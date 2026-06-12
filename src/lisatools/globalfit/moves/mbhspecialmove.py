@@ -1,5 +1,7 @@
 """MBH-specific MCMC move including an optional time-windowed search step."""
 
+from __future__ import annotations
+
 import os
 from copy import deepcopy
 
@@ -12,6 +14,7 @@ from eryn.ensemble import EnsembleSampler
 from eryn.moves import RedBlueMove, StretchMove
 
 # from bbhx.likelihood import NewHeterodynedLikelihood
+from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from lisatools.sensitivity import A1TDISens, E1TDISens, SensitivityMatrix
@@ -30,8 +33,15 @@ from ...utils.utility import asnumpy, tukey
 
 # from eryn.state import State
 from ..state import GFState
-from .addremovemove import ResidualAddOneRemoveOneMove
+from .addremovemove import ResidualAddOneRemoveOneMove, MultiGPUResidualAddRemoveMove
 from .globalfitmove import GlobalFitMove
+
+if TYPE_CHECKING:
+    from eryn.prior import ProbDistContainer
+    from eryn.utils.transform import TransformContainer
+    from typing import Any
+    from ...domaincomputation import DomainComputationGroupArray
+    from ...sources.bbh import PhenomTHMTDIWaveform, PhenomTHMTDIOnFlyWaveform
 
 
 def update_fn(i, last_sample, sampler):
@@ -102,6 +112,83 @@ def search_likelihood_wrap(
     ).real)
 
     return ll
+
+class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
+    """
+    
+    """
+    def __init__(
+        self, 
+        dcga: DomainComputationGroupArray,
+        waveform_gen: PhenomTHMTDIWaveform | PhenomTHMTDIOnFlyWaveform,
+        branch_name: str,
+        coords_shape: tuple,
+        waveform_gen_kwargs: dict,
+        waveform_like_kwargs: dict,
+        num_repeats: int,
+        transform_fn: TransformContainer,
+        priors: ProbDistContainer,
+        inner_moves: list,
+        Tmax: float = np.inf,
+        betas_all: np.ndarray = None,
+        permute_every: int = 20,
+        pad_out_of_prior: bool = False,
+        run_async: bool = False,
+        run_threaded: bool = False,
+        **kwargs
+    ):
+        waveform_gen_method: str = "get_signals_for_residuals"
+        waveform_like_method: str = "__call__"
+
+        if not hasattr(waveform_gen, waveform_gen_method):
+            raise ValueError(f"Waveform generator must have method {waveform_gen_method} for TDMBHSpecialMove.")
+        if not hasattr(waveform_gen, waveform_like_method):
+            raise ValueError(f"Waveform generator must have method {waveform_like_method} for TDMBHSpecialMove.")
+
+        if 'synchronize' not in waveform_like_kwargs:
+            waveform_like_kwargs['synchronize'] = not run_async
+
+        super().__init__(
+            dcga,
+            waveform_gen,
+            branch_name,
+            coords_shape,
+            waveform_gen_method,
+            waveform_gen_kwargs,
+            waveform_like_kwargs,
+            num_repeats,
+            transform_fn,
+            priors,
+            inner_moves,
+            Tmax,
+            betas_all,
+            permute_every,
+            pad_out_of_prior,
+            run_async,
+            run_threaded,
+            waveform_like_method,
+            **kwargs
+        )
+            
+    def get_split_inds(self) -> np.ndarray:
+            """
+            Get the indices for splitting the ensemble. Override the parent method to ensure splits where all the gpus have the same number of entries to prevent recompilation.
+            """
+            all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
+            inds = all_inds % self.nsplits
+            if self.randomize_split:
+                if self.dcga.gpus is None:
+                    [np.random.shuffle(x) for x in inds]
+                
+                else:
+                    num_per_gpu = self.nwalkers // len(self.dcga.gpus)
+                    for row in inds:
+                        for gpu in self.dcga.gpus:
+                            start = gpu * num_per_gpu
+                            end = (gpu + 1) * num_per_gpu
+                            np.random.shuffle(row[start:end])
+            return inds
+
 
 
 class MBHSpecialMove(

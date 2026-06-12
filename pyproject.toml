@@ -55,6 +55,9 @@ dependencies = [
   "scikit-learn",
   "cudakima",
   # "install>=0.0.1",
+  # NOTE (2026-06-11, stft_tof merge): stft_tof added "pybind11>=3.0.4"
+  # here; dropped -- the binding layer is nanobind since Phase 3M and the
+  # absorbed C++ is ported accordingly.
 ]
 
 
@@ -165,8 +168,8 @@ sdist.include = [
   # "src/lisatools/cutils/pycppdetector.pxd",
   "src/lisatools/cutils/Detector.hpp",
   "src/lisatools/cutils/global.hpp",
-  "src/lisatools/cutils/binding.cxx",
-  "src/lisatools/cutils/binding.hpp",
+  "src/lisatools/cutils/binding_detector.cxx",
+  "src/lisatools/cutils/binding_detector.hpp",
   "src/lisatools/cutils/lisatools_header_abi.hpp",
   "src/lisatools/cutils/orbits_view.hpp",
   "src/lisatools/cutils/LISAanalysisToolsConfig.cmake",
@@ -189,6 +192,9 @@ sdist.include = [
   "src/lisatools/cutils/binding_lat_spline_tdi.hpp",
   # Phase 4: citation registry data file (parsed by lisatools.utils.citations).
   "CITATION.cff",
+  # stft_tof merge: CMake sources template consumed by cutils/CMakeLists.
+  "src/lisatools/cutils/lisatools_sources.cmake",
+  "src/lisatools/cutils/lisatools_sources.cmake.in",
 ]
 sdist.exclude = [
   ".devcontainer/",
@@ -227,7 +233,12 @@ report.omit = [
   "*/lisatools_backend_*/git_version.py",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
 [tool.uv.sources]
-mojito = { index = "gitlab-esa-commons" }
+mojito = { index = "pypi" }
 lisaconstants = { index = "pypi" }
 mojito-processor = { index = "testpypi" }  # TODO: switch to pypi once published there

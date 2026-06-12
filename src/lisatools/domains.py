@@ -33,8 +33,6 @@ from scipy import interpolate, signal, special
 
 try:
     import cupy as cp
-    import cupyx.scipy.signal as cupyx_signal
-    from cupyx.scipy import special as cupy_special
 
     CUPY_AVAILABLE = True
 
@@ -116,6 +114,9 @@ class DomainBase:
     def arr(self, arr: np.ndarray | cp.ndarray):
         """Set the underlying array and infer batch / channel dimensions."""
         if self.backend.uses_cupy:
+            # deferred import: cupyx is only present alongside cupy
+            import cupyx.scipy.signal as cupyx_signal
+
             self._stft = cupyx_signal.stft
         else:
             self._stft = signal.stft
@@ -676,20 +677,25 @@ class TDSignal(DomainBase, TDSettings):
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
-        df = 1 / (self.N * self.dt)
-
-        fd_arr = self.xp.fft.rfft(self.arr * window, axis=-1) * self.dt
         if settings is not None:
             assert isinstance(settings, FDSettings)
-            assert settings.df == df, f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
-            assert settings.N == fd_arr.shape[-1]
+            # Integer-length check against the target df (robust vs the old
+            # float df == df comparison); the caller must pre-pad the signal
+            # so the FFT length matches -- no silent padding here.
+            n_fft = round(1 / (settings.df * self.dt))
+            assert self.N == n_fft, (
+                f"Signal length ({self.N}) != target FFT length ({n_fft}). "
+                f"Caller must pre-pad the signal."
+            )
+            fd_arr = self.xp.fft.rfft(self.arr * window, axis=-1) * self.dt
             fd_settings = settings
-        
+
         else:
+            fd_arr = self.xp.fft.rfft(self.arr * window, axis=-1) * self.dt
+            df = 1 / (self.N * self.dt)
             fd_settings = FDSettings(fd_arr.shape[-1], df, force_backend=self.backend)
-        
-        fd_arr_in = fd_arr[..., fd_settings.active_slice]
-        return FDSignal(fd_arr_in, fd_settings)
+
+        return FDSignal(fd_arr[..., fd_settings.active_slice], fd_settings)
 
     def stft(self, settings=None, window=None):
         """Short-time Fourier transform of the time-domain signal.
@@ -893,10 +899,19 @@ class FDSettings(DomainSettingsBase):
         """Return the :class:`DomainBase` subclass that pairs with these settings."""
         return FDSignal
 
+    @staticmethod
+    def get_associated_group():
+        from .domaincomputation import FDComputationGroup
+        return FDComputationGroup
+
     @property
     def associated_class(self):
         """The :class:`DomainBase` subclass that pairs with these settings."""
         return self.get_associated_class()
+
+    @property
+    def associated_group(self):
+        return self.get_associated_group()
 
     @property
     def kwargs(self) -> dict:
@@ -1210,20 +1225,18 @@ class FDSignal(FDSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
-    def plot(self, 
-             channel: int = 0, 
-             ax: plt.Axes | None = None, 
-             filename: Optional[str] = None,
-             **kwargs) -> plt.Axes:
+    def plot(
+        self, channel: int = 0, ax: plt.Axes | None = None, filename: Optional[str] = None, **kwargs
+    ) -> plt.Axes:
         """
         Plot the squared amplitude of the FD signal for a given channel.
 
         Args:
             channel: The channel index to visualize.
-            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.  
+            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.
             filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
             **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
-        
+
         Returns:
             The matplotlib Axes object containing the plot.
         """
@@ -1242,7 +1255,8 @@ class FDSignal(FDSettings, DomainBase):
         if filename is not None:
             plt.savefig(filename, bbox_inches="tight")
         return ax
-        
+
+
 class STFTSettings(DomainSettingsBase):
     """Short-time Fourier transform basis settings.
 
@@ -1311,9 +1325,18 @@ class STFTSettings(DomainSettingsBase):
     def get_associated_class():
         return STFTSignal
 
+    @staticmethod
+    def get_associated_group():
+        from .domaincomputation import STFTComputationGroup
+        return STFTComputationGroup
+
     @property
     def associated_class(self):
         return self.get_associated_class()
+
+    @property
+    def associated_group(self):
+        return self.get_associated_group()
 
     @property
     def basis_shape(self) -> tuple:
@@ -1616,12 +1639,14 @@ class STFTSignal(STFTSettings, DomainBase):
 
         ax.loglog(f_arr, np.abs(arr_here[time_bin]) ** 2, **kwargs)
 
-        ax.set_title(f"STFT Frequency Spectrum for Time Bin {time_bin} (Time = {self.t_arr[time_bin]:.2f})")
+        ax.set_title(
+            f"STFT Frequency Spectrum for Time Bin {time_bin} (Time = {self.t_arr[time_bin]:.2f})"
+        )
         ax.set_xlabel("Frequency")
         ax.set_ylabel("Magnitude")
         ax.set_xlim(self.min_freq, self.max_freq)
         return ax
-    
+
     def _plot_td(self, channel=0, ax=None, freq_bin=0, **kwargs):
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
@@ -1633,7 +1658,9 @@ class STFTSignal(STFTSettings, DomainBase):
         ax.plot(t_arr, arr_here[:, freq_bin].imag, label="imag part", **kwargs)
 
         ax.legend()
-        ax.set_title(f"STFT Time Series for Frequency Bin {freq_bin} (Frequency = {self.f_arr[freq_bin]:.2f})")
+        ax.set_title(
+            f"STFT Time Series for Frequency Bin {freq_bin} (Frequency = {self.f_arr[freq_bin]:.2f})"
+        )
         ax.set_xlabel("Time")
         ax.set_ylabel("Magnitude")
         return ax
@@ -1641,7 +1668,7 @@ class STFTSignal(STFTSettings, DomainBase):
     @property
     def ind_min(self) -> int:
         return self._ind_min
-    
+
     @ind_min.setter
     def ind_min(self, ind_min: int):
         if ind_min is None:
@@ -1651,19 +1678,21 @@ class STFTSignal(STFTSettings, DomainBase):
     @property
     def ind_max(self) -> int:
         return self._ind_max
-    
+
     @ind_max.setter
     def ind_max(self, ind_max: int):
         if ind_max is None:
             ind_max = self.NF - 1
         self._ind_max = ind_max
-    
-    def plot(self, 
-             channel: int = 0, 
-             ax: plt.Axes | None = None, 
-             plot_type: str = "stft", 
-             filename: Optional[str] = None,
-             **kwargs) -> plt.Axes:
+
+    def plot(
+        self,
+        channel: int = 0,
+        ax: plt.Axes | None = None,
+        plot_type: str = "stft",
+        filename: Optional[str] = None,
+        **kwargs,
+    ) -> plt.Axes:
         """
         Visualize the STFT signal in either the time-frequency domain (stft), frequency domain (fd), or time domain (td).
 
@@ -1674,7 +1703,7 @@ class STFTSignal(STFTSettings, DomainBase):
                 vs frequency plot of the magnitude squared of the STFT coefficients. 'fd' will create a log-log plot of the magnitude squared of the STFT coefficients for a single time bin. 'td' will create a plot of the magnitude squared of the real and imaginary parts of the STFT coefficients for a single frequency bin.
             filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
             **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
-        
+
         Returns:
             The matplotlib Axes object containing the plot.
         """
@@ -1685,7 +1714,9 @@ class STFTSignal(STFTSettings, DomainBase):
         elif plot_type == "td":
             ax = self._plot_td(channel=channel, ax=ax, **kwargs)
         else:
-            raise ValueError(f"Invalid plot_type {plot_type}. Must be one of 'stft', 'fd', or 'td'.")
+            raise ValueError(
+                f"Invalid plot_type {plot_type}. Must be one of 'stft', 'fd', or 'td'."
+            )
 
         if filename is not None:
             plt.savefig(filename, bbox_inches="tight")
@@ -2477,7 +2508,10 @@ class DomainBaseArray:
 
     """
 
-    def __init__(self, signals: List[DomainBase]) -> None:
+    def __init__(self, signals: List[DomainBase] | DomainBaseArray) -> None:
+        if isinstance(signals, DomainBaseArray):
+            signals = signals.signals
+            
         if not all(isinstance(s, DomainBase) for s in signals):
             raise TypeError("All elements of DomainBaseArray must be DomainBase instances.")
         self.signals = list(signals)
@@ -2504,6 +2538,16 @@ class DomainBaseArray:
 
     def __getitem__(self, index):
         return self.signals[index]
+
+    def __add__(self, other: DomainBaseArray) -> "DomainBaseArray":
+        """
+        Define how to add two DomainBaseArrays together. This will concatenate the signals from both arrays into a single array.
+        """
+
+        if not isinstance(other, DomainBaseArray):
+            raise TypeError("Can only add DomainBaseArray to another DomainBaseArray.")
+        return DomainBaseArray(self.signals + other.signals)
+
 
     @property
     def batched(self) -> Optional[DomainBase]:

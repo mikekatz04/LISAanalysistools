@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+import logging
 import warnings
 from copy import deepcopy
 from inspect import Attribute
@@ -34,7 +35,7 @@ from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
 from ...utils.utility import asnumpy
 from ..galaxyglobal import fit_each_leaf, make_gmm, run_gb_bulk_search
-from ._gb_likelihood import (
+from .gb_likelihood import (
     BandLikelihoodEngine,
     FDBandLikelihoodEngine,
     SwapLLResult,
@@ -42,6 +43,7 @@ from ._gb_likelihood import (
     make_band_likelihood_engine,
 )
 from .globalfitmove import GFCombineMove, GlobalFitMove
+from ..priors.gbpriors import get_fdot_mojito
 
 # -*- coding: utf-8 -*-
 
@@ -69,6 +71,7 @@ from ..state import GFState
 
 __all__ = ["GBSpecialStretchMove"]
 
+logger = logging.getLogger(__name__)
 
 class _NoOpMempool:
     """CPU stand-in for ``cupy.get_default_memory_pool()`` — calls become no-ops."""
@@ -100,14 +103,14 @@ def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
     assert comm is not None
 
     # get current rank and get index into class_ranks_list
-    print(f"INSIDE GB search, RANK: {comm.Get_rank()}")
+    logger.info(f"INSIDE GB search, RANK: {comm.Get_rank()}")
     rank = comm.Get_rank()
     rank_index = class_ranks_list.index(rank)
     if rank_index == 0:
         comm_info = {"process_ranks_for_fit": class_ranks_list}
-        print("waiting to send process ranks")
+        logger.info("waiting to send process ranks")
         comm.send(comm_info, dest=main_rank, tag=232342)
-        print("sent process ranks")
+        logger.info("sent process ranks")
 
     fit_each_leaf(rank, curr, main_rank, comm)
 
@@ -116,7 +119,7 @@ def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
 #     assert comm is not None
 
 #     # get current rank and get index into class_ranks_list
-#     print(f"INSIDE GB search, RANK: {comm.Get_rank()}")
+#     logger.info(f"INSIDE GB search, RANK: {comm.Get_rank()}")
 #     rank = comm.Get_rank()
 #     rank_index = class_ranks_list.index(rank)
 #     gather_rank = class_ranks_list[0]
@@ -133,6 +136,7 @@ def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
 #         # run GMM fit here
 #         fit_each_leaf(rank, curr, gather_rank, comm)
 #         pass
+
 
 
 def fit_gmm(samples, comm, comm_info):
@@ -176,7 +180,7 @@ def fit_gmm(samples, comm, comm_info):
 
     batch = 10000
     breaks = np.arange(0, len(args) + batch, batch)
-    print("BREAKS", breaks)
+    logger.info("BREAKS", breaks)
     if len(breaks) == 1:
         breakpoint()
     process_ranks_for_fit = comm_info["process_ranks_for_fit"]
@@ -202,7 +206,7 @@ def fit_gmm(samples, comm, comm_info):
 
             outer_iteration += 1
             if outer_iteration % 500 == 0:
-                print(
+                logger.info(
                     f"ITERATION: {outer_iteration}, need:",
                     np.sum(~gmm_complete),
                     current_status,
@@ -227,11 +231,11 @@ def fit_gmm(samples, comm, comm_info):
                             OverflowError,
                         ) as e:
                             current_status[proc_i] = False
-                            print("BAD error on return")
+                            logger.warning("BAD error on return")
                             continue
                         if "BAD" in output_info:
                             current_status[proc_i] = False
-                            print("BAD", output_info["BAD"])
+                            logger.warning("BAD", output_info["BAD"])
                             continue
                         # print(output_info)
 
@@ -349,7 +353,7 @@ def gb_refit_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
     assert comm is not None
 
     # get current rank and get index into class_ranks_list
-    print(f"INSIDE GB refit, RANK: {comm.Get_rank()}")
+    logger.info(f"INSIDE GB refit, RANK: {comm.Get_rank()}")
     rank = comm.Get_rank()
     rank_index = class_ranks_list.index(rank)
     gather_rank = class_ranks_list[0]
@@ -437,6 +441,10 @@ class Buffer(LISAToolsParallelModule):
         force_backend="gpu",
         use_template_arr=False,
         basis_settings: Optional[DomainSettingsBase] = None,
+        # TODO(post-merge, 2026-06): collapse to a single ``gb=`` handle.
+        # gb_wdm_comp exists only because some functions still live on the
+        # FD GBGPU object; once everything needed is reachable from one
+        # GB computations object, drop gb_wdm_comp here and below.
         gb_wdm_comp=None,
         *args,
         **kwargs,
@@ -474,13 +482,13 @@ class Buffer(LISAToolsParallelModule):
         self.use_template_arr = use_template_arr
         # load data into buffer for these bands
         # 3 is number of sub-bands to store
-        
+
         self.tdi_channel_setup = self.waveform_kwargs.get("tdi_channel_setup")
         if self.tdi_channel_setup == "XYZ":
             assert self.nchannels == 3
         else:
             assert "A" in self.tdi_channel_setup and "E" in self.tdi_channel_setup
-            print("WARNING: using AE(T) channels where we assume ortogonality. This may not be sufficient for realistic orbtis.")
+            logger.warning("using AE(T) channels where we assume ortogonality. This may not be sufficient for realistic orbtis.")
 
         # Resolve the parent basis-domain settings. Defaults to an FD grid
         # consistent with the legacy Buffer behavior (data_length bins on the
@@ -864,7 +872,9 @@ class Buffer(LISAToolsParallelModule):
             self.buffer_start_index[self.unique_band_combos[:, 2] == 0] = (
                 self.band_edges[0] / self.df
             ).astype(np.int32) - self.edge_buffer
-            # self.buffer_start_index[self.unique_band_combos[:, 2] == self.num_bands - 1] = (self.band_edges[-1] / self.df).astype(np.int32) - self.edge_buffer
+            # Clamp so buffer end never overflows the data range (band_edges[-1])
+            max_start = int(self.band_edges[-1] / self.df) - self.data_length
+            self.buffer_start_index = np.minimum(self.buffer_start_index, max_start)
 
         self.start_freq_inds = self.xp.asarray(self.buffer_start_index.copy().astype(np.int32))
 
@@ -945,7 +955,7 @@ class Buffer(LISAToolsParallelModule):
         # cp.get_default_memory_pool().free_all_blocks()
 
         return source_term + psd_term
-    
+
 
     def get_swap_ll(self, params_remove, params_add, data_index, N_vals, phase_maximize=False):
         """Per-proposal swap log-likelihood difference.
@@ -977,7 +987,7 @@ class Buffer(LISAToolsParallelModule):
         kept = result.kept
 
         if np.any(~kept):
-            print(f"NOT KEEPING: {(~kept).sum()}")
+            logger.info(f"NOT KEEPING: {(~kept).sum()}")
 
         if phase_maximize and result.phase_angle is not None:
             # Engine returns the per-proposal phase rotation applied during
@@ -1081,7 +1091,7 @@ class Buffer(LISAToolsParallelModule):
 
     def reset_residual_buffers(self, inds_fill=None):
         if inds_fill is None:
-            inds_fill = cp.arange(self.num_bands_now)     
+            inds_fill = cp.arange(self.num_bands_now)
         self.band_buffer[inds_fill] = 0.0
 
     def reset_psd_buffers(self, inds_fill=None):
@@ -1185,7 +1195,7 @@ class Buffer(LISAToolsParallelModule):
         assert np.all(
             (self.buffer_start_index[inds_fill] - start_freq_ind + self.data_length)
             <= acs.data_length
-        )
+        ), f"Buffer indexing exceeds available data length in AnalysisContainerArray. Start indices: {self.buffer_start_index[inds_fill]}, start_freq_ind: {start_freq_ind}, data_length: {self.data_length}, acs data_length: {acs.data_length}"
 
         start_inds = self.buffer_start_index[inds_fill] - start_freq_ind
 
@@ -1309,13 +1319,13 @@ class BandSorter(LISAToolsParallelModule):
         gb_branch: Branch,
         band_edges: Optional[np.ndarray] = None,
         band_N_vals: Optional[np.ndarray] = None,
-        force_backend: bool = None,
+        force_backend: Optional[str] = None,
         transform_fn: Optional[TransformContainer] = None,
         copy: bool = True,
         inds_subset: Optional[np.ndarray] = None,
         inds_main_band_sorter: Optional[np.ndarray] = None,
         gb=None,
-        gb_wdm_comp=None,
+        gb_wdm_comp=None,  # TODO(post-merge): collapse into gb= (see Buffer)
         waveform_kwargs={},
         main_band_sorter=None,
         max_data_store_size: int = 6000,
@@ -1413,6 +1423,7 @@ class BandSorter(LISAToolsParallelModule):
             # else:
             proposal_logpdf = cp.zeros(self.coords.shape[0])
 
+            # breakpoint()
             batch_here = int(1e6)
             inds_splitting = np.arange(0, self.coords.shape[0], batch_here)
             if inds_splitting[-1] != self.coords.shape[0] - 1:
@@ -1650,7 +1661,7 @@ class BandSorter(LISAToolsParallelModule):
                 special_indices_unique,
                 self.transform_fn,
                 self.waveform_kwargs,
-                acs.df,
+                acs.settings.df,
                 sources_now_map,
                 sources_inject_now_map,
                 self.main_band_sorter.special_band_inds[sources_now_map],
@@ -1776,11 +1787,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         gpu_priors,
         *args,
         waveform_kwargs={},
-        parameter_transforms=None,
+        parameter_transforms: Optional[TransformContainer] = None,
         snr_lim=1e-10,
         rj_proposal_distribution=None,
         is_rj_prop=False,
-        num_repeat_proposals=1,
+        num_repeat_proposals=100,
         name=None,
         use_prior_removal=False,
         phase_maximize=False,
@@ -1788,16 +1799,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         gpus=[],
         num_band_preload=20000,
         run_swaps=True,
-        # TODO: make this adjustable?
         max_data_store_size=6000,
         force_backend=None,
-        gb_wdm_comp=None,
+        gb_wdm_comp=None,  # TODO(post-merge): collapse into gb= (see Buffer)
+        search_kwargs=None,
+        stretch_probability=0.5,
         **kwargs,
     ):
         # return_gpu is a kwarg for the stretch move
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         GlobalFitMove.__init__(self, name=name)
-        GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs)
+        Move.__init__(self, *args, return_gpu=True, **kwargs)
+        # kwargs_group = dict(
+        #     n_iter_update=1,
+        #     live_dangerously=True,
+        #     a=1.75,
+        #     num_repeat_proposals=200,
+        #     nfriends=32
+        # )
+        # GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs_group)
 
         self.force_backend = force_backend
         self.ranks_needed = ranks_needed
@@ -1882,9 +1902,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # setup N vals for bands
         self.band_N_vals = self.xp.asarray(band_N_vals)
-        
+
         self.num_proposals = 0
-        
+        self.search_kwargs = search_kwargs
+        # In-model proposal mix: probability of drawing the band-aware group
+        # stretch instead of the info-matrix Cholesky jump per iteration.
+        # TODO(later, user note 2026-06-11): examine a more flexible
+        # in-model proposal setup (pluggable proposal components) instead of
+        # this two-way gate.
+        self.stretch_probability = float(stretch_probability)
+
 
     def setup(self, model, branches):
         return
@@ -1893,256 +1920,256 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def supported_backends(cls):
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
-    def setup_gb_friends(self, band_sorter):
-        st = time.perf_counter()
-        coords = band_sorter.coords
-        inds = band_sorter.inds
-        temp_index = band_sorter.temp_inds
+    # def setup_gb_friends(self, band_sorter):
+    #     st = time.perf_counter()
+    #     coords = band_sorter.coords
+    #     inds = band_sorter.inds
+    #     temp_index = band_sorter.temp_inds
 
-        # supps = branch.branch_supplemental
-        ntemps = self.ntemps
-        nwalkers = self.nwalkers
-        all_remaining_freqs = coords[inds & (temp_index == 0)][:, 1]
+    #     # supps = branch.branch_supplemental
+    #     ntemps = self.ntemps
+    #     nwalkers = self.nwalkers
+    #     all_remaining_freqs = coords[inds & (temp_index == 0)][:, 1]
 
-        all_remaining_cords = coords[inds & (temp_index == 0)]
+    #     all_remaining_cords = coords[inds & (temp_index == 0)]
 
-        num_remaining = len(all_remaining_freqs)
+    #     num_remaining = len(all_remaining_freqs)
 
-        all_temp_fs = self.xp.asarray(coords[inds][:, 1])
+    #     all_temp_fs = self.xp.asarray(coords[inds][:, 1])
 
-        # TODO: improve this?
-        self.inds_freqs_sorted = self.xp.asarray(np.argsort(all_remaining_freqs))
-        self.freqs_sorted = self.xp.asarray(np.sort(all_remaining_freqs))
-        self.all_coords_sorted = self.xp.asarray(all_remaining_cords)[self.inds_freqs_sorted]
+    #     # TODO: improve this?
+    #     self.inds_freqs_sorted = self.xp.asarray(np.argsort(all_remaining_freqs))
+    #     self.freqs_sorted = self.xp.asarray(np.sort(all_remaining_freqs))
+    #     self.all_coords_sorted = self.xp.asarray(all_remaining_cords)[self.inds_freqs_sorted]
 
-        left_inds, right_inds = self.find_friends_init(all_temp_fs)
+    #     left_inds, right_inds = self.find_friends_init(all_temp_fs)
 
-        start_inds = asnumpy(left_inds.copy())
+    #     start_inds = asnumpy(left_inds.copy())
 
-        start_inds_all = -np.ones_like(inds, dtype=np.int32)
-        start_inds_all[inds] = start_inds.astype(np.int32)
+    #     start_inds_all = -np.ones_like(inds, dtype=np.int32)
+    #     start_inds_all[inds] = start_inds.astype(np.int32)
 
-        band_sorter.friend_start_inds = start_inds_all
-
-        # if "friend_start_inds" not in supps:
-        #     supps.add_objects({"friend_start_inds": start_inds_all})
-        # else:
-        #     supps[:] = {"friend_start_inds": start_inds_all}
+    #     band_sorter.friend_start_inds = start_inds_all
+
+    #     # if "friend_start_inds" not in supps:
+    #     #     supps.add_objects({"friend_start_inds": start_inds_all})
+    #     # else:
+    #     #     supps[:] = {"friend_start_inds": start_inds_all}
 
-        et = time.perf_counter()
-        self.mempool.free_all_blocks()
-
-        self.has_setup_group = True
-        # print("SETUP:", et - st)
-        # start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
-        # freqs_sorted_here = self.freqs_sorted.get()
-        # freqs_remaining_here = all_remaining_freqs
+    #     et = time.perf_counter()
+    #     self.mempool.free_all_blocks()
+
+    #     self.has_setup_group = True
+    #     # print("SETUP:", et - st)
+    #     # start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
+    #     # freqs_sorted_here = self.freqs_sorted.get()
+    #     # freqs_remaining_here = all_remaining_freqs
 
-        # start_ind_best = np.zeros_like(freqs_remaining_here, dtype=int)
-
-        # best_index = (
-        #     np.searchsorted(freqs_sorted_here, freqs_remaining_here, side="right") - 1
-        # )
-        # best_index[best_index < self.nfriends] = self.nfriends
-        # best_index[best_index >= len(freqs_sorted_here) - self.nfriends] = (
-        #     len(freqs_sorted_here) - self.nfriends
-        # )
-        # check_inds = (
-        #     best_index[:, None]
-        #     + np.tile(np.arange(2 * self.nfriends), (best_index.shape[0], 1))
-        #     - self.nfriends
-        # )
-
-        # check_freqs = freqs_sorted_here[check_inds]
-        # breakpoint()
-
-        # # batch_count = 1000
-        # # split_inds = np.arange(batch_count, freqs_remaining_here.shape[0], batch_count)
-
-        # # splits_remain = np.split(freqs_remaining_here, split_inds)
-        # # splits_check = np.split(check_freqs, split_inds)
-
-        # # out = []
-        # # for i, (split_r, split_c) in enumerate(zip(splits_remain, splits_check)):
-        # #     out.append(np.abs(split_r[:, None] - split_c))
-        # #     print(i)
-
-        # # freq_distance = np.asarray(out)
-
-        # freq_distance = np.abs(freqs_remaining_here[:, None] - check_freqs)
-        # breakpoint()
-
-        # keep_min_inds = np.argsort(freq_distance, axis=-1)[:, : self.nfriends].min(
-        #     axis=-1
-        # )
-        # start_inds_freq = check_inds[(np.arange(len(check_inds)), keep_min_inds)]
-
-        # start_inds_freq_out[inds] = start_inds_freq
-
-        # start_inds_freq_out[~inds] = -1
-
-        # if "friend_start_inds" not in supps:
-        #     supps.add_objects({"friend_start_inds": start_inds_freq_out})
-        # else:
-        #     supps[:] = {"friend_start_inds": start_inds_freq_out}
-
-        # self.all_friends_start_inds_sorted = self.xp.asarray(
-        #     start_inds_freq_out[inds][self.inds_freqs_sorted.get()]
-        # )
-
-    def find_friends_init(self, all_temp_fs):
-
-        total_binaries = all_temp_fs.shape[0]
-        still_going = cp.ones(total_binaries, dtype=bool)
-        inds_zero = cp.searchsorted(self.freqs_sorted, all_temp_fs, side="right") - 1
-        left_inds = inds_zero - int(self.nfriends / 2)
-        right_inds = inds_zero + int(self.nfriends / 2) - 1
-
-        # do right first here
-        right_inds[left_inds < 0] = self.nfriends - 1
-        left_inds[left_inds < 0] = 0
-
-        # do left first here
-        left_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - self.nfriends
-        right_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - 1
-
-        assert np.all(right_inds - left_inds == self.nfriends - 1)
-
-        assert (
-            not np.any(right_inds < 0)
-            and not np.any(right_inds > len(self.freqs_sorted) - 1)
-            and not np.any(left_inds < 0)
-            and not np.any(left_inds > len(self.freqs_sorted) - 1)
-        )
-
-        jjj = 0
-        while np.any(still_going):
-            distance_left = np.abs(
-                all_temp_fs[still_going] - self.freqs_sorted[left_inds[still_going]]
-            )
-            distance_right = np.abs(
-                all_temp_fs[still_going] - self.freqs_sorted[right_inds[still_going]]
-            )
-
-            check_move_right = distance_right <= distance_left
-            check_left_inds = left_inds[still_going][check_move_right] + 1
-            check_right_inds = right_inds[still_going][check_move_right] + 1
-
-            new_distance_right = np.abs(
-                all_temp_fs[still_going][check_move_right] - self.freqs_sorted[check_right_inds]
-            )
-
-            change_inds = cp.arange(len(all_temp_fs))[still_going][check_move_right][
-                (new_distance_right < distance_left[check_move_right])
-                & (check_right_inds < len(self.freqs_sorted))
-            ]
+    #     # start_ind_best = np.zeros_like(freqs_remaining_here, dtype=int)
+
+    #     # best_index = (
+    #     #     np.searchsorted(freqs_sorted_here, freqs_remaining_here, side="right") - 1
+    #     # )
+    #     # best_index[best_index < self.nfriends] = self.nfriends
+    #     # best_index[best_index >= len(freqs_sorted_here) - self.nfriends] = (
+    #     #     len(freqs_sorted_here) - self.nfriends
+    #     # )
+    #     # check_inds = (
+    #     #     best_index[:, None]
+    #     #     + np.tile(np.arange(2 * self.nfriends), (best_index.shape[0], 1))
+    #     #     - self.nfriends
+    #     # )
+
+    #     # check_freqs = freqs_sorted_here[check_inds]
+    #     # breakpoint()
+
+    #     # # batch_count = 1000
+    #     # # split_inds = np.arange(batch_count, freqs_remaining_here.shape[0], batch_count)
+
+    #     # # splits_remain = np.split(freqs_remaining_here, split_inds)
+    #     # # splits_check = np.split(check_freqs, split_inds)
+
+    #     # # out = []
+    #     # # for i, (split_r, split_c) in enumerate(zip(splits_remain, splits_check)):
+    #     # #     out.append(np.abs(split_r[:, None] - split_c))
+    #     # #     print(i)
+
+    #     # # freq_distance = np.asarray(out)
+
+    #     # freq_distance = np.abs(freqs_remaining_here[:, None] - check_freqs)
+    #     # breakpoint()
+
+    #     # keep_min_inds = np.argsort(freq_distance, axis=-1)[:, : self.nfriends].min(
+    #     #     axis=-1
+    #     # )
+    #     # start_inds_freq = check_inds[(np.arange(len(check_inds)), keep_min_inds)]
+
+    #     # start_inds_freq_out[inds] = start_inds_freq
+
+    #     # start_inds_freq_out[~inds] = -1
+
+    #     # if "friend_start_inds" not in supps:
+    #     #     supps.add_objects({"friend_start_inds": start_inds_freq_out})
+    #     # else:
+    #     #     supps[:] = {"friend_start_inds": start_inds_freq_out}
+
+    #     # self.all_friends_start_inds_sorted = self.xp.asarray(
+    #     #     start_inds_freq_out[inds][self.inds_freqs_sorted.get()]
+    #     # )
+
+    # def find_friends_init(self, all_temp_fs):
+
+    #     total_binaries = all_temp_fs.shape[0]
+    #     still_going = cp.ones(total_binaries, dtype=bool)
+    #     inds_zero = cp.searchsorted(self.freqs_sorted, all_temp_fs, side="right") - 1
+    #     left_inds = inds_zero - int(self.nfriends / 2)
+    #     right_inds = inds_zero + int(self.nfriends / 2) - 1
+
+    #     # do right first here
+    #     right_inds[left_inds < 0] = self.nfriends - 1
+    #     left_inds[left_inds < 0] = 0
+
+    #     # do left first here
+    #     left_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - self.nfriends
+    #     right_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - 1
+
+    #     assert np.all(right_inds - left_inds == self.nfriends - 1)
+
+    #     assert (
+    #         not np.any(right_inds < 0)
+    #         and not np.any(right_inds > len(self.freqs_sorted) - 1)
+    #         and not np.any(left_inds < 0)
+    #         and not np.any(left_inds > len(self.freqs_sorted) - 1)
+    #     )
+
+    #     jjj = 0
+    #     while np.any(still_going):
+    #         distance_left = np.abs(
+    #             all_temp_fs[still_going] - self.freqs_sorted[left_inds[still_going]]
+    #         )
+    #         distance_right = np.abs(
+    #             all_temp_fs[still_going] - self.freqs_sorted[right_inds[still_going]]
+    #         )
+
+    #         check_move_right = distance_right <= distance_left
+    #         check_left_inds = left_inds[still_going][check_move_right] + 1
+    #         check_right_inds = right_inds[still_going][check_move_right] + 1
+
+    #         new_distance_right = np.abs(
+    #             all_temp_fs[still_going][check_move_right] - self.freqs_sorted[check_right_inds]
+    #         )
+
+    #         change_inds = cp.arange(len(all_temp_fs))[still_going][check_move_right][
+    #             (new_distance_right < distance_left[check_move_right])
+    #             & (check_right_inds < len(self.freqs_sorted))
+    #         ]
 
-            left_inds[change_inds] += 1
-            right_inds[change_inds] += 1
-
-            stop_inds_right_1 = cp.arange(len(all_temp_fs))[still_going][check_move_right][
-                (check_right_inds >= len(self.freqs_sorted))
-            ]
+    #         left_inds[change_inds] += 1
+    #         right_inds[change_inds] += 1
+
+    #         stop_inds_right_1 = cp.arange(len(all_temp_fs))[still_going][check_move_right][
+    #             (check_right_inds >= len(self.freqs_sorted))
+    #         ]
 
-            # last part is just for up here, below it will remove if it is still equal
-            stop_inds_right_2 = cp.arange(len(all_temp_fs))[still_going][check_move_right][
-                (new_distance_right >= distance_left[check_move_right])
-                & (check_right_inds < len(self.freqs_sorted))
-                & (distance_right[check_move_right] != distance_left[check_move_right])
-            ]
-            stop_inds_right = cp.concatenate([stop_inds_right_1, stop_inds_right_2])
-            assert np.all(still_going[stop_inds_right])
+    #         # last part is just for up here, below it will remove if it is still equal
+    #         stop_inds_right_2 = cp.arange(len(all_temp_fs))[still_going][check_move_right][
+    #             (new_distance_right >= distance_left[check_move_right])
+    #             & (check_right_inds < len(self.freqs_sorted))
+    #             & (distance_right[check_move_right] != distance_left[check_move_right])
+    #         ]
+    #         stop_inds_right = cp.concatenate([stop_inds_right_1, stop_inds_right_2])
+    #         assert np.all(still_going[stop_inds_right])
 
-            # equal to should only be left over if it was equal above and moving right did not help
-            check_move_left = distance_left <= distance_right
-            check_left_inds = left_inds[still_going][check_move_left] - 1
-            check_right_inds = right_inds[still_going][check_move_left] - 1
+    #         # equal to should only be left over if it was equal above and moving right did not help
+    #         check_move_left = distance_left <= distance_right
+    #         check_left_inds = left_inds[still_going][check_move_left] - 1
+    #         check_right_inds = right_inds[still_going][check_move_left] - 1
 
-            new_distance_left = np.abs(
-                all_temp_fs[still_going][check_move_left] - self.freqs_sorted[check_left_inds]
-            )
+    #         new_distance_left = np.abs(
+    #             all_temp_fs[still_going][check_move_left] - self.freqs_sorted[check_left_inds]
+    #         )
 
-            change_inds = cp.arange(len(all_temp_fs))[still_going][check_move_left][
-                (new_distance_left < distance_right[check_move_left]) & (check_left_inds >= 0)
-            ]
+    #         change_inds = cp.arange(len(all_temp_fs))[still_going][check_move_left][
+    #             (new_distance_left < distance_right[check_move_left]) & (check_left_inds >= 0)
+    #         ]
 
-            left_inds[change_inds] -= 1
-            right_inds[change_inds] -= 1
+    #         left_inds[change_inds] -= 1
+    #         right_inds[change_inds] -= 1
 
-            stop_inds_left_1 = cp.arange(len(all_temp_fs))[still_going][check_move_left][
-                (check_left_inds < 0)
-            ]
-            stop_inds_left_2 = cp.arange(len(all_temp_fs))[still_going][check_move_left][
-                (new_distance_left >= distance_right[check_move_left]) & (check_left_inds >= 0)
-            ]
-            stop_inds_left = cp.concatenate([stop_inds_left_1, stop_inds_left_2])
+    #         stop_inds_left_1 = cp.arange(len(all_temp_fs))[still_going][check_move_left][
+    #             (check_left_inds < 0)
+    #         ]
+    #         stop_inds_left_2 = cp.arange(len(all_temp_fs))[still_going][check_move_left][
+    #             (new_distance_left >= distance_right[check_move_left]) & (check_left_inds >= 0)
+    #         ]
+    #         stop_inds_left = cp.concatenate([stop_inds_left_1, stop_inds_left_2])
 
-            stop_inds = cp.concatenate([stop_inds_right, stop_inds_left])
-            still_going[stop_inds] = False
-            # print(jjj, still_going.sum())
-            if jjj >= self.nfriends:
-                breakpoint()
-            jjj += 1
+    #         stop_inds = cp.concatenate([stop_inds_right, stop_inds_left])
+    #         still_going[stop_inds] = False
+    #         # print(jjj, still_going.sum())
+    #         if jjj >= self.nfriends:
+    #             breakpoint()
+    #         jjj += 1
 
-        return left_inds, right_inds
+    #     return left_inds, right_inds
 
-    def fix_friends(self, band_sorter, new_inds):
+    # def fix_friends(self, band_sorter, new_inds):
 
-        assert self.xp.all(band_sorter.inds[new_inds])
-        all_temp_fs = self.xp.asarray(band_sorter.coords[new_inds][:, 1])
+    #     assert self.xp.all(band_sorter.inds[new_inds])
+    #     all_temp_fs = self.xp.asarray(band_sorter.coords[new_inds][:, 1])
 
-        self.find_friends_init(all_temp_fs)
+    #     self.find_friends_init(all_temp_fs)
 
-        start_inds = asnumpy(left_inds.copy())
-        # TODO: remove .get()?
-        band_sorter.friend_start_inds[new_inds] = start_inds_all
+    #     start_inds = asnumpy(left_inds.copy())
+    #     # TODO: remove .get()?
+    #     band_sorter.friend_start_inds[new_inds] = start_inds_all
 
-    def find_friends(self, name, gb_points_to_move, s_inds=None, branch_supps=None):
-        if s_inds is None:  #  or branch_supps is None:
-            raise ValueError
+    # def find_friends(self, name, gb_points_to_move, s_inds=None, branch_supps=None):
+    #     if s_inds is None:  #  or branch_supps is None:
+    #         raise ValueError
 
-        inds_points_to_move = self.xp.asarray(s_inds.flatten())
+    #     inds_points_to_move = self.xp.asarray(s_inds.flatten())
 
-        half_friends = int(self.nfriends / 2)
+    #     half_friends = int(self.nfriends / 2)
 
-        gb_points_for_move = gb_points_to_move.reshape(-1, 8).copy()
+    #     gb_points_for_move = gb_points_to_move.reshape(-1, 8).copy()
 
-        if not hasattr(self, "ntemps"):
-            self.ntemps = 1
+    #     if not hasattr(self, "ntemps"):
+    #         self.ntemps = 1
 
-        # TODO: update how this is done
-        inds_start_freq_to_move = (
-            self.friend_start_inds_now
-        )  # self.xp.asarray(branch_supps[:]["friend_start_inds"].flatten())
-        assert inds_points_to_move.sum().item() == inds_start_freq_to_move.shape[0]
+    #     # TODO: update how this is done
+    #     inds_start_freq_to_move = (
+    #         self.friend_start_inds_now
+    #     )  # self.xp.asarray(branch_supps[:]["friend_start_inds"].flatten())
+    #     assert inds_points_to_move.sum().item() == inds_start_freq_to_move.shape[0]
 
-        deviation = self.xp.random.randint(0, self.nfriends, size=len(inds_start_freq_to_move))
+    #     deviation = self.xp.random.randint(0, self.nfriends, size=len(inds_start_freq_to_move))
 
-        inds_keep_friends = inds_start_freq_to_move + deviation
+    #     inds_keep_friends = inds_start_freq_to_move + deviation
 
-        inds_keep_friends[inds_keep_friends < 0] = 0
-        inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (
-            len(self.all_coords_sorted) - 1
-        )
+    #     inds_keep_friends[inds_keep_friends < 0] = 0
+    #     inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (
+    #         len(self.all_coords_sorted) - 1
+    #     )
 
-        gb_points_for_move[inds_points_to_move] = self.all_coords_sorted[inds_keep_friends]
-        return gb_points_for_move[None, :, None, :]
+    #     gb_points_for_move[inds_points_to_move] = self.all_coords_sorted[inds_keep_friends]
+    #     return gb_points_for_move[None, :, None, :]
 
-    def new_find_friends(self, name, inds_in):
-        inds_start_freq_to_move = self.current_friends_start_inds[tuple(inds_in)]
+    # def new_find_friends(self, name, inds_in):
+    #     inds_start_freq_to_move = self.current_friends_start_inds[tuple(inds_in)]
 
-        deviation = self.xp.random.randint(0, self.nfriends, size=len(inds_start_freq_to_move))
+    #     deviation = self.xp.random.randint(0, self.nfriends, size=len(inds_start_freq_to_move))
 
-        inds_keep_friends = inds_start_freq_to_move + deviation
+    #     inds_keep_friends = inds_start_freq_to_move + deviation
 
-        inds_keep_friends[inds_keep_friends < 0] = 0
-        inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (
-            len(self.all_coords_sorted) - 1
-        )
+    #     inds_keep_friends[inds_keep_friends < 0] = 0
+    #     inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (
+    #         len(self.all_coords_sorted) - 1
+    #     )
 
-        gb_points_for_move = self.all_coords_sorted[inds_keep_friends]
+    #     gb_points_for_move = self.all_coords_sorted[inds_keep_friends]
 
-        return gb_points_for_move
+    #     return gb_points_for_move
 
     def adjust_sources_in_residual_buffer(
         self, factor, model, band_sorter: BandSorter, *args, **kwargs
@@ -2216,14 +2243,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # global_ll_tracker = model.analysis_container_arr.likelihood().copy()
         # accumulated_local_diffs = cp.zeros_like(global_ll_tracker)
         # walker_accept_counts = cp.zeros(self.nwalkers, dtype=int)
-        
+
         # random start to rotation around
         start_unit = model.random.randint(units)
-        # NOTE: ``fixed_coords_for_info_mat`` / ``has_fixed_coords`` removed
-        # along with the info-matrix Cholesky cache. The chunked-het NUTS
-        # path recomputes the per-source Hessian metric each propose() call
-        # for only the sources picked for update, so no cross-iteration
-        # caching is needed.
+        # stft_tof info-matrix proposal (2026-06 merge direction): the
+        # per-source Cholesky cache is seeded from the current coords; it is
+        # lazily extended/invalidated as RJ adds/removes sources. This
+        # replaces the chunked-het NUTS step for now (NUTS may return later);
+        # the group stretch continues to run alongside it.
+        fixed_coords_for_info_mat = band_sorter.coords.copy()
+        has_fixed_coords = band_sorter.inds.copy()
+
         for tmp in range(units):
             # continue
             remainder = (start_unit + tmp) % units
@@ -2244,7 +2274,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             #     & (band_indices > 1)
             #     & (self.band_N_vals[band_indices] < 1024)  # TESTING
             # )
-            # TODO: check issue at ~23.5 mHz, removing for now. Really just removing high edge band
 
             apply_inds = not self.is_rj_prop
             extra_bool = (
@@ -2421,18 +2450,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     breakpoint()
                 max_counts = uni_special_counts.max().item()
                 num_proposals_here = (
-                    300  # self.num_repeat_proposals  #  if not self.is_rj_prop else max_counts
+                    self.num_repeat_proposals  #  if not self.is_rj_prop else max_counts
                 )
 
-                # NUTS path: no per-source Cholesky cache anymore. Each
-                # in-model propose() step recomputes the Hessian for only
-                # the sources picked for update against the *clean* per-band
-                # buffer (h_curr already removed). See Chunk 4 wiring below.
+                # stft_tof info-matrix proposal: reset the per-source
+                # Cholesky cache at the start of each band-unit pass; it is
+                # (re)filled lazily inside the proposal loop below.
+                try:
+                    del has_chol, inds_map_chol, chol_store, chol_params_fixed
+                except NameError:
+                    pass
+
+                has_chol = self.xp.zeros_like(source_map_now, dtype=bool)
+                inds_map_chol = self.xp.zeros((0,), dtype=int)
+                chol_store = self.xp.zeros((0, 8, 8))
+                chol_params_fixed = self.xp.zeros((0, 8))
+
                 been_picked_for_rj_update = self.xp.zeros_like(source_map_now, dtype=bool)
                 have_not_run_in_model = True
                 previous_inds = band_sorter.inds.copy()
-                for move_i in range(num_proposals_here):
-                    is_rj_now = bool(np.random.choice([0, 1], p=[0.97, 0.03]))
+                counter_infomat = 0
+                time_spent_infomat = 0.0
+                for move_i in range(self.num_repeat_proposals):
+
+                    is_rj_now = bool(np.random.choice([0, 1], p=[0.97, 0.03])) # TODO Make custom
 
                     if band_sorter.inds[source_map_now].sum() == 0:
                         is_rj_now = True
@@ -2474,14 +2515,115 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             band_sorter.inds[source_map_now[sources_picked_for_update]]
                         )
 
-                        # === info-matrix path REMOVED (Chunk 3) ===
-                        # The Fisher / Cholesky cache that produced the
-                        # in-model Gaussian proposal has been excised. Its
-                        # replacement -- per-source NUTS over the band buffer
-                        # with the source temporarily subtracted -- lives in
-                        # the proposal block below (Chunk 4). No caching is
-                        # done across propose() calls; the Hessian metric is
-                        # rebuilt for each picked source every call.
+                        # === stft_tof information-matrix proposal ===
+                        # Replaces the chunked-het NUTS step (2026-06 merge
+                        # direction); the group stretch continues to run in
+                        # the same proposal mix. The information matrix is
+                        # PINNED to the frequency-domain GBGPU computation
+                        # (``self.gb.information_matrix``) for speed -- even
+                        # when the band likelihood runs on another basis.
+                        # NOTE(Phase C): the GBGPU `information_matrix`
+                        # signature used here (psd=, noise_index=,
+                        # data_length=, batch_size=) must be confirmed when
+                        # the GBGPU dev merge lands.
+                        new_chol = (~has_chol) & band_sorter.inds[source_map_now]
+                        num_chol_new = new_chol.sum().item()
+
+                        if num_chol_new > 0:
+                            has_chol[new_chol] = True
+
+                            time_infomat_start = time.perf_counter()
+                            # due to fixed, it will not change during run through of the proposal
+                            # unless rj causes leaf addition/removal
+                            new_chol_params_fixed = fixed_coords_for_info_mat[
+                                source_map_now[new_chol]
+                            ]  # band_sorter.coords[source_map_now[new_chol]]
+                            new_inds_map_chol = source_map_now[new_chol]
+
+                            _test_inds = self.parameter_transforms.fill_dict["test_inds"]
+
+                            info_mat_params = self.xp.zeros((num_chol_new, 9))
+                            info_mat_params[:, _test_inds] = new_chol_params_fixed
+                            fdot_scale = 1e-16
+                            info_mat_transforms_global = self.parameter_transforms.original_parameter_transforms
+
+                            info_mat_transforms = {
+                                0: info_mat_transforms_global[r"$\log A$"],
+                                1: info_mat_transforms_global[r"$f_0$"],
+                                2: lambda x: x * fdot_scale,
+                                5: info_mat_transforms_global[r"$\cos\iota$"],
+                                8: info_mat_transforms_global[r"$\sin\delta$"],
+                            }
+
+                            # transform fdot
+                            info_mat_params[:, 2] /= fdot_scale
+
+                            walker_inds_chol = band_sorter.walker_inds[source_map_now[new_chol]]
+
+                            _tmp_waveform_kwargs = self.waveform_kwargs.copy()
+                            _tmp_waveform_kwargs.pop("start_freq_ind")
+
+                            info_mat = self.gb.information_matrix(
+                                info_mat_params,
+                                psd=model.analysis_container_arr.linear_psd_arr,
+                                eps=1e-9,
+                                parameter_transforms=info_mat_transforms,
+                                inds=self.xp.asarray(_test_inds),
+                                easy_central_difference=False,
+                                noise_index=walker_inds_chol,
+                                data_length=model.analysis_container_arr.data_length,
+                                batch_size=10000,
+                                **_tmp_waveform_kwargs,
+                            )
+
+                            self.mempool.free_all_blocks()
+
+                            # chol(cov) -> chol(inv(info_mat))
+                            new_chol_store = self.xp.linalg.cholesky(self.xp.linalg.inv(info_mat))
+                            _chol_store = self.xp.concatenate(
+                                [chol_store.copy(), new_chol_store], axis=0
+                            )
+                            _chol_params_fixed = self.xp.concatenate(
+                                [chol_params_fixed.copy(), new_chol_params_fixed],
+                                axis=0,
+                            )
+                            _inds_map_chol = self.xp.concatenate(
+                                [inds_map_chol.copy(), new_inds_map_chol]
+                            )
+
+                            del chol_store, chol_params_fixed, inds_map_chol
+                            self.mempool.free_all_blocks()
+                            # reference transfer (not rewriting)
+                            chol_store = _chol_store
+                            chol_params_fixed = _chol_params_fixed
+                            inds_map_chol = _inds_map_chol
+
+                            time_spent_infomat += time.perf_counter() - time_infomat_start
+                            counter_infomat += 1
+
+                        remove_chol = has_chol & (~band_sorter.inds[source_map_now])
+                        num_chol_remove = remove_chol.sum().item()
+
+                        if num_chol_remove > 0:
+                            has_chol[remove_chol] = False
+                            remove_inds = self.xp.arange(inds_map_chol.shape[0])[
+                                self.xp.in1d(inds_map_chol, source_map_now[remove_chol])
+                            ]
+
+                            _chol_store = self.xp.delete(chol_store, remove_inds, axis=0).copy()
+                            _chol_params_fixed = self.xp.delete(
+                                chol_params_fixed, remove_inds, axis=0
+                            ).copy()
+                            _inds_map_chol = self.xp.delete(
+                                inds_map_chol, remove_inds, axis=0
+                            ).copy()
+
+                            del chol_store, chol_params_fixed, inds_map_chol
+                            self.mempool.free_all_blocks()
+                            # reference transfer (not rewriting)
+                            chol_store = _chol_store
+                            chol_params_fixed = _chol_params_fixed
+                            inds_map_chol = _inds_map_chol
 
                     # st_1 = time.perf_counter()
                     else:
@@ -2531,9 +2673,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         breakpoint()
                     if not is_rj_now:  # self.is_rj_prop:
                         old_coords = params_to_update.copy()
-                        # custom group stretch
-                        # TODO: work into main group stretch somehow
-                        if False:
+                        # In-model proposal mix (2026-06 merge direction):
+                        # per-iteration random draw between the band-aware
+                        # group stretch and the info-matrix Cholesky jump.
+                        # The stretch requires the friends machinery to have
+                        # been set up (setup_gbs -> friend_start_inds).
+                        # TODO: check detailed balance of the band-restricted
+                        # group stretch (long-standing note).
+                        use_stretch = (
+                            self.stretch_probability > 0.0
+                            and hasattr(band_sorter, "friend_start_inds")
+                            and float(np.random.rand()) < self.stretch_probability
+                        )
+                        if use_stretch:
                             params_into_proposal = params_to_update[None, :, None, :]
 
                             self.friend_start_inds_now = band_sorter.friend_start_inds[
@@ -2555,93 +2707,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             new_coords = q["gb"][0, :, 0, :]
 
                         else:
-                            # === Chunk 4: buffer-flip + per-leaf NUTS step ===
-                            # Workflow per source picked for in-model update:
-                            #   1) subtract h_curr from the band buffer so the
-                            #      residual is "clean" (d - h_other) for that
-                            #      band and the Hessian / leapfrog navigate L
-                            #      on a self-consistent buffer.
-                            #   2) compute the per-leaf Hessian metric (jax
-                            #      autograd; psd_fix=True takes |-H| as the
-                            #      mass matrix).
-                            #   3) run one NUTS iteration -- closures supply
-                            #      the per-leaf tempered log-posterior and
-                            #      gradient (curr_beta * L; the prior is
-                            #      gated downstream by curr_logp).
-                            #   4) leave the buffer flipped; the outer M-H
-                            #      accept logic decides which template
-                            #      (old_coords on reject, new_coords on
-                            #      accept) gets added back to the buffer in
-                            #      the post-flip block.
-                            from eryn.moves.nuts import NUTSSampler
-                            nuts_subtract_index = data_index_to_update.copy()
-                            nuts_N_vals = self.band_N_vals[
-                                band_sorter.band_inds[inds_to_update]
-                            ].copy()
-                            buffer_obj.remove_sources_from_band_buffer(
-                                old_coords, nuts_subtract_index, nuts_N_vals,
+                            # === stft_tof info-matrix jump (replaces the
+                            # chunked-het NUTS step, 2026-06 merge
+                            # direction; NUTS may return later). Gaussian
+                            # proposal drawn from the per-source Cholesky of
+                            # the inverse FD information matrix cached
+                            # above; symmetric, so no Jacobian factor. The
+                            # group stretch continues to run in the overall
+                            # proposal mix.
+                            mapped_chol_inds = self.xp.searchsorted(
+                                inds_map_chol, inds_to_update, side="left"
                             )
-                            # Backend (JAX autograd) is fixed on the
-                            # Buffer's gb_wdm_comp at construction; no
-                            # runtime backend= kwarg per the sprint rule.
-                            M_metric = buffer_obj.hessian(
-                                old_coords, nuts_subtract_index, nuts_subtract_index,
-                                nuts_N_vals, psd_fix=True,
+                            # TODO: asserts/checks
+                            tmp_chols_here = chol_store[mapped_chol_inds]
+
+                            # TODO: change einsum for speed?
+                            # TODO: adjusting jump_factor over time?
+                            jump_factor = 0.005
+                            _rand_draw = self.xp.random.randn(mapped_chol_inds.shape[0], 8)
+                            old_coords_scaled_fdot = old_coords.copy()
+                            # TODO: add this to whole thing
+                            old_coords_scaled_fdot[:, 2] /= fdot_scale
+                            new_coords = old_coords_scaled_fdot + jump_factor * self.xp.einsum(
+                                "...ij,...j->...i", tmp_chols_here, _rand_draw
                             )
-                            M_metric = self.xp.asarray(M_metric)
-
-                            # Per-leaf inverse temperature (one entry per
-                            # picked source). Closes over via curr_beta_nuts.
-                            curr_beta_nuts = band_temps[map_to_update[2], map_to_update[0]]
-
-                            def _log_post_fn(x_batch,
-                                              _bidx=nuts_subtract_index,
-                                              _Nv=nuts_N_vals,
-                                              _beta=curr_beta_nuts):
-                                d_h, h_h = buffer_obj.get_ll(
-                                    self.xp.asarray(x_batch),
-                                    _bidx, _bidx, _Nv,
-                                )
-                                ll = self.xp.asarray(d_h) - 0.5 * self.xp.asarray(h_h)
-                                return _beta * ll
-
-                            def _grad_log_post_fn(x_batch,
-                                                   _bidx=nuts_subtract_index,
-                                                   _Nv=nuts_N_vals,
-                                                   _beta=curr_beta_nuts):
-                                g = buffer_obj.get_ll_grad(
-                                    self.xp.asarray(x_batch),
-                                    _bidx, _bidx, _Nv,
-                                )
-                                return _beta[:, None] * self.xp.asarray(g)
-
-                            nuts = NUTSSampler(
-                                grad_log_posterior_fn=_grad_log_post_fn,
-                                log_posterior_fn=_log_post_fn,
-                                ndim=8,
-                                metric=M_metric,
-                                step_size=float(getattr(self, "nuts_step_size", 0.1)),
-                                max_tree_depth=int(getattr(self, "nuts_max_tree_depth", 4)),
-                                adapt_step_size=False,
-                            )
-                            nuts_out = nuts.step(old_coords)
-                            new_coords = (nuts_out[0] if isinstance(nuts_out, tuple)
-                                          else nuts_out)
-                            # NUTS leapfrog preserves detailed balance, so
-                            # no log-Jacobian correction is needed at the
-                            # outer M-H gate.
-                            update_factors = self.xp.zeros(new_coords.shape[0])
-                            # Restore the buffer to its pre-flip state by
-                            # adding h_curr (old_coords) back. The
-                            # downstream accept-path then runs its own
-                            # remove(old)/add(new) cycle for accepted
-                            # sources from a clean baseline, identical to
-                            # how the legacy Cholesky proposal left it.
-                            # ll_diff=0 in the swap_ll branch ensures the
-                            # outer M-H gate is prior-only for in-model.
-                            buffer_obj.add_sources_to_band_buffer(
-                                old_coords, nuts_subtract_index, nuts_N_vals,
-                            )
+                            new_coords[:, 2] *= fdot_scale
+                            update_factors = self.xp.zeros(new_coords.shape[0])  # symmetric draws
 
                         new_coords[:] = self.periodic.wrap(
                             {"gb": new_coords[:, None, :]}, xp=self.xp
@@ -2658,10 +2749,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         old_coords = params_to_update.copy()
                         new_coords = params_to_update.copy()
                         logp_tmp = cp.asarray(self.gpu_priors["gb"].logpdf(old_coords))
-                        
+
                         # if self.xp.any(self.xp.isinf(logp_tmp[run_now_tmp])):
                         #     breakpoint()
-                            
+
                         prev_logp = cp.zeros_like(logp_tmp)
                         curr_logp = cp.zeros_like(logp_tmp)
 
@@ -2679,6 +2770,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         prev_logp[inds] = logp_tmp[inds]
                         curr_logp[~inds] = logp_tmp[~inds]
 
+                    # check if any proposals have -inf logp before likelihood calculation to catch issues early
+                    if cp.all(~cp.isfinite(prev_logp)):  # [run_now_tmp]
+                        logger.warning("Found -inf logp in previous logp.")
+                        # check which parameters have -inf logp and why
+                        # bad_idx = cp.where(~cp.isfinite(prev_logp))[0]
+                        # for idx in bad_idx:
+                        #     logger.warning(f"Parameter with -inf logp at index {idx}: {params_to_update[idx]}. Prior limits are:")
+
+                        # for param_name, prior in self.gpu_priors["gb"].priors_in.items():
+                        #     logger.warning(f"  {param_name}: [{prior.min_val},{prior.max_val}]")
+                        #breakpoint()
                     # if cp.any(cp.isinf(prev_logp)):  # [run_now_tmp]
                     #     breakpoint()
                     # inputs into swap proposal
@@ -2769,28 +2871,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     ].copy()
 
                     # CANNOT COPY PARAMETER ARRAYS, IN PLACE ADJUSTMENT IF PHASE MAXIMIZING
-                    if is_rj_now:
-                        # RJ swap (add-one / remove-one): canonical swap_ll
-                        # on the unflipped buffer. Phase-maximisation is
-                        # allowed here -- it's the analytic phi0 marginal
-                        # the legacy RJ path has always used.
-                        ll_diff[keep2] = buffer_obj.get_swap_ll(
-                            params_remove,
-                            params_add,
-                            data_index,
-                            swap_N_vals,
-                            phase_maximize=self.phase_maximize,
-                        )
-                        # in case there is phase marginalization, need to adjust in new_coords
-                        if self.phase_maximize:
-                            new_coords[keep2] = params_add[:]
-                    else:
-                        # In-model NUTS path: leapfrog already integrated
-                        # the tempered likelihood, so the outer M-H gate
-                        # is on prior support only. Setting ll_diff=0
-                        # collapses ``curr_beta * ll_diff + (curr_logp -
-                        # prev_logp)`` down to the prior delta.
-                        ll_diff[keep2] = 0.0
+                    # Both branches are ordinary M-H now: the in-model
+                    # info-matrix jump (stft_tof, replacing NUTS) and the RJ
+                    # add/remove swap both score through the canonical
+                    # swap_ll on the band buffer.
+                    ll_diff[keep2] = buffer_obj.get_swap_ll(
+                        params_remove,
+                        params_add,
+                        data_index,
+                        swap_N_vals,
+                        phase_maximize=self.phase_maximize,
+                    )
+
+                    # in case there is phase marginalization, need to adjust in new_coords
+                    if self.phase_maximize:
+                        new_coords[keep2] = params_add[:]
+
+                    # wrap because phase marginalization can put coords outside of prior range
+                    new_coords[:] = self.periodic.wrap( 
+                        {"gb": new_coords[:, None, :]}, xp=self.xp
+                    )["gb"][:, 0]
 
                     curr_beta = band_temps[map_to_update[2], map_to_update[0]]
                     # print("change priors?, need to adjust here")
@@ -2798,6 +2898,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     delta_logP = curr_beta * ll_diff + (curr_logp - prev_logp)
                     lnpdiff = delta_logP + update_factors.squeeze()
                     accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
+
+                    # check if any coords outside of the prior are accepted
+                    # this should only be possible for beta=0, but should still be rejected
+                    bad_mask = ((ll_diff <= -1e299) | (curr_logp <= -1e229))
+                    bad_accepts = accept & bad_mask
+                    if self.xp.any(bad_accepts):
+                        if self.xp.any(curr_beta[bad_accepts] != 0.0):
+                            logger.warning(f"A chain with beta > 0 accepted a coordinate outside of prior rang for {self.name} move")
+                            if "fstat" in self.name or "refit" in self.name:
+                                pass
+                            else:
+                                logger.info(f"delta_logP: {delta_logP[bad_accepts]}. Factors: {update_factors.squeeze()[bad_accepts]}. ll_diff: {ll_diff[bad_accepts]}. curr_logp: {curr_logp[bad_accepts]}. prev_logp: {prev_logp[bad_accepts]}. curr_beta: {curr_beta[bad_accepts]}")
+                        accept[bad_accepts] = False
 
                     if is_rj_now and self.use_prior_removal:
                         if self.xp.any(~(band_sorter.inds[inds_to_update][accept])):
@@ -2849,12 +2962,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         ] += ll_accept
 
                         accepted_out[temp_inds_accept, walker_inds_accept, band_inds_accept] += 1
-                        
+
                         # for t_idx, w_idx, ll_change in zip(temp_inds_accept, walker_inds_accept, ll_accept):
                         #     if t_idx == 0:  # Count acceptances for the cold chain
                         #         accumulated_local_diffs[w_idx] += ll_change
                         #         walker_accept_counts[w_idx] += 1
-                                
+
                         # switch accepted waveform
                         old_coords_for_change = old_coords[accept].copy()
                         new_coords_for_change = new_coords[accept].copy()
@@ -2868,18 +2981,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         new_change_N_vals = old_change_N_vals.copy()
 
                         # TODO: should we combine this to make faster
-                        ll_before = buffer_obj.likelihood(source_only=True)
+                        # ll_before = buffer_obj.likelihood(source_only=True)
                         buffer_obj.remove_sources_from_band_buffer(
                             old_coords_for_change, old_change_index, old_change_N_vals
                         )
-                        ll_mid = buffer_obj.likelihood(source_only=True)
+                        # ll_mid = buffer_obj.likelihood(source_only=True)
                         buffer_obj.add_sources_to_band_buffer(
                             new_coords_for_change, new_change_index, new_change_N_vals
                         )
-                        ll_after = buffer_obj.likelihood(source_only=True)
+                        # ll_after = buffer_obj.likelihood(source_only=True)
 
-                        ll_check = np.zeros_like(ll_after)
-                        ll_check[data_index_to_update[accept]] = ll_accept
+                        # ll_check = np.zeros_like(ll_after)
+                        # ll_check[data_index_to_update[accept]] = ll_accept
 
                         # if not np.allclose(ll_check, ll_after - ll_before):
                         #     breakpoint()
@@ -2906,6 +3019,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # RJ COUNT IS PROPORTIONAL TO NUMBER OF SOURCES IN THE BAND,
                 # SO IT WILL ALSO ACCOUNT FOR NUM_REPEAT_PROPOSALS FOR IN-MODEL
                 run_count[inds_now] = current_rj_counter
+                logger.info(f"The information matrix was calculated {counter_infomat} times over {self.num_repeat_proposals} proposal repeats, for a total of {time_spent_infomat:.2f} seconds.")
 
                 # if not self.is_rj_prop:
                 #     # should be subset for in model
@@ -2926,7 +3040,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 #     print(tmp)
                 self.mempool.free_all_blocks()
                 # update prop counter
-                print(f"For {self.name}, we still have to run, {still_to_run.sum()}")
+                logger.info(f"For {self.name}, we still have to run {still_to_run.sum()} proposals.")
             # add back in all sources in the cold-chain
             # residual from this group
             # llaf1 = model.analysis_container_arr.likelihood()
@@ -2936,12 +3050,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             # final_global_ll = model.analysis_container_arr.likelihood().copy()
             # true_global_diffs = final_global_ll - global_ll_tracker
-            
+
             # print("\n" + "="*65)
             # print("WALKER DRIFT ANALYSIS (COLD CHAIN)")
             # print(f"{'Walker':<8} | {'Accepted':<8} | {'Local C++ Sum':<15} | {'Global Diff':<15} | {'Error':<15}")
             # print("-" * 65)
-            
+
             # for w in range(self.nwalkers):
             #     loc = accumulated_local_diffs[w].item()
             #     glob = true_global_diffs[w].item()
@@ -2949,12 +3063,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             #     acc = walker_accept_counts[w].item()
             #     print(f"{w:<8} | {acc:<8} | {loc:<15.4f} | {glob:<15.4f} | {err:<15.4f}")
             # print("="*65)
-            
+
             # llaf2 = model.analysis_container_arr.likelihood(source_only=True)
             # breakpoint()
             # ll_change_sum = ll_change_log.sum(axis=-1)
             # check_in = state.log_like[0] + ll_change_sum[0].get()    
-                
+
             if self.backend.uses_cupy:
                 self.xp.cuda.runtime.deviceSynchronize()
 
@@ -2983,13 +3097,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 odd = False
                 bool_remainder = 0
 
-            ll_before2 = model.analysis_container_arr.likelihood()
+            # ll_before2 = model.analysis_container_arr.likelihood()
             self.remove_cold_chain_sources_from_residual(
                 model,
                 band_sorter,
                 extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
             )
-            ll_after2 = model.analysis_container_arr.likelihood()
+            # ll_after2 = model.analysis_container_arr.likelihood()
 
             if self.num_bands == 1:
                 num_bands_tempered = 1
@@ -2997,7 +3111,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             else:
                 num_bands_tempered = self.num_bands - 2
                 band_index_arr = cp.arange(1, self.num_bands -1)
-                
+
             num_bands_unit = np.arange(num_bands_tempered)[start::2].shape[0]
 
             walkers_permuted = (
@@ -3088,7 +3202,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     sel = paccept > raccept
 
                     current_lls[sel, i2 : i1 + 1] = new_lls[sel]
-                    
+
                     # reverse not accepted ones
                     buffer_i1_reject = buffer_i1[~sel]
                     buffer_i2_reject = buffer_i2[~sel]
@@ -3170,16 +3284,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 ] = diffs.flatten()
                 num_bands_run += num_bands_preload_temp
 
-            ll_before3 = model.analysis_container_arr.likelihood()
+            # ll_before3 = model.analysis_container_arr.likelihood()
             self.add_cold_chain_sources_to_residual(
                 model,
                 band_sorter,
                 extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
             )
-            ll_after3 = model.analysis_container_arr.likelihood()
+            # ll_after3 = model.analysis_container_arr.likelihood()
 
         # adapt if desired
-        print("change adaptation")
+        # TODO: change temperature adaptation
         if self.time > 0:
             ratios = (band_swaps_accepted / band_swaps_proposed).T
             betas0 = band_temps.copy().T
@@ -3205,7 +3319,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             band_temps += self.xp.asarray(dbetas.T)
 
-        print("NEED TO FIX ANALYSIS CONTAINER extra factor")
+        # TODO Ask michael what this is about print("NEED TO FIX ANALYSIS CONTAINER extra factor")
         ll_change_sum_temp = ll_change_log_temp.sum(axis=-1)
 
         return ll_change_sum_temp, band_swaps_accepted, band_swaps_proposed
@@ -3239,7 +3353,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.fd = None
             self.df = 1.0 / acs_settings.Tobs
         self.current_state = state
-        np.random.seed(10)
+        # np.random.seed(10)
         # print("start stretch")
 
         # Check that the dimensions are compatible.
@@ -3254,7 +3368,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Run any move-specific setup.
         self.setup(model, state.branches)
         self.num_proposals += 1
-        
+
         # after setup is still no dist, return
         if self.rj_proposal_distribution is None:
             return state, np.zeros((ntemps, nwalkers), dtype=bool)
@@ -3313,7 +3427,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             {"gb": new_state.branches["gb"].coords[:].reshape(ntemps * nwalkers, nleaves_max, ndim)}
         )["gb"].reshape(ntemps, nwalkers, nleaves_max, ndim)
 
-        print("is this okay for rj? I do not think so, check with below use of gb_inds_in")
+        # TODO Ask Michael about this print("is this okay for rj? I do not think so, check with below use of gb_inds_in")
         if self.use_prior_removal:  # TODO: make this stronger?
             keep_all_inds = False
         else:
@@ -3349,13 +3463,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             source_only=False
         )  #  - cp.sum(cp.log(cp.asarray(psd[:2])), axis=(0, 2))).get()
 
-        print(np.abs(new_state.log_like - ll_after).max())        
+        # print(np.abs(new_state.log_like - ll_after).max())        
         # store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
         start_diffs = np.abs(new_state.log_like[0] - ll_after)
 
         check = ll_after - new_state.log_like[0] - start_diffs
-        
-        print(f"Start check: {start_diffs=}, {check=}")
+
+        logger.debug(f"Start check: {start_diffs=}, {check=}")
         if not np.abs(check).max() < 1e-4:
             # assert np.abs(check).max() < 1.0
             new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
@@ -3367,21 +3481,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # assert np.all(start_diffs < 2.0)
         per_walker_band_proposals = cp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
         per_walker_band_accepted = cp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
-        
+
+        num_active_leaves = new_state.branches["gb"].inds[0].sum(axis=-1) # cold chain only
+        logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
         ll_change_log = self.run_proposal(model, new_state, band_sorter, band_temps)
         et_prop = time.perf_counter()
-        print(self.name, "reg prop:", et_prop - st_prop)
-        
-        print("NEED TO FIX ANALYSIS CONTAINER extra factor")
+        # Diagnostic: per-temperature alive source counts after run_proposal
+        _alive_per_temp_post_prop = [
+            int(band_sorter.inds[band_sorter.temp_inds == _t].sum()) for _t in range(ntemps)
+        ]
+        logger.info(f"Alive sources per temp after run_proposal: {_alive_per_temp_post_prop}")
+        logger.info(f"Runtime of {self.name} proposal is {round(et_prop - st_prop,3)} seconds.")
+
+        # TODO ask michael about this print("NEED TO FIX ANALYSIS CONTAINER extra factor")
         ll_change_sum = ll_change_log.sum(axis=-1)
         new_state.log_like[0] += _to_numpy(ll_change_sum[0])
 
         ll_after = model.analysis_container_arr.likelihood()
         check = ll_after - new_state.log_like[0] - start_diffs
 
-        print(f"After proposal check: {start_diffs=}, {check=}")
+        logger.debug(f"After proposal check: {start_diffs=}, {check=}")
         if not np.abs(check).max() < 1e-4:
             assert np.abs(check).max() < 1.0
             new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
@@ -3417,16 +3538,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             ll_after = model.analysis_container_arr.likelihood()
             check = ll_after - new_state.log_like[0] - start_diffs
 
-            print(f"After tempering check: {start_diffs=}, {check=}")
+            logger.debug(f"After tempering check: {start_diffs=}, {check=}")
             if not np.abs(check).max() < 1e-4:
                 assert np.abs(check).max() < 1.0
                 new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
 
             self.mempool.free_all_blocks()
             et_temp = time.perf_counter()
-            print(self.name, "tempering duration is", et_temp - st_temp, "seconds")
-            
-        print("make sure this works for rj")
+            logger.info(f"Runtime of {self.name} tempering is {round(et_temp - st_temp,3)} seconds.")
+            # Diagnostic: per-temperature alive source counts after run_tempering
+            # _alive_per_temp_post_temp = [
+            #     int(band_sorter.inds[band_sorter.temp_inds == _t].sum()) for _t in range(ntemps)
+            # ]
+            # logger.info(f"Alive sources per temp after run_tempering: {_alive_per_temp_post_temp}")
+
+        # TODO ask michael about this print("make sure this works for rj")
+        # Diagnostic: per-temperature alive source counts before write-back
+        # _alive_per_temp_pre_wb = [
+        #     int(band_sorter.inds[band_sorter.temp_inds == _t].sum()) for _t in range(ntemps)
+        # ]
+        # logger.info(f"Alive sources per temp before write-back: {_alive_per_temp_pre_wb}")
         special_indices_finish = (
             band_sorter.temp_inds[band_sorter.inds] * nwalkers
             + band_sorter.walker_inds[band_sorter.inds]
@@ -3448,7 +3579,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_inds_new = cp.zeros_like(leaf_inds_new_tmp)
         leaf_inds_new[sorted_inds] = leaf_inds_new_tmp
 
-        print("NEED TO PROPERLY MOVE SUPPLEMENTAL INFO BASED ON OLD LEAVES.")
+        # TODO: NEED TO PROPERLY MOVE SUPPLEMENTAL INFO BASED ON OLD LEAVES.
         inds_new = (
             _to_numpy(band_sorter.temp_inds[band_sorter.inds]),
             _to_numpy(band_sorter.walker_inds[band_sorter.inds]),
@@ -3466,7 +3597,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # new_state.branches["gb"].branch_supplemental[inds_new] = state.branches["gb"].branch_supplemental[inds_old]
         et_all = time.perf_counter()
-        print(self.name, et_all - st_all)
+        logger.info(f"Full runtime of {self.name} is {round(et_all - st_all, 3)} seconds.")
+        num_active_leaves = new_state.branches["gb"].inds[0].sum(axis=-1)
+        logger.info(f"Number of active leaves in cold chain after proposal: {num_active_leaves}")
 
         # TODO: need to redo the acceptance fraction
         # get accepted fraction
@@ -3583,7 +3716,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplemental)
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
-        
+
+        num_active_sources = new_state.branches["gb"].inds.sum(axis=-1)[0]
+        logger.info(f"Current number of active sources in cold chain is {num_active_sources}")
+
         return new_state, accepted
 
     def check_ll_inject(self, model, band_sorter, verbose=False):
@@ -3630,7 +3766,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     aca.linear_data_arr[i][:] = snapshot[i][:]
         finally:
             cp.cuda.runtime.setDevice(main_gpu)
-            
+
     @property
     def ranks_needed(self):
         if not hasattr(self, "_ranks_needed"):
@@ -3736,10 +3872,11 @@ def para_log_like(
     xp = gb.backend.xp
 
     x_tmp = transform_fn.both_transforms(x, xp=xp)
-    # need to get just f, fdot, fddot, lam, beta
+    # need to get just f, fdot, fddot, alpha, delta
     data_index = xp.full(x.shape[0], walker_max, dtype=xp.int32)
     if fstat:
         x_in = x_tmp[:, xp.array([1, 2, 3, 7, 8])]
+        # breakpoint()
         # TODO: fix for N>256?
         ll = gb.get_fstat_ll(
             x_in,
@@ -3747,11 +3884,11 @@ def para_log_like(
             acs.linear_psd_arr,
             data_index=data_index,
             noise_index=data_index,
-            data_length=acs.data_length,
+            data_length=acs.end_shape[0],
             data_splits=np.array([gb.gpus[0]]),
             phase_marginalize=phase_maximize,
             return_cupy=True,
-            N=512,  # 1024 is too much shared memory I think
+            N=512,  
             **waveform_kwargs,
         )
 
@@ -3769,11 +3906,11 @@ def para_log_like(
             acs.linear_psd_arr,
             data_index=data_index,
             noise_index=data_index,
-            data_length=acs.data_length,
+            data_length=acs.end_shape[0],
             data_splits=np.array([gb.gpus[0]]),
             phase_marginalize=phase_maximize,
             return_cupy=True,
-            # N=256,
+            # N=512,
             **waveform_kwargs,
         )
         # breakpoint()
@@ -4079,6 +4216,17 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         return gb_search_func
 
     def setup(self, model, branches):
+        assert isinstance(self.search_kwargs, dict)
+        nwalkers: int = self.search_kwargs["nwalkers"]
+        ntemps: int = self.search_kwargs["ntemps"]
+        shutoff_band_iteration: int = self.search_kwargs["shutoff_band_iteration"]
+        shutoff_frequency_threshold: float = self.search_kwargs["shutoff_frequency_threshold"]
+        burn_1: int = self.search_kwargs["burn_1"]
+        nsteps_1: int = self.search_kwargs["nsteps_1"]
+        snr_threshold: float = self.search_kwargs["snr_threshold"]
+        burn_2: int = self.search_kwargs["burn_2"]
+        nsteps_2: int = self.search_kwargs["nsteps_2"]
+
         # FOR FAST TESTING/DEBUGGING
         # import pickle
         # with open("gmm_tmp.pickle", "rb") as fp:
@@ -4086,57 +4234,58 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         # rj_dist = ProbDistContainer(
         #     {
-        #         (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\lambda$", r"$\sin\beta$"): full_gmm,
+        #         (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
         #         r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
         #         r"$\psi$": uniform_dist(0.0, np.pi),
         #     },
         #     use_cupy=True,
         # )
-        # rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"])
+        # rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"])
         # return
+
         # run paraensemble MCMC.
         max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
-        self.gb.d_d = 0.0  # model.analysis_container_arr.inner_product()[max_logl_walker]
+        self.gb.d_d = model.analysis_container_arr.inner_product()[max_logl_walker] # 0.0
         ndim = branches["gb"].ndim
-        nwalkers = 30  # TODO: adjustable
-        ntemps = 24  # TODO: adjustable
-        shutoff_band_iteration = 2
         priors_global = self.priors if not self.backend.uses_cuda else self.gpu_priors            
-        
+
         if self.num_bands == 1:
             f0_max = self.band_edges[1:]
             f0_min = self.band_edges[:-1]
         else:
             f0_max = self.band_edges[2:-1]
             f0_min = self.band_edges[1:-2]
-        
-        # logic to shutoff bands #? Think about how this should change when we change SNR_thresh
+
+        # logic to shutoff bands #? Think about how this should change when we change SNR_thresh and with changing noise
         if self.num_proposals >= shutoff_band_iteration:
             bands_to_shutoff = np.all(~self.found_source_in_band[-shutoff_band_iteration:, :], axis=0)
 
+            if shutoff_frequency_threshold is not None:
+                min_freqs = getattr(f0_min, "get")() if hasattr(f0_min, "get") else f0_min
+                freq_mask = min_freqs >= shutoff_frequency_threshold
+                bands_to_shutoff = bands_to_shutoff & freq_mask
+
             if np.all(bands_to_shutoff):
-                print(f"No sources found across all bands for {shutoff_band_iteration} iterations, reverting to priors")
+                logger.info(f"No sources found across all bands for {shutoff_band_iteration} iterations, reverting to priors")
                 self.rj_proposal_distribution = priors_global
                 return
-            
+
             else:
                 shutoff_mask = ~bands_to_shutoff
                 f0_max = f0_max[shutoff_mask]
                 f0_min = f0_min[shutoff_mask]
                 ngroups = np.sum(shutoff_mask)
-            
+
         else:
             ngroups = max(1, self.num_bands - 2)
             assert f0_max.shape[0] == ngroups
             assert f0_min.shape[0] == ngroups
             bands_to_shutoff = None
-    
-        print(f"The current number of active bands is {ngroups}")
 
-        # TODO: make this adjustable to match settings
-        m_chirp_lims = [0.001, 1.2]
-        fdot_max = get_fdot(f0_max, Mc=m_chirp_lims[-1])
-        fdot_min = -fdot_max
+        logger.info(f"The current number of active bands is {ngroups}")
+
+        fdot_max = get_fdot_mojito(f0_max, sign="+")
+        fdot_min = get_fdot_mojito(f0_max, sign="-")
 
         priors_in = deepcopy(priors_global)["gb"].priors_in
         priors_in[r"$f_0$"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
@@ -4144,23 +4293,11 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         priors = {
             "gb": ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
         }
-        # print(priors["gb"].key_order)
-        # catalogue = gather_catalogue(
-        #     "/sps/lisaf/crondeel/secret_sauce/GBgpu_sampler/data/Catalogue_Mojito_lite_wdwd_gbgpu_params_full.npy",
-        #     self.band_edges[1:].min(),
-        #     self.band_edges[:-1].max()  
-        # )
-        # truths_in_band = get_true_source_for_bands(self.band_edges[1:-1], catalogue, output_shape=(ngroups, ntemps, nwalkers, 9))
-        # truths_in_band = self.xp.delete(truths_in_band, 3, axis=-1)
-        # noised_truths = noise_parameters(truths_in_band, 0.00001)
-        
         start_params = priors["gb"].rvs(size=(ngroups, ntemps, nwalkers))
         prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, fdot_min, fdot_max)
         prior_transform_fn.transform_from_prior_basis(start_params, self.xp.arange(ngroups))
-        
-        # start_params[noised_truths[..., 0] < -1] = noised_truths[noised_truths[..., 0] < -1]
 
-        print("phase maximizing here right now (?)")
+        #? print("phase maximizing here right now (?)")
         ll_args = (
             self.gb,
             model.analysis_container_arr,
@@ -4175,7 +4312,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             model.analysis_container_arr,
             max_logl_walker,
             self.parameter_transforms,
-            False,  # self.phase_maximize,
+            self.phase_maximize, # False, #
             self.waveform_kwargs,
         )
 
@@ -4183,6 +4320,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         #     test_params,
         #     *ll_args
         # )
+
         gibbs_sampling_setup = np.ones(8, dtype=bool)
         gibbs_sampling_setup[np.array([0, 3, 4, 5])] = False
         para_sampler = ParaEnsembleSampler(
@@ -4213,19 +4351,20 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         state.log_prior = para_sampler.compute_log_prior(state.branches_coords)
         state.log_like = para_sampler.compute_log_like(state.branches_coords, logp=state.log_prior)
 
-        nsteps = 500
-        para_sampler.run_mcmc(state, nsteps, burn=500, progress=True)
+        para_sampler.run_mcmc(state, nsteps_1, burn=burn_1, progress=True)
 
         samples = self.xp.asarray(para_sampler.get_chain()[:, :, 0])
-        check_ll = para_sampler.get_log_like()[:, :, 0]
-        sample_ll = asnumpy(
-            para_log_like(samples.reshape(-1, 8), *ll_args).reshape(samples.shape[:-1])
-        )
+        # Diagnostics disabled (stft_tof): computed-but-unused and each costs
+        # a full likelihood sweep over all samples.
+        # check_ll = para_sampler.get_log_like()[:, :, 0]
+        # sample_ll = asnumpy(
+        #     para_log_like(samples.reshape(-1, 8), *ll_args).reshape(samples.shape[:-1])
+        # )
 
-        check_real_ll_phase_maximized = asnumpy(
-            para_log_like(samples.reshape(-1, 8), *ll_args, fstat=False)
-            .reshape(samples.shape[:-1])
-        )
+        # check_real_ll_phase_maximized = asnumpy(
+        #     para_log_like(samples.reshape(-1, 8), *ll_args, fstat=False)
+        #     .reshape(samples.shape[:-1])
+        # )
         check_real_ll, opt_snr = para_log_like(
             samples.reshape(-1, 8), *ll_args_2, fstat=False, return_snr=True
         )
@@ -4234,10 +4373,10 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         # np.save("opt_snr_from_ldc_parasampler_check.npy", opt_snr)
         # np.save("samples_from_ldc_parasampler_check.npy", samples)
-        
+
         # TODO: make cut adjustable
-        groups_running_now = opt_snr.min(axis=(0, 2)) > 8.0
-        
+        groups_running_now = opt_snr.min(axis=(0, 2)) > snr_threshold
+
         if self.num_proposals == 0:
             self.found_source_in_band = groups_running_now
         else:
@@ -4247,16 +4386,18 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
                 shutoff_temp = np.zeros(self.found_source_in_band.shape[1], dtype=bool)
                 shutoff_temp[~bands_to_shutoff] = groups_running_now
                 self.found_source_in_band = np.vstack([self.found_source_in_band, shutoff_temp])
-        
-        print(f"Found a source in {groups_running_now.sum()} out of {groups_running_now.shape[0]} active bands")
+
+        logger.info(f"Found a source in {groups_running_now.sum()} out of {groups_running_now.shape[0]} active bands")
         if not np.any(groups_running_now):
-            print("Did not find any new sources.")
+            logger.info("Did not find any new sources.")
             return
 
         start_params_2 = np.tile(samples[-1][groups_running_now, None], (1, ntemps, 1, 1))
-
+        # Maybe not start from maximized values?
         gibbs_sampling_setup_2 = np.ones(8, dtype=bool)
-        gibbs_sampling_setup_2[np.array([3])] = False
+        if ll_args_2[4]: # phase_maximization
+            gibbs_sampling_setup_2[np.array([3])] = False
+
         prior_transform_fn_2 = PriorTransformFn(
             f0_min[groups_running_now] * 1e3,
             f0_max[groups_running_now] * 1e3,
@@ -4273,7 +4414,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             para_log_like,
             priors,
             tempering_kwargs=dict(ntemps=ntemps, Tmax=np.inf),
-            args=ll_args,
+            args=ll_args_2,
             kwargs=dict(fstat=False),
             gpu=self.gb.gpus[0],
             periodic=self.periodic,
@@ -4299,29 +4440,60 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         if np.any(np.isinf(new_state.log_prior)):
             breakpoint()
 
-        nsteps = 500
-        para_sampler_2.run_mcmc(new_state, nsteps, burn=500, progress=True)
+        para_sampler_2.run_mcmc(new_state, nsteps_2, burn=burn_2, progress=True)
 
         samples_2 = self.xp.asarray(para_sampler_2.get_chain()[:, :, 0])
-        check_ll_2 = para_sampler_2.get_log_like()[:, :, 0]
+        # check_ll_2 = para_sampler_2.get_log_like()[:, :, 0]
 
-        check_real_ll_phase_maximized_2 = asnumpy(
-            para_log_like(samples_2.reshape(-1, 8), *ll_args, fstat=False)
-            .reshape(samples_2.shape[:-1])
-        )
-        check_real_ll_2 = asnumpy(
-            para_log_like(samples_2.reshape(-1, 8), *ll_args_2, fstat=False)
-            .reshape(samples_2.shape[:-1])
-        )
+        # Diagnostics disabled (stft_tof): computed-but-unused likelihood sweeps.
+        # check_real_ll_phase_maximized_2 = asnumpy(
+        #     para_log_like(samples_2.reshape(-1, 8), *ll_args, fstat=False)
+        #     .reshape(samples_2.shape[:-1])
+        # )
+        # check_real_ll_2 = asnumpy(
+        #     para_log_like(samples_2.reshape(-1, 8), *ll_args_2, fstat=False)
+        #     .reshape(samples_2.shape[:-1])
+        # )
 
-        # TODO: add removal of bands that consistently dont find things
         samples_2 = samples_2.transpose(1, 0, 2, 3)
-        # np.save("/sps/lisaf/crondeel/secret_sauce/GBgpu_sampler/data/output_dir_ldc_highf_test/diagnostics/samples_ldc_run_3.npy", samples_2)
+        # np.save("/workspace/rrondeel/erebor/testing/highf_gb/search2_samples_check.npy", samples_2)
 
         st = time.perf_counter()
         samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])[
             :, :, np.array([0, 1, 2, 4, 6, 7])
         ]
+
+        if self.xp.isnan(samples_2_tmp).any() or self.xp.isinf(samples_2_tmp).any():
+            logger.warning(
+                f"samples_2_tmp contains NaN or Inf before GMM fitting. \
+                NaN count: {self.xp.isnan(samples_2_tmp).sum()}. \
+                Inf count: {self.xp.isinf(samples_2_tmp).sum()}. \
+                Skipping search..."
+            )
+            return
+            # breakpoint()
+            # raise ValueError(
+            #     f"samples_2_tmp contains NaN or Inf before GMM fitting. "
+            #     f"NaN count: {self.xp.isnan(samples_2_tmp).sum()}, "
+            #     f"Inf count: {self.xp.isinf(samples_2_tmp).sum()}"
+            # )
+
+        ranges = samples_2_tmp.max(axis=1) - samples_2_tmp.min(axis=1)  # (n_groups, n_features)
+        degenerate = (ranges == 0)
+        if degenerate.any():
+            bad_groups, bad_feats = self.xp.where(degenerate)
+            logger.warning(
+                f"Degenerate features (zero range) in groups {bad_groups} \
+                for features {bad_feats}. transform_to_gmm_basis will produce NaN. \
+                Skipping search..."
+            )
+            return
+            # breakpoint()
+            # raise ValueError(
+            #     f"Degenerate features (zero range) in groups {bad_groups} "
+            #     f"for features {bad_feats}. transform_to_gmm_basis will produce NaN."
+            # )
+
         full_gmm = vec_fit_gmm_min_bic(
             samples_2_tmp,
             min_comp=1,
@@ -4335,17 +4507,17 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         #     pickle.dump(full_gmm, fp, pickle.HIGHEST_PROTOCOL)
 
         et = time.perf_counter()
-        print(f"GPU GMM FIT: {et - st}")
+        logger.info(f"Runtime of GPU GMM FIT: {round(et - st,3)} seconds")
 
         rj_dist = ProbDistContainer(
             {
-                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\lambda$", r"$\sin\beta$"): full_gmm,
+                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
                 r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
                 r"$\psi$": uniform_dist(0.0, np.pi),
             },
             use_cupy=True,
         )
-        rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"])
+        rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"])
         # if self.ranks_needed == 0:
         #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
         #     gmm_info = gather_gmms(gmms)
@@ -4365,8 +4537,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         # print(gen_ll, self.gb.d_h / gen_opt_snr, gen_opt_snr)
         # breakpoint()
         self.rj_proposal_distribution = {"gb": rj_dist}
-  
-    
+
 
 class GBSpecialRJSearchMove(GBSpecialBase): #? only needed for mutli GPU usage
     """Reversible-jump GB search move that delegates work to extra GPU/MPI ranks.
@@ -4417,7 +4588,7 @@ class GBSpecialRJSearchMove(GBSpecialBase): #? only needed for mutli GPU usage
         else:
             search_ch.cancel()
 
-        print("CHECK INSIDE PROP")
+        # TODO print("CHECK INSIDE PROP")
 
 
 from lisatools.globalfit.gathergalaxy import gather_gb_samples
@@ -4439,6 +4610,9 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         GBSpecialBase.__init__(self, *args, **kwargs)
 
     def setup(self, model, branches):
+        samples_keep = self.search_kwargs["refit_start_iteration"]
+        nwalkers = self.search_kwargs["nwalkers"]
+        num_compare_samples = 1
         # FOR FAST TESTING/DEBUGGING
         # import pickle
         # with open("gmm_tmp.pickle", "rb") as fp:
@@ -4446,13 +4620,13 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 
         # rj_dist = ProbDistContainer(
         #     {
-        #         (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\lambda$", r"$\sin\beta$"): full_gmm,
+        #         (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
         #         r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
         #         r"$\psi$": uniform_dist(0.0, np.pi),
         #     },
         #     use_cupy=True,
         # )
-        # rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
+        # rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
         # self.rj_proposal_distribution = {"gb": rj_dist}
         # return
         # run paraensemble MCMC.
@@ -4465,8 +4639,9 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 
         st = time.perf_counter()
         sens_mat = model.analysis_container_arr[max_logl_walker].sens_mat
-        samples_keep = 5
         if reader.iteration < 2 * samples_keep:
+            logger.info("Not enough samples to perform refitting, reverting to priors.")
+            self.rj_proposal_distribution = {"gb": self.priors if not self.backend.uses_cuda else self.gpu_priors}
             return
 
         num_compare_samples = 1
@@ -4498,6 +4673,22 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         num_in_groups = np.asarray([len(tmp) for tmp in groups])
         keep = num_in_groups > nwalkers * samples_keep / 2
 
+        logger.info(
+            f"Groups passing sample count filter: {keep.sum()} / {len(keep)}. "
+            f"num_in_groups: {num_in_groups}"
+        )
+
+        if not keep.any():
+            logger.warning(
+                f"No groups have enough samples (threshold={nwalkers * samples_keep / 2:.0f}). "
+                f"Max samples in any group: {num_in_groups.max()}. "
+                f"Reverting to priors."
+            )
+            self.rj_proposal_distribution = {
+                "gb": self.priors if not self.backend.uses_cuda else self.gpu_priors
+            }
+            return
+
         max_num_source = max([tmp.shape[0] for tmp in groups])
         samples = np.full((len(groups), max_num_source, groups[0].shape[-1]), np.nan)
         for i, group in enumerate(groups):
@@ -4505,6 +4696,17 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 
         samples_fin = samples[keep]
         num_in_groups_fin = num_in_groups[keep]
+
+        if len(num_in_groups_fin) == 0 or num_in_groups_fin.min() == num_in_groups_fin.max():
+            logger.warning(
+                f"Cannot construct step range from num_in_groups_fin={num_in_groups_fin}. "
+                f"Reverting to priors..."
+            )
+            self.rj_proposal_distribution = {
+                "gb": self.priors if not self.backend.uses_cuda else self.gpu_priors
+            }
+            return
+
         cp.cuda.runtime.setDevice(gpu)
         output_info = []
         step = 5
@@ -4523,6 +4725,33 @@ class GBSpecialRJRefitMove(GBSpecialBase):
             here = (num_in_groups_fin >= start) & (num_in_groups_fin < end)
             # this randomly throughs away ~step amount of samples to make gmm work
             samples_here = samples_fin[here][:, :start, np.array([0, 1, 2, 4, 6, 7])].copy()
+
+            if np.isnan(samples_here).any():
+                nan_groups = np.where(np.isnan(samples_here).any(axis=(1, 2)))[0]
+                logger.warning(
+                    f"NaN padding leaked into samples_here at start={start}. \
+                    Affected groups (local indices): {nan_groups}. \
+                    num_in_groups for those groups: {num_in_groups_fin[here][nan_groups]} \
+                    Skipping Refit..."
+                )
+                return
+                # raise ValueError(
+                #     f"NaN padding leaked into samples_here at start={start}. "
+                #     f"Affected groups (local indices): {nan_groups}. "
+                #     f"num_in_groups for those groups: {num_in_groups_fin[here][nan_groups]}"
+                # )
+
+            ranges = samples_here.max(axis=1) - samples_here.min(axis=1)
+            if (ranges == 0).any():
+                bad = np.where((ranges == 0))
+                logger.warning(
+                    f"Degenerate features at start={start}: groups={bad[0]}, features={bad[1]} \
+                    Skipping Refit..."
+                )
+                # raise ValueError(
+                #     f"Degenerate features at start={start}: groups={bad[0]}, features={bad[1]}"
+                # )
+
             weights, means, covs, invcovs, dets, mins, maxs = vec_fit_gmm_min_bic(
                 cp.asarray(samples_here),
                 min_comp=1,
@@ -4539,7 +4768,7 @@ class GBSpecialRJRefitMove(GBSpecialBase):
             dets_all += dets
             mins_all += mins
             maxs_all += maxs
-            print(start, end)
+            # logger.info(start, end)
 
         full_gmm = FullGaussianMixtureModel(
             weights_all,
@@ -4552,16 +4781,16 @@ class GBSpecialRJRefitMove(GBSpecialBase):
             use_cupy=True,
         )
 
-        print("time:", time.perf_counter() - st)
+        logger.info(f"Runtime GMM Refit: {round(time.perf_counter() - st)}")
         rj_dist = ProbDistContainer(
             {
-                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\lambda$", r"$\sin\beta$"): full_gmm,
+                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
                 r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
                 r"$\psi$": uniform_dist(0.0, np.pi),
             },
             use_cupy=True,
         )
-        rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
+        rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
         # if self.ranks_needed == 0:
         #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
         #     gmm_info = gather_gmms(gmms)
@@ -4587,15 +4816,15 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 def get_param_limits(array): # can be used for debugging of coordinate values
     """Return per-column min/max of ``array`` (debug helper for GB coordinates)."""
     num_params = array.shape[-1]
-    
+
     if num_params == 8:
-        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
-    if num_params == 9:
-        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", r"$\phi_0$" r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
-    
+        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
+    elif num_params == 9:
+        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
+    else:
+        param_labels = num_params * [""]
     for i, param_label in enumerate(param_labels):
         param_values = array[..., i]
         min_array_i = param_values.min()
         max_array_i = param_values.max()
         print(f"For parameter {param_label}, the minimun value is {min_array_i}, the maximum value is {max_array_i}")
-        print(f"The mean of {param_label} is {cp.mean(param_values)} with a std of {cp.std(param_values)}")

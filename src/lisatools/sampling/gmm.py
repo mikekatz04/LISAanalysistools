@@ -773,32 +773,69 @@ def draw_multinomial_vec(n_samples, weights, random_state, xp=None):
     """
     if xp is None:
         xp = np
-
-    n_groups, n_components = weights.shape
-    weights_tmp = xp.cumsum(weights, axis=-1)
-    cumulative_weights = xp.concatenate(
-        [xp.zeros((n_groups, 1)), xp.cumsum(weights, axis=-1)], axis=1
-    )
-    draw = random_state.rand(n_groups, n_samples)
-    extra_kwargs = {}
-    try:
-        extra_kwargs["gpu"] = xp.cuda.runtime.getDevice()
-    except AttributeError:
-        pass
-
-    component = (
-        searchsorted2d_vec(cumulative_weights, draw, side="right", xp=xp, **extra_kwargs) - 1
-    ).reshape(draw.shape)
-
-    component_tmp = (n_components + 1) * xp.repeat(xp.arange(n_groups), n_samples).reshape(
-        n_groups, n_samples
-    )
+        
+    n_groups, n_components = weights.shape 
     counts = xp.zeros((n_groups, n_components), dtype=int)
-    uni, uni_counts = xp.unique((component + component_tmp).flatten(), return_counts=True)
-    group = uni // (n_components + 1)
-    comp = uni % (n_components + 1)
-    counts[group, comp] = uni_counts
+    
+    # Normalize weights per group to guard against any floating point drift
+    weights_norm = weights / weights.sum(axis=-1, keepdims=True)
+    
+    for g in range(n_groups):
+        counts[g] = xp.array(
+            random_state.multinomial(n_samples, weights_norm[g].tolist())
+        )
+    
     return counts
+    # n_groups, n_components = weights.shape
+    # # weights_tmp = xp.cumsum(weights, axis=-1)
+    # cumulative_weights = xp.concatenate(
+    #     [xp.zeros((n_groups, 1)), xp.cumsum(weights, axis=-1)], axis=1
+    # )
+    # draw = random_state.rand(n_groups, n_samples)
+    # extra_kwargs = {}
+    # try:
+    #     extra_kwargs["gpu"] = xp.cuda.runtime.getDevice()
+    # except AttributeError:
+    #     pass
+
+    # component = (
+    #     searchsorted2d_vec(cumulative_weights, draw, side="right", xp=xp, **extra_kwargs) - 1
+    # ).reshape(draw.shape)
+
+    # # stride must be n_components, not n_components + 1
+    # component_tmp = n_components * xp.repeat(xp.arange(n_groups), n_samples).reshape(
+    #     n_groups, n_samples
+    # )
+    # counts = xp.zeros((n_groups, n_components), dtype=int)
+    # uni, uni_counts = xp.unique((component + component_tmp).flatten(), return_counts=True)
+    # group = uni // n_components  # matching stride
+    # comp = uni % n_components    # matching stride
+    # counts[group, comp] = uni_counts
+    # return counts
+    # # OLD
+    # cumulative_weights = xp.concatenate(
+    #     [xp.zeros((n_groups, 1)), xp.cumsum(weights, axis=-1)], axis=1
+    # )
+    # draw = random_state.rand(n_groups, n_samples)
+    # extra_kwargs = {}
+    # try:
+    #     extra_kwargs["gpu"] = xp.cuda.runtime.getDevice()
+    # except AttributeError:
+    #     pass
+
+    # component = (
+    #     searchsorted2d_vec(cumulative_weights, draw, side="right", xp=xp, **extra_kwargs) - 1
+    # ).reshape(draw.shape)
+
+    # component_tmp = (n_components + 1) * xp.repeat(xp.arange(n_groups), n_samples).reshape(
+    #     n_groups, n_samples
+    # )
+    # counts = xp.zeros((n_groups, n_components), dtype=int)
+    # uni, uni_counts = xp.unique((component + component_tmp).flatten(), return_counts=True)
+    # group = uni // (n_components + 1)
+    # comp = uni % (n_components + 1)
+    # counts[group, comp] = uni_counts
+    # return counts
 
 
 class GaussianMixtureModel:
@@ -1364,36 +1401,85 @@ class GaussianMixtureModel:
         rng = self.random_state
 
         n_samples_comp = draw_multinomial_vec(n_samples, weights, rng, xp=self.xp)
+
         # n_samples_comp = rng.multinomial(n_samples, self.weights_)
-        n_features = means.shape[-1]
+        assert (n_samples_comp.sum(axis=-1) == n_samples).all(), \
+        f"draw_multinomial_vec row sums {n_samples_comp.sum(axis=-1)} != {n_samples}"
+
         X = self.xp.zeros((n_groups, n_samples, n_features))
         samples_so_far = self.xp.zeros((n_groups, n_samples), dtype=bool)
         comp_out = self.xp.zeros((n_groups, n_samples), dtype=int)
         chol_decomp = self.xp.linalg.cholesky(covariances)
+        
         if self.covariance_type == "full":
+            fill_pos = self.xp.zeros(n_groups, dtype=int)  # next unfilled index per group
+
             for k in range(n_components):
-                n_samp_k = n_samples_comp[:, k]
+                n_samp_k = n_samples_comp[:, k]          # shape (n_groups,)
                 n_samp_k_max = n_samp_k.max().item()
                 if n_samp_k_max == 0:
                     continue
+
                 z = rng.randn(n_groups, n_samp_k_max, n_features)
                 _samples = means[:, k][:, None, :] + self.xp.einsum(
                     "ijk,imk->imj", chol_decomp[:, k], z
-                )
-                repeat_arg = list(asnumpy(n_samp_k))
+                )  # shape (n_groups, n_samp_k_max, n_features)
 
-                tmp0 = self.xp.repeat(self.xp.arange(n_groups), repeat_arg)
-                _tmp = self.xp.tile(self.xp.arange(n_samp_k_max), (n_groups, 1))
-                tmp1 = _tmp[_tmp < n_samp_k[:, None]]
+                for g in range(n_groups):
+                    n_g = n_samp_k[g].item()
+                    if n_g == 0:
+                        continue
+                    start = fill_pos[g].item()
+                    X[g, start:start + n_g] = _samples[g, :n_g]
+                    comp_out[g, start:start + n_g] = k
+                    fill_pos[g] += n_g
 
-                tmp_fill = samples_so_far.argmin(axis=-1)[tmp0] + tmp1
+            assert (fill_pos == n_samples).all(), \
+                f"Not all slots filled: fill_pos={fill_pos}"
+            # for k in range(n_components):
+            #     n_samp_k = n_samples_comp[:, k]
+            #     n_samp_k_max = n_samp_k.max().item()
+            #     if n_samp_k_max == 0:
+            #         continue
+            #     z = rng.randn(n_groups, n_samp_k_max, n_features)
+            #     _samples = means[:, k][:, None, :] + self.xp.einsum(
+            #         "ijk,imk->imj", chol_decomp[:, k], z
+            #     )
+            #     try:
+            #         repeat_arg = list(n_samp_k.get())
+            #     except AttributeError:
+            #         repeat_arg = list(n_samp_k)
 
-                X[tmp0, tmp_fill] = _samples[tmp0, tmp1]
-                assert self.xp.all(~samples_so_far[tmp0, tmp_fill])
-                samples_so_far[tmp0, tmp_fill] = True
-                comp_out[tmp0, tmp_fill] = k
+            #     tmp0 = self.xp.repeat(self.xp.arange(n_groups), repeat_arg)
+            #     # _tmp = self.xp.tile(self.xp.arange(n_samp_k_max), (n_groups, 1))
+            #     # tmp1 = _tmp[_tmp < n_samp_k[:, None]]
 
-            assert self.xp.all(samples_so_far)
+            #     # tmp_fill = samples_so_far.argmin(axis=-1)[tmp0] + tmp1
+
+            #     # X[tmp0, tmp_fill] = _samples[tmp0, tmp1]
+                
+            #     # assert self.xp.all(~samples_so_far[tmp0, tmp_fill])
+            #     # samples_so_far[tmp0, tmp_fill] = True
+            #     # comp_out[tmp0, tmp_fill] = k
+                
+            #     tmp1_per_group = [self.xp.arange(n_samp_k[g].item()) for g in range(n_groups)]
+            #     tmp1_local = self.xp.concatenate(tmp1_per_group)
+                
+            #     _tmp = self.xp.tile(self.xp.arange(n_samp_k_max), (n_groups, 1))
+            #     tmp1_sample_idx = _tmp[_tmp < n_samp_k[:, None]]
+                
+            #     fill_offsets = samples_so_far.argmin(axis=-1)[tmp0] 
+            #     tmp_fill = fill_offsets + tmp1_local  
+                
+            #     X[tmp0, tmp_fill] = _samples[tmp0, tmp1_sample_idx]
+            #     assert self.xp.all(~samples_so_far[tmp0, tmp_fill])
+            #     samples_so_far[tmp0, tmp_fill] = True
+            #     comp_out[tmp0, tmp_fill] = k
+                
+            # try:
+            #     assert self.xp.all(samples_so_far)
+            # except:
+            #     breakpoint()
             # X = self.xp.vstack(
             #     [
             #         rng.multivariate_normal(mean, covariance, int(sample))

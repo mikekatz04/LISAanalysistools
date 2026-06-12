@@ -45,7 +45,7 @@
 //         "OrbitsWrap / WDM*Wrap / TDIConfig* with pybind11. "
 //         "See plan section OrbitsWrap-symbol-unification.");
 //
-// LAT's own binding.cxx #defines LISATOOLS_IS_WRAPPER_OWNER 1 before
+// LAT's own binding_detector.cxx #defines LISATOOLS_IS_WRAPPER_OWNER 1 before
 // including this header, so the assertion passes there. Any downstream
 // TU that accidentally calls py::class_<OrbitsWrap>(...) without
 // flipping the toggle gets a compile-time error pointing at this rule

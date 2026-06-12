@@ -1,4 +1,13 @@
-"""MCMC move that updates the LISA noise PSD (and optional galactic foreground)."""
+"""MCMC move that updates the LISA noise PSD (and optional galactic foreground).
+
+stft_tof merge (2026-06): hybrid likelihood routing. The move keeps the
+dev-side domain-agnostic structure (per-walker sensitivity matrices installed
+on the AnalysisContainers, scored via ``acs.likelihood()``), and adds the
+stft_tof C++ XYZ-sensitivity kernel (``psd_likelihood_wrap`` shared-memory
+sums) as a fast path when the data basis is FD or STFT and the ACA holds a
+single shard. The WDM basis falls back to the ACA route until the WDM
+counterpart kernels land in domains.cu.
+"""
 
 import time
 import warnings
@@ -15,141 +24,23 @@ from eryn.moves import RedBlueMove, StretchMove
 from eryn.state import State as eryn_State
 from eryn.utils.transform import TransformContainer
 
-# from ..utils import new_sens_mat
 from tqdm import tqdm
 
-from lisatools.cutils.psd_likelihood_utils import psd_likelihood_numba
-
-from ... import get_backend
 from ...analysiscontainer import AnalysisContainerArray
+from ...domains import FDSettings, STFTSettings
 from ...sensitivity import XYZSensitivityBackend
 from ...utils.utility import asnumpy
-from ..moves import GlobalFitMove
 from ..state import GFState
 from .globalfitmove import GlobalFitMove
 
 logger = logging.getLogger(__name__)
 
-# def psd_log_like_ae(x, freqs, data, df, data_length, supps=None, **sens_kwargs):
-#     if supps is None:
-#         raise ValueError("Must provide supps to identify the data streams.")
-
-#     # TODO: get right backend inside the function
-#     psd_likelihood = get_backend("gpu").psd_likelihood
-
-#     wi = supps["walker_inds"]
-
-#     # TODO: better way so avoid order issues?
-#     psd_pars = x[0]
-#     if len(x) == 1:
-#         galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
-#     else:
-#         galfor_pars = x[1]
-
-#     A_data = data[0]
-#     E_data = data[1]
-
-#     data_index_all = cp.asarray(wi).astype(np.int32)
-#     ll = cp.zeros(psd_pars.shape[0])
-#     A_Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-#     A_Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-#     E_Soms_d_in_all = cp.asarray(psd_pars[:, 2])
-#     E_Sa_a_in_all = cp.asarray(psd_pars[:, 3])
-#     Amp_all = cp.asarray(galfor_pars[:, 0])
-#     kn_all = cp.asarray(galfor_pars[:, 1])
-#     alpha_all = cp.asarray(galfor_pars[:, 2])
-#     sl1_all = cp.asarray(galfor_pars[:, 3])
-#     sl2_all = cp.asarray(galfor_pars[:, 4])
-#     num_data = 1
-#     num_psds = psd_pars.shape[0]
-
-#     psd_likelihood(
-#         ll,
-#         freqs,
-#         data,
-#         data_index_all,
-#         A_Soms_d_in_all,
-#         A_Sa_a_in_all,
-#         E_Soms_d_in_all,
-#         E_Sa_a_in_all,
-#         Amp_all,
-#         alpha_all,
-#         sl1_all,
-#         kn_all,
-#         sl2_all,
-#         df,
-#         data_length,
-#         num_data,
-#         num_psds,
-#     )
-
-#     # # galfor_pars = None
-#     # ll2 = xp.zeros_like(ll)
-#     # for i, (psd_pars_i, galfor_pars_i) in enumerate(zip(psd_pars, galfor_pars)):
-#     #     psd = [
-#     #         get_sensitivity(freqs, model=psd_pars_i[:2], foreground_params=galfor_pars_i, **sens_kwargs),
-#     #         get_sensitivity(freqs, model=psd_pars_i[2:], foreground_params=galfor_pars_i, **sens_kwargs)
-#     #     ]
-#     #     psd[0][0] = psd[0][1]
-#     #     psd[1][0] = psd[1][1]
-
-#     #     # inner_product = 4 * df * (xp.sum(data[0][wi].conj() * data[0][wi] / psd[0]) + xp.sum(data[1][wi].conj() * data[1][wi] / psd[1])).real
-#     #     inner_product = 4 * df * (xp.sum(data[0].conj() * data[0] / psd[0]) + xp.sum(data[1].conj() * data[1] / psd[1])).real
-#     #     ll2[i] = -1/2 * inner_product - xp.sum(xp.log(xp.asarray(psd)))
-#     # assert np.allclose(ll.get(), ll2.get())
-#     return ll.get()
-
-
-# def psd_log_like_xyz(x, freqs, data, df, data_length, supps=None, tdi2=False, **sens_kwargs):
-#     if supps is None:
-#         raise ValueError("Must provide supps to identify the data streams.")
-
-#     wi = supps["walker_inds"]
-
-#     # TODO: better way so avoid order issues?
-#     psd_pars = x[0]
-#     if len(x) == 1:
-#         galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
-#     else:
-#         galfor_pars = x[1]
-
-#     data_index_all = cp.asarray(wi).astype(np.int32)
-#     # ll = cp.zeros(psd_pars.shape[0])
-#     Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-#     Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-#     Amp_all = cp.asarray(galfor_pars[:, 0])
-#     kn_all = cp.asarray(galfor_pars[:, 1])
-#     alpha_all = cp.asarray(galfor_pars[:, 2])
-#     sl1_all = cp.asarray(galfor_pars[:, 3])
-#     sl2_all = cp.asarray(galfor_pars[:, 4])
-#     num_data = 1
-#     num_psds = psd_pars.shape[0]
-
-#     ll = psd_likelihood_numba(
-#         freqs,
-#         data,
-#         data_index_all,
-#         Soms_d_in_all,
-#         Sa_a_in_all,
-#         Amp_all,
-#         alpha_all,
-#         sl1_all,
-#         kn_all,
-#         sl2_all,
-#         df,
-#         data_length,
-#         tdi2=tdi2,
-#     )
-
-#     return ll.get()
-
-
-# TODO: temperature swap permutation
+DEBUG_MODE = False
 
 
 class PSDMove(GlobalFitMove, StretchMove):
     """
-    Move for sampling over PSD parameters. Can also include galactic foreground parameters if desired. 
+    Move for sampling over PSD parameters. Can also include galactic foreground parameters if desired.
 
     Args:
         acs: AnalysisContainerArray containing the data and sensitivity information.
@@ -159,11 +50,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         max_logl_mode: if True, will keep running the move until the maximum log likelihood does not change for a certain number of checks. This is useful for finding the maximum likelihood point.
         psd_kwargs: additional keyword arguments for the psd_log_like function.
         sensitivity_backend: instance of XYZSensitivityBackend to use for computing the likelihood.
-        psd_transform_fn: TransformContainer for transforming the PSD parameters. 
+        psd_transform_fn: TransformContainer for transforming the PSD parameters.
         galfor_transform_fn: TransformContainer for transforming the galactic foreground parameters.
         permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
+        tolerance: minimum allowed distance between spline knot positions in the sensitivity model.
         **kwargs: additional keyword arguments for the Move class.
     """
+
     def __init__(
         self,
         acs: AnalysisContainerArray,
@@ -188,13 +81,177 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.num_repeats = num_repeats
         self.max_logl_mode = max_logl_mode
         self.starting_now = True
-        self.tolerance = tolerance
 
         self.sensitivity_backend = sensitivity_backend
         self.psd_transform_fn = psd_transform_fn
         self.galfor_transform_fn = galfor_transform_fn
 
         self.permute_every = permute_every
+        self.tolerance = tolerance
+
+    # ------------------------------------------------------------------
+    # stft_tof kernel fast path
+    # ------------------------------------------------------------------
+
+    def transform_coords(self, coords: list, return_cupy: bool = False, xp=None):
+        """
+        Prepare the coordinates for the move. This can include transforming the parameters if necessary.
+
+        Args:
+            coords: list of numpy arrays containing the parameters for the move. The first element should be the PSD parameters, and the second element (if present) should be the galactic foreground parameters.
+            return_cupy: if True, will return the transformed coordinates as cupy arrays for use on the GPU. If False, will return numpy arrays.
+            xp: the array library to use (numpy or cupy).
+        Returns:
+            A tuple containing the transformed PSD parameters and galactic foreground parameters (if present) in the target array library.
+        """
+        if xp is None:
+            xp = self.acs.xp  # Use the array library from the analysis container
+
+        if self.psd_transform_fn is not None:
+            psd_pars = self.psd_transform_fn.both_transforms(coords[0])
+        else:
+            psd_pars = coords[0]
+
+        if len(coords) == 1:
+            galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
+        else:
+            if self.galfor_transform_fn is not None:
+                galfor_pars = self.galfor_transform_fn.both_transforms(coords[1])
+            else:
+                galfor_pars = coords[1]
+
+        if return_cupy:
+            psd_pars = xp.asarray(psd_pars)
+            galfor_pars = xp.asarray(galfor_pars)
+
+        return psd_pars, galfor_pars
+
+    def prepare_likelihood_inputs(self, psd_pars, galfor_pars) -> tuple:
+        """
+        Prepare the inputs for the likelihood computation. This can include placing the data on the correct device and formatting the parameters as needed.
+        """
+
+        xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
+
+        # Use .copy() (not xp.ascontiguousarray) to guarantee each kernel input
+        # owns an independent allocation. ascontiguousarray is a no-op when the
+        # slice is already contiguous — which is the case for a column of a
+        # Fortran-order 2D array. In that case Soms_d_in_all and Sa_a_in_all
+        # would alias psd_pars's buffer, and the CUDA kernel would read through
+        # those aliased pointers — exposing it to cupy memory-pool reuse
+        # hazards while the kernel runs asynchronously. .copy() forces a
+        # fresh, contiguous, owning allocation.
+        Soms_d_in_all = psd_pars[:, 0].copy()
+        Sa_a_in_all = psd_pars[:, 1].copy()
+
+        if self.sensitivity_backend.use_splines:
+            knots_positions = xp.asarray(psd_pars[:, 3::2])
+            knots_amplitudes = xp.asarray(psd_pars[:, 2:-1:2])
+            half = knots_positions.shape[1] // 2  # Get the mid of the array
+            # put the 2 noise levels on the batch axis
+            spline_knots_amplitude = xp.stack(
+                (knots_amplitudes[:, :half], knots_amplitudes[:, half:])
+            )
+            spline_knots_position = xp.stack(
+                (knots_positions[:, :half], knots_positions[:, half:])
+            )
+
+            # Sort
+            sort_indices = xp.argsort(spline_knots_position, axis=2)
+            # Apply the same indices to both arrays
+            spline_knots_position = xp.take_along_axis(
+                spline_knots_position, sort_indices, axis=2
+            )
+            spline_knots_amplitude = xp.take_along_axis(
+                spline_knots_amplitude, sort_indices, axis=2
+            )
+            # now check if any knot position is not too close together
+        else:
+            spline_knots_position = None
+            spline_knots_amplitude = None
+
+        # Same defensive copy for the galactic-foreground components. The
+        # previous code unpacked `*xp.ascontiguousarray(galfor_pars.T)` which,
+        # for an already-contiguous input, would unpack 5 views into the same
+        # base array — same aliasing hazard as Soms/Sa. Copying each row
+        # independently gives 5 owning 1D arrays.
+        galfor_pars_T = galfor_pars.T  # view; transpose is always free
+        Amp_all = galfor_pars_T[0].copy()
+        alpha_all = galfor_pars_T[1].copy()
+        f_1_all = galfor_pars_T[2].copy()
+        kn_all = galfor_pars_T[3].copy()
+        f_2_all = galfor_pars_T[4].copy()
+
+        likelihood_args = (
+            Soms_d_in_all,
+            Sa_a_in_all,
+            Amp_all,
+            alpha_all,
+            f_1_all,
+            kn_all,
+            f_2_all,
+            spline_knots_position,
+            spline_knots_amplitude,
+        )
+
+        return likelihood_args
+
+    def psd_log_like(self, x: list, supps=None, **sens_kwargs) -> np.ndarray:
+        """
+        Internal method to compute the log likelihood for the PSD parameters via the C++ XYZ sensitivity kernel (stft_tof fast path).
+
+        Args:
+            x: list of numpy arrays containing the parameters for the move. The first element should be the PSD parameters, and the second element (if present) should be the galactic foreground parameters.
+            supps: supplemental information for the likelihood computation, such as walker indices.
+            **sens_kwargs: additional keyword arguments to pass to the sensitivity backend for likelihood computation.
+        Returns:
+            A numpy array containing the log likelihood values for each set of parameters.
+        """
+        if supps is None:
+            raise ValueError("Must provide supps to identify the data streams.")
+
+        xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
+
+        wi = supps["walker_inds"]
+        data_index_all = xp.asarray(wi).astype(np.int32)
+
+        psd_pars, galfor_pars = self.transform_coords(x, return_cupy=True, xp=xp)
+
+        likelihood_args = self.prepare_likelihood_inputs(psd_pars, galfor_pars)
+
+        ll = self.sensitivity_backend.compute_log_like(
+            self.acs.linear_data_arr[0], data_index_all, *likelihood_args
+        )
+
+        if likelihood_args[-2] is not None and likelihood_args[-1] is not None:
+            invalid_knots = xp.any(
+                xp.diff(10 ** likelihood_args[-2], axis=2) < self.tolerance, axis=(0, 2)
+            )
+        else:
+            invalid_knots = xp.zeros(psd_pars.shape[0], dtype=bool)
+
+        ll[invalid_knots] = -1e300
+
+        return ll.get() if hasattr(ll, "get") else ll
+
+    def _kernel_fast_path_available(self) -> bool:
+        """True when the C++ XYZ sensitivity kernel can score this proposal.
+
+        Conditions: a sensitivity backend is configured, the data basis is FD
+        or STFT (the kernel's two domains — the WDM counterpart is planned in
+        domains.cu), and the ACA holds a single shard (the kernel reads
+        ``linear_data_arr[0]`` directly).
+        """
+        if self.sensitivity_backend is None:
+            return False
+        basis = self.sensitivity_backend.basis_settings
+        if not isinstance(basis, (FDSettings, STFTSettings)):
+            return False
+        return len(self.acs.linear_data_arr) == 1
+
+    # ------------------------------------------------------------------
+    # dev ACA path + hybrid dispatch
+    # ------------------------------------------------------------------
 
     def _build_sensitivity_for_walker(self, walker_index: int, psd_params, galfor_params):
         """Build the per-walker sensitivity matrix for the given parameters.
@@ -212,15 +269,16 @@ class PSDMove(GlobalFitMove, StretchMove):
         )
 
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
-        """Compute the PSD/galfor branch log-likelihood via the ACA.
+        """Compute the PSD/galfor branch log-likelihood.
 
-        For each walker we install the proposed PSD (and optional galactic
-        foreground) into the corresponding :class:`AnalysisContainer`'s
-        :attr:`sens_mat`, then read the per-walker likelihood from the
-        shared :class:`AnalysisContainerArray`. This is the same code path
-        that every other branch uses, which keeps the PSD move
-        domain-agnostic (FD / STFT / WDM) instead of routing through a
-        sensitivity-backend kernel that only spoke FD.
+        Hybrid routing (stft_tof merge): when the C++ XYZ kernel fast path is
+        available (FD/STFT basis, single shard), score the proposals directly
+        through ``XYZSensitivityBackend.compute_log_like``. Otherwise fall
+        back to the dev-side, domain-agnostic route: install the proposed PSD
+        (and optional galactic foreground) into each walker's
+        :class:`AnalysisContainer` ``sens_mat`` and read the per-walker
+        likelihood from the shared :class:`AnalysisContainerArray` (works for
+        FD / STFT / WDM alike).
 
         Args:
             coords: Branch-keyed dict of coordinates from the current state.
@@ -246,6 +304,20 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
+
+        if self._kernel_fast_path_available():
+            # stft_tof fast path: C++ shared-memory kernel.
+            psd_coords = coords["psd"][logp_keep][:, 0]
+            if "galfor" in coords:
+                input_args = [psd_coords, coords["galfor"][logp_keep][:, 0]]
+            else:
+                input_args = [psd_coords]
+
+            supps_keep = supps[logp_keep]
+            logl[logp_keep] = self.psd_log_like(input_args, supps=supps_keep, **self.psd_kwargs)
+
+            self.prev_logl = logl.copy()
+            return logl, None
 
         # ``walker_inds`` is broadcast (ntemps, nwalkers) — flatten and mask
         # to the rows that survived the prior cut. ``BranchSupplemental``'s
@@ -284,32 +356,6 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.prev_logl = logl.copy()
 
         return logl, None
-
-    # def compute_log_prior(self, coords, inds=None, supps=None, branch_supps=None):
-
-    #     ntemps, nwalkers, _, _ = coords[list(coords.keys())[0]].shape
-
-    #     logp = np.zeros((ntemps, nwalkers))
-    #     for key in ["galfor", "psd"]:
-    #         ntemps, nwalkers, nleaves_max, ndim = coords[key].shape
-    #         if nleaves_max > 1:
-    #             raise NotImplementedError
-
-    #         logp_contrib = self.priors[key].logpdf(coords[key].reshape(-1, ndim)).reshape(ntemps, nwalkers, nleaves_max).sum(axis=-1)
-    #         logp[:] += logp_contrib
-
-    #     # now that everything is lined up
-    #     breakpoint()
-    #     nleaves_max_gb = inds["gb"].shape[-1]
-    #     gb_inds_tiled = cp.tile(cp.asarray(inds["gb"][0][None, :]), (ntemps, 1, 1))
-    #     gb_coords = cp.tile(cp.asarray(coords["gb"][0]), (ntemps, 1, 1, 1))[gb_inds_tiled]
-    #     walker_inds = cp.repeat(cp.arange(ntemps * nwalkers)[:, None], nleaves_max_gb, axis=-1).reshape(ntemps, nwalkers, nleaves_max_gb)[gb_inds_tiled]
-    #     logp_per_bin = cp.zeros((ntemps, nwalkers, nleaves_max_gb))
-    #     logp_per_bin[gb_inds_tiled] = self.gpu_priors["gb"].logpdf(gb_coords, psds=self.acs.lisasens_list[0][0],walker_inds=walker_inds)
-    #     logp[:] += logp_per_bin.sum(axis=-1).get()
-
-    #     cp.get_default_memory_pool().free_all_blocks()
-    #     return logp
 
     def compute_log_prior(self, branches_coords, *args, **kwargs):
         """Sum the per-branch log priors over PSD and (optional) galfor coordinates.
@@ -413,9 +459,6 @@ class PSDMove(GlobalFitMove, StretchMove):
                 if changed_once:
                     num_so_far += 1
 
-            # print(max_logl, num_so_far, num_checks)
-            # breakpoint()
-
         return state, accepted
 
     def propose(self, model, state):
@@ -430,7 +473,6 @@ class PSDMove(GlobalFitMove, StretchMove):
             Tuple ``(new_state, accepted)``.
         """
         # setup model framework for passing necessary
-        # self.priors["all_models_together"].full_state = state
         tmp_branches_coords = {
             key: state.branches_coords[key]
             for key in ["psd", "galfor"]
@@ -440,22 +482,14 @@ class PSDMove(GlobalFitMove, StretchMove):
         tmp_state = GFState(tmp_branches_coords, copy=True, supplemental=state.supplemental)
 
         # ensuring it is up to date. Should not change anything.
-        # eryn_state_in = eryn_State(state.branches_coords, inds=state.branches_inds, supplemental=state.supplemental, branch_supplemental=state.branches_supplemental, betas=state.betas, log_like=state.log_like, log_prior=state.log_prior, copy=True)
         before_vals = model.analysis_container_arr.likelihood().copy()
 
-        # TODO: check this
-        # if self.starting_now:
         tmp_state.log_prior = self.compute_log_prior(tmp_branches_coords)
         tmp_state.log_like = self.compute_log_like(
             tmp_branches_coords, logp=tmp_state.log_prior, supps=tmp_state.supplemental
         )[0]
         self.starting_now = False
-        # if np.any(np.abs(before_vals - tmp_state.log_like[0]) > 1e-4) :
-        #     breakpoint()
 
-        # breakpoint()
-        # logp = model.compute_log_prior_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplemental)
-        # logl_test = self.compute_log_like(state.branches_coords, inds=state.branches_inds, supps=state.supplemental, logp=logp)
         tmp_coords_check = state.branches["psd"].coords[0, :, 0].copy()
         tmp_model = Model(
             state,
@@ -466,12 +500,6 @@ class PSDMove(GlobalFitMove, StretchMove):
             model.random,
         )
 
-        # state.acs.set_psd_vals(
-        #     state.branches["psd"].coords[0, :, 0],
-        #     overall_inds=np.arange(state.branches["psd"].shape[1]),
-        #     foreground_params=state.branches["galfor"].coords[0, :, 0]
-        # )
-        # avs_vals = state.acs.get_ll(include_psd_info=True).copy()
         if self.max_logl_mode:
             tmp_state, accepted = self.run_move_max_likelihood(tmp_model, tmp_state)
 
@@ -499,7 +527,7 @@ class PSDMove(GlobalFitMove, StretchMove):
                 galfor_params = None
 
             new_sens = self.sensitivity_backend(
-                f"walker_{w}", psd_params, galfor_params=galfor_params, transform_fn=self.psd_transform_fn, 
+                f"walker_{w}", psd_params, galfor_params=galfor_params, transform_fn=self.psd_transform_fn,
             )
             self.acs[w].sens_mat = new_sens
 

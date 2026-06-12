@@ -12,8 +12,9 @@ import os
 import warnings
 from abc import ABC
 from copy import deepcopy
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
+from logging import getLogger
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import interpolate
@@ -35,10 +36,8 @@ except (ModuleNotFoundError, ImportError):
 
 from cudakima import AkimaInterpolant1D
 
-NUM_SPLINE_THREADS = 256
-
 from . import detector as lisa_models
-from .detector import L1Orbits
+from .detector import L1Orbits, Orbits
 from .domains import DomainSettingsBase
 from .stochastic import (
     FittedHyperbolicTangentGalacticForeground,
@@ -49,7 +48,13 @@ from .stochastic import (
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
-from eryn.utils import TransformContainer
+
+if TYPE_CHECKING:
+    from .utils.typing import NDArrayLike, ArrayModule
+
+logger = getLogger(__name__)
+
+NUM_SPLINE_THREADS = 256
 
 class Sensitivity(ABC):
     """Base Class for PSD information.
@@ -1085,12 +1090,12 @@ class SensitivityMatrixBase:
         self._inv_det_dirty = False
 
     @property
-    def basis_settings(self) -> np.ndarray:
+    def basis_settings(self) -> domains.DomainSettingsBase:
         """Domain settings (frequency / time / TF) the matrix is evaluated on."""
         return self._basis_settings
 
     @basis_settings.setter
-    def basis_settings(self, basis_settings: np.ndarray) -> None:
+    def basis_settings(self, basis_settings: domains.DomainSettingsBase) -> None:
         """Set the domain settings (must be a :class:`~lisatools.domains.DomainSettingsBase`)."""
         assert isinstance(basis_settings, domains.DomainSettingsBase)
         self._basis_settings = basis_settings
@@ -2048,11 +2053,12 @@ def check_sensitivity(sensitivity: Any) -> Sensitivity:
     return sensitivity
 
 
-# TODO/DOCS: this stub appears to be a forward declaration mirroring the
-# ``DataResidualArray`` pattern in datacontainer.py; verify whether it's
-# still needed.
-class XYZSensitivityBackend:
-    pass
+# Number of epochs the FD transfer-function average is decimated to, spanning the
+# full orbit. The constellation breathing is smooth on day-to-month scales (dominant
+# period ~1 yr), so ~daily resolution (1024 pts over a ~2 yr orbit) reproduces the
+# average over the full native LTT grid (~25M pts) to well below 0.1% -- while the
+# full grid is infeasible to evaluate the transfer functions on.
+_N_AVERAGE_EPOCHS = 1024
 
 
 class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
@@ -2060,8 +2066,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     Wraps :class:`LISAToolsParallelModule` (for backend dispatch) and
     :class:`SensitivityMatrixBase` (for the matrix interface). The matrix is
-    computed at the basis frequencies via the pybind11 ``SensitivityMatrixWrap``
-    using averaged light-travel-times derived from the supplied orbits.
+    computed at the basis frequencies via the native ``SensitivityMatrixWrap``
+    using averaged light-travel-times derived from the supplied orbits, with
+    optional spline interpolation and galactic-foreground contributions.
+    Currently supports TDI generations 1 and 2, but only XYZ channels.
 
     Args:
         orbits: Configured :class:`~lisatools.detector.L1Orbits` instance providing
@@ -2077,22 +2085,32 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             :class:`LISAToolsParallelModule`.
         mask_percentage: Fractional bandwidth around transfer-function dips that
             is masked out (defaults to ``0.05``).
-        window_values: Optional window applied to the data; used for
-            normalising the resulting PSD.
+        galactic_grid_kwargs: Optional dictionary of keyword arguments to set up
+            the galactic grid for foreground contributions. If ``None`` or empty,
+            the galactic grid is not included in the sensitivity matrix;
+            otherwise the dictionary is passed to :meth:`_setup_galactic_grid`.
+        window_values: Optional window applied to the time-domain data; used for
+            normalising the resulting PSD (accounts for windowing-induced loss
+            of power).
+        average_transfer_functions: Whether to average the TDI transfer functions
+            over the orbit (``True``) or use the values at a single average epoch
+            (``False``), in the case of a frequency-domain basis. Default is
+            ``False``.
     """
 
     def __init__(
         self,
-        orbits: L1Orbits,
+        orbits: Orbits | L1Orbits,
         settings: DomainSettingsBase,
         tdi_generation: int = 2,
         use_splines: bool = False,
         spline_order: Optional[str] = "cubic",
         force_backend: Optional[str] = "cpu",
         mask_percentage: Optional[float] = None,
-        window_values: Optional[np.ndarray | cp.ndarray] = None
+        galactic_grid_kwargs: Optional[dict] = None,
+        window_values: Optional[NDArrayLike] = None,
+        average_transfer_functions: bool = False,
     ):
-
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         SensitivityMatrixBase.__init__(self, settings)
 
@@ -2116,20 +2134,32 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.mask_percentage = mask_percentage if mask_percentage is not None else 0.05
 
         self.window_values = window_values
+
+        self.average_transfer_functions = average_transfer_functions
+        self._averaging_active = False   # set True by get_averaged_ltts() in FD averaged mode
+
         self._setup()
+        
+        self.galactic_grid_kwargs = galactic_grid_kwargs # for propagation to copies
+        include_galaxy = (isinstance(galactic_grid_kwargs, dict) and len(galactic_grid_kwargs) > 0)
+        
+        if include_galaxy:
+            self._sanitize_galactic_grid_kwargs(galactic_grid_kwargs)
+            self._setup_galactic_grid(**galactic_grid_kwargs)
 
     @property
     def kwargs(self):
-        """Keyword arguments for class initialization."""
         return {
             "orbits": self.orbits,
             "settings": self.basis_settings,
             "tdi_generation": self.tdi_generation,
             "use_splines": self.use_splines,
             "spline_order": self.spline_order,
-            "force_backend": "cpu" if self.backend.xp == np else "gpu",
+            "force_backend": self.backend.backend_name.split("_")[-1],
             "mask_percentage": self.mask_percentage,
-            "window_values": self.window_values
+            "galactic_grid_kwargs": self.galactic_grid_kwargs,  # propagate to copies
+            "window_values": self.window_values,
+            "average_transfer_functions": self.average_transfer_functions,
         }
 
     @property
@@ -2138,54 +2168,58 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         return self.backend.xp
 
     @property
+    def smoothing_sigma(self):
+        """Sigma for smoothing the sensitivity matrix around the zero dips."""
+        return 5
+
+    @property
     def time_indices(self):
         """Integer indices into the time axis used by the C++ backend."""
         return self._time_indices
+    
 
     @time_indices.setter
     def time_indices(self, x):
         """Set the time-index array used by the C++ backend."""
         self._time_indices = x
 
-    def __deepcopy__(self, memo):
-        """Custom deepcopy to handle unpicklable backend objects."""
-        from copy import copy
+    def get_averaged_ltts(self) -> tuple[np.ndarray, np.ndarray]:
+        """Compute averaged and differential light-travel times across LISA links.
 
-        # Create a new instance without calling __init__
-        cls = self.__class__
-        new_obj = cls.__new__(cls)
+        Reads orbital light-travel times at the segment centre times (STFT/WDM) or
+        at the appropriate FD epoch(s), then forms per-arm averages and differences
+        needed by the C++ sensitivity kernel.
 
-        # Copy the memo to avoid infinite recursion
-        memo[id(self)] = new_obj
+        Link ordering follows ``orbits.LINKS``: [12, 23, 31, 13, 32, 21].
+        Averages are taken between opposite-direction pairs (12↔21, 23↔32, 31↔13).
 
-        # Manually copy attributes
-        for key, value in self.__dict__.items():
-            if key in ("_backend", "pycpp_sensitivity_matrix"):
-                # Don't deepcopy backend objects - just reference
-                setattr(new_obj, key, value)
-            elif key == "orbits":
-                # Shallow copy orbits (share the same backend)
-                setattr(new_obj, key, copy(value))
-            elif key == "spline_interpolant":
-                # Shallow copy spline interpolant
-                setattr(new_obj, key, copy(value))
-            else:
-                # Deepcopy everything else
-                setattr(new_obj, key, deepcopy(value, memo))
+        Returns:
+            avg_ltts: Mean light-travel times per arm. Shape ``(n_epochs, 6)``.
+            delta_ltts: Signed difference (forward − backward) per arm. Shape ``(n_epochs, 6)``.
 
-        return new_obj
+        Note:
+            ``n_epochs`` (the first axis of the returned arrays — it becomes the C++
+            wrap's ``n_times`` in :meth:`_setup`) is **not** always equal to
+            ``len(self.time_indices)``:
 
-    def get_averaged_ltts(self):
-        """Return ``(avg_ltts, delta_ltts)`` averaged over conjugate link pairs.
-
-        Pairs (12, 21), (23, 32), (31, 13) are averaged to give the symmetric
-        light-travel times and their (small) differences used by the
-        sensitivity-matrix kernel.
+            * STFT/WDM and FD non-averaging: ``n_epochs == len(self.time_indices)``
+              (one per segment, or 1 for FD).
+            * **FD averaging mode** (``average_transfer_functions=True``): the returned
+              arrays hold ``N ≈ _N_AVERAGE_EPOCHS`` decimated orbit epochs while
+              ``self.time_indices == [0]``. This mismatch is deliberate. Those N epochs
+              exist **only** to feed the one-time transfer-function average in
+              :meth:`_build_and_attach_averaged_tfs` (which evaluates the 12 TFs at all
+              N epochs via ``get_noise_tfs_wrap`` and means them). The likelihood and
+              :meth:`compute_sensitivity_matrix` instead read the precomputed averaged
+              TFs — ``get_noise_covariance`` indexes ``*_avg[f_idx]`` and ignores
+              ``time_index`` — so they iterate a SINGLE effective time. Once the average
+              is built, the wrap's N-epoch LTT array is no longer read in averaged mode.
         """
         # first, compute the average ltts and their differences.
         # check if we need multiple time points
         if hasattr(self.basis_settings, "t_arr"):
             t_arr = self.xp.asarray(self.basis_settings.t_arr)
+        
             tiled_times = self.xp.tile(
                 t_arr[:, self.xp.newaxis], (1, 6)
             ).flatten()  # compute ltts at these times with orbits
@@ -2196,9 +2230,31 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
             self.time_indices = self.xp.arange(len(t_arr), dtype=self.xp.int32)
 
+
         else:
-            ltts = self.xp.mean(self.orbits.ltt, axis=0)[self.xp.newaxis, :]
-            self.time_indices = self.xp.array([0], dtype=self.xp.int32)
+            if self.average_transfer_functions:
+                # Average the transfer functions over the FULL orbit span. orbits.ltt_t is
+                # the native LTT time grid (fine cadence, ~25M pts); the breathing is smooth
+                # on day-to-month scales, so we decimate to ~daily resolution -> numerically
+                # identical to the full-grid average but tractable. No user-provided
+                # epoch count needed.
+                t_full = self.xp.asarray(self.orbits.ltt_t)
+                stride = max(1, int(len(t_full) // _N_AVERAGE_EPOCHS))
+                t_arr = t_full[::stride]
+                tiled_times = self.xp.tile(t_arr[:, self.xp.newaxis], (1, 6)).flatten()
+                links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
+                ltts = self.orbits.get_light_travel_times(tiled_times, links).reshape(len(t_arr), 6)
+                # NOTE: ltts holds N decimated epochs -> the wrap is built with n_times=N
+                # (see _setup), but time_indices=[0]. The N epochs feed the one-time TF
+                # average only (_build_and_attach_averaged_tfs); the likelihood reads the
+                # averaged TFs and iterates a single effective time. See the
+                # get_averaged_ltts docstring for the full rationale.
+                self.time_indices = self.xp.array([0], dtype=self.xp.int32)
+                self._averaging_active = True
+            else:
+                # single effective epoch: the orbit-averaged LTTs, i.e. C(E[L])
+                ltts = self.xp.mean(self.orbits.ltt, axis=0)[self.xp.newaxis, :]
+                self.time_indices = self.xp.array([0], dtype=self.xp.int32)
 
         # with orbits.LINKS order: 12, 23, 31, 13, 32, 21, we need averages between pairs
         # pairs: (12,21), (23,32), (31,13)
@@ -2221,7 +2277,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.pycppsensmat_args = [
             self.xp.asarray(avg_ltts.flatten().copy()),
             self.xp.asarray(delta_ltts.flatten().copy()),
-            avg_ltts.shape[0],  # n_times
+            avg_ltts.shape[0],  # n_times (= N decimated epochs in FD averaged mode; != len(time_indices) there)
             self.orbits.armlength,
             self.tdi_generation,
             self.use_splines,
@@ -2237,6 +2293,72 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self._init_basis_settings()
 
+        if self._averaging_active:
+            self._build_and_attach_averaged_tfs()
+
+    def _build_and_attach_averaged_tfs(self):
+        """Precompute epoch-averaged transfer functions and attach them to the
+        c++ object so the in-kernel covariance assembly (and the diagnostic path)
+        use E_t[C(f;L(t))].  Parameter-free -> computed once; arrays kept alive on
+        self and shared across walker copies (like gal_R_avg)."""
+        xp = self.xp
+        nf = self.num_freqs
+        # the epochs to average the transfer functions over (NOT likelihood time
+        # points; the likelihood uses time_indices=[0]). See get_averaged_ltts docstring.
+        N = self.pycppsensmat_args[2]
+        f_arr = xp.asarray(self.f_arr)
+
+        # order MUST match get_noise_tfs_wrap: oms_xx,xy,xz,yy,yz,zz, tm_xx,xy,xz,yy,yz,zz
+        real_flags = (True, False, False, True, False, True,
+                      True, False, False, True, False, True)
+        acc = [xp.zeros(nf, dtype=xp.float64 if r else xp.complex128) for r in real_flags]
+
+        # Accumulate the per-epoch transfer functions in CHUNKS: the materialised
+        # (n_epochs x n_freqs) buffer would be tens of GB at production n_freqs, so we
+        # bound the transient buffer to ~1 GB regardless of n_freqs / n_epochs.
+        chunk = max(1, min(N, int(1e9 // (nf * 16 * 12))))
+        for start in range(0, N, chunk):
+            cs = int(min(chunk, N - start))
+            bufs = [xp.empty(cs * nf, dtype=xp.float64 if r else xp.complex128) for r in real_flags]
+            self.pycpp_sensitivity_matrix.get_noise_tfs_wrap(
+                f_arr, *bufs, nf, cs, xp.arange(start, start + cs, dtype=xp.int32))
+            for k in range(12):
+                acc[k] += bufs[k].reshape(cs, nf).sum(axis=0)
+
+        # epoch mean -> 12 contiguous (nf,) arrays, KEPT ALIVE on self (non-owned in c++)
+        self._avg_tf_arrays = [xp.ascontiguousarray(a / N) for a in acc]
+        self.pycpp_sensitivity_matrix.set_averaged_tfs_wrap(*self._avg_tf_arrays, nf)
+
+    def __deepcopy__(self, memo):
+        """Custom deepcopy to handle unpicklable backend objects."""
+        from copy import copy
+
+        # Create a new instance without calling __init__
+        cls = self.__class__
+        new_obj = cls.__new__(cls)
+
+        # Copy the memo to avoid infinite recursion
+        memo[id(self)] = new_obj
+
+        # Manually copy attributes
+        for key, value in self.__dict__.items():
+            if key in ("_backend", "pycpp_sensitivity_matrix", "_galactic_grid", "_avg_tf_arrays"):
+                # Don't deepcopy backend objects - just reference.
+                # _avg_tf_arrays is referenced by raw pointers inside the (shared)
+                # pycpp_sensitivity_matrix, so copies MUST share these arrays.
+                setattr(new_obj, key, value)
+            elif key == "orbits":
+                # Shallow copy orbits (share the same backend)
+                setattr(new_obj, key, copy(value))
+            elif key == "spline_interpolant":
+                # Shallow copy spline interpolant
+                setattr(new_obj, key, copy(value))
+            else:
+                # Deepcopy everything else
+                setattr(new_obj, key, deepcopy(value, memo))
+        
+        return new_obj
+
     def _setup_window(self):
         """Setup window values for the c++ backend."""
         if self.window_values is not None:
@@ -2251,7 +2373,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             )
         else:
             self.window_normalization = 1.0
-
+                
     def _init_basis_settings(self):
         """Initialize basis settings from domain settings."""
         self.f_arr = self.xp.asarray(self.basis_settings.f_arr)
@@ -2307,6 +2429,187 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         return dips_indices
 
+    def _sanitize_galactic_grid_kwargs(self, kwargs: dict) -> None:
+        """
+        Check that the galactic grid kwargs are valid and contain the necessary parameters.
+        
+        Args:
+            kwargs: Dictionary of galactic grid parameters to check. Expected keys include:
+                - R_d: Disk radial scale length [kpc]
+                - z_d: Disk vertical scale height [kpc]
+                - t0: Reference time at which to compute the initial LISA orbital phase and rotation angle.
+                - N_lambda: Number of ecliptic longitude points for quadrature (optional, default 90)
+                - N_beta: Number of ecliptic latitude points for quadrature (optional, default 60)
+                - galactic_grid: Optional pre-computed galactic grid object (e.g., from another instance) to reuse
+        """
+        required_keys = ["R_d", "z_d", "t0"]
+        for key in required_keys:
+            if key not in kwargs:
+                raise ValueError(f"Missing required galactic_grid_kwargs parameter: {key}")
+            if not isinstance(kwargs[key], (int, float)):
+                raise ValueError(f"Galactic grid parameter {key} must be a number (int or float).")
+
+        optional_keys = ["N_lambda", "N_beta", "galactic_grid"]
+        for key in optional_keys:
+            if key in kwargs and key == "galactic_grid":
+                # galactic_grid can be any object, so we won't check its type here
+                continue
+            elif key in kwargs:
+                if not isinstance(kwargs[key], int):
+                    raise ValueError(f"Galactic grid parameter {key} must be an integer.")
+
+    def _setup_galactic_grid(
+            self,
+            R_d: float,
+            z_d: float,
+            t0: float,
+            N_lambda: Optional[int] = 90,
+            N_beta: Optional[int] = 60,
+            galactic_grid: Optional[Any] = None
+        ) -> None:
+        """
+        Compute the fixed galactic sky geometry if not provided, and attach it to the sensitivity backend.
+
+        Called once during setup.  After this call, sensitivity_backend.pycpp_sensitivity_matrix
+        has gal_R_avg wired in and will include the galactic foreground in every likelihood
+        evaluation automatically, scaled by the per-walker spectral parameters passed via
+        Amp_all, alpha_all, f_1_all, f_knee_all, f_2_all.
+
+        Args:
+            R_d: Disk radial scale length [kpc]
+            z_d: Disk vertical scale height [kpc]
+            t0: Reference time at which to compute the initial LISA orbital phase and rotation angle.
+            N_lambda: Number of ecliptic longitude points for quadrature (default 90)
+            N_beta: Number of ecliptic latitude points for quadrature (default 60)
+            galactic_grid: Optional pre-computed galactic grid object (e.g., from another instance) to reuse
+        """
+        if galactic_grid is not None:
+            self._galactic_grid = galactic_grid
+
+            # logger.info("Using provided galactic grid object, skipping re-initialization.")
+            
+        else:
+            alpha0, beta0 = self.orbits.get_constellation_angles(t0)
+
+            # logger.debug(
+            #     f"Initializing galactic grid: R_d={R_d} kpc, z_d={z_d} kpc, "
+            #     f"alpha0={alpha0:.4f} rad, beta0={beta0:.4f} rad"
+            # )
+
+            # Build host-side quadrature geometry
+            setup = self.backend.GalacticGridSetup()
+            setup.compute(
+                N_lambda=N_lambda,
+                N_beta=N_beta,
+            )
+            
+            # logger.debug(f"Galactic sky grid: N_sky={setup.N_sky}, N_quad={setup.N_quad}")
+
+            if hasattr(self.basis_settings, "t_arr"):
+                _t_arr = self.basis_settings.t_arr.copy()
+            else:
+                _t_arr = np.array([t0])
+            #     logger.warning(
+            #     f"FD domain detected — using t=t0={t0} for galactic sky average. "
+            #     "This is correct only for stationary (non-cyclostationary) analyses."
+            # )
+
+            self._initialize_galactic_grid(
+                times=self.xp.asarray(_t_arr),
+                R_d=float(R_d),
+                z_d=float(z_d),
+                R_vals_quad=self.xp.asarray(setup.R_vals_quad),
+                z_vals_quad=self.xp.asarray(setup.z_vals_quad),
+                quad_weights=self.xp.asarray(setup.quad_weights),
+                cos_beta_ecl=self.xp.asarray(setup.cos_beta_ecl),
+                lam_ecl=self.xp.asarray(setup.lam_ecl),
+                beta_ecl=self.xp.asarray(setup.beta_ecl),
+                N_quad=setup.N_quad,
+                N_sky=setup.N_sky,
+                alpha0=float(alpha0),
+                beta0=float(beta0),
+                t0=float(t0)
+            )
+
+            # logger.info("Galactic grid initialized.")
+
+        self.pycpp_sensitivity_matrix.set_galactic_grid(self._galactic_grid)
+        # logger.info("Galactic grid attached to sensitivity backend.")
+
+    def _initialize_galactic_grid(
+        self,
+        times: np.ndarray,
+        R_d: float,
+        z_d: float,
+        R_vals_quad: np.ndarray,
+        z_vals_quad: np.ndarray,
+        quad_weights: np.ndarray,
+        cos_beta_ecl: np.ndarray,
+        lam_ecl: np.ndarray,
+        beta_ecl: np.ndarray,
+        N_quad: int,
+        N_sky: int,
+        alpha0: float,
+        beta0: float,
+        t0: float
+    ) -> None:
+        """
+        Build the GalacticGridWrap, compute fixed sky weights and R_avg, and
+        attach to the C++ sensitivity matrix.  Call once before inference.
+
+        The grid is stored on self and propagated to any copies made via __call__.
+
+        Args:
+            times:        Segment centre times (N_times,)
+            R_d:          Disk radial scale length [kpc]
+            z_d:          Disk vertical scale height [kpc]
+            R_vals_quad:  (N_quad * N_sky,) galactocentric radii
+            z_vals_quad:  (N_quad * N_sky,) heights above disk
+            quad_weights: (N_quad,) Gauss-Legendre weights
+            cos_beta_ecl: (N_sky,) cos(beta) for solid-angle weighting
+            lam_ecl:      (N_sky,) ecliptic longitudes
+            beta_ecl:     (N_sky,) ecliptic latitudes
+            N_quad:       Number of quadrature nodes (16)
+            N_sky:        Number of sky pixels
+            alpha0:       LISA orbit initial phase (rad)
+            beta0:        LISA orbit inclination (rad)
+            t0:           Reference time for constellation angles (s)
+        """
+        GalWrap = self.backend.GalacticGridWrap
+
+        self._galactic_grid = GalWrap(
+            self.xp.asarray(R_vals_quad),
+            self.xp.asarray(z_vals_quad),
+            self.xp.asarray(quad_weights),
+            self.xp.asarray(cos_beta_ecl),
+            self.xp.asarray(lam_ecl),
+            self.xp.asarray(beta_ecl),
+            N_quad,
+            N_sky,
+            alpha0,
+            beta0,
+            t0,
+            self.num_times,
+            self.num_freqs,
+        )
+
+        self._galactic_grid.initialize_wrap(
+            self.xp.asarray(times),
+            R_d,
+            z_d,
+            len(times),
+        )
+
+    def disable_galactic_grid(self) -> None:
+        """Detach the galactic foreground from all subsequent likelihood evaluations.
+
+        Clears ``self._galactic_grid`` and instructs the C++ backend to stop adding
+        the galactic foreground term to the covariance matrix.  To re-enable, call
+        :meth:`_setup_galactic_grid` again with the appropriate parameters.
+        """
+        self._galactic_grid = None
+        self.pycpp_sensitivity_matrix.disable_galactic_grid()
+
     def _compute_matrix_elements(
         self,
         freqs,
@@ -2314,11 +2617,11 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         Sa_a_in=3e-15,
         Amp=0,
         alpha=0,
-        sl1=0,
+        f_1=0,
         kn=0,
-        sl2=0,
-        knots_position_all: np.ndarray | cp.ndarray = None,
-        knots_amplitude_all: np.ndarray | cp.ndarray = None,
+        f_2=0,
+        knots_position_all: NDArrayLike = None,
+        knots_amplitude_all: NDArrayLike = None,
     ):
         """Compute the 6 sensitivity matrix terms using the c++ backend."""
 
@@ -2350,9 +2653,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             float(Sa_a_in),
             float(Amp),
             float(alpha),
-            float(sl1),
+            float(f_1),
             float(kn),
-            float(sl2),
+            float(f_2),
             splines_in_isi_oms,
             spline_in_testmass,
             c00,
@@ -2418,46 +2721,107 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def compute_sensitivity_matrix(
         self,
-        freqs,
-        Soms_d_in=15e-12,
-        Sa_a_in=3e-15,
-        Amp=0,
-        alpha=0,
-        sl1=0,
-        kn=0,
-        sl2=0,
-        knots_position_all: np.ndarray | cp.ndarray = None,
-        knots_amplitude_all: np.ndarray | cp.ndarray = None,
-    ):
-        """Compute the full 3x3 sensitivity matrix using the c++ backend."""
+        freqs: NDArrayLike,
+        Soms_d_in: float = 15e-12,
+        Sa_a_in: float = 3e-15,
+        Amp: float = 0.0,
+        alpha: float = 0.0,
+        f_1: float = 0.0,
+        kn: float = 0.0,
+        f_2: float = 0.0,
+        knots_position_all: NDArrayLike = None,
+        knots_amplitude_all: NDArrayLike = None,
+        smooth: bool = False,
+    ) -> NDArrayLike:
+        """Compute the full 3×3 XYZ covariance matrix at arbitrary frequencies.
+
+        Calls the C++ kernel to evaluate all six independent matrix elements
+        (XX, YY, ZZ and the complex cross-terms XY, XZ, YZ) at ``freqs``, then
+        assembles the full Hermitian matrix.  If the galactic grid has been
+        initialised, the foreground contribution is added automatically via the
+        stored ``gal_R_avg``.
+
+        Unlike :meth:`set_sensitivity_matrix`, this method does **not** update the
+        internal ``sens_mat`` attribute; it is for one-off evaluations (e.g.,
+        diagnostics, plotting).
+
+        Args:
+            freqs: Frequency array at which to evaluate the matrix [Hz].
+                   Shape ``(n_freqs,)`` or ``(n_times, n_freqs)`` depending on the domain.
+            Soms_d_in: Displacement (OMS) noise amplitude ``S_oms`` [m/√Hz]. Default 15 pm/√Hz.
+            Sa_a_in: Test-mass acceleration noise amplitude ``S_acc`` [m s⁻²/√Hz]. Default 3 fm s⁻²/√Hz.
+            Amp: Galactic foreground spectral amplitude ``A`` [Hz⁻¹]. Pass 0 to omit.
+            alpha: Galactic foreground spectral index ``α`` (dimensionless).
+            f_1: Galactic foreground low-frequency roll-off scale ``f₁`` [Hz].
+            kn: Galactic foreground knee frequency ``f_knee`` [Hz].
+            f_2: Galactic foreground high-frequency roll-off scale ``f₂`` [Hz].
+            knots_position_all: Log10-frequency positions of spline knots for
+                noise residuals. Shape ``(2, n_knots)``. ``None`` if not using splines.
+            knots_amplitude_all: Spline knot amplitudes for noise residuals.
+                Shape ``(2, n_knots)``. ``None`` if not using splines.
+            smooth: If ``True``, apply Gaussian smoothing around the TDI notches
+                (zeros of the transfer function) before returning. Default ``False``.
+
+        Returns:
+            Hermitian covariance matrix ``Σ(f)``. Shape ``(3, 3, n_times, n_freqs)``
+            (or ``(3, 3, n_freqs)`` for FD analyses with a single time point),
+            dtype ``complex128``.
+        """
         c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
             freqs,
             Soms_d_in,
             Sa_a_in,
             Amp,
             alpha,
-            sl1,
+            f_1,
             kn,
-            sl2,
+            f_2,
             knots_position_all,
             knots_amplitude_all,
         )
         matrix = self._fill_matrix(c00, c11, c22, c01, c02, c12)
+        
+        if smooth:
+            matrix = self.smooth_sensitivity_matrix(matrix, sigma=self.smoothing_sigma)
+
         return matrix
 
     def set_sensitivity_matrix(
         self,
         Soms_d_in: float = 15e-12,
         Sa_a_in: float = 3e-15,
-        knots_position_all: np.ndarray | cp.ndarray = None,
-        knots_amplitude_all: np.ndarray | cp.ndarray = None,
+        knots_position_all: NDArrayLike = None,
+        knots_amplitude_all: NDArrayLike = None,
         Amp: float = 0.0,
         alpha: float = 0.0,
-        sl1: float = 0.0,
+        f_1: float = 0.0,
         kn: float = 0.0,
-        sl2: float = 0.0,
-    ):
-        """Internally store the sensitivity matrix computed at the basis frequencies."""
+        f_2: float = 0.0,
+    ) -> None:
+        """Evaluate and store the covariance matrix at the domain's basis frequencies.
+
+        Computes the 3×3 XYZ covariance matrix at ``self.f_arr`` via the C++ kernel,
+        applies Gaussian smoothing around the TDI transfer-function notches, and
+        stores the result in ``self.sens_mat``.  The inverse and log-determinant
+        (``self.invC``, ``self.detC``) are recomputed immediately via
+        :meth:`_setup_det_and_inv`.
+
+        This is the method called by :meth:`__call__` to update a per-walker copy of
+        the backend with new PSD/foreground parameters at each MCMC step.
+
+        Args:
+            Soms_d_in: Displacement (OMS) noise amplitude ``S_oms`` [m/√Hz]. Default 15 pm/√Hz.
+            Sa_a_in: Test-mass acceleration noise amplitude ``S_acc`` [m s⁻²/√Hz]. Default 3 fm s⁻²/√Hz.
+            knots_position_all: Log10-frequency positions of spline knots for noise
+                residuals. Shape ``(2, n_knots)``. ``None`` if not using splines.
+            knots_amplitude_all: Spline knot amplitudes for noise residuals.
+                Shape ``(2, n_knots)``. ``None`` if not using splines.
+            Amp: Galactic foreground spectral amplitude ``A`` [Hz⁻¹]. Pass 0 to omit.
+            alpha: Galactic foreground spectral index ``α`` (dimensionless).
+            f_1: Galactic foreground low-frequency roll-off scale ``f₁`` [Hz].
+            kn: Galactic foreground knee frequency ``f_knee`` [Hz].
+            f_2: Galactic foreground high-frequency roll-off scale ``f₂`` [Hz].
+        """
 
         c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
             self.f_arr,
@@ -2465,16 +2829,16 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             Sa_a_in,
             Amp,
             alpha,
-            sl1,
+            f_1,
             kn,
-            sl2,
+            f_2,
             knots_position_all,
             knots_amplitude_all,
         )
 
         sens_mat = self._fill_matrix(c00, c11, c22, c01, c02, c12)
 
-        self.sens_mat = self.smooth_sensitivity_matrix(sens_mat, sigma=5)
+        self.sens_mat = self.smooth_sensitivity_matrix(sens_mat, sigma=self.smoothing_sigma)
 
     def _setup_det_and_inv(self):
         """use the c++ backend to compute the log-determinant and inverse of the sensitivity matrix."""
@@ -2483,12 +2847,12 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def _inverse_det_wrapper(
         self,
-        c00: np.ndarray | cp.ndarray,
-        c11: np.ndarray | cp.ndarray,
-        c22: np.ndarray | cp.ndarray,
-        c01: np.ndarray | cp.ndarray,
-        c02: np.ndarray | cp.ndarray,
-        c12: np.ndarray | cp.ndarray,
+        c00: NDArrayLike,
+        c11: NDArrayLike,
+        c22: NDArrayLike,
+        c01: NDArrayLike,
+        c02: NDArrayLike,
+        c12: NDArrayLike,
     ) -> tuple:
         """Wrapper to call c++ backend for inverse log-determinant computation."""
 
@@ -2514,7 +2878,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         return inverse_matrix, det.reshape(self.basis_settings.basis_shape_active)
 
-    def compute_inverse_det(self, matrix_in: np.ndarray | cp.ndarray) -> tuple:
+    def compute_inverse_det(self, matrix_in: NDArrayLike) -> tuple:
         """
         Invert the 3x3 sensitivity matrix and compute its log-determinant with the c++ backend.
 
@@ -2529,8 +2893,26 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
         return inverse_matrix, det
 
-    def compute_transfer_functions(self, freqs: np.ndarray | cp.ndarray) -> tuple:
-        """Compute transfer functions using the c++ backend."""
+    def compute_transfer_functions(self, freqs: NDArrayLike) -> tuple[NDArrayLike]:
+        """Compute the OMS and test-mass noise transfer functions at arbitrary frequencies.
+
+        Evaluates the 12 independent transfer-function elements (6 OMS + 6 TM,
+        covering XX, XY, XZ, YY, YZ, ZZ for each) at ``freqs`` using the C++
+        kernel.  These are the pure geometric transfer functions without any noise
+        amplitude applied; multiply by ``Soms_d`` / ``Sa_a`` to get the noise PSD
+        contribution.  The results are also used internally to locate the TDI notches
+        (zeros) that should be masked during smoothing.
+
+        Args:
+            freqs: Frequency array [Hz]. Shape ``(n_freqs,)``.
+
+        Returns:
+            12-tuple of arrays, each of shape ``(n_times, n_freqs)``:
+            ``(oms_xx, oms_xy, oms_xz, oms_yy, oms_yz, oms_zz,
+               tm_xx,  tm_xy,  tm_xz,  tm_yy,  tm_yz,  tm_zz)``.
+            Diagonal elements (``*_xx``, ``*_yy``, ``*_zz``) are real-valued;
+            off-diagonal elements are complex.
+        """
 
         xp = self.xp
         num_freqs = len(freqs)
@@ -2589,18 +2971,19 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def compute_log_like(
         self,
-        data_in_all: np.ndarray | cp.ndarray,
-        data_index_all: np.ndarray | cp.ndarray,
-        Soms_in_all: np.ndarray | cp.ndarray,
-        Sa_in_all: np.ndarray | cp.ndarray,
-        Amp_in_all: np.ndarray | cp.ndarray,
-        alpha_in_all: np.ndarray | cp.ndarray,
-        sl1_in_all: np.ndarray | cp.ndarray,
-        kn_in_all: np.ndarray | cp.ndarray,
-        sl2_in_all: np.ndarray | cp.ndarray,
-        knots_position_all: np.ndarray | cp.ndarray = None,
-        knots_amplitude_all: np.ndarray | cp.ndarray = None,
-    ) -> np.ndarray | cp.ndarray:
+        data_in_all: NDArrayLike,
+        data_index_all: NDArrayLike,
+        Soms_in_all: NDArrayLike,
+        Sa_in_all: NDArrayLike,
+        Amp_in_all: NDArrayLike,
+        alpha_in_all: NDArrayLike,
+        f_1_in_all: NDArrayLike,
+        kn_in_all: NDArrayLike,
+        f_2_in_all: NDArrayLike,
+        knots_position_all: NDArrayLike = None,
+        knots_amplitude_all: NDArrayLike = None,
+        run_async: bool = False,
+    ) -> NDArrayLike:
         """
         Compute log-likelihood using the c++ backend.
 
@@ -2611,17 +2994,30 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             Sa_in_all: Acceleration noise levels for each walker. Shape (num_psds)
             Amp_in_all: Galactic foreground amplitude for each walker. Shape (num_psds)
             alpha_in_all: Galactic foreground alpha for each walker. Shape (num_psds)
-            sl1_in_all: First galactic foreground slope parameter for each walker. Shape (num_psds)
+            f_1_in_all: First galactic foreground scale-frequency parameter for each walker. Shape (num_psds)
             kn_in_all: Galactic foreground knee frequency parameter for each walker. Shape (num_psds)
-            sl2_in_all: Second galactic foreground slope parameter for each walker. Shape (num_psds)
+            f_2_in_all: Second galactic foreground scale-frequency parameter for each walker. Shape (num_psds)
             knots_position_all: Positions of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
             knots_amplitude_all: Amplitudes of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
+            run_async: Whether to run the CUDA computation asynchronously. Default is False.
 
         Returns:
             log_like_out: Computed log-likelihoods for each PSD. Shape (num_psds,)
         """
 
         xp = self.xp
+
+        # sanitize input
+        Soms_in_all = xp.atleast_1d(Soms_in_all)
+        Sa_in_all = xp.atleast_1d(Sa_in_all)
+
+        Amp_in_all = xp.atleast_1d(Amp_in_all)
+        alpha_in_all = xp.atleast_1d(alpha_in_all)
+        f_1_in_all = xp.atleast_1d(f_1_in_all)
+        kn_in_all = xp.atleast_1d(kn_in_all)
+        f_2_in_all = xp.atleast_1d(f_2_in_all)
+        
+        # same for splines?
 
         num_psds = len(Soms_in_all)
 
@@ -2652,9 +3048,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             xp.asarray(Sa_in_all),
             xp.asarray(Amp_in_all),
             xp.asarray(alpha_in_all),
-            xp.asarray(sl1_in_all),
+            xp.asarray(f_1_in_all),
             xp.asarray(kn_in_all),
-            xp.asarray(sl2_in_all),
+            xp.asarray(f_2_in_all),
             xp.asarray(splines_weights_isi_oms),
             xp.asarray(splines_weights_testmass),
             self.basis_settings.differential_component,
@@ -2662,23 +3058,38 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self.num_times,
             self.dips_mask,
             num_psds,
+            run_async
         )
 
         return log_like_out
 
     def smooth_sensitivity_matrix(
         self,
-        matrix_in: np.ndarray | cp.ndarray,
+        matrix_in: NDArrayLike,
         sigma: float = 5.0,
-    ) -> np.ndarray | cp.ndarray:
-        """
-        Perform log-frequency smoothing of the sensitivity matrix to get rid of the very sharp dips.
+    ) -> NDArrayLike:
+        """Smooth the sensitivity matrix around TDI transfer-function notches.
+
+        The TDI transfer functions have sharp zeros at multiples of ``f = c/(2L)``
+        (~0.1 Hz for LISA).  Near these notches the covariance matrix becomes
+        nearly singular, causing numerical issues in the inversion.  This method
+        replaces the matrix values at the masked notch frequencies with values
+        from a Gaussian-smoothed version of the matrix, leaving all other
+        frequencies untouched.
+
+        Smoothing is applied along the last axis (frequency) with
+        ``scipy.ndimage.gaussian_filter1d`` (CPU) or its CuPy equivalent (GPU).
 
         Args:
             matrix_in: Input sensitivity matrix. Trailing axes match
                 ``basis_shape_active`` — ``(num_freqs,)`` for FD,
-                ``(num_freqs, num_times)`` for WDM.
+                ``(num_freqs, num_times)`` for WDM. The array is not modified
+                in-place.
             sigma: Width of the Gaussian smoothing kernel in frequency bins.
+                Default 5.
+
+        Returns:
+            Smoothed sensitivity matrix, same shape and dtype as ``matrix_in``.
         """
         filter_func = np_gaussian_filter1d if self.xp == np else cp_gaussian_filter1d
 
@@ -2702,44 +3113,101 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         return smoothed_matrix
 
-    def __call__(
-        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None, transform_fn: TransformContainer = None
-    ) -> XYZSensitivityBackend:
-        """
-        Update the internal sensitivity matrix with new noise parameters and return to be used in a AnalysisContainer.
+    def build_spline_arrays(self, spline_params: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Unpack interleaved spline parameters into separate position and amplitude arrays.
+
+        The MCMC state stores spline parameters in an interleaved layout::
+
+            [amp₀, pos₀, amp₁, pos₁, ...,   # OMS knots
+             amp₀, pos₀, amp₁, pos₁, ...]   # TM knots
+
+        This method splits that flat vector into two ``(2, n_walkers, n_knots)``
+        arrays ready for the C++ Akima spline kernel.
 
         Args:
-            psd_params: Array of PSD parameters in order [Soms_d, Sa_a, (optional spline params...)]
-            galfor_params: Array of galactic foreground parameters in order [Amp, alpha, sl1, kn, sl2].
+            spline_params: Interleaved spline parameters for one or more walkers.
+                Shape ``(n_walkers, 2 * n_knots_oms + 2 * n_knots_tm)`` or
+                ``(2 * n_knots_oms + 2 * n_knots_tm,)`` for a single walker.
 
         Returns:
-            self: a configured copy of the sensitivity matrix backend.
+            spline_knots_position: Log10-frequency positions of knots.
+                Shape ``(2, n_walkers, n_knots)`` — axis 0 indexes [OMS, TM].
+            spline_knots_amplitude: Knot amplitudes (multiplicative noise residuals).
+                Shape ``(2, n_walkers, n_knots)`` — axis 0 indexes [OMS, TM].
         """
+        
+        spline_params = self.xp.atleast_2d(spline_params)
 
-        new_sens_mat = XYZSensitivityBackend(**self.kwargs)
+        spline_knots_position = spline_params[:, 1::2]
+        spline_knots_amplitude = spline_params[:, 0:-1:2]
+        half = spline_knots_position.shape[1] // 2
+        spline_knots_amplitude = self.xp.stack((spline_knots_amplitude[:, :half], spline_knots_amplitude[:, half:]))
+        spline_knots_position = self.xp.stack((spline_knots_position[:, :half], spline_knots_position[:, half:]))
 
-        self.name = name
+        #todo should we sort the knots
 
-        if self.use_splines:
-            if transform_fn is None:
-                raise ValueError("A transform container is needed when using splines for fitting the noise.")
-            spline_params = transform_fn.both_transforms(psd_params, copy=True, return_transpose=False) 
-            spline_params = cp.atleast_2d( spline_params )
-            spline_knots_position = spline_params[:,3::2]
-            spline_knots_amplitude = spline_params[:,2:-1:2]
-            half = spline_knots_position.shape[1] // 2
-            spline_knots_amplitude = cp.stack((spline_knots_amplitude[:, :half], spline_knots_amplitude[:, half:]))
-            spline_knots_position = cp.stack((spline_knots_position[:, :half], spline_knots_position[:, half:]))
-            Soms_d = spline_params[:,0].squeeze()
-            Sa_a = spline_params[:,1].squeeze()
+        return spline_knots_position, spline_knots_amplitude
+
+    def __call__(
+        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None
+    ) -> "XYZSensitivityBackend":
+        """Create a configured copy of this backend with updated noise parameters.
+
+        Used by :class:`~lisatools.globalfit.moves.psdmove.PSDMove` to produce a
+        per-walker sensitivity matrix at each MCMC step without re-initialising
+        expensive objects (orbits, galactic grid, spline interpolant).
+
+        The returned object shares the same C++ kernel and galactic grid as the
+        parent but has its ``sens_mat``, ``invC``, and ``detC`` attributes set
+        to the values implied by the supplied parameters.
+
+        Args:
+            name: Identifier label attached to the returned copy (``new_sens_mat.name``).
+            psd_params: Noise parameters for this walker.
+
+                - Without splines: ``[Soms_d, Sa_a]`` — shape ``(2,)``.
+                - With splines: ``[Soms_d, Sa_a, amp₀, pos₀, amp₁, pos₁, ...]``
+                  where the remaining elements are interleaved OMS + TM knot
+                  amplitudes and positions; see :meth:`build_spline_arrays`.
+
+            galfor_params: Galactic foreground parameters ``[Amp, alpha, f_1, kn, f_2]``
+                in physical (not log) units.  If ``None``, the foreground contribution
+                is zeroed out.
+
+        Returns:
+            A new :class:`XYZSensitivityBackend` instance with the sensitivity matrix,
+            its inverse, and log-determinant set to reflect the supplied parameters.
+
+        Notes:
+            The copy is a **shallow** :func:`copy.copy`, not a re-construction.  All
+            walker-independent state — orbits, spline interpolant, the C++ kernel
+            (``pycpp_sensitivity_matrix``), the galactic grid, ``f_arr``, ``dips_mask``,
+            window normalisation, basis settings — is shared by reference with the
+            parent.  Only the per-walker arrays differ, and they are *rebound* (not
+            mutated in place): :meth:`set_sensitivity_matrix` assigns a fresh
+            ``sens_mat`` whose setter recomputes ``invC``/``detC`` into new arrays, so
+            the parent's arrays are never touched.  This avoids re-allocating the C++
+            kernel / interpolant and recomputing the (walker-independent) light-travel
+            times and transfer-function dip mask on every MCMC step.
+        """
+        from copy import copy
+
+        # Shallow copy: shares the kernel, interpolant, orbits, galactic grid and
+        # all immutable basis arrays with the parent. set_sensitivity_matrix below
+        # rebinds sens_mat/invC/detC, so the shared template is never mutated.
+        new_sens_mat = copy(self)
+        new_sens_mat.name = name
+
+        Soms_d = psd_params[0]
+        Sa_a = psd_params[1]
+        if self.use_splines:  # assume transformed input.
+            spline_knots_position, spline_knots_amplitude = self.build_spline_arrays(psd_params[2:])
         else:
             spline_knots_position = None
             spline_knots_amplitude = None
-            Soms_d = psd_params[0]
-            Sa_a = psd_params[1]
 
         if galfor_params is None:
-            galfor_params = np.zeros(5)
+            galfor_params = self.xp.zeros(5)
 
         new_sens_mat.set_sensitivity_matrix(
             Soms_d, Sa_a, spline_knots_position, spline_knots_amplitude, *galfor_params

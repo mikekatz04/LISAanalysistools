@@ -160,4 +160,4 @@ cython_debug/
 #.idea/
 
 # not push _version.py file since this is handled by setuptool_scm
-src/lisatools/_version.py
+/src/lisatools/_version.py

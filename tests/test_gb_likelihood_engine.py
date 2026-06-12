@@ -54,7 +54,7 @@ class FDEngineEquivalenceTest(unittest.TestCase):
     """
 
     def test_engine_matches_direct(self):
-        from lisatools.globalfit.moves._gb_likelihood import (
+        from lisatools.globalfit.moves.gb_likelihood import (
             FDBandLikelihoodEngine,
         )
         from lisatools.domains import FDSettings
@@ -167,7 +167,7 @@ class WDMEngineCallSignatureTest(unittest.TestCase):
 
         from lisatools.chunked_het import WDMComputationsBase
         from lisatools.domains import WDMSettings
-        from lisatools.globalfit.moves._gb_likelihood import (
+        from lisatools.globalfit.moves.gb_likelihood import (
             WDMBandLikelihoodEngine,
         )
 
@@ -226,7 +226,7 @@ def _try_import_engine():
     rather than a failure.
     """
     try:
-        from lisatools.globalfit.moves._gb_likelihood import (
+        from lisatools.globalfit.moves.gb_likelihood import (
             make_band_likelihood_engine,
         )
 

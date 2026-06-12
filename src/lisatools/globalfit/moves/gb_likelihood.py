@@ -1,4 +1,8 @@
-"""Domain-agnostic likelihood engines for the GB special moves.
+"""Domain-agnostic band likelihood engines for the GB special moves.
+
+(Public module as of the 2026-06 stft_tof merge; formerly the private
+``_gb_likelihood``. The engines are intended for documented, repeatable
+use by any band-based GB sampler component, not just the in-tree moves.)
 
 Two implementations live here:
 
@@ -12,9 +16,22 @@ Two implementations live here:
   :func:`get_swap_ll_wdm`, :func:`fill_global_wdm`.
 
 The :class:`BandLikelihoodEngine` protocol is the contract both implementations
-honour. :class:`Buffer` dispatches on its ``basis_settings`` to pick one and
-then talks to the engine via :class:`AnalysisContainerArray` only -- the move
-itself never reaches into ``self.gb`` or C-side pointers.
+honour. :class:`Buffer` dispatches on its ``basis_settings`` (a
+:class:`~lisatools.domains.DomainSettingsBase` child -- never a string flag)
+to pick one and then talks to the engine via
+:class:`AnalysisContainerArray` only -- the move itself never reaches into
+``self.gb`` or C-side pointers.
+
+Engine guarantees:
+
+* ``get_swap_ll`` performs the frequency-bounds rejection internally:
+  proposals whose ``f0/df +- N_vals/2`` fall outside the band buffer are
+  clamped to ``ll_diff = -1e300`` and reported via ``SwapLLResult.kept``
+  (this is the bounds check that previously lived inline in
+  ``gbspecialstretch``).
+* The compute backend (CPU C++ / CUDA / JAX) is fixed at engine
+  construction; per the sprint-wide rule there is no runtime ``backend=``
+  kwarg on any method.
 """
 
 from __future__ import annotations

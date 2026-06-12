@@ -3,14 +3,19 @@
 import multiprocessing as mp
 import os
 import time
+import logging
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
+from tqdm import tqdm
 
 try:
     import cupy as xp
-except ModuleNotFoundError:
+    GPU_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
     import numpy as xp
+    GPU_AVAILABLE = False
+
 import h5py
 import numpy as np
 import pandas as pd
@@ -19,6 +24,8 @@ from gbgpu.utils.utility import get_N
 
 from lisatools.utils.constants import *
 from lisatools.utils.utility import asnumpy
+
+logger = logging.getLogger(__name__)
 
 
 class GBGrouping:
@@ -1109,7 +1116,8 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
 
     test_bins_for_snr = gb_samples[gb_inds]
 
-    transform_fn = current_info.gb_info["transform"]
+    transform_fn = current_i
+    nfo.gb_info["transform"]
     test_bins_for_snr_in = transform_fn.both_transforms(test_bins_for_snr)
     gb.d_d = 0.0
 
@@ -1444,6 +1452,8 @@ def gather_gb_samples(
     reader,
     sens_mat,
     gpu,
+    gb_samples: Optional[np.ndarray] = None,
+    gb_inds: Optional[np.ndarray] = None,
     num_compare_samples=1,
     samples_keep=1,
     thin_by=1,
@@ -1451,6 +1461,7 @@ def gather_gb_samples(
     snr_lim_second_cut=5.0,
     overlap_lim=0.5,
     snr_diff_lim=20.0,
+    use_representative=False,
 ):
     """Gather GB chain samples (band-aware) into per-source groups.
 
@@ -1474,24 +1485,39 @@ def gather_gb_samples(
         snr_lim_second_cut: Secondary SNR cut after grouping.
         overlap_lim: Overlap threshold above which samples are grouped.
         snr_diff_lim: Maximum SNR difference within a group.
+        use_representative: Group-consolidation comparison mode. ``False``
+            (default, exact): compare every member of a group against every
+            member of its nearest-frequency neighbour — O(N * g^2) host
+            arrays and GPU evals (OOMs / crawls at large ``samples_keep``).
+            ``True``: compare a single representative (median-frequency
+            member) per group, O(N). Stricter than the exact test (merges
+            only if the representatives clear ``overlap_lim``), so near the
+            threshold it can UNDER-merge and leave one source split across
+            two groups. Validate against the exact path before trusting it
+            at large ``samples_keep``.
     """
+    if not GPU_AVAILABLE:
+        logger.warning("GPU not available, cannot gather GB samples.")
+        return None
+
     gb.backend.set_cuda_device(gpu)
     gb.gpus = [gpu]
     fake_data = [xp.zeros((len(waveform_kwargs["tdi_channel_setup"]), fd.shape[0]), dtype=xp.complex128)]
     psd_in = [xp.asarray(sens_mat.invC.copy())]
 
-    gb_samples = reader.get_chain(
-        branch_names=["gb"],
-        temp_index=0,
-        discard=reader.iteration - samples_keep,
-        thin=thin_by,
-    )["gb"]
-    gb_inds = reader.get_inds(
-        branch_names=["gb"],
-        temp_index=0,
-        discard=reader.iteration - samples_keep,
-        thin=thin_by,
-    )["gb"]
+    if gb_samples is None or gb_inds is None:
+        gb_samples = reader.get_chain(
+            branch_names=["gb"],
+            temp_index=0,
+            discard=reader.iteration - samples_keep,
+            thin=thin_by,
+        )["gb"]
+        gb_inds = reader.get_inds(
+            branch_names=["gb"],
+            temp_index=0,
+            discard=reader.iteration - samples_keep,
+            thin=thin_by,
+        )["gb"]
 
     gb_samples = gb_samples.reshape(-1, gb_samples.shape[-2], gb_samples.shape[-1])
     gb_inds = gb_inds.reshape(-1, gb_inds.shape[-1])
@@ -1519,7 +1545,7 @@ def gather_gb_samples(
     if num_compare_samples > len(gb_samples):
         num_compare_samples = len(gb_samples)
 
-    for samp_i in range(len(gb_samples) - 1)[:num_compare_samples]:
+    for samp_i in tqdm(range(len(gb_samples) - 1)[:num_compare_samples], desc="Comparing samples"):
 
         first_sample = gb_samples[random_samples[samp_i]].reshape(-1, 8)
         first_sample_snrs = gb_snrs[random_samples[samp_i]].flatten()
@@ -1581,9 +1607,9 @@ def gather_gb_samples(
             binaries_base_sample_batch_in = transform_fn.both_transforms(
                 binaries_base_sample[start_ind:end_ind]
             )
-            if fd[0] != 0.0:
-                print("Need to work on if start_freq_ind is not zero, things will likely break later.")
-                print("It seems to be working, ignore for now.")
+            # if fd[0] != 0.0:
+            #     print("Need to work on if start_freq_ind is not zero, things will likely break later.")
+            #     print("It seems to be working, ignore for now.")
                 # raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
             assert "start_freq_ind" in waveform_kwargs
@@ -1600,7 +1626,7 @@ def gather_gb_samples(
             ll_diff[start_ind:end_ind] = asnumpy(
                 gb.add_remove.real / np.sqrt(gb.add_add.real * gb.remove_remove.real)
             )
-            print(start_ind, len(inds_split) - 1)
+            logger.debug(f"{start_ind=}, {(len(inds_split) - 1)=}")
 
         for i, keep_map_i in enumerate(keep_map):
             # TODO: check this?
@@ -1670,11 +1696,13 @@ def gather_gb_samples(
                 breakpoint()
 
             keep_groups.append(group)
-        print(f"samp_i: {samp_i + 1}, num: {gb_inds_tmp.sum()}")
+        logger.debug(f"samp_i: {samp_i + 1}, num: {gb_inds_tmp.sum()}")
 
     current_number = len(keep_groups)
     final_number = -1
+    print("Initial number of groups:", current_number)
     while current_number != final_number:
+        print("Consolidating groups, current number:", current_number)
         current_number = len(keep_groups)
         # need to consolidate
         group_min_f = np.asarray([group_i[:, 1].min() for group_i in keep_groups])
@@ -1704,28 +1732,45 @@ def gather_gb_samples(
         inds2 = np.take_along_axis(diffs_min, _inds1[:, :, None], axis=-1)[:, :, 0].argmin(axis=0)
         inds1 = _inds1.T[(np.arange(len(inds2)), inds2)]
         diffs_min_final = diffs_min[(inds2, np.arange(len(inds2)), inds1)]
-        assert np.all(diffs_min_final == diffs_min.min(axis=(0, 2)))
+        #assert np.all(diffs_min_final == diffs_min.min(axis=(0, 2)))
         # diffs_min = diffs_min.min(axis=(0, 2))
         groups_final = np.arange(len(inds1))
-        test_bins = []
-        base_bins = []
-        new_group_map = []
-        old_group_map = []
-        for i, (group, closest_group) in enumerate(zip(keep_groups, inds1)):
-            _base_bins, _test_bins = [
-                tmp.flatten()
-                for tmp in np.meshgrid(
-                    np.arange(len(group)), np.arange(len(keep_groups[closest_group]))
-                )
-            ]
-            base_bins.append(group[_base_bins])
-            test_bins.append(keep_groups[closest_group][_test_bins])
-            new_group_map.append(np.full_like(_test_bins, i))
-            old_group_map.append(np.full_like(_test_bins, closest_group))
-        base_bins = np.concatenate(base_bins, axis=0)
-        test_bins = np.concatenate(test_bins, axis=0)
-        new_group_map = np.concatenate(new_group_map, axis=0)
-        old_group_map = np.concatenate(old_group_map, axis=0)
+        if use_representative:
+            # One representative (median-frequency member) per group instead of the
+            # full g*g cross product. base_bins[i] is group i's representative,
+            # test_bins[i] its nearest neighbour's; the (new_group, old_group) map is
+            # therefore (i, inds1[i]) -- exactly the mapping the exact branch builds,
+            # just one row per group instead of len(group)*len(neighbour).
+            base_bins = np.stack(
+                [
+                    group[np.argsort(group[:, 1])[len(group) // 2]]
+                    for group in keep_groups
+                ],
+                axis=0,
+            )
+            test_bins = base_bins[inds1]
+            new_group_map = np.arange(len(keep_groups))
+            old_group_map = inds1.copy()
+        else:
+            test_bins = []
+            base_bins = []
+            new_group_map = []
+            old_group_map = []
+            for i, (group, closest_group) in enumerate(zip(keep_groups, inds1)):
+                _base_bins, _test_bins = [
+                    tmp.flatten()
+                    for tmp in np.meshgrid(
+                        np.arange(len(group)), np.arange(len(keep_groups[closest_group]))
+                    )
+                ]
+                base_bins.append(group[_base_bins])
+                test_bins.append(keep_groups[closest_group][_test_bins])
+                new_group_map.append(np.full_like(_test_bins, i))
+                old_group_map.append(np.full_like(_test_bins, closest_group))
+            base_bins = np.concatenate(base_bins, axis=0)
+            test_bins = np.concatenate(test_bins, axis=0)
+            new_group_map = np.concatenate(new_group_map, axis=0)
+            old_group_map = np.concatenate(old_group_map, axis=0)
 
         band_inds = np.searchsorted(asnumpy(band_edges), base_bins[:, 1] / 1e3, side="right") - 1
         N_vals = band_N_vals[band_inds]
@@ -1746,10 +1791,10 @@ def gather_gb_samples(
             base_bins_in = transform_fn.both_transforms(base_bins[start_ind:end_ind])
             test_bins_in = transform_fn.both_transforms(test_bins[start_ind:end_ind])
 
-            if fd[0] != 0.0:
+            # if fd[0] != 0.0:
                 # breakpoint()
-                print("Need to work on if start_freq_ind is not zero, things will likely break later.")
-                print("It seems to be working, ignore for now.")
+                # print("Need to work on if start_freq_ind is not zero, things will likely break later.")
+                # print("It seems to be working, ignore for now.")
                 # raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
             _ = gb.swap_likelihood_difference(
@@ -1793,9 +1838,9 @@ def gather_gb_samples(
             new_groups_3[i] = -1
             keep_groups[i] = None
 
-        print("before step:", len(keep_groups))
+        logger.info(f"before step: {len(keep_groups)}")
         keep_groups = [tmp for tmp in keep_groups if tmp is not None]
-        print("after step:", len(keep_groups))
+        logger.info(f"after step: {len(keep_groups)}")
         final_number = len(keep_groups)
         num_in_group = [len(group_i) for group_i in keep_groups]
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from collections import namedtuple
 import os
+from collections import namedtuple
 from typing import Any, Callable, Optional, Union
 
 import h5py
@@ -30,6 +30,7 @@ from ..domains import (
     DomainSettingsBase,
     FDSettings,
     STFTSettings,
+    TDSettings,
     WDMSettings,
 )
 from ..sensitivity import (
@@ -71,7 +72,6 @@ class Setup:
         self._settings_class = type(settings_holder)
         self.settings = settings_holder
 
-        # had a better way to do this but it stopped allowing for pickle
         self._settings_names = [field.name for field in dataclasses.fields(self._settings_class)]
         self._settings_args_names = [
             field.name
@@ -80,14 +80,14 @@ class Setup:
                 field.default == dataclasses.MISSING
                 and field.default_factory == dataclasses.MISSING
             )
-        ]  # args
+        ]
         self._settings_kwargs_names = [
             field.name
             for field in dataclasses.fields(self._settings_class)
             if (
                 field.default != dataclasses.MISSING or field.default_factory != dataclasses.MISSING
             )
-        ]  # kwargs
+        ]
         _args = tuple([getattr(settings_holder, key) for key in self._settings_args_names])
         _kwargs = {key: getattr(settings_holder, key) for key in self._settings_kwargs_names}
         self._settings_class.__init__(self, *_args, **_kwargs)
@@ -121,7 +121,7 @@ class Settings:
     dt: float | None = None
     initialize_kwargs: dict | None = None
     transform: Optional[TransformContainer] = None
-    priors: Optional[typing.Dict[str,ProbDistContainer]] = None
+    priors: Optional[typing.Dict[str, ProbDistContainer]] = None
     periodic: Optional[dict] = None
     nleaves_max: Optional[int] = None
     nleaves_min: Optional[int] = None
@@ -153,6 +153,7 @@ class GeneralSettings(Settings):
     defaults of ``None`` mark options that the user must supply (see
     :meth:`GeneralSetup.init_setup` for assertions).
     """
+    num_iterations: int | None = 500
     Tobs: float | None = None
     dt: float | None = None
     file_store_dir: str | None = None
@@ -189,6 +190,20 @@ class GeneralSettings(Settings):
     normalize_window: bool = False
     catalogue: typing.Optional[dict] = None
 
+    # --- run metadata (propagated to RunMetadata.from_curr) ---
+    global_fit_codename: Optional[str] = None
+    global_fit_version: Optional[str] = None
+    global_fit_contact: Optional[str] = None
+    global_fit_code_link: Optional[str] = None
+    submission_parent_folder: Optional[str] = None
+    input_data_link: Optional[str] = None
+    input_reference: Optional[str] = None
+    noise_model: Optional[str] = None
+    noise_model_code_link: Optional[str] = None
+    run_waveform_model: Optional[str] = None
+    run_waveform_model_code_link: Optional[str] = None
+    comment: Optional[str] = None
+
 
 from .loginfo import init_logger
 
@@ -213,15 +228,15 @@ class GeneralSetup(Setup, GeneralSettings):
 
     def __init__(self, general_settings: GeneralSettings):
 
-        # had a better way to do this but it stopped allowing for pickle
         Setup.__init__(self, general_settings)
 
         level = logging.DEBUG
         name = "GeneralSetup"
-        # Ensure artifacts dir exists before creating log file handler
         if not os.path.exists(self.artifacts_file_dir):
             os.makedirs(self.artifacts_file_dir)
-        self.logger = init_logger(filename="general_setup.log", level=level, name=name, log_dir=self.artifacts_file_dir)
+        self.logger = init_logger(
+            filename="general_setup.log", level=level, name=name, log_dir=self.artifacts_file_dir
+        )
 
         self.init_setup()
 
@@ -234,6 +249,18 @@ class GeneralSetup(Setup, GeneralSettings):
     def artifacts_file_dir(self) -> str:
         """Directory where logs and diagnostic plots are stored for this run."""
         return self.file_store_dir + self.base_file_name + "_artifacts/"
+
+    @property
+    def data_t0(self) -> float:
+        return self.data_td_settings.t0
+
+    @property
+    def data_dt(self) -> float:
+        return self.data_td_settings.dt
+    
+    @property
+    def catalogue(self):
+        return getattr(self.data_processor, "catalogue", {})
 
     def init_setup(self):
         """Validate required settings and trigger data preparation."""
@@ -293,13 +320,13 @@ class GeneralSetup(Setup, GeneralSettings):
 
         self.data_processor = self.data_processor_class(**(self.processor_init_kwargs or {}))
 
-        # preprocess data
         if self.fixed_psd_kwargs is None:
-
             self.fixed_psd_kwargs = dict(
-                psd_params=[15e-12, 3e-15],  # default scirdv1
+                psd_params=[15e-12, 3e-15],
                 galfor_params=None,
             )
+
+        self.logger.info(f"Using fixed PSD kwargs: {self.fixed_psd_kwargs}")
 
         default_preprocess_kwargs = dict(
             plot_folder=self.artifacts_file_dir,
@@ -309,18 +336,26 @@ class GeneralSetup(Setup, GeneralSettings):
         )
 
         if self.preprocess_kwargs is None:
-            preprocess_kwargs = default_preprocess_kwargs
+            self.preprocess_kwargs = default_preprocess_kwargs
         else:
-            preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
+            self.preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
 
-        for key, value in preprocess_kwargs.items():
+        for key, value in self.preprocess_kwargs.items():
             self.logger.debug(f"Preprocess setting: {key} = {value}")
 
-        times, _ = self.data_processor.process(**preprocess_kwargs)
+        times, _ = self.data_processor.process(**self.preprocess_kwargs)
         dt = self.data_processor.td_signal.settings.dt
         Nt = len(times)
+        # data_t0 anchor: downstream waveform wrappers align their grids to
+        # the loader's first sample (dev-side fix).
         self.data_t0 = float(times[0])
         self.catalogue = getattr(self.data_processor, 'catalogue', {})
+        # TD settings of the loaded data (stft_tof side): consumed by the
+        # TDWaveformBase-family wrappers as ``data_td_settings``.
+        self.data_td_settings = TDSettings(
+            *self.data_processor.td_signal.settings.args, force_backend=self.force_backend
+        )
+        self.Tobs = Nt * dt
 
         domain_settings = self._resolve_domain_settings(times=times, dt=dt)
         self.basis_kwargs = dict(force_backend=self.force_backend)
@@ -328,6 +363,7 @@ class GeneralSetup(Setup, GeneralSettings):
         # Domain-specific window length + diagnostic-plot kwargs. The window
         # is always built on the underlying time grid (length Nt); the basis
         # transform inside data_processor.pour() handles the projection.
+        # Dispatch is by DomainSettingsBase child class -- never a string flag.
         if isinstance(domain_settings, STFTSettings):
             nperseg = domain_settings.get_nperseg(dt)
             self.window_alpha = self.window_taper_duration / (nperseg * dt)
@@ -392,30 +428,41 @@ class GeneralSetup(Setup, GeneralSettings):
 
         if orbits is not None:
             self.orbits = orbits
+            orbits_kwargs = orbits.kwargs
+
             if self.force_backend == self.gpu_backend:
-                self.gpu_orbits = self.data_processor.orbits_class(
-                    filename=orbits.filename,
-                    armlength=orbits.armlength,
-                    force_backend=self.gpu_backend,
-                    frame=orbits.frame,
-                )
+                # Rebuild on the GPU backend via the orbits' reproducibility
+                # properties (stft_tof); ``kwargs`` carries armlength, t0 and
+                # frame, so ICRS orbit files round-trip correctly.
+                orbits_kwargs["force_backend"] = self.gpu_backend
+                self.logger.debug(f"Initializing GPU orbits with kwargs: {orbits_kwargs}")
+
+                self.gpu_orbits = self.data_processor.orbits_class(*orbits.args, **orbits_kwargs)
 
         self.init_orbit_information()
 
         # Sensitivity backend: defaults to CompositeSensitivityBackend, which
         # builds a CompositeSensitivityMatrix (InstrumentNoise + optional
         # GalacticForeground / SGWB components) per walker. Set
-        # ``sensitivity_backend_class=XYZSensitivityBackend`` to fall back to
-        # the legacy C++/CUDA matrix path.
+        # ``sensitivity_backend_class=XYZSensitivityBackend`` for the C++/CUDA
+        # matrix path (incl. the stft_tof galactic-grid foreground).
         sensitivity_init_kwargs = dict(self.sensitivity_init_kwargs or {})
+
+        # stft_tof: anchor the galactic grid's orbit-phase reference to the
+        # data start when the caller did not set it explicitly.
+        if "galactic_grid_kwargs" in sensitivity_init_kwargs and isinstance(
+            sensitivity_init_kwargs["galactic_grid_kwargs"], dict
+        ):
+            sensitivity_init_kwargs["galactic_grid_kwargs"].setdefault("t0", self.data_t0)
+
         backend_cls = self.sensitivity_backend_class or CompositeSensitivityBackend
         if backend_cls is CompositeSensitivityBackend or (
             isinstance(backend_cls, type)
             and issubclass(backend_cls, CompositeSensitivityBackend)
         ):
-            # Drop kwargs that are specific to the legacy XYZ backend so a
+            # Drop kwargs that are specific to the XYZ backend so a
             # settings file can be switched over without editing every kwarg.
-            xyz_only = ("mask_percentage", "use_splines", "spline_order")
+            xyz_only = ("mask_percentage", "use_splines", "spline_order", "galactic_grid_kwargs")
             for k in xyz_only:
                 if k in sensitivity_init_kwargs:
                     self.logger.debug(
@@ -437,6 +484,7 @@ class GeneralSetup(Setup, GeneralSettings):
             )
 
 
+
 @dataclasses.dataclass
 class GlobalFitSettings:
     """Top-level settings bundle describing one global-fit run.
@@ -452,8 +500,10 @@ class GlobalFitSettings:
     source_info: typing.Dict[str, Setup]
     general_info: GeneralSetup
     rank_info: RankInfo
-    # TODO: add to adocs current args for these
     setup_function: typing.Callable[(...), None]
+    source_metadata: typing.Dict[str, dataclasses.dataclass] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 @dataclasses.dataclass
@@ -497,23 +547,16 @@ class GlobalFitEngine(EnsembleSampler):
         self.analysis_container_arr = analysis_container_arr
 
     def get_model(self):
-        """Get ``Model`` object from sampler
-
-        The model object is used to pass necessary information to the
-        proposals. This method can be used to retrieve the ``model`` used
-        in the sampler from outside the sampler.
+        """Get ``Model`` object from sampler.
 
         Returns:
-            :class:`Model`: ``Model`` object used by sampler.
-
+            :class:`GlobalFitInfo`: model object used by the sampler.
         """
-        # Set up a wrapper around the relevant model functions
         if self.pool is not None:
             map_fn = self.pool.map
         else:
             map_fn = map
 
-        # setup model framework for passing necessary items
         model = GlobalFitInfo(
             self.analysis_container_arr,
             map_fn,

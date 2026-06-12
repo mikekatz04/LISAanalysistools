@@ -40,10 +40,17 @@ class LISAToolsBackendMethods(BackendMethods):
 
     OrbitsWrap: object
     Orbits: object
-    # SensitivityMatrixWrap: object  # XYZBackend disabled (symbol issues on Linux)
+    # stft_tof merge (2026-06): XYZ sensitivity backend reactivated (the
+    # former "symbol issues on Linux" were the missing CPU/GPU aliases).
+    SensitivityMatrixWrap: object
+    GalacticGridSetup: object
+    GalacticGridWrap: object
+    # STFTDomainWrap / FDDomainWrap(stft) / STFTFresnelWrap land with the
+    # domains.{hpp,cu} consolidation (incoming stft FDDomainWrap collides
+    # with the Phase-3L.1 FDDomainWrap below until unified).
     check_orbits: typing.Callable[(...), None]
-    # psd_likelihood: typing.Callable[(...), None]
-    # compute_logpdf: typing.Callable[(...), None]
+    psd_likelihood: typing.Callable[(...), None]
+    compute_logpdf: typing.Callable[(...), None]
 
     # Phase 3L.7k (2026-06-04): LISA-response Wraps absorbed from the
     # now-retiring fastlisaresponse backend. Owners of the underlying
@@ -88,9 +95,12 @@ class LISAToolsBackend:
     OrbitsWrap: object
     Orbits: object
     check_orbits: typing.Callable[(...), None]
-    # SensitivityMatrixWrap: object  # XYZBackend disabled (symbol issues on Linux)
-    # psd_likelihood: typing.Callable[(...), None]
-    # compute_logpdf: typing.Callable[(...), None]
+    # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
+    SensitivityMatrixWrap: object
+    GalacticGridSetup: object
+    GalacticGridWrap: object
+    psd_likelihood: typing.Callable[(...), None]
+    compute_logpdf: typing.Callable[(...), None]
     # Phase 3L.7k LISA-response Wraps (see LISAToolsBackendMethods).
     TDSplineTDIWaveformWrap: object
     FDSplineTDIWaveformWrap: object
@@ -112,9 +122,12 @@ class LISAToolsBackend:
         self.OrbitsWrap = lisatools_backend_methods.OrbitsWrap
         self.Orbits = lisatools_backend_methods.Orbits
         self.check_orbits = lisatools_backend_methods.check_orbits
-        # self.SensitivityMatrixWrap = lisatools_backend_methods.SensitivityMatrixWrap  # XYZBackend disabled
-        # self.psd_likelihood = lisatools_backend_methods.psd_likelihood
-        # self.compute_logpdf = lisatools_backend_methods.compute_logpdf
+        # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
+        self.SensitivityMatrixWrap = lisatools_backend_methods.SensitivityMatrixWrap
+        self.GalacticGridSetup = lisatools_backend_methods.GalacticGridSetup
+        self.GalacticGridWrap = lisatools_backend_methods.GalacticGridWrap
+        self.psd_likelihood = lisatools_backend_methods.psd_likelihood
+        self.compute_logpdf = lisatools_backend_methods.compute_logpdf
         # Phase 3L.7k -- LISA-response wraps absorbed from
         # fastlisaresponse cutils backend (which is being retired).
         self.TDSplineTDIWaveformWrap = lisatools_backend_methods.TDSplineTDIWaveformWrap
@@ -156,15 +169,18 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             raise BackendUnavailableException("'cpu' backend could not be imported.") from e
 
         numpy = LISAToolsCpuBackend.check_numpy()
-
+    
         _lat_pd = lisatools_backend_cpu.pycppdetector
         return LISAToolsBackendMethods(
             OrbitsWrap=_lat_pd.OrbitsWrapCPU,
             Orbits=_lat_pd.OrbitsCPU,
             check_orbits=_lat_pd.check_orbits,
-            # SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapCPU,  # XYZBackend disabled
-            # psd_likelihood=_lat_pd.psd_likelihood,
-            # compute_logpdf=_lat_pd.compute_logpdf,
+            # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
+            SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapCPU,
+            GalacticGridSetup=_lat_pd.GalacticGridSetup,
+            GalacticGridWrap=_lat_pd.GalacticGridWrapCPU,
+            psd_likelihood=_lat_pd.psd_likelihood,
+            compute_logpdf=_lat_pd.compute_logpdf,
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
             TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapCPU,
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapCPU,
@@ -217,15 +233,19 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             raise MissingDependencies(
                 "'cuda11x' backend requires cupy", pip_deps=["cupy-cuda11x"]
             ) from e
+        
 
         _lat_pd = lisatools_backend_cuda11x.pycppdetector
         return LISAToolsBackendMethods(
             OrbitsWrap=_lat_pd.OrbitsWrapGPU,
             Orbits=_lat_pd.OrbitsGPU,
             check_orbits=_lat_pd.check_orbits,
-            # SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
-            # psd_likelihood=_lat_pd.psd_likelihood,
-            # compute_logpdf=_lat_pd.compute_logpdf,
+            # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
+            SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,
+            GalacticGridSetup=_lat_pd.GalacticGridSetup,
+            GalacticGridWrap=_lat_pd.GalacticGridWrapGPU,
+            psd_likelihood=_lat_pd.psd_likelihood,
+            compute_logpdf=_lat_pd.compute_logpdf,
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
             TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
@@ -276,15 +296,18 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             raise MissingDependencies(
                 "'cuda12x' backend requires cupy", pip_deps=["cupy-cuda12x"]
             ) from e
-
+        
         _lat_pd = lisatools_backend_cuda12x.pycppdetector
         return LISAToolsBackendMethods(
             OrbitsWrap=_lat_pd.OrbitsWrapGPU,
             Orbits=_lat_pd.OrbitsGPU,
             check_orbits=_lat_pd.check_orbits,
-            # SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
-            # psd_likelihood=_lat_pd.psd_likelihood,
-            # compute_logpdf=_lat_pd.compute_logpdf,
+            # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
+            SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,
+            GalacticGridSetup=_lat_pd.GalacticGridSetup,
+            GalacticGridWrap=_lat_pd.GalacticGridWrapGPU,
+            psd_likelihood=_lat_pd.psd_likelihood,
+            compute_logpdf=_lat_pd.compute_logpdf,
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
             TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
@@ -300,7 +323,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             TDITypeDict={"XYZ": _lat_pd.TDI_XYZ, "AET": _lat_pd.TDI_AET, "AE": _lat_pd.TDI_AE},
             xp=cupy,
         )
-
+    
 class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
     """CUDA 13.x backend, backed by ``lisatools_backend_cuda13x``."""
 
@@ -325,7 +348,7 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             import gbt_backend_cuda13x.interp
             import lisatools_backend_cuda13x.pycppdetector
 
-            # import lisatools_backend_cuda13x.psd
+            # import lisatools_backend_cuda12x.psd
 
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException("'cuda13x' backend could not be imported.") from e
@@ -336,15 +359,18 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             raise MissingDependencies(
                 "'cuda13x' backend requires cupy", pip_deps=["cupy-cuda13x"]
             ) from e
-
+        
         _lat_pd = lisatools_backend_cuda13x.pycppdetector
         return LISAToolsBackendMethods(
             OrbitsWrap=_lat_pd.OrbitsWrapGPU,
             Orbits=_lat_pd.OrbitsGPU,
             check_orbits=_lat_pd.check_orbits,
-            # SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
-            # psd_likelihood=_lat_pd.psd_likelihood,
-            # compute_logpdf=_lat_pd.compute_logpdf,
+            # stft_tof merge (2026-06): XYZ sensitivity backend reactivated.
+            SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,
+            GalacticGridSetup=_lat_pd.GalacticGridSetup,
+            GalacticGridWrap=_lat_pd.GalacticGridWrapGPU,
+            psd_likelihood=_lat_pd.psd_likelihood,
+            compute_logpdf=_lat_pd.compute_logpdf,
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
             TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
@@ -360,4 +386,5 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             TDITypeDict={"XYZ": _lat_pd.TDI_XYZ, "AET": _lat_pd.TDI_AET, "AE": _lat_pd.TDI_AE},
             xp=cupy,
         )
+
 """List of existing backends, per default order of preference."""

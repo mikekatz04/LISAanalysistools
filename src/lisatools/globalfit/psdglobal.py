@@ -85,8 +85,8 @@ def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
     Amp_all = xp.asarray(galfor_pars[:, 0])
     kn_all = xp.asarray(galfor_pars[:, 1])
     alpha_all = xp.asarray(galfor_pars[:, 2])
-    sl1_all = xp.asarray(galfor_pars[:, 3])
-    sl2_all = xp.asarray(galfor_pars[:, 4])
+    f_1_all = xp.asarray(galfor_pars[:, 3])
+    f_2_all = xp.asarray(galfor_pars[:, 4])
     num_data = 1
     num_psds = psd_pars.shape[0]
 
@@ -101,9 +101,9 @@ def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
         E_Sa_a_in_all,
         Amp_all,
         alpha_all,
-        sl1_all,
+        f_1_all,
         kn_all,
-        sl2_all,
+        f_2_all,
         df,
         data_length,
         num_data,
@@ -217,9 +217,9 @@ class PSDwithGBPriorWrap:
             E_Sa_a_in_all = xp.asarray(psd_pars[:, 3])
             Amp_all = xp.asarray(galfor_pars[:, 0])
             alpha_all = xp.asarray(galfor_pars[:, 1])
-            sl1_all = xp.asarray(galfor_pars[:, 2])
+            f_1_all = xp.asarray(galfor_pars[:, 2])
             kn_all = xp.asarray(galfor_pars[:, 3])
-            sl2_all = xp.asarray(galfor_pars[:, 4])
+            f_2_all = xp.asarray(galfor_pars[:, 4])
             num_f = len(gb_params_in)
 
             Sn_A = xp.zeros(num_f, dtype=xp.float64)
@@ -238,9 +238,9 @@ class PSDwithGBPriorWrap:
                     E_Sa_a_in_all,
                     Amp_all,
                     alpha_all,
-                    sl1_all,
+                    f_1_all,
                     kn_all,
-                    sl2_all,
+                    f_2_all,
                     num_f,
                 )
 

@@ -25,6 +25,7 @@ except (ModuleNotFoundError, ImportError):
         "Please install cupy and a compatible CUDA version for GPU acceleration."
     )
 
+from logging import getLogger
 import typing
 
 from eryn.state import BranchSupplemental
@@ -35,13 +36,15 @@ from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
-from .stock.erebor import Setup
 from .moves import GFCombineMove, GlobalFitMove
+from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter, save_residuals
 from .recipe import Recipe
 from .state import GFState
+from .stock.erebor import Setup
 from .utils import BasicResidualacsLikelihood
 
 
+logger = getLogger(__name__)
 class CurrentInfoGlobalFit:
     """Manages the current state and configuration information for a global fit run.
 
@@ -158,6 +161,11 @@ class CurrentInfoGlobalFit:
         return self.current_info.source_info
 
     @property
+    def source_metadata(self) -> dict:
+        """Metadata information for all sources."""
+        return self.current_info.source_metadata
+
+    @property
     def rank_info(self):
         """MPI rank assignment information."""
         return self.current_info.rank_info
@@ -172,7 +180,7 @@ class CurrentInfoGlobalFit:
         return {
             name: setup.injection
             for name, setup in self.source_info.items()
-            if hasattr(setup, 'injection') and setup.injection is not None
+            if hasattr(setup, "injection") and setup.injection is not None
         }
 
 
@@ -225,7 +233,9 @@ class GlobalFit:
         name = "GlobalFit"
         artifacts_dir = self.curr.general_info.artifacts_file_dir
         setup_root_file_handler(artifacts_dir, level=level)
-        self.logger = init_logger(filename="global_fit.log", level=level, name=name, log_dir=artifacts_dir)
+        self.logger = init_logger(
+            filename="global_fit.log", level=level, name=name, log_dir=artifacts_dir
+        )
 
         if self.rank == self.main_rank:
             dump_settings(self.curr.settings_dict, artifacts_dir)
@@ -411,7 +421,7 @@ class GlobalFit:
 
         return state
 
-    def setup_acs(self, state: GFState) -> AnalysisContainerArray:
+    def setup_acs(self, state: GFState, rebuild_residuals: bool = False) -> AnalysisContainerArray:
         """
         Set up AnalysisContainerArray for likelihood computations.
 
@@ -423,6 +433,11 @@ class GlobalFit:
 
         Args:
             state: GFState object containing current parameter values.
+            rebuild_residuals: If ``True``, subtract each non-PSD branch's
+                current templates from the freshly-built containers so the
+                stored arrays are residuals rather than raw data (stft_tof
+                restart/handover path; it was disabled there while the EMRI
+                branch was being debugged, so it stays opt-in here).
 
         Returns:
             AnalysisContainerArray containing data, residuals, and
@@ -432,14 +447,39 @@ class GlobalFit:
         if _xp_is_cupy and general_info.gpus is not None:
             xp.cuda.runtime.setDevice(general_info.gpus[0])
 
+        # Per-branch params-based template generators registered into every
+        # AC's dictionary-based ``signal_gen``. Settings expose them as
+        # ``source_info[name].signal_gen`` (the converted core of the legacy
+        # ``get_templates`` process: transform + waveform generator called as
+        # ``fn(*params) -> template``). Branches without one fall back to the
+        # bulk ``get_templates`` hook in the rebuild loop below until they
+        # are converted.
+        signal_gen_map = {}
+        for name in self.curr.engine_info.branch_names:
+            if name in ("psd", "galfor") or name not in self.curr.source_info:
+                continue
+            _gen = getattr(self.curr.source_info[name], "signal_gen", None)
+            if callable(_gen):
+                signal_gen_map[name] = _gen
+
         acs_tmp = []
         for w in range(self.nwalkers):
             data_res_arr = deepcopy(general_info.input_data_residual_array)
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
+                psd_params = (
+                    self.curr.source_info["psd"].transform.both_transforms(psd_params)
+                    if self.curr.source_info["psd"].transform is not None
+                    else psd_params
+                )
                 # need to generalize for other stochastic functions
                 if "galfor" in state.branches_coords.keys():
                     galfor_params = state.branches_coords["galfor"][0, w, 0]
+                    galfor_params = (
+                        self.curr.source_info["galfor"].transform.both_transforms(galfor_params)
+                        if self.curr.source_info["galfor"].transform is not None
+                        else galfor_params
+                    )
                 else:
                     galfor_params = None
                 sens_here = general_info.sensitivity_backend(
@@ -453,10 +493,79 @@ class GlobalFit:
                     f"walker_{w}", **general_info.fixed_psd_kwargs
                 )
 
-            acs_tmp.append((_analysis_tmp := AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here))))
+            acs_tmp.append(
+                (
+                    _analysis_tmp := AnalysisContainer(
+                        deepcopy(data_res_arr),
+                        deepcopy(sens_here),
+                        signal_gen=dict(signal_gen_map) if signal_gen_map else None,
+                    )
+                )
+            )
 
         gpus = general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
+
+        if rebuild_residuals:
+            # Residual rebuild, replicating the stft_tof ``get_templates``
+            # process. Preferred route (2026-06 merge direction): drive the
+            # template generation from the state's coords/inds through each
+            # container's dictionary-based ``signal_gen``
+            # ({branch_name -> generator}) and
+            # :meth:`AnalysisContainer.build_template` -- no model callables
+            # passed through ``source_info``. Branches whose generators are
+            # not (yet) registered on ``signal_gen`` fall back to the
+            # stft_tof ``source_info[...]["get_templates"]`` process so the
+            # rebuild always works during the migration.
+            handled_by_signal_gen = set()
+            for w, ac in enumerate(acs.flatten()):
+                gen_map = getattr(ac, "_signal_gen", None)
+                if not isinstance(gen_map, dict):
+                    continue  # this walker's branches use the fallback below
+                params = {}
+                for name in self.curr.engine_info.branch_names:
+                    if name in ("psd", "galfor") or name not in gen_map:
+                        continue
+                    inds_w = state.branches_inds[name][0, w]
+                    if not inds_w.any():
+                        continue
+                    params[name] = state.branches_coords[name][0, w][inds_w]
+                handled_by_signal_gen.update(params.keys())
+                if not params:
+                    continue
+                template = ac.build_template(params)
+                ac.data.add_signal(template, sign=-1)
+
+            # stft_tof fallback for branches without a registered generator.
+            for name, source_info in self.curr.source_info.items():
+                if name not in self.curr.engine_info.branch_names:
+                    continue
+                if name in ("psd", "galfor") or name in handled_by_signal_gen:
+                    continue
+                try:
+                    get_templates = source_info["get_templates"]
+                except (KeyError, TypeError):
+                    logger.warning(
+                        f"rebuild_residuals: branch {name!r} has neither a "
+                        "signal_gen entry nor a get_templates hook; skipped."
+                    )
+                    continue
+
+                templates_tmp = xp.asarray(
+                    get_templates(state, source_info, self.curr.general_info)
+                )
+
+                # no need to adjust data index or start_freq_ind:
+                # add_signal_to_residual handles alignment.
+                acs.add_signal_to_residual(templates_tmp)
+
+                del templates_tmp
+                logger.info(f"added {name} templates to acs residuals (get_templates path).")
+
+            if xp.__name__ == "cupy":
+                xp.get_default_memory_pool().free_all_blocks()
+            logger.info("rebuilt residuals from state coords/inds.")
+
         return acs
 
     @property
@@ -505,7 +614,10 @@ class GlobalFit:
                     for key, value in self.curr.source_info[name]["priors"].items():
                         priors[key] = value
 
-                    if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
+                    if (
+                        "periodic" in self.curr.source_info[name]
+                        and self.curr.source_info[name]["periodic"] is not None
+                    ):
                         for key, value in self.curr.source_info[name]["periodic"].items():
                             periodic[key] = value
 
@@ -594,6 +706,7 @@ class GlobalFit:
             self.logger.debug("acs setup done")
 
             state.log_like[:] = acs.likelihood(complex=False)
+            logger.info(f"initial log likelihood: {state.log_like[0]}")
 
             like_mix = BasicResidualacsLikelihood(acs)
 
@@ -728,12 +841,19 @@ class GlobalFit:
             _tmp_move = StretchMove(live_dangerously=True)
             # permute False is there for the PSD sampling for now
 
+            truths = self.curr.get_truths_dict()
+
+            exclude_from_plot = ["gb"]  # TODO: make this more general
+            truths_plot = {key: val for key, val in truths.items() if key not in exclude_from_plot}
+            branches_plot = [name for name in branch_names if name not in exclude_from_plot]
+
             plot_container = PlotContainer(
                 plots=["base", "tempering"],
+                branches=branches_plot,
                 parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
-                discard=0.1,
-                truths=self.curr.get_truths_dict(),
+                discard=0.3,
+                truths=truths_plot,
             )
 
             # Wrap ``periodic`` as a ``PeriodicContainer`` with ``key_order``
@@ -776,9 +896,7 @@ class GlobalFit:
                 stopping_fn=self.recipe,
                 stopping_iterations=1,
             )
-            _tmp_move.temperature_control.swaps_accepted = np.zeros(
-                (self.ntemps, self.nwalkers), dtype=int
-            )
+            _tmp_move.temperature_control.swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
 
             self.recipe.backend = backend
             backend.add_recipe(self.recipe)
@@ -792,7 +910,19 @@ class GlobalFit:
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
 
-            sampler_mix.run_mcmc(state, 50, thin_by=1, progress=True, store=True)
+            if self.curr.general_info.submission_parent_folder is not None:
+                gf_plotter = GlobalFitPlotter(curr=self.curr)
+                gf_plotter.save_input_data()
+
+            sampler_mix.run_mcmc(state, self.curr.general_info.num_iterations, thin_by=1, progress=True, store=True)
+
+            if self.curr.general_info.submission_parent_folder is not None:
+                self.logger.debug(f"saving submission to {self.curr.general_info.submission_parent_folder}")
+                submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
+                submission_writer.write_submission(acs)
+
+            logger.info("Residuals saved.")
+
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:

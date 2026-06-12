@@ -41,10 +41,6 @@ from lisatools.utils.constants import *
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
 
-    # psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors)
-
-    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
-
     # Initialize MBH walkers from catalogue injection parameters
     catalogue = getattr(curr.general_info, "catalogue", {})
     mbh_catalogue = catalogue.get("MBHB", {})
@@ -62,18 +58,15 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         curr.source_info["mbh"].injection = injection_params
 
         # Per-parameter spread for the Gaussian scatter
+        # spread = np.array([1e-4, 1e-3, 1e-2, 1e-2, 1e-2, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1])
         spread = 1e-5
+        # | logM | q | s1z | s2z | dL | phi_ref | iota | psi | lambda_SSB | beta_SSB | tc |
 
         scatter_around_injection(
-            state,
-            "mbh",
-            injection_params,
-            spread,
+            state, "mbh", injection_params, spread, betas=curr.source_info["mbh"].betas
         )
 
-    # todo test this
-
-    _, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state)
+    _, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state, permute_every=60)
     # mbh_pe_moves = GFCombineMove(moves=[mbh_pe_move, psd_pe_move], share_temperature_control=False)
     recipe.add_recipe_component(PERecipeStep(moves=[mbh_pe_move]), name="mbh pe")
 
@@ -113,10 +106,12 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         data_td_settings=general_set.data_td_settings,
         Tobs=1.0
         / 12.0
+        / 2.0
         * YRSID_SI,  # this is only for the waveform generation, not the data, which is still general_set.Tobs
-        start_freq=0.00014041319931638136,
-        ref_freq=0.00014041319931638136,  # source 5
-        buffer_time=3000,
+        start_freq=1e-4,
+        ref_freq=1e-4,
+        use_reference_time=True,
+        buffer_time=6000,
         stft_dt=general_set.stft_dt,
         freq_min=general_set.start_freq,
         freq_max=general_set.end_freq,
@@ -131,6 +126,8 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         # domain_kwargs=general_set.basis_kwargs,
     )
 
+    betas = 1 / 1.2 ** np.arange(general_set.ntemps)  # Geometric ladder with ratio 1.2
+
     mbh_settings = MBHSettings(
         Tobs=general_set.Tobs,
         dt=general_set.dt,
@@ -139,8 +136,9 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=1,
         nleaves_min=1,
         ndim=11,
-        num_prop_repeats=40,
+        num_prop_repeats=50,
         log_dir=general_set.file_store_dir,
+        betas=betas,
     )
 
     return MBHSetup(mbh_settings)
@@ -150,19 +148,20 @@ def get_general_erebor_settings() -> GeneralSetup:
     # limits on parameters
     # now with negative fdots
 
-    source_ids = [5]
+    source_ids = [18]
 
-    Tobs = 4.0 * YRSID_SI / 12.0
-    dt = 2.5
-    start_freq = 5e-5
-    end_freq = 1e-1
+    Tobs = 3.5 * YRSID_SI / 12.0
+    dt = 5.0
+    start_freq = 1e-4
+    end_freq = 2.9e-2
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_5_noiseless"
+    base_file_name = "postmerger"
+    # base_file_name = "mbh_18_test_no_tempering"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [0]
+    gpus = [5]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -171,22 +170,20 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend = "cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
-    ntemps = 3
-
-    window_type = "tukey"
-    window_taper_duration = 1 / start_freq
-    normalize_window = True
+    ntemps = 1
 
     basis_domain = "stft"
-    stft_dt = 24 * 3600.0 if basis_domain == "stft" else None  # hours
+    stft_dt = 1 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
+
+    window_type = "tukey"
+    window_taper_duration = 0.1 * stft_dt if basis_domain == "stft" else 1 / start_freq
+    normalize_window = True
 
     base_file_name += f"_{basis_domain}"
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
-        source_types=[
-            "mbhb",
-        ],
+        source_types=["noise", "mbhb"],
         source_ids=dict(mbhb=source_ids),
         verbose=True,
         do_plots=True,
@@ -195,7 +192,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     )
 
     downsample_kwargs = {
-        "target_fs": 0.2,  # Hz — target sampling rate (None = no downsampling).
+        "target_fs": 1 / dt,  # Hz — target sampling rate (None = no downsampling).
         "window": (
             "kaiser",
             31.0,
@@ -228,7 +225,23 @@ def get_general_erebor_settings() -> GeneralSetup:
         Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, use_splines=False)
+
+    # load the psd result
+    psd_run_file = file_store_dir + "matrix_for_mbhb_parameter_estimation_main.h5"
+    from eryn.backends import HDFBackend
+
+    psd_backend = HDFBackend(psd_run_file)
+
+    psd_chain = psd_backend.get_chain(temp_index=0)["psd"].reshape(-1, 2)
+    logl_chain = psd_backend.get_log_like(temp_index=0).flatten()
+    best_psd_index = np.argmax(logl_chain)
+    best_psd_params = psd_chain[best_psd_index]
+
+    fixed_psd_kwargs = dict(
+        psd_params=best_psd_params,  # default scirdv1
+        galfor_params=None,
+    )
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
@@ -251,6 +264,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         preprocess_kwargs=preprocess_kwargs,
         normalize_window=normalize_window,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
+        fixed_psd_kwargs=fixed_psd_kwargs,
     )
 
     general_setup = GeneralSetup(general_settings)

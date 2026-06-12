@@ -144,7 +144,7 @@ class HyperbolicTangentGalacticForeground(StochasticContribution):
 
     @staticmethod
     def specific_Sh_function(
-        f: float | np.ndarray, amp: float, fk: float, alpha: float, s1: float, s2: float
+        f: float | np.ndarray, amp: float, fk: float, alpha: float, f_1: float, f_2: float
     ) -> float | np.ndarray:
         """Hyperbolic tangent model 1 for the Galaxy foreground noise
 
@@ -152,19 +152,19 @@ class HyperbolicTangentGalacticForeground(StochasticContribution):
 
         .. math::
 
-            S_\\text{gal} = \\frac{A_\\text{gal}}{2}e^{-s_1f^\\alpha}f^{-7/3}\\left[ 1 + \\tanh{\\left(-s_2 (f - f_k)\\right)} \\right],
+            S_\\text{gal} = \\frac{A_\\text{gal}}{2}e^{-\\left(f/f_1\\right)^\\alpha}f^{-7/3}\\left[ 1 + \\tanh{\\left(-(f - f_k)/f_2\\right)} \\right],
 
         where :math:`A_\\text{gal}` is the amplitude of the stochastic signal, :math:`f_k` is the knee frequency at which a bend occurs,
-        math:`\\alpha` is a power law parameter, :math:`s_1` is a slope parameter below the knee,
-        and :math:`s_2` is a slope parameter after the knee.:
+        math:`\\alpha` is a power law parameter, :math:`f_1` sets the exponential roll-off scale,
+        and :math:`f_2` sets the transition width around the knee.
 
         Args:
             f: Frequency array.
             amp: Amplitude parameter for the Galaxy.
             fk: Knee frequency in Hz.
             alpha: Power law parameter.
-            s1: Slope parameter below knee.
-            s2: Slope parameter above knee.
+            f_1: Exponential scale-frequency parameter.
+            f_2: Hyperbolic-tangent transition scale-frequency parameter.
 
         Returns:
             PSD of the Galaxy foreground noise
@@ -172,10 +172,10 @@ class HyperbolicTangentGalacticForeground(StochasticContribution):
         """
         Sgal = (
             amp
-            * np.exp(-(f**alpha) * s1)
+            * np.exp(-((f / f_1) ** alpha))
             * (f ** (-7.0 / 3.0))
             * 0.5
-            * (1.0 + np.tanh(-(f - fk) * s2))
+            * (1.0 + np.tanh(-(f - fk) / f_2))
         )
 
         return Sgal
@@ -223,7 +223,7 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
         2.09278117e-03,
         1.57362626e-03,
     ]
-    Slope1 = [
+    _Slope1 = [
         9.41315118e02,
         1.36887568e03,
         1.68729474e03,
@@ -233,7 +233,7 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
         3.74970124e03,
     ]
 
-    Slope2 = [
+    _Slope2 = [
         1.03239773e02,
         1.03351646e03,
         1.62204855e03,
@@ -242,6 +242,8 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
         2.95774596e03,
         3.15199454e03,
     ]
+    F1 = [s ** (-1.0 / 1.18300266e00) for s in _Slope1]
+    F2 = [1.0 / s for s in _Slope2]
     Tmax = 10 * YRSID_SI
 
     @classmethod
@@ -271,15 +273,15 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
             raise ValueError("Tobs is greater than the maximum allowable fit which is 10 years.")
 
         # Interpolate
-        tck1 = interpolate.splrep(cls.Xobs, cls.Slope1, s=0, k=1)
+        tck1 = interpolate.splrep(cls.Xobs, cls.F1, s=0, k=1)
         tck2 = interpolate.splrep(cls.Xobs, cls.knee, s=0, k=1)
-        tck3 = interpolate.splrep(cls.Xobs, cls.Slope2, s=0, k=1)
-        s1 = interpolate.splev(Tobs, tck1, der=0).item()
+        tck3 = interpolate.splrep(cls.Xobs, cls.F2, s=0, k=1)
+        f_1 = interpolate.splev(Tobs, tck1, der=0).item()
         fk = interpolate.splev(Tobs, tck2, der=0).item()
-        s2 = interpolate.splev(Tobs, tck3, der=0).item()
+        f_2 = interpolate.splev(Tobs, tck3, der=0).item()
 
         return HyperbolicTangentGalacticForeground.specific_Sh_function(
-            f, cls.amp, fk, cls.alpha, s1, s2
+            f, cls.amp, fk, cls.alpha, f_1, f_2
         )
 
 

@@ -80,6 +80,8 @@ class L1DataLoader:
         Additional keyword arguments for the orbits class.
     verbose : bool, optional
         Verbosity flag. Default is True.
+    store_individual_timeseries : bool, optional
+        Whether to store individual timeseries for each source type and ID. Default is False.
     """
 
     def __init__(
@@ -90,6 +92,7 @@ class L1DataLoader:
         orbits_class: Orbits = L1Orbits,
         orbits_kwargs: dict = None,
         verbose: bool = True,
+        store_individual_timeseries: bool = False,  # whether to store individual timeseries for each source type and ID
     ):
         self.data_folder = os.path.join(L1_folder, "data")
         self.catalogues_folder = os.path.join(L1_folder, "catalogues")
@@ -114,7 +117,7 @@ class L1DataLoader:
         self.orbits_class = orbits_class
         self.orbits_kwargs = orbits_kwargs
         self.verbose = verbose
-
+        self.store_individual_timeseries = store_individual_timeseries
         if self.verbose:
             logger.info(f"L1DataLoader initialized with data folder: {self.data_folder}")
             logger.info(f"Source types to load: {self.source_types}")
@@ -140,7 +143,7 @@ class L1DataLoader:
             "SOBHB": "sobhb_cat_mojito_lite_processed_MT.hdf5",
         }
 
-    def load_single_binary(self, group: h5py.Group, binary_id: int) -> dict:
+    def load_single_binary(self, group: h5py.Group, binary_id: int, source_type: str) -> dict:
         """
         Load a single binary source from the given HDF5 group.
 
@@ -154,13 +157,17 @@ class L1DataLoader:
         params = {}
         for key in group.keys():
             try:
-                ds = group[key]
+                if source_type in ["VGB", "GB"]:
+                    ds = group[key][:]
+                else:
+                    ds = group[key][binary_id]
+
                 if ds.dtype.kind == "O":  # object type (e.g. variable-length strings)
-                    val = ds[binary_id]
+                    val = ds
                     if isinstance(val, bytes):
                         val = val.decode()
                 else:
-                    val = ds[binary_id][()]
+                    val = ds[()]
                 params[key] = val
             except Exception as e:
                 raise e
@@ -168,6 +175,18 @@ class L1DataLoader:
 
     def _open(self, file_path: str) -> MojitoL1File:
         raise NotImplementedError("_open method should be implemented in subclasses.")
+
+    @property
+    def individual_timeseries(self) -> dict | None:
+        """
+        Property to access individual timeseries for each source type and ID.
+
+        Returns:
+            dict: A dictionary containing individual timeseries for each source type and ID.
+        """
+        if not hasattr(self, "_individual_timeseries"):
+            return None
+        return self._individual_timeseries
 
     def load_data(self) -> tuple:
         """
@@ -181,20 +200,48 @@ class L1DataLoader:
                 - orbits (Orbits): An instance of the Orbits class initialized with the loaded data.
         """
         xyz = None
+        orbits: Orbits = None
 
+        if self.store_individual_timeseries:
+            _individual_timeseries = (
+                {}
+            )  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis.
+
+        import time as _t
         if "NOISE" in self.source_types:
             subfolder = os.path.join(self.data_folder, "INSTRUMENT", "L1")
             file_path = find_file(subfolder, "NOISE", 00)
 
+            if orbits is None:
+                _t0 = _t.perf_counter()
+                orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
+                print(f"[load_data] L1Orbits(...) (incl. _setup) took {_t.perf_counter()-_t0:.2f}s", flush=True)
+                _t0 = _t.perf_counter()
+                orbits.configure(linear_interp_setup=True)
+                print(f"[load_data] orbits.configure(linear_interp_setup=True) took {_t.perf_counter()-_t0:.2f}s", flush=True)
+                logger.info(f"Initialized orbits from NOISE file.")
+
             with self._open(file_path) as f:
+                _t0 = _t.perf_counter()
                 xyz = f.tdis.xyz_doppler[:]
+                print(f"[load_data] NOISE f.tdis.xyz_doppler[:] took {_t.perf_counter()-_t0:.2f}s shape={xyz.shape}", flush=True)
 
                 tdi_dt = f.tdis.time_sampling.dt  # time step in seconds
                 tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
                 tdi_times = f.tdis.time_sampling.t()
 
-            orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
-            orbits.configure(linear_interp_setup=True)
+                if self.store_individual_timeseries:
+                    noise_covariance = f.noise_estimates.xyz[:] / (f.laser_frequency**2)
+                    noise_frequencies = f.noise_estimates.freq_sampling.f()
+                    noise_times = f.noise_estimates.time_sampling.t()
+
+                    _individual_timeseries["NOISE"] = (
+                        xyz.T.copy()
+                    )  # store the noise timeseries separately if needed
+                    _individual_timeseries["PSD_MATRIX"] = noise_covariance
+                    _individual_timeseries["PSD_FREQUENCIES"] = noise_frequencies
+                    _individual_timeseries["PSD_TIMES"] = noise_times
+
             self.source_types.remove("NOISE")
 
             if self.verbose:
@@ -210,64 +257,119 @@ class L1DataLoader:
             if source_type in ["GB", "VGB"]:
                 ids = [0]  # only one file for GB/VGB
             else:
-                ids = self.source_ids.get(source_type, [])            
+                ids = self.source_ids.get(source_type, [])
 
             if not isinstance(ids, list):
                 ids = [ids]
             if len(ids) == 0:
                 raise ValueError(f"No source IDs provided for source type '{source_type}'.")
 
-            binary_params = h5py.File(
-                os.path.join(self.catalogues_folder, self.catalogues_map.get(source_type)),
-                "r",
-            )["Binaries"]
+            catalogue_path = os.path.join(
+                self.catalogues_folder, self.catalogues_map.get(source_type)
+            )
 
             self.catalogue[source_type] = {}
 
             if self.verbose:
                 logger.info(f"Loading data for source type '{source_type}'")
 
-            for source_id in tqdm(
-                ids, desc=f"Loading {source_type} sources", disable=not self.verbose
-            ):
-                file_path = find_file(subfolder, source_type, source_id)
+            with h5py.File(catalogue_path, "r") as catalogue_file:
+                binary_params = catalogue_file["Binaries"]
+                for source_id in tqdm(
+                    ids, desc=f"Loading {source_type} sources", disable=not self.verbose
+                ):
+                    file_path = find_file(subfolder, source_type, source_id)
 
-                self.catalogue[source_type][source_id] = self.load_single_binary(
-                    binary_params, source_id
-                )
-                if self.verbose:
-                    logger.info(
-                        f"Loaded catalogue parameters for {source_type} source ID {source_id} from catalogue."
+                    self.catalogue[source_type][source_id] = self.load_single_binary(
+                        binary_params, source_id, source_type
                     )
+                    if self.verbose:
+                        logger.info(
+                            f"Loaded catalogue parameters for {source_type} source ID {source_id} from catalogue."
+                        )
 
-                with self._open(file_path) as f:
-                    _xyz = f.tdis.xyz_doppler[:]
-                    _tdi_dt = f.tdis.time_sampling.dt  # time step in seconds
-                    _tdi_times = f.tdis.time_sampling.t()
-                    _tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
-                    if xyz is None:
-                        xyz = _xyz
-                        tdi_dt = _tdi_dt
-                        tdi_times = _tdi_times
-                        tdi_fs = _tdi_fs
+                    with self._open(file_path) as f:
+                        _t0 = _t.perf_counter()
+                        _xyz = f.tdis.xyz_doppler[:]
+                        print(f"[load_data] {source_type} source {source_id} f.tdis.xyz_doppler[:] took {_t.perf_counter()-_t0:.2f}s shape={_xyz.shape}", flush=True)
+                        _tdi_dt = f.tdis.time_sampling.dt  # time step in seconds
+                        _tdi_times = f.tdis.time_sampling.t()
+                        _tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
+                        if xyz is None:
+                            xyz = _xyz
+                            tdi_dt = _tdi_dt
+                            tdi_times = _tdi_times
+                            tdi_fs = _tdi_fs
 
-                        orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
-                        orbits.configure(linear_interp_setup=True)
+                            if orbits is None:
+                                orbits: Orbits = self.orbits_class(
+                                    file_path, **(self.orbits_kwargs or {})
+                                )
+                                orbits.configure(linear_interp_setup=True)
+                                logger.info(f"Initialized orbits from {source_type} file.")
 
-                    else:
-                        xyz += _xyz
-                        assert tdi_dt == _tdi_dt, "Time steps do not match between files."
-                        assert tdi_fs == _tdi_fs, "Sampling frequencies do not match between files."
-                        assert (
-                            tdi_times == _tdi_times
-                        ).all(), "Time arrays do not match between files."
+                        else:
+                            xyz += _xyz
+                            assert tdi_dt == _tdi_dt, "Time steps do not match between files."
+                            assert tdi_fs == _tdi_fs, "Sampling frequencies do not match between files."
+                            assert (
+                                tdi_times == _tdi_times
+                            ).all(), "Time arrays do not match between files."
+
+                        if self.store_individual_timeseries:
+                            _individual_timeseries[f"{source_type}_{source_id}"] = (
+                                _xyz.T.copy()
+                            )  # store individual timeseries for this source
 
         xyz = xyz.T  # Transpose to have shape (n_channels, n_times)
         assert (
             xyz.shape[1] == tdi_times.shape[0]
         ), "Data time dimension does not match time array length."
 
+        assert orbits is not None, "Orbits were not initialized from any file."
+
+        if self.store_individual_timeseries:
+            self._individual_timeseries = (
+                _individual_timeseries  # store the individual timeseries for potential further use
+            )
+
         return tdi_times, tdi_fs, xyz, orbits
+
+    def dump_individual_timeseries(self, file_path: str, delete_after_dump: bool = False):
+        """
+        Dump the individual timeseries for each source type and ID to a .h5 file for debugging or further analysis.
+
+        Args:
+            file_path (str): The path to the output .h5 file.
+            delete_after_dump (bool, optional): Whether to delete the individual timeseries after dumping them. Defaults to False.
+        """
+        with h5py.File(file_path, "w") as f:
+            for key, ts_data in self.individual_timeseries.items():
+                f.create_dataset(key, data=ts_data)
+        if self.verbose:
+            logger.info(f"Dumped individual timeseries to {file_path}")
+
+        if delete_after_dump:
+            self.individual_timeseries.clear()
+
+    def dump_catalogue(self, file_path: str):
+        """
+        Dump the loaded catalogue parameters to a .h5 file for debugging or further analysis.
+
+        Args:
+            file_path (str): The path to the output .h5 file.
+        """
+        with h5py.File(file_path, "w") as f:
+            for source_type, sources in self.catalogue.items():
+                grp = f.create_group(source_type)
+                for source_id, params in sources.items():
+                    subgrp = grp.create_group(f"source_{source_id}")
+                    for param_key, param_value in params.items():
+                        if isinstance(param_value, str):
+                            param_value = np.string_(param_value)  # convert to bytes for h5py
+                        subgrp.create_dataset(param_key, data=param_value)
+        if self.verbose:
+            logger.info(f"Dumped catalogue parameters to {file_path}")
 
 
 class SangriaDataLoader:
@@ -377,6 +479,13 @@ class SignalProcessor:
         self.verbose = verbose
         self.do_plots = do_plots
 
+        self._original_t0 = float(times[0])  # store original t0 for reference in case of trimming
+
+    @property
+    def original_t0(self) -> float:
+        """Original start time of the data before any trimming."""
+        return self._original_t0
+
     def _to_mp_dict(self):
         """ndarray (n_ch, N) -> {'X': arr, 'Y': arr, 'Z': arr}"""
         return {ch: self.data[i] for i, ch in enumerate(self._CHANNEL_NAMES[: self.data.shape[0]])}
@@ -385,7 +494,9 @@ class SignalProcessor:
         """{'X': arr, 'Y': arr, 'Z': arr} -> ndarray (n_ch, N)"""
         return np.vstack([mp_data[ch] for ch in self._CHANNEL_NAMES if ch in mp_data])
 
-    def _filter_via_mp(self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True):
+    def _filter_via_mp(
+        self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True
+    ):
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.filter(low=low, high=high, order=order, filter_type=filter_type, zero_phase=zero_phase)
         return self._from_mp_dict(mp.data)
@@ -545,6 +656,17 @@ class SignalProcessor:
         np.ndarray
             Downsampled data array.
         """
+        if target_fs == self.fs:
+            if self.verbose:
+                logger.info(
+                    f"Target sampling frequency is the same as current fs ({self.fs} Hz). No downsampling applied."
+                )
+            return self.data
+        elif target_fs > self.fs:
+            raise ValueError(
+                f"Target sampling frequency ({target_fs} Hz) must be less than current fs ({self.fs} Hz) for downsampling."
+            )
+
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.downsample(target_fs=target_fs, window=window, padtype=padtype)
         self.data = self._from_mp_dict(mp.data)
@@ -836,6 +958,7 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         orbits_class: Orbits = L1Orbits,
         orbits_kwargs: dict = None,
         verbose: bool = True,
+        store_individual_timeseries: bool = False,
         do_plots: bool = False,
         Tobs: float = None
     ):
@@ -847,6 +970,7 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
             orbits_class=orbits_class,
             orbits_kwargs=orbits_kwargs,
             verbose=verbose,
+            store_individual_timeseries=store_individual_timeseries,
         )
 
         times, fs, data_xyz, orbits = self.load_data()
@@ -862,6 +986,34 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
 
     def _open(self, file_path: str) -> MojitoL1File:
         return MojitoL1File(file_path)
+
+    def process(self, *args, **kwargs):
+        """
+        Apply identical processing to the main data and all individual timeseries.
+        """
+        if hasattr(self, "individual_timeseries") and self.individual_timeseries is not None:
+            for key, ts_data in self.individual_timeseries.items():
+                if "PSD" in key:  # skip processing for PSD data
+                    continue
+                temp_processor = BaseProcessingStep(
+                    times=self.times.copy(),
+                    data=ts_data.copy(),
+                    fs=self.fs,
+                    verbose=False,  # Suppress logs for the individual processing
+                    do_plots=False,
+                )
+                _, ts_data = temp_processor.process(*args, **kwargs)
+                self.individual_timeseries[key] = ts_data
+
+        processed_times, processed_data = super().process(*args, **kwargs)
+
+        if hasattr(self, "individual_timeseries") and self.individual_timeseries is not None:
+            self.individual_timeseries["TIMES"] = (
+                processed_times  # store the processed times as well
+            )
+            self.individual_timeseries["COMBINED"] = processed_data
+
+        return processed_times, processed_data
 
 
 class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
@@ -886,3 +1038,6 @@ class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
         BaseProcessingStep.__init__(self, times, data_xyz, fs, verbose=verbose, do_plots=do_plots)
 
         self.orbits = None  # no orbital information available in Sangria files
+        self.individual_timeseries = (
+            {}
+        )  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis

@@ -19,18 +19,20 @@ import logging
 
 from eryn.backends import HDFBackend as eryn_Backend
 from eryn.moves.tempering import make_ladder
-from eryn.prior import ProbDistContainer, uniform_dist
+from eryn.prior import ProbDistContainer, uniform_dist, log_uniform
 from eryn.state import State as ErynState
 from eryn.state import Branch as ErynBranch
 from eryn.utils import TransformContainer
 from gbgpu.utils.utility import get_fdot, get_N
 
+from lisatools.sources.utils import ecliptic_to_icrs
 from lisatools.utils.utility import AET, detrend, tukey
 from lisatools.utils.constants import YRSID_SI, PC_SI
 
 from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ..engine import Settings, Setup, GeneralSetup
 from ..loginfo import init_logger
+from ..priors.gbpriors import get_fdot_mojito
 
 
 @dataclasses.dataclass
@@ -48,19 +50,22 @@ class GBSettings(Settings):
     phi0_lims: typing.List[float] = dataclasses.field(default_factory=list)
     iota_lims: typing.List[float] = dataclasses.field(default_factory=list)
     psi_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    lam_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    beta_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    alpha_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    delta_lims: typing.List[float] = dataclasses.field(default_factory=list)
     start_freq: float = 0.0001  # this might get adjusted ?
     end_freq: float = 0.025
     oversample: int = 4. # FD
     extra_buffer: int = 5
     start_resample_iter: Optional[typing.Tuple[int]] = (-1,)  # -1 so that it starts right at the start of PE
     iter_count_per_resample: Optional[int] = 10
+    num_repeat_proposals: int = 100
+    search_kwargs: Optional[dict] = None
     group_proposal_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
     t0: Optional[float] = 0.0
     tdi_setup: Optional[str] = "XYZ" # other options are AET and AE.
     use_tdi2: Optional[bool] = True
+    waveform_kwargs: dict = dataclasses.field(default_factory=dict)
     # Domain selection for this branch. The user passes the same
     # ``DomainSettingsBase`` that lives on the parent ``GeneralSetup``
     # (FDSettings, STFTSettings, WDMSettings, ...). The band structure /
@@ -157,21 +162,46 @@ class GBSetup(Setup, GBSettings):
         self.init_setup()
 
     def init_sampling_info(self):
-        """Build the GB :class:`TransformContainer`, prior, periodicity, and waveform kwargs."""
-        input_basis = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
+        """Build the GB :class:`TransformContainer`, prior, periodicity, and waveform kwargs.
+
+        stft_tof basis (kept at the 2026-06 merge): named LaTeX parameters
+        with ICRS sky angles (alpha / sin(delta)) -- the run frame is ICRS --
+        and the named transforms that the GB info-matrix proposal looks up
+        (``parameter_transforms.original_parameter_transforms[r"$\\log A$"]``
+        etc. in :mod:`..moves.gbspecialstretch`).
+        """
+        input_basis = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$",
+                       r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
 
         if self.transform is None:
-            self.transform = make_gb_transform_container()
+            gb_transform_fn_in = {
+                r"$\log A$": np.exp,
+                r"$f_0$": f_ms_to_s,
+                r"$\phi_0$": lambda x: -1 * x,  # flip sign of phi0 to match JaxGB convention.
+                r"$\cos\iota$": np.arccos,
+                r"$\sin\delta$": np.arcsin,
+
+            }
+
+            output_basis = [
+                r"$\log A$", r"$f_0$", r"$\dot{f}$",
+                r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$",
+                r"$\psi$", r"$\alpha$", r"$\sin\delta$"
+            ]
+
+            gb_fill_dict = {r"$\ddot{f}$": 0.0}
+
+            self.transform = TransformContainer(
+                input_basis=input_basis,
+                output_basis=output_basis,
+                parameter_transforms=gb_transform_fn_in,
+                fill_dict=gb_fill_dict,
+            )
 
         if self.periodic is None:
-            # Use integer indices (relative to ``input_basis``) so eryn's
-            # ``PeriodicContainer`` can build without needing ``key_order``;
-            # the underlying parameter order is ``input_basis``.
-            self.periodic = {"gb": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}}
+            self.periodic = {"gb": {r"$\phi_0$": 2*np.pi, r"$\psi$": np.pi, r"$\alpha$": 2 * np.pi}}
 
-        self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
-            # TODO: change to scaled linear in amplitude!?!
             priors_gb = {
                 input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
                 input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
@@ -179,37 +209,18 @@ class GBSetup(Setup, GBSettings):
                 input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
                 input_basis[4]: uniform_dist(*np.cos(self.iota_lims)),
                 input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
-                input_basis[6]: uniform_dist(self.lam_lims[0], self.lam_lims[1]),
-                input_basis[7]: uniform_dist(*np.sin(self.beta_lims)),
+                input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
+                input_basis[7]: uniform_dist(*np.sin(self.delta_lims)),
             }
 
-            # TODO: orbits check against sangria/sangria_hm
-
-            # priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
             self.priors = {"gb": ProbDistContainer(priors_gb)}
 
         if self.betas is None:
-            snrs_ladder = np.array(
-                [
-                    1.0,
-                    1.5,
-                    2.0,
-                    3.0,
-                    4.0,
-                    5.0,
-                    7.5,
-                    10.0,
-                    15.0,
-                    20.0,
-                    35.0,
-                    50.0,
-                    75.0,
-                    125.0,
-                    250.0,
-                    5e2,
-                ]
-            )
-            ntemps_pe = 4  # len(snrs_ladder)
+            # snrs_ladder = np.array(
+            #     [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0,
+            #      15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2]
+            # )
+            ntemps_pe = 24 # len(snrs_ladder)
             # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
             betas = 1 / 1.2 ** np.arange(ntemps_pe)
             betas[-1] = 0.0001
@@ -222,24 +233,41 @@ class GBSetup(Setup, GBSettings):
             self.initialize_kwargs = {}
 
         # GBGPU FD waveform kwargs. The WDM-domain engine in
-        # ``_gb_likelihood.WDMBandLikelihoodEngine`` ignores
+        # ``gb_likelihood.WDMBandLikelihoodEngine`` ignores
         # ``start_freq_ind`` / ``oversample`` (it dispatches to the WDM C
         # kernel via ``GBWDMComputations``), but we keep the same dict so
         # the down-stream Buffer's ``tdi_channel_setup`` read still works
-        # on either path.
-        self.waveform_kwargs = dict(
-            dt=self.dt,
-            T=self.Tobs,
-            use_c_implementation=True,
-            oversample=self.oversample,
-            start_freq_ind=self.start_freq_ind,
-            tdi_channel_setup=self.tdi_setup,
-            tdi2=self.use_tdi2
-        )
+        # on either path. The settings file may pre-populate
+        # ``waveform_kwargs`` (stft_tof field); this default is built from
+        # the other fields only when it is left empty.
+        if not self.waveform_kwargs:
+            self.waveform_kwargs = dict(
+                dt=self.dt,
+                T=self.Tobs,
+                use_c_implementation=True,
+                oversample=self.oversample,
+                start_freq_ind=self.start_freq_ind,
+                tdi_channel_setup=self.tdi_setup,
+                tdi2=self.use_tdi2
+            )
 
         if self.group_proposal_kwargs is None:
             self.group_proposal_kwargs: typing.Dict[str, Any] = dict(
                 n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=200
+            )
+        
+        if self.search_kwargs is None:
+            self.search_kwargs: typing.Dict[str, Any] = dict(
+                nwalkers = 32,
+                ntemps = 24,
+                shutoff_band_iteration = 5,
+                shutoff_frequency_threshold = None, # 4e-3 
+                burn_1 = 200,
+                nsteps_1 = 200,
+                snr_threshold = 8.0,
+                burn_2 = 500,
+                nsteps_2 = 500,
+                refit_start_iteration = 5 
             )
 
     # def __getattr__(self, attr: str) -> typing.Any:
@@ -323,38 +351,48 @@ class GBSetup(Setup, GBSettings):
             )
         else:
             # FD path: bands sized in multiples of ``df = 1/Tobs`` using the
-            # FD-oversampled per-band N. Walks down from ``end_freq``.
+            # FD-oversampled per-band N. Walks down from ``end_freq``
+            # (stft_tof refinements: half-bin start, min_N stop guard, and
+            # edge trim against out-of-bound indexing).
             # TODO: assign to binned f or leave general? probably better to be general
             band_edges_in_reverse_order = [self.end_freq]
-            band_N_vals_reverse_order = []
-            # determines N from high_Frequency edge of sub-band
             current_N = get_N(1e-30, self.end_freq, self.Tobs, oversample=self.oversample).item()
-            band_N_vals_reverse_order.append(current_N)
+            min_N = get_N(1e-30, self.start_freq, self.Tobs, oversample=self.oversample).item()
+            band_N_vals_reverse_order = [current_N]
 
-            current_freq = self.end_freq
+            current_freq = self.end_freq - self.df / 2
             last_freq = self.end_freq
-            while current_freq > self.start_freq:
+            while current_freq > self.start_freq + min_N * self.df:
                 current_freq = last_freq - (current_N * 2 + self.extra_buffer) * self.df
                 band_edges_in_reverse_order.append(current_freq)
                 current_N = get_N(1e-30, current_freq, self.Tobs, oversample=self.oversample).item()
                 band_N_vals_reverse_order.append(current_N)
                 last_freq = current_freq
-            band_edges_in_reverse_order.append(
-                last_freq - (current_N * 2 + self.extra_buffer) * self.df
-            )
 
-            self.band_edges = np.asarray(band_edges_in_reverse_order)[::-1]
-            self.band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
+            band_edges = np.asarray(band_edges_in_reverse_order)[::-1]
+            band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
 
-        self.logger.debug("NEED TO THINK ABOUT mCHIRP prior")
+            # trim edges to avoid out of bound indexing
+            self.band_edges = band_edges[2:-1]
+            self.band_N_vals = band_N_vals[2:-1]
+
         self.f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
-        fdot_max_val = get_fdot(self.f0_lims[-1], Mc=self.m_chirp_lims[-1])
 
-        self.fdot_lims = [-fdot_max_val, fdot_max_val]
+        self.fdot_lims = [
+            get_fdot_mojito(self.f0_lims[1], sign="-"), 
+            get_fdot_mojito(self.f0_lims[1], sign="+"), 
+        ]
 
-        self.num_sub_bands = len(self.band_edges)
+        self.num_sub_bands = len(self.band_edges) - 1
+        
+        self.logger.info(
+            f"GB f0 prior range is set from {round(self.f0_lims[0],7)} to {round(self.f0_lims[1],7)}"
+        )
+        self.logger.info(f"The number of subbands is {self.num_sub_bands}")
+        self.logger.info(f"Min freq of subbands is {self.band_edges.min()}")
+        self.logger.info(f"Max freq of subbands is {self.band_edges.max()}")
 
-
+        
 def mbh_dist_trans(x):
     """Transform an MBH ``ln total mass`` parameter (named for pickling support)."""
     return x * PC_SI * 1e9  # Gpc
@@ -366,6 +404,14 @@ def gpc_to_mpc(x):
     """
     return x * 1e3
 
+def mT_Q(M, Q):
+    """
+    Transform from total mass and mass ratio m1/m2 to m1 and m2.
+    """
+    m2 = M / (1 + Q)
+    m1 = Q * m2
+    assert np.all(m1 >= m2), "m1 should be the larger mass"
+    return m1, m2
 
 def mpc_to_gpc(x):
     """
@@ -444,6 +490,8 @@ from ..hdfbackend import MBHHDFBackend
 from ..state import MBHState
 
 
+
+
 @dataclasses.dataclass
 class MBHSettings(Settings):
     """Settings dataclass describing the MBH branch in an Erebor-style recipe."""
@@ -476,23 +524,10 @@ class MBHSetup(Setup):
 
     def init_sampling_info(self):
         """Build the MBH :class:`TransformContainer`, prior, periodicity, and waveform kwargs."""
-        # input_basis = [
-        #     "logM",
-        #     "q",
-        #     "s1z",
-        #     "s2z",
-        #     "dist",
-        #     "phi_ref",
-        #     "cos_iota",
-        #     "lam",
-        #     "sin_beta",
-        #     "psi",
-        #     "t_ref",
-        # ]
 
         input_basis = [
             "logM",
-            "q",
+            "Q",
             "s1z",
             "s2z",
             "dist",
@@ -505,7 +540,45 @@ class MBHSetup(Setup):
         ]
 
         if self.transform is None:
-            self.transform = make_mbh_transform_container()
+            # stft_tof MBH transform (kept at the 2026-06 merge): samples in
+            # the LISA frame, converts to SSB, then maps sky + polarization
+            # to ICRS (the run frame) via ecliptic_to_icrs.
+            output_basis = [
+                "logM",
+                "Q",
+                "s1z",
+                "s2z",
+                "dist",
+                "phi_ref",
+                # "f_ref",
+                "cos_iota",
+                "psi",
+                "lam",
+                "sin_beta",
+                # "psi",
+                "t_plunge",
+            ]
+
+            mbh_transform_fn_in = {
+                "logM": np.exp,
+                "dist": gpc_to_mpc,
+                "cos_iota": np.arccos,
+                "sin_beta": np.arcsin,
+                ("logM", "Q"): mT_Q,
+                ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
+                ("lam", "sin_beta", "psi"): ecliptic_to_icrs,
+            }
+
+            # for transforms
+            # mbh_fill_dict = {"f_ref": 0.0}
+            mbh_fill_dict = {}
+
+            self.transform = TransformContainer(
+                input_basis=input_basis,
+                output_basis=output_basis,
+                parameter_transforms=mbh_transform_fn_in,
+                fill_dict=mbh_fill_dict,
+            )
 
         if self.periodic is None:
             self.periodic = {"mbh": {"phi_ref": 2 * np.pi, "lam": 2 * np.pi, "psi": np.pi}}
@@ -513,14 +586,14 @@ class MBHSetup(Setup):
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
             priors_mbh = {
-                "logM": uniform_dist(np.log(1e4), np.log(1e8)),
-                "q": uniform_dist(0.01, 0.999999999),
+                "logM": uniform_dist(np.log(1e5), np.log(1e8)),
+                "Q": log_uniform(1., 10.),
                 "s1z": uniform_dist(-0.99999999, +0.99999999),
                 "s2z": uniform_dist(-0.99999999, +0.99999999),
-                "dist": uniform_dist(0.01, 1000.0),
+                "dist": uniform_dist(1, 150.0), # uniform_dist(0.01, 1000.0),
                 "phi_ref": uniform_dist(0.0, 2 * np.pi),
                 "cos_iota": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                "psi": uniform_dist(0.0, 2 * np.pi),
+                "psi": uniform_dist(0.0, np.pi), #is this right?
                 "lam": uniform_dist(0.0, 2 * np.pi),
                 "sin_beta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                 "t_plunge": uniform_dist(0.0, self.Tobs + 3600.0),
@@ -1110,10 +1183,10 @@ class PSDSettings(Settings):
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 4
-    transform_fn: Optional[TransformContainer] = None
+    transform: Optional[TransformContainer] = None
     injection: Optional[np.ndarray] = None 
     nknots: Optional[int] = None
-
+    num_prop_repeats: int = 50
 
 class PSDSetup(Setup):
     """:class:`Setup` for the instrumental PSD branch in the Erebor recipe.
@@ -1188,6 +1261,7 @@ class GalForSettings(Settings):
     """
 
     galfor_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
+    transform: Optional[TransformContainer] = None
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 5

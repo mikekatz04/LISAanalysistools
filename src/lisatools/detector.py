@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 import h5py
+from logging import getLogger
 import numpy as np
 import requests
 from scipy import interpolate
@@ -29,11 +30,47 @@ except (ModuleNotFoundError, ImportError):
     jnp = None
     jax_here = False
 
+logger = getLogger(__name__)
+
 SC = [1, 2, 3]
 LINKS = [12, 23, 31, 13, 32, 21]
 
 LINEAR_INTERP_TIMESTEP = 50.00  # 600.00  # sec (0.25 hr)
 
+
+def icrs_to_ecliptic(positions_icrs: np.ndarray) -> np.ndarray:
+    """
+    Convert cartesian positions from ICRS to ecliptic coordinates.
+
+    Args:
+        positions_icrs: Array of shape (n_times, 3, 3) representing positions
+                        in ICRS frame for 3 spacecraft over n_times.
+
+    Returns:
+        positions_ecliptic: Array of shape (n_times, 3, 3) in ecliptic frame.
+    """
+
+    import astropy
+
+    positions_ecliptic = np.zeros_like(positions_icrs)
+
+    for sc in range(3):
+
+        c_icrs = astropy.coordinates.SkyCoord(
+            positions_icrs[:, sc, 0],
+            positions_icrs[:, sc, 1],
+            positions_icrs[:, sc, 2],
+            frame="icrs",
+            unit="m",
+            representation_type="cartesian",
+        )
+        c_ecliptic = c_icrs.transform_to(astropy.coordinates.BarycentricMeanEcliptic)
+        c_ecliptic.representation_type = "cartesian"
+        positions_ecliptic[:, sc, :] = np.array(
+            [c_ecliptic.x.value, c_ecliptic.y.value, c_ecliptic.z.value]
+        ).T
+
+    return positions_ecliptic
 
 class Orbits(LISAToolsParallelModule, ABC):
     """LISA Orbit Base Class
@@ -59,7 +96,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         force_backend: Optional[str] = None,
         t0: Optional[float] = 0.0,
         frame: str = "ecliptic",
-        **kwargs
+        **kwargs,
     ) -> None:
 
         # TODO: should we make it compute armlength.
@@ -84,6 +121,21 @@ class Orbits(LISAToolsParallelModule, ABC):
                 f"frame must be 'ecliptic' or 'icrs', got {frame!r}."
             )
         self._frame = frame
+
+    @property
+    def args(self):
+        """Arguments for recreating this class instance."""
+        return (self.filename,)
+
+    @property
+    def kwargs(self):
+        """Keyword arguments for recreating this class instance."""
+        return {
+            "armlength": self.armlength,
+            "force_backend": self.backend.backend_name.split("_")[-1],
+            "t0": self.t0,
+            "frame": self.frame,
+        }
 
     @property
     def xp(self):
@@ -286,6 +338,11 @@ class Orbits(LISAToolsParallelModule, ABC):
         """Set Spacecraft velocities."""
         return self._v
 
+    @property
+    def average_ltt(self) -> float:
+        """Average light travel time."""
+        return float(np.mean(self.ltt))
+
     def configure(
         self,
         t_arr: Optional[np.ndarray] = None,
@@ -365,7 +422,7 @@ class Orbits(LISAToolsParallelModule, ABC):
                 self.t0,
                 dt,
                 len(self.t),
-                self.t0, 
+                self.t0,
                 dt,
                 len(self.t),
                 self.xp.asarray(self.n.flatten().copy()),
@@ -582,6 +639,89 @@ class Orbits(LISAToolsParallelModule, ABC):
         if squeeze:
             return output.squeeze()
         return output
+    
+    def get_constellation_angles(self, t: float | np.ndarray) -> tuple[float | np.ndarray, float | np.ndarray]:
+        """
+        Compute LISA orbital phase (:math:`\\alpha`) and constellation rotation (:math:`\\beta`) from spacecraft positions at given time(s).
+        Computes with the c++ backend.
+        Adapted from @Federico Pozzoli.
+
+        Args:
+            t: Time array in seconds.
+        
+        Returns:
+            alpha: Orbital phase of the constellation in the ecliptic plane (radians).
+            beta: Constellation rotation angle (radians).
+        """
+        squeeze = isinstance(t, float)
+        if isinstance(t, float) and t < self.sc_t[0]:
+            msg = (
+                f"Time {t} is before the start of the spacecraft time grid {self.sc_t[0]}. "
+                "Setting `t` to the start of the grid for this computation."
+                )
+            logger.warning(msg)
+                           
+            t = self.sc_t[0]
+        
+        elif isinstance(t, (np.ndarray, self.xp.ndarray)) and np.any(t < self.sc_t[0]):
+            msg = (
+                    f"Some times in `t` are before the start of the spacecraft time grid `t_0 = {self.sc_t[0]} s`. "
+                    "If providing an array, make sure all times are within the spacecraft time grid: "
+                    f"{self.sc_t[0]} s to {self.sc_t[-1]} s."
+                )
+            raise ValueError(msg)
+
+        sc1_pos = self.get_pos(t, sc=1)
+        sc2_pos = self.get_pos(t, sc=2)
+        sc3_pos = self.get_pos(t, sc=3)
+
+        # move to host if on gpu
+        if hasattr(sc1_pos, "get"):
+            sc1_pos = sc1_pos.get()
+            sc2_pos = sc2_pos.get()
+            sc3_pos = sc3_pos.get()
+
+        # make sure everything is 2D here
+        sc1_pos = np.atleast_2d(sc1_pos)
+        sc2_pos = np.atleast_2d(sc2_pos)
+        sc3_pos = np.atleast_2d(sc3_pos)
+
+        if hasattr(self, "frame") and self.frame == "icrs":
+            # convert to ecliptic coordinates if needed
+            all_positions = np.stack([sc1_pos, sc2_pos, sc3_pos], axis=1)  # shape (n_times, 3, 3)
+            all_positions_ecliptic = icrs_to_ecliptic(all_positions)
+            sc1_pos = all_positions_ecliptic[:, 0, :]
+            sc2_pos = all_positions_ecliptic[:, 1, :]
+            sc3_pos = all_positions_ecliptic[:, 2, :]
+
+        # Compute LISA barycenter in ecliptic frame
+        r_bc = (sc1_pos + sc2_pos + sc3_pos) / 3.0
+
+        # α: Phase of barycenter in ecliptic plane
+        alpha = np.arctan2(r_bc[:, 1], r_bc[:, 0])
+        
+        # For beta, measure rotation of constellation
+        # Use arm L̂2 (SC3 - SC2) which should point in +x̂ direction when beta = 0
+        arm2_vec = sc3_pos - sc2_pos
+        # Project onto ecliptic plane (xy components)
+        arm2_x = arm2_vec[:, 0]
+        arm2_y = arm2_vec[:, 1]
+
+        # Angle of L̂2 in ecliptic SSB coordinates
+        psi2 = np.arctan2(arm2_y, arm2_x)
+
+        # In the constellation frame at beta=0, L̂2 points in +x̂ direction
+        # The constellation frame rotates with the barycenter, so:
+        # beta = (angle of L̂2 in ecliptic SSB) - alpha
+        beta = psi2 - alpha
+        
+        # Normalize to [-π, π)
+        beta = np.arctan2(np.sin(beta), np.cos(beta))
+
+        if squeeze:
+            return float(alpha[0]), float(beta[0])
+        return alpha, beta
+
 
     @property
     def ptr(self) -> int:
@@ -608,6 +748,10 @@ class EqualArmlengthOrbits(Orbits):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__("equalarmlength-orbits.h5", *args, **kwargs)
 
+    @property
+    def args(self):
+        """Arguments for recreating this class instance."""
+        return ()
 
 class ESAOrbits(Orbits):
     """ESA Orbits
@@ -623,44 +767,11 @@ class ESAOrbits(Orbits):
     def __init__(self, *args, **kwargs):
         super().__init__("esa-trailing-orbits.h5", *args, **kwargs)
 
+    @property
+    def args(self):
+        """Arguments for recreating this class instance."""
+        return ()
 
-def icrs_to_ecliptic(positions_icrs):
-    """
-    Convert cartesian positions from ICRS to ecliptic coordinates.
-
-    Args:
-        positions_icrs: Array of shape (n_times, 3, 3) representing positions
-                        in ICRS frame for 3 spacecraft over n_times.
-    
-    Returns:
-        positions_ecliptic: Array of shape (n_times, 3, 3) in ecliptic frame.
-    """
-
-    import astropy
-
-    positions_ecliptic = np.zeros_like(positions_icrs)
-
-    for sc in range(3):
-
-        c_icrs = astropy.coordinates.SkyCoord(
-            positions_icrs[:, sc, 0],
-            positions_icrs[:, sc, 1],
-            positions_icrs[:, sc, 2],
-            frame="icrs",
-            unit="m",
-            representation_type="cartesian",
-        )
-        # BarycentricTrueEcliptic to match the sky-angle conversions in
-        # lisatools.sources.utils / lisatools.response.directresponse
-        # ('barycentrictrueecliptic') so orbits and sky coordinates land in
-        # the identical ecliptic frame.
-        c_ecliptic = c_icrs.transform_to(astropy.coordinates.BarycentricTrueEcliptic)
-        c_ecliptic.representation_type = "cartesian"
-        positions_ecliptic[:, sc, :] = np.array(
-            [c_ecliptic.x.value, c_ecliptic.y.value, c_ecliptic.z.value]
-        ).T
-
-    return positions_ecliptic
 
 
 class L1Orbits(Orbits):
@@ -691,9 +802,8 @@ class L1Orbits(Orbits):
     def kwargs(self):
         """Keyword arguments for recreating this class instance."""
         return {
-            "filename": self.filename,
             "armlength": self.armlength,
-            "force_backend": self.backend,
+            "force_backend": self.backend.backend_name.split("_")[-1],
             "frame": self.frame,
         }
         
@@ -713,7 +823,7 @@ class L1Orbits(Orbits):
 
         with self.open() as f:
             # Load light travel times and their time array
-            self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6)
+            self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6) 
             self.ltt_t = f.ltts.time_sampling.t()  # Shape: (N_ltt_times,)
             
             # Load spacecraft positions and their time array
@@ -927,6 +1037,7 @@ class L1Orbits(Orbits):
                 
         # Interpolate positions from their native time grid to target grid
         # _pos_data is (N_pos, 3_sc, 3_xyz)
+
         pos_interp_shape = (len(t_arr), 3, 3)
         pos_interpolated = np.zeros(pos_interp_shape)
         vel_interpolated = np.zeros(pos_interp_shape)
@@ -945,14 +1056,13 @@ class L1Orbits(Orbits):
                 pos_splines[isc][icoord] = cs
                 pos_interpolated[:, isc, icoord] = cs(t_arr)
 
-                #interpolate velocities as well
-                cs = interpolate.CubicSpline(
-                    self.sc_t_base,
-                    self.v_base[:, isc, icoord]
-                )
-                vel_interpolated[:, isc, icoord] = cs(t_arr)
-        
-        # Calculate unit vectors        
+                # interpolate velocities as well
+                v_cs = interpolate.CubicSpline(self.sc_t_base, self.v_base[:, isc, icoord])
+                vel_interpolated[:, isc, icoord] = v_cs(t_arr)
+
+                del v_cs
+
+        # Calculate unit vectors
         # Link order: 12, 23, 31, 13, 32, 21
         # indices: 0, 1, 2, 3, 4, 5
         
@@ -961,14 +1071,18 @@ class L1Orbits(Orbits):
         rec_indices = [x - 1 for x in self.link_space_craft_r]
         emit_indices = [x - 1 for x in self.link_space_craft_e]
 
+
         for i in range(6):
             rec_idx = rec_indices[i]
             emit_idx = emit_indices[i]
-            
-            # Interpolate LTT for this link
-            cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
-            ltt_i = cs_ltt(t_arr)
-            
+
+            # LTTs are stored at TDI cadence (~2.5 s), much denser than the
+            # 600 s target grid — linear interpolation here matches the input
+            # discretization and avoids a CubicSpline tridiagonal solve over
+            # tens of millions of points (the dominant cost in this method).
+            # cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
+            # ltt_i = cs_ltt(t_arr)
+            ltt_i = np.interp(t_arr, self.ltt_t, self.ltt[:, i])
             # Emission time
             t_emit = t_arr - ltt_i
             
@@ -994,7 +1108,7 @@ class L1Orbits(Orbits):
         self.v = self.xp.asarray(vel_interpolated)
         self.n = self.xp.asarray(n_interpolated)
 
-        # make sure base spacecraft and link inormation is ready
+        # make sure base spacecraft and link information is ready
         lsr = np.asarray(self.link_space_craft_r).copy().astype(np.int32)
         lse = np.asarray(self.link_space_craft_e).copy().astype(np.int32)
         ll = np.asarray(self.LINKS).copy().astype(np.int32)
@@ -1021,6 +1135,9 @@ class L1Orbits(Orbits):
         else:
             self.pycppdetector_args = None
 
+        # call garbage collection to free memory from large arrays no longer needed
+        import gc
+        gc.collect()
 
     # def _setup(self):
     #     """Override base class _setup - we load data in `_load_mojito_data` instead."""

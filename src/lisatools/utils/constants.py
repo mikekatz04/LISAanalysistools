@@ -1,14 +1,21 @@
-"""Physical and LISA-specific numeric constants used throughout the package."""
+"""Physical and LISA-specific numeric constants used throughout the package.
 
-MSUN_SI = 1.98848e30
-YRSID_SI = 31558149.763545603
-AU_SI = 149597870700.0
-C_SI = 299792458.0
-G_SI = 6.674080e-11
-GMSUN = 1.3271244210789466e20
-MTSUN_SI = 4.925491025873693e-06
-MRSUN_SI = 1476.6250615036158
-PC_SI = 3.0856775814913674e16
+Values are sourced from ``lisaconstants`` (>= 2.0.2) so every package in
+the sprint tree shares one set of definitions; the trailing comments show
+the legacy hard-coded values they replace.
+"""
+
+import lisaconstants as lc
+
+MSUN_SI = lc.SOLAR_MASS  # 1.98848e30
+YRSID_SI = lc.ASTRONOMICAL_YEAR  # 31558149.763545603
+AU_SI = lc.ASTRONOMICAL_UNIT  # 149597870700.0
+C_SI = lc.SPEED_OF_LIGHT  # 299792458.0
+G_SI = lc.GRAVITATIONAL_CONSTANT  # 6.674080e-11
+GMSUN = lc.SOLAR_MASS_PARAMETER  # 1.3271244210789466e20
+MTSUN_SI = lc.SOLAR_MASS_PARAMETER / lc.SPEED_OF_LIGHT**3  # 4.925491025873693e-06
+MRSUN_SI = lc.SOLAR_MASS_PARAMETER / lc.SPEED_OF_LIGHT**2  # 1476.6250615036158
+PC_SI = lc.PARSEC  # 3.0856775814913674e16
 PI = 3.141592653589793238462643383279502884
 PI_2 = 1.570796326794896619231321691639751442
 PI_3 = 1.047197551196597746154214461093167628
@@ -47,6 +54,8 @@ Soth = (2.0e-12) ** 2  # m^2/Hz
 
 # Mass of Jupiter
 Mjup = 1.898e27
+
+EPS_RAD = PI / 180. * lc.OBLIQUITY
 
 #################
 # LISA constant #

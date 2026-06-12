@@ -840,8 +840,7 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
         ])
         # Sky direction ICRS -> SSB ecliptic (the run frame). qS/phiS are
         # polar/azimuthal angles: qS = pi/2 - latitude.
-        _, lam_S, beta_S = icrs_sky_to_ecliptic(
-            0.0,
+        lam_S, beta_S = icrs_sky_to_ecliptic(
             emri_injections_full_basis[:, 8],  # RA
             emri_injections_full_basis[:, 7],  # Dec
         )
@@ -850,8 +849,7 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
         # The MBH spin orientation (qK, phiK) is likewise a direction on
         # the sky; rotate it the same way (assumes the catalogue gives it
         # as ICRS polar/azimuth angles).
-        _, lam_K, beta_K = icrs_sky_to_ecliptic(
-            0.0,
+        lam_K, beta_K = icrs_sky_to_ecliptic(
             emri_injections_full_basis[:, 10],                   # azimuth (RA-like)
             np.pi / 2 - emri_injections_full_basis[:, 9],        # polar -> dec
         )
@@ -951,10 +949,10 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBH
             for i in sorted(_sobbh_cat.keys())
         ])
         # Sky + polarization ICRS -> SSB ecliptic (the run frame).
-        psi_ecl, lam_ecl, beta_ecl = icrs_sky_to_ecliptic(
-            sobbh_injections_full_basis[:, 9],
+        lam_ecl, beta_ecl, psi_ecl = icrs_sky_to_ecliptic(
             sobbh_injections_full_basis[:, 7],
             sobbh_injections_full_basis[:, 8],
+            sobbh_injections_full_basis[:, 9],
         )
         sobbh_injections_full_basis[:, 7] = lam_ecl % (2 * np.pi)
         sobbh_injections_full_basis[:, 8] = beta_ecl

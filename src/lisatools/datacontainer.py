@@ -316,7 +316,7 @@ class DataResidualArray:
         return self.settings.f_arr
 
     @property
-    def data_res_arr(self) -> np.ndarray:
+    def data_res_arr(self) -> DomainBase:
         """Actual data residual array"""
         return self._data_res_arr
 

@@ -139,6 +139,7 @@ from lisatools.globalfit.recipe_steps import (
     build_psd_moves,
     build_gb_moves,
 )
+from lisatools.globalfit.priors.gbpriors import get_fdot_mojito
 
 
 # ============================================================
@@ -414,9 +415,9 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     f0_lims = [0.05e-3, 2.5e-2]  #! TODO: check validity for mojito
 
     m_chirp_lims = [0.001, 1.0]
-    fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
-
-    fdot_lims = [-fdot_max_val, fdot_max_val]
+    # fdot bounds from the mojito-catalog relation (stft_tof), evaluated at
+    # the band's upper edge -- matches the erebor GBSetup default.
+    fdot_lims = [get_fdot_mojito(f0_lims[-1], sign="-"), get_fdot_mojito(f0_lims[-1], sign="+")]
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
@@ -459,7 +460,18 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     ntemps_gb = general_set.ntemps
     gb_betas = 1.0 / 1.2 ** np.arange(ntemps_gb)
     gb_betas[-1] = 1e-4
-
+    
+    assert start_freq and end_freq and general_set.Tobs and general_set.preprocess_kwargs
+    start_freq_ind = int(start_freq * general_set.Tobs)
+    
+    try:
+        data_start_time = getattr(general_set.orbits, 'sc_t0')
+    except AttributeError:
+        data_start_time = 97729089.327664 + 850.5
+    t0_gbs = data_start_time + general_set.preprocess_kwargs["trim_kwargs"]["trim_duration"]
+    
+    initialize_kwargs = dict(force_backend=general_set.gpu_backend)
+    
     gb_settings = GBSettings(
         A_lims=A_lims,
         f0_lims=f0_lims,
@@ -568,6 +580,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         data_processor_class=SangriaProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
+        normalize_window=normalize_window,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
     )
 
@@ -587,6 +600,12 @@ def get_global_fit_settings(copy_settings_file=False):
             + "_"
             + __file__.split("/")[-1],
         )
+
+    ###############################
+    ###############################
+    ######    Rank/GPU setup  #####
+    ###############################
+    ###############################
 
     head_rank = 1
     main_rank = 0

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import warnings
 from abc import ABC
+import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -53,6 +54,7 @@ def _coerce_to_domain_base(obj) -> DomainBase:
         f"or a DataResidualArray; got {type(obj).__name__}."
     )
 
+logger = logging.getLogger(__name__)
 
 class AnalysisContainer:
     """Combinatorial container that combines sensitivity and data information.
@@ -1563,6 +1565,11 @@ class AnalysisContainerArray:
             for g in gpus:
                 if not isinstance(g, (int, np.integer)):
                     raise TypeError(f"gpus entries must be int, got {type(g)}")
+            if len(gpus) > 1:
+                logger.warning(
+                    "Multiple GPUs detected. Data and sensitivity information "
+                    "will be split across the GPUs as evenly as possible."
+                )
             # Allocations below run inside per-GPU `Device` contexts; we save
             # and restore the caller's main device so __init__ has no
             # side-effect on global CUDA state.
@@ -1654,6 +1661,12 @@ class AnalysisContainerArray:
             # Restore whatever device the caller was on before __init__.
             self.xp.cuda.runtime.setDevice(self._main_device_at_init)
 
+    def synchronize(self):
+        if self.gpus is not None:
+            for gpu in self.gpus:
+                with self.xp.cuda.device.Device(gpu):
+                    self.xp.cuda.runtime.deviceSynchronize()
+
     def zero_out_data_arr(self):
         """Zero the linear (per-GPU) data buffers in place."""
         if self.gpus is None:
@@ -1686,8 +1699,12 @@ class AnalysisContainerArray:
             intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
             start_index = intra_split_index * (self.nchannels * self.data_length)
             end_index = (intra_split_index + 1) * (self.nchannels * self.data_length)
+
+            flat_data_res_here = ac.data_res_arr.flatten()
+            if hasattr(flat_data_res_here, "get"):
+                flat_data_res_here = flat_data_res_here.get()
             self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(
-                ac.data_res_arr.flatten()
+                flat_data_res_here
             )
             # ac.data_res_arr._data_res_arr = signal_class(arr=self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, *self.data_shape), settings=settings)     #as todo check: are those 2 lines the same?
             ac.data_res_arr.data_res_arr._arr = self.linear_data_arr[split][
@@ -1715,8 +1732,13 @@ class AnalysisContainerArray:
             intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
             start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
             end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
+            # invC may live on a different GPU (always computed on GPU 0).
+            # Route through CPU to avoid broken P2P cross-device copies.
+            invC_src = ac.sens_mat.invC
+            if hasattr(invC_src, 'get'):
+                invC_src = invC_src.get()
             self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(
-                ac.sens_mat.invC.flatten()
+                invC_src.flatten()
             )
             ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(
                 self.shape_sens + self.end_shape
@@ -2086,7 +2108,7 @@ class AnalysisContainerArray:
     def signal_operation(
         self,
         sign: int,
-        templates,
+        templates: DomainBaseArray | List[DomainBase] | DomainBase | np.ndarray | cp.ndarray,
         data_index: Optional[np.ndarray] = None,
         start_index=None,
     ) -> None:
@@ -2113,6 +2135,7 @@ class AnalysisContainerArray:
                 Ignored when domain-aware templates are supplied.
 
         """
+        # ---- normalise *templates* to a flat list of DomainBase ----
         if isinstance(templates, DomainBaseArray):
             item_list = list(templates)
         elif isinstance(templates, list):
@@ -2171,8 +2194,15 @@ class AnalysisContainerArray:
                         for i in rows:
                             di = int(data_index[i])
                             si = int(start_index[i])
+                            t_i = templates[i]
+                            # stft_tof cross-device hygiene (see _signal_on_device).
+                            if isinstance(t_i, self.xp.ndarray) and t_i.device.id != int(gpu):
+                                if not t_i.flags["C_CONTIGUOUS"]:
+                                    with self.xp.cuda.Device(t_i.device.id):
+                                        t_i = self.xp.ascontiguousarray(t_i)
+                                t_i = self.xp.asarray(t_i.get())
                             acs_flat[di].data[:, si : si + template_length] += (
-                                sign * templates[i]
+                                sign * t_i
                             )
             finally:
                 self.xp.cuda.runtime.setDevice(main_gpu)
@@ -2206,6 +2236,8 @@ class AnalysisContainerArray:
         # partial-overlap handling is delegated to DomainBase.add_signal,
         # which performs an in-place update on acs_flat[di].data._arr
         # (a slice of self.linear_data_arr[split] that lives on this GPU).
+        # Templates produced on a different device are first migrated via
+        # _signal_on_device (stft_tof cross-device hygiene).
         main_gpu = self.xp.cuda.runtime.getDevice()
         gpu_per_template = self.gpu_map[data_index]
         try:
@@ -2214,9 +2246,34 @@ class AnalysisContainerArray:
                 rows = np.where(mask)[0]
                 with self.xp.cuda.Device(int(gpu)):
                     for i in rows:
-                        acs_flat[int(data_index[i])].data.add_signal(item_list[i], sign=sign)
+                        signal = self._signal_on_device(item_list[i], int(gpu))
+                        acs_flat[int(data_index[i])].data.add_signal(signal, sign=sign)
         finally:
             self.xp.cuda.runtime.setDevice(main_gpu)
+
+    def _signal_on_device(self, signal: DomainBase, gpu: int) -> DomainBase:
+        """Return ``signal`` with its array resident on ``gpu``.
+
+        Cross-device hygiene absorbed from the stft_tof branch: templates
+        produced by a proposal on another device are first made C-contiguous
+        on their *source* device (CuPy cannot copy non-contiguous arrays
+        between devices), then routed through host memory -- ``cp.asarray``
+        does NOT copy a CuPy array across devices (it returns the same
+        object) and direct P2P access between non-adjacent devices is not
+        guaranteed. Must be called inside the target ``Device(gpu)`` context.
+        """
+        arr = signal.arr
+        if not isinstance(arr, self.xp.ndarray):
+            return signal
+        if arr.device.id == gpu:
+            return signal
+        if not arr.flags["C_CONTIGUOUS"]:
+            with self.xp.cuda.Device(arr.device.id):
+                arr = self.xp.ascontiguousarray(arr)
+        # host-route the cross-device copy (no P2P assumption)
+        arr = self.xp.asarray(arr.get())
+        settings = signal.settings
+        return settings.associated_class(arr, settings)
 
     def add_signal_to_residual(self, templates, data_index=None, **kwargs) -> None:
         """Subtract templates from the residual (residual = data - signal).
