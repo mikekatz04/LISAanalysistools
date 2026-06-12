@@ -32,20 +32,28 @@
 #ifndef __DOMAINS_HPP__
 #define __DOMAINS_HPP__
 
-#include "cuda_complex.hpp"
+// gbt_global.h transitively brings in cuda_complex.hpp + the CUDA_DEVICE /
+// CUDA_KERNEL / cmplx typedef set (one sprint-wide copy, owned by
+// GPUBackendTools).
 #include "gbt_global.h"
 
+// NOTE (2026-06 merge): the FD specialisation of STFTDomain is named
+// FDDomainForStft because the canonical chunked-het data container in
+// fd_domain.hh already owns the FDDomain name (and its nanobind
+// registration / downstream GBGPU+BBHx consumption).
+// TODO(unify): merge FDDomainForStft and fd_domain.hh's FDDomain into one
+// class during the domains consolidation follow-up.
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #define STFTSettings STFTSettingsGPU
 #define FDSettings FDSettingsGPU
 #define STFTDomain STFTDomainGPU
-#define FDDomain FDDomainGPU
+#define FDDomainForStft FDDomainForStftGPU
 #define STFTFresnel STFTFresnelGPU
 #else
 #define STFTSettings STFTSettingsCPU
 #define FDSettings FDSettingsCPU
 #define STFTDomain STFTDomainCPU
-#define FDDomain FDDomainCPU
+#define FDDomainForStft FDDomainForStftCPU
 #define STFTFresnel STFTFresnelCPU
 #endif
 
@@ -53,8 +61,16 @@
 // TDI_XYZ: uses the full 3x3 cross-channel inverse covariance (off-diagonal
 // terms are non-zero) TDI_AET: uses the diagonal inverse covariance (A, E, T
 // channels are treated as independent)
-#define TDI_XYZ 0
-#define TDI_AET 1
+//
+// VALUES MUST MATCH the canonical flavor ints in wdm_domain.hh
+// (TDI_XYZ=1, TDI_AET=2, TDI_AE=3): they cross the Python boundary via
+// pycppdetector's TDITypeDict and are shared with the chunked-het kernels.
+// (The stft_tof branch used 0/1 here; re-based at the 2026-06 merge.)
+#ifndef TDI_XYZ
+#define TDI_XYZ 1
+#define TDI_AET 2
+#define TDI_AE 3
+#endif
 
 /**
  * @brief Grid parameters for an STFT (Short-Time Fourier Transform) domain.
@@ -361,11 +377,15 @@ class STFTDomain : public STFTSettings {
  * All STFTDomain methods are available; the time dimension is trivially 1,
  * making all time-related arguments (t_idx, start_times_all, …) effectively
  * no-ops or fixed to zero.
+ *
+ * Named FDDomainForStft (2026-06 merge): the canonical chunked-het data
+ * container in fd_domain.hh owns the FDDomain name. TODO(unify): merge the
+ * two classes in the domains consolidation follow-up.
  */
-class FDDomain : public STFTDomain {
+class FDDomainForStft : public STFTDomain {
  public:
   CUDA_CALLABLE_MEMBER
-  FDDomain(int num_freqs_, int num_channels_, double f_min_, double f_max_,
+  FDDomainForStft(int num_freqs_, int num_channels_, double f_min_, double f_max_,
            double df_, cmplx* data_, cmplx* invC_, int num_data_,
            int num_noise_, int tdi_type_)
       : STFTDomain(1, num_freqs_, num_channels_, 0.0, f_min_, f_max_, 0.0, df_,

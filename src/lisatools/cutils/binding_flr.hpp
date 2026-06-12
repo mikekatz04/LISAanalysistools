@@ -8,7 +8,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
-#include "binding.hpp"
+#include "binding_detector.hpp"
 #include "gbt_binding.hpp"
 #include "Interpolate.hh"
 

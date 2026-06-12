@@ -27,11 +27,13 @@ from eryn.utils.transform import TransformContainer
 from tqdm import tqdm
 
 from ...analysiscontainer import AnalysisContainerArray
+from ...domaincomputation import DomainComputationGroupArray
 from ...domains import FDSettings, STFTSettings
 from ...sensitivity import XYZSensitivityBackend
 from ...utils.utility import asnumpy
 from ..state import GFState
 from .globalfitmove import GlobalFitMove
+from .multigpumove import MultiGPUMoveBase
 
 logger = logging.getLogger(__name__)
 
@@ -536,3 +538,111 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         new_state.log_like[0] = after_vals
         return new_state, accepted
+
+
+# stft_tof addition: multi-GPU variant of the PSD move running the kernel
+# fast path through DomainComputationGroupArray's per-device replicas. Kept
+# through the merge; its interaction with the dev-side ACA sharding is
+# reviewed in the dedicated multi-GPU pass.
+class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
+    def __init__(
+        self,
+        dcga: DomainComputationGroupArray,
+        priors,
+        *args,
+        num_repeats: int = 1,
+        max_logl_mode: bool = False,
+        psd_kwargs: dict = {},
+        psd_transform_fn: TransformContainer = None,
+        galfor_transform_fn: TransformContainer = None,
+        permute_every: int = 20,
+        tolerance: float = 0.0,
+        run_async: bool = False,
+        run_threaded: bool = False,
+        **kwargs,
+    ):
+
+        PSDMove.__init__(
+            self,
+            dcga.acs,
+            priors,
+            *args,
+            num_repeats=num_repeats,
+            max_logl_mode=max_logl_mode,
+            psd_kwargs=psd_kwargs,
+            sensitivity_backend=dcga.computation_groups[0].sensitivity_backend,
+            psd_transform_fn=psd_transform_fn,
+            galfor_transform_fn=galfor_transform_fn,
+            permute_every=permute_every,
+            tolerance=tolerance,
+            **kwargs,
+        )
+        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
+
+        # TEST FLAG: when True, MultiGPUPSDMove.psd_log_like delegates to the
+        # parent PSDMove.psd_log_like, completely bypassing DCGA's unpack/place/
+        # loop_operation machinery. Only meaningful on single-GPU setups.
+        # If flipping this to True makes CHECK1/CHECK2 stop firing, the bug is
+        # localized to the DCGA path (unpack_coords/place_on_device/
+        # _loop_operation/_compute_group_likelihood). Set from the settings
+        # file via `psd_move._force_parent_path = True` after move construction.
+        self._force_parent_path = False
+
+    def psd_log_like(self, x: list, supps=None, **sens_kwargs):
+        """ """
+        if supps is None:
+            raise ValueError("Must provide supps to identify the data streams.")
+
+        # Single-GPU debug path: skip DCGA entirely and run the parent's direct
+        # sensitivity_backend.compute_log_like call. This isolates whether the
+        # bug is in the MultiGPU routing (DCGA unpack/place/loop) or elsewhere.
+        if getattr(self, "_force_parent_path", False):
+            return PSDMove.psd_log_like(self, x, supps=supps, **sens_kwargs)
+
+        wi = supps["walker_inds"]
+
+        psd_pars, galfor_pars = self.transform_coords(x, return_cupy=False)
+
+        data_index_all = np.asarray(wi).astype(np.int32)
+
+        positions_per_split, data_intra_index_per_split, _ = self.dcga.unpack_indices(data_index_all)
+        coords_per_split = self.dcga.unpack_coords(positions_per_split, (psd_pars, galfor_pars))
+
+        data_intra_index_per_split, coords_per_split = self.dcga.place_on_device(
+            items=(data_intra_index_per_split, coords_per_split)
+        )
+
+        likelihood_args_per_split = self.dcga._loop_operation(
+            operation=self.prepare_likelihood_inputs,
+            operation_args_per_split=coords_per_split,
+            positions_per_split=positions_per_split,
+        )
+
+        ll = self.dcga.compute_psd_likelihood(
+            positions_per_split,
+            data_intra_index_per_split,
+            data_intra_index_per_split,
+            likelihood_args_per_split,
+            likelihood_kwargs={'run_async': self.run_async},
+            run_threaded=self.run_threaded,
+        )
+
+        # now check if any knot position is not too close together
+        if self.sensitivity_backend.use_splines:
+            invalid_knots_mask = np.zeros(psd_pars.shape[0], dtype=bool)
+            for i, likelihood_args in enumerate(likelihood_args_per_split):
+                if likelihood_args is None:
+                    continue
+                spline_knots_position = (
+                    likelihood_args[-2].get()
+                    if hasattr(likelihood_args[-2], "get")
+                    else likelihood_args[-2]
+                )
+
+                invalid_knots_mask[positions_per_split[i]] = np.any(
+                    np.diff(10**spline_knots_position, axis=2) < self.tolerance, axis=(0, 2)
+                )
+            ll[invalid_knots_mask] = -1e300
+
+        self.dcga.free_gpu_memory()
+        return ll

@@ -21,7 +21,7 @@
 
 #include "binding_flr.hpp"     // ReturnPointerBase, TDIConfigWrap,
                                // CubicSplineWrap
-#include "binding.hpp"         // OrbitsWrap, array_type<T>
+#include "binding_detector.hpp"         // OrbitsWrap, array_type<T>
 #include "lat_spline_tdi_waveform.hh"
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)

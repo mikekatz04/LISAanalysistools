@@ -5,7 +5,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
 #include "binding_flr.hpp"
-#include "binding.hpp"
+#include "binding_detector.hpp"
 #include "gbt_binding.hpp"
 // Phase 3L (2026-06-02): generic classes absorbed from lisa-on-gpu's
 // TDIonTheFly carve-out.

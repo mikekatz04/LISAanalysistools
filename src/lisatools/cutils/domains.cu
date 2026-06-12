@@ -585,7 +585,7 @@ void STFTDomain::compute_likelihood_terms_wrap(
 #endif
 };
 
-void FDDomain::compute_likelihood_terms_wrap(
+void FDDomainForStft::compute_likelihood_terms_wrap(
     cmplx* d_h_out, cmplx* h_h_out, cmplx* template_vals,
     double* start_freqs_all, int num_binaries, int* data_index_all,
     int* noise_index_all, int num_freqs_template, bool run_async) {
@@ -593,9 +593,9 @@ void FDDomain::compute_likelihood_terms_wrap(
   // start_times_all = nullptr signals the kernel to use start_t_idx = 0.
   STFTDomain::compute_likelihood_terms_wrap(
       d_h_out, h_h_out, template_vals,
-      nullptr,  // start_times_all not used in FDDomain
+      nullptr,  // start_times_all not used in FDDomainForStft
       start_freqs_all, num_binaries, data_index_all, noise_index_all,
-      1,  // num_times_template = 1 for FDDomain
+      1,  // num_times_template = 1 for FDDomainForStft
       num_freqs_template, run_async);
 }
 

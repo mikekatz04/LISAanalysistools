@@ -23,7 +23,13 @@ from lisatools.sensitivity import XYZSensitivityBackend
 from lisatools.utils.constants import YRSID_SI
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gf_dev"))
-from ltt_averaging_diagnostic import to_tt, to_aet_diag  # validated AET projection
+# ``ltt_averaging_diagnostic`` (validated AET projection) was an untracked
+# local helper on the stft_tof author's machine -- skip cleanly when absent.
+_ltt_diag = pytest.importorskip(
+    "ltt_averaging_diagnostic",
+    reason="ltt_averaging_diagnostic helper (gf_dev/) not present in this checkout",
+)
+to_tt, to_aet_diag = _ltt_diag.to_tt, _ltt_diag.to_aet_diag
 
 NOISE_FILE = ("/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
               "data/INSTRUMENT/L1/NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5")
