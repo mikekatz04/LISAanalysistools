@@ -1,4 +1,18 @@
-"""Global-fit settings for the GB + foreground run.
+"""Global-fit settings for a GB-only run WITHOUT foreground fitting.
+
+Copy of ``gb_and_foreground_global_fit_settings.py`` with:
+
+* **No galactic-foreground branch** (``galfor`` removed from
+  ``source_info``) — the foreground is not fit.
+* **Fixed PSD** — no ``psd`` sampling branch either. The sensitivity is
+  a fixed :class:`InstrumentNoise` built from the Sangria injection
+  values via ``GeneralSettings.fixed_psd_kwargs``
+  (``psd_params=[15e-12, 3e-15]``, ``galfor_params=None``), which the
+  engine uses whenever no ``psd`` branch is present.
+* **Frequency band restricted to f > 6 mHz** (``MIN_FREQ`` knob): both
+  the WDM domain's active band and the GB ``f0`` prior start at 6 mHz.
+  Above 6 mHz the unresolved galactic confusion in the Sangria data is
+  negligible, so GB tests can run without any foreground noise model.
 
 This file is meant to be edited directly. Two high-level config blocks
 live near the top:
@@ -87,13 +101,9 @@ from lisatools.sampling.prior import (
     SNRPrior,
 )
 
+# No PSDSetup / GalForSetup here — the PSD is fixed and the foreground
+# is not fit in this configuration.
 from lisatools.globalfit.stock.erebor import (
-    GalForSetup,
-    GalForSettings,
-    PSDSetup,
-    PSDSettings,
-    MBHSetup,
-    MBHSettings,
     GBSetup,
     GBSettings,
 )
@@ -136,7 +146,6 @@ from lisatools.globalfit.recipe_steps import (
     SearchRecipeStep,
     PERecipeStep,
     RJRecipeStep,
-    build_psd_moves,
     build_gb_moves,
 )
 
@@ -179,6 +188,19 @@ TDI_GEN = _CHAN_TO_GEN[TDI_CHAN]
 TDI_GEN_STR = f"{TDI_GEN}{'nd' if TDI_GEN == 2 else 'st'} generation"
 NCHANNELS = 3
 
+# Frequency band: restrict to f > 6 mHz so the unresolved galactic
+# confusion (which dominates well below this) is out of band — no
+# foreground model needed anywhere in the fit.
+MIN_FREQ = 6e-3
+MAX_FREQ = 2.5e-2
+
+# Fixed PSD (no psd sampling branch): Sangria injection values
+# ``[Soms_d, Sa_a]`` in linear (square-root) units. Used by the engine's
+# no-psd-branch path via ``GeneralSettings.fixed_psd_kwargs``;
+# ``galfor_params=None`` means no galactic-foreground component is added
+# to the sensitivity matrix.
+FIXED_PSD_PARAMS = [15e-12, 3e-15]
+
 # Engine-level (NWALKERS / NTEMPS env-overridable for smoke tests).
 RANDOM_SEED = 103209
 NWALKERS = int(os.environ.get("NWALKERS", 4))
@@ -192,7 +214,7 @@ WINDOW_TAPER_DURATION = 0.0  # rectangular window
 
 # Output
 FILE_STORE_DIR = "./gf_output/"
-BASE_FILE_NAME = "gb_fg_smoke_test"
+BASE_FILE_NAME = "gb_no_fg_test"
 
 
 # ============================================================
@@ -316,19 +338,8 @@ def setup_recipe(
         )
 
     #* ================================= BUILD MOVES =================================
-    # Smoke test: pretend search is already done — run PE moves only so the
-    # PSD does one standard MCMC pass and yields to the GB move, instead of
-    # the search PSD move's max-loglikelihood convergence loop.
-    num_repeats_psd = 5  # standard = 60 (smoke test: keep PSD inner loop short so GB runs sooner)
-    permute_every_psd = 50  # standard = 50
-    psd_search_move, psd_pe_move = build_psd_moves(
-        engine_info,
-        curr,
-        acs,
-        priors,
-        num_repeats=num_repeats_psd,
-        permute_every=permute_every_psd,
-    )
+    # No PSD / foreground moves: the PSD is fixed (no ``psd`` branch) and
+    # the foreground is not fit, so the recipe holds GB moves only.
     gb_search_moves, gb_pe_moves = build_gb_moves(
         engine_info, curr, acs, priors, state
     )
@@ -339,14 +350,14 @@ def setup_recipe(
     gb_pe_moves = [m for m in gb_pe_moves if "prior" in m.name]
 
     #* ================================= SETUP PE (no search) =================================
-    all_pe_moves = [psd_pe_move] + gb_pe_moves
+    all_pe_moves = gb_pe_moves
     gf_pe_move = GFCombineMove(
         moves=all_pe_moves, verbose=True, share_temperature_control=False
     )
     gf_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     recipe.add_recipe_component(
-        PERecipeStep(moves=[gf_pe_move]), name="gb + psd pe"
+        PERecipeStep(moves=[gf_pe_move]), name="gb pe"
     )
 
 
@@ -390,11 +401,13 @@ def setup_recipe(
 # Crop 20 wavelets from each time edge so the boundary wavelets (which
 # extend past the data) don't show up as NaN in the active WDM band.
 # Matches the pattern the original NF365 lookup table used.
+# NOTE: ``min_freq=MIN_FREQ`` (6 mHz) is the foreground-free band
+# restriction — everything below it is excluded from the likelihood.
 DOMAIN_CHOICE = WDMSettings.make_factory(
     Nf=NF,
     Nt=NT,
-    min_freq=1e-4,
-    max_freq=2.5e-2,
+    min_freq=MIN_FREQ,
+    max_freq=MAX_FREQ,
     min_time=20 * WAVELET_DURATION,
     max_time=(NT - 20) * WAVELET_DURATION,
 )
@@ -411,7 +424,9 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     delta_safe = 1e-5
 
     A_lims = [7e-26, 1e-19]
-    f0_lims = [0.05e-3, 2.5e-2]  #! TODO: check validity for mojito
+    # f0 prior clamped to the foreground-free band (> 6 mHz) to match
+    # the restricted WDM domain.
+    f0_lims = [MIN_FREQ, MAX_FREQ]
 
     m_chirp_lims = [0.001, 1.0]
     fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
@@ -493,38 +508,9 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     return GBSetup(gb_settings)
 
 
-def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
-    initialize_kwargs_psd = dict()
-
-    priors_psd = {
-        r"$S_{\rm oms}$": uniform_dist(6.0e-12, 20.0e-11),
-        r"$S_{\rm tm}$": uniform_dist(1.0e-15, 20.0e-14),
-    }
-    priors = {"psd": ProbDistContainer(priors_psd)}
-    injection = np.array([15e-12, 3e-15])
-
-    psd_settings = PSDSettings(
-        ndim=2,
-        injection=injection,
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs=initialize_kwargs_psd,
-        priors=priors,
-        log_dir=general_set.file_store_dir,
-    )
-
-    return PSDSetup(psd_settings)
-
-
-def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
-    galfor_settings = GalForSettings(
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs={},
-        log_dir=general_set.file_store_dir,
-    )
-
-    return GalForSetup(galfor_settings)
+# No ``get_psd_erebor_settings`` / ``get_galfor_erebor_settings`` here:
+# the PSD is fixed via ``fixed_psd_kwargs`` (engine no-psd-branch path)
+# and the galactic foreground is not fit.
 
 
 def get_general_erebor_settings() -> GeneralSetup:
@@ -550,6 +536,14 @@ def get_general_erebor_settings() -> GeneralSetup:
     # spline_order) are filtered out at the engine.
     sensitivity_init_kwargs = dict(tdi_generation=TDI_GEN)
 
+    # With no ``psd`` branch in ``source_info`` the engine builds every
+    # walker's sensitivity from these fixed values (InstrumentNoise only;
+    # ``galfor_params=None`` -> no foreground component).
+    fixed_psd_kwargs = dict(
+        psd_params=list(FIXED_PSD_PARAMS),
+        galfor_params=None,
+    )
+
     general_settings = GeneralSettings(
         Tobs=TOBS,
         dt=DT,
@@ -565,6 +559,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         window_taper_duration=WINDOW_TAPER_DURATION,
         gpu_backend=GPU_BACKEND,
         gpus=gpus,
+        fixed_psd_kwargs=fixed_psd_kwargs,
         data_processor_class=SangriaProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
@@ -594,14 +589,12 @@ def get_global_fit_settings(copy_settings_file=False):
     rank_info = RankInfo(head_rank=head_rank, main_rank=main_rank)
 
     gb_setup = get_gb_erebor_settings(general_setup)
-    psd_setup = get_psd_erebor_settings(general_setup)
-    galfor_setup = get_galfor_erebor_settings(general_setup)
 
+    # GB only: no ``psd`` branch (fixed PSD via ``fixed_psd_kwargs``) and
+    # no ``galfor`` branch (foreground not fit).
     global_settings = GlobalFitSettings(
         source_info={
             "gb": gb_setup,
-            "psd": psd_setup,
-            "galfor": galfor_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,
@@ -616,9 +609,11 @@ def get_global_fit_settings(copy_settings_file=False):
 if __name__ == "__main__":
     settings = get_global_fit_settings()
     print(
-        f"GB + foreground settings constructed OK\n"
+        f"GB no-foreground settings constructed OK\n"
         f"  Tobs = {TOBS:.6e} s  (target {TOBS_TARGET:.6e} s)\n"
         f"  WDM grid Nf={NF}, Nt={NT}, wavelet_duration={WAVELET_DURATION:.1f} s\n"
+        f"  Band: [{MIN_FREQ:.3e}, {MAX_FREQ:.3e}] Hz (foreground-free, f > 6 mHz)\n"
+        f"  PSD: FIXED at {FIXED_PSD_PARAMS} (no psd branch, no galfor branch)\n"
         f"  Backend: {GPU_BACKEND} (GPU available={gpu_available})\n"
         f"  Data: {LDC_SOURCE_FILE}"
     )
