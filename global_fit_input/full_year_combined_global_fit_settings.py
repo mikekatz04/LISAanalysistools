@@ -1063,7 +1063,7 @@ def get_mbh_tdionfly_multi_erebor_settings(general_set: GeneralSetup) -> Optiona
         mbh_injections_full_basis[:, 9] = psi_ecl % np.pi
     else:
         mbh_injections_full_basis = MBH_INJECTIONS_FULL_BASIS
-
+        
     injection_sampling_per_leaf = np.stack(
         [mbh_tdionfly_full_to_sampling(row) for row in mbh_injections_full_basis],
         axis=0,
@@ -1230,6 +1230,7 @@ def _build_mbh_tdionfly_move_runtime(
             inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
             for i in range(inj_coords.shape[0]):
                 sig = wave_gen(*inj_coords_in[i], **mbh_info.waveform_kwargs)
+                breakpoint()
                 acs.add_signal_to_residual([sig], data_index=np.array([i]))
                 del sig
                 gc.collect()
