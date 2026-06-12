@@ -34,7 +34,7 @@ from .recipe import Recipe
 from .state import GFState
 from .stock.erebor import Setup
 from .utils import BasicResidualacsLikelihood
-
+import pickle
 
 logger = getLogger(__name__)
 class CurrentInfoGlobalFit:
@@ -52,7 +52,8 @@ class CurrentInfoGlobalFit:
     def __init__(self, settings: GlobalFitSettings):
 
         self.settings_dict = settings
-        self.current_info = deepcopy(settings)
+        
+        self.current_info = settings
 
         backend_path = self.general_info.main_file_path
         self.backend = GFHDFBackend(backend_path)

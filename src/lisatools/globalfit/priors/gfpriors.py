@@ -3,25 +3,15 @@ from __future__ import annotations
 import os
 import ast
 import numpy as np
-from typing import Dict, Any, Union, Tuple
+from typing import Dict, Union, Tuple
 
 # Assuming all prior classes are defined in the same package/module
 # Adjust the import path according to your project structure
-from .base import Prior, UniformDistribution
-from .joint import JointPrior, MultivariateGaussian
-from .analytical import (
-    DeltaFunction,
-    PowerLaw,
-    LogUniform,
-    CosineUniform,
-    SineUniform,
-    Gaussian,
-    Normal,
-    LogNormal,
-    LogGaussian,
-    Exponential,
-    Log10Uniform,
-)
+from .base import *
+from .joint import *
+from .analytical import *
+from .network import *
+from .discrete import *
 
 
 class LISAPriorDict(dict):
@@ -63,6 +53,11 @@ class LISAPriorDict(dict):
             "LogGaussian": LogGaussian,
             "Exponential": Exponential,
             "MultivariateGaussian": MultivariateGaussian,
+            "MojitoF0FdotPrior": MojitoF0FdotPrior,
+            "MojitoF0mHzFdotPrior": MojitoF0mHzFdotPrior,
+            "DiscreteUniform": DiscreteUniform,
+            "Categorical": Categorical,
+            "Poisson": Poisson,
         }
         
         safe_env = {"__builtins__": {}}

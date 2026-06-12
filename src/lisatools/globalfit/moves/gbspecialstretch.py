@@ -24,7 +24,7 @@ from ...analysiscontainer import AnalysisContainerArray
 from ...utils.parallelbase import LISAToolsParallelModule
 from ..galaxyglobal import fit_each_leaf, make_gmm, run_gb_bulk_search
 from .globalfitmove import GFCombineMove, GlobalFitMove
-from ..priors.gbpriors import get_fdot_mojito
+from ..priors.joint import MojitoF0FdotPrior
 
 # -*- coding: utf-8 -*-
 
@@ -643,8 +643,11 @@ class Buffer(LISAToolsParallelModule):
             params_add[keep, 3] = params_add[keep, 3] - self.gb.phase_angle
 
         # rejection sampling on SNR
-        opt_snr = (self.gb.add_add.real ** (1 / 2)).copy()
-
+        opt_snr_add = cp.full(keep.shape[0], 0.0)
+        opt_snr_remove = cp.full(keep.shape[0], 0.0)
+        
+        opt_snr_add[keep] = (self.gb.add_add.real ** (1 / 2)).copy()
+        opt_snr_remove[keep] = (self.gb.remove_remove.real ** (1 / 2)).copy()
         # params_add_in = self.transform_fn.both_transforms(
         #     params_add, xp=cp
         # )
@@ -706,10 +709,10 @@ class Buffer(LISAToolsParallelModule):
         # reject sample only for adding, not removing
         # when removing this opt_snr will be very small due to amp_add being super small
         reject = self.xp.zeros(keep.shape[0], dtype=bool)
-        reject[keep] = (opt_snr < self.opt_snr_rej_samp_limit) & (params_add_in[keep, 0] > 1e-30)
+        reject[keep] = (opt_snr_add[keep] < self.opt_snr_rej_samp_limit) & (params_add_in[keep, 0] > 1e-30)
         ll_diff[reject] = -1e300
 
-        return ll_diff
+        return ll_diff, opt_snr_remove, opt_snr_add
 
     def reset_residual_buffers(self, inds_fill=None):
         if inds_fill is None:
@@ -1709,7 +1712,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # global_ll_tracker = model.analysis_container_arr.likelihood().copy()
         # accumulated_local_diffs = cp.zeros_like(global_ll_tracker)
         # walker_accept_counts = cp.zeros(self.nwalkers, dtype=int)
-
+        breakpoint() # TODO CHECK SHAPE to be (ntemps, nwalkers, nleaves)
+        snrs_tmp = cp.zeros(state.branches["gb"].shape[:-1])
+        
         # random start to rotation around
         start_unit = model.random.randint(units)
         fixed_coords_for_info_mat = band_sorter.coords.copy()
@@ -2002,14 +2007,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             info_mat_params = self.xp.zeros((num_chol_new, 9))
                             info_mat_params[:, _test_inds] = new_chol_params_fixed
                             fdot_scale = 1e-16
-                            info_mat_transforms_global = self.parameter_transforms.original_parameter_transforms
-
+                            # info_mat_transforms_global = self.parameter_transforms.original_parameter_transforms
+                            
+                            # assert info_mat_transforms_global is not None
+                            # f0_transform = lambda x: info_mat_transforms_global[("f0", "fdot")](x, self.xp.zeros_like(x))[0]
                             info_mat_transforms = {
-                                0: info_mat_transforms_global[r"$\log A$"],
-                                1: info_mat_transforms_global[r"$f_0$"],
-                                2: lambda x: x * fdot_scale,
-                                5: info_mat_transforms_global[r"$\cos\iota$"],
-                                8: info_mat_transforms_global[r"$\sin\delta$"],
+                                0: lambda x: self.xp.exp(x), # logA to A
+                                1: lambda x: x * 1e-3, # f0 from mHz to Hz
+                                2: lambda x: x * fdot_scale, # fdot from 1e-16 Hz/s to Hz/s
+                                5: lambda x: self.xp.arccos(x), # cos_inc to inc
+                                8: lambda x: self.xp.arcsin(x), # sin_dec to dec
                             }
 
                             # transform fdot
@@ -2029,9 +2036,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 inds = self.xp.asarray(_test_inds),
                                 easy_central_difference=False,
                                 noise_index = walker_inds_chol,
-                                # N = 512,
+                                # N = 1024,
                                 data_length = model.analysis_container_arr.end_shape[0],
-                                batch_size = 10000,
+                                batch_size = 100000,
                                 **_tmp_waveform_kwargs,                                
                             )
                             #* old info mat setup
@@ -2168,6 +2175,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         band_sorter.walker_inds[inds_to_update].get(),
                         band_sorter.band_inds[inds_to_update].get(),
                     )
+                    
+                    walker_inds_here = map_to_update[1]
+                    temp_inds_here = map_to_update[0]
+                    
+                    if "hyper" in self.current_state.branches:
+                        model_idx = self.xp.asarray(
+                            self.current_state.branches["hyper"].coords[temp_inds_here, walker_inds_here, 0, 0]
+                        )
+                    else:
+                        model_idx = self.xp.zeros(len(inds_to_update), dtype=self.xp.int32)
+                    
                     if self.xp.any(params_to_update[:, 0] < -100.0):
                         breakpoint()
                     if not is_rj_now:  # self.is_rj_prop:
@@ -2219,17 +2237,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             {"gb": new_coords[:, None, :]}, xp=self.xp
                         )["gb"][:, 0]
 
+                        # TODO check that the model index gets ignore when it is not needed (same for below)
                         prev_logp = cp.asarray(
-                            self.gpu_priors["gb"].logpdf(params_to_update)
+                            self.gpu_priors["gb"].logpdf(params_to_update, model_index=model_idx)
                         )  # , psds=self.mgh.psd_shaped[0][0], walker_inds=curr_index)
                         curr_logp = cp.asarray(
-                            self.gpu_priors["gb"].logpdf(new_coords)
+                            self.gpu_priors["gb"].logpdf(new_coords, model_index=model_idx)
                         )  # , psds=self.mgh.psd_shaped[0][0], walker_inds=curr_index)
 
                     else:
                         old_coords = params_to_update.copy()
                         new_coords = params_to_update.copy()
-                        logp_tmp = cp.asarray(self.gpu_priors["gb"].logpdf(old_coords))
+                        logp_tmp = cp.asarray(self.gpu_priors["gb"].logpdf(old_coords, model_index=model_idx))
 
                         # if self.xp.any(self.xp.isinf(logp_tmp[run_now_tmp])):
                         #     breakpoint()
@@ -2250,7 +2269,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                         prev_logp[inds] = logp_tmp[inds]
                         curr_logp[~inds] = logp_tmp[~inds]
+                        
+                        if "num_gbs" in self.gpu_priors:
+                            poisson_prior = self.gpu_priors["num_gbs"]
+                            
+                            temp_inds = map_to_update[0]
+                            walker_inds = map_to_update[1]
+                            inds_3d = band_sorter.inds.reshape(self.ntemps, self.nwalkers, -1)
+                            current_N_binaries = inds_3d[temp_inds, walker_inds].sum(axis=-1)
+                            
+                            # TODO need to check the amount of add/removed binaries per temp and walker
+                            new_N_binaries = current_N_binaries.copy()
+                            new_N_binaries[inds] -= 1 # death
+                            new_N_binaries[~inds] += 1 # birth
 
+                            # Evaluate the Poisson prior
+                            prev_poisson_logp = poisson_prior.logpdf(current_N_binaries, model_index=model_idx)
+                            curr_poisson_logp = poisson_prior.logpdf(new_N_binaries, model_index=model_idx)
+                            
+                            prev_logp += prev_poisson_logp
+                            curr_logp += curr_poisson_logp
+                            
+                            
                     # check if any proposals have -inf logp before likelihood calculation to catch issues early
                     if cp.all(~cp.isfinite(prev_logp)):  # [run_now_tmp]
                         logger.warning("Found -inf logp in previous logp.")
@@ -2352,14 +2392,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     ].copy()
 
                     # CANNOT COPY PARAMETER ARRAYS, IN PLACE ADJUSTMENT IF PHASE MAXIMIZING
-                    ll_diff[keep2] = buffer_obj.get_swap_ll(
+                    ll_diff_tmp, opt_snr_remove, opt_snr_add = buffer_obj.get_swap_ll(
                         params_remove,
                         params_add,
                         data_index,
                         swap_N_vals,
                         phase_maximize=self.phase_maximize,
                     )
+                    ll_diff[keep2] = ll_diff_tmp
+                    
+                    if "resolv_gb" in self.gpu_priors:
+                        # grab resolvability prior
+                        resolv_prior = self.gpu_priors["resolv_gb"]
 
+                        prev_logp[keep2] += resolv_prior.logpdf(opt_snr_remove)
+                        curr_logp[keep2] += resolv_prior.logpdf(opt_snr_add)
+                    
                     # in case there is phase marginalization, need to adjust in new_coords
                     if self.phase_maximize:
                         new_coords[keep2] = params_add[:]
@@ -2437,10 +2485,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             # remove fixed_coords (just need the bool)
                             remove_fixed_coords = has_fixed_coords & (~band_sorter.inds)
                             has_fixed_coords[remove_fixed_coords] = False
+                            
+                            died = ~band_sorter.inds[inds_update_accept]
+                            if cp.any(died):
+                                dead_temps = temp_inds_accept[died].get()
+                                dead_walkers = walker_inds_accept[died].get()
+                                dead_leaves = leaf_inds_accept[died].get()
+                                snrs_tmp[
+                                    dead_temps, dead_walkers, dead_leaves
+                                ] = 0.0
 
                         temp_inds_accept = band_sorter.temp_inds[inds_update_accept]
                         walker_inds_accept = band_sorter.walker_inds[inds_update_accept]
                         band_inds_accept = band_sorter.band_inds[inds_update_accept]
+                        leaf_inds_accept = band_sorter.leaf_inds[inds_update_accept]
+                        
+                        snrs_tmp[
+                            temp_inds_accept.get(), 
+                            walker_inds_accept.get(), 
+                            leaf_inds_accept.get()
+                        ] = opt_snr_add[accept].get()
+                        
                         ll_change_log[
                             temp_inds_accept, walker_inds_accept, band_inds_accept
                         ] += ll_accept
@@ -2556,7 +2621,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.xp.cuda.runtime.deviceSynchronize()
 
 
-        return ll_change_log
+        return ll_change_log, snrs_tmp
 
     def run_tempering(self, model, state, band_sorter, band_temps):
         ll_change_log_temp = cp.zeros((self.ntemps, self.nwalkers, self.num_bands))
@@ -2951,10 +3016,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per_walker_band_accepted = cp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
 
         num_active_leaves = new_state.branches["gb"].inds[0].sum(axis=-1) # cold chain only
-        logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
+        logger.info(f"Number of active leaves in cold chain before proposal: {num_active_leaves}")
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
-        ll_change_log = self.run_proposal(model, new_state, band_sorter, band_temps)
+        ll_change_log, snrs_tmp = self.run_proposal(model, new_state, band_sorter, band_temps)
         et_prop = time.perf_counter()
         # Diagnostic: per-temperature alive source counts after run_proposal
         _alive_per_temp_post_prop = [
@@ -3063,6 +3128,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # turn on all the ones that are there
         new_state.branches["gb"].inds[inds_new] = True
 
+        if "snr" in new_state.branches_supplemental.get("gb", {}):
+            new_state.branches_supplemental["gb"]["snr"] = snrs_tmp # SAVE opt snr in supplemental branch
+        
         # new_state.branches["gb"].branch_supplemental[inds_new] = state.branches["gb"].branch_supplemental[inds_old]
         et_all = time.perf_counter()
         logger.info(f"Full runtime of {self.name} is {round(et_all - st_all, 3)} seconds.")
@@ -3361,7 +3429,7 @@ class PriorTransformFn:
             fdot_max,
         )
 
-    def adjust_logp(self, logp, groups_running):
+    def adjust_logp(self, logp, groups_running, **kwargs):
 
         xp = get_array_module(self.f_min)
 
@@ -3422,6 +3490,91 @@ class PriorTransformFn:
         ) + fdot_min_here[:, None, None]
 
         return
+
+
+class JointMojitoPriorTransformFn:
+    def __init__(self, f0_min_mHz: np.ndarray, f0_max_mHz: np.ndarray, f0_idx: int = 1, fdot_idx: int = 2):
+        self.f0_min = f0_min_mHz
+        self.f0_max = f0_max_mHz
+        self.f0_idx = f0_idx
+        self.fdot_idx = fdot_idx
+
+    def _get_fdot_bounds(self, f0_mHz, xp):
+        """Dynamic bounds calculated per sample."""
+        f0_Hz = f0_mHz * 1e-3
+        f0_safe = xp.where(f0_Hz > 0, f0_Hz, 1.0)
+        fdot_min = -2e-20 * (f0_safe / 4e-4) ** (16 / 3)
+        fdot_max = 3e-21 * (f0_safe / 1e-4) ** (11 / 3)
+        return fdot_min, fdot_max
+
+    def transform_from_prior_basis(self, coords, groups_running, xp=cp):
+        if groups_running is None:
+            groups_running = xp.arange(len(self.f0_min))
+
+        f0_min_here = xp.asarray(self.f0_min[groups_running])[:, None, None]
+        f0_max_here = xp.asarray(self.f0_max[groups_running])[:, None, None]
+
+        # 1. Transform f0 from [0, 1] to physical mHz
+        u_f0 = coords[:, :, :, self.f0_idx]
+        f0_mHz = u_f0 * (f0_max_here - f0_min_here) + f0_min_here
+        coords[:, :, :, self.f0_idx] = f0_mHz
+        
+        # 2. Transform fdot using the exact f0 we just generated
+        u_fdot = coords[:, :, :, self.fdot_idx]
+        fdot_min, fdot_max = self._get_fdot_bounds(f0_mHz, xp)
+        coords[:, :, :, self.fdot_idx] = u_fdot * (fdot_max - fdot_min) + fdot_min
+
+    def transform_to_prior_basis(self, coords, groups_running, xp=cp):
+        if groups_running is None:
+            groups_running = xp.arange(len(self.f0_min))
+
+        f0_min_here = xp.asarray(self.f0_min[groups_running])[:, None, None]
+        f0_max_here = xp.asarray(self.f0_max[groups_running])[:, None, None]
+        
+        f0_mHz = coords[:, :, :, self.f0_idx]
+        fdot = coords[:, :, :, self.fdot_idx]
+        
+        # 1. Reverse fdot using the physical f0
+        fdot_min, fdot_max = self._get_fdot_bounds(f0_mHz, xp)
+        coords[:, :, :, self.fdot_idx] = (fdot - fdot_min) / (fdot_max - fdot_min)
+        
+        # 2. Reverse f0
+        coords[:, :, :, self.f0_idx] = (f0_mHz - f0_min_here) / (f0_max_here - f0_min_here)
+
+    def adjust_logp(self, logp, groups_running, coords, xp=cp):
+        """Adjust log-probability based on the Jacobian of the transformation."""
+        if groups_running is None:
+            groups_running = xp.arange(len(self.f0_min))
+
+        f0_min_here = xp.asarray(self.f0_min[groups_running])[:, None, None]
+        f0_max_here = xp.asarray(self.f0_max[groups_running])[:, None, None]
+
+        # p(f0) log-determinant
+        logp -= xp.log(f0_max_here - f0_min_here)
+
+        # p(fdot | f0) log-determinant
+        breakpoint()
+        f0_mHz = coords[:, :, :, self.f0_idx]
+        fdot_min, fdot_max = self._get_fdot_bounds(f0_mHz, xp)
+        logp -= xp.log(fdot_max - fdot_min)
+
+        return logp
+    
+# TODO place to priors.joint
+class UnitSquarePrior:
+    """Dummy 2D prior for Eryn parallel sampling over a unit square."""
+    def __init__(self, use_cupy=False):
+        self.xp = cp if use_cupy else np
+
+    def rvs(self, size=(1,)):
+        if isinstance(size, int): size = (size,)
+        return self.xp.random.uniform(0.0, 1.0, size=(*size, 2))
+
+    def logpdf(self, x):
+        out = self.xp.zeros(x.shape[:-1])
+        invalid = (x < 0.0) | (x > 1.0)
+        out[invalid.any(axis=-1)] = -np.inf
+        return out
 
 
 class BayesGMMFit:
@@ -3650,19 +3803,28 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         logger.info(f"The current number of active bands is {ngroups}")
 
-        fdot_max = get_fdot_mojito(f0_max, sign="+")
-        fdot_min = get_fdot_mojito(f0_max, sign="-")
-
         priors_in = deepcopy(priors_global)["gb"].priors_in
-        priors_in[r"$f_0$"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
-        priors_in[r"$\dot{f}$"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        
+        joint_key = ("f0", "fdot")
+        if joint_key in priors_in:
+            priors_in[joint_key] = UnitSquarePrior(use_cupy=self.backend.uses_cupy)
+        else:
+            raise KeyError(f"Expected JointPrior, {joint_key} not found in dictionary.")
+
+        # fdot_max = get_fdot_mojito(f0_max, sign="+")
+        # fdot_min = get_fdot_mojito(f0_max, sign="-")        
+        # priors_in[r"f0"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        # priors_in[r"fdot"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        
         priors = {
             "gb": ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
         }
         start_params = priors["gb"].rvs(size=(ngroups, ntemps, nwalkers))
-        prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, fdot_min, fdot_max)
-        prior_transform_fn.transform_from_prior_basis(start_params, self.xp.arange(ngroups))
-
+        prior_transform_fn = JointMojitoPriorTransformFn(f0_min * 1e3, f0_max * 1e3)
+        prior_transform_fn.transform_from_prior_basis(start_params, self.xp.arange(ngroups), xp=self.xp)
+        # prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, fdot_min, fdot_max)
+        # prior_transform_fn.transform_from_prior_basis(start_params, self.xp.arange(ngroups))
+        
         #? print("phase maximizing here right now (?)")
         ll_args = (
             self.gb,
@@ -3877,13 +4039,13 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         rj_dist = ProbDistContainer(
             {
-                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
-                r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
-                r"$\psi$": uniform_dist(0.0, np.pi),
+                (r"logA", r"f0", r"fdot", r"cos_inc", r"ra", r"sin_dec"): full_gmm,
+                r"phi0": uniform_dist(0.0, 2 * np.pi),
+                r"psi": uniform_dist(0.0, np.pi),
             },
             use_cupy=True,
         )
-        rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"])
+        rj_dist.reset_key_order([r"logA", r"f0", r"fdot", r"phi0", r"cos_inc", r"psi", r"ra", r"sin_dec"])
         # if self.ranks_needed == 0:
         #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
         #     gmm_info = gather_gmms(gmms)
@@ -4128,13 +4290,13 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         logger.info(f"Runtime GMM Refit: {round(time.perf_counter() - st)}")
         rj_dist = ProbDistContainer(
             {
-                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
-                r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
-                r"$\psi$": uniform_dist(0.0, np.pi),
+                (r"logA", r"f0", r"fdot", r"cos_inc", r"ra", r"sin_dec"): full_gmm,
+                r"phi0": uniform_dist(0.0, 2 * np.pi),
+                r"psi": uniform_dist(0.0, np.pi),
             },
             use_cupy=True,
         )
-        rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
+        rj_dist.key_order = [r"logA", r"f0", r"fdot", r"phi0", r"cos_inc", r"psi", r"ra", r"sin_dec"]
         # if self.ranks_needed == 0:
         #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
         #     gmm_info = gather_gmms(gmms)

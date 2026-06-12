@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
+from numpy.typing import ArrayLike
 from eryn.utils import TransformContainer
 
 from lisatools.diagnostic import covariance, plot_covariance_contour, plot_covariance_corner
@@ -676,7 +677,7 @@ def evolve_galactic_binary(
     Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]
 ):
     """Evolves one or more galactic binaries from its initial starting parameters to some set of final parameters for a given starting and end time.
-    If Mc is provided, the binary is evolved using gravitationally driven quadrupolar radiation. Otherwise, a linear approximation is used.
+    If Mc is provided, the binary is evolved using gravitationally driven quadrupolar radiation. Otherwise, a linear (Taylor) approximation is used.
 
     Args:
         t_start (float): Start/initial time of the binaries before evolving.
@@ -704,3 +705,18 @@ def evolve_galactic_binary(
        
     else:
         raise NotImplementedError("Currently, the galactic binaries can only be evolved using the linear approximation")
+        
+       
+def mT_Q(M, Q):
+    """
+    Transform from total mass and mass ratio m1/m2 to m1 and m2.
+    """
+    m2 = M / (1 + Q)
+    m1 = Q * m2
+    assert np.all(m1 >= m2), "m1 should be the larger mass"
+    return m1, m2
+
+
+def gpc_to_mpc(x):
+    """Convert Gpc to Mpc."""
+    return x * 1e3

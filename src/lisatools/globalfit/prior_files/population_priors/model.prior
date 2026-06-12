@@ -1,0 +1,1 @@
+model = Categorical(n_categories=2, name="model")

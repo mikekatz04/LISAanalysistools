@@ -18,7 +18,7 @@ from numpy.typing import ArrayLike, NDArray
 from lisatools.utils.typing import NDArrayLike
 from .base import Prior, UniformDistribution
 
-
+ANGLE_SAFE = 1e-9  # To avoid numerical issues with arccos and arcsin at the boundaries
 
 class DeltaFunction(Prior):
     """Dirac delta function prior. Always returns the peak value."""
@@ -84,7 +84,7 @@ class PowerLaw(UniformDistribution):
         self.alpha = alpha
         self._power = alpha + 1.0
         self._inv_power = 1.0 / self._power
-        self._log_abs_power = np.log(abs(self._power))
+        self._log_abs_power = self.xp.log(self.xp.abs(self._power))
 
         # The bounds in u-space can flip if the power is negative.
         # e.g., x in [1, 10] with alpha=-2 -> u in [1, 0.1]. Uniform needs min < max.
@@ -118,8 +118,10 @@ class PowerLaw(UniformDistribution):
         log |du/dx| = ln|alpha+1| + alpha * ln(x)
         """
         # We use xp.where to safely mask negative or zero values before logging
+        x_phys = self.xp.asarray(x_phys)
         valid_x = self.xp.where(x_phys > 0, x_phys, 1.0)
-        return self._log_abs_power + self.alpha * self.xp.log(valid_x)
+        out = self._log_abs_power + self.alpha * self.xp.log(valid_x)
+        return self._to_device(out)
 
 
 class LogUniform(UniformDistribution):
@@ -143,8 +145,8 @@ class LogUniform(UniformDistribution):
 
         # Initialize the Uniform base class in the log-space
         super().__init__(
-            minimum=np.log(minimum),
-            maximum=np.log(maximum),
+            minimum=float(np.log(minimum)),
+            maximum=float(np.log(maximum)),
             name=name,
             use_cupy=use_cupy,
             return_gpu=return_gpu,
@@ -158,17 +160,23 @@ class LogUniform(UniformDistribution):
 
     def _forward(self, x_phys: NDArrayLike) -> NDArrayLike:
         """Physical x -> Sampling u = ln(x)"""
-        return self.xp.log(x_phys)
+        x_phys = self.xp.asarray(x_phys)
+        out = self.xp.log(x_phys)
+        return self._to_device(out)
 
     def _inverse(self, u_samp: NDArrayLike) -> NDArrayLike:
         """Sampling u -> Physical x = exp(u)"""
-        return self.xp.exp(u_samp)
+        u_samp = self.xp.asarray(u_samp)
+        out = self.xp.exp(u_samp)
+        return self._to_device(out)
 
     def _jacobian(self, x_phys: NDArrayLike) -> NDArrayLike:
         """
         log | du / dx | = log(1 / x) = -log(x)
         """
-        return -self.xp.log(x_phys)
+        x_phys = self.xp.asarray(x_phys)
+        out = -self.xp.log(x_phys)
+        return self._to_device(out)
 
 
 class CosineUniform(UniformDistribution):
@@ -188,8 +196,8 @@ class CosineUniform(UniformDistribution):
     ):
         # Initialize Uniform in u = cos(iota) between [-1, 1]
         super().__init__(
-            minimum=-1.0,
-            maximum=1.0,
+            minimum=-1.0+ANGLE_SAFE,
+            maximum=1.0-ANGLE_SAFE,
             name=name,
             use_cupy=use_cupy,
             return_gpu=return_gpu,
@@ -201,18 +209,24 @@ class CosineUniform(UniformDistribution):
 
     def _forward(self, iota_phys: NDArrayLike) -> NDArrayLike:
         """Physical iota -> Sampling u = cos(iota)"""
-        return self.xp.cos(iota_phys)
+        iota_phys = self.xp.asarray(iota_phys)
+        out = self.xp.cos(iota_phys)
+        return self._to_device(out)
 
     def _inverse(self, u_samp: NDArrayLike) -> NDArrayLike:
         """Sampling u -> Physical iota = arccos(u)"""
-        return self.xp.arccos(u_samp)
+        u_samp = self.xp.asarray(u_samp)
+        out = self.xp.arccos(u_samp)
+        return self._to_device(out)
 
     def _jacobian(self, iota_phys: NDArrayLike) -> NDArrayLike:
         """
         log | du / diota | = log( |-sin(iota)| ) = log(sin(iota))
         Valid because iota is in [0, pi], so sin(iota) is positive.
         """
-        return self.xp.log(self.xp.sin(iota_phys))
+        iota_phys = self.xp.asarray(iota_phys)
+        out = self.xp.log(self.xp.sin(iota_phys))
+        return self._to_device(out)
 
 
 class SineUniform(UniformDistribution):
@@ -232,8 +246,8 @@ class SineUniform(UniformDistribution):
     ):
         # Initialize Uniform in u = sin(beta) between [-1, 1]
         super().__init__(
-            minimum=-1.0,
-            maximum=1.0,
+            minimum=-1.0+ANGLE_SAFE,
+            maximum=1.0-ANGLE_SAFE,
             name=name,
             use_cupy=use_cupy,
             return_gpu=return_gpu,
@@ -245,19 +259,25 @@ class SineUniform(UniformDistribution):
 
     def _forward(self, beta_phys: NDArrayLike) -> NDArrayLike:
         """Physical beta -> Sampling u = sin(beta)"""
-        return self.xp.sin(beta_phys)
+        beta_phys = self.xp.asarray(beta_phys)
+        out = self.xp.sin(beta_phys)
+        return self._to_device(out)
 
     def _inverse(self, u_samp: NDArrayLike) -> NDArrayLike:
         """Sampling u -> Physical beta = arcsin(u)"""
-        return self.xp.arcsin(u_samp)
+        u_samp = self.xp.asarray(u_samp)
+        out = self.xp.arcsin(u_samp)
+        return self._to_device(out)
 
     def _jacobian(self, beta_phys: NDArrayLike) -> NDArrayLike:
         """
         log | du / dbeta | = log( |cos(beta)| ) = log(cos(beta))
         Valid because beta is in [-pi/2, pi/2], so cos(beta) is positive.
         """
-        return self.xp.log(self.xp.cos(beta_phys))
-
+        beta_phys = self.xp.asarray(beta_phys)
+        out = self.xp.log(self.xp.cos(beta_phys))
+        return self._to_device(out)
+    
 
 class Log10Uniform(UniformDistribution):
     """
@@ -279,15 +299,15 @@ class Log10Uniform(UniformDistribution):
             raise ValueError("Log10Uniform minimum value must be strictly positive.")
 
         super().__init__(
-            minimum=np.log10(minimum),
-            maximum=np.log10(maximum),
+            minimum=float(np.log10(minimum)),
+            maximum=float(np.log10(maximum)),
             name=name,
             use_cupy=use_cupy,
             return_gpu=return_gpu,
             **kwargs,
         )
         # Precompute constants to avoid recalculating during sampling
-        self._log_log10 = np.log(np.log(10.0))
+        self._log_log10 = self.xp.log(self.xp.log(10.0))
 
         self.forward_transform = self._forward
         self.inverse_transform = self._inverse
@@ -295,18 +315,24 @@ class Log10Uniform(UniformDistribution):
 
     def _forward(self, x_phys: NDArrayLike) -> NDArrayLike:
         """Physical x -> Sampling u = log10(x)"""
-        return self.xp.log10(x_phys)
+        x_phys = self.xp.asarray(x_phys)
+        out = self.xp.log10(x_phys)
+        return self._to_device(out)
 
     def _inverse(self, u_samp: NDArrayLike) -> NDArrayLike:
         """Sampling u -> Physical x = 10^u"""
-        return 10.0 ** u_samp
+        u_samp = self.xp.asarray(u_samp)
+        out = self.xp.power(10.0, u_samp)
+        return self._to_device(out)
 
     def _jacobian(self, x_phys: NDArrayLike) -> NDArrayLike:
         """
         u = ln(x) / ln(10)  ->  du/dx = 1 / (x * ln(10))
         log |du/dx| = -ln(x) - ln(ln(10))
         """
-        return -self.xp.log(x_phys) - self._log_log10
+        x_phys = self.xp.asarray(x_phys)
+        out = -self.xp.log(x_phys) - self._log_log10
+        return self._to_device(out)
     
     
 class UniformInVolume(PowerLaw):
@@ -389,7 +415,7 @@ class Gaussian(Prior):
         )
         self.mu = mu
         self.sigma = sigma
-        self._log_norm = 0.5 * np.log(2.0 * np.pi * self.sigma**2)
+        self._log_norm = 0.5 * self.xp.log(2.0 * self.xp.pi * self.sigma**2)
 
     def rvs(self, size: int | tuple[int, ...] = (1,)) -> NDArrayLike:
         if isinstance(size, int):
@@ -431,7 +457,7 @@ class LogNormal(Prior):
             raise ValueError("Standard deviation sigma must be positive.")
         self.mu = mu
         self.sigma = sigma
-        self._log_sqrt_2pi = np.log(np.sqrt(2.0 * np.pi))
+        self._log_sqrt_2pi = self.xp.log(self.xp.sqrt(2.0 * self.xp.pi))
 
     def rvs(self, size: int | tuple[int, ...] = (1,)) -> NDArrayLike:
         if isinstance(size, int):
@@ -441,7 +467,7 @@ class LogNormal(Prior):
 
     def logpdf(self, x: ArrayLike) -> NDArrayLike:
         x_arr = self.xp.asarray(x)
-        out = self.xp.full_like(x_arr, -np.inf, dtype=self.xp.float64)
+        out = self.xp.full_like(x_arr, -self.xp.inf, dtype=self.xp.float64)
         mask = x_arr > self.minimum
         
         valid_x = self.xp.where(mask, x_arr, 1.0)
@@ -483,7 +509,7 @@ class Exponential(Prior):
         if mu <= 0.0:
             raise ValueError("Exponential mean 'mu' must be positive.")
         self.mu = mu
-        self._log_mu = np.log(self.mu)
+        self._log_mu = self.xp.log(self.mu)
 
     def rvs(self, size: int | tuple[int, ...] = (1,)) -> NDArrayLike:
         if isinstance(size, int):
@@ -493,7 +519,7 @@ class Exponential(Prior):
 
     def logpdf(self, x: ArrayLike) -> NDArrayLike:
         x_arr = self.xp.asarray(x)
-        out = self.xp.full_like(x_arr, -np.inf, dtype=self.xp.float64)
+        out = self.xp.full_like(x_arr, -self.xp.inf, dtype=self.xp.float64)
         mask = x_arr >= self.minimum
         
         valid_x = self.xp.where(mask, x_arr, 0.0)
@@ -510,3 +536,86 @@ class Exponential(Prior):
         out[mask] = 1.0 - self.xp.exp(-valid_x / self.mu)
         
         return self._to_device(out)
+    
+    
+
+class ResolvabilityPrior(Prior):
+    """
+    Error-function (Normal CDF) based prior representing the probability 
+    of resolving a source given its Signal-to-Noise Ratio (SNR).
+    
+    p(resolved | rho) = 0.5 * (1 + erf((rho - rho_th) / (sqrt(2) * sigma)))
+    """
+
+    def __init__(
+        self,
+        rho_threshold: float = 7.0,
+        sigma: float = 1.0,
+        name: str | None = None,
+        latex_label: str | None = r"p_{\rm res}",
+        use_cupy: bool = False,
+        return_gpu: bool = False,
+        **kwargs
+    ):
+        super().__init__(
+            name=name,
+            name_phys=name,
+            latex_label=latex_label,
+            minimum=0.0,
+            maximum=np.inf,
+            check_range_nonzero=False,
+            use_cupy=use_cupy,
+            return_gpu=return_gpu,
+            **kwargs
+        )
+        self.rho_threshold = rho_threshold
+        self.sigma = sigma
+
+        # Check for cupyx if GPU is requested
+        if self.use_cupy:
+            try:
+                import cupyx.scipy.special  # noqa: F401
+            except ImportError:
+                raise ImportError(
+                    "ResolvabilityPrior requires 'cupyx' for stable erf/log_ndtr "
+                    "evaluation when use_cupy=True."
+                )
+
+    def _log_ndtr(self, x: NDArrayLike) -> NDArrayLike:
+        """
+        Dynamically dispatch the log of the Normal CDF.
+        This is mathematically equivalent to log(0.5 * (1 + erf(x / sqrt(2))))
+        but is numerically stable for large negative values.
+        """
+        if self.use_cupy:
+            from cupyx.scipy.special import log_ndtr
+            return log_ndtr(x)
+        else:
+            from scipy.special import log_ndtr
+            return log_ndtr(x)
+
+    def logpdf(self, x: ArrayLike, **kwargs) -> NDArrayLike:
+        """
+        Calculates the log probability of resolution.
+        Args:
+            x: Flattened array of SNRs.
+        """
+        x_arr = self.xp.asarray(x)
+        
+        # Calculate z = (rho - rho_th) / sigma
+        # Note: log_ndtr divides by sqrt(2) internally!
+        z = (x_arr - self.rho_threshold) / self.sigma
+        
+        log_prob = self._log_ndtr(z)
+        
+        return self._to_device(log_prob)
+
+    def rvs(self, size: int | tuple[int, ...] = (1,), **kwargs) -> NDArrayLike:
+        """
+        Resolvability evaluates SNR probabilities. We cannot draw SNRs 
+        directly from it without a waveform and noise realization.
+        """
+        raise NotImplementedError(
+            "ResolvabilityPrior evaluates SNR probabilities. You cannot "
+            "draw SNRs directly from it without a waveform and noise realization."
+        )

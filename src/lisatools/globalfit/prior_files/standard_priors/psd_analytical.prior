@@ -1,0 +1,5 @@
+# PSD analytical parameter priors for LISA analyses
+# Sampled uniformly in log10 space, physical output is linear S_n(f)
+# Lines with # are ignored.
+log10_S_oms = Log10Uniform(minimum=1e-12, maximum=1e-10, name="log10_S_oms", name_phys="S_oms", latex_label=r"\log_{10} S_{\rm oms}")
+log10_S_tm = Log10Uniform(minimum=1e-16, maximum=1e-13, name="log10_S_tm", name_phys="S_tm", latex_label=r"\log_{10} S_{\rm tm}")

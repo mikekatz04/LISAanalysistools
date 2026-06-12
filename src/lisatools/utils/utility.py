@@ -445,3 +445,90 @@ autodoc_type_aliases = {
     "Iterable": "Iterable",
     "ArrayLike": "ArrayLike",
 }
+
+
+from scipy.interpolate import Akima1DInterpolator
+
+def interpolate_complex_noise(
+    noise_freqs: np.ndarray, 
+    noise_estimate: np.ndarray, 
+    f_arr: np.ndarray
+) -> np.ndarray:
+    """
+    Interpolates a complex N-dimensional array over a new set of frequencies using 
+    Akima interpolation.
+    
+    Parameters:
+        noise_freqs (np.ndarray): 1D array of original frequencies.
+        noise_estimate (np.ndarray): Original complex data array. The first axis 
+                                     (axis=0) must match the length of `noise_freqs`.
+        f_arr (np.ndarray): 1D array of target frequencies for evaluation.
+        
+    Returns:
+        np.ndarray: Interpolated complex data matching the spatial dimensions 
+                    of `noise_estimate` and the length of `f_arr`.
+    """
+    try:
+        f_arr = f_arr.get()
+        return_gpu = True
+    except:
+        return_gpu = False    
+        
+    interp_real = Akima1DInterpolator(noise_freqs, noise_estimate.real)
+    interp_imag = Akima1DInterpolator(noise_freqs, noise_estimate.imag)
+    
+    interpolated_complex = interp_real(f_arr) + 1j * interp_imag(f_arr)
+    
+    if return_gpu:
+        cp = get_array_module(f_arr) 
+        return cp.asarray(interpolated_complex)
+    else:
+        return  interpolated_complex
+
+
+def generate_multivariate_noise_fd(
+    sensitivity_matrix: np.ndarray,
+    df: float,
+) -> np.ndarray:
+    """
+    Generate correlated noise directly in the Frequency Domain for multiple channels.
+    
+    Args:
+        sensitivity_matrix: The PSD/CSD matrix from XYZSensitivityBackend.
+                            Shape must be (n_channels, n_channels, ..., N_freq).
+        df: Frequency domain bin size (1 / T_obs).
+        
+    Returns:
+        noise_realization: Complex noise array of shape (n_channels, ..., N_freq).
+    """
+    try:
+        import cupy as cp
+        xp = cp.get_array_module(sensitivity_matrix)
+    except ImportError:
+        xp = np
+
+    n_channels = sensitivity_matrix.shape[0]
+    basis_dims = sensitivity_matrix.shape[2:] 
+
+    perm = tuple(range(2, sensitivity_matrix.ndim)) + (0, 1)
+    cov_mat_T = sensitivity_matrix.transpose(perm)
+    
+    jitter = xp.eye(n_channels) * 1e-60
+    
+    # Σ(f) = L(f) @ L(f)^H
+    L = xp.linalg.cholesky(cov_mat_T + jitter)
+    
+    # Generate independent standard white noise
+    norm = 0.5 * (1.0 / df) ** 0.5
+    w_shape = basis_dims + (n_channels,)
+    
+    w_real = xp.random.normal(0, norm, w_shape)
+    w_imag = xp.random.normal(0, norm, w_shape)
+    w = w_real + 1j * w_imag
+    
+    noise_T = (L @ w[..., None]).squeeze(-1)
+    
+    ndim_noise = noise_T.ndim
+    inv_perm = (ndim_noise - 1,) + tuple(range(ndim_noise - 1))
+    
+    return noise_T.transpose(inv_perm)

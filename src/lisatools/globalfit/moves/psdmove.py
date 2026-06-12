@@ -331,9 +331,14 @@ class PSDMove(GlobalFitMove, StretchMove):
                 if changed_once:
                     num_so_far += 1
 
-            # print(max_logl, num_so_far, num_checks)
-            # breakpoint()
+            logger.info(f"Max log-likelihood: {max_logl}. For {num_so_far} out of {num_checks} checks the log-likelihood has not changed.")
 
+        # logger.debug the max log-likelihood and the corresponding parameters
+        logger.debug(f"Max log-likelihood found: {max_logl}")
+        logger.debug(f"Corresponding PSD parameters: {state.branches_coords['psd'][0, np.argmax(state.log_like[0]), :]}")
+        if "galfor" in state.branches_coords:
+            logger.debug(f"Corresponding galfor parameters: {state.branches_coords['galfor'][0, np.argmax(state.log_like[0]), :]}")
+        
         return state, accepted
 
     def propose(self, model, state):

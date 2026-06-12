@@ -6,19 +6,20 @@ Credits for most of the signal processing functions to Ollie Burke and Martina M
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Callable, Dict, Optional, List
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-from mojito import MojitoL1File
+from mojito.reader import MojitoL1File
 from MojitoProcessor import SignalProcessor as MPSignalProcessor
 from tqdm import tqdm
 
 from ..datacontainer import DataResidualArray
 from ..detector import L1Orbits, Orbits
-from ..domains import DomainBase, DomainSettingsBase, TDSettings, TDSignal
+from ..domains import DomainBase, DomainSettingsBase, FDSettings, FDSignal, STFTSettings, STFTSignal, TDSettings, TDSignal, WDMSignal, WDMSettings
 from ..utils.utility import get_array_module
+from ..utils.typing import NDArrayLike
 
 logger = logging.getLogger(__name__)
 
@@ -1023,3 +1024,78 @@ class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
         self.individual_timeseries = (
             {}
         )  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis
+
+
+from gbgpu.gbgpu import GBGPU
+
+class GBDataGenerator:
+    """
+    DataLoader for generating mock TDI data from multiple waveform generators.
+    """
+
+    def __init__(
+        self,
+        injection_parameters: NDArrayLike,
+        gb: GBGPU,
+        waveform_kwargs: Dict[str, Any],
+        domain_settings: DomainSettingsBase,
+        verbose: bool = True,
+    ) -> None:
+        
+        self.injection_parameters = injection_parameters
+        self.gb = gb
+        self.orbits = self.gb.orbits
+        self.orbits_class = self.gb.orbits.__class__
+        self.waveform_kwargs = waveform_kwargs
+        self.domain_settings = domain_settings
+        self.verbose = verbose
+        
+        if isinstance(self.domain_settings, TDSettings):
+            self.domain = "td"
+        elif isinstance(self.domain_settings, FDSettings):
+            self.domain = "fd"
+        elif isinstance(self.domain_settings, STFTSettings):
+            self.domain = "stft"
+        elif isinstance(self.domain_settings, WDMSettings):
+            self.domain = "wdm"
+        else:
+            raise ValueError("Unsupported domain settings type. Must be TDSettings, FDSettings, STFTSettings, or WDMSettings.")
+
+    def generate_data(
+        self,
+    ) -> tuple[DataResidualArray, Orbits]:
+        """
+        Generate and accumulate waveforms for all source types and their parameters.
+
+        Returns
+        -------
+        tuple
+            times (NDArray), sampling frequency (float), combined TDI data (NDArray), and orbits.
+        """
+        # TODO generalize to TD, STFT, WDM.
+        xp = self.gb.xp
+        
+        num_binaries = self.injection_parameters.shape[0]
+        # data_shape = (self.domain_settings.N,) if self.domain in ["td", "fd"] else (self.domain_settings.NT, self.domain_settings.NF)
+        group_index = xp.zeros(num_binaries, dtype=xp.int32)
+        data_length = len(self.domain_settings.f_arr)
+        template = xp.zeros((len(self.waveform_kwargs["tdi_channel_setup"]),data_length), xp.complex128) # TODO check for TD and TF
+
+        logger.info(f"Generating GB data for {num_binaries} binaries...")
+        self.gb.generate_global_template(
+            params = self.injection_parameters,
+            group_index = group_index,
+            templates = template,
+            **self.waveform_kwargs
+        )
+        
+        generated_signal = FDSignal(arr=template, settings=self.domain_settings)
+
+        data_residual_array = DataResidualArray(
+            data_res_in=generated_signal,
+            signal_domain=self.domain_settings,
+            input_signal_domain=self.domain_settings,
+            window=None,  
+        )
+
+        return data_residual_array, self.gb.orbits

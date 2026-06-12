@@ -355,9 +355,9 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     t_init = t_ref + trim_duration
     
     f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot, phase_sign=-1)
-    
+
     f0_mHz = f_init * 1e3
-    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))# % (np.pi)
+    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))
 
     ra = np.array(catalogue_entry["RightAscension"]) # alpha
     dec = np.array(catalogue_entry["Declination"]) # delta
@@ -692,9 +692,9 @@ def build_gb_moves(
             inf_coords = coords_out_gb[inf_indices]
             logger.error(f"Found {len(inf_indices)} coordinates with inf logpdf under GB priors. Example inf coordinates: {inf_coords[:5]}") 
 
-            logger.info("Prior bounds for GB parameters:")
-            for param_name, prior in priors["gb"].priors_in.items():
-                logger.info(f"  {param_name}: [{prior.min_val},{prior.max_val}]")
+            # logger.info("Prior bounds for GB parameters:")
+            # for param_name, prior in priors["gb"].priors_in.items():
+            #     logger.info(f"  {param_name}: [{prior.minimum},{prior.max_val}]")
             breakpoint()
             raise ValueError("Starting priors are inf. If injecting, try reducing spread.")
 
@@ -718,14 +718,7 @@ def build_gb_moves(
 
         logger.info("Removing GBs from residuals")
         template_in = deepcopy(acs.linear_data_arr)
-        # acs lays walkers out in contiguous blocks of ``len(gpu_splits[0])`` per
-        # GPU, so ``walker % num_per_gpu_walker`` recovers the intra-split residual
-        # index inside generate_global_template. Required (and only valid) for >1
-        # GPU; left None for single-GPU so GBGPU keeps its 1-GPU fast path. Mirrors
-        # GBSpecialBase.adjust_sources_in_residual_buffer.
-        num_per_gpu_walker = (
-            len(acs.gpu_splits[0]) if (acs.gpus is not None and len(acs.gpus) > 1) else None
-        )
+        data_in = deepcopy(acs[0].data_res_arr.data_res_arr.arr[0])
         gb.generate_global_template(
             coords_in_in,
             data_index,
@@ -733,16 +726,76 @@ def build_gb_moves(
             data_length=acs.data_length,
             factors=factors,
             data_splits=acs.gpu_map,
-            num_per_gpu=num_per_gpu_walker,
             N=N_vals,
             **gb_info.waveform_kwargs,
         )
         max_diff_templates = cp.abs(template_in[0]-acs.linear_data_arr[0]).max()
-        del template_in
+        logger.debug(f"Max absolute value in template before subtraction: {cp.abs(template_in[0]).max():5e}")
+        logger.debug(f"Max absolute value in template after subtraction: {cp.abs(acs.linear_data_arr[0]).max():5e}")
+
+        acs[0].data_res_arr.data_res_arr.plot(channel=0, filename=curr.general_info.artifacts_file_dir + "data_post_subtraction.png")
         logger.debug(f"The difference in residuals in/out = {max_diff_templates:5e}")
 
-    acs[0].data_res_arr.data_res_arr.plot(channel=0, filename=curr.general_info.artifacts_file_dir + "data_post_subtraction.png")
+        # gb.d_d = 0.0 # cp.asarray(acs.inner_product()[0])
+        # ll_gb = gb.get_ll(
+        #     coords_in_in, 
+        #     acs.linear_data_arr, 
+        #     acs.linear_psd_arr, 
+        #     data_index=data_index, 
+        #     noise_index=data_index, 
+        #     data_length=acs.data_length, 
+        #     data_splits=acs.gpu_map, 
+        #     phase_marginalize=False, 
+        #     **gb_info.waveform_kwargs,
+        # )
+        # opt_snr_gb = gb.h_h.real ** (1 / 2)
+        # print(f"{opt_snr_gb=}, {ll_gb=}")
 
+        # wavekwargs_tmp = deepcopy(gb_info.waveform_kwargs)
+        # wavekwargs_tmp.pop("start_freq_ind")
+        # gb.run_wave(*coords_in_in[1], **wavekwargs_tmp)
+        
+        # import matplotlib.pyplot as plt
+        # plt.figure(figsize=(10, 6))
+        # plt.plot(gb.freqs[0].get(), gb.X[0].real.get(), label="gb template")
+        # # plt.plot(acs.settings.f_arr.get(), acs[0].data_res_arr.data_res_arr[0].real.get(), label="data after subtraction")
+        # plt.plot(acs.settings.f_arr.get(), data_in.real.get(), label="data pre-subtraction")
+        # plt.xlabel("Frequency (Hz)")
+        # plt.ylabel("Amplitude")
+        # plt.legend()
+        # plt.xscale("log")
+        # plt.xlim(gb.freqs[0].get()[64], gb.freqs[0].get()[196])
+        # plt.savefig(curr.general_info.artifacts_file_dir + "template_comparison_real.png")
+        # plt.close()
+        
+        # plt.figure(figsize=(10, 6))
+        # plt.plot(gb.freqs[0].get(), gb.X[0].imag.get(), label="gb template")
+        # # plt.plot(acs.settings.f_arr.get(), acs[0].data_res_arr.data_res_arr[0].imag.get(), label="data after subtraction")
+        # plt.plot(acs.settings.f_arr.get(), data_in.imag.get(), label="data pre-subtraction")
+        # plt.xlabel("Frequency (Hz)")
+        # plt.ylabel("Amplitude")
+        # plt.xscale("log")
+        # plt.legend()
+        # plt.xlim(gb.freqs[0].get()[64], gb.freqs[0].get()[196])
+        # plt.savefig(curr.general_info.artifacts_file_dir + "template_comparison_imag.png")
+        # plt.close()
+        
+        # plt.figure(figsize=(10, 6))
+        # plt.plot(gb.freqs[0].get(), np.abs(gb.X[0].get()), label="gb template")
+        # # plt.plot(acs.settings.f_arr.get(), np.abs(acs[0].data_res_arr.data_res_arr[0]).get(), label="data after subtraction")
+        # plt.plot(acs.settings.f_arr.get(), np.abs(data_in).get(), label="data pre-subtraction")
+        # plt.xlabel("Frequency (Hz)")
+        # plt.ylabel("Amplitude")
+        # plt.xscale("log")
+        # plt.legend()
+        # plt.xlim(gb.freqs[0].get()[64], gb.freqs[0].get()[196])
+        # plt.savefig(curr.general_info.artifacts_file_dir + "template_comparison_abs.png")
+        # plt.close()
+
+        # breakpoint()
+        del template_in
+
+    
     #* Check if we need to adjust the band temps, and adjust if required
     adjust_temps = False
     state_band_info = getattr(state, "band_info", None)
@@ -887,3 +940,59 @@ def build_gb_moves(
     gb_pe_moves = [gb_pe_prior_move, gb_pe_refit_move, gb_pe_fstat_mcmc_move]
 
     return gb_search_moves, gb_pe_moves
+
+
+from .moves.hypermove import HyperMove
+from .stock.erebor import HyperSetup
+from eryn.state import BranchSupplemental
+
+def build_hyper_moves(
+    engine_info: Setup,
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    state: GFState,
+    wave_gen,
+    *,
+    num_repeats: int = 60,
+    permute_every: int = 50,
+    Tmax: float = 1e6,
+) -> HyperMove:
+    
+    hyper_settings: HyperSetup = curr.source_info["hyper"] 
+    branch_name_map: dict = hyper_settings.branch_name_map
+    resolved_info = curr.source_info[branch_name_map["resolved"]]
+    stochastic_info = curr.source_info[branch_name_map["stochastic"]]
+    
+    # setup supplemental branches
+    nwalkers: int = curr.general_info.nwalkers
+    ntemps: int = curr.general_info.ntemps
+    
+    breakpoint() # TODO CHECK
+    gb_shape = state.branches_coords["gb"].shape[:-1] # (ntemps, nwalkers, nleaves_max)
+
+    state.branches_supplemental["gb"].add_objects({
+        "snr": np.zeros(gb_shape, dtype=np.float64)
+    })
+    
+    
+    # setup move
+    hyper_move = HyperMove(
+        acs, 
+        wave_gen,
+        resolved_info.waveform_kwargs,
+        dict(
+            resolved = resolved_info.source_config,
+            stochastic = stochastic_info.source_config
+        ),
+        branch_name_map,
+        hyper_settings.catalogues,
+        snr_threshold=hyper_settings.resolvability_threshold
+    )
+    
+    
+    return hyper_move
+    
+    
+    
+    

@@ -33,7 +33,7 @@ from ..sensitivity import (
     XYZ2SensitivityMatrix,
     XYZSensitivityBackend,
 )
-from ..utils.utility import AET, detrend, windowfun
+from ..utils.utility import AET, detrend, windowfun, generate_multivariate_noise_fd, interpolate_complex_noise
 from .preprocessing import BaseProcessingStep
 
 
@@ -227,89 +227,106 @@ class GeneralSetup(Setup, GeneralSettings):
 
         self.logger.info(f"Using fixed PSD kwargs: {self.fixed_psd_kwargs}")
 
-        default_preprocess_kwargs = dict(
-            plot_folder=self.artifacts_file_dir,
-            highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),
-            trim_kwargs=dict(duration=200 * 3600, is_percent=False, trimming_type="from_each_end"),
-            Tobs=self.Tobs,
-        )
+        if hasattr(data_processor, "process"):
+            default_preprocess_kwargs = dict(
+                plot_folder=self.artifacts_file_dir,
+                highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),
+                trim_kwargs=dict(duration=200 * 3600, is_percent=False, trimming_type="from_each_end"),
+                Tobs=self.Tobs,
+            )
 
-        if self.preprocess_kwargs is None:
-            self.preprocess_kwargs = default_preprocess_kwargs
+            if self.preprocess_kwargs is None:
+                self.preprocess_kwargs = default_preprocess_kwargs
+            else:
+                self.preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
+
+            for key, value in self.preprocess_kwargs.items():
+                self.logger.debug(f"Preprocess setting: {key} = {value}")
+
+            times, _ = data_processor.process(**self.preprocess_kwargs)
+            dt = data_processor.td_signal.settings.dt
+            Nt = len(times)
+            self.data_td_settings = TDSettings(
+                *data_processor.td_signal.settings.args, force_backend=self.force_backend
+            )
+            self.Tobs = Nt * dt
+
+            if self.basis_domain == "stft":
+                from ..domains import get_stft_settings
+
+                if self.stft_dt is None:
+                    raise ValueError("Must provide `stft_dt` for stft basis domain.")
+                self.basis_kwargs = dict(
+                    big_dt=self.stft_dt, min_freq=self.start_freq, max_freq=self.end_freq
+                )
+                domain_settings = get_stft_settings(
+                    times=times,
+                    **self.basis_kwargs,
+                    force_backend=self.force_backend,
+                )
+                nperseg = domain_settings.get_nperseg(dt)
+
+                self.window_alpha = self.window_taper_duration / (nperseg * dt)
+                window, _ = windowfun(self.window_type, nperseg, alpha=self.window_alpha)
+
+                plot_kwargs_list = [
+                    dict(
+                        channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"
+                    ),
+                    dict(
+                        channel=0,
+                        plot_type="fd",
+                        time_bin=0,
+                        filename=self.artifacts_file_dir + "fd_data.png",
+                    ),
+                    dict(
+                        channel=0,
+                        plot_type="td",
+                        freq_bin=0,
+                        filename=self.artifacts_file_dir + "td_data.png",
+                    ),
+                ]
+
+            elif self.basis_domain == "fd":
+                from ..domains import FDSettings
+
+                df = 1.0 / (Nt * dt)
+                Nf = Nt // 2 + 1
+
+                self.window_alpha = self.window_taper_duration / (Nt * dt)
+                self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
+                domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
+
+                self.window_alpha = self.window_taper_duration / (Nt * dt)
+                window, _ = windowfun(self.window_type, Nt, alpha=self.window_alpha)
+                plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
+
+            else:
+                raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
+
+            # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
+            # self.logger.debug(f"Window factor for normalization: {window_factor}")
+
+            self.logger.debug(f"Applying window {self.window_type} with alpha: {self.window_alpha}")
+            self.input_data_residual_array, orbits = data_processor.pour(
+                settings=domain_settings, window=window, return_orbits=True
+            )
+            
         else:
-            self.preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
-
-        for key, value in self.preprocess_kwargs.items():
-            self.logger.debug(f"Preprocess setting: {key} = {value}")
-
-        times, _ = data_processor.process(**self.preprocess_kwargs)
-        dt = data_processor.td_signal.settings.dt
-        Nt = len(times)
-        self.data_td_settings = TDSettings(
-            *data_processor.td_signal.settings.args, force_backend=self.force_backend
-        )
-        self.Tobs = Nt * dt
-
-        if self.basis_domain == "stft":
-            from ..domains import get_stft_settings
-
-            if self.stft_dt is None:
-                raise ValueError("Must provide `stft_dt` for stft basis domain.")
-            self.basis_kwargs = dict(
-                big_dt=self.stft_dt, min_freq=self.start_freq, max_freq=self.end_freq
+            assert self.basis_domain == "fd", "Pre-generated data only supported for fd basis domain currently."
+            self.input_data_residual_array, orbits = data_processor.generate_data()
+            self.orbits = data_processor.orbits
+            domain_settings =  self.input_data_residual_array.settings
+            assert self.dt is not None
+            self.Tobs = 1.0 / domain_settings.df
+            self.data_td_settings = TDSettings(
+                t0=0.0, 
+                N=int(self.Tobs / self.dt), 
+                dt=self.dt, 
+                force_backend=self.force_backend
             )
-            domain_settings = get_stft_settings(
-                times=times,
-                **self.basis_kwargs,
-                force_backend=self.force_backend,
-            )
-            nperseg = domain_settings.get_nperseg(dt)
-
-            self.window_alpha = self.window_taper_duration / (nperseg * dt)
-            window, _ = windowfun(self.window_type, nperseg, alpha=self.window_alpha)
-
-            plot_kwargs_list = [
-                dict(
-                    channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"
-                ),
-                dict(
-                    channel=0,
-                    plot_type="fd",
-                    time_bin=0,
-                    filename=self.artifacts_file_dir + "fd_data.png",
-                ),
-                dict(
-                    channel=0,
-                    plot_type="td",
-                    freq_bin=0,
-                    filename=self.artifacts_file_dir + "td_data.png",
-                ),
-            ]
-
-        elif self.basis_domain == "fd":
-            from ..domains import FDSettings
-
-            df = 1.0 / (Nt * dt)
-            Nf = Nt // 2 + 1
-
-            self.window_alpha = self.window_taper_duration / (Nt * dt)
-            self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
-            domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
-
-            self.window_alpha = self.window_taper_duration / (Nt * dt)
-            window, _ = windowfun(self.window_type, Nt, alpha=self.window_alpha)
             plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
-
-        else:
-            raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
-
-        # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
-        # self.logger.debug(f"Window factor for normalization: {window_factor}")
-
-        self.logger.debug(f"Applying window {self.window_type} with alpha: {self.window_alpha}")
-        self.input_data_residual_array, orbits = data_processor.pour(
-            settings=domain_settings, window=window, return_orbits=True
-        )
+            
 
         if self.basis_domain == "fd":  # TODO check if this is also necessary for STFT or TD
             self.input_data_residual_array.data_length = len(
@@ -321,7 +338,7 @@ class GeneralSetup(Setup, GeneralSettings):
 
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
-
+            
         for key, value in domain_settings.__dict__.items():
             self.logger.info(f"Domain setting: {key} = {value}")
 
@@ -349,10 +366,64 @@ class GeneralSetup(Setup, GeneralSettings):
             window_values=window if self.normalize_window else None,
             **self.sensitivity_init_kwargs,
         )
+        
+        if not hasattr(self.data_processor, "process"):
+            # TODO: add option for empirical noise path in settings and load from there if provided
+            self.empirical_noise_path = "/workspace/ggfitlisa/ldc/mojito_light/data/INSTRUMENT/L1/NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5"
+            self.logger.info(f"Loading empirical noise from {self.empirical_noise_path}")
+            self._setup_empirical_sensitivity(domain_settings.f_arr)
+            self.logger.info("Injecting multivariate correlated noise from SensitivityMatrix.")
+            self._inject_correlated_noise(domain_settings.df)
+        
+            for plot_kwargs_here in plot_kwargs_list:
+                plot_kwargs_list[0]["filename"] = self.artifacts_file_dir + "fd_data_with_noise.png"
+                _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
+        
         # --- Store preprocessing --- #
         self.data_processor = data_processor
+        
+    def _setup_empirical_sensitivity(self, f_arr):
+        with h5py.File(self.empirical_noise_path, "r") as f:
+            # Assumes Mojito format: shape (N_times, N_freqs, 3, 3)
+            CENTRAL_FREQ = 281600000000000.0
+            xyz_noise_estimate = f['noise_estimates/XYZ'][:] / CENTRAL_FREQ**2
+            
+            fmin = f['noise_estimates/log_frequency_sampling'].attrs['fmin']
+            fmax = f['noise_estimates/log_frequency_sampling'].attrs['fmax']
+            size = f['noise_estimates/log_frequency_sampling'].attrs['size']
+            noise_freqs = np.logspace(np.log10(fmin), np.log10(fmax), size)
+            
+        noise_estimate_avg = xyz_noise_estimate.mean(axis=0)
 
+        interpolated_noise = interpolate_complex_noise(noise_freqs, noise_estimate_avg, f_arr)
+        
+        sens_mat_cpu = interpolated_noise.transpose(1, 2, 0)
+        
+        xp = self.sensitivity_backend.xp
+        self.sensitivity_backend.sens_mat = xp.asarray(sens_mat_cpu)
+        
+        self.logger.debug("Empirical noise successfully pushed to SensitivityMatrixBase.")
     
+    def _inject_correlated_noise(self, df):
+        if self.empirical_noise_path is None:
+            psd_params = self.fixed_psd_kwargs.get("psd_params", [15e-12, 3e-15])
+            galfor_params = self.fixed_psd_kwargs.get("galfor_params", np.zeros(5))
+            
+            self.sensitivity_backend.set_sensitivity_matrix(
+                Soms_d_in=psd_params[0], 
+                Sa_a_in=psd_params[1],
+                *(galfor_params if galfor_params is not None else np.zeros(5))
+            )
+        
+        # Grab the currently active matrix (Empirical OR Analytic)
+        sens_mat = self.sensitivity_backend.sens_mat 
+        
+        # Generate and inject
+        noise_fd = generate_multivariate_noise_fd(sens_mat, df)
+        self.input_data_residual_array.data_res_arr.arr += noise_fd
+        
+        self.logger.debug("Multivariate noise realization generated and added to signal.")
+            
 @dataclasses.dataclass
 class GlobalFitSettings:
     source_info: typing.Dict[str, Setup]

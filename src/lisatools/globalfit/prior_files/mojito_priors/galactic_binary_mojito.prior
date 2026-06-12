@@ -1,0 +1,10 @@
+# The prior for a non-eccentric galactic binary used for the Mojito-light LISA data challenge
+# Lines with # are ignored.
+logA = LogUniform(minimum=10**(-23.2), maximum=1e-20, name="logA", name_phys="A", latex_label="\log \mathcal{A}")
+('f0', 'fdot') = MojitoF0mHzFdotPrior(f0_min_mHz=0.1, f0_max_mHz=21.0)
+fddot = DeltaFunction(peak=0.0, name="fddot", latex_label="\ddot{f}")
+phi0 = Uniform(minimum=0.0, maximum=2*np.pi, name="phi0", boundary="periodic", latex_label="\phi_0")
+cos_inc = CosineUniform(name="cos_inc", name_phys="inc", latex_label="\cos \iota")
+psi = Uniform(minimum=0.0, maximum=np.pi, name="psi", boundary="periodic", latex_label="\psi")
+ra = Uniform(minimum=0.0, maximum=2*np.pi, name="ra", boundary="periodic", latex_label="\alpha")
+sin_dec = SineUniform(name="sin_dec", name_phys="dec", latex_label="\sin \delta")

@@ -1,0 +1,8 @@
+# Galactic foreground spectral envelope priors
+# Only the spectral envelope is inferred; the sky geometry (R_avg) is fixed
+# Lines with # are ignored.
+log10_Amp = Log10Uniform(minimum=1e-46, maximum=1e-43, name="log10_Amp", name_phys="Amp", latex_label=r"\log_{10} A_{\rm gal}")
+alpha = Uniform(minimum=0.5, maximum=60.0, name="alpha", name_phys="alpha", latex_label=r"\alpha_{\rm gal}")
+log10_f1 = Log10Uniform(minimum=1e-4, maximum=1e-1, name="log10_f1", name_phys="f1", latex_label=r"\log_{10} f_1")
+log10_fknee = Log10Uniform(minimum=1e-4, maximum=1e-2, name="log10_fknee", name_phys="fknee", latex_label=r"\log_{10} f_{\rm knee}")
+log10_f2 = Log10Uniform(minimum=1e-4, maximum=1e-1, name="log10_f2", name_phys="f2", latex_label=r"\log_{10} f_2")

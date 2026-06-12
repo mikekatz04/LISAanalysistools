@@ -300,7 +300,7 @@ class Prior(object):
         **kwargs
     ) -> NDArrayLike:
         """Generic method to calculate CDF, can be overwritten in subclass"""
-        if np.any(np.isinf([self.minimum, self.maximum])):
+        if self.xp.any(self.xp.isinf([self.minimum, self.maximum])):
             raise ValueError(
                 "Unable to use the generic CDF calculation for priors with"
                 "infinite support")
@@ -449,7 +449,7 @@ class UniformDistribution(Prior):
         )
 
         self.pdf_val = 1.0 / self.width 
-        self.logpdf_val = np.log(self.pdf_val)
+        self.logpdf_val = self.xp.log(self.pdf_val)
 
         if self.use_cupy:
             try:
@@ -471,7 +471,7 @@ class UniformDistribution(Prior):
 
     def logpdf(self, x: ArrayLike) -> NDArrayLike:
         x_arr = self.xp.asarray(x)
-        out = self.xp.full_like(x_arr, -np.inf, dtype=self.xp.float64)
+        out = self.xp.full_like(x_arr, -self.xp.inf, dtype=self.xp.float64)
 
         mask = (x_arr >= self.minimum) & (x_arr <= self.maximum)
         out[mask] = self.logpdf_val
@@ -520,7 +520,7 @@ class HierarchicalUniformDistribution(Prior):
         x_arr = self.xp.asarray(x)
         y_arr = self.xp.asarray(y)
 
-        out = self.xp.full_like(x_arr, -np.inf, dtype=self.xp.float64)
+        out = self.xp.full_like(x_arr, -self.xp.inf, dtype=self.xp.float64)
         mask = (x_arr >= self.minimum) & (x_arr <= y_arr)
 
         valid_y = self.xp.where(mask, y_arr, self.minimum + 1.0)

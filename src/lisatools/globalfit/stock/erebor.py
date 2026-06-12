@@ -9,7 +9,6 @@ import numpy as np
 
 try:
     import cupy as cp
-
 except (ModuleNotFoundError, ImportError) as e:
     import numpy as cp
 
@@ -17,32 +16,34 @@ import logging
 
 from eryn.backends import HDFBackend as eryn_Backend
 from eryn.moves.tempering import make_ladder
-from eryn.prior import ProbDistContainer, uniform_dist, log_uniform
 from eryn.state import State as ErynState
 from eryn.state import Branch as ErynBranch
 from eryn.utils import TransformContainer
 from gbgpu.utils.utility import get_fdot, get_N
 
 from lisatools.sources.utils import ecliptic_to_icrs
-from lisatools.utils.utility import AET, detrend, tukey
 from lisatools.utils.constants import YRSID_SI, PC_SI
 
 from ..engine import Settings, Setup, GeneralSetup
 from ..loginfo import init_logger
-from ..priors.gbpriors import get_fdot_mojito
 
+from ..priors import (
+    GBConfig, 
+    MBHConfig, 
+    PSDAnalyticalConfig, 
+    GalForConfig,
+    EMRIConfig,
+    HyperConfig
+)
+
+
+#* ==============================================================================
+#* GALACTIC BINARIES (GB)
+#* ==============================================================================
 
 @dataclasses.dataclass
 class GBSettings(Settings):
-    A_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    f0_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    m_chirp_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    fdot_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    phi0_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    iota_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    psi_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    alpha_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    delta_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    prior_file: Optional[str] = None
     start_freq: float = 0.0001  # this might get adjusted ?
     end_freq: float = 0.025
     oversample: int = 4
@@ -53,77 +54,53 @@ class GBSettings(Settings):
     search_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
     waveform_kwargs: dict = dataclasses.field(default_factory=dict)
-    # t0: Optional[float] = 0.0
-    # tdi_setup: Optional[str] = "XYZ" # other options are AET and AE. 
-    # use_tdi2: Optional[bool] = True
-
-# basic transform functions for pickling
-def f_ms_to_s(x):
-    return x * 1e-3
 
 
 from ..hdfbackend import GBHDFBackend
 from ..state import GBState
 
-
 class GBSetup(Setup, GBSettings):
-    def __init__(self, gb_settings: GBSettings):
-
+    def __init__(self, gb_settings: GBSettings, source_config = None):
         # had a better way to do this but it stopped allowing for pickle
         Setup.__init__(self, gb_settings)
 
-        level = logging.DEBUG
-        name = "GBSetup"
-        self.logger = init_logger(filename="gb_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
-
+        self.logger = init_logger(
+            filename="gb_setup.log", 
+            level=logging.DEBUG, 
+            name="GBSetup", 
+            log_dir=getattr(self, 'log_dir', None)
+        )
+        if source_config is None:
+            self.source_config = GBConfig(
+                prior_file=self.prior_file, 
+                use_cupy=True, # TODO grab dynamically
+                return_gpu=False
+            )
+        else:
+            self.source_config = source_config
+        
         self.init_setup()
 
-    def init_sampling_info(self):
-
-        input_basis = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", 
-                       r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
-
-        if self.transform is None:
-            gb_transform_fn_in = {
-                r"$\log A$": np.exp,
-                r"$f_0$": f_ms_to_s,
-                r"$\phi_0$": lambda x: -1 * x,  # flip sign of phi0 to match JaxGB convention.
-                r"$\cos\iota$": np.arccos,
-                r"$\sin\delta$": np.arcsin,
-
-            }
-
-            output_basis = [
-                r"$\log A$", r"$f_0$", r"$\dot{f}$", 
-                r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", 
-                r"$\psi$", r"$\alpha$", r"$\sin\delta$"
-            ]
-            
-            gb_fill_dict = {r"$\ddot{f}$": 0.0}
-
-            self.transform = TransformContainer(
-                input_basis=input_basis,
-                output_basis=output_basis,
-                parameter_transforms=gb_transform_fn_in,
-                fill_dict=gb_fill_dict,
+    def init_sampling_info(self):   
+        
+        if self.new_f0_lims is not None:
+            # NOTE also update fdot when there is an explicit fdot range dictated
+            # For the example below we have a joint prior on f0 and fdot, 
+            # so only f0 needs to be reset.
+            self.source_config.update_prior_kwargs(
+                ("f0", "fdot"), 
+                f0_min=self.new_f0_lims[0].item() * 1e3, 
+                f0_max=self.new_f0_lims[1].item() * 1e3 # sampling in mHz
             )
-
-        if self.periodic is None:
-            self.periodic = {"gb": {r"$\phi_0$": 2*np.pi, r"$\psi$": np.pi, r"$\alpha$": 2 * np.pi}}
-
+        
         if self.priors is None:
-            priors_gb = {
-                input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
-                input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
-                input_basis[2]: uniform_dist(self.fdot_lims[0], self.fdot_lims[1]),
-                input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
-                input_basis[4]: uniform_dist(*np.cos(self.iota_lims)),
-                input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
-                input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
-                input_basis[7]: uniform_dist(*np.sin(self.delta_lims)),
-            }
-
-            self.priors = {"gb": ProbDistContainer(priors_gb)}
+            self.priors = self.source_config.priors
+        
+        if self.transform is None:
+            self.transform = self.source_config.transform
+        
+        if self.periodic is None:
+            self.periodic = self.source_config.periodic.periodic
 
         if self.betas is None:
             # snrs_ladder = np.array(
@@ -207,6 +184,7 @@ class GBSetup(Setup, GBSettings):
             current_N = get_N(1e-30, current_freq, self.Tobs, oversample=self.oversample).item()
             band_N_vals_reverse_order.append(current_N)
             last_freq = current_freq
+        
         band_edges_in_reverse_order.append(
             last_freq - (current_N * 2 + self.extra_buffer) * self.df
         )
@@ -218,22 +196,22 @@ class GBSetup(Setup, GBSettings):
         self.band_edges = band_edges[2:-1]
         self.band_N_vals = band_N_vals[2:-1]
 
-        self.f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
-
-        self.fdot_lims = [
-            get_fdot_mojito(self.f0_lims[1], sign="-"), 
-            get_fdot_mojito(self.f0_lims[1], sign="+"), 
-        ]
+        self.new_f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
 
         self.num_sub_bands = len(self.band_edges) - 1
         
         self.logger.info(
-            f"GB f0 prior range is set from {round(self.f0_lims[0],7)} to {round(self.f0_lims[1],7)}"
+            f"GB f0 prior range is set from {round(self.new_f0_lims[0],7)} to {round(self.new_f0_lims[1],7)}"
         )
         self.logger.info(f"The number of subbands is {self.num_sub_bands}")
         self.logger.info(f"Min freq of subbands is {self.band_edges.min()}")
         self.logger.info(f"Max freq of subbands is {self.band_edges.max()}")
 
+        
+     
+#* ==============================================================================
+#* MASSIVE BLACK HOLE BINARIES (MBHB)
+#* ==============================================================================
         
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
@@ -254,15 +232,13 @@ def mT_Q(M, Q):
     assert np.all(m1 >= m2), "m1 should be the larger mass"
     return m1, m2
 
+#! SKIPPING FOR NOW, MBHB is quite difficult due to the complex transforms, maybe we should define priors for them
 
 from bbhx.utils.transform import mT_q, LISA_to_SSB
 from eryn.moves import Move
 
 from ..hdfbackend import MBHHDFBackend
 from ..state import MBHState
-
-
-
 
 @dataclasses.dataclass
 class MBHSettings(Settings):
@@ -436,17 +412,17 @@ class MBHSetup(Setup):
             self.branch_backend = MBHHDFBackend
 
 
+#* ==============================================================================
+#* EXTREME MASS RATIO INSPIRALS (EMRI)
+#* ==============================================================================
+
+from eryn.moves import Move
 from ..hdfbackend import EMRIHDFBackend
 from ..state import EMRIState
 
-
 @dataclasses.dataclass
 class EMRISettings(Settings):
-    logm1_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    m2_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    a_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    p0_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    e0_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    prior_file: Optional[str] = None
     waveform_kwargs: Optional[dict] = None
     injection: Optional[np.ndarray] = None  # AS here only for the starting state
     info_matrix_gen: Optional[Any] = None  # todo change name to info matrix or smth
@@ -456,108 +432,42 @@ class EMRISettings(Settings):
     num_prop_repeats: Optional[int] = 10
     emri_search_file_key: Optional[str] = "_emri_search_tmp_file"
 
-
-class EMRISetup(Setup):
+        
+class EMRISetup(Setup, EMRISettings):
     def __init__(self, emri_settings: EMRISettings):
-
         # had a better way to do this but it stopped allowing for pickle
-        super().__init__(emri_settings)
+        Setup.__init__(self, emri_settings)
 
-        level = logging.DEBUG
-        name = "EMRISetup"
-        self.logger = init_logger(filename="emri_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
+        self.logger = init_logger(
+            filename="emri_setup.log", 
+            level=logging.DEBUG, 
+            name="EMRISetup", 
+            log_dir=getattr(self, 'log_dir', None)
+        )
 
+        self.source_config = EMRIConfig(
+            prior_file=self.prior_file, 
+            use_cupy=True, # TODO grab dynamically
+            return_gpu=False
+        )
         self.init_setup()
 
     def init_sampling_info(self):
 
-        input_basis = [
-            "logm1",
-            "m2",
-            "a",
-            "p0",
-            "e0",
-            "dist",
-            "qS",
-            "phiS",
-            "qK",
-            "phiK",
-            "Phi_phi0",
-            "Phi_r0",
-        ]
-
+        if self.priors is None:
+            self.priors = self.source_config.priors
+        
         if self.transform is None:
-
-            output_basis = [
-                "logm1",
-                "m2",
-                "a",
-                "p0",
-                "e0",
-                "xI0",
-                "dist",
-                "qS",
-                "phiS",
-                "qK",
-                "phiK",
-                "Phi_phi0",
-                "Phi_theta0",
-                "Phi_r0",
-            ]
-
-            # for transforms
-
-            emri_fill_dict = {
-                "xI0": self.fill_values[0],  # inclination
-                "Phi_theta0": self.fill_values[1],  # Phi_theta
-            }
-
-            emri_transform_fn_in = {
-                output_basis[0]: np.exp,  # M
-                output_basis[7]: np.arccos,  # qS
-                output_basis[9]: np.arccos,  # qK
-            }
-
-            self.transform = TransformContainer(
-                input_basis=input_basis,
-                output_basis=output_basis,
-                parameter_transforms=emri_transform_fn_in,
-                fill_dict=emri_fill_dict,
-            )
-
+            self.transform = self.source_config.transform
+            
         if self.periodic is None:
-            self.periodic = {
-                "emri": {
-                    "phiS": 2 * np.pi,
-                    "phiK": 2 * np.pi,
-                    "Phi_phi0": 2 * np.pi,
-                    "Phi_r0": 2 * np.pi,
-                }
-            }
-
-        self.setup_priors(input_basis)
-
+            self.periodic = self.source_config.periodic.periodic
+        
         if self.betas is None:
-            snrs_ladder = np.array(
-                [
-                    1.0,
-                    1.5,
-                    2.0,
-                    3.0,
-                    4.0,
-                    5.0,
-                    7.5,
-                    10.0,
-                    15.0,
-                    20.0,
-                    35.0,
-                    50.0,
-                    75.0,
-                    125.0,
-                    250.0,
-                    5e2,
-                ]
-            )
+            # snrs_ladder = np.array(
+            #     [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0,
+            #      15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2]
+            # )
             ntemps_pe = 24  # len(snrs_ladder)
             # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
             betas = 1 / 1.2 ** np.arange(ntemps_pe)
@@ -583,42 +493,6 @@ class EMRISetup(Setup):
 
             self.inner_moves = [(StretchMove(), 1.0)]
 
-    def setup_priors(self, input_basis):
-        """
-        Get the prior distributions for the EMRI parameters.
-        override the default priors with custom boundaries for the intrinsic parameters.
-
-        Args:
-
-        Returns:
-            ProbDistContainer: Container with prior distributions for each parameter.
-        """
-
-        priors_emri = {
-            input_basis[0]: uniform_dist(np.log(5e5), np.log(5e6)),  # log m1
-            input_basis[1]: uniform_dist(1, 100),  # m2
-            input_basis[2]: uniform_dist(0.01, 0.999),  # a
-            input_basis[3]: uniform_dist(5.0, 100.0),  # p0
-            input_basis[4]: uniform_dist(0.001, 0.8),  # e0
-            input_basis[5]: uniform_dist(0.01, 100.0),  # dist in Gpc
-            input_basis[6]: uniform_dist(-0.99999, 0.99999),  # qS
-            input_basis[7]: uniform_dist(0.0, 2 * np.pi),  # phiS
-            input_basis[8]: uniform_dist(-0.99999, 0.99999),  # qK
-            input_basis[9]: uniform_dist(0.0, 2 * np.pi),  # phiK
-            input_basis[10]: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
-            input_basis[11]: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
-        }
-
-        limits = ["logm1_lims", "m2_lims", "a_lims", "p0_lims", "e0_lims"]
-        for i, lims in enumerate(limits):
-            if getattr(self, lims) is not None:
-                self.logger.info(
-                    f"Setting prior for parameter {i} using limits {getattr(self, lims)}"
-                )
-                priors_emri[input_basis[i]] = uniform_dist(*getattr(self, lims))
-
-        self.priors = {"emri": ProbDistContainer(priors_emri)}
-
     def init_setup(self):
         self.init_sampling_info()
         self.init_state_backend_info()
@@ -631,11 +505,13 @@ class EMRISetup(Setup):
             self.branch_backend = EMRIHDFBackend
 
 
-from lisatools.detector import EqualArmlengthOrbits
-
+#* ==============================================================================
+#* Instrumental Noise (PSD)
+#* ==============================================================================
 
 @dataclasses.dataclass
 class PSDSettings(Settings):
+    prior_file: Optional[str] = None
     psd_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     nleaves_max: int = 1
     nleaves_min: int = 1
@@ -645,16 +521,25 @@ class PSDSettings(Settings):
     nknots: Optional[int] = None
     num_prop_repeats: int = 50
 
-class PSDSetup(Setup):
+
+class PSDSetup(Setup, PSDSettings):
     def __init__(self, psd_settings: PSDSettings):
-
         # had a better way to do this but it stopped allowing for pickle
-        super().__init__(psd_settings)
+        Setup.__init__(self, psd_settings)
 
-        level = logging.DEBUG
-        name = "PSDSetup"
-        self.logger = init_logger(filename="psd_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
+        self.logger = init_logger(
+            filename="psd_setup.log", 
+            level=logging.DEBUG, 
+            name="PSDSetup", 
+            log_dir=getattr(self, 'log_dir', None)
+        )
 
+        self.source_config = PSDAnalyticalConfig(
+            prior_file=self.prior_file, 
+            use_cupy=True, # TODO grab dynamically
+            return_gpu=False
+        )
+        
         self.init_setup()
 
     def init_sampling_info(self):
@@ -666,19 +551,16 @@ class PSDSetup(Setup):
             self.initialize_kwargs = {}
 
         if self.priors is None:
-            # TODO: change to scaled linear in amplitude!?!
-            priors_psd = {
-                r"$S_{\rm oms}$": uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
-                r"$S_{\rm tm}$": uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
-                # 2: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
-                # 3: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
-            }
-
-            # TODO: orbits check against sangria/sangria_hm
-            self.priors = {"psd": ProbDistContainer(priors_psd)}
-
+            self.priors = self.source_config.priors
         else:
             self.logger.info("Using custom priors for PSD branch")
+            
+        if self.transform is None:
+            self.transform = self.source_config.transform
+            self.psd_kwargs["transform_fn"] = self.transform
+            
+        if self.periodic is None:
+            self.periodic = self.source_config.periodic.periodic
 
         if self.betas is None:
             # TODO: fix this to be generic
@@ -700,8 +582,13 @@ class PSDSetup(Setup):
         self.init_sampling_info()
 
 
+#* ==============================================================================
+#* Galactic Foreground (GalFor)
+#* ==============================================================================
+
 @dataclasses.dataclass
 class GalForSettings(Settings):
+    prior_file: Optional[str] = None
     galfor_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     transform: Optional[TransformContainer] = None
     nleaves_max: int = 1
@@ -709,16 +596,26 @@ class GalForSettings(Settings):
     ndim: int = 5
 
 
-class GalForSetup(Setup):
-    def __init__(self, galfor_settings: GalForSettings):
-
+class GalForSetup(Setup, GalForSettings):
+    def __init__(self, galfor_settings: GalForSettings, source_config = None):
         # had a better way to do this but it stopped allowing for pickle
-        super().__init__(galfor_settings)
+        Setup.__init__(self, galfor_settings)
 
-        level = logging.DEBUG
-        name = "GalForSetup"
-        self.logger = init_logger(filename="galfor_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
-
+        self.logger = init_logger(
+            filename="galfor_setup.log", 
+            level=logging.DEBUG, 
+            name="GalForSetup", 
+            log_dir=getattr(self, 'log_dir', None)
+        )
+        if source_config is None:
+            self.source_config = GalForConfig(
+                prior_file=self.prior_file,
+                use_cupy=True, # TODO grab dynamically
+                return_gpu=False
+            )
+        else:
+            self.source_config = source_config
+            
         self.init_setup()
 
     def init_sampling_info(self):
@@ -730,18 +627,14 @@ class GalForSetup(Setup):
             self.initialize_kwargs = {}
 
         if self.priors is None:
-            # TODO: change to scaled linear in amplitude!?!
-            priors_galfor = {
-                0: uniform_dist(1e-45, 2e-43),  # amp
-                1: uniform_dist(1e-4, 5e-2),  # knee
-                2: uniform_dist(0.01, 3.0),  # alpha
-                3: uniform_dist(1e0, 1e7),  # Slope1
-                4: uniform_dist(5e1, 8e3),  # Slope2
-            }
+            self.priors = self.source_config.priors
 
-            # TODO: orbits check against sangria/sangria_hm
-            self.priors = {"galfor": ProbDistContainer(priors_galfor)}
-
+        if self.transform is None:
+            self.transform = self.source_config.transform
+            
+        if self.periodic is None:
+            self.periodic = self.source_config.periodic.periodic
+            
         # if self.betas is None:
         #     # TODO: fix this to be generic
         #     ntemps_pe = 24  # len(snrs_ladder)
@@ -762,25 +655,84 @@ class GalForSetup(Setup):
         self.init_sampling_info()
 
 
-def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
+@dataclasses.dataclass
+class HyperSettings(Settings):
+    prior_file: Optional[str] = None
+    hyper_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
+    branch_name_map: Optional[typing.Dict] = None
+    catalogues: typing.List = dataclasses.field(default_factory=list)
+    resolvability_threshold: float = 7.0
+    transform: Optional[TransformContainer] = None
+    nleaves_max: int = 1
+    nleaves_min: int = 1
+    Nmodels: int = 2
+    betas: Optional[np.ndarray] = None
+    
+    
+class HyperSetup(Setup, HyperSettings):
+    def __init__(self, hyper_settings: HyperSettings):
+        # had a better way to do this but it stopped allowing for pickle
+        Setup.__init__(self, hyper_settings)
 
-    from lisatools.detector import EqualArmlengthOrbits
-    from lisatools.utils.constants import YRSID_SI
+        self.logger = init_logger(
+            filename="hyper_setup.log", 
+            level=logging.DEBUG, 
+            name="HyperSetup", 
+            log_dir=getattr(self, 'log_dir', None)
+        )
 
-    Tobs = YRSID_SI
-    dt = 10.0
+        self.source_config = HyperConfig(
+            prior_file=self.prior_file, 
+            use_cupy=True, # TODO grab dynamically
+            return_gpu=False
+        )
+        
+        self.init_setup()
 
-    galfor_settings = GalForSettings(
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs={},
-    )
+    def init_sampling_info(self):
 
-    return GalForSetup(galfor_settings)
+        if self.hyper_kwargs is None:
+            self.hyper_kwargs = dict()
+
+        if self.branch_name_map is None:
+            self.branch_name_map = dict(
+                resolved = "gb",
+                stochastic = "galfor"
+            )
+    
+        if self.initialize_kwargs is None:
+            self.initialize_kwargs = {}
+
+        if self.priors is None:
+            self.priors = self.source_config.priors
+        else:
+            self.logger.info("Using custom priors for hyper branch")
+            
+        if self.transform is None:
+            self.transform = self.source_config.transform
+            
+        if self.periodic is None:
+            self.periodic = self.source_config.periodic.periodic
+        
+        if self.betas is None:
+            assert self.ntemps is not None, "ntemps must be specified if betas is not provided"
+            betas = 1 / 1.2 ** np.arange(self.ntemps)
+            betas[-1] = 0.0001
+            self.betas = betas
+
+        if self.other_tempering_kwargs is None:
+            self.other_tempering_kwargs = dict(adaptation_time=2, permute=True)
+
+        if self.initialize_kwargs is None:
+            self.initialize_kwargs = {}
+
+    def init_setup(self):
+        self.init_sampling_info()
+
 
 
 if __name__ == "__main__":
-    # general_set = get_general_erebor_settings()
+    # gb_setup = GBSetup(GBSettings())
     # gb_set = get_gb_erebor_settings(general_set)
     # mbh_set = get_mbh_erebor_settings(general_set)
     # psd_set = get_psd_erebor_settings(general_set)

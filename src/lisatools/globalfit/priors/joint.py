@@ -16,8 +16,8 @@ class JointPrior(object):
         self,
         names: Sequence[str],
         names_phys: Sequence[str] | None = None,
-        latex_label: Sequence[str | None] | None = None,
-        unit: Sequence[str | None] | None = None,
+        latex_labels: Sequence[str | None] | None = None,
+        units: Sequence[str | None] | None = None,
         boundaries: Sequence[str | None] | None = None,
         use_cupy: bool = False,
         return_gpu: bool = False,
@@ -84,8 +84,8 @@ class JointPrior(object):
             self.boundaries = tuple(None for _ in range(self.num_vars))
 
         # Trigger the setters to validate lengths and apply defaults
-        self.latex_label = latex_label
-        self.unit = unit
+        self.latex_label = latex_labels
+        self.unit = units
 
         # N-dimensional coordinate transformation attributes (Physical <-> Sampling)
         self.forward_transform_nd = forward_transform_nd
@@ -403,42 +403,42 @@ class MultivariateGaussian(JointPrior):
         names: Sequence[str],
         mu: ArrayLike,
         cov: ArrayLike,
-        latex_label: Sequence[str | None] | None = None,
-        unit: Sequence[str | None] | None = None,
+        latex_labels: Sequence[str | None] | None = None,
+        units: Sequence[str | None] | None = None,
         use_cupy: bool = False,
         return_gpu: bool = False,
     ):
         super().__init__(
             names=names, 
-            latex_label=latex_label,
-            unit=unit,
+            latex_labels=latex_labels,
+            units=units,
             use_cupy=use_cupy, 
             return_gpu=return_gpu
         )
 
-        self.mu = np.asarray(mu, dtype=np.float64)
-        self.cov = np.asarray(cov, dtype=np.float64)
+        self.mu = self.xp.asarray(mu, dtype=self.xp.float64)
+        self.cov = self.xp.asarray(cov, dtype=self.xp.float64)
 
         if self.mu.shape != (self.num_vars,):
             raise ValueError(f"'mu' must have shape ({self.num_vars},).")
         if self.cov.shape != (self.num_vars, self.num_vars):
             raise ValueError(f"'cov' must have shape ({self.num_vars}, {self.num_vars}).")
 
-        if not np.allclose(self.cov, self.cov.T):
+        if not self.xp.allclose(self.cov, self.cov.T):
             raise ValueError("Covariance matrix must be symmetric.")
 
         # Precompute precision and normalization on CPU
         try:
-            self.prec = np.linalg.inv(self.cov)
-        except np.linalg.LinAlgError:
+            self.prec = self.xp.linalg.inv(self.cov)
+        except self.xp.linalg.LinAlgError:
             raise ValueError("Covariance matrix is singular and cannot be inverted.")
 
-        sign, logdet = np.linalg.slogdet(self.cov)
+        sign, logdet = self.xp.linalg.slogdet(self.cov)
         if sign <= 0:
             raise ValueError("Covariance matrix is not positive definite.")
             
-        self._log_norm = -0.5 * (self.num_vars * np.log(2.0 * np.pi) + logdet)
-        self.cholesky_lower = np.linalg.cholesky(self.cov)
+        self._log_norm = -0.5 * (self.num_vars * self.xp.log(2.0 * self.xp.pi) + logdet)
+        self.cholesky_lower = self.xp.linalg.cholesky(self.cov)
 
         # Push to GPU if requested
         if self.use_cupy:
@@ -466,3 +466,167 @@ class MultivariateGaussian(JointPrior):
         quadratic_term = self.xp.einsum("...i,ij,...j->...", diff, self.prec, diff)
         out = -0.5 * quadratic_term + self._log_norm
         return self._to_device(out)
+    
+    
+    
+class MojitoF0FdotPrior(JointPrior):
+    """
+    Joint prior for f0 and fdot.
+    
+    f0 is distributed uniformly between [f0_min, f0_max].
+    fdot is distributed uniformly between dynamic bounds dictated by f0.
+    """
+
+    def __init__(
+        self,
+        f0_min: float = 1e-4,
+        f0_max: float = 2.1e-2,
+        use_cupy: bool = False,
+        return_gpu: bool = False,
+        **kwargs
+    ):
+        super().__init__(
+            names=("f0", "fdot"),
+            latex_labels=(r"f_0", r"\dot{f}"),
+            units=("Hz", "Hz/s"),
+            use_cupy=use_cupy,
+            return_gpu=return_gpu,
+            **kwargs
+        )
+        self.f0_min = f0_min
+        self.f0_max = f0_max
+
+    def _get_fdot_bounds(self, f0: NDArrayLike) -> Tuple[NDArrayLike, NDArrayLike]:
+        """
+        Vectorized calculation of the dynamic fdot bounds.
+        """
+        f0_safe = self.xp.where(f0 > 0, f0, 1.0)
+        
+        min_val = -2e-20 * (f0_safe / 4e-4) ** (16 / 3)
+        max_val = 3e-21 * (f0_safe / 1e-4) ** (11 / 3)
+        
+        return min_val, max_val
+
+    def rvs(self, size: int | tuple[int, ...] = (1,), **kwargs) -> NDArrayLike:
+        if isinstance(size, int):
+            size = (size,)
+
+        f0_samples = self.xp.random.uniform(self.f0_min, self.f0_max, size=size)
+        fdot_min, fdot_max = self._get_fdot_bounds(f0_samples)
+        
+        fdot_samples = self.xp.random.uniform(fdot_min, fdot_max, size=size)
+        samples = self.xp.stack([f0_samples, fdot_samples], axis=-1)
+        
+        return self._to_device(samples)
+
+    def logpdf(self, x: ArrayLike, **kwargs) -> NDArrayLike:
+        x_arr = self.xp.asarray(x)
+        
+        if x_arr.shape[-1] != 2:
+            raise ValueError(f"Expected last dimension of x to be 2, got {x_arr.shape[-1]}")
+
+        f0 = x_arr[..., 0]
+        fdot = x_arr[..., 1]
+        
+        out = self.xp.full_like(f0, -self.xp.inf, dtype=self.xp.float64)
+        
+        mask_f0 = (f0 >= self.f0_min) & (f0 <= self.f0_max)
+        
+        fdot_min, fdot_max = self._get_fdot_bounds(f0)
+        mask_fdot = (fdot >= fdot_min) & (fdot <= fdot_max)
+        
+        # Overall valid mask
+        valid = mask_f0 & mask_fdot
+        
+        # log p = log p(f0) - log(fdot_max - fdot_min)
+        valid_fdot_diff = self.xp.where(valid, fdot_max - fdot_min, 1.0)
+        f0_log_norm = -self.xp.log(self.f0_max - self.f0_min)
+        out[valid] = f0_log_norm - self.xp.log(valid_fdot_diff[valid])
+        
+        return self._to_device(out)
+    
+    
+    
+def f_mHz_to_Hz_and_fdot(f0_mHz: NDArrayLike, fdot: NDArrayLike) -> Tuple[NDArrayLike, NDArrayLike]:
+    """Utility function to convert f0 from mHz to Hz and fdot from mHz/yr to Hz/s."""
+    f0_Hz = f0_mHz * 1e-3
+    return f0_Hz, fdot
+
+
+class MojitoF0mHzFdotPrior(JointPrior):
+    """
+    Joint prior for f0 in mHz and fdot.
+    
+    f0 is distributed uniformly between [f0_min, f0_max].
+    fdot is distributed uniformly between dynamic bounds dictated by f0.
+    """
+
+    def __init__(
+        self,
+        f0_min_mHz: float = 0.1,
+        f0_max_mHz: float = 21.0,
+        use_cupy: bool = False,
+        return_gpu: bool = False,
+        **kwargs
+    ):
+        super().__init__(
+            names=("f0", "fdot"),
+            names_phys=("f0", "fdot"), # Maps to the physical Hz basis
+            latex_labels=(r"f_0", r"\dot{f}"),
+            units=("mHz", "Hz/s"),
+            use_cupy=use_cupy,
+            return_gpu=return_gpu,
+            inverse_transform_nd=f_mHz_to_Hz_and_fdot,
+            **kwargs
+        )
+        self.f0_min = f0_min_mHz
+        self.f0_max = f0_max_mHz
+
+    def _get_fdot_bounds(self, f0_mHz: NDArrayLike) -> tuple[NDArrayLike, NDArrayLike]:
+        """Calculates dynamic bounds for fdot. The formula requires f0 in Hz."""
+        f0_Hz = f0_mHz * 1e-3
+        
+        min_val = -2e-20 * (f0_Hz / 4e-4) ** (16 / 3)
+        max_val = 3e-21 * (f0_Hz / 1e-4) ** (11 / 3)
+        return min_val, max_val
+
+    def rvs(self, size: int | tuple[int, ...] = (1,), **kwargs) -> NDArrayLike:
+        if isinstance(size, int):
+            size = (size,)
+
+        # 1. Sample f0 in mHz
+        f0_mHz_samples = self.xp.random.uniform(self.f0_min, self.f0_max, size=size)
+        
+        # 2. Get bounds and sample fdot
+        fdot_min, fdot_max = self._get_fdot_bounds(f0_mHz_samples)
+        fdot_samples = self.xp.random.uniform(fdot_min, fdot_max, size=size)
+        
+        samples = self.xp.stack([f0_mHz_samples, fdot_samples], axis=-1)
+        return self._to_device(samples)
+
+    def logpdf(self, x: ArrayLike, **kwargs) -> NDArrayLike:
+        x_arr = self.xp.asarray(x)
+        
+        if x_arr.shape[-1] != 2:
+            raise ValueError("Expected last dimension of x to be 2.")
+
+        f0_mHz = x_arr[..., 0]
+        fdot = x_arr[..., 1]
+        
+        out = self.xp.full_like(f0_mHz, -self.xp.inf, dtype=self.xp.float64)
+        
+        mask_f0 = (f0_mHz >= self.f0_min) & (f0_mHz <= self.f0_max)
+        fdot_min, fdot_max = self._get_fdot_bounds(f0_mHz)
+        mask_fdot = (fdot >= fdot_min) & (fdot <= fdot_max)
+        
+        valid = mask_f0 & mask_fdot
+        valid_fdot_diff = self.xp.where(valid, fdot_max - fdot_min, 1.0)
+        
+        # p(f0, fdot) = p(f0) * p(fdot|f0)
+        f0_log_norm = -self.xp.log(self.f0_max - self.f0_min)
+        out[valid] = f0_log_norm - self.xp.log(valid_fdot_diff[valid])
+        
+        return self._to_device(out)
+    
+    
+    

@@ -1,4 +1,4 @@
-# The prior for a non-eccentric galactic binary used for the Mojito-light LISA data challenge
+# The prior for a non-eccentric galactic binary used for the LISA data challenge
 # Lines with # are ignored.
 logA = LogUniform(minimum=10**(-23.2), maximum=1e-20, name="logA", name_phys="A", latex_label="\log \mathcal{A}")
 f0 = Uniform(minimum=1e-4, maximum=2.1e-2, name="f0", unit="Hz", latex_label="f_0")
