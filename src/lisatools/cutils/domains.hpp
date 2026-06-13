@@ -891,7 +891,69 @@ class WDMDomain : public WDMSettings{
         }
         *grad_acc_k += local_acc;
     }
+
+    /** @brief Host wrapper: batched (d|h)/(h|h) likelihood terms on the WDM
+     *  grid -- the WDM counterpart of STFTDomain::compute_likelihood_terms_wrap
+     *  (2026-06 merge follow-up). Body in domains.cu.
+     *
+     *  Each binary owns a rectangular template sub-grid of
+     *  n_m_template x n_n_template WDM pixels addressed by integer start
+     *  indices on the FULL WDM grid: start_layer_m_all[bin] (frequency
+     *  layer m) and start_time_n_all[bin] (time bin n). The pixel getters
+     *  offset by ind_min_f / ind_min_t internally, so callers must ensure
+     *  every sub-grid lies inside the active band
+     *  [ind_min_f, ind_max_f] x [ind_min_t, ind_max_t] -- the Python wrap
+     *  layer validates this (the kernel cannot throw on GPU).
+     *
+     *  Unlike STFT, the outputs are real doubles (WDM coefficients are
+     *  real) and the finalization factor is a bare 4.0: the per-pixel
+     *  primitives already carry the WDM differential component 0.25, so
+     *  4 * sum(d*h*invC*0.25) reproduces the Python convention
+     *  4 * sum(...) * differential_component exactly.
+     *
+     * @param d_h_out            Output (d|h) values, shape [num_binaries]
+     * @param h_h_out            Output (h|h) values, shape [num_binaries]
+     * @param template_vals      Template array, shape
+     *                           [num_binaries, num_channel, n_m_template,
+     *                            n_n_template] (n fastest, matching wdm_data)
+     * @param start_layer_m_all  Absolute start frequency-layer m per binary
+     * @param start_time_n_all   Absolute start time-bin n per binary
+     * @param num_binaries       Number of sources in this batch
+     * @param data_index_all     Data-instance index per binary
+     * @param noise_index_all    Noise-instance index per binary
+     * @param n_m_template       Frequency layers per template sub-grid
+     * @param n_n_template       Time bins per template sub-grid
+     * @param tdi_type           TDI_XYZ / TDI_AET / TDI_AE (passed per call,
+     *                           matching the other WDMDomain helpers)
+     */
+    void compute_likelihood_terms_wrap(double* d_h_out, double* h_h_out,
+                                       double* template_vals,
+                                       int* start_layer_m_all,
+                                       int* start_time_n_all,
+                                       int num_binaries,
+                                       int* data_index_all,
+                                       int* noise_index_all,
+                                       int n_m_template, int n_n_template,
+                                       int tdi_type, bool run_async = false);
 };
+
+/** @brief First-pass kernel: partial (d|h) and (h|h) sums per CUDA block on
+ *  the WDM grid. Mirror of compute_likelihood_contributions_kernel (STFT)
+ *  with real-valued accumulators and integer (m, n) sub-grid addressing.
+ *  See WDMDomain::compute_likelihood_terms_wrap for parameter semantics. */
+CUDA_KERNEL
+void wdm_compute_likelihood_contributions_kernel(
+    double* d_h_contrib, double* h_h_contrib, WDMDomain domain,
+    double* template_vals, int* start_layer_m_all, int* start_time_n_all,
+    int num_binaries, int* data_index_all, int* noise_index_all,
+    int n_m_template, int n_n_template, int tdi_type);
+
+/** @brief Second-pass kernel: reduce per-block partial sums to per-binary
+ *  results. Real-valued mirror of like_sum_from_contrib_cmplx. */
+CUDA_KERNEL
+void like_sum_from_contrib_real(double* d_h_final, double* h_h_final,
+                                double* d_h_contrib, double* h_h_contrib,
+                                int num_blocks_per_bin, int num_binaries);
 
 // FDDomain -- frequency-domain data container + inverse-noise descriptor.
 // Used by the chunked-heterodyne and signal-heterodyne kernels to evaluate

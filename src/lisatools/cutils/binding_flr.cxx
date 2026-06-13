@@ -196,6 +196,18 @@ void response_part(nb::module_ &m) {
          nb::arg("ind_min_f"), nb::arg("ind_max_f"),
          nb::arg("num_data"), nb::arg("num_noise"))
     .def_rw("wdm", &WDMDomainWrap::wdm)
+    // 2026-06 merge follow-up: batched WDM likelihood terms (WDM counterpart
+    // of STFTDomainWrap.compute_likelihood_terms in binding_detector.cxx's
+    // domains_part). Pure compute — release the GIL (argument conversion
+    // happens before the guard, so the nb::ndarray args are safe).
+    .def("compute_likelihood_terms", &WDMDomainWrap::compute_likelihood_terms,
+         nb::arg("d_h_out"), nb::arg("h_h_out"), nb::arg("template_vals"),
+         nb::arg("start_layer_m"), nb::arg("start_time_n"), nb::arg("num_binaries"),
+         nb::arg("data_index"), nb::arg("noise_index"),
+         nb::arg("n_m_template"), nb::arg("n_n_template"), nb::arg("tdi_type"),
+         nb::arg("run_async") = false,
+         nb::call_guard<nb::gil_scoped_release>(),
+         "Compute (d|h) and (h|h) likelihood terms for a batch of binaries (WDM).")
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)

@@ -46,6 +46,45 @@ class WDMDomainWrap : public WDMSettingsWrap {
         delete wdm;
         // base dtor handles wdm_settings
     };
+
+    // Batched (d|h)/(h|h) likelihood terms on the WDM grid — WDM counterpart
+    // of STFTDomainWrap::compute_likelihood_terms (2026-06 merge follow-up).
+    // Outputs are real doubles; template sub-grids are addressed by integer
+    // (m, n) start indices on the full WDM grid. The Python wrap layer
+    // (lisatools.domaincomputation.WDMComputationGroup) converts physical
+    // start times/frequencies to indices and validates active-band coverage
+    // before calling (the GPU kernel cannot throw).
+    void compute_likelihood_terms(
+        array_type<double> d_h_out,
+        array_type<double> h_h_out,
+        array_type<double> template_vals,
+        array_type<int> start_layer_m,
+        array_type<int> start_time_n,
+        int num_binaries,
+        array_type<int> data_index,
+        array_type<int> noise_index,
+        int n_m_template,
+        int n_n_template,
+        int tdi_type,
+        bool run_async = false)
+    {
+        double *d_h_ptr = return_pointer_and_check_length(d_h_out, "d_h_out", num_binaries, 1);
+        double *h_h_ptr = return_pointer_and_check_length(h_h_out, "h_h_out", num_binaries, 1);
+        double *tmpl_ptr = return_pointer_and_check_length(
+            template_vals, "template_vals",
+            num_binaries * wdm->num_channel * n_m_template * n_n_template, 1);
+        int *sm_ptr = return_pointer_and_check_length(start_layer_m, "start_layer_m", num_binaries, 1);
+        int *sn_ptr = return_pointer_and_check_length(start_time_n, "start_time_n", num_binaries, 1);
+        int *di_ptr = return_pointer_and_check_length(data_index, "data_index", num_binaries, 1);
+        int *ni_ptr = return_pointer_and_check_length(noise_index, "noise_index", num_binaries, 1);
+
+        wdm->compute_likelihood_terms_wrap(
+            d_h_ptr, h_h_ptr, tmpl_ptr,
+            sm_ptr, sn_ptr,
+            num_binaries,
+            di_ptr, ni_ptr,
+            n_m_template, n_n_template, tdi_type, run_async);
+    }
 };
 
 #endif // __BINDING_WDM_DOMAIN_HPP__

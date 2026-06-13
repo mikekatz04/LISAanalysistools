@@ -96,7 +96,19 @@ Branch: `merge-stft-tof`; base: dev + your 315 commits since d690a0a.)*
 - Port of the vectorized legacy response (drops the per-source fallback loop).
 - ICRS-basis `SkyMove`; re-enable MBH sky-mode hops.
 - Unify `FDDomainForStft` + `FDDomain`; finish the C++ domains consolidation.
-- WDM counterparts to the STFT C/C++ kernels.
-- CPU-thread splits through the same DCGA structure (threads ↔ GPUs via one
-  Python orchestration layer).
-- Combined STFT+WDM time-frequency tutorial notebook.
+
+## Done since the draft
+
+- **WDM counterparts to the STFT C/C++ kernels**:
+  `WDMDomainWrap.compute_likelihood_terms` (two-pass batched (d|h)/(h|h)
+  kernels in `cutils/domains.cu`, real-valued, integer (m, n) sub-grid
+  addressing, XYZ/AET/AE) + `WDMComputationGroup` in `domaincomputation.py`
+  (auto-selected by `DomainComputationGroupArray` for `WDMSettings` data).
+  Validated against the Python WDM `inner_product` path to ~1e-15
+  (`tests/test_wdm_domain_cpp.py`).
+- CPU-thread splits through the same DCGA structure
+  (`AnalysisContainerArray(n_splits=...)` + `run_threaded=True`; threads ↔
+  GPUs via one Python orchestration layer). The pure-compute C++ bindings
+  release the GIL so CPU threads parallelize for real.
+- Combined STFT+WDM time-frequency tutorial:
+  `examples/time_frequency_domains_tutorial.ipynb`.
