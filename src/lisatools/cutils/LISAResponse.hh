@@ -61,13 +61,13 @@ class LISAResponse{
     };
     ~LISAResponse(){};
     void get_tdi_delays(double *delayed_links_, double *input_links_, int num_inputs, int num_delays, double *t_arr_,
-                    int order, double sampling_frequency, int buffer_integer, double *A_in_, double deps, int num_A, double *E_in_, int tdi_start_ind);
-                    
+                    int order, double sampling_frequency, int buffer_integer, double *A_in_, double deps, int num_A, double *E_in_, int tdi_start_ind, double *t0_arr_, int batch_size = 1, bool run_async = false);
+
     void get_response(double *y_gw_, double *t_data_, double *k_in_, double *u_in_, double *v_in_, double dt,
                   int num_delays,
                   cmplx* input_in_, int num_inputs, int order,
                   double sampling_frequency, int buffer_integer,
-                  double *A_in_, double deps, int num_A, double *E_in_, int projections_start_ind, double t0);
+                  double *A_in_, double deps, int num_A, double *E_in_, int projections_start_ind, double *t0_arr_, int batch_size = 1, bool run_async = false);
 };
 
 #endif // __LISA_RESPONSE__

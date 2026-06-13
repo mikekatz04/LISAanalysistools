@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import jax
 import numpy as np
 
-from .domains import FDSettings, STFTSettings
+from .domains import FDSettings, STFTSettings, WDMSettings
 from .utils.parallelbase import LISAToolsParallelModule
 
 if TYPE_CHECKING:
@@ -175,12 +175,18 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     def _create_cpp_domain(self):
         raise NotImplementedError("Subclasses must implement _create_cpp_domain")
 
+    #: dtype of the (d|h) / (h|h) outputs returned by
+    #: ``compute_signal_likelihood_terms``. Complex for FD/STFT;
+    #: :class:`WDMComputationGroup` overrides with ``float`` (WDM
+    #: coefficients and inverse-noise weights are real).
+    _likelihood_terms_dtype = complex
+
     def _prepare_likelihood_arrays(
         self, num_binaries, start_freqs, data_index, noise_index, start_times=None
     ):
         """Allocate output arrays and ensure contiguous input arrays with correct dtypes."""
-        d_h_out = self.xp.zeros(num_binaries, dtype=self.xp.complex128)
-        h_h_out = self.xp.zeros(num_binaries, dtype=self.xp.complex128)
+        d_h_out = self.xp.zeros(num_binaries, dtype=self._likelihood_terms_dtype)
+        h_h_out = self.xp.zeros(num_binaries, dtype=self._likelihood_terms_dtype)
         start_freqs = self.xp.ascontiguousarray(start_freqs, dtype=self.xp.float64)
         data_index = self.xp.ascontiguousarray(data_index, dtype=self.xp.int32)
         noise_index = self.xp.ascontiguousarray(noise_index, dtype=self.xp.int32)
@@ -521,6 +527,161 @@ class FDComputationGroup(BaseDomainComputationGroup):
         return d_h_out, h_h_out
 
 
+class WDMComputationGroup(BaseDomainComputationGroup):
+    """Wraps C++ WDMDomainWrap for batched likelihood computation (WDM).
+
+    WDM counterpart of :class:`STFTComputationGroup` (2026-06 merge
+    follow-up). Differences from the STFT group:
+
+    * Templates, data, and inverse-noise weights are **real** doubles, so
+      ``(d|h)`` / ``(h|h)`` come back as ``float64`` arrays.
+    * The C++ kernel addresses each binary's rectangular template sub-grid
+      by integer ``(m, n)`` start indices on the full WDM grid. This wrapper
+      converts the base API's physical ``start_freqs`` / ``start_times`` to
+      indices (``m = round(f / layer_df)``, ``n = round(t / layer_dt)``;
+      times are measured on the same t0-relative axis as
+      ``settings.t_arr``) and validates active-band coverage before calling
+      into C++ (the CUDA kernel cannot throw).
+    * ``tdi_type`` is passed per call to the C++ side (matching the other
+      ``WDMDomain`` helpers) rather than stored on the C++ domain object.
+    """
+
+    _likelihood_terms_dtype = float
+
+    def __init__(
+        self,
+        acs: AnalysisContainerArray,
+        split_index: int = 0,
+        tdi_type: str = "XYZ",
+        force_backend: str = "cpu",
+    ):
+        from .domains import WDMSettings
+
+        if not isinstance(acs.settings, WDMSettings):
+            raise ValueError(
+                "settings must be an instance of WDMSettings for WDMComputationGroup."
+            )
+        super().__init__(acs, split_index, tdi_type, force_backend)
+
+        with self.group_device_context():
+            self._create_cpp_domain()
+
+    def __repr__(self):
+        return super().__repr__() + f" with WDM settings: {self.settings}"
+
+    @property
+    def domain_args(self):
+        return [
+            self.data_arr,
+            self.invC_arr,
+            self.settings.layer_df,
+            self.settings.layer_dt,
+            self.settings.Nf,
+            self.settings.Nt,
+            self.num_channels,
+            self.settings.ind_min_t,
+            self.settings.ind_max_t,
+            self.settings.ind_min_f,
+            self.settings.ind_max_f,
+            self.num_data,
+            self.num_noise,
+        ]
+
+    def _create_cpp_domain(self):
+        self._cpp_domain = self.backend.WDMDomainWrap(*self.domain_args)
+
+    def compute_signal_likelihood_terms(
+        self,
+        data_index: NDArrayLike,
+        noise_index: NDArrayLike,
+        template_vals: NDArrayLike,
+        start_freqs: NDArrayLike,
+        start_times: NDArrayLike,
+        **kwargs,
+    ) -> tuple[NDArrayLike, NDArrayLike]:
+        """
+        Compute (d|h) and (h|h) for a batch of binaries on the WDM grid.
+
+        Args:
+            template_vals : double array
+                Shape ``(num_binaries, num_channels, n_m, n_n)`` — real WDM
+                coefficients of each template sub-grid, frequency-layer (m)
+                axis before time-bin (n) axis, matching the data layout.
+            data_index : int array, shape ``(num_binaries,)``
+            noise_index : int array, shape ``(num_binaries,)``
+            start_freqs : double array, shape ``(num_binaries,)``
+                Physical frequency of each sub-grid's first layer
+                (``m * layer_df``).
+            start_times : double array, shape ``(num_binaries,)``
+                t0-relative time of each sub-grid's first bin
+                (``n * layer_dt``, same axis as ``settings.t_arr``).
+
+        Returns:
+            d_h_out : double array, shape ``(num_binaries,)``
+            h_h_out : double array, shape ``(num_binaries,)``
+        """
+        if start_times is None:
+            raise ValueError(
+                "start_times is required for WDMComputationGroup (t0-relative "
+                "time of each template sub-grid's first WDM bin)."
+            )
+
+        num_binaries, _, n_m, n_n = template_vals.shape
+        s = self.settings
+
+        # physical -> integer WDM grid indices (rounded: template sub-grids
+        # must be aligned with the data's WDM grid).
+        start_layer_m = self.xp.rint(
+            self.xp.asarray(start_freqs, dtype=self.xp.float64) / s.layer_df
+        ).astype(self.xp.int32)
+        start_time_n = self.xp.rint(
+            self.xp.asarray(start_times, dtype=self.xp.float64) / s.layer_dt
+        ).astype(self.xp.int32)
+
+        # Active-band validation lives here because the C++ pixel getters
+        # index relative to (ind_min_f, ind_min_t) without bounds checks
+        # (the CUDA kernel cannot throw).
+        if bool((start_layer_m < s.ind_min_f).any()) or bool(
+            (start_layer_m + n_m - 1 > s.ind_max_f).any()
+        ):
+            raise ValueError(
+                f"Template frequency layers must lie inside the active band "
+                f"[{s.ind_min_f}, {s.ind_max_f}]."
+            )
+        if bool((start_time_n < s.ind_min_t).any()) or bool(
+            (start_time_n + n_n - 1 > s.ind_max_t).any()
+        ):
+            raise ValueError(
+                f"Template time bins must lie inside the active band "
+                f"[{s.ind_min_t}, {s.ind_max_t}]."
+            )
+
+        d_h_out, h_h_out, _, data_index, noise_index, _ = self._prepare_likelihood_arrays(
+            num_binaries, start_freqs, data_index, noise_index
+        )
+
+        template_vals = self.xp.ascontiguousarray(template_vals, dtype=self.xp.float64)
+
+        run_async = kwargs.get("run_async", False)
+
+        self.cpp_domain.compute_likelihood_terms(
+            d_h_out,
+            h_h_out,
+            template_vals.ravel(),
+            start_layer_m,
+            start_time_n,
+            num_binaries,
+            data_index,
+            noise_index,
+            n_m,
+            n_n,
+            self.backend.TDITypeDict[self.tdi_type],
+            run_async,
+        )
+
+        return d_h_out, h_h_out
+
+
 class DomainComputationGroupArray:
     """Helper class to manage multiple DomainComputationGroup instances for different splits.
 
@@ -603,25 +764,20 @@ class DomainComputationGroupArray:
         return self._thread_pool
 
     @property
-    def domain_type(self):
-        """Analysis domain type, either 'STFT' or 'FD', inferred from the settings of the AnalysisContainerArray."""
-
-        if isinstance(self.acs.settings, STFTSettings):
-            return "STFT"
-        elif isinstance(self.acs.settings, FDSettings):
-            return "FD"
-        else:
-            raise NotImplementedError("Unsupported domain settings type in AnalysisContainerArray.")
-
-    @property
     def computation_group_class(self):
-        """Returns the appropriate DomainComputationGroup subclass based on the domain type."""
-        if self.domain_type == "STFT":
+        """The :class:`BaseDomainComputationGroup` subclass paired with the
+        ACA's settings. Dispatch is by :class:`DomainSettingsBase` child
+        class — never a string flag (sprint rule)."""
+        if isinstance(self.acs.settings, STFTSettings):
             return STFTComputationGroup
-        elif self.domain_type == "FD":
+        if isinstance(self.acs.settings, FDSettings):
             return FDComputationGroup
-        else:
-            raise NotImplementedError("Unsupported domain type for computation group class.")
+        if isinstance(self.acs.settings, WDMSettings):
+            return WDMComputationGroup
+        raise NotImplementedError(
+            f"Unsupported domain settings type "
+            f"{type(self.acs.settings).__name__} for DomainComputationGroupArray."
+        )
 
     @contextmanager
     def device_context(self, device: int = None):

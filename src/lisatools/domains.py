@@ -763,10 +763,13 @@ class TDSignal(DomainBase, TDSettings):
         return self.fft(settings=None, window=window).transform(settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
-        """Dispatch to :meth:`fft`, :meth:`stft`, or :meth:`wdmtransform` based on ``new_domain``."""
-        if window is None:
-            window = self.xp.ones(self.arr.shape, dtype=float)
+        """Dispatch to :meth:`fft`, :meth:`stft`, or :meth:`wdmtransform` based on ``new_domain``.
 
+        ``window=None`` is forwarded as-is: each target handles its own
+        default (full-length ones for FD/WDM, per-segment ``nperseg`` ones
+        for STFT — pre-filling a full-signal window here broke the STFT
+        branch, whose window must be segment-length).
+        """
         if isinstance(new_domain, TDSettings):
             if window is None:
                 window = self.xp.ones(self.arr.shape, dtype=float)
@@ -774,9 +777,8 @@ class TDSignal(DomainBase, TDSettings):
 
         elif isinstance(new_domain, FDSettings):
             return self.fft(settings=new_domain, window=window)
-        
-        elif isinstance(new_domain, STFTSettings):
 
+        elif isinstance(new_domain, STFTSettings):
             return self.stft(settings=new_domain, window=window)
 
         elif isinstance(new_domain, WDMSettings):
@@ -1515,6 +1517,12 @@ class STFTSettings(DomainSettingsBase):
         )  #! in the STFT domain, the basis shape is (# number of times segments, # number of frequencies)
 
     @property
+    def basis_shape_active(self) -> tuple:
+        """Active basis shape ``(NT, NF_active)`` — required by the
+        :class:`DomainBase` array contract (trailing signal axes)."""
+        return (self.NT, self.NF_active)
+
+    @property
     def total_terms(self) -> int:
         return self.NT * self.NF_active
 
@@ -1762,12 +1770,16 @@ class STFTSignal(STFTSettings, DomainBase):
         STFTSettings.__init__(self, *settings.args, **settings.kwargs)
         DomainBase.__init__(self, arr)
 
-        # freq layers
-        if self.arr.shape[-2] != self.N_active:
-            assert arr.shape[-2] == self.NF
+        # Frequency axis is the LAST one (trailing axes are (NT, NF_active)).
+        # Accept a full-NF array and slice it down to the active band.
+        if self.arr.shape[-1] != self.NF_active:
+            assert arr.shape[-1] == self.NF, (
+                f"STFTSignal array last axis must be NF_active "
+                f"({self.NF_active}) or NF ({self.NF}); got {arr.shape[-1]}."
+            )
             _arr = self._arr.copy()
             del self._arr
-            self.arr = _arr[:, self.active_slice]
+            self.arr = _arr[..., self.active_slice]
 
     @property
     def settings(self) -> STFTSettings:
@@ -2029,9 +2041,16 @@ class WDMSettings(DomainSettingsBase):
 
         found_wavelet = False
         wavelet_duration = -1.0
+        # Evaluate every candidate against the ORIGINAL Tobs. (Mutating
+        # Tobs inside the scan made it decay by up to t_max per iteration
+        # -- harmless for year-long Tobs but a ZeroDivision crash on small
+        # grids and a silent grid-shrink in general.)
+        Tobs_in = Tobs
         for tmp in np.linspace(t_min, t_max, num_linspace):
             wavelet_duration = int(tmp / dt) * dt
-            Nt = int(Tobs / wavelet_duration)
+            Nt = int(Tobs_in / wavelet_duration)
+            if Nt == 0:
+                continue  # candidate duration exceeds the observation time
             Tobs = Nt * wavelet_duration
             N = int(Tobs / dt)
             Nf = int(N / Nt)

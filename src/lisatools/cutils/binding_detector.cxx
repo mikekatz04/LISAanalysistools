@@ -9,7 +9,7 @@
 #include "Detector.hpp"
 #include "PSD.hpp"
 #include "galactic_response.hpp"
-#include "wdm_domain.hh"             // TDI_XYZ / TDI_AET / TDI_AE macros
+#include "domains.hpp"               // domain classes + TDI_XYZ / TDI_AET / TDI_AE macros
 #include <string>
 #include <cstring>
 #include <iostream>
@@ -17,6 +17,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
 #include "binding_detector.hpp"
+#include "binding_domains.hpp"       // STFTDomainWrap, FDDomainForStftWrap, STFTFresnelWrap
 
 // Phase 3J: this binding TU is the SOLE registration site for the shared
 // wrapper classes (OrbitsWrap, LISAResponseWrap, TDIConfigWrap, ...).
@@ -521,7 +522,8 @@ void detector_part(nb::module_ &m) {
          "foreground in the likelihood.  Pass None to disable.")
     .def("disable_galactic_grid", &XYZSensitivityMatrixWrap::disable_galactic_grid,
          "Detach galactic grid (equivalent to set_galactic_grid(None)).")
-    .def("get_noise_tfs_wrap",        &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
+    .def("get_noise_tfs_wrap",        &XYZSensitivityMatrixWrap::get_noise_tfs_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Get noise transfer functions.")
     .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap,
          nb::arg("like_contrib_final"), nb::arg("f_arr"), nb::arg("data"),
          nb::arg("data_index_all"), nb::arg("time_index_all"),
@@ -531,11 +533,14 @@ void detector_part(nb::module_ &m) {
          nb::arg("differential_component"), nb::arg("num_freqs"), nb::arg("num_times"),
          nb::arg("dips_mask"), nb::arg("num_psds"),
          nb::arg("run_async") = false,
+         nb::call_guard<nb::gil_scoped_release>(),
          "Compute PSD likelihood.")
-    .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap, "Compute noise covariance matrix.")
+    .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Compute noise covariance matrix.")
     .def("set_averaged_tfs_wrap",     &XYZSensitivityMatrixWrap::set_averaged_tfs_wrap, "Attach FD time-averaged transfer functions.")
     .def("disable_averaged_tfs_wrap", &XYZSensitivityMatrixWrap::disable_averaged_tfs_wrap, "Detach FD time-averaged transfer functions.")
-    .def("get_inverse_det_wrap",      &XYZSensitivityMatrixWrap::get_inverse_det_wrap, "Batch invert 3x3 Hermitian matrices and compute determinants.")
+    .def("get_inverse_det_wrap",      &XYZSensitivityMatrixWrap::get_inverse_det_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Batch invert 3x3 Hermitian matrices and compute determinants.")
     .def_rw("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
     .def("__copy__",  [](const XYZSensitivityMatrixWrap &self) {
         return XYZSensitivityMatrixWrap(self);
@@ -554,10 +559,91 @@ void detector_part(nb::module_ &m) {
             nb::arg("averaged_ltts_arr"), nb::arg("delta_ltts_arr"), nb::arg("n_times"), nb::arg("armlength"), nb::arg("generation"), nb::arg("spline_noise"), nb::arg("window_factor") = 1.0)
     ;
 
-    m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap, "Legacy PSD likelihood wrapping");
-    m.def("get_psd_val_legacy_wrap", &get_psd_val_legacy_wrap, "Legacy PSD val wrapping");
-    m.def("psd_likelihood", &psd_likelihood_binding, "PSD likelihood computation");
-    m.def("compute_logpdf", &compute_logpdf_binding, "Compute log PDF from GMM");
+    m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap,
+          nb::call_guard<nb::gil_scoped_release>(), "Legacy PSD likelihood wrapping");
+    m.def("get_psd_val_legacy_wrap", &get_psd_val_legacy_wrap,
+          nb::call_guard<nb::gil_scoped_release>(), "Legacy PSD val wrapping");
+    m.def("psd_likelihood", &psd_likelihood_binding,
+          nb::call_guard<nb::gil_scoped_release>(), "PSD likelihood computation");
+    m.def("compute_logpdf", &compute_logpdf_binding,
+          nb::call_guard<nb::gil_scoped_release>(), "Compute log PDF from GMM");
+}
+
+
+// ============================================================================
+// STFT / FD domain wrap registrations (2026-06 domains consolidation).
+//
+// Nanobind port of the incoming stft_tof branch's pybind11 domains_part()
+// (pre-merge binding.cxx:388-444). The wrap classes live in
+// binding_domains.hpp; the underlying domain classes in domains.{hpp,cu}.
+// The incoming FDDomainWrap is registered as FDDomainForStftWrap{CPU,GPU}
+// because the Phase-3L.1 chunked-het FDDomainWrap (binding_flr.cxx) owns
+// the FDDomainWrap py-name. The TDI_XYZ/TDI_AET/TDI_AE module attrs the
+// original set here are already exported in NB_MODULE below (canonical
+// 1/2/3 values).
+// ============================================================================
+
+void domains_part(nb::module_ &m) {
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    nb::class_<STFTDomainWrap>(m, "STFTDomainWrapGPU")
+#else
+    nb::class_<STFTDomainWrap>(m, "STFTDomainWrapCPU")
+#endif
+    .def(nb::init<int, int, int, double, double, double, double, double,
+                  array_type<std::complex<double>>, array_type<std::complex<double>>,
+                  int, int, int>(),
+         nb::arg("num_times"), nb::arg("num_freqs"), nb::arg("num_channels"),
+         nb::arg("t0"), nb::arg("f_min"), nb::arg("f_max"),
+         nb::arg("dt"), nb::arg("df"),
+         nb::arg("data"), nb::arg("invC"),
+         nb::arg("num_data"), nb::arg("num_noise"), nb::arg("tdi_type"))
+    .def("compute_likelihood_terms", &STFTDomainWrap::compute_likelihood_terms,
+         nb::arg("d_h_out"), nb::arg("h_h_out"), nb::arg("template_vals"),
+         nb::arg("start_times"), nb::arg("start_freqs"), nb::arg("num_binaries"),
+         nb::arg("data_index"), nb::arg("noise_index"),
+         nb::arg("n_t_template"), nb::arg("n_f_template"),
+         nb::arg("run_async") = false,
+         nb::call_guard<nb::gil_scoped_release>(),
+         "Compute (d|h) and (h|h) likelihood terms for a batch of binaries.");
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    nb::class_<FDDomainForStftWrap>(m, "FDDomainForStftWrapGPU")
+#else
+    nb::class_<FDDomainForStftWrap>(m, "FDDomainForStftWrapCPU")
+#endif
+    .def(nb::init<int, int, double, double, double,
+                  array_type<std::complex<double>>, array_type<std::complex<double>>,
+                  int, int, int>(),
+         nb::arg("num_freqs"), nb::arg("num_channels"),
+         nb::arg("f_min"), nb::arg("f_max"), nb::arg("df"),
+         nb::arg("data"), nb::arg("invC"),
+         nb::arg("num_data"), nb::arg("num_noise"), nb::arg("tdi_type"))
+    .def("compute_likelihood_terms", &FDDomainForStftWrap::compute_likelihood_terms,
+         nb::arg("d_h_out"), nb::arg("h_h_out"), nb::arg("template_vals"),
+         nb::arg("start_freqs"), nb::arg("num_binaries"),
+         nb::arg("data_index"), nb::arg("noise_index"),
+         nb::arg("n_f_template"),
+         nb::arg("run_async") = false,
+         nb::call_guard<nb::gil_scoped_release>(),
+         "Compute (d|h) and (h|h) likelihood terms for a batch of binaries (FD).");
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    nb::class_<STFTFresnelWrap>(m, "STFTFresnelWrapGPU")
+#else
+    nb::class_<STFTFresnelWrap>(m, "STFTFresnelWrapCPU")
+#endif
+    .def(nb::init<int, int, int, double, double, double, double, double, double>(),
+         nb::arg("num_times"), nb::arg("num_freqs"), nb::arg("num_channels"),
+         nb::arg("t0"), nb::arg("f_min"), nb::arg("f_max"),
+         nb::arg("dt"), nb::arg("df"), nb::arg("window_alpha") = 0.0)
+    .def("compute_fourier_values", &STFTFresnelWrap::compute_fourier_values,
+         nb::arg("output"), nb::arg("amps"), nb::arg("phase0s"),
+         nb::arg("f0s"), nb::arg("fdot0s"), nb::arg("t0s"),
+         nb::arg("freqs"), nb::arg("window_factor"),
+         nb::arg("num_binaries"), nb::arg("num_freqs"),
+         nb::call_guard<nb::gil_scoped_release>(),
+         "Compute Fresnel-based Fourier values for a batch of binaries.");
 }
 
 
@@ -580,6 +666,9 @@ NB_MODULE(pycppdetector, m) {
     // 2026-06-04 in favor of the canonical OrbitsWrap; CubicSplineWrap
     // moved to GBT's `interp` module 2026-06-10.)
     response_part(m);
+    // 2026-06 domains consolidation: STFT/FD domain wraps (STFTDomainWrap,
+    // FDDomainForStftWrap, STFTFresnelWrap) from binding_domains.hpp.
+    domains_part(m);
     m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
 
     m.def("get_module_path_cpp", &get_module_path, "Returns the file path of the module");

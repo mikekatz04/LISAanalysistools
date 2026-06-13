@@ -412,14 +412,14 @@ class GeneralSetup(Setup, GeneralSettings):
         )
 
         if isinstance(domain_settings, FDSettings):
-            # FD path: thread the active-band f_arr through DataResidualArray
-            # so downstream consumers (e.g. moves keyed off start_freq_ind)
-            # see the correct band.
+            # FD path: ``pour`` returns an FDSignal whose ``settings`` IS the
+            # resolved ``domain_settings`` instance, so the active-band
+            # ``f_arr`` / ``df`` / ``start_freq_ind`` are already carried by
+            # the DomainBase (the legacy DataResidualArray
+            # ``_store_time_and_frequency_information`` call is gone).
+            # ``data_length`` is kept as a plain attribute for moves that
+            # still key off it.
             self.input_data_residual_array.data_length = len(domain_settings.f_arr)
-            self.input_data_residual_array._store_time_and_frequency_information(
-                df=domain_settings.df,
-                f_arr=domain_settings.f_arr,
-            )
 
         # Diagnostic plots — domain-dependent.
         for plot_kwargs_here in plot_kwargs_list:

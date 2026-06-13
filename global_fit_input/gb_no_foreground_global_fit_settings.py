@@ -290,14 +290,17 @@ def setup_recipe(
         # path, build a separate ``GBWDMHeterodyne(force_backend="jax")``
         # and hand it to the Buffer.
         import sys
-        _gb_wdm_het_dir = os.path.abspath(
-            os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "..", "scripts", "gb_chunked_het",
-            )
+        _scripts_root = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "scripts"
         )
-        if _gb_wdm_het_dir not in sys.path:
-            sys.path.insert(0, _gb_wdm_het_dir)
+        # ``gb_wdm_het`` lives in scripts/gb_chunked_het and imports its
+        # validated chunked-het primitives from
+        # scripts/diagnostics/check_shortened_wdm, so BOTH dirs must be on
+        # sys.path for the GBWDMHeterodyne import to resolve.
+        for _sub in ("gb_chunked_het", "diagnostics"):
+            _d = os.path.abspath(os.path.join(_scripts_root, _sub))
+            if _d not in sys.path:
+                sys.path.insert(0, _d)
         from gb_wdm_het import GBWDMHeterodyne
 
         _wdm = general_info.domain_settings
@@ -313,6 +316,12 @@ def setup_recipe(
         _jax_chunk = int(_jax_chunk_env) if _jax_chunk_env else None
         gb_info.gb_wdm_comp = GBWDMHeterodyne(
             Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
+            # Carry the AnalysisContainer's active WDM band so the chunked-het
+            # kernels write/read the restricted (Nf_active, Nt_active) layout
+            # directly (matches GBWDMComputations). Without this the class would
+            # assume the full parent grid and overrun the AC's active buffer.
+            ind_min_f=_wdm.ind_min_f, ind_max_f=_wdm.ind_max_f,
+            ind_min_t=_wdm.ind_min_t, ind_max_t=_wdm.ind_max_t,
             T_full=general_info.Tobs, t_ref_full=gb_info.t0,
             Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
             n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
@@ -435,8 +444,10 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
-    lam_lims = [0.0, 2 * np.pi]
-    beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
+    # ICRS run frame (post-merge): sky params are alpha/RA + delta/dec, not
+    # ecliptic lam/beta. GBSettings consumes ``alpha_lims``/``delta_lims``.
+    alpha_lims = [0.0, 2 * np.pi]
+    delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
 
     # GB band runs across the full active band of the parent domain
     # settings (resolved by GeneralSetup at construction time). The
@@ -483,8 +494,8 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         phi0_lims=phi0_lims,
         iota_lims=iota_lims,
         psi_lims=psi_lims,
-        lam_lims=lam_lims,
-        beta_lims=beta_lims,
+        alpha_lims=alpha_lims,
+        delta_lims=delta_lims,
         start_freq=start_freq,
         end_freq=end_freq,
         oversample=oversample,

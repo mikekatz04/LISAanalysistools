@@ -14,7 +14,7 @@ set(LISATOOLS_CU_SOURCES
 )
 
 set(LISATOOLS_HEADERS
-    Detector.hpp;PSD.hpp;domains.hpp;binding_detector.hpp;galactic_response.hpp
+    Detector.hpp;PSD.hpp;domains.hpp;binding_detector.hpp;binding_domains.hpp;galactic_response.hpp;wdm_settings.hh;wdm_domain.hh;fd_domain.hh
 )
 
 # Helper: generate copy commands for CPU builds (.cu → .cxx).

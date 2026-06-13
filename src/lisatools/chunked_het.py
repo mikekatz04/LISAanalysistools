@@ -768,19 +768,43 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         else:
             assert isinstance(templates, self.xp.ndarray)
 
+        # Choose the output layout from the buffer: full parent grid (dense,
+        # absolute (m, n)) or the restricted active band (Nf_active, Nt_active,
+        # written at (m - ind_min_f, n - ind_min_t) via active_band=True). The
+        # cpp_wdm_settings already carries the real band, so active mode only
+        # flips the write addressing. Dense is preferred when the buffer is
+        # full-grid-sized; active when this comp carries a restricted band AND
+        # the buffer is the smaller active size (the global-fit settings path).
+        ws = self.wdm_settings
+        Nfa = int(getattr(ws, "Nf_active", self.Nf))
+        Nta = int(getattr(ws, "Nt_active", self.Nt))
+        restricted = (Nfa < self.Nf) or (Nta < self.Nt)
+        dense_per, active_per = self.nchannels * self.Nf * self.Nt, self.nchannels * Nfa * Nta
+        active_band = False
         if templates.ndim == 1:
-            per_template = self.nchannels * self.Nf * self.Nt
-            num_templates = int(templates.shape[-1] // per_template)
-            assert num_templates * per_template == templates.shape[-1], (
-                f"templates flat size {templates.shape[-1]} not divisible "
-                f"by nchannels*Nf*Nt = {per_template}")
-        elif templates.ndim == 3:
-            nch, _Nf, _Nt = templates.shape
-            assert (nch, _Nf, _Nt) == (self.nchannels, self.Nf, self.Nt)
-            num_templates = 1
-        elif templates.ndim == 4:
-            num_templates, nch, _Nf, _Nt = templates.shape
-            assert (nch, _Nf, _Nt) == (self.nchannels, self.Nf, self.Nt)
+            flat = int(templates.shape[-1])
+            if flat % dense_per == 0:
+                per_template = dense_per
+            elif restricted and flat % active_per == 0:
+                active_band, per_template = True, active_per
+            else:
+                raise AssertionError(
+                    f"templates flat size {flat} matches neither dense "
+                    f"(nchannels*Nf*Nt={dense_per}) nor active "
+                    f"(nchannels*Nf_active*Nt_active={active_per}).")
+            num_templates = int(flat // per_template)
+        elif templates.ndim in (3, 4):
+            shp = tuple(templates.shape[-3:])
+            if shp == (self.nchannels, self.Nf, self.Nt):
+                active_band = False
+            elif restricted and shp == (self.nchannels, Nfa, Nta):
+                active_band = True
+            else:
+                raise AssertionError(
+                    f"templates trailing shape {shp} matches neither dense "
+                    f"({self.nchannels}, {self.Nf}, {self.Nt}) nor active "
+                    f"({self.nchannels}, {Nfa}, {Nta}).")
+            num_templates = 1 if templates.ndim == 3 else int(templates.shape[0])
         else:
             raise ValueError(
                 "templates must be 3D (nchannels, Nf, Nt), 4D "
@@ -836,6 +860,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(self.N_cp_sig), int(self.N_cp_orbit),
             int(m_band_half_width),
+            bool(active_band),
         )
 
     def get_fstat_ll_wdm(self, params, wdm_holder,

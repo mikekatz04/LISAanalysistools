@@ -332,14 +332,17 @@ public:
 
 
 // ============================================================================
-// STFT / FD domain wraps (STFTDomainWrap, FDDomainWrap, STFTFresnelWrap)
+// STFT / FD domain wraps (STFTDomainWrap, FDDomainForStftWrap,
+// STFTFresnelWrap)
 //
-// NOT yet bound here. The incoming stft_tof domain machinery is being
-// consolidated into domains.{hpp,cu} together with the existing WDM/FD
-// domain classes (wdm_settings.hh / wdm_domain.hh / fd_domain.hh) -- see the
-// domains-consolidation work item. Binding surface lands there; note the
-// incoming FDDomainWrap name collides with the Phase-3L.1 FDDomainWrap in
-// binding_fd_domain.hpp and must be reconciled, not double-registered.
+// Bound at the 2026-06 domains consolidation: the wrap classes live in
+// binding_domains.hpp and are registered in binding_detector.cxx's
+// domains_part(m). The incoming stft_tof FDDomainWrap was renamed
+// FDDomainForStftWrap (py-names FDDomainForStftWrap{CPU,GPU}) because the
+// Phase-3L.1 chunked-het FDDomainWrap (binding_fd_domain.hpp, registered in
+// binding_flr.cxx) owns the FDDomainWrap py-name. The underlying domain
+// classes -- STFT family + the consolidated WDMSettings / WDMDomain /
+// FDDomain -- all live in domains.{hpp,cu}.
 // ============================================================================
 
 

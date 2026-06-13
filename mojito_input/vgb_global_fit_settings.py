@@ -17,6 +17,7 @@ except (ModuleNotFoundError, ImportError) as e:
 from typing import TYPE_CHECKING
 
 from lisatools.detector import L1Orbits
+from lisatools.domains import FDSettings, STFTSettings
 from lisatools.domaincomputation import DomainComputationGroupArray
 from lisatools.utils.constants import *
 from lisatools.globalfit.run import CurrentInfoGlobalFit
@@ -333,15 +334,24 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
+    # Domain communicated by settings factory, not a string flag (sprint
+    # rule): the engine calls ``factory(times, dt, force_backend)`` after
+    # loading the data so the grid is sized against the real time array.
+    if basis_domain == "stft":
+        domain_settings = STFTSettings.make_factory(
+            big_dt=stft_dt, min_freq=start_freq, max_freq=end_freq
+        )
+    else:
+        domain_settings = FDSettings.make_factory(
+            min_freq=start_freq, max_freq=end_freq
+        )
+
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        start_freq=start_freq,
-        end_freq=end_freq,
-        basis_domain=basis_domain,
-        stft_dt=stft_dt,
+        domain_settings=domain_settings,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
@@ -349,7 +359,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         window_type=window_type,
         window_taper_duration=window_taper_duration,
         gpus=gpus,
-        data_processor=L1ProcessingStep,
+        data_processor_class=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         normalize_window=normalize_window,
@@ -367,6 +377,12 @@ def get_general_erebor_settings() -> GeneralSetup:
     )
 
     general_setup = GeneralSetup(general_settings)
+    # Band/STFT metadata consumed by the per-source setup functions
+    # (no longer GeneralSettings fields post-merge; the analysis band
+    # itself lives on domain_settings).
+    general_setup.start_freq = start_freq
+    general_setup.end_freq = end_freq
+    general_setup.stft_dt = stft_dt
     return general_setup
 
 

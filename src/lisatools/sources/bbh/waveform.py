@@ -14,7 +14,7 @@ from lisatools.response.directresponse import ResponseWrapper
 
 from ...domains import DomainSettingsBase
 from ...utils.constants import *
-from ...utils.jaxbase import JaxBase
+from ...jax.jaxbase import JaxBase
 from ..waveformbase import SNRWaveform, TDPyResponseWaveformBase, TDTDIOnFlyWaveformBase
 
 try:

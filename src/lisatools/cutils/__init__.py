@@ -45,9 +45,12 @@ class LISAToolsBackendMethods(BackendMethods):
     SensitivityMatrixWrap: object
     GalacticGridSetup: object
     GalacticGridWrap: object
-    # STFTDomainWrap / FDDomainWrap(stft) / STFTFresnelWrap land with the
-    # domains.{hpp,cu} consolidation (incoming stft FDDomainWrap collides
-    # with the Phase-3L.1 FDDomainWrap below until unified).
+    # 2026-06 domains consolidation: STFT/FD domain wraps. The incoming stft
+    # FDDomainWrap is exposed as FDDomainForStftWrap (the Phase-3L.1
+    # chunked-het FDDomainWrap below owns the FDDomainWrap name).
+    STFTDomainWrap: object
+    FDDomainForStftWrap: object
+    STFTFresnelWrap: object
     check_orbits: typing.Callable[(...), None]
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
@@ -99,6 +102,10 @@ class LISAToolsBackend:
     SensitivityMatrixWrap: object
     GalacticGridSetup: object
     GalacticGridWrap: object
+    # 2026-06 domains consolidation: STFT/FD domain wraps.
+    STFTDomainWrap: object
+    FDDomainForStftWrap: object
+    STFTFresnelWrap: object
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
     # Phase 3L.7k LISA-response Wraps (see LISAToolsBackendMethods).
@@ -126,6 +133,10 @@ class LISAToolsBackend:
         self.SensitivityMatrixWrap = lisatools_backend_methods.SensitivityMatrixWrap
         self.GalacticGridSetup = lisatools_backend_methods.GalacticGridSetup
         self.GalacticGridWrap = lisatools_backend_methods.GalacticGridWrap
+        # 2026-06 domains consolidation: STFT/FD domain wraps.
+        self.STFTDomainWrap = lisatools_backend_methods.STFTDomainWrap
+        self.FDDomainForStftWrap = lisatools_backend_methods.FDDomainForStftWrap
+        self.STFTFresnelWrap = lisatools_backend_methods.STFTFresnelWrap
         self.psd_likelihood = lisatools_backend_methods.psd_likelihood
         self.compute_logpdf = lisatools_backend_methods.compute_logpdf
         # Phase 3L.7k -- LISA-response wraps absorbed from
@@ -179,6 +190,10 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapCPU,
             GalacticGridSetup=_lat_pd.GalacticGridSetup,
             GalacticGridWrap=_lat_pd.GalacticGridWrapCPU,
+            # 2026-06 domains consolidation: STFT/FD domain wraps.
+            STFTDomainWrap=_lat_pd.STFTDomainWrapCPU,
+            FDDomainForStftWrap=_lat_pd.FDDomainForStftWrapCPU,
+            STFTFresnelWrap=_lat_pd.STFTFresnelWrapCPU,
             psd_likelihood=_lat_pd.psd_likelihood,
             compute_logpdf=_lat_pd.compute_logpdf,
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
@@ -244,6 +259,10 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,
             GalacticGridSetup=_lat_pd.GalacticGridSetup,
             GalacticGridWrap=_lat_pd.GalacticGridWrapGPU,
+            # 2026-06 domains consolidation: STFT/FD domain wraps.
+            STFTDomainWrap=_lat_pd.STFTDomainWrapGPU,
+            FDDomainForStftWrap=_lat_pd.FDDomainForStftWrapGPU,
+            STFTFresnelWrap=_lat_pd.STFTFresnelWrapGPU,
             psd_likelihood=_lat_pd.psd_likelihood,
             compute_logpdf=_lat_pd.compute_logpdf,
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
@@ -306,6 +325,10 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,
             GalacticGridSetup=_lat_pd.GalacticGridSetup,
             GalacticGridWrap=_lat_pd.GalacticGridWrapGPU,
+            # 2026-06 domains consolidation: STFT/FD domain wraps.
+            STFTDomainWrap=_lat_pd.STFTDomainWrapGPU,
+            FDDomainForStftWrap=_lat_pd.FDDomainForStftWrapGPU,
+            STFTFresnelWrap=_lat_pd.STFTFresnelWrapGPU,
             psd_likelihood=_lat_pd.psd_likelihood,
             compute_logpdf=_lat_pd.compute_logpdf,
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
@@ -369,6 +392,10 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,
             GalacticGridSetup=_lat_pd.GalacticGridSetup,
             GalacticGridWrap=_lat_pd.GalacticGridWrapGPU,
+            # 2026-06 domains consolidation: STFT/FD domain wraps.
+            STFTDomainWrap=_lat_pd.STFTDomainWrapGPU,
+            FDDomainForStftWrap=_lat_pd.FDDomainForStftWrapGPU,
+            STFTFresnelWrap=_lat_pd.STFTFresnelWrapGPU,
             psd_likelihood=_lat_pd.psd_likelihood,
             compute_logpdf=_lat_pd.compute_logpdf,
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.

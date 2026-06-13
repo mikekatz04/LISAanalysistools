@@ -152,7 +152,7 @@ if(LISATOOLS_WITH_CPU)
   target_link_libraries(lisaanalysistools_cpu_pycppdetector PRIVATE lisaanalysistools_cpu_detector_static)
   target_include_directories(lisaanalysistools_cpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_cpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                      binding_detector.hpp  binding_flr.hpp)
+                                      binding_detector.hpp  binding_flr.hpp  binding_domains.hpp)
 endif()
 
 # III. Declare the GPU backend
@@ -177,13 +177,17 @@ if(LISATOOLS_WITH_GPU)
 
   target_include_directories(lisaanalysistools_gpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                      binding_detector.hpp  binding_flr.hpp)
+                                      binding_detector.hpp  binding_flr.hpp  binding_domains.hpp)
 
 endif()
 
-# Generate lisatools_sources.cmake for downstream packages
+# Generate lisatools_sources.cmake for downstream packages.
+# 2026-06 domains consolidation: wdm_settings.hh / wdm_domain.hh /
+# fd_domain.hh are now deprecated #include shims onto domains.hpp (listed so
+# downstream installs keep the lisa-on-gpu-era include paths working);
+# binding_domains.hpp carries the STFT/FD domain wrap classes.
 set(LISATOOLS_CU_SOURCE_NAMES "Detector.cu" "PSD.cu" "domains.cu" "galactic_response.cu")
-set(LISATOOLS_HEADER_NAMES "Detector.hpp" "PSD.hpp" "domains.hpp" "binding_detector.hpp" "galactic_response.hpp")
+set(LISATOOLS_HEADER_NAMES "Detector.hpp" "PSD.hpp" "domains.hpp" "binding_detector.hpp" "binding_domains.hpp" "galactic_response.hpp" "wdm_settings.hh" "wdm_domain.hh" "fd_domain.hh")
 
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/lisatools_sources.cmake.in"

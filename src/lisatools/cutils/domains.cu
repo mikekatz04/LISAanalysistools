@@ -102,6 +102,21 @@ static CUDA_DEVICE cmplx block_reduce_cmplx(cmplx* array) {
   cmplx output = BlockReduce(temp_storage).Reduce(thread_data, ComplexSum());
   return output;
 }
+
+/**
+ * @brief Real-valued mirror of block_reduce_cmplx for the WDM kernels
+ * (WDM coefficients and inverse-noise weights are real doubles).
+ */
+static CUDA_DEVICE double block_reduce_double(double* array) {
+  using BlockReduce = cub::BlockReduce<double, NUM_THREADS>;
+  CUDA_SHARED typename BlockReduce::TempStorage temp_storage;
+  // Synchronise before reading: ensures all threads have written their element.
+  CUDA_SYNC_THREADS;
+  int tid = threadIdx.x;
+  double thread_data = array[tid];
+  double output = BlockReduce(temp_storage).Sum(thread_data);
+  return output;
+}
 #endif
 
 // ============================================================
@@ -1060,3 +1075,267 @@ void like_sum_from_contrib_cmplx(
     }
   }
 }
+
+// ============================================================
+// WDM batched likelihood kernels — WDM counterparts of the STFT
+// two-pass kernels above (2026-06 merge follow-up).
+//
+// Differences from the STFT pair:
+//   - WDM coefficients and inverse-noise weights are real doubles, so all
+//     accumulators/outputs are double (no complex conjugation needed).
+//   - Template sub-grids are addressed by integer (m, n) start indices on
+//     the full WDM grid (the WDMDomain pixel getters offset by
+//     ind_min_f / ind_min_t internally) instead of physical start
+//     times/frequencies.
+//   - The finalization factor is a bare 4.0: WDMDomain's per-pixel
+//     primitives already carry the WDM differential component 0.25
+//     (see get_inner_product_value), so 4 * sum(d*h*invC*0.25) reproduces
+//     the Python convention 4 * sum(...) * differential_component.
+//   - tdi_type is a per-call argument (matching the other WDMDomain
+//     helpers) rather than a stored member.
+// ============================================================
+
+/**
+ * Pass-1 kernel: accumulate per-block partial sums of (d|h) and (h|h) on
+ * the WDM grid.
+ *
+ * Grid layout (GPU, 2-D):
+ *   blockIdx.y ∈ [0, num_binaries)  — identifies the source.
+ *   blockIdx.x ∈ [0, num_blocks_x)  — tile along the flattened (m,n) index.
+ *
+ * CPU fallback: a single serial loop writes d_h_contrib[bin] directly.
+ *
+ * @param d_h_contrib   Output partial sums (d|h): [num_binaries, num_blocks_x]
+ * @param h_h_contrib   Output partial sums (h|h): [num_binaries, num_blocks_x]
+ * @param domain        WDMDomain object (passed by value; pointer fields are
+ *                      device pointers in the GPU build)
+ * @param template_vals Template: [num_binaries, num_channel, n_m_template,
+ *                      n_n_template] (n fastest, matching wdm_data layout)
+ * @param start_layer_m_all  Absolute start frequency-layer m per binary
+ * @param start_time_n_all   Absolute start time-bin n per binary
+ * @param num_binaries  Batch size
+ * @param data_index_all  Which data realisation to use per binary
+ * @param noise_index_all Which noise realisation to use per binary
+ * @param n_m_template  Frequency layers per template sub-grid
+ * @param n_n_template  Time bins per template sub-grid
+ * @param tdi_type      TDI_XYZ / TDI_AET / TDI_AE
+ */
+CUDA_KERNEL
+void wdm_compute_likelihood_contributions_kernel(
+    double* d_h_contrib, double* h_h_contrib, WDMDomain domain,
+    double* template_vals, int* start_layer_m_all, int* start_time_n_all,
+    int num_binaries, int* data_index_all, int* noise_index_all,
+    int n_m_template, int n_n_template, int tdi_type) {
+  int tid;                  // thread index within the block (GPU) or 0 (CPU)
+  int start_bin, incr_bin;  // binary loop bounds
+  int start_idx, incr_idx;  // flat (m,n) loop bounds within this block
+
+#ifdef __CUDACC__
+  tid = threadIdx.x;
+  start_bin = blockIdx.y;
+  incr_bin = gridDim.y;
+  start_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  incr_idx = blockDim.x * gridDim.x;
+  CUDA_SHARED double d_h_tmp[NUM_THREADS];
+  CUDA_SHARED double h_h_tmp[NUM_THREADS];
+#else
+      tid = 0;
+      start_bin = 0;
+      incr_bin = 1;
+      start_idx = 0;
+      incr_idx = 1;
+      double d_h_tmp[1];
+      double h_h_tmp[1];
+#endif
+
+  int total_mn = n_m_template * n_n_template;
+
+  for (int bin = start_bin; bin < num_binaries; bin += incr_bin) {
+    d_h_tmp[tid] = 0.0;
+    h_h_tmp[tid] = 0.0;
+#ifdef __CUDACC__
+    CUDA_SYNC_THREADS;
+#endif
+
+    int data_index = data_index_all[bin];
+    int noise_index = noise_index_all[bin];
+    int start_m = start_layer_m_all[bin];
+    int start_n = start_time_n_all[bin];
+
+    int num_ch = domain.num_channel;
+    // Base offset into template_vals for this binary (row-major).
+    int template_base = bin * num_ch * n_m_template * n_n_template;
+
+    for (int idx = start_idx; idx < total_mn; idx += incr_idx) {
+      int m_local = idx / n_n_template;
+      int n_local = idx % n_n_template;
+      int m = start_m + m_local;
+      int n = start_n + n_local;
+
+      double w_mn[3];
+      for (int ch = 0; ch < num_ch; ch++) {
+        w_mn[ch] = template_vals[template_base +
+                                 (ch * n_m_template + m_local) * n_n_template +
+                                 n_local];
+      }
+
+      // add_ip_contrib accumulates into d_h_tmp[tid]/h_h_tmp[tid] and
+      // dispatches XYZ-cross vs AET/AE-diagonal on tdi_type internally.
+      domain.add_ip_contrib(d_h_tmp, h_h_tmp, w_mn, m, n, data_index,
+                            noise_index, tdi_type);
+    }
+
+#ifdef __CUDACC__
+    // The factor 4 pairs with the 0.25 already inside the per-pixel
+    // primitives — see the block comment above.
+    CUDA_SYNC_THREADS;
+    double d_h_red = 4.0 * block_reduce_double(d_h_tmp);
+    // Must sync again: CUB's TempStorage must not be overwritten until
+    // all threads have completed the first reduction.
+    CUDA_SYNC_THREADS;
+    double h_h_red = 4.0 * block_reduce_double(h_h_tmp);
+    if (tid == 0) {
+      d_h_contrib[bin * gridDim.x + blockIdx.x] = d_h_red;
+      h_h_contrib[bin * gridDim.x + blockIdx.x] = h_h_red;
+    }
+    CUDA_SYNC_THREADS;
+#else
+        // CPU: num_blocks_x == 1, so write directly at index [bin].
+        d_h_contrib[bin] = 4.0 * d_h_tmp[0];
+        h_h_contrib[bin] = 4.0 * h_h_tmp[0];
+#endif
+  }
+}
+
+/**
+ * Pass-2 kernel: reduce per-block partial sums to per-binary scalar results.
+ * Real-valued mirror of like_sum_from_contrib_cmplx; identical structure.
+ */
+CUDA_KERNEL
+void like_sum_from_contrib_real(
+    double* d_h_final,    // [num_binaries] final (d|h)
+    double* h_h_final,    // [num_binaries] final (h|h)
+    double* d_h_contrib,  // [num_binaries * num_blocks_per_bin] partial sums
+    double* h_h_contrib,  // [num_binaries * num_blocks_per_bin] partial sums
+    int num_blocks_per_bin, int num_binaries) {
+  int tid;
+  int bin_i, incr_bin;
+
+#ifdef __CUDACC__
+  tid = threadIdx.x;
+  bin_i = blockIdx.y;
+  incr_bin = gridDim.y;
+  CUDA_SHARED double shared_d_h[NUM_THREADS];
+  CUDA_SHARED double shared_h_h[NUM_THREADS];
+#else
+      tid = 0;
+      bin_i = 0;
+      incr_bin = 1;
+      double shared_d_h[1];
+      double shared_h_h[1];
+#endif
+
+  for (int bin = bin_i; bin < num_binaries; bin += incr_bin) {
+    double sum_d_h = 0.0;
+    double sum_h_h = 0.0;
+
+#ifdef __CUDACC__
+    for (int i = tid; i < num_blocks_per_bin; i += blockDim.x)
+#else
+        for (int i = 0; i < num_blocks_per_bin; i++)
+#endif
+    {
+      sum_d_h += d_h_contrib[bin * num_blocks_per_bin + i];
+      sum_h_h += h_h_contrib[bin * num_blocks_per_bin + i];
+    }
+
+    shared_d_h[tid] = sum_d_h;
+    shared_h_h[tid] = sum_h_h;
+
+#ifdef __CUDACC__
+    CUDA_SYNC_THREADS;
+    // Tree-based reduction
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+      if (tid < s) {
+        shared_d_h[tid] = shared_d_h[tid] + shared_d_h[tid + s];
+        shared_h_h[tid] = shared_h_h[tid] + shared_h_h[tid + s];
+      }
+      CUDA_SYNC_THREADS;
+    }
+#endif
+
+    if (tid == 0) {
+      d_h_final[bin] = shared_d_h[0];
+      h_h_final[bin] = shared_h_h[0];
+    }
+  }
+}
+
+/**
+ * Host wrapper: launch the two-pass GPU WDM likelihood kernels (or the
+ * equivalent CPU loop) for a batch of num_binaries sources. Mirrors
+ * STFTDomain::compute_likelihood_terms_wrap; see domains.hpp for the
+ * parameter documentation.
+ */
+void WDMDomain::compute_likelihood_terms_wrap(
+    double* d_h_out, double* h_h_out, double* template_vals,
+    int* start_layer_m_all, int* start_time_n_all, int num_binaries,
+    int* data_index_all, int* noise_index_all, int n_m_template,
+    int n_n_template, int tdi_type, bool run_async) {
+#ifdef __CUDACC__
+  double* d_h_contrib;
+  double* h_h_contrib;
+  // Number of blocks along the (m,n) dimension; each block reduces
+  // NUM_THREADS pixels and contributes one partial-sum entry.
+  int num_blocks_x =
+      (n_m_template * n_n_template + NUM_THREADS - 1) / NUM_THREADS;
+  int num_blocks_y = num_binaries;  // one row of blocks per binary
+  dim3 grid_dim(num_blocks_x, num_blocks_y);
+
+  // Allocate partial-sum buffers: [num_binaries, num_blocks_x]
+  if (run_async) {
+    gpuErrchk(cudaMallocAsync(&d_h_contrib,
+                              num_binaries * num_blocks_x * sizeof(double),
+                              cudaStreamDefault));
+    gpuErrchk(cudaMallocAsync(&h_h_contrib,
+                              num_binaries * num_blocks_x * sizeof(double),
+                              cudaStreamDefault));
+  } else {
+    gpuErrchk(cudaMalloc(&d_h_contrib,
+                         num_binaries * num_blocks_x * sizeof(double)));
+    gpuErrchk(cudaMalloc(&h_h_contrib,
+                         num_binaries * num_blocks_x * sizeof(double)));
+  }
+
+  // Pass 1: compute per-block partial sums of (d|h) and (h|h). `*this` is
+  // passed by value (the struct is copied into kernel-arg space, so the
+  // host-pointer-dereference pitfall does not apply; its wdm_data/wdm_noise
+  // fields are already device pointers).
+  wdm_compute_likelihood_contributions_kernel<<<grid_dim, NUM_THREADS>>>(
+      d_h_contrib, h_h_contrib, *this, template_vals, start_layer_m_all,
+      start_time_n_all, num_binaries, data_index_all, noise_index_all,
+      n_m_template, n_n_template, tdi_type);
+  // Pass 2: reduce partial sums across blocks for each binary.
+  dim3 reduce_grid_dim(1, num_binaries, 1);  // one block per binary
+  like_sum_from_contrib_real<<<reduce_grid_dim, NUM_THREADS>>>(
+      d_h_out, h_h_out, d_h_contrib, h_h_contrib, num_blocks_x, num_binaries);
+
+  gpuErrchk(cudaGetLastError());
+  if (run_async) {
+    gpuErrchk(cudaFreeAsync(d_h_contrib, cudaStreamDefault));
+    gpuErrchk(cudaFreeAsync(h_h_contrib, cudaStreamDefault));
+  } else {
+    gpuErrchk(cudaFree(d_h_contrib));
+    gpuErrchk(cudaFree(h_h_contrib));
+    cudaDeviceSynchronize();
+  }
+
+#else
+  // CPU path: the kernel function is a plain C++ function.  Results are
+  // written directly to d_h_out / h_h_out (no intermediate buffers needed).
+  wdm_compute_likelihood_contributions_kernel(
+      d_h_out, h_h_out, *this, template_vals, start_layer_m_all,
+      start_time_n_all, num_binaries, data_index_all, noise_index_all,
+      n_m_template, n_n_template, tdi_type);
+#endif
+};

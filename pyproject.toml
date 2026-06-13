@@ -179,12 +179,21 @@ sdist.include = [
   "src/lisatools/cutils/binding_flr.cxx",
   "src/lisatools/cutils/binding_flr.hpp",
   # Phase 3L: TDIonTheFly C++ carve-out, class by class.
+  # (2026-06 domains consolidation: fd_domain.hh / wdm_settings.hh /
+  # wdm_domain.hh are now deprecated #include shims onto domains.hpp.)
   "src/lisatools/cutils/fd_domain.hh",
   "src/lisatools/cutils/binding_fd_domain.hpp",
   "src/lisatools/cutils/wdm_settings.hh",
   "src/lisatools/cutils/binding_wdm_settings.hpp",
   "src/lisatools/cutils/wdm_domain.hh",
   "src/lisatools/cutils/binding_wdm_domain.hpp",
+  # stft_tof merge + 2026-06 domains consolidation: STFT/FD domain machinery
+  # and the galactic-response backend.
+  "src/lisatools/cutils/domains.hpp",
+  "src/lisatools/cutils/domains.cu",
+  "src/lisatools/cutils/binding_domains.hpp",
+  "src/lisatools/cutils/galactic_response.hpp",
+  "src/lisatools/cutils/galactic_response.cu",
   "src/lisatools/cutils/lat_tdi_on_the_fly.hh",
   "src/lisatools/cutils/lat_tdi_on_the_fly.cu",
   "src/lisatools/cutils/lat_spline_tdi_waveform.hh",

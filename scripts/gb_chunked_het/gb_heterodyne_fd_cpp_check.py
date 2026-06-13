@@ -18,6 +18,7 @@ import numpy as np
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.utils.constants import YRSID_SI
 from lisatools.response.tdiconfig import TDIConfig
+import gbgpu  # registers the gbgpu_* backends GBTDIonTheFly re-prefixes to
 from lisatools.response.tdionfly import GBTDIonTheFly, GBFDTDIonTheFly
 
 

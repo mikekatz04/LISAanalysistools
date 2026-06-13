@@ -133,13 +133,15 @@ class LISAResponseWrap : public ReturnPointerBase {
     };
 
     void get_tdi_delays_wrap(array_type<double> delayed_links_, array_type<double> input_links_, int num_inputs, int num_delays, array_type<double> t_arr_,
-                    int order, double sampling_frequency, int buffer_integer, array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int tdi_start_ind);
-                    
+                    int order, double sampling_frequency, int buffer_integer, array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int tdi_start_ind,
+                    array_type<double> t0_arr_, int batch_size = 1, bool run_async = false);
+
     void get_response_wrap(array_type<double> y_gw_, array_type<double> t_data_, array_type<double> k_in_, array_type<double> u_in_, array_type<double> v_in_, double dt,
                   int num_delays,
                   array_type<std::complex<double>> input_in_, int num_inputs, int order,
                   double sampling_frequency, int buffer_integer,
-                  array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int projections_start_ind, double t0);
+                  array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int projections_start_ind,
+                  array_type<double> t0_arr_, int batch_size = 1, bool run_async = false);
     
 };
 

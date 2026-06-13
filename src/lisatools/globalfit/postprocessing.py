@@ -979,9 +979,12 @@ class RunMetadata(MetadataBase):
         instance._web_extras = {
             "Tobs_s": float(gi.Tobs),
             "dt_s": float(gi.dt),
-            "basis_domain": gi.basis_domain,
-            "start_freq_hz": float(gi.start_freq) if gi.start_freq is not None else None,
-            "end_freq_hz": float(gi.end_freq) if gi.end_freq is not None else None,
+            # Serialization label only — internal dispatch is by
+            # DomainSettingsBase child class (sprint rule), so the metadata
+            # derives its tag from the resolved settings type.
+            "basis_domain": type(gi.domain_settings).__name__,
+            "start_freq_hz": float(gi.start_freq) if getattr(gi, "start_freq", None) is not None else None,
+            "end_freq_hz": float(gi.end_freq) if getattr(gi, "end_freq", None) is not None else None,
             "nwalkers": gi.nwalkers,
             "ntemps": gi.ntemps,
         }

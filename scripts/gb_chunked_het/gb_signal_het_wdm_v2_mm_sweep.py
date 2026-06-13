@@ -54,6 +54,10 @@ from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.utils.constants import YRSID_SI
 
 from lisatools.response.tdiconfig import TDIConfig
+# GBTDIonTheFly re-prefixes its backend lookup to the ``gbgpu_*`` family
+# (Phase 3L.7k); importing gbgpu registers those backends so force_backend
+# resolution succeeds.
+import gbgpu  # noqa: F401  (side-effect: registers gbgpu_cpu/cuda backends)
 from lisatools.response.tdionfly import GBTDIonTheFly
 
 from eryn.prior import ProbDistContainer, uniform_dist
@@ -266,8 +270,8 @@ def main():
     t_ref = t_start
     min_time = EDGE_CUT * wavelet_duration
     max_time = (Nt - EDGE_CUT) * wavelet_duration
-    min_freq = 1e-4
-    max_freq = 35.0e-3
+    min_freq = float(os.environ.get("MIN_FREQ_HZ", 1e-4))
+    max_freq = float(os.environ.get("MAX_FREQ_HZ", 35.0e-3))
 
     print(
         f"[grid] Nf={Nf} Nt={Nt} dt={dt}s  Tobs={Tobs:.3e}s  "

@@ -36,25 +36,50 @@
 // CUDA_KERNEL / cmplx typedef set (one sprint-wide copy, owned by
 // GPUBackendTools).
 #include "gbt_global.h"
+#include <cstddef>    // size_t (FDDomain indexing)
+#include <stdexcept>  // std::invalid_argument (WDMDomain CPU-branch checks)
 
+// ----------------------------------------------------------------------------
+// Domains consolidation (2026-06, post-stft_tof merge): this header now owns
+// ALL of LAT's C++ time-frequency domain descriptors:
+//   - STFT family (incoming at the stft_tof merge): STFTSettings, FDSettings,
+//     STFTDomain, FDDomainForStft, STFTFresnel. Method bodies in domains.cu.
+//   - WDM/FD chunked-het family (Phase 3L.1/3L.2/3L.4, ex lisa-on-gpu):
+//     WDMSettings, WDMDomain, FDDomain. Fully header-inline.
+// The former standalone headers wdm_settings.hh / wdm_domain.hh / fd_domain.hh
+// remain as deprecated #include shims onto this file so lisa-on-gpu-era
+// include paths and downstream consumers (GBGPU, BBHx) keep compiling.
+//
 // NOTE (2026-06 merge): the FD specialisation of STFTDomain is named
-// FDDomainForStft because the canonical chunked-het data container in
-// fd_domain.hh already owns the FDDomain name (and its nanobind
+// FDDomainForStft because the canonical chunked-het data container (below,
+// ex fd_domain.hh) already owns the FDDomain name (and its nanobind
 // registration / downstream GBGPU+BBHx consumption).
-// TODO(unify): merge FDDomainForStft and fd_domain.hh's FDDomain into one
-// class during the domains consolidation follow-up.
+// TODO(unify): merge FDDomainForStft and FDDomain into one class during a
+// follow-up.
+//
+// Per-backend CPU/GPU class-name alias block (sprint-wide rule): every class
+// in this header is compiled into BOTH the CPU and the GPU shared object, so
+// each one must alias to a distinct per-backend C++ type name. Both branches
+// must carry the same entry set.
+// ----------------------------------------------------------------------------
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #define STFTSettings STFTSettingsGPU
 #define FDSettings FDSettingsGPU
 #define STFTDomain STFTDomainGPU
 #define FDDomainForStft FDDomainForStftGPU
 #define STFTFresnel STFTFresnelGPU
+#define WDMSettings WDMSettingsGPU
+#define WDMDomain WDMDomainGPU
+#define FDDomain FDDomainGPU
 #else
 #define STFTSettings STFTSettingsCPU
 #define FDSettings FDSettingsCPU
 #define STFTDomain STFTDomainCPU
 #define FDDomainForStft FDDomainForStftCPU
 #define STFTFresnel STFTFresnelCPU
+#define WDMSettings WDMSettingsCPU
+#define WDMDomain WDMDomainCPU
+#define FDDomain FDDomainCPU
 #endif
 
 // TDI channel configuration types
@@ -517,5 +542,478 @@ CUDA_KERNEL
 void like_sum_from_contrib_cmplx(cmplx* d_h_final, cmplx* h_h_final,
                                  cmplx* d_h_contrib, cmplx* h_h_contrib,
                                  int num_blocks_per_bin, int num_binaries);
+
+// ============================================================================
+// WDM / FD chunked-het domain descriptors (consolidated from wdm_settings.hh,
+// wdm_domain.hh, fd_domain.hh at the 2026-06 domains consolidation; class
+// definitions preserved byte-for-byte). All header-inline -- no .cu bodies.
+// ============================================================================
+
+// WDMSettings -- POD config describing the WDM (Wilson Daubechies Meyer)
+// time-frequency grid and the active (m, n) band of interest.
+//
+// Phase 3L (2026-06-02): moved from
+//   lisa-on-gpu/src/fastlisaresponse/cutils/TDIonTheFly.hh:459-488
+// to LISAanalysistools (ex wdm_settings.hh).
+
+class WDMSettings{
+  public:
+    int Nt;
+    int Nf;
+    int num_channel;
+    double layer_df;
+    double layer_dt;
+    int ind_min_t;
+    int ind_max_t;
+    int ind_min_f;
+    int ind_max_f;
+    int Nf_active;
+    int Nt_active;
+
+    CUDA_CALLABLE_MEMBER
+    WDMSettings(double layer_df_, double layer_dt_, int Nf_, int Nt_, int num_channel_, int ind_min_t_, int ind_max_t_, int ind_min_f_, int ind_max_f_){
+        Nf = Nf_;
+        Nt = Nt_;
+        num_channel = num_channel_;
+        layer_df = layer_df_;
+        layer_dt = layer_dt_;
+        ind_min_t = ind_min_t_;
+        ind_max_t = ind_max_t_;
+        ind_min_f = ind_min_f_;
+        ind_max_f = ind_max_f_;
+        Nf_active = ind_max_f - ind_min_f + 1; // inclusive
+        Nt_active = ind_max_t - ind_min_t + 1; // inclusive
+    };
+};
+
+// WDMDomain -- WDM (Wilson Daubechies Meyer) time-frequency-domain data
+// container + inverse-noise descriptor. Inherits from WDMSettings to share
+// grid metadata; adds wdm_data + wdm_noise pointers and the per-pixel
+// inner-product / chain-rule helpers used by the chunked-heterodyne (and v2
+// signal-heterodyne) kernels.
+//
+// Phase 3L (2026-06-02): moved from
+//   lisa-on-gpu/src/fastlisaresponse/cutils/TDIonTheFly.hh:466-525
+//   lisa-on-gpu/src/fastlisaresponse/cutils/TDIonTheFly.cu:381-846
+// to LISAanalysistools (ex wdm_domain.hh). All 12 method bodies are
+// header-inline (they are all CUDA_DEVICE-only and small enough to inline).
+
+class WDMDomain : public WDMSettings{
+  public:
+
+    double *wdm_data;
+    double *wdm_noise;
+    int num_data;
+    int num_noise;
+
+    CUDA_CALLABLE_MEMBER
+    WDMDomain(double *wdm_data_, double *wdm_noise_, double layer_df_, double layer_dt_, int Nf_, int Nt_, int num_channel_, int ind_min_t_, int ind_max_t_, int ind_min_f_, int ind_max_f_, int num_data_, int num_noise_):
+    WDMSettings(layer_df_, layer_dt_, Nf_, Nt_, num_channel_, ind_min_t_, ind_max_t_, ind_min_f_, ind_max_f_)
+    {
+        wdm_data = wdm_data_;
+        wdm_noise = wdm_noise_;
+        num_data = num_data_;
+        num_noise = num_noise_;
+    };
+
+    CUDA_DEVICE inline
+    int get_pixel_index(int m, int n, int channel, int data_index)
+    {
+        if (data_index >= num_data)
+        {
+#ifdef __CUDACC__
+#else
+            throw std::invalid_argument("data_index is larger than available data instances.");
+#endif
+        }
+        return ((data_index * num_channel + channel) * Nf_active + (m - ind_min_f)) * Nt_active + (n - ind_min_t);
+    }
+
+    CUDA_DEVICE inline
+    int get_pixel_index_noise(int m, int n, int channel, int noise_index)
+    {
+        if (noise_index >= num_noise)
+        {
+#ifdef __CUDACC__
+#else
+            throw std::invalid_argument("noise_index is larger than available noise instances.");
+#endif
+        }
+        return ((noise_index * num_channel + channel) * Nf_active + (m - ind_min_f)) * Nt_active + (n - ind_min_t);
+    }
+
+    CUDA_DEVICE inline
+    int get_pixel_index_noise_cross_channel(int m, int n, int channel_i, int channel_j, int noise_index)
+    {
+        return (((noise_index * num_channel + channel_i) * num_channel + channel_j) * Nf_active + (m - ind_min_f)) * Nt_active + (n - ind_min_t);
+    }
+
+    CUDA_DEVICE inline
+    double get_pixel_data_value(int m, int n, int channel, int data_index)
+    {
+        return wdm_data[get_pixel_index(m, n, channel, data_index)];
+    }
+
+    CUDA_DEVICE inline
+    double get_pixel_noise_value(int m, int n, int channel, int noise_index)
+    {
+        return wdm_noise[get_pixel_index_noise(m, n, channel, noise_index)];
+    }
+
+    CUDA_DEVICE inline
+    double get_pixel_noise_value_cross_channel(int m, int n, int channel_i, int channel_j, int noise_index)
+    {
+        return wdm_noise[get_pixel_index_noise_cross_channel(m, n, channel_i, channel_j, noise_index)];
+    }
+
+    CUDA_DEVICE inline
+    void get_inner_product_value(double *d_h, double *h_h, double wdm_template_nm, int m, int n, int channel, int data_index, int noise_index)
+    {
+        double wdm_data_nm = get_pixel_data_value(m, n, channel, data_index);
+        double wdm_noise_nm = get_pixel_noise_value(m, n, channel, noise_index);
+        double val_d_h = wdm_data_nm * wdm_template_nm * wdm_noise_nm * 0.25;
+        double val_h_h = wdm_template_nm * wdm_template_nm * wdm_noise_nm * 0.25;
+
+        *d_h = val_d_h;
+        *h_h = val_h_h;
+    }
+
+    CUDA_DEVICE inline
+    void get_inner_product_value_cross_channel(double *d_h, double *h_h, double wdm_template_nm_i, double wdm_template_nm_j, int m, int n, int channel_i, int channel_j, int data_index, int noise_index)
+    {
+        // assume data is channel_i, template is channel_j
+        double wdm_data_nm_i = get_pixel_data_value(m, n, channel_i, data_index);
+        double wdm_noise_nm_ij = get_pixel_noise_value_cross_channel(m, n, channel_i, channel_j, noise_index);
+
+        // 0.25 factor is needed. Check python code
+        double val_d_h = wdm_data_nm_i * wdm_template_nm_j * wdm_noise_nm_ij * 0.25;
+        double val_h_h = wdm_template_nm_i * wdm_template_nm_j * wdm_noise_nm_ij * 0.25;
+
+        *d_h = val_d_h;
+        *h_h = val_h_h;
+    }
+
+    CUDA_DEVICE inline
+    void add_ip_contrib(double *d_h_tmp, double *h_h_tmp, double *w_mn, int layer_m, int n, int data_index, int noise_index, int tdi_type)
+    {
+#ifdef __CUDACC__
+        int tid = threadIdx.x;
+#else
+        int tid = 0;
+#endif
+
+        double d_h_val = 0.0;
+        double h_h_val = 0.0;
+        if (tdi_type == TDI_XYZ)
+        {
+            for (int channel_i = 0; channel_i < 3; channel_i += 1)
+            {
+                for (int channel_j = 0; channel_j < 3; channel_j += 1)
+                {
+
+                    // TODO: change from 9 to 6 calculations?
+                    get_inner_product_value_cross_channel(&d_h_val, &h_h_val, w_mn[channel_i], w_mn[channel_j], layer_m, n, channel_i, channel_j, data_index, noise_index);
+                    d_h_tmp[tid] += d_h_val;
+                    h_h_tmp[tid] += h_h_val;
+
+                }
+            }
+        }
+        else if (tdi_type == TDI_AET)
+        {
+            // AET: three orthogonal channels, diagonal noise. The caller is
+            // responsible for providing AET-projected data/template values and
+            // a diagonal-only noise buffer; both the CPU and CUDA builds run
+            // the same loop.
+            for (int channel_i = 0; channel_i < 3; channel_i += 1)
+            {
+                get_inner_product_value(&d_h_val, &h_h_val, w_mn[channel_i], layer_m, n, channel_i, data_index, noise_index);
+                d_h_tmp[tid] += d_h_val;
+                h_h_tmp[tid] += h_h_val;
+            }
+        }
+        else if (tdi_type == TDI_AE)
+        {
+            // AE: two orthogonal channels (T dropped). Same loop body as AET
+            // but truncated to channels {0,1}; the caller must pre-project.
+            for (int channel_i = 0; channel_i < 2; channel_i += 1)
+            {
+                get_inner_product_value(&d_h_val, &h_h_val, w_mn[channel_i], layer_m, n, channel_i, data_index, noise_index);
+                d_h_tmp[tid] += d_h_val;
+                h_h_tmp[tid] += h_h_val;
+            }
+        }
+    }
+
+    CUDA_DEVICE inline
+    void add_ip_swap_contrib(double *d_h_add_acc, double *d_h_remove_acc, double *add_add_acc, double *remove_remove_acc, double *add_remove_acc, double *w_mn_add, double *w_mn_remove, int layer_m, int n, int data_index, int noise_index, int tdi_type)
+    {
+        // Accumulators are per-thread scalars (register-resident in the caller). We
+        // sum into local temporaries here and write them back at the end, so the
+        // hot channel loop touches no shared/global memory and the previous
+        // 5xNUM_THREADS_HERE shared staging buffer is gone.
+        double d_h_add_local = 0.0;
+        double d_h_remove_local = 0.0;
+        double add_add_local = 0.0;
+        double remove_remove_local = 0.0;
+        double add_remove_local = 0.0;
+
+        double d_h_val = 0.0;
+        double hh_val = 0.0;
+
+        int nchannels = 3;
+        if (tdi_type == TDI_AE) nchannels = 2;
+
+        if (tdi_type == TDI_XYZ)
+        {
+            for (int channel_i = 0; channel_i < 3; channel_i += 1)
+            {
+                for (int channel_j = 0; channel_j < 3; channel_j += 1)
+                {
+                    get_inner_product_value_cross_channel(&d_h_val, &hh_val, w_mn_add[channel_i], w_mn_add[channel_j], layer_m, n, channel_i, channel_j, data_index, noise_index);
+                    d_h_add_local += d_h_val;
+                    add_add_local += hh_val;
+
+                    get_inner_product_value_cross_channel(&d_h_val, &hh_val, w_mn_remove[channel_i], w_mn_remove[channel_j], layer_m, n, channel_i, channel_j, data_index, noise_index);
+                    d_h_remove_local += d_h_val;
+                    remove_remove_local += hh_val;
+
+                    // <h_add|h_remove>: only hh_val (= add_i * remove_j * noise_ij) is needed.
+                    get_inner_product_value_cross_channel(&d_h_val, &hh_val, w_mn_add[channel_i], w_mn_remove[channel_j], layer_m, n, channel_i, channel_j, data_index, noise_index);
+                    add_remove_local += hh_val;
+                }
+            }
+        }
+        else if ((tdi_type == TDI_AET) || (tdi_type == TDI_AE))
+        {
+            // AET/AE: orthogonal channels, diagonal per-pixel noise. AET keeps
+            // all three channels, AE drops T via nchannels=2. Caller must
+            // supply data/template/noise in the projected basis. Same loop on
+            // CPU and CUDA.
+            for (int channel_i = 0; channel_i < nchannels; channel_i += 1)
+            {
+                get_inner_product_value(&d_h_val, &hh_val, w_mn_add[channel_i], layer_m, n, channel_i, data_index, noise_index);
+                d_h_add_local += d_h_val;
+                add_add_local += hh_val;
+
+                get_inner_product_value(&d_h_val, &hh_val, w_mn_remove[channel_i], layer_m, n, channel_i, data_index, noise_index);
+                d_h_remove_local += d_h_val;
+                remove_remove_local += hh_val;
+
+                get_inner_product_value_cross_channel(&d_h_val, &hh_val, w_mn_add[channel_i], w_mn_remove[channel_i], layer_m, n, channel_i, channel_i, data_index, noise_index);
+                add_remove_local += hh_val;
+            }
+        }
+        else
+        {
+#ifdef __CUDACC__
+#else
+            throw std::invalid_argument("Incorrect TDI type.");
+#endif
+        }
+
+        *d_h_add_acc += d_h_add_local;
+        *d_h_remove_acc += d_h_remove_local;
+        *add_add_acc += add_add_local;
+        *remove_remove_acc += remove_remove_local;
+        *add_remove_acc += add_remove_local;
+    }
+
+    // Per-pixel chain-rule contribution:
+    //   grad_acc_k += sum_{c,c'} (w_d - w_h)_c * (dw_h/dtheta_k)_{c'} * N^{-1}_{cc'} * 0.25
+    // (XYZ cross-channel; the AET / AE branches use the diagonal noise).
+    CUDA_DEVICE inline
+    void add_grad_contrib(double *grad_acc_k, const double *w_mn, const double *dw_mn_dk,
+                          int layer_m, int n, int data_index, int noise_index, int tdi_type)
+    {
+        double local_acc = 0.0;
+        if (tdi_type == TDI_XYZ)
+        {
+            for (int ci = 0; ci < 3; ci += 1)
+            {
+                double w_d_i = get_pixel_data_value(layer_m, n, ci, data_index);
+                double r_i = w_d_i - w_mn[ci];
+                for (int cj = 0; cj < 3; cj += 1)
+                {
+                    double N_ij = get_pixel_noise_value_cross_channel(layer_m, n, ci, cj, noise_index);
+                    local_acc += r_i * dw_mn_dk[cj] * N_ij * 0.25;
+                }
+            }
+        }
+        else if ((tdi_type == TDI_AET) || (tdi_type == TDI_AE))
+        {
+            int nchannels = (tdi_type == TDI_AE) ? 2 : 3;
+            for (int c = 0; c < nchannels; c += 1)
+            {
+                double w_d = get_pixel_data_value(layer_m, n, c, data_index);
+                double N_c = get_pixel_noise_value(layer_m, n, c, noise_index);
+                local_acc += (w_d - w_mn[c]) * dw_mn_dk[c] * N_c * 0.25;
+            }
+        }
+        *grad_acc_k += local_acc;
+    }
+
+    // Swap variant: accumulates +/- r_after * dw * N^{-1}, where
+    //   r_after = w_d - w_add_center + w_rem_center.
+    // `sign` selects between the add side (+1, dw = dw_add) and the remove
+    // side (-1, dw = dw_rem); the helper is called once per parameter and
+    // once per side.
+    CUDA_DEVICE inline
+    void add_swap_grad_contrib_one_side(
+        double *grad_acc_k, double sign,
+        const double *w_mn_add, const double *w_mn_rem, const double *dw_mn_dk,
+        int layer_m, int n, int data_index, int noise_index, int tdi_type)
+    {
+        double local_acc = 0.0;
+        if (tdi_type == TDI_XYZ)
+        {
+            for (int ci = 0; ci < 3; ci += 1)
+            {
+                double w_d_i = get_pixel_data_value(layer_m, n, ci, data_index);
+                double r_i = w_d_i - w_mn_add[ci] + w_mn_rem[ci];
+                for (int cj = 0; cj < 3; cj += 1)
+                {
+                    double N_ij = get_pixel_noise_value_cross_channel(layer_m, n, ci, cj, noise_index);
+                    local_acc += sign * r_i * dw_mn_dk[cj] * N_ij * 0.25;
+                }
+            }
+        }
+        else if ((tdi_type == TDI_AET) || (tdi_type == TDI_AE))
+        {
+            int nchannels = (tdi_type == TDI_AE) ? 2 : 3;
+            for (int c = 0; c < nchannels; c += 1)
+            {
+                double w_d = get_pixel_data_value(layer_m, n, c, data_index);
+                double N_c = get_pixel_noise_value(layer_m, n, c, noise_index);
+                double r_c = w_d - w_mn_add[c] + w_mn_rem[c];
+                local_acc += sign * r_c * dw_mn_dk[c] * N_c * 0.25;
+            }
+        }
+        *grad_acc_k += local_acc;
+    }
+
+    /** @brief Host wrapper: batched (d|h)/(h|h) likelihood terms on the WDM
+     *  grid -- the WDM counterpart of STFTDomain::compute_likelihood_terms_wrap
+     *  (2026-06 merge follow-up). Body in domains.cu.
+     *
+     *  Each binary owns a rectangular template sub-grid of
+     *  n_m_template x n_n_template WDM pixels addressed by integer start
+     *  indices on the FULL WDM grid: start_layer_m_all[bin] (frequency
+     *  layer m) and start_time_n_all[bin] (time bin n). The pixel getters
+     *  offset by ind_min_f / ind_min_t internally, so callers must ensure
+     *  every sub-grid lies inside the active band
+     *  [ind_min_f, ind_max_f] x [ind_min_t, ind_max_t] -- the Python wrap
+     *  layer validates this (the kernel cannot throw on GPU).
+     *
+     *  Unlike STFT, the outputs are real doubles (WDM coefficients are
+     *  real) and the finalization factor is a bare 4.0: the per-pixel
+     *  primitives already carry the WDM differential component 0.25, so
+     *  4 * sum(d*h*invC*0.25) reproduces the Python convention
+     *  4 * sum(...) * differential_component exactly.
+     *
+     * @param d_h_out            Output (d|h) values, shape [num_binaries]
+     * @param h_h_out            Output (h|h) values, shape [num_binaries]
+     * @param template_vals      Template array, shape
+     *                           [num_binaries, num_channel, n_m_template,
+     *                            n_n_template] (n fastest, matching wdm_data)
+     * @param start_layer_m_all  Absolute start frequency-layer m per binary
+     * @param start_time_n_all   Absolute start time-bin n per binary
+     * @param num_binaries       Number of sources in this batch
+     * @param data_index_all     Data-instance index per binary
+     * @param noise_index_all    Noise-instance index per binary
+     * @param n_m_template       Frequency layers per template sub-grid
+     * @param n_n_template       Time bins per template sub-grid
+     * @param tdi_type           TDI_XYZ / TDI_AET / TDI_AE (passed per call,
+     *                           matching the other WDMDomain helpers)
+     */
+    void compute_likelihood_terms_wrap(double* d_h_out, double* h_h_out,
+                                       double* template_vals,
+                                       int* start_layer_m_all,
+                                       int* start_time_n_all,
+                                       int num_binaries,
+                                       int* data_index_all,
+                                       int* noise_index_all,
+                                       int n_m_template, int n_n_template,
+                                       int tdi_type, bool run_async = false);
+};
+
+/** @brief First-pass kernel: partial (d|h) and (h|h) sums per CUDA block on
+ *  the WDM grid. Mirror of compute_likelihood_contributions_kernel (STFT)
+ *  with real-valued accumulators and integer (m, n) sub-grid addressing.
+ *  See WDMDomain::compute_likelihood_terms_wrap for parameter semantics. */
+CUDA_KERNEL
+void wdm_compute_likelihood_contributions_kernel(
+    double* d_h_contrib, double* h_h_contrib, WDMDomain domain,
+    double* template_vals, int* start_layer_m_all, int* start_time_n_all,
+    int num_binaries, int* data_index_all, int* noise_index_all,
+    int n_m_template, int n_n_template, int tdi_type);
+
+/** @brief Second-pass kernel: reduce per-block partial sums to per-binary
+ *  results. Real-valued mirror of like_sum_from_contrib_cmplx. */
+CUDA_KERNEL
+void like_sum_from_contrib_real(double* d_h_final, double* h_h_final,
+                                double* d_h_contrib, double* h_h_contrib,
+                                int num_blocks_per_bin, int num_binaries);
+
+// FDDomain -- frequency-domain data container + inverse-noise descriptor.
+// Used by the chunked-heterodyne and signal-heterodyne kernels to evaluate
+// per-bin <d|h> and <h|h>.
+//
+// Phase 3L (2026-06-02): moved from
+//   lisa-on-gpu/src/fastlisaresponse/cutils/TDIonTheFly.hh:561-610
+// to LISAanalysistools (ex fd_domain.hh) as the first installment of the
+// C++ TDIonTheFly carve-out. Fully header-inline.
+// NOT the same class as FDDomainForStft above -- see TODO(unify).
+
+class FDDomain {
+  public:
+    cmplx  *fd_data;   // (num_data, num_channel, n_rfft) complex
+    double *fd_invC;   // tdi_type=TDI_XYZ: (num_noise, num_channel, num_channel, n_rfft)
+                       // tdi_type=TDI_AET/AE: (num_noise, num_channel, n_rfft)
+    int    n_rfft;
+    int    num_channel;
+    int    num_data;
+    int    num_noise;
+    int    ind_min;    // inclusive
+    int    ind_max;    // inclusive
+    double df;
+    double Tobs;       // = 1/df, kept for convenience
+
+    CUDA_CALLABLE_MEMBER
+    FDDomain(cmplx *fd_data_, double *fd_invC_, int n_rfft_,
+             int num_channel_, int num_data_, int num_noise_,
+             int ind_min_, int ind_max_, double df_)
+    {
+        fd_data     = fd_data_;
+        fd_invC     = fd_invC_;
+        n_rfft      = n_rfft_;
+        num_channel = num_channel_;
+        num_data    = num_data_;
+        num_noise   = num_noise_;
+        ind_min     = ind_min_;
+        ind_max     = ind_max_;
+        df          = df_;
+        Tobs        = 1.0 / df_;
+    };
+    CUDA_DEVICE inline cmplx get_data(int k, int channel, int data_index) const
+    {
+        return fd_data[(size_t) data_index * num_channel * n_rfft
+                       + (size_t) channel * n_rfft + k];
+    }
+    CUDA_DEVICE inline double get_invC_diag(int k, int channel, int noise_index) const
+    {
+        return fd_invC[(size_t) noise_index * num_channel * n_rfft
+                       + (size_t) channel * n_rfft + k];
+    }
+    CUDA_DEVICE inline double get_invC_cross(int k, int c1, int c2, int noise_index) const
+    {
+        return fd_invC[(((size_t) noise_index * num_channel + c1)
+                        * num_channel + c2) * n_rfft + k];
+    }
+    CUDA_DEVICE inline bool in_band(int k) const
+    {
+        return (k >= ind_min) && (k <= ind_max);
+    }
+};
 
 #endif  // __DOMAINS_HPP__

@@ -257,17 +257,38 @@ class GBSetup(Setup, GBSettings):
             )
         
         if self.search_kwargs is None:
+            # Configuration for the stft_tof per-band serial GB search
+            # (consumed by ``GBSpecialRJSerialSearchMCMC.setup`` and
+            # ``GBSpecialRJRefitMove.setup``):
+            #   nwalkers / ntemps          — per-band ParaEnsembleSampler size
+            #   burn_1 / nsteps_1          — stage 1: F-stat (phase-maximized)
+            #                                MCMC, Gibbs on the 4 intrinsic-
+            #                                like params
+            #   snr_threshold              — band "found a source" gate on the
+            #                                stage-1 chain's min optimal SNR
+            #   burn_2 / nsteps_2          — stage 2: full-likelihood refine
+            #                                from stage-1's last sample; its
+            #                                samples feed the GMM fit that
+            #                                becomes the RJ proposal
+            #   shutoff_band_iteration     — shut a band off after this many
+            #                                consecutive source-less search
+            #                                iterations (all-off reverts the
+            #                                RJ proposal to the global prior)
+            #   shutoff_frequency_threshold— only bands above this frequency
+            #                                are shutoff-eligible (None = all)
+            #   refit_start_iteration      — samples kept per leaf for the
+            #                                GMM refit in GBSpecialRJRefitMove
             self.search_kwargs: typing.Dict[str, Any] = dict(
                 nwalkers = 32,
                 ntemps = 24,
                 shutoff_band_iteration = 5,
-                shutoff_frequency_threshold = None, # 4e-3 
+                shutoff_frequency_threshold = None, # 4e-3
                 burn_1 = 200,
                 nsteps_1 = 200,
                 snr_threshold = 8.0,
                 burn_2 = 500,
                 nsteps_2 = 500,
-                refit_start_iteration = 5 
+                refit_start_iteration = 5
             )
 
     # def __getattr__(self, attr: str) -> typing.Any:

@@ -54,8 +54,14 @@ from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.domains import (
-    TDSettings, TDSignal, FDSettings, WDMSettings, WDMSignal, WDMLookupTable,
+    TDSettings, TDSignal, FDSettings, WDMSettings, WDMSignal,
 )
+try:  # WDMLookupTable was retired (Phase 0 lookup-table retirement); the
+    # lookup-table main() below still references it, but the prior helper
+    # build_gb_prior (imported by chunked-het scripts) does not.
+    from lisatools.domains import WDMLookupTable
+except ImportError:
+    WDMLookupTable = None
 
 from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.utils import TransformContainer

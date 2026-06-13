@@ -1,5 +1,6 @@
 """Built-in recipe steps and helpers for assembling Erebor-style global-fit runs."""
 
+import os
 import time
 import logging
 import typing
@@ -846,7 +847,11 @@ def build_gb_moves(
                 f"supported for GB initialization."
             )
 
-    acs[0].data_res_arr.data_res_arr.plot(channel=0, filename=curr.general_info.artifacts_file_dir + "data_post_subtraction.png")
+    # Optional post-subtraction diagnostic plot. Only FD/STFT signal containers
+    # implement ``.plot``; WDMSignal (and other domains) do not, so guard it.
+    _post_sub = acs[0].data_res_arr.data_res_arr
+    if hasattr(_post_sub, "plot"):
+        _post_sub.plot(channel=0, filename=curr.general_info.artifacts_file_dir + "data_post_subtraction.png")
 
     #* Check if we need to adjust the band temps, and adjust if required
     adjust_temps = False
@@ -947,20 +952,30 @@ def build_gb_moves(
     )
     gb_search_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
-    gb_search_refit_move = GBSpecialRJRefitMove(
-        *gb_move_args, 
-        rj_proposal_distribution=None,
-        is_rj_prop=True,
-        run_swaps=False, 
-        name="rj_refit_search",
-        fp=general_info.main_file_path,
-        phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
-        ranks_needed=0,
-        gpus=[],
-        **gb_move_kwargs
-    )
-    gb_search_refit_move.accepted = np.zeros((ntemps, nwalkers))
-    
+    # The RJ refit moves load a GMM-refit proposal file (``main_file_path``)
+    # produced during a run. When it is absent (fresh run / smoke, or refit
+    # disabled) the refit moves are optional and skipped: the search refit move
+    # is already excluded from ``gb_search_moves``, and the PE refit move is
+    # dropped from ``gb_pe_moves`` below. This keeps the prior + fstat moves
+    # (incl. GBSpecialRJPriorMove) buildable without the refit artifact.
+    _refit_fp = getattr(general_info, "main_file_path", None)
+    _refit_available = isinstance(_refit_fp, str) and os.path.exists(_refit_fp)
+
+    if _refit_available:
+        gb_search_refit_move = GBSpecialRJRefitMove(
+            *gb_move_args,
+            rj_proposal_distribution=None,
+            is_rj_prop=True,
+            run_swaps=False,
+            name="rj_refit_search",
+            fp=_refit_fp,
+            phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
+            ranks_needed=0,
+            gpus=[],
+            **gb_move_kwargs
+        )
+        gb_search_refit_move.accepted = np.zeros((ntemps, nwalkers))
+
     gb_search_moves = [gb_search_fstat_mcmc_move, gb_search_prune_move] # gb_search_refit_move, Refit currently not used for search
     
     #* ============================================= PARAMETER ESTIMATION MOVES =============================================
@@ -989,19 +1004,22 @@ def build_gb_moves(
     )
     gb_pe_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
-    gb_pe_refit_move = GBSpecialRJRefitMove(
-        *gb_move_args, 
-        rj_proposal_distribution=None,
-        run_swaps=True, 
-        name="rj_refit",
-        fp=general_info.main_file_path,
-        phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],
-        ranks_needed=0,
-        gpus=[],
-        **gb_move_kwargs
-    )
-    gb_pe_refit_move.accepted = np.zeros((ntemps, nwalkers))
-    
-    gb_pe_moves = [gb_pe_prior_move, gb_pe_refit_move, gb_pe_fstat_mcmc_move]
+    # Prior + fstat moves always build; the refit move is inserted only when
+    # its GMM-refit file is available (see ``_refit_available`` above).
+    gb_pe_moves = [gb_pe_prior_move, gb_pe_fstat_mcmc_move]
+    if _refit_available:
+        gb_pe_refit_move = GBSpecialRJRefitMove(
+            *gb_move_args,
+            rj_proposal_distribution=None,
+            run_swaps=True,
+            name="rj_refit",
+            fp=_refit_fp,
+            phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],
+            ranks_needed=0,
+            gpus=[],
+            **gb_move_kwargs
+        )
+        gb_pe_refit_move.accepted = np.zeros((ntemps, nwalkers))
+        gb_pe_moves.insert(1, gb_pe_refit_move)  # [prior, refit, fstat]
 
     return gb_search_moves, gb_pe_moves
