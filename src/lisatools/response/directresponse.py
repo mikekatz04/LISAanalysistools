@@ -231,7 +231,16 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         self.cpp_orbits = self.backend.OrbitsWrap(*self.response_orbits.pycppdetector_args)
         self.cpp_tdi_config = self.backend.TDIConfigWrap(*self.tdi_config.pytdiconfig_args)
         self.cpp_response = self.backend.LISAResponseWrap(self.cpp_orbits, self.cpp_tdi_config)
-        
+
+        # batched-response state (feat-batching, 2026-06). ``batch_size``
+        # defaults to a single source; ``get_projections`` updates it (and
+        # ``t0_arr``) per call. ``y_gw_flat``/``t_arr_proj`` start unset so
+        # ``get_tdi_delays`` can detect "projections not yet computed".
+        self.y_gw_flat = None
+        self.t_arr_proj = None
+        self.batch_size = 1
+        self.t0_arr = self.xp.zeros(1, dtype=self.xp.float64)
+
     def check_add_orbit_args(self, *args):
         """Check orbit arguments for adherence to cpp Orbits class.
         
@@ -438,43 +447,74 @@ class pyResponseTDI(FastLISAResponseParallelModule):
     @property
     def y_gw(self):
         """Projections along the arms"""
-        return self.y_gw_flat.reshape(self.nlinks, -1)
+        raw = self.y_gw_flat.reshape(self.batch_size, self.nlinks, -1)
+        return raw[0] if self.batch_size == 1 else raw
 
     def _data_time_check(
-        self, t_data: np.ndarray, input_in: np.ndarray
+        self, t_data: np.ndarray, input_in: np.ndarray, t0_arr: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
 
-        # remove input data that goes beyond orbital information
-        if t_data.max() > self.response_orbits.t.max():  # self.response_orbits.ltt_t.max():
+        # remove input data that goes beyond orbital information. ``t_data`` is
+        # the shared relative time array (starts at 0); the per-source absolute
+        # time is ``t_data + t0_arr``. Trim to the worst-case across the batch.
+        t_orbit_max = float(self.response_orbits.t.max())
+        if bool(
+            self.xp.any((t_data + t0_arr.reshape(-1, 1)).max(axis=-1) > t_orbit_max)
+        ):
             warnings.warn(
                 "Input waveform is longer than available orbital information. Trimming to fit orbital information."
             )
 
-            max_ind = self.xp.where(t_data <= self.response_orbits.t.max())[0][-1]  # np.where(t_data <= self.response_orbits.sc_t.max())[0][-1]
+            max_ind = int(
+                self.xp.where(
+                    (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
+                )[1][-1]
+            )
 
             t_data = t_data[:max_ind]
-            input_in = input_in[:max_ind]
+            input_in = input_in[:, :max_ind]
         return (t_data, input_in)
 
-    def get_projections(self, input_in, lam, beta, t0_shift_to_data=0.0, t0=0.0, t_buffer=10000.0):
-        """Compute projections of GW signal on to LISA constellation
+    def get_projections(self, input_in, lam, beta, t0_shift_to_data=0.0, t0=0.0, t_buffer=10000.0, run_async=False):
+        """Compute projections of GW signal on to LISA constellation.
+
+        Supports a single source or a batch (feat-batching, 2026-06): a true
+        batched CUDA kernel processes all sources in parallel along the grid
+        ``z`` dimension. A single source is just ``batch_size == 1``.
 
         Args:
-            input_in (xp.ndarray): Input complex time-domain signal. It should be of the form:
-                :math:`h_+ + ih_x`. If using the GPU for the response, this should be a CuPy array.
-            lam (double): Ecliptic Longitude in radians.
-            beta (double): Ecliptic Latitude in radians.
-            t0 (double): Initial time at which to start the waveform. 
-            t_buffer (double, optional): Buffer time from ``t0``. Because of the delays
-                and interpolation towards earlier times, the beginning of the waveform
-                is garbage. ``t_buffer`` tells the waveform generator where to start the waveform
-                compared to ``t0``.
+            input_in (xp.ndarray): Input complex time-domain signal,
+                :math:`h_+ + ih_x`. Shape ``(num_pts,)`` for a single source or
+                ``(batch_size, num_pts)`` for a batch. CuPy array on the GPU.
+            lam (double or array): Ecliptic Longitude in radians. Scalar, or an
+                array of length ``batch_size`` for a batch.
+            beta (double or array): Ecliptic Latitude in radians. Scalar or
+                length-``batch_size`` array.
+            t0 (double or array): Absolute start time(s) in seconds. Scalar or
+                length-``batch_size`` array.
+            t_buffer (double, optional): Buffer time from ``t0``. The start of
+                the waveform is garbage because of the delays and interpolation
+                towards earlier times; ``t_buffer`` says where to start.
+            run_async (bool, optional): If True, use async device allocs/streams.
+                (Default: ``False``)
 
         Raises:
             ValueError: If ``t_buffer`` is not large enough.
-
-
         """
+        # --- batch detection (scalar lam/beta -> batch_size 1) ---
+        lam = self.xp.atleast_1d(self.xp.asarray(lam, dtype=self.xp.float64))
+        beta = self.xp.atleast_1d(self.xp.asarray(beta, dtype=self.xp.float64))
+        batch_size = len(lam)
+
+        assert np.abs(t0_shift_to_data) < self.dt, (
+            "t0_shift_to_data should be less than the data time step (dt)."
+        )
+        t0_arr = self.xp.atleast_1d(self.xp.asarray(t0, dtype=np.float64)) + t0_shift_to_data
+        if t0_arr.ndim == 1 and t0_arr.shape[0] == 1:
+            # broadcast a shared t0 across the batch
+            t0_arr = t0_arr.repeat(batch_size)
+        self.batch_size = batch_size
+
         self.tdi_start_ind = int(t_buffer / self.dt)
         # get necessary buffer for TDI
         self.check_tdi_buffer = int(100.0 * self.sampling_frequency) + 4 * self.order
@@ -500,43 +540,48 @@ class pyResponseTDI(FastLISAResponseParallelModule):
                 "Need to increase t_buffer. The initial buffer is not large enough."
             )
 
-        # determine sky vectors
-        k = np.zeros(3, dtype=np.float64)
-        u = np.zeros(3, dtype=np.float64)
-        v = np.zeros(3, dtype=np.float64)
+        # --- promote input_in to (batch_size, num_pts) ---
+        input_in = self.xp.asarray(input_in)
+        if input_in.ndim == 1:
+            input_in = input_in.reshape(1, -1)
+        assert input_in.shape[0] == batch_size, (
+            f"input_in batch dim {input_in.shape[0]} != batch_size {batch_size}."
+        )
+        num_inputs_per_source = input_in.shape[1]
+        self.num_total_points = num_inputs_per_source
 
-        self.num_total_points = len(input_in)
+        # shared relative time array (same for every source); per-source
+        # absolute time is added inside the kernel via t0_arr.
+        t_arr = self.xp.arange(num_inputs_per_source, dtype=self.xp.float64) * self.dt
+        t_arr, input_in = self._data_time_check(t_arr, input_in, t0_arr)
+        num_inputs_per_source = input_in.shape[1]
 
-        cosbeta = np.cos(beta)
-        sinbeta = np.sin(beta)
+        assert num_inputs_per_source >= self.num_pts
 
-        coslam = np.cos(lam)
-        sinlam = np.sin(lam)
+        # --- batched sky vectors (flat: batch_size * 3) ---
+        k_in = self.xp.zeros(batch_size * 3, dtype=self.xp.float64)
+        u_in = self.xp.zeros(batch_size * 3, dtype=self.xp.float64)
+        v_in = self.xp.zeros(batch_size * 3, dtype=self.xp.float64)
 
-        v[0] = -sinbeta * coslam
-        v[1] = -sinbeta * sinlam
-        v[2] = cosbeta
-        u[0] = sinlam
-        u[1] = -coslam
-        u[2] = 0.0
-        k[0] = -cosbeta * coslam
-        k[1] = -cosbeta * sinlam
-        k[2] = -sinbeta
+        cb = self.xp.cos(beta)
+        sb = self.xp.sin(beta)
+        cl = self.xp.cos(lam)
+        sl = self.xp.sin(lam)
+
+        v_in[0::3] = -sb * cl
+        v_in[1::3] = -sb * sl
+        v_in[2::3] = cb
+        u_in[0::3] = sl
+        u_in[1::3] = -cl
+        u_in[2::3] = 0.0
+        k_in[0::3] = -cb * cl
+        k_in[1::3] = -cb * sl
+        k_in[2::3] = -sb
 
         self.nlinks = 6
-        k_in = self.xp.asarray(k)
-        u_in = self.xp.asarray(u)
-        v_in = self.xp.asarray(v)
+        input_flat = input_in.reshape(-1)  # (batch_size * num_inputs_per_source,)
 
-        input_in = self.xp.asarray(input_in)
-
-        assert np.abs(t0_shift_to_data) < self.dt
-
-        t_arr = self.xp.arange(len(input_in)) * self.dt + (t0 + t0_shift_to_data)
-        t_arr, input_in = self._data_time_check(t_arr, input_in)
-
-        assert len(input_in) >= self.num_pts
-        y_gw = self.xp.zeros((self.nlinks * self.num_pts,), dtype=self.xp.float64)
+        y_gw = self.xp.zeros(batch_size * self.nlinks * self.num_pts, dtype=self.xp.float64)
         self.response_gen(
             y_gw,
             t_arr,
@@ -544,9 +589,9 @@ class pyResponseTDI(FastLISAResponseParallelModule):
             u_in,
             v_in,
             self.dt,
-            len(input_in),
-            input_in,
-            len(input_in),
+            num_inputs_per_source,
+            input_flat,
+            num_inputs_per_source,
             self.order,
             self.sampling_frequency,
             self.buffer_integer,
@@ -555,55 +600,56 @@ class pyResponseTDI(FastLISAResponseParallelModule):
             len(self.A_in),
             self.E_in,
             self.projections_start_ind,
-            t0,
+            t0_arr,
+            batch_size,
+            run_async,
         )
 
         self.t_arr_proj = t_arr
+        self.t0_arr = t0_arr
         self.y_gw_flat = y_gw
         self.y_gw_length = self.num_pts
 
     @property
     def XYZ(self):
         """Return links as an array"""
-        return self.delayed_links_flat.reshape(3, -1)
+        raw = self.delayed_links_flat.reshape(self.batch_size, 3, -1)
+        return raw[0] if self.batch_size == 1 else raw
 
-    def get_tdi_delays(self, t_arr=None, y_gw=None):
+    def get_tdi_delays(self, t_arr=None, y_gw=None, run_async=False):
         """Get TDI combinations from projections.
 
         This functions generates the TDI combinations from the projections
         computed with ``get_projections``. It can return XYZ, AET, or AE depending
-        on what was input for ``tdi_chan`` into ``__init__``.
+        on what was input for ``tdi_chan`` into ``__init__``. Batched
+        (feat-batching, 2026-06): when ``get_projections`` was run on a batch,
+        each returned channel has shape ``(batch_size, num_pts)``.
 
         Args:
-            t0 (double, optional): Initial time at which to start the waveform. 
-                Should only be provided if not running projections. Otherwise (and if None), it will
-                be the same as the projection used. (Default: ``None``)
-            y_gw (xp.ndarray, optional): Projections along the arms. This should be
-                a 2D ``numpy`` or ``cupy`` array with shape: ``(nlinks, num_pts)``.
-                The links must be entered in the proper order in the code.
-                The link order is given in the orbits class: ``orbits.LINKS``. 
-                (Default: ``None``)
+            t_arr (xp.ndarray, optional): Time array. Only provide when entering
+                ``y_gw`` directly; otherwise the projection time array is reused.
+            y_gw (xp.ndarray, optional): Projections along the arms (single
+                source), 2D with shape ``(nlinks, num_pts)``. The link order is
+                ``orbits.LINKS``. (Default: ``None``)
+            run_async (bool, optional): If True, use async device allocs/streams.
+                (Default: ``False``)
 
         Returns:
-            tuple: (X,Y,Z) or (A,E,T) or (A,E)
+            tuple: (X,Y,Z) or (A,E,T) or (A,E). Each entry is ``(num_pts,)`` for
+            a single source or ``(batch_size, num_pts)`` for a batch.
 
         Raises:
             ValueError: If ``tdi_chan`` is not one of the options.
-
-
         """
-        self.delayed_links_flat = self.xp.zeros(
-            (3, self.num_pts), dtype=self.xp.float64
-        )
-
-        # y_gw entered directly
+        # y_gw entered directly -> always a single source.
         if y_gw is not None:
             assert y_gw.shape == (len(self.orbits.LINKS), self.num_pts)
+            self.batch_size = 1
+            self.t0_arr = self.xp.zeros(1, dtype=self.xp.float64)
             self.y_gw_flat = y_gw.flatten().copy()
             self.y_gw_length = self.num_pts
             if t_arr is None:
                 raise ValueError("If entering y_gw directly, also need to enter t_arr directly.")
-            
             assert t_arr.shape == (self.num_pts,)
 
         elif self.y_gw_flat is None:
@@ -614,23 +660,13 @@ class pyResponseTDI(FastLISAResponseParallelModule):
             assert self.t_arr_proj is not None
             t_arr = self.t_arr_proj
 
-        self.delayed_links_flat = self.delayed_links_flat.flatten()
-    
-        num_units = int(self.tdi.tdi_operation_index.max() + 1)
-
-        assert np.all(
-            (np.diff(self.tdi.tdi_operation_index) == 0)
-            | (np.diff(self.tdi.tdi_operation_index) == 1)
+        self.delayed_links_flat = self.xp.zeros(
+            self.batch_size * 3 * self.num_pts, dtype=self.xp.float64
         )
 
-        _, unit_starts, unit_lengths = np.unique(
-            self.tdi.tdi_operation_index,
-            return_index=True,
-            return_counts=True,
-        )
-
-        unit_starts = unit_starts.astype(np.int32)
-        unit_lengths = unit_lengths.astype(np.int32)
+        # NOTE: unit_starts / unit_lengths now live on the TDIConfig object
+        # (passed to LISAResponse at construction), so they are no longer
+        # threaded through tdi_gen here.
 
         self.tdi_gen(
             self.delayed_links_flat,
@@ -646,21 +682,22 @@ class pyResponseTDI(FastLISAResponseParallelModule):
             len(self.A_in),
             self.E_in,
             self.tdi_start_ind,
+            self.t0_arr,
+            self.batch_size,
+            run_async,
         )
 
+        xyz = self.XYZ  # (3, num_pts) if batch_size == 1, else (batch_size, 3, num_pts)
+        if self.batch_size == 1:
+            X, Y, Z = xyz
+        else:
+            X, Y, Z = xyz[:, 0, :], xyz[:, 1, :], xyz[:, 2, :]
+
         if self.tdi_chan == "XYZ":
-            X, Y, Z = self.XYZ
             return X, Y, Z
-
-        elif self.tdi_chan == "AET" or self.tdi_chan == "AE":
-            X, Y, Z = self.XYZ
+        elif self.tdi_chan in ("AET", "AE"):
             A, E, T = AET(X, Y, Z)
-            if self.tdi_chan == "AET":
-                return A, E, T
-
-            else:
-                return A, E
-
+            return (A, E, T) if self.tdi_chan == "AET" else (A, E)
         else:
             raise ValueError("tdi_chan must be 'XYZ', 'AET' or 'AE'.")
 

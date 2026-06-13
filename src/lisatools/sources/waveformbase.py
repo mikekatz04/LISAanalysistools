@@ -12,7 +12,6 @@ This module defines the base wrappers for waveform generation, including the app
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import inspect
 import logging
 from typing import TYPE_CHECKING, Tuple
 
@@ -949,36 +948,25 @@ class TDPyResponseWaveformBase(TDWaveformBase):
                     f"merger_time={merger_time}, t_arr[0]={float(t_arr[:, 0].min()):.6e}."
                 )
 
-        if "run_async" in inspect.signature(self.response.get_projections).parameters:
-            # stft_tof batched response API (array lam/beta/t0 + run_async).
-            self.response.get_projections(
-                strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0], t_buffer=self.buffer_time, run_async=self.run_async
-            )
+        # Batched response (feat-batching, 2026-06): the whole batch of sources
+        # (array lam/beta/t0) is projected + TDI-combined in a single pair of
+        # kernel launches, parallel along the grid z dimension. ``run_async``
+        # overlaps per-source device allocations/copies via CUDA streams. This
+        # replaced the interim per-source fallback loop once the vectorized
+        # response landed in lisatools.response.directresponse.
+        self.response.get_projections(
+            strain,
+            lam=ra,
+            beta=dec,
+            t0=shifted_t_arr[:, 0],
+            t_buffer=self.buffer_time,
+            run_async=self.run_async,
+        )
 
-            tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)) # (Nbatch, num_channels, Ntimes) if batched else (num_channels, Ntimes)
-            if len(tdis.shape) == 3:
-                tdis = tdis.transpose(1, 0, 2)
-        else:
-            # TODO(Phase B): lisatools' current ``pyResponseTDI`` is the
-            # single-source legacy API (scalar lam/beta/t0, fixed num_pts,
-            # no run_async). Loop the batch here until the tdi_on_fly
-            # legacy-response updates (batched arrays + run_async) are
-            # ported into ``lisatools.response.directresponse``.
-            tdis_per_source = []
-            for b in range(strain.shape[0]):
-                # output length tracks this source's padded window
-                self.response.num_pts = int(strain.shape[-1])
-                self.response.get_projections(
-                    strain[b],
-                    lam=float(ra[b]),
-                    beta=float(dec[b]),
-                    t0=float(shifted_t_arr[b, 0]),
-                    t_buffer=self.buffer_time,
-                )
-                tdis_per_source.append(
-                    self.xp.asarray(self.response.get_tdi_delays())
-                )
-            tdis = self.xp.array(tdis_per_source)  # (Nbatch, num_channels, Ntimes)
+        tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async))
+        # (Nbatch, num_channels, Ntimes) if batched else (num_channels, Ntimes)
+        if len(tdis.shape) == 3:
+            tdis = tdis.transpose(1, 0, 2)
 
         tdis = tdis[..., :-num_buffer_ponts] # remove the padded points
         tdis[..., :num_buffer_ponts] = 0.0  # zero out the corrupted points at the start

@@ -21,18 +21,22 @@ namespace nb = nanobind;
 
 
 void LISAResponseWrap::get_tdi_delays_wrap(array_type<double> delayed_links_, array_type<double> input_links_, int num_inputs, int num_delays, array_type<double> t_arr_,
-                    int order, double sampling_frequency, int buffer_integer, array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int tdi_start_ind)
+                    int order, double sampling_frequency, int buffer_integer, array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int tdi_start_ind,
+                    array_type<double> t0_arr_, int batch_size, bool run_async)
 {
     response->get_tdi_delays(
-        return_pointer_and_check_length(delayed_links_, "delayed_links", num_delays, 3),
-        return_pointer_and_check_length(input_links_, "input_links", num_inputs, 6),
+        return_pointer_and_check_length(delayed_links_, "delayed_links", num_delays * batch_size, 3),
+        return_pointer_and_check_length(input_links_, "input_links", num_inputs * batch_size, 6),
         num_inputs, num_delays,
         return_pointer_and_check_length(t_arr_, "t_arr", num_delays, 1),
-        order, sampling_frequency, buffer_integer, 
+        order, sampling_frequency, buffer_integer,
         return_pointer_and_check_length(A_in_, "A_in", num_A, 1),
         deps, num_A,
-        return_pointer(E_in_, "E_in"), 
-        tdi_start_ind
+        return_pointer(E_in_, "E_in"),
+        tdi_start_ind,
+        return_pointer_and_check_length(t0_arr_, "t0_arr", batch_size, 1),
+        batch_size,
+        run_async
     );
 }
 
@@ -40,21 +44,25 @@ void LISAResponseWrap::get_response_wrap(array_type<double> y_gw_, array_type<do
     int num_delays,
     array_type<std::complex<double>> input_in_, int num_inputs, int order,
     double sampling_frequency, int buffer_integer,
-    array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int projections_start_ind, double t0)
+    array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int projections_start_ind,
+    array_type<double> t0_arr_, int batch_size, bool run_async)
 {
     response->get_response(
-        return_pointer_and_check_length(y_gw_, "y_gw", num_delays, 6),
+        return_pointer_and_check_length(y_gw_, "y_gw", num_delays * batch_size, 6),
         return_pointer_and_check_length(t_data_, "t_data", num_delays, 1),
-        return_pointer_and_check_length(k_in_, "k_in", 3, 1),
-        return_pointer_and_check_length(u_in_, "u_in", 3, 1),
-        return_pointer_and_check_length(v_in_, "v_in", 3, 1),
+        return_pointer_and_check_length(k_in_, "k_in", 3 * batch_size, 1),
+        return_pointer_and_check_length(u_in_, "u_in", 3 * batch_size, 1),
+        return_pointer_and_check_length(v_in_, "v_in", 3 * batch_size, 1),
         dt, num_delays,
         return_pointer_cmplx(input_in_, "input_in"),
-        num_inputs, order, sampling_frequency, buffer_integer,  
+        num_inputs, order, sampling_frequency, buffer_integer,
         return_pointer_and_check_length(A_in_, "A_in", num_A, 1),
         deps, num_A,
-        return_pointer(E_in_, "E_in"), 
-        projections_start_ind, t0
+        return_pointer(E_in_, "E_in"),
+        projections_start_ind,
+        return_pointer_and_check_length(t0_arr_, "t0_arr", batch_size, 1),
+        batch_size,
+        run_async
     );
 }
     
