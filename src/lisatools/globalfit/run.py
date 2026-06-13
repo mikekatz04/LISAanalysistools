@@ -518,6 +518,7 @@ class GlobalFit:
             # stft_tof ``source_info[...]["get_templates"]`` process so the
             # rebuild always works during the migration.
             handled_by_signal_gen = set()
+            breakpoint()
             for w, ac in enumerate(acs.flatten()):
                 gen_map = getattr(ac, "_signal_gen", None)
                 if not isinstance(gen_map, dict):

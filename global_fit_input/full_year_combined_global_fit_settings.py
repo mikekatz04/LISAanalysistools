@@ -201,9 +201,9 @@ MOJITO_DATA_PATH = os.environ.get(
 # Edit to match the mojito catalog you intend to load. Each class is
 # capped at len(<list>) leaves per branch.
 MOJITO_SOURCE_IDS = {
-    "MBHB": [0], # range(2)
+    "MBHB": [], # range(2)
     "EMRI": [],  # 0, 1, 2], # range(2)
-    "SOBHB": [],  # [0, 1, 2], # range(2)
+    "SOBHB": [0],  # [0, 1, 2], # range(2)
 }
 
 
@@ -958,18 +958,18 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
             [
                 _emri_cat[i]["PrimaryMassSSBFrame"],        # M
                 _emri_cat[i]["SecondaryMassSSBFrame"],      # mu
-                _emri_cat[i]["PrimarySpin"],                # a
-                _emri_cat[i]["InitialSemiLatusRectum"],     # p0
-                _emri_cat[i]["InitialEccentricity"],        # e0
-                _emri_cat[i]["InitialCosineInclination"],   # xI0
+                _emri_cat[i]["PrimarySpinParameter"],                # a
+                _emri_cat[i]["SemiLatusRectum"],     # p0
+                _emri_cat[i]["AzimuthalPhase"],        # e0
+                _emri_cat[i]["InclinationAngle"],   # xI0
                 _emri_cat[i]["LuminosityDistance"] / 1e3,   # dist (Mpc -> Gpc)
                 np.pi / 2 - _emri_cat[i]["Declination"],    # qS (ICRS polar)
                 _emri_cat[i]["RightAscension"] % (2 * np.pi),  # phiS (ICRS azimuth)
-                _emri_cat[i]["PolarAngleOfSpin"],           # qK (ICRS polar)
-                _emri_cat[i]["AzimuthalAngleOfSpin"],       # phiK (ICRS azimuth)
-                _emri_cat[i]["InitialPhasePhiPhi"],         # Phi_phi0
-                _emri_cat[i]["InitialPhasePhiTheta"],       # Phi_theta0
-                _emri_cat[i]["InitialPhasePhiR"],           # Phi_r0
+                _emri_cat[i]["PolarAnglePrimarySpin"],           # qK (ICRS polar)
+                _emri_cat[i]["AzimuthalAnglePrimarySpin"],       # phiK (ICRS azimuth)
+                _emri_cat[i]["AzimuthalPhase"],         # Phi_phi0
+                _emri_cat[i]["PolarPhase"],       # Phi_theta0
+                _emri_cat[i]["RadialPhase"],           # Phi_r0
             ]
             for i in sorted(_emri_cat.keys())
         ])
@@ -1077,7 +1077,7 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBH
                 _sobbh_cat[i]["RightAscension"] % (2 * np.pi),  # RA (lam slot)
                 _sobbh_cat[i]["Declination"],               # Dec (beta slot)
                 _sobbh_cat[i]["PolarisationAngle"] % np.pi, # psi (ICRS)
-                _sobbh_cat[i]["PhaseReferenceSourceFrame"], # phi0
+                _sobbh_cat[i]["TrueAnomaly"], # phi0
             ]
             for i in sorted(_sobbh_cat.keys())
         ])

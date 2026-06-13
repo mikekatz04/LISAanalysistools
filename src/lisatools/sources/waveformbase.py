@@ -949,10 +949,26 @@ class TDPyResponseWaveformBase(TDWaveformBase):
                     f"merger_time={merger_time}, t_arr[0]={float(t_arr[:, 0].min()):.6e}."
                 )
 
+        # Sub-dt grid alignment: the response builds an internal time array
+        #     t_arr = arange(N) * dt + (t0 + t0_shift_to_data)
+        # If shifted_t_arr[:, 0] is not on the data grid (data_t0 + k*dt),
+        # h+/hx is sampled on a sub-dt-shifted grid and the resulting TDI
+        # template is misaligned with the data — a O(1e-3) mismatch even when
+        # all parameters are correct.  Compute t0_shift_to_data per source so
+        # the response evaluates on the data grid (modulo integer offsets).
+        delta = self.data_t0 - shifted_t_arr[:, 0]
+        t0_shift_to_data = delta - self.xp.rint(delta / self.dt) * self.dt
+        # |t0_shift_to_data| is now in (-dt/2, dt/2], satisfying
+        # pyResponseTDI's assert(|t0_shift_to_data| < dt).
+
         if "run_async" in inspect.signature(self.response.get_projections).parameters:
             # stft_tof batched response API (array lam/beta/t0 + run_async).
+            _kw = {}
+            if "t0_shift_to_data" in inspect.signature(self.response.get_projections).parameters:
+                _kw["t0_shift_to_data"] = t0_shift_to_data
             self.response.get_projections(
-                strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0], t_buffer=self.buffer_time, run_async=self.run_async
+                strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0],
+                t_buffer=self.buffer_time, run_async=self.run_async, **_kw,
             )
 
             tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)) # (Nbatch, num_channels, Ntimes) if batched else (num_channels, Ntimes)
@@ -973,6 +989,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
                     lam=float(ra[b]),
                     beta=float(dec[b]),
                     t0=float(shifted_t_arr[b, 0]),
+                    t0_shift_to_data=float(t0_shift_to_data[b]),
                     t_buffer=self.buffer_time,
                 )
                 tdis_per_source.append(
@@ -983,6 +1000,11 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         tdis = tdis[..., :-num_buffer_ponts] # remove the padded points
         tdis[..., :num_buffer_ponts] = 0.0  # zero out the corrupted points at the start
         shifted_t_arr = shifted_t_arr[:, :-num_buffer_ponts]
+
+        # Apply the same sub-dt shift to the time labels so they describe what
+        # the response actually evaluated.  After this the previous post-hoc
+        # `% dt` correction below is a near-no-op (residual is < ULP).
+        shifted_t_arr += t0_shift_to_data[:, None]
 
         t_arr_shift = (self.data_t0 - shifted_t_arr[:, 0]) % self.dt
         shifted_t_arr += t_arr_shift[:, None]

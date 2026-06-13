@@ -620,14 +620,11 @@ def build_mbh_moves_phenom(
     if subtract_initial:
         subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "mbh", mbh_info)
 
-    if mbh_info.betas is None:
-        mbh_info.betas = make_ladder(mbh_info.ndim, ntemps=ntemps)
+    mbh_info.betas = make_ladder(mbh_info.ndim, ntemps=ntemps)
     betas_all = np.tile(mbh_info.betas, (mbh_info.nleaves_max, 1))
     state.sub_states["mbh"].betas_all = betas_all
     logger.debug(f"MBH betas: {mbh_info.betas}")
-
     coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
-
     mbh_move_args = (
         "mbh",  # branch_name
         coords_shape,

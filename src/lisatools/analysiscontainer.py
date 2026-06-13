@@ -1661,6 +1661,9 @@ class AnalysisContainerArray:
             # Restore whatever device the caller was on before __init__.
             self.xp.cuda.runtime.setDevice(self._main_device_at_init)
 
+    def flatten(self):
+        return self.acs.flatten()
+    
     def synchronize(self):
         if self.gpus is not None:
             for gpu in self.gpus:
