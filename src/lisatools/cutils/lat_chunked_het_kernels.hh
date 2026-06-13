@@ -1594,8 +1594,16 @@ void wdm_het_fill_global_kernel(
     int nchannels, int n_rfft_chunk,
     double T_chunk, double dt, double T, double t_ref,
     double tukey_alpha,
-    int    m_band_half_width)
+    int    m_band_half_width,
+    bool   active_band)
 {
+    // ``active_band`` selects the output layout of ``template_fill``:
+    //   false -> full dense parent grid (nchannels, Nf, Nt), absolute (m, n_glob).
+    //   true  -> active-band buffer (nchannels, Nf_active, Nt_active), addressed
+    //        as (m - ind_min_f, n_glob - ind_min_t) -- mirrors
+    //        WDMDomain::data_index_to_global so a settings-path AnalysisContainer
+    //        active-band buffer can be written/subtracted directly. Coefficients
+    //        whose (m, n_glob) fall outside the active band are dropped.
     // Same per-(chunk, m_layer) pipeline as wdm_het_get_ll_kernel:
     //   1. build sparse time grid in shared mem
     //   2. for each m_layer: compute tdi_channel + heterodyne + Tukey
@@ -1724,7 +1732,18 @@ void wdm_het_fill_global_kernel(
             //                        -> atomicAdd into template_fill.
             // ============================================================
             const double scale_fd     = 0.5 * dt_sparse / dt;
+            // Active-band output strides/offsets (mirror WDMDomain). Dense mode
+            // keeps the full parent grid with zero offset.
+            const int out_Nf = active_band ? wdm_settings->Nf_active : Nf;
+            const int out_Nt = active_band ? wdm_settings->Nt_active : Nt;
+            const int f_off  = active_band ? wdm_settings->ind_min_f : 0;
+            const int t_off  = active_band ? wdm_settings->ind_min_t : 0;
             for (int m = m_lo; m < m_hi; ++m) {
+                // Active band: skip whole m-layers outside [ind_min_f, ind_max_f].
+                // Uniform across the block (all threads see the same m), so the
+                // skipped step-5/6/7 syncs are skipped together -- no deadlock.
+                const int m_out = m - f_off;
+                if (active_band && (m_out < 0 || m_out >= out_Nf)) continue;
                 // ---- 5) window + rearrange: fd_chunk_buf -> layer_buf ----
                 const int    half_Nt_sub  = Nt_sub / 2;
                 const int    half_Nsp     = N_sparse / 2;
@@ -1761,6 +1780,10 @@ void wdm_het_fill_global_kernel(
                 for (int n_loc = keep_lo + THREAD_START_X; n_loc < keep_hi;
                      n_loc += BLOCK_INCR_X) {
                     const int  n_glob       = n_global_lo + (n_loc - keep_lo);
+                    const int  n_out        = n_glob - t_off;
+                    // Active band: drop time-pixels outside [ind_min_t, ind_max_t].
+                    // Per-thread branch (no sync in this loop) -> safe.
+                    if (active_band && (n_out < 0 || n_out >= out_Nt)) continue;
                     const bool parity_even  = (((m + n_loc) & 1) == 0);
                     const double sign       = ((((m + 1) * n_loc) & 1) == 0)
                                                 ? 1.0 : -1.0;
@@ -1768,7 +1791,7 @@ void wdm_het_fill_global_kernel(
                         const cmplx z      = layer_buf[c * Nt_sub + n_loc];
                         const double real_part = parity_even ? z.real() : z.imag();
                         const double w     = factor * kappa * sign * real_part;
-                        const size_t dst   = ((size_t) c * Nf + m) * Nt + n_glob;
+                        const size_t dst   = ((size_t) c * out_Nf + m_out) * out_Nt + n_out;
 #ifdef __CUDACC__
                         atomicAdd(&template_fill[dst], w);
 #else
@@ -2712,8 +2735,12 @@ inline void wdm_het_fill_global_impl(
     double T_chunk, double dt, double T, double t_ref,
     double tukey_alpha,
     int grid_dim, int N_cp_sig, int N_cp_orbit,
-    int m_band_half_width)
+    int m_band_half_width,
+    bool active_band = false)
 {
+    // ``active_band`` (default false = dense parent grid) is forwarded to the
+    // kernel; true selects the active-band output layout. Defaulting to false
+    // keeps existing callers (incl. BBHx/SOBBH) source- and behaviour-compatible.
     // The new kernel does not use N_cp_sig / N_cp_orbit (no spline / orbit
     // caches in this rewrite). grid_dim selects gridDim.x (binaries per
     // launch); default = num_bin (one block per binary).
@@ -2756,7 +2783,7 @@ inline void wdm_het_fill_global_impl(
         n_chunks, num_bin, nparams,
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
-        T_chunk, dt, T, t_ref, tukey_alpha, m_band_half_width);
+        T_chunk, dt, T, t_ref, tukey_alpha, m_band_half_width, active_band);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
@@ -2769,7 +2796,7 @@ inline void wdm_het_fill_global_impl(
         n_chunks, num_bin, nparams,
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
-        T_chunk, dt, T, t_ref, tukey_alpha, m_band_half_width);
+        T_chunk, dt, T, t_ref, tukey_alpha, m_band_half_width, active_band);
 #endif
 }
 

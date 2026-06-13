@@ -186,7 +186,13 @@ TOBS_TARGET = float(os.environ.get("TOBS_TARGET", YRSID_SI))
 DT = 2.5
 
 # Half-day-ish wavelet-duration search window for adjust_to_even_bins.
-WAVELET_DUR_BOUNDS = (40000.0, 48000.0)
+# Env-overridable (WAVELET_DUR_MIN / WAVELET_DUR_MAX) so smoke tests can
+# pick a tiny wavelet duration that yields a small WDM grid at a short
+# TOBS_TARGET without editing this file.
+WAVELET_DUR_BOUNDS = (
+    float(os.environ.get("WAVELET_DUR_MIN", 40000.0)),
+    float(os.environ.get("WAVELET_DUR_MAX", 48000.0)),
+)
 
 # Data source selection.
 #   "mojito"    — load source TD signals from a mojito L1 folder.

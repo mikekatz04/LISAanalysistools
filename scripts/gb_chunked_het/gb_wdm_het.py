@@ -452,6 +452,11 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
     # to instantiate, and which prefix the chunked-het methods use.
     # GBWDMHeterodyne -> GBComputationGroupWrap.gb_wdm_het_*
     # SOBBHWDMHeterodyne -> SOBBHComputationGroupWrap.sobbh_wdm_het_*
+    # GBComputationGroupWrap + the gb_wdm_het_* kernels live on the GBGPU
+    # backend (which also composes the LAT-side OrbitsWrap / TDIConfigWrap /
+    # WDMSettingsWrap / TDITypeDict). Re-prefix so ``self.backend`` resolves
+    # there instead of inheriting the default "lisatools" backend.
+    _BACKEND_PREFIX = "gbgpu"
     _CPP_WRAP_ATTR = "GBComputationGroupWrap"
     _CPP_METHOD_PREFIX = "gb_wdm_het"
     _CPP_NPARAMS = 9
@@ -467,6 +472,8 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
                  N_cp_sig=0,
                  N_cp_orbit=0,
                  d_d=0.0,
+                 ind_min_f=None, ind_max_f=None,
+                 ind_min_t=None, ind_max_t=None,
                  jax_chunk=None):
         # Resolve the backend object up front so all nested
         # constructors share the same backend string.
@@ -509,6 +516,18 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         self.N_cp_orbit = int(N_cp_orbit)
         self.Nf       = int(Nf)
         self.Nt       = int(Nt)
+        # Active WDM band. Default (None) = full parent grid, preserving the
+        # historical dense behaviour (prior-draws / standalone use). When the
+        # global-fit settings pass the AnalysisContainer's band (its
+        # ``WDMSettings.ind_min_f`` etc.), the chunked-het kernels read/write
+        # the restricted ``(Nf_active, Nt_active)`` layout directly -- matching
+        # GBWDMComputations, which already carries the band.
+        self.ind_min_f = 0 if ind_min_f is None else int(ind_min_f)
+        self.ind_max_f = (int(Nf) - 1) if ind_max_f is None else int(ind_max_f)
+        self.ind_min_t = 0 if ind_min_t is None else int(ind_min_t)
+        self.ind_max_t = (int(Nt) - 1) if ind_max_t is None else int(ind_max_t)
+        self.Nf_active = self.ind_max_f - self.ind_min_f + 1
+        self.Nt_active = self.ind_max_t - self.ind_min_t + 1
         self.dt       = float(dt)
         self.T_full   = float(T_full)
         self.t_ref_full = float(t_ref_full)
@@ -651,12 +670,13 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         # ``gb_wdm_het_*`` entry point now takes a ``WDMSettingsWrap *``
         # immediately after ``tdi_config_wrap``, reading Nf / Nt /
         # ind_min_f / ind_max_f / ind_min_t / ind_max_t off it instead
-        # of taking ``Nf`` / ``Nt`` ints in the int-arg block). For
-        # GBWDMHeterodyne the active band IS the full grid -- this
-        # class doesn't carry an ind_min/max concept like
-        # GBWDMComputations does -- so we point ind_min_* at 0 and
-        # ind_max_* at the corresponding N-1, making Nf_active=Nf and
-        # Nt_active=Nt for the kernel's data_d / invC length checks.
+        # of taking ``Nf`` / ``Nt`` ints in the int-arg block). The active
+        # band (``ind_min_*`` / ``ind_max_*``) is resolved in __init__ above:
+        # default = full grid (Nf_active=Nf, Nt_active=Nt), or the restricted
+        # AnalysisContainer band when the global-fit settings pass it. The
+        # kernel reads Nf / Nt / ind_min_* / ind_max_* off this struct for the
+        # data_d / invC length checks and (in active_band mode) the template
+        # write addressing.
         layer_df = 1.0 / (2.0 * self.Nf * self.dt)
         layer_dt_grid = self.Nf * self.dt
         self._cpp_wdm_settings = self._be.WDMSettingsWrap(
@@ -664,8 +684,8 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
             float(layer_dt_grid),
             int(self.Nf), int(self.Nt),
             int(self.nchannels),
-            int(0), int(self.Nt - 1),   # ind_min_t, ind_max_t (full Nt active)
-            int(0), int(self.Nf - 1),   # ind_min_f, ind_max_f (full Nf active)
+            int(self.ind_min_t), int(self.ind_max_t),
+            int(self.ind_min_f), int(self.ind_max_f),
         )
         # ``tdi_type`` int the kernel uses to switch the invC layout
         # (XYZ cross-channel vs AET/AE diagonal). GBWDMHeterodyne is
@@ -698,7 +718,8 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
             f"got {arr.size} elements, not divisible by {self._CPP_NPARAMS}.")
         return arr.copy(), num_bin
 
-    def _call_cpp_fill_global(self, template_out, params_flat, factors, num_bin, grid_dim):
+    def _call_cpp_fill_global(self, template_out, params_flat, factors, num_bin, grid_dim,
+                              active_band=False):
         # Binding signature (recent): (template, orbits, tdi_config,
         # wdm_settings, params, factors, chunk_t_starts, keep_lo, keep_hi,
         # n_global_offset, wdm_window, n_chunks, num_bin, nparams,
@@ -724,6 +745,7 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
             float(self._cpp_tukey_alpha), int(grid_dim),
             int(self.N_cp_sig), int(self.N_cp_orbit),
             int(1),  # m_band_half_width
+            bool(active_band),
         )
 
     def _call_cpp_get_ll(self, d_h_out, h_h_out, data_d, invC,
@@ -858,18 +880,21 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         return stitched
 
     def fill_global(self, template_out, params_list, factors=None,
-                    grid_dim=0):
+                    grid_dim=0, active_band=False):
         """Accumulate per-binary stitched WDM templates into ``template_out``.
 
         Args:
-            template_out: ``(nchannels, Nf, Nt)`` float array, the
-                accumulator (caller pre-zeros).
+            template_out: float accumulator (caller pre-zeros). Dense
+                ``(nchannels, Nf, Nt)`` when ``active_band`` is False, or
+                active-band ``(nchannels, Nf_active, Nt_active)`` when True.
             params_list: iterable of length-nparams source-parameter
                 vectors (one per binary).
             factors: per-binary multiplicative factors (default = +1).
             grid_dim: CUDA launch grid size (use 0 to default to
                 ``n_chunks``). Use :func:`chunked_het_grid_dim` to pick
                 an optimal value for A100 / H100.
+            active_band: write into the restricted active band rather than
+                the full parent grid (see ``fill_global_wdm``).
         """
         num_bin = len(params_list)
         if factors is None:
@@ -881,11 +906,18 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
             params_flat, n_check = self._flatten_params(params_list)
             assert n_check == num_bin
             self._call_cpp_fill_global(template_out, params_flat, factors,
-                                       num_bin, grid_dim)
+                                       num_bin, grid_dim, active_band=active_band)
             return template_out
 
+        # Pure-Python fallback: _stitched_wdm produces the dense (nch, Nf, Nt)
+        # coefficients; crop to the active band when requested so the
+        # accumulator layout matches the C++ active_band path.
         for src, f in zip(params_list, factors):
-            template_out += float(f) * self._stitched_wdm(src)
+            stitched = self._stitched_wdm(src)
+            if active_band:
+                stitched = stitched[:, self.ind_min_f:self.ind_max_f + 1,
+                                       self.ind_min_t:self.ind_max_t + 1]
+            template_out += float(f) * stitched
         return template_out
 
     def get_ll(self, data_d, invC, params_list, grid_dim=0,
@@ -1885,34 +1917,50 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         params = np.atleast_2d(np.asarray(params, dtype=float)).reshape(-1, self._CPP_NPARAMS)
         params_used = self._maybe_ecl_to_icrs(params, convert_to_ra_dec)
         num_bin = params_used.shape[0]
-        del source
+        del source  # band comes from this instance (set at construction), not the AC
 
         nch, Nf, Nt = self.nchannels, self.Nf, self.Nt
-        per_template = nch * Nf * Nt
-        # Reshape templates to (num_templates, nch, Nf, Nt) -- supports
-        # 1D flat, 3D single-slab, and 4D multi-slab inputs the same way
-        # GBWDMComputations.fill_global_wdm does. Aliasing the original
-        # buffer (no .copy()) so writes propagate back to the caller.
+        Nfa, Nta = self.Nf_active, self.Nt_active
+        restricted = (Nfa < Nf) or (Nta < Nt)
+        dense_per, active_per = nch * Nf * Nt, nch * Nfa * Nta
+        # Choose the output layout from the buffer the caller handed us. A
+        # full-grid (dense) buffer is written with absolute (m, n); a
+        # restricted active-band buffer is written via active_band=True at
+        # (m - ind_min_f, n - ind_min_t). Dense is preferred when the buffer
+        # is full-grid-sized (prior-draws / standalone); active is used when
+        # this instance carries a restricted band AND the buffer is the
+        # smaller active size (the global-fit settings path).
         if templates.ndim == 1:
-            assert templates.shape[-1] % per_template == 0, (
-                f"templates flat size {templates.shape[-1]} not divisible "
-                f"by nchannels*Nf*Nt = {per_template}"
-            )
-            num_templates = int(templates.shape[-1] // per_template)
-            templates_view = templates.reshape(num_templates, nch, Nf, Nt)
-        elif templates.ndim == 3:
-            assert templates.shape == (nch, Nf, Nt), (
-                f"3D templates must be ({nch}, {Nf}, {Nt}); got {templates.shape}"
-            )
-            num_templates = 1
-            templates_view = templates[None, :, :, :]
-        elif templates.ndim == 4:
-            assert templates.shape[1:] == (nch, Nf, Nt), (
-                f"4D templates must be (num_templates, {nch}, {Nf}, {Nt}); "
-                f"got {templates.shape}"
-            )
-            num_templates = int(templates.shape[0])
-            templates_view = templates
+            flat = int(templates.shape[-1])
+            if flat % dense_per == 0:
+                active_band, per_template, out_Nf, out_Nt = False, dense_per, Nf, Nt
+            elif restricted and flat % active_per == 0:
+                active_band, per_template, out_Nf, out_Nt = True, active_per, Nfa, Nta
+            else:
+                raise AssertionError(
+                    f"templates flat size {flat} matches neither dense "
+                    f"(nchannels*Nf*Nt={dense_per}) nor active "
+                    f"(nchannels*Nf_active*Nt_active={active_per})."
+                )
+            num_templates = int(flat // per_template)
+            templates_view = templates.reshape(num_templates, nch, out_Nf, out_Nt)
+        elif templates.ndim in (3, 4):
+            shp = tuple(templates.shape[-3:])
+            if shp == (nch, Nf, Nt):
+                active_band, out_Nf, out_Nt = False, Nf, Nt
+            elif restricted and shp == (nch, Nfa, Nta):
+                active_band, out_Nf, out_Nt = True, Nfa, Nta
+            else:
+                raise AssertionError(
+                    f"templates trailing shape {shp} matches neither dense "
+                    f"({nch}, {Nf}, {Nt}) nor active ({nch}, {Nfa}, {Nta})."
+                )
+            if templates.ndim == 3:
+                num_templates = 1
+                templates_view = templates[None, :, :, :]
+            else:
+                num_templates = int(templates.shape[0])
+                templates_view = templates
         else:
             raise ValueError(
                 "templates must be 1D (flat), 3D (nchannels, Nf, Nt), or "
@@ -1950,7 +1998,7 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
             params_slab = [params_used[i] for i in np.flatnonzero(mask)]
             factors_slab = factors_arr[mask]
             self.fill_global(templates_view[int(slab)], params_slab,
-                             factors=factors_slab)
+                             factors=factors_slab, active_band=active_band)
 
 
 def psd_fix_eigabs(M, floor_rel=1e-30):
@@ -1996,6 +2044,9 @@ class SOBBHWDMHeterodyne(GBWDMHeterodyne):
 
     # Routes ``fill_global`` / ``get_ll`` / ``swap_ll`` through the
     # ``SOBBHComputationGroupWrap.sobbh_wdm_het_*`` C++ methods.
+    # SOBBHComputationGroupWrap + sobbh_wdm_het_* kernels live on the BBHx
+    # backend (composing the LAT-side wraps). Re-prefix there.
+    _BACKEND_PREFIX = "bbhx"
     _CPP_WRAP_ATTR = "SOBBHComputationGroupWrap"
     _CPP_METHOD_PREFIX = "sobbh_wdm_het"
     _CPP_NPARAMS = 11

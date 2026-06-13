@@ -1814,6 +1814,11 @@ class AnalysisContainerArray:
     def __len__(self) -> int:
         return len(self.acs)
 
+    def flatten(self) -> "np.ndarray":
+        """Return the underlying per-walker :class:`AnalysisContainer` object
+        array flattened to 1D (delegates to ``self.acs.flatten()``)."""
+        return self.acs.flatten()
+
     # ------------------------------------------------------------------
     # Vectorized dispatcher (replaces the legacy _loop_operation)
     # ------------------------------------------------------------------
