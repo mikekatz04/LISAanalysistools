@@ -1,16 +1,18 @@
 import numpy as np
+import logging
 from copy import deepcopy
 from typing import Dict, Any, List, Tuple
 from eryn.moves import Move
 from eryn.state import State
 from eryn.model import Model
 from .globalfitmove import GlobalFitMove
+from ..state import GFState
 from ...analysiscontainer import AnalysisContainerArray
 from ..priors.sourceconfigs import BaseSourceConfig
 from ...utils.typing import NDArrayLike
 from gbgpu.gbgpu import GBGPU
 
-
+logger = logging.getLogger(__name__)
 
 class HyperMove(GlobalFitMove, Move):
     """
@@ -23,17 +25,7 @@ class HyperMove(GlobalFitMove, Move):
         
 
     Args:
-        nleaves_max (dict): Maximum number(s) of leaves for each model.
-            Keys are ``branch_names`` and values are ``nleaves_max`` for each branch.
-            This is a keyword argument, nut it is required.
-        nleaves_min (dict): Minimum number(s) of leaves for each model.
-            Keys are ``branch_names`` and values are ``nleaves_min`` for each branch.
-            This is a keyword argument, nut it is required.
-        tune (bool, optional): If True, tune proposal. (Default: ``False``)
-        fix_change (int or None, optional): Fix the change in the number of leaves. Make them all
-            add a leaf or remove a leaf. This can be useful for some search functions. Options
-            are ``0`` or ``1``. (default: ``None``)
-
+        
     """
 
     def __init__(
@@ -57,70 +49,136 @@ class HyperMove(GlobalFitMove, Move):
         self.branch_name_map = branch_name_map
         self.catalogues = catalogues
         self.nmodels = len(catalogues)
+        
+        self.N_tot_model = {}
+        for model in range(self.nmodels):
+            self.N_tot_model[model] = self.catalogues[model].shape[0]
+        
         self.snr_threshold = snr_threshold
         self.num_repeats = num_repeats
+        
+        self.first_catalogue_itteration = True      
 
 
-    def setup(self) -> None:
-        """Calculates the expected number of resolved sources for the current model and sets up 
-        any necessary information for the proposal. This is called at the beginning of each proposal
-        step, so it can be used to adapt the proposal based on the current state of the sampler.
+    def setup(self, coords):
+        
+        if self.first_catalogue_itteration:
+            logger.info("Starting first snr loop of catalogues")
+            max_logl_walker = np.argmax(self.acs.likelihood()).item()
+            acs_max_logl = AnalysisContainerArray([deepcopy(self.acs[max_logl_walker])], gpus=self.acs.gpus)
+            xp = acs_max_logl.xp
+            for i, catalogue in enumerate(self.catalogues):
+                ncat = catalogue.shape[0]
+                data_index = xp.asarray(
+                    np.repeat(0, ncat), dtype=np.int32
+                )
+                
+                self.wave_gen.get_ll(
+                    catalogue, 
+                    acs_max_logl.linear_data_arr, # we are only interested in h_h contribution for opt_snr, so this can be anything
+                    acs_max_logl.linear_psd_arr, 
+                    data_index=data_index, 
+                    noise_index=data_index, 
+                    data_length=acs_max_logl.data_length, 
+                    data_splits=np.array([0]), 
+                    phase_marginalize=False, 
+                    **self.waveform_kwargs
+                )
+                h_h_raw = self.wave_gen.h_h 
+                h_h = h_h_raw.get() if hasattr(h_h_raw, "get") else h_h_raw
 
-        Args:
-            branches_coords (dict): Keys are ``branch_names``. Values are
-                np.ndarray[ntemps, nwalkers, nleaves_max, ndim]. These are the curent
-                coordinates for all the walkers.
+                opt_snrs = np.sqrt(h_h.real)
+                catalogue_filtered = catalogue[opt_snrs > 1.0] # TODO cut adjustable?
+                logger.info(f"For catalogue {i}, {catalogue_filtered.sum()}/{ncat} binaries are above SNR=1.0")
+                self.catalogues[i] = catalogue_filtered
+            
+            self.first_catalogue_itteration = False
 
-        """
-        Nexpected_resolved_dict = {}
+        return
+    
+    def compute_source_contribution(
+        self, 
+        model_coords: NDArrayLike, 
+        resolved_coords: NDArrayLike, 
+        stochastic_coords: NDArrayLike
+    ) -> NDArrayLike:
+        xp = self.acs.xp
+        ntemps, nwalkers, nleaves_max, ndim_res = resolved_coords.shape
+        _, _, _, ndim_stoc = stochastic_coords.shape
+
+        resolved_priors = self.source_setups["resolved"].priors[self.branch_name_map["resolved"]]
+        stochastic_priors = self.source_setups["stochastic"].priors[self.branch_name_map["stochastic"]]
+        
+        model_coords_2d = model_coords[..., 0, 0].astype(int)
+        
+        resolved_reshaped = xp.asarray(resolved_coords.reshape(-1, ndim_res))
+        model_flat_1 = xp.asarray(
+            np.broadcast_to(
+                model_coords_2d[:,:, np.newaxis], 
+                (ntemps, nwalkers, nleaves_max)
+            ).flatten()
+        )
+        stochastic_reshaped = xp.asarray(stochastic_coords.reshape(-1, ndim_stoc))
+        model_flat_2 = xp.asarray(model_coords_2d.flatten())
+        
+        # TODO check handling of nans in gb values (or "not active" GBs)
+        breakpoint()
+        resolved_pdfs = resolved_priors.logpdf(resolved_reshaped, model_flat_1).reshape((ntemps, nwalkers, nleaves_max))        
+        logp_resolved = resolved_pdfs.sum(axis=-1)
+        
+        logp_stochastic = stochastic_priors.logpdf(stochastic_reshaped, model_flat_2).reshape((ntemps, nwalkers))
+        
+        return logp_resolved + logp_stochastic
+    
+    
+    def compute_number_contribution(
+        self,
+        model_coords: NDArrayLike,
+        num_resolved_sources: NDArrayLike
+    ) -> NDArrayLike:
+        xp = self.acs.xp
+        nwalkers = len(self.acs)
+        
+        Nexpected_resolved_array = np.zeros((self.nmodels, nwalkers))
         for i, catalogue in enumerate(self.catalogues):
-            self.wave_gen.run_wave(*catalogue, **self.waveform_kwargs)
-            data_index = ... # setup data_index
-            acs = ... # setup the analysis container array for this catalogue and the current data and psd
-            # new analysis containers should be generated (or something similar to acs.linear_data_arr to save memory). 
-            # This can be done with self.wave_gen.generate_global_template() (see gb moves file)
-            # psd should be grabbed by usual acs
+            ncat = catalogue.shape[0]
+            
+            coords_in = xp.asarray(
+                np.broadcast_to(catalogue, (nwalkers,)+catalogue.shape).reshape(-1, 9)
+            )
+            data_index = xp.asarray(
+                np.repeat(np.arange(nwalkers), ncat), dtype=np.int32
+            )
+            
             self.wave_gen.get_ll(
-                catalogue, 
-                acs.linear_data_arr, 
-                acs.linear_psd_arr, 
+                coords_in, 
+                self.acs.linear_data_arr, # we are only interested in h_h contribution for opt_snr, so this can be anything
+                self.acs.linear_psd_arr, 
                 data_index=data_index, 
                 noise_index=data_index, 
-                data_length=acs.data_length, 
+                data_length=self.acs.data_length, 
                 data_splits=np.array([0]), 
                 phase_marginalize=False, 
                 **self.waveform_kwargs
             )
-            opt_snrs = gb.h_h.real ** (1 / 2)
-            Nexpected_resolved = np.sum(opt_snrs > self.snr_threshold)
-            Nexpected_resolved_dict[i] = Nexpected_resolved
-            
-        self.Nexpected_resolved_dict = Nexpected_resolved_dict
+            h_h_raw = self.wave_gen.h_h 
+            h_h = h_h_raw.get() if hasattr(h_h_raw, "get") else h_h_raw
+
+            opt_snrs = np.sqrt(h_h.real).reshape(nwalkers, ncat)
+            Nexpected_resolved_array[i] = np.sum(opt_snrs > self.snr_threshold, axis=-1)
         
-        return   
-
-
-    def get_model_change_proposal(
-        self, 
-        coords: np.ndarray, 
-        random: np.random.RandomState, 
-        nmodels: int, 
-    ) -> np.ndarray:       
-        """Helper function for changing the model index.
+        model_coords_2d = model_coords[..., 0, 0].astype(int)
         
-        This proposal strictly selects a DIFFERENT model uniformly, perserving detailed balance.
-
-        Args:
-            coords (np.ndarray): The coordinates of all walkers for this specific branch with shape 
-                ``(ntemps, nwalkers, nleaves_max, ndims)``.
-            random (object): Current random state of the sampler.
-            nmodels (int): The total number of models, must be greater than 1.
-
-        Returns:
-            np.ndarray: A new array of model indices.
+        term_1 = Nexpected_resolved_array[model_coords_2d, np.arange(nwalkers)]
         
-        """
-        if nmodels <= 1:
+        N_tot_array = np.array([self.N_tot_model[m] for m in range(self.nmodels)])
+        term_2 = N_tot_array[model_coords_2d]
+        
+        return - term_1 + num_resolved_sources * term_2
+    
+    
+    def get_proposal(self, coords, random, supps=None, branch_supps=None):
+        if self.nmodels <= 1:
             raise ValueError("nmodels must be strictly greater than 1 to propose a change.")
         
         ntemps, nwalkers, _, _ = coords.shape
@@ -128,382 +186,117 @@ class HyperMove(GlobalFitMove, Move):
         # all leaves of each walker and temperature have the same model
         current_indices = coords[..., 0, 0].copy().astype(int)
         
-        proposed_indices = random.randint(1, nmodels, size=(ntemps, nwalkers))
+        proposed_indices = random.randint(1, self.nmodels, size=(ntemps, nwalkers))
         
-        new_indices = (current_indices + proposed_indices) % nmodels
+        new_indices = (current_indices + proposed_indices) % self.nmodels
         
         new_coords = coords.copy()
-        new_coords[..., 0, 0] = new_indices[..., np.newaxis]
-                
-        return new_coords
+        new_coords[..., 0, 0] = new_indices
         
-    def get_pop_posterior(
-        self,
-        branches_coords: Dict[str, np.ndarray], 
-        branches_inds: Dict[str, np.ndarray], 
-        branch_name_map: Dict[str, str], 
-        source_setups: Dict[str, BaseSourceConfig],
-        snr_array: np.ndarray,          # <-- Passed in from the sampler state
-        N_tot_dict: Dict[int, float],   # <-- N_tot(M) for each model
-    ) -> np.ndarray:
-        """
-        Calculates the exact population posterior derived from the marginalized RJ-MCMC formalism.
-        """
-        # 1. Extract the current model indices from the hyper branch
-        # Shape: (ntemps, nwalkers)
-        model_indices = branches_coords["hyper"][..., 0, 0].astype(int)
+        factors = np.zeros((ntemps, nwalkers))
         
-        # 2. Extract GB parameters and active indices
-        gb_coords = branches_coords["gb"]
-        gb_inds = branches_inds["gb"]
-        k1 = gb_inds.sum(axis=-1)  # Number of resolved sources per walker (ntemps, nwalkers)
+        return new_coords, factors
         
-        # 3. Get the expected total and resolved counts dynamically
-        # Map the model indices to the constants
-        N_tot = np.vectorize(N_tot_dict.get)(model_indices)
-        N_1 = np.vectorize(self.Nexpected_resolved_dict.get)(model_indices)
-
-        # 4. Evaluate the modified Poisson term: k1 * ln(N_tot) - N_1
-        log_poisson_mod = k1 * np.log(N_tot) - N_1
-
-        # 5. Evaluate the Normalizing Flow (p_pop) and Resolvability (alpha)
-        gb_prior = source_setups["gb"].priors["gb"]
-        resolv_prior = source_setups["gb"].priors["resolv_gb"]
-        
-        # Evaluate for all leaves. Eryn priors return -inf for invalid coords, 
-        # but we multiply by gb_inds anyway to zero out inactive leaves.
-        logp_pop = gb_prior.logpdf(gb_coords, model_index=model_indices)
-        logp_res = resolv_prior.logpdf(snr_array)
-        
-        # Sum over the active leaves (axis=-1)
-        logp_sources = np.sum((logp_pop + logp_res) * gb_inds, axis=-1)
-        
-        # 6. Total Population Posterior
-        total_pop_prior = log_poisson_mod + logp_sources
-        
-        return total_pop_prior
-
-    def get_proposal(
-        self, 
-        all_coords: Dict[str, np.ndarray], 
-        all_inds: Dict[str, np.ndarray], 
-        nleaves_min_all: Dict[str, int], 
-        nleaves_max_all: Dict[str, int], 
-        random: np.random.RandomState, 
-        **kwargs: Any
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], np.ndarray]:
-        """Make a proposal
-
-        Args:
-            all_coords (dict): Keys are ``branch_names``. Values are
-                np.ndarray[ntemps, nwalkers, nleaves_max, ndim]. These are the current
-                coordinates for all the walkers.
-            all_inds (dict): Keys are ``branch_names``. Values are
-                np.ndarray[ntemps, nwalkers, nleaves_max]. These are the boolean
-                arrays marking which leaves are currently used within each walker.
-            nleaves_min_all (dict): Minimum values of leaf ount for each model. Must have same order as ``all_coords``.
-            nleaves_max_all (dict): Maximum values of leaf ount for each model. Must have same order as ``all_coords``.
-            random (object): Current random state of the sampler.
-            **kwargs (ignored): For modularity.
-
-        Returns:
-            tuple: Tuple containing proposal information.
-                First entry is the new coordinates as a dictionary with keys
-                as ``branch_names`` and values as
-                ``double `` np.ndarray[ntemps, nwalkers, nleaves_max, ndim] containing
-                proposed coordinates. Second entry is the new ``inds`` array with
-                boolean values flipped for added or removed sources. Third entry
-                is the factors associated with the
-                proposal necessary for detailed balance. This is effectively
-                any term in the detailed balance fraction. +log of factors if
-                in the numerator. -log of factors if in the denominator.
-
-        Raises:
-            ValueError: leave set-up is incorrect.
-
-        """
-        # prepare the output dictionaries
-        q = {}
-        new_inds = all_inds.copy()
-
-        # loop over the models included here
-        assert len(nleaves_min_all)
-        assert len(all_coords.keys()) == len(nleaves_max_all.keys())
-        for i, (name, coords) in enumerate(zip(all_coords.keys(), all_coords.values())):
-            # check for proper RJ setup
-            nleaves_max = nleaves_max_all[name]
-            nleaves_min = nleaves_min_all[name]
-            if nleaves_min == nleaves_max:
-                continue
-            elif nleaves_min > nleaves_max:
-                raise ValueError("nleaves_min is greater than nleaves_max. Not allowed.")
-            
-            # get new coordinates
-            q[name] = self.get_model_change_proposal(
-                coords, random, self.nmodels
-            )
-            
-            ntemps, nwalkers, _, _ = coords.shape
-            
-            if i == 0:
-                factors = np.zeros((ntemps, nwalkers))
-                
-            #! since the usual implementation is performed using a uniform proposal 
-            #! in the model index, the factors are zero. This can be changed in the
-            #! future if necessary
-
-        return q, new_inds, factors
     
-        
-    def propose(
-        self, 
-        model: Model, 
-        state: State
-    ) -> Tuple[State, Any]:
-        """Use the move to generate a proposal and compute the acceptance
-
-        Args:
-            model (:class:`eryn.model.Model`): Carrier of sampler information.
-            state (:class:`State`): Current state of the sampler.
-
-        Returns:
-            :class:`State`: State of sampler after proposal is complete.
-
+    def run_hyper_tempering(self, state):
         """
-        self.setup()
+        This tempering function does the tempering operations of the usual temperature control.
+        However, it overrides share_temperature=False (represented by skip_swap_branches) 
+        for the relevant branches in self.branch_name_map and 'hyper'.
+        Thus, this swaps the coords for all relevant branches when the swap is accepted.
+        """
+        if self.temperature_control is None or self.temperature_control.ntemps <= 1 or self.prevent_swaps:
+            return state
+
+        tc = self.temperature_control
         
-        current_snrs = state.branches_supplemental["gb"]["snr"]
+        target_branches = list(self.branch_name_map.values())
+        if "hyper" not in target_branches:
+            target_branches.append("hyper")
+            
+        original_skip_swap = list(tc.skip_swap_branches)
         
         try:
-            prev_tot_pop_prior = state.branches_supplemental["hyper"]["total_pop_prior"]
-        except AttributeError:
-            prev_tot_pop_prior = self.get_pop_posterior(
-                state.branches_coords, 
-                state.branches_inds, 
-                self.branch_name_map, 
-                self.source_setups,
-                current_snrs,
-                self.N_tot_dict
-            )
+            # This makes do_swaps_indexing() swap their coordinates and parameters
+            tc.skip_swap_branches = [
+                branch for branch in original_skip_swap 
+                if branch not in target_branches
+            ]
+            swapped_state = tc.temper_comps(state, adapt=False)
+            
+        finally:
+            tc.skip_swap_branches = original_skip_swap
+            
+        return swapped_state
+    
+    
+    def propose(self, model, state):
         
-        ntemps, nwalkers, _, _ = state.branches[list(state.branches.keys())[0]].shape
-
-        accepted = np.zeros((ntemps, nwalkers), dtype=bool)
-
+        self.setup(state.branches_coords)
+        
         all_branch_names = list(state.branches.keys())
-
+        
         ntemps, nwalkers, _, _ = state.branches[all_branch_names[0]].shape
-
-        for branch_names_run, inds_run in self.gibbs_sampling_setup_iterator(
-            all_branch_names
+        
+        # setup supplemental information
+        if not np.all(
+            np.asarray(list(state.branches_supplemental.values())) == None
         ):
-            # gibbs sampling is only over branches so pick out that info
-            coords_propose_in = {
-                key: state.branches_coords[key] for key in branch_names_run
-            }
-            inds_propose_in = {
-                key: state.branches_inds[key] for key in branch_names_run
-            }
-            branches_supp_propose_in = {
-                key: state.branches_supplemental[key] for key in branch_names_run
-            }
+            new_branch_supps = deepcopy(state.branches_supplemental)
+        else:
+            new_branch_supps = None
 
-            if len(list(coords_propose_in.keys())) == 0:
-                raise ValueError(
-                    "Right now, no models are getting a reversible jump proposal. Check nleaves_min and nleaves_max or do not use rj proposal."
-                )
-
-            # get min and max leaf information
-            nleaves_max_all = {brn: self.nleaves_max[brn] for brn in branch_names_run}
-            nleaves_min_all = {brn: self.nleaves_min[brn] for brn in branch_names_run}
-
-            self.current_model = model
-            self.current_state = state
-            # propose new sources and coordinates
-            q, new_inds, factors = self.get_proposal(
-                coords_propose_in,
-                inds_propose_in,
-                nleaves_min_all,
-                nleaves_max_all,
-                model.random,
-                branch_supps=branches_supp_propose_in,
-                supps=state.supplemental,
-            )
-
-            new_tot_pop_prior = self.get_pop_posterior(
-                q, 
-                new_inds, 
-                self.branch_name_map, 
-                self.source_setups,
-                current_snrs, # SNR doesn't change during an Out-Model move!
-                self.N_tot_dict
-            )
-            factors += (new_tot_pop_prior - prev_tot_pop_prior)
+        if state.supplemental is not None:
+            new_supps = deepcopy(state.supplemental)
+        else:
+            new_supps = None
             
-            branches_supps_new = {
-                key: item for key, item in branches_supp_propose_in.items()
-            }
-            # account for gibbs sampling
-            self.cleanup_proposals_gibbs(
-                branch_names_run, inds_run, q, state.branches_coords
-            )
+        self.current_model = model
+        self.current_state = state
 
-            # put back any branches that were left out from Gibbs split
-            for name, branch in state.branches.items():
-                if name not in q:
-                    q[name] = state.branches[name].coords[:].copy()
-                if name not in new_inds:
-                    new_inds[name] = state.branches[name].inds[:].copy()
+        num_resolved_sources = deepcopy(state.branches[self.branch_name_map["resolved"]].inds[:].sum(axis=-1))
+        old_coords_model = deepcopy(state.branches_coords["hyper"])    
+        coords_resolved = deepcopy(state.branches_coords[self.branch_name_map["resolved"]])
+        coords_stochastic = deepcopy(state.branches_coords[self.branch_name_map["stochastic"]])
 
-                if name not in branches_supps_new:
-                    branches_supps_new[name] = state.branches_supplemental[name]
+        # calculate prior contribution old state
+        logp_source_prev = self.compute_source_contribution(old_coords_model, coords_resolved, coords_stochastic) # self.prior at init
+        logp_number_prev = self.compute_number_contribution(old_coords_model, num_resolved_sources) # Ntot(M), catalog and psd set at init
+        
+        logp_prev = logp_source_prev + logp_number_prev
 
-            # fix any ordering issues
-            q, new_inds, branches_supps_new = self.ensure_ordering(
-                list(state.branches.keys()), q, new_inds, branches_supps_new
-            )
+        # get new model coords
+        new_coords_model, factors = self.get_proposal(
+            old_coords_model,
+            model.random,
+            supps=new_supps,
+            branch_supps=new_branch_supps,
+        )
+        
+        # calculate prior contribution new state
+        logp_source_curr = self.compute_source_contribution(new_coords_model, coords_resolved, coords_stochastic) # self.prior at init
+        logp_number_curr = self.compute_number_contribution(new_coords_model, num_resolved_sources) # Ntot(M), catalog and psd set at init
+        
+        logp_curr = logp_source_curr + logp_number_curr
+        
+        # acceptance fraction
+        delta_logp = factors + logp_curr - logp_prev
+        accepted = delta_logp > np.log(model.random.rand(ntemps, nwalkers))
+        
+        # new_coords = deepcopy(state.coords)
+        # new_coords["hyper"] = new_coords_model
+        
+        new_state = GFState(state, copy=True)
+        new_state.branches_coords["hyper"] = new_coords_model
+        assert new_state.log_prior is not None
+        new_state.log_prior[:] = logp_curr
 
-            # setup supplemental information
-
-            if state.supplemental is not None:
-                # TODO: should there be a copy?
-                new_supps = deepcopy(state.supplemental)
-
-            else:
-                new_supps = None
-
-            logp = np.zeros((ntemps, nwalkers))
+        new_state = self.run_hyper_tempering(new_state)
             
-            self.fix_logp_gibbs(branch_names_run, inds_run, logp, new_inds)
-
-            # Compute the ln like of the proposed position.
-            logl, new_blobs = model.compute_log_like_fn(
-                q,
-                inds=new_inds,
-                logp=logp,
-                supps=new_supps,
-                branch_supps=branches_supps_new,
-            )
-
-            # posterior and previous info
-            logP = self.compute_log_posterior(logl, logp)
-
-            prev_logl = state.log_like
-
-            prev_logp = state.log_prior
-
-            # takes care of tempering
-            prev_logP = self.compute_log_posterior(prev_logl, prev_logp)
-
-            # acceptance fraction
-            lnpdiff = factors + logP - prev_logP
-
-            accepted = lnpdiff > np.log(model.random.rand(ntemps, nwalkers))
-            
-            if new_supps is not None and "hyper" in new_supps:
-                # Store the updated population prior for accepted walkers
-                updated_pop_prior = np.where(accepted, new_tot_pop_prior, prev_tot_pop_prior)
-                new_supps["hyper"]["total_pop_prior"] = updated_pop_prior
-                
-            # update with new state
-            new_state = GFState(
-                q,
-                log_like=logl,
-                log_prior=logp,
-                blobs=None,
-                inds=new_inds,
-                supplemental=new_supps,
-                branch_supplemental=branches_supps_new,
-            )
-            state = self.update(state, new_state, accepted)
-
-
-        if self.temperature_control is not None and not self.prevent_swaps:
-            state = self.temperature_control.temper_comps(state, adapt=False)
-
         # add to move-specific accepted information
         self.accepted += accepted
         self.num_proposals += 1
 
-        return state, accepted
-    
-    
-
-def propose(self, model, state):
-    
-    self.setup(state.branches_coords)
-    
-    all_branch_names = list(state.branches.keys())
-    
-    ntemps, nwalkers, _, _ = state.branches[all_branch_names[0]].shape
-    
-    # setup supplemental information
-    if not np.all(
-        np.asarray(list(state.branches_supplemental.values())) == None
-    ):
-        new_branch_supps = deepcopy(state.branches_supplemental)
-    else:
-        new_branch_supps = None
-
-    if state.supplemental is not None:
-        new_supps = deepcopy(state.supplemental)
-    else:
-        new_supps = None
+        return new_state, accepted
         
-    self.current_model = model
-    self.current_state = state
-
-    num_resolved_sources = deepcopy(state.branches[self.branch_name_map["resolved"]].inds[:].sum(axis=-1))
-    old_coords_model = deepcopy(state.branches_coords["hyper"])    
-    coords_resolved = deepcopy(state.branches_coords[self.branch_name_map["resolved"]])
-    coords_stochastic = deepcopy(state.branches_coords[self.branch_name_map["stochastic"]])
-
-    # calculate prior contribution old state
-    logp_source_prev = self.compute_source_contribution(old_coords_model, coords_resolved, coords_stochastic) # self.prior at init
-    logp_number_prev = self.compute_number_contribution(old_coords_model, num_resolved_sources) # Ntot(M), catalog and psd set at init
-    
-    logp_prev = logp_source_prev + logp_number_prev
-
-    # get new model coords
-    new_coords_model, factors = self.get_proposal(
-        old_coords_model,
-        model.random,
-        supps=new_supps,
-        branch_supps=new_branch_supps,
-    )
-    
-    # calculate prior contribution new state
-    logp_source_curr = self.compute_source_contribution(new_coords_model, coords_resolved, coords_stochastic) # self.prior at init
-    logp_number_curr = self.compute_number_contribution(new_coords_model, num_resolved_sources) # Ntot(M), catalog and psd set at init
-    
-    logp_curr = logp_source_curr + logp_source_curr
-    
-    # acceptance fraction
-    delta_logp = factors + logp_curr - logp_prev
-    
-    accepted = delta_logp > np.log(model.random.rand(ntemps, nwalkers))
-    
-    new_coords = deepcopy(state.coords)
-    new_coords["hyper"] = new_coords_model
-    
-    # TODO check agains psdmove or gbmove
-    new_state = GFState( 
-        new_coords,
-        log_like=state.log_like,
-        log_prior=logp_curr, #? i think this only works if everything else is model independent
-        blobs=None,
-        inds=state.inds,
-        supplemental=new_supps,
-        branch_supplemental=new_branch_supps,
-    )
-
-    if self.temperature_control is not None and not self.prevent_swaps:
-        new_state = self.temperature_control.temper_comps(new_state, adapt=False)
-        
-    # add to move-specific accepted information
-    self.accepted += accepted
-    self.num_proposals += 1
-
-    return new_state, accepted
-            
-            
+   
