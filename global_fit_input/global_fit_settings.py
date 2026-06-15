@@ -331,6 +331,7 @@ def get_sobbh_response_wrapper(
     t_buffer: float = 3e4,
     orbits: Optional[Orbits] = None,
     force_backend: str = "cpu",
+    reference_time: Optional[float] = None,
 ):
     """Build (and cache) a :class:`ResponseWrapper` around :class:`SOBBHWaveform`.
 
@@ -339,7 +340,10 @@ def get_sobbh_response_wrapper(
     cache key so the injection path and the template path share the same
     instance.
     """
-    key = (Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits))
+    key = (
+        Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits),
+        reference_time,
+    )
     if key in _SOBBH_WAVE_GEN_CACHE:
         return _SOBBH_WAVE_GEN_CACHE[key]
 
@@ -347,6 +351,7 @@ def get_sobbh_response_wrapper(
         Tobs=Tobs,
         dt=dt,
         t0=t_start,
+        reference_time=reference_time,
         force_backend=force_backend,
     )
 

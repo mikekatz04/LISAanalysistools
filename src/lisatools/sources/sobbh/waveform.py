@@ -490,12 +490,23 @@ class SOBBHWaveform:
         Tobs: float,
         dt: float,
         t0: float = 0.0,
+        reference_time: Optional[float] = None,
         force_backend: str = "cpu",
         pad_zeros: bool = True,
     ):
         self.Tobs = Tobs
         self.dt = dt
         self.t0 = t0
+        # ``reference_time`` is the absolute epoch at which ``f_low`` is
+        # defined (the fixed catalogue reference, e.g. mojito's
+        # ``MOJITO_REFERENCE_TIME``). It is deliberately decoupled from the
+        # data-window start ``t0``: the data array begins at
+        # ``t0 = reference_time + trim_duration``, so at the first sample the
+        # binary has already evolved ``trim_duration`` past ``f_low``. The PN
+        # inspiral measures time from ``reference_time`` (see ``__call__``).
+        # Defaults to ``t0`` (f_low at the window start) for the synthetic
+        # path, which has no separate catalogue epoch.
+        self.reference_time = t0 if reference_time is None else reference_time
         self.force_backend = force_backend
         self.pad_zeros = pad_zeros
         N = int(round(Tobs / dt))
@@ -545,17 +556,20 @@ class SOBBHWaveform:
         kwargs.pop("T", None)
         kwargs.pop("dt", None)
         kwargs.pop("convert_to_ra_dec", None)
-        # ``self.t0`` is the fixed catalogue reference epoch (e.g. mojito's
-        # ``MOJITO_REFERENCE_TIME``) at which ``f_low`` is defined; it also
-        # marks the data-window start.  The PN inspiral measures time *from*
-        # that epoch, so the physics grid must be made relative to ``self.t0``.
-        # Otherwise a large absolute ``t0`` (mojito mode) pushes every sample
+        # The PN inspiral measures time from ``reference_time`` (the fixed
+        # catalogue epoch where ``f_low`` is defined), NOT from the data-window
+        # start ``t0``.  ``self._times`` is the absolute data grid
+        # (``arange(N)*dt + t0``); subtracting ``reference_time`` yields the PN
+        # time, which at the first sample equals ``t0 - reference_time ==
+        # trim_duration`` -- i.e. the binary has already evolved past ``f_low``
+        # by the time the window starts (mirrors the GB
+        # ``evolve_galactic_binary(t_ref -> t_ref + trim)`` convention).
+        # Without this, a large absolute grid (mojito mode) pushes every sample
         # past the merger cut ``times < tc`` -> all zeros for short-``tc``
-        # sources, or evaluates the wrong inspiral phase for long-``tc`` ones.
-        # Absolute placement on the data grid is handled downstream by
-        # ResponseWrapper via its own ``t0`` (synthetic mode has ``t0 == 0``,
-        # so this subtraction is a no-op there).
-        times = self._times - self.t0
+        # sources.  Synthetic mode has ``reference_time == t0``, so this reduces
+        # to a relative ``arange(N)*dt`` grid.  Absolute placement on the data
+        # grid is handled downstream by ResponseWrapper via its own ``t0``.
+        times = self._times - self.reference_time
         if t_shift != 0.0:
             times = times - float(t_shift)
 

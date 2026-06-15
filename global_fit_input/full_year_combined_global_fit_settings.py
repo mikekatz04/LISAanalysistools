@@ -1297,6 +1297,16 @@ def _get_sobbh_wave_wrap(general_info, nchannels: int = NCHANNELS):
         tdi_config=tdi_config, tdi_chan=TDI_CHAN,
         role="template", force_backend=force_backend,
         orbits=general_info.orbits,
+        # f_low is defined at the fixed catalogue epoch, NOT the (trimmed)
+        # data-window start ``data_t0``. Pass the epoch explicitly in mojito
+        # mode so the PN inspiral evolves ``f_low`` forward by
+        # ``data_t0 - MOJITO_REFERENCE_TIME`` (== trim_duration) to the window
+        # start (mirrors the GB ``evolve_galactic_binary`` convention). In
+        # synthetic mode there is no separate epoch, so leave it ``None`` ->
+        # f_low at the window start.
+        reference_time=(
+            MOJITO_REFERENCE_TIME if DATA_PROCESSOR == "mojito" else None
+        ),
     )
     # Engine-provided TD settings (carries the loader's data_t0 anchor).
     wrap = SOBBHWaveWrap(
