@@ -699,16 +699,16 @@ def make_emri_transform_container(fill_values):
         "p0",
         "e0",
         "dist",
-        "qS",
+        "cosqS",
         "phiS",
-        "qK",
+        "cosqK",
         "phiK",
         "Phi_phi0",
         "Phi_r0",
     ]
 
     output_basis = [
-        "logm1",
+        "m1",
         "m2",
         "a",
         "p0",
@@ -742,6 +742,11 @@ def make_emri_transform_container(fill_values):
         output_basis[7]: np.cos,  # qS
         output_basis[9]: np.cos,  # qK
     }
+    key_map = {
+        "logm1": "m1",
+        "cosqK": "qK",
+        "cosqS": "qS",
+    }
 
     return TransformContainer(
         input_basis=input_basis,
@@ -749,6 +754,7 @@ def make_emri_transform_container(fill_values):
         parameter_transforms=emri_transform_fn_in,
         fill_dict=emri_fill_dict,
         inverse_parameter_transforms=emri_inverse_transform_fn_in,
+        key_map=key_map
     )
 
 

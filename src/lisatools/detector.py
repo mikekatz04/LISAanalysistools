@@ -95,7 +95,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         armlength: Optional[float] = 2.5e9,
         force_backend: Optional[str] = None,
         t0: Optional[float] = 0.0,
-        frame: str = "ecliptic",
+        frame: str = "icrs",
         **kwargs,
     ) -> None:
 
@@ -790,7 +790,7 @@ class L1Orbits(Orbits):
         filename: str,
         armlength: float = 2.5e9,
         force_backend: Optional[str] = None,
-        frame: str = "ecliptic",
+        frame: str = "icrs",
         **kwargs,
     ):
         # frame is validated and stored by the Orbits base class (before
@@ -1387,7 +1387,7 @@ if jax_here:
                 "filename": self.filename,
                 "armlength": self._armlength,
                 "configured": self.configured,
-                "frame": getattr(self, "_frame", "ecliptic"),
+                "frame": getattr(self, "_frame", "icrs"),
                 "ltt_dt": self.ltt_dt,
                 "sc_dt": self.sc_dt,
                 "ltt_t0": self.ltt_t0,
@@ -1410,7 +1410,7 @@ if jax_here:
             obj.filename = aux_data["filename"]
             obj._armlength = aux_data["armlength"]
             obj.configured = aux_data["configured"]
-            obj._frame = aux_data.get("frame", "ecliptic")
+            obj._frame = aux_data.get("frame", "icrs")
             obj.ltt_dt = aux_data["ltt_dt"]
             obj.sc_dt = aux_data["sc_dt"]
             obj.ltt_t0 = aux_data["ltt_t0"]

@@ -134,6 +134,7 @@ from lisatools.globalfit.stock.erebor import (
     SOBBHSettings,
     SOBBHSetup,
     make_mbh_transform_container,
+    make_emri_transform_container,
 )
 from lisatools.sensitivity import (
     CompositeSensitivityMatrix,
@@ -208,8 +209,8 @@ MOJITO_DATA_PATH = os.environ.get(
 # capped at len(<list>) leaves per branch.
 MOJITO_SOURCE_IDS = {
     "MBHB": [], # range(2)
-    "EMRI": [],  # 0, 1, 2], # range(2)
-    "SOBHB": [0],  # [0, 1, 2], # range(2)
+    "EMRI": [1],  # 0, 1, 2], # range(2)
+    "SOBHB": [],  # [0, 1, 2], # range(2)
 }
 
 
@@ -966,10 +967,10 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
                 _emri_cat[i]["SecondaryMassSSBFrame"],      # mu
                 _emri_cat[i]["PrimarySpinParameter"],                # a
                 _emri_cat[i]["SemiLatusRectum"],     # p0
-                _emri_cat[i]["AzimuthalPhase"],        # e0
-                _emri_cat[i]["InclinationAngle"],   # xI0
+                _emri_cat[i]["Eccentricity"],        # e0
+                np.cos(_emri_cat[i]["InclinationAngle"]),   # xI0
                 _emri_cat[i]["LuminosityDistance"] / 1e3,   # dist (Mpc -> Gpc)
-                np.pi / 2 - _emri_cat[i]["Declination"],    # qS (ICRS polar)
+                _emri_cat[i]["Declination"],    # qS (ICRS polar)
                 _emri_cat[i]["RightAscension"] % (2 * np.pi),  # phiS (ICRS azimuth)
                 _emri_cat[i]["PolarAnglePrimarySpin"],           # qK (ICRS polar)
                 _emri_cat[i]["AzimuthalAnglePrimarySpin"],       # phiK (ICRS azimuth)
@@ -982,10 +983,8 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
     else:
         emri_injections_full_basis = EMRI_INJECTIONS_FULL_BASIS
 
-    injection_sampling_per_leaf = np.stack(
-        [emri_full_to_sampling(row) for row in emri_injections_full_basis],
-        axis=0,
-    )
+    tc = make_emri_transform_container([emri_injections_full_basis[0, 5], emri_injections_full_basis[0, -2]])
+    injection_sampling_per_leaf = tc.both_inverse_transforms(emri_injections_full_basis)
 
     # Full-range priors: passing None for every *_lims keeps the wide
     # defaults built inside EMRISetup.setup_priors (dist in Gpc).

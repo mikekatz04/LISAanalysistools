@@ -232,7 +232,6 @@ def get_emri_response_wrapper(
         "tdi_chan": tdi_chan,
         "order": order,
         "remove_garbage": "zero",
-        "is_ecliptic_latitude": False,
         "t_buffer": t_buffer,
     }
 

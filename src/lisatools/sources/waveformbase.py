@@ -12,6 +12,7 @@ This module defines the base wrappers for waveform generation, including the app
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import inspect
 import logging
 from typing import TYPE_CHECKING, Tuple
 
