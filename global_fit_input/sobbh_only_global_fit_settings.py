@@ -149,14 +149,23 @@ def get_sobbh_response_wrapper(
     order: int = 40,
     t_buffer: float = 3e4,
     force_backend: str = "cpu",
+    reference_time: Optional[float] = None,
 ):
     """Build (and cache) a :class:`ResponseWrapper` around :class:`SOBBHWaveform`.
 
-    One generator is built per ``(Tobs, dt, t_start, tdi_chan, order, force_backend)``
+    One generator is built per
+    ``(Tobs, dt, t_start, tdi_chan, order, force_backend, reference_time)``
     cache key — injection + template paths share the same instance, mirroring
     the EMRI smoke setup.
+
+    ``reference_time`` is the absolute epoch at which ``f_low`` is defined; it
+    is decoupled from the data-window start ``t_start`` (the PN inspiral
+    measures time from it). This run is synthetic-only (``t_start == 0``) so it
+    is left ``None`` -> f_low at the window start; the kwarg exists so this
+    duplicate stays signature-consistent with the canonical
+    ``global_fit_settings.get_sobbh_response_wrapper``.
     """
-    key = (Tobs, dt, t_start, tdi_chan, order, force_backend)
+    key = (Tobs, dt, t_start, tdi_chan, order, force_backend, reference_time)
     if key in _WAVE_GEN_CACHE:
         return _WAVE_GEN_CACHE[key]
 
@@ -164,6 +173,7 @@ def get_sobbh_response_wrapper(
         Tobs=Tobs,
         dt=dt,
         t0=t_start,
+        reference_time=reference_time,
         force_backend=force_backend,
     )
 

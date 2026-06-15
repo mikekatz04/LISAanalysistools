@@ -427,6 +427,12 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
             tdi_chan=tdi_chan,
             role="injection",
             force_backend=force_backend,
+            # ``reference_time`` is the absolute epoch where ``f_low`` is
+            # defined (decoupled from the data-window start). This is a
+            # synthetic (Sangria) run with no separate catalogue epoch, so
+            # ``None`` -> f_low at the window start. (mojito runs pass
+            # MOJITO_REFERENCE_TIME here; see full_year_combined.)
+            reference_time=None,
         )
         sobbh_td = np.zeros_like(sangria_data)
         for i, params in enumerate(sobbh_injections):
