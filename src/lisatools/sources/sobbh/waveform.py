@@ -400,7 +400,7 @@ def tau_to_x(tau, sigma, delta, eta, s):
 
 
 def waveform_generate_h_plus_cross(
-    m1, m2, D, inc, f_low, s1, s2, times, coallesence_phase=0.0
+    m1, m2, D, inc, f_low, s1, s2, times, reference_phase=0.0
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate ``(hp, hx)`` for an aligned-spin SOBBH PN inspiral.
 
@@ -413,7 +413,10 @@ def waveform_generate_h_plus_cross(
         s1: dimensionless aligned spin of primary.
         s2: dimensionless aligned spin of secondary.
         times: time grid (seconds) on which to evaluate.
-        coallesence_phase: coalescence-phase offset (rad).
+        reference_phase: orbital phase at the REFERENCE time (i.e. at
+            ``f_low`` / ``x0``), in rad. This is the catalogue convention
+            (``TrueAnomaly`` is the phase at the reference epoch), so the
+            inspiral is anchored there rather than at coalescence.
 
     Returns:
         ``(hp, hx, t_subset)`` with ``hp``/``hx`` of length ``len(t_subset)``,
@@ -438,9 +441,33 @@ def waveform_generate_h_plus_cross(
     tau = eta * (tc - t_subset) / (5 * M)
 
     x = tau_to_x(tau, sigma, delta, eta, s)
-    Phi = coallesence_phase - phase(x, sigma, delta, eta, s)
+    # Anchor the orbital phase at the REFERENCE epoch (t == reference_time,
+    # i.e. tau == tau_ref), NOT at coalescence. `phase(x)` is referenced to
+    # merger (phase=0 at x_merger), so `- phase(x) + phase(x_ref)` makes
+    # `Phi(reference) == reference_phase` exactly. The catalogue TrueAnomaly
+    # is the orbital phase at the reference epoch.
+    #
+    # We anchor on `phase(tau_to_x(tau_ref))` -- the x the inspiral ACTUALLY
+    # has at the reference epoch in its own tau-parametrization -- rather than
+    # `phase(x0)` with x0=(pi M f_low)^(2/3). `tau_to_x` (x(tau) series) and
+    # `time_to_merger` (t(x) series, used for tc) are independent 3.5PN
+    # inversions and are not exact numerical inverses, so tau_to_x(tau_ref)
+    # differs from x0 by ~1e-9; phase(x) is steep (~1e6 rad) so that becomes a
+    # few-degree offset. Using the self-consistent value zeroes that residual.
+    tau_ref = eta * tc / (5 * M)  # tau at the reference epoch (t_subset == 0)
+    x_ref = tau_to_x(tau_ref, sigma, delta, eta, s)
+    Phi = (
+        reference_phase
+        - phase(x, sigma, delta, eta, s)
+        + phase(x_ref, sigma, delta, eta, s)
+    )
 
-    A = -(2 * M * eta * x) / D
+    # Strain amplitude. NOTE (2026-06-15): the leading sign was -, which made
+    # the SOBBH single-link response come out as -(mojito eta_ij) on every link
+    # (verified pre-TDI vs the mojito L1 eta_ij; the shared pyResponseTDI is
+    # correct -- the EMRI per-link is not a global -1). Flipped to + to match
+    # the LDC / lisagwresponse strain-sign convention mojito uses.
+    A = (2 * M * eta * x) / D
     C = jnp.cos(inc)
     A_plus = A * (1 + C**2)
     A_cross = A * 2 * C
@@ -478,7 +505,8 @@ class SOBBHWaveform:
       7  lam  (ecliptic longitude, rad)
       8  beta (ecliptic latitude, rad)
       9  psi  (polarization, rad)
-      10 phi0 (coalescence-phase offset, rad)
+      10 phi0 (orbital phase at the REFERENCE epoch / f_low, rad --
+            i.e. the catalogue ``TrueAnomaly``, NOT the coalescence phase)
       11 t_shift (seconds)       -- time offset, default 0
 
     The wrapper applies polarization rotation; ``ResponseWrapper`` handles
@@ -582,7 +610,7 @@ class SOBBHWaveform:
             float(s1),
             float(s2),
             times,
-            coallesence_phase=float(phi0),
+            reference_phase=float(phi0),
         )
 
         n_active = hp_short.shape[0]
