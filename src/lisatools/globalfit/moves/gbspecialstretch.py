@@ -3361,7 +3361,7 @@ class PriorTransformFn:
             fdot_max,
         )
 
-    def adjust_logp(self, logp, groups_running):
+    def adjust_logp(self, logp, groups_running, **kwargs):
 
         xp = get_array_module(self.f_min)
 

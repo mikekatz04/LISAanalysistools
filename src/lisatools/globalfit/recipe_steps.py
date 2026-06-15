@@ -357,7 +357,7 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot, phase_sign=-1)
     
     f0_mHz = f_init * 1e3
-    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))# % (np.pi)
+    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))
 
     ra = np.array(catalogue_entry["RightAscension"]) # alpha
     dec = np.array(catalogue_entry["Declination"]) # delta
@@ -716,7 +716,7 @@ def build_gb_moves(
 
         N_vals = band_N_vals[band_inds]
 
-        logger.info("Removing GBs from residuals")
+        logger.info(f"Removing {state.branches["gb"].inds[0].sum()} GBs from residuals, for {nwalkers=}")
         template_in = deepcopy(acs.linear_data_arr)
         # acs lays walkers out in contiguous blocks of ``len(gpu_splits[0])`` per
         # GPU, so ``walker % num_per_gpu_walker`` recovers the intra-split residual
@@ -738,10 +738,12 @@ def build_gb_moves(
             **gb_info.waveform_kwargs,
         )
         max_diff_templates = cp.abs(template_in[0]-acs.linear_data_arr[0]).max()
+        logger.debug(f"Max absolute value in template before subtraction: {cp.abs(template_in[0]).max():5e}")
+        logger.debug(f"Max absolute value in template after subtraction: {cp.abs(acs.linear_data_arr[0]).max():5e}")       
+        acs[0].data_res_arr.data_res_arr.plot(channel=0, filename=curr.general_info.artifacts_file_dir + "data_post_subtraction.png")
         del template_in
         logger.debug(f"The difference in residuals in/out = {max_diff_templates:5e}")
 
-    acs[0].data_res_arr.data_res_arr.plot(channel=0, filename=curr.general_info.artifacts_file_dir + "data_post_subtraction.png")
 
     #* Check if we need to adjust the band temps, and adjust if required
     adjust_temps = False
