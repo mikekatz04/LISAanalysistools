@@ -731,6 +731,13 @@ def _build_synthetic_source_streams(
             Tobs=Tobs, dt=dt, t_start=t_start,
             tdi_config=tdi_config, tdi_chan=TDI_CHAN,
             role="injection", force_backend=force_backend,
+            # Same f_low-epoch convention as the template path: in mojito mode
+            # f_low is defined at the fixed catalogue epoch (decoupled from the
+            # data-window start); synthetic mode (this builder's only caller)
+            # has no separate epoch, so ``None`` -> f_low at the window start.
+            reference_time=(
+                MOJITO_REFERENCE_TIME if DATA_PROCESSOR == "mojito" else None
+            ),
         )
         for ii, params in enumerate(sobbh_injections):
             print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
