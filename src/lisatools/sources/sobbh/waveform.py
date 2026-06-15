@@ -545,10 +545,19 @@ class SOBBHWaveform:
         kwargs.pop("T", None)
         kwargs.pop("dt", None)
         kwargs.pop("convert_to_ra_dec", None)
+        # ``self.t0`` is the fixed catalogue reference epoch (e.g. mojito's
+        # ``MOJITO_REFERENCE_TIME``) at which ``f_low`` is defined; it also
+        # marks the data-window start.  The PN inspiral measures time *from*
+        # that epoch, so the physics grid must be made relative to ``self.t0``.
+        # Otherwise a large absolute ``t0`` (mojito mode) pushes every sample
+        # past the merger cut ``times < tc`` -> all zeros for short-``tc``
+        # sources, or evaluates the wrong inspiral phase for long-``tc`` ones.
+        # Absolute placement on the data grid is handled downstream by
+        # ResponseWrapper via its own ``t0`` (synthetic mode has ``t0 == 0``,
+        # so this subtraction is a no-op there).
+        times = self._times - self.t0
         if t_shift != 0.0:
-            times = self._times - float(t_shift)
-        else:
-            times = self._times
+            times = times - float(t_shift)
 
         hp_short, hx_short, _t_subset = waveform_generate_h_plus_cross(
             float(m1),
