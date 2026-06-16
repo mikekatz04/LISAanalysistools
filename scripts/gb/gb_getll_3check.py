@@ -51,6 +51,7 @@ BAND_LAYERS = int(os.environ.get("GB_BAND_LAYERS", "15"))  # +/- layers around f
 EDGE = int(os.environ.get("GB_EDGE", "20"))
 NT_SUB = int(os.environ.get("NT_SUB", "256")); N_SPARSE = int(os.environ.get("N_SPARSE", "256"))
 TUKEY_ALPHA = float(os.environ.get("GB_TUKEY_ALPHA", "0.05"))  # 0.01-0.05, GB chunked/sig-het regime
+SKIP_SIGHET = os.environ.get("SKIP_SIGHET", "0") == "1"  # skip check (4) for fast chunked-param sweeps
 DATA_CACHE = f"/tmp/gb_mojito_data_{int(N_DAYS)}d.npz"
 
 
@@ -138,6 +139,9 @@ def main():
         chunk_wdm = wrap(*p9)
         ll2 = float(np.real(analysis.template_likelihood(chunk_wdm)))
         mm_chunk = float(1 - abs(analysis.template_inner_product(chunk_wdm, normalize=True)))
+        if rank == 0:
+            print(f"  [chunk geom] Nt_sub={comp.Nt_sub} N_sparse={comp.N_sparse} "
+                  f"n_pad={comp.n_pad} n_chunks={comp.n_chunks} T_chunk={comp.T_chunk:.3e}s", flush=True)
 
         # (3) chunked DIRECT get_ll (exact existing call) - 0.5*d_d
         invC = np.asarray(sens.invC); invC = np.where(np.isfinite(invC), invC, 0.0)
@@ -147,11 +151,14 @@ def main():
 
         # (4) signal-het DIRECT get_ll (GBSignalHetComputations.__init__ builds the
         #     heterodyne coeffs under the hood; same Tukey on data + FD sparse window)
-        sighet = GBSignalHetComputations(D, p9, Nf=NF, Nt=NT, dt=DT, t0=data_t0, t_ref=REF,
-                                         orbits=orb, tdi_config="2nd generation",
-                                         min_freq=lof, max_freq=hif, tukey_alpha=TUKEY_ALPHA,
-                                         force_backend=BACKEND)
-        ll4 = float(np.asarray(sighet.get_ll(p9))[0])
+        if SKIP_SIGHET:
+            ll4 = float("nan"); sighet = None
+        else:
+            sighet = GBSignalHetComputations(D, p9, Nf=NF, Nt=NT, dt=DT, t0=data_t0, t_ref=REF,
+                                             orbits=orb, tdi_config="2nd generation",
+                                             min_freq=lof, max_freq=hif, tukey_alpha=TUKEY_ALPHA,
+                                             force_backend=BACKEND)
+            ll4 = float(np.asarray(sighet.get_ll(p9))[0])
 
         print(f"  {rank:>2} {f0*1e3:>9.4f} {snr:>7.1f} | {ll1:>12.4e} {ll2:>12.4e} {ll3:>12.4e} {ll4:>12.4e} "
               f"| {ll3-ll1:>+10.3e} {ll4-ll1:>+10.3e} {mm_chunk:>10.3e}", flush=True)
