@@ -1,0 +1,161 @@
+"""GBSignalHetComputations -- V2 polyphase signal-heterodyne GB likelihood,
+with ALL heterodyne-coefficient setup done inside ``__init__`` (mirroring the
+BBHx HeterodynedLikelihood pattern: data + reference go in, the heterodyne
+coefficients are precomputed under the hood, then ``get_ll(params)`` is a clean
+call into the existing ``gb_signal_het_get_ll_in_kernel`` kernel).
+
+Refactored from the verified ``compare_signalhet_vs_chunked_mcmc.py:build_pack``
+signal-het path -- no new likelihood logic, the kernel call is reused verbatim.
+Lives here next to its v2 helpers (``GBSparseComplexWDMGen``, ``python_bin_fold``);
+promotion to ``gbgpu/gbsignalhetcomputations.py`` is the dedicated V2-port step.
+"""
+from __future__ import annotations
+
+import importlib
+import numpy as np
+from scipy.signal.windows import tukey as _tukey
+
+from lisatools.domains import TDSettings, TDSignal, WDMSettings
+from lisatools.analysiscontainer import AnalysisContainer
+from lisatools.sensitivity import XYZ2SensitivityMatrix
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
+
+from gb_signal_het_wdm_v2 import GBSparseComplexWDMGen
+from gb_signal_het_cpp_validate import python_bin_fold
+
+
+def _resolve_backend(name):
+    name = {"gpu": "cuda12x", "cuda": "cuda12x"}.get(name.lower().strip(), name.lower().strip())
+    if name == "cpu":
+        return "cpu", "gbgpu_backend_cpu", False
+    if name in ("cuda11x", "cuda12x", "cuda13x"):
+        return name, f"gbgpu_backend_{name}", True
+    raise ValueError(f"Unknown backend {name!r}.")
+
+
+class GBSignalHetComputations:
+    """Signal-het GB likelihood. ``__init__`` precomputes the heterodyne
+    reference ``c0`` and bin-fold coefficients (A0/A1/B0/B1) from the data +
+    reference params; ``get_ll(params)`` evaluates logL for candidate params.
+
+    Args:
+        data_td (np.ndarray): ``(3, Nf*Nt)`` time-domain TDI data (the band is
+            selected by ``min_freq``/``max_freq`` in the WDM transform).
+        ref_params (np.ndarray): length-9 heterodyne reference
+            ``(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta)`` -- the carrier
+            the polyphase heterodyne is taken about (e.g. the catalogue params).
+        Nf, Nt, dt, t0 (int/float): WDM grid + data sampling.
+        t_ref (float): GB phase reference epoch.
+        orbits, tdi_config: response orbits (e.g. ``L1Orbits``) + TDI config.
+        min_freq, max_freq (float): active WDM band [Hz].
+        sens_model, edge_cut, nt_layer, n_sparse_fd, m_active_half_width,
+        max_r, tukey_alpha, force_backend: as in ``build_pack`` (defaults match).
+    """
+
+    def __init__(self, data_td, ref_params, *, Nf, Nt, dt, t0, t_ref,
+                 orbits, tdi_config, min_freq, max_freq, sens_model="scirdv1",
+                 edge_cut=20, nt_layer=64, n_sparse_fd=1024, m_active_half_width=2,
+                 max_r=5.0, tukey_alpha=0.05, force_backend="cpu"):
+        # tukey_alpha in [0.01, 0.05]: the SAME Tukey taper is applied to the
+        # data WDM window (below) AND to the FD-heterodyne sparse window via the
+        # kernel's TUKEY_ALPHA arg (in get_ll) -- they must mirror, per the GB
+        # chunked/sig-het notes (a mismatch shifts <d|h>/<h|h> by ~logL units).
+        _, module_name, is_gpu = _resolve_backend(force_backend)
+        _be = importlib.import_module(f"{module_name}.cgbgpu")
+        self.cpp = _be.GBComputationGroupWrapGPU() if is_gpu else _be.GBComputationGroupWrapCPU()
+
+        Nobs = Nf * Nt
+        Tobs = Nt * Nf * dt
+        t_arr = np.arange(Nobs) * dt + t0
+        if isinstance(tdi_config, str):
+            tdi_config = TDIConfig(tdi_config, force_backend=force_backend)
+        td_set = TDSettings(Nobs, dt, t0=t0, force_backend=force_backend)
+        window = (_tukey(Nobs, alpha=tukey_alpha).astype(float) if tukey_alpha > 0
+                  else np.ones(Nobs))
+
+        wdm_kw = dict(t0=t0, min_freq=min_freq, max_freq=max_freq,
+                      min_time=edge_cut * Nf * dt, max_time=(Nt - edge_cut) * Nf * dt,
+                      force_backend=force_backend)
+        wdm_set_real = WDMSettings(Nf, Nt, dt, is_complex=False, **wdm_kw)
+        wdm_set_complex = WDMSettings(Nf, Nt, dt, is_complex=True, **wdm_kw)
+
+        # dense TD generator (its GPU-side wrap drives the per-call template build)
+        t_tdi = np.linspace(t_arr[0], t_arr[-1], 16384)
+        gb_gen = GBTDIonTheFly(t_tdi, Tobs, t_ref, 1.0 / dt, 1,
+                               tdi_config=tdi_config, orbits=orbits, tdi_chan="XYZ",
+                               force_backend=force_backend)
+        self.tdi_wrap = gb_gen.wave_gen
+
+        def real_td_cb(p):
+            amp, f0, fdot, fddot, phi0, inc, psi, lam, beta = p
+            sp = gb_gen(np.array([amp]), np.array([f0]), np.array([fdot]),
+                        np.array([fddot]), np.array([phi0]), np.array([inc]),
+                        np.array([psi]), np.array([lam]), np.array([beta]),
+                        convert_to_ra_dec=False, return_spline=True)
+            return np.asarray(sp.eval_tdi(t_arr))[0]
+
+        # --- data on the WDM band (real + complex), + d_d --------------------
+        data_real = TDSignal(data_td, settings=td_set).transform(wdm_set_real, window=window)
+        data_complex = np.asarray(
+            TDSignal(data_td, settings=td_set).transform(wdm_set_complex, window=window).arr)
+        sens_real = XYZ2SensitivityMatrix(wdm_set_real, model=sens_model)
+        self.analysis = AnalysisContainer(data_real, sens_real)
+        self.d_d = float(np.real(self.analysis.inner_product()))
+
+        # --- heterodyne reference c0 at ref_params ---------------------------
+        ref_params = np.asarray(ref_params, dtype=float).reshape(9)
+        td_ref = real_td_cb(ref_params)
+        c0_dense = np.asarray(
+            TDSignal(td_ref, settings=td_set).transform(wdm_set_complex, window=window).arr)
+
+        # --- sparse grid + bin-fold COEFFICIENTS (built here, under the hood) -
+        ind_min_t = int(wdm_set_real.ind_min_t); ind_min_f = int(wdm_set_real.ind_min_f)
+        Nt_active = int(wdm_set_real.Nt_active)
+        Nf_active = int(wdm_set_real.ind_max_f - wdm_set_real.ind_min_f + 1)
+        sparse_gen = GBSparseComplexWDMGen(
+            real_td_callable=real_td_cb, wdm_set_complex=wdm_set_complex,
+            data_dt=dt, ind_min_t=ind_min_t, Nt_active=Nt_active,
+            Nt_layer=nt_layer, m_active_half_width=m_active_half_width)
+        stride = sparse_gen.stride; N_sparse_t = sparse_gen.N_sparse_t
+        n_sparse_local = np.asarray(sparse_gen.n_sparse_local, dtype=np.int32)
+        window_full = sparse_gen.window_full.astype(np.float64)
+        c0_sparse = c0_dense[:, :, n_sparse_local]
+        invC_complex = np.asarray(XYZ2SensitivityMatrix(wdm_set_complex, model=sens_model).invC)
+        A0, A1, B0, B1 = python_bin_fold(
+            data_complex, c0_dense, invC_complex, n_sparse_local, stride, Nt_active, tdi_type="XYZ")
+
+        # --- owned backend buffers + scalars for get_ll ----------------------
+        self.c0_sparse_all = c0_sparse[None, ...].copy()
+        self.A0_all = A0[None].copy(); self.A1_all = A1[None].copy()
+        self.B0_all = B0[None].copy(); self.B1_all = B1[None].copy()
+        self.window_full = window_full; self.n_sparse_local = n_sparse_local
+        self.params_ref_all = ref_params.reshape(1, 9).copy()
+        self._g = dict(Nf=Nf, Nt=Nt, Nf_active=Nf_active, Nt_active=Nt_active,
+                       nt_layer=nt_layer, N_sparse_t=N_sparse_t, stride=stride,
+                       ind_min_t=ind_min_t, ind_min_f=ind_min_f, layer_df=wdm_set_real.layer_df,
+                       dt=dt, Tobs=Tobs, t0=t0, n_sparse_fd=n_sparse_fd,
+                       tukey_alpha=tukey_alpha, max_r=max_r)
+
+    def get_ll(self, params):
+        """logL for candidate ``params`` (length-9 vector or ``(N,9)``)."""
+        x = np.asarray(params, dtype=float)
+        x = x[None, :] if x.ndim == 1 else x
+        N = x.shape[0]
+        d_h = np.zeros(N, dtype=np.float64); h_h = np.zeros(N, dtype=np.float64)
+        g = self._g
+        self.cpp.gb_signal_het_get_ll_in_kernel(
+            self.tdi_wrap, d_h, h_h, self.c0_sparse_all,
+            self.A0_all, self.A1_all, self.B0_all, self.B1_all,
+            self.window_full, self.n_sparse_local,
+            np.ascontiguousarray(x), self.params_ref_all,
+            np.zeros(N, dtype=np.int32),
+            N, 1, 9, 1, 2,
+            g["Nf"], g["Nt"], g["Nf_active"], g["Nt_active"],
+            g["nt_layer"], g["N_sparse_t"], g["stride"],
+            g["ind_min_t"], g["ind_min_f"], 2,
+            g["layer_df"], g["dt"], g["Tobs"], g["t0"],
+            3, 0, g["n_sparse_fd"],
+            g["tukey_alpha"], g["max_r"],
+        )
+        return -0.5 * self.d_d + np.asarray(d_h) - 0.5 * np.asarray(h_h)
