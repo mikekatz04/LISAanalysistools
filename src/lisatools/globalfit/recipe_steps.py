@@ -452,8 +452,18 @@ def subtract_initial_signal(
                 #     # acs.xp.get_default_memory_pool().free_all_blocks()
                 #     cp.cuda.runtime.setDevice(main_device)  # Switch back to main device after subtraction
                 #     logger.debug(f"Switched back to main CUDA device {main_device} after subtraction.")
-                    
+        # log memory usage after subtraction
+        if acs.gpus is not None:
+            mempool = acs.xp.get_default_memory_pool()
+            used_mem = mempool.used_bytes() / 1e9
+        del signals_in
+        if acs.gpus is not None:          
+            mempool.free_all_blocks()  # Free GPU memory used for signals
+            freed_mem = used_mem - mempool.used_bytes() / 1e9
+            logger.debug(f"GPU memory freed after subtraction: {freed_mem:.2f} GB")
+
         logger.debug(f"Subtracted {counter} initial signals for {source_name}")
+
     else:
         logger.info(f"No initial signals for {source_name}")
 
@@ -801,7 +811,8 @@ def build_gb_moves(
         temperature_control=temperature_control,
         use_gpu=True, 
         num_repeat_proposals=gb_info.num_repeat_proposals,
-        search_kwargs=gb_info.search_kwargs
+        search_kwargs=gb_info.search_kwargs,
+        num_band_preload=10000
     )
 
     #* ============================================= SEARCH MOVES =============================================
