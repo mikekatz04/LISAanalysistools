@@ -173,7 +173,8 @@ def get_orbits(t_start):
     linear_interp_setup transient is ~3.2 GB and was the OOM cause."""
     if _ORBITS[0] is None:
         print("[orbits] building L1Orbits over window...", flush=True)
-        orb = L1Orbits(find_file(EMRI_L1, "EMRI", 1), force_backend=BACKEND, frame="icrs")
+        _frame = "ecliptic" if os.environ.get("EMRI_ALL_ECL") else "icrs"
+        orb = L1Orbits(find_file(EMRI_L1, "EMRI", 1), force_backend=BACKEND, frame=_frame)
         pad = 1.0e5   # covers t_buffer (3e4) + light-travel delays
         lo = max(t_start - pad, float(orb.sc_t0))
         hi = min(t_start + TOBS + pad, float(orb._sc_t_base[-1]))
@@ -224,7 +225,17 @@ def build_template(cat, t_start, *, qS_mode, flip_hx, nchan=3):
     dec = cat["Declination"]; ra = cat["RightAscension"] % (2 * np.pi)
     qS = (np.pi / 2 - dec) if qS_mode == "colat" else dec
     qK = cat["PolarAnglePrimarySpin"]; phiK = cat["AzimuthalAnglePrimarySpin"]
-    params = [M, mu, a, p0, e0, xI0, dist, qS, ra, qK, phiK,
+    phiS = ra
+    # ALL-ECLIPTIC (the validated frame fix): FEW assumes ecliptic, so convert
+    # the catalogue ICRS sky AND spin -> ecliptic; the response then reads the
+    # ecliptic sky from params and get_orbits() loads the ecliptic orbit. NO
+    # frame mixing (unlike EMRI_ECL_SKY which kept ICRS response/orbit).
+    if os.environ.get("EMRI_ALL_ECL"):
+        lam_ecl, beta_ecl = icrs_to_ecliptic(float(ra), float(dec))
+        qS = np.pi / 2.0 - float(beta_ecl); phiS = float(lam_ecl) % (2 * np.pi)
+        lamK, betaK = icrs_to_ecliptic(float(phiK) % (2 * np.pi), np.pi / 2.0 - float(qK))
+        qK = np.pi / 2.0 - float(betaK); phiK = float(lamK) % (2 * np.pi)
+    params = [M, mu, a, p0, e0, xI0, dist, qS, phiS, qK, phiK,
               cat["AzimuthalPhase"], cat["PolarPhase"], cat["RadialPhase"]]
 
     _LBL = ["M", "mu", "a", "p0", "e0", "xI0", "dist(Gpc)", "qS", "phiS",
@@ -238,7 +249,10 @@ def build_template(cat, t_start, *, qS_mode, flip_hx, nchan=3):
     # (qS=pi/2-Dec, phiS=RA) the response uses. Set EMRI_ECL_SKY=1 to instead
     # feed FEW the ecliptic-polar sky (intrinsic-frame) while the response
     # keeps ICRS.
-    if os.environ.get("EMRI_ECL_SKY"):
+    if os.environ.get("EMRI_ALL_ECL"):
+        print(f"    [sky] ALL-ECLIPTIC: FEW+response+orbit ecliptic; qS={qS:.4f} "
+              f"phiS={phiS:.4f} qK={qK:.4f} phiK={phiK:.4f}", flush=True)
+    elif os.environ.get("EMRI_ECL_SKY"):
         lam_ecl, beta_ecl = icrs_to_ecliptic(float(ra), float(dec))
         qS_ecl = np.pi / 2.0 - float(beta_ecl)
         phiS_ecl = float(lam_ecl) % (2 * np.pi)
@@ -275,6 +289,14 @@ def build_template(cat, t_start, *, qS_mode, flip_hx, nchan=3):
     if arr.shape[-1] < n_off + N_WIN:
         arr = np.pad(arr, ((0, 0), (0, n_off + N_WIN - arr.shape[-1])))
     arr = arr[:, n_off:n_off + N_WIN]
+    # n_off is rounded, so the sliced grid (REF + n_off*DT) lands `resid` seconds
+    # off the true data start; correct that sub-sample offset with an FD phase
+    # ramp so the broadband EMRI harmonics align exactly (resid up to DT/2 ~ 10s).
+    resid = (t_start - MOJITO_REFERENCE_TIME) - n_off * DT
+    if abs(resid) > 1e-9:
+        f = np.fft.rfftfreq(N_WIN, d=DT)
+        A = np.fft.rfft(arr, axis=-1) * np.exp(2j * np.pi * f * resid)[None, :]
+        arr = np.fft.irfft(A, n=N_WIN, axis=-1)
     return arr
 
 

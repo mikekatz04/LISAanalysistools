@@ -77,29 +77,42 @@ def main():
     lam = ra; beta = dec   # response uses ICRS (u,v) from (ra, dec)
     n = N_WIN; win = tukey(n, 0.1)
 
-    for sky in ["icrs", "ecliptic"]:
-        if sky == "icrs":
-            qS, phiS = np.pi / 2 - dec, ra
+    def rms(a):
+        return float(np.sqrt(np.mean(a ** 2)))
+
+    def dir_icrs_to_ecl(theta, phi):  # convert a direction (polar theta, az phi) ICRS->ecl
+        lam_, beta_ = icrs_to_ecliptic(float(phi) % (2 * np.pi), float(np.pi / 2 - theta))
+        return float(np.pi / 2 - beta_), float(lam_) % (2 * np.pi)
+
+    eta_rms = [rms(eta[ETA_IJ[i]][:n] * win) for i in range(6)]
+    for config in ["icrs", "ecl_all"]:
+        if config == "icrs":
+            qS, phiS, qK, phiK = np.pi / 2 - dec, ra % (2 * np.pi), base[9], base[10]
         else:
             lam_e, beta_e = icrs_to_ecliptic(float(ra), float(dec))
             qS, phiS = np.pi / 2 - float(beta_e), float(lam_e) % (2 * np.pi)
-        params = list(base); params[7] = qS; params[8] = phiS
+            qK, phiK = dir_icrs_to_ecl(base[9], base[10])
+        params = list(base); params[7], params[8], params[9], params[10] = qS, phiS, qK, phiK
         h = np.asarray(fg(*params, T=wave_gen.Tobs, dt=DT))     # FEW h+ - i hx, complex
-        print(f"\n=== sky={sky}  (FEW qS={qS:.4f} phiS={phiS:.4f}) ===", flush=True)
+        print(f"\n=== config={config}  FEW(qS={qS:.3f} phiS={phiS:.3f} qK={qK:.3f} phiK={phiK:.3f}),"
+              f" response stays ICRS(ra,dec) ===", flush=True)
         best = (-9, None)
-        for psi in np.linspace(0, np.pi, 19):
+        for psi in np.linspace(0, np.pi, 25):
             hr = h * np.exp(2j * psi)                            # polarization rotation
             h_in = hr.real - 1j * hr.imag                        # flip_hx=True
             rm.get_projections(h_in, lam, beta, t0_shift_to_data=wave_gen.t0_shift_to_data,
                                t0=wave_gen.t0, t_buffer=wave_gen.t_buffer)
             y = np.asarray(rm.y_gw_flat).reshape(6, -1)
             rhos = [rho_of(y[i, :n] * win, eta[ETA_IJ[i]][:n] * win) for i in range(6)]
-            score = np.mean(rhos)                                # want all +1 -> mean ~ +1
+            amps = [rms(y[i, :n] * win) / eta_rms[i] for i in range(6)]
+            score = np.mean(rhos)
             if score > best[0]:
-                best = (score, np.degrees(psi), rhos)
-        sc, psd, rhos = best
-        print(f"  best psi={psd:.1f}deg  mean_rho={sc:+.3f}  per-link rho="
-              f"{[round(r,2) for r in rhos]}", flush=True)
+                best = (score, np.degrees(psi), rhos, amps)
+        sc, psd, rhos, amps = best
+        spread = max(amps) / min(amps)
+        print(f"  best psi={psd:.0f}deg  mean_rho={sc:+.3f}  amp-spread(max/min)={spread:.2f}", flush=True)
+        print(f"    per-arm rho: " + " ".join(f"{ETA_IJ[i]}={rhos[i]:+.2f}" for i in range(6)), flush=True)
+        print(f"    per-arm amp(LAT/eta): " + " ".join(f"{ETA_IJ[i]}={amps[i]:.2f}" for i in range(6)), flush=True)
 
 
 if __name__ == "__main__":
