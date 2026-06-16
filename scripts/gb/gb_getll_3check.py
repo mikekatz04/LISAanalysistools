@@ -41,8 +41,11 @@ PATH = "/Users/mkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/"
 GB_L1 = os.path.join(PATH, "data", "GB", "L1")
 BACKEND = "cpu"; DT = 10.0; NCH = 3; SENS = "scirdv1"
 N_DAYS = 365.0  # cache window; we use the first NF*NT samples below
-NF, NT = 1460, 512           # Nt divisible by sig-het Nt_layer (64); keeps memory bounded
-N_WIN = NF * NT              # 747,520 (~86 d); layer_df = 1/(2*NF*dt) (Nf-only) unchanged -> band isolation preserved
+NF = int(os.environ.get("GB_NF", "1460"))
+NT = int(os.environ.get("GB_NT", "512"))  # Nt divisible by sig-het Nt_layer (64); env-tunable
+# Larger NT -> finer WDM time resolution -> smaller sig-het heterodyne floor.
+# Capped by the cached data length (365 d @ dt=10 = 3.15M samples) so NF*NT <= ~3.15M.
+N_WIN = NF * NT              # layer_df = 1/(2*NF*dt) (Nf-only) unchanged -> band isolation preserved
 TOPN = int(os.environ.get("GB_TOPN", "3"))
 BAND_LAYERS = int(os.environ.get("GB_BAND_LAYERS", "15"))  # +/- layers around f0
 EDGE = int(os.environ.get("GB_EDGE", "20"))

@@ -131,6 +131,20 @@ class GBSignalHetComputations:
         self.B0_all = B0[None].copy(); self.B1_all = B1[None].copy()
         self.window_full = window_full; self.n_sparse_local = n_sparse_local
         self.params_ref_all = ref_params.reshape(1, 9).copy()
+
+        # KEEP-ALIVES: the signal-het kernel reads C++ pointers held inside
+        # ``self.tdi_wrap`` (gb_gen.wave_gen) -- the orbits/TDI-config/spline
+        # state lives on the Python objects below. If they are GC'd when
+        # __init__ returns, those pointers dangle and the FIRST kernel call
+        # silently returns d_h=h_h=0 (or SIGSEGVs nondeterministically).
+        # Mirrors build_pack's explicit keep-alive list in
+        # compare_signalhet_vs_chunked_mcmc.py.
+        self._keep_alive = dict(
+            gb_gen=gb_gen, orbits=orbits, tdi_config=tdi_config,
+            td_set=td_set, sparse_gen=sparse_gen,
+            wdm_set_real=wdm_set_real, wdm_set_complex=wdm_set_complex,
+            window=window, real_td_cb=real_td_cb,
+        )
         self._g = dict(Nf=Nf, Nt=Nt, Nf_active=Nf_active, Nt_active=Nt_active,
                        nt_layer=nt_layer, N_sparse_t=N_sparse_t, stride=stride,
                        ind_min_t=ind_min_t, ind_min_f=ind_min_f, layer_df=wdm_set_real.layer_df,
@@ -158,4 +172,6 @@ class GBSignalHetComputations:
             3, 0, g["n_sparse_fd"],
             g["tukey_alpha"], g["max_r"],
         )
+        self.last_d_h = np.asarray(d_h).copy()
+        self.last_h_h = np.asarray(h_h).copy()
         return -0.5 * self.d_d + np.asarray(d_h) - 0.5 * np.asarray(h_h)
