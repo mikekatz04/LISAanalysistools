@@ -1303,6 +1303,7 @@ class SubmissionWriter(BackendConsumer):
             snr_lim_second_cut=5.0,
             overlap_lim=0.7,
             snr_diff_lim=20.0,
+            use_representative=True,
         )
         
         reader = GFHDFBackend(
