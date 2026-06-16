@@ -351,7 +351,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         nleaves_min=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         ndim=11,
-        num_prop_repeats=40,
+        num_prop_repeats=50,
         betas=betas,
         inner_moves=[StretchMove(),]
     )
@@ -378,29 +378,29 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
 
     global_fit_codename = "erebor"
-    global_fit_version = "CDL1run0_v17"
+    global_fit_version = "CDL1run0_v0"
     global_fit_contact = "ereborl2d@googlegroups.com"
     global_fit_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/releases/tag/cdl1-run_0"
     global_fit_input_data_link = ""
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
-    comment = "6 MBHBs after fixing another bug."
+    comment = "6 MBHBs without EMRIs in the data"
 
-    submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
+    submission_folder = "/work/asantini/globalfit/systematics/"
 
-    num_iterations = 100
+    num_iterations = 500
 
     source_ids = [18, 5, 16, 7, 2, 12]
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
-    end_freq = 2.9e-2
+    end_freq = 1e-1
 
     head_dir = "/data/asantini/globalfit/erebor/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "6_mbhbs_submission_test"
+    base_file_name = "6_mbhbs_without_emris"
     file_store_dir = head_dir
 
     gpus = [0, 1]
@@ -411,7 +411,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 50
+    nwalkers = 40
     ntemps = 4
 
     window_type = "tukey"
@@ -468,7 +468,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, average_transfer_functions=True)
 
     general_settings = GeneralSettings(
         num_iterations=num_iterations,
