@@ -28,8 +28,8 @@ DT = 20.0; N_WIN = 16384; TOBS_S = N_WIN * DT
 T_BUF = 1000.0
 N_PTS = 4096                  # trajectory resolution did NOT change |O| (256==16384) -> keep modest
 DELAY = 800.0                 # > k*x SSB-projection delay (~472s) + TDI/interp margin
-MODE_THRESH = 1e-7            # mode_selection_threshold is a CALL-TIME arg (base.py:143);
-#                              construction mode_selector_kwargs was ignored -> default 1e-5 -> 180
+MODE_THRESH = 1e-10           # mode_selection_threshold is a CALL-TIME arg (base.py:143).
+#                              1e-5(default)->180, 1e-7->388 (|O| 0.967->0.975); push lower
 
 
 def wd():
