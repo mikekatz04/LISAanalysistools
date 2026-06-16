@@ -960,7 +960,8 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         verbose: bool = True,
         store_individual_timeseries: bool = False,
         do_plots: bool = False,
-        Tobs: float = None
+        Tobs: float = None,
+        window_start_offset: float = 0.0,
     ):
         L1DataLoader.__init__(
             self,
@@ -975,8 +976,14 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
 
         times, fs, data_xyz, orbits = self.load_data()
         # TODO: add this to other processors?
+        # ``window_start_offset`` (seconds from the file start) lets a caller
+        # chop a sub-window that does NOT begin at the file start -- e.g. a
+        # snippet centered on an MBH merger mid-mission. Default 0.0 keeps the
+        # legacy behavior (first ``Tobs`` from the file start) byte-for-byte.
         if Tobs is not None:
-            keep = (times[:] - times[0]) < Tobs
+            rel = times[:] - times[0]
+            offset = float(window_start_offset)
+            keep = (rel >= offset) & (rel < offset + Tobs)
             times = times[keep]
             data_xyz = data_xyz[:, keep]
 

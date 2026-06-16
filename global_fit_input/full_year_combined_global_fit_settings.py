@@ -164,11 +164,15 @@ if _HERE not in sys.path:
 from global_fit_settings import (
     EMRIWaveWrap,
     INJECTION_PARAMS_FULL_BASIS as _SINGLE_EMRI_INJECTION,
+    MBHTDIonFlyWaveWrap,
+    SOBBHTDIonFlyWaveWrap,
     SOBBHWaveWrap,
     SOBBH_INJECTION_PARAMS_FULL_BASIS as _SINGLE_SOBBH_INJECTION,
     emri_full_to_sampling,
     get_emri_response_wrapper,
+    get_mbh_tdionfly_gen,
     get_sobbh_response_wrapper,
+    get_sobbh_tdionfly_gen,
     sobbh_full_to_sampling,
 )
 
@@ -180,10 +184,23 @@ from mbh_phentax_only_global_fit_settings import (
 # *** Top-of-file knobs (the "surface" the user touches) ***
 # ============================================================
 
-# Target observation length and sample step. TOBS_TARGET is
-# env-overridable so smoke tests can run on a shorter stretch
-# (e.g. TOBS_TARGET=2.6e6 for ~1 month) without editing this file.
-TOBS_TARGET = float(os.environ.get("TOBS_TARGET", YRSID_SI))
+# Template path: TDI-on-the-fly (default; validated 2026-06-15 to beat
+# the legacy pyResponse path against the mojito data by 1-2 orders of
+# magnitude) vs the legacy path. Set USE_TDIONFLY=0 to revert
+# MBH -> PhenomTHMTDIWaveform and SOBBH -> ResponseWrapper(SOBBHWaveform).
+# (EMRI is always legacy here.)
+USE_TDIONFLY = os.environ.get("USE_TDIONFLY", "1") == "1"
+
+# Mojito data window. Default = the FULL data span (production global
+# fit). Set CHOP_WINDOW=1 to opt in to a short per-source snippet (the
+# test / validation path): a merger-centered window for MBH, ~6 months
+# for SOBBH / EMRI. TOBS_TARGET is computed below once the active source
+# is known (it differs between the full-window and chopped cases); both
+# knobs are env-overridable. MERGER_FRAC is where the MBH merger sits in
+# the chopped window (matches scripts/mbh/mbh_mojito_match_debug.py).
+CHOP_WINDOW = os.environ.get("CHOP_WINDOW", "0") == "1"
+MERGER_FRAC = 0.72
+
 DT = 2.5
 
 # Half-day-ish wavelet-duration search window for adjust_to_even_bins.
@@ -227,7 +244,45 @@ def _normalize_source_ids(d: dict) -> dict:
     return out
 
 
+# Per-class env override (used by the test / validation harness to select a
+# single source without editing this file): MBHB_IDS / EMRI_IDS / SOBHB_IDS,
+# comma-separated ints; empty string -> []. Unset -> keep the literal above.
+for _cls in ("MBHB", "EMRI", "SOBHB"):
+    _env_ids = os.environ.get(f"{_cls}_IDS")
+    if _env_ids is not None:
+        MOJITO_SOURCE_IDS[_cls] = [
+            int(x) for x in _env_ids.split(",") if x.strip() != ""
+        ]
+
 MOJITO_SOURCE_IDS = _normalize_source_ids(MOJITO_SOURCE_IDS)
+
+# Active source = the single non-empty class. Single-source-at-a-time
+# snippet runs (CHOP_WINDOW=1) require exactly one class; the full-window
+# default supports the combined multi-source fit. The UX is: edit
+# MOJITO_SOURCE_IDS above ([1] for the active class, [] for the rest) and
+# set CHOP_WINDOW=1 for a snippet run — TOBS, the window center, and the
+# on-the-fly-vs-legacy routing all follow from that.
+_ACTIVE = [k for k, v in MOJITO_SOURCE_IDS.items() if v]
+ACTIVE_SOURCE = _ACTIVE[0] if len(_ACTIVE) == 1 else None
+
+if not CHOP_WINDOW:
+    # Production default: full data span (one year).
+    TOBS_TARGET = float(os.environ.get("TOBS_TARGET", YRSID_SI))
+elif ACTIVE_SOURCE == "MBHB":
+    # Short merger-centered snippet (~7 weeks) — covers the in-band
+    # inspiral + merger for one MBH.
+    TOBS_TARGET = float(os.environ.get("TOBS_TARGET", 48 * 86400.0))
+else:
+    # SOBBH / EMRI: ~6 months.
+    TOBS_TARGET = float(os.environ.get("TOBS_TARGET", 0.5 * YRSID_SI))
+
+if CHOP_WINDOW and ACTIVE_SOURCE is None:
+    raise ValueError(
+        "CHOP_WINDOW=1 is a single-source-at-a-time snippet run: set exactly "
+        "one of MOJITO_SOURCE_IDS non-empty (got "
+        f"{[k for k, v in MOJITO_SOURCE_IDS.items() if v]}). Leave CHOP_WINDOW "
+        "unset/0 for the full-window combined fit."
+    )
 
 # Synthetic instrument noise (fixed, no PSD branch).
 ADD_INSTRUMENT_NOISE = False
@@ -281,6 +336,15 @@ MBH_PHENOM_TOL = 1e-12     # phentax root-finding tolerance
 MBH_START_FREQ = 7e-5      # Hz; waveform-generation start frequency
 MBH_RESPONSE_ORDER = 30    # Lagrange interpolation order (pyResponseTDI)
 MBH_BUFFER_TIME = 15_000.0  # s; response edge buffer
+
+# TDI-on-the-fly MBH waveform-window margin (seconds). The phentax window
+# (dur_s) is sized from the DATA span (Tobs) + this margin so it is
+# source-INDEPENDENT and built ONCE: a merger may sit anywhere in the data
+# window, and the per-source merger time enters ONLY as the call-time
+# ``t_merge`` argument (the on-the-fly response places the merger at
+# ``MBH_WAVEFORM_T0 + t_plunge``). The extra margin gives the same spline
+# headroom the validated debug recipe used.
+MBH_TDIONFLY_MARGIN = 6.0 * 86400.0
 
 # Epoch the merger times (t_plunge) are referenced to. Mojito catalogue
 # coalescence times are relative to the mojito reference epoch; the
@@ -795,7 +859,8 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         orbits_kwargs: Optional[dict] = None,
         verbose: bool = True,
         do_plots: bool = False,
-        Tobs: float = None
+        Tobs: float = None,
+        window_start_offset: float = 0.0,
     ):
         # Source types are MBHB / EMRI / SOBHB; drop any class whose
         # source_ids list is empty (mojito's L1DataLoader raises on
@@ -816,7 +881,8 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
             orbits_kwargs=orbits_kwargs,
             verbose=verbose,
             do_plots=do_plots,
-            Tobs=Tobs
+            Tobs=Tobs,
+            window_start_offset=window_start_offset,
         )
         # super().__init__ already called load_data() and stored .data,
         # .times, .fs, .orbits, .catalogue.
@@ -1230,10 +1296,12 @@ def get_mbh_phenom_multi_erebor_settings(general_set: GeneralSetup) -> Optional[
     # The wave-gen build is deferred to first call (cached) so settings
     # construction stays cheap.
     def _mbh_signal_gen(*params, **kwargs):
-        wave_gen = _get_mbh_phenom_wave_gen(**initialize_kwargs_mbh)
         params_in = MBH_TRANSFORM.both_transforms(
             np.asarray(params, dtype=float)
         )
+        if USE_TDIONFLY:
+            return _get_mbh_tdionfly_wave_wrap(general_set)(*params_in, **kwargs)
+        wave_gen = _get_mbh_phenom_wave_gen(**initialize_kwargs_mbh)
         return wave_gen.get_signals_for_residuals(*params_in, **kwargs)
 
     mbh_settings = MBHSettings(
@@ -1292,28 +1360,53 @@ def _get_emri_wave_wrap(general_info, nchannels: int = NCHANNELS):
 
 
 def _get_sobbh_wave_wrap(general_info, nchannels: int = NCHANNELS):
-    """Build (and cache) the SOBBH domain-wrapped template generator."""
+    """Build (and cache) the SOBBH domain-wrapped template generator.
+
+    With ``USE_TDIONFLY`` (default) this is the validated
+    :class:`SOBBHTDIonFly` path (WDM mm5 ~3.5e-7 vs the legacy 2.4e-5);
+    otherwise it falls back to the legacy ``ResponseWrapper(SOBBHWaveform)``
+    (which hardcodes ``flip_hx=True`` — the wrong handedness for mojito).
+    Used by both the engine ``signal_gen`` and the PE move, so toggling
+    here routes both.
+    """
     key = ("sobbh", id(general_info), nchannels)
     if key in _WAVE_WRAP_CACHE:
         return _WAVE_WRAP_CACHE[key]
     force_backend = _force_backend_for_branch()
     tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
+    # f_low is defined at the fixed catalogue epoch, NOT the (trimmed)
+    # data-window start ``data_t0``. Pass the epoch explicitly in mojito
+    # mode so the PN inspiral evolves ``f_low`` forward to the window start
+    # (mirrors the GB ``evolve_galactic_binary`` convention). In synthetic
+    # mode there is no separate epoch, so leave it ``None`` -> f_low at the
+    # window start.
+    reference_time = (
+        MOJITO_REFERENCE_TIME if DATA_PROCESSOR == "mojito" else None
+    )
+
+    if USE_TDIONFLY:
+        gen = get_sobbh_tdionfly_gen(
+            Tobs=general_info.Tobs, dt=general_info.dt,
+            t_start=general_info.data_t0, tdi_config=tdi_config,
+            reference_time=reference_time, orbits=general_info.orbits,
+            force_backend=force_backend,
+        )
+        n = int(round(general_info.Tobs / general_info.dt))
+        t_arr = np.arange(n) * general_info.dt + general_info.data_t0
+        wrap = SOBBHTDIonFlyWaveWrap(
+            gen, t_arr, general_info.data_td_settings,
+            general_info.domain_settings, td_window=None, nchannels=nchannels,
+        )
+        _WAVE_WRAP_CACHE[key] = wrap
+        return wrap
+
     template_wave_gen = get_sobbh_response_wrapper(
         Tobs=general_info.Tobs, dt=general_info.dt,
         t_start=general_info.data_t0,
         tdi_config=tdi_config, tdi_chan=TDI_CHAN,
         role="template", force_backend=force_backend,
         orbits=general_info.orbits,
-        # f_low is defined at the fixed catalogue epoch, NOT the (trimmed)
-        # data-window start ``data_t0``. Pass the epoch explicitly in mojito
-        # mode so the PN inspiral evolves ``f_low`` forward by
-        # ``data_t0 - MOJITO_REFERENCE_TIME`` (== trim_duration) to the window
-        # start (mirrors the GB ``evolve_galactic_binary`` convention). In
-        # synthetic mode there is no separate epoch, so leave it ``None`` ->
-        # f_low at the window start.
-        reference_time=(
-            MOJITO_REFERENCE_TIME if DATA_PROCESSOR == "mojito" else None
-        ),
+        reference_time=reference_time,
     )
     # Engine-provided TD settings (carries the loader's data_t0 anchor).
     wrap = SOBBHWaveWrap(
@@ -1323,6 +1416,47 @@ def _get_sobbh_wave_wrap(general_info, nchannels: int = NCHANNELS):
     )
     _WAVE_WRAP_CACHE[key] = wrap
     return wrap
+
+
+def _get_mbh_tdionfly_wave_wrap(general_info, nchannels: int = NCHANNELS):
+    """Build (and cache) the MBH TDI-on-the-fly domain-wrapped generator.
+
+    The :class:`bbhx.mbhtdionfly.MBHTDIonFly` generator is built ONCE and is
+    **source-independent**: its phentax waveform window (``dur_s``) is sized
+    from the DATA span (``Tobs`` + :data:`MBH_TDIONFLY_MARGIN`) so a merger
+    may sit anywhere in the window. The per-source merger time
+    (``t_plunge``, the last waveform-basis slot) enters ONLY as the
+    call-time ``t_merge`` argument — the on-the-fly response places the
+    merger absolutely at ``MBH_WAVEFORM_T0 + t_plunge`` (``t0 =
+    MBH_WAVEFORM_T0``), while the output grid / domain use the data-window
+    ``data_t0``. Used by both the engine ``signal_gen`` and the PE move, so
+    one instance serves every leaf and every sampler proposal.
+    """
+    key = ("mbh_tdionfly", id(general_info), nchannels)
+    if key in _WAVE_WRAP_CACHE:
+        return _WAVE_WRAP_CACHE[key]
+    force_backend = _force_backend_for_branch()
+    tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
+    orbits = general_info.gpu_orbits if gpu_available else general_info.orbits
+    n = int(round(general_info.Tobs / general_info.dt))
+    t_arr = np.arange(n) * general_info.dt + general_info.data_t0
+    # Source-independent waveform window: cover the whole data span (a
+    # merger may sit anywhere in it) + margin, so the same generator serves
+    # every t_plunge the sampler proposes (no per-call rebuild).
+    dur_s = general_info.Tobs + MBH_TDIONFLY_MARGIN
+    gen = get_mbh_tdionfly_gen(
+        dt=general_info.dt, t_start=MBH_WAVEFORM_T0, dur_s=dur_s,
+        tdi_config=tdi_config, orbits=orbits,
+        waveform_duration=dur_s, force_backend=force_backend,
+    )
+    wrap = MBHTDIonFlyWaveWrap(
+        gen, t_arr, general_info.data_td_settings,
+        general_info.domain_settings, nchannels=nchannels,
+    )
+    _WAVE_WRAP_CACHE[key] = wrap
+    return wrap
+
+
 def _build_emri_move_runtime(
     curr: CurrentInfoGlobalFit,
     acs: AnalysisContainerArray,
@@ -1366,20 +1500,49 @@ def _build_mbh_move_runtime(
     priors: dict,
     state,
 ):
-    """MBH PE move via the stock ``build_mbh_moves_phenom`` builder.
+    """MBH PE move.
 
-    Reuses the cached ``PhenomTHMTDIWaveform`` (the same instance backing
-    the engine-side ``signal_gen``) and passes ``subtract_initial=False``
-    — the engine's ``setup_acs(rebuild_residuals=True)`` already
-    subtracted the state's MBH templates (no residual writes here).
+    With ``USE_TDIONFLY`` (default) the MBH branch uses the same stretch
+    ``ResidualAddOneRemoveOneMove`` pattern as EMRI / SOBBH, driven by the
+    per-leaf :class:`_MBHTDIonFlyWaveWrap` (the TDI-on-the-fly generator
+    has no special-move API). Otherwise it falls back to the stock
+    ``build_mbh_moves_phenom`` builder around the cached
+    ``PhenomTHMTDIWaveform``. Either way move construction only — the
+    engine's ``setup_acs(rebuild_residuals=True)`` already subtracted the
+    state's MBH templates via the registered ``signal_gen``.
     """
     mbh_info = curr.source_info["mbh"]
-    wave_gen = _get_mbh_phenom_wave_gen(**mbh_info.initialize_kwargs)
-    _, move = build_mbh_moves_phenom(
-        curr, acs, priors, state,
-        wave_gen=wave_gen,
-        subtract_initial=False,
+
+    if not USE_TDIONFLY:
+        wave_gen = _get_mbh_phenom_wave_gen(**mbh_info.initialize_kwargs)
+        _, move = build_mbh_moves_phenom(
+            curr, acs, priors, state,
+            wave_gen=wave_gen,
+            subtract_initial=False,
+        )
+        return move
+
+    general_info = curr.general_info
+    nwalkers = general_info.nwalkers
+    ntemps = general_info.ntemps
+
+    wave_gen = _get_mbh_tdionfly_wave_wrap(general_info)
+
+    betas_all = np.tile(
+        make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1)
     )
+    state.sub_states["mbh"].betas_all = betas_all
+    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
+    move = ResidualAddOneRemoveOneMove(
+        "mbh", coords_shape, wave_gen,
+        mbh_info.waveform_kwargs.copy(),
+        mbh_info.waveform_kwargs.copy(),
+        acs, mbh_info.num_prop_repeats,
+        mbh_info.transform, priors,
+        mbh_info.inner_moves,
+        Tmax=np.inf, betas_all=betas_all,
+    )
+    move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
     return move
 
 
@@ -1467,6 +1630,44 @@ def setup_recipe(
 # ============================================================
 # *** General setup ***
 # ============================================================
+def _mbh_chop_window_offset() -> float:
+    """Seconds from the L1 file start at which to begin a chopped MBH window.
+
+    Only nonzero when ``CHOP_WINDOW`` and the active source is MBH: the MBH
+    merger falls mid-mission, so the snippet must begin before it. The
+    merger is placed at ``MERGER_FRAC`` of the window. The merger epoch
+    (``TimeCoalescencePhenomTPHMSSBFrame``) is read directly from the
+    mojito MBHB catalogue HDF5 for the active id; it is measured relative
+    to ``MOJITO_REFERENCE_TIME``, which is ~the L1 file start, so the
+    offset is ``max(0, t_plunge - MERGER_FRAC*TOBS)``. Default 0.0 keeps the
+    full window (production).
+    """
+    if not (CHOP_WINDOW and ACTIVE_SOURCE == "MBHB"):
+        return 0.0
+    import glob
+
+    mbh_id = int(MOJITO_SOURCE_IDS["MBHB"][0])
+    cat_files = sorted(
+        glob.glob(os.path.join(MOJITO_DATA_PATH, "catalogues", "mbhb_cat_*.hdf5"))
+    )
+    if not cat_files:
+        logger.warning(
+            "CHOP_WINDOW: no mbhb_cat_*.hdf5 under %s/catalogues; using offset 0.",
+            MOJITO_DATA_PATH,
+        )
+        return 0.0
+    with h5py.File(cat_files[0], "r") as f:
+        # MBHB catalogue row == id (0-based IDs coincide with rows).
+        t_plunge = float(f["Binaries"]["TimeCoalescencePhenomTPHMSSBFrame"][mbh_id])
+    offset = max(0.0, t_plunge - MERGER_FRAC * TOBS)
+    logger.info(
+        "CHOP_WINDOW MBH id=%d: t_plunge=%.1f s -> window_start_offset=%.1f s "
+        "(merger at ~%.0f%% of the %.1f-day window).",
+        mbh_id, t_plunge, offset, 100 * MERGER_FRAC, TOBS / 86400.0,
+    )
+    return offset
+
+
 def _select_data_processor():
     """Return ``(processor_class, processor_init_kwargs)`` per DATA_PROCESSOR."""
     if DATA_PROCESSOR == "mojito":
@@ -1486,7 +1687,10 @@ def _select_data_processor():
             ),
             verbose=True,
             do_plots=False,
-            Tobs=TOBS
+            Tobs=TOBS,
+            # Default 0.0 (full window from file start). Nonzero only for a
+            # chopped single-MBH snippet (CHOP_WINDOW=1).
+            window_start_offset=_mbh_chop_window_offset(),
         )
         return L1ProcessingStepWithSyntheticNoise, kwargs
 
