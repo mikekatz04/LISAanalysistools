@@ -28,8 +28,8 @@ DT = 20.0; N_WIN = 16384; TOBS_S = N_WIN * DT
 T_BUF = 1000.0
 N_PTS = 4096                  # trajectory resolution did NOT change |O| (256==16384) -> keep modest
 DELAY = 800.0                 # > k*x SSB-projection delay (~472s) + TDI/interp margin
-MODE_THRESH = 1e-10           # mode_selection_threshold is a CALL-TIME arg (base.py:143).
-#                              1e-5(default)->180, 1e-7->388 (|O| 0.967->0.975); push lower
+MODE_THRESH = 1e-7            # CALL-TIME arg (base.py:143). 1e-5(def)->180->|O|0.967;
+#                              1e-7->388->0.975; 1e-10->724->0.975 (PLATEAUED) -> use 1e-7
 
 
 def wd():
@@ -125,6 +125,33 @@ def main():
         nm = np.sqrt((np.abs(A) ** 2).sum() * (np.abs(B) ** 2).sum())
         O = max(abs(np.sum(np.conj(B) * A * np.exp(2j * np.pi * ff * t))) / nm for t in taus)
         print(f"    {ch}: time-scan TDI |O|={O:.4f}  (coarse-traj was ~0.967, pyResponse ~0.92)", flush=True)
+
+    # ---- noise-weighted LIKELIHOOD at injection (full XYZ, SciRD) ----
+    from lisatools.domains import TDSettings, FDSettings, TDSignal
+    from lisatools.analysiscontainer import AnalysisContainer
+    from lisatools.sensitivity import XYZ2SensitivityMatrix
+    td_set = TDSettings(N_WIN, DT, t0=0.0, force_backend="cpu")
+    fd_set = FDSettings(N=N_WIN // 2 + 1, df=1.0 / (N_WIN * DT),
+                        min_freq=1e-4, max_freq=1e-2, force_backend="cpu")
+    data_fd = TDSignal(dXYZ, td_set).transform(fd_set, window=win)
+    ac = AnalysisContainer(data_fd, XYZ2SensitivityMatrix(fd_set, model="scirdv1"))
+    tmpl_fd = TDSignal(lat, td_set).transform(fd_set, window=win)
+    fb = np.asarray(fd_set.f_arr); base = np.asarray(tmpl_fd.arr).copy()
+    opt, _ = ac.template_snr(tmpl_fd)                    # optimal SNR (tau-invariant)
+    best = (-9e99, 0.0, 0.0)
+    for t in np.linspace(-1500, 1500, 301):
+        tmpl_fd.arr[:] = base * np.exp(2j * np.pi * fb * t)[None, :]
+        _, det = ac.template_snr(tmpl_fd)               # detected SNR <d|h>/sqrt<h|h>
+        logL = det * opt - 0.5 * opt ** 2
+        if logL > best[0]:
+            best = (logL, t, det)
+    tmpl_fd.arr[:] = base
+    dd = float(ac.inner_product().real); logL, tau_b, det = best
+    print(f"  LIKELIHOOD (SciRD, full XYZ, best tau={tau_b:+.0f}s):", flush=True)
+    print(f"    opt SNR={opt:.3f}  det SNR={det:.3f}  data SNR={np.sqrt(dd):.3f}  "
+          f"SNR recovered={det/np.sqrt(dd):.4f}", flush=True)
+    # EMRI is low SNR -> small SNR^2 in the likelihood, so dlogL(loss) is modest even at |O|~0.97
+    print(f"    logL={logL:.2f}  inj logL=0.5<d|d>={0.5*dd:.2f}  dlogL(loss vs inj)={0.5*dd-logL:.3f}", flush=True)
 
 
 if __name__ == "__main__":
