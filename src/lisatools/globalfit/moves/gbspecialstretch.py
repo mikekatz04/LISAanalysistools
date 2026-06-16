@@ -50,6 +50,8 @@ from ...sampling.prior import FullGaussianMixtureModel, GBPriorWrap
 from ...utils.utility import get_array_module, get_groups_from_band_structure, searchsorted2d_vec
 from ..state import GFState
 
+VERBOSE = False
+
 __all__ = ["GBSpecialStretchMove"]
 
 logger = logging.getLogger(__name__)
@@ -892,6 +894,7 @@ class BandSorter(LISAToolsParallelModule):
         max_data_store_size: int = 6000,
         rj_prop=None,
         keep_all_inds=True,
+        model_coords=None,
     ):
 
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
@@ -950,20 +953,33 @@ class BandSorter(LISAToolsParallelModule):
         self.orig_inds = self.xp.asarray(gb_branch.inds)
         self.keep_all_inds = keep_all_inds
         self.rj_prop = rj_prop
-
+        
         if rj_prop is not None:
+            
+            if model_coords is not None:
+                has_model_coords = True
+                model_coords = self.xp.broadcast_to(
+                    self.xp.asarray(model_coords[...,0]).astype(self.xp.int32), gb_branch.coords.shape[:-1]
+                )
+            
             if keep_all_inds:
                 self.coords = self.xp.asarray(gb_branch.coords.reshape(-1, 8))
                 self.inds = self.orig_inds.flatten()
+                model_idx = model_coords.flatten() if has_model_coords else None
             else:
                 self.coords = self.xp.asarray(gb_branch.coords[gb_branch.inds])
                 self.inds = self.xp.ones(self.coords.shape[:-1], dtype=bool)
+                model_idx = model_coords[gb_branch.inds] if has_model_coords else None
 
             if self.xp.any(~self.inds):
                 new_sources = cp.full_like(self.coords[~self.inds], np.nan)
+                model_idx_prop = model_idx[~self.inds] if has_model_coords else None
                 fix = cp.full(new_sources.shape[0], True)
                 while cp.any(fix):
-                    new_sources[fix] = rj_prop.rvs(size=fix.sum().item())
+                    new_sources[fix] = rj_prop.rvs(
+                        size=fix.sum().item(), 
+                        model_index=model_idx_prop[fix]
+                    )
                     fix = cp.any(cp.isnan(new_sources), axis=-1)
 
                 self.coords[~self.inds] = new_sources
@@ -985,7 +1001,7 @@ class BandSorter(LISAToolsParallelModule):
 
             for stind, eind in zip(inds_splitting[:-1], inds_splitting[1:]):
                 proposal_logpdf[stind:eind] = self.xp.asarray(
-                    rj_prop.logpdf(self.coords[stind:eind])
+                    rj_prop.logpdf(self.coords[stind:eind], model_index=model_idx[stind:eind])
                 )
             self.xp.get_default_memory_pool().free_all_blocks()
 
@@ -1712,7 +1728,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # global_ll_tracker = model.analysis_container_arr.likelihood().copy()
         # accumulated_local_diffs = cp.zeros_like(global_ll_tracker)
         # walker_accept_counts = cp.zeros(self.nwalkers, dtype=int)
-        breakpoint() # TODO CHECK SHAPE to be (ntemps, nwalkers, nleaves)
         snrs_tmp = cp.zeros(state.branches["gb"].shape[:-1])
         
         # random start to rotation around
@@ -2036,7 +2051,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 inds = self.xp.asarray(_test_inds),
                                 easy_central_difference=False,
                                 noise_index = walker_inds_chol,
-                                # N = 1024,
                                 data_length = model.analysis_container_arr.end_shape[0],
                                 batch_size = 100000,
                                 **_tmp_waveform_kwargs,                                
@@ -2176,8 +2190,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         band_sorter.band_inds[inds_to_update].get(),
                     )
                     
-                    walker_inds_here = map_to_update[1]
-                    temp_inds_here = map_to_update[0]
+                    walker_inds_here = map_to_update_cpu[1]
+                    temp_inds_here = map_to_update_cpu[0]
                     
                     if "hyper" in self.current_state.branches:
                         model_idx = self.xp.asarray(
@@ -2244,7 +2258,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         curr_logp = cp.asarray(
                             self.gpu_priors["gb"].logpdf(new_coords, model_index=model_idx)
                         )  # , psds=self.mgh.psd_shaped[0][0], walker_inds=curr_index)
-
+                        if VERBOSE:
+                            print(f"{prev_logp=}\n{curr_logp=}")
+                            
                     else:
                         old_coords = params_to_update.copy()
                         new_coords = params_to_update.copy()
@@ -2270,8 +2286,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         prev_logp[inds] = logp_tmp[inds]
                         curr_logp[~inds] = logp_tmp[~inds]
                         
+                        if VERBOSE:
+                            print(f"RJ:\n{prev_logp=}\n{curr_logp=}")
+                        
                         if "num_gbs" in self.gpu_priors:
                             poisson_prior = self.gpu_priors["num_gbs"]
+                            poisson_prior.return_gpu = True
                             
                             temp_inds = map_to_update[0]
                             walker_inds = map_to_update[1]
@@ -2283,17 +2303,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             new_N_binaries[inds] -= 1 # death
                             new_N_binaries[~inds] += 1 # birth
 
-                            # Evaluate the Poisson prior
-                            prev_poisson_logp = poisson_prior.logpdf(current_N_binaries, model_index=model_idx)
-                            curr_poisson_logp = poisson_prior.logpdf(new_N_binaries, model_index=model_idx)
-                            
+                            # poisson prior on the number of GBs
+                            prev_poisson_logp = poisson_prior.logpdf(current_N_binaries[:,None], model_index=model_idx)
+                            curr_poisson_logp = poisson_prior.logpdf(new_N_binaries[:,None], model_index=model_idx)
+                            # print(f"{prev_poisson_logp=}\n{curr_poisson_logp=}")
                             prev_logp += prev_poisson_logp
                             curr_logp += curr_poisson_logp
                             
-                            
                     # check if any proposals have -inf logp before likelihood calculation to catch issues early
-                    if cp.all(~cp.isfinite(prev_logp)):  # [run_now_tmp]
-                        logger.warning("Found -inf logp in previous logp.")
+                    # if cp.all(~cp.isfinite(prev_logp)):  # [run_now_tmp]
+                    #     logger.warning("Found -inf logp in previous logp.")
                         # check which parameters have -inf logp and why
                         # bad_idx = cp.where(~cp.isfinite(prev_logp))[0]
                         # for idx in bad_idx:
@@ -2401,13 +2420,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     )
                     ll_diff[keep2] = ll_diff_tmp
                     
+                    full_opt_snr_add = self.xp.zeros(len(keep2), dtype=self.xp.float64)
+                    full_opt_snr_add[keep2] = opt_snr_add
+                    
                     if "resolv_gb" in self.gpu_priors:
                         # grab resolvability prior
                         resolv_prior = self.gpu_priors["resolv_gb"]
+                        resolv_prior.return_gpu = True
+                        
+                        if VERBOSE:
+                            print("Number of removed gbs above snr7 =", len(opt_snr_remove[opt_snr_remove > 7.0]))
+                            print("Number of added gbs above snr7 =", len(opt_snr_add[opt_snr_add > 7.0]))
+                        
+                        if opt_snr_remove.size > 0 and opt_snr_add.size > 0:
+                            resolv_remove = resolv_prior.logpdf(opt_snr_remove)
+                            resolv_add = resolv_prior.logpdf(opt_snr_add)
+                            
+                            if is_rj_now:
+                                # Identify which of the active proposals are proposing a death
+                                _prev_is_alive = band_sorter.inds[inds_to_update[keep2]]
+                                _curr_is_alive = ~_prev_is_alive
+                            else:
+                                # For in-model parameter updates, the binary is alive in both states.
+                                _prev_is_alive = cp.ones(len(opt_snr_remove), dtype=bool)
+                                _curr_is_alive = cp.ones(len(opt_snr_add), dtype=bool)
+                            
+                            # Only evaluate the resolvability prior on the ALIVE state.
+                            # For death 'remove' is alive. For birth 'add' is alive.
+                            prev_logp[keep2] += cp.where(_prev_is_alive, resolv_remove, 0.0)
+                            curr_logp[keep2] += cp.where(_curr_is_alive, resolv_add, 0.0)
 
-                        prev_logp[keep2] += resolv_prior.logpdf(opt_snr_remove)
-                        curr_logp[keep2] += resolv_prior.logpdf(opt_snr_add)
-                    
+                                            
                     # in case there is phase marginalization, need to adjust in new_coords
                     if self.phase_maximize:
                         new_coords[keep2] = params_add[:]
@@ -2419,11 +2462,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                     curr_beta = band_temps[map_to_update[2], map_to_update[0]]
                     # print("change priors?, need to adjust here")
-
-                    delta_logP = curr_beta * ll_diff + (curr_logp - prev_logp)
+                    delta_logp = curr_logp - prev_logp
+                    delta_logp = cp.where(cp.isinf(prev_logp) | cp.isinf(curr_logp), -cp.inf, delta_logp)
+                    delta_logp = cp.nan_to_num(delta_logp, nan=-cp.inf)
+                    
+                    delta_logP = curr_beta * ll_diff + delta_logp
                     lnpdiff = delta_logP + update_factors.squeeze()
                     accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
-
+                    
+                    if is_rj_now and VERBOSE:
+                        _current_inds = band_sorter.inds[inds_to_update]
+                        # A zombie is a currently ALIVE source whose parameter prior evaluates to -inf
+                        zombies = keep2 & _current_inds & cp.isinf(prev_logp)
+                        
+                        if cp.any(zombies):
+                            num_zombies = int(zombies.sum().get())
+                            z_idx = cp.where(zombies)[0][:3].get()
+                            
+                            print("\n" + "!"*80)
+                            print(f"[WARNING] Found {num_zombies} ALIVE sources with -INF parameter prior!")
+                            print("The Normalizing Flow prior considers these sources impossible.")
+                            print("Check if injected true values violate parameter bounds or if model_idx is mismatched.")
+                            print("-" * 80)
+                            for idx in z_idx:
+                                print(f"Zombie Params: {old_coords[idx].get()}")
+                            print("!"*80 + "\n")
+                    
                     # check if any coords outside of the prior are accepted
                     # this should only be possible for beta=0, but should still be rejected
                     bad_mask = ((ll_diff <= -1e299) | (curr_logp <= -1e229))
@@ -2468,7 +2532,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                     if cp.any(accept):
                         inds_update_accept = inds_to_update[accept]
-
+                        
+                        temp_inds_accept = band_sorter.temp_inds[inds_update_accept]
+                        walker_inds_accept = band_sorter.walker_inds[inds_update_accept]
+                        band_inds_accept = band_sorter.band_inds[inds_update_accept]
+                        leaf_inds_accept = band_sorter.leaf_inds[inds_update_accept]
+                        
                         ll_accept = ll_diff[accept]
                         if is_rj_now:  # self.is_rj_prop:
                             # update inds
@@ -2494,24 +2563,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 snrs_tmp[
                                     dead_temps, dead_walkers, dead_leaves
                                 ] = 0.0
-
-                        temp_inds_accept = band_sorter.temp_inds[inds_update_accept]
-                        walker_inds_accept = band_sorter.walker_inds[inds_update_accept]
-                        band_inds_accept = band_sorter.band_inds[inds_update_accept]
-                        leaf_inds_accept = band_sorter.leaf_inds[inds_update_accept]
                         
                         snrs_tmp[
                             temp_inds_accept.get(), 
                             walker_inds_accept.get(), 
                             leaf_inds_accept.get()
-                        ] = opt_snr_add[accept].get()
+                        ] = full_opt_snr_add[accept].get()
+                        
+                        if VERBOSE:
+                            print("Current amount of gbs above snr7 = ", len(snrs_tmp[snrs_tmp > 7.0]))
                         
                         ll_change_log[
                             temp_inds_accept, walker_inds_accept, band_inds_accept
                         ] += ll_accept
 
                         accepted_out[temp_inds_accept, walker_inds_accept, band_inds_accept] += 1
-
+                        
+                        # if is_rj_now:
+                        #     breakpoint()
                         # for t_idx, w_idx, ll_change in zip(temp_inds_accept, walker_inds_accept, ll_accept):
                         #     if t_idx == 0:  # Count acceptances for the cold chain
                         #         accumulated_local_diffs[w_idx] += ll_change
@@ -2568,7 +2637,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # RJ COUNT IS PROPORTIONAL TO NUMBER OF SOURCES IN THE BAND,
                 # SO IT WILL ALSO ACCOUNT FOR NUM_REPEAT_PROPOSALS FOR IN-MODEL
                 run_count[inds_now] = current_rj_counter
-                logger.info(f"The information matrix was calculated {counter_infomat} times over {self.num_repeat_proposals} proposal repeats, for a total of {time_spent_infomat:.2f} seconds.")
+                # logger.info(f"The information matrix was calculated {counter_infomat} times over {self.num_repeat_proposals} proposal repeats, for a total of {time_spent_infomat:.2f} seconds.")
 
                 # if not self.is_rj_prop:
                 #     # should be subset for in model
@@ -2983,6 +3052,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             waveform_kwargs=self.waveform_kwargs,
             rj_prop=rj_prop,
             keep_all_inds=keep_all_inds,
+            model_coords=new_state.branches["hyper"].coords if "hyper" in new_state.branches else None
         )
 
         do_synchronize = False
@@ -3129,7 +3199,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         new_state.branches["gb"].inds[inds_new] = True
 
         if "snr" in new_state.branches_supplemental.get("gb", {}):
-            new_state.branches_supplemental["gb"]["snr"] = snrs_tmp # SAVE opt snr in supplemental branch
+            new_state.branches_supplemental["gb"][:]["snr"] = snrs_tmp # SAVE opt snr in supplemental branch
         
         # new_state.branches["gb"].branch_supplemental[inds_new] = state.branches["gb"].branch_supplemental[inds_old]
         et_all = time.perf_counter()

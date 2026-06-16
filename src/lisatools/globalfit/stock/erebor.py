@@ -87,14 +87,20 @@ class GBSetup(Setup, GBSettings):
             # NOTE also update fdot when there is an explicit fdot range dictated
             # For the example below we have a joint prior on f0 and fdot, 
             # so only f0 needs to be reset.
-            self.source_config.update_prior_kwargs(
-                ("f0", "fdot"), 
-                f0_min=self.new_f0_lims[0].item() * 1e3, 
-                f0_max=self.new_f0_lims[1].item() * 1e3 # sampling in mHz
-            )
+            try:
+                self.source_config.update_prior_kwargs(
+                    ("f0", "fdot"), 
+                    f0_min=self.new_f0_lims[0].item() * 1e3, 
+                    f0_max=self.new_f0_lims[1].item() * 1e3 # sampling in mHz
+                )
+            except:
+                self.logger.warning("Resetting of the f0 and fdot limits could not be performed. Check whether this behaviour is expected.")
         
         if self.priors is None:
-            self.priors = self.source_config.priors
+            if not hasattr(self.source_config, "get_multi_branch_priors"):
+                self.priors = self.source_config.priors
+            else:
+                self.priors = getattr(self.source_config, "get_multi_branch_priors")()
         
         if self.transform is None:
             self.transform = self.source_config.transform

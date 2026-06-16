@@ -73,7 +73,7 @@ class BaseSourceConfig:
             return_gpu=self.return_gpu
         )
 
-    def _build_transform_container(self) -> TransformContainer:
+    def _build_transform_container(self) -> TransformContainer | None:
         """Dynamically builds the transformation and fill-value container."""
         input_basis = []
         output_basis = []
@@ -90,7 +90,7 @@ class BaseSourceConfig:
             return wrapper
         
         for prior in self.prior_dict.values():
-            
+
             is_fixed = type(prior).__name__ == "DeltaFunction"
             
             if isinstance(prior, JointPrior):
@@ -122,6 +122,9 @@ class BaseSourceConfig:
                 else:
                     # Inject the fixed value
                     fill_dict[prior.name_phys] = prior.peak
+
+        if not parameter_transforms and not key_map and not fill_dict:
+            return None
 
         return TransformContainer(
             input_basis=input_basis,
@@ -412,17 +415,17 @@ class HyperConfig(BaseSourceConfig):
         )
         super().__init__(
             prior_dict=prior_dict,
-            source_name="psd",
+            source_name="hyper",
             use_cupy=use_cupy,
             return_gpu=return_gpu
         )
 
     @classmethod
     def _get_default_prior_dict(cls) -> "LISAPriorDict":
-        psd_prior_text = """
+        hyper_prior_text = """
             model = Categorical(n_categories=2, name="model", name_phys="model", latex_label=r"$M$")
         """
-        return LISAPriorDict.from_string(psd_prior_text)
+        return LISAPriorDict.from_string(hyper_prior_text)
 
     @classmethod
     def default(cls, use_cupy: bool = False, return_gpu: bool = False) -> "HyperConfig":
@@ -473,7 +476,23 @@ class HyperGBConfig(BaseSourceConfig):
         })
 
         super().__init__(self.gb_priors, "gb", use_cupy, return_gpu)
+        
+        output_order = ["logA", "f0_mHz", "fdot", "phi0", "cos_inc", "psi", "ra", "sin_dec"]
+        self.priors["gb"].reset_key_order(output_order)
 
+        self.transform = TransformContainer(
+            input_basis=output_order,
+            output_basis=['A', 'f0', 'fdot', 'fddot', 'phi0', 'inc', 'psi', 'ra', 'dec'],
+            parameter_transforms=self.transform.original_parameter_transforms,
+            fill_dict={'fddot': 0.0},
+            key_map={'logA': 'A', 'f0_mHz': 'f0', 'sin_dec': 'dec', 'cos_inc': 'inc'},
+        )
+        
+        self.periodic = PeriodicContainer(
+            periodic={self.source_name: {'phi0': 2*np.pi, 'psi': np.pi, 'ra': 2*np.pi}},
+            key_order={self.source_name: tuple(self.transform.input_basis)}
+        )
+        
         self.num_gbs_prior = HyperPoisson(
             lams=poisson_lams,
             use_cupy=use_cupy,
@@ -490,7 +509,37 @@ class HyperGBConfig(BaseSourceConfig):
     def get_multi_branch_priors(self) -> dict[str, ProbDistContainer]:
         """Returns the multi-branch dictionary expected by Eryn's global state."""
         return {
-            "gb": self._build_prob_dist_container(),
+            "gb": self.priors["gb"],
             "num_gbs": ProbDistContainer({0: self.num_gbs_prior}, use_cupy=self.use_cupy, return_gpu=self.return_gpu),
             "resolv_gb": ProbDistContainer({0: self.resolv_gb_prior}, use_cupy=self.use_cupy, return_gpu=self.return_gpu)
         }
+        
+
+from .network import HyperGalForPrior
+
+class HyperGalForConfig(BaseSourceConfig):
+    """
+    Complete configuration class for Hyper-Parameter Inference of the Galactic Foreground.
+    Exports the 'galfor' branch to Eryn.
+    """
+
+    def __init__(
+        self,
+        nf_config_files: list[str],
+        use_cupy: bool = False,
+        return_gpu: bool = False,
+    ):
+        self.use_cupy = use_cupy
+        self.return_gpu = return_gpu
+
+        # Initialize the Prior dictionary. All 5 parameters are handled by the HyperPrior.
+        self.galfor_priors = LISAPriorDict({
+            ("log10_Amp", "alpha", "log10_f1", "log10_fknee", "log10_f2"): HyperGalForPrior(
+                config_files=nf_config_files,
+                use_cupy=use_cupy,
+                return_gpu=return_gpu
+            )
+        })
+
+        super().__init__(self.galfor_priors, "galfor", use_cupy, return_gpu)
+

@@ -1,4 +1,4 @@
-"""Run with: uv run python /workspace/rrondeel/pop_inf/LISAanalysistools/scripts/run_global.py -sfp /workspace/rrondeel/pop_inf/LISAanalysistools/population_inference_input/galfor_psd_custom_populations_settings.py """
+"""Run with: uv run python /sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/scripts/run_global.py -sfp /sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/population_inference_input/galfor_psd_custom_population_settings.py"""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def setup_recipe(
 #* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
     spread_gb = np.array([1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30])
-    iteratively_resolved_population_path = "/workspace/rrondeel/pop_inf/data/iteratively_resolved_gbs_0.75yrs_snr7_estnoise_strong_int.npy"
+    iteratively_resolved_population_path = "/sps/lisaf/crondeel/pop_inf/data/iteratively_resolved_gbs_0.75yrs_snr7_estnoise_strong_int.npy"
     iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
 
     frequencies = iteratively_resolved_population["Frequency"]
@@ -137,7 +137,6 @@ def setup_recipe(
     _, _ = build_gb_moves(
         engine_info, curr, acs, priors, state
     )
-    # np.save("./post_pred_galfor/xx_data_subtracted.npy", np.abs(acs[0].data_res_arr.data_res_arr.arr[0])**2)
     
     #* ================================= SETUP SEARCH ================================= 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="init psd search")
@@ -183,7 +182,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> tuple[PSDSetup, Stocha
     injection = np.array([np.log10(15e-12), np.log10(3e-15)])
 
     #? Will be changed to relative path in the future
-    prior_file_psd = "/workspace/rrondeel/pop_inf/LISAanalysistools/src/lisatools/globalfit/prior_files/mojito_priors/instrumental_noise_analytical_mojito.prior"
+    prior_file_psd = "/sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/mojito_priors/instrumental_noise_analytical_mojito.prior"
 
     psd_settings = PSDSettings(
         Tobs=general_set.Tobs,
@@ -193,7 +192,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> tuple[PSDSetup, Stocha
         ndim=2,
         injection=injection,
         log_dir=general_set.file_store_dir,
-        num_prop_repeats=100,
+        num_prop_repeats=50,
     )
     prior_model_config = {
         r"$S_{\rm oms}$": (-12.0, -10.0),
@@ -218,7 +217,7 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> tuple[GalForSetup, 
     # for now just two parameters, but can be extended to include splines or other features in the future
 
     #? Will be changed to relative path in the future
-    prior_file_galfor = "/workspace/rrondeel/pop_inf/LISAanalysistools/src/lisatools/globalfit/prior_files/mojito_priors/galactic_foreground_stationary_mojito.prior"
+    prior_file_galfor = "/sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/mojito_priors/galactic_foreground_stationary_mojito.prior"
     
     galfor_settings = GalForSettings(
         Tobs=general_set.Tobs,
@@ -252,7 +251,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
     
     #? Will be changed to relative path in the future
-    prior_file_gb = "/workspace/rrondeel/pop_inf/LISAanalysistools/src/lisatools/globalfit/prior_files/mojito_priors/galactic_binary_mojito.prior"
+    prior_file_gb = "/sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/mojito_priors/galactic_binary_mojito.prior"
     
     input_data_arr: DataResidualArray = general_set.input_data_residual_array
     start_freq = float(input_data_arr.settings.f_arr[0])
@@ -370,7 +369,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     submission_folder = None # "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    num_iterations = 300
+    num_iterations = 1000
 
     # source_ids = [18, 5, 16]
     start_freq = 9e-5
@@ -385,10 +384,10 @@ def get_general_erebor_settings() -> GeneralSetup:
     domain_settings = FDSettings(N=Nf, df=1/Tobs, min_freq=start_freq, max_freq=end_freq)
     
 
-    head_dir = "/workspace/rrondeel/pop_inf/_runs/"
-    data_input_path = "/workspace/rrondeel/pop_inf/data/"
+    head_dir = "/sps/lisaf/crondeel/pop_inf/_runs/"
+    data_input_path = "/sps/lisaf/crondeel/pop_inf/data/"
     base_file_name = global_fit_version
-    file_store_dir = head_dir + "galfor_estimation_strong_int/"
+    file_store_dir = head_dir + "galfor_estimation_strong_int_long/"
     # head_dir = "/data/asantini/packages/LISAanalysistools/"
     # data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
     # base_file_name = global_fit_version #"test_mbh_18_with_covariance"
@@ -401,8 +400,8 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
-    backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 24
+    backend = "cuda13x" if gpus is not None else "cpu"
+    nwalkers = 32
     ntemps = 16
 
 
@@ -411,7 +410,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     base_file_name += f"_{basis_domain}"
     
-    orbit_file = "/workspace/ggfitlisa/ldc/mojito_light/data/GB/L1/GB_731d_2.5s_L1_source0_0_20251205T020733787241Z.h5"
+    orbit_file = "/sps/lisaf/crondeel/mojito_light/data/GB/L1/GB_731d_2.5s_L1_source0_0_20251205T020733787241Z.h5"
     orbits = L1Orbits(
         filename=orbit_file,
         force_backend=backend, 

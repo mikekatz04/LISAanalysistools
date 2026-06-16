@@ -4,8 +4,10 @@ from typing import Sequence, Callable, Tuple, Any
 from numpy.typing import ArrayLike
 from ...utils.typing import NDArrayLike
 
-from lisaflow.experiments.rvs.galaxy import Galaxy
+from lisaflow.experiments.rvs.galaxy import GalaxyFlow
+from lisaflow.experiments.rvs.galfor import GalForFlow
 from .joint import JointPrior
+from ...utils.utility import get_array_module
 
 try:
     import torch
@@ -147,13 +149,11 @@ class NormalizingFlowPrior(JointPrior):
         return self._to_device(out_array)
 
 
-
-
-class FullGalaxyPrior(JointPrior, Galaxy):
+class FullGalaxyPrior(JointPrior, GalaxyFlow):
     """
     5D Normalizing Flow prior for Galactic Binaries.
     
-    Network Fit Basis (NFB): [logA, logf0_Hz, -sign(fdot)*log|fdot|, ra, sin_dec]
+    Network Fit Basis (NFB): [logA, logf0_Hz, -sign(fdot)*log|C*fdot|, ra, sin_dec]
     Sampling Basis (SB):     [logA, f0_mHz, fdot, ra, sin_dec]
     Physical Basis (PB):     [A, f0_Hz, fdot, ra, dec]
     """
@@ -165,9 +165,11 @@ class FullGalaxyPrior(JointPrior, Galaxy):
         return_gpu: bool = False
     ):
 
-        FullGalaxyPrior.__init__(self, config_file)
-        self.load_fit()
-
+        GalaxyFlow.__init__(self, config_file)
+        
+        checkpoint_path = self.config["saving"]["save_root"] + self.config["training"]["checkpoints"]
+        self.load_fit(checkpoint_path)
+        
         param_names = ("logA", "f0_mHz", "fdot", "ra", "sin_dec")
         param_names_phys = ("A", "f0", "fdot", "ra", "dec")
         latex_labels = (r"\log \mathcal{A}", r"f_{0, {\rm mHz}}", r"\dot{f}", r"\alpha", r"\sin \delta")
@@ -184,11 +186,15 @@ class FullGalaxyPrior(JointPrior, Galaxy):
 
     def _sb_to_pb(self, logA, f0_mHz, fdot, ra, sin_dec, **kwargs):
         """Maps: Sampling Basis (SB) -> Physical Basis (PB)"""
-        A = self.xp.exp(logA)
+        xp = get_array_module(logA)
+        A = xp.exp(logA)
         f0 = f0_mHz * 1e-3
-        dec = self.xp.arcsin(sin_dec)
+        dec = xp.arcsin(sin_dec)
         return A, f0, fdot, ra, dec
 
+    def _fdot_rescale_factor(self, f0_max = 0.029) -> float:
+        return 3200 * self.xp.cbrt(2) * self.xp.sqrt(5/3) / f0_max**(9/2)
+    
     def _nfb_to_sb(self, nfb_samples):
         """Maps: Network Fit Basis (NFB) -> Sampling Basis (SB)"""
         logA = nfb_samples[..., 0]
@@ -199,13 +205,14 @@ class FullGalaxyPrior(JointPrior, Galaxy):
 
         f0_mHz = self.xp.exp(logf0) * 1e3
         
-        # y = -sign(fdot) * log|fdot|
-        # Since log|fdot| is negative (fdot ~ 1e-16), |y| = -log|fdot|.
-        # Thus |fdot| = exp(-|y|) and sign of y matches sign of fdot.
-        fdot = self.xp.sign(mlogfdot) * self.xp.exp(-self.xp.abs(mlogfdot))
+        # y = -sign(fdot) * log|C*fdot|
+        # Since log|fdot| is negative (fdot ~ 1e-16), |y| = -log|C*fdot|.
+        # Thus |fdot| = exp(-|y|)/C and sign of y matches sign of fdot.
+        rescale_factor = self._fdot_rescale_factor()
+        fdot = self.xp.sign(mlogfdot) * self.xp.exp(-self.xp.abs(mlogfdot)) / rescale_factor
 
         return self.xp.stack([logA, f0_mHz, fdot, ra, sin_dec], axis=-1)
-
+    
     def _sb_to_nfb(self, sb_samples):
         """Maps: Sampling Basis (SB) -> Network Fit Basis (NFB)"""
         logA = sb_samples[..., 0]
@@ -217,19 +224,27 @@ class FullGalaxyPrior(JointPrior, Galaxy):
         # f0_mHz -> log(f0_Hz)
         logf0 = self.xp.log(f0_mHz * 1e-3)
         
-        # fdot -> -sign(fdot) * log|fdot|
+        # fdot -> -sign(fdot) * log|C*fdot|
         # Safe guard against absolute 0 to prevent log(0) = -inf causing NaN gradients
         safe_fdot = self.xp.where(fdot != 0, fdot, 1e-30)
-        mlogfdot = -self.xp.sign(safe_fdot) * self.xp.log(self.xp.abs(safe_fdot))
+        rescale_factor = self._fdot_rescale_factor()
+        mlogfdot = -self.xp.sign(safe_fdot) * self.xp.log(self.xp.abs(safe_fdot * rescale_factor)) 
         return self.xp.stack([logA, logf0, mlogfdot, ra, sin_dec], axis=-1)
 
+    def _tensor_to_xp(self, tensor: torch.Tensor):
+        """Zero-copy transfer from PyTorch Tensor to CuPy/NumPy array."""
+        if self.use_cupy and tensor.is_cuda:
+            from torch.utils.dlpack import to_dlpack
+            return self.xp.from_dlpack(to_dlpack(tensor))
+        return self.xp.asarray(tensor.detach().cpu().numpy())
+    
     def rvs(self, size: int | Tuple[int, ...] = (1,), **kwargs: Any) -> NDArrayLike:
         if isinstance(size, int):
             size = (size,)
             
         num_samples = int(np.prod(size))
         
-        nfb_samples = self.sample(num_samples=num_samples)
+        nfb_samples = self._tensor_to_xp(self.sample(num_samples=num_samples))
         nfb_samples = nfb_samples.reshape(*size, self.num_vars)
         
         sb_samples = self._nfb_to_sb(nfb_samples)
@@ -243,11 +258,11 @@ class FullGalaxyPrior(JointPrior, Galaxy):
         x_nfb = self._sb_to_nfb(x_sb)
         x_nfb_flat = x_nfb.reshape(-1, self.num_vars)
         
-        logpdf_nfb_flat = self.log_prob(x_nfb_flat)
+        logpdf_nfb_flat = self._tensor_to_xp(self.log_prob(x_nfb_flat))
         logpdf_nfb = logpdf_nfb_flat.reshape(original_shape[:-1])
         
         # d(NFB_f0) / d(SB_f0) = d(ln(f0_mHz*1e-3)) / d(f0_mHz) = 1 / f0_mHz
-        # d(NFB_fdot) / d(SB_fdot) = d(-sign(fdot)*ln|fdot|) / d(fdot) = 1 / |fdot|
+        # d(NFB_fdot) / d(SB_fdot) = d(-sign(fdot)*ln|C*fdot|) / d(fdot) = 1 / |fdot|
         # Log Determinant = -ln(f0_mHz) - ln(|fdot|)
         f0_mHz = x_sb[..., 1]
         fdot = x_sb[..., 2]
@@ -289,7 +304,7 @@ class HyperGalaxyPrior(JointPrior):
 
         names = self.models[0].names
         names_phys = self.models[0].names_phys
-        latex_labels = self.models[0].latex_labels
+        latex_labels = self.models[0].latex_label
 
         super().__init__(
             names=names,
@@ -314,12 +329,13 @@ class HyperGalaxyPrior(JointPrior):
         if mod_idx.ndim < x_sb.ndim - 1:
             mod_idx = self.xp.expand_dims(mod_idx, tuple(range(mod_idx.ndim, x_sb.ndim - 1)))
         
-        mod_idx = self.xp.broadcast_to(mod_idx, x_sb.shape[:-1])
+        if mod_idx.shape[:-1] != x_sb.shape[:-1]:
+            mod_idx = self.xp.broadcast_to(mod_idx, x_sb.shape[:-1])
         
         out = self.xp.full(x_sb.shape[:-1], -np.inf, dtype=self.xp.float64)
 
         for i in range(self.n_models):
-            mask = (mod_idx == i)
+            mask = (mod_idx == i).squeeze()
             
             if not mask.any():
                 continue
@@ -347,6 +363,162 @@ class HyperGalaxyPrior(JointPrior):
             if n_samples_model == 0:
                 continue
                 
+            out_samples[mask] = self.models[i].rvs(size=n_samples_model)
+
+        return self._to_device(out_samples)
+    
+    
+# TODO change to GalForFlow
+
+class GalForNFPrior(JointPrior, GalForFlow):
+    """
+    5D Normalizing Flow prior for the Galactic Foreground.
+    
+    Network Fit Basis (NFB) == Sampling Basis (SB):
+        [log10_Amp, alpha, log10_f1, log10_fknee, log10_f2]
+        
+    Physical Basis (PB): 
+        [Amp, alpha, f1, fknee, f2]
+    """
+    
+    def __init__(
+        self, 
+        config_file: str, 
+        use_cupy: bool = False,
+        return_gpu: bool = False
+    ):
+        GalForFlow.__init__(self, config_file)
+        
+        checkpoint_path = self.config["saving"]["save_root"] + self.config["training"]["checkpoints"]
+        self.load_fit(checkpoint_path)
+        
+        param_names = ("log10_Amp", "alpha", "log10_f1", "log10_fknee", "log10_f2")
+        param_names_phys = ("Amp", "alpha", "f1", "fknee", "f2")
+        latex_labels = (
+            r"\log_{10} A_{\rm gal}", 
+            r"\alpha_{\rm gal}", 
+            r"\log_{10} f_1", 
+            r"\log_{10} f_{\rm knee}", 
+            r"\log_{10} f_2"
+        )
+
+        JointPrior.__init__(
+            self,
+            names=param_names,
+            names_phys=param_names_phys,
+            latex_labels=latex_labels,
+            use_cupy=use_cupy,
+            return_gpu=return_gpu,
+            inverse_transform_nd=self._sb_to_pb
+        )
+
+    def _sb_to_pb(self, log10_Amp, alpha, log10_f1, log10_fknee, log10_f2, **kwargs):
+        """Maps: Sampling Basis (SB) -> Physical Basis (PB)"""
+        Amp = 10.0 ** log10_Amp
+        f1 = 10.0 ** log10_f1
+        fknee = 10.0 ** log10_fknee
+        f2 = 10.0 ** log10_f2
+        return Amp, alpha, f1, fknee, f2
+
+    def _tensor_to_xp(self, tensor: torch.Tensor):
+        """Zero-copy transfer from PyTorch Tensor to CuPy/NumPy array."""
+        if self.use_cupy and tensor.is_cuda:
+            from torch.utils.dlpack import to_dlpack
+            return self.xp.from_dlpack(to_dlpack(tensor))
+        return self.xp.asarray(tensor.detach().cpu().numpy())
+    
+    def rvs(self, size: int | Tuple[int, ...] = (1,), **kwargs: Any) -> NDArrayLike:
+        if isinstance(size, int):
+            size = (size,)
+            
+        num_samples = int(np.prod(size))
+        
+        # SB == NFB, so we sample directly and reshape
+        sb_samples_torch = self.sample(num_samples=num_samples)
+        sb_samples = self._tensor_to_xp(sb_samples_torch).reshape(*size, self.num_vars)
+        
+        return self._to_device(sb_samples)
+    
+    def logpdf(self, x: ArrayLike, **kwargs: Any) -> NDArrayLike:
+        x_sb = self.xp.asarray(x)
+        original_shape = x_sb.shape
+        
+        x_sb_flat = x_sb.reshape(-1, self.num_vars)
+        
+        # no jacobians needed because sb=nfb
+        logpdf_sb_flat = self._tensor_to_xp(self.log_prob(x_sb_flat))
+        logpdf_sb = logpdf_sb_flat.reshape(original_shape[:-1])
+        
+        return self._to_device(logpdf_sb)
+    
+
+class HyperGalForPrior(JointPrior):
+    """
+    Conditional Normalizing Flow Prior for Galactic Foreground Model Selection.
+    """
+
+    def __init__(
+        self,
+        config_files: Sequence[str],  
+        use_cupy: bool = False,
+        return_gpu: bool = False,
+    ):
+        self.n_models = len(config_files)
+        
+        self.models = [
+            GalForNFPrior(
+                config_file=cfg, 
+                use_cupy=use_cupy, 
+                return_gpu=True, # who is going to sample networks on cpu?
+            ) for cfg in config_files
+        ]
+
+        names = self.models[0].names
+        names_phys = self.models[0].names_phys
+        latex_labels = self.models[0].latex_label
+
+        super().__init__(
+            names=names,
+            names_phys=names_phys,
+            latex_labels=latex_labels,
+            use_cupy=use_cupy,
+            return_gpu=return_gpu,
+            inverse_transform_nd=self.models[0].inverse_transform_nd
+        )
+
+    def logpdf(self, x: ArrayLike, model_index: ArrayLike, **kwargs: Any) -> NDArrayLike:
+        x_sb = self.xp.asarray(x)
+        mod_idx = self.xp.asarray(model_index).astype(self.xp.int32)
+        
+        if mod_idx.ndim < x_sb.ndim - 1:
+            mod_idx = self.xp.expand_dims(mod_idx, tuple(range(mod_idx.ndim, x_sb.ndim - 1)))
+        
+        mod_idx = self.xp.broadcast_to(mod_idx, x_sb.shape[:-1])
+        out = self.xp.full(x_sb.shape[:-1], -np.inf, dtype=self.xp.float64)
+
+        for i in range(self.n_models):
+            mask = (mod_idx == i)
+            if not mask.any():
+                continue
+            out[mask] = self.models[i].logpdf(x_sb[mask])
+
+        return self._to_device(out)
+
+    def rvs(self, size: int | Tuple[int, ...] = (1,), model_index: ArrayLike = 0, **kwargs: Any) -> NDArrayLike:
+        if isinstance(size, int):
+            size = (size,)
+        
+        mod_idx = self.xp.asarray(model_index).astype(self.xp.int32)
+        if mod_idx.shape != size:
+            mod_idx = self.xp.broadcast_to(mod_idx, size)
+            
+        out_samples = self.xp.empty((*size, self.num_vars), dtype=self.xp.float64)
+        
+        for i in range(self.n_models):
+            mask = (mod_idx == i)
+            n_samples_model = int(mask.sum())
+            if n_samples_model == 0:
+                continue
             out_samples[mask] = self.models[i].rvs(size=n_samples_model)
 
         return self._to_device(out_samples)

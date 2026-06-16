@@ -240,7 +240,6 @@ class HyperPoisson(Prior):
         self.lams = np.array(lams, dtype=np.float64)
         self.n_models = len(self.lams)
         
-        # Move to GPU if necessary
         if self.use_cupy:
             self.lams = self.xp.asarray(self.lams)
 
@@ -250,9 +249,10 @@ class HyperPoisson(Prior):
             try:
                 import cupyx.scipy.special  # noqa: F401
             except ImportError:
-                raise ImportError("ConditionalPoisson requires 'cupyx' when use_cupy=True.")
+                raise ImportError("HyperPoisson requires 'cupyx' when use_cupy=True.")
 
     def _gammaln(self, x: NDArrayLike) -> NDArrayLike:
+        """Helper to safely route to the correct scipy/cupyx gammaln implementation."""
         if self.use_cupy:
             from cupyx.scipy.special import gammaln
             return gammaln(x)
@@ -262,42 +262,62 @@ class HyperPoisson(Prior):
 
     def logpdf(self, x: ArrayLike, model_index: ArrayLike, **kwargs) -> NDArrayLike:
         """
-        Args:
-            x: Array of event counts N. Shape (...,)
-            model_index: Array of model integers. Must broadcast with x.
-        """
-        x_arr = self.xp.asarray(x)
-        mod_idx = self.xp.asarray(model_index).astype(self.xp.int32)
+        Evaluate the log probability of N given M_i.
         
+        Args:
+            x: Array of event counts N. 
+            model_index: Array of model integers.
+        """
+        x_arr = self.xp.asarray(x, dtype=self.xp.float64)
+        mod_idx = self.xp.asarray(model_index).astype(self.xp.int32)
+  
+        if mod_idx.shape != x_arr.shape:
+            if mod_idx.size == x_arr.size:
+                mod_idx = mod_idx.reshape(x_arr.shape)
+            else:
+                mod_idx = self.xp.broadcast_to(mod_idx, x_arr.shape)
+
         out = self.xp.full_like(x_arr, -np.inf, dtype=self.xp.float64)
         
-        # Valid: non-negative integer AND valid model index
         mask = (x_arr >= 0) & (self.xp.round(x_arr) == x_arr) & (mod_idx >= 0) & (mod_idx < self.n_models)
         
-        valid_x = self.xp.where(mask, x_arr, 0.0)
-        valid_mod = self.xp.where(mask, mod_idx, 0)
+        valid_x = x_arr[mask]
+        valid_mod = mod_idx[mask]
         
-        # Broadcast the rates dynamically based on the model index
+        if valid_x.size == 0:
+            return self._to_device(out)
+        
         lam_active = self.lams[valid_mod]
         log_lam_active = self._log_lams[valid_mod]
         
         # ln p(N|M) = N * ln(lam_M) - lam_M - ln(N!)
         log_prob = valid_x * log_lam_active - lam_active - self._gammaln(valid_x + 1.0)
         
-        out[mask] = log_prob[mask]
+        out[mask] = log_prob
+        
         return self._to_device(out)
 
+    # Alias logpmf to logpdf because Eryn's ProbDistContainer checks for logpmf 
+    # when dealing with discrete/integer counting variables.
+    logpmf = logpdf
+
     def rvs(self, size: int | Tuple[int, ...] = (1,), model_index: ArrayLike = 0, **kwargs) -> NDArrayLike:
-        """Draw samples condition on a given model index."""
+        """
+        Draw samples condition on a given model index (or array of model indices).
+        """
+        if isinstance(size, int):
+            size = (size,)
+            
         mod_idx = self.xp.asarray(model_index).astype(self.xp.int32)
         
-        # Ensure it broadcasts to the requested size
-        if mod_idx.ndim == 0:
-            mod_idx = self.xp.full(size, mod_idx)
-            
+        if mod_idx.shape != size:
+            if mod_idx.size == np.prod(size):
+                mod_idx = mod_idx.reshape(size)
+            else:
+                mod_idx = self.xp.broadcast_to(mod_idx, size)
+                
         lam_active = self.lams[mod_idx]
+        
         samples = self.xp.random.poisson(lam_active).astype(self.xp.float64)
+        
         return self._to_device(samples)
-    
-    
-    

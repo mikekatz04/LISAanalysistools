@@ -11,6 +11,7 @@ from ...analysiscontainer import AnalysisContainerArray
 from ..priors.sourceconfigs import BaseSourceConfig
 from ...utils.typing import NDArrayLike
 from gbgpu.gbgpu import GBGPU
+from gbgpu.utils.utility import get_N
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,9 @@ class HyperMove(GlobalFitMove, Move):
         
         self.N_tot_model = {}
         for model in range(self.nmodels):
+            assert self.catalogues[model].shape[0] > self.catalogues[model].shape[1], (
+                "The number of sources should be the first axis of the catalog."
+            )
             self.N_tot_model[model] = self.catalogues[model].shape[0]
         
         self.snr_threshold = snr_threshold
@@ -63,11 +67,22 @@ class HyperMove(GlobalFitMove, Move):
     def setup(self, coords):
         
         if self.first_catalogue_itteration:
-            logger.info("Starting first snr loop of catalogues")
+            logger.info("Starting first snr loop of catalogues")           
+            
             max_logl_walker = np.argmax(self.acs.likelihood()).item()
             acs_max_logl = AnalysisContainerArray([deepcopy(self.acs[max_logl_walker])], gpus=self.acs.gpus)
             xp = acs_max_logl.xp
+            f_min_global = acs_max_logl.settings.f_arr.min().get()
+            df = acs_max_logl.settings.df 
+            oversample = self.waveform_kwargs["oversample"] if "oversample" in self.waveform_kwargs else 1
+            f_min_filter = f_min_global + get_N(1e-30, f_min_global, 1/df, oversample) * df
+            
             for i, catalogue in enumerate(self.catalogues):
+                
+                # filter for out_of_bounds; currently assume f0_idx = 1
+                mask = catalogue[:,1] > f_min_filter
+                catalogue = catalogue[mask, :]
+                
                 ncat = catalogue.shape[0]
                 data_index = xp.asarray(
                     np.repeat(0, ncat), dtype=np.int32
@@ -88,8 +103,8 @@ class HyperMove(GlobalFitMove, Move):
                 h_h = h_h_raw.get() if hasattr(h_h_raw, "get") else h_h_raw
 
                 opt_snrs = np.sqrt(h_h.real)
-                catalogue_filtered = catalogue[opt_snrs > 1.0] # TODO cut adjustable?
-                logger.info(f"For catalogue {i}, {catalogue_filtered.sum()}/{ncat} binaries are above SNR=1.0")
+                catalogue_filtered = catalogue[opt_snrs > 0.5] # TODO cut adjustable?
+                logger.info(f"For catalogue {i}, {catalogue_filtered.shape[0]}/{ncat} binaries are above SNR=0.5")
                 self.catalogues[i] = catalogue_filtered
             
             self.first_catalogue_itteration = False
@@ -100,6 +115,7 @@ class HyperMove(GlobalFitMove, Move):
         self, 
         model_coords: NDArrayLike, 
         resolved_coords: NDArrayLike, 
+        resolved_inds: NDArrayLike,
         stochastic_coords: NDArrayLike
     ) -> NDArrayLike:
         xp = self.acs.xp
@@ -118,15 +134,23 @@ class HyperMove(GlobalFitMove, Move):
                 (ntemps, nwalkers, nleaves_max)
             ).flatten()
         )
+        inds_flat = resolved_inds.flatten()
+        resolved_in = resolved_reshaped[inds_flat, :]
+        model_flat_1 = model_flat_1[inds_flat]
+        
         stochastic_reshaped = xp.asarray(stochastic_coords.reshape(-1, ndim_stoc))
-        model_flat_2 = xp.asarray(model_coords_2d.flatten())
+        model_flat_2 = xp.asarray(model_coords_2d.flatten())# [:,None]
         
-        # TODO check handling of nans in gb values (or "not active" GBs)
-        breakpoint()
-        resolved_pdfs = resolved_priors.logpdf(resolved_reshaped, model_flat_1).reshape((ntemps, nwalkers, nleaves_max))        
+        active_pdfs = resolved_priors.logpdf(resolved_in, model_index=model_flat_1)
+        resolved_pdfs = xp.zeros(ntemps * nwalkers * nleaves_max, dtype=xp.float64)
+        resolved_pdfs[inds_flat] = active_pdfs
+        resolved_pdfs = resolved_pdfs.reshape((ntemps, nwalkers, nleaves_max))   
         logp_resolved = resolved_pdfs.sum(axis=-1)
-        
-        logp_stochastic = stochastic_priors.logpdf(stochastic_reshaped, model_flat_2).reshape((ntemps, nwalkers))
+
+        logp_stochastic = xp.asarray(stochastic_priors.logpdf(
+            stochastic_reshaped, 
+            model_index=model_flat_2
+        ).reshape((ntemps, nwalkers)))
         
         return logp_resolved + logp_stochastic
     
@@ -138,7 +162,7 @@ class HyperMove(GlobalFitMove, Move):
     ) -> NDArrayLike:
         xp = self.acs.xp
         nwalkers = len(self.acs)
-        
+
         Nexpected_resolved_array = np.zeros((self.nmodels, nwalkers))
         for i, catalogue in enumerate(self.catalogues):
             ncat = catalogue.shape[0]
@@ -149,10 +173,10 @@ class HyperMove(GlobalFitMove, Move):
             data_index = xp.asarray(
                 np.repeat(np.arange(nwalkers), ncat), dtype=np.int32
             )
-            
+            # we are only interested in h_h contribution for opt_snr, so this can be anything
             self.wave_gen.get_ll(
                 coords_in, 
-                self.acs.linear_data_arr, # we are only interested in h_h contribution for opt_snr, so this can be anything
+                self.acs.linear_data_arr, 
                 self.acs.linear_psd_arr, 
                 data_index=data_index, 
                 noise_index=data_index, 
@@ -174,7 +198,7 @@ class HyperMove(GlobalFitMove, Move):
         N_tot_array = np.array([self.N_tot_model[m] for m in range(self.nmodels)])
         term_2 = N_tot_array[model_coords_2d]
         
-        return - term_1 + num_resolved_sources * term_2
+        return - term_1 + num_resolved_sources * np.log(term_2)
     
     
     def get_proposal(self, coords, random, supps=None, branch_supps=None):
@@ -254,14 +278,25 @@ class HyperMove(GlobalFitMove, Move):
         self.current_model = model
         self.current_state = state
 
-        num_resolved_sources = deepcopy(state.branches[self.branch_name_map["resolved"]].inds[:].sum(axis=-1))
+        resolved_inds = state.branches[self.branch_name_map["resolved"]].inds[:]
+        num_resolved_sources = deepcopy(resolved_inds.sum(axis=-1))
         old_coords_model = deepcopy(state.branches_coords["hyper"])    
         coords_resolved = deepcopy(state.branches_coords[self.branch_name_map["resolved"]])
         coords_stochastic = deepcopy(state.branches_coords[self.branch_name_map["stochastic"]])
 
         # calculate prior contribution old state
-        logp_source_prev = self.compute_source_contribution(old_coords_model, coords_resolved, coords_stochastic) # self.prior at init
-        logp_number_prev = self.compute_number_contribution(old_coords_model, num_resolved_sources) # Ntot(M), catalog and psd set at init
+        logp_source_prev = self.compute_source_contribution(
+            old_coords_model, 
+            coords_resolved, 
+            resolved_inds, 
+            coords_stochastic
+        ) # self.prior at init
+        logp_source_prev = logp_source_prev.get() if hasattr(logp_source_prev, "get") else logp_source_prev
+        
+        logp_number_prev = self.compute_number_contribution(
+            old_coords_model, 
+            num_resolved_sources
+        ) # Ntot(M), catalog and psd set at init
         
         logp_prev = logp_source_prev + logp_number_prev
 
@@ -274,8 +309,18 @@ class HyperMove(GlobalFitMove, Move):
         )
         
         # calculate prior contribution new state
-        logp_source_curr = self.compute_source_contribution(new_coords_model, coords_resolved, coords_stochastic) # self.prior at init
-        logp_number_curr = self.compute_number_contribution(new_coords_model, num_resolved_sources) # Ntot(M), catalog and psd set at init
+        logp_source_curr = self.compute_source_contribution(
+            new_coords_model, 
+            coords_resolved, 
+            resolved_inds,
+            coords_stochastic
+        ) # self.prior at init
+        logp_source_curr = logp_source_curr.get() if hasattr(logp_source_curr, "get") else logp_source_curr
+
+        logp_number_curr = self.compute_number_contribution(
+            new_coords_model, 
+            num_resolved_sources
+        ) # Ntot(M), catalog and psd set at init
         
         logp_curr = logp_source_curr + logp_number_curr
         
@@ -283,11 +328,14 @@ class HyperMove(GlobalFitMove, Move):
         delta_logp = factors + logp_curr - logp_prev
         accepted = delta_logp > np.log(model.random.rand(ntemps, nwalkers))
         
+        # print("Cold chain accepted hyper proposals are", accepted[0])
+        print("Old model coords are", old_coords_model[0,:,0,0])
+        print("New model coords are", new_coords_model[0,:,0,0])
         # new_coords = deepcopy(state.coords)
         # new_coords["hyper"] = new_coords_model
         
         new_state = GFState(state, copy=True)
-        new_state.branches_coords["hyper"] = new_coords_model
+        new_state.branches_coords["hyper"][accepted] = new_coords_model[accepted]
         assert new_state.log_prior is not None
         new_state.log_prior[:] = logp_curr
 

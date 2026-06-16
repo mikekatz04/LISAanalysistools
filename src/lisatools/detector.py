@@ -183,13 +183,13 @@ class Orbits(LISAToolsParallelModule, ABC):
 
             if not os.path.exists(path_to_this_file + filename):
                 # download files from github if they are not there
-                github_file = f"https://github.com/mikekatz04/LISAanalysistools/blob/main/src/lisatools/orbit_files/{filename}"
+                github_file = f"https://github.com/lisa-analysis-tools/lisa-analysis-tools/blob/main/src/lisatools/orbit_files/{filename}"
                 r = requests.get(github_file)
 
                 # if not success
                 if r.status_code != 200:
                     raise ValueError(
-                        f"Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/lisatools/orbit_files/."
+                        f"Cannot find {filename} within default files located at github.com/lisa-analysis-tools/lisa-analysis-tools/lisatools/orbit_files/."
                     )
                 # write the contents to a local file
                 with open(path_to_this_file + filename, "wb") as f:

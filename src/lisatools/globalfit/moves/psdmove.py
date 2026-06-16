@@ -257,6 +257,11 @@ class PSDMove(GlobalFitMove, StretchMove):
     def compute_log_prior(self, branches_coords, *args, **kwargs):
         # wait to get ntemps, nwalkers
         logp = None
+        if "hyper" in branches_coords:
+            model_coords = branches_coords["hyper"].flatten()
+        else:
+            model_coords = None
+  
         for key in ["psd", "galfor"]:
             if key not in branches_coords:
                 continue
@@ -265,9 +270,10 @@ class PSDMove(GlobalFitMove, StretchMove):
                 logp = np.zeros((ntemps, nwalkers))
 
             logp[:] += (
-                self.priors[key]
-                .logpdf(branches_coords[key].reshape(-1, ndim))
-                .reshape(ntemps, nwalkers)
+                self.priors[key].logpdf(
+                    branches_coords[key].reshape(-1, ndim), 
+                    model_index=model_coords
+                ).reshape(ntemps, nwalkers)
             )
         return logp
 
@@ -280,7 +286,11 @@ class PSDMove(GlobalFitMove, StretchMove):
             logp = new_state.log_prior
             branch_supps = new_state.branches_supplemental
             supps = new_state.supplemental
-
+            if "hyper" in new_state.branches_coords:
+                model_coords = new_state.branches_coords["hyper"]
+            else:
+                model_coords = None
+            
             logP = self.compute_log_posterior(logl, logp)
             x, logP, logl, logp, inds, blobs, supps, branch_supps = (
                 self.temperature_control.temperature_swaps(
@@ -294,6 +304,7 @@ class PSDMove(GlobalFitMove, StretchMove):
                     compute_log_prior=self.compute_log_prior,
                     fancy_swap=True,
                     permute_here=True,
+                    model_info=model_coords
                 )
             )
 
@@ -346,9 +357,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         # self.priors["all_models_together"].full_state = state
         xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
 
+        relevant_branches = ["psd", "galfor"]
+        if "hyper" in state.branches:
+            relevant_branches = relevant_branches + ["hyper"]
+            
         tmp_branches_coords = {
             key: state.branches_coords[key]
-            for key in ["psd", "galfor"]
+            for key in relevant_branches
             if key in state.branches_coords
         }
 
@@ -359,7 +374,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         before_vals = model.analysis_container_arr.likelihood().copy()
 
         # TODO: check this
-        # if self.starting_now:
+        # if self.starting_now:  
         tmp_state.log_prior = self.compute_log_prior(tmp_branches_coords)
         tmp_state.log_like = self.compute_log_like(
             tmp_branches_coords, logp=tmp_state.log_prior, supps=tmp_state.supplemental

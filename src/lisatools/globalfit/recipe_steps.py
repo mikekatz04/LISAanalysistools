@@ -239,27 +239,28 @@ def scatter_around_injection(
 
             draws = np.random.multivariate_normal(center, scaled_cov, size=nwalkers)
 
-            if leaf_prior is not None:
-                bad = ~np.isfinite(leaf_prior.logpdf(draws))
-                tries = 0
-                while bad.any():
-                    if tries >= max_resample_tries:
-                        n_bad = int(bad.sum())
-                        raise RuntimeError(
-                            f"scatter_around_injection: leaf={leaf} temp={t}: "
-                            f"{n_bad}/{nwalkers} walkers still outside prior support "
-                            f"after {max_resample_tries} resample passes. "
-                            f"Injection sampling-basis params = {center.tolist()}. "
-                            f"Likely the injection sits on / outside a prior edge, or "
-                            f"the scatter is too wide for the prior range."
-                            f"Last resampled points (showing up to 10): {draws[bad][:10].tolist()}"
-                        )
-                    redraws = np.random.multivariate_normal(
-                        center, scaled_cov, size=int(bad.sum())
-                    )
-                    draws[bad] = redraws
+            if not "hyper" in priors.keys():
+                if leaf_prior is not None:
                     bad = ~np.isfinite(leaf_prior.logpdf(draws))
-                    tries += 1
+                    tries = 0
+                    while bad.any():
+                        if tries >= max_resample_tries:
+                            n_bad = int(bad.sum())
+                            raise RuntimeError(
+                                f"scatter_around_injection: leaf={leaf} temp={t}: "
+                                f"{n_bad}/{nwalkers} walkers still outside prior support "
+                                f"after {max_resample_tries} resample passes. "
+                                f"Injection sampling-basis params = {center.tolist()}. "
+                                f"Likely the injection sits on / outside a prior edge, or "
+                                f"the scatter is too wide for the prior range."
+                                f"Last resampled points (showing up to 10): {draws[bad][:10].tolist()}"
+                            )
+                        redraws = np.random.multivariate_normal(
+                            center, scaled_cov, size=int(bad.sum())
+                        )
+                        draws[bad] = redraws
+                        bad = ~np.isfinite(leaf_prior.logpdf(draws))
+                        tries += 1
 
             coords[t, :, leaf] = draws
 
@@ -661,11 +662,18 @@ def build_gb_moves(
     logger.debug(f"GBGPU initialized with gpus: {gb.gpus} and backend: {gb.backend}")
     
     #* Make sure that priors are evaluated on gpus
-    gpu_priors_in = deepcopy(priors["gb"].priors_in)
-    for _, item in gpu_priors_in.items():
-        item.use_cupy = True
-    gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
-    
+    gpu_priors = {}
+    for key, prior_container in priors.items():
+        if "gb" in key:
+            gpu_priors_in = deepcopy(prior_container.priors_in)
+            
+            for item in gpu_priors_in.values():
+                item.use_cupy = True
+            
+            gpu_prior = ProbDistContainer(gpu_priors_in, use_cupy=True)
+            gpu_prior.reset_key_order(prior_container.key_order)
+            gpu_priors[key] = gpu_prior
+
     nleaves_max_gb = state.branches["gb"].shape[-2]
     
     #* Get band information
@@ -684,7 +692,13 @@ def build_gb_moves(
         coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
         coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
         
-        check = priors["gb"].logpdf(coords_out_gb)
+        if not "hyper" in priors.keys():
+            check = priors["gb"].logpdf(coords_out_gb)
+        else:
+            model_idx = np.broadcast_to(state.branches_coords["hyper"], (ntemps, nwalkers, nleaves_max_gb, 1))
+            alive_model_idx = model_idx[0, state.branches["gb"].inds[0]]
+            check = priors["gb"].logpdf(coords_out_gb, model_index=alive_model_idx)
+            
         if np.any(np.isinf(check)):
 
             # check which prior is inf
@@ -718,6 +732,7 @@ def build_gb_moves(
 
         logger.info("Removing GBs from residuals")
         template_in = deepcopy(acs.linear_data_arr)
+                
         data_in = deepcopy(acs[0].data_res_arr.data_res_arr.arr[0])
         gb.generate_global_template(
             coords_in_in,
@@ -855,6 +870,31 @@ def build_gb_moves(
         search_kwargs=gb_info.search_kwargs
     )
 
+    #* Setup of normalizing flow proposal
+    if "hyper" in state.branches:
+        from .priors.network import HyperGalaxyPrior
+        from .priors.base import UniformDistribution
+        from .priors.analytical import CosineUniform, DeltaFunction
+        proposal_config_file_1 = r"/sps/lisaf/crondeel/population_fit/data/weak_int_resolved_fdot_rescale/configs/prior_density_galaxy.yaml"
+        proposal_config_file_2 = r"/sps/lisaf/crondeel/population_fit/data/strong_int_resolved_fdot_rescale/configs/prior_density_galaxy.yaml"
+        proposal_configs = [proposal_config_file_1, proposal_config_file_2]
+        gb_flow_proposal = HyperGalaxyPrior(proposal_configs, use_cupy=True, return_gpu=True)
+        
+        proposal_dist = ProbDistContainer(
+            {("logA", "f0_mHz", "fdot", "ra", "sin_dec"): gb_flow_proposal,
+            "phi0": UniformDistribution(minimum=0.0, maximum=2*np.pi, name="phi0", boundary="periodic"),
+            "cos_inc": CosineUniform(name="cos_inc", name_phys="inc"),
+            "psi": UniformDistribution(minimum=0.0, maximum=np.pi, name="psi", boundary="periodic")},
+            use_cupy=True,
+            return_gpu=True
+        )
+        proposal_dist.reset_key_order(["logA", "f0_mHz", "fdot", "phi0", "cos_inc", "psi", "ra", "sin_dec"])
+        
+        pe_proposal_dist = {"gb": proposal_dist}
+        logger.info("Using hierarchical normalizing flow proposals for the GBs.")
+    else:   
+        pe_proposal_dist = gpu_priors
+
     #* ============================================= SEARCH MOVES =============================================
     gb_search_prune_move = GBSpecialRJPriorMove(
         *gb_move_args, 
@@ -901,7 +941,7 @@ def build_gb_moves(
     #* ============================================= PARAMETER ESTIMATION MOVES =============================================
     gb_pe_prior_move = GBSpecialRJPriorMove(
         *gb_move_args, 
-        rj_proposal_distribution=gpu_priors,
+        rj_proposal_distribution=pe_proposal_dist,
         name="rj_prior",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
@@ -962,19 +1002,9 @@ def build_hyper_moves(
     hyper_settings: HyperSetup = curr.source_info["hyper"] 
     branch_name_map: dict = hyper_settings.branch_name_map
     resolved_info = curr.source_info[branch_name_map["resolved"]]
-    stochastic_info = curr.source_info[branch_name_map["stochastic"]]
-    
-    # setup supplemental branches
+    stochastic_info = curr.source_info[branch_name_map["stochastic"]]  
     nwalkers: int = curr.general_info.nwalkers
     ntemps: int = curr.general_info.ntemps
-    
-    breakpoint() # TODO CHECK
-    gb_shape = state.branches_coords["gb"].shape[:-1] # (ntemps, nwalkers, nleaves_max)
-
-    state.branches_supplemental["gb"].add_objects({
-        "snr": np.zeros(gb_shape, dtype=np.float64)
-    })
-    
     
     # setup move
     hyper_move = HyperMove(
@@ -989,10 +1019,23 @@ def build_hyper_moves(
         hyper_settings.catalogues,
         snr_threshold=hyper_settings.resolvability_threshold
     )
-    
+    hyper_move.accepted = np.zeros((ntemps, nwalkers))
     
     return hyper_move
     
     
     
-    
+def get_param_limits(array): # can be used for debugging of coordinate values
+    num_params = array.shape[-1]
+
+    if num_params == 8:
+        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
+    elif num_params == 9:
+        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
+    else:
+        param_labels = num_params * [""]
+    for i, param_label in enumerate(param_labels):
+        param_values = array[..., i]
+        min_array_i = param_values.min()
+        max_array_i = param_values.max()
+        print(f"For parameter {param_label}, the minimun value is {min_array_i}, the maximum value is {max_array_i}")

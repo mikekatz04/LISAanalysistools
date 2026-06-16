@@ -284,7 +284,7 @@ class GlobalFit:
         else:
             self.logger.debug("update this somehow")
             # print("update this somehow")
-            # # breakpoint()
+
             # start from priors by default
             coords = {
                 key: priors[key].rvs(
@@ -314,12 +314,25 @@ class GlobalFit:
                 coords["emri"] = self.curr.source_info["emri"].injection + factor * np.random.randn(
                     self.ntemps, self.nwalkers, self.engine_info.nleaves_max["emri"]
                 )
+            if "hyper" in inds:
+                inds["hyper"][:] = True
+                branch_supps = {
+                    "gb": BranchSupplemental(
+                        {
+                            "snr": xp.zeros(coords["gb"].shape[:-1], dtype=xp.float64),
+                        },
+                        base_shape=(coords["gb"].shape[:-1]),
+                    )
+                }
+            else:
+                branch_supps=None
 
             state = GFState(
                 coords,
                 inds=inds,
                 random_state=np.random.get_state(),
                 sub_state_bases=self.engine_info.branch_states,
+                branch_supplemental=branch_supps
             )
 
             # TODO: generalize all this stuff here (?)
@@ -683,7 +696,7 @@ class GlobalFit:
 
             truths = self.curr.get_truths_dict()
 
-            exclude_from_plot = ["gb"]  # TODO: make this more general
+            exclude_from_plot = []  # TODO: make this more general
             truths_plot = {key: val for key, val in truths.items() if key not in exclude_from_plot}
             branches_plot = [name for name in branch_names if name not in exclude_from_plot]
 

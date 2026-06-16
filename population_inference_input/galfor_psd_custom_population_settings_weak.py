@@ -1,4 +1,4 @@
-"""Run with: uv run python /sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/scripts/run_global.py -sfp /sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/population_inference_input/galaxy_psd_custom_population_settings.py """
+"""Run with: uv run python /sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/scripts/run_global.py -sfp /sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/population_inference_input/galfor_psd_custom_population_settings.py"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from lisatools.domains import FDSettings
 import numpy as np
 import shutil
 import logging
+import os
 
 try:
     import cupy as cp
@@ -25,8 +26,7 @@ from lisatools.utils.constants import *
 from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.stock.erebor import (
     GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings, 
-    HyperSettings, HyperSetup
+    MBHSetup, MBHSettings, GBSetup, GBSettings
 )
 from eryn.prior import ProbDistContainer
 
@@ -46,7 +46,6 @@ from lisatools.globalfit.recipe_steps import (
     RJRecipeStep,
     build_psd_moves,
     build_gb_moves,
-    build_hyper_moves,
     build_mbh_moves_phenom,
     scatter_around_injection,
     mbh_catalogue_to_sampling_basis,
@@ -97,8 +96,8 @@ def setup_recipe(
     ntemps: int = general_info.ntemps
     cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
     psd_info = curr.source_info["psd"]
-
-    #* =============================== INJECT SOURCES =================================
+    
+#* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
     spread_gb = np.array([1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30])
     iteratively_resolved_population_path = "/sps/lisaf/crondeel/pop_inf/data/iteratively_resolved_gbs_0.75yrs_snr7_estnoise_weak_int.npy"
@@ -130,66 +129,44 @@ def setup_recipe(
     )
     # setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds, priors=priors)
 
-    
     #* ================================= BUILD MOVES ==================================
     psd_search_move, psd_pe_move = build_psd_moves(
         engine_info, curr, acs, priors, num_repeats=psd_info.num_prop_repeats
     )
     
-    gb_search_moves, gb_pe_moves = build_gb_moves(
+    _, _ = build_gb_moves(
         engine_info, curr, acs, priors, state
     )
-
-    gbgbpu_initialize_kwargs = dict(
-        orbits=curr.general_info.gpu_orbits,
-        t0=MOJITO_REFERENCE_TIME,
-        force_backend=curr.general_info.gpu_backend,
-        flip_ref_phase=False
-    )
-    gb = GBGPU(**gbgbpu_initialize_kwargs)
-    gb.gpus = [0]
-    gb.d_d = 0.0
-    hyper_move = build_hyper_moves(
-        engine_info, curr, acs, priors, state, gb
-    )
-    
     
     #* ================================= SETUP SEARCH ================================= 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="init psd search")
-    
-    # search_weights = [0.8, 0.15, 0.05]
-    # recipe.add_recipe_component(RJRecipeStep(moves=gb_search_moves, weights=search_weights, convergence_iter=10), name="gb search")
+
     
     #* ========================== SETUP PARAMETER ESTIMATION ========================== 
 
-    prior_combined = GFCombineMove(moves=[gb_pe_moves[0], psd_pe_move, hyper_move], share_temperature_control=False)
-    # fstat_combined = GFCombineMove(moves=[gb_pe_moves[1], psd_pe_move], share_temperature_control=False)
-    # refit_combined = GFCombineMove(moves=[gb_pe_moves[2], psd_pe_move], share_temperature_control=False)
-
-    # pe_weights = [0.8, 0.16, 0.04] # [0.05, 0.45, 0.5] # 
     recipe.add_recipe_component(PERecipeStep(
-        moves=[prior_combined],
-        # moves=[prior_combined, fstat_combined, refit_combined], 
-        # weights=pe_weights, 
+        moves=[psd_pe_move], 
         thin_by=1, 
         convergence_iter=500
     ), name="gb_psd_pe")
-        
+    
+
+    
 
 
 #######################
 ##### SETTINGS ########
 #######################
 
-# LOG10_TM_ASD_RANGE = (-16.0, -13.0)
-# LOG10_OMS_ASD_RANGE = (-12.0, -10.0)
+LOG10_TM_ASD_RANGE = (-16.0, -13.0)
+LOG10_OMS_ASD_RANGE = (-12.0, -10.0)
 
-# # Galactic foreground prior ranges
-# LOG10_AMP_RANGE = (-46.0, -43.0)
-# ALPHA_RANGE = (1.0, 8.0)
-# LOG10_FREQ1_RANGE = (np.log10(1e-3), np.log10(1e-2))
-# LOG10_FREQ2_RANGE = (np.log10(1e-4), np.log10(1e-2))
-# LOG10_FKNEE_RANGE = (np.log10(1e-3), np.log10(1e-1))
+# Galactic foreground prior ranges
+LOG10_AMP_RANGE = (-46.0, -43.0)
+ALPHA_RANGE = (1.0, 8.0)
+LOG10_FREQ1_RANGE = (np.log10(1e-3), np.log10(1e-2))
+LOG10_FREQ2_RANGE = (np.log10(1e-4), np.log10(1e-2))
+LOG10_FKNEE_RANGE = (np.log10(1e-3), np.log10(1e-1))
 
 
 def get_psd_erebor_settings(general_set: GeneralSetup) -> tuple[PSDSetup, StochasticMetadata]:
@@ -215,7 +192,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> tuple[PSDSetup, Stocha
         ndim=2,
         injection=injection,
         log_dir=general_set.file_store_dir,
-        num_prop_repeats=100,
+        num_prop_repeats=50,
     )
     prior_model_config = {
         r"$S_{\rm oms}$": (-12.0, -10.0),
@@ -230,6 +207,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> tuple[PSDSetup, Stocha
     )
 
     return PSDSetup(psd_settings), psd_metadata
+
 
 def get_galfor_erebor_settings(general_set: GeneralSetup) -> tuple[GalForSetup, StochasticMetadata]:
 
@@ -263,18 +241,8 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> tuple[GalForSetup, 
         prior_model_config=prior_model_config,
     )
 
-    if True:
-        from lisatools.globalfit.priors.sourceconfigs import HyperGalForConfig
-        config_file_weak =   "/sps/lisaf/crondeel/population_fit/data/weak_int_galfor/configs/prior_density_galfor.yaml"
-        config_file_strong = "/sps/lisaf/crondeel/population_fit/data/strong_int_galfor/configs/prior_density_galfor.yaml"
-        galfor_config = HyperGalForConfig(
-            [config_file_weak, config_file_strong],
-            use_cupy=True,
-            return_gpu=False
-        )
-    galfor_setup = GalForSetup(galfor_settings, source_config=galfor_config)
-    return galfor_setup, galfor_metadata
-    
+    return GalForSetup(galfor_settings), galfor_metadata
+
 
 def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMetadata]:
     
@@ -283,7 +251,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
     
     #? Will be changed to relative path in the future
-    prior_file_gb = "//sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/mojito_priors/galactic_binary_mojito.prior"
+    prior_file_gb = "/sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/mojito_priors/galactic_binary_mojito.prior"
     
     input_data_arr: DataResidualArray = general_set.input_data_residual_array
     start_freq = float(input_data_arr.settings.f_arr[0])
@@ -344,7 +312,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
         waveform_kwargs=waveform_kwargs,
-        nleaves_max=5000,
+        nleaves_max=6000,
         nleaves_min=0,
         ndim=8,
         betas=betas,
@@ -353,18 +321,16 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         search_kwargs=search_kwargs        
     )
 
-    from lisatools.globalfit.priors.sourceconfigs import HyperGBConfig
-    config_file_weak =   "/sps/lisaf/crondeel/population_fit/data/weak_int_fdot_rescale/configs/prior_density_galaxy.yaml"
-    config_file_strong = "/sps/lisaf/crondeel/population_fit/data/strong_int_fdot_rescale/configs/prior_density_galaxy.yaml"
-    gb_config = HyperGBConfig(
-        [config_file_weak, config_file_strong],
-        [15539324, 43280272], 
-        rho_threshold=7.0,
-        sigma_resolv=2.21,
-        use_cupy=True,
-        return_gpu=False
-    )
-    # gb_config=None
+    # from ..src.lisatools.globalfit.priors.sourceconfigs import HyperGBConfig
+    # gb_config = HyperGBConfig(
+    #     [config_file_weak, config_file_strong],
+    #     [15539324, 43280272], 
+    #     rho_threshold=7.0,
+    #     sigma_resolv=0.15,
+    #     use_cupy=True,
+    #     return_gpu=True
+    # )
+    gb_config=None
     
     gb_setup = GBSetup(gb_settings, source_config=gb_config)
     
@@ -389,33 +355,6 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     return gb_setup, gb_metadata
 
 
-def get_hyper_erebor_settings(general_set: GeneralSetup) -> HyperSetup:
-    
-    prior_file = "/sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/population_priors/model.prior"
-    
-    catalog_weak_int = np.load("/sps/lisaf/crondeel/pop_inf/data/catalogue_dwds_with_weak_interaction_gbgpu.npy")
-    catalog_strong_int = np.load("/sps/lisaf/crondeel/pop_inf/data/catalogue_dwds_with_strong_interaction_gbgpu.npy")
-    catalogues = [catalog_weak_int, catalog_strong_int]
-    
-    betas = 1 / 1.2 ** np.arange(general_set.ntemps)
-    betas[-1] = 0.0001
-    
-    hyper_settings = HyperSettings(
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        ndim=1,
-        prior_file=prior_file,
-        hyper_kwargs={},
-        branch_name_map=dict(resolved="gb", stochastic="galfor"),
-        catalogues=catalogues,
-        resolvability_threshold=7.0,
-        Nmodels=2,
-        betas=betas
-    )
-    
-    return HyperSetup(hyper_settings)
-
-
 def get_general_erebor_settings() -> GeneralSetup:
 
     global_fit_codename = "erebor"
@@ -430,7 +369,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     submission_folder = None # "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    num_iterations = 375
+    num_iterations = 1000
 
     # source_ids = [18, 5, 16]
     start_freq = 9e-5
@@ -448,7 +387,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/sps/lisaf/crondeel/pop_inf/_runs/"
     data_input_path = "/sps/lisaf/crondeel/pop_inf/data/"
     base_file_name = global_fit_version
-    file_store_dir = head_dir + "pop_inf_run_1/"
+    file_store_dir = head_dir + "galfor_estimation_weak_int_long/"
     # head_dir = "/data/asantini/packages/LISAanalysistools/"
     # data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
     # base_file_name = global_fit_version #"test_mbh_18_with_covariance"
@@ -462,7 +401,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda13x" if gpus is not None else "cpu"
-    nwalkers = 24
+    nwalkers = 32
     ntemps = 16
 
 
@@ -604,14 +543,6 @@ def get_global_fit_settings(copy_settings_file=False):
 
     gb_setup, gb_metadata = get_gb_erebor_settings(general_setup)
 
-    ##################################
-    ##################################
-    ###  Hyper Settings  ###############
-    ##################################
-    ##################################
-
-    hyper_setup = get_hyper_erebor_settings(general_setup)
-
     ##############
     ## READ OUT ##
     ##############
@@ -621,7 +552,6 @@ def get_global_fit_settings(copy_settings_file=False):
             "gb": gb_setup,
             "psd": psd_setup,
             "galfor": galfor_setup,
-            "hyper": hyper_setup
         },
         general_info=general_setup,
         rank_info=rank_info,
@@ -634,11 +564,7 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     curr_info = CurrentInfoGlobalFit(global_settings)
-
-    # from pathlib import Path
-    # file_path = Path("/sps/lisaf/crondeel/pop_inf/_runs/inference_testing/GFPRIORS_v2_fd_parameter_estimation_main.h5")
-    # file_path.unlink(missing_ok=True)
-
+    
     return curr_info
 
 

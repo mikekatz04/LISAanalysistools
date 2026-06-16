@@ -123,7 +123,7 @@ class GeneralSettings(Settings):
     ntemps: int | None = None
     window_type: str = "tukey"
     window_taper_duration: float | None = None
-    gpu_backend: str = "cuda12x"
+    gpu_backend: str = "cuda13x"
     gpus: typing.List[int] | None = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] | None = None
     # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
@@ -369,7 +369,7 @@ class GeneralSetup(Setup, GeneralSettings):
         
         if not hasattr(self.data_processor, "process"):
             # TODO: add option for empirical noise path in settings and load from there if provided
-            self.empirical_noise_path = "/workspace/ggfitlisa/ldc/mojito_light/data/INSTRUMENT/L1/NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5"
+            self.empirical_noise_path = "/sps/lisaf/crondeel/mojito_light/data/INSTRUMENT/L1/NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5"
             self.logger.info(f"Loading empirical noise from {self.empirical_noise_path}")
             self._setup_empirical_sensitivity(domain_settings.f_arr)
             self.logger.info("Injecting multivariate correlated noise from SensitivityMatrix.")
