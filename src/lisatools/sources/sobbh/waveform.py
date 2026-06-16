@@ -435,7 +435,27 @@ def _pn_amp_phase_core(
     s = (m1**2 * s1 + m2**2 * s2) / (M**2)
     delta = (m1 - m2) / M
 
+    # Time-to-coalescence from the reference epoch, computed CONSISTENTLY with
+    # the ``tau_to_x`` evolution series used just below: pick tc so that
+    # ``tau_to_x(tau_ref) == x0`` (equivalently ``f(reference) == f_low``)
+    # EXACTLY. The independent t(x) series ``time_to_merger(x0)`` (used here only
+    # as the initial guess) leaves ``f(reference)`` off by ~5e-9 -- a ~0.6 s
+    # chirp-timing offset against an external catalogue. (mojito's
+    # ``TimeCoalescenceSSBFrame`` agrees with this self-consistent value to
+    # ~0.08 s, vs ~0.6 s for ``time_to_merger`` -- i.e. mojito's tc is
+    # tau_to_x-consistent too.) A few Newton steps on ``tau_to_x(tau_ref)=x0``
+    # from the guess converge immediately (the correction is tiny). tc is a
+    # DERIVED quantity, fully fixed by (m1, m2, s1, s2, f_low) -- not a free
+    # parameter.
     tc = time_to_merger(x0, sigma, delta, eta, s) * M
+    for _ in range(4):
+        tau_ref = eta * tc / (5 * M)
+        x_ref = tau_to_x(tau_ref, sigma, delta, eta, s)
+        h = tau_ref * 1e-6
+        dx_dtau = (tau_to_x(tau_ref + h, sigma, delta, eta, s) - x_ref) / h
+        tau_ref = tau_ref - (x_ref - x0) / dx_dtau
+        tc = 5.0 * M * tau_ref / eta
+    tc = float(tc)
     t_subset = times[times < tc]
     tau = eta * (tc - t_subset) / (5 * M)
 
@@ -447,12 +467,10 @@ def _pn_amp_phase_core(
     # is the orbital phase at the reference epoch.
     #
     # We anchor on `phase(tau_to_x(tau_ref))` -- the x the inspiral ACTUALLY
-    # has at the reference epoch in its own tau-parametrization -- rather than
-    # `phase(x0)` with x0=(pi M f_low)^(2/3). `tau_to_x` (x(tau) series) and
-    # `time_to_merger` (t(x) series, used for tc) are independent 3.5PN
-    # inversions and are not exact numerical inverses, so tau_to_x(tau_ref)
-    # differs from x0 by ~1e-9; phase(x) is steep (~1e6 rad) so that becomes a
-    # few-degree offset. Using the self-consistent value zeroes that residual.
+    # has at the reference epoch in its own tau-parametrization. With the
+    # tau_to_x-consistent tc above, `tau_to_x(tau_ref) == x0` to machine
+    # precision, so this equals `phase(x0)`; the explicit form keeps the anchor
+    # exact regardless of the tc solver tolerance.
     tau_ref = eta * tc / (5 * M)  # tau at the reference epoch (t_subset == 0)
     x_ref = tau_to_x(tau_ref, sigma, delta, eta, s)
     Phi = (
