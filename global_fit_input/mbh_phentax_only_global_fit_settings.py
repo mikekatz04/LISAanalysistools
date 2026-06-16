@@ -451,7 +451,13 @@ from bbhx.mbhtdionfly import MBHTDIonFly
 
 MBH_TDIONFLY_HIGHER_MODES = (21, 33, 44)
 MBH_TDIONFLY_TOL = 1e-12  # phentax root-finding tolerance
-MBH_TDIONFLY_COARSE_SCALE = 12.0
+# Adaptive coarse-grained grid spacing = coarse_graining_scale_factor * f.
+# At the phentax default 12 the spacing AT THE MERGER is ~3.66 s, which
+# under-resolves the merger/ringdown -> broadband aliasing -> a spurious flat
+# ~5e-22 low-frequency floor in the TD-spline TDI-on-the-fly path. 48 gives
+# ~0.886 s at the merger and drops the legacy<->on-the-fly mismatch to
+# mm 6.3e-7 (>1mHz) (validated 2026-06-15, MBHB id=0); converges by 48.
+MBH_TDIONFLY_COARSE_SCALE = 48.0
 
 
 _TDIONFLY_GEN_CACHE = {}

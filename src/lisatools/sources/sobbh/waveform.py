@@ -399,28 +399,27 @@ def tau_to_x(tau, sigma, delta, eta, s):
     return x
 
 
-def waveform_generate_h_plus_cross(
-    m1, m2, D, inc, f_low, s1, s2, times, reference_phase=0.0
+def _pn_amp_phase_core(
+    m1, m2, D, f_low, s1, s2, times, reference_phase=0.0
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Generate ``(hp, hx)`` for an aligned-spin SOBBH PN inspiral.
+    """Shared 3.5PN core: ``(A, Phi, t_subset)`` for an aligned-spin inspiral.
 
-    Args:
-        m1: primary mass (solar masses).
-        m2: secondary mass (solar masses).
-        D: luminosity distance (parsec).
-        inc: inclination (rad).
-        f_low: starting GW frequency (Hz).
-        s1: dimensionless aligned spin of primary.
-        s2: dimensionless aligned spin of secondary.
-        times: time grid (seconds) on which to evaluate.
-        reference_phase: orbital phase at the REFERENCE time (i.e. at
-            ``f_low`` / ``x0``), in rad. This is the catalogue convention
-            (``TrueAnomaly`` is the phase at the reference epoch), so the
-            inspiral is anchored there rather than at coalescence.
+    ``A`` is the GW strain amplitude ``(2 M eta x)/D`` (WITHOUT the
+    inclination factors), ``Phi`` is the orbital phase anchored at the
+    reference epoch, and ``t_subset`` is the subset of ``times`` strictly
+    before the estimated coalescence time ``tc``.
 
-    Returns:
-        ``(hp, hx, t_subset)`` with ``hp``/``hx`` of length ``len(t_subset)``,
-        which is the subset of ``times`` strictly before the estimated tc.
+    Both the polarization path (:func:`waveform_generate_h_plus_cross`, which
+    folds in ``inc`` and builds ``hp``/``hx``) and the amplitude/phase path
+    (:func:`waveform_generate_amp_phase`, which feeds the time-domain
+    TDI-on-the-fly response) go through this single core, so the legacy
+    ``pyResponse`` and the on-the-fly responses use identical PN math.
+
+    NOTE (2026-06-15): the strain-amplitude leading sign is ``+``. It was once
+    ``-``, which made the SOBBH single-link response come out as
+    ``-(mojito eta_ij)`` on every link (verified pre-TDI vs the mojito L1
+    ``eta_ij``; the shared ``pyResponseTDI`` is correct). Flipped to ``+`` to
+    match the LDC / lisagwresponse strain-sign convention mojito uses.
     """
     m1 = m1 * MTsun
     m2 = m2 * MTsun
@@ -462,12 +461,37 @@ def waveform_generate_h_plus_cross(
         + phase(x_ref, sigma, delta, eta, s)
     )
 
-    # Strain amplitude. NOTE (2026-06-15): the leading sign was -, which made
-    # the SOBBH single-link response come out as -(mojito eta_ij) on every link
-    # (verified pre-TDI vs the mojito L1 eta_ij; the shared pyResponseTDI is
-    # correct -- the EMRI per-link is not a global -1). Flipped to + to match
-    # the LDC / lisagwresponse strain-sign convention mojito uses.
     A = (2 * M * eta * x) / D
+
+    return A, Phi, t_subset
+
+
+def waveform_generate_h_plus_cross(
+    m1, m2, D, inc, f_low, s1, s2, times, reference_phase=0.0
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate ``(hp, hx)`` for an aligned-spin SOBBH PN inspiral.
+
+    Args:
+        m1: primary mass (solar masses).
+        m2: secondary mass (solar masses).
+        D: luminosity distance (parsec).
+        inc: inclination (rad).
+        f_low: starting GW frequency (Hz).
+        s1: dimensionless aligned spin of primary.
+        s2: dimensionless aligned spin of secondary.
+        times: time grid (seconds) on which to evaluate.
+        reference_phase: orbital phase at the REFERENCE time (i.e. at
+            ``f_low`` / ``x0``), in rad. This is the catalogue convention
+            (``TrueAnomaly`` is the phase at the reference epoch), so the
+            inspiral is anchored there rather than at coalescence.
+
+    Returns:
+        ``(hp, hx, t_subset)`` with ``hp``/``hx`` of length ``len(t_subset)``,
+        which is the subset of ``times`` strictly before the estimated tc.
+    """
+    A, Phi, t_subset = _pn_amp_phase_core(
+        m1, m2, D, f_low, s1, s2, times, reference_phase=reference_phase
+    )
     C = jnp.cos(inc)
     A_plus = A * (1 + C**2)
     A_cross = A * 2 * C
@@ -476,6 +500,43 @@ def waveform_generate_h_plus_cross(
     hx = A_cross * jnp.cos(2 * Phi - jnp.pi / 2)
 
     return hp, hx, t_subset
+
+
+def waveform_generate_amp_phase(
+    m1, m2, D, f_low, s1, s2, times, reference_phase=0.0
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate ``(gw_amp, gw_phase, t_subset)`` for a SOBBH PN inspiral.
+
+    The amplitude/phase representation consumed by the time-domain
+    TDI-on-the-fly response
+    (:class:`lisatools.response.tdionfly.TDTDIonTheFly`, via
+    :class:`bbhx.sobbhtdionfly.SOBBHTDIonFly`). It shares the exact PN core
+    (:func:`_pn_amp_phase_core`) with the legacy ``pyResponse`` path
+    (:func:`waveform_generate_h_plus_cross`), so the two responses differ only
+    in the projection, never in the source physics.
+
+    * ``gw_amp = A = (2 M eta x)/D`` -- the **intrinsic** GW strain amplitude,
+      WITHOUT the inclination factors ``(1+cos^2 i)`` / ``2 cos i``. Those are
+      applied downstream by the response's ``get_hp_hc`` from the ``inc``
+      parameter (exactly as the legacy folds them into ``hp``/``hx``).
+    * ``gw_phase = 2*Phi`` -- the GW phase. The response builds
+      ``hp ~ A (1+cos^2 i) cos(gw_phase)`` and
+      ``hx ~ A (2 cos i) sin(gw_phase)``; with the on-the-fly convention
+      ``hSp = -amp (1+cos^2 i) cos(phase)`` the caller passes
+      ``phase = gw_phase + pi`` so the signs match
+      :func:`waveform_generate_h_plus_cross`.
+
+    Args:
+        Same as :func:`waveform_generate_h_plus_cross` minus ``inc`` (which is
+        applied by the response, not baked into the amplitude here).
+
+    Returns:
+        ``(gw_amp, gw_phase, t_subset)``, each of length ``len(t_subset)``.
+    """
+    A, Phi, t_subset = _pn_amp_phase_core(
+        m1, m2, D, f_low, s1, s2, times, reference_phase=reference_phase
+    )
+    return A, 2.0 * Phi, t_subset
 
 
 # ----------------------------------------------------------- LISA-side wrapper
@@ -630,3 +691,62 @@ class SOBBHWaveform:
         hx_rot = hp_full * s2psi + hx_full * c2psi
 
         return hp_rot + 1j * hx_rot
+
+    def compute_amp_phase(
+        self,
+        m1,
+        m2,
+        s1,
+        s2,
+        dist,
+        f_low,
+        phi0,
+        times=None,
+        t_shift=0.0,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Evaluate the intrinsic GW amplitude / phase on a time grid.
+
+        The amplitude/phase counterpart of :meth:`__call__`: instead of the
+        polarization-rotated complex strain (which the legacy ``pyResponse``
+        path consumes via ``ResponseWrapper``), this returns the inclination-
+        free GW amplitude ``A`` and the GW phase ``2*Phi`` that the
+        time-domain TDI-on-the-fly response
+        (:class:`bbhx.sobbhtdionfly.SOBBHTDIonFly`) consumes. Both paths share
+        the exact PN core, so they are the *same* waveform tool differing only
+        in output representation -- ``inc``/``psi`` are applied by the
+        response, not here.
+
+        The PN time is measured from ``reference_time`` (the fixed catalogue
+        epoch where ``f_low`` is defined), identically to :meth:`__call__`.
+
+        Args:
+            m1, m2, s1, s2, dist, f_low, phi0: as in the sampling basis
+                (``dist`` in Gpc, ``phi0`` the reference-epoch orbital phase).
+            times (np.ndarray, optional): absolute time grid (sec). Defaults to
+                the internal data grid ``arange(N)*dt + t0``.
+            t_shift (float, optional): extra time offset (sec). (default: 0)
+
+        Returns:
+            ``(abs_times, gw_amp, gw_phase)`` -- ``abs_times`` are the absolute
+            times (same epoch convention as the input grid) strictly before
+            ``tc``; ``gw_amp = A``; ``gw_phase = 2*Phi``.
+        """
+        if times is None:
+            times = self._times_np
+        times = np.asarray(times, dtype=float)
+        # PN time measured from the reference epoch (see __call__).
+        pn_times = times - self.reference_time - float(t_shift)
+
+        gw_amp, gw_phase, t_subset_pn = waveform_generate_amp_phase(
+            float(m1),
+            float(m2),
+            float(dist) * 1.0e9,  # Gpc -> parsec
+            float(f_low),
+            float(s1),
+            float(s2),
+            pn_times,
+            reference_phase=float(phi0),
+        )
+        # Map the (pre-tc) PN-time subset back onto the input epoch.
+        abs_times = np.asarray(t_subset_pn) + self.reference_time + float(t_shift)
+        return abs_times, np.asarray(gw_amp), np.asarray(gw_phase)
