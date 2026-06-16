@@ -349,31 +349,30 @@ def get_general_erebor_settings() -> GeneralSetup:
     window_taper_duration = 1 / start_freq
     normalize_window = True
 
-    # Run domain. "wdm" drives the chunked-heterodyne GB likelihood (built
-    # lazily in setup_recipe); "fd" / "stft" are the legacy alternatives.
-    # Env-overridable so a smoke test can fall back without editing the file.
-    basis_domain = os.environ.get("GB_BASIS_DOMAIN", "wdm")
-    stft_dt = 1 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
+    # Run domain. The choice is a ``DomainSettingsBase`` (sub)class whose
+    # ``make_factory`` builds the factory the engine consumes — NOT a string
+    # flag (sprint rule: domains are communicated as a DomainSettingsBase /
+    # factory and dispatched by isinstance). WDM drives the chunked-heterodyne
+    # GB likelihood (built lazily in setup_recipe).
+    domain_cls = WDMSettings
 
-    base_file_name += f"_{basis_domain}"
+    # WDM grid: ~1-hour wavelets via adjust_to_even_bins, which also snaps
+    # Tobs to an exact Nf*Nt*dt span.
+    WAVELET_DUR_BOUNDS = (
+        float(os.environ.get("WAVELET_DUR_MIN", 3600.0)),
+        float(os.environ.get("WAVELET_DUR_MAX", 4400.0)),
+    )
+    NF, NT, WAVELET_DURATION = WDMSettings.adjust_to_even_bins(
+        t_min=WAVELET_DUR_BOUNDS[0], t_max=WAVELET_DUR_BOUNDS[1], dt=dt, Tobs=Tobs,
+    )
+    Tobs = NF * NT * dt  # exact WDM span
+    logger.info(
+        "WDM grid: Nf=%d Nt=%d wavelet_duration=%.1f s Tobs=%.6e s",
+        NF, NT, WAVELET_DURATION, Tobs,
+    )
 
-    # WDM grid (chunked-het): ~1-hour wavelets via adjust_to_even_bins, which
-    # also snaps Tobs to an exact Nf*Nt*dt span. Only built for the WDM domain.
-    NF = NT = WAVELET_DURATION = None
-    if basis_domain == "wdm":
-        WAVELET_DUR_BOUNDS = (
-            float(os.environ.get("WAVELET_DUR_MIN", 3600.0)),
-            float(os.environ.get("WAVELET_DUR_MAX", 4400.0)),
-        )
-        NF, NT, WAVELET_DURATION = WDMSettings.adjust_to_even_bins(
-            t_min=WAVELET_DUR_BOUNDS[0], t_max=WAVELET_DUR_BOUNDS[1],
-            dt=dt, Tobs=Tobs,
-        )
-        Tobs = NF * NT * dt  # exact WDM span
-        logger.info(
-            "WDM grid: Nf=%d Nt=%d wavelet_duration=%.1f s Tobs=%.6e s",
-            NF, NT, WAVELET_DURATION, Tobs,
-        )
+    stft_dt = None
+    base_file_name += f"_{domain_cls.__name__.replace('Settings', '').lower()}"
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
@@ -421,22 +420,16 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
-    # Domain communicated by settings factory, not a string flag (sprint
-    # rule): the engine calls ``factory(times, dt, force_backend)`` after
-    # loading the data so the grid is sized against the real time array.
-    if basis_domain == "wdm":
-        domain_settings = WDMSettings.make_factory(
-            Nf=NF, Nt=NT, min_freq=start_freq, max_freq=end_freq,
-            min_time=20 * WAVELET_DURATION, max_time=(NT - 20) * WAVELET_DURATION,
-        )
-    elif basis_domain == "stft":
-        domain_settings = STFTSettings.make_factory(
-            big_dt=stft_dt, min_freq=start_freq, max_freq=end_freq
-        )
-    else:
-        domain_settings = FDSettings.make_factory(
-            min_freq=start_freq, max_freq=end_freq
-        )
+    # Build the factory from the chosen domain class (above). The engine
+    # calls ``factory(times, dt, force_backend)`` after loading the data so
+    # the grid is sized against the real time array. To switch domains,
+    # reassign ``domain_cls`` and the matching ``make_factory`` call:
+    #   FD  : FDSettings.make_factory(min_freq=start_freq, max_freq=end_freq)
+    #   STFT: STFTSettings.make_factory(big_dt=24*3600.0, min_freq=start_freq, max_freq=end_freq)
+    domain_settings = domain_cls.make_factory(
+        Nf=NF, Nt=NT, min_freq=start_freq, max_freq=end_freq,
+        min_time=20 * WAVELET_DURATION, max_time=(NT - 20) * WAVELET_DURATION,
+    )
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
