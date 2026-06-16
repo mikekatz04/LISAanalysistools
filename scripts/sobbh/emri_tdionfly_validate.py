@@ -28,8 +28,9 @@ DT = 20.0; N_WIN = 16384; TOBS_S = N_WIN * DT
 T_BUF = 1000.0
 N_PTS = 4096                  # trajectory resolution did NOT change |O| (256==16384) -> keep modest
 DELAY = 800.0                 # > k*x SSB-projection delay (~472s) + TDI/interp margin
-MODE_THRESH = 1e-7            # CALL-TIME arg (base.py:143). 1e-5(def)->180->|O|0.967;
-#                              1e-7->388->0.975; 1e-10->724->0.975 (PLATEAUED) -> use 1e-7
+MODE_THRESH = float(os.environ.get("MODE_THRESH", "1e-7"))   # sweepable for the opt-SNR-vs-
+#  modes dig. CALL-TIME arg (base.py:143). 1e-5(def)->180->|O|0.967; 1e-7->388->0.975;
+#  1e-10->724->0.975 (PLATEAUED). opt SNR @1e-7 = 5.95 vs data 4.02 (1.48x).
 
 
 def wd():
