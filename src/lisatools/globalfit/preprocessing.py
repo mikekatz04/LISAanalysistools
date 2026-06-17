@@ -932,7 +932,7 @@ class BaseProcessingStep(SignalProcessor):
             data_signal = self.td_signal
         else:
             # TODO: fix this to be chopped based on Tobs originally
-            if self.td_signal.N != settings.N:
+            if isinstance(settings, TDSettings) and self.td_signal.N != settings.N:
                 assert settings.N < self.td_signal.N
                 _td_sig = TDSignal(self.td_signal[:, :settings.N], TDSettings(settings.N, self.td_signal.dt))
             else:

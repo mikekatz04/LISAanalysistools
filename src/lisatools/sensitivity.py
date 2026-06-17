@@ -38,7 +38,7 @@ from cudakima import AkimaInterpolant1D
 
 from . import detector as lisa_models
 from .detector import L1Orbits, Orbits
-from .domains import DomainSettingsBase
+from .domains import DomainSettingsBase, WDMSettings
 from .stochastic import (
     FittedHyperbolicTangentGalacticForeground,
     HyperbolicTangentGalacticForeground,
@@ -3103,7 +3103,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         if self.num_times == 1:
             # FD: squeeze the time axis; mask is (num_freqs,).
             mask = mask[0]
-        else:
+        elif isinstance(self.basis_settings, WDMSettings):
             # WDM: swap to (num_freqs, num_times) to match basis_shape_active.
             mask = mask.T
 
