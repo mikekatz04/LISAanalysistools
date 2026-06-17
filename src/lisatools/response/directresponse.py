@@ -506,7 +506,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         beta = self.xp.atleast_1d(self.xp.asarray(beta, dtype=self.xp.float64))
         batch_size = len(lam)
 
-        assert np.abs(t0_shift_to_data) < self.dt, (
+        assert np.all(np.abs(t0_shift_to_data) < self.dt), (
             "t0_shift_to_data should be less than the data time step (dt)."
         )
         t0_arr = self.xp.atleast_1d(self.xp.asarray(t0, dtype=np.float64)) + t0_shift_to_data
