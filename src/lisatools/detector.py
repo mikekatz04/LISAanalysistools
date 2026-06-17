@@ -984,19 +984,19 @@ class L1Orbits(Orbits):
     def n(self, x):
         self._n = x
 
-    @property
-    def pycppdetector(self) -> object:
-        """C++ ``OrbitsWrap`` instance backing this orbit class."""
-        # TODO/DOCS: ``self._pycppdetect_args`` looks like a typo for
-        # ``self._pycppdetector_args`` (used by :class:`Orbits`); confirm the
-        # intended attribute and fix.
-        if self._pycppdetector_args is None:
-            raise ValueError(
-                "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
-            )
-        self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetect_args)
+    # @property
+    # def pycppdetector(self) -> object:
+    #     """C++ ``OrbitsWrap`` instance backing this orbit class."""
+    #     # TODO/DOCS: ``self._pycppdetect_args`` looks like a typo for
+    #     # ``self._pycppdetector_args`` (used by :class:`Orbits`); confirm the
+    #     # intended attribute and fix.
+    #     if self._pycppdetector_args is None:
+    #         raise ValueError(
+    #             "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
+    #         )
+    #     self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetector_args)
 
-        return self._pycppdetector
+    #     return self._pycppdetector
 
     def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
         """Configure orbits with interpolation to a target time grid.
