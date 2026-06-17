@@ -26,7 +26,6 @@ if TYPE_CHECKING:
 
     from .analysiscontainer import AnalysisContainer, AnalysisContainerArray
     from .detector import Orbits
-    from .domains import DomainBase, FDSettings, STFTSettings
     from .sensitivity import XYZSensitivityBackend
     from .utils.typing import NDArrayLike, ArrayModule
 
@@ -480,7 +479,7 @@ class FDComputationGroup(BaseDomainComputationGroup):
         ]
 
     def _create_cpp_domain(self):
-        self._cpp_domain = self.backend.FDDomainWrap(*self.domain_args)
+        self._cpp_domain = self.backend.FDDomainForStftWrap(*self.domain_args)
 
     def compute_signal_likelihood_terms(
         self,
