@@ -470,7 +470,10 @@ def get_mbh_tdionfly_gen(
     and the generator's observation window (pre-merger inspiral + margin).
     """
     higher_modes = tuple(higher_modes)
-    key = (dt, t_start, dur_s, force_backend, waveform_duration, higher_modes, id(orbits))
+    key = (
+        dt, t_start, dur_s, force_backend, waveform_duration, higher_modes,
+        coarse_scale, tol, dt_min, id(orbits),
+    )
     if key in _MBH_TDIONFLY_GEN_CACHE:
         return _MBH_TDIONFLY_GEN_CACHE[key]
 
