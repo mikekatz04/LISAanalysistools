@@ -56,9 +56,34 @@ TUKEY_ALPHA = float(os.environ.get("GB_TUKEY_ALPHA", "0.05"))  # 0.01-0.05, GB c
 # hidden) but lets the taper leak into the active region at large Nt -> chunked
 # mm jumps from ~1e-9 to ~1e-3. Override with GB_EDGE to force a fixed value.
 import math as _math
-_edge_taper = int(_math.ceil(0.5 * TUKEY_ALPHA * NT)) + 8  # + margin for WDM window spread
+TAPER_LAYERS = int(_math.ceil(0.5 * TUKEY_ALPHA * NT))   # global Tukey taper width in WDM layers
+_edge_taper = TAPER_LAYERS + 8                            # + margin for WDM window spread
 EDGE = int(os.environ["GB_EDGE"]) if "GB_EDGE" in os.environ else max(20, _edge_taper)
 NT_SUB = int(os.environ.get("NT_SUB", "256")); N_SPARSE = int(os.environ.get("N_SPARSE", "256"))
+N_PAD = int(os.environ.get("N_PAD", str(NT_SUB // 8)))    # chunk overlap-discard half-width
+
+
+def check_taper_coverage():
+    """Guard the chunked-het invariant: the active WDM region MUST exclude the
+    global Tukey taper (the chunked-het cannot reproduce it -- see header). Also
+    sanity-check the per-chunk stitching overlap so chunks have a kept region."""
+    if EDGE < TAPER_LAYERS:
+        raise SystemExit(
+            f"[taper-coverage] edge-cut EDGE={EDGE} does NOT cover the global "
+            f"Tukey taper (~{TAPER_LAYERS} WDM layers = ceil(alpha*Nt/2), "
+            f"alpha={TUKEY_ALPHA}, Nt={NT}). The chunked-het only applies a "
+            f"PER-CHUNK stitching taper, never the global edge taper, so the "
+            f"taper region must be cut out of the active band. Raise GB_EDGE to "
+            f">= {TAPER_LAYERS} (auto-default does this) or lower GB_TUKEY_ALPHA/GB_NT.")
+    kept = NT_SUB - 2 * N_PAD
+    if kept <= 0:
+        raise SystemExit(
+            f"[chunk-overlap] Nt_sub={NT_SUB} with n_pad={N_PAD} leaves no kept "
+            f"region (Nt_sub - 2*n_pad = {kept} <= 0); chunks fully overlap.")
+    print(f"  [taper-coverage OK] EDGE={EDGE} >= taper~{TAPER_LAYERS} layers; "
+          f"chunk kept={kept}/{NT_SUB} (n_pad={N_PAD})", flush=True)
+
+
 SKIP_SIGHET = os.environ.get("SKIP_SIGHET", "0") == "1"  # skip check (4) for fast chunked-param sweeps
 DATA_CACHE = f"/tmp/gb_mojito_data_{int(N_DAYS)}d.npz"
 
@@ -97,6 +122,7 @@ def main():
     D = np.asarray(z["data_td"])[:NCH, :N_WIN]; data_t0 = float(z["data_t0"])
     top_params = np.asarray(z["top_params"]); top_freqs = np.asarray(z["top_freqs"])
     banner(f"GB likelihood 3-check, top {TOPN} mojito hi-f, +/-{BAND_LAYERS} layers")
+    check_taper_coverage()
     TOBS = N_WIN * DT
     orb = L1Orbits(find_file(GB_L1, "GB", 0), force_backend=BACKEND, frame="icrs")
     pad = 1.0e5; lo = max(data_t0 - pad, float(orb.sc_t0)); hi = min(data_t0 + TOBS + pad, float(orb._sc_t_base[-1]))
@@ -140,7 +166,7 @@ def main():
         ll1 = float(np.real(analysis.template_likelihood(dense_wdm)))
 
         # chunked-het computations (orbits MUST match dense)
-        comp = GBWDMComputations(wdm_set, t_ref=REF, Nt_sub=NT_SUB, n_pad=NT_SUB // 8, N_sparse=N_SPARSE,
+        comp = GBWDMComputations(wdm_set, t_ref=REF, Nt_sub=NT_SUB, n_pad=N_PAD, N_sparse=N_SPARSE,
                                  N_cp_sig=0, N_cp_orbit=0, orbits=orb, tdi_config="2nd generation",
                                  force_backend=BACKEND, d_d=0.0, tdi_type="XYZ")
         # (2) chunked TEMPLATE -> lisatools template_likelihood
