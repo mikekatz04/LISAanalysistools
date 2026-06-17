@@ -39,7 +39,7 @@ from eryn.state import State
 from eryn.backends import HDFBackend
 import os
 
-from emritdionfly import EMRITDIonFly
+from lisatools.sources.emri import EMRITDIonFly
 # credit Michael Katz and Alessandro Santini (with internal code contrubtions in docs)
 
 

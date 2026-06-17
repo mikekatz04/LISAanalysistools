@@ -48,7 +48,7 @@ from lisatools.response.tdiconfig import TDIConfig
 
 from few.waveform import FastKerrEccentricEquatorialFlux
 
-from emritdionfly import EMRITDIonFly
+from lisatools.sources.emri import EMRITDIonFly
 
 
 def probe_emri(
