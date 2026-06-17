@@ -12,6 +12,7 @@ promotion to ``gbgpu/gbsignalhetcomputations.py`` is the dedicated V2-port step.
 from __future__ import annotations
 
 import importlib
+import math
 import numpy as np
 from scipy.signal.windows import tukey as _tukey
 
@@ -34,6 +35,43 @@ def _resolve_backend(name):
     raise ValueError(f"Unknown backend {name!r}.")
 
 
+def tukey_taper_layers(Nt, tukey_alpha):
+    """Width, in WDM time-LAYERS, of ONE end of a ``Tukey(alpha)`` taper applied
+    to the full ``Nf*Nt`` time series.
+
+    A ``scipy.signal.windows.tukey(N, alpha)`` cosine-taper covers ``alpha/2`` of
+    the ``N`` samples at each end; one WDM time-layer spans ``Nf`` samples, so the
+    taper is ``alpha/2 * (Nf*Nt) / Nf = alpha*Nt/2`` layers. Automatically decided
+    from the window (``alpha``) and grid (``Nt``) -- no hand-tuning.
+    """
+    return int(math.ceil(0.5 * float(tukey_alpha) * int(Nt)))
+
+
+def recommended_edge_cut(Nt, tukey_alpha, method, margin=8):
+    """Recommended WDM time-edge cut (layers) for a fast-likelihood ``method``,
+    derived automatically from the Tukey taper (:func:`tukey_taper_layers`).
+
+    The two GB fast-likelihoods want OPPOSITE edge regions w.r.t. the global
+    taper:
+
+    * ``method="chunked"`` -- the chunked-het cannot reproduce the global taper
+      (it applies only a per-chunk stitching window), so the active region must
+      EXCLUDE the taper: ``max(20, taper + margin)``.
+    * ``method="sighet"`` -- the sig-het's bin-fold floor is driven by the noisy
+      WDM time-edge pixels (``|c0| -> 0``); it wants the taper INSIDE the active
+      region so the Tukey DOWN-WEIGHTS those edges, i.e. a small cut strictly
+      below the taper: ``max(2, taper // 4)`` (dropping below the taper cut the
+      Nt=512 floor ~17x in testing).
+    """
+    taper = tukey_taper_layers(Nt, tukey_alpha)
+    m = str(method).lower().replace("-", "_")
+    if m in ("chunked", "chunk", "chunked_het"):
+        return max(20, taper + int(margin))
+    if m in ("sighet", "signal_het", "signalhet", "sig_het"):
+        return max(2, taper // 4)
+    raise ValueError(f"method must be 'chunked' or 'sighet', got {method!r}")
+
+
 class GBSignalHetComputations:
     """Signal-het GB likelihood. ``__init__`` precomputes the heterodyne
     reference ``c0`` and bin-fold coefficients (A0/A1/B0/B1) from the data +
@@ -49,13 +87,20 @@ class GBSignalHetComputations:
         t_ref (float): GB phase reference epoch.
         orbits, tdi_config: response orbits (e.g. ``L1Orbits``) + TDI config.
         min_freq, max_freq (float): active WDM band [Hz].
-        sens_model, edge_cut, nt_layer, n_sparse_fd, m_active_half_width,
-        max_r, tukey_alpha, force_backend: as in ``build_pack`` (defaults match).
+        edge_cut (int or None): WDM time-edge cut (layers). ``None`` (default)
+            auto-decides from the window via
+            :func:`recommended_edge_cut(Nt, tukey_alpha, "sighet")` -- a small cut
+            BELOW the Tukey taper so the taper sits inside the active region and
+            down-weights the noisy bin-fold edges (lowers the floor). Pass an int
+            to override. The resolved value is stored on ``self.edge_cut`` and the
+            taper width on ``self.taper_layers``.
+        sens_model, nt_layer, n_sparse_fd, m_active_half_width, max_r,
+        tukey_alpha, force_backend: as in ``build_pack`` (defaults match).
     """
 
     def __init__(self, data_td, ref_params, *, Nf, Nt, dt, t0, t_ref,
                  orbits, tdi_config, min_freq, max_freq, sens_model="scirdv1",
-                 edge_cut=20, nt_layer=64, n_sparse_fd=1024, m_active_half_width=2,
+                 edge_cut=None, nt_layer=64, n_sparse_fd=1024, m_active_half_width=2,
                  max_r=5.0, tukey_alpha=0.05, force_backend="cpu"):
         # tukey_alpha in [0.01, 0.05]: the SAME Tukey taper is applied to the
         # data WDM window (below) AND to the FD-heterodyne sparse window via the
@@ -64,6 +109,16 @@ class GBSignalHetComputations:
         _, module_name, is_gpu = _resolve_backend(force_backend)
         _be = importlib.import_module(f"{module_name}.cgbgpu")
         self.cpp = _be.GBComputationGroupWrapGPU() if is_gpu else _be.GBComputationGroupWrapCPU()
+
+        # Edge-cut auto-decided from the window: the Tukey taper is
+        # tukey_taper_layers(Nt, tukey_alpha) WDM layers, and the sig-het floor is
+        # smallest when that taper sits INSIDE the active region (it down-weights
+        # the noisy bin-fold edges). edge_cut=None -> recommended_edge_cut(...,
+        # "sighet") (a small cut below the taper). Pass an int to override.
+        self.taper_layers = tukey_taper_layers(Nt, tukey_alpha)
+        if edge_cut is None:
+            edge_cut = recommended_edge_cut(Nt, tukey_alpha, "sighet")
+        self.edge_cut = int(edge_cut)
 
         Nobs = Nf * Nt
         Tobs = Nt * Nf * dt
@@ -75,7 +130,7 @@ class GBSignalHetComputations:
                   else np.ones(Nobs))
 
         wdm_kw = dict(t0=t0, min_freq=min_freq, max_freq=max_freq,
-                      min_time=edge_cut * Nf * dt, max_time=(Nt - edge_cut) * Nf * dt,
+                      min_time=self.edge_cut * Nf * dt, max_time=(Nt - self.edge_cut) * Nf * dt,
                       force_backend=force_backend)
         wdm_set_real = WDMSettings(Nf, Nt, dt, is_complex=False, **wdm_kw)
         wdm_set_complex = WDMSettings(Nf, Nt, dt, is_complex=True, **wdm_kw)

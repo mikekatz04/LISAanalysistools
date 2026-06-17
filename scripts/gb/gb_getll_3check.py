@@ -34,7 +34,8 @@ from lisatools.analysiscontainer import AnalysisContainer
 from lisatools.sensitivity import XYZ2SensitivityMatrix
 from gbgpu.gbcomps import GBWDMComputations
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gb_chunked_het"))
-from gbsignalhetcomputations import GBSignalHetComputations  # noqa: E402
+from gbsignalhetcomputations import (  # noqa: E402
+    GBSignalHetComputations, tukey_taper_layers, recommended_edge_cut)
 
 REF = 97729089.327664
 PATH = "/Users/mkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/"
@@ -49,38 +50,62 @@ N_WIN = NF * NT              # layer_df = 1/(2*NF*dt) (Nf-only) unchanged -> ban
 TOPN = int(os.environ.get("GB_TOPN", "3"))
 BAND_LAYERS = int(os.environ.get("GB_BAND_LAYERS", "15"))  # +/- layers around f0
 TUKEY_ALPHA = float(os.environ.get("GB_TUKEY_ALPHA", "0.05"))  # 0.01-0.05, GB chunked/sig-het regime
-# Edge-cut SCALES WITH DURATION. The global Tukey taper covers alpha*Nt/2 WDM
-# time layers at each end. The chunked-het only mirrors the GLOBAL taper outside
-# its per-chunk stitching window, so the active region must exclude the taper:
-# edge_cut >= alpha*Nt/2. A fixed edge-cut (e.g. 20) is fine at small Nt (taper
-# hidden) but lets the taper leak into the active region at large Nt -> chunked
-# mm jumps from ~1e-9 to ~1e-3. Override with GB_EDGE to force a fixed value.
-import math as _math
-TAPER_LAYERS = int(_math.ceil(0.5 * TUKEY_ALPHA * NT))   # global Tukey taper width in WDM layers
-_edge_taper = TAPER_LAYERS + 8                            # + margin for WDM window spread
-EDGE = int(os.environ["GB_EDGE"]) if "GB_EDGE" in os.environ else max(20, _edge_taper)
+# --- PER-METHOD edge-cuts (WDM time-layers cut from each end of the active
+# region). The two methods want OPPOSITE edge regions w.r.t. the global Tukey
+# taper (width ~ alpha*Nt/2 layers), so each carries its OWN adjustable edge-cut:
+#
+#   * chunked-het  CANNOT reproduce the global taper (it only applies a per-chunk
+#     stitching window), so it must EXCLUDE the taper:  EDGE_CHUNK >= taper.
+#     Too-small here -> taper leaks into the active band -> chunked mm 1e-9->1e-3.
+#
+#   * sig-het      floor is the bin-fold quadrature over the noisy WDM time-edge
+#     pixels (|c0|->0). It wants the taper INSIDE the active band so the Tukey
+#     DOWN-WEIGHTS those edges:  EDGE_SIGHET < taper. Dropping EDGE_SIGHET below
+#     the taper cut the floor ~17x at Nt=512 (EC 20->6.5e-4, 5->6.8e-5, 2->3.7e-5).
+#
+# Both are env-overridable; auto-defaults are decided from the window via the
+# installed helpers (tukey_taper_layers / recommended_edge_cut), so the taper is
+# computed automatically from (Nt, alpha). Legacy GB_EDGE sets EDGE_CHUNK.
+TAPER_LAYERS = tukey_taper_layers(NT, TUKEY_ALPHA)
+
+
+def _edge_env(name, default, fallback=None):
+    if name in os.environ:
+        return int(os.environ[name])
+    if fallback is not None and fallback in os.environ:
+        return int(os.environ[fallback])
+    return int(default)
+
+
+EDGE_CHUNK = _edge_env("GB_EDGE_CHUNK", recommended_edge_cut(NT, TUKEY_ALPHA, "chunked"),
+                       fallback="GB_EDGE")
+EDGE_SIGHET = _edge_env("GB_EDGE_SIGHET", recommended_edge_cut(NT, TUKEY_ALPHA, "sighet"))
+EDGE = EDGE_CHUNK  # back-compat alias (dense/chunked grid)
 NT_SUB = int(os.environ.get("NT_SUB", "256")); N_SPARSE = int(os.environ.get("N_SPARSE", "256"))
 N_PAD = int(os.environ.get("N_PAD", str(NT_SUB // 8)))    # chunk overlap-discard half-width
 
 
 def check_taper_coverage():
-    """Guard the chunked-het invariant: the active WDM region MUST exclude the
-    global Tukey taper (the chunked-het cannot reproduce it -- see header). Also
-    sanity-check the per-chunk stitching overlap so chunks have a kept region."""
-    if EDGE < TAPER_LAYERS:
+    """Guard the chunked-het invariant (active region MUST exclude the global
+    Tukey taper -- it cannot reproduce it) + sanity-check the chunk overlap.
+    Reports the sig-het edge-cut and whether it benefits from the taper."""
+    if EDGE_CHUNK < TAPER_LAYERS:
         raise SystemExit(
-            f"[taper-coverage] edge-cut EDGE={EDGE} does NOT cover the global "
-            f"Tukey taper (~{TAPER_LAYERS} WDM layers = ceil(alpha*Nt/2), "
+            f"[taper-coverage] EDGE_CHUNK={EDGE_CHUNK} does NOT cover the global "
+            f"Tukey taper (~{TAPER_LAYERS} layers = ceil(alpha*Nt/2), "
             f"alpha={TUKEY_ALPHA}, Nt={NT}). The chunked-het only applies a "
             f"PER-CHUNK stitching taper, never the global edge taper, so the "
-            f"taper region must be cut out of the active band. Raise GB_EDGE to "
+            f"taper must be cut out of the active band. Raise GB_EDGE_CHUNK to "
             f">= {TAPER_LAYERS} (auto-default does this) or lower GB_TUKEY_ALPHA/GB_NT.")
     kept = NT_SUB - 2 * N_PAD
     if kept <= 0:
         raise SystemExit(
             f"[chunk-overlap] Nt_sub={NT_SUB} with n_pad={N_PAD} leaves no kept "
             f"region (Nt_sub - 2*n_pad = {kept} <= 0); chunks fully overlap.")
-    print(f"  [taper-coverage OK] EDGE={EDGE} >= taper~{TAPER_LAYERS} layers; "
+    sh_note = ("taper IN active band -> edges down-weighted" if EDGE_SIGHET < TAPER_LAYERS
+               else "WARNING: EDGE_SIGHET >= taper -> sig-het floor NOT reduced")
+    print(f"  [edges] chunked EDGE_CHUNK={EDGE_CHUNK} (>= taper {TAPER_LAYERS}); "
+          f"sig-het EDGE_SIGHET={EDGE_SIGHET} ({sh_note}); "
           f"chunk kept={kept}/{NT_SUB} (n_pad={N_PAD})", flush=True)
 
 
@@ -139,17 +164,19 @@ def main():
     wd0 = WDMSettings(NF, NT, DT, t0=data_t0, min_freq=1e-4, max_freq=35e-3, force_backend=BACKEND)
     layer_df = wd0.layer_df
     print(f"  layer_df={layer_df*1e6:.3f} uHz  N_WIN={N_WIN}=NF*NT  "
-          f"NT={NT} tukey={TUKEY_ALPHA} EDGE={EDGE} (taper~{0.5*TUKEY_ALPHA*NT:.0f} layers)", flush=True)
+          f"NT={NT} tukey={TUKEY_ALPHA} taper~{TAPER_LAYERS} layers  "
+          f"EDGE_CHUNK={EDGE_CHUNK} EDGE_SIGHET={EDGE_SIGHET}", flush=True)
 
     print(f"\n  {'rk':>2} {'f0(mHz)':>9} {'SNR':>7} | {'(1)dense':>12} {'(2)chk_tmpl':>12} {'(3)chk_getll':>12} {'(4)sighet':>12} "
-          f"| {'(3)-(1)':>10} {'(4)-(1)':>10} {'mm_chunk':>10}", flush=True)
+          f"| {'(3)-(1)':>10} {'mm_chunk':>10} {'mm_sighet':>10}", flush=True)
     for rank in range(TOPN):
         A0, f0, fdot, phi0, inc, psi, ra, dec = top_params[rank]
         p9 = np.array([A0, f0, fdot, 0.0, phi0, inc, psi, ra, dec])
         m_floor = int(f0 / layer_df)
         lof = (m_floor - BAND_LAYERS) * layer_df; hif = (m_floor + BAND_LAYERS + 1) * layer_df
         wdm_set = WDMSettings(NF, NT, DT, t0=data_t0, min_freq=lof, max_freq=hif,
-                              min_time=EDGE * NF * DT, max_time=(NT - EDGE) * NF * DT, force_backend=BACKEND)
+                              min_time=EDGE_CHUNK * NF * DT, max_time=(NT - EDGE_CHUNK) * NF * DT,
+                              force_backend=BACKEND)
 
         # band-passed mojito WDM data + analysis (same Tukey window as sig-het)
         win = tukey(N_WIN, TUKEY_ALPHA)
@@ -187,16 +214,17 @@ def main():
         # (4) signal-het DIRECT get_ll (GBSignalHetComputations.__init__ builds the
         #     heterodyne coeffs under the hood; same Tukey on data + FD sparse window)
         if SKIP_SIGHET:
-            ll4 = float("nan"); sighet = None
+            ll4 = float("nan"); mm4 = float("nan"); sighet = None
         else:
             sighet = GBSignalHetComputations(D, p9, Nf=NF, Nt=NT, dt=DT, t0=data_t0, t_ref=REF,
                                              orbits=orb, tdi_config="2nd generation",
                                              min_freq=lof, max_freq=hif, tukey_alpha=TUKEY_ALPHA,
-                                             edge_cut=EDGE, force_backend=BACKEND)
+                                             edge_cut=EDGE_SIGHET, force_backend=BACKEND)
             ll4 = float(np.asarray(sighet.get_ll(p9))[0])
+            mm4 = abs(2.0 * ll4 / sighet.d_d)  # sig-het eff_mm over its OWN active region
 
         print(f"  {rank:>2} {f0*1e3:>9.4f} {snr:>7.1f} | {ll1:>12.4e} {ll2:>12.4e} {ll3:>12.4e} {ll4:>12.4e} "
-              f"| {ll3-ll1:>+10.3e} {ll4-ll1:>+10.3e} {mm_chunk:>10.3e}", flush=True)
+              f"| {ll3-ll1:>+10.3e} {mm_chunk:>10.3e} {mm4:>10.3e}", flush=True)
         del comp, sighet; gc.collect()
     print("\nDONE.", flush=True)
 
