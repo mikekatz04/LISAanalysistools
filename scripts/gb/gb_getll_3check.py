@@ -48,9 +48,17 @@ NT = int(os.environ.get("GB_NT", "512"))  # Nt divisible by sig-het Nt_layer (64
 N_WIN = NF * NT              # layer_df = 1/(2*NF*dt) (Nf-only) unchanged -> band isolation preserved
 TOPN = int(os.environ.get("GB_TOPN", "3"))
 BAND_LAYERS = int(os.environ.get("GB_BAND_LAYERS", "15"))  # +/- layers around f0
-EDGE = int(os.environ.get("GB_EDGE", "20"))
-NT_SUB = int(os.environ.get("NT_SUB", "256")); N_SPARSE = int(os.environ.get("N_SPARSE", "256"))
 TUKEY_ALPHA = float(os.environ.get("GB_TUKEY_ALPHA", "0.05"))  # 0.01-0.05, GB chunked/sig-het regime
+# Edge-cut SCALES WITH DURATION. The global Tukey taper covers alpha*Nt/2 WDM
+# time layers at each end. The chunked-het only mirrors the GLOBAL taper outside
+# its per-chunk stitching window, so the active region must exclude the taper:
+# edge_cut >= alpha*Nt/2. A fixed edge-cut (e.g. 20) is fine at small Nt (taper
+# hidden) but lets the taper leak into the active region at large Nt -> chunked
+# mm jumps from ~1e-9 to ~1e-3. Override with GB_EDGE to force a fixed value.
+import math as _math
+_edge_taper = int(_math.ceil(0.5 * TUKEY_ALPHA * NT)) + 8  # + margin for WDM window spread
+EDGE = int(os.environ["GB_EDGE"]) if "GB_EDGE" in os.environ else max(20, _edge_taper)
+NT_SUB = int(os.environ.get("NT_SUB", "256")); N_SPARSE = int(os.environ.get("N_SPARSE", "256"))
 SKIP_SIGHET = os.environ.get("SKIP_SIGHET", "0") == "1"  # skip check (4) for fast chunked-param sweeps
 DATA_CACHE = f"/tmp/gb_mojito_data_{int(N_DAYS)}d.npz"
 
@@ -104,7 +112,8 @@ def main():
     td_set = TDSettings(N_WIN, DT, t0=data_t0, force_backend=BACKEND)
     wd0 = WDMSettings(NF, NT, DT, t0=data_t0, min_freq=1e-4, max_freq=35e-3, force_backend=BACKEND)
     layer_df = wd0.layer_df
-    print(f"  layer_df={layer_df*1e6:.3f} uHz  N_WIN={N_WIN}=NF*NT", flush=True)
+    print(f"  layer_df={layer_df*1e6:.3f} uHz  N_WIN={N_WIN}=NF*NT  "
+          f"NT={NT} tukey={TUKEY_ALPHA} EDGE={EDGE} (taper~{0.5*TUKEY_ALPHA*NT:.0f} layers)", flush=True)
 
     print(f"\n  {'rk':>2} {'f0(mHz)':>9} {'SNR':>7} | {'(1)dense':>12} {'(2)chk_tmpl':>12} {'(3)chk_getll':>12} {'(4)sighet':>12} "
           f"| {'(3)-(1)':>10} {'(4)-(1)':>10} {'mm_chunk':>10}", flush=True)
@@ -157,7 +166,7 @@ def main():
             sighet = GBSignalHetComputations(D, p9, Nf=NF, Nt=NT, dt=DT, t0=data_t0, t_ref=REF,
                                              orbits=orb, tdi_config="2nd generation",
                                              min_freq=lof, max_freq=hif, tukey_alpha=TUKEY_ALPHA,
-                                             force_backend=BACKEND)
+                                             edge_cut=EDGE, force_backend=BACKEND)
             ll4 = float(np.asarray(sighet.get_ll(p9))[0])
 
         print(f"  {rank:>2} {f0*1e3:>9.4f} {snr:>7.1f} | {ll1:>12.4e} {ll2:>12.4e} {ll3:>12.4e} {ll4:>12.4e} "
