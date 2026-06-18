@@ -102,8 +102,12 @@ def check_taper_coverage():
         raise SystemExit(
             f"[chunk-overlap] Nt_sub={NT_SUB} with n_pad={N_PAD} leaves no kept "
             f"region (Nt_sub - 2*n_pad = {kept} <= 0); chunks fully overlap.")
-    sh_note = ("taper IN active band -> edges down-weighted" if EDGE_SIGHET < TAPER_LAYERS
-               else "WARNING: EDGE_SIGHET >= taper -> sig-het floor NOT reduced")
+    # Post real-WDM-projection fix: the sig-het wants EDGE_SIGHET == EDGE_CHUNK so
+    # its active region MATCHES the dense (-> absolute logL tracks it). A smaller
+    # EDGE_SIGHET (the old workaround for the now-eliminated projection floor)
+    # mismatches the time coverage and re-introduces a ~%-of-logL bias.
+    sh_note = ("matches chunked/dense (good)" if EDGE_SIGHET == EDGE_CHUNK
+               else "WARNING: EDGE_SIGHET != EDGE_CHUNK -> coverage mismatch vs dense")
     print(f"  [edges] chunked EDGE_CHUNK={EDGE_CHUNK} (>= taper {TAPER_LAYERS}); "
           f"sig-het EDGE_SIGHET={EDGE_SIGHET} ({sh_note}); "
           f"chunk kept={kept}/{NT_SUB} (n_pad={N_PAD})", flush=True)
