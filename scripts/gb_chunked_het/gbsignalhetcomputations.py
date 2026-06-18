@@ -58,17 +58,23 @@ def recommended_edge_cut(Nt, tukey_alpha, method, margin=8):
       (it applies only a per-chunk stitching window), so the active region must
       EXCLUDE the taper: ``max(20, taper + margin)``.
     * ``method="sighet"`` -- the sig-het's bin-fold floor is driven by the noisy
-      WDM time-edge pixels (``|c0| -> 0``); it wants the taper INSIDE the active
-      region so the Tukey DOWN-WEIGHTS those edges, i.e. a small cut strictly
-      below the taper: ``max(2, taper // 4)`` (dropping below the taper cut the
-      Nt=512 floor ~17x in testing).
+      WDM time-edge pixels (``|c0| -> 0``); it wants the active-region boundary
+      to sit as DEEP as possible INSIDE the Tukey taper, where the Tukey most
+      strongly down-weights it. The deeper the boundary, the smaller AND the more
+      robustly-NEGATIVE the bin-fold floor (the floor flips positive once the
+      boundary leaves the taper). So a SMALL constant cut, clamped just below the
+      taper: ``min(2, taper - 1)`` (>= 1). Measured (tukey=0.05, nt_layer=64):
+      EC=2 < EC=3 < EC=4 in |floor| and all logL < 0 -- EC=2 gives 3.7e-5@Nt512
+      and 6.3e-6@Nt2048, vs 6.5e-4 / 2.3e-5 at the old taper//4. NOTE: densifying
+      the sparse basis (nt_layer -> Nt) does NOT help and breaks the polyphase at
+      stride=1; the floor is the edge quadrature, and the edge-cut is the lever.
     """
     taper = tukey_taper_layers(Nt, tukey_alpha)
     m = str(method).lower().replace("-", "_")
     if m in ("chunked", "chunk", "chunked_het"):
         return max(20, taper + int(margin))
     if m in ("sighet", "signal_het", "signalhet", "sig_het"):
-        return max(2, taper // 4)
+        return max(1, min(2, taper - 1))
     raise ValueError(f"method must be 'chunked' or 'sighet', got {method!r}")
 
 

@@ -62,6 +62,12 @@ MH = int(os.environ.get("M_HALF", "2"))
 # QUADRATURE itself (see summary), which max_r/tukey/n_sparse_fd/nt_layer/m_half
 # all leave unchanged; only the observation length Nt moves it.
 MAX_R = float(os.environ.get("MAX_R", "5.0"))
+# Sparse-edge trim: drop this many sparse-time bins from EACH end of the sig-het
+# basis (N_sparse_t) before the bin-fold, so the ill-conditioned edge bins (where
+# the polyphase/WDM reconstruction is artifact-y and r=c1/c0 is non-linear) are
+# never summed. Only the interior WDM pixels that fall within the trimmed
+# heterodyned basis contribute. "Cut a couple."
+SPARSE_TRIM = int(os.environ.get("SPARSE_TRIM", "0"))
 AMP = 1e-21
 
 
@@ -135,15 +141,52 @@ def run(Nt):
     mm_kernel = float(1.0 - abs(O))
     d_d = float(np.real(analysis.inner_product()))
 
-    # ---- (C) get_ll BIN-FOLD floor: the full d_h/h_h path at cand=ref --------
+    # ---- (C) get_ll BIN-FOLD floor with SPARSE-EDGE TRIM + matched pixels ----
     # data = the reference template itself (self-consistency), so logL must be 0.
+    m_carrier = int(np.floor(p9[1] / layer_df)) - ind_min_f
     invC_c = np.asarray(XYZ2SensitivityMatrix(wsc, model="scirdv1").invC)
     A0, A1, B0, B1 = python_bin_fold(c0c, c0c, invC_c, n_sparse_local, stride,
                                      Nt_active, tdi_type="XYZ")
+    # Polyphase is EVALUATED at the FULL N_sparse_t (unchanged grid + n_start, so
+    # no reference shift) -- we just ZERO the K edge bins' bin-fold weights
+    # (A0/A1/B0/B1) each end, so those artifact-y edge bins don't contribute to
+    # <d|h>/<h|h>. "Evaluate full, cut a couple."
+    K = SPARSE_TRIM
+    A0z, A1z, B0z, B1z = A0.copy(), A1.copy(), B0.copy(), B1.copy()
+    if K > 0:
+        for arr in (A0z, A1z, B0z, B1z):
+            arr[..., :K] = 0.0
+            arr[..., N_sparse_t - K:] = 0.0
+
+    # MATCHED PIXELS: the SAME (m-layer, time) cells the bin-fold actually sums --
+    # active m-band (carrier +/- m_half) x the NON-zeroed (interior) time bins --
+    # so the dense "non-heterodyne" reference uses the identical highlighted pixels.
+    bin_edges = np.arange(N_sparse_t + 1) * stride; bin_edges[-1] = Nt_active
+    bin_idx = np.repeat(np.arange(N_sparse_t), np.diff(bin_edges).astype(int))
+    keep_t = ((bin_idx >= K) & (bin_idx < N_sparse_t - K)).astype(float)   # (Nt_active,)
+    keep_m = np.zeros(Nf_active)
+    keep_m[max(0, m_carrier - MH): m_carrier + MH + 1] = 1.0               # active m-band
+    data_m = np.asarray(c0r.arr) * keep_m[None, :, None] * keep_t[None, None, :]
+    an_m = AnalysisContainer(WDMSignal(data_m, wsr), sens)
+    d_d_m = float(np.real(an_m.inner_product()))    # dense <d|d> over the SAME pixels (REAL WDM)
+    Nst_t = N_sparse_t - 2 * K                       # # of contributing (interior) bins
+
+    # DECISIVE convention check: at cand=ref the bin-fold <d|h> reduces to the
+    # COMPLEX WDM self-inner-product 0.5*Re(Sum c0*.invC.c0). Compare to the REAL
+    # WDM <d|d> over the IDENTICAL pixels. If these differ ~= the bin-fold floor,
+    # the floor is the complex<->real WDM convention, not sampling/quadrature.
+    cc = c0c * keep_m[None, :, None] * keep_t[None, None, :]
+    dd_cplx = 0.5 * float(np.real(np.einsum("cmn,cdmn,dmn->", cc.conj(), invC_c, cc)))
+    conv_reldiff = abs(d_d_m - dd_cplx) / max(d_d_m, 1e-300)
+    # Re-project FIRST (the TEMPLATE's order), same complex invC, same pixels.
+    rec = np.real(cc)
+    dd_reproj = float(np.real(np.einsum("cmn,cdmn,dmn->", rec, invC_c, rec)))
+    reproj_reldiff = abs(d_d_m - dd_reproj) / max(d_d_m, 1e-300)
+
     d_h = np.zeros(1); h_h = np.zeros(1)
     cpp.gb_signal_het_get_ll_in_kernel(
         tdi_wrap, d_h, h_h, c0_sparse[None, ...].copy(),
-        A0[None].copy(), A1[None].copy(), B0[None].copy(), B1[None].copy(),
+        A0z[None].copy(), A1z[None].copy(), B0z[None].copy(), B1z[None].copy(),
         window_full, n_sparse_local,
         np.ascontiguousarray(p9.reshape(1, 9)), np.ascontiguousarray(p9.reshape(1, 9)),
         np.zeros(1, dtype=np.int32),
@@ -154,8 +197,14 @@ def run(Nt):
         layer_df, DT, Tobs, t_start,
         3, 0, NSFD, TUK, MAX_R,
     )
-    ll_getll = -0.5 * d_d + float(d_h[0]) - 0.5 * float(h_h[0])
-    mm_getll = -2.0 * ll_getll / d_d   # eff_mm: the get_ll floor as a mismatch
+    ll_getll = -0.5 * d_d_m + float(d_h[0]) - 0.5 * float(h_h[0])
+    mm_getll = -2.0 * ll_getll / d_d_m   # eff_mm over the MATCHED pixel set
+    rd_dh = abs(d_h[0] - d_d_m) / max(d_d_m, 1e-300)
+    rd_hh = abs(h_h[0] - d_d_m) / max(d_d_m, 1e-300)
+    # TRUE mismatch of the bin-fold path: overlap from ITS OWN <d|h>/<h|h>,
+    # directly comparable to the template path's (B) mm vs dense.
+    O_bf = float(d_h[0]) / np.sqrt(max(d_d_m, 1e-300) * max(float(h_h[0]), 1e-300))
+    mm_bf = float(1.0 - abs(O_bf))
 
     # ---- localize (B): per-time and per-layer L2 error of (kernel - dense) --
     c0_act = np.asarray(c0r.arr)            # (3, Nf_active, Nt_active)
@@ -166,12 +215,19 @@ def run(Nt):
     nt = err_t.size
     edge_frac = float(np.sum(err_t[:nt // 10] ** 2) + np.sum(err_t[-nt // 10:] ** 2)) \
         / max(float(np.sum(err_t ** 2)), 1e-300)
-    m_carrier = int(np.floor(p9[1] / layer_df)) - ind_min_f
-    print(f"\n  Nt={Nt}  Nt_active={Nt_active}  Nf_active={Nf_active}  d_d={d_d:.4e}", flush=True)
+    print(f"\n  Nt={Nt}  Nt_active={Nt_active}  Nf_active={Nf_active}  "
+          f"N_sparse_t={N_sparse_t}->trim{SPARSE_TRIM}->{Nst_t}  d_d(matched)={d_d_m:.4e}", flush=True)
     print(f"    (A) polyphase-from-dense-rfft  max reldiff = {mm_poly:.3e}", flush=True)
     print(f"    (B) kernel fill_global tmpl    mm vs dense = {mm_kernel:.3e}", flush=True)
-    print(f"    (C) get_ll bin-fold floor      eff_mm      = {mm_getll:.3e}  "
+    print(f"    [<d|h>] bin-fold={float(d_h[0]):.8e}  dense(matched)={d_d_m:.8e}  reldiff={rd_dh:.2e}", flush=True)
+    print(f"    [<h|h>] bin-fold={float(h_h[0]):.8e}  dense(matched)={d_d_m:.8e}  reldiff={rd_hh:.2e}", flush=True)
+    print(f"    (C) get_ll bin-fold floor (matched pixels)  eff_mm = {mm_getll:.3e}  "
           f"(logL={ll_getll:+.3e})", flush=True)
+    print(f"    (C) get_ll bin-fold TRUE mismatch 1-|O|     = {mm_bf:.3e}   "
+          f"[cf template (B) {mm_kernel:.1e}]", flush=True)
+    print(f"    [WDM conv] lisatools_REAL={d_d_m:.8e}", flush=True)
+    print(f"               complex 0.5Re(C*.C) = {dd_cplx:.8e}  reldiff={conv_reldiff:.3e}  (=bin-fold {rd_dh:.2e})", flush=True)
+    print(f"               Re(C) first, then .  = {dd_reproj:.8e}  reldiff={reproj_reldiff:.3e}  (template's order)", flush=True)
     print(f"    (B) localize: edge10%-energy frac={edge_frac:.3f}  "
           f"err_t[bulk-median]={np.median(err_t):.3e}  err_t[max]={err_t.max():.3e}", flush=True)
     del orbits, gb_gen; gc.collect()
