@@ -26,7 +26,7 @@ REF = 97729089.327664
 SRC = 1
 DT = 20.0; N_WIN = 16384; TOBS_S = N_WIN * DT
 T_BUF = 1000.0
-N_PTS = 4096                  # trajectory resolution did NOT change |O| (256==16384) -> keep modest
+N_PTS = int(os.environ.get("N_PTS", "4096"))   # sweepable: tests get_tdi spline/phi_ref density
 DELAY = 800.0                 # > k*x SSB-projection delay (~472s) + TDI/interp margin
 MODE_THRESH = float(os.environ.get("MODE_THRESH", "1e-7"))   # sweepable for the opt-SNR-vs-
 #  modes dig. CALL-TIME arg (base.py:143). 1e-5(def)->180->|O|0.967; 1e-7->388->0.975;
