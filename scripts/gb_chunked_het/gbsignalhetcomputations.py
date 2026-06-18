@@ -57,24 +57,20 @@ def recommended_edge_cut(Nt, tukey_alpha, method, margin=8):
     * ``method="chunked"`` -- the chunked-het cannot reproduce the global taper
       (it applies only a per-chunk stitching window), so the active region must
       EXCLUDE the taper: ``max(20, taper + margin)``.
-    * ``method="sighet"`` -- the sig-het's bin-fold floor is driven by the noisy
-      WDM time-edge pixels (``|c0| -> 0``); it wants the active-region boundary
-      to sit as DEEP as possible INSIDE the Tukey taper, where the Tukey most
-      strongly down-weights it. The deeper the boundary, the smaller AND the more
-      robustly-NEGATIVE the bin-fold floor (the floor flips positive once the
-      boundary leaves the taper). So a SMALL constant cut, clamped just below the
-      taper: ``min(2, taper - 1)`` (>= 1). Measured (tukey=0.05, nt_layer=64):
-      EC=2 < EC=3 < EC=4 in |floor| and all logL < 0 -- EC=2 gives 3.7e-5@Nt512
-      and 6.3e-6@Nt2048, vs 6.5e-4 / 2.3e-5 at the old taper//4. NOTE: densifying
-      the sparse basis (nt_layer -> Nt) does NOT help and breaks the polyphase at
-      stride=1; the floor is the edge quadrature, and the edge-cut is the lever.
+    * ``method="sighet"`` -- SINCE the real-WDM projection fix (get_ll project_real
+      =1) the sig-het has NO complex-vs-real bin-fold floor, so it no longer needs
+      the old small-edge-cut workaround that masked that floor. It now shares the
+      chunked rule (``EC >= taper``) so its active region MATCHES the dense/chunked
+      one -- which is what makes its absolute logL track the dense (log-like chain:
+      sig-het - dense ~2.5e-8 at injection, ~2e-2 at logL -500; a mismatched edge-
+      cut instead leaves a ~13%-of-logL bias from different time coverage). The
+      per-method edge split has collapsed; both return the same value.
     """
     taper = tukey_taper_layers(Nt, tukey_alpha)
     m = str(method).lower().replace("-", "_")
-    if m in ("chunked", "chunk", "chunked_het"):
+    if m in ("chunked", "chunk", "chunked_het",
+             "sighet", "signal_het", "signalhet", "sig_het"):
         return max(20, taper + int(margin))
-    if m in ("sighet", "signal_het", "signalhet", "sig_het"):
-        return max(1, min(2, taper - 1))
     raise ValueError(f"method must be 'chunked' or 'sighet', got {method!r}")
 
 
@@ -215,7 +211,8 @@ class GBSignalHetComputations:
                        nt_layer=nt_layer, N_sparse_t=N_sparse_t, stride=stride,
                        ind_min_t=ind_min_t, ind_min_f=ind_min_f, layer_df=wdm_set_real.layer_df,
                        dt=dt, Tobs=Tobs, t0=t0, n_sparse_fd=n_sparse_fd,
-                       tukey_alpha=tukey_alpha, max_r=max_r)
+                       tukey_alpha=tukey_alpha, max_r=max_r,
+                       m_half=int(m_active_half_width))
 
     def get_ll(self, params):
         """logL for candidate ``params`` (length-9 vector or ``(N,9)``)."""
@@ -234,7 +231,7 @@ class GBSignalHetComputations:
             N, 1, 9, 1, 2,
             g["Nf"], g["Nt"], g["Nf_active"], g["Nt_active"],
             g["nt_layer"], g["N_sparse_t"], g["stride"],
-            g["ind_min_t"], g["ind_min_f"], 2,
+            g["ind_min_t"], g["ind_min_f"], g["m_half"],
             g["layer_df"], g["dt"], g["Tobs"], g["t0"],
             3, 0, g["n_sparse_fd"],
             g["tukey_alpha"], g["max_r"], 1,  # project_real=1
