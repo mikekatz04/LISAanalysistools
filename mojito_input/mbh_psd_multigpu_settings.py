@@ -14,7 +14,6 @@ except (ModuleNotFoundError, ImportError) as e:
 
 
 from lisatools.detector import L1Orbits
-from lisatools.domains import FDSettings, STFTSettings
 from lisatools.domaincomputation import DomainComputationGroupArray
 from lisatools.utils.constants import *
 from eryn.state import BranchSupplemental
@@ -25,16 +24,15 @@ from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, MBHSetup, MB
 from eryn.prior import uniform_dist, log_uniform
 from eryn.utils import TransformContainer
 from eryn.prior import ProbDistContainer
-
-from eryn.moves import StretchMove, TemperatureControl
+from eryn.moves import StretchMove, TemperatureControl 
 from eryn.moves.tempering import make_ladder
+
+from lisatools.domains import STFTSettings, FDSettings
+from lisatools.sensitivity import XYZSensitivityBackend
 from lisatools.globalfit.moves import GFCombineMove, MultiGPUPSDMove, TDMBHSpecialMove
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
 from lisatools.globalfit.recipe_steps import subtract_initial_signal
 from lisatools.utils.constants import YRSID_SI
-
-from eryn.utils.updates import Update
-
 from lisatools.globalfit.preprocessing import L1ProcessingStep
 from lisatools.globalfit.recipe_steps import (
     SearchRecipeStep,
@@ -51,6 +49,8 @@ from lisatools.globalfit.postprocessing import (
 )
 
 logger = logging.getLogger(__name__)
+
+MOJITO_REFERENCE_TIME = 97729089.327664
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
@@ -256,7 +256,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     waveform_init_kwargs = dict(
         waveform_kwargs=wave_kwargs,
-        waveform_t0=97729089.327664,
+        waveform_t0=MOJITO_REFERENCE_TIME,
         data_td_settings=general_set.data_td_settings,
         Tobs=1.0
         / 12.0
@@ -352,7 +352,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         nleaves_min=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         ndim=11,
-        num_prop_repeats=40,
+        num_prop_repeats=50,
         betas=betas,
         inner_moves=[StretchMove(),]
     )
@@ -379,29 +379,29 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
 
     global_fit_codename = "erebor"
-    global_fit_version = "CDL1run0_v17"
+    global_fit_version = "CDL1run0_v0"
     global_fit_contact = "ereborl2d@googlegroups.com"
     global_fit_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/releases/tag/cdl1-run_0"
     global_fit_input_data_link = ""
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
-    comment = "6 MBHBs after fixing another bug."
+    comment = "6 MBHBs in time-frequency"
 
-    submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
+    submission_folder = None #"/work/asantini/globalfit/erebor_org_setup/mojito_runs/"
 
-    num_iterations = 100
+    num_iterations = 500
 
     source_ids = [18, 5, 16, 7, 2, 12]
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
-    end_freq = 2.9e-2
+    end_freq = 1e-1
 
-    head_dir = "/data/asantini/globalfit/erebor/mojito_runs/"
+    head_dir = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "6_mbhbs_submission_test"
+    base_file_name = "6_mbhbs_without_emris"
     file_store_dir = head_dir
 
     gpus = [0, 1]
@@ -412,15 +412,22 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 50
+    nwalkers = 40
     ntemps = 4
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
     normalize_window = True
 
-    basis_domain = "fd"
+    basis_domain = "stft"
     stft_dt = 1 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
+
+    if basis_domain == "stft":
+        domain_settings = STFTSettings.make_factory(
+            big_dt=stft_dt, min_freq=start_freq, max_freq=end_freq
+        )
+    else:
+        domain_settings = FDSettings.make_factory(min_freq=start_freq, max_freq=end_freq)
 
     base_file_name += f"_{basis_domain}"
 
@@ -469,19 +476,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
-
-    # Domain communicated by settings factory, not a string flag (sprint
-    # rule): the engine calls ``factory(times, dt, force_backend)`` after
-    # loading the data so the grid is sized against the real time array.
-    if basis_domain == "stft":
-        domain_settings = STFTSettings.make_factory(
-            big_dt=stft_dt, min_freq=start_freq, max_freq=end_freq
-        )
-    else:
-        domain_settings = FDSettings.make_factory(
-            min_freq=start_freq, max_freq=end_freq
-        )
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, average_transfer_functions=True)
 
     general_settings = GeneralSettings(
         num_iterations=num_iterations,
@@ -501,6 +496,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         normalize_window=normalize_window,
+        sensitivity_backend_class=XYZSensitivityBackend,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
         global_fit_codename=global_fit_codename,
         global_fit_version=global_fit_version,
@@ -515,12 +511,6 @@ def get_general_erebor_settings() -> GeneralSetup:
     )
 
     general_setup = GeneralSetup(general_settings)
-    # Band/STFT metadata consumed by the per-source setup functions
-    # (no longer GeneralSettings fields post-merge; the analysis band
-    # itself lives on domain_settings).
-    general_setup.start_freq = start_freq
-    general_setup.end_freq = end_freq
-    general_setup.stft_dt = stft_dt
     return general_setup
 
 

@@ -95,6 +95,11 @@ class PSDMove(GlobalFitMove, StretchMove):
     # stft_tof kernel fast path
     # ------------------------------------------------------------------
 
+    @property
+    def allowed_shards(self) -> int:
+        """Number of shards allowed for the kernel fast path. Currently 1 in this move"""
+        return 1
+
     def transform_coords(self, coords: list, return_cupy: bool = False, xp=None):
         """
         Prepare the coordinates for the move. This can include transforming the parameters if necessary.
@@ -249,7 +254,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         basis = self.sensitivity_backend.basis_settings
         if not isinstance(basis, (FDSettings, STFTSettings)):
             return False
-        return len(self.acs.linear_data_arr) == 1
+        return len(self.acs.linear_data_arr) == self.allowed_shards
 
     # ------------------------------------------------------------------
     # dev ACA path + hybrid dispatch
@@ -474,6 +479,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         Returns:
             Tuple ``(new_state, accepted)``.
         """
+        xp = self.acs.xp # pick the appropriate array library
+        
         # setup model framework for passing necessary
         tmp_branches_coords = {
             key: state.branches_coords[key]
@@ -523,15 +530,31 @@ class PSDMove(GlobalFitMove, StretchMove):
         nwalkers = len(self.acs)
         for w in range(nwalkers):
             psd_params = new_state.branches_coords["psd"][0, w, 0]
+            psd_params = self.psd_transform_fn.both_transforms(psd_params) if self.psd_transform_fn is not None else psd_params
             if "galfor" in new_state.branches_coords:
                 galfor_params = new_state.branches_coords["galfor"][0, w, 0]
+                galfor_params = self.galfor_transform_fn.both_transforms(galfor_params) if self.galfor_transform_fn is not None else galfor_params
             else:
                 galfor_params = None
 
-            new_sens = self.sensitivity_backend(
-                f"walker_{w}", psd_params, galfor_params=galfor_params, transform_fn=self.psd_transform_fn,
-            )
+            gpu = self.acs.gpu_map[w]
+            if self.acs.gpus is not None:
+                with xp.cuda.Device(gpu):
+                    new_sens = self.sensitivity_backend(
+                        f"walker_{w}",
+                        psd_params,
+                        galfor_params=galfor_params,
+                    )
+            else:
+                new_sens = self.sensitivity_backend(
+                    f"walker_{w}",
+                    psd_params,
+                    galfor_params=galfor_params,
+                    transform_fn=self.psd_transform_fn,
+                )
+
             self.acs[w].sens_mat = new_sens
+
 
         self.acs.reset_linear_psd_arr()
         after_vals = self.acs.likelihood()
@@ -587,6 +610,12 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         # _loop_operation/_compute_group_likelihood). Set from the settings
         # file via `psd_move._force_parent_path = True` after move construction.
         self._force_parent_path = False
+
+    @property
+    def allowed_shards(self) -> int:
+        """Number of shards allowed for the kernel fast path. In the multi-GPU case, this is equal to the number of devices."""
+    
+        return len(self.dcga.computation_groups)
 
     def psd_log_like(self, x: list, supps=None, **sens_kwargs):
         """ """

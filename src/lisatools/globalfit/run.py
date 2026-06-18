@@ -485,7 +485,7 @@ class GlobalFit:
                 sens_here = general_info.sensitivity_backend(
                     f"walker_{w}",
                     psd_params,
-                    transform_fn=self.curr.source_info["psd"].transform_fn,
+                    # transform_fn=self.curr.source_info["psd"].transform_fn,
                     galfor_params=galfor_params,
                 )
             else:
