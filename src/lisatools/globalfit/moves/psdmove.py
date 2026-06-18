@@ -85,6 +85,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.starting_now = True
 
         self.sensitivity_backend = sensitivity_backend
+        logger.info(f"Initialized PSDMove with sensitivity backend: {self.sensitivity_backend}")
+        
         self.psd_transform_fn = psd_transform_fn
         self.galfor_transform_fn = galfor_transform_fn
 
