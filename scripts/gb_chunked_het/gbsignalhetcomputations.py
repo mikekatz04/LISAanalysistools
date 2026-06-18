@@ -23,7 +23,7 @@ from lisatools.response.tdiconfig import TDIConfig
 from lisatools.response.tdionfly import GBTDIonTheFly
 
 from gb_signal_het_wdm_v2 import GBSparseComplexWDMGen
-from gb_signal_het_cpp_validate import python_bin_fold
+from gb_signal_het_cpp_validate import python_bin_fold_real
 
 
 def _resolve_backend(name):
@@ -183,13 +183,18 @@ class GBSignalHetComputations:
         window_full = sparse_gen.window_full.astype(np.float64)
         c0_sparse = c0_dense[:, :, n_sparse_local]
         invC_complex = np.asarray(XYZ2SensitivityMatrix(wdm_set_complex, model=sens_model).invC)
-        A0, A1, B0, B1 = python_bin_fold(
+        # REAL-projection coefficients (match the REAL WDM likelihood exactly).
+        # <d|h>: A0/A1 are the REPACKED complex coeffs (kernel's Re(A0*r) -> real,
+        # no extra storage). <h|h>: B0/B1 (conj) + B0nc/B1nc (nonconj) so the
+        # kernel forms 0.5*Re(conj + nonconj) = the real projection (project_real=1).
+        A0, A1, B0, B1, B0nc, B1nc = python_bin_fold_real(
             data_complex, c0_dense, invC_complex, n_sparse_local, stride, Nt_active, tdi_type="XYZ")
 
         # --- owned backend buffers + scalars for get_ll ----------------------
         self.c0_sparse_all = c0_sparse[None, ...].copy()
         self.A0_all = A0[None].copy(); self.A1_all = A1[None].copy()
         self.B0_all = B0[None].copy(); self.B1_all = B1[None].copy()
+        self.B0nc_all = B0nc[None].copy(); self.B1nc_all = B1nc[None].copy()
         self.window_full = window_full; self.n_sparse_local = n_sparse_local
         self.params_ref_all = ref_params.reshape(1, 9).copy()
 
@@ -222,6 +227,7 @@ class GBSignalHetComputations:
         self.cpp.gb_signal_het_get_ll_in_kernel(
             self.tdi_wrap, d_h, h_h, self.c0_sparse_all,
             self.A0_all, self.A1_all, self.B0_all, self.B1_all,
+            self.B0nc_all, self.B1nc_all,
             self.window_full, self.n_sparse_local,
             np.ascontiguousarray(x), self.params_ref_all,
             np.zeros(N, dtype=np.int32),
@@ -231,7 +237,7 @@ class GBSignalHetComputations:
             g["ind_min_t"], g["ind_min_f"], 2,
             g["layer_df"], g["dt"], g["Tobs"], g["t0"],
             3, 0, g["n_sparse_fd"],
-            g["tukey_alpha"], g["max_r"],
+            g["tukey_alpha"], g["max_r"], 1,  # project_real=1
         )
         self.last_d_h = np.asarray(d_h).copy()
         self.last_h_h = np.asarray(h_h).copy()

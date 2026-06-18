@@ -34,6 +34,7 @@ from lisatools.response.tdionfly import GBTDIonTheFly
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gb_signal_het_wdm_v2 import GBSparseComplexWDMGen  # noqa: E402
+from gb_signal_het_cpp_validate import python_bin_fold_real  # noqa: E402
 
 DT = 10.0; NF = 1460; EC = 20; NTL = 64; MH = 2; TUK = 0.05
 NT = int(os.environ.get("NT", "512"))
@@ -158,6 +159,45 @@ def main():
         k = kcoef[:, :, :, b]                      # (4,3,M)
         h_h_real += float(np.real(np.einsum("icm,ijcdm,jdm->", k, G, k)))
 
+    # ---- STAY-COMPLEX route: add the NON-CONJUGATED sum, choose real at the end
+    # real = 0.5 Re(conj_sum + nonconj_sum). conj_sum is the CURRENT bin-fold.
+    def binsum(x):  # sum x (..., Nt_active) into (..., N_sparse_t) bins
+        return np.stack([x[..., bidx == b].sum(-1) for b in range(N_sparse_t)], axis=-1)
+    # <d|h>: nonconj uses data (NO conj) . invC . c0
+    Dnc = np.einsum("amn,abmn->bmn", data_c[:, m_local, :], invC_act)
+    wAnc = Dnc * c0_dense
+    A0nc = binsum(wAnc); A1nc = binsum(wAnc * n_off[None, None, :])
+    dh_conj_raw = np.sum(A0c * r + A1c * dr)                  # == current complex raw
+    dh_nonc_raw = np.sum(A0nc * r + A1nc * dr)
+    d_h_realcplx = 0.5 * np.real(dh_conj_raw + dh_nonc_raw)
+    # <h|h>: E[c,c2] = (conj or not) c0_c . invC . c0_c2 ; conj form pairs conj(r_c) r_c2
+    E_conj = np.conj(c0_dense)[:, None] * invC_act * c0_dense[None, :]   # (3,3,M,Nt_a)
+    E_nonc = c0_dense[:, None] * invC_act * c0_dense[None, :]
+    B0c = binsum(E_conj); B1c = binsum(E_conj * n_off[None, None, None, :])
+    B0n = binsum(E_nonc); B1n = binsum(E_nonc * n_off[None, None, None, :])
+    rc, drc = r, dr
+    hh_conj_raw = (np.einsum("abmt,amt,bmt->", B0c, np.conj(rc), rc)
+                   + np.einsum("abmt,amt,bmt->", B1c, np.conj(rc), drc)
+                   + np.einsum("abmt,amt,bmt->", B1c, np.conj(drc), rc))
+    hh_nonc_raw = (np.einsum("abmt,amt,bmt->", B0n, rc, rc)
+                   + np.einsum("abmt,amt,bmt->", B1n, rc, drc)
+                   + np.einsum("abmt,amt,bmt->", B1n, drc, rc))
+    h_h_realcplx = 0.5 * np.real(hh_conj_raw + hh_nonc_raw)
+
+    # ---- (4) via python_bin_fold_real (the FUNCTION to be ported to C++) ----
+    # kernel-style: d_h = 0.5 Re(Sum A0p r + A1p dr);
+    #               h_h = 0.5 Re(Sum B0 conj(rc)rc2 + B0nc rc rc2 + B1/B1nc dr terms)
+    A0p, A1p, B0f, B1f, B0n, B1n = python_bin_fold_real(
+        data_c[:, m_local, :], c0_dense, invC_act, nsl, stride, Nt_active, "XYZ")
+    d_h_fn = 0.5 * float(np.real(np.sum(A0p * r + A1p * dr)))
+    hh_c = (np.einsum("abmt,amt,bmt->", B0f, np.conj(r), r)
+            + np.einsum("abmt,amt,bmt->", B1f, np.conj(r), dr)
+            + np.einsum("abmt,amt,bmt->", B1f, np.conj(dr), r))
+    hh_n = (np.einsum("abmt,amt,bmt->", B0n, r, r)
+            + np.einsum("abmt,amt,bmt->", B1n, r, dr)
+            + np.einsum("abmt,amt,bmt->", B1n, dr, r))
+    h_h_fn = 0.5 * float(np.real(hh_c + hh_n))
+
     dd = float(np.real(analysis.inner_product()))
     print(f"  NT={NT}  DF0_FRAC={DF0_FRAC}  M={M}  N_sparse_t={N_sparse_t}  stride={stride}", flush=True)
     print(f"  <d|h>  true(real WDM) = {d_h_true:.10e}", flush=True)
@@ -168,6 +208,16 @@ def main():
     print(f"         REAL-PROJ bin  = {h_h_real:.10e}   reldiff={abs(h_h_real-h_h_true)/abs(h_h_true):.3e}", flush=True)
     ll_real = -0.5 * dd + d_h_real - 0.5 * h_h_real
     print(f"  logL real-proj bin-fold = {ll_real:+.4e}  (eff_mm {abs(2*ll_real/dd):.2e})", flush=True)
+    print(f"  --- STAY-COMPLEX (conj + nonconj, choose real at end) ---", flush=True)
+    print(f"  <d|h> real via 0.5Re(conj+nonconj) = {d_h_realcplx:.10e}  reldiff={abs(d_h_realcplx-d_h_true)/abs(d_h_true):.3e}", flush=True)
+    print(f"  <h|h> real via 0.5Re(conj+nonconj) = {h_h_realcplx:.10e}  reldiff={abs(h_h_realcplx-h_h_true)/abs(h_h_true):.3e}", flush=True)
+    ll_rc = -0.5 * dd + d_h_realcplx - 0.5 * h_h_realcplx
+    print(f"  logL stay-complex->real = {ll_rc:+.4e}  (eff_mm {abs(2*ll_rc/dd):.2e})", flush=True)
+    print(f"  --- python_bin_fold_real (FUNCTION -> C++ port contract) ---", flush=True)
+    print(f"  <d|h> fn = {d_h_fn:.10e}  reldiff={abs(d_h_fn-d_h_true)/abs(d_h_true):.3e}", flush=True)
+    print(f"  <h|h> fn = {h_h_fn:.10e}  reldiff={abs(h_h_fn-h_h_true)/abs(h_h_true):.3e}", flush=True)
+    ll_fn = -0.5 * dd + d_h_fn - 0.5 * h_h_fn
+    print(f"  logL fn  = {ll_fn:+.4e}  (eff_mm {abs(2*ll_fn/dd):.2e})", flush=True)
 
 
 if __name__ == "__main__":

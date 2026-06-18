@@ -38,7 +38,7 @@ import gbgpu_backend_cpu.cgbgpu as _be
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gb_signal_het_wdm_v2 import GBSparseComplexWDMGen  # noqa: E402
-from gb_signal_het_cpp_validate import python_bin_fold  # noqa: E402
+from gb_signal_het_cpp_validate import python_bin_fold, python_bin_fold_real  # noqa: E402
 
 DT = 10.0; NF = 1460
 EC = int(os.environ.get("EDGE", "20"))   # WDM time-edge cut (layers) for the active region
@@ -68,6 +68,7 @@ MAX_R = float(os.environ.get("MAX_R", "5.0"))
 # never summed. Only the interior WDM pixels that fall within the trimmed
 # heterodyned basis contribute. "Cut a couple."
 SPARSE_TRIM = int(os.environ.get("SPARSE_TRIM", "0"))
+PROJECT_REAL = int(os.environ.get("PROJECT_REAL", "1"))  # 1: real WDM projection
 AMP = 1e-21
 
 
@@ -145,16 +146,21 @@ def run(Nt):
     # data = the reference template itself (self-consistency), so logL must be 0.
     m_carrier = int(np.floor(p9[1] / layer_df)) - ind_min_f
     invC_c = np.asarray(XYZ2SensitivityMatrix(wsc, model="scirdv1").invC)
-    A0, A1, B0, B1 = python_bin_fold(c0c, c0c, invC_c, n_sparse_local, stride,
-                                     Nt_active, tdi_type="XYZ")
-    # Polyphase is EVALUATED at the FULL N_sparse_t (unchanged grid + n_start, so
-    # no reference shift) -- we just ZERO the K edge bins' bin-fold weights
-    # (A0/A1/B0/B1) each end, so those artifact-y edge bins don't contribute to
-    # <d|h>/<h|h>. "Evaluate full, cut a couple."
+    # REAL-projection coefficients (PROJECT_REAL=1 default): A0/A1 repacked,
+    # plus nonconj B0nc/B1nc. PROJECT_REAL=0 falls back to legacy complex via
+    # the old python_bin_fold (Hermitian) for comparison.
+    if PROJECT_REAL:
+        A0, A1, B0, B1, B0nc, B1nc = python_bin_fold_real(
+            c0c, c0c, invC_c, n_sparse_local, stride, Nt_active, tdi_type="XYZ")
+    else:
+        A0, A1, B0, B1 = python_bin_fold(c0c, c0c, invC_c, n_sparse_local, stride,
+                                         Nt_active, tdi_type="XYZ")
+        B0nc = np.zeros_like(B0); B1nc = np.zeros_like(B1)
     K = SPARSE_TRIM
     A0z, A1z, B0z, B1z = A0.copy(), A1.copy(), B0.copy(), B1.copy()
+    B0ncz, B1ncz = B0nc.copy(), B1nc.copy()
     if K > 0:
-        for arr in (A0z, A1z, B0z, B1z):
+        for arr in (A0z, A1z, B0z, B1z, B0ncz, B1ncz):
             arr[..., :K] = 0.0
             arr[..., N_sparse_t - K:] = 0.0
 
@@ -187,6 +193,7 @@ def run(Nt):
     cpp.gb_signal_het_get_ll_in_kernel(
         tdi_wrap, d_h, h_h, c0_sparse[None, ...].copy(),
         A0z[None].copy(), A1z[None].copy(), B0z[None].copy(), B1z[None].copy(),
+        B0ncz[None].copy(), B1ncz[None].copy(),
         window_full, n_sparse_local,
         np.ascontiguousarray(p9.reshape(1, 9)), np.ascontiguousarray(p9.reshape(1, 9)),
         np.zeros(1, dtype=np.int32),
@@ -195,7 +202,7 @@ def run(Nt):
         NTL, N_sparse_t, stride,
         ind_min_t, ind_min_f, 2,
         layer_df, DT, Tobs, t_start,
-        3, 0, NSFD, TUK, MAX_R,
+        3, 0, NSFD, TUK, MAX_R, int(PROJECT_REAL),
     )
     ll_getll = -0.5 * d_d_m + float(d_h[0]) - 0.5 * float(h_h[0])
     mm_getll = -2.0 * ll_getll / d_d_m   # eff_mm over the MATCHED pixel set
