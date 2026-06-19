@@ -20,6 +20,7 @@ import gc
 import logging
 import os
 import shutil
+import warnings
 from copy import deepcopy
 from typing import Optional
 
@@ -189,6 +190,35 @@ EMRI_MODE_SELECTOR_KWARGS = {"mode_selection_threshold": 1e-2}
 _EMRI_WAVE_GEN_CACHE = {}
 
 
+class _EMRISpecialFrameWrap:
+    """Force the SPECIAL EMRI frame on every call to the EMRI ResponseWrapper.
+
+    The EMRI sky/spin params are FEW **ecliptic-polar** angles (qS, phiS, qK,
+    phiK), so the FEW h+/hx (viewing + polarization) are built in the ecliptic
+    frame. The response then runs against **frame="icrs"** orbits, so the sky
+    must be converted ecliptic -> ICRS inside the wrapper: the underlying
+    ResponseWrapper is built with ``is_ecliptic_latitude=False`` (beta = pi/2 - qS
+    = ecliptic latitude) and every call passes ``convert_to_ra_dec=True`` (lam,
+    beta -> ra, dec). This is the validated SPECIAL setup (ecl-polar sky + RAW
+    FILE spin + ICRS orbits) that reproduces the mojito EMRI to mm ~ 4e-5 and
+    removes the 1.49x amplitude (which came from ecliptic-converting the spin).
+    The per-call deprecation warning the conversion emits is suppressed -- this
+    is the intended EMRI path for now.
+    """
+
+    def __init__(self, wave_gen):
+        self._wave_gen = wave_gen
+
+    def __call__(self, *params, **kwargs):
+        kwargs.setdefault("convert_to_ra_dec", True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return self._wave_gen(*params, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._wave_gen, name)
+
+
 def get_emri_response_wrapper(
     *,
     Tobs: float,
@@ -233,15 +263,22 @@ def get_emri_response_wrapper(
         "order": order,
         "remove_garbage": "zero",
         "t_buffer": t_buffer,
+        # SPECIAL EMRI frame: index_beta=7 carries the ecliptic POLAR angle qS, so
+        # is_ecliptic_latitude=False maps it to the ecliptic latitude (pi/2 - qS).
+        # _EMRISpecialFrameWrap then forces convert_to_ra_dec=True per call so the
+        # sky goes ecliptic -> ICRS for the frame="icrs" orbits.
+        "is_ecliptic_latitude": False,
     }
 
     if orbits is None:
         orbits = EqualArmlengthOrbits(force_backend=force_backend)
-    wave_gen = ResponseWrapper(
-        few_generator,
-        orbits=orbits,
-        t0=t_start,
-        **response_kwargs,
+    wave_gen = _EMRISpecialFrameWrap(
+        ResponseWrapper(
+            few_generator,
+            orbits=orbits,
+            t0=t_start,
+            **response_kwargs,
+        )
     )
     _EMRI_WAVE_GEN_CACHE[key] = wave_gen
     return wave_gen

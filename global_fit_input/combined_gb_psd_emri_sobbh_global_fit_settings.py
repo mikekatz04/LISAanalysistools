@@ -412,7 +412,11 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
         emri_td = np.zeros_like(sangria_data)
         for i, params in enumerate(emri_injections):
             logger.info(f"  EMRI {i+1}/{len(emri_injections)}: generating waveform...")
-            sig = np.asarray(emri_wave_gen(*params, convert_to_ra_dec=False))
+            # SPECIAL EMRI frame: let get_emri_response_wrapper's _EMRISpecialFrameWrap
+            # force convert_to_ra_dec=True (ecl sky -> ICRS for frame="icrs" orbits) so the
+            # synthetic injection matches the (also-converting) template. Do NOT pass
+            # convert_to_ra_dec=False here -- that would desync injection vs template.
+            sig = np.asarray(emri_wave_gen(*params))
             sig = _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
             emri_td = emri_td + sig
             logger.info(f"  EMRI {i+1}/{len(emri_injections)}: done")
