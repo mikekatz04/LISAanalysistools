@@ -534,7 +534,7 @@ class GlobalFit:
                 if not params:
                     continue
                 template = ac.build_template(params)
-                breakpoint()
+                # breakpoint()  # debug hook: inspect template vs ac.data here
                 ac.data.add_signal(template, sign=-1)
 
             # stft_tof fallback for branches without a registered generator.

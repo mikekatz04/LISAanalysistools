@@ -103,6 +103,7 @@ from lisatools.response.tdiconfig import TDIConfig
 
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.detector import DefaultOrbits, LISAModel
+from lisatools.sources.utils import icrs_to_ecliptic
 from lisatools.domains import (
     FDSettings,
     TDSettings,
@@ -1026,33 +1027,50 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
     )
 
     if DATA_PROCESSOR == "mojito":
-        # NOTE: catalogue field names are best-guess (mojito EMRI catalogue
-        # schema unverified) — correct them against the actual
-        # emri_cat_mojito_lite_processed_MT.hdf5 keys. ICRS run frame
-        # (2026-06 reversion): sky and spin directions are read raw in
-        # ICRS — qS/phiS are polar/azimuthal: qS = pi/2 - Dec, phiS = RA —
-        # and the orbits are loaded with frame='icrs' to match (no
-        # rotation here).
+        # SPECIAL EMRI frame (validated 2026-06-19, scripts/sobbh/
+        # emri_frame_convert_check.py): the FEW intrinsic h+/hx are built
+        # from ECLIPTIC-POLAR sky angles (qS = pi/2 - ecliptic-latitude,
+        # phiS = ecliptic-longitude — converted from the catalogue ICRS
+        # RA/Dec) together with the RAW FILE spin angles (qK, phiK read
+        # straight from the catalogue, NOT ecliptic-converted — converting
+        # the spin is what produced the spurious 1.49x amplitude). The
+        # ResponseWrapper is built is_ecliptic_latitude=False and called
+        # convert_to_ra_dec=True (see _EMRISpecialFrameWrap in
+        # global_fit_settings) so the sky goes ecliptic -> ICRS for the
+        # frame="icrs" orbits, while the spin stays in the FEW frame. This
+        # reproduces the mojito EMRI to mm ~ 4e-5.
         _emri_cat = general_set.data_processor.catalogue["EMRI"]
-        emri_injections_full_basis = np.asarray([
-            [
-                _emri_cat[i]["PrimaryMassSSBFrame"],        # M
-                _emri_cat[i]["SecondaryMassSSBFrame"],      # mu
-                _emri_cat[i]["PrimarySpinParameter"],                # a
-                _emri_cat[i]["SemiLatusRectum"],     # p0
-                _emri_cat[i]["Eccentricity"],        # e0
-                np.cos(_emri_cat[i]["InclinationAngle"]),   # xI0
-                _emri_cat[i]["LuminosityDistance"] / 1e3,   # dist (Mpc -> Gpc)
-                _emri_cat[i]["Declination"],    # qS (ICRS polar)
-                _emri_cat[i]["RightAscension"] % (2 * np.pi),  # phiS (ICRS azimuth)
-                _emri_cat[i]["PolarAnglePrimarySpin"],           # qK (ICRS polar)
-                _emri_cat[i]["AzimuthalAnglePrimarySpin"],       # phiK (ICRS azimuth)
-                _emri_cat[i]["AzimuthalPhase"],         # Phi_phi0
-                _emri_cat[i]["PolarPhase"],       # Phi_theta0
-                _emri_cat[i]["RadialPhase"],           # Phi_r0
-            ]
-            for i in sorted(_emri_cat.keys())
-        ])
+        _emri_rows = []
+        for i in sorted(_emri_cat.keys()):
+            _e = _emri_cat[i]
+            _ra = float(_e["RightAscension"]) % (2 * np.pi)
+            _dec = float(_e["Declination"])
+            _lam_S, _beta_S = icrs_to_ecliptic(_ra, _dec)
+            _qS_e = float(np.pi / 2 - _beta_S)          # ecliptic polar angle
+            _phiS_e = float(_lam_S) % (2 * np.pi)       # ecliptic longitude
+            _emri_rows.append([
+                _e["PrimaryMassSSBFrame"],        # M
+                _e["SecondaryMassSSBFrame"],      # mu
+                _e["PrimarySpinParameter"],       # a
+                _e["SemiLatusRectum"],            # p0
+                _e["Eccentricity"],               # e0
+                # FastKerrEccentricEquatorialFlux is an EQUATORIAL model:
+                # xI0 must be +1 (prograde) — the catalogue "InclinationAngle"
+                # is the VIEWING inclination (line of sight vs orbital L), which
+                # FEW derives internally from the qS/qK sky+spin geometry, not an
+                # intrinsic input. Mirrors the validated SPECIAL recipe
+                # (scripts/sobbh/emri_frame_convert_check.py INTR[5]=1.0).
+                1.0,                              # xI0 (equatorial prograde)
+                _e["LuminosityDistance"] / 1e3,   # dist (Mpc -> Gpc)
+                _qS_e,                            # qS (ecliptic polar)
+                _phiS_e,                          # phiS (ecliptic longitude)
+                _e["PolarAnglePrimarySpin"],      # qK (RAW file spin)
+                _e["AzimuthalAnglePrimarySpin"],  # phiK (RAW file spin)
+                _e["AzimuthalPhase"],             # Phi_phi0
+                _e["PolarPhase"],                 # Phi_theta0
+                _e["RadialPhase"],                # Phi_r0
+            ])
+        emri_injections_full_basis = np.asarray(_emri_rows)
     else:
         emri_injections_full_basis = EMRI_INJECTIONS_FULL_BASIS
 
@@ -1336,15 +1354,41 @@ _WAVE_WRAP_CACHE = {}
 
 
 def _get_emri_wave_wrap(general_info, nchannels: int = NCHANNELS):
-    """Build (and cache) the EMRI domain-wrapped template generator."""
+    """Build (and cache) the EMRI domain-wrapped template generator.
+
+    The intrinsic FEW phases are referenced to the **catalogue reference
+    epoch** (``MOJITO_REFERENCE_TIME``, the same for every source), NOT the
+    trimmed data-window start ``data_t0`` — ``GenerateEMRIWaveform`` has no
+    internal reference time, so its ``t0`` IS the phase reference. The
+    response is therefore generated from REF over ``(N + offset_int)``
+    samples; ``t0_shift_to_data`` carries the sub-sample remainder and
+    :class:`EMRIWaveWrap` slices the integer ``offset_int`` off the front so
+    the rest lands on the data grid (``t0 = data_t0``). Mirrors the validated
+    SPECIAL recipe in scripts/sobbh/emri_frame_convert_check.py.
+    """
     key = ("emri", id(general_info), nchannels)
     if key in _WAVE_WRAP_CACHE:
         return _WAVE_WRAP_CACHE[key]
     force_backend = _force_backend_for_branch()
     tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
+
+    dt = general_info.dt
+    data_t0 = general_info.data_t0
+    # Catalogue reference epoch (shared by all sources); falls back to the
+    # data start only in synthetic mode (where REF == data_t0).
+    ref = MOJITO_REFERENCE_TIME if DATA_PROCESSOR == "mojito" else data_t0
+    off = data_t0 - ref
+    offset_int = int(round(off / dt))
+    t0_shift = off - offset_int * dt  # sub-sample remainder, |t0_shift| < dt
+    out_N = int(round(general_info.Tobs / dt))
+    # Generate offset_int extra samples so that, after the front slice, the
+    # surviving window still spans the full data grid.
+    resp_Tobs = (out_N + offset_int) * dt
+
     template_wave_gen = get_emri_response_wrapper(
-        Tobs=general_info.Tobs, dt=general_info.dt,
-        t_start=general_info.data_t0,
+        Tobs=resp_Tobs, dt=dt,
+        t_start=ref,
+        t0_shift_to_data=t0_shift,
         tdi_config=tdi_config, tdi_chan=TDI_CHAN,
         role="template", force_backend=force_backend,
         orbits=general_info.orbits,
@@ -1353,7 +1397,7 @@ def _get_emri_wave_wrap(general_info, nchannels: int = NCHANNELS):
     wrap = EMRIWaveWrap(
         template_wave_gen, general_info.data_td_settings,
         general_info.domain_settings,
-        td_window=None, nchannels=nchannels,
+        td_window=None, nchannels=nchannels, offset_int=offset_int,
     )
     _WAVE_WRAP_CACHE[key] = wrap
     return wrap

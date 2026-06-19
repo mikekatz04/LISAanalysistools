@@ -231,13 +231,26 @@ def get_emri_response_wrapper(
     t_buffer: float = 3e4,
     orbits: Optional[Orbits] = None,
     force_backend: str = "cpu",
+    t0_shift_to_data: float = 0.0,
 ):
     """Build (and cache) a :class:`ResponseWrapper` around ``GenerateEMRIWaveform``.
 
     Cached so the injection path and template path share one generator —
     building two on CPU exhausts RAM.
+
+    ``t_start`` is the epoch the intrinsic FEW phases (``Phi_phi0`` etc.)
+    are referenced to — for mojito data this is the **catalogue reference
+    time** (``MOJITO_REFERENCE_TIME``), NOT the (trimmed) data-window start,
+    because ``GenerateEMRIWaveform`` has no internal reference epoch (its
+    ``t0`` IS the phase reference). ``t0_shift_to_data`` then carries the
+    sub-sample (``|.| < dt``) remainder of ``data_t0 - t_start``; the integer
+    part is handled by the caller slicing ``offset_int`` samples off the
+    front of the response output (see :class:`EMRIWaveWrap`).
     """
-    key = (Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits))
+    key = (
+        Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits),
+        t0_shift_to_data,
+    )
     if key in _EMRI_WAVE_GEN_CACHE:
         return _EMRI_WAVE_GEN_CACHE[key]
 
@@ -263,6 +276,9 @@ def get_emri_response_wrapper(
         "order": order,
         "remove_garbage": "zero",
         "t_buffer": t_buffer,
+        # Sub-sample (|.| < dt) alignment of the REF-anchored waveform onto the
+        # data grid; the integer-sample part is sliced by EMRIWaveWrap.
+        "t0_shift_to_data": t0_shift_to_data,
         # SPECIAL EMRI frame: index_beta=7 carries the ecliptic POLAR angle qS, so
         # is_ecliptic_latitude=False maps it to the ecliptic latitude (pi/2 - qS).
         # _EMRISpecialFrameWrap then forces convert_to_ra_dec=True per call so the
@@ -300,6 +316,7 @@ class EMRIWaveWrap:
         td_window=None,
         runtime_kwargs: Optional[dict] = None,
         nchannels: Optional[int] = None,
+        offset_int: int = 0,
     ):
         self.wave_gen = wave_gen
         self.td_settings = td_settings
@@ -307,13 +324,27 @@ class EMRIWaveWrap:
         self.td_window = td_window
         self.runtime_kwargs = runtime_kwargs or {}
         self.nchannels = nchannels
+        # Integer-sample offset between the REF-anchored response output and the
+        # data grid: data_t0 = t_start(=REF) + offset_int*dt + t0_shift_to_data.
+        # The response is generated over (td_settings.N + offset_int) samples
+        # starting at REF; slicing off the first ``offset_int`` lands the rest
+        # on the data grid (t0 = data_t0). Mirrors the validated SPECIAL recipe
+        # in scripts/sobbh/emri_frame_convert_check.py (leg[:, offset_int:...]).
+        self.offset_int = int(offset_int)
 
     def __call__(self, *params, **kwargs):
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
-        arr = np.asarray(self.wave_gen(*params, **call_kwargs))
+        arr = np.atleast_2d(np.asarray(self.wave_gen(*params, **call_kwargs)))
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
+        if self.offset_int:
+            arr = arr[:, self.offset_int:]
+        N = self.td_settings.N
+        if arr.shape[-1] < N:
+            arr = np.pad(arr, ((0, 0), (0, N - arr.shape[-1])))
+        elif arr.shape[-1] > N:
+            arr = arr[:, :N]
         return TDSignal(arr, self.td_settings).transform(
             self.target_domain, window=self.td_window
         )
