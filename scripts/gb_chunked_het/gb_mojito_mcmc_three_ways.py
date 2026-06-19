@@ -104,8 +104,10 @@ def build_shared():
     # physical 9-vector at REF: [amp, f0, fdot, fddot, phi0, inc, psi, lam, beta]
     p_inj = np.array([amp, f0, fdot, 0.0, phi0, inc, psi, ra, dec])
     # sampled 8-vector (REF): [logA, f0(mHz), fdot, phi0, cos_iota, psi, alpha, sin_delta]
-    inj_sampled = np.array([np.log(amp), f0 * 1e3, fdot, phi0,
-                            np.cos(inc), psi, ra, np.sin(dec)])
+    # phi0 (2pi), psi (pi) and alpha (2pi) are periodic; the cache stores them in a
+    # signed range, so wrap into the prior support [0, period) (physically identical).
+    inj_sampled = np.array([np.log(amp), f0 * 1e3, fdot, phi0 % (2 * np.pi),
+                            np.cos(inc), psi % np.pi, ra % (2 * np.pi), np.sin(dec)])
 
     m_floor = int(f0 / layer_df); BAND = 15
     lo_f = (m_floor - BAND) * layer_df; hi_f = (m_floor + BAND + 1) * layer_df

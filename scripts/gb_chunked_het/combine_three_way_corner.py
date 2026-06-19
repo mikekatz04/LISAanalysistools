@@ -21,6 +21,7 @@ from gb_mojito_mcmc_three_ways import build_shared
 LABELS = ["logA", "f0 [mHz]", "fdot", "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
 METHODS = [("fd", "C0"), ("wdm_chunked", "C1"), ("wdm_sighet", "C2")]
 BURN_FRAC = float(os.environ.get("BURN_FRAC", "0.3"))
+BURN_STEPS = int(os.environ.get("BURN_STEPS", "0"))  # absolute burn-in; 0 -> use BURN_FRAC
 
 
 def main():
@@ -32,10 +33,14 @@ def main():
         h5 = os.path.join(out_dir, f"mcmc_mojito_rank{rank}_{kind}.h5")
         if not os.path.exists(h5):
             print(f"[skip] missing {h5}", flush=True); continue
-        chain = HDFBackend(h5).get_chain()["gb"]          # (nsteps, ntemps, nwalkers, 1, 8)
-        nb = max(1, int(BURN_FRAC * chain.shape[0]))
+        try:
+            chain = HDFBackend(h5).get_chain()["gb"]      # (nsteps, ntemps, nwalkers, 1, 8)
+        except Exception as e:
+            print(f"[skip] {kind}: unreadable ({e})", flush=True); continue
+        nsteps = chain.shape[0]
+        nb = min(BURN_STEPS, nsteps - 1) if BURN_STEPS > 0 else max(1, int(BURN_FRAC * nsteps))
         samples[kind] = chain[nb:, 0].reshape(-1, 8)      # cold chain, post burn-in
-        print(f"[{kind:>11}] {chain.shape[0]} steps x {chain.shape[2]} walkers "
+        print(f"[{kind:>11}] {nsteps} steps x {chain.shape[2]} walkers, burn {nb} "
               f"-> {samples[kind].shape[0]} cold samples", flush=True)
 
     if not samples:
