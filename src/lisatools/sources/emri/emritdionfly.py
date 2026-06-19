@@ -161,7 +161,7 @@ class EMRITDIonFly:
             t_arr_tdi,
             mode_amp,
             mode_phase,
-            1.0,
+            self.dt,
             num_sub,
             t_input=t_arr_in,
             tdi_config=self.tdi_config,
