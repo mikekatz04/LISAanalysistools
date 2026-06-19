@@ -1499,8 +1499,7 @@ class AnalysisContainerArray:
             sensitivity information. The data and sensitivity information for
             each container will be split across the GPUs as evenly as possible.
             If ``None``, everything is stored on the CPU.
-        complex_psd: If ``True``, allocate a complex-valued PSD buffer (not yet
-            implemented; raises ``NotImplementedError``).
+        complex_psd: If ``True``, allocate a complex-valued PSD buffer.
         n_splits: CPU-threading knob (mutually exclusive with ``gpus``): shard
             the containers into this many CPU splits through the **same**
             split structure used for GPUs (``gpu_splits`` / ``split_map`` /
