@@ -33,6 +33,7 @@ from eryn.state import State as eryn_State
 from eryn.utils.plot import PlotContainer
 
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from ..domains import WDMSettings
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
@@ -504,7 +505,8 @@ class GlobalFit:
             )
 
         gpus = general_info.gpus
-        acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
+        complex_psd = not isinstance(acs_tmp[0].data.settings, WDMSettings)
+        acs = AnalysisContainerArray(acs_tmp, gpus=gpus, complex_psd=complex_psd)
 
         if rebuild_residuals:
             # Residual rebuild, replicating the stft_tof ``get_templates``
@@ -709,7 +711,7 @@ class GlobalFit:
             # process). Branches without one are skipped with a warning and
             # may keep subtracting in their recipe (legacy path) -- no
             # double-subtraction either way.
-            acs = self.setup_acs(state, rebuild_residuals=True)
+            acs = self.setup_acs(state, rebuild_residuals=False)
             self.logger.debug("acs setup done")
 
             state.log_like[:] = acs.likelihood(complex=False)
