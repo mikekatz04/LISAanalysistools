@@ -177,25 +177,41 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """
         import gc
         for i in range(coords.shape[0]):
-            sig = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+            sig = self.get_waveform_here(coords[i])
             self.acs.signal_operation(sign, [sig], data_index=np.array([i]))
             del sig
             gc.collect()
             _free_pool()
 
     def add_back_in_cold_chain_sources(self, coords):
-        """Subtract current cold-chain sources from the residual (one walker at a time)."""
-        self._apply_cold_chain_sources(coords, sign=-1)
-
-    def remove_cold_chain_sources(self, coords):
         """Add current cold-chain sources back into the residual (one walker at a time)."""
         self._apply_cold_chain_sources(coords, sign=+1)
+
+    def remove_cold_chain_sources(self, coords):
+        """Subtract current cold-chain sources from the residual (one walker at a time)."""
+        self._apply_cold_chain_sources(coords, sign=-1)
 
         # ll_tmp3 = self.acs.likelihood(
         #     source_only=True
         # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
-    def get_waveform_here(self, coords: np.ndarray) -> DomainBaseArray | list[DomainBase]:
+    def get_waveform_here(self, coords: np.ndarray) -> DomainBase:
+        """Get the waveforms for a single given source coordinates.
+
+         It calls ``waveform_gen`` and returns a :class:`~lisatools.domains.DomainBase`
+        (e.g. :class:`~lisatools.domains.STFTSignal` or
+        :class:`~lisatools.domains.FDSignal`).
+
+        Args:
+            coords: Source coordinates, shape ``(ndim)``.
+
+        Returns:
+            :class:`~lisatools.domains.DomainBase`.
+
+        """
+        return self.waveform_gen(*coords, **self.waveform_gen_kwargs)
+
+    def get_waveforms_here(self, coords: np.ndarray) -> DomainBaseArray | list[DomainBase]:
         """Get the waveforms for the given source coordinates.
 
         Each call to ``waveform_gen`` returns a :class:`~lisatools.domains.DomainBase`
@@ -216,7 +232,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         waveforms = []
         for i in range(coords.shape[0]):
-            waveforms.append(self.waveform_gen(*coords[i], **self.waveform_gen_kwargs))
+            waveforms.append(self.get_waveform_here(coords[i]))
 
         return DomainBaseArray(waveforms)
 
@@ -628,10 +644,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
-            logger.info(f"✓ {self.branch_name} leaf {leaf} complete ({time.time() - tic:.1f}s)")
+            logger.info(f"* {self.branch_name} leaf {leaf} complete ({time.time() - tic:.1f}s)")
 
         # udpate at the end
-        logger.info(f"✓ {self.branch_name} proposal complete — all leaves processed ({time.time() - tic:.1f}s total)")
+        logger.info(f"* {self.branch_name} proposal complete — all leaves processed ({time.time() - tic:.1f}s total)")
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
         # print("before computing current likelihood. elapsed: ", time.time() - tic)
@@ -851,8 +867,18 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         for waveforms_split in waveforms_per_split:
             waveforms.extend(waveforms_split)
         return waveforms
+    
+    def get_waveform_here(self, coords: np.ndarray) -> DomainBase:
+        """Get the waveform for the given source coordinates. Generate it on the first GPU.
 
-    def get_waveform_here(self, coords: np.ndarray) -> list[DomainBase]:
+        """
+        wave_gen = getattr(
+            self.waveform_generators[0],
+            self.waveform_gen_method
+        )
+        return wave_gen(*coords, **self.waveform_gen_kwargs)
+
+    def get_waveforms_here(self, coords: np.ndarray) -> list[DomainBase]:
         """Get the waveforms for the given source coordinates.
 
         """
