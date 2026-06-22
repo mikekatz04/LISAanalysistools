@@ -468,6 +468,7 @@ class PSDMove(GlobalFitMove, StretchMove):
                 if changed_once:
                     num_so_far += 1
 
+        logger.info(f"Max log-likelihood plateaued at {max_logl:.3f} for PSD parameters: {state.branches_coords['psd'][0, 0, 0]}")
         return state, accepted
 
     def propose(self, model, state):
