@@ -65,7 +65,42 @@ void LISAResponseWrap::get_response_wrap(array_type<double> y_gw_, array_type<do
         run_async
     );
 }
-    
+
+
+void LISAResponseWrap::get_response_quintic_wrap(array_type<double> y_gw_, array_type<double> t_data_, array_type<double> k_in_, array_type<double> u_in_, array_type<double> v_in_, double dt,
+    int num_delays,
+    array_type<std::complex<double>> input_in_, int num_inputs, double sampling_frequency,
+    array_type<double> c1r_, array_type<double> c2r_, array_type<double> c3r_, array_type<double> c4r_, array_type<double> c5r_,
+    array_type<double> c1i_, array_type<double> c2i_, array_type<double> c3i_, array_type<double> c4i_, array_type<double> c5i_,
+    int projections_start_ind, int spline_type,
+    array_type<double> t0_arr_, int batch_size, bool run_async)
+{
+    response->get_response_quintic(
+        return_pointer_and_check_length(y_gw_, "y_gw", num_delays * batch_size, 6),
+        return_pointer_and_check_length(t_data_, "t_data", num_delays, 1),
+        return_pointer_and_check_length(k_in_, "k_in", 3 * batch_size, 1),
+        return_pointer_and_check_length(u_in_, "u_in", 3 * batch_size, 1),
+        return_pointer_and_check_length(v_in_, "v_in", 3 * batch_size, 1),
+        dt, num_delays,
+        return_pointer_cmplx(input_in_, "input_in"),
+        num_inputs, sampling_frequency,
+        return_pointer_and_check_length(c1r_, "c1r", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c2r_, "c2r", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c3r_, "c3r", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c4r_, "c4r", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c5r_, "c5r", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c1i_, "c1i", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c2i_, "c2i", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c3i_, "c3i", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c4i_, "c4i", num_inputs * batch_size, 1),
+        return_pointer_and_check_length(c5i_, "c5i", num_inputs * batch_size, 1),
+        projections_start_ind, spline_type,
+        return_pointer_and_check_length(t0_arr_, "t0_arr", batch_size, 1),
+        batch_size,
+        run_async
+    );
+}
+
 
 void check_response(LISAResponse *response)
 {
@@ -90,6 +125,7 @@ void response_part(nb::module_ &m) {
     // Bind member functions
     .def("get_tdi_delays_wrap", &LISAResponseWrap::get_tdi_delays_wrap, "Preform TDI combinations.")
     .def("get_response_wrap", &LISAResponseWrap::get_response_wrap, "Get detector projections.")
+    .def("get_response_quintic_wrap", &LISAResponseWrap::get_response_quintic_wrap, "Get detector projections (quintic spline).")
     // You can also expose public data members directly using def_rw
     .def_rw("orbits", &LISAResponseWrap::orbits)
     // .def("get_link_ind", &OrbitsWrap::get_link_ind, "Get link index.")
