@@ -396,14 +396,14 @@ def get_general_erebor_settings() -> GeneralSetup:
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
-    end_freq = 1e-1
+    end_freq = 2.9e-2
 
     head_dir = "/data/asantini/globalfit/erebor/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "6_mbhbs_without_emris"
+    base_file_name = "6_mbhbs_without_emris_v2"
     file_store_dir = head_dir
 
-    gpus = [0, 1]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -411,15 +411,16 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 40
+    nwalkers = 30
     ntemps = 4
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
     normalize_window = True
 
-    basis_domain = "fd"
+    basis_domain = "stft"
     stft_dt = 1 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
+    average_transfer_functions = basis_domain == "fd"
 
     base_file_name += f"_{basis_domain}"
 
@@ -468,7 +469,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, average_transfer_functions=True)
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, average_transfer_functions=average_transfer_functions)
 
     general_settings = GeneralSettings(
         num_iterations=num_iterations,
