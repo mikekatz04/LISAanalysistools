@@ -1300,17 +1300,12 @@ void wdm_het_get_ll_kernel(
         double tmp_dh = 0.0;
         double tmp_hh = 0.0;
 
-        // Carrier bin in chunk-FD coordinates + WDM m-band centred on f0.
-        const double f0       = params[src.f0_index];
-        const int    k_f0     = (int) round(f0 / df_chunk);
-        const double f0_grid  = (double) k_f0 * df_chunk;
-        const int    m_floor  = (int) (f0 / layer_df);
-        int          m_lo     = m_floor - m_band_half_width;
-        int          m_hi     = m_floor + m_band_half_width + 1;   // exclusive
-        // Clip to active band -- the accumulator only reads pixels in the
-        // active band anyway, so processing layers outside is wasted work.
-        if (m_lo < ind_min_f)             m_lo = ind_min_f;
-        if (m_hi > ind_min_f + Nf_active) m_hi = ind_min_f + Nf_active;
+        // Per-chunk carrier + WDM m-band are computed INSIDE the chunk loop
+        // below (2026-06-19 chirp fix): a chirping source (SOBBH) sweeps
+        // frequency across chunks, so f0_grid / k_f0 / m-band must track the
+        // source frequency at each chunk's centre via src.get_f(), not the
+        // constant params[f0_index]. For GB (negligible chirp over a chunk)
+        // src.get_f(chunk_centre) == f0 to within a chunk-FD bin -> no-op.
 
         Vec k_sky(0.0, 0.0, 0.0);
         Vec u_sky(0.0, 0.0, 0.0);
@@ -1326,6 +1321,26 @@ void wdm_het_get_ll_kernel(
             const int    n_global_lo = chunk_n_global_offset[j];
             const double chunk_t0    = chunk_t_starts[j];
             const double dt_sparse   = T_chunk / (double) N_sparse;
+
+            // Per-chunk carrier: track the GW frequency at the chunk centre via
+            // the PHASE derivative d(get_phase)/dt / (2*pi), so a chirping
+            // source heterodynes + places each chunk at its swept layers
+            // (2026-06-19 chirp fix; no-op for GB). The phase derivative is used
+            // (not src.get_f) so the carrier is exactly consistent with the
+            // (mojito-validated) get_phase TD -- SOBBH's get_f/sobbh_f has a
+            // latent 2x f_orbital-vs-f_GW convention bug not exercised elsewhere.
+            const double _tc_mid = chunk_t0 + 0.5 * T_chunk;
+            const double _eps    = 0.5 * dt_sparse;
+            const double f0       = (src.get_phase(_tc_mid + _eps, params, bin_i)
+                                   - src.get_phase(_tc_mid - _eps, params, bin_i))
+                                    / (4.0 * M_PI * _eps);
+            const int    k_f0     = (int) round(f0 / df_chunk);
+            const double f0_grid  = (double) k_f0 * df_chunk;
+            const int    m_floor  = (int) (f0 / layer_df);
+            int          m_lo     = m_floor - m_band_half_width;
+            int          m_hi     = m_floor + m_band_half_width + 1;   // exclusive
+            if (m_lo < ind_min_f)             m_lo = ind_min_f;
+            if (m_hi > ind_min_f + Nf_active) m_hi = ind_min_f + Nf_active;
 
             // Populate orbit spline cache once over this chunk's time
             // window [chunk_t0, chunk_t0 + T_chunk]. All threads cooperate
@@ -1645,14 +1660,8 @@ void wdm_het_fill_global_kernel(
         double *params       = &params_all[(size_t) bin_i * nparams];
         const double factor  = factors_all[bin_i];
 
-        const double f0      = params[src.f0_index];
-        const int    k_f0    = (int) round(f0 / df_chunk);
-        const double f0_grid = (double) k_f0 * df_chunk;
-        const int    m_floor = (int) (f0 / layer_df);
-        int          m_lo    = m_floor - m_band_half_width;
-        int          m_hi    = m_floor + m_band_half_width + 1;
-        if (m_lo < 0)   m_lo = 0;
-        if (m_hi > Nf)  m_hi = Nf;
+        // Per-chunk carrier + band computed inside the loop (chirp fix, see
+        // wdm_het_get_ll_kernel); no-op for GB, tracks SOBBH's sweep.
 
         for (int j = 0; j < n_chunks; ++j) {
             const int    keep_lo     = chunk_keep_lo[j];
@@ -1660,6 +1669,19 @@ void wdm_het_fill_global_kernel(
             const int    n_global_lo = chunk_n_global_offset[j];
             const double chunk_t0    = chunk_t_starts[j];
             const double dt_sparse   = T_chunk / (double) N_sparse;
+
+            const double _tc_mid = chunk_t0 + 0.5 * T_chunk;
+            const double _eps    = 0.5 * dt_sparse;
+            const double f0      = (src.get_phase(_tc_mid + _eps, params, bin_i)
+                                  - src.get_phase(_tc_mid - _eps, params, bin_i))
+                                   / (4.0 * M_PI * _eps);
+            const int    k_f0    = (int) round(f0 / df_chunk);
+            const double f0_grid = (double) k_f0 * df_chunk;
+            const int    m_floor = (int) (f0 / layer_df);
+            int          m_lo    = m_floor - m_band_half_width;
+            int          m_hi    = m_floor + m_band_half_width + 1;
+            if (m_lo < 0)   m_lo = 0;
+            if (m_hi > Nf)  m_hi = Nf;
 
             // ============================================================
             // Steps 1-4 are CHUNK-LEVEL (no m dependence): TD-build,
