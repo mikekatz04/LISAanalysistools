@@ -211,7 +211,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         priors=priors,
         ndim=2,
         injection=injection,
-        num_prop_repeats=100,
+        num_prop_repeats=500,
     )
 
     psd_metadata = StochasticMetadata(
@@ -386,7 +386,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
-    comment = "6 MBHBs in time-frequency"
+    comment = "6 MBHBs"
 
     submission_folder = None #"/work/asantini/globalfit/erebor_org_setup/mojito_runs/"
 
@@ -397,14 +397,14 @@ def get_general_erebor_settings() -> GeneralSetup:
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
-    end_freq = 1e-1
+    end_freq = 2.9e-2
 
     head_dir = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "6_mbhbs_without_emris"
+    base_file_name = "test_merge"
     file_store_dir = head_dir
 
-    gpus = [0, 1]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -412,7 +412,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 40
+    nwalkers = 30
     ntemps = 4
 
     window_type = "tukey"

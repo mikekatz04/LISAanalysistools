@@ -14,7 +14,6 @@ except (ModuleNotFoundError, ImportError) as e:
 
 
 from lisatools.detector import L1Orbits
-from lisatools.domains import FDSettings, STFTSettings
 from lisatools.domaincomputation import DomainComputationGroupArray
 from lisatools.utils.constants import *
 from eryn.state import BranchSupplemental
@@ -22,18 +21,18 @@ from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, MBHSetup, MBHSettings
 
 
-from eryn.prior import uniform_dist, log_uniform, ProbDistContainer
+from eryn.prior import uniform_dist, log_uniform
 from eryn.utils import TransformContainer
-
-from eryn.moves import TemperatureControl
+from eryn.prior import ProbDistContainer
+from eryn.moves import StretchMove, TemperatureControl 
 from eryn.moves.tempering import make_ladder
+
+from lisatools.domains import STFTSettings, FDSettings
+from lisatools.sensitivity import XYZSensitivityBackend
 from lisatools.globalfit.moves import GFCombineMove, MultiGPUPSDMove, TDMBHSpecialMove
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
 from lisatools.globalfit.recipe_steps import subtract_initial_signal
 from lisatools.utils.constants import YRSID_SI
-
-from eryn.utils.updates import Update
-
 from lisatools.globalfit.preprocessing import L1ProcessingStep
 from lisatools.globalfit.recipe_steps import (
     SearchRecipeStep,
@@ -44,9 +43,14 @@ from lisatools.globalfit.recipe_steps import (
     mbh_catalogue_to_sampling_basis,
 )
 
-from lisatools.globalfit.postprocessing import StochasticMetadata
+from lisatools.globalfit.postprocessing import (
+    StochasticMetadata,
+    SourceMetadata
+)
 
 logger = logging.getLogger(__name__)
+
+MOJITO_REFERENCE_TIME = 97729089.327664
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
@@ -57,12 +61,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
-    Tmax: float = 1e6
-    num_repeats: int = 100
-    permute_every: int = 50
+    Tmax: float = 1.0e6
+    permute_every: int = 20
 
     psd_info = curr.source_info["psd"]
-    # mbh_info = curr.source_info["mbh"]
 
     effective_ndim = engine_info.ndims["psd"]
     temperature_control = TemperatureControl(
@@ -70,13 +72,13 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     )
 
     psd_move_kwargs = dict(
-        num_repeats=num_repeats,
+        num_repeats=psd_info.num_prop_repeats,
         permute_every=permute_every,
         live_dangerously=True,
         psd_transform_fn=psd_info.transform,
         temperature_control=temperature_control,
         use_gpu=True,
-        run_async=False,
+        run_async=True,
         run_threaded=False
     )
 
@@ -88,11 +90,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_search_move.accepted = np.zeros((ntemps, nwalkers))
     psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    #psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors, num_repeats=num_repeats, permute_every=permute_every, Tmax=Tmax)
+    #psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors, permute_every=50)
 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
-
-    # Initialize MBH walkers from catalogue injection parameters
     
     recipe.add_recipe_component(PERecipeStep(moves=[psd_pe_move]), name="psd pe")
 
@@ -138,11 +138,11 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs_psd,
+        log_dir=general_set.artifacts_file_dir,
         priors=priors,
         ndim=2,
         injection=injection,
-        log_dir=general_set.file_store_dir,
-        num_prop_repeats=50,
+        num_prop_repeats=500,
     )
 
     psd_metadata = StochasticMetadata(
@@ -155,60 +155,71 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
     return PSDSetup(psd_settings), psd_metadata
 
-
 def get_general_erebor_settings() -> GeneralSetup:
     # limits on parameters
     # now with negative fdots
 
     global_fit_codename = "erebor"
-    global_fit_version = "run0_v8"
+    global_fit_version = "CDL1run0_v0"
     global_fit_contact = "ereborl2d@googlegroups.com"
-    global_fit_code_link = "https://github.com/Erebor-L2D"
-    global_fit_input_data_link = "https://nextcloud-dcc-fi-csc-okd-globalstorage1.2.rahtiapp.fi/apps/files/files/4641?dir=/brickmarket/mojito_light_v1_0_0"
+    global_fit_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/releases/tag/cdl1-run_0"
+    global_fit_input_data_link = ""
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
-    global_fit_noise_model_code_link = "https://github.com/Erebor-L2D" #todo populate repositories
+    global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
+    comment = ""
 
-    submission_folder = None #"/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
+    submission_folder = None #"/work/asantini/globalfit/erebor_org_setup/mojito_runs/"
 
-    source_ids = [18]
+    num_iterations = 500
 
-    Tobs = 3.0 * YRSID_SI / 12.0
+    source_ids = [18, 5, 16, 7, 2, 12]
+
+    Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
     end_freq = 2.9e-2
 
-    head_dir = "/data/asantini/packages/LISAanalysistools/"
+    head_dir = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "3_months_psd_noswaps_debug_newmove" #"test_mbh_18_with_covariance"
-    file_store_dir = head_dir + "mojito_output/"
+    base_file_name = "test_merge_psd"
+    file_store_dir = head_dir
 
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
+
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 24
-    ntemps = 10
+    nwalkers = 30
+    ntemps = 4
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
     normalize_window = True
 
-    basis_domain = "fd"
-    stft_dt = 7 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
+    basis_domain = "stft"
+    stft_dt = 1 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
+
+    if basis_domain == "stft":
+        domain_settings = STFTSettings.make_factory(
+            big_dt=stft_dt, min_freq=start_freq, max_freq=end_freq
+        )
+    else:
+        domain_settings = FDSettings.make_factory(min_freq=start_freq, max_freq=end_freq)
 
     base_file_name += f"_{basis_domain}"
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
         source_types=["noise"],  #'vgb', 'gb'
-        #source_ids=dict(mbhb=source_ids),
+        source_ids=dict(mbhb=source_ids),
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
+        store_individual_timeseries=False,
         orbits_kwargs=dict(force_backend=backend, frame="icrs"),  # icrs
     )
 
@@ -246,21 +257,10 @@ def get_general_erebor_settings() -> GeneralSetup:
         Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
-
-    # Domain communicated by settings factory, not a string flag (sprint
-    # rule): the engine calls ``factory(times, dt, force_backend)`` after
-    # loading the data so the grid is sized against the real time array.
-    if basis_domain == "stft":
-        domain_settings = STFTSettings.make_factory(
-            big_dt=stft_dt, min_freq=start_freq, max_freq=end_freq
-        )
-    else:
-        domain_settings = FDSettings.make_factory(
-            min_freq=start_freq, max_freq=end_freq
-        )
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, average_transfer_functions=True)
 
     general_settings = GeneralSettings(
+        num_iterations=num_iterations,
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
@@ -277,6 +277,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         normalize_window=normalize_window,
+        sensitivity_backend_class=XYZSensitivityBackend,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
         global_fit_codename=global_fit_codename,
         global_fit_version=global_fit_version,
@@ -287,15 +288,10 @@ def get_general_erebor_settings() -> GeneralSetup:
         noise_model=global_fit_noise_model,
         noise_model_code_link=global_fit_noise_model_code_link,
         submission_parent_folder=submission_folder,
+        comment=comment
     )
 
     general_setup = GeneralSetup(general_settings)
-    # Band/STFT metadata consumed by the per-source setup functions
-    # (no longer GeneralSettings fields post-merge; the analysis band
-    # itself lives on domain_settings).
-    general_setup.start_freq = start_freq
-    general_setup.end_freq = end_freq
-    general_setup.stft_dt = stft_dt
     return general_setup
 
 
@@ -335,6 +331,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     psd_setup, psd_metadata = get_psd_erebor_settings(general_setup)
 
+
     ##############
     ## READ OUT ##
     ##############
@@ -348,7 +345,7 @@ def get_global_fit_settings(copy_settings_file=False):
         setup_function=setup_recipe,
         source_metadata={
             "psd": psd_metadata,
-        },
+        }
     )
 
     curr_info = CurrentInfoGlobalFit(global_settings)
