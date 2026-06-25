@@ -35,15 +35,45 @@ import typing as _typing
 
 _builtins.typing = _typing
 
+import os
 import unittest
 
 import numpy as np
 
+import lisatools
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.response.directresponse import pyResponseTDI
 from lisatools.response.parallelbase import FastLISAResponseParallelModule
 
 YRSID_SI = 31558149.763545603
+
+
+def _to_host(arr):
+    """Bring a backend array (numpy or cupy) to host numpy for comparisons."""
+    try:
+        import cupy
+
+        if isinstance(arr, cupy.ndarray):
+            return cupy.asnumpy(arr)
+    except ImportError:
+        pass
+    return np.asarray(arr)
+
+
+def _gpu_backend_name():
+    """First available CUDA backend name, or None. Note: ``has_backend('cuda')``
+    (the alias) currently *raises* rather than returning False, so probe the
+    concrete names instead."""
+    for name in ("cuda12x", "cuda11x", "cuda13x"):
+        try:
+            if lisatools.has_backend(name):
+                return name
+        except Exception:
+            pass
+    return None
+
+
+_GPU_BACKEND = _gpu_backend_name()
 
 _GB_ARGS = dict(A=1.084702251e-22, f=2.35962078e-3, fdot=1.47197271e-17,
                 iota=1.11820901, phi0=4.91128699, psi=2.3290324)
@@ -83,11 +113,16 @@ class _GBWave(FastLISAResponseParallelModule):
         hc = hSp * sin2psi + hSc * cos2psi
         return hp + 1j * hc
 
-
 class TestQuinticResponse(unittest.TestCase):
+    # Backend under test. The base class runs on CPU; ``TestQuinticResponseGPU``
+    # overrides this to exercise the CUDA ``response_quintic`` kernel. Orbits,
+    # wave generator, and response are all forced onto this single backend (a
+    # mismatch trips the ``tdi_orbits`` backend assertion).
+    BACKEND = "cpu"
+
     @classmethod
     def setUpClass(cls):
-        cls.wave_gen = _GBWave(force_backend="cpu")
+        cls.wave_gen = _GBWave(force_backend=cls.BACKEND)
         cls.t = np.arange(0.0, _T * YRSID_SI, _DT)
 
         pols = [
@@ -98,9 +133,10 @@ class TestQuinticResponse(unittest.TestCase):
             )
             for _ in _SKY
         ]
-        cls.all_pols = np.asarray(pols)
+        # keep the inputs on the response backend (xp = numpy or cupy)
+        cls.all_pols = cls.wave_gen.xp.stack(pols)
 
-        orbits = EqualArmlengthOrbits()
+        orbits = EqualArmlengthOrbits(force_backend=cls.BACKEND)
         orbits.configure(linear_interp_setup=True)
         cls.orbits = orbits
 
@@ -113,14 +149,14 @@ class TestQuinticResponse(unittest.TestCase):
             tdi="1st generation",
             tdi_chan="AET",
             use_spline=use_spline,
-            force_backend="cpu",
+            force_backend=self.BACKEND,
             **kwargs,
         )
 
     def _projections(self, use_spline, pols, lam, beta):
         resp = self._make_response(use_spline)
         resp.get_projections(pols, lam, beta, t_buffer=_T_BUFFER)
-        return resp, np.asarray(resp.y_gw)
+        return resp, _to_host(resp.y_gw)
 
     def _valid_window(self, resp):
         # interior region where both schemes computed non-garbage projections
@@ -128,7 +164,7 @@ class TestQuinticResponse(unittest.TestCase):
         return slice(pad, resp.num_pts - pad)
 
     def _reldiff(self, a, b):
-        a, b = np.asarray(a), np.asarray(b)
+        a, b = _to_host(a), _to_host(b)
         scale = np.abs(a).max()
         return np.abs(a - b).max() / scale
 
@@ -138,7 +174,7 @@ class TestQuinticResponse(unittest.TestCase):
         # default kwarg
         resp_def = pyResponseTDI(
             sampling_frequency=1.0 / _DT, num_pts=len(self.t), orbits=self.orbits,
-            tdi="1st generation", force_backend="cpu",
+            tdi="1st generation", force_backend=self.BACKEND,
         )
         self.assertFalse(resp_def.use_spline)
 
@@ -205,9 +241,9 @@ class TestQuinticResponse(unittest.TestCase):
                 self.all_pols[b], _LAMBDAS[b], _BETAS[b], t_buffer=_T_BUFFER
             )
             A_s, E_s, T_s = resp_s.get_tdi_delays()
-            np.testing.assert_array_equal(np.asarray(A_b[b]), np.asarray(A_s))
-            np.testing.assert_array_equal(np.asarray(E_b[b]), np.asarray(E_s))
-            np.testing.assert_array_equal(np.asarray(T_b[b]), np.asarray(T_s))
+            np.testing.assert_array_equal(_to_host(A_b[b]), _to_host(A_s))
+            np.testing.assert_array_equal(_to_host(E_b[b]), _to_host(E_s))
+            np.testing.assert_array_equal(_to_host(T_b[b]), _to_host(T_s))
 
     def test_call_time_use_spline_override(self):
         """``get_projections(use_spline=...)`` overrides the instance default in
@@ -218,11 +254,11 @@ class TestQuinticResponse(unittest.TestCase):
         # construct-time references for each scheme
         lag_ref = self._make_response(False)
         lag_ref.get_projections(self.all_pols, _LAMBDAS, _BETAS, t_buffer=_T_BUFFER)
-        y_lag = np.asarray(lag_ref.y_gw).copy()
+        y_lag = _to_host(lag_ref.y_gw).copy()
 
         quin_ref = self._make_response(True)
         quin_ref.get_projections(self.all_pols, _LAMBDAS, _BETAS, t_buffer=_T_BUFFER)
-        y_quin = np.asarray(quin_ref.y_gw).copy()
+        y_quin = _to_host(quin_ref.y_gw).copy()
 
         # the two schemes genuinely differ (guards against a no-op test)
         self.assertGreater(self._reldiff(y_lag, y_quin), 1e-9)
@@ -232,23 +268,23 @@ class TestQuinticResponse(unittest.TestCase):
         force_on.get_projections(
             self.all_pols, _LAMBDAS, _BETAS, t_buffer=_T_BUFFER, use_spline=True
         )
-        np.testing.assert_array_equal(np.asarray(force_on.y_gw), y_quin)
+        np.testing.assert_array_equal(_to_host(force_on.y_gw), y_quin)
 
         # quintic-default instance forced OFF -> Lagrange (the both-directions case)
         force_off = self._make_response(True)
         force_off.get_projections(
             self.all_pols, _LAMBDAS, _BETAS, t_buffer=_T_BUFFER, use_spline=False
         )
-        np.testing.assert_array_equal(np.asarray(force_off.y_gw), y_lag)
+        np.testing.assert_array_equal(_to_host(force_off.y_gw), y_lag)
 
         # use_spline=None (default) respects the instance default in both cases
         lag_def = self._make_response(False)
         lag_def.get_projections(self.all_pols, _LAMBDAS, _BETAS, t_buffer=_T_BUFFER)
-        np.testing.assert_array_equal(np.asarray(lag_def.y_gw), y_lag)
+        np.testing.assert_array_equal(_to_host(lag_def.y_gw), y_lag)
 
         quin_def = self._make_response(True)
         quin_def.get_projections(self.all_pols, _LAMBDAS, _BETAS, t_buffer=_T_BUFFER)
-        np.testing.assert_array_equal(np.asarray(quin_def.y_gw), y_quin)
+        np.testing.assert_array_equal(_to_host(quin_def.y_gw), y_quin)
 
     def test_quintic_chunk_kwarg_matches_auto(self):
         """``quintic_chunk`` forwards to the GBT SPIKE fit and changes only the
@@ -257,7 +293,7 @@ class TestQuinticResponse(unittest.TestCase):
         auto = self._make_response(True)  # quintic_chunk defaults to 0 (auto)
         self.assertEqual(auto.quintic_chunk, 0)
         auto.get_projections(self.all_pols, _LAMBDAS, _BETAS, t_buffer=_T_BUFFER)
-        y_auto = np.asarray(auto.y_gw).copy()
+        y_auto = _to_host(auto.y_gw).copy()
 
         forced = self._make_response(True, quintic_chunk=64)
         self.assertEqual(forced.quintic_chunk, 64)
@@ -268,6 +304,20 @@ class TestQuinticResponse(unittest.TestCase):
     def test_invalid_quintic_chunk_raises(self):
         with self.assertRaises(AssertionError):
             self._make_response(True, quintic_chunk=-1)
+
+
+@unittest.skipUnless(
+    _GPU_BACKEND is not None, "no CUDA backend available (cuda11x/12x/13x)"
+)
+class TestQuinticResponseGPU(TestQuinticResponse):
+    """Re-run the full quintic suite on the CUDA ``response_quintic`` kernel.
+
+    Inherits every test method; only the backend changes. Exercises the GPU
+    quintic projection, the batched CUDA kernel, and the GBT SPIKE band-solve
+    on device. ``"gpu"`` is the alias for the first available CUDA backend
+    (resolved by ``get_backend``)."""
+
+    BACKEND = "gpu"
 
 
 if __name__ == "__main__":
