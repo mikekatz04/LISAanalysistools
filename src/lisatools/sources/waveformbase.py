@@ -740,7 +740,8 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         freq_max: float = 1.0,
         fft_batch_size: int = 1,
         signal_duration: float = None,
-        buffer_time: int = 5000,
+        buffer_time: int = 10000,
+        use_spline: bool = False,
         run_async: bool = False,
         output_domain_settings: DomainSettingsBase = None,
         force_backend: str = "cpu",
@@ -774,6 +775,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             orbits=orbits,
             tdi=tdi_generation,
             tdi_chan=tdi_channels,
+            use_spline=use_spline,
             force_backend=force_backend,
         )
 
@@ -790,6 +792,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
                 "signal_duration": self.response.num_pts * self.dt,
                 "buffer_time": self.buffer_time,
                 "run_async": self.run_async,
+                "use_spline": self.response.use_spline,
             }
         )
         return base_kwargs
