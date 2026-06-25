@@ -274,6 +274,10 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         self.t_arr_proj = None
         self.batch_size = 1
         self.t0_arr = self.xp.zeros(1, dtype=self.xp.float64)
+        # Per-source sub-sample data-grid shift (paired with t0_arr); updated per
+        # call in get_projections. Carried into the kernel eval time so a batch of
+        # sources with different sub-sample offsets each land on the data grid.
+        self.t0_shift_arr = self.xp.zeros(1, dtype=self.xp.float64)
 
     def check_add_orbit_args(self, *args):
         """Check orbit arguments for adherence to cpp Orbits class.
@@ -504,11 +508,13 @@ class pyResponseTDI(FastLISAResponseParallelModule):
                 "Input waveform is longer than available orbital information. Trimming to fit orbital information."
             )
 
-            max_ind = int(
-                self.xp.where(
-                    (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
-                )[1][-1]
-            )
+            # ``where(...)[1][-1]`` returned the last in-range column of the LAST
+            # source (row-major order), not the batch worst case -- a heterogeneous
+            # -t0 batch could then keep eval times > t_orbit_max for an earlier
+            # source. Count in-range columns per source (the condition is a prefix
+            # since t_data increases) and trim to the shortest-reaching source.
+            in_range = (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
+            max_ind = int(in_range.sum(axis=-1).min())
 
             t_data = t_data[:max_ind]
             input_in = input_in[:, :max_ind]
@@ -609,14 +615,23 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         num_inputs_per_source = input_in.shape[1]
         self.num_total_points = num_inputs_per_source
 
-        # shared relative evaluation grid; per-source absolute eval time is t_arr + t0_arr
-        # inside the kernel. t0_shift_to_data (data-grid alignment) lives HERE on the eval
-        # grid -> the kernel evaluates arange(N)*dt + t0_arr + t0_shift_to_data, while still
-        # indexing the waveform array relative to the unshifted t0_arr (its exact start).
-        # (t_arr + t0_arr is numerically unchanged vs. the old split, so the output grid and
-        # _data_time_check are unaffected; only the waveform-array sampling is corrected.)
-        t_arr = (self.xp.arange(num_inputs_per_source, dtype=self.xp.float64) * self.dt
-                 + t0_shift_to_data)
+        # Shared relative evaluation grid, starting at 0. The per-source absolute
+        # eval time is ``t_arr + t0_arr + t0_shift_arr`` inside the kernel: t0_arr is
+        # the waveform's exact start, t0_shift_arr the sub-sample data-grid shift.
+        # The shift rides the kernel eval time (NOT this shared grid) so each source
+        # in a batch can carry its own sub-sample offset; t0_arr still anchors the
+        # waveform-array index, so the shift survives in clipped_delay exactly as in
+        # the single-source path. (Pre-2026-06 the shift was baked into t_arr here,
+        # which a per-source batch cannot represent -> broadcast crash for B>=2.)
+        t_arr = self.xp.arange(num_inputs_per_source, dtype=self.xp.float64) * self.dt
+        t0_shift_arr = self.xp.atleast_1d(
+            self.xp.asarray(t0_shift_to_data, dtype=self.xp.float64)
+        )
+        if t0_shift_arr.shape[0] == 1:
+            t0_shift_arr = t0_shift_arr.repeat(batch_size)
+        assert t0_shift_arr.shape[0] == batch_size, (
+            f"t0_shift_to_data length {t0_shift_arr.shape[0]} != batch_size {batch_size}."
+        )
         t_arr, input_in = self._data_time_check(t_arr, input_in, t0_arr)
         num_inputs_per_source = input_in.shape[1]
 
@@ -666,6 +681,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
                 self.E_in,
                 self.projections_start_ind,
                 t0_arr,
+                t0_shift_arr,
                 batch_size,
                 run_async,
             )
@@ -734,12 +750,14 @@ class pyResponseTDI(FastLISAResponseParallelModule):
                 self.projections_start_ind,
                 int(CUBIC_SPLINE_LINEAR_SPACING),
                 t0_arr,
+                t0_shift_arr,
                 batch_size,
                 run_async,
             )
 
         self.t_arr_proj = t_arr
         self.t0_arr = t0_arr
+        self.t0_shift_arr = t0_shift_arr
         self.y_gw_flat = y_gw
         self.y_gw_length = self.num_pts
 
@@ -779,6 +797,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
             assert y_gw.shape == (len(self.orbits.LINKS), self.num_pts)
             self.batch_size = 1
             self.t0_arr = self.xp.zeros(1, dtype=self.xp.float64)
+            self.t0_shift_arr = self.xp.zeros(1, dtype=self.xp.float64)
             self.y_gw_flat = y_gw.flatten().copy()
             self.y_gw_length = self.num_pts
             if t_arr is None:
@@ -801,19 +820,20 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         # (passed to LISAResponse at construction), so they are no longer
         # threaded through tdi_gen here.
 
-        # The projections (input_links / y_gw) live on the t_arr grid and BEGIN at
-        # ``t_arr[0] + t0_arr`` (they were evaluated at t_arr[i] + t0_arr in get_projections).
-        # The TDI kernel indexes them via ``delay - t0_arr``, i.e. it only subtracts
-        # ``t0_arr[bin]`` -- so its reference must instead be the projection start
-        # ``t0_arr[bin] + t_arr[0]``. For the standard get_projections path t_arr[0] equals
-        # t0_shift_to_data (the data-grid alignment), so this is exactly
-        # ``t0_arr[bin] + t0_shift_to_data``. Re-split the relative grid / absolute offset so
-        # t0_arr carries the projection start and the relative grid starts at 0: the kernel
-        # eval time (t_arr + t0_arr) is invariant, only the y_gw array reference is corrected.
-        # (Pre-t0_shift_to_data fix, t_arr[0] was 0, so subtracting t0_arr alone sufficed.)
+        # The projections (input_links / y_gw) were evaluated at
+        # ``t_arr[i] + t0_arr[bin] + t0_shift_arr[bin]`` in get_projections, so y_gw
+        # BEGINS at ``t_arr[0] + t0_arr[bin] + t0_shift_arr[bin]``. The TDI kernel
+        # indexes y_gw via ``delay - t0_arr`` (it subtracts only its own t0_arr arg),
+        # so that arg must equal the projection start. Re-split the grid so the
+        # relative axis starts at 0 and the per-source absolute offset carries the
+        # full start: ``t_arr_start`` covers the direct-entry path (user t_arr[0] != 0),
+        # and ``t0_shift_arr`` carries the per-source sub-sample data-grid shift (on the
+        # standard path t_arr[0] == 0 and the shift lives entirely in t0_shift_arr).
+        # The kernel eval time (t_arr_tdi + t0_arr_tdi) is invariant; only the y_gw
+        # array reference is corrected.
         t_arr_start = t_arr[0]
         t_arr_tdi = t_arr - t_arr_start
-        t0_arr_tdi = self.t0_arr + t_arr_start
+        t0_arr_tdi = self.t0_arr + t_arr_start + self.t0_shift_arr
 
         self.tdi_gen(
             self.delayed_links_flat,

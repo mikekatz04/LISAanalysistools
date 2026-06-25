@@ -479,7 +479,7 @@ void response(double *y_gw, double *t_data, double *k_in, double *u_in, double *
               int num_delays,
               cmplx *input_in, int num_inputs, int order, double sampling_frequency,
               int buffer_integer, double *A_in, double deps, int num_A, double *E_in, int projections_start_ind,
-              Orbits *orbits_in, double *t0_arr, int batch_size)
+              Orbits *orbits_in, double *t0_arr, double *t0_shift_arr, int batch_size)
 {
     int batch_ind;
 #ifdef __CUDACC__
@@ -608,7 +608,11 @@ void response(double *y_gw, double *t_data, double *k_in, double *u_in, double *
             int integer_delay_rec, integer_delay_em, max_integer_delay, min_integer_delay;
             double t_rec, t_em;
 
-            t = t_data[i] + t0_arr[batch_ind];
+            // Per-source sub-sample data-grid shift rides the EVAL time only.
+            // t0_offset (= t0_arr[batch_ind], unchanged) still anchors the
+            // waveform-array index, so t0_arr cancels in clipped_delay and the
+            // shift survives there exactly as in the legacy shared-grid path.
+            t = t_data[i] + t0_arr[batch_ind] + t0_shift_arr[batch_ind];
             t_rec = t;
             L = orbits.get_light_travel_time(t_rec, link);
             t_em = t_rec - L;
@@ -734,7 +738,7 @@ void response_quintic(double *y_gw, double *t_data, double *k_in, double *u_in, 
               double *c1r, double *c2r, double *c3r, double *c4r, double *c5r,
               double *c1i, double *c2i, double *c3i, double *c4i, double *c5i,
               int projections_start_ind, int spline_type,
-              Orbits *orbits_in, double *t0_arr, int batch_size)
+              Orbits *orbits_in, double *t0_arr, double *t0_shift_arr, int batch_size)
 {
     int batch_ind;
 #ifdef __CUDACC__
@@ -845,7 +849,11 @@ void response_quintic(double *y_gw, double *t_data, double *k_in, double *u_in, 
             double clipped_delay_rec, clipped_delay_em;
             double t_rec, t_em;
 
-            t = t_data[i] + t0_arr[batch_ind];
+            // Per-source sub-sample data-grid shift rides the EVAL time only.
+            // t0_offset (= t0_arr[batch_ind], unchanged) still anchors the
+            // waveform-array index, so t0_arr cancels in clipped_delay and the
+            // shift survives there exactly as in the legacy shared-grid path.
+            t = t_data[i] + t0_arr[batch_ind] + t0_shift_arr[batch_ind];
             t_rec = t;
             L = orbits.get_light_travel_time(t_rec, link);
             t_em = t_rec - L;
@@ -934,7 +942,7 @@ void LISAResponse::get_response(double *y_gw, double *t_data, double *k_in, doub
                   int num_delays,
                   cmplx* input_in, int num_inputs, int order,
                   double sampling_frequency, int buffer_integer,
-                  double *A_in, double deps, int num_A, double *E_in, int projections_start_ind, double *t0_arr, int batch_size, bool run_async)
+                  double *A_in, double deps, int num_A, double *E_in, int projections_start_ind, double *t0_arr, double *t0_shift_arr, int batch_size, bool run_async)
 {
 
     if (orbits == NULL)
@@ -965,7 +973,7 @@ void LISAResponse::get_response(double *y_gw, double *t_data, double *k_in, doub
                                        num_delays,
                                        input_in, num_inputs, order, sampling_frequency, buffer_integer,
                                        A_in, deps, num_A, E_in, projections_start_ind,
-                                       orbits_gpu, t0_arr, batch_size);
+                                       orbits_gpu, t0_arr, t0_shift_arr, batch_size);
     
     if (run_async){
         gpuErrchk(cudaGetLastError());
@@ -988,7 +996,7 @@ void LISAResponse::get_response(double *y_gw, double *t_data, double *k_in, doub
                  input_in   + batch_ind * num_inputs,
                  num_inputs, order, sampling_frequency, buffer_integer,
                  A_in, deps, num_A, E_in, projections_start_ind,
-                 orbits, t0_arr + batch_ind, 1);
+                 orbits, t0_arr + batch_ind, t0_shift_arr + batch_ind, 1);
     }
 #endif
 }
@@ -999,7 +1007,7 @@ void LISAResponse::get_response_quintic(double *y_gw, double *t_data, double *k_
                   cmplx* input_in, int num_inputs, double sampling_frequency,
                   double *c1r, double *c2r, double *c3r, double *c4r, double *c5r,
                   double *c1i, double *c2i, double *c3i, double *c4i, double *c5i,
-                  int projections_start_ind, int spline_type, double *t0_arr, int batch_size, bool run_async)
+                  int projections_start_ind, int spline_type, double *t0_arr, double *t0_shift_arr, int batch_size, bool run_async)
 {
 
     if (orbits == NULL)
@@ -1031,7 +1039,7 @@ void LISAResponse::get_response_quintic(double *y_gw, double *t_data, double *k_
                                        c1r, c2r, c3r, c4r, c5r,
                                        c1i, c2i, c3i, c4i, c5i,
                                        projections_start_ind, spline_type,
-                                       orbits_gpu, t0_arr, batch_size);
+                                       orbits_gpu, t0_arr, t0_shift_arr, batch_size);
 
     if (run_async){
         gpuErrchk(cudaGetLastError());
@@ -1058,7 +1066,7 @@ void LISAResponse::get_response_quintic(double *y_gw, double *t_data, double *k_
                  c1i + (long)batch_ind * num_inputs, c2i + (long)batch_ind * num_inputs, c3i + (long)batch_ind * num_inputs,
                  c4i + (long)batch_ind * num_inputs, c5i + (long)batch_ind * num_inputs,
                  projections_start_ind, spline_type,
-                 orbits, t0_arr + batch_ind, 1);
+                 orbits, t0_arr + batch_ind, t0_shift_arr + batch_ind, 1);
     }
 #endif
 }

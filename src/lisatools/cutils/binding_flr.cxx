@@ -45,7 +45,7 @@ void LISAResponseWrap::get_response_wrap(array_type<double> y_gw_, array_type<do
     array_type<std::complex<double>> input_in_, int num_inputs, int order,
     double sampling_frequency, int buffer_integer,
     array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int projections_start_ind,
-    array_type<double> t0_arr_, int batch_size, bool run_async)
+    array_type<double> t0_arr_, array_type<double> t0_shift_arr_, int batch_size, bool run_async)
 {
     response->get_response(
         return_pointer_and_check_length(y_gw_, "y_gw", num_delays * batch_size, 6),
@@ -61,6 +61,7 @@ void LISAResponseWrap::get_response_wrap(array_type<double> y_gw_, array_type<do
         return_pointer(E_in_, "E_in"),
         projections_start_ind,
         return_pointer_and_check_length(t0_arr_, "t0_arr", batch_size, 1),
+        return_pointer_and_check_length(t0_shift_arr_, "t0_shift_arr", batch_size, 1),
         batch_size,
         run_async
     );
@@ -73,7 +74,7 @@ void LISAResponseWrap::get_response_quintic_wrap(array_type<double> y_gw_, array
     array_type<double> c1r_, array_type<double> c2r_, array_type<double> c3r_, array_type<double> c4r_, array_type<double> c5r_,
     array_type<double> c1i_, array_type<double> c2i_, array_type<double> c3i_, array_type<double> c4i_, array_type<double> c5i_,
     int projections_start_ind, int spline_type,
-    array_type<double> t0_arr_, int batch_size, bool run_async)
+    array_type<double> t0_arr_, array_type<double> t0_shift_arr_, int batch_size, bool run_async)
 {
     response->get_response_quintic(
         return_pointer_and_check_length(y_gw_, "y_gw", num_delays * batch_size, 6),
@@ -96,6 +97,7 @@ void LISAResponseWrap::get_response_quintic_wrap(array_type<double> y_gw_, array
         return_pointer_and_check_length(c5i_, "c5i", num_inputs * batch_size, 1),
         projections_start_ind, spline_type,
         return_pointer_and_check_length(t0_arr_, "t0_arr", batch_size, 1),
+        return_pointer_and_check_length(t0_shift_arr_, "t0_shift_arr", batch_size, 1),
         batch_size,
         run_async
     );

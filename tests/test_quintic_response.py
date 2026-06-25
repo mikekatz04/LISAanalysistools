@@ -245,6 +245,30 @@ class TestQuinticResponse(unittest.TestCase):
             np.testing.assert_array_equal(_to_host(E_b[b]), _to_host(E_s))
             np.testing.assert_array_equal(_to_host(T_b[b]), _to_host(T_s))
 
+    def test_quintic_batched_heterogeneous_shift_equals_per_source(self):
+        """Batched quintic with DISTINCT per-source sub-sample shifts == looping
+        each source with its own scalar shift, bit-for-bit. Exercises the native
+        per-source ``t0_shift_arr`` kernel param (the batched-shift fix) on the
+        quintic path; a per-source ``(B,)`` shift used to broadcast-crash."""
+        shifts = np.array([0.3, -1.7])  # distinct, |.| < _DT
+        t0s = np.array([0.0, 0.0])
+        resp_b = self._make_response(True)
+        resp_b.get_projections(
+            self.all_pols, _LAMBDAS, _BETAS,
+            t0_shift_to_data=shifts, t0=t0s, t_buffer=_T_BUFFER,
+        )
+        A_b, E_b, T_b = resp_b.get_tdi_delays()
+        for b in range(len(_SKY)):
+            resp_s = self._make_response(True)
+            resp_s.get_projections(
+                self.all_pols[b], _LAMBDAS[b], _BETAS[b],
+                t0_shift_to_data=float(shifts[b]), t0=float(t0s[b]), t_buffer=_T_BUFFER,
+            )
+            A_s, E_s, T_s = resp_s.get_tdi_delays()
+            np.testing.assert_array_equal(np.asarray(A_b[b]), np.asarray(A_s))
+            np.testing.assert_array_equal(np.asarray(E_b[b]), np.asarray(E_s))
+            np.testing.assert_array_equal(np.asarray(T_b[b]), np.asarray(T_s))
+
     def test_call_time_use_spline_override(self):
         """``get_projections(use_spline=...)`` overrides the instance default in
         BOTH directions; ``use_spline=None`` (default) falls back to it.

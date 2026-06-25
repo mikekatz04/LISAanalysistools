@@ -1004,18 +1004,32 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         tdis[..., :num_buffer_ponts] = 0.0  # zero out the corrupted points at the start
         shifted_t_arr = shifted_t_arr[:, :-num_buffer_ponts]
 
-        # Apply the same sub-dt shift to the time labels so they describe what
-        # the response actually evaluated.  After this the previous post-hoc
-        # `% dt` correction below is a near-no-op (residual is < ULP).
+        # Apply the sub-dt shift to the time labels so they describe what the
+        # response actually evaluated (arange*dt + t0_arr + t0_shift_to_data).
+        # After this, shifted_t_arr[:, 0] == data_t0 - n*dt exactly (n integer),
+        # i.e. the labels already sit on the data grid.
         shifted_t_arr += t0_shift_to_data[:, None]
 
-        t_arr_shift = (self.data_t0 - shifted_t_arr[:, 0]) % self.dt
-        shifted_t_arr += t_arr_shift[:, None]
-
+        # NB: a post-hoc `(data_t0 - shifted_t_arr[:, 0]) % dt` re-alignment used
+        # to live here. It was redundant (the line above already lands the labels
+        # on the data grid) AND unsafe: numpy's `%` is discontinuous at multiples
+        # of dt, so a tiny *negative* float residual maps to ~dt instead of ~0 and
+        # shifts the whole template by a full sample vs. the data (a silent
+        # e^{-i 2*pi f dt} phase ramp in FD; fired ~1% of evaluations when data_t0
+        # is off-grid). The rint() below already absorbs the sub-ULP residual, so
+        # the modulo step is dropped entirely.
         start_inds = self.xp.maximum(
             0, self.xp.rint((self.data_t0 - shifted_t_arr[:, 0]) / self.dt).astype(int)
         )
-        start_ind = int(start_inds.max())
+        # Per-source leading-sample trim collapsed to ONE shared cut. Use the MIN
+        # across sources, not the max: the max over-trims every source whose own
+        # start_ind is smaller, silently discarding valid in-window signal from
+        # later-starting sources in a heterogeneous batch. The min drops only
+        # samples that are before data_t0 for *every* source; any per-source
+        # remainder before data_t0 is handled downstream (build_common_grid masks
+        # negative grid indices; the residual path re-aligns per source). For a
+        # single source min == max, so that path is unchanged.
+        start_ind = int(start_inds.min())
 
         if start_ind > 0:
             shifted_t_arr = shifted_t_arr[:, start_ind:]

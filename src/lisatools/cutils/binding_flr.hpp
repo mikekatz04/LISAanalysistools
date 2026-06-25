@@ -141,7 +141,7 @@ class LISAResponseWrap : public ReturnPointerBase {
                   array_type<std::complex<double>> input_in_, int num_inputs, int order,
                   double sampling_frequency, int buffer_integer,
                   array_type<double> A_in_, double deps, int num_A, array_type<double> E_in_, int projections_start_ind,
-                  array_type<double> t0_arr_, int batch_size = 1, bool run_async = false);
+                  array_type<double> t0_arr_, array_type<double> t0_shift_arr_, int batch_size = 1, bool run_async = false);
 
     void get_response_quintic_wrap(array_type<double> y_gw_, array_type<double> t_data_, array_type<double> k_in_, array_type<double> u_in_, array_type<double> v_in_, double dt,
                   int num_delays,
@@ -149,7 +149,7 @@ class LISAResponseWrap : public ReturnPointerBase {
                   array_type<double> c1r_, array_type<double> c2r_, array_type<double> c3r_, array_type<double> c4r_, array_type<double> c5r_,
                   array_type<double> c1i_, array_type<double> c2i_, array_type<double> c3i_, array_type<double> c4i_, array_type<double> c5i_,
                   int projections_start_ind, int spline_type,
-                  array_type<double> t0_arr_, int batch_size = 1, bool run_async = false);
+                  array_type<double> t0_arr_, array_type<double> t0_shift_arr_, int batch_size = 1, bool run_async = false);
 
 };
 
