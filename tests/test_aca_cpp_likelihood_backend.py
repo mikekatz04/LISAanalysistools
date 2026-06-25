@@ -41,10 +41,7 @@ import unittest
 import numpy as np
 
 from lisatools.analysiscontainer import AnalysisContainerArray as _ACA
-from lisatools.domaincomputation import (
-    BaseDomainComputationGroup,
-    DomainComputationGroupArray,
-)
+from lisatools.domaincomputation import BaseDomainComputationGroup
 from lisatools.domains import FDSettings, WDMSettings
 
 
@@ -90,12 +87,34 @@ class _ACSHost:
     implementations, assigned here so the test exercises production code.
     """
 
-    # --- borrowed, under test ---
+    # --- borrowed from AnalysisContainerArray, under test ---
     cpp_template_likelihood = _ACA.cpp_template_likelihood
     refresh_cpp_dd = _ACA.refresh_cpp_dd
-    cpp_likelihood_backend = _ACA.cpp_likelihood_backend  # property
-    domain_computation_group = _ACA.domain_computation_group  # property
-    domain_group_kwargs = _ACA.domain_group_kwargs  # property (+ setter)
+    unpack_indices = _ACA.unpack_indices
+    unpack_coords = _ACA.unpack_coords
+    place_on_device = _ACA.place_on_device
+    _loop_operation = _ACA._loop_operation
+    device_context = _ACA.device_context
+    free_gpu_memory = _ACA.free_gpu_memory
+    _to_host = _ACA._to_host
+    synchronize = _ACA.synchronize
+    compute_d_d_terms = _ACA.compute_d_d_terms
+    compute_noise_terms = _ACA.compute_noise_terms
+    _compute_group_likelihood = _ACA._compute_group_likelihood
+    compute_signal_likelihood = _ACA.compute_signal_likelihood
+    compute_psd_likelihood = _ACA.compute_psd_likelihood
+    _cpp_strategy_class = _ACA._cpp_strategy_class
+    _build_cpp_splits = _ACA._build_cpp_splits
+    _ensure_cpp_splits = _ACA._ensure_cpp_splits
+    cpp_split = _ACA.cpp_split
+    # borrowed properties
+    cpp_likelihood_backend = _ACA.cpp_likelihood_backend
+    domain_computation_group = _ACA.domain_computation_group
+    domain_group_kwargs = _ACA.domain_group_kwargs
+    num_splits = _ACA.num_splits
+    ac_to_split = _ACA.ac_to_split
+    cpp_splits = _ACA.cpp_splits
+    thread_pool = _ACA.thread_pool
 
     xp = np
     run_threaded = False
@@ -139,9 +158,16 @@ class _ACSHost:
         ]
         self.acs = np.asarray([_StubAC(v) for v in d_d_values], dtype=object)
 
+        # Routing table the borrowed unpack_indices reads (ac_to_split = split_map).
+        self.ac_to_intra = np.empty(num_acs, dtype=np.int32)
+        for split_id, entries in enumerate(self.gpu_splits):
+            self.ac_to_intra[entries] = np.arange(len(entries), dtype=np.int32)
+
         # Lazy-state attributes the borrowed accessors read/write.
         self._domain_group_kwargs = dict(domain_group_kwargs or {})
+        self._cpp_splits = None
         self._cpp_likelihood_backend = None
+        self._thread_pool = None
 
 
 # ---------------------------------------------------------------------------
@@ -180,10 +206,12 @@ class _StubFDComputationGroup(BaseDomainComputationGroup):
         return d_h, h_h
 
 
-class _StubFDDCGA(DomainComputationGroupArray):
-    @property
-    def computation_group_class(self):
-        return _StubFDComputationGroup
+def _use_stub_fd_strategy(host):
+    """Point an ACS host at the NumPy FD stub strategy (the merged real
+    FDComputationGroup needs an unreconciled FD binding). Instance-shadows the
+    borrowed ``_cpp_strategy_class`` so ``_build_cpp_splits`` builds the stub."""
+    host._cpp_strategy_class = lambda: _StubFDComputationGroup
+    return host
 
 
 # ---------------------------------------------------------------------------
@@ -261,15 +289,15 @@ class TestWDMForwarderRealKernel(unittest.TestCase):
 
     def test_lazy_build_then_matches_reference(self):
         host = self._make_host(num_acs=4, num_splits=2)
-        self.assertIsNone(host._cpp_likelihood_backend)
+        self.assertIsNone(host._cpp_splits)
         data_index, templ, sf, st, sm, sn = self._make_batch(4, nb=6)
 
         out = host.cpp_template_likelihood(data_index, templ, sf, st)
 
-        # Lazy build happened and produced the real WDM group.
-        self.assertIsNotNone(host._cpp_likelihood_backend)
+        # Lazy build happened and produced the real WDM strategy per split.
+        self.assertIsNotNone(host._cpp_splits)
         self.assertEqual(
-            type(host._cpp_likelihood_backend.computation_groups[0]).__name__,
+            type(host.cpp_splits[0]).__name__,
             "WDMComputationGroup",
         )
         ref = self._reference(host, data_index, templ, sm, sn)
@@ -387,9 +415,9 @@ class TestFDForwarderStubGroup(unittest.TestCase):
             settings, data, invC, d_d,
             nchannels=self.NCH, num_splits=num_splits, data_dtype=complex,
         )
-        # Preset a stub backend (the merged real FDComputationGroup needs an
-        # unreconciled FD binding); the forwarder uses the cached instance.
-        host._cpp_likelihood_backend = _StubFDDCGA(host)
+        # The merged real FDComputationGroup needs an unreconciled FD binding,
+        # so build the NumPy FD stub strategy instead (via the strategy hook).
+        _use_stub_fd_strategy(host)
         host._raw = (data, invC, d_d)
         return host
 
@@ -483,36 +511,39 @@ class TestForwarderStateSemantics(unittest.TestCase):
             N=self.NFREQ + 1, df=self.DF, min_freq=self.DF,
             max_freq=self.NFREQ * self.DF, force_backend="cpu",
         )
-        return _ACSHost(
-            settings, data, invC, d_d, nchannels=self.NCH,
-            num_splits=num_splits, data_dtype=complex,
-            domain_group_kwargs={"tdi_type": "XYZ"},
+        return _use_stub_fd_strategy(
+            _ACSHost(
+                settings, data, invC, d_d, nchannels=self.NCH,
+                num_splits=num_splits, data_dtype=complex,
+                domain_group_kwargs={"tdi_type": "XYZ"},
+            )
         )
 
     def test_lazy_none_until_accessed(self):
         host = self._host()
+        self.assertIsNone(host._cpp_splits)
         self.assertIsNone(host._cpp_likelihood_backend)
-        # Inject a stub coordinator via the accessor's cache; real FD build is
-        # unreconciled, so we test the *caching* behaviour directly.
-        host._cpp_likelihood_backend = _StubFDDCGA(host)
-        first = host.cpp_likelihood_backend
+        first = host.cpp_likelihood_backend  # builds strategies + the shim
+        self.assertIsNotNone(host._cpp_splits)
         self.assertIs(first, host.cpp_likelihood_backend)  # cached, same object
         self.assertIs(first, host.domain_computation_group)  # alias
 
     def test_domain_group_kwargs_setter_invalidates_cache(self):
         host = self._host()
-        host._cpp_likelihood_backend = _StubFDDCGA(host)
+        host.cpp_likelihood_backend  # build strategies + shim
         self.assertIsNotNone(host._cpp_likelihood_backend)
+        self.assertIsNotNone(host._cpp_splits)
         host.domain_group_kwargs = {"tdi_type": "AET"}
-        # Setter must reset the cached backend and store the new kwargs.
+        # Setter must reset both the strategy list and the shim cache.
         self.assertIsNone(host._cpp_likelihood_backend)
+        self.assertIsNone(host._cpp_splits)
         self.assertEqual(host.domain_group_kwargs, {"tdi_type": "AET"})
 
     def test_refresh_noop_when_not_built(self):
         host = self._host()
-        self.assertIsNone(host._cpp_likelihood_backend)
+        self.assertIsNone(host._cpp_splits)
         host.refresh_cpp_dd()  # must not raise
-        self.assertIsNone(host._cpp_likelihood_backend)
+        self.assertIsNone(host._cpp_splits)
 
 
 if __name__ == "__main__":

@@ -699,434 +699,100 @@ class WDMComputationGroup(BaseDomainComputationGroup):
 
 
 class DomainComputationGroupArray:
-    """Helper class to manage multiple DomainComputationGroup instances for different splits.
+    """Thin forwarding shim over :class:`AnalysisContainerArray` (deprecated).
 
-    It can perform computations across different GPU splits and aggregate results as needed.
+    The multi-split C++ likelihood coordinator was absorbed into
+    ``AnalysisContainerArray``: it now owns the per-split strategy workspaces
+    (``acs.cpp_splits`` — the STFT/FD/WDM ``*ComputationGroup`` objects) and the
+    batched orchestration directly. This shim forwards every attribute/method to
+    its ``acs`` so existing callers (global-fit moves, external settings files)
+    keep working during the migration.
 
-    Args:
-        acs : AnalysisContainerArray
-            The AnalysisContainerArray containing the data and noise arrays, as well as the GPU split information. This will be used to initialize the individual DomainComputationGroup instances for each split.
+    Prefer the ACA methods directly: ``acs.cpp_template_likelihood`` /
+    ``acs.compute_signal_likelihood`` / ``acs.compute_psd_likelihood`` /
+    ``acs.cpp_splits``.
     """
 
-    def __init__(self, acs: AnalysisContainerArray, domain_group_kwargs: dict[str, Any] = None):
-
+    def __init__(self, acs, domain_group_kwargs=None):
         self.acs = acs
-        
-        self.initialize_computation_groups(domain_group_kwargs)
+        if domain_group_kwargs is not None:
+            # Resets the strategy cache + stores the new kwargs.
+            acs.domain_group_kwargs = domain_group_kwargs
+        acs._ensure_cpp_splits()
 
-        # Precomputed routing tables. ``ac_to_split`` maps a global AC id
-        # (equivalently walker id in the tempered sampler) to the split that
-        # owns it; ``ac_to_intra`` maps the same AC id to its intra-split
-        # index, which is what ``BaseDomainComputationGroup.compute_signal_likelihood``
-        # expects for ``data_index`` / ``noise_index``. Building these once
-        # here replaces per-call ``np.where(...)`` lookups on the hot path.
-        self.ac_to_split = np.asarray(self.acs.split_map)
-        self.ac_to_intra = np.empty(self.acs.acs_total_entries, dtype=np.int32)
-        for split_id, ids in enumerate(self.acs.gpu_splits):
-            self.ac_to_intra[ids] = np.arange(len(ids), dtype=np.int32)
-
-        self._thread_pool = ThreadPoolExecutor(max_workers=self.num_splits)
-
-    def __del__(self):
-        if hasattr(self, "_thread_pool"):
-            self._thread_pool.shutdown(wait=False, cancel_futures=True)
-
-    def initialize_computation_groups(self, domain_group_kwargs: dict[str, Any] = None):
-        """Initializes a DomainComputationGroup instance for each GPU split in the AnalysisContainerArray."""
-
-        force_backend = "cpu" if self.acs.gpus is None else "gpu"
-        settings = self.acs.settings
-        computation_groups: list[BaseDomainComputationGroup] = []
-        for split_index in range(self.num_splits):
-            with self.device_context(
-                self.acs.gpus[split_index] if self.acs.gpus is not None else None
-            ):
-                group = self.computation_group_class(
-                    acs=self.acs,
-                    split_index=split_index,
-                    force_backend=force_backend,
-                    **(domain_group_kwargs or {})
-                )
-                computation_groups.append(group)
-        self.computation_groups = computation_groups
-
-        self.compute_d_d_terms()
-
+    # --- state forwards ---
     @property
-    def xp(self):
-        """Array module (numpy or cupy)."""
-        return self.acs.xp
+    def computation_groups(self):
+        return self.acs.cpp_splits
 
     @property
     def gpus(self):
-        """list of GPU IDs corresponding to each split, or None if using CPU."""
         return self.acs.gpus
 
     @property
-    def main_gpu(self):
-        """GPU ID of the main device, or None if using CPU."""
-        return self.gpus[0] if self.gpus is not None else None
+    def xp(self):
+        return self.acs.xp
 
     @property
     def num_splits(self):
-        return len(self.acs.gpu_splits)
-    
+        return self.acs.num_splits
+
+    @property
+    def main_gpu(self):
+        return self.acs.gpus[0] if self.acs.gpus is not None else None
+
     @property
     def thread_pool(self):
-        """ThreadPoolExecutor for parallel execution across splits"""
-        if not hasattr(self, "_thread_pool"):
-            self._thread_pool = ThreadPoolExecutor(max_workers=self.num_splits)
-            logger.warning("ThreadPoolExecutor not initialized. Initializing with num_splits workers.")
-        return self._thread_pool
+        return self.acs.thread_pool
 
     @property
-    def computation_group_class(self):
-        """The :class:`BaseDomainComputationGroup` subclass paired with the
-        ACA's settings. Dispatch is by :class:`DomainSettingsBase` child
-        class — never a string flag (sprint rule)."""
-        if isinstance(self.acs.settings, STFTSettings):
-            return STFTComputationGroup
-        if isinstance(self.acs.settings, FDSettings):
-            return FDComputationGroup
-        if isinstance(self.acs.settings, WDMSettings):
-            return WDMComputationGroup
-        raise NotImplementedError(
-            f"Unsupported domain settings type "
-            f"{type(self.acs.settings).__name__} for DomainComputationGroupArray."
-        )
+    def ac_to_split(self):
+        return self.acs.ac_to_split
 
-    @contextmanager
-    def device_context(self, device: int = None):
-        """Context manager to set the appropriate device for CPU or GPU backends.
+    @property
+    def ac_to_intra(self):
+        return self.acs.ac_to_intra
 
-        Args:
-            device: GPU device ID to set the context to. If None, it will set the context to CPU if using a GPU backend, or do nothing if already using a CPU backend.
-        """
+    # --- routing / dispatch forwards ---
+    def unpack_indices(self, *args, **kwargs):
+        return self.acs.unpack_indices(*args, **kwargs)
 
-        if device is None or self.gpus is None:
-            # CPU context - set context to CPU if using a GPU backend, otherwise do nothing
-            with jax.default_device(jax.devices("cpu")[0]):
-                yield "cpu"
+    def unpack_coords(self, *args, **kwargs):
+        return self.acs.unpack_coords(*args, **kwargs)
 
-        else:
-            # device_id = self.gpus.index(device)
+    def place_on_device(self, *args, **kwargs):
+        return self.acs.place_on_device(*args, **kwargs)
 
-            # GPU context - set context to the specified GPU device
-            # with jax.default_device(jax.devices("gpu")[device_id]):
-            with self.xp.cuda.Device(device):
-                yield f"gpu: {device}"
+    def _loop_operation(self, *args, **kwargs):
+        return self.acs._loop_operation(*args, **kwargs)
 
-    def restore_main_device(self):
-        """Restores the main device context after GPU computations, and calls ``xp.get_default_memory_pool().free_all_blocks()`` to clear GPU memory.
-
-        Notes:
-            This method should be called after performing computations on multiple GPU devices to ensure that the main device context is restored.
-        """
-        if self.main_gpu is not None:
-            self.xp.get_default_memory_pool().free_all_blocks()
-            self.xp.cuda.runtime.setDevice(self.main_gpu)
-            jax.config.update(
-                "jax_default_device", jax.devices("gpu")[self.gpus.index(self.main_gpu)]
-            )
+    def device_context(self, *args, **kwargs):
+        return self.acs.device_context(*args, **kwargs)
 
     def synchronize(self):
-        """Synchronizes all GPU devices to ensure that all computations are complete before proceeding.
-
-        Notes:
-            This method should be called after performing computations on multiple GPU devices to ensure that all devices have completed their tasks before moving on to the next steps in the workflow.
-        """
-        if self.gpus is not None:
-            for device in self.gpus:
-                with self.device_context(device):
-                    self.xp.cuda.runtime.deviceSynchronize()
+        return self.acs.synchronize()
 
     def free_gpu_memory(self):
-        """Frees GPU memory on all devices by calling ``xp.get_default_memory_pool().free_all_blocks()`` for each device.
+        return self.acs.free_gpu_memory()
 
-        Notes:
-            This method should be called after performing computations on multiple GPU devices to ensure that GPU memory is freed and available for future computations.
-        """
-        if self.gpus is not None:
-            for device in self.gpus:
-                with self.device_context(device):
-                    self.xp.get_default_memory_pool().free_all_blocks()
+    def restore_main_device(self):
+        # Kept for API-compat; ACA restores device state inline (no-op here).
+        return None
 
-    def _to_host(self, arr: NDArrayLike) -> np.ndarray:
-        """Move an array to the host, ensuring it is a numpy ndarray."""
-        return arr.get() if hasattr(arr, "get") else arr
+    def _to_host(self, arr):
+        return self.acs._to_host(arr)
 
-    def unpack_indices(
-        self,
-        data_index: NDArrayLike,
-        noise_index: NDArrayLike = None,
-    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
-        """Partition a flat ``(data_index, noise_index)`` batch by split.
+    def compute_d_d_terms(self, *args, **kwargs):
+        return self.acs.compute_d_d_terms(*args, **kwargs)
 
-        Returns three parallel lists of length ``self.num_splits``:
+    def compute_noise_terms(self, *args, **kwargs):
+        return self.acs.compute_noise_terms(*args, **kwargs)
 
-        * ``positions_per_split[s]``: flat-batch positions routed to split ``s``
-          (empty arrays for splits with no matching ACs — callers skip
-          via ``len(positions) == 0``).
-        * ``data_intra_per_split[s]``: intra-split AC ids for those positions,
-          ready to be moved to device via ``self.xp.asarray``.
-        * ``noise_intra_per_split[s]``: intra-split noise AC ids.
+    def _compute_group_likelihood(self, *args, **kwargs):
+        return self.acs._compute_group_likelihood(*args, **kwargs)
 
-        This is the single owner of the partition — downstream routines
-        (waveform generation, likelihood scatter, residual dispatch) share
-        its output instead of recomputing ``np.where(ac_to_split == s)``.
-        """
-        data_index_cpu = self._to_host(data_index)
-        noise_index_cpu = self._to_host(noise_index) if noise_index is not None else data_index_cpu
+    def compute_signal_likelihood(self, *args, **kwargs):
+        return self.acs.compute_signal_likelihood(*args, **kwargs)
 
-        split_of_each = self.ac_to_split[data_index_cpu]
-
-        positions_per_split: list[np.ndarray] = []
-        data_intra_per_split: list[np.ndarray] = []
-        noise_intra_per_split: list[np.ndarray] = []
-        for split_id in range(self.num_splits):
-            positions = np.where(split_of_each == split_id)[0]
-            positions_per_split.append(positions)
-            data_intra_per_split.append(self.ac_to_intra[data_index_cpu[positions]])
-            noise_intra_per_split.append(self.ac_to_intra[noise_index_cpu[positions]])
-
-        return positions_per_split, data_intra_per_split, noise_intra_per_split
-
-    def unpack_coords(
-        self,
-        positions_per_split: list[np.ndarray],
-        coords: NDArrayLike | tuple[NDArrayLike],
-        keep_tuple: bool = False,
-    ) -> list[tuple[np.ndarray] | np.ndarray]:
-        """
-        Unpack coordinates for each split based on the positions per split.
-
-        Args:
-            positions_per_split: list of numpy arrays, where each array contains the positions for a specific split.
-            coords: A numpy or cupy array containing the coordinates to be unpacked, or a tuple of such arrays if there are multiple coordinate arrays (multiple branches).
-            keep_tuple: If True, ensure the returned coordinates per split are always in a tuple format. This applies only when there is a single coordinate array.
-
-        Returns:
-            args_per_group: A list of coordinates for each split, where each element is either a single array (if there is only one coordinate array) or a tuple of arrays (if there are multiple coordinate arrays). The coordinates are indexed according to the positions for each split.
-        """
-
-        if not isinstance(coords, tuple):
-            coords = (coords,)
-
-        coords_host = tuple(self._to_host(coords_here) for coords_here in coords)
-
-        args_per_group: list = []
-        for positions in positions_per_split:
-            if len(positions) > 0:
-                coords_s = [np.asfortranarray(coords_host[i][positions]) for i in range(len(coords_host))]
-
-                args_per_group.append(tuple(coords_s) if len(coords_s) > 1 or keep_tuple else coords_s[0])
-            else:
-                args_per_group.append(())
-
-        return args_per_group
-
-    def place_on_device(
-        self, items: tuple[list[np.ndarray | tuple[np.ndarray]]]
-    ) -> tuple[list[NDArrayLike | tuple[NDArrayLike]]]:
-        """Place lists of arrays on the appropriate devices for each split.
-
-        Args:
-            items: A tuple of lists of numpy arrays, where each entry in the tuple corresponds to a different type of array (e.g., data_index, noise_index, template_vals), and each list contains the arrays for each split.
-
-        Returns:
-            A tuple of lists of arrays, where each array has been moved to the appropriate device for its split using ``self.xp.asarray``.
-        """
-        num_items = len(items)
-
-        device_items: list[list] = [[] for _ in range(num_items)]
-
-        for i, device in enumerate(
-            self.gpus if self.gpus is not None else [None] * self.num_splits
-        ):
-            with self.device_context(device):
-                for item_id, item_per_split in enumerate(items):
-                    entry = item_per_split[i]
-                    if isinstance(entry, np.ndarray):
-                        device_items[item_id].append(self.xp.asarray(entry, copy=True))
-                    elif isinstance(entry, tuple):
-                        if len(entry) == 0:
-                            device_items[item_id].append(())
-                        else:
-                            device_items[item_id].append(tuple(self.xp.asarray(arr, copy=True) for arr in entry))
-                    else:
-                        raise ValueError("Each entry in items must be either a numpy array or a tuple of numpy arrays.")
-        return tuple(device_items)
-
-    def _loop_operation(
-        self,
-        operation: Callable | list[Callable],
-        operation_args_per_split: list[tuple] = None,
-        operation_kwargs: dict | list[dict] = None,
-        aggregate_fn: Callable = None,
-        positions_per_split: list[np.ndarray] = None,
-        run_threaded: bool = False,
-    ) -> list | Any:
-        """General loop to perform an operation across splits, with optional result aggregation.
-
-        Args:
-            operation: A callable or a list of callables (one per split) to execute within each split's device context. Each callable should accept the corresponding args and kwargs for that split.
-            operation_args_per_split: Optional list of tuples, where each tuple contains the positional arguments to pass to the operation for the corresponding split. The caller is responsible for ensuring that the arguments are correctly placed on the appropriate device (e.g., via self.xp.asarray). If not provided, defaults to a list of empty tuples.
-            operation_kwargs: Optional dictionary or list of dictionaries of keyword arguments to pass to the operation for all splits.
-            aggregate_fn: Optional callable to aggregate the results from all splits after the loop. If not provided, the raw list of results from each split is returned.
-            positions_per_split: Optional list of numpy arrays containing the positions for each split, used to guard against empty splits.
-            run_threaded: If True, dispatch operations across splits using a ThreadPoolExecutor. Default is False.
-        Returns:
-            A list of results from each split if aggregate_fn is not provided, or the aggregated result if aggregate_fn is provided.
-        """
-        if operation_args_per_split is None:
-            operation_args_per_split = [()] * self.num_splits
-        if operation_kwargs is None:
-            operation_kwargs = {}
-
-        if len(operation_args_per_split) != self.num_splits:
-            raise ValueError("Length of operation_args_per_split must match the number of splits.")
-
-        if isinstance(operation, list):
-            if len(operation) != self.num_splits:
-                raise ValueError(
-                    "If operation is a list, its length must match the number of splits."
-                )
-            operations = operation
-        else:
-            operations = [operation] * self.num_splits
-
-        if isinstance(operation_kwargs, list):
-            if len(operation_kwargs) != self.num_splits:
-                raise ValueError(
-                    "If operation_kwargs is a list, its length must match the number of splits."
-                )
-            operation_kwargs_per_split = operation_kwargs
-        else:
-            operation_kwargs_per_split = [operation_kwargs] * self.num_splits
-
-        devices = self.gpus if self.gpus is not None else [None] * self.num_splits
-
-        def _run_split_operation(i, device):
-            if positions_per_split is not None and len(positions_per_split[i]) == 0:
-                return None
-            with self.device_context(device):
-                return operations[i](*operation_args_per_split[i], **operation_kwargs_per_split[i])
-        
-        if run_threaded:
-            futures = [self.thread_pool.submit(_run_split_operation, i, device) for i, device in enumerate(devices)]
-            outputs = [future.result() for future in futures]
-        else:
-            outputs = []
-            for i, device in enumerate(
-                devices
-            ):
-                out_i = _run_split_operation(i, device)
-                outputs.append(out_i)
-
-        if aggregate_fn is not None:
-            return aggregate_fn(outputs)
-        return outputs
-
-    def compute_d_d_terms(self, out: bool = False, **kwargs):
-        """Compute (d|d) terms for all splits and store them in the respective computation groups."""
-
-        operations = [group.compute_d_d_term for group in self.computation_groups]
-
-        list_out = self._loop_operation(
-            operation=operations, operation_kwargs={"out": out, **kwargs}
-        )
-        if out:
-            return list_out
-
-    def compute_noise_terms(self, out: bool = False, **kwargs):
-        """Compute noise likelihood terms for all splits and store them in the respective computation groups."""
-
-        operations = [group.compute_noise_term for group in self.computation_groups]
-
-        list_out = self._loop_operation(
-            operation=operations, operation_kwargs={"out": out, **kwargs}
-        )
-        if out:
-            return list_out
-
-    def _compute_group_likelihood(
-        self,
-        positions_per_split: list[np.ndarray],
-        data_intra_per_split: list[NDArrayLike],
-        noise_intra_per_split: list[NDArrayLike],
-        operations: list[Callable],
-        likelihood_args_per_split: list[tuple],
-        likelihood_kwargs: dict | list[dict] = None, 
-        run_threaded: bool = False,
-    ):
-        """Compute likelihood for each split using the provided likelihood functions and arguments, and aggregate the results into a single output array."""
-        # todo I am assuming everything has been placed on the correct device. use self.place_on_device if not.
-
-        operation_args_per_split = []
-        for split_id in range(self.num_splits):
-            likelihood_args = likelihood_args_per_split[split_id]
-            args_i = (
-                data_intra_per_split[split_id],
-                noise_intra_per_split[split_id],
-                *(likelihood_args if likelihood_args is not None else ()),
-            )
-            operation_args_per_split.append(args_i)
-
-        all_logls = self._loop_operation(
-            operation=operations, operation_args_per_split=operation_args_per_split, operation_kwargs=likelihood_kwargs, positions_per_split=positions_per_split, run_threaded=run_threaded
-        )
-
-        # now synchronize
-        self.synchronize()
-        n_data = sum(len(p) for p in positions_per_split)
-    
-        output = np.full(n_data, -1e300, dtype=np.float64)
-        for split_id, positions in enumerate(positions_per_split):
-            if len(positions) > 0:
-                output[positions] = self._to_host(all_logls[split_id])
-
-        if np.any(output == -1e300):
-            logger.warning("Some positions were not filled in the output array. This may indicate an issue with the likelihood computation or aggregation.")
-        return output
-
-    def compute_psd_likelihood(
-        self,
-        positions_per_split: list[np.ndarray],
-        data_intra_per_split: list[NDArrayLike],
-        noise_intra_per_split: list[NDArrayLike],
-        likelihood_args_per_split: list[tuple],
-        likelihood_kwargs: dict | list[dict] = None,
-        run_threaded: bool = False,
-    ):
-        """Compute PSD likelihood for each split and aggregate results."""
-        operations = [group.compute_psd_likelihood for group in self.computation_groups]
-        return self._compute_group_likelihood(
-            positions_per_split,
-            data_intra_per_split,
-            noise_intra_per_split,
-            operations,
-            likelihood_args_per_split,
-            likelihood_kwargs=likelihood_kwargs,
-            run_threaded=run_threaded,
-        )
-
-    def compute_signal_likelihood(
-        self,
-        positions_per_split: list[np.ndarray],
-        data_intra_per_split: list[NDArrayLike],
-        noise_intra_per_split: list[NDArrayLike],
-        likelihood_args_per_split: list[tuple],
-        likelihood_kwargs: dict | list[dict] = None,
-        run_threaded: bool = False,
-    ):
-        """Compute signal likelihood for each split and aggregate results."""
-        operations = [group.compute_signal_likelihood for group in self.computation_groups]
-        return self._compute_group_likelihood(
-            positions_per_split,
-            data_intra_per_split,
-            noise_intra_per_split,
-            operations,
-            likelihood_args_per_split,
-            likelihood_kwargs=likelihood_kwargs,
-            run_threaded=run_threaded,
-        )
+    def compute_psd_likelihood(self, *args, **kwargs):
+        return self.acs.compute_psd_likelihood(*args, **kwargs)
