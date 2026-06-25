@@ -1519,6 +1519,13 @@ class AnalysisContainerArray:
             concurrently, one thread per split (GPU splits each enter their
             own device context; CPU splits rely on GIL-releasing work). The
             default ``False`` preserves the serial per-split loops.
+        domain_group_kwargs: Kwargs forwarded to the owned C++ likelihood
+            backend's per-split computation groups (e.g. ``tdi_type`` for all
+            domains, and STFT's ``window_alpha`` / ``use_midpoint``). Drives
+            :meth:`cpp_template_likelihood` via the lazily-built
+            :attr:`cpp_likelihood_backend`. May also be set later through the
+            :attr:`domain_group_kwargs` property (which invalidates the cached
+            backend).
 
     """
 
@@ -1535,9 +1542,17 @@ class AnalysisContainerArray:
         gpu_assignment: Optional[np.ndarray] = None,
         n_splits: Optional[int] = None,
         run_threaded: bool = False,
+        domain_group_kwargs: Optional[dict] = None,
     ) -> None:
         self.run_threaded = bool(run_threaded)
         self._thread_pool = None
+
+        # Lazily-built C++ likelihood backend (a
+        # ``DomainComputationGroupArray`` keyed to this ACA's splits). Built
+        # on first access to :attr:`cpp_likelihood_backend`; see that
+        # property for why construction must be deferred past ``__init__``.
+        self._domain_group_kwargs = dict(domain_group_kwargs) if domain_group_kwargs else {}
+        self._cpp_likelihood_backend = None
 
         if isinstance(analysis_containers, AnalysisContainer):
             acs = np.array([analysis_containers], dtype=object)
@@ -2058,6 +2073,73 @@ class AnalysisContainerArray:
             )
         return self._thread_pool
 
+    # ------------------------------------------------------------------
+    # C++ likelihood backend (owned DomainComputationGroupArray)
+    # ------------------------------------------------------------------
+
+    @property
+    def domain_group_kwargs(self) -> dict:
+        """Kwargs forwarded to the owned C++ likelihood backend's per-split
+        computation groups (e.g. ``tdi_type``, and STFT's ``window_alpha`` /
+        ``use_midpoint``). Reassigning invalidates the cached backend so it is
+        rebuilt with the new kwargs on next access."""
+        return self._domain_group_kwargs
+
+    @domain_group_kwargs.setter
+    def domain_group_kwargs(self, value: Optional[dict]) -> None:
+        self._domain_group_kwargs = dict(value) if value else {}
+        self._cpp_likelihood_backend = None  # force rebuild on next access
+
+    @property
+    def cpp_likelihood_backend(self) -> "DomainComputationGroupArray":
+        """Lazily build and cache the owned C++ likelihood backend.
+
+        The same C++ kernels run on CPU (host compiler) and GPU (``nvcc``);
+        this is the "cpp" fast path, distinct from the slow per-AC
+        ``diagnostic`` path behind :meth:`calculate_signal_likelihood` /
+        :meth:`template_likelihood`.
+
+        Builds a :class:`~lisatools.domaincomputation.DomainComputationGroupArray`
+        against ``self`` (so it is keyed to this ACA's ``gpu_splits`` /
+        ``split_map`` / ``linear_*_arr`` / ``settings``; STFT/FD/WDM dispatch
+        is automatic on ``settings``). The per-split computation groups are
+        configured from :attr:`domain_group_kwargs`.
+
+        Construction is deferred to first access (never inside ``__init__``)
+        because the backend precomputes ``(d|d)`` per split, which reads each
+        AC's ``inner_product()`` off ``linear_data_arr`` / ``linear_psd_arr`` —
+        buffers only populated at the *end* of ``__init__``
+        (``reset_linear_*_arr``). ``(d|d)`` is a snapshot at build time; after
+        mutating residuals call :meth:`refresh_cpp_dd`.
+        """
+        if self._cpp_likelihood_backend is None:
+            # Deferred import: ``domaincomputation`` imports this module only
+            # under TYPE_CHECKING, so importing it here (not at module top)
+            # keeps the runtime import graph acyclic.
+            from .domaincomputation import DomainComputationGroupArray
+
+            self._cpp_likelihood_backend = DomainComputationGroupArray(
+                self, self._domain_group_kwargs
+            )
+        return self._cpp_likelihood_backend
+
+    @property
+    def domain_computation_group(self) -> "DomainComputationGroupArray":
+        """Alias for :attr:`cpp_likelihood_backend`."""
+        return self.cpp_likelihood_backend
+
+    def refresh_cpp_dd(self, **kwargs) -> None:
+        """Recompute the owned C++ backend's cached ``(d|d)`` per split.
+
+        Call after mutating residuals (e.g. :meth:`signal_operation`, or any
+        path that rewrites the per-split linear data buffers) so that
+        :meth:`cpp_template_likelihood` reflects the new data. No-op if the
+        backend has not been built yet. ``kwargs`` are forwarded to each
+        container's ``inner_product``.
+        """
+        if self._cpp_likelihood_backend is not None:
+            self._cpp_likelihood_backend.compute_d_d_terms(**kwargs)
+
     def _split_rows(self, index_arr: np.ndarray) -> dict:
         """Group flat row positions by owning split: ``{split: rows}``."""
         split_per_row = self.split_map[np.asarray(index_arr, dtype=int)]
@@ -2208,6 +2290,98 @@ class AnalysisContainerArray:
             payload=template,
             index=index,
             op_kwargs=kwargs,
+        )
+
+    def cpp_template_likelihood(
+        self,
+        data_index,
+        template_vals,
+        start_freqs,
+        start_times=None,
+        noise_index=None,
+        run_threaded=None,
+        run_async: bool = False,
+    ) -> np.ndarray:
+        r"""Fast batched signal log-likelihood from pre-generated templates,
+        via the owned C++ backend.
+
+        Drives the multi-split propagation through
+        :attr:`cpp_likelihood_backend` (a ``DomainComputationGroupArray``),
+        evaluating
+
+        .. math:: -\tfrac{1}{2}\,\bigl((d|d) + (h|h) - 2\,\mathrm{Re}(d|h)\bigr)
+
+        for a **flat** batch of pre-generated templates, with the fast C++
+        kernels (``compute_likelihood_terms``) instead of the slow per-AC
+        ``diagnostic`` path used by :meth:`calculate_signal_likelihood` /
+        :meth:`template_likelihood` (which remains the general + validation
+        reference).
+
+        Args:
+            data_index: int array ``(N,)``. Global AC id (equivalently walker
+                id) targeted by each template row.
+            template_vals: template array, leading axis ``N``:
+                ``(N, nchannels, n_t, n_f)`` for STFT,
+                ``(N, nchannels, n_f)`` for FD,
+                ``(N, nchannels, n_m, n_n)`` for WDM. Coerced to
+                :attr:`data_dtype` (``float`` for WDM, ``complex`` otherwise) —
+                the STFT/FD kernels do not coerce, so a wrong-width dtype would
+                silently corrupt; the coercion here is required.
+            start_freqs: float array ``(N,)``. Physical start frequency of each
+                template sub-grid.
+            start_times: float array ``(N,)``. Required for STFT/WDM; unused for
+                FD (pass ``None``).
+            noise_index: int array ``(N,)``; defaults to ``data_index``.
+            run_threaded: per-split threaded dispatch; defaults to
+                :attr:`run_threaded`.
+            run_async: forwarded into the kernel (GPU async alloc/free; no-op on
+                CPU).
+
+        Returns:
+            ``np.ndarray`` of shape ``(N,)`` (host), per-binary log-likelihoods
+            in the original flat input order.
+
+        Notes:
+            ``(d|h)`` / ``(h|h)`` are recomputed every call from the live
+            per-split residual buffers, but ``(d|d)`` is cached at backend
+            build time. After mutating residuals call
+            :meth:`refresh_cpp_dd` before relying on the result.
+        """
+        if run_threaded is None:
+            run_threaded = self.run_threaded
+
+        dcga = self.cpp_likelihood_backend
+
+        template_vals = self.xp.asarray(template_vals, dtype=self.data_dtype)
+        start_freqs = self.xp.asarray(start_freqs, dtype=self.xp.float64)
+        if start_times is not None:
+            start_times = self.xp.asarray(start_times, dtype=self.xp.float64)
+
+        # 1) partition the flat batch by owning split (single owner of the
+        #    partition; ``noise_index=None`` -> ``data_index`` inside).
+        positions, data_intra, noise_intra = dcga.unpack_indices(data_index, noise_index)
+
+        # 2) scatter templates / start_freqs [/ start_times] per split, in the
+        #    positional order ``compute_signal_likelihood_terms`` expects.
+        if start_times is None:
+            coords = (template_vals, start_freqs)
+        else:
+            coords = (template_vals, start_freqs, start_times)
+        coords_per_split = dcga.unpack_coords(positions, coords, keep_tuple=True)
+
+        # 3) place intra-indices + scattered coords on each split's device.
+        data_intra, noise_intra, coords_per_split = dcga.place_on_device(
+            (data_intra, noise_intra, coords_per_split)
+        )
+
+        # 4) batched (d|h)/(h|h) kernels + cached (d|d) -> aggregated (N,) host.
+        return dcga.compute_signal_likelihood(
+            positions_per_split=positions,
+            data_intra_per_split=data_intra,
+            noise_intra_per_split=noise_intra,
+            likelihood_args_per_split=coords_per_split,
+            likelihood_kwargs={"run_async": run_async},
+            run_threaded=run_threaded,
         )
 
     def __getitem__(self, index: Any) -> np.ndarray[AnalysisContainer]:
