@@ -105,6 +105,66 @@ def python_bin_fold(data_complex, c0_complex, invC, n_b_idx_local, stride,
     return A0, A1, B0, B1
 
 
+def python_bin_fold_real(data_complex, c0_complex, invC, n_b_idx_local, stride,
+                         Nt_active, tdi_type):
+    """REAL-projection bin-fold coefficients (match the REAL WDM likelihood, not
+    the Hermitian one). See gb_sighet_realproj_proto.py for the proof (1e-13).
+
+    <d|h>: a SINGLE repacked complex coeff per channel,
+        ``A0p = 2*(A0re + i*A0im)``,  A0re = Sum Re(d).ReInvC.Re(c0),
+                                      A0im = Sum Re(d).ReInvC.Im(c0),
+        so the EXISTING kernel's ``0.5*Re(A0p*r + A1p*dr)`` yields the exact real
+        ``<d|h>`` at the SAME storage as today (no conjugate, no doubling).
+    <h|h>: the conj blocks B0/B1 (as today) PLUS nonconj blocks B0nc/B1nc
+        (``Sum c0_c.ReInvC.c0_c2`` with NO conjugate on c0_c). The kernel forms
+        ``0.5*Re(B0.conj(rc)rc2 + B0nc.rc.rc2 + B1/B1nc dr terms)`` -> exact real
+        ``<h|h>`` minus the dr^2 (noff^2) term (the linear-r budget; add a noff^2
+        set later only if the off-reference check needs it).
+
+    Returns A0p, A1p, B0, B1, B0nc, B1nc (same shapes as python_bin_fold's A0/B0).
+    """
+    nch, Nf_act, _ = c0_complex.shape
+    N_sparse_t = len(n_b_idx_local)
+    bin_edges = np.arange(N_sparse_t + 1) * stride; bin_edges[-1] = Nt_active
+    bin_idx = np.repeat(np.arange(N_sparse_t), np.diff(bin_edges).astype(int))
+    assert bin_idx.shape[0] == Nt_active
+    n_off = (np.arange(Nt_active) - n_b_idx_local[bin_idx]).astype(float)
+
+    Re_d = np.real(data_complex)
+    iC = np.real(invC)                      # real WDM sensitivity
+    u = np.real(c0_complex); w = np.imag(c0_complex)
+
+    # ---- <d|h> repack: A0re/A0im integrands, packed into one complex ----
+    if tdi_type == "XYZ":
+        Dre = np.einsum("cmn,cdmn->dmn", Re_d, iC)   # Sum_c Re(d_c) ReInvC[c,d]
+    else:
+        Dre = Re_d * iC
+    wA_re = Dre * u; wA_im = Dre * w
+    A0p = np.zeros((nch, Nf_act, N_sparse_t), dtype=np.complex128)
+    A1p = np.zeros((nch, Nf_act, N_sparse_t), dtype=np.complex128)
+    for b in range(N_sparse_t):
+        m = bin_idx == b; nf = n_off[m]
+        A0p[:, :, b] = 2.0 * (wA_re[:, :, m].sum(-1) + 1j * wA_im[:, :, m].sum(-1))
+        A1p[:, :, b] = 2.0 * ((wA_re[:, :, m] * nf).sum(-1) + 1j * (wA_im[:, :, m] * nf).sum(-1))
+
+    # ---- <h|h>: conj + nonconj blocks (real invC) ----
+    if tdi_type == "XYZ":
+        Ec = c0_complex.conj()[:, None] * iC * c0_complex[None, :]   # conj(c0_c) iC c0_c2
+        En = c0_complex[:, None] * iC * c0_complex[None, :]          # c0_c iC c0_c2 (no conj)
+        shp = (nch, nch, Nf_act, N_sparse_t)
+    else:
+        Ec = c0_complex.conj() * iC * c0_complex
+        En = c0_complex * iC * c0_complex
+        shp = (nch, Nf_act, N_sparse_t)
+    B0 = np.zeros(shp, dtype=np.complex128); B1 = np.zeros(shp, dtype=np.complex128)
+    B0nc = np.zeros(shp, dtype=np.complex128); B1nc = np.zeros(shp, dtype=np.complex128)
+    for b in range(N_sparse_t):
+        m = bin_idx == b; nf = n_off[m]
+        B0[..., b] = Ec[..., m].sum(-1); B1[..., b] = (Ec[..., m] * nf).sum(-1)
+        B0nc[..., b] = En[..., m].sum(-1); B1nc[..., b] = (En[..., m] * nf).sum(-1)
+    return A0p, A1p, B0, B1, B0nc, B1nc
+
+
 def python_get_ll_v1(c1_sparse_active, m_local_active, c0_sparse_complex,
                       A0, A1, B0, B1, tdi_type, c0_mask):
     """Python v1 get_ll body translated for ONE binary, taking the

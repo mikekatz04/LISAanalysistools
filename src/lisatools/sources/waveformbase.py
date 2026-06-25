@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 class AETTDIWaveform(ABC):
     """Base class for an AET TDI Waveform."""

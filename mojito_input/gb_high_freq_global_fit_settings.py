@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import h5py
 import numpy as np
+import os
 import shutil
+import sys
 import logging
 
 try:
@@ -17,7 +19,7 @@ except (ModuleNotFoundError, ImportError) as e:
 from typing import TYPE_CHECKING
 
 from lisatools.detector import L1Orbits
-from lisatools.domains import FDSettings, STFTSettings
+from lisatools.domains import FDSettings, STFTSettings, WDMSettings
 from lisatools.domaincomputation import DomainComputationGroupArray
 from lisatools.utils.constants import *
 from eryn.state import BranchSupplemental
@@ -86,7 +88,8 @@ def setup_recipe(
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
-    cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
+    if gpu_available:
+        cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
 
     #* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
@@ -95,7 +98,60 @@ def setup_recipe(
     # subset_inds = np.array([int(name.split('_')[1]) for name in iteratively_resolved_population["Name"]])
     subset_inds = None
     # setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds)
-    
+
+    #* ============== Chunked-heterodyne (WDM) GB likelihood ==============
+    # When the run domain is WDM, the GB branch uses the chunked-het
+    # likelihood (``gb_wdm_het.GBWDMHeterodyne``). Built lazily here, not on
+    # the settings dataclass: ``CurrentInfoGlobalFit.__init__`` deepcopies
+    # the settings tree and the underlying C++ orbit wrap is not picklable.
+    # ``N_cp_sig=48`` / ``N_cp_orbit=32`` are the validated defaults
+    # (median mm5 ~1e-9; see sprint-root CLAUDE.md). Mirrors the
+    # ``gb_and_foreground_global_fit_settings.py`` wiring.
+    gb_info = curr.source_info["gb"]
+    if (
+        isinstance(general_info.domain_settings, WDMSettings)
+        and gb_info.gb_wdm_comp is None
+    ):
+        _gb_wdm_het_dir = os.path.abspath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..", "scripts", "gb_chunked_het",
+            )
+        )
+        if _gb_wdm_het_dir not in sys.path:
+            sys.path.insert(0, _gb_wdm_het_dir)
+        from gb_wdm_het import GBWDMHeterodyne
+
+        _wdm = general_info.domain_settings
+        # Anchor the chunked-het grid at the runtime data start
+        # (``times[0]`` after the preprocess trim), not at 0.
+        _t_obs_start = float(getattr(general_info, "data_t0", 0.0))
+        _jax_chunk_env = os.environ.get("CHUNKED_JAX_CHUNK")
+        _jax_chunk = int(_jax_chunk_env) if _jax_chunk_env else None
+        gb_info.gb_wdm_comp = GBWDMHeterodyne(
+            Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
+            T_full=general_info.Tobs, t_ref_full=gb_info.t0,
+            Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
+            n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
+            N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
+            nchannels=3,
+            force_backend=general_info.force_backend,
+            tdi_gen="2nd generation",
+            orbits=general_info.gpu_orbits,
+            t_obs_start=_t_obs_start,
+            N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
+            N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
+            jax_chunk=_jax_chunk,
+        )
+        logger.info(
+            "Chunked-het GB likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d "
+            "N_cp_sig=%d N_cp_orbit=%d (t_obs_start=%.3e t_ref=%.3e)",
+            _wdm.Nf, _wdm.Nt,
+            gb_info.gb_wdm_comp.Nt_sub, gb_info.gb_wdm_comp.N_sparse,
+            gb_info.gb_wdm_comp.N_cp_sig, gb_info.gb_wdm_comp.N_cp_orbit,
+            _t_obs_start, gb_info.t0,
+        )
+
     #* ================================= BUILD MOVES ==================================
     gb_search_moves, gb_pe_moves = build_gb_moves(
         engine_info, curr, acs, priors, state
@@ -140,10 +196,17 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
     
     input_data_arr: DataResidualArray = general_set.input_data_residual_array
-    start_freq = float(input_data_arr.settings.f_arr.min())
-    end_freq = float(input_data_arr.settings.f_arr.max())
-    
-    Tobs = 1/getattr(input_data_arr.settings, "df")
+    # Band from the resolved domain settings (works for FD and WDM); fall
+    # back to the FD frequency grid if the domain doesn't expose min/max.
+    domain_settings = general_set.domain_settings
+    if getattr(domain_settings, "min_freq", None) is not None:
+        start_freq = float(domain_settings.min_freq)
+        end_freq = float(domain_settings.max_freq)
+    else:
+        start_freq = float(input_data_arr.settings.f_arr.min())
+        end_freq = float(input_data_arr.settings.f_arr.max())
+
+    Tobs = general_set.Tobs
 
     oversample = 4
     extra_buffer = 5
@@ -203,13 +266,18 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         extra_buffer=extra_buffer,
         # Start_resample_iter, Iter_count_per_resample, !group_proposal_kwargs (handled later?)
         start_freq_ind=start_freq_ind,
-        # t0=t0_gbs,
+        t0=general_set.data_t0,
         # tdi_setup="XYZ",
         # use_tdi2=True,
         Tobs=Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
         waveform_kwargs=waveform_kwargs,
+        # Run domain + chunked-het GB likelihood. ``gb_wdm_comp`` is built
+        # lazily in ``setup_recipe`` (the C++ orbit wrap is not picklable, and
+        # CurrentInfoGlobalFit deepcopies the settings tree).
+        domain_settings=domain_settings,
+        gb_wdm_comp=None,
         # Transform, Priors, Periodic (handled later!)
         nleaves_max=20,
         nleaves_min=0,
@@ -266,11 +334,12 @@ def get_general_erebor_settings() -> GeneralSetup:
     submission_folder = file_store_dir
     
     gpus = [0]
-    cp.cuda.runtime.setDevice(gpus[0])
-    # Restrict JAX to only see the target GPU — must be set before JAX backend init
-    import jax
+    if gpu_available:
+        cp.cuda.runtime.setDevice(gpus[0])
+        # Restrict JAX to only see the target GPU — must be set before JAX backend init
+        import jax
 
-    jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
+        jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
     nwalkers = 32
@@ -280,10 +349,30 @@ def get_general_erebor_settings() -> GeneralSetup:
     window_taper_duration = 1 / start_freq
     normalize_window = True
 
-    basis_domain = "fd"
-    stft_dt = 1 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
+    # Run domain. The choice is a ``DomainSettingsBase`` (sub)class whose
+    # ``make_factory`` builds the factory the engine consumes — NOT a string
+    # flag (sprint rule: domains are communicated as a DomainSettingsBase /
+    # factory and dispatched by isinstance). WDM drives the chunked-heterodyne
+    # GB likelihood (built lazily in setup_recipe).
+    domain_cls = WDMSettings
 
-    base_file_name += f"_{basis_domain}"
+    # WDM grid: ~1-hour wavelets via adjust_to_even_bins, which also snaps
+    # Tobs to an exact Nf*Nt*dt span.
+    WAVELET_DUR_BOUNDS = (
+        float(os.environ.get("WAVELET_DUR_MIN", 3600.0)),
+        float(os.environ.get("WAVELET_DUR_MAX", 4400.0)),
+    )
+    NF, NT, WAVELET_DURATION = WDMSettings.adjust_to_even_bins(
+        t_min=WAVELET_DUR_BOUNDS[0], t_max=WAVELET_DUR_BOUNDS[1], dt=dt, Tobs=Tobs,
+    )
+    Tobs = NF * NT * dt  # exact WDM span
+    logger.info(
+        "WDM grid: Nf=%d Nt=%d wavelet_duration=%.1f s Tobs=%.6e s",
+        NF, NT, WAVELET_DURATION, Tobs,
+    )
+
+    stft_dt = None
+    base_file_name += f"_{domain_cls.__name__.replace('Settings', '').lower()}"
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
@@ -331,17 +420,16 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
-    # Domain communicated by settings factory, not a string flag (sprint
-    # rule): the engine calls ``factory(times, dt, force_backend)`` after
-    # loading the data so the grid is sized against the real time array.
-    if basis_domain == "stft":
-        domain_settings = STFTSettings.make_factory(
-            big_dt=stft_dt, min_freq=start_freq, max_freq=end_freq
-        )
-    else:
-        domain_settings = FDSettings.make_factory(
-            min_freq=start_freq, max_freq=end_freq
-        )
+    # Build the factory from the chosen domain class (above). The engine
+    # calls ``factory(times, dt, force_backend)`` after loading the data so
+    # the grid is sized against the real time array. To switch domains,
+    # reassign ``domain_cls`` and the matching ``make_factory`` call:
+    #   FD  : FDSettings.make_factory(min_freq=start_freq, max_freq=end_freq)
+    #   STFT: STFTSettings.make_factory(big_dt=24*3600.0, min_freq=start_freq, max_freq=end_freq)
+    domain_settings = domain_cls.make_factory(
+        Nf=NF, Nt=NT, min_freq=start_freq, max_freq=end_freq,
+        min_time=20 * WAVELET_DURATION, max_time=(NT - 20) * WAVELET_DURATION,
+    )
 
     general_settings = GeneralSettings(
         Tobs=Tobs,

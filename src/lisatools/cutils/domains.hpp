@@ -431,15 +431,22 @@ class STFTFresnel : public STFTSettings {
                           ///< window) [s] alpha * dt / 2
   double f_taper;  /// 1.0 / (2.0 * taper_duration);  ///< Frequency scale
                    /// associated with the window taper [Hz]
+  bool use_midpoint;  ///< If true, anchor the linear-chirp expansion at the bin
+                      ///< midpoint (t0 + dt/2) rather than the bin start (t0).
+                      ///< The caller must then supply (amp, phase0, f0, fdot0)
+                      ///< evaluated at the midpoint. The Fourier-transform
+                      ///< origin stays at t0, so the output keeps the standard
+                      ///< STFT convention (see get_phase_kernel_product).
   CUDA_CALLABLE_MEMBER
   STFTFresnel(int num_times_, int num_freqs_, int num_channels_, double t0_,
               double f_min_, double f_max_, double dt_, double df_,
-              double window_alpha_)
+              double window_alpha_, bool use_midpoint_ = false)
       : STFTSettings(num_times_, num_freqs_, num_channels_, t0_, f_min_, f_max_,
                      dt_, df_),
         window_alpha(window_alpha_),
         taper_duration(window_alpha_ > 0.0 ? window_alpha_ * dt_ / 2.0 : 0.0),
-        f_taper(window_alpha_ > 0.0 ? 1.0 / (2.0 * taper_duration) : 0.0){};
+        f_taper(window_alpha_ > 0.0 ? 1.0 / (2.0 * taper_duration) : 0.0),
+        use_midpoint(use_midpoint_){};
 
   CUDA_DEVICE
   void get_amp_phase(double* amp, double* phase, cmplx z);
@@ -459,8 +466,9 @@ class STFTFresnel : public STFTSettings {
   cmplx get_fresnel_kernel_interval(double f, double t0, double f0,
                                     double fdot0, double t_start, double t_end);
   CUDA_DEVICE
-  cmplx get_phase_kernel_product(double f_eff, double t0, double f0,
-                                 double fdot0, double t_start, double t_end);
+  cmplx get_phase_kernel_product(double f_eff, double t_ref, double f0,
+                                 double fdot0, double t_start, double t_end,
+                                 double t_ft_origin);
   CUDA_DEVICE
   cmplx get_windowed_fourier_value(double amp, double phase0, double f0,
                                    double fdot0, double t0, double f);

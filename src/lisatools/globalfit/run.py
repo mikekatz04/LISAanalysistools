@@ -33,6 +33,7 @@ from eryn.state import State as eryn_State
 from eryn.utils.plot import PlotContainer
 
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from ..domains import WDMSettings
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
@@ -485,7 +486,7 @@ class GlobalFit:
                 sens_here = general_info.sensitivity_backend(
                     f"walker_{w}",
                     psd_params,
-                    transform_fn=self.curr.source_info["psd"].transform_fn,
+                    # transform_fn=self.curr.source_info["psd"].transform_fn,
                     galfor_params=galfor_params,
                 )
             else:
@@ -504,7 +505,8 @@ class GlobalFit:
             )
 
         gpus = general_info.gpus
-        acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
+        complex_psd = not isinstance(acs_tmp[0].data.settings, WDMSettings)
+        acs = AnalysisContainerArray(acs_tmp, gpus=gpus, complex_psd=complex_psd)
 
         if rebuild_residuals:
             # Residual rebuild, replicating the stft_tof ``get_templates``
@@ -534,7 +536,7 @@ class GlobalFit:
                 if not params:
                     continue
                 template = ac.build_template(params)
-                breakpoint()
+                # breakpoint()  # debug hook: inspect template vs ac.data here
                 ac.data.add_signal(template, sign=-1)
 
             # stft_tof fallback for branches without a registered generator.
@@ -709,7 +711,7 @@ class GlobalFit:
             # process). Branches without one are skipped with a warning and
             # may keep subtracting in their recipe (legacy path) -- no
             # double-subtraction either way.
-            acs = self.setup_acs(state, rebuild_residuals=True)
+            acs = self.setup_acs(state, rebuild_residuals=False)
             self.logger.debug("acs setup done")
 
             state.log_like[:] = acs.likelihood(complex=False)

@@ -499,6 +499,27 @@ class GeneralSetup(Setup, GeneralSettings):
                 **sensitivity_init_kwargs,
             )
 
+    @property
+    def stft_dt(self) -> Optional[float]:
+        """STFT hop time, if applicable."""
+        if isinstance(self.domain_settings, STFTSettings):
+            return self.domain_settings.dt
+        return None
+    
+    @property
+    def start_freq(self) -> Optional[float]:
+        """Starting frequency of the active band, if applicable."""
+        if hasattr(self.domain_settings, "min_freq_input"):
+            return self.domain_settings.min_freq_input
+        return None
+    
+    @property
+    def end_freq(self) -> Optional[float]:
+        """Ending frequency of the active band, if applicable."""
+        if hasattr(self.domain_settings, "max_freq_input"):
+            return self.domain_settings.max_freq_input
+        return None
+
 
 
 @dataclasses.dataclass

@@ -29,6 +29,12 @@
 #   SKIP_FEW=1                    # skip FastEMRIWaveforms (EMRI users only)
 #   SKIP_PHENTAX=1                # skip phentax (MBH PhenomTHM)
 #   SKIP_LISA_ON_GPU=1            # skip retiring lisa-on-gpu (default)
+#   GIT_PULL=1                    # (default) after checkout, fast-forward-pull
+#                                 # origin/<branch> for each package. The install
+#                                 # ABORTS if any package has diverged from its
+#                                 # remote (non-fast-forward) so you never build
+#                                 # on a silently stale/conflicting tree. Set
+#                                 # GIT_PULL=0 to skip pulling (offline / pinned).
 
 set -euo pipefail
 
@@ -36,6 +42,7 @@ ORG="${ORG:-lisa-analysis-tools}"
 SKIP_FEW="${SKIP_FEW:-0}"
 SKIP_PHENTAX="${SKIP_PHENTAX:-0}"
 SKIP_LISA_ON_GPU="${SKIP_LISA_ON_GPU:-1}"
+GIT_PULL="${GIT_PULL:-1}"
 
 LAT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEV_ROOT="$(dirname "$LAT_DIR")"
@@ -83,11 +90,35 @@ clone_or_reuse_sibling() {
     fi
 }
 
+# Fast-forward-pull origin/<branch>. Aborts the whole install if the local
+# branch has diverged from its remote (non-fast-forward) or the working tree
+# conflicts, so a stale/conflicting checkout is never silently built. Skip with
+# GIT_PULL=0.
+pull_or_stop() {
+    local repo_path="$1" branch="$2"
+    local name; name="$(basename "$repo_path")"
+    [ "$GIT_PULL" = "1" ] || { echo "===> GIT_PULL=0: skipping pull for $name"; return 0; }
+    echo "===> pulling origin/$branch in $name (fast-forward only)"
+    if ! git -C "$repo_path" pull --ff-only origin "$branch"; then
+        echo "" >&2
+        echo "ERROR: could not fast-forward '$name' to origin/$branch." >&2
+        echo "       The local '$branch' has diverged from the remote (local commits" >&2
+        echo "       not on origin, or conflicting local changes), so a plain pull is" >&2
+        echo "       not allowed. Resolve it manually, e.g.:" >&2
+        echo "         cd $repo_path" >&2
+        echo "         git status" >&2
+        echo "         git log --oneline --graph --left-right HEAD...origin/$branch" >&2
+        echo "       then re-run ./install.sh  (or set GIT_PULL=0 to skip pulls)." >&2
+        exit 1
+    fi
+}
+
 editable_install() {
     local repo_path="$1" branch="$2"
     shift 2
     cd "$repo_path"
     git checkout "$branch"
+    pull_or_stop "$repo_path" "$branch"
     pip install --no-build-isolation -e . "$@"
 }
 
