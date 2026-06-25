@@ -346,7 +346,19 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         tdi_type: str = "XYZ",
         force_backend: str = "cpu",
         window_alpha: float = 0.0,
+        use_midpoint: bool = False,
     ):
+        """
+        Args:
+            window_alpha: Tukey-window parameter for the Fresnel transform
+                (``0.0`` = rectangular window).
+            use_midpoint: If ``True``, the Fresnel transform anchors each
+                linear-chirp expansion at the bin midpoint (``t0 + dt/2``)
+                instead of the bin start, which is more accurate for signals
+                with frequency curvature. The caller must then supply the
+                per-window ``(amp, phase0, f0, fdot0)`` evaluated at the bin
+                midpoint; the output convention is unchanged.
+        """
         from .domains import STFTSettings
 
         if not isinstance(acs.settings, STFTSettings):
@@ -356,6 +368,7 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         super().__init__(acs, split_index, tdi_type, force_backend)
 
         self.window_alpha = window_alpha
+        self.use_midpoint = use_midpoint
 
         with self.group_device_context():
             self._create_cpp_domain()
@@ -383,7 +396,11 @@ class STFTComputationGroup(BaseDomainComputationGroup):
 
     def _create_cpp_domain(self):
         self._cpp_domain = self.backend.STFTDomainWrap(*self.domain_args)
-        self._cpp_fresnel = self.backend.STFTFresnelWrap(*self.domain_args[:8], window_alpha=self.window_alpha)
+        self._cpp_fresnel = self.backend.STFTFresnelWrap(
+            *self.domain_args[:8],
+            window_alpha=self.window_alpha,
+            use_midpoint=self.use_midpoint,
+        )
 
     @property
     def cpp_fresnel(self):

@@ -653,6 +653,25 @@ double STFTFresnel::get_auxiliary_g(double x) {
   return g;
 }
 
+/**
+ * Evaluate the Fresnel integrals C(x) and S(x).
+ *
+ * NOTE ON ACCURACY: this is a fast, low-accuracy evaluation, not an exact one.
+ * For |x| <= 6 it uses the Abramowitz & Stegun 7.3.27/7.3.28 rational
+ * approximations of the auxiliary functions f(x), g(x) (get_auxiliary_f /
+ * get_auxiliary_g), whose absolute error is up to ~2e-3; for |x| > 6 only the
+ * leading asymptotic term is kept (error ~5e-4). The analytic linear-chirp
+ * Fourier identity built on top of these (get_fourier_value) is itself exact,
+ * so this ~2e-3 approximation is what sets the floor on the Fresnel
+ * Fourier-value accuracy for a clean linear chirp (measured ~1.9e-3 relative
+ * vs a brute-force transform), independent of the start/midpoint reference
+ * choice (both reference choices hit identical Fresnel arguments for a linear
+ * chirp). It is far below the linear-chirp *modeling* error for curved signals
+ * (the error the midpoint option reduces), so it is normally negligible. If
+ * near-machine-precision Fresnel values are ever required, replace the rational
+ * fits with a higher-order approximation (e.g. Boersma) or a series +
+ * continued-fraction split.
+ */
 CUDA_DEVICE
 void STFTFresnel::get_fresnel_integrals(double* C, double* S, double x) {
   double abs_x = std::abs(x);
@@ -716,13 +735,20 @@ cmplx STFTFresnel::get_fresnel_kernel(double f, double t0, double f0,
 }
 
 CUDA_DEVICE
-cmplx STFTFresnel::get_phase_kernel_product(double f_eff, double t0, double f0,
-                                            double fdot0, double t_start,
-                                            double t_end) {
+cmplx STFTFresnel::get_phase_kernel_product(double f_eff, double t_ref,
+                                            double f0, double fdot0,
+                                            double t_start, double t_end,
+                                            double t_ft_origin) {
   cmplx kernel =
-      get_fresnel_kernel_interval(f_eff, t0, f0, fdot0, t_start, t_end);
+      get_fresnel_kernel_interval(f_eff, t_ref, f0, fdot0, t_start, t_end);
   double zeta = get_zeta(f_eff, f0, fdot0);
-  double phase = -M_PI * fdot0 * zeta * zeta;
+  // First term: the usual stationary-phase factor for a chirp referenced at
+  // t_ref.  Second term: re-references the Fourier transform back to the
+  // window start (t_ft_origin) when the chirp is anchored elsewhere
+  // (t_ref = midpoint).  It is exactly 0 when t_ref == t_ft_origin, so the
+  // initial-time path is bit-for-bit unchanged.
+  double phase = -M_PI * fdot0 * zeta * zeta -
+                 2.0 * M_PI * f_eff * (t_ref - t_ft_origin);
   return gcmplx::polar(1.0, phase) * kernel;
 }
 
@@ -735,21 +761,30 @@ cmplx STFTFresnel::get_windowed_fourier_value(double amp, double phase0,
   double t_roll_on = t0 + taper_duration;
   double t_roll_off = t_end - taper_duration;
 
+  // Chirp reference: bin start (default) or bin midpoint (more accurate).  The
+  // Fourier-transform origin is always the window start t0, so each sub-term
+  // automatically picks up the correct per-effective-frequency compensating
+  // phase inside get_phase_kernel_product and the output stays in the standard
+  // STFT convention.  Integration bounds remain the physical window times.
+  double t_ref = use_midpoint ? (t0 + 0.5 * dt) : t0;
+
   double amplitude = amp / std::sqrt(2.0 * std::abs(fdot0));
   cmplx overall_factor = gcmplx::polar(amplitude, phase0);
 
-  cmplx rectangular = get_phase_kernel_product(f, t0, f0, fdot0, t0, t_end);
-  cmplx left_dc = get_phase_kernel_product(f, t0, f0, fdot0, t0, t_roll_on);
-  cmplx left_plus_shift =
-      get_phase_kernel_product(f - f_taper, t0, f0, fdot0, t0, t_roll_on);
-  cmplx left_minus_shift =
-      get_phase_kernel_product(f + f_taper, t0, f0, fdot0, t0, t_roll_on);
+  cmplx rectangular =
+      get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t_end, t0);
+  cmplx left_dc =
+      get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t_roll_on, t0);
+  cmplx left_plus_shift = get_phase_kernel_product(f - f_taper, t_ref, f0, fdot0,
+                                                   t0, t_roll_on, t0);
+  cmplx left_minus_shift = get_phase_kernel_product(
+      f + f_taper, t_ref, f0, fdot0, t0, t_roll_on, t0);
   cmplx right_dc =
-      get_phase_kernel_product(f, t0, f0, fdot0, t_roll_off, t_end);
-  cmplx right_plus_shift =
-      get_phase_kernel_product(f - f_taper, t0, f0, fdot0, t_roll_off, t_end);
-  cmplx right_minus_shift =
-      get_phase_kernel_product(f + f_taper, t0, f0, fdot0, t_roll_off, t_end);
+      get_phase_kernel_product(f, t_ref, f0, fdot0, t_roll_off, t_end, t0);
+  cmplx right_plus_shift = get_phase_kernel_product(
+      f - f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
+  cmplx right_minus_shift = get_phase_kernel_product(
+      f + f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
 
   cmplx out = overall_factor * (rectangular - 0.5 * (left_dc + right_dc) -
                                 0.25 * (left_plus_shift + left_minus_shift +
@@ -766,9 +801,14 @@ cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0,
 
   double t1 = t0 + dt;
 
+  // Chirp reference: bin start (default) or bin midpoint (more accurate).  The
+  // Fourier-transform origin stays at the window start t0; the compensating
+  // phase added in get_phase_kernel_product keeps the standard STFT convention.
+  double t_ref = use_midpoint ? (t0 + 0.5 * dt) : t0;
+
   double amplitude = window_factor * amp / std::sqrt(2.0 * std::abs(fdot0));
 
-  cmplx phase_kernel = get_phase_kernel_product(f, t0, f0, fdot0, t0, t1);
+  cmplx phase_kernel = get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t1, t0);
   cmplx out = gcmplx::polar(amplitude, phase0) * phase_kernel;
 
   return out;

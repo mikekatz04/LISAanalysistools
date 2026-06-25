@@ -154,10 +154,12 @@ public:
 
     STFTFresnelWrap(int num_times, int num_freqs, int num_channels,
                     double t0, double f_min, double f_max,
-                    double dt, double df, double window_alpha = 0.0)
+                    double dt, double df, double window_alpha = 0.0,
+                    bool use_midpoint = false)
     {
         fresnel = new STFTFresnel(num_times, num_freqs, num_channels,
-                                  t0, f_min, f_max, dt, df, window_alpha);
+                                  t0, f_min, f_max, dt, df, window_alpha,
+                                  use_midpoint);
     }
 
     ~STFTFresnelWrap() { delete fresnel; }
