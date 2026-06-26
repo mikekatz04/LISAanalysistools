@@ -19,10 +19,10 @@ itself, two ways:
   likelihood kernel** (``WDMDomainWrap``) — the lazily-built real
   ``WDMComputationGroup`` runs on CPU. This validates the forwarder feeding a
   genuine kernel end-to-end, including the lazy backend build.
-* **FD** (:class:`TestFDForwarderStubGroup`) drives a NumPy stub group (the
-  established pattern from ``test_multi_gpu_placement.py``; the merged real
-  ``FDComputationGroup`` requires the not-yet-reconciled STFT-era FD binding).
-  This covers the complex-dtype + ``start_times=None`` forwarder path.
+* **FD** (:class:`TestFDForwarderRealKernel`) drives the **real C++ FD
+  likelihood kernel** (``FDDomainForStftWrap``) — the lazily-built real
+  ``FDComputationGroup`` runs on CPU and matches the full-covariance reference
+  to machine precision. Covers the complex-dtype + ``start_times=None`` path.
 
 STFT shares the identical forwarder code path (the forwarder treats the
 template opaquely — it only coerces dtype and scatters); WDM (4-index
@@ -42,7 +42,6 @@ import warnings
 import numpy as np
 
 from lisatools.analysiscontainer import AnalysisContainerArray as _ACA
-from lisatools.domaincomputation import BaseDomainComputationGroup
 from lisatools.domains import FDSettings, WDMSettings
 
 
@@ -172,7 +171,7 @@ class _ACSHost:
 
 
 # ---------------------------------------------------------------------------
-# FD stub group + coordinator (NumPy XYZ reference), from test_multi_gpu_placement.
+# Full-covariance XYZ FD inner-product reference (from test_multi_gpu_placement).
 # ---------------------------------------------------------------------------
 
 
@@ -184,35 +183,6 @@ def _cross_inner(a, b, invC, df):
         for j in range(nch):
             acc += np.sum(np.conj(a[i]) * invC[i, j] * b[j])
     return 4.0 * df * acc
-
-
-class _StubFDComputationGroup(BaseDomainComputationGroup):
-    """NumPy stand-in for ``FDComputationGroup`` (XYZ full-cov reference)."""
-
-    def compute_signal_likelihood_terms(
-        self, data_index, noise_index, template_vals, start_freqs, start_times=None, **_
-    ):
-        nb, nch, nfreq = template_vals.shape
-        data = self.data_arr.reshape(self.num_data, nch, nfreq)
-        invC = self.invC_arr.reshape(self.num_noise, nch, nch, nfreq)
-        df = self.settings.df
-        d_h = np.zeros(nb, dtype=np.complex128)
-        h_h = np.zeros(nb, dtype=np.complex128)
-        for b in range(nb):
-            d = data[int(data_index[b])]
-            ic = invC[int(noise_index[b])]
-            h = template_vals[b]
-            d_h[b] = _cross_inner(d, h, ic, df)
-            h_h[b] = _cross_inner(h, h, ic, df)
-        return d_h, h_h
-
-
-def _use_stub_fd_strategy(host):
-    """Point an ACS host at the NumPy FD stub strategy (the merged real
-    FDComputationGroup needs an unreconciled FD binding). Instance-shadows the
-    borrowed ``_cpp_strategy_class`` so ``_build_cpp_splits`` builds the stub."""
-    host._cpp_strategy_class = lambda: _StubFDComputationGroup
-    return host
 
 
 # ---------------------------------------------------------------------------
@@ -384,9 +354,9 @@ class TestWDMForwarderRealKernel(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestFDForwarderStubGroup(unittest.TestCase):
+class TestFDForwarderRealKernel(unittest.TestCase):
     """``cpp_template_likelihood`` forwarder over the complex FD path,
-    driving a NumPy stub group (XYZ full-cov) with a preset backend."""
+    driving the real C++ ``FDComputationGroup`` (``FDDomainForStftWrap``)."""
 
     NCH = 3
     NFREQ = 64
@@ -416,9 +386,11 @@ class TestFDForwarderStubGroup(unittest.TestCase):
             settings, data, invC, d_d,
             nchannels=self.NCH, num_splits=num_splits, data_dtype=complex,
         )
-        # The merged real FDComputationGroup needs an unreconciled FD binding,
-        # so build the NumPy FD stub strategy instead (via the strategy hook).
-        _use_stub_fd_strategy(host)
+        # Drives the real FDComputationGroup: the borrowed _cpp_strategy_class
+        # dispatches FDSettings -> FDComputationGroup, and the stub
+        # orbits/sensitivity satisfy build_cpp_objects (the signal inner
+        # products don't use orbits). The real FDDomainForStftWrap kernel
+        # matches _cross_inner to machine precision.
         host._raw = (data, invC, d_d)
         return host
 
@@ -512,12 +484,10 @@ class TestForwarderStateSemantics(unittest.TestCase):
             N=self.NFREQ + 1, df=self.DF, min_freq=self.DF,
             max_freq=self.NFREQ * self.DF, force_backend="cpu",
         )
-        return _use_stub_fd_strategy(
-            _ACSHost(
-                settings, data, invC, d_d, nchannels=self.NCH,
-                num_splits=num_splits, data_dtype=complex,
-                domain_group_kwargs={"tdi_type": "XYZ"},
-            )
+        return _ACSHost(
+            settings, data, invC, d_d, nchannels=self.NCH,
+            num_splits=num_splits, data_dtype=complex,
+            domain_group_kwargs={"tdi_type": "XYZ"},
         )
 
     def test_lazy_none_until_accessed(self):
