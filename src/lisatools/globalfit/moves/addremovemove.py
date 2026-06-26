@@ -808,26 +808,26 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
 
         self._waveform_generators = []
         for i, device in enumerate(
-            self.dcga.gpus if self.dcga.gpus is not None else [None] * self.dcga.num_splits
+            self.acs.gpus if self.acs.gpus is not None else [None] * self.acs.num_splits
         ):
             if not hasattr(self.waveform_gen, "kwargs"):
                 raise ValueError("Waveform generator must have a 'kwargs' attribute that contains the keyword arguments to initialize the waveform generator.")    
             
-            with self.dcga.device_context(device):
+            with self.acs.device_context(device):
                 # if i == 0:
                 #     # Reuse the initial waveform generator for the first split to save memory
                 #     self._waveform_generators.append(self.waveform_gen)
                 # else:
                 init_kwargs = self.waveform_gen.kwargs.copy()
                 if "orbits" in init_kwargs:
-                    init_kwargs["orbits"] = self.dcga.computation_groups[i].orbits
+                    init_kwargs["orbits"] = self.acs.cpp_split(i).orbits
 
                 self._waveform_generators.append(
                     self.waveform_gen.__class__(**init_kwargs)
                 )
 
     def free_gpu_memory(self):
-        self.dcga.free_gpu_memory()
+        self.acs.free_gpu_memory()
 
     @property
     def waveform_generators(self) -> list:
@@ -845,15 +845,15 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         Prepare the inputs for the waveform generator from the given coordinates and data index.
         """
 
-        positions_per_split, data_intra_index_per_split, _ = self.dcga.unpack_indices(data_index)
-        coords_per_split = self.dcga.unpack_coords(positions_per_split, coords, keep_tuple=True)
+        positions_per_split, data_intra_index_per_split, _ = self.acs.unpack_indices(data_index)
+        coords_per_split = self.acs.unpack_coords(positions_per_split, coords, keep_tuple=True)
 
-        data_intra_index_per_split, coords_per_split = self.dcga.place_on_device(
+        data_intra_index_per_split, coords_per_split = self.acs.place_on_device(
             items=(data_intra_index_per_split, coords_per_split)
         )
 
-        waveform_args_per_split = self.dcga._loop_operation(
-            operation=[self.make_args_tuple for _ in self.dcga.computation_groups],
+        waveform_args_per_split = self.acs._loop_operation(
+            operation=[self.make_args_tuple for _ in self.acs.cpp_splits],
             operation_args_per_split=coords_per_split,
         )
 
@@ -890,7 +890,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
 
         operations = [getattr(waveform_gen, self.waveform_gen_method) for waveform_gen in self.waveform_generators]
 
-        waveforms_out = self.dcga._loop_operation(
+        waveforms_out = self.acs._loop_operation(
             operation=operations,
             operation_args_per_split=waveform_args_per_split,
             operation_kwargs=self.waveform_gen_kwargs,
@@ -898,7 +898,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             run_threaded=self.run_threaded,
         )
 
-        self.dcga.synchronize()
+        self.acs.synchronize()
 
         return waveforms_out
 
@@ -907,7 +907,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         Set up the likelihood computation. In the general case, this means computing the :math:\\langle d | d \\rangle term.
         """
 
-        self.dcga.compute_d_d_terms()
+        self.acs.compute_d_d_terms()
 
     def compute_like(self, coords_in: np.ndarray, data_index: np.ndarray) -> np.ndarray:
         """
@@ -925,7 +925,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
 
         waveform_like_operations = [getattr(waveform_gen, self.waveform_like_method) for waveform_gen in self.waveform_generators]
 
-        likelihood_args_per_split = self.dcga._loop_operation(
+        likelihood_args_per_split = self.acs._loop_operation(
             operation=waveform_like_operations,
             operation_args_per_split=waveform_args_per_split,
             operation_kwargs=self.waveform_like_kwargs,
@@ -934,9 +934,9 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         ) 
 
         if not self.run_async:
-            self.dcga.synchronize()
+            self.acs.synchronize()
 
-        likelihoods = self.dcga.compute_signal_likelihood(
+        likelihoods = self.acs.compute_signal_likelihood(
             positions_per_split=positions_per_split,
             data_intra_per_split=data_intra_index_per_split,
             noise_intra_per_split=data_intra_index_per_split,
