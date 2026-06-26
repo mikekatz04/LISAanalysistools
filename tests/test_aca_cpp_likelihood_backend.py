@@ -24,10 +24,13 @@ itself, two ways:
   ``FDComputationGroup`` runs on CPU and matches the full-covariance reference
   to machine precision. Covers the complex-dtype + ``start_times=None`` path.
 
-STFT shares the identical forwarder code path (the forwarder treats the
-template opaquely — it only coerces dtype and scatters); WDM (4-index
-sub-grids, real) and FD (3-index, complex) together exercise the shape and
-dtype generality.
+* **STFT** (:class:`TestSTFTForwarderRealKernel`) drives the **real C++ STFT
+  kernel** (``STFTDomainWrap``) over a 4-D time-frequency template. The STFT
+  inner product is the FD full-cov product summed over time bins (``4 df`` per
+  ``(t,f)`` pixel), so the same ``_cross_inner`` reference applies.
+
+Together WDM (4-index, real), FD (3-index, complex) and STFT (4-index, complex)
+exercise the shape and dtype generality of the forwarder.
 
 We drive the *real* ``AnalysisContainerArray`` methods (borrowed onto a
 lightweight ACS host that carries exactly the attributes the backend reads),
@@ -42,7 +45,7 @@ import warnings
 import numpy as np
 
 from lisatools.analysiscontainer import AnalysisContainerArray as _ACA
-from lisatools.domains import FDSettings, WDMSettings
+from lisatools.domains import FDSettings, STFTSettings, WDMSettings
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +456,120 @@ class TestFDForwarderRealKernel(unittest.TestCase):
         host = self._make_host(num_acs=4, num_splits=2)
         data_index, templ, sf = self._batch(4, nb=6)
         out = host.cpp_template_likelihood(data_index, templ.astype(np.complex64), sf)
+        ref = self._reference(host, data_index, templ)
+        np.testing.assert_allclose(out, ref, rtol=1e-4, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# STFT: real C++ time-frequency kernel through the forwarder.
+# ---------------------------------------------------------------------------
+
+
+class TestSTFTForwarderRealKernel(unittest.TestCase):
+    """``cpp_template_likelihood`` forwarder over the time-frequency STFT path,
+    driving the real C++ ``STFTComputationGroup`` (``STFTDomainWrap``). The STFT
+    inner product is the FD full-cov product summed over time bins (``4 df`` per
+    ``(t, f)`` pixel), so the same ``_cross_inner`` reference applies with
+    ``(nch, NT, NF)`` arrays. ``start_times``/``start_freqs`` are chosen to put
+    the template sub-grid at index ``(0, 0)`` (full-grid templates)."""
+
+    NCH = 3
+    NT = 4
+    NFREQ = 8  # == NF_active given min_freq=DF, max_freq=NFREQ*DF, NF=NFREQ+1
+    DT = 10.0
+    DF = 1e-3
+
+    def _make_host(self, num_acs, num_splits, seed=1):
+        rng = np.random.default_rng(seed)
+        shp = (num_acs, self.NCH, self.NT, self.NFREQ)
+        data = rng.standard_normal(shp) + 1j * rng.standard_normal(shp)
+        invC = np.zeros(
+            (num_acs, self.NCH, self.NCH, self.NT, self.NFREQ), dtype=np.complex128
+        )
+        for ac in range(num_acs):
+            for t in range(self.NT):
+                for f in range(self.NFREQ):
+                    A = rng.standard_normal((self.NCH, self.NCH)) + 1j * rng.standard_normal(
+                        (self.NCH, self.NCH)
+                    )
+                    invC[ac, :, :, t, f] = A @ A.conj().T + 3.0 * np.eye(self.NCH)
+        d_d = np.array(
+            [_cross_inner(data[i], data[i], invC[i], self.DF).real for i in range(num_acs)]
+        )
+        settings = STFTSettings(
+            t0=0.0, dt=self.DT, df=self.DF, NT=self.NT, NF=self.NFREQ + 1,
+            min_freq=self.DF, max_freq=self.NFREQ * self.DF, force_backend="cpu",
+        )
+        assert settings.NF_active == self.NFREQ
+        host = _ACSHost(
+            settings, data, invC, d_d,
+            nchannels=self.NCH, num_splits=num_splits, data_dtype=complex,
+        )
+        # Real STFTComputationGroup (STFTDomainWrap); stub orbits/sensitivity
+        # satisfy build_cpp_objects (signal inner products don't use orbits).
+        host._raw = (data, invC, d_d)
+        return host
+
+    def _batch(self, num_acs, nb, seed=7):
+        rng = np.random.default_rng(seed)
+        data_index = np.tile(np.arange(num_acs), int(np.ceil(nb / num_acs)))[:nb].astype(np.int32)
+        shp = (nb, self.NCH, self.NT, self.NFREQ)
+        templ = rng.standard_normal(shp) + 1j * rng.standard_normal(shp)
+        start_freqs = np.full(nb, self.DF, dtype=np.float64)  # -> freq index 0
+        start_times = np.full(nb, 0.0, dtype=np.float64)      # -> time index 0
+        return data_index, templ, start_freqs, start_times
+
+    def _reference(self, host, data_index, templ):
+        data, invC, d_d = host._raw
+        out = np.zeros(data_index.shape[0])
+        for b in range(data_index.shape[0]):
+            d = data[data_index[b]]
+            ic = invC[data_index[b]]
+            h = templ[b]
+            d_h = _cross_inner(d, h, ic, self.DF)
+            h_h = _cross_inner(h, h, ic, self.DF)
+            out[b] = -0.5 * (d_d[data_index[b]] + h_h - 2 * d_h).real
+        return out
+
+    def test_matches_reference(self):
+        host = self._make_host(num_acs=4, num_splits=2)
+        data_index, templ, sf, st = self._batch(4, nb=6)
+        out = host.cpp_template_likelihood(data_index, templ, sf, start_times=st)
+        ref = self._reference(host, data_index, templ)
+        np.testing.assert_allclose(out, ref, rtol=1e-10, atol=1e-10)
+
+    def test_parity_vs_hand_driven_coordinator(self):
+        host = self._make_host(num_acs=4, num_splits=2)
+        data_index, templ, sf, st = self._batch(4, nb=6)
+        host._ensure_cpp_splits()
+        pos, di, ni = host.unpack_indices(data_index, None)
+        coords = host.unpack_coords(pos, (templ.astype(complex), sf, st), keep_tuple=True)
+        di, ni, coords = host.place_on_device((di, ni, coords))
+        ref = host.compute_signal_likelihood(pos, di, ni, coords)
+        out = host.cpp_template_likelihood(data_index, templ, sf, start_times=st)
+        np.testing.assert_allclose(out, ref, rtol=1e-12, atol=1e-12)
+
+    def test_split_layout_invariance(self):
+        h1 = self._make_host(num_acs=4, num_splits=1, seed=99)
+        h2 = self._make_host(num_acs=4, num_splits=2, seed=99)
+        data_index, templ, sf, st = self._batch(4, nb=8)
+        o1 = h1.cpp_template_likelihood(data_index, templ, sf, start_times=st)
+        o2 = h2.cpp_template_likelihood(data_index, templ, sf, start_times=st)
+        np.testing.assert_allclose(o1, o2, rtol=1e-12, atol=1e-12)
+
+    def test_run_threaded_matches_serial(self):
+        host = self._make_host(num_acs=4, num_splits=2)
+        data_index, templ, sf, st = self._batch(4, nb=6)
+        s = host.cpp_template_likelihood(data_index, templ, sf, start_times=st, run_threaded=False)
+        t = host.cpp_template_likelihood(data_index, templ, sf, start_times=st, run_threaded=True)
+        np.testing.assert_array_equal(s, t)
+
+    def test_dtype_coercion_complex64(self):
+        host = self._make_host(num_acs=4, num_splits=2)
+        data_index, templ, sf, st = self._batch(4, nb=6)
+        out = host.cpp_template_likelihood(
+            data_index, templ.astype(np.complex64), sf, start_times=st
+        )
         ref = self._reference(host, data_index, templ)
         np.testing.assert_allclose(out, ref, rtol=1e-4, atol=1e-4)
 
