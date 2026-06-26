@@ -28,15 +28,6 @@ class MultiGPUMoveBase:
         self._run_threaded = run_threaded
 
     @property
-    def dcga(self) -> DomainComputationGroupArray:
-        """Transitional handle to the ACA-owned cpp coordinator shim.
-
-        Forwards to ``self.acs``; removed in Phase C once every move drives the
-        ACA directly via ``self.acs``.
-        """
-        return self.acs.cpp_likelihood_backend
-
-    @property
     def run_async(self) -> bool:
         return self._run_async
 

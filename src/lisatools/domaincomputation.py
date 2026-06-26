@@ -4,12 +4,12 @@ likelihood computation of (d|h) and (h|h) inner products."""
 from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from concurrent.futures import ThreadPoolExecutor
-import jax
 import numpy as np
 
 from .domains import FDSettings, STFTSettings, WDMSettings
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class BaseDomainComputationGroup(LISAToolsParallelModule):
+class DomainKernelStrategy(LISAToolsParallelModule):
     """Wraps C++ DomainWrap for batched likelihood computation on the AnalysisContainerArray data.
 
     One instance per GPU split.  Holds references to the linearized arrays
@@ -145,7 +145,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
     def __repr__(self):
         split_index = getattr(self, "split_index", None)
-        return f"BaseDomainComputationGroup with split index {split_index} and TDI type {self.tdi_type}"
+        return f"DomainKernelStrategy with split index {split_index} and TDI type {self.tdi_type}"
 
     @property
     def xp(self) -> ArrayModule:
@@ -336,7 +336,14 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         return self.sensitivity_backend.compute_log_like(self.data_arr, data_index, *args, **kwargs)
 
 
-class STFTComputationGroup(BaseDomainComputationGroup):
+# Back-compat alias: the per-split strategy was renamed from
+# ``BaseDomainComputationGroup`` to :class:`DomainKernelStrategy` when the
+# array-level coordinator was absorbed into ``AnalysisContainerArray``.
+# Downstream code and tests subclass the old name — keep it working.
+BaseDomainComputationGroup = DomainKernelStrategy
+
+
+class STFTComputationGroup(DomainKernelStrategy):
     """Wraps C++ STFTDomainWrap for batched likelihood computation."""
 
     def __init__(
@@ -459,7 +466,7 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         return d_h_out, h_h_out
 
 
-class FDComputationGroup(BaseDomainComputationGroup):
+class FDComputationGroup(DomainKernelStrategy):
     """
     Wraps C++ FDDomainWrap for batched likelihood computation.
     """
@@ -543,7 +550,7 @@ class FDComputationGroup(BaseDomainComputationGroup):
         return d_h_out, h_h_out
 
 
-class WDMComputationGroup(BaseDomainComputationGroup):
+class WDMComputationGroup(DomainKernelStrategy):
     """Wraps C++ WDMDomainWrap for batched likelihood computation (WDM).
 
     WDM counterpart of :class:`STFTComputationGroup` (2026-06 merge
@@ -699,28 +706,39 @@ class WDMComputationGroup(BaseDomainComputationGroup):
 
 
 class DomainComputationGroupArray:
-    """Thin forwarding shim over :class:`AnalysisContainerArray` (deprecated).
+    """Deprecated thin alias over :class:`AnalysisContainerArray`.
 
     The multi-split C++ likelihood coordinator was absorbed into
-    ``AnalysisContainerArray``: it now owns the per-split strategy workspaces
-    (``acs.cpp_splits`` — the STFT/FD/WDM ``*ComputationGroup`` objects) and the
-    batched orchestration directly. This shim forwards every attribute/method to
-    its ``acs`` so existing callers (global-fit moves, external settings files)
-    keep working during the migration.
+    ``AnalysisContainerArray``, which now owns the per-split strategy
+    workspaces (``acs.cpp_splits`` — the STFT/FD/WDM ``*ComputationGroup``
+    objects) and the batched orchestration directly. Drive the ACA methods
+    instead: ``acs.cpp_template_likelihood`` / ``acs.compute_signal_likelihood``
+    / ``acs.compute_psd_likelihood`` / ``acs.cpp_splits``.
 
-    Prefer the ACA methods directly: ``acs.cpp_template_likelihood`` /
-    ``acs.compute_signal_likelihood`` / ``acs.compute_psd_likelihood`` /
-    ``acs.cpp_splits``.
+    This alias is kept only so external settings files that still construct
+    ``DomainComputationGroupArray(acs=acs)`` and hand it to the global-fit
+    moves keep working — the moves resolve ``dcga.acs`` at their constructor
+    boundary. Constructing it directly emits a :class:`DeprecationWarning`;
+    the ACA's own :attr:`~AnalysisContainerArray.cpp_likelihood_backend`
+    compat handle builds it with ``_internal=True`` and stays quiet.
     """
 
-    def __init__(self, acs, domain_group_kwargs=None):
+    def __init__(self, acs, domain_group_kwargs=None, *, _internal=False):
+        if not _internal:
+            warnings.warn(
+                "DomainComputationGroupArray is deprecated: the C++ likelihood "
+                "coordinator now lives on AnalysisContainerArray. Pass the ACA "
+                "to the global-fit moves and use acs.cpp_template_likelihood / "
+                "acs.cpp_splits directly.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.acs = acs
         if domain_group_kwargs is not None:
             # Resets the strategy cache + stores the new kwargs.
             acs.domain_group_kwargs = domain_group_kwargs
         acs._ensure_cpp_splits()
 
-    # --- state forwards ---
     @property
     def computation_groups(self):
         return self.acs.cpp_splits
@@ -730,69 +748,9 @@ class DomainComputationGroupArray:
         return self.acs.gpus
 
     @property
-    def xp(self):
-        return self.acs.xp
-
-    @property
     def num_splits(self):
         return self.acs.num_splits
 
     @property
-    def main_gpu(self):
-        return self.acs.gpus[0] if self.acs.gpus is not None else None
-
-    @property
-    def thread_pool(self):
-        return self.acs.thread_pool
-
-    @property
-    def ac_to_split(self):
-        return self.acs.ac_to_split
-
-    @property
-    def ac_to_intra(self):
-        return self.acs.ac_to_intra
-
-    # --- routing / dispatch forwards ---
-    def unpack_indices(self, *args, **kwargs):
-        return self.acs.unpack_indices(*args, **kwargs)
-
-    def unpack_coords(self, *args, **kwargs):
-        return self.acs.unpack_coords(*args, **kwargs)
-
-    def place_on_device(self, *args, **kwargs):
-        return self.acs.place_on_device(*args, **kwargs)
-
-    def _loop_operation(self, *args, **kwargs):
-        return self.acs._loop_operation(*args, **kwargs)
-
-    def device_context(self, *args, **kwargs):
-        return self.acs.device_context(*args, **kwargs)
-
-    def synchronize(self):
-        return self.acs.synchronize()
-
-    def free_gpu_memory(self):
-        return self.acs.free_gpu_memory()
-
-    def restore_main_device(self):
-        # Kept for API-compat; ACA restores device state inline (no-op here).
-        return None
-
-    def _to_host(self, arr):
-        return self.acs._to_host(arr)
-
-    def compute_d_d_terms(self, *args, **kwargs):
-        return self.acs.compute_d_d_terms(*args, **kwargs)
-
-    def compute_noise_terms(self, *args, **kwargs):
-        return self.acs.compute_noise_terms(*args, **kwargs)
-
-    def _compute_group_likelihood(self, *args, **kwargs):
-        return self.acs._compute_group_likelihood(*args, **kwargs)
-
-    def compute_signal_likelihood(self, *args, **kwargs):
-        return self.acs.compute_signal_likelihood(*args, **kwargs)
-
-    def compute_psd_likelihood(self, *args, **kwargs):
-        return self.acs.compute_psd_likelihood(*args, **kwargs)
+    def xp(self):
+        return self.acs.xp

@@ -1505,10 +1505,11 @@ class AnalysisContainerArray:
             the containers into this many CPU splits through the **same**
             split structure used for GPUs (``gpu_splits`` / ``split_map`` /
             per-split linear buffers). One thread per split is then driven by
-            :class:`~lisatools.domaincomputation.DomainComputationGroupArray`
+            the ACA's own per-split C++ likelihood coordinator (the
+            :attr:`cpp_splits` strategies + :meth:`compute_signal_likelihood`)
             with ``run_threaded=True`` exactly as in the multi-GPU case (each
-            split's computation group holds its own workspaces, so threads
-            never share scratch buffers). Threads pay off where the per-split
+            split's strategy holds its own workspaces, so threads never share
+            scratch buffers). Threads pay off where the per-split
             work releases the GIL (numpy/BLAS/FFT on large arrays, JAX-CPU,
             GIL-releasing C++ kernels); pin ``OMP_NUM_THREADS`` /
             ``OPENBLAS_NUM_THREADS`` so ``n_splits * blas_threads`` does not
@@ -1520,13 +1521,13 @@ class AnalysisContainerArray:
             concurrently, one thread per split (GPU splits each enter their
             own device context; CPU splits rely on GIL-releasing work). The
             default ``False`` preserves the serial per-split loops.
-        domain_group_kwargs: Kwargs forwarded to the owned C++ likelihood
-            backend's per-split computation groups (e.g. ``tdi_type`` for all
-            domains, and STFT's ``window_alpha`` / ``use_midpoint``). Drives
-            :meth:`cpp_template_likelihood` via the lazily-built
-            :attr:`cpp_likelihood_backend`. May also be set later through the
+        domain_group_kwargs: Kwargs forwarded to the ACA's per-split C++
+            likelihood strategies (e.g. ``tdi_type`` for all domains, and
+            STFT's ``window_alpha`` / ``use_midpoint``). Drives
+            :meth:`cpp_template_likelihood` via the lazily-built per-split
+            strategies (:attr:`cpp_splits`). May also be set later through the
             :attr:`domain_group_kwargs` property (which invalidates the cached
-            backend).
+            strategies).
 
     """
 
@@ -1548,10 +1549,12 @@ class AnalysisContainerArray:
         self.run_threaded = bool(run_threaded)
         self._thread_pool = None
 
-        # Lazily-built C++ likelihood backend (a
-        # ``DomainComputationGroupArray`` keyed to this ACA's splits). Built
-        # on first access to :attr:`cpp_likelihood_backend`; see that
-        # property for why construction must be deferred past ``__init__``.
+        # Lazily-built per-split C++ likelihood state. ``_cpp_splits`` are the
+        # per-split strategy workspaces (built on first access to
+        # :attr:`cpp_splits`; deferred past ``__init__`` because they read the
+        # per-split linear buffers populated at the end of construction).
+        # ``_cpp_likelihood_backend`` caches the deprecated
+        # ``DomainComputationGroupArray`` compat shim.
         self._domain_group_kwargs = dict(domain_group_kwargs) if domain_group_kwargs else {}
         self._cpp_splits = None             # per-split C++ strategy workspaces
         self._cpp_likelihood_backend = None  # cached deprecated DCGA shim
@@ -2087,11 +2090,12 @@ class AnalysisContainerArray:
     # ------------------------------------------------------------------
     # ACA owns the per-split C++ strategy workspaces (the STFT/FD/WDM
     # *ComputationGroup objects) and the batched multi-split orchestration
-    # directly. The legacy ``DomainComputationGroupArray`` is now a thin
-    # forwarding shim over these methods. The same C++ kernels run on CPU
-    # (host compiler) and GPU (``nvcc``) — the "cpp" fast path, distinct from
-    # the slow per-AC ``diagnostic`` path behind ``calculate_signal_likelihood``
-    # / ``template_likelihood`` (which stays as the general + validation path).
+    # directly. The legacy ``DomainComputationGroupArray`` is now only a
+    # deprecated thin alias (kept for external settings files that still
+    # construct it). The same C++ kernels run on CPU (host compiler) and GPU
+    # (``nvcc``) — the "cpp" fast path, distinct from the slow per-AC
+    # ``diagnostic`` path behind ``calculate_signal_likelihood`` /
+    # ``template_likelihood`` (which stays as the general + validation path).
 
     @property
     def num_splits(self) -> int:
@@ -2187,7 +2191,7 @@ class AnalysisContainerArray:
         if self._cpp_likelihood_backend is None:
             from .domaincomputation import DomainComputationGroupArray
 
-            self._cpp_likelihood_backend = DomainComputationGroupArray(self)
+            self._cpp_likelihood_backend = DomainComputationGroupArray(self, _internal=True)
         return self._cpp_likelihood_backend
 
     @property

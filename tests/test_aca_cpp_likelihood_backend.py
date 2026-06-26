@@ -37,6 +37,7 @@ so the code under test is the production forwarder, not a re-implementation.
 from __future__ import annotations
 
 import unittest
+import warnings
 
 import numpy as np
 
@@ -303,15 +304,15 @@ class TestWDMForwarderRealKernel(unittest.TestCase):
         ref = self._reference(host, data_index, templ, sm, sn)
         np.testing.assert_allclose(out, ref, rtol=1e-9, atol=1e-9)
 
-    def test_parity_vs_hand_driven_dcga(self):
+    def test_parity_vs_hand_driven_coordinator(self):
         host = self._make_host(num_acs=4, num_splits=2)
         data_index, templ, sf, st, _, _ = self._make_batch(4, nb=6)
 
-        dcga = host.cpp_likelihood_backend  # build once, reuse for both
-        pos, di, ni = dcga.unpack_indices(data_index, None)
-        coords = dcga.unpack_coords(pos, (templ.astype(float), sf, st), keep_tuple=True)
-        di, ni, coords = dcga.place_on_device((di, ni, coords))
-        ref = dcga.compute_signal_likelihood(pos, di, ni, coords)
+        host._ensure_cpp_splits()  # build the per-split strategies once
+        pos, di, ni = host.unpack_indices(data_index, None)
+        coords = host.unpack_coords(pos, (templ.astype(float), sf, st), keep_tuple=True)
+        di, ni, coords = host.place_on_device((di, ni, coords))
+        ref = host.compute_signal_likelihood(pos, di, ni, coords)
 
         out = host.cpp_template_likelihood(data_index, templ, sf, st)
         np.testing.assert_allclose(out, ref, rtol=1e-12, atol=1e-12)
@@ -450,14 +451,14 @@ class TestFDForwarderStubGroup(unittest.TestCase):
         ref = self._reference(host, data_index, templ)
         np.testing.assert_allclose(out, ref, rtol=1e-10, atol=1e-10)
 
-    def test_parity_vs_hand_driven_dcga(self):
+    def test_parity_vs_hand_driven_coordinator(self):
         host = self._make_host(num_acs=4, num_splits=2)
         data_index, templ, sf = self._batch(4, nb=6)
-        dcga = host.cpp_likelihood_backend
-        pos, di, ni = dcga.unpack_indices(data_index, None)
-        coords = dcga.unpack_coords(pos, (templ.astype(complex), sf), keep_tuple=True)
-        di, ni, coords = dcga.place_on_device((di, ni, coords))
-        ref = dcga.compute_signal_likelihood(pos, di, ni, coords)
+        host._ensure_cpp_splits()
+        pos, di, ni = host.unpack_indices(data_index, None)
+        coords = host.unpack_coords(pos, (templ.astype(complex), sf), keep_tuple=True)
+        di, ni, coords = host.place_on_device((di, ni, coords))
+        ref = host.compute_signal_likelihood(pos, di, ni, coords)
         out = host.cpp_template_likelihood(data_index, templ, sf, start_times=None)
         np.testing.assert_allclose(out, ref, rtol=1e-12, atol=1e-12)
 
@@ -544,6 +545,26 @@ class TestForwarderStateSemantics(unittest.TestCase):
         self.assertIsNone(host._cpp_splits)
         host.refresh_cpp_dd()  # must not raise
         self.assertIsNone(host._cpp_splits)
+
+    def test_direct_construction_emits_deprecation_warning(self):
+        """Constructing the deprecated alias directly warns; the ACA's own
+        ``cpp_likelihood_backend`` compat handle (``_internal=True``) does not.
+        The thin alias still forwards state to the ACA."""
+        from lisatools.domaincomputation import DomainComputationGroupArray
+
+        host = self._host()
+        with self.assertWarns(DeprecationWarning):
+            shim = DomainComputationGroupArray(host)
+        self.assertIs(shim.acs, host)
+        self.assertIs(shim.computation_groups, host.cpp_splits)
+        self.assertEqual(shim.num_splits, host.num_splits)
+        self.assertIs(shim.xp, host.xp)
+
+        # The internal compat handle must stay quiet.
+        host._cpp_likelihood_backend = None
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            host.cpp_likelihood_backend  # must not raise (no warning)
 
 
 if __name__ == "__main__":
