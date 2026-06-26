@@ -588,15 +588,21 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         **kwargs,
     ):
 
+        # Resolve the real ACA (tolerate an ACA or a deprecated DCGA shim at the
+        # constructor boundary) and ensure its per-split cpp strategies exist so
+        # split 0's sensitivity backend is available below.
+        acs = dcga.acs if hasattr(dcga, "acs") else dcga
+        acs._ensure_cpp_splits()
+
         PSDMove.__init__(
             self,
-            dcga.acs,
+            acs,
             priors,
             *args,
             num_repeats=num_repeats,
             max_logl_mode=max_logl_mode,
             psd_kwargs=psd_kwargs,
-            sensitivity_backend=dcga.computation_groups[0].sensitivity_backend,
+            sensitivity_backend=acs.cpp_split(0).sensitivity_backend,
             psd_transform_fn=psd_transform_fn,
             galfor_transform_fn=galfor_transform_fn,
             permute_every=permute_every,
@@ -618,7 +624,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
     def allowed_shards(self) -> int:
         """Number of shards allowed for the kernel fast path. In the multi-GPU case, this is equal to the number of devices."""
     
-        return len(self.dcga.computation_groups)
+        return self.acs.num_splits
 
     def psd_log_like(self, x: list, supps=None, **sens_kwargs):
         """ """
@@ -637,20 +643,20 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
 
         data_index_all = np.asarray(wi).astype(np.int32)
 
-        positions_per_split, data_intra_index_per_split, _ = self.dcga.unpack_indices(data_index_all)
-        coords_per_split = self.dcga.unpack_coords(positions_per_split, (psd_pars, galfor_pars))
+        positions_per_split, data_intra_index_per_split, _ = self.acs.unpack_indices(data_index_all)
+        coords_per_split = self.acs.unpack_coords(positions_per_split, (psd_pars, galfor_pars))
 
-        data_intra_index_per_split, coords_per_split = self.dcga.place_on_device(
+        data_intra_index_per_split, coords_per_split = self.acs.place_on_device(
             items=(data_intra_index_per_split, coords_per_split)
         )
 
-        likelihood_args_per_split = self.dcga._loop_operation(
+        likelihood_args_per_split = self.acs._loop_operation(
             operation=self.prepare_likelihood_inputs,
             operation_args_per_split=coords_per_split,
             positions_per_split=positions_per_split,
         )
 
-        ll = self.dcga.compute_psd_likelihood(
+        ll = self.acs.compute_psd_likelihood(
             positions_per_split,
             data_intra_index_per_split,
             data_intra_index_per_split,
@@ -676,5 +682,5 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
                 )
             ll[invalid_knots_mask] = -1e300
 
-        self.dcga.free_gpu_memory()
+        self.acs.free_gpu_memory()
         return ll
