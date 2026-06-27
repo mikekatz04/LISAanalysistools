@@ -637,7 +637,7 @@ class TDSettings(DomainSettingsBase):
         new_N = (stop - start) // step
         new_t0 = self.t0 + start * self.dt
 
-        return TDSettings(new_t0, new_N, self.dt, force_backend=self.backend)
+        return TDSettings(new_N, self.dt, new_t0, force_backend=self.backend)
 
 
 class TDSignal(DomainBase, TDSettings):
