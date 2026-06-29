@@ -2,6 +2,11 @@
 #include "cuda_complex.hpp"
 #include "LISAResponse.hh"
 #include "Detector.hpp"
+// GBT quintic spline device classes (header-only eval; QuinticSplineSegment).
+// Used by the response_quintic projection kernel below. Macros (CUDA_DEVICE,
+// CUDA_KERNEL, ...) come from gbt_global.h and expand to empty on the CPU
+// (.cxx) build, so the segment eval compiles as a plain host method.
+#include "InterpolateDevice.hh"
 #include <iostream>
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
@@ -474,7 +479,7 @@ void response(double *y_gw, double *t_data, double *k_in, double *u_in, double *
               int num_delays,
               cmplx *input_in, int num_inputs, int order, double sampling_frequency,
               int buffer_integer, double *A_in, double deps, int num_A, double *E_in, int projections_start_ind,
-              Orbits *orbits_in, double *t0_arr, int batch_size)
+              Orbits *orbits_in, double *t0_arr, double *t0_shift_arr, int batch_size)
 {
     int batch_ind;
 #ifdef __CUDACC__
@@ -603,7 +608,11 @@ void response(double *y_gw, double *t_data, double *k_in, double *u_in, double *
             int integer_delay_rec, integer_delay_em, max_integer_delay, min_integer_delay;
             double t_rec, t_em;
 
-            t = t_data[i] + t0_arr[batch_ind];
+            // Per-source sub-sample data-grid shift rides the EVAL time only.
+            // t0_offset (= t0_arr[batch_ind], unchanged) still anchors the
+            // waveform-array index, so t0_arr cancels in clipped_delay and the
+            // shift survives there exactly as in the legacy shared-grid path.
+            t = t_data[i] + t0_arr[batch_ind] + t0_shift_arr[batch_ind];
             t_rec = t;
             L = orbits.get_light_travel_time(t_rec, link);
             t_em = t_rec - L;
@@ -713,11 +722,227 @@ void response(double *y_gw, double *t_data, double *k_in, double *u_in, double *
 }
 
 
+// Quintic-spline variant of the projection kernel. Identical geometry/delay/
+// antenna-pattern/batching to `response` above; the only difference is that the
+// complex waveform h = h_+ + i h_x is evaluated at the two delayed times via a
+// precomputed degree-5 spline (GBT QuinticSplineSegment) instead of the order-`order`
+// Lagrange fractional-delay filter. The spline is fit Python-side (real + imag);
+// c{1..5}r / c{1..5}i are the per-segment power-basis coefficients about the left
+// node, y0 is the input sample itself. The uniform fit grid x[w] = w*dt lets us
+// locate the segment in O(1) and read coefficients straight from global memory --
+// no shared-memory waveform window (so no BUFFER_SIZE cap on signal length).
+CUDA_KERNEL
+void response_quintic(double *y_gw, double *t_data, double *k_in, double *u_in, double *v_in, double dt,
+              int num_delays,
+              cmplx *input_in, int num_inputs, double sampling_frequency,
+              double *c1r, double *c2r, double *c3r, double *c4r, double *c5r,
+              double *c1i, double *c2i, double *c3i, double *c4i, double *c5i,
+              int projections_start_ind, int spline_type,
+              Orbits *orbits_in, double *t0_arr, double *t0_shift_arr, int batch_size)
+{
+    int batch_ind;
+#ifdef __CUDACC__
+    batch_ind = blockIdx.z;
+#else
+    batch_ind = 0;
+#endif
+
+    // Per-source base offset into the whole-batch coeff / input arrays. GPU: the
+    // arrays span the whole batch, so offset by batch_ind. CPU: the host wrapper
+    // pre-offsets every per-source pointer, so the in-kernel offset is 0.
+#ifdef __CUDACC__
+    long batch_off = (long)batch_ind * num_inputs;
+#else
+    long batch_off = 0;
+#endif
+
+    CUDA_SHARED double k[3];
+    CUDA_SHARED double u[3];
+    CUDA_SHARED double v[3];
+    CUDA_SHARED int link_space_craft_rec[NLINKS];
+    CUDA_SHARED int link_space_craft_em[NLINKS];
+    CUDA_SHARED int links[NLINKS];
+
+#ifdef __CUDACC__
+    CUDA_SHARED double x_rec_all[NUM_THREADS_RESPONSE * 3];
+    CUDA_SHARED double x_em_all[NUM_THREADS_RESPONSE * 3];
+    CUDA_SHARED double n_all[NUM_THREADS_RESPONSE * 3];
+
+    double *x_rec = &x_rec_all[3 * threadIdx.x];
+    double *x_em = &x_em_all[3 * threadIdx.x];
+    double *n = &n_all[3 * threadIdx.x];
+#endif
+
+    int start, increment;
+
+    CUDA_SYNC_THREADS;
+
+#ifdef __CUDACC__
+    start = threadIdx.x;
+    increment = blockDim.x;
+#else
+    start = 0;
+    increment = 1;
+#endif
+    for (int i = start; i < 3; i += increment)
+    {
+        k[i] = k_in[batch_ind * 3 + i];
+        u[i] = u_in[batch_ind * 3 + i];
+        v[i] = v_in[batch_ind * 3 + i];
+    }
+    CUDA_SYNC_THREADS;
+
+    Orbits orbits = *orbits_in;
+    for (int i = start; i < NLINKS; i += increment)
+    {
+        link_space_craft_rec[i] = orbits.sc_r[i];
+        link_space_craft_em[i] = orbits.sc_e[i];
+        links[i] = orbits.links[i];
+    }
+    CUDA_SYNC_THREADS;
+
+    double t0_offset = t0_arr[batch_ind];
+#ifdef __CUDACC__
+    start = blockIdx.y;
+    increment = gridDim.y;
+#else
+    start = 0;
+    increment = 1;
+#endif
+    for (int link_i = start; link_i < NLINKS; link_i += increment)
+    {
+        int sc_r = link_space_craft_rec[link_i];
+        int sc_e = link_space_craft_em[link_i];
+        int link = links[link_i];
+
+        int start2, increment2;
+#ifdef __CUDACC__
+        start2 = projections_start_ind + threadIdx.x + blockDim.x * blockIdx.x;
+        increment2 = blockDim.x * gridDim.x;
+#else
+        start2 = projections_start_ind;
+        increment2 = 1;
+#endif
+        for (int i = start2;
+             i < num_delays - projections_start_ind;
+             i += increment2)
+        {
+
+#ifdef __CUDACC__
+#else
+            double x_rec_all[3];
+            CUDA_SHARED double x_em_all[3];
+            CUDA_SHARED double n_all[3];
+
+            double *x_rec = &x_rec_all[0];
+            double *x_em = &x_em_all[0];
+            double *n = &n_all[0];
+
+#endif
+
+            double xi_p, xi_c;
+            double k_dot_n, k_dot_x_rec, k_dot_x_em;
+            double t, L, delay_rec, delay_em;
+            double hp_del_rec, hp_del_em, hc_del_rec, hc_del_em;
+
+            double large_factor, pre_factor;
+            double clipped_delay_rec, clipped_delay_em;
+            double t_rec, t_em;
+
+            // Per-source sub-sample data-grid shift rides the EVAL time only.
+            // t0_offset (= t0_arr[batch_ind], unchanged) still anchors the
+            // waveform-array index, so t0_arr cancels in clipped_delay and the
+            // shift survives there exactly as in the legacy shared-grid path.
+            t = t_data[i] + t0_arr[batch_ind] + t0_shift_arr[batch_ind];
+            t_rec = t;
+            L = orbits.get_light_travel_time(t_rec, link);
+            t_em = t_rec - L;
+            Vec out_vec(0.0, 0.0, 0.0);
+            double norm = 0.0;
+            double n_temp;
+
+            out_vec = orbits.get_pos(t_rec, sc_r);
+            x_rec[0] = out_vec.x;
+            x_rec[1] = out_vec.y;
+            x_rec[2] = out_vec.z;
+
+            // changed this t -> t_em
+            out_vec = orbits.get_pos(t_em, sc_e);
+            x_em[0] = out_vec.x;
+            x_em[1] = out_vec.y;
+            x_em[2] = out_vec.z;
+
+            for (int coord = 0; coord < 3; coord += 1)
+            {
+                n_temp = x_rec[coord] - x_em[coord];
+                n[coord] = n_temp;
+                norm += n_temp * n_temp;
+            }
+
+            norm = sqrt(norm);
+
+#pragma unroll
+            for (int coord = 0; coord < 3; coord += 1)
+            {
+                n[coord] = n[coord] / norm;
+            }
+
+            xi_projections(&xi_p, &xi_c, u, v, n);
+
+            k_dot_n = dot_product_1d(k, n);
+            k_dot_x_rec = dot_product_1d(k, x_rec); // receiver
+            k_dot_x_em = dot_product_1d(k, x_em); // emitter
+
+            delay_rec = t_rec - k_dot_x_rec * C_inv;
+            delay_em = t_em - k_dot_x_em * C_inv;
+
+            // delays relative to this source's t0 -- same coordinate as the fit grid
+            // (t_arr = arange(num_inputs)*dt, starting at 0).
+            clipped_delay_rec = delay_rec - t0_offset;
+            clipped_delay_em = delay_em - t0_offset;
+
+            // --- quintic spline evaluation of h at the two delayed times ---
+            // Uniform grid: window w = floor(delay/dt), x0 = w*dt == t_arr[w]
+            // (same multiply, so bit-for-bit consistent with the fit). Build the
+            // segment inline + clamp to [0, num_inputs-2] rather than calling
+            // QuinticSpline::get_window, which throws on the CPU backend when a
+            // delay leaves the domain (edge points are trimmed by projections_start_ind).
+            {
+                int w = (int)(clipped_delay_rec * sampling_frequency);
+                if (w < 0) w = 0;
+                if (w > num_inputs - 2) w = num_inputs - 2;
+                long idx = batch_off + w;
+                double x0 = (double)w * dt;
+                QuinticSplineSegment seg_hp(x0, input_in[idx].real(), c1r[idx], c2r[idx], c3r[idx], c4r[idx], c5r[idx], spline_type);
+                QuinticSplineSegment seg_hc(x0, input_in[idx].imag(), c1i[idx], c2i[idx], c3i[idx], c4i[idx], c5i[idx], spline_type);
+                hp_del_rec = seg_hp.eval(clipped_delay_rec);
+                hc_del_rec = seg_hc.eval(clipped_delay_rec);
+            }
+            {
+                int w = (int)(clipped_delay_em * sampling_frequency);
+                if (w < 0) w = 0;
+                if (w > num_inputs - 2) w = num_inputs - 2;
+                long idx = batch_off + w;
+                double x0 = (double)w * dt;
+                QuinticSplineSegment seg_hp(x0, input_in[idx].real(), c1r[idx], c2r[idx], c3r[idx], c4r[idx], c5r[idx], spline_type);
+                QuinticSplineSegment seg_hc(x0, input_in[idx].imag(), c1i[idx], c2i[idx], c3i[idx], c4i[idx], c5i[idx], spline_type);
+                hp_del_em = seg_hp.eval(clipped_delay_em);
+                hc_del_em = seg_hc.eval(clipped_delay_em);
+            }
+
+            pre_factor = 1. / (1. - k_dot_n);
+            large_factor = (hp_del_em - hp_del_rec) * xi_p + (hc_del_em - hc_del_rec) * xi_c;
+            y_gw[batch_ind * NLINKS * num_delays + link_i * num_delays + i] = pre_factor * large_factor;
+        }
+    }
+}
+
+
 void LISAResponse::get_response(double *y_gw, double *t_data, double *k_in, double *u_in, double *v_in, double dt,
                   int num_delays,
                   cmplx* input_in, int num_inputs, int order,
                   double sampling_frequency, int buffer_integer,
-                  double *A_in, double deps, int num_A, double *E_in, int projections_start_ind, double *t0_arr, int batch_size, bool run_async)
+                  double *A_in, double deps, int num_A, double *E_in, int projections_start_ind, double *t0_arr, double *t0_shift_arr, int batch_size, bool run_async)
 {
 
     if (orbits == NULL)
@@ -748,7 +973,7 @@ void LISAResponse::get_response(double *y_gw, double *t_data, double *k_in, doub
                                        num_delays,
                                        input_in, num_inputs, order, sampling_frequency, buffer_integer,
                                        A_in, deps, num_A, E_in, projections_start_ind,
-                                       orbits_gpu, t0_arr, batch_size);
+                                       orbits_gpu, t0_arr, t0_shift_arr, batch_size);
     
     if (run_async){
         gpuErrchk(cudaGetLastError());
@@ -771,7 +996,77 @@ void LISAResponse::get_response(double *y_gw, double *t_data, double *k_in, doub
                  input_in   + batch_ind * num_inputs,
                  num_inputs, order, sampling_frequency, buffer_integer,
                  A_in, deps, num_A, E_in, projections_start_ind,
-                 orbits, t0_arr + batch_ind, 1);
+                 orbits, t0_arr + batch_ind, t0_shift_arr + batch_ind, 1);
+    }
+#endif
+}
+
+
+void LISAResponse::get_response_quintic(double *y_gw, double *t_data, double *k_in, double *u_in, double *v_in, double dt,
+                  int num_delays,
+                  cmplx* input_in, int num_inputs, double sampling_frequency,
+                  double *c1r, double *c2r, double *c3r, double *c4r, double *c5r,
+                  double *c1i, double *c2i, double *c3i, double *c4i, double *c5i,
+                  int projections_start_ind, int spline_type, double *t0_arr, double *t0_shift_arr, int batch_size, bool run_async)
+{
+
+    if (orbits == NULL)
+    {
+        throw std::invalid_argument("Must add orbits with add_orbit_information method.");
+    }
+
+#ifdef __CUDACC__
+
+    int num_delays_here = (num_delays - 2 * projections_start_ind);
+    int num_blocks = std::ceil((num_delays_here + NUM_THREADS_RESPONSE - 1) / NUM_THREADS_RESPONSE);
+
+    // copy self to GPU
+    Orbits *orbits_gpu;
+    if (run_async){
+        gpuErrchk(cudaMallocAsync(&orbits_gpu, sizeof(Orbits), cudaStreamDefault));
+        gpuErrchk(cudaMemcpyAsync(orbits_gpu, orbits, sizeof(Orbits), cudaMemcpyHostToDevice, cudaStreamDefault));
+    }
+    else{
+        gpuErrchk(cudaMalloc(&orbits_gpu, sizeof(Orbits)));
+        gpuErrchk(cudaMemcpy(orbits_gpu, orbits, sizeof(Orbits), cudaMemcpyHostToDevice));
+    }
+
+    dim3 gridDim(num_blocks, 1, batch_size);
+
+    response_quintic<<<gridDim, NUM_THREADS_RESPONSE>>>(y_gw, t_data, k_in, u_in, v_in, dt,
+                                       num_delays,
+                                       input_in, num_inputs, sampling_frequency,
+                                       c1r, c2r, c3r, c4r, c5r,
+                                       c1i, c2i, c3i, c4i, c5i,
+                                       projections_start_ind, spline_type,
+                                       orbits_gpu, t0_arr, t0_shift_arr, batch_size);
+
+    if (run_async){
+        gpuErrchk(cudaGetLastError());
+        gpuErrchk(cudaFreeAsync(orbits_gpu, cudaStreamDefault));
+    }else{
+        cudaDeviceSynchronize();
+        gpuErrchk(cudaGetLastError());
+
+        gpuErrchk(cudaFree(orbits_gpu));
+    }
+#else
+
+    for (int batch_ind = 0; batch_ind < batch_size; batch_ind++) {
+        response_quintic(y_gw       + batch_ind * NLINKS * num_delays,
+                 t_data,
+                 k_in       + batch_ind * 3,
+                 u_in       + batch_ind * 3,
+                 v_in       + batch_ind * 3,
+                 dt, num_delays,
+                 input_in   + (long)batch_ind * num_inputs,
+                 num_inputs, sampling_frequency,
+                 c1r + (long)batch_ind * num_inputs, c2r + (long)batch_ind * num_inputs, c3r + (long)batch_ind * num_inputs,
+                 c4r + (long)batch_ind * num_inputs, c5r + (long)batch_ind * num_inputs,
+                 c1i + (long)batch_ind * num_inputs, c2i + (long)batch_ind * num_inputs, c3i + (long)batch_ind * num_inputs,
+                 c4i + (long)batch_ind * num_inputs, c5i + (long)batch_ind * num_inputs,
+                 projections_start_ind, spline_type,
+                 orbits, t0_arr + batch_ind, t0_shift_arr + batch_ind, 1);
     }
 #endif
 }

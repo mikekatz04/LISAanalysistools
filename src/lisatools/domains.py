@@ -573,6 +573,11 @@ class TDSettings(DomainSettingsBase):
         """Active basis shape (same as :attr:`basis_shape` for TD)."""
         # TODO: adjust this
         return (self.N,)
+    
+    @property
+    def Tobs(self) -> float:
+        """Total observation time ``N * dt``."""
+        return self.N * self.dt
 
     def __repr__(self) -> str:
         return (
@@ -601,9 +606,9 @@ class TDSettings(DomainSettingsBase):
     def compute_slice_indices(self, tmin: float, tmax: float) -> slice:
         """Return a ``slice`` along the time axis covering ``[tmin, tmax]``."""
         if tmin < self.t0:
-            raise ValueError("tmin must be greater than or equal to t0.")
+            tmin = self.t0
         if tmax > self.t0 + self.N * self.dt:
-            raise ValueError("tmax must be less than or equal to t0 + N*dt.")
+            tmax = self.t0 + self.N * self.dt
 
         start_idx = int(self.xp.round((tmin - self.t0) / self.dt))
         end_idx = int(self.xp.round((tmax - self.t0) / self.dt))
@@ -637,7 +642,7 @@ class TDSettings(DomainSettingsBase):
         new_N = (stop - start) // step
         new_t0 = self.t0 + start * self.dt
 
-        return TDSettings(new_N, self.dt, new_t0, force_backend=self.backend)
+        return TDSettings(N=new_N, dt=self.dt, t0=new_t0, force_backend=self.backend)
 
 
 class TDSignal(DomainBase, TDSettings):

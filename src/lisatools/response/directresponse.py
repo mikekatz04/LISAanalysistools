@@ -10,8 +10,9 @@ import h5py
 
 from scipy.interpolate import CubicSpline
 
-from lisatools.detector import EqualArmlengthOrbits, Orbits
-from lisatools.utils.utility import AET
+from ..detector import EqualArmlengthOrbits, Orbits
+from ..utils.constants import C_SI
+from ..utils.utility import AET
 
 from .parallelbase import FastLISAResponseParallelModule
 from .tdiconfig import TDIConfig
@@ -33,7 +34,7 @@ from math import factorial
 
 factorials = np.array([factorial(i) for i in range(30)])
 
-C_inv = 3.3356409519815204e-09
+C_inv = 1.0 / C_SI  # 3.3356409519815204e-09
 
 
 from astropy.coordinates import SkyCoord
@@ -126,10 +127,23 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         tdi_chan (str, optional): Which TDI channel combination to return. Choices are :code:`'XYZ'`,
             :code:`AET`, or :code:`AE`. (default: :code:`'XYZ'`)
         tdi_orbits (:class:`Orbits`, optional): Set if different orbits from projection.
-            Orbits class from LISA Analysis Tools. Works with LISA Orbits 
+            Orbits class from LISA Analysis Tools. Works with LISA Orbits
             outputs: ``lisa-simulation.pages.in2p3.fr/orbits/``.
             (default: :class:`EqualArmlengthOrbits`)
-        force_backend (str, optional): If given, run this class on the requested backend. 
+        use_spline (bool, optional): Default interpolation scheme for the *projection*
+            waveform evaluation. If ``True``, evaluate the delayed waveform with a
+            degree-5 (quintic) spline; if ``False``, use the order-``order`` Lagrangian
+            fractional-delay filter. The TDI computation always stays on the Lagrangian
+            path regardless of this setting. Can be overridden per call via
+            ``get_projections(..., use_spline=...)``. (default: ``False``)
+        quintic_chunk (int, optional): SPIKE band-solve chunk length (rows per partition)
+            for the quintic projection fit, forwarded to
+            :class:`~gpubackendtools.interpolate.QuinticSplineInterpolant`. ``0`` lets GBT
+            auto-size it. Only a tuning lever for the quintic path; ignored when
+            ``use_spline`` is ``False``. Raising the chunk count increases the GPU
+            reduced-solve parallelism in the low-spline-count regime (e.g. a single long
+            source, ``ninterps == 2``). (default: ``0``)
+        force_backend (str, optional): If given, run this class on the requested backend.
             Options are ``"cpu"``, ``"cuda11x"``, ``"cuda12x"``, ``"cuda13x"``. (default: ``None``)
 
     Attributes:
@@ -157,10 +171,14 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         num_channels (int): 3.
         num_pts (int): Number of points to produce for the final output template.
         order (int): Order of Lagrangian interpolation technique.
+        quintic_chunk (int): SPIKE band-solve chunk length forwarded to the quintic
+            projection fit (``0`` = GBT auto-sizes). Tuning lever for the quintic path.
         sampling_frequency (double): The sampling rate in Hz.
         tdi (str or list): TDI setup.
         tdi_buffer (int): The buffer necessary for all information needed at early times
             for the TDI computation. This is set to 200.
+        use_spline (bool): Default projection interpolation scheme (``True`` = quintic
+            spline, ``False`` = Lagrangian). Overridable per call in ``get_projections``.
         xp (obj): Either Numpy or Cupy.
 
     """
@@ -174,6 +192,8 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         orbits: Optional[Orbits] = EqualArmlengthOrbits,
         tdi_orbits: Optional[Orbits] = None,
         tdi_chan="XYZ",
+        use_spline=False,
+        quintic_chunk=0,
         force_backend=None,
     ):
 
@@ -197,6 +217,20 @@ class pyResponseTDI(FastLISAResponseParallelModule):
             tdi = TDIConfig(tdi, force_backend=force_backend)
         self.tdi = tdi
         self.tdi_chan = tdi_chan
+
+        # interpolation scheme for the *projection* waveform evaluation. The TDI
+        # computation always uses the Lagrangian path regardless of this setting.
+        assert isinstance(use_spline, bool), "use_spline must be a bool."
+        self.use_spline = use_spline
+
+        # SPIKE band-solve chunk length for the quintic projection fit (0 = let
+        # GBT auto-size). Tuning lever for the low-spline-count regime (e.g. a
+        # single long source -> ninterps == 2): a larger chunk count raises the
+        # GPU reduced-solve parallelism. Forwarded to QuinticSplineInterpolant.
+        assert isinstance(quintic_chunk, int) and quintic_chunk >= 0, (
+            "quintic_chunk must be a non-negative int (0 = auto)."
+        )
+        self.quintic_chunk = quintic_chunk
 
         super().__init__(force_backend=force_backend)
 
@@ -240,6 +274,10 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         self.t_arr_proj = None
         self.batch_size = 1
         self.t0_arr = self.xp.zeros(1, dtype=self.xp.float64)
+        # Per-source sub-sample data-grid shift (paired with t0_arr); updated per
+        # call in get_projections. Carried into the kernel eval time so a batch of
+        # sources with different sub-sample offsets each land on the data grid.
+        self.t0_shift_arr = self.xp.zeros(1, dtype=self.xp.float64)
 
     def check_add_orbit_args(self, *args):
         """Check orbit arguments for adherence to cpp Orbits class.
@@ -284,6 +322,11 @@ class pyResponseTDI(FastLISAResponseParallelModule):
     def response_gen(self) -> callable:
         """CPU/GPU function for generating the projections."""
         return self.cpp_response.get_response_wrap
+
+    @property
+    def response_quintic_gen(self) -> callable:
+        """CPU/GPU function for generating the projections with the quintic spline."""
+        return self.cpp_response.get_response_quintic_wrap
 
     @property
     def tdi_gen(self) -> callable:
@@ -465,17 +508,19 @@ class pyResponseTDI(FastLISAResponseParallelModule):
                 "Input waveform is longer than available orbital information. Trimming to fit orbital information."
             )
 
-            max_ind = int(
-                self.xp.where(
-                    (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
-                )[1][-1]
-            )
+            # ``where(...)[1][-1]`` returned the last in-range column of the LAST
+            # source (row-major order), not the batch worst case -- a heterogeneous
+            # -t0 batch could then keep eval times > t_orbit_max for an earlier
+            # source. Count in-range columns per source (the condition is a prefix
+            # since t_data increases) and trim to the shortest-reaching source.
+            in_range = (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
+            max_ind = int(in_range.sum(axis=-1).min())
 
             t_data = t_data[:max_ind]
             input_in = input_in[:, :max_ind]
         return (t_data, input_in)
 
-    def get_projections(self, input_in, lam, beta, t0_shift_to_data=0.0, t0=0.0, t_buffer=10000.0, run_async=False):
+    def get_projections(self, input_in, lam, beta, t0_shift_to_data=0.0, t0=0.0, t_buffer=10000.0, use_spline: Optional[bool] = None, run_async=False):
         """Compute projections of GW signal on to LISA constellation.
 
         Supports a single source or a batch (feat-batching, 2026-06): a true
@@ -490,17 +535,31 @@ class pyResponseTDI(FastLISAResponseParallelModule):
                 array of length ``batch_size`` for a batch.
             beta (double or array): Ecliptic Latitude in radians. Scalar or
                 length-``batch_size`` array.
+            t0_shift_to_data (double, optional): Shift to apply to ``t0`` to align
+                the input strain with the datastream. Default: 0.0 seconds. 
             t0 (double or array): Absolute start time(s) in seconds. Scalar or
                 length-``batch_size`` array.
             t_buffer (double, optional): Buffer time from ``t0``. The start of
                 the waveform is garbage because of the delays and interpolation
-                towards earlier times; ``t_buffer`` says where to start.
+                towards earlier times; ``t_buffer`` says where to start. Default: 10000.0 seconds.
+            use_spline (bool, optional): Per-call override of the instance default
+                ``self.use_spline``. If ``None`` (the default), use the instance
+                default. If ``True`` / ``False``, force the quintic-spline / Lagrangian
+                projection for this call, overriding ``self.use_spline`` in either
+                direction. Default: ``None``.
             run_async (bool, optional): If True, use async device allocs/streams.
                 (Default: ``False``)
 
         Raises:
             ValueError: If ``t_buffer`` is not large enough.
         """
+        # None -> fall back to the instance default; an explicit bool overrides it
+        # in either direction (force the spline on or off for this call).
+        assert use_spline is None or isinstance(use_spline, bool), (
+            "use_spline must be None or a bool."
+        )
+        use_spline = self.use_spline if use_spline is None else use_spline
+
         # --- batch detection (scalar lam/beta -> batch_size 1) ---
         lam = self.xp.atleast_1d(self.xp.asarray(lam, dtype=self.xp.float64))
         beta = self.xp.atleast_1d(self.xp.asarray(beta, dtype=self.xp.float64))
@@ -556,14 +615,23 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         num_inputs_per_source = input_in.shape[1]
         self.num_total_points = num_inputs_per_source
 
-        # shared relative evaluation grid; per-source absolute eval time is t_arr + t0_arr
-        # inside the kernel. t0_shift_to_data (data-grid alignment) lives HERE on the eval
-        # grid -> the kernel evaluates arange(N)*dt + t0_arr + t0_shift_to_data, while still
-        # indexing the waveform array relative to the unshifted t0_arr (its exact start).
-        # (t_arr + t0_arr is numerically unchanged vs. the old split, so the output grid and
-        # _data_time_check are unaffected; only the waveform-array sampling is corrected.)
-        t_arr = (self.xp.arange(num_inputs_per_source, dtype=self.xp.float64) * self.dt
-                 + t0_shift_to_data)
+        # Shared relative evaluation grid, starting at 0. The per-source absolute
+        # eval time is ``t_arr + t0_arr + t0_shift_arr`` inside the kernel: t0_arr is
+        # the waveform's exact start, t0_shift_arr the sub-sample data-grid shift.
+        # The shift rides the kernel eval time (NOT this shared grid) so each source
+        # in a batch can carry its own sub-sample offset; t0_arr still anchors the
+        # waveform-array index, so the shift survives in clipped_delay exactly as in
+        # the single-source path. (Pre-2026-06 the shift was baked into t_arr here,
+        # which a per-source batch cannot represent -> broadcast crash for B>=2.)
+        t_arr = self.xp.arange(num_inputs_per_source, dtype=self.xp.float64) * self.dt
+        t0_shift_arr = self.xp.atleast_1d(
+            self.xp.asarray(t0_shift_to_data, dtype=self.xp.float64)
+        )
+        if t0_shift_arr.shape[0] == 1:
+            t0_shift_arr = t0_shift_arr.repeat(batch_size)
+        assert t0_shift_arr.shape[0] == batch_size, (
+            f"t0_shift_to_data length {t0_shift_arr.shape[0]} != batch_size {batch_size}."
+        )
         t_arr, input_in = self._data_time_check(t_arr, input_in, t0_arr)
         num_inputs_per_source = input_in.shape[1]
 
@@ -593,31 +661,103 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         input_flat = input_in.reshape(-1)  # (batch_size * num_inputs_per_source,)
 
         y_gw = self.xp.zeros(batch_size * self.nlinks * self.num_pts, dtype=self.xp.float64)
-        self.response_gen(
-            y_gw,
-            t_arr,
-            k_in,
-            u_in,
-            v_in,
-            self.dt,
-            num_inputs_per_source,
-            input_flat,
-            num_inputs_per_source,
-            self.order,
-            self.sampling_frequency,
-            self.buffer_integer,
-            self.A_in,
-            self.deps,
-            len(self.A_in),
-            self.E_in,
-            self.projections_start_ind,
-            t0_arr,
-            batch_size,
-            run_async,
-        )
+        if not use_spline: # Lagrangian interpolation path. 
+            self.response_gen(
+                y_gw,
+                t_arr,
+                k_in,
+                u_in,
+                v_in,
+                self.dt,
+                num_inputs_per_source,
+                input_flat,
+                num_inputs_per_source,
+                self.order,
+                self.sampling_frequency,
+                self.buffer_integer,
+                self.A_in,
+                self.deps,
+                len(self.A_in),
+                self.E_in,
+                self.projections_start_ind,
+                t0_arr,
+                t0_shift_arr,
+                batch_size,
+                run_async,
+            )
+        else:
+            # Quintic-spline projection path. Fit the real & imag parts of the
+            # batched waveform on the shared relative-time grid in ONE combined
+            # QuinticSplineInterpolant (ninterps = 2*batch_size: the batch_size
+            # real splines first, then the batch_size imag splines), then hand the
+            # two contiguous coefficient halves to the quintic kernel. The single
+            # combined fit maximizes the spline count for the GBT band-solve
+            # coalescing (see plan "Interaction with GBT GPU-opt #4").
+            from gpubackendtools.interpolate import (
+                QuinticSplineInterpolant,
+                CUBIC_SPLINE_LINEAR_SPACING,
+            )
+
+            assert num_inputs_per_source >= 6, "Quintic projection requires at least 6 input samples."
+
+            flavor = self.backend.name.split("_")[-1]
+            # interp-major flat layout: [real_0..real_{B-1}, imag_0..imag_{B-1}],
+            # each block ``num_inputs_per_source`` long, on the shared uniform grid t_arr.
+            x_grid = self.xp.tile(t_arr, 2 * batch_size)
+            y_stack = self.xp.concatenate(
+                [input_in.real, input_in.imag], axis=0
+            ).reshape(-1)
+
+            spl = QuinticSplineInterpolant(
+                x_grid, y_stack, ninterps=2 * batch_size, length=num_inputs_per_source,
+                force_backend=flavor, _chunk=self.quintic_chunk,
+            )
+            assert spl.spline_type == CUBIC_SPLINE_LINEAR_SPACING, (
+                "Quintic projection assumes a uniform time grid."
+            )
+            assert spl.xp is self.xp, "Quintic fit backend does not match the response backend."
+
+            # Retain only the five coefficient buffers, then drop everything else.
+            # The quintic eval reads y0 from ``input_flat`` and computes x0
+            # analytically on the uniform grid, so it never touches the fit's x/y
+            # arrays -- those (~2 device arrays of 2*batch_size*num_inputs_per_source
+            # doubles; e.g. ~1.7 GB for 100x 1-month sources @ 5 s) are dead weight
+            # after the solve. ``c1_flat..c5_flat`` are standalone allocations, so
+            # holding just them (and dropping the interpolant plus the x_grid/y_stack
+            # temporaries it aliases) frees x/y before the kernel launches, while
+            # keeping the coeff data alive across the (possibly async) call and until
+            # the next get_projections.
+            self._quintic_coeffs = (
+                spl.c1_flat, spl.c2_flat, spl.c3_flat, spl.c4_flat, spl.c5_flat
+            )
+            del spl, x_grid, y_stack
+            c1f, c2f, c3f, c4f, c5f = self._quintic_coeffs
+
+            half = batch_size * num_inputs_per_source  # real coeffs in [:half], imag coeffs in [half:]
+            self.response_quintic_gen(
+                y_gw,
+                t_arr,
+                k_in,
+                u_in,
+                v_in,
+                self.dt,
+                num_inputs_per_source,
+                input_flat,
+                num_inputs_per_source,
+                self.sampling_frequency,
+                c1f[:half], c2f[:half], c3f[:half], c4f[:half], c5f[:half],
+                c1f[half:], c2f[half:], c3f[half:], c4f[half:], c5f[half:],
+                self.projections_start_ind,
+                int(CUBIC_SPLINE_LINEAR_SPACING),
+                t0_arr,
+                t0_shift_arr,
+                batch_size,
+                run_async,
+            )
 
         self.t_arr_proj = t_arr
         self.t0_arr = t0_arr
+        self.t0_shift_arr = t0_shift_arr
         self.y_gw_flat = y_gw
         self.y_gw_length = self.num_pts
 
@@ -657,6 +797,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
             assert y_gw.shape == (len(self.orbits.LINKS), self.num_pts)
             self.batch_size = 1
             self.t0_arr = self.xp.zeros(1, dtype=self.xp.float64)
+            self.t0_shift_arr = self.xp.zeros(1, dtype=self.xp.float64)
             self.y_gw_flat = y_gw.flatten().copy()
             self.y_gw_length = self.num_pts
             if t_arr is None:
@@ -679,19 +820,20 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         # (passed to LISAResponse at construction), so they are no longer
         # threaded through tdi_gen here.
 
-        # The projections (input_links / y_gw) live on the t_arr grid and BEGIN at
-        # ``t_arr[0] + t0_arr`` (they were evaluated at t_arr[i] + t0_arr in get_projections).
-        # The TDI kernel indexes them via ``delay - t0_arr``, i.e. it only subtracts
-        # ``t0_arr[bin]`` -- so its reference must instead be the projection start
-        # ``t0_arr[bin] + t_arr[0]``. For the standard get_projections path t_arr[0] equals
-        # t0_shift_to_data (the data-grid alignment), so this is exactly
-        # ``t0_arr[bin] + t0_shift_to_data``. Re-split the relative grid / absolute offset so
-        # t0_arr carries the projection start and the relative grid starts at 0: the kernel
-        # eval time (t_arr + t0_arr) is invariant, only the y_gw array reference is corrected.
-        # (Pre-t0_shift_to_data fix, t_arr[0] was 0, so subtracting t0_arr alone sufficed.)
+        # The projections (input_links / y_gw) were evaluated at
+        # ``t_arr[i] + t0_arr[bin] + t0_shift_arr[bin]`` in get_projections, so y_gw
+        # BEGINS at ``t_arr[0] + t0_arr[bin] + t0_shift_arr[bin]``. The TDI kernel
+        # indexes y_gw via ``delay - t0_arr`` (it subtracts only its own t0_arr arg),
+        # so that arg must equal the projection start. Re-split the grid so the
+        # relative axis starts at 0 and the per-source absolute offset carries the
+        # full start: ``t_arr_start`` covers the direct-entry path (user t_arr[0] != 0),
+        # and ``t0_shift_arr`` carries the per-source sub-sample data-grid shift (on the
+        # standard path t_arr[0] == 0 and the shift lives entirely in t0_shift_arr).
+        # The kernel eval time (t_arr_tdi + t0_arr_tdi) is invariant; only the y_gw
+        # array reference is corrected.
         t_arr_start = t_arr[0]
         t_arr_tdi = t_arr - t_arr_start
-        t0_arr_tdi = self.t0_arr + t_arr_start
+        t0_arr_tdi = self.t0_arr + t_arr_start + self.t0_shift_arr
 
         self.tdi_gen(
             self.delayed_links_flat,
