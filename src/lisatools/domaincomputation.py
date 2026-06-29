@@ -16,12 +16,11 @@ from .domains import FDSettings, STFTSettings, WDMSettings
 from .utils.parallelbase import LISAToolsParallelModule
 
 if TYPE_CHECKING:
-    # ``domains.py`` imports the computation-group classes from this
-    # module at module-top-level, so pulling ``STFTSettings`` /
-    # ``FDSettings`` in eagerly here creates a circular import. They're
-    # only needed for type hints and an ``isinstance`` check in
-    # ``DomainComputationGroupArray.domain_type`` — the latter does its
-    # own lazy import.
+    # The settings classes (``FDSettings`` / ``STFTSettings`` /
+    # ``WDMSettings``) are used for the per-domain ``isinstance`` dispatch
+    # in the ``*ComputationGroup`` strategy classes below, which each do
+    # their own lazy ``from .domains import ...`` inside the method that
+    # needs them (see ``STFT``/``FD``/``WDMComputationGroup``).
     import cupy as cp  # typing-only; runtime cupy use lives in call sites
 
     from .analysiscontainer import AnalysisContainer, AnalysisContainerArray

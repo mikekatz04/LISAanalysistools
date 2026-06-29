@@ -9,7 +9,7 @@ Covers the additive integration in :class:`AnalysisContainerArray`:
   that drives the multi-split propagation through the owned backend; and
 * :meth:`refresh_cpp_dd` for the cached ``(d|d)`` term.
 
-The forwarder is pure plumbing over the DCGA primitives
+The forwarder is pure plumbing over the ACA primitives
 (``unpack_indices`` / ``unpack_coords`` / ``place_on_device`` /
 ``cpp_signal_likelihood``), all already covered by
 ``test_multi_gpu_placement.py``. Here we exercise the *forwarder* code path
@@ -353,7 +353,7 @@ class TestWDMForwarderRealKernel(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# FD: stub group through the forwarder (complex dtype, start_times=None).
+# FD: real C++ kernel through the forwarder (complex dtype, start_times=None).
 # ---------------------------------------------------------------------------
 
 

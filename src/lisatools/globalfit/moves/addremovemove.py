@@ -733,7 +733,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
     Wrapper around ResidualAddOneRemoveOneMove that runs the waveform generation and likelihood computation on multiple GPUs.
 
     Args:
-    dcga: DomainComputationGroupArray that contains the information about the domain computation groups and the GPUs to use for each group.
+    dcga: the C++ likelihood coordinator carrying the per-split strategies and per-split GPU assignment. Accepts an AnalysisContainerArray (resolved via ``dcga.acs``) or a deprecated DomainComputationGroupArray shim wrapping one.
     waveform_gen: waveform generator class that generates the waveforms for the sources given their coordinates.
     branch_name: name of the branch that this move will operate on.
     coords_shape: shape of the coordinates of the sources in the branch that this move will operate on.

@@ -1668,7 +1668,7 @@ class AnalysisContainerArray:
         else:
             # CPU-thread splits (no GPUs): ``n_splits`` shards the containers
             # through the same split structure as multi-GPU, one thread per
-            # split downstream (DCGA run_threaded). With GPUs, the split
+            # split downstream (ACA run_threaded). With GPUs, the split
             # count is always len(gpus). (Arg validation happens above,
             # before any device work.)
             num_machines = (

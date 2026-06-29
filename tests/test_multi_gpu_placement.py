@@ -1,11 +1,15 @@
-"""Placement + routing tests for :class:`DomainComputationGroupArray`.
+"""Placement + routing tests for the :class:`AnalysisContainerArray` C++
+likelihood coordinator (absorbed from the former
+:class:`DomainComputationGroupArray`).
 
 These tests exercise the multi-split routing logic introduced by the
-multi-GPU refactor *without* requiring any real GPUs. We drive the
-coordinator with a lightweight ``AnalysisContainerArray`` shim that
-exposes exactly the attributes the coordinator and each
-``BaseDomainComputationGroup.extract_from_acs`` /
-``build_cpp_objects`` path read.
+multi-GPU refactor *without* requiring any real GPUs. We drive the real
+ACA coordinator methods (borrowed onto a lightweight ``_StubACS`` host)
+that read exactly the attributes the coordinator and each
+``DomainKernelStrategy.extract_from_acs`` / ``build_cpp_objects`` path
+need. (The strategy base is imported here under its back-compat alias
+``BaseDomainComputationGroup`` so the tests also cover that the alias
+still resolves.)
 
 Key properties verified:
     * ``ac_to_split`` / ``ac_to_intra`` routing tables match
