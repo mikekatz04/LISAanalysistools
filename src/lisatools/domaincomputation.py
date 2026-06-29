@@ -712,8 +712,8 @@ class DomainComputationGroupArray:
     ``AnalysisContainerArray``, which now owns the per-split strategy
     workspaces (``acs.cpp_splits`` — the STFT/FD/WDM ``*ComputationGroup``
     objects) and the batched orchestration directly. Drive the ACA methods
-    instead: ``acs.cpp_template_likelihood`` / ``acs.compute_signal_likelihood``
-    / ``acs.compute_psd_likelihood`` / ``acs.cpp_splits``.
+    instead: ``acs.cpp_template_likelihood`` / ``acs.cpp_signal_likelihood``
+    / ``acs.cpp_psd_likelihood`` / ``acs.cpp_splits``.
 
     This alias is kept only so external settings files that still construct
     ``DomainComputationGroupArray(acs=acs)`` and hand it to the global-fit

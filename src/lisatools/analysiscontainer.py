@@ -1506,7 +1506,7 @@ class AnalysisContainerArray:
             split structure used for GPUs (``gpu_splits`` / ``split_map`` /
             per-split linear buffers). One thread per split is then driven by
             the ACA's own per-split C++ likelihood coordinator (the
-            :attr:`cpp_splits` strategies + :meth:`compute_signal_likelihood`)
+            :attr:`cpp_splits` strategies + :meth:`cpp_signal_likelihood`)
             with ``run_threaded=True`` exactly as in the multi-GPU case (each
             split's strategy holds its own workspaces, so threads never share
             scratch buffers). Threads pay off where the per-split
@@ -2185,7 +2185,7 @@ class AnalysisContainerArray:
     def cpp_likelihood_backend(self) -> "DomainComputationGroupArray":
         """Deprecated-compat handle: a thin ``DomainComputationGroupArray``
         shim forwarding to this ACA. Prefer the ACA methods directly
-        (:meth:`cpp_template_likelihood`, :meth:`compute_signal_likelihood`,
+        (:meth:`cpp_template_likelihood`, :meth:`cpp_signal_likelihood`,
         :attr:`cpp_splits`)."""
         self._ensure_cpp_splits()
         if self._cpp_likelihood_backend is None:
@@ -2448,7 +2448,7 @@ class AnalysisContainerArray:
             )
         return output
 
-    def compute_psd_likelihood(
+    def cpp_psd_likelihood(
         self,
         positions_per_split,
         data_intra_per_split,
@@ -2457,7 +2457,11 @@ class AnalysisContainerArray:
         likelihood_kwargs=None,
         run_threaded=False,
     ):
-        """Batched PSD likelihood across splits (aggregated ``(N,)`` host)."""
+        """Batched PSD likelihood across splits (aggregated ``(N,)`` host).
+
+        The ``cpp_`` prefix marks this as the fast C++ batched-kernel path
+        (as opposed to the diagnostic ``likelihood`` family); it is the
+        PSD likelihood driven by the PSD proposal."""
         self._ensure_cpp_splits()
         operations = [s.compute_psd_likelihood for s in self._cpp_splits]
         return self._compute_group_likelihood(
@@ -2470,7 +2474,7 @@ class AnalysisContainerArray:
             run_threaded=run_threaded,
         )
 
-    def compute_signal_likelihood(
+    def cpp_signal_likelihood(
         self,
         positions_per_split,
         data_intra_per_split,
@@ -2481,6 +2485,7 @@ class AnalysisContainerArray:
     ):
         """Batched signal likelihood across splits (aggregated ``(N,)`` host).
 
+        The ``cpp_`` prefix marks this as the fast C++ batched-kernel path.
         This is the per-split-routed core; :meth:`cpp_template_likelihood` is
         the flat-batch entry point that scatters templates into it."""
         self._ensure_cpp_splits()
@@ -2730,7 +2735,7 @@ class AnalysisContainerArray:
         )
 
         # 4) batched (d|h)/(h|h) kernels + cached (d|d) -> aggregated (N,) host.
-        return self.compute_signal_likelihood(
+        return self.cpp_signal_likelihood(
             positions_per_split=positions,
             data_intra_per_split=data_intra,
             noise_intra_per_split=noise_intra,

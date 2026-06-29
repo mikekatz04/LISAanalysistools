@@ -936,7 +936,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         if not self.run_async:
             self.acs.synchronize()
 
-        likelihoods = self.acs.compute_signal_likelihood(
+        likelihoods = self.acs.cpp_signal_likelihood(
             positions_per_split=positions_per_split,
             data_intra_per_split=data_intra_index_per_split,
             noise_intra_per_split=data_intra_index_per_split,

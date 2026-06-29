@@ -656,7 +656,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
             positions_per_split=positions_per_split,
         )
 
-        ll = self.acs.compute_psd_likelihood(
+        ll = self.acs.cpp_psd_likelihood(
             positions_per_split,
             data_intra_index_per_split,
             data_intra_index_per_split,

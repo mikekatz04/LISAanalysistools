@@ -11,7 +11,7 @@ Covers the additive integration in :class:`AnalysisContainerArray`:
 
 The forwarder is pure plumbing over the DCGA primitives
 (``unpack_indices`` / ``unpack_coords`` / ``place_on_device`` /
-``compute_signal_likelihood``), all already covered by
+``cpp_signal_likelihood``), all already covered by
 ``test_multi_gpu_placement.py``. Here we exercise the *forwarder* code path
 itself, two ways:
 
@@ -104,8 +104,8 @@ class _ACSHost:
     compute_d_d_terms = _ACA.compute_d_d_terms
     compute_noise_terms = _ACA.compute_noise_terms
     _compute_group_likelihood = _ACA._compute_group_likelihood
-    compute_signal_likelihood = _ACA.compute_signal_likelihood
-    compute_psd_likelihood = _ACA.compute_psd_likelihood
+    cpp_signal_likelihood = _ACA.cpp_signal_likelihood
+    cpp_psd_likelihood = _ACA.cpp_psd_likelihood
     _cpp_strategy_class = _ACA._cpp_strategy_class
     _build_cpp_splits = _ACA._build_cpp_splits
     _ensure_cpp_splits = _ACA._ensure_cpp_splits
@@ -285,7 +285,7 @@ class TestWDMForwarderRealKernel(unittest.TestCase):
         pos, di, ni = host.unpack_indices(data_index, None)
         coords = host.unpack_coords(pos, (templ.astype(float), sf, st), keep_tuple=True)
         di, ni, coords = host.place_on_device((di, ni, coords))
-        ref = host.compute_signal_likelihood(pos, di, ni, coords)
+        ref = host.cpp_signal_likelihood(pos, di, ni, coords)
 
         out = host.cpp_template_likelihood(data_index, templ, sf, st)
         np.testing.assert_allclose(out, ref, rtol=1e-12, atol=1e-12)
@@ -433,7 +433,7 @@ class TestFDForwarderRealKernel(unittest.TestCase):
         pos, di, ni = host.unpack_indices(data_index, None)
         coords = host.unpack_coords(pos, (templ.astype(complex), sf), keep_tuple=True)
         di, ni, coords = host.place_on_device((di, ni, coords))
-        ref = host.compute_signal_likelihood(pos, di, ni, coords)
+        ref = host.cpp_signal_likelihood(pos, di, ni, coords)
         out = host.cpp_template_likelihood(data_index, templ, sf, start_times=None)
         np.testing.assert_allclose(out, ref, rtol=1e-12, atol=1e-12)
 
@@ -545,7 +545,7 @@ class TestSTFTForwarderRealKernel(unittest.TestCase):
         pos, di, ni = host.unpack_indices(data_index, None)
         coords = host.unpack_coords(pos, (templ.astype(complex), sf, st), keep_tuple=True)
         di, ni, coords = host.place_on_device((di, ni, coords))
-        ref = host.compute_signal_likelihood(pos, di, ni, coords)
+        ref = host.cpp_signal_likelihood(pos, di, ni, coords)
         out = host.cpp_template_likelihood(data_index, templ, sf, start_times=st)
         np.testing.assert_allclose(out, ref, rtol=1e-12, atol=1e-12)
 

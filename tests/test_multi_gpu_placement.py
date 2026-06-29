@@ -15,7 +15,7 @@ Key properties verified:
     * ``compute_d_d_terms`` populates each group's per-split ``d_d``
       vector in intra-split order (and runs automatically at
       coordinator construction).
-    * ``compute_signal_likelihood`` reproduces the per-binary reference
+    * ``cpp_signal_likelihood`` reproduces the per-binary reference
       and is invariant to the split layout (single split vs. two
       splits), including empty splits.
     * ``run_threaded=True`` (ThreadPoolExecutor dispatch) matches the
@@ -135,8 +135,8 @@ class _StubACS:
     compute_d_d_terms = _ACA.compute_d_d_terms
     compute_noise_terms = _ACA.compute_noise_terms
     _compute_group_likelihood = _ACA._compute_group_likelihood
-    compute_signal_likelihood = _ACA.compute_signal_likelihood
-    compute_psd_likelihood = _ACA.compute_psd_likelihood
+    cpp_signal_likelihood = _ACA.cpp_signal_likelihood
+    cpp_psd_likelihood = _ACA.cpp_psd_likelihood
     _build_cpp_splits = _ACA._build_cpp_splits
     _ensure_cpp_splits = _ACA._ensure_cpp_splits
     cpp_split = _ACA.cpp_split
@@ -261,7 +261,7 @@ class _StubFDComputationGroup(BaseDomainComputationGroup):
 
     The base-class machinery (``extract_from_acs``,
     ``build_cpp_objects``, ``compute_d_d_term``,
-    ``compute_signal_likelihood``) runs unmodified — only the
+    ``cpp_signal_likelihood``) runs unmodified — only the
     C++-kernel-backed ``compute_signal_likelihood_terms`` is replaced
     with the Python XYZ reference so the tests run on a CPU-only
     install (the merged ``FDComputationGroup`` requires the not-yet-
@@ -304,7 +304,7 @@ def _route_batch(coord, data_index, noise_index, *flat_arrays):
     """Build the per-split routing + ``likelihood_args`` from flat arrays.
 
     Callers who have flat ``(template, start_freqs[, start_times])``
-    tensors use this to reach the merged ``compute_signal_likelihood``
+    tensors use this to reach the merged ``cpp_signal_likelihood``
     signature, which takes the ``unpack_indices`` output plus a
     ``list[tuple]`` of per-split likelihood args.
     """
@@ -450,7 +450,7 @@ class TestComputeDdTerms(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# compute_signal_likelihood
+# cpp_signal_likelihood
 # ---------------------------------------------------------------------------
 
 
@@ -494,7 +494,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         positions, data_intra, noise_intra, likelihood_args = _route_batch(
             coord, data_index, noise_index, template, start_freqs
         )
-        likes = coord.compute_signal_likelihood(
+        likes = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args
         )
         expected = self._reference_likes(acs, data_index, noise_index, template)
@@ -514,7 +514,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         positions, data_intra, noise_intra, likelihood_args = _route_batch(
             coord, data_index, noise_index, template, start_freqs
         )
-        likes = coord.compute_signal_likelihood(
+        likes = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args
         )
         expected = self._reference_likes(acs, data_index, noise_index, template)
@@ -543,7 +543,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         # thanks to the ``positions_per_split`` short-circuit.
         assert all(len(a) == 0 for a in likelihood_args[1])
 
-        likes = coord.compute_signal_likelihood(
+        likes = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args
         )
         expected = np.array(
@@ -575,8 +575,8 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
 
         route1 = _route_batch(coord1, data_index, noise_index, template, start_freqs)
         route2 = _route_batch(coord2, data_index, noise_index, template, start_freqs)
-        likes1 = coord1.compute_signal_likelihood(*route1[:3], route1[3])
-        likes2 = coord2.compute_signal_likelihood(*route2[:3], route2[3])
+        likes1 = coord1.cpp_signal_likelihood(*route1[:3], route1[3])
+        likes2 = coord2.cpp_signal_likelihood(*route2[:3], route2[3])
         np.testing.assert_allclose(likes1, likes2, rtol=1e-12)
 
     def test_run_threaded_matches_serial(self):
@@ -596,10 +596,10 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
             coord, data_index, noise_index, template, start_freqs
         )
 
-        likes_serial = coord.compute_signal_likelihood(
+        likes_serial = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args, run_threaded=False
         )
-        likes_threaded = coord.compute_signal_likelihood(
+        likes_threaded = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args, run_threaded=True
         )
         np.testing.assert_array_equal(likes_serial, likes_threaded)
@@ -612,7 +612,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
 
 class TestLoopOperationCallable(unittest.TestCase):
     """Bound-method dispatch is covered by compute_d_d_terms /
-    compute_signal_likelihood; here we verify the generic callable path
+    cpp_signal_likelihood; here we verify the generic callable path
     used for external per-device work (waveform generation, etc.)."""
 
     def test_callable_invoked_per_group_with_args(self):
@@ -796,7 +796,7 @@ class TestPlaceOnDevice(unittest.TestCase):
 class TestComposedLikelihoodFromCoords(unittest.TestCase):
     """The pre-merge ``compute_likelihood_from_coords`` convenience was
     removed; callers now compose ``unpack_indices`` + ``unpack_coords``
-    + ``_loop_operation`` + ``compute_signal_likelihood``. Verify the
+    + ``_loop_operation`` + ``cpp_signal_likelihood``. Verify the
     composition end to end against the per-binary reference."""
 
     def test_matches_per_binary_reference(self):
@@ -830,7 +830,7 @@ class TestComposedLikelihoodFromCoords(unittest.TestCase):
         likelihood_args = [
             out if out is not None else () for out in wf_out_per_split
         ]
-        likes = coord.compute_signal_likelihood(
+        likes = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args
         )
 
