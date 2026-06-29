@@ -1,11 +1,15 @@
-"""Placement + routing tests for :class:`DomainComputationGroupArray`.
+"""Placement + routing tests for the :class:`AnalysisContainerArray` C++
+likelihood coordinator (absorbed from the former
+:class:`DomainComputationGroupArray`).
 
 These tests exercise the multi-split routing logic introduced by the
-multi-GPU refactor *without* requiring any real GPUs. We drive the
-coordinator with a lightweight ``AnalysisContainerArray`` shim that
-exposes exactly the attributes the coordinator and each
-``BaseDomainComputationGroup.extract_from_acs`` /
-``build_cpp_objects`` path read.
+multi-GPU refactor *without* requiring any real GPUs. We drive the real
+ACA coordinator methods (borrowed onto a lightweight ``_StubACS`` host)
+that read exactly the attributes the coordinator and each
+``DomainKernelStrategy.extract_from_acs`` / ``build_cpp_objects`` path
+need. (The strategy base is imported here under its back-compat alias
+``BaseDomainComputationGroup`` so the tests also cover that the alias
+still resolves.)
 
 Key properties verified:
     * ``ac_to_split`` / ``ac_to_intra`` routing tables match
@@ -15,7 +19,7 @@ Key properties verified:
     * ``compute_d_d_terms`` populates each group's per-split ``d_d``
       vector in intra-split order (and runs automatically at
       coordinator construction).
-    * ``compute_signal_likelihood`` reproduces the per-binary reference
+    * ``cpp_signal_likelihood`` reproduces the per-binary reference
       and is invariant to the split layout (single split vs. two
       splits), including empty splits.
     * ``run_threaded=True`` (ThreadPoolExecutor dispatch) matches the
@@ -41,10 +45,8 @@ import unittest
 
 import numpy as np
 
-from lisatools.domaincomputation import (
-    BaseDomainComputationGroup,
-    DomainComputationGroupArray,
-)
+from lisatools.analysiscontainer import AnalysisContainerArray as _ACA
+from lisatools.domaincomputation import BaseDomainComputationGroup
 from lisatools.domains import FDSettings
 
 
@@ -111,17 +113,53 @@ class _StubAC:
 
 
 class _StubACS:
-    """Minimal ``AnalysisContainerArray`` shim for routing tests.
+    """Minimal ``AnalysisContainerArray`` host for the routing tests.
 
-    The coordinator and group read ``settings``, ``gpus``, ``xp``,
-    ``acs_total_entries``, ``gpu_splits``, ``split_map``,
-    ``linear_data_arr``, ``linear_psd_arr``, ``nchannels``, and the
-    object array ``acs``. We provide all of those and nothing else.
+    Builds synthetic split data and **borrows the real, now-ACA-resident
+    coordinator methods** (``unpack_indices`` / ``unpack_coords`` /
+    ``place_on_device`` / ``_loop_operation`` / ``compute_*`` / ...), so the
+    routing/dispatch code under test is the genuine library implementation.
+    Only the per-split *strategy* is stubbed: ``_cpp_strategy_class`` returns
+    the NumPy ``_StubFDComputationGroup`` (the merged real FDComputationGroup
+    needs an unreconciled FD binding).
 
-    The shim is intentionally CPU-only (``gpus=None``) so that every
-    split's ``device`` is ``None`` and the ``force_backend='cpu'``
-    assertion in ``extract_from_acs`` holds regardless of split count.
+    CPU-only (``gpus=None``) so every split's ``device`` is ``None`` and the
+    ``force_backend='cpu'`` assertion in ``extract_from_acs`` holds.
     """
+
+    # --- borrowed from AnalysisContainerArray (the absorbed DCGA coordinator) ---
+    unpack_indices = _ACA.unpack_indices
+    unpack_coords = _ACA.unpack_coords
+    place_on_device = _ACA.place_on_device
+    _loop_operation = _ACA._loop_operation
+    device_context = _ACA.device_context
+    free_gpu_memory = _ACA.free_gpu_memory
+    _to_host = _ACA._to_host
+    synchronize = _ACA.synchronize
+    compute_d_d_terms = _ACA.compute_d_d_terms
+    compute_noise_terms = _ACA.compute_noise_terms
+    _compute_group_likelihood = _ACA._compute_group_likelihood
+    cpp_signal_likelihood = _ACA.cpp_signal_likelihood
+    cpp_psd_likelihood = _ACA.cpp_psd_likelihood
+    _build_cpp_splits = _ACA._build_cpp_splits
+    _ensure_cpp_splits = _ACA._ensure_cpp_splits
+    cpp_split = _ACA.cpp_split
+    # borrowed properties
+    num_splits = _ACA.num_splits
+    ac_to_split = _ACA.ac_to_split
+    cpp_splits = _ACA.cpp_splits
+    thread_pool = _ACA.thread_pool
+    domain_group_kwargs = _ACA.domain_group_kwargs
+
+    run_threaded = False
+
+    @property
+    def computation_groups(self):
+        """Back-compat alias used by these routing tests (== ``cpp_splits``)."""
+        return self.cpp_splits
+
+    def _cpp_strategy_class(self):
+        return _StubFDComputationGroup
 
     def __init__(
         self,
@@ -207,13 +245,27 @@ class _StubACS:
         self.d_d_reference = d_d_vals
         self.acs = np.asarray([_StubAC(v) for v in d_d_vals], dtype=object)
 
+        # Routing table for the borrowed coordinator (ac_to_split = split_map).
+        self.ac_to_intra = np.empty(num_acs, dtype=np.int32)
+        for split_id, ids in enumerate(self.gpu_splits):
+            self.ac_to_intra[ids] = np.arange(len(ids), dtype=np.int32)
+
+        # Lazy-state attributes the borrowed coordinator reads/writes, then
+        # build the per-split strategies eagerly (mirrors DCGA's auto-build at
+        # construction, incl. the (d|d) snapshot the tests assert on).
+        self._domain_group_kwargs = {}
+        self._cpp_splits = None
+        self._cpp_likelihood_backend = None
+        self._thread_pool = None
+        self._build_cpp_splits()
+
 
 class _StubFDComputationGroup(BaseDomainComputationGroup):
     """NumPy stand-in for ``FDComputationGroup``.
 
     The base-class machinery (``extract_from_acs``,
     ``build_cpp_objects``, ``compute_d_d_term``,
-    ``compute_signal_likelihood``) runs unmodified — only the
+    ``cpp_signal_likelihood``) runs unmodified — only the
     C++-kernel-backed ``compute_signal_likelihood_terms`` is replaced
     with the Python XYZ reference so the tests run on a CPU-only
     install (the merged ``FDComputationGroup`` requires the not-yet-
@@ -245,19 +297,6 @@ class _StubFDComputationGroup(BaseDomainComputationGroup):
         return d_h, h_h
 
 
-class _StubDCGA(DomainComputationGroupArray):
-    """Coordinator wired to the NumPy stub group.
-
-    Only ``computation_group_class`` is overridden; every routing /
-    placement / scatter code path under test is the real library
-    implementation.
-    """
-
-    @property
-    def computation_group_class(self):
-        return _StubFDComputationGroup
-
-
 def _python_log_likelihood(data, invC, template, d_d, df):
     """Per-binary log-likelihood reference (XYZ full-cov, FD)."""
     d_h = _cross_inner(data, template, invC, df)
@@ -269,7 +308,7 @@ def _route_batch(coord, data_index, noise_index, *flat_arrays):
     """Build the per-split routing + ``likelihood_args`` from flat arrays.
 
     Callers who have flat ``(template, start_freqs[, start_times])``
-    tensors use this to reach the merged ``compute_signal_likelihood``
+    tensors use this to reach the merged ``cpp_signal_likelihood``
     signature, which takes the ``unpack_indices`` output plus a
     ``list[tuple]`` of per-split likelihood args.
     """
@@ -288,7 +327,7 @@ class TestRoutingTables(unittest.TestCase):
 
     def test_single_split(self):
         acs = _StubACS(num_acs=3, num_splits=1, num_channels=3, num_freqs=32, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         np.testing.assert_array_equal(coord.ac_to_split, np.zeros(3, dtype=int))
         np.testing.assert_array_equal(coord.ac_to_intra, np.arange(3))
@@ -298,7 +337,7 @@ class TestRoutingTables(unittest.TestCase):
         # 4 ACs split evenly across 2 splits -> split_map = [0,0,1,1],
         # intra indices reset inside each split.
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=32, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         np.testing.assert_array_equal(coord.ac_to_split, np.array([0, 0, 1, 1]))
         np.testing.assert_array_equal(coord.ac_to_intra, np.array([0, 1, 0, 1]))
@@ -325,7 +364,7 @@ class TestUnpackIndices(unittest.TestCase):
 
     def test_flat_routing(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         nwalkers, ntemps = 4, 3
         data_index = self._tempered_index(nwalkers, ntemps)
@@ -357,7 +396,7 @@ class TestUnpackIndices(unittest.TestCase):
     def test_empty_split(self):
         """A split with no matching binaries yields zero-length entries."""
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         # All binaries resolve to AC 0 -> split 0; split 1 must be empty.
         data_index = np.zeros(5, dtype=int)
@@ -382,7 +421,7 @@ class TestComputeDdTerms(unittest.TestCase):
         # The merged coordinator computes (d|d) automatically inside
         # ``initialize_computation_groups`` — no explicit call needed.
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         # Each group holds exactly the d_d values of its own ACs, in
         # intra-split order.
@@ -402,7 +441,7 @@ class TestComputeDdTerms(unittest.TestCase):
         # in split order recovers the global AC order because
         # ``gpu_splits`` are contiguous blocks.
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         d_d_all = coord.compute_d_d_terms(out=True)
         assert isinstance(d_d_all, list)
@@ -415,7 +454,7 @@ class TestComputeDdTerms(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# compute_signal_likelihood
+# cpp_signal_likelihood
 # ---------------------------------------------------------------------------
 
 
@@ -451,7 +490,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
 
     def test_single_split_matches_reference(self):
         acs = _StubACS(num_acs=4, num_splits=1, num_channels=3, num_freqs=64, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         data_index, noise_index, template, start_freqs = self._build_batch(
             acs, nwalkers=4, ntemps=3
@@ -459,7 +498,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         positions, data_intra, noise_intra, likelihood_args = _route_batch(
             coord, data_index, noise_index, template, start_freqs
         )
-        likes = coord.compute_signal_likelihood(
+        likes = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args
         )
         expected = self._reference_likes(acs, data_index, noise_index, template)
@@ -471,7 +510,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         # flat batch puts some binaries on each split; the return must
         # still be in the original flat order.
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=64, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         data_index, noise_index, template, start_freqs = self._build_batch(
             acs, nwalkers=4, ntemps=3
@@ -479,7 +518,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         positions, data_intra, noise_intra, likelihood_args = _route_batch(
             coord, data_index, noise_index, template, start_freqs
         )
-        likes = coord.compute_signal_likelihood(
+        likes = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args
         )
         expected = self._reference_likes(acs, data_index, noise_index, template)
@@ -489,7 +528,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
     def test_empty_split_no_crash(self):
         """All binaries on split 0; split 1 must be skipped, not crash."""
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=64, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         rng = np.random.default_rng(11)
         # AC 0 -> split 0. Every binary lives on split 0.
@@ -508,7 +547,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         # thanks to the ``positions_per_split`` short-circuit.
         assert all(len(a) == 0 for a in likelihood_args[1])
 
-        likes = coord.compute_signal_likelihood(
+        likes = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args
         )
         expected = np.array(
@@ -531,8 +570,8 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         acs1 = _StubACS(num_splits=1, **kwargs)
         acs2 = _StubACS(num_splits=2, **kwargs)
 
-        coord1 = _StubDCGA(acs1)
-        coord2 = _StubDCGA(acs2)
+        coord1 = acs1
+        coord2 = acs2
 
         data_index, noise_index, template, start_freqs = self._build_batch(
             acs1, nwalkers=4, ntemps=3
@@ -540,8 +579,8 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
 
         route1 = _route_batch(coord1, data_index, noise_index, template, start_freqs)
         route2 = _route_batch(coord2, data_index, noise_index, template, start_freqs)
-        likes1 = coord1.compute_signal_likelihood(*route1[:3], route1[3])
-        likes2 = coord2.compute_signal_likelihood(*route2[:3], route2[3])
+        likes1 = coord1.cpp_signal_likelihood(*route1[:3], route1[3])
+        likes2 = coord2.cpp_signal_likelihood(*route2[:3], route2[3])
         np.testing.assert_allclose(likes1, likes2, rtol=1e-12)
 
     def test_run_threaded_matches_serial(self):
@@ -552,7 +591,7 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
         guard: the merged library implements threaded dispatch.)
         """
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=32, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         data_index, noise_index, template, start_freqs = self._build_batch(
             acs, nwalkers=4, ntemps=2
@@ -561,10 +600,10 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
             coord, data_index, noise_index, template, start_freqs
         )
 
-        likes_serial = coord.compute_signal_likelihood(
+        likes_serial = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args, run_threaded=False
         )
-        likes_threaded = coord.compute_signal_likelihood(
+        likes_threaded = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args, run_threaded=True
         )
         np.testing.assert_array_equal(likes_serial, likes_threaded)
@@ -577,12 +616,12 @@ class TestComputeSignalLikelihoodPlacement(unittest.TestCase):
 
 class TestLoopOperationCallable(unittest.TestCase):
     """Bound-method dispatch is covered by compute_d_d_terms /
-    compute_signal_likelihood; here we verify the generic callable path
+    cpp_signal_likelihood; here we verify the generic callable path
     used for external per-device work (waveform generation, etc.)."""
 
     def test_callable_invoked_per_group_with_args(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         calls = []
 
@@ -601,7 +640,7 @@ class TestLoopOperationCallable(unittest.TestCase):
 
     def test_callable_defaults_empty_args_kwargs(self):
         acs = _StubACS(num_acs=6, num_splits=3, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         counter = {"n": 0}
 
@@ -614,7 +653,7 @@ class TestLoopOperationCallable(unittest.TestCase):
 
     def test_args_length_mismatch_raises(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         with self.assertRaisesRegex(ValueError, "must match the number of splits"):
             coord._loop_operation(lambda x: x, operation_args_per_split=[(1,)])
@@ -622,7 +661,7 @@ class TestLoopOperationCallable(unittest.TestCase):
     def test_positions_short_circuit_skips_empty_split(self):
         """Empty splits yield ``None`` and never invoke the operation."""
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         calls = []
 
@@ -661,7 +700,7 @@ class TestUnpackCoords(unittest.TestCase):
 
     def test_single_array_sliced_per_split(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         data_index = np.array([0, 3, 1, 2, 0, 2], dtype=np.int32)
         coords = np.column_stack(
@@ -681,7 +720,7 @@ class TestUnpackCoords(unittest.TestCase):
     def test_tuple_coords_per_split(self):
         """Multi-branch coordinate tuples stay tuples per split."""
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         data_index = np.array([0, 3, 2, 1, 0], dtype=np.int32)
         c0 = np.arange(data_index.shape[0], dtype=np.float64)
@@ -699,7 +738,7 @@ class TestUnpackCoords(unittest.TestCase):
 
     def test_empty_split_yields_empty_tuple(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         data_index = np.zeros(3, dtype=np.int32)  # all on split 0
         coords = np.ones((3, 2), dtype=np.float64)
@@ -712,7 +751,7 @@ class TestUnpackCoords(unittest.TestCase):
 
     def test_keep_tuple_wraps_single_array(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         data_index = np.array([0, 2], dtype=np.int32)
         coords = np.arange(2, dtype=np.float64)
@@ -735,7 +774,7 @@ class TestUnpackCoords(unittest.TestCase):
 class TestPlaceOnDevice(unittest.TestCase):
     def test_cpu_round_trip_arrays_and_tuples(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         arrays_per_split = [np.arange(3, dtype=np.float64), np.arange(2.0)]
         tuples_per_split = [(np.ones(2), np.zeros(2)), ()]
@@ -761,12 +800,12 @@ class TestPlaceOnDevice(unittest.TestCase):
 class TestComposedLikelihoodFromCoords(unittest.TestCase):
     """The pre-merge ``compute_likelihood_from_coords`` convenience was
     removed; callers now compose ``unpack_indices`` + ``unpack_coords``
-    + ``_loop_operation`` + ``compute_signal_likelihood``. Verify the
+    + ``_loop_operation`` + ``cpp_signal_likelihood``. Verify the
     composition end to end against the per-binary reference."""
 
     def test_matches_per_binary_reference(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=64, df=1e-3)
-        coord = _StubDCGA(acs)
+        coord = acs
 
         rng = np.random.default_rng(42)
         data_index = np.array([0, 1, 2, 3, 0, 2], dtype=np.int32)
@@ -795,7 +834,7 @@ class TestComposedLikelihoodFromCoords(unittest.TestCase):
         likelihood_args = [
             out if out is not None else () for out in wf_out_per_split
         ]
-        likes = coord.compute_signal_likelihood(
+        likes = coord.cpp_signal_likelihood(
             positions, data_intra, noise_intra, likelihood_args
         )
 

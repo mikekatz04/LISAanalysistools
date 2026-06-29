@@ -6,6 +6,7 @@ import math
 import warnings
 from abc import ABC
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -1504,10 +1505,11 @@ class AnalysisContainerArray:
             the containers into this many CPU splits through the **same**
             split structure used for GPUs (``gpu_splits`` / ``split_map`` /
             per-split linear buffers). One thread per split is then driven by
-            :class:`~lisatools.domaincomputation.DomainComputationGroupArray`
+            the ACA's own per-split C++ likelihood coordinator (the
+            :attr:`cpp_splits` strategies + :meth:`cpp_signal_likelihood`)
             with ``run_threaded=True`` exactly as in the multi-GPU case (each
-            split's computation group holds its own workspaces, so threads
-            never share scratch buffers). Threads pay off where the per-split
+            split's strategy holds its own workspaces, so threads never share
+            scratch buffers). Threads pay off where the per-split
             work releases the GIL (numpy/BLAS/FFT on large arrays, JAX-CPU,
             GIL-releasing C++ kernels); pin ``OMP_NUM_THREADS`` /
             ``OPENBLAS_NUM_THREADS`` so ``n_splits * blas_threads`` does not
@@ -1519,6 +1521,13 @@ class AnalysisContainerArray:
             concurrently, one thread per split (GPU splits each enter their
             own device context; CPU splits rely on GIL-releasing work). The
             default ``False`` preserves the serial per-split loops.
+        domain_group_kwargs: Kwargs forwarded to the ACA's per-split C++
+            likelihood strategies (e.g. ``tdi_type`` for all domains, and
+            STFT's ``window_alpha`` / ``use_midpoint``). Drives
+            :meth:`cpp_template_likelihood` via the lazily-built per-split
+            strategies (:attr:`cpp_splits`). May also be set later through the
+            :attr:`domain_group_kwargs` property (which invalidates the cached
+            strategies).
 
     """
 
@@ -1535,9 +1544,20 @@ class AnalysisContainerArray:
         gpu_assignment: Optional[np.ndarray] = None,
         n_splits: Optional[int] = None,
         run_threaded: bool = False,
+        domain_group_kwargs: Optional[dict] = None,
     ) -> None:
         self.run_threaded = bool(run_threaded)
         self._thread_pool = None
+
+        # Lazily-built per-split C++ likelihood state. ``_cpp_splits`` are the
+        # per-split strategy workspaces (built on first access to
+        # :attr:`cpp_splits`; deferred past ``__init__`` because they read the
+        # per-split linear buffers populated at the end of construction).
+        # ``_cpp_likelihood_backend`` caches the deprecated
+        # ``DomainComputationGroupArray`` compat shim.
+        self._domain_group_kwargs = dict(domain_group_kwargs) if domain_group_kwargs else {}
+        self._cpp_splits = None             # per-split C++ strategy workspaces
+        self._cpp_likelihood_backend = None  # cached deprecated DCGA shim
 
         if isinstance(analysis_containers, AnalysisContainer):
             acs = np.array([analysis_containers], dtype=object)
@@ -1648,7 +1668,7 @@ class AnalysisContainerArray:
         else:
             # CPU-thread splits (no GPUs): ``n_splits`` shards the containers
             # through the same split structure as multi-GPU, one thread per
-            # split downstream (DCGA run_threaded). With GPUs, the split
+            # split downstream (ACA run_threaded). With GPUs, the split
             # count is always len(gpus). (Arg validation happens above,
             # before any device work.)
             num_machines = (
@@ -1697,6 +1717,13 @@ class AnalysisContainerArray:
                     )
                 )
             self.split_map[split] = i
+
+        # Routing table for the C++ likelihood coordinator: global AC id ->
+        # intra-split index (what the per-split strategies expect for
+        # data_index / noise_index). ``ac_to_split`` is ``split_map``.
+        self.ac_to_intra = np.empty(self.acs_total_entries, dtype=np.int32)
+        for split_id, ids in enumerate(gpu_splits):
+            self.ac_to_intra[ids] = np.arange(len(ids), dtype=np.int32)
 
         self.num_acs = len(acs.flatten())
         self.reset_linear_data_arr()
@@ -2058,6 +2085,421 @@ class AnalysisContainerArray:
             )
         return self._thread_pool
 
+    # ------------------------------------------------------------------
+    # C++ likelihood coordinator (absorbed from DomainComputationGroupArray)
+    # ------------------------------------------------------------------
+    # ACA owns the per-split C++ strategy workspaces (the STFT/FD/WDM
+    # *ComputationGroup objects) and the batched multi-split orchestration
+    # directly. The legacy ``DomainComputationGroupArray`` is now only a
+    # deprecated thin alias (kept for external settings files that still
+    # construct it). The same C++ kernels run on CPU (host compiler) and GPU
+    # (``nvcc``) — the "cpp" fast path, distinct from the slow per-AC
+    # ``diagnostic`` path behind ``calculate_signal_likelihood`` /
+    # ``template_likelihood`` (which stays as the general + validation path).
+
+    @property
+    def num_splits(self) -> int:
+        return len(self.gpu_splits)
+
+    @property
+    def ac_to_split(self) -> np.ndarray:
+        """Global AC id -> owning split index (alias of ``split_map``)."""
+        return self.split_map
+
+    @property
+    def domain_group_kwargs(self) -> dict:
+        """Kwargs forwarded to the per-split C++ strategies (e.g. ``tdi_type``,
+        and STFT's ``window_alpha`` / ``use_midpoint``). Reassigning rebuilds
+        the strategies on next access."""
+        return self._domain_group_kwargs
+
+    @domain_group_kwargs.setter
+    def domain_group_kwargs(self, value: Optional[dict]) -> None:
+        self._domain_group_kwargs = dict(value) if value else {}
+        self._cpp_splits = None              # force strategy rebuild
+        self._cpp_likelihood_backend = None  # and drop the shim cache
+
+    def _cpp_strategy_class(self):
+        """Per-domain strategy class paired with ``settings`` (isinstance
+        dispatch — never a string flag)."""
+        # Deferred import: ``domaincomputation`` imports this module only under
+        # TYPE_CHECKING, so importing here keeps the runtime graph acyclic.
+        from .domaincomputation import (
+            STFTComputationGroup,
+            FDComputationGroup,
+            WDMComputationGroup,
+        )
+
+        if isinstance(self.settings, domains.STFTSettings):
+            return STFTComputationGroup
+        if isinstance(self.settings, domains.FDSettings):
+            return FDComputationGroup
+        if isinstance(self.settings, domains.WDMSettings):
+            return WDMComputationGroup
+        raise NotImplementedError(
+            f"Unsupported domain settings type {type(self.settings).__name__} "
+            f"for the C++ likelihood coordinator."
+        )
+
+    def _build_cpp_splits(self) -> None:
+        """Build the per-split C++ strategy workspaces and snapshot ``(d|d)``.
+
+        Deferred to first access (never in ``__init__``): each strategy
+        precomputes ``(d|d)`` from each AC's ``inner_product()`` off the
+        per-split ``linear_*_arr`` buffers, which are only populated at the end
+        of ``__init__`` (``reset_linear_*_arr``).
+        """
+        force_backend = "cpu" if self.gpus is None else "gpu"
+        cls = self._cpp_strategy_class()
+        splits = []
+        for split_index in range(self.num_splits):
+            device = self.gpus[split_index] if self.gpus is not None else None
+            with self.device_context(device):
+                splits.append(
+                    cls(
+                        acs=self,
+                        split_index=split_index,
+                        force_backend=force_backend,
+                        **self._domain_group_kwargs,
+                    )
+                )
+        self._cpp_splits = splits
+        self.compute_d_d_terms()
+
+    def _ensure_cpp_splits(self) -> None:
+        if self._cpp_splits is None:
+            self._build_cpp_splits()
+
+    @property
+    def cpp_splits(self) -> list:
+        """The per-split C++ strategy workspaces (lazily built)."""
+        self._ensure_cpp_splits()
+        return self._cpp_splits
+
+    def cpp_split(self, i: int):
+        """The C++ strategy workspace for split ``i`` (exposes ``.orbits`` /
+        ``.sensitivity_backend`` / ``.cpp_domain``)."""
+        return self.cpp_splits[i]
+
+    @property
+    def cpp_likelihood_backend(self) -> "DomainComputationGroupArray":
+        """Deprecated-compat handle: a thin ``DomainComputationGroupArray``
+        shim forwarding to this ACA. Prefer the ACA methods directly
+        (:meth:`cpp_template_likelihood`, :meth:`cpp_signal_likelihood`,
+        :attr:`cpp_splits`)."""
+        self._ensure_cpp_splits()
+        if self._cpp_likelihood_backend is None:
+            from .domaincomputation import DomainComputationGroupArray
+
+            self._cpp_likelihood_backend = DomainComputationGroupArray(self, _internal=True)
+        return self._cpp_likelihood_backend
+
+    @property
+    def domain_computation_group(self) -> "DomainComputationGroupArray":
+        """Alias for :attr:`cpp_likelihood_backend`."""
+        return self.cpp_likelihood_backend
+
+    def refresh_cpp_dd(self, **kwargs) -> None:
+        """Recompute the cached ``(d|d)`` per split after mutating residuals
+        (e.g. :meth:`signal_operation`). No-op if the strategies are not built
+        yet. ``kwargs`` are forwarded to each container's ``inner_product``."""
+        if self._cpp_splits is not None:
+            self.compute_d_d_terms(**kwargs)
+
+    # ---- device / memory helpers (moved from DomainComputationGroupArray) ----
+
+    @contextmanager
+    def device_context(self, device: int = None):
+        """Set the device context for a split: a specific GPU, or CPU (which
+        also pins JAX's default device)."""
+        if device is None or self.gpus is None:
+            import jax  # lazy: keep ``import lisatools.analysiscontainer`` jax-free
+
+            with jax.default_device(jax.devices("cpu")[0]):
+                yield "cpu"
+        else:
+            with self.xp.cuda.Device(device):
+                yield f"gpu: {device}"
+
+    def free_gpu_memory(self) -> None:
+        """Free the cupy default memory pool on every GPU split."""
+        if self.gpus is not None:
+            for device in self.gpus:
+                with self.device_context(device):
+                    self.xp.get_default_memory_pool().free_all_blocks()
+
+    def _to_host(self, arr) -> np.ndarray:
+        """Move an array to host numpy (no-op if already numpy)."""
+        return arr.get() if hasattr(arr, "get") else arr
+
+    # ---- routing / scatter (moved from DomainComputationGroupArray) ----
+
+    def unpack_indices(self, data_index, noise_index=None):
+        """Partition a flat ``(data_index, noise_index)`` batch by split.
+
+        Returns three parallel lists of length ``num_splits``:
+        ``positions_per_split`` (flat-batch positions per split; empty arrays
+        for splits with no matching ACs), ``data_intra_per_split`` and
+        ``noise_intra_per_split`` (intra-split AC ids). Single owner of the
+        partition — downstream routines share its output."""
+        data_index_cpu = self._to_host(data_index)
+        noise_index_cpu = (
+            self._to_host(noise_index) if noise_index is not None else data_index_cpu
+        )
+
+        split_of_each = self.ac_to_split[data_index_cpu]
+
+        positions_per_split: list = []
+        data_intra_per_split: list = []
+        noise_intra_per_split: list = []
+        for split_id in range(self.num_splits):
+            positions = np.where(split_of_each == split_id)[0]
+            positions_per_split.append(positions)
+            data_intra_per_split.append(self.ac_to_intra[data_index_cpu[positions]])
+            noise_intra_per_split.append(self.ac_to_intra[noise_index_cpu[positions]])
+
+        return positions_per_split, data_intra_per_split, noise_intra_per_split
+
+    def unpack_coords(self, positions_per_split, coords, keep_tuple=False):
+        """Slice flat coordinate array(s) per split (Fortran-ordered host
+        copies); returns ``()`` for empty splits. ``keep_tuple`` wraps the
+        single-array case in a 1-tuple."""
+        if not isinstance(coords, tuple):
+            coords = (coords,)
+
+        coords_host = tuple(self._to_host(coords_here) for coords_here in coords)
+
+        args_per_group: list = []
+        for positions in positions_per_split:
+            if len(positions) > 0:
+                coords_s = [
+                    np.asfortranarray(coords_host[i][positions])
+                    for i in range(len(coords_host))
+                ]
+                args_per_group.append(
+                    tuple(coords_s) if len(coords_s) > 1 or keep_tuple else coords_s[0]
+                )
+            else:
+                args_per_group.append(())
+
+        return args_per_group
+
+    def place_on_device(self, items):
+        """Place a tuple of per-split array/tuple lists on each split's device
+        (``self.xp.asarray(copy=True)``); empty tuples pass through."""
+        num_items = len(items)
+        device_items: list = [[] for _ in range(num_items)]
+
+        for i, device in enumerate(
+            self.gpus if self.gpus is not None else [None] * self.num_splits
+        ):
+            with self.device_context(device):
+                for item_id, item_per_split in enumerate(items):
+                    entry = item_per_split[i]
+                    if isinstance(entry, np.ndarray):
+                        device_items[item_id].append(self.xp.asarray(entry, copy=True))
+                    elif isinstance(entry, tuple):
+                        if len(entry) == 0:
+                            device_items[item_id].append(())
+                        else:
+                            device_items[item_id].append(
+                                tuple(self.xp.asarray(arr, copy=True) for arr in entry)
+                            )
+                    else:
+                        raise ValueError(
+                            "Each entry in items must be either a numpy array or a "
+                            "tuple of numpy arrays."
+                        )
+        return tuple(device_items)
+
+    def _loop_operation(
+        self,
+        operation,
+        operation_args_per_split=None,
+        operation_kwargs=None,
+        aggregate_fn=None,
+        positions_per_split=None,
+        run_threaded=False,
+    ):
+        """General per-split dispatch (return-collecting; visits all splits;
+        empty splits short-circuit to ``None`` via ``positions_per_split``).
+
+        Distinct from :meth:`_run_per_split` (worker+rows, populated-only,
+        writes into a shared results buffer) used by the slow vectorized path.
+        ``operation`` may be a single callable or one per split; results are
+        index-aligned to splits, optionally reduced by ``aggregate_fn``."""
+        if operation_args_per_split is None:
+            operation_args_per_split = [()] * self.num_splits
+        if operation_kwargs is None:
+            operation_kwargs = {}
+
+        if len(operation_args_per_split) != self.num_splits:
+            raise ValueError(
+                "Length of operation_args_per_split must match the number of splits."
+            )
+
+        if isinstance(operation, list):
+            if len(operation) != self.num_splits:
+                raise ValueError(
+                    "If operation is a list, its length must match the number of splits."
+                )
+            operations = operation
+        else:
+            operations = [operation] * self.num_splits
+
+        if isinstance(operation_kwargs, list):
+            if len(operation_kwargs) != self.num_splits:
+                raise ValueError(
+                    "If operation_kwargs is a list, its length must match the number of splits."
+                )
+            operation_kwargs_per_split = operation_kwargs
+        else:
+            operation_kwargs_per_split = [operation_kwargs] * self.num_splits
+
+        devices = self.gpus if self.gpus is not None else [None] * self.num_splits
+
+        def _run_split_operation(i, device):
+            if positions_per_split is not None and len(positions_per_split[i]) == 0:
+                return None
+            with self.device_context(device):
+                return operations[i](
+                    *operation_args_per_split[i], **operation_kwargs_per_split[i]
+                )
+
+        if run_threaded:
+            futures = [
+                self.thread_pool.submit(_run_split_operation, i, device)
+                for i, device in enumerate(devices)
+            ]
+            outputs = [future.result() for future in futures]
+        else:
+            outputs = []
+            for i, device in enumerate(devices):
+                outputs.append(_run_split_operation(i, device))
+
+        if aggregate_fn is not None:
+            return aggregate_fn(outputs)
+        return outputs
+
+    # ---- batched likelihood orchestration (moved from DCGA) ----
+
+    def compute_d_d_terms(self, out: bool = False, **kwargs):
+        """Compute ``(d|d)`` for all splits, storing it on each strategy."""
+        self._ensure_cpp_splits()
+        operations = [s.compute_d_d_term for s in self._cpp_splits]
+        list_out = self._loop_operation(
+            operation=operations, operation_kwargs={"out": out, **kwargs}
+        )
+        if out:
+            return list_out
+
+    def compute_noise_terms(self, out: bool = False, **kwargs):
+        """Compute the noise log-likelihood term for all splits."""
+        self._ensure_cpp_splits()
+        operations = [s.compute_noise_term for s in self._cpp_splits]
+        list_out = self._loop_operation(
+            operation=operations, operation_kwargs={"out": out, **kwargs}
+        )
+        if out:
+            return list_out
+
+    def _compute_group_likelihood(
+        self,
+        positions_per_split,
+        data_intra_per_split,
+        noise_intra_per_split,
+        operations,
+        likelihood_args_per_split,
+        likelihood_kwargs=None,
+        run_threaded=False,
+    ):
+        """Run per-split likelihood ``operations`` and scatter the results back
+        into a single flat ``(N,)`` host array in original input order."""
+        operation_args_per_split = []
+        for split_id in range(self.num_splits):
+            likelihood_args = likelihood_args_per_split[split_id]
+            args_i = (
+                data_intra_per_split[split_id],
+                noise_intra_per_split[split_id],
+                *(likelihood_args if likelihood_args is not None else ()),
+            )
+            operation_args_per_split.append(args_i)
+
+        all_logls = self._loop_operation(
+            operation=operations,
+            operation_args_per_split=operation_args_per_split,
+            operation_kwargs=likelihood_kwargs,
+            positions_per_split=positions_per_split,
+            run_threaded=run_threaded,
+        )
+
+        self.synchronize()
+        n_data = sum(len(p) for p in positions_per_split)
+
+        output = np.full(n_data, -1e300, dtype=np.float64)
+        for split_id, positions in enumerate(positions_per_split):
+            if len(positions) > 0:
+                output[positions] = self._to_host(all_logls[split_id])
+
+        if np.any(output == -1e300):
+            logger.warning(
+                "Some positions were not filled in the output array. This may "
+                "indicate an issue with the likelihood computation or aggregation."
+            )
+        return output
+
+    def cpp_psd_likelihood(
+        self,
+        positions_per_split,
+        data_intra_per_split,
+        noise_intra_per_split,
+        likelihood_args_per_split,
+        likelihood_kwargs=None,
+        run_threaded=False,
+    ):
+        """Batched PSD likelihood across splits (aggregated ``(N,)`` host).
+
+        The ``cpp_`` prefix marks this as the fast C++ batched-kernel path
+        (as opposed to the diagnostic ``likelihood`` family); it is the
+        PSD likelihood driven by the PSD proposal."""
+        self._ensure_cpp_splits()
+        operations = [s.compute_psd_likelihood for s in self._cpp_splits]
+        return self._compute_group_likelihood(
+            positions_per_split,
+            data_intra_per_split,
+            noise_intra_per_split,
+            operations,
+            likelihood_args_per_split,
+            likelihood_kwargs=likelihood_kwargs,
+            run_threaded=run_threaded,
+        )
+
+    def cpp_signal_likelihood(
+        self,
+        positions_per_split,
+        data_intra_per_split,
+        noise_intra_per_split,
+        likelihood_args_per_split,
+        likelihood_kwargs=None,
+        run_threaded=False,
+    ):
+        """Batched signal likelihood across splits (aggregated ``(N,)`` host).
+
+        The ``cpp_`` prefix marks this as the fast C++ batched-kernel path.
+        This is the per-split-routed core; :meth:`cpp_template_likelihood` is
+        the flat-batch entry point that scatters templates into it."""
+        self._ensure_cpp_splits()
+        operations = [s.compute_signal_likelihood for s in self._cpp_splits]
+        return self._compute_group_likelihood(
+            positions_per_split,
+            data_intra_per_split,
+            noise_intra_per_split,
+            operations,
+            likelihood_args_per_split,
+            likelihood_kwargs=likelihood_kwargs,
+            run_threaded=run_threaded,
+        )
+
     def _split_rows(self, index_arr: np.ndarray) -> dict:
         """Group flat row positions by owning split: ``{split: rows}``."""
         split_per_row = self.split_map[np.asarray(index_arr, dtype=int)]
@@ -2208,6 +2650,98 @@ class AnalysisContainerArray:
             payload=template,
             index=index,
             op_kwargs=kwargs,
+        )
+
+    def cpp_template_likelihood(
+        self,
+        data_index,
+        template_vals,
+        start_freqs,
+        start_times=None,
+        noise_index=None,
+        run_threaded=None,
+        run_async: bool = False,
+    ) -> np.ndarray:
+        r"""Fast batched signal log-likelihood from pre-generated templates,
+        via the owned C++ backend.
+
+        Drives the multi-split propagation through
+        :attr:`cpp_likelihood_backend` (a ``DomainComputationGroupArray``),
+        evaluating
+
+        .. math:: -\tfrac{1}{2}\,\bigl((d|d) + (h|h) - 2\,\mathrm{Re}(d|h)\bigr)
+
+        for a **flat** batch of pre-generated templates, with the fast C++
+        kernels (``compute_likelihood_terms``) instead of the slow per-AC
+        ``diagnostic`` path used by :meth:`calculate_signal_likelihood` /
+        :meth:`template_likelihood` (which remains the general + validation
+        reference).
+
+        Args:
+            data_index: int array ``(N,)``. Global AC id (equivalently walker
+                id) targeted by each template row.
+            template_vals: template array, leading axis ``N``:
+                ``(N, nchannels, n_t, n_f)`` for STFT,
+                ``(N, nchannels, n_f)`` for FD,
+                ``(N, nchannels, n_m, n_n)`` for WDM. Coerced to
+                :attr:`data_dtype` (``float`` for WDM, ``complex`` otherwise) —
+                the STFT/FD kernels do not coerce, so a wrong-width dtype would
+                silently corrupt; the coercion here is required.
+            start_freqs: float array ``(N,)``. Physical start frequency of each
+                template sub-grid.
+            start_times: float array ``(N,)``. Required for STFT/WDM; unused for
+                FD (pass ``None``).
+            noise_index: int array ``(N,)``; defaults to ``data_index``.
+            run_threaded: per-split threaded dispatch; defaults to
+                :attr:`run_threaded`.
+            run_async: forwarded into the kernel (GPU async alloc/free; no-op on
+                CPU).
+
+        Returns:
+            ``np.ndarray`` of shape ``(N,)`` (host), per-binary log-likelihoods
+            in the original flat input order.
+
+        Notes:
+            ``(d|h)`` / ``(h|h)`` are recomputed every call from the live
+            per-split residual buffers, but ``(d|d)`` is cached at backend
+            build time. After mutating residuals call
+            :meth:`refresh_cpp_dd` before relying on the result.
+        """
+        if run_threaded is None:
+            run_threaded = self.run_threaded
+
+        self._ensure_cpp_splits()
+
+        template_vals = self.xp.asarray(template_vals, dtype=self.data_dtype)
+        start_freqs = self.xp.asarray(start_freqs, dtype=self.xp.float64)
+        if start_times is not None:
+            start_times = self.xp.asarray(start_times, dtype=self.xp.float64)
+
+        # 1) partition the flat batch by owning split (single owner of the
+        #    partition; ``noise_index=None`` -> ``data_index`` inside).
+        positions, data_intra, noise_intra = self.unpack_indices(data_index, noise_index)
+
+        # 2) scatter templates / start_freqs [/ start_times] per split, in the
+        #    positional order ``compute_signal_likelihood_terms`` expects.
+        if start_times is None:
+            coords = (template_vals, start_freqs)
+        else:
+            coords = (template_vals, start_freqs, start_times)
+        coords_per_split = self.unpack_coords(positions, coords, keep_tuple=True)
+
+        # 3) place intra-indices + scattered coords on each split's device.
+        data_intra, noise_intra, coords_per_split = self.place_on_device(
+            (data_intra, noise_intra, coords_per_split)
+        )
+
+        # 4) batched (d|h)/(h|h) kernels + cached (d|d) -> aggregated (N,) host.
+        return self.cpp_signal_likelihood(
+            positions_per_split=positions,
+            data_intra_per_split=data_intra,
+            noise_intra_per_split=noise_intra,
+            likelihood_args_per_split=coords_per_split,
+            likelihood_kwargs={"run_async": run_async},
+            run_threaded=run_threaded,
         )
 
     def __getitem__(self, index: Any) -> np.ndarray[AnalysisContainer]:

@@ -83,7 +83,10 @@ class TestBatchedResponse(unittest.TestCase):
         ]
         cls.all_pols = np.asarray(pols)  # (nsky, num_time_samples)
 
-        orbits = EqualArmlengthOrbits()
+        # Force orbits onto the same (CPU) backend as the response. Without this,
+        # ``EqualArmlengthOrbits()`` defaults to the first available backend (the
+        # GPU on a CUDA box), tripping the ``tdi_orbits`` backend-match assertion.
+        orbits = EqualArmlengthOrbits(force_backend="cpu")
         orbits.configure(linear_interp_setup=True)
         cls.orbits = orbits
 
@@ -125,6 +128,31 @@ class TestBatchedResponse(unittest.TestCase):
             resp_s = self._make_response()
             resp_s.get_projections(
                 self.all_pols[b], _LAMBDAS[b], _BETAS[b], t_buffer=_T_BUFFER
+            )
+            A_s, E_s, T_s = resp_s.get_tdi_delays()
+            np.testing.assert_array_equal(np.asarray(A_b[b]), np.asarray(A_s))
+            np.testing.assert_array_equal(np.asarray(E_b[b]), np.asarray(E_s))
+            np.testing.assert_array_equal(np.asarray(T_b[b]), np.asarray(T_s))
+
+    def test_batched_heterogeneous_shift_equals_per_source(self):
+        """Per-source sub-sample shift (the batched-shift native param). A batch
+        with DISTINCT ``t0_shift_to_data`` per source must equal looping each
+        source with its own scalar shift, bit-for-bit (same kernel, per-source
+        ``batch_ind``). Guards the former B>=2 broadcast crash at
+        ``get_projections`` (``arange(N)*dt + (B,)`` shift array)."""
+        shifts = np.array([0.3, -1.7])  # distinct, |.| < _DT
+        t0s = np.array([0.0, 0.0])
+        resp_b = self._make_response()
+        resp_b.get_projections(
+            self.all_pols, _LAMBDAS, _BETAS,
+            t0_shift_to_data=shifts, t0=t0s, t_buffer=_T_BUFFER,
+        )
+        A_b, E_b, T_b = resp_b.get_tdi_delays()
+        for b in range(len(_SKY)):
+            resp_s = self._make_response()
+            resp_s.get_projections(
+                self.all_pols[b], _LAMBDAS[b], _BETAS[b],
+                t0_shift_to_data=float(shifts[b]), t0=float(t0s[b]), t_buffer=_T_BUFFER,
             )
             A_s, E_s, T_s = resp_s.get_tdi_delays()
             np.testing.assert_array_equal(np.asarray(A_b[b]), np.asarray(A_s))
