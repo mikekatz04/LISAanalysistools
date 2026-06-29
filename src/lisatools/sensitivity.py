@@ -1853,8 +1853,15 @@ def get_sensitivity(
     elif isinstance(basis_settings, domains.TDSettings):
         raise NotImplementedError
     elif isinstance(basis_settings, domains.STFTSettings):
-        raise NotImplementedError
-        PSD = sensitivity.get_Sn(basis_settings.f_arr, *args, **kwargs)
+        # Stationary-noise STFT PSD: evaluate the Fourier-domain PSD on the
+        # active frequency bins (shape (NF_active,)) exactly as the FD branch
+        # does, then replicate it across every STFT time segment so the result
+        # matches basis_shape_active == (NT, NF_active). The noise is assumed
+        # the same at each time bin; a time-varying STFT PSD would instead
+        # supply a per-segment spectrum here.
+        xp = get_array_module(basis_settings.f_arr)
+        psd_f = sensitivity.get_Sn(basis_settings.f_arr, *args, **kwargs)
+        PSD = xp.repeat(xp.asarray(psd_f)[None, :], basis_settings.NT, axis=0)
     elif isinstance(basis_settings, domains.WDMSettings):
         if kwargs_list is None:
             kwargs_list = [kwargs for _ in range(basis_settings.Nt)]
