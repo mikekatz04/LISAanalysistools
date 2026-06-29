@@ -177,13 +177,13 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
             all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
             inds = all_inds % self.nsplits
             if self.randomize_split:
-                if self.dcga.gpus is None:
+                if self.acs.gpus is None:
                     [np.random.shuffle(x) for x in inds]
                 
                 else:
-                    num_per_gpu = self.nwalkers // len(self.dcga.gpus)
+                    num_per_gpu = self.nwalkers // len(self.acs.gpus)
                     for row in inds:
-                        for gpu in self.dcga.gpus:
+                        for gpu in self.acs.gpus:
                             start = gpu * num_per_gpu
                             end = (gpu + 1) * num_per_gpu
                             np.random.shuffle(row[start:end])
