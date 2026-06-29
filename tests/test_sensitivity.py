@@ -33,7 +33,7 @@ from lisatools.sensitivity import (
     T2TDISens,
 )
 from lisatools.stochastic import PowerLawSGWB
-from lisatools.domains import FDSettings
+from lisatools.domains import FDSettings, STFTSettings
 from lisatools.utils.constants import *
 from lisatools import detector as lisa
 
@@ -51,6 +51,16 @@ class SensitivityTest(unittest.TestCase):
             force_backend=force_backend,
         )
 
+    def _make_stft_settings(self, NT=8):
+        """STFT grid over the same LISA band as ``_make_fd_settings`` with ``NT`` time segments."""
+        force_backend = "gpu" if gpu_available else "cpu"
+        # Same df / band as the FD helper so the per-frequency PSD matches.
+        return STFTSettings(
+            t0=0.0, dt=86400.0, df=1e-4, NT=NT, NF=10001,
+            min_freq=1e-4, max_freq=1.0,
+            force_backend=force_backend,
+        )
+
     def test_get_sen(self):
         """Verify :func:`get_sensitivity` returns finite values for the X1 TDI PSD."""
         xp = cp if gpu_available else np
@@ -58,6 +68,29 @@ class SensitivityTest(unittest.TestCase):
         Sn = get_sensitivity(self._make_fd_settings(), sens_fn="X1TDISens", model=lisa.sangria)
 
         self.assertFalse(xp.any(xp.isnan(Sn)))
+
+    def test_get_sen_stft(self):
+        """STFT PSD replicates the FD PSD across every time segment.
+
+        With the stationary-noise assumption, :func:`get_sensitivity` on an
+        ``STFTSettings`` should return shape ``(NT, NF_active)`` where every row
+        equals the FD PSD evaluated on the same active frequency bins.
+        """
+        xp = cp if gpu_available else np
+
+        stft_settings = self._make_stft_settings(NT=8)
+        Sn_stft = get_sensitivity(stft_settings, sens_fn="X1TDISens", model=lisa.sangria)
+
+        # Shape must match basis_shape_active == (NT, NF_active).
+        self.assertEqual(Sn_stft.shape, stft_settings.basis_shape_active)
+        self.assertFalse(xp.any(xp.isnan(Sn_stft)))
+
+        # The per-frequency reference: get_Sn on the same active frequency bins.
+        Sn_ref = get_sensitivity(self._make_fd_settings(), sens_fn="X1TDISens", model=lisa.sangria)
+        # FD active band is [1e-4, 1.0] -> identical f_arr to the STFT band.
+        xp.testing.assert_array_equal(stft_settings.f_arr, self._make_fd_settings().f_arr)
+        for it in range(stft_settings.NT):
+            xp.testing.assert_array_equal(Sn_stft[it], Sn_ref)
 
     def _test_sens_mat(self, sens_mat_class, model):
         """Construct ``sens_mat_class`` over a uniform LISA-band grid for ``model``."""
@@ -93,6 +126,30 @@ class SensitivityTest(unittest.TestCase):
     def test_sensitivity_matrix_AE2(self):
         """Build an :class:`AE2SensitivityMatrix` for the ``sangria_v2`` noise model."""
         self._test_sens_mat(AE2SensitivityMatrix, lisa.sangria_v2)
+
+    def test_sensitivity_matrix_XYZ1_stft(self):
+        """Build an :class:`XYZ1SensitivityMatrix` on an STFT basis.
+
+        The matrix must carry shape ``(3, 3, NT, NF_active)``, be finite, have
+        a computable inverse/determinant, and — because the STFT PSD replicates
+        the frequency-domain PSD across time — every time segment must equal the
+        FD sensitivity matrix on the same active band.
+        """
+        NT = 5
+        stft = self._make_stft_settings(NT=NT)
+        Sn = XYZ1SensitivityMatrix(stft, model=lisa.sangria)
+
+        stft_mat = np.asarray(Sn.sens_mat)
+        self.assertEqual(stft_mat.shape, (3, 3, NT, stft.NF_active))
+        self.assertFalse(np.any(np.isnan(stft_mat)))
+        # Lazy inverse / determinant must compute on the (NT, NF_active) grid.
+        self.assertEqual(np.asarray(Sn.invC).shape, (3, 3, NT, stft.NF_active))
+        self.assertEqual(np.asarray(Sn.detC).shape, (NT, stft.NF_active))
+
+        # Each STFT time segment equals the FD matrix on the matching band.
+        fd_mat = np.asarray(XYZ1SensitivityMatrix(self._make_fd_settings(), model=lisa.sangria).sens_mat)
+        for it in range(NT):
+            np.testing.assert_array_equal(stft_mat[:, :, it, :], fd_mat)
 
 
 class SensitivityMatrixArithmeticTest(unittest.TestCase):
