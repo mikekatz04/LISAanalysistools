@@ -67,7 +67,18 @@ class LISAResponse{
                   int num_delays,
                   cmplx* input_in_, int num_inputs, int order,
                   double sampling_frequency, int buffer_integer,
-                  double *A_in_, double deps, int num_A, double *E_in_, int projections_start_ind, double *t0_arr_, int batch_size = 1, bool run_async = false);
+                  double *A_in_, double deps, int num_A, double *E_in_, int projections_start_ind, double *t0_arr_, double *t0_shift_arr_, int batch_size = 1, bool run_async = false);
+
+    // Quintic-spline projection variant (Lagrange replaced by a precomputed
+    // degree-5 spline for the waveform interpolation). c{1..5}r / c{1..5}i are the
+    // real/imag per-segment power-basis coefficients (flat, interp-major, length
+    // num_inputs per source); input_in_ supplies y0. See response_quintic kernel.
+    void get_response_quintic(double *y_gw_, double *t_data_, double *k_in_, double *u_in_, double *v_in_, double dt,
+                  int num_delays,
+                  cmplx* input_in_, int num_inputs, double sampling_frequency,
+                  double *c1r_, double *c2r_, double *c3r_, double *c4r_, double *c5r_,
+                  double *c1i_, double *c2i_, double *c3i_, double *c4i_, double *c5i_,
+                  int projections_start_ind, int spline_type, double *t0_arr_, double *t0_shift_arr_, int batch_size = 1, bool run_async = false);
 };
 
 #endif // __LISA_RESPONSE__
