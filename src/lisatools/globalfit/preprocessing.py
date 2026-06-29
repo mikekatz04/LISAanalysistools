@@ -138,7 +138,7 @@ class L1DataLoader:
         return {
             "GB": "wdwd_cat_mojito_lite_processed.hdf5",
             "VGB": "vgb_cat_mojito_lite_processed.hdf5",
-            "MBHB": "mbhb_cat_mojito_lite_processed_MT.hdf5",
+            "MBHB": "mbhb_cat_mojito_lite_processed_MT_rounding_fixed.hdf5",
             "EMRI": "emri_cat_mojito_lite_processed_MT.hdf5",
             "SOBHB": "sobhb_cat_mojito_lite_processed_MT.hdf5",
         }
