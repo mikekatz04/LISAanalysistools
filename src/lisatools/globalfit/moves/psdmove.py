@@ -573,7 +573,7 @@ class PSDMove(GlobalFitMove, StretchMove):
 class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
     def __init__(
         self,
-        dcga: DomainComputationGroupArray,
+        dcga: AnalysisContainerArray | DomainComputationGroupArray,
         priors,
         *args,
         num_repeats: int = 1,
@@ -592,7 +592,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         # Resolve the real ACA (tolerate an ACA or a deprecated DCGA shim at the
         # constructor boundary) and ensure its per-split cpp strategies exist so
         # split 0's sensitivity backend is available below.
-        acs = dcga.acs if hasattr(dcga, "acs") else dcga
+        acs = dcga.acs if (hasattr(dcga, "acs") and isinstance(dcga.acs, AnalysisContainerArray)) else dcga
         acs._ensure_cpp_splits()
 
         PSDMove.__init__(
@@ -612,7 +612,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         )
         MultiGPUMoveBase.__init__(
             self,
-            dcga,
+            acs=acs,
             run_async=run_async,
             run_threaded=run_threaded,
             batch_size_per_gpu=batch_size_per_gpu,

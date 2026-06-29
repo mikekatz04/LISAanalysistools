@@ -348,29 +348,33 @@ class GlobalFit:
             if "emri" in inds:
                 inds["emri"][:] = True
                 self.logger.debug("initializing emri inds to true")
+                if (
+                    "emri" in self.curr.source_info
+                    and self.curr.source_info["emri"].injection is not None
+                ):
+                    
+                    self.logger.debug("override emri starting coords to be close to the injection")
+                    factor = 0.0
 
-                self.logger.debug("override emri starting coords to be close to the injection")
-                factor = 0.0
-
-                # Multi-leaf safe: accepts either a flat ``(ndim,)`` injection
-                # (broadcast across all leaves) or a per-leaf ``(nleaves, ndim)``
-                # injection. The trailing axis is always ``ndim`` so the
-                # randn matches the engine's ``(ntemps, nwalkers, nleaves, ndim)``
-                # coord layout.
-                inj = np.asarray(self.curr.source_info["emri"].injection)
-                if inj.ndim == 1:
-                    inj = inj[None, :]
-                nleaves_emri = self.engine_info.nleaves_max["emri"]
-                ndim_emri = inj.shape[-1]
-                if inj.shape[0] == 1:
-                    inj = np.broadcast_to(inj, (nleaves_emri, ndim_emri))
-                assert inj.shape == (nleaves_emri, ndim_emri), (
-                    f"EMRI injection shape {inj.shape} doesn't match "
-                    f"(nleaves_max={nleaves_emri}, ndim={ndim_emri})."
-                )
-                coords["emri"] = inj[None, None] + factor * np.random.randn(
-                    self.ntemps, self.nwalkers, nleaves_emri, ndim_emri
-                )
+                    # Multi-leaf safe: accepts either a flat ``(ndim,)`` injection
+                    # (broadcast across all leaves) or a per-leaf ``(nleaves, ndim)``
+                    # injection. The trailing axis is always ``ndim`` so the
+                    # randn matches the engine's ``(ntemps, nwalkers, nleaves, ndim)``
+                    # coord layout.
+                    inj = np.asarray(self.curr.source_info["emri"].injection)
+                    if inj.ndim == 1:
+                        inj = inj[None, :]
+                    nleaves_emri = self.engine_info.nleaves_max["emri"]
+                    ndim_emri = inj.shape[-1]
+                    if inj.shape[0] == 1:
+                        inj = np.broadcast_to(inj, (nleaves_emri, ndim_emri))
+                    assert inj.shape == (nleaves_emri, ndim_emri), (
+                        f"EMRI injection shape {inj.shape} doesn't match "
+                        f"(nleaves_max={nleaves_emri}, ndim={ndim_emri})."
+                    )
+                    coords["emri"] = inj[None, None] + factor * np.random.randn(
+                        self.ntemps, self.nwalkers, nleaves_emri, ndim_emri
+                    )
             if "sobbh" in inds:
                 inds["sobbh"][:] = True
                 self.logger.debug("initializing sobbh inds to true")

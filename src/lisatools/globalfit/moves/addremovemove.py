@@ -754,7 +754,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
     """
     def __init__(
         self, 
-        dcga: DomainComputationGroupArray,
+        dcga: AnalysisContainerArray | DomainComputationGroupArray,
         waveform_gen: Any,
         branch_name: str,
         coords_shape: tuple,
@@ -794,9 +794,12 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             **kwargs
         )
 
+        acs = dcga.acs if (hasattr(dcga, "acs") and isinstance(dcga.acs, AnalysisContainerArray)) else dcga
+        acs._ensure_cpp_splits()        
+
         MultiGPUMoveBase.__init__(
             self,
-            dcga,
+            acs=acs,
             run_async=run_async,
             run_threaded=run_threaded,
             batch_size_per_gpu=batch_size_per_gpu,

@@ -11,6 +11,7 @@ import numpy as np
 from typing import TYPE_CHECKING
 
 from ...domaincomputation import DomainComputationGroupArray
+from ...analysiscontainer import AnalysisContainerArray
 
 logger = getLogger(__name__)
 
@@ -18,20 +19,17 @@ logger = getLogger(__name__)
 class MultiGPUMoveBase:
     def __init__(
         self,
-        dcga: DomainComputationGroupArray = None,
+        acs: AnalysisContainerArray = None,
         run_async: bool = False,
         run_threaded: bool = False,
         batch_size_per_gpu: int = None,
-        *,
-        acs=None,
     ):
         # The C++ likelihood coordinator now lives on ``AnalysisContainerArray``
         # (DCGA was absorbed). Accept either an ACA or a (deprecated)
         # ``DomainComputationGroupArray`` shim at the constructor boundary so
         # external settings files that still pass ``dcga=`` keep working, and
         # resolve both to the real ACA. We no longer store the DCGA itself.
-        resolved = acs if acs is not None else dcga
-        self.acs = resolved.acs if hasattr(resolved, "acs") else resolved
+        self.acs = acs
         self._run_async = run_async
         self._run_threaded = run_threaded
         # Cap on the number of waveform+likelihood evaluations a single device

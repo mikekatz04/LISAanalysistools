@@ -399,6 +399,41 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
 
     return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_icrs, alpha, sin_delta]).T
 
+def emri_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
+    """Convert a single Mojito EMRI catalogue entry to EMRI sampling basis.
+
+    The sampling basis is:
+    ``["logm1", "m2", "a", "p0", "e0", "dist", "cosqK", "phiK", "Phi_phi0", "Phi_r0", "alpha", "sin_delta",]``
+
+    Parameters
+    ----------
+    catalogue_entry : dict
+        Dictionary of catalogue parameters for one EMRI source, as
+        stored by ``L1DataLoader.catalogue['EMRI'][source_id]``.
+
+    Returns
+    -------
+    np.ndarray
+        Parameter vector of shape ``(12,)`` in the EMRI sampling basis
+        (ICRS for sky parameters).
+    """
+    m1 = float(catalogue_entry['PrimaryMassSSBFrame'])
+    m2 = float(catalogue_entry['SecondaryMassSSBFrame'])
+    a = float(catalogue_entry['PrimarySpinParameter'])
+    p0 = float(catalogue_entry['SemiLatusRectum'])
+    e0 = float(catalogue_entry['Eccentricity'])
+    dist = float(catalogue_entry['LuminosityDistance'] * 1e-3) # convert to Gpc
+    ra = float(catalogue_entry['RightAscension']) % (2 * np.pi)
+    dec = float(catalogue_entry['Declination'])
+
+    qK = float(catalogue_entry['PolarAnglePrimarySpin'])
+    phiK = float(catalogue_entry['AzimuthalAnglePrimarySpin'])
+
+    Phi_phi0 = float(catalogue_entry['AzimuthalPhase']) % (2 * np.pi)
+    Phi_r0 = float(catalogue_entry['RadialPhase']) % (2 * np.pi)
+
+    return np.array([np.log(m1), m2, a, p0, e0, dist, np.cos(qK), phiK, Phi_phi0, Phi_r0, ra, np.sin(dec)])
+
 
 def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None, priors: ProbDistContainer | None = None):
     """Initialize 'branch_name' walkers from catalogue injection parameters"""
