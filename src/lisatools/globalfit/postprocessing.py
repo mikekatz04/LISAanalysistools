@@ -197,7 +197,7 @@ def detections_to_structured_array(detections: list[dict]) -> np.ndarray:
     str_dtype = h5py.string_dtype(encoding="utf-8")
     fields = [
         ("source_id", str_dtype),
-        ("posterior_id", str_dtype),
+        ("posterior_file", str_dtype),
         ("comment", str_dtype),
         ("quality_flag", "i8"),
         ("known_injection", str_dtype),
@@ -247,8 +247,20 @@ def _build_leaf_samples_dict(
     branch: str,
     log_prior: np.ndarray,
     log_likelihood: np.ndarray,
+    valid_mask: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
-    """Build one leaf's posterior mapping and apply corrections/filtering."""
+    """Build one leaf's posterior mapping and apply corrections/filtering.
+
+    ``log_prior`` / ``log_likelihood`` may be the 1-D global thinned arrays (shared by
+    every source, e.g. MBH) or 2-D ``(n_samples, n_leaves)`` per-source arrays that are
+    sliced by ``leaf`` exactly like the parameters (clustered GB sources, whose joint
+    logprior/loglikelihood is attached per originating thinned step).
+
+    ``valid_mask`` (a boolean ``(n_samples,)`` mask) drops padded/inactive samples. GB
+    clusters are NaN-padded to a common ``max_num_source`` length, so trimming yields each
+    source's true, length-consistent posterior. ``None`` keeps every sample (MBH is never
+    padded).
+    """
 
     samples_dict = {name: samples_here[..., i] for i, name in enumerate(parameter_names)}
     samples_dict["logprior"] = log_prior
@@ -256,10 +268,101 @@ def _build_leaf_samples_dict(
     samples_dict = _apply_output_corrections(branch, samples_dict)
     samples_dict = _filter_removed_params(branch, samples_dict)
 
-    return {
+    leaf_dict = {
         name: values[:, leaf] if len(values.shape) == 2 else values
         for name, values in samples_dict.items()
     }
+    if valid_mask is not None:
+        leaf_dict = {name: np.asarray(values)[valid_mask] for name, values in leaf_dict.items()}
+    return leaf_dict
+
+
+def _recover_group_steps(
+    groups: list[np.ndarray],
+    original_samples: np.ndarray,
+    inds: np.ndarray,
+) -> list[np.ndarray]:
+    """Recover the originating thinned-draw index of every clustered GB sample.
+
+    The GB clustering builds each group out of *exact* rows of the thinned cold chain
+    ``original_samples`` (sampling space). The global thinned logprior/loglikelihood
+    arrays are ordered along that same draw axis, so mapping each group member back to its
+    draw lets us attach the correct, length-matched joint logprior/loglikelihood to every
+    clustered sample — without touching the clustering itself.
+
+    Matching is exact (bit-identical float64 rows) via a byte-view total order.
+
+    Args:
+        groups: list of ``(group_len, ndim)`` sampling-space parameter arrays.
+        original_samples: ``(n_draws, n_leaves, ndim)`` thinned sampling-space chain.
+        inds: ``(n_draws, n_leaves)`` boolean occupancy of ``original_samples``.
+
+    Returns:
+        list parallel to ``groups``; each entry is an ``int64 (group_len,)`` array of
+        thinned-draw indices, with ``-1`` for any member lacking an exact match.
+    """
+    original_samples = np.asarray(original_samples)
+    n_draws, n_leaves, ndim = original_samples.shape
+    on_mask = np.asarray(inds, dtype=bool).reshape(n_draws * n_leaves)
+    flat = original_samples.reshape(n_draws * n_leaves, ndim)
+    ref_rows = np.ascontiguousarray(flat[on_mask])
+    draw_of_row = np.repeat(np.arange(n_draws, dtype=np.int64), n_leaves)[on_mask]
+
+    if ref_rows.shape[0] == 0:
+        return [np.full(len(np.atleast_2d(g)), -1, dtype=np.int64) for g in groups]
+
+    void_dt = np.dtype((np.void, ref_rows.dtype.itemsize * ndim))
+    ref_keys = ref_rows.view(void_dt).ravel()
+    order = np.argsort(ref_keys, kind="stable")
+    ref_sorted = ref_keys[order]
+    draw_sorted = draw_of_row[order]
+
+    steps_per_group: list[np.ndarray] = []
+    n_unmatched = 0
+    for group in groups:
+        g = np.ascontiguousarray(np.atleast_2d(group))
+        g_keys = g.view(void_dt).ravel()
+        pos = np.clip(np.searchsorted(ref_sorted, g_keys), 0, len(ref_sorted) - 1)
+        matched = ref_sorted[pos] == g_keys
+        steps = np.where(matched, draw_sorted[pos], -1).astype(np.int64)
+        n_unmatched += int((~matched).sum())
+        steps_per_group.append(steps)
+
+    if n_unmatched:
+        logger.warning(
+            f"GB step recovery: {n_unmatched} clustered sample(s) had no exact thinned-chain "
+            f"match; their logprior/loglikelihood are set to NaN."
+        )
+    return steps_per_group
+
+
+def _build_padded_per_source_logprob(
+    steps_per_group: list[np.ndarray],
+    thinned_log_prior: np.ndarray,
+    thinned_log_likelihood: np.ndarray,
+    max_num_source: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build NaN-padded per-source logprior/loglikelihood aligned with the padded samples.
+
+    Returns two ``(n_groups, max_num_source)`` arrays; entry ``[i, :len(steps_i)]`` holds the
+    thinned logprior/loglikelihood at each member's originating draw (NaN where the step is
+    ``-1`` or beyond the group's real length, matching the sample NaN-padding).
+    """
+    thinned_log_prior = np.asarray(thinned_log_prior)
+    thinned_log_likelihood = np.asarray(thinned_log_likelihood)
+    n_groups = len(steps_per_group)
+    log_prior = np.full((n_groups, max_num_source), np.nan)
+    log_likelihood = np.full((n_groups, max_num_source), np.nan)
+    for i, steps in enumerate(steps_per_group):
+        steps = np.asarray(steps)
+        valid = steps >= 0
+        vlp = np.full(len(steps), np.nan)
+        vll = np.full(len(steps), np.nan)
+        vlp[valid] = thinned_log_prior[steps[valid]]
+        vll[valid] = thinned_log_likelihood[steps[valid]]
+        log_prior[i, : len(steps)] = vlp
+        log_likelihood[i, : len(steps)] = vll
+    return log_prior, log_likelihood
 
 
 def _build_stochastic_samples_dict(
@@ -1292,8 +1395,6 @@ class SubmissionWriter(BackendConsumer):
         from lisatools.globalfit.state import GBState
 
         gb_info = self.curr.source_info["gb"]
-        gb_wave_gen = GBGPU(**gb_info.initialize_kwargs)
-        gb_wave_gen.gpus = self.curr.general_info.gpus[:1] # use only one GPU for the clustering
 
         cluster_kwargs = dict(
             num_compare_samples=200,
@@ -1305,56 +1406,83 @@ class SubmissionWriter(BackendConsumer):
             snr_diff_lim=20.0,
             use_representative=True,
         )
-        
-        reader = GFHDFBackend(
-            self.backend.filename, sub_state_bases={"gb": GBState}, sub_backend={"gb": GBHDFBackend}
-        )
-        
-        gb_wave_gen.d_d = 0.0
-        max_logl_walker = np.argmax(acs.likelihood()).item()
-        sens_mat = acs[max_logl_walker].sens_mat
-        
-        if len(acs.gpus) > 1:
-            # we probably need everything on the same GPU
-            cp.cuda.runtime.setDevice(gb_wave_gen.gpus[0])
-            sens_mat._sens_mat = cp.asarray(sens_mat._sens_mat)
-            
-        logger.info('starting to gather GB samples for clustering')
-        
-        groups = gather_gb_samples(
-            acs.f_arr,
-            gb_info.transform,
-            gb_wave_gen,
-            gb_info.waveform_kwargs.copy(),
-            cp.asarray(gb_info.band_edges),
-            gb_info.band_N_vals,
-            reader,
-            sens_mat,
-            gb_wave_gen.gpus[0],
-            gb_samples=original_samples,
-            gb_inds=inds,
-            **cluster_kwargs,
-        )
+        self._gb_cluster_kwargs = cluster_kwargs
+
+        # The "Comparing samples" clustering is a multi-hour GPU step. Cache its raw output
+        # (groups + each member's originating thinned step) next to the run so a downstream
+        # bug never re-costs it, and the posterior/logprob derivation can be iterated fast.
+        cache_path = f"{self.backend.filename}.gbcluster_cache.npz"
+        cached = self._load_gb_cluster_cache(cache_path, original_samples)
+        if cached is not None:
+            groups, steps_per_group = cached
+        else:
+            gb_wave_gen = GBGPU(**gb_info.initialize_kwargs)
+            gb_wave_gen.gpus = self.curr.general_info.gpus[:1]  # use only one GPU for the clustering
+
+            reader = GFHDFBackend(
+                self.backend.filename, sub_state_bases={"gb": GBState}, sub_backend={"gb": GBHDFBackend}
+            )
+
+            gb_wave_gen.d_d = 0.0
+            max_logl_walker = np.argmax(acs.likelihood()).item()
+            sens_mat = acs[max_logl_walker].sens_mat
+
+            if len(acs.gpus) > 1:
+                # we probably need everything on the same GPU
+                cp.cuda.runtime.setDevice(gb_wave_gen.gpus[0])
+                sens_mat._sens_mat = cp.asarray(sens_mat._sens_mat)
+
+            logger.info('starting to gather GB samples for clustering')
+
+            groups = gather_gb_samples(
+                acs.f_arr,
+                gb_info.transform,
+                gb_wave_gen,
+                gb_info.waveform_kwargs.copy(),
+                cp.asarray(gb_info.band_edges),
+                gb_info.band_N_vals,
+                reader,
+                sens_mat,
+                gb_wave_gen.gpus[0],
+                gb_samples=original_samples,
+                gb_inds=inds,
+                **cluster_kwargs,
+            )
+
+            # Recover each clustered sample's originating thinned step now (for length-matched,
+            # step-correct joint logprob) and cache groups+steps before any save logic runs.
+            steps_per_group = _recover_group_steps(groups, original_samples, inds)
+            self._save_gb_cluster_cache(cache_path, groups, steps_per_group, original_samples)
 
         logger.info(f"Completed clustering. Number of groups found: {len(groups)}")
 
         num_in_groups = np.asarray([len(tmp) for tmp in groups])
-        keep = num_in_groups > reader.nwalkers * cluster_kwargs['samples_keep'] / 2
+        keep = num_in_groups > self.backend.nwalkers * cluster_kwargs['samples_keep'] / 2
 
         logger.info(
             f"Groups passing sample count filter: {keep.sum()} / {len(keep)}. "
             f"num_in_groups: {num_in_groups}"
         )
         max_num_source = max([tmp.shape[0] for tmp in groups])
-        
+
         samples_fin = np.full((len(groups), max_num_source, groups[0].shape[-1]), np.nan)
         for i, group in enumerate(groups):
             samples_fin[i, : len(group)] = group
 
+        # Per-source joint logprior/loglikelihood, padded exactly like samples_fin so each GB
+        # source carries the thinned-chain logprob of the step every clustered sample came from.
+        logprior_fin, loglike_fin = _build_padded_per_source_logprob(
+            steps_per_group, self.log_prior, self.log_likelihood, max_num_source
+        )
+
         samples_fin = samples_fin[keep] # shape (nclusters, nsteps, ndim)
+        logprior_fin = logprior_fin[keep]
+        loglike_fin = loglike_fin[keep]
         num_in_groups_fin = num_in_groups[keep]
 
         samples_fin = samples_fin.transpose(1, 0, 2)
+        logprior_fin = logprior_fin.transpose(1, 0)  # (max_num_source, nclusters)
+        loglike_fin = loglike_fin.transpose(1, 0)
         inds_fin = np.isfinite(samples_fin[..., 0])
 
         # now transform again from the sampling space to the physical space
@@ -1366,8 +1494,68 @@ class SubmissionWriter(BackendConsumer):
         sorted_indices = np.argsort(mean_frequencies)
         samples_fin = samples_fin[:, sorted_indices, :]
         inds_fin = inds_fin[:, sorted_indices]
+        logprior_fin = logprior_fin[:, sorted_indices]
+        loglike_fin = loglike_fin[:, sorted_indices]
+
+        # Per-source logprob (aligned with self.samples["gb"]) consumed by _save_source_posterior.
+        if not hasattr(self, "_per_source_logprob"):
+            self._per_source_logprob = {}
+        self._per_source_logprob["gb"] = (logprior_fin, loglike_fin)
 
         return samples_fin, inds_fin
+
+    def _gb_cluster_cache_key(self) -> str:
+        return str(getattr(self, "_gb_cluster_kwargs", {}))
+
+    def _load_gb_cluster_cache(self, path: str, original_samples: np.ndarray):
+        """Load cached GB clustering (groups + per-member thinned steps) if it matches the
+        current run/settings; return ``(groups, steps_per_group)`` or ``None`` to re-cluster."""
+        if getattr(self, "force_recluster", False):
+            logger.info("force_recluster=True; ignoring any GB clustering cache.")
+            return None
+        if not os.path.exists(path):
+            return None
+        try:
+            data = np.load(path, allow_pickle=True)
+            if int(data["n_draws"]) != int(original_samples.shape[0]) or str(
+                data["cluster_kwargs"]
+            ) != self._gb_cluster_cache_key():
+                logger.info(
+                    f"GB clustering cache at {path} does not match current settings; re-clustering."
+                )
+                return None
+            groups = [np.asarray(g) for g in data["groups"]]
+            steps = [np.asarray(s) for s in data["steps"]]
+        except Exception as e:  # corrupt/unreadable cache -> just recompute
+            logger.warning(f"Could not load GB clustering cache {path}: {e!r}; re-clustering.")
+            return None
+        logger.info(
+            f"Loaded GB clustering from cache {path}: {len(groups)} groups "
+            f"(skipping the multi-hour 'Comparing samples' step)."
+        )
+        return groups, steps
+
+    def _save_gb_cluster_cache(
+        self, path: str, groups: list, steps_per_group: list, original_samples: np.ndarray
+    ) -> None:
+        """Persist GB clustering output (groups + per-member thinned steps) for fast re-runs."""
+        try:
+            groups_obj = np.empty(len(groups), dtype=object)
+            steps_obj = np.empty(len(steps_per_group), dtype=object)
+            for i, g in enumerate(groups):
+                groups_obj[i] = np.asarray(g)
+            for i, s in enumerate(steps_per_group):
+                steps_obj[i] = np.asarray(s)
+            np.savez(
+                path,
+                groups=groups_obj,
+                steps=steps_obj,
+                n_draws=int(original_samples.shape[0]),
+                cluster_kwargs=self._gb_cluster_cache_key(),
+            )
+            logger.info(f"Cached GB clustering to {path}: {len(groups)} groups.")
+        except Exception as e:
+            logger.warning(f"Could not write GB clustering cache {path}: {e!r}.")
 
     @property
     def prepare_samples_registry(self) -> dict[str, Callable[[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]]:
@@ -1497,16 +1685,31 @@ class SubmissionWriter(BackendConsumer):
             leaves = slice(leaf_count, min(leaf_count + MAX_SOURCES_PER_BATCH, num_leaves))
 
             samples_here = samples[:, leaves, :]
+            inds_here = np.asarray(inds[:, leaves], dtype=bool)
             num_sources_here = samples_here.shape[1]
             logger.debug(f"Number of sources in this batch: {num_sources_here}")
 
+            # Clustered branches (GB) carry per-source joint logprior/loglikelihood attached per
+            # originating thinned step; other branches (MBH) share the global thinned arrays.
+            per_source_logprob = getattr(self, "_per_source_logprob", {})
+            if branch in per_source_logprob:
+                branch_log_prior = per_source_logprob[branch][0][:, leaves]
+                branch_log_likelihood = per_source_logprob[branch][1][:, leaves]
+            else:
+                branch_log_prior = self.log_prior
+                branch_log_likelihood = self.log_likelihood
+
             # save to h5 file
-            filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_posteriors_{num_sources_here}_{leaf_count}_{self.run_metadata.submission_timestamp}.h5"
+            filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_posteriors_{num_sources_here}_{leaf_count}.h5"
             filepath = os.path.join(self.posterior_folders[branch], filename)
             with h5py.File(os.path.join(self.run_metadata.submission_folder, filepath), "w") as f:
                 for leaf in range(num_sources_here):
 
-                    source_label = self.get_source_label_registry[branch](samples_here[:, leaf, :], leaf_count + leaf)
+                    # GB clusters are NaN-padded to a common length; keep only this source's real
+                    # samples so params + logprob share one length (MBH: mask is all-True -> no-op).
+                    valid_mask = inds_here[:, leaf]
+
+                    source_label = self.get_source_label_registry[branch](samples_here[:, leaf, :][valid_mask], leaf_count + leaf)
                     label_to_statistic[source_label] = detection_stats[leaf_count + leaf]
 
                     leaf_samples = _build_leaf_samples_dict(
@@ -1514,8 +1717,9 @@ class SubmissionWriter(BackendConsumer):
                         parameter_names=parameter_names,
                         leaf=leaf,
                         branch=branch,
-                        log_prior=self.log_prior,
-                        log_likelihood=self.log_likelihood,
+                        log_prior=branch_log_prior,
+                        log_likelihood=branch_log_likelihood,
+                        valid_mask=valid_mask,
                     )
                     _save_posterior_dataset(f, source_label, leaf_samples)
 
@@ -1531,7 +1735,7 @@ class SubmissionWriter(BackendConsumer):
         for j, source_idx in enumerate(posterior_files_map.keys()):
             detections.append({
                 "source_id": str(source_idx),
-                "posterior_id": posterior_files_map[source_idx],
+                "posterior_file": posterior_files_map[source_idx],
                 "comment": "",
                 "quality_flag": int(metadata.quality_flags[j]) if j < len(metadata.quality_flags) else 0,
                 "known_injection": known_injections_here[j] if j < len(known_injections_here) else "",
@@ -1545,7 +1749,7 @@ class SubmissionWriter(BackendConsumer):
         metadata.posterior_files = list(posterior_files_map.values())
 
         # now save the metadata for this source
-        metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_{self.run_metadata.submission_timestamp}"
+        metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}"
 
         metadata_h5_filepath = os.path.join(
             self.run_metadata.submission_folder, f"{metadata_base_filename}.h5"
@@ -1556,10 +1760,6 @@ class SubmissionWriter(BackendConsumer):
 
         with h5py.File(metadata_h5_filepath, "w") as f:
             source_group = f.create_group(name="sources")
-            posterior_group = source_group.create_group(name="posterior_files")
-
-            for j, (source_idx, posterior_file_path) in enumerate(posterior_files_map.items()):
-                posterior_group.create_dataset(source_idx, data=str(posterior_file_path))
 
             source_group.create_dataset(
                 "detection", data=detections_to_structured_array(detections)
@@ -1637,7 +1837,7 @@ class SubmissionWriter(BackendConsumer):
         structured_array = posteriors_to_structured_array(samples_dict)
 
         effective_branch_name = "noise" #todo or stochastic?
-        filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{effective_branch_name}_posteriors_{self.run_metadata.submission_timestamp}.h5"
+        filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{effective_branch_name}_posteriors.h5"
         filepath = os.path.join(self.posterior_folders[branches_here[0]], filename)
 
         with h5py.File(os.path.join(self.run_metadata.submission_folder, filepath), "w") as f:
@@ -1654,7 +1854,7 @@ class SubmissionWriter(BackendConsumer):
             group.create_dataset("loglikelihood", data=samples_dict["loglikelihood"]) 
 
         metadata.posterior_file = filepath # we store the relative path to the posterior file in the metadata        
-        metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{effective_branch_name}_{self.run_metadata.submission_timestamp}"
+        metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{effective_branch_name}"
         metadata_h5_filepath = os.path.join(
             self.run_metadata.submission_folder, f"{metadata_base_filename}.h5"
         )

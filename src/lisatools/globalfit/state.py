@@ -10,6 +10,15 @@ def return_x(x):
     return x
 
 
+def _branch_coords(possible_state, branch):
+    """Coords array for ``branch`` from either a coords dict (cold start) or an eryn ``State``
+    reloaded from a backend. The eryn ``State`` is not subscriptable, so reloading an MBH/EMRI
+    run (e.g. for standalone postprocessing) must go through ``branches_coords``."""
+    if isinstance(possible_state, dict):
+        return possible_state[branch]
+    return possible_state.branches_coords[branch]
+
+
 class GBState(eryn_State):
 
     # copy this still for each. At general hdf5 function to deal with these setups rather than specific
@@ -246,7 +255,14 @@ class MBHState(eryn_State):
             self.num_mbhs = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_mbhs = possible_state["mbh"].shape[-2]
+            if possible_state is not None:
+                self.num_mbhs = _branch_coords(possible_state, "mbh").shape[-2]
+            elif betas_all is not None:
+                # Reload path (MBHHDFBackend.get_a_sample passes None + the stored betas_all,
+                # shape (..., num_mbhs, ntemps)); num_mbhs is the second-to-last axis.
+                self.num_mbhs = betas_all.shape[-2]
+            else:
+                self.num_mbhs = 20
 
     @property
     def reset_kwargs(self):
@@ -266,7 +282,14 @@ class EMRIState(eryn_State):
             self.num_emris = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_emris = possible_state["emri"].shape[-2]
+            if possible_state is not None:
+                self.num_emris = _branch_coords(possible_state, "emri").shape[-2]
+            elif betas_all is not None:
+                # Reload path (EMRIHDFBackend.get_a_sample passes None + the stored betas_all,
+                # shape (..., num_emris, ntemps)); num_emris is the second-to-last axis.
+                self.num_emris = betas_all.shape[-2]
+            else:
+                self.num_emris = 20
 
     @property
     def reset_kwargs(self):
