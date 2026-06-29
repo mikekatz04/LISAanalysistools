@@ -772,6 +772,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         run_async: bool = False,
         run_threaded: bool = False,
         waveform_like_method: str = None,
+        batch_size_per_gpu: int = None,
         **kwargs
     ):
         ResidualAddOneRemoveOneMove.__init__(
@@ -793,7 +794,13 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             **kwargs
         )
 
-        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
+        MultiGPUMoveBase.__init__(
+            self,
+            dcga,
+            run_async=run_async,
+            run_threaded=run_threaded,
+            batch_size_per_gpu=batch_size_per_gpu,
+        )
 
         self.waveform_gen = waveform_gen
         self.waveform_gen_method = waveform_gen_method
@@ -913,12 +920,30 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         """
         Compute the likelihood for the given coordinates and data index.
 
+        When :attr:`batch_size_per_gpu` is set, the rows are processed in
+        per-GPU sub-batches (at most ``batch_size_per_gpu`` waveforms generated
+        on each device at a time) to bound peak GPU memory; ``None`` keeps the
+        all-at-once behaviour. See :meth:`MultiGPUMoveBase.run_in_gpu_batches`.
+
         Args:
             coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
             data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
-        
+
         Returns:
             ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
+        """
+        return self.run_in_gpu_batches(
+            data_index,
+            lambda sub: self._compute_like_chunk(coords_in[sub], data_index[sub]),
+            n_out=coords_in.shape[0],
+        )
+
+    def _compute_like_chunk(self, coords_in: np.ndarray, data_index: np.ndarray) -> np.ndarray:
+        """Single-pass likelihood for one (already-sized) batch of rows.
+
+        This is the original :meth:`compute_like` body: every row in
+        ``coords_in`` is generated and scored across the devices in one pass.
+        :meth:`compute_like` calls it once per per-GPU sub-batch.
         """
 
         positions_per_split, data_intra_index_per_split, waveform_args_per_split = self.prepare_inputs(coords_in, data_index)

@@ -585,6 +585,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         tolerance: float = 0.0,
         run_async: bool = False,
         run_threaded: bool = False,
+        batch_size_per_gpu: int = None,
         **kwargs,
     ):
 
@@ -609,7 +610,13 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
             tolerance=tolerance,
             **kwargs,
         )
-        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
+        MultiGPUMoveBase.__init__(
+            self,
+            dcga,
+            run_async=run_async,
+            run_threaded=run_threaded,
+            batch_size_per_gpu=batch_size_per_gpu,
+        )
 
         # TEST FLAG: when True, MultiGPUPSDMove.psd_log_like delegates to the
         # parent PSDMove.psd_log_like, completely bypassing the ACA cpp
@@ -639,12 +646,27 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         if getattr(self, "_force_parent_path", False):
             return PSDMove.psd_log_like(self, x, supps=supps, **sens_kwargs)
 
-        wi = supps["walker_inds"]
-
         psd_pars, galfor_pars = self.transform_coords(x, return_cupy=False)
+        data_index_all = np.asarray(supps["walker_inds"]).astype(np.int32)
 
-        data_index_all = np.asarray(wi).astype(np.int32)
+        # When ``batch_size_per_gpu`` is set, evaluate in per-GPU sub-batches to
+        # bound peak device memory; ``None`` runs everything in one pass.
+        return self.run_in_gpu_batches(
+            data_index_all,
+            lambda sub: self._psd_log_like_chunk(
+                psd_pars[sub], galfor_pars[sub], data_index_all[sub]
+            ),
+            n_out=psd_pars.shape[0],
+        )
 
+    def _psd_log_like_chunk(self, psd_pars, galfor_pars, data_index_all):
+        """Single-pass PSD likelihood for one (already-sized) batch of rows.
+
+        This is the original :meth:`psd_log_like` device body. Its
+        ``positions_per_split`` / ``invalid_knots_mask`` are naturally
+        chunk-local, so it works unchanged on a per-GPU sub-batch; the returned
+        ``ll`` has length ``psd_pars.shape[0]`` (this chunk).
+        """
         positions_per_split, data_intra_index_per_split, _ = self.acs.unpack_indices(data_index_all)
         coords_per_split = self.acs.unpack_coords(positions_per_split, (psd_pars, galfor_pars))
 
