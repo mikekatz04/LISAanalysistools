@@ -69,6 +69,14 @@ class EMRISpecialMove(MultiGPUResidualAddRemoveMove):
             positions_per_split, coords_in, keep_tuple=False
         )
 
+        # The routing index must live on each split's device for the C++
+        # likelihood kernel (cpp_signal_likelihood -> ascontiguousarray on
+        # self.xp); only the *coordinates* stay on the host as numpy floats
+        # (for few). The base path does this in prepare_inputs/place_on_device.
+        (data_intra_index_per_split,) = self.acs.place_on_device(
+            items=(data_intra_index_per_split,)
+        )
+
         # One op method applied to every split; ``split_idx`` (threaded through
         # the args) selects that split's waveform replica / GPU.  _loop_operation
         # enters each split's device context and runs the splits concurrently
