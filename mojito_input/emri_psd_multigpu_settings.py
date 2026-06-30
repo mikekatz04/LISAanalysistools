@@ -81,7 +81,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         run_async=True,
         run_threaded=False
     )
-    breakpoint()
+
     psd_search_move = MultiGPUPSDMove(
         acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
     )
@@ -92,7 +92,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     #psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors, permute_every=50)
 
-    recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
 
     #* ========================= *#
     
@@ -163,8 +163,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     emri_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     #_, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state, permute_every=40)
-    emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
-    recipe.add_recipe_component(PERecipeStep(moves=[emri_pe_moves]), name="emri + psd pe")
+    # emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
+    recipe.add_recipe_component(PERecipeStep(moves=[emri_pe_move]), name="emri pe")
 
 
 #######################
@@ -300,23 +300,36 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     ]
 
     # for transforms
-    fill_values = [-1.0, 0.4543828072057121]  # inclination, Phi_theta
-
     emri_fill_dict = {
-        "xI0": fill_values[0],  # inclination
-        "Phi_theta0": fill_values[1],  # Phi_theta
+        "xI0": 1.0,  # inclination
+        "Phi_theta0": 0.0,  # Phi_theta
     }
 
+    def decouple_spin_sign(a, xI0):
+        # Decouple the spin sign from a
+
+        xI0 = np.sign(a) * 1.0  # inclination is either 1 or -1 depending on the sign of a
+        a = np.abs(a)  # take the absolute value of a
+        return a, xI0
+
+    def couple_spin_sign(a, xI0):
+        # Couple the spin sign back into a
+        a = np.sign(xI0) * a  # restore the sign of a based on xI0
+        xI0 = 1.0
+        return a, xI0
+
     emri_transform_fn_in = {
-        output_basis[0]: np.exp,  # M
-        output_basis[7]: np.arccos,  # qK
-        output_basis[13]: np.arcsin,  # delta
+        "m1": np.exp,  # M
+        ("a", "xI0"): decouple_spin_sign,
+        "qK": np.arccos,  # qK
+        "delta": np.arcsin,  # delta
     }
 
     emri_inverse_transform_fn_in = {
-        output_basis[0]: np.log,  # M
-        output_basis[7]: np.cos,  # qS
-        output_basis[13]: np.sin,  # delta
+        "m1": np.log,  # M
+        "qK": np.cos,  # qS
+        ("a", "xI0"): couple_spin_sign,
+        "delta": np.sin,  # delta
     }
     key_map = {
         "logm1": "m1",
@@ -343,9 +356,9 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     }
 
     priors_emri = {
-            "logm1": uniform_dist(np.log(5e5), np.log(5e6)),  # log m1
+            "logm1": uniform_dist(np.log(1e5), np.log(5e6)),  # log m1
             "m2": uniform_dist(1, 100),  # m2
-            "a": uniform_dist(0.01, 0.999),  # a
+            "a": uniform_dist(-0.999, 0.999),  # a
             "p0": uniform_dist(5.0, 100.0),  # p0
             "e0": uniform_dist(0.001, 0.8),  # e0
             "dist": uniform_dist(0.01, 100.0),  # dist in Gpc
@@ -456,7 +469,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
-        source_types=["noise", "emri"],  #'vgb', 'gb'
+        source_types=["emri"],  #'vgb', 'gb'
         source_ids=dict(emri=source_ids),
         verbose=True,
         do_plots=True,

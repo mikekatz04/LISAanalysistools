@@ -145,12 +145,12 @@ class EMRITDIWaveform(TDPyResponseWaveformBase):
         )
 
     @property
-    def wrapper_kwargs(self):
+    def kwargs(self):
         wrapper_kwargs = self.wrapper_kwargs # get the TD TDI wrapper-specific kwargs
 
         return {
             "waveform_class": self.waveform_class,
-            **self.waveform_kwargs,
+            "waveform_kwargs": self.waveform_kwargs,
             **wrapper_kwargs,
         }
     
@@ -250,7 +250,7 @@ class EMRITDIWaveform(TDPyResponseWaveformBase):
             Phi_r0: NDArrayLike,
             ra: NDArrayLike,
             dec: NDArrayLike,
-            merger_time: NDArrayLike,
+            merger_time: float,
             **kwargs
             ) -> tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
         """
@@ -279,7 +279,6 @@ class EMRITDIWaveform(TDPyResponseWaveformBase):
 
         """
 
-        max_merger_time = merger_time.max() # to determine the length of the output arrays
         times = []
         hplus = []
         hcross = []
@@ -288,7 +287,7 @@ class EMRITDIWaveform(TDPyResponseWaveformBase):
             t, hplus_i, hcross_i = self.wave_gen(
                 m1[i], m2[i], a[i], p0[i], e0[i], x0[i], distance[i],
                 qK[i], phiK[i], Phi_phi0[i], Phi_theta0[i], Phi_r0[i],
-                ra[i], dec[i], max_merger_time, **kwargs
+                ra[i], dec[i], merger_time, **kwargs
             )
             times.append(t)
             hplus.append(hplus_i)
@@ -322,8 +321,6 @@ class EMRITDIWaveform(TDPyResponseWaveformBase):
         merger_time = float(self.data_times_array[-1] - self.waveform_t0)
 
         if np.ndim(ra) >= 1:
-            xp = get_array_module(ra)
-            merger_time = xp.broadcast_to(merger_time, ra.shape)
             return self._call_batched(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
         return self._call_single(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
 

@@ -838,7 +838,8 @@ class EMRISetup(Setup):
                 }
             }
 
-        self.setup_priors(input_basis)
+        if self.priors is None:
+            self.setup_priors(input_basis)
 
         if self.betas is None:
             snrs_ladder = np.array(
