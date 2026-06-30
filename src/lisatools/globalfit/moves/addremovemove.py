@@ -644,10 +644,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
-            logger.info(f"* {self.branch_name} leaf {leaf} complete ({time.time() - tic:.1f}s)")
+            logger.info(f"{self.branch_name} leaf {leaf} complete ({time.time() - tic:.1f}s)")
 
         # udpate at the end
-        logger.info(f"* {self.branch_name} proposal complete — all leaves processed ({time.time() - tic:.1f}s total)")
+        logger.info(f"{self.branch_name} proposal complete - all leaves processed ({time.time() - tic:.1f}s total)")
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
         # print("before computing current likelihood. elapsed: ", time.time() - tic)

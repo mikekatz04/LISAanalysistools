@@ -112,7 +112,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         curr.source_info["emri"].injection = injection_params
 
         # Per-parameter spread for the Gaussian scatter
-        spread = 1e-5
+        spread = 1e-6
 
         scatter_around_injection(
             state,
@@ -159,7 +159,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         # Cap concurrent EMRI waveform+likelihood evaluations per GPU to bound
         # peak device memory; None runs all of a split's walkers at once. With
         # >1 GPU this still runs num_gpus * batch_size_per_gpu walkers in parallel.
-        batch_size_per_gpu=4,
+        batch_size_per_gpu=1,
     )
 
     emri_pe_move = EMRISpecialMove(**emri_move_kwargs)
@@ -386,7 +386,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         nleaves_max=len(general_set.processor_init_kwargs["source_ids"]["emri"]),
         nleaves_min=len(general_set.processor_init_kwargs["source_ids"]["emri"]),
         ndim=12,
-        num_prop_repeats=5,
+        num_prop_repeats=30,
         betas=betas,
         inner_moves=[StretchMove(),],
         logm1_lims = None,
@@ -443,7 +443,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     base_file_name = "test_emri"
     file_store_dir = head_dir
 
-    gpus = [1]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -451,7 +451,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 20
+    nwalkers = 10
     ntemps = 1
 
     window_type = "tukey"
@@ -502,8 +502,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     }
 
     trim_kwargs = {
-        "duration": 0.02,  # seconds — duration to trim from each end
-        "is_percent": True,  # If True, 'duration' is interpreted as a percentage of the total signal length
+        "duration": 200 * 3600,  # seconds — duration to trim from each end
+        "is_percent": False,  # If True, 'duration' is interpreted as a percentage of the total signal length
         "trimming_type": "from_each_end",  # "from_each_end" or "from_start"
     }
 
