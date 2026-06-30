@@ -1030,7 +1030,7 @@ class FDSettings(DomainSettingsBase):
             self.ind_min = int(np.ceil(value / self.df))
         else:
             self.ind_min = 0
-        self._min_freq = value
+        self._min_freq = self.ind_min * self.df
 
     @property
     def max_freq(self) -> Optional[float]:
@@ -1048,7 +1048,7 @@ class FDSettings(DomainSettingsBase):
             self.ind_max = int(value / self.df)
         else:
             self.ind_max = (self.N - 1)
-        self._max_freq = value
+        self._max_freq = self.ind_max * self.df
 
     @property
     def ind_min(self) -> int:
@@ -1551,7 +1551,7 @@ class STFTSettings(DomainSettingsBase):
             self.ind_min = int(np.ceil(value / self.df))
         else:
             self.ind_min = 0
-        self._min_freq = value
+        self._min_freq = self.ind_min * self.df
 
     @property
     def max_freq(self) -> Optional[float]:
@@ -1569,7 +1569,7 @@ class STFTSettings(DomainSettingsBase):
             self.ind_max = int(value / self.df)
         else:
             self.ind_max = (self.NF - 1)
-        self._max_freq = value
+        self._max_freq = self.ind_max * self.df
 
     @property
     def ind_min(self) -> int:
