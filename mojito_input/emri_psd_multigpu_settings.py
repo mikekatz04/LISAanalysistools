@@ -1,5 +1,4 @@
 import h5py
-from lisatools.globalfit.moves.addremovemove import MultiGPUResidualAddRemoveMove
 import numpy as np
 import shutil
 import logging
@@ -30,7 +29,7 @@ from eryn.moves.tempering import make_ladder
 
 from lisatools.domains import STFTSettings, FDSettings
 from lisatools.sensitivity import XYZSensitivityBackend
-from lisatools.globalfit.moves import GFCombineMove, MultiGPUPSDMove, TDMBHSpecialMove
+from lisatools.globalfit.moves import GFCombineMove, MultiGPUPSDMove, TDMBHSpecialMove, EMRISpecialMove
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
 from lisatools.globalfit.recipe_steps import emri_catalogue_to_sampling_basis, subtract_initial_signal
 from lisatools.utils.constants import YRSID_SI
@@ -156,10 +155,14 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         pad_out_of_prior=True,
         run_async=True,
         run_threaded=True,
-        randomize_split=True
+        randomize_split=True,
+        # Cap concurrent EMRI waveform+likelihood evaluations per GPU to bound
+        # peak device memory; None runs all of a split's walkers at once. With
+        # >1 GPU this still runs num_gpus * batch_size_per_gpu walkers in parallel.
+        batch_size_per_gpu=4,
     )
 
-    emri_pe_move = MultiGPUResidualAddRemoveMove(**emri_move_kwargs)
+    emri_pe_move = EMRISpecialMove(**emri_move_kwargs)
     emri_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     #_, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state, permute_every=40)
