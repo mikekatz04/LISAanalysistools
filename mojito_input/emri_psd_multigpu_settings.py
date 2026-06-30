@@ -63,31 +63,31 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     permute_every: int = 20
 
     emri_info = curr.source_info["emri"]
-    psd_info = curr.source_info["psd"]
+    # psd_info = curr.source_info["psd"]
 
-    effective_ndim = engine_info.ndims["psd"]
-    temperature_control = TemperatureControl(
-        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
-    )
+    # effective_ndim = engine_info.ndims["psd"]
+    # temperature_control = TemperatureControl(
+    #     effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+    # )
 
-    psd_move_kwargs = dict(
-        num_repeats=psd_info.num_prop_repeats,
-        permute_every=permute_every,
-        live_dangerously=True,
-        psd_transform_fn=psd_info.transform,
-        temperature_control=temperature_control,
-        use_gpu=True,
-        run_async=True,
-        run_threaded=False
-    )
+    # psd_move_kwargs = dict(
+    #     num_repeats=psd_info.num_prop_repeats,
+    #     permute_every=permute_every,
+    #     live_dangerously=True,
+    #     psd_transform_fn=psd_info.transform,
+    #     temperature_control=temperature_control,
+    #     use_gpu=True,
+    #     run_async=True,
+    #     run_threaded=False
+    # )
 
-    psd_search_move = MultiGPUPSDMove(
-        acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
-    )
-    psd_pe_move = MultiGPUPSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
+    # psd_search_move = MultiGPUPSDMove(
+    #     acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
+    # )
+    # psd_pe_move = MultiGPUPSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
 
-    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
-    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
+    # psd_search_move.accepted = np.zeros((ntemps, nwalkers))
+    # psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     #psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors, permute_every=50)
 
