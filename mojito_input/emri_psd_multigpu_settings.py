@@ -604,14 +604,14 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "emri": emri_setup,
-            "psd": psd_setup,
+            #"psd": psd_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,
         setup_function=setup_recipe,
         source_metadata={
             "emri": emri_metadata,
-            "psd": psd_metadata,
+            #"psd": psd_metadata,
         }
     )
 
