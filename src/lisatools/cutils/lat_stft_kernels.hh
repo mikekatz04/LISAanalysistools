@@ -57,6 +57,12 @@
 #define N_PARAMS_MAX 20
 #endif
 
+// Max response sub-samples per STFT segment for the FFTColumn on-stack buffer
+// (design 2026-07-01). Bounds register/local pressure; n_sub is clamped to it.
+#ifndef STFT_FFT_NSUB_MAX
+#define STFT_FFT_NSUB_MAX 64
+#endif
+
 // ---------------------------------------------------------------------------
 // Self-contained in-block complex sum reduction (GPU only; the CPU mirror reads
 // the single accumulator directly). Standalone (no dependency on domains.cu's
@@ -229,12 +235,67 @@ struct FFTColumn {
         int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase,
         cmplx* d_h_tmp, cmplx* h_h_tmp, int tid)
     {
-        // Filled in Task 2. Stub keeps the TU compiling before FFTColumn is wired.
-        (void) src; (void) fresnel; (void) stft; (void) params; (void) k; (void) u;
-        (void) v; (void) link_space_craft_rec; (void) link_space_craft_em; (void) bin_i;
-        (void) time_i; (void) t_here; (void) data_index; (void) noise_index;
-        (void) n_side_bins; (void) n_sub; (void) window_factor;
-        (void) freq_from_tdi_phase; (void) d_h_tmp; (void) h_h_tmp; (void) tid;
+        (void) window_factor;  // rectangular prototype; per-sample window is w_m=1.
+        double dt = stft->dt;
+        double df = stft->df;
+        double f_min = stft->f_min;
+        int num_freqs = stft->num_freqs;
+
+        int N = n_sub;
+        if (N < 1) N = 1;
+        if (N > STFT_FFT_NSUB_MAX) N = STFT_FFT_NSUB_MAX;
+        double dts_sub = dt / (double) N;
+
+        // Carrier bin from the (Doppler-corrected) TDI-phase frequency at t_here.
+        cmplx tdi_center[3];
+        double f0, fdot0;
+        src.get_tdi_Xf_single(&tdi_center[0], t_here, params, k, u, v,
+                              link_space_craft_rec, link_space_craft_em, bin_i);
+        stft_pixel_freq_fdot<SourceT>(
+            src, t_here, params, k, u, v,
+            link_space_craft_rec, link_space_craft_em, bin_i,
+            tdi_center, /*ch_ref=*/0, dt, freq_from_tdi_phase, &f0, &fdot0);
+        int freq_j = stft->get_freq_index(f0);
+
+        // Sample conj(response) on the N_sub sub-grid once (reused across bins).
+        // Midpoint quadrature (tau_m = t_here + (m+0.5)*dts_sub): 2nd-order accurate
+        // Riemann sum of the per-segment integral, vs 1st-order for left endpoints.
+        cmplx slow[3 * STFT_FFT_NSUB_MAX];
+        for (int m = 0; m < N; ++m)
+        {
+            double tau = t_here + ((double) m + 0.5) * dts_sub;
+            cmplx tv[3];
+            src.get_tdi_Xf_single(&tv[0], tau, params, k, u, v,
+                                  link_space_craft_rec, link_space_craft_em, bin_i);
+            for (int c = 0; c < 3; ++c)
+            {
+                cmplx s = gcmplx::conj(tv[c]);          // Fresnel convention
+                if (!isfinite(s.real()) || !isfinite(s.imag()))
+                    s = cmplx(0.0, 0.0);                 // NaN scrub (mirror gbfd)
+                slow[c * STFT_FFT_NSUB_MAX + m] = s;
+            }
+        }
+
+        // Targeted DFT: only the (2*n_side_bins+1) bins around the carrier.
+        cmplx col_val[3];
+        for (int diff = -n_side_bins; diff <= +n_side_bins; diff += 1)
+        {
+            int freq_j_here = freq_j + diff;
+            if ((freq_j_here < 0) || (freq_j_here > num_freqs - 1)) continue;
+            double freq_here = f_min + freq_j_here * df;
+            for (int c = 0; c < 3; ++c) col_val[c] = cmplx(0.0, 0.0);
+            for (int m = 0; m < N; ++m)
+            {
+                double tau = t_here + ((double) m + 0.5) * dts_sub;
+                cmplx ph = gcmplx::polar(1.0, -2.0 * M_PI * freq_here * tau);
+                for (int c = 0; c < 3; ++c)
+                    col_val[c] = col_val[c] + slow[c * STFT_FFT_NSUB_MAX + m] * ph;
+            }
+            for (int c = 0; c < 3; ++c)
+                col_val[c] = 0.5 * dts_sub * col_val[c];
+            stft->add_ip_contrib(d_h_tmp, h_h_tmp, col_val,
+                                 time_i, freq_j_here, data_index, noise_index);
+        }
     }
 };
 
@@ -385,6 +446,101 @@ inline void stft_get_ll_impl(
         d_h_out, h_h_out, orbits, tdi_config, fresnel, stft,
         params_all, data_index_all, noise_index_all,
         num_bin, nparams, T, t_ref, n_side_bins, window_factor, freq_from_tdi_phase);
+#endif
+}
+
+// ===========================================================================
+// get_ll (FFT-per-column variant): same (d|h),(h|h) surface as stft_get_ll,
+// but the per-column template is a targeted DFT of the sub-sampled windowed
+// response (FFTColumn policy) instead of the analytic Fresnel per-pixel value.
+// ===========================================================================
+template <class SourceT>
+CUDA_KERNEL
+void stft_get_ll_fft_kernel(
+    cmplx* d_h_out, cmplx* h_h_out,
+    Orbits* orbits, TDIConfig* tdi_config,
+    STFTFresnel* fresnel, STFTDomain* stft,
+    double* params_all, int* data_index_all, int* noise_index_all,
+    int num_bin, int nparams, double T, double t_ref,
+    int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase)
+{
+    CUDA_SHARED cmplx d_h_tmp[NUM_THREADS_HERE];
+    CUDA_SHARED cmplx h_h_tmp[NUM_THREADS_HERE];
+    CUDA_SHARED double params[N_PARAMS_MAX];
+
+    SourceT src(orbits, tdi_config, T, t_ref);
+
+    CUDA_SHARED int link_space_craft_rec[NLINKS];
+    CUDA_SHARED int link_space_craft_em[NLINKS];
+    src.fill_link_arrays(link_space_craft_rec, link_space_craft_em);
+    CUDA_SYNC_THREADS;
+
+#ifdef __CUDACC__
+    int tid = threadIdx.x;
+#else
+    int tid = 0;
+#endif
+
+    for (int bin_i = BLOCK_START_X; bin_i < num_bin; bin_i += GRID_INCR_X)
+    {
+        int data_index = data_index_all[bin_i];
+        int noise_index = noise_index_all[bin_i];
+        for (int i = THREAD_START_X; i < nparams; i += BLOCK_INCR_X)
+            params[i] = params_all[bin_i * nparams + i];
+        CUDA_SYNC_THREADS;
+
+        cmplx d_h_val, h_h_val;
+        stft_eval_block_ll<SourceT, FFTColumn>(
+            src, fresnel, stft, params,
+            link_space_craft_rec, link_space_craft_em, bin_i,
+            data_index, noise_index,
+            n_side_bins, window_factor, freq_from_tdi_phase,
+            d_h_tmp, h_h_tmp, tid, &d_h_val, &h_h_val, n_sub);
+
+        if (tid == 0)
+        {
+            d_h_out[bin_i] = d_h_val;
+            h_h_out[bin_i] = h_h_val;
+        }
+        CUDA_SYNC_THREADS;
+    }
+}
+
+template <class SourceT>
+inline void stft_get_ll_fft_impl(
+    cmplx* d_h_out, cmplx* h_h_out,
+    Orbits* orbits, TDIConfig* tdi_config,
+    STFTFresnel* fresnel, STFTDomain* stft,
+    double* params_all, int* data_index_all, int* noise_index_all,
+    int num_bin, int nparams, double T, double t_ref,
+    int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase)
+{
+#ifdef __CUDACC__
+    static Orbits*      orbits_gpu     = nullptr;
+    static TDIConfig*   tdi_config_gpu = nullptr;
+    static STFTFresnel* fresnel_gpu    = nullptr;
+    static STFTDomain*  stft_gpu       = nullptr;
+    if (orbits_gpu     == nullptr) gpuErrchk(cudaMalloc(&orbits_gpu,     sizeof(Orbits)));
+    if (tdi_config_gpu == nullptr) gpuErrchk(cudaMalloc(&tdi_config_gpu, sizeof(TDIConfig)));
+    if (fresnel_gpu    == nullptr) gpuErrchk(cudaMalloc(&fresnel_gpu,    sizeof(STFTFresnel)));
+    if (stft_gpu       == nullptr) gpuErrchk(cudaMalloc(&stft_gpu,       sizeof(STFTDomain)));
+    gpuErrchk(cudaMemcpy(orbits_gpu,     orbits,     sizeof(Orbits),     cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(tdi_config_gpu, tdi_config, sizeof(TDIConfig),  cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(fresnel_gpu,    fresnel,    sizeof(STFTFresnel), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(stft_gpu,       stft,       sizeof(STFTDomain), cudaMemcpyHostToDevice));
+
+    dim3 grid((unsigned) num_bin, 1u, 1u);
+    stft_get_ll_fft_kernel<SourceT><<<grid, NUM_THREADS_HERE>>>(
+        d_h_out, h_h_out, orbits_gpu, tdi_config_gpu, fresnel_gpu, stft_gpu,
+        params_all, data_index_all, noise_index_all,
+        num_bin, nparams, T, t_ref, n_side_bins, n_sub, window_factor, freq_from_tdi_phase);
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaGetLastError());
+#else
+    stft_get_ll_fft_kernel<SourceT>(
+        d_h_out, h_h_out, orbits, tdi_config, fresnel, stft,
+        params_all, data_index_all, noise_index_all,
+        num_bin, nparams, T, t_ref, n_side_bins, n_sub, window_factor, freq_from_tdi_phase);
 #endif
 }
 
