@@ -166,6 +166,17 @@ CUDA_DEVICE void stft_pixel_freq_fdot(
         tdi_center, ch_ref, f_astro, fdot_astro, f0_out, fdot0_out);
 }
 
+// Integer power of a unit-modulus complex number via a short recurrence (|z|==1
+// so z^{-k} = conj(z)^k). Used by FFTColumn's twiddle-recurrence DFT; |k| <= n_side.
+CUDA_DEVICE inline cmplx stft_unit_cpow(cmplx z, int k)
+{
+    cmplx r(1.0, 0.0);
+    cmplx b = (k >= 0) ? z : gcmplx::conj(z);
+    int n = (k >= 0) ? k : -k;
+    for (int i = 0; i < n; ++i) r = r * b;
+    return r;
+}
+
 // ===========================================================================
 // Compile-time column-producer policies (design §4). The shared driver
 // stft_eval_block_ll<SourceT, ColumnProducer> delegates the per-column inner
@@ -294,23 +305,42 @@ struct FFTColumn {
             }
         }
 
-        // Targeted DFT: only the (2*n_side_bins+1) bins around the carrier.
+        // Heterodyne to the center carrier bin (freq_j) IN PLACE: 1 sincos per
+        // sub-sample. slow[] now holds the demodulated (near-DC) column.
+        double f_center = f_min + freq_j * df;
+        for (int m = 0; m < N; ++m)
+        {
+            double tau = t_here + ((double) m + 0.5) * dts_sub;
+            cmplx het = gcmplx::polar(1.0, -2.0 * M_PI * f_center * tau);
+            for (int c = 0; c < 3; ++c)
+                slow[c * STFT_FFT_NSUB_MAX + m] = slow[c * STFT_FFT_NSUB_MAX + m] * het;
+        }
+
+        // Targeted DFT of the demodulated column via a twiddle recurrence -- only
+        // the (2*n_side_bins+1) bins near the carrier, TRANSCENDENTAL-FREE inside:
+        //   bin(freq_j+diff) = 0.5*dts_sub * base^diff * sum_m demod[m] * (W^diff)^m,
+        //   W = exp(-2pi i/N),  base = exp(-2pi i (df*t_here + 0.5/N)).
+        // Identical to the direct DFT (df*tau_m = df*t_here + (m+0.5)/N since
+        // df*stft_dt = 1). sincos/column: (2*n_side+1)*N  ->  N + 2.
+        cmplx W = gcmplx::polar(1.0, -2.0 * M_PI / (double) N);
+        cmplx base = gcmplx::polar(1.0, -2.0 * M_PI * (df * t_here + 0.5 / (double) N));
         cmplx col_val[3];
         for (int diff = -n_side_bins; diff <= +n_side_bins; diff += 1)
         {
             int freq_j_here = freq_j + diff;
             if ((freq_j_here < 0) || (freq_j_here > num_freqs - 1)) continue;
-            double freq_here = f_min + freq_j_here * df;
+            cmplx Wd = stft_unit_cpow(W, diff);
+            cmplx scale = (0.5 * dts_sub) * stft_unit_cpow(base, diff);
             for (int c = 0; c < 3; ++c) col_val[c] = cmplx(0.0, 0.0);
+            cmplx tw(1.0, 0.0);
             for (int m = 0; m < N; ++m)
             {
-                double tau = t_here + ((double) m + 0.5) * dts_sub;
-                cmplx ph = gcmplx::polar(1.0, -2.0 * M_PI * freq_here * tau);
                 for (int c = 0; c < 3; ++c)
-                    col_val[c] = col_val[c] + slow[c * STFT_FFT_NSUB_MAX + m] * ph;
+                    col_val[c] = col_val[c] + slow[c * STFT_FFT_NSUB_MAX + m] * tw;
+                tw = tw * Wd;
             }
             for (int c = 0; c < 3; ++c)
-                col_val[c] = 0.5 * dts_sub * col_val[c];
+                col_val[c] = scale * col_val[c];
             stft->add_ip_contrib(d_h_tmp, h_h_tmp, col_val,
                                  time_i, freq_j_here, data_index, noise_index);
         }
