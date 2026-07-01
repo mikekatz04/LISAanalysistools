@@ -786,9 +786,21 @@ cmplx STFTFresnel::get_windowed_fourier_value(double amp, double phase0,
   cmplx right_minus_shift = get_phase_kernel_product(
       f + f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
 
+  // The right-ramp half-cosine is referenced to the segment END,
+  // cos(pi*(t_end - t)/taper). Re-expressed as frequency shifts referenced to
+  // the Fourier origin t0 it carries constant phases exp(-/+ 2 pi i f_taper*dt)
+  // on the (f -/+ f_taper) terms. Those are unity iff f_taper*dt = 1/alpha is an
+  // integer (true for all historical alphas: 0.1, 0.5, 1.0); omitting them for
+  // an off-grid taper silently degraded the windowed template to mm ~ 1e-2
+  // (found 2026-07-02 with taper = 1e4 s at dt = 1 day, alpha = 0.2315).
+  double taper_rot = 2.0 * M_PI * f_taper * dt;
+  cmplx right_rot_p = gcmplx::polar(1.0, -taper_rot);  // multiplies (f - f_taper)
+  cmplx right_rot_m = gcmplx::polar(1.0, +taper_rot);  // multiplies (f + f_taper)
+
   cmplx out = overall_factor * (rectangular - 0.5 * (left_dc + right_dc) -
                                 0.25 * (left_plus_shift + left_minus_shift +
-                                        right_plus_shift + right_minus_shift));
+                                        right_rot_p * right_plus_shift +
+                                        right_rot_m * right_minus_shift));
   return out;
 }
 
