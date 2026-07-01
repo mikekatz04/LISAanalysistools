@@ -264,10 +264,7 @@ CUDA_DEVICE void stft_eval_block_ll(
 
     double t0 = stft->t0;
     double dt = stft->dt;
-    double df = stft->df;
-    double f_min = stft->f_min;
     int num_times = stft->num_times;
-    int num_freqs = stft->num_freqs;
 
     d_h_tmp[tid] = cmplx(0.0, 0.0);
     h_h_tmp[tid] = cmplx(0.0, 0.0);
