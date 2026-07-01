@@ -161,49 +161,34 @@ CUDA_DEVICE void stft_pixel_freq_fdot(
 }
 
 // ===========================================================================
-// Per-binary (d|h),(h|h) evaluation for one parameter vector (already loaded
-// into the shared `params`). Zeroes the supplied scratch, runs the time x
-// side-freq x channel Fresnel loop, reduces, and writes the 4*diff_comp-scaled
-// (d|h),(h|h) into *d_h_val,*h_h_val (broadcast to all threads on GPU; on CPU
-// tid==0 holds the sum). Recomputes the sky vectors from `params` each call so
-// it is reusable after a parameter perturbation (the get_ll gradient path).
-// Shared by stft_get_ll_kernel and stft_get_ll_grad_kernel so the gradient's
-// forward evaluation is byte-identical to get_ll.
+// Compile-time column-producer policies (design §4). The shared driver
+// stft_eval_block_ll<SourceT, ColumnProducer> delegates the per-column inner
+// computation to ColumnProducer::produce. FresnelColumn reproduces the merged
+// analytic per-pixel path byte-for-byte; FFTColumn (Task 2) is the targeted-DFT
+// generator. Zero runtime cost — the policy is resolved at compile time.
 // ===========================================================================
-template <class SourceT>
-CUDA_DEVICE void stft_eval_block_ll(
-    SourceT& src, STFTFresnel* fresnel, STFTDomain* stft,
-    double* params,
-    int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
-    int data_index, int noise_index,
-    int n_side_bins, double window_factor, bool freq_from_tdi_phase,
-    cmplx* d_h_tmp, cmplx* h_h_tmp, int tid,
-    cmplx* d_h_val, cmplx* h_h_val)
-{
-    cmplx tdi_channel_val[3];
-    double tdi_channel_amp[3];
-    double tdi_channel_phase[3];
-    cmplx fresnel_val[3];
-    double f0, fdot0;
-    Vec k(0.0, 0.0, 0.0);
-    Vec u(0.0, 0.0, 0.0);
-    Vec v(0.0, 0.0, 0.0);
-
-    double t0 = stft->t0;
-    double dt = stft->dt;
-    double df = stft->df;
-    double f_min = stft->f_min;
-    int num_times = stft->num_times;
-    int num_freqs = stft->num_freqs;
-
-    d_h_tmp[tid] = cmplx(0.0, 0.0);
-    h_h_tmp[tid] = cmplx(0.0, 0.0);
-    CUDA_SYNC_THREADS;
-
-    src.get_sky_vectors(&k, &u, &v, params);
-    for (int time_i = THREAD_START_X; time_i < num_times; time_i += BLOCK_INCR_X)
+struct FresnelColumn {
+    template <class SourceT>
+    static CUDA_DEVICE void produce(
+        SourceT& src, STFTFresnel* fresnel, STFTDomain* stft,
+        double* params, Vec k, Vec u, Vec v,
+        int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
+        int time_i, double t_here, int data_index, int noise_index,
+        int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase,
+        cmplx* d_h_tmp, cmplx* h_h_tmp, int tid)
     {
-        double t_here = t0 + time_i * dt;
+        (void) n_sub;  // Fresnel path ignores the FFT sub-sample count.
+        cmplx tdi_channel_val[3];
+        double tdi_channel_amp[3];
+        double tdi_channel_phase[3];
+        cmplx fresnel_val[3];
+        double f0, fdot0;
+
+        double dt = stft->dt;
+        double df = stft->df;
+        double f_min = stft->f_min;
+        int num_freqs = stft->num_freqs;
+
         src.get_tdi_Xf_single(&tdi_channel_val[0], t_here, params, k, u, v,
                               link_space_craft_rec, link_space_craft_em, bin_i);
 
@@ -231,6 +216,73 @@ CUDA_DEVICE void stft_eval_block_ll(
                                      time_i, freq_j_here, data_index, noise_index);
             }
         }
+    }
+};
+
+struct FFTColumn {
+    template <class SourceT>
+    static CUDA_DEVICE void produce(
+        SourceT& src, STFTFresnel* fresnel, STFTDomain* stft,
+        double* params, Vec k, Vec u, Vec v,
+        int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
+        int time_i, double t_here, int data_index, int noise_index,
+        int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase,
+        cmplx* d_h_tmp, cmplx* h_h_tmp, int tid)
+    {
+        // Filled in Task 2. Stub keeps the TU compiling before FFTColumn is wired.
+        (void) src; (void) fresnel; (void) stft; (void) params; (void) k; (void) u;
+        (void) v; (void) link_space_craft_rec; (void) link_space_craft_em; (void) bin_i;
+        (void) time_i; (void) t_here; (void) data_index; (void) noise_index;
+        (void) n_side_bins; (void) n_sub; (void) window_factor;
+        (void) freq_from_tdi_phase; (void) d_h_tmp; (void) h_h_tmp; (void) tid;
+    }
+};
+
+// ===========================================================================
+// Per-binary (d|h),(h|h) evaluation for one parameter vector (already loaded
+// into the shared `params`). Zeroes the supplied scratch, runs the time x
+// side-freq x channel Fresnel loop, reduces, and writes the 4*diff_comp-scaled
+// (d|h),(h|h) into *d_h_val,*h_h_val (broadcast to all threads on GPU; on CPU
+// tid==0 holds the sum). Recomputes the sky vectors from `params` each call so
+// it is reusable after a parameter perturbation (the get_ll gradient path).
+// Shared by stft_get_ll_kernel and stft_get_ll_grad_kernel so the gradient's
+// forward evaluation is byte-identical to get_ll.
+// ===========================================================================
+template <class SourceT, class ColumnProducer = FresnelColumn>
+CUDA_DEVICE void stft_eval_block_ll(
+    SourceT& src, STFTFresnel* fresnel, STFTDomain* stft,
+    double* params,
+    int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
+    int data_index, int noise_index,
+    int n_side_bins, double window_factor, bool freq_from_tdi_phase,
+    cmplx* d_h_tmp, cmplx* h_h_tmp, int tid,
+    cmplx* d_h_val, cmplx* h_h_val, int n_sub = 0)
+{
+    Vec k(0.0, 0.0, 0.0);
+    Vec u(0.0, 0.0, 0.0);
+    Vec v(0.0, 0.0, 0.0);
+
+    double t0 = stft->t0;
+    double dt = stft->dt;
+    double df = stft->df;
+    double f_min = stft->f_min;
+    int num_times = stft->num_times;
+    int num_freqs = stft->num_freqs;
+
+    d_h_tmp[tid] = cmplx(0.0, 0.0);
+    h_h_tmp[tid] = cmplx(0.0, 0.0);
+    CUDA_SYNC_THREADS;
+
+    src.get_sky_vectors(&k, &u, &v, params);
+    for (int time_i = THREAD_START_X; time_i < num_times; time_i += BLOCK_INCR_X)
+    {
+        double t_here = t0 + time_i * dt;
+        ColumnProducer::template produce<SourceT>(
+            src, fresnel, stft, params, k, u, v,
+            link_space_craft_rec, link_space_craft_em, bin_i,
+            time_i, t_here, data_index, noise_index,
+            n_side_bins, n_sub, window_factor, freq_from_tdi_phase,
+            d_h_tmp, h_h_tmp, tid);
     }
     CUDA_SYNC_THREADS;
 #ifdef __CUDACC__
