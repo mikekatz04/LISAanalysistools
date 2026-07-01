@@ -33,7 +33,8 @@
 // SourceT::get_f / get_fdot (the legacy astrophysical-only behaviour).
 
 #include "domains.hpp"            // STFTSettings / STFTDomain / STFTFresnel + global.hpp (cmplx, CUDA_* macros, gcmplx)
-#include "lat_tdi_on_the_fly.hh"  // LISATDIonTheFly base (SourceT) + Vec / Orbits / TDIConfig
+#include "lat_tdi_on_the_fly.hh"  // LISATDIonTheFly base (SourceT) + Vec / Orbits / TDIConfig + OrbitsSplineCache
+#include "lat_chunked_het_kernels.hh"  // populate_orbit_spline_cache (+ wdm_fit_cubic_spline) for FFTColumn's cached orbit path
 
 // blockDim.x for these kernels (GPU) / single-thread CPU mirror. Normally
 // already defined by lat_chunked_het_kernels.hh (pulled in ahead of this header
@@ -61,6 +62,12 @@
 // (design 2026-07-01). Bounds register/local pressure; n_sub is clamped to it.
 #ifndef STFT_FFT_NSUB_MAX
 #define STFT_FFT_NSUB_MAX 64
+#endif
+
+// Max orbit spline-cache control points for FFTColumn's cached get_tdi path
+// (mirrors FAST_WDM_N_CP_ORBIT_MAX). At 48 the shared buffers add ~23 KB.
+#ifndef STFT_ORBIT_NCP_MAX
+#define STFT_ORBIT_NCP_MAX 48
 #endif
 
 // ---------------------------------------------------------------------------
@@ -191,10 +198,11 @@ struct FresnelColumn {
         double* params, Vec k, Vec u, Vec v,
         int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
         int time_i, double t_here, int data_index, int noise_index,
-        int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase,
+        int n_side_bins, int n_sub, OrbitsSplineCache* orbit_cache,
+        double window_factor, bool freq_from_tdi_phase,
         cmplx* d_h_tmp, cmplx* h_h_tmp, int tid)
     {
-        (void) n_sub;  // Fresnel path ignores the FFT sub-sample count.
+        (void) n_sub; (void) orbit_cache;  // Fresnel path ignores the FFT-only knobs.
         cmplx tdi_channel_val[3];
         double tdi_channel_amp[3];
         double tdi_channel_phase[3];
@@ -243,7 +251,8 @@ struct FFTColumn {
         double* params, Vec k, Vec u, Vec v,
         int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
         int time_i, double t_here, int data_index, int noise_index,
-        int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase,
+        int n_side_bins, int n_sub, OrbitsSplineCache* orbit_cache,
+        double window_factor, bool freq_from_tdi_phase,
         cmplx* d_h_tmp, cmplx* h_h_tmp, int tid)
     {
         // Window = free time-domain multiply (design 2026-07-01). Match the analysis
@@ -294,8 +303,13 @@ struct FFTColumn {
                 { double sn = (t_here + dt - tau) / taper; w_m = 0.5 * (1.0 - cos(M_PI * sn)); }
             }
             cmplx tv[3];
-            src.get_tdi_Xf_single(&tv[0], tau, params, k, u, v,
-                                  link_space_craft_rec, link_space_craft_em, bin_i);
+            if (orbit_cache != nullptr)
+                src.get_tdi_Xf_single_cached(&tv[0], tau, params, k, u, v,
+                                             link_space_craft_rec, link_space_craft_em,
+                                             bin_i, orbit_cache);
+            else
+                src.get_tdi_Xf_single(&tv[0], tau, params, k, u, v,
+                                      link_space_craft_rec, link_space_craft_em, bin_i);
             for (int c = 0; c < 3; ++c)
             {
                 cmplx s = w_m * gcmplx::conj(tv[c]);    // Fresnel convention + window
@@ -365,7 +379,8 @@ CUDA_DEVICE void stft_eval_block_ll(
     int data_index, int noise_index,
     int n_side_bins, double window_factor, bool freq_from_tdi_phase,
     cmplx* d_h_tmp, cmplx* h_h_tmp, int tid,
-    cmplx* d_h_val, cmplx* h_h_val, int n_sub = 0)
+    cmplx* d_h_val, cmplx* h_h_val, int n_sub = 0,
+    OrbitsSplineCache* orbit_cache = nullptr)
 {
     Vec k(0.0, 0.0, 0.0);
     Vec u(0.0, 0.0, 0.0);
@@ -387,7 +402,7 @@ CUDA_DEVICE void stft_eval_block_ll(
             src, fresnel, stft, params, k, u, v,
             link_space_craft_rec, link_space_craft_em, bin_i,
             time_i, t_here, data_index, noise_index,
-            n_side_bins, n_sub, window_factor, freq_from_tdi_phase,
+            n_side_bins, n_sub, orbit_cache, window_factor, freq_from_tdi_phase,
             d_h_tmp, h_h_tmp, tid);
     }
     CUDA_SYNC_THREADS;
@@ -510,7 +525,7 @@ void stft_get_ll_fft_kernel(
     STFTFresnel* fresnel, STFTDomain* stft,
     double* params_all, int* data_index_all, int* noise_index_all,
     int num_bin, int nparams, double T, double t_ref,
-    int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase)
+    int n_side_bins, int n_sub, int n_cp_orbit, double window_factor, bool freq_from_tdi_phase)
 {
     CUDA_SHARED cmplx d_h_tmp[NUM_THREADS_HERE];
     CUDA_SHARED cmplx h_h_tmp[NUM_THREADS_HERE];
@@ -529,6 +544,40 @@ void stft_get_ll_fft_kernel(
     int tid = 0;
 #endif
 
+    // Orbit spline cache: built ONCE over the analysis span [t0, t0+NT*dt] and
+    // shared across all binaries (the orbit is source-independent). Replaces the
+    // per-sub-sample orbit / light-travel-time lookups inside get_tdi with cheap
+    // cached cubic evals; skipped when n_cp_orbit < 4 (FFTColumn falls back to direct).
+    CUDA_SHARED double orbit_t_cp_buf  [STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_ltt_y_buf [6 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_ltt_c1_buf[6 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_ltt_c2_buf[6 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_ltt_c3_buf[6 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_pos_y_buf [9 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_pos_c1_buf[9 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_pos_c2_buf[9 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_pos_c3_buf[9 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_B_buf     [STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED double orbit_pcr_buf   [8 * STFT_ORBIT_NCP_MAX];
+    CUDA_SHARED OrbitsSplineCache orbit_cache_storage;
+
+    OrbitsSplineCache* orbit_cache_ptr = nullptr;
+    {
+        int n_cp = (n_cp_orbit > STFT_ORBIT_NCP_MAX) ? STFT_ORBIT_NCP_MAX : n_cp_orbit;
+        if (n_cp >= 4)
+        {
+            populate_orbit_spline_cache(
+                &orbit_cache_storage, orbits, stft->t0,
+                (double) stft->num_times * stft->dt, n_cp,
+                orbit_t_cp_buf, orbit_ltt_y_buf, orbit_ltt_c1_buf,
+                orbit_ltt_c2_buf, orbit_ltt_c3_buf, orbit_pos_y_buf,
+                orbit_pos_c1_buf, orbit_pos_c2_buf, orbit_pos_c3_buf,
+                orbit_B_buf, orbit_pcr_buf);
+            CUDA_SYNC_THREADS;
+            orbit_cache_ptr = &orbit_cache_storage;
+        }
+    }
+
     for (int bin_i = BLOCK_START_X; bin_i < num_bin; bin_i += GRID_INCR_X)
     {
         int data_index = data_index_all[bin_i];
@@ -543,7 +592,7 @@ void stft_get_ll_fft_kernel(
             link_space_craft_rec, link_space_craft_em, bin_i,
             data_index, noise_index,
             n_side_bins, window_factor, freq_from_tdi_phase,
-            d_h_tmp, h_h_tmp, tid, &d_h_val, &h_h_val, n_sub);
+            d_h_tmp, h_h_tmp, tid, &d_h_val, &h_h_val, n_sub, orbit_cache_ptr);
 
         if (tid == 0)
         {
@@ -561,7 +610,7 @@ inline void stft_get_ll_fft_impl(
     STFTFresnel* fresnel, STFTDomain* stft,
     double* params_all, int* data_index_all, int* noise_index_all,
     int num_bin, int nparams, double T, double t_ref,
-    int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase)
+    int n_side_bins, int n_sub, int n_cp_orbit, double window_factor, bool freq_from_tdi_phase)
 {
 #ifdef __CUDACC__
     static Orbits*      orbits_gpu     = nullptr;
@@ -581,14 +630,14 @@ inline void stft_get_ll_fft_impl(
     stft_get_ll_fft_kernel<SourceT><<<grid, NUM_THREADS_HERE>>>(
         d_h_out, h_h_out, orbits_gpu, tdi_config_gpu, fresnel_gpu, stft_gpu,
         params_all, data_index_all, noise_index_all,
-        num_bin, nparams, T, t_ref, n_side_bins, n_sub, window_factor, freq_from_tdi_phase);
+        num_bin, nparams, T, t_ref, n_side_bins, n_sub, n_cp_orbit, window_factor, freq_from_tdi_phase);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
     stft_get_ll_fft_kernel<SourceT>(
         d_h_out, h_h_out, orbits, tdi_config, fresnel, stft,
         params_all, data_index_all, noise_index_all,
-        num_bin, nparams, T, t_ref, n_side_bins, n_sub, window_factor, freq_from_tdi_phase);
+        num_bin, nparams, T, t_ref, n_side_bins, n_sub, n_cp_orbit, window_factor, freq_from_tdi_phase);
 #endif
 }
 
