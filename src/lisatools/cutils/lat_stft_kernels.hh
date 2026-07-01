@@ -235,7 +235,12 @@ struct FFTColumn {
         int n_side_bins, int n_sub, double window_factor, bool freq_from_tdi_phase,
         cmplx* d_h_tmp, cmplx* h_h_tmp, int tid)
     {
-        (void) window_factor;  // rectangular prototype; per-sample window is w_m=1.
+        // Window = free time-domain multiply (design 2026-07-01). Match the analysis
+        // window the data STFT used: Tukey when window_alpha>0 (taper_duration =
+        // alpha*dt/2, mirroring get_windowed_fourier_value / scipy.signal.tukey),
+        // else a flat window scaled by window_factor (the rectangular Fresnel path).
+        double window_alpha = fresnel->window_alpha;
+        double taper = fresnel->taper_duration;
         double dt = stft->dt;
         double df = stft->df;
         double f_min = stft->f_min;
@@ -264,12 +269,25 @@ struct FFTColumn {
         for (int m = 0; m < N; ++m)
         {
             double tau = t_here + ((double) m + 0.5) * dts_sub;
+            // Analysis window as a plain per-sample multiply (same segment position
+            // as the data STFT). Tukey taper over [t_here, t_here+taper] and
+            // [t_here+dt-taper, t_here+dt]; flat elsewhere. w_m = window_factor
+            // when rectangular (window_alpha == 0), matching the Fresnel path.
+            double w_m = window_factor;
+            if (window_alpha > 0.0)
+            {
+                w_m = 1.0;
+                if (tau < t_here + taper)
+                { double sn = (tau - t_here) / taper; w_m = 0.5 * (1.0 - cos(M_PI * sn)); }
+                else if (tau > t_here + dt - taper)
+                { double sn = (t_here + dt - tau) / taper; w_m = 0.5 * (1.0 - cos(M_PI * sn)); }
+            }
             cmplx tv[3];
             src.get_tdi_Xf_single(&tv[0], tau, params, k, u, v,
                                   link_space_craft_rec, link_space_craft_em, bin_i);
             for (int c = 0; c < 3; ++c)
             {
-                cmplx s = gcmplx::conj(tv[c]);          // Fresnel convention
+                cmplx s = w_m * gcmplx::conj(tv[c]);    // Fresnel convention + window
                 if (!isfinite(s.real()) || !isfinite(s.imag()))
                     s = cmplx(0.0, 0.0);                 // NaN scrub (mirror gbfd)
                 slow[c * STFT_FFT_NSUB_MAX + m] = s;
