@@ -898,33 +898,26 @@ def setup_recipe(
         isinstance(general_info.domain_settings, WDMSettings)
         and gb_info.gb_wdm_comp is None
     ):
-        import sys
-        if "/Users/mlkatz/Research/sprint_2026" not in sys.path:
-            sys.path.insert(0, "/Users/mlkatz/Research/sprint_2026")
-        from gb_wdm_het import GBWDMHeterodyne
+        # Chunked-het GB likelihood: the INSTALLED GBGPU class (removes a stale
+        # hardcoded sys.path). GBWDMComputations reads Nf/Nt/dt/band/t0 from the domain.
+        from gbgpu.gbcomps import GBWDMComputations
 
         _wdm = general_info.domain_settings
         _t_obs_start = float(getattr(general_info, "t_obs_start", 0.0))
-        # CHUNKED_JAX_CHUNK env knob lets a JAX-backed instance split
-        # the leaf axis for memory; unused on the C++ backends. None
-        # falls through to GBWDMHeterodyne's _resolve_jax_chunk which
-        # honours GBHET_JAX_CHUNK / JAX_GRAD_CHUNK at call time.
-        _jax_chunk_env = os.environ.get("CHUNKED_JAX_CHUNK")
-        _jax_chunk = int(_jax_chunk_env) if _jax_chunk_env else None
-        gb_info.gb_wdm_comp = GBWDMHeterodyne(
-            Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
-            T_full=general_info.Tobs, t_ref_full=gb_info.t0,
+        # The band WDMSettings domain (_wdm) carries Nf/Nt/dt + the active band +
+        # t0; t_ref is the GB phase reference; tdi_config replaces tdi_gen.
+        gb_info.gb_wdm_comp = GBWDMComputations(
+            _wdm,
+            t_ref=gb_info.t0,
             Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
             n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
             N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
-            nchannels=3,
-            force_backend=general_info.force_backend,
-            tdi_gen="2nd generation" if gb_info.use_tdi2 else "1st generation",
-            orbits=general_info.gpu_orbits,
-            t_obs_start=_t_obs_start,
             N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
             N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
-            jax_chunk=_jax_chunk,
+            orbits=general_info.gpu_orbits,
+            tdi_config="2nd generation" if gb_info.use_tdi2 else "1st generation",
+            force_backend=general_info.force_backend,
+            tdi_type="XYZ",
         )
 
     #* ============================== PSD ===============================

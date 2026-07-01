@@ -62,7 +62,11 @@ from lisatools.globalfit.priors.gbpriors import get_fdot_mojito
 from lisatools.sources.utils import evolve_galactic_binary
 from gbgpu.gbcomps import GBWDMComputations, GBFDComputations
 
-from gbsignalhetcomputations import GBSignalHetComputations, recommended_edge_cut
+from gbsignalhetcomputations import recommended_edge_cut          # dev helper
+from gbgpu.gbsignalhetcomputations import GBSignalHetComputations  # INSTALLED class
+# ^ sig-het reference now comes from the GBGPU backend (gb_signal_het_make_reference)
+#   + lisatools window/bin-fold; no Python polyphase. The dev gbsignalhetcomputations
+#   .py is kept only for recommended_edge_cut + the walkthrough explainer's internals.
 from gbfdhetcomputations import GBFDHetComputations  # dense reference (FD_IMPL=dense)
 
 from eryn.ensemble import EnsembleSampler
@@ -243,6 +247,10 @@ def build_method(kind, s):
         domain = WDMSettings(Nf, Nt, dt, t0=data_t0, min_freq=lo_f, max_freq=hi_f,
                              min_time=EC * Nf * dt, max_time=(Nt - EC) * Nf * dt,
                              is_complex=False, force_backend=backend)
+        # SIGHET_REF_IMPL toggles HOW the sig-het reference c0 is built:
+        #   "chunked" (default) -- the chunked-het/polyphase WDM method (active band,
+        #                          full Nt), proven == dense to ~3.7e-16 logL.
+        #   "dense"             -- full-TD reference -> TDSignal.transform(wdm_complex).
         comp = GBSignalHetComputations(
             data_td, p_inj, Nf=Nf, Nt=Nt, dt=dt, t0=data_t0, t_ref=REF,
             orbits=orbits, tdi_config="2nd generation", min_freq=lo_f, max_freq=hi_f,

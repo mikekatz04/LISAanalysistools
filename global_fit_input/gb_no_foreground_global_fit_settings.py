@@ -147,6 +147,8 @@ from lisatools.globalfit.recipe_steps import (
     PERecipeStep,
     RJRecipeStep,
     build_gb_moves,
+    select_gb_injection_subset_by_snr,
+    setup_state_for_injection,
 )
 
 
@@ -160,14 +162,27 @@ from lisatools.globalfit.recipe_steps import (
 # TOBS_TARGET=2.6e6 for ~1 month) without editing this file. Sangria
 # training data is sampled at dt = 5 s.
 TOBS_TARGET = float(os.environ.get("TOBS_TARGET", 90 * 86400.0))
-DT = 5.0
+# dt = 2.5 s matches the mojito L1 GB data (``GB_*_2.5s_L1_*.h5``), so the
+# loaded data grid and the WDM grid stay consistent without a downsample
+# step (mirrors full_year_combined_global_fit_settings.py's DT=2.5).
+DT = 2.5
 
 # ~1-hour wavelet-duration search window for adjust_to_even_bins. The
 # lower bound is the 3600 s the original hand-computed grid used; at the
 # default TOBS_TARGET (90 d) this reproduces Nf=720 / Nt=2160 exactly.
 WAVELET_DUR_BOUNDS = (3600.0, 4400.0)
 
-# Sangria input file (env-overridable).
+# Mojito L1 data folder (env-overridable). The GB galaxy is loaded as the
+# data ("full data"), and ``catalogue["GB"]`` is populated so the GBs can be
+# started at their true catalog points (see setup_recipe). This is the
+# DEFAULT data source for this file.
+MOJITO_DATA_PATH = os.environ.get(
+    "MOJITO_DATA_PATH",
+    "/Users/mkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/",
+)
+
+# Sangria input file (env-overridable) — kept as an available alternative
+# data source (see the commented Sangria block in get_general_erebor_settings).
 LDC_SOURCE_FILE = os.environ.get(
     "LDC_SOURCE_FILE",
     "/Users/mkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5",
@@ -235,6 +250,35 @@ logger.info(
 )
 
 
+# ============================================================
+# *** GB band: narrow, decoupled from the (full) data band ***
+# ============================================================
+# The WDM domain active band above ([MIN_FREQ, MAX_FREQ]) is the DATA band
+# and stays wide ("keep the data as the full data"). The GB f0 band /
+# band_edges are restricted to a few WDM layers around ~7.5 mHz so a single
+# bright GB is easy to visualize while the sampler runs. Because
+# ``GBSetup.init_band_structure`` builds ONE band per WDM layer and raises if
+# the GB range spans < 1 layer, the band is expressed in integer layer units
+# (layer_df = 1/(2*Nf*dt)). GB_N_LAYERS=3 gives 3 sub-bands (1 samplable
+# interior layer + 2 guard layers); bump to n+2 for n samplable layers.
+LAYER_DF = 1.0 / (2 * NF * DT)
+GB_CENTER_FREQ = float(os.environ.get("GB_CENTER_FREQ", 7.5e-3))
+GB_N_LAYERS = int(os.environ.get("GB_N_LAYERS", 3))
+_gb_k_center = int(round(GB_CENTER_FREQ / LAYER_DF))
+_gb_k_lo = _gb_k_center - GB_N_LAYERS // 2
+GB_MIN_FREQ = _gb_k_lo * LAYER_DF
+GB_MAX_FREQ = (_gb_k_lo + GB_N_LAYERS) * LAYER_DF
+logger.info(
+    "GB band: [%.6e, %.6e] Hz (%d WDM layers @ ~%.3f mHz, layer_df=%.4e Hz)",
+    GB_MIN_FREQ, GB_MAX_FREQ, GB_N_LAYERS, GB_CENTER_FREQ * 1e3, LAYER_DF,
+)
+
+# GB special-move debug instrumentation (band residual round-trip ll checks +
+# begin/middle/end band plots). Off by default; set GB_DEBUG=1 to enable. The
+# flag is consumed inside build_gb_moves via the same env var.
+GB_DEBUG = bool(int(os.environ.get("GB_DEBUG", "0")))
+
+
 ################
 
 ### DEFINE RECIPE
@@ -289,51 +333,33 @@ def setup_recipe(
         # instance was built with. To run the JAX-autograd grad/hessian
         # path, build a separate ``GBWDMHeterodyne(force_backend="jax")``
         # and hand it to the Buffer.
-        import sys
-        _scripts_root = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "scripts"
-        )
-        # ``gb_wdm_het`` lives in scripts/gb_chunked_het and imports its
-        # validated chunked-het primitives from
-        # scripts/diagnostics/check_shortened_wdm, so BOTH dirs must be on
-        # sys.path for the GBWDMHeterodyne import to resolve.
-        for _sub in ("gb_chunked_het", "diagnostics"):
-            _d = os.path.abspath(os.path.join(_scripts_root, _sub))
-            if _d not in sys.path:
-                sys.path.insert(0, _d)
-        from gb_wdm_het import GBWDMHeterodyne
+        # Chunked-het GB likelihood: the INSTALLED GBGPU class (no sys.path hack,
+        # no dev gb_wdm_het). GBWDMComputations takes the band WDMSettings domain +
+        # t_ref directly -- the Nf/Nt/ind_*/T_full/t_obs_start args GBWDMHeterodyne
+        # needed are all carried by the domain (Nf/Nt/dt/band/t0).
+        from gbgpu.gbcomps import GBWDMComputations
 
         _wdm = general_info.domain_settings
         # ``data_t0`` is the runtime data start time set by the engine
         # (``times[0]`` after the preprocess trim) — the chunked-het WDM
         # grid must be anchored there, not at 0.
         _t_obs_start = float(getattr(general_info, "data_t0", 0.0))
-        # CHUNKED_JAX_CHUNK env knob lets a JAX-backed instance split
-        # the leaf axis for memory; unused on the C++ backends. None
-        # falls through to GBWDMHeterodyne's _resolve_jax_chunk which
-        # honours GBHET_JAX_CHUNK / JAX_GRAD_CHUNK at call time.
-        _jax_chunk_env = os.environ.get("CHUNKED_JAX_CHUNK")
-        _jax_chunk = int(_jax_chunk_env) if _jax_chunk_env else None
-        gb_info.gb_wdm_comp = GBWDMHeterodyne(
-            Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
-            # Carry the AnalysisContainer's active WDM band so the chunked-het
-            # kernels write/read the restricted (Nf_active, Nt_active) layout
-            # directly (matches GBWDMComputations). Without this the class would
-            # assume the full parent grid and overrun the AC's active buffer.
-            ind_min_f=_wdm.ind_min_f, ind_max_f=_wdm.ind_max_f,
-            ind_min_t=_wdm.ind_min_t, ind_max_t=_wdm.ind_max_t,
-            T_full=general_info.Tobs, t_ref_full=gb_info.t0,
+        # The band WDMSettings domain (_wdm) carries Nf/Nt/dt + the active band
+        # (ind_min_f/ind_max_f/ind_min_t/ind_max_t) + t0 (anchored at data_t0 by the
+        # engine), so GBWDMComputations reads all of that from it directly. t_ref is
+        # the GB phase reference (was t_ref_full). tdi_config replaces tdi_gen.
+        gb_info.gb_wdm_comp = GBWDMComputations(
+            _wdm,
+            t_ref=gb_info.t0,
             Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
             n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
             N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
-            nchannels=3,
-            force_backend=general_info.force_backend,
-            tdi_gen=TDI_GEN_STR,
-            orbits=general_info.gpu_orbits,
-            t_obs_start=_t_obs_start,
             N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
             N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
-            jax_chunk=_jax_chunk,
+            orbits=general_info.gpu_orbits,
+            tdi_config=TDI_GEN_STR,
+            force_backend=general_info.force_backend,
+            tdi_type="XYZ",
         )
         logger.info(
             "Chunked-het GB likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d "
@@ -344,6 +370,23 @@ def setup_recipe(
             gb_info.gb_wdm_comp.N_cp_sig,
             gb_info.gb_wdm_comp.N_cp_orbit,
             _t_obs_start, gb_info.t0,
+        )
+
+    #* ============== START GBs AT TRUE CATALOG POINTS (SNR cut) ==============
+    # Read the GB catalogue, compute optimal SNR (sqrt<h|h>) via the WDM
+    # likelihood for sources inside the (narrow) GB band, cut at optimal
+    # SNR > 3, and inject those as the starting leaves of the "gb" branch —
+    # mirrors how MBH/EMRI/SOBBH start at truth in the full-year settings.
+    # Runs before build_gb_moves so the moves' band setup sees true-point
+    # coords. On a data source without a GB catalogue (e.g. Sangria) this is
+    # a no-op and the state falls back to prior draws.
+    if gb_info.gb_wdm_comp is not None:
+        gb_snr_subset_inds = select_gb_injection_subset_by_snr(
+            curr, acs, gb_info, gb_info.gb_wdm_comp, snr_threshold=3.0
+        )
+        setup_state_for_injection(
+            curr, state, source_type="GB", branch_name="gb",
+            subset_inds=gb_snr_subset_inds, priors=priors,
         )
 
     #* ================================= BUILD MOVES =================================
@@ -449,20 +492,15 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     alpha_lims = [0.0, 2 * np.pi]
     delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
 
-    # GB band runs across the full active band of the parent domain
-    # settings (resolved by GeneralSetup at construction time). The
-    # GBSetup.init_band_structure clamps WDM runs to [ind_min_f,
-    # ind_max_f] automatically; FD runs follow ``min_freq``/``max_freq``
-    # already baked into ``FDSettings``.
+    # GB band: narrow (few WDM layers @ ~7.5 mHz), DECOUPLED from the wide
+    # WDM *data* band so a single bright source is visualizable. These are
+    # the ``start_freq``/``end_freq`` overrides (module-level GB_MIN_FREQ /
+    # GB_MAX_FREQ knobs derived from the WDM layer grid). GBSetup.
+    # init_band_structure clamps the GB band to the WDM active band
+    # automatically; here the GB band is already a strict subset of it.
     domain_settings = general_set.domain_settings
-    if hasattr(domain_settings, "min_freq") and domain_settings.min_freq is not None:
-        start_freq = float(domain_settings.min_freq)
-    else:
-        start_freq = 5e-5
-    if hasattr(domain_settings, "max_freq") and domain_settings.max_freq is not None:
-        end_freq = float(domain_settings.max_freq)
-    else:
-        end_freq = 3e-2
+    start_freq = GB_MIN_FREQ
+    end_freq = GB_MAX_FREQ
 
     oversample = 4
     extra_buffer = 5
@@ -535,10 +573,37 @@ def get_general_erebor_settings() -> GeneralSetup:
     # ``setup_recipe``.
     domain_settings = DOMAIN_CHOICE
 
+    # DEFAULT data source: mojito L1. ``source_types=["GB"]`` loads the whole
+    # GB galaxy TD (one file, ids=[0]) as the data AND populates
+    # ``catalogue["GB"]`` so the GBs can be started at their true catalog
+    # points via setup_state_for_injection. ``frame="icrs"`` matches the GB
+    # sampling basis (alpha/RA, sin_delta, psi ICRS).
+    data_processor_class = L1ProcessingStep
     processor_init_kwargs = dict(
-        data_input_path=LDC_SOURCE_FILE,
-        remove_from_data=["mbhb"],  # keep GB foreground / noise; drop MBHs
+        L1_folder=MOJITO_DATA_PATH,
+        source_types=["GB"],  # add "VGB" to also load verification binaries
+        source_ids=None,      # unused for GB/VGB (single-file galaxy)
+        orbits_class=L1Orbits,
+        orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="icrs"),
+        # NOTE: do NOT pass Tobs here. The engine's preprocess trims
+        # 200 h from each end and then keeps the first ``Tobs`` seconds, so
+        # the final data must be exactly Nf*Nt samples. Pre-trimming to Tobs
+        # at load would leave Tobs-1.44e6 s < Tobs and mismatch the fixed WDM
+        # grid; loading the full file lets preprocess land on exactly Nf*Nt.
     )
+
+    # --- Sangria alternative (kept available; not the default) --------------
+    # To run on the Sangria training data instead, swap the two lines above
+    # for:
+    #     data_processor_class = SangriaProcessingStep
+    #     processor_init_kwargs = dict(
+    #         data_input_path=LDC_SOURCE_FILE,
+    #         remove_from_data=["mbhb"],  # keep GB foreground / noise; drop MBHs
+    #     )
+    # NOTE: SangriaDataLoader does not populate ``catalogue`` — the GB truth
+    # must be read from the HDF5 directly (fp["sky"]["dgb"/"igb"/"vgb"]["cat"],
+    # see gathergalaxy.py:1181-1245) via sangria_gb_catalogue_to_sampling_basis.
+    # -----------------------------------------------------------------------
 
     preprocess_kwargs = dict(normalize=False)
 
@@ -571,7 +636,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         gpu_backend=GPU_BACKEND,
         gpus=gpus,
         fixed_psd_kwargs=fixed_psd_kwargs,
-        data_processor_class=SangriaProcessingStep,
+        data_processor_class=data_processor_class,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
@@ -621,10 +686,13 @@ if __name__ == "__main__":
     settings = get_global_fit_settings()
     print(
         f"GB no-foreground settings constructed OK\n"
-        f"  Tobs = {TOBS:.6e} s  (target {TOBS_TARGET:.6e} s)\n"
+        f"  Tobs = {TOBS:.6e} s  (target {TOBS_TARGET:.6e} s), dt = {DT} s\n"
         f"  WDM grid Nf={NF}, Nt={NT}, wavelet_duration={WAVELET_DURATION:.1f} s\n"
-        f"  Band: [{MIN_FREQ:.3e}, {MAX_FREQ:.3e}] Hz (foreground-free, f > 6 mHz)\n"
+        f"  Data band (WDM domain): [{MIN_FREQ:.3e}, {MAX_FREQ:.3e}] Hz (full data)\n"
+        f"  GB band: [{GB_MIN_FREQ:.6e}, {GB_MAX_FREQ:.6e}] Hz "
+        f"({GB_N_LAYERS} WDM layers @ ~{GB_CENTER_FREQ*1e3:.3f} mHz)\n"
+        f"  Walkers/Temps: NWALKERS={NWALKERS}, NTEMPS={NTEMPS}, GB_DEBUG={GB_DEBUG}\n"
         f"  PSD: FIXED at {FIXED_PSD_PARAMS} (no psd branch, no galfor branch)\n"
         f"  Backend: {GPU_BACKEND} (GPU available={gpu_available})\n"
-        f"  Data: {LDC_SOURCE_FILE}"
+        f"  Data: mojito L1 GB galaxy @ {MOJITO_DATA_PATH}"
     )

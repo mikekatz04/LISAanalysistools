@@ -182,11 +182,15 @@ def main():
 
     # ---- installed signal-het frontend: builds analysis/d_d/sparse_gen/c0/bin- -
     #      fold internally; get_ll(params) returns logL directly. Single source. -
+    # SIGHET_REF_IMPL toggles the reference c0 build: "chunked" (default, the
+    # chunked-het/polyphase WDM method, active band at full Nt; == dense to ~1e-14 --
+    # test_sighet_ref_from_chunked.py) or "dense" (full-TD TDSignal.transform).
     sighet = GBSignalHetComputations(
         data_td, p_inj, Nf=Nf, Nt=Nt, dt=dt, t0=t0, t_ref=t_ref,
         orbits=orbits, tdi_config=tdi_config, min_freq=lo_f, max_freq=hi_f,
         edge_cut=EC, m_active_half_width=M_HALF, nt_layer=Nt_layer,
-        tukey_alpha=TUK, force_backend=backend)
+        tukey_alpha=TUK, force_backend=backend,
+        reference_impl=os.environ.get("SIGHET_REF_IMPL", "chunked"))
 
     ka = sighet._keep_alive
     real_td_cb = ka["real_td_cb"]; window = ka["window"]; td_set = ka["td_set"]
