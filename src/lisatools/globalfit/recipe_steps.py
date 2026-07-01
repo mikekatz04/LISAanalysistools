@@ -523,6 +523,8 @@ def subtract_initial_signal(
                     logger.debug(f"Initial log-likelihood contribution from walker {w}, leaf {leaf}: {ll_here}")
                     acs.add_signal_to_residual(signals_in, data_index=np.array([w]))
                 counter += 1
+
+                acs.free_gpu_memory()
                 
                 # if acs.gpus is not None:
                 #     acs.synchronize()  # Ensure GPU computations are complete before logging
