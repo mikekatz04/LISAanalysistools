@@ -731,10 +731,10 @@ class TDSignal(DomainBase, TDSettings):
         # Check we have enough data
         required_samples = Nsegments * nperseg
 
-        if self.N < required_samples:
-            raise ValueError(
-                f"Not enough data: have {self.N} samples, need {required_samples} for {Nsegments} segments"
-            )
+        # if self.N < required_samples:
+        #     raise ValueError(
+        #         f"Not enough data: have {self.N} samples, need {required_samples} for {Nsegments} segments"
+        #     )
 
         if Nsegments > Nsegments_available:
             # Need to pad
@@ -1753,7 +1753,9 @@ def get_stft_settings(
     dt = float(times[1] - times[0])
 
     big_dt = int(big_dt / dt) * dt  # make sure big_dt is an integer multiple of dt
-    NT = int(np.floor(N / (big_dt / dt)))
+    # now make sure that Tobs is an integer multiple of big_dt
+
+    NT = int(np.ceil(N / (big_dt / dt))) # number of segments
     DF = 1 / big_dt
     nperseg = int(big_dt / dt)
     NF = nperseg // 2 + 1
