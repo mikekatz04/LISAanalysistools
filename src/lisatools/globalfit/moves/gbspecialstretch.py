@@ -752,9 +752,10 @@ class Buffer(LISAToolsParallelModule):
         self.band_buffer[inds_fill] += acs.data_shaped[0][inds_get_data]
         del inds_get_data
 
-        inds_get_psd = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=True)
         self.reset_psd_buffers(inds_fill=inds_fill)
-
+        
+        cp.get_default_memory_pool().free_all_blocks()
+        inds_get_psd = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=True)
         self.psd_buffer[inds_fill] = acs.psd_shaped[0][inds_get_psd]
 
         del inds_get_psd
@@ -1741,6 +1742,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if self.num_bands == 1:
                 remainder = 0
 
+            # delete previous buffer_obj if it exists to free up memory space
+            if tmp > 0:
+                del buffer_obj
+                self.mempool.free_all_blocks()
+            
             # add back in all sources in the cold-chain
             # residual from this group
             # llbef1 = model.analysis_container_arr.likelihood(source_only=True)

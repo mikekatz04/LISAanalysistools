@@ -107,6 +107,7 @@ class HyperMove(GlobalFitMove, Move):
                 logger.info(f"For catalogue {i}, {catalogue_filtered.shape[0]}/{ncat} binaries are above SNR=0.5")
                 self.catalogues[i] = catalogue_filtered
             
+            del acs_max_logl, data_index
             self.first_catalogue_itteration = False
 
         return
@@ -328,11 +329,12 @@ class HyperMove(GlobalFitMove, Move):
         delta_logp = factors + logp_curr - logp_prev
         accepted = delta_logp > np.log(model.random.rand(ntemps, nwalkers))
         
-        # print("Cold chain accepted hyper proposals are", accepted[0])
-        print("Old model coords are", old_coords_model[0,:,0,0])
-        print("New model coords are", new_coords_model[0,:,0,0])
-        # new_coords = deepcopy(state.coords)
-        # new_coords["hyper"] = new_coords_model
+        
+        logger.debug(f"Old model coords are     {old_coords_model[0,:,0,0]}")
+        logger.debug(f"Proposed model coords are {new_coords_model[0,:,0,0]}")
+        model_coords_tmp = deepcopy(old_coords_model)
+        model_coords_tmp[accepted] = new_coords_model[accepted]
+        logger.debug(f"New model coords are     {model_coords_tmp[0,:,0,0]}")
         
         new_state = GFState(state, copy=True)
         new_state.branches_coords["hyper"][accepted] = new_coords_model[accepted]

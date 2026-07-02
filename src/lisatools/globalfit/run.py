@@ -696,7 +696,7 @@ class GlobalFit:
 
             truths = self.curr.get_truths_dict()
 
-            exclude_from_plot = []  # TODO: make this more general
+            exclude_from_plot = ["hyper"] if "hyper" in state.branch_names else []  # TODO: make this more general
             truths_plot = {key: val for key, val in truths.items() if key not in exclude_from_plot}
             branches_plot = [name for name in branch_names if name not in exclude_from_plot]
 

@@ -430,7 +430,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     submission_folder = None # "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    num_iterations = 375
+    num_iterations = 500
 
     # source_ids = [18, 5, 16]
     start_freq = 9e-5
@@ -462,8 +462,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda13x" if gpus is not None else "cpu"
-    nwalkers = 24
-    ntemps = 16
+    nwalkers = 20
+    ntemps = 12
 
 
     basis_domain = "fd"

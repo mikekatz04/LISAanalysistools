@@ -89,5 +89,54 @@ if __name__ == "__main__":
     curr_info = settings_function()
 
     gf = GlobalFit(curr_info, MPI.COMM_WORLD)
-    gf.run_global_fit()
+    
+    # Setup checker when running out of memory on GPU. This will dump all live GPU arrays and their names to stdout.
+    import gc
+    import cupy as cp
+
+    def find_names_for_array(arr, max_depth=3):
+        """Best-effort: find variable names referencing this array."""
+        names = []
+        seen = set()
+
+        def search(obj, depth, path):
+            if depth > max_depth or id(obj) in seen:
+                return
+            seen.add(id(obj))
+            for ref in gc.get_referrers(obj):
+                if isinstance(ref, dict):
+                    for k, v in ref.items():
+                        if v is obj:
+                            # is this dict a frame's locals/globals, or an instance __dict__?
+                            for ref2 in gc.get_referrers(ref):
+                                if hasattr(ref2, 'f_locals') and ref2.f_locals is ref:
+                                    names.append(f"local '{k}' in {ref2.f_code.co_name}() line {ref2.f_lineno}")
+                                elif hasattr(ref2, '__dict__') and ref2.__dict__ is ref:
+                                    names.append(f"attribute '{k}' of {type(ref2).__name__} instance")
+                elif isinstance(ref, (list, tuple)):
+                    search(ref, depth + 1, path)
+
+        search(arr, 0, [])
+        return names
+
+    def dump_gpu_arrays_with_names(min_size_mb=10):
+        arrays = []
+        for obj in gc.get_objects():
+            if isinstance(obj, cp.ndarray) and obj.nbytes / 1024**2 >= min_size_mb:
+                names = find_names_for_array(obj)
+                arrays.append((obj.nbytes / 1024**2, obj.shape, obj.dtype, names))
+        arrays.sort(reverse=True, key=lambda x: x[0])
+        for size_mb, shape, dtype, names in arrays:
+            print(f"{size_mb:>10.1f} MB  {str(shape):<25} {dtype}  -> {names or 'no named ref found'}")
+
+    try:
+        gf.run_global_fit()
+    except cp.cuda.memory.OutOfMemoryError:
+        print("=== OOM — dumping live GPU arrays ===")
+        dump_gpu_arrays_with_names(min_size_mb=5)
+        pool = cp.get_default_memory_pool()
+        print(f"Pool used:  {pool.used_bytes()/1024**2:.1f} MB")
+        print(f"Pool total: {pool.total_bytes()/1024**2:.1f} MB")
+        raise
+        
     #breakpoint()
