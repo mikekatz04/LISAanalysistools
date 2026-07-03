@@ -14,7 +14,6 @@ except (ModuleNotFoundError, ImportError) as e:
 
 
 from lisatools.detector import L1Orbits
-from lisatools.domaincomputation import DomainComputationGroupArray
 from lisatools.utils.constants import *
 from eryn.state import BranchSupplemental
 from lisatools.globalfit.run import CurrentInfoGlobalFit
@@ -63,35 +62,33 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     permute_every: int = 20
 
     emri_info = curr.source_info["emri"]
-    # psd_info = curr.source_info["psd"]
+    psd_info = curr.source_info["psd"]
 
-    # effective_ndim = engine_info.ndims["psd"]
-    # temperature_control = TemperatureControl(
-    #     effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
-    # )
+    effective_ndim = engine_info.ndims["psd"]
+    temperature_control = TemperatureControl(
+        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+    )
 
-    # psd_move_kwargs = dict(
-    #     num_repeats=psd_info.num_prop_repeats,
-    #     permute_every=permute_every,
-    #     live_dangerously=True,
-    #     psd_transform_fn=psd_info.transform,
-    #     temperature_control=temperature_control,
-    #     use_gpu=True,
-    #     run_async=True,
-    #     run_threaded=False
-    # )
+    psd_move_kwargs = dict(
+        num_repeats=psd_info.num_prop_repeats,
+        permute_every=permute_every,
+        live_dangerously=True,
+        psd_transform_fn=psd_info.transform,
+        temperature_control=temperature_control,
+        use_gpu=True,
+        run_async=True,
+        run_threaded=False
+    )
 
-    # psd_search_move = MultiGPUPSDMove(
-    #     acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
-    # )
-    # psd_pe_move = MultiGPUPSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
+    psd_search_move = MultiGPUPSDMove(
+        acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
+    )
+    psd_pe_move = MultiGPUPSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
 
-    # psd_search_move.accepted = np.zeros((ntemps, nwalkers))
-    # psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
+    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
+    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    #psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors, permute_every=50)
-
-    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
 
     #* ========================= *#
     
@@ -135,13 +132,13 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     state.sub_states["emri"].betas_all = betas_all
     logger.debug(f"EMRI betas: {emri_info.betas}")
 
-    coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
+    coords_shape_emri = (betas_all.shape[1], nwalkers, emri_info.nleaves_max, emri_info.ndim)
 
     emri_move_kwargs = dict(
         dcga=acs,
         waveform_gen=wave_gen,
         branch_name="emri",
-        coords_shape=coords_shape,
+        coords_shape=coords_shape_emri,
         waveform_gen_method="get_signals_for_residuals",
         waveform_gen_kwargs=emri_info.waveform_kwargs.copy(),
         waveform_like_method="__call__",
@@ -153,8 +150,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         betas_all=betas_all,
         permute_every=permute_every,
         pad_out_of_prior=True,
-        run_async=True,
-        run_threaded=True,
+        run_async=False,
+        run_threaded=False,
         randomize_split=True,
         # Cap concurrent EMRI waveform+likelihood evaluations per GPU to bound
         # peak device memory; None runs all of a split's walkers at once. With
@@ -166,8 +163,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     emri_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     #_, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state, permute_every=40)
-    # emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
-    recipe.add_recipe_component(PERecipeStep(moves=[emri_pe_move]), name="emri pe")
+    emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
+    recipe.add_recipe_component(PERecipeStep(moves=[emri_pe_moves]), name="emri pe")
 
 
 #######################
@@ -231,6 +228,8 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
 def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 
+    ntemps_emri = 1
+
     waveform_model = "EMRITDIWaveform"
     waveform_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sources/emri/waveform.py#L130"
     prior_model_code_link = ""
@@ -268,10 +267,10 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 
     waveform_runtime_kwargs = dict(mode_selection_threshold = 1e-4)
 
-    betas = 1 / 1.2 ** np.arange(general_set.ntemps)  # Geometric ladder with ratio 1.2
+    betas = 1 / 1.2 ** np.arange(ntemps_emri)  # Geometric ladder with ratio 1.2
 
     input_basis = [
-        "logm1",
+        "log_m1",
         "m2",
         "a",
         "p0",
@@ -335,7 +334,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         "delta": np.sin,  # delta
     }
     key_map = {
-        "logm1": "m1",
+        "log_m1": "m1",
         "cosqK": "qK",
         "sin_delta": "delta",
     }
@@ -359,7 +358,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     }
 
     priors_emri = {
-            "logm1": uniform_dist(np.log(1e5), np.log(5e6)),  # log m1
+            "log_m1": uniform_dist(np.log(1e5), np.log(5e6)),  # log m1
             "m2": uniform_dist(1, 100),  # m2
             "a": uniform_dist(-0.999, 0.999),  # a
             "p0": uniform_dist(5.0, 100.0),  # p0
@@ -414,8 +413,6 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     return EMRISetup(emri_settings), emri_metadata
 
 def get_general_erebor_settings() -> GeneralSetup:
-    # limits on parameters
-    # now with negative fdots
 
     global_fit_codename = "erebor"
     global_fit_version = "CDL1run0_v0"
@@ -440,10 +437,10 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     head_dir = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "test_emri"
+    base_file_name = "test_emri0_psd"
     file_store_dir = head_dir
 
-    gpus = [0]
+    gpus = [5]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -451,7 +448,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 10
+    nwalkers = 15
     ntemps = 1
 
     window_type = "tukey"
@@ -472,7 +469,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
-        source_types=["emri"],  #'vgb', 'gb'
+        source_types=["noise", "emri"],  #'vgb', 'gb'
         source_ids=dict(emri=source_ids),
         verbose=True,
         do_plots=True,
@@ -591,7 +588,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     ##################################
     ##################################
-    ###  EMRI Settings  ###############
+    ###  EMRI Settings  ##############
     ##################################
     ##################################
 
@@ -604,14 +601,14 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "emri": emri_setup,
-            #"psd": psd_setup,
+            "psd": psd_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,
         setup_function=setup_recipe,
         source_metadata={
             "emri": emri_metadata,
-            #"psd": psd_metadata,
+            "psd": psd_metadata,
         }
     )
 

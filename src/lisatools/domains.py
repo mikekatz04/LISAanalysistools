@@ -1755,7 +1755,8 @@ def get_stft_settings(
     big_dt = int(big_dt / dt) * dt  # make sure big_dt is an integer multiple of dt
     # now make sure that Tobs is an integer multiple of big_dt
 
-    NT = int(np.ceil(N / (big_dt / dt))) # number of segments
+    # NT = int(np.ceil(N / (big_dt / dt))) # number of segments
+    NT = int(np.floor(N / (big_dt / dt))) # number of segments
     DF = 1 / big_dt
     nperseg = int(big_dt / dt)
     NF = nperseg // 2 + 1

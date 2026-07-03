@@ -298,7 +298,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
     def setup(self, model, state):
         """Per-iteration setup hook (no-op by default)."""
-        return
+        
+        # run the inner moves setup if they have a setup method
+        for move in self.moves:
+            if hasattr(move, "setup"):
+                move.setup(state.branches)
 
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
         """
