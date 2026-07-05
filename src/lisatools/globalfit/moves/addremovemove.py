@@ -24,7 +24,7 @@ def _free_pool() -> None:
         xp.get_default_memory_pool().free_all_blocks()
 
 
-from eryn.moves import Move, StretchMove, TemperatureControl
+from eryn.moves import Move, StretchMove, TemperatureControl, RedBlueMove
 from eryn.prior import ProbDistContainer
 from eryn.utils.transform import TransformContainer
 
@@ -504,7 +504,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     c = {self.branch_name: sets[:split] + sets[split + 1 :]}
 
                     # Get the move-specific proposal.
-                    if isinstance(move_here, StretchMove):
+                    if isinstance(move_here, RedBlueMove):
                         q, factors = move_here.get_proposal(s, c, model.random)
 
                     else:
@@ -541,10 +541,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                                     new_points_in,
                                     data_index=data_index,
                                 )
-                    
+
                     if DEBUG_MODE:
                         logger.debug(f"average proposed logl: {logl[in_prior].mean()}.")
-    
+
                     if np.any(logl[in_prior] < -1e10) or np.any(logl[in_prior] > 1e30):
                         logger.warning(f"Suspicious likelihood encountered in propose: min = {logl[~np.isinf(logp)].min()}, max = {logl[~np.isinf(logp)].max()}. This could be a sign of numerical issues.")
                         if DEBUG_MODE:
