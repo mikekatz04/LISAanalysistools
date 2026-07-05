@@ -23,7 +23,7 @@ from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, EMRISetup, E
 from eryn.prior import uniform_dist, log_uniform
 from eryn.utils import TransformContainer
 from eryn.prior import ProbDistContainer
-from eryn.moves import StretchMove, TemperatureControl 
+from eryn.moves import StretchMove, TemperatureControl, DEMove
 from eryn.moves.tempering import make_ladder
 
 from lisatools.domains import STFTSettings, FDSettings
@@ -77,7 +77,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         temperature_control=temperature_control,
         use_gpu=True,
         run_async=True,
-        run_threaded=False
+        run_threaded=True
     )
 
     psd_search_move = MultiGPUPSDMove(
@@ -150,8 +150,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         betas_all=betas_all,
         permute_every=permute_every,
         pad_out_of_prior=True,
-        run_async=False,
-        run_threaded=False,
+        run_async=True,
+        run_threaded=True,
         randomize_split=True,
         # Cap concurrent EMRI waveform+likelihood evaluations per GPU to bound
         # peak device memory; None runs all of a split's walkers at once. With
@@ -359,7 +359,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 
     priors_emri = {
             "log_m1": uniform_dist(np.log(1e5), np.log(5e6)),  # log m1
-            "m2": uniform_dist(1, 100),  # m2
+            "m2": uniform_dist(1, 200),  # m2
             "a": uniform_dist(-0.999, 0.999),  # a
             "p0": uniform_dist(5.0, 100.0),  # p0
             "e0": uniform_dist(0.001, 0.8),  # e0
@@ -387,7 +387,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         ndim=12,
         num_prop_repeats=30,
         betas=betas,
-        inner_moves=[StretchMove(),],
+        inner_moves=[StretchMove(), DEMove()],
         logm1_lims = None,
         m2_lims = None,
         a_lims = None,
@@ -428,7 +428,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     num_iterations = 500
 
-    source_ids = [0]
+    source_ids = [3]
 
     Tobs = 1 * YRSID_SI
     dt = 5.0
@@ -437,10 +437,10 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     head_dir = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "test_emri0_psd"
+    base_file_name = "test_emri3_psd"
     file_store_dir = head_dir
 
-    gpus = [5]
+    gpus = [0, 1]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -448,7 +448,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 15
+    nwalkers = 30
     ntemps = 1
 
     window_type = "tukey"
