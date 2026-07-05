@@ -72,6 +72,42 @@ def icrs_to_ecliptic(positions_icrs: np.ndarray) -> np.ndarray:
 
     return positions_ecliptic
 
+
+def ecliptic_to_icrs(positions_ecliptic: np.ndarray) -> np.ndarray:
+    """
+    Convert cartesian positions from ecliptic to ICRS coordinates.
+
+    Args:
+        positions_ecliptic: Array of shape (n_times, 3, 3) representing positions
+                            in ecliptic frame for 3 spacecraft over n_times.
+
+    Returns:
+        positions_icrs: Array of shape (n_times, 3, 3) in ICRS frame.
+    """
+
+    import astropy
+
+    positions_icrs = np.zeros_like(positions_ecliptic)
+
+    for sc in range(3):
+
+        c_ecl = astropy.coordinates.SkyCoord(
+            positions_ecliptic[:, sc, 0],
+            positions_ecliptic[:, sc, 1],
+            positions_ecliptic[:, sc, 2],
+            frame="barycentricmeanecliptic",
+            unit="m",
+            representation_type="cartesian",
+        )
+        c_icrs = c_ecl.transform_to(astropy.coordinates.ICRS)
+        c_icrs.representation_type = "cartesian"
+        
+        positions_icrs[:, sc, :] = np.array(
+            [c_icrs.x.value, c_icrs.y.value, c_icrs.z.value]
+        ).T
+
+    return positions_icrs
+
 class Orbits(LISAToolsParallelModule, ABC):
     """LISA Orbit Base Class
 
@@ -95,7 +131,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         armlength: Optional[float] = 2.5e9,
         force_backend: Optional[str] = None,
         t0: Optional[float] = 0.0,
-        frame: str = "icrs",
+        frame: str = "ecliptic",
         **kwargs,
     ) -> None:
 
@@ -184,6 +220,10 @@ class Orbits(LISAToolsParallelModule, ABC):
             for key in f.attrs.keys():
                 setattr(self, key + "_base", f.attrs[key])
 
+        if self.frame == "icrs":
+            self._x_base = ecliptic_to_icrs(self.x_base)
+            self._v_base = ecliptic_to_icrs(self.v_base)
+
     @property
     def filename(self) -> str:
         """Orbit file name."""
@@ -263,6 +303,9 @@ class Orbits(LISAToolsParallelModule, ABC):
         """Spacecraft position from file."""
         with self.open() as f:
             x = f["tcb"]["x"][:]
+
+        if self.frame == "icrs":
+            x = ecliptic_to_icrs(x)
         return x
 
     @property
@@ -270,6 +313,8 @@ class Orbits(LISAToolsParallelModule, ABC):
         """Spacecraft velocities from file."""
         with self.open() as f:
             v = f["tcb"]["v"][:]
+        if self.frame == "icrs":
+            v = ecliptic_to_icrs(v)
         return v
 
     @property
