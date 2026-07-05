@@ -72,6 +72,42 @@ def icrs_to_ecliptic(positions_icrs: np.ndarray) -> np.ndarray:
 
     return positions_ecliptic
 
+
+def ecliptic_to_icrs(positions_ecliptic: np.ndarray) -> np.ndarray:
+    """
+    Convert cartesian positions from ecliptic to ICRS coordinates.
+
+    Args:
+        positions_ecliptic: Array of shape (n_times, 3, 3) representing positions
+                            in ecliptic frame for 3 spacecraft over n_times.
+
+    Returns:
+        positions_icrs: Array of shape (n_times, 3, 3) in ICRS frame.
+    """
+
+    import astropy
+
+    positions_icrs = np.zeros_like(positions_ecliptic)
+
+    for sc in range(3):
+
+        c_ecl = astropy.coordinates.SkyCoord(
+            positions_ecliptic[:, sc, 0],
+            positions_ecliptic[:, sc, 1],
+            positions_ecliptic[:, sc, 2],
+            frame="barycentricmeanecliptic",
+            unit="m",
+            representation_type="cartesian",
+        )
+        c_icrs = c_ecl.transform_to(astropy.coordinates.ICRS)
+        c_icrs.representation_type = "cartesian"
+        
+        positions_icrs[:, sc, :] = np.array(
+            [c_icrs.x.value, c_icrs.y.value, c_icrs.z.value]
+        ).T
+
+    return positions_icrs
+
 class Orbits(LISAToolsParallelModule, ABC):
     """LISA Orbit Base Class
 
@@ -95,7 +131,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         armlength: Optional[float] = 2.5e9,
         force_backend: Optional[str] = None,
         t0: Optional[float] = 0.0,
-        frame: str = "icrs",
+        frame: str = "ecliptic",
         **kwargs,
     ) -> None:
 
@@ -184,6 +220,10 @@ class Orbits(LISAToolsParallelModule, ABC):
             for key in f.attrs.keys():
                 setattr(self, key + "_base", f.attrs[key])
 
+        if self.frame == "icrs":
+            self._x_base = ecliptic_to_icrs(self.x_base)
+            self._v_base = ecliptic_to_icrs(self.v_base)
+
     @property
     def filename(self) -> str:
         """Orbit file name."""
@@ -263,6 +303,9 @@ class Orbits(LISAToolsParallelModule, ABC):
         """Spacecraft position from file."""
         with self.open() as f:
             x = f["tcb"]["x"][:]
+
+        if self.frame == "icrs":
+            x = ecliptic_to_icrs(x)
         return x
 
     @property
@@ -270,6 +313,8 @@ class Orbits(LISAToolsParallelModule, ABC):
         """Spacecraft velocities from file."""
         with self.open() as f:
             v = f["tcb"]["v"][:]
+        if self.frame == "icrs":
+            v = ecliptic_to_icrs(v)
         return v
 
     @property
@@ -582,6 +627,89 @@ class Orbits(LISAToolsParallelModule, ABC):
 
         # prepare output
         output = self.xp.array([pos_x, pos_y, pos_z]).T
+        if squeeze:
+            return output.squeeze()
+        return output
+
+    def get_vel(self, t: float | np.ndarray, sc: int | np.ndarray) -> np.ndarray:
+        """Compute spacecraft velocity as a function of time.
+
+        Linearly interpolates the configured velocity grid (:attr:`v`) in
+        time -- the same linear scheme the C++ backend uses for positions in
+        :meth:`get_pos`. Unlike :meth:`get_pos` this is a pure-Python
+        evaluator (it never touches the C++ backend), so it also works when
+        the orbits were configured on the base points (``make_cpp=False``).
+
+        Note:
+            Out-of-range times are clamped to the grid edges (the
+            :func:`numpy.interp` / :func:`cupy.interp` convention), whereas
+            the C++ position path returns zeros past the grid. Keep queries
+            within ``[sc_t[0], sc_t[-1]]`` to avoid relying on this edge
+            behaviour.
+
+        Args:
+            t: Time array in seconds.
+            sc: which spacecraft. Must be ``in self.SC``.
+
+        Returns:
+            Velocity of spacecraft, shape ``(..., 3)``.
+
+        """
+        self._check_configured()
+
+        # test and setup inputs accordingly (mirrors get_pos)
+        if isinstance(t, float) and isinstance(sc, int):
+            squeeze = True
+            t = self.xp.atleast_1d(t)
+            sc = self.xp.atleast_1d(sc).astype(np.int32)
+
+        elif isinstance(t, self.xp.ndarray) and isinstance(sc, int):
+            squeeze = False
+            t = self.xp.atleast_1d(t)
+            sc = self.xp.full_like(t, sc, dtype=np.int32)
+
+        elif isinstance(t, self.xp.ndarray) and isinstance(sc, self.xp.ndarray):
+            squeeze = False
+            t = self.xp.asarray(t)
+            sc = self.xp.asarray(sc).astype(np.int32)
+
+        else:
+            raise ValueError(
+                "(t, sc) can be (float, int), (np.ndarray, int), (np.ndarray, np.ndarray). If the inputs follow this, make sure the orbits class GPU setting matches the arrays coming in (GPU or CPU)."
+            )
+
+        # Velocity grid (N, 3_sc, 3_xyz) on the spacecraft time axis. Wrapped
+        # in xp.asarray because the base configure() stores _v as numpy even
+        # on the GPU backend; for L1Orbits it is already an xp array.
+        t_grid = self.xp.asarray(self.sc_t)
+        v_grid = self.xp.asarray(self.v)
+
+        # Buffers filled per spacecraft. The mask loop handles a per-element
+        # ``sc`` array while staying vectorised (only 3 iterations).
+        # TODO(get_vel): swap this interp core for
+        # ``self.pycppdetector.get_vel_wrap`` once ``v_arr`` lands in the C++
+        # Orbits class -- the public interface here stays identical.
+        vel_x = self.xp.zeros_like(t)
+        vel_y = self.xp.zeros_like(t)
+        vel_z = self.xp.zeros_like(t)
+        covered = self.xp.zeros_like(t, dtype=bool)
+        for _sc in self.SC:
+            mask = sc == _sc
+            covered |= mask
+            if not bool(mask.any()):
+                continue
+            tt = t[mask]
+            vel_x[mask] = self.xp.interp(tt, t_grid, v_grid[:, _sc - 1, 0])
+            vel_y[mask] = self.xp.interp(tt, t_grid, v_grid[:, _sc - 1, 1])
+            vel_z[mask] = self.xp.interp(tt, t_grid, v_grid[:, _sc - 1, 2])
+
+        # C++ get_pos delegates spacecraft-id validation to the backend; do it
+        # explicitly here so out-of-range sc raise instead of silently zeroing.
+        if not bool(covered.all()):
+            raise ValueError(f"All sc values must be in {self.SC}.")
+
+        # prepare output
+        output = self.xp.array([vel_x, vel_y, vel_z]).T
         if squeeze:
             return output.squeeze()
         return output
@@ -1307,6 +1435,37 @@ if jax_here:
             sc_arr = (jnp.atleast_1d(sc) - 1).astype(int)
 
             output = interpolate_pos(t_arr, sc_arr, self.sc_t, self.x)
+            if squeeze_sc:
+                output = output.squeeze(axis=1)
+            if squeeze_t:
+                output = output.squeeze(axis=0)
+
+            return output
+
+        def get_vel(self, t, sc):
+            """Compute spacecraft velocity using JAX interpolation.
+
+            Mirrors :meth:`get_pos`; reuses the grid-generic
+            ``interpolate_pos`` helper on the velocity grid (:attr:`v`), which
+            linearly interpolates any ``(T, 3_sc, 3_xyz)`` array.
+
+            Args:
+                t: Time (scalar or array)
+                sc: Spacecraft index (1, 2, or 3) or array of indices
+
+            Returns:
+                Spacecraft velocity(ies) with shape (..., 3) for coordinates
+            """
+            if not self.configured:
+                raise RuntimeError("Must call configure() before get_vel()")
+
+            squeeze_t = jnp.isscalar(t)
+            squeeze_sc = jnp.isscalar(sc)
+
+            t_arr = jnp.atleast_1d(t)
+            sc_arr = (jnp.atleast_1d(sc) - 1).astype(int)
+
+            output = interpolate_pos(t_arr, sc_arr, self.sc_t, self.v)
             if squeeze_sc:
                 output = output.squeeze(axis=1)
             if squeeze_t:
