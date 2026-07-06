@@ -80,36 +80,54 @@ static CUDA_DEVICE cmplx stft_block_reduce_cmplx(cmplx* sdata)
 
 // ---------------------------------------------------------------------------
 // Doppler-corrected instantaneous frequency / frequency-rate of the TDI signal
-// at time `t`, derived SOLELY from the TDI phase (no astrophysical get_f /
-// get_fdot model), per channel, in the kernel's chirp convention
-// (phase = arg(conj(TDI))). Two-stage self-heterodyne central difference:
+// at time `t`, derived from the TDI phase (the VALUES never use the
+// astrophysical get_f/get_fdot model), per channel, in the kernel's chirp
+// convention (phase = arg(conj(TDI))). ONE central-difference stencil at a
+// small half-width D spanning a fixed fraction of a carrier cycle,
 //
-//   stage 1 (bootstrap): a small ABSOLUTE half-width d1 = 0.5 s gives a
-//     wrap-free first difference (|4 pi f d1| < pi for f < 0.05 Hz, i.e. the
-//     whole LISA band) -> coarse f_hat. First differences are noise-robust at
-//     small steps; SECOND differences are not (the curvature signal
-//     phi'' * d1^2 sits below the arg()/spline noise), so fdot must come from
-//     stage 2.
-//   stage 2 (refine): re-difference at the STFT bin half-width `delta`, where
-//     the curvature signal pi*fdot*delta^2 (~0.1 rad for Doppler-dominated GB
-//     rates at 6 h bins) towers over the noise. The known advance
-//     2*pi*f_hat*delta is heterodyned out before taking the residual argument,
-//     so there is no phase-wrapping ambiguity even when f*delta >> 1.
-//     Validity: |2 pi (f - f_hat) delta + pi fdot delta^2| < pi, i.e.
-//     |fdot| < 1/delta^2 (~2e-9 Hz/s at 6 h bins) -- orders of magnitude above
-//     any GB chirp + orbital Doppler rate.
+//     D = STFT_FREQ_FDOT_STENCIL_CYCLES / f_astro   (quarter-cycle stencil),
 //
-// `tdi_center[ch]` are the (already-computed) TDI values at `t`. All phase
-// differences are principal-valued args of complex PRODUCTS (never differences
-// of separate arg() calls), so no branch-cut bookkeeping is needed.
+// i.e. tens of seconds at mHz -- always local, never the STFT segment width.
+// f_astro sets only the step SCALE (any O(1)-correct scale gives the same
+// answer); the derivatives themselves are pure phase differences:
 //
-// NOTE: this samples the TDI (hence the orbit) at t +- delta. At the first/last
-// STFT bins that is +- one bin outside the observation; for accuracy there the
-// ORBIT must cover a little beyond the observation window (it normally does --
-// orbit files span more than the analysis segment). A one-sided edge stencil was
-// tried and is NOT needed: the residual at the first/last bins is the observation
-// sitting at the orbit's boundary, not the finite-difference reach.
+//     f0    =  arg( conj(z+) * z-              ) / (4 pi D)
+//     fdot0 =  arg( conj(z+) * conj(z-) * z0^2 ) / (2 pi D^2)
+//
+// Both are principal-valued args of complex PRODUCTS (never differences of
+// separate arg() calls), so there is no wrapping/branch-cut bookkeeping:
+//   * first difference: |4 pi f D| = pi * (f/f_astro)/2 ~ pi/2 -- wrap-free
+//     with a 2x margin at every carrier (f differs from f_astro only by the
+//     ~1e-4-relative Doppler).
+//   * second difference: 2 pi fdot D^2 ~ 1e-9 rad -- never wraps.
+//
+// Step-size budget (why neither extreme works): the TDI-phase evaluation
+// noise is eps_phi ~ few 1e-10 rad (double roundoff on ~1e5-rad carrier
+// phases), so fdot carries noise ~ eps_phi/(pi D^2) and the spurious
+// curvature accumulated across one STFT segment is ~ eps_phi*(dt_seg/D)^2:
+//   * a relative-to-t or sub-second step (D ~ 0.01 s) gives HUNDREDS of
+//     radians -- catastrophic;
+//   * a fixed few-second step fails long segments / high carriers
+//     (measured: mm 3.2e-3 at 17 h segments, 8 mHz, D = 4 s);
+//   * the quarter-cycle step gives eps_phi*(4*f*dt_seg)^2/... ~ 1e-4..1e-2
+//     rad^0.5 budgets -> mm 1e-8..1e-5 across the LISA band. fdot0 remains
+//     O(1)-noisy relative to the Doppler rate itself, which is fine: the
+//     Fresnel value's 1/sqrt(2|fdot0|) prefactor cancels analytically
+//     against the C/S increments in the near-monochromatic limit, so only
+//     the accumulated curvature phase matters.
+//
+// NOTE: samples the TDI (hence the orbit) only at t +- D, so the stencil
+// stays inside the observation except within D of its very ends.
+// Identically-zero TDI samples (the response zeroes retarded times outside
+// the orbit span, e.g. the first samples when the observation is pinned at
+// the orbit's t0) carry no phase: such pixels degrade to the astro model,
+// as the legacy estimator did implicitly. Near-null CHANNELS (power < 1e-24
+// of the loudest) copy the loudest channel's estimate so the f0[0]-driven
+// carrier placement can never be thrown out of the band by roundoff phase.
 // ---------------------------------------------------------------------------
+constexpr double STFT_FREQ_FDOT_STENCIL_CYCLES = 0.125;  ///< carrier cycles per half-width
+constexpr double STFT_FREQ_FDOT_DT_MAX = 3600.0;         ///< half-width cap [s]
+
 // Astro-model degradation shared by the guards below: fires only where the
 // TDI has no differentiable phase (identically-zero response samples at the
 // orbit-file boundary, or a fully unusable stencil). The legacy
@@ -130,125 +148,103 @@ CUDA_DEVICE inline void stft_freq_fdot_astro_fallback(
 
 template <class SourceT>
 CUDA_DEVICE void stft_freq_fdot_from_tdi_phase(
-    SourceT& src, double t, double delta,
+    SourceT& src, double t,
     double* params, Vec k, Vec u, Vec v,
     int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
     const cmplx* tdi_center,
     double* f0_out, double* fdot0_out)
 {
-    const double d1 = 0.5;  // bootstrap half-width [s]
+    // Quarter-cycle stencil: f_astro sets only the step SCALE.
+    double f_scale = src.get_f(t, params, bin_i);
+    if (!(f_scale > 0.0))
+    {
+        stft_freq_fdot_astro_fallback<SourceT>(src, t, params, bin_i,
+                                               f0_out, fdot0_out);
+        return;
+    }
+    double D = STFT_FREQ_FDOT_STENCIL_CYCLES / f_scale;
+    if (D > STFT_FREQ_FDOT_DT_MAX)
+        D = STFT_FREQ_FDOT_DT_MAX;
 
-    cmplx tdi_p1[3];
-    cmplx tdi_m1[3];
     cmplx tdi_p[3];
     cmplx tdi_m[3];
-
-    src.get_tdi_Xf_single(&tdi_p1[0], t + d1, params, k, u, v,
+    src.get_tdi_Xf_single(&tdi_p[0], t + D, params, k, u, v,
                           link_space_craft_rec, link_space_craft_em, bin_i);
-    src.get_tdi_Xf_single(&tdi_m1[0], t - d1, params, k, u, v,
-                          link_space_craft_rec, link_space_craft_em, bin_i);
-    src.get_tdi_Xf_single(&tdi_p[0], t + delta, params, k, u, v,
-                          link_space_craft_rec, link_space_craft_em, bin_i);
-    src.get_tdi_Xf_single(&tdi_m[0], t - delta, params, k, u, v,
+    src.get_tdi_Xf_single(&tdi_m[0], t - D, params, k, u, v,
                           link_space_craft_rec, link_space_craft_em, bin_i);
 
-    // stage 1 on the LOUDEST channel only: orbital Doppler is common across
-    // X/Y/Z to leading order, and a near-null channel's phase is pure noise --
-    // a shared loud-channel f_hat keeps every channel's stage-2 residual
-    // bounded (|res| <= pi by construction), so a null channel degrades
-    // gracefully instead of throwing the carrier placement out of the band.
+    // Channel powers at the center; the loudest channel anchors the
+    // degenerate cases below.
+    double pow_ch[3];
     int ch_ref = 0;
-    double pow_ref = tdi_center[0].real() * tdi_center[0].real()
-                   + tdi_center[0].imag() * tdi_center[0].imag();
-    for (int ch = 1; ch < 3; ch += 1)
+    for (int ch = 0; ch < 3; ch += 1)
     {
-        double pow_ch = tdi_center[ch].real() * tdi_center[ch].real()
-                      + tdi_center[ch].imag() * tdi_center[ch].imag();
-        if (pow_ch > pow_ref)
-        {
+        pow_ch[ch] = tdi_center[ch].real() * tdi_center[ch].real()
+                   + tdi_center[ch].imag() * tdi_center[ch].imag();
+        if (pow_ch[ch] > pow_ch[ch_ref])
             ch_ref = ch;
-            pow_ref = pow_ch;
-        }
-    }
-    // Degenerate pixels: identically-zero TDI at `t` OR at any stencil sample
-    // (the response guard zeroes samples whose retarded arm times precede the
-    // orbit span -- the very first segments when the observation is pinned at
-    // the orbit's t0). A vanished sample has no phase (arg(0) == 0): the
-    // center collapses the bootstrap, and a vanished t +- delta sample zeroes
-    // its stage-2 residual, which crushes fdot0 (and with it the Fresnel
-    // 1/sqrt(2|fdot0|) amplitude) with pure noise. Degrade to the astro
-    // model, exactly like the legacy astro-heterodyned estimator did there.
-    bool stencil_zero = (pow_ref == 0.0);
-    const cmplx* stencil[4] = { tdi_p1, tdi_m1, tdi_p, tdi_m };
-    for (int s = 0; s < 4; s += 1)
-    {
-        double pw = stencil[s][ch_ref].real() * stencil[s][ch_ref].real()
-                  + stencil[s][ch_ref].imag() * stencil[s][ch_ref].imag();
-        if (pw == 0.0)
-            stencil_zero = true;
-    }
-    if (stencil_zero)
-    {
-        stft_freq_fdot_astro_fallback<SourceT>(src, t, params, bin_i,
-                                               f0_out, fdot0_out);
-        return;
     }
 
-    // Bootstrap from ONE-SIDED differences on both sides (each wrap-free at
-    // d1: |2 pi f d1| < pi across the band), keeping the side with the larger
-    // |advance|: when the observation is pinned at the orbit's own boundary,
-    // the outward side samples the orbit beyond its span and its phase
-    // advance is corrupted/shrunk, while the inward side stays exact. In the
-    // interior both sides agree and the choice is immaterial.
-    // With phi = arg(conj(TDI)):  phi(t+d1)-phi(t) = arg(conj(p1)*c),
-    //                             phi(t)-phi(t-d1) = arg(conj(c)*m1).
-    double dphi_f = gcmplx::arg(gcmplx::conj(tdi_p1[ch_ref]) * tdi_center[ch_ref]);
-    double dphi_b = gcmplx::arg(gcmplx::conj(tdi_center[ch_ref]) * tdi_m1[ch_ref]);
-    double dphi1;
-    if (isnan(dphi_f))
-        dphi1 = dphi_b;
-    else if (isnan(dphi_b))
-        dphi1 = dphi_f;
-    else
-        dphi1 = (fabs(dphi_f) >= fabs(dphi_b)) ? dphi_f : dphi_b;
-    double f_hat = dphi1 / (2.0 * M_PI * d1);
-    if (isnan(f_hat))
+    // Degenerate pixel: identically-zero TDI at the center or in the stencil
+    // (see the header comment). arg(0) == 0 carries no phase information.
+    double pow_p = tdi_p[ch_ref].real() * tdi_p[ch_ref].real()
+                 + tdi_p[ch_ref].imag() * tdi_p[ch_ref].imag();
+    double pow_m = tdi_m[ch_ref].real() * tdi_m[ch_ref].real()
+                 + tdi_m[ch_ref].imag() * tdi_m[ch_ref].imag();
+    if (pow_ch[ch_ref] == 0.0 || pow_p == 0.0 || pow_m == 0.0)
     {
-        // Both stencil sides unusable: same graceful astro degradation.
         stft_freq_fdot_astro_fallback<SourceT>(src, t, params, bin_i,
                                                f0_out, fdot0_out);
         return;
     }
-    double het = 2.0 * M_PI * f_hat * delta;
 
     for (int ch = 0; ch < 3; ch += 1)
     {
-        // stage 2: heterodyne the f_hat advance out, keep the small residual.
+        // With phi = arg(conj(TDI)):
+        //   phi(t+D) - phi(t-D)          = arg( conj(z+) * z- )
+        //   phi(t+D) + phi(t-D) - 2phi(t) = arg( conj(z+) * conj(z-) * z0^2 )
         cmplx c0 = tdi_center[ch];
-        double res_p = gcmplx::arg(gcmplx::conj(tdi_p[ch]) * c0 *
-                                   gcmplx::polar(1.0, -het));
-        double res_m = gcmplx::arg(gcmplx::conj(tdi_m[ch]) * c0 *
-                                   gcmplx::polar(1.0, +het));
-        // a_p = phi(t+delta) - phi(t) =  2 pi f0 delta + pi fdot0 delta^2,
-        // a_m = phi(t-delta) - phi(t) = -2 pi f0 delta + pi fdot0 delta^2.
-        double a_p = res_p + het;
-        double a_m = res_m - het;
-        f0_out[ch] = (a_p - a_m) / (4.0 * M_PI * delta);
-        fdot0_out[ch] = (a_p + a_m) / (2.0 * M_PI * delta * delta);
+        double dphi1 = gcmplx::arg(gcmplx::conj(tdi_p[ch]) * tdi_m[ch]);
+        double dphi2 = gcmplx::arg(gcmplx::conj(tdi_p[ch]) *
+                                   gcmplx::conj(tdi_m[ch]) * c0 * c0);
+        f0_out[ch] = dphi1 / (4.0 * M_PI * D);
+        fdot0_out[ch] = dphi2 / (2.0 * M_PI * D * D);
+        // Exact-zero fdot0 would hit 0/0 in the Fresnel zeta/amplitude; the
+        // value is in the fdot-insensitive sinc regime anyway, so any
+        // astro-scale floor is equivalent.
+        if (fdot0_out[ch] == 0.0)
+            fdot0_out[ch] = 1.0e-18;
+    }
+
+    if (isnan(f0_out[ch_ref]) || isnan(fdot0_out[ch_ref]))
+    {
+        // Loudest channel unusable (e.g. NaN response sample): degrade.
+        stft_freq_fdot_astro_fallback<SourceT>(src, t, params, bin_i,
+                                               f0_out, fdot0_out);
+        return;
+    }
+
+    // Near-null channels: their phase is pure roundoff -- copy the loudest
+    // channel's estimate (also catches NaN powers via the negated compare).
+    for (int ch = 0; ch < 3; ch += 1)
+    {
+        if (!(pow_ch[ch] >= 1.0e-24 * pow_ch[ch_ref]))
+        {
+            f0_out[ch] = f0_out[ch_ref];
+            fdot0_out[ch] = fdot0_out[ch_ref];
+        }
     }
 }
 
-// Resolve (f0, fdot0) per channel for one pixel: TDI-phase derivation or
-// astrophysical fallback. `delta` is the stage-2 refine half-width for the
-// TDI-phase path -- pass the STFT bin width (far shorter than the year-scale
-// Doppler timescale, yet long enough that the curvature signal dominates the
-// noise; see stft_freq_fdot_from_tdi_phase).
+// Resolve (f0, fdot0) per channel for one pixel: TDI-phase derivation
+// (small-step central difference, see stft_freq_fdot_from_tdi_phase) or
+// astrophysical fallback.
 template <class SourceT>
 CUDA_DEVICE void stft_pixel_freq_fdot(
     SourceT& src, double t,
     double* params, Vec k, Vec u, Vec v,
     int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
-    const cmplx* tdi_center, double delta,
+    const cmplx* tdi_center,
     bool freq_from_tdi_phase,
     double* f0_out, double* fdot0_out)
 {
@@ -260,7 +256,7 @@ CUDA_DEVICE void stft_pixel_freq_fdot(
         return;
     }
     stft_freq_fdot_from_tdi_phase<SourceT>(
-        src, t, delta, params, k, u, v,
+        src, t, params, k, u, v,
         link_space_craft_rec, link_space_craft_em, bin_i,
         tdi_center, f0_out, fdot0_out);
 }
@@ -322,7 +318,7 @@ CUDA_DEVICE void stft_eval_block_ll(
         stft_pixel_freq_fdot<SourceT>(
             src, t_here, params, k, u, v,
             link_space_craft_rec, link_space_craft_em, bin_i,
-            tdi_channel_val, dt, freq_from_tdi_phase, &f0[0], &fdot0[0]);
+            tdi_channel_val, freq_from_tdi_phase, &f0[0], &fdot0[0]);
 
         int freq_j = stft->get_freq_index(f0[0]);
         for (int diff = -n_side_bins; diff <= +n_side_bins; diff += 1)
@@ -526,7 +522,7 @@ void stft_fill_global_kernel(
             stft_pixel_freq_fdot<SourceT>(
                 src, t_here, params, k, u, v,
                 link_space_craft_rec, link_space_craft_em, bin_i,
-                tdi_channel_val, dt, freq_from_tdi_phase, &f0[0], &fdot0[0]);
+                tdi_channel_val, freq_from_tdi_phase, &f0[0], &fdot0[0]);
 
             freq_j = stft->get_freq_index(f0[0]);
             for (int diff = -n_side_bins; diff <= +n_side_bins; diff += 1)
@@ -682,11 +678,11 @@ CUDA_DEVICE void stft_eval_block_swap(
         stft_pixel_freq_fdot<SourceT>(
             src, t_here, params_add, k_add, u_add, v_add,
             link_space_craft_rec, link_space_craft_em, bin_i,
-            tdi_val_add, dt, freq_from_tdi_phase, &f0_add[0], &fdot0_add[0]);
+            tdi_val_add, freq_from_tdi_phase, &f0_add[0], &fdot0_add[0]);
         stft_pixel_freq_fdot<SourceT>(
             src, t_here, params_remove, k_remove, u_remove, v_remove,
             link_space_craft_rec, link_space_craft_em, bin_i,
-            tdi_val_remove, dt, freq_from_tdi_phase, &f0_remove[0], &fdot0_remove[0]);
+            tdi_val_remove, freq_from_tdi_phase, &f0_remove[0], &fdot0_remove[0]);
 
         int freq_j_add = stft->get_freq_index(f0_add[0]);
         int freq_j_remove = stft->get_freq_index(f0_remove[0]);
