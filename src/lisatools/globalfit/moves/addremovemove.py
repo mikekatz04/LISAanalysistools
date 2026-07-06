@@ -23,6 +23,11 @@ def _free_pool() -> None:
     if _xp_is_cupy:
         xp.get_default_memory_pool().free_all_blocks()
 
+try:
+    from eryn.moves import FlowMove
+    flow_move_available = True
+except ImportError:
+    flow_move_available = False
 
 from eryn.moves import Move, StretchMove, TemperatureControl, RedBlueMove
 from eryn.prior import ProbDistContainer
@@ -302,7 +307,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # run the inner moves setup if they have a setup method
         for move in self.moves:
             if hasattr(move, "setup"):
-                move.setup(state.branches)
+                move.setup(state.branches_coords)
 
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
         """
@@ -380,7 +385,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         # randomize order
         leaves_random_order = np.random.permutation(np.arange(self.nleaves_max))
+
+        ring_buffer = dict() # prepare a ring buffer to store the proposed points to be submitted to an eventual flow proposal.
+
         for leaf in leaves_random_order:
+
+            leaf_buffer = []
             # guard against leaves with False
             assert np.all(
                 state.branches[self.branch_name].inds[0, 0, leaf]
@@ -472,6 +482,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 ]
 
                 # logger.debug(f"move here: {move_here.__class__.__name__}")
+                if flow_move_available:
+                    if isinstance(move_here, FlowMove):
+                        move_here.active_condition = leaf
 
                 # Split the ensemble in half and iterate over these two halves.
                 accepted = np.zeros((ntemps_full, self.nwalkers), dtype=bool)
@@ -631,8 +644,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     self.branch_name
                 ][:, :, 0]
 
-            # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
+                leaf_buffer.append(
+                    new_state.branches_coords[self.branch_name][0, :, leaf].copy()
+                )
 
+            # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
+            ring_buffer[leaf] = np.array(leaf_buffer).reshape(-1, ndim)
             # add back cold chain sources
             _free_pool()
 
@@ -652,6 +669,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         # udpate at the end
         logger.info(f"{self.branch_name} proposal complete - all leaves processed ({time.time() - tic:.1f}s total)")
+
+        if flow_move_available:
+            for move in self.moves:
+                if isinstance(move, FlowMove):
+                    move.submit_by_leaf(ring_buffer)
+                    logger.info("Current repeats submitted to flow move")
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
         # print("before computing current likelihood. elapsed: ", time.time() - tic)
