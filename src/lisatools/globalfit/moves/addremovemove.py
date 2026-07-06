@@ -398,9 +398,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             ][
                 : self.ntemps
             ]  # as: make sure only local ntemps are used
-            ntemps_full = new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
+            # ntemps_full = new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
 
-            ndim = new_state.branches[self.branch_name].coords.shape[-1]
+            ntemps_full, _, _, ndim = new_state.branches[self.branch_name].coords.shape
 
             # remove cold chain sources
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]

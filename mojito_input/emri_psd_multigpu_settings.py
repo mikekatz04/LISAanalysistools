@@ -162,7 +162,6 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     emri_pe_move = EMRISpecialMove(**emri_move_kwargs)
     emri_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    #_, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state, permute_every=40)
     emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
     recipe.add_recipe_component(PERecipeStep(moves=[emri_pe_moves]), name="emri pe")
 
@@ -437,10 +436,10 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     head_dir = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "test_emri3_psd"
+    base_file_name = "test_temperatures"
     file_store_dir = head_dir
 
-    gpus = [0, 1]
+    gpus = [3]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -448,8 +447,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 30
-    ntemps = 1
+    nwalkers = 10
+    ntemps = 5
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
