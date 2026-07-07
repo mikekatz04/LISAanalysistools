@@ -311,6 +311,34 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         self.edge_buffer = 2000
         self.is_rj = is_rj
 
+        # Frequency-clipped parent domains (FDSettings with min/max_freq)
+        # store only bins [ind_min, ind_max]. Every per-cell FD window (and
+        # its start index) must live inside that range: clamp the window
+        # length here -- BEFORE the ``special_indices_unique`` setter below
+        # computes start indices and before the buffers are allocated -- and
+        # record the parent bounds for the start-index clamp in the setter.
+        # WDM and legacy full-grid FD paths are untouched.
+        self._parent_ind_min = None
+        self._parent_stored_len = None
+        if (
+            isinstance(basis_settings, FDSettings)
+            and getattr(basis_settings, "ind_min", None) is not None
+            and getattr(basis_settings, "ind_max", None) is not None
+        ):
+            self._parent_ind_min = int(basis_settings.ind_min)
+            self._parent_stored_len = (
+                int(basis_settings.ind_max) - int(basis_settings.ind_min) + 1
+            )
+            if self._fd_store_length_value > self._parent_stored_len:
+                logger.warning(
+                    "FD cell window (%d bins) exceeds the clipped parent domain "
+                    "(%d stored bins); clamping each cell window to the full "
+                    "stored band.",
+                    self._fd_store_length_value,
+                    self._parent_stored_len,
+                )
+                self._fd_store_length_value = self._parent_stored_len
+
         self.special_indices_unique = special_indices_unique
         self.transform_fn = transform_fn
         self.waveform_kwargs = waveform_kwargs
@@ -665,9 +693,14 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             tmp_buffer_start_index = (self.band_edges[0] / self.df).astype(
                 np.int32
             ) - self.edge_buffer
-            assert tmp_buffer_start_index + self._fd_store_length >= (
-                (self.band_edges[-1] / self.df).astype(np.int32) + self.edge_buffer
-            )
+            if getattr(self, "_parent_ind_min", None) is None:
+                # Legacy full-grid parent: the single window must cover the
+                # whole band plus both edge buffers. (With a frequency-
+                # clipped parent this is un-satisfiable by construction --
+                # the clamp below shifts/shrinks the window instead.)
+                assert tmp_buffer_start_index + self._fd_store_length >= (
+                    (self.band_edges[-1] / self.df).astype(np.int32) + self.edge_buffer
+                )
             self.buffer_start_index = self.xp.repeat(
                 tmp_buffer_start_index, self.unique_band_combos.shape[0]
             )
@@ -682,6 +715,16 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             # Clamp so buffer end never overflows the data range (band_edges[-1])
             max_start = int(self.band_edges[-1] / self.df) - self._fd_store_length
             self.buffer_start_index = np.minimum(self.buffer_start_index, max_start)
+
+        if getattr(self, "_parent_ind_min", None) is not None:
+            # Frequency-clipped parent: clamp every window into the stored
+            # bin range [ind_min, ind_min + stored_len - window]. Edge cells
+            # lose their out-of-domain guard margin (the parent stores
+            # nothing there); the engines read placement from
+            # ``start_freq_inds`` so a shifted window stays consistent.
+            lo = self._parent_ind_min
+            hi = max(lo, lo + self._parent_stored_len - self._fd_store_length)
+            self.buffer_start_index = self.xp.clip(self.buffer_start_index, lo, hi)
 
         self.start_freq_inds = self.xp.asarray(self.buffer_start_index.copy().astype(np.int32))
         if hasattr(self, "_min_freq_inds_store"):

@@ -567,11 +567,14 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
 # WDM lookup table removed sprint-wide -- the chunked-heterodyne template
 # pipeline (gb_wdm_het.GBWDMHeterodyne) is now the only WDM backend. The
 # build is wired in ``setup_recipe`` above when the domain is WDM.
-# Example alternates:
-# DOMAIN_CHOICE = FDSettings.make_factory(
-#     min_freq=MIN_FREQ,
-#     max_freq=MAX_FREQ,
-# )
+# ``GB_DOMAIN=fd`` switches the run basis to the frequency domain (same
+# band restriction); default (unset / "wdm") keeps the WDM grid above.
+if os.environ.get("GB_DOMAIN", "wdm").lower() == "fd":
+    DOMAIN_CHOICE = FDSettings.make_factory(
+        min_freq=MIN_FREQ,
+        max_freq=MAX_FREQ,
+    )
+# STFT alternate:
 # DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=5e-5, max_freq=3e-2)
 # ============================================================
 
