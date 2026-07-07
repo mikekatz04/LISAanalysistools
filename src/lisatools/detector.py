@@ -998,7 +998,8 @@ class L1Orbits(Orbits):
 
         return self._pycppdetector
 
-    def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
+    def configure(self, t_arr=None, dt=None, linear_interp_setup=False,
+                  linear_interp_dt=3600.0):
         """Configure orbits with interpolation to a target time grid.
 
         Handles different time arrays for LTTs and positions in Mojito files.
@@ -1007,24 +1008,36 @@ class L1Orbits(Orbits):
             t_arr: Target time array (if None, will be constructed)
             dt: Target time step
             linear_interp_setup: If True, create dense grid for fast linear interpolation
+            linear_interp_dt: Cap (sec) on the position/unit-vector grid step
+                used when ``linear_interp_setup`` is True. The C++ kernel
+                interpolates spacecraft positions LINEARLY between grid nodes,
+                so the grid must be fine enough that the linear-interp sag of
+                the annual orbit, ``(dt^2 / 8) |r..| ~ (dt^2 / 8) * AU * (2pi/yr)^2``,
+                is negligible as a light-travel time. Mojito L1 files carry
+                positions at ``dt_base ~ 5.8 days`` -> sag ~ 0.13 light-sec ->
+                a periodic Doppler phase error 2*pi*f0*0.13*cos(beta_ecl) rad
+                that floored every template-vs-data mismatch at 1e-6..2e-4
+                (measured on the VGB stream, 2026-07-07). At 3600 s the sag is
+                ~1e-5 light-sec (mm ~ 1e-12). Pass ``None`` to use the file's
+                native cadence unmodified (old behavior).
         """
-        
+
         # Determine target time array
         if linear_interp_setup:
             make_cpp = True
-            # Orbit quantities (positions / velocities / link unit vectors)
-            # only carry information at the file's native spacecraft-orbit
-            # cadence ``dt_base`` (a few points per orbit); they are smooth and
-            # the C++ kernel linearly interpolates them at evaluation time. The
-            # dense light-travel-times keep their own native grid (``ltt_dt``,
-            # ~2.5 s) and are handed to C++ separately below — they are NOT
-            # splined here (the ``np.interp`` in the link loop only samples them
-            # onto ``t_arr`` to build the unit vectors). Building this grid at a
-            # fine kernel dt (e.g. 2.5 s) would span the full mission at that
-            # step -> tens of millions of points and a CubicSpline
-            # solve/eval that dominates runtime (minutes-to-hours on CPU).
-            # Default to the native orbit cadence so the grid stays tiny.
+            # Positions / velocities / link unit vectors are cubic-splined
+            # from the file's native grid onto this grid ONCE here; the C++
+            # kernel then interpolates them linearly at evaluation time, so
+            # the grid step sets the response fidelity (see linear_interp_dt
+            # docstring). The dense light-travel-times keep their own native
+            # grid (``ltt_dt``, ~2.5 s) and are handed to C++ separately below
+            # — they are NOT splined here (the ``np.interp`` in the link loop
+            # only samples them onto ``t_arr`` to build the unit vectors).
+            # A full-mission grid at 3600 s is ~2e4 points — negligible; do
+            # NOT use the raw TDI cadence (2.5 s, tens of millions of points).
             dt = float(self.dt_base)
+            if linear_interp_dt is not None:
+                dt = min(dt, float(linear_interp_dt))
             # interpolate only the orbit quantities, the ltts are already dense enough
             t0 = self.sc_t0
             t_end = float(self._sc_t_base[-1])
