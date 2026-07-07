@@ -113,7 +113,7 @@ from lisatools.domains import TDSettings
 from lisatools.globalfit.engine import Setup
 from lisatools.globalfit.moves import GFCombineMove, ResidualAddOneRemoveOneMove
 from lisatools.globalfit.recipe import Recipe
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     PERecipeStep,
     build_gb_moves,
     build_psd_moves,
@@ -927,11 +927,12 @@ def setup_recipe(
     )
 
     #* ============================== GB ================================
-    _gb_search_moves, gb_pe_moves = build_gb_moves(
-        engine_info, curr, acs, priors, state
+    # Smoke-friendly: keep only the prior-based RJ proposal in PE mode (no
+    # search list), expressed via the ``build_gb_moves`` design knobs.
+    _, gb_pe_moves = build_gb_moves(
+        engine_info, curr, acs, priors, state,
+        include_search=False, pe_move_names=["rj_prior"],
     )
-    # Smoke-friendly: keep only the prior-based RJ proposal in PE mode.
-    gb_pe_moves = [m for m in gb_pe_moves if "prior" in m.name]
 
     #* ============================== MBH (phentax) =====================
     mbh_pe_move = None

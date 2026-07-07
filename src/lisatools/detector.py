@@ -1012,11 +1012,23 @@ class L1Orbits(Orbits):
         # Determine target time array
         if linear_interp_setup:
             make_cpp = True
-            dt = dt if dt is not None else LINEAR_INTERP_TIMESTEP
+            # Orbit quantities (positions / velocities / link unit vectors)
+            # only carry information at the file's native spacecraft-orbit
+            # cadence ``dt_base`` (a few points per orbit); they are smooth and
+            # the C++ kernel linearly interpolates them at evaluation time. The
+            # dense light-travel-times keep their own native grid (``ltt_dt``,
+            # ~2.5 s) and are handed to C++ separately below — they are NOT
+            # splined here (the ``np.interp`` in the link loop only samples them
+            # onto ``t_arr`` to build the unit vectors). Building this grid at a
+            # fine kernel dt (e.g. 2.5 s) would span the full mission at that
+            # step -> tens of millions of points and a CubicSpline
+            # solve/eval that dominates runtime (minutes-to-hours on CPU).
+            # Default to the native orbit cadence so the grid stays tiny.
+            dt = float(self.dt_base)
             # interpolate only the orbit quantities, the ltts are already dense enough
             t0 = self.sc_t0
             t_end = float(self._sc_t_base[-1])
-                        
+
             t_arr = np.arange(t0, t_end + dt, dt)
             t_arr = t_arr[t_arr <= t_end]
             

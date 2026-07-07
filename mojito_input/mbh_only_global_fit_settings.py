@@ -26,7 +26,7 @@ from lisatools.domains import FDSettings, STFTSettings
 from lisatools.globalfit.engine import GeneralSettings, GeneralSetup, GlobalFitSettings, RankInfo
 from lisatools.globalfit.moves import GFCombineMove
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     PERecipeStep,
     SearchRecipeStep,
     build_mbh_moves_phenom,

@@ -75,38 +75,8 @@ from lisatools.globalfit.preprocessing import SangriaProcessingStep
 
 from eryn.utils.updates import Update
 
-from lisatools.globalfit.recipe import Recipe, RecipeStep
+from lisatools.globalfit.recipe import Recipe, SearchRecipeStep, PERecipeStep
 import time
-
-
-################
-
-### DEFINE RECIPE
-
-#############
-
-
-class PSDSearchRecipeStep(RecipeStep):
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        # this will already be converged to max logl
-        return True
-
-
-class PSDPERecipeStep(RecipeStep):
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        # this will already be converged to max logl
-        return False
-
 
 from lisatools.sampling.stopping import SearchConvergeStopping
 
@@ -163,8 +133,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_search_move.accepted = np.zeros((ntemps, nwalkers))
     psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    recipe.add_recipe_component(PSDPERecipeStep(moves=[psd_pe_move]), name="psd pe")
+    recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    recipe.add_recipe_component(PERecipeStep(moves=[psd_pe_move]), name="psd pe")
     
     
 #######################
@@ -310,7 +280,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         window_taper_duration=window_taper_duration,
         gpu_backend=GPU_BACKEND,
         gpus=gpus,
-        data_processor=SangriaProcessingStep,
+        data_processor_class=SangriaProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,

@@ -351,6 +351,10 @@ def make_gmm(gb, gmm_info_in):
 
 
 def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
+    # DEPRECATED (2026-07 GB-proposal rework): this legacy MPI-pipeline entry
+    # constructs GBSpecialStretchMove with a pre-rework signature (positional
+    # ``fd``, no ``band_N_vals``) and cannot run against the current move.
+    # The supported construction path is recipe.py::build_gb_moves.
     """Run the GB parameter-estimation sampler on ``gpu``.
 
     Pulls the global-fit configuration from ``head_rank``, builds the GB

@@ -1606,36 +1606,50 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         out[:, ilo: ihi + 1, tslice] = self._invert_psd(arr) if is_psd else arr
         return out
 
+    def _wrap_single_ac_as_aca(self, ac):
+        """Wrap a lone :class:`AnalysisContainer` into a 1-element
+        :class:`AnalysisContainerArray` so the ``*_wdm`` dispatch always flows
+        through the same ``linear_data_arr`` path the multi-walker band buffer
+        uses (one AC == one walker slab).  ``gpus`` is inferred from where the
+        container's residual actually lives so the internal repack stays
+        on-device (``None`` for a NumPy/CPU container).
+        """
+        from lisatools.analysiscontainer import AnalysisContainerArray
+        arr = getattr(getattr(ac, "data_res_arr", None), "arr", None)
+        # cupy arrays expose ``.device.id``; NumPy(<2) has no ``.device`` and
+        # NumPy>=2's ``.device`` is the string ``"cpu"`` (no ``.id``) -> None.
+        dev = getattr(getattr(arr, "device", None), "id", None)
+        gpus = None if dev is None else [int(dev)]
+        return AnalysisContainerArray(ac, gpus=gpus)
+
     def _resolve_source_to_arrays(self, source, data_index=None, noise_index=None,
                                    num_bin=None):
         """Resolve ``source`` to ``{data_idx: (data_d_global, invC_global)}``
         keyed by the unique ``data_index`` values present in this call.
 
-        For the array-tuple and AC cases there is exactly one entry (key
-        ``0``); for ACAs there is one entry per unique ``data_index``.
+        Accepts a raw ``(data_d, invC)`` tuple, a single
+        :class:`AnalysisContainer`, or an :class:`AnalysisContainerArray`.  A
+        lone ``AnalysisContainer`` is wrapped into a 1-element ACA under the
+        hood so the interior is identical either way (the C code always sees an
+        ACA-style ``linear_data_arr``).  There is one output entry per unique
+        ``data_index`` (key ``0`` for the tuple / single-AC cases).
         """
         # 1) Raw tuple (data_d, invC) -- pass through.
         if isinstance(source, (tuple, list)) and len(source) == 2 and not hasattr(source, "linear_data_arr"):
             d, c = source
             return {0: (np.asarray(d, dtype=float), np.asarray(c, dtype=float))}
 
-        # 2) AnalysisContainer -- single source.
-        if hasattr(source, "data_res_arr") and hasattr(source, "sens_mat") and not hasattr(source, "linear_data_arr"):
-            bs = self._maybe_aca_basis(source)
-            d = np.asarray(source.data_res_arr.arr, dtype=float)
-            psd = np.asarray(source.sens_mat.sens_mat, dtype=float)
-            if d.shape == (self.nchannels, self.Nf, self.Nt):
-                return {0: (d, self._invert_psd(psd if psd.ndim == 3 else np.stack(
-                    [psd[c, c] for c in range(self.nchannels)], axis=0
-                )))}
-            # Active-band slab -> zero-pad.
-            assert bs is not None, (
-                "AnalysisContainer with non-global data shape requires "
-                "basis_settings exposing ind_min_f / ind_max_f"
-            )
-            d_g = self._zero_pad_band_to_global(d, bs, is_psd=False)
-            c_g = self._zero_pad_band_to_global(psd, bs, is_psd=True)
-            return {0: (d_g, c_g)}
+        # 2) Single AnalysisContainer -- wrap into a 1-element ACA under the
+        #    hood and fall through to the ACA branch so the interior data path
+        #    (linear_data_arr -> C code) is the same as the multi-walker case.
+        if (hasattr(source, "data_res_arr") and hasattr(source, "sens_mat")
+                and not hasattr(source, "linear_data_arr")):
+            source = self._wrap_single_ac_as_aca(source)
+            # one walker slab -> default index 0 for every requested binary
+            if data_index is not None:
+                data_index = np.zeros_like(np.asarray(data_index))
+            if noise_index is not None:
+                noise_index = np.zeros_like(np.asarray(noise_index))
 
         # 3) AnalysisContainerArray (legacy ``wdm_holder``).
         if hasattr(source, "linear_data_arr") or hasattr(source, "data_shaped"):

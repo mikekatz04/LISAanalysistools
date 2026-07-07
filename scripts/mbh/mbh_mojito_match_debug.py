@@ -12,7 +12,7 @@ setup**:
     ``_get_mbh_phenom_wave_gen`` in
     ``global_fit_input/full_year_combined_global_fit_settings.py``).
   * Catalogue -> sampling basis via the stock
-    ``lisatools.globalfit.recipe_steps.mbh_catalogue_to_sampling_basis``.
+    ``lisatools.globalfit.recipe.mbh_catalogue_to_sampling_basis``.
   * Sky/polarization in **ICRS** (orbits loaded with ``frame="icrs"``), matching
     the 2026-06 run-frame directive.
 
@@ -86,7 +86,7 @@ import matplotlib.pyplot as plt
 
 from lisatools.detector import L1Orbits
 from lisatools.globalfit.preprocessing import L1ProcessingStep, find_file
-from lisatools.globalfit.recipe_steps import mbh_catalogue_to_sampling_basis
+from lisatools.globalfit.recipe import mbh_catalogue_to_sampling_basis
 from lisatools.globalfit.stock.erebor import make_mbh_transform_container
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform

@@ -6,7 +6,7 @@ grid as a :class:`DomainSettingsBase` / factory the engine consumes.
 
 Built on the same pieces the smoke-test settings files use:
 
-* ``recipe_steps.build_psd_moves`` / ``build_gb_moves`` drive the PSD
+* ``recipe.build_psd_moves`` / ``build_gb_moves`` drive the PSD
   and GB branches (mirrors ``gb_and_foreground_global_fit_settings.py``).
 * The EMRI branch reuses the cached ``GenerateEMRIWaveform`` +
   ``ResponseWrapper`` pattern from ``emri_only_global_fit_settings.py``
@@ -77,7 +77,7 @@ from lisatools.globalfit.moves import (
 )
 from lisatools.globalfit.preprocessing import BaseProcessingStep, SangriaProcessingStep
 from lisatools.globalfit.recipe import Recipe
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     PERecipeStep,
     SearchRecipeStep,
     build_gb_moves,

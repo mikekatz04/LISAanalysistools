@@ -38,7 +38,7 @@ from lisatools.utils.constants import YRSID_SI
 from eryn.utils.updates import Update
 
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     SearchRecipeStep,
     PERecipeStep,
     RJRecipeStep,

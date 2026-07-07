@@ -90,6 +90,15 @@ def f_s_to_ms(x):
     return x * 1e3
 
 
+def ten_to_the_x(x):
+    """Return ``10 ** x`` (named 1-arg transform for pickling support).
+
+    Used as a per-parameter :class:`~eryn.utils.TransformContainer` transform for
+    PSD / foreground amplitudes sampled in ``log10`` space.
+    """
+    return 10.0 ** x
+
+
 def make_gb_transform_container():
     """Build the stock GB :class:`TransformContainer` (forward + inverse).
 
@@ -164,32 +173,32 @@ class GBSetup(Setup, GBSettings):
     def init_sampling_info(self):
         """Build the GB :class:`TransformContainer`, prior, periodicity, and waveform kwargs.
 
-        stft_tof basis (kept at the 2026-06 merge): named LaTeX parameters
-        with ICRS sky angles (alpha / sin(delta)) -- the run frame is ICRS --
-        and the named transforms that the GB info-matrix proposal looks up
-        (``parameter_transforms.original_parameter_transforms[r"$\\log A$"]``
-        etc. in :mod:`..moves.gbspecialstretch`).
+        Plain parameter names (same convention as
+        :func:`make_gb_transform_container`) with ICRS sky angles
+        (``alpha`` / ``sin_delta``) -- the run frame is ICRS. ``A`` is
+        sampled in ``ln A`` (the ``np.exp`` transform maps to the physical
+        amplitude), ``f0`` in mHz.
         """
-        input_basis = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$",
-                       r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
+        input_basis = ["A", "f0", "fdot", "phi0",
+                       "cos_iota", "psi", "alpha", "sin_delta"]
 
         if self.transform is None:
             gb_transform_fn_in = {
-                r"$\log A$": np.exp,
-                r"$f_0$": f_ms_to_s,
-                r"$\phi_0$": lambda x: -1 * x,  # flip sign of phi0 to match JaxGB convention.
-                r"$\cos\iota$": np.arccos,
-                r"$\sin\delta$": np.arcsin,
+                "A": np.exp,
+                "f0": f_ms_to_s,
+                "phi0": lambda x: -1 * x,  # flip sign of phi0 to match JaxGB convention.
+                "cos_iota": np.arccos,
+                "sin_delta": np.arcsin,
 
             }
 
             output_basis = [
-                r"$\log A$", r"$f_0$", r"$\dot{f}$",
-                r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$",
-                r"$\psi$", r"$\alpha$", r"$\sin\delta$"
+                "A", "f0", "fdot",
+                "fddot", "phi0", "cos_iota",
+                "psi", "alpha", "sin_delta"
             ]
 
-            gb_fill_dict = {r"$\ddot{f}$": 0.0}
+            gb_fill_dict = {"fddot": 0.0}
 
             self.transform = TransformContainer(
                 input_basis=input_basis,
@@ -199,7 +208,7 @@ class GBSetup(Setup, GBSettings):
             )
 
         if self.periodic is None:
-            self.periodic = {"gb": {r"$\phi_0$": 2*np.pi, r"$\psi$": np.pi, r"$\alpha$": 2 * np.pi}}
+            self.periodic = {"gb": {"phi0": 2*np.pi, "psi": np.pi, "alpha": 2 * np.pi}}
 
         if self.priors is None:
             priors_gb = {
@@ -459,7 +468,7 @@ def make_mbh_transform_container():
     """Build the stock MBH :class:`TransformContainer` (forward + inverse).
 
     Sampling basis (ICRS — the 2026-06 run frame, matching
-    :func:`lisatools.globalfit.recipe_steps.mbh_catalogue_to_sampling_basis`):
+    :func:`lisatools.globalfit.recipe.mbh_catalogue_to_sampling_basis`):
     ``logM, Q (= m1/m2 >= 1), s1z, s2z, dist (Gpc), phi_ref, cos_iota,
     psi (ICRS), alpha (RA), sin_delta, t_plunge (SSB)``. The output basis
     holds ``m1, m2 (via mT_Q), dist (Mpc), iota, delta`` with sky /

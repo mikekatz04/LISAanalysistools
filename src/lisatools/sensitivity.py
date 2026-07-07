@@ -6,6 +6,7 @@ Stas Babak and Antoine Petiteau for the LDC team.
 
 from __future__ import annotations
 
+import functools
 import math
 import operator
 import os
@@ -3632,6 +3633,258 @@ class CompositeSensitivityMatrix(SensitivityMatrixBase):
     def update_component(self, index: int) -> None:
         """Recompute a single component (after changing its params) and re-sum."""
         self.rebuild(indices=[index])
+
+    def draw_correlated_td_noise(
+        self, dt: float, *, seed: Optional[int | np.random.Generator] = None
+    ) -> np.ndarray:
+        """Draw a ``(nchannels, N)`` real TD noise realization from this matrix.
+
+        The matrix must be evaluated on an :class:`~lisatools.domains.FDSettings`
+        rFFT grid. A per-frequency Cholesky factor of ``self.sens_mat`` (the
+        ``(nch, nch, Nf)`` covariance) is applied to a unit complex-Gaussian draw
+        and inverse-rFFT'd (LDC convention ``td = irfft(fd) / dt``). Frequencies
+        whose covariance is not positive-definite (e.g. the ``f = 0`` bin) fall
+        back to an independent diagonal-``sqrt`` draw.
+
+        The realization is computed on the host (NumPy) so a fixed integer
+        ``seed`` gives a reproducible, backend-independent stream.
+
+        Args:
+            dt: Time-domain sample spacing in seconds. ``N`` is derived as
+                ``round(1 / (df * dt))`` from the grid ``df``.
+            seed: Seed or :class:`numpy.random.Generator` for the draw.
+
+        Returns:
+            ``(nchannels, N)`` ``float64`` array of correlated TD noise.
+        """
+        if not isinstance(self.basis_settings, domains.FDSettings):
+            raise ValueError(
+                "draw_correlated_td_noise requires an FDSettings basis; got "
+                f"{type(self.basis_settings).__name__}."
+            )
+        cov = asnumpy(self.sens_mat)  # (nch, nch, Nf_rfft)
+        nch = cov.shape[0]
+        df = self.basis_settings.df
+        N = int(round(1.0 / (df * dt)))
+        Nf_rfft = N // 2 + 1
+        if cov.shape[-1] != Nf_rfft:
+            raise ValueError(
+                f"covariance length {cov.shape[-1]} != N//2+1 = {Nf_rfft} implied "
+                f"by df={df!r}, dt={dt!r}."
+            )
+
+        rng = np.random.default_rng(seed)
+        norm = 0.5 * (1.0 / df) ** 0.5
+        z = rng.normal(0, norm, (nch, Nf_rfft)) + 1j * rng.normal(
+            0, norm, (nch, Nf_rfft)
+        )
+
+        n_fd = np.zeros_like(z)
+        eye = np.eye(nch) * 1e-60  # regularise the DC / non-PD bins
+        for k in range(Nf_rfft):
+            C_k = cov[..., k] + eye
+            try:
+                L = np.linalg.cholesky(C_k)
+            except np.linalg.LinAlgError:
+                diag = np.maximum(np.diag(cov[..., k]), 0.0)
+                n_fd[:, k] = np.sqrt(diag) * z[:, k]
+                continue
+            n_fd[:, k] = L @ z[:, k]
+
+        n_td = np.fft.irfft(n_fd, n=N, axis=-1) / dt
+        return n_td.astype(np.float64)
+
+
+def generate_correlated_instrument_noise_td(
+    N: int,
+    dt: float,
+    *,
+    Soms_d: float,
+    Sa_a: float,
+    tdi_generation: int,
+    seed: Optional[int | np.random.Generator] = None,
+    model_name: str = "synthetic_noise_model",
+    orbits: Optional[Orbits] = None,
+) -> np.ndarray:
+    """Sample a ``(nchannels, N)`` TD instrument-noise realization.
+
+    Builds an :class:`InstrumentNoise` covariance for a
+    ``LISAModel(Soms_d**2, Sa_a**2, orbits, model_name)`` on an rFFT
+    :class:`~lisatools.domains.FDSettings` grid and delegates to
+    :meth:`CompositeSensitivityMatrix.draw_correlated_td_noise`.
+
+    Args:
+        N: Number of TD samples.
+        dt: Sample spacing in seconds.
+        Soms_d / Sa_a: Linear instrument-noise levels (the covariance uses the
+            squared values internally, matching the stock model convention).
+        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0).
+        seed: RNG seed / generator.
+        model_name: Name recorded on the :class:`LISAModel` (does not affect the
+            realization).
+        orbits: Orbits carrier for the model (``DefaultOrbits()`` if ``None``;
+            ``LISAModel.lisanoises`` only reads the noise levels).
+
+    Returns:
+        ``(nchannels, N)`` ``float64`` array of correlated TD noise.
+    """
+    Nf_rfft = N // 2 + 1
+    df = 1.0 / (N * dt)
+    fd_settings = domains.FDSettings(N=Nf_rfft, df=df, force_backend="cpu")
+    if orbits is None:
+        orbits = lisa_models.DefaultOrbits()
+    model = lisa_models.LISAModel(Soms_d ** 2, Sa_a ** 2, orbits, model_name)
+    instrument = InstrumentNoise(
+        tdi_generation=tdi_generation, model=model, fill_nans=0.0
+    )
+    sens = CompositeSensitivityMatrix(fd_settings, [instrument])
+    return sens.draw_correlated_td_noise(dt, seed=seed)
+
+
+def annual_amplitude_envelope(
+    t_arr, *, amp: float, phase0: float, period: float = YRSID_SI
+) -> np.ndarray:
+    """Per-sample amplitude envelope ``1 + amp*cos(2*pi*t/period + phase0)``."""
+    return 1.0 + amp * np.cos(2.0 * np.pi * np.asarray(t_arr) / period + phase0)
+
+
+def annual_modulation_matrix(
+    t_arr, *, amp: float, phase0: float, period: float = YRSID_SI
+) -> np.ndarray:
+    """``(nch, nch, Nt)`` isotropic-foreground modulation with an annual envelope.
+
+    Standard isotropic per-element pattern (diag ``1``, off-diag ``-1/2``) times
+    the *power-domain* annual envelope (the square of
+    :func:`annual_amplitude_envelope`, since the modulation multiplies the
+    covariance / power, not the amplitude).
+    """
+    t_arr = np.asarray(t_arr)
+    base = np.array(
+        [
+            [1.0, -0.5, -0.5],
+            [-0.5, 1.0, -0.5],
+            [-0.5, -0.5, 1.0],
+        ]
+    )
+    env = (
+        annual_amplitude_envelope(t_arr, amp=amp, phase0=phase0, period=period) ** 2
+    )
+    return base[:, :, None] * env[None, None, :]
+
+
+class AnnualModulatedGalacticForeground(GalacticForeground):
+    """:class:`GalacticForeground` with an annual amplitude modulation pre-bound.
+
+    The per-element modulation is :func:`annual_modulation_matrix` with ``amp`` /
+    ``phase0`` / ``period`` bound at construction, so the covariance acquires a
+    ``(1 + amp*cos(...))**2`` annual envelope. ``foreground_params`` are forwarded
+    to ``stochastic_fn`` (default
+    :class:`~lisatools.stochastic.FittedHyperbolicTangentGalacticForeground`, for
+    which ``(Tobs,)`` is the expected parameter tuple).
+    """
+
+    def __init__(
+        self,
+        foreground_params: Sequence[float],
+        *,
+        amp: float,
+        phase0: float,
+        tdi_generation: int = 2,
+        period: float = YRSID_SI,
+        stochastic_fn=None,
+    ):
+        if stochastic_fn is None:
+            stochastic_fn = FittedHyperbolicTangentGalacticForeground
+        modulation = functools.partial(
+            annual_modulation_matrix, amp=amp, phase0=phase0, period=period
+        )
+        super().__init__(
+            foreground_params=foreground_params,
+            modulation=modulation,
+            tdi_generation=tdi_generation,
+            stochastic_fn=stochastic_fn,
+        )
+
+
+def generate_foreground_td(
+    N: int,
+    dt: float,
+    *,
+    Tobs: float,
+    foreground_params: Optional[Sequence[float]],
+    tdi_generation: int,
+    seed: Optional[int | np.random.Generator] = None,
+    stochastic_fn=None,
+    envelope: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+) -> np.ndarray:
+    """Sample a ``(nchannels, N)`` TD galactic-foreground realization.
+
+    Builds a stationary :class:`GalacticForeground` covariance on an rFFT
+    :class:`~lisatools.domains.FDSettings` grid, draws a correlated TD
+    realization via
+    :meth:`CompositeSensitivityMatrix.draw_correlated_td_noise`, and (optionally)
+    multiplies each channel by a per-sample amplitude-domain ``envelope(t)``
+    (e.g. ``sqrt`` of :func:`annual_amplitude_envelope`) to make the realization
+    non-stationary in the same way an annual-modulated model covariance is.
+
+    Args:
+        N: Number of TD samples.
+        dt: Sample spacing in seconds.
+        Tobs: Observation span; used as the default ``foreground_params`` tuple
+            ``(Tobs,)`` when ``foreground_params`` is ``None``.
+        foreground_params: Parameters for ``stochastic_fn``; ``None`` -> ``(Tobs,)``.
+        tdi_generation: 1 or 2.
+        seed: RNG seed / generator.
+        stochastic_fn: Stochastic foreground model (default
+            :class:`~lisatools.stochastic.FittedHyperbolicTangentGalacticForeground`).
+        envelope: Optional callable ``t_arr -> (N,)`` amplitude-domain multiplier.
+
+    Returns:
+        ``(nchannels, N)`` ``float64`` array of correlated TD foreground.
+    """
+    if stochastic_fn is None:
+        stochastic_fn = FittedHyperbolicTangentGalacticForeground
+    Nf_rfft = N // 2 + 1
+    df = 1.0 / (N * dt)
+    fd_settings = domains.FDSettings(N=Nf_rfft, df=df, force_backend="cpu")
+    fg_params = foreground_params if foreground_params is not None else (Tobs,)
+    fg = GalacticForeground(
+        foreground_params=fg_params,
+        modulation=None,  # stationary base; the envelope is applied in TD below
+        tdi_generation=tdi_generation,
+        stochastic_fn=stochastic_fn,
+    )
+    sens = CompositeSensitivityMatrix(fd_settings, [fg])
+    n_td = sens.draw_correlated_td_noise(dt, seed=seed)
+    if envelope is not None:
+        t_arr = np.arange(N) * dt  # caller adds any t0 separately
+        n_td = n_td * np.asarray(envelope(t_arr))[None, :]
+    return n_td
+
+
+_TDI_CHAN_TO_GENERATION = {
+    "XYZ": 2,
+    "AET": 2,
+    "XYZ2": 2,
+    "AET2": 2,
+    "XYZ1": 1,
+    "AET1": 1,
+}
+
+
+def tdi_generation_from_channel(tdi_chan: str) -> int:
+    """Map a TDI channel label to its TDI generation (1 or 2).
+
+    ``"XYZ"/"AET"/"XYZ2"/"AET2" -> 2``, ``"XYZ1"/"AET1" -> 1``. Raises
+    :class:`ValueError` on an unrecognised label.
+    """
+    try:
+        return _TDI_CHAN_TO_GENERATION[tdi_chan]
+    except KeyError:
+        raise ValueError(
+            f"TDI channel {tdi_chan!r} not recognised; expected one of "
+            f"{sorted(_TDI_CHAN_TO_GENERATION)}."
+        )
 
 
 class CompositeSensitivityBackend:

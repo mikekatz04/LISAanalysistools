@@ -78,7 +78,7 @@ def mbh_dist_trans(x):
 
 from eryn.utils.updates import Update
 
-from lisatools.globalfit.recipe import Recipe, RecipeStep
+from lisatools.globalfit.recipe import Recipe, SearchRecipeStep, PERecipeStep
 import time
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
@@ -106,40 +106,6 @@ DOMAIN_CHOICE = FDSettings.make_factory(min_freq=0.0, max_freq=None)
 ### DEFINE RECIPE
 
 #############
-
-
-class MBHSearchStep(RecipeStep):
-
-    def __init__(self, *args, moves=None, weights=None, **kwargs):
-        super().__init__(moves=moves, weights=weights)
-
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-        
-    def stopping_function(self, *args, **kwargs):
-        # this will already be converged to max logl
-        # I think it should be just True becuase 
-        # the inner proposal is taking care of this. 
-        return True  # self.stopper(*args, **kwargs)
-
-
-class MBHPEStep(RecipeStep):
-
-    def __init__(self, *args, moves=None, weights=None, **kwargs):
-        super().__init__(moves=moves, weights=weights)
-
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-        
-    def stopping_function(self, *args, **kwargs):
-        # this will already be converged to max logl
-        # I think it should be just True becuase 
-        # the inner proposal is taking care of this. 
-        return False  # self.stopper(*args, **kwargs)
 
 
 ################
@@ -214,8 +180,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     mbh_pe_move = MBHSpecialMove(*mbh_move_args, name="mbh_pe", run_search=False, force_backend="cuda12x")
     mbh_search_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
     mbh_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
-    recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_move], n_iters=5, verbose=True), name="mbh search")
-    recipe.add_recipe_component(MBHPEStep(moves=[mbh_pe_move], n_iters=5, verbose=True), name="mbh pe")
+    recipe.add_recipe_component(SearchRecipeStep(moves=[mbh_search_move], n_iters=5, verbose=True), name="mbh search")
+    recipe.add_recipe_component(PERecipeStep(moves=[mbh_pe_move], n_iters=5, verbose=True), name="mbh pe")
     
 #######################
 ##### SETTINGS ###########

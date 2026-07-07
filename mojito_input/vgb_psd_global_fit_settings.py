@@ -87,7 +87,7 @@ from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves, setup_state_for_injection, scatter_around_injection
+from lisatools.globalfit.recipe import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves, setup_state_for_injection, scatter_around_injection
 from lisatools.globalfit.priors.gbpriors import get_fdot_mojito
 
 ################

@@ -21,7 +21,7 @@ import os, numpy as np
 os.environ.setdefault("OMP_NUM_THREADS", "8")
 import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
 import phentax.waveform as pw
-from lisatools.globalfit.recipe_steps import mbh_catalogue_to_sampling_basis
+from lisatools.globalfit.recipe import mbh_catalogue_to_sampling_basis
 from lisatools.globalfit.stock.erebor import make_mbh_transform_container
 
 MBHB_ID = int(os.environ.get("MBHB_ID", "0"))

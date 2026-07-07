@@ -1293,8 +1293,17 @@ void wdm_het_get_ll_kernel(
         double *params      = &params_all[(size_t) bin_i * nparams];
         const int data_ind  = data_index_all[bin_i];
         const int noise_ind = noise_index_all[bin_i];
-        (void) noise_ind;  // invC already incorporates noise; kept for API parity
-        (void) data_ind;   // data_d / invC are indexed directly (no per-binary slab)
+        // Route this binary's data / invC reads into their own slab so
+        // multi-walker / multi-band buffers work in one launch. Indices are
+        // buffer-local (0..num-1); a single buffer passes 0 -> offset 0
+        // (backward compatible). Layout mirrors the active-band data/invC
+        // read math below (g_d / g_inv).
+        const size_t per_data = (size_t) nchannels * Nf_active * Nt_active;
+        const size_t per_invC = (size_t) ((tdi_type == TDI_XYZ)
+                                    ? nchannels * nchannels : nchannels)
+                                * Nf_active * Nt_active;
+        const double *data_d_b = data_d + (size_t) data_ind  * per_data;
+        const double *invC_b   = invC   + (size_t) noise_ind * per_invC;
 
         // Per-binary inner-product accumulators (in registers).
         double tmp_dh = 0.0;
@@ -1516,7 +1525,7 @@ void wdm_het_get_ll_kernel(
                         w_arr[c] = psign * rp;
                         const size_t g_d = ((size_t) c * Nf_active + m_act)
                                             * Nt_active + n_act;
-                        d_arr[c] = data_d[g_d];
+                        d_arr[c] = data_d_b[g_d];
                     }
                     if (tdi_type == TDI_XYZ) {
                         // invC is Hermitian (and real): 3 diag + 3 off-diag
@@ -1529,7 +1538,7 @@ void wdm_het_get_ll_kernel(
                             const size_t g_inv =
                                 (((size_t) c * nchannels + c)
                                    * Nf_active + m_act) * Nt_active + n_act;
-                            const double inv = invC[g_inv];
+                            const double inv = invC_b[g_inv];
                             tmp_dh += d_arr[c] * w_arr[c] * inv;
                             tmp_hh += w_arr[c] * w_arr[c] * inv;
                         }
@@ -1538,7 +1547,7 @@ void wdm_het_get_ll_kernel(
                                 const size_t g_inv =
                                     (((size_t) c1 * nchannels + c2)
                                        * Nf_active + m_act) * Nt_active + n_act;
-                                const double inv = invC[g_inv];
+                                const double inv = invC_b[g_inv];
                                 tmp_dh += (d_arr[c1] * w_arr[c2]
                                             + d_arr[c2] * w_arr[c1]) * inv;
                                 tmp_hh += 2.0 * w_arr[c1] * w_arr[c2] * inv;
@@ -1549,7 +1558,7 @@ void wdm_het_get_ll_kernel(
                         for (int c = 0; c < nchannels; ++c) {
                             const size_t g_inv = ((size_t) c * Nf_active + m_act)
                                                   * Nt_active + n_act;
-                            const double inv = invC[g_inv];
+                            const double inv = invC_b[g_inv];
                             tmp_dh += d_arr[c] * w_arr[c] * inv;
                             tmp_hh += w_arr[c] * w_arr[c] * inv;
                         }
@@ -1600,6 +1609,7 @@ void wdm_het_fill_global_kernel(
     Orbits *orbits, TDIConfig *tdi_config,
     WDMSettings *wdm_settings,
     double *params_all, double *factors_all,
+    int *data_index_all,
     double *chunk_t_starts, int *chunk_keep_lo, int *chunk_keep_hi,
     int *chunk_n_global_offset,
     double *wdm_window,
@@ -1659,6 +1669,17 @@ void wdm_het_fill_global_kernel(
     for (int bin_i = BLOCK_START_X; bin_i < num_bin; bin_i += GRID_INCR_X) {
         double *params       = &params_all[(size_t) bin_i * nparams];
         const double factor  = factors_all[bin_i];
+
+        // Route this binary's template into its own slab so multi-walker /
+        // multi-band buffers work in one launch. ``data_index_all`` is
+        // buffer-local (0..num_templates-1); a single-template buffer passes
+        // data_index=0 -> offset 0 (backward compatible). per_template matches
+        // the (nchannels, out_Nf, out_Nt) write layout used for ``dst`` below.
+        const int    _oNf   = active_band ? wdm_settings->Nf_active : Nf;
+        const int    _oNt   = active_band ? wdm_settings->Nt_active : Nt;
+        double *template_fill_b = template_fill
+            + (size_t) data_index_all[bin_i]
+              * (size_t) nchannels * (size_t) _oNf * (size_t) _oNt;
 
         // Per-chunk carrier + band computed inside the loop (chirp fix, see
         // wdm_het_get_ll_kernel); no-op for GB, tracks SOBBH's sweep.
@@ -1815,9 +1836,9 @@ void wdm_het_fill_global_kernel(
                         const double w     = factor * kappa * sign * real_part;
                         const size_t dst   = ((size_t) c * out_Nf + m_out) * out_Nt + n_out;
 #ifdef __CUDACC__
-                        atomicAdd(&template_fill[dst], w);
+                        atomicAdd(&template_fill_b[dst], w);
 #else
-                        template_fill[dst] += w;
+                        template_fill_b[dst] += w;
 #endif
                     }
                 }
@@ -1918,7 +1939,18 @@ void wdm_het_swap_ll_kernel(
     for (int bin_i = BLOCK_START_X; bin_i < num_bin; bin_i += GRID_INCR_X) {
         double *p_add = &params_add_all   [(size_t) bin_i * nparams];
         double *p_rem = &params_remove_all[(size_t) bin_i * nparams];
-        (void) data_index_all; (void) noise_index_all;
+        // Route this binary's data / invC reads into their own slab so
+        // multi-walker / multi-band buffers work in one launch. Indices are
+        // buffer-local (0..num-1); a single buffer passes 0 -> offset 0
+        // (backward compatible). Layout mirrors the g_d / g_inv read math below.
+        const int data_ind  = data_index_all[bin_i];
+        const int noise_ind = noise_index_all[bin_i];
+        const size_t per_data = (size_t) nchannels * Nf_active * Nt_active;
+        const size_t per_invC = (size_t) ((tdi_type == TDI_XYZ)
+                                    ? nchannels * nchannels : nchannels)
+                                * Nf_active * Nt_active;
+        const double *data_d_b = data_d + (size_t) data_ind  * per_data;
+        const double *invC_b   = invC   + (size_t) noise_ind * per_invC;
 
         // Per-thread accumulators.
         double tmp_dh_a = 0.0, tmp_dh_r = 0.0;
@@ -2163,7 +2195,7 @@ void wdm_het_swap_ll_kernel(
                                 w_r_arr[c] = kappa * sign * rp;
                                 const size_t g_d = ((size_t) c * Nf_active + m_act)
                                                     * Nt_active + n_act;
-                                d_arr[c] = data_d[g_d];
+                                d_arr[c] = data_d_b[g_d];
                             }
                             if (tdi_type == TDI_XYZ) {
                                 // Symmetric invC: 3 diag + 3 off-diag reads.
@@ -2174,7 +2206,7 @@ void wdm_het_swap_ll_kernel(
                                         (((size_t) c * nchannels + c)
                                           * Nf_active + m_act)
                                           * Nt_active + n_act;
-                                    const double inv = invC[g_inv];
+                                    const double inv = invC_b[g_inv];
                                     tmp_dh_a += d_arr[c]   * w_a_arr[c] * inv;
                                     tmp_dh_r += d_arr[c]   * w_r_arr[c] * inv;
                                     tmp_aa   += w_a_arr[c] * w_a_arr[c] * inv;
@@ -2187,7 +2219,7 @@ void wdm_het_swap_ll_kernel(
                                             (((size_t) c1 * nchannels + c2)
                                               * Nf_active + m_act)
                                               * Nt_active + n_act;
-                                        const double inv = invC[g_inv];
+                                        const double inv = invC_b[g_inv];
                                         tmp_dh_a += (d_arr[c1]   * w_a_arr[c2]
                                                       + d_arr[c2]   * w_a_arr[c1]) * inv;
                                         tmp_dh_r += (d_arr[c1]   * w_r_arr[c2]
@@ -2202,7 +2234,7 @@ void wdm_het_swap_ll_kernel(
                                 for (int c = 0; c < nchannels; ++c) {
                                     const size_t g_inv = ((size_t) c * Nf_active + m_act)
                                                           * Nt_active + n_act;
-                                    const double inv = invC[g_inv];
+                                    const double inv = invC_b[g_inv];
                                     tmp_dh_a += d_arr[c]   * w_a_arr[c] * inv;
                                     tmp_dh_r += d_arr[c]   * w_r_arr[c] * inv;
                                     tmp_aa   += w_a_arr[c] * w_a_arr[c] * inv;
@@ -2371,8 +2403,18 @@ void wdm_het_get_fstat_ll_kernel(
     // use the same convention.
     for (int bin_i = BLOCK_START_X; bin_i < num_bin; bin_i += GRID_INCR_X) {
         double *params      = &params_all[(size_t) bin_i * nparams];
-        const int data_ind  = data_index_all [bin_i];  (void) data_ind;
-        const int noise_ind = noise_index_all[bin_i];  (void) noise_ind;
+        // Route this binary's data / invC reads into their own slab so
+        // multi-walker / multi-band buffers work in one launch. Indices are
+        // buffer-local (0..num-1); a single buffer passes 0 -> offset 0
+        // (backward compatible). Layout mirrors the g_d / g_inv read math below.
+        const int data_ind  = data_index_all [bin_i];
+        const int noise_ind = noise_index_all[bin_i];
+        const size_t per_data = (size_t) nchannels * Nf_active * Nt_active;
+        const size_t per_invC = (size_t) ((tdi_type == TDI_XYZ)
+                                    ? nchannels * nchannels : nchannels)
+                                * Nf_active * Nt_active;
+        const double *data_d_b = data_d + (size_t) data_ind  * per_data;
+        const double *invC_b   = invC   + (size_t) noise_ind * per_invC;
 
         // Per-thread accumulators.
         double tmp_N[N_FILTERS] = {0.0, 0.0, 0.0, 0.0};
@@ -2545,7 +2587,7 @@ void wdm_het_get_fstat_ll_kernel(
                             for (int c = 0; c < nchannels; ++c) {
                                 const size_t g_d = ((size_t) c * Nf_active + m_act)
                                                     * Nt_active + n_act;
-                                d_arr[c] = data_d[g_d];
+                                d_arr[c] = data_d_b[g_d];
                             }
                             // 4 N partials: <d | A_i>
                             for (int fi = 0; fi < N_FILTERS; ++fi) {
@@ -2557,7 +2599,7 @@ void wdm_het_get_fstat_ll_kernel(
                                             (((size_t) c * nchannels + c)
                                               * Nf_active + m_act)
                                               * Nt_active + n_act;
-                                        const double inv = invC[g_inv];
+                                        const double inv = invC_b[g_inv];
                                         const double w_i =
                                             w_basis_reg[(fi * nchannels + c)
                                                           * K_MAX_REG
@@ -2570,7 +2612,7 @@ void wdm_het_get_fstat_ll_kernel(
                                                 (((size_t) c1 * nchannels + c2)
                                                   * Nf_active + m_act)
                                                   * Nt_active + n_act;
-                                            const double inv = invC[g_inv];
+                                            const double inv = invC_b[g_inv];
                                             const double w_c1 =
                                                 w_basis_reg[(fi * nchannels + c1)
                                                               * K_MAX_REG
@@ -2588,7 +2630,7 @@ void wdm_het_get_fstat_ll_kernel(
                                         const size_t g_inv = ((size_t) c * Nf_active
                                                                 + m_act)
                                                               * Nt_active + n_act;
-                                        const double inv = invC[g_inv];
+                                        const double inv = invC_b[g_inv];
                                         const double w_i =
                                             w_basis_reg[(fi * nchannels + c)
                                                           * K_MAX_REG
@@ -2612,7 +2654,7 @@ void wdm_het_get_fstat_ll_kernel(
                                                 (((size_t) c * nchannels + c)
                                                   * Nf_active + m_act)
                                                   * Nt_active + n_act;
-                                            const double inv = invC[g_inv];
+                                            const double inv = invC_b[g_inv];
                                             const double w_i =
                                                 w_basis_reg[(fi * nchannels + c)
                                                               * K_MAX_REG
@@ -2629,7 +2671,7 @@ void wdm_het_get_fstat_ll_kernel(
                                                     (((size_t) c1 * nchannels + c2)
                                                       * Nf_active + m_act)
                                                       * Nt_active + n_act;
-                                                const double inv = invC[g_inv];
+                                                const double inv = invC_b[g_inv];
                                                 const double w_i_c1 =
                                                     w_basis_reg[(fi * nchannels + c1)
                                                                   * K_MAX_REG
@@ -2656,7 +2698,7 @@ void wdm_het_get_fstat_ll_kernel(
                                                                     * Nf_active
                                                                     + m_act)
                                                                   * Nt_active + n_act;
-                                            const double inv = invC[g_inv];
+                                            const double inv = invC_b[g_inv];
                                             const double w_i =
                                                 w_basis_reg[(fi * nchannels + c)
                                                               * K_MAX_REG
@@ -2747,6 +2789,7 @@ inline void wdm_het_fill_global_impl(
     Orbits *orbits, TDIConfig *tdi_config,
     WDMSettings *wdm_settings,
     double *params_all, double *factors_all,
+    int *data_index_all,
     double *chunk_t_starts, int *chunk_keep_lo, int *chunk_keep_hi,
     int *chunk_n_global_offset,
     double *wdm_window,
@@ -2800,6 +2843,7 @@ inline void wdm_het_fill_global_impl(
     wdm_het_fill_global_kernel<SourceT><<<grid, NUM_THREADS_HERE, shared_bytes>>>(
         template_fill, orbits_gpu, tdi_config_gpu, wdm_settings_gpu,
         params_all, factors_all,
+        data_index_all,
         chunk_t_starts, chunk_keep_lo, chunk_keep_hi, chunk_n_global_offset,
         wdm_window,
         n_chunks, num_bin, nparams,
@@ -2813,6 +2857,7 @@ inline void wdm_het_fill_global_impl(
     wdm_het_fill_global_kernel<SourceT>(
         template_fill, orbits, tdi_config, wdm_settings,
         params_all, factors_all,
+        data_index_all,
         chunk_t_starts, chunk_keep_lo, chunk_keep_hi, chunk_n_global_offset,
         wdm_window,
         n_chunks, num_bin, nparams,

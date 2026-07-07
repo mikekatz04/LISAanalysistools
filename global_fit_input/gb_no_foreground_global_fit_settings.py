@@ -129,11 +129,8 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 from lisatools.analysiscontainer import AnalysisContainerArray
-from lisatools.domains import WDMSettings
-
-# basic transform functions for pickling
-def f_ms_to_s(x):
-    return x * 1e-3
+from lisatools.domains import WDMSettings, FDSettings
+from lisatools.sensitivity import tdi_generation_from_channel
 
 from eryn.utils.updates import Update
 
@@ -142,7 +139,7 @@ from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     SearchRecipeStep,
     PERecipeStep,
     RJRecipeStep,
@@ -150,6 +147,37 @@ from lisatools.globalfit.recipe_steps import (
     select_gb_injection_subset_by_snr,
     setup_state_for_injection,
 )
+
+
+# ============================================================
+# *** DEBUG MODE (single switch) ***
+# ============================================================
+# GB_DEBUG=1 turns this settings file into the fast smoke configuration.
+# The debug values below are seeded through ``os.environ.setdefault``, so
+# every knob keeps its usual explicit env override and the ONLY difference
+# from a true run is this flag: short Tobs (3 d), 3 walkers / 2 temps,
+# small chunked-het kernel sizes, a handful of iterations, and the GB
+# special-move debug instrumentation (band residual round-trip ll checks +
+# begin/middle/end band plots; consumed inside ``build_gb_moves`` from the
+# same env var, plots under GB_DEBUG_DIR, default ./gf_output/gb_debug/).
+#
+#   GB_DEBUG=1 python scripts/run_global.py \
+#       -sfp global_fit_input/gb_no_foreground_global_fit_settings.py
+#
+GB_DEBUG = bool(int(os.environ.get("GB_DEBUG", "0")))
+if GB_DEBUG:
+    for _knob, _debug_val in {
+        "TOBS_TARGET": str(3 * 86400.0),  # 3 days
+        "NWALKERS": "3",
+        "NTEMPS": "2",
+        "CHUNKED_NT_SUB": "64",
+        "CHUNKED_N_PAD": "8",
+        "CHUNKED_N_SPARSE": "64",
+        "CHUNKED_N_CP_SIG": "16",
+        "CHUNKED_N_CP_ORBIT": "16",
+        "GF_NUM_ITER": "4",
+    }.items():
+        os.environ.setdefault(_knob, _debug_val)
 
 
 # ============================================================
@@ -167,10 +195,15 @@ TOBS_TARGET = float(os.environ.get("TOBS_TARGET", 90 * 86400.0))
 # step (mirrors full_year_combined_global_fit_settings.py's DT=2.5).
 DT = 2.5
 
-# ~1-hour wavelet-duration search window for adjust_to_even_bins. The
-# lower bound is the 3600 s the original hand-computed grid used; at the
-# default TOBS_TARGET (90 d) this reproduces Nf=720 / Nt=2160 exactly.
-WAVELET_DUR_BOUNDS = (3600.0, 4400.0)
+# Wavelet-duration search window for adjust_to_even_bins
+# (env-overridable). Default ~1 h reproduces the original grid; the
+# validated mojito match scripts (gb_mojito_match / three_ways) run on
+# ~4-h wavelets (Nf*dt = 14600 s) -- set WAVELET_DUR_MIN/MAX = 14000 /
+# 15000 to reproduce their grid.
+WAVELET_DUR_BOUNDS = (
+    float(os.environ.get("WAVELET_DUR_MIN", 3600.0)),
+    float(os.environ.get("WAVELET_DUR_MAX", 4400.0)),
+)
 
 # Mojito L1 data folder (env-overridable). The GB galaxy is loaded as the
 # data ("full data"), and ``catalogue["GB"]`` is populated so the GBs can be
@@ -188,18 +221,9 @@ LDC_SOURCE_FILE = os.environ.get(
     "/Users/mkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5",
 )
 
-# TDI channel — TDI generation is derived from it.
+# TDI channel — TDI generation is derived from it via the stock helper.
 TDI_CHAN = "XYZ"
-_CHAN_TO_GEN = {
-    "XYZ": 2, "AET": 2, "XYZ2": 2, "AET2": 2,
-    "XYZ1": 1, "AET1": 1,
-}
-if TDI_CHAN not in _CHAN_TO_GEN:
-    raise ValueError(
-        f"TDI_CHAN={TDI_CHAN!r} not recognised. "
-        f"Add it to _CHAN_TO_GEN to pin the TDI generation."
-    )
-TDI_GEN = _CHAN_TO_GEN[TDI_CHAN]
+TDI_GEN = tdi_generation_from_channel(TDI_CHAN)
 TDI_GEN_STR = f"{TDI_GEN}{'nd' if TDI_GEN == 2 else 'st'} generation"
 NCHANNELS = 3
 
@@ -221,15 +245,18 @@ RANDOM_SEED = 103209
 NWALKERS = int(os.environ.get("NWALKERS", 4))
 NTEMPS = int(os.environ.get("NTEMPS", 2))
 
-# No Tukey taper for this smoke test — the chunked-het templates are
-# built without windowing, and we want the data path to match.
-# ``window_taper_duration = 0`` gives ``alpha = 0`` which is a
-# rectangular window inside :func:`lisatools.utils.utility.windowfun`.
-WINDOW_TAPER_DURATION = 0.0  # rectangular window
+# Data->WDM Tukey window, expressed as the scipy ``alpha``
+# (env-overridable). The engine derives ``window_alpha =
+# window_taper_duration / Tobs``, so the taper DURATION is computed
+# from this alpha after the grid is known (below). alpha = 0.05 matches
+# the validated mojito match scripts; the WDM edge crop below is sized
+# to cover the tapered region (edge-cut >= alpha*Nt/2, the chunked-het
+# Tukey/edge-leak rule).
+WINDOW_TUKEY_ALPHA = float(os.environ.get("WINDOW_TUKEY_ALPHA", "0.05"))
 
 # Output
-FILE_STORE_DIR = "./gf_output/"
-BASE_FILE_NAME = "gb_no_fg_test"
+FILE_STORE_DIR = "./gf_output_test_2/"
+BASE_FILE_NAME = "gb_no_fg_test_2"
 
 
 # ============================================================
@@ -244,9 +271,21 @@ NF, NT, WAVELET_DURATION = WDMSettings.adjust_to_even_bins(
 TOBS = NF * NT * DT
 TARGET_N = NF * NT  # total TD sample count
 
+# Derived data-window taper duration (seconds): the engine computes
+# ``window_alpha = window_taper_duration / Tobs``, so this realises the
+# WINDOW_TUKEY_ALPHA knob above on the resolved grid.
+WINDOW_TAPER_DURATION = WINDOW_TUKEY_ALPHA * TOBS
+
+# WDM time-edge crop (wavelets per end): must cover both the boundary
+# wavelets AND the Tukey taper region (edge-cut >= alpha*Nt/2 -- the
+# chunked-het Tukey/edge-leak rule).
+EDGE_CROP_WAVELETS = max(20, int(np.ceil(WINDOW_TUKEY_ALPHA * NT / 2)) + 4)
+
 logger.info(
-    "WDM grid: Nf=%d, Nt=%d, wavelet_duration=%.1f s, Tobs=%.6e s (target %.6e s)",
+    "WDM grid: Nf=%d, Nt=%d, wavelet_duration=%.1f s, Tobs=%.6e s (target %.6e s), "
+    "window alpha=%.3f (taper %.0f s), edge crop=%d wavelets",
     NF, NT, WAVELET_DURATION, TOBS, TOBS_TARGET,
+    WINDOW_TUKEY_ALPHA, WINDOW_TAPER_DURATION, EDGE_CROP_WAVELETS,
 )
 
 
@@ -264,7 +303,11 @@ logger.info(
 LAYER_DF = 1.0 / (2 * NF * DT)
 GB_CENTER_FREQ = float(os.environ.get("GB_CENTER_FREQ", 7.5e-3))
 GB_N_LAYERS = int(os.environ.get("GB_N_LAYERS", 3))
-_gb_k_center = int(round(GB_CENTER_FREQ / LAYER_DF))
+# floor (not round) so the SAMPLABLE interior layer is the one that
+# CONTAINS GB_CENTER_FREQ -- rounding up pushed a source in the upper
+# half of its layer into the lower guard band, where the SNR-cut
+# injection never looks.
+_gb_k_center = int(np.floor(GB_CENTER_FREQ / LAYER_DF))
 _gb_k_lo = _gb_k_center - GB_N_LAYERS // 2
 GB_MIN_FREQ = _gb_k_lo * LAYER_DF
 GB_MAX_FREQ = (_gb_k_lo + GB_N_LAYERS) * LAYER_DF
@@ -273,10 +316,33 @@ logger.info(
     GB_MIN_FREQ, GB_MAX_FREQ, GB_N_LAYERS, GB_CENTER_FREQ * 1e3, LAYER_DF,
 )
 
-# GB special-move debug instrumentation (band residual round-trip ll checks +
-# begin/middle/end band plots). Off by default; set GB_DEBUG=1 to enable. The
-# flag is consumed inside build_gb_moves via the same env var.
-GB_DEBUG = bool(int(os.environ.get("GB_DEBUG", "0")))
+# ============================================================
+# *** ACA frequency clipping (memory knob) ***
+# ============================================================
+# DATA_BAND_LAYERS (env, int) narrows the DATA band -- and with it every
+# per-walker ACA slab (data + XYZ-cross invC scale with Nf_active) -- to
+# +-DATA_BAND_LAYERS WDM layers around the GB band, instead of the full
+# [6, 25] mHz. This is what makes a full-scale (many walkers x many
+# temps) run on a single source's sub-bands fit in laptop memory. The
+# clipped band must comfortably contain the GB band plus the chunked-het
+# 5-layer inner-product gating; >= GB_N_LAYERS/2 + 5 is safe. Unset =
+# full data band (default, unchanged).
+_data_band_layers = os.environ.get("DATA_BAND_LAYERS")
+if _data_band_layers is not None:
+    _L = int(_data_band_layers)
+    assert _L >= GB_N_LAYERS // 2 + 5, (
+        f"DATA_BAND_LAYERS={_L} too narrow: need >= GB_N_LAYERS//2 + 5 = "
+        f"{GB_N_LAYERS // 2 + 5} to cover the GB band + the 5-layer "
+        "chunked-het gating."
+    )
+    MIN_FREQ = max(MIN_FREQ, (_gb_k_center - _L) * LAYER_DF)
+    MAX_FREQ = min(MAX_FREQ, (_gb_k_center + 1 + _L) * LAYER_DF)
+    logger.info(
+        "ACA data band CLIPPED to [%.6e, %.6e] Hz (+-%d layers around the "
+        "GB band).", MIN_FREQ, MAX_FREQ, _L,
+    )
+
+# (GB_DEBUG is defined in the DEBUG MODE block at the top of the file.)
 
 
 ################
@@ -341,13 +407,21 @@ def setup_recipe(
 
         _wdm = general_info.domain_settings
         # ``data_t0`` is the runtime data start time set by the engine
-        # (``times[0]`` after the preprocess trim) — the chunked-het WDM
-        # grid must be anchored there, not at 0.
+        # (``times[0]`` after the preprocess trim). The chunked-het evaluates
+        # the orbits at chunk times anchored on ``wdm_settings.t0`` (-> the
+        # het's ``self.t_obs_start``); the Mojito orbits + data live at the
+        # absolute epoch ``data_t0`` (~9.8e7 s). Nothing in the engine anchors
+        # the WDM domain t0 to data_t0, so it stays 0 -> the het would sample
+        # the orbits ~1e8 s BEFORE their span and every WDM template comes back
+        # identically zero (=> NaN <h|h>). Anchor it here so ``t_obs_start`` is
+        # the absolute data start. (WDM coefficient addressing is t0-independent
+        # -- only the absolute orbit-evaluation times depend on this.)
         _t_obs_start = float(getattr(general_info, "data_t0", 0.0))
+        _orig_wdm_t0 = float(_wdm.t0)
+        _wdm.t0 = _t_obs_start
         # The band WDMSettings domain (_wdm) carries Nf/Nt/dt + the active band
-        # (ind_min_f/ind_max_f/ind_min_t/ind_max_t) + t0 (anchored at data_t0 by the
-        # engine), so GBWDMComputations reads all of that from it directly. t_ref is
-        # the GB phase reference (was t_ref_full). tdi_config replaces tdi_gen.
+        # (ind_min_f/ind_max_f/ind_min_t/ind_max_t) + t0; t_ref is the GB phase
+        # reference (was t_ref_full). tdi_config replaces tdi_gen.
         gb_info.gb_wdm_comp = GBWDMComputations(
             _wdm,
             t_ref=gb_info.t0,
@@ -363,14 +437,28 @@ def setup_recipe(
         )
         logger.info(
             "Chunked-het GB likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d "
-            "N_cp_sig=%d N_cp_orbit=%d (t_obs_start=%.3e t_ref=%.3e)",
+            "N_cp_sig=%d N_cp_orbit=%d (domain t0 %.6e -> het t_obs_start=%.6e, "
+            "t_ref=%.6e, chunk_t_starts=[%.6e, %.6e])",
             _wdm.Nf, _wdm.Nt,
             gb_info.gb_wdm_comp.Nt_sub,
             gb_info.gb_wdm_comp.N_sparse,
             gb_info.gb_wdm_comp.N_cp_sig,
             gb_info.gb_wdm_comp.N_cp_orbit,
-            _t_obs_start, gb_info.t0,
+            _orig_wdm_t0, gb_info.gb_wdm_comp.t_obs_start, gb_info.t0,
+            float(gb_info.gb_wdm_comp.chunk_t_starts.min()),
+            float(gb_info.gb_wdm_comp.chunk_t_starts.max()),
         )
+
+    # FD-domain mirror of the block above: the GB move auto-builds a
+    # config-only ``GBFDComputations(fd_settings, t_ref, ...)`` from the
+    # ACA's FDSettings; it only needs the orbits + TDI-config handles
+    # (C++ orbit wraps are not picklable, so they are wired here after the
+    # settings deepcopy, exactly like ``gb_wdm_comp`` on the WDM path).
+    if isinstance(general_info.domain_settings, FDSettings):
+        if getattr(gb_info, "orbits", None) is None:
+            gb_info.orbits = general_info.gpu_orbits
+        if getattr(gb_info, "tdi_config", None) is None:
+            gb_info.tdi_config = TDI_GEN_STR
 
     #* ============== START GBs AT TRUE CATALOG POINTS (SNR cut) ==============
     # Read the GB catalogue, compute optimal SNR (sqrt<h|h>) via the WDM
@@ -384,22 +472,35 @@ def setup_recipe(
         gb_snr_subset_inds = select_gb_injection_subset_by_snr(
             curr, acs, gb_info, gb_info.gb_wdm_comp, snr_threshold=3.0
         )
+        # Per-dimension scatter for the true-point start. The stock scalar
+        # default (1e-5) is ~10 orders too wide for the GB ``fdot`` dimension
+        # (~1e-15 scale, prior half-width ~1e-12), so every scattered walker
+        # lands outside the fdot prior. Use the existing per-dim ``spread``
+        # array path, sized to a small fraction of each prior dimension's width
+        # so it auto-scales across the decade-spanning GB parameters (logA,
+        # f0[mHz], fdot, angles) and stays inside the prior even after the
+        # betas widening applied in scatter_around_injection. Widths come from
+        # the prior's own draws (correct sampling-basis order; the prior is
+        # keyed by parameter labels, not dimension indices).
+        _gb_draws = priors["gb"].rvs(size=20000)
+        _gb_draws = _gb_draws.get() if hasattr(_gb_draws, "get") else np.asarray(_gb_draws)
+        _gb_spread = 1e-4 * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
         setup_state_for_injection(
             curr, state, source_type="GB", branch_name="gb",
-            subset_inds=gb_snr_subset_inds, priors=priors,
+            subset_inds=gb_snr_subset_inds, priors=priors, spread=_gb_spread,
         )
 
     #* ================================= BUILD MOVES =================================
     # No PSD / foreground moves: the PSD is fixed (no ``psd`` branch) and
     # the foreground is not fit, so the recipe holds GB moves only.
-    gb_search_moves, gb_pe_moves = build_gb_moves(
-        engine_info, curr, acs, priors, state
+    # Smoke test: use ONLY the prior-based RJ proposal for GBs (100%) — drops
+    # the fstat / refit moves and the search list. The design knobs on
+    # ``build_gb_moves`` express this directly (replacing the old post-hoc
+    # ``[m for m in gb_pe_moves if "prior" in m.name]`` filter).
+    _, gb_pe_moves = build_gb_moves(
+        engine_info, curr, acs, priors, state,
+        include_search=False, pe_move_names=["rj_prior"],
     )
-
-    # Smoke test: use ONLY the prior-based RJ proposal for GBs (100%) —
-    # drops the fstat / refit moves. ``build_gb_moves`` returns the PE list
-    # as ``[prior, refit, fstat_mcmc]``; keep just the prior one.
-    gb_pe_moves = [m for m in gb_pe_moves if "prior" in m.name]
 
     #* ================================= SETUP PE (no search) =================================
     all_pe_moves = gb_pe_moves
@@ -460,14 +561,17 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
     Nt=NT,
     min_freq=MIN_FREQ,
     max_freq=MAX_FREQ,
-    min_time=20 * WAVELET_DURATION,
-    max_time=(NT - 20) * WAVELET_DURATION,
+    min_time=EDGE_CROP_WAVELETS * WAVELET_DURATION,
+    max_time=(NT - EDGE_CROP_WAVELETS) * WAVELET_DURATION,
 )
 # WDM lookup table removed sprint-wide -- the chunked-heterodyne template
 # pipeline (gb_wdm_het.GBWDMHeterodyne) is now the only WDM backend. The
 # build is wired in ``setup_recipe`` above when the domain is WDM.
 # Example alternates:
-# DOMAIN_CHOICE = FDSettings.make_factory(min_freq=5e-5, max_freq=3e-2)
+# DOMAIN_CHOICE = FDSettings.make_factory(
+#     min_freq=MIN_FREQ,
+#     max_freq=MAX_FREQ,
+# )
 # DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=5e-5, max_freq=3e-2)
 # ============================================================
 
@@ -501,12 +605,42 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     domain_settings = general_set.domain_settings
     start_freq = GB_MIN_FREQ
     end_freq = GB_MAX_FREQ
+    # FD basis: GBSetup's FD band walker builds bands (2*N + extra_buffer)
+    # rfft bins wide and trims the outer THREE edges, so the few-WDM-layer
+    # band the WDM smoke uses is far too narrow (it yields ZERO bands) --
+    # at the 3-day debug Tobs a single band is already ~2 mHz wide
+    # (N=256 at 7.5 mHz). Default to the FULL data band (env-overridable
+    # via GB_FD_BANDWIDTH, Hz, centered on GB_CENTER_FREQ) so several
+    # bands survive the trim; a true 90-day run has 30x finer df and can
+    # narrow this again.
+    if isinstance(domain_settings, FDSettings):
+        _bw = os.environ.get("GB_FD_BANDWIDTH")
+        if _bw is None:
+            start_freq, end_freq = MIN_FREQ, MAX_FREQ
+        else:
+            _half_bw = 0.5 * float(_bw)
+            start_freq = max(MIN_FREQ, GB_CENTER_FREQ - _half_bw)
+            end_freq = min(MAX_FREQ, GB_CENTER_FREQ + _half_bw)
+        logger.info(
+            "FD basis: GB band widened to [%.6e, %.6e] Hz for the FD band walker.",
+            start_freq, end_freq,
+        )
 
-    oversample = 4
+    # FD basis at the short debug Tobs: oversample=2 halves the per-band N
+    # (128 at 7.5 mHz -- still ample for a near-monochromatic GB) so the
+    # band walker yields several bands across the data band.
+    oversample = 2 if isinstance(domain_settings, FDSettings) else 4
     extra_buffer = 5
     start_freq_ind = 0
-    # TODO obtain ``t0_gbs`` properly from orbits; copied from federico's
-    # gbgpu validation for the time being.
+    # GB phase/frequency reference epoch = the mojito catalogue epoch
+    # (``MOJITO_REFERENCE_TIME`` = TimeReferenceSSBFrame). This is the
+    # VALIDATED convention from scripts/gb/gb_mojito_match.py +
+    # scripts/gb_chunked_het/gb_mojito_mcmc_three_ways.py (mm ~ 1e-8
+    # against the band-passed data): catalogue params are used AT this
+    # epoch (no trim evolution) and the chunked-het comp gets
+    # ``t_ref=REF`` while the WDM domain t0 stays the trimmed data start.
+    # The conversion in ``gb_catalogue_to_sampling_basis`` must use the
+    # SAME anchor (params at REF, phys phi0 = +TrueAnomaly).
     t0_gbs = 97729089.327664
     initialize_kwargs = dict(force_backend=general_set.force_backend)
 
@@ -551,6 +685,14 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         nleaves_max=100,  # smoke test: keep state arrays small
         nleaves_min=0,
         ndim=8,
+        # Sampling-basis periodic parameters, keyed by the same plain
+        # names as the priors/transform (run.py translates names ->
+        # indices through the branch transform's ``input_basis`` before
+        # building the sampler's PeriodicContainer, which the engine
+        # wires onto every move -- without it the GB move's in-model
+        # wrap crashes on ``periodic=None``).
+        periodic={"gb": {"phi0": 2 * np.pi, "psi": np.pi,
+                         "alpha": 2 * np.pi}},
         log_dir=general_set.file_store_dir,
     )
 
@@ -629,6 +771,9 @@ def get_general_erebor_settings() -> GeneralSetup:
         domain_settings=domain_settings,
         random_seed=RANDOM_SEED,
         backup_iter=5,
+        # Env-overridable iteration cap (default 500). Set GF_NUM_ITER=2 for a
+        # quick GB_DEBUG smoke run that exercises a few proposals.
+        num_iterations=int(os.environ.get("GF_NUM_ITER", 500)),
         nwalkers=NWALKERS,
         ntemps=NTEMPS,
         window_type="tukey",

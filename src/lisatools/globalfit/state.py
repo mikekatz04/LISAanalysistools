@@ -86,7 +86,7 @@ class GBState(eryn_State):
             band_temps: ``(num_bands, ntemps)`` array of inverse temperatures.
         """
 
-        if not hasattr(self, "intialized"):
+        if not self.band_initialized:
             band_info = {}
             band_info["nwalkers"], band_info["ntemps"], band_info["band_edges"] = (
                 nwalkers,
@@ -128,9 +128,18 @@ class GBState(eryn_State):
             self.band_info = band_info
 
         else:
-            assert nwalkers == band_info["nwalkers"]
-            assert ntemps == band_info["ntemps"]
-            assert np.all(band_edges == band_info["band_edges"])
+            # already initialized: validate the geometry is unchanged.
+            # band_info dicts that round-tripped through the HDF backend
+            # (GBHDFBackend stores only the ``band_info_keys`` arrays)
+            # lack the nwalkers/ntemps/num_bands scalars -- backfill them
+            # from the array shapes before validating.
+            bi = self.band_info
+            bi.setdefault("num_bands", len(bi["band_edges"]) - 1)
+            bi.setdefault("ntemps", int(bi["band_temps"].shape[-1]))
+            bi.setdefault("nwalkers", int(bi["band_num_binaries"].shape[1]))
+            assert nwalkers == bi["nwalkers"]
+            assert ntemps == bi["ntemps"]
+            assert np.all(band_edges == bi["band_edges"])
 
     def update_band_information(
         self,
@@ -166,6 +175,21 @@ class GBState(eryn_State):
 
         self.band_info["band_swaps_proposed"] += band_swaps_proposed
         self.band_info["band_swaps_accepted"] += band_swaps_accepted
+
+    def accumulate_proposals(self, proposed, accepted, is_rj: bool) -> None:
+        """Accumulate ``(num_bands, ntemps)`` proposal/acceptance counts into
+        the RJ or in-model counter family."""
+        if is_rj:
+            self.band_info["band_num_proposed_rj"] += proposed
+            self.band_info["band_num_accepted_rj"] += accepted
+        else:
+            self.band_info["band_num_proposed"] += proposed
+            self.band_info["band_num_accepted"] += accepted
+
+    def accumulate_swaps(self, proposed, accepted) -> None:
+        """Accumulate ``(num_bands, ntemps - 1)`` tempering swap counts."""
+        self.band_info["band_swaps_proposed"] += proposed
+        self.band_info["band_swaps_accepted"] += accepted
 
     def reset_band_counters(self):
         """Zero all per-band proposal/acceptance/swap counters."""
