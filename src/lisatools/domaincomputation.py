@@ -95,6 +95,26 @@ class DomainKernelStrategy(LISAToolsParallelModule):
                 self.device is not None
             ), "GPU backend specified but `device` is None. Please provide a valid `device` for GPU usage."
 
+    def _owned_cpp_array(self, name: str, arr, dtype):
+        """Contiguous ``dtype`` view/copy of ``arr`` OWNED by this group.
+
+        The nanobind domain wraps store RAW POINTERS into the arrays they are
+        constructed with (``return_pointer_no_check``). If an argument's dtype
+        does not match the binding signature (e.g. the float64
+        ``linear_psd_arr`` passed to the complex-invC STFT/FD domains),
+        nanobind implicitly converts it into a TEMPORARY that is freed as soon
+        as the constructor returns -- the C++ domain is left dangling and
+        silently reads whatever later heap allocation reuses that block
+        (likelihoods corrupt with a common scalar on (d|h) and (h|h)). Owning
+        the correctly-typed buffer here pins it for the domain's lifetime.
+        When ``arr`` already matches (contiguous, right dtype) this is the
+        SAME object, so in-place updates of the source array stay visible.
+        """
+        key = "_cpp_owned_" + name
+        if not hasattr(self, key):
+            setattr(self, key, self.xp.ascontiguousarray(arr, dtype=dtype))
+        return getattr(self, key)
+
     @contextmanager
     def group_device_context(self):
         """Context manager to set the device context for this computation group."""
@@ -393,8 +413,11 @@ class STFTComputationGroup(DomainKernelStrategy):
             self.settings.max_freq,
             self.settings.dt,
             self.settings.df,
-            self.data_arr,
-            self.invC_arr,
+            # complex128 buffers OWNED by this group: the wrap keeps raw
+            # pointers, and a dtype-converted nanobind temporary would dangle
+            # (see _owned_cpp_array).
+            self._owned_cpp_array("data", self.data_arr, self.xp.complex128),
+            self._owned_cpp_array("invC", self.invC_arr, self.xp.complex128),
             self.num_data,
             self.num_noise,
             self.backend.TDITypeDict[self.tdi_type],
@@ -494,8 +517,9 @@ class FDComputationGroup(DomainKernelStrategy):
             self.settings.min_freq,
             self.settings.max_freq,
             self.settings.df,
-            self.data_arr,
-            self.invC_arr,
+            # complex128 buffers OWNED by this group (see _owned_cpp_array).
+            self._owned_cpp_array("data", self.data_arr, self.xp.complex128),
+            self._owned_cpp_array("invC", self.invC_arr, self.xp.complex128),
             self.num_data,
             self.num_noise,
             self.backend.TDITypeDict[self.tdi_type],
