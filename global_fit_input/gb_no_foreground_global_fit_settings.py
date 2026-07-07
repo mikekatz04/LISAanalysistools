@@ -682,9 +682,18 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         domain_settings=domain_settings,
         gb_wdm_comp=gb_wdm_comp,
         betas=gb_betas,
-        nleaves_max=100,  # smoke test: keep state arrays small
+        # Max GB leaves per chain (env-overridable). RJ cost scales with
+        # this (the BandSorter pre-draws EVERY inds=False leaf and scores
+        # one RJ step per leaf per iteration), so focused few-source runs
+        # should set it near the expected source count (e.g. 6), not 100.
+        nleaves_max=int(os.environ.get("GB_NLEAVES_MAX", 100)),
         nleaves_min=0,
         ndim=8,
+        # In-model repeat count per picked source (env-overridable).
+        # High-fidelity runs want enough repeats that the friends table /
+        # Fisher factor stay valid between rebuilds (user guidance: ~300
+        # for the focused single-source runs).
+        num_repeat_proposals=int(os.environ.get("GB_NUM_REPEAT_PROPOSALS", 100)),
         # Sampling-basis periodic parameters, keyed by the same plain
         # names as the priors/transform (run.py translates names ->
         # indices through the branch transform's ``input_basis`` before
