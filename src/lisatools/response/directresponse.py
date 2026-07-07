@@ -561,8 +561,12 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         use_spline = self.use_spline if use_spline is None else use_spline
 
         # --- batch detection (scalar lam/beta -> batch_size 1) ---
-        lam = self.xp.atleast_1d(self.xp.asarray(lam, dtype=self.xp.float64))
-        beta = self.xp.atleast_1d(self.xp.asarray(beta, dtype=self.xp.float64))
+        lam = self.xp.ascontiguousarray(
+            self.xp.atleast_1d(self.xp.asarray(lam, dtype=self.xp.float64))
+        )
+        beta = self.xp.ascontiguousarray(
+            self.xp.atleast_1d(self.xp.asarray(beta, dtype=self.xp.float64))
+        )
         batch_size = len(lam)
 
         assert np.all(np.abs(t0_shift_to_data) < self.dt), (
@@ -574,7 +578,9 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         # the waveform array via ``delay - t0_arr``, so a shift baked into t0_arr cancels
         # against the same shift in the eval time and the waveform ends up sampled off the
         # data grid by t0_shift_to_data.
-        t0_arr = self.xp.atleast_1d(self.xp.asarray(t0, dtype=np.float64))
+        t0_arr = self.xp.ascontiguousarray(
+                self.xp.atleast_1d(self.xp.asarray(t0, dtype=np.float64))
+        )
         if t0_arr.ndim == 1 and t0_arr.shape[0] == 1:
             # broadcast a shared t0 across the batch
             t0_arr = t0_arr.repeat(batch_size)
@@ -624,8 +630,10 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         # the single-source path. (Pre-2026-06 the shift was baked into t_arr here,
         # which a per-source batch cannot represent -> broadcast crash for B>=2.)
         t_arr = self.xp.arange(num_inputs_per_source, dtype=self.xp.float64) * self.dt
-        t0_shift_arr = self.xp.atleast_1d(
-            self.xp.asarray(t0_shift_to_data, dtype=self.xp.float64)
+        t0_shift_arr = self.xp.ascontiguousarray(
+            self.xp.atleast_1d(
+                self.xp.asarray(t0_shift_to_data, dtype=self.xp.float64)
+            )
         )
         if t0_shift_arr.shape[0] == 1:
             t0_shift_arr = t0_shift_arr.repeat(batch_size)
