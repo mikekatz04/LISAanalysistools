@@ -44,6 +44,12 @@ class BaseSourcePrior:
         return_gpu (bool): Whether the priors should return arrays on the GPU.
         verbose (bool): If True, enables sanity check warnings.
     """
+    @property
+    def _xp(self):
+        """Array module (NumPy/CuPy) derived from ``use_cupy`` — never stored
+        on the instance so the object stays deepcopy- and pickle-safe."""
+        return cp if self.use_cupy else np
+
     def __init__(
         self,
         source_name: str,
@@ -68,7 +74,12 @@ class BaseSourcePrior:
         self.return_gpu = return_gpu
         self.verbose = verbose
 
-        self._xp = cp if self.use_cupy else np
+        # NOTE: the array module is intentionally NOT stored on the instance
+        # (``self._xp = cp/np``): priors live inside the settings tree, which
+        # is deepcopied (CurrentInfoGlobalFit) and pickled (MPI workers), and
+        # both die on a raw module attribute with
+        # "TypeError: cannot pickle 'module' object". Use the ``_xp``
+        # property (derived from ``use_cupy``) instead.
 
         # verbose controls the broader set of optional checks below.
         self._check_fill_dict()
@@ -333,7 +344,17 @@ class _GPUPriorWrapper:
         }
 
     def __getattr__(self, name: str) -> Any:
-        """Delegate any attribute not defined on the wrapper to the inner object."""
+        """Delegate any attribute not defined on the wrapper to the inner object.
+
+        Dunder lookups and ``_prior_obj`` itself must raise
+        ``AttributeError`` instead of delegating: ``copy.deepcopy`` /
+        ``pickle`` probe the half-constructed object for hooks
+        (``__deepcopy__``, ``__reduce_ex__``, ``__getstate__``, ...) BEFORE
+        ``_prior_obj`` exists, and the unguarded delegation recursed on
+        ``self._prior_obj`` until RecursionError.
+        """
+        if name == "_prior_obj" or (name.startswith("__") and name.endswith("__")):
+            raise AttributeError(name)
         return getattr(self._prior_obj, name)
 
     def _call_with_cpu_fallback(self, func_name: str, *args, **kwargs) -> Any:

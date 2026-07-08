@@ -111,8 +111,15 @@ class BandScheduler:
     and the buffer stays densely packed with work.
     """
 
+    @property
+    def xp(self):
+        """Array module derived from a stored flag — never the module itself
+        (raw module attributes break deepcopy/pickle of containing graphs)."""
+        return cp if self._uses_cupy else np
+
     def __init__(self, special_band_inds, n_subbands, xp=np):
-        self.xp = xp
+        # Store a flag, not the module (see the ``xp`` property).
+        self._uses_cupy = (getattr(xp, "__name__", "numpy") == "cupy")
         uni, counts = xp.unique(special_band_inds, return_counts=True)
         order = xp.argsort(counts)
         self.cell_specials = uni[order]

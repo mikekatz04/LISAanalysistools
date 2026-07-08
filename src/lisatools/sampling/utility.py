@@ -41,9 +41,14 @@ class DetermineGBGroups:
 
     def __init__(self, gb_wave_generator, transform_fn=None, waveform_kwargs={}):
         self.gb_wave_generator = gb_wave_generator
-        self.xp = self.gb_wave_generator.xp
         self.transform_fn = transform_fn
         self.waveform_kwargs = waveform_kwargs
+
+    @property
+    def xp(self):
+        """Array module delegated to the generator (not stored: raw module
+        attributes break deepcopy/pickle of any containing object graph)."""
+        return self.gb_wave_generator.xp
 
     def __call__(
         self,
@@ -284,9 +289,14 @@ class GetLastGBState:
 
     def __init__(self, gb_wave_generator, transform_fn=None, waveform_kwargs={}):
         self.gb_wave_generator = gb_wave_generator
-        self.xp = self.gb_wave_generator.xp
         self.transform_fn = transform_fn
         self.waveform_kwargs = waveform_kwargs
+
+    @property
+    def xp(self):
+        """Array module delegated to the generator (not stored: raw module
+        attributes break deepcopy/pickle of any containing object graph)."""
+        return self.gb_wave_generator.xp
 
     def __call__(
         self,
