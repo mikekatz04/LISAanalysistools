@@ -103,9 +103,12 @@ class EMRISpecialMove(MultiGPUResidualAddRemoveMove):
             run_threaded=self.run_threaded,
         )
 
-        # Drop the (large) template arrays before reclaiming the pool.
+        # Drop the (large) template arrays so their blocks return to the cupy
+        # pool for reuse by the next chunk. Do NOT free_all_blocks() here: with
+        # small per-GPU batches that would tear the pool down after every few
+        # waveforms and force fresh (driver-serializing) cudaMallocs each
+        # chunk. The pool is emptied once per proposal by the base move.
         del likelihood_args_per_split
-        self.free_gpu_memory()
 
         if np.any(~np.isfinite(likelihoods)):
             logger.warning(
@@ -114,6 +117,35 @@ class EMRISpecialMove(MultiGPUResidualAddRemoveMove):
             )
 
         return np.where(np.isfinite(likelihoods), likelihoods, -1e300)
+
+    def get_split_inds(self) -> np.ndarray:
+        """Half-split the ensemble with per-GPU-balanced membership.
+
+        The walker -> AC-entry map is contiguous per split
+        (``AnalysisContainerArray.gpu_splits`` uses ``np.split``), so eryn's
+        default full-row shuffle makes each half's per-GPU share
+        hypergeometric: the number of sequential ``batch_size_per_gpu`` chunks
+        per likelihood call is set by the *largest* split share, and the tail
+        chunks drive one GPU while the others idle. Shuffling within each
+        split's contiguous block instead keeps every half exactly balanced
+        across GPUs (same idea as ``TDMBHSpecialMove.get_split_inds``, but
+        indexed by split position so non-contiguous device ids work too).
+        """
+        all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
+        inds = all_inds % self.nsplits
+        if self.randomize_split:
+            if self.acs.gpus is None:
+                for row in inds:
+                    np.random.shuffle(row)
+            else:
+                num_splits = len(self.acs.gpus)
+                num_per_split = self.nwalkers // num_splits
+                for row in inds:
+                    for k in range(num_splits):
+                        np.random.shuffle(
+                            row[k * num_per_split:(k + 1) * num_per_split]
+                        )
+        return inds
 
     def _emri_signal_op(self, coords_split: np.ndarray, split_idx: int):
         """Generate split ``split_idx``'s sources one at a time and stack them.
