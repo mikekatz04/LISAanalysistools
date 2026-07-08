@@ -1,18 +1,39 @@
 """EMRI test MCMC against CD1 (mojito L1) data.
 
 Loads one EMRI source from a CD1 L1 dataset, builds the WDM-domain
-injection from the L1 data stream and a matching legacy-response
-(``ResponseWrapper``) template, sanity-checks the injection
-likelihood / overlap / SNR, then runs an Eryn ensemble MCMC over 12
-sampled parameters (``x0`` and ``Phi_theta0`` held fixed).
+injection from the (noiseless) L1 data stream and a matching template
+via the validated SPECIAL EMRI frame recipe, sanity-checks the
+injection likelihood (should be ~0: the template nulls the data), then
+runs an Eryn ensemble MCMC over the 12-parameter stock sampling basis
+(``xI0`` and ``Phi_theta0`` held fixed).
+
+SPECIAL EMRI frame (validated 2026-06-19, see
+``global_fit_input/full_year_combined_global_fit_settings.py`` and
+``scripts/sobbh/run_mojito_null_checks.sh``):
+
+- FEW gets ECLIPTIC-POLAR sky angles (``qS = pi/2 - ecliptic latitude``,
+  ``phiS = ecliptic longitude``, converted from the catalogue ICRS
+  RA/Dec) together with the RAW catalogue spin angles (``qK``/``phiK``
+  NOT converted) and ``xI0 = +1`` (equatorial prograde — the catalogue
+  "InclinationAngle" is the viewing inclination, which FEW derives
+  internally).
+- The response runs against ``frame="icrs"`` orbits, so the sky is
+  converted ecliptic -> ICRS per call (``convert_to_ra_dec=True`` via
+  ``_EMRISpecialFrameWrap`` inside ``get_emri_response_wrapper``).
+- The FEW phases are referenced to the catalogue reference epoch
+  (``TimeReferenceSSBFrame`` == ``lisatools.globalfit.recipe.
+  MOJITO_REFERENCE_TIME``): the response ``t0`` is REF, the integer-
+  sample part of ``data_t0 - REF`` is sliced off the response output by
+  ``EMRIWaveWrap`` and the sub-sample remainder goes through
+  ``t0_shift_to_data``.
 
 credit Michael Katz and Alessandro Santini
 """
 
 import os
+import sys
 
 import numpy as np
-from scipy.signal.windows import tukey
 
 try:
     import cupy as cp
@@ -24,24 +45,37 @@ from eryn.ensemble import EnsembleSampler
 from eryn.moves import StretchMove
 from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.state import State
-from eryn.utils import PeriodicContainer, TransformContainer
-from few.waveform import GenerateEMRIWaveform
-from lisaconstants import ASTRONOMICAL_YEAR
+from eryn.utils import PeriodicContainer
 
 from lisatools.analysiscontainer import AnalysisContainer
 from lisatools.datacontainer import DataResidualArray
 from lisatools.detector import L1Orbits
 from lisatools.domains import TDSettings, TDSignal, WDMSettings
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.response import ResponseWrapper, TDIConfig
+from lisatools.globalfit.stock.erebor import make_emri_transform_container
+from lisatools.response import TDIConfig
 from lisatools.response.directresponse import icrs_to_ecliptic
 from lisatools.sensitivity import XYZ2SensitivityMatrix
+from lisatools.utils.constants import YRSID_SI
+
+# The validated EMRI response/frame helpers live in the repo-level
+# global_fit_input directory (not the installed package).
+_LAT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(_LAT_ROOT, "global_fit_input"))
+from global_fit_settings import EMRIWaveWrap, get_emri_response_wrapper
 
 # --- configuration -----------------------------------------------------------
 
 L1_PATH = "/scratch-jpl/335-lisa/mlkatz/cd1L_data"
 SOURCE_ID = 0
 BACKEND = "cuda12x"  # "cpu" or "cuda12x"
+
+# Analysis window from the data start (the EMRI null-check default is
+# 3-6 months; the WDM grid is fit inside this target).
+TOBS_TARGET = 0.25 * YRSID_SI
+WAVELET_DUR_BOUNDS = (40000.0, 48000.0)  # adjust_to_even_bins search window [s]
+MIN_FREQ = 1e-4  # Hz
+MAX_FREQ = 2.5e-2  # Hz
 
 NTEMPS = 4
 NWALKERS = 32
@@ -51,38 +85,16 @@ THIN_BY = 5
 PRIOR_HALF_WIDTH = 1e-2  # fractional prior half-width on the intrinsic parameters
 START_HALF_WIDTH_INTRINSIC = 1e-7  # start-ball half-widths around the injection
 START_HALF_WIDTH_EXTRINSIC = 1e-3
-CHOP_ENDS = 10000  # samples trimmed from each end of both data and template
 
 xp = np if BACKEND == "cpu" else cp
 
-# full = FEW waveform parameter order (must never change); sampled = MCMC order
-FULL_BASIS = [
-    "M", "mu", "a", "p0", "e0", "x0", "dist",
-    "qS", "phiS", "qK", "phiK",
-    "Phi_phi0", "Phi_theta0", "Phi_r0",
-]
+# Stock EMRI sampling basis (make_emri_transform_container order).
 SAMPLED_BASIS = [
-    "M", "mu", "a", "p0", "e0", "dist",
+    "logm1", "m2", "a", "p0", "e0", "dist",
     "cosqS", "phiS", "cosqK", "phiK",
     "Phi_phi0", "Phi_r0",
 ]
-INTRINSIC = ["M", "mu", "a", "p0", "e0"]
-
-
-class WaveWrap:
-    """Generate legacy-response TDI channels aligned to the data grid, in the WDM domain."""
-
-    def __init__(self, wave_gen, temp_start, chop_ends, td_set, output_set, window):
-        self.wave_gen = wave_gen
-        self.temp_start, self.chop_ends = temp_start, chop_ends
-        self.td_set, self.output_set, self.window = td_set, output_set, window
-
-    def __call__(self, *params, **kwargs):
-        tdi_channels = self.wave_gen(*params, **kwargs)
-        wave = xp.asarray([chan[self.temp_start:] for chan in tdi_channels])
-        wave = wave[:, self.chop_ends:-self.chop_ends][:, : self.td_set.N]
-        wdm = TDSignal(wave, self.td_set).transform(self.output_set, window=self.window)
-        return DataResidualArray(wdm)
+INTRINSIC = ["logm1", "m2", "a", "p0", "e0"]
 
 
 def fractional_ball(center, half_width):
@@ -98,83 +110,49 @@ if __name__ == "__main__":
         source_types=["emri"],
         source_ids=dict(emri=[SOURCE_ID]),
         orbits_class=L1Orbits,
-        orbits_kwargs=dict(force_backend=BACKEND, frame="icrs"),  # equatorial coords (ra/dec)
+        orbits_kwargs=dict(force_backend=BACKEND, frame="icrs"),
         verbose=True,
         do_plots=False,
     )
     binary_params = loader.catalogue["EMRI"][SOURCE_ID]
-    orbits = loader.orbits
     dt = loader.dt
+    data_t0 = float(loader.times[0])
 
     print(f"Source ID {SOURCE_ID} catalogue parameters:")
     for key, value in binary_params.items():
         print(f"  {key}: {value}")
 
     # --- analysis grids --------------------------------------------------------
-    # 1 or 2 years of data depending on when the EMRI plunges
-    Tobs_wave = np.ceil(binary_params["TimeCoalescenceSSBFrame"] / ASTRONOMICAL_YEAR)
-    Tobs_sec = Tobs_wave * ASTRONOMICAL_YEAR
-
-    # wavelet duration between half and 0.6 days
     Nf, Nt, wavelet_duration = WDMSettings.adjust_to_even_bins(
-        0.5 * 24 * 3600.0, 0.6 * 24 * 3600.0, dt, Tobs_sec
+        t_min=WAVELET_DUR_BOUNDS[0],
+        t_max=WAVELET_DUR_BOUNDS[1],
+        dt=dt,
+        Tobs=TOBS_TARGET,
     )
     N = Nf * Nt
-    td_set = TDSettings(N, dt, force_backend=BACKEND)
+    assert loader.data.shape[1] >= N, "data span is shorter than the WDM grid"
+
+    td_set = TDSettings(N, dt, t0=data_t0, force_backend=BACKEND)
     wdm_set = WDMSettings(
         Nf,
         Nt,
         dt,
-        min_freq=1e-4,
-        max_freq=0.030,
-        min_time=wavelet_duration * 20,
-        max_time=wavelet_duration * (Nt - 20),
-        force_backend=BACKEND,
-    )
-    window = xp.asarray(tukey(N, alpha=0.05))
-
-    # --- EMRI waveform + legacy response ---------------------------------------
-    few_generator = GenerateEMRIWaveform(
-        "FastKerrEccentricEquatorialFlux",
-        return_list=False,  # hp - i*hx as a single complex array
-        inspiral_kwargs={
-            "DENSE_STEPPING": 0,  # sparsely sampled trajectory
-            "max_init_len": int(1e4),
-            "force_backend": "cpu",
-        },
-        sum_kwargs={"pad_output": True},
-        mode_selector_kwargs={"mode_selection_threshold": 1e-2},
-        frame="detector",
+        min_freq=MIN_FREQ,
+        max_freq=MAX_FREQ,
+        min_time=20 * wavelet_duration,
+        max_time=(Nt - 20) * wavelet_duration,
         force_backend=BACKEND,
     )
 
-    # snap the waveform reference time onto the data time grid
-    t0 = binary_params["TimeReferenceSSBFrame"]
-    t0_shift_to_data = loader.times[0] + round((t0 - loader.times[0]) / dt) * dt - t0
+    # injection (data) in the WDM domain — rectangular window, matching the
+    # full_year pipeline (WINDOW_TAPER_DURATION = 0, td_window=None)
+    injection_wave = xp.asarray(loader.data[:, :N])
+    injection = DataResidualArray(TDSignal(injection_wave, td_set).transform(wdm_set))
 
-    legacy_tdi_generator = ResponseWrapper(
-        few_generator,
-        orbits=orbits,
-        t0=t0,
-        t0_shift_to_data=t0_shift_to_data,
-        Tobs=Tobs_wave,
-        dt=dt,
-        index_lambda=8,
-        index_beta=7,
-        flip_hx=True,
-        force_backend=BACKEND,
-        tdi=TDIConfig("2nd generation"),
-        tdi_chan="XYZ",
-        order=40,
-        remove_garbage="zero",
-        is_ecliptic_latitude=False,
-        t_buffer=30000.0,
-    )
-
-    # --- injection parameters in FEW order --------------------------------------
-    lambda_ecl, beta_ecl = icrs_to_ecliptic(
-        binary_params["RightAscension"], binary_params["Declination"]
-    )
+    # --- SPECIAL-frame injection parameters in FEW order ------------------------
+    ra = float(binary_params["RightAscension"]) % (2 * np.pi)
+    dec = float(binary_params["Declination"])
+    lambda_ecl, beta_ecl = icrs_to_ecliptic(ra, dec)
     wf_params = np.array(
         [
             binary_params["PrimaryMassSSBFrame"],  # M
@@ -182,77 +160,70 @@ if __name__ == "__main__":
             binary_params["PrimarySpinParameter"],  # a
             binary_params["SemiLatusRectum"],  # p0
             binary_params["Eccentricity"],  # e0
-            np.cos(binary_params["InclinationAngle"]),  # x0
-            binary_params["LuminosityDistance"] * 1e-3,  # dist [Gpc]
-            np.pi / 2 - beta_ecl,  # qS
-            lambda_ecl,  # phiS
-            binary_params["PolarAnglePrimarySpin"],  # qK
-            binary_params["AzimuthalAnglePrimarySpin"],  # phiK
+            1.0,  # xI0: equatorial prograde (NOT cos(InclinationAngle))
+            binary_params["LuminosityDistance"] / 1e3,  # dist [Gpc]
+            float(np.pi / 2 - beta_ecl),  # qS (ecliptic polar)
+            float(lambda_ecl) % (2 * np.pi),  # phiS (ecliptic longitude)
+            binary_params["PolarAnglePrimarySpin"],  # qK (RAW file spin)
+            binary_params["AzimuthalAnglePrimarySpin"],  # phiK (RAW file spin)
             binary_params["AzimuthalPhase"],  # Phi_phi0
             binary_params["PolarPhase"],  # Phi_theta0
             binary_params["RadialPhase"],  # Phi_r0
         ]
     )
-    injection_full = dict(zip(FULL_BASIS, wf_params))
 
-    # --- align template + injection on a common grid -----------------------------
-    tdi_channels = legacy_tdi_generator(*wf_params)
-    times_waveform = legacy_tdi_generator.response_model.t_arr_proj
+    # --- REF-anchored response, aligned onto the data grid -----------------------
+    ref = float(binary_params["TimeReferenceSSBFrame"])
+    off = data_t0 - ref
+    offset_int = int(round(off / dt))
+    t0_shift = off - offset_int * dt  # sub-sample remainder, |.| < dt
+    resp_Tobs = (N + offset_int) * dt
 
-    assert times_waveform[0] < loader.times[0]
-    assert times_waveform[-1] < loader.times[-1]
-
-    # template starts before the data: drop its head; the data outlives the
-    # template: trim the data tail (inj_end is negative)
-    temp_start = int((loader.times[0] - times_waveform[0]) / dt)
-    inj_end = int((times_waveform[-1] - loader.times[-1]) / dt)
-
-    template_time = times_waveform[temp_start:][CHOP_ENDS:-CHOP_ENDS]
-    injection_time = loader.times[:inj_end][CHOP_ENDS:-CHOP_ENDS]
-    assert xp.allclose(xp.asarray(injection_time), xp.asarray(template_time))
-
-    injection_wave = xp.asarray(loader.data[:, :inj_end])[:, CHOP_ENDS:-CHOP_ENDS][:, :N]
-    injection = DataResidualArray(
-        TDSignal(injection_wave, td_set).transform(wdm_set, window=window)
+    wave_gen = get_emri_response_wrapper(
+        Tobs=resp_Tobs,
+        dt=dt,
+        t_start=ref,
+        t0_shift_to_data=t0_shift,
+        tdi_config=TDIConfig("2nd generation", force_backend=BACKEND),
+        tdi_chan="XYZ",
+        force_backend=BACKEND,
+        orbits=loader.orbits,
+    )
+    signal_gen = EMRIWaveWrap(
+        wave_gen,
+        td_set,
+        wdm_set,
+        td_window=None,
+        nchannels=3,
+        offset_int=offset_int,
     )
 
-    # --- analysis container + injection sanity check ------------------------------
-    signal_gen = WaveWrap(legacy_tdi_generator, temp_start, CHOP_ENDS, td_set, wdm_set, window)
+    # --- analysis container + injection null check -------------------------------
     sens_mat = XYZ2SensitivityMatrix(injection.data_res_arr.settings, model="scirdv1")
     analysis = AnalysisContainer(injection, sens_mat, signal_gen=signal_gen)
 
     template = signal_gen(*wf_params)
-    check_ll = analysis.template_likelihood(template)
+    check_ll = analysis.template_likelihood(template)  # -0.5 <d-h|d-h>: ~0 when h nulls d
     check_snr = analysis.template_snr(template)
     overlap = analysis.template_inner_product(template, normalize=True)
     print(
-        f"EMRI {SOURCE_ID}: log-likelihood {check_ll}, mismatch {1.0 - overlap}, "
-        f"overlap {overlap}, SNR (observed, optimal) {check_snr}"
+        f"EMRI {SOURCE_ID}: source-only log-likelihood {check_ll} (expect ~0), "
+        f"mismatch {1.0 - overlap}, overlap {overlap}, "
+        f"SNR (observed, optimal) {check_snr}"
     )
 
     # --- MCMC setup ----------------------------------------------------------------
-    transform_fn = TransformContainer(
-        input_basis=SAMPLED_BASIS,
-        output_basis=FULL_BASIS,
-        parameter_transforms={"cosqS": np.arccos, "cosqK": np.arccos},
-        fill_dict={
-            "x0": injection_full["x0"],
-            "Phi_theta0": injection_full["Phi_theta0"],
-        },
-        key_map={"cosqS": "qS", "cosqK": "qK"},
+    # stock transform: sampling basis -> FEW basis, filling xI0 and Phi_theta0
+    transform_fn = make_emri_transform_container([wf_params[5], wf_params[12]])
+    injection_sampled = dict(
+        zip(SAMPLED_BASIS, transform_fn.both_inverse_transforms(wf_params))
     )
-
-    # injection values in the sampled coordinates
-    injection_sampled = {
-        name: np.cos(injection_full[name[3:]]) if name.startswith("cos") else injection_full[name]
-        for name in SAMPLED_BASIS
-    }
 
     priors = {
         "emri": ProbDistContainer(
             {
-                "M": fractional_ball(injection_sampled["M"], PRIOR_HALF_WIDTH),
-                "mu": fractional_ball(injection_sampled["mu"], PRIOR_HALF_WIDTH),
+                "logm1": fractional_ball(injection_sampled["logm1"], PRIOR_HALF_WIDTH),
+                "m2": fractional_ball(injection_sampled["m2"], PRIOR_HALF_WIDTH),
                 "a": fractional_ball(injection_sampled["a"], PRIOR_HALF_WIDTH),
                 "p0": fractional_ball(injection_sampled["p0"], PRIOR_HALF_WIDTH),
                 "e0": fractional_ball(injection_sampled["e0"], PRIOR_HALF_WIDTH),
@@ -312,6 +283,6 @@ if __name__ == "__main__":
     injection_coords = np.array([injection_sampled[name] for name in SAMPLED_BASIS])
     injection_state = State({"emri": np.tile(injection_coords, (NTEMPS, NWALKERS, 1, 1))})
     injection_like = sampler.compute_log_like(injection_state.branches_coords)[0]
-    print("injection log_like:", injection_like[0, 0])
+    print("injection log_like:", injection_like[0, 0], "(expect ~0)")
 
     sampler.run_mcmc(start_state, nsteps=NSTEPS, burn=0, thin_by=THIN_BY, progress=True)
