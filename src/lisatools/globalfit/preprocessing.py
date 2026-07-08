@@ -957,6 +957,22 @@ class BaseProcessingStep(SignalProcessor):
 
         # The TD signal is already a DomainBase; ``.transform(settings, window)``
         # produces the matching DomainBase child in the target domain.
+        #
+        # TODO (2026-07-07, backend auto-conversion follow-up): transform()
+        # now auto-transfers a CPU-loaded signal onto the target settings'
+        # backend (DomainBase._coerce_transform_backend), which fixes the
+        # GPU-settings-vs-CPU-data mismatch on this pour() path. Two related
+        # boundaries still need an audit pass:
+        #   1. the equality short-circuit below can hand back the
+        #      CPU-resident td_signal WITHOUT any transfer when the target
+        #      settings compare equal but live on another backend — if a
+        #      NumPy/CuPy mix fires just downstream of pour(), apply
+        #      ``data_signal = data_signal.with_backend(settings.backend)``;
+        #   2. other CPU-side ingest points (noise-knot arrays into
+        #      XYZSensitivityBackend.set_sensitivity_matrix, hand-built
+        #      window arrays in settings files) are not auto-converted —
+        #      DomainBase.with_backend / xp.asarray at the boundary is the
+        #      pattern to use, one transfer per array, when they fire.
         if self.td_signal.settings == settings:
             data_signal = self.td_signal
         else:
