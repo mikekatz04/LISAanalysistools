@@ -931,6 +931,152 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             eng.fill_template(buffer_obj.acs_buffer, params_phys, di, swap_N_vals,
                               factor=+1, waveform_kwargs=self.waveform_kwargs)
 
+    def _debug_seq_select(self, buffer_obj, t_i, w_i, b_i, slots, curr):
+        """Pick the entry of this repeat batch to trace with the 3x3
+        sequence figures: the chosen (walker, band) cell at its coldest
+        temperature present, once per sampler step. Returns None when the
+        cell is absent, tracing is off, or it already ran this step."""
+        if not self.debug or getattr(self, "_dbg_seq_done", True):
+            return None
+        try:
+            sel_w = self.debug_plot_walker
+            sel_b = (self.debug_plot_band if self.debug_plot_band is not None
+                     else (len(self.band_edges) - 1) // 2)
+            w_np = _to_numpy(w_i); b_np = _to_numpy(b_i); t_np = _to_numpy(t_i)
+            match = np.where((w_np == sel_w) & (b_np == sel_b))[0]
+            if match.size == 0:
+                return None
+            idx = int(match[np.argmin(t_np[match])])
+            self._dbg_seq_done = True
+            f0_old = float(_to_numpy(
+                self.transform_fn.both_transforms(curr[idx:idx + 1], xp=cp)[0, 1]))
+            return dict(
+                idx=idx,
+                slot=int(_to_numpy(slots)[idx]),
+                temp=int(t_np[idx]), walker=sel_w, band=sel_b,
+                f0_old=f0_old, f0_new=f0_old,
+                snaps={},
+            )
+        except Exception as e:
+            logger.warning("[GB_DEBUG %s] seq select skipped: %r", self.name, e)
+            return None
+
+    def _debug_slab_snapshot(self, buffer_obj, slot):
+        """Copy one cell's residual slab as (nchannels, Nf_active, Nt_active)."""
+        bs = self._basis_settings
+        Nf_a = int(getattr(bs, "Nf_active", None) or bs.Nf)
+        Nt_a = int(getattr(bs, "Nt_active", None) or bs.Nt)
+        nc = buffer_obj.nchannels
+        return _to_numpy(buffer_obj.band_buffer[slot]).copy().reshape(nc, Nf_a, Nt_a)
+
+    def _debug_plot_band_sequence(self, buffer_obj, seq) -> None:
+        """Four 3x3 figures (rows = X/Y/Z channels; columns = |template| /
+        |data| / |residual|) at the four buffer moments of one in-model
+        repeat block on the traced source:
+
+            1 before_removal   (source still in the residual)
+            2 after_removal    (source-free residual the repeats score on)
+            3 before_addback   (must equal 2 -- repeats never touch the buffer)
+            4 after_addback    (final coordinates written back)
+
+        The template column is reconstructed from snapshot differences
+        (old template = snap1 - snap2; new template = snap4 - snap3), the
+        data column is the with-source state and the residual column the
+        source-free state at each moment -- so figures 1/2 (and 3/4) also
+        serve as a visual fill round-trip check.
+        """
+        if not self.debug:
+            return
+        try:
+            import os as _os
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            s = seq["snaps"]
+            need = ("before_removal", "after_removal",
+                    "before_addback", "after_addback")
+            if any(k not in s for k in need):
+                return
+            bs = self._basis_settings
+            layer_df = float(bs.layer_df)
+            ind_min_f = int(bs.ind_min_f)
+
+            # Buffer sign convention: the band buffer holds the RESIDUAL
+            # (data - templates). ``remove_sources_from_band_buffer``
+            # UN-models the source (residual += template -> data-like);
+            # ``add_sources_to_band_buffer`` re-subtracts it. Hence:
+            #   snap before_removal / after_addback  = residual state
+            #   snap after_removal / before_addback  = data-like state
+            # and the templates come from the snapshot differences.
+            T_old = s["after_removal"] - s["before_removal"]
+            T_new = s["before_addback"] - s["after_addback"]
+            figures = [
+                # (tag, template, data, residual, f0)
+                ("1_before_removal", T_old, s["before_removal"] + T_old,
+                 s["before_removal"], seq["f0_old"]),
+                ("2_after_removal", T_old, s["after_removal"],
+                 s["after_removal"] - T_old, seq["f0_old"]),
+                ("3_before_addback", T_new, s["before_addback"],
+                 s["before_addback"] - T_new, seq["f0_new"]),
+                ("4_after_addback", T_new, s["after_addback"] + T_new,
+                 s["after_addback"], seq["f0_new"]),
+            ]
+
+            nc = T_old.shape[0]
+            ch_names = ["X", "Y", "Z"][:nc]
+            local = int(round(seq["f0_old"] / layer_df)) - ind_min_f
+            lo = max(local - 6, 0)
+            hi = min(local + 7, T_old.shape[1])
+            ylo = (ind_min_f + lo - 0.5) * layer_df * 1e3
+            yhi = (ind_min_f + hi - 0.5) * layer_df * 1e3
+
+            _os.makedirs(self.debug_plot_dir, exist_ok=True)
+            for tag, T, D, R, f0 in figures:
+                fig, axes = plt.subplots(
+                    nc, 3, figsize=(13.5, 3.2 * nc), squeeze=False,
+                    sharex=True, sharey=True,
+                )
+                for row in range(nc):
+                    for col, (name, arr) in enumerate(
+                            [("template", T), ("data", D), ("residual", R)]):
+                        ax = axes[row][col]
+                        im = ax.imshow(
+                            np.abs(arr[row, lo:hi]), aspect="auto",
+                            origin="lower",
+                            extent=[0, arr.shape[2], ylo, yhi],
+                        )
+                        ax.axhline(f0 * 1e3, color="r", ls="--", lw=1.0)
+                        if row == 0:
+                            ax.set_title(f"|{name}|", fontsize=11)
+                        if col == 0:
+                            ax.set_ylabel(f"{ch_names[row]}\nfrequency [mHz]",
+                                          fontsize=10)
+                        if row == nc - 1:
+                            ax.set_xlabel("WDM time pixel", fontsize=10)
+                        ax.tick_params(labelsize=8)
+                        cbar = fig.colorbar(im, ax=ax)
+                        cbar.ax.tick_params(labelsize=7)
+                fig.suptitle(
+                    f"GB in-model sequence {tag.replace('_', ' ')} — "
+                    f"band {seq['band']} | walker {seq['walker']} | "
+                    f"T{seq['temp']} | f0 = {f0 * 1e3:.4f} mHz",
+                    fontsize=13,
+                )
+                fname = _os.path.join(
+                    self.debug_plot_dir,
+                    f"gb_debug_seq{tag}_band{seq['band']}_w{seq['walker']}"
+                    f"_t{seq['temp']}_{self._dbg_plot_counter:04d}.png",
+                )
+                fig.savefig(fname, dpi=120, bbox_inches="tight")
+                plt.close(fig)
+                self._dbg_plot_counter += 1
+                logger.info("[GB_DEBUG %s] saved sequence plot -> %s",
+                            self.name, fname)
+        except Exception as e:
+            logger.warning("[GB_DEBUG %s] sequence plots skipped: %r",
+                           self.name, e)
+
     def _debug_log_band_null(self, buffer_obj) -> None:
         """Log the CHOSEN band's source-only residual log-likelihood per
         temperature, once per sampler step (right after the first buffer
@@ -1159,6 +1305,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # once per step too.
         self._dbg_plotted_stages = set()
         self._dbg_null_logged = False
+        self._dbg_seq_done = False
 
         units = self.band_units if self.num_bands > 1 else 1
         start_unit = model.random.randint(units)
@@ -1621,8 +1768,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         curr = band_sorter.coords[ids].copy()
         curr[:] = self.periodic.wrap({"gb": curr[:, None, :]}, xp=xp)["gb"][:, 0]
 
+        # Debug 3x3 sequence figures (channels x template/data/residual) at
+        # the four buffer moments of this repeat block, for the chosen
+        # (walker, band) cell only, once per sampler step.
+        seq = self._debug_seq_select(buffer_obj, t_i, w_i, b_i, slots, curr)
+        if seq is not None:
+            seq["snaps"]["before_removal"] = self._debug_slab_snapshot(
+                buffer_obj, seq["slot"])
+
         # Take the source out of the cell residual for the whole repeat block.
         buffer_obj.remove_sources_from_band_buffer(curr, slots, N_vals)
+
+        if seq is not None:
+            seq["snaps"]["after_removal"] = self._debug_slab_snapshot(
+                buffer_obj, seq["slot"])
 
         chol = self._compute_proposal_cholesky(model, band_sorter, ids)
         ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals)
@@ -1688,7 +1847,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # Final coordinates back into the residual and the sorter.
         band_sorter.coords[ids] = curr
+        if seq is not None:
+            seq["snaps"]["before_addback"] = self._debug_slab_snapshot(
+                buffer_obj, seq["slot"])
         buffer_obj.add_sources_to_band_buffer(curr, slots, N_vals)
+        if seq is not None:
+            seq["snaps"]["after_addback"] = self._debug_slab_snapshot(
+                buffer_obj, seq["slot"])
+            seq["f0_new"] = float(_to_numpy(
+                self.transform_fn.both_transforms(
+                    curr[seq["idx"]:seq["idx"] + 1], xp=cp)[0, 1]))
+            self._debug_plot_band_sequence(buffer_obj, seq)
 
     def _tempering_swap_grid(self, band_sorter, start):
         """Permuted (band, walker, temp) cell grid for one tempering parity.
