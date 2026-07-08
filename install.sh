@@ -35,6 +35,17 @@
 #                                 # remote (non-fast-forward) so you never build
 #                                 # on a silently stale/conflicting tree. Set
 #                                 # GIT_PULL=0 to skip pulling (offline / pinned).
+#   GBT_LAPACKE_DETECT_WITH=PKGCONFIG
+#                                 # (default) how the compiled packages locate
+#                                 # LAPACKE: AUTO | CMAKE | PKGCONFIG | DISABLE.
+#                                 # Passed to every package (GBT, LAT, BBHx,
+#                                 # GBGPU, FEW) as
+#                                 # cmake.define.GBT_LAPACKE_DETECT_WITH.
+#   GBT_LAPACKE_FETCH=            # AUTO | ON | OFF — download + build Reference
+#                                 # LAPACK when detection fails. Unset (default)
+#                                 # keeps each package's own default (AUTO).
+#   GBT_LAPACKE_EXTRA_LIBS=       # extra libs linked alongside LAPACKE, e.g.
+#                                 # "gfortran". Unset keeps package defaults.
 
 set -euo pipefail
 
@@ -43,6 +54,9 @@ SKIP_FEW="${SKIP_FEW:-0}"
 SKIP_PHENTAX="${SKIP_PHENTAX:-0}"
 SKIP_LISA_ON_GPU="${SKIP_LISA_ON_GPU:-1}"
 GIT_PULL="${GIT_PULL:-1}"
+GBT_LAPACKE_DETECT_WITH="${GBT_LAPACKE_DETECT_WITH:-PKGCONFIG}"
+GBT_LAPACKE_FETCH="${GBT_LAPACKE_FETCH:-}"
+GBT_LAPACKE_EXTRA_LIBS="${GBT_LAPACKE_EXTRA_LIBS:-}"
 
 LAT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEV_ROOT="$(dirname "$LAT_DIR")"
@@ -57,6 +71,9 @@ export PIP_CONSTRAINT="$CONSTRAINTS"
 echo "LAT repo:    $LAT_DIR"
 echo "Dev root:    $DEV_ROOT"
 echo "Constraints: $PIP_CONSTRAINT"
+echo "LAPACKE:     detect=${GBT_LAPACKE_DETECT_WITH}" \
+     "fetch=${GBT_LAPACKE_FETCH:-<package default>}" \
+     "extra_libs=${GBT_LAPACKE_EXTRA_LIBS:-<package default>}"
 echo ""
 
 # ----------------------------------------------------------------------
@@ -72,7 +89,18 @@ pip install \
 #export CXX=/usr/bin/clang++
 #export PKG_CONFIG_PATH="/opt/homebrew/opt/lapack/lib/pkgconfig:$PKG_CONFIG_PATH"
 
-LAPACKE_FLAG="--config-settings=cmake.define.GBT_LAPACKE_DETECT_WITH=PKGCONFIG"
+# The GBT_LAPACKE_* option family is shared by every compiled package in the
+# chain (GBT's get_lapacke() is the single detector; LAT/BBHx/GBGPU include
+# it, and FEW's gpu_backend branch reads the same names), so one flag set is
+# passed to all of them. FETCH / EXTRA_LIBS are only forwarded when the user
+# set them, keeping each package's own defaults otherwise.
+LAPACKE_FLAGS=("--config-settings=cmake.define.GBT_LAPACKE_DETECT_WITH=${GBT_LAPACKE_DETECT_WITH}")
+if [ -n "$GBT_LAPACKE_FETCH" ]; then
+    LAPACKE_FLAGS+=("--config-settings=cmake.define.GBT_LAPACKE_FETCH=${GBT_LAPACKE_FETCH}")
+fi
+if [ -n "$GBT_LAPACKE_EXTRA_LIBS" ]; then
+    LAPACKE_FLAGS+=("--config-settings=cmake.define.GBT_LAPACKE_EXTRA_LIBS=${GBT_LAPACKE_EXTRA_LIBS}")
+fi
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -134,20 +162,20 @@ editable_install() {
 # ----------------------------------------------------------------------
 
 clone_or_reuse_sibling "$ORG" GPUBackendTools
-editable_install "$DEV_ROOT/GPUBackendTools" spline "$LAPACKE_FLAG"
+editable_install "$DEV_ROOT/GPUBackendTools" spline "${LAPACKE_FLAGS[@]}"
 
 clone_or_reuse_sibling "$ORG" Eryn
-editable_install "$DEV_ROOT/Eryn" dev "$LAPACKE_FLAG"
+editable_install "$DEV_ROOT/Eryn" dev "${LAPACKE_FLAGS[@]}"
 
 echo ""
 echo "===> installing LAT (this repo: $LAT_DIR)"
-editable_install "$LAT_DIR" dev "$LAPACKE_FLAG"
+editable_install "$LAT_DIR" dev "${LAPACKE_FLAGS[@]}"
 
 clone_or_reuse_sibling "$ORG" BBHx
-editable_install "$DEV_ROOT/BBHx" dev "$LAPACKE_FLAG"
+editable_install "$DEV_ROOT/BBHx" dev "${LAPACKE_FLAGS[@]}"
 
 clone_or_reuse_sibling "$ORG" GBGPU
-editable_install "$DEV_ROOT/GBGPU" dev "$LAPACKE_FLAG"
+editable_install "$DEV_ROOT/GBGPU" dev "${LAPACKE_FLAGS[@]}"
 
 clone_or_reuse_sibling "$ORG" LATW || \
     echo "WARN: LATW clone failed (skipping — tutorials repo is optional)"
@@ -165,14 +193,15 @@ fi
 
 if [ "$SKIP_FEW" != "1" ]; then
     clone_or_reuse_sibling BlackHolePerturbationToolkit FastEMRIWaveforms
-    editable_install "$DEV_ROOT/FastEMRIWaveforms" gpu_backend \
-        --config-settings=cmake.define.FEW_LAPACKE_DETECT_WITH=PKGCONFIG
+    # FEW's gpu_backend branch reads the shared GBT_LAPACKE_* option names
+    # (commit f5f51416), so it takes the same flag set as everything else.
+    editable_install "$DEV_ROOT/FastEMRIWaveforms" gpu_backend "${LAPACKE_FLAGS[@]}"
 fi
 
 # lisa-on-gpu is being retired — opt-in only.
 if [ "$SKIP_LISA_ON_GPU" != "1" ]; then
     clone_or_reuse_sibling mikekatz04 lisa-on-gpu
-    editable_install "$DEV_ROOT/lisa-on-gpu" tdi_on_fly "$LAPACKE_FLAG"
+    editable_install "$DEV_ROOT/lisa-on-gpu" tdi_on_fly "${LAPACKE_FLAGS[@]}"
 fi
 
 echo ""
