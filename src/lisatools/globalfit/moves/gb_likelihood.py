@@ -4,7 +4,7 @@
 ``_gb_likelihood``. The engines are intended for documented, repeatable
 use by any band-based GB sampler component, not just the in-tree moves.)
 
-Two implementations live here:
+Three implementations live here:
 
 * :class:`FDBandLikelihoodEngine` -- wraps :class:`gbgpu.gbgpu.GBGPU` (frequency
   domain). Ports the inlined logic that used to live inside
@@ -14,6 +14,11 @@ Two implementations live here:
   :class:`gbgpu.gbcomps.GBWDMComputations` (WDM time-frequency
   domain). Uses :func:`GBWDMComputations.get_ll_wdm`,
   :func:`get_swap_ll_wdm`, :func:`fill_global_wdm`.
+
+* :class:`STFTBandLikelihoodEngine` -- wraps
+  :class:`gbgpu.gbcomps.STFTGBComputations` (STFT/Fresnel time-frequency
+  domain). Uses :func:`STFTGBComputations.get_ll_stft`,
+  :func:`get_swap_ll_stft`, :func:`fill_global_stft`, :func:`get_ll_grad_stft`.
 
 The :class:`BandLikelihoodEngine` protocol is the contract both implementations
 honour. :class:`Buffer` dispatches on its ``basis_settings`` (a
@@ -47,7 +52,7 @@ except (ImportError, ModuleNotFoundError):
     import numpy as cp
 
 from ...analysiscontainer import AnalysisContainerArray
-from ...domains import DomainSettingsBase, FDSettings, WDMSettings
+from ...domains import DomainSettingsBase, FDSettings, STFTSettings, WDMSettings
 
 
 @dataclass
@@ -738,11 +743,328 @@ class WDMBandLikelihoodEngine:
         )
 
 
+# ---------------------------------------------------------------------------
+# STFT/Fresnel-domain engine (wraps gbgpu.gbcomps.STFTGBComputations)
+# ---------------------------------------------------------------------------
+
+
+class STFTBandLikelihoodEngine:
+    """STFT (Fresnel) engine wrapping a
+    :class:`gbgpu.gbcomps.STFTGBComputations` instance.
+
+    Unlike the WDM computations object (whose methods take the holder per
+    call), ``STFTGBComputations`` reads its data / inverse-covariance through
+    the ``STFTComputationGroup`` bound to ``gb_stft_comp.stft_comps``. The
+    engine therefore REBINDS that attribute per call to the band ACA's own
+    per-split strategy (``buffer_aca.cpp_splits[s]``): the ACA builds and
+    caches those groups itself (``window_alpha`` / ``use_midpoint`` /
+    ``tdi_type`` via its ``domain_group_kwargs``), and the group's C++ domain
+    reads the LIVE ``linear_data_arr`` / ``linear_psd_arr`` buffers zero-copy,
+    so in-place residual updates between calls stay visible without any
+    rebuild.
+
+    Multi-split dispatch: proposal rows are partitioned by the split owning
+    their band (``buffer_aca.split_map``), band indices are remapped to
+    intra-split indices (``buffer_aca.ac_to_intra``), and each split's kernel
+    call runs under that split's device context. The single-split case (all
+    the WDM engine supports today) degenerates to one iteration with an
+    identity remap. Cross-device gathers of the per-split outputs into the
+    full-length result arrays are untested on multi-GPU.
+
+    Engine outputs are ``(d|d)``-independent -- :meth:`get_ll` returns the raw
+    ``d_h`` / ``h_h`` and :meth:`get_swap_ll` assembles ``ll_diff`` from the
+    five raw swap terms -- so the group's ``d_d`` snapshot going stale as the
+    Buffer rewrites residuals in place is harmless here.
+
+    Serial-use assumption: rebinding mutates the shared ``gb_stft_comp``
+    (same constraint as the WDM engine's stashed ``d_h_out`` attributes) --
+    one engine call at a time per gb object.
+
+    The Fresnel knobs (``n_side_bins`` / ``window_factor`` /
+    ``freq_from_tdi_phase`` / ``T`` / ``t_ref`` / orbits / TDI config) are
+    fixed on ``gb_stft_comp`` at its construction; per the sprint-wide rule
+    there is no runtime override here.
+    """
+
+    def __init__(
+        self,
+        gb_stft_comp,
+        basis_settings: STFTSettings,
+        nchannels: int,
+        tdi_channel_setup: str,
+        opt_snr_rej_samp_limit: float = 5.0,
+    ):
+        self.gb_stft_comp = gb_stft_comp
+        self.basis_settings = basis_settings
+        self.nchannels = nchannels
+        self.tdi_channel_setup = tdi_channel_setup
+        self.opt_snr_rej_samp_limit = opt_snr_rej_samp_limit
+
+    @property
+    def xp(self):
+        return self.gb_stft_comp.xp
+
+    # ---------- per-split dispatch -------------------------------------------
+
+    def _split_plan(self, buffer_aca: AnalysisContainerArray, data_index, noise_index=None):
+        """Partition proposal rows by the ACA split owning their data band.
+
+        Returns ``[(split, row_mask, intra_data_idx, intra_noise_idx, device),
+        ...]`` for every split referenced by ``data_index`` (a row's split is
+        keyed on its data band). ``intra_noise_idx`` is ``None`` when
+        ``noise_index`` is. Raises if any row's noise band lives in a
+        different split than its data band -- per-split kernel dispatch needs
+        them co-located (always true in the Buffer, where both are the
+        band's AC).
+        """
+        xp = self.xp
+        split_map = xp.asarray(buffer_aca.split_map)
+        ac_to_intra = xp.asarray(buffer_aca.ac_to_intra)
+        d_idx = xp.asarray(data_index).astype(int)
+        n_idx = None if noise_index is None else xp.asarray(noise_index).astype(int)
+        if n_idx is not None and bool((split_map[d_idx] != split_map[n_idx]).any()):
+            raise ValueError(
+                "STFTBandLikelihoodEngine: a proposal row references a data "
+                "band and a noise band owned by different ACA splits; "
+                "per-split kernel dispatch requires them to be co-located."
+            )
+        row_split = split_map[d_idx]
+        plan = []
+        for s in range(len(buffer_aca.cpp_splits)):
+            mask = row_split == s
+            if not bool(mask.any()):
+                continue
+            device = buffer_aca.gpus[s] if buffer_aca.gpus is not None else None
+            intra_d = ac_to_intra[d_idx[mask]].astype(xp.int32)
+            intra_n = (
+                None if n_idx is None else ac_to_intra[n_idx[mask]].astype(xp.int32)
+            )
+            plan.append((s, mask, intra_d, intra_n, device))
+        return plan
+
+    # ---------- fill_template ------------------------------------------------
+
+    def fill_template(
+        self,
+        buffer_aca: AnalysisContainerArray,
+        params_phys,
+        params_index,
+        N_vals,
+        *,
+        factor: int,
+        waveform_kwargs: dict,
+    ) -> None:
+        assert factor in (-1, +1)
+        xp = self.xp
+        params_phys = xp.atleast_2d(xp.asarray(params_phys))
+        # N_vals / waveform_kwargs are FD-specific; the Fresnel kernel's band
+        # support is n_side_bins, fixed on gb_stft_comp at construction.
+        for s, mask, intra_d, _, device in self._split_plan(buffer_aca, params_index):
+            with buffer_aca.device_context(device):
+                self.gb_stft_comp.stft_comps = buffer_aca.cpp_splits[s]
+                factors_arr = xp.full(
+                    int(mask.sum()), float(factor), dtype=xp.float64
+                )
+                # The split's flat buffer IS the (num_bands, nchannels, NT,
+                # NF_active) template stack the kernel scatters into;
+                # intra-split data_index addresses the band slot.
+                self.gb_stft_comp.fill_global_stft(
+                    params_phys[mask],
+                    buffer_aca.linear_data_arr[s],
+                    data_index=intra_d,
+                    factors=factors_arr,
+                )
+
+    # ---------- get_ll -------------------------------------------------------
+
+    def get_ll(
+        self,
+        buffer_aca: AnalysisContainerArray,
+        params_phys,
+        *,
+        data_index,
+        noise_index,
+        N_vals,
+        waveform_kwargs: dict,
+    ):
+        xp = self.xp
+        params_phys = xp.atleast_2d(xp.asarray(params_phys))
+        num_bin = params_phys.shape[0]
+        d_h = xp.zeros(num_bin, dtype=xp.complex128)
+        h_h = xp.zeros(num_bin, dtype=xp.complex128)
+        for s, mask, intra_d, intra_n, device in self._split_plan(
+            buffer_aca, data_index, noise_index
+        ):
+            with buffer_aca.device_context(device):
+                self.gb_stft_comp.stft_comps = buffer_aca.cpp_splits[s]
+                self.gb_stft_comp.get_ll_stft(
+                    params_phys[mask], data_index=intra_d, noise_index=intra_n
+                )
+                d_h[mask] = self.gb_stft_comp.d_h_out
+                h_h[mask] = self.gb_stft_comp.h_h_out
+        return d_h, h_h
+
+    # ---------- get_swap_ll --------------------------------------------------
+
+    def get_swap_ll(
+        self,
+        buffer_aca: AnalysisContainerArray,
+        params_remove_phys,
+        params_add_phys,
+        *,
+        data_index,
+        noise_index,
+        N_vals,
+        phase_marginalize: bool,
+        waveform_kwargs: dict,
+    ) -> SwapLLResult:
+        xp = self.xp
+
+        if phase_marginalize:
+            # get_ll_stft/get_swap_ll_stft have no phase-maximisation pass;
+            # surfacing this loudly beats silently returning the un-maximised
+            # result (same policy as the WDM engine).
+            raise NotImplementedError(
+                "STFTBandLikelihoodEngine.get_swap_ll does not yet support "
+                "phase_marginalize=True. The STFT swap kernel needs a phase-"
+                "maximisation pass first."
+            )
+
+        pa = xp.atleast_2d(xp.asarray(params_add_phys))
+        pr = xp.atleast_2d(xp.asarray(params_remove_phys))
+
+        # STFT bounds-keep (WDM parity): each source's central frequency bin
+        # must sit in the active band. The kernels clamp every pixel access to
+        # the grid, so this is proposal semantics (reject band-escapees), not
+        # crash safety.
+        df = self.basis_settings.df
+        ind_min = self.basis_settings.ind_min
+        ind_max = self.basis_settings.ind_max
+        bin_add = (pa[:, 1] / df).astype(int)
+        bin_remove = (pr[:, 1] / df).astype(int)
+        keep = (
+            (bin_add >= ind_min)
+            & (bin_add <= ind_max)
+            & (bin_remove >= ind_min)
+            & (bin_remove <= ind_max)
+        )
+
+        num_prop = keep.shape[0]
+        ll_diff = xp.full(num_prop, -1e300, dtype=xp.float64)
+        opt_snr = xp.zeros(num_prop, dtype=xp.float64)
+        d_h_add = xp.zeros(num_prop, dtype=xp.float64)
+        d_h_remove = xp.zeros(num_prop, dtype=xp.float64)
+        hh_add = xp.zeros(num_prop, dtype=xp.float64)
+        hh_remove = xp.zeros(num_prop, dtype=xp.float64)
+        hh_cross = xp.zeros(num_prop, dtype=xp.float64)
+
+        if bool(keep.any()):
+            rows_kept = xp.where(keep)[0]
+            d_idx = xp.asarray(data_index)[keep]
+            n_idx = xp.asarray(noise_index)[keep]
+            for s, sub_mask, intra_d, intra_n, device in self._split_plan(
+                buffer_aca, d_idx, n_idx
+            ):
+                rows = rows_kept[sub_mask]
+                with buffer_aca.device_context(device):
+                    self.gb_stft_comp.stft_comps = buffer_aca.cpp_splits[s]
+                    (
+                        _like_add,
+                        _like_rem,
+                        d_h_a,
+                        d_h_r,
+                        aa,
+                        rr,
+                        ar,
+                    ) = self.gb_stft_comp.get_swap_ll_stft(
+                        pa[rows],
+                        pr[rows],
+                        data_index=intra_d,
+                        noise_index=intra_n,
+                    )
+                    # Same swap algebra as the WDM engine; the STFT kernel
+                    # returns the raw complex inner products, so take the
+                    # real parts here.
+                    ll_diff[rows] = (
+                        (d_h_a.real - d_h_r.real)
+                        - 0.5 * (aa.real - rr.real)
+                        - (ar.real - rr.real)
+                    )
+                    d_h_add[rows] = d_h_a.real
+                    d_h_remove[rows] = d_h_r.real
+                    hh_add[rows] = aa.real
+                    hh_remove[rows] = rr.real
+                    hh_cross[rows] = ar.real
+                    opt_snr[rows] = xp.sqrt(xp.maximum(aa.real, 0.0))
+
+        return SwapLLResult(
+            ll_diff=ll_diff,
+            d_h_add=d_h_add,
+            d_h_remove=d_h_remove,
+            hh_add=hh_add,
+            hh_remove=hh_remove,
+            hh_cross=hh_cross,
+            opt_snr_add=opt_snr,
+            phase_angle=None,
+            kept=keep,
+        )
+
+    # ---------- get_ll_grad / hessian ---------------------------------------
+
+    def get_ll_grad(
+        self,
+        buffer_aca: AnalysisContainerArray,
+        params_phys,
+        *,
+        data_index,
+        noise_index,
+        N_vals,
+        param_eps=None,
+        chunk: Optional[int] = None,
+        waveform_kwargs: dict | None = None,
+    ):
+        """Per-source gradient of ``L = <d|h> - 0.5 <h|h>`` w.r.t. params.
+
+        Returns ``(num_proposals, nparams)``. Routed through the central-FD
+        kernel behind :meth:`STFTGBComputations.get_ll_grad_stft`, which
+        (unlike the WDM chunked-het path) accepts ``param_eps`` natively --
+        it is forwarded. ``chunk`` has no STFT analog and is swallowed for
+        caller backward-compat.
+        """
+        xp = self.xp
+        del N_vals, chunk, waveform_kwargs
+        params_phys = xp.atleast_2d(xp.asarray(params_phys))
+        num_bin = params_phys.shape[0]
+        grad = xp.zeros(
+            (num_bin, self.gb_stft_comp.num_params), dtype=xp.float64
+        )
+        for s, mask, intra_d, intra_n, device in self._split_plan(
+            buffer_aca, data_index, noise_index
+        ):
+            with buffer_aca.device_context(device):
+                self.gb_stft_comp.stft_comps = buffer_aca.cpp_splits[s]
+                grad[mask] = self.gb_stft_comp.get_ll_grad_stft(
+                    params_phys[mask],
+                    param_eps=param_eps,
+                    data_index=intra_d,
+                    noise_index=intra_n,
+                )
+        return grad
+
+    def hessian(self, *_args, **_kwargs):
+        raise NotImplementedError(
+            "STFTBandLikelihoodEngine.hessian is not implemented: "
+            "STFTGBComputations has no hessian_stft kernel. Use the "
+            "WDM/chunked-het Buffer for NUTS metric construction."
+        )
+
+
 def make_band_likelihood_engine(
     basis_settings: DomainSettingsBase,
     *,
     gb=None,
     gb_wdm_comp=None,
+    gb_stft_comp=None,
     nchannels: int,
     tdi_channel_setup: str,
     df: Optional[float] = None,
@@ -753,8 +1075,9 @@ def make_band_likelihood_engine(
     """Construct the right engine for the supplied basis-domain settings.
 
     Dispatch keys off ``isinstance(basis_settings, ...)`` -- no string-level
-    mode flag. The caller passes whichever ``gb`` / ``gb_wdm_comp`` is
-    appropriate for the domain it has selected; the missing one stays ``None``.
+    mode flag. The caller passes whichever ``gb`` / ``gb_wdm_comp`` /
+    ``gb_stft_comp`` is appropriate for the domain it has selected; the
+    others stay ``None``.
     """
     if isinstance(basis_settings, FDSettings):
         if gb is None:
@@ -786,6 +1109,20 @@ def make_band_likelihood_engine(
             )
         return WDMBandLikelihoodEngine(
             gb_comps=gb_wdm_comp,
+            basis_settings=basis_settings,
+            nchannels=nchannels,
+            tdi_channel_setup=tdi_channel_setup,
+            opt_snr_rej_samp_limit=opt_snr_rej_samp_limit,
+        )
+    if isinstance(basis_settings, STFTSettings):
+        if gb_stft_comp is None:
+            raise ValueError(
+                "STFTBandLikelihoodEngine requires a "
+                "gbgpu.gbcomps.STFTGBComputations instance (pass "
+                "gb_stft_comp=...)."
+            )
+        return STFTBandLikelihoodEngine(
+            gb_stft_comp=gb_stft_comp,
             basis_settings=basis_settings,
             nchannels=nchannels,
             tdi_channel_setup=tdi_channel_setup,

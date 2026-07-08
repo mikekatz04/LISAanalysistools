@@ -1500,7 +1500,12 @@ class AnalysisContainerArray:
             sensitivity information. The data and sensitivity information for
             each container will be split across the GPUs as evenly as possible.
             If ``None``, everything is stored on the CPU.
-        complex_psd: If ``True``, allocate a complex-valued PSD buffer.
+        complex_psd: If ``True``, allocate a complex-valued PSD buffer; if
+            ``False``, a real-valued one. Default ``None`` derives it from the
+            domain exactly like the data dtype: real for WDM, complex for
+            FD/STFT (whose sensitivity cross-terms are complex and whose C++
+            domain wraps take complex128 ``invC`` — a real buffer there would
+            silently discard the imaginary parts).
         n_splits: CPU-threading knob (mutually exclusive with ``gpus``): shard
             the containers into this many CPU splits through the **same**
             split structure used for GPUs (``gpu_splits`` / ``split_map`` /
@@ -1540,7 +1545,7 @@ class AnalysisContainerArray:
         self,
         analysis_containers: AnalysisContainer | List[AnalysisContainer] | np.ndarray,
         gpus: list | int | None = None,
-        complex_psd: bool = False,
+        complex_psd: Optional[bool] = None,
         gpu_assignment: Optional[np.ndarray] = None,
         n_splits: Optional[int] = None,
         run_threaded: bool = False,
@@ -1639,6 +1644,14 @@ class AnalysisContainerArray:
         else:
             self.data_dtype = complex
 
+        if complex_psd is None:
+            # Same dispatch as data_dtype above: WDM sensitivity is real;
+            # FD/STFT invC carries complex cross-terms and the C++ domain
+            # wraps take complex128 (a float64 buffer would be silently
+            # converted — and its imaginary parts silently discarded).
+            complex_psd = not isinstance(
+                ac_tmp.sens_mat.basis_settings, domains.WDMSettings
+            )
         self.noise_dtype = float if not complex_psd else complex
             
         assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
