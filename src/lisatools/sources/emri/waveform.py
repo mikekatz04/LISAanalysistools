@@ -318,7 +318,7 @@ class EMRITDIWaveform(TDPyResponseWaveformBase):
         if ra is None or dec is None:
             *args, ra, dec = args
         
-        merger_time = float(self.data_times_array[-1] - self.waveform_t0)
+        merger_time = float(self.domain_settings.t_end - self.waveform_t0)
 
         if np.ndim(ra) >= 1:
             return self._call_batched(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
