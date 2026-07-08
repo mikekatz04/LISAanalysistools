@@ -54,7 +54,26 @@ class PERecipeStep(BaseRecipeStep):
     def stopping_function(self, *args, **kwargs):
         """Never stop on its own — relies on outer stopping logic."""
         return False
+    
+class IterationCountRecipeStep(BaseRecipeStep):
+    """Recipe step that runs for N iterations before moving to the next step."""
 
+    def __init__(self, moves: list, weights: typing.Optional[list] = None, num_iters: int = 100):
+        super().__init__(moves, weights)
+        self.num_iters = num_iters
+
+    def setup_run(self, iteration, last_sample, sampler):
+        super().setup_run(iteration, last_sample, sampler)
+
+        self.start_iteration = iteration
+
+    def stopping_function(self, iteration, last_sample, sampler):
+        """Stop after num_iters iterations."""
+        stop = (iteration - self.start_iteration) >= self.num_iters
+        if stop:
+            logger.info(f"IterationCountRecipeStep stopping after {self.num_iters} iterations.")
+        
+        return stop
 
 class RJRecipeStep(BaseRecipeStep):
     """Reversible-jump recipe step that stops once GB leaf count plateaus.
