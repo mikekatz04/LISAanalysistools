@@ -165,6 +165,26 @@ class DomainBase:
         """Transform this signal into ``new_domain`` (subclasses must implement)."""
         raise NotImplementedError("Transform needs to be implemented for this signal type.")
 
+    def _check_transform_backend(self, new_domain: DomainSettingsBase) -> None:
+        """Fail fast when a transform target lives on a different backend.
+
+        Layered transforms thread THIS signal's backend through every
+        intermediate domain built under the hood, so a target settings
+        object on a different backend would only blow up deep inside the
+        chain with an opaque NumPy/CuPy mixing error. Backends are fixed at
+        construction (sprint rule) -- no silent coercion / device transfer.
+        """
+        if new_domain.xp is not self.xp:
+            flavor = self.backend_name.split("_")[-1]
+            raise ValueError(
+                f"transform target settings are on backend "
+                f"'{new_domain.backend_name}' but this signal is on "
+                f"'{self.backend_name}'. Construct the target settings with "
+                f"force_backend='{flavor}' (or pass this signal's .backend); "
+                "intermediate domains inherit the signal's backend, and "
+                "mixing NumPy/CuPy mid-chain fails."
+            )
+
     @property
     def shape(self) -> tuple:
         """Shape of :attr:`arr`."""
@@ -770,6 +790,7 @@ class TDSignal(DomainBase, TDSettings):
         for STFT — pre-filling a full-signal window here broke the STFT
         branch, whose window must be segment-length).
         """
+        self._check_transform_backend(new_domain)
         if isinstance(new_domain, TDSettings):
             if window is None:
                 window = self.xp.ones(self.arr.shape, dtype=float)
@@ -1207,23 +1228,25 @@ class FDSignal(FDSettings, DomainBase):
         _tmp = self.xp.fft.irfft(arr_in * window, axis=-1)
         
         if settings is None:
+            # Intermediate settings built under the hood MUST inherit this
+            # signal's backend: layered transforms (e.g. WDM -> STFT goes
+            # through wdm_to_fd().ifft(settings=None).stft()) otherwise
+            # produce a CPU-default TDSettings mid-chain on GPU runs and the
+            # next step mixes NumPy/CuPy.
             Tobs = 1 / self.df
             Nobs = _tmp.shape[-1]
             dt = Tobs / Nobs
-            settings = TDSettings(Nobs, dt)
+            settings = TDSettings(Nobs, dt, force_backend=self.backend)
 
         td_arr = _tmp / settings.dt
         return TDSignal(td_arr, settings)
-    
+
     def __repr__(self) -> str:
         return (
             f"FDSignal(N={self.N}, df={self.df}, "
             f"min_freq={self.min_freq}, max_freq={self.max_freq}, "
             f"backend={self.backend_name.split('_')[-1]})"
         )
-
-        td_settings = TDSettings(N, dt, t0=0.0, force_backend=self.backend)
-        return TDSignal(td_arr, td_settings)
 
     def get_fd_window_for_wdm(self, settings):
         """Build the WDM analysis window in frequency space (currently unimplemented)."""
@@ -1378,6 +1401,7 @@ class FDSignal(FDSettings, DomainBase):
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
         """Dispatch to :meth:`ifft`, :meth:`wdmtransform`, etc. based on ``new_domain``."""
+        self._check_transform_backend(new_domain)
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
@@ -2579,9 +2603,15 @@ class WDMSignal(WDMSettings, DomainBase):
         return FDSignal(arr_fd, settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
-        """Dispatch to the correct WDM-to-X conversion based on ``new_domain``."""
-        if window is None:
-            window = self.xp.ones(self.arr.shape, dtype=float)
+        """Dispatch to the correct WDM-to-X conversion based on ``new_domain``.
+
+        ``window=None`` is forwarded as-is to the FINAL step of each chain:
+        every step defaults its own window with the shape it needs.
+        (Pre-filling a WDM-shaped ones array here broke the layered chains
+        — e.g. it reached ``ifft`` on the FD intermediate, whose window must
+        be FD-length. Same rule as :meth:`TDSignal.transform`.)
+        """
+        self._check_transform_backend(new_domain)
 
         if isinstance(new_domain, TDSettings):
             return self.wdm_to_fd(settings=None, window=None).ifft(settings=new_domain, window=window)
