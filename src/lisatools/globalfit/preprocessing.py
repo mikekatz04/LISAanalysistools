@@ -666,7 +666,7 @@ class SignalProcessor:
             raise ValueError(
                 f"Target sampling frequency ({target_fs} Hz) must be less than current fs ({self.fs} Hz) for downsampling."
             )
-
+        
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.downsample(target_fs=target_fs, window=window, padtype=padtype)
         self.data = self._from_mp_dict(mp.data)
