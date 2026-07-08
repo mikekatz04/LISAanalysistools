@@ -290,8 +290,12 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
     def _swap_layer_groups(self, params_add_2d, params_remove_2d,
                             group_band_layers, margin_layers,
                             data_index=None, noise_index=None):
+        # compute_swap_layer_groups is xp-agnostic (dispatches on the array
+        # module of its inputs) -- keep params on this instance's backend
+        # like _layer_groups does; np.asarray here raised CuPy's
+        # implicit-conversion TypeError on GPU.
         return compute_swap_layer_groups(
-            np.asarray(params_add_2d), np.asarray(params_remove_2d),
+            self.xp.asarray(params_add_2d), self.xp.asarray(params_remove_2d),
             layer_df=self.layer_df,
             f0_param_index=self._F0_PARAM_INDEX,
             group_band_layers=int(group_band_layers),
