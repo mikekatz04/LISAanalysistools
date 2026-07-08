@@ -931,6 +931,75 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             eng.fill_template(buffer_obj.acs_buffer, params_phys, di, swap_N_vals,
                               factor=+1, waveform_kwargs=self.waveform_kwargs)
 
+    def _debug_log_band_null(self, buffer_obj) -> None:
+        """Log the CHOSEN band's source-only residual log-likelihood per
+        temperature, once per sampler step (right after the first buffer
+        load, i.e. central-band sources subtracted, before any proposal).
+
+        This is the direct null check: with noiseless data and the cold
+        chain at (or near) the injection, the chosen band's
+        ``-1/2 <r|r>`` restricted to the band's WDM layers must be ~0 for
+        T0. The full-buffer ``likelihood(source_only=True)`` cannot show
+        this on the WDM path -- each cell slab spans the whole active band,
+        so the unsubtracted rest of the galaxy dominates; this slices out
+        exactly the band's layers.
+        """
+        if not self.debug or getattr(self, "_dbg_null_logged", True):
+            return
+        try:
+            bs = self._basis_settings
+            if not hasattr(bs, "layer_df"):
+                return  # WDM-only diagnostic for now
+            sel_w = self.debug_plot_walker
+            sel_b = (self.debug_plot_band if self.debug_plot_band is not None
+                     else (len(self.band_edges) - 1) // 2)
+
+            combos = _to_numpy(buffer_obj.unique_band_combos)
+            rows = [i for i in range(combos.shape[0])
+                    if int(combos[i, 1]) == sel_w and int(combos[i, 2]) == sel_b]
+            if not rows:
+                return
+            self._dbg_null_logged = True
+
+            layer_df = float(bs.layer_df)
+            ind_min_f = int(bs.ind_min_f)
+            Nf_a = int(getattr(bs, "Nf_active", None) or bs.Nf)
+            Nt_a = int(getattr(bs, "Nt_active", None) or bs.Nt)
+            be = _to_numpy(self.band_edges)
+            # WDM layers are CENTERED on m*layer_df while band edges are at
+            # m*layer_df, so the band interval straddles two layers: include
+            # every layer whose center lies in [edge_b, edge_b+1] (both
+            # boundary layers), so the carrier layer is always covered.
+            k0 = max(int(np.ceil(be[sel_b] / layer_df - 1e-9)) - ind_min_f, 0)
+            k1 = min(int(np.floor(be[sel_b + 1] / layer_df + 1e-9)) + 1 - ind_min_f,
+                     Nf_a)
+            dc = float(buffer_obj.settings.differential_component)
+            nc = buffer_obj.nchannels
+
+            band_np = _to_numpy(buffer_obj._materialize(buffer_obj.band_buffer))
+            psd_np = _to_numpy(buffer_obj._materialize(buffer_obj.psd_buffer))
+            msgs = []
+            for i in sorted(rows, key=lambda i: int(combos[i, 0])):
+                t = int(combos[i, 0])
+                r = band_np[i].reshape(nc, Nf_a, Nt_a)[:, k0:k1]
+                if buffer_obj.tdi_channel_setup == "XYZ":
+                    ic = psd_np[i].reshape(nc, nc, Nf_a, Nt_a)[:, :, k0:k1]
+                    ll = -0.5 * 4.0 * dc * float(
+                        np.einsum("ifk,ijfk,jfk->", r, ic.real, r))
+                else:
+                    ic = psd_np[i].reshape(nc, Nf_a, Nt_a)[:, k0:k1]
+                    ll = -0.5 * 4.0 * dc * float(np.sum(r * ic.real * r))
+                msgs.append(f"T{t}: {ll:.6e}")
+            logger.info(
+                "[GB_DEBUG %s] sub-band SOURCE-ONLY residual ll "
+                "(band %d, walker %d, layers %d:%d): %s "
+                "(cold chain at injection should be ~0)",
+                self.name, sel_b, sel_w, ind_min_f + k0, ind_min_f + k1,
+                "; ".join(msgs),
+            )
+        except Exception as e:
+            logger.warning("[GB_DEBUG %s] band-null log skipped: %r", self.name, e)
+
     def _debug_plot_band(self, buffer_obj, params_add, data_index, swap_N_vals,
                          ll_diff_kept, map_to_update_cpu, keep2, move_i,
                          stage: str = "in-model") -> None:
@@ -1015,15 +1084,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 lo = max(local - 6, 0)
                 hi = min(local + 7, tile.shape[0])
                 sub = tile[lo:hi]
+                # WDM layer m is CENTERED on m*layer_df (span (m +- 1/2)*df):
+                # the y-extent runs from the bottom edge of layer lo to the
+                # top edge of layer hi-1, i.e. offset -1/2 layer relative to
+                # the raw indices. (Without the -0.5 every row displayed a
+                # half-layer too high and sources looked misaligned.)
                 im = ax.imshow(
                     sub, aspect="auto", origin="lower",
                     extent=[0, sub.shape[1],
-                            (ind_min_f + lo) * layer_df * 1e3,
-                            (ind_min_f + hi) * layer_df * 1e3],
+                            (ind_min_f + lo - 0.5) * layer_df * 1e3,
+                            (ind_min_f + hi - 0.5) * layer_df * 1e3],
                 )
                 ax.axhline(f0 * 1e3, color="r", ls="--", lw=1.2,
                            label=f"f0 = {f0 * 1e3:.4f} mHz")
-                ax.set_title(f"T{temp}  $\\Delta$logL = {ll_val:.3e}", fontsize=11)
+                # RJ forbidden proposals carry a -1e300 sentinel, not a
+                # likelihood -- label them instead of printing the sentinel.
+                ll_txt = ("forbidden proposal" if ll_val < -1e290
+                          else f"$\\Delta$logL = {ll_val:.3e}")
+                ax.set_title(f"T{temp}  {ll_txt}", fontsize=11)
                 ax.set_xlabel("WDM time pixel (X)", fontsize=10)
                 if panel % ncols == 0:
                     ax.set_ylabel("frequency [mHz]", fontsize=10)
@@ -1077,8 +1155,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         acc_counts = cp.zeros_like(prop_counts)
 
         # One debug figure per STAGE per run_proposal call (i.e. per sampler
-        # step): _debug_plot_band consumes this set.
+        # step): _debug_plot_band consumes this set. The band-null log fires
+        # once per step too.
         self._dbg_plotted_stages = set()
+        self._dbg_null_logged = False
 
         units = self.band_units if self.num_bands > 1 else 1
         start_unit = model.random.randint(units)
@@ -1152,6 +1232,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         buffer_obj = subset.get_buffer(
             model.analysis_container_arr, scheduler.slot_specials.copy()
         )
+        self._debug_log_band_null(buffer_obj)
 
         # Pick eligibility lives on the MAIN sorter: only sources inside this
         # unit's subset are candidates (for in-model moves the subset already
@@ -1183,6 +1264,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     model.analysis_container_arr, new_specials,
                     inds_fill=inds_fill, buffer_obj=buffer_obj,
                 )
+                self._debug_log_band_null(buffer_obj)
             round_i += 1
             self.mempool.free_all_blocks()
 
@@ -1341,16 +1423,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         prop_counts[0][t_i, w_i, b_i] += 1
 
         if os.environ.get("GB_RJ_TRACE"):
+            # Trace every cold-chain DEATH proposal (accepted or not) plus
+            # every accepted cold-chain move. The death delta is
+            # -<r|h> - 0.5<h|h>: for a well-fit bright source it must sit
+            # near -0.5*SNR^2 and essentially never be accepted at beta=1,
+            # so a cold-chain leaf loss means either h_h came back ~0 from
+            # the kernel (template dropped: band-edge layer gating /
+            # sub-band slab window / stale device index arrays) or the
+            # accept bookkeeping raced the residual update. d_h/h_h at
+            # proposal time distinguish the two -- compare GPU vs CPU runs
+            # of the same seed/config.
             for _k in range(len(ids)):
-                if accept[_k] and t_i[_k] == 0:
-                    logger.warning(
-                        "RJTRACE t=%d w=%d b=%d alive_before=%d delta=%.4e "
-                        "beta=%.3e lnp=%.4e factors=%.4e curr_lp=%.4e prev_lp=%.4e",
-                        int(t_i[_k]), int(w_i[_k]), int(b_i[_k]),
-                        int(alive[_k]), float(delta_ll[_k]), float(beta[_k]),
-                        float(lnpdiff[_k]), float(factors[_k]),
-                        float(curr_logp[_k]), float(prev_logp[_k]),
-                    )
+                if t_i[_k] != 0:
+                    continue
+                _acc = bool(accept[_k])
+                if not (_acc or bool(alive[_k])):
+                    continue
+                logger.warning(
+                    "RJTRACE %s t=%d w=%d b=%d slot=%d f0=%.9e mHz N=%d "
+                    "d_h=%.6e h_h=%.6e delta=%.6e beta=%.3e lnp=%.6e "
+                    "factors=%.4e curr_lp=%.4e prev_lp=%.4e accept=%d",
+                    "DEATH" if alive[_k] else "BIRTH",
+                    int(t_i[_k]), int(w_i[_k]), int(b_i[_k]), int(slots[_k]),
+                    float(params[_k, 1]), int(N_vals[_k]),
+                    float(d_h[_k]), float(h_h[_k]), float(delta_ll[_k]),
+                    float(beta[_k]), float(lnpdiff[_k]), float(factors[_k]),
+                    float(curr_logp[_k]), float(prev_logp[_k]), int(_acc),
+                )
 
         if bool(accept.any()):
             acc_ids = ids[accept]
