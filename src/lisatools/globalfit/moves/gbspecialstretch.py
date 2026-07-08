@@ -462,6 +462,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         jump_factor=0.005,
         debug=False,
         debug_plot_dir="./gf_output/gb_debug/",
+        debug_plot_walker=0,
+        debug_plot_band=None,
         **kwargs,
     ):
         # return_gpu is a kwarg for the stretch move
@@ -498,6 +500,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # early-return, so the production path is untouched.
         self.debug = bool(debug)
         self.debug_plot_dir = debug_plot_dir
+        # Plot selection: only the chosen (walker, band) cell is plotted --
+        # ONE figure per plotted step with a panel per temperature -- instead
+        # of a PNG for every (temp, walker, band) the proposal touches.
+        # ``debug_plot_band=None`` resolves to the central band at plot time.
+        self.debug_plot_walker = int(debug_plot_walker)
+        self.debug_plot_band = (None if debug_plot_band is None
+                                else int(debug_plot_band))
         self._dbg_plot_counter = 0
 
         # for key in priors:
@@ -925,8 +934,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _debug_plot_band(self, buffer_obj, params_add, data_index, swap_N_vals,
                          ll_diff_kept, map_to_update_cpu, keep2, move_i,
                          stage: str = "in-model") -> None:
-        """Save a WDM time-frequency plot of the band residual around the
-        proposed source (begin/middle/end of the band's proposals).
+        """Save ONE WDM time-frequency figure for the CHOSEN (walker, band)
+        cell, with a panel per temperature present in this proposal batch.
+
+        Only the cell selected by ``debug_plot_walker`` / ``debug_plot_band``
+        (default: walker 0 / the central band) is plotted -- not every
+        (temp, walker, band) the proposal touches -- so a debug run produces
+        a small, readable progression instead of hundreds of PNGs.
 
         ``stage`` labels the proposal context in the title and file name:
         ``"rj"`` (birth/death step) or ``"in-model"`` (repeat block).
@@ -944,63 +958,94 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             layer_df = float(bs.layer_df)
             ind_min_f = int(bs.ind_min_f)
 
+            sel_w = self.debug_plot_walker
+            sel_b = (self.debug_plot_band if self.debug_plot_band is not None
+                     else (len(self.band_edges) - 1) // 2)
+
+            # ``params_add`` / ``data_index`` / ``ll_diff_kept`` are aligned
+            # with the KEPT subset; map_to_update_cpu indexes the full batch,
+            # bridged by ``orig``.
             orig = np.where(_to_numpy(keep2).astype(bool))[0]
             if orig.size == 0:
                 return
-            i0 = 0
-            slab = int(_to_numpy(data_index)[i0])
-            temp = int(map_to_update_cpu[0][orig[i0]])
-            walker = int(map_to_update_cpu[1][orig[i0]])
-            band = int(map_to_update_cpu[2][orig[i0]])
+            temps_all, walkers_all, bands_all = map_to_update_cpu
+            pos = [i for i, j in enumerate(orig)
+                   if int(walkers_all[j]) == sel_w and int(bands_all[j]) == sel_b]
+            if not pos:
+                return  # chosen cell not in this batch
+            # One figure per stage per sampler step: the set is reset at the
+            # top of run_proposal, so later picks of the same cell within
+            # this step do not save additional figures.
+            plotted = getattr(self, "_dbg_plotted_stages", None)
+            if plotted is not None:
+                if stage in plotted:
+                    return
+                plotted.add(stage)
+            pos.sort(key=lambda i: int(temps_all[orig[i]]))
 
             params_phys = self.transform_fn.both_transforms(params_add, xp=cp)
-            f0 = float(_to_numpy(params_phys[i0, 1]))
-            local = int(round(f0 / layer_df)) - ind_min_f
-            ll_val = float(_to_numpy(xp.asarray(ll_diff_kept))[i0])
+            di_np = _to_numpy(data_index)
+            ll_np = _to_numpy(xp.asarray(ll_diff_kept))
 
             # band_buffer is per-slot (num_bands_now, nchannels, data_length)
             # with the WDM tile flattened; recover (Nf_active, Nt_active).
-            # (data_shaped is a per-SHARD list -- indexing it by slot was the
-            # old bug that skipped every plot with an IndexError.)
             Nf_a = int(getattr(bs, "Nf_active", None) or bs.Nf)
             Nt_a = int(getattr(bs, "Nt_active", None) or bs.Nt)
-            tile = np.abs(
-                _to_numpy(buffer_obj.band_buffer[slab][0])
-            ).reshape(Nf_a, Nt_a)
-            lo = max(local - 6, 0)
-            hi = min(local + 7, tile.shape[0])
-            sub = tile[lo:hi]
 
-            fig, ax = plt.subplots(figsize=(10, 5))
-            im = ax.imshow(
-                sub, aspect="auto", origin="lower",
-                extent=[0, sub.shape[1],
-                        (ind_min_f + lo) * layer_df * 1e3,
-                        (ind_min_f + hi) * layer_df * 1e3],
+            n = len(pos)
+            ncols = min(n, 4)
+            nrows = (n + ncols - 1) // ncols
+            fig, axes = plt.subplots(
+                nrows, ncols, figsize=(5.6 * ncols, 4.4 * nrows),
+                squeeze=False, sharey=True,
             )
-            ax.axhline(f0 * 1e3, color="r", ls="--", lw=1.5,
-                       label=f"proposed source f0 = {f0 * 1e3:.4f} mHz")
-            ax.set_xlabel("WDM time pixel (X channel)", fontsize=12)
-            ax.set_ylabel("frequency [mHz]", fontsize=12)
-            ax.tick_params(labelsize=10)
-            ax.set_title(
-                f"GB {stage} proposal — |WDM residual| around the source\n"
-                f"band {band} | temp {temp} | walker {walker} | "
-                f"repeat {move_i} | $\\Delta$logL = {ll_val:.3e}",
-                fontsize=12,
+            for ax in axes.flat[n:]:
+                ax.set_visible(False)
+
+            for panel, i0 in enumerate(pos):
+                ax = axes.flat[panel]
+                temp = int(temps_all[orig[i0]])
+                slab = int(di_np[i0])
+                f0 = float(_to_numpy(params_phys[i0, 1]))
+                local = int(round(f0 / layer_df)) - ind_min_f
+                ll_val = float(ll_np[i0])
+                tile = np.abs(
+                    _to_numpy(buffer_obj.band_buffer[slab][0])
+                ).reshape(Nf_a, Nt_a)
+                lo = max(local - 6, 0)
+                hi = min(local + 7, tile.shape[0])
+                sub = tile[lo:hi]
+                im = ax.imshow(
+                    sub, aspect="auto", origin="lower",
+                    extent=[0, sub.shape[1],
+                            (ind_min_f + lo) * layer_df * 1e3,
+                            (ind_min_f + hi) * layer_df * 1e3],
+                )
+                ax.axhline(f0 * 1e3, color="r", ls="--", lw=1.2,
+                           label=f"f0 = {f0 * 1e3:.4f} mHz")
+                ax.set_title(f"T{temp}  $\\Delta$logL = {ll_val:.3e}", fontsize=11)
+                ax.set_xlabel("WDM time pixel (X)", fontsize=10)
+                if panel % ncols == 0:
+                    ax.set_ylabel("frequency [mHz]", fontsize=10)
+                ax.tick_params(labelsize=9)
+                ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+                cbar = fig.colorbar(im, ax=ax)
+                cbar.ax.tick_params(labelsize=8)
+
+            fig.suptitle(
+                f"GB {stage} proposal — |WDM residual| around the source | "
+                f"band {sel_b} | walker {sel_w} | repeat {move_i} | "
+                f"all temperatures",
+                fontsize=13,
             )
-            ax.legend(loc="upper right", fontsize=10, framealpha=0.9)
-            cbar = fig.colorbar(im, ax=ax)
-            cbar.set_label("|residual| (WDM coefficient)", fontsize=11)
-            cbar.ax.tick_params(labelsize=9)
             _os.makedirs(self.debug_plot_dir, exist_ok=True)
             fname = _os.path.join(
                 self.debug_plot_dir,
-                f"gb_debug_{stage.replace('-', '')}_band{band}_t{temp}_w{walker}"
+                f"gb_debug_{stage.replace('-', '')}_band{sel_b}_w{sel_w}"
                 f"_move{move_i}_{self._dbg_plot_counter:04d}.png",
             )
-            # bbox_inches="tight" guarantees the (two-line) title, axis
-            # labels, and colorbar label are all inside the saved figure.
+            # bbox_inches="tight" guarantees the suptitle, axis labels, and
+            # colorbar labels are all inside the saved figure.
             fig.savefig(fname, dpi=130, bbox_inches="tight")
             plt.close(fig)
             self._dbg_plot_counter += 1
@@ -1030,6 +1075,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ll_change_log = cp.zeros((self.ntemps, self.nwalkers, self.num_bands))
         prop_counts = cp.zeros((2, self.ntemps, self.nwalkers, self.num_bands), dtype=int)
         acc_counts = cp.zeros_like(prop_counts)
+
+        # One debug figure per STAGE per run_proposal call (i.e. per sampler
+        # step): _debug_plot_band consumes this set.
+        self._dbg_plotted_stages = set()
 
         units = self.band_units if self.num_bands > 1 else 1
         start_unit = model.random.randint(units)

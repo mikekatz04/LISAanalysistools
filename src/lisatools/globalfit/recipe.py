@@ -1342,6 +1342,13 @@ def build_gb_moves(
         # GB_DEBUG=1; direct kwarg on the move class (no GBSettings field).
         debug=bool(int(os.environ.get("GB_DEBUG", "0"))),
         debug_plot_dir=os.environ.get("GB_DEBUG_DIR", "./gf_output/gb_debug/"),
+        # Plot ONLY this (walker, band) cell (all temperatures, one figure
+        # per plotted step). Band default None -> central band at plot time;
+        # gb_no_foreground setdefaults these to walker 0 / the central GB
+        # band.
+        debug_plot_walker=int(os.environ.get("GB_DEBUG_PLOT_WALKER", "0")),
+        debug_plot_band=(int(os.environ["GB_DEBUG_PLOT_BAND"])
+                         if os.environ.get("GB_DEBUG_PLOT_BAND") else None),
         **{
             k: v
             for k, v in gb_info.group_proposal_kwargs.items()

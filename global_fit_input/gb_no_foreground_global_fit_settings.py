@@ -255,8 +255,8 @@ NTEMPS = int(os.environ.get("NTEMPS", 2))
 WINDOW_TUKEY_ALPHA = float(os.environ.get("WINDOW_TUKEY_ALPHA", "0.05"))
 
 # Output
-FILE_STORE_DIR = "./gf_output_test_2/"
-BASE_FILE_NAME = "gb_no_fg_test_2"
+FILE_STORE_DIR = str(os.environ.get("FILE_STORE_DIR", "./gf_output_gb_no_fg/"))
+BASE_FILE_NAME = str(os.environ.get("BASE_FILE_NAME", "gb_no_fg_test_2"))
 
 
 # ============================================================
@@ -315,6 +315,14 @@ logger.info(
     "GB band: [%.6e, %.6e] Hz (%d WDM layers @ ~%.3f mHz, layer_df=%.4e Hz)",
     GB_MIN_FREQ, GB_MAX_FREQ, GB_N_LAYERS, GB_CENTER_FREQ * 1e3, LAYER_DF,
 )
+
+# Debug-plot cell selection: with GB_DEBUG=1 the GB move saves ONE figure
+# per plotted step for a single (walker, band) cell -- a panel per
+# temperature -- instead of a PNG for every cell the proposal touches.
+# Defaults: walker 0 and the CENTRAL GB band (the samplable layer that
+# contains GB_CENTER_FREQ). Env-overridable like every other knob.
+os.environ.setdefault("GB_DEBUG_PLOT_WALKER", "0")
+os.environ.setdefault("GB_DEBUG_PLOT_BAND", str(GB_N_LAYERS // 2))
 
 # ============================================================
 # *** ACA frequency clipping (memory knob) ***
