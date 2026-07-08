@@ -124,10 +124,16 @@ void response_part(nb::module_ &m) {
     // Bind the constructor
     .def(nb::init<OrbitsWrap *, TDIConfigWrap *>(),
          nb::arg("orbits"), nb::arg("tdi_config"))
-    // Bind member functions
-    .def("get_tdi_delays_wrap", &LISAResponseWrap::get_tdi_delays_wrap, "Preform TDI combinations.")
-    .def("get_response_wrap", &LISAResponseWrap::get_response_wrap, "Get detector projections.")
-    .def("get_response_quintic_wrap", &LISAResponseWrap::get_response_quintic_wrap, "Get detector projections (quintic spline).")
+    // Bind member functions. Pure compute — release the GIL (argument
+    // conversion happens before the guard, so the nb::ndarray args are safe);
+    // otherwise per-GPU threads serialize on these calls, which block in
+    // cudaDeviceSynchronize when run_async=false.
+    .def("get_tdi_delays_wrap", &LISAResponseWrap::get_tdi_delays_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Preform TDI combinations.")
+    .def("get_response_wrap", &LISAResponseWrap::get_response_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Get detector projections.")
+    .def("get_response_quintic_wrap", &LISAResponseWrap::get_response_quintic_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Get detector projections (quintic spline).")
     // You can also expose public data members directly using def_rw
     .def_rw("orbits", &LISAResponseWrap::orbits)
     // .def("get_link_ind", &OrbitsWrap::get_link_ind, "Get link index.")

@@ -14,6 +14,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import inspect
 import logging
+import os
 from typing import TYPE_CHECKING, Tuple
 
 import numpy as np
@@ -50,7 +51,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEBUG_MODE = True
+# Opt-in via LISATOOLS_WAVEFORM_DEBUG=1: full-array NaN/Inf scans in
+# _apply_response (4 passes over the (batch, N) strain/time arrays plus device
+# syncs on every call). The cheap orbit-range crash guard always runs.
+DEBUG_MODE = os.environ.get("LISATOOLS_WAVEFORM_DEBUG", "0") not in ("0", "", "false", "False")
 
 class AETTDIWaveform(ABC):
     """Base class for an AET TDI Waveform."""
@@ -244,7 +248,11 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     def stft_t_arr(self):
         """Time array for the STFT segments, if applicable."""
         if self.nperseg:
-            return self.domain_settings.t_arr[:: self.nperseg]
+            # Strided arange directly — bit-identical to
+            # ``domain_settings.t_arr[::nperseg]`` without materializing the
+            # full N-sample time array on every access.
+            ds = self.domain_settings
+            return ds.t0 + ds.xp.arange(0, ds.N, self.nperseg) * ds.dt
         else:
             return None
 
@@ -902,21 +910,31 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         # _data_time_check only guards the upper bound; we add a symmetric
         # check here and log per-source diagnostics so the offending source
         # is identified at the Python level before the kernel ever fires.
-        if DEBUG_MODE:   
+        # The orbit extrema are constant per instance — cache them so the
+        # always-on range check costs only the endpoint reductions of
+        # shifted_t_arr. The full-array NaN/Inf scans are DEBUG_MODE-only.
+        _extrema = getattr(self, "_orbit_t_extrema", None)
+        if _extrema is None:
             try:
-                _orbit_t_min = float(self.response.response_orbits.sc_t_base.min())
-                _orbit_t_max = float(self.response.response_orbits.sc_t_base.max())
-                _ltt_t_min = float(self.response.response_orbits.ltt_t.min())
-                _ltt_t_max = float(self.response.response_orbits.ltt_t.max())
+                _extrema = (
+                    float(self.response.response_orbits.sc_t_base.min()),
+                    float(self.response.response_orbits.sc_t_base.max()),
+                    float(self.response.response_orbits.ltt_t.min()),
+                    float(self.response.response_orbits.ltt_t.max()),
+                )
             except Exception:
-                _orbit_t_min = _orbit_t_max = _ltt_t_min = _ltt_t_max = None
+                _extrema = (None, None, None, None)
+            self._orbit_t_extrema = _extrema
+        _orbit_t_min, _orbit_t_max, _ltt_t_min, _ltt_t_max = _extrema
 
-            _t0_arr = shifted_t_arr[:, 0]
-            _t_last_arr = shifted_t_arr[:, -1]
-            _t0_min = float(_t0_arr.min())
-            _t0_max = float(_t0_arr.max())
-            _t_last_min = float(_t_last_arr.min())
-            _t_last_max = float(_t_last_arr.max())
+        _t0_arr = shifted_t_arr[:, 0]
+        _t_last_arr = shifted_t_arr[:, -1]
+        _t0_min = float(_t0_arr.min())
+        _t0_max = float(_t0_arr.max())
+        _t_last_min = float(_t_last_arr.min())
+        _t_last_max = float(_t_last_arr.max())
+
+        if DEBUG_MODE:
             _has_nan = bool(
                 self.xp.isnan(strain).any() or self.xp.isnan(shifted_t_arr).any()
             )
@@ -936,21 +954,21 @@ class TDPyResponseWaveformBase(TDWaveformBase):
                 merger_time.tolist() if hasattr(merger_time, "tolist") else merger_time,
                 _has_nan, _has_inf,
             )
-            
+
                 raise ValueError(
                     f"_apply_response: NaN/Inf detected before response kernel "
                     f"(nan={_has_nan}, inf={_has_inf}, merger_time={merger_time}, t0=[{_t0_min}, {_t0_max}])."
                 )
 
-            if _orbit_t_min is not None and (
-                _t0_min < _orbit_t_min or _t_last_max > _orbit_t_max
-            ):
-                raise ValueError(
-                    f"_apply_response: requested time window [{_t0_min:.6e}, {_t_last_max:.6e}] "
-                    f"falls outside orbit sc_t range [{_orbit_t_min:.6e}, {_orbit_t_max:.6e}]. "
-                    f"This would cause the response CUDA kernel to read out-of-bounds. "
-                    f"merger_time={merger_time}, t_arr[0]={float(t_arr[:, 0].min()):.6e}."
-                )
+        if _orbit_t_min is not None and (
+            _t0_min < _orbit_t_min or _t_last_max > _orbit_t_max
+        ):
+            raise ValueError(
+                f"_apply_response: requested time window [{_t0_min:.6e}, {_t_last_max:.6e}] "
+                f"falls outside orbit sc_t range [{_orbit_t_min:.6e}, {_orbit_t_max:.6e}]. "
+                f"This would cause the response CUDA kernel to read out-of-bounds. "
+                f"merger_time={merger_time}, t_arr[0]={float(t_arr[:, 0].min()):.6e}."
+            )
 
         # Sub-dt grid alignment: the response builds an internal time array
         #     t_arr = arange(N) * dt + (t0 + t0_shift_to_data)

@@ -564,6 +564,11 @@ class TDSettings(DomainSettingsBase):
         return self.t0 + self.xp.arange(self.N) * self.dt
 
     @property
+    def t_end(self) -> float:
+        """Time of the last sample, ``t_arr[-1]``, without building the array."""
+        return self.t0 + (self.N - 1) * self.dt
+
+    @property
     def basis_shape(self) -> tuple:
         """Total basis shape ``(N,)``."""
         return (self.N,)

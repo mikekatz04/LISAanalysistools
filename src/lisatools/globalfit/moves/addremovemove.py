@@ -197,6 +197,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         the previous batched path semantically but never holds more than a
         single source's waveform in memory.
         """
+        _free_pool()
         import gc
         for i in range(coords.shape[0]):
             sig = self.get_waveform_here(coords[i])
