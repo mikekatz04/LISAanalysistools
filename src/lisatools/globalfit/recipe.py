@@ -1423,6 +1423,23 @@ def build_gb_moves(
         debug_plot_walker=int(os.environ.get("GB_DEBUG_PLOT_WALKER", "0")),
         debug_plot_band=(int(os.environ["GB_DEBUG_PLOT_BAND"])
                          if os.environ.get("GB_DEBUG_PLOT_BAND") else None),
+        # Per-band progressive leaf cap (search mode). Armed only when
+        # GB_LEAF_CAP_START is set (gb_no_foreground sets it under
+        # GB_MODE=search): every band starts capped at that many leaves per
+        # (temp, walker) cell; a band's cap increments -- independently of
+        # other bands -- once it has spent GB_LEAF_CAP_MIN_ITERS iterations
+        # at the current cap AND every cold walker's band residual ll is
+        # within GB_LEAF_CAP_LL_NSIGMA * sqrt(N_dof/2) of the running best
+        # (AND, with GB_LEAF_CAP_OCCUPANCY=1, some cold walker actually
+        # holds cap leaves there). See GBSpecialBase._update_band_leaf_caps.
+        leaf_cap_start=(int(os.environ["GB_LEAF_CAP_START"])
+                        if os.environ.get("GB_LEAF_CAP_START") else None),
+        leaf_cap_min_iters=int(os.environ.get("GB_LEAF_CAP_MIN_ITERS", "50")),
+        leaf_cap_ll_nsigma=float(os.environ.get("GB_LEAF_CAP_LL_NSIGMA", "3.0")),
+        leaf_cap_require_occupancy=bool(
+            int(os.environ.get("GB_LEAF_CAP_OCCUPANCY", "1"))
+        ),
+        leaf_cap_update=True,
         **{
             k: v
             for k, v in gb_info.group_proposal_kwargs.items()
@@ -1450,10 +1467,12 @@ def build_gb_moves(
         is_rj_prop=True,
         run_swaps=False, 
         name="rj_fstat_mcmc_search",
-        phase_maximize=True, 
+        phase_maximize=True,
         ranks_needed=0,
         gpus=[],
-        **gb_move_kwargs
+        # Leaf-cap counters advance once per iteration: the prior RJ move is
+        # the designated updater; the other RJ moves only enforce the gate.
+        **{**gb_move_kwargs, "leaf_cap_update": False}
     )
     gb_search_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -1477,7 +1496,7 @@ def build_gb_moves(
             phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
             ranks_needed=0,
             gpus=[],
-            **gb_move_kwargs
+            **{**gb_move_kwargs, "leaf_cap_update": False}
         )
         gb_search_refit_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -1503,12 +1522,12 @@ def build_gb_moves(
     gb_pe_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
         *gb_move_args, 
         rj_proposal_distribution=None,
-        run_swaps=True, 
+        run_swaps=True,
         name="rj_fstat_mcmc",
-        phase_maximize=False, 
+        phase_maximize=False,
         ranks_needed=0,
         gpus=[],
-        **gb_move_kwargs
+        **{**gb_move_kwargs, "leaf_cap_update": False}
     )
     gb_pe_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -1525,7 +1544,7 @@ def build_gb_moves(
             phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],
             ranks_needed=0,
             gpus=[],
-            **gb_move_kwargs
+            **{**gb_move_kwargs, "leaf_cap_update": False}
         )
         gb_pe_refit_move.accepted = np.zeros((ntemps, nwalkers))
         gb_pe_moves.insert(1, gb_pe_refit_move)  # [prior, refit, fstat]

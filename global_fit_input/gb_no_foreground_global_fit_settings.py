@@ -182,6 +182,37 @@ if GB_DEBUG:
 
 
 # ============================================================
+# *** RUN MODE: parameter estimation vs search ***
+# ============================================================
+# GB_MODE=pe (default): today's behavior -- leaves start AT the true
+# catalogue points (SNR > 3 subset, scattered), no leaf caps.
+#
+# GB_MODE=search: the realistic zero-knowledge configuration. The gb
+# branch starts with ZERO leaves (the engine's default prior-draw state,
+# all inds False) and the per-band progressive leaf cap arms: every band
+# allows at most GB_LEAF_CAP_START (default 1) leaves per (temp, walker)
+# cell -- enforced at every temperature via a -inf prior on over-cap RJ
+# births -- and each band's cap increments INDEPENDENTLY once it has
+# spent GB_LEAF_CAP_MIN_ITERS iterations at the current cap and every
+# cold walker's band residual ll has converged to within
+# GB_LEAF_CAP_LL_NSIGMA * sqrt(N_dof/2) of the running best (plus, by
+# default, an occupancy check: some cold walker must actually hold cap
+# leaves in the band). RJ stays on throughout; the caps only bound it
+# from above. See GBSpecialBase._update_band_leaf_caps for details.
+#
+#   GB_MODE=search GB_DEBUG=1 python scripts/run_global.py \
+#       -sfp global_fit_input/gb_no_foreground_global_fit_settings.py
+#
+GB_MODE = os.environ.get("GB_MODE", "pe").lower()
+if GB_MODE not in ("pe", "search"):
+    raise ValueError(f"GB_MODE must be 'pe' or 'search', got {GB_MODE!r}.")
+if GB_MODE == "search":
+    # Arm the leaf-cap machinery (consumed by build_gb_moves via env);
+    # explicit env overrides still win via setdefault.
+    os.environ.setdefault("GB_LEAF_CAP_START", "1")
+
+
+# ============================================================
 # *** Top-of-file knobs (the "surface" the user touches) ***
 # ============================================================
 # (mirrors full_year_combined_global_fit_settings.py)
@@ -495,27 +526,34 @@ def setup_recipe(
                 exclude_f0_lims=_central_lims,
                 window_hz=4 * LAYER_DF,
             )
-        gb_snr_subset_inds = select_gb_injection_subset_by_snr(
-            curr, acs, gb_info, gb_info.gb_wdm_comp, snr_threshold=3.0,
-            f0_lims=_injection_f0_lims,
-        )
-        # Per-dimension scatter for the true-point start. The stock scalar
-        # default (1e-5) is ~10 orders too wide for the GB ``fdot`` dimension
-        # (~1e-15 scale, prior half-width ~1e-12), so every scattered walker
-        # lands outside the fdot prior. Use the existing per-dim ``spread``
-        # array path, sized to a small fraction of each prior dimension's width
-        # so it auto-scales across the decade-spanning GB parameters (logA,
-        # f0[mHz], fdot, angles) and stays inside the prior even after the
-        # betas widening applied in scatter_around_injection. Widths come from
-        # the prior's own draws (correct sampling-basis order; the prior is
-        # keyed by parameter labels, not dimension indices).
-        _gb_draws = priors["gb"].rvs(size=20000)
-        _gb_draws = _gb_draws.get() if hasattr(_gb_draws, "get") else np.asarray(_gb_draws)
-        _gb_spread = 1e-4 * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
-        setup_state_for_injection(
-            curr, state, source_type="GB", branch_name="gb",
-            subset_inds=gb_snr_subset_inds, priors=priors, spread=_gb_spread,
-        )
+        # GB_MODE=search: NO true-point seeding. The gb branch keeps the
+        # engine's default zero-leaf state (prior-draw coords, all inds
+        # False) and the sampler must FIND the sources through RJ under the
+        # per-band progressive leaf cap (armed at the top of this file).
+        # Neighbor subtraction above still applies -- known out-of-band
+        # signals are removed from the data in either mode.
+        if GB_MODE != "search":
+            gb_snr_subset_inds = select_gb_injection_subset_by_snr(
+                curr, acs, gb_info, gb_info.gb_wdm_comp, snr_threshold=3.0,
+                f0_lims=_injection_f0_lims,
+            )
+            # Per-dimension scatter for the true-point start. The stock scalar
+            # default (1e-5) is ~10 orders too wide for the GB ``fdot`` dimension
+            # (~1e-15 scale, prior half-width ~1e-12), so every scattered walker
+            # lands outside the fdot prior. Use the existing per-dim ``spread``
+            # array path, sized to a small fraction of each prior dimension's width
+            # so it auto-scales across the decade-spanning GB parameters (logA,
+            # f0[mHz], fdot, angles) and stays inside the prior even after the
+            # betas widening applied in scatter_around_injection. Widths come from
+            # the prior's own draws (correct sampling-basis order; the prior is
+            # keyed by parameter labels, not dimension indices).
+            _gb_draws = priors["gb"].rvs(size=20000)
+            _gb_draws = _gb_draws.get() if hasattr(_gb_draws, "get") else np.asarray(_gb_draws)
+            _gb_spread = 1e-4 * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
+            setup_state_for_injection(
+                curr, state, source_type="GB", branch_name="gb",
+                subset_inds=gb_snr_subset_inds, priors=priors, spread=_gb_spread,
+            )
 
     #* ================================= BUILD MOVES =================================
     # No PSD / foreground moves: the PSD is fixed (no ``psd`` branch) and

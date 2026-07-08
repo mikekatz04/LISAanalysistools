@@ -67,7 +67,7 @@ from eryn.utils.utility import groups_from_inds
 from ...diagnostic import inner_product
 from ...sampling.prior import FullGaussianMixtureModel, GBPriorWrap
 from ...utils.utility import get_array_module, get_groups_from_band_structure, searchsorted2d_vec
-from ..state import GFState
+from ..state import GFState, ensure_leaf_cap_fields
 
 __all__ = ["GBSpecialStretchMove"]
 
@@ -460,6 +460,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         stretch_probability=0.5,
         band_units=2,
         jump_factor=0.005,
+        leaf_cap_start=None,
+        leaf_cap_min_iters=50,
+        leaf_cap_ll_nsigma=3.0,
+        leaf_cap_require_occupancy=True,
+        leaf_cap_update=True,
         debug=False,
         debug_plot_dir="./gf_output/gb_debug/",
         debug_plot_walker=0,
@@ -514,6 +519,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         #         raise ValueError(
         #             "Priors need to be eryn.priors.ProbDistContainer object."
         #         )
+
+        # Per-band progressive leaf cap (search mode). ``leaf_cap_start``
+        # arms the machinery: fresh states get ``band_leaf_cap[:] =
+        # leaf_cap_start`` and RJ births into a band already holding
+        # ``cap[b]`` alive leaves are prior-forbidden (curr_logp = -inf) at
+        # EVERY temperature -- the cap is a truncation of the prior on the
+        # per-band leaf count, so it must be temperature-uniform for the
+        # per-band tempering swaps to exchange states of a common support.
+        # Convergence is judged on the COLD chain only (see
+        # ``_update_band_leaf_caps``); ``leaf_cap_update`` marks the single
+        # RJ move per iteration that advances the cap state.
+        self.leaf_cap_start = leaf_cap_start
+        self._leaf_cap_enabled = leaf_cap_start is not None
+        self.leaf_cap_min_iters = int(leaf_cap_min_iters)
+        self.leaf_cap_ll_nsigma = float(leaf_cap_ll_nsigma)
+        self.leaf_cap_require_occupancy = bool(leaf_cap_require_occupancy)
+        self.leaf_cap_update = bool(leaf_cap_update)
+        self._band_leaf_cap = None
 
         self.priors = priors
         self.gb = gb
@@ -1710,6 +1733,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
         curr_logp[(~alive) & out_of_band] = -np.inf
 
+        # Per-band progressive leaf cap (search mode): a birth into a band
+        # already holding ``cap[b]`` alive sources is prior-forbidden --
+        # a truncation of the prior on the per-band leaf count. The cap is
+        # judged on the cold chain (``_update_band_leaf_caps``) but enforced
+        # at EVERY temperature so tempering swaps stay within a common prior
+        # support. Setting -inf here routes the birth through the existing
+        # ``keep`` machinery: it never reaches the likelihood kernel and the
+        # bad-accept guard force-rejects it at beta > 0.
+        if self._band_leaf_cap is not None:
+            num_bands = self.num_bands
+            cap_xp = xp.asarray(self._band_leaf_cap)
+            flat_all = (
+                (band_sorter.temp_inds.astype(xp.int64) * self.nwalkers
+                 + band_sorter.walker_inds) * num_bands
+                + band_sorter.band_inds
+            )
+            cell_counts = xp.bincount(
+                flat_all[band_sorter.inds],
+                minlength=self.ntemps * self.nwalkers * num_bands,
+            )
+            cell_flat = (
+                (picked["temp_inds"].astype(xp.int64) * self.nwalkers
+                 + picked["walker_inds"]) * num_bands
+                + picked["band_inds"]
+            )
+            over_cap = (
+                cell_counts[cell_flat] >= cap_xp[picked["band_inds"]]
+            )
+            curr_logp[(~alive) & over_cap] = -np.inf
+
         delta_ll = cp.full_like(logp, -1e300)
         d_h = cp.zeros_like(logp)
         h_h = cp.zeros_like(logp)
@@ -2331,6 +2384,140 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         new_state.branches["gb"].inds[inds_new] = True
         # new_state.branches["gb"].branch_supplemental[inds_new] = state.branches["gb"].branch_supplemental[inds_old]
 
+    def _band_residual_lls(self, acs):
+        """Per-band cold-walker residual ll ``-1/2 <r|r>`` from the parent ACA.
+
+        Returns a host ``(nwalkers, num_bands)`` array. The parent ACA holds
+        one AC per COLD-chain walker, so this is exactly the per-band null
+        the leaf-cap convergence test needs. Shard-aware: each per-GPU (or
+        per-CPU-split) slab is reduced on its owning device via a per-bin ll
+        followed by a cumulative-sum band reduction (no per-band kernel
+        loop). Also stores ``self._band_dof`` -- the real-dof count per band
+        used to scale the convergence tolerance.
+        """
+        xp = self.xp
+        bs = self._basis_settings
+        be = _to_numpy(self.band_edges)
+        num_bands = self.num_bands
+        norm = 4.0 * float(bs.differential_component)
+        is_wdm = isinstance(bs, WDMSettings)
+        nchannels = int(acs.nchannels)
+        # XYZ runs carry the full cross-channel inverse covariance
+        # (shape_sens == (nc, nc)); AET/AE runs a per-channel diagonal.
+        is_xyz = len(acs.shape_sens) == 2
+
+        if is_wdm:
+            layer_df = float(bs.layer_df)
+            ind_min_f = int(bs.ind_min_f)
+            Nf = int(bs.Nf_active)
+            Nt = int(bs.Nt_active)
+            k0 = np.clip(
+                np.ceil(be[:-1] / layer_df - 1e-9).astype(int) - ind_min_f, 0, Nf
+            )
+            k1 = np.clip(
+                np.floor(be[1:] / layer_df + 1e-9).astype(int) + 1 - ind_min_f,
+                0, Nf,
+            )
+            # real WDM coefficients: 1 dof per (channel, layer, time) pixel
+            dof_per_bin = nchannels * Nt
+        else:
+            df = float(bs.df)
+            start_bin = int(acs.start_freq_ind[0])
+            Nf = int(acs.data_length)
+            k0 = np.clip(np.rint(be[:-1] / df).astype(int) - start_bin, 0, Nf)
+            k1 = np.clip(np.rint(be[1:] / df).astype(int) - start_bin, 0, Nf)
+            # complex FD bins: 2 real dof per (channel, bin)
+            dof_per_bin = 2 * nchannels
+        k1 = np.maximum(k1, k0)
+        self._band_dof = (k1 - k0) * dof_per_bin
+
+        def _shard_band_lls(r, ic):
+            # r: (nw, nc, Nf[, Nt]); ic: (nw, nc[, nc], Nf[, Nt]) -> (nw, Nf)
+            if is_xyz:
+                if is_wdm:
+                    per_bin = xp.einsum("wifk,wijfk,wjfk->wf", r, ic.real, r)
+                else:
+                    per_bin = xp.einsum(
+                        "wif,wijf,wjf->wf", r.conj(), ic, r
+                    ).real
+            else:
+                if is_wdm:
+                    per_bin = xp.einsum("wifk,wifk,wifk->wf", r, ic.real, r)
+                else:
+                    per_bin = ((r.conj() * r).real * ic.real).sum(axis=1)
+            cs = xp.zeros((per_bin.shape[0], Nf + 1))
+            cs[:, 1:] = xp.cumsum(per_bin, axis=1)
+            k0_xp, k1_xp = xp.asarray(k0), xp.asarray(k1)
+            return -0.5 * norm * (cs[:, k1_xp] - cs[:, k0_xp])
+
+        out = np.zeros((int(acs.acs_total_entries), num_bands))
+        data_shaped, psd_shaped = acs.data_shaped, acs.psd_shaped
+        for i, split in enumerate(acs.gpu_splits):
+            if acs.gpus is not None:
+                with xp.cuda.Device(acs.gpus[i]):
+                    out[np.asarray(split)] = _to_numpy(
+                        _shard_band_lls(data_shaped[i], psd_shaped[i])
+                    )
+            else:
+                out[np.asarray(split)] = _to_numpy(
+                    _shard_band_lls(data_shaped[i], psd_shaped[i])
+                )
+        return out
+
+    def _update_band_leaf_caps(self, model, new_state, band_counts) -> None:
+        """Advance the per-band progressive leaf caps (once per iteration).
+
+        Runs at the very end of ``propose`` (after the final
+        ``check_ll_inject`` rebuild, so the parent residual reflects the
+        accepted state). Per band ``b``, the cap increments when ALL of:
+
+        1. ``band_cap_iters[b] >= leaf_cap_min_iters`` at the current cap;
+        2. every cold walker's band residual ll sits within
+           ``leaf_cap_ll_nsigma * sqrt(N_b / 2)`` of the running best
+           (``N_b`` = real dof in the band -- for a whitened residual
+           ``-1/2<r|r>`` fluctuates with sigma ~ sqrt(N_b/2), so this is the
+           "converged up to statistical change" test);
+        3. (optional, ``leaf_cap_require_occupancy``) at least one cold
+           walker actually holds ``cap[b]`` leaves in the band -- an
+           exhausted band with free headroom keeps its cap.
+
+        Bands increment independently; nothing waits on other bands. On
+        increment the iteration counter and running best reset, so the next
+        level must re-converge on its own evidence.
+        """
+        bi = new_state.sub_states["gb"].band_info
+        cap = bi["band_leaf_cap"]
+        iters = bi["band_cap_iters"]
+        best = bi["band_best_ll"]
+
+        lls = self._band_residual_lls(model.analysis_container_arr)
+        best[:] = np.maximum(best, lls.max(axis=0))
+        iters += 1
+
+        tol = self.leaf_cap_ll_nsigma * np.sqrt(self._band_dof / 2.0)
+        converged = (iters >= self.leaf_cap_min_iters) & (
+            (best - lls.min(axis=0)) <= tol
+        )
+        if self.leaf_cap_require_occupancy:
+            cold_counts = _to_numpy(band_counts[0])  # (nwalkers, num_bands)
+            converged &= cold_counts.max(axis=0) >= cap
+        nleaves_max = new_state.branches["gb"].shape[2]
+        converged &= cap < nleaves_max
+
+        if np.any(converged):
+            inc_bands = np.where(converged)[0]
+            cap[converged] += 1
+            iters[converged] = 0
+            best[converged] = -np.inf
+            logger.info(
+                f"{self.name}: leaf cap incremented for bands "
+                f"{inc_bands.tolist()} -> {cap[inc_bands].tolist()}."
+            )
+        logger.info(
+            f"{self.name}: leaf caps min/max = {int(cap.min())}/{int(cap.max())}; "
+            f"bands at min-iters gate: {int((iters < self.leaf_cap_min_iters).sum())}."
+        )
+
     def propose(self, model, state):
         """Use the move to generate a proposal and compute the acceptance
 
@@ -2366,6 +2553,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         self.nwalkers = nwalkers
         self.ntemps = ntemps
+
+        # Arm the per-band progressive leaf cap (search mode). The cap array
+        # lives in ``state.band_info`` (HDF5-persisted); a fresh state
+        # carries the -1 sentinel and is armed to ``leaf_cap_start`` here.
+        # ``self._band_leaf_cap`` is a live numpy reference: the birth gate
+        # in ``_run_rj_step`` reads it and ``_update_band_leaf_caps``
+        # mutates it in place.
+        self._band_leaf_cap = None
+        if self._leaf_cap_enabled and self.is_rj_prop:
+            bi = state.sub_states["gb"].band_info
+            ensure_leaf_cap_fields(bi, self.num_bands)
+            if np.all(bi["band_leaf_cap"] < 0):
+                bi["band_leaf_cap"][:] = int(self.leaf_cap_start)
+                logger.info(
+                    f"{self.name}: armed per-band leaf cap at "
+                    f"{int(self.leaf_cap_start)} for {self.num_bands} bands."
+                )
+            self._band_leaf_cap = bi["band_leaf_cap"]
 
         # Run any move-specific setup.
         self.setup(model, state.branches)
@@ -2621,6 +2826,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         self.mempool.free_all_blocks()
         new_state.log_like[:] = self.check_ll_inject(model, new_band_sorter)
+
+        # Per-band progressive leaf caps advance AFTER the final residual
+        # rebuild so the convergence metric sees the accepted state. Only
+        # the designated updater move (one RJ move per iteration) advances
+        # the counters; every cap-enabled RJ move enforces the gate.
+        if self._band_leaf_cap is not None and self.leaf_cap_update:
+            self._update_band_leaf_caps(model, new_state, band_info["band_counts"])
+
         # if self.is_rj_prop:
         #     pass  # print(self.name, "2nd count check:", new_state.branches["gb"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
 

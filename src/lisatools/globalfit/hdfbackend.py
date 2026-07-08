@@ -607,6 +607,18 @@ class GBHDFBackend(eryn_HDFBackend):
                 compression_opts=self.compression_opts,
             )
 
+            # Per-band progressive leaf-cap state (search mode; see
+            # lisatools.globalfit.state.ensure_leaf_cap_fields).
+            for cap_key in ("band_leaf_cap", "band_cap_iters", "band_best_ll"):
+                band_info.create_dataset(
+                    cap_key,
+                    (0, num_bands),
+                    maxshape=(None, num_bands),
+                    dtype=self.dtype,
+                    compression=self.compression,
+                    compression_opts=self.compression_opts,
+                )
+
     @property
     def num_bands(self):
         """Get num_bands from h5 file."""
@@ -748,6 +760,10 @@ class GBHDFBackend(eryn_HDFBackend):
             # branch-specific
             for name, dat in state.sub_states["gb"].band_info.items():
                 if not isinstance(dat, np.ndarray) or name == "band_edges":
+                    continue
+                if name not in gb_group:
+                    # e.g. the leaf-cap arrays on an HDF file created before
+                    # they existed: skip rather than corrupt the resume.
                     continue
                 gb_group[name][iteration] = dat
 
