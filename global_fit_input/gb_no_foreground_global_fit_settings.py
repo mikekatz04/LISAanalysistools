@@ -146,6 +146,7 @@ from lisatools.globalfit.recipe import (
     build_gb_moves,
     select_gb_injection_subset_by_snr,
     setup_state_for_injection,
+    subtract_gb_neighbors_from_data,
 )
 
 
@@ -477,8 +478,26 @@ def setup_recipe(
     # coords. On a data source without a GB catalogue (e.g. Sangria) this is
     # a no-op and the state falls back to prior draws.
     if gb_info.gb_wdm_comp is not None:
+        # GB_SUBTRACT_NEIGHBORS=1 (NOT the default): focused-central-band
+        # mode. Injected (sampled) leaves are restricted to the CENTRAL GB
+        # band layer, and every catalogue source in the neighboring layers
+        # (window = 4 layers each side) is subtracted from the data as a
+        # KNOWN signal so its spectral spread does not bias the in-band fit.
+        # The two selections are disjoint by construction.
+        _subtract_neighbors = bool(int(os.environ.get("GB_SUBTRACT_NEIGHBORS", "0")))
+        _injection_f0_lims = None
+        if _subtract_neighbors:
+            _central_lims = (_gb_k_center * LAYER_DF,
+                             (_gb_k_center + 1) * LAYER_DF)
+            _injection_f0_lims = _central_lims
+            subtract_gb_neighbors_from_data(
+                curr, acs, gb_info, gb_info.gb_wdm_comp,
+                exclude_f0_lims=_central_lims,
+                window_hz=4 * LAYER_DF,
+            )
         gb_snr_subset_inds = select_gb_injection_subset_by_snr(
-            curr, acs, gb_info, gb_info.gb_wdm_comp, snr_threshold=3.0
+            curr, acs, gb_info, gb_info.gb_wdm_comp, snr_threshold=3.0,
+            f0_lims=_injection_f0_lims,
         )
         # Per-dimension scatter for the true-point start. The stock scalar
         # default (1e-5) is ~10 orders too wide for the GB ``fdot`` dimension

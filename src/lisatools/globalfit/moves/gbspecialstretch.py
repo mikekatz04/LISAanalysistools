@@ -977,10 +977,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         layer_df = float(bs.layer_df)
         ind_min_f = int(bs.ind_min_f)
         Nf_a = arr.shape[1]
-        be = _to_numpy(self.band_edges)
-        k0 = max(int(np.ceil(be[band] / layer_df - 1e-9)) - ind_min_f, 0)
-        k1 = min(int(np.floor(be[band + 1] / layer_df + 1e-9)) + 1 - ind_min_f,
-                 Nf_a)
+        if band is None:
+            # full slab (all active layers) -- matches the kernel get_ll
+            # support up to its per-source layer gating.
+            k0, k1 = 0, Nf_a
+        else:
+            be = _to_numpy(self.band_edges)
+            k0 = max(int(np.ceil(be[band] / layer_df - 1e-9)) - ind_min_f, 0)
+            k1 = min(int(np.floor(be[band + 1] / layer_df + 1e-9)) + 1 - ind_min_f,
+                     Nf_a)
         dc = float(buffer_obj.settings.differential_component)
         nc = buffer_obj.nchannels
         r = arr[:, k0:k1]
@@ -1037,6 +1042,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             lls = {k: self._debug_band_source_only_ll(
                        buffer_obj, s[k], seq["slot"], seq["band"])
                    for k in need}
+
+            # Cross-check: the FULL-SLAB source-only delta-ll of the addback
+            # (ll(after) - ll(before) = <r|h> - 1/2<h|h> analytically) must
+            # match the LAST get_ll value of the repeat block (ll_ref of the
+            # final accepted coordinates) up to the kernel's per-source
+            # layer gating.
+            ll_ref_final = seq.get("ll_ref_final")
+            dll_addback = (
+                self._debug_band_source_only_ll(
+                    buffer_obj, s["after_addback"], seq["slot"], None)
+                - self._debug_band_source_only_ll(
+                    buffer_obj, s["before_addback"], seq["slot"], None)
+            )
+            if ll_ref_final is not None:
+                logger.info(
+                    "[GB_DEBUG %s] addback delta-ll (full slab) = %.6e vs "
+                    "final get_ll = %.6e (diff %.3e)",
+                    self.name, dll_addback, ll_ref_final,
+                    abs(dll_addback - ll_ref_final),
+                )
             figures = [
                 # (tag, template, data, ACTUAL buffer state, f0)
                 ("1_before_removal", T_old, s["after_removal"],
@@ -1100,12 +1125,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         ax.tick_params(labelsize=8)
                         cbar = fig.colorbar(im, ax=ax)
                         cbar.ax.tick_params(labelsize=7)
+                extra = ""
+                if tag.startswith("4_") and ll_ref_final is not None:
+                    extra = (f"  |  addback $\\Delta$ll = {dll_addback:.4e} "
+                             f"vs final get_ll = {ll_ref_final:.4e}")
                 fig.suptitle(
                     f"GB in-model sequence {tag.replace('_', ' ')} — "
                     f"band {seq['band']} | walker {seq['walker']} | "
                     f"T{seq['temp']} | f0 = {f0 * 1e3:.4f} mHz\n"
                     f"band SOURCE-ONLY ll of buffer residual = "
-                    f"{ll_state:.4e}",
+                    f"{ll_state:.4e}{extra}",
                     fontsize=13,
                 )
                 fname = _os.path.join(
@@ -1120,6 +1149,123 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             self.name, fname)
         except Exception as e:
             logger.warning("[GB_DEBUG %s] sequence plots skipped: %r",
+                           self.name, e)
+
+    def _debug_rj_select(self, buffer_obj, picked):
+        """Arm the RJ before/after trace for the chosen (walker, band) cell
+        (coldest temperature present in this pick round), once per step."""
+        if not self.debug or getattr(self, "_dbg_rj_done", True):
+            return None
+        try:
+            sel_w = self.debug_plot_walker
+            sel_b = (self.debug_plot_band if self.debug_plot_band is not None
+                     else (len(self.band_edges) - 1) // 2)
+            w_np = _to_numpy(picked["walker_inds"])
+            b_np = _to_numpy(picked["band_inds"])
+            t_np = _to_numpy(picked["temp_inds"])
+            match = np.where((w_np == sel_w) & (b_np == sel_b))[0]
+            if match.size == 0:
+                return None
+            idx = int(match[np.argmin(t_np[match])])
+            slot = int(_to_numpy(picked["slot_index"])[idx])
+            return dict(
+                idx=idx, slot=slot, temp=int(t_np[idx]),
+                walker=sel_w, band=sel_b,
+                before=self._debug_slab_snapshot(buffer_obj, slot),
+            )
+        except Exception as e:
+            logger.warning("[GB_DEBUG %s] rj select skipped: %r", self.name, e)
+            return None
+
+    def _debug_plot_rj_pair(self, buffer_obj, rj_seq) -> None:
+        """After the RJ step: if the traced cell's buffer changed (an RJ
+        birth/death was ACCEPTED there), save ONE 3x3 figure -- rows =
+        channels, columns = |accepted template| (after - before) /
+        |buffer before RJ| / |buffer after RJ| -- with the band's
+        source-only ll of both states in the title. No figure when the RJ
+        proposal was rejected (buffer unchanged)."""
+        if rj_seq is None or not self.debug:
+            return
+        try:
+            import os as _os
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            after = self._debug_slab_snapshot(buffer_obj, rj_seq["slot"])
+            before = rj_seq["before"]
+            diff = after - before
+            if not np.any(diff):
+                return  # RJ proposal rejected: nothing to show
+            self._dbg_rj_done = True
+
+            bs = self._basis_settings
+            layer_df = float(bs.layer_df)
+            ind_min_f = int(bs.ind_min_f)
+            ll_b = self._debug_band_source_only_ll(
+                buffer_obj, before, rj_seq["slot"], rj_seq["band"])
+            ll_a = self._debug_band_source_only_ll(
+                buffer_obj, after, rj_seq["slot"], rj_seq["band"])
+
+            # Center the view on the accepted template's peak layer.
+            prof = np.abs(diff).sum(axis=(0, 2))
+            local = int(np.argmax(prof))
+            lo = max(local - 2, 0)
+            hi = min(local + 3, diff.shape[1])
+            ylo = (ind_min_f + lo - 0.5) * layer_df * 1e3
+            yhi = (ind_min_f + hi - 0.5) * layer_df * 1e3
+
+            nc = diff.shape[0]
+            ch_names = ["X", "Y", "Z"][:nc]
+            vmax_row = [max(float(np.abs(a[row, lo:hi]).max())
+                            for a in (diff, before, after))
+                        for row in range(nc)]
+            fig, axes = plt.subplots(
+                nc, 3, figsize=(13.5, 3.2 * nc), squeeze=False,
+                sharex=True, sharey=True,
+            )
+            for row in range(nc):
+                for col, (name, arr) in enumerate(
+                        [("accepted template", diff),
+                         ("buffer before RJ", before),
+                         ("buffer after RJ", after)]):
+                    ax = axes[row][col]
+                    im = ax.imshow(
+                        np.abs(arr[row, lo:hi]), aspect="auto", origin="lower",
+                        extent=[0, arr.shape[2], ylo, yhi],
+                        vmin=0.0, vmax=vmax_row[row],
+                    )
+                    if row == 0:
+                        ax.set_title(f"|{name}|", fontsize=11)
+                    if col == 0:
+                        ax.set_ylabel(f"{ch_names[row]}\nfrequency [mHz]",
+                                      fontsize=10)
+                    if row == nc - 1:
+                        ax.set_xlabel("WDM time pixel", fontsize=10)
+                    ax.tick_params(labelsize=8)
+                    cbar = fig.colorbar(im, ax=ax)
+                    cbar.ax.tick_params(labelsize=7)
+            fig.suptitle(
+                f"GB rj ACCEPTED — band {rj_seq['band']} | "
+                f"walker {rj_seq['walker']} | T{rj_seq['temp']}\n"
+                f"band SOURCE-ONLY ll: before = {ll_b:.4e}, "
+                f"after = {ll_a:.4e} (Δ = {ll_a - ll_b:+.4e})",
+                fontsize=13,
+            )
+            _os.makedirs(self.debug_plot_dir, exist_ok=True)
+            fname = _os.path.join(
+                self.debug_plot_dir,
+                f"gb_debug_seq0_rj_accepted_band{rj_seq['band']}"
+                f"_w{rj_seq['walker']}_t{rj_seq['temp']}"
+                f"_{self._dbg_plot_counter:04d}.png",
+            )
+            fig.savefig(fname, dpi=120, bbox_inches="tight")
+            plt.close(fig)
+            self._dbg_plot_counter += 1
+            logger.info("[GB_DEBUG %s] saved RJ before/after plot -> %s",
+                        self.name, fname)
+        except Exception as e:
+            logger.warning("[GB_DEBUG %s] rj pair plot skipped: %r",
                            self.name, e)
 
     def _debug_log_band_null(self, buffer_obj) -> None:
@@ -1352,6 +1498,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._dbg_plotted_stages = set()
         self._dbg_null_logged = False
         self._dbg_seq_done = False
+        self._dbg_rj_done = False
 
         units = self.band_units if self.num_bands > 1 else 1
         start_unit = model.random.randint(units)
@@ -1440,10 +1587,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 break
 
             if self.is_rj_prop:
+                # RJ before/after trace of the chosen cell: snapshots
+                # bracket the RJ step; figures save only when the cell's RJ
+                # proposal was ACCEPTED (buffer changed). Chronologically
+                # BEFORE the in-model sequence figures.
+                rj_seq = self._debug_rj_select(buffer_obj, picked)
                 self._run_rj_step(
                     model, band_sorter, buffer_obj, band_temps, picked,
                     ll_change_log, prop_counts, acc_counts, round_i, scheduler,
                 )
+                self._debug_plot_rj_pair(buffer_obj, rj_seq)
 
             self._run_in_model_repeats(
                 model, band_sorter, buffer_obj, band_temps, picked,
@@ -1896,6 +2049,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if seq is not None:
             seq["snaps"]["before_addback"] = self._debug_slab_snapshot(
                 buffer_obj, seq["slot"])
+            # Final get_ll value for the traced source (post-repeats), for
+            # the addback delta-ll cross-check in the sequence figures.
+            seq["ll_ref_final"] = float(_to_numpy(ll_ref)[seq["idx"]])
         buffer_obj.add_sources_to_band_buffer(curr, slots, N_vals)
         if seq is not None:
             seq["snaps"]["after_addback"] = self._debug_slab_snapshot(

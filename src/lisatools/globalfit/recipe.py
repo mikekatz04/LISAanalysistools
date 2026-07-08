@@ -683,6 +683,7 @@ def select_gb_injection_subset_by_snr(
     snr_threshold: float = 3.0,
     source_type: str = "GB",
     branch_name: str = "gb",
+    f0_lims: typing.Optional[typing.Sequence[float]] = None,
 ) -> np.ndarray:
     """Select in-band GB catalogue sources by optimal SNR for true-point start.
 
@@ -723,7 +724,9 @@ def select_gb_injection_subset_by_snr(
 
     # In-band on f0 (sampling basis stores f0 in mHz at index 1).
     f0_hz = np.asarray(sampling[:, 1], dtype=float) * 1e-3
-    f0_lo, f0_hi = float(gb_info.f0_lims[0]), float(gb_info.f0_lims[1])
+    if f0_lims is None:
+        f0_lims = gb_info.f0_lims
+    f0_lo, f0_hi = float(f0_lims[0]), float(f0_lims[1])
     in_band = (f0_hz >= f0_lo) & (f0_hz <= f0_hi)
     n_in = int(in_band.sum())
     if n_in == 0:
@@ -844,6 +847,77 @@ def select_gb_injection_subset_by_snr(
         f"{subset_inds.size} true-point leaves."
     )
     return subset_inds
+
+
+def subtract_gb_neighbors_from_data(
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    gb_info,
+    gb_wdm_comp,
+    *,
+    exclude_f0_lims: typing.Sequence[float],
+    window_hz: float,
+    source_type: str = "GB",
+    branch_name: str = "gb",
+) -> int:
+    """Subtract KNOWN neighbor-band GB templates from every walker's data.
+
+    For focused single-band runs: catalogue sources whose ``f0`` falls
+    OUTSIDE ``exclude_f0_lims`` (the sampled band) but within ``window_hz``
+    of it are treated as known signals and subtracted from the residual of
+    every cold-chain walker (``fill_global_wdm`` with ``factors = -1``), so
+    their frequency spread does not bias the in-band fit. Returns the number
+    of subtracted sources.
+
+    Pair with ``select_gb_injection_subset_by_snr(..., f0_lims=
+    exclude_f0_lims)`` so injected leaves and subtracted neighbors are
+    disjoint (a source must never be modeled AND pre-subtracted).
+    """
+    catalogue = getattr(curr.general_info, "catalogue", {}) or {}
+    catalogue = catalogue.get(source_type, {})
+    if not catalogue:
+        logger.warning(
+            f"No '{source_type}' catalogue found; neighbor subtraction skipped."
+        )
+        return 0
+
+    keys = sorted(catalogue.keys())
+    conversion_func = globals().get(f"{branch_name}_catalogue_to_sampling_basis")
+    trim_duration = curr.general_info.data_t0 - MOJITO_REFERENCE_TIME
+    sampling = np.array(
+        [conversion_func(catalogue[k], trim_duration=trim_duration) for k in keys]
+    )
+    if sampling.ndim == 3:
+        sampling = sampling.reshape(-1, sampling.shape[-1])
+
+    f0_hz = np.asarray(sampling[:, 1], dtype=float) * 1e-3
+    lo, hi = float(exclude_f0_lims[0]), float(exclude_f0_lims[1])
+    mask = (((f0_hz >= lo - window_hz) & (f0_hz < lo))
+            | ((f0_hz > hi) & (f0_hz <= hi + window_hz)))
+    n_sub = int(mask.sum())
+    if n_sub == 0:
+        logger.info("Neighbor subtraction: no catalogue sources in the "
+                    f"window around [{lo:.6e}, {hi:.6e}] Hz.")
+        return 0
+
+    xp = gb_wdm_comp.xp
+    params_phys = gb_info.transform.both_transforms(
+        cp.asarray(sampling[mask]), xp=cp)
+    nwalkers = int(curr.general_info.nwalkers)
+    params_tiled = xp.tile(xp.asarray(params_phys), (nwalkers, 1))
+    data_index = xp.repeat(
+        xp.arange(nwalkers, dtype=xp.int32), n_sub).astype(xp.int32)
+    factors = -xp.ones(params_tiled.shape[0], dtype=xp.float64)
+    gb_wdm_comp.fill_global_wdm(
+        params_tiled, acs.gather_linear_data_arr(),
+        data_index=data_index, factors=factors,
+    )
+    logger.info(
+        "Neighbor subtraction: subtracted %d known catalogue sources "
+        "(window %.3e Hz around [%.6e, %.6e] Hz) from %d walkers.",
+        n_sub, window_hz, lo, hi, nwalkers,
+    )
+    return n_sub
 
 
 def subtract_initial_signal(
