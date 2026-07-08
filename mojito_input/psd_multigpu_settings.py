@@ -62,7 +62,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     Tmax: float = 1.0e6
-    permute_every: int = 20
+    permute_every: int = 200
 
     psd_info = curr.source_info["psd"]
 
@@ -175,17 +175,17 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     source_ids = [18, 5, 16, 7, 2, 12]
 
-    Tobs = 9.0 * YRSID_SI / 12.0
+    Tobs = 7.0 * 24 * 3600.0  # seconds
     dt = 5.0
     start_freq = 1e-4
-    end_freq = 2.9e-2
+    end_freq = 1e-1
 
     head_dir = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "test_merge_psd"
+    base_file_name = "test_psd_processing7"
     file_store_dir = head_dir
 
-    gpus = [0]
+    gpus = [1]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -219,7 +219,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
-        store_individual_timeseries=False,
+        store_individual_timeseries=True,
         orbits_kwargs=dict(force_backend=backend, frame="icrs"),  # icrs
     )
 
@@ -227,18 +227,18 @@ def get_general_erebor_settings() -> GeneralSetup:
         "target_fs": 1 / dt,  # Hz — target sampling rate (None = no downsampling).
         "window": (
             "kaiser",
-            31.0,
+            5.0,
         ),  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
     }
 
     highpass_kwargs = {
-        "cutoff": 1e-5,  # Hz — highpass cutoff frequency
+        "cutoff": 5e-6,  # Hz — highpass cutoff frequency
         "order": 2,  # Butterworth filter order
         "zero_phase": True,
     }
 
     lowpass_kwargs = {
-        "cutoff": 1e-1,  # Hz — lowpass cutoff frequency
+        "cutoff": 0.101,  # Hz — lowpass cutoff frequency
         "order": 2,  # Butterworth filter order
         "zero_phase": True,
     }

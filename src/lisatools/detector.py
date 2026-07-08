@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from copy import deepcopy
+from copy import copy as shallow_copy, deepcopy
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
@@ -72,6 +72,36 @@ def icrs_to_ecliptic(positions_icrs: np.ndarray) -> np.ndarray:
 
     return positions_ecliptic
 
+
+def copy_orbits(orbits: "Orbits") -> "Orbits":
+    """Copy ``orbits`` for a response / kernel consumer, sharing large arrays.
+
+    Response and TDI-on-the-fly consumers keep a *private* :class:`Orbits`
+    instance so that a per-consumer :meth:`Orbits.configure` cannot disturb the
+    caller's object. Historically that private instance was produced with
+    :func:`copy.deepcopy`, which also duplicates the post-``configure`` CuPy
+    device arrays (the geometry ``_x``/``_v``/``_n`` and the multi-GB ``ltt``
+    inside ``pycppdetector_args``) — several GB per consumer on the GPU.
+
+    Those arrays are **immutable once configured**:
+
+    * :meth:`Orbits.configure` *rebinds* attributes (``self.x = xp.asarray(...)``n)
+      rather than mutating in place, so reconfiguring one copy never touches the
+      arrays another copy still references.
+    * No code writes ``_x``/``_v``/``_n``/``_sc_t`` or the ``pycppdetector_args``
+      buffers in place.
+    * The C++ ``Orbits`` stores those device pointers and only *reads* them
+      (``interpolate``); it neither writes nor frees them (CuPy owns the memory).
+      The C++ ``OrbitsWrap`` copy-constructor already shares the pointers.
+
+    So for an already-configured orbit a **shallow** copy is sufficient and
+    correct: the returned object is a distinct :class:`Orbits` (safe to
+    reconfigure independently) that shares the big read-only arrays by reference
+    instead of duplicating them on the device. An unconfigured orbit is still
+    deep-copied, so the consumer's later ``configure`` builds fresh arrays
+    without touching the source's base data.
+    """
+    return shallow_copy(orbits) if orbits.configured else deepcopy(orbits)
 
 def ecliptic_to_icrs(positions_ecliptic: np.ndarray) -> np.ndarray:
     """

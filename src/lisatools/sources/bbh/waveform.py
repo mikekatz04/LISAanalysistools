@@ -14,6 +14,7 @@ from lisatools.response.directresponse import ResponseWrapper
 
 from ...domains import DomainSettingsBase
 from ...utils.constants import *
+from ...utils.typing import NDArrayLike
 from ...jax.jaxbase import JaxBase
 from ..waveformbase import SNRWaveform, TDPyResponseWaveformBase, TDTDIOnFlyWaveformBase
 
@@ -192,12 +193,12 @@ class PhenomTHMWaveformBase(JaxBase):
     
     @staticmethod
     def trim_and_shift_times(
-        times: np.ndarray | cp.ndarray,
-        mask: np.ndarray | cp.ndarray,
+        times: NDArrayLike,
+        mask: NDArrayLike,
         *,
         xp: ArrayModule,
         dt: float,
-    ) -> np.ndarray | cp.ndarray:
+    ) -> NDArrayLike:
         """
         Shift and trim the time arrays for each source according to its mask, so that the resulting time arrays have the same shape (Nbatch, max_valid_times). the initial time points can be different across sources.
 
@@ -251,9 +252,9 @@ class PhenomTHMWaveformBase(JaxBase):
         return 0.5 * (1.0 - xp.cos(xp.pi * x))
 
     def get_reference_quantities(self,
-                                merger_time: float | np.ndarray | cp.ndarray, 
-                                start_freq: float | np.ndarray | cp.ndarray = None,
-                                ref_freq: float | np.ndarray | cp.ndarray = None
+                                merger_time: float | NDArrayLike, 
+                                start_freq: float | NDArrayLike = None,
+                                ref_freq: float | NDArrayLike = None
                                 ) -> dict:
         """
         Get the reference quantities for the waveform generation, depending on the settings of the class.
@@ -401,19 +402,19 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
 
     def wave_gen_batch(
         self,
-        m1: np.ndarray | cp.ndarray,
-        m2: np.ndarray | cp.ndarray,
-        s1z: np.ndarray | cp.ndarray,
-        s2z: np.ndarray | cp.ndarray,
-        distance: np.ndarray | cp.ndarray,
-        phi_ref: np.ndarray | cp.ndarray,
-        inclination: np.ndarray | cp.ndarray,
-        psi: np.ndarray | cp.ndarray,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
-        merger_time: np.ndarray | cp.ndarray = None,
-        ref_freq: float | np.ndarray | cp.ndarray = None,
-        start_freq: float | np.ndarray | cp.ndarray = None,
+        m1: NDArrayLike,
+        m2: NDArrayLike,
+        s1z: NDArrayLike,
+        s2z: NDArrayLike,
+        distance: NDArrayLike,
+        phi_ref: NDArrayLike,
+        inclination: NDArrayLike,
+        psi: NDArrayLike,
+        ra: NDArrayLike = None,
+        dec: NDArrayLike = None,
+        merger_time: NDArrayLike = None,
+        ref_freq: float | NDArrayLike = None,
+        start_freq: float | NDArrayLike = None,
         synchronize: bool = False,
         **kwargs,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -534,22 +535,22 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         
     def get_amp_phase(
         self,
-        m1: np.ndarray | cp.ndarray,
-        m2: np.ndarray | cp.ndarray,
-        s1z: np.ndarray | cp.ndarray,
-        s2z: np.ndarray | cp.ndarray,
-        distance: np.ndarray | cp.ndarray,
-        phi_ref: np.ndarray | cp.ndarray,
-        inclination: np.ndarray | cp.ndarray,
-        psi: np.ndarray | cp.ndarray,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
-        merger_time: np.ndarray | cp.ndarray = None,
-        ref_freq: np.ndarray | cp.ndarray = None,
-        start_freq: np.ndarray | cp.ndarray = None,
+        m1: NDArrayLike,
+        m2: NDArrayLike,
+        s1z: NDArrayLike,
+        s2z: NDArrayLike,
+        distance: NDArrayLike,
+        phi_ref: NDArrayLike,
+        inclination: NDArrayLike,
+        psi: NDArrayLike,
+        ra: NDArrayLike = None,
+        dec: NDArrayLike = None,
+        merger_time: NDArrayLike = None,
+        ref_freq: NDArrayLike = None,
+        start_freq: NDArrayLike = None,
         synchronize: bool = False,
         **kwargs,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
         """
         Get the waveform modes' amplitude and phase, already including the spherical harmonic contributions.
 
@@ -607,8 +608,8 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         return times_out, amplitude[..., -num_keep:] * ramp, phase[..., -num_keep:] * ramp # should we also apply the ramp to the phase? 
 
     def process_amp_phase(
-        self, amp: np.ndarray | cp.ndarray, phase: np.ndarray | cp.ndarray
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        self, amp: NDArrayLike, phase: NDArrayLike
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """
         Process the waveform amplitude and phase to align to the tdi on fly conventions.
         For this specific waveform, we need :math:`A \\to A/2` and :math:`\\phi \\to \\pi-\\phi`.

@@ -54,7 +54,26 @@ class PERecipeStep(BaseRecipeStep):
     def stopping_function(self, *args, **kwargs):
         """Never stop on its own — relies on outer stopping logic."""
         return False
+    
+class IterationCountRecipeStep(BaseRecipeStep):
+    """Recipe step that runs for N iterations before moving to the next step."""
 
+    def __init__(self, moves: list, weights: typing.Optional[list] = None, num_iters: int = 100):
+        super().__init__(moves, weights)
+        self.num_iters = num_iters
+
+    def setup_run(self, iteration, last_sample, sampler):
+        super().setup_run(iteration, last_sample, sampler)
+
+        self.start_iteration = iteration
+
+    def stopping_function(self, iteration, last_sample, sampler):
+        """Stop after num_iters iterations."""
+        stop = (iteration - self.start_iteration) >= self.num_iters
+        if stop:
+            logger.info(f"IterationCountRecipeStep stopping after {self.num_iters} iterations.")
+        
+        return stop
 
 class RJRecipeStep(BaseRecipeStep):
     """Reversible-jump recipe step that stops once GB leaf count plateaus.
@@ -265,6 +284,7 @@ def scatter_around_injection(
                 while bad.any():
                     if tries >= max_resample_tries:
                         n_bad = int(bad.sum())
+                        #breakpoint()
                         raise RuntimeError(
                             f"scatter_around_injection: leaf={leaf} temp={t}: "
                             f"{n_bad}/{nwalkers} walkers still outside prior support "
@@ -399,6 +419,42 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
 
     return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_icrs, alpha, sin_delta]).T
 
+def emri_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
+    """Convert a single Mojito EMRI catalogue entry to EMRI sampling basis.
+
+    The sampling basis is:
+    ``["logm1", "m2", "a", "p0", "e0", "dist", "cosqK", "phiK", "Phi_phi0", "Phi_r0", "alpha", "sin_delta",]``
+
+    Parameters
+    ----------
+    catalogue_entry : dict
+        Dictionary of catalogue parameters for one EMRI source, as
+        stored by ``L1DataLoader.catalogue['EMRI'][source_id]``.
+
+    Returns
+    -------
+    np.ndarray
+        Parameter vector of shape ``(12,)`` in the EMRI sampling basis
+        (ICRS for sky parameters).
+    """
+    m1 = float(catalogue_entry['PrimaryMassSSBFrame'])
+    m2 = float(catalogue_entry['SecondaryMassSSBFrame'])
+    a = float(catalogue_entry['PrimarySpinParameter'])
+    p0 = float(catalogue_entry['SemiLatusRectum'])
+    e0 = float(catalogue_entry['Eccentricity'])
+    xI0= float(np.cos(catalogue_entry['InclinationAngle']))
+    dist = float(catalogue_entry['LuminosityDistance'] * 1e-3) # convert to Gpc
+    ra = float(catalogue_entry['RightAscension']) % (2 * np.pi)
+    dec = float(catalogue_entry['Declination'])
+
+    qK = float(catalogue_entry['PolarAnglePrimarySpin'])
+    phiK = float(catalogue_entry['AzimuthalAnglePrimarySpin']) % (2 * np.pi)
+
+    Phi_phi0 = float(catalogue_entry['AzimuthalPhase']) % (2 * np.pi)
+    Phi_r0 = float(catalogue_entry['RadialPhase']) % (2 * np.pi)
+
+    return np.array([np.log(m1), m2, a * xI0, p0, e0, dist, np.cos(qK), phiK, Phi_phi0, Phi_r0, ra, np.sin(dec)])
+
 
 def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None, priors: ProbDistContainer | None = None):
     """Initialize 'branch_name' walkers from catalogue injection parameters"""
@@ -472,19 +528,22 @@ def subtract_initial_signal(
             if inds[0, leaf]:
                 assert np.all(inds[:, leaf])
                 inj_coords = state.branches_coords[source_name][0, :, leaf]
-                inj_coords_in = xp.asarray(source_info.transform.both_transforms(inj_coords))
+                inj_coords_in = np.asarray(source_info.transform.both_transforms(inj_coords))
 
                 # logger.debug(f"CUDA device here: {cp.cuda.runtime.getDevice()}")  # Debugging line to check current CUDA device
 
                 # C-order columns are non-contiguous (stride = ndim*8), so ascontiguousarray
                 # is forced to allocate a fresh, pool-aligned buffer for each parameter —
                 # avoiding the misalignment that arises with F-order when nwalkers is odd.
-                signals_in = wave_gen(*[xp.ascontiguousarray(col) for col in inj_coords_in.T], **source_info.waveform_kwargs)
-                for w in range(len(signals_in)):
-                    ll_here = acs.acs[w].template_likelihood(template=signals_in[w], include_psd_info=False)
+                # signals_in = wave_gen(*[xp.ascontiguousarray(col) for col in inj_coords_in.T], **source_info.waveform_kwargs)
+                for w, coords_here in enumerate(inj_coords_in):
+                    signals_in = wave_gen(*coords_here, **source_info.waveform_kwargs)
+                    ll_here = acs.acs[w].template_likelihood(template=signals_in, include_psd_info=False)
                     logger.debug(f"Initial log-likelihood contribution from walker {w}, leaf {leaf}: {ll_here}")
-                acs.add_signal_to_residual(signals_in)
+                    acs.add_signal_to_residual(signals_in, data_index=np.array([w]))
                 counter += 1
+
+                acs.free_gpu_memory()
                 
                 # if acs.gpus is not None:
                 #     acs.synchronize()  # Ensure GPU computations are complete before logging

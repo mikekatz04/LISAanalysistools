@@ -10,16 +10,12 @@ import h5py
 
 from scipy.interpolate import CubicSpline
 
-from ..detector import EqualArmlengthOrbits, Orbits
-from ..utils.constants import C_SI
+from ..detector import EqualArmlengthOrbits, Orbits, copy_orbits
+from ..utils.constants import C_SI, YRSID_SI
 from ..utils.utility import AET
 
 from .parallelbase import FastLISAResponseParallelModule
 from .tdiconfig import TDIConfig
-
-# TODO: need to update constants setup
-YRSID_SI = 31558149.763545603
-
 
 def get_factorial(n):
     fact = 1
@@ -351,7 +347,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
 
         assert isinstance(orbits, Orbits)
 
-        self._response_orbits = deepcopy(orbits)
+        self._response_orbits = copy_orbits(orbits)
 
         if not self._response_orbits.configured:
             self._response_orbits.configure(linear_interp_setup=True)
@@ -371,7 +367,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         assert isinstance(orbits, Orbits)
         assert orbits.backend.name.split("_")[-1] == self.backend.name.split("_")[-1]
 
-        self._tdi_orbits = deepcopy(orbits)
+        self._tdi_orbits = copy_orbits(orbits)
 
         if not self._tdi_orbits.configured:
             self._tdi_orbits.configure(linear_interp_setup=True)

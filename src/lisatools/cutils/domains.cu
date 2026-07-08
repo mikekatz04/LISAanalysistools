@@ -125,37 +125,33 @@ static CUDA_DEVICE double block_reduce_double(double* array) {
 
 /**
  * Convert a physical time t [s] to its zero-based grid index.
- * Returns -1 on GPU if out of bounds; throws on CPU.
+ *
+ * Rounds to the nearest grid step rather than truncating: the template and data
+ * grids share the same dt and are bin-aligned by construction, so (t - t0)/dt is
+ * an integer up to floating-point noise.  Truncation maps a value that is
+ * (integer - 1 ULP) to integer-1; round-to-nearest recovers the intended index.
+ * The result may fall outside [0, num_times); the STFT likelihood kernels skip
+ * out-of-grid pixels with a bounds guard (the CUDA kernel cannot throw).
  */
 CUDA_DEVICE
 int STFTDomain::get_time_index(double t) {
-  if (t < t0 || t > t0 + num_times * dt) {
-#ifdef __CUDACC__
-// On GPU we cannot throw; the caller should verify the template
-// sub-grid lies within the domain grid before launching.
-#else
-    throw std::invalid_argument("Time t is out of bounds of the STFT domain.");
-#endif
-    return -1;
-  }
-  return (int)((t - t0) / dt);
+  return (int)llround((t - t0) / dt);
 }
 
 /**
  * Convert a physical frequency f [Hz] to its zero-based grid index.
- * Returns -1 on GPU if out of bounds; throws on CPU.
+ *
+ * Rounds to the nearest grid step (see get_time_index).  A template start
+ * frequency at the band edge can land ~1 ULP below f_min because it is computed
+ * on a different float path than f_min = ind_min*df; truncation plus a strict
+ * ``f < f_min`` test would then return an out-of-grid -1 (which the kernel used
+ * unchecked -> negative flat offset -> CUDA_ERROR_ILLEGAL_ADDRESS).
+ * Round-to-nearest maps it to the intended bin; the kernel bounds guard skips
+ * genuinely out-of-grid indices.
  */
 CUDA_DEVICE
 int STFTDomain::get_freq_index(double f) {
-  if (f < f_min || f > f_max) {
-#ifdef __CUDACC__
-#else
-    throw std::invalid_argument(
-        "Frequency f is out of bounds of the STFT domain.");
-#endif
-    return -1;
-  }
-  return (int)((f - f_min) / df);
+  return (int)llround((f - f_min) / df);
 }
 
 /**
@@ -1014,6 +1010,21 @@ void compute_likelihood_contributions_kernel(
       int f_local = idx % num_freqs_template;
       int t_idx = start_t_idx + t_local;
       int f_idx = start_f_idx + f_local;
+
+      // Bounds guard: skip template pixels placed outside the data grid.  Two
+      // ways this happens: (1) the waveform's STFT window count
+      // ceil(N/nperseg) = NT+1 exceeds the data grid num_times = NT (the extra
+      // trailing row is safe-masked to zero), and (2) a start freq/time at the
+      // band/window edge (get_freq_index / get_time_index round to the nearest
+      // bin).  get_data_index / get_noise_index do no bounds checking and the
+      // CUDA kernel cannot throw, so an out-of-grid t_idx/f_idx reads past (or
+      // before) the data / invC buffers -> CUDA_ERROR_ILLEGAL_ADDRESS.
+      // Out-of-grid pixels have no data and contribute zero to the band-limited
+      // inner product, so skipping them is correct.
+      if (t_idx < 0 || t_idx >= domain.num_times ||
+          f_idx < 0 || f_idx >= domain.num_freqs) {
+        continue;
+      }
 
       cmplx h_vals[3];
       for (int ch = 0; ch < num_ch; ch++) {

@@ -169,7 +169,7 @@ class BaseRecipeStep(RecipeStep):
         weights: List of weights matching ``moves``.
     """
 
-    def __init__(self, *args, moves=None, weights=None, **kwargs):
+    def __init__(self, moves=None, weights=None):
         super().__init__(moves=moves, weights=weights)
 
     def setup_run(self, iteration, last_sample, sampler):

@@ -23,8 +23,13 @@ def _free_pool() -> None:
     if _xp_is_cupy:
         xp.get_default_memory_pool().free_all_blocks()
 
+try:
+    from eryn.moves import FlowMove
+    flow_move_available = True
+except ImportError:
+    flow_move_available = False
 
-from eryn.moves import Move, StretchMove, TemperatureControl
+from eryn.moves import Move, StretchMove, TemperatureControl, RedBlueMove
 from eryn.prior import ProbDistContainer
 from eryn.utils.transform import TransformContainer
 
@@ -143,6 +148,23 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             for tmp_move in self.moves:
                 if tmp_move.periodic is None:
                     tmp_move.periodic = periodic
+    
+    @property
+    def inner_moves_acceptance_fractions(self):
+        """
+        Return the acceptance fractions for each inner move at each step.
+        """
+        if hasattr(self, "_inner_moves_acceptance_fractions"):
+            return self._inner_moves_acceptance_fractions
+        
+        return None
+    
+    @inner_moves_acceptance_fractions.setter
+    def inner_moves_acceptance_fractions(self, acceptance_fractions):
+        """
+        Set the acceptance fractions for each inner move at each step.
+        """
+        self._inner_moves_acceptance_fractions = acceptance_fractions
 
     def free_gpu_memory(self):
         if self.xp is not np:
@@ -298,7 +320,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
     def setup(self, model, state):
         """Per-iteration setup hook (no-op by default)."""
-        return
+        
+        # run the inner moves setup if they have a setup method
+        for move in self.moves:
+            if hasattr(move, "setup"):
+                move.setup(state.branches_coords)
 
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
         """
@@ -376,7 +402,18 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         # randomize order
         leaves_random_order = np.random.permutation(np.arange(self.nleaves_max))
+
+        ring_buffer = dict() # prepare a ring buffer to store the proposed points to be submitted to an eventual flow proposal.
+        
+        inner_moves_accepted = dict() # prepare a dictionary to store the accepted fraction for each inner move
+        inner_moves_counter = dict() # prepare a dictionary to store the number of proposals for each inner move
+        for move in self.moves:
+            inner_moves_accepted[move.__class__.__name__] = None
+            inner_moves_counter[move.__class__.__name__] = 0
+
         for leaf in leaves_random_order:
+
+            leaf_buffer = []
             # guard against leaves with False
             assert np.all(
                 state.branches[self.branch_name].inds[0, 0, leaf]
@@ -394,9 +431,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             ][
                 : self.ntemps
             ]  # as: make sure only local ntemps are used
-            ntemps_full = new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
+            # ntemps_full = new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
 
-            ndim = new_state.branches[self.branch_name].coords.shape[-1]
+            ntemps_full, _, _, ndim = new_state.branches[self.branch_name].coords.shape
 
             # remove cold chain sources
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
@@ -467,7 +504,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     model.random.choice(np.arange(len(self.moves)), p=self.move_weights)
                 ]
 
+                move_name = move_here.__class__.__name__
+
                 # logger.debug(f"move here: {move_here.__class__.__name__}")
+                if flow_move_available:
+                    if isinstance(move_here, FlowMove):
+                        move_here.active_condition = leaf
 
                 # Split the ensemble in half and iterate over these two halves.
                 accepted = np.zeros((ntemps_full, self.nwalkers), dtype=bool)
@@ -500,7 +542,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     c = {self.branch_name: sets[:split] + sets[split + 1 :]}
 
                     # Get the move-specific proposal.
-                    if isinstance(move_here, StretchMove):
+                    if isinstance(move_here, RedBlueMove):
                         q, factors = move_here.get_proposal(s, c, model.random)
 
                     else:
@@ -537,10 +579,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                                     new_points_in,
                                     data_index=data_index,
                                 )
-                    
+
                     if DEBUG_MODE:
                         logger.debug(f"average proposed logl: {logl[in_prior].mean()}.")
-    
+
                     if np.any(logl[in_prior] < -1e10) or np.any(logl[in_prior] > 1e30):
                         logger.warning(f"Suspicious likelihood encountered in propose: min = {logl[~np.isinf(logp)].min()}, max = {logl[~np.isinf(logp)].max()}. This could be a sign of numerical issues.")
                         if DEBUG_MODE:
@@ -586,6 +628,16 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # print(self.accepted[0])
                 self.num_proposals += 1
 
+                inner_moves_counter[move_name] += 1
+                if inner_moves_accepted[move_name] is None:
+                    # int, not bool: `bool += bool` saturates at 1 and would cap
+                    # every per-move acceptance count at a single accept per walker.
+                    # Only the used temperatures (:self.ntemps) are ever set in
+                    # `accepted`; track those and drop the ntemps_full tail.
+                    inner_moves_accepted[move_name] = accepted[: self.ntemps].astype(int)
+                else:
+                    inner_moves_accepted[move_name] += accepted[: self.ntemps]
+
                 # TODO: include PSD likelihood in swaps?
                 # temperature swaps
                 # make swaps
@@ -627,8 +679,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     self.branch_name
                 ][:, :, 0]
 
-            # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
+                leaf_buffer.append(
+                    new_state.branches_coords[self.branch_name][0, :, leaf].copy()
+                )
 
+            # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
+            ring_buffer[leaf] = np.array(leaf_buffer).reshape(-1, ndim)
             # add back cold chain sources
             _free_pool()
 
@@ -644,10 +700,16 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
-            logger.info(f"* {self.branch_name} leaf {leaf} complete ({time.time() - tic:.1f}s)")
+            logger.info(f"{self.branch_name} leaf {leaf} complete ({time.time() - tic:.1f}s)")
 
         # udpate at the end
-        logger.info(f"* {self.branch_name} proposal complete — all leaves processed ({time.time() - tic:.1f}s total)")
+        logger.info(f"{self.branch_name} proposal complete - all leaves processed ({time.time() - tic:.1f}s total)")
+
+        if flow_move_available:
+            for move in self.moves:
+                if isinstance(move, FlowMove):
+                    move.submit_by_leaf(ring_buffer)
+                    logger.info("Current repeats submitted to flow move")
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
         # print("before computing current likelihood. elapsed: ", time.time() - tic)
@@ -696,9 +758,34 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         self.free_gpu_memory()
 
-        # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
-        # breakpoint()
+        # mean acceptance fraction per used temperature (averaged over walkers);
+        # shape (self.ntemps,) per move, or the -1. sentinel if the move was never drawn.
+        latest_acceptance_fraction = {
+            k: inner_moves_accepted[k].mean(axis=1) / inner_moves_counter[k]
+            if inner_moves_counter[k] > 0
+            else -1.
+            for k in inner_moves_accepted.keys()
+        }
+
+        if hasattr(self, "_inner_moves_acceptance_fractions"):
+            for move in self.moves:
+                move_name = move.__class__.__name__
+                self._inner_moves_acceptance_fractions[move_name].append(
+                    latest_acceptance_fraction[move_name]
+                    )
+        else:
+            self._inner_moves_acceptance_fractions = dict()
+            for move in self.moves:
+                move_name = move.__class__.__name__
+                self._inner_moves_acceptance_fractions[move_name] = [
+                    latest_acceptance_fraction[move_name]
+                ]
+
+        logger.debug(f"inner moves acceptance fractions: {latest_acceptance_fraction}. elapsed: {time.time() - tic}")
         logger.debug(f"mean accepted fraction: {np.mean(self.accepted[0] / self.num_proposals)}. elapsed: {time.time() - tic}")
+
+
+
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):
@@ -754,7 +841,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
     """
     def __init__(
         self, 
-        dcga: DomainComputationGroupArray,
+        dcga: AnalysisContainerArray | DomainComputationGroupArray,
         waveform_gen: Any,
         branch_name: str,
         coords_shape: tuple,
@@ -772,6 +859,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         run_async: bool = False,
         run_threaded: bool = False,
         waveform_like_method: str = None,
+        batch_size_per_gpu: int = None,
         **kwargs
     ):
         ResidualAddOneRemoveOneMove.__init__(
@@ -793,7 +881,16 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             **kwargs
         )
 
-        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
+        acs = dcga.acs if (hasattr(dcga, "acs") and isinstance(dcga.acs, AnalysisContainerArray)) else dcga
+        acs._ensure_cpp_splits()        
+
+        MultiGPUMoveBase.__init__(
+            self,
+            acs=acs,
+            run_async=run_async,
+            run_threaded=run_threaded,
+            batch_size_per_gpu=batch_size_per_gpu,
+        )
 
         self.waveform_gen = waveform_gen
         self.waveform_gen_method = waveform_gen_method
@@ -913,12 +1010,30 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         """
         Compute the likelihood for the given coordinates and data index.
 
+        When :attr:`batch_size_per_gpu` is set, the rows are processed in
+        per-GPU sub-batches (at most ``batch_size_per_gpu`` waveforms generated
+        on each device at a time) to bound peak GPU memory; ``None`` keeps the
+        all-at-once behaviour. See :meth:`MultiGPUMoveBase.run_in_gpu_batches`.
+
         Args:
             coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
             data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
-        
+
         Returns:
             ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
+        """
+        return self.run_in_gpu_batches(
+            data_index,
+            lambda sub: self._compute_like_chunk(coords_in[sub], data_index[sub]),
+            n_out=coords_in.shape[0],
+        )
+
+    def _compute_like_chunk(self, coords_in: np.ndarray, data_index: np.ndarray) -> np.ndarray:
+        """Single-pass likelihood for one (already-sized) batch of rows.
+
+        This is the original :meth:`compute_like` body: every row in
+        ``coords_in`` is generated and scored across the devices in one pass.
+        :meth:`compute_like` calls it once per per-GPU sub-batch.
         """
 
         positions_per_split, data_intra_index_per_split, waveform_args_per_split = self.prepare_inputs(coords_in, data_index)

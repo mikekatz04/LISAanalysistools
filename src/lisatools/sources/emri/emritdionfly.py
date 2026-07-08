@@ -29,7 +29,10 @@ from typing import Optional
 
 import numpy as np
 
-from few.utils.utility import get_polarization_angle, get_viewing_angles
+try:
+    from few.utils.utility import get_polarization_angle, get_viewing_angles
+except ImportError:
+    pass
 
 from lisatools.response.tdionfly import TDTDIonTheFly
 
