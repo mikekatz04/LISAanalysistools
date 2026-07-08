@@ -148,6 +148,23 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             for tmp_move in self.moves:
                 if tmp_move.periodic is None:
                     tmp_move.periodic = periodic
+    
+    @property
+    def inner_moves_acceptance_fractions(self):
+        """
+        Return the acceptance fractions for each inner move at each step.
+        """
+        if hasattr(self, "_inner_moves_acceptance_fractions"):
+            return self._inner_moves_acceptance_fractions
+        
+        return None
+    
+    @inner_moves_acceptance_fractions.setter
+    def inner_moves_acceptance_fractions(self, acceptance_fractions):
+        """
+        Set the acceptance fractions for each inner move at each step.
+        """
+        self._inner_moves_acceptance_fractions = acceptance_fractions
 
     def free_gpu_memory(self):
         if self.xp is not np:
@@ -387,6 +404,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         leaves_random_order = np.random.permutation(np.arange(self.nleaves_max))
 
         ring_buffer = dict() # prepare a ring buffer to store the proposed points to be submitted to an eventual flow proposal.
+        
+        inner_moves_accepted = dict() # prepare a dictionary to store the accepted fraction for each inner move
+        inner_moves_counter = dict() # prepare a dictionary to store the number of proposals for each inner move
+        for move in self.moves:
+            inner_moves_accepted[move.__class__.__name__] = None
+            inner_moves_counter[move.__class__.__name__] = 0
 
         for leaf in leaves_random_order:
 
@@ -480,6 +503,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 move_here = self.moves[
                     model.random.choice(np.arange(len(self.moves)), p=self.move_weights)
                 ]
+
+                move_name = move_here.__class__.__name__
 
                 # logger.debug(f"move here: {move_here.__class__.__name__}")
                 if flow_move_available:
@@ -603,6 +628,16 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # print(self.accepted[0])
                 self.num_proposals += 1
 
+                inner_moves_counter[move_name] += 1
+                if inner_moves_accepted[move_name] is None:
+                    # int, not bool: `bool += bool` saturates at 1 and would cap
+                    # every per-move acceptance count at a single accept per walker.
+                    # Only the used temperatures (:self.ntemps) are ever set in
+                    # `accepted`; track those and drop the ntemps_full tail.
+                    inner_moves_accepted[move_name] = accepted[: self.ntemps].astype(int)
+                else:
+                    inner_moves_accepted[move_name] += accepted[: self.ntemps]
+
                 # TODO: include PSD likelihood in swaps?
                 # temperature swaps
                 # make swaps
@@ -723,9 +758,34 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         self.free_gpu_memory()
 
-        # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
-        # breakpoint()
+        # mean acceptance fraction per used temperature (averaged over walkers);
+        # shape (self.ntemps,) per move, or the -1. sentinel if the move was never drawn.
+        latest_acceptance_fraction = {
+            k: inner_moves_accepted[k].mean(axis=1) / inner_moves_counter[k]
+            if inner_moves_counter[k] > 0
+            else -1.
+            for k in inner_moves_accepted.keys()
+        }
+
+        if hasattr(self, "_inner_moves_acceptance_fractions"):
+            for move in self.moves:
+                move_name = move.__class__.__name__
+                self._inner_moves_acceptance_fractions[move_name].append(
+                    latest_acceptance_fraction[move_name]
+                    )
+        else:
+            self._inner_moves_acceptance_fractions = dict()
+            for move in self.moves:
+                move_name = move.__class__.__name__
+                self._inner_moves_acceptance_fractions[move_name] = [
+                    latest_acceptance_fraction[move_name]
+                ]
+
+        logger.debug(f"inner moves acceptance fractions: {latest_acceptance_fraction}. elapsed: {time.time() - tic}")
         logger.debug(f"mean accepted fraction: {np.mean(self.accepted[0] / self.num_proposals)}. elapsed: {time.time() - tic}")
+
+
+
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):
