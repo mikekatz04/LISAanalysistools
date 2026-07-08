@@ -1154,6 +1154,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _debug_rj_select(self, buffer_obj, picked):
         """Arm the RJ before/after trace for the chosen (walker, band) cell
         (coldest temperature present in this pick round), once per step."""
+        self._dbg_rj_seq = None
         if not self.debug or getattr(self, "_dbg_rj_done", True):
             return None
         try:
@@ -1168,22 +1169,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 return None
             idx = int(match[np.argmin(t_np[match])])
             slot = int(_to_numpy(picked["slot_index"])[idx])
-            return dict(
+            rj_seq = dict(
                 idx=idx, slot=slot, temp=int(t_np[idx]),
                 walker=sel_w, band=sel_b,
                 before=self._debug_slab_snapshot(buffer_obj, slot),
             )
+            # _run_rj_step marks rj_seq["accepted"] from the real accept
+            # bookkeeping. A slab diff alone cannot be the signal: the
+            # verify hook's add/remove round-trips leave ~1e-10-relative
+            # FP dust in the slab even for rejected proposals.
+            self._dbg_rj_seq = rj_seq
+            return rj_seq
         except Exception as e:
             logger.warning("[GB_DEBUG %s] rj select skipped: %r", self.name, e)
             return None
 
     def _debug_plot_rj_pair(self, buffer_obj, rj_seq) -> None:
-        """After the RJ step: if the traced cell's buffer changed (an RJ
-        birth/death was ACCEPTED there), save ONE 3x3 figure -- rows =
-        channels, columns = |accepted template| (after - before) /
-        |buffer before RJ| / |buffer after RJ| -- with the band's
-        source-only ll of both states in the title. No figure when the RJ
-        proposal was rejected (buffer unchanged)."""
+        """After the RJ step: if the traced cell's RJ proposal was ACCEPTED
+        (per the accept bookkeeping recorded by ``_run_rj_step``), save ONE
+        3x3 figure -- rows = channels, columns = |accepted template|
+        (after - before) / |buffer before RJ| / |buffer after RJ| -- with
+        the band's source-only ll of both states in the title. No figure
+        when the proposal was rejected; the slab may still differ by FP
+        dust from the verify hook's round-trips, which is why the accept
+        flag (not the diff) is the gate."""
         if rj_seq is None or not self.debug:
             return
         try:
@@ -1195,8 +1204,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             after = self._debug_slab_snapshot(buffer_obj, rj_seq["slot"])
             before = rj_seq["before"]
             diff = after - before
-            if not np.any(diff):
-                return  # RJ proposal rejected: nothing to show
+            self._dbg_rj_seq = None
+            if not rj_seq.get("accepted", False):
+                return  # traced cell's RJ proposal was rejected
             self._dbg_rj_done = True
 
             bs = self._basis_settings
@@ -1764,6 +1774,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"{self.name}: accepted an out-of-prior RJ coordinate at beta > 0."
                 )
             accept[bad_accepts] = False
+
+        rj_seq = getattr(self, "_dbg_rj_seq", None)
+        if rj_seq is not None:
+            rj_seq["accepted"] = bool(accept[rj_seq["idx"]])
 
         t_i, w_i, b_i = picked["temp_inds"], picked["walker_inds"], picked["band_inds"]
         prop_counts[0][t_i, w_i, b_i] += 1
