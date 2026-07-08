@@ -969,21 +969,51 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         nc = buffer_obj.nchannels
         return _to_numpy(buffer_obj.band_buffer[slot]).copy().reshape(nc, Nf_a, Nt_a)
 
+    def _debug_band_source_only_ll(self, buffer_obj, arr, slot, band):
+        """Source-only ll ``-1/2 <a|a>`` of ``arr`` (nc, Nf_a, Nt_a), sliced
+        to the WDM layers whose centers lie in ``band``'s edge interval
+        (same slicing as :meth:`_debug_log_band_null`)."""
+        bs = self._basis_settings
+        layer_df = float(bs.layer_df)
+        ind_min_f = int(bs.ind_min_f)
+        Nf_a = arr.shape[1]
+        be = _to_numpy(self.band_edges)
+        k0 = max(int(np.ceil(be[band] / layer_df - 1e-9)) - ind_min_f, 0)
+        k1 = min(int(np.floor(be[band + 1] / layer_df + 1e-9)) + 1 - ind_min_f,
+                 Nf_a)
+        dc = float(buffer_obj.settings.differential_component)
+        nc = buffer_obj.nchannels
+        r = arr[:, k0:k1]
+        psd_np = _to_numpy(buffer_obj._materialize(buffer_obj.psd_buffer)[slot])
+        if buffer_obj.tdi_channel_setup == "XYZ":
+            ic = psd_np.reshape(nc, nc, Nf_a, -1)[:, :, k0:k1]
+            return -0.5 * 4.0 * dc * float(
+                np.einsum("ifk,ijfk,jfk->", r, ic.real, r))
+        ic = psd_np.reshape(nc, Nf_a, -1)[:, k0:k1]
+        return -0.5 * 4.0 * dc * float(np.sum(r * ic.real * r))
+
     def _debug_plot_band_sequence(self, buffer_obj, seq) -> None:
         """Four 3x3 figures (rows = X/Y/Z channels; columns = |template| /
-        |data| / |residual|) at the four buffer moments of one in-model
-        repeat block on the traced source:
+        |data| / |buffer residual|) at the four buffer moments of one
+        in-model repeat block on the traced source:
 
-            1 before_removal   (source still in the residual)
-            2 after_removal    (source-free residual the repeats score on)
+            1 before_removal   (source modeled: residual ~ null)
+            2 after_removal    (source UN-modeled: signal IN the residual)
             3 before_addback   (must equal 2 -- repeats never touch the buffer)
-            4 after_addback    (final coordinates written back)
+            4 after_addback    (final template re-subtracted: signal OUT)
 
-        The template column is reconstructed from snapshot differences
-        (old template = snap1 - snap2; new template = snap4 - snap3), the
-        data column is the with-source state and the residual column the
-        source-free state at each moment -- so figures 1/2 (and 3/4) also
-        serve as a visual fill round-trip check.
+        The third column is the RAW buffer state at that moment -- the
+        signal visibly enters at 2 and leaves at 4. Each figure's suptitle
+        carries the band's SOURCE-ONLY ll of that state (-1/2 <r|r> over
+        the band's layers), so the in/out shows up numerically too.
+
+        Buffer sign convention: the band buffer holds the RESIDUAL
+        (data - templates); ``remove_sources_from_band_buffer`` UN-models
+        the source (residual += template) and
+        ``add_sources_to_band_buffer`` re-subtracts it. Templates come
+        from snapshot differences (old = snap2 - snap1; new =
+        snap3 - snap4); the data column is the with-source state of each
+        pair (constant by construction -- the moving part is column 3).
         """
         if not self.debug:
             return
@@ -1002,24 +1032,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             layer_df = float(bs.layer_df)
             ind_min_f = int(bs.ind_min_f)
 
-            # Buffer sign convention: the band buffer holds the RESIDUAL
-            # (data - templates). ``remove_sources_from_band_buffer``
-            # UN-models the source (residual += template -> data-like);
-            # ``add_sources_to_band_buffer`` re-subtracts it. Hence:
-            #   snap before_removal / after_addback  = residual state
-            #   snap after_removal / before_addback  = data-like state
-            # and the templates come from the snapshot differences.
             T_old = s["after_removal"] - s["before_removal"]
             T_new = s["before_addback"] - s["after_addback"]
+            lls = {k: self._debug_band_source_only_ll(
+                       buffer_obj, s[k], seq["slot"], seq["band"])
+                   for k in need}
             figures = [
-                # (tag, template, data, residual, f0)
-                ("1_before_removal", T_old, s["before_removal"] + T_old,
+                # (tag, template, data, ACTUAL buffer state, f0)
+                ("1_before_removal", T_old, s["after_removal"],
                  s["before_removal"], seq["f0_old"]),
                 ("2_after_removal", T_old, s["after_removal"],
-                 s["after_removal"] - T_old, seq["f0_old"]),
+                 s["after_removal"], seq["f0_old"]),
                 ("3_before_addback", T_new, s["before_addback"],
-                 s["before_addback"] - T_new, seq["f0_new"]),
-                ("4_after_addback", T_new, s["after_addback"] + T_new,
+                 s["before_addback"], seq["f0_new"]),
+                ("4_after_addback", T_new, s["before_addback"],
                  s["after_addback"], seq["f0_new"]),
             ]
 
@@ -1033,13 +1059,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             _os.makedirs(self.debug_plot_dir, exist_ok=True)
             for tag, T, D, R, f0 in figures:
+                ll_state = lls[tag[2:]]
                 fig, axes = plt.subplots(
                     nc, 3, figsize=(13.5, 3.2 * nc), squeeze=False,
                     sharex=True, sharey=True,
                 )
                 for row in range(nc):
                     for col, (name, arr) in enumerate(
-                            [("template", T), ("data", D), ("residual", R)]):
+                            [("template", T), ("data", D),
+                             ("buffer residual", R)]):
                         ax = axes[row][col]
                         im = ax.imshow(
                             np.abs(arr[row, lo:hi]), aspect="auto",
@@ -1060,7 +1088,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 fig.suptitle(
                     f"GB in-model sequence {tag.replace('_', ' ')} — "
                     f"band {seq['band']} | walker {seq['walker']} | "
-                    f"T{seq['temp']} | f0 = {f0 * 1e3:.4f} mHz",
+                    f"T{seq['temp']} | f0 = {f0 * 1e3:.4f} mHz\n"
+                    f"band SOURCE-ONLY ll of buffer residual = "
+                    f"{ll_state:.4e}",
                     fontsize=13,
                 )
                 fname = _os.path.join(
