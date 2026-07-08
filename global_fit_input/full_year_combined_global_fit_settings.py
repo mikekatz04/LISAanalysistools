@@ -103,7 +103,7 @@ from lisatools.response.tdiconfig import TDIConfig
 
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.detector import DefaultOrbits, LISAModel
-from lisatools.sources.utils import icrs_to_ecliptic
+from lisatools.sources.emri import emri_catalogue_to_waveform_basis
 from lisatools.domains import (
     FDSettings,
     TDSettings,
@@ -989,41 +989,17 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
         # the spin is what produced the spurious 1.49x amplitude). The
         # ResponseWrapper is built is_ecliptic_latitude=False and called
         # convert_to_ra_dec=True (see _EMRISpecialFrameWrap in
-        # global_fit_settings) so the sky goes ecliptic -> ICRS for the
-        # frame="icrs" orbits, while the spin stays in the FEW frame. This
-        # reproduces the mojito EMRI to mm ~ 4e-5.
+        # lisatools.sources.emri.response) so the sky goes ecliptic -> ICRS
+        # for the frame="icrs" orbits, while the spin stays in the FEW frame.
+        # This reproduces the mojito EMRI to mm ~ 4e-5. Row construction lives
+        # in the stock lisatools.sources.emri.emri_catalogue_to_waveform_basis.
         _emri_cat = general_set.data_processor.catalogue["EMRI"]
-        _emri_rows = []
-        for i in sorted(_emri_cat.keys()):
-            _e = _emri_cat[i]
-            _ra = float(_e["RightAscension"]) % (2 * np.pi)
-            _dec = float(_e["Declination"])
-            _lam_S, _beta_S = icrs_to_ecliptic(_ra, _dec)
-            _qS_e = float(np.pi / 2 - _beta_S)          # ecliptic polar angle
-            _phiS_e = float(_lam_S) % (2 * np.pi)       # ecliptic longitude
-            _emri_rows.append([
-                _e["PrimaryMassSSBFrame"],        # M
-                _e["SecondaryMassSSBFrame"],      # mu
-                _e["PrimarySpinParameter"],       # a
-                _e["SemiLatusRectum"],            # p0
-                _e["Eccentricity"],               # e0
-                # FastKerrEccentricEquatorialFlux is an EQUATORIAL model:
-                # xI0 must be +1 (prograde) — the catalogue "InclinationAngle"
-                # is the VIEWING inclination (line of sight vs orbital L), which
-                # FEW derives internally from the qS/qK sky+spin geometry, not an
-                # intrinsic input. Mirrors the validated SPECIAL recipe
-                # (scripts/sobbh/emri_frame_convert_check.py INTR[5]=1.0).
-                1.0,                              # xI0 (equatorial prograde)
-                _e["LuminosityDistance"] / 1e3,   # dist (Mpc -> Gpc)
-                _qS_e,                            # qS (ecliptic polar)
-                _phiS_e,                          # phiS (ecliptic longitude)
-                _e["PolarAnglePrimarySpin"],      # qK (RAW file spin)
-                _e["AzimuthalAnglePrimarySpin"],  # phiK (RAW file spin)
-                _e["AzimuthalPhase"],             # Phi_phi0
-                _e["PolarPhase"],                 # Phi_theta0
-                _e["RadialPhase"],                # Phi_r0
-            ])
-        emri_injections_full_basis = np.asarray(_emri_rows)
+        emri_injections_full_basis = np.asarray(
+            [
+                emri_catalogue_to_waveform_basis(_emri_cat[i])
+                for i in sorted(_emri_cat.keys())
+            ]
+        )
     else:
         emri_injections_full_basis = EMRI_INJECTIONS_FULL_BASIS
 

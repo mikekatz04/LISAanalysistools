@@ -20,6 +20,7 @@ from ...domains import TDSettings, TDSignal
 from ...response.directresponse import ResponseWrapper
 from ...response.tdiconfig import TDIConfig
 from ...utils.constants import YRSID_SI
+from ..utils import icrs_to_ecliptic
 
 # Shared inspiral / sum / mode-selector defaults (mirrors the settings files).
 EMRI_INSPIRAL_KWARGS = {
@@ -166,6 +167,59 @@ def get_emri_response_wrapper(
 
     _EMRI_WAVE_GEN_CACHE[key] = wave_gen
     return wave_gen
+
+
+def emri_catalogue_to_waveform_basis(entry: dict) -> np.ndarray:
+    """Convert one mojito EMRI catalogue entry to the 14-param FEW waveform basis.
+
+    SPECIAL EMRI frame (validated 2026-06-19,
+    ``scripts/sobbh/emri_frame_convert_check.py``): ECLIPTIC-POLAR sky angles
+    (``qS = pi/2 - ecliptic latitude``, ``phiS = ecliptic longitude``,
+    converted from the catalogue ICRS RA/Dec) together with the RAW catalogue
+    spin angles (``qK``/``phiK`` NOT converted — ecliptic-converting the spin
+    produced the spurious 1.49x amplitude) and ``xI0 = +1``:
+    FastKerrEccentricEquatorialFlux is an equatorial model, and the catalogue
+    "InclinationAngle" is the VIEWING inclination, which FEW derives
+    internally from the qS/qK sky+spin geometry rather than taking it as an
+    intrinsic input.
+
+    Pair with a ``get_emri_response_wrapper(special_frame=True)`` generator so
+    the sky is converted back ecliptic -> ICRS for ``frame="icrs"`` orbits.
+
+    The ICRS -> ecliptic conversion is the LISA-DDPC-SEG-TN-007 fixed-obliquity
+    rotation (``lisatools.sources.utils.icrs_to_ecliptic``, the mojito
+    convention) — the same one the validated full_year settings used — NOT the
+    astropy ``barycentrictrueecliptic`` version in
+    ``lisatools.response.directresponse`` (they differ by ~1e-4 rad).
+
+    Args:
+        entry: One source's catalogue dict (mojito L1 ``catalogue["EMRI"][i]``).
+
+    Returns:
+        ``(14,)`` array ``[M, mu, a, p0, e0, xI0, dist (Gpc), qS, phiS, qK,
+        phiK, Phi_phi0, Phi_theta0, Phi_r0]``.
+    """
+    ra = float(entry["RightAscension"]) % (2 * np.pi)
+    dec = float(entry["Declination"])
+    lam_S, beta_S = icrs_to_ecliptic(ra, dec)
+    return np.array(
+        [
+            entry["PrimaryMassSSBFrame"],  # M
+            entry["SecondaryMassSSBFrame"],  # mu
+            entry["PrimarySpinParameter"],  # a
+            entry["SemiLatusRectum"],  # p0
+            entry["Eccentricity"],  # e0
+            1.0,  # xI0 (equatorial prograde)
+            entry["LuminosityDistance"] / 1e3,  # dist (Mpc -> Gpc)
+            float(np.pi / 2 - beta_S),  # qS (ecliptic polar)
+            float(lam_S) % (2 * np.pi),  # phiS (ecliptic longitude)
+            entry["PolarAnglePrimarySpin"],  # qK (RAW file spin)
+            entry["AzimuthalAnglePrimarySpin"],  # phiK (RAW file spin)
+            entry["AzimuthalPhase"],  # Phi_phi0
+            entry["PolarPhase"],  # Phi_theta0
+            entry["RadialPhase"],  # Phi_r0
+        ]
+    )
 
 
 class EMRIWaveWrap:

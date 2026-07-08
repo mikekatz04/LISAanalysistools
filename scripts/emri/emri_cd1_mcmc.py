@@ -7,8 +7,8 @@ injection likelihood (should be ~0: the template nulls the data), then
 runs an Eryn ensemble MCMC over the 12-parameter stock sampling basis
 (``xI0`` and ``Phi_theta0`` held fixed).
 
-SPECIAL EMRI frame (validated 2026-06-19, see
-``global_fit_input/full_year_combined_global_fit_settings.py`` and
+SPECIAL EMRI frame (validated 2026-06-19; canonical implementation in
+``lisatools.sources.emri.response``, exercised pipeline-wide by
 ``scripts/sobbh/run_mojito_null_checks.sh``):
 
 - FEW gets ECLIPTIC-POLAR sky angles (``qS = pi/2 - ecliptic latitude``,
@@ -31,7 +31,6 @@ credit Michael Katz and Alessandro Santini
 """
 
 import os
-import sys
 
 import numpy as np
 
@@ -54,15 +53,13 @@ from lisatools.domains import TDSettings, TDSignal, WDMSettings
 from lisatools.globalfit.preprocessing import L1ProcessingStep
 from lisatools.globalfit.stock.erebor import make_emri_transform_container
 from lisatools.response import TDIConfig
-from lisatools.response.directresponse import icrs_to_ecliptic
 from lisatools.sensitivity import XYZ2SensitivityMatrix
+from lisatools.sources.emri import (
+    EMRIWaveWrap,
+    emri_catalogue_to_waveform_basis,
+    get_emri_response_wrapper,
+)
 from lisatools.utils.constants import YRSID_SI
-
-# The validated EMRI response/frame helpers live in the repo-level
-# global_fit_input directory (not the installed package).
-_LAT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(_LAT_ROOT, "global_fit_input"))
-from global_fit_settings import EMRIWaveWrap, get_emri_response_wrapper
 
 # --- configuration -----------------------------------------------------------
 
@@ -150,27 +147,8 @@ if __name__ == "__main__":
     injection = DataResidualArray(TDSignal(injection_wave, td_set).transform(wdm_set))
 
     # --- SPECIAL-frame injection parameters in FEW order ------------------------
-    ra = float(binary_params["RightAscension"]) % (2 * np.pi)
-    dec = float(binary_params["Declination"])
-    lambda_ecl, beta_ecl = icrs_to_ecliptic(ra, dec)
-    wf_params = np.array(
-        [
-            binary_params["PrimaryMassSSBFrame"],  # M
-            binary_params["SecondaryMassSSBFrame"],  # mu
-            binary_params["PrimarySpinParameter"],  # a
-            binary_params["SemiLatusRectum"],  # p0
-            binary_params["Eccentricity"],  # e0
-            1.0,  # xI0: equatorial prograde (NOT cos(InclinationAngle))
-            binary_params["LuminosityDistance"] / 1e3,  # dist [Gpc]
-            float(np.pi / 2 - beta_ecl),  # qS (ecliptic polar)
-            float(lambda_ecl) % (2 * np.pi),  # phiS (ecliptic longitude)
-            binary_params["PolarAnglePrimarySpin"],  # qK (RAW file spin)
-            binary_params["AzimuthalAnglePrimarySpin"],  # phiK (RAW file spin)
-            binary_params["AzimuthalPhase"],  # Phi_phi0
-            binary_params["PolarPhase"],  # Phi_theta0
-            binary_params["RadialPhase"],  # Phi_r0
-        ]
-    )
+    # (ecliptic-polar sky + RAW file spin + xI0=+1; see the stock converter)
+    wf_params = emri_catalogue_to_waveform_basis(binary_params)
 
     # --- REF-anchored response, aligned onto the data grid -----------------------
     ref = float(binary_params["TimeReferenceSSBFrame"])
