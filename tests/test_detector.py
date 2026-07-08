@@ -27,7 +27,7 @@ class DetectorTest(unittest.TestCase):
         xp = cp if gpu_available else np
         force_backend = "cpu" if not gpu_available else "cuda12x"
         orbits = lisa.DefaultOrbits(force_backend=force_backend)
-        orbits.configure(linear_interp_setup=True)
+        # configuration is lazy (first use); no explicit configure() needed
         dt = 100.0
         _t = xp.arange(0.0, YRSID_SI, dt)
         t_arr_links = xp.tile(_t, (len(orbits.LINKS), 1)).flatten()

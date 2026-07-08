@@ -2117,9 +2117,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         assert self.backend.xp == orbits.xp, "Orbits and Sensitivity backend mismatch."
 
-        self.orbits = orbits
-        if not self.orbits.configured:
-            self.orbits.configure(linear_interp_setup=True)
+        self.orbits = orbits  # configures lazily on first use
 
         self.tdi_generation = tdi_generation
         self.channel_shape = (3, 3)

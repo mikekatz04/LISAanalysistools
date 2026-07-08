@@ -270,9 +270,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             orbits = EqualArmlengthOrbits(force_backend=self.force_backend)
             logger.warning("No Orbits object provided. Using default EqualArmlengthOrbits.")
 
-        if not orbits.configured:
-            orbits.configure(linear_interp_setup=True)
-        self._orbits = orbits
+        self._orbits = orbits  # configures lazily on first use
 
     @property
     def analysis_domain(self) -> str:

@@ -248,12 +248,14 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         if not self._orbits.configured:
             # Configure on the full observation span at the kernel's dt
             # so pycppdetector_args populate for the C++ / JAX wrap.
+            # (_configure directly: this is an explicit custom grid, not the
+            # lazy default configuration.)
             t_arr = np.arange(0.0, self.T + self.dt, self.dt) + self.t_obs_start
             try:
-                self._orbits.configure(t_arr=t_arr, dt=self.dt,
+                self._orbits._configure(t_arr=t_arr, dt=self.dt,
                                         linear_interp_setup=True)
             except TypeError:
-                self._orbits.configure(linear_interp_setup=True)
+                self._orbits._configure(linear_interp_setup=True)
         self.cpp_orbits = self.backend.OrbitsWrap(*self._orbits.pycppdetector_args)
 
     @classmethod

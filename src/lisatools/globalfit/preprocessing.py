@@ -244,8 +244,11 @@ class L1DataLoader:
                 orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
                 print(f"[load_data] L1Orbits(...) (incl. _setup) took {_t.perf_counter()-_t0:.2f}s", flush=True)
                 _t0 = _t.perf_counter()
-                orbits.configure(linear_interp_setup=True)
-                print(f"[load_data] orbits.configure(linear_interp_setup=True) took {_t.perf_counter()-_t0:.2f}s", flush=True)
+                # Eagerly build the interpolation grid here (data-load time is
+                # the right place to pay the one-time cost); equivalent to the
+                # lazy first-use configuration.
+                orbits._ensure_configured()
+                print(f"[load_data] orbits._ensure_configured() took {_t.perf_counter()-_t0:.2f}s", flush=True)
                 logger.info(f"Initialized orbits from NOISE file.")
 
             with self._open(file_path) as f:
@@ -331,8 +334,7 @@ class L1DataLoader:
                             if orbits is None:
                                 orbits: Orbits = self.orbits_class(
                                     file_path, **(self.orbits_kwargs or {})
-                                )
-                                orbits.configure(linear_interp_setup=True)
+                                )  # configures lazily on first use
                                 logger.info(f"Initialized orbits from {source_type} file.")
 
                         else:

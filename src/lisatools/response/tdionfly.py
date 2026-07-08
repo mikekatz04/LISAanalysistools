@@ -142,9 +142,7 @@ class TDIonTheFly(FastLISAResponseParallelModule):
 
         self._orbits = deepcopy(orbits)
 
-        if not self._orbits.configured:
-            self._orbits.configure(linear_interp_setup=True)
-            
+        # pycppdetector_args triggers lazy configuration if needed.
         self.cpp_orbits = self.backend.OrbitsWrap(*self._orbits.pycppdetector_args)
     
     @property

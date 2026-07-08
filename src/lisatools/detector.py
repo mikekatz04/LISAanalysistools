@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass
@@ -96,6 +97,9 @@ class Orbits(LISAToolsParallelModule, ABC):
         force_backend: Optional[str] = None,
         t0: Optional[float] = 0.0,
         frame: str = "icrs",
+        t_arr: Optional[np.ndarray] = None,
+        dt: Optional[float] = None,
+        linear_interp_setup: bool = True,
         **kwargs,
     ) -> None:
 
@@ -106,6 +110,19 @@ class Orbits(LISAToolsParallelModule, ABC):
         self.frame = frame
         self._setup()
         self.configured = False
+        # Grid-configuration arguments (formerly passed to the separate
+        # ``configure()`` call). Configuration itself is LAZY: it runs on
+        # first access to any configured-grid quantity (``t``, ``x``, ``n``,
+        # ``v``, ``ltt``, ``pycppdetector``, ...) via
+        # :meth:`_ensure_configured`. Construction therefore stays cheap
+        # (stock orbit files span years; building the interpolation grid
+        # costs seconds and GBs) -- settings trees can hold / deepcopy
+        # unconfigured instances for free, and workflows that trim the
+        # base tables after construction still work as long as they trim
+        # before first use.
+        self._configure_kwargs = dict(
+            t_arr=t_arr, dt=dt, linear_interp_setup=linear_interp_setup
+        )
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
     @property
@@ -348,6 +365,32 @@ class Orbits(LISAToolsParallelModule, ABC):
         t_arr: Optional[np.ndarray] = None,
         dt: Optional[float] = None,
         linear_interp_setup: Optional[bool] = False,
+        **kwargs,
+    ) -> None:
+        """Deprecated: pass grid arguments to ``__init__`` instead.
+
+        Configuration now happens lazily on first use with the arguments
+        stored at construction. Explicit calls still work (and are the way
+        to RE-configure after mutating the base tables, e.g. trimming the
+        LTT arrays), but new code should construct with the desired
+        ``t_arr`` / ``dt`` / ``linear_interp_setup`` (/ ``linear_interp_dt``
+        for :class:`L1Orbits`) and let first use trigger the build.
+        """
+        warnings.warn(
+            "Orbits.configure() is deprecated: pass the grid arguments to "
+            "__init__ and let configuration happen lazily on first use. "
+            "(Explicit calls remain supported for re-configuring after "
+            "mutating the base tables.)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._configure(t_arr=t_arr, dt=dt, linear_interp_setup=linear_interp_setup, **kwargs)
+
+    def _configure(
+        self,
+        t_arr: Optional[np.ndarray] = None,
+        dt: Optional[float] = None,
+        linear_interp_setup: Optional[bool] = False,
     ) -> None:
         """Configure the orbits to match the signal response generator time basis.
 
@@ -463,9 +506,11 @@ class Orbits(LISAToolsParallelModule, ABC):
     @property
     def pycppdetector(self) -> object:
         """C++ class"""
+        self._ensure_configured()
         if self._pycppdetector_args is None:
             raise ValueError(
-                "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
+                "Asking for c++ class. Need linear_interp_setup = True (the "
+                "__init__ default) so the configured grid carries C++ args."
             )
         self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetector_args)
         return self._pycppdetector
@@ -473,6 +518,7 @@ class Orbits(LISAToolsParallelModule, ABC):
     @property
     def pycppdetector_args(self) -> tuple:
         """args for the c++ class."""
+        self._ensure_configured()
         return self._pycppdetector_args
 
     @pycppdetector_args.setter
@@ -486,10 +532,20 @@ class Orbits(LISAToolsParallelModule, ABC):
         self._check_configured()
         return len(self.t)
 
-    def _check_configured(self) -> None:
-        """Raise if :meth:`configure` has not been called yet."""
+    def _ensure_configured(self) -> None:
+        """Lazily build the interpolation grid on first use.
+
+        Runs :meth:`_configure` with the arguments stored at construction
+        the first time any configured-grid quantity is requested. Workflows
+        that mutate the base tables after construction (e.g. trimming the
+        LTT arrays to an analysis window to save memory) must do so BEFORE
+        first use; call :meth:`_configure` explicitly to rebuild afterwards.
+        """
         if not self.configured:
-            raise ValueError("Cannot request property. Need to use configure() method first.")
+            self._configure(**self._configure_kwargs)
+
+    # Back-compat alias (semantics changed from raise -> lazy configure).
+    _check_configured = _ensure_configured
 
     def get_light_travel_times(
         self, t: float | np.ndarray, link: int | np.ndarray
@@ -791,13 +847,18 @@ class L1Orbits(Orbits):
         armlength: float = 2.5e9,
         force_backend: Optional[str] = None,
         frame: str = "icrs",
+        linear_interp_dt: Optional[float] = 500.0,
         **kwargs,
     ):
         # frame is validated and stored by the Orbits base class (before
         # ``_setup`` runs, which reads ``self.frame`` to decide whether to
         # rotate the mojito ICRS positions to ecliptic).
         super().__init__(filename, armlength, force_backend, frame=frame, **kwargs)
-       
+        # Cap on the lazily-built position/unit-vector grid step -- see
+        # :meth:`_configure`. Stored with the other grid arguments so the
+        # lazy configuration picks it up.
+        self._configure_kwargs["linear_interp_dt"] = linear_interp_dt
+
     @property
     def kwargs(self):
         """Keyword arguments for recreating this class instance."""
@@ -805,6 +866,7 @@ class L1Orbits(Orbits):
             "armlength": self.armlength,
             "force_backend": self.backend.backend_name.split("_")[-1],
             "frame": self.frame,
+            "linear_interp_dt": self._configure_kwargs.get("linear_interp_dt", 500.0),
         }
         
     def open(self):
@@ -984,22 +1046,14 @@ class L1Orbits(Orbits):
     def n(self, x):
         self._n = x
 
-    @property
-    def pycppdetector(self) -> object:
-        """C++ ``OrbitsWrap`` instance backing this orbit class."""
-        # TODO/DOCS: ``self._pycppdetect_args`` looks like a typo for
-        # ``self._pycppdetector_args`` (used by :class:`Orbits`); confirm the
-        # intended attribute and fix.
-        if self._pycppdetector_args is None:
-            raise ValueError(
-                "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
-            )
-        self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetect_args)
+    # ``pycppdetector`` override removed 2026-07-07: it was identical to the
+    # base-class property except for a load-bearing typo
+    # (``self._pycppdetect_args``) that would have raised AttributeError on
+    # first use -- consumers build from ``pycppdetector_args`` directly, so
+    # it never fired. The base property (with lazy configuration) is used.
 
-        return self._pycppdetector
-
-    def configure(self, t_arr=None, dt=None, linear_interp_setup=False,
-                  linear_interp_dt=3600.0):
+    def _configure(self, t_arr=None, dt=None, linear_interp_setup=False,
+                   linear_interp_dt=500.0):
         """Configure orbits with interpolation to a target time grid.
 
         Handles different time arrays for LTTs and positions in Mojito files.
@@ -1017,9 +1071,11 @@ class L1Orbits(Orbits):
                 positions at ``dt_base ~ 5.8 days`` -> sag ~ 0.13 light-sec ->
                 a periodic Doppler phase error 2*pi*f0*0.13*cos(beta_ecl) rad
                 that floored every template-vs-data mismatch at 1e-6..2e-4
-                (measured on the VGB stream, 2026-07-07). At 3600 s the sag is
-                ~1e-5 light-sec (mm ~ 1e-12). Pass ``None`` to use the file's
-                native cadence unmodified (old behavior).
+                (measured on the VGB stream, 2026-07-07). At the 500 s default
+                the sag is ~6e-7 light-sec (phase error < 1e-7 rad at 20 mHz;
+                mm far below double precision) and the full-mission grid is
+                still tiny (~1.3e5 points, built once). Pass ``None`` to use
+                the file's native cadence unmodified (old behavior).
         """
 
         # Determine target time array
@@ -1270,8 +1326,10 @@ if jax_here:
             force_backend: If 'gpu' or 'cuda', use GPU; if 'cpu', use CPU
         """
         
-        def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
-            super().configure(t_arr, dt, linear_interp_setup)
+        def _configure(self, t_arr=None, dt=None, linear_interp_setup=False,
+                       linear_interp_dt=500.0):
+            super()._configure(t_arr, dt, linear_interp_setup,
+                               linear_interp_dt=linear_interp_dt)
             # No C++ backend for this implementation, ovverride attribute
             self._pycppdetector_args = None
 

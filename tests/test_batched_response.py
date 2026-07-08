@@ -84,7 +84,7 @@ class TestBatchedResponse(unittest.TestCase):
         cls.all_pols = np.asarray(pols)  # (nsky, num_time_samples)
 
         orbits = EqualArmlengthOrbits()
-        orbits.configure(linear_interp_setup=True)
+        # configuration is lazy (first use); no explicit configure() needed
         cls.orbits = orbits
 
     def _make_response(self):
