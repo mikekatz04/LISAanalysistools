@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import math
 import warnings
-from abc import ABC
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import logging
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union, TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
 from eryn.utils import TransformContainer
-from scipy import interpolate
 
 from .domains import DomainBase, DomainBaseArray, DomainSettingsBase
 
@@ -25,21 +22,19 @@ try:
 except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
-from . import detector as lisa_models
 from .datacontainer import DataResidualArray
 from .diagnostic import (
-    data_signal_full_source_and_noise_likelihood,
-    data_signal_source_likelihood_term,
     inner_product,
     noise_likelihood_term,
     residual_full_source_and_noise_likelihood,
     residual_source_likelihood_term,
 )
-from .sensitivity import SensitivityMatrix, SensitivityMatrixBase
-from .stochastic import FittedHyperbolicTangentGalacticForeground, StochasticContribution
+from .sensitivity import SensitivityMatrixBase
 from .utils.constants import *
-from .utils.utility import AET, get_array_module, asnumpy
+from .utils.utility import asnumpy
 
+if TYPE_CHECKING:
+    from .domaincomputation import DomainComputationGroupArray
 
 SignalGenSpec = Union[Callable, Mapping[str, Callable]]
 
