@@ -216,10 +216,15 @@ class GBSetup(Setup, GBSettings):
                 input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
                 input_basis[2]: uniform_dist(self.fdot_lims[0], self.fdot_lims[1]),
                 input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
-                input_basis[4]: uniform_dist(*np.cos(self.iota_lims)),
+                # cos is DECREASING on [0, pi]: cos(iota_lims) comes out
+                # (max, min), so sort into increasing order before handing
+                # it to uniform_dist -- never rely on the dist silently
+                # swapping reversed bounds. (Same defensive sort on the
+                # sin(delta) line even though sin is increasing there.)
+                input_basis[4]: uniform_dist(*np.sort(np.cos(self.iota_lims))),
                 input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
                 input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
-                input_basis[7]: uniform_dist(*np.sin(self.delta_lims)),
+                input_basis[7]: uniform_dist(*np.sort(np.sin(self.delta_lims))),
             }
 
             self.priors = {"gb": ProbDistContainer(priors_gb)}
