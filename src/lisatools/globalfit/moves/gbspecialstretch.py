@@ -1052,12 +1052,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             nc = T_old.shape[0]
             ch_names = ["X", "Y", "Z"][:nc]
             local = int(round(seq["f0_old"] / layer_df)) - ind_min_f
-            lo = max(local - 6, 0)
-            hi = min(local + 7, T_old.shape[1])
+            # 5-layer (mm5-style) span: tight enough that neighboring
+            # galaxy sources outside the band (e.g. 19.668 mHz, 5 layers
+            # below the 20.38 mHz source) stay out of the figures.
+            lo = max(local - 2, 0)
+            hi = min(local + 3, T_old.shape[1])
             ylo = (ind_min_f + lo - 0.5) * layer_df * 1e3
             yhi = (ind_min_f + hi - 0.5) * layer_df * 1e3
 
             _os.makedirs(self.debug_plot_dir, exist_ok=True)
+            # ONE color scale per channel row, shared by every column of
+            # every figure in the sequence: the panels are directly
+            # comparable, so the signal entering/leaving the buffer shows
+            # up as brightness (a near-null residual stays dark instead of
+            # being autoscaled up to look like signal).
+            vmax_row = [
+                max(float(np.abs(arr[row, lo:hi]).max())
+                    for _tag, _T, _D, _R, _f0 in figures
+                    for arr in (_T, _D, _R))
+                for row in range(nc)
+            ]
             for tag, T, D, R, f0 in figures:
                 ll_state = lls[tag[2:]]
                 fig, axes = plt.subplots(
@@ -1073,6 +1087,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             np.abs(arr[row, lo:hi]), aspect="auto",
                             origin="lower",
                             extent=[0, arr.shape[2], ylo, yhi],
+                            vmin=0.0, vmax=vmax_row[row],
                         )
                         ax.axhline(f0 * 1e3, color="r", ls="--", lw=1.0)
                         if row == 0:
@@ -1257,8 +1272,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 tile = np.abs(
                     _to_numpy(buffer_obj.band_buffer[slab][0])
                 ).reshape(Nf_a, Nt_a)
-                lo = max(local - 6, 0)
-                hi = min(local + 7, tile.shape[0])
+                # 5-layer (mm5-style) span, matching the sequence figures.
+                lo = max(local - 2, 0)
+                hi = min(local + 3, tile.shape[0])
                 sub = tile[lo:hi]
                 # WDM layer m is CENTERED on m*layer_df (span (m +- 1/2)*df):
                 # the y-extent runs from the bottom edge of layer lo to the
