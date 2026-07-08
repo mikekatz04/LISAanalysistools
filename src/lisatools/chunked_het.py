@@ -162,20 +162,26 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
                 f"tdi_type must be one of 'XYZ', 'AET', 'AE'; got {tdi_type!r}.")
         self.tdi_type = tdi_type
 
-        # Chunk geometry + WDM phitilde -- precomputed once.
+        # Chunk geometry + WDM phitilde -- precomputed once on the host
+        # (compute_chunk_geometry / compute_wdm_window are host-side by
+        # design), then uploaded ONCE to this instance's backend: every
+        # kernel call passes these as-is and the CUDA bindings require
+        # device arrays. On CPU xp is numpy and asarray is a no-op.
         backend_short = self.backend.name.split("_")[-1]
         geom = compute_chunk_geometry(self.Nt, self.Nt_sub, self.n_pad)
         layer_dt = self.Nf * self.dt
         starts_f = np.asarray(geom["starts"], dtype=float)
-        self.chunk_t_starts = (
+        self.chunk_t_starts = self.xp.asarray(
             self.t_obs_start + starts_f * layer_dt
-        ).copy()
-        self.chunk_keep_lo  = np.asarray(geom["keep_lo"],     dtype=np.int32)
-        self.chunk_keep_hi  = np.asarray(geom["keep_hi"],     dtype=np.int32)
-        self.chunk_n_global_offset = np.asarray(geom["n_global_lo"],
-                                                  dtype=np.int32)
-        self.wdm_window = compute_wdm_window(self.Nf, self.Nt_sub, self.dt,
-                                              backend=backend_short)
+        )
+        self.chunk_keep_lo  = self.xp.asarray(geom["keep_lo"],     dtype=self.xp.int32)
+        self.chunk_keep_hi  = self.xp.asarray(geom["keep_hi"],     dtype=self.xp.int32)
+        self.chunk_n_global_offset = self.xp.asarray(geom["n_global_lo"],
+                                                     dtype=self.xp.int32)
+        self.wdm_window = self.xp.asarray(
+            compute_wdm_window(self.Nf, self.Nt_sub, self.dt,
+                               backend=backend_short)
+        )
         self.n_chunks = int(starts_f.size)
 
         # Resolved Tukey alpha (one double passed to the kernel).
@@ -553,14 +559,14 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             int(self.backend.TDITypeDict[self.tdi_type]),
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(self.N_cp_sig), int(self.N_cp_orbit),
-            np.asarray(groups["binary_perm"],  dtype=np.int32),
-            np.asarray(groups["group_starts"], dtype=np.int32),
-            np.asarray(groups["group_ends"],   dtype=np.int32),
-            np.asarray(groups["group_m_lo"],   dtype=np.int32),
-            np.asarray(groups["group_m_hi"],   dtype=np.int32),
+            self.xp.asarray(groups["binary_perm"],  dtype=np.int32),
+            self.xp.asarray(groups["group_starts"], dtype=np.int32),
+            self.xp.asarray(groups["group_ends"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_lo"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_hi"],   dtype=np.int32),
             int(groups["n_groups"]),
-            np.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
-            np.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
+            self.xp.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
+            self.xp.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
             int(m_band_half_width),
         )
 
@@ -661,11 +667,11 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             float(self.T), float(self.t_ref),
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(self.N_cp_sig), int(self.N_cp_orbit),
-            np.asarray(groups["binary_perm"],  dtype=np.int32),
-            np.asarray(groups["group_starts"], dtype=np.int32),
-            np.asarray(groups["group_ends"],   dtype=np.int32),
-            np.asarray(groups["group_m_lo"],   dtype=np.int32),
-            np.asarray(groups["group_m_hi"],   dtype=np.int32),
+            self.xp.asarray(groups["binary_perm"],  dtype=np.int32),
+            self.xp.asarray(groups["group_starts"], dtype=np.int32),
+            self.xp.asarray(groups["group_ends"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_lo"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_hi"],   dtype=np.int32),
             int(groups["n_groups"]),
         )
 
@@ -747,14 +753,14 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             float(self.T), float(self.t_ref),
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(self.N_cp_sig), int(self.N_cp_orbit),
-            np.asarray(groups["binary_perm"],  dtype=np.int32),
-            np.asarray(groups["group_starts"], dtype=np.int32),
-            np.asarray(groups["group_ends"],   dtype=np.int32),
-            np.asarray(groups["group_m_lo"],   dtype=np.int32),
-            np.asarray(groups["group_m_hi"],   dtype=np.int32),
+            self.xp.asarray(groups["binary_perm"],  dtype=np.int32),
+            self.xp.asarray(groups["group_starts"], dtype=np.int32),
+            self.xp.asarray(groups["group_ends"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_lo"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_hi"],   dtype=np.int32),
             int(groups["n_groups"]),
-            np.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
-            np.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
+            self.xp.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
+            self.xp.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
         )
 
         grad_add    = self.xp.asarray(grad_add_out).reshape(num_bin, nparams)
