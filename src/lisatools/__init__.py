@@ -92,6 +92,50 @@ except (ImportError, ModuleNotFoundError):
 
 Globals().backends_manager.add_backends(add_backends)
 
+
+# --- nanobind shutdown-leak cleanup -------------------------------------
+# nanobind runs a leak check from a ``Py_AtExit`` handler at the very end of
+# interpreter finalization. It prints "nanobind: leaked N instances/types/
+# functions" whenever any nanobind *instance* is still alive at that moment,
+# and the type/function reports are gated on there being >= 1 leaked instance
+# (see nanobind ``nb_internals.cpp``: ``if (!leak) print_leak_warnings =
+# false``). These are NOT reference-counting bugs in the C++ bindings:
+#
+#   * the leaked *types*/*functions* are simply the ``pycppdetector`` objects
+#     cached for the whole process by the deliberate
+#     ``Globals().backends_manager`` singleton, and
+#   * whether a cached wrapper *instance* happens to outlive the check is a
+#     benign finalization-ordering race (it flips with trivial, unrelated
+#     changes to the program).
+#
+# A plain Python ``atexit`` callback runs *before* nanobind's ``Py_AtExit``
+# check. Emptying the backend registry there lets the cached backends -- and,
+# as a side effect of tearing down that dict during finalization, the
+# outstanding wrapper instances -- be destructed before the check runs, so it
+# sees a clean slate. This genuinely releases the objects rather than muting
+# the warning with ``nb::set_leak_warnings(false)``.
+#
+# Registered at import time so it runs late in the LIFO ``atexit`` order,
+# after user-registered handlers. The registry is left empty (backends are not
+# reloaded) because this only ever runs during interpreter shutdown; a plain
+# ``clear()`` is the one operation that reliably wins the finalization race
+# (rebuilding/repopulating the dict re-triggers the leak).
+def _release_backends_at_exit() -> None:
+    import gc
+
+    try:
+        # BackendsManager exposes no public teardown, so reach the registry
+        # directly; guarded so shutdown never raises if the layout changes.
+        Globals().backends_manager._registry.clear()
+    except Exception:  # pragma: no cover - best-effort shutdown cleanup
+        pass
+    gc.collect()
+
+
+import atexit as _atexit
+
+_atexit.register(_release_backends_at_exit)
+
 from gpubackendtools import get_backend as _get_backend
 from gpubackendtools import get_first_backend as _get_first_backend
 from gpubackendtools import has_backend as _has_backend

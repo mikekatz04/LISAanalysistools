@@ -1093,8 +1093,8 @@ class FDSettings(DomainSettingsBase):
     def kwargs(self) -> dict:
         """Keyword arguments needed to reconstruct this settings object."""
         return dict(
-            min_freq=self.min_freq,
-            max_freq=self.max_freq,
+            min_freq=self.min_freq_input,
+            max_freq=self.max_freq_input,
             force_backend=self.backend,
         )
 
@@ -1604,7 +1604,7 @@ class STFTSettings(DomainSettingsBase):
     @property
     def kwargs(self) -> dict:
         return dict(
-            min_freq=self.min_freq, max_freq=self.max_freq, force_backend=self.backend
+            min_freq=self.min_freq_input, max_freq=self.max_freq_input, force_backend=self.backend
         )
 
     @property
@@ -2254,7 +2254,7 @@ class WDMSettings(DomainSettingsBase):
                 self.ind_min_f = 0
         else:
             self.ind_min_f = 0
-        self._min_freq = value
+        self._min_freq = self.ind_min_f * self.layer_df
 
     @property
     def max_freq(self) -> Optional[float]:
@@ -2274,7 +2274,7 @@ class WDMSettings(DomainSettingsBase):
                 self.ind_max_f = (self.Nf - 1)
         else:
             self.ind_max_f = (self.Nf - 1)
-        self._max_freq = value
+        self._max_freq = self.ind_max_f * self.layer_df
 
     @property
     def min_time(self) -> float:
@@ -2393,8 +2393,8 @@ class WDMSettings(DomainSettingsBase):
             window=self.window,
             # norm=self.norm,
             omega=self.omega,
-            min_freq=self.min_freq,
-            max_freq=self.max_freq,
+            min_freq=self.min_freq_input,
+            max_freq=self.max_freq_input,
             min_time=self.min_time,
             max_time=self.max_time,
             is_complex=self.is_complex,

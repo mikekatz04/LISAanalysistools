@@ -21,6 +21,8 @@ if TYPE_CHECKING:
         import cupy as cp
     except (ImportError, ModuleNotFoundError):
         import numpy as cp
+    
+    from ..detector import Orbits
 
 class CalculationController:
     """Wrapper class to control investigative computations.
@@ -780,3 +782,173 @@ def psi_rotation_icrs_to_ecliptic(lam_ecl, beta_ecl):
     sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
 
     return out_fun(xp.arctan2(sindeltapsi, cosdeltapsi))
+
+# ---- 
+def _get_orbital_quantities(orbits: Orbits, t: float | np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Get the LISA orbital quantities at a given time.
+
+    Args:
+        orbits: Orbits object containing the LISA orbital parameters.
+        t: Time(s) at which to evaluate the orbital quantities.
+
+    Returns:
+        Tuple of (centroid_position, x_lisa, y_lisa, z_lisa) in meters.
+    """
+    position_1 = orbits.get_pos(t, 1)
+    position_2 = orbits.get_pos(t, 2)
+    position_3 = orbits.get_pos(t, 3)
+
+    # compute centroid of the LISA constellation
+    centroid_position = np.mean([position_1, position_2, position_3], axis=0)
+    relative_position_1 = position_1 - centroid_position
+    relative_position_2 = position_2 - centroid_position
+    relative_position_3 = position_3 - centroid_position
+
+    x_lisa = -1. * relative_position_1 / np.linalg.norm(relative_position_1)
+    p1_cross_p2 = np.cross(relative_position_1, relative_position_2)
+    z_lisa = p1_cross_p2 / np.linalg.norm(p1_cross_p2)
+    y_lisa = np.cross(z_lisa, x_lisa)
+
+    return centroid_position, x_lisa, y_lisa, z_lisa
+
+def to_lisa_frame(orbits: Orbits, 
+                  t: float | np.ndarray,
+                  ra_or_lambda: float | np.ndarray,
+                  dec_or_beta: float | np.ndarray, 
+                  psi: float | np.ndarray,
+                  t_ref: float = 0.0
+                  ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Convert sky position and polarization angles from the SSB frame to the LISA frame at a given time.
+    Credits: Sylvain Marsat
+
+    Args:
+        orbits: Orbits object containing the LISA orbital parameters.
+        t: Time(s) at which to evaluate the conversion, relative to the reference time `t_ref`.
+        ra_or_lambda: Right ascension (ICRS) or ecliptic longitude in radians.
+        dec_or_beta: Declination (ICRS) or ecliptic latitude in radians.
+        psi: Polarization angle in radians.
+        t_ref: Reference time in seconds (default is 0.0).
+
+    Returns:
+        Tuple of (t_lisa, lambd_lisa, beta_lisa, psi_lisa) where:
+            - t_lisa: Time(s) in the LISA frame, relative to the reference time `t_ref`.
+            - lambd_lisa: Ecliptic longitude in radians in the LISA frame.
+            - beta_lisa: Ecliptic latitude in radians in the LISA frame.
+            - psi_lisa: Polarization angle in radians in the LISA frame.
+    """
+
+    t_abs = t_ref + t
+
+    cb = np.cos(dec_or_beta)
+    sb = np.sin(dec_or_beta)
+    cl = np.cos(ra_or_lambda)
+    sl = np.sin(ra_or_lambda)
+    cp = np.cos(psi)
+    sp = np.sin(psi)
+
+    k = np.array([-cb*cl, -cb*sl, -sb])
+
+    centroid_position, x_lisa, y_lisa, z_lisa = _get_orbital_quantities(orbits, t_abs)
+
+    # time
+    t_lisa = t_abs + np.dot(k, centroid_position) / C_SI
+
+    #sky
+    lambd_lisa = np.arctan2( - np.dot(k, y_lisa), -np.dot(k, x_lisa) )
+    beta_lisa = np.arcsin( - np.dot(k, z_lisa) )
+
+    # polarization
+    e_z = np.array([0., 0., 1.])
+    z_cross_k = np.cross(e_z, k)
+    u = z_cross_k / np.linalg.norm(z_cross_k)
+    v = np.cross(k, u)
+    p = cp * u + sp * v
+    q = -sp * u + cp * v
+    z_lisa_cross_k = np.cross(z_lisa, k)
+    u_lisa = z_lisa_cross_k / np.linalg.norm(z_lisa_cross_k)
+    v_lisa = np.cross(k, u_lisa)
+    psi_lisa = np.arctan2(np.dot(p, v_lisa), np.dot(p, u_lisa)) % np.pi
+
+    return t_lisa - t_ref, lambd_lisa, beta_lisa, psi_lisa
+
+def from_lisa_frame(orbits: Orbits, 
+                    t_lisa: float | np.ndarray,
+                    lambd_lisa: float | np.ndarray,
+                    beta_lisa: float | np.ndarray, 
+                    psi_lisa: float | np.ndarray,
+                    t_ref: float = 0.0
+                    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Convert sky position and polarization angles from the LISA frame to the SSB frame at a given time.
+    Credits: Sylvain Marsat
+
+    Args:
+        orbits: Orbits object containing the LISA orbital parameters.
+        t_lisa: Time(s) in the LISA frame, relative to the reference time `t_ref`.
+        lambd_lisa: Ecliptic longitude in radians in the LISA frame.
+        beta_lisa: Ecliptic latitude in radians in the LISA frame.
+        psi_lisa: Polarization angle in radians in the LISA frame.
+        t_ref: Reference time in seconds (default is 0.0). 
+
+    Returns:
+        Tuple of (t, ra_or_lambda, dec_or_beta, psi) where:
+            - t: Time(s) in the SSB frame, relative to the reference time `t_ref`.
+            - ra_or_lambda: Right ascension (ICRS) or ecliptic longitude in radians in the SSB frame.
+            - dec_or_beta: Declination (ICRS) or ecliptic latitude in radians in the SSB frame.
+            - psi: Polarization angle in radians in the SSB frame.
+    """
+    # NOTE: time tSSB depends on the sky position given in SSB parameters
+    # Initially, approximate angles using tL instead of tSSB - then iterate
+    
+    t_lisa_abs = t_ref + t_lisa
+    t_approx = t_lisa_abs
+
+    centroid_position, x_lisa, y_lisa, z_lisa = _get_orbital_quantities(orbits, t_lisa_abs)
+    velocity_1 = orbits.get_vel(t_lisa_abs, 1)
+    velocity_2 = orbits.get_vel(t_lisa_abs, 2)
+    velocity_3 = orbits.get_vel(t_lisa_abs, 3)
+
+    centroid_velocity = np.mean([velocity_1, velocity_2, velocity_3], axis=0)
+
+    e_x = np.array([1., 0., 0.])
+    e_y = np.array([0., 1., 0.])
+    e_z = np.array([0., 0., 1.])
+
+    for kk in range(3):
+        _, x_lisa, y_lisa, z_lisa = _get_orbital_quantities(orbits, t_approx)
+
+        cb = np.cos(beta_lisa)
+        sb = np.sin(beta_lisa)
+        cl = np.cos(lambd_lisa)
+        sl = np.sin(lambd_lisa)
+        cp = np.cos(psi_lisa)
+        sp = np.sin(psi_lisa)
+
+        k = -cb*cl * x_lisa - cb*sl * y_lisa - sb * z_lisa
+
+        ra_or_lambda_approx = np.arctan2( - np.dot(k, e_y), -np.dot(k, e_x) )
+        dec_or_beta_approx = np.arcsin( - np.dot(k, e_z) )
+
+        # time
+        k_centroid_position = np.dot(k, centroid_position) / C_SI
+        k_centroid_velocity = np.dot(k, centroid_velocity) / C_SI
+        t_approx = t_lisa_abs - k_centroid_position * (1 - k_centroid_velocity)
+    
+    t = t_approx - t_ref
+    ra_or_lambda = ra_or_lambda_approx
+    dec_or_beta = dec_or_beta_approx
+
+    # polarization
+    z_lisa_cross_k = np.cross(z_lisa, k)
+    u_lisa = z_lisa_cross_k / np.linalg.norm(z_lisa_cross_k)
+    v_lisa = np.cross(k, u_lisa)
+    p = cp * u_lisa + sp * v_lisa
+    q = -sp * u_lisa + cp * v_lisa
+    z_cross_k = np.cross(e_z, k)
+    u = z_cross_k / np.linalg.norm(z_cross_k)
+    v = np.cross(k, u)
+    psi = np.arctan2(np.dot(p, v), np.dot(p, u)) % np.pi
+
+    return t, ra_or_lambda, dec_or_beta, psi
