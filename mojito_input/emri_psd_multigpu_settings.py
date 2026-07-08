@@ -63,7 +63,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     Tmax: float = 1.0e6
-    permute_every: int = 20
+    permute_every: int = 100
 
     emri_info = curr.source_info["emri"]
     psd_info = curr.source_info["psd"]
@@ -179,25 +179,28 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         randomize_split=True,
         # Cap concurrent EMRI waveform+likelihood evaluations per GPU to bound
         # peak device memory; None runs all of a split's walkers at once. With
-        # >1 GPU this still runs num_gpus * batch_size_per_gpu walkers in parallel.
-        batch_size_per_gpu=5,
+        # >1 GPU this still runs num_gpus * batch_size_per_gpu walkers in
+        # parallel. 5 = a full half-split per GPU (nwalkers=20, ntemps_emri=1,
+        # 2 GPUs, GPU-balanced splits) -> one chunk per likelihood call
+        # instead of ~6 serial 1-waveform chunks with barriers in between.
+        batch_size_per_gpu=1,  # TODO restore 5 once the split-0 ~39GB persistent footprint is fixed (see tasks/todo_emri_multigpu.md)
     )
-    emri_move_kwargs_burnin = emri_move_kwargs.copy()
-    emri_move_kwargs_burnin["inner_moves"] = burnin_inner_moves[:-1] # Do a first round of burn-in before training
+    # emri_move_kwargs_burnin = emri_move_kwargs.copy()
+    # emri_move_kwargs_burnin["inner_moves"] = burnin_inner_moves[:-1] # Do a first round of burn-in before training
 
-    emri_burnin_move = EMRISpecialMove(**emri_move_kwargs_burnin)
-    emri_burnin_move.accepted = np.zeros((ntemps, nwalkers))
+    # emri_burnin_move = EMRISpecialMove(**emri_move_kwargs_burnin)
+    # emri_burnin_move.accepted = np.zeros((ntemps, nwalkers))
 
-    emri_burnin_moves = GFCombineMove(moves=[emri_burnin_move, psd_pe_move], share_temperature_control=False)
-    recipe.add_recipe_component(IterationCountRecipeStep(moves=[emri_burnin_moves], num_iters=30), name="emri first burnin")
+    # emri_burnin_moves = GFCombineMove(moves=[emri_burnin_move, psd_pe_move], share_temperature_control=False)
+    # recipe.add_recipe_component(IterationCountRecipeStep(moves=[emri_burnin_moves], num_iters=30), name="emri first burnin")
 
-    emri_move_kwargs_burnin["inner_moves"] = burnin_inner_moves # now train the flow
+    # emri_move_kwargs_burnin["inner_moves"] = burnin_inner_moves # now train the flow
 
-    emri_burnin_move2 = EMRISpecialMove(**emri_move_kwargs_burnin) 
-    emri_burnin_move2.accepted = np.zeros((ntemps, nwalkers))
+    # emri_burnin_move2 = EMRISpecialMove(**emri_move_kwargs_burnin) 
+    # emri_burnin_move2.accepted = np.zeros((ntemps, nwalkers))
 
-    emri_burnin_moves = GFCombineMove(moves=[emri_burnin_move2, psd_pe_move], share_temperature_control=False)
-    recipe.add_recipe_component(IterationCountRecipeStep(moves=[emri_burnin_moves], num_iters=30), name="emri second burnin")
+    # emri_burnin_moves = GFCombineMove(moves=[emri_burnin_move2, psd_pe_move], share_temperature_control=False)
+    # recipe.add_recipe_component(IterationCountRecipeStep(moves=[emri_burnin_moves], num_iters=30), name="emri second burnin")
 
     emri_pe_move = EMRISpecialMove(**emri_move_kwargs)
     emri_pe_move.accepted = np.zeros((ntemps, nwalkers))
@@ -302,10 +305,15 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         tukey_alpha=general_set.window_alpha,
         force_backend=general_set.force_backend,
         fft_batch_size=1,
+        # Launch the response/TDI kernels without their internal
+        # cudaDeviceSynchronize (the move synchronizes before consuming
+        # results); together with the GIL-released response bindings this lets
+        # the per-GPU threads overlap instead of alternating.
+        run_async=False,  # TODO restore True once memory headroom exists (cudaMallocAsync vs cupy pool contention + hard-abort on OOM)
         **response_kwargs,
     )
 
-    waveform_runtime_kwargs = dict(mode_selection_threshold = 1e-2)
+    waveform_runtime_kwargs = dict(mode_selection_threshold = 1e-4)
 
     betas = 1 / 1.2 ** np.arange(ntemps_emri)  # Geometric ladder with ratio 1.2
 
@@ -418,7 +426,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     nleaves_max_emri = len(general_set.processor_init_kwargs["source_ids"]["emri"])
 
     # Trainer GPU: must stay off the ACS/sampling devices (general_set.gpus).
-    flow_train_gpu = 1
+    flow_train_gpu = 4
     assert flow_train_gpu not in (general_set.gpus or []), (
         "flow trainer must run on a GPU not used by the ACS"
     )
@@ -538,7 +546,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     base_file_name = "test_flow"
     file_store_dir = head_dir
 
-    gpus = [0]
+    gpus = [0, 1]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -546,7 +554,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 15
+    nwalkers = 20
     ntemps = 5
 
     window_type = "tukey"
