@@ -871,7 +871,7 @@ def build_gb_moves(
                 data_splits=acs.gpu_map,
                 num_per_gpu=num_per_gpu_walker,
                 N=N_vals,
-                **waveform_kwargs,
+                **gb_info.waveform_kwargs,
             )
             max_diff_templates = cp.abs(template_in[0] - acs.linear_data_arr[0]).max()
             del template_in
