@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import queue
+import threading
 import warnings
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from contextlib import contextmanager
 import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union, TYPE_CHECKING
@@ -37,6 +39,54 @@ if TYPE_CHECKING:
     from .domaincomputation import DomainComputationGroupArray
 
 SignalGenSpec = Union[Callable, Mapping[str, Callable]]
+
+
+class _DaemonThreadPool:
+    """Minimal ``submit -> Future`` thread pool with **daemon** workers.
+
+    Replaces ``concurrent.futures.ThreadPoolExecutor`` for the per-split GPU
+    dispatch.  TPE workers are non-daemon and the interpreter joins them
+    unconditionally at shutdown (``concurrent.futures.thread._python_exit``);
+    a worker wedged in a GIL-released CUDA call — or on a cupy memory-pool
+    lock abandoned when Ctrl+C unwinds the main thread mid-operation — then
+    blocks process exit forever (Ctrl+C appears to "stall").  Daemon workers
+    keep the same submit/Future semantics (results and exceptions propagate
+    identically) while letting the process exit regardless of worker state.
+    """
+
+    def __init__(self, max_workers: int, thread_name_prefix: str = "acs-split"):
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._threads = [
+            threading.Thread(
+                target=self._worker, name=f"{thread_name_prefix}-{i}", daemon=True
+            )
+            for i in range(max_workers)
+        ]
+        for t in self._threads:
+            t.start()
+
+    def _worker(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            future, fn, args, kwargs = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # noqa: BLE001 — propagate via the Future
+                future.set_exception(exc)
+
+    def submit(self, fn, /, *args, **kwargs) -> Future:
+        future: Future = Future()
+        self._queue.put((future, fn, args, kwargs))
+        return future
+
+    def shutdown(self) -> None:
+        """Stop idle workers (a wedged worker is daemon and dies with the process)."""
+        for _ in self._threads:
+            self._queue.put(None)
 
 
 def _coerce_to_domain_base(obj) -> DomainBase:
@@ -2085,10 +2135,15 @@ class AnalysisContainerArray:
     # ------------------------------------------------------------------
 
     @property
-    def thread_pool(self) -> ThreadPoolExecutor:
-        """Lazy ``ThreadPoolExecutor`` with one worker per split."""
+    def thread_pool(self) -> _DaemonThreadPool:
+        """Lazy daemon-worker pool with one worker per split.
+
+        Daemon threads (not a ``ThreadPoolExecutor``) so that a worker wedged
+        in an uninterruptible CUDA call can never block interpreter shutdown —
+        see :class:`_DaemonThreadPool`.
+        """
         if self._thread_pool is None:
-            self._thread_pool = ThreadPoolExecutor(
+            self._thread_pool = _DaemonThreadPool(
                 max_workers=max(1, len(self.gpu_splits))
             )
         return self._thread_pool

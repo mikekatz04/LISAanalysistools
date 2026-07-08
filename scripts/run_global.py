@@ -89,5 +89,12 @@ if __name__ == "__main__":
     curr_info = settings_function()
 
     gf = GlobalFit(curr_info, MPI.COMM_WORLD)
-    gf.run_global_fit()
+    try:
+        gf.run_global_fit()
+    except KeyboardInterrupt:
+        # Skip interpreter teardown entirely: atexit/threading shutdown joins
+        # any thread still wedged in a GIL-released CUDA call and would hang
+        # the process forever. State is safe (backups every backup_iter).
+        print("\nKeyboardInterrupt — exiting immediately.", file=sys.stderr, flush=True)
+        os._exit(130)
     #breakpoint()
