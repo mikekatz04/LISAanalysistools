@@ -32,15 +32,16 @@ def resolve_compute(
 ) -> typing.Tuple[typing.Optional[typing.List[int]], str]:
     """Resolve the (gpus, gpu_backend) pair the engine consumes.
 
-    ``use_gpu=None`` auto-detects via :func:`cupy_available`. The engine
-    derives ``force_backend = gpu_backend if gpus is not None else "cpu"``,
-    so returning ``gpus=None`` selects the CPU path regardless of
-    ``gpu_backend``.
+    ``use_gpu=None`` auto-detects via :func:`cupy_available`. On the CPU
+    path this returns ``(None, "cpu")`` — matching the legacy settings
+    files' ``GPU_BACKEND = "cpu"`` fallback. That equality
+    (``force_backend == gpu_backend``) is what makes the engine clone the
+    data processor's orbits into ``gpu_orbits`` on CPU-only runs.
     """
     if use_gpu is None:
         use_gpu = cupy_available()
     if not use_gpu:
-        return None, gpu_backend
+        return None, "cpu"
     return list(gpus) if gpus is not None else [0], gpu_backend
 
 
