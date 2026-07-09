@@ -467,6 +467,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_cap_update=True,
         sighet_refresh_every=20,
         sighet_refresh_dphase=0.5,
+        sighet_refresh_min_beta=0.1,
         debug_seq_pick="first",
         debug=False,
         debug_plot_dir="./gf_output/gb_debug/",
@@ -558,6 +559,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # is a no-op (chunked-het / FD).
         self.sighet_refresh_every = int(sighet_refresh_every)
         self.sighet_refresh_dphase = float(sighet_refresh_dphase)
+        # Refresh only where the scoring error matters: below this beta a
+        # stale reference's ll error is beta-suppressed in the acceptance
+        # exponent, while every refresh costs a full reference rebuild --
+        # the dominant sig-het expense (~seconds/setup on production
+        # grids; hot junk sources otherwise trip the drift test at nearly
+        # every checkpoint).
+        self.sighet_refresh_min_beta = float(sighet_refresh_min_beta)
 
         self.priors = priors
         self.gb = gb
@@ -1013,7 +1021,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     return None
                 cell_coords = _to_numpy(band_sorter.coords)[cell_ids]
                 if self.debug_seq_pick == "loudest":
-                    target_id = int(cell_ids[np.argmax(cell_coords[:, 0])])
+                    # SNR proxy, not bare amplitude: an edge-on source can
+                    # carry the biggest amplitude at a fraction of the
+                    # SNR. amp * sqrt(((1+cos^2 i)/2)^2 + cos^2 i) uses the
+                    # sampling coords directly (col 0 = logA, col 4 =
+                    # cos_iota); sky/psi response factors are O(1).
+                    c2 = cell_coords[:, 4] ** 2
+                    snr_proxy = np.exp(cell_coords[:, 0]) * np.sqrt(
+                        ((1.0 + c2) / 2.0) ** 2 + c2)
+                    target_id = int(cell_ids[np.argmax(snr_proxy)])
                 else:
                     f0_target = float(self.debug_seq_pick)
                     target_id = int(cell_ids[
@@ -2315,6 +2331,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 far = (drift > self.sighet_refresh_dphase) | (
                     cp.abs(curr[:, 0] - ref_track[:, 0]) > np.log(2.0)
                 )
+                # Hot cells keep their stale reference: the ll error is
+                # beta-suppressed and each refresh is a full setup.
+                far = far & (beta >= self.sighet_refresh_min_beta)
                 if bool(far.any()):
                     buffer_obj.setup_in_model_likelihood(
                         curr[far], slots[far], N_vals[far]

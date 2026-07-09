@@ -1448,6 +1448,8 @@ def build_gb_moves(
         # drift exceeds the threshold (radians). Inert on chunked/FD.
         sighet_refresh_every=int(os.environ.get("GB_SIGHET_REFRESH_EVERY", "20")),
         sighet_refresh_dphase=float(os.environ.get("GB_SIGHET_REFRESH_DPHASE", "0.5")),
+        sighet_refresh_min_beta=float(
+            os.environ.get("GB_SIGHET_REFRESH_MIN_BETA", "0.1")),
         **{
             k: v
             for k, v in gb_info.group_proposal_kwargs.items()
