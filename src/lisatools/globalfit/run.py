@@ -33,14 +33,13 @@ from eryn.state import State as eryn_State
 from eryn.utils.plot import PlotContainer
 
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
+from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings, Setup
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
 from .moves import GFCombineMove, GlobalFitMove
 from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter, save_residuals
 from .recipe import Recipe
 from .state import GFState
-from .stock.erebor import Setup
 from .utils import BasicResidualacsLikelihood
 
 
