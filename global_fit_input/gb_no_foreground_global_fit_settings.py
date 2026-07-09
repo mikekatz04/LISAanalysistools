@@ -129,7 +129,7 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 from lisatools.analysiscontainer import AnalysisContainerArray
-from lisatools.domains import WDMSettings, FDSettings
+from lisatools.domains import WDMSettings, FDSettings, STFTSettings
 from lisatools.sensitivity import tdi_generation_from_channel
 
 from eryn.utils.updates import Update
@@ -525,6 +525,61 @@ def setup_recipe(
         if getattr(gb_info, "tdi_config", None) is None:
             gb_info.tdi_config = TDI_GEN_STR
 
+    # STFT-domain mirror of the WDM block: the STFT band engine drives an
+    # ``STFTGBComputations`` whose ``stft_comps`` is the PARENT
+    # ``STFTComputationGroup`` (the engine rebinds it to the band ACA's
+    # per-split groups per call; the recipe's initial-subtraction arm and
+    # the move-level parent fills use the parent binding built here). Like
+    # ``gb_wdm_comp`` it holds C++ orbit wraps, so it cannot live on the
+    # settings dataclass (deepcopy) and is built here instead.
+    if (
+        isinstance(general_info.domain_settings, STFTSettings)
+        and getattr(gb_info, "gb_stft_comp", None) is None
+    ):
+        from gbgpu.gbcomps import STFTGBComputations
+
+        # The ACA's per-split STFTComputationGroups must carry the Fresnel
+        # configuration the engine expects; assigning domain_group_kwargs
+        # invalidates any cached groups, so ``cpp_splits`` below rebuilds
+        # with these kwargs. NOTE (pending box-run validation):
+        # ``window_alpha`` here is the PER-SEGMENT window of the STFT
+        # evaluator -- it must match how the engine STFT'd the data
+        # stream; keep both on the same knob when wiring the real run.
+        acs.domain_group_kwargs = dict(
+            tdi_type=TDI_CHAN,
+            window_alpha=float(os.environ.get("STFT_WINDOW_ALPHA", "0.0")),
+            use_midpoint=bool(int(os.environ.get("STFT_USE_MIDPOINT", "0"))),
+        )
+        _stft = acs.settings
+        gb_info.gb_stft_comp = STFTGBComputations(
+            stft_comps=acs.cpp_splits[0],
+            T=float(_stft.NT * _stft.dt),
+            t_ref=gb_info.t0,
+            orbits=general_info.gpu_orbits,
+            tdi_config=TDI_GEN_STR,
+            force_backend=general_info.force_backend,
+            # n_side_bins=2 -> ~5 columns per source; the accuracy floor is
+            # the shared band-truncation leakage (see the STFT agreement
+            # studies), env-overridable for wider stencils.
+            n_side_bins=int(os.environ.get("STFT_N_SIDE_BINS", "2")),
+            window_factor=1.0,
+            # Default ON: per-bin Fresnel chirp frequency/rate from the TDI
+            # phase (includes the LISA orbital Doppler, whose rate typically
+            # exceeds the astrophysical fdot).
+            freq_from_tdi_phase=bool(
+                int(os.environ.get("STFT_FREQ_FROM_TDI_PHASE", "1"))
+            ),
+        )
+        logger.info(
+            "STFT GB likelihood: NT=%d NF_active=%d big_dt=%.1f s t0=%.6e "
+            "n_side_bins=%d freq_from_tdi_phase=%s window_alpha=%.3f t_ref=%.6e",
+            _stft.NT, _stft.NF_active, float(_stft.dt), float(_stft.t0),
+            gb_info.gb_stft_comp.n_side_bins,
+            gb_info.gb_stft_comp.freq_from_tdi_phase,
+            acs.domain_group_kwargs["window_alpha"],
+            gb_info.t0,
+        )
+
     #* ============== START GBs AT TRUE CATALOG POINTS (SNR cut) ==============
     # Read the GB catalogue, compute optimal SNR (sqrt<h|h>) via the WDM
     # likelihood for sources inside the (narrow) GB band, cut at optimal
@@ -533,7 +588,17 @@ def setup_recipe(
     # Runs before build_gb_moves so the moves' band setup sees true-point
     # coords. On a data source without a GB catalogue (e.g. Sangria) this is
     # a no-op and the state falls back to prior draws.
-    if gb_info.gb_wdm_comp is not None:
+    # Domain-appropriate GB comp for the injection-seeding helpers below:
+    # WDM runs use ``gb_wdm_comp``; STFT runs the ``gb_stft_comp`` built
+    # above (``select_gb_injection_subset_by_snr`` dispatches on which
+    # ``get_ll_*`` surface the comp exposes). FD runs have neither -> the
+    # block is skipped and the state stays at the engine default.
+    _gb_seed_comp = (
+        gb_info.gb_wdm_comp
+        if gb_info.gb_wdm_comp is not None
+        else getattr(gb_info, "gb_stft_comp", None)
+    )
+    if _gb_seed_comp is not None:
         # GB_SUBTRACT_NEIGHBORS=1 (NOT the default): focused-central-band
         # mode. Injected (sampled) leaves are restricted to the CENTRAL GB
         # band layer, and every catalogue source in the neighboring layers
@@ -543,6 +608,10 @@ def setup_recipe(
         _subtract_neighbors = bool(int(os.environ.get("GB_SUBTRACT_NEIGHBORS", "0")))
         _injection_f0_lims = None
         if _subtract_neighbors:
+            assert gb_info.gb_wdm_comp is not None, (
+                "GB_SUBTRACT_NEIGHBORS is WDM-only for now "
+                "(subtract_gb_neighbors_from_data drives fill_global_wdm)."
+            )
             _central_lims = (_gb_k_center * LAYER_DF,
                              (_gb_k_center + 1) * LAYER_DF)
             _injection_f0_lims = _central_lims
@@ -559,7 +628,7 @@ def setup_recipe(
         # signals are removed from the data in either mode.
         if GB_MODE != "search":
             gb_snr_subset_inds = select_gb_injection_subset_by_snr(
-                curr, acs, gb_info, gb_info.gb_wdm_comp, snr_threshold=3.0,
+                curr, acs, gb_info, _gb_seed_comp, snr_threshold=3.0,
                 f0_lims=_injection_f0_lims,
             )
             # GB_START=prior: PE dimensionality WITHOUT truth seeding --
@@ -685,15 +754,27 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
 # WDM lookup table removed sprint-wide -- the chunked-heterodyne template
 # pipeline (gb_wdm_het.GBWDMHeterodyne) is now the only WDM backend. The
 # build is wired in ``setup_recipe`` above when the domain is WDM.
-# ``GB_DOMAIN=fd`` switches the run basis to the frequency domain (same
-# band restriction); default (unset / "wdm") keeps the WDM grid above.
-if os.environ.get("GB_DOMAIN", "wdm").lower() == "fd":
+# ``GB_DOMAIN=fd`` switches the run basis to the frequency domain,
+# ``GB_DOMAIN=stft`` to the STFT/Fresnel basis (same band restriction);
+# default (unset / "wdm") keeps the WDM grid above.
+_GB_DOMAIN = os.environ.get("GB_DOMAIN", "wdm").lower()
+if _GB_DOMAIN == "fd":
     DOMAIN_CHOICE = FDSettings.make_factory(
         min_freq=MIN_FREQ,
         max_freq=MAX_FREQ,
     )
-# STFT alternate:
-# DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=5e-5, max_freq=3e-2)
+elif _GB_DOMAIN == "stft":
+    # STFT basis: ``STFT_BIG_DT`` (s) is the segment length (df = 1/big_dt);
+    # 21600 s (6 h) is the segment scale the STFT GB kernel suite is
+    # validated on. The factory anchors t0 = times[0] (absolute data
+    # epoch), so no WDM-style t0 re-anchor is needed in setup_recipe.
+    DOMAIN_CHOICE = STFTSettings.make_factory(
+        big_dt=float(os.environ.get("STFT_BIG_DT", 21600.0)),
+        min_freq=MIN_FREQ,
+        max_freq=MAX_FREQ,
+    )
+elif _GB_DOMAIN != "wdm":
+    raise ValueError(f"GB_DOMAIN must be 'wdm', 'fd', or 'stft', got {_GB_DOMAIN!r}.")
 # ============================================================
 
 
@@ -733,8 +814,11 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     # (N=256 at 7.5 mHz). Default to the FULL data band (env-overridable
     # via GB_FD_BANDWIDTH, Hz, centered on GB_CENTER_FREQ) so several
     # bands survive the trim; a true 90-day run has 30x finer df and can
-    # narrow this again.
-    if isinstance(domain_settings, FDSettings):
+    # narrow this again. The STFT basis shares this branch: GBSetup's
+    # band structure falls into the same FD-style walker (the STFT band
+    # engine is whole-grid, so bands are bookkeeping windows there), and
+    # the same zero-band trim hazard applies.
+    if isinstance(domain_settings, (FDSettings, STFTSettings)):
         _bw = os.environ.get("GB_FD_BANDWIDTH")
         if _bw is None:
             start_freq, end_freq = MIN_FREQ, MAX_FREQ
@@ -743,14 +827,14 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
             start_freq = max(MIN_FREQ, GB_CENTER_FREQ - _half_bw)
             end_freq = min(MAX_FREQ, GB_CENTER_FREQ + _half_bw)
         logger.info(
-            "FD basis: GB band widened to [%.6e, %.6e] Hz for the FD band walker.",
-            start_freq, end_freq,
+            "%s basis: GB band widened to [%.6e, %.6e] Hz for the FD-style band walker.",
+            type(domain_settings).__name__, start_freq, end_freq,
         )
 
-    # FD basis at the short debug Tobs: oversample=2 halves the per-band N
-    # (128 at 7.5 mHz -- still ample for a near-monochromatic GB) so the
-    # band walker yields several bands across the data band.
-    oversample = 2 if isinstance(domain_settings, FDSettings) else 4
+    # FD/STFT basis at the short debug Tobs: oversample=2 halves the
+    # per-band N (128 at 7.5 mHz -- still ample for a near-monochromatic
+    # GB) so the band walker yields several bands across the data band.
+    oversample = 2 if isinstance(domain_settings, (FDSettings, STFTSettings)) else 4
     extra_buffer = 5
     start_freq_ind = 0
     # GB phase/frequency reference epoch = the mojito catalogue epoch

@@ -736,14 +736,20 @@ def select_gb_injection_subset_by_snr(
         )
         return np.array([], dtype=int)
 
-    # Optimal SNR via the WDM likelihood (consistent with the fit's likelihood).
+    # Optimal SNR via the band likelihood (consistent with the fit's likelihood).
     # ``<h|h>`` needs only the (shared, fixed) PSD, so a single walker slab
     # suffices: pass walker-0's AnalysisContainer.  ``get_ll_wdm`` wraps a lone
     # AnalysisContainer into a 1-element ACA under the hood, so the data path is
     # identical to the multi-walker band-buffer case.
     params_phys = gb_info.transform.both_transforms(cp.asarray(sampling[in_band]), xp=cp)
     di = cp.zeros(params_phys.shape[0], dtype=cp.int32)
-    gb_wdm_comp.get_ll_wdm(params_phys, acs[0], data_index=di, noise_index=di)
+    if hasattr(gb_wdm_comp, "get_ll_wdm"):
+        gb_wdm_comp.get_ll_wdm(params_phys, acs[0], data_index=di, noise_index=di)
+    else:
+        # STFT comp (STFTGBComputations): reads data / PSD through the parent
+        # STFTComputationGroup bound to ``stft_comps`` -- walker-0 rows via
+        # data_index=0; ``<h|h>`` is data-independent here too.
+        gb_wdm_comp.get_ll_stft(params_phys, data_index=di, noise_index=di)
 
     h_h_np = asnumpy(gb_wdm_comp.h_h_out).real
     d_h_np = asnumpy(getattr(gb_wdm_comp, "d_h_out", np.zeros_like(h_h_np))).real
