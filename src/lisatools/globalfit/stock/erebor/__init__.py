@@ -54,16 +54,32 @@ from .transforms import (  # noqa: F401
     ten_to_the_x,
 )
 
-# --- stock variant registry -------------------------------------------------
+# --- stock family base + variant registry ----------------------------------
+from .fit import EreborFit, EreborGeneralSettings  # noqa: F401
+
 _registry = StockRegistry("erebor")
 
 get_stock = _registry.get
 get_stock_options = _registry.options
 
+from .variants.gb_no_fg import GBNoForegroundGlobalFit  # noqa: E402
+
+for _cls in (GBNoForegroundGlobalFit,):
+    _registry.register(_cls)
+
+#: Names of the registered stock options (mirrors the sensitivity.py idiom).
+__stock_globalfit_options__ = _registry.names()
+
+# Module-level callable default instances: lightweight, so the defaults live
+# in memory. ``erebor.gb_no_fg(**overrides)`` CLONES the defaults into a
+# fresh fit (the primary pattern); mutating ``erebor.gb_no_fg`` itself
+# changes the session-wide default for later clones — deliberate, but shared.
+gb_no_fg = GBNoForegroundGlobalFit()
+
 
 def __getattr__(name):
-    # Defined for nicer error messages on unknown attributes; the variant
-    # module attributes (gb_no_fg, ...) are real module globals set below.
+    # Nicer error messages on unknown attributes; the variant module
+    # attributes (gb_no_fg, ...) are real module globals set above.
     raise AttributeError(
         f"module {__name__!r} has no attribute {name!r}. "
         f"Stock options: {_registry.names()}."

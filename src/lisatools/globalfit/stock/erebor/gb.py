@@ -11,6 +11,7 @@ import numpy as np
 from eryn.moves import Move
 from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
+from eryn.utils import TransformContainer
 from gbgpu.utils.utility import get_fdot, get_N
 
 from lisatools.domains import DomainSettingsBase, FDSettings, WDMSettings

@@ -530,9 +530,12 @@ class StockGlobalFit(CurrentInfoGlobalFit):
             raise AttributeError(name)
         if name in ("general", "_branch_names"):
             raise AttributeError(name)
-        if name in StockGlobalFit._HEADLINE_KNOBS:
+        if name in type(self)._HEADLINE_KNOBS:
             return getattr(self.general, name)
-        if name in _BUILT_ONLY_ATTRS:
+        if name in _BUILT_ONLY_ATTRS or hasattr(CurrentInfoGlobalFit, name):
+            # Either a build-product attribute, or a CurrentInfoGlobalFit
+            # property that failed internally on one (property AttributeErrors
+            # re-dispatch here under the property's own name).
             raise AttributeError(
                 f"{type(self).__name__}.{name} is only available after the fit is "
                 "built — call .build() first."
@@ -540,7 +543,7 @@ class StockGlobalFit(CurrentInfoGlobalFit):
         raise AttributeError(f"{type(self).__name__} object has no attribute {name!r}")
 
     def __setattr__(self, name, value):
-        if name in StockGlobalFit._HEADLINE_KNOBS and "general" in self.__dict__:
+        if name in type(self)._HEADLINE_KNOBS and "general" in self.__dict__:
             setattr(self.general, name, value)
             return
         super().__setattr__(name, value)
