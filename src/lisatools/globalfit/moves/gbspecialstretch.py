@@ -1007,6 +1007,84 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         nc = buffer_obj.nchannels
         return _to_numpy(buffer_obj.band_buffer[slot]).copy().reshape(nc, Nf_a, Nt_a)
 
+    def _debug_cell_total_template(self, buffer_obj, band_sorter, seq):
+        """Sum of ALL modeled templates of the traced cell (scratch fill).
+
+        Fills every alive source of the traced (temp, walker, band) cell
+        into a zeroed scratch slab through the engine's fill_template with
+        factor=+1 -- the same sign convention as
+        ``remove_sources_from_band_buffer`` (band_buffer = residual =
+        data - sum(templates)), so ``residual + total_template`` is the
+        cell's TOTAL DATA view. Returns None on failure (debug-only)."""
+        try:
+            t, w, b = seq["temp"], seq["walker"], seq["band"]
+            mask = (
+                (band_sorter.temp_inds == t)
+                & (band_sorter.walker_inds == w)
+                & (band_sorter.band_inds == b)
+                & band_sorter.inds
+            )
+            bs = self._basis_settings
+            Nf_a = int(getattr(bs, "Nf_active", None) or bs.Nf)
+            Nt_a = int(getattr(bs, "Nt_active", None) or bs.Nt)
+            nc = buffer_obj.nchannels
+            n_src = int(mask.sum())
+            if n_src == 0:
+                return np.zeros((nc, Nf_a, Nt_a))
+            coords = band_sorter.coords[mask]
+            params_phys = self.transform_fn.both_transforms(coords, xp=cp)
+            scratch = cp.zeros(nc * Nf_a * Nt_a)
+
+            class _Scratch:
+                linear_data_arr = [scratch]
+
+                def __len__(self):
+                    return 1
+
+            buffer_obj._likelihood_engine.fill_template(
+                _Scratch(), params_phys,
+                cp.zeros(n_src, dtype=cp.int32),
+                band_sorter.band_N_vals[
+                    cp.full(n_src, b, dtype=int)
+                ],
+                factor=+1, waveform_kwargs=self.waveform_kwargs,
+            )
+            return _to_numpy(scratch).reshape(nc, Nf_a, Nt_a)
+        except Exception as e:  # debug-only: never break the sampler
+            logger.warning(
+                "[GB_DEBUG %s] cell total-template fill skipped: %r",
+                self.name, e,
+            )
+            return None
+
+    def _debug_walker_true_data(self, acs, walker):
+        """The traced walker's TRUE data slab: injection data minus non-GB
+        models, from the move's block-start snapshot
+        (``reset_non_gb_linear_data_arr`` is taken with ALL cold-chain GB
+        templates restored). Unlike the ``residual + cell templates``
+        reconstruction, this is correct even when GB sources are modeled
+        OUTSIDE the traced band (those subtractions are not undone by the
+        cell's own templates). Returns None on failure (debug-only)."""
+        try:
+            snap = getattr(self, "reset_non_gb_linear_data_arr", None)
+            if snap is None:
+                return None
+            bs = self._basis_settings
+            Nf_a = int(getattr(bs, "Nf_active", None) or bs.Nf)
+            Nt_a = int(getattr(bs, "Nt_active", None) or bs.Nt)
+            nc = int(acs.nchannels)
+            for i, split in enumerate(acs.gpu_splits):
+                loc = np.where(np.asarray(split) == int(walker))[0]
+                if loc.size:
+                    arr = _to_numpy(snap[i]).reshape(-1, nc, Nf_a, Nt_a)
+                    return arr[int(loc[0])].copy()
+            return None
+        except Exception as e:  # debug-only: never break the sampler
+            logger.warning(
+                "[GB_DEBUG %s] true-data slice skipped: %r", self.name, e,
+            )
+            return None
+
     def _debug_band_source_only_ll(self, buffer_obj, arr, slot, band):
         """Source-only ll ``-1/2 <a|a>`` of ``arr`` (nc, Nf_a, Nt_a), sliced
         to the WDM layers whose centers lie in ``band``'s edge interval
@@ -1036,27 +1114,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return -0.5 * 4.0 * dc * float(np.sum(r * ic.real * r))
 
     def _debug_plot_band_sequence(self, buffer_obj, seq) -> None:
-        """Four 3x3 figures (rows = X/Y/Z channels; columns = |template| /
-        |data| / |buffer residual|) at the four buffer moments of one
-        in-model repeat block on the traced source:
+        """Four 3x3 figures (rows = X/Y/Z channels; columns =
+        |TOTAL template| / |TOTAL data| / |buffer residual|) at the four
+        buffer moments of one in-model repeat block on the traced source:
 
             1 before_removal   (source modeled: residual ~ null)
             2 after_removal    (source UN-modeled: signal IN the residual)
             3 before_addback   (must equal 2 -- repeats never touch the buffer)
             4 after_addback    (final template re-subtracted: signal OUT)
 
-        The third column is the RAW buffer state at that moment -- the
-        signal visibly enters at 2 and leaves at 4. Each figure's suptitle
-        carries the band's SOURCE-ONLY ll of that state (-1/2 <r|r> over
-        the band's layers), so the in/out shows up numerically too.
+        Column semantics (all reconstructed from the cell's constant TOTAL
+        DATA, ``data_const = residual(before_removal) + sum of ALL modeled
+        templates``, computed by ``_debug_cell_total_template``):
 
-        Buffer sign convention: the band buffer holds the RESIDUAL
-        (data - templates); ``remove_sources_from_band_buffer`` UN-models
-        the source (residual += template) and
-        ``add_sources_to_band_buffer`` re-subtracts it. Templates come
-        from snapshot differences (old = snap2 - snap1; new =
-        snap3 - snap4); the data column is the with-source state of each
-        pair (constant by construction -- the moving part is column 3).
+        - column 1 = ``data_const - residual`` = the SUM of the templates
+          currently in the model: removing the picked source appears as a
+          small DENT here (7 sources -> 6) ...
+        - column 2 = ``data_const`` -- the total data view, identical in
+          all four figures (every source visible);
+        - column 3 = the RAW buffer residual -- ... and as +1 signal here.
+
+        Each figure's suptitle carries the band's SOURCE-ONLY ll of the
+        residual state (-1/2 <r|r> over the band's layers), so the in/out
+        shows up numerically too. Buffer sign convention: band_buffer =
+        RESIDUAL (data - templates); ``remove_sources_from_band_buffer``
+        UN-models (residual += template), ``add_sources_...`` re-subtracts.
         """
         if not self.debug:
             return
@@ -1075,8 +1157,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             layer_df = float(bs.layer_df)
             ind_min_f = int(bs.ind_min_f)
 
-            T_old = s["after_removal"] - s["before_removal"]
-            T_new = s["before_addback"] - s["after_addback"]
+            data_const = seq.get("data_const")
+            t_tot = seq.get("t_tot")
+            if data_const is None or t_tot is None:
+                # Total-template fill failed at arm time: fall back to the
+                # traced-source-only template diffs for column 1 and the
+                # with-source pair state for column 2.
+                data_const = s["after_removal"]
+                t_tot = s["after_removal"] - s["before_removal"]
             lls = {k: self._debug_band_source_only_ll(
                        buffer_obj, s[k], seq["slot"], seq["band"])
                    for k in need}
@@ -1100,26 +1188,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     self.name, dll_addback, ll_ref_final,
                     abs(dll_addback - ll_ref_final),
                 )
+            # Total template at each moment: the block-start fill of ALL
+            # the cell's modeled templates, minus what has been shifted
+            # into the residual since (snap_k - snap_1 = the removed
+            # template content). Built from the DIRECT fill -- not
+            # data - residual -- so out-of-band models never leak into
+            # this column when data_const is the true-data slab.
+            def _t_at(k):
+                return t_tot - (s[k] - s["before_removal"])
+
             figures = [
-                # (tag, template, data, ACTUAL buffer state, f0)
-                ("1_before_removal", T_old, s["after_removal"],
-                 s["before_removal"], seq["f0_old"]),
-                ("2_after_removal", T_old, s["after_removal"],
-                 s["after_removal"], seq["f0_old"]),
-                ("3_before_addback", T_new, s["before_addback"],
-                 s["before_addback"], seq["f0_new"]),
-                ("4_after_addback", T_new, s["before_addback"],
-                 s["after_addback"], seq["f0_new"]),
+                # (tag, TOTAL template, TOTAL data, ACTUAL buffer state, f0)
+                ("1_before_removal", _t_at("before_removal"),
+                 data_const, s["before_removal"], seq["f0_old"]),
+                ("2_after_removal", _t_at("after_removal"),
+                 data_const, s["after_removal"], seq["f0_old"]),
+                ("3_before_addback", _t_at("before_addback"),
+                 data_const, s["before_addback"], seq["f0_new"]),
+                ("4_after_addback", _t_at("after_addback"),
+                 data_const, s["after_addback"], seq["f0_new"]),
             ]
 
-            nc = T_old.shape[0]
+            nc = data_const.shape[0]
             ch_names = ["X", "Y", "Z"][:nc]
             local = int(round(seq["f0_old"] / layer_df)) - ind_min_f
             # 5-layer (mm5-style) span: tight enough that neighboring
             # galaxy sources outside the band (e.g. 19.668 mHz, 5 layers
             # below the 20.38 mHz source) stay out of the figures.
             lo = max(local - 2, 0)
-            hi = min(local + 3, T_old.shape[1])
+            hi = min(local + 3, data_const.shape[1])
             ylo = (ind_min_f + lo - 0.5) * layer_df * 1e3
             yhi = (ind_min_f + hi - 0.5) * layer_df * 1e3
 
@@ -1143,7 +1240,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
                 for row in range(nc):
                     for col, (name, arr) in enumerate(
-                            [("template", T), ("data", D),
+                            [("total template", T), ("total data", D),
                              ("buffer residual", R)]):
                         ax = axes[row][col]
                         im = ax.imshow(
@@ -2056,6 +2153,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if seq is not None:
             seq["snaps"]["before_removal"] = self._debug_slab_snapshot(
                 buffer_obj, seq["slot"])
+            # Cell TOTAL DATA (constant across the block): residual +
+            # sum of ALL modeled templates of the cell. The figures show
+            # total template = data_const - residual, so removing the one
+            # picked source appears as +1 signal in the residual and a
+            # small dent in the total template.
+            _t_tot = self._debug_cell_total_template(
+                buffer_obj, band_sorter, seq)
+            seq["t_tot"] = _t_tot
+            seq["data_const"] = (
+                None if _t_tot is None
+                else seq["snaps"]["before_removal"] + _t_tot
+            )
+            # TRUE data guard: prefer the injection-data slab (minus
+            # non-GB models) over the residual+templates reconstruction --
+            # the two coincide unless GB sources are modeled OUTSIDE the
+            # traced band (the reconstruction cannot undo those
+            # subtractions; the snapshot slice can).
+            _true = self._debug_walker_true_data(
+                model.analysis_container_arr, seq["walker"])
+            if _true is not None:
+                seq["data_const"] = _true
 
         # Take the source out of the cell residual for the whole repeat block.
         buffer_obj.remove_sources_from_band_buffer(curr, slots, N_vals)
