@@ -57,36 +57,49 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Run the LISA Global Fit with LISA Analysis Tools.")
 
-    parser.add_argument("-sfp", "--settings_file_path", required=True, help="The settings file.") # Positional
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("-sfp", "--settings_file_path", help="A settings file (legacy path-loading).")
+    group.add_argument(
+        "--stock",
+        help=(
+            "A stock run variant from lisatools.globalfit.stock.erebor "
+            "(e.g. gb_no_fg, all_sources, full_year_combined). Knobs come "
+            "from the variant's env-backed defaults; adjust anything else "
+            "through the class API in a driver script."
+        ),
+    )
     parser.add_argument("-sff", "--settings_function", default="get_global_fit_settings", help="The function in the settings file that will import the settings information.") # Optional flag
-    
+
     args = parser.parse_args()
 
-    # Define the module name and the full path to the Python file
-    file_path = args.settings_file_path
-    if file_path[-3:] != ".py":
-        raise ValueError("Imported settings file must be a python file (.py).")
+    if args.stock is not None:
+        from lisatools.globalfit.stock import erebor
 
-    module_name = file_path.split("/")[-1].split(".py")[0]
-    '/path/to/my_module.py' # Replace with the actual path to your .py file
+        curr_info = erebor.get_stock(args.stock).build()
+    else:
+        # Define the module name and the full path to the Python file
+        file_path = args.settings_file_path
+        if file_path[-3:] != ".py":
+            raise ValueError("Imported settings file must be a python file (.py).")
 
-    # Create a module specification from the file location
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
+        module_name = file_path.split("/")[-1].split(".py")[0]
 
-    # Create a new module object from the specification
-    my_module = importlib.util.module_from_spec(spec)
+        # Create a module specification from the file location
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
 
-    # Add the module to sys.modules (optional, but good practice for caching)
-    sys.modules[module_name] = my_module
+        # Create a new module object from the specification
+        my_module = importlib.util.module_from_spec(spec)
 
-    # Execute the module's code
-    spec.loader.exec_module(my_module)
+        # Add the module to sys.modules (optional, but good practice for caching)
+        sys.modules[module_name] = my_module
 
-    # Now you can access functions, classes, or variables from the imported module
-    # For example, if my_module.py contains a function called 'my_function':
-    settings_function = getattr(my_module, args.settings_function)
-    
-    curr_info = settings_function()
+        # Execute the module's code
+        spec.loader.exec_module(my_module)
+
+        # Now you can access functions, classes, or variables from the imported module
+        settings_function = getattr(my_module, args.settings_function)
+
+        curr_info = settings_function()
 
     gf = GlobalFit(curr_info, MPI.COMM_WORLD)
     gf.run_global_fit()

@@ -563,7 +563,11 @@ class StockGlobalFit(CurrentInfoGlobalFit):
                 f"{type(settings).__name__}."
             )
         if name not in self._branch_names:
-            if name in self._HEADLINE_KNOBS or hasattr(type(self), name):
+            if (
+                name in self._HEADLINE_KNOBS
+                or hasattr(type(self), name)
+                or name in self.__dict__  # e.g. "recipe", "general", "setup_function"
+            ):
                 raise ValueError(
                     f"Branch name {name!r} clashes with an existing "
                     f"{type(self).__name__} attribute."

@@ -106,6 +106,53 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
 - `orbit_files/` — packaged orbit data files.
 - `scripts/` — dev / validation / benchmark / diagnostics scripts (`gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `notes/`). Migrated from sprint-root at Phase 2.
 
+## Stock global fits — no new settings files (sprint-wide rule)
+
+Run configurations live as **installed stock classes**, not settings files
+(reorg-top-layer, 2026-07-09). The API:
+
+```python
+from lisatools.globalfit.stock import erebor
+
+erebor.get_stock_options()             # [(name, description), ...]
+fit = erebor.gb_no_fg(nwalkers=4)      # or erebor.get_stock("gb_no_fg", ...)
+fit.gb.center_freq = 8e-3              # plain attribute access on the blocks
+fit.recipe.pop_move("rj_refit")        # named move stacks per recipe stage
+fit.remove_branch("galfor")            # compose whole objects in/out
+curr = fit.build()                     # heavy stage (data load), on command
+fit.run()                              # build -> GlobalFit -> run_global_fit
+```
+
+Architecture (building-block pyramid, `stock/base.py` + `stock/erebor/`):
+`StockGlobalFit` **inherits `CurrentInfoGlobalFit`** with the heavy
+`super().__init__` deferred to `.build()`; the per-branch knob layer is the
+existing `*Settings` dataclasses (variants fill defaults via subclasses);
+the recipe is a declarative `RecipeSpec` of stages/`MoveSpec`s materialized
+by the variant's module-level `setup_recipe`. Env vars resolve as field
+defaults (*explicit kwarg > env var > hard default*). Waveform-path
+defaults: SOBBH TDI-on-the-fly, MBH legacy phentax, EMRI legacy — per-branch
+`use_tdionfly` knobs; `USE_TDIONFLY` env flips both.
+
+Rules:
+
+1. **No new global-fit settings files.** A new run variant is a
+   `StockGlobalFit` subclass in `lisatools.globalfit.stock.<family>/variants/`
+   registered with the family registry; knobs are documented dataclass
+   fields, users get the class (good docstrings replace file-editing).
+2. **Nothing heavy in `__init__`.** Construction is validation + defaults
+   only; data loads, waveform builds, HDF backends, and directory creation
+   happen in `.build()` (prove with the cheapness tests in
+   `tests/test_stock_globalfit.py`).
+3. **The pre-build fit must pickle/deepcopy** (sprint rule): named
+   module-level functions/classes only on the config; runtime-only objects
+   attach post-deepcopy via `attach_runtime_objects`.
+4. The `global_fit_input/*.py` files for migrated variants are minimal
+   stubs (default `get_global_fit_settings()` + legacy re-exports) — do not
+   grow them back.
+
+`scripts/run_global.py` accepts `--stock <name>` alongside the legacy
+`-sfp <path>`.
+
 ## V2 signal-heterodyne work-item (in-flight, 2026-06-02)
 
 A second WDM-domain likelihood path is being developed alongside the
