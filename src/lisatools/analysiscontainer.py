@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import atexit
 import queue
 import threading
+import time
 import warnings
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -52,10 +54,30 @@ class _DaemonThreadPool:
     blocks process exit forever (Ctrl+C appears to "stall").  Daemon workers
     keep the same submit/Future semantics (results and exceptions propagate
     identically) while letting the process exit regardless of worker state.
+
+    Because daemon threads are never joined by ``threading._shutdown``, their
+    frames would survive interpreter teardown still holding the last task's
+    ``fn``/``args`` — pinning nanobind-backed GPU wrappers past module
+    teardown and tripping nanobind's exit-time leak check (which lisatools'
+    ``_release_backends_at_exit`` otherwise keeps silent).  Two measures
+    restore the zero-live-instances state at that check: workers drop their
+    task locals before blocking on the next ``get()``, and an ``atexit`` hook
+    (registered per pool, so it runs *before* the import-time
+    ``_release_backends_at_exit`` in LIFO order) joins the workers with a
+    bounded timeout.  A wedged worker makes the join time out — the process
+    still exits (that's the point of daemon threads) and the leak report may
+    then reappear for the objects that worker pins, which is accurate.
     """
 
-    def __init__(self, max_workers: int, thread_name_prefix: str = "acs-split"):
+    def __init__(
+        self,
+        max_workers: int,
+        thread_name_prefix: str = "acs-split",
+        initializer: Optional[Callable[[], None]] = None,
+    ):
         self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._shutdown = False
+        self._initializer = initializer
         self._threads = [
             threading.Thread(
                 target=self._worker, name=f"{thread_name_prefix}-{i}", daemon=True
@@ -64,29 +86,67 @@ class _DaemonThreadPool:
         ]
         for t in self._threads:
             t.start()
+        atexit.register(self.shutdown)
 
     def _worker(self) -> None:
+        if self._initializer is not None:
+            try:
+                self._initializer()
+            except Exception as exc:  # noqa: BLE001 — a bad initializer must not kill the worker
+                warnings.warn(
+                    f"_DaemonThreadPool initializer failed in "
+                    f"{threading.current_thread().name}: {exc!r}"
+                )
         while True:
             item = self._queue.get()
             if item is None:
                 return
             future, fn, args, kwargs = item
             if not future.set_running_or_notify_cancel():
+                del item, future
                 continue
             try:
                 future.set_result(fn(*args, **kwargs))
             except BaseException as exc:  # noqa: BLE001 — propagate via the Future
                 future.set_exception(exc)
+            # Drop task references before blocking on the next get(): an idle
+            # worker's frame must not keep the previous fn/args (and anything
+            # they reach, e.g. GPU wrappers) alive. Mirrors stdlib
+            # concurrent.futures.thread._worker's `del work_item`.
+            # (`exc` needs no del: `except ... as exc` unbinds it automatically.)
+            del item, future, fn, args, kwargs
 
     def submit(self, fn, /, *args, **kwargs) -> Future:
+        if self._shutdown:
+            raise RuntimeError("cannot submit to a shut-down _DaemonThreadPool")
         future: Future = Future()
         self._queue.put((future, fn, args, kwargs))
         return future
 
-    def shutdown(self) -> None:
-        """Stop idle workers (a wedged worker is daemon and dies with the process)."""
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Cancel pending work and join workers, waiting at most ``timeout`` s total.
+
+        Idempotent. A worker wedged in a GIL-released CUDA call makes its join
+        time out; the pool gives up on it (it is daemon and dies with the
+        process) rather than blocking exit.
+        """
+        if self._shutdown:
+            return
+        self._shutdown = True
+        # Cancel not-yet-started items so the poison pills reach the workers
+        # promptly instead of queueing behind abandoned work.
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                item[0].cancel()
         for _ in self._threads:
             self._queue.put(None)
+        deadline = time.monotonic() + timeout
+        for t in self._threads:
+            t.join(max(0.0, deadline - time.monotonic()))
 
 
 def _coerce_to_domain_base(obj) -> DomainBase:
@@ -2141,10 +2201,24 @@ class AnalysisContainerArray:
         Daemon threads (not a ``ThreadPoolExecutor``) so that a worker wedged
         in an uninterruptible CUDA call can never block interpreter shutdown —
         see :class:`_DaemonThreadPool`.
+
+        Each worker is pinned to ``gpus[0]`` at thread start: a fresh thread's
+        CUDA current-device is 0, and since CUDA 12 ``cudaSetDevice`` eagerly
+        creates the ~400 MB primary context — so the restore-on-exit of the
+        first ``cp.cuda.Device(...)`` block run in an unpinned worker would
+        materialize a stray context on GPU 0. Pinning makes every restore land
+        on a device whose context already exists; tasks still select their own
+        split device on entry via :meth:`device_context`.
         """
         if self._thread_pool is None:
+            initializer = None
+            if self.gpus is not None:
+                initializer = lambda dev=int(self.gpus[0]): (  # noqa: E731
+                    self.xp.cuda.runtime.setDevice(dev)
+                )
             self._thread_pool = _DaemonThreadPool(
-                max_workers=max(1, len(self.gpu_splits))
+                max_workers=max(1, len(self.gpu_splits)),
+                initializer=initializer,
             )
         return self._thread_pool
 
@@ -2274,7 +2348,14 @@ class AnalysisContainerArray:
     @contextmanager
     def device_context(self, device: int = None):
         """Set the device context for a split: a specific GPU, or CPU (which
-        also pins JAX's default device)."""
+        also pins JAX's default device).
+
+        ``cp.cuda.Device`` restores the thread's previous device on exit, and
+        since CUDA 12 ``cudaSetDevice`` eagerly creates the primary context —
+        only run this in threads already pinned to a real device (the
+        :attr:`thread_pool` workers are, via their initializer), or the
+        restore materializes a ~400 MB context on device 0.
+        """
         if device is None or self.gpus is None:
             import jax  # lazy: keep ``import lisatools.analysiscontainer`` jax-free
 
