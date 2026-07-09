@@ -370,6 +370,27 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             f"got {type(wdm_holder).__name__}"
         )
 
+    # ---- per-source in-model likelihood setup hooks -----------------------
+    #
+    # The GB special move calls setup_in_model() once per picked source
+    # batch -- at the same stage the proposal cholesky / friend table are
+    # built, AFTER the sources are taken out of their cell residuals --
+    # and clear_in_model() after the repeat block. Chunked-het scores every
+    # proposal directly against the residual, so it needs no per-source
+    # preparation: both hooks just return. Heterodyne-reference
+    # computations (gbgpu's GBSignalHetComputations engine mode) override
+    # them to build the reference against the source-free residual and
+    # hold it CONSTANT for the duration of the in-model repeats.
+
+    def setup_in_model(self, buffer_aca, params_ref_phys, data_index,
+                       N_vals=None) -> None:
+        """No-op in-model setup hook (see class comment above)."""
+        return None
+
+    def clear_in_model(self) -> None:
+        """No-op in-model teardown hook."""
+        return None
+
     def get_ll_wdm(self, params, wdm_holder, data_index=None, noise_index=None,
                    convert_to_ra_dec: Optional[bool] = None,
                    grid_dim: int = 0,

@@ -493,6 +493,27 @@ def setup_recipe(
             float(gb_info.gb_wdm_comp.chunk_t_starts.max()),
         )
 
+        # GB_SIGHET_INMODEL=1: score the IN-MODEL repeat blocks through the
+        # signal-heterodyne likelihood (per-source reference rebuilt each
+        # repeat block from the source-free cell residual) while RJ /
+        # fills / swaps keep the chunked-het path. Pure type dispatch: the
+        # move receives a GBSignalHetComputations wrapping the chunked
+        # comp above; its setup_in_model/clear_in_model hooks (called
+        # inside _run_in_model_repeats at the friends/info-matrix stage)
+        # do the switching -- chunked comps inherit no-op hooks. CPU-only
+        # for now (the sig-het kernels have no CUDA build yet).
+        if bool(int(os.environ.get("GB_SIGHET_INMODEL", "0"))):
+            from gbgpu.gbsignalhetcomputations import GBSignalHetComputations
+            gb_info.gb_wdm_comp = GBSignalHetComputations.for_band_engine(
+                gb_info.gb_wdm_comp,
+                nt_layer=int(os.environ.get("SIGHET_NT_LAYER", 64)),
+                n_sparse_fd=int(os.environ.get("SIGHET_N_SPARSE_FD", 1024)),
+            )
+            logger.info(
+                "GB in-model likelihood: SIGNAL-HET "
+                "(chunked-het delegate for RJ / fills / swaps)."
+            )
+
     # FD-domain mirror of the block above: the GB move auto-builds a
     # config-only ``GBFDComputations(fd_settings, t_ref, ...)`` from the
     # ACA's FDSettings; it only needs the orbits + TDI-config handles

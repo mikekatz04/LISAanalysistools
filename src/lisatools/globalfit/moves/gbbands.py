@@ -944,6 +944,25 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             return ll, self.d_h_out, self.h_h_out, self.phase_angle
         return ll
 
+    def setup_in_model_likelihood(self, params, data_index, N_vals=None) -> None:
+        """Per-source in-model likelihood setup (once per repeat block).
+
+        Forwards the picked sources' CURRENT sampling-basis params
+        (transformed to physical) plus their buffer slots to the engine's
+        ``setup_in_model`` hook. Chunked-het / FD engines no-op; a sig-het
+        computation builds its heterodyne reference against the
+        source-free cell residuals here and holds it constant until
+        :meth:`clear_in_model_likelihood`. Call AFTER the sources are
+        removed from the residual, BEFORE the reference ll of the repeat
+        block is computed."""
+        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        self._likelihood_engine.setup_in_model(
+            self, params_phys, data_index, N_vals=N_vals)
+
+    def clear_in_model_likelihood(self) -> None:
+        """Deactivate the per-source in-model setup (no-op engines ignore)."""
+        self._likelihood_engine.clear_in_model()
+
     def get_add_ll(self, params, data_index, noise_index, N_vals, phase_maximize=False):
         """Log-likelihood delta of ADDING a source to the model.
 

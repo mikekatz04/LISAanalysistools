@@ -2050,6 +2050,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 buffer_obj, seq["slot"])
 
         chol = self._compute_proposal_cholesky(model, band_sorter, ids)
+        # Per-source likelihood setup for the repeat block (same stage as
+        # the proposal cholesky / friend table). Chunked-het / FD engines
+        # no-op; a sig-het computation builds its heterodyne reference
+        # against the source-free residual HERE and holds it CONSTANT for
+        # the whole repeat block, so ll_ref below and every repeat's
+        # get_add_ll score through the same likelihood.
+        buffer_obj.setup_in_model_likelihood(curr, slots, N_vals)
         ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals)
         curr_prior = cp.asarray(self.gpu_priors["gb"].logpdf(curr))
 
@@ -2110,6 +2117,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 buffer_obj, curr, new, slots, N_vals, delta_ll, keep,
                 (asnumpy(t_i), asnumpy(w_i), asnumpy(b_i)), move_i,
             )
+
+        # Repeat block over: deactivate the per-source likelihood setup so
+        # everything outside the block (RJ, removal, fills) scores through
+        # the standard engine path again.
+        buffer_obj.clear_in_model_likelihood()
 
         # Final coordinates back into the residual and the sorter.
         band_sorter.coords[ids] = curr
