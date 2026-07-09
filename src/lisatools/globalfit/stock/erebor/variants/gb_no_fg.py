@@ -249,8 +249,39 @@ class GBNoForegroundGlobalFit(EreborFit):
         if debug:
             for _knob, _debug_val in _DEBUG_ENV_PRESET.items():
                 os.environ.setdefault(_knob, _debug_val)
+            # Arm the GB special-move debug instrumentation too (band
+            # residual round-trip checks + begin/middle/end band plots under
+            # GB_DEBUG_DIR) — consumed inside build_gb_moves from the env.
+            os.environ.setdefault("GB_DEBUG", "1")
         super().__init__(**knobs)
         self.debug = bool(debug)
+
+    def apply_debug_preset(self) -> None:
+        """Apply the GB_DEBUG smoke preset to the current fields.
+
+        Field-level version of the env preset used at construction (clones
+        never re-run ``__init__``, so ``fit(debug=True)`` routes here).
+        Explicit env values still win, mirroring the setdefault semantics.
+        """
+        os.environ.setdefault("GB_DEBUG", "1")
+        self.general.tobs_target = env_resolve("TOBS_TARGET", 3 * 86400.0, float)
+        self.general.nwalkers = env_resolve("NWALKERS", 3, int)
+        self.general.ntemps = env_resolve("NTEMPS", 2, int)
+        self.general.num_iterations = env_resolve("GF_NUM_ITER", 4, int)
+        self.gb.nt_sub = env_resolve("CHUNKED_NT_SUB", 64, int)
+        self.gb.n_pad = env_resolve("CHUNKED_N_PAD", 8, int)
+        self.gb.n_sparse = env_resolve("CHUNKED_N_SPARSE", 64, int)
+        self.gb.n_cp_sig = env_resolve("CHUNKED_N_CP_SIG", 16, int)
+        self.gb.n_cp_orbit = env_resolve("CHUNKED_N_CP_ORBIT", 16, int)
+        self.debug = True
+
+    def apply_overrides(self, overrides: dict) -> None:
+        debug = overrides.pop("debug", None)
+        if debug:
+            self.apply_debug_preset()
+        elif debug is not None:
+            self.debug = False
+        super().apply_overrides(overrides)
 
     # -- default blocks -------------------------------------------------------
 

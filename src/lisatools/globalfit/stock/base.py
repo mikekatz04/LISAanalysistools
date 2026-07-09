@@ -70,7 +70,7 @@ def env_resolve(var: str, default, cast=str):
     (they never consult it).
     """
     raw = os.environ.get(var)
-    if raw is None:
+    if raw is None or raw.strip() == "":
         return default
     if cast is bool:
         low = raw.strip().lower()
@@ -725,11 +725,20 @@ class StockGlobalFit(CurrentInfoGlobalFit):
         lines.append(f"  setup_function: {getattr(self.setup_function, '__name__', None)}")
         return "\n".join(lines)
 
+    def apply_overrides(self, overrides: dict) -> None:
+        """Apply override knobs to this instance.
+
+        Variants intercept special constructor knobs here (e.g. gb_no_fg's
+        ``debug`` preset) so that cloning via ``__call__`` honors them the
+        same way construction does.
+        """
+        self._apply_knobs(overrides)
+
     def __call__(self, **overrides) -> "StockGlobalFit":
         """Clone this configuration (config only, never built products) with overrides."""
         new = deepcopy(self)
         new.reset_build()
-        new._apply_knobs(overrides)
+        new.apply_overrides(overrides)
         return new
 
     def __getstate__(self):

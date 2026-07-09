@@ -84,6 +84,15 @@ class KnobTest(unittest.TestCase):
             self.assertEqual(erebor.get_stock("gb_no_fg", nwalkers=2).nwalkers, 2)
         self.assertEqual(erebor.get_stock("gb_no_fg").nwalkers, 4)  # hard default
 
+    def test_clone_honors_debug_preset(self):
+        with _EnvGuard(GB_DEBUG=None, TOBS_TARGET=None, NWALKERS=None, NTEMPS=None,
+                       CHUNKED_NT_SUB=None, GF_NUM_ITER=None):
+            clone = erebor.gb_no_fg(debug=True)
+            self.assertTrue(clone.debug)
+            self.assertEqual(clone.tobs_target, 3 * 86400.0)
+            self.assertEqual(clone.nwalkers, 3)
+            self.assertEqual(clone.gb.nt_sub, 64)
+
     def test_gb_debug_preset(self):
         with _EnvGuard(GB_DEBUG="1", TOBS_TARGET=None, NWALKERS=None, NTEMPS=None,
                        CHUNKED_NT_SUB=None, CHUNKED_N_PAD=None, CHUNKED_N_SPARSE=None,
