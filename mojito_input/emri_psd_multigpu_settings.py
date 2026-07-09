@@ -24,7 +24,7 @@ from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, EMRISetup, E
 from eryn.prior import uniform_dist, log_uniform
 from eryn.utils import TransformContainer
 from eryn.prior import ProbDistContainer
-from eryn.moves import StretchMove, TemperatureControl, DEMove, FlowMove
+from eryn.moves import StretchMove, TemperatureControl, DEMove, ConditionalFlowMove
 from eryn.moves.tempering import make_ladder
 from eryn.flows import ZukoFlow, WhiteningTransform, OneHotLeafConditioning, ProcessExecutor
 
@@ -66,33 +66,33 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     permute_every: int = 100
 
     emri_info = curr.source_info["emri"]
-    psd_info = curr.source_info["psd"]
+    # psd_info = curr.source_info["psd"]
 
-    effective_ndim = engine_info.ndims["psd"]
-    temperature_control = TemperatureControl(
-        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
-    )
+    # effective_ndim = engine_info.ndims["psd"]
+    # temperature_control = TemperatureControl(
+    #     effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+    # )
 
-    psd_move_kwargs = dict(
-        num_repeats=psd_info.num_prop_repeats,
-        permute_every=permute_every,
-        live_dangerously=True,
-        psd_transform_fn=psd_info.transform,
-        temperature_control=temperature_control,
-        use_gpu=True,
-        run_async=True,
-        run_threaded=True
-    )
+    # psd_move_kwargs = dict(
+    #     num_repeats=psd_info.num_prop_repeats,
+    #     permute_every=permute_every,
+    #     live_dangerously=True,
+    #     psd_transform_fn=psd_info.transform,
+    #     temperature_control=temperature_control,
+    #     use_gpu=True,
+    #     run_async=True,
+    #     run_threaded=True
+    # )
 
-    psd_search_move = MultiGPUPSDMove(
-        acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
-    )
-    psd_pe_move = MultiGPUPSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
+    # psd_search_move = MultiGPUPSDMove(
+    #     acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
+    # )
+    # psd_pe_move = MultiGPUPSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
 
-    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
-    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
+    # psd_search_move.accepted = np.zeros((ntemps, nwalkers))
+    # psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
 
     #* ========================= *#
     
@@ -113,7 +113,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         curr.source_info["emri"].injection = injection_params
 
         # Per-parameter spread for the Gaussian scatter
-        spread = 1e-5
+        spread = 1e-6
 
         scatter_around_injection(
             state,
@@ -146,7 +146,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     for inner_move in emri_info.inner_moves:
         move_obj = inner_move[0] if isinstance(inner_move, tuple) else inner_move
         move_weight = inner_move[1] if isinstance(inner_move, tuple) else 1.0
-        if isinstance(move_obj, FlowMove):
+        if isinstance(move_obj, ConditionalFlowMove):
             move_obj.executor = ProcessExecutor(move_obj.flow, **move_obj.executor_init_kwargs)
             logger.info(
                 f"EMRI flow trainer started on "
@@ -172,7 +172,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         priors=priors,
         inner_moves=emri_info.inner_moves, 
         betas_all=betas_all,
-        permute_every=permute_every,
+        permute_every=25,
         pad_out_of_prior=True,
         run_async=True,
         run_threaded=True,
@@ -183,7 +183,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         # parallel. 5 = a full half-split per GPU (nwalkers=20, ntemps_emri=1,
         # 2 GPUs, GPU-balanced splits) -> one chunk per likelihood call
         # instead of ~6 serial 1-waveform chunks with barriers in between.
-        batch_size_per_gpu=1,  # TODO restore 5 once the split-0 ~39GB persistent footprint is fixed (see tasks/todo_emri_multigpu.md)
+        batch_size_per_gpu=5,  # TODO restore 5 once the split-0 ~39GB persistent footprint is fixed (see tasks/todo_emri_multigpu.md)
     )
     # emri_move_kwargs_burnin = emri_move_kwargs.copy()
     # emri_move_kwargs_burnin["inner_moves"] = burnin_inner_moves[:-1] # Do a first round of burn-in before training
@@ -205,8 +205,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     emri_pe_move = EMRISpecialMove(**emri_move_kwargs)
     emri_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
-    recipe.add_recipe_component(PERecipeStep(moves=[emri_pe_moves]), name="emri pe")
+    #emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
+    recipe.add_recipe_component(PERecipeStep(moves=[emri_pe_move]), name="emri pe")
 
 #######################
 ##### SETTINGS ########
@@ -309,7 +309,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         # cudaDeviceSynchronize (the move synchronizes before consuming
         # results); together with the GIL-released response bindings this lets
         # the per-GPU threads overlap instead of alternating.
-        run_async=False,  # TODO restore True once memory headroom exists (cudaMallocAsync vs cupy pool contention + hard-abort on OOM)
+        run_async=True,  # TODO restore True once memory headroom exists (cudaMallocAsync vs cupy pool contention + hard-abort on OOM)
         **response_kwargs,
     )
 
@@ -446,8 +446,8 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
             ndim=len(input_basis), periodic=flow_periodic, shared=True
         ),
         seed=general_set.random_seed,
-        transforms=6,
-        hidden_features=(128, 128, 128),
+        transforms=8,
+        hidden_features=(128, 256, 128),
         bins=8,
     )
 
@@ -455,7 +455,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     # move's per-leaf ring buffer (submit_by_leaf once per MCMC step); setup()
     # still polls the executor and hot-reloads new weights every step. Until
     # the first trained snapshot arrives the move is an identity pass-through.
-    flow_move = FlowMove(flow, "emri", executor=None, harvest_every=None)
+    flow_move = ConditionalFlowMove(flow, "emri", executor=None, harvest_every=None)
 
     # The ProcessExecutor itself is built in setup_recipe (a live executor does
     # not survive the deepcopy inside CurrentInfoGlobalFit); its parameters are
@@ -467,11 +467,11 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     flow_artifacts_dir = os.path.join(general_set.artifacts_file_dir, "emri_flow")
     flow_move.executor_init_kwargs = dict(
         worker_device=f"cuda:{flow_train_gpu}",
-        epochs_per_round=500,
+        epochs_per_round=700,
         min_train_samples=1500,
-        max_buffer_samples=20_000,
-        fit_kwargs=dict(batch_size=512, lr=1e-3, lr_annealing=True, optimizer="adamw"),
-        refit_transform_every=5,
+        max_buffer_samples=2000,
+        fit_kwargs=dict(batch_size=1024, lr=1e-3, lr_annealing=True, optimizer="adamw", patience=100, validation_fraction=0.3),
+        refit_transform_every=1,
         torch_num_threads=2,
         seed=general_set.random_seed,
         save_path=os.path.join(flow_artifacts_dir, "emri_flow_latest.h5"),
@@ -537,7 +537,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     source_ids = [3]
 
     Tobs = 1 * YRSID_SI
-    dt = 5.0
+    dt = 5.
     start_freq = 1e-4
     end_freq = 2.9e-2
 
@@ -546,7 +546,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     base_file_name = "test_flow"
     file_store_dir = head_dir
 
-    gpus = [0, 1]
+    gpus = [5]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -554,8 +554,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 20
-    ntemps = 5
+    nwalkers = 12
+    ntemps = 1
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
@@ -575,7 +575,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
-        source_types=["noise", "emri"],  #'vgb', 'gb'
+        source_types=["emri"],  #'vgb', 'gb'
         source_ids=dict(emri=source_ids),
         verbose=True,
         do_plots=True,
@@ -707,14 +707,14 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "emri": emri_setup,
-            "psd": psd_setup,
+            #"psd": psd_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,
         setup_function=setup_recipe,
         source_metadata={
             "emri": emri_metadata,
-            "psd": psd_metadata,
+            #"psd": psd_metadata,
         }
     )
 
