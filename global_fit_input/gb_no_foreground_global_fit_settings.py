@@ -210,6 +210,10 @@ if GB_MODE == "search":
     # Arm the leaf-cap machinery (consumed by build_gb_moves via env);
     # explicit env overrides still win via setdefault.
     os.environ.setdefault("GB_LEAF_CAP_START", "1")
+    # Annealing default: phase-maximised RJ births (two-quadrature
+    # analytic maximisation in the band engines; accepted phi0 rotated
+    # to the maximum). GB_RJ_PHASE_MAXIMIZE=0 turns it back off.
+    os.environ.setdefault("GB_RJ_PHASE_MAXIMIZE", "1")
 
 
 # ============================================================

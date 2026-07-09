@@ -884,7 +884,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             data_index=data_index,
             noise_index=data_index,
             N_vals=N_vals,
-            phase_marginalize=phase_maximize,
+            phase_maximize=phase_maximize,
             waveform_kwargs=self.waveform_kwargs,
         )
 
@@ -930,7 +930,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             data_index=data_index,
             noise_index=noise_index,
             N_vals=N_vals,
-            phase_marginalize=phase_maximize,
+            phase_maximize=phase_maximize,
             waveform_kwargs=self.waveform_kwargs,
         )
         self.d_h_out = self._likelihood_engine.d_h_out

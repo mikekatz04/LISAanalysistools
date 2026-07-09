@@ -1447,17 +1447,24 @@ def build_gb_moves(
         },
     )
 
+    # Phase-maximised RJ births for the prior moves (two-quadrature
+    # analytic maximisation in the band engines; the accepted phi0 is
+    # rotated to the maximum). GB_RJ_PHASE_MAXIMIZE=1 turns it on --
+    # gb_no_foreground defaults it ON under GB_MODE=search (the
+    # "annealing" configuration) and OFF otherwise.
+    _rj_phase_max = bool(int(os.environ.get("GB_RJ_PHASE_MAXIMIZE", "0")))
+
     #* ============================================= SEARCH MOVES =============================================
     gb_search_prune_move = GBSpecialRJPriorMove(
-        *gb_move_args, 
+        *gb_move_args,
         rj_proposal_distribution=gpu_priors,
         name="rj_prior_search",
-        use_prior_removal=True,  
-        phase_maximize=False,  
+        use_prior_removal=True,
+        phase_maximize=_rj_phase_max,
         ranks_needed=0,
-        run_swaps=True, 
+        run_swaps=True,
         gpus=[],
-        **gb_move_kwargs 
+        **gb_move_kwargs
     )
     gb_search_prune_move.accepted = np.zeros((ntemps, nwalkers))
     
@@ -1511,7 +1518,7 @@ def build_gb_moves(
         rj_proposal_distribution=gpu_priors,
         name="rj_prior",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
-        phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
+        phase_maximize=_rj_phase_max,
         ranks_needed=0,
         run_swaps=True, 
         gpus=[],

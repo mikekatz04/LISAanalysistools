@@ -1839,7 +1839,7 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
 
     def get_swap_ll_wdm(self, params_add, params_remove, source, *,
                         data_index=None, noise_index=None,
-                        convert_to_ra_dec=False, phase_marginalize=False):
+                        convert_to_ra_dec=False, phase_maximize=False):
         """ACA-aware swap-LL pieces. Drop-in for
         :meth:`GBWDMComputations.get_swap_ll_wdm`.
 
@@ -1849,14 +1849,14 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         ``(like_add, like_remove, d_h_add, d_h_remove, aa, rr, ar)`` in
         the same shape contract as the legacy generator.
 
-        ``phase_marginalize=True`` is currently not supported by the
+        ``phase_maximize=True`` is currently not supported by the
         chunked-het kernel; we surface this loudly rather than silently
         returning the un-maximised result.
         """
-        if phase_marginalize:
+        if phase_maximize:
             raise NotImplementedError(
                 "GBWDMHeterodyne.get_swap_ll_wdm does not yet support "
-                "phase_marginalize=True. Use the gradient path "
+                "phase_maximize=True. Use the gradient path "
                 "(get_ll_grad_wdm / hessian_wdm) which does not "
                 "phase-maximise, or fall back to the FD legacy "
                 "generator for RJ moves."
