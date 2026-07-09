@@ -185,6 +185,31 @@ class CurrentInfoGlobalFit:
         }
 
 
+def _periodic_names_to_indices(per_dict: dict, transform) -> dict:
+    """Translate a per-branch periodic dict to integer parameter indices.
+
+    Settings files key ``periodic`` by the same parameter names as the
+    priors/transform (e.g. ``{"phi0": 2*np.pi}``); eryn's
+    :class:`PeriodicContainer` wants sampling-basis integer indices. String
+    keys are resolved through ``transform.input_basis``; integer keys pass
+    through unchanged.
+    """
+    out = {}
+    basis = getattr(transform, "input_basis", None)
+    for var, period in per_dict.items():
+        if isinstance(var, str):
+            if basis is None or var not in basis:
+                raise ValueError(
+                    f"periodic parameter {var!r} cannot be resolved to a "
+                    "sampling-basis index: the branch transform's "
+                    f"input_basis is {basis!r}."
+                )
+            out[basis.index(var)] = period
+        else:
+            out[int(var)] = period
+    return out
+
+
 class GlobalFit:
     """Main class for managing the global fit MCMC sampling run.
 
@@ -626,7 +651,9 @@ class GlobalFit:
                         and self.curr.source_info[name]["periodic"] is not None
                     ):
                         for key, value in self.curr.source_info[name]["periodic"].items():
-                            periodic[key] = value
+                            periodic[key] = _periodic_names_to_indices(
+                                value, self.curr.source_info[name].get("transform")
+                            )
 
                 # TODO: clean up
                 if isinstance(self.curr.source_info[name], Setup):
@@ -638,7 +665,9 @@ class GlobalFit:
                         and self.curr.source_info[name].periodic is not None
                     ):
                         for key, value in self.curr.source_info[name].periodic.items():
-                            periodic[key] = value
+                            periodic[key] = _periodic_names_to_indices(
+                                value, getattr(self.curr.source_info[name], "transform", None)
+                            )
 
             state = self.load_info(priors)
             self.logger.debug("state loaded")

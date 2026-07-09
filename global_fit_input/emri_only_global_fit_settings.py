@@ -20,7 +20,6 @@ Smoke-test choices:
 import gc
 import logging
 import shutil
-from typing import Optional
 
 import numpy as np
 
@@ -37,16 +36,10 @@ logger = logging.getLogger(__name__)
 from eryn.moves import StretchMove
 from eryn.moves.tempering import make_ladder
 
-from lisatools.response.directresponse import ResponseWrapper
 from lisatools.response.tdiconfig import TDIConfig
-from few.waveform import GenerateEMRIWaveform
 
-from lisatools.detector import EqualArmlengthOrbits
 from lisatools.domains import (
-    DomainBaseArray,
-    FDSettings,
     TDSettings,
-    TDSignal,
     WDMSettings,
 )
 from lisatools.globalfit.engine import (
@@ -55,15 +48,17 @@ from lisatools.globalfit.engine import (
     GlobalFitSettings,
     RankInfo,
 )
-from lisatools.globalfit.moves import ResidualAddOneRemoveOneMove
-from lisatools.globalfit.preprocessing import BaseProcessingStep
-from lisatools.globalfit.recipe import RecipeStep
+from lisatools.globalfit.recipe import EMRIMoveBuilder, PERecipeStep
+from lisatools.globalfit.preprocessing import SyntheticSourceProcessingStep
 from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.stock.erebor import (
     EMRISettings,
     EMRISetup,
     make_emri_transform_container,
 )
+# EMRI response-wrapper + domain-projection adapter now live in the stock
+# ``lisatools.sources.emri`` package (carved out of the settings files).
+from lisatools.sources.emri import EMRIWaveWrap, get_emri_response_wrapper
 from lisatools.utils.constants import YRSID_SI
 
 
@@ -123,193 +118,80 @@ def emri_full_to_sampling(params_full):
     return transform.both_inverse_transforms(p)
 
 
-# ---- Cached EMRI generator + wrappers (shared across data path + moves) ----
-
-# Shared inspiral / sum / mode-selector kwargs (mirrors emri_test_script_td_wave.py).
-INSPIRAL_KWARGS = {
-    "DENSE_STEPPING": 0,
-    "max_init_len": int(1e4),
-    "force_backend": "cpu",
-}
-SUM_KWARGS = {"pad_output": True}
-# Single mode-selection threshold for both injection and template paths.
-# 1e-2 keeps the smoke test fast; revisit once GPU is available.
-MODE_SELECTOR_KWARGS = {"mode_selection_threshold": 1e-2}
-
-_WAVE_GEN_CACHE = {}
+# ---- EMRI response wrapper + domain adapter: imported from the stock
+#      ``lisatools.sources.emri`` package (was inlined + duplicated here).
+#      ``special_frame=False`` reproduces this smoke test's raw-wrapper path
+#      (sampler basis stays [qS, phiS, qK, phiK]; convert_to_ra_dec=False). ----
 
 
-def get_emri_response_wrapper(
-    *,
-    Tobs: float,
-    dt: float,
-    t_start: float,
-    tdi_config: TDIConfig,
-    tdi_chan: str = "XYZ",
-    role: str = "template",
-    order: int = 40,
-    t_buffer: float = 3e4,
-    force_backend: str = "cpu",
-):
-    """Build (and cache) a :class:`ResponseWrapper` around ``GenerateEMRIWaveform``.
-
-    Note: this smoke test uses *one* generator for both the synthetic
-    injection and the template path. Building two ``GenerateEMRIWaveform``
-    instances (as the original test script does for tight vs loose mode
-    selection) crashes the CPU process here, so we just share the looser
-    template threshold and pay the small accuracy cost — the smoke test
-    only exercises pipeline plumbing, not source recovery.
-    """
-    # ``role`` is intentionally ignored in the cache key so injection and
-    # template both reuse the first generator built.
-    key = (Tobs, dt, t_start, tdi_chan, order, force_backend)
-    if key in _WAVE_GEN_CACHE:
-        return _WAVE_GEN_CACHE[key]
-
-    few_generator = GenerateEMRIWaveform(
-        "FastKerrEccentricEquatorialFlux",
-        return_list=False,
-        inspiral_kwargs=INSPIRAL_KWARGS,
-        sum_kwargs=SUM_KWARGS,
-        frame="detector",
-        mode_selector_kwargs=MODE_SELECTOR_KWARGS,
-        force_backend=force_backend,
+def _make_emri_injection_wave_gen(*, Tobs, dt, t_start, tdi_chan):
+    """Module-level factory so the (unpicklable) wrapper is built lazily inside
+    the stock :class:`SyntheticSourceProcessingStep` (its ``processor_init_kwargs``
+    are deep-copied, so only this picklable function reference is stored)."""
+    return get_emri_response_wrapper(
+        Tobs=Tobs,
+        dt=dt,
+        t_start=t_start,
+        tdi_config=TDIConfig("2nd generation", force_backend="cpu"),
+        tdi_chan=tdi_chan,
+        role="injection",
+        special_frame=False,
     )
 
-    response_kwargs = {
-        "Tobs": Tobs / YRSID_SI,
-        "dt": dt,
-        "index_lambda": 8,
-        "index_beta": 7,
-        "flip_hx": True,
-        "force_backend": force_backend,
-        "tdi": tdi_config,
-        "tdi_chan": tdi_chan,
-        "order": order,
-        "remove_garbage": "zero",
-        "is_ecliptic_latitude": False,
-        "t_buffer": t_buffer,
-    }
 
-    orbits = EqualArmlengthOrbits(force_backend=force_backend)
-    wave_gen = ResponseWrapper(
-        few_generator,
-        orbits=orbits,
-        t0=t_start,
-        **response_kwargs,
-    )
-    _WAVE_GEN_CACHE[key] = wave_gen
-    return wave_gen
+# Cached domain-wrapped template generator, shared between the engine-side
+# ``signal_gen`` (residual rebuild) and the PE move so the (slow) response build
+# happens once. ``get_emri_response_wrapper`` caches the underlying
+# ``ResponseWrapper`` keyed by (Tobs, dt, t_start, ..., special_frame) with
+# ``role`` excluded, so this template wrapper shares the SAME orbit + LTT object
+# as the ``role="injection"`` data path — the residual therefore cancels at the
+# true injection point. Orbits default to ``EqualArmlengthOrbits`` (constant,
+# non-sampled light travel times).
+_WAVE_WRAP_CACHE = {}
 
 
-class EMRIWaveWrap:
-    """Adapter that runs the cached ResponseWrapper and projects to the run's domain.
+def _get_emri_wave_wrap(general_info, nchannels: int = 3):
+    """Build (and cache) the EMRI domain-wrapped template generator.
 
-    Mirrors ``EMRIWaveWrap`` in ``emri_test_script_td_wave.py``: the call
-    output is a :class:`DomainBase` subclass (FDSignal / WDMSignal / ...)
-    so the global-fit move and ACA dispatch land on the right kernels.
+    Reproduces exactly the wrapper the recipe used to build inline, so the
+    engine's ``setup_acs(rebuild_residuals=True)`` subtracts the identical
+    template the injection added.
     """
-
-    def __init__(
-        self,
-        wave_gen,
-        td_settings: TDSettings,
-        target_domain,
+    key = ("emri", id(general_info), nchannels)
+    if key in _WAVE_WRAP_CACHE:
+        return _WAVE_WRAP_CACHE[key]
+    template_wave_gen = get_emri_response_wrapper(
+        Tobs=general_info.Tobs,
+        dt=general_info.dt,
+        t_start=T_START,
+        tdi_config=TDIConfig("2nd generation", force_backend="cpu"),
+        tdi_chan="XYZ",
+        role="template",
+        special_frame=False,
+    )
+    td_settings = TDSettings(
+        int(round(general_info.Tobs / general_info.dt)),
+        general_info.dt,
+        force_backend="cpu",
+    )
+    wrap = EMRIWaveWrap(
+        template_wave_gen,
+        td_settings,
+        general_info.domain_settings,
         td_window=None,
-        runtime_kwargs: Optional[dict] = None,
-        nchannels: Optional[int] = None,
-    ):
-        self.wave_gen = wave_gen
-        self.td_settings = td_settings
-        self.target_domain = target_domain
-        self.td_window = td_window
-        self.runtime_kwargs = runtime_kwargs or {}
-        self.nchannels = nchannels
-
-    def __call__(self, *params, **kwargs):
-        call_kwargs = dict(self.runtime_kwargs)
-        call_kwargs.update(kwargs)
-        # ``convert_to_ra_dec=False`` keeps the sampler basis aligned with
-        # ``[qS, phiS, qK, phiK]`` rather than (ra, dec).
-        call_kwargs.setdefault("convert_to_ra_dec", False)
-        arr = np.asarray(self.wave_gen(*params, **call_kwargs))
-        if self.nchannels is not None:
-            arr = arr[: self.nchannels]
-        return TDSignal(arr, self.td_settings).transform(
-            self.target_domain, window=self.td_window
-        )
-
-
-class SyntheticEMRIProcessingStep(BaseProcessingStep):
-    """Generate the EMRI injection in-process via the shared ResponseWrapper.
-
-    Hands ``(times, data, fs)`` to :class:`BaseProcessingStep` — same
-    interface as :class:`SangriaProcessingStep`. No external h5 path
-    needed.
-    """
-
-    def __init__(
-        self,
-        Tobs: float,
-        dt: float,
-        t_start: float,
-        injection_params_full_basis: np.ndarray,
-        tdi_chan: str = "XYZ",
-        nchannels: int = 3,
-        verbose: bool = True,
-        do_plots: bool = False,
-    ):
-        tdi_config = TDIConfig("2nd generation", force_backend="cpu")
-        wave_gen = get_emri_response_wrapper(
-            Tobs=Tobs,
-            dt=dt,
-            t_start=t_start,
-            tdi_config=tdi_config,
-            tdi_chan=tdi_chan,
-            role="injection",
-        )
-
-        td_signal = np.asarray(
-            wave_gen(*injection_params_full_basis, convert_to_ra_dec=False)
-        )
-        td_signal = np.atleast_2d(td_signal)[:nchannels]
-
-        # ``ResponseWrapper`` can produce a couple fewer samples than
-        # ``Tobs/dt`` (Lagrange buffer / remove_garbage). Pad/clip to
-        # exactly ``Tobs/dt`` so downstream WDM ``N = Nf*Nt`` matches.
-        target_N = int(round(Tobs / dt))
-        if td_signal.shape[-1] < target_N:
-            pad = target_N - td_signal.shape[-1]
-            td_signal = np.pad(td_signal, ((0, 0), (0, pad)), mode="constant")
-        elif td_signal.shape[-1] > target_N:
-            td_signal = td_signal[:, :target_N]
-
-        N = td_signal.shape[-1]
-        times = np.arange(N) * dt + t_start
-        fs = 1.0 / dt
-
-        BaseProcessingStep.__init__(
-            self, times, td_signal, fs, verbose=verbose, do_plots=do_plots
-        )
-        self.orbits = None
-        self.injection_params_full_basis = injection_params_full_basis
-        self.tdi_chan = tdi_chan
+        # Smoke path: keep the sampler basis [qS, phiS, qK, phiK]; the stock
+        # EMRIWaveWrap does not force convert_to_ra_dec (that is the SPECIAL
+        # frame's job), so pass it explicitly here.
+        runtime_kwargs={"convert_to_ra_dec": False},
+        nchannels=nchannels,
+    )
+    _WAVE_WRAP_CACHE[key] = wrap
+    return wrap
 
 
 ################
 #  RECIPE STEPS
 ################
-
-
-class EMRIPERecipeStep(RecipeStep):
-    """PE-only step (runs indefinitely; outer ``run_mcmc`` count caps it)."""
-
-    def setup_run(self, iteration, last_sample, sampler):
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        return False
 
 
 ################
@@ -334,87 +216,24 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         flush=True,
     )
 
-    # Pull the cached ResponseWrapper (built once at data-load time) and
-    # wrap it for the template path. ``EMRIWaveWrap`` returns a
-    # ``DomainBase`` so ACA add/remove_signal_to_residual and the EMRI
-    # move's get_waveform_here use the right kernels.
-    tdi_config = TDIConfig("2nd generation", force_backend="cpu")
-    template_wave_gen = get_emri_response_wrapper(
-        Tobs=general_info.Tobs,
-        dt=general_info.dt,
-        t_start=T_START,
-        tdi_config=tdi_config,
-        tdi_chan="XYZ",
-        role="template",
-    )
-    td_settings = TDSettings(
-        int(round(general_info.Tobs / general_info.dt)),
-        general_info.dt,
-        force_backend="cpu",
-    )
-    wave_gen = EMRIWaveWrap(
-        template_wave_gen,
-        td_settings,
-        domain_settings,
-        td_window=None,
-        nchannels=acs.nchannels,
-    )
+    # Template generator, shared with the engine-side ``signal_gen`` through the
+    # ``_WAVE_WRAP_CACHE`` (same cached ResponseWrapper as the injection).
+    wave_gen = _get_emri_wave_wrap(general_info, nchannels=acs.nchannels)
 
-    # Pre-inject starting templates into each walker's residual.
-    if np.any(emri_inds := state.branches_inds["emri"][0]):
-        print(
-            f"[setup_recipe] pre-injecting EMRI starts; nleaves_max={emri_inds.shape[-1]}",
-            flush=True,
-        )
-        for leaf in range(emri_inds.shape[-1]):
-            if not emri_inds[0, leaf]:
-                continue
-            assert np.all(emri_inds[:, leaf])
-            inj_coords = state.branches_coords["emri"][0, :, leaf]
-            inj_coords_in = emri_info.transform.both_transforms(inj_coords)
-            n_starts = inj_coords.shape[0]
-            print(
-                f"[setup_recipe] generating + applying {n_starts} starting waveforms (leaf {leaf}) one at a time...",
-                flush=True,
-            )
-            # One EMRI waveform at a time: generate, add to that walker's
-            # residual, drop the reference, force a gc cycle. Keeps peak RAM
-            # at one waveform worth instead of ``n_starts`` simultaneously.
-            for i in range(n_starts):
-                print(
-                    f"[setup_recipe]   walker {i}/{n_starts}: generating...",
-                    flush=True,
-                )
-                sig = wave_gen(*inj_coords_in[i], **emri_info.waveform_kwargs)
-                acs.add_signal_to_residual([sig], data_index=np.array([i]))
-                del sig
-                gc.collect()
-    print("[setup_recipe] pre-injection done; building EMRI PE move", flush=True)
+    # No recipe-side residual pre-injection: the engine's
+    # ``setup_acs(rebuild_residuals=True)`` already subtracted the state's EMRI
+    # templates via the registered ``signal_gen`` (see get_emri_erebor_settings).
+    # Doing it here as well would double-subtract.
+    print("[setup_recipe] building EMRI PE move", flush=True)
 
-    betas_all = np.tile(
-        make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1)
+    # Stock single-source PE-move builder (make_ladder -> betas_all ->
+    # ResidualAddOneRemoveOneMove); the machinery lives in
+    # ``lisatools.globalfit.recipe``.
+    _, emri_pe_moves = EMRIMoveBuilder(wave_gen=wave_gen).build(
+        engine_info, curr, acs, priors, state
     )
-    state.sub_states["emri"].betas_all = betas_all
-
-    coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
-
-    emri_pe_move = ResidualAddOneRemoveOneMove(
-        "emri",
-        coords_shape,
-        wave_gen,
-        emri_info.waveform_kwargs.copy(),
-        emri_info.waveform_kwargs.copy(),
-        acs,
-        emri_info.num_prop_repeats,
-        emri_info.transform,
-        priors,
-        emri_info.inner_moves,
-        Tmax=np.inf,
-        betas_all=betas_all,
-    )
-    emri_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
     recipe.add_recipe_component(
-        EMRIPERecipeStep(moves=[emri_pe_move]), name="emri pe"
+        PERecipeStep(moves=emri_pe_moves), name="emri pe"
     )
 
 
@@ -495,7 +314,22 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         ndim=12,
     )
 
-    return EMRISetup(emri_settings)
+    emri_setup = EMRISetup(emri_settings)
+
+    # Engine-side template generation: one sampling-basis row in -> one
+    # run-domain template out. ``setup_acs(rebuild_residuals=True)`` calls this
+    # to subtract the state's EMRI templates from the residuals (replacing the
+    # old recipe-side pre-injection loop). The wave-wrap build is deferred to
+    # first call (cached) so settings construction stays cheap.
+    def _emri_signal_gen(*params, **kwargs):
+        wave_wrap = _get_emri_wave_wrap(general_set)
+        params_in = emri_setup.transform.both_transforms(
+            np.asarray(params, dtype=float)
+        )
+        return wave_wrap(*params_in, **kwargs)
+
+    emri_setup.signal_gen = _emri_signal_gen
+    return emri_setup
 
 
 def get_general_erebor_settings() -> GeneralSetup:
@@ -510,11 +344,17 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     domain_settings = DOMAIN_CHOICE
 
+    # The stock ``SyntheticSourceProcessingStep`` builds the (cached) injection
+    # response wrapper via the module-level factory and injects it onto the data
+    # grid. The template path in ``setup_recipe`` re-requests the wrapper and
+    # hits the same cache entry.
     processor_init_kwargs = dict(
         Tobs=Tobs,
         dt=dt,
         t_start=T_START,
-        injection_params_full_basis=INJECTION_PARAMS_FULL_BASIS,
+        wave_gen_factory=_make_emri_injection_wave_gen,
+        injections=INJECTION_PARAMS_FULL_BASIS,
+        call_kwargs={"convert_to_ra_dec": False},
         tdi_chan="XYZ",
         nchannels=3,
     )
@@ -551,7 +391,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         window_taper_duration=window_taper_duration,
         gpu_backend=GPU_BACKEND,
         gpus=None,
-        data_processor=SyntheticEMRIProcessingStep,
+        data_processor_class=SyntheticSourceProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,

@@ -120,10 +120,7 @@ from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.domains import WDMSettings
-
-# basic transform functions for pickling
-def f_ms_to_s(x):
-    return x * 1e-3
+from lisatools.sensitivity import tdi_generation_from_channel
 
 from eryn.utils.updates import Update
 
@@ -132,7 +129,7 @@ from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     SearchRecipeStep,
     PERecipeStep,
     RJRecipeStep,
@@ -165,18 +162,9 @@ LDC_SOURCE_FILE = os.environ.get(
     "/Users/mkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5",
 )
 
-# TDI channel — TDI generation is derived from it.
+# TDI channel — TDI generation is derived from it via the stock helper.
 TDI_CHAN = "XYZ"
-_CHAN_TO_GEN = {
-    "XYZ": 2, "AET": 2, "XYZ2": 2, "AET2": 2,
-    "XYZ1": 1, "AET1": 1,
-}
-if TDI_CHAN not in _CHAN_TO_GEN:
-    raise ValueError(
-        f"TDI_CHAN={TDI_CHAN!r} not recognised. "
-        f"Add it to _CHAN_TO_GEN to pin the TDI generation."
-    )
-TDI_GEN = _CHAN_TO_GEN[TDI_CHAN]
+TDI_GEN = tdi_generation_from_channel(TDI_CHAN)
 TDI_GEN_STR = f"{TDI_GEN}{'nd' if TDI_GEN == 2 else 'st'} generation"
 NCHANNELS = 3
 
@@ -268,42 +256,29 @@ def setup_recipe(
         # instance was built with. To run the JAX-autograd grad/hessian
         # path, build a separate ``GBWDMHeterodyne(force_backend="jax")``
         # and hand it to the Buffer.
-        import sys
-        _gb_wdm_het_dir = os.path.abspath(
-            os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "..", "scripts", "gb_chunked_het",
-            )
-        )
-        if _gb_wdm_het_dir not in sys.path:
-            sys.path.insert(0, _gb_wdm_het_dir)
-        from gb_wdm_het import GBWDMHeterodyne
+        # Chunked-het GB likelihood: the INSTALLED GBGPU class (no sys.path hack,
+        # no dev gb_wdm_het). GBWDMComputations reads Nf/Nt/dt/band/t0 from the domain.
+        from gbgpu.gbcomps import GBWDMComputations
 
         _wdm = general_info.domain_settings
         # ``data_t0`` is the runtime data start time set by the engine
         # (``times[0]`` after the preprocess trim) — the chunked-het WDM
         # grid must be anchored there, not at 0.
         _t_obs_start = float(getattr(general_info, "data_t0", 0.0))
-        # CHUNKED_JAX_CHUNK env knob lets a JAX-backed instance split
-        # the leaf axis for memory; unused on the C++ backends. None
-        # falls through to GBWDMHeterodyne's _resolve_jax_chunk which
-        # honours GBHET_JAX_CHUNK / JAX_GRAD_CHUNK at call time.
-        _jax_chunk_env = os.environ.get("CHUNKED_JAX_CHUNK")
-        _jax_chunk = int(_jax_chunk_env) if _jax_chunk_env else None
-        gb_info.gb_wdm_comp = GBWDMHeterodyne(
-            Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
-            T_full=general_info.Tobs, t_ref_full=gb_info.t0,
+        # The band WDMSettings domain (_wdm) carries Nf/Nt/dt + the active band +
+        # t0 (data_t0); t_ref is the GB phase reference; tdi_config replaces tdi_gen.
+        gb_info.gb_wdm_comp = GBWDMComputations(
+            _wdm,
+            t_ref=gb_info.t0,
             Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
             n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
             N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
-            nchannels=3,
-            force_backend=general_info.force_backend,
-            tdi_gen=TDI_GEN_STR,
-            orbits=general_info.gpu_orbits,
-            t_obs_start=_t_obs_start,
             N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
             N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
-            jax_chunk=_jax_chunk,
+            orbits=general_info.gpu_orbits,
+            tdi_config=TDI_GEN_STR,
+            force_backend=general_info.force_backend,
+            tdi_type="XYZ",
         )
         logger.info(
             "Chunked-het GB likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d "
@@ -330,14 +305,14 @@ def setup_recipe(
         num_repeats=num_repeats_psd,
         permute_every=permute_every_psd,
     )
-    gb_search_moves, gb_pe_moves = build_gb_moves(
-        engine_info, curr, acs, priors, state
+    # Smoke test: use ONLY the prior-based RJ proposal for GBs (100%) — drops
+    # the fstat / refit moves and the search list, expressed via the
+    # ``build_gb_moves`` design knobs (replacing the old post-hoc
+    # ``[m for m in gb_pe_moves if "prior" in m.name]`` filter).
+    _, gb_pe_moves = build_gb_moves(
+        engine_info, curr, acs, priors, state,
+        include_search=False, pe_move_names=["rj_prior"],
     )
-
-    # Smoke test: use ONLY the prior-based RJ proposal for GBs (100%) —
-    # drops the fstat / refit moves. ``build_gb_moves`` returns the PE list
-    # as ``[prior, refit, fstat_mcmc]``; keep just the prior one.
-    gb_pe_moves = [m for m in gb_pe_moves if "prior" in m.name]
 
     #* ================================= SETUP PE (no search) =================================
     all_pe_moves = [psd_pe_move] + gb_pe_moves

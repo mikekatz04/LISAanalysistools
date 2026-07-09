@@ -13,6 +13,29 @@ def return_x(x):
     return x
 
 
+def ensure_leaf_cap_fields(band_info: dict, num_bands: int) -> None:
+    """Backfill the per-band progressive leaf-cap arrays on ``band_info``.
+
+    Three ``(num_bands,)`` arrays drive the search-mode leaf cap
+    (see ``GBSpecialBase._update_band_leaf_caps``):
+
+    - ``band_leaf_cap``: max alive leaves allowed per band at EVERY
+      temperature. ``-1`` = cap disarmed (the fresh-state sentinel; the
+      first cap-enabled RJ move arms it to its ``leaf_cap_start``).
+    - ``band_cap_iters``: RJ iterations spent at the current cap.
+    - ``band_best_ll``: running max of the per-band cold-walker residual
+      ll at the current cap (reset to ``-inf`` on each increment).
+
+    Kept OUT of ``band_info_keys`` so band-info dicts loaded from HDF5
+    files written before this feature still pass the setter's required-key
+    check; this backfill runs from both branches of
+    :meth:`GBState.initialize_band_information`.
+    """
+    band_info.setdefault("band_leaf_cap", np.full(num_bands, -1, dtype=int))
+    band_info.setdefault("band_cap_iters", np.zeros(num_bands, dtype=int))
+    band_info.setdefault("band_best_ll", np.full(num_bands, -np.inf))
+
+
 class GBState(eryn_State):
     """Galactic-binary (GB) sampler state with per-band bookkeeping.
 
@@ -86,7 +109,7 @@ class GBState(eryn_State):
             band_temps: ``(num_bands, ntemps)`` array of inverse temperatures.
         """
 
-        if not hasattr(self, "intialized"):
+        if not self.band_initialized:
             band_info = {}
             band_info["nwalkers"], band_info["ntemps"], band_info["band_edges"] = (
                 nwalkers,
@@ -124,13 +147,24 @@ class GBState(eryn_State):
                 (band_info["ntemps"], band_info["nwalkers"], band_info["num_bands"]),
                 dtype=int,
             )
+            ensure_leaf_cap_fields(band_info, band_info["num_bands"])
             band_info["initialized"] = True
             self.band_info = band_info
 
         else:
-            assert nwalkers == band_info["nwalkers"]
-            assert ntemps == band_info["ntemps"]
-            assert np.all(band_edges == band_info["band_edges"])
+            # already initialized: validate the geometry is unchanged.
+            # band_info dicts that round-tripped through the HDF backend
+            # (GBHDFBackend stores only the ``band_info_keys`` arrays)
+            # lack the nwalkers/ntemps/num_bands scalars -- backfill them
+            # from the array shapes before validating.
+            bi = self.band_info
+            bi.setdefault("num_bands", len(bi["band_edges"]) - 1)
+            bi.setdefault("ntemps", int(bi["band_temps"].shape[-1]))
+            bi.setdefault("nwalkers", int(bi["band_num_binaries"].shape[1]))
+            ensure_leaf_cap_fields(bi, bi["num_bands"])
+            assert nwalkers == bi["nwalkers"]
+            assert ntemps == bi["ntemps"]
+            assert np.all(band_edges == bi["band_edges"])
 
     def update_band_information(
         self,
@@ -166,6 +200,21 @@ class GBState(eryn_State):
 
         self.band_info["band_swaps_proposed"] += band_swaps_proposed
         self.band_info["band_swaps_accepted"] += band_swaps_accepted
+
+    def accumulate_proposals(self, proposed, accepted, is_rj: bool) -> None:
+        """Accumulate ``(num_bands, ntemps)`` proposal/acceptance counts into
+        the RJ or in-model counter family."""
+        if is_rj:
+            self.band_info["band_num_proposed_rj"] += proposed
+            self.band_info["band_num_accepted_rj"] += accepted
+        else:
+            self.band_info["band_num_proposed"] += proposed
+            self.band_info["band_num_accepted"] += accepted
+
+    def accumulate_swaps(self, proposed, accepted) -> None:
+        """Accumulate ``(num_bands, ntemps - 1)`` tempering swap counts."""
+        self.band_info["band_swaps_proposed"] += proposed
+        self.band_info["band_swaps_accepted"] += accepted
 
     def reset_band_counters(self):
         """Zero all per-band proposal/acceptance/swap counters."""

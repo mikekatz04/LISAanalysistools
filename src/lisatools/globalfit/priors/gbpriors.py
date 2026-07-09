@@ -32,24 +32,28 @@ class GalacticBinaryPrior(BaseSourcePrior):
         
         if sampling_params is None:
             sampling_params = [
-                r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", 
-                r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"
+                "A", "f0", "fdot", "phi0",
+                "cos_iota", "psi", "alpha", "sin_delta"
             ]
-        
+
         if physical_params is None:
+            # Names persist through the value transforms (exp / arccos /
+            # arcsin), matching GBSetup.init_sampling_info and
+            # make_gb_transform_container -- TransformContainer requires
+            # every sampling name to appear in the output basis.
             physical_params = [
-                r"$A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", 
-                r"$\phi_0$", r"$\iota$", r"$\psi$", r"$\alpha$", r"$\delta$"
+                "A", "f0", "fdot", "fddot",
+                "phi0", "cos_iota", "psi", "alpha", "sin_delta"
             ]
-            
+
         if fill_dict is None:
-            fill_dict = {r"$\ddot{f}$": 0.0}
-            
+            fill_dict = {"fddot": 0.0}
+
         if param_transforms is None:
             param_transforms = {
-                r"$\log A$": np.exp,
-                r"$\cos\iota$": np.arccos,
-                r"$\sin\delta$": np.arcsin,
+                "A": np.exp,
+                "cos_iota": np.arccos,
+                "sin_delta": np.arcsin,
             }
             
         super().__init__(

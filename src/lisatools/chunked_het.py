@@ -162,20 +162,26 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
                 f"tdi_type must be one of 'XYZ', 'AET', 'AE'; got {tdi_type!r}.")
         self.tdi_type = tdi_type
 
-        # Chunk geometry + WDM phitilde -- precomputed once.
+        # Chunk geometry + WDM phitilde -- precomputed once on the host
+        # (compute_chunk_geometry / compute_wdm_window are host-side by
+        # design), then uploaded ONCE to this instance's backend: every
+        # kernel call passes these as-is and the CUDA bindings require
+        # device arrays. On CPU xp is numpy and asarray is a no-op.
         backend_short = self.backend.name.split("_")[-1]
         geom = compute_chunk_geometry(self.Nt, self.Nt_sub, self.n_pad)
         layer_dt = self.Nf * self.dt
         starts_f = np.asarray(geom["starts"], dtype=float)
-        self.chunk_t_starts = (
+        self.chunk_t_starts = self.xp.asarray(
             self.t_obs_start + starts_f * layer_dt
-        ).copy()
-        self.chunk_keep_lo  = np.asarray(geom["keep_lo"],     dtype=np.int32)
-        self.chunk_keep_hi  = np.asarray(geom["keep_hi"],     dtype=np.int32)
-        self.chunk_n_global_offset = np.asarray(geom["n_global_lo"],
-                                                  dtype=np.int32)
-        self.wdm_window = compute_wdm_window(self.Nf, self.Nt_sub, self.dt,
-                                              backend=backend_short)
+        )
+        self.chunk_keep_lo  = self.xp.asarray(geom["keep_lo"],     dtype=self.xp.int32)
+        self.chunk_keep_hi  = self.xp.asarray(geom["keep_hi"],     dtype=self.xp.int32)
+        self.chunk_n_global_offset = self.xp.asarray(geom["n_global_lo"],
+                                                     dtype=self.xp.int32)
+        self.wdm_window = self.xp.asarray(
+            compute_wdm_window(self.Nf, self.Nt_sub, self.dt,
+                               backend=backend_short)
+        )
         self.n_chunks = int(starts_f.size)
 
         # Resolved Tukey alpha (one double passed to the kernel).
@@ -248,12 +254,14 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         if not self._orbits.configured:
             # Configure on the full observation span at the kernel's dt
             # so pycppdetector_args populate for the C++ / JAX wrap.
+            # (_configure directly: this is an explicit custom grid, not the
+            # lazy default configuration.)
             t_arr = np.arange(0.0, self.T + self.dt, self.dt) + self.t_obs_start
             try:
-                self._orbits.configure(t_arr=t_arr, dt=self.dt,
+                self._orbits._configure(t_arr=t_arr, dt=self.dt,
                                         linear_interp_setup=True)
             except TypeError:
-                self._orbits.configure(linear_interp_setup=True)
+                self._orbits._configure(linear_interp_setup=True)
         self.cpp_orbits = self.backend.OrbitsWrap(*self._orbits.pycppdetector_args)
 
     @classmethod
@@ -282,8 +290,12 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
     def _swap_layer_groups(self, params_add_2d, params_remove_2d,
                             group_band_layers, margin_layers,
                             data_index=None, noise_index=None):
+        # compute_swap_layer_groups is xp-agnostic (dispatches on the array
+        # module of its inputs) -- keep params on this instance's backend
+        # like _layer_groups does; np.asarray here raised CuPy's
+        # implicit-conversion TypeError on GPU.
         return compute_swap_layer_groups(
-            np.asarray(params_add_2d), np.asarray(params_remove_2d),
+            self.xp.asarray(params_add_2d), self.xp.asarray(params_remove_2d),
             layer_df=self.layer_df,
             f0_param_index=self._F0_PARAM_INDEX,
             group_band_layers=int(group_band_layers),
@@ -329,6 +341,55 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         assert int(data_index.max()) < num_data
         assert int(noise_index.max()) < num_noise
         return data_index, noise_index
+
+    def _as_wdm_holder(self, wdm_holder):
+        """Normalise ``wdm_holder`` to an :class:`AnalysisContainerArray`.
+
+        The ``*_wdm`` kernels consume an ACA's flat ``linear_data_arr[0]`` /
+        ``linear_psd_arr[0]`` and index it per-binary via ``data_index``.
+        Callers may pass either a full (multi-walker) ACA or a single
+        :class:`AnalysisContainer` (e.g. one walker slab for a data-independent
+        ``<h|h>``).  A lone container is wrapped into a 1-element ACA under the
+        hood so the kernel interior is identical either way (one AC == one
+        walker slab; ``data_index`` must then be all-zero).  ``gpus`` is
+        inferred from where the container's residual lives so the repack stays
+        on-device.
+        """
+        # Already an ACA (or anything exposing the flat buffers) -> pass through.
+        if hasattr(wdm_holder, "linear_data_arr"):
+            return wdm_holder
+        from .analysiscontainer import AnalysisContainer, AnalysisContainerArray
+        if isinstance(wdm_holder, AnalysisContainer):
+            arr = getattr(getattr(wdm_holder, "data_res_arr", None), "arr", None)
+            # cupy arrays expose ``.device.id``; NumPy has no such attr -> None.
+            dev = getattr(getattr(arr, "device", None), "id", None)
+            gpus = None if dev is None else [int(dev)]
+            return AnalysisContainerArray(wdm_holder, gpus=gpus)
+        raise TypeError(
+            f"wdm_holder must be an AnalysisContainerArray or AnalysisContainer; "
+            f"got {type(wdm_holder).__name__}"
+        )
+
+    # ---- per-source in-model likelihood setup hooks -----------------------
+    #
+    # The GB special move calls setup_in_model() once per picked source
+    # batch -- at the same stage the proposal cholesky / friend table are
+    # built, AFTER the sources are taken out of their cell residuals --
+    # and clear_in_model() after the repeat block. Chunked-het scores every
+    # proposal directly against the residual, so it needs no per-source
+    # preparation: both hooks just return. Heterodyne-reference
+    # computations (gbgpu's GBSignalHetComputations engine mode) override
+    # them to build the reference against the source-free residual and
+    # hold it CONSTANT for the duration of the in-model repeats.
+
+    def setup_in_model(self, buffer_aca, params_ref_phys, data_index,
+                       N_vals=None) -> None:
+        """No-op in-model setup hook (see class comment above)."""
+        return None
+
+    def clear_in_model(self) -> None:
+        """No-op in-model teardown hook."""
+        return None
 
     def get_ll_wdm(self, params, wdm_holder, data_index=None, noise_index=None,
                    convert_to_ra_dec: Optional[bool] = None,
@@ -391,6 +452,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             d_h_out = self.xp.zeros(num_bin)
             h_h_out = self.xp.zeros(num_bin)
 
+        wdm_holder = self._as_wdm_holder(wdm_holder)
         num_data = num_noise = len(wdm_holder)
         data_index, noise_index = self._prep_indices(
             num_bin, num_data, num_noise, data_index, noise_index)
@@ -485,6 +547,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             aa    = self.xp.zeros(num_bin); rr    = self.xp.zeros(num_bin)
             ar    = self.xp.zeros(num_bin)
 
+        wdm_holder = self._as_wdm_holder(wdm_holder)
         num_data = num_noise = len(wdm_holder)
         data_index, noise_index = self._prep_indices(
             num_bin, num_data, num_noise, data_index, noise_index)
@@ -521,14 +584,14 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             int(self.backend.TDITypeDict[self.tdi_type]),
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(self.N_cp_sig), int(self.N_cp_orbit),
-            np.asarray(groups["binary_perm"],  dtype=np.int32),
-            np.asarray(groups["group_starts"], dtype=np.int32),
-            np.asarray(groups["group_ends"],   dtype=np.int32),
-            np.asarray(groups["group_m_lo"],   dtype=np.int32),
-            np.asarray(groups["group_m_hi"],   dtype=np.int32),
+            self.xp.asarray(groups["binary_perm"],  dtype=np.int32),
+            self.xp.asarray(groups["group_starts"], dtype=np.int32),
+            self.xp.asarray(groups["group_ends"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_lo"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_hi"],   dtype=np.int32),
             int(groups["n_groups"]),
-            np.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
-            np.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
+            self.xp.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
+            self.xp.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
             int(m_band_half_width),
         )
 
@@ -592,6 +655,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             params_tmp[:, -2] = lam
             params_tmp[:, -1] = beta
 
+        wdm_holder = self._as_wdm_holder(wdm_holder)
         num_data = num_noise = len(wdm_holder)
         data_index, noise_index = self._prep_indices(
             num_bin, num_data, num_noise, data_index, noise_index)
@@ -628,11 +692,11 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             float(self.T), float(self.t_ref),
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(self.N_cp_sig), int(self.N_cp_orbit),
-            np.asarray(groups["binary_perm"],  dtype=np.int32),
-            np.asarray(groups["group_starts"], dtype=np.int32),
-            np.asarray(groups["group_ends"],   dtype=np.int32),
-            np.asarray(groups["group_m_lo"],   dtype=np.int32),
-            np.asarray(groups["group_m_hi"],   dtype=np.int32),
+            self.xp.asarray(groups["binary_perm"],  dtype=np.int32),
+            self.xp.asarray(groups["group_starts"], dtype=np.int32),
+            self.xp.asarray(groups["group_ends"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_lo"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_hi"],   dtype=np.int32),
             int(groups["n_groups"]),
         )
 
@@ -670,6 +734,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
                 p_tmp[:, -2] = lam
                 p_tmp[:, -1] = beta
 
+        wdm_holder = self._as_wdm_holder(wdm_holder)
         num_data = num_noise = len(wdm_holder)
         data_index, noise_index = self._prep_indices(
             num_bin, num_data, num_noise, data_index, noise_index)
@@ -713,14 +778,14 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             float(self.T), float(self.t_ref),
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(self.N_cp_sig), int(self.N_cp_orbit),
-            np.asarray(groups["binary_perm"],  dtype=np.int32),
-            np.asarray(groups["group_starts"], dtype=np.int32),
-            np.asarray(groups["group_ends"],   dtype=np.int32),
-            np.asarray(groups["group_m_lo"],   dtype=np.int32),
-            np.asarray(groups["group_m_hi"],   dtype=np.int32),
+            self.xp.asarray(groups["binary_perm"],  dtype=np.int32),
+            self.xp.asarray(groups["group_starts"], dtype=np.int32),
+            self.xp.asarray(groups["group_ends"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_lo"],   dtype=np.int32),
+            self.xp.asarray(groups["group_m_hi"],   dtype=np.int32),
             int(groups["n_groups"]),
-            np.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
-            np.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
+            self.xp.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
+            self.xp.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
         )
 
         grad_add    = self.xp.asarray(grad_add_out).reshape(num_bin, nparams)
@@ -760,6 +825,21 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             grid_dim: CUDA launch grid size (use 0 to default to
                 ``n_chunks``).
         """
+        # Call-time holder acceptance (sprint rule, 2026-07): the fill
+        # target may be an AnalysisContainerArray (incl. sub-band buffers),
+        # a lone AnalysisContainer, or a DomainBase child (e.g. WDMSignal)
+        # -- resolved here to the flat/shaped array the kernel accumulates
+        # into. Raw ndarrays keep the legacy path below.
+        from .domains import DomainBase as _DomainBase
+        if hasattr(templates, "linear_data_arr"):
+            templates = templates.linear_data_arr[0]
+        elif isinstance(templates, _DomainBase):
+            templates = templates.arr
+        else:
+            from .analysiscontainer import AnalysisContainer as _AC
+            if isinstance(templates, _AC):
+                templates = self._as_wdm_holder(templates).linear_data_arr[0]
+
         if self.backend.name == self._BACKEND_PREFIX + "_jax":
             assert isinstance(templates, np.ndarray), (
                 "On the JAX backend, ``templates`` must be a numpy "
@@ -812,6 +892,11 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
 
         params_tmp = self.xp.atleast_2d(self.xp.asarray(params)).copy()
         num_bin = params_tmp.shape[0]
+        # Empty batch (e.g. a sub-band cell with no live sources to
+        # inject): nothing to accumulate -- and the data_index bounds
+        # check below cannot reduce over an empty array.
+        if num_bin == 0 or params_tmp.size == 0:
+            return
         nparams = int(self._NPARAMS)
         assert params_tmp.shape[1] == nparams, (
             f"params has {params_tmp.shape[1]} columns, expected {nparams}")
@@ -847,6 +932,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             self.cpp_orbits, self.cpp_tdi_config,
             self.cpp_wdm_settings,
             params_in, factors,
+            data_index,
             self.chunk_t_starts,
             self.chunk_keep_lo, self.chunk_keep_hi,
             self.chunk_n_global_offset,
@@ -926,6 +1012,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             M_re = self.xp.zeros((num_bin, 10))
             M_im = self.xp.zeros((num_bin, 10))
 
+        wdm_holder = self._as_wdm_holder(wdm_holder)
         num_data = num_noise = len(wdm_holder)
         data_index, noise_index = self._prep_indices(
             num_bin, num_data, num_noise, data_index, noise_index)
@@ -963,5 +1050,119 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         self.N_arr = N_re
         self.M_mat = M_re
         return N_re, M_re
+
+    # GB-oriented default finite-difference steps (per physical parameter),
+    # matching GBFDComputations._DEFAULT_PARAM_EPS. SOBBH (11 params) callers
+    # should pass ``param_eps`` explicitly; extra columns fall back to 1e-6.
+    _DEFAULT_PARAM_EPS = (
+        1.0e-25,   # amp
+        2.0e-14,   # f0    (Hz)
+        1.0e-21,   # fdot  (Hz/s)
+        1.0e-28,   # fddot (Hz/s^2)
+        1.0e-6,    # phi0
+        1.0e-6,    # iota
+        1.0e-6,    # psi
+        1.0e-6,    # lam
+        1.0e-6,    # beta
+    )
+
+    def _fisher_param_eps(self, nparams, param_eps):
+        if param_eps is not None:
+            eps = self.xp.asarray(param_eps, dtype=self.xp.float64)
+            assert eps.shape[0] == nparams, (
+                f"param_eps length {eps.shape[0]} != nparams {nparams}")
+            return eps
+        base = list(self._DEFAULT_PARAM_EPS)
+        if nparams > len(base):
+            base = base + [base[-1]] * (nparams - len(base))
+        return self.xp.asarray(base[:nparams], dtype=self.xp.float64)
+
+    def information_matrix(self, params, wdm_holder,
+                           inds=None, param_eps=None,
+                           noise_index=None,
+                           convert_to_ra_dec: Optional[bool] = None,
+                           **swap_kwargs):
+        """Per-source Fisher information matrix over the WDM domain.
+
+        Single-template parity with ``GBGPU.information_matrix``. The Fisher
+        ``Gamma_ij = <dh/dtheta_i | dh/dtheta_j>`` is assembled from
+        central-difference cross inner products ``<h_a | h_b>``, which
+        :meth:`get_swap_ll_wdm` returns as its ``ar`` term with the canonical
+        WDM inner-product normalization -- so the matrix matches the WDM
+        likelihood convention exactly, with no factor re-derivation. With
+        ``theta_i^+/- = theta +/- eps_i e_i`` and 2nd-order central
+        differences,
+
+            Gamma_ij = [ar(i+,j+) - ar(i+,j-) - ar(i-,j+) + ar(i-,j-)]
+                       / (4 eps_i eps_j).
+
+        Cost: 4 ``get_swap_ll_wdm`` launches per unique (i, j) pair; heavier
+        than the FD path but correct-by-construction. (A direct dh-buffer
+        variant via :meth:`fill_global_wdm` can replace this once its inner
+        product is factor-calibrated against ``<h|h>``.)
+
+        Args:
+            params: ``(num_bin, nparams)`` GB parameters (1D auto-promoted).
+            wdm_holder: ``AnalysisContainerArray`` (or a single
+                ``AnalysisContainer``, wrapped under the hood) providing invC.
+            inds: parameter indices to include (default all ``nparams``).
+            param_eps: per-parameter finite-difference step (default the
+                GB-oriented table; SOBBH callers should pass this).
+            noise_index: per-binary index into the invC slabs.
+            swap_kwargs: forwarded to :meth:`get_swap_ll_wdm`
+                (``grid_dim``/``use_layer_groups``/``group_band_layers``/
+                ``margin_layers``/``m_band_half_width``).
+
+        Returns:
+            ``(num_bin, num_derivs, num_derivs)`` real Fisher matrices.
+        """
+        p = self.xp.asarray(self.xp.atleast_2d(params)).copy()
+        num_bin, nparams = p.shape[0], int(self._NPARAMS)
+        assert p.shape[1] == nparams, (
+            f"params has {p.shape[1]} columns, expected {nparams}")
+        if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
+            lam = p[:, -2].copy(); beta = p[:, -1].copy()
+            lam, beta = ecliptic_to_icrs(lam, beta)
+            p[:, -2] = lam; p[:, -1] = beta
+
+        if inds is None:
+            inds = list(range(nparams))
+        else:
+            inds = [int(i) for i in self.xp.asarray(inds).tolist()]
+        num_derivs = len(inds)
+        eps = self._fisher_param_eps(nparams, param_eps)
+
+        plus, minus = [], []
+        for ind in inds:
+            ei = float(eps[ind])
+            up = p.copy(); up[:, ind] += ei
+            dn = p.copy(); dn[:, ind] -= ei
+            plus.append(up); minus.append(dn)
+
+        def _ar(pa, pb):
+            # <h(pa) | h(pb)> per binary (index 6 of the get_swap_ll_wdm tuple).
+            # The Fisher only consumes template cross terms, so the data slab
+            # is irrelevant -- but the layer-grouping path requires
+            # data_index == noise_index, so align them.
+            out = self.get_swap_ll_wdm(
+                pa, pb, wdm_holder,
+                data_index=noise_index, noise_index=noise_index,
+                **swap_kwargs)
+            return self.xp.asarray(out[6]).real
+
+        info = self.xp.zeros((num_bin, num_derivs, num_derivs),
+                             dtype=self.xp.float64)
+        for i in range(num_derivs):
+            ei = float(eps[inds[i]])
+            for j in range(i, num_derivs):
+                ej = float(eps[inds[j]])
+                g = (_ar(plus[i],  plus[j])
+                     - _ar(plus[i],  minus[j])
+                     - _ar(minus[i], plus[j])
+                     + _ar(minus[i], minus[j])) / (4.0 * ei * ej)
+                info[:, i, j] = g
+                info[:, j, i] = g
+        return info
 
 

@@ -33,7 +33,7 @@ def _watchdog():
 
 from lisatools.detector import L1Orbits
 from lisatools.globalfit.preprocessing import find_file
-from lisatools.globalfit.recipe_steps import mbh_catalogue_to_sampling_basis
+from lisatools.globalfit.recipe import mbh_catalogue_to_sampling_basis
 from lisatools.globalfit.stock.erebor import make_mbh_transform_container
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform

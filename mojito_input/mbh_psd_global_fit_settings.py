@@ -34,7 +34,7 @@ from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralS
 from eryn.utils.updates import Update
 
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     SearchRecipeStep,
     PERecipeStep,
     build_psd_moves,

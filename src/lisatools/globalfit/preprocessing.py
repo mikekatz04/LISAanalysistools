@@ -4,9 +4,10 @@ Preprocessing module for loading and handling Mojito L1 files.
 Credits for most of the signal processing functions to Ollie Burke and Martina Muratore for the repository: https://github.com/OllieBurke/mojito-noise-sprint/blob/main/Mojito_Sprint/
 """
 
+import dataclasses
 import logging
 import os
-from typing import Optional
+from typing import Callable, Optional, Sequence
 
 import h5py
 import matplotlib.pyplot as plt
@@ -17,7 +18,14 @@ from tqdm import tqdm
 
 from ..domains import DomainBase
 from ..detector import L1Orbits, Orbits
-from ..domains import DomainBase, DomainSettingsBase, TDSettings, TDSignal
+from ..domains import (
+    DomainBase,
+    DomainSettingsBase,
+    FDSettings,
+    TDSettings,
+    TDSignal,
+    place_td_signal_on_grid,
+)
 from ..utils.utility import get_array_module
 
 logger = logging.getLogger(__name__)
@@ -60,6 +68,25 @@ def find_file(folder: str, source_type: str, source_id: int) -> str:
     raise FileNotFoundError(
         f"No Mojito L1 file found for source type '{source_type}' and source ID '{source_id}' in folder '{folder}'."
     )
+
+
+def normalize_source_ids(d: dict) -> dict:
+    """Coerce a per-class source-id mapping to lists.
+
+    Each value is normalized so ``None -> []``, a scalar ``v -> [v]``, and a
+    list/tuple is returned as a ``list``. Used by settings recipes to build a
+    uniform ``{source_type: [ids...]}`` mapping from user-edited literals /
+    environment overrides.
+    """
+    out = {}
+    for k, v in d.items():
+        if v is None:
+            out[k] = []
+        elif isinstance(v, (list, tuple)):
+            out[k] = list(v)
+        else:
+            out[k] = [v]
+    return out
 
 
 class L1DataLoader:
@@ -217,8 +244,11 @@ class L1DataLoader:
                 orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
                 print(f"[load_data] L1Orbits(...) (incl. _setup) took {_t.perf_counter()-_t0:.2f}s", flush=True)
                 _t0 = _t.perf_counter()
-                orbits.configure(linear_interp_setup=True)
-                print(f"[load_data] orbits.configure(linear_interp_setup=True) took {_t.perf_counter()-_t0:.2f}s", flush=True)
+                # Eagerly build the interpolation grid here (data-load time is
+                # the right place to pay the one-time cost); equivalent to the
+                # lazy first-use configuration.
+                orbits._ensure_configured()
+                print(f"[load_data] orbits._ensure_configured() took {_t.perf_counter()-_t0:.2f}s", flush=True)
                 logger.info(f"Initialized orbits from NOISE file.")
 
             with self._open(file_path) as f:
@@ -304,8 +334,7 @@ class L1DataLoader:
                             if orbits is None:
                                 orbits: Orbits = self.orbits_class(
                                     file_path, **(self.orbits_kwargs or {})
-                                )
-                                orbits.configure(linear_interp_setup=True)
+                                )  # configures lazily on first use
                                 logger.info(f"Initialized orbits from {source_type} file.")
 
                         else:
@@ -928,13 +957,32 @@ class BaseProcessingStep(SignalProcessor):
 
         # The TD signal is already a DomainBase; ``.transform(settings, window)``
         # produces the matching DomainBase child in the target domain.
+        #
+        # TODO (2026-07-07, backend auto-conversion follow-up): transform()
+        # now auto-transfers a CPU-loaded signal onto the target settings'
+        # backend (DomainBase._coerce_transform_backend), which fixes the
+        # GPU-settings-vs-CPU-data mismatch on this pour() path. Two related
+        # boundaries still need an audit pass:
+        #   1. the equality short-circuit below can hand back the
+        #      CPU-resident td_signal WITHOUT any transfer when the target
+        #      settings compare equal but live on another backend — if a
+        #      NumPy/CuPy mix fires just downstream of pour(), apply
+        #      ``data_signal = data_signal.with_backend(settings.backend)``;
+        #   2. other CPU-side ingest points (noise-knot arrays into
+        #      XYZSensitivityBackend.set_sensitivity_matrix, hand-built
+        #      window arrays in settings files) are not auto-converted —
+        #      DomainBase.with_backend / xp.asarray at the boundary is the
+        #      pattern to use, one transfer per array, when they fire.
         if self.td_signal.settings == settings:
             data_signal = self.td_signal
         else:
             # TODO: fix this to be chopped based on Tobs originally
             if isinstance(settings, TDSettings) and self.td_signal.N != settings.N:
-                assert settings.N < self.td_signal.N
+                assert settings.N < self.td_signal.N            
                 _td_sig = TDSignal(self.td_signal[:, :settings.N], TDSettings(settings.N, self.td_signal.dt))
+            elif isinstance(settings, FDSettings):
+                target_td_n = round(1 / (settings.df * self.td_signal.dt))
+                _td_sig = TDSignal(self.td_signal[:, :target_td_n], TDSettings(target_td_n, self.td_signal.dt))
             else:
                 _td_sig = self.td_signal
             data_signal = _td_sig.transform(settings, window=window)
@@ -1048,3 +1096,233 @@ class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
         self.individual_timeseries = (
             {}
         )  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis
+
+
+# ============================================================
+# Synthetic-data / injection processing
+# ============================================================
+@dataclasses.dataclass
+class SyntheticSourceSpec:
+    """One source class to inject onto a synthetic data grid.
+
+    Args:
+        label: Identifier for the returned per-source stream (e.g. ``"EMRI"``).
+        wave_gen: Callable producing a per-source signal. When
+            ``times_from_gen`` is ``False`` it returns a ``(nch, n)`` (or ``(n,)``)
+            array on the data grid; when ``True`` it returns ``(times, channels)``.
+        injections: ``(num_sources, ndim)`` array of parameter rows (a single 1-D
+            row is broadcast to ``(1, ndim)``).
+        param_transform: Optional per-row transform applied before calling
+            ``wave_gen`` (e.g. an MBH sampling->waveform basis transform).
+        times_from_gen: If ``True``, ``wave_gen`` returns ``(times, channels)`` and
+            the channels are placed on the grid at their native ``times``.
+        call_kwargs: Optional extra keyword arguments forwarded to ``wave_gen``
+            (e.g. ``{"convert_to_ra_dec": False}`` for the EMRI wrapper).
+    """
+
+    label: str
+    wave_gen: Callable
+    injections: np.ndarray
+    param_transform: Optional[Callable] = None
+    times_from_gen: bool = False
+    call_kwargs: Optional[dict] = None
+
+
+def build_synthetic_source_streams(
+    grid: TDSettings,
+    *,
+    sources: Sequence[SyntheticSourceSpec],
+    nchannels: int,
+    progress: bool = False,
+) -> "dict[str, np.ndarray]":
+    """Sum per-source TD signal streams onto ``grid``.
+
+    Each :class:`SyntheticSourceSpec` is evaluated over its injection rows and
+    the resulting signals are placed onto the shared ``grid`` via
+    :func:`~lisatools.domains.place_td_signal_on_grid`. Returns a mapping
+    ``{label: (nchannels, grid.N)}`` (one summed stream per source class).
+    """
+    N = grid.N
+    out: "dict[str, np.ndarray]" = {}
+    for spec in sources:
+        inj = np.atleast_2d(spec.injections)
+        stream = np.zeros((nchannels, N), dtype=np.float64)
+        call_kwargs = spec.call_kwargs or {}
+        if inj.shape[0] > 0 and inj.size > 0:
+            for ii, row in enumerate(inj):
+                if progress:
+                    logger.info(
+                        "Injecting %s signal %d of %d", spec.label, ii + 1, inj.shape[0]
+                    )
+                if spec.param_transform is not None:
+                    params = spec.param_transform(np.asarray(row, dtype=float))
+                else:
+                    params = row
+                if spec.times_from_gen:
+                    times, channels = spec.wave_gen(*params, **call_kwargs)
+                    placed = place_td_signal_on_grid(
+                        np.atleast_2d(channels), grid, times=times
+                    ).arr
+                else:
+                    sig = np.asarray(spec.wave_gen(*params, **call_kwargs))
+                    placed = place_td_signal_on_grid(np.atleast_2d(sig), grid).arr
+                stream += np.asarray(placed)[:nchannels]
+        out[spec.label] = stream
+    return out
+
+
+class SyntheticSourceProcessingStep(BaseProcessingStep):
+    """Generate a single source class's injection in-process.
+
+    Builds the injected TD stream from a source-specific response wrapper and
+    hands ``(times, data, fs)`` to :class:`BaseProcessingStep` — the same
+    interface as :class:`SangriaProcessingStep`, with no external file needed.
+
+    Supply the wrapper either directly (``wave_gen``) for runtime use, or via a
+    ``wave_gen_factory`` for the global-fit settings path: the response wrappers
+    hold unpicklable C++ objects, so when this step is registered as
+    ``GeneralSettings.data_processor_class`` (whose ``processor_init_kwargs`` are
+    deep-copied), pass a **module-level** ``wave_gen_factory`` function and let it
+    build the wrapper lazily inside ``__init__``. The factory is called as
+    ``wave_gen_factory(Tobs=..., dt=..., t_start=..., tdi_chan=...)``.
+    """
+
+    def __init__(
+        self,
+        *,
+        Tobs: float,
+        dt: float,
+        t_start: float,
+        wave_gen: Optional[Callable] = None,
+        wave_gen_factory: Optional[Callable] = None,
+        injections: np.ndarray,
+        param_transform: Optional[Callable] = None,
+        times_from_gen: bool = False,
+        call_kwargs: Optional[dict] = None,
+        tdi_chan: str = "XYZ",
+        nchannels: int = 3,
+        verbose: bool = True,
+        do_plots: bool = False,
+    ):
+        if wave_gen is None:
+            if wave_gen_factory is None:
+                raise ValueError(
+                    "SyntheticSourceProcessingStep needs either wave_gen or "
+                    "wave_gen_factory."
+                )
+            wave_gen = wave_gen_factory(
+                Tobs=Tobs, dt=dt, t_start=t_start, tdi_chan=tdi_chan
+            )
+        target_N = int(round(Tobs / dt))
+        grid = TDSettings(N=target_N, dt=dt, t0=t_start, force_backend="cpu")
+        spec = SyntheticSourceSpec(
+            label=tdi_chan,
+            wave_gen=wave_gen,
+            injections=injections,
+            param_transform=param_transform,
+            times_from_gen=times_from_gen,
+            call_kwargs=call_kwargs,
+        )
+        streams = build_synthetic_source_streams(
+            grid, sources=[spec], nchannels=nchannels, progress=verbose
+        )
+        combined = next(iter(streams.values()))
+
+        times = np.arange(target_N) * dt + t_start
+        fs = 1.0 / dt
+        BaseProcessingStep.__init__(
+            self, times, combined, fs, verbose=verbose, do_plots=do_plots
+        )
+        self.orbits = None
+        self.tdi_chan = tdi_chan
+        self.injections = np.atleast_2d(injections)
+
+
+class SyntheticDataProcessor(BaseProcessingStep):
+    """All-synthetic processor: injected sources + optional noise + foreground.
+
+    Sums the per-class source streams (:func:`build_synthetic_source_streams`)
+    onto a data grid, optionally adding correlated instrument noise
+    (:func:`~lisatools.sensitivity.generate_correlated_instrument_noise_td`) and
+    a galactic-foreground TD realization
+    (:func:`~lisatools.sensitivity.generate_foreground_td`), all placed on the
+    same grid. An optional ``base_data`` (e.g. a Sangria sky-only slice or a
+    mojito L1 stream) is added underneath. Exposes ``catalogue`` (if supplied)
+    so downstream factories can read leaf counts uniformly.
+
+    Args:
+        Tobs / dt / t_start: Data-grid definition (``N = round(Tobs/dt)``).
+        source_specs: :class:`SyntheticSourceSpec` list to inject.
+        nchannels: Number of TDI channels.
+        add_instrument_noise: ``None`` or kwargs for
+            :func:`~lisatools.sensitivity.generate_correlated_instrument_noise_td`
+            (``Soms_d``, ``Sa_a``, ``tdi_generation``, ``seed``, ...).
+        add_foreground: ``None`` or kwargs for
+            :func:`~lisatools.sensitivity.generate_foreground_td`
+            (``foreground_params``, ``tdi_generation``, ``seed``, ``envelope`` ...;
+            ``Tobs`` defaults to this processor's ``Tobs``).
+        base_data: Optional ``(nch, n)`` TD stream added underneath the injections.
+        catalogue: Optional catalogue dict stored on ``self.catalogue``.
+        tdi_chan: TDI channel label recorded on ``self.tdi_chan``.
+    """
+
+    def __init__(
+        self,
+        *,
+        Tobs: float,
+        dt: float,
+        t_start: float,
+        source_specs: Sequence[SyntheticSourceSpec],
+        nchannels: int = 3,
+        add_instrument_noise: Optional[dict] = None,
+        add_foreground: Optional[dict] = None,
+        base_data: Optional[np.ndarray] = None,
+        catalogue: Optional[dict] = None,
+        tdi_chan: str = "XYZ",
+        verbose: bool = True,
+        do_plots: bool = False,
+    ):
+        # Local import: sensitivity is a heavier module and only needed when
+        # synthetic noise / foreground are requested (no import cycle —
+        # sensitivity does not import globalfit).
+        from ..sensitivity import (
+            generate_correlated_instrument_noise_td,
+            generate_foreground_td,
+        )
+
+        target_N = int(round(Tobs / dt))
+        grid = TDSettings(N=target_N, dt=dt, t0=t_start, force_backend="cpu")
+
+        combined = np.zeros((nchannels, target_N), dtype=np.float64)
+        if base_data is not None:
+            combined = combined + np.asarray(
+                place_td_signal_on_grid(np.atleast_2d(base_data), grid).arr
+            )[:nchannels]
+
+        streams = build_synthetic_source_streams(
+            grid, sources=source_specs, nchannels=nchannels, progress=verbose
+        )
+        for stream in streams.values():
+            combined = combined + stream
+
+        if add_instrument_noise is not None:
+            noise_td = generate_correlated_instrument_noise_td(
+                target_N, dt, **add_instrument_noise
+            )[:nchannels]
+            combined = combined + noise_td
+
+        if add_foreground is not None:
+            fg_kwargs = dict(add_foreground)
+            fg_kwargs.setdefault("Tobs", Tobs)
+            fg_td = generate_foreground_td(target_N, dt, **fg_kwargs)[:nchannels]
+            combined = combined + fg_td
+
+        times = np.arange(target_N) * dt + t_start
+        fs = 1.0 / dt
+        BaseProcessingStep.__init__(
+            self, times, combined, fs, verbose=verbose, do_plots=do_plots
+        )
+        self.orbits = None
+        self.tdi_chan = tdi_chan
+        if catalogue is not None:
+            self.catalogue = catalogue

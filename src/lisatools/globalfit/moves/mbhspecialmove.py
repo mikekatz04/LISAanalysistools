@@ -486,7 +486,7 @@ class MBHSpecialMove(
 
             # d_d_vals[:] = acs.inner_product()
             full_kwargs = self.waveform_like_kwargs.copy()
-            full_kwargs["phase_marginalize"] = True
+            full_kwargs["phase_maximize"] = True
             full_kwargs["length"] = 1024
 
             like_args = (
@@ -562,14 +562,14 @@ class MBHSpecialMove(
             final_state = sampler.run_mcmc(start_state, nsteps, thin_by=50, progress=True)
             print("End like:", sampler.get_log_like().max())
 
-            full_kwargs["phase_marginalize"] = True
+            full_kwargs["phase_maximize"] = True
             coords_post_like = final_state.branches["mbh"].coords[0, :, 0]
             new_ll = search_likelihood_wrap(coords_post_like, *like_args)
 
             opt_snr = self.waveform_gen.h_h.copy() ** (1 / 2)
             det_snr = self.waveform_gen.d_h / opt_snr
             phase_change = np.angle(self.waveform_gen.non_marg_d_h)
-            full_kwargs["phase_marginalize"] = False
+            full_kwargs["phase_maximize"] = False
             _coords_check = coords_post_like.copy()
             # adjust phase due to phase marginalizations
             _coords_check[:, 5] = _coords_check[:, 5] + 1.0 / 2.0 * asnumpy(phase_change)

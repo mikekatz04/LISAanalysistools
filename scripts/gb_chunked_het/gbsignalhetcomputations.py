@@ -22,8 +22,44 @@ from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.response.tdionfly import GBTDIonTheFly
 
-from gb_signal_het_wdm_v2 import GBSparseComplexWDMGen
+from gb_signal_het_wdm_v2 import GBSparseComplexWDMGen, _compute_sparse_complex_wdm
 from gb_signal_het_cpp_validate import python_bin_fold_real
+
+
+def reference_c0_dense(impl, ref_params, real_td_cb, td_set, wdm_set_complex, window,
+                       sparse_gen, ind_min_t, ind_min_f, Nt_active, Nf_active):
+    """Dense complex-WDM reference ``c0`` ``(nch, Nf_active, Nt_active)`` built either
+    way (selected by ``impl``):
+
+    * ``"dense"``    -- the full TD reference -> ``TDSignal.transform(wdm_complex)``
+      (the original path; computes ALL ``Nf*Nt`` WDM tiles).
+    * ``"chunked"``  -- the chunked-het / polyphase WDM method (the SAME machinery the
+      kernel runs for candidate ``c1``), evaluated over ONLY the active band
+      ``Nf_active`` layers at FULL ``Nt`` resolution (so the bin-fold still gets the
+      dense ``c0`` it needs). Proven == ``"dense"`` to ~7e-15 (get_ll 1e-14,
+      ``test_sighet_ref_from_chunked.py``); needs the Tukey-windowed reference rfft.
+      Faster than ``"dense"`` by ~``Nf/Nf_active`` (only the active layers are
+      transformed). The TD rfft itself is still full-grid -- sourcing it from the C++
+      chunked-het FD front-end (``sparse_from_rfft``) is the further "no full-TD" step.
+    """
+    td_ref = np.asarray(real_td_cb(ref_params))
+    impl = str(impl).lower()
+    if impl in ("dense", "td", "transform"):
+        return np.asarray(
+            TDSignal(td_ref, settings=td_set).transform(wdm_set_complex, window=window).arr)
+    if impl in ("chunked", "chunked_het", "polyphase", "sighet"):
+        sg = sparse_gen
+        if td_ref.ndim == 1:
+            td_ref = td_ref[None, :]
+        fd_rfft = np.fft.rfft(td_ref * np.asarray(window)[None, :], axis=-1)
+        m_full = np.arange(ind_min_f, ind_min_f + Nf_active)
+        n_global_full = ind_min_t + np.arange(Nt_active)
+        # full-resolution polyphase: Nt_layer = Nt, stride = 1 -> c0 at EVERY active
+        # time pixel (not subsampled), active band only.
+        c0 = _compute_sparse_complex_wdm(
+            fd_rfft, m_full, sg.Nf, sg.Nt, sg.Nt, sg.window_full, n_global_full, 1)
+        return np.ascontiguousarray(c0 * sg.sqrt_dt)
+    raise ValueError(f"reference_impl must be 'dense' or 'chunked', got {impl!r}")
 
 
 def _resolve_backend(name):
@@ -103,7 +139,8 @@ class GBSignalHetComputations:
     def __init__(self, data_td, ref_params, *, Nf, Nt, dt, t0, t_ref,
                  orbits, tdi_config, min_freq, max_freq, sens_model="scirdv1",
                  edge_cut=None, nt_layer=64, n_sparse_fd=1024, m_active_half_width=2,
-                 max_r=5.0, tukey_alpha=0.05, force_backend="cpu"):
+                 max_r=5.0, tukey_alpha=0.05, force_backend="cpu",
+                 reference_impl="chunked"):
         # tukey_alpha in [0.01, 0.05]: the SAME Tukey taper is applied to the
         # data WDM window (below) AND to the FD-heterodyne sparse window via the
         # kernel's TUKEY_ALPHA arg (in get_ll) -- they must mirror, per the GB
@@ -160,13 +197,7 @@ class GBSignalHetComputations:
         self.analysis = AnalysisContainer(data_real, sens_real)
         self.d_d = float(np.real(self.analysis.inner_product()))
 
-        # --- heterodyne reference c0 at ref_params ---------------------------
-        ref_params = np.asarray(ref_params, dtype=float).reshape(9)
-        td_ref = real_td_cb(ref_params)
-        c0_dense = np.asarray(
-            TDSignal(td_ref, settings=td_set).transform(wdm_set_complex, window=window).arr)
-
-        # --- sparse grid + bin-fold COEFFICIENTS (built here, under the hood) -
+        # --- sparse grid + bands (needed by BOTH reference_impl paths) -------
         ind_min_t = int(wdm_set_real.ind_min_t); ind_min_f = int(wdm_set_real.ind_min_f)
         Nt_active = int(wdm_set_real.Nt_active)
         Nf_active = int(wdm_set_real.ind_max_f - wdm_set_real.ind_min_f + 1)
@@ -177,8 +208,33 @@ class GBSignalHetComputations:
         stride = sparse_gen.stride; N_sparse_t = sparse_gen.N_sparse_t
         n_sparse_local = np.asarray(sparse_gen.n_sparse_local, dtype=np.int32)
         window_full = sparse_gen.window_full.astype(np.float64)
-        c0_sparse = c0_dense[:, :, n_sparse_local]
         invC_complex = np.asarray(XYZ2SensitivityMatrix(wdm_set_complex, model=sens_model).invC)
+
+        # --- heterodyne reference c0 at ref_params (dense OR chunked-het) ----
+        # "chunked" (default) gets c0 from the GBGPU BACKEND producer
+        # gb_signal_het_make_reference -- the FD-gen + polyphase run on the reference
+        # params, NO Python polyphase (the reference is "getable from the backend").
+        # It emits c0 at the sparse grid (get_ll convention, for r=c1/c0) AND full Nt
+        # (transform convention, for the bin-fold). "dense" uses TDSignal.transform.
+        # Validated get_ll parity ~1e-6 (test_sighet_backend_producer.py).
+        ref_params = np.asarray(ref_params, dtype=float).reshape(9)
+        self.reference_impl = str(reference_impl).lower()
+        if self.reference_impl in ("chunked", "chunked_het", "polyphase", "sighet", "backend"):
+            c0_sparse_be = np.zeros((1, 3, Nf_active, N_sparse_t), dtype=np.complex128)
+            c0_dense_be = np.zeros((1, 3, Nf_active, Nt_active), dtype=np.complex128)
+            self.cpp.gb_signal_het_make_reference(
+                self.tdi_wrap, c0_sparse_be, c0_dense_be, window_full, n_sparse_local,
+                np.ascontiguousarray(ref_params[None]), 1, 9, 1, 2,
+                Nf, Nt, Nf_active, Nt_active, nt_layer, N_sparse_t, stride,
+                ind_min_t, ind_min_f, float(wdm_set_real.layer_df), dt, Tobs, t0,
+                3, n_sparse_fd, tukey_alpha)
+            c0_sparse = c0_sparse_be[0]         # get_ll convention (for the kernel)
+            c0_dense = c0_dense_be[0]           # transform convention (for the bin-fold)
+        else:
+            c0_dense = reference_c0_dense(
+                "dense", ref_params, real_td_cb, td_set, wdm_set_complex,
+                window, sparse_gen, ind_min_t, ind_min_f, Nt_active, Nf_active)
+            c0_sparse = c0_dense[:, :, n_sparse_local]
         # REAL-projection coefficients (match the REAL WDM likelihood exactly).
         # <d|h>: A0/A1 are the REPACKED complex coeffs (kernel's Re(A0*r) -> real,
         # no extra storage). <h|h>: B0/B1 (conj) + B0nc/B1nc (nonconj) so the
@@ -193,6 +249,16 @@ class GBSignalHetComputations:
         self.B0nc_all = B0nc[None].copy(); self.B1nc_all = B1nc[None].copy()
         self.window_full = window_full; self.n_sparse_local = n_sparse_local
         self.params_ref_all = ref_params.reshape(1, 9).copy()
+
+        # Exposed for the batched reference generator
+        # (gb_sighet_batched_reference.GBSignalHetReferenceSet): the SHARED setup
+        # (data/invC/grid/window/sparse-gen/TD-callable) that a SET of references
+        # reuses while varying only the reference params -> stacked c0 + bin-fold.
+        self._gen_shared = dict(
+            data_complex=data_complex, invC_complex=invC_complex,
+            td_set=td_set, wdm_set_complex=wdm_set_complex, window=window,
+            real_td_cb=real_td_cb, stride=stride, n_sparse_local=n_sparse_local,
+            Nt_active=Nt_active, Nf_active=Nf_active, sparse_gen=sparse_gen)
 
         # KEEP-ALIVES: the signal-het kernel reads C++ pointers held inside
         # ``self.tdi_wrap`` (gb_gen.wave_gen) -- the orbits/TDI-config/spline

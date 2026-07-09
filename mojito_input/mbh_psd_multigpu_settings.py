@@ -31,10 +31,10 @@ from lisatools.domains import STFTSettings, FDSettings
 from lisatools.sensitivity import XYZSensitivityBackend
 from lisatools.globalfit.moves import GFCombineMove, MultiGPUPSDMove, TDMBHSpecialMove
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-from lisatools.globalfit.recipe_steps import subtract_initial_signal
+from lisatools.globalfit.recipe import subtract_initial_signal
 from lisatools.utils.constants import YRSID_SI
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     SearchRecipeStep,
     PERecipeStep,
     build_psd_moves,

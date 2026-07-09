@@ -26,7 +26,7 @@ from lisatools.domains import FDSettings, STFTSettings
 from lisatools.globalfit.engine import GeneralSettings, GeneralSetup, GlobalFitSettings, RankInfo
 from lisatools.globalfit.generatefuncs import *
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import PERecipeStep, SearchRecipeStep, build_psd_moves
+from lisatools.globalfit.recipe import PERecipeStep, SearchRecipeStep, build_psd_moves
 from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
 from lisatools.globalfit.state import AllGFBranchInfo, EMRIState, GBState, GFBranchInfo, MBHState
 from lisatools.globalfit.stock.erebor import (

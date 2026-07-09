@@ -42,7 +42,7 @@ def mbh_dist_trans(x):
 def ll_wrap(x, ll_het, transform_fn):
     x_in = transform_fn.both_transforms(x)
 
-    ll = ll_het.get_ll(x_in.T, phase_marginalize=False)
+    ll = ll_het.get_ll(x_in.T, phase_maximize=False)
     return ll
 
 
@@ -337,7 +337,7 @@ if __name__ == "__main__":
     # d_d_vals[:] = acs.inner_product()
     
     full_kwargs = waveform_kwargs_mbh.copy()
-    full_kwargs["phase_marginalize"] = True
+    full_kwargs["phase_maximize"] = True
     full_kwargs["length"] = 1024
 
     like_args = (wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, transform_fn_mbh, (cp.asarray(fd), acs.linear_data_arr[0], 1. / acs.linear_psd_arr[0], df), full_kwargs)

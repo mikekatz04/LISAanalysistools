@@ -21,7 +21,6 @@ Smoke-test choices:
 import gc
 import logging
 import shutil
-from typing import Optional
 
 import numpy as np
 
@@ -38,14 +37,10 @@ logger = logging.getLogger(__name__)
 from eryn.moves import StretchMove
 from eryn.moves.tempering import make_ladder
 
-from lisatools.response.directresponse import ResponseWrapper
 from lisatools.response.tdiconfig import TDIConfig
 
-from lisatools.detector import EqualArmlengthOrbits
 from lisatools.domains import (
-    DomainBaseArray,
     TDSettings,
-    TDSignal,
     WDMSettings,
 )
 from lisatools.globalfit.engine import (
@@ -54,16 +49,17 @@ from lisatools.globalfit.engine import (
     GlobalFitSettings,
     RankInfo,
 )
-from lisatools.globalfit.moves import ResidualAddOneRemoveOneMove
-from lisatools.globalfit.preprocessing import BaseProcessingStep
-from lisatools.globalfit.recipe import RecipeStep
+from lisatools.globalfit.preprocessing import SyntheticSourceProcessingStep
+from lisatools.globalfit.recipe import PERecipeStep, SOBBHMoveBuilder
 from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.stock.erebor import (
     SOBBHSettings,
     SOBBHSetup,
     make_sobbh_transform_container,
 )
-from lisatools.sources.sobbh import SOBBHWaveform
+# SOBBH response-wrapper + domain-projection adapter now live in the stock
+# ``lisatools.sources.sobbh`` package (carved out of the settings files).
+from lisatools.sources.sobbh import SOBBHWaveWrap, get_sobbh_response_wrapper
 from lisatools.utils.constants import YRSID_SI
 
 
@@ -133,183 +129,70 @@ def sobbh_full_to_sampling(params_full):
     return transform.both_inverse_transforms(np.asarray(params_full, dtype=float))
 
 
-# ---- Cached SOBBH generator + wrappers (shared across data path + moves) ----
+# ---- SOBBH response wrapper + domain adapter: imported from the stock
+#      ``lisatools.sources.sobbh`` package (was inlined + duplicated here). ----
 
-_WAVE_GEN_CACHE = {}
 
-
-def get_sobbh_response_wrapper(
-    *,
-    Tobs: float,
-    dt: float,
-    t_start: float,
-    tdi_config: TDIConfig,
-    tdi_chan: str = "XYZ",
-    role: str = "template",
-    order: int = 40,
-    t_buffer: float = 3e4,
-    force_backend: str = "cpu",
-    reference_time: Optional[float] = None,
-):
-    """Build (and cache) a :class:`ResponseWrapper` around :class:`SOBBHWaveform`.
-
-    One generator is built per
-    ``(Tobs, dt, t_start, tdi_chan, order, force_backend, reference_time)``
-    cache key — injection + template paths share the same instance, mirroring
-    the EMRI smoke setup.
-
-    ``reference_time`` is the absolute epoch at which ``f_low`` is defined; it
-    is decoupled from the data-window start ``t_start`` (the PN inspiral
-    measures time from it). This run is synthetic-only (``t_start == 0``) so it
-    is left ``None`` -> f_low at the window start; the kwarg exists so this
-    duplicate stays signature-consistent with the canonical
-    ``global_fit_settings.get_sobbh_response_wrapper``.
-    """
-    key = (Tobs, dt, t_start, tdi_chan, order, force_backend, reference_time)
-    if key in _WAVE_GEN_CACHE:
-        return _WAVE_GEN_CACHE[key]
-
-    sobbh_generator = SOBBHWaveform(
+def _make_sobbh_injection_wave_gen(*, Tobs, dt, t_start, tdi_chan):
+    """Module-level factory so the (unpicklable) wrapper is built lazily inside
+    the stock :class:`SyntheticSourceProcessingStep` (its ``processor_init_kwargs``
+    are deep-copied, so only this picklable function reference is stored)."""
+    return get_sobbh_response_wrapper(
         Tobs=Tobs,
         dt=dt,
-        t0=t_start,
-        reference_time=reference_time,
-        force_backend=force_backend,
+        t_start=t_start,
+        tdi_config=TDIConfig("2nd generation", force_backend="cpu"),
+        tdi_chan=tdi_chan,
+        role="injection",
     )
 
-    # SOBBH output-basis positions of lam / beta (see header).
-    response_kwargs = {
-        "Tobs": Tobs / YRSID_SI,
-        "dt": dt,
-        "index_lambda": 7,
-        "index_beta": 8,
-        "flip_hx": True,
-        "force_backend": force_backend,
-        "tdi": tdi_config,
-        "tdi_chan": tdi_chan,
-        "order": order,
-        "remove_garbage": "zero",
-        "is_ecliptic_latitude": True,
-        "t_buffer": t_buffer,
-    }
 
-    orbits = EqualArmlengthOrbits(force_backend=force_backend)
-    wave_gen = ResponseWrapper(
-        sobbh_generator,
-        orbits=orbits,
-        t0=t_start,
-        **response_kwargs,
-    )
-    _WAVE_GEN_CACHE[key] = wave_gen
-    return wave_gen
+# Cached domain-wrapped template generator, shared between the engine-side
+# ``signal_gen`` (residual rebuild) and the PE move. ``get_sobbh_response_wrapper``
+# caches the underlying ``ResponseWrapper`` with ``role`` excluded from the key,
+# so this template shares the SAME orbit + LTT object as the ``role="injection"``
+# data path — the residual cancels at the true injection point. Orbits default to
+# ``EqualArmlengthOrbits`` (constant, non-sampled light travel times).
+_WAVE_WRAP_CACHE = {}
 
 
-class SOBBHWaveWrap:
-    """Adapter that runs the cached ResponseWrapper and projects to the run's domain.
+def _get_sobbh_wave_wrap(general_info, nchannels: int = 3):
+    """Build (and cache) the SOBBH domain-wrapped template generator.
 
-    Mirrors ``EMRIWaveWrap`` from ``emri_only_global_fit_settings.py``: the
-    output is a :class:`DomainBase` subclass (FDSignal / WDMSignal / …) so
-    the global-fit move and ACA dispatch land on the right kernels.
+    Reproduces exactly the wrapper the recipe used to build inline, so the
+    engine's ``setup_acs(rebuild_residuals=True)`` subtracts the identical
+    template the injection added.
     """
-
-    def __init__(
-        self,
-        wave_gen,
-        td_settings: TDSettings,
-        target_domain,
+    key = ("sobbh", id(general_info), nchannels)
+    if key in _WAVE_WRAP_CACHE:
+        return _WAVE_WRAP_CACHE[key]
+    template_wave_gen = get_sobbh_response_wrapper(
+        Tobs=general_info.Tobs,
+        dt=general_info.dt,
+        t_start=T_START,
+        tdi_config=TDIConfig("2nd generation", force_backend="cpu"),
+        tdi_chan="XYZ",
+        role="template",
+    )
+    td_settings = TDSettings(
+        int(round(general_info.Tobs / general_info.dt)),
+        general_info.dt,
+        force_backend="cpu",
+    )
+    wrap = SOBBHWaveWrap(
+        template_wave_gen,
+        td_settings,
+        general_info.domain_settings,
         td_window=None,
-        runtime_kwargs: Optional[dict] = None,
-        nchannels: Optional[int] = None,
-    ):
-        self.wave_gen = wave_gen
-        self.td_settings = td_settings
-        self.target_domain = target_domain
-        self.td_window = td_window
-        self.runtime_kwargs = runtime_kwargs or {}
-        self.nchannels = nchannels
-
-    def __call__(self, *params, **kwargs):
-        call_kwargs = dict(self.runtime_kwargs)
-        call_kwargs.update(kwargs)
-        # SOBBHWaveform doesn't use convert_to_ra_dec; ResponseWrapper
-        # will pop the flag from kwargs.
-        call_kwargs.setdefault("convert_to_ra_dec", False)
-        arr = np.asarray(self.wave_gen(*params, **call_kwargs))
-        if self.nchannels is not None:
-            arr = arr[: self.nchannels]
-        return TDSignal(arr, self.td_settings).transform(
-            self.target_domain, window=self.td_window
-        )
-
-
-class SyntheticSOBBHProcessingStep(BaseProcessingStep):
-    """Generate the SOBBH injection in-process via the shared ResponseWrapper.
-
-    Hands ``(times, data, fs)`` to :class:`BaseProcessingStep` — same
-    interface as :class:`SangriaProcessingStep`. No external h5 path
-    needed.
-    """
-
-    def __init__(
-        self,
-        Tobs: float,
-        dt: float,
-        t_start: float,
-        injection_params_full_basis: np.ndarray,
-        tdi_chan: str = "XYZ",
-        nchannels: int = 3,
-        verbose: bool = True,
-        do_plots: bool = False,
-    ):
-        tdi_config = TDIConfig("2nd generation", force_backend="cpu")
-        wave_gen = get_sobbh_response_wrapper(
-            Tobs=Tobs,
-            dt=dt,
-            t_start=t_start,
-            tdi_config=tdi_config,
-            tdi_chan=tdi_chan,
-            role="injection",
-        )
-
-        td_signal = np.asarray(
-            wave_gen(*injection_params_full_basis, convert_to_ra_dec=False)
-        )
-        td_signal = np.atleast_2d(td_signal)[:nchannels]
-
-        # Pad/clip to exactly ``Tobs/dt`` to keep WDM ``N = Nf*Nt`` consistent.
-        target_N = int(round(Tobs / dt))
-        if td_signal.shape[-1] < target_N:
-            pad = target_N - td_signal.shape[-1]
-            td_signal = np.pad(td_signal, ((0, 0), (0, pad)), mode="constant")
-        elif td_signal.shape[-1] > target_N:
-            td_signal = td_signal[:, :target_N]
-
-        N = td_signal.shape[-1]
-        times = np.arange(N) * dt + t_start
-        fs = 1.0 / dt
-
-        BaseProcessingStep.__init__(
-            self, times, td_signal, fs, verbose=verbose, do_plots=do_plots
-        )
-        self.orbits = None
-        self.injection_params_full_basis = injection_params_full_basis
-        self.tdi_chan = tdi_chan
+        nchannels=nchannels,
+    )
+    _WAVE_WRAP_CACHE[key] = wrap
+    return wrap
 
 
 ################
 #  RECIPE STEPS
 ################
-
-
-class SOBBHPERecipeStep(RecipeStep):
-    """PE-only step (runs indefinitely; outer ``run_mcmc`` count caps it)."""
-
-    def setup_run(self, iteration, last_sample, sampler):
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        return False
 
 
 ################
@@ -334,84 +217,24 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         flush=True,
     )
 
-    # Pull the cached ResponseWrapper (built once at data-load time) and
-    # wrap it for the template path.
-    tdi_config = TDIConfig("2nd generation", force_backend="cpu")
-    template_wave_gen = get_sobbh_response_wrapper(
-        Tobs=general_info.Tobs,
-        dt=general_info.dt,
-        t_start=T_START,
-        tdi_config=tdi_config,
-        tdi_chan="XYZ",
-        role="template",
-    )
-    td_settings = TDSettings(
-        int(round(general_info.Tobs / general_info.dt)),
-        general_info.dt,
-        force_backend="cpu",
-    )
-    wave_gen = SOBBHWaveWrap(
-        template_wave_gen,
-        td_settings,
-        domain_settings,
-        td_window=None,
-        nchannels=acs.nchannels,
-    )
+    # Template generator, shared with the engine-side ``signal_gen`` through the
+    # ``_WAVE_WRAP_CACHE`` (same cached ResponseWrapper as the injection).
+    wave_gen = _get_sobbh_wave_wrap(general_info, nchannels=acs.nchannels)
 
-    # Pre-inject starting templates into each walker's residual.
-    if np.any(sobbh_inds := state.branches_inds["sobbh"][0]):
-        print(
-            f"[setup_recipe] pre-injecting SOBBH starts; nleaves_max={sobbh_inds.shape[-1]}",
-            flush=True,
-        )
-        for leaf in range(sobbh_inds.shape[-1]):
-            if not sobbh_inds[0, leaf]:
-                continue
-            assert np.all(sobbh_inds[:, leaf])
-            inj_coords = state.branches_coords["sobbh"][0, :, leaf]
-            inj_coords_in = sobbh_info.transform.both_transforms(inj_coords)
-            n_starts = inj_coords.shape[0]
-            print(
-                f"[setup_recipe] generating + applying {n_starts} starting waveforms (leaf {leaf}) one at a time...",
-                flush=True,
-            )
-            # One SOBBH waveform at a time: generate, add to that walker's
-            # residual, drop the reference, force a gc cycle.
-            for i in range(n_starts):
-                print(
-                    f"[setup_recipe]   walker {i}/{n_starts}: generating...",
-                    flush=True,
-                )
-                sig = wave_gen(*inj_coords_in[i], **sobbh_info.waveform_kwargs)
-                acs.add_signal_to_residual([sig], data_index=np.array([i]))
-                del sig
-                gc.collect()
-    print("[setup_recipe] pre-injection done; building SOBBH PE move", flush=True)
+    # No recipe-side residual pre-injection: the engine's
+    # ``setup_acs(rebuild_residuals=True)`` already subtracted the state's SOBBH
+    # templates via the registered ``signal_gen`` (see get_sobbh_erebor_settings).
+    # Doing it here as well would double-subtract.
+    print("[setup_recipe] building SOBBH PE move", flush=True)
 
-    betas_all = np.tile(
-        make_ladder(sobbh_info.ndim, ntemps=ntemps), (sobbh_info.nleaves_max, 1)
+    # Stock single-source PE-move builder (make_ladder -> betas_all ->
+    # ResidualAddOneRemoveOneMove); the machinery lives in
+    # ``lisatools.globalfit.recipe``.
+    _, sobbh_pe_moves = SOBBHMoveBuilder(wave_gen=wave_gen).build(
+        engine_info, curr, acs, priors, state
     )
-    state.sub_states["sobbh"].betas_all = betas_all
-
-    coords_shape = (ntemps, nwalkers, sobbh_info.nleaves_max, sobbh_info.ndim)
-
-    sobbh_pe_move = ResidualAddOneRemoveOneMove(
-        "sobbh",
-        coords_shape,
-        wave_gen,
-        sobbh_info.waveform_kwargs.copy(),
-        sobbh_info.waveform_kwargs.copy(),
-        acs,
-        sobbh_info.num_prop_repeats,
-        sobbh_info.transform,
-        priors,
-        sobbh_info.inner_moves,
-        Tmax=np.inf,
-        betas_all=betas_all,
-    )
-    sobbh_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
     recipe.add_recipe_component(
-        SOBBHPERecipeStep(moves=[sobbh_pe_move]), name="sobbh pe"
+        PERecipeStep(moves=sobbh_pe_moves), name="sobbh pe"
     )
 
 
@@ -486,7 +309,21 @@ def get_sobbh_erebor_settings(general_set: GeneralSetup) -> SOBBHSetup:
         ndim=11,
     )
 
-    return SOBBHSetup(sobbh_settings)
+    sobbh_setup = SOBBHSetup(sobbh_settings)
+
+    # Engine-side template generation: one sampling-basis row in -> one
+    # run-domain template out. ``setup_acs(rebuild_residuals=True)`` calls this
+    # to subtract the state's SOBBH templates from the residuals (replacing the
+    # old recipe-side pre-injection loop). Build deferred to first call (cached).
+    def _sobbh_signal_gen(*params, **kwargs):
+        wave_wrap = _get_sobbh_wave_wrap(general_set)
+        params_in = sobbh_setup.transform.both_transforms(
+            np.asarray(params, dtype=float)
+        )
+        return wave_wrap(*params_in, **kwargs)
+
+    sobbh_setup.signal_gen = _sobbh_signal_gen
+    return sobbh_setup
 
 
 def get_general_erebor_settings() -> GeneralSetup:
@@ -501,11 +338,17 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     domain_settings = DOMAIN_CHOICE
 
+    # The stock ``SyntheticSourceProcessingStep`` builds the (cached) injection
+    # response wrapper via the module-level factory and injects it onto the data
+    # grid. The template path in ``setup_recipe`` re-requests the wrapper and
+    # hits the same cache entry.
     processor_init_kwargs = dict(
         Tobs=Tobs,
         dt=dt,
         t_start=T_START,
-        injection_params_full_basis=INJECTION_PARAMS_FULL_BASIS,
+        wave_gen_factory=_make_sobbh_injection_wave_gen,
+        injections=INJECTION_PARAMS_FULL_BASIS,
+        call_kwargs={"convert_to_ra_dec": False},
         tdi_chan="XYZ",
         nchannels=3,
     )
@@ -542,7 +385,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         window_taper_duration=window_taper_duration,
         gpu_backend=GPU_BACKEND,
         gpus=None,
-        data_processor=SyntheticSOBBHProcessingStep,
+        data_processor_class=SyntheticSourceProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,

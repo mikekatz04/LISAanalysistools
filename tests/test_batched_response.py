@@ -83,11 +83,8 @@ class TestBatchedResponse(unittest.TestCase):
         ]
         cls.all_pols = np.asarray(pols)  # (nsky, num_time_samples)
 
-        # Force orbits onto the same (CPU) backend as the response. Without this,
-        # ``EqualArmlengthOrbits()`` defaults to the first available backend (the
-        # GPU on a CUDA box), tripping the ``tdi_orbits`` backend-match assertion.
-        orbits = EqualArmlengthOrbits(force_backend="cpu")
-        orbits.configure(linear_interp_setup=True)
+        orbits = EqualArmlengthOrbits(force_backend="cpu", frame="ecliptic")
+        # configuration is lazy (first use); no explicit configure() needed
         cls.orbits = orbits
 
     def _make_response(self):

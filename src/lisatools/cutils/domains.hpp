@@ -986,11 +986,19 @@ class FDDomain {
     int    ind_max;    // inclusive
     double df;
     double Tobs;       // = 1/df, kept for convenience
+    // Per-row absolute start bin of each data/noise row's frequency window
+    // (length num_data / num_noise; the two share row geometry). nullptr
+    // means every row spans the global grid starting at bin 0 (legacy
+    // full-rfft layout). With windows, row `i` stores bins
+    // [start_inds[i], start_inds[i] + n_rfft) of the global grid -- this is
+    // the C++ realization of the sub-band buffer's ``min_freq_inds``.
+    int   *start_inds;
 
     CUDA_CALLABLE_MEMBER
     FDDomain(cmplx *fd_data_, double *fd_invC_, int n_rfft_,
              int num_channel_, int num_data_, int num_noise_,
-             int ind_min_, int ind_max_, double df_)
+             int ind_min_, int ind_max_, double df_,
+             int *start_inds_ = nullptr)
     {
         fd_data     = fd_data_;
         fd_invC     = fd_invC_;
@@ -1002,21 +1010,34 @@ class FDDomain {
         ind_max     = ind_max_;
         df          = df_;
         Tobs        = 1.0 / df_;
+        start_inds  = start_inds_;
     };
+    CUDA_DEVICE inline int row_start(int index) const
+    {
+        return (start_inds != nullptr) ? start_inds[index] : 0;
+    }
+    CUDA_DEVICE inline bool in_row(int k, int index) const
+    {
+        int k_loc = k - row_start(index);
+        return (k_loc >= 0) && (k_loc < n_rfft);
+    }
     CUDA_DEVICE inline cmplx get_data(int k, int channel, int data_index) const
     {
         return fd_data[(size_t) data_index * num_channel * n_rfft
-                       + (size_t) channel * n_rfft + k];
+                       + (size_t) channel * n_rfft
+                       + (k - row_start(data_index))];
     }
     CUDA_DEVICE inline double get_invC_diag(int k, int channel, int noise_index) const
     {
         return fd_invC[(size_t) noise_index * num_channel * n_rfft
-                       + (size_t) channel * n_rfft + k];
+                       + (size_t) channel * n_rfft
+                       + (k - row_start(noise_index))];
     }
     CUDA_DEVICE inline double get_invC_cross(int k, int c1, int c2, int noise_index) const
     {
-        return fd_invC[(((size_t) noise_index * num_channel + c1)
-                        * num_channel + c2) * n_rfft + k];
+        return fd_invC[((((size_t) noise_index * num_channel + c1)
+                        * num_channel + c2) * n_rfft)
+                       + (k - row_start(noise_index))];
     }
     CUDA_DEVICE inline bool in_band(int k) const
     {

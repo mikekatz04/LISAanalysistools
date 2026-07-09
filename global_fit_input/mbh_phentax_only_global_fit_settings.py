@@ -28,7 +28,6 @@ Smoke-test choices:
 import gc
 import logging
 import shutil
-from typing import Optional, Sequence
 
 import numpy as np
 
@@ -42,42 +41,31 @@ gpu_available = False
 
 logger = logging.getLogger(__name__)
 
-from bbhx.utils.transform import mT_q  # paired (logM, q) -> (m1, m2)
-
 from eryn.moves import StretchMove
 from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
-from eryn.utils.transform import TransformContainer
 
-from lisatools.response.directresponse import ResponseWrapper
 from lisatools.response.tdiconfig import TDIConfig
-from lisatools.response.tdionfly import TDTDIonTheFly
 
-from lisatools.detector import ESAOrbits, EqualArmlengthOrbits, Orbits
-from lisatools.domains import (
-    DomainBaseArray,
-    FDSettings,
-    TDSettings,
-    TDSignal,
-    WDMSettings,
-)
+from lisatools.domains import TDSettings, WDMSettings
 from lisatools.globalfit.engine import (
     GeneralSettings,
     GeneralSetup,
     GlobalFitSettings,
     RankInfo,
 )
-from lisatools.globalfit.moves import ResidualAddOneRemoveOneMove
-from lisatools.globalfit.preprocessing import BaseProcessingStep
-from lisatools.globalfit.recipe import RecipeStep
+from lisatools.globalfit.preprocessing import SyntheticSourceProcessingStep
+from lisatools.globalfit.recipe import MBHMoveBuilder, PERecipeStep
 from lisatools.globalfit.run import CurrentInfoGlobalFit
-from lisatools.globalfit.stock.erebor import MBHSettings, MBHSetup, m1_m2_to_mT_q
+from lisatools.globalfit.stock.erebor import MBHSettings, MBHSetup
+# MBH phentax response-wrapper + domain adapter + transform live in BBHx (the
+# sprint's MBH-physics owner, home of MBHTDIonFly + the phentax extra).
+from bbhx.mbhphentax import (
+    MBHWaveWrap,
+    get_mbh_phentax_response_wrapper,
+    make_mbh_phentax_transform_container,
+)
 from lisatools.utils.constants import YRSID_SI
-
-# ``phentax`` is the JAX implementation of IMRPhenomT(HM). Imported lazily
-# inside :class:`IMRPhenomTHMWaveform` so the module-level import path
-# stays cheap if a user only wants to inspect the settings.
-import jax.numpy as jnp
 
 
 # ============================================================
@@ -153,533 +141,75 @@ def mbh_full_to_sampling(params_full: np.ndarray) -> np.ndarray:
       ``sin_beta = sin(beta)``
       All other params pass through unchanged.
     """
-    transform = _build_mbh_phentax_transform()
+    transform = make_mbh_phentax_transform_container()
     return transform.both_inverse_transforms(np.asarray(params_full, dtype=float))
 
 
-# ---- Cached MBH generator + wrappers (shared across data path + moves) ----
-
-_WAVE_GEN_CACHE = {}
-
-
-class IMRPhenomTHMWaveform:
-    """LISA-side IMRPhenomTHM (phentax) waveform generator.
-
-    Mirrors the call-signature contract that
-    ``fastlisaresponse.ResponseWrapper`` expects (and that
-    :class:`lisatools.sources.sobbh.SOBBHWaveform` implements for SOBBHs):
-
-    * ``__init__(Tobs, dt, t0, ...)`` builds the internal uniform time
-      grid + caches a single :class:`phentax.IMRPhenomTHM` instance.
-    * ``__call__(m1, m2, s1z, s2z, dist, phi_ref, inc, psi, lam, beta,
-      t_plunge, **kwargs) -> complex Array`` evaluates the polarisation-
-      rotated waveform on the internal time grid and returns
-      ``hp + 1j*hx``.
-
-    ``lam`` and ``beta`` are accepted in the call signature so
-    ``ResponseWrapper`` can read them off (via ``index_lambda`` /
-    ``index_beta``) and apply the LISA sky projection; the waveform
-    itself does not use them.
-
-    The merger is placed at ``t = t_plunge`` within the observation
-    window. phentax produces its waveform on a grid centred at the
-    merger (``t = 0``), so we ask it for ``t_min = -t_plunge`` and
-    ``T = Tobs``; the returned ``num_steps = ceil(Tobs/dt)`` samples
-    then align one-to-one with our target grid because the spacing
-    is ``delta_t = dt`` on both.
-    """
-
-    def __init__(
-        self,
-        Tobs: float,
-        dt: float,
-        t0: float = 0.0,
-        higher_modes: Optional[object] = "all",
-        include_negative_modes: bool = True,
-        coarse_grain: bool = False,
-        force_backend: str = "cpu",
-        pad_zeros: bool = True,
-    ):
-        # Lazy-import phentax so the module-level import-time cost is paid
-        # only when the smoke test is actually constructed.
-        from phentax.waveform import IMRPhenomTHM
-
-        self.Tobs = Tobs
-        self.dt = dt
-        self.t0 = t0
-        self.force_backend = force_backend
-        self.pad_zeros = pad_zeros
-        N = int(round(Tobs / dt))
-        self._N = N
-        self._times_np = np.arange(N) * dt + t0
-
-        self._phentax = IMRPhenomTHM(
-            higher_modes=higher_modes,
-            include_negative_modes=include_negative_modes,
-            coarse_grain=coarse_grain,
-            T=Tobs,
-        )
-
-    @property
-    def N(self) -> int:
-        return self._N
-
-    @property
-    def times(self) -> np.ndarray:
-        return self._times_np
-
-    def __call__(
-        self,
-        m1,
-        m2,
-        s1z,
-        s2z,
-        dist,
-        phi_ref,
-        inc,
-        psi,
-        lam,
-        beta,
-        t_plunge,
-        **kwargs,
-    ):
-        """Evaluate the polarisation-rotated waveform on the internal time grid.
-
-        Returns a complex array ``h = hp + 1j*hx`` so the call signature
-        matches what ``fastlisaresponse.ResponseWrapper`` expects (it
-        reads ``h.real`` / ``h.imag`` to get the two polarisations).
-        Set ``flip_hx=True`` on ``ResponseWrapper`` to get the standard
-        ``h.real - 1j*h.imag`` convention.
-
-        ``dist`` is in Gpc; converted to Mpc inside (phentax convention).
-        ``lam`` / ``beta`` are accepted but unused here — they're
-        forwarded through ``ResponseWrapper`` for sky-projection.
-        ``t_plunge`` is the merger time relative to the start of the
-        observation; phentax internally uses merger == 0.
-        """
-        del lam, beta  # consumed by ResponseWrapper, not the source waveform
-        # ResponseWrapper injects ``T`` and ``dt`` into kwargs; ignore.
-        kwargs.pop("T", None)
-        kwargs.pop("dt", None)
-        kwargs.pop("convert_to_ra_dec", None)
-
-        dist_mpc = float(dist) * 1.0e3  # Gpc -> Mpc (phentax convention)
-        t_plunge_f = float(t_plunge)
-
-        # phentax compute_polarizations returns (times, mask, h_plus, h_cross)
-        # with merger at t=0. Setting ``t_min = -t_plunge`` and ``T = Tobs``
-        # makes the returned ``ceil(T/dt)`` samples align with our target
-        # ``[0, Tobs)`` grid sample-for-sample.
-        _, mask_phen, hp_phen, hx_phen = self._phentax.compute_polarizations(
-            m1=float(m1),
-            m2=float(m2),
-            chi1z=float(s1z),
-            chi2z=float(s2z),
-            distance=dist_mpc,
-            phi_ref=float(phi_ref),
-            inclination=float(inc),
-            psi=float(psi),
-            delta_t=float(self.dt),
-            t_min=-t_plunge_f,
-            t_ref=-t_plunge_f,
-            T=float(self.Tobs),
-        )
-
-        # phentax always returns a leading batch axis (shape (1, N) for a
-        # single-source call); squeeze it so the wrapped ``ResponseWrapper``
-        # (which uses ``len(h)`` to size the projection) sees a 1D array.
-        hp = np.asarray(hp_phen, dtype=np.float64).reshape(-1)
-        hx = np.asarray(hx_phen, dtype=np.float64).reshape(-1)
-        mask = np.asarray(mask_phen, dtype=bool).reshape(-1)
-
-        # Zero out invalid samples flagged by phentax's adaptive/uniform grid.
-        hp = np.where(mask, hp, 0.0)
-        hx = np.where(mask, hx, 0.0)
-
-        # Pad with zeros (or clip) to exactly N so ``ResponseWrapper`` and
-        # the WDM transform downstream see the right shape.
-        if hp.shape[-1] < self._N:
-            if self.pad_zeros:
-                pad = self._N - hp.shape[-1]
-                hp = np.pad(hp, (0, pad), mode="constant")
-                hx = np.pad(hx, (0, pad), mode="constant")
-            else:
-                raise ValueError(
-                    f"phentax produced {hp.shape[-1]} samples but N={self._N}; "
-                    "either set pad_zeros=True or increase the input grid."
-                )
-        elif hp.shape[-1] > self._N:
-            hp = hp[: self._N]
-            hx = hx[: self._N]
-
-        return hp + 1j * hx
+# ---- MBH phentax response wrapper + domain adapter: imported from the stock
+#      ``lisatools.sources.bbh`` package (was inlined + duplicated here). ----
 
 
-def get_mbh_phentax_response_wrapper(
-    *,
-    Tobs: float,
-    dt: float,
-    t_start: float,
-    tdi_config: TDIConfig,
-    tdi_chan: str = "XYZ",
-    role: str = "template",
-    order: int = 40,
-    t_buffer: float = 3e4,
-    higher_modes: Optional[object] = "all",
-    orbits: Optional[Orbits] = None,
-    force_backend: str = "cpu",
-):
-    """Build (and cache) a :class:`ResponseWrapper` around
-    :class:`IMRPhenomTHMWaveform`.
-
-    Mirrors :func:`get_emri_response_wrapper`: a single generator is
-    reused between the synthetic-injection data loader and the template
-    move so the slow phentax JIT compilation runs once per
-    ``(Tobs, dt, t_start, tdi_chan, order, force_backend, higher_modes)``
-    key.
-
-    Note: this mirrors the EMRI smoke-test convention where ``role`` is
-    intentionally **not** part of the cache key, so injection and
-    template share the same generator instance.
-    """
-    key = (
-        Tobs, dt, t_start, tdi_chan, order, force_backend,
-        str(higher_modes),
-    )
-    if key in _WAVE_GEN_CACHE:
-        return _WAVE_GEN_CACHE[key]
-
-    waveform_gen = IMRPhenomTHMWaveform(
+def _make_mbh_injection_wave_gen(*, Tobs, dt, t_start, tdi_chan):
+    """Module-level factory so the (unpicklable) wrapper is built lazily inside
+    the stock :class:`SyntheticSourceProcessingStep` (its ``processor_init_kwargs``
+    are deep-copied, so only this picklable function reference is stored)."""
+    return get_mbh_phentax_response_wrapper(
         Tobs=Tobs,
         dt=dt,
-        t0=t_start,
-        higher_modes=higher_modes,
-        force_backend=force_backend,
+        t_start=t_start,
+        tdi_config=TDIConfig("2nd generation", force_backend="cpu"),
+        tdi_chan=tdi_chan,
+        role="injection",
+        higher_modes="all",
     )
 
-    response_kwargs = {
-        "Tobs": Tobs / YRSID_SI,
-        "dt": dt,
-        # Indices match the call signature of IMRPhenomTHMWaveform.__call__:
-        #   (m1, m2, s1z, s2z, dist, phi_ref, inc, psi, lam, beta, t_plunge)
-        #              0   1   2    3    4     5    6    7    8     9     10
-        "index_lambda": 8,
-        "index_beta": 9,
-        "flip_hx": True,
-        "force_backend": force_backend,
-        "tdi": tdi_config,
-        "tdi_chan": tdi_chan,
-        "order": order,
-        "remove_garbage": "zero",
-        "is_ecliptic_latitude": True,
-        "t_buffer": t_buffer,
-    }
 
-    if orbits is None:
-        orbits = EqualArmlengthOrbits(force_backend=force_backend)
-        
-    # ResponseWrapper.get_t0_shift_to_data(, dt: float, t_start: float) -> float:
-    wave_gen = ResponseWrapper(
-        waveform_gen,
-        orbits=orbits,
-        t0=t_start,
-        **response_kwargs,
-    )
-    _WAVE_GEN_CACHE[key] = wave_gen
-    return wave_gen
+# Cached domain-wrapped template generator, shared between the engine-side
+# ``signal_gen`` (residual rebuild) and the PE move. ``get_mbh_phentax_response_wrapper``
+# caches the underlying ``ResponseWrapper`` with ``role`` excluded from the key,
+# so this template shares the SAME orbit + LTT object as the ``role="injection"``
+# data path. Orbits default to ``EqualArmlengthOrbits`` (constant, non-sampled
+# light travel times). This reproduces the wrapper the recipe built inline.
+_WAVE_WRAP_CACHE = {}
 
 
-class MBHWaveWrap:
-    """Adapter that runs the cached ResponseWrapper and projects to the
-    run's domain.
+def _get_mbh_wave_wrap(general_info, nchannels: int = 3):
+    """Build (and cache) the MBH-phentax domain-wrapped template generator.
 
-    Mirrors :class:`EMRIWaveWrap` from
-    ``emri_only_global_fit_settings.py`` — the call output is a
-    :class:`DomainBase` subclass (FDSignal / WDMSignal / ...) so the
-    global-fit move and ACA dispatch land on the right kernels.
+    Reproduces exactly the wrapper the recipe used to build inline, so the
+    engine's ``setup_acs(rebuild_residuals=True)`` subtracts the identical
+    template the recipe pre-injection used to.
     """
-
-    def __init__(
-        self,
-        wave_gen,
-        td_settings: TDSettings,
-        target_domain,
+    key = ("mbh", id(general_info), nchannels)
+    if key in _WAVE_WRAP_CACHE:
+        return _WAVE_WRAP_CACHE[key]
+    template_wave_gen = get_mbh_phentax_response_wrapper(
+        Tobs=general_info.Tobs,
+        dt=general_info.dt,
+        t_start=T_START,
+        tdi_config=TDIConfig("2nd generation", force_backend="cpu"),
+        tdi_chan="XYZ",
+        role="template",
+    )
+    td_settings = TDSettings(
+        int(round(general_info.Tobs / general_info.dt)),
+        general_info.dt,
+        force_backend="cpu",
+    )
+    wrap = MBHWaveWrap(
+        template_wave_gen,
+        td_settings,
+        general_info.domain_settings,
         td_window=None,
-        runtime_kwargs: Optional[dict] = None,
-        nchannels: Optional[int] = None,
-    ):
-        self.wave_gen = wave_gen
-        self.td_settings = td_settings
-        self.target_domain = target_domain
-        self.td_window = td_window
-        self.runtime_kwargs = runtime_kwargs or {}
-        self.nchannels = nchannels
-
-    def __call__(self, *params, **kwargs):
-        call_kwargs = dict(self.runtime_kwargs)
-        call_kwargs.update(kwargs)
-        # Sky coords pass through in the orbits frame directly (sprint
-        # convention: SSB ecliptic) — no per-call frame conversion.
-        arr = np.asarray(self.wave_gen(*params, **call_kwargs))
-        if self.nchannels is not None:
-            arr = arr[: self.nchannels]
-        return TDSignal(arr, self.td_settings).transform(
-            self.target_domain, window=self.td_window
-        )
-
-
-# ============================================================
-# *** MBH TDI-on-the-fly path ***
-# ============================================================
-# :class:`bbhx.mbhtdionfly.MBHTDIonFly` (moved there from
-# ``scripts/mbh/mbhtdionfly.py``): per call, phentax produces per-mode
-# strain amp/phase on its coarse adaptive time grid (merger at t=0);
-# the grid is shifted to ``t_merge + t0``; the TDI response is
-# evaluated on that grid via :class:`TDTDIonTheFly` spline kernels;
-# the result is upsampled onto the data grid before the domain
-# (WDM / FD) transform.
-#
-# Call basis (11 params):
-#     ``(m1, m2, s1z, s2z, dist, phi_ref, inc, lam, beta, psi, t_merger)``
-# * ``dist`` is in **Mpc** (phentax convention — no Gpc conversion).
-# * ``(lam, beta)`` must be in the sky frame the ``orbits`` were built
-#   with: ecliptic lon/lat for the stock orbit classes, ra/dec when the
-#   orbits use ``frame='icrs'`` (mojito catalogs).
-# * ``t_merger`` is the merger time **relative to** ``t0``.
-
-from bbhx.mbhtdionfly import MBHTDIonFly
-
-MBH_TDIONFLY_HIGHER_MODES = (21, 33, 44)
-MBH_TDIONFLY_TOL = 1e-12  # phentax root-finding tolerance
-# Adaptive coarse-grained grid spacing = coarse_graining_scale_factor * f.
-# At the phentax default 12 the spacing AT THE MERGER is ~3.66 s, which
-# under-resolves the merger/ringdown -> broadband aliasing -> a spurious flat
-# ~5e-22 low-frequency floor in the TD-spline TDI-on-the-fly path. 48 gives
-# ~0.886 s at the merger and drops the legacy<->on-the-fly mismatch to
-# mm 6.3e-7 (>1mHz) (validated 2026-06-15, MBHB id=0); converges by 48.
-MBH_TDIONFLY_COARSE_SCALE = 48.0
-
-
-_TDIONFLY_GEN_CACHE = {}
-
-
-def get_mbh_tdionfly_gen(
-    *,
-    Tobs: float,
-    dt: float,
-    t_start: float,
-    tdi_config: TDIConfig,
-    orbits: Optional[Orbits] = None,
-    waveform_duration: Optional[float] = None,
-    higher_modes: Optional[Sequence[int]] = None,
-    force_backend: str = "cpu",
-) -> MBHTDIonFly:
-    """Build (and cache) an :class:`MBHTDIonFly` generator.
-
-    Mirrors ``scripts/mbh/mbh_test_script_td_wave.py``: phentax
-    IMRPhenomTHM with coarse-grained amp/phase output feeding
-    :class:`TDTDIonTheFly`. A single generator is reused between the
-    synthetic-injection data loader and the template move (same caching
-    convention as :func:`get_mbh_phentax_response_wrapper`).
-    """
-    higher_modes = (
-        tuple(higher_modes) if higher_modes is not None else MBH_TDIONFLY_HIGHER_MODES
+        nchannels=nchannels,
     )
-    key = (Tobs, dt, t_start, force_backend, waveform_duration, higher_modes, id(orbits))
-    if key in _TDIONFLY_GEN_CACHE:
-        return _TDIONFLY_GEN_CACHE[key]
-
-    # Lazy phentax import (same convention as IMRPhenomTHMWaveform).
-    from phentax.waveform import IMRPhenomTHM
-
-    wave_gen = IMRPhenomTHM(
-        higher_modes=list(higher_modes),
-        include_negative_modes=True,  # negative m modes produced by symmetry
-        t_low_fit=True,  # fit-based start time for the t(f) root finder
-        coarse_grain=True,
-        coarse_graining_scale_factor=MBH_TDIONFLY_COARSE_SCALE,
-        atol=MBH_TDIONFLY_TOL,
-        rtol=MBH_TDIONFLY_TOL,
-        T=Tobs,
-    )
-
-    if orbits is None:
-        orbits = ESAOrbits(force_backend=force_backend)
-
-    gen = MBHTDIonFly(
-        wave_gen,
-        orbits,
-        tdi_config,
-        dt,
-        Tobs,
-        t0=t_start,
-        waveform_duration=waveform_duration,
-        force_backend=force_backend,
-    )
-    _TDIONFLY_GEN_CACHE[key] = gen
-    return gen
-
-
-class MBHTDIonFlyWaveWrap:
-    """Adapter: MBHTDIonFly TD output -> run-domain signal.
-
-    Mirrors :class:`MBHWaveWrap`, but evaluates the TDI-on-the-fly
-    generator on the data time grid (``upsample_t_arr``) with
-    ``combine=True`` (sum over modes) before the domain transform.
-    """
-
-    def __init__(
-        self,
-        wave_gen: MBHTDIonFly,
-        t_arr: np.ndarray,
-        td_settings: TDSettings,
-        target_domain,
-        td_window=None,
-        runtime_kwargs: Optional[dict] = None,
-        nchannels: Optional[int] = None,
-    ):
-        self.wave_gen = wave_gen
-        self.t_arr = t_arr
-        self.td_settings = td_settings
-        self.target_domain = target_domain
-        self.td_window = td_window
-        self.runtime_kwargs = runtime_kwargs or {}
-        self.nchannels = nchannels
-
-    def __call__(self, *params, **kwargs):
-        call_kwargs = dict(self.runtime_kwargs)
-        call_kwargs.update(kwargs)
-        # Old ResponseWrapper-path kwarg; the TDI-on-the-fly generator
-        # consumes (lam, beta) in the orbits frame directly.
-        call_kwargs.pop("convert_to_ra_dec", None)
-        arr = np.asarray(
-            self.wave_gen(*params, upsample_t_arr=self.t_arr, combine=True, **call_kwargs)
-        )
-        if self.nchannels is not None:
-            arr = arr[: self.nchannels]
-        return TDSignal(arr, self.td_settings).transform(
-            self.target_domain, window=self.td_window
-        )
-
-
-# Waveform (full) basis for the TDI-on-the-fly path. NOTE the ordering
-# differs from the old ResponseWrapper basis: (lam, beta) come before
-# psi, dist is Mpc, and the merger time is named t_merger.
-MBH_TDIONFLY_FULL_BASIS = [
-    "m1", "m2", "s1z", "s2z", "dist", "phi_ref",
-    "inc", "lam", "beta", "psi", "t_merger",
-]
-MBH_TDIONFLY_SAMPLED_BASIS = [
-    "mT", "q", "s1z", "s2z", "dist", "phi_ref",
-    "cosinc", "lam", "sinbeta", "psi", "t_merger",
-]
-
-
-def _build_mbh_tdionfly_transform() -> TransformContainer:
-    """Sampling-basis -> waveform-basis transform for the TDI-on-the-fly path.
-
-    Mirrors ``scripts/mbh/mbh_test_script_td_wave.py``: ``(mT, q)`` with
-    ``q = m2/m1`` maps to ``(m1, m2)``; ``cosinc`` / ``sinbeta`` invert
-    to the angles. ``dist`` passes through in Mpc.
-    """
-    return TransformContainer(
-        input_basis=MBH_TDIONFLY_SAMPLED_BASIS,
-        output_basis=MBH_TDIONFLY_FULL_BASIS,
-        parameter_transforms={
-            ("mT", "q"): mT_q,
-            "cosinc": np.arccos,
-            "sinbeta": np.arcsin,
-        },
-        key_map={"mT": "m1", "q": "m2", "cosinc": "inc", "sinbeta": "beta"},
-        inverse_parameter_transforms={
-            ("mT", "q"): m1_m2_to_mT_q,
-            "cosinc": np.cos,
-            "sinbeta": np.sin,
-        },
-    )
-
-
-def mbh_tdionfly_full_to_sampling(params_full: np.ndarray) -> np.ndarray:
-    """Waveform-basis -> sampling-basis (elementwise; works on (11,) or (11, n))."""
-    p = np.asarray(params_full, dtype=float)
-    transform = _build_mbh_tdionfly_transform()
-    # the container expects parameters on the last axis; this helper's
-    # contract puts them on the first
-    return transform.both_inverse_transforms(p.T).T
-
-
-class SyntheticMBHProcessingStep(BaseProcessingStep):
-    """Generate the MBH injection in-process via the shared ResponseWrapper.
-
-    Hands ``(times, data, fs)`` to :class:`BaseProcessingStep` — same
-    interface as :class:`SangriaProcessingStep`. No external h5 path
-    needed.
-    """
-
-    def __init__(
-        self,
-        Tobs: float,
-        dt: float,
-        t_start: float,
-        injection_params_full_basis: np.ndarray,
-        tdi_chan: str = "XYZ",
-        nchannels: int = 3,
-        higher_modes: Optional[object] = "all",
-        verbose: bool = True,
-        do_plots: bool = False,
-    ):
-        tdi_config = TDIConfig("2nd generation", force_backend="cpu")
-        wave_gen = get_mbh_phentax_response_wrapper(
-            Tobs=Tobs,
-            dt=dt,
-            t_start=t_start,
-            tdi_config=tdi_config,
-            tdi_chan=tdi_chan,
-            role="injection",
-            higher_modes=higher_modes,
-        )
-
-        td_signal = np.asarray(
-            wave_gen(*injection_params_full_basis, convert_to_ra_dec=False)
-        )
-        td_signal = np.atleast_2d(td_signal)[:nchannels]
-
-        # ``ResponseWrapper`` can produce a couple fewer samples than
-        # ``Tobs/dt`` (Lagrange buffer / remove_garbage). Pad/clip to
-        # exactly ``Tobs/dt`` so downstream WDM ``N = Nf*Nt`` matches.
-        target_N = int(round(Tobs / dt))
-        if td_signal.shape[-1] < target_N:
-            pad = target_N - td_signal.shape[-1]
-            td_signal = np.pad(td_signal, ((0, 0), (0, pad)), mode="constant")
-        elif td_signal.shape[-1] > target_N:
-            td_signal = td_signal[:, :target_N]
-
-        N = td_signal.shape[-1]
-        times = np.arange(N) * dt + t_start
-        fs = 1.0 / dt
-
-        BaseProcessingStep.__init__(
-            self, times, td_signal, fs, verbose=verbose, do_plots=do_plots
-        )
-        self.orbits = None
-        self.injection_params_full_basis = injection_params_full_basis
-        self.tdi_chan = tdi_chan
+    _WAVE_WRAP_CACHE[key] = wrap
+    return wrap
 
 
 ################
 #  RECIPE STEPS
 ################
-
-
-class MBHPERecipeStep(RecipeStep):
-    """PE-only step (runs indefinitely; outer ``run_mcmc`` count caps it)."""
-
-    def setup_run(self, iteration, last_sample, sampler):
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        return False
 
 
 ################
@@ -704,135 +234,31 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         flush=True,
     )
 
-    # Pull the cached ResponseWrapper (built once at data-load time) and
-    # wrap it for the template path. ``MBHWaveWrap`` returns a
-    # ``DomainBase`` so ACA add/remove_signal_to_residual and the MBH
-    # move's get_waveform_here use the right kernels.
-    tdi_config = TDIConfig("2nd generation", force_backend="cpu")
-    template_wave_gen = get_mbh_phentax_response_wrapper(
-        Tobs=general_info.Tobs,
-        dt=general_info.dt,
-        t_start=T_START,
-        tdi_config=tdi_config,
-        tdi_chan="XYZ",
-        role="template",
-    )
-    td_settings = TDSettings(
-        int(round(general_info.Tobs / general_info.dt)),
-        general_info.dt,
-        force_backend="cpu",
-    )
-    wave_gen = MBHWaveWrap(
-        template_wave_gen,
-        td_settings,
-        domain_settings,
-        td_window=None,
-        nchannels=acs.nchannels,
-    )
+    # Template generator, shared with the engine-side ``signal_gen`` through the
+    # ``_WAVE_WRAP_CACHE`` (same cached ResponseWrapper as the injection).
+    wave_gen = _get_mbh_wave_wrap(general_info, nchannels=acs.nchannels)
 
-    # Pre-inject starting templates into each walker's residual.
-    if np.any(mbh_inds := state.branches_inds["mbh"][0]):
-        print(
-            f"[setup_recipe] pre-injecting MBH starts; nleaves_max={mbh_inds.shape[-1]}",
-            flush=True,
-        )
-        for leaf in range(mbh_inds.shape[-1]):
-            if not mbh_inds[0, leaf]:
-                continue
-            assert np.all(mbh_inds[:, leaf])
-            inj_coords = state.branches_coords["mbh"][0, :, leaf]
-            inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
-            n_starts = inj_coords.shape[0]
-            print(
-                f"[setup_recipe] generating + applying {n_starts} starting waveforms (leaf {leaf}) one at a time...",
-                flush=True,
-            )
-            # One MBH waveform at a time: generate, add to that walker's
-            # residual, drop the reference, force a gc cycle. Keeps peak
-            # RAM at one waveform worth instead of ``n_starts``
-            # simultaneously.
-            for i in range(n_starts):
-                print(
-                    f"[setup_recipe]   walker {i}/{n_starts}: generating...",
-                    flush=True,
-                )
-                sig = wave_gen(*inj_coords_in[i], **mbh_info.waveform_kwargs)
-                acs.add_signal_to_residual([sig], data_index=np.array([i]))
-                del sig
-                gc.collect()
-    print("[setup_recipe] pre-injection done; building MBH PE move", flush=True)
+    # No recipe-side residual pre-injection: the engine's
+    # ``setup_acs(rebuild_residuals=True)`` already subtracted the state's MBH
+    # templates via the registered ``signal_gen`` (see
+    # get_mbh_phentax_erebor_settings). Doing it here as well would double-subtract.
+    print("[setup_recipe] building MBH PE move", flush=True)
 
-    betas_all = np.tile(
-        make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1)
-    )
-    state.sub_states["mbh"].betas_all = betas_all
-
-    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
-
-    mbh_pe_move = ResidualAddOneRemoveOneMove(
-        "mbh",
-        coords_shape,
-        wave_gen,
-        mbh_info.waveform_kwargs.copy(),
-        mbh_info.waveform_kwargs.copy(),
-        acs,
-        mbh_info.num_prop_repeats,
-        mbh_info.transform,
-        priors,
-        mbh_info.inner_moves,
-        Tmax=np.inf,
-        betas_all=betas_all,
-    )
-    mbh_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    # Stock single-source PE-move builder. This phentax path passes
+    # ``waveform_kwargs`` as the likelihood kwargs (matching the inline move it
+    # replaces); ``MBHMoveBuilder`` defaults the like-kwargs to ``{}`` (the
+    # phenom ``build_mbh_moves_phenom`` convention), so pass it explicitly here.
+    _, mbh_pe_moves = MBHMoveBuilder(
+        wave_gen=wave_gen, waveform_like_kwargs=mbh_info.waveform_kwargs
+    ).build(engine_info, curr, acs, priors, state)
     recipe.add_recipe_component(
-        MBHPERecipeStep(moves=[mbh_pe_move]), name="mbh pe"
+        PERecipeStep(moves=mbh_pe_moves), name="mbh pe"
     )
 
 
 ##########################
 #  SETTINGS
 ##########################
-
-
-def _build_mbh_phentax_transform() -> TransformContainer:
-    """Build the sampling-basis -> waveform-basis transform for phentax MBH.
-
-    Mirrors the convention used by the legacy ``MBHSetup.init_sampling_info``
-    in lisatools: identical input + output basis names, and the
-    ``parameter_transforms`` operate *in-place* on those positions. So
-    after the transform fires, the value at position ``logM`` is in fact
-    ``m1`` (via ``(logM, q) -> mT_q``), the value at ``q`` is ``m2``, etc.
-    ``IMRPhenomTHMWaveform.__call__`` then receives them positionally in
-    the order: ``(m1, m2, s1z, s2z, dist, phi_ref, inc, psi, lam, beta,
-    t_plunge)``.
-
-    Unlike the legacy MBH transform we do *not* apply ``LISA_to_SSB``:
-    phentax + :class:`ResponseWrapper` consume ecliptic-frame
-    ``(lam, beta)`` directly (``is_ecliptic_latitude=True``). We also
-    drop the ``gpc_to_mpc`` step — :class:`IMRPhenomTHMWaveform`
-    converts ``dist`` from Gpc -> Mpc inside its own ``__call__``.
-    """
-    basis = [
-        "logM", "q", "s1z", "s2z", "dist", "phi_ref",
-        "cos_iota", "psi", "lam", "sin_beta", "t_plunge",
-    ]
-    return TransformContainer(
-        input_basis=basis,
-        output_basis=basis,
-        parameter_transforms={
-            "logM": np.exp,
-            ("logM", "q"): mT_q,           # (M_total, q) -> (m1, m2)
-            "cos_iota": np.arccos,         # cos_iota -> inc
-            "sin_beta": np.arcsin,         # sin_beta -> beta
-        },
-        fill_dict={},
-        inverse_parameter_transforms={
-            "logM": np.log,
-            ("logM", "q"): m1_m2_to_mT_q,  # (m1, m2) -> (M_total, q)
-            "cos_iota": np.cos,            # inc -> cos_iota
-            "sin_beta": np.sin,            # beta -> sin_beta
-        },
-    )
 
 
 def get_mbh_phentax_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
@@ -904,6 +330,17 @@ def get_mbh_phentax_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     inner_moves = [(StretchMove(), 1.0)]
 
+    mbh_transform = make_mbh_phentax_transform_container()
+
+    # Engine-side template generation: one sampling-basis row in -> one
+    # run-domain template out. ``setup_acs(rebuild_residuals=True)`` calls this
+    # to subtract the state's MBH templates from the residuals (replacing the
+    # old recipe-side pre-injection loop). Build deferred to first call (cached).
+    def _mbh_signal_gen(*params, **kwargs):
+        wave_wrap = _get_mbh_wave_wrap(general_set)
+        params_in = mbh_transform.both_transforms(np.asarray(params, dtype=float))
+        return wave_wrap(*params_in, **kwargs)
+
     mbh_settings = MBHSettings(
         Tobs=general_set.Tobs,
         dt=general_set.dt,
@@ -915,11 +352,12 @@ def get_mbh_phentax_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=1,
         nleaves_min=1,
         ndim=11,
-        transform=_build_mbh_phentax_transform(),
+        transform=mbh_transform,
         priors=priors,
         # Angles where periodicity matters in the sampling basis:
         periodic={"mbh": {"phi_ref": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}},
         log_dir=general_set.file_store_dir,
+        signal_gen=_mbh_signal_gen,
     )
 
     return MBHSetup(mbh_settings)
@@ -937,14 +375,19 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     domain_settings = DOMAIN_CHOICE
 
+    # The stock ``SyntheticSourceProcessingStep`` builds the (cached) injection
+    # response wrapper via the module-level factory and injects it onto the data
+    # grid. The template path in ``setup_recipe`` re-requests the wrapper and
+    # hits the same cache entry.
     processor_init_kwargs = dict(
         Tobs=Tobs,
         dt=dt,
         t_start=T_START,
-        injection_params_full_basis=INJECTION_PARAMS_FULL_BASIS,
+        wave_gen_factory=_make_mbh_injection_wave_gen,
+        injections=INJECTION_PARAMS_FULL_BASIS,
+        call_kwargs={"convert_to_ra_dec": False},
         tdi_chan="XYZ",
         nchannels=3,
-        higher_modes="all",
     )
 
     # CompositeSensitivityBackend is the default; only ``tdi_generation``
@@ -979,7 +422,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         window_taper_duration=window_taper_duration,
         gpu_backend=GPU_BACKEND,
         gpus=None,
-        data_processor=SyntheticMBHProcessingStep,
+        data_processor_class=SyntheticSourceProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,

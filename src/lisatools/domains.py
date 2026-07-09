@@ -45,6 +45,9 @@ from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from . import cutils
 import dataclasses
+import logging
+
+logger = logging.getLogger("lisatools.domains")
 
 @dataclasses.dataclass
 class DomainSettingsBase(LISAToolsParallelModule):
@@ -164,6 +167,90 @@ class DomainBase:
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
         """Transform this signal into ``new_domain`` (subclasses must implement)."""
         raise NotImplementedError("Transform needs to be implemented for this signal type.")
+
+    def with_backend(self, force_backend) -> "DomainBase":
+        """Return this signal on another backend (one host<->device transfer).
+
+        Same signal class and identical settings, reconstructed with
+        ``force_backend`` (a backend name like ``"cpu"``/``"cuda12x"`` or a
+        Backend object); the data array is uploaded (``xp.asarray``) or
+        downloaded (:func:`asnumpy`) exactly once. Returns ``self`` when the
+        backend already matches.
+
+        This is the sanctioned crossing point between backends: everything
+        derived from the returned object lives on the new backend, keeping
+        the sprint rule "one instance = one backend" intact while still
+        letting CPU-loaded data (disk reads are host-side by nature) enter a
+        GPU pipeline.
+        """
+        # Cheap short-circuit when handed a Backend object (the common case,
+        # e.g. ``other_settings.backend``): compare array modules directly
+        # instead of paying a settings reconstruction.
+        if getattr(force_backend, "xp", None) is self.xp:
+            return self
+
+        settings = self.settings
+        # settings.kwargs is the reconstruction recipe for the settings
+        # object (`type(settings)(*settings.args, **settings.kwargs)`). Most
+        # entries are scalars/None, but some settings classes carry ARRAYS in
+        # the recipe (WDMSettings' `window` and `omega`), and those arrays
+        # live on THIS signal's current backend. Rebuilding the settings for
+        # the other backend with a CuPy array still inside the recipe would
+        # plant device memory inside a CPU settings object, which only blows
+        # up later, on the first NumPy op that touches it. So real device
+        # arrays are downloaded to host (asnumpy -> .get()) before the
+        # rebuild. The CPU->GPU direction needs no mirror-image upload: the
+        # GPU settings ctor receives host arrays exactly as it would from a
+        # user constructing it directly, and coerces with its own xp where
+        # needed. The `cp is not np` guard covers CuPy-less installs, where
+        # this module aliases cp to numpy at import and the isinstance test
+        # would otherwise match every plain NumPy array.
+        new_kwargs = {
+            k: asnumpy(v) if isinstance(v, cp.ndarray) and cp is not np else v
+            for k, v in settings.kwargs.items()
+        }
+        new_kwargs["force_backend"] = force_backend
+        new_settings = type(settings)(*settings.args, **new_kwargs)
+        if new_settings.xp is self.xp:
+            return self
+        if new_settings.backend.uses_cupy:
+            new_arr = new_settings.xp.asarray(self.arr)
+        else:
+            new_arr = asnumpy(self.arr)
+        return type(self)(new_arr, new_settings)
+
+    def _coerce_transform_backend(
+        self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None
+    ) -> tuple["DomainBase", np.ndarray | cp.ndarray]:
+        """Move this signal (and ``window``) to ``new_domain``'s backend if needed.
+
+        Layered transforms thread the signal's backend through every
+        intermediate domain built under the hood, so a target settings object
+        on a different backend used to raise here (a mixed NumPy/CuPy chain
+        fails deep inside otherwise). Since 2026-07: the transform target
+        defines where the work happens — when the backends differ, the signal
+        and window are transferred ONCE at entry via :meth:`with_backend` and
+        the whole chain (intermediates + output) runs on the target backend.
+        That is also the memory-minimal placement: a single copy of the input
+        crosses the device boundary; nothing mid-chain ever transfers.
+        """
+        if new_domain.xp is self.xp:
+            return self, window
+        logger.info(
+            "transform target is on backend '%s' but signal is on '%s': "
+            "transferring the signal (%s, %.0f MB) to the target backend.",
+            new_domain.backend_name,
+            self.backend_name,
+            "x".join(map(str, self.arr.shape)),
+            self.arr.nbytes / 1e6,
+        )
+        signal_on_target = self.with_backend(new_domain.backend)
+        if window is not None and not isinstance(window, str):
+            if new_domain.backend.uses_cupy:
+                window = new_domain.xp.asarray(window)
+            else:
+                window = asnumpy(window)
+        return signal_on_target, window
 
     @property
     def shape(self) -> tuple:
@@ -780,6 +867,9 @@ class TDSignal(DomainBase, TDSettings):
         for STFT — pre-filling a full-signal window here broke the STFT
         branch, whose window must be segment-length).
         """
+        signal, window = self._coerce_transform_backend(new_domain, window)
+        if signal is not self:
+            return signal.transform(new_domain, window=window)
         if isinstance(new_domain, TDSettings):
             if window is None:
                 window = self.xp.ones(self.arr.shape, dtype=float)
@@ -1217,23 +1307,25 @@ class FDSignal(FDSettings, DomainBase):
         _tmp = self.xp.fft.irfft(arr_in * window, axis=-1)
         
         if settings is None:
+            # Intermediate settings built under the hood MUST inherit this
+            # signal's backend: layered transforms (e.g. WDM -> STFT goes
+            # through wdm_to_fd().ifft(settings=None).stft()) otherwise
+            # produce a CPU-default TDSettings mid-chain on GPU runs and the
+            # next step mixes NumPy/CuPy.
             Tobs = 1 / self.df
             Nobs = _tmp.shape[-1]
             dt = Tobs / Nobs
-            settings = TDSettings(Nobs, dt)
+            settings = TDSettings(Nobs, dt, force_backend=self.backend)
 
         td_arr = _tmp / settings.dt
         return TDSignal(td_arr, settings)
-    
+
     def __repr__(self) -> str:
         return (
             f"FDSignal(N={self.N}, df={self.df}, "
             f"min_freq={self.min_freq}, max_freq={self.max_freq}, "
             f"backend={self.backend_name.split('_')[-1]})"
         )
-
-        td_settings = TDSettings(N, dt, t0=0.0, force_backend=self.backend)
-        return TDSignal(td_arr, td_settings)
 
     def get_fd_window_for_wdm(self, settings):
         """Build the WDM analysis window in frequency space (currently unimplemented)."""
@@ -1388,6 +1480,9 @@ class FDSignal(FDSettings, DomainBase):
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
         """Dispatch to :meth:`ifft`, :meth:`wdmtransform`, etc. based on ``new_domain``."""
+        signal, window = self._coerce_transform_backend(new_domain, window)
+        if signal is not self:
+            return signal.transform(new_domain, window=window)
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
@@ -2592,9 +2687,17 @@ class WDMSignal(WDMSettings, DomainBase):
         return FDSignal(arr_fd, settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
-        """Dispatch to the correct WDM-to-X conversion based on ``new_domain``."""
-        if window is None:
-            window = self.xp.ones(self.arr.shape, dtype=float)
+        """Dispatch to the correct WDM-to-X conversion based on ``new_domain``.
+
+        ``window=None`` is forwarded as-is to the FINAL step of each chain:
+        every step defaults its own window with the shape it needs.
+        (Pre-filling a WDM-shaped ones array here broke the layered chains
+        — e.g. it reached ``ifft`` on the FD intermediate, whose window must
+        be FD-length. Same rule as :meth:`TDSignal.transform`.)
+        """
+        signal, window = self._coerce_transform_backend(new_domain, window)
+        if signal is not self:
+            return signal.transform(new_domain, window=window)
 
         if isinstance(new_domain, TDSettings):
             return self.wdm_to_fd(settings=None, window=None).ifft(settings=new_domain, window=window)

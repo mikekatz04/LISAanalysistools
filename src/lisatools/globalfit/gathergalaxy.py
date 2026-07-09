@@ -59,7 +59,7 @@ class GBGrouping:
     best_match_limit = 0.9
     parameters = []
     stop = False
-    phase_marginalize = True  # TODO: check
+    phase_maximize = True  # TODO: check
 
     def __init__(
         self,
@@ -254,7 +254,7 @@ class GBGrouping:
                 params_check_in[stind:endind],
                 fake_data_swap,
                 psd_in_swap,
-                phase_marginalize=self.phase_marginalize,
+                phase_maximize=self.phase_maximize,
                 N=N[stind:endind],
                 start_freq_ind=0,
                 data_length=len(self.fake_data[0]),
@@ -1618,7 +1618,7 @@ def gather_gb_samples(
                 binaries_base_sample_batch_in,
                 fake_data,
                 psd_in,
-                phase_marginalize=True,
+                phase_maximize=True,
                 **waveform_kwargs,
             )
 
@@ -1802,7 +1802,7 @@ def gather_gb_samples(
                 test_bins_in,
                 fake_data,
                 psd_in,
-                phase_marginalize=True,
+                phase_maximize=True,
                 **waveform_kwargs,
             )
             ll_diff[start_ind:end_ind] = asnumpy(

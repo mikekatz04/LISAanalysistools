@@ -103,7 +103,7 @@ from lisatools.response.tdiconfig import TDIConfig
 
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.detector import DefaultOrbits, LISAModel
-from lisatools.sources.utils import icrs_to_ecliptic
+from lisatools.sources.emri import emri_catalogue_to_waveform_basis
 from lisatools.domains import (
     FDSettings,
     TDSettings,
@@ -118,13 +118,20 @@ from lisatools.globalfit.engine import (
     Setup,
 )
 from lisatools.globalfit.moves import GFCombineMove, ResidualAddOneRemoveOneMove
-from lisatools.globalfit.preprocessing import BaseProcessingStep, L1ProcessingStep
+from lisatools.globalfit.preprocessing import (
+    BaseProcessingStep,
+    L1ProcessingStep,
+    normalize_source_ids,
+)
 from lisatools.globalfit.recipe import Recipe
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     MOJITO_REFERENCE_TIME,
     PERecipeStep,
     build_mbh_moves_phenom,
     mbh_catalogue_to_sampling_basis,
+    EMRIMoveBuilder,
+    MBHMoveBuilder,
+    SOBBHMoveBuilder,
 )
 from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.stock.erebor import (
@@ -141,6 +148,8 @@ from lisatools.sensitivity import (
     CompositeSensitivityMatrix,
     GalacticForeground,
     InstrumentNoise,
+    generate_correlated_instrument_noise_td,
+    tdi_generation_from_channel,
 )
 from lisatools.sampling.moves.skymodehop import SkyMove
 from lisatools.stochastic import FittedHyperbolicTangentGalacticForeground
@@ -232,17 +241,8 @@ MOJITO_SOURCE_IDS = {
 }
 
 
-def _normalize_source_ids(d: dict) -> dict:
-    """Coerce per-class IDs to a list: ``None`` -> ``[]``, scalar -> ``[v]``."""
-    out = {}
-    for k, v in d.items():
-        if v is None:
-            out[k] = []
-        elif isinstance(v, (list, tuple)):
-            out[k] = list(v)
-        else:
-            out[k] = [v]
-    return out
+# ``normalize_source_ids`` (per-class id -> list coercion) now lives in the
+# stock ``lisatools.globalfit.preprocessing`` module.
 
 
 # Per-class env override (used by the test / validation harness to select a
@@ -255,7 +255,7 @@ for _cls in ("MBHB", "EMRI", "SOBHB"):
             int(x) for x in _env_ids.split(",") if x.strip() != ""
         ]
 
-MOJITO_SOURCE_IDS = _normalize_source_ids(MOJITO_SOURCE_IDS)
+MOJITO_SOURCE_IDS = normalize_source_ids(MOJITO_SOURCE_IDS)
 
 # Active source = the single non-empty class. Single-source-at-a-time
 # snippet runs (CHOP_WINDOW=1) require exactly one class; the full-window
@@ -302,18 +302,9 @@ FOREGROUND_SEED = 67890
 ANNUAL_AMP = 0.10
 ANNUAL_PHASE0 = 0.0
 
-# TDI channel — TDI generation is derived from it.
+# TDI channel — TDI generation is derived from it via the stock helper.
 TDI_CHAN = "XYZ"
-_CHAN_TO_GEN = {
-    "XYZ": 2, "AET": 2, "XYZ2": 2, "AET2": 2,
-    "XYZ1": 1, "AET1": 1,
-}
-if TDI_CHAN not in _CHAN_TO_GEN:
-    raise ValueError(
-        f"TDI_CHAN={TDI_CHAN!r} not recognised. "
-        f"Add it to _CHAN_TO_GEN to pin the TDI generation."
-    )
-TDI_GEN = _CHAN_TO_GEN[TDI_CHAN]
+TDI_GEN = tdi_generation_from_channel(TDI_CHAN)
 TDI_GEN_STR = f"{TDI_GEN}{'nd' if TDI_GEN == 2 else 'st'} generation"
 NCHANNELS = 3
 
@@ -468,49 +459,9 @@ class AnnualModulatedGalacticForeground(GalacticForeground):
 # ============================================================
 # *** Synthetic noise + foreground TD generators ***
 # ============================================================
-def _generate_correlated_fd_noise(
-    N: int,
-    dt: float,
-    Soms_d: float,
-    Sa_a: float,
-    tdi_generation: int,
-    seed: int,
-) -> np.ndarray:
-    """Sample a 3-channel TD instrument-noise realization from the FD
-    instrument-noise covariance built by :class:`InstrumentNoise`.
-
-    Returns shape ``(3, N)`` float64.
-    """
-    Nf_rfft = N // 2 + 1
-    df = 1.0 / (N * dt)
-    fd_settings = FDSettings(N=Nf_rfft, df=df, force_backend="cpu")
-    model = LISAModel(
-        Soms_d ** 2, Sa_a ** 2, DefaultOrbits(), "full_year_noise_model",
-    )
-    instrument = InstrumentNoise(
-        tdi_generation=tdi_generation, model=model, fill_nans=0.0
-    )
-    sens = CompositeSensitivityMatrix(fd_settings, [instrument])
-    cov = np.asarray(sens.sens_mat)
-
-    rng = np.random.default_rng(seed)
-    norm = 0.5 * (1.0 / df) ** 0.5
-    z = rng.normal(0, norm, (3, Nf_rfft)) + 1j * rng.normal(0, norm, (3, Nf_rfft))
-
-    n_fd = np.zeros_like(z)
-    eye = np.eye(3) * 1e-60
-    for k in range(Nf_rfft):
-        C_k = cov[..., k] + eye
-        try:
-            L = np.linalg.cholesky(C_k)
-        except np.linalg.LinAlgError:
-            diag = np.maximum(np.diag(cov[..., k]), 0.0)
-            n_fd[:, k] = np.sqrt(diag) * z[:, k]
-            continue
-        n_fd[:, k] = L @ z[:, k]
-
-    n_td = np.fft.irfft(n_fd, n=N, axis=-1) / dt
-    return n_td.astype(np.float64)
+# ``_generate_correlated_fd_noise`` -> stock
+# ``lisatools.sensitivity.generate_correlated_instrument_noise_td`` (bit-identical
+# fixed-seed realization; was duplicated verbatim across settings files).
 
 
 def _generate_foreground_fd_only_covariance(
@@ -899,10 +850,11 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
             place_td_signal_on_grid(self.data[:nch], grid).arr
         )
         if ADD_INSTRUMENT_NOISE:
-            noise_td = _generate_correlated_fd_noise(
+            noise_td = generate_correlated_instrument_noise_td(
                 N=N, dt=self.dt,
                 Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
                 tdi_generation=TDI_GEN, seed=NOISE_SEED,
+                model_name="full_year_noise_model",
             )
             combined = combined + np.asarray(
                 place_td_signal_on_grid(noise_td[:nch], grid).arr
@@ -959,10 +911,11 @@ class SyntheticDataProcessor(BaseProcessingStep):
 
         combined = emri_td + sobbh_td + mbh_td
         if ADD_INSTRUMENT_NOISE:
-            noise_td = _generate_correlated_fd_noise(
+            noise_td = generate_correlated_instrument_noise_td(
                 N=target_N, dt=dt,
                 Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
                 tdi_generation=TDI_GEN, seed=NOISE_SEED,
+                model_name="full_year_noise_model",
             )[:nchannels]
             combined = combined + noise_td
         if ADD_GALACTIC_FOREGROUND:
@@ -1036,41 +989,17 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
         # the spin is what produced the spurious 1.49x amplitude). The
         # ResponseWrapper is built is_ecliptic_latitude=False and called
         # convert_to_ra_dec=True (see _EMRISpecialFrameWrap in
-        # global_fit_settings) so the sky goes ecliptic -> ICRS for the
-        # frame="icrs" orbits, while the spin stays in the FEW frame. This
-        # reproduces the mojito EMRI to mm ~ 4e-5.
+        # lisatools.sources.emri.response) so the sky goes ecliptic -> ICRS
+        # for the frame="icrs" orbits, while the spin stays in the FEW frame.
+        # This reproduces the mojito EMRI to mm ~ 4e-5. Row construction lives
+        # in the stock lisatools.sources.emri.emri_catalogue_to_waveform_basis.
         _emri_cat = general_set.data_processor.catalogue["EMRI"]
-        _emri_rows = []
-        for i in sorted(_emri_cat.keys()):
-            _e = _emri_cat[i]
-            _ra = float(_e["RightAscension"]) % (2 * np.pi)
-            _dec = float(_e["Declination"])
-            _lam_S, _beta_S = icrs_to_ecliptic(_ra, _dec)
-            _qS_e = float(np.pi / 2 - _beta_S)          # ecliptic polar angle
-            _phiS_e = float(_lam_S) % (2 * np.pi)       # ecliptic longitude
-            _emri_rows.append([
-                _e["PrimaryMassSSBFrame"],        # M
-                _e["SecondaryMassSSBFrame"],      # mu
-                _e["PrimarySpinParameter"],       # a
-                _e["SemiLatusRectum"],            # p0
-                _e["Eccentricity"],               # e0
-                # FastKerrEccentricEquatorialFlux is an EQUATORIAL model:
-                # xI0 must be +1 (prograde) — the catalogue "InclinationAngle"
-                # is the VIEWING inclination (line of sight vs orbital L), which
-                # FEW derives internally from the qS/qK sky+spin geometry, not an
-                # intrinsic input. Mirrors the validated SPECIAL recipe
-                # (scripts/sobbh/emri_frame_convert_check.py INTR[5]=1.0).
-                1.0,                              # xI0 (equatorial prograde)
-                _e["LuminosityDistance"] / 1e3,   # dist (Mpc -> Gpc)
-                _qS_e,                            # qS (ecliptic polar)
-                _phiS_e,                          # phiS (ecliptic longitude)
-                _e["PolarAnglePrimarySpin"],      # qK (RAW file spin)
-                _e["AzimuthalAnglePrimarySpin"],  # phiK (RAW file spin)
-                _e["AzimuthalPhase"],             # Phi_phi0
-                _e["PolarPhase"],                 # Phi_theta0
-                _e["RadialPhase"],                # Phi_r0
-            ])
-        emri_injections_full_basis = np.asarray(_emri_rows)
+        emri_injections_full_basis = np.asarray(
+            [
+                emri_catalogue_to_waveform_basis(_emri_cat[i])
+                for i in sorted(_emri_cat.keys())
+            ]
+        )
     else:
         emri_injections_full_basis = EMRI_INJECTIONS_FULL_BASIS
 
@@ -1520,22 +1449,9 @@ def _build_emri_move_runtime(
 
     wave_gen = _get_emri_wave_wrap(general_info)
 
-    betas_all = np.tile(
-        make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1)
-    )
-    state.sub_states["emri"].betas_all = betas_all
-    coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
-    move = ResidualAddOneRemoveOneMove(
-        "emri", coords_shape, wave_gen,
-        emri_info.waveform_kwargs.copy(),
-        emri_info.waveform_kwargs.copy(),
-        acs, emri_info.num_prop_repeats,
-        emri_info.transform, priors,
-        emri_info.inner_moves,
-        Tmax=np.inf, betas_all=betas_all,
-    )
-    move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
-    return move
+    # Stock single-source PE-move builder (betas_all / coords / move machinery).
+    _, moves = EMRIMoveBuilder(wave_gen=wave_gen).build(None, curr, acs, priors, state)
+    return moves[0]
 
 
 def _build_mbh_move_runtime(
@@ -1572,22 +1488,13 @@ def _build_mbh_move_runtime(
 
     wave_gen = _get_mbh_tdionfly_wave_wrap(general_info)
 
-    betas_all = np.tile(
-        make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1)
-    )
-    state.sub_states["mbh"].betas_all = betas_all
-    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
-    move = ResidualAddOneRemoveOneMove(
-        "mbh", coords_shape, wave_gen,
-        mbh_info.waveform_kwargs.copy(),
-        mbh_info.waveform_kwargs.copy(),
-        acs, mbh_info.num_prop_repeats,
-        mbh_info.transform, priors,
-        mbh_info.inner_moves,
-        Tmax=np.inf, betas_all=betas_all,
-    )
-    move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
-    return move
+    # Stock single-source PE-move builder. The tdionfly MBH path passes
+    # ``waveform_kwargs`` as the likelihood kwargs (unlike the phenom
+    # ``build_mbh_moves_phenom`` default of ``{}``), so pass it explicitly.
+    _, moves = MBHMoveBuilder(
+        wave_gen=wave_gen, waveform_like_kwargs=mbh_info.waveform_kwargs
+    ).build(None, curr, acs, priors, state)
+    return moves[0]
 
 
 def _build_sobbh_move_runtime(
@@ -1610,22 +1517,9 @@ def _build_sobbh_move_runtime(
 
     wave_gen = _get_sobbh_wave_wrap(general_info)
 
-    betas_all = np.tile(
-        make_ladder(sobbh_info.ndim, ntemps=ntemps), (sobbh_info.nleaves_max, 1)
-    )
-    state.sub_states["sobbh"].betas_all = betas_all
-    coords_shape = (ntemps, nwalkers, sobbh_info.nleaves_max, sobbh_info.ndim)
-    move = ResidualAddOneRemoveOneMove(
-        "sobbh", coords_shape, wave_gen,
-        sobbh_info.waveform_kwargs.copy(),
-        sobbh_info.waveform_kwargs.copy(),
-        acs, sobbh_info.num_prop_repeats,
-        sobbh_info.transform, priors,
-        sobbh_info.inner_moves,
-        Tmax=np.inf, betas_all=betas_all,
-    )
-    move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
-    return move
+    # Stock single-source PE-move builder (betas_all / coords / move machinery).
+    _, moves = SOBBHMoveBuilder(wave_gen=wave_gen).build(None, curr, acs, priors, state)
+    return moves[0]
 
 
 # ============================================================

@@ -207,6 +207,14 @@ void response_part(nb::module_ &m) {
          nb::arg("n_rfft"), nb::arg("num_channel"),
          nb::arg("num_data"), nb::arg("num_noise"),
          nb::arg("ind_min"), nb::arg("ind_max"), nb::arg("df"))
+    .def(nb::init<array_type<std::complex<double>>, array_type<double>,
+                  int, int, int, int, int, int, double,
+                  array_type<int>>(),
+         nb::arg("fd_data"), nb::arg("fd_invC"),
+         nb::arg("n_rfft"), nb::arg("num_channel"),
+         nb::arg("num_data"), nb::arg("num_noise"),
+         nb::arg("ind_min"), nb::arg("ind_max"), nb::arg("df"),
+         nb::arg("start_inds"))
     .def_rw("fd", &FDDomainWrap::fd)
     ;
 

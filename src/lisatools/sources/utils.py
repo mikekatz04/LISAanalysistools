@@ -783,6 +783,46 @@ def psi_rotation_icrs_to_ecliptic(lam_ecl, beta_ecl):
 
     return out_fun(xp.arctan2(sindeltapsi, cosdeltapsi))
 
+
+class WaveWrapCache:
+    """Tiny keyed cache for expensive per-run wave-generator / wave-wrap objects.
+
+    Replaces the ad-hoc module-level ``_WAVE_WRAP_CACHE`` / ``_MBH_PHENOM_GEN_CACHE``
+    dicts that the global-fit settings files used to memoize per-run response
+    wrappers and domain-projection adapters. The caller owns the cache key (e.g.
+    ``(id(general_info), nchannels, use_tdionfly)``) so the run-scoped semantics
+    are preserved.
+
+    Example::
+
+        _CACHE = WaveWrapCache()
+        wrap = _CACHE.get_or_build(
+            (id(general_info), nchannels), lambda: build_emri_wave_wrap(...)
+        )
+    """
+
+    def __init__(self):
+        self._store: dict = {}
+
+    def get_or_build(self, key, factory):
+        """Return the cached object for ``key``, building it via ``factory()`` once."""
+        if key not in self._store:
+            self._store[key] = factory()
+        return self._store[key]
+
+    def clear(self):
+        """Drop all cached entries."""
+        self._store.clear()
+
+    def __contains__(self, key):
+        return key in self._store
+
+    def __getitem__(self, key):
+        return self._store[key]
+
+    def __setitem__(self, key, value):
+        self._store[key] = value
+
 # ---- 
 def _get_orbital_quantities(orbits: Orbits, t: float | np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """

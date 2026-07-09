@@ -347,10 +347,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
 
         assert isinstance(orbits, Orbits)
 
-        self._response_orbits = copy_orbits(orbits)
-
-        if not self._response_orbits.configured:
-            self._response_orbits.configure(linear_interp_setup=True)
+        self._response_orbits = copy_orbits(orbits)  # configures lazily on first use
 
     @property
     def tdi_orbits(self) -> Orbits:
@@ -367,10 +364,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         assert isinstance(orbits, Orbits)
         assert orbits.backend.name.split("_")[-1] == self.backend.name.split("_")[-1]
 
-        self._tdi_orbits = copy_orbits(orbits)
-
-        if not self._tdi_orbits.configured:
-            self._tdi_orbits.configure(linear_interp_setup=True)
+        self._tdi_orbits = copy_orbits(orbits)  # configures lazily on first use
 
     @property
     def citation(self):

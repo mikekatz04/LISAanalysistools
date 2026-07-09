@@ -35,7 +35,8 @@ from eryn.utils import PeriodicContainer, TransformContainer
 from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from lisatools.datacontainer import DataResidualArray
 from lisatools.domains import FDSettings
-from lisatools.sensitivity import AE1SensitivityMatrix
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.globalfit.engine import GlobalFitInfo
 from lisatools.globalfit.moves.gbspecialstretch import GBSpecialRJPriorMove
 from lisatools.globalfit.state import GBState, GFState
@@ -106,13 +107,13 @@ def _build_band_structure(start_freq: float, end_freq: float, Tobs: float, df: f
 
 
 def _build_fd_ac(fd: np.ndarray, df: float):
-    """Two-channel (A,E) frequency-domain analysis container on CPU.
+    """Three-channel XYZ frequency-domain analysis container on CPU.
 
     Note: FDSettings owns the full ``np.arange(N) * df`` grid; ``min_freq``
     only marks the active slice. So ``N`` is sized to cover [0, fd[-1]] and
     the active slice maps to our (shorter) fd window.
     """
-    nchan = 2
+    nchan = 3
     N_full = int(np.ceil(fd[-1] / df)) + 1
     data_full = np.zeros((nchan, N_full), dtype=np.complex128)
     ind_lo = int(np.round(fd[0] / df))
@@ -130,7 +131,7 @@ def _build_fd_ac(fd: np.ndarray, df: float):
     drs._dt = None
     drs._Tobs = None
     drs._fmax = float(fd_settings.f_arr.max())
-    sens = AE1SensitivityMatrix(drs.settings)
+    sens = XYZ2SensitivityMatrix(drs.settings, model="scirdv1")
     return AnalysisContainer(drs, sens), N_full, ind_lo
 
 
@@ -154,7 +155,9 @@ def main() -> int:
     # ------------------------------------------------------------------
     # GBGPU on CPU
     # ------------------------------------------------------------------
-    gb = GBGPU(force_backend=BACKEND)
+    from lisatools.detector import EqualArmlengthOrbits
+
+    gb = GBGPU(orbits=EqualArmlengthOrbits(force_backend=BACKEND), force_backend=BACKEND)
     gb.gpus = None  # CPU path: no GPU device list
     print(f"[setup] GBGPU backend={gb.backend.name}, xp={gb.backend.xp.__name__}")
 
@@ -177,7 +180,7 @@ def main() -> int:
     priors = _build_gb_priors()
     gpu_priors = priors  # same on CPU
     transform = _build_gb_transform()
-    waveform_kwargs = dict(dt=dt, T=Tobs, tdi_channel_setup="AE", use_c_implementation=True)
+    waveform_kwargs = dict(dt=dt, T=Tobs, tdi_channel_setup="XYZ")
 
     # ------------------------------------------------------------------
     # AnalysisContainerArray (single AC, FD path, gpus=None)
@@ -189,7 +192,7 @@ def main() -> int:
     for _ in range(NWALKERS):
         ac_i, N_full, ind_lo = _build_fd_ac(fd, df)
         acs_list.append(ac_i)
-    acs = AnalysisContainerArray(acs_list, gpus=None)
+    acs = AnalysisContainerArray(acs_list, gpus=None, complex_psd=True)
     print(f"[setup] acs.data_length={acs.data_length}, acs.nchannels={acs.nchannels}, acs.acs_total_entries={acs.acs_total_entries}, acs.gpus={acs.gpus}")
     fd_full = np.arange(N_full) * df
 
@@ -228,11 +231,13 @@ def main() -> int:
         ind_lo,                      # start_freq_ind (where active band begins in full grid)
         acs.data_length,
         acs,                         # mgh
-        fd_full,
         band_edges,
         band_N_vals,
         gpu_priors,
         rj_proposal_distribution=gpu_priors,
+        orbits=gb.orbits,
+        tdi_config=TDIConfig("1st generation"),
+        t_ref=0.0,
         max_data_store_size=512,
         name="rj_prior_cpu_smoke",
         waveform_kwargs=waveform_kwargs,

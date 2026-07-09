@@ -351,6 +351,10 @@ def make_gmm(gb, gmm_info_in):
 
 
 def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
+    # DEPRECATED (2026-07 GB-proposal rework): this legacy MPI-pipeline entry
+    # constructs GBSpecialStretchMove with a pre-rework signature (positional
+    # ``fd``, no ``band_N_vals``) and cannot run against the current move.
+    # The supported construction path is recipe.py::build_gb_moves.
     """Run the GB parameter-estimation sampler on ``gpu``.
 
     Pulls the global-fit configuration from ``head_rank``, builds the GB
@@ -1238,7 +1242,7 @@ def run_iterative_subtraction_mcmc(
 
     prev_logl = xp.asarray(
         gb.get_ll(
-            new_points_in, data_in, psd_in, phase_marginalize=True, **waveform_kwargs
+            new_points_in, data_in, psd_in, phase_maximize=True, **waveform_kwargs
         ).reshape(prev_logp.shape)
     )
 
@@ -1355,7 +1359,7 @@ def run_iterative_subtraction_mcmc(
                     new_points_in,
                     data_in,
                     psd_in,
-                    phase_marginalize=True,
+                    phase_maximize=True,
                     **waveform_kwargs,
                 )
             )
@@ -1506,7 +1510,7 @@ def run_iterative_subtraction_mcmc(
                 best_logl_points_in,
                 data_in,
                 psd_in,
-                phase_marginalize=True,
+                phase_maximize=True,
                 **waveform_kwargs,
             )
         )
@@ -1641,7 +1645,7 @@ def run_iterative_subtraction_mcmc(
                             new_points_in,
                             data_in,
                             psd_in,
-                            phase_marginalize=True,
+                            phase_maximize=True,
                             **waveform_kwargs,
                         )
                     ).reshape(new_points_with_fs.shape[:-1])
@@ -1694,7 +1698,7 @@ def run_iterative_subtraction_mcmc(
                             best_logl_points_in,
                             data_in,
                             psd_in,
-                            phase_marginalize=True,
+                            phase_maximize=True,
                             **waveform_kwargs,
                         )
                     )
@@ -1816,7 +1820,7 @@ def run_iterative_subtraction_mcmc(
     #             breakpoint()
 
     #     tmp_in = transform_fn.both_transforms(tmp.reshape(-1, ndim))
-    #     start_like = gb.get_ll(tmp_in, data_in, psd_in, phase_marginalize=False, **waveform_kwargs).reshape(tmp.shape[:-1])
+    #     start_like = gb.get_ll(tmp_in, data_in, psd_in, phase_maximize=False, **waveform_kwargs).reshape(tmp.shape[:-1])
 
     #     starting_points[still_going_start_like] = tmp
 

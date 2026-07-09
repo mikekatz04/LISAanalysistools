@@ -6,7 +6,7 @@ grid as a :class:`DomainSettingsBase` / factory the engine consumes.
 
 Built on the same pieces the smoke-test settings files use:
 
-* ``recipe_steps.build_psd_moves`` / ``build_gb_moves`` drive the PSD
+* ``recipe.build_psd_moves`` / ``build_gb_moves`` drive the PSD
   and GB branches (mirrors ``gb_and_foreground_global_fit_settings.py``).
 * The EMRI branch reuses the cached ``GenerateEMRIWaveform`` +
   ``ResponseWrapper`` pattern from ``emri_only_global_fit_settings.py``
@@ -77,7 +77,7 @@ from lisatools.globalfit.moves import (
 )
 from lisatools.globalfit.preprocessing import BaseProcessingStep, SangriaProcessingStep
 from lisatools.globalfit.recipe import Recipe
-from lisatools.globalfit.recipe_steps import (
+from lisatools.globalfit.recipe import (
     PERecipeStep,
     SearchRecipeStep,
     build_gb_moves,
@@ -177,177 +177,16 @@ def emri_full_to_sampling(params_full):
     return transform.both_inverse_transforms(p)
 
 
-# Shared inspiral / sum / mode-selector kwargs (mirrors emri_only).
-EMRI_INSPIRAL_KWARGS = {
-    "DENSE_STEPPING": 0,
-    "max_init_len": int(1e4),
-    "force_backend": "cpu",
-}
-EMRI_SUM_KWARGS = {"pad_output": True}
-# 1e-2 threshold keeps things fast; tighten once on GPU.
-EMRI_MODE_SELECTOR_KWARGS = {"mode_selection_threshold": 1e-2}
-
-_EMRI_WAVE_GEN_CACHE = {}
-
-
-class _EMRISpecialFrameWrap:
-    """Force the SPECIAL EMRI frame on every call to the EMRI ResponseWrapper.
-
-    The EMRI sky/spin params are FEW **ecliptic-polar** angles (qS, phiS, qK,
-    phiK), so the FEW h+/hx (viewing + polarization) are built in the ecliptic
-    frame. The response then runs against **frame="icrs"** orbits, so the sky
-    must be converted ecliptic -> ICRS inside the wrapper: the underlying
-    ResponseWrapper is built with ``is_ecliptic_latitude=False`` (beta = pi/2 - qS
-    = ecliptic latitude) and every call passes ``convert_to_ra_dec=True`` (lam,
-    beta -> ra, dec). This is the validated SPECIAL setup (ecl-polar sky + RAW
-    FILE spin + ICRS orbits) that reproduces the mojito EMRI to mm ~ 4e-5 and
-    removes the 1.49x amplitude (which came from ecliptic-converting the spin).
-    The per-call deprecation warning the conversion emits is suppressed -- this
-    is the intended EMRI path for now.
-    """
-
-    def __init__(self, wave_gen):
-        self._wave_gen = wave_gen
-
-    def __call__(self, *params, **kwargs):
-        kwargs.setdefault("convert_to_ra_dec", True)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            return self._wave_gen(*params, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._wave_gen, name)
-
-
-def get_emri_response_wrapper(
-    *,
-    Tobs: float,
-    dt: float,
-    t_start: float,
-    tdi_config: TDIConfig,
-    tdi_chan: str = "XYZ",
-    role: str = "template",
-    order: int = 40,
-    t_buffer: float = 3e4,
-    orbits: Optional[Orbits] = None,
-    force_backend: str = "cpu",
-    t0_shift_to_data: float = 0.0,
-):
-    """Build (and cache) a :class:`ResponseWrapper` around ``GenerateEMRIWaveform``.
-
-    Cached so the injection path and template path share one generator —
-    building two on CPU exhausts RAM.
-
-    ``t_start`` is the epoch the intrinsic FEW phases (``Phi_phi0`` etc.)
-    are referenced to — for mojito data this is the **catalogue reference
-    time** (``MOJITO_REFERENCE_TIME``), NOT the (trimmed) data-window start,
-    because ``GenerateEMRIWaveform`` has no internal reference epoch (its
-    ``t0`` IS the phase reference). ``t0_shift_to_data`` then carries the
-    sub-sample (``|.| < dt``) remainder of ``data_t0 - t_start``; the integer
-    part is handled by the caller slicing ``offset_int`` samples off the
-    front of the response output (see :class:`EMRIWaveWrap`).
-    """
-    key = (
-        Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits),
-        t0_shift_to_data,
-    )
-    if key in _EMRI_WAVE_GEN_CACHE:
-        return _EMRI_WAVE_GEN_CACHE[key]
-
-    few_generator = GenerateEMRIWaveform(
-        "FastKerrEccentricEquatorialFlux",
-        return_list=False,
-        inspiral_kwargs=EMRI_INSPIRAL_KWARGS,
-        sum_kwargs=EMRI_SUM_KWARGS,
-        frame="detector",
-        mode_selector_kwargs=EMRI_MODE_SELECTOR_KWARGS,
-        force_backend=force_backend,
-    )
-
-    response_kwargs = {
-        "Tobs": Tobs / YRSID_SI,
-        "dt": dt,
-        "index_lambda": 8,
-        "index_beta": 7,
-        "flip_hx": True,
-        "force_backend": force_backend,
-        "tdi": tdi_config,
-        "tdi_chan": tdi_chan,
-        "order": order,
-        "remove_garbage": "zero",
-        "t_buffer": t_buffer,
-        # Sub-sample (|.| < dt) alignment of the REF-anchored waveform onto the
-        # data grid; the integer-sample part is sliced by EMRIWaveWrap.
-        "t0_shift_to_data": t0_shift_to_data,
-        # SPECIAL EMRI frame: index_beta=7 carries the ecliptic POLAR angle qS, so
-        # is_ecliptic_latitude=False maps it to the ecliptic latitude (pi/2 - qS).
-        # _EMRISpecialFrameWrap then forces convert_to_ra_dec=True per call so the
-        # sky goes ecliptic -> ICRS for the frame="icrs" orbits.
-        "is_ecliptic_latitude": False,
-    }
-
-    if orbits is None:
-        orbits = EqualArmlengthOrbits(force_backend=force_backend)
-    wave_gen = _EMRISpecialFrameWrap(
-        ResponseWrapper(
-            few_generator,
-            orbits=orbits,
-            t0=t_start,
-            **response_kwargs,
-        )
-    )
-    _EMRI_WAVE_GEN_CACHE[key] = wave_gen
-    return wave_gen
-
-
-class EMRIWaveWrap:
-    """Run the cached ResponseWrapper and project to the run's domain.
-
-    Output is a :class:`DomainBase` subclass (FDSignal / WDMSignal / ...)
-    so ACA dispatch and the EMRI move's ``get_waveform_here`` land on the
-    right kernels.
-    """
-
-    def __init__(
-        self,
-        wave_gen,
-        td_settings: TDSettings,
-        target_domain,
-        td_window=None,
-        runtime_kwargs: Optional[dict] = None,
-        nchannels: Optional[int] = None,
-        offset_int: int = 0,
-    ):
-        self.wave_gen = wave_gen
-        self.td_settings = td_settings
-        self.target_domain = target_domain
-        self.td_window = td_window
-        self.runtime_kwargs = runtime_kwargs or {}
-        self.nchannels = nchannels
-        # Integer-sample offset between the REF-anchored response output and the
-        # data grid: data_t0 = t_start(=REF) + offset_int*dt + t0_shift_to_data.
-        # The response is generated over (td_settings.N + offset_int) samples
-        # starting at REF; slicing off the first ``offset_int`` lands the rest
-        # on the data grid (t0 = data_t0). Mirrors the validated SPECIAL recipe
-        # in scripts/sobbh/emri_frame_convert_check.py (leg[:, offset_int:...]).
-        self.offset_int = int(offset_int)
-
-    def __call__(self, *params, **kwargs):
-        call_kwargs = dict(self.runtime_kwargs)
-        call_kwargs.update(kwargs)
-        arr = np.atleast_2d(np.asarray(self.wave_gen(*params, **call_kwargs)))
-        if self.nchannels is not None:
-            arr = arr[: self.nchannels]
-        if self.offset_int:
-            arr = arr[:, self.offset_int:]
-        N = self.td_settings.N
-        if arr.shape[-1] < N:
-            arr = np.pad(arr, ((0, 0), (0, N - arr.shape[-1])))
-        elif arr.shape[-1] > N:
-            arr = arr[:, :N]
-        return TDSignal(arr, self.td_settings).transform(
-            self.target_domain, window=self.td_window
-        )
+# Canonical EMRI response-wrapper machinery — carved out to the installed
+# package (lisatools.sources.emri.response, 2026-07-01); re-exported here for
+# the settings files and scripts that import these names from this module.
+from lisatools.sources.emri import (  # noqa: F401
+    EMRI_INSPIRAL_KWARGS,
+    EMRI_SUM_KWARGS,
+    EMRI_MODE_SELECTOR_KWARGS,
+    EMRIWaveWrap,
+    get_emri_response_wrapper,
+)
 
 
 # ============================================================
@@ -1041,26 +880,23 @@ def setup_recipe(
         isinstance(general_info.domain_settings, WDMSettings)
         and gb_info.gb_wdm_comp is None
     ):
-        import sys
-        if "/Users/mlkatz/Research/sprint_2026" not in sys.path:
-            sys.path.insert(0, "/Users/mlkatz/Research/sprint_2026")
-        from gb_wdm_het import GBWDMHeterodyne
+        # Chunked-het GB likelihood: the INSTALLED GBGPU class (removes a stale
+        # hardcoded sys.path). GBWDMComputations reads Nf/Nt/dt/band/t0 from the domain.
+        from gbgpu.gbcomps import GBWDMComputations
 
         _wdm = general_info.domain_settings
-        _t_obs_start = float(getattr(general_info, "t_obs_start", 0.0))
-        gb_info.gb_wdm_comp = GBWDMHeterodyne(
-            Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
-            T_full=general_info.Tobs, t_ref_full=gb_info.t0,
+        gb_info.gb_wdm_comp = GBWDMComputations(
+            _wdm,
+            t_ref=gb_info.t0,
             Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
             n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
             N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
-            nchannels=3,
-            force_backend=general_info.force_backend,
-            tdi_gen="2nd generation" if gb_info.use_tdi2 else "1st generation",
-            orbits=general_info.gpu_orbits,
-            t_obs_start=_t_obs_start,
             N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
             N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
+            orbits=general_info.gpu_orbits,
+            tdi_config="2nd generation" if gb_info.use_tdi2 else "1st generation",
+            force_backend=general_info.force_backend,
+            tdi_type="XYZ",
         )
 
     #* ================================= PSD =================================

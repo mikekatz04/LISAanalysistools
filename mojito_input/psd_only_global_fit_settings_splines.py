@@ -78,7 +78,7 @@ from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralS
 from eryn.utils.updates import Update
 
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, build_psd_moves
+from lisatools.globalfit.recipe import SearchRecipeStep, PERecipeStep, build_psd_moves
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):

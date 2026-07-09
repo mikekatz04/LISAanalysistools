@@ -51,7 +51,7 @@ def _to_np(a):
 
 def _backend(average):
     orbits = L1Orbits(NOISE_FILE, force_backend="cpu", frame="icrs")
-    orbits.configure(linear_interp_setup=True)
+    # configuration is lazy (first use); no explicit configure() needed
     # df chosen so the [min_freq, max_freq] band fits within N (active_slice end_idx
     # is NOT clamped to N), keeping total_terms == len(f_arr).
     fd = FDSettings(N=4096, df=5e-6, min_freq=1e-4, max_freq=2e-2, force_backend="cpu")

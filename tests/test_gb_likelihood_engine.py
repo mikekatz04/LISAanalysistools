@@ -201,7 +201,7 @@ class WDMEngineCallSignatureTest(unittest.TestCase):
                       N_vals=None, waveform_kwargs={})
         engine.get_swap_ll(aca, params, params,
                            data_index=idx, noise_index=idx, N_vals=None,
-                           phase_marginalize=False, waveform_kwargs={})
+                           phase_maximize=False, waveform_kwargs={})
         # param_eps / chunk are forwarded by gbspecialstretch.Buffer.get_ll_grad
         # to the engine; the engine must swallow them because the underlying
         # get_ll_grad_wdm no longer accepts them.

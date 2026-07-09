@@ -27,14 +27,13 @@ need a GPU + ``cupy`` + ``gbgpu`` (they call ``self.xp.cuda.runtime.``...);
 this script intentionally stops one level below the eryn move so it runs on
 CPU and exercises the same numerical pipeline.
 
-Both TDI conventions are supported via the ``--tdi-type`` flag (default AET,
-which is diagonal and avoids the off-diagonal noise drift that XYZ can show
-on a single noise realisation).
+XYZ is the only TDI convention exercised (sprint direction 2026-07:
+the GB pipeline runs XYZ with the full cross-channel inverse covariance;
+AET is not used).
 
 Run from the repo root:
 
     /Users/mkatz/miniconda3/envs/deving/bin/python test_gbspecial_engine_iter.py
-    /Users/mkatz/miniconda3/envs/deving/bin/python test_gbspecial_engine_iter.py --tdi-type XYZ
 """
 
 from __future__ import annotations
@@ -56,12 +55,10 @@ from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from lisatools.sensitivity import (
     XYZ2SensitivityMatrix,
-    AET1SensitivityMatrix,
-    AET2SensitivityMatrix,
     SensitivityMatrixBase,
 )
 from lisatools.domains import (
-    TDSettings, TDSignal, FDSettings, WDMSettings, WDMSignal, WDMLookupTable,
+    TDSettings, TDSignal, FDSettings, WDMSettings, WDMSignal,
 )
 
 from lisatools.response.tdiconfig import TDIConfig
@@ -70,24 +67,25 @@ from gbgpu.gbcomps import GBWDMComputations
 
 
 # ----------------------------------------------------------------------------
-# Static config -- aligned with gb_lookup_table_test_script.py so we can reuse
-# the cached WDM lookup table on disk.
+# Static config. Post-Phase-0 the chunked-heterodyne GBWDMComputations builds
+# everything from a WDMSettings grid -- no lookup table on disk. NT is kept
+# small so the CPU run stays memory-light.
 # ----------------------------------------------------------------------------
 BACKEND = "cpu"
 DT = 10.0
 NF = 1460
-NT = 256 * 10
+NT = 512
 WAVELET_DURATION = NF * DT
 TOBS = NT * WAVELET_DURATION
-
-LOOKUP_TABLE_PATH = "wdm_lookup_new_all_time_layers_1.h5"
 
 MIN_FREQ = 0.0029493407356002777
 MAX_FREQ = 0.00306500115660421
 MIN_TIME = 20 * WAVELET_DURATION
 MAX_TIME = (NT - 20) * WAVELET_DURATION
 
-T_START = int(0.5 * YRSID_SI / DT) * DT
+# Observation starts at t=0 so the injection TD grid, the WDMSettings grid
+# (t0 defaults to 0), and the chunked-het comp's t_obs_start all agree.
+T_START = 0.0
 T_REF = T_START
 N_INJ_GRID = 16384
 
@@ -95,15 +93,6 @@ N_INJ_GRID = 16384
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
-
-
-def _xyz_to_aet(arr: np.ndarray) -> np.ndarray:
-    """Linear XYZ -> AET combination on the leading 3-channel axis."""
-    X, Y, Z = arr[0], arr[1], arr[2]
-    A = (Z - X) / np.sqrt(2.0)
-    E = (X - 2.0 * Y + Z) / np.sqrt(6.0)
-    T = (X + Y + Z) / np.sqrt(3.0)
-    return np.stack([A, E, T], axis=0)
 
 
 def _draw_injection_params(rng: np.random.Generator, wdm_set: WDMSettings) -> np.ndarray:
@@ -172,24 +161,13 @@ def _build_injection_td(
 
 def _build_wdm_ac(
     inj_td: np.ndarray, td_set: TDSettings, wdm_set: WDMSettings,
-    window: np.ndarray, tdi_type: str,
+    window: np.ndarray,
 ) -> AnalysisContainer:
-    """Pack a WDM AC for the requested TDI type.
-
-    XYZ: full 3-channel WDM data + XYZ2SensitivityMatrix (3x3 inverse cov).
-    AET: convert XYZ->AET in time-domain, then transform; use AET1Sens.
-    """
-    if tdi_type == "XYZ":
-        inj_wdm = TDSignal(inj_td, settings=td_set).transform(wdm_set, window=window)
-        injection = DataResidualArray(inj_wdm)
-        sens = XYZ2SensitivityMatrix(injection.settings, model="scirdv1")
-    elif tdi_type == "AET":
-        inj_aet_td = _xyz_to_aet(inj_td)
-        inj_wdm = TDSignal(inj_aet_td, settings=td_set).transform(wdm_set, window=window)
-        injection = DataResidualArray(inj_wdm)
-        sens = AET1SensitivityMatrix(injection.settings)
-    else:
-        raise NotImplementedError(f"tdi_type={tdi_type!r} not supported in this script.")
+    """Pack a WDM AC: full 3-channel XYZ WDM data + XYZ2SensitivityMatrix
+    (3x3 inverse covariance)."""
+    inj_wdm = TDSignal(inj_td, settings=td_set).transform(wdm_set, window=window)
+    injection = DataResidualArray(inj_wdm)
+    sens = XYZ2SensitivityMatrix(injection.settings, model="scirdv1")
     return AnalysisContainer(injection, sens)
 
 
@@ -200,39 +178,24 @@ def _build_wdm_ac(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--tdi-type", choices=["AET", "XYZ"], default="AET",
-        help="TDI channel convention. AET decouples cross-channel noise (default).",
-    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    tdi_type = "XYZ"
 
     rng = np.random.default_rng(args.seed)
 
-    if not os.path.exists(LOOKUP_TABLE_PATH):
-        print(
-            f"[skip] WDM lookup table {LOOKUP_TABLE_PATH!r} not found. "
-            "Build it via gb_lookup_table_test_script.py first."
-        )
-        return 0
-
-    print(f"[step] Loading WDM lookup table {LOOKUP_TABLE_PATH!r}")
-    wdm_lookup = WDMLookupTable.from_file(LOOKUP_TABLE_PATH, force_backend=BACKEND)
     wdm_set = WDMSettings(
         NF, NT, DT,
         min_freq=MIN_FREQ, max_freq=MAX_FREQ,
         min_time=MIN_TIME, max_time=MAX_TIME,
     )
-    if not wdm_lookup.settings.eq_without_inds(wdm_set):
-        print("[fail] WDM lookup table settings do not match this script's WDMSettings.")
-        return 1
 
     N_total = wdm_set.N
     td_set = TDSettings(N_total, DT, force_backend=BACKEND)
     window = scipy_signal.windows.tukey(N_total, alpha=0.05)
     t_arr = np.arange(N_total) * DT + T_START
 
-    print(f"[step] Building TDI / orbits / GB generator (tdi_type={args.tdi_type})")
+    print(f"[step] Building TDI / orbits / GB generator (tdi_type={tdi_type})")
     tdi_config = TDIConfig("1st generation")
     orbits = ESAOrbits(force_backend=BACKEND)
     gb_tdi_kwargs = dict(
@@ -253,14 +216,14 @@ def main() -> int:
     )
 
     print("[step] Building WDM AC (injection)")
-    wdm_ac = _build_wdm_ac(inj_td, td_set, wdm_set, window, args.tdi_type)
+    wdm_ac = _build_wdm_ac(inj_td, td_set, wdm_set, window)
     wdm_holder = AnalysisContainerArray([wdm_ac])
 
-    print("[step] Building GBWDMComputations")
+    print("[step] Building GBWDMComputations (chunked-heterodyne)")
     gb_comps = GBWDMComputations(
-        wdm_lookup, TOBS, T_REF,
+        wdm_settings=wdm_set, t_ref=T_REF,
         orbits=orbits, tdi_config=tdi_config,
-        force_backend=BACKEND, tdi_type=args.tdi_type,
+        force_backend=BACKEND, tdi_type=tdi_type,
     )
 
     # ------------------------------------------------------------------
@@ -392,10 +355,42 @@ def main() -> int:
     print("[ok] In-model proposal numerics look sane.")
 
     # ------------------------------------------------------------------
+    # Step D: engine-level wrapper (WDMBandLikelihoodEngine.get_ll).
+    #
+    # get_ll returns the LOG-LIKELIHOOD (d_d per the comps convention; 0
+    # here) and stashes d_h_out / h_h_out; return_inner_products=True gives
+    # the full tuple. Verify both forms agree with the raw comps call.
+    # ------------------------------------------------------------------
+    print("\n==== Engine wrapper (WDMBandLikelihoodEngine.get_ll) ====")
+    from lisatools.globalfit.moves.gb_likelihood import WDMBandLikelihoodEngine
+
+    engine = WDMBandLikelihoodEngine(
+        gb_comps=gb_comps, basis_settings=wdm_set,
+        nchannels=3, tdi_channel_setup=tdi_type,
+    )
+    nch = 3
+    ll_eng, d_h_e, h_h_e, phase_e = engine.get_ll(
+        wdm_holder, inj_params.reshape(1, -1),
+        data_index=None, noise_index=None, N_vals=None,
+        return_inner_products=True, waveform_kwargs={},
+    )
+    ll_expected = -0.5 * (float(h_h_e[0]) - 2.0 * float(d_h_e[0]))
+    rel_ll = abs(float(ll_eng[0]) - ll_expected) / max(abs(ll_expected), 1.0)
+    rel_dh = abs(float(d_h_e[0]) - d_h_inj) / max(abs(d_h_inj), 1.0)
+    print(f"   engine ll        = {float(ll_eng[0]):+.6e}")
+    print(f"   -0.5*(h_h-2d_h)  = {ll_expected:+.6e}  (rel diff {rel_ll:.3e})")
+    print(f"   rel(d_h engine vs comps) = {rel_dh:.3e}")
+    if rel_ll > 1e-12 or rel_dh > 1e-12:
+        print("[FAIL] engine get_ll return / inner-product stash inconsistent.")
+        return 1
+    assert phase_e is None  # no phase maximisation requested
+    print("[ok] Engine get_ll returns the log-likelihood; inner products stashed.")
+
+    # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
     print("\n==== SUMMARY ====")
-    print(f"  tdi_type             = {args.tdi_type}")
+    print(f"  tdi_type             = {tdi_type}")
     print(f"  injection SNR        = {snr_inj:.2f}")
     print(f"  RJ birth   ll_diff   = {ll_diff_birth:+.4e}")
     print(f"  in-model   ll_diff   = {ll_diff_inmodel:+.4e}")

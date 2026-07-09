@@ -1055,8 +1055,7 @@ class RunMetadata(MetadataBase):
         )
 
         orbits = orbits_class(filename=filename, **orbits_kwargs)
-        orbits.configure(linear_interp_setup=True)
-
+        # configures lazily on first use
         return orbits
 
     def get_domain_settings(self) -> DomainSettingsBase:
