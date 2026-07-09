@@ -467,6 +467,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_cap_update=True,
         sighet_refresh_every=20,
         sighet_refresh_dphase=0.5,
+        debug_seq_pick="first",
         debug=False,
         debug_plot_dir="./gf_output/gb_debug/",
         debug_plot_walker=0,
@@ -514,6 +515,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.debug_plot_walker = int(debug_plot_walker)
         self.debug_plot_band = (None if debug_plot_band is None
                                 else int(debug_plot_band))
+        # Which of the traced cell's sources the sequence figures follow:
+        # "first" = whatever the first pick round selects (default);
+        # "loudest" = wait for the round that picks the cell's max-amplitude
+        # source; a number (mHz) = wait for the source nearest that f0.
+        self.debug_seq_pick = str(debug_seq_pick).lower()
         self._dbg_plot_counter = 0
 
         # for key in priors:
@@ -969,11 +975,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             eng.fill_template(buffer_obj.acs_buffer, params_phys, di, swap_N_vals,
                               factor=+1, waveform_kwargs=self.waveform_kwargs)
 
-    def _debug_seq_select(self, buffer_obj, t_i, w_i, b_i, slots, curr):
+    def _debug_seq_select(self, buffer_obj, band_sorter, ids, t_i, w_i, b_i,
+                          slots, curr):
         """Pick the entry of this repeat batch to trace with the 3x3
         sequence figures: the chosen (walker, band) cell at its coldest
-        temperature present, once per sampler step. Returns None when the
-        cell is absent, tracing is off, or it already ran this step."""
+        temperature present, once per sampler step. With
+        ``debug_seq_pick="loudest"`` (or a target f0 in mHz) the trace
+        WAITS for the pick round that selects the cell's max-amplitude
+        (or nearest-f0) source -- every source is picked exactly once per
+        pass, so its round always comes. Returns None when the cell is
+        absent, tracing is off, it already ran this step, or the picked
+        source is not the requested one yet."""
         if not self.debug or getattr(self, "_dbg_seq_done", True):
             return None
         try:
@@ -985,6 +997,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if match.size == 0:
                 return None
             idx = int(match[np.argmin(t_np[match])])
+
+            if self.debug_seq_pick != "first":
+                # Target source of the traced cell: max amplitude
+                # ("loudest") or nearest to an explicit f0 [mHz].
+                cell_mask = (
+                    (band_sorter.temp_inds == int(t_np[idx]))
+                    & (band_sorter.walker_inds == sel_w)
+                    & (band_sorter.band_inds == sel_b)
+                    & band_sorter.inds
+                )
+                cell_ids = _to_numpy(
+                    self.xp.arange(band_sorter.num_sources)[cell_mask])
+                if cell_ids.size == 0:
+                    return None
+                cell_coords = _to_numpy(band_sorter.coords)[cell_ids]
+                if self.debug_seq_pick == "loudest":
+                    target_id = int(cell_ids[np.argmax(cell_coords[:, 0])])
+                else:
+                    f0_target = float(self.debug_seq_pick)
+                    target_id = int(cell_ids[
+                        np.argmin(np.abs(cell_coords[:, 1] - f0_target))])
+                if int(_to_numpy(ids)[idx]) != target_id:
+                    return None  # not this round: keep waiting
+
             self._dbg_seq_done = True
             f0_old = float(_to_numpy(
                 self.transform_fn.both_transforms(curr[idx:idx + 1], xp=cp)[0, 1]))
@@ -2149,7 +2185,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Debug 3x3 sequence figures (channels x template/data/residual) at
         # the four buffer moments of this repeat block, for the chosen
         # (walker, band) cell only, once per sampler step.
-        seq = self._debug_seq_select(buffer_obj, t_i, w_i, b_i, slots, curr)
+        seq = self._debug_seq_select(
+            buffer_obj, band_sorter, ids, t_i, w_i, b_i, slots, curr)
         if seq is not None:
             seq["snaps"]["before_removal"] = self._debug_slab_snapshot(
                 buffer_obj, seq["slot"])

@@ -562,23 +562,51 @@ def setup_recipe(
                 curr, acs, gb_info, gb_info.gb_wdm_comp, snr_threshold=3.0,
                 f0_lims=_injection_f0_lims,
             )
-            # Per-dimension scatter for the true-point start. The stock scalar
-            # default (1e-5) is ~10 orders too wide for the GB ``fdot`` dimension
-            # (~1e-15 scale, prior half-width ~1e-12), so every scattered walker
-            # lands outside the fdot prior. Use the existing per-dim ``spread``
-            # array path, sized to a small fraction of each prior dimension's width
-            # so it auto-scales across the decade-spanning GB parameters (logA,
-            # f0[mHz], fdot, angles) and stays inside the prior even after the
-            # betas widening applied in scatter_around_injection. Widths come from
-            # the prior's own draws (correct sampling-basis order; the prior is
-            # keyed by parameter labels, not dimension indices).
-            _gb_draws = priors["gb"].rvs(size=20000)
-            _gb_draws = _gb_draws.get() if hasattr(_gb_draws, "get") else np.asarray(_gb_draws)
-            _gb_spread = 1e-4 * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
-            setup_state_for_injection(
-                curr, state, source_type="GB", branch_name="gb",
-                subset_inds=gb_snr_subset_inds, priors=priors, spread=_gb_spread,
-            )
+            # GB_START=prior: PE dimensionality WITHOUT truth seeding --
+            # the same number of leaves as the SNR-selected injection
+            # subset, but every leaf's coordinates drawn from the PRIOR.
+            # The sampler must assemble the fit itself (the debug seq
+            # figures then show the total template converging toward the
+            # data instead of starting on it). Default GB_START=truth is
+            # the existing injection-seeded start.
+            _gb_start = os.environ.get("GB_START", "truth").lower()
+            if _gb_start not in ("truth", "prior"):
+                raise ValueError(
+                    f"GB_START must be 'truth' or 'prior', got {_gb_start!r}."
+                )
+            if _gb_start == "prior":
+                _n_true = int(len(gb_snr_subset_inds))
+                _gb_inds = state.branches["gb"].inds
+                _gb_coords = state.branches["gb"].coords
+                _nt, _nw, _nl, _ndim = _gb_coords.shape
+                _draws = priors["gb"].rvs(size=(_nt, _nw, _n_true))
+                _draws = (_draws.get() if hasattr(_draws, "get")
+                          else np.asarray(_draws))
+                _gb_inds[:] = False
+                _gb_inds[:, :, :_n_true] = True
+                _gb_coords[:, :, :_n_true, :] = _draws
+                logger.info(
+                    "GB start: %d leaves per walker at PRIOR draws "
+                    "(GB_START=prior; truth seeding skipped).", _n_true,
+                )
+            else:
+                # Per-dimension scatter for the true-point start. The stock scalar
+                # default (1e-5) is ~10 orders too wide for the GB ``fdot`` dimension
+                # (~1e-15 scale, prior half-width ~1e-12), so every scattered walker
+                # lands outside the fdot prior. Use the existing per-dim ``spread``
+                # array path, sized to a small fraction of each prior dimension's width
+                # so it auto-scales across the decade-spanning GB parameters (logA,
+                # f0[mHz], fdot, angles) and stays inside the prior even after the
+                # betas widening applied in scatter_around_injection. Widths come from
+                # the prior's own draws (correct sampling-basis order; the prior is
+                # keyed by parameter labels, not dimension indices).
+                _gb_draws = priors["gb"].rvs(size=20000)
+                _gb_draws = _gb_draws.get() if hasattr(_gb_draws, "get") else np.asarray(_gb_draws)
+                _gb_spread = 1e-4 * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
+                setup_state_for_injection(
+                    curr, state, source_type="GB", branch_name="gb",
+                    subset_inds=gb_snr_subset_inds, priors=priors, spread=_gb_spread,
+                )
 
     #* ================================= BUILD MOVES =================================
     # No PSD / foreground moves: the PSD is fixed (no ``psd`` branch) and

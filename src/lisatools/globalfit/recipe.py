@@ -1423,6 +1423,9 @@ def build_gb_moves(
         debug_plot_walker=int(os.environ.get("GB_DEBUG_PLOT_WALKER", "0")),
         debug_plot_band=(int(os.environ["GB_DEBUG_PLOT_BAND"])
                          if os.environ.get("GB_DEBUG_PLOT_BAND") else None),
+        # Which of the traced cell's sources the sequence figures follow:
+        # "first" (default), "loudest", or a target f0 in mHz.
+        debug_seq_pick=os.environ.get("GB_DEBUG_SEQ_PICK", "first"),
         # Per-band progressive leaf cap (search mode). Armed only when
         # GB_LEAF_CAP_START is set (gb_no_foreground sets it under
         # GB_MODE=search): every band starts capped at that many leaves per
