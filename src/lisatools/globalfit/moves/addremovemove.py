@@ -24,7 +24,7 @@ def _free_pool() -> None:
         xp.get_default_memory_pool().free_all_blocks()
 
 try:
-    from eryn.moves import FlowMove
+    from eryn.moves import ConditionalFlowMove
     flow_move_available = True
 except ImportError:
     flow_move_available = False
@@ -135,6 +135,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # make sure to propagate the periodic information to the inner moves if it is included in kwargs
         if 'periodic' in kwargs:
             self.periodic = kwargs['periodic']
+
+        self.flow_wait = 20 # do not use flow move until at least 10 proposals have been made. This is to make sure that the flow move has enough data to train on.
 
     @property
     def periodic(self):
@@ -320,12 +322,17 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )
 
     def setup(self, model, state):
-        """Per-iteration setup hook (no-op by default)."""
+        """Per-iteration setup hook."""
         
         # run the inner moves setup if they have a setup method
         for move in self.moves:
             if hasattr(move, "setup"):
                 move.setup(state.branches_coords)
+
+            if isinstance(move, ConditionalFlowMove):
+                logger.info(f"Flow move version: {move._loaded_version}")
+
+
 
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
         """
@@ -509,7 +516,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                 # logger.debug(f"move here: {move_here.__class__.__name__}")
                 if flow_move_available:
-                    if isinstance(move_here, FlowMove):
+                    if isinstance(move_here, ConditionalFlowMove):
                         move_here.active_condition = leaf
 
                 # Split the ensemble in half and iterate over these two halves.
@@ -624,6 +631,15 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     prev_logp[(temp_inds_update, walker_inds_update)] = logp[keep].flatten()
                     prev_logP[(temp_inds_update, walker_inds_update)] = logP[keep].flatten()
 
+                    if isinstance(move_here, ConditionalFlowMove):
+                        # log debug information for flow move
+                        logger.debug(f"Flow move {move_name} accepted {np.sum(keep)} out of {len(keep.flatten())} proposals for leaf {leaf}.")
+
+                        logger.debug(f"MH factors: {factors.flatten()}")
+                        logger.debug(f"prev_logP: {prev_logP_here.flatten()}")
+                        logger.debug(f"logP: {logP.flatten()}")
+                        logger.debug(f"lnpdiff: {lnpdiff.flatten()}")
+
                 # acceptance tracking
                 self.accepted += accepted
                 # print(self.accepted[0])
@@ -706,9 +722,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # udpate at the end
         logger.info(f"{self.branch_name} proposal complete - all leaves processed ({time.time() - tic:.1f}s total)")
 
-        if flow_move_available:
+        if flow_move_available and int(self.num_proposals / self.num_repeats) > self.flow_wait: # only submit to flow move after 10 proposals have been made
+            #todo make customizable
             for move in self.moves:
-                if isinstance(move, FlowMove):
+                if isinstance(move, ConditionalFlowMove):
                     move.submit_by_leaf(ring_buffer)
                     logger.info("Current repeats submitted to flow move")
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
@@ -975,6 +992,52 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             self.waveform_gen_method
         )
         return wave_gen(*coords, **self.waveform_gen_kwargs)
+
+    def _apply_cold_chain_sources(self, coords: np.ndarray, sign: int) -> None:
+        """Split-parallel residual bookkeeping (add-back / subtract).
+
+        The single-device base implementation generates every cold-chain
+        template one-at-a-time on split 0's replica — the other GPUs idle
+        through the whole phase and the templates of walkers owned by other
+        devices are then host-routed across — with a full ``gc.collect()``
+        after each source. Here each split's thread generates its own
+        walkers' templates on the device that owns their residuals and
+        applies them immediately: ``signal_operation`` with a single-row
+        ``data_index`` only touches that split's residual buffer, so
+        concurrent application across splits is safe. Peak memory per device
+        stays at one template + generation transients, as in the base
+        implementation.
+        """
+        on_gpu = self.acs.gpus is not None
+        if on_gpu:
+            self.acs.free_gpu_memory()
+
+        data_index = np.arange(coords.shape[0])
+        positions_per_split, _, _ = self.acs.unpack_indices(data_index)
+
+        def _generate_and_apply(positions: np.ndarray, split_idx: int):
+            wave_gen = getattr(
+                self.waveform_generators[split_idx], self.waveform_gen_method
+            )
+            for pos in positions:
+                sig = wave_gen(*coords[int(pos)], **self.waveform_gen_kwargs)
+                self.acs.signal_operation(
+                    sign, [sig], data_index=np.array([int(pos)])
+                )
+                del sig
+
+        self.acs._loop_operation(
+            operation=_generate_and_apply,
+            operation_args_per_split=[
+                (positions_per_split[i], i) for i in range(self.acs.num_splits)
+            ],
+            positions_per_split=positions_per_split,
+            run_threaded=self.run_threaded,
+        )
+
+        if on_gpu:
+            self.acs.synchronize()
+            self.acs.free_gpu_memory()
 
     def get_waveforms_here(self, coords: np.ndarray) -> list[DomainBase]:
         """Get the waveforms for the given source coordinates.

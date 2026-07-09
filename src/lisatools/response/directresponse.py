@@ -497,9 +497,10 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         # the shared relative time array (starts at 0); the per-source absolute
         # time is ``t_data + t0_arr``. Trim to the worst-case across the batch.
         t_orbit_max = float(self.response_orbits.t.max())
-        if bool(
-            self.xp.any((t_data + t0_arr.reshape(-1, 1)).max(axis=-1) > t_orbit_max)
-        ):
+        # ``t_data`` increases monotonically (see trimming logic below), so
+        # each source's max eval time is ``t_data[-1] + t0`` — check that
+        # instead of materializing the (batch, N) sum just to reduce it.
+        if bool(self.xp.any(t0_arr + float(t_data[-1]) > t_orbit_max)):
             warnings.warn(
                 "Input waveform is longer than available orbital information. Trimming to fit orbital information."
             )
@@ -586,20 +587,15 @@ class pyResponseTDI(FastLISAResponseParallelModule):
         # get necessary buffer for TDI
         self.check_tdi_buffer = int(100.0 * self.sampling_frequency) + 4 * self.order
 
-        tmp_orbits = deepcopy(self.response_orbits.x_base)
-        self.projection_buffer = (
-            int(
-                (
-                    np.sum(
-                        tmp_orbits.copy() * tmp_orbits.copy(),
-                        axis=-1,
-                    )
-                    ** (1 / 2)
-                ).max()
-                * C_inv
-            )
-            + 4 * self.order
-        )
+        # Max orbital radius is fixed per orbits object — compute it once
+        # instead of deepcopying + reducing the orbit arrays on every call.
+        _pb = getattr(self, "_projection_buffer_cache", None)
+        if _pb is None or _pb[0] is not self.response_orbits:
+            x_base = self.response_orbits.x_base
+            _radius_max = float((np.sum(x_base * x_base, axis=-1) ** (1 / 2)).max())
+            _pb = (self.response_orbits, _radius_max)
+            self._projection_buffer_cache = _pb
+        self.projection_buffer = int(_pb[1] * C_inv) + 4 * self.order
         self.projections_start_ind = self.tdi_start_ind - 2 * self.check_tdi_buffer
 
         if self.projections_start_ind < self.projection_buffer:
