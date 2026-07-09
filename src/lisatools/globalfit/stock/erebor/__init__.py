@@ -62,9 +62,10 @@ _registry = StockRegistry("erebor")
 get_stock = _registry.get
 get_stock_options = _registry.options
 
+from .variants.all_sources import AllSourcesGlobalFit  # noqa: E402
 from .variants.gb_no_fg import GBNoForegroundGlobalFit  # noqa: E402
 
-for _cls in (GBNoForegroundGlobalFit,):
+for _cls in (GBNoForegroundGlobalFit, AllSourcesGlobalFit):
     _registry.register(_cls)
 
 #: Names of the registered stock options (mirrors the sensitivity.py idiom).
@@ -75,6 +76,7 @@ __stock_globalfit_options__ = _registry.names()
 # fresh fit (the primary pattern); mutating ``erebor.gb_no_fg`` itself
 # changes the session-wide default for later clones — deliberate, but shared.
 gb_no_fg = GBNoForegroundGlobalFit()
+all_sources = AllSourcesGlobalFit()
 
 
 def __getattr__(name):

@@ -67,6 +67,11 @@ class EreborGeneralSettings(GeneralSettings):
     tobs_target: float = dataclasses.field(
         default_factory=env_default("TOBS_TARGET", 90 * 86400.0, float)
     )
+    # Fixed-grid override: when BOTH are set, the WDM grid is (nf, nt)
+    # directly (Tobs = nf*nt*dt) instead of adjust_to_even_bins on
+    # tobs_target / the wavelet-duration bounds.
+    nf: typing.Optional[int] = None
+    nt: typing.Optional[int] = None
     wavelet_duration_min: float = dataclasses.field(
         default_factory=env_default("WAVELET_DUR_MIN", 3600.0, float)
     )
@@ -152,11 +157,10 @@ class EreborFit(StockGlobalFit):
     @property
     def wdm_grid(self) -> typing.Tuple[int, int, float, float]:
         """``(Nf, Nt, wavelet_duration, Tobs)`` from the current grid knobs."""
-        return derive_wdm_grid(
-            self.general.tobs_target,
-            self.general.dt,
-            self.general.wavelet_duration_bounds,
-        )
+        gs = self.general
+        if gs.nf is not None and gs.nt is not None:
+            return gs.nf, gs.nt, gs.nf * gs.dt, gs.nf * gs.nt * gs.dt
+        return derive_wdm_grid(gs.tobs_target, gs.dt, gs.wavelet_duration_bounds)
 
     @property
     def layer_df(self) -> float:
@@ -175,10 +179,14 @@ class EreborFit(StockGlobalFit):
         # Compute backend (gpus=None -> engine resolves force_backend="cpu").
         gs.gpus, gs.gpu_backend = resolve_compute(gs.use_gpu, gs.gpu_backend, gs.gpus)
 
-        # WDM grid + exact Tobs.
-        Nf, Nt, wavelet_duration, tobs = derive_wdm_grid(
-            gs.tobs_target, gs.dt, gs.wavelet_duration_bounds
-        )
+        # WDM grid + exact Tobs (fixed nf/nt override wins over derivation).
+        if gs.nf is not None and gs.nt is not None:
+            Nf, Nt = gs.nf, gs.nt
+            wavelet_duration, tobs = Nf * gs.dt, Nf * Nt * gs.dt
+        else:
+            Nf, Nt, wavelet_duration, tobs = derive_wdm_grid(
+                gs.tobs_target, gs.dt, gs.wavelet_duration_bounds
+            )
         if gs.Tobs is None:
             gs.Tobs = tobs
 
@@ -205,7 +213,7 @@ class EreborFit(StockGlobalFit):
         if gs.data_processor_class is None:
             self.set_default_processor(gs)
         if gs.preprocess_kwargs is None:
-            gs.preprocess_kwargs = dict(normalize=False)
+            gs.preprocess_kwargs = self.default_preprocess_kwargs()
         if gs.sensitivity_init_kwargs is None:
             gs.sensitivity_init_kwargs = dict(tdi_generation=gs.tdi_gen)
         if gs.fixed_psd_kwargs is None and gs.fixed_psd_params is not None:
@@ -231,6 +239,10 @@ class EreborFit(StockGlobalFit):
             min_time=edge_crop * wavelet_duration,
             max_time=(Nt - edge_crop) * wavelet_duration,
         )
+
+    def default_preprocess_kwargs(self) -> dict:
+        """Variant hook: kwargs merged over the engine's preprocess defaults."""
+        return dict(normalize=False)
 
     def set_default_processor(self, gs: EreborGeneralSettings) -> None:
         """Default data source: mojito L1 loader on ``gs.source_types``."""
