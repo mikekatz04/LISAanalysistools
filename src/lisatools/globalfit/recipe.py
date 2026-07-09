@@ -27,7 +27,7 @@ except ModuleNotFoundError:
 
 # DataResidualArray is now a deprecation shim; we pass DomainBase children
 # (or raw arrays via the AnalysisContainer/template APIs) directly.
-from lisatools.domains import FDSettings, WDMSettings
+from lisatools.domains import FDSettings, STFTSettings, WDMSettings
 
 from bbhx.utils.transform import SSB_to_LISA
 from gbgpu.gbgpu import GBGPU
@@ -1323,6 +1323,27 @@ def build_gb_moves(
                 data_index=xp.asarray(data_index),
                 factors=factors_arr,
             )
+        elif isinstance(domain_settings, STFTSettings):
+            if getattr(gb_info, "gb_stft_comp", None) is None:
+                raise ValueError(
+                    "STFT-domain GB initialization requires "
+                    "gb_info.gb_stft_comp; build an STFTGBComputations in the "
+                    "settings file and pass it via GBSettings.gb_stft_comp."
+                )
+            xp = gb_info.gb_stft_comp.xp
+            factors_arr = xp.asarray(factors).astype(xp.float64)
+            # Mirrors the WDM arm: the parent linear buffer IS the
+            # (num_walkers, nchannels, NT, NF_active) template stack the
+            # Fresnel fill kernel scatters into, keyed by walker data_index.
+            # gb_stft_comp.stft_comps is the PARENT STFTComputationGroup here
+            # (the settings file builds the comp around it), so the kernel's
+            # cpp_domain matches this buffer.
+            gb_info.gb_stft_comp.fill_global_stft(
+                coords_in_in,
+                acs.gather_linear_data_arr(),
+                data_index=xp.asarray(data_index).astype(xp.int32),
+                factors=factors_arr,
+            )
         else:
             raise NotImplementedError(
                 f"Domain settings {type(domain_settings).__name__} are not "
@@ -1408,6 +1429,10 @@ def build_gb_moves(
         # needs the orbits / TDI configuration and the phase reference time.
         gb_wdm_comp=gb_info.gb_wdm_comp,
         gb_fd_comp=getattr(gb_info, "gb_fd_comp", None),
+        # gb_stft_comp is None for the FD/WDM paths and an STFTGBComputations
+        # instance for the STFT path (built in the settings file around the
+        # parent STFTComputationGroup, like gb_wdm_comp).
+        gb_stft_comp=getattr(gb_info, "gb_stft_comp", None),
         orbits=getattr(gb_info, "orbits", None),
         tdi_config=getattr(gb_info, "tdi_config", None),
         t_ref=float(getattr(gb_info, "t0", 0.0) or 0.0),

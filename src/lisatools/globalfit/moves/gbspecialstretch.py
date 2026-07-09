@@ -456,6 +456,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         force_backend=None,
         gb_wdm_comp=None,
         gb_fd_comp=None,
+        gb_stft_comp=None,
         orbits=None,
         tdi_config=None,
         t_ref=0.0,
@@ -663,6 +664,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         elif isinstance(acs.settings, WDMSettings):
             self.fd = None
             self.df = 1.0 / acs.settings.Tobs
+        elif isinstance(acs.settings, STFTSettings):
+            # STFT's .df IS the FD bin width (1 / Tobs), so the band-index
+            # math matches the FD/WDM convention directly.
+            self.fd = None
+            self.df = float(acs.settings.df)
         else:
             raise NotImplementedError(
                 f"GBSpecialBase does not support basis domain "
@@ -743,6 +749,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             gb=self.gb,
             gb_fd_comp=self.gb_fd_comp,
             gb_wdm_comp=self.gb_wdm_comp,
+            gb_stft_comp=self.gb_stft_comp,
             nchannels=acs.nchannels,
             tdi_channel_setup=self.waveform_kwargs.get("tdi_channel_setup"),
             df=self.df,
@@ -2082,6 +2089,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _test_inds = np.asarray(self.parameter_transforms.fill_dict["test_inds"])
         walker_inds = band_sorter.walker_inds[ids].astype(xp.int32)
 
+        if isinstance(self._basis_settings, STFTSettings):
+            # Interim STFT proposal shaping: STFTGBComputations has no
+            # information_matrix kernel yet, so return an identity Cholesky
+            # in the RESCALED sampling coordinates (y = x / s). Proposal
+            # shape only -- M-H corrects; the group-stretch half of
+            # in_model_proposal is unaffected. Native STFT Fisher is a
+            # documented follow-up.
+            s = xp.ones(ndim)
+            s[2] = self._fdot_scale
+            self._proposal_param_scales = s
+            if not getattr(self, "_stft_chol_warned", False):
+                logger.warning(
+                    f"{self.name}: STFT basis has no native information_matrix "
+                    "yet; using an identity proposal Cholesky (rescaled "
+                    "sampling coordinates). Gaussian in-model jumps are "
+                    "unshaped; group-stretch proposals are unaffected."
+                )
+                self._stft_chol_warned = True
+            return xp.repeat(xp.eye(ndim)[None, :, :], n_src, axis=0)
+
         if isinstance(self._basis_settings, FDSettings):
             info_phys = self.gb_fd_comp.information_matrix(
                 params_phys, model.analysis_container_arr,
@@ -2868,6 +2895,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             gb=self.gb,
             gb_wdm_comp=self.gb_wdm_comp,
             gb_fd_comp=self.gb_fd_comp,
+            gb_stft_comp=self.gb_stft_comp,
             waveform_kwargs=self.waveform_kwargs,
             rj_prop=rj_prop,
             keep_all_inds=keep_all_inds,
@@ -3018,6 +3046,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             gb=self.gb,
             gb_wdm_comp=self.gb_wdm_comp,
             gb_fd_comp=self.gb_fd_comp,
+            gb_stft_comp=self.gb_stft_comp,
             waveform_kwargs=self.waveform_kwargs,
         )
 

@@ -78,6 +78,11 @@ class GBSettings(Settings):
     # user builds this once their WDM grid + lookup table are known
     # (see global-fit input scripts).
     gb_wdm_comp: typing.Any = None
+    # Optional STFT/Fresnel-domain likelihood object (a
+    # ``gbgpu.gbcomps.STFTGBComputations`` instance, built around the parent
+    # ``STFTComputationGroup``). Required when ``domain_settings`` is a
+    # :class:`STFTSettings`; ignored otherwise.
+    gb_stft_comp: typing.Any = None
 
 # basic transform functions for pickling
 def f_ms_to_s(x):

@@ -12,6 +12,7 @@ import warnings
 from gbgpu.gb_likelihood import (  # noqa: F401
     BandLikelihoodEngine,
     FDBandLikelihoodEngine,
+    STFTBandLikelihoodEngine,
     SwapLLResult,
     WDMBandLikelihoodEngine,
     make_band_likelihood_engine,

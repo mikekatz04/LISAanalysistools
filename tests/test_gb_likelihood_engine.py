@@ -445,14 +445,21 @@ class STFTEngineCallSignatureTest(unittest.TestCase):
         # The rebind must have landed the ACA's split group on the gb object.
         self.assertIs(stub.stft_comps, aca.cpp_splits[0])
 
-        d_h, h_h = engine.get_ll(aca, params, data_index=idx, noise_index=idx,
-                                 N_vals=None, waveform_kwargs={})
-        np.testing.assert_allclose(d_h, 3.0 + 1.0j)
-        np.testing.assert_allclose(h_h, 2.0 + 0.5j)
+        # Protocol-conformant get_ll (2026-07 restoration): returns the ll
+        # array; real inner-product stashes on d_h_out / h_h_out (mixin/
+        # protocol convention), raw complex on the _cmplx twins.
+        ll = engine.get_ll(aca, params, data_index=idx, noise_index=idx,
+                           N_vals=None, waveform_kwargs={})
+        np.testing.assert_allclose(ll, 0.0)
+        self.assertTrue(bool(engine.kept_out.all()))
+        np.testing.assert_allclose(engine.d_h_out_cmplx, 3.0 + 1.0j)
+        np.testing.assert_allclose(engine.h_h_out_cmplx, 2.0 + 0.5j)
+        np.testing.assert_allclose(engine.d_h_out, 3.0)
+        np.testing.assert_allclose(engine.h_h_out, 2.0)
 
         res = engine.get_swap_ll(aca, params, params,
                                  data_index=idx, noise_index=idx, N_vals=None,
-                                 phase_marginalize=False, waveform_kwargs={})
+                                 phase_maximize=False, waveform_kwargs={})
         self.assertTrue(bool(res.kept.all()))
         # d_h_a == d_h_r and aa == rr == ar  =>  ll_diff = -(ar - rr) = 0.
         np.testing.assert_allclose(res.ll_diff, 0.0, atol=1e-14)
@@ -475,10 +482,18 @@ class STFTEngineCallSignatureTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             engine.hessian(aca, params, data_index=idx, noise_index=idx,
                            N_vals=None)
-        with self.assertRaises(NotImplementedError):
-            engine.get_swap_ll(aca, params, params,
-                               data_index=idx, noise_index=idx, N_vals=None,
-                               phase_marginalize=True, waveform_kwargs={})
+
+        # phase_maximize is now supported via the two-quadrature mixin
+        # (2026-07 restoration): the swap path maximises the ADD template's
+        # phase and reports the applied rotation.
+        res_pm = engine.get_swap_ll(aca, params, params,
+                                    data_index=idx, noise_index=idx,
+                                    N_vals=None, phase_maximize=True,
+                                    waveform_kwargs={})
+        self.assertIsNotNone(res_pm.phase_angle)
+        # Stub returns phase-independent values -> zero rotation, zero gain.
+        np.testing.assert_allclose(res_pm.phase_angle, 0.0, atol=1e-14)
+        np.testing.assert_allclose(res_pm.ll_diff, 0.0, atol=1e-14)
 
     def test_out_of_band_proposals_clamped_without_kernel_call(self):
         import inspect
@@ -521,7 +536,7 @@ class STFTEngineCallSignatureTest(unittest.TestCase):
 
         res = engine.get_swap_ll(aca, params, params,
                                  data_index=idx, noise_index=idx, N_vals=None,
-                                 phase_marginalize=False, waveform_kwargs={})
+                                 phase_maximize=False, waveform_kwargs={})
         self.assertFalse(bool(res.kept.any()))
         self.assertTrue(bool((res.ll_diff == -1e300).all()))
         self.assertTrue(bool((res.opt_snr_add == 0.0).all()))
@@ -538,9 +553,10 @@ class STFTEngineCallSignatureTest(unittest.TestCase):
 class STFTEngineNumericTest(unittest.TestCase):
     """End-to-end numeric check of the STFT engine on real CPU kernels.
 
-    Builds a real 2-band STFT ACA the way ``Buffer._build_stft_band_aca``
-    does (full active grid per band, complex data + invC, domain_group_kwargs
-    driving the ACA-owned groups), unit inverse-covariance, then:
+    Builds a real 2-band STFT ACA the way the sub-band buffer's STFT branch
+    (``SubBandBuffer._build_band_ac_list``) does (full active grid per band,
+    complex data + invC, domain_group_kwargs driving the ACA-owned groups),
+    unit inverse-covariance, then:
 
     * ``fill_template`` writes band 0 only (band 1 stays zero);
     * ``get_ll`` on [band0, band1] in ONE call gives ``d_h == h_h`` on the
@@ -643,13 +659,17 @@ class STFTEngineNumericTest(unittest.TestCase):
         )
 
         # One batched call across both bands: same source against the filled
-        # band (0) and the empty band (1).
+        # band (0) and the empty band (1). Protocol-conformant get_ll
+        # (2026-07 restoration): returns the ll array; the raw complex inner
+        # products land on the engine's _cmplx stashes.
         p2 = np.vstack([params, params])
         d_idx = np.array([0, 1], dtype=np.int32)
-        d_h, h_h = engine.get_ll(
+        ll = engine.get_ll(
             aca, p2, data_index=d_idx, noise_index=d_idx,
             N_vals=None, waveform_kwargs={},
         )
+        d_h = engine.d_h_out_cmplx
+        h_h = engine.h_h_out_cmplx
         # Template against its own fill: d_h == h_h. Empty band: d_h == 0.
         rel = abs(d_h[0] - h_h[0]) / abs(h_h[0])
         self.assertLess(float(rel), 1e-12)
@@ -659,7 +679,8 @@ class STFTEngineNumericTest(unittest.TestCase):
 
         # Refactor-equivalence: direct call after a manual rebind.
         gb.stft_comps = aca.cpp_splits[0]
-        gb.get_ll_stft(p2, data_index=d_idx, noise_index=d_idx)
+        ll_direct = gb.get_ll_stft(p2, data_index=d_idx, noise_index=d_idx)
+        np.testing.assert_allclose(np.asarray(ll), np.asarray(ll_direct))
         np.testing.assert_allclose(np.asarray(d_h), np.asarray(gb.d_h_out))
         np.testing.assert_allclose(np.asarray(h_h), np.asarray(gb.h_h_out))
 
@@ -668,7 +689,7 @@ class STFTEngineNumericTest(unittest.TestCase):
             aca, params, params,
             data_index=np.array([0], dtype=np.int32),
             noise_index=np.array([0], dtype=np.int32),
-            N_vals=None, phase_marginalize=False, waveform_kwargs={},
+            N_vals=None, phase_maximize=False, waveform_kwargs={},
         )
         self.assertTrue(bool(res.kept.all()))
         self.assertLess(float(abs(res.ll_diff[0])), 1e-10)
@@ -688,18 +709,21 @@ class STFTEngineNumericTest(unittest.TestCase):
         )
 
     def test_build_stft_band_aca_smoke(self):
-        """Real ``Buffer._build_stft_band_aca`` run (partial Buffer init).
+        """Real ``SubBandBuffer._build_band_ac_list`` STFT run (partial init).
 
-        Verifies the STFT branch of the Buffer's per-band ACA construction:
-        complex128 data + inverse-covariance buffers on the full active grid,
-        per-band settings equal to the parent's, domain_group_kwargs copied
-        from the parent group, and the band ACA's own cpp_splits building a
-        working STFTComputationGroup with that configuration.
+        Verifies the STFT branch of the sub-band buffer's per-band ACA
+        construction (post-2026-07 restructure: ``_build_band_ac_list``
+        replaced the per-domain ``_build_*_band_aca`` methods): complex128
+        data + inverse-covariance buffers on the full active grid, per-band
+        settings equal to the parent's, domain_group_kwargs copied from the
+        parent group, and the band ACA's own cpp_splits building a working
+        STFTComputationGroup with that configuration.
         """
         import types as _types
 
         import numpy as np
 
+        from lisatools.analysiscontainer import AnalysisContainerArray
         from lisatools.domaincomputation import STFTComputationGroup
         from lisatools.globalfit.moves.gbspecialstretch import Buffer
         from lisatools.utils.parallelbase import LISAToolsParallelModule
@@ -715,7 +739,8 @@ class STFTEngineNumericTest(unittest.TestCase):
         buf.gb = _types.SimpleNamespace(gpus=None)
         buf.gb_stft_comp = gb
 
-        band_aca = buf._build_stft_band_aca()
+        ac_list, aca_kwargs = buf._build_band_ac_list()
+        band_aca = AnalysisContainerArray(ac_list, **aca_kwargs)
 
         settings = gb.stft_comps.settings
         self.assertEqual(band_aca.linear_data_arr[0].dtype, np.complex128)

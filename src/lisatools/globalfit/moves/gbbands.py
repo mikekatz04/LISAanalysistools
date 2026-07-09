@@ -47,7 +47,7 @@ from ...analysiscontainer import (
     BandView,
     band_gpu_assignment,
 )
-from ...domains import DomainSettingsBase, FDSettings, WDMSettings
+from ...domains import DomainSettingsBase, FDSettings, STFTSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
 from ...utils.utility import asnumpy
@@ -279,6 +279,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         basis_settings: Optional[DomainSettingsBase] = None,
         gb_wdm_comp=None,
         gb_fd_comp=None,
+        gb_stft_comp=None,
         *args,
         **kwargs,
     ):
@@ -291,11 +292,12 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         assert self.backend.name.split("_")[-1] == gb.backend.name.split("_")[-1]
         self.gb = gb
         # Domain computation objects (gbgpu.gbcomps.GBWDMComputations /
-        # GBFDComputations prototype). The one matching ``basis_settings``
-        # is required; the other stays None. The legacy ``gb`` handle is
-        # kept only for the info-matrix proposal shaping.
+        # GBFDComputations prototype / STFTGBComputations). The one matching
+        # ``basis_settings`` is required; the others stay None. The legacy
+        # ``gb`` handle is kept only for the info-matrix proposal shaping.
         self.gb_wdm_comp = gb_wdm_comp
         self.gb_fd_comp = gb_fd_comp
+        self.gb_stft_comp = gb_stft_comp
         self._df = df
         self.nwalkers = nwalkers
         self.sources_now_map, self.sources_inject_now_map = (
@@ -417,6 +419,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             gb=self.gb,
             gb_fd_comp=self.gb_fd_comp,
             gb_wdm_comp=self.gb_wdm_comp,
+            gb_stft_comp=self.gb_stft_comp,
             nchannels=self.nchannels,
             tdi_channel_setup=self.tdi_channel_setup,
             df=float(self.df) if not hasattr(self.df, "item") else self.df.item(),
@@ -538,6 +541,15 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             Nf_active = self._basis_settings.Nf_active
             Nt_active = self._basis_settings.Nt_active
             return (self.nchannels, Nf_active, Nt_active)
+        elif isinstance(self._basis_settings, STFTSettings):
+            # First-cut: full STFT active grid per band, mirroring the WDM
+            # first-cut above (the Fresnel kernels address the domain-global
+            # (NT, NF_active) grid; per-band frequency slicing is a follow-on).
+            return (
+                self.nchannels,
+                self._basis_settings.NT,
+                self._basis_settings.NF_active,
+            )
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -556,6 +568,12 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             if self.tdi_channel_setup == "XYZ":
                 return (self.nchannels, self.nchannels, Nf_active, Nt_active)
             return (self.nchannels, Nf_active, Nt_active)
+        elif isinstance(self._basis_settings, STFTSettings):
+            NT = self._basis_settings.NT
+            NF_active = self._basis_settings.NF_active
+            if self.tdi_channel_setup == "XYZ":
+                return (self.nchannels, self.nchannels, NT, NF_active)
+            return (self.nchannels, NT, NF_active)
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -568,6 +586,8 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             return self.xp.complex128
         elif isinstance(self._basis_settings, WDMSettings):
             return self.xp.float64
+        elif isinstance(self._basis_settings, STFTSettings):
+            return self.xp.complex128
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -585,6 +605,10 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             return self.xp.float64
         elif isinstance(self._basis_settings, WDMSettings):
             return self.xp.float64
+        elif isinstance(self._basis_settings, STFTSettings):
+            # Complex inverse covariance (STFT cross-terms are complex; the
+            # C++ STFTDomain wrap takes complex128 invC).
+            return self.xp.complex128
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -623,6 +647,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 min_time=parent.ind_min_t * parent.layer_dt,
                 max_time=parent.ind_max_t * parent.layer_dt,
             )
+        elif isinstance(self._basis_settings, STFTSettings):
+            # First-cut: per-band settings replicate the parent grid (full
+            # active band per band buffer, like the WDM branch above). The
+            # args/kwargs round-trip reconstructs from the RAW min/max_freq
+            # inputs, keeping ind_min/ind_max identical to the parent's.
+            parent = self._basis_settings
+            return type(parent)(*parent.args, **parent.kwargs)
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -643,11 +674,35 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         data_dtype = self._per_band_data_dtype
         sens_dtype = self._per_band_sens_dtype
 
+        is_stft = isinstance(self._basis_settings, STFTSettings)
+        parent_group = None
+        if is_stft:
+            if self.gb_stft_comp is None:
+                raise ValueError(
+                    "SubBandBuffer(basis_settings=STFTSettings) requires "
+                    "gb_stft_comp (a gbgpu.gbcomps.STFTGBComputations "
+                    "instance)."
+                )
+            parent_group = self.gb_stft_comp.stft_comps
+
         ac_list = []
         for _ in range(self.num_bands_now):
             res_data = cp.zeros(data_shape, dtype=data_dtype)
             data_domain = per_band_settings.associated_class(res_data, per_band_settings)
-            sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
+            if is_stft:
+                # Unlike the FD/WDM band ACAs (whose engines never touch
+                # cpp_splits), the STFT engine drives the band ACA's own
+                # per-split STFTComputationGroup, and that group's
+                # ``build_cpp_objects`` reconstructs a sensitivity backend
+                # from the split's first AC -- requiring a REAL backend
+                # (``orbits`` + ``kwargs``), not a bare SensitivityMatrixBase.
+                # Clone the parent group's backend per band (construction is
+                # lazy and shares the parent's configured orbits) and
+                # overwrite the buffers with band-local zeros.
+                parent_sb = parent_group.sensitivity_backend
+                sm = type(parent_sb)(**parent_sb.kwargs)
+            else:
+                sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
             sm.sens_mat = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.invC = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
@@ -667,9 +722,21 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         )
         aca_kwargs = dict(
             gpus=list(gpus_in) if gpus_in else None,
-            complex_psd=False,
+            # STFT invC is complex128 (see _per_band_sens_dtype); FD/WDM
+            # buffers hold the real inverse covariance.
+            complex_psd=is_stft,
             gpu_assignment=gpu_assignment,
         )
+        if is_stft:
+            # The band ACA's per-split STFTComputationGroups (cpp_splits)
+            # must carry the same Fresnel configuration as the parent group
+            # -- the STFT engine rebinds gb_stft_comp.stft_comps onto exactly
+            # those groups per call.
+            aca_kwargs["domain_group_kwargs"] = dict(
+                tdi_type=parent_group.tdi_type,
+                window_alpha=parent_group.window_alpha,
+                use_midpoint=parent_group.use_midpoint,
+            )
         return ac_list, aca_kwargs
 
     def update_special_indices(self, new_special_indices, inds_fill=None):
@@ -776,6 +843,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         if isinstance(self._basis_settings, WDMSettings):
             return self.xp.full(
                 self.num_bands_now, self._basis_settings.ind_min_f, dtype=self.xp.int32
+            )
+        if isinstance(self._basis_settings, STFTSettings):
+            # STFT slabs cover the full active grid; placement is absolute
+            # (the Fresnel kernels address the domain-global grid), so every
+            # slot starts at the parent's active-band FD bin ind_min.
+            return self.xp.full(
+                self.num_bands_now, self._basis_settings.ind_min, dtype=self.xp.int32
             )
         return self._min_freq_inds_store
 
@@ -1151,6 +1225,35 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             inds3 = cp.arange(Nf_active)[None, None, :, None]
             inds4 = cp.arange(Nt_active)[None, None, None, :]
             return inds1, inds2, inds3, inds4
+        if isinstance(self._basis_settings, STFTSettings):
+            # First-cut STFT fill index map (WDM parity): per-band buffers
+            # cover the full STFT active grid, so pick each band's entire
+            # (channel, NT, NF_active) slab out of the parent ACA, keyed by
+            # the band's parent data index (unique_band_combos[:, 1]). Note
+            # the STFT axis order is (NT, NF_active) -- time-major, the
+            # transpose of the WDM (Nf, Nt) slab above.
+            if inds_fill is None:
+                inds_fill = cp.arange(self.num_bands_now)
+
+            NT = self._basis_settings.NT
+            NF_active = self._basis_settings.NF_active
+
+            if is_psd and self.tdi_channel_setup == "XYZ":
+                # target shape:
+                # (len(inds_fill), nchannels, nchannels, NT, NF_active)
+                inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None, None]
+                inds2 = cp.arange(self.nchannels)[None, :, None, None, None]
+                inds3 = cp.arange(self.nchannels)[None, None, :, None, None]
+                inds4 = cp.arange(NT)[None, None, None, :, None]
+                inds5 = cp.arange(NF_active)[None, None, None, None, :]
+                return inds1, inds2, inds3, inds4, inds5
+
+            # target shape: (len(inds_fill), nchannels, NT, NF_active)
+            inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None]
+            inds2 = cp.arange(self.nchannels)[None, :, None, None]
+            inds3 = cp.arange(NT)[None, None, :, None]
+            inds4 = cp.arange(NF_active)[None, None, None, :]
+            return inds1, inds2, inds3, inds4
         if not isinstance(self._basis_settings, FDSettings):
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -1311,6 +1414,7 @@ class BandSorter(LISAToolsParallelModule):
         gb=None,
         gb_wdm_comp=None,
         gb_fd_comp=None,
+        gb_stft_comp=None,
         waveform_kwargs={},
         main_band_sorter=None,
         max_data_store_size: int = 6000,
@@ -1333,6 +1437,7 @@ class BandSorter(LISAToolsParallelModule):
                         "gb",
                         "gb_wdm_comp",
                         "gb_fd_comp",
+                        "gb_stft_comp",
                         "rj_prop",
                     ]:
                         continue
@@ -1362,6 +1467,7 @@ class BandSorter(LISAToolsParallelModule):
             # copy loop so we don't deepcopy GPU-resident objects).
             self.gb_wdm_comp = getattr(_band_sorter, "gb_wdm_comp", None)
             self.gb_fd_comp = getattr(_band_sorter, "gb_fd_comp", None)
+            self.gb_stft_comp = getattr(_band_sorter, "gb_stft_comp", None)
             # need to make sure is not mixed up in loop
             self.set_main_band_sorter_info(main_band_sorter, inds_main_band_sorter)
             return
@@ -1371,9 +1477,11 @@ class BandSorter(LISAToolsParallelModule):
         self.gb = gb
         # Domain computation objects, forwarded to the buffer in
         # :meth:`get_buffer` so the engine selection matches the parent
-        # ACA's basis (WDMSettings -> gb_wdm_comp, FDSettings -> gb_fd_comp).
+        # ACA's basis (WDMSettings -> gb_wdm_comp, FDSettings -> gb_fd_comp,
+        # STFTSettings -> gb_stft_comp).
         self.gb_wdm_comp = gb_wdm_comp
         self.gb_fd_comp = gb_fd_comp
+        self.gb_stft_comp = gb_stft_comp
         self.waveform_kwargs = waveform_kwargs
         self.gb_branch_orig = gb_branch
         self.num_bands = len(band_edges) - 1
@@ -1666,19 +1774,22 @@ class BandSorter(LISAToolsParallelModule):
                 special_indices_unique,
                 self.transform_fn,
                 self.waveform_kwargs,
-                # Frequency spacing for the band-index math. FDSettings uses the
-                # FD bin resolution ``.df``; WDMSettings uses ``.layer_df`` so the
-                # ``band_edges / df`` math yields WDM *layer* indices -- the same
-                # quantity the WDM likelihood engine addresses by
-                # (WDMBandLikelihoodEngine uses ``basis_settings.layer_df``).
-                (acs.settings.df if isinstance(acs.settings, FDSettings)
-                 else acs.settings.layer_df),
+                # Frequency spacing for the band-index math. FDSettings and
+                # STFTSettings use the FD bin resolution ``.df`` (the STFT
+                # engine's bounds mask is FD-bin flavoured); WDMSettings uses
+                # ``.layer_df`` so the ``band_edges / df`` math yields WDM
+                # *layer* indices -- the same quantity the WDM likelihood
+                # engine addresses by (WDMBandLikelihoodEngine uses
+                # ``basis_settings.layer_df``).
+                (acs.settings.layer_df if isinstance(acs.settings, WDMSettings)
+                 else acs.settings.df),
                 sources_now_map,
                 sources_inject_now_map,
                 self.main_band_sorter.special_band_inds[sources_now_map],
                 basis_settings=acs.settings,
                 gb_wdm_comp=self.gb_wdm_comp,
                 gb_fd_comp=self.gb_fd_comp,
+                gb_stft_comp=self.gb_stft_comp,
                 force_backend=self.force_backend,
                 **kwargs,
             )
