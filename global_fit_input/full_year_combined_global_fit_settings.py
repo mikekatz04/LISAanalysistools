@@ -401,300 +401,94 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
 )
 
 
+
 # ============================================================
-# *** Annual modulation for the galactic-foreground noise ***
+# *** Shared injection / processor machinery (installed stock modules) ***
 # ============================================================
-def annual_amplitude_envelope(t_arr: np.ndarray) -> np.ndarray:
-    """Per-sample amplitude envelope ``1 + A*cos(2*pi*t/yr + phi0)``."""
-    return 1.0 + ANNUAL_AMP * np.cos(
-        2.0 * np.pi * np.asarray(t_arr) / YRSID_SI + ANNUAL_PHASE0
-    )
+# Moved to ``lisatools.globalfit.stock.erebor.{injections,wrappers}``
+# (reorg-top-layer, 2026-07-09). The thin bindings below apply this file's
+# module knobs so downstream code keeps the original call signatures.
+from lisatools.globalfit.stock.erebor.injections import (  # noqa: F401
+    AnnualAmplitudeEnvelope,
+    AnnualCovarianceModulation,
+    AnnualModulatedGalacticForeground as _StockAnnualModulatedGF,
+    L1ProcessingStepWithSyntheticNoise as _StockL1WithSyntheticNoise,
+    SyntheticDataProcessor as _StockSyntheticDataProcessor,
+    build_synthetic_source_streams as _stock_build_synthetic_source_streams,
+    generate_modulated_foreground_td as _stock_generate_modulated_foreground_td,
+    make_emri_injections as _make_emri_injections,
+    make_mbh_injections as _make_mbh_injections,
+    make_sobbh_injections as _make_sobbh_injections,
+)
+from lisatools.globalfit.stock.erebor.wrappers import get_mbh_phenom_wave_gen
+
+# Same names/behaviors as the old module-level functions, with this file's
+# knobs (ANNUAL_*, TDI_*, MBH_*, noise/foreground constants) bound.
+annual_amplitude_envelope = AnnualAmplitudeEnvelope(ANNUAL_AMP, ANNUAL_PHASE0)
+annual_modulation_callable = AnnualCovarianceModulation(ANNUAL_AMP, ANNUAL_PHASE0)
 
 
-def annual_modulation_callable(t_arr):
-    """``(nch, nch, Nt)`` modulation matrix for GalacticForeground.
+class AnnualModulatedGalacticForeground(_StockAnnualModulatedGF):
+    """:class:`GalacticForeground` with this run's annual modulation pre-bound."""
 
-    Uses the standard isotropic-foreground per-element pattern (diag = 1,
-    off-diag = -1/2) with an overall annual amplitude envelope applied
-    uniformly across elements. The envelope is the square of the TD
-    amplitude envelope because the modulation acts on the covariance
-    (power), not the realization amplitude.
-    """
-    t_arr = np.asarray(t_arr)
-    Nt = t_arr.shape[0]
-    base = np.array([
-        [ 1.0, -0.5, -0.5],
-        [-0.5,  1.0, -0.5],
-        [-0.5, -0.5,  1.0],
-    ])
-    env = annual_amplitude_envelope(t_arr) ** 2  # power-domain envelope
-    return base[:, :, None] * env[None, None, :]
-
-
-class AnnualModulatedGalacticForeground(GalacticForeground):
-    """:class:`GalacticForeground` with the annual modulation pre-bound."""
-
-    def __init__(
-        self,
-        foreground_params: Optional[Sequence[float]] = None,
-        tdi_generation: int = TDI_GEN,
-    ):
-        # FOREGROUND_PARAMS=None -> use the FittedHyperbolicTangent default
-        # (no per-parameter tuple required; the class reads Tobs at call
-        # time). Pass a placeholder param vector that the fitted class
-        # ignores so the SeparableComponent contract is satisfied.
-        if foreground_params is None:
-            foreground_params = (TOBS,)
-            stochastic_fn = FittedHyperbolicTangentGalacticForeground
-        else:
-            stochastic_fn = FittedHyperbolicTangentGalacticForeground
+    def __init__(self, foreground_params=None, tdi_generation=TDI_GEN):
         super().__init__(
             foreground_params=foreground_params,
-            modulation=annual_modulation_callable,
             tdi_generation=tdi_generation,
-            stochastic_fn=stochastic_fn,
+            tobs=TOBS,
+            annual_amp=ANNUAL_AMP,
+            annual_phase0=ANNUAL_PHASE0,
         )
 
 
-# ============================================================
-# *** Synthetic noise + foreground TD generators ***
-# ============================================================
-# ``_generate_correlated_fd_noise`` -> stock
-# ``lisatools.sensitivity.generate_correlated_instrument_noise_td`` (bit-identical
-# fixed-seed realization; was duplicated verbatim across settings files).
-
-
-def _generate_foreground_fd_only_covariance(
-    Nf_rfft: int,
-    df: float,
-    Tobs: float,
-    foreground_params: Optional[Sequence[float]],
-    tdi_generation: int,
-) -> np.ndarray:
-    """Build a 3x3xNf_rfft FD covariance for the galactic foreground only
-    (no instrument), using the same path as the model-side
-    :class:`GalacticForeground` so the synthetic realization matches the
-    likelihood model.
-    """
-    fd_settings = FDSettings(N=Nf_rfft, df=df, force_backend="cpu")
-    fg_params = (
-        foreground_params
-        if foreground_params is not None
-        else (Tobs,)
-    )
-    fg_component = GalacticForeground(
-        foreground_params=fg_params,
-        modulation=None,  # stationary base — we apply the annual envelope in TD
-        tdi_generation=tdi_generation,
-        stochastic_fn=FittedHyperbolicTangentGalacticForeground,
-    )
-    sens = CompositeSensitivityMatrix(fd_settings, [fg_component])
-    return np.asarray(sens.sens_mat)  # (3, 3, Nf_rfft)
-
-
 def _generate_modulated_foreground_td(
-    N: int,
-    dt: float,
-    Tobs: float,
-    foreground_params: Optional[Sequence[float]],
-    tdi_generation: int,
-    seed: int,
-) -> np.ndarray:
-    """Sample a 3-channel TD foreground realization and apply the annual
-    amplitude envelope per-sample.
-
-    Workflow: build the stationary 3x3 FD covariance, per-frequency
-    Cholesky, draw complex Gaussian, IRFFT to TD, then multiply each
-    channel by ``sqrt(annual_amplitude_envelope(t))`` so the realization
-    is non-stationary in the same way the model covariance is.
-    """
-    Nf_rfft = N // 2 + 1
-    df = 1.0 / (N * dt)
-    cov = _generate_foreground_fd_only_covariance(
-        Nf_rfft, df, Tobs, foreground_params, tdi_generation
+    N, dt, Tobs, foreground_params, tdi_generation, seed
+):
+    return _stock_generate_modulated_foreground_td(
+        N=N, dt=dt, Tobs=Tobs, foreground_params=foreground_params,
+        tdi_generation=tdi_generation, seed=seed,
+        annual_amp=ANNUAL_AMP, annual_phase0=ANNUAL_PHASE0,
     )
-
-    rng = np.random.default_rng(seed)
-    norm = 0.5 * (1.0 / df) ** 0.5
-    z = rng.normal(0, norm, (3, Nf_rfft)) + 1j * rng.normal(0, norm, (3, Nf_rfft))
-
-    n_fd = np.zeros_like(z)
-    eye = np.eye(3) * 1e-60
-    for k in range(Nf_rfft):
-        C_k = cov[..., k] + eye
-        try:
-            L = np.linalg.cholesky(C_k)
-        except np.linalg.LinAlgError:
-            diag = np.maximum(np.diag(cov[..., k]), 0.0)
-            n_fd[:, k] = np.sqrt(diag) * z[:, k]
-            continue
-        n_fd[:, k] = L @ z[:, k]
-
-    n_td = (np.fft.irfft(n_fd, n=N, axis=-1) / dt).astype(np.float64)
-
-    # Apply per-sample annual envelope (amplitude domain).
-    t_arr = np.arange(N) * dt  # mojito processor adds its own t0 separately
-    env = np.sqrt(annual_amplitude_envelope(t_arr))
-    n_td *= env[None, :]
-    return n_td
-
-
-# ============================================================
-# *** Per-class synthetic injection arrays (10 sources each) ***
-# ============================================================
-def _make_emri_injections(n: int) -> np.ndarray:
-    """Return ``(n, 14)`` EMRI waveform-basis injection vectors.
-
-    Intrinsic params shared (so a tight per-leaf prior is feasible);
-    sky / phase / distance vary per source.
-    """
-    base = _SINGLE_EMRI_INJECTION.copy()
-    if n == 0:
-        return np.zeros((0, base.size), dtype=base.dtype)
-    rng = np.random.default_rng(11)
-    rows = []
-    for i in range(n):
-        row = base.copy()
-        row[6]  = 1.0 + 2.0 * rng.uniform()           # dist (Gpc)
-        row[7]  = rng.uniform(0.05, np.pi - 0.05)     # qS
-        row[8]  = rng.uniform(0.0, 2.0 * np.pi)       # phiS
-        row[9]  = rng.uniform(0.05, np.pi - 0.05)     # qK
-        row[10] = rng.uniform(0.0, 2.0 * np.pi)       # phiK
-        row[11] = rng.uniform(0.0, 2.0 * np.pi)       # Phi_phi0
-        rows.append(row)
-    return np.stack(rows, axis=0)
-
-
-def _make_sobbh_injections(n: int) -> np.ndarray:
-    """Return ``(n, 11)`` SOBBH waveform-basis injection vectors."""
-    base = _SINGLE_SOBBH_INJECTION.copy()
-    if n == 0:
-        return np.zeros((0, base.size), dtype=base.dtype)
-    rng = np.random.default_rng(22)
-    rows = []
-    for i in range(n):
-        row = base.copy()
-        row[4]  = 1.0 + 1.0 * rng.uniform()           # dist
-        row[5]  = rng.uniform(0.05, np.pi - 0.05)     # inc
-        row[7]  = rng.uniform(0.0, 2.0 * np.pi)       # lam
-        row[8]  = rng.uniform(-np.pi / 2 + 0.05, np.pi / 2 - 0.05)  # beta
-        row[9]  = rng.uniform(0.0, np.pi)             # psi
-        row[10] = rng.uniform(0.0, 2.0 * np.pi)       # phi0
-        rows.append(row)
-    return np.stack(rows, axis=0)
 
 
 # MBH sampling-basis -> waveform-basis transform: the stock forward +
-# inverse container (direct ICRS) from erebor. Sampling basis matches
-# ``mbh_catalogue_to_sampling_basis``: ``(logM, Q, s1z, s2z, dist [Gpc],
-# phi_ref, cos_iota, psi, alpha, sin_delta, t_plunge)`` with
-# ``Q = m1/m2 >= 1``; the positional output is the
-# ``PhenomTHMTDIWaveform`` call order ``(m1, m2, s1z, s2z, dist [Mpc],
-# phi_ref, inc, psi, ra, dec, merger_time)`` — sky / polarization pass
-# through unchanged in ICRS (the run frame; orbits loaded with
-# ``frame='icrs'``).
+# inverse container (direct ICRS) from erebor.
 MBH_TRANSFORM = make_mbh_transform_container()
 
-
-def _make_mbh_injections(n: int, tobs: float) -> np.ndarray:
-    """Return ``(n, 11)`` MBH sampling-basis injection vectors.
-
-    Basis: ``(logM, Q, s1z, s2z, dist [Gpc], phi_ref, cos_iota, psi,
-    alpha, sin_delta, t_plunge)`` — the MBH sampling basis (transformed
-    to the ``PhenomTHMTDIWaveform`` call order via ``MBH_TRANSFORM``).
-    Masses and spins come from the shared phentax baseline; sky / phase /
-    distance / merger time vary per source. Synthetic mode uses the
-    stock analytic (ecliptic-frame) orbits, so the "ICRS" sky slots are
-    simply interpreted in the orbits' native frame — self-consistent
-    between injection and template.
-    """
-    base = _SINGLE_MBH_PHENTAX_INJECTION.copy()  # (m1, m2, s1z, s2z, ...)
-    if n == 0:
-        return np.zeros((0, 11), dtype=float)
-    m1, m2 = float(base[0]), float(base[1])
-    rng = np.random.default_rng(33)
-    rows = []
-    for i in range(n):
-        rows.append(np.array([
-            np.log(m1 + m2),                               # logM
-            m1 / m2,                                       # Q (>= 1)
-            base[2],                                       # s1z
-            base[3],                                       # s2z
-            10.0 + 15.0 * rng.uniform(),                   # dist (Gpc)
-            rng.uniform(0.0, 2.0 * np.pi),                 # phi_ref
-            np.cos(rng.uniform(0.1, np.pi - 0.1)),         # cos_iota
-            rng.uniform(0.0, np.pi),                       # psi
-            rng.uniform(0.0, 2.0 * np.pi),                 # alpha
-            np.sin(rng.uniform(-np.pi / 2 + 0.1, np.pi / 2 - 0.1)),  # sin_delta
-            # Spread merger times across the interior of the observation
-            # (relative to MBH_WAVEFORM_T0 = the data start in synthetic mode).
-            (0.2 + 0.6 * (i + 1) / (n + 1)) * tobs,        # t_plunge
-        ]))
-    return np.stack(rows, axis=0)
-
-
-# ---- Cached MBH PhenomTHMTDIWaveform (shared: signal_gen registration,
-# ----   synthetic injection stream, and the recipe's PE move) ----
-_MBH_PHENOM_GEN_CACHE = {}
+_MBH_PHENOM_KWARGS = dict(
+    waveform_duration=MBH_WAVEFORM_DURATION,
+    higher_modes=MBH_HIGHER_MODES,
+    phenom_tol=MBH_PHENOM_TOL,
+    start_freq=MBH_START_FREQ,
+    response_order=MBH_RESPONSE_ORDER,
+    buffer_time=MBH_BUFFER_TIME,
+    min_freq=MIN_FREQ,
+    max_freq=MAX_FREQ,
+)
 
 
 def _get_mbh_phenom_wave_gen(
     *,
-    data_td_settings: TDSettings,
-    waveform_t0: float,
+    data_td_settings,
+    waveform_t0,
     orbits=None,
     output_domain_settings=None,
-    tukey_alpha: float = 0.0,
-    force_backend: str = "cpu",
+    tukey_alpha=0.0,
+    force_backend="cpu",
 ):
-    """Build (and cache) the MBH ``PhenomTHMTDIWaveform``.
-
-    One instance is shared between the engine-side residual rebuild
-    (``signal_gen``), the synthetic injection stream, and the PE move so
-    the (slow) phentax setup runs once per configuration.
-    """
-    key = (
-        id(data_td_settings), waveform_t0, id(orbits),
-        id(output_domain_settings), tukey_alpha, force_backend,
-    )
-    if key in _MBH_PHENOM_GEN_CACHE:
-        return _MBH_PHENOM_GEN_CACHE[key]
-
-    from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform
-
-    gen = PhenomTHMTDIWaveform(
-        waveform_kwargs=dict(
-            higher_modes=list(MBH_HIGHER_MODES),
-            include_negative_modes=True,  # negative m modes by symmetry
-            t_low_fit=True,  # fit-seeded start time for the t(f) root finder
-            coarse_grain=False,  # pyResponseTDI needs equispaced time arrays
-            atol=MBH_PHENOM_TOL,
-            rtol=MBH_PHENOM_TOL,
-        ),
-        # Waveform-generation window only (phentax ``T``), not the data span.
-        Tobs=(MBH_WAVEFORM_DURATION if MBH_WAVEFORM_DURATION is not None else TOBS),
-        start_freq=MBH_START_FREQ,
-        use_reference_time=True,
-        waveform_t0=waveform_t0,
+    return get_mbh_phenom_wave_gen(
         data_td_settings=data_td_settings,
-        tdi_generation=TDI_GEN_STR,
-        tdi_channels=TDI_CHAN,
-        sampling_frequency=1.0 / DT,
+        waveform_t0=waveform_t0,
+        dt=DT,
         orbits=orbits,
-        order=MBH_RESPONSE_ORDER,
-        tukey_alpha=tukey_alpha,
-        stft_dt=None,
-        freq_min=MIN_FREQ,
-        freq_max=MAX_FREQ,
-        fft_batch_size=2,
-        buffer_time=MBH_BUFFER_TIME,
-        # WDM run target — communicated by settings object (sprint rule).
-        # None on the injection path (TD output only).
         output_domain_settings=output_domain_settings,
+        tukey_alpha=tukey_alpha,
         force_backend=force_backend,
+        data_span=TOBS,
+        tdi_gen_str=TDI_GEN_STR,
+        tdi_chan=TDI_CHAN,
+        **_MBH_PHENOM_KWARGS,
     )
-    _MBH_PHENOM_GEN_CACHE[key] = gen
-    return gen
 
 
 EMRI_INJECTIONS_FULL_BASIS = _make_emri_injections(N_EMRI_INJECTIONS)
@@ -703,131 +497,51 @@ SOBBH_INJECTIONS_FULL_BASIS = _make_sobbh_injections(N_SOBBH_INJECTIONS)
 # the waveform basis via MBH_TRANSFORM where needed.
 MBH_INJECTIONS_SAMPLING_BASIS = _make_mbh_injections(N_MBH_INJECTIONS, TOBS)
 
+_SOBBH_REFERENCE_TIME = (
+    MOJITO_REFERENCE_TIME if DATA_PROCESSOR == "mojito" else None
+)
 
-# ============================================================
-# *** Data processors ***
-# ============================================================
+
 def _build_synthetic_source_streams(
-    Tobs: float,
-    dt: float,
-    t_start: float,
-    target_N: int,
-    nchannels: int,
-    force_backend: str,
-    emri_injections: np.ndarray,
-    sobbh_injections: np.ndarray,
-    mbh_injections: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build per-class TD signal sums via the cached response wrappers."""
-    tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
-    zero = np.zeros((nchannels, target_N), dtype=np.float64)
-    # Stock full-grid placement target (right-pad / clip onto the data grid).
-    grid = TDSettings(N=target_N, dt=dt, t0=t_start, force_backend="cpu")
-
-    emri_td = zero.copy()
-    if emri_injections.shape[0] > 0:
-        emri_wave_gen = get_emri_response_wrapper(
-            Tobs=Tobs, dt=dt, t_start=t_start,
-            tdi_config=tdi_config, tdi_chan=TDI_CHAN,
-            role="injection", force_backend=force_backend,
-        )
-        for ii, params in enumerate(emri_injections):
-            print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [start]")
-
-            sig = np.asarray(emri_wave_gen(*params))
-            emri_td += np.asarray(
-                place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
-            )
-            print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [end]")
-
-
-    sobbh_td = zero.copy()
-    if sobbh_injections.shape[0] > 0:
-        sobbh_wave_gen = get_sobbh_response_wrapper(
-            Tobs=Tobs, dt=dt, t_start=t_start,
-            tdi_config=tdi_config, tdi_chan=TDI_CHAN,
-            role="injection", force_backend=force_backend,
-            # Same f_low-epoch convention as the template path: in mojito mode
-            # f_low is defined at the fixed catalogue epoch (decoupled from the
-            # data-window start); synthetic mode (this builder's only caller)
-            # has no separate epoch, so ``None`` -> f_low at the window start.
-            reference_time=(
-                MOJITO_REFERENCE_TIME if DATA_PROCESSOR == "mojito" else None
-            ),
-        )
-        for ii, params in enumerate(sobbh_injections):
-            print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
-            sig = np.asarray(sobbh_wave_gen(*params))
-            sobbh_td += np.asarray(
-                place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
-            )
-            print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [end]")
-
-    mbh_td = zero.copy()
-    if mbh_injections.shape[0] > 0:
-        # PhenomTHMTDIWaveform path (stft_tof structure): legacy
-        # pyResponseTDI response on the dense phentax grid, then stock
-        # full-grid placement. Same generator class as the PE templates so
-        # the engine-side residual rebuild nulls the injections exactly.
+    Tobs, dt, t_start, target_N, nchannels, force_backend,
+    emri_injections, sobbh_injections, mbh_injections,
+):
+    mbh_wave_gen = None
+    if np.atleast_2d(mbh_injections).shape[0] > 0:
+        grid = TDSettings(N=target_N, dt=dt, t0=t_start, force_backend="cpu")
         mbh_wave_gen = _get_mbh_phenom_wave_gen(
-            data_td_settings=grid,
-            waveform_t0=t_start,
-            orbits=None,  # stock analytic orbits (synthetic mode)
-            output_domain_settings=None,  # TD output only here
+            data_td_settings=grid, waveform_t0=t_start,
+            orbits=None, output_domain_settings=None,
             force_backend=force_backend,
         )
-        for ii, params in enumerate(mbh_injections):
-            print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [start]")
-            params_in = MBH_TRANSFORM.both_transforms(
-                np.asarray(params, dtype=float)
-            )
-            times, channels = mbh_wave_gen.compute_tdi_channels(*params_in)
-            mbh_td += np.asarray(
-                place_td_signal_on_grid(channels, grid, times=times).arr
-            )[:nchannels]
-            print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [end]")
-    return emri_td, sobbh_td, mbh_td
+    return _stock_build_synthetic_source_streams(
+        Tobs=Tobs, dt=dt, t_start=t_start, target_N=target_N,
+        nchannels=nchannels, force_backend=force_backend,
+        emri_injections=emri_injections,
+        sobbh_injections=sobbh_injections,
+        mbh_injections=mbh_injections,
+        tdi_chan=TDI_CHAN, tdi_gen_str=TDI_GEN_STR,
+        sobbh_reference_time=_SOBBH_REFERENCE_TIME,
+        mbh_wave_gen=mbh_wave_gen, mbh_transform=MBH_TRANSFORM,
+    )
 
 
-class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
-    """Mojito L1 source loader + synthetic FD noise + modulated foreground.
-
-    Loads MBHB / EMRI / SOBHB source TD signals from a mojito L1 folder
-    (no NOISE, no GB / VGB), then adds:
-      1. Synthetic FD-correlated instrument noise drawn from the
-         ``(NOISE_SOMS_D, NOISE_SA_A)`` covariance.
-      2. A galactic-foreground TD realization with the annual amplitude
-         envelope applied per-sample.
-
-    The mojito catalog populated by the base loader on ``self.catalogue``
-    is preserved for downstream factories.
-    """
+class L1ProcessingStepWithSyntheticNoise(_StockL1WithSyntheticNoise):
+    """Mojito L1 loader + this run's synthetic noise / foreground knobs."""
 
     def __init__(
         self,
-        L1_folder: str,
-        source_ids: dict,
+        L1_folder,
+        source_ids,
         orbits_class=None,
-        orbits_kwargs: Optional[dict] = None,
-        verbose: bool = True,
-        do_plots: bool = False,
-        Tobs: float = None,
-        window_start_offset: float = 0.0,
+        orbits_kwargs=None,
+        verbose=True,
+        do_plots=False,
+        Tobs=None,
+        window_start_offset=0.0,
     ):
-        # Source types are MBHB / EMRI / SOBHB; drop any class whose
-        # source_ids list is empty (mojito's L1DataLoader raises on
-        # missing IDs). Instrument noise + galactic foreground come from
-        # the synthetic generators below, not from mojito.
-        source_types = [
-            t for t in ["MBHB", "EMRI", "SOBHB"] if source_ids.get(t)
-        ]
-        if orbits_class is None:
-            from lisatools.detector import L1Orbits
-            orbits_class = L1Orbits
-
         super().__init__(
             L1_folder=L1_folder,
-            source_types=source_types,
             source_ids=source_ids,
             orbits_class=orbits_class,
             orbits_kwargs=orbits_kwargs,
@@ -835,114 +549,62 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
             do_plots=do_plots,
             Tobs=Tobs,
             window_start_offset=window_start_offset,
+            add_instrument_noise=ADD_INSTRUMENT_NOISE,
+            noise_soms_d=NOISE_SOMS_D,
+            noise_sa_a=NOISE_SA_A,
+            noise_seed=NOISE_SEED,
+            add_galactic_foreground=ADD_GALACTIC_FOREGROUND,
+            foreground_params=FOREGROUND_PARAMS,
+            foreground_seed=FOREGROUND_SEED,
+            annual_amp=ANNUAL_AMP,
+            annual_phase0=ANNUAL_PHASE0,
+            tdi_generation=TDI_GEN,
         )
-        # super().__init__ already called load_data() and stored .data,
-        # .times, .fs, .orbits, .catalogue.
-
-        # Add synthetic FD instrument noise + modulated foreground.
-        # Stock full-grid placement (right-pad / clip onto the data grid).
-        N = int(round(self.T / self.dt))
-        nch = self.data.shape[0]
-        grid = TDSettings(
-            N=N, dt=self.dt, t0=float(self.times[0]), force_backend="cpu"
-        )
-        combined = np.asarray(
-            place_td_signal_on_grid(self.data[:nch], grid).arr
-        )
-        if ADD_INSTRUMENT_NOISE:
-            noise_td = generate_correlated_instrument_noise_td(
-                N=N, dt=self.dt,
-                Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
-                tdi_generation=TDI_GEN, seed=NOISE_SEED,
-                model_name="full_year_noise_model",
-            )
-            combined = combined + np.asarray(
-                place_td_signal_on_grid(noise_td[:nch], grid).arr
-            )
-        if ADD_GALACTIC_FOREGROUND:
-            fg_td = _generate_modulated_foreground_td(
-                N=N, dt=self.dt, Tobs=self.T,
-                foreground_params=FOREGROUND_PARAMS,
-                tdi_generation=TDI_GEN, seed=FOREGROUND_SEED,
-            )
-            combined = combined + np.asarray(
-                place_td_signal_on_grid(fg_td[:nch], grid).arr
-            )
-        self.data = combined
 
 
-class SyntheticDataProcessor(BaseProcessingStep):
-    """All-synthetic processor used for testing without a mojito L1 folder.
-
-    Builds per-class source TD signals via the cached response wrappers
-    and sums the same instrument-noise + modulated-foreground TD streams
-    as :class:`L1ProcessingStepWithSyntheticNoise`. Exposes a
-    ``catalogue`` dict in the same shape so downstream factories can
-    read leaf counts uniformly.
-    """
+class SyntheticDataProcessor(_StockSyntheticDataProcessor):
+    """All-synthetic processor with this run's knobs bound."""
 
     def __init__(
         self,
-        Tobs: float,
-        dt: float,
-        t_start: float,
-        emri_injection_params_full_basis: np.ndarray,
-        sobbh_injection_params_full_basis: np.ndarray,
-        mbh_injection_params_sampling_basis: np.ndarray,
-        nchannels: int = NCHANNELS,
-        force_backend: str = "cpu",
-        verbose: bool = True,
-        do_plots: bool = False,
+        Tobs,
+        dt,
+        t_start,
+        emri_injection_params_full_basis,
+        sobbh_injection_params_full_basis,
+        mbh_injection_params_sampling_basis,
+        nchannels=NCHANNELS,
+        force_backend="cpu",
+        verbose=True,
+        do_plots=False,
     ):
-        target_N = int(round(Tobs / dt))
-        emri = np.atleast_2d(emri_injection_params_full_basis)
-        sobbh = np.atleast_2d(sobbh_injection_params_full_basis)
-        # MBH rows arrive in the sampling basis; _build_synthetic_source_streams
-        # applies MBH_TRANSFORM per row.
-        mbh = np.atleast_2d(mbh_injection_params_sampling_basis)
-
-        emri_td, sobbh_td, mbh_td = _build_synthetic_source_streams(
-            Tobs=Tobs, dt=dt, t_start=t_start, target_N=target_N,
-            nchannels=nchannels, force_backend=force_backend,
-            emri_injections=emri,
-            sobbh_injections=sobbh,
-            mbh_injections=mbh,
+        super().__init__(
+            Tobs=Tobs,
+            dt=dt,
+            t_start=t_start,
+            emri_injection_params_full_basis=emri_injection_params_full_basis,
+            sobbh_injection_params_full_basis=sobbh_injection_params_full_basis,
+            mbh_injection_params_sampling_basis=mbh_injection_params_sampling_basis,
+            source_ids=MOJITO_SOURCE_IDS,
+            nchannels=nchannels,
+            force_backend=force_backend,
+            verbose=verbose,
+            do_plots=do_plots,
+            tdi_chan=TDI_CHAN,
+            tdi_gen_str=TDI_GEN_STR,
+            sobbh_reference_time=_SOBBH_REFERENCE_TIME,
+            mbh_phenom_kwargs=_MBH_PHENOM_KWARGS,
+            add_instrument_noise=ADD_INSTRUMENT_NOISE,
+            noise_soms_d=NOISE_SOMS_D,
+            noise_sa_a=NOISE_SA_A,
+            noise_seed=NOISE_SEED,
+            add_galactic_foreground=ADD_GALACTIC_FOREGROUND,
+            foreground_params=FOREGROUND_PARAMS,
+            foreground_seed=FOREGROUND_SEED,
+            annual_amp=ANNUAL_AMP,
+            annual_phase0=ANNUAL_PHASE0,
+            tdi_generation=TDI_GEN,
         )
-
-        combined = emri_td + sobbh_td + mbh_td
-        if ADD_INSTRUMENT_NOISE:
-            noise_td = generate_correlated_instrument_noise_td(
-                N=target_N, dt=dt,
-                Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
-                tdi_generation=TDI_GEN, seed=NOISE_SEED,
-                model_name="full_year_noise_model",
-            )[:nchannels]
-            combined = combined + noise_td
-        if ADD_GALACTIC_FOREGROUND:
-            fg_td = _generate_modulated_foreground_td(
-                N=target_N, dt=dt, Tobs=Tobs,
-                foreground_params=FOREGROUND_PARAMS,
-                tdi_generation=TDI_GEN, seed=FOREGROUND_SEED,
-            )[:nchannels]
-            combined = combined + fg_td
-        times = np.arange(target_N) * dt + t_start
-        fs = 1.0 / dt
-        BaseProcessingStep.__init__(
-            self, times, combined, fs, verbose=verbose, do_plots=do_plots,
-        )
-        self.orbits = None
-        self.tdi_chan = TDI_CHAN
-        # Synthetic-mode catalogue mirrors the mojito shape so downstream
-        # factories can use a uniform `len(general_info.catalogue[<CLASS>])`.
-        self.catalogue = {
-            "MBHB": {sid: {} for sid in MOJITO_SOURCE_IDS["MBHB"]},
-            "EMRI": {sid: {} for sid in MOJITO_SOURCE_IDS["EMRI"]},
-            "SOBHB": {sid: {} for sid in MOJITO_SOURCE_IDS["SOBHB"]},
-        }
-        # Stash truths so plot/diagnostic code can find them.
-        self.emri_injection_params_full_basis = emri
-        self.sobbh_injection_params_full_basis = sobbh
-        self.mbh_injection_params_sampling_basis = mbh
 
 
 # ============================================================
