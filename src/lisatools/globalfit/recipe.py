@@ -1440,6 +1440,11 @@ def build_gb_moves(
             int(os.environ.get("GB_LEAF_CAP_OCCUPANCY", "1"))
         ),
         leaf_cap_update=True,
+        # Sig-het in-model drift refresh: every N repeats, re-anchor the
+        # heterodyne references of sources whose accumulated carrier-phase
+        # drift exceeds the threshold (radians). Inert on chunked/FD.
+        sighet_refresh_every=int(os.environ.get("GB_SIGHET_REFRESH_EVERY", "20")),
+        sighet_refresh_dphase=float(os.environ.get("GB_SIGHET_REFRESH_DPHASE", "0.5")),
         **{
             k: v
             for k, v in gb_info.group_proposal_kwargs.items()

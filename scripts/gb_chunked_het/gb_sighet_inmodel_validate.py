@@ -178,7 +178,20 @@ def main():
     check("sighet phase-max round trip d_h", float(eng_s.d_h_out[0]),
           dmax_s, 1e-8)
 
-    # 4. Teardown restores exact delegation.
+    # 4. Mid-block PATCH (drift refresh): re-anchor the reference at
+    # cand4 in place, then compare with a FRESH setup at cand4 -- the
+    # two must be identical computations.
+    p4 = cands[4]
+    sighet.setup_in_model(holder, p4[None, :], zeros)   # patch in place
+    eng_s.get_ll(holder, p4[None, :], phase_maximize=False, **kw)
+    dh_patch = float(eng_s.d_h_out[0])
+    sighet.clear_in_model()
+    sighet.setup_in_model(holder, p4[None, :], zeros)   # fresh build
+    eng_s.get_ll(holder, p4[None, :], phase_maximize=False, **kw)
+    check("patched reference == fresh reference", dh_patch,
+          float(eng_s.d_h_out[0]), 1e-14)
+
+    # 5. Teardown restores exact delegation.
     sighet.clear_in_model()
     eng_s.get_ll(holder, A[None, :], phase_maximize=False, **kw)
     check("post-clear d_h == chunked d_h", float(eng_s.d_h_out[0]), dh_c, 0.0)

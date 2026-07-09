@@ -465,6 +465,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_cap_ll_nsigma=3.0,
         leaf_cap_require_occupancy=True,
         leaf_cap_update=True,
+        sighet_refresh_every=20,
+        sighet_refresh_dphase=0.5,
         debug=False,
         debug_plot_dir="./gf_output/gb_debug/",
         debug_plot_walker=0,
@@ -537,6 +539,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.leaf_cap_require_occupancy = bool(leaf_cap_require_occupancy)
         self.leaf_cap_update = bool(leaf_cap_update)
         self._band_leaf_cap = None
+
+        # Mid-block drift refresh for sig-het in-model scoring: every
+        # ``sighet_refresh_every`` repeats, a LIGHT parameter-space test
+        # (accumulated carrier-phase drift vs the reference + amplitude
+        # ratio) finds the sources that walked too far from their
+        # heterodyne expansion point, and ONLY those get their reference
+        # coefficients rebuilt (and their ll_ref re-based). Hot chains
+        # take the big accepted steps, so in practice this fires mostly
+        # at high temperature -- the per-source test handles that with no
+        # temperature special-casing. Inert when the engine's setup hook
+        # is a no-op (chunked-het / FD).
+        self.sighet_refresh_every = int(sighet_refresh_every)
+        self.sighet_refresh_dphase = float(sighet_refresh_dphase)
 
         self.priors = priors
         self.gb = gb
@@ -2056,7 +2071,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # against the source-free residual HERE and holds it CONSTANT for
         # the whole repeat block, so ll_ref below and every repeat's
         # get_add_ll score through the same likelihood.
-        buffer_obj.setup_in_model_likelihood(curr, slots, N_vals)
+        sighet_active = bool(
+            buffer_obj.setup_in_model_likelihood(curr, slots, N_vals)
+        )
+        # Drift-refresh anchor: the sampling-basis coords each source's
+        # sig-het reference was built at (see the refresh block below).
+        ref_track = curr.copy() if sighet_active else None
         ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals)
         curr_prior = cp.asarray(self.gpu_priors["gb"].logpdf(curr))
 
@@ -2117,6 +2137,42 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 buffer_obj, curr, new, slots, N_vals, delta_ll, keep,
                 (asnumpy(t_i), asnumpy(w_i), asnumpy(b_i)), move_i,
             )
+
+            # Sig-het drift refresh: every ``sighet_refresh_every``
+            # repeats, re-anchor the references of the sources that
+            # walked too far from their expansion point. The test is
+            # pure parameter arithmetic (no kernel call): accumulated
+            # carrier-phase drift 2*pi*|df0|*Tobs + pi*|dfdot|*Tobs^2
+            # plus an amplitude-ratio guard. Refreshed sources get their
+            # reference PATCHED in place (only those coefficient blocks
+            # rebuild) and their ll_ref re-based against the new
+            # reference so the MH deltas never mix references.
+            if (
+                sighet_active
+                and self.sighet_refresh_every > 0
+                and (move_i + 1) % self.sighet_refresh_every == 0
+                and move_i + 1 < self.num_repeat_proposals
+            ):
+                Tobs = float(self._basis_settings.Tobs)
+                df0_hz = cp.abs(curr[:, 1] - ref_track[:, 1]) / 1e3
+                dfdot = cp.abs(curr[:, 2] - ref_track[:, 2])
+                drift = 2.0 * np.pi * df0_hz * Tobs + np.pi * dfdot * Tobs**2
+                far = (drift > self.sighet_refresh_dphase) | (
+                    cp.abs(curr[:, 0] - ref_track[:, 0]) > np.log(2.0)
+                )
+                if bool(far.any()):
+                    buffer_obj.setup_in_model_likelihood(
+                        curr[far], slots[far], N_vals[far]
+                    )
+                    ll_ref[far] = buffer_obj.get_add_ll(
+                        curr[far], slots[far], slots[far], N_vals[far]
+                    )
+                    ref_track[far] = curr[far]
+                    logger.debug(
+                        f"{self.name}: sig-het reference refresh for "
+                        f"{int(far.sum())}/{len(ids)} sources at repeat "
+                        f"{move_i + 1}."
+                    )
 
         # Repeat block over: deactivate the per-source likelihood setup so
         # everything outside the block (RJ, removal, fills) scores through

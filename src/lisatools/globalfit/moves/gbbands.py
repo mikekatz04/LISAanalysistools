@@ -954,9 +954,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         source-free cell residuals here and holds it constant until
         :meth:`clear_in_model_likelihood`. Call AFTER the sources are
         removed from the residual, BEFORE the reference ll of the repeat
-        block is computed."""
+        block is computed.
+
+        Returns the engine hook's value: truthy when a sig-het reference
+        is now active (the move uses this to arm its mid-block drift
+        refresh), ``None`` from the no-op hooks."""
         params_phys = self.transform_fn.both_transforms(params, xp=cp)
-        self._likelihood_engine.setup_in_model(
+        return self._likelihood_engine.setup_in_model(
             self, params_phys, data_index, N_vals=N_vals)
 
     def clear_in_model_likelihood(self) -> None:
