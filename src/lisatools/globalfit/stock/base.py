@@ -670,7 +670,14 @@ class StockGlobalFit(CurrentInfoGlobalFit):
         # The recipe spec rides along so the setup_function can materialize it.
         settings.source_metadata["recipe_spec"] = self.recipe
         CurrentInfoGlobalFit.__init__(self, settings)
+        # Post-deepcopy hook: attach runtime-only objects (e.g. per-branch
+        # ``signal_gen`` adapters bound to the runtime general_info) onto the
+        # deepcopied Setups — never onto the pre-build config.
+        self.attach_runtime_objects()
         return self
+
+    def attach_runtime_objects(self) -> None:
+        """Variant hook, called once at the end of :meth:`build`."""
 
     def reset_build(self):
         """Drop all built products, returning to the cheap configured state."""

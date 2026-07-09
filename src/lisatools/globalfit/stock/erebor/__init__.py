@@ -63,9 +63,10 @@ get_stock = _registry.get
 get_stock_options = _registry.options
 
 from .variants.all_sources import AllSourcesGlobalFit  # noqa: E402
+from .variants.full_year_combined import FullYearCombinedGlobalFit  # noqa: E402
 from .variants.gb_no_fg import GBNoForegroundGlobalFit  # noqa: E402
 
-for _cls in (GBNoForegroundGlobalFit, AllSourcesGlobalFit):
+for _cls in (GBNoForegroundGlobalFit, AllSourcesGlobalFit, FullYearCombinedGlobalFit):
     _registry.register(_cls)
 
 #: Names of the registered stock options (mirrors the sensitivity.py idiom).
@@ -77,6 +78,7 @@ __stock_globalfit_options__ = _registry.names()
 # changes the session-wide default for later clones — deliberate, but shared.
 gb_no_fg = GBNoForegroundGlobalFit()
 all_sources = AllSourcesGlobalFit()
+full_year_combined = FullYearCombinedGlobalFit()
 
 
 def __getattr__(name):

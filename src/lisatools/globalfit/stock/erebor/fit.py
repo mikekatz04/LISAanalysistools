@@ -220,7 +220,11 @@ class EreborFit(StockGlobalFit):
             gs.fixed_psd_kwargs = dict(
                 psd_params=list(gs.fixed_psd_params), galfor_params=None
             )
+        self.finalize_general(gs)
         return gs
+
+    def finalize_general(self, gs: EreborGeneralSettings) -> None:
+        """Variant hook: last-touch mutation after Tobs/domain are resolved."""
 
     def make_domain_settings(
         self,
