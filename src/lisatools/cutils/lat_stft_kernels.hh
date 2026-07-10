@@ -16,6 +16,14 @@
 // device primitives already live in domains.{hpp,cu} -- this header only adds the
 // GB-on-the-fly glue.
 //
+// Column-producer seam (2026-07): the per-column source evaluation + per-pixel
+// Fourier value live behind a compile-time ColumnT policy (see the
+// "Column-producer policy seam" block below; FresnelColumn is the production
+// policy and the default template argument everywhere, so per-source packages
+// instantiate `stft_*_impl<TheirSource>` exactly as before). An alternative
+// column producer (e.g. a heterodyned per-segment FFT) plugs in as a second
+// policy without touching the consumers.
+//
 // Conventions (must match domains.cu so the on-the-fly likelihood equals the
 // template-based STFTComputationGroup path):
 //   amp, phase  <- get_amp_phase(conj(tdi_val[ch]))   (conjugate = Fresnel convention)
@@ -262,6 +270,91 @@ CUDA_DEVICE void stft_pixel_freq_fdot(
 }
 
 // ===========================================================================
+// Column-producer policy seam
+// ===========================================================================
+// One "column" = one (source, STFT time bin). A ColumnT policy owns the
+// per-column SOURCE evaluation and produces the per-(frequency-bin, channel)
+// pixel Fourier values; the CONSUMERS (the ll / swap / fill kernels below)
+// keep the frequency loop, the bounds masks, the 0.5 real-signal convention,
+// any fill `factor`, and all accumulation/reduction logic. Compile-time
+// (static) polymorphism only -- every method CUDA_DEVICE inline, no
+// virtuals, no function pointers -- so the compiled inner loops are the
+// pre-seam inlined code (outputs byte-identical, validated by
+// scripts/validation/stft_column_policy_oracle.py).
+//
+// Contract:
+//   State           POD per-column scratch, policy-defined, register-sized.
+//   setup()         everything that does not depend on the pixel frequency:
+//                   sample the source at the column anchor, derive the
+//                   per-channel chirp (f0, fdot0) and amp/phase, place the
+//                   carrier bin. Called once per (source, column).
+//   State.carrier_j the column's carrier frequency bin (placement of the
+//                   +- n_side_bins stencil by the consumer).
+//   value(s, j, freq_j_here, freq_here)
+//                   RAW Fourier value for channel j at absolute frequency
+//                   bin freq_j_here (frequency freq_here). NOTE: the swap
+//                   kernel sums over the UNION of two carriers' stencils, so
+//                   value() may be queried up to |freq_j_here - carrier_j|
+//                   <= n_side_bins + |carrier_add - carrier_remove|; a
+//                   policy with finite tabulated support (e.g. a per-column
+//                   FFT) must size or clamp for that.
+//
+// FresnelColumn is the production policy: the analytic (windowed)
+// linear-chirp Fresnel evaluator, byte-identical to the historical inlined
+// code (the amp/phase extraction is hoisted from per-pixel to per-column;
+// it is a pure function of the anchor TDI sample, so the values are
+// unchanged and the atan2/abs work drops by the stencil width).
+// ===========================================================================
+template <class SourceT>
+struct FresnelColumn
+{
+    struct State
+    {
+        STFTFresnel* fresnel;   // non-const: the evaluator methods are not const-qualified
+        double t_seg;           // window start (Fourier origin)
+        double window_factor;
+        double amp[3];
+        double phase[3];
+        double f0[3];
+        double fdot0[3];
+        int carrier_j;          // carrier frequency bin (stencil placement)
+    };
+
+    CUDA_DEVICE static void setup(
+        State& s, SourceT& src, STFTFresnel* fresnel, STFTDomain* stft,
+        double* params, Vec k, Vec u, Vec v,
+        int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
+        double t_seg, double t_anchor_shift,
+        double window_factor, bool freq_from_tdi_phase)
+    {
+        s.fresnel = fresnel;
+        s.t_seg = t_seg;
+        s.window_factor = window_factor;
+        double t_here = t_seg + t_anchor_shift;  // chirp/sampling anchor
+        cmplx tdi_channel_val[3];
+        src.get_tdi_Xf_single(&tdi_channel_val[0], t_here, params, k, u, v,
+                              link_space_craft_rec, link_space_craft_em, bin_i);
+        stft_pixel_freq_fdot<SourceT>(
+            src, t_here, params, k, u, v,
+            link_space_craft_rec, link_space_craft_em, bin_i,
+            tdi_channel_val, freq_from_tdi_phase, &s.f0[0], &s.fdot0[0]);
+        for (int j = 0; j < 3; j += 1)
+            fresnel->get_amp_phase(&s.amp[j], &s.phase[j],
+                                   gcmplx::conj(tdi_channel_val[j]));
+        s.carrier_j = stft->get_freq_index(s.f0[0]);
+    }
+
+    CUDA_DEVICE static cmplx value(const State& s, int j, int freq_j_here,
+                                   double freq_here)
+    {
+        (void) freq_j_here;  // analytic evaluator: any frequency, no tabulation
+        return s.fresnel->get_fourier_value(
+            s.amp[j], s.phase[j], s.f0[j], s.fdot0[j],
+            s.t_seg, freq_here, s.window_factor);
+    }
+};
+
+// ===========================================================================
 // Per-binary (d|h),(h|h) evaluation for one parameter vector (already loaded
 // into the shared `params`). Zeroes the supplied scratch, runs the time x
 // side-freq x channel Fresnel loop, reduces, and writes the 4*diff_comp-scaled
@@ -271,7 +364,7 @@ CUDA_DEVICE void stft_pixel_freq_fdot(
 // Shared by stft_get_ll_kernel and stft_get_ll_grad_kernel so the gradient's
 // forward evaluation is byte-identical to get_ll.
 // ===========================================================================
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 CUDA_DEVICE void stft_eval_block_ll(
     SourceT& src, STFTFresnel* fresnel, STFTDomain* stft,
     double* params,
@@ -281,11 +374,8 @@ CUDA_DEVICE void stft_eval_block_ll(
     cmplx* d_h_tmp, cmplx* h_h_tmp, int tid,
     cmplx* d_h_val, cmplx* h_h_val)
 {
-    cmplx tdi_channel_val[3];
-    double tdi_channel_amp[3];
-    double tdi_channel_phase[3];
     cmplx fresnel_val[3];
-    double f0[3], fdot0[3];
+    typename ColumnT::State col;
     Vec k(0.0, 0.0, 0.0);
     Vec u(0.0, 0.0, 0.0);
     Vec v(0.0, 0.0, 0.0);
@@ -311,16 +401,11 @@ CUDA_DEVICE void stft_eval_block_ll(
     for (int time_i = THREAD_START_X; time_i < num_times; time_i += BLOCK_INCR_X)
     {
         double t_seg = t0 + time_i * dt;         // window start
-        double t_here = t_seg + t_anchor_shift;  // chirp/sampling anchor
-        src.get_tdi_Xf_single(&tdi_channel_val[0], t_here, params, k, u, v,
-                              link_space_craft_rec, link_space_craft_em, bin_i);
+        ColumnT::setup(col, src, fresnel, stft, params, k, u, v,
+                       link_space_craft_rec, link_space_craft_em, bin_i,
+                       t_seg, t_anchor_shift, window_factor, freq_from_tdi_phase);
 
-        stft_pixel_freq_fdot<SourceT>(
-            src, t_here, params, k, u, v,
-            link_space_craft_rec, link_space_craft_em, bin_i,
-            tdi_channel_val, freq_from_tdi_phase, &f0[0], &fdot0[0]);
-
-        int freq_j = stft->get_freq_index(f0[0]);
+        int freq_j = col.carrier_j;
         for (int diff = -n_side_bins; diff <= +n_side_bins; diff += 1)
         {
             int freq_j_here = freq_j + diff;
@@ -329,11 +414,8 @@ CUDA_DEVICE void stft_eval_block_ll(
                 double freq_here = f_min + freq_j_here * df;
                 for (int j = 0; j < 3; j += 1)
                 {
-                    fresnel->get_amp_phase(&tdi_channel_amp[j], &tdi_channel_phase[j],
-                                           gcmplx::conj(tdi_channel_val[j]));
-                    fresnel_val[j] = 0.5 * fresnel->get_fourier_value(
-                        tdi_channel_amp[j], tdi_channel_phase[j], f0[j], fdot0[j],
-                        t_seg, freq_here, window_factor);
+                    fresnel_val[j] = 0.5 * ColumnT::value(col, j, freq_j_here,
+                                                          freq_here);
                 }
                 stft->add_ip_contrib(d_h_tmp, h_h_tmp, fresnel_val,
                                      time_i, freq_j_here, data_index, noise_index);
@@ -357,7 +439,7 @@ CUDA_DEVICE void stft_eval_block_ll(
 // ===========================================================================
 // get_ll : (d|h) and (h|h) per binary.
 // ===========================================================================
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 CUDA_KERNEL
 void stft_get_ll_kernel(
     cmplx* d_h_out, cmplx* h_h_out,
@@ -393,7 +475,7 @@ void stft_get_ll_kernel(
         CUDA_SYNC_THREADS;
 
         cmplx d_h_val, h_h_val;
-        stft_eval_block_ll<SourceT>(
+        stft_eval_block_ll<SourceT, ColumnT>(
             src, fresnel, stft, params,
             link_space_craft_rec, link_space_craft_em, bin_i,
             data_index, noise_index,
@@ -409,7 +491,7 @@ void stft_get_ll_kernel(
     }
 }
 
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 inline void stft_get_ll_impl(
     cmplx* d_h_out, cmplx* h_h_out,
     Orbits* orbits, TDIConfig* tdi_config,
@@ -433,14 +515,14 @@ inline void stft_get_ll_impl(
     gpuErrchk(cudaMemcpy(stft_gpu,       stft,       sizeof(STFTDomain), cudaMemcpyHostToDevice));
 
     dim3 grid((unsigned) num_bin, 1u, 1u);
-    stft_get_ll_kernel<SourceT><<<grid, NUM_THREADS_HERE>>>(
+    stft_get_ll_kernel<SourceT, ColumnT><<<grid, NUM_THREADS_HERE>>>(
         d_h_out, h_h_out, orbits_gpu, tdi_config_gpu, fresnel_gpu, stft_gpu,
         params_all, data_index_all, noise_index_all,
         num_bin, nparams, T, t_ref, n_side_bins, window_factor, freq_from_tdi_phase);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
-    stft_get_ll_kernel<SourceT>(
+    stft_get_ll_kernel<SourceT, ColumnT>(
         d_h_out, h_h_out, orbits, tdi_config, fresnel, stft,
         params_all, data_index_all, noise_index_all,
         num_bin, nparams, T, t_ref, n_side_bins, window_factor, freq_from_tdi_phase);
@@ -459,7 +541,7 @@ inline void stft_get_ll_impl(
 // the domain's num_freqs already IS the active band, so the active-band layout
 // is the implemented path.
 // ===========================================================================
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 CUDA_KERNEL
 void stft_fill_global_kernel(
     cmplx* template_fill,
@@ -474,17 +556,13 @@ void stft_fill_global_kernel(
 
     SourceT src(orbits, tdi_config, T, t_ref);
 
-    cmplx tdi_channel_val[3];
-    double tdi_channel_amp[3];
-    double tdi_channel_phase[3];
-    double f0[3], fdot0[3];
+    typename ColumnT::State col;
 
     CUDA_SHARED int link_space_craft_rec[NLINKS];
     CUDA_SHARED int link_space_craft_em[NLINKS];
     src.fill_link_arrays(link_space_craft_rec, link_space_craft_em);
     CUDA_SYNC_THREADS;
 
-    double t_here;
     int data_index;
     Vec k(0.0, 0.0, 0.0);
     Vec u(0.0, 0.0, 0.0);
@@ -515,16 +593,12 @@ void stft_fill_global_kernel(
         for (int time_i = THREAD_START_X; time_i < num_times; time_i += BLOCK_INCR_X)
         {
             double t_seg = t0 + time_i * dt;     // window start
-            t_here = t_seg + t_anchor_shift;     // chirp/sampling anchor
-            src.get_tdi_Xf_single(&tdi_channel_val[0], t_here, params, k, u, v,
-                                  link_space_craft_rec, link_space_craft_em, bin_i);
+            ColumnT::setup(col, src, fresnel, stft, params, k, u, v,
+                           link_space_craft_rec, link_space_craft_em, bin_i,
+                           t_seg, t_anchor_shift, window_factor,
+                           freq_from_tdi_phase);
 
-            stft_pixel_freq_fdot<SourceT>(
-                src, t_here, params, k, u, v,
-                link_space_craft_rec, link_space_craft_em, bin_i,
-                tdi_channel_val, freq_from_tdi_phase, &f0[0], &fdot0[0]);
-
-            freq_j = stft->get_freq_index(f0[0]);
+            freq_j = col.carrier_j;
             for (int diff = -n_side_bins; diff <= +n_side_bins; diff += 1)
             {
                 int freq_j_here = freq_j + diff;
@@ -533,11 +607,8 @@ void stft_fill_global_kernel(
                     double freq_here = f_min + freq_j_here * df;
                     for (int j = 0; j < 3; j += 1)
                     {
-                        fresnel->get_amp_phase(&tdi_channel_amp[j], &tdi_channel_phase[j],
-                                               gcmplx::conj(tdi_channel_val[j]));
-                        cmplx val = factor * 0.5 * fresnel->get_fourier_value(
-                            tdi_channel_amp[j], tdi_channel_phase[j], f0[j], fdot0[j],
-                            t_seg, freq_here, window_factor);
+                        cmplx val = factor * 0.5 * ColumnT::value(col, j, freq_j_here,
+                                                                  freq_here);
                         // template_fill[(((data_index*nch + j)*num_times + time_i)*num_freqs) + freq_j_here]
                         size_t idx = ((((size_t) data_index * nchannels + j) * num_times
                                        + time_i) * num_freqs) + freq_j_here;
@@ -555,7 +626,7 @@ void stft_fill_global_kernel(
     }
 }
 
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 inline void stft_fill_global_impl(
     cmplx* template_fill,
     Orbits* orbits, TDIConfig* tdi_config,
@@ -579,7 +650,7 @@ inline void stft_fill_global_impl(
     gpuErrchk(cudaMemcpy(stft_gpu,       stft,       sizeof(STFTDomain), cudaMemcpyHostToDevice));
 
     dim3 grid((unsigned) num_bin, 1u, 1u);
-    stft_fill_global_kernel<SourceT><<<grid, NUM_THREADS_HERE>>>(
+    stft_fill_global_kernel<SourceT, ColumnT><<<grid, NUM_THREADS_HERE>>>(
         template_fill, orbits_gpu, tdi_config_gpu, fresnel_gpu, stft_gpu,
         params_all, data_index_all, factors_all,
         num_bin, nparams, T, t_ref, n_side_bins, window_factor,
@@ -587,7 +658,7 @@ inline void stft_fill_global_impl(
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
-    stft_fill_global_kernel<SourceT>(
+    stft_fill_global_kernel<SourceT, ColumnT>(
         template_fill, orbits, tdi_config, fresnel, stft,
         params_all, data_index_all, factors_all,
         num_bin, nparams, T, t_ref, n_side_bins, window_factor,
@@ -620,7 +691,7 @@ inline void stft_fill_global_impl(
 // tracks' sky vectors from their params each call so it is reusable after a
 // parameter perturbation (the swap gradient path). Shared by
 // stft_swap_ll_kernel and stft_swap_ll_grad_kernel.
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 CUDA_DEVICE void stft_eval_block_swap(
     SourceT& src, STFTFresnel* fresnel, STFTDomain* stft,
     double* params_add, double* params_remove,
@@ -632,15 +703,10 @@ CUDA_DEVICE void stft_eval_block_swap(
     cmplx* d_h_add_val, cmplx* d_h_remove_val, cmplx* add_add_val,
     cmplx* remove_remove_val, cmplx* add_remove_val)
 {
-    cmplx tdi_val_add[3];
-    double amp_add[3];
-    double phase_add[3];
     cmplx fresnel_val_add[3];
-    cmplx tdi_val_remove[3];
-    double amp_remove[3];
-    double phase_remove[3];
     cmplx fresnel_val_remove[3];
-    double f0_add[3], fdot0_add[3], f0_remove[3], fdot0_remove[3];
+    typename ColumnT::State col_add;
+    typename ColumnT::State col_remove;
     Vec k_add(0.0, 0.0, 0.0), u_add(0.0, 0.0, 0.0), v_add(0.0, 0.0, 0.0);
     Vec k_remove(0.0, 0.0, 0.0), u_remove(0.0, 0.0, 0.0), v_remove(0.0, 0.0, 0.0);
 
@@ -667,25 +733,21 @@ CUDA_DEVICE void stft_eval_block_swap(
     for (int time_i = THREAD_START_X; time_i < num_times; time_i += BLOCK_INCR_X)
     {
         double t_seg = t0 + time_i * dt;         // window start
-        double t_here = t_seg + t_anchor_shift;  // chirp/sampling anchor
-        src.get_tdi_Xf_single(&tdi_val_add[0], t_here, params_add, k_add, u_add, v_add,
-                              link_space_craft_rec, link_space_craft_em, bin_i);
-        src.get_tdi_Xf_single(&tdi_val_remove[0], t_here, params_remove, k_remove, u_remove, v_remove,
-                              link_space_craft_rec, link_space_craft_em, bin_i);
-
         // (f0, fdot0) from each track's own TDI phase (Doppler-corrected
         // when freq_from_tdi_phase; else astrophysical get_f/get_fdot).
-        stft_pixel_freq_fdot<SourceT>(
-            src, t_here, params_add, k_add, u_add, v_add,
-            link_space_craft_rec, link_space_craft_em, bin_i,
-            tdi_val_add, freq_from_tdi_phase, &f0_add[0], &fdot0_add[0]);
-        stft_pixel_freq_fdot<SourceT>(
-            src, t_here, params_remove, k_remove, u_remove, v_remove,
-            link_space_craft_rec, link_space_craft_em, bin_i,
-            tdi_val_remove, freq_from_tdi_phase, &f0_remove[0], &fdot0_remove[0]);
+        ColumnT::setup(col_add, src, fresnel, stft, params_add,
+                       k_add, u_add, v_add,
+                       link_space_craft_rec, link_space_craft_em, bin_i,
+                       t_seg, t_anchor_shift, window_factor,
+                       freq_from_tdi_phase);
+        ColumnT::setup(col_remove, src, fresnel, stft, params_remove,
+                       k_remove, u_remove, v_remove,
+                       link_space_craft_rec, link_space_craft_em, bin_i,
+                       t_seg, t_anchor_shift, window_factor,
+                       freq_from_tdi_phase);
 
-        int freq_j_add = stft->get_freq_index(f0_add[0]);
-        int freq_j_remove = stft->get_freq_index(f0_remove[0]);
+        int freq_j_add = col_add.carrier_j;
+        int freq_j_remove = col_remove.carrier_j;
         int freq_j_min = (freq_j_add < freq_j_remove) ? freq_j_add : freq_j_remove;
         int freq_j_max = (freq_j_add > freq_j_remove) ? freq_j_add : freq_j_remove;
 
@@ -697,16 +759,10 @@ CUDA_DEVICE void stft_eval_block_swap(
                 double freq_here = f_min + freq_j_here * df;
                 for (int j = 0; j < 3; j += 1)
                 {
-                    fresnel->get_amp_phase(&amp_add[j], &phase_add[j],
-                                           gcmplx::conj(tdi_val_add[j]));
-                    fresnel->get_amp_phase(&amp_remove[j], &phase_remove[j],
-                                           gcmplx::conj(tdi_val_remove[j]));
-                    fresnel_val_add[j] = 0.5 * fresnel->get_fourier_value(
-                        amp_add[j], phase_add[j], f0_add[j], fdot0_add[j],
-                        t_seg, freq_here, window_factor);
-                    fresnel_val_remove[j] = 0.5 * fresnel->get_fourier_value(
-                        amp_remove[j], phase_remove[j], f0_remove[j], fdot0_remove[j],
-                        t_seg, freq_here, window_factor);
+                    fresnel_val_add[j] = 0.5 * ColumnT::value(
+                        col_add, j, freq_j_here, freq_here);
+                    fresnel_val_remove[j] = 0.5 * ColumnT::value(
+                        col_remove, j, freq_j_here, freq_here);
                 }
                 stft->add_ip_swap_contrib(
                     d_h_add_tmp, d_h_remove_tmp, add_add_tmp, remove_remove_tmp,
@@ -741,7 +797,7 @@ CUDA_DEVICE void stft_eval_block_swap(
 #endif
 }
 
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 CUDA_KERNEL
 void stft_swap_ll_kernel(
     cmplx* d_h_add_out, cmplx* d_h_remove_out,
@@ -786,7 +842,7 @@ void stft_swap_ll_kernel(
         CUDA_SYNC_THREADS;
 
         cmplx d_h_add_val, d_h_remove_val, add_add_val, remove_remove_val, add_remove_val;
-        stft_eval_block_swap<SourceT>(
+        stft_eval_block_swap<SourceT, ColumnT>(
             src, fresnel, stft, params_add, params_remove,
             link_space_craft_rec, link_space_craft_em, bin_i,
             data_index, noise_index, n_side_bins, window_factor, freq_from_tdi_phase,
@@ -805,7 +861,7 @@ void stft_swap_ll_kernel(
     }
 }
 
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 inline void stft_swap_ll_impl(
     cmplx* d_h_add_out, cmplx* d_h_remove_out,
     cmplx* add_add_out, cmplx* remove_remove_out, cmplx* add_remove_out,
@@ -831,7 +887,7 @@ inline void stft_swap_ll_impl(
     gpuErrchk(cudaMemcpy(stft_gpu,       stft,       sizeof(STFTDomain), cudaMemcpyHostToDevice));
 
     dim3 grid((unsigned) num_bin, 1u, 1u);
-    stft_swap_ll_kernel<SourceT><<<grid, NUM_THREADS_HERE>>>(
+    stft_swap_ll_kernel<SourceT, ColumnT><<<grid, NUM_THREADS_HERE>>>(
         d_h_add_out, d_h_remove_out, add_add_out, remove_remove_out, add_remove_out,
         orbits_gpu, tdi_config_gpu, fresnel_gpu, stft_gpu,
         params_add_all, params_remove_all, data_index_all, noise_index_all,
@@ -839,7 +895,7 @@ inline void stft_swap_ll_impl(
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
-    stft_swap_ll_kernel<SourceT>(
+    stft_swap_ll_kernel<SourceT, ColumnT>(
         d_h_add_out, d_h_remove_out, add_add_out, remove_remove_out, add_remove_out,
         orbits, tdi_config, fresnel, stft,
         params_add_all, params_remove_all, data_index_all, noise_index_all,
@@ -868,7 +924,7 @@ inline void stft_swap_ll_impl(
 // identically 0 as in real-valued WDM). M upper-triangle flatten:
 //   m_idx(i,j) = i*4 - i*(i+1)/2 + j   for i <= j.
 // ===========================================================================
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 CUDA_KERNEL
 void stft_get_fstat_ll_kernel(
     double* N_re_out, double* N_im_out,   // (num_bin, 4)
@@ -941,7 +997,7 @@ void stft_get_fstat_ll_kernel(
             CUDA_SYNC_THREADS;
 
             cmplx d_h_val, h_h_val;
-            stft_eval_block_ll<SourceT>(
+            stft_eval_block_ll<SourceT, ColumnT>(
                 src, fresnel, stft, params_i,
                 link_space_craft_rec, link_space_craft_em, bin_i,
                 data_index, noise_index,
@@ -980,7 +1036,7 @@ void stft_get_fstat_ll_kernel(
                 CUDA_SYNC_THREADS;
 
                 cmplx d_h_add_val, d_h_remove_val, add_add_val, remove_remove_val, add_remove_val;
-                stft_eval_block_swap<SourceT>(
+                stft_eval_block_swap<SourceT, ColumnT>(
                     src, fresnel, stft, params_i, params_j,
                     link_space_craft_rec, link_space_craft_em, bin_i,
                     data_index, noise_index, n_side_bins, window_factor, freq_from_tdi_phase,
@@ -1000,7 +1056,7 @@ void stft_get_fstat_ll_kernel(
     }
 }
 
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 inline void stft_get_fstat_ll_impl(
     double* N_re_out, double* N_im_out,
     double* M_re_out, double* M_im_out,
@@ -1025,7 +1081,7 @@ inline void stft_get_fstat_ll_impl(
     gpuErrchk(cudaMemcpy(stft_gpu,       stft,       sizeof(STFTDomain), cudaMemcpyHostToDevice));
 
     dim3 grid((unsigned) num_bin, 1u, 1u);
-    stft_get_fstat_ll_kernel<SourceT><<<grid, NUM_THREADS_HERE>>>(
+    stft_get_fstat_ll_kernel<SourceT, ColumnT><<<grid, NUM_THREADS_HERE>>>(
         N_re_out, N_im_out, M_re_out, M_im_out,
         orbits_gpu, tdi_config_gpu, fresnel_gpu, stft_gpu,
         params_all, data_index_all, noise_index_all,
@@ -1033,7 +1089,7 @@ inline void stft_get_fstat_ll_impl(
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
-    stft_get_fstat_ll_kernel<SourceT>(
+    stft_get_fstat_ll_kernel<SourceT, ColumnT>(
         N_re_out, N_im_out, M_re_out, M_im_out,
         orbits, tdi_config, fresnel, stft,
         params_all, data_index_all, noise_index_all,
@@ -1052,7 +1108,7 @@ inline void stft_get_fstat_ll_impl(
 // self-term is never needed. grad_out layout: grad_out[bin*nparams + k].
 // (Mirrors the FD/signal-het central-difference gradients.)
 // ===========================================================================
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 CUDA_KERNEL
 void stft_get_ll_grad_kernel(
     double* grad_out,
@@ -1104,7 +1160,7 @@ void stft_get_ll_grad_kernel(
             if (tid == 0) params[kk] = saved + eps_k;
             CUDA_SYNC_THREADS;
             cmplx d_h_p, h_h_p;
-            stft_eval_block_ll<SourceT>(
+            stft_eval_block_ll<SourceT, ColumnT>(
                 src, fresnel, stft, params,
                 link_space_craft_rec, link_space_craft_em, bin_i,
                 data_index, noise_index, n_side_bins, window_factor, freq_from_tdi_phase,
@@ -1114,7 +1170,7 @@ void stft_get_ll_grad_kernel(
             if (tid == 0) params[kk] = saved - eps_k;
             CUDA_SYNC_THREADS;
             cmplx d_h_m, h_h_m;
-            stft_eval_block_ll<SourceT>(
+            stft_eval_block_ll<SourceT, ColumnT>(
                 src, fresnel, stft, params,
                 link_space_craft_rec, link_space_craft_em, bin_i,
                 data_index, noise_index, n_side_bins, window_factor, freq_from_tdi_phase,
@@ -1130,7 +1186,7 @@ void stft_get_ll_grad_kernel(
     }
 }
 
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 inline void stft_get_ll_grad_impl(
     double* grad_out,
     Orbits* orbits, TDIConfig* tdi_config,
@@ -1155,14 +1211,14 @@ inline void stft_get_ll_grad_impl(
     gpuErrchk(cudaMemcpy(stft_gpu,       stft,       sizeof(STFTDomain), cudaMemcpyHostToDevice));
 
     dim3 grid((unsigned) num_bin, 1u, 1u);
-    stft_get_ll_grad_kernel<SourceT><<<grid, NUM_THREADS_HERE>>>(
+    stft_get_ll_grad_kernel<SourceT, ColumnT><<<grid, NUM_THREADS_HERE>>>(
         grad_out, orbits_gpu, tdi_config_gpu, fresnel_gpu, stft_gpu,
         params_all, data_index_all, noise_index_all, param_eps,
         num_bin, nparams, T, t_ref, n_side_bins, window_factor, freq_from_tdi_phase);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
-    stft_get_ll_grad_kernel<SourceT>(
+    stft_get_ll_grad_kernel<SourceT, ColumnT>(
         grad_out, orbits, tdi_config, fresnel, stft,
         params_all, data_index_all, noise_index_all, param_eps,
         num_bin, nparams, T, t_ref, n_side_bins, window_factor, freq_from_tdi_phase);
@@ -1180,7 +1236,7 @@ inline void stft_get_ll_grad_impl(
 // S is re-evaluated each perturbation via stft_eval_block_swap so the forward
 // model is byte-identical to swap_ll. Layout: grad[bin*nparams + k].
 // ===========================================================================
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 CUDA_KERNEL
 void stft_swap_ll_grad_kernel(
     double* grad_add_out, double* grad_remove_out,
@@ -1239,7 +1295,7 @@ void stft_swap_ll_grad_kernel(
             if (tid == 0) params_add[kk] = saved + eps_k;
             CUDA_SYNC_THREADS;
             cmplx dha_p, dhr_p, aa_p, rr_p, ar_p;
-            stft_eval_block_swap<SourceT>(
+            stft_eval_block_swap<SourceT, ColumnT>(
                 src, fresnel, stft, params_add, params_remove,
                 link_space_craft_rec, link_space_craft_em, bin_i,
                 data_index, noise_index, n_side_bins, window_factor, freq_from_tdi_phase,
@@ -1251,7 +1307,7 @@ void stft_swap_ll_grad_kernel(
             if (tid == 0) params_add[kk] = saved - eps_k;
             CUDA_SYNC_THREADS;
             cmplx dha_m, dhr_m, aa_m, rr_m, ar_m;
-            stft_eval_block_swap<SourceT>(
+            stft_eval_block_swap<SourceT, ColumnT>(
                 src, fresnel, stft, params_add, params_remove,
                 link_space_craft_rec, link_space_craft_em, bin_i,
                 data_index, noise_index, n_side_bins, window_factor, freq_from_tdi_phase,
@@ -1282,7 +1338,7 @@ void stft_swap_ll_grad_kernel(
             if (tid == 0) params_remove[kk] = saved + eps_k;
             CUDA_SYNC_THREADS;
             cmplx dha_p, dhr_p, aa_p, rr_p, ar_p;
-            stft_eval_block_swap<SourceT>(
+            stft_eval_block_swap<SourceT, ColumnT>(
                 src, fresnel, stft, params_add, params_remove,
                 link_space_craft_rec, link_space_craft_em, bin_i,
                 data_index, noise_index, n_side_bins, window_factor, freq_from_tdi_phase,
@@ -1294,7 +1350,7 @@ void stft_swap_ll_grad_kernel(
             if (tid == 0) params_remove[kk] = saved - eps_k;
             CUDA_SYNC_THREADS;
             cmplx dha_m, dhr_m, aa_m, rr_m, ar_m;
-            stft_eval_block_swap<SourceT>(
+            stft_eval_block_swap<SourceT, ColumnT>(
                 src, fresnel, stft, params_add, params_remove,
                 link_space_craft_rec, link_space_craft_em, bin_i,
                 data_index, noise_index, n_side_bins, window_factor, freq_from_tdi_phase,
@@ -1312,7 +1368,7 @@ void stft_swap_ll_grad_kernel(
     }
 }
 
-template <class SourceT>
+template <class SourceT, class ColumnT = FresnelColumn<SourceT>>
 inline void stft_swap_ll_grad_impl(
     double* grad_add_out, double* grad_remove_out,
     Orbits* orbits, TDIConfig* tdi_config,
@@ -1338,7 +1394,7 @@ inline void stft_swap_ll_grad_impl(
     gpuErrchk(cudaMemcpy(stft_gpu,       stft,       sizeof(STFTDomain), cudaMemcpyHostToDevice));
 
     dim3 grid((unsigned) num_bin, 1u, 1u);
-    stft_swap_ll_grad_kernel<SourceT><<<grid, NUM_THREADS_HERE>>>(
+    stft_swap_ll_grad_kernel<SourceT, ColumnT><<<grid, NUM_THREADS_HERE>>>(
         grad_add_out, grad_remove_out, orbits_gpu, tdi_config_gpu, fresnel_gpu, stft_gpu,
         params_add_all, params_remove_all, data_index_all, noise_index_all,
         param_eps_add, param_eps_remove,
@@ -1346,7 +1402,7 @@ inline void stft_swap_ll_grad_impl(
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
-    stft_swap_ll_grad_kernel<SourceT>(
+    stft_swap_ll_grad_kernel<SourceT, ColumnT>(
         grad_add_out, grad_remove_out, orbits, tdi_config, fresnel, stft,
         params_add_all, params_remove_all, data_index_all, noise_index_all,
         param_eps_add, param_eps_remove,
