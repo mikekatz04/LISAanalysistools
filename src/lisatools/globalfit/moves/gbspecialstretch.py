@@ -2636,13 +2636,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # (one per walker), and fancy-index ``+=`` collapses
                     # duplicate indices (arr[[1,1,1]] += 1 increments ONCE).
                     # The counters must add one per row, not one per band.
+                    # NOTE: guard empty inputs — numpy.bincount([]) returns
+                    # zeros, but CuPy's bincount computes max(x) first and
+                    # raises on a zero-size array (no accepted swaps in a
+                    # chunk is the common case).
                     _nb_tot = band_swaps_accepted.shape[0]
-                    band_swaps_accepted[:, i2] += cp.bincount(
-                        band_inds_now[sel, 0], minlength=_nb_tot
-                    ).astype(band_swaps_accepted.dtype)
-                    band_swaps_proposed[:, i2] += cp.bincount(
-                        band_inds_now[:, 0], minlength=_nb_tot
-                    ).astype(band_swaps_proposed.dtype)
+                    _acc_bands = band_inds_now[sel, 0]
+                    if _acc_bands.size:
+                        band_swaps_accepted[:, i2] += cp.bincount(
+                            _acc_bands, minlength=_nb_tot
+                        ).astype(band_swaps_accepted.dtype)
+                    if band_inds_now.size:
+                        band_swaps_proposed[:, i2] += cp.bincount(
+                            band_inds_now[:, 0], minlength=_nb_tot
+                        ).astype(band_swaps_proposed.dtype)
 
                     # Accepted cells trade their (temp, walker) labels in the
                     # sorter so the sources follow their templates.
