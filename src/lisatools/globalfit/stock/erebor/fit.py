@@ -133,8 +133,12 @@ class EreborGeneralSettings(GeneralSettings):
     )
     # GPU_BACKEND selects the lisatools/gbgpu backend wheel flavor
     # (cuda11x / cuda12x / cuda13x); only consulted when the GPU is active.
+    # Default "auto" -> resolve_compute detects the wheel matching this
+    # machine's cupy runtime at build time, so a non-propagated GPU_BACKEND
+    # env var can't silently pick the wrong flavor. An explicit value
+    # (env or kwarg) is always honored verbatim.
     gpu_backend: str = dataclasses.field(
-        default_factory=env_default("GPU_BACKEND", "cuda13x", str)
+        default_factory=env_default("GPU_BACKEND", "auto", str)
     )
     # GPUS: comma-separated device indices (e.g. "0" or "2,3"); unset ->
     # device 0 when the GPU is active.

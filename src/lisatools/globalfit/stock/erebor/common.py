@@ -25,6 +25,55 @@ def cupy_available() -> bool:
         return False
 
 
+# GPU_BACKEND values that mean "pick the CUDA wheel that matches this
+# machine" rather than a deliberate, authoritative choice. An explicit
+# ``"cudaXXx"`` is NEVER in this set, so a real ``force_backend`` is always
+# honored verbatim (see :func:`resolve_gpu_backend`).
+_AUTO_BACKEND_SENTINELS = frozenset({None, "", "auto", "cuda", "gpu"})
+
+
+def resolve_gpu_backend(gpu_backend: typing.Optional[str]) -> str:
+    """Resolve a GPU-backend request to a concrete installed wheel name.
+
+    An **explicit** request (``"cuda11x"`` / ``"cuda12x"`` / ``"cuda13x"``)
+    is returned unchanged — the caller's choice is authoritative and is
+    never overridden. A deliberate ``force_backend`` therefore always wins,
+    and a mismatched explicit choice fails loudly downstream instead of
+    being silently swapped underneath the user.
+
+    Only the *auto* sentinels (``None`` / ``""`` / ``"auto"`` / ``"cuda"`` /
+    ``"gpu"``) trigger detection: the CUDA wheel whose major version matches
+    the running cupy runtime, confirmed present via an ``importlib`` spec
+    probe (no CUDA context is created here — the device is pinned later).
+    """
+    if gpu_backend not in _AUTO_BACKEND_SENTINELS:
+        return gpu_backend
+
+    import importlib.util
+
+    order = ["cuda12x", "cuda11x", "cuda13x"]
+    try:
+        import cupy
+
+        major = cupy.cuda.runtime.runtimeGetVersion() // 1000  # 12040 -> 12
+        preferred = f"cuda{major}x"
+        order = [preferred] + [name for name in order if name != preferred]
+    except Exception:
+        pass
+    for name in order:
+        if importlib.util.find_spec(f"lisatools_backend_{name}") is not None:
+            return name
+    # No plugin wheel found under the expected names — defer to the
+    # lisatools registry alias, which loads the first CUDA backend that
+    # actually imports; hard-fall to cuda12x only if even that fails.
+    try:
+        import lisatools
+
+        return lisatools.get_backend("cuda").backend_base
+    except Exception:
+        return "cuda12x"
+
+
 def resolve_compute(
     use_gpu: typing.Optional[bool],
     gpu_backend: str,
@@ -37,12 +86,20 @@ def resolve_compute(
     files' ``GPU_BACKEND = "cpu"`` fallback. That equality
     (``force_backend == gpu_backend``) is what makes the engine clone the
     data processor's orbits into ``gpu_orbits`` on CPU-only runs.
+
+    On the GPU path ``gpu_backend`` is passed through
+    :func:`resolve_gpu_backend`: an explicit ``"cudaXXx"`` is honored
+    verbatim, while an auto sentinel (the default when ``GPU_BACKEND`` is
+    unset) is resolved to the CUDA wheel matching this machine — so a
+    non-propagated ``GPU_BACKEND`` env var can no longer silently select
+    the wrong plugin wheel.
     """
     if use_gpu is None:
         use_gpu = cupy_available()
     if not use_gpu:
         return None, "cpu"
-    return list(gpus) if gpus is not None else [0], gpu_backend
+    gpus = list(gpus) if gpus is not None else [0]
+    return gpus, resolve_gpu_backend(gpu_backend)
 
 
 def derive_wdm_grid(
