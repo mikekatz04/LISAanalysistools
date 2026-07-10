@@ -6,6 +6,7 @@ import os
 import time
 import logging
 import warnings
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from inspect import Attribute
 from types import ModuleType
@@ -365,6 +366,75 @@ from .gbbands import (
     return_x,
     unpack_special_index,
 )
+
+
+class _ProposeTimer:
+    """Accumulating wall-clock stage timer for one GB ``propose()`` call.
+
+    Localizes where a proposal spends its time (GPU-efficiency diagnosis):
+    stages are accumulated with :meth:`span` and reported as a single
+    sorted INFO line at the end of the propose. Overhead is a pair of
+    ``perf_counter`` calls per span, so it stays on by default.
+
+    On a CuPy backend the numbers are HOST wall time per stage. Because
+    kernel launches are asynchronous, device work is attributed to the
+    stage that *forces* the sync (the next ``_to_numpy`` / ``.item()`` /
+    explicit synchronize). Set ``GB_PROP_TIMING_SYNC=1`` to synchronize the
+    device at every span boundary instead — slightly slower overall, but
+    each stage then carries exactly its own kernel time. Either view is
+    diagnostic: if host time dominates in stages with tiny kernels
+    (``inmodel_repeats`` with few cells), the run is launch-overhead-bound
+    (too few sub-bands/cells per launch to keep the GPU busy).
+    """
+
+    __slots__ = ("stages", "counts", "_sync")
+
+    def __init__(self, sync_fn=None):
+        self.stages: dict = {}
+        self.counts: dict = {}
+        self._sync = sync_fn
+
+    @contextmanager
+    def span(self, name: str):
+        if self._sync is not None:
+            self._sync()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            if self._sync is not None:
+                self._sync()
+            self.stages[name] = self.stages.get(name, 0.0) + (
+                time.perf_counter() - t0
+            )
+
+    def count(self, name: str, n: int = 1) -> None:
+        self.counts[name] = self.counts.get(name, 0) + int(n)
+
+    def report(self, total: float) -> str:
+        # Top-level stages only: nested spans (buffer_build inside
+        # run_proposal, ...) are reported but excluded from the
+        # tracked/untracked accounting via the ``_TOP`` list.
+        top = (
+            "sorter_build", "friend_index", "resid_open_close", "ll_checks",
+            "run_proposal", "run_tempering", "write_back", "sorter_rebuild",
+            "band_info", "ll_inject_final", "ll_inject_drift", "mempool_free",
+        )
+        items = sorted(self.stages.items(), key=lambda kv: -kv[1])
+        tracked = sum(v for k, v in self.stages.items() if k in top)
+        parts = [f"{k}={v:.3f}s" for k, v in items]
+        cparts = [f"{k}={v}" for k, v in sorted(self.counts.items())]
+        return (
+            f"total={total:.3f}s tracked={tracked:.3f}s "
+            f"untracked={max(total - tracked, 0.0):.3f}s | "
+            + " ".join(parts)
+            + (" | " + " ".join(cparts) if cparts else "")
+        )
+
+
+def _tspan(tm, name: str):
+    """Timer span or no-op when the propose-level timer is absent."""
+    return tm.span(name) if tm is not None else nullcontext()
 
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
@@ -1710,9 +1780,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _dbg_change_start = _to_numpy(ll_change_log[0].sum(axis=-1)).copy()
 
             # Open this parity class in the parent residual.
-            self.remove_cold_chain_sources_from_residual(
-                model, band_sorter, units=units, remainder=remainder
-            )
+            with _tspan(getattr(self, "_prop_timer", None), "unit_open_close"):
+                self.remove_cold_chain_sources_from_residual(
+                    model, band_sorter, units=units, remainder=remainder
+                )
             self._debug_cold_chain_residual_loaded(model, remainder)
 
             apply_inds = not self.is_rj_prop
@@ -1734,9 +1805,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
 
             # Close: re-subtract with (possibly updated) cold-chain coords.
-            self.add_cold_chain_sources_to_residual(
-                model, band_sorter, units=units, remainder=remainder
-            )
+            with _tspan(getattr(self, "_prop_timer", None), "unit_open_close"):
+                self.add_cold_chain_sources_to_residual(
+                    model, band_sorter, units=units, remainder=remainder
+                )
 
             if self.debug:
                 _dbg_ll_unit_end = _to_numpy(
@@ -1754,21 +1826,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     float(np.abs(_direct - _tracked).max()),
                 )
 
-            if self.backend.uses_cupy:
-                self.xp.cuda.runtime.deviceSynchronize()
-            self.mempool.free_all_blocks()
+            with _tspan(getattr(self, "_prop_timer", None), "mempool_free"):
+                if self.backend.uses_cupy:
+                    self.xp.cuda.runtime.deviceSynchronize()
+                self.mempool.free_all_blocks()
 
         return ll_change_log, prop_counts, acc_counts
 
     def _run_band_unit(self, model, band_sorter, subset, band_temps,
                        ll_change_log, prop_counts, acc_counts):
         """Drive one parity unit's cells through the sub-band buffer."""
+        tm = getattr(self, "_prop_timer", None)
         scheduler = BandScheduler(
             subset.special_band_inds, self.num_band_preload, xp=self.xp
         )
-        buffer_obj = subset.get_buffer(
-            model.analysis_container_arr, scheduler.slot_specials.copy()
-        )
+        with _tspan(tm, "buffer_build"):
+            buffer_obj = subset.get_buffer(
+                model.analysis_container_arr, scheduler.slot_specials.copy()
+            )
+        if tm is not None:
+            tm.count("cells", int(scheduler.n_cells))
         self._debug_log_band_null(buffer_obj)
 
         # Pick eligibility lives on the MAIN sorter: only sources inside this
@@ -1779,9 +1856,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         round_i = 0
         while scheduler.any_active():
-            picked = self._pick_sources(band_sorter, buffer_obj, scheduler, eligible)
+            with _tspan(tm, "pick"):
+                picked = self._pick_sources(band_sorter, buffer_obj, scheduler, eligible)
             if picked is None:
                 break
+            if tm is not None:
+                # Batch size per repeat round: on GPU, small batches mean the
+                # 100-repeat in-model loop is kernel-launch-overhead-bound.
+                tm.count("picked_sources", int(len(picked["specials"])))
 
             if self.is_rj_prop:
                 # RJ before/after trace of the chosen cell: snapshots
@@ -1789,27 +1871,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # proposal was ACCEPTED (buffer changed). Chronologically
                 # BEFORE the in-model sequence figures.
                 rj_seq = self._debug_rj_select(buffer_obj, picked)
-                self._run_rj_step(
-                    model, band_sorter, buffer_obj, band_temps, picked,
-                    ll_change_log, prop_counts, acc_counts, round_i, scheduler,
-                )
+                with _tspan(tm, "rj_step"):
+                    self._run_rj_step(
+                        model, band_sorter, buffer_obj, band_temps, picked,
+                        ll_change_log, prop_counts, acc_counts, round_i, scheduler,
+                    )
                 self._debug_plot_rj_pair(buffer_obj, rj_seq)
 
-            self._run_in_model_repeats(
-                model, band_sorter, buffer_obj, band_temps, picked,
-                ll_change_log, prop_counts, acc_counts,
-            )
+            with _tspan(tm, "inmodel_repeats"):
+                self._run_in_model_repeats(
+                    model, band_sorter, buffer_obj, band_temps, picked,
+                    ll_change_log, prop_counts, acc_counts,
+                )
 
             scheduler.record_picks(picked["specials"])
             inds_fill, new_specials = scheduler.advance()
             if len(inds_fill):
-                subset.get_buffer(
-                    model.analysis_container_arr, new_specials,
-                    inds_fill=inds_fill, buffer_obj=buffer_obj,
-                )
+                with _tspan(tm, "buffer_build"):
+                    subset.get_buffer(
+                        model.analysis_container_arr, new_specials,
+                        inds_fill=inds_fill, buffer_obj=buffer_obj,
+                    )
                 self._debug_log_band_null(buffer_obj)
             round_i += 1
-            self.mempool.free_all_blocks()
+            # NOTE (GPU efficiency): freeing the WHOLE CuPy pool every pick
+            # round forces cudaFree/cudaMalloc churn for every allocation in
+            # the next round. The mempool_free stage time quantifies it.
+            with _tspan(tm, "mempool_free"):
+                self.mempool.free_all_blocks()
+        if tm is not None:
+            tm.count("pick_rounds", round_i)
 
         logger.info(
             f"{self.name}: band unit complete after {round_i} pick rounds "
@@ -2429,7 +2520,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         if self.time <= 0:
             return
-        ratios = (band_swaps_accepted / band_swaps_proposed).T
+        # Edge bands never receive swap proposals (interior-bands-only grid),
+        # so guard the 0/0: an unproposed (band, pair) adapts with ratio 0
+        # instead of propagating NaN into the ladder (at ntemps > 2 a NaN
+        # here corrupts band_temps for the edge bands' middle temps, which
+        # then NaN-poisons every acceptance in those bands).
+        _prop_safe = cp.maximum(band_swaps_proposed, 1)
+        ratios = (band_swaps_accepted / _prop_safe).T
         betas0 = band_temps.copy().T
         betas1 = betas0.copy()
 
@@ -2466,11 +2563,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # begins at band 1 (the interior bands).
             bool_remainder = 1 if start == 0 else 0
 
-            self.remove_cold_chain_sources_from_residual(
-                model,
-                band_sorter,
-                extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
-            )
+            with _tspan(getattr(self, "_prop_timer", None), "temper_open_close"):
+                self.remove_cold_chain_sources_from_residual(
+                    model,
+                    band_sorter,
+                    extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
+                )
 
             (band_index, temp_index, walkers_permuted, special_index,
              num_bands_unit) = self._tempering_swap_grid(band_sorter, start)
@@ -2488,13 +2586,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 special_inds_now = special_index.reshape(-1, self.ntemps)[start_ind:end_ind].copy()
                 special_inds_now_flat = special_inds_now.flatten()
 
-                buffer_obj = band_sorter.get_buffer(
-                    model.analysis_container_arr,
-                    special_inds_now_flat,
-                    use_template_arr=True,
-                )
+                with _tspan(getattr(self, "_prop_timer", None), "temper_buffer"):
+                    buffer_obj = band_sorter.get_buffer(
+                        model.analysis_container_arr,
+                        special_inds_now_flat,
+                        use_template_arr=True,
+                    )
 
-                current_lls = buffer_obj.band_likelihoods(source_only=True).reshape(-1, self.ntemps)
+                with _tspan(getattr(self, "_prop_timer", None), "temper_swap_score"):
+                    current_lls = buffer_obj.band_likelihoods(source_only=True).reshape(-1, self.ntemps)
                 current_lls_orig = current_lls.copy()
                 for t in range(self.ntemps)[1:][::-1]:
                     i1 = t
@@ -2510,9 +2610,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # TODO: add indices because not every likelihood is needed
                     # TODO: C-side vectorized temperature-pair swap kernel
                     # (batch the template exchange + per-cell likelihoods).
-                    new_lls = buffer_obj.band_likelihoods(source_only=True).reshape(-1, self.ntemps)[
-                        :, i2 : i1 + 1
-                    ]
+                    with _tspan(getattr(self, "_prop_timer", None), "temper_swap_score"):
+                        new_lls = buffer_obj.band_likelihoods(source_only=True).reshape(-1, self.ntemps)[
+                            :, i2 : i1 + 1
+                        ]
                     old_lls = current_lls[:, i2 : i1 + 1]
 
                     beta1 = band_temps[(band_inds_now[:, 0], i1)]
@@ -2531,8 +2632,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # Reverse the swaps that were not accepted.
                     buffer_obj.swap_template_slots(buffer_i1[~sel], buffer_i2[~sel])
 
-                    band_swaps_accepted[band_inds_now[:, 0], i2] += sel.astype(int)
-                    band_swaps_proposed[band_inds_now[:, 0], i2] += 1
+                    # bincount accumulation: several grid rows share a band
+                    # (one per walker), and fancy-index ``+=`` collapses
+                    # duplicate indices (arr[[1,1,1]] += 1 increments ONCE).
+                    # The counters must add one per row, not one per band.
+                    _nb_tot = band_swaps_accepted.shape[0]
+                    band_swaps_accepted[:, i2] += cp.bincount(
+                        band_inds_now[sel, 0], minlength=_nb_tot
+                    ).astype(band_swaps_accepted.dtype)
+                    band_swaps_proposed[:, i2] += cp.bincount(
+                        band_inds_now[:, 0], minlength=_nb_tot
+                    ).astype(band_swaps_proposed.dtype)
 
                     # Accepted cells trade their (temp, walker) labels in the
                     # sorter so the sources follow their templates.
@@ -2561,11 +2671,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 num_bands_run += num_bands_preload_temp
 
             # ll_before3 = model.analysis_container_arr.likelihood()
-            self.add_cold_chain_sources_to_residual(
-                model,
-                band_sorter,
-                extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
-            )
+            with _tspan(getattr(self, "_prop_timer", None), "temper_open_close"):
+                self.add_cold_chain_sources_to_residual(
+                    model,
+                    band_sorter,
+                    extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
+                )
             # ll_after3 = model.analysis_container_arr.likelihood()
 
         self._adapt_band_temps(band_temps, band_swaps_accepted, band_swaps_proposed)
@@ -2774,6 +2885,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         st_all = time.perf_counter()
 
+        # Per-propose stage timing (GPU-efficiency diagnosis): one INFO line
+        # per propose with the sorted stage breakdown. GB_PROP_TIMING_SYNC=1
+        # synchronizes the device at every span boundary so device work is
+        # attributed to the launching stage (see _ProposeTimer docstring).
+        _tm_sync = None
+        if self.backend.uses_cupy and os.environ.get("GB_PROP_TIMING_SYNC", "0") == "1":
+            _tm_sync = self.xp.cuda.runtime.deviceSynchronize
+        self._prop_timer = tm = _ProposeTimer(sync_fn=_tm_sync)
+
         if self.backend.uses_cupy:
             self.xp.cuda.runtime.setDevice(model.analysis_container_arr.gpus[0])
         # Run-time source of truth is the ACA that arrives with the model:
@@ -2853,42 +2973,47 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         else:
             keep_all_inds = True
 
-        band_sorter = BandSorter(
-            new_state.branches["gb"],
-            self.band_edges,
-            self.band_N_vals,
-            force_backend=self.force_backend,
-            transform_fn=self.parameter_transforms,
-            max_data_store_size=self.max_data_store_size,
-            gb=self.gb,
-            gb_wdm_comp=self.gb_wdm_comp,
-            gb_fd_comp=self.gb_fd_comp,
-            waveform_kwargs=self.waveform_kwargs,
-            rj_prop=rj_prop,
-            keep_all_inds=keep_all_inds,
-        )
+        with tm.span("sorter_build"):
+            band_sorter = BandSorter(
+                new_state.branches["gb"],
+                self.band_edges,
+                self.band_N_vals,
+                force_backend=self.force_backend,
+                transform_fn=self.parameter_transforms,
+                max_data_store_size=self.max_data_store_size,
+                gb=self.gb,
+                gb_wdm_comp=self.gb_wdm_comp,
+                gb_fd_comp=self.gb_fd_comp,
+                waveform_kwargs=self.waveform_kwargs,
+                rj_prop=rj_prop,
+                keep_all_inds=keep_all_inds,
+            )
 
         # Cold-chain friend table for the group-stretch half of the in-model
         # mix (rebuilt every proposal; cheap sort of the cold-chain f0s).
         self._infomat_wdm_logged = False
         if self.stretch_probability > 0.0:
-            band_sorter.build_friend_index(self.nfriends)
+            with tm.span("friend_index"):
+                band_sorter.build_friend_index(self.nfriends)
 
         do_synchronize = False
         device = self.xp.cuda.runtime.getDevice() if self.backend.uses_cupy else -1
 
         # get non-gb contribution
-        self.remove_cold_chain_sources_from_residual(model, band_sorter, apply_inds=True)
-        # Multi-GPU: snapshot every per-GPU shard of linear_data_arr inside its
-        # owning device context so the copies live on the right device. Restored
-        # in check_ll_inject() symmetrically.
-        self.reset_non_gb_linear_data_arr = self._snapshot_linear_data_arr(
-            model.analysis_container_arr
-        )
-        self.add_cold_chain_sources_to_residual(model, band_sorter, apply_inds=True)
-        ll_after = model.analysis_container_arr.likelihood(
-            source_only=False
-        )  #  - cp.sum(cp.log(cp.asarray(psd[:2])), axis=(0, 2))).get()
+        with tm.span("resid_open_close"):
+            self.remove_cold_chain_sources_from_residual(model, band_sorter, apply_inds=True)
+            # Multi-GPU: snapshot every per-GPU shard of linear_data_arr inside its
+            # owning device context so the copies live on the right device. Restored
+            # in check_ll_inject() symmetrically.
+            self.reset_non_gb_linear_data_arr = self._snapshot_linear_data_arr(
+                model.analysis_container_arr
+            )
+            self.add_cold_chain_sources_to_residual(model, band_sorter, apply_inds=True)
+        # NOTE: no explicit source_only here — follow the run-level container
+        # default so this baseline stays in the same convention as the
+        # incremental checks below and check_ll_inject().
+        with tm.span("ll_checks"):
+            ll_after = model.analysis_container_arr.likelihood()  #  - cp.sum(cp.log(cp.asarray(psd[:2])), axis=(0, 2))).get()
 
         # print(np.abs(new_state.log_like - ll_after).max())        
         # store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
@@ -2910,9 +3035,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
-        ll_change_log, prop_counts, acc_counts = self.run_proposal(
-            model, new_state, band_sorter, band_temps
-        )
+        with tm.span("run_proposal"):
+            ll_change_log, prop_counts, acc_counts = self.run_proposal(
+                model, new_state, band_sorter, band_temps
+            )
         et_prop = time.perf_counter()
         # Diagnostic: per-temperature alive source counts after run_proposal
         _alive_per_temp_post_prop = [
@@ -2925,7 +3051,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ll_change_sum = ll_change_log.sum(axis=-1)
         new_state.log_like[0] += _to_numpy(ll_change_sum[0])
 
-        ll_after = model.analysis_container_arr.likelihood()
+        with tm.span("ll_checks"):
+            ll_after = model.analysis_container_arr.likelihood()
         check = ll_after - new_state.log_like[0] - start_diffs
 
         logger.debug(f"After proposal check: {start_diffs=}, {check=}")
@@ -2941,7 +3068,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"{self.name}: incremental ll drift {drift:.3e} after "
                 "proposal; rebuilding log_like from the residual."
             )
-            new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
+            with tm.span("ll_inject_drift"):
+                new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
         # breakpoint()
 
         # TEMPERING
@@ -2963,15 +3091,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # and False
         ):
             st_temp = time.perf_counter()
-            ll_before1 = model.analysis_container_arr.likelihood()
+            with tm.span("ll_checks"):
+                ll_before1 = model.analysis_container_arr.likelihood()
 
-            ll_change_sum_temp, band_swaps_accepted, band_swaps_proposed = self.run_tempering(
-                model, new_state, band_sorter, band_temps
-            )
+            with tm.span("run_tempering"):
+                ll_change_sum_temp, band_swaps_accepted, band_swaps_proposed = self.run_tempering(
+                    model, new_state, band_sorter, band_temps
+                )
 
             new_state.log_like[0] += _to_numpy(ll_change_sum_temp[0])
 
-            ll_after = model.analysis_container_arr.likelihood()
+            with tm.span("ll_checks"):
+                ll_after = model.analysis_container_arr.likelihood()
             check = ll_after - new_state.log_like[0] - start_diffs
 
             logger.debug(f"After tempering check: {start_diffs=}, {check=}")
@@ -2981,9 +3112,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"{self.name}: incremental ll drift {drift:.3e} after "
                     "tempering; rebuilding log_like from the residual."
                 )
-                new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
+                with tm.span("ll_inject_drift"):
+                    new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
 
-            self.mempool.free_all_blocks()
+            with tm.span("mempool_free"):
+                self.mempool.free_all_blocks()
             et_temp = time.perf_counter()
             logger.info(f"Runtime of {self.name} tempering is {round(et_temp - st_temp,3)} seconds.")
             # Diagnostic: per-temperature alive source counts after run_tempering
@@ -2993,7 +3126,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # logger.info(f"Alive sources per temp after run_tempering: {_alive_per_temp_post_temp}")
 
         # TODO ask michael about this print("make sure this works for rj")
-        self._write_back_state(new_state, band_sorter)
+        with tm.span("write_back"):
+            self._write_back_state(new_state, band_sorter)
 
         et_all = time.perf_counter()
         logger.info(f"Full runtime of {self.name} is {round(et_all - st_all, 3)} seconds.")
@@ -3002,19 +3136,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         new_inds = cp.asarray(new_state.branches_inds["gb"])
         del band_sorter
-        self.mempool.free_all_blocks()
-        new_band_sorter = BandSorter(
-            new_state.branches["gb"],
-            self.band_edges,
-            self.band_N_vals,
-            force_backend=self.force_backend,
-            transform_fn=self.parameter_transforms,
-            max_data_store_size=self.max_data_store_size,
-            gb=self.gb,
-            gb_wdm_comp=self.gb_wdm_comp,
-            gb_fd_comp=self.gb_fd_comp,
-            waveform_kwargs=self.waveform_kwargs,
-        )
+        with tm.span("mempool_free"):
+            self.mempool.free_all_blocks()
+        with tm.span("sorter_rebuild"):
+            new_band_sorter = BandSorter(
+                new_state.branches["gb"],
+                self.band_edges,
+                self.band_N_vals,
+                force_backend=self.force_backend,
+                transform_fn=self.parameter_transforms,
+                max_data_store_size=self.max_data_store_size,
+                gb=self.gb,
+                gb_wdm_comp=self.gb_wdm_comp,
+                gb_fd_comp=self.gb_fd_comp,
+                waveform_kwargs=self.waveform_kwargs,
+            )
 
         # in-model inds will not change
         tmp_freqs_find_bands = cp.asarray(new_state.branches_coords["gb"][:, :, :, 1])
@@ -3036,12 +3172,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.temperature_control.swaps_accepted = np.zeros(ntemps - 1)
         self.temperature_control.swaps_proposed = np.zeros(ntemps - 1)
 
-        self.mempool.free_all_blocks()
+        with tm.span("mempool_free"):
+            self.mempool.free_all_blocks()
 
         self.time += 1
         # self.xp.cuda.runtime.deviceSynchronize()
 
-        band_info = new_band_sorter.get_band_info()
+        with tm.span("band_info"):
+            band_info = new_band_sorter.get_band_info()
 
         # prop/acc counts: row 0 = RJ, row 1 = in-model; band_info wants
         # (num_bands, ntemps) summed over walkers. The two families are
@@ -3066,8 +3204,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # new_state.log_like[:] = self.check_ll_inject(new_state)
 
-        self.mempool.free_all_blocks()
-        new_state.log_like[:] = self.check_ll_inject(model, new_band_sorter)
+        with tm.span("mempool_free"):
+            self.mempool.free_all_blocks()
+        with tm.span("ll_inject_final"):
+            new_state.log_like[:] = self.check_ll_inject(model, new_band_sorter)
 
         # Per-band progressive leaf caps advance AFTER the final residual
         # rebuild so the convergence metric sees the accepted state. Only
@@ -3084,6 +3224,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         num_active_sources = new_state.branches["gb"].inds.sum(axis=-1)[0]
         logger.info(f"Current number of active sources in cold chain is {num_active_sources}")
+
+        # Stage-timing breakdown for this propose (see _ProposeTimer).
+        logger.info(
+            "[GB_TIMING %s] %s",
+            self.name,
+            tm.report(time.perf_counter() - st_all),
+        )
 
         return new_state, accepted
 
