@@ -43,7 +43,9 @@ from lisatools.domains import FDSettings, WDMSettings
 
 from ....engine import GeneralSetup, Settings
 from ....recipe import (
+    MOJITO_REFERENCE_TIME,
     build_gb_moves,
+    gb_catalogue_to_sampling_basis,
     select_gb_injection_subset_by_snr,
     setup_state_for_injection,
     subtract_gb_neighbors_from_data,
@@ -140,7 +142,16 @@ class GBNoFgGBSettings(GBSettings):
     # -- shape / sampling --
     ndim: int = 8
     nleaves_min: int = 0
-    nleaves_max: int = dataclasses.field(default_factory=env_default("GB_NLEAVES_MAX", 100, int))
+    # None (default) -> resolved at build to 2x the number of catalogue
+    # sources inside the SAMPLED central band (the f0 prior span). The RJ
+    # move visits every leaf slot once per proposal (one pick round each:
+    # alive slots get death proposals, dead slots get births), so
+    # nleaves_max directly sets the proposal's sequential depth; sizing it
+    # to the local catalogue keeps RJ birth headroom without paying for a
+    # tail of ~always-empty slots. GB_NLEAVES_MAX / explicit kwarg wins.
+    nleaves_max: typing.Optional[int] = dataclasses.field(
+        default_factory=env_default("GB_NLEAVES_MAX", None, int)
+    )
     num_repeat_proposals: int = dataclasses.field(
         default_factory=env_default("GB_NUM_REPEAT_PROPOSALS", 100, int)
     )
@@ -453,6 +464,13 @@ class GBNoForegroundGlobalFit(EreborFit):
         if gb.oversample is None:
             gb.oversample = 2 if is_fd else 4
 
+        # Dynamic RJ leaf-slot budget (None -> 2x the catalogue sources in
+        # the sampled central band; see the nleaves_max field docstring).
+        if gb.nleaves_max is None:
+            gb.nleaves_max = self._resolve_nleaves_max(
+                gb, general_setup, is_fd, layer_df
+            )
+
         gb.tdi_setup = general_setup.tdi_chan
         gb.use_tdi2 = tdi_generation_info(general_setup.tdi_chan)[0] == 2
         gb.initialize_kwargs = dict(force_backend=general_setup.force_backend)
@@ -467,6 +485,53 @@ class GBNoForegroundGlobalFit(EreborFit):
         # underlying C++ orbits wrap is not picklable).
         gb.gb_wdm_comp = None
         return gb
+
+    def _resolve_nleaves_max(self, gb, general_setup, is_fd, layer_df) -> int:
+        """Dynamic RJ leaf budget: 2x the catalogue sources in the sampled band.
+
+        The RJ move visits EVERY leaf slot once per proposal (one pick round
+        each), so ``nleaves_max`` directly sets the proposal's sequential
+        depth — a fixed budget of 100 means 100 pick rounds x 100 in-model
+        repeats regardless of how many sources exist locally. 2x the local
+        catalogue count keeps birth headroom while dropping the tail of
+        ~always-empty slots. The counting window is the SAMPLED f0 span
+        (interior band edges: one layer inside each end of the GB band),
+        matching GBSetup's ``f0_lims`` on the WDM path. Fallback to the
+        legacy 100 on the FD basis (band edges are get_N-derived there,
+        unknown at this stage) or when no GB catalogue is available
+        (synthetic mode).
+        """
+        fallback = 100
+        catalogue = (getattr(general_setup, "catalogue", None) or {}).get("GB", {})
+        if is_fd or not catalogue:
+            logger.info(
+                "GB nleaves_max: dynamic sizing unavailable (%s); using the "
+                "legacy default %d.",
+                "FD basis" if is_fd else "no GB catalogue",
+                fallback,
+            )
+            return fallback
+
+        trim_duration = general_setup.data_t0 - MOJITO_REFERENCE_TIME
+        sampling = np.array(
+            [
+                gb_catalogue_to_sampling_basis(catalogue[k], trim_duration=trim_duration)
+                for k in sorted(catalogue.keys())
+            ]
+        )
+        if sampling.ndim == 3:
+            sampling = sampling.reshape(-1, sampling.shape[-1])
+        f0_hz = np.asarray(sampling[:, 1], dtype=float) * 1e-3
+        lo, hi = gb.start_freq + layer_df, gb.end_freq - layer_df
+        n_in = int(((f0_hz >= lo) & (f0_hz <= hi)).sum())
+        out = max(2 * n_in, 4)
+        logger.info(
+            "GB nleaves_max: %d catalogue sources in the sampled band "
+            "[%.6e, %.6e] Hz -> nleaves_max = 2 x %d = %d (RJ pick rounds "
+            "per proposal drop from the fixed 100 to %d).",
+            n_in, lo, hi, n_in, out, out,
+        )
+        return out
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
