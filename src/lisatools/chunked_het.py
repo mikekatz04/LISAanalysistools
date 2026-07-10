@@ -364,7 +364,25 @@ class WDMComputationsBase(LISAToolsParallelModule):
             # cupy arrays expose ``.device.id``; NumPy has no such attr -> None.
             dev = getattr(getattr(arr, "device", None), "id", None)
             gpus = None if dev is None else [int(dev)]
-            return AnalysisContainerArray(wdm_holder, gpus=gpus)
+            # Wrap COPIES of the domain/sens holders, NOT the caller's
+            # container: AnalysisContainerArray construction REBINDS its
+            # containers' arrays into the wrap's private linear buffers
+            # (reset_linear_data_arr / reset_linear_psd_arr set
+            # ``._arr`` / ``.invC`` to views of the new buffers). Wrapping a
+            # parent-ACA-owned container directly would silently disconnect
+            # that walker from its parent's ``linear_data_arr`` — the GB
+            # kernels keep writing the parent buffer while ``acs.likelihood``
+            # reads the stale private copy (walker-0 frozen-readout bug,
+            # 2026-07-10). Shallow copies share the ndarray content at
+            # repack time, so the numerics are identical; only the rebind
+            # side effect is confined to the throwaway wrap.
+            import copy as _copy
+
+            holder_ac = AnalysisContainer(
+                _copy.copy(wdm_holder.data),
+                _copy.copy(wdm_holder.sens_mat),
+            )
+            return AnalysisContainerArray(holder_ac, gpus=gpus)
         raise TypeError(
             f"wdm_holder must be an AnalysisContainerArray or AnalysisContainer; "
             f"got {type(wdm_holder).__name__}"
