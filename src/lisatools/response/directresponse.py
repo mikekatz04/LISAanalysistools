@@ -13,7 +13,7 @@ from scipy.interpolate import CubicSpline
 from lisatools.detector import EqualArmlengthOrbits, Orbits
 from lisatools.utils.utility import AET
 
-from .parallelbase import FastLISAResponseParallelModule
+from ..utils.parallelbase import LISAToolsParallelModule
 from .tdiconfig import TDIConfig
 
 # TODO: need to update constants setup
@@ -91,7 +91,7 @@ def warn_deprecated_frame_conversion(stacklevel: int = 3) -> None:
     )
 
 
-class pyResponseTDI(FastLISAResponseParallelModule):
+class pyResponseTDI(LISAToolsParallelModule):
     """Class container for fast LISA response function generation.
 
     The class computes the generic time-domain response function for LISA.
@@ -339,7 +339,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
     def supported_backends(cls):
         # Phase 3L.7l holdout (fixed 2026-06-05): switch from the stale
         # `fastlisaresponse_<flavor>` prefix to the canonical
-        # `_BACKEND_PREFIX` ("lisatools" via FastLISAResponseParallelModule).
+        # `_BACKEND_PREFIX` ("lisatools" via LISAToolsParallelModule).
         return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def _fill_A_E(self):
@@ -721,7 +721,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
             raise ValueError("tdi_chan must be 'XYZ', 'AET' or 'AE'.")
 
 
-class ResponseWrapper(FastLISAResponseParallelModule):
+class ResponseWrapper(LISAToolsParallelModule):
     """Wrapper to produce LISA TDI from TD waveforms
 
     This class takes a waveform generator that produces :math:`h_+ \pm ih_x`.
@@ -865,7 +865,7 @@ class ResponseWrapper(FastLISAResponseParallelModule):
     def supported_backends(cls):
         # Phase 3L.7l holdout (fixed 2026-06-05): switch from the stale
         # `fastlisaresponse_<flavor>` prefix to the canonical
-        # `_BACKEND_PREFIX` ("lisatools" via FastLISAResponseParallelModule).
+        # `_BACKEND_PREFIX` ("lisatools" via LISAToolsParallelModule).
         return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def __call__(self, *args, convert_to_ra_dec: Optional[bool] = None, **kwargs):

@@ -35,8 +35,8 @@ import numpy as np
 from .detector import EqualArmlengthOrbits, Orbits
 from .domains import WDMSettings
 from .response.directresponse import ecliptic_to_icrs, warn_deprecated_frame_conversion
-from .response.parallelbase import FastLISAResponseParallelModule
 from .response.tdiconfig import TDIConfig
+from .utils.parallelbase import LISAToolsParallelModule
 from .wdm_het import (
     USE_RECOMMENDED_TUKEY,
     compute_chunk_geometry,
@@ -47,7 +47,7 @@ from .wdm_het import (
 )
 
 
-class WDMComputationsBase(FastLISAResponseParallelModule):
+class WDMComputationsBase(LISAToolsParallelModule):
     """Source-class-agnostic WDM-domain chunked-heterodyne likelihood base.
 
     Routes through the chunked-heterodyne kernel set

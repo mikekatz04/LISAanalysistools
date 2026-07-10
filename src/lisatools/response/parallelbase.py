@@ -1,50 +1,27 @@
-"""LISA-response dispatch base.
+"""LISA-response dispatch base — backward-compatibility shim.
 
-Phase 3L.7k (2026-06-04): the prefix used to resolve `force_backend`
-strings changed from ``fastlisaresponse`` to ``lisatools`` because the
-fastlisaresponse_<flavor> backend family is being retired in favor of
-the LAT ``LISAToolsBackend`` (now carrying all of the LISA-response
-Wraps it used to hand off through fastlisaresponse). The class name
-stays the same for compat -- a future cleanup will rename it to
-``LISAToolsResponseParallelModule`` alongside the broader
-post-reorg Python sweep.
+The LISA-response classes now inherit :class:`LISAToolsParallelModule`
+directly (the single lisatools backend-dispatch base). This module keeps the
+historical names importable:
+
+* ``FastLISAResponseParallelModule`` — legacy name for the response base.
+* ``LISAToolsResponseParallelModule`` — post-Phase-3L.7k descriptive name.
+
+Both are now aliases of :class:`lisatools.utils.parallelbase.LISAToolsParallelModule`,
+which carries the ``"lisatools"`` backend prefix and the
+``GPU_RECOMMENDED_WITH_JAX`` helper. Existing consumers (including GB / SOBBH
+subclasses that override ``_BACKEND_PREFIX``) keep working unchanged; new code
+should inherit ``LISAToolsParallelModule`` directly.
 """
 
-from gpubackendtools import ParallelModuleBase
+from ..utils.parallelbase import LISAToolsParallelModule
 
+# Backward-compatible aliases (same class object).
+FastLISAResponseParallelModule = LISAToolsParallelModule
+LISAToolsResponseParallelModule = LISAToolsParallelModule
 
-class FastLISAResponseParallelModule(ParallelModuleBase):
-    # Phase 3L.7k (2026-06-04): class-level override that lets GB / SOBBH
-    # subclasses re-prefix to ``gbgpu`` or ``bbhx`` without rewriting
-    # __init__. The default ``lisatools`` covers FDSpline / TDSpline /
-    # generic-response consumers; GBTDIonTheFly / GBFDTDIonTheFly /
-    # SOBBHTDIonTheFly etc. override it to their package's own prefix.
-    _BACKEND_PREFIX = "lisatools"
-
-    def __init__(self, force_backend=None):
-        if isinstance(force_backend, str) and not force_backend.startswith(
-            self._BACKEND_PREFIX + "_"
-        ):
-            force_backend = (self._BACKEND_PREFIX, force_backend)
-        super().__init__(force_backend)
-
-    @staticmethod
-    def GPU_RECOMMENDED_WITH_JAX() -> list[str]:
-        """Same as GPU_RECOMMENDED() but with the JAX backend appended.
-
-        The JAX backend is a host-side pure-Python path (no compiled
-        wheel needed); we list it after the GPU options so the default
-        "first available" pick stays GPU when both are present.
-
-        Returns bare platform tags (``cuda13x`` / ``cpu`` / ...); the
-        consuming :meth:`supported_backends` prepends the
-        ``lisatools_`` namespace to match the names registered in
-        ``Globals().backends_manager``.
-        """
-        return ["cuda13x", "cuda12x", "cuda11x", "cpu", "jax"]
-
-
-# Convenience alias matching the post-Phase-3L.7k naming. Existing
-# consumers keep using `FastLISAResponseParallelModule`; new code can
-# use the more descriptive form.
-LISAToolsResponseParallelModule = FastLISAResponseParallelModule
+__all__ = [
+    "LISAToolsParallelModule",
+    "FastLISAResponseParallelModule",
+    "LISAToolsResponseParallelModule",
+]

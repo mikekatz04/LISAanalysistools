@@ -3,7 +3,9 @@
 Absorbed from ``lisa-on-gpu`` / ``fastlisaresponse`` at Phase 3 of the
 sprint reorg. Public symbols:
 
-- :class:`FastLISAResponseParallelModule` — backend-dispatch base
+- :class:`LISAToolsParallelModule` — backend-dispatch base (response
+  classes inherit this directly; ``FastLISAResponseParallelModule`` /
+  ``LISAToolsResponseParallelModule`` are backward-compat aliases of it)
 - :class:`TDIConfig`                       — TDI generation config
 - :class:`Response` / :class:`ResponseWrapper` / :func:`pyResponseTDI`
   — direct (frequency-domain) response (was ``fastlisaresponse.response``)
@@ -21,13 +23,19 @@ on first import so users of ``lisatools.response`` do not need to know.
 # directly. The previous force-registration ``import fastlisaresponse``
 # block was removed at Phase 3L.7l.
 
-from .parallelbase import FastLISAResponseParallelModule
+from .parallelbase import (
+    FastLISAResponseParallelModule,
+    LISAToolsParallelModule,
+    LISAToolsResponseParallelModule,
+)
 from .tdiconfig import TDIConfig
 from .directresponse import ecliptic_to_icrs, pyResponseTDI, ResponseWrapper
 from . import tdionfly
 
 __all__ = [
+    "LISAToolsParallelModule",
     "FastLISAResponseParallelModule",
+    "LISAToolsResponseParallelModule",
     "TDIConfig",
     "ecliptic_to_icrs",
     "pyResponseTDI",

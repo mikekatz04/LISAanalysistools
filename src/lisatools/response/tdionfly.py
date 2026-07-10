@@ -23,7 +23,7 @@ from lisatools.detector import EqualArmlengthOrbits, Orbits
 from lisatools.utils.utility import AET
 from gpubackendtools import wrapper
             
-from .parallelbase import FastLISAResponseParallelModule
+from ..utils.parallelbase import LISAToolsParallelModule
 from .tdiconfig import TDIConfig
 
 # TODO: need to update constants setup
@@ -50,7 +50,7 @@ class CubicSpline:
     """Alias to cubic spline cython class."""
     pass
 
-class TDIonTheFly(FastLISAResponseParallelModule):
+class TDIonTheFly(LISAToolsParallelModule):
     """Class container for LISA TDI on the fly.
 
     This class is also GPU-accelerated, which is very helpful for Bayesian inference
@@ -299,7 +299,7 @@ class TDTDIonTheFly(TDIonTheFly):
         )
     
 
-class TDIOutput(FastLISAResponseParallelModule):
+class TDIOutput(LISAToolsParallelModule):
     def __init__(self, x, tdi_amp, tdi_phase, phase_ref, fill_splines=True, **kwargs):
         
         self.x = x
@@ -581,7 +581,7 @@ class FDTDIonTheFly(TDIonTheFly):
         )
     
 
-class GBFDTDIonTheFly(FastLISAResponseParallelModule):
+class GBFDTDIonTheFly(LISAToolsParallelModule):
     # Phase 3L.7k: needs gbgpu_<flavor> backend (carries GBTDIonTheFlyWrap).
     _BACKEND_PREFIX = "gbgpu"
     """Heterodyned frequency-domain GB TDI on the fly.

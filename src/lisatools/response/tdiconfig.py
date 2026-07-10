@@ -13,10 +13,10 @@ from scipy.interpolate import CubicSpline
 from lisatools.detector import EqualArmlengthOrbits, Orbits
 from lisatools.utils.utility import AET
 
-from .parallelbase import FastLISAResponseParallelModule
+from ..utils.parallelbase import LISAToolsParallelModule
 
 
-class TDIConfig(FastLISAResponseParallelModule):
+class TDIConfig(LISAToolsParallelModule):
     """
 
     Args:
@@ -36,7 +36,7 @@ class TDIConfig(FastLISAResponseParallelModule):
     @classmethod
     def supported_backends(cls):
         # Phase 3L.7l holdout (fixed 2026-06-05): use `_BACKEND_PREFIX`
-        # ("lisatools" via FastLISAResponseParallelModule).
+        # ("lisatools" via LISAToolsParallelModule).
         return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
 
     def __init__(self, tdi: str | List[dict], force_backend: Optional[str] = None):
