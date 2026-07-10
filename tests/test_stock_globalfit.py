@@ -102,6 +102,16 @@ class KnobTest(unittest.TestCase):
             self.assertEqual(fit.tobs_target, 3 * 86400.0)
             self.assertEqual(fit.nwalkers, 3)
 
+    def test_compute_backend_env_knobs(self):
+        with _EnvGuard(GPU_BACKEND="cuda12x", GPUS="2,3", USE_GPU="0"):
+            fit = erebor.get_stock("gb_no_fg")
+            self.assertEqual(fit.general.gpu_backend, "cuda12x")
+            self.assertEqual(fit.general.gpus, [2, 3])
+            self.assertIs(fit.general.use_gpu, False)
+            # USE_GPU=0 forces the CPU path regardless of the flavor knob
+            gs = fit.make_general_settings()
+            self.assertIsNone(gs.gpus)
+
     def test_construction_is_cheap(self):
         # No directories created, and a nonexistent data path is fine
         # (nothing touches the filesystem until build()).

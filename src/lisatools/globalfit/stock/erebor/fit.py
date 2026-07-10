@@ -34,6 +34,11 @@ from .common import (
 __all__ = ["EreborGeneralSettings", "EreborFit"]
 
 
+def _parse_gpu_list(raw: str) -> typing.List[int]:
+    """GPUS env parser: comma-separated device indices."""
+    return [int(x) for x in raw.split(",") if x.strip() != ""]
+
+
 @dataclasses.dataclass
 class EreborGeneralSettings(GeneralSettings):
     """Erebor-family general block: engine fields + shared Erebor knobs.
@@ -122,8 +127,20 @@ class EreborGeneralSettings(GeneralSettings):
     fixed_psd_params: typing.Optional[typing.List[float]] = None
 
     # --- compute backend (construction-time choice; sprint rule) ---
-    use_gpu: typing.Optional[bool] = None  # None -> auto-detect (cupy import)
-    gpu_backend: str = "cuda13x"
+    # USE_GPU=0 forces CPU even when cupy is present; unset -> auto-detect.
+    use_gpu: typing.Optional[bool] = dataclasses.field(
+        default_factory=env_default("USE_GPU", None, bool)
+    )
+    # GPU_BACKEND selects the lisatools/gbgpu backend wheel flavor
+    # (cuda11x / cuda12x / cuda13x); only consulted when the GPU is active.
+    gpu_backend: str = dataclasses.field(
+        default_factory=env_default("GPU_BACKEND", "cuda13x", str)
+    )
+    # GPUS: comma-separated device indices (e.g. "0" or "2,3"); unset ->
+    # device 0 when the GPU is active.
+    gpus: typing.Optional[typing.List[int]] = dataclasses.field(
+        default_factory=env_default("GPUS", None, _parse_gpu_list)
+    )
 
     @property
     def tdi_gen(self) -> int:
