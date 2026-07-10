@@ -23,6 +23,7 @@ from lisatools.response.directresponse import ResponseWrapper
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.sources.sobbh import SOBBHWaveform
 from lisatools.utils.constants import YRSID_SI
+from lisatools.utils.utility import get_array_module
 
 # Canonical EMRI response-wrapper machinery lives in the installed
 # ``lisatools.sources.emri`` package (2026-07-01 carve-out); re-exported here
@@ -128,7 +129,11 @@ class SOBBHWaveWrap:
     def __call__(self, *params, **kwargs):
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
-        arr = np.asarray(self.wave_gen(*params, **call_kwargs))
+        raw = self.wave_gen(*params, **call_kwargs)
+        # ResponseWrapper returns a list of per-channel TDI arrays on the
+        # response backend (cupy on GPU); stack on that backend, not host.
+        xp = get_array_module(raw[0] if isinstance(raw, (list, tuple)) else raw)
+        arr = xp.asarray(raw)
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
         return TDSignal(arr, self.td_settings).transform(

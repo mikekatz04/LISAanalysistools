@@ -20,6 +20,7 @@ from ...domains import TDSettings, TDSignal
 from ...response.directresponse import ResponseWrapper
 from ...response.tdiconfig import TDIConfig
 from ...utils.constants import YRSID_SI
+from ...utils.utility import get_array_module
 from ..utils import icrs_to_ecliptic
 
 # Shared inspiral / sum / mode-selector defaults (mirrors the settings files).
@@ -255,14 +256,19 @@ class EMRIWaveWrap:
     def __call__(self, *params, **kwargs):
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
-        arr = np.atleast_2d(np.asarray(self.wave_gen(*params, **call_kwargs)))
+        raw = self.wave_gen(*params, **call_kwargs)
+        # ResponseWrapper returns a list of per-channel TDI arrays on the
+        # response backend (cupy on GPU); stack on that backend rather than
+        # forcing host with np.asarray.
+        xp = get_array_module(raw[0] if isinstance(raw, (list, tuple)) else raw)
+        arr = xp.atleast_2d(xp.asarray(raw))
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
         if self.offset_int:
             arr = arr[:, self.offset_int :]
         N = self.td_settings.N
         if arr.shape[-1] < N:
-            arr = np.pad(arr, ((0, 0), (0, N - arr.shape[-1])))
+            arr = xp.pad(arr, ((0, 0), (0, N - arr.shape[-1])))
         elif arr.shape[-1] > N:
             arr = arr[:, :N]
         return TDSignal(arr, self.td_settings).transform(self.target_domain, window=self.td_window)
