@@ -715,9 +715,15 @@ class AnalysisContainer:
         # breakpoint()
         like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
 
-        if include_psd_info:
-            # add noise term if requested
-            like_out += self.likelihood(noise_only=True)
+        if include_psd_info and not self.likelihood_source_only:
+            # Add the noise normalization term. Skipped on source-only /
+            # fixed-PSD containers (``likelihood_source_only=True``): there the
+            # noise term is an overall constant that cancels in every
+            # Likelihood difference, so dropping it keeps the readout as the
+            # pure ``-1/2 <r|r>`` source Likelihood. ``source_only=False`` is
+            # explicit so the noise_only call never collides with the
+            # container-level source-only default.
+            like_out += self.likelihood(noise_only=True, source_only=False)
 
         return like_out
 
@@ -738,10 +744,23 @@ class AnalysisContainer:
             Likelihood value.
 
         """
+        source_only_explicit = source_only is not None
         if source_only is None:
             source_only = getattr(self, "likelihood_source_only", False)
         if noise_only and source_only:
-            raise ValueError("noise_only and source only cannot both be True.")
+            if source_only_explicit:
+                raise ValueError(
+                    "likelihood(noise_only=True, source_only=True) is "
+                    "contradictory: the noise-only and source-only terms are "
+                    "mutually exclusive."
+                )
+            raise ValueError(
+                "likelihood(noise_only=True) was called on a container built "
+                "with likelihood_source_only=True, so source_only defaulted to "
+                "True and collides with noise_only. Pass source_only=False "
+                "explicitly for the noise term, or don't request the noise "
+                "term on a source-only (fixed-PSD) container."
+            )
         elif noise_only:
             return noise_likelihood_term(self.sens_mat)
         elif source_only:
