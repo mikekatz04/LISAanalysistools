@@ -24,6 +24,7 @@ from lisatools.sensitivity import (
 )
 from lisatools.stochastic import FittedHyperbolicTangentGalacticForeground
 from lisatools.utils.constants import YRSID_SI
+from lisatools.utils.utility import get_array_module
 
 from .transforms import (
     make_emri_transform_container,
@@ -462,8 +463,9 @@ class AnnualAmplitudeEnvelope:
         self.phase0 = phase0
 
     def __call__(self, t_arr: np.ndarray) -> np.ndarray:
-        return 1.0 + self.amp * np.cos(
-            2.0 * np.pi * np.asarray(t_arr) / YRSID_SI + self.phase0
+        xp = get_array_module(t_arr)
+        return 1.0 + self.amp * xp.cos(
+            2.0 * np.pi * xp.asarray(t_arr) / YRSID_SI + self.phase0
         )
 
 
@@ -481,8 +483,9 @@ class AnnualCovarianceModulation:
         self.envelope = AnnualAmplitudeEnvelope(amp, phase0)
 
     def __call__(self, t_arr):
-        t_arr = np.asarray(t_arr)
-        base = np.array([
+        xp = get_array_module(t_arr)
+        t_arr = xp.asarray(t_arr)
+        base = xp.array([
             [ 1.0, -0.5, -0.5],
             [-0.5,  1.0, -0.5],
             [-0.5, -0.5,  1.0],
