@@ -230,6 +230,9 @@ class GBNoFgGeneralSettings(EreborGeneralSettings):
     fixed_psd_params: typing.Optional[typing.List[float]] = dataclasses.field(
         default_factory=lambda: [15e-12, 3e-15]
     )
+    # Fixed PSD (no psd branch) -> report source-only log L = -1/2 <r|r>
+    # (drop the constant -sum(log|detC|) noise normalization term).
+    likelihood_source_only: bool = True
     # data_mode="synthetic" injects these GB rows in-process instead of
     # loading the mojito galaxy: ``(num_sources, 9)`` in the GBGPU basis
     # ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``. None -> the

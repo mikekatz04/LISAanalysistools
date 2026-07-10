@@ -210,6 +210,9 @@ class FullYearGeneralSettings(EreborGeneralSettings):
     synthetic_t_start: float = 0.0
 
     # --- fixed sensitivity components (no psd / galfor branches) ---
+    # Fixed PSD (no psd branch) -> report source-only log L = -1/2 <r|r>
+    # (drop the constant -sum(log|detC|) noise normalization term).
+    likelihood_source_only: bool = True
     add_instrument_noise: bool = False
     noise_soms_d: float = 15e-12
     noise_sa_a: float = 3e-15

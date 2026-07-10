@@ -93,6 +93,18 @@ class AnalysisContainer:
             a class (the auto-instantiate path). Must be empty when
             ``sens_mat`` is already an instance.
 
+        likelihood_source_only: Container-level default for the ``source_only``
+            flag of the likelihood methods (:meth:`likelihood`,
+            :meth:`calculate_signal_likelihood`, ...). When ``True``, calls
+            that do not pass ``source_only`` explicitly return the
+            source-only Likelihood ``-1/2 <r|r>`` and leave out the noise
+            normalization term ``-sum(log|detC|)``. Only set this on runs
+            where the PSD is FIXED (no psd sampling branch) — with a fixed
+            PSD the noise term is an overall constant, so dropping it leaves
+            all likelihood *differences* unchanged while making the readout
+            directly interpretable as the residual inner product. An
+            explicit ``source_only=`` at a call site always wins.
+
         data_res_arr: Deprecated alias of ``data`` (kept for backward compatibility).
 
     """
@@ -103,6 +115,7 @@ class AnalysisContainer:
         sens_mat: Union[SensitivityMatrixBase, type, None] = None,
         signal_gen: Optional[SignalGenSpec] = None,
         sens_mat_kwargs: Optional[dict] = None,
+        likelihood_source_only: bool = False,
         *,
         data_res_arr: Union[DomainBase, DataResidualArray, None] = None,
     ) -> None:
@@ -142,6 +155,9 @@ class AnalysisContainer:
         # 3. signal generator (callable or dict)
         if signal_gen is not None:
             self.signal_gen = signal_gen
+
+        # 4. run-level likelihood convention (see class docstring).
+        self.likelihood_source_only = bool(likelihood_source_only)
 
     # ------------------------------------------------------------------
     # Data access (new + legacy)
@@ -706,12 +722,15 @@ class AnalysisContainer:
         return like_out
 
     def likelihood(
-        self, source_only: bool = False, noise_only: bool = False, **kwargs: dict
+        self, source_only: Optional[bool] = None, noise_only: bool = False, **kwargs: dict
     ) -> float | complex:
         """Return the likelihood of the current arangement.
 
         Args:
-            source_only: If ``True`` return the source-only Likelihood.
+            source_only: If ``True`` return the source-only Likelihood
+                (``-1/2 <r|r>``, no noise normalization term). ``None``
+                (default) falls back to the container-level
+                :attr:`likelihood_source_only` setting.
             noise_only: If ``True``, return the noise part of the Likelihood alone.
             **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
 
@@ -719,6 +738,8 @@ class AnalysisContainer:
             Likelihood value.
 
         """
+        if source_only is None:
+            source_only = getattr(self, "likelihood_source_only", False)
         if noise_only and source_only:
             raise ValueError("noise_only and source only cannot both be True.")
         elif noise_only:
@@ -736,7 +757,7 @@ class AnalysisContainer:
         self,
         calc: str,
         *args: Any,
-        source_only: bool = False,
+        source_only: Optional[bool] = None,
         waveform_kwargs: Optional[Union[dict, Mapping[str, dict]]] = None,
         transform_fn: Optional[TransformContainer] = None,
         signal_gen: Optional[SignalGenSpec] = None,
@@ -754,7 +775,8 @@ class AnalysisContainer:
                 exactly one positional argument: a ``dict`` mapping
                 ``model_name -> 1D/2D params``.
             source_only: If ``True`` return the source-only Likelihood
-                (leave out noise part).
+                (leave out noise part). ``None`` (default) falls back to the
+                container-level :attr:`likelihood_source_only` setting.
             waveform_kwargs: Keyword arguments forwarded to the generator(s).
                 In multi-model mode this can also be a
                 ``{model_name: dict}`` mapping.
@@ -772,6 +794,9 @@ class AnalysisContainer:
             Likelihood / inner-product / SNR value, or a structured dict
             (per_model_per_signal mode).
         """
+        if source_only is None:
+            source_only = getattr(self, "likelihood_source_only", False)
+
         # Temporarily swap in a per-call signal_gen if provided.
         prev_gen = self._signal_gen if hasattr(self, "_signal_gen") else None
         if signal_gen is not None:
@@ -875,7 +900,7 @@ class AnalysisContainer:
     def calculate_signal_likelihood(
         self,
         *args: Any,
-        source_only: bool = False,
+        source_only: Optional[bool] = None,
         waveform_kwargs: Optional[Union[dict, Mapping[str, dict]]] = None,
         per_model_per_signal: bool = False,
         **kwargs: dict,
@@ -888,6 +913,8 @@ class AnalysisContainer:
         argument, a ``dict`` of ``{model_name: 1D or 2D params}``.
         ``per_model_per_signal=True`` (multi-model) returns the un-summed
         per-source results instead of the combined-template scalar.
+        ``source_only=None`` falls back to the container-level
+        :attr:`likelihood_source_only` setting.
         """
 
         return self._calculate_signal_operation(

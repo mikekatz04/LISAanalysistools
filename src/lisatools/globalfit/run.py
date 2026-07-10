@@ -486,6 +486,17 @@ class GlobalFit:
             if callable(_gen):
                 signal_gen_map[name] = _gen
 
+        # Run-level likelihood convention (see GeneralSettings docstring).
+        # getattr for backward compatibility with pickled/legacy settings.
+        ll_source_only = bool(getattr(general_info, "likelihood_source_only", False))
+        if ll_source_only and "psd" in self.curr.engine_info.branch_names:
+            logger.warning(
+                "likelihood_source_only=True with a 'psd' sampling branch: the "
+                "noise term varies with the PSD parameters, so source-only "
+                "likelihoods are NOT valid for PSD acceptance. Disabling."
+            )
+            ll_source_only = False
+
         acs_tmp = []
         for w in range(self.nwalkers):
             data_res_arr = deepcopy(general_info.input_data_residual_array)
@@ -523,6 +534,7 @@ class GlobalFit:
                         deepcopy(data_res_arr),
                         deepcopy(sens_here),
                         signal_gen=dict(signal_gen_map) if signal_gen_map else None,
+                        likelihood_source_only=ll_source_only,
                     )
                 )
             )

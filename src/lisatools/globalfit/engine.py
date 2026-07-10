@@ -184,6 +184,15 @@ class GeneralSettings(Settings):
     ntemps: int | None = None
     window_type: str = "tukey"
     window_taper_duration: float | None = None
+    # Run-level likelihood convention: when True, every AnalysisContainer the
+    # engine builds defaults its likelihood methods to source_only=True
+    # (log L = -1/2 <r|r>, no -sum(log|detC|) noise normalization term). ONLY
+    # for runs with a FIXED PSD (no psd sampling branch): there the noise
+    # term is an overall constant, so likelihood differences / acceptances
+    # are unchanged while the readout becomes directly interpretable as the
+    # residual inner product. Runs that sample the PSD need the noise term
+    # and must keep this False.
+    likelihood_source_only: bool = False
     gpu_backend: str = "cuda12x"
     gpus: typing.List[int] | None = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] | None = None
