@@ -170,10 +170,16 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         num_repeats=emri_info.num_prop_repeats,
         transform_fn=emri_info.transform,
         priors=priors,
-        inner_moves=emri_info.inner_moves, 
+        inner_moves=emri_info.inner_moves,
         betas_all=betas_all,
         permute_every=25,
         pad_out_of_prior=True,
+        # Submit only every 5th repeat's cold-chain snapshot to the flow
+        # trainer: at ~0.3 acceptance, consecutive snapshots are mostly
+        # duplicates and the flow memorizes the walker-track filaments
+        # (acceptance -> 0 with -60..-150 MH factors). ~5 repeats is the
+        # walker decorrelation scale.
+        flow_buffer_thin=5,
         run_async=True,
         run_threaded=True,
         randomize_split=True,
@@ -459,18 +465,34 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 
     # The ProcessExecutor itself is built in setup_recipe (a live executor does
     # not survive the deepcopy inside CurrentInfoGlobalFit); its parameters are
-    # defined here. Ring buffer feeds num_repeats * nwalkers rows per leaf per
-    # step, so min_train_samples=1000 triggers the first fit after ~4 steps.
+    # defined here. With flow_buffer_thin=5 the move submits
+    # (num_repeats/5) * nwalkers = 120 semi-independent rows per leaf per step:
+    # min_train_samples=1500 triggers the first fit ~13 steps after submissions
+    # start and max_buffer_samples=2000 keeps a ~17-step history window.
+    # Anti-memorization guards (the trainer previously collapsed onto the
+    # correlated walker tracks, killing acceptance): val_split="temporal" holds
+    # out the NEWEST rows so early stopping measures fresh-point NLL (the MH
+    # factor), and train_noise jitters training rows by 0.1 per-dim std as
+    # KDE-style smoothing. epochs/patience sized for ~2k-row buffers.
     # Monitoring: the latest fit is checkpointed atomically to HDF5 (reload
     # later via ZukoFlow.load(save_path)) and each training round writes loss/
     # val-NLL plots plus a corner overlay of training samples vs flow draws.
     flow_artifacts_dir = os.path.join(general_set.artifacts_file_dir, "emri_flow")
     flow_move.executor_init_kwargs = dict(
         worker_device=f"cuda:{flow_train_gpu}",
-        epochs_per_round=700,
+        epochs_per_round=150,
         min_train_samples=1500,
         max_buffer_samples=2000,
-        fit_kwargs=dict(batch_size=1024, lr=1e-3, lr_annealing=True, optimizer="adamw", patience=100, validation_fraction=0.3),
+        fit_kwargs=dict(
+            batch_size=1024,
+            lr=1e-3,
+            lr_annealing=True,
+            optimizer="adamw",
+            patience=30,
+            validation_fraction=0.3,
+            val_split="temporal",
+            train_noise=0.01,
+        ),
         refit_transform_every=1,
         torch_num_threads=2,
         seed=general_set.random_seed,

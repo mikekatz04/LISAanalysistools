@@ -70,7 +70,15 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         Tmax: maximum temperature for the temperature control.
         betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
         permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
-        pad_out_of_prior: whether to pad proposed sources that are out of the prior bounds to avoid JIT compilation issues. If True, proposed sources that are out of the prior bounds will be replaced with the first in-prior point. 
+        pad_out_of_prior: whether to pad proposed sources that are out of the prior bounds to avoid JIT compilation issues. If True, proposed sources that are out of the prior bounds will be replaced with the first in-prior point.
+        flow_buffer_thin: keep only every ``flow_buffer_thin``-th repeat's cold-chain snapshot
+            (plus the final one) in the ring buffer submitted to the flow trainer. Appending
+            every repeat feeds the trainer runs of near-duplicate rows (at ~0.3 acceptance,
+            ~70% of consecutive snapshots are identical) — thin walker-track "worms" that a
+            flexible flow memorizes, collapsing its density onto sub-posterior-scale filaments
+            and killing the flow-move acceptance. Thinning to roughly the walker decorrelation
+            scale (~5 repeats) keeps the submitted rows semi-independent. 1 restores the old
+            append-every-repeat behaviour.
         **kwargs: additional keyword arguments for the Move class.
     """
 
@@ -90,6 +98,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         betas_all: np.ndarray = None,
         permute_every: int = 20,
         pad_out_of_prior: bool = False,
+        flow_buffer_thin: int = 5,
         **kwargs,
     ):
 
@@ -131,6 +140,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         
         self.permute_every = permute_every
         self.pad_out_of_prior = pad_out_of_prior
+        self.flow_buffer_thin = max(1, int(flow_buffer_thin))
         
         # make sure to propagate the periodic information to the inner moves if it is included in kwargs
         if 'periodic' in kwargs:
@@ -696,9 +706,17 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     self.branch_name
                 ][:, :, 0]
 
-                leaf_buffer.append(
-                    new_state.branches_coords[self.branch_name][0, :, leaf].copy()
-                )
+                # Thin the flow-trainer feed: only every flow_buffer_thin-th
+                # snapshot (and always the last) is kept, so the submitted
+                # rows are semi-independent instead of near-duplicate runs
+                # (see flow_buffer_thin in the class docstring).
+                if (
+                    (repeat + 1) % self.flow_buffer_thin == 0
+                    or repeat == self.num_repeats - 1
+                ):
+                    leaf_buffer.append(
+                        new_state.branches_coords[self.branch_name][0, :, leaf].copy()
+                    )
 
             # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
             ring_buffer[leaf] = np.array(leaf_buffer).reshape(-1, ndim)
