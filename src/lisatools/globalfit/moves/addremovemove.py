@@ -33,7 +33,7 @@ from tqdm import tqdm
 from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray
-from ...utils.utility import asnumpy
+from ...utils.utility import asnumpy, get_array_module
 from .globalfitmove import GlobalFitMove
 from .multigpumove import MultiGPUMoveBase
 
@@ -240,12 +240,31 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # TODO: we should probably move the prior in here even though
         # in general with current setup it should only be points in the prior
         # that make it here
-        data_index_np = asnumpy(data_index)
+        # Normalize to a 2D ``(n_sources, ndim)`` batch so the per-source loop
+        # below works whether the caller passed a single 1D ``(ndim,)`` source
+        # or a 2D batch. ``atleast_2d`` on a 1D vector yields ``(1, ndim)``
+        # (row), which is exactly one source -- NOT ndim sources.
+        coords_in = get_array_module(coords_in).atleast_2d(coords_in)
+        data_index_np = np.atleast_1d(asnumpy(data_index))
         ll = np.full_like(data_index_np, -1e300, dtype=float)
         source_only = kwargs.pop("source_only", False)
 
-        # batched generation: one waveform call for all sources (stft_tof)
-        all_templates = signal_gen(*coords_in.T, **self.waveform_gen_kwargs)
+        # TODO: VECTORIZATION. Every generator currently wired into this move
+        # is SINGLE-SOURCE: EMRI (FEW GenerateEMRIWaveform), SOBBH / MBH
+        # (the tdionfly + legacy ResponseWrapper wraps all build ONE combined
+        # template per call). The old batched form ``signal_gen(*coords_in.T)``
+        # passed each parameter as a length-n_sources VECTOR, which crashes the
+        # single-source FEW generator (and would silently sum candidates for
+        # the ``combine=True`` tdionfly wraps). So generate per-source in a
+        # plain loop for now. To vectorize later, branch on a per-generator
+        # capability flag (e.g. ``getattr(signal_gen, "vectorized_over_sources",
+        # False)``) and, when True, restore the single batched call — the
+        # ``WaveformBase.get_signals_for_residuals`` style already returns a
+        # per-source DomainBaseArray that ``all_templates[i]`` can index.
+        all_templates = [
+            signal_gen(*coords_in[i], **self.waveform_gen_kwargs)
+            for i in range(coords_in.shape[0])
+        ]
 
         for i in range(coords_in.shape[0]):
             template = all_templates[i]

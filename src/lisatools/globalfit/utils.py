@@ -28,7 +28,6 @@ class BasicResidualacsLikelihood:
     def __call__(self, *args, supps=None, **kwargs):
         ll_temp = self.acs.likelihood()
         overall_inds = supps["overal_inds"]
-        breakpoint()
         return ll_temp[overall_inds]
 
 
