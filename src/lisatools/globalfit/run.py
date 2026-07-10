@@ -894,13 +894,28 @@ class GlobalFit:
             truths_plot = {key: val for key, val in truths.items() if key not in exclude_from_plot}
             branches_plot = [name for name in branch_names if name not in exclude_from_plot]
 
-            plot_container = PlotContainer(
-                plots=["base", "tempering"],
-                branches=branches_plot,
-                parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
-                tempering_palette="icefire",
-                discard=0.3,
-                truths=truths_plot,
+            # Diagnostic plotting is opt-out via the general settings
+            # (MAKE_PLOTS / PLOT_ITERATIONS env knobs on the stock classes;
+            # getattr defaults keep non-stock settings working). Set
+            # make_diagnostic_plots=False to skip plots entirely, or bump
+            # plot_iterations to plot far less often.
+            _make_plots = getattr(
+                self.curr.general_info, "make_diagnostic_plots", True
+            )
+            _plot_iterations = int(
+                getattr(self.curr.general_info, "plot_iterations", 100) or 100
+            )
+            plot_container = (
+                PlotContainer(
+                    plots=["base", "tempering"],
+                    branches=branches_plot,
+                    parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
+                    tempering_palette="icefire",
+                    discard=0.3,
+                    truths=truths_plot,
+                )
+                if _make_plots
+                else None
             )
 
             # Wrap ``periodic`` as a ``PeriodicContainer`` with ``key_order``
@@ -933,7 +948,7 @@ class GlobalFit:
                 branch_names=branch_names,
                 # update_fn=update_fn,
                 plot_generator=plot_container,
-                plot_iterations=10,
+                plot_iterations=_plot_iterations,
                 # update_iterations=1,
                 # update_fn=recipe,  # stop_converge_mix,
                 # update_iterations=1,  # TODO: change this?

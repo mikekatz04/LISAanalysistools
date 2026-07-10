@@ -59,6 +59,15 @@ class EreborGeneralSettings(GeneralSettings):
     random_seed: int = 103209
     backup_iter: int = 5
     main_file_key: str = "testing"
+    # Diagnostic plotting during the run. MAKE_PLOTS=0 disables the eryn
+    # diagnostic plots entirely (fastest, and dodges plot-only crashes);
+    # PLOT_ITERATIONS sets how many sampler iterations between plot refreshes.
+    make_diagnostic_plots: bool = dataclasses.field(
+        default_factory=env_default("MAKE_PLOTS", True, bool)
+    )
+    plot_iterations: int = dataclasses.field(
+        default_factory=env_default("PLOT_ITERATIONS", 100, int)
+    )
     file_store_dir: str = dataclasses.field(
         default_factory=env_default("FILE_STORE_DIR", "./gf_output/")
     )
