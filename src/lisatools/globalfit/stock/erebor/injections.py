@@ -280,10 +280,13 @@ class SyntheticGBProcessingStep(BaseProcessingStep):
         use_tdi2: bool = True,
         oversample: int = 1,
         force_backend: str = "cpu",
+        orbits=None,
         verbose: bool = True,
         do_plots: bool = False,
     ):
         from gbgpu.gbgpu import GBGPU
+
+        from lisatools.detector import EqualArmlengthOrbits
 
         params = np.atleast_2d(injection_params).astype(np.float64)
         assert params.shape[1] == 9, (
@@ -300,7 +303,12 @@ class SyntheticGBProcessingStep(BaseProcessingStep):
         target_N = int(round(Tobs / dt))
         data_length = target_N // 2 + 1
 
-        gb = GBGPU(force_backend=force_backend)
+        # GBGPU requires an orbits object (it carries the phase-reference
+        # t0); default to the stock analytic orbits, consistent with the
+        # ecliptic lam/beta injection basis.
+        if orbits is None:
+            orbits = EqualArmlengthOrbits(force_backend=force_backend)
+        gb = GBGPU(force_backend=force_backend, orbits=orbits)
         # ``GBGPU.generate_global_template`` reads ``self.gpus`` directly,
         # which is only set elsewhere (e.g. in the move setup). For a
         # standalone injection we set it explicitly.
@@ -415,6 +423,30 @@ MBH_PHENTAX_BASE_PARAMS = np.array(
 def mbh_phentax_injection_full_basis(t_plunge: float) -> np.ndarray:
     """The stock MBH phentax injection row with ``t_plunge`` appended."""
     return np.concatenate([MBH_PHENTAX_BASE_PARAMS, [float(t_plunge)]])
+
+
+def sobbh_catalogue_to_waveform_basis(row) -> np.ndarray:
+    """Mojito SOBHB catalogue row -> 11-param waveform basis.
+
+    ICRS run frame: sky + polarization are read raw (RA in the lam slot,
+    Dec in the beta slot, psi ICRS); the orbits must be loaded with
+    ``frame='icrs'`` to match. ``phi0`` is the catalogue ``TrueAnomaly``.
+    """
+    return np.array(
+        [
+            row["PrimaryMassSSBFrame"],
+            row["SecondaryMassSSBFrame"],
+            row["PrimarySpinCompZ"],
+            row["SecondarySpinCompZ"],
+            row["LuminosityDistance"] / 1e3,  # Mpc -> Gpc
+            row["InclinationAngle"],
+            row["GW22FrequencySSBFrame"],
+            row["RightAscension"] % (2 * np.pi),
+            row["Declination"],
+            row["PolarisationAngle"] % np.pi,
+            row["TrueAnomaly"],
+        ]
+    )
 
 
 # ============================================================
@@ -778,12 +810,12 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         annual_phase0: float = 0.0,
         tdi_generation: int = 2,
     ):
-        # Source types are MBHB / EMRI / SOBHB; drop any class whose
-        # source_ids list is empty (mojito's L1DataLoader raises on
-        # missing IDs). Instrument noise + galactic foreground come from
-        # the synthetic generators, not from mojito.
+        # Drop any class whose source_ids list is empty (mojito's
+        # L1DataLoader raises on missing IDs). GB / VGB load the whole
+        # galaxy file (ids just gate inclusion). Instrument noise + galactic
+        # foreground come from the synthetic generators, not from mojito.
         source_types = [
-            t for t in ["MBHB", "EMRI", "SOBHB"] if source_ids.get(t)
+            t for t in ["GB", "VGB", "MBHB", "EMRI", "SOBHB"] if source_ids.get(t)
         ]
         if orbits_class is None:
             from lisatools.detector import L1Orbits

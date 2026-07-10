@@ -123,6 +123,11 @@ curr = fit.build()                     # heavy stage (data load), on command
 fit.run()                              # build -> GlobalFit -> run_global_fit
 ```
 
+Every variant's data pipeline swaps with one knob: `fit.general.data_mode`
+(`"mojito"` default everywhere; `"synthetic"` builds all streams in-process
+with no external data; all_sources also keeps legacy `"sangria"`). Env:
+`DATA_PROCESSOR=<mode>`. An explicit `data_processor_class` swap always wins.
+
 Architecture (building-block pyramid, `stock/base.py` + `stock/erebor/`):
 `StockGlobalFit` **inherits `CurrentInfoGlobalFit`** with the heavy
 `super().__init__` deferred to `.build()`; the per-branch knob layer is the

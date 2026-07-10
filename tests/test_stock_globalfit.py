@@ -251,5 +251,94 @@ class WaveformPathDefaultsTest(unittest.TestCase):
             self.assertEqual(fit.recipe.move_names(), ["emri_pe"])
 
 
+class DataProcessorSwapTest(unittest.TestCase):
+    """data_mode swaps the whole data pipeline in one assignment."""
+
+    def test_gb_no_fg_modes(self):
+        from lisatools.globalfit.preprocessing import L1ProcessingStep
+        from lisatools.globalfit.stock.erebor.injections import (
+            SyntheticGBProcessingStep,
+        )
+
+        gs = erebor.get_stock("gb_no_fg").make_general_settings()
+        self.assertIs(gs.data_processor_class, L1ProcessingStep)
+
+        fit = erebor.get_stock("gb_no_fg")
+        fit.general.data_mode = "synthetic"
+        gs = fit.make_general_settings()
+        self.assertIs(gs.data_processor_class, SyntheticGBProcessingStep)
+        self.assertEqual(gs.processor_init_kwargs["injection_params"].shape[1], 9)
+        # synthetic streams are exactly Nf*Nt samples -> no preprocess trims
+        self.assertIsNone(gs.preprocess_kwargs["trim_kwargs"])
+
+        with self.assertRaises(ValueError):
+            erebor.get_stock("gb_no_fg", data_mode="nope").make_general_settings()
+
+    def test_gb_no_fg_env_switch(self):
+        from lisatools.globalfit.stock.erebor.injections import (
+            SyntheticGBProcessingStep,
+        )
+
+        with _EnvGuard(DATA_PROCESSOR="synthetic"):
+            gs = erebor.get_stock("gb_no_fg").make_general_settings()
+        self.assertIs(gs.data_processor_class, SyntheticGBProcessingStep)
+
+    def test_gb_no_fg_explicit_class_wins(self):
+        from lisatools.globalfit.stock.erebor.injections import (
+            SyntheticGBProcessingStep,
+        )
+
+        fit = erebor.get_stock("gb_no_fg")  # data_mode stays "mojito"
+        fit.general.data_processor_class = SyntheticGBProcessingStep
+        fit.general.processor_init_kwargs = dict(
+            Tobs=fit.wdm_grid[3], dt=fit.general.dt, t_start=0.0
+        )
+        gs = fit.make_general_settings()
+        self.assertIs(gs.data_processor_class, SyntheticGBProcessingStep)
+
+    def test_all_sources_modes(self):
+        from lisatools.globalfit.preprocessing import SangriaProcessingStep
+        from lisatools.globalfit.stock.erebor.injections import (
+            L1ProcessingStepWithSyntheticNoise,
+            SyntheticCombinedProcessingStep,
+        )
+
+        gs = erebor.get_stock("all_sources").make_general_settings()
+        self.assertIs(gs.data_processor_class, L1ProcessingStepWithSyntheticNoise)
+        self.assertEqual(
+            sorted(gs.processor_init_kwargs["source_ids"]),
+            ["EMRI", "GB", "MBHB", "SOBHB"],
+        )
+
+        gs = erebor.get_stock("all_sources", data_mode="sangria").make_general_settings()
+        self.assertIs(gs.data_processor_class, SangriaProcessingStep)
+
+        fit = erebor.get_stock("all_sources", data_mode="synthetic")
+        fit.remove_branch("sobbh")
+        fit.pop_move("sobbh_pe")
+        gs = fit.make_general_settings()
+        self.assertIs(gs.data_processor_class, SyntheticCombinedProcessingStep)
+        spec_classes = [
+            cls.__name__ for cls, _ in gs.processor_init_kwargs["processor_specs"]
+        ]
+        self.assertIn("SyntheticGBProcessingStep", spec_classes)
+        self.assertIn("SyntheticEMRIProcessingStep", spec_classes)
+        self.assertNotIn("SyntheticSOBBHProcessingStep", spec_classes)
+
+    def test_full_year_modes(self):
+        from lisatools.globalfit.stock.erebor.injections import (
+            L1ProcessingStepWithSyntheticNoise,
+            SyntheticDataProcessor,
+        )
+
+        with _EnvGuard(EMRI_IDS="1", MBHB_IDS=None, SOBHB_IDS=None):
+            gs = erebor.get_stock("full_year_combined").make_general_settings()
+            self.assertIs(gs.data_processor_class, L1ProcessingStepWithSyntheticNoise)
+            gs = erebor.get_stock(
+                "full_year_combined", data_mode="synthetic"
+            ).make_general_settings()
+            self.assertIs(gs.data_processor_class, SyntheticDataProcessor)
+
+
 if __name__ == "__main__":
     unittest.main()

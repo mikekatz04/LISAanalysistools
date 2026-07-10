@@ -546,25 +546,10 @@ class FullYearCombinedGlobalFit(EreborFit):
             )
         cat = self._catalogue(general_setup, "SOBHB") if gs.data_mode == "mojito" else None
         if cat is not None:
-            # ICRS run frame: sky + polarization read raw (RA in the lam
-            # slot, Dec in the beta slot, psi ICRS); orbits loaded icrs.
+            from ..injections import sobbh_catalogue_to_waveform_basis
+
             full_basis = np.asarray(
-                [
-                    [
-                        cat[i]["PrimaryMassSSBFrame"],
-                        cat[i]["SecondaryMassSSBFrame"],
-                        cat[i]["PrimarySpinCompZ"],
-                        cat[i]["SecondarySpinCompZ"],
-                        cat[i]["LuminosityDistance"] / 1e3,  # Mpc -> Gpc
-                        cat[i]["InclinationAngle"],
-                        cat[i]["GW22FrequencySSBFrame"],
-                        cat[i]["RightAscension"] % (2 * np.pi),
-                        cat[i]["Declination"],
-                        cat[i]["PolarisationAngle"] % np.pi,
-                        cat[i]["TrueAnomaly"],
-                    ]
-                    for i in sorted(cat.keys())
-                ]
+                [sobbh_catalogue_to_waveform_basis(cat[i]) for i in sorted(cat.keys())]
             )
         else:
             full_basis = make_sobbh_injections(n)

@@ -1,12 +1,16 @@
-"""Stock variant ``all_sources``: every branch, Sangria data, smoke-scale grid.
+"""Stock variant ``all_sources``: every branch, mojito or synthetic data.
 
 The installed version of ``global_fit_input/global_fit_settings.py``: six
-branches (``gb``, ``psd``, ``galfor``, ``mbh``, ``emri``, ``sobbh``) on the
-Sangria training data with a fixed smoke-friendly WDM grid (Nf=720, Nt=2160,
-dt=5 s -> 90 d). Waveform paths are the file's legacy ones: MBH via
-``BBHWaveformFD`` + ``MBHSpecialMove``, EMRI/SOBBH via the cached legacy
-``ResponseWrapper`` wave wraps (the TDI-on-the-fly builders live in
-``..wrappers`` when a run wants to swap them in).
+branches (``gb``, ``psd``, ``galfor``, ``mbh``, ``emri``, ``sobbh``) on a
+fixed smoke-friendly WDM grid (Nf=720, Nt=2160, dt=5 s -> 90 d).
+``general.data_mode`` selects the data pipeline: ``"mojito"`` (default —
+GB galaxy + selected MBHB/EMRI/SOBHB from the L1 folder, plus synthetic
+instrument noise for the psd branch), ``"synthetic"`` (all streams built
+in-process, no external data), or ``"sangria"`` (the legacy LDC file).
+Waveform paths are the file's legacy ones: MBH via ``BBHWaveformFD`` +
+``MBHSpecialMove``, EMRI/SOBBH via the cached legacy ``ResponseWrapper``
+wave wraps (the TDI-on-the-fly builders live in ``..wrappers`` when a run
+wants to swap them in).
 
 Two latent bugs in the legacy file are fixed by construction: the
 ``data_processor=`` (vs ``data_processor_class=``) kwarg, and the
@@ -47,6 +51,7 @@ from ...base import (
     env_default,
     materialize_recipe,
 )
+from ..common import tdi_generation_info
 from ..emri import EMRISettings, EMRISetup
 from ..fit import EreborFit, EreborGeneralSettings
 from ..gb import GBSettings, GBSetup
@@ -103,7 +108,10 @@ class AllSourcesGBSettings(GBSettings):
     ndim: int = 8
     nleaves_min: int = 0
     nleaves_max: int = dataclasses.field(default_factory=env_default("GB_NLEAVES_MAX", 100, int))
-    t0: float = GB_T_REF
+    # Phase/frequency reference epoch. None -> resolved at build from the
+    # data mode (legacy constant for sangria, the stream start for
+    # synthetic).
+    t0: typing.Optional[float] = None
     oversample: int = 4
     extra_buffer: int = 5
     start_freq_ind: int = 0
@@ -174,8 +182,33 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     base_file_name: str = dataclasses.field(
         default_factory=env_default("BASE_FILE_NAME", "global_fit_smoke_test")
     )
-    # Synthetic-data start time (Sangria stream starts at 0).
+    # Data source: "mojito" (default) loads the GB galaxy + selected
+    # MBHB/EMRI/SOBHB sources from a mojito L1 folder (+ synthetic
+    # instrument noise for the psd branch); "synthetic" builds every
+    # present branch's stream in-process (no external data needed);
+    # "sangria" (legacy) loads the LDC training file.
+    data_mode: str = dataclasses.field(
+        default_factory=env_default("DATA_PROCESSOR", "mojito", str)
+    )
+    # Mojito-mode source selection per class (GB loads the whole galaxy
+    # file; the id list just gates inclusion). Filtered by the branches
+    # actually present on the fit.
+    mojito_source_ids: dict = dataclasses.field(
+        default_factory=lambda: {"GB": [0], "MBHB": [0], "EMRI": [1], "SOBHB": [0]}
+    )
+    # Mojito L1 signals are noiseless: add synthetic instrument noise so the
+    # psd branch has something to fit (the loaded GB galaxy itself plays the
+    # role of the foreground for the galfor branch).
+    add_instrument_noise: bool = True
+    noise_soms_d: float = 15e-12
+    noise_sa_a: float = 3e-15
+    noise_seed: int = 12345
+    # Synthetic-data start time (the Sangria stream starts at 0).
     t_start: float = 0.0
+    # data_mode="synthetic": GB rows in the GBGPU basis
+    # ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``; None -> the
+    # stock two-source table.
+    gb_injection_params: typing.Optional[typing.Any] = None
 
 
 class AllSourcesGlobalFit(EreborFit):
@@ -196,6 +229,15 @@ class AllSourcesGlobalFit(EreborFit):
         "emri": EMRISetup,
         "sobbh": SOBBHSetup,
     }
+
+    def adjust_general(self, gs: AllSourcesGeneralSettings) -> None:
+        # Mojito L1 data is sampled at dt = 2.5 s (the class defaults are the
+        # Sangria-legacy dt = 5 grid). When the user left the grid at its
+        # defaults, keep the 90-d span and ~1-h wavelets by doubling Nf.
+        if gs.data_mode == "mojito" and gs.dt == 5.0:
+            gs.dt = 2.5
+            if gs.nf == 720 and gs.nt == 2160:
+                gs.nf = 1440
 
     def default_branches(self) -> typing.Dict[str, Settings]:
         return {
@@ -227,19 +269,131 @@ class AllSourcesGlobalFit(EreborFit):
         )
 
     def set_default_processor(self, gs: AllSourcesGeneralSettings) -> None:
-        from lisatools.globalfit.preprocessing import SangriaProcessingStep
+        if gs.data_mode == "mojito":
+            from ..injections import L1ProcessingStepWithSyntheticNoise
 
-        gs.data_processor_class = SangriaProcessingStep
-        gs.processor_init_kwargs = dict(data_input_path=gs.ldc_source_file)
+            force_backend = gs.gpu_backend if gs.gpus is not None else "cpu"
+            branch_to_class = {
+                "gb": "GB", "mbh": "MBHB", "emri": "EMRI", "sobbh": "SOBHB"
+            }
+            source_ids = {
+                cls: list(gs.mojito_source_ids.get(cls, []))
+                for branch, cls in branch_to_class.items()
+                if branch in self._branch_names and gs.mojito_source_ids.get(cls)
+            }
+            if not source_ids:
+                raise ValueError(
+                    "all_sources data_mode='mojito' has no loadable classes "
+                    "(check mojito_source_ids vs the present branches)."
+                )
+            gs.data_processor_class = L1ProcessingStepWithSyntheticNoise
+            gs.processor_init_kwargs = dict(
+                L1_folder=gs.mojito_data_path,
+                source_ids=source_ids,
+                orbits_kwargs=dict(
+                    force_backend=force_backend, frame=gs.orbits_frame
+                ),
+                verbose=True,
+                do_plots=False,
+                Tobs=gs.Tobs,
+                add_instrument_noise=gs.add_instrument_noise,
+                noise_soms_d=gs.noise_soms_d,
+                noise_sa_a=gs.noise_sa_a,
+                noise_seed=gs.noise_seed,
+                tdi_generation=tdi_generation_info(gs.tdi_chan)[0],
+            )
+            return
+        if gs.data_mode == "sangria":
+            from lisatools.globalfit.preprocessing import SangriaProcessingStep
+
+            gs.data_processor_class = SangriaProcessingStep
+            gs.processor_init_kwargs = dict(data_input_path=gs.ldc_source_file)
+            return
+        if gs.data_mode == "synthetic":
+            # One in-process stream per PRESENT branch (gb / emri / sobbh),
+            # summed by SyntheticCombinedProcessingStep — no external data.
+            from ..injections import (
+                GB_INJECTION_PARAMS,
+                SyntheticCombinedProcessingStep,
+                SyntheticEMRIProcessingStep,
+                SyntheticGBProcessingStep,
+                SyntheticSOBBHProcessingStep,
+            )
+
+            use_tdi2 = tdi_generation_info(gs.tdi_chan)[0] == 2
+            specs = []
+            if "gb" in self._branch_names:
+                params = (
+                    gs.gb_injection_params
+                    if gs.gb_injection_params is not None
+                    else GB_INJECTION_PARAMS
+                )
+                specs.append(
+                    (
+                        SyntheticGBProcessingStep,
+                        dict(
+                            injection_params=np.atleast_2d(
+                                np.asarray(params, dtype=float)
+                            ),
+                            tdi_chan=gs.tdi_chan,
+                            use_tdi2=use_tdi2,
+                            force_backend="cpu",
+                        ),
+                    )
+                )
+            if "emri" in self._branch_names:
+                specs.append(
+                    (
+                        SyntheticEMRIProcessingStep,
+                        dict(
+                            injection_params_full_basis=INJECTION_PARAMS_FULL_BASIS,
+                            tdi_chan=gs.tdi_chan,
+                            force_backend="cpu",
+                        ),
+                    )
+                )
+            if "sobbh" in self._branch_names:
+                specs.append(
+                    (
+                        SyntheticSOBBHProcessingStep,
+                        dict(
+                            injection_params_full_basis=SOBBH_INJECTION_PARAMS_FULL_BASIS,
+                            tdi_chan=gs.tdi_chan,
+                            force_backend="cpu",
+                        ),
+                    )
+                )
+            if not specs:
+                raise ValueError(
+                    "all_sources data_mode='synthetic' has no injectable "
+                    "branches (gb/emri/sobbh all removed)."
+                )
+            gs.data_processor_class = SyntheticCombinedProcessingStep
+            gs.processor_init_kwargs = dict(
+                Tobs=gs.Tobs,
+                dt=gs.dt,
+                t_start=gs.t_start,
+                processor_specs=specs,
+                nchannels=gs.nchannels,
+            )
+            return
+        raise ValueError(
+            f"all_sources data_mode={gs.data_mode!r} not recognised; use "
+            "'mojito', 'synthetic', or 'sangria' (or swap "
+            "data_processor_class wholesale)."
+        )
 
     def default_preprocess_kwargs(self) -> dict:
+        if self.general.data_mode in ("mojito", "synthetic"):
+            # Both emit exactly Tobs = Nf*Nt*dt samples (the mojito loader
+            # trims at load via its Tobs kwarg); skip the engine's default
+            # highpass + edge-trim + Tobs trim.
+            return dict(
+                highpass_kwargs=None, trim_kwargs=None, Tobs=None, normalize=False
+            )
         # Sangria is a year-long stream: keep the engine's default
         # highpass + edge-trim + Tobs trim so the final data is exactly
-        # Nf*Nt samples (the window is built on the processed grid). A
-        # synthetic processor that already emits exactly Nf*Nt samples
-        # should instead set fit.general.preprocess_kwargs =
-        # dict(highpass_kwargs=None, trim_kwargs=None, Tobs=None,
-        # normalize=False).
+        # Nf*Nt samples (the window is built on the processed grid).
         return dict(normalize=False)
 
     # -- branch resolution --------------------------------------------------------
@@ -249,7 +403,22 @@ class AllSourcesGlobalFit(EreborFit):
         prep = getattr(self, f"_prepare_{name}", None)
         return prep(settings, general_setup) if prep is not None else settings
 
+    def _catalogue(self, general_setup: GeneralSetup, cls: str):
+        if self.general.data_mode != "mojito":
+            return None
+        cat = getattr(general_setup, "catalogue", None) or getattr(
+            general_setup.data_processor, "catalogue", {}
+        )
+        entry = cat.get(cls) if cat else None
+        return entry or None
+
     def _prepare_gb(self, gb: AllSourcesGBSettings, general_setup: GeneralSetup):
+        if gb.t0 is None:
+            gb.t0 = (
+                GB_T_REF
+                if self.general.data_mode != "synthetic"
+                else float(self.general.t_start)
+            )
         if not gb.fdot_lims:
             fdot_max_val = get_fdot(gb.f0_lims[-1], Mc=gb.m_chirp_lims[-1])
             gb.fdot_lims = [-fdot_max_val, fdot_max_val]
@@ -267,6 +436,18 @@ class AllSourcesGlobalFit(EreborFit):
         return gb
 
     def _prepare_mbh(self, mbh: AllSourcesMBHSettings, general_setup: GeneralSetup):
+        if mbh.injection is None:
+            cat = self._catalogue(general_setup, "MBHB")
+            if cat is not None:
+                from ....recipe import mbh_catalogue_to_sampling_basis
+
+                mbh.injection = np.stack(
+                    [
+                        mbh_catalogue_to_sampling_basis(cat[i])
+                        for i in sorted(cat.keys())
+                    ],
+                    axis=0,
+                )
         if mbh.initialize_kwargs is None:
             from lisatools.detector import EqualArmlengthOrbits
 
@@ -305,7 +486,11 @@ class AllSourcesGlobalFit(EreborFit):
         from eryn.moves import StretchMove
 
         force_backend = general_setup.force_backend
-        t_start = float(self.general.t_start)
+        t_start = (
+            float(general_setup.data_t0)
+            if self.general.data_mode == "mojito"
+            else float(self.general.t_start)
+        )
         if emri.initialize_kwargs is None:
             emri.initialize_kwargs = dict(
                 T=general_setup.Tobs / YRSID_SI,
@@ -324,7 +509,15 @@ class AllSourcesGlobalFit(EreborFit):
         if emri.waveform_kwargs is None:
             emri.waveform_kwargs = dict()
         if emri.injection is None:
-            emri.injection = emri_full_to_sampling(INJECTION_PARAMS_FULL_BASIS)
+            cat = self._catalogue(general_setup, "EMRI")
+            if cat is not None:
+                from lisatools.sources.emri import emri_catalogue_to_waveform_basis
+
+                full = emri_catalogue_to_waveform_basis(cat[sorted(cat.keys())[0]])
+            else:
+                full = INJECTION_PARAMS_FULL_BASIS
+            emri.injection = emri_full_to_sampling(full)
+            emri.fill_values = np.array([full[5], full[12]])
         if getattr(emri, "fill_values", None) is None:
             emri.fill_values = np.array(
                 [INJECTION_PARAMS_FULL_BASIS[5], INJECTION_PARAMS_FULL_BASIS[12]]
@@ -349,7 +542,11 @@ class AllSourcesGlobalFit(EreborFit):
         from eryn.moves import StretchMove
 
         force_backend = general_setup.force_backend
-        t_start = float(self.general.t_start)
+        t_start = (
+            float(general_setup.data_t0)
+            if self.general.data_mode == "mojito"
+            else float(self.general.t_start)
+        )
         if sobbh.initialize_kwargs is None:
             sobbh.initialize_kwargs = dict(
                 T=general_setup.Tobs / YRSID_SI,
@@ -368,7 +565,14 @@ class AllSourcesGlobalFit(EreborFit):
         if sobbh.waveform_kwargs is None:
             sobbh.waveform_kwargs = dict()
         if sobbh.injection is None:
-            sobbh.injection = sobbh_full_to_sampling(SOBBH_INJECTION_PARAMS_FULL_BASIS)
+            cat = self._catalogue(general_setup, "SOBHB")
+            if cat is not None:
+                from ..injections import sobbh_catalogue_to_waveform_basis
+
+                full = sobbh_catalogue_to_waveform_basis(cat[sorted(cat.keys())[0]])
+            else:
+                full = SOBBH_INJECTION_PARAMS_FULL_BASIS
+            sobbh.injection = sobbh_full_to_sampling(full)
         if getattr(sobbh, "fill_values", None) is None:
             sobbh.fill_values = np.array([])
         d = sobbh.delta_prior

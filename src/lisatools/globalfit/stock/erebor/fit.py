@@ -91,6 +91,18 @@ class EreborGeneralSettings(GeneralSettings):
     nchannels: int = 3
 
     # --- data source ---
+    # Which stock data processor the variant builds when the user has not
+    # swapped one in wholesale. Allowed values are variant-defined (every
+    # variant supports "synthetic"; gb_no_fg/full_year default "mojito",
+    # all_sources defaults "sangria"). One assignment (or
+    # DATA_PROCESSOR=<mode>) swaps the whole data pipeline; an explicit
+    # ``data_processor_class`` always wins over this knob.
+    data_mode: str = dataclasses.field(
+        default_factory=env_default("DATA_PROCESSOR", "mojito", str)
+    )
+    # Start time of the synthetic data stream (mojito/sangria modes pull the
+    # start from the data files).
+    synthetic_t_start: float = 0.0
     mojito_data_path: str = dataclasses.field(
         default_factory=env_default(
             "MOJITO_DATA_PATH",

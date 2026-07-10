@@ -145,7 +145,10 @@ class GBNoFgGBSettings(GBSettings):
         default_factory=env_default("GB_NUM_REPEAT_PROPOSALS", 100, int)
     )
     periodic: dict = dataclasses.field(default_factory=_default_gb_periodic)
-    t0: float = GB_MOJITO_T_REF
+    # Phase/frequency reference epoch. None -> resolved at build from the
+    # data mode: the mojito catalogue epoch in mojito mode, the synthetic
+    # stream start in synthetic mode.
+    t0: typing.Optional[float] = None
     extra_buffer: int = 5
     start_freq_ind: int = 0
     # ``oversample=None`` -> auto at build: 2 on FD (halves per-band N at
@@ -227,6 +230,11 @@ class GBNoFgGeneralSettings(EreborGeneralSettings):
     fixed_psd_params: typing.Optional[typing.List[float]] = dataclasses.field(
         default_factory=lambda: [15e-12, 3e-15]
     )
+    # data_mode="synthetic" injects these GB rows in-process instead of
+    # loading the mojito galaxy: ``(num_sources, 9)`` in the GBGPU basis
+    # ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``. None -> the
+    # stock two-source table (injections.GB_INJECTION_PARAMS).
+    gb_injection_params: typing.Optional[typing.Any] = None
 
 
 class GBNoForegroundGlobalFit(EreborFit):
@@ -334,6 +342,50 @@ class GBNoForegroundGlobalFit(EreborFit):
                 "the GB band).", gs.min_freq, gs.max_freq, L,
             )
 
+    def set_default_processor(self, gs: GBNoFgGeneralSettings) -> None:
+        if gs.data_mode == "mojito":
+            # Mojito L1 GB galaxy (populates catalogue["GB"] for the
+            # true-point start).
+            super().set_default_processor(gs)
+            return
+        if gs.data_mode == "synthetic":
+            # In-process GB injection — no external data needed. With no
+            # catalogue the true-point seeding in setup_recipe is a no-op
+            # and the sampler starts from prior draws / RJ births.
+            from ..injections import GB_INJECTION_PARAMS, SyntheticGBProcessingStep
+
+            params = (
+                gs.gb_injection_params
+                if gs.gb_injection_params is not None
+                else GB_INJECTION_PARAMS
+            )
+            gs.data_processor_class = SyntheticGBProcessingStep
+            gs.processor_init_kwargs = dict(
+                Tobs=self.wdm_grid[3],
+                dt=gs.dt,
+                t_start=gs.synthetic_t_start,
+                injection_params=np.atleast_2d(np.asarray(params, dtype=float)),
+                tdi_chan=gs.tdi_chan,
+                nchannels=gs.nchannels,
+                use_tdi2=tdi_generation_info(gs.tdi_chan)[0] == 2,
+                force_backend="cpu",
+            )
+            return
+        raise ValueError(
+            f"gb_no_fg data_mode={gs.data_mode!r} not recognised; use "
+            "'mojito' or 'synthetic' (or swap data_processor_class wholesale)."
+        )
+
+    def default_preprocess_kwargs(self) -> dict:
+        if self.general.data_mode == "synthetic":
+            # The synthetic stream covers exactly Tobs = Nf*Nt*dt; skip the
+            # engine's default highpass + edge-trim + Tobs trim so the WDM
+            # shape stays exact.
+            return dict(
+                highpass_kwargs=None, trim_kwargs=None, Tobs=None, normalize=False
+            )
+        return super().default_preprocess_kwargs()
+
     def make_domain_settings(self, gs, Nf, Nt, wavelet_duration, edge_crop):
         # GB_DOMAIN=fd switches the run basis to the frequency domain (same
         # band restriction); the object-level swap (fit.general.domain_settings
@@ -349,6 +401,15 @@ class GBNoForegroundGlobalFit(EreborFit):
         if name != "gb":
             return settings
         gb: GBNoFgGBSettings = settings
+        if gb.t0 is None:
+            # Mojito: catalogue params are referenced at the catalogue epoch
+            # (validated convention); synthetic: phases reference the stream
+            # start.
+            gb.t0 = (
+                GB_MOJITO_T_REF
+                if self.general.data_mode == "mojito"
+                else float(self.general.synthetic_t_start)
+            )
         if gb.mode not in ("pe", "search"):
             raise ValueError(f"GB mode must be 'pe' or 'search', got {gb.mode!r}.")
         if gb.start not in ("truth", "prior"):
