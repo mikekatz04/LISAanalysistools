@@ -16,7 +16,9 @@ Usage::
     from lisatools.globalfit.stock import erebor
 
     fit = erebor.gb_no_fg(nwalkers=4, file_base_name="my_run")
-    fit.gb.center_freq = 8.0e-3        # move the narrow GB band
+    fit.gb.min_freq = 9.8e-3           # direct GB band bounds (primary
+    fit.gb.max_freq = 10.4e-3          #   interface; snapped to WDM layers)
+    fit.gb.center_freq = 8.0e-3        # or: center/n_layers (secondary)
     fit.recipe.add_move(MoveSpec("rj_fstat_mcmc", branch="gb"), stage="gb_pe")
     fit.build()                        # heavy: loads + pours the data
     fit.run()                          # or hand it to run_global.py / GlobalFit
@@ -167,12 +169,34 @@ class GBNoFgGBSettings(GBSettings):
     oversample: typing.Optional[int] = None
 
     # -- narrow GB band, decoupled from the (wide) data band --
-    # Expressed in integer WDM-layer units around ``center_freq`` (the
-    # samplable interior layer CONTAINS center_freq; floor, not round).
-    center_freq: float = dataclasses.field(
-        default_factory=env_default("GB_CENTER_FREQ", 7.5e-3, float)
+    # PRIMARY interface: direct band bounds (Hz). The GB band becomes
+    # [min_freq, max_freq] snapped INWARD to WDM layer boundaries, with one
+    # sub-band separator on every layer boundary in between (>= 3 snapped
+    # layers required so an interior sampled span exists). Must lie inside
+    # the data band (general min_freq/max_freq). The defaults reproduce the
+    # legacy 3-layer band around 7.5 mHz on typical grids. On the WDM path
+    # the bounds resolve into equivalent canonical (center_freq, n_layers)
+    # at build so every downstream consumer (band edges, f0 prior,
+    # data-band clipping, dynamic nleaves_max, debug plots) stays
+    # consistent.
+    min_freq: float = dataclasses.field(
+        default_factory=env_default("GB_MIN_FREQ", 7.36e-3, float)
     )
-    n_layers: int = dataclasses.field(default_factory=env_default("GB_N_LAYERS", 3, int))
+    max_freq: float = dataclasses.field(
+        default_factory=env_default("GB_MAX_FREQ", 7.78e-3, float)
+    )
+    # SECONDARY interface: center + layer count, in integer WDM-layer units
+    # around ``center_freq`` (the samplable interior layer CONTAINS
+    # center_freq; floor, not round). Used only when EITHER field is set
+    # explicitly (kwarg or GB_CENTER_FREQ / GB_N_LAYERS env) — the unset one
+    # fills from the legacy defaults (7.5e-3 / 3) — and then it overrides
+    # min_freq/max_freq.
+    center_freq: typing.Optional[float] = dataclasses.field(
+        default_factory=env_default("GB_CENTER_FREQ", None, float)
+    )
+    n_layers: typing.Optional[int] = dataclasses.field(
+        default_factory=env_default("GB_N_LAYERS", None, int)
+    )
     # DATA_BAND_LAYERS (memory knob): clip the DATA band — and every
     # per-walker ACA slab — to +-N layers around the GB band. None = full band.
     data_band_layers: typing.Optional[int] = dataclasses.field(
@@ -328,12 +352,38 @@ class GBNoForegroundGlobalFit(EreborFit):
 
     # -- general resolution -----------------------------------------------------
 
+    @staticmethod
+    def _band_klohi(gb, layer_df: float) -> typing.Tuple[int, int]:
+        """Resolved (k_lo, k_hi) GB-band layer bounds (pure; no mutation).
+
+        PRIMARY mode: ``[gb.min_freq, gb.max_freq]`` snapped INWARD to layer
+        boundaries (``k_lo = ceil(min/layer_df)``, ``k_hi = floor(max/..)``);
+        band edges then land on every layer boundary in between. SECONDARY
+        mode (either ``center_freq`` or ``n_layers`` set explicitly):
+        ``n_layers`` layers around the layer CONTAINING ``center_freq``
+        (legacy behaviour; the unset field fills from 7.5e-3 / 3).
+        """
+        if gb.center_freq is not None or gb.n_layers is not None:
+            center = gb.center_freq if gb.center_freq is not None else 7.5e-3
+            n_layers = int(gb.n_layers) if gb.n_layers is not None else 3
+            k_center = int(math.floor(center / layer_df))
+            k_lo = k_center - n_layers // 2
+            return k_lo, k_lo + n_layers
+        k_lo = int(math.ceil(float(gb.min_freq) / layer_df))
+        k_hi = int(math.floor(float(gb.max_freq) / layer_df))
+        if k_hi - k_lo < 3:
+            raise ValueError(
+                f"GB band [{gb.min_freq:.6e}, {gb.max_freq:.6e}] Hz spans only "
+                f"{max(k_hi - k_lo, 0)} whole WDM layer(s) after snapping "
+                f"inward (layer_df={layer_df:.4e} Hz); need >= 3 layers so an "
+                "interior sampled span exists. Widen min_freq/max_freq."
+            )
+        return k_lo, k_hi
+
     def _gb_band(self, layer_df: float) -> typing.Tuple[float, float, int]:
         """(GB start_freq, end_freq, k_center) in integer WDM-layer units."""
-        gb = self.gb
-        k_center = int(math.floor(gb.center_freq / layer_df))
-        k_lo = k_center - gb.n_layers // 2
-        return k_lo * layer_df, (k_lo + gb.n_layers) * layer_df, k_center
+        k_lo, k_hi = self._band_klohi(self.gb, layer_df)
+        return k_lo * layer_df, k_hi * layer_df, (k_lo + k_hi) // 2
 
     def adjust_general(self, gs: GBNoFgGeneralSettings) -> None:
         # ACA frequency clipping (memory knob): narrow the DATA band to
@@ -342,15 +392,16 @@ class GBNoForegroundGlobalFit(EreborFit):
         if gb.data_band_layers is not None:
             layer_df = self.layer_df
             L = int(gb.data_band_layers)
-            min_needed = gb.n_layers // 2 + 5
-            assert L >= min_needed, (
-                f"data_band_layers={L} too narrow: need >= n_layers//2 + 5 = "
-                f"{min_needed} to cover the GB band + the 5-layer chunked-het "
-                "gating."
+            # Clip is measured from the BAND EDGES (works identically for the
+            # min/max and center/n_layers interfaces); >= 5 layers of margin
+            # are required for the 5-layer chunked-het gating.
+            assert L >= 5, (
+                f"data_band_layers={L} too narrow: need >= 5 layers beyond "
+                "the GB band edges to cover the chunked-het gating."
             )
-            _, _, k_center = self._gb_band(layer_df)
-            gs.min_freq = max(gs.min_freq, (k_center - L) * layer_df)
-            gs.max_freq = min(gs.max_freq, (k_center + 1 + L) * layer_df)
+            k_lo, k_hi = self._band_klohi(gb, layer_df)
+            gs.min_freq = max(gs.min_freq, (k_lo - L) * layer_df)
+            gs.max_freq = min(gs.max_freq, (k_hi + L) * layer_df)
             logger.info(
                 "ACA data band CLIPPED to [%.6e, %.6e] Hz (+-%d layers around "
                 "the GB band).", gs.min_freq, gs.max_freq, L,
@@ -440,24 +491,55 @@ class GBNoForegroundGlobalFit(EreborFit):
         # Narrow GB band (WDM) / widened band (FD band walker).
         is_fd = isinstance(domain_settings, FDSettings)
         layer_df = 1.0 / (2 * general_setup.domain_settings.Nf * gb.dt) if not is_fd else None
+        _center_mode = gb.center_freq is not None or gb.n_layers is not None
         if is_fd:
-            if gb.fd_bandwidth is None:
-                gb.start_freq = general_setup.min_freq
-                gb.end_freq = general_setup.max_freq
+            if _center_mode:
+                # SECONDARY interface on FD: legacy center +- fd_bandwidth/2
+                # (full data band when fd_bandwidth is None).
+                _center = gb.center_freq if gb.center_freq is not None else 7.5e-3
+                if gb.fd_bandwidth is None:
+                    gb.start_freq = general_setup.min_freq
+                    gb.end_freq = general_setup.max_freq
+                else:
+                    half_bw = 0.5 * float(gb.fd_bandwidth)
+                    gb.start_freq = max(general_setup.min_freq, _center - half_bw)
+                    gb.end_freq = min(general_setup.max_freq, _center + half_bw)
             else:
-                half_bw = 0.5 * float(gb.fd_bandwidth)
-                gb.start_freq = max(general_setup.min_freq, gb.center_freq - half_bw)
-                gb.end_freq = min(general_setup.max_freq, gb.center_freq + half_bw)
+                # PRIMARY interface on FD: the direct bounds, clamped to the
+                # data band (fd_bandwidth only applies to the center mode).
+                if gb.fd_bandwidth is not None:
+                    logger.warning(
+                        "FD basis: fd_bandwidth is ignored with direct "
+                        "min_freq/max_freq bounds (set center_freq to use it)."
+                    )
+                gb.start_freq = max(general_setup.min_freq, float(gb.min_freq))
+                gb.end_freq = min(general_setup.max_freq, float(gb.max_freq))
             logger.info(
-                "FD basis: GB band widened to [%.6e, %.6e] Hz for the FD band "
+                "FD basis: GB band set to [%.6e, %.6e] Hz for the FD band "
                 "walker.", gb.start_freq, gb.end_freq,
             )
         else:
-            gb.start_freq, gb.end_freq, _ = self._gb_band(layer_df)
+            k_lo, k_hi = self._band_klohi(gb, layer_df)
+            gb.start_freq, gb.end_freq = k_lo * layer_df, k_hi * layer_df
+            if (gb.start_freq < general_setup.min_freq - 1e-12
+                    or gb.end_freq > general_setup.max_freq + 1e-12):
+                raise ValueError(
+                    f"GB band [{gb.start_freq:.6e}, {gb.end_freq:.6e}] Hz "
+                    f"extends outside the data band "
+                    f"[{general_setup.min_freq:.6e}, {general_setup.max_freq:.6e}] Hz; "
+                    "adjust gb.min_freq/max_freq (or center_freq/n_layers), or "
+                    "widen the general band."
+                )
+            # Canonicalize BOTH interfaces on the resolved block so every
+            # downstream consumer (setup_recipe's k_center, debug plots,
+            # data-band clipping, nleaves sizing) reads consistent values.
+            gb.min_freq, gb.max_freq = gb.start_freq, gb.end_freq
+            gb.n_layers = k_hi - k_lo
+            gb.center_freq = ((k_lo + k_hi) // 2 + 0.5) * layer_df
             logger.info(
-                "GB band: [%.6e, %.6e] Hz (%d WDM layers @ ~%.3f mHz, "
-                "layer_df=%.4e Hz)", gb.start_freq, gb.end_freq, gb.n_layers,
-                gb.center_freq * 1e3, layer_df,
+                "GB band: [%.6e, %.6e] Hz (%d WDM layers, separators on every "
+                "layer boundary, layer_df=%.4e Hz)", gb.start_freq, gb.end_freq,
+                gb.n_layers, layer_df,
             )
 
         # FD basis at short Tobs: oversample=2 halves the per-band N.
