@@ -16,7 +16,7 @@ GW22FrequencySSBFrame, RA/Dec direct with icrs-frame orbits, kernel
 t_ref = REF.
 """
 import os, sys, gc, time, threading, resource
-os.environ.setdefault("OMP_NUM_THREADS", "8")
+os.environ.setdefault("OMP_NUM_THREADS", "1")  # MPI-only parallelism policy
 import numpy as np
 import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
 MEM_CAP_GB = float(os.environ.get("GB_MEM_CAP_GB", "8.2")); _IS_MAC = sys.platform == "darwin"

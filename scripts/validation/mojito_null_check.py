@@ -30,7 +30,7 @@ os.environ.setdefault(
 )
 os.environ.setdefault("NWALKERS", "1")
 os.environ.setdefault("NTEMPS", "1")
-os.environ.setdefault("OMP_NUM_THREADS", "8")
+os.environ.setdefault("OMP_NUM_THREADS", "1")  # MPI-only parallelism policy
 os.environ.setdefault("MAKE_PLOTS", "0")
 
 import numpy as np

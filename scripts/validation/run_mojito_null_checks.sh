@@ -70,7 +70,7 @@ if command -v brew >/dev/null 2>&1; then
   export PKG_CONFIG_PATH="$(brew --prefix lapack 2>/dev/null)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 fi
 export DATA_PROCESSOR=mojito MOJITO_DATA_PATH NWALKERS=1 NTEMPS=1 \
-       OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}" \
+       OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" \
        NULL_CHECK_MEM_GB="${NULL_CHECK_MEM_GB:-24}"
 
 # class dir -> the env var that selects its source ids for the stock variant

@@ -1,16 +1,30 @@
+import os
+
+# MPI-only parallelism (2026-07 policy): pin every threading backend to a
+# single thread unless the user overrides explicitly. OMP threading in the
+# C++ kernels has caused OOM kills on dev machines, and BLAS pools must be
+# set BEFORE numpy loads — hence this block precedes all other imports.
+# Parallelism comes from MPI ranks (and GPUs, when configured).
+for _v in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_v, "1")
+
 import importlib.util
 import sys
 import argparse
 
 import numpy as np
 from mpi4py import MPI
-import os
 import warnings
 from copy import deepcopy
 
 import ast
 import ctypes
-import sys
 
 
 def _pre_init_cuda() -> None:

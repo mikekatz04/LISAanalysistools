@@ -51,6 +51,14 @@ Common env knobs: `NWALKERS`, `NTEMPS`, `GF_NUM_ITER`, `DATA_PROCESSOR`
 (`mojito`/`synthetic`), `TOBS_TARGET`, `MAKE_PLOTS`, `GPUS`, `USE_GPU`,
 `GPU_BACKEND`.
 
+**Threading policy (2026-07): MPI-only — no OMP.** `run_global.py` pins
+`OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` /
+`VECLIB_MAXIMUM_THREADS` / `NUMEXPR_NUM_THREADS` to 1 before any import
+(OMP-threaded kernels have caused OOM kills on dev machines). Parallelism
+comes from MPI ranks and, when configured, GPUs. Set the env vars
+explicitly to override; python drivers that bypass `run_global.py` should
+pin them the same way before importing numpy/lisatools.
+
 ## Notes
 
 - `head_rank` is a retired legacy alias (old multi-stage pipeline); it
