@@ -275,6 +275,147 @@ class GBNoFgGeneralSettings(EreborGeneralSettings):
     gb_injection_params: typing.Optional[typing.Any] = None
 
 
+# ============================================================
+# Shared gb_no_fg-style GB branch setup (module-level so all_sources reuses it)
+# ============================================================
+
+
+def _band_klohi(gb, layer_df: float) -> typing.Tuple[int, int]:
+    """Resolved (k_lo, k_hi) GB-band layer bounds (pure; no mutation)."""
+    if gb.center_freq is not None or gb.n_layers is not None:
+        center = gb.center_freq if gb.center_freq is not None else 7.5e-3
+        n_layers = int(gb.n_layers) if gb.n_layers is not None else 3
+        k_center = int(math.floor(center / layer_df))
+        k_lo = k_center - n_layers // 2
+        return k_lo, k_lo + n_layers
+    k_lo = int(math.ceil(float(gb.min_freq) / layer_df))
+    k_hi = int(math.floor(float(gb.max_freq) / layer_df))
+    if k_hi - k_lo < 3:
+        raise ValueError(
+            f"GB band [{gb.min_freq:.6e}, {gb.max_freq:.6e}] Hz spans only "
+            f"{max(k_hi - k_lo, 0)} whole WDM layer(s) after snapping "
+            f"inward (layer_df={layer_df:.4e} Hz); need >= 3 layers so an "
+            "interior sampled span exists. Widen min_freq/max_freq."
+        )
+    return k_lo, k_hi
+
+
+def _resolve_nleaves_max(gb, general_setup, is_fd, layer_df) -> int:
+    """Dynamic RJ leaf budget: 2x the catalogue sources in the sampled band."""
+    fallback = 100
+    catalogue = (getattr(general_setup, "catalogue", None) or {}).get("GB", {})
+    if is_fd or not catalogue:
+        logger.info(
+            "GB nleaves_max: dynamic sizing unavailable (%s); using the "
+            "legacy default %d.",
+            "FD basis" if is_fd else "no GB catalogue",
+            fallback,
+        )
+        return fallback
+
+    trim_duration = general_setup.data_t0 - MOJITO_REFERENCE_TIME
+    sampling = np.array(
+        [
+            gb_catalogue_to_sampling_basis(catalogue[k], trim_duration=trim_duration)
+            for k in sorted(catalogue.keys())
+        ]
+    )
+    if sampling.ndim == 3:
+        sampling = sampling.reshape(-1, sampling.shape[-1])
+    f0_hz = np.asarray(sampling[:, 1], dtype=float) * 1e-3
+    lo, hi = gb.start_freq + layer_df, gb.end_freq - layer_df
+    n_in = int(((f0_hz >= lo) & (f0_hz <= hi)).sum())
+    out = max(2 * n_in, 4)
+    logger.info(
+        "GB nleaves_max: %d catalogue sources in the sampled band "
+        "[%.6e, %.6e] Hz -> nleaves_max = 2 x %d = %d.",
+        n_in, lo, hi, n_in, out,
+    )
+    return out
+
+
+def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
+    """gb_no_fg-style GB branch prep: band derivation + f0/fdot/nleaves/betas.
+
+    Shared by ``gb_no_fg`` and ``all_sources`` so their GB setup is identical
+    (all_sources just passes a GB band down to 0.1 mHz via the branch's
+    ``min_freq``/``max_freq``).
+    """
+    if gb.t0 is None:
+        gb.t0 = GB_MOJITO_T_REF if data_mode == "mojito" else float(synthetic_t_start)
+    if gb.mode not in ("pe", "search"):
+        raise ValueError(f"GB mode must be 'pe' or 'search', got {gb.mode!r}.")
+    if gb.start not in ("truth", "prior"):
+        raise ValueError(f"GB start must be 'truth' or 'prior', got {gb.start!r}.")
+    domain_settings = general_setup.domain_settings
+
+    if not gb.f0_lims:
+        gb.f0_lims = [general_setup.min_freq, general_setup.max_freq]
+    if not gb.fdot_lims:
+        fdot_max_val = get_fdot(gb.f0_lims[-1], Mc=gb.m_chirp_lims[-1])
+        gb.fdot_lims = [-fdot_max_val, fdot_max_val]
+
+    is_fd = isinstance(domain_settings, FDSettings)
+    layer_df = 1.0 / (2 * general_setup.domain_settings.Nf * gb.dt) if not is_fd else None
+    _center_mode = gb.center_freq is not None or gb.n_layers is not None
+    if is_fd:
+        if _center_mode:
+            _center = gb.center_freq if gb.center_freq is not None else 7.5e-3
+            if gb.fd_bandwidth is None:
+                gb.start_freq = general_setup.min_freq
+                gb.end_freq = general_setup.max_freq
+            else:
+                half_bw = 0.5 * float(gb.fd_bandwidth)
+                gb.start_freq = max(general_setup.min_freq, _center - half_bw)
+                gb.end_freq = min(general_setup.max_freq, _center + half_bw)
+        else:
+            if gb.fd_bandwidth is not None:
+                logger.warning(
+                    "FD basis: fd_bandwidth is ignored with direct "
+                    "min_freq/max_freq bounds (set center_freq to use it)."
+                )
+            gb.start_freq = max(general_setup.min_freq, float(gb.min_freq))
+            gb.end_freq = min(general_setup.max_freq, float(gb.max_freq))
+        logger.info(
+            "FD basis: GB band set to [%.6e, %.6e] Hz for the FD band walker.",
+            gb.start_freq, gb.end_freq,
+        )
+    else:
+        k_lo, k_hi = _band_klohi(gb, layer_df)
+        gb.start_freq, gb.end_freq = k_lo * layer_df, k_hi * layer_df
+        if (gb.start_freq < general_setup.min_freq - 1e-12
+                or gb.end_freq > general_setup.max_freq + 1e-12):
+            raise ValueError(
+                f"GB band [{gb.start_freq:.6e}, {gb.end_freq:.6e}] Hz "
+                f"extends outside the data band "
+                f"[{general_setup.min_freq:.6e}, {general_setup.max_freq:.6e}] Hz; "
+                "adjust gb.min_freq/max_freq (or center_freq/n_layers), or "
+                "widen the general band."
+            )
+        gb.min_freq, gb.max_freq = gb.start_freq, gb.end_freq
+        gb.n_layers = k_hi - k_lo
+        gb.center_freq = ((k_lo + k_hi) // 2 + 0.5) * layer_df
+        logger.info(
+            "GB band: [%.6e, %.6e] Hz (%d WDM layers, layer_df=%.4e Hz)",
+            gb.start_freq, gb.end_freq, gb.n_layers, layer_df,
+        )
+
+    if gb.oversample is None:
+        gb.oversample = 2 if is_fd else 4
+    if gb.nleaves_max is None:
+        gb.nleaves_max = _resolve_nleaves_max(gb, general_setup, is_fd, layer_df)
+
+    gb.tdi_setup = general_setup.tdi_chan
+    gb.use_tdi2 = tdi_generation_info(general_setup.tdi_chan)[0] == 2
+    gb.initialize_kwargs = dict(force_backend=general_setup.force_backend)
+    if gb.betas is None:
+        betas = 1.0 / 1.2 ** np.arange(general_setup.ntemps)
+        betas[-1] = 1e-4
+        gb.betas = betas
+    gb.gb_wdm_comp = None
+    return gb
+
+
 class GBNoForegroundGlobalFit(EreborFit):
     """GB-only global fit without foreground fitting (fixed PSD, f > 6 mHz)."""
 
@@ -352,39 +493,6 @@ class GBNoForegroundGlobalFit(EreborFit):
 
     # -- general resolution -----------------------------------------------------
 
-    @staticmethod
-    def _band_klohi(gb, layer_df: float) -> typing.Tuple[int, int]:
-        """Resolved (k_lo, k_hi) GB-band layer bounds (pure; no mutation).
-
-        PRIMARY mode: ``[gb.min_freq, gb.max_freq]`` snapped INWARD to layer
-        boundaries (``k_lo = ceil(min/layer_df)``, ``k_hi = floor(max/..)``);
-        band edges then land on every layer boundary in between. SECONDARY
-        mode (either ``center_freq`` or ``n_layers`` set explicitly):
-        ``n_layers`` layers around the layer CONTAINING ``center_freq``
-        (legacy behaviour; the unset field fills from 7.5e-3 / 3).
-        """
-        if gb.center_freq is not None or gb.n_layers is not None:
-            center = gb.center_freq if gb.center_freq is not None else 7.5e-3
-            n_layers = int(gb.n_layers) if gb.n_layers is not None else 3
-            k_center = int(math.floor(center / layer_df))
-            k_lo = k_center - n_layers // 2
-            return k_lo, k_lo + n_layers
-        k_lo = int(math.ceil(float(gb.min_freq) / layer_df))
-        k_hi = int(math.floor(float(gb.max_freq) / layer_df))
-        if k_hi - k_lo < 3:
-            raise ValueError(
-                f"GB band [{gb.min_freq:.6e}, {gb.max_freq:.6e}] Hz spans only "
-                f"{max(k_hi - k_lo, 0)} whole WDM layer(s) after snapping "
-                f"inward (layer_df={layer_df:.4e} Hz); need >= 3 layers so an "
-                "interior sampled span exists. Widen min_freq/max_freq."
-            )
-        return k_lo, k_hi
-
-    def _gb_band(self, layer_df: float) -> typing.Tuple[float, float, int]:
-        """(GB start_freq, end_freq, k_center) in integer WDM-layer units."""
-        k_lo, k_hi = self._band_klohi(self.gb, layer_df)
-        return k_lo * layer_df, k_hi * layer_df, (k_lo + k_hi) // 2
-
     def adjust_general(self, gs: GBNoFgGeneralSettings) -> None:
         # ACA frequency clipping (memory knob): narrow the DATA band to
         # +-data_band_layers WDM layers around the GB band.
@@ -399,7 +507,7 @@ class GBNoForegroundGlobalFit(EreborFit):
                 f"data_band_layers={L} too narrow: need >= 5 layers beyond "
                 "the GB band edges to cover the chunked-het gating."
             )
-            k_lo, k_hi = self._band_klohi(gb, layer_df)
+            k_lo, k_hi = _band_klohi(gb, layer_df)
             gs.min_freq = max(gs.min_freq, (k_lo - L) * layer_df)
             gs.max_freq = min(gs.max_freq, (k_hi + L) * layer_df)
             logger.info(
@@ -465,167 +573,22 @@ class GBNoForegroundGlobalFit(EreborFit):
         settings = super().prepare_branch_settings(name, general_setup)
         if name != "gb":
             return settings
-        gb: GBNoFgGBSettings = settings
-        if gb.t0 is None:
-            # Mojito: catalogue params are referenced at the catalogue epoch
-            # (validated convention); synthetic: phases reference the stream
-            # start.
-            gb.t0 = (
-                GB_MOJITO_T_REF
-                if self.general.data_mode == "mojito"
-                else float(self.general.synthetic_t_start)
-            )
-        if gb.mode not in ("pe", "search"):
-            raise ValueError(f"GB mode must be 'pe' or 'search', got {gb.mode!r}.")
-        if gb.start not in ("truth", "prior"):
-            raise ValueError(f"GB start must be 'truth' or 'prior', got {gb.start!r}.")
-        domain_settings = general_setup.domain_settings  # resolved instance
-
-        # f0 prior clamped to the (possibly clipped) data band.
-        if not gb.f0_lims:
-            gb.f0_lims = [general_setup.min_freq, general_setup.max_freq]
-        if not gb.fdot_lims:
-            fdot_max_val = get_fdot(gb.f0_lims[-1], Mc=gb.m_chirp_lims[-1])
-            gb.fdot_lims = [-fdot_max_val, fdot_max_val]
-
-        # Narrow GB band (WDM) / widened band (FD band walker).
-        is_fd = isinstance(domain_settings, FDSettings)
-        layer_df = 1.0 / (2 * general_setup.domain_settings.Nf * gb.dt) if not is_fd else None
-        _center_mode = gb.center_freq is not None or gb.n_layers is not None
-        if is_fd:
-            if _center_mode:
-                # SECONDARY interface on FD: legacy center +- fd_bandwidth/2
-                # (full data band when fd_bandwidth is None).
-                _center = gb.center_freq if gb.center_freq is not None else 7.5e-3
-                if gb.fd_bandwidth is None:
-                    gb.start_freq = general_setup.min_freq
-                    gb.end_freq = general_setup.max_freq
-                else:
-                    half_bw = 0.5 * float(gb.fd_bandwidth)
-                    gb.start_freq = max(general_setup.min_freq, _center - half_bw)
-                    gb.end_freq = min(general_setup.max_freq, _center + half_bw)
-            else:
-                # PRIMARY interface on FD: the direct bounds, clamped to the
-                # data band (fd_bandwidth only applies to the center mode).
-                if gb.fd_bandwidth is not None:
-                    logger.warning(
-                        "FD basis: fd_bandwidth is ignored with direct "
-                        "min_freq/max_freq bounds (set center_freq to use it)."
-                    )
-                gb.start_freq = max(general_setup.min_freq, float(gb.min_freq))
-                gb.end_freq = min(general_setup.max_freq, float(gb.max_freq))
-            logger.info(
-                "FD basis: GB band set to [%.6e, %.6e] Hz for the FD band "
-                "walker.", gb.start_freq, gb.end_freq,
-            )
-        else:
-            k_lo, k_hi = self._band_klohi(gb, layer_df)
-            gb.start_freq, gb.end_freq = k_lo * layer_df, k_hi * layer_df
-            if (gb.start_freq < general_setup.min_freq - 1e-12
-                    or gb.end_freq > general_setup.max_freq + 1e-12):
-                raise ValueError(
-                    f"GB band [{gb.start_freq:.6e}, {gb.end_freq:.6e}] Hz "
-                    f"extends outside the data band "
-                    f"[{general_setup.min_freq:.6e}, {general_setup.max_freq:.6e}] Hz; "
-                    "adjust gb.min_freq/max_freq (or center_freq/n_layers), or "
-                    "widen the general band."
-                )
-            # Canonicalize BOTH interfaces on the resolved block so every
-            # downstream consumer (setup_recipe's k_center, debug plots,
-            # data-band clipping, nleaves sizing) reads consistent values.
-            gb.min_freq, gb.max_freq = gb.start_freq, gb.end_freq
-            gb.n_layers = k_hi - k_lo
-            gb.center_freq = ((k_lo + k_hi) // 2 + 0.5) * layer_df
-            logger.info(
-                "GB band: [%.6e, %.6e] Hz (%d WDM layers, separators on every "
-                "layer boundary, layer_df=%.4e Hz)", gb.start_freq, gb.end_freq,
-                gb.n_layers, layer_df,
-            )
-
-        # FD basis at short Tobs: oversample=2 halves the per-band N.
-        if gb.oversample is None:
-            gb.oversample = 2 if is_fd else 4
-
-        # Dynamic RJ leaf-slot budget (None -> 2x the catalogue sources in
-        # the sampled central band; see the nleaves_max field docstring).
-        if gb.nleaves_max is None:
-            gb.nleaves_max = self._resolve_nleaves_max(
-                gb, general_setup, is_fd, layer_df
-            )
-
-        gb.tdi_setup = general_setup.tdi_chan
-        gb.use_tdi2 = tdi_generation_info(general_setup.tdi_chan)[0] == 2
-        gb.initialize_kwargs = dict(force_backend=general_setup.force_backend)
-
-        # Match the GB tempering ladder length to ntemps (band_temps shape).
-        if gb.betas is None:
-            betas = 1.0 / 1.2 ** np.arange(general_setup.ntemps)
-            betas[-1] = 1e-4
-            gb.betas = betas
-
-        # WDM-domain GB likelihood object: built lazily in setup_recipe (the
-        # underlying C++ orbits wrap is not picklable).
-        gb.gb_wdm_comp = None
-        return gb
-
-    def _resolve_nleaves_max(self, gb, general_setup, is_fd, layer_df) -> int:
-        """Dynamic RJ leaf budget: 2x the catalogue sources in the sampled band.
-
-        The RJ move visits EVERY leaf slot once per proposal (one pick round
-        each), so ``nleaves_max`` directly sets the proposal's sequential
-        depth — a fixed budget of 100 means 100 pick rounds x 100 in-model
-        repeats regardless of how many sources exist locally. 2x the local
-        catalogue count keeps birth headroom while dropping the tail of
-        ~always-empty slots. The counting window is the SAMPLED f0 span
-        (interior band edges: one layer inside each end of the GB band),
-        matching GBSetup's ``f0_lims`` on the WDM path. Fallback to the
-        legacy 100 on the FD basis (band edges are get_N-derived there,
-        unknown at this stage) or when no GB catalogue is available
-        (synthetic mode).
-        """
-        fallback = 100
-        catalogue = (getattr(general_setup, "catalogue", None) or {}).get("GB", {})
-        if is_fd or not catalogue:
-            logger.info(
-                "GB nleaves_max: dynamic sizing unavailable (%s); using the "
-                "legacy default %d.",
-                "FD basis" if is_fd else "no GB catalogue",
-                fallback,
-            )
-            return fallback
-
-        trim_duration = general_setup.data_t0 - MOJITO_REFERENCE_TIME
-        sampling = np.array(
-            [
-                gb_catalogue_to_sampling_basis(catalogue[k], trim_duration=trim_duration)
-                for k in sorted(catalogue.keys())
-            ]
+        return prepare_gb_branch(
+            settings,
+            general_setup,
+            data_mode=self.general.data_mode,
+            synthetic_t_start=self.general.synthetic_t_start,
         )
-        if sampling.ndim == 3:
-            sampling = sampling.reshape(-1, sampling.shape[-1])
-        f0_hz = np.asarray(sampling[:, 1], dtype=float) * 1e-3
-        lo, hi = gb.start_freq + layer_df, gb.end_freq - layer_df
-        n_in = int(((f0_hz >= lo) & (f0_hz <= hi)).sum())
-        out = max(2 * n_in, 4)
-        logger.info(
-            "GB nleaves_max: %d catalogue sources in the sampled band "
-            "[%.6e, %.6e] Hz -> nleaves_max = 2 x %d = %d (RJ pick rounds "
-            "per proposal drop from the fixed 100 to %d).",
-            n_in, lo, hi, n_in, out, out,
-        )
-        return out
 
+def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
+    """Build the ``gb_no_fg``-style GB move stack (shared helper).
 
-def setup_recipe(recipe, engine_info, curr, acs, priors, state):
-    """Recipe setup for ``gb_no_fg`` (the run's ``setup_function``).
-
-    Variant-specific pre-work (chunked-het likelihood build, true-point /
-    prior seeding, neighbor subtraction) followed by the generic
-    materialization of the fit's :class:`RecipeSpec`.
+    Variant-specific GB pre-work — chunked-het likelihood build, true-point /
+    prior seeding, neighbor subtraction — then ``build_gb_moves``. Returns the
+    ``{name: move}`` dict; the caller materializes the recipe. Imported by both
+    ``gb_no_fg`` and ``all_sources`` so their GB setup is identical.
     """
     general_info = curr.general_info
-    nwalkers: int = general_info.nwalkers
-    ntemps: int = general_info.ntemps
     gpus = general_info.gpus
     if gpus is not None:
         import cupy as cp
@@ -792,12 +755,21 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         pe_move_names=pe_names or None,
     )
     stock_moves = {m.name: m for m in list(gb_search_moves) + list(gb_pe_moves)}
+    return stock_moves
 
+
+def setup_recipe(recipe, engine_info, curr, acs, priors, state):
+    """Recipe setup for ``gb_no_fg`` (the run's ``setup_function``)."""
+    general_info = curr.general_info
+    stock_moves = setup_gb_moves(engine_info, curr, acs, priors, state)
+    recipe_spec: RecipeSpec = curr.source_metadata["recipe_spec"]
     ctx = MoveBuildContext(
         recipe=recipe, engine_info=engine_info, curr=curr, acs=acs,
         priors=priors, state=state,
     )
-    materialize_recipe(recipe, recipe_spec, ctx, stock_moves, ntemps, nwalkers)
+    materialize_recipe(
+        recipe, recipe_spec, ctx, stock_moves, general_info.ntemps, general_info.nwalkers
+    )
 
 
 GBNoForegroundGlobalFit.default_setup_function = staticmethod(setup_recipe)
