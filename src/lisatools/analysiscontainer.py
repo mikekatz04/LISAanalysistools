@@ -1645,18 +1645,6 @@ class AnalysisContainerArray:
             If ``None``, everything is stored on the CPU.
         complex_psd: If ``True``, allocate a complex-valued PSD buffer (not yet
             implemented; raises ``NotImplementedError``).
-        n_splits: CPU-threading knob (mutually exclusive with ``gpus``): shard
-            the containers into this many CPU splits through the **same**
-            split structure used for GPUs (``gpu_splits`` / ``split_map`` /
-            per-split linear buffers). One thread per split is then driven by
-            :class:`~lisatools.domaincomputation.DomainComputationGroupArray`
-            with ``run_threaded=True`` exactly as in the multi-GPU case (each
-            split's computation group holds its own workspaces, so threads
-            never share scratch buffers). Threads pay off where the per-split
-            work releases the GIL (numpy/BLAS/FFT on large arrays, JAX-CPU,
-            GIL-releasing C++ kernels); pin ``OMP_NUM_THREADS`` /
-            ``OPENBLAS_NUM_THREADS`` so ``n_splits * blas_threads`` does not
-            oversubscribe the machine.
         run_threaded: If ``True``, the array-level analysis ops
             (:meth:`_vectorized_dispatch` consumers — ``likelihood``,
             ``inner_product``, ``calculate_signal_*`` — and the domain-aware
@@ -1678,7 +1666,6 @@ class AnalysisContainerArray:
         gpus: list | int | None = None,
         complex_psd: bool = False,
         gpu_assignment: Optional[np.ndarray] = None,
-        n_splits: Optional[int] = None,
         run_threaded: bool = False,
     ) -> None:
         self.run_threaded = bool(run_threaded)
@@ -1727,19 +1714,6 @@ class AnalysisContainerArray:
 
         if isinstance(gpus, int):
             gpus = [gpus]
-        # Validate the CPU-split knob before any device work: with GPUs the
-        # split count is always len(gpus).
-        if n_splits is not None:
-            if gpus is not None:
-                raise ValueError(
-                    "n_splits is the CPU-split knob; with gpus the split "
-                    "count is len(gpus)."
-                )
-            if not (1 <= int(n_splits) <= int(self.acs_total_entries)):
-                raise ValueError(
-                    f"n_splits must be in [1, {int(self.acs_total_entries)}]; "
-                    f"got {n_splits}."
-                )
         self.gpus = gpus
         if gpus is not None:
             # Sanity-check: each entry is a valid device id.
@@ -1791,15 +1765,11 @@ class AnalysisContainerArray:
                 np.where(gpu_assignment == g)[0] for g in gpus
             ]
         else:
-            # CPU-thread splits (no GPUs): ``n_splits`` shards the containers
-            # through the same split structure as multi-GPU, one thread per
-            # split downstream (DCGA run_threaded). With GPUs, the split
-            # count is always len(gpus). (Arg validation happens above,
-            # before any device work.)
-            num_machines = (
-                int(n_splits) if (gpus is None and n_splits is not None)
-                else (1 if gpus is None else len(gpus))
-            )
+            # One split on CPU; len(gpus) splits with GPUs. (The n_splits
+            # CPU-thread splitting knob was removed — parallel-resources
+            # plan P4: it duplicated kernel-level OMP threading above the
+            # kernels with oversubscription risk and had no callers.)
+            num_machines = 1 if gpus is None else len(gpus)
             # Load-balanced contiguous blocks (parallel-resources plan P1):
             # array_split keeps per-split sizes within 1 of each other. The
             # old ceil-stride split could leave the last device nearly idle
@@ -2112,7 +2082,7 @@ class AnalysisContainerArray:
                 return asnumpy(res)
             return res
 
-        # Per-split execution (rows grouped by split_map so CPU n_splits
+        # Per-split execution (rows grouped by split_map so multi-GPU
         # parallelize the same way GPU splits do). results[r] slots are
         # distinct per row, so threaded workers never write the same slot.
         split_to_rows = self._split_rows(index_arr)
@@ -2200,7 +2170,7 @@ class AnalysisContainerArray:
     # dispatcher and signal_operation. One Python orchestration layer
     # spreading work across threads and GPUs: GPU splits each enter their
     # own device context inside the worker (cupy's current device is
-    # thread-local); CPU splits (``n_splits``) run as plain threads and
+    # thread-local); CPU splits run as plain threads and
     # pay off where the per-row work releases the GIL.
     # ------------------------------------------------------------------
 

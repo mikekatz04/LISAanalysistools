@@ -398,8 +398,10 @@ N_cp_orbit=32, half-day wavelets, full angular prior):
 Do NOT add OpenMP (or any nested threading) inside C++/CUDA compute kernels
 anywhere across the LISA Analysis Tools repos.
 
-**Why:** threading is owned at the RUN level -- `OMP_NUM_THREADS` and the
-`AnalysisContainerArray` `n_splits` / `run_threaded` per-split machinery.
+**Why:** threading is owned at the RUN level -- `OMP_NUM_THREADS`, and the
+`AnalysisContainerArray` multi-GPU `gpus` / `run_threaded` per-split
+machinery (the CPU-side `n_splits` twin was removed 2026-07: it threaded
+above kernel-level OMP with oversubscription risk and had no callers).
 Nested kernel threading fights that pool and makes run-level thread budgeting
 meaningless.
 

@@ -178,70 +178,8 @@ class SearchConvergeStopping(Stopping):
             return False
 
 
-class GBBandLogLConvergeStopping(Stopping):
-    """Per-frequency-band log-likelihood convergence criterion for GB searches.
-
-    Splits the frequency axis at ``band_edges`` and tracks the best
-    log-likelihood within each band independently. A band is marked converged
-    when its best log-likelihood has not improved by more than ``diff`` for
-    ``n_iters`` consecutive calls. Sampling stops once all bands are
-    converged.
-
-    Args:
-        fd: 1D array of frequencies indexing the data; ``band_edges`` are
-            located in this array via ``searchsorted``.
-        band_edges: Array of frequency band edges (length ``num_bands + 1``).
-        n_iters: Number of consecutive non-improving calls required to mark
-            a band converged.
-        diff: Log-likelihood improvement threshold.
-        verbose: If ``True``, print per-call diagnostics.
-        start_iteration: Number of leading iterations to discard.
-    """
-
-    def __init__(self, fd, band_edges, n_iters=30, diff=1.0, verbose=False, start_iteration=0):
-        self.band_edge_inds = np.searchsorted(fd, band_edges, side="right") - 1
-        self.num_bands = self.band_edge_inds.shape[0] - 1
-        self.converged = np.zeros(self.num_bands, dtype=bool)
-        self.iters_consecutive = np.zeros(self.num_bands, dtype=int)
-        self.past_like_best = np.full(self.num_bands, -np.inf)
-        self.n_iters = n_iters
-        self.diff = diff
-        self.verbose = verbose
-        self.start_iteration = start_iteration
-
-    def add_mgh(self, mgh):
-        """Attach a multi-GPU data holder used to compute per-band likelihoods."""
-        self.mgh = mgh
-
-    def __call__(self, i, sample, sampler):
-        """Update per-band convergence state and return ``True`` once all bands have converged."""
-
-        ll_per_band = self.mgh.get_ll(band_edge_inds=self.band_edge_inds).max(axis=0)
-
-        ll_movement = (ll_per_band - self.past_like_best) > self.diff
-
-        self.iters_consecutive[~ll_movement] += 1
-        self.iters_consecutive[ll_movement] = 0
-
-        self.converged = self.iters_consecutive >= self.n_iters
-
-        self.past_like_best[ll_movement] = ll_per_band[ll_movement]
-
-        # for move in sampler.all_moves:
-        #     move.converged_sub_bands = self.converged.copy()
-
-        if self.verbose:
-            print(
-                "Num still going:",
-                (~self.converged).sum(),
-                "\nChanged here:",
-                (ll_movement).sum(),
-            )
-
-        if np.all(self.converged):
-            return True
-        else:
-            return False
+# GBBandLogLConvergeStopping was removed with the legacy
+# MultiGPUDataHolder it consumed (parallel-resources plan P4).
 
 
 class SearchConvergeStopping2(Stopping):

@@ -44,9 +44,9 @@ rule — **full detail: [`docs/conventions.md`](docs/conventions.md).**
   `mm2` over the 2 carrier layers (tighter check). Both are
   `1 - normalized overlap` via `AnalysisContainer.template_inner_product`.
 - **No nested OpenMP in compute kernels.** Threading is owned at the run
-  level (`OMP_NUM_THREADS`, `AnalysisContainerArray` `n_splits`); fix slow
-  CPU kernels algorithmically or move them to GPU, never `#pragma omp`
-  inside a kernel.
+  level (`OMP_NUM_THREADS`; multi-GPU splits via `AnalysisContainerArray`
+  `gpus`/`run_threaded`); fix slow CPU kernels algorithmically or move them
+  to GPU, never `#pragma omp` inside a kernel.
 - **Cross-wheel C++/CUDA sharing: recompile-in-place.** Downstream wheels
   (GBGPU, BBHx, FEW) recompile against upstream (GBT, LAT) headers rather
   than link against upstream's compiled archive; prefer POD `*View` structs
@@ -153,11 +153,11 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
   - `wdm/` — `wavelet_lookup.py`, `wdm_settings.py`, `wdm_domain.py`, `fast_inner.py`. **Absorbed at Phase 3D.** GB-specific (heterodyne) variants live in `gbgpu.jax.wdm`.
 - `sources/` — waveform generators per source class: `bbh/`, `emri/`, `gb/`, plus `defaultresponse.py` and `waveformbase.py`.
 - `sampling/` — MCMC pieces built on top of `eryn`: priors, likelihood wrappers, custom moves, stopping criteria, GMM utilities.
-- `globalfit/` — the LISA global fit pipeline: `pipeline.py`, `engine.py`, `run.py`, `recipe.py`, plus per-component modules (`mbhglobal.py`, `galaxyglobal.py`, `psdglobal.py`, `mbhsearch.py`, …) and stock recipes in `globalfit/stock/`. Post stft_tof merge (2026-06-12) conventions:
+- `globalfit/` — the LISA global fit pipeline: `engine.py`, `run.py`, `recipe.py`, `hdfbackend.py`, the moves in `globalfit/moves/`, and stock recipes in `globalfit/stock/` (the legacy `pipeline.py` + per-component `mbhglobal/galaxyglobal/psdglobal` movers were deleted 2026-07, parallel-resources plan P0/P4; `mbhsearch.py` remains for the dev search script). Post stft_tof merge (2026-06-12) conventions:
   - **Engine-side template generation**: each branch registers a params-based generator on `Settings.signal_gen` (`fn(*sampling_params) -> DomainBase`, wrapping transform + waveform + domain projection); `run.py::setup_acs(state, rebuild_residuals=True)` builds/subtracts the state's templates from the residuals under the hood. Settings-file recipes build **moves only** — never write residuals directly.
   - **ICRS run frame**: catalogue sky/polarization parameters are sampled raw (`alpha`/RA, `sin_delta`, `psi` ICRS); orbits are loaded with `frame="icrs"`. The stock MBH transform (`make_mbh_transform_container`, forward + inverse) is direct-ICRS with `Q = m1/m2`.
   - **Domains are never communicated by string** — `GeneralSettings.domain_settings` takes a `DomainSettingsBase` instance or a `(times, dt, force_backend)` factory (`FDSettings/STFTSettings/WDMSettings.make_factory`); all dispatch is `isinstance` on the settings class.
-- `utils/` — `constants.py` (re-exports `lisaconstants`-derived values like `YRSID_SI`), array helpers (`get_array_module`, `AET`), exceptions, multi-GPU data holders.
+- `utils/` — `constants.py` (re-exports `lisaconstants`-derived values like `YRSID_SI`), array helpers (`get_array_module`, `AET`), exceptions.
 - `orbit_files/` — packaged orbit data files.
 - `scripts/` — dev / validation / benchmark / diagnostics scripts (`gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `notes/`). Migrated from the umbrella workspace root at Phase 2.
 

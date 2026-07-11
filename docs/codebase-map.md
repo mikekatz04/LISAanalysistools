@@ -45,7 +45,7 @@ package.
 | `sources/` | Per-source waveform generators: `bbh/`, `emri/`, `gb/`, `sobbh/`, plus `waveformbase.py`, `defaultresponse.py`, `utils.py`. |
 | `sampling/` | Eryn-based MCMC pieces: `prior.py`, `likelihood.py`, `gmm.py`, `stopping.py`, `moves/`. |
 | `globalfit/` | The global-fit pipeline (engine, run, recipe, per-branch modules, `moves/`, `priors/`, `stock/`). See §3–4. |
-| `utils/` | `parallelbase.py` (`LISAToolsParallelModule`), `constants.py`, `utility.py` (`get_array_module`, `AET`, `asnumpy`), `typing.py`, `multigpudataholder.py`. |
+| `utils/` | `parallelbase.py` (`LISAToolsParallelModule`), `constants.py`, `utility.py` (`get_array_module`, `AET`, `asnumpy`), `typing.py`. |
 | `orbit_files/` | Packaged orbit data. |
 
 ---
@@ -208,8 +208,8 @@ and validated against C++ at the inner-product level (see §7).
   `h5py`.
 - Waveform packages used *by* LAT’s source generators: `gbgpu.gbgpu.GBGPU`
   (`sources/gb`), `few.waveform` (`sources/emri`), `bbhx.waveformbuild`
-  (`globalfit/pipeline.py`). These are `[testing]`/runtime source deps, not
-  build deps.
+  (`globalfit/stock/erebor/wrappers.py`). These are `[testing]`/runtime source
+  deps, not build deps.
 
 **Depends on LAT (downstream):** GBGPU, BBHx, FastEMRIWaveforms consume LAT’s
 C++ headers. Verified: `GBGPU/src/gbgpu/cutils/CMakeLists.txt` and
@@ -271,7 +271,7 @@ templated kernels.
 | Add a native C++/CUDA symbol to a backend | `cutils/__init__.py` (`LISAToolsBackendMethods` + each `*_module_loader`), `cutils/CMakeLists.txt` |
 | How a backend is chosen at runtime | `utils/parallelbase.py`, `cutils/__init__.py`, `__init__.py`, `jax/backend.py` |
 | Global-fit run config / stock variants | `globalfit/stock/base.py`, `globalfit/stock/erebor/`, `.../variants/` |
-| Global-fit engine / run loop / recipe | `globalfit/engine.py`, `globalfit/run.py`, `globalfit/recipe.py`, `globalfit/pipeline.py` |
+| Global-fit engine / run loop / recipe | `globalfit/engine.py`, `globalfit/run.py`, `globalfit/recipe.py`, `globalfit/hdfbackend.py` |
 | MCMC moves (GB/MBH/PSD special moves) | `globalfit/moves/`, `sampling/moves/`, `sampling/prior.py` |
 | Downstream C++ header consumption (GBGPU/BBHx) | `cutils/orbits_view.hpp`, `cutils/lisatools_header_abi.hpp`, `get_include()` in `__init__.py` |
 | JAX response / WDM implementations | `jax/response/`, `jax/wdm/` |
