@@ -97,6 +97,10 @@ logger = logging.getLogger(__name__)
 # legacy constant used for the sangria stream's GB reference).
 GB_T_REF = GB_MOJITO_T_REF
 
+# Default synthetic-data start (matches EreborGeneralSettings.synthetic_t_start):
+# 10,000 s keeps the TDI2 warm-up look-back inside the orbit span.
+_SYNTH_T0_DEFAULT = 10_000.0
+
 _SOURCE_BRANCH_TO_CLASS = {"mbh": "MBHB", "emri": "EMRI", "sobbh": "SOBHB"}
 
 
@@ -171,8 +175,10 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     noise_soms_d: float = 15e-12
     noise_sa_a: float = 3e-15
     noise_seed: int = 12345
-    # Synthetic-data start time (the Sangria stream starts at 0).
-    t_start: float = 0.0
+    # Synthetic-data start time. Default 10,000 s so the TDI2 warm-up
+    # look-back stays inside the orbit span (which starts at t=0); the
+    # legacy Sangria stream itself starts at 0 (see ``mbh_waveform_t0``).
+    t_start: float = _SYNTH_T0_DEFAULT
     # data_mode="synthetic": GB rows in the GBGPU basis
     # ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``; None -> the
     # stock two-source table.
@@ -222,9 +228,11 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     @property
     def mbh_waveform_t0(self) -> float:
         """Epoch merger times (t_plunge) are referenced to."""
-        return (
-            MOJITO_REFERENCE_TIME if self.data_mode == "mojito" else float(self.t_start)
-        )
+        if self.data_mode == "mojito":
+            return MOJITO_REFERENCE_TIME
+        if self.data_mode == "sangria":
+            return 0.0  # the legacy Sangria stream starts at 0
+        return float(self.t_start)
 
     @property
     def sobbh_reference_time(self) -> typing.Optional[float]:
@@ -262,10 +270,11 @@ class AllSourcesGlobalFit(EreborFit):
             if gs.nf == 720 and gs.nt == 2160:
                 gs.nf = 1440
         # Keep the legacy ``t_start`` knob and the inherited
-        # ``synthetic_t_start`` in sync (either may be set).
-        if gs.t_start and not gs.synthetic_t_start:
+        # ``synthetic_t_start`` in sync (either may be set; a value that
+        # differs from the shared default is the user's).
+        if gs.t_start != _SYNTH_T0_DEFAULT:
             gs.synthetic_t_start = gs.t_start
-        elif gs.synthetic_t_start and not gs.t_start:
+        elif gs.synthetic_t_start != _SYNTH_T0_DEFAULT:
             gs.t_start = gs.synthetic_t_start
         # gb_no_fg's ACA data-band clipping is a single-band memory knob; in
         # this multi-source variant the data band must cover every branch.

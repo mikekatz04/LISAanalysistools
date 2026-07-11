@@ -997,21 +997,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         tdis = tdis[..., :-num_buffer_ponts] # remove the padded points
         tdis[..., :num_buffer_ponts] = 0.0  # zero out the corrupted points at the start
-        # TDI warm-up at the orbit-span edge: output samples whose delayed
-        # orbit evaluations precede the orbits' valid span come back NaN
-        # (e.g. synthetic runs where waveform_t0 == the orbit start, whose
-        # first ~8 arm-delays of output need orbit data at t < 0). Zero them
-        # like ResponseWrapper's ``remove_garbage="zero"`` — one non-finite
-        # edge sample would otherwise poison the whole domain transform
-        # downstream (both the injected data and every template).
-        _bad = ~self.xp.isfinite(tdis)
-        if _bad.any():
-            logger.debug(
-                "_apply_response: zeroed %d non-finite TDI samples "
-                "(orbit-span-edge warm-up).",
-                int(_bad.sum()),
-            )
-            tdis[_bad] = 0.0
         shifted_t_arr = shifted_t_arr[:, :-num_buffer_ponts]
 
         # Apply the same sub-dt shift to the time labels so they describe what
@@ -1026,6 +1011,47 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             0, self.xp.rint((self.data_t0 - shifted_t_arr[:, 0]) / self.dt).astype(int)
         )
         start_ind = int(start_inds.max())
+
+        # Non-finite response output is zeroed (ResponseWrapper
+        # ``remove_garbage="zero"`` semantics) — one non-finite sample kept
+        # in the data span would poison the whole domain transform
+        # downstream (both the injected data and every template). Two
+        # distinct populations, reported separately so the numbers read
+        # correctly:
+        #   (a) pre-data window samples, discarded by the ``start_ind`` crop
+        #       below. EXPECTED and harmless whenever the waveform window
+        #       opens before the orbit span (synthetic mode puts
+        #       waveform_t0 at the orbit start, so the ~month-long
+        #       pre-merger inspiral sits at t < 0 where orbits cannot be
+        #       evaluated) — but it IS wasted response compute; clip the
+        #       window if this dominates template timing.
+        #   (b) samples INSIDE the kept data span: the TDI warm-up right at
+        #       the orbit-span edge (output at t needs orbit data back to
+        #       t - ~8 arm-delays). Small (~tens of samples) and zero is
+        #       the correct value; a LARGE count here means something else
+        #       is wrong (bad parameters / orbit coverage) — hence WARNING.
+        _bad = ~self.xp.isfinite(tdis)
+        if _bad.any():
+            _n_kept = int(_bad[..., start_ind:].sum())
+            _n_cropped = int(_bad.sum()) - _n_kept
+            if _n_kept:
+                logger.warning(
+                    "_apply_response: zeroed %d non-finite TDI sample(s) "
+                    "INSIDE the data span (TDI warm-up at the orbit-span "
+                    "edge; expected ~O(10) at a t=0 orbit start — "
+                    "investigate if large).",
+                    _n_kept,
+                )
+            if _n_cropped:
+                logger.debug(
+                    "_apply_response: zeroed %d non-finite samples in the "
+                    "pre-data portion of the waveform window (all discarded "
+                    "by the data-span crop; expected when the window opens "
+                    "before the orbit span, e.g. synthetic mode — wasted "
+                    "response compute, not a correctness issue).",
+                    _n_cropped,
+                )
+            tdis[_bad] = 0.0
 
         if start_ind > 0:
             shifted_t_arr = shifted_t_arr[:, start_ind:]

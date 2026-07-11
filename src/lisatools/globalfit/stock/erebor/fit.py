@@ -115,8 +115,12 @@ class EreborGeneralSettings(GeneralSettings):
         default_factory=env_default("DATA_PROCESSOR", "mojito", str)
     )
     # Start time of the synthetic data stream (mojito/sangria modes pull the
-    # start from the data files).
-    synthetic_t_start: float = 0.0
+    # start from the data files). Default 10,000 s — NOT 0 — so the TDI2
+    # warm-up look-back (output at t needs orbit data back to t - ~8
+    # arm-delays ~ 85 s) stays inside the orbit span, which starts at t=0;
+    # a t=0 data start makes the first ~85 s of every response unevaluable
+    # (they would be NaN-scrubbed to zero).
+    synthetic_t_start: float = 10_000.0
     mojito_data_path: str = dataclasses.field(
         default_factory=env_default(
             "MOJITO_DATA_PATH",

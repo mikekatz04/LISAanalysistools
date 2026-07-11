@@ -125,7 +125,8 @@ class FullYearGeneralSettings(EreborGeneralSettings):
         default_factory=env_default("CHOP_WINDOW", False, bool)
     )
     merger_frac: float = 0.72
-    synthetic_t_start: float = 0.0
+    # synthetic_t_start inherits the Erebor default (10,000 s: keeps the
+    # TDI2 warm-up look-back inside the orbit span).
 
     # --- fixed sensitivity components (no psd / galfor branches) ---
     # Fixed PSD (no psd branch) -> report source-only log L = -1/2 <r|r>
