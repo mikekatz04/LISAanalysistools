@@ -1413,6 +1413,72 @@ class BandView:
         finally:
             self._aca.xp.cuda.runtime.setDevice(main)
 
+    def swap_rows(self, idx_a, idx_b) -> None:
+        """Exchange rows ``idx_a[i] <-> idx_b[i]`` (parallel-resources plan P1).
+
+        Same-shard pairs — the common case under band-grouped shard
+        assignment, where a tempering swap pair shares its band — are
+        swapped in place inside their owning device context with NO host
+        hop. Cross-shard pairs fall back to the gather/scatter path.
+        """
+        idx_a = np.atleast_1d(np.asarray(asnumpy(idx_a), dtype=int))
+        idx_b = np.atleast_1d(np.asarray(asnumpy(idx_b), dtype=int))
+        if idx_a.shape != idx_b.shape:
+            raise ValueError(
+                f"swap_rows index shapes differ: {idx_a.shape} vs {idx_b.shape}"
+            )
+        if idx_a.size == 0:
+            return
+        sh_a, in_a, _ = self._resolve_array(idx_a)
+        sh_b, in_b, _ = self._resolve_array(idx_b)
+        same = sh_a == sh_b
+
+        # Locality instrumentation (multi-GPU validation runbook): under
+        # band-grouped shard assignment the cross count should stay ~0.
+        self.swap_same_shard_count = getattr(self, "swap_same_shard_count", 0) + int(
+            same.sum()
+        )
+        self.swap_cross_shard_count = getattr(self, "swap_cross_shard_count", 0) + int(
+            (~same).sum()
+        )
+        if (~same).any():
+            logger.debug(
+                "BandView.swap_rows: %d cross-shard pair(s) this call "
+                "(totals same=%d cross=%d)",
+                int((~same).sum()),
+                self.swap_same_shard_count,
+                self.swap_cross_shard_count,
+            )
+
+        xp_mod = self._aca.xp
+        for s in np.unique(sh_a[same]):
+            sel = same & (sh_a == s)
+            shard = self._shards[s]
+            if self._aca.gpus is None:
+                ia, ib = in_a[sel], in_b[sel]
+                tmp = shard[ia].copy()
+                shard[ia] = shard[ib]
+                shard[ib] = tmp
+                continue
+            main = xp_mod.cuda.runtime.getDevice()
+            try:
+                with xp_mod.cuda.Device(int(self._aca.gpus[s])):
+                    ia = xp_mod.asarray(in_a[sel])
+                    ib = xp_mod.asarray(in_b[sel])
+                    tmp = shard[ia].copy()
+                    shard[ia] = shard[ib]
+                    shard[ib] = tmp
+            finally:
+                xp_mod.cuda.runtime.setDevice(main)
+
+        if not same.all():
+            # Cross-shard remainder (rare under band-grouped assignment):
+            # the existing host-routed gather/scatter path stays correct.
+            a, b = idx_a[~same], idx_b[~same]
+            tmp = self._gather(a).copy()
+            self._scatter(a, self._gather(b))
+            self._scatter(b, tmp)
+
     def _gather(self, band_inds: np.ndarray):
         """Gather rows ``band_inds`` from every shard into one ndarray.
 
@@ -1486,30 +1552,44 @@ class BandView:
 
 
 def band_gpu_assignment(
-    num_bands: int, gpus: Optional[List[int]], mode: str = "striped"
+    num_bands: int,
+    gpus: Optional[List[int]],
+    mode: str = "striped",
+    group_ids: Optional[np.ndarray] = None,
 ) -> Optional[np.ndarray]:
-    """Return a per-band GPU id assignment for use with :class:`AnalysisContainerArray`.
+    """Return a per-slot GPU id assignment for use with :class:`AnalysisContainerArray`.
 
-    Used by the GB special-move Buffer to shard band buffers across GPUs.
+    Used by the GB special-move Buffer to shard its per-cell slabs across
+    GPUs. ``num_bands`` is really the number of buffer SLOTS (one per active
+    (temp, walker, band) cell).
 
     Parameters
     ----------
     num_bands:
-        Number of bands (== ``num_acs`` of the per-band ACA).
+        Number of buffer slots (== ``num_acs`` of the per-cell ACA).
     gpus:
         Available GPU ids. ``None`` or a single-GPU list returns ``None``
         (no custom assignment needed; legacy contiguous partition kicks in).
     mode:
-        ``"striped"`` (default) — ``gpu_map[b] = gpus[b % len(gpus)]``. Keeps
-        the BandSorter even/odd within-pass non-overlap invariant intact,
-        because consecutive bands land on different GPUs and so the
-        edge_buffer overlap region between neighbour buffers never
-        straddles a single shard.
+        ``"striped"`` (default) — ``gpu_map[slot] = gpus[slot % len(gpus)]``.
+        Fine-grained load balance over slots.
 
         ``"block"`` — contiguous-block split (legacy). Use only for testing;
         per the plan, this can violate the no-overlap invariant at shard
         seams when bands within a BandSorter pass touch their neighbours'
         edge buffers.
+    group_ids:
+        Optional per-slot BAND ids (parallel-resources plan P1): slots with
+        the same band are placed on the SAME shard, so every cell of a band
+        is device-local — in particular the tempering swap pairs (same
+        band, adjacent temps), which under plain slot striping always
+        landed on DIFFERENT shards (slot order puts a row's temps in
+        consecutive slots) and paid a host-hop per swap. Bands round-robin
+        across GPUs WITHIN each even/odd parity class (ranked by first
+        appearance): the GB move activates bands in parity rotation, so
+        ranking across classes could put all of one parity on a single
+        device (e.g. active bands 3,4,7,8,... at ngpus=2). Overrides
+        ``mode``.
 
     Returns
     -------
@@ -1518,6 +1598,24 @@ def band_gpu_assignment(
     """
     if gpus is None or len(gpus) <= 1:
         return None
+    if group_ids is not None:
+        group_ids = np.asarray(group_ids, dtype=int)
+        if group_ids.shape != (num_bands,):
+            raise ValueError(
+                f"group_ids must have shape ({num_bands},); got {group_ids.shape}"
+            )
+        uniq, first_pos, inverse = np.unique(
+            group_ids, return_index=True, return_inverse=True
+        )
+        # Rank each unique band within its own parity class, in first-
+        # appearance order, so each parity pass spreads across all GPUs.
+        ranks = np.empty(len(uniq), dtype=int)
+        counters = [0, 0]
+        for gi in np.argsort(first_pos):
+            parity = int(uniq[gi] % 2)
+            ranks[gi] = counters[parity]
+            counters[parity] += 1
+        return np.asarray(gpus, dtype=int)[ranks[inverse] % len(gpus)]
     if mode == "striped":
         return np.asarray([gpus[b % len(gpus)] for b in range(num_bands)], dtype=int)
     if mode == "block":
@@ -1702,11 +1800,21 @@ class AnalysisContainerArray:
                 int(n_splits) if (gpus is None and n_splits is not None)
                 else (1 if gpus is None else len(gpus))
             )
-            split_num = int(np.ceil(self.acs_total_entries / num_machines))
-            split_inds = np.arange(split_num, self.acs_total_entries, split_num)
-            self.gpu_splits = gpu_splits = np.split(
-                np.arange(self.acs_total_entries), split_inds
+            # Load-balanced contiguous blocks (parallel-resources plan P1):
+            # array_split keeps per-split sizes within 1 of each other. The
+            # old ceil-stride split could leave the last device nearly idle
+            # (e.g. 10 walkers on 4 devices -> 3/3/3/1 instead of 3/3/2/2).
+            self.gpu_splits = gpu_splits = np.array_split(
+                np.arange(self.acs_total_entries), num_machines
             )
+            sizes = [len(s) for s in gpu_splits]
+            if len(sizes) > 1 and max(sizes) != min(sizes):
+                logger.info(
+                    "AnalysisContainerArray split is uneven (%s entries per "
+                    "split); the larger split(s) set the pace. Choose "
+                    "nwalkers divisible by the device count to balance.",
+                    sizes,
+                )
 
         self.gpu_map = np.zeros(self.acs_total_entries, dtype=int)
         self.split_map = np.zeros(self.acs_total_entries, dtype=int)

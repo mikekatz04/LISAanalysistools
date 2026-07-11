@@ -795,16 +795,26 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             ac_list.append(AnalysisContainer(data_domain, sm))
 
         gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
-        # Multi-GPU at the GB band-tree level: pass the full gpus list and a
-        # striped band assignment so consecutive bands land on different
-        # GPUs. The BandSorter even/odd within-pass invariant keeps bands in
-        # one pass non-overlapping in time-frequency support, so striping is
-        # safe. The per-band accessors (band_buffer / psd_buffer /
-        # template_buffer) automatically fall back to a single ndarray view
-        # for single-GPU runs and return a BandView (multi-shard router)
-        # otherwise -- see the accessor block above.
+        # Multi-GPU at the GB band-tree level (parallel-resources plan P1):
+        # group the per-cell slabs by their BAND id so every cell of a band
+        # -- in particular a tempering swap pair (same band, adjacent temps)
+        # -- is device-local, while bands round-robin across GPUs in
+        # first-appearance order (the GB move activates bands in even/odd
+        # parity rotation, so each parity pass still spreads over all
+        # devices). Plain slot striping put a row's temps in consecutive
+        # slots on ALTERNATING shards, making every tempering swap pair pay
+        # a cross-device hop. The per-band accessors (band_buffer /
+        # psd_buffer / template_buffer) automatically fall back to a single
+        # ndarray view for single-GPU runs and return a BandView
+        # (multi-shard router) otherwise -- see the accessor block above.
         gpu_assignment = (
-            band_gpu_assignment(len(ac_list), list(gpus_in)) if gpus_in else None
+            band_gpu_assignment(
+                len(ac_list),
+                list(gpus_in),
+                group_ids=asnumpy(self.unique_band_combos[:, 2]),
+            )
+            if gpus_in
+            else None
         )
         aca_kwargs = dict(
             gpus=list(gpus_in) if gpus_in else None,
@@ -1364,9 +1374,16 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         templates -- and, called again with the rejected subset, to revert
         the swaps that failed the acceptance draw.
         """
-        tmp = self.template_buffer[slots_a].copy()
-        self.template_buffer[slots_a] = self.template_buffer[slots_b]
-        self.template_buffer[slots_b] = tmp[:]
+        buf = self.template_buffer
+        if isinstance(buf, BandView):
+            # Multi-GPU: same-shard pairs (the common case under the
+            # band-grouped shard assignment) swap in place on their device
+            # with no host hop (parallel-resources plan P1).
+            buf.swap_rows(slots_a, slots_b)
+            return
+        tmp = buf[slots_a].copy()
+        buf[slots_a] = buf[slots_b]
+        buf[slots_b] = tmp[:]
 
     def _adjust_via_engine(
         self, factor, target_aca, params, params_index, N_vals, *args, **kwargs

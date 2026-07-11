@@ -1644,11 +1644,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     )
                 self._debug_log_band_null(buffer_obj)
             round_i += 1
-            # NOTE (GPU efficiency): freeing the WHOLE CuPy pool every pick
-            # round forces cudaFree/cudaMalloc churn for every allocation in
-            # the next round. The mempool_free stage time quantifies it.
-            with _tspan(tm, "mempool_free"):
-                self.mempool.free_all_blocks()
+            # GPU efficiency (parallel-resources plan P1): freeing the WHOLE
+            # CuPy pool every pick round forces cudaFree/cudaMalloc churn
+            # for every allocation in the next round, so it is now OPT-IN —
+            # set GB_MEMPOOL_FREE_EACH_ROUND=1 only when a run is genuinely
+            # memory-bound (the per-unit/per-proposal frees remain). The
+            # mempool_free stage time quantifies the cost either way.
+            if os.environ.get("GB_MEMPOOL_FREE_EACH_ROUND", "0") == "1":
+                with _tspan(tm, "mempool_free"):
+                    self.mempool.free_all_blocks()
         if tm is not None:
             tm.count("pick_rounds", round_i)
 
@@ -2211,6 +2215,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     curr[seq["idx"]:seq["idx"] + 1], xp=cp)[0, 1]))
             self._debug_plot_band_sequence(buffer_obj, seq)
 
+    def _permute_walkers_for_swaps(self):
+        """One walker permutation for a (band, temp) tempering row.
+
+        Global permutation on a single device; per-device-block permutation
+        when the model ACA shards walkers across GPUs (set by
+        ``run_tempering``), so a swap pair's parent walkers always share a
+        device (parallel-resources plan P1). Row positions in a block only
+        ever hold walkers from that block, so every adjacent-temperature
+        pair within a row is device-local.
+        """
+        groups = getattr(self, "_tempering_walker_groups", None)
+        if not groups:
+            return cp.random.permutation(cp.arange(self.nwalkers))
+        out = cp.empty(self.nwalkers, dtype=int)
+        for g in groups:
+            g_dev = cp.asarray(g)
+            out[g_dev] = g_dev[cp.random.permutation(len(g))]
+        return out
+
     def _tempering_swap_grid(self, band_sorter, start):
         """Permuted (band, walker, temp) cell grid for one tempering parity.
 
@@ -2236,7 +2259,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         walkers_permuted = (
             cp.asarray(
                 [
-                    cp.random.permutation(cp.arange(self.nwalkers))
+                    self._permute_walkers_for_swaps()
                     for _ in range(self.ntemps * num_bands_tempered)
                 ]
             )
@@ -2299,6 +2322,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_temps += self.xp.asarray(dbetas.T)
 
     def run_tempering(self, model, state, band_sorter, band_temps):
+        # Per-GPU temperature permutation (parallel-resources plan P1): when
+        # the model ACA splits the cold-chain walkers across devices, swap
+        # partners are drawn WITHIN each device's walker block so no swap
+        # couples residuals on different GPUs. Walkers are exchangeable, so
+        # a device-local permutation is still a correct swap kernel; single
+        # device -> one global block (behavior unchanged).
+        _aca = getattr(model, "analysis_container_arr", None)
+        _splits = getattr(_aca, "gpu_splits", None)
+        self._tempering_walker_groups = (
+            [np.asarray(asnumpy(s), dtype=int) for s in _splits]
+            if _splits is not None and len(_splits) > 1
+            else None
+        )
         ll_change_log_temp = cp.zeros((self.ntemps, self.nwalkers, self.num_bands))
 
         band_swaps_accepted = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
