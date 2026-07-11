@@ -124,6 +124,10 @@ def main():
         bf = min(((mmt(x), x) for x in bc[1] + np.linspace(-1.0, 1.0, 121))); t.arr[:] = t0a
         print(f"  {rank:>4} {f0*1e3:>10.5f} {A0:>10.3e} {1-O.real:>+11.3e} {1-abs(O):>11.3e} "
               f"{bf[1]:>+9.3f} {bf[0]:>11.3e} {float(det):>+8.2f}", flush=True)
+        # Machine-parseable line for scripts/validation/run_mojito_null_checks.sh.
+        print(f"[RESULT] class=VGB rank={rank} f0_mhz={f0*1e3:.5f} "
+              f"overlap={abs(O):.8f} mismatch={1-abs(O):.3e} "
+              f"mm_taustar={bf[0]:.3e} det_snr={float(det):.2f}", flush=True)
         # plot band
         ff = np.fft.rfftfreq(N_WIN, DT); sel = (ff >= flo) & (ff <= fhi)
         FD = np.fft.rfft(D[0] * win) * DT; FB = np.fft.rfft(B[0] * win) * DT

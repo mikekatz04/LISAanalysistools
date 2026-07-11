@@ -1,15 +1,22 @@
-"""Source-agnostic null-template check INSIDE the full_year_combined global fit.
+"""Source-agnostic null-template check INSIDE the stock full_year_combined fit.
 
-Drives the real pipeline (get_global_fit_settings -> GlobalFit.load_info ->
-setup_acs -> acs.likelihood) for whichever single source class is active (set
-MBHB_IDS / SOBHB_IDS / EMRI_IDS in the environment before running), builds that
-branch's template at the EXACT catalogue injection (factor=0), and reports every
-inner product feeding the likelihood:
+Drives the real pipeline (erebor.full_year_combined().build() ->
+GlobalFit.load_info -> setup_acs -> acs.likelihood) for whichever single source
+class is active (set MBHB_IDS / SOBHB_IDS / EMRI_IDS in the environment before
+running), builds that branch's template at the EXACT catalogue injection
+(factor=0) through the branch's engine-side ``signal_gen``
+(``SourceSignalGen``: phentax MBH / TDI-on-the-fly SOBBH / legacy EMRI — the
+same generators the production runs sample with), and reports every inner
+product feeding the likelihood:
 
     <d|d>, <h|h>, <d|h>, <r|r>=<d|d>+<h|h>-2<d|h>, overlap, source term -0.5<r|r>,
     noise term, full logL  --  plus a setup_acs(rebuild_residuals=True) cross-check.
 
 If the branch's wiring reproduces the mojito L1 source, <r|r>/<d|d> -> 0.
+
+GB / VGB streams are handled by the sibling per-source fidelity scripts
+(scripts/gb/gb_mojito_match.py, scripts/gb/vgb_mojito_match.py) — see the
+run_mojito_null_checks.sh driver next to this file.
 """
 import os
 import threading
@@ -24,8 +31,8 @@ os.environ.setdefault(
 os.environ.setdefault("NWALKERS", "1")
 os.environ.setdefault("NTEMPS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "8")
+os.environ.setdefault("MAKE_PLOTS", "0")
 
-import importlib.util
 import numpy as np
 
 
@@ -38,37 +45,33 @@ def _watchdog(limit_gb=float(os.environ.get("NULL_CHECK_MEM_GB", "24"))):
         time.sleep(0.5)
 
 
-def _load_settings():
-    here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(
-        os.path.dirname(os.path.dirname(here)),
-        "global_fit_input", "full_year_combined_global_fit_settings.py",
-    )
-    spec = importlib.util.spec_from_file_location("fy_settings", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def main():
     threading.Thread(target=_watchdog, daemon=True).start()
-    fy = _load_settings()
     from mpi4py import MPI
     from eryn.state import BranchSupplemental
+    from lisatools.globalfit.recipe import MOJITO_REFERENCE_TIME
     from lisatools.globalfit.run import GlobalFit
+    from lisatools.globalfit.stock import erebor
 
-    active = [k for k, v in fy.MOJITO_SOURCE_IDS.items() if v]
-    print(f"[cfg] DATA_PROCESSOR={fy.DATA_PROCESSOR} source_ids={fy.MOJITO_SOURCE_IDS} "
-          f"CHOP_WINDOW={fy.CHOP_WINDOW} DT={fy.DT} TOBS={fy.TOBS:.4e}s "
-          f"({fy.TOBS/86400:.1f}d) NF={fy.NF} NT={fy.NT}", flush=True)
+    # Stock variant build: source ids / window / grid all resolve from the
+    # same env vars the production runs use (EMRI_IDS / MBHB_IDS / SOBHB_IDS,
+    # CHOP_WINDOW, TOBS_TARGET, DT-family defaults).
+    fit = erebor.full_year_combined(nwalkers=1, ntemps=1)
+    gs = fit.general
+    active = [k for k, v in gs.mojito_source_ids.items() if v]
+    print(f"[cfg] data_mode={gs.data_mode} source_ids={gs.mojito_source_ids} "
+          f"CHOP_WINDOW={gs.chop_window} DT={gs.dt} "
+          f"tobs_target={gs.tobs_target:.4e}s ({gs.tobs_target/86400:.1f}d)", flush=True)
 
-    curr = fy.get_global_fit_settings()
+    curr = fit.build()
     gi = curr.general_info
     branch = [n for n in curr.source_info if n not in ("psd", "galfor")][0]
     setup = curr.source_info[branch]
     print(f"[branch] active class={active} -> branch={branch!r}  "
-          f"data_t0={gi.data_t0:.4f}  REF={fy.MOJITO_REFERENCE_TIME:.4f}  "
-          f"off={gi.data_t0 - fy.MOJITO_REFERENCE_TIME:.3f}s", flush=True)
+          f"signal_gen={type(setup.signal_gen).__name__}  "
+          f"data_t0={gi.data_t0:.4f}  REF={MOJITO_REFERENCE_TIME:.4f}  "
+          f"off={gi.data_t0 - MOJITO_REFERENCE_TIME:.3f}s  "
+          f"TOBS={gi.Tobs:.4e}s ({gi.Tobs/86400:.1f}d)", flush=True)
 
     comm = MPI.COMM_WORLD
     bp = gi.main_file_path
