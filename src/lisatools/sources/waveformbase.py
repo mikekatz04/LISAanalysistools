@@ -997,6 +997,21 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         tdis = tdis[..., :-num_buffer_ponts] # remove the padded points
         tdis[..., :num_buffer_ponts] = 0.0  # zero out the corrupted points at the start
+        # TDI warm-up at the orbit-span edge: output samples whose delayed
+        # orbit evaluations precede the orbits' valid span come back NaN
+        # (e.g. synthetic runs where waveform_t0 == the orbit start, whose
+        # first ~8 arm-delays of output need orbit data at t < 0). Zero them
+        # like ResponseWrapper's ``remove_garbage="zero"`` — one non-finite
+        # edge sample would otherwise poison the whole domain transform
+        # downstream (both the injected data and every template).
+        _bad = ~self.xp.isfinite(tdis)
+        if _bad.any():
+            logger.debug(
+                "_apply_response: zeroed %d non-finite TDI samples "
+                "(orbit-span-edge warm-up).",
+                int(_bad.sum()),
+            )
+            tdis[_bad] = 0.0
         shifted_t_arr = shifted_t_arr[:, :-num_buffer_ponts]
 
         # Apply the same sub-dt shift to the time labels so they describe what

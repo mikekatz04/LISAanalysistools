@@ -11,6 +11,8 @@ import os
 import pickle
 import unittest
 
+import numpy as np
+
 from lisatools.globalfit.stock import MoveSpec, RecipeSpec, StageSpec
 from lisatools.globalfit.stock import erebor
 
@@ -328,12 +330,25 @@ class DataProcessorSwapTest(unittest.TestCase):
         fit.pop_move("sobbh_pe")
         gs = fit.make_general_settings()
         self.assertIs(gs.data_processor_class, SyntheticCombinedProcessingStep)
-        spec_classes = [
-            cls.__name__ for cls, _ in gs.processor_init_kwargs["processor_specs"]
-        ]
-        self.assertIn("SyntheticGBProcessingStep", spec_classes)
-        self.assertIn("SyntheticEMRIProcessingStep", spec_classes)
-        self.assertNotIn("SyntheticSOBBHProcessingStep", spec_classes)
+        specs = dict(
+            (cls.__name__, kwargs)
+            for cls, kwargs in gs.processor_init_kwargs["processor_specs"]
+        )
+        # GB via the gb_no_fg-style generator; MBH/EMRI/SOBBH (+ noise) via
+        # full_year's SyntheticDataProcessor so the data injection matches
+        # the branch templates. The removed sobbh branch injects nothing.
+        self.assertIn("SyntheticGBProcessingStep", specs)
+        self.assertIn("SyntheticDataProcessor", specs)
+        src = specs["SyntheticDataProcessor"]
+        self.assertEqual(
+            np.atleast_2d(src["sobbh_injection_params_full_basis"]).shape[0], 0
+        )
+        self.assertEqual(
+            np.atleast_2d(src["emri_injection_params_full_basis"]).shape[0], 1
+        )
+        self.assertEqual(
+            np.atleast_2d(src["mbh_injection_params_sampling_basis"]).shape[0], 1
+        )
 
     def test_full_year_modes(self):
         from lisatools.globalfit.stock.erebor.injections import (

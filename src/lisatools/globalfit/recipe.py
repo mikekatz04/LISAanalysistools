@@ -1039,7 +1039,9 @@ def build_psd_moves(
         galfor_transform_fn=galfor_info.transform if galfor_info is not None else None,
         sensitivity_backend=general_info.sensitivity_backend,
         temperature_control=temperature_control,
-        use_gpu=True,
+        # Match the run's compute setup: hardcoding True makes eryn's
+        # StretchMove call .get() on numpy arrays in CPU runs.
+        use_gpu=general_info.gpus is not None,
     )
 
     psd_search_move = PSDMove(
