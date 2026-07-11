@@ -1480,7 +1480,6 @@ def build_gb_moves(
         name="rj_prior_search",
         use_prior_removal=True,
         phase_maximize=_rj_phase_max,
-        ranks_needed=0,
         run_swaps=True,
         gpus=[],
         **gb_move_kwargs
@@ -1494,7 +1493,6 @@ def build_gb_moves(
         run_swaps=False, 
         name="rj_fstat_mcmc_search",
         phase_maximize=True,
-        ranks_needed=0,
         gpus=[],
         # Leaf-cap counters advance once per iteration: the prior RJ move is
         # the designated updater; the other RJ moves only enforce the gate.
@@ -1520,7 +1518,6 @@ def build_gb_moves(
             name="rj_refit_search",
             fp=_refit_fp,
             phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
-            ranks_needed=0,
             gpus=[],
             **{**gb_move_kwargs, "leaf_cap_update": False}
         )
@@ -1538,7 +1535,6 @@ def build_gb_moves(
         name="rj_prior",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=_rj_phase_max,
-        ranks_needed=0,
         run_swaps=True, 
         gpus=[],
         **gb_move_kwargs
@@ -1551,7 +1547,6 @@ def build_gb_moves(
         run_swaps=True,
         name="rj_fstat_mcmc",
         phase_maximize=False,
-        ranks_needed=0,
         gpus=[],
         **{**gb_move_kwargs, "leaf_cap_update": False}
     )
@@ -1568,7 +1563,6 @@ def build_gb_moves(
             name="rj_refit",
             fp=_refit_fp,
             phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],
-            ranks_needed=0,
             gpus=[],
             **{**gb_move_kwargs, "leaf_cap_update": False}
         )

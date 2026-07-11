@@ -194,6 +194,10 @@ class GeneralSettings(Settings):
     domain_settings: Optional[DomainSettingsSpec] = None
     random_seed: int | None = None
     backup_iter: int | None = None
+    # HDF backend chain compression (parallel-resources plan P2): gzip-4 by
+    # default — level 9 costs the saver a lot of CPU for marginal size gains.
+    hdf_compression: str = "gzip"
+    hdf_compression_opts: int = 4
     nwalkers: int | None = None
     ntemps: int | None = None
     window_type: str = "tukey"

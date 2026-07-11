@@ -35,7 +35,6 @@ from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
 from ...utils.utility import asnumpy
-from ..galaxyglobal import fit_each_leaf, make_gmm, run_gb_bulk_search
 from gbgpu.gb_likelihood import (
     BandLikelihoodEngine,
     FDBandLikelihoodEngine,
@@ -86,266 +85,10 @@ class _NoOpMempool:
 _to_numpy = asnumpy
 
 
-def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
-    """Worker entry point for ranks dedicated to the GB bulk search.
-
-    # TODO/DOCS: full handshake protocol with ``main_rank``; the body is the
-    canonical reference. Worker ranks pin themselves to a GPU, receive
-    band-split assignments, run :func:`run_gb_bulk_search`, and report
-    back.
-
-    Args:
-        comm: MPI communicator.
-        curr: Global-fit info object.
-        main_rank: Rank that orchestrates the search.
-        class_extra_gpus: GPU indices owned by this move class.
-        class_ranks_list: Ranks owned by this move class.
-    """
-    assert comm is not None
-
-    # get current rank and get index into class_ranks_list
-    logger.info(f"INSIDE GB search, RANK: {comm.Get_rank()}")
-    rank = comm.Get_rank()
-    rank_index = class_ranks_list.index(rank)
-    if rank_index == 0:
-        comm_info = {"process_ranks_for_fit": class_ranks_list}
-        logger.info("waiting to send process ranks")
-        comm.send(comm_info, dest=main_rank, tag=232342)
-        logger.info("sent process ranks")
-
-    fit_each_leaf(rank, curr, main_rank, comm)
-
-def fit_gmm(samples, comm, comm_info):
-    """Fit a Gaussian mixture model to per-leaf GB chain samples.
-
-    # TODO/DOCS: cross-rank protocol; mirrors the helper in
-    :mod:`lisatools.globalfit.galaxyglobal` but is invoked by worker ranks
-    of the GB special move set.
-    """
-
-    if len(samples) == 0:
-        return None
-
-    keep = np.arange(8)  # array([0, 1, 2, 4, 6, 7])
-
-    if samples.ndim == 4:
-        num_keep, num_samp, nwalkers_keep, ndim = samples.shape
-
-        args = []
-        for band in range(num_keep):
-            args.append(samples[band].reshape(-1, ndim)[:, keep])
-
-    elif samples.ndim == 2:
-        max_groups = samples[:, 0].astype(int).max()
-
-        args = []
-        for group in np.unique(samples[:, 0].astype(int)):
-            keep_samp = samples[:, 0].astype(int) == group
-            if keep_samp.sum() > 0:
-                if np.any(np.isnan(samples[keep_samp, 3:])) or np.any(
-                    np.isinf(samples[keep_samp, 3:])
-                ):
-                    breakpoint()
-                args.append(samples[keep_samp, 3:][:, keep])
-
-    else:
-        raise ValueError
-
-    # for debugging
-    # args = args[:1000]
-
-    batch = 10000
-    breaks = np.arange(0, len(args) + batch, batch)
-    logger.info("BREAKS", breaks)
-    if len(breaks) == 1:
-        breakpoint()
-    process_ranks_for_fit = comm_info["process_ranks_for_fit"]
-    gmm_info_all = []
-    for i in range(len(breaks) - 1):
-        start = breaks[i]
-        end = breaks[i + 1]
-        args_tmp = args[start:end]
-        gmm_info = [None for tmp in args_tmp]
-        gmm_complete = np.zeros(len(gmm_info), dtype=bool)
-
-        # OPPOSITE
-        # send_tags = comm_info["rec_tags"]
-        # rec_tags = comm_info["send_tags"]
-        outer_iteration = 0
-        current_send_arg_index = 0
-        current_status = [False for _ in process_ranks_for_fit]
-
-        while np.any(~gmm_complete):
-            time.sleep(0.1)
-            if current_send_arg_index >= len(args_tmp) and np.all(~np.asarray(current_status)):
-                current_send_arg_index = 0
-
-            outer_iteration += 1
-            if outer_iteration % 500 == 0:
-                logger.info(
-                    f"ITERATION: {outer_iteration}, need:",
-                    np.sum(~gmm_complete),
-                    current_status,
-                )
-
-            for proc_i, proc_rank in enumerate(process_ranks_for_fit):
-                # time.sleep(0.6)
-                if current_status[proc_i]:
-                    rec_tag = int(str(proc_rank) + "4545")
-                    check_output = comm.irecv(source=proc_rank)
-
-                    if not check_output.get_status():
-                        check_output.cancel()
-                    else:
-                        # first two give some delay for the processor that messes up
-                        try:
-                            output_info = check_output.wait()
-                        except (
-                            pickle.UnpicklingError,
-                            UnicodeDecodeError,
-                            ValueError,
-                            OverflowError,
-                        ) as e:
-                            current_status[proc_i] = False
-                            logger.warning("BAD error on return")
-                            continue
-                        if "BAD" in output_info:
-                            current_status[proc_i] = False
-                            logger.warning("BAD", output_info["BAD"])
-                            continue
-                        # print(output_info)
-
-                        arg_index = output_info["arg"]
-                        rank_recv = output_info["rank"]
-                        output_list = output_info["output"]
-
-                        gmm_info[arg_index] = output_list
-                        gmm_complete[arg_index] = True
-                        current_status[proc_i] = False
-
-                        if gmm_complete.sum() + 25 > len(args):
-                            print(proc_i, current_status)
-
-                if not current_status[proc_i]:
-                    while (
-                        current_send_arg_index < len(args_tmp)
-                        and gmm_complete[current_send_arg_index]
-                    ):
-                        current_send_arg_index += 1
-
-                    if current_send_arg_index < len(args_tmp):
-                        send_info = {
-                            "samples": args_tmp[current_send_arg_index],
-                            "arg": current_send_arg_index,
-                        }
-                        # print("sending", process_ranks_for_fit[index_add])
-                        send_tag = int(str(proc_rank) + "67676")
-                        comm.send(send_info, dest=proc_rank, tag=send_tag)
-                        current_status[proc_i] = True
-
-                        current_send_arg_index += 1
-
-        gmm_info_all.append(gmm_info)
-
-    weights = [tmp[0] for tmp in gmm_info]
-    means = [tmp[1] for tmp in gmm_info]
-    covs = [tmp[2] for tmp in gmm_info]
-    invcovs = [tmp[3] for tmp in gmm_info]
-    dets = [tmp[4] for tmp in gmm_info]
-    mins = [tmp[5] for tmp in gmm_info]
-    maxs = [tmp[6] for tmp in gmm_info]
-
-    output = [weights, means, covs, invcovs, dets, mins, maxs]
-
-    return output
-
-
-def fit_each_leaf(rank, curr, gather_rank, comm):
-    """Worker-side helper that fits one GMM per assigned GB leaf."""
-
-    run_process = True
-
-    while run_process:
-        try:
-            check = comm.recv(source=gather_rank)
-        except (
-            pickle.UnpicklingError,
-            UnicodeDecodeError,
-            ValueError,
-            OverflowError,
-        ) as e:
-            # print("BAD BAD ", rank)
-            comm.send({"BAD": "receiving issue"}, dest=gather_rank, tag=send_tag)
-            continue
-
-        if isinstance(check, str):
-            if check == "end":
-                run_process = False
-            continue
-
-        assert isinstance(check, dict)
-
-        try:
-            arg_index = check["arg"]
-
-            # print("INSIDE", rank, arg_index)
-            samples = check["samples"]
-        except KeyError:
-            comm.send({"BAD": "KeyError"}, dest=gather_rank, tag=send_tag)
-            continue
-
-        assert isinstance(samples, np.ndarray)
-
-        gmm = GMMFit(samples)
-        output_list = [
-            gmm.keep_mix.weights_,
-            gmm.keep_mix.means_,
-            gmm.keep_mix.covariances_,
-            np.array(
-                [
-                    np.linalg.inv(gmm.keep_mix.covariances_[i])
-                    for i in range(len(gmm.keep_mix.weights_))
-                ]
-            ),
-            np.array(
-                [
-                    np.linalg.det(gmm.keep_mix.covariances_[i])
-                    for i in range(len(gmm.keep_mix.weights_))
-                ]
-            ),
-            gmm.sample_mins,
-            gmm.sample_maxs,
-        ]
-        comm.send({"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank)
-    return
-
-
-def gb_refit_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
-    """Worker entry point for ranks dedicated to GMM-based GB refits.
-
-    # TODO/DOCS: full protocol; coordinates the per-leaf GMM refits used to
-    refresh ``rj_proposal_distribution`` on the GB RJ moves.
-    """
-    assert comm is not None
-
-    # get current rank and get index into class_ranks_list
-    logger.info(f"INSIDE GB refit, RANK: {comm.Get_rank()}")
-    rank = comm.Get_rank()
-    rank_index = class_ranks_list.index(rank)
-    gather_rank = class_ranks_list[0]
-    if rank_index == 0:
-        split_remainder = 0  # will fix this setup in the future
-        num_search = 2
-        gpu = class_extra_gpus[0]
-        comm_info = {"process_ranks_for_fit": class_ranks_list[1:]}
-        # run search here
-        # run_gb_bulk_search(gpu, curr, comm, comm_info, main_rank, num_search, split_remainder)
-        pass
-
-    else:
-        # run GMM fit here
-        fit_each_leaf(rank, curr, gather_rank, comm)
-        pass
+# The MPI worker entry points (gb_search_func / fit_each_leaf /
+# gb_refit_func) that fanned CPU distribution fitting out to spare ranks
+# were removed with the move->rank dispatch (parallel-resources plan P3);
+# GPU GMM fitting (vec_fit_gmm_min_bic) replaced them.
 
 
 from dataclasses import dataclass
@@ -449,7 +192,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # TODO/DOCS: full argument list — many constructor kwargs are passed
     through unmodified to ``GroupStretchMove``. Intended use is via the
     concrete subclasses :class:`GBSpecialStretchMove`,
-    :class:`GBSpecialRJPriorMove`, :class:`GBSpecialRJSearchMove`,
+    :class:`GBSpecialRJPriorMove`,
     :class:`GBSpecialRJSerialSearchMCMC`, and
     :class:`GBSpecialRJRefitMove`.
 
@@ -480,7 +223,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         use_prior_removal: If ``True``, draw RJ proposals from the prior.
         phase_maximize: If ``True``, marginalize over phase in the
             likelihood.
-        ranks_needed / gpus: MPI / GPU resource requests.
+        gpus: GPU device list for this move (intra-node knob).
         num_band_preload: Number of bands preloaded per call.
         run_swaps: Whether to run band-temperature swaps.
         max_data_store_size: Cap on the per-iteration data store size.
@@ -515,7 +258,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         name=None,
         use_prior_removal=False,
         phase_maximize=False,
-        ranks_needed=0,
         gpus=[],
         num_band_preload=20000,
         wdm_band_slab_layers=None,
@@ -561,7 +303,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.use_gpu = self.backend.uses_cupy
 
         self.force_backend = force_backend
-        self.ranks_needed = ranks_needed
         self.gpus = gpus
         self.gpu_priors = gpu_priors
         self.num_repeat_proposals = num_repeat_proposals
@@ -3299,18 +3040,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         finally:
             cp.cuda.runtime.setDevice(main_gpu)
 
-    @property
-    def ranks_needed(self):
-        if not hasattr(self, "_ranks_needed"):
-            raise ValueError("Need to set ranks needed for this class.")
-
-        return self._ranks_needed
-
-    @ranks_needed.setter
-    def ranks_needed(self, ranks_needed):
-        assert isinstance(ranks_needed, int)
-        self._ranks_needed = ranks_needed
-
 
 class GBSpecialStretchMove(GBSpecialBase):
     """In-model GB move with the band-aware group-stretch / info-matrix mix.
@@ -3657,7 +3386,7 @@ class GMMFit:
 
 
 def gather_gmms(gmms):
-    """Pack a list of GMM fits into the dict format expected by :func:`make_gmm`."""
+    """Pack a list of GMM fits into the legacy make_gmm dict format."""
     weights = []
     means = []
     covs = []
@@ -3702,9 +3431,6 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
     band-restricted prior via :class:`PriorTransformFn`.
     """
     comm_info = None
-
-    def get_rank_function(self):
-        return gb_search_func
 
     def setup(self, model, branches):
         assert isinstance(self.search_kwargs, dict)
@@ -4030,47 +3756,10 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         self.rj_proposal_distribution = {"gb": rj_dist}
 
 
-class GBSpecialRJSearchMove(GBSpecialBase): #? only needed for mutli GPU usage
-    """Reversible-jump GB search move that delegates work to extra GPU/MPI ranks.
-
-    # TODO/DOCS: full multi-GPU coordination protocol with the worker
-    function :func:`gb_search_func` — used when sufficient ranks are
-    available so the bulk search runs concurrently with PE.
-    """
-    def get_rank_function(self):
-        return gb_search_func
-
-    def setup(self, model, branches):
-        self.interact_with_search()
-        super(GBSpecialRJSearchMove, self).setup(branches) # should be serial move?
-
-    def interact_with_search(self):
-        search_rank = self.ranks[0]
-
-        search_ch = self.comm.irecv(source=search_rank)
-        if search_ch.get_status():
-            search_req = search_ch.wait()
-
-            if "receive" in search_req and search_req["receive"]:
-                search_dict = self.comm.recv(source=search_rank)
-                self.rj_proposal_distribution["gb"] = make_gmm(self.gb, search_dict["search"])
-
-            if "send" in search_req and search_req["send"]:
-                # DEPRECATED (2026-07 rework): this legacy MPI hand-off read
-                # from a stored ``self.mgh`` with a two-shard layout and a
-                # ``lisasens_shaped`` attribute that no longer exist. When
-                # the multi-GPU search path is revived, read the residual /
-                # psd from the model ACA at propose time instead.
-                raise NotImplementedError(
-                    "GBSpecialRJSearchMove residual hand-off needs re-wiring "
-                    "to the model's AnalysisContainerArray (legacy self.mgh "
-                    "path removed in the 2026-07 rework)."
-                )
-
-        else:
-            search_ch.cancel()
-
-        # TODO print("CHECK INSIDE PROP")
+# GBSpecialRJSearchMove (the MPI multi-GPU search delegate) was removed
+# with the move->rank dispatch (parallel-resources plan P3); the serial
+# single-GPU search (GBSpecialRJSerialSearchMCMC + GPU GMM fitting) is
+# the live search path.
 
 
 from lisatools.globalfit.gathergalaxy import gather_gb_samples

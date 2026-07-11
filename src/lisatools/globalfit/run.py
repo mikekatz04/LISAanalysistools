@@ -293,6 +293,38 @@ class GlobalFit:
         if self.rank == self.main_rank:
             dump_settings(self.curr.settings_dict, artifacts_dir)
 
+    @property
+    def _plot_iterations(self) -> int:
+        return int(getattr(self.curr.general_info, "plot_iterations", 100) or 100)
+
+    def make_plot_container(self):
+        """Build the diagnostic ``PlotContainer`` (or ``None`` when disabled).
+
+        Used by whichever rank owns plotting: the main rank at np < 3, the
+        dedicated results rank at np >= 3 (parallel-resources plan P2).
+        Opt-out via ``make_diagnostic_plots`` (MAKE_PLOTS env on the stock
+        classes); cadence via ``plot_iterations`` (PLOT_ITERATIONS env).
+        """
+        if not getattr(self.curr.general_info, "make_diagnostic_plots", True):
+            return None
+        branch_names = self.engine_info.branch_names
+        truths = self.curr.get_truths_dict()
+        exclude_from_plot = ["gb"]  # TODO: make this more general
+        truths_plot = {
+            key: val for key, val in truths.items() if key not in exclude_from_plot
+        }
+        branches_plot = [
+            name for name in branch_names if name not in exclude_from_plot
+        ]
+        return PlotContainer(
+            plots=["base", "tempering"],
+            branches=branches_plot,
+            parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
+            tempering_palette="icefire",
+            discard=0.3,
+            truths=truths_plot,
+        )
+
     def load_info(self, priors: typing.Dict[str, typing.Any]) -> GFState:
         """
         Load or initialize the MCMC state from backend or priors.
@@ -807,8 +839,14 @@ class GlobalFit:
 
             backend = GFHDFBackend(
                 backend_path,  # self.curr.general_info["file_information"]["fp_main"],
-                compression="gzip",
-                compression_opts=9,
+                # gzip-4 default: level 9 was CPU-heavy on the saver for
+                # marginal size gains on chain data (settings-overridable).
+                compression=getattr(
+                    self.curr.general_info, "hdf_compression", "gzip"
+                ),
+                compression_opts=getattr(
+                    self.curr.general_info, "hdf_compression_opts", 4
+                ),
                 comm=self.comm,
                 save_plot_rank=self.results_rank,
                 sub_backend=self.engine_info.branch_backends,
@@ -886,85 +924,35 @@ class GlobalFit:
             # backend.save_step(state, accepted, swaps_accepted=swaps_accepted)
             # exit()
 
-            rank_instructions = {}
-            print("NEED TO FIX")
-            for move_tmp in []:  # setup_info_all.in_model_moves + setup_info_all.rj_moves:
-                if isinstance(move_tmp, tuple) or isinstance(move_tmp, list):
-                    move_tmp = move_tmp[0]
-
-                # adjust for combine move
-                if isinstance(move_tmp, GFCombineMove):
-                    moves_list = move_tmp.moves
-                else:
-                    moves_list = [move_tmp]
-
-                for move in moves_list:
-                    if not isinstance(move, GlobalFitMove):
-                        raise ValueError("All moves must be a subclass of GlobalFitMove.")
-
-                    move.comm = self.comm
-                    if len(move.gpus) > 0 or (move.ranks_needed > 0 and not move.ranks_initialized):
-                        if len(move.gpus) > 0:
-                            assert move.ranks_needed > 0
-
-                        tmp_ranks = []
-                        for _ in range(move.ranks_needed):
-                            try:
-                                tmp_ranks.append(self.ranks_to_give.pop())
-                            except IndexError:
-                                raise ValueError("Not enough MPI ranks to give.")
-                        self.used_ranks += tmp_ranks
-                        move.assign_ranks(tmp_ranks)
-                        for rank in tmp_ranks:
-                            rank_instructions[rank] = {
-                                "function": move.get_rank_function(),
-                                "class_rank_list": tmp_ranks,
-                                "gpus": move.gpus,
-                            }
-
-            # stop unneeded processes
+            # Stop the spare processes. (The old move->rank dispatch that
+            # handed spares to moves was removed with the CPU distribution-
+            # fitting workers it served — GPU GMM fitting / neural flows
+            # replaced them; parallel-resources plan P3. A future coarse
+            # multi-node worker pool would re-enter here.)
             for rank in self.all_ranks:
                 if rank in self.used_ranks:
                     continue
                 self.comm.send("stop", dest=rank)
-
-            for rank, tmp in rank_instructions.items():
-                self.comm.send({"rank": rank, **tmp}, dest=rank)
 
             from eryn.moves import StretchMove
 
             _tmp_move = StretchMove(live_dangerously=True)
             # permute False is there for the PSD sampling for now
 
-            truths = self.curr.get_truths_dict()
-
-            exclude_from_plot = ["gb"]  # TODO: make this more general
-            truths_plot = {key: val for key, val in truths.items() if key not in exclude_from_plot}
-            branches_plot = [name for name in branch_names if name not in exclude_from_plot]
-
-            # Diagnostic plotting is opt-out via the general settings
-            # (MAKE_PLOTS / PLOT_ITERATIONS env knobs on the stock classes;
-            # getattr defaults keep non-stock settings working). Set
-            # make_diagnostic_plots=False to skip plots entirely, or bump
-            # plot_iterations to plot far less often.
-            _make_plots = getattr(
-                self.curr.general_info, "make_diagnostic_plots", True
-            )
-            _plot_iterations = int(
-                getattr(self.curr.general_info, "plot_iterations", 100) or 100
-            )
+            # Diagnostic plotting ownership (parallel-resources plan P2): at
+            # np >= 3 the dedicated results rank renders the plots from the
+            # backend it writes, so the sampler never blocks on matplotlib;
+            # below that the main rank plots as before.
+            _plot_iterations = self._plot_iterations
             plot_container = (
-                PlotContainer(
-                    plots=["base", "tempering"],
-                    branches=branches_plot,
-                    parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
-                    tempering_palette="icefire",
-                    discard=0.3,
-                    truths=truths_plot,
-                )
-                if _make_plots
+                self.make_plot_container()
+                if self.results_rank == self.main_rank
                 else None
             )
+            if plot_container is None:
+                # eryn auto-creates its own PlotContainer when
+                # plot_generator is None and plot_iterations > 0.
+                _plot_iterations = -1
 
             # Wrap ``periodic`` as a ``PeriodicContainer`` with ``key_order``
             # so eryn doesn't reject the string-keyed dict. The key_order
@@ -1040,27 +1028,21 @@ class GlobalFit:
                 self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
+            # Dedicated saver rank (np >= 3): async HDF5 writes + the
+            # diagnostic plots, both off the sampler's critical path
+            # (saves always take priority; see the loop's docstring).
             save_to_backend_asynchronously_and_plot(
                 backend,
                 self.comm,
                 self.main_rank,
-                self.head_rank,
-                1,
-                self.curr.general_info.backup_iter,
-            )  # 1 is plot_iter
+                plot_container=self.make_plot_container(),
+                plot_iter=self._plot_iterations,
+                backup_iter=self.curr.general_info.backup_iter,
+            )
 
         else:
+            # Spare rank: wait for the startup "stop" and exit. (The
+            # instruction-dict dispatch that ran move workers here was
+            # removed with the move->rank machinery; plan P3.)
             info = self.comm.recv(source=self.main_rank)
-            if isinstance(info, dict):
-                launch_rank = info["rank"]
-                assert launch_rank == self.rank
-                launch_function = info["function"]
-                launch_function(
-                    self.comm,
-                    self.curr,
-                    self.main_rank,
-                    info["gpus"],
-                    info["class_rank_list"],
-                )
-
-            print(f"Process {self.rank} finished.")
+            print(f"Process {self.rank} finished ({info!r}).")

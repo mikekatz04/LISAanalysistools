@@ -2,6 +2,7 @@
 
 import shutil
 import time
+from logging import getLogger
 from typing import Optional
 
 import h5py
@@ -16,6 +17,8 @@ from ..domains import (
 )
 from .plot import RunResultsProduction
 from .state import EMRIState, GBState, GFState, MBHState, SOBBHState
+
+logger = getLogger(__name__)
 
 
 # ----------------------------------------------------------------------
@@ -129,66 +132,115 @@ def _read_domain_settings(
 
 
 def save_to_backend_asynchronously_and_plot(
-    gb_reader, comm, main_rank, head_rank, plot_iter, backup_iter
+    gb_reader,
+    comm,
+    main_rank,
+    plot_container=None,
+    plot_iter=100,
+    backup_iter=5,
+    coalesce_threshold=3,
 ):
     """Async writer loop: receive states from ``main_rank`` and persist to HDF5.
 
-    Runs on the dedicated results rank. Receives a ``{save_args, save_kwargs}``
-    payload, calls :meth:`GFHDFBackend.save_step_main`, periodically copies
-    the file to a running backup, and exits when sent ``{"finish_run": True}``.
+    Runs on the dedicated results rank (np >= 3). Receives
+    ``{save_args, save_kwargs}`` payloads, calls
+    :meth:`GFHDFBackend.save_step_main`, periodically copies the file to a
+    running backup, regenerates the diagnostic plots, and exits when sent
+    ``{"finish_run": True}``.
+
+    Saves always take priority over plots (parallel-resources plan P2):
+
+    - The loop blocks directly on ``recv`` — the incoming message IS the
+      clock (no fixed sleep).
+    - Backpressure: if the loop falls behind and more than
+      ``coalesce_threshold`` save payloads are queued, only the newest is
+      written and the number of dropped intermediate states is logged
+      loudly (never silently).
+    - Plots run only when the incoming queue is empty; a queued save defers
+      the plot to the next quiet gap, and a plot failure never kills the
+      saver.
 
     Args:
         gb_reader: The :class:`GFHDFBackend` to write into.
         comm: MPI communicator.
         main_rank: Rank that produces the save payloads.
-        head_rank: Rank that owns the global state.
-        plot_iter: Iteration cadence for plot regeneration (currently
-            commented out in body).
-        backup_iter: Iteration cadence at which the HDF file is copied to a
+        plot_container: Optional eryn ``PlotContainer``; its ``backend`` is
+            pointed at ``gb_reader`` so plots render from the file this
+            loop writes. ``None`` disables plotting.
+        plot_iter: Save-step cadence for plot regeneration.
+        backup_iter: Save-step cadence at which the HDF file is copied to a
             ``*_running_backup_copy.h5``.
+        coalesce_threshold: Queue depth above which intermediate states are
+            dropped in favour of the newest.
     """
-    print("starting run SAVE")
-    run_results_production = (
-        None  ## RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
-    )
+    logger.info("results rank: starting async save/plot loop")
+    if plot_container is not None:
+        plot_container.backend = gb_reader
     run = True
     i = 0
+    total_dropped = 0
     while run:
-        print("WAITING FOR DATA")
-        save_dict = comm.recv(source=main_rank)
-        print("RECEIVED FOR DATA")
-        if "finish_run" in save_dict and save_dict["finish_run"]:
+        payloads = [comm.recv(source=main_rank)]
+        # Drain the backlog without blocking: saves must never queue behind
+        # this loop's own work.
+        while comm.iprobe(source=main_rank):
+            payloads.append(comm.recv(source=main_rank))
+
+        finish = any(
+            isinstance(p, dict) and p.get("finish_run", False) for p in payloads
+        )
+        states = [p for p in payloads if isinstance(p, dict) and "save_args" in p]
+        if len(states) > coalesce_threshold:
+            dropped = len(states) - 1
+            total_dropped += dropped
+            logger.warning(
+                "results rank fell behind: dropping %d intermediate save "
+                "state(s), keeping the newest (%d dropped so far this run).",
+                dropped,
+                total_dropped,
+            )
+            states = states[-1:]
+
+        for save_dict in states:
+            st = time.perf_counter()
+            gb_reader.save_step_main(
+                *save_dict["save_args"], **save_dict["save_kwargs"]
+            )
+            logger.debug("save step took %.3f s", time.perf_counter() - st)
+            i += 1
+            if (i % backup_iter) == 0:
+                shutil.copy(
+                    gb_reader.filename,
+                    gb_reader.filename[:-3] + "_running_backup_copy.h5",
+                )
+
+        if finish:
             run = False
             continue
 
-        time.sleep(15.0)  # to allow for ending the code
-        save_args = save_dict["save_args"]
-        save_kwargs = save_dict["save_kwargs"]
-        print("attempting to save step")
-        st = time.perf_counter()
-        gb_reader.save_step_main(*save_args, **save_kwargs)
-        et = time.perf_counter()
-        print("SAVE STEP, time:", et - st)
-        # if ((i + 1) % plot_iter) == 0:
-        #     print("ASK FOR DATA FOR PLOT")
-        #     comm.send({"send": True}, dest=head_rank, tag=91)
-        #     current_info = comm.recv(source=head_rank, tag=92)
-
-        #     # remove GPU component for GB waveform build
-        #     current_info.current_info["gb"]["get_templates"].initialization_kwargs["use_gpu"] = False
-        #     current_info.current_info["mbh"]["get_templates"].initialization_kwargs["use_gpu"] = False
-        #     current_info.current_info["gb"]["get_templates"].runtime_kwargs["use_c_implementation"] = False
-
-        #     print("STARTING PLOT")
-        #     run_results_production.build_plots(current_info)
-        #     print("FINISHED PLOT")
-
-        if ((i + 1) % backup_iter) == 0:
-            print("copy to backup file")
-            # copy to backup file
-            shutil.copy(gb_reader.filename, gb_reader.filename[:-3] + "_running_backup_copy.h5")
-
-        i += 1
+        # Plots only in a quiet gap: a queued save always wins.
+        if (
+            plot_container is not None
+            and i > 0
+            and (i % plot_iter) == 0
+            and not comm.iprobe(source=main_rank)
+        ):
+            st = time.perf_counter()
+            try:
+                plot_container.produce_plots()
+            except Exception:
+                logger.exception(
+                    "diagnostic plotting failed on the results rank "
+                    "(saves continue unaffected)"
+                )
+            else:
+                logger.info(
+                    "diagnostic plots regenerated in %.1f s",
+                    time.perf_counter() - st,
+                )
+    logger.info(
+        "results rank: finished (%d states saved, %d dropped)", i, total_dropped
+    )
     return
 
 

@@ -4,7 +4,6 @@ from .addremovemove import ResidualAddOneRemoveOneMove
 from .gbspecialstretch import (
     GBSpecialRJPriorMove,
     GBSpecialRJRefitMove,
-    GBSpecialRJSearchMove,
     GBSpecialRJSerialSearchMCMC,
     GBSpecialStretchMove,
 )

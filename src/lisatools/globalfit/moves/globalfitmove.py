@@ -19,8 +19,6 @@ class GlobalFitMove:
             should be reset. ``-1`` disables.
     """
 
-    ranks_initialized = False
-
     def __init__(
         self,
         *args,
@@ -75,8 +73,8 @@ class GlobalFitMove:
 
         self._comm = comm
 
-    # NOTE: ranks_needed was defined twice on this class; the asserting
-    # version below (which always won at class creation) is the survivor.
+    # NOTE: the ranks/assign_ranks/ranks_needed move->rank machinery was
+    # removed with the dead dispatch (parallel-resources plan P3).
 
     @property
     def gpus(self):
@@ -92,33 +90,6 @@ class GlobalFitMove:
             assert isinstance(tmp, int)
 
         self._gpus = gpus
-
-    @property
-    def ranks(self):
-        """List of MPI ranks assigned to this move via :meth:`assign_ranks`."""
-        return self._ranks
-
-    def assign_ranks(self, ranks):
-        """Record the MPI ranks dedicated to this move.
-
-        Args:
-            ranks: List of MPI rank indices.
-        """
-        assert isinstance(ranks, list)
-        self.ranks_initialized = True
-        self._ranks = ranks
-
-    @property
-    def ranks_needed(self):
-        """Number of MPI ranks this move requires (default 0)."""
-        if not hasattr(self, "_ranks_needed"):
-            return 0
-        return self._ranks_needed
-
-    @ranks_needed.setter
-    def ranks_needed(self, ranks_needed):
-        assert isinstance(ranks_needed, int)
-        self._ranks_needed = ranks_needed
 
 
 class GFCombineMove(CombineMove, GlobalFitMove):
