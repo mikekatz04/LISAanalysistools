@@ -1018,8 +1018,15 @@ def build_psd_moves(
     ntemps: int = general_info.ntemps
     psd_info = curr.source_info["psd"]
     galfor_info = curr.source_info.get("galfor", None)
+    sgwb_info = curr.source_info.get("sgwb", None)
 
-    effective_ndim = engine_info.ndims["psd"] if galfor_info is None else engine_info.ndims["galfor"] + engine_info.ndims["psd"] 
+    # The single joint PSDMove samples psd (+ optional galfor + optional sgwb),
+    # so the tempering ladder dimension is the sum of the present branch ndims.
+    effective_ndim = engine_info.ndims["psd"]
+    if galfor_info is not None:
+        effective_ndim += engine_info.ndims["galfor"]
+    if sgwb_info is not None:
+        effective_ndim += engine_info.ndims["sgwb"]
     temperature_control = TemperatureControl(
         effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
     )

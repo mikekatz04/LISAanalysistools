@@ -64,6 +64,7 @@ from ..injections import (
 from ..mbh import MBHSettings, MBHSetup
 from ..noise import GalForSettings, GalForSetup, PSDSettings, PSDSetup
 from ..sobbh import SOBBHSettings, SOBBHSetup
+from ..stochastic import SGWBSettings, SGWBSetup
 from ..wrappers import (
     EMRIWaveWrap,
     SOBBHWaveWrap,
@@ -142,6 +143,14 @@ class AllSourcesPSDSettings(PSDSettings):
 
 
 @dataclasses.dataclass
+class AllSourcesSGWBSettings(SGWBSettings):
+    """Optional power-law SGWB branch (2 params: log10_A, alpha)."""
+
+    ndim: int = 2
+    injection: typing.Optional[np.ndarray] = None
+
+
+@dataclasses.dataclass
 class AllSourcesEMRISettings(EMRISettings):
     """EMRI branch: legacy ResponseWrapper path, tight prior around injection."""
 
@@ -209,6 +218,17 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     # ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``; None -> the
     # stock two-source table.
     gb_injection_params: typing.Optional[typing.Any] = None
+    # Opt-in SGWB branch (env ALL_SOURCES_SGWB=1). Default off keeps the
+    # six-branch behaviour unchanged; when on, a power-law SGWB is fit jointly
+    # with psd+galfor through the same PSDMove. Note: the stock data
+    # processors do not yet inject an SGWB, so enable this only with data that
+    # contains one (or extend the processor).
+    fit_sgwb: bool = dataclasses.field(
+        default_factory=env_default("ALL_SOURCES_SGWB", False, bool)
+    )
+    sgwb_injection: typing.Sequence[float] = dataclasses.field(
+        default_factory=lambda: [-9.5, 2.0 / 3.0]
+    )
 
 
 class AllSourcesGlobalFit(EreborFit):
@@ -228,6 +248,7 @@ class AllSourcesGlobalFit(EreborFit):
         "mbh": MBHSetup,
         "emri": EMRISetup,
         "sobbh": SOBBHSetup,
+        "sgwb": SGWBSetup,
     }
 
     def adjust_general(self, gs: AllSourcesGeneralSettings) -> None:
@@ -240,7 +261,7 @@ class AllSourcesGlobalFit(EreborFit):
                 gs.nf = 1440
 
     def default_branches(self) -> typing.Dict[str, Settings]:
-        return {
+        branches = {
             "gb": AllSourcesGBSettings(),
             "psd": AllSourcesPSDSettings(),
             "galfor": GalForSettings(),
@@ -248,6 +269,9 @@ class AllSourcesGlobalFit(EreborFit):
             "emri": AllSourcesEMRISettings(),
             "sobbh": AllSourcesSOBBHSettings(),
         }
+        if self.general.fit_sgwb:
+            branches["sgwb"] = AllSourcesSGWBSettings()
+        return branches
 
     def default_recipe(self) -> RecipeSpec:
         # One combined PE stage, legacy order: psd, mbh, emri, sobbh, gb.
@@ -481,6 +505,22 @@ class AllSourcesGlobalFit(EreborFit):
         if galfor.initialize_kwargs is None:
             galfor.initialize_kwargs = {}
         return galfor
+
+    def _prepare_sgwb(self, sgwb: AllSourcesSGWBSettings, general_setup: GeneralSetup):
+        from eryn.prior import ProbDistContainer, uniform_dist
+
+        if sgwb.initialize_kwargs is None:
+            sgwb.initialize_kwargs = {}
+        if sgwb.priors is None:
+            # prior wide enough to contain a detectable log10_A injection
+            sgwb.priors = {
+                "sgwb": ProbDistContainer(
+                    {0: uniform_dist(-16.0, -9.0), 1: uniform_dist(-1.0, 2.0)}
+                )
+            }
+        if sgwb.injection is None:
+            sgwb.injection = np.asarray(self.general.sgwb_injection, dtype=float)
+        return sgwb
 
     def _prepare_emri(self, emri: AllSourcesEMRISettings, general_setup: GeneralSetup):
         from eryn.moves import StretchMove

@@ -35,9 +35,16 @@ class PSDSettings(Settings):
     nleaves_min: int = 1
     ndim: int = 4
     transform: Optional[TransformContainer] = None
-    injection: Optional[np.ndarray] = None 
+    injection: Optional[np.ndarray] = None
     nknots: Optional[int] = None
     num_prop_repeats: int = 50
+    # Instrument-noise model choice for this branch — swap it the way a source
+    # branch swaps its waveform. ``None`` -> the backend default
+    # (``InstrumentNoise`` + ``LISAModel``, name ``model_name``). The variant's
+    # ``finalize_general`` threads these onto the CompositeSensitivityBackend.
+    instrument_component_cls: Any = None
+    instrument_model_cls: Any = None
+    model_name: Optional[str] = None
 
 class PSDSetup(Setup):
     """:class:`Setup` for the instrumental PSD branch in the Erebor recipe.
@@ -116,6 +123,13 @@ class GalForSettings(Settings):
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 5
+    # Spectral / modulation model choice for this branch — swap it the way a
+    # source branch swaps its waveform (``fit.galfor.stochastic_fn = ...``).
+    # ``None`` -> the sensitivity backend's default
+    # (``HyperbolicTangentGalacticForeground`` / stationary). The variant's
+    # ``finalize_general`` threads these onto the CompositeSensitivityBackend.
+    stochastic_fn: Any = None
+    modulation: Any = None
 
 
 class GalForSetup(Setup):

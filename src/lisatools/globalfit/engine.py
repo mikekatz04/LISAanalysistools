@@ -103,6 +103,17 @@ class Setup:
         assert isinstance(settings, Settings)
         self._settings = settings
 
+    @property
+    def transform_fn(self) -> Optional[TransformContainer]:
+        """Alias for :attr:`transform` (the branch parameter transform).
+
+        ``run.py``/moves refer to the branch's parameter transform as
+        ``transform_fn`` while the :class:`Settings` field is named
+        ``transform``; expose both names for the same object so either spelling
+        resolves on any :class:`Setup`.
+        """
+        return self.transform
+
     def init_df(self):
         """Round ``Tobs`` to a multiple of ``dt`` and recompute ``df = 1/Tobs``."""
         self.Tobs = int(self.Tobs / self.dt) * self.dt
@@ -497,6 +508,7 @@ class GeneralSetup(Setup, GeneralSettings):
                     sensitivity_init_kwargs.pop(k)
             self.sensitivity_backend = backend_cls(
                 settings=domain_settings,
+                force_backend=self.force_backend,
                 **sensitivity_init_kwargs,
             )
         else:

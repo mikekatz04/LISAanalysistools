@@ -59,6 +59,10 @@ def windowfun(winType, N, alpha=0.01, xp=None):
     # Tukey window
     def tukey(N, alpha):
         # alpha -- parameter the defines the shape of the window
+        if alpha <= 0.0:
+            # alpha = 0 is the rectangular limit; the general expression below
+            # divides by alpha, so return the rectangular window directly.
+            return xp.ones(N, dtype=float)
         w         = xp.zeros(N, dtype=float)
         i         = xp.arange(0,N,1)
         r         = (2.0*i)/(alpha*(N-1))

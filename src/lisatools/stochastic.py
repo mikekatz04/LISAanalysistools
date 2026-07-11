@@ -19,7 +19,7 @@ except (ModuleNotFoundError, ImportError):
 
 from . import detector as lisa_models
 from .utils.constants import *
-from .utils.utility import AET
+from .utils.utility import AET, get_array_module
 
 
 class StochasticContribution(ABC):
@@ -122,7 +122,8 @@ class StochasticContributionContainer:
             Stochastic contribution.
 
         """
-        Sh_out = np.zeros_like(f)
+        xp = get_array_module(f)
+        Sh_out = xp.zeros_like(f)
         for key in params_dict:
             stochastic_contrib = self.stochastic_contribution_dict[key]
             Sh_out += stochastic_contrib.get_Sh(f, params_dict[key], **(kwargs_dict.get(key, {})))
@@ -170,12 +171,13 @@ class HyperbolicTangentGalacticForeground(StochasticContribution):
             PSD of the Galaxy foreground noise
 
         """
+        xp = get_array_module(f)
         Sgal = (
             amp
-            * np.exp(-((f / f_1) ** alpha))
+            * xp.exp(-((f / f_1) ** alpha))
             * (f ** (-7.0 / 3.0))
             * 0.5
-            * (1.0 + np.tanh(-(f - fk) / f_2))
+            * (1.0 + xp.tanh(-(f - fk) / f_2))
         )
 
         return Sgal
@@ -327,12 +329,18 @@ class PowerLawSGWB(StochasticContribution):
         Returns:
             GW spectral density ``Sgw(f)`` (pre-response).
         """
+        # Backend-generic (numpy / cupy): resolve xp from f. cupy has no
+        # ``errstate``; avoid the f=0 divide entirely by masking f<=0 to a
+        # dummy 1.0 before the division and NaN-ing those bins afterwards
+        # (bit-identical result: Sgw at f>0, NaN at f<=0).
+        xp = get_array_module(f)
         A = 10.0**log10_A
-        # Sgw ~ 1/f^3 diverges at f=0; return NaN there.
-        with np.errstate(divide="ignore", invalid="ignore"):
-            prefactor = SGWB_HSCALE / (f * f * f)
-            Sgw = prefactor * A * (f / fref) ** alpha
-        return np.where(np.asarray(f) > 0.0, Sgw, np.nan)
+        f_arr = xp.asarray(f, dtype=float)
+        pos = f_arr > 0.0
+        safe_f = xp.where(pos, f_arr, 1.0)
+        prefactor = SGWB_HSCALE / (safe_f * safe_f * safe_f)
+        Sgw = prefactor * A * (safe_f / fref) ** alpha
+        return xp.where(pos, Sgw, xp.nan)
 
 
 class LogNormalSGWB(StochasticContribution):

@@ -84,6 +84,26 @@ class DomainSettingsBase(LISAToolsParallelModule):
         """Return a new settings object describing a sliced view of this domain."""
         raise NotImplementedError("get_slice needs to be implemented for this signal type.")
 
+    # Whether the basis coefficients that enter the Gaussian likelihood are
+    # *real* variables (TD, WDM) rather than the complex one-sided (FD/STFT
+    # Whittle) coefficients. Subclasses flip this single flag; the numeric
+    # convention lives in one place, :attr:`logdet_factor`.
+    _real_basis: bool = False
+
+    @property
+    def logdet_factor(self) -> float:
+        r"""Factor multiplying ``sum(log det C)`` in the Gaussian noise term.
+
+        One factor for every domain, resolved from a single characteristic
+        (:attr:`_real_basis`): ``0.5`` for real-basis domains (TD, real WDM),
+        where each real coefficient contributes ``-0.5 log det C`` to the
+        Gaussian density, and ``1.0`` for the complex one-sided (FD / Whittle)
+        convention used historically throughout lisatools. Without the ``0.5``
+        the noise-parameter posterior peaks at ``C_true / 2`` (validated
+        empirically via a global covariance-scale scan).
+        """
+        return 0.5 if self._real_basis else 1.0
+
 
 class DomainBase:
     """Base wrapper for an array tagged with its domain settings.
@@ -613,6 +633,9 @@ class TDSettings(DomainSettingsBase):
         t0: Start time in seconds. Defaults to ``0.0``.
         **kwargs: Forwarded to :class:`DomainSettingsBase` (e.g. ``force_backend``).
     """
+
+    # Real Gaussian basis -> logdet_factor = 0.5 (see DomainSettingsBase).
+    _real_basis: bool = True
 
     N: int
     dt: float
@@ -2026,6 +2049,11 @@ class WDMSettings(DomainSettingsBase):
         max_time: Upper edge of the active time band (seconds).
         **kwargs: Forwarded to :class:`DomainSettingsBase` (e.g. ``force_backend``).
     """
+
+    # WDM coefficients entering the likelihood are real Gaussian variables
+    # (true for the quadrature is_complex variant too, whose imaginary part is
+    # dropped before the likelihood) -> logdet_factor = 0.5.
+    _real_basis: bool = True
 
     def __init__(
         self,

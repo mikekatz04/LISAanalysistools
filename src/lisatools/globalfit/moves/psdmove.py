@@ -255,7 +255,9 @@ class PSDMove(GlobalFitMove, StretchMove):
     # dev ACA path + hybrid dispatch
     # ------------------------------------------------------------------
 
-    def _build_sensitivity_for_walker(self, walker_index: int, psd_params, galfor_params):
+    def _build_sensitivity_for_walker(
+        self, walker_index: int, psd_params, galfor_params, sgwb_params=None
+    ):
         """Build the per-walker sensitivity matrix for the given parameters.
 
         Routes through the configured :class:`XYZSensitivityBackend`. The
@@ -263,11 +265,16 @@ class PSDMove(GlobalFitMove, StretchMove):
         AnalysisContainer for the matching walker when we accept proposals
         (see :meth:`propose`).
         """
+        # ``sgwb_params`` is only forwarded when present so the legacy
+        # XYZSensitivityBackend (whose __call__ has no sgwb kwarg) keeps
+        # working for runs without an sgwb branch.
+        extra = {} if sgwb_params is None else dict(sgwb_params=sgwb_params)
         return self.sensitivity_backend(
             f"walker_{walker_index}",
             psd_params,
             galfor_params=galfor_params,
             transform_fn=self.psd_transform_fn,
+            **extra,
         )
 
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
@@ -331,6 +338,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         psd_coords = coords["psd"][logp_keep][:, 0]
         has_galfor = "galfor" in coords
         galfor_coords = coords["galfor"][logp_keep][:, 0] if has_galfor else None
+        has_sgwb = "sgwb" in coords
+        sgwb_coords = coords["sgwb"][logp_keep][:, 0] if has_sgwb else None
 
         # Cache and restore the per-walker sensitivity matrix so we don't
         # corrupt the state seen by other moves. After all proposals are
@@ -343,8 +352,9 @@ class PSDMove(GlobalFitMove, StretchMove):
                 if w not in original_sens:
                     original_sens[w] = self.acs[w].sens_mat
                 galfor_here = None if not has_galfor else galfor_coords[row]
+                sgwb_here = None if not has_sgwb else sgwb_coords[row]
                 self.acs[w].sens_mat = self._build_sensitivity_for_walker(
-                    w, psd_coords[row], galfor_here
+                    w, psd_coords[row], galfor_here, sgwb_here
                 )
             self.acs.reset_linear_psd_arr()
             walker_ll = self.acs.likelihood()
@@ -370,7 +380,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         """
         # wait to get ntemps, nwalkers
         logp = None
-        for key in ["psd", "galfor"]:
+        for key in ["psd", "galfor", "sgwb"]:
             if key not in branches_coords:
                 continue
             ntemps, nwalkers, _, ndim = branches_coords[key].shape
@@ -477,7 +487,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         # setup model framework for passing necessary
         tmp_branches_coords = {
             key: state.branches_coords[key]
-            for key in ["psd", "galfor"]
+            for key in ["psd", "galfor", "sgwb"]
             if key in state.branches_coords
         }
 
@@ -511,7 +521,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         # CHECK THIS STATE SETUP
         new_state = GFState(state, copy=True)
 
-        for key in ["psd", "galfor"]:
+        for key in ["psd", "galfor", "sgwb"]:
             if key not in tmp_state.branches:
                 continue
             new_state.branches[key].coords[:] = tmp_state.branches[key].coords[:]
@@ -527,9 +537,13 @@ class PSDMove(GlobalFitMove, StretchMove):
                 galfor_params = new_state.branches_coords["galfor"][0, w, 0]
             else:
                 galfor_params = None
+            if "sgwb" in new_state.branches_coords:
+                sgwb_params = new_state.branches_coords["sgwb"][0, w, 0]
+            else:
+                sgwb_params = None
 
-            new_sens = self.sensitivity_backend(
-                f"walker_{w}", psd_params, galfor_params=galfor_params, transform_fn=self.psd_transform_fn,
+            new_sens = self._build_sensitivity_for_walker(
+                w, psd_params, galfor_params, sgwb_params
             )
             self.acs[w].sens_mat = new_sens
 

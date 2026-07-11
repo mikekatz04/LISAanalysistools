@@ -14,17 +14,25 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from lisatools.domains import FDSettings, TDSettings, place_td_signal_on_grid
+from lisatools.domains import (
+    FDSettings,
+    TDSettings,
+    TDSignal,
+    WDMSettings,
+    WDMSignal,
+    place_td_signal_on_grid,
+)
 from lisatools.globalfit.preprocessing import BaseProcessingStep, L1ProcessingStep
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.sensitivity import (
+    CompositeSensitivityBackend,
     CompositeSensitivityMatrix,
     GalacticForeground,
     generate_correlated_instrument_noise_td,
 )
 from lisatools.stochastic import FittedHyperbolicTangentGalacticForeground
 from lisatools.utils.constants import YRSID_SI
-from lisatools.utils.utility import get_array_module
+from lisatools.utils.utility import asnumpy, get_array_module
 
 from .transforms import (
     make_emri_transform_container,
@@ -511,6 +519,17 @@ class AnnualModulatedGalacticForeground(GalacticForeground):
         annual_amp: float = 0.10,
         annual_phase0: float = 0.0,
     ):
+        import warnings
+
+        warnings.warn(
+            "AnnualModulatedGalacticForeground is deprecated; use the general "
+            "modulation framework directly: GalacticForeground(foreground_params, "
+            "modulation=AnnualCovarianceModulation(annual_amp, annual_phase0), "
+            "stochastic_fn=FittedHyperbolicTangentGalacticForeground) — or "
+            "GalForTimeModulation(path) for a tabulated modulation.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if foreground_params is None:
             if tobs is None:
                 raise ValueError(
@@ -989,3 +1008,141 @@ class SyntheticDataProcessor(BaseProcessingStep):
         self.emri_injection_params_full_basis = emri
         self.sobbh_injection_params_full_basis = sobbh
         self.mbh_injection_params_sampling_basis = mbh
+
+
+class SyntheticNoiseProcessingStep(BaseProcessingStep):
+    """Canonical mojito-shaped synthetic *noise* processor (no mojito data).
+
+    A proper :class:`~lisatools.globalfit.preprocessing.BaseProcessingStep`
+    subclass — it flows through the normal ``process`` / ``pour`` pipeline and
+    exposes ``td_signal`` / ``catalogue`` / ``orbits`` in the same shape a
+    mojito :class:`~lisatools.globalfit.preprocessing.L1ProcessingStep` would,
+    so downstream engine code reads it uniformly — but it needs **no mojito
+    files**. There are no GW *sources*: the data are a self-consistent noise
+    realization Cholesky-drawn from the *injected* composite covariance
+    (instrument PSD + optional modulated galactic foreground + optional SGWB),
+    the very covariance the noise fit recovers.
+
+    The draw lives directly in the analysis (WDM) basis so the full per-element
+    time-modulation and SGWB structure are captured exactly (a TD generator
+    cannot reproduce a time-varying ``(3, 3, Nt)`` covariance). ``process``
+    establishes the time grid with a zero TD stream; the noise is materialised
+    in ``pour``. Swap this ``data_processor_class`` for a Sangria / mojito / CD1L
+    loader to run the same noise fit on real data.
+
+    Args:
+        Tobs: Observation span (seconds); the time grid is ``N = round(Tobs/dt)``.
+        dt: Underlying TD sample spacing (seconds).
+        psd_injection: ``(Soms_d, Sa_a)`` instrument noise levels (sqrt units).
+        galfor_injection: Optional galactic-foreground parameters; ``None`` omits
+            the foreground component.
+        sgwb_injection: Optional SGWB spectral-template parameters; ``None``
+            (the default, and always for ``noise_only``) omits the SGWB
+            component.
+        galfor_modulation: Per-element foreground time modulation forwarded to
+            :class:`~lisatools.sensitivity.CompositeSensitivityBackend`
+            (``None`` = stationary; a callable such as
+            :class:`~lisatools.sensitivity.GalForTimeModulation`, or an array).
+        sgwb_stochastic_fn: SGWB spectral template (class or stock name).
+        tdi_generation: 1 or 2.
+        seed: RNG seed for the noise draw (reproducible data).
+        t_start: Start time of the stream (seconds).
+        nchannels: Number of TDI channels (3 for XYZ).
+    """
+
+    def __init__(
+        self,
+        Tobs: float,
+        dt: float,
+        psd_injection: Sequence[float],
+        galfor_injection: Optional[Sequence[float]] = None,
+        sgwb_injection: Optional[Sequence[float]] = None,
+        galfor_modulation: Optional[object] = None,
+        sgwb_stochastic_fn: str = "PowerLawSGWB",
+        tdi_generation: int = 2,
+        seed: int = 0,
+        t_start: float = 0.0,
+        nchannels: int = 3,
+        verbose: bool = True,
+        do_plots: bool = False,
+    ):
+        self.Tobs = float(Tobs)
+        self.psd_injection = np.asarray(psd_injection, dtype=float)
+        self.galfor_injection = (
+            None if galfor_injection is None else np.asarray(galfor_injection, dtype=float)
+        )
+        self.sgwb_injection = (
+            None if sgwb_injection is None else np.asarray(sgwb_injection, dtype=float)
+        )
+        self.galfor_modulation = galfor_modulation
+        self.sgwb_stochastic_fn = sgwb_stochastic_fn
+        self.tdi_generation = int(tdi_generation)
+        self.seed = int(seed)
+
+        # Zero TD placeholder grid — establishes the (mojito-shaped) time base;
+        # the actual noise is drawn in the analysis domain in ``pour``.
+        N = int(round(self.Tobs / dt))
+        times = np.arange(N) * dt + t_start
+        data = np.zeros((nchannels, N), dtype=float)
+        BaseProcessingStep.__init__(
+            self, times, data, 1.0 / dt, verbose=verbose, do_plots=do_plots
+        )
+
+        # ``pour`` returns orbits=None so the engine keeps the settings' orbits;
+        # ``catalogue`` mirrors the mojito shape but carries only the noise
+        # injection truths (no source-class keys -> zero source leaves).
+        self.orbits = None
+        self.catalogue = dict(
+            psd_injection=self.psd_injection,
+            galfor_injection=self.galfor_injection,
+            sgwb_injection=self.sgwb_injection,
+            seed=self.seed,
+        )
+
+    def pour(self, settings, window=None, return_orbits=False):
+        """Draw the composite-noise realization on the active WDM grid."""
+        if not isinstance(settings, WDMSettings):
+            raise NotImplementedError(
+                "SyntheticNoiseProcessingStep pours into WDM domains only; got "
+                f"{type(settings).__name__}. (The composite draw is done in the "
+                "analysis basis; extend here for FD/STFT if needed.)"
+            )
+        backend = CompositeSensitivityBackend(
+            settings,
+            tdi_generation=self.tdi_generation,
+            galfor_modulation=self.galfor_modulation,
+            sgwb_stochastic_fn=self.sgwb_stochastic_fn,
+        )
+        sensmat = backend(
+            "injection",
+            self.psd_injection,
+            galfor_params=self.galfor_injection,
+            sgwb_params=self.sgwb_injection,
+        )
+        # sens_mat is on the active grid (nch, nch, Nf_active, Nt_active) -- the
+        # same shape TDSignal.transform produces for poured data. Keep the whole
+        # draw on the analysis backend (settings.xp: numpy on CPU, cupy on GPU).
+        xp = settings.xp
+        C = xp.asarray(sensmat.sens_mat)
+        nch, _, nf, nt = C.shape
+        Cp = C.transpose(2, 3, 0, 1).reshape(-1, nch, nch)  # (Npix, nch, nch)
+        # Clean non-finite band-edge pixels (they are dropped by the likelihood's
+        # detC mask anyway) and add a tiny diagonal jitter so every pixel is
+        # positive-definite for the batched Cholesky. The jitter is far below the
+        # model's precision and negligible on real (finite) pixels.
+        Cp = xp.where(xp.isfinite(Cp), Cp, 0.0)
+        diag = xp.einsum("...ii->...i", Cp)
+        eps = 1e-12 * xp.maximum(diag.max(axis=1, keepdims=True), 1e-300)
+        Cp = Cp + eps[..., None] * xp.eye(nch)
+        L = xp.linalg.cholesky(Cp)
+        # Host numpy RNG on CPU keeps the draw reproducible + bit-identical; on
+        # GPU a cupy RNG keeps the draw on-device (a different but valid
+        # realization for a given seed -- CPU is the reproducible reference).
+        rng = (np if xp is np else xp).random.default_rng(self.seed)
+        z = rng.standard_normal((Cp.shape[0], nch, 1))
+        draw = (L @ z)[:, :, 0].reshape(nf, nt, nch).transpose(2, 0, 1)  # (nch, nf, nt)
+
+        data_signal = WDMSignal(draw, settings)
+        if return_orbits:
+            return data_signal, self.orbits
+        return data_signal
