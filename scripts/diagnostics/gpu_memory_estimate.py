@@ -17,17 +17,31 @@ Components modeled (all from the real allocation shapes):
    (-> factor 9), n_acs = nwalkers.
 
 2. **GB SubBandBuffer** (globalfit/moves/gbbands.py) -- the dominant term.
-   Per active (temp, walker, band) cell it stores the FULL active WDM grid
-   FOUR times (band data + template twin + sens_mat + invC):
-     data     : nch          * Nf_active * Nt_active * 8 B  (residual, float64)
-     template : nch          * Nf_active * Nt_active * 8 B  (template twin)
-     sens_mat : nch*nch      * Nf_active * Nt_active * 8 B  (XYZ cross-channel)
-     invC     : nch*nch      * Nf_active * Nt_active * 8 B
-   times num_bands_now = ntemps * nwalkers * n_gb_bands.
-   NOTE: the per-band full-active-grid storage is a documented first-cut
-   (the WDM kernel uses a single global [ind_min_f, ind_max_f]); per-band
-   layer slicing would cut Nf_active -> ~5 here. Until then this term is the
-   one that explodes.
+   Per active (temp, walker, band) *slot* it stores the FULL active WDM grid.
+   With the 2026-07-10 memory defaults (tasks a + c):
+     data     : nch     * Nf_active * Nt_active * 8 B  (residual, float64)
+     invC     : nch*nch * Nf_active * Nt_active * 8 B  (XYZ cross-channel)
+     sens_mat : ZERO-STORAGE by default (keep_sens_mat=False) -- the forward
+                matrix is a shape-correct broadcast view; only invC feeds the
+                kernel. keep_sens_mat=True restores nch*nch*Nf_active*Nt_active*8.
+   Optionally a template twin (use_template_arr, RJ/tempering) adds another
+   (data + invC) of the same size.
+
+   PEAK sub-band-buffer memory = n_subbands * per_slot ONCE THE CAP BINDS.
+   The BandScheduler holds at most ``n_subbands`` slots and swaps finished
+   cells into them, so the peak is ``min(n_subbands, n_cells_total) *
+   per_slot`` where n_cells_total = ntemps * nwalkers * n_gb_bands. The
+   ensemble counts (ntemps/nwalkers/n_gb_bands) DO NOT scale the peak -- they
+   only decide (i) whether the cap binds (n_cells_total > n_subbands) and
+   (ii) how many scheduler rounds run (wall-clock). per_slot depends ONLY on
+   the grid (Nf_active, Nt_active, nchannels). ``n_subbands`` (task a; GB move
+   ``num_band_preload`` / ``GB_N_SUBBANDS``, stock default 1024) is therefore
+   THE peak-memory lever. (nwalkers does scale the SEPARATE ACA term above.)
+   NOTE: each slot still spans the FULL active band Nf_active (the WDM kernel
+   uses a single global [ind_min_f, ind_max_f]); per-band layer slicing (task
+   b) would cut Nf_active -> ~n_layers+guard but needs a per-slab layer-origin
+   kernel change (native CUDA + JAX). Until then Nf_active is the last big
+   lever left in this term.
 
 The ``chunked-het comp`` (gbgpu.gbcomps) internal scratch is NOT modeled
 here (it lives in GBGPU and scales with Nt_sub * N_sparse * num_bin); it is
@@ -76,6 +90,9 @@ def estimate(
     ntemps: int = 2,
     n_gb_bands: int = 1,
     tdi_xyz: bool = True,
+    n_subbands: int = 1024,  # stock GBSettings default (GB_N_SUBBANDS)
+    keep_sens_mat: bool = False,
+    use_template_arr: bool = True,
 ) -> dict:
     """Estimate the dominant Python-side GPU allocations (bytes) for a WDM GB run."""
     Nf = int(round(wavelet_duration / dt))
@@ -101,19 +118,28 @@ def estimate(
     aca_psd = data_length * sens_factor * n_acs * 8  # float64
     aca_total = aca_data + aca_psd
 
-    # 2. GB SubBandBuffer (per temp*walker*band cell; full active grid x4)
-    num_bands_now = ntemps * nwalkers * n_gb_bands
+    # 2. GB SubBandBuffer (per resident temp*walker*band SLOT; full active grid).
+    #    num_bands_now is capped by n_subbands (the BandScheduler slot count /
+    #    GB move num_band_preload): finished cells swap out for pending ones,
+    #    so peak buffer memory scales with the cap, not the total cell count.
+    n_cells_total = ntemps * nwalkers * n_gb_bands
+    num_bands_now = min(int(n_subbands), n_cells_total)
     per_band_data = nchannels * data_length * 8
-    per_band_template = nchannels * data_length * 8
-    per_band_sens = sens_factor * data_length * 8
     per_band_invC = sens_factor * data_length * 8
-    per_band = per_band_data + per_band_template + per_band_sens + per_band_invC
+    # Forward sensitivity matrix: zero-storage broadcast view by default
+    # (keep_sens_mat=False); a real full array only when the caller keeps it.
+    per_band_sens = sens_factor * data_length * 8 if keep_sens_mat else 0
+    # Template twin (RJ / tempering) mirrors the residual + invC layout.
+    per_band_template = (per_band_data + per_band_invC) if use_template_arr else 0
+    per_band = per_band_data + per_band_invC + per_band_sens + per_band_template
     buffer_total = num_bands_now * per_band
 
     total = aca_total + buffer_total
     return dict(
         Nf=Nf, Nt=Nt, Nf_active=Nf_active, Nt_active=Nt_active,
         data_length=data_length, num_bands_now=num_bands_now,
+        n_cells_total=n_cells_total, n_subbands=int(n_subbands),
+        keep_sens_mat=keep_sens_mat, use_template_arr=use_template_arr,
         layer_df=ldf, data_band_hz=(data_min_freq, data_max_freq),
         aca_data=aca_data, aca_psd=aca_psd, aca_total=aca_total,
         per_band=per_band, buffer_total=buffer_total, total=total,
@@ -124,21 +150,29 @@ def _fmt(nbytes: float) -> str:
     return f"{nbytes / GB:8.3f} GB" if nbytes >= GB else f"{nbytes / MB:8.1f} MB"
 
 
+# All configs below use the 2026-07-10 memory defaults: invC-only per-band
+# storage (keep_sens_mat=False) and the n_subbands peak cap (task a + c). The
+# OLD-default rows (keep_sens_mat=True, n_subbands=20000 = uncapped) are shown
+# alongside the big-run cases so the win is visible.
 CONFIGS = [
     ("gb_no_fg default (90d, band 6-25mHz, 4w/2t, 1 band)",
      dict(tobs_days=90, nwalkers=4, ntemps=2, n_gb_bands=1)),
     ("+ DATA_BAND_LAYERS=10 (clip to GB band)",
      dict(tobs_days=90, nwalkers=4, ntemps=2, n_gb_bands=1, data_band_layers=10)),
-    ("bigger walkers/temps (30w/10t, 1 band)",
-     dict(tobs_days=90, nwalkers=30, ntemps=10, n_gb_bands=1)),
-    ("bigger walkers/temps + 20 GB bands",
+    ("bigger 30w/10t, 20 GB bands -- OLD defaults (sens_mat kept, uncapped)",
+     dict(tobs_days=90, nwalkers=30, ntemps=10, n_gb_bands=20,
+          keep_sens_mat=True, n_subbands=20000)),
+    ("bigger 30w/10t, 20 GB bands -- NEW defaults (invC-only, uncapped)",
      dict(tobs_days=90, nwalkers=30, ntemps=10, n_gb_bands=20)),
-    ("1 year, full band 0.1-25mHz, 30w/10t, 100 bands",
+    ("bigger 30w/10t, 20 GB bands -- NEW + n_subbands=512 cap",
+     dict(tobs_days=90, nwalkers=30, ntemps=10, n_gb_bands=20, n_subbands=512)),
+    ("1 year, full band 0.1-25mHz, 30w/10t, 100 bands -- OLD defaults",
      dict(tobs_days=365.25, data_min_freq=1e-4, data_max_freq=25e-3,
-          nwalkers=30, ntemps=10, n_gb_bands=100)),
-    ("1 year, full band, 30w/10t, 100 bands, DATA_BAND_LAYERS=10",
+          nwalkers=30, ntemps=10, n_gb_bands=100,
+          keep_sens_mat=True, n_subbands=20000)),
+    ("1 year, full band, 30w/10t, 100 bands -- NEW defaults + n_subbands=512",
      dict(tobs_days=365.25, data_min_freq=1e-4, data_max_freq=25e-3,
-          nwalkers=30, ntemps=10, n_gb_bands=100, data_band_layers=10)),
+          nwalkers=30, ntemps=10, n_gb_bands=100, n_subbands=512)),
 ]
 
 
@@ -148,34 +182,46 @@ def main():
     print("=" * 100)
     for label, kw in CONFIGS:
         r = estimate(**kw)
+        _cap = ("capped" if r['num_bands_now'] < r['n_cells_total'] else "uncapped")
+        _sens = ("sens_mat KEPT" if r['keep_sens_mat'] else "invC-only")
         print(f"\n### {label}")
         print(f"    grid Nf={r['Nf']} Nt={r['Nt']} | active {r['Nf_active']}x{r['Nt_active']} "
               f"= {r['data_length']:,} px | band {r['data_band_hz'][0]*1e3:.2f}-"
-              f"{r['data_band_hz'][1]*1e3:.2f} mHz | num_bands_now={r['num_bands_now']:,}")
+              f"{r['data_band_hz'][1]*1e3:.2f} mHz")
+        print(f"    slots={r['num_bands_now']:,} of {r['n_cells_total']:,} cells "
+              f"({_cap}, n_subbands={r['n_subbands']:,}) | {_sens}"
+              f"{' | +template twin' if r['use_template_arr'] else ''}")
         print(f"    ACA buffers (per-walker residual+invC) : {_fmt(r['aca_total'])}"
               f"   [data {_fmt(r['aca_data'])} + psd {_fmt(r['aca_psd'])}]")
-        print(f"    GB SubBandBuffer (x num_bands_now)      : {_fmt(r['buffer_total'])}"
-              f"   [{_fmt(r['per_band'])}/band]")
+        print(f"    GB SubBandBuffer (x slots)             : {_fmt(r['buffer_total'])}"
+              f"   [{_fmt(r['per_band'])}/slot]")
         print(f"    >>> TOTAL (these two terms)            : {_fmt(r['total'])}")
     print("\n" + "=" * 100)
-    print("DOMINANT TERM: the GB SubBandBuffer = num_bands_now x (full active grid, 4 copies,")
-    print("9x cross-channel invC). Scales as ntemps*nwalkers*n_gb_bands * Nf_active*Nt_active.")
+    print("DOMINANT TERM: the GB SubBandBuffer = num_bands_now (<= n_subbands) x (full active")
+    print("grid: residual + 9x cross-channel invC [+ template twin]). Scales as")
+    print("min(n_subbands, ntemps*nwalkers*n_gb_bands) * Nf_active*Nt_active.")
     print("")
-    print("Levers you have NOW (largest effect first):")
-    print("  * DATA_BAND_LAYERS=N   clip the analysis band to +-N WDM layers around the GB")
-    print("      band -> cuts Nf_active (e.g. 138 -> 22 = 6x). The single biggest knob.")
-    print("  * n_subbands / num_band_preload  caps how many band cells are buffered per")
-    print("      get_buffer call (GB move default 20000 -- far above any real cell count;")
-    print("      lower it to bound the peak). Not yet a stock knob.")
-    print("  * nwalkers * ntemps    direct multiplier on num_bands_now.")
-    print("  * fewer GB bands per run (focused-band runs) -> smaller n_gb_bands.")
+    print("Defaults as of 2026-07-10 (tasks a + c, now shipped):")
+    print("  * n_subbands (GB move num_band_preload / env GB_N_SUBBANDS) is a STOCK knob on")
+    print("      GBSettings. It caps resident (temp,walker,band) SLOTS -> the peak-memory")
+    print("      lever. Default 20000 (uncapped); lower it to bound peak GPU memory.")
+    print("  * keep_sens_mat=False is the SubBandBuffer default: only invC is stored per")
+    print("      band (the kernel input); the forward sens_mat is a zero-storage view.")
+    print("      Cuts the per-band cross-channel term ~2x. Flip keep_sens_mat=True to keep it.")
     print("")
-    print("Code-level fixes (bigger wins, need a change to gbbands.py):")
-    print("  * PER-BAND LAYER SLICING: each band stores the FULL Nf_active grid; a real GB")
-    print("      band spans ~n_layers+guard (<=~10) layers. Slicing Nf_active -> ~10 cuts the")
-    print("      buffer by Nf_active/10 (10-18x here). This is the documented first-cut TODO.")
-    print("  * sens_mat AND invC are both allocated per band (2x the 9x cross-channel term);")
-    print("      if invC is derived from sens_mat, only one need persist.")
+    print("Other levers you have NOW (no code change):")
+    print("  * DATA_BAND_LAYERS=N   clip the analysis band + per-walker ACA slab to +-N WDM")
+    print("      layers around the GB band -> cuts Nf_active (e.g. 138 -> 22 = 6x).")
+    print("  * nwalkers * ntemps * n_gb_bands   drive n_cells_total; the n_subbands cap")
+    print("      bounds the peak regardless.")
+    print("")
+    print("Remaining code-level win (task b -- NATIVE kernel change, GPU build required):")
+    print("  * PER-BAND LAYER SLICING: each slot still spans the FULL Nf_active grid, but a")
+    print("      real GB band spans ~n_layers+guard (<=~10) layers. Slicing Nf_active -> ~10")
+    print("      cuts the buffer by Nf_active/10 (10-18x). BLOCKED: the shared GBWDMComputations")
+    print("      writes each layer at (m - GLOBAL ind_min_f), so per-band slabs need the")
+    print("      chunked-het kernels (gb_wdm_het_{get_ll,swap_ll,fill_global}, CUDA + JAX) to")
+    print("      take a per-slab layer origin. Cannot be done Python-side.")
 
 
 if __name__ == "__main__":

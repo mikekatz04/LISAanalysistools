@@ -69,6 +69,15 @@ _to_numpy = asnumpy
 # ``[0, _SPECIAL_INDEX_BASE)``; everything above encodes (temp, walker).
 _SPECIAL_INDEX_BASE = int(1e6)
 
+# Task-b default WDM-layer leakage half-width for auto-sized per-band slabs.
+# A near-monochromatic GB's WDM energy is captured by the chunked-het kernel
+# over ``m_floor +/- m_band_half_width`` (default 1 -> 3 layers), which alone
+# reaches median mm5 ~1e-9; the canonical mm5 band spans 5 layers. Beyond +/-2
+# layers the energy is < ~1e-7 for the recommended Tukey window (alpha
+# 0.01-0.05), so 2 neighbor layers each side covers the leakage conservatively.
+# ``scripts/diagnostics/check_wdm_band_slab.py`` measures this directly.
+_WDM_SLAB_LEAKAGE_LAYERS = 2
+
 
 def pack_special_index(temp_inds, walker_inds, band_inds, nwalkers: int):
     """Pack ``(temp, walker, band)`` triplets into scalar special indices.
@@ -279,6 +288,9 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         basis_settings: Optional[DomainSettingsBase] = None,
         gb_wdm_comp=None,
         gb_fd_comp=None,
+        keep_sens_mat: bool = False,
+        wdm_band_slab_layers: Optional[int] = None,
+        wdm_slab_guard_layers: int = 1,
         *args,
         **kwargs,
     ):
@@ -351,6 +363,33 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         self.waveform_kwargs = waveform_kwargs
         self.opt_snr_rej_samp_limit = opt_snr_rej_samp_limit
         self.use_template_arr = use_template_arr
+        # Per-band sensitivity storage. Only the inverse covariance ``invC``
+        # feeds the WDM / FD likelihood kernels (the ACA repacks
+        # ``sens_mat.invC`` into ``linear_psd_arr``; nothing on the band-move
+        # path reads the forward ``sens_mat`` array). Default ``False``
+        # therefore stores ONLY ``invC`` per band and backs the forward
+        # ``sens_mat`` with a zero-storage, shape-correct broadcast view --
+        # halving the per-band cross-channel (XYZ 3x3) memory. Set
+        # ``keep_sens_mat=True`` to allocate the forward matrix too (e.g. for
+        # diagnostics that inspect the per-band covariance directly).
+        self.keep_sens_mat = keep_sens_mat
+        # Task-b: narrow per-band WDM slabs. Each per-band buffer slab spans a
+        # limited number of WDM frequency layers centered on the band --
+        # instead of the FULL active band ``Nf_active`` -- cutting the dominant
+        # sub-band-buffer memory term by ~Nf_active/slab_Nf. Requires the C++
+        # chunked-het kernels built with the task-b per-slab layer origin
+        # (default backend); the per-slot origins flow via ``slab_min_f``.
+        #   ``wdm_band_slab_layers`` semantics:
+        #     None -> OFF (full active band; bit-identical to pre-task-b).
+        #     0    -> AUTO: band layer span + 2*(leakage + guard), where
+        #             leakage = _WDM_SLAB_LEAKAGE_LAYERS (2) and guard =
+        #             ``wdm_slab_guard_layers`` (default 1) -> band_span + 6.
+        #     N>0  -> EXPLICIT: exactly N layers (power users).
+        # FD path ignores this (already per-band narrow via max_data_store_size).
+        self._wdm_band_slab_layers = (
+            int(wdm_band_slab_layers) if wdm_band_slab_layers is not None else None
+        )
+        self._wdm_slab_guard_layers = int(wdm_slab_guard_layers)
 
         self.tdi_channel_setup = self.waveform_kwargs.get("tdi_channel_setup")
         if self.tdi_channel_setup == "XYZ":
@@ -525,23 +564,108 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         return self._basis_settings
 
     @property
+    def band_slab_Nf(self) -> Optional[int]:
+        """WDM-layer extent of a narrow per-band slab (task-b), or ``None``.
+
+        ``None`` on the FD path, or on WDM when ``wdm_band_slab_layers`` is
+        ``None`` (full-active-band layout). ``0`` auto-sizes to
+        ``band_span + 2*(leakage + guard)``; ``N>0`` uses exactly ``N``. All
+        slabs share this constant extent; each has its own origin in
+        :attr:`slab_min_f`. Clamped to the parent active band.
+        """
+        if self._wdm_band_slab_layers is None:
+            return None
+        if not isinstance(self._basis_settings, WDMSettings):
+            return None
+        if self._wdm_band_slab_layers > 0:
+            slab_Nf = int(self._wdm_band_slab_layers)
+        else:
+            # Auto: cover the widest band + leakage + guard on each side.
+            slab_Nf = self.recommend_band_slab_layers(
+                self.band_edges,
+                float(self.df) if not hasattr(self.df, "item") else self.df.item(),
+                leakage=_WDM_SLAB_LEAKAGE_LAYERS,
+                guard=self._wdm_slab_guard_layers,
+                xp=self.xp,
+            )
+        # Never exceed the parent active band.
+        return int(min(slab_Nf, self._basis_settings.Nf_active))
+
+    @staticmethod
+    def recommend_band_slab_layers(band_edges, layer_df, leakage=_WDM_SLAB_LEAKAGE_LAYERS,
+                                   guard=1, xp=np) -> int:
+        """Recommended per-band slab extent (WDM layers) for task-b.
+
+        ``max_band_span + 2*(leakage + guard)``: the widest band's layer span
+        plus enough neighbor layers on each side to cover the chunked-het
+        template spread (``leakage``, ~2 for the recommended Tukey window)
+        and a safety ``guard``. This is what ``wdm_band_slab_layers=0``
+        (auto) resolves to; ``check_wdm_band_slab.py`` prints it alongside a
+        measured leakage estimate.
+        """
+        edges = xp.asarray(band_edges)
+        lo = (edges[:-1] / layer_df).astype(int)
+        hi = (edges[1:] / layer_df).astype(int)
+        # Layer count of the widest band. Edges are layer-aligned frequency
+        # boundaries, so ``hi - lo`` is the exclusive layer span (1 for a
+        # 1-layer band); floor to >= 1 for sub-layer bands.
+        max_span = max(1, int(xp.max(hi - lo)))
+        return int(max_span + 2 * (int(leakage) + int(guard)))
+
+    @property
+    def slab_min_f(self):
+        """Per-slot start WDM layer of each narrow band slab (task-b), or ``None``.
+
+        Each slot's slab spans ``[slab_min_f[slot], slab_min_f[slot] +
+        band_slab_Nf)`` WDM layers, centered on the slot's band and clamped
+        into the parent active band ``[ind_min_f, ind_max_f]``. Recomputed
+        from the live per-slot band assignment (``unique_band_combos[:, 2]``)
+        so it tracks cell swap-outs. Read by the chunked-het kernels (via
+        ``fill_global_wdm`` / ``_slab_kernel_args``) as the per-slab layer
+        origin. ``None`` when narrow slabs are off.
+        """
+        slab_Nf = self.band_slab_Nf
+        if slab_Nf is None:
+            return None
+        ldf = float(self.df) if not hasattr(self.df, "item") else self.df.item()
+        band_inds = self.unique_band_combos[:, 2]
+        # Center the slab on the band (its [lo, hi] layer span), so the
+        # m_band_half_width spread on either side of any source in the band
+        # stays inside the slab as long as slab_Nf >= band_span + 2*hw.
+        lo_layer = (self.band_edges[band_inds] / ldf).astype(self.xp.int32)
+        hi_layer = (self.band_edges[band_inds + 1] / ldf).astype(self.xp.int32)
+        center = (lo_layer + hi_layer) // 2
+        origins = center - slab_Nf // 2
+        parent = self._basis_settings
+        lo = int(parent.ind_min_f)
+        hi = max(lo, int(parent.ind_max_f) + 1 - slab_Nf)
+        return self.xp.clip(origins, lo, hi).astype(self.xp.int32)
+
+    @property
     def _per_band_data_shape(self) -> tuple:
         """Shape of a single band's residual buffer (one AC's data_res_arr)."""
         if isinstance(self._basis_settings, FDSettings):
             return (self.nchannels, self._fd_store_length)
         elif isinstance(self._basis_settings, WDMSettings):
-            # First-cut: each per-band buffer covers the FULL WDM active grid
-            # (Nf_active layers x Nt_active time pixels). The WDM kernel
-            # currently uses a single global [ind_min_f, ind_max_f] rather
-            # than per-band offsets, so per-band slicing on the layer axis is
-            # a follow-on once the kernel takes per-band layer offsets.
-            Nf_active = self._basis_settings.Nf_active
+            # Task-b: a narrow per-band slab covers ``band_slab_Nf`` layers
+            # (centered on the band, origin in ``slab_min_f``) instead of the
+            # full active grid; ``band_slab_Nf is None`` keeps the full
+            # ``Nf_active`` layout (the WDM kernel then uses the single global
+            # [ind_min_f, ind_max_f] origin).
+            Nf_use = self._per_band_Nf
             Nt_active = self._basis_settings.Nt_active
-            return (self.nchannels, Nf_active, Nt_active)
+            return (self.nchannels, Nf_use, Nt_active)
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
             )
+
+    @property
+    def _per_band_Nf(self) -> int:
+        """Per-band WDM slab frequency extent: ``band_slab_Nf`` when narrow,
+        else the full parent ``Nf_active``."""
+        slab_Nf = self.band_slab_Nf
+        return int(slab_Nf) if slab_Nf is not None else int(self._basis_settings.Nf_active)
 
     @property
     def _per_band_sens_shape(self) -> tuple:
@@ -551,11 +675,11 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 return (self.nchannels, self.nchannels, self._fd_store_length)
             return (self.nchannels, self._fd_store_length)
         elif isinstance(self._basis_settings, WDMSettings):
-            Nf_active = self._basis_settings.Nf_active
+            Nf_use = self._per_band_Nf
             Nt_active = self._basis_settings.Nt_active
             if self.tdi_channel_setup == "XYZ":
-                return (self.nchannels, self.nchannels, Nf_active, Nt_active)
-            return (self.nchannels, Nf_active, Nt_active)
+                return (self.nchannels, self.nchannels, Nf_use, Nt_active)
+            return (self.nchannels, Nf_use, Nt_active)
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -605,12 +729,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 force_backend=self._basis_settings.backend_name.split("_", 1)[1],
             )
         elif isinstance(self._basis_settings, WDMSettings):
-            # First-cut: per-band WDMSettings matches the parent grid (full
-            # WDM active band). A true per-band sliced WDMSettings becomes
-            # possible once the WDM kernel takes per-band
-            # [ind_min_f, ind_max_f] arrays; until then we share the parent.
+            # Per-band WDMSettings: full parent active band by default. Task-b:
+            # when narrow slabs are on, the per-band domain only needs the
+            # SHAPE (band_slab_Nf, Nt_active) -- the actual per-slot layer
+            # origin lives in ``slab_min_f`` (the kernel arg), not here -- so
+            # we pin ``ind_max_f`` to make ``Nf_active == band_slab_Nf``.
             parent = self._basis_settings
-            return WDMSettings(
+            per_band = WDMSettings(
                 Nf=parent.Nf,
                 Nt=parent.Nt,
                 dt=parent.data_dt,
@@ -623,6 +748,10 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 min_time=parent.ind_min_t * parent.layer_dt,
                 max_time=parent.ind_max_t * parent.layer_dt,
             )
+            slab_Nf = self.band_slab_Nf
+            if slab_Nf is not None:
+                per_band.ind_max_f = int(per_band.ind_min_f) + int(slab_Nf) - 1
+            return per_band
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -643,12 +772,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         data_dtype = self._per_band_data_dtype
         sens_dtype = self._per_band_sens_dtype
 
+        # Forward sensitivity matrix: full per-band allocation only when the
+        # caller asks to keep it (``keep_sens_mat=True``). Otherwise back it
+        # with a zero-storage broadcast view -- correct ``.shape`` / ``.ndim``
+        # (the ACA reads ``sens_mat.shape`` to derive ``shape_sens``; the
+        # SensitivityMatrixBase ndarray setter only shape-checks it) but a
+        # single element of memory. ``invC`` -- the only array the likelihood
+        # kernels consume -- is always a real per-band buffer.
+        def _forward_sens():
+            if self.keep_sens_mat:
+                return cp.zeros(sens_shape, dtype=sens_dtype)
+            return cp.broadcast_to(cp.zeros((), dtype=sens_dtype), sens_shape)
+
         ac_list = []
         for _ in range(self.num_bands_now):
             res_data = cp.zeros(data_shape, dtype=data_dtype)
             data_domain = per_band_settings.associated_class(res_data, per_band_settings)
             sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
-            sm.sens_mat = cp.zeros(sens_shape, dtype=sens_dtype)
+            sm.sens_mat = _forward_sens()
             sm.invC = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
             ac_list.append(AnalysisContainer(data_domain, sm))
@@ -1119,19 +1260,32 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     ) -> Tuple[cp.ndarray, cp.ndarray, cp.ndarray]:
 
         if isinstance(self._basis_settings, WDMSettings):
-            # First-cut WDM fill index map. Per-band buffers cover the full
-            # WDM active grid, so the index map is the simplest possible: it
-            # picks each band's entire (channel, Nf_active, Nt_active) slab
-            # out of the parent ACA. The data axis position is taken from
-            # unique_band_combos[:, 1] (the parent data index for that band).
+            # WDM fill index map: pick each band's slab out of the parent ACA.
+            # Default (full-active) copies the entire (channel, Nf_active,
+            # Nt_active) slab. Task-b narrow slabs copy only each slot's own
+            # ``band_slab_Nf``-layer window: the parent-local layer offset is
+            # ``slab_min_f[slot] - parent.ind_min_f`` (the parent stores active
+            # layer ``ind_min_f`` at local index 0), so the layer axis becomes
+            # PER-SLOT rather than a shared 0..Nf_active-1 ramp. Data axis
+            # position is unique_band_combos[:, 1] (the parent walker index).
             if inds_fill is None:
                 inds_fill = cp.arange(self.num_bands_now)
 
-            Nf_active = self._basis_settings.Nf_active
             Nt_active = self._basis_settings.Nt_active
+            slab_Nf = self.band_slab_Nf
+            if slab_Nf is None:
+                # Full active band: shared layer ramp 0..Nf_active-1.
+                Nf_use = self._basis_settings.Nf_active
+                layer_lo = cp.zeros(len(inds_fill), dtype=cp.int32)
+            else:
+                # Narrow: per-slot parent-local layer offset.
+                Nf_use = int(slab_Nf)
+                layer_lo = (
+                    self.slab_min_f[inds_fill] - int(self._basis_settings.ind_min_f)
+                ).astype(cp.int32)
 
             if is_psd and self.tdi_channel_setup == "XYZ":
-                # target shape: (len(inds_fill), nchannels, nchannels, Nf_active, Nt_active)
+                # target shape: (len(inds_fill), nchannels, nchannels, Nf_use, Nt_active)
                 # The parent WDM ACA's psd_shaped[0] has shape
                 # ``(num_walkers, nchan, nchan, Nf_active, Nt_active)`` — one
                 # entry per walker with channels as inner axes. Unlike the FD
@@ -1141,14 +1295,16 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None, None]
                 inds2 = cp.arange(self.nchannels)[None, :, None, None, None]
                 inds3 = cp.arange(self.nchannels)[None, None, :, None, None]
-                inds4 = cp.arange(Nf_active)[None, None, None, :, None]
+                inds4 = (layer_lo[:, None, None, None, None]
+                         + cp.arange(Nf_use)[None, None, None, :, None])
                 inds5 = cp.arange(Nt_active)[None, None, None, None, :]
                 return inds1, inds2, inds3, inds4, inds5
 
-            # target shape: (len(inds_fill), nchannels, Nf_active, Nt_active)
+            # target shape: (len(inds_fill), nchannels, Nf_use, Nt_active)
             inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None]
             inds2 = cp.arange(self.nchannels)[None, :, None, None]
-            inds3 = cp.arange(Nf_active)[None, None, :, None]
+            inds3 = (layer_lo[:, None, None, None]
+                     + cp.arange(Nf_use)[None, None, :, None])
             inds4 = cp.arange(Nt_active)[None, None, None, :]
             return inds1, inds2, inds3, inds4
         if not isinstance(self._basis_settings, FDSettings):
@@ -1225,6 +1381,15 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         """
         assert isinstance(factor, int) and (factor == -1 or factor == +1)
         params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        # Task-b: forward this buffer's narrow per-band slab metadata so the
+        # template write matches the narrow slab layout. Passed ONLY when this
+        # is a narrow WDM buffer (band_slab_Nf set) so the FD engine's
+        # fill_template -- which takes no such kwargs -- is untouched.
+        _slab_kwargs = {}
+        if getattr(self, "band_slab_Nf", None) is not None:
+            _slab_kwargs = dict(
+                band_slab_Nf=self.band_slab_Nf, slab_min_f=self.slab_min_f
+            )
         self._likelihood_engine.fill_template(
             target_aca,
             params_phys,
@@ -1232,6 +1397,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             N_vals,
             factor=factor,
             waveform_kwargs=self.waveform_kwargs,
+            **_slab_kwargs,
         )
 
     def adjust_sources_in_band_buffer(
@@ -1316,6 +1482,8 @@ class BandSorter(LISAToolsParallelModule):
         max_data_store_size: int = 6000,
         rj_prop=None,
         keep_all_inds=True,
+        wdm_band_slab_layers: Optional[int] = None,
+        wdm_slab_guard_layers: int = 1,
     ):
 
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
@@ -1374,6 +1542,11 @@ class BandSorter(LISAToolsParallelModule):
         # ACA's basis (WDMSettings -> gb_wdm_comp, FDSettings -> gb_fd_comp).
         self.gb_wdm_comp = gb_wdm_comp
         self.gb_fd_comp = gb_fd_comp
+        # Task-b narrow per-band WDM slab extent (None = full active band).
+        # Forwarded to each SubBandBuffer built in :meth:`get_buffer`; a plain
+        # int/None so the copy-constructor's generic loop carries it through.
+        self.wdm_band_slab_layers = wdm_band_slab_layers
+        self.wdm_slab_guard_layers = wdm_slab_guard_layers
         self.waveform_kwargs = waveform_kwargs
         self.gb_branch_orig = gb_branch
         self.num_bands = len(band_edges) - 1
@@ -1680,6 +1853,8 @@ class BandSorter(LISAToolsParallelModule):
                 gb_wdm_comp=self.gb_wdm_comp,
                 gb_fd_comp=self.gb_fd_comp,
                 force_backend=self.force_backend,
+                wdm_band_slab_layers=self.wdm_band_slab_layers,
+                wdm_slab_guard_layers=self.wdm_slab_guard_layers,
                 **kwargs,
             )
 

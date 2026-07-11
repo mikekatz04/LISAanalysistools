@@ -1190,7 +1190,15 @@ void wdm_het_get_ll_kernel(
     int    tdi_type,
     double tukey_alpha,
     int    m_band_half_width,
-    int    N_cp_orbit)   // 0 -> raw orbit lookups; >0 -> per-chunk spline cache
+    int    N_cp_orbit,   // 0 -> raw orbit lookups; >0 -> per-chunk spline cache
+    // Task-b per-band slab addressing (default-off = bit-identical):
+    //   Nf_slab  <= 0     -> each slab spans the full active band (Nf_active)
+    //   slab_min_f == null -> every slab shares the global ind_min_f origin
+    // When both are set, slab `s` covers WDM layers
+    //   [slab_min_f[s], slab_min_f[s] + Nf_slab); a source's m-layer is written
+    // at (m - slab_min_f[s]) and the per-slab stride is nchannels*Nf_slab*Nt.
+    int        Nf_slab = 0,
+    const int *slab_min_f = nullptr)
 {
     // One binary per block (grid.X); chunks iterated sequentially inside the
     // block. See the kernel-section header comment above for the full design.
@@ -1293,15 +1301,20 @@ void wdm_het_get_ll_kernel(
         double *params      = &params_all[(size_t) bin_i * nparams];
         const int data_ind  = data_index_all[bin_i];
         const int noise_ind = noise_index_all[bin_i];
+        // Per-slab frequency window (task b). Default-off (slab_min_f==null,
+        // Nf_slab<=0) reproduces the global active-band layout exactly.
+        const int band_min_f = (slab_min_f != nullptr)
+                                   ? slab_min_f[data_ind] : ind_min_f;
+        const int slab_Nf    = (Nf_slab > 0) ? Nf_slab : Nf_active;
         // Route this binary's data / invC reads into their own slab so
         // multi-walker / multi-band buffers work in one launch. Indices are
         // buffer-local (0..num-1); a single buffer passes 0 -> offset 0
         // (backward compatible). Layout mirrors the active-band data/invC
         // read math below (g_d / g_inv).
-        const size_t per_data = (size_t) nchannels * Nf_active * Nt_active;
+        const size_t per_data = (size_t) nchannels * slab_Nf * Nt_active;
         const size_t per_invC = (size_t) ((tdi_type == TDI_XYZ)
                                     ? nchannels * nchannels : nchannels)
-                                * Nf_active * Nt_active;
+                                * slab_Nf * Nt_active;
         const double *data_d_b = data_d + (size_t) data_ind  * per_data;
         const double *invC_b   = invC   + (size_t) noise_ind * per_invC;
 
@@ -1348,8 +1361,8 @@ void wdm_het_get_ll_kernel(
             const int    m_floor  = (int) (f0 / layer_df);
             int          m_lo     = m_floor - m_band_half_width;
             int          m_hi     = m_floor + m_band_half_width + 1;   // exclusive
-            if (m_lo < ind_min_f)             m_lo = ind_min_f;
-            if (m_hi > ind_min_f + Nf_active) m_hi = ind_min_f + Nf_active;
+            if (m_lo < band_min_f)            m_lo = band_min_f;
+            if (m_hi > band_min_f + slab_Nf) m_hi = band_min_f + slab_Nf;
 
             // Populate orbit spline cache once over this chunk's time
             // window [chunk_t0, chunk_t0 + T_chunk]. All threads cooperate
@@ -1452,7 +1465,7 @@ void wdm_het_get_ll_kernel(
             // ============================================================
             const double scale_fd     = 0.5 * dt_sparse / dt;
             for (int m = m_lo; m < m_hi; ++m) {
-                const int m_act = m - ind_min_f;
+                const int m_act = m - band_min_f;
 
                 // ---- 5) window + rearrange for layer m: fd_chunk_buf -> layer_buf ----
                 //
@@ -1523,7 +1536,7 @@ void wdm_het_get_ll_kernel(
                         const cmplx z = layer_buf[c * Nt_sub + n_loc];
                         const double rp = parity_even ? z.real() : z.imag();
                         w_arr[c] = psign * rp;
-                        const size_t g_d = ((size_t) c * Nf_active + m_act)
+                        const size_t g_d = ((size_t) c * slab_Nf + m_act)
                                             * Nt_active + n_act;
                         d_arr[c] = data_d_b[g_d];
                     }
@@ -1537,7 +1550,7 @@ void wdm_het_get_ll_kernel(
                         for (int c = 0; c < nchannels; ++c) {
                             const size_t g_inv =
                                 (((size_t) c * nchannels + c)
-                                   * Nf_active + m_act) * Nt_active + n_act;
+                                   * slab_Nf + m_act) * Nt_active + n_act;
                             const double inv = invC_b[g_inv];
                             tmp_dh += d_arr[c] * w_arr[c] * inv;
                             tmp_hh += w_arr[c] * w_arr[c] * inv;
@@ -1546,7 +1559,7 @@ void wdm_het_get_ll_kernel(
                             for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
                                 const size_t g_inv =
                                     (((size_t) c1 * nchannels + c2)
-                                       * Nf_active + m_act) * Nt_active + n_act;
+                                       * slab_Nf + m_act) * Nt_active + n_act;
                                 const double inv = invC_b[g_inv];
                                 tmp_dh += (d_arr[c1] * w_arr[c2]
                                             + d_arr[c2] * w_arr[c1]) * inv;
@@ -1556,7 +1569,7 @@ void wdm_het_get_ll_kernel(
                     } else {
                         // TDI_AET / TDI_AE: invC is diagonal in channels.
                         for (int c = 0; c < nchannels; ++c) {
-                            const size_t g_inv = ((size_t) c * Nf_active + m_act)
+                            const size_t g_inv = ((size_t) c * slab_Nf + m_act)
                                                   * Nt_active + n_act;
                             const double inv = invC_b[g_inv];
                             tmp_dh += d_arr[c] * w_arr[c] * inv;
@@ -1620,7 +1633,13 @@ void wdm_het_fill_global_kernel(
     double T_chunk, double dt, double T, double t_ref,
     double tukey_alpha,
     int    m_band_half_width,
-    bool   active_band)
+    bool   active_band,
+    // Task-b per-band slab addressing (only meaningful when active_band=true;
+    // default-off = bit-identical). Nf_slab<=0 -> full Nf_active per slab;
+    // slab_min_f==null -> global ind_min_f origin. When set, slab `s` is
+    // (nchannels, Nf_slab, Nt_active) and layer m writes at (m - slab_min_f[s]).
+    int        Nf_slab = 0,
+    const int *slab_min_f = nullptr)
 {
     // ``active_band`` selects the output layout of ``template_fill``:
     //   false -> full dense parent grid (nchannels, Nf, Nt), absolute (m, n_glob).
@@ -1675,7 +1694,12 @@ void wdm_het_fill_global_kernel(
         // buffer-local (0..num_templates-1); a single-template buffer passes
         // data_index=0 -> offset 0 (backward compatible). per_template matches
         // the (nchannels, out_Nf, out_Nt) write layout used for ``dst`` below.
-        const int    _oNf   = active_band ? wdm_settings->Nf_active : Nf;
+        // Per-slab frequency window (task b): narrow the active-band output
+        // extent + origin per slab. Default-off (Nf_slab<=0, slab_min_f==null)
+        // keeps _oNf==Nf_active with the global ind_min_f origin below.
+        const bool   _narrow = active_band && (Nf_slab > 0) && (slab_min_f != nullptr);
+        const int    _oNf   = active_band
+                                ? (_narrow ? Nf_slab : wdm_settings->Nf_active) : Nf;
         const int    _oNt   = active_band ? wdm_settings->Nt_active : Nt;
         double *template_fill_b = template_fill
             + (size_t) data_index_all[bin_i]
@@ -1776,10 +1800,14 @@ void wdm_het_fill_global_kernel(
             // ============================================================
             const double scale_fd     = 0.5 * dt_sparse / dt;
             // Active-band output strides/offsets (mirror WDMDomain). Dense mode
-            // keeps the full parent grid with zero offset.
-            const int out_Nf = active_band ? wdm_settings->Nf_active : Nf;
+            // keeps the full parent grid with zero offset. Task-b narrow mode
+            // (_narrow) shrinks the frequency extent + origin to this slab's band.
+            const int out_Nf = active_band
+                                 ? (_narrow ? Nf_slab : wdm_settings->Nf_active) : Nf;
             const int out_Nt = active_band ? wdm_settings->Nt_active : Nt;
-            const int f_off  = active_band ? wdm_settings->ind_min_f : 0;
+            const int f_off  = active_band
+                                 ? (_narrow ? slab_min_f[data_index_all[bin_i]]
+                                            : wdm_settings->ind_min_f) : 0;
             const int t_off  = active_band ? wdm_settings->ind_min_t : 0;
             for (int m = m_lo; m < m_hi; ++m) {
                 // Active band: skip whole m-layers outside [ind_min_f, ind_max_f].
@@ -1869,7 +1897,11 @@ void wdm_het_swap_ll_kernel(
     double T_chunk, double dt, double T, double t_ref,
     int    tdi_type,
     double tukey_alpha,
-    int    m_band_half_width)
+    int    m_band_half_width,
+    // Task-b per-band slab addressing (default-off = bit-identical); see
+    // wdm_het_get_ll_kernel for the contract.
+    int        Nf_slab = 0,
+    const int *slab_min_f = nullptr)
 {
     // Same per-(chunk, m_layer) flow as get_ll, but with TWO template builds
     // (add + rem) and 5 inner-product partials (<d|h_add>, <d|h_rem>,
@@ -1945,10 +1977,14 @@ void wdm_het_swap_ll_kernel(
         // (backward compatible). Layout mirrors the g_d / g_inv read math below.
         const int data_ind  = data_index_all[bin_i];
         const int noise_ind = noise_index_all[bin_i];
-        const size_t per_data = (size_t) nchannels * Nf_active * Nt_active;
+        // Per-slab frequency window (task b); default-off matches the global band.
+        const int band_min_f = (slab_min_f != nullptr)
+                                   ? slab_min_f[data_ind] : ind_min_f;
+        const int slab_Nf    = (Nf_slab > 0) ? Nf_slab : Nf_active;
+        const size_t per_data = (size_t) nchannels * slab_Nf * Nt_active;
         const size_t per_invC = (size_t) ((tdi_type == TDI_XYZ)
                                     ? nchannels * nchannels : nchannels)
-                                * Nf_active * Nt_active;
+                                * slab_Nf * Nt_active;
         const double *data_d_b = data_d + (size_t) data_ind  * per_data;
         const double *invC_b   = invC   + (size_t) noise_ind * per_invC;
 
@@ -1969,8 +2005,8 @@ void wdm_het_swap_ll_kernel(
         const int    m_floor_r = (int) (f0_r / layer_df);
         int          m_lo      = (m_floor_a < m_floor_r ? m_floor_a : m_floor_r) - m_band_half_width;
         int          m_hi      = (m_floor_a > m_floor_r ? m_floor_a : m_floor_r) + m_band_half_width + 1;
-        if (m_lo < ind_min_f)             m_lo = ind_min_f;
-        if (m_hi > ind_min_f + Nf_active) m_hi = ind_min_f + Nf_active;
+        if (m_lo < band_min_f)            m_lo = band_min_f;
+        if (m_hi > band_min_f + slab_Nf) m_hi = band_min_f + slab_Nf;
 
         for (int j = 0; j < n_chunks; ++j) {
             const int    keep_lo     = chunk_keep_lo[j];
@@ -2104,7 +2140,7 @@ void wdm_het_swap_ll_kernel(
             const double kappa        = 2.0 * sqrt(M_PI * dt) / (double) Nf;
             constexpr int K_MAX_REG   = FAST_WDM_K_PER_THREAD_MAX;
             for (int m = m_lo; m < m_hi; ++m) {
-                const int m_act        = m - ind_min_f;
+                const int m_act        = m - band_min_f;
                 const int fft_offset_a = m * half_Nt_sub - half_Nt_sub - k_f0_a;
                 const int fft_offset_r = m * half_Nt_sub - half_Nt_sub - k_f0_r;
 
@@ -2193,7 +2229,7 @@ void wdm_het_swap_ll_kernel(
                                 const cmplx z = layer_buf[c * Nt_sub + n_loc];
                                 const double rp = parity_even ? z.real() : z.imag();
                                 w_r_arr[c] = kappa * sign * rp;
-                                const size_t g_d = ((size_t) c * Nf_active + m_act)
+                                const size_t g_d = ((size_t) c * slab_Nf + m_act)
                                                     * Nt_active + n_act;
                                 d_arr[c] = data_d_b[g_d];
                             }
@@ -2204,7 +2240,7 @@ void wdm_het_swap_ll_kernel(
                                 for (int c = 0; c < nchannels; ++c) {
                                     const size_t g_inv =
                                         (((size_t) c * nchannels + c)
-                                          * Nf_active + m_act)
+                                          * slab_Nf + m_act)
                                           * Nt_active + n_act;
                                     const double inv = invC_b[g_inv];
                                     tmp_dh_a += d_arr[c]   * w_a_arr[c] * inv;
@@ -2217,7 +2253,7 @@ void wdm_het_swap_ll_kernel(
                                     for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
                                         const size_t g_inv =
                                             (((size_t) c1 * nchannels + c2)
-                                              * Nf_active + m_act)
+                                              * slab_Nf + m_act)
                                               * Nt_active + n_act;
                                         const double inv = invC_b[g_inv];
                                         tmp_dh_a += (d_arr[c1]   * w_a_arr[c2]
@@ -2232,7 +2268,7 @@ void wdm_het_swap_ll_kernel(
                                 }
                             } else {
                                 for (int c = 0; c < nchannels; ++c) {
-                                    const size_t g_inv = ((size_t) c * Nf_active + m_act)
+                                    const size_t g_inv = ((size_t) c * slab_Nf + m_act)
                                                           * Nt_active + n_act;
                                     const double inv = invC_b[g_inv];
                                     tmp_dh_a += d_arr[c]   * w_a_arr[c] * inv;
@@ -2312,7 +2348,11 @@ void wdm_het_get_fstat_ll_kernel(
     double T_chunk, double dt, double T, double t_ref,
     int    tdi_type,
     double tukey_alpha,
-    int    m_band_half_width)
+    int    m_band_half_width,
+    // Task-b per-band slab addressing (default-off = bit-identical); see
+    // wdm_het_get_ll_kernel for the contract.
+    int        Nf_slab = 0,
+    const int *slab_min_f = nullptr)
 {
     // F-stat: build 4 basis waveforms per Cornish & Crowder '05 with fixed
     //   (A, iota, psi, phi0) = (2, pi/2, {0, pi/4, 0, pi/4}, {0, pi, 3pi/2, pi/2})
@@ -2409,10 +2449,14 @@ void wdm_het_get_fstat_ll_kernel(
         // (backward compatible). Layout mirrors the g_d / g_inv read math below.
         const int data_ind  = data_index_all [bin_i];
         const int noise_ind = noise_index_all[bin_i];
-        const size_t per_data = (size_t) nchannels * Nf_active * Nt_active;
+        // Per-slab frequency window (task b); default-off matches the global band.
+        const int band_min_f = (slab_min_f != nullptr)
+                                   ? slab_min_f[data_ind] : ind_min_f;
+        const int slab_Nf    = (Nf_slab > 0) ? Nf_slab : Nf_active;
+        const size_t per_data = (size_t) nchannels * slab_Nf * Nt_active;
         const size_t per_invC = (size_t) ((tdi_type == TDI_XYZ)
                                     ? nchannels * nchannels : nchannels)
-                                * Nf_active * Nt_active;
+                                * slab_Nf * Nt_active;
         const double *data_d_b = data_d + (size_t) data_ind  * per_data;
         const double *invC_b   = invC   + (size_t) noise_ind * per_invC;
 
@@ -2427,8 +2471,8 @@ void wdm_het_get_fstat_ll_kernel(
         const int    m_floor = (int) (f0 / layer_df);
         int          m_lo    = m_floor - m_band_half_width;
         int          m_hi    = m_floor + m_band_half_width + 1;     // exclusive
-        if (m_lo < ind_min_f)             m_lo = ind_min_f;
-        if (m_hi > ind_min_f + Nf_active) m_hi = ind_min_f + Nf_active;
+        if (m_lo < band_min_f)            m_lo = band_min_f;
+        if (m_hi > band_min_f + slab_Nf) m_hi = band_min_f + slab_Nf;
 
         for (int j = 0; j < n_chunks; ++j) {
             const int    keep_lo     = chunk_keep_lo[j];
@@ -2523,7 +2567,7 @@ void wdm_het_get_fstat_ll_kernel(
             const double kappa       = 2.0 * sqrt(M_PI * dt) / (double) Nf;
             constexpr int K_MAX_REG  = FAST_WDM_K_PER_THREAD_MAX;
             for (int m = m_lo; m < m_hi; ++m) {
-                const int m_act = m - ind_min_f;
+                const int m_act = m - band_min_f;
                 // Per-thread storage for THIS m's 4 basis WDM coefs.
                 double w_basis_reg[N_FILTERS * FAST_WDM_NCHANNELS_MAX * K_MAX_REG];
                 const int fft_offset = m * half_Nt_sub - half_Nt_sub - k_f0;
@@ -2585,7 +2629,7 @@ void wdm_het_get_fstat_ll_kernel(
                             // Read data for all channels once.
                             double d_arr[FAST_WDM_NCHANNELS_MAX];
                             for (int c = 0; c < nchannels; ++c) {
-                                const size_t g_d = ((size_t) c * Nf_active + m_act)
+                                const size_t g_d = ((size_t) c * slab_Nf + m_act)
                                                     * Nt_active + n_act;
                                 d_arr[c] = data_d_b[g_d];
                             }
@@ -2597,7 +2641,7 @@ void wdm_het_get_fstat_ll_kernel(
                                     for (int c = 0; c < nchannels; ++c) {
                                         const size_t g_inv =
                                             (((size_t) c * nchannels + c)
-                                              * Nf_active + m_act)
+                                              * slab_Nf + m_act)
                                               * Nt_active + n_act;
                                         const double inv = invC_b[g_inv];
                                         const double w_i =
@@ -2610,7 +2654,7 @@ void wdm_het_get_fstat_ll_kernel(
                                         for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
                                             const size_t g_inv =
                                                 (((size_t) c1 * nchannels + c2)
-                                                  * Nf_active + m_act)
+                                                  * slab_Nf + m_act)
                                                   * Nt_active + n_act;
                                             const double inv = invC_b[g_inv];
                                             const double w_c1 =
@@ -2627,7 +2671,7 @@ void wdm_het_get_fstat_ll_kernel(
                                     }
                                 } else {
                                     for (int c = 0; c < nchannels; ++c) {
-                                        const size_t g_inv = ((size_t) c * Nf_active
+                                        const size_t g_inv = ((size_t) c * slab_Nf
                                                                 + m_act)
                                                               * Nt_active + n_act;
                                         const double inv = invC_b[g_inv];
@@ -2652,7 +2696,7 @@ void wdm_het_get_fstat_ll_kernel(
                                         for (int c = 0; c < nchannels; ++c) {
                                             const size_t g_inv =
                                                 (((size_t) c * nchannels + c)
-                                                  * Nf_active + m_act)
+                                                  * slab_Nf + m_act)
                                                   * Nt_active + n_act;
                                             const double inv = invC_b[g_inv];
                                             const double w_i =
@@ -2669,7 +2713,7 @@ void wdm_het_get_fstat_ll_kernel(
                                             for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
                                                 const size_t g_inv =
                                                     (((size_t) c1 * nchannels + c2)
-                                                      * Nf_active + m_act)
+                                                      * slab_Nf + m_act)
                                                       * Nt_active + n_act;
                                                 const double inv = invC_b[g_inv];
                                                 const double w_i_c1 =
@@ -2695,7 +2739,7 @@ void wdm_het_get_fstat_ll_kernel(
                                     } else {
                                         for (int c = 0; c < nchannels; ++c) {
                                             const size_t g_inv = ((size_t) c
-                                                                    * Nf_active
+                                                                    * slab_Nf
                                                                     + m_act)
                                                                   * Nt_active + n_act;
                                             const double inv = invC_b[g_inv];
@@ -2801,7 +2845,9 @@ inline void wdm_het_fill_global_impl(
     double tukey_alpha,
     int grid_dim, int N_cp_sig, int N_cp_orbit,
     int m_band_half_width,
-    bool active_band = false)
+    bool active_band = false,
+    // Task-b per-band slab addressing (default-off = bit-identical).
+    int Nf_slab = 0, const int *slab_min_f = nullptr)
 {
     // ``active_band`` (default false = dense parent grid) is forwarded to the
     // kernel; true selects the active-band output layout. Defaulting to false
@@ -2849,7 +2895,8 @@ inline void wdm_het_fill_global_impl(
         n_chunks, num_bin, nparams,
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
-        T_chunk, dt, T, t_ref, tukey_alpha, m_band_half_width, active_band);
+        T_chunk, dt, T, t_ref, tukey_alpha, m_band_half_width, active_band,
+        Nf_slab, slab_min_f);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
@@ -2863,7 +2910,8 @@ inline void wdm_het_fill_global_impl(
         n_chunks, num_bin, nparams,
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
-        T_chunk, dt, T, t_ref, tukey_alpha, m_band_half_width, active_band);
+        T_chunk, dt, T, t_ref, tukey_alpha, m_band_half_width, active_band,
+        Nf_slab, slab_min_f);
 #endif
 }
 
@@ -2889,7 +2937,9 @@ inline void wdm_het_get_ll_impl(
     int grid_dim, int N_cp_sig, int N_cp_orbit,
     int *binary_perm, int *group_starts, int *group_ends,
     int *group_m_lo, int *group_m_hi, int n_groups,
-    int m_band_half_width)
+    int m_band_half_width,
+    // Task-b per-band slab addressing (default-off = bit-identical).
+    int Nf_slab = 0, const int *slab_min_f = nullptr)
 {
     // New kernel does not use group-grouping path: each block handles one
     // binary and determines its own narrow m-band internally. Layer-grouping
@@ -2947,7 +2997,7 @@ inline void wdm_het_get_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        N_cp_orbit);
+        N_cp_orbit, Nf_slab, slab_min_f);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
@@ -2961,7 +3011,7 @@ inline void wdm_het_get_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        N_cp_orbit);
+        N_cp_orbit, Nf_slab, slab_min_f);
 #endif
 }
 
@@ -2989,7 +3039,9 @@ inline void wdm_het_swap_ll_impl(
     int *binary_perm, int *group_starts, int *group_ends,
     int *group_m_lo, int *group_m_hi, int n_groups,
     int *pair_m_lo_b, int *pair_m_hi_b,
-    int m_band_half_width)
+    int m_band_half_width,
+    // Task-b per-band slab addressing (default-off = bit-identical).
+    int Nf_slab = 0, const int *slab_min_f = nullptr)
 {
     (void) N_cp_sig; (void) N_cp_orbit;
     (void) binary_perm; (void) group_starts; (void) group_ends;
@@ -3034,7 +3086,8 @@ inline void wdm_het_swap_ll_impl(
         n_chunks, num_bin, nparams,
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
-        T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width);
+        T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
+        Nf_slab, slab_min_f);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
@@ -3049,7 +3102,8 @@ inline void wdm_het_swap_ll_impl(
         n_chunks, num_bin, nparams,
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
-        T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width);
+        T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
+        Nf_slab, slab_min_f);
 #endif
 }
 
@@ -3074,7 +3128,9 @@ inline void wdm_het_get_fstat_ll_impl(
     int    tdi_type,
     double tukey_alpha,
     int grid_dim,
-    int m_band_half_width)
+    int m_band_half_width,
+    // Task-b per-band slab addressing (default-off = bit-identical).
+    int Nf_slab = 0, const int *slab_min_f = nullptr)
 {
 #ifdef __CUDACC__
     // One binary per block on grid.X (always). The grid_dim arg is
@@ -3123,7 +3179,8 @@ inline void wdm_het_get_fstat_ll_impl(
         n_chunks, num_bin, nparams,
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
-        T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width);
+        T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
+        Nf_slab, slab_min_f);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
@@ -3137,7 +3194,8 @@ inline void wdm_het_get_fstat_ll_impl(
         n_chunks, num_bin, nparams,
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
-        T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width);
+        T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
+        Nf_slab, slab_min_f);
 #endif
 }
 

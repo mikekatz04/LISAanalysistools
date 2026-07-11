@@ -2,6 +2,61 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## LISA Analysis Tools conventions & maps (this repo is the canonical hub)
+
+LISAanalysistools (LAT) is the project's central LISA-physics library and the
+canonical home for cross-repo Claude guidance — the umbrella workspace's root
+directory (`lisa_sprint_2026/CLAUDE.md`) is now just a stub that points here.
+
+The rules below apply to every LISA Analysis Tools repo (`lisa-on-gpu`, LAT,
+GPUBackendTools, BBHx, FastEMRIWaveforms, GBGPU, Eryn). Compact gist per
+rule — **full detail: [`docs/conventions.md`](docs/conventions.md).**
+
+- **Backend implementation hierarchy.** GPU C++ (CUDA) leads as the
+  reference implementation; CPU C++ mirrors it via `#ifdef`/shared macros
+  and must match to machine precision; JAX may diverge internally with
+  JAX-native idioms but must match at the inner-product level (reldiff
+  ≲ 1e-12).
+- **No new global-fit settings files.** Run configurations are installed
+  `StockGlobalFit` classes under `lisatools.globalfit.stock`, not settings
+  files — see "Stock global fits" below for the LAT-specific API.
+- **No backend strings as function kwargs.** Backend choice is made at
+  object instantiation (`force_backend="cpu"/"cuda12x"/"jax"`), never as a
+  per-method kwarg (`backend=`, `use_jax=`, ...); dispatch internally via
+  `self.backend`.
+- **Host→device upload of class-wrapper objects.** Host-`new`'d wrapper
+  structs (`OrbitsWrap`, `WDMSettingsWrap`, ...) whose pointer fields a CUDA
+  kernel dereferences must be `cudaMalloc`+`cudaMemcpy`'d to device before
+  the kernel launch, then freed after sync — never pass the host pointer
+  straight into a device kernel.
+- **CPU/GPU class-name aliasing.** Every C++ class compiled into both the
+  CPU and GPU shared objects (wrapper classes and the underlying classes
+  they point to) needs a per-backend `#define` alias (`FooGPU`/`FooCPU`) so
+  the two builds emit distinct C++ type names and don't collide in
+  pybind11's/nanobind's typeid registry.
+- **Deepcopy / pickle safety.** Never store an array module (`self.xp = cp`)
+  as an instance attribute — expose it as a property derived from a flag or
+  `self.backend`. Guard `__getattr__` delegators against dunder/pre-`__init__`
+  probing. Settings-tree objects must survive
+  `pickle.loads(pickle.dumps(copy.deepcopy(obj)))`.
+- **Narrowband mismatches mm2 / mm5.** Canonical chunked-het/WDM accuracy
+  metrics: `mm5` over a 5-m-layer band around the carrier (primary metric),
+  `mm2` over the 2 carrier layers (tighter check). Both are
+  `1 - normalized overlap` via `AnalysisContainer.template_inner_product`.
+- **No nested OpenMP in compute kernels.** Threading is owned at the run
+  level (`OMP_NUM_THREADS`, `AnalysisContainerArray` `n_splits`); fix slow
+  CPU kernels algorithmically or move them to GPU, never `#pragma omp`
+  inside a kernel.
+- **Cross-wheel C++/CUDA sharing: recompile-in-place.** Downstream wheels
+  (GBGPU, BBHx, FEW) recompile against upstream (GBT, LAT) headers rather
+  than link against upstream's compiled archive; prefer POD `*View` structs
+  as the cross-wheel interface; bump `LISATOOLS_HEADER_ABI_VERSION` on any
+  struct-layout change.
+
+Maps: [`docs/codebase-map.md`](docs/codebase-map.md) (this repo's internal
+layout) and [`docs/architecture-map.md`](docs/architecture-map.md)
+(cross-repo dependency graph, capability→module table, backend-wheel model).
+
 ## Project Overview
 
 `lisaanalysistools` (imported as `lisatools`) is a Python package for LISA (Laser Interferometer Space Antenna) data analysis, including building the LISA Global Fit. It is a hybrid Python / C++ / CUDA project built with `scikit-build-core` and CMake. Python 3.12+ is required.
@@ -73,7 +128,7 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
 - `domains.{hpp,cu}` — stft_tof STFT time-frequency C++ (`STFTSettings`, `FDSettings`, `STFTDomain`, `STFTFresnel`, and `FDDomainForStft` — renamed from the incoming `FDDomain` to avoid colliding with dev's `fd_domain.hh` class; unify later). TDI flavor ints are re-based to the canonical `TDI_XYZ=1 / TDI_AET=2 / TDI_AE=3` behind `#ifndef` guards — Python must pass `backend.TDITypeDict` values, never literals. Also hosts the consolidated WDM/FD domain descriptors (2026-06-12); the STFT wraps are bound via `binding_domains.hpp` (`STFTDomainWrap`, `FDDomainForStftWrap`, `STFTFresnelWrap`).
 - `binding_flr.cxx` / `binding_flr.hpp` — `response_part()` implementation + shared wrapper classes (`ReturnPointerBase`, `TDIConfigWrap`, `LISAResponseWrap`). **Absorbed from lisa-on-gpu at Phase 3E**. The `PYBIND11_MODULE(responselisa, m)` block was stripped; LAT's pycppdetector is the sole entry point.
 - `orbits_view.hpp` — `OrbitsView` POD struct, the stable-layout cross-wheel interface downstream packages consume in place of typed `Orbits*` pointers. `binding_detector.cxx` runs `static_assert(sizeof + 15 offsetofs)` confirming layout matches `class Orbits` at every build. See plan section "POD-view side-channel".
-- `lisatools_header_abi.hpp` — `LISATOOLS_HEADER_ABI_VERSION` macro + `LISATOOLS_IS_WRAPPER_OWNER` toggle. **`binding_detector.cxx` sets the toggle to 1** (LAT is the owner); downstream binding TUs leave it at the default 0 and add `static_assert(!LISATOOLS_IS_WRAPPER_OWNER, ...)`. Compile-time enforcement of the single-registrant rule. See `tools/check_single_registrant.sh` at sprint root for the CI-side grep complement.
+- `lisatools_header_abi.hpp` — `LISATOOLS_HEADER_ABI_VERSION` macro + `LISATOOLS_IS_WRAPPER_OWNER` toggle. **`binding_detector.cxx` sets the toggle to 1** (LAT is the owner); downstream binding TUs leave it at the default 0 and add `static_assert(!LISATOOLS_IS_WRAPPER_OWNER, ...)`. Compile-time enforcement of the single-registrant rule. See `tools/check_single_registrant.sh` in the umbrella workspace root for the CI-side grep complement.
 - `LISAanalysisToolsConfig.cmake` — `find_package(LISAanalysisTools CONFIG REQUIRED)` → `LISAanalysisTools::headers` interface target for downstream CMake consumers.
 - `pycppdetector.pyx` is a legacy Cython file; the active path is the nanobind module `pycppdetector` produced from `binding_detector.cxx`.
 
@@ -104,9 +159,9 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
   - **Domains are never communicated by string** — `GeneralSettings.domain_settings` takes a `DomainSettingsBase` instance or a `(times, dt, force_backend)` factory (`FDSettings/STFTSettings/WDMSettings.make_factory`); all dispatch is `isinstance` on the settings class.
 - `utils/` — `constants.py` (re-exports `lisaconstants`-derived values like `YRSID_SI`), array helpers (`get_array_module`, `AET`), exceptions, multi-GPU data holders.
 - `orbit_files/` — packaged orbit data files.
-- `scripts/` — dev / validation / benchmark / diagnostics scripts (`gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `notes/`). Migrated from sprint-root at Phase 2.
+- `scripts/` — dev / validation / benchmark / diagnostics scripts (`gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `notes/`). Migrated from the umbrella workspace root at Phase 2.
 
-## Stock global fits — no new settings files (sprint-wide rule)
+## Stock global fits — no new settings files (LISA Analysis Tools–wide rule)
 
 Run configurations live as **installed stock classes**, not settings files
 (reorg-top-layer, 2026-07-09). The API:
@@ -148,7 +203,7 @@ Rules:
    only; data loads, waveform builds, HDF backends, and directory creation
    happen in `.build()` (prove with the cheapness tests in
    `tests/test_stock_globalfit.py`).
-3. **The pre-build fit must pickle/deepcopy** (sprint rule): named
+3. **The pre-build fit must pickle/deepcopy** (LISA Analysis Tools–wide rule): named
    module-level functions/classes only on the config; runtime-only objects
    attach post-deepcopy via `attach_runtime_objects`.
 4. The `global_fit_input/*.py` files for migrated variants are minimal
@@ -158,30 +213,17 @@ Rules:
 `scripts/run_global.py` accepts `--stock <name>` alongside the legacy
 `-sfp <path>`.
 
-## V2 signal-heterodyne work-item (in-flight, 2026-06-02)
+## V2 signal-heterodyne likelihood path
 
-A second WDM-domain likelihood path is being developed alongside the
-existing chunked-heterodyne (`gb_wdm_het_*`) family. It uses a polyphase
-per-active-m-layer iFFT + carrier de-rotation to compute sparse complex
-WDM coefficients without the full dense `TDSignal.transform` — Python
-prototype shows ~130× speedup and mm5 ≈ 1.6e-9 median.
-
-- **Plan**: `~/.claude/plans/yes-find-and-read-sprightly-garden.md` (full
-  architecture, kernel signatures, shared-mem budget, file-by-file
-  migration order).
-- **In-flight code**: `scripts/gb_chunked_het/gb_signal_het_wdm_v2*.py`
-  + `scripts/gb_chunked_het/signal_het_cpp/signal_het_views.hpp` (POD
-  view structs that move to `src/lisatools/cutils/signal_het_views.hpp`
-  at landing).
-- **What lands in LAT**: `cutils/SignalHetPolyphase.{hh,cu}`,
-  `cutils/SignalHetConvert.{hh,cu}`, `cutils/SignalHetReconstruct.{hh,cu}`,
-  `cutils/SignalHetBinFold.{hh,cu}`, `cutils/signal_het_views.hpp`,
-  `response/signal_het_comp.py` (`SignalHetComputationsBase`), and
-  `jax/wdm/signal_het_*` JAX mirror. All source-agnostic; per-source
-  `*AbsoluteFD` entries live in GBGPU/BBHx.
-- **Independent of the C++ TDIonTheFly carve-out** — can land before the
-  carve-out is done. Both work-items share the L2 enforcement landed
-  in Phase 3J.
+A second WDM-domain likelihood path — polyphase per-active-m-layer iFFT +
+carrier de-rotation producing sparse complex WDM coefficients without the full
+dense `TDSignal.transform` — has been developed and validated alongside the
+chunked-heterodyne (`gb_wdm_het_*`) family (~130× faster; GB mm5 ≈ 1.6e-9
+median). Source-agnostic helpers live in `signal_het.py` / `chunked_het.py`;
+the GB implementation is `gbgpu.gbsignalhetcomputations.GBSignalHetComputations`
+(currently CPU-only, wired into the global-fit GB path via `for_band_engine()`),
+and the SOBBH counterpart lives in `bbhx`. See the per-repo `docs/codebase-map.md`
+for exact current locations; a JAX mirror is a documented follow-up.
 
 ## Downstream consumption
 
@@ -205,88 +247,3 @@ Downstream waveform packages (GBGPU, BBHx, FastEMRIWaveforms) consume LAT header
 - `Makefile` at the repo root is leftover from a previous project (`lisacattools`) — ignore it; build with `pip` / `cmake` as described above.
 - When editing native code, remember the `.cu → .cxx` copy step: a change to `Detector.cu` rebuilds both CPU and GPU targets.
 - When adding Python code that needs to work on both CPU and GPU, follow the `xp` pattern (resolve the array module from an input array via `get_array_module`) rather than importing `cupy` unconditionally.
-
-## Backend implementation hierarchy (sprint-wide rule)
-
-When implementing or modifying an algorithm that exists across multiple
-backends (GPU C++ / CPU C++ / JAX), follow this hierarchy:
-
-1. **GPU C++ (CUDA) leads.** This is the canonical performance target
-   and reference implementation. New algorithms and optimizations are
-   designed for the GPU first; CPU and JAX paths follow.
-
-2. **CPU C++ mirrors GPU C++ as closely as possible.** Same kernel
-   structure, same algorithm, same data flow — use `#ifdef __CUDACC__`
-   or shared compile-time macros (`CUDA_SHARED`, `THREAD_START_X`,
-   `BLOCK_INCR_X`, …) to bridge platform differences. The CPU path
-   exists primarily for testing and CPU-only environments; it must
-   not diverge in algorithm or output beyond floating-point order of
-   operations.
-
-3. **CPU C++ must reproduce the overall lisatools computation.**
-   Against the lisatools reference (e.g. `FDSignal.transform`,
-   `TDSignal.transform`, `XYZ2SensitivityMatrix`), match to machine
-   precision (≤ 1e-15 mismatch) in direct modes; cache/approximation
-   modes have documented per-feature error budgets.
-
-4. **JAX may diverge internally** — design it to be JAX-efficient.
-   JAX-CPU and JAX-GPU compilation targets may even differ. Use
-   JAX-native idioms (`jax.lax.scan`, `jax.vmap`, static-shape
-   `dynamic_slice` + masks, functional carries) rather than
-   mechanically translating CUDA shared memory / register caches.
-
-5. **JAX must match C++ inner-product outputs.** End-to-end
-   likelihood quantities (`<d|h>`, `<h|h>`, swap_ll 5 terms) must
-   match the C++ to floating-point precision (reldiff ≲ 1e-12) on
-   representative test cases. Intermediate quantities (raw templates,
-   per-chunk WDM coefficients) may differ at FP precision due to
-   summation order — validate at the inner-product level.
-
-**Workflow for a new feature.** GPU C++ → CPU C++ via `#ifdef` → JAX
-with JAX-native idioms → cross-backend inner-product validation.
-
-
-
-## Narrowband mismatches mm2 / mm5 (chunked-het / WDM validation)
-
-When verifying a chunked-heterodyne or other narrowband WDM template
-against a lisatools reference signal, the canonical narrowband
-mismatches are:
-
-- **`mm5`** -- "5-layer" mismatch over a 5-m-layer band around the
-  carrier `f0`. The band is defined by frequency bounds
-  `[f0 - 3*layer_df, f0 + 2*layer_df]` (slightly asymmetric to cover
-  the spectral tails on the side where the WDM transform spreads). Use
-  this as the **primary** chunked-het accuracy metric -- it captures
-  the dominant carrier + first-neighbour m-layers.
-
-- **`mm2`** -- "2-layer" mismatch over just `m_floor` and `m_floor + 1`
-  (the two layers that hold the bulk of a near-monochromatic GB
-  signal). Band bounds: `[(m_floor - 0.5)*layer_df,
-  (m_floor + 1 + 0.5)*layer_df]`. Use this as a tighter check
-  isolating the carrier itself; it strips away spectral-tail
-  contributions.
-
-Both are **`1 - normalized overlap`**:
-
-```python
-mm = 1 - <d|h> / sqrt(<d|d> <h|h>)
-```
-
-via `AnalysisContainer.template_inner_product(..., normalize=True)`,
-after slicing both `data` and `template` to the same narrow band by
-building a per-binary `WDMSettings(min_freq=..., max_freq=...)` and
-reusing the parent grid for layer-index alignment.
-
-The canonical implementation lives in
-`gb_chunked_prior_draws.py:283-340` (the `mm5` and `mm2` blocks).
-SOBBH and other source-class versions should mirror the same band
-definition for direct cross-source comparison.
-
-Acceptance thresholds (current chunked-het with N_cp_sig=48,
-N_cp_orbit=32, half-day wavelets, full angular prior):
-- median mm5 ~ 1e-9, 90% < 8e-9, 99% < 3e-7
-- low-frequency (m_floor < 100) sources occasionally show mm5 ~ 1e-7
-  due to spectral-tail extension below ind_min_f -- documented
-  systematic, not a bug.
-

@@ -518,6 +518,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ranks_needed=0,
         gpus=[],
         num_band_preload=20000,
+        wdm_band_slab_layers=None,
+        wdm_slab_guard_layers=1,
         run_swaps=True,
         max_data_store_size=6000,
         force_backend=None,
@@ -568,6 +570,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if kwargs.get("n_subbands") is not None:
             num_band_preload = int(kwargs["n_subbands"])
         self.num_band_preload = self.n_subbands = num_band_preload
+        # Task-b: narrow per-band WDM slab extent (layers). None = full active
+        # band (bit-identical to pre-task-b); 0 = auto-size (band span +
+        # 2*(leakage+guard)); N>0 = explicit. ``wdm_slab_guard_layers`` is the
+        # adjustable guard used by the auto-size. Forwarded to every
+        # BandSorter -> SubBandBuffer.
+        self.wdm_band_slab_layers = wdm_band_slab_layers
+        self.wdm_slab_guard_layers = wdm_slab_guard_layers
         self.band_preload_size = self.max_data_store_size = max_data_store_size
         self.use_prior_removal = use_prior_removal
         self.has_setup_group = False
@@ -2991,6 +3000,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 gb=self.gb,
                 gb_wdm_comp=self.gb_wdm_comp,
                 gb_fd_comp=self.gb_fd_comp,
+                wdm_band_slab_layers=self.wdm_band_slab_layers,
+                wdm_slab_guard_layers=self.wdm_slab_guard_layers,
                 waveform_kwargs=self.waveform_kwargs,
                 rj_prop=rj_prop,
                 keep_all_inds=keep_all_inds,
@@ -3156,6 +3167,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 gb=self.gb,
                 gb_wdm_comp=self.gb_wdm_comp,
                 gb_fd_comp=self.gb_fd_comp,
+                wdm_band_slab_layers=self.wdm_band_slab_layers,
+                wdm_slab_guard_layers=self.wdm_slab_guard_layers,
                 waveform_kwargs=self.waveform_kwargs,
             )
 

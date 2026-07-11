@@ -17,6 +17,7 @@ from gbgpu.utils.utility import get_fdot, get_N
 from lisatools.domains import DomainSettingsBase, FDSettings, WDMSettings
 from lisatools.utils.constants import YRSID_SI
 
+from ..base import env_default
 from ...engine import Settings, Setup
 from ...hdfbackend import GBHDFBackend
 from ...loginfo import init_logger
@@ -50,6 +51,43 @@ class GBSettings(Settings):
     num_repeat_proposals: int = 100
     search_kwargs: Optional[dict] = None
     group_proposal_kwargs: Optional[dict] = None
+    # Peak GPU-memory cap for the GB special move. ``n_subbands`` is the
+    # maximum number of (temp, walker, band) sub-band buffer cells resident
+    # at once (the ``BandScheduler`` slot count / the move's
+    # ``num_band_preload``). The move preloads at most this many cells and
+    # swaps finished cells out for pending ones, so PEAK sub-band-buffer
+    # memory scales with ``n_subbands``, not the total cell count
+    # (ntemps*nwalkers*n_bands). Lower it to bound peak GPU memory on large
+    # runs; the historical move default is 20000 (effectively "load every
+    # cell"). Env: ``GB_N_SUBBANDS``. Flows to the move via
+    # ``group_proposal_kwargs["num_band_preload"]`` (see ``__post_init__``).
+    # Peak sub-band-buffer memory is ``n_subbands * per_slot`` once the cap
+    # binds (total cells > n_subbands); ntemps/nwalkers/n_bands only decide
+    # whether it binds and how many scheduler rounds run, NOT the peak. Default
+    # 1024 (was an effectively-uncapped 20000): bounds peak on large multi-band
+    # runs while leaving small runs -- whose cell count is already < 1024 --
+    # untouched. Env: ``GB_N_SUBBANDS``.
+    n_subbands: int = dataclasses.field(
+        default_factory=env_default("GB_N_SUBBANDS", 1024, int)
+    )
+    # Task-b: narrow per-band WDM slabs. Each per-band sub-band-buffer slab
+    # spans a few WDM layers centered on the band instead of the full analysis
+    # band ``Nf_active``, cutting the dominant buffer memory term by
+    # ~Nf_active/slab_Nf. WDM path only (FD is already per-band narrow).
+    # Requires the chunked-het backend built with the task-b per-slab origin
+    # (the default CUDA/CPU build). Env: GB_WDM_BAND_SLAB_LAYERS.
+    #   None -> OFF (full active band; bit-identical to pre-task-b). [default]
+    #   0    -> AUTO: band layer span + 2*(leakage + wdm_slab_guard_layers),
+    #           leakage=2 (recommended-Tukey estimate) -> ~band_span + 6.
+    #   N>0  -> EXPLICIT N layers.
+    wdm_band_slab_layers: typing.Optional[int] = dataclasses.field(
+        default_factory=env_default("GB_WDM_BAND_SLAB_LAYERS", None, int)
+    )
+    # Adjustable guard (extra WDM layers each side) used by the AUTO slab size
+    # (wdm_band_slab_layers=0). Env: GB_WDM_SLAB_GUARD_LAYERS.
+    wdm_slab_guard_layers: int = dataclasses.field(
+        default_factory=env_default("GB_WDM_SLAB_GUARD_LAYERS", 1, int)
+    )
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
     t0: Optional[float] = 0.0
     tdi_setup: Optional[str] = "XYZ" # other options are AET and AE.
@@ -188,7 +226,18 @@ class GBSetup(Setup, GBSettings):
             self.group_proposal_kwargs: typing.Dict[str, Any] = dict(
                 n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=200
             )
-        
+        # Peak sub-band-buffer memory cap. Injected here (not only in the
+        # None-default dict above) so an explicit ``group_proposal_kwargs``
+        # still gets the ``n_subbands`` knob unless it names one itself.
+        self.group_proposal_kwargs.setdefault("num_band_preload", int(self.n_subbands))
+        # Task-b narrow per-band WDM slabs (None -> full active band).
+        self.group_proposal_kwargs.setdefault(
+            "wdm_band_slab_layers", self.wdm_band_slab_layers
+        )
+        self.group_proposal_kwargs.setdefault(
+            "wdm_slab_guard_layers", self.wdm_slab_guard_layers
+        )
+
         if self.search_kwargs is None:
             # Configuration for the stft_tof per-band serial GB search
             # (consumed by ``GBSpecialRJSerialSearchMCMC.setup`` and

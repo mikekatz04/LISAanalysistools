@@ -27,11 +27,6 @@ from .utils.constants import *
 from .utils.utility import AET, asnumpy, get_array_module
 
 
-# TODO/DOCS: this stub appears to be a forward declaration for the type hint on __init__'s data_res_in parameter; verify whether it's still needed.
-class DataResidualArray:
-    pass
-
-
 class DataResidualArray:
     """Deprecated container — kept as a thin shim around :class:`~lisatools.domains.DomainBase`.
 

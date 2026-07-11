@@ -311,6 +311,45 @@ class WDMComputationsBase(LISAToolsParallelModule):
         """Resolve ``self._METHOD_PREFIX + '_' + name`` on the comp group."""
         return getattr(self._comp_group(), f"{self._METHOD_PREFIX}_{name}")
 
+    def _slab_kernel_args(self, holder):
+        """Task-b per-band slab args to splat at the end of the C++ buffer
+        kernels (get_ll / swap_ll / fill_global / get_fstat_ll).
+
+        Narrow per-band slabs (each buffer slot spans ``band_slab_Nf`` WDM
+        layers starting at ``slab_min_f[slot]`` instead of the full active
+        band) are a **C++-only** memory optimization. Returns:
+
+        * ``()`` on the JAX backend -- the JAX kernels keep their original
+          signature (narrow mode there is a documented follow-up), so nothing
+          is appended.
+        * ``(0, empty_int32)`` on the C++ backends when the holder carries no
+          slab metadata -- the required kernel args in their OFF state
+          (bit-identical to the pre-task-b full-active-band layout).
+        * ``(int(band_slab_Nf), slab_min_f_int32)`` when the holder (a GB
+          ``SubBandBuffer`` built with ``wdm_band_slab_layers``) exposes the
+          per-slot origins.
+        """
+        return self._slab_args_from(
+            getattr(holder, "band_slab_Nf", None),
+            getattr(holder, "slab_min_f", None),
+        )
+
+    def _slab_args_from(self, band_slab_Nf, slab_min_f):
+        """Build the trailing C++ slab kernel args from explicit values.
+
+        ``()`` on JAX (narrow mode is C++-only); ``(0, empty_int32)`` when
+        off (the required args in their bit-identical OFF state);
+        ``(int(band_slab_Nf), slab_min_f_int32)`` when narrow.
+        """
+        if self.backend.name == self._BACKEND_PREFIX + "_jax":
+            return ()
+        if band_slab_Nf is None or slab_min_f is None:
+            return (0, self.xp.zeros(0, dtype=np.int32))
+        return (
+            int(band_slab_Nf),
+            self.xp.ascontiguousarray(self.xp.asarray(slab_min_f, dtype=np.int32)),
+        )
+
     def _empty_groups(self, num_bin):
         """Zero-length grouping arrays for the un-grouped C-kernel path."""
         return dict(
@@ -511,6 +550,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
             self.xp.asarray(groups["group_m_hi"],   dtype=np.int32),
             int(groups["n_groups"]),
             int(m_band_half_width),
+            *self._slab_kernel_args(wdm_holder),
         )
 
         self.d_h_out = d_h_out
@@ -611,6 +651,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
             self.xp.asarray(groups["pair_m_lo_b"],  dtype=np.int32),
             self.xp.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
             int(m_band_half_width),
+            *self._slab_kernel_args(wdm_holder),
         )
 
         self.d_h_add_out       = d_h_a
@@ -814,7 +855,9 @@ class WDMComputationsBase(LISAToolsParallelModule):
                         convert_to_ra_dec: Optional[bool] = None,
                         data_index=None, factors=None,
                         grid_dim: int = 0,
-                        m_band_half_width: int = 1):
+                        m_band_half_width: int = 1,
+                        band_slab_Nf: Optional[int] = None,
+                        slab_min_f=None):
         """Scatter per-source chunked-heterodyne WDM templates into a global buffer.
 
         Argument order matches the other ``*_wdm`` methods on this
@@ -874,7 +917,10 @@ class WDMComputationsBase(LISAToolsParallelModule):
         # full-grid-sized; active when this comp carries a restricted band AND
         # the buffer is the smaller active size (the global-fit settings path).
         ws = self.wdm_settings
-        Nfa = int(getattr(ws, "Nf_active", self.Nf))
+        # Task-b: a narrow per-band slab makes the active layout span band_slab_Nf
+        # layers instead of the full Nf_active. The per-template flat size + the
+        # (nchannels, Nfa, Nta) shape check below key off this reduced extent.
+        Nfa = int(band_slab_Nf) if band_slab_Nf else int(getattr(ws, "Nf_active", self.Nf))
         Nta = int(getattr(ws, "Nt_active", self.Nt))
         restricted = (Nfa < self.Nf) or (Nta < self.Nt)
         dense_per, active_per = self.nchannels * self.Nf * self.Nt, self.nchannels * Nfa * Nta
@@ -965,6 +1011,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
             int(self.N_cp_sig), int(self.N_cp_orbit),
             int(m_band_half_width),
             bool(active_band),
+            *self._slab_args_from(band_slab_Nf, slab_min_f),
         )
 
     def get_fstat_ll_wdm(self, params, wdm_holder,
@@ -1062,6 +1109,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
             int(self.backend.TDITypeDict[self.tdi_type]),
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(m_band_half_width),
+            *self._slab_kernel_args(wdm_holder),
         )
 
         # WDM coefs are real -> imag is identically 0.
