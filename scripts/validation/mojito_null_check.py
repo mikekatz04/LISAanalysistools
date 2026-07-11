@@ -118,7 +118,10 @@ def main():
     d_h = complex(ac.non_marg_d_h)
     r_r = d_d + h_h - 2.0 * d_h.real
     logL_source = -0.5 * r_r
-    noise_term = float(ac.likelihood(noise_only=True))
+    # source_only=False explicitly: full_year runs a fixed PSD
+    # (likelihood_source_only=True), which otherwise collides with
+    # noise_only on the container.
+    noise_term = float(ac.likelihood(noise_only=True, source_only=False))
     logL_full = float(ac.template_likelihood(h, include_psd_info=True))
 
     print(f"\n===========  {branch.upper()} inner products @ injection (global fit)  ===========", flush=True)
