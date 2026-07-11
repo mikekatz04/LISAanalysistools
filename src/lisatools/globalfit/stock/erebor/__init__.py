@@ -32,6 +32,11 @@ from .noise import (  # noqa: F401
     PSDSetup,
     get_galfor_erebor_settings,
 )
+from .stochastic import (  # noqa: F401
+    SGWBSettings,
+    SGWBSetup,
+    get_sgwb_erebor_settings,
+)
 from .sobbh import SOBBHHDFBackend, SOBBHSettings, SOBBHSetup, SOBBHState  # noqa: F401
 from .transforms import (  # noqa: F401
     LISA_to_SSB,
@@ -65,8 +70,15 @@ get_stock_options = _registry.options
 from .variants.all_sources import AllSourcesGlobalFit  # noqa: E402
 from .variants.full_year_combined import FullYearCombinedGlobalFit  # noqa: E402
 from .variants.gb_no_fg import GBNoForegroundGlobalFit  # noqa: E402
+from .variants.noise import NoiseOnlyGlobalFit, NoiseSGWBGlobalFit  # noqa: E402
 
-for _cls in (GBNoForegroundGlobalFit, AllSourcesGlobalFit, FullYearCombinedGlobalFit):
+for _cls in (
+    GBNoForegroundGlobalFit,
+    AllSourcesGlobalFit,
+    FullYearCombinedGlobalFit,
+    NoiseOnlyGlobalFit,
+    NoiseSGWBGlobalFit,
+):
     _registry.register(_cls)
 
 #: Names of the registered stock options (mirrors the sensitivity.py idiom).
@@ -79,6 +91,8 @@ __stock_globalfit_options__ = _registry.names()
 gb_no_fg = GBNoForegroundGlobalFit()
 all_sources = AllSourcesGlobalFit()
 full_year_combined = FullYearCombinedGlobalFit()
+noise_only = NoiseOnlyGlobalFit()
+noise_sgwb = NoiseSGWBGlobalFit()
 
 
 def __getattr__(name):

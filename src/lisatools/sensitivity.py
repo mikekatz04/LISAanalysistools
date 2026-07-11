@@ -254,8 +254,9 @@ class X1TDISens(Sensitivity):
             Cxx: Transform factor.
 
         """
+        xp = Sensitivity.get_xp(f)
         x = 2 * np.pi * f * L_SI / C_SI
-        return 16.0 * np.sin(x) ** 2
+        return 16.0 * xp.sin(x) ** 2
 
     @staticmethod
     def transform(
@@ -268,16 +269,17 @@ class X1TDISens(Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
+        xp = Sensitivity.get_xp(f)
         assert noise_levels.units == "relative_frequency"
         Cxx = X1TDISens.Cxx(f)
 
         x = 2 * np.pi * f * L_SI / C_SI
         # TODO: need to check these
         isi_rfi_readout_transfer = Cxx
-        tmi_readout_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
-        tm_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
+        tmi_readout_transfer = Cxx * (2.0 * (1.0 + xp.cos(x) ** 2))
+        tm_transfer = Cxx * (2.0 * (1.0 + xp.cos(x) ** 2))
         rfi_backlink_transfer = Cxx
-        tmi_backlink_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
+        tmi_backlink_transfer = Cxx * (2.0 * (1.0 + xp.cos(x) ** 2))
 
         isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
         rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
@@ -305,8 +307,9 @@ class X1TDISens(Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
+        xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
-        t = 4.0 * x**2 * np.sin(x) ** 2
+        t = 4.0 * x**2 * xp.sin(x) ** 2
         return Sh * t
 
 
@@ -338,8 +341,9 @@ class XY1TDISens(Sensitivity):
             Cxy: Transform factor.
 
         """
+        xp = Sensitivity.get_xp(f)
         x = 2 * np.pi * f * L_SI / C_SI
-        return -4.0 * np.sin(2 * x) * np.sin(x)
+        return -4.0 * xp.sin(2 * x) * xp.sin(x)
 
     @staticmethod
     def transform(
@@ -387,10 +391,11 @@ class XY1TDISens(Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
+        xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
         # TODO: check these functions
         # GB = -0.5 of X
-        t = -0.5 * (4.0 * x**2 * np.sin(x) ** 2)
+        t = -0.5 * (4.0 * x**2 * xp.sin(x) ** 2)
         return Sh * t
 
 
@@ -424,10 +429,11 @@ class X2TDISens(Sensitivity):
             Cxx: Transform factor.
 
         """
+        xp = Sensitivity.get_xp(f)
         x = 2 * np.pi * f * L_SI / C_SI
         return (
-            16.0 * np.sin(x) ** 2 * np.sin(2 * x) ** 2
-        )  # np.abs(1. - np.exp(-2j * np.pi * f * L_SI / C_SI) ** 2) ** 2
+            16.0 * xp.sin(x) ** 2 * xp.sin(2 * x) ** 2
+        )  # xp.abs(1. - xp.exp(-2j * np.pi * f * L_SI / C_SI) ** 2) ** 2
 
     @staticmethod
     def transform(
@@ -440,16 +446,17 @@ class X2TDISens(Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
+        xp = Sensitivity.get_xp(f)
         assert noise_levels.units == "relative_frequency"
         Cxx = X2TDISens.Cxx(f)
 
         x = 2 * np.pi * f * L_SI / C_SI
 
         isi_rfi_readout_transfer = 4.0 * Cxx
-        tmi_readout_transfer = Cxx * (3 + np.cos(2 * x))
-        tm_transfer = 4 * Cxx * (3 + np.cos(2 * x))
+        tmi_readout_transfer = Cxx * (3 + xp.cos(2 * x))
+        tm_transfer = 4 * Cxx * (3 + xp.cos(2 * x))
         rfi_backlink_transfer = 4 * Cxx
-        tmi_backlink_transfer = Cxx * (3 + np.cos(2 * x))
+        tmi_backlink_transfer = Cxx * (3 + xp.cos(2 * x))
 
         isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
         rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
@@ -477,9 +484,10 @@ class X2TDISens(Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
+        xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
         # TODO: check these functions for TDI2
-        t = 4.0 * x**2 * np.sin(x) ** 2
+        t = 4.0 * x**2 * xp.sin(x) ** 2
         return Sh * t
 
 
@@ -527,9 +535,10 @@ class XY2TDISens(Sensitivity):
             Cxy: Transform factor.
 
         """
+        xp = Sensitivity.get_xp(f)
         x = 2 * np.pi * f * L_SI / C_SI
 
-        return -16.0 * np.sin(x) * np.sin(2.0 * x) ** 3
+        return -16.0 * xp.sin(x) * xp.sin(2.0 * x) ** 3
 
     @staticmethod
     def transform(
@@ -598,9 +607,10 @@ class XY2TDISens(Sensitivity):
         Returns:
             Stochastic contribution to CSD.
         """
+        xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
         # Placeholder - using TDI1 form scaled by -0.5
-        t = -0.5 * (4.0 * x**2 * np.sin(x) ** 2)
+        t = -0.5 * (4.0 * x**2 * xp.sin(x) ** 2)
         return Sh * t
 
 
@@ -662,21 +672,22 @@ class A1TDISens(X1TDISens, Sensitivity):
                 "ExtendedLISAModel has not been implemented yet for A1/E1/T1."
             )
 
+        xp = Sensitivity.get_xp(f)
         assert noise_levels.units == "relative_frequency"
         Cxx = X1TDISens.Cxx(f)
 
         x = 2 * np.pi * f * L_SI / C_SI
 
         # these are WRONG
-        tmi_readout_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
+        tmi_readout_transfer = Cxx * (2.0 * (1.0 + xp.cos(x) ** 2))
         rfi_backlink_transfer = Cxx
-        tmi_backlink_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
+        tmi_backlink_transfer = Cxx * (2.0 * (1.0 + xp.cos(x) ** 2))
 
         # these are right and were changed accordingly
         # Need to find a citation for these 1st gen stuff
         # all that is needed for old model type
-        isi_rfi_readout_transfer = 1 / 2 * Cxx * (2.0 + np.cos(x))
-        tm_transfer = Cxx * (3.0 + 2.0 * np.cos(x) + np.cos(2 * x))
+        isi_rfi_readout_transfer = 1 / 2 * Cxx * (2.0 + xp.cos(x))
+        tm_transfer = Cxx * (3.0 + 2.0 * xp.cos(x) + xp.cos(2 * x))
 
         isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
         rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
@@ -704,8 +715,9 @@ class A1TDISens(X1TDISens, Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
+        xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
-        t = 4.0 * x**2 * np.sin(x) ** 2
+        t = 4.0 * x**2 * xp.sin(x) ** 2
         return 1.5 * (Sh * t)
 
 
@@ -731,6 +743,7 @@ class T1TDISens(Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
+        xp = Sensitivity.get_xp(f)
         assert noise_levels.units == "relative_frequency"
 
         Cxx = X1TDISens.Cxx(f)
@@ -752,15 +765,15 @@ class T1TDISens(Sensitivity):
             raise NotImplementedError(
                 "ExtendedLISAModel has not been implemented yet for A1/E1/T1."
             )
-        tmi_readout_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
+        tmi_readout_transfer = Cxx * (2.0 * (1.0 + xp.cos(x) ** 2))
         rfi_backlink_transfer = Cxx
-        tmi_backlink_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
+        tmi_backlink_transfer = Cxx * (2.0 * (1.0 + xp.cos(x) ** 2))
 
         # these are right and were changed accordingly
         # Need to find a citation for these 1st gen stuff
         # all that is needed for old model type
-        isi_rfi_readout_transfer = Cxx * (1 - np.cos(x))
-        tm_transfer = 8.0 * Cxx * np.sin(x / 2.0) ** 4
+        isi_rfi_readout_transfer = Cxx * (1 - xp.cos(x))
+        tm_transfer = 8.0 * Cxx * xp.sin(x / 2.0) ** 4
 
         isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
         rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
@@ -788,8 +801,9 @@ class T1TDISens(Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
+        xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
-        t = 4.0 * x**2 * np.sin(x) ** 2
+        t = 4.0 * x**2 * xp.sin(x) ** 2
         return 0.0 * (Sh * t)
 
 class A2TDISens(X2TDISens, Sensitivity):
@@ -808,17 +822,18 @@ class A2TDISens(X2TDISens, Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
+        xp = Sensitivity.get_xp(f)
         assert noise_levels.units == "relative_frequency"
         Cxx = X2TDISens.Cxx(f)
 
         x = 2 * np.pi * f * L_SI / C_SI
 
-        isi_rfi_readout_transfer = 2.0 * Cxx * (2 + np.cos(x))
-        tmi_readout_transfer = Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x))
-        tm_transfer = 4 * Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x))
+        isi_rfi_readout_transfer = 2.0 * Cxx * (2 + xp.cos(x))
+        tmi_readout_transfer = Cxx * (3 + 2 * xp.cos(x) + xp.cos(2 * x))
+        tm_transfer = 4 * Cxx * (3 + 2 * xp.cos(x) + xp.cos(2 * x))
 
-        rfi_backlink_transfer = 2 * Cxx * (2 * np.cos(x))
-        tmi_backlink_transfer = Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x))
+        rfi_backlink_transfer = 2 * Cxx * (2 * xp.cos(x))
+        tmi_backlink_transfer = Cxx * (3 + 2 * xp.cos(x) + xp.cos(2 * x))
 
         isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
         rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
@@ -846,9 +861,10 @@ class A2TDISens(X2TDISens, Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
+        xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
         # TODO: check these functions for TDI2
-        t = 4.0 * x**2 * np.sin(x) ** 2
+        t = 4.0 * x**2 * xp.sin(x) ** 2
         return Sh * t
 
 
@@ -874,16 +890,17 @@ class T2TDISens(X2TDISens, Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
+        xp = Sensitivity.get_xp(f)
         assert noise_levels.units == "relative_frequency"
         Cxx = X2TDISens.Cxx(f)
 
         x = 2 * np.pi * f * L_SI / C_SI
 
-        isi_rfi_readout_transfer = 4.0 * Cxx * (1 - np.cos(x))
-        tmi_readout_transfer = 8 * Cxx * np.sin(x / 2.0) ** 4
-        tm_transfer = 32 * Cxx * np.sin(x / 2.0) ** 4
-        rfi_backlink_transfer = 4.0 * Cxx * (1 - np.cos(x))
-        tmi_backlink_transfer = 8 * Cxx * np.sin(x / 2.0) ** 4
+        isi_rfi_readout_transfer = 4.0 * Cxx * (1 - xp.cos(x))
+        tmi_readout_transfer = 8 * Cxx * xp.sin(x / 2.0) ** 4
+        tm_transfer = 32 * Cxx * xp.sin(x / 2.0) ** 4
+        rfi_backlink_transfer = 4.0 * Cxx * (1 - xp.cos(x))
+        tmi_backlink_transfer = 8 * Cxx * xp.sin(x / 2.0) ** 4
 
         isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
         rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
@@ -911,9 +928,10 @@ class T2TDISens(X2TDISens, Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
+        xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
         # TODO: check these functions for TDI2
-        t = 4.0 * x**2 * np.sin(x) ** 2
+        t = 4.0 * x**2 * xp.sin(x) ** 2
         return Sh * t
 
 
@@ -946,6 +964,7 @@ class LISASens(Sensitivity):
             Sensitivity array.
 
         """
+        xp = Sensitivity.get_xp(f)
         if include_instrument:
             model = lisa_models.check_lisa_model(model)
 
@@ -960,8 +979,8 @@ class LISASens(Sensitivity):
             Sa_d = noise_values.tm_noise
             Sop = noise_values.isi_oms_noise
 
-            all_m = np.sqrt(4.0 * Sa_d + Sop)
-            ## Average the antenna response
+            all_m = xp.sqrt(4.0 * Sa_d + Sop)
+            ## Average the antenna response (scalar constants -> host np is fine)
             av_resp = np.sqrt(5) if average else 1.0
 
             ## Projection effect
@@ -970,7 +989,7 @@ class LISASens(Sensitivity):
             ## Approximative transfer function
             f0 = 1.0 / (2.0 * lisaLT)
             a = 0.41
-            T = np.sqrt(1 + (f / (a * f0)) ** 2)
+            T = xp.sqrt(1 + (f / (a * f0)) ** 2)
             sens = (av_resp * Proj * T * all_m / lisaL) ** 2
         else:
             # stochastic-only: skip the instrument term entirely (no model needed)
@@ -1005,16 +1024,17 @@ class CornishLISASens(LISASens):
             PSD values.
         """
         # TODO: documentation here
+        xp = Sensitivity.get_xp(f)
         sky_averaging_constant = 20.0 / 3.0 if average else 1.0
 
         L = 2.5 * 10**9  # Length of LISA arm
         f0 = 19.09 * 10 ** (-3)  # transfer frequency
 
         # Optical Metrology Sensor
-        Poms = ((1.5e-11) * (1.5e-11)) * (1 + np.power((2e-3) / f, 4))
+        Poms = ((1.5e-11) * (1.5e-11)) * (1 + xp.power((2e-3) / f, 4))
 
         # Acceleration Noise
-        Pacc = (3e-15) * (3e-15) * (1 + (4e-4 / f) * (4e-4 / f)) * (1 + np.power(f / (8e-3), 4))
+        Pacc = (3e-15) * (3e-15) * (1 + (4e-4 / f) * (4e-4 / f)) * (1 + xp.power(f / (8e-3), 4))
 
         # constants for Galactic background after 1 year of observation
         alpha = 0.171
@@ -1026,15 +1046,15 @@ class CornishLISASens(LISASens):
         # Galactic background contribution
         Sc = (
             9e-45
-            * np.power(f, -7 / 3)
-            * np.exp(-np.power(f, alpha) + beta * f * np.sin(k * f))
-            * (1 + np.tanh(gamma * (f_k - f)))
+            * xp.power(f, -7 / 3)
+            * xp.exp(-xp.power(f, alpha) + beta * f * xp.sin(k * f))
+            * (1 + xp.tanh(gamma * (f_k - f)))
         )
 
         # PSD
         PSD = (sky_averaging_constant) * (
             (10 / (3 * L * L))
-            * (Poms + (4 * Pacc) / (np.power(2 * np.pi * f, 4)))
+            * (Poms + (4 * Pacc) / (xp.power(2 * np.pi * f, 4)))
             * (1 + 0.6 * (f / f0) * (f / f0))
             + Sc
         )
@@ -1378,11 +1398,13 @@ class SensitivityMatrixBase:
 
             _invC = xp.zeros_like(tmp)
 
-            # adjust for nans in off-diagonals
+            # adjust for nans in off-diagonals (xp.isnan so this works on cupy;
+            # ``inds``/``inds_bad`` below stay host arrays — they are Python-loop
+            # batch/index bookkeeping, not device data)
             for i in range(3):
                 for j in range(3):
                     if i != j:
-                        tmp[np.isnan(tmp[:, i, j]), i, j] = 0.0
+                        tmp[xp.isnan(tmp[:, i, j]), i, j] = 0.0
 
             batch = 100000
             inds = np.arange(0, tmp.shape[0], batch)
@@ -2062,7 +2084,92 @@ def check_sensitivity(sensitivity: Any) -> Sensitivity:
 _N_AVERAGE_EPOCHS = 1024
 
 
-class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
+class SensitivityBackendBase(LISAToolsParallelModule):
+    """Shared base for per-walker sensitivity-matrix backends.
+
+    A *sensitivity backend* is a callable that maps a walker's noise parameters
+    to a :class:`SensitivityMatrixBase`. Both the native-kernel
+    :class:`XYZSensitivityBackend` and the pure-Python
+    :class:`CompositeSensitivityBackend` derive from this base so they share the
+    **same backend-dispatch machinery** (via
+    :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`: ``.xp`` /
+    ``.backend`` / ``force_backend``) and the **same** ``__call__`` contract;
+    each backend supplies only its matrix construction in :meth:`_build_matrix`.
+
+    Args:
+        settings: Domain settings the matrix is evaluated on (FD, WDM, ...).
+        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0).
+        force_backend: Backend selector (``"cpu"`` / a CUDA name / ``"jax"``);
+            see :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`.
+    """
+
+    def __init__(
+        self,
+        settings: DomainSettingsBase,
+        *,
+        tdi_generation: int = 2,
+        force_backend: Optional[str] = None,
+    ):
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+        self.basis_settings = settings
+        self.tdi_generation = tdi_generation
+
+    @classmethod
+    def supported_backends(cls):
+        """Backends this sensitivity backend can dispatch to (CPU / CUDA / JAX).
+
+        Mirrors :class:`~lisatools.chunked_het.WDMComputationsBase`: JAX is listed
+        last, so the default "first available" pick stays CPU/GPU. (JAX *compute*
+        for the composite path is a deferred follow-up; the name is advertised so
+        an explicit ``force_backend="jax"`` resolves once that lands.)
+        """
+        return [cls._BACKEND_PREFIX + "_" + t for t in cls.GPU_RECOMMENDED_WITH_JAX()]
+
+    @property
+    def xp(self):
+        """Array module of the resolved backend (numpy / cupy / jax.numpy)."""
+        return self.backend.xp
+
+    def __call__(
+        self,
+        name: str,
+        psd_params,
+        galfor_params=None,
+        sgwb_params=None,
+        transform_fn: Optional[TransformContainer] = None,
+    ) -> "SensitivityMatrixBase":
+        """Build a per-walker sensitivity matrix from noise parameters.
+
+        Applies the optional PSD ``transform_fn`` (sampling -> physical params),
+        then delegates matrix construction to :meth:`_build_matrix`. The shared
+        signature means a run's ``sensitivity_backend`` can be either subclass
+        interchangeably (``run.py`` always passes ``transform_fn=`` /
+        ``galfor_params=`` / ``sgwb_params=``).
+
+        Args:
+            name: Identifier recorded on the produced matrix.
+            psd_params: ``[Soms_d, Sa_a, ...]`` (sampling basis if ``transform_fn``).
+            galfor_params: Optional galactic-foreground parameters.
+            sgwb_params: Optional SGWB spectral-template parameters.
+            transform_fn: Optional PSD :class:`TransformContainer`.
+        """
+        params = np.asarray(psd_params, dtype=float)
+        if transform_fn is not None:
+            params = transform_fn.both_transforms(
+                params, copy=True, return_transpose=False
+            )
+            params = np.atleast_1d(np.asarray(params).squeeze())
+        return self._build_matrix(name, params, galfor_params, sgwb_params)
+
+    def _build_matrix(self, name, params, galfor_params, sgwb_params):
+        """Construct the sensitivity matrix for the (already-transformed) params.
+
+        Subclass hook. ``params`` is the physical-basis ``[Soms_d, Sa_a, ...]``.
+        """
+        raise NotImplementedError
+
+
+class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
     """3x3 XYZ TDI sensitivity matrix backed by the C++/CUDA detector kernels.
 
     Wraps :class:`LISAToolsParallelModule` (for backend dispatch) and
@@ -2112,7 +2219,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         window_values: Optional[NDArrayLike] = None,
         average_transfer_functions: bool = False,
     ):
-        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+        SensitivityBackendBase.__init__(
+            self, settings, tdi_generation=tdi_generation, force_backend=force_backend
+        )
         SensitivityMatrixBase.__init__(self, settings)
 
         assert self.backend.xp == orbits.xp, "Orbits and Sensitivity backend mismatch."
@@ -3147,10 +3256,14 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         return spline_knots_position, spline_knots_amplitude
 
-    def __call__(
-        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None
+    def _build_matrix(
+        self, name: str, params: np.ndarray, galfor_params=None, sgwb_params=None
     ) -> "XYZSensitivityBackend":
         """Create a configured copy of this backend with updated noise parameters.
+
+        Backend hook (see :meth:`SensitivityBackendBase.__call__`). ``params`` is
+        the physical-basis noise vector; ``sgwb_params`` is accepted for signature
+        parity but ignored (the native XYZ kernel has no SGWB term).
 
         Used by :class:`~lisatools.globalfit.moves.psdmove.PSDMove` to produce a
         per-walker sensitivity matrix at each MCMC step without re-initialising
@@ -3197,10 +3310,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         new_sens_mat = copy(self)
         new_sens_mat.name = name
 
-        Soms_d = psd_params[0]
-        Sa_a = psd_params[1]
+        Soms_d = params[0]
+        Sa_a = params[1]
         if self.use_splines:  # assume transformed input.
-            spline_knots_position, spline_knots_amplitude = self.build_spline_arrays(psd_params[2:])
+            spline_knots_position, spline_knots_amplitude = self.build_spline_arrays(params[2:])
         else:
             spline_knots_position = None
             spline_knots_amplitude = None
@@ -3296,6 +3409,40 @@ def modulation_from_elements(
         return M
 
     return _mod
+
+
+class GalForTimeModulation:
+    """Per-element galactic-foreground time modulation loaded from a table file.
+
+    This is the general, data-driven time-modulation provider for
+    :class:`GalacticForeground` (``modulation=GalForTimeModulation(path)``): a
+    picklable callable ``t_arr -> (3, 3, Ntime)``. The table columns are
+    ``t, XX, YY, ZZ, XY, XZ, YZ`` (e.g. a GLASS anisotropy fit tuned to a given
+    galaxy orientation); the symmetric per-element covariance modulation is
+    interpolated onto the requested time grid.
+
+    Prefer this over the analytic annual model (:func:`annual_modulation_matrix`
+    / :class:`AnnualCovarianceModulation`) when a measured/tabulated modulation
+    is available. The file is (re)loaded lazily on each call, so the object holds
+    only its path and pickles cleanly across MPI ranks.
+
+    Args:
+        path: Path to the whitespace-delimited modulation table.
+    """
+
+    def __init__(self, path: str):
+        self.path = str(path)
+
+    def __call__(self, t_arr):
+        glass = np.loadtxt(self.path)
+        mod = np.array(
+            [
+                [glass[:, 1], glass[:, 4], glass[:, 5]],
+                [glass[:, 4], glass[:, 2], glass[:, 6]],
+                [glass[:, 5], glass[:, 6], glass[:, 3]],
+            ]
+        )
+        return interpolate.interp1d(glass[:, 0], mod)(np.asarray(asnumpy(t_arr)))
 
 
 class NoiseComponent:
@@ -3791,6 +3938,15 @@ class AnnualModulatedGalacticForeground(GalacticForeground):
         period: float = YRSID_SI,
         stochastic_fn=None,
     ):
+        warnings.warn(
+            "AnnualModulatedGalacticForeground is deprecated; use the general "
+            "modulation framework directly: GalacticForeground(foreground_params, "
+            "modulation=functools.partial(annual_modulation_matrix, amp=..., "
+            "phase0=...)) — or GalForTimeModulation(path) for a tabulated "
+            "modulation.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if stochastic_fn is None:
             stochastic_fn = FittedHyperbolicTangentGalacticForeground
         modulation = functools.partial(
@@ -3885,14 +4041,15 @@ def tdi_generation_from_channel(tdi_chan: str) -> int:
         )
 
 
-class CompositeSensitivityBackend:
+class CompositeSensitivityBackend(SensitivityBackendBase):
     """Callable wrapper that produces :class:`CompositeSensitivityMatrix` instances
     parameterised by per-walker PSD (and optional galactic-foreground / SGWB)
     coordinates.
 
-    The call signature mirrors :meth:`XYZSensitivityBackend.__call__` so the
-    object can be slotted into ``GeneralSetup.sensitivity_backend`` without any
-    changes in the global-fit run/move code. Each call returns a fresh
+    Shares :class:`SensitivityBackendBase` (hence the backend dispatch + the
+    ``__call__`` contract) with :class:`XYZSensitivityBackend`, so either can be
+    slotted into ``GeneralSetup.sensitivity_backend`` interchangeably. Each call
+    (via the base ``__call__`` -> :meth:`_build_matrix`) returns a fresh
     :class:`CompositeSensitivityMatrix` that sums an :class:`InstrumentNoise`
     component (rebuilt with the walker's Soms_d / Sa_a) and optionally a
     :class:`GalacticForeground` component (when ``galfor_params`` is supplied),
@@ -3910,6 +4067,15 @@ class CompositeSensitivityBackend:
         galfor_stochastic_fn: Stochastic-model class used for the optional
             :class:`GalacticForeground` component (only used when the caller
             supplies ``galfor_params``).
+        galfor_modulation: Per-element time modulation forwarded to the
+            :class:`GalacticForeground` component: ``None`` (stationary
+            isotropic limit), a ``(nch, nch)`` constant matrix, a
+            ``(nch, nch, Ntime)`` array, or a callable ``t_arr -> (nch, nch,
+            Ntime)`` (e.g. :class:`GalForTimeModulation`), evaluated lazily on
+            the domain's active time grid.
+        sgwb_stochastic_fn: SGWB spectral-template class or stock name used for
+            the optional :class:`SGWB` component (only used when the caller
+            supplies ``sgwb_params``).
         extra_components: Additional :class:`NoiseComponent` instances added
             to every constructed matrix — e.g. a stationary SGWB. These are
             held by reference so they're built once and reused.
@@ -3923,52 +4089,57 @@ class CompositeSensitivityBackend:
         model_name: str = "sangria",
         instrument_fill_nans: float = 0.0,
         galfor_stochastic_fn=HyperbolicTangentGalacticForeground,
+        galfor_modulation: Optional[object] = None,
+        sgwb_stochastic_fn="PowerLawSGWB",
+        instrument_component_cls=None,
+        instrument_model_cls=None,
         extra_components: Optional[Sequence[NoiseComponent]] = None,
+        force_backend: Optional[str] = None,
     ):
-        self.basis_settings = settings
-        self.tdi_generation = tdi_generation
+        SensitivityBackendBase.__init__(
+            self, settings, tdi_generation=tdi_generation, force_backend=force_backend
+        )
         self.model_name = model_name
         self.instrument_fill_nans = instrument_fill_nans
+        # Swappable instrument-noise model (defaults preserve current behavior).
+        self.instrument_component_cls = instrument_component_cls or InstrumentNoise
+        self.instrument_model_cls = instrument_model_cls or lisa_models.LISAModel
         self.galfor_stochastic_fn = galfor_stochastic_fn
+        self.galfor_modulation = galfor_modulation
+        self.sgwb_stochastic_fn = sgwb_stochastic_fn
         self.extra_components = list(extra_components) if extra_components else []
         # ``LISAModel.lisanoises`` only reads Soms_d / Sa_a — the orbits field
         # is just a carrier here, so one shared instance is fine.
         self._orbits = lisa_models.DefaultOrbits()
 
-    def __call__(
-        self,
-        name: str,
-        psd_params,
-        galfor_params=None,
-        transform_fn: Optional[TransformContainer] = None,
+    def _build_matrix(
+        self, name: str, params, galfor_params=None, sgwb_params=None
     ) -> CompositeSensitivityMatrix:
         """Build a per-walker :class:`CompositeSensitivityMatrix`.
 
+        Backend hook (see :meth:`SensitivityBackendBase.__call__`, which applies
+        the optional ``transform_fn`` before this is called).
+
         Args:
             name: Identifier (e.g. ``"walker_3"``) recorded on the LISAModel.
-            psd_params: ``[Soms_d, Sa_a]`` in linear (square-root) units, matching
-                the convention used by :class:`XYZSensitivityBackend`.
-            galfor_params: Optional galactic-foreground parameters. When given,
-                a :class:`GalacticForeground` component is added.
-            transform_fn: Optional :class:`TransformContainer`. Applied to
-                ``psd_params`` first if provided.
+            params: ``[Soms_d, Sa_a]`` in linear (square-root) units (physical
+                basis), matching :class:`XYZSensitivityBackend`.
+            galfor_params: Optional galactic-foreground parameters. When given, a
+                :class:`GalacticForeground` component is added (with the backend's
+                ``galfor_modulation``).
+            sgwb_params: Optional SGWB spectral-template parameters. When given,
+                an :class:`SGWB` component is added.
 
         Returns:
             A freshly built :class:`CompositeSensitivityMatrix`.
         """
-        params = np.asarray(psd_params, dtype=float)
-        if transform_fn is not None:
-            params = transform_fn.both_transforms(
-                params, copy=True, return_transpose=False
-            )
-            params = np.atleast_1d(np.asarray(params).squeeze())
         Soms_d = float(params[0])
         Sa_a = float(params[1])
-        model = lisa_models.LISAModel(
+        model = self.instrument_model_cls(
             Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
         )
         components: list[NoiseComponent] = [
-            InstrumentNoise(
+            self.instrument_component_cls(
                 tdi_generation=self.tdi_generation,
                 model=model,
                 fill_nans=self.instrument_fill_nans,
@@ -3978,8 +4149,17 @@ class CompositeSensitivityBackend:
             components.append(
                 GalacticForeground(
                     foreground_params=np.asarray(galfor_params, dtype=float),
+                    modulation=self.galfor_modulation,
                     tdi_generation=self.tdi_generation,
                     stochastic_fn=self.galfor_stochastic_fn,
+                )
+            )
+        if sgwb_params is not None:
+            components.append(
+                SGWB(
+                    sgwb_params=np.asarray(sgwb_params, dtype=float),
+                    stochastic_fn=self.sgwb_stochastic_fn,
+                    tdi_generation=self.tdi_generation,
                 )
             )
         components.extend(self.extra_components)

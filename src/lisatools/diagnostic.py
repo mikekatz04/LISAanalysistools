@@ -313,7 +313,13 @@ def noise_likelihood_term(psd: SensitivityMatrixBase) -> float:
 
     .. math::
 
-        \\log{\\mathcal{L}}_n = -\\sum \\log{\\vec{S}_n}.
+        \\log{\\mathcal{L}}_n = -\\kappa \\sum \\log{\\vec{S}_n},
+
+    where :math:`\\kappa` is the domain's
+    :attr:`~lisatools.domains.DomainSettingsBase.logdet_factor`: ``1.0`` in the
+    one-sided complex (FD / Whittle) convention and ``0.5`` for real-basis
+    domains (TD, WDM), where each real coefficient contributes
+    :math:`-\\frac{1}{2}\\log{\\det{C}}` to the Gaussian density.
 
     Args:
         psd: Sensitivity information.
@@ -322,17 +328,22 @@ def noise_likelihood_term(psd: SensitivityMatrixBase) -> float:
         Noise term Likelihood value.
 
     """
-    fix = np.isnan(psd[:]) | np.isinf(psd[:])
+    # Backend-generic (numpy / cupy): the detC / psd arrays follow the domain's
+    # array module, so resolve xp from them rather than hardcoding numpy.
+    xp = get_array_module(psd.detC)
+
+    fix = xp.isnan(psd[:]) | xp.isinf(psd[:])
 
     # assert np.sum(fix) == np.prod(psd.shape[:len(psd.basis_settings.basis_shape)]) or np.sum(fix) == 0, f"sum fix: {np.sum(fix)}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}" #todo fix this
     assert (
-        np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0
-    ), f"sum fix: {np.sum(fix)}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}"
+        int(xp.sum(fix)) == int(np.prod(psd.shape[:-1])) or int(xp.sum(fix)) == 0
+    ), f"sum fix: {int(xp.sum(fix))}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}"
     # TODO: check on this / add warning
     detC = psd.detC
-    keep = (detC != 0.0) & (~np.isinf(detC)) & (~np.isnan(detC))
+    keep = (detC != 0.0) & (~xp.isinf(detC)) & (~xp.isnan(detC))
 
-    nl_val = -np.sum(np.log(np.abs(detC[keep])))
+    factor = getattr(psd.basis_settings, "logdet_factor", 1.0)
+    nl_val = -factor * xp.sum(xp.log(xp.abs(detC[keep])))
     return nl_val
 
 

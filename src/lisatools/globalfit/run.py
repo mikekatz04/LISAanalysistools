@@ -338,10 +338,16 @@ class GlobalFit:
                 for key in self.engine_info.branch_names
             }
             # TODO: make this more generic to anything
+            # TODO: this per-branch ``inds[...][:] = True`` flip structure is
+            # hand-enumerated branch-by-branch and does not scale — refactor it
+            # to drive off branch metadata (e.g. an "always-on"/fixed-leaf flag
+            # on the branch settings) instead of a literal if-ladder.
             if "psd" in inds:
                 inds["psd"][:] = True
             if "galfor" in inds:
                 inds["galfor"][:] = True
+            if "sgwb" in inds:
+                inds["sgwb"][:] = True
             if "mbh" in inds:
                 inds["mbh"][:] = True
                 self.logger.debug("initializing mbh inds to true")
@@ -517,11 +523,24 @@ class GlobalFit:
                     )
                 else:
                     galfor_params = None
+                # only forward sgwb_params when the branch exists so the legacy
+                # XYZSensitivityBackend signature keeps working for runs without
+                # an sgwb branch
+                extra_sens_kwargs = {}
+                if "sgwb" in state.branches_coords.keys():
+                    sgwb_params = state.branches_coords["sgwb"][0, w, 0]
+                    sgwb_params = (
+                        self.curr.source_info["sgwb"].transform.both_transforms(sgwb_params)
+                        if self.curr.source_info["sgwb"].transform is not None
+                        else sgwb_params
+                    )
+                    extra_sens_kwargs["sgwb_params"] = sgwb_params
                 sens_here = general_info.sensitivity_backend(
                     f"walker_{w}",
                     psd_params,
                     transform_fn=self.curr.source_info["psd"].transform_fn,
                     galfor_params=galfor_params,
+                    **extra_sens_kwargs,
                 )
             else:
                 sens_here = general_info.sensitivity_backend(

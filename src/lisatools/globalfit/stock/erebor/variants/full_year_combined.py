@@ -59,7 +59,7 @@ from ...base import (
 from ..emri import EMRISettings, EMRISetup
 from ..fit import EreborFit, EreborGeneralSettings
 from ..injections import (
-    AnnualModulatedGalacticForeground,
+    AnnualCovarianceModulation,
     SyntheticDataProcessor,
     make_emri_injections,
     make_mbh_injections,
@@ -431,10 +431,15 @@ class FullYearCombinedGlobalFit(EreborFit):
             and "extra_components" not in gs.sensitivity_init_kwargs
         ):
             from lisatools.detector import DefaultOrbits, LISAModel
-            from lisatools.sensitivity import InstrumentNoise
+            from lisatools.sensitivity import GalacticForeground, InstrumentNoise
+            from lisatools.stochastic import FittedHyperbolicTangentGalacticForeground
 
             base = dict(gs.sensitivity_init_kwargs or {})
             base.setdefault("tdi_generation", gs.tdi_gen)
+            # Annually-modulated galactic foreground via the general modulation
+            # framework: GalacticForeground(modulation=...) with the analytic
+            # annual covariance modulation (a picklable callable). The fitted
+            # spectral model takes (Tobs,) as its params.
             base["extra_components"] = [
                 InstrumentNoise(
                     tdi_generation=gs.tdi_gen,
@@ -446,12 +451,15 @@ class FullYearCombinedGlobalFit(EreborFit):
                     ),
                     fill_nans=0.0,
                 ),
-                AnnualModulatedGalacticForeground(
-                    foreground_params=gs.foreground_params,
+                GalacticForeground(
+                    foreground_params=(
+                        gs.foreground_params
+                        if gs.foreground_params is not None
+                        else (gs.Tobs,)
+                    ),
+                    modulation=AnnualCovarianceModulation(gs.annual_amp, gs.annual_phase0),
                     tdi_generation=gs.tdi_gen,
-                    tobs=gs.Tobs,
-                    annual_amp=gs.annual_amp,
-                    annual_phase0=gs.annual_phase0,
+                    stochastic_fn=FittedHyperbolicTangentGalacticForeground,
                 ),
             ]
             gs.sensitivity_init_kwargs = base
