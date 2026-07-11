@@ -46,7 +46,16 @@ from ...base import (
     materialize_recipe,
 )
 from ..fit import EreborFit, EreborGeneralSettings
-from ..noise import GalForSettings, GalForSetup, PSDSettings, PSDSetup
+from ..noise import (
+    GalForSettings,
+    GalForSetup,
+    PSDSettings,
+    PSDSetup,
+    noise_sensitivity_init_kwargs,
+    prepare_galfor_branch,
+    prepare_psd_branch,
+    resolve_galfor_modulation,
+)
 from ..stochastic import SGWBSettings, SGWBSetup
 
 logger = logging.getLogger(__name__)
@@ -143,10 +152,7 @@ class _NoiseFitBase(EreborFit):
 
     # -- foreground modulation (None => stationary) --
     def _resolve_modulation(self, gs: NoiseGeneralSettings):
-        from lisatools.sensitivity import GalForTimeModulation
-
-        path = gs.galfor_modulation_path
-        return GalForTimeModulation(path) if path else None
+        return resolve_galfor_modulation(gs.galfor_modulation_path)
 
     # -- domain: bare WDM factory, no time crop so the (nch, Nf, Nt) draw
     #    matches the full active grid --
@@ -189,27 +195,14 @@ class _NoiseFitBase(EreborFit):
     #    ``fit.sgwb.stochastic_fn`` / ``fit.psd.instrument_model_cls`` — no
     #    editing of general-level ``sensitivity_init_kwargs`` needed. --
     def finalize_general(self, gs: NoiseGeneralSettings) -> None:
-        base = dict(gs.sensitivity_init_kwargs or {})
-        base.setdefault("tdi_generation", gs.tdi_gen)
-
-        galfor = getattr(self, "galfor", None)
-        if galfor is not None and getattr(galfor, "stochastic_fn", None) is not None:
-            base["galfor_stochastic_fn"] = galfor.stochastic_fn
-        branch_mod = getattr(galfor, "modulation", None) if galfor is not None else None
-        # branch-level modulation wins; else the variant's file/path modulation.
-        base["galfor_modulation"] = (
-            branch_mod if branch_mod is not None else self._resolve_modulation(gs)
+        gs.sensitivity_init_kwargs = noise_sensitivity_init_kwargs(
+            gs.sensitivity_init_kwargs,
+            tdi_generation=gs.tdi_gen,
+            galfor=getattr(self, "galfor", None),
+            psd=getattr(self, "psd", None),
+            galfor_modulation_path=gs.galfor_modulation_path,
+            extra=self._sgwb_sens_kwargs(gs),
         )
-
-        psd = getattr(self, "psd", None)
-        if psd is not None:
-            for attr in ("instrument_component_cls", "instrument_model_cls", "model_name"):
-                val = getattr(psd, attr, None)
-                if val is not None:
-                    base[attr] = val
-
-        base.update(self._sgwb_sens_kwargs(gs))
-        gs.sensitivity_init_kwargs = base
 
     # -- per-branch priors / injections --
     def prepare_branch_settings(self, name: str, general_setup: GeneralSetup) -> Settings:
@@ -218,25 +211,10 @@ class _NoiseFitBase(EreborFit):
         return prep(settings, general_setup) if prep is not None else settings
 
     def _prepare_psd(self, psd: NoisePSDSettings, general_setup: GeneralSetup):
-        if psd.initialize_kwargs is None:
-            psd.initialize_kwargs = dict()
-        if psd.priors is None:
-            psd.priors = {
-                "psd": ProbDistContainer(
-                    {
-                        r"$S_{\rm oms}$": uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
-                        r"$S_{\rm tm}$": uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
-                    }
-                )
-            }
-        if psd.injection is None:
-            psd.injection = np.asarray(self.general.psd_injection, dtype=float)
-        return psd
+        return prepare_psd_branch(psd, self.general.psd_injection)
 
     def _prepare_galfor(self, galfor: GalForSettings, general_setup: GeneralSetup):
-        if galfor.initialize_kwargs is None:
-            galfor.initialize_kwargs = {}
-        return galfor
+        return prepare_galfor_branch(galfor)
 
     # -- sgwb presence hooks (overridden by NoiseSGWBGlobalFit) --
     def _sgwb_injection(self, gs: NoiseGeneralSettings):

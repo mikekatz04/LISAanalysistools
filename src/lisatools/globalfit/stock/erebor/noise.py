@@ -224,3 +224,77 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
     )
 
     return GalForSetup(galfor_settings)
+
+
+# ============================================================
+# Shared noise (PSD + galactic-foreground) branch setup
+# ------------------------------------------------------------
+# These module-level helpers are the single source of truth for the noise
+# branch setup, used by both the ``noise_only``/``noise_sgwb`` variants and by
+# ``all_sources`` (whose psd/galfor setup "matches the noise setup").
+# ============================================================
+
+
+def resolve_galfor_modulation(path):
+    """``None`` (stationary) or a :class:`GalForTimeModulation` from ``path``."""
+    from lisatools.sensitivity import GalForTimeModulation
+
+    return GalForTimeModulation(path) if path else None
+
+
+def prepare_psd_branch(psd, psd_injection=None):
+    """Fill the 2-param instrument PSD prior + (optional) injection.
+
+    The injection ``[Soms_d, Sa_a]`` sits inside the sampled prior so the fit
+    recovers it. Shared by the noise variants and all_sources.
+    """
+    if psd.initialize_kwargs is None:
+        psd.initialize_kwargs = dict()
+    if psd.priors is None:
+        psd.priors = {
+            "psd": ProbDistContainer(
+                {
+                    r"$S_{\rm oms}$": uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
+                    r"$S_{\rm tm}$": uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
+                }
+            )
+        }
+    if psd.injection is None and psd_injection is not None:
+        psd.injection = np.asarray(psd_injection, dtype=float)
+    return psd
+
+
+def prepare_galfor_branch(galfor):
+    """Galactic-foreground branch prep (prior comes from ``GalForSetup``)."""
+    if galfor.initialize_kwargs is None:
+        galfor.initialize_kwargs = {}
+    return galfor
+
+
+def noise_sensitivity_init_kwargs(
+    base, *, tdi_generation, galfor=None, psd=None, galfor_modulation_path=None, extra=None
+):
+    """Thread the per-branch noise-MODEL choice onto ``sensitivity_init_kwargs``.
+
+    A user swaps the noise model via the branch Settings the same way a source
+    branch swaps its waveform: ``fit.galfor.stochastic_fn`` / ``.modulation`` /
+    ``fit.psd.instrument_model_cls`` — read off ``galfor``/``psd`` here and
+    forwarded to :class:`CompositeSensitivityBackend`. ``extra`` (e.g. the SGWB
+    template) is merged last. Shared by the noise variants and all_sources.
+    """
+    out = dict(base or {})
+    out.setdefault("tdi_generation", tdi_generation)
+    if galfor is not None and getattr(galfor, "stochastic_fn", None) is not None:
+        out["galfor_stochastic_fn"] = galfor.stochastic_fn
+    branch_mod = getattr(galfor, "modulation", None) if galfor is not None else None
+    out["galfor_modulation"] = (
+        branch_mod if branch_mod is not None else resolve_galfor_modulation(galfor_modulation_path)
+    )
+    if psd is not None:
+        for attr in ("instrument_component_cls", "instrument_model_cls", "model_name"):
+            val = getattr(psd, attr, None)
+            if val is not None:
+                out[attr] = val
+    if extra:
+        out.update(extra)
+    return out
