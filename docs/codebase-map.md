@@ -131,7 +131,9 @@ fit.run()                                   # build -> GlobalFit -> run_global_f
 ```
 Registered variants: `gb_no_fg`, `all_sources`, `full_year_combined`
 (`globalfit/stock/erebor/variants/`). `scripts/run_global.py --stock <name>`
-is the CLI entry; `scripts/run_mpi_global_fit.py` for MPI. The legacy
+is the CLI entry (single-process or under `mpiexec` — rank layout and GPU
+knobs in [`docs/global-fit-launch.md`](global-fit-launch.md); the legacy
+`run_mpi_global_fit.py`/`pipeline.py` stack was removed 2026-07). The legacy
 `global_fit_input/*.py` and `mojito_input/*.py` settings files are
 compatibility stubs — **do not grow them back**.
 

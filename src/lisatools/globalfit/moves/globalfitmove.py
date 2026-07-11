@@ -75,16 +75,8 @@ class GlobalFitMove:
 
         self._comm = comm
 
-    @property
-    def ranks_needed(self):
-        """Number of MPI ranks this move requires (default 0)."""
-        if not hasattr(self, "_ranks_needed"):
-            return 0
-        return self._ranks_needed
-
-    @ranks_needed.setter
-    def ranks_needed(self, ranks_needed):
-        self._ranks_needed = ranks_needed
+    # NOTE: ranks_needed was defined twice on this class; the asserting
+    # version below (which always won at class creation) is the survivor.
 
     @property
     def gpus(self):

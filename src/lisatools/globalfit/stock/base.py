@@ -471,7 +471,10 @@ class StockGlobalFit(CurrentInfoGlobalFit):
         branches: typing.Optional[typing.Dict[str, Settings]] = None,
         recipe: typing.Optional[RecipeSpec] = None,
         setup_function: typing.Optional[typing.Callable] = None,
-        head_rank: int = 1,
+        # head_rank is a legacy alias from the retired multi-stage pipeline;
+        # it defaults to the main rank (no separate role). GlobalFit assigns
+        # the dedicated saver rank automatically at np >= 3.
+        head_rank: int = 0,
         main_rank: int = 0,
         **knobs,
     ):

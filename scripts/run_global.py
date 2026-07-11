@@ -55,7 +55,20 @@ from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
 if __name__ == "__main__":
 
     import argparse
-    parser = argparse.ArgumentParser(description="Run the LISA Global Fit with LISA Analysis Tools.")
+    parser = argparse.ArgumentParser(
+        description="Run the LISA Global Fit with LISA Analysis Tools.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "MPI launch matrix (see docs/global-fit-launch.md):\n"
+            "  python scripts/run_global.py --stock <name>                # np=1: sampler + synchronous saves\n"
+            "  mpiexec -n 2 python scripts/run_global.py --stock <name>   # rank 1 is a spare (stopped at startup)\n"
+            "  mpiexec -n 3 python scripts/run_global.py --stock <name>   # rank 2 = dedicated async saver rank\n"
+            "  srun -n 3 --gpus-per-node=<G> python scripts/run_global.py --stock <name>\n"
+            "GPU count is a knob, not a rank: GPUS=0,1 selects the local devices the\n"
+            "main rank drives (USE_GPU=0 forces CPU). Common env: NWALKERS, NTEMPS,\n"
+            "GF_NUM_ITER, DATA_PROCESSOR, TOBS_TARGET, MAKE_PLOTS."
+        ),
+    )
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-sfp", "--settings_file_path", help="A settings file (legacy path-loading).")
@@ -75,7 +88,19 @@ if __name__ == "__main__":
     if args.stock is not None:
         from lisatools.globalfit.stock import erebor
 
-        curr_info = erebor.get_stock(args.stock).build()
+        fit = erebor.get_stock(args.stock)  # cheap: validation + defaults only
+        # Only the ranks that consume the built configuration pay for the
+        # heavy data build: the main rank (sampler) and, at np >= 3, the
+        # dedicated saver rank (it needs the backend spec). Spare ranks wait
+        # for the "stop" the main rank sends at startup and exit — no
+        # redundant per-rank data load.
+        _comm = MPI.COMM_WORLD
+        _main, _results, _ = GlobalFit.resolve_rank_roles(_comm, fit.main_rank)
+        if _comm.Get_rank() not in (_main, _results):
+            msg = _comm.recv(source=_main)
+            print(f"Process {_comm.Get_rank()} finished ({msg!r}).")
+            sys.exit(0)
+        curr_info = fit.build()
     else:
         # Define the module name and the full path to the Python file
         file_path = args.settings_file_path

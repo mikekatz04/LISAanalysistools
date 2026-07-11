@@ -51,7 +51,10 @@ class RankInfo:
     """MPI rank assignments for the global fit.
 
     Args:
-        head_rank: Rank that orchestrates the run.
+        head_rank: DEPRECATED legacy alias from the retired multi-stage
+            pipeline; it has no role and should equal ``main_rank``. The
+            dedicated saver rank is assigned automatically at ``np >= 3``
+            (see ``GlobalFit.resolve_rank_roles``).
         main_rank: Rank that drives the main sampler loop.
     """
 
@@ -262,8 +265,9 @@ class GeneralSetup(Setup, GeneralSettings):
 
         level = logging.DEBUG
         name = "GeneralSetup"
-        if not os.path.exists(self.artifacts_file_dir):
-            os.makedirs(self.artifacts_file_dir)
+        # exist_ok: several MPI ranks build concurrently (run_global.py builds
+        # on every rank) — check-then-create here is a startup race.
+        os.makedirs(self.artifacts_file_dir, exist_ok=True)
         self.logger = init_logger(
             filename="general_setup.log", level=level, name=name, log_dir=self.artifacts_file_dir
         )
@@ -310,9 +314,7 @@ class GeneralSetup(Setup, GeneralSettings):
         self.force_backend = self.gpu_backend if self.gpus is not None else "cpu"
         self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
         self.logger.debug(f"Saving artifacts to {self.artifacts_file_dir}")
-        if not os.path.exists(self.artifacts_file_dir):
-            os.makedirs(self.artifacts_file_dir)
-            self.logger.debug(f"Created artifacts directory")
+        os.makedirs(self.artifacts_file_dir, exist_ok=True)
 
         self.init_data_information()
 

@@ -1,13 +1,17 @@
-"""Top-level runner classes (``GlobalFit``, ``GlobalFitSegment``, ``MPIControlGlobalFit``).
+"""Top-level runner class (``GlobalFit``).
 
 This module wires together the per-source samplers, the recipe driver, the
 HDF backend, and MPI rank coordination into a runnable end-to-end global fit.
+
+MPI rank roles (see ``GlobalFit.resolve_rank_roles``): the main rank runs the
+sampler; at ``np >= 3`` the highest spare rank becomes a dedicated
+results/saver rank; all other ranks are spares and are stopped at startup.
+The legacy multi-stage pipeline classes (``GlobalFitSegment``,
+``MPIControlGlobalFit``) were removed 2026-07 (parallel-resources plan P0).
 """
 
 import logging
 import os
-import time
-from abc import ABC
 from copy import deepcopy
 
 import numpy as np
@@ -219,6 +223,34 @@ class GlobalFit:
         comm: MPI communicator for parallel processing.
     """
 
+    @classmethod
+    def resolve_rank_roles(cls, comm: MPI.Comm, main_rank: int = 0):
+        """Resolve the MPI rank roles for a run on ``comm``.
+
+        The layout is: ``main_rank`` runs the sampler; at ``size >= 3`` the
+        highest spare rank becomes the dedicated results/saver rank (below
+        that, saving is synchronous on main); every remaining rank is a
+        spare that is sent ``"stop"`` at startup.
+
+        Exposed as a classmethod so launchers (``scripts/run_global.py``)
+        can decide which ranks need the heavy data build *before*
+        constructing :class:`GlobalFit`.
+
+        Args:
+            comm: MPI communicator.
+            main_rank: Rank that drives the sampler. Default 0.
+
+        Returns:
+            ``(main_rank, results_rank, spare_ranks)``.
+        """
+        all_ranks = list(range(comm.Get_size()))
+        spares = [r for r in all_ranks if r != main_rank]
+        if comm.Get_size() < 3:
+            results_rank = main_rank
+        else:
+            results_rank = spares.pop()
+        return main_rank, results_rank, spares
+
     def __init__(self, curr: CurrentInfoGlobalFit, comm: MPI.Comm):
         """Main class for managing the global fit MCMC sampling run.
 
@@ -236,21 +268,18 @@ class GlobalFit:
         self.nwalkers: int = self.curr.general_info.nwalkers
         self.ntemps: int = self.curr.general_info.ntemps
         self.all_ranks = list(range(self.comm.Get_size()))
-        self.used_ranks = []
+        # head_rank is a legacy alias from the retired multi-stage pipeline;
+        # it gets NO role here. Only ranks with an actual role enter
+        # used_ranks — every other rank (including a legacy distinct head
+        # rank) is a spare and receives "stop" at startup. Putting a
+        # roleless rank in used_ranks deadlocks it in the worker recv.
         self.head_rank = self.curr.rank_info.head_rank
         self.main_rank = self.curr.rank_info.main_rank
-        self.used_ranks.append(self.head_rank)
-        self.used_ranks.append(self.main_rank)
-
-        self.ranks_to_give = deepcopy(self.all_ranks)
-        if self.head_rank in self.ranks_to_give:
-            self.ranks_to_give.remove(self.head_rank)
-        self.ranks_to_give.remove(self.main_rank)
-
-        if comm.Get_size() < 3:
-            self.results_rank = self.main_rank
-        else:
-            self.results_rank = self.ranks_to_give.pop()
+        self.main_rank, self.results_rank, self.ranks_to_give = self.resolve_rank_roles(
+            comm, self.main_rank
+        )
+        self.used_ranks = [self.main_rank]
+        if self.results_rank != self.main_rank:
             self.used_ranks.append(self.results_rank)
 
         level = logging.DEBUG
@@ -1004,7 +1033,11 @@ class GlobalFit:
 
             logger.info("Residuals saved.")
 
-            self.comm.send({"finish_run": True}, dest=self.results_rank)
+            if self.results_rank != self.main_rank:
+                # Dedicated saver rank (np >= 3): tell it the run is over.
+                # Below that the saver is aliased to main — a self-send would
+                # only rely on MPI eager buffering for nothing.
+                self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
             save_to_backend_asynchronously_and_plot(
@@ -1031,175 +1064,3 @@ class GlobalFit:
                 )
 
             print(f"Process {self.rank} finished.")
-
-
-class GlobalFitSegment(ABC):
-    """Abstract base class for a segment of the global fit workflow.
-
-    Defines the interface for individual components or stages in a multi-step
-    global fit process. Subclasses must implement methods to adjust settings
-    and execute the specific segment.
-
-    Args:
-        comm: MPI communicator for parallel processing.
-        copy_settings_file: Whether to copy the settings file. Defaults to False.
-    """
-
-    def __init__(self, comm, copy_settings_file=False):
-        self.comm = comm
-        # self.base_settings = get_global_fit_settings(copy_settings_file=copy_settings_file)
-        settings = deepcopy(self.base_settings)
-        self.gpus = settings["general"]["gpus"]
-        self.adjust_settings(settings)
-
-        self.current_info = CurrentInfoGlobalFit(settings)
-
-    def adjust_settings(self, settings):
-        """Adjust settings for this specific workflow segment.
-
-        Args:
-            settings: Settings dictionary to modify.
-
-        Raises:
-            NotImplementedError: Must be implemented by subclasses.
-        """
-        raise NotImplementedError
-
-    def run(self):
-        """Execute this workflow segment.
-
-        Raises:
-            NotImplementedError: Must be implemented by subclasses.
-        """
-        raise NotImplementedError
-
-
-class MPIControlGlobalFit:
-    """Controller for managing MPI processes in a global fit run.
-
-    Coordinates MPI rank assignments for different components of the global fit,
-    including main sampling, results processing, and auxiliary computations.
-
-    Args:
-        current_info: CurrentInfoGlobalFit object with run configuration.
-        comm: MPI communicator for parallel processing.
-        gpus: List of GPU device IDs available for computation.
-        run_results_update: Whether to run asynchronous results updates. Defaults to True.
-        **run_results_update_kwargs: Additional keyword arguments for results updates.
-    """
-
-    def __init__(
-        self,
-        current_info,
-        comm,
-        gpus,
-        run_results_update=True,
-        **run_results_update_kwargs,
-    ):
-
-        ranks = np.arange(comm.Get_size())
-
-        self.rank = comm.Get_rank()
-        self.run_results_update = run_results_update
-        self.run_results_update_kwargs = run_results_update_kwargs
-
-        assert len(gpus) >= 2
-
-        self.current_info = current_info
-        self.comm = comm
-        self.gpus = gpus
-
-        self.head_rank = self.current_info.rank_info.head_rank
-        self.main_rank = self.current_info.rank_info.main_rank
-        self.other_ranks = list(range(comm.Size()))[2:]
-
-        self.main_gpu = self.current_info.gpu_assignments["main_gpu"]
-        self.other_gpus = self.current_info.gpu_assignments["other_gpus"]
-
-        # assign results saving rank
-        self.run_results_rank = self.other_ranks.pop(0)
-
-        for gpu_assign in self.all_gpu_assignments:
-            assert gpu_assign in self.gpus
-
-    def run_global_fit(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
-        """Execute the global fit workflow with specified components.
-
-        Coordinates the execution of different global fit components (PSD estimation,
-        MBH fitting, GB parameter estimation, GB searches) across MPI ranks.
-
-        Args:
-            run_psd: Whether to run PSD estimation. Defaults to True.
-            run_mbhs: Whether to run MBH fitting. Defaults to True.
-            run_gbs_pe: Whether to run GB parameter estimation. Defaults to True.
-            run_gbs_search: Whether to run GB searches. Defaults to True.
-        """
-        if self.rank == self.head_rank:
-            # send to refit
-            print("sending data")
-
-            self.share_start_info(
-                run_psd=run_psd,
-                run_mbhs=run_mbhs,
-                run_gbs_pe=run_gbs_pe,
-                run_gbs_search=run_gbs_search,
-            )
-
-            print("done sending data")
-
-            # populate which runs are going
-            runs_going = ["main"]
-
-            if len(runs_going) == 0:
-                raise ValueError(
-                    "No runs are going to be launched because all options for runs are False."
-                )
-
-            while len(runs_going) > 0:
-                time.sleep(1)
-
-        elif self.rank == self.main_rank:
-            fin = run_main_function(self.main_gpu, self.comm, self.head_rank, self.run_results_rank)
-
-        elif self.run_results_update and self.rank == self.run_results_rank:
-            save_to_backend_asynchronously_and_plot(
-                self.current_info.backend,
-                self.comm,
-                self.main_rank,
-                self.head_rank,
-                1,
-                self.current_info.general_info.backup_iter,
-            )
-
-
-# def run_gf_progression(global_fit_progression, comm, head_rank, status_file):
-#     rank = comm.Get_rank()
-
-#     for g_i, global_fit_segment in enumerate(global_fit_progression):
-#         # check if this segment has completed
-#         if os.path.exists(status_file):
-#             with open(status_file, "r") as fp:
-#                 lines = fp.readlines()
-#                 if global_fit_segment["name"] + "\n" in lines:
-#                     print(f"continue {global_fit_segment['name']}")
-#                     continue
-
-#         class_name = global_fit_segment["name"]
-#         if rank == head_rank:
-#             print(f"\n\nStarting {class_name}\n\n")
-#             st = time.perf_counter()
-#         print(f"\n\nStarting {class_name}, {rank}\n\n")
-
-#         segment = global_fit_segment["segment"](*global_fit_segment["args"], **global_fit_segment["kwargs"])
-
-#         print("start", g_i, rank)
-#         segment.run()
-#         print("finished:", rank)
-#         comm.Barrier()
-#         print("end", g_i, rank)
-#         if rank == head_rank:
-#             class_name = global_fit_segment["name"]
-#             et = time.perf_counter()
-#             print(f"\n\nEnding {class_name}({et - st} sec)\n\n")
-#             with open(segment.current_info.general_info["file_information"]["status_file"], "a") as fp:
-#                 fp.write(global_fit_segment["name"] + "\n")
