@@ -135,6 +135,13 @@ class MoveSpec:
     branch: typing.Optional[str] = None
     weight: typing.Optional[float] = None
     instance: typing.Any = None
+    # Move-level debug override applied at materialization via
+    # ``move.set_debug(...)``. ``None`` -> no override (the move keeps its
+    # env-resolved default: GB_DEBUG / {BRANCH}_DEBUG). ``True``/``False`` ->
+    # enable/disable; a ``dict`` -> ``set_debug(enabled=dict.pop("enabled",
+    # True), **dict)`` (keys: plot_dir/plot_walker/plot_leaf/plot_band/every).
+    # Takes precedence over the stage-level ``StageSpec.debug``.
+    debug: typing.Optional[typing.Union[bool, dict]] = None
 
 
 @dataclasses.dataclass
@@ -158,6 +165,10 @@ class StageSpec:
     moves: typing.List[MoveSpec] = dataclasses.field(default_factory=list)
     step_kwargs: dict = dataclasses.field(default_factory=dict)
     combine_kwargs: dict = dataclasses.field(default_factory=dict)
+    # Stage-level debug override: applied to every move in this stage that
+    # does not carry its own ``MoveSpec.debug``. Same value semantics as
+    # ``MoveSpec.debug`` (bool or options dict); ``None`` -> no override.
+    debug: typing.Optional[typing.Union[bool, dict]] = None
 
     _KINDS = ("search", "pe", "rj")
 
@@ -265,6 +276,41 @@ class RecipeSpec:
     def pop_move(self, name: str, stage: typing.Optional[str] = None) -> MoveSpec:
         st, i = self._find_move(name, stage)
         return st.moves.pop(i)
+
+    def set_move_debug(
+        self,
+        name: str,
+        enabled: bool = True,
+        *,
+        stage: typing.Optional[str] = None,
+        **opts,
+    ) -> MoveSpec:
+        """Turn a single move's debug instrumentation on/off (materialize-time).
+
+        ``opts`` (plot_dir / plot_walker / plot_leaf / plot_band / every) are
+        forwarded to :meth:`GlobalFitMove.set_debug`. Overrides any
+        stage-level debug and the move's env default. Example::
+
+            fit.recipe.set_move_debug("emri_pe", plot_dir="./emri_dbg", every=5)
+            fit.recipe.set_move_debug("psd_pe", False)   # force off
+        """
+        mv = self.get_move(name, stage)
+        mv.debug = {"enabled": enabled, **opts} if opts else enabled
+        return mv
+
+    def set_stage_debug(
+        self, stage_name: str, enabled: bool = True, **opts
+    ) -> StageSpec:
+        """Turn debug on/off for every move in a stage (unless a move overrides).
+
+        ``opts`` are forwarded to each move's :meth:`GlobalFitMove.set_debug`.
+        Example::
+
+            fit.recipe.set_stage_debug("full_pe", plot_walker=2)
+        """
+        st = self._stage(stage_name)
+        st.debug = {"enabled": enabled, **opts} if opts else enabled
+        return st
 
     def add_move(
         self,
@@ -400,6 +446,16 @@ def materialize_recipe(
                     f"Move {mv.name!r} has no instance/target and no stock builder "
                     f"provided one (stock moves available: {sorted(stock_moves)})."
                 )
+            # Move/stage-level debug: move-spec wins over stage-spec; None
+            # leaves the move's env-resolved default untouched.
+            _dbg = mv.debug if mv.debug is not None else st.debug
+            if _dbg is not None and hasattr(move, "set_debug"):
+                if isinstance(_dbg, dict):
+                    _opts = dict(_dbg)
+                    move.set_debug(_opts.pop("enabled", True), **_opts)
+                else:
+                    move.set_debug(bool(_dbg))
+
             moves.append(move)
             weights.append(mv.weight if mv.weight is not None else 1.0)
 
@@ -594,6 +650,12 @@ class StockGlobalFit(CurrentInfoGlobalFit):
 
     def pop_move(self, *args, **kwargs):
         return self.recipe.pop_move(*args, **kwargs)
+
+    def set_move_debug(self, *args, **kwargs):
+        return self.recipe.set_move_debug(*args, **kwargs)
+
+    def set_stage_debug(self, *args, **kwargs):
+        return self.recipe.set_stage_debug(*args, **kwargs)
 
     def list_moves(self) -> str:
         return self.recipe.list_moves()

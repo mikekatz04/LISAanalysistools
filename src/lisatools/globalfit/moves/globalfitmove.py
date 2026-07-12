@@ -76,6 +76,43 @@ class GlobalFitMove:
     # NOTE: the ranks/assign_ranks/ranks_needed move->rank machinery was
     # removed with the dead dispatch (parallel-resources plan P3).
 
+    def set_debug(
+        self,
+        enabled: bool = True,
+        *,
+        plot_dir=None,
+        plot_walker=None,
+        plot_leaf=None,
+        plot_band=None,
+        every=None,
+    ) -> None:
+        """Enable/disable this move's debug instrumentation (move/stage level).
+
+        Uniform across the debug-capable moves — the GB special-stretch move
+        (band-indexed: ``plot_band``) and ``ResidualAddOneRemoveOneMove``
+        (leaf-indexed: ``plot_leaf``). Options left ``None`` keep whatever the
+        move already resolved from its env vars (``GB_DEBUG`` /
+        ``{BRANCH}_DEBUG``); precedence is move-spec > stage-spec > env.
+
+        Applied by :func:`materialize_recipe` from the ``debug`` field on a
+        ``MoveSpec``/``StageSpec``, or callable directly on a built move.
+        Moves without debug hooks (e.g. ``PSDMove``) simply carry the flag
+        inertly.
+        """
+        self.debug = bool(enabled)
+        if plot_dir is not None:
+            self.debug_plot_dir = str(plot_dir)
+        if plot_walker is not None:
+            self.debug_plot_walker = int(plot_walker)
+        if plot_leaf is not None and hasattr(self, "debug_plot_leaf"):
+            self.debug_plot_leaf = int(plot_leaf)
+        if plot_band is not None and hasattr(self, "debug_plot_band"):
+            self.debug_plot_band = int(plot_band)
+        if every is not None and hasattr(self, "debug_every"):
+            self.debug_every = max(1, int(every))
+        if self.debug and not getattr(self, "debug_plot_dir", None):
+            self.debug_plot_dir = "./gf_output/debug/"
+
     @property
     def gpus(self):
         """List of GPU device indices assigned to this move (default empty)."""

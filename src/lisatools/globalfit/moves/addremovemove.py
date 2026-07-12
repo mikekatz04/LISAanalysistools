@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from copy import deepcopy
 from typing import Any, Callable, TYPE_CHECKING
@@ -126,10 +127,174 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         
         self.permute_every = permute_every
         self.pad_out_of_prior = pad_out_of_prior
-        
+
+        self._setup_debug()
+
         # make sure to propagate the periodic information to the inner moves if it is included in kwargs
         if 'periodic' in kwargs:
             self.periodic = kwargs['periodic']
+
+    # ------------------------------------------------------------------
+    # Debug / instrumentation plotting (mirrors the GB special-stretch move,
+    # adapted to the "remove source from residual -> sample -> put it back"
+    # choreography of this move). Activated per branch by the capitalised
+    # ``{BRANCH_NAME}_DEBUG`` env var (e.g. EMRI_DEBUG / SOBBH_DEBUG /
+    # MBH_DEBUG); companion knobs mirror GB's:
+    #   {BRANCH}_DEBUG            "1" arms all debug hooks (default off)
+    #   {BRANCH}_DEBUG_DIR        output folder (default ./gf_output/{branch}_debug/)
+    #   {BRANCH}_DEBUG_PLOT_WALKER the single walker whose leaf is plotted (0)
+    #   {BRANCH}_DEBUG_PLOT_LEAF   the single leaf plotted (unset -> the first
+    #                              alive leaf each step)
+    #   {BRANCH}_DEBUG_EVERY       plot only every Nth propose step (1)
+    # ------------------------------------------------------------------
+    def _setup_debug(self) -> None:
+        """Read the per-branch ``{BRANCH}_DEBUG`` env options (called from __init__)."""
+        p = str(self.branch_name).upper()
+        self._dbg_prefix = p
+        self.debug = bool(int(os.environ.get(f"{p}_DEBUG", "0")))
+        self.debug_plot_dir = os.environ.get(
+            f"{p}_DEBUG_DIR", f"./gf_output/{self.branch_name}_debug/"
+        )
+        self.debug_plot_walker = int(os.environ.get(f"{p}_DEBUG_PLOT_WALKER", "0"))
+        _leaf = os.environ.get(f"{p}_DEBUG_PLOT_LEAF")
+        self.debug_plot_leaf = int(_leaf) if _leaf not in (None, "") else None
+        self.debug_every = max(1, int(os.environ.get(f"{p}_DEBUG_EVERY", "1")))
+        self._dbg_plot_counter = 0
+        self._dbg_step = 0
+        if self.debug:
+            logger.info(
+                "[%s_DEBUG] armed: dir=%s walker=%d leaf=%s every=%d",
+                p, self.debug_plot_dir, self.debug_plot_walker,
+                self.debug_plot_leaf, self.debug_every,
+            )
+
+    def _dbg_trace_this_step(self) -> bool:
+        """True when the current propose step should produce debug plots."""
+        return self.debug and (self._dbg_step % self.debug_every == 0)
+
+    def _dbg_residual(self, walker: int):
+        """Host copy of ``walker``'s current residual array (domain-native shape)."""
+        return asnumpy(self.acs[int(walker)].data.arr).copy()
+
+    def _dbg_template(self, coords_row_in, walker: int):
+        """Host copy of one source's template array, in the residual's domain shape.
+
+        ``coords_row_in`` is a single already-transformed (waveform-basis)
+        coordinate row. Returns ``None`` on any failure (debug must never
+        break the sampler).
+        """
+        try:
+            sig = self.waveform_gen(*coords_row_in, **self.waveform_gen_kwargs)
+            arr = sig.arr if hasattr(sig, "arr") else sig
+            return asnumpy(arr).copy()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s_DEBUG] template build skipped: %r", self._dbg_prefix, exc)
+            return None
+
+    @staticmethod
+    def _dbg_source_only_ll(residual_arr) -> float:
+        """Un-weighted -1/2<r|r> proxy (sum |r|^2) for a residual snapshot title."""
+        r = np.asarray(residual_arr)
+        return float(-0.5 * np.sum(np.abs(r) ** 2))
+
+    def _debug_plot_source_sequence(self, leaf, walker, snaps, template, meta) -> None:
+        """Save one figure tracing a leaf through remove -> sample -> re-add.
+
+        Rows = TDI channels; columns = the residual at the four moments plus
+        the recovered template:
+          1. residual BEFORE removal (source still subtracted from it),
+          2. residual with the source EXPOSED (added back in for sampling),
+          3. the accepted source TEMPLATE (what the sampler reconstructed),
+          4. residual AFTER re-adding the (updated) source.
+        Domain-adaptive: WDM -> |coeff| time-frequency image; FD -> |X(f)|;
+        TD -> |x(t)|. Any failure is logged and swallowed.
+        """
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            # Columns labelled by what each residual state IS, independent of
+            # the (confusing) add/remove method names: the entry residual has
+            # this leaf's source folded into the fit; the "isolated" residual
+            # is the one the sampler actually scored this leaf's proposals
+            # against (source contribution present); the exit residual folds
+            # the updated source back in.
+            cols = [
+                ("1: residual, source in fit (entry)", snaps.get("before_removal")),
+                ("2: residual, leaf isolated (sampled)", snaps.get("exposed")),
+                ("3: recovered template", template),
+                ("4: residual, source refit (exit)", snaps.get("after_readd")),
+            ]
+            cols = [(t, a) for t, a in cols if a is not None]
+            if not cols:
+                return
+            ref = cols[0][1]
+            nch = ref.shape[0] if ref.ndim >= 2 else 1
+            kind = meta.get("domain", "wdm")
+
+            # Shared per-channel-row colour scale across all columns so the
+            # residual states and the template are directly comparable — the
+            # source should show up in column 2 (leaf isolated) and match
+            # column 3 (recovered template). vmax = 99.5th percentile so a
+            # single hot coefficient does not wash the image out.
+            abscols = [
+                (t, (np.abs(np.asarray(a))[None] if np.asarray(a).ndim == 1
+                     else np.abs(np.asarray(a))))
+                for t, a in cols
+            ]
+            vmax_row = [
+                max(
+                    (np.percentile(a[ch], 99.5) for _, a in abscols if a.shape[0] > ch),
+                    default=1.0,
+                ) or 1.0
+                for ch in range(nch)
+            ]
+
+            fig, axes = plt.subplots(
+                nch, len(cols),
+                figsize=(3.6 * len(cols), 2.7 * nch),
+                squeeze=False, sharex=True,
+            )
+            for ci, (title, a) in enumerate(abscols):
+                for ch in range(nch):
+                    ax = axes[ch][ci]
+                    slab = a[ch] if a.shape[0] > ch else a[0]
+                    if kind == "wdm" and slab.ndim == 2:
+                        im = ax.imshow(
+                            slab, aspect="auto", origin="lower", cmap="viridis",
+                            vmin=0.0, vmax=vmax_row[ch],
+                        )
+                        if ci == len(cols) - 1:
+                            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+                    else:
+                        ax.plot(slab.ravel(), lw=0.6)
+                        if kind == "fd":
+                            ax.set_yscale("log")
+                    if ch == 0:
+                        ax.set_title(title, fontsize=9)
+                    if ci == 0:
+                        ax.set_ylabel(f"chan {ch}", fontsize=8)
+
+            rr0 = self._dbg_source_only_ll(snaps["before_removal"]) if snaps.get("before_removal") is not None else float("nan")
+            rr1 = self._dbg_source_only_ll(snaps["after_readd"]) if snaps.get("after_readd") is not None else float("nan")
+            fig.suptitle(
+                f"{self.branch_name} leaf {leaf} walker {walker} step {self._dbg_step}  "
+                f"| -0.5<r|r> before={rr0:.3e} after={rr1:.3e}",
+                fontsize=10,
+            )
+            os.makedirs(self.debug_plot_dir, exist_ok=True)
+            fname = os.path.join(
+                self.debug_plot_dir,
+                f"{self.branch_name}_debug_seq_leaf{leaf}_w{walker}_{self._dbg_plot_counter:04d}.png",
+            )
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            fig.savefig(fname, dpi=120, bbox_inches="tight")
+            plt.close(fig)
+            self._dbg_plot_counter += 1
+            logger.info("[%s_DEBUG] saved -> %s", self._dbg_prefix, fname)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[%s_DEBUG] plot skipped: %r", self._dbg_prefix, exc)
 
     @property
     def periodic(self):
@@ -370,6 +535,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         new_state = deepcopy(state)
 
+        # per-step debug reset (trace at most one leaf per propose call)
+        self._dbg_step += 1
+        self._dbg_leaf_done = False
+        self._dbg_snaps = {}
+
         # self.acs = model.analysis_container_arr
         self.check_add_skip_swap_info(state)
 
@@ -401,10 +571,39 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             ndim = new_state.branches[self.branch_name].coords.shape[-1]
 
+            # Debug: trace ONE leaf per step (the configured leaf, else the
+            # first alive one). Snapshot the residual the sampler will score
+            # against, before/after isolating this leaf, and plot it.
+            _dbg_leaf = (
+                self.debug
+                and not self._dbg_leaf_done
+                and self._dbg_step % self.debug_every == 0
+                and (self.debug_plot_leaf is None or leaf == self.debug_plot_leaf)
+            )
+            _dbg_w = min(int(self.debug_plot_walker), self.nwalkers - 1)
+            # Debug must never crash the sampler: every snapshot is guarded
+            # and disarms this leaf's tracing on any failure.
+            if _dbg_leaf:
+                try:
+                    self._dbg_snaps = {"before_removal": self._dbg_residual(_dbg_w)}
+                    self._dbg_domain = type(self.acs[_dbg_w].data).__name__.replace(
+                        "Signal", ""
+                    ).lower()
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("[%s_DEBUG] snapshot skipped: %r", self._dbg_prefix, exc)
+                    _dbg_leaf = False
+
             # remove cold chain sources
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             removal_coords_in = self.transform_fn.both_transforms(removal_coords)
             self.add_back_in_cold_chain_sources(removal_coords_in)
+
+            if _dbg_leaf:
+                try:
+                    self._dbg_snaps["exposed"] = self._dbg_residual(_dbg_w)
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("[%s_DEBUG] snapshot skipped: %r", self._dbg_prefix, exc)
+                    _dbg_leaf = False
 
             self.setup_likelihood_here(removal_coords_in)
 
@@ -637,7 +836,25 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             add_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             add_coords_in = self.transform_fn.both_transforms(add_coords)
+
+            _dbg_tmpl = None
+            if _dbg_leaf:
+                # recovered template = the accepted cold-chain source for the
+                # traced walker (built before it is folded back in).
+                _dbg_tmpl = self._dbg_template(add_coords_in[_dbg_w], _dbg_w)
+
             self.remove_cold_chain_sources(add_coords_in)
+
+            if _dbg_leaf:
+                try:
+                    self._dbg_snaps["after_readd"] = self._dbg_residual(_dbg_w)
+                    self._debug_plot_source_sequence(
+                        leaf, _dbg_w, self._dbg_snaps, _dbg_tmpl,
+                        {"domain": getattr(self, "_dbg_domain", "wdm")},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("[%s_DEBUG] plot skipped: %r", self._dbg_prefix, exc)
+                self._dbg_leaf_done = True
 
             # read out all betas from temperature controls
             new_state.sub_states[self.branch_name].betas_all[leaf][

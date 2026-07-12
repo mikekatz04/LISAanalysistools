@@ -59,6 +59,42 @@ comes from MPI ranks and, when configured, GPUs. Set the env vars
 explicitly to override; python drivers that bypass `run_global.py` should
 pin them the same way before importing numpy/lisatools.
 
+## Debug-plot instrumentation (per-move residual tracing)
+
+The GB special-stretch move and the source moves
+(``ResidualAddOneRemoveOneMove`` — MBH phentax / EMRI / SOBBH) can dump
+per-step figures tracing the "remove source from the residual → sample →
+put it back" choreography. Each figure shows, per TDI channel, the residual
+the sampler scored against and the recovered template.
+
+Two ways to turn it on (precedence: move-spec > stage-spec > env):
+
+**Env, per branch** — the source moves self-activate from
+``{BRANCH}_DEBUG`` (capitalised branch name):
+
+```sh
+EMRI_DEBUG=1  SOBBH_DEBUG=1  MBH_DEBUG=1  \
+EMRI_DEBUG_DIR=./emri_dbg  MBH_DEBUG_PLOT_WALKER=2  MBH_DEBUG_EVERY=10 \
+python scripts/run_global.py --stock all_sources
+```
+Companion knobs (each prefixed by the branch): ``{B}_DEBUG_DIR``,
+``{B}_DEBUG_PLOT_WALKER``, ``{B}_DEBUG_PLOT_LEAF``, ``{B}_DEBUG_EVERY``. GB
+uses the analogous ``GB_DEBUG`` / ``GB_DEBUG_DIR`` /
+``GB_DEBUG_PLOT_WALKER`` / ``GB_DEBUG_PLOT_BAND``.
+
+**Move / stage level, in code** — via the recipe API (works for GB and the
+source moves uniformly, and is picklable):
+
+```python
+fit = erebor.all_sources()
+fit.set_move_debug("emri_pe", plot_dir="./emri_dbg", every=5)  # one move
+fit.set_stage_debug("full_pe", plot_walker=2)                  # whole stage
+fit.set_move_debug("psd_pe", False)                            # force off
+```
+These set ``MoveSpec.debug`` / ``StageSpec.debug``, applied at
+materialization through ``GlobalFitMove.set_debug(...)`` (options:
+``plot_dir``, ``plot_walker``, ``plot_leaf`` / ``plot_band``, ``every``).
+
 ## Notes
 
 - `head_rank` is a retired legacy alias (old multi-stage pipeline); it
