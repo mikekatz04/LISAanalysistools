@@ -85,6 +85,7 @@ class GlobalFitMove:
         plot_leaf=None,
         plot_band=None,
         every=None,
+        log=None,
     ) -> None:
         """Enable/disable this move's debug instrumentation (move/stage level).
 
@@ -110,6 +111,8 @@ class GlobalFitMove:
             self.debug_plot_band = int(plot_band)
         if every is not None and hasattr(self, "debug_every"):
             self.debug_every = max(1, int(every))
+        if log is not None and hasattr(self, "debug_log"):
+            self.debug_log = bool(log)
         if self.debug and not getattr(self, "debug_plot_dir", None):
             self.debug_plot_dir = "./gf_output/debug/"
 

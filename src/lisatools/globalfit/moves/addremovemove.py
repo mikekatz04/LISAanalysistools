@@ -159,6 +159,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         _leaf = os.environ.get(f"{p}_DEBUG_PLOT_LEAF")
         self.debug_plot_leaf = int(_leaf) if _leaf not in (None, "") else None
         self.debug_every = max(1, int(os.environ.get(f"{p}_DEBUG_EVERY", "1")))
+        # Colour scale keyed to the RESIDUAL (where the other sources are
+        # already subtracted) and log10 by default, so this source stays
+        # visible even in a crowded band. {P}_DEBUG_LOG=0 -> linear.
+        self.debug_log = bool(int(os.environ.get(f"{p}_DEBUG_LOG", "1")))
         self._dbg_plot_counter = 0
         self._dbg_step = 0
         if self.debug:
@@ -264,12 +268,31 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 a = a[None] if a.ndim == 1 else a
                 return a[c] if a.shape[0] > c else a[0]
 
-            # One colour scale per channel, shared across template/data and
-            # every frame's residual, so the flip-book is calibrated.
-            vmax_row = []
+            # Colour scale keyed to the RESIDUAL frames only (the other
+            # sources are already subtracted there, so a crowded band does
+            # not blow out the scale) and log10 by default so a source stays
+            # visible whether it is weak or sits among louder ones. The
+            # template/data columns share the same scale and simply saturate
+            # where they are loud. One (vmin, vmax) per channel, shared
+            # across all frames -> the flip-book is calibrated.
+            res_pool = [
+                np.concatenate([_ch(r, ch).ravel() for _, _, r in frames])
+                for ch in range(nch)
+            ]
+            use_log = bool(getattr(self, "debug_log", True)) and kind == "wdm"
+            if use_log:
+                _allpos = np.concatenate([p[p > 0] for p in res_pool if np.any(p > 0)]) \
+                    if any(np.any(p > 0) for p in res_pool) else np.array([1e-30])
+                _floor = float(np.median(_allpos)) * 1e-3 or 1e-30
+                xform = lambda x: np.log10(np.abs(x) + _floor)  # noqa: E731
+            else:
+                _floor = 0.0
+                xform = lambda x: np.abs(x)  # noqa: E731
+            vmin_row, vmax_row = [], []
             for ch in range(nch):
-                pool = [_ch(tmpl, ch), _ch(data, ch)] + [_ch(r, ch) for _, _, r in frames]
-                vmax_row.append(max((np.percentile(p, 99.5) for p in pool), default=1.0) or 1.0)
+                t = xform(res_pool[ch])
+                vmax_row.append(float(np.percentile(t, 99.5)))
+                vmin_row.append(float(np.percentile(t, 20.0)) if use_log else 0.0)
 
             rr_entry = (
                 self._dbg_source_only_ll(snaps["before_removal"])
@@ -290,15 +313,16 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         slab = _ch(a, ch)
                         if kind == "wdm" and slab.ndim == 2:
                             im = ax.imshow(
-                                slab, aspect="auto", origin="lower", cmap="viridis",
-                                vmin=0.0, vmax=vmax_row[ch],
+                                xform(slab), aspect="auto", origin="lower",
+                                cmap="viridis", vmin=vmin_row[ch], vmax=vmax_row[ch],
                             )
                             if ci == 2:
-                                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+                                cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+                                if use_log:
+                                    cb.set_label("log10|coeff|", fontsize=7)
                         else:
-                            ax.plot(slab.ravel(), lw=0.6)
-                            if kind == "fd":
-                                ax.set_yscale("log")
+                            ax.plot(np.abs(slab).ravel(), lw=0.6)
+                            ax.set_yscale("log")
                         if ch == 0:
                             ax.set_title(ctitle, fontsize=9)
                         if ci == 0:
