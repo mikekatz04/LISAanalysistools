@@ -198,101 +198,124 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return float(-0.5 * np.sum(np.abs(r) ** 2))
 
     def _debug_plot_source_sequence(self, leaf, walker, snaps, template, meta) -> None:
-        """Save one figure tracing a leaf through remove -> sample -> re-add.
+        """Save a GB-style flip-book of ``[template | data | residual]`` frames.
 
-        Rows = TDI channels; columns = the residual at the four moments plus
-        the recovered template:
-          1. residual BEFORE removal (source still subtracted from it),
-          2. residual with the source EXPOSED (added back in for sampling),
-          3. the accepted source TEMPLATE (what the sampler reconstructed),
-          4. residual AFTER re-adding the (updated) source.
-        Domain-adaptive: WDM -> |coeff| time-frequency image; FD -> |X(f)|;
-        TD -> |x(t)|. Any failure is logged and swallowed.
+        Mirrors the GB special-stretch move's per-moment 3x3 sequence figures:
+        one figure PER MOMENT of the remove -> sample -> re-add choreography,
+        each with rows = TDI channels (X/Y/Z) and columns
+
+          1. TOTAL TEMPLATE — this leaf's recovered source ``h`` (fixed),
+          2. TOTAL DATA     — the data this source is fit against, i.e. the
+                              source-isolated residual with every other source
+                              already removed (fixed reference),
+          3. RESIDUAL       — the ACS residual AT THAT MOMENT (varies).
+
+        The frames are the entry (source folded into the fit), removed (source
+        isolated for sampling), and refit (updated source folded back) states.
+        Template and data columns are held fixed across frames while the
+        residual column changes, so flipping through the numbered files
+        ``..._f0_...`` / ``_f1_`` / ``_f2_`` animates the source leaving and
+        re-entering the residual directly. A single colour scale (per channel)
+        is shared across ALL frames and columns so the flip is calibrated.
+        Domain-adaptive (WDM image / FD|TD line); any failure is logged and
+        swallowed.
+
+        NOTE vs GB: this move does not mutate the residual during the repeat
+        loop (proposals are scored on the fly), so the GB "before/after
+        add-back" pair collapses to a single ``removed`` frame here.
         """
         try:
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
 
-            # Columns labelled by what each residual state IS, independent of
-            # the (confusing) add/remove method names: the entry residual has
-            # this leaf's source folded into the fit; the "isolated" residual
-            # is the one the sampler actually scored this leaf's proposals
-            # against (source contribution present); the exit residual folds
-            # the updated source back in.
-            cols = [
-                ("1: residual, source in fit (entry)", snaps.get("before_removal")),
-                ("2: residual, leaf isolated (sampled)", snaps.get("exposed")),
-                ("3: recovered template", template),
-                ("4: residual, source refit (exit)", snaps.get("after_readd")),
-            ]
-            cols = [(t, a) for t, a in cols if a is not None]
-            if not cols:
+            if template is None:
                 return
-            ref = cols[0][1]
-            nch = ref.shape[0] if ref.ndim >= 2 else 1
+            tmpl = np.asarray(template)
+            # Fixed "data" reference = the source-isolated residual (others
+            # removed). Fall back to entry + template if the exposed snapshot
+            # is missing.
+            data = snaps.get("exposed")
+            if data is None and snaps.get("before_removal") is not None:
+                data = np.asarray(snaps["before_removal"]) + tmpl
+            if data is None:
+                return
+            data = np.asarray(data)
+            if tmpl.shape != data.shape:
+                return  # template build failed / shape mismatch -> skip cleanly
+
+            frames = [
+                ("f0", "entry: source in fit", snaps.get("before_removal")),
+                ("f1", "removed: source isolated", snaps.get("exposed")),
+                ("f2", "refit: source re-added", snaps.get("after_readd")),
+            ]
+            frames = [(k, t, np.asarray(r)) for k, t, r in frames if r is not None]
+            if not frames:
+                return
+
+            nch = data.shape[0] if data.ndim >= 2 else 1
+            chan_labels = (
+                ["X", "Y", "Z"] if nch == 3 else [f"chan {c}" for c in range(nch)]
+            )
             kind = meta.get("domain", "wdm")
 
-            # Shared per-channel-row colour scale across all columns so the
-            # residual states and the template are directly comparable — the
-            # source should show up in column 2 (leaf isolated) and match
-            # column 3 (recovered template). vmax = 99.5th percentile so a
-            # single hot coefficient does not wash the image out.
-            abscols = [
-                (t, (np.abs(np.asarray(a))[None] if np.asarray(a).ndim == 1
-                     else np.abs(np.asarray(a))))
-                for t, a in cols
-            ]
-            vmax_row = [
-                max(
-                    (np.percentile(a[ch], 99.5) for _, a in abscols if a.shape[0] > ch),
-                    default=1.0,
-                ) or 1.0
-                for ch in range(nch)
-            ]
+            def _ch(a, c):
+                a = np.abs(a)
+                a = a[None] if a.ndim == 1 else a
+                return a[c] if a.shape[0] > c else a[0]
 
-            fig, axes = plt.subplots(
-                nch, len(cols),
-                figsize=(3.6 * len(cols), 2.7 * nch),
-                squeeze=False, sharex=True,
-            )
-            for ci, (title, a) in enumerate(abscols):
-                for ch in range(nch):
-                    ax = axes[ch][ci]
-                    slab = a[ch] if a.shape[0] > ch else a[0]
-                    if kind == "wdm" and slab.ndim == 2:
-                        im = ax.imshow(
-                            slab, aspect="auto", origin="lower", cmap="viridis",
-                            vmin=0.0, vmax=vmax_row[ch],
-                        )
-                        if ci == len(cols) - 1:
-                            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
-                    else:
-                        ax.plot(slab.ravel(), lw=0.6)
-                        if kind == "fd":
-                            ax.set_yscale("log")
-                    if ch == 0:
-                        ax.set_title(title, fontsize=9)
-                    if ci == 0:
-                        ax.set_ylabel(f"chan {ch}", fontsize=8)
+            # One colour scale per channel, shared across template/data and
+            # every frame's residual, so the flip-book is calibrated.
+            vmax_row = []
+            for ch in range(nch):
+                pool = [_ch(tmpl, ch), _ch(data, ch)] + [_ch(r, ch) for _, _, r in frames]
+                vmax_row.append(max((np.percentile(p, 99.5) for p in pool), default=1.0) or 1.0)
 
-            rr0 = self._dbg_source_only_ll(snaps["before_removal"]) if snaps.get("before_removal") is not None else float("nan")
-            rr1 = self._dbg_source_only_ll(snaps["after_readd"]) if snaps.get("after_readd") is not None else float("nan")
-            fig.suptitle(
-                f"{self.branch_name} leaf {leaf} walker {walker} step {self._dbg_step}  "
-                f"| -0.5<r|r> before={rr0:.3e} after={rr1:.3e}",
-                fontsize=10,
+            rr_entry = (
+                self._dbg_source_only_ll(snaps["before_removal"])
+                if snaps.get("before_removal") is not None else float("nan")
             )
             os.makedirs(self.debug_plot_dir, exist_ok=True)
-            fname = os.path.join(
-                self.debug_plot_dir,
-                f"{self.branch_name}_debug_seq_leaf{leaf}_w{walker}_{self._dbg_plot_counter:04d}.png",
-            )
-            fig.tight_layout(rect=[0, 0, 1, 0.96])
-            fig.savefig(fname, dpi=120, bbox_inches="tight")
-            plt.close(fig)
+            base = f"{self.branch_name}_debug_leaf{leaf}_w{walker}_s{self._dbg_step:04d}"
+
+            for fkey, ftitle, residual in frames:
+                cols = [("total template", tmpl), ("total data", data),
+                        (f"residual — {ftitle}", residual)]
+                fig, axes = plt.subplots(
+                    nch, 3, figsize=(3.6 * 3, 2.7 * nch), squeeze=False, sharex=True,
+                )
+                for ci, (ctitle, a) in enumerate(cols):
+                    for ch in range(nch):
+                        ax = axes[ch][ci]
+                        slab = _ch(a, ch)
+                        if kind == "wdm" and slab.ndim == 2:
+                            im = ax.imshow(
+                                slab, aspect="auto", origin="lower", cmap="viridis",
+                                vmin=0.0, vmax=vmax_row[ch],
+                            )
+                            if ci == 2:
+                                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+                        else:
+                            ax.plot(slab.ravel(), lw=0.6)
+                            if kind == "fd":
+                                ax.set_yscale("log")
+                        if ch == 0:
+                            ax.set_title(ctitle, fontsize=9)
+                        if ci == 0:
+                            ax.set_ylabel(chan_labels[ch], fontsize=9)
+                rr_here = self._dbg_source_only_ll(residual)
+                fig.suptitle(
+                    f"{self.branch_name} leaf {leaf} walker {walker} step "
+                    f"{self._dbg_step} — {ftitle}  | -0.5<r|r> entry={rr_entry:.3e} "
+                    f"here={rr_here:.3e}",
+                    fontsize=10,
+                )
+                fname = os.path.join(self.debug_plot_dir, f"{base}_{fkey}.png")
+                fig.tight_layout(rect=[0, 0, 1, 0.96])
+                fig.savefig(fname, dpi=120, bbox_inches="tight")
+                plt.close(fig)
+                logger.info("[%s_DEBUG] saved -> %s", self._dbg_prefix, fname)
             self._dbg_plot_counter += 1
-            logger.info("[%s_DEBUG] saved -> %s", self._dbg_prefix, fname)
         except Exception as exc:  # noqa: BLE001
             logger.info("[%s_DEBUG] plot skipped: %r", self._dbg_prefix, exc)
 
@@ -599,6 +622,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.add_back_in_cold_chain_sources(removal_coords_in)
 
             if _dbg_leaf:
+                # source-isolated residual = the "data" this source is fit
+                # against (all other sources removed); the fixed reference for
+                # the flip-book decomposition.
                 try:
                     self._dbg_snaps["exposed"] = self._dbg_residual(_dbg_w)
                 except Exception as exc:  # noqa: BLE001

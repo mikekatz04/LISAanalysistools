@@ -64,8 +64,12 @@ pin them the same way before importing numpy/lisatools.
 The GB special-stretch move and the source moves
 (``ResidualAddOneRemoveOneMove`` — MBH phentax / EMRI / SOBBH) can dump
 per-step figures tracing the "remove source from the residual → sample →
-put it back" choreography. Each figure shows, per TDI channel, the residual
-the sampler scored against and the recovered template.
+put it back" choreography. Output is a GB-style flip-book: one figure per
+moment (source in fit → isolated → refit), each rows = TDI channels (X/Y/Z),
+columns = [total template | total data | residual]. The template/data columns
+are fixed references and the residual column changes across frames, so
+flipping ``_f0`` / ``_f1`` / ``_f2`` animates the source leaving and
+re-entering the residual.
 
 Two ways to turn it on (precedence: move-spec > stage-spec > env):
 
