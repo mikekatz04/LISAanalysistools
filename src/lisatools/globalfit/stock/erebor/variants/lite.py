@@ -58,6 +58,10 @@ _COMMON_LITE = {
 # all_sources: fixed small grid — nf=720, nt=180 (the validated smoke shape;
 # ~7.5 d at dt=5 synthetic, ~3.75 d at the mojito dt=2.5 flip) — plus a
 # narrow GB band (small sub-band count) and few repeat proposals.
+# NOTE: even lite, the six-branch fit peaks at ~4 GB (per-branch waveform
+# generation + WDM transforms), so it wants >8 GB RAM to run comfortably in a
+# notebook kernel; the single-purpose lite variants (gb_no_fg_lite,
+# noise_only_lite) run on any laptop.
 ALL_SOURCES_LITE = {
     **_COMMON_LITE,
     "general.nf": 720,
