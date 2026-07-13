@@ -382,7 +382,7 @@ class LiteVariantTest(unittest.TestCase):
 
     def test_lite_preset_applied(self):
         fit = erebor.all_sources_lite()
-        self.assertEqual(fit.general.num_iterations, 10)
+        self.assertEqual(fit.general.num_iterations, 3)
         self.assertEqual(fit.general.nwalkers, 4)
         self.assertEqual(fit.general.ntemps, 2)
         self.assertIs(fit.general.use_gpu, False)
@@ -403,7 +403,7 @@ class LiteVariantTest(unittest.TestCase):
     def test_explicit_kwarg_beats_lite(self):
         fit = erebor.all_sources_lite(nwalkers=12)
         self.assertEqual(fit.general.nwalkers, 12)
-        self.assertEqual(fit.general.num_iterations, 10)
+        self.assertEqual(fit.general.num_iterations, 3)
 
     def test_lite_stays_cheap_and_picklable(self):
         for lite in self.LITE_NAMES:

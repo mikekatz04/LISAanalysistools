@@ -45,7 +45,11 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 _COMMON_LITE = {
-    "general.num_iterations": 10,
+    # A few iterations is enough for a smoke: it exercises the whole pipeline
+    # and shows the output shapes. Kept low so the heaviest lite fit
+    # (all_sources, six branches incl. MBH phentax) finishes and stays within
+    # a laptop's memory even inside a notebook kernel. Scale up for real runs.
+    "general.num_iterations": 3,
     "general.nwalkers": 4,
     "general.ntemps": 2,
     "general.use_gpu": False,  # lite == CPU smoke; pass use_gpu=True to override
