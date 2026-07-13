@@ -633,11 +633,11 @@ void domains_part(nb::module_ &m) {
 #else
     nb::class_<STFTFresnelWrap>(m, "STFTFresnelWrapCPU")
 #endif
-    .def(nb::init<int, int, int, double, double, double, double, double, double, bool>(),
+    .def(nb::init<int, int, int, double, double, double, double, double, double, bool, bool>(),
          nb::arg("num_times"), nb::arg("num_freqs"), nb::arg("num_channels"),
          nb::arg("t0"), nb::arg("f_min"), nb::arg("f_max"),
          nb::arg("dt"), nb::arg("df"), nb::arg("window_alpha") = 0.0,
-         nb::arg("use_midpoint") = false)
+         nb::arg("use_midpoint") = false, nb::arg("linear_envelope") = false)
     .def("compute_fourier_values", &STFTFresnelWrap::compute_fourier_values,
          nb::arg("output"), nb::arg("amps"), nb::arg("phase0s"),
          nb::arg("f0s"), nb::arg("fdot0s"), nb::arg("t0s"),

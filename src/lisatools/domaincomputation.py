@@ -373,6 +373,7 @@ class STFTComputationGroup(DomainKernelStrategy):
         force_backend: str = "cpu",
         window_alpha: float = 0.0,
         use_midpoint: bool = False,
+        linear_envelope: bool = False,
     ):
         """
         Args:
@@ -384,6 +385,12 @@ class STFTComputationGroup(DomainKernelStrategy):
                 with frequency curvature. The caller must then supply the
                 per-window ``(amp, phase0, f0, fdot0)`` evaluated at the bin
                 midpoint; the output convention is unchanged.
+            linear_envelope: If ``True``, add the analytic linear-envelope
+                first-moment correction to each pixel value. The per-channel
+                amplitude slope is derived for free from the estimator's
+                ``t +- D`` stencil samples, so this models the within-segment
+                TDI amplitude drift the const-envelope kernel otherwise freezes.
+                Defaults ``False`` (byte-identical to the const-envelope path).
         """
         from .domains import STFTSettings
 
@@ -395,6 +402,7 @@ class STFTComputationGroup(DomainKernelStrategy):
 
         self.window_alpha = window_alpha
         self.use_midpoint = use_midpoint
+        self.linear_envelope = linear_envelope
 
         with self.group_device_context():
             self._create_cpp_domain()
@@ -429,6 +437,7 @@ class STFTComputationGroup(DomainKernelStrategy):
             *self.domain_args[:8],
             window_alpha=self.window_alpha,
             use_midpoint=self.use_midpoint,
+            linear_envelope=self.linear_envelope,
         )
 
     @property

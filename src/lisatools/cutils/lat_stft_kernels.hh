@@ -160,8 +160,20 @@ CUDA_DEVICE void stft_freq_fdot_from_tdi_phase(
     double* params, Vec k, Vec u, Vec v,
     int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
     const cmplx* tdi_center,
-    double* f0_out, double* fdot0_out)
+    double* f0_out, double* fdot0_out,
+    double* amp_p_out, double* amp_m_out, double* D_out)
 {
+    // Linear-envelope exports: per-channel stencil amplitudes |z+-| and the
+    // half-width D, consumed by FresnelColumn::setup as the slope
+    // a_j = (|z+|-|z-|)/(2 D |z0|). Default 0 so any astro-fallback / degenerate
+    // early-return below carries NO slope (a_j = 0); the normal path fills them.
+    for (int ch = 0; ch < 3; ch += 1)
+    {
+        amp_p_out[ch] = 0.0;
+        amp_m_out[ch] = 0.0;
+    }
+    *D_out = STFT_FREQ_FDOT_DT_MAX;
+
     // Quarter-cycle stencil: f_astro sets only the step SCALE.
     double f_scale = src.get_f(t, params, bin_i);
     if (!(f_scale > 0.0))
@@ -173,6 +185,7 @@ CUDA_DEVICE void stft_freq_fdot_from_tdi_phase(
     double D = STFT_FREQ_FDOT_STENCIL_CYCLES / f_scale;
     if (D > STFT_FREQ_FDOT_DT_MAX)
         D = STFT_FREQ_FDOT_DT_MAX;
+    *D_out = D;
 
     cmplx tdi_p[3];
     cmplx tdi_m[3];
@@ -242,11 +255,21 @@ CUDA_DEVICE void stft_freq_fdot_from_tdi_phase(
             fdot0_out[ch] = fdot0_out[ch_ref];
         }
     }
+
+    // Normal path only (all guards passed): export the stencil amplitudes for
+    // the linear-envelope slope. Reuses the z+- samples already evaluated above
+    // -- no extra response calls.
+    for (int ch = 0; ch < 3; ch += 1)
+    {
+        amp_p_out[ch] = gcmplx::abs(tdi_p[ch]);
+        amp_m_out[ch] = gcmplx::abs(tdi_m[ch]);
+    }
 }
 
 // Resolve (f0, fdot0) per channel for one pixel: TDI-phase derivation
 // (small-step central difference, see stft_freq_fdot_from_tdi_phase) or
-// astrophysical fallback.
+// astrophysical fallback. amp_p/amp_m/D are the linear-envelope exports
+// (zeroed on the astro path -> a_j = 0).
 template <class SourceT>
 CUDA_DEVICE void stft_pixel_freq_fdot(
     SourceT& src, double t,
@@ -254,11 +277,18 @@ CUDA_DEVICE void stft_pixel_freq_fdot(
     int* link_space_craft_rec, int* link_space_craft_em, int bin_i,
     const cmplx* tdi_center,
     bool freq_from_tdi_phase,
-    double* f0_out, double* fdot0_out)
+    double* f0_out, double* fdot0_out,
+    double* amp_p_out, double* amp_m_out, double* D_out)
 {
 
     if (!freq_from_tdi_phase)
     {
+        for (int ch = 0; ch < 3; ch += 1)
+        {
+            amp_p_out[ch] = 0.0;   // astro path: no stencil amplitudes -> a_j = 0
+            amp_m_out[ch] = 0.0;
+        }
+        *D_out = STFT_FREQ_FDOT_DT_MAX;
         stft_freq_fdot_astro_fallback<SourceT>(src, t, params, bin_i,
                                                f0_out, fdot0_out);
         return;
@@ -266,7 +296,7 @@ CUDA_DEVICE void stft_pixel_freq_fdot(
     stft_freq_fdot_from_tdi_phase<SourceT>(
         src, t, params, k, u, v,
         link_space_craft_rec, link_space_craft_em, bin_i,
-        tdi_center, f0_out, fdot0_out);
+        tdi_center, f0_out, fdot0_out, amp_p_out, amp_m_out, D_out);
 }
 
 // ===========================================================================
@@ -317,6 +347,7 @@ struct FresnelColumn
         double phase[3];
         double f0[3];
         double fdot0[3];
+        double a[3];            // per-channel linear-envelope slope a_j (0 if off)
         int carrier_j;          // carrier frequency bin (stencil placement)
     };
 
@@ -334,13 +365,24 @@ struct FresnelColumn
         cmplx tdi_channel_val[3];
         src.get_tdi_Xf_single(&tdi_channel_val[0], t_here, params, k, u, v,
                               link_space_craft_rec, link_space_craft_em, bin_i);
+        double amp_p[3], amp_m[3], D_stencil;
         stft_pixel_freq_fdot<SourceT>(
             src, t_here, params, k, u, v,
             link_space_craft_rec, link_space_craft_em, bin_i,
-            tdi_channel_val, freq_from_tdi_phase, &s.f0[0], &s.fdot0[0]);
+            tdi_channel_val, freq_from_tdi_phase, &s.f0[0], &s.fdot0[0],
+            &amp_p[0], &amp_m[0], &D_stencil);
         for (int j = 0; j < 3; j += 1)
             fresnel->get_amp_phase(&s.amp[j], &s.phase[j],
                                    gcmplx::conj(tdi_channel_val[j]));
+        // Linear-envelope slope a_j = (|z+|-|z-|)/(2 D |z0|) per channel (the
+        // fractional amplitude drift across the segment). Astro-fallback /
+        // degenerate pixels export amp_p==amp_m==0 -> a_j = 0; guard the
+        // near-null channels (|z0|~0) against 0/0. Consumed by value() only when
+        // fresnel->linear_envelope is on.
+        for (int j = 0; j < 3; j += 1)
+            s.a[j] = (s.amp[j] > 0.0)
+                         ? (amp_p[j] - amp_m[j]) / (2.0 * D_stencil * s.amp[j])
+                         : 0.0;
         s.carrier_j = stft->get_freq_index(s.f0[0]);
     }
 
@@ -348,9 +390,12 @@ struct FresnelColumn
                                    double freq_here)
     {
         (void) freq_j_here;  // analytic evaluator: any frequency, no tabulation
+        // s.a[j] is the linear-envelope slope; get_fourier_value applies it only
+        // when fresnel->linear_envelope is on (else slope is ignored -> the
+        // const-envelope value is byte-identical).
         return s.fresnel->get_fourier_value(
             s.amp[j], s.phase[j], s.f0[j], s.fdot0[j],
-            s.t_seg, freq_here, s.window_factor);
+            s.t_seg, freq_here, s.window_factor, s.a[j]);
     }
 };
 

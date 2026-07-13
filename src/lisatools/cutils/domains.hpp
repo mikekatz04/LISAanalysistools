@@ -437,16 +437,24 @@ class STFTFresnel : public STFTSettings {
                       ///< evaluated at the midpoint. The Fourier-transform
                       ///< origin stays at t0, so the output keeps the standard
                       ///< STFT convention (see get_phase_kernel_product).
+  bool linear_envelope;  ///< If true, add the analytic linear-envelope
+                         ///< first-moment correction a_j*(i/2pi)dF/df to each
+                         ///< pixel value (a_j is the per-channel fractional
+                         ///< amplitude slope supplied by the caller as `slope`).
+                         ///< Default false -> reproduces the const-envelope
+                         ///< path BYTE-IDENTICALLY (correction fully gated).
   CUDA_CALLABLE_MEMBER
   STFTFresnel(int num_times_, int num_freqs_, int num_channels_, double t0_,
               double f_min_, double f_max_, double dt_, double df_,
-              double window_alpha_, bool use_midpoint_ = false)
+              double window_alpha_, bool use_midpoint_ = false,
+              bool linear_envelope_ = false)
       : STFTSettings(num_times_, num_freqs_, num_channels_, t0_, f_min_, f_max_,
                      dt_, df_),
         window_alpha(window_alpha_),
         taper_duration(window_alpha_ > 0.0 ? window_alpha_ * dt_ / 2.0 : 0.0),
         f_taper(window_alpha_ > 0.0 ? 1.0 / (2.0 * taper_duration) : 0.0),
-        use_midpoint(use_midpoint_){};
+        use_midpoint(use_midpoint_),
+        linear_envelope(linear_envelope_){};
 
   CUDA_DEVICE
   void get_amp_phase(double* amp, double* phase, cmplx z);
@@ -470,13 +478,19 @@ class STFTFresnel : public STFTSettings {
                                  double fdot0, double t_start, double t_end,
                                  double t_ft_origin);
   CUDA_DEVICE
+  cmplx get_phase_kernel_product_moment(double f_eff, double t_ref, double f0,
+                                        double fdot0, double t_start,
+                                        double t_end, double t_ft_origin);
+  CUDA_DEVICE
   cmplx get_windowed_fourier_value(double amp, double phase0, double f0,
-                                   double fdot0, double t0, double f);
+                                   double fdot0, double t0, double f,
+                                   double slope = 0.0);
   CUDA_DEVICE
   cmplx get_fresnel_kernel(double f, double t0, double f0, double fdot0);
   CUDA_DEVICE
   cmplx get_fourier_value(double amp, double phase0, double f0, double fdot0,
-                          double t0, double f, double window_factor);
+                          double t0, double f, double window_factor,
+                          double slope = 0.0);
 
   void compute_fourier_values_wrap(cmplx* output, double* amps, double* phase0s,
                                    double* f0s, double* fdot0s, double* t0s,
