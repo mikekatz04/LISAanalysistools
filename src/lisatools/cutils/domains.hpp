@@ -467,6 +467,11 @@ class STFTFresnel : public STFTSettings {
                              double x);  // Fresnel integrals C(x) and S(x)
                                          // returned in ints[0] and ints[1]
   CUDA_DEVICE
+  void get_fresnel_integrals_with_expi(
+      double* C, double* S, double* cos_arg, double* sin_arg,
+      double x);  // as get_fresnel_integrals, also exposing the internal
+                  // cos/sin(0.5*pi*x^2) (= dC/dx, dS/dx; even in x)
+  CUDA_DEVICE
   cmplx get_fresnel_kernel_interval(double f, double t0, double f0,
                                     double fdot0, double t_start, double t_end);
   CUDA_DEVICE
@@ -474,9 +479,12 @@ class STFTFresnel : public STFTSettings {
                                  double fdot0, double t_start, double t_end,
                                  double t_ft_origin);
   CUDA_DEVICE
-  cmplx get_phase_kernel_product_moment(double f_eff, double t_ref, double f0,
-                                        double fdot0, double t_start,
-                                        double t_end, double t_ft_origin);
+  void get_phase_kernel_product_with_moment(
+      double f_eff, double t_ref, double f0, double fdot0, double t_start,
+      double t_end, double t_ft_origin, cmplx* kernel_out,
+      cmplx* moment_out);  // fused: kernel (bit-identical to
+                           // get_phase_kernel_product) + its first moment
+                           // about t_ref (the linear-envelope correction)
   CUDA_DEVICE
   cmplx get_windowed_fourier_value(double amp, double phase0, double f0,
                                    double fdot0, double t0, double f,

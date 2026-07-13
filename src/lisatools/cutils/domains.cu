@@ -662,11 +662,27 @@ double STFTFresnel::get_v(double tau, double f, double f0, double fdot0) {
  */
 CUDA_DEVICE
 void STFTFresnel::get_fresnel_integrals(double* C, double* S, double x) {
+  double cos_arg_unused, sin_arg_unused;
+  get_fresnel_integrals_with_expi(C, S, &cos_arg_unused, &sin_arg_unused, x);
+}
+
+// Body of get_fresnel_integrals, additionally exposing the internal
+// cos/sin(0.5*pi*x^2) evaluated once at the top (the auxiliary-branch sincos).
+// These are exactly the Fresnel derivatives dC/dx and dS/dx, so the fused
+// moment evaluator reuses them instead of re-calling sincos. They are even in
+// x (the argument is 0.5*pi*x^2), so the x < 0 odd-symmetry flip applied to
+// C and S below does NOT apply to them.
+CUDA_DEVICE
+void STFTFresnel::get_fresnel_integrals_with_expi(double* C, double* S,
+                                                  double* cos_arg,
+                                                  double* sin_arg, double x) {
   double abs_x = std::abs(x);
   double pi_x = M_PI * abs_x;
   double half_pi_x2 = 0.5 * pi_x * abs_x;  // arg = 0.5 * pi * ax^2
   double c_halfpix2 = std::cos(half_pi_x2);
   double s_halfpix2 = std::sin(half_pi_x2);
+  *cos_arg = c_halfpix2;
+  *sin_arg = s_halfpix2;
   double S_val, C_val;
 
   if (abs_x <= 1.6) {
@@ -807,50 +823,58 @@ cmplx STFTFresnel::get_phase_kernel_product(double f_eff, double t_ref,
   return gcmplx::polar(1.0, phase) * kernel;
 }
 
-// First moment about t_ref of get_phase_kernel_product -- the analytic kernel of
-// the linear-envelope correction. With F(f) the phase-kernel product, the
-// linear-envelope first moment integral is  int tau e^{i phi} dtau = (i/2pi) dF/df
-// (guide A2); anchored at t_ref it reduces to
+// Fused evaluator: the phase-kernel product AND its first moment about t_ref
+// in one pass. *kernel_out reproduces get_phase_kernel_product BIT-FOR-BIT
+// (same evaluation sequence); the moment costs no additional Fresnel
+// evaluations, endpoint sincos, or polar on top of it (they are shared),
+// versus ~5-6 redundant sincos per call when the two were evaluated apart.
+//
+// Moment derivation (guide A2): with F(f) the phase-kernel product, the
+// linear-envelope first moment integral is  int tau e^{i phi} dtau = (i/2pi) dF/df;
+// anchored at t_ref it reduces to
 //   M = polar(1, phase) * [ -zeta*kernel + (i/2pi) dkernel/df ].
-// `phase` is IDENTICAL to get_phase_kernel_product's zeroth-moment phase, so the
-// t_ref/t_ft_origin anchoring (incl. use_midpoint) matches exactly; the
-// (t_ref - t_ft_origin) Fourier-origin shift cancels analytically into the
-// -zeta*kernel stationary term (validated: helper-form == (i/2pi)dF/df -
-// (t_ref-t0)F to ~4e-10). dC/dv = cos(pi v^2/2), dS/dv = sin(pi v^2/2) are the
-// exact Fresnel derivatives (the same sincos get_fresnel_integrals evaluates);
-// dv/df = -sqrt(2|fdot0|)/fdot0 at both endpoints.
+// `phase` is IDENTICAL to the zeroth moment's, so the t_ref/t_ft_origin
+// anchoring (incl. use_midpoint) matches exactly; the (t_ref - t_ft_origin)
+// Fourier-origin shift cancels analytically into the -zeta*kernel stationary
+// term (validated: helper-form == (i/2pi)dF/df - (t_ref-t0)F to ~4e-10).
+// dC/dv = cos(pi v^2/2), dS/dv = sin(pi v^2/2) are the exact Fresnel
+// derivatives -- here reused from get_fresnel_integrals_with_expi's endpoint
+// evaluations (they differ from the previous direct cos/sin(0.5*M_PI*v*v)
+// calls only by ulp-level argument association, 0.5*(M_PI*|v|)*|v| vs
+// ((0.5*M_PI)*v)*v); dv/df = -sqrt(2|fdot0|)/fdot0 at both endpoints.
 CUDA_DEVICE
-cmplx STFTFresnel::get_phase_kernel_product_moment(double f_eff, double t_ref,
-                                                   double f0, double fdot0,
-                                                   double t_start, double t_end,
-                                                   double t_ft_origin) {
+void STFTFresnel::get_phase_kernel_product_with_moment(
+    double f_eff, double t_ref, double f0, double fdot0, double t_start,
+    double t_end, double t_ft_origin, cmplx* kernel_out, cmplx* moment_out) {
   double tau_start = t_start - t_ref;
   double tau_end = t_end - t_ref;
   double v_start = get_v(tau_start, f_eff, f0, fdot0);
   double v_end = get_v(tau_end, f_eff, f0, fdot0);
 
   double C_start, S_start, C_end, S_end;
-  get_fresnel_integrals(&C_start, &S_start, v_start);
-  get_fresnel_integrals(&C_end, &S_end, v_end);
+  double cos_start, sin_start, cos_end, sin_end;
+  get_fresnel_integrals_with_expi(&C_start, &S_start, &cos_start, &sin_start,
+                                  v_start);
+  get_fresnel_integrals_with_expi(&C_end, &S_end, &cos_end, &sin_end, v_end);
   double delta_C = C_end - C_start;
   double delta_S = S_end - S_start;
   cmplx kernel =
       (fdot0 >= 0.0) ? cmplx(delta_C, delta_S) : cmplx(delta_C, -delta_S);
 
   double dv_df = -std::sqrt(2.0 * std::abs(fdot0)) / fdot0;
-  double dC_df = dv_df * (std::cos(0.5 * M_PI * v_end * v_end) -
-                         std::cos(0.5 * M_PI * v_start * v_start));
-  double dS_df = dv_df * (std::sin(0.5 * M_PI * v_end * v_end) -
-                         std::sin(0.5 * M_PI * v_start * v_start));
+  double dC_df = dv_df * (cos_end - cos_start);
+  double dS_df = dv_df * (sin_end - sin_start);
   cmplx dkernel_df =
       (fdot0 >= 0.0) ? cmplx(dC_df, dS_df) : cmplx(dC_df, -dS_df);
 
   double zeta = get_zeta(f_eff, f0, fdot0);
   double phase = -M_PI * fdot0 * zeta * zeta -
                  2.0 * M_PI * f_eff * (t_ref - t_ft_origin);
+  cmplx rot = gcmplx::polar(1.0, phase);
   cmplx moment_kernel =
       -zeta * kernel + cmplx(0.0, 1.0 / (2.0 * M_PI)) * dkernel_df;
-  return gcmplx::polar(1.0, phase) * moment_kernel;
+  *kernel_out = rot * kernel;
+  *moment_out = rot * moment_kernel;
 }
 
 CUDA_DEVICE
@@ -873,20 +897,56 @@ cmplx STFTFresnel::get_windowed_fourier_value(double amp, double phase0,
   double amplitude = amp / std::sqrt(2.0 * std::abs(fdot0));
   cmplx overall_factor = gcmplx::polar(amplitude, phase0);
 
-  cmplx rectangular =
-      get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t_end, t0);
-  cmplx left_dc =
-      get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t_roll_on, t0);
-  cmplx left_plus_shift = get_phase_kernel_product(f - f_taper, t_ref, f0, fdot0,
-                                                   t0, t_roll_on, t0);
-  cmplx left_minus_shift = get_phase_kernel_product(
-      f + f_taper, t_ref, f0, fdot0, t0, t_roll_on, t0);
-  cmplx right_dc =
-      get_phase_kernel_product(f, t_ref, f0, fdot0, t_roll_off, t_end, t0);
-  cmplx right_plus_shift = get_phase_kernel_product(
-      f - f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
-  cmplx right_minus_shift = get_phase_kernel_product(
-      f + f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
+  // Linear-envelope correction: each sub-interval term also gets its own
+  // first moment (same 7-term Tukey decomposition, same weights and taper
+  // rotations), added as slope * M below. The fused evaluator returns each
+  // term's {value, moment} in one pass -- the values are bit-identical to
+  // get_phase_kernel_product's, so gating only on (linear_envelope, slope)
+  // keeps the value path invariant. slope == 0.0 (astro-fallback columns)
+  // skips the moment work entirely: the correction would be exactly zero.
+  bool with_moment = linear_envelope && (slope != 0.0);
+
+  cmplx rectangular, left_dc, left_plus_shift, left_minus_shift;
+  cmplx right_dc, right_plus_shift, right_minus_shift;
+  cmplx m_rectangular(0.0, 0.0), m_left_dc(0.0, 0.0);
+  cmplx m_left_plus_shift(0.0, 0.0), m_left_minus_shift(0.0, 0.0);
+  cmplx m_right_dc(0.0, 0.0), m_right_plus_shift(0.0, 0.0);
+  cmplx m_right_minus_shift(0.0, 0.0);
+  if (with_moment) {
+    get_phase_kernel_product_with_moment(f, t_ref, f0, fdot0, t0, t_end, t0,
+                                         &rectangular, &m_rectangular);
+    get_phase_kernel_product_with_moment(f, t_ref, f0, fdot0, t0, t_roll_on,
+                                         t0, &left_dc, &m_left_dc);
+    get_phase_kernel_product_with_moment(f - f_taper, t_ref, f0, fdot0, t0,
+                                         t_roll_on, t0, &left_plus_shift,
+                                         &m_left_plus_shift);
+    get_phase_kernel_product_with_moment(f + f_taper, t_ref, f0, fdot0, t0,
+                                         t_roll_on, t0, &left_minus_shift,
+                                         &m_left_minus_shift);
+    get_phase_kernel_product_with_moment(f, t_ref, f0, fdot0, t_roll_off,
+                                         t_end, t0, &right_dc, &m_right_dc);
+    get_phase_kernel_product_with_moment(f - f_taper, t_ref, f0, fdot0,
+                                         t_roll_off, t_end, t0,
+                                         &right_plus_shift,
+                                         &m_right_plus_shift);
+    get_phase_kernel_product_with_moment(f + f_taper, t_ref, f0, fdot0,
+                                         t_roll_off, t_end, t0,
+                                         &right_minus_shift,
+                                         &m_right_minus_shift);
+  } else {
+    rectangular = get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t_end, t0);
+    left_dc = get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t_roll_on, t0);
+    left_plus_shift = get_phase_kernel_product(f - f_taper, t_ref, f0, fdot0,
+                                               t0, t_roll_on, t0);
+    left_minus_shift = get_phase_kernel_product(f + f_taper, t_ref, f0, fdot0,
+                                                t0, t_roll_on, t0);
+    right_dc =
+        get_phase_kernel_product(f, t_ref, f0, fdot0, t_roll_off, t_end, t0);
+    right_plus_shift = get_phase_kernel_product(f - f_taper, t_ref, f0, fdot0,
+                                                t_roll_off, t_end, t0);
+    right_minus_shift = get_phase_kernel_product(f + f_taper, t_ref, f0, fdot0,
+                                                 t_roll_off, t_end, t0);
+  }
 
   // The right-ramp half-cosine is referenced to the segment END,
   // cos(pi*(t_end - t)/taper). Re-expressed as frequency shifts referenced to
@@ -904,25 +964,7 @@ cmplx STFTFresnel::get_windowed_fourier_value(double amp, double phase0,
                                         right_rot_p * right_plus_shift +
                                         right_rot_m * right_minus_shift));
 
-  // Linear-envelope correction: each sub-interval term gets its own first
-  // moment (same 7-term Tukey decomposition, same weights and taper rotations),
-  // added as slope * M. Fully gated: OFF -> byte-identical to the line above.
-  if (linear_envelope) {
-    cmplx m_rectangular =
-        get_phase_kernel_product_moment(f, t_ref, f0, fdot0, t0, t_end, t0);
-    cmplx m_left_dc =
-        get_phase_kernel_product_moment(f, t_ref, f0, fdot0, t0, t_roll_on, t0);
-    cmplx m_left_plus_shift = get_phase_kernel_product_moment(
-        f - f_taper, t_ref, f0, fdot0, t0, t_roll_on, t0);
-    cmplx m_left_minus_shift = get_phase_kernel_product_moment(
-        f + f_taper, t_ref, f0, fdot0, t0, t_roll_on, t0);
-    cmplx m_right_dc = get_phase_kernel_product_moment(f, t_ref, f0, fdot0,
-                                                       t_roll_off, t_end, t0);
-    cmplx m_right_plus_shift = get_phase_kernel_product_moment(
-        f - f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
-    cmplx m_right_minus_shift = get_phase_kernel_product_moment(
-        f + f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
-
+  if (with_moment) {
     cmplx moment =
         overall_factor * (m_rectangular - 0.5 * (m_left_dc + m_right_dc) -
                           0.25 * (m_left_plus_shift + m_left_minus_shift +
@@ -953,18 +995,21 @@ cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0,
 
   double amplitude = window_factor * amp / std::sqrt(2.0 * std::abs(fdot0));
 
-  cmplx phase_kernel = get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t1, t0);
-  cmplx out = gcmplx::polar(amplitude, phase0) * phase_kernel;
-
-  // Linear-envelope correction: out += slope * (i/2pi) dF/df, anchored at t_ref.
-  // Fully gated: OFF -> byte-identical to the const-envelope value above.
-  if (linear_envelope) {
-    cmplx moment_kernel =
-        get_phase_kernel_product_moment(f, t_ref, f0, fdot0, t0, t1, t0);
-    out = out + slope * gcmplx::polar(amplitude, phase0) * moment_kernel;
+  // Linear-envelope correction: out += slope * (i/2pi) dF/df, anchored at
+  // t_ref, computed by the fused evaluator (value bit-identical to the plain
+  // path; Fresnel endpoints, sincos, and polar shared). Fully gated: OFF, or
+  // slope == 0.0 (astro-fallback columns, batch API) -> byte-identical
+  // const-envelope value.
+  if (linear_envelope && slope != 0.0) {
+    cmplx phase_kernel, moment_kernel;
+    get_phase_kernel_product_with_moment(f, t_ref, f0, fdot0, t0, t1, t0,
+                                         &phase_kernel, &moment_kernel);
+    cmplx pref = gcmplx::polar(amplitude, phase0);
+    return pref * phase_kernel + slope * pref * moment_kernel;
   }
 
-  return out;
+  cmplx phase_kernel = get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t1, t0);
+  return gcmplx::polar(amplitude, phase0) * phase_kernel;
 }
 
 // ============================================================
