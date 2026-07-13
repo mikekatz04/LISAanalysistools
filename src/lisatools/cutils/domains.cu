@@ -637,54 +637,113 @@ double STFTFresnel::get_v(double tau, double f, double f0, double fdot0) {
   return v;
 }
 
-CUDA_DEVICE
-double STFTFresnel::get_auxiliary_f(double x) {
-  double f = (1.0 + 0.926 * x) / (2.0 + 1.792 * x + 3.104 * x * x);
-  return f;
-}
-
-CUDA_DEVICE
-double STFTFresnel::get_auxiliary_g(double x) {
-  double g = 1.0 / (2.0 + 4.142 * x + 3.492 * x * x + 6.670 * x * x * x);
-  return g;
-}
-
 /**
  * Evaluate the Fresnel integrals C(x) and S(x).
  *
- * NOTE ON ACCURACY: this is a fast, low-accuracy evaluation, not an exact one.
- * For |x| <= 6 it uses the Abramowitz & Stegun 7.3.27/7.3.28 rational
- * approximations of the auxiliary functions f(x), g(x) (get_auxiliary_f /
- * get_auxiliary_g), whose absolute error is up to ~2e-3; for |x| > 6 only the
- * leading asymptotic term is kept (error ~5e-4). The analytic linear-chirp
- * Fourier identity built on top of these (get_fourier_value) is itself exact,
- * so this ~2e-3 approximation is what sets the floor on the Fresnel
- * Fourier-value accuracy for a clean linear chirp (measured ~1.9e-3 relative
- * vs a brute-force transform), independent of the start/midpoint reference
- * choice (both reference choices hit identical Fresnel arguments for a linear
- * chirp). It is far below the linear-chirp *modeling* error for curved signals
- * (the error the midpoint option reduces), so it is normally negligible. If
- * near-machine-precision Fresnel values are ever required, replace the rational
- * fits with a higher-order approximation (e.g. Boersma) or a series +
- * continued-fraction split.
+ * NOTE ON ACCURACY: high-accuracy evaluation, <=2e-9 absolute per value vs
+ * scipy.special.fresnel over |x| in [0, 1000] (validated in a NumPy mirror;
+ * measured max |dC|=1.6e-10, |dS|=7.0e-11). Three branches on ax = |x| (the
+ * final x < 0 sign flip uses that C, S are odd):
+ *   1. ax <= 1.6 : Maclaurin series with term recurrences, essentially exact
+ *      (~1e-16); stops when |term| < 1e-17*|sum|.
+ *   2. 1.6 < ax < 8 : auxiliary form C = 0.5 + f*sin(arg) - g*cos(arg),
+ *      S = 0.5 - f*cos(arg) - g*sin(arg), arg = 0.5*pi*ax^2, with degree-5/5
+ *      (f) and degree-6/6 (g) minimax rational fits in u = 1/ax^2 (max rel err
+ *      8.7e-10 f / 2.2e-9 g).
+ *   3. ax >= 8 : 5-term asymptotic series in w = 1/(pi*ax^2) (truncation
+ *      ~1e-13 at ax=8).
+ * The two auxiliary branches share the C/S assembly. The series/rational seam
+ * at ax=1.6 has a ~1.6e-10 jump -- the minimax fit's local error at its domain
+ * edge -- which is negligible: it is <= the 2e-9 per-value budget and its
+ * mismatch impact is ~eps^2/2 ~ 1e-20. The analytic linear-chirp Fourier
+ * identity built on top (get_fourier_value) is itself exact, so this <=2e-9
+ * evaluation now sets the Fresnel Fourier-value floor (was ~2e-3 with the old
+ * Abramowitz & Stegun 7.3.27/7.3.28 rational fits).
  */
 CUDA_DEVICE
 void STFTFresnel::get_fresnel_integrals(double* C, double* S, double x) {
   double abs_x = std::abs(x);
   double pi_x = M_PI * abs_x;
-  double half_pi_x2 = 0.5 * pi_x * abs_x;
+  double half_pi_x2 = 0.5 * pi_x * abs_x;  // arg = 0.5 * pi * ax^2
   double c_halfpix2 = std::cos(half_pi_x2);
   double s_halfpix2 = std::sin(half_pi_x2);
   double S_val, C_val;
 
-  double threshold = 6.0;
-
-  if (abs_x > threshold) {
-    S_val = 0.5 - 1 / pi_x * c_halfpix2;
-    C_val = 0.5 + 1 / pi_x * s_halfpix2;
+  if (abs_x <= 1.6) {
+    // Branch 1: Maclaurin series with term recurrences.
+    //   C = sum (-1)^n (pi/2)^{2n}   ax^{4n+1} / ((2n)!   (4n+1))
+    //   S = sum (-1)^n (pi/2)^{2n+1} ax^{4n+3} / ((2n+1)! (4n+3))
+    double x2 = abs_x * abs_x;
+    double x4 = x2 * x2;
+    double fac = -(0.5 * M_PI) * (0.5 * M_PI) * x4;  // -(pi/2)^2 * ax^4
+    double b = abs_x;                      // base term b_0 = ax
+    C_val = b / 1.0;                       // /(4*0+1)
+    double d = (0.5 * M_PI) * abs_x * x2;  // d_0 = (pi/2) * ax^3
+    S_val = d / 3.0;                       // /(4*0+3)
+    for (int n = 1; n <= 100; n++) {       // caps at 100; converges ~n=25
+      b = b * fac / ((2 * n - 1) * (2 * n));
+      double cterm = b / (4 * n + 1);
+      C_val += cterm;
+      d = d * fac / ((2 * n) * (2 * n + 1));
+      double sterm = d / (4 * n + 3);
+      S_val += sterm;
+      if (std::abs(cterm) < 1e-17 * std::abs(C_val) &&
+          std::abs(sterm) < 1e-17 * std::abs(S_val)) {
+        break;
+      }
+    }
   } else {
-    double f_x = get_auxiliary_f(abs_x);
-    double g_x = get_auxiliary_g(abs_x);
+    double f_x, g_x;
+    if (abs_x < 8.0) {
+      // Branch 2: auxiliary form with minimax rational fits in u = 1/ax^2
+      // (coefficients ascending in u, Horner); f = P_F/Q_F / (pi*ax),
+      // g = P_G/Q_G / (pi^2*ax^3).
+      double u = 1.0 / (abs_x * abs_x);
+      double pf = -2.8568630009945513e+00;
+      pf = pf * u - 1.2714841072845186e+01;
+      pf = pf * u + 9.9741235553347174e+00;
+      pf = pf * u + 1.6530235844406874e+01;
+      pf = pf * u + 5.6393336781284269e+00;
+      pf = pf * u + 9.9999998788975186e-01;
+      double qf = -6.5764635236542199e+00;
+      qf = qf * u - 8.5850028996594485e+00;
+      qf = qf * u + 1.1683893414197762e+01;
+      qf = qf * u + 1.6834326314502963e+01;
+      qf = qf * u + 5.6393317184256810e+00;
+      qf = qf * u + 1.0000000000000000e+00;
+      double pg = 3.2177684059265470e+00;
+      pg = pg * u + 1.1588596586401721e+01;
+      pg = pg * u - 2.1885461791121589e+01;
+      pg = pg * u + 1.4001161175318936e+01;
+      pg = pg * u + 2.2643028376343988e+01;
+      pg = pg * u + 5.6691485084817055e+00;
+      pg = pg * u + 9.9999994455231545e-01;
+      double qg = 1.9504389595032652e+01;
+      qg = qg * u - 1.9482374004004097e+01;
+      qg = qg * u + 5.8164191581105191e+00;
+      qg = qg * u + 2.2588896377169348e+01;
+      qg = qg * u + 2.4163564112837470e+01;
+      qg = qg * u + 5.6691386346869024e+00;
+      qg = qg * u + 1.0000000000000000e+00;
+      f_x = (1.0 / pi_x) * (pf / qf);
+      g_x = (1.0 / (M_PI * M_PI * abs_x * abs_x * abs_x)) * (pg / qg);
+    } else {
+      // Branch 3: 5-term asymptotic series, w = 1/(pi*ax^2).
+      //   f = (1/(pi*ax)) sum_{m=0}^{4} (-1)^m (4m-1)!! w^{2m}   ((-1)!!=1)
+      //   g = (1/(pi*ax)) sum_{m=0}^{4} (-1)^m (4m+1)!! w^{2m+1}
+      // Double-factorial constants printed by the NumPy mirror:
+      //   (4m-1)!! for m=0..4: 1, 3, 105, 10395, 2027025
+      //   (4m+1)!! for m=0..4: 1, 15, 945, 135135, 34459425
+      double w = 1.0 / (M_PI * abs_x * abs_x);
+      double w2 = w * w;
+      double f_sum =
+          1.0 + w2 * (-3.0 + w2 * (105.0 + w2 * (-10395.0 + w2 * 2027025.0)));
+      double g_sum =
+          w * (1.0 + w2 * (-15.0 +
+                           w2 * (945.0 + w2 * (-135135.0 + w2 * 34459425.0))));
+      f_x = (1.0 / pi_x) * f_sum;
+      g_x = (1.0 / pi_x) * g_sum;
+    }
     S_val = 0.5 - f_x * c_halfpix2 - g_x * s_halfpix2;
     C_val = 0.5 + f_x * s_halfpix2 - g_x * c_halfpix2;
   }
