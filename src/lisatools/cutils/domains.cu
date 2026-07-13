@@ -748,10 +748,57 @@ cmplx STFTFresnel::get_phase_kernel_product(double f_eff, double t_ref,
   return gcmplx::polar(1.0, phase) * kernel;
 }
 
+// First moment about t_ref of get_phase_kernel_product -- the analytic kernel of
+// the linear-envelope correction. With F(f) the phase-kernel product, the
+// linear-envelope first moment integral is  int tau e^{i phi} dtau = (i/2pi) dF/df
+// (guide A2); anchored at t_ref it reduces to
+//   M = polar(1, phase) * [ -zeta*kernel + (i/2pi) dkernel/df ].
+// `phase` is IDENTICAL to get_phase_kernel_product's zeroth-moment phase, so the
+// t_ref/t_ft_origin anchoring (incl. use_midpoint) matches exactly; the
+// (t_ref - t_ft_origin) Fourier-origin shift cancels analytically into the
+// -zeta*kernel stationary term (validated: helper-form == (i/2pi)dF/df -
+// (t_ref-t0)F to ~4e-10). dC/dv = cos(pi v^2/2), dS/dv = sin(pi v^2/2) are the
+// exact Fresnel derivatives (the same sincos get_fresnel_integrals evaluates);
+// dv/df = -sqrt(2|fdot0|)/fdot0 at both endpoints.
+CUDA_DEVICE
+cmplx STFTFresnel::get_phase_kernel_product_moment(double f_eff, double t_ref,
+                                                   double f0, double fdot0,
+                                                   double t_start, double t_end,
+                                                   double t_ft_origin) {
+  double tau_start = t_start - t_ref;
+  double tau_end = t_end - t_ref;
+  double v_start = get_v(tau_start, f_eff, f0, fdot0);
+  double v_end = get_v(tau_end, f_eff, f0, fdot0);
+
+  double C_start, S_start, C_end, S_end;
+  get_fresnel_integrals(&C_start, &S_start, v_start);
+  get_fresnel_integrals(&C_end, &S_end, v_end);
+  double delta_C = C_end - C_start;
+  double delta_S = S_end - S_start;
+  cmplx kernel =
+      (fdot0 >= 0.0) ? cmplx(delta_C, delta_S) : cmplx(delta_C, -delta_S);
+
+  double dv_df = -std::sqrt(2.0 * std::abs(fdot0)) / fdot0;
+  double dC_df = dv_df * (std::cos(0.5 * M_PI * v_end * v_end) -
+                         std::cos(0.5 * M_PI * v_start * v_start));
+  double dS_df = dv_df * (std::sin(0.5 * M_PI * v_end * v_end) -
+                         std::sin(0.5 * M_PI * v_start * v_start));
+  cmplx dkernel_df =
+      (fdot0 >= 0.0) ? cmplx(dC_df, dS_df) : cmplx(dC_df, -dS_df);
+
+  double zeta = get_zeta(f_eff, f0, fdot0);
+  double phase = -M_PI * fdot0 * zeta * zeta -
+                 2.0 * M_PI * f_eff * (t_ref - t_ft_origin);
+  cmplx moment_kernel =
+      -zeta * kernel + cmplx(0.0, 1.0 / (2.0 * M_PI)) * dkernel_df;
+  return gcmplx::polar(1.0, phase) * moment_kernel;
+}
+
 CUDA_DEVICE
 cmplx STFTFresnel::get_windowed_fourier_value(double amp, double phase0,
                                               double f0, double fdot0,
-                                              double t0, double f) {
+                                              double t0, double f,
+                                              double slope) {
   // account the effect of a tukey window on the fourier value.
   double t_end = t0 + dt;
   double t_roll_on = t0 + taper_duration;
@@ -797,15 +844,42 @@ cmplx STFTFresnel::get_windowed_fourier_value(double amp, double phase0,
                                 0.25 * (left_plus_shift + left_minus_shift +
                                         right_rot_p * right_plus_shift +
                                         right_rot_m * right_minus_shift));
+
+  // Linear-envelope correction: each sub-interval term gets its own first
+  // moment (same 7-term Tukey decomposition, same weights and taper rotations),
+  // added as slope * M. Fully gated: OFF -> byte-identical to the line above.
+  if (linear_envelope) {
+    cmplx m_rectangular =
+        get_phase_kernel_product_moment(f, t_ref, f0, fdot0, t0, t_end, t0);
+    cmplx m_left_dc =
+        get_phase_kernel_product_moment(f, t_ref, f0, fdot0, t0, t_roll_on, t0);
+    cmplx m_left_plus_shift = get_phase_kernel_product_moment(
+        f - f_taper, t_ref, f0, fdot0, t0, t_roll_on, t0);
+    cmplx m_left_minus_shift = get_phase_kernel_product_moment(
+        f + f_taper, t_ref, f0, fdot0, t0, t_roll_on, t0);
+    cmplx m_right_dc = get_phase_kernel_product_moment(f, t_ref, f0, fdot0,
+                                                       t_roll_off, t_end, t0);
+    cmplx m_right_plus_shift = get_phase_kernel_product_moment(
+        f - f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
+    cmplx m_right_minus_shift = get_phase_kernel_product_moment(
+        f + f_taper, t_ref, f0, fdot0, t_roll_off, t_end, t0);
+
+    cmplx moment =
+        overall_factor * (m_rectangular - 0.5 * (m_left_dc + m_right_dc) -
+                          0.25 * (m_left_plus_shift + m_left_minus_shift +
+                                  right_rot_p * m_right_plus_shift +
+                                  right_rot_m * m_right_minus_shift));
+    out = out + slope * moment;
+  }
   return out;
 }
 
 CUDA_DEVICE
 cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0,
                                      double fdot0, double t0, double f,
-                                     double window_factor) {
+                                     double window_factor, double slope) {
   if (window_alpha > 0.0)
-    return get_windowed_fourier_value(amp, phase0, f0, fdot0, t0, f);
+    return get_windowed_fourier_value(amp, phase0, f0, fdot0, t0, f, slope);
 
   double t1 = t0 + dt;
 
@@ -818,6 +892,14 @@ cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0,
 
   cmplx phase_kernel = get_phase_kernel_product(f, t_ref, f0, fdot0, t0, t1, t0);
   cmplx out = gcmplx::polar(amplitude, phase0) * phase_kernel;
+
+  // Linear-envelope correction: out += slope * (i/2pi) dF/df, anchored at t_ref.
+  // Fully gated: OFF -> byte-identical to the const-envelope value above.
+  if (linear_envelope) {
+    cmplx moment_kernel =
+        get_phase_kernel_product_moment(f, t_ref, f0, fdot0, t0, t1, t0);
+    out = out + slope * gcmplx::polar(amplitude, phase0) * moment_kernel;
+  }
 
   return out;
 }
