@@ -863,6 +863,10 @@ CUDA_DEVICE
 cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0,
                                      double fdot0, double t0, double f,
                                      double window_factor) {
+  // NOTE(window_factor): the scale is applied ONLY on the unwindowed
+  // (window_alpha == 0) path below. With window_alpha > 0 the Tukey
+  // evaluator models the window exactly and window_factor is intentionally
+  // ignored -- callers must not expect it to act on the windowed path.
   if (window_alpha > 0.0)
     return get_windowed_fourier_value(amp, phase0, f0, fdot0, t0, f);
 
