@@ -916,6 +916,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # get_ll is consistent with both the swap_ll the sampler scores and the
     # full residual change, plus begin/middle/end band plots.
 
+    @property
+    def _debug_tiles(self) -> bool:
+        """Whether the GB_DEBUG per-cell slab snapshots / band-tile plots run.
+
+        The 3x3 sequence figures, the RJ before/after pair, the band null
+        log and :meth:`_debug_plot_band` all reshape a cell's residual slab
+        into a WDM ``(nchannels, Nf_active, Nt_active)`` tile and render 2-D
+        wavelet images, so they only make sense on the WDM basis. On the FD
+        basis there is no such tile (the slab is a flat frequency window), so
+        these are skipped; the domain-agnostic GB_DEBUG checks
+        (get_add_ll/get_removal_ll deltas, the residual add/remove round-trip,
+        the removal identity, and the timing report) still run under
+        ``self.debug`` regardless of domain.
+        """
+        return self.debug and isinstance(self._basis_settings, WDMSettings)
+
     def _debug_cold_chain_residual_loaded(self, model, remainder) -> None:
         """At the cold-chain residual load site: log the neighbour cold-chain
         residual baseline ll for this band unit ("load neighbouring residual")."""
@@ -1076,7 +1092,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         pass, so its round always comes. Returns None when the cell is
         absent, tracing is off, it already ran this step, or the picked
         source is not the requested one yet."""
-        if not self.debug or getattr(self, "_dbg_seq_done", True):
+        # WDM-tile-only (the 3x3 slab figures); no-op on the FD basis.
+        if not self._debug_tiles or getattr(self, "_dbg_seq_done", True):
             return None
         try:
             sel_w = self.debug_plot_walker
@@ -1424,7 +1441,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """Arm the RJ before/after trace for the chosen (walker, band) cell
         (coldest temperature present in this pick round), once per step."""
         self._dbg_rj_seq = None
-        if not self.debug or getattr(self, "_dbg_rj_done", True):
+        # WDM-tile-only (before/after slab snapshots); no-op on the FD basis.
+        if not self._debug_tiles or getattr(self, "_dbg_rj_done", True):
             return None
         try:
             sel_w = self.debug_plot_walker
@@ -1560,7 +1578,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         so the unsubtracted rest of the galaxy dominates; this slices out
         exactly the band's layers.
         """
-        if not self.debug or getattr(self, "_dbg_null_logged", True):
+        # WDM-tile-only (slices the slab by WDM layers); no-op on the FD basis.
+        if not self._debug_tiles or getattr(self, "_dbg_null_logged", True):
             return
         try:
             bs = self._basis_settings
@@ -1630,7 +1649,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``stage`` labels the proposal context in the title and file name:
         ``"rj"`` (birth/death step) or ``"in-model"`` (repeat block).
         """
-        if not self.debug:
+        # WDM time-frequency tile figure; no-op on the FD basis.
+        if not self._debug_tiles:
             return
         try:
             import os as _os
