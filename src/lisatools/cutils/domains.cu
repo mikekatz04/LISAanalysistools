@@ -990,6 +990,12 @@ cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0,
  * current STFT window and N_window is the number of time bins in the window.
  * @param num_binaries  Number of sources in the batch
  * @param num_freqs     Number of frequency points per source
+ *
+ * @note linear_envelope has NO effect on this batch API (by design): the
+ * call carries no response stencil, so there is no per-segment amplitude
+ * slope to apply -- get_fourier_value is invoked with its default slope=0.
+ * The envelope correction acts only on the likelihood/fill paths, where
+ * FresnelColumn::setup derives the slope from the +-D TDI samples.
  */
 CUDA_KERNEL
 void compute_fourier_values_kernel(cmplx* output, STFTFresnel fresnel,

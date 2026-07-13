@@ -644,7 +644,11 @@ void domains_part(nb::module_ &m) {
          nb::arg("freqs"), nb::arg("window_factor"),
          nb::arg("num_binaries"), nb::arg("num_freqs"),
          nb::call_guard<nb::gil_scoped_release>(),
-         "Compute Fresnel-based Fourier values for a batch of binaries.");
+         "Compute Fresnel-based Fourier values for a batch of binaries.\n\n"
+         "linear_envelope has NO effect here (by design): this API receives\n"
+         "no response stencil, hence no per-segment amplitude slope; the\n"
+         "envelope correction acts only on the likelihood/fill paths where\n"
+         "FresnelColumn::setup derives the slope from the +-D TDI samples.");
 }
 
 
