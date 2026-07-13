@@ -463,10 +463,6 @@ class STFTFresnel : public STFTSettings {
   CUDA_DEVICE
   double get_v(double tau, double f, double f0, double fdot0);
   CUDA_DEVICE
-  double get_auxiliary_f(double x);
-  CUDA_DEVICE
-  double get_auxiliary_g(double x);
-  CUDA_DEVICE
   void get_fresnel_integrals(double* C, double* S,
                              double x);  // Fresnel integrals C(x) and S(x)
                                          // returned in ints[0] and ints[1]
