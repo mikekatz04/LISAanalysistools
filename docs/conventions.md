@@ -444,3 +444,32 @@ ${GBT_CUTILS} ${LISATOOLS_CUTILS})`; when a needed host-side symbol lives in a
 doesn't fit, copy the `.cu` into the downstream build (with a comment pointing
 back to the canonical LAT/GBT source) and bump the ABI version whenever that
 canonical source changes.
+
+## Tutorials: the LATW branch policy (LISA Analysis Tools–wide rule)
+
+Tutorials live in the **LATW** repo
+(github.com/lisa-analysis-tools/LATW), not in per-repo `examples/`
+notebook collections (LAT's `examples/` is a pointer only). LATW has two
+long-lived branches with different compatibility targets:
+
+- **`main`** must run against the latest **pip-installable releases**:
+  `lisaanalysistools`, `eryn`, `gbgpu`, `bbhx`, `fastemriwaveforms`,
+  `fastlisaresponse`, `gpubackendtools`. Never introduce dev-only APIs on
+  `main`.
+- **`dev`** must run against the **development stack** installed by
+  `LISAanalysistools/install.sh` (GPUBackendTools@spline, Eryn@dev,
+  LAT@dev, BBHx@dev, GBGPU@dev, FastEMRIWaveforms@gpu_backend, phentax;
+  lisa-on-gpu deprecated).
+- If you change a dev-branch API in any stack package, check and fix the
+  LATW `dev` tutorials in the same work session. Tutorials promote
+  `dev` → `main` only when a release cut makes them runnable on released
+  wheels.
+- **The same policy applies to every stack package's own tutorials**
+  (basic usage only — analyses live in LATW): main/master tutorials must
+  run on that package's latest pip release; dev-state branch tutorials
+  (dev / spline / gpu_backend) reflect the development APIs.
+
+Authoring conventions (cell skeleton, Task/Question format, answer
+stripping, runtime/memory budgets, docstring-currency rule):
+`LATW/tutorials/STYLE.md`. All notebook execution is sequential,
+thread-pinned (`OMP_NUM_THREADS=1`), laptop-sized.

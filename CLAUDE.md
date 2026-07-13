@@ -52,6 +52,13 @@ rule — **full detail: [`docs/conventions.md`](docs/conventions.md).**
   than link against upstream's compiled archive; prefer POD `*View` structs
   as the cross-wheel interface; bump `LISATOOLS_HEADER_ABI_VERSION` on any
   struct-layout change.
+- **Tutorials live in LATW; branch policy.** LATW `main` must run on the
+  latest pip releases (never dev-only APIs); LATW `dev` must run on the
+  install.sh development stack — if you change a dev API in any stack
+  package, fix the LATW `dev` tutorials in the same session. The same
+  main↔release / dev-branch↔dev-API rule applies to each package's own
+  basic-usage tutorials. LAT's `examples/` is a pointer only — do not add
+  notebooks there.
 
 Maps: [`docs/codebase-map.md`](docs/codebase-map.md) (this repo's internal
 layout) and [`docs/architecture-map.md`](docs/architecture-map.md)

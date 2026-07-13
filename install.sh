@@ -177,8 +177,15 @@ editable_install "$DEV_ROOT/BBHx" dev "${LAPACKE_FLAGS[@]}"
 clone_or_reuse_sibling "$ORG" GBGPU
 editable_install "$DEV_ROOT/GBGPU" dev "${LAPACKE_FLAGS[@]}"
 
-clone_or_reuse_sibling "$ORG" LATW || \
+if clone_or_reuse_sibling "$ORG" LATW; then
+    # Tutorials repo: pure-Python, never pip-installed. The dev branch is the
+    # dev-stack tutorial set (branch policy: LATW main <-> pip releases,
+    # LATW dev <-> this install.sh stack).
+    git -C "$DEV_ROOT/LATW" checkout dev
+    pull_or_stop "$DEV_ROOT/LATW" dev
+else
     echo "WARN: LATW clone failed (skipping — tutorials repo is optional)"
+fi
 
 # ----------------------------------------------------------------------
 # Optional / external
