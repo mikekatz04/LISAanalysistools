@@ -23,6 +23,14 @@ from .waveform import SOBBHWaveform
 _SOBBH_WAVE_GEN_CACHE: dict = {}
 _SOBBH_TDIONFLY_GEN_CACHE: dict = {}
 
+# Stock SOBBH TDI-on-the-fly defaults — the sources-side single source of
+# truth, mirrored by ``SourceSOBBHSettings`` (n_grid / buffer_time /
+# response_order) and the ``get_sobbh_tdionfly_gen`` signature. Kept equal to
+# the erebor values (enforced by tests/test_stock_waveform_alignment.py).
+SOBBH_STOCK_N_GRID = 2048
+SOBBH_STOCK_BUFFER_TIME = 5000.0
+SOBBH_STOCK_RESPONSE_ORDER = 40  # legacy-ResponseWrapper path only (unused by TOF)
+
 
 def get_sobbh_response_wrapper(
     *,
@@ -248,3 +256,85 @@ class SOBBHTDIonFlyWaveWrap:
     def __call__(self, *params, **kwargs):
         arr = self.raw_td(*params, **kwargs)
         return TDSignal(arr, self.td_settings).transform(self.target_domain, window=self.td_window)
+
+
+def build_sobbh_stock_waveform(
+    *,
+    Tobs: float,
+    dt: float,
+    t_start: float,
+    td_settings: TDSettings,
+    target_domain,
+    tdi_config: TDIConfig,
+    reference_time: Optional[float] = None,
+    orbits: Optional[Orbits] = None,
+    n_grid: int = SOBBH_STOCK_N_GRID,
+    buffer_time: float = SOBBH_STOCK_BUFFER_TIME,
+    force_backend: str = "cpu",
+    td_window=None,
+    nchannels: Optional[int] = None,
+):
+    """Build THE stock-aligned SOBBH waveform (all_sources default: TDI-on-the-fly).
+
+    This is the single documented entry point that reproduces the SOBBH branch
+    the stock ``all_sources`` global fit runs by default
+    (``SourceSOBBHSettings.use_tdionfly=True``; see
+    ``lisatools.globalfit.stock.erebor.source_runtime.get_sobbh_wave_wrap``): a
+    cached :class:`bbhx.sobbhtdionfly.SOBBHTDIonFly` (built via
+    :func:`get_sobbh_tdionfly_gen`) wrapped in :class:`SOBBHTDIonFlyWaveWrap`,
+    which evaluates on the data grid and projects to ``target_domain``.
+
+    The returned callable consumes the 11-parameter SOBBH **waveform** basis
+    ``(m1, m2, s1, s2, dist[Gpc], inc, f_low, ra, dec, psi, phi0)`` and returns
+    a :class:`~lisatools.domains.DomainBase` signal.
+
+    Because :func:`get_sobbh_tdionfly_gen` caches on
+    ``(Tobs, dt, t_start, force_backend, reference_time, n_grid, buffer_time,
+    id(orbits))``, calling this with the same run essentials as the global fit
+    yields byte-identical output (the underlying generator is shared).
+
+    Args:
+        Tobs: Observation time in seconds.
+        dt: Time-domain sample step in seconds.
+        t_start: Data-window start (the generator ``t0``).
+        td_settings: :class:`~lisatools.domains.TDSettings` of the data grid.
+        target_domain: Analysis-domain settings to project onto (FD / WDM / ...).
+        tdi_config: :class:`~lisatools.response.tdiconfig.TDIConfig` (the
+            all_sources default is 2nd generation).
+        reference_time: Epoch ``f_low`` is defined at (``None`` -> the window
+            start; ``MOJITO_REFERENCE_TIME`` in mojito mode).
+        orbits: Response orbits (``None`` -> analytic default inside the
+            generator).
+        n_grid: SOBBH TDI-on-the-fly interior grid size (default matches
+            ``SourceSOBBHSettings.n_grid``).
+        buffer_time: Generator garbage buffer in seconds (default matches
+            ``SourceSOBBHSettings.buffer_time``).
+        force_backend: Backend selection at construction.
+        td_window: Optional time-domain window applied before the transform.
+        nchannels: Number of leading TDI channels to keep.
+
+    Returns:
+        A :class:`SOBBHTDIonFlyWaveWrap` instance (callable on the SOBBH
+        waveform basis, returning a domain-projected signal).
+    """
+    gen = get_sobbh_tdionfly_gen(
+        Tobs=Tobs,
+        dt=dt,
+        t_start=t_start,
+        tdi_config=tdi_config,
+        reference_time=reference_time,
+        orbits=orbits,
+        n_grid=n_grid,
+        buffer_time=buffer_time,
+        force_backend=force_backend,
+    )
+    n = int(round(Tobs / dt))
+    t_arr = np.arange(n) * dt + t_start
+    return SOBBHTDIonFlyWaveWrap(
+        gen,
+        t_arr,
+        td_settings,
+        target_domain,
+        td_window=td_window,
+        nchannels=nchannels,
+    )

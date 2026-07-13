@@ -36,33 +36,82 @@ if TYPE_CHECKING:
         from ...utils.typing import NDArrayLike, ArrayModule
 
 
+# ============================================================
+# Stock MBH ``PhenomTHMTDIWaveform`` defaults (global-fit aligned)
+# ============================================================
+# The sources-side single source of truth for the LEGACY phentax MBH template
+# path. These mirror ``SourceMBHSettings`` and ``get_mbh_phenom_wave_gen`` in
+# ``lisatools.globalfit.stock.erebor`` — a bare ``PhenomTHMTDIWaveform`` builds
+# the same generator configuration the stock ``all_sources`` fit uses for its
+# default MBH branch. Kept equal to the erebor values (enforced by
+# tests/test_stock_waveform_alignment.py).
+#
+# ``coarse_grain=False`` is mandatory: pyResponseTDI needs equispaced time
+# arrays. ``include_negative_modes`` adds the negative-m modes by symmetry;
+# ``t_low_fit`` seeds the ``t(f)`` root finder from the fit.
+MBH_PHENOM_DEFAULT_WAVEFORM_KWARGS = dict(
+    higher_modes=[21, 33, 44],
+    include_negative_modes=True,
+    t_low_fit=True,
+    coarse_grain=False,
+    atol=1e-12,
+    rtol=1e-12,
+)
+MBH_PHENOM_DEFAULT_TOBS = YRSID_SI / 12.0  # phentax generation window (seconds)
+MBH_PHENOM_DEFAULT_START_FREQ = 7e-5
+MBH_PHENOM_DEFAULT_RESPONSE_ORDER = 30
+MBH_PHENOM_DEFAULT_BUFFER_TIME = 15_000.0
+MBH_PHENOM_DEFAULT_FREQ_MIN = 1e-4
+MBH_PHENOM_DEFAULT_FREQ_MAX = 2.5e-2
+MBH_PHENOM_DEFAULT_FFT_BATCH_SIZE = 2
+MBH_PHENOM_DEFAULT_TDI_GENERATION = "2nd generation"
+MBH_PHENOM_DEFAULT_TDI_CHANNELS = "XYZ"
+
+
 class BBHSNRWaveform(SNRWaveform):
     """Wrapper class for straightforward BBH SNR calculations.
 
-    Calculates it for A and E channels in TDI2.
+    Calculates A/E/T channels in **TDI 2nd generation** (``tdi2=True``, matching
+    the stock ``all_sources`` MBH TDI generation). This is a quick bbhx
+    frequency-domain SNR helper — it is *not* the global-fit MBH residual
+    template (that is the legacy phentax :class:`PhenomTHMTDIWaveform`) and it
+    reports the ``AET`` SNR channels rather than the ``XYZ`` residual channels.
 
     Args:
-        bbh_waveform_kwargs: ``amp_phase_kwargs`` for :class:`BBHWaveformFD`.
-        response_kwargs: ``response_kwargs`` for :class:`BBHWaveformFD`.
+        bbh_waveform_kwargs: ``amp_phase_kwargs`` for :class:`BBHWaveformFD`
+            (``None`` -> ``{"run_phenomd": False}``).
+        response_kwargs: ``response_kwargs`` for :class:`BBHWaveformFD`
+            (``None`` -> ``{"TDItag": "AET", "tdi2": True}``).
+        force_backend: Backend selection at construction (``"cpu"`` /
+            ``"cuda12x"`` / ...); forwarded to :class:`BBHWaveformFD`.
 
     """
 
     def __init__(
         self,
-        bbh_waveform_kwargs: Optional[dict] = {"run_phenomd": False},
-        response_kwargs: Optional[dict] = {"TDItag": "AET", "tdi2": True},
+        bbh_waveform_kwargs: Optional[dict] = None,
+        response_kwargs: Optional[dict] = None,
+        force_backend: str = "cpu",
     ) -> None:
 
-        if "TDItag" not in response_kwargs:
-            response_kwargs["TDItag"] = "AET"
-
-        if "tdi2" not in response_kwargs:
-            response_kwargs["tdi2"] = True
+        # Resolve mutable defaults inside __init__ (never share a dict across
+        # instances / mutate a default argument).
+        bbh_waveform_kwargs = (
+            dict(run_phenomd=False)
+            if bbh_waveform_kwargs is None
+            else dict(bbh_waveform_kwargs)
+        )
+        response_kwargs = (
+            {} if response_kwargs is None else dict(response_kwargs)
+        )
+        response_kwargs.setdefault("TDItag", "AET")
+        response_kwargs.setdefault("tdi2", True)
 
         # wave generating class
         self.wave_gen = BBHWaveformFD(
             amp_phase_kwargs=bbh_waveform_kwargs,
             response_kwargs=response_kwargs,
+            force_backend=force_backend,
         )
 
     @property
@@ -278,28 +327,72 @@ class PhenomTHMWaveformBase(JaxBase):
 
 class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
     """
-    Generate PhenomTHM waveforms with the TDI LISA Response.
+    Generate PhenomTHM waveforms with the TDI LISA Response (global-fit aligned).
+
+    A bare instance reproduces the generator configuration the stock
+    ``all_sources`` global fit uses for its default (legacy) MBH branch — see
+    ``lisatools.globalfit.stock.erebor.wrappers.get_mbh_phenom_wave_gen`` and
+    ``source_runtime.SourceMBHSettings``. Every waveform-config default below
+    is drawn from the module-level ``MBH_PHENOM_DEFAULT_*`` constants (the
+    sources-side single source of truth); only the *run-specific* arguments
+    (``waveform_t0``, ``data_td_settings``, ``orbits``, ``sampling_frequency``,
+    ``tukey_alpha``, ``output_domain_settings``, ``force_backend``) must be
+    supplied per run.
 
     Args:
-        waveform_kwargs: Keyword arguments forwarded to :class:`phentax.waveform.IMRPhenomTHM`.
-        Tobs: Observation time in years.
-        start_freq: Starting frequency in Hz for the waveform generation. If `None`, it has to be explicitly provided in the waveform generation calls.
-        ref_freq: Reference frequency in Hz for the waveform generation. If `None` and `start_freq` is provided, it will default to `start_freq`. Otherwise, it has to be explicitly provided in the waveform generation calls.
-        *args: Additional positional arguments forwarded to :class:`TDPyResponseWaveformBase`.
-        **kwargs: Additional keyword arguments forwarded to :class:`TDPyResponseWaveformBase`.
+        waveform_kwargs: Keyword arguments forwarded to
+            :class:`phentax.waveform.IMRPhenomTHM`. ``None`` (default) uses a
+            copy of :data:`MBH_PHENOM_DEFAULT_WAVEFORM_KWARGS` (higher modes
+            ``(21, 33, 44)``, negative modes on, ``t_low_fit=True``,
+            ``coarse_grain=False``, ``atol=rtol=1e-12``).
+        Tobs: phentax generation window in seconds (its ``T``); default
+            :data:`MBH_PHENOM_DEFAULT_TOBS`.
+        start_freq: Starting frequency in Hz; default
+            :data:`MBH_PHENOM_DEFAULT_START_FREQ`.
+        ref_freq: Reference frequency in Hz (``None`` -> ``start_freq``).
+        order: pyResponseTDI Lagrange order; default
+            :data:`MBH_PHENOM_DEFAULT_RESPONSE_ORDER`.
+        buffer_time: TDI response buffer in seconds; default
+            :data:`MBH_PHENOM_DEFAULT_BUFFER_TIME`.
+        freq_min / freq_max: FD/STFT output frequency bounds; defaults
+            :data:`MBH_PHENOM_DEFAULT_FREQ_MIN` / :data:`MBH_PHENOM_DEFAULT_FREQ_MAX`.
+        fft_batch_size: FD transform batch size; default
+            :data:`MBH_PHENOM_DEFAULT_FFT_BATCH_SIZE`.
+        tdi_generation / tdi_channels: TDI configuration; defaults
+            :data:`MBH_PHENOM_DEFAULT_TDI_GENERATION` (2nd gen) /
+            :data:`MBH_PHENOM_DEFAULT_TDI_CHANNELS` (``XYZ``).
+        *args: Additional positional arguments forwarded to
+            :class:`TDPyResponseWaveformBase` (its first positional is
+            ``waveform_t0``).
+        **kwargs: Run-specific keyword arguments forwarded to
+            :class:`TDPyResponseWaveformBase` (``waveform_t0``,
+            ``data_td_settings``, ``orbits``, ``sampling_frequency``,
+            ``tukey_alpha``, ``stft_dt``, ``output_domain_settings``,
+            ``force_backend``).
     """
 
     def __init__(
         self,
-        waveform_kwargs: dict,
-        Tobs: float = 1.0,
-        start_freq: float = None,
+        waveform_kwargs: Optional[dict] = None,
+        Tobs: float = MBH_PHENOM_DEFAULT_TOBS,
+        start_freq: float = MBH_PHENOM_DEFAULT_START_FREQ,
         ref_freq: float = None,
         use_reference_time: bool = True,
         use_coalescence_time: bool = False,
         *args: Any,
+        order: int = MBH_PHENOM_DEFAULT_RESPONSE_ORDER,
+        buffer_time: int = MBH_PHENOM_DEFAULT_BUFFER_TIME,
+        freq_min: float = MBH_PHENOM_DEFAULT_FREQ_MIN,
+        freq_max: float = MBH_PHENOM_DEFAULT_FREQ_MAX,
+        fft_batch_size: int = MBH_PHENOM_DEFAULT_FFT_BATCH_SIZE,
+        tdi_generation: str = MBH_PHENOM_DEFAULT_TDI_GENERATION,
+        tdi_channels: str = MBH_PHENOM_DEFAULT_TDI_CHANNELS,
         **kwargs: Any,
     ) -> None:
+
+        if waveform_kwargs is None:
+            # Copy so the shared module-level default is never mutated.
+            waveform_kwargs = dict(MBH_PHENOM_DEFAULT_WAVEFORM_KWARGS)
 
         if "coarse_grain" in waveform_kwargs and waveform_kwargs["coarse_grain"] is True:
             raise ValueError("Applying the response through the `PyresponseTDI` class requires equispaced time arrays")
@@ -307,9 +400,16 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         TDPyResponseWaveformBase.__init__(
             self,
             *args,
+            order=order,
+            buffer_time=buffer_time,
+            freq_min=freq_min,
+            freq_max=freq_max,
+            fft_batch_size=fft_batch_size,
+            tdi_generation=tdi_generation,
+            tdi_channels=tdi_channels,
             **kwargs,
         )
-        
+
         PhenomTHMWaveformBase.__init__(
             self,
             waveform_kwargs=waveform_kwargs,
