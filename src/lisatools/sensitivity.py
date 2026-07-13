@@ -1618,7 +1618,9 @@ class SensitivityMatrix(SensitivityMatrixBase):
     """Container to hold sensitivity information.
 
     Args:
-        basis_x: Frequency array in FD. Time array in TD. Wavelet basis in WDM. Etc.
+        settings: Domain settings (a :class:`~lisatools.domains.DomainSettingsBase`,
+            e.g. :class:`~lisatools.domains.FDSettings`) describing the basis the
+            sensitivity is evaluated on (its ``f_arr`` in FD, etc.).
         sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the
             desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,
             or a string corresponding to the :class:`Sensitivity` object.
@@ -1655,7 +1657,8 @@ class XYZ1SensitivityMatrix(SensitivityMatrix):
     This is 3x3 symmetric matrix.
 
     Args:
-        f: Frequency array.
+        settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
+            whose ``f_arr`` sets the frequency grid.
         **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
@@ -1682,7 +1685,8 @@ class XYZ2SensitivityMatrix(SensitivityMatrix):
                [ Σ_ZX   Σ_ZY   Σ_ZZ ]
 
     Args:
-        f: Frequency array [Hz].
+        settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
+            whose ``f_arr`` sets the frequency grid [Hz].
         **sens_kwargs: Keyword arguments to pass to Sensitivity.get_Sn()
             (e.g., model=lisa_models.sangria).
 
@@ -1722,7 +1726,8 @@ class AET1SensitivityMatrix(SensitivityMatrix):
     This is just an array because no cross-terms.
 
     Args:
-        f: Frequency array.
+        settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
+            whose ``f_arr`` sets the frequency grid.
         **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
@@ -1780,7 +1785,8 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
     """Default sensitivity matrix adding :class:`LISASens` for the specified number of channels.
 
     Args:
-        f: Frequency array.
+        settings: Domain settings (e.g. :class:`~lisatools.domains.FDSettings`)
+            whose ``f_arr`` sets the frequency grid.
         nchannels: Number of channels.
         **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
@@ -1813,11 +1819,16 @@ def get_sensitivity(
     Same interface to many sensitivity curves.
 
     Args:
-        f: Frequency array.
+        basis_settings: Domain settings (a
+            :class:`~lisatools.domains.DomainSettingsBase`, e.g.
+            :class:`~lisatools.domains.FDSettings`) whose ``f_arr`` sets the
+            evaluation grid. A raw frequency scalar/array is also accepted for
+            backward compatibility (the sensitivity is then evaluated directly
+            on those frequencies).
         *args: Any additional arguments for the sensitivity function ``get_Sn`` method.
         sens_fn: String or class that represents the name of the desired PSD function.
-        return_type: Described the desired output. Choices are ASD,
-            PSD, or char_strain (characteristic strain). Default is ASD.
+        return_type: Describes the desired output. Choices are ``"ASD"``,
+            ``"PSD"``, or ``"char_strain"`` (characteristic strain). Default is ``"PSD"``.
         fill_nans: Value to fill nans in sensitivity (at 0 frequency).
             If ``None``, thens nans will be left in the array.
         wdm_psd_method: How to build the WDM (wavelet) noise PSD (ignored for

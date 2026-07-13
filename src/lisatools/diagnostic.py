@@ -83,8 +83,16 @@ def inner_product(
             raise ValueError(
                 "inner_product: raw-array inputs require ``basis_settings``."
             )
-        xp = get_array_module(sig)
-        arr = xp.atleast_2d(sig)
+        if isinstance(sig, (list, tuple)):
+            # A per-channel list/tuple of 1D arrays (a documented input form,
+            # produced e.g. by ``info_matrix`` when it stacks the waveform
+            # derivatives channel-by-channel). Resolve the array module from
+            # the first channel and stack into a ``(nchannels, N)`` array.
+            xp = get_array_module(sig[0])
+            arr = xp.atleast_2d(xp.asarray(sig))
+        else:
+            xp = get_array_module(sig)
+            arr = xp.atleast_2d(sig)
         return basis_settings.associated_class(arr, basis_settings)
 
     sig1 = _coerce(sig1)
