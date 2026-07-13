@@ -359,23 +359,33 @@ def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
     layer_df = 1.0 / (2 * general_setup.domain_settings.Nf * gb.dt) if not is_fd else None
     _center_mode = gb.center_freq is not None or gb.n_layers is not None
     if is_fd:
+        # FD basis has no WDM layers: the narrow ``gb.min_freq/max_freq``
+        # defaults are WDM layer-snapping semantics and are FAR too narrow
+        # for the FD band walker (a single FD sub-band is already ~2*N*df
+        # wide, which exceeds a few-layer band at short Tobs and collapses
+        # ``band_edges`` to empty). So on FD:
+        #   * ``fd_bandwidth is None`` -> the FULL data band (the documented
+        #     default; several sub-bands survive the band-walker trim).
+        #   * ``fd_bandwidth`` set     -> a band of that width centered on the
+        #     requested center (``center_freq`` in center mode, else the
+        #     midpoint of ``gb.min_freq/max_freq``), clipped to the data band.
         if _center_mode:
             _center = gb.center_freq if gb.center_freq is not None else 7.5e-3
-            if gb.fd_bandwidth is None:
-                gb.start_freq = general_setup.min_freq
-                gb.end_freq = general_setup.max_freq
-            else:
-                half_bw = 0.5 * float(gb.fd_bandwidth)
-                gb.start_freq = max(general_setup.min_freq, _center - half_bw)
-                gb.end_freq = min(general_setup.max_freq, _center + half_bw)
         else:
-            if gb.fd_bandwidth is not None:
-                logger.warning(
-                    "FD basis: fd_bandwidth is ignored with direct "
-                    "min_freq/max_freq bounds (set center_freq to use it)."
-                )
-            gb.start_freq = max(general_setup.min_freq, float(gb.min_freq))
-            gb.end_freq = min(general_setup.max_freq, float(gb.max_freq))
+            _center = 0.5 * (float(gb.min_freq) + float(gb.max_freq))
+        if gb.fd_bandwidth is None:
+            gb.start_freq = general_setup.min_freq
+            gb.end_freq = general_setup.max_freq
+        else:
+            half_bw = 0.5 * float(gb.fd_bandwidth)
+            gb.start_freq = max(general_setup.min_freq, _center - half_bw)
+            gb.end_freq = min(general_setup.max_freq, _center + half_bw)
+        # FD has no WDM-layer count; expose sane, non-None values so the
+        # shared WDM-oriented consumers (debug-band selection, plots) that
+        # read ``n_layers``/``center_freq`` don't trip over ``None``.
+        gb.center_freq = _center
+        if gb.n_layers is None:
+            gb.n_layers = 3
         logger.info(
             "FD basis: GB band set to [%.6e, %.6e] Hz for the FD band walker.",
             gb.start_freq, gb.end_freq,
@@ -606,7 +616,10 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
         os.environ.setdefault("GB_LEAF_CAP_START", "1")
         os.environ.setdefault("GB_RJ_PHASE_MAXIMIZE", "1")
     os.environ.setdefault("GB_DEBUG_PLOT_WALKER", "0")
-    os.environ.setdefault("GB_DEBUG_PLOT_BAND", str(getattr(gb_info, "n_layers", 3) // 2))
+    # ``n_layers`` is a WDM concept and is ``None`` on the FD basis; fall back
+    # to 3 so the debug-band index is well defined for either domain.
+    _n_layers_for_plot = getattr(gb_info, "n_layers", None) or 3
+    os.environ.setdefault("GB_DEBUG_PLOT_BAND", str(_n_layers_for_plot // 2))
 
     # Build the WDM-domain GB likelihood here (after the deepcopy in
     # ``CurrentInfoGlobalFit.__init__``) — the underlying C++ orbits wrap
