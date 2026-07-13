@@ -629,17 +629,68 @@ def generate_modulated_foreground_td(
 # ============================================================
 # *** Per-class synthetic injection-row makers ***
 # ============================================================
+#
+# Two modes, selected by ``general.synthetic_injections``:
+#
+# * ``mode="stock"`` (default) — the fixed stock tables above, extrinsics
+#   varied with per-class FIXED seeds (11/22/33): byte-identical to the
+#   historical behaviour, independent of ``seed``.
+# * ``mode="prior"`` — every varied parameter is drawn with a seeded RNG
+#   from (an interior region of) the source class's sampling priors.
+#   Extrinsics use their full prior ranges (isotropic sky/orientation);
+#   intrinsics are drawn from a documented interior region chosen so every
+#   draw yields a valid, laptop-fast waveform (e.g. EMRI ``p0``/``e0``
+#   combinations that FEW can integrate). The same ``(mode, seed, n)``
+#   always reproduces the same rows — the data processor and the branch
+#   preparation call these independently and MUST agree.
+
+_PRIOR_DRAW_CLASS_OFFSET = {"EMRI": 1, "SOBHB": 2, "MBHB": 3, "GB": 4}
+_DEFAULT_INJECTION_SEED = 1234
 
 
-def make_emri_injections(n: int, base: Optional[np.ndarray] = None) -> np.ndarray:
+def _prior_rng(seed: Optional[int], cls: str) -> np.random.Generator:
+    """Deterministic per-class RNG: one user seed, decorrelated across classes."""
+    base = _DEFAULT_INJECTION_SEED if seed is None else int(seed)
+    return np.random.default_rng([base, _PRIOR_DRAW_CLASS_OFFSET[cls]])
+
+
+def make_emri_injections(
+    n: int,
+    base: Optional[np.ndarray] = None,
+    *,
+    mode: str = "stock",
+    seed: Optional[int] = None,
+) -> np.ndarray:
     """Return ``(n, 14)`` EMRI waveform-basis injection vectors.
 
-    Intrinsic params shared (so a tight per-leaf prior is feasible);
-    sky / phase / distance vary per source (fixed seed).
+    ``mode="stock"``: intrinsic params shared from the stock baseline (so a
+    tight per-leaf prior is feasible); sky / phase / distance vary per
+    source (fixed seed). ``mode="prior"``: intrinsics drawn from an interior
+    region of the wide priors (M 5e5-2e6, mu 5-30, a 0-0.9, p0 9-13,
+    e0 0.1-0.5 — guaranteed-valid FEW trajectories); extrinsics isotropic.
     """
     base = (INJECTION_PARAMS_FULL_BASIS if base is None else np.asarray(base)).copy()
     if n == 0:
         return np.zeros((0, base.size), dtype=base.dtype)
+    if mode == "prior":
+        rng = _prior_rng(seed, "EMRI")
+        rows = []
+        for _ in range(n):
+            row = base.copy()
+            row[0]  = np.exp(rng.uniform(np.log(5.0e5), np.log(2.0e6)))  # M
+            row[1]  = rng.uniform(5.0, 30.0)                             # mu
+            row[2]  = rng.uniform(0.0, 0.9)                              # a
+            row[3]  = rng.uniform(9.0, 13.0)                             # p0
+            row[4]  = rng.uniform(0.1, 0.5)                              # e0
+            row[6]  = rng.uniform(0.5, 3.0)                              # dist (Gpc)
+            row[7]  = np.arccos(rng.uniform(-0.99, 0.99))                # qS
+            row[8]  = rng.uniform(0.0, 2.0 * np.pi)                      # phiS
+            row[9]  = np.arccos(rng.uniform(-0.99, 0.99))                # qK
+            row[10] = rng.uniform(0.0, 2.0 * np.pi)                      # phiK
+            row[11] = rng.uniform(0.0, 2.0 * np.pi)                      # Phi_phi0
+            row[13] = rng.uniform(0.0, 2.0 * np.pi)                      # Phi_r0
+            rows.append(row)
+        return np.stack(rows, axis=0)
     rng = np.random.default_rng(11)
     rows = []
     for i in range(n):
@@ -654,13 +705,43 @@ def make_emri_injections(n: int, base: Optional[np.ndarray] = None) -> np.ndarra
     return np.stack(rows, axis=0)
 
 
-def make_sobbh_injections(n: int, base: Optional[np.ndarray] = None) -> np.ndarray:
-    """Return ``(n, 11)`` SOBBH waveform-basis injection vectors (fixed seed)."""
+def make_sobbh_injections(
+    n: int,
+    base: Optional[np.ndarray] = None,
+    *,
+    mode: str = "stock",
+    seed: Optional[int] = None,
+) -> np.ndarray:
+    """Return ``(n, 11)`` SOBBH waveform-basis injection vectors.
+
+    ``mode="stock"``: the stock baseline with fixed-seed extrinsic scatter.
+    ``mode="prior"``: masses/spins/``f_low`` from an interior region of the
+    wide priors (m1 25-55, m2 15-m1, |s| <= 0.9, f_low 6-18 mHz — in-band,
+    laptop-fast); extrinsics isotropic.
+    """
     base = (
         SOBBH_INJECTION_PARAMS_FULL_BASIS if base is None else np.asarray(base)
     ).copy()
     if n == 0:
         return np.zeros((0, base.size), dtype=base.dtype)
+    if mode == "prior":
+        rng = _prior_rng(seed, "SOBHB")
+        rows = []
+        for _ in range(n):
+            row = base.copy()
+            row[0]  = rng.uniform(25.0, 55.0)                            # m1
+            row[1]  = rng.uniform(15.0, row[0])                          # m2 <= m1
+            row[2]  = rng.uniform(-0.9, 0.9)                             # s1
+            row[3]  = rng.uniform(-0.9, 0.9)                             # s2
+            row[4]  = rng.uniform(0.5, 2.0)                              # dist (Gpc)
+            row[5]  = np.arccos(rng.uniform(-0.99, 0.99))                # inc
+            row[6]  = rng.uniform(6.0e-3, 1.8e-2)                        # f_low
+            row[7]  = rng.uniform(0.0, 2.0 * np.pi)                      # lam
+            row[8]  = np.arcsin(rng.uniform(-0.99, 0.99))                # beta
+            row[9]  = rng.uniform(0.0, np.pi)                            # psi
+            row[10] = rng.uniform(0.0, 2.0 * np.pi)                      # phi0
+            rows.append(row)
+        return np.stack(rows, axis=0)
     rng = np.random.default_rng(22)
     rows = []
     for i in range(n):
@@ -676,18 +757,44 @@ def make_sobbh_injections(n: int, base: Optional[np.ndarray] = None) -> np.ndarr
 
 
 def make_mbh_injections(
-    n: int, tobs: float, base: Optional[np.ndarray] = None
+    n: int,
+    tobs: float,
+    base: Optional[np.ndarray] = None,
+    *,
+    mode: str = "stock",
+    seed: Optional[int] = None,
 ) -> np.ndarray:
-    """Return ``(n, 11)`` MBH sampling-basis injection vectors (fixed seed).
+    """Return ``(n, 11)`` MBH sampling-basis injection vectors.
 
     Basis: ``(logM, Q, s1z, s2z, dist [Gpc], phi_ref, cos_iota, psi,
-    alpha, sin_delta, t_plunge)``. Masses and spins come from the shared
-    phentax baseline; sky / phase / distance / merger time vary per source
-    with merger times spread across the interior of the observation.
+    alpha, sin_delta, t_plunge)``. ``mode="stock"``: masses and spins from
+    the shared phentax baseline; sky / phase / distance / merger time vary
+    per source (fixed seed) with merger times spread across the interior of
+    the observation. ``mode="prior"``: total mass log-uniform 8e5-4e6,
+    Q log-uniform 1-8, |s| <= 0.9, dist 10-50 Gpc, isotropic sky/orientation,
+    ``t_plunge`` uniform over the interior (0.25-0.85) of the observation.
     """
     base = (MBH_PHENTAX_BASE_PARAMS if base is None else np.asarray(base)).copy()
     if n == 0:
         return np.zeros((0, 11), dtype=float)
+    if mode == "prior":
+        rng = _prior_rng(seed, "MBHB")
+        rows = []
+        for _ in range(n):
+            rows.append(np.array([
+                rng.uniform(np.log(8.0e5), np.log(4.0e6)),           # logM
+                np.exp(rng.uniform(0.0, np.log(8.0))),               # Q (>= 1)
+                rng.uniform(-0.9, 0.9),                              # s1z
+                rng.uniform(-0.9, 0.9),                              # s2z
+                rng.uniform(10.0, 50.0),                             # dist (Gpc)
+                rng.uniform(0.0, 2.0 * np.pi),                       # phi_ref
+                rng.uniform(-0.99, 0.99),                            # cos_iota
+                rng.uniform(0.0, np.pi),                             # psi
+                rng.uniform(0.0, 2.0 * np.pi),                       # alpha
+                rng.uniform(-0.99, 0.99),                            # sin_delta
+                rng.uniform(0.25, 0.85) * tobs,                      # t_plunge
+            ]))
+        return np.stack(rows, axis=0)
     m1, m2 = float(base[0]), float(base[1])
     rng = np.random.default_rng(33)
     rows = []
@@ -705,6 +812,48 @@ def make_mbh_injections(
             np.sin(rng.uniform(-np.pi / 2 + 0.1, np.pi / 2 - 0.1)),  # sin_delta
             (0.2 + 0.6 * (i + 1) / (n + 1)) * tobs,        # t_plunge
         ]))
+    return np.stack(rows, axis=0)
+
+
+def make_gb_injections(
+    n: int,
+    *,
+    mode: str = "stock",
+    seed: Optional[int] = None,
+    band: tuple = (1.0e-3, 1.0e-2),
+) -> np.ndarray:
+    """Return ``(n, 9)`` GB rows ``[A, f0, fdot, fddot, phi0, iota, psi, lam, beta]``.
+
+    ``mode="stock"``: rows cycled from :data:`GB_INJECTION_PARAMS` (small
+    fixed-seed ``f0`` jitter beyond the table length keeps rows distinct).
+    ``mode="prior"``: amplitude log-uniform 3e-23-3e-22, ``f0`` uniform in
+    ``band``, ``fdot`` log-uniform 1e-17-1e-14, isotropic orientation/sky.
+    """
+    if n == 0:
+        return np.zeros((0, 9), dtype=float)
+    if mode == "prior":
+        rng = _prior_rng(seed, "GB")
+        f_lo, f_hi = float(band[0]), float(band[1])
+        rows = []
+        for _ in range(n):
+            rows.append(np.array([
+                np.exp(rng.uniform(np.log(3.0e-23), np.log(3.0e-22))),  # A
+                rng.uniform(f_lo, f_hi),                                # f0
+                np.exp(rng.uniform(np.log(1.0e-17), np.log(1.0e-14))),  # fdot
+                0.0,                                                    # fddot
+                rng.uniform(0.0, 2.0 * np.pi),                          # phi0
+                np.arccos(rng.uniform(-0.99, 0.99)),                    # iota
+                rng.uniform(0.0, np.pi),                                # psi
+                rng.uniform(0.0, 2.0 * np.pi),                          # lam
+                np.arcsin(rng.uniform(-0.99, 0.99)),                    # beta
+            ]))
+        return np.stack(rows, axis=0)
+    table = np.atleast_2d(GB_INJECTION_PARAMS)
+    rows = [table[i % len(table)].copy() for i in range(n)]
+    if n > len(table):
+        jitter_rng = np.random.default_rng(44)
+        for i in range(len(table), n):
+            rows[i][1] *= 1.0 + 1.0e-3 * jitter_rng.uniform(1.0, 5.0)
     return np.stack(rows, axis=0)
 
 

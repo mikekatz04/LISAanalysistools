@@ -423,18 +423,21 @@ class AllSourcesGlobalFit(EreborFit):
                     if "mbh" in self._branch_names
                     else AllSourcesMBHSettings()
                 )
+                # Same (mode, seed) as the branch prep -> identical tables.
+                inj_mode = gs.synthetic_injections or "stock"
+                inj_seed = gs.synthetic_injection_seed
                 specs.append(
                     (
                         SyntheticDataProcessor,
                         dict(
                             emri_injection_params_full_basis=make_emri_injections(
-                                n_inj["EMRI"]
+                                n_inj["EMRI"], mode=inj_mode, seed=inj_seed
                             ),
                             sobbh_injection_params_full_basis=make_sobbh_injections(
-                                n_inj["SOBHB"]
+                                n_inj["SOBHB"], mode=inj_mode, seed=inj_seed
                             ),
                             mbh_injection_params_sampling_basis=make_mbh_injections(
-                                n_inj["MBHB"], gs.Tobs
+                                n_inj["MBHB"], gs.Tobs, mode=inj_mode, seed=inj_seed
                             ),
                             source_ids=source_ids,
                             force_backend="cpu",

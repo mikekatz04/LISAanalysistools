@@ -300,19 +300,22 @@ class FullYearCombinedGlobalFit(EreborFit):
             )
         else:
             mbh = self.mbh if "mbh" in self._branch_names else FullYearMBHSettings()
+            # Same (mode, seed) as the branch prep -> identical tables.
+            inj_mode = gs.synthetic_injections or "stock"
+            inj_seed = gs.synthetic_injection_seed
             gs.data_processor_class = SyntheticDataProcessor
             gs.processor_init_kwargs = dict(
                 Tobs=tobs,
                 dt=gs.dt,
                 t_start=gs.synthetic_t_start,
                 emri_injection_params_full_basis=make_emri_injections(
-                    gs.n_injections["EMRI"]
+                    gs.n_injections["EMRI"], mode=inj_mode, seed=inj_seed
                 ),
                 sobbh_injection_params_full_basis=make_sobbh_injections(
-                    gs.n_injections["SOBHB"]
+                    gs.n_injections["SOBHB"], mode=inj_mode, seed=inj_seed
                 ),
                 mbh_injection_params_sampling_basis=make_mbh_injections(
-                    gs.n_injections["MBHB"], tobs
+                    gs.n_injections["MBHB"], tobs, mode=inj_mode, seed=inj_seed
                 ),
                 source_ids={k: list(v) for k, v in gs.mojito_source_ids.items()},
                 nchannels=gs.nchannels,

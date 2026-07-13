@@ -70,6 +70,13 @@ get_stock_options = _registry.options
 from .variants.all_sources import AllSourcesGlobalFit  # noqa: E402
 from .variants.full_year_combined import FullYearCombinedGlobalFit  # noqa: E402
 from .variants.gb_no_fg import GBNoForegroundGlobalFit  # noqa: E402
+from .variants.lite import (  # noqa: E402
+    AllSourcesLiteGlobalFit,
+    FullYearCombinedLiteGlobalFit,
+    GBNoForegroundLiteGlobalFit,
+    NoiseOnlyLiteGlobalFit,
+    NoiseSGWBLiteGlobalFit,
+)
 from .variants.noise import NoiseOnlyGlobalFit, NoiseSGWBGlobalFit  # noqa: E402
 
 for _cls in (
@@ -78,6 +85,11 @@ for _cls in (
     FullYearCombinedGlobalFit,
     NoiseOnlyGlobalFit,
     NoiseSGWBGlobalFit,
+    GBNoForegroundLiteGlobalFit,
+    AllSourcesLiteGlobalFit,
+    FullYearCombinedLiteGlobalFit,
+    NoiseOnlyLiteGlobalFit,
+    NoiseSGWBLiteGlobalFit,
 ):
     _registry.register(_cls)
 
@@ -88,11 +100,18 @@ __stock_globalfit_options__ = _registry.names()
 # in memory. ``erebor.gb_no_fg(**overrides)`` CLONES the defaults into a
 # fresh fit (the primary pattern); mutating ``erebor.gb_no_fg`` itself
 # changes the session-wide default for later clones — deliberate, but shared.
+# Every full model has a ``*_lite`` laptop-smoke twin (same machinery, all
+# knobs turned down; equivalently ``erebor.<name>(lite=True)``).
 gb_no_fg = GBNoForegroundGlobalFit()
 all_sources = AllSourcesGlobalFit()
 full_year_combined = FullYearCombinedGlobalFit()
 noise_only = NoiseOnlyGlobalFit()
 noise_sgwb = NoiseSGWBGlobalFit()
+gb_no_fg_lite = GBNoForegroundLiteGlobalFit()
+all_sources_lite = AllSourcesLiteGlobalFit()
+full_year_combined_lite = FullYearCombinedLiteGlobalFit()
+noise_only_lite = NoiseOnlyLiteGlobalFit()
+noise_sgwb_lite = NoiseSGWBLiteGlobalFit()
 
 
 def __getattr__(name):

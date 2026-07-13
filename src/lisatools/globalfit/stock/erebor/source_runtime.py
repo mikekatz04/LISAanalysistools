@@ -157,6 +157,19 @@ class SourceSOBBHSettings(SOBBHSettings):
 # ============================================================
 # Branch resolution (wide-prior catalogue/synthetic injection)
 # ============================================================
+def synthetic_injection_mode(gs) -> tuple:
+    """``(mode, seed)`` for the ``make_*_injections`` calls, from the general block.
+
+    Prior-mode draws apply only to synthetic data; anything else keeps the
+    stock tables. The SAME values feed the data processor and the branch
+    preparation so the injected data and the branch injection tables agree.
+    """
+    if getattr(gs, "data_mode", None) != "synthetic":
+        return "stock", None
+    mode = getattr(gs, "synthetic_injections", None) or "stock"
+    return mode, getattr(gs, "synthetic_injection_seed", None)
+
+
 def source_catalogue(general_setup: GeneralSetup, cls: str) -> typing.Optional[dict]:
     cat = getattr(general_setup, "catalogue", None) or getattr(
         general_setup.data_processor, "catalogue", {}
@@ -197,7 +210,8 @@ def prepare_emri_branch(emri, general_setup: GeneralSetup, gs):
             [emri_catalogue_to_waveform_basis(cat[i]) for i in sorted(cat.keys())]
         )
     else:
-        full_basis = make_emri_injections(n)
+        inj_mode, inj_seed = synthetic_injection_mode(gs)
+        full_basis = make_emri_injections(n, mode=inj_mode, seed=inj_seed)
     tc = make_emri_transform_container([full_basis[0, 5], full_basis[0, -2]])
     if emri.injection is None:
         emri.injection = tc.both_inverse_transforms(full_basis)
@@ -249,7 +263,8 @@ def prepare_sobbh_branch(sobbh, general_setup: GeneralSetup, gs):
             [sobbh_catalogue_to_waveform_basis(cat[i]) for i in sorted(cat.keys())]
         )
     else:
-        full_basis = make_sobbh_injections(n)
+        inj_mode, inj_seed = synthetic_injection_mode(gs)
+        full_basis = make_sobbh_injections(n, mode=inj_mode, seed=inj_seed)
     if sobbh.injection is None:
         tc = make_sobbh_transform_container()
         sobbh.injection = np.stack(
@@ -283,7 +298,10 @@ def prepare_mbh_branch(mbh, general_setup: GeneralSetup, gs):
             axis=0,
         )
     else:
-        injection = make_mbh_injections(n, general_setup.Tobs)
+        inj_mode, inj_seed = synthetic_injection_mode(gs)
+        injection = make_mbh_injections(
+            n, general_setup.Tobs, mode=inj_mode, seed=inj_seed
+        )
     if mbh.injection is None:
         mbh.injection = injection
     if mbh.transform is None:

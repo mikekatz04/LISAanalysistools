@@ -565,7 +565,14 @@ class StockGlobalFit(CurrentInfoGlobalFit):
     # -- knob application ------------------------------------------------------
 
     def _apply_knobs(self, knobs: dict):
-        """Apply constructor kwargs: headline knobs and variant attributes."""
+        """Apply constructor kwargs: headline knobs and variant attributes.
+
+        ``lite=True`` applies the variant's laptop-smoke preset FIRST, so
+        every other explicit kwarg still wins over it (precedence:
+        explicit kwarg > lite preset > env var > class default).
+        """
+        if knobs.pop("lite", False):
+            self.apply_lite()
         for key, value in knobs.items():
             if key in self._HEADLINE_KNOBS:
                 setattr(self.general, key, value)
@@ -579,6 +586,44 @@ class StockGlobalFit(CurrentInfoGlobalFit):
                     "Adjust nested blocks directly (fit.general.<field>, fit.gb.<field>, "
                     "fit.recipe...) for anything beyond the headline knobs."
                 )
+
+    # -- lite (laptop-smoke) preset ---------------------------------------------
+
+    def lite_overrides(self) -> dict:
+        """Dotted-path -> value overrides for the variant's ``lite`` preset.
+
+        Applied by ``lite=True`` on any stock call and by the registered
+        ``*_lite`` twins — one table shared by both spellings. Empty in the
+        base; variants provide it (Erebor's live in
+        ``stock/erebor/variants/lite.py``). Precedence when applied:
+        explicit kwarg > lite preset > env var > class default.
+        """
+        return {}
+
+    def apply_lite(self) -> None:
+        """Apply :meth:`lite_overrides` to this fit (laptop-smoke preset).
+
+        Dotted paths resolve against the fit (``"general.num_iterations"``,
+        ``"gb.num_repeat_proposals"``, ...); paths whose parent object is
+        missing (e.g. a removed branch) are skipped silently.
+        """
+        overrides = self.lite_overrides()
+        if not overrides:
+            raise ValueError(
+                f"{type(self).__name__} has no lite preset (lite_overrides() "
+                "is empty) — override lite_overrides() on the variant."
+            )
+        for path, value in overrides.items():
+            obj = self
+            *parents, leaf = path.split(".")
+            try:
+                for parent in parents:
+                    obj = getattr(obj, parent)
+            except AttributeError:
+                continue
+            if not hasattr(obj, leaf):
+                continue
+            setattr(obj, leaf, deepcopy(value))
 
     # -- headline knob delegation ---------------------------------------------
 

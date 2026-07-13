@@ -365,5 +365,192 @@ class DataProcessorSwapTest(unittest.TestCase):
             self.assertIs(gs.data_processor_class, SyntheticDataProcessor)
 
 
+class LiteVariantTest(unittest.TestCase):
+    LITE_NAMES = (
+        "gb_no_fg_lite",
+        "all_sources_lite",
+        "full_year_combined_lite",
+        "noise_only_lite",
+        "noise_sgwb_lite",
+    )
+
+    def test_lite_twins_registered(self):
+        names = [name for name, _ in erebor.get_stock_options()]
+        for lite in self.LITE_NAMES:
+            self.assertIn(lite, names)
+            self.assertIn(lite[: -len("_lite")], names)
+
+    def test_lite_preset_applied(self):
+        fit = erebor.all_sources_lite()
+        self.assertEqual(fit.general.num_iterations, 10)
+        self.assertEqual(fit.general.nwalkers, 4)
+        self.assertEqual(fit.general.ntemps, 2)
+        self.assertIs(fit.general.use_gpu, False)
+        self.assertEqual(fit.general.nt, 180)
+        self.assertEqual(fit.gb.num_repeat_proposals, 2)
+
+    def test_lite_kwarg_matches_twin(self):
+        via_kwarg = erebor.all_sources(lite=True)
+        via_twin = erebor.all_sources_lite()
+        for path in ("num_iterations", "nwalkers", "ntemps", "nf", "nt", "use_gpu"):
+            self.assertEqual(
+                getattr(via_kwarg.general, path), getattr(via_twin.general, path)
+            )
+        self.assertEqual(
+            via_kwarg.gb.num_repeat_proposals, via_twin.gb.num_repeat_proposals
+        )
+
+    def test_explicit_kwarg_beats_lite(self):
+        fit = erebor.all_sources_lite(nwalkers=12)
+        self.assertEqual(fit.general.nwalkers, 12)
+        self.assertEqual(fit.general.num_iterations, 10)
+
+    def test_lite_stays_cheap_and_picklable(self):
+        for lite in self.LITE_NAMES:
+            fit = erebor.get_stock(lite)
+            self.assertFalse(fit.built)
+            clone = pickle.loads(pickle.dumps(copy.deepcopy(fit)))
+            self.assertEqual(
+                clone.general.num_iterations, fit.general.num_iterations
+            )
+
+    def test_lite_to_heavy_is_knob_changes(self):
+        fit = erebor.gb_no_fg_lite()
+        fit.general.tobs_target = 90 * 86400.0
+        fit.gb.num_repeat_proposals = 100
+        heavy = erebor.gb_no_fg()
+        self.assertEqual(fit.general.tobs_target, heavy.general.tobs_target)
+        self.assertEqual(
+            fit.gb.num_repeat_proposals, heavy.gb.num_repeat_proposals
+        )
+
+
+class SyntheticFallbackTest(unittest.TestCase):
+    def test_missing_mojito_falls_back_to_synthetic_prior(self):
+        fit = erebor.all_sources_lite(mojito_data_path="/definitely/not/there/")
+        fit.resolve_data_source()
+        self.assertEqual(fit.general.data_mode, "synthetic")
+        self.assertEqual(fit.general.synthetic_injections, "prior")
+        self.assertIsNotNone(fit.general.gb_injection_params)
+        gb_rows = np.atleast_2d(fit.general.gb_injection_params)
+        self.assertEqual(gb_rows.shape[1], 9)
+        lo, hi = fit._gb_injection_band()
+        self.assertTrue(((gb_rows[:, 1] >= lo) & (gb_rows[:, 1] <= hi)).all())
+
+    def test_fallback_processor_is_synthetic(self):
+        fit = erebor.all_sources_lite(mojito_data_path="/definitely/not/there/")
+        gs = fit.make_general_settings()
+        from lisatools.globalfit.stock.erebor.injections import (
+            SyntheticCombinedProcessingStep,
+        )
+
+        self.assertIs(gs.data_processor_class, SyntheticCombinedProcessingStep)
+
+    def test_explicit_synthetic_keeps_stock_tables(self):
+        fit = erebor.all_sources_lite(data_mode="synthetic")
+        fit.resolve_data_source()
+        self.assertEqual(fit.general.synthetic_injections, "stock")
+        self.assertIsNone(fit.general.gb_injection_params)
+
+    def test_user_gb_table_wins_over_prior_mode(self):
+        table = np.array([[1e-22, 3e-3, 1e-16, 0.0, 0.0, 0.5, 0.4, 1.0, 0.2]])
+        fit = erebor.all_sources_lite(
+            mojito_data_path="/definitely/not/there/", gb_injection_params=table
+        )
+        fit.resolve_data_source()
+        self.assertTrue(np.array_equal(fit.general.gb_injection_params, table))
+
+    def test_existing_mojito_path_untouched(self):
+        with _EnvGuard(MOJITO_DATA_PATH=None):
+            fit = erebor.all_sources_lite(mojito_data_path=os.getcwd())
+            fit.resolve_data_source()
+            self.assertEqual(fit.general.data_mode, "mojito")
+
+
+class PriorInjectionDrawTest(unittest.TestCase):
+    def test_reproducible_and_seed_sensitive(self):
+        from lisatools.globalfit.stock.erebor.injections import (
+            make_emri_injections,
+            make_gb_injections,
+            make_mbh_injections,
+            make_sobbh_injections,
+        )
+
+        for maker, args in (
+            (make_emri_injections, (3,)),
+            (make_sobbh_injections, (3,)),
+            (make_mbh_injections, (3, 1.0e6)),
+        ):
+            a = maker(*args, mode="prior", seed=5)
+            self.assertTrue(np.array_equal(a, maker(*args, mode="prior", seed=5)))
+            self.assertFalse(np.array_equal(a, maker(*args, mode="prior", seed=6)))
+        g = make_gb_injections(3, mode="prior", seed=5)
+        self.assertTrue(np.array_equal(g, make_gb_injections(3, mode="prior", seed=5)))
+
+    def test_stock_mode_matches_legacy(self):
+        from lisatools.globalfit.stock.erebor.injections import (
+            GB_INJECTION_PARAMS,
+            make_emri_injections,
+            make_gb_injections,
+            make_mbh_injections,
+            make_sobbh_injections,
+        )
+
+        # stock mode ignores the seed and reproduces the historical tables
+        self.assertTrue(
+            np.array_equal(
+                make_emri_injections(2), make_emri_injections(2, seed=99)
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                make_sobbh_injections(2), make_sobbh_injections(2, seed=99)
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                make_mbh_injections(2, 1e6), make_mbh_injections(2, 1e6, seed=99)
+            )
+        )
+        self.assertTrue(
+            np.array_equal(make_gb_injections(2), GB_INJECTION_PARAMS)
+        )
+
+    def test_prior_draws_respect_interior_ranges(self):
+        from lisatools.globalfit.stock.erebor.injections import (
+            make_emri_injections,
+            make_mbh_injections,
+            make_sobbh_injections,
+        )
+
+        e = make_emri_injections(8, mode="prior", seed=3)
+        self.assertTrue(((e[:, 3] >= 9.0) & (e[:, 3] <= 13.0)).all())  # p0
+        self.assertTrue(((e[:, 4] >= 0.1) & (e[:, 4] <= 0.5)).all())  # e0
+        s = make_sobbh_injections(8, mode="prior", seed=3)
+        self.assertTrue((s[:, 1] <= s[:, 0]).all())  # m2 <= m1
+        self.assertTrue(((s[:, 6] >= 6e-3) & (s[:, 6] <= 1.8e-2)).all())  # f_low
+        m = make_mbh_injections(8, 1.0e6, mode="prior", seed=3)
+        self.assertTrue(((m[:, 10] >= 0.25e6) & (m[:, 10] <= 0.85e6)).all())
+
+    def test_branch_prep_and_processor_agree(self):
+        # The same (mode, seed) flows to the data processor and the branch
+        # prep — spot-check via the module-level helpers they both call.
+        from lisatools.globalfit.stock.erebor.injections import make_mbh_injections
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            synthetic_injection_mode,
+        )
+
+        fit = erebor.all_sources_lite(
+            data_mode="synthetic", synthetic_injections="prior",
+            synthetic_injection_seed=77,
+        )
+        fit.resolve_data_source()
+        mode, seed = synthetic_injection_mode(fit.general)
+        self.assertEqual((mode, seed), ("prior", 77))
+        a = make_mbh_injections(1, 1e6, mode=mode, seed=seed)
+        b = make_mbh_injections(1, 1e6, mode="prior", seed=77)
+        self.assertTrue(np.array_equal(a, b))
+
+
 if __name__ == "__main__":
     unittest.main()

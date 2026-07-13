@@ -17,6 +17,8 @@ factory built, data processor chosen) only inside
 from __future__ import annotations
 
 import dataclasses
+import logging
+import os
 import typing
 from copy import deepcopy
 
@@ -32,6 +34,8 @@ from .common import (
 )
 
 __all__ = ["EreborGeneralSettings", "EreborFit"]
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_gpu_list(raw: str) -> typing.List[int]:
@@ -136,6 +140,22 @@ class EreborGeneralSettings(GeneralSettings):
     source_types: typing.Tuple[str, ...] = ("GB",)
     orbits_frame: str = "icrs"
 
+    # --- synthetic-injection coordinates ---
+    # How the synthetic data processors pick injection coordinates when the
+    # user has not supplied them (``gb_injection_params`` / per-branch
+    # ``.injection``): "stock" -> the fixed stock tables; "prior" -> seeded
+    # draws from (an interior region of) each source class's sampling
+    # priors. ``None`` -> auto: "stock" normally, "prior" when a missing
+    # mojito folder forced the synthetic fallback (see
+    # :meth:`EreborFit.resolve_data_source`). Explicit injection tables
+    # always win over either mode.
+    synthetic_injections: typing.Optional[str] = dataclasses.field(
+        default_factory=env_default("SYNTHETIC_INJECTIONS", None, str)
+    )
+    synthetic_injection_seed: int = dataclasses.field(
+        default_factory=env_default("SYNTHETIC_INJECTION_SEED", 1234, int)
+    )
+
     # --- fixed sensitivity (used when no psd branch is present) ---
     fixed_psd_params: typing.Optional[typing.List[float]] = None
 
@@ -218,7 +238,87 @@ class EreborFit(StockGlobalFit):
     def adjust_general(self, gs: EreborGeneralSettings) -> None:
         """Variant hook: mutate the copied general block before resolution."""
 
+    def resolve_data_source(self) -> None:
+        """Resolve the data source on the FIT-LEVEL general block (idempotent).
+
+        When ``data_mode == "mojito"`` but the mojito L1 folder does not
+        exist on this machine, fall back to ``data_mode = "synthetic"`` so
+        the bare quickstart (``fit = erebor.all_sources(); fit.build()``)
+        works with no external data. Fallback injection coordinates are
+        drawn from the source priors (``synthetic_injections = "prior"``)
+        unless the user chose a mode or supplied explicit tables
+        (``gb_injection_params`` / per-branch ``.injection``), which always
+        win.
+
+        Deliberately mutates ``self.general`` (not just the build-time
+        copy): branch preparation reads the fit-level block, so the data
+        processor and the branch injections must resolve identically.
+        """
+        gs = self.general
+        if gs.data_mode == "mojito" and not os.path.isdir(gs.mojito_data_path):
+            logger.warning(
+                "data_mode='mojito' but the mojito data folder %r does not "
+                "exist — falling back to data_mode='synthetic' (in-process "
+                "injections, coordinates drawn from the source priors). Set "
+                "MOJITO_DATA_PATH / general.mojito_data_path to use mojito "
+                "data.",
+                gs.mojito_data_path,
+            )
+            gs.data_mode = "synthetic"
+            if gs.synthetic_injections is None:
+                gs.synthetic_injections = "prior"
+        if gs.synthetic_injections is None:
+            gs.synthetic_injections = "stock"
+        elif gs.synthetic_injections not in ("stock", "prior"):
+            raise ValueError(
+                f"synthetic_injections={gs.synthetic_injections!r} not "
+                "recognised; use 'stock', 'prior', or None (auto)."
+            )
+        # Prior-mode GB rows ride the existing ``gb_injection_params`` knob
+        # (the synthetic GB processor and the GB branch prep both read it),
+        # so variants need no extra wiring. An explicit user table wins.
+        if (
+            gs.data_mode == "synthetic"
+            and gs.synthetic_injections == "prior"
+            and "gb" in self._branch_names
+            and getattr(gs, "gb_injection_params", "absent") is None
+        ):
+            from .injections import make_gb_injections
+
+            gs.gb_injection_params = make_gb_injections(
+                self._gb_injection_count(),
+                mode="prior",
+                seed=gs.synthetic_injection_seed,
+                band=self._gb_injection_band(),
+            )
+
+    def _gb_injection_count(self) -> int:
+        """Number of prior-drawn synthetic GB rows (mirrors the class counts)."""
+        ids = getattr(self.general, "mojito_source_ids", None) or {}
+        return len(ids.get("GB", [])) or 2  # 2 matches the stock table
+
+    def _gb_injection_band(self) -> typing.Tuple[float, float]:
+        """Frequency band for prior-drawn GB f0s: the GB branch band."""
+        gb = self.gb if "gb" in self._branch_names else None
+        lo = hi = None
+        if gb is not None:
+            center = getattr(gb, "center_freq", None)
+            if center is not None:
+                n_layers = int(getattr(gb, "n_layers", None) or 3)
+                half = 0.5 * n_layers * self.layer_df
+                lo, hi = center - half, center + half
+            else:
+                lo = getattr(gb, "min_freq", None)
+                hi = getattr(gb, "max_freq", None)
+        if lo is None:
+            lo = self.general.min_freq
+        if hi is None:
+            hi = self.general.max_freq
+        lo, hi = max(float(lo), 3.0e-4), min(float(hi), 2.3e-2)
+        return (lo, hi) if lo < hi else (1.0e-3, 1.0e-2)
+
     def make_general_settings(self) -> EreborGeneralSettings:
+        self.resolve_data_source()
         gs = deepcopy(self.general)
         self.adjust_general(gs)
 
