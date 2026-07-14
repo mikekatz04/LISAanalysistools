@@ -501,8 +501,8 @@ def return_input(x: Any) -> Any:
 
 
 def return_float(x: np.ndarray | float) -> float:
-    """Return the input as a float."""
-    return float(x)
+    """Return the input as a float (accepts size-1 arrays)."""
+    return float(np.squeeze(x))
 
 
 def icrs_to_ecliptic(
@@ -783,7 +783,17 @@ def psi_rotation_icrs_to_ecliptic(lam_ecl, beta_ecl):
 
     return out_fun(xp.arctan2(sindeltapsi, cosdeltapsi))
 
-# ---- 
+# ----
+def _dot(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Dot product over the last (xyz) axis, broadcasting any batch dimensions."""
+    return np.sum(a * b, axis=-1)
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    """Normalize vectors along the last (xyz) axis."""
+    return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+
 def _get_orbital_quantities(orbits: Orbits, t: float | np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Get the LISA orbital quantities at a given time.
@@ -805,18 +815,18 @@ def _get_orbital_quantities(orbits: Orbits, t: float | np.ndarray) -> Tuple[np.n
     relative_position_2 = position_2 - centroid_position
     relative_position_3 = position_3 - centroid_position
 
-    x_lisa = -1. * relative_position_1 / np.linalg.norm(relative_position_1)
+    x_lisa = -1. * _unit(relative_position_1)
     p1_cross_p2 = np.cross(relative_position_1, relative_position_2)
-    z_lisa = p1_cross_p2 / np.linalg.norm(p1_cross_p2)
+    z_lisa = _unit(p1_cross_p2)
     y_lisa = np.cross(z_lisa, x_lisa)
 
     return centroid_position, x_lisa, y_lisa, z_lisa
 
-def to_lisa_frame(orbits: Orbits, 
-                  t: float | np.ndarray,
+def to_lisa_frame(t: float | np.ndarray,
                   ra_or_lambda: float | np.ndarray,
                   dec_or_beta: float | np.ndarray, 
                   psi: float | np.ndarray,
+                  orbits: Orbits, 
                   t_ref: float = 0.0
                   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -824,11 +834,11 @@ def to_lisa_frame(orbits: Orbits,
     Credits: Sylvain Marsat
 
     Args:
-        orbits: Orbits object containing the LISA orbital parameters.
         t: Time(s) at which to evaluate the conversion, relative to the reference time `t_ref`.
         ra_or_lambda: Right ascension (ICRS) or ecliptic longitude in radians.
         dec_or_beta: Declination (ICRS) or ecliptic latitude in radians.
         psi: Polarization angle in radians.
+        orbits: Orbits object containing the LISA orbital parameters.
         t_ref: Reference time in seconds (default is 0.0).
 
     Returns:
@@ -837,10 +847,18 @@ def to_lisa_frame(orbits: Orbits,
             - lambd_lisa: Ecliptic longitude in radians in the LISA frame.
             - beta_lisa: Ecliptic latitude in radians in the LISA frame.
             - psi_lisa: Polarization angle in radians in the LISA frame.
-    """
+    """    
+    squeeze = isinstance(t, float) and isinstance(ra_or_lambda, float) and isinstance(dec_or_beta, float) and isinstance(psi, float)
+    output_fun = return_float if squeeze else return_input
+
+    t = np.atleast_1d(t)
+    ra_or_lambda = np.atleast_1d(ra_or_lambda)
+    dec_or_beta = np.atleast_1d(dec_or_beta)
+    psi = np.atleast_1d(psi)
 
     t_abs = t_ref + t
-
+    centroid_position, x_lisa, y_lisa, z_lisa = _get_orbital_quantities(orbits, t_abs)
+    
     cb = np.cos(dec_or_beta)
     sb = np.sin(dec_or_beta)
     cl = np.cos(ra_or_lambda)
@@ -848,36 +866,35 @@ def to_lisa_frame(orbits: Orbits,
     cp = np.cos(psi)
     sp = np.sin(psi)
 
-    k = np.array([-cb*cl, -cb*sl, -sb])
-
-    centroid_position, x_lisa, y_lisa, z_lisa = _get_orbital_quantities(orbits, t_abs)
+    k = np.stack([-cb*cl, -cb*sl, -sb], axis=-1)
 
     # time
-    t_lisa = t_abs + np.dot(k, centroid_position) / C_SI
+    t_lisa = t_abs + _dot(k, centroid_position) / C_SI
 
     #sky
-    lambd_lisa = np.arctan2( - np.dot(k, y_lisa), -np.dot(k, x_lisa) )
-    beta_lisa = np.arcsin( - np.dot(k, z_lisa) )
+    lambd_lisa = np.arctan2( - _dot(k, y_lisa), -_dot(k, x_lisa) )
+    beta_lisa = np.arcsin( - _dot(k, z_lisa) )
 
     # polarization
     e_z = np.array([0., 0., 1.])
+
     z_cross_k = np.cross(e_z, k)
-    u = z_cross_k / np.linalg.norm(z_cross_k)
+    u = _unit(z_cross_k)
     v = np.cross(k, u)
-    p = cp * u + sp * v
-    q = -sp * u + cp * v
+    p = cp[..., None] * u + sp[..., None] * v
+    q = -sp[..., None] * u + cp[..., None] * v
     z_lisa_cross_k = np.cross(z_lisa, k)
-    u_lisa = z_lisa_cross_k / np.linalg.norm(z_lisa_cross_k)
+    u_lisa = _unit(z_lisa_cross_k)
     v_lisa = np.cross(k, u_lisa)
-    psi_lisa = np.arctan2(np.dot(p, v_lisa), np.dot(p, u_lisa)) % np.pi
+    psi_lisa = np.arctan2(_dot(p, v_lisa), _dot(p, u_lisa)) % np.pi
 
-    return t_lisa - t_ref, lambd_lisa, beta_lisa, psi_lisa
+    return output_fun(t_lisa - t_ref), output_fun(lambd_lisa), output_fun(beta_lisa), output_fun(psi_lisa)
 
-def from_lisa_frame(orbits: Orbits, 
-                    t_lisa: float | np.ndarray,
+def from_lisa_frame(t_lisa: float | np.ndarray,
                     lambd_lisa: float | np.ndarray,
                     beta_lisa: float | np.ndarray, 
                     psi_lisa: float | np.ndarray,
+                    orbits: Orbits, 
                     t_ref: float = 0.0
                     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -885,11 +902,11 @@ def from_lisa_frame(orbits: Orbits,
     Credits: Sylvain Marsat
 
     Args:
-        orbits: Orbits object containing the LISA orbital parameters.
         t_lisa: Time(s) in the LISA frame, relative to the reference time `t_ref`.
         lambd_lisa: Ecliptic longitude in radians in the LISA frame.
         beta_lisa: Ecliptic latitude in radians in the LISA frame.
         psi_lisa: Polarization angle in radians in the LISA frame.
+        orbits: Orbits object containing the LISA orbital parameters.
         t_ref: Reference time in seconds (default is 0.0). 
 
     Returns:
@@ -901,6 +918,13 @@ def from_lisa_frame(orbits: Orbits,
     """
     # NOTE: time tSSB depends on the sky position given in SSB parameters
     # Initially, approximate angles using tL instead of tSSB - then iterate
+    squeeze = isinstance(t_lisa, float) and isinstance(lambd_lisa, float) and isinstance(beta_lisa, float) and isinstance(psi_lisa, float)
+    output_fun = return_float if squeeze else return_input
+
+    t_lisa = np.atleast_1d(t_lisa)
+    lambd_lisa = np.atleast_1d(lambd_lisa)
+    beta_lisa = np.atleast_1d(beta_lisa)
+    psi_lisa = np.atleast_1d(psi_lisa)
     
     t_lisa_abs = t_ref + t_lisa
     t_approx = t_lisa_abs
@@ -926,14 +950,14 @@ def from_lisa_frame(orbits: Orbits,
         cp = np.cos(psi_lisa)
         sp = np.sin(psi_lisa)
 
-        k = -cb*cl * x_lisa - cb*sl * y_lisa - sb * z_lisa
+        k = -(cb*cl)[..., None] * x_lisa - (cb*sl)[..., None] * y_lisa - sb[..., None] * z_lisa
 
-        ra_or_lambda_approx = np.arctan2( - np.dot(k, e_y), -np.dot(k, e_x) )
-        dec_or_beta_approx = np.arcsin( - np.dot(k, e_z) )
+        ra_or_lambda_approx = np.arctan2( - _dot(k, e_y), -_dot(k, e_x) )
+        dec_or_beta_approx = np.arcsin( - _dot(k, e_z) )
 
         # time
-        k_centroid_position = np.dot(k, centroid_position) / C_SI
-        k_centroid_velocity = np.dot(k, centroid_velocity) / C_SI
+        k_centroid_position = _dot(k, centroid_position) / C_SI
+        k_centroid_velocity = _dot(k, centroid_velocity) / C_SI
         t_approx = t_lisa_abs - k_centroid_position * (1 - k_centroid_velocity)
     
     t = t_approx - t_ref
@@ -942,13 +966,13 @@ def from_lisa_frame(orbits: Orbits,
 
     # polarization
     z_lisa_cross_k = np.cross(z_lisa, k)
-    u_lisa = z_lisa_cross_k / np.linalg.norm(z_lisa_cross_k)
+    u_lisa = _unit(z_lisa_cross_k)
     v_lisa = np.cross(k, u_lisa)
-    p = cp * u_lisa + sp * v_lisa
-    q = -sp * u_lisa + cp * v_lisa
+    p = cp[..., None] * u_lisa + sp[..., None] * v_lisa
+    q = -sp[..., None] * u_lisa + cp[..., None] * v_lisa
     z_cross_k = np.cross(e_z, k)
-    u = z_cross_k / np.linalg.norm(z_cross_k)
+    u = _unit(z_cross_k)
     v = np.cross(k, u)
-    psi = np.arctan2(np.dot(p, v), np.dot(p, u)) % np.pi
+    psi = np.arctan2(_dot(p, v), _dot(p, u)) % np.pi
 
-    return t, ra_or_lambda, dec_or_beta, psi
+    return output_fun(t), output_fun(ra_or_lambda), output_fun(dec_or_beta), output_fun(psi)

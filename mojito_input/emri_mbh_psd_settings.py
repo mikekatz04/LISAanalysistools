@@ -4,6 +4,8 @@ import os
 import shutil
 import logging
 
+from functools import partial
+
 try:
     import cupy as cp
 
@@ -18,8 +20,9 @@ from lisatools.detector import L1Orbits
 from lisatools.utils.constants import *
 from eryn.state import BranchSupplemental
 from lisatools.globalfit.run import CurrentInfoGlobalFit
-from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, EMRISetup, EMRISettings
-
+from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, EMRISetup, EMRISettings, MBHSetup, MBHSettings
+from lisatools.sources.utils import from_lisa_frame, to_lisa_frame
+from lisatools.sampling.moves.skymodehop import SkyMove
 
 from eryn.prior import uniform_dist, log_uniform
 from eryn.utils import TransformContainer
@@ -55,6 +58,33 @@ logger = logging.getLogger(__name__)
 
 MOJITO_REFERENCE_TIME = 97729089.327664
 
+def attach_flow_trainers(info, label):
+    """Start a ProcessExecutor for every ConditionalFlowMove among ``info.inner_moves``.
+
+    The executor is attached here rather than in the settings function:
+    CurrentInfoGlobalFit deep-copies the settings, and a live ProcessExecutor
+    (mp queues + spawned worker) does not survive a deepcopy. Constructing it
+    here also ensures only the sampler process spawns the trainer.
+
+    Returns a copy of the inner-move list with the flow moves at zero weight
+    (train-but-don't-propose), usable as a burn-in move set.
+    """
+    burnin_inner_moves = []
+    for inner_move in info.inner_moves:
+        move_obj = inner_move[0] if isinstance(inner_move, tuple) else inner_move
+        move_weight = inner_move[1] if isinstance(inner_move, tuple) else 1.0
+        if isinstance(move_obj, ConditionalFlowMove):
+            move_obj.executor = ProcessExecutor(move_obj.flow, **move_obj.executor_init_kwargs)
+            logger.info(
+                f"{label} flow trainer started on "
+                f"{move_obj.executor.worker_device} (sampling flow on cpu)"
+            )
+            burnin_inner_moves.append((move_obj, 0.0))
+        else:
+            burnin_inner_moves.append((move_obj, move_weight))
+    return burnin_inner_moves
+
+
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
@@ -66,33 +96,34 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     permute_every: int = 100
 
     emri_info = curr.source_info["emri"]
-    # psd_info = curr.source_info["psd"]
+    mbh_info = curr.source_info["mbh"]
+    psd_info = curr.source_info["psd"]
 
-    # effective_ndim = engine_info.ndims["psd"]
-    # temperature_control = TemperatureControl(
-    #     effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
-    # )
+    effective_ndim = engine_info.ndims["psd"]
+    temperature_control = TemperatureControl(
+        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+    )
 
-    # psd_move_kwargs = dict(
-    #     num_repeats=psd_info.num_prop_repeats,
-    #     permute_every=permute_every,
-    #     live_dangerously=True,
-    #     psd_transform_fn=psd_info.transform,
-    #     temperature_control=temperature_control,
-    #     use_gpu=True,
-    #     run_async=True,
-    #     run_threaded=True
-    # )
+    psd_move_kwargs = dict(
+        num_repeats=psd_info.num_prop_repeats,
+        permute_every=permute_every,
+        live_dangerously=True,
+        psd_transform_fn=psd_info.transform,
+        temperature_control=temperature_control,
+        use_gpu=True,
+        run_async=True,
+        run_threaded=True
+    )
 
-    # psd_search_move = MultiGPUPSDMove(
-    #     acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
-    # )
-    # psd_pe_move = MultiGPUPSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
+    psd_search_move = MultiGPUPSDMove(
+        acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
+    )
+    psd_pe_move = MultiGPUPSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
 
-    # psd_search_move.accepted = np.zeros((ntemps, nwalkers))
-    # psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
+    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
+    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
 
     #* ========================= *#
     
@@ -126,9 +157,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     from lisatools.sources.emri.waveform import EMRITDIWaveform
 
     # todo test this
-    wave_gen = EMRITDIWaveform(**emri_info.initialize_kwargs)
+    emri_wave_gen = EMRITDIWaveform(**emri_info.initialize_kwargs)
     # breakpoint()
-    subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "emri", emri_info)
+    subtract_initial_signal(acs, state, emri_wave_gen.get_signals_for_residuals, "emri", emri_info)
 
     if emri_info.betas is None:
         emri_info.betas = make_ladder(emri_info.ndim, ntemps=ntemps)
@@ -138,29 +169,11 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     coords_shape_emri = (betas_all.shape[1], nwalkers, emri_info.nleaves_max, emri_info.ndim)
 
-    # Attach the online flow trainer here rather than in the settings function:
-    # CurrentInfoGlobalFit deep-copies the settings, and a live ProcessExecutor
-    # (mp queues + spawned worker) does not survive a deepcopy. Constructing it
-    # here also ensures only the sampler process spawns the trainer.
-    burnin_inner_moves = []
-    for inner_move in emri_info.inner_moves:
-        move_obj = inner_move[0] if isinstance(inner_move, tuple) else inner_move
-        move_weight = inner_move[1] if isinstance(inner_move, tuple) else 1.0
-        if isinstance(move_obj, ConditionalFlowMove):
-            move_obj.executor = ProcessExecutor(move_obj.flow, **move_obj.executor_init_kwargs)
-            logger.info(
-                f"EMRI flow trainer started on "
-                f"{move_obj.executor.worker_device} (sampling flow on cpu)"
-            )
-
-            burnin_inner_moves.append((move_obj, 0.0))  # zero weight during burn-in; flow is trained but not used
-        else:
-            burnin_inner_moves.append((move_obj, move_weight))
-        
+    burnin_inner_moves_emri = attach_flow_trainers(emri_info, "EMRI")
 
     emri_move_kwargs = dict(
         dcga=acs,
-        waveform_gen=wave_gen,
+        waveform_gen=emri_wave_gen,
         branch_name="emri",
         coords_shape=coords_shape_emri,
         waveform_gen_method="get_signals_for_residuals",
@@ -174,45 +187,88 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         betas_all=betas_all,
         permute_every=25,
         pad_out_of_prior=True,
-        # Submit only every 5th repeat's cold-chain snapshot to the flow
-        # trainer: at ~0.3 acceptance, consecutive snapshots are mostly
-        # duplicates and the flow memorizes the walker-track filaments
-        # (acceptance -> 0 with -60..-150 MH factors). ~5 repeats is the
-        # walker decorrelation scale.
         flow_buffer_thin=5,
         run_async=True,
         run_threaded=True,
         randomize_split=True,
-        # Cap concurrent EMRI waveform+likelihood evaluations per GPU to bound
-        # peak device memory; None runs all of a split's walkers at once. With
-        # >1 GPU this still runs num_gpus * batch_size_per_gpu walkers in
-        # parallel. 5 = a full half-split per GPU (nwalkers=20, ntemps_emri=1,
-        # 2 GPUs, GPU-balanced splits) -> one chunk per likelihood call
-        # instead of ~6 serial 1-waveform chunks with barriers in between.
-        batch_size_per_gpu=5,  # TODO restore 5 once the split-0 ~39GB persistent footprint is fixed (see tasks/todo_emri_multigpu.md)
+        batch_size_per_gpu=5,
     )
-    # emri_move_kwargs_burnin = emri_move_kwargs.copy()
-    # emri_move_kwargs_burnin["inner_moves"] = burnin_inner_moves[:-1] # Do a first round of burn-in before training
-
-    # emri_burnin_move = EMRISpecialMove(**emri_move_kwargs_burnin)
-    # emri_burnin_move.accepted = np.zeros((ntemps, nwalkers))
-
-    # emri_burnin_moves = GFCombineMove(moves=[emri_burnin_move, psd_pe_move], share_temperature_control=False)
-    # recipe.add_recipe_component(IterationCountRecipeStep(moves=[emri_burnin_moves], num_iters=30), name="emri first burnin")
-
-    # emri_move_kwargs_burnin["inner_moves"] = burnin_inner_moves # now train the flow
-
-    # emri_burnin_move2 = EMRISpecialMove(**emri_move_kwargs_burnin) 
-    # emri_burnin_move2.accepted = np.zeros((ntemps, nwalkers))
-
-    # emri_burnin_moves = GFCombineMove(moves=[emri_burnin_move2, psd_pe_move], share_temperature_control=False)
-    # recipe.add_recipe_component(IterationCountRecipeStep(moves=[emri_burnin_moves], num_iters=30), name="emri second burnin")
 
     emri_pe_move = EMRISpecialMove(**emri_move_kwargs)
     emri_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    #emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
-    recipe.add_recipe_component(PERecipeStep(moves=[emri_pe_move]), name="emri pe")
+
+    #* ========================= *#
+    
+    # Initialize MBH walkers from catalogue injection parameters
+    catalogue = getattr(curr.general_info, "catalogue", {})
+    mbh_catalogue = catalogue.get("MBHB", {})
+    if mbh_catalogue:
+        mbh_info = curr.source_info["mbh"]
+        injection_params_list = []
+        for source_id in sorted(mbh_catalogue.keys()):
+            entry = mbh_catalogue[source_id]
+            sampling_params = mbh_catalogue_to_sampling_basis(entry, to_lisa_frame=partial(to_lisa_frame, orbits=general_info.orbits, t_ref=MOJITO_REFERENCE_TIME))
+            injection_params_list.append(sampling_params)
+
+        injection_params = np.array(injection_params_list)
+
+        # Store injection truths for diagnostic plots
+        curr.source_info["mbh"].injection = injection_params
+
+        # Per-parameter spread for the Gaussian scatter
+        spread = np.array([1e-4, 1e-3, 1e-3, 1e-3, 1e-3, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1])
+
+        scatter_around_injection(
+            state,
+            "mbh",
+            injection_params,
+            spread,
+            priors=priors,
+        )
+        
+    from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform
+
+    # todo test this
+    mbh_wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
+    # breakpoint()
+    subtract_initial_signal(acs, state, mbh_wave_gen.get_signals_for_residuals, "mbh", mbh_info)
+
+    if mbh_info.betas is None:
+        mbh_info.betas = make_ladder(mbh_info.ndim, ntemps=ntemps)
+    betas_all = np.tile(mbh_info.betas, (mbh_info.nleaves_max, 1))
+    state.sub_states["mbh"].betas_all = betas_all
+    logger.debug(f"MBH betas: {mbh_info.betas}")
+
+    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
+
+    burnin_inner_moves_mbh = attach_flow_trainers(mbh_info, "MBH")
+
+    mbh_move_kwargs = dict(
+        dcga=acs,
+        waveform_gen=mbh_wave_gen,
+        branch_name="mbh",
+        coords_shape=coords_shape,
+        waveform_gen_kwargs=mbh_info.waveform_kwargs.copy(),
+        waveform_like_kwargs={},
+        num_repeats=mbh_info.num_prop_repeats,
+        transform_fn=mbh_info.transform,
+        priors=priors,
+        inner_moves=mbh_info.inner_moves,
+        betas_all=betas_all,
+        permute_every=permute_every,
+        pad_out_of_prior=True,
+        flow_buffer_thin=5,
+        run_async=True,
+        run_threaded=True,
+        randomize_split=True
+    )
+
+    mbh_pe_move = TDMBHSpecialMove(**mbh_move_kwargs)
+    mbh_pe_move.accepted = np.zeros((ntemps, nwalkers))
+
+    pe_moves = GFCombineMove(moves=[mbh_pe_move, emri_pe_move, psd_pe_move], share_temperature_control=False)
+    recipe.add_recipe_component(PERecipeStep(moves=[pe_moves]), name="emri pe")
 
 #######################
 ##### SETTINGS ########
@@ -271,6 +327,284 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     )
 
     return PSDSetup(psd_settings), psd_metadata
+
+def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
+
+    waveform_model = "PhenomTHMTDIWaveform"
+    waveform_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sources/bbh/waveform.py#L130"
+    prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
+    frequency_ranges = [(general_set.start_freq, general_set.end_freq)]
+
+    hms = [21, 33, 44]
+
+    tlowfit = True  # use a fit to set the starting time of the root finder used in t(f)
+    tol = 1e-12  # root finding tolerance
+
+    wave_kwargs = dict(
+        higher_modes=hms,
+        include_negative_modes=True,  # negative m modes will be produced by simmetry
+        t_low_fit=tlowfit,
+        coarse_grain=False,  # if false it will generate the waveform on a dense time grid with the specified timestep
+        atol=tol,
+        rtol=tol,
+    )
+
+    response_kwargs = dict(
+        sampling_frequency=1.0 / general_set.dt,
+        tdi_generation="2nd generation",
+        tdi_channels="XYZ",
+        orbits=general_set.gpu_orbits if gpu_available else general_set.orbits,
+        order=30,
+    )
+
+    waveform_init_kwargs = dict(
+        waveform_kwargs=wave_kwargs,
+        waveform_t0=MOJITO_REFERENCE_TIME,
+        data_td_settings=general_set.data_td_settings,
+        Tobs=1.0
+        / 12.0
+        * YRSID_SI,  # this is only for the waveform generation, not the data, which is still general_set.Tobs
+        start_freq=7e-5,
+        use_reference_time=True,
+        buffer_time=15_000,
+        stft_dt=general_set.stft_dt,
+        freq_min=general_set.start_freq,
+        freq_max=general_set.end_freq,
+        tukey_alpha=general_set.window_alpha,
+        force_backend=general_set.force_backend,
+        fft_batch_size=2,
+        **response_kwargs,
+    )
+
+    waveform_runtime_kwargs = dict()
+
+    betas = 1 / 1.2 ** np.arange(general_set.ntemps)  # Geometric ladder with ratio 1.2
+
+    input_basis = [
+        r"$\log M$",
+        r"$Q$",
+        r"$s_{1z}$",
+        r"$s_{2z}$",
+        r"$d_L$",
+        r"$\phi_{\rm ref}$",
+        r"$\cos \iota$",
+        r"$\psi_L$",
+        r"$\lambda_L$",
+        r"$\sin \beta_L$",
+        r"$t_L$",
+    ]
+
+    output_basis = [
+        r"$m_1$",
+        r"$m_2$",
+        r"$s_{1z}$",
+        r"$s_{2z}$",
+        r"$d_L$",
+        r"$\phi_{\rm ref}$",
+        r"$\iota$",
+        r"$\psi$",
+        r"$\alpha$",
+        r"$\delta$",
+        r"$t_{\rm plunge}$",
+    ]
+
+    key_map = {
+        r"$\log M$": r"$m_1$",
+        r"$Q$": r"$m_2$",
+        r"$\cos \iota$": r"$\iota$",
+        r"$\psi_L$": r"$\psi$",
+        r"$\lambda_L$": r"$\alpha$",
+        r"$\sin \beta_L$": r"$\delta$",
+        r"$t_L$": r"$t_{\rm plunge}$",
+    }
+
+    def gpc_to_mpc(x):
+        """
+        Transform from Gpc to Mpc, for distance prior.
+        """
+        return x * 1e3
+
+    def mT_Q(M, Q):
+        """
+        Transform from total mass and mass ratio m1/m2 to m1 and m2.
+        """
+        m2 = M / (1 + Q)
+        m1 = Q * m2
+        assert np.all(m1 >= m2), "m1 should be the larger mass"
+        return m1, m2
+    
+    _to_lisa_frame = partial(to_lisa_frame, orbits=general_set.orbits, t_ref=MOJITO_REFERENCE_TIME)
+    _from_lisa_frame = partial(from_lisa_frame, orbits=general_set.orbits, t_ref=MOJITO_REFERENCE_TIME)
+
+    mbh_transform_fn_in = {
+        r"$m_1$": np.exp,
+        r"$d_L$": gpc_to_mpc,
+        r"$\iota$": np.arccos,
+        r"$\delta$": np.arcsin,
+        (r"$m_1$", r"$m_2$"): mT_Q,
+        (r"$t_{\rm plunge}$", r"$\alpha$", r"$\delta$", r"$\psi$"): _from_lisa_frame,
+    }
+
+    inverse_mbh_transform_fn_in = {
+        r"$m_1$": np.log,
+        r"$d_L$": gpc_to_mpc,
+        r"$\iota$": np.cos,
+        r"$\delta$": np.sin,
+        (r"$m_1$", r"$m_2$"): mT_Q,
+        (r"$t_{\rm plunge}$", r"$\alpha$", r"$\delta$", r"$\psi$"): _to_lisa_frame,
+    }
+
+    transform = TransformContainer(
+        input_basis=input_basis,
+        output_basis=output_basis,
+        parameter_transforms=mbh_transform_fn_in,
+        inverse_parameter_transforms=inverse_mbh_transform_fn_in,
+        key_map=key_map,
+        fill_dict={},
+    )
+
+    periodic = {"mbh": {r"$\phi_{\rm ref}$": 2 * np.pi, r"$\lambda_L$": 2 * np.pi, r"$\psi_L$": np.pi}}
+
+    priors_mbh = {
+                r"$\log M$": uniform_dist(np.log(1e5), np.log(1e8)),
+                r"$Q$": log_uniform(1., 10.),
+                r"$s_{1z}$": uniform_dist(-0.99999999, +0.99999999),
+                r"$s_{2z}$": uniform_dist(-0.99999999, +0.99999999),
+                r"$d_L$": uniform_dist(1, 150.0), # uniform_dist(0.01, 1000.0),
+                r"$\phi_{\rm ref}$": uniform_dist(0.0, 2 * np.pi),
+                r"$\cos \iota$": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                r"$\psi_L$": uniform_dist(0.0, np.pi), #is this right?
+                r"$\lambda_L$": uniform_dist(0.0, 2 * np.pi),
+                r"$\sin \beta_L$": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                r"$t_L$": uniform_dist(0.0, general_set.Tobs + 3600.0),
+            }
+    priors = {"mbh": ProbDistContainer(priors_mbh)}
+
+    #* ===== Flow proposal (online-trained normalizing flow) ===== *#
+
+    nleaves_max_mbh = len(general_set.processor_init_kwargs["source_ids"]["mbhb"])
+
+    # Trainer GPU: must stay off the ACS/sampling devices (general_set.gpus).
+    # Shared with the EMRI trainer (separate worker processes on the same
+    # device; each net is small, so memory is not a concern).
+    flow_train_gpu = 4
+    assert flow_train_gpu not in (general_set.gpus or []), (
+        "flow trainer must run on a GPU not used by the ACS"
+    )
+
+    # periodic angles in the sampling basis (note psi_L has period pi)
+    flow_periodic = {
+        input_basis.index(name): (0.0, periodic["mbh"][name])
+        for name in [r"$\phi_{\rm ref}$", r"$\psi_L$", r"$\lambda_L$"]
+    }
+
+    # Per-leaf whitening (shared=False): the 6 MBHBs live in different regions
+    # of parameter space; per-condition maps keep each leaf ~N(0,1) in latent
+    # space so the shared NSF only has to learn per-leaf shape modulations
+    # (selected through the one-hot conditioning).
+    flow = ZukoFlow(
+        dims=len(input_basis),
+        flow_class="NSF",
+        device="cpu",  # proposal-side net; training runs on the executor's GPU
+        conditioning=OneHotLeafConditioning(nleaves_max=nleaves_max_mbh),
+        data_transform=WhiteningTransform(
+            ndim=len(input_basis), periodic=flow_periodic, shared=False
+        ),
+        seed=general_set.random_seed,
+        transforms=8,
+        hidden_features=(128, 128, 128),
+        bins=8,
+    )
+
+    # harvest_every=None: training data comes exclusively from the add/remove
+    # move's per-leaf ring buffer (submit_by_leaf once per MCMC step); setup()
+    # still polls the executor and hot-reloads new weights every step. Until
+    # the first trained snapshot arrives the move is an identity pass-through.
+    flow_move = ConditionalFlowMove(flow, "mbh", executor=None, harvest_every=None)
+
+    # The ProcessExecutor itself is built in setup_recipe (a live executor does
+    # not survive the deepcopy inside CurrentInfoGlobalFit); its parameters are
+    # defined here. With flow_buffer_thin=5 the move submits
+    # (num_repeats/5) * nwalkers = 240 semi-independent rows per leaf per step:
+    # min_train_samples=1500 triggers the first fit ~7 steps after submissions
+    # start and max_buffer_samples=6000 keeps a ~25-step history window per
+    # leaf (staleness is free: splice-tested lag cost ~0 out to >=12 steps).
+    # Overfit guards: val_split="temporal" holds out the NEWEST rows so early
+    # stopping measures fresh-point NLL (the MH factor). train_noise MUST stay
+    # 0 here: the jitter is applied per-dim in the whitened latent space, where
+    # per-condition whitening makes each sky-mode island (and the razor
+    # phase/timing correlations) far thinner than 0.1 -- 0.1 jitter puffed the
+    # training data by 10-100x in those directions and cost the proposals
+    # 10^3-10^5 nats (splice test 2026-07-14: acceptance ceiling ~0.60;
+    # train_noise 0.1 -> 0 + buffer 2k -> 4k rows moved implied acceptance
+    # from ~0.000 to ~0.2-0.3; see tasks/todo_flow_mbh_proposal.md).
+    flow_artifacts_dir = os.path.join(general_set.artifacts_file_dir, "mbh_flow")
+    flow_move.executor_init_kwargs = dict(
+        worker_device=f"cuda:{flow_train_gpu}",
+        epochs_per_round=150,
+        min_train_samples=1500,
+        max_buffer_samples=6000,
+        fit_kwargs=dict(
+            batch_size=1024,
+            lr=1e-3,
+            lr_annealing=True,
+            optimizer="adamw",
+            patience=30,
+            validation_fraction=0.15,
+            val_split="temporal",
+            train_noise=0.0,
+        ),
+        refit_transform_every=1,
+        torch_num_threads=2,
+        seed=general_set.random_seed,
+        save_path=os.path.join(flow_artifacts_dir, "mbh_flow_latest.h5"),
+        diagnostics_dir=flow_artifacts_dir,
+        plot_corner=True,
+    )
+
+    sky_inds_map = dict(cosinc=6, lam=8, sinbeta=9, psi=7, t_ref=10)
+    inner_moves = [
+        (StretchMove(), 0.35),
+        (DEMove(), 0.3),
+        (SkyMove(ind_map=sky_inds_map, coord_frame="lisa", which='lat'), 0.05),
+        (SkyMove(ind_map=sky_inds_map, coord_frame="lisa", which='long'), 0.05),
+        (SkyMove(ind_map=sky_inds_map, coord_frame="lisa", which='both'), 0.05),
+        (flow_move, 0.2),
+    ]
+
+    mbh_settings = MBHSettings(
+        log_dir=general_set.artifacts_file_dir,
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs=waveform_init_kwargs,
+        transform=transform,
+        periodic=periodic,
+        priors=priors,
+        waveform_kwargs=waveform_runtime_kwargs,
+        nleaves_max=nleaves_max_mbh,
+        nleaves_min=nleaves_max_mbh,
+        ndim=11,
+        num_prop_repeats=50,
+        betas=betas,
+        inner_moves=inner_moves
+    )
+
+    wf_metadata = waveform_init_kwargs.copy()
+    _ = wf_metadata.pop("data_td_settings", None)  # remove data_td_settings
+    _ = wf_metadata.pop("orbits", None)  # remove orbits from metadata to avoid issues with serialization
+    wf_metadata['force_backend'] = 'cpu'
+
+
+    mbh_metadata = SourceMetadata(
+        source_type="MBHB",
+        frequency_ranges=frequency_ranges,
+        waveform_model=waveform_model,
+        waveform_model_code_link=waveform_model_code_link,
+        waveform_model_config=wf_metadata,
+        prior_model_code_link=prior_model_code_link,
+    )
+
+    return MBHSetup(mbh_settings), mbh_metadata
 
 
 def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
@@ -449,11 +783,11 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         device="cpu",  # proposal-side net; training runs on the executor's GPU
         conditioning=OneHotLeafConditioning(nleaves_max=nleaves_max_emri),
         data_transform=WhiteningTransform(
-            ndim=len(input_basis), periodic=flow_periodic, shared=True
+            ndim=len(input_basis), periodic=flow_periodic, shared=False
         ),
         seed=general_set.random_seed,
         transforms=8,
-        hidden_features=(128, 256, 128),
+        hidden_features=(128, 128, 128),
         bins=8,
     )
 
@@ -466,14 +800,17 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     # The ProcessExecutor itself is built in setup_recipe (a live executor does
     # not survive the deepcopy inside CurrentInfoGlobalFit); its parameters are
     # defined here. With flow_buffer_thin=5 the move submits
-    # (num_repeats/5) * nwalkers = 120 semi-independent rows per leaf per step:
-    # min_train_samples=1500 triggers the first fit ~13 steps after submissions
-    # start and max_buffer_samples=2000 keeps a ~17-step history window.
+    # (num_repeats/5) * nwalkers = 240 semi-independent rows per leaf per step:
+    # min_train_samples=1500 triggers the first fit ~7 steps after submissions
+    # start and max_buffer_samples=2000 keeps a ~8-step history window per leaf.
     # Anti-memorization guards (the trainer previously collapsed onto the
     # correlated walker tracks, killing acceptance): val_split="temporal" holds
     # out the NEWEST rows so early stopping measures fresh-point NLL (the MH
-    # factor), and train_noise jitters training rows by 0.1 per-dim std as
-    # KDE-style smoothing. epochs/patience sized for ~2k-row buffers.
+    # factor). train_noise stays 0: the jitter acts in whitened latent space
+    # and smears the sharpest posterior directions; the splice-test harness
+    # (2026-07-14) measured implied acceptance 0.36 (noise 0.1) vs 0.44
+    # (noise 0) against a ~0.60 ceiling. The temporal split + patience are the
+    # anti-memorization guards that remain.
     # Monitoring: the latest fit is checkpointed atomically to HDF5 (reload
     # later via ZukoFlow.load(save_path)) and each training round writes loss/
     # val-NLL plots plus a corner overlay of training samples vs flow draws.
@@ -491,7 +828,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
             patience=30,
             validation_fraction=0.15,
             val_split="temporal",
-            train_noise=0.1,
+            train_noise=0.0,
         ),
         refit_transform_every=1,
         torch_num_threads=2,
@@ -556,7 +893,10 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     num_iterations = 500
 
-    source_ids = [3]
+    source_ids = dict(
+        emri=[0, 3],
+        mbhb=[18, 5, 16, 7, 2, 12]
+        )
 
     Tobs = 1 * YRSID_SI
     dt = 5.
@@ -565,10 +905,10 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     head_dir = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "test_flow"
+    base_file_name = "test_flow_joint_sources"
     file_store_dir = head_dir
 
-    gpus = [5]
+    gpus = [5, 6]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -576,8 +916,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 12
-    ntemps = 1
+    nwalkers = 24
+    ntemps = 4
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
@@ -597,13 +937,13 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
-        source_types=["emri"],  #'vgb', 'gb'
-        source_ids=dict(emri=source_ids),
+        source_types=["noise", "mbhb", "emri"],  #'vgb', 'gb'
+        source_ids=source_ids,
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
         store_individual_timeseries=True,
-        orbits_kwargs=dict(force_backend=backend, frame="icrs"),  # icrs
+        orbits_kwargs=dict(force_backend="cpu", frame="icrs"),  # icrs
     )
 
     downsample_kwargs = {
@@ -716,6 +1056,14 @@ def get_global_fit_settings(copy_settings_file=False):
 
     ##################################
     ##################################
+    ###  MBH Settings  ###############
+    ##################################
+    ##################################
+
+    mbh_setup, mbh_metadata = get_mbh_erebor_settings(general_setup)
+
+    ##################################
+    ##################################
     ###  EMRI Settings  ##############
     ##################################
     ##################################
@@ -729,14 +1077,16 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "emri": emri_setup,
-            #"psd": psd_setup,
+            "mbh": mbh_setup,
+            "psd": psd_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,
         setup_function=setup_recipe,
         source_metadata={
             "emri": emri_metadata,
-            #"psd": psd_metadata,
+            "mbh": mbh_metadata,
+            "psd": psd_metadata,
         }
     )
 
