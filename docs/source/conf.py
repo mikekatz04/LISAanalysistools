@@ -10,34 +10,48 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
 import os
+import shutil
 import sys
 
 
 dir_path = os.path.dirname(os.path.realpath(__file__)) + "/../../"
 
-import shutil
-
-shutil.copy(
-    dir_path + "examples/lisatools_tutorial.ipynb",
-    dir_path + "docs/source/lisatools_tutorial.ipynb",
-)
-
-# LISA-response tutorial -- moved from lisa-on-gpu at Phase 3L.7
-# (2026-06-05) as part of the fastlisaresponse -> lisatools.response carve-out.
-shutil.copy(
-    dir_path + "examples/lisa_response_tutorial.ipynb",
-    dir_path + "docs/source/lisa_response_tutorial.ipynb",
-)
-
-# WDM transform tutorial (Phase 3L.7 follow-up, 2026-06-05).
-shutil.copy(
-    dir_path + "examples/wdm_transform_tutorial.ipynb",
-    dir_path + "docs/source/wdm_transform_tutorial.ipynb",
-)
-
 sys.path.insert(0, os.path.abspath("../../"))
 
 here = os.path.abspath(os.path.dirname(__file__))
+
+# Pull the LATW workshop's informational notebooks (tutorials/00_*..08_*) at
+# the pinned dev commit recorded in docs/latw_ref.txt and copy them into
+# docs/source/latw/ so nbsphinx renders them (from their committed outputs;
+# see nbsphinx_execute = "never" below). The exercises under
+# tutorials/further/ are a linked mention in index.rst only -- not fetched or
+# rendered here. fetch_latw lives in docs/, so put docs/ on sys.path first.
+docs_dir = os.path.abspath(os.path.join(here, ".."))  # .../docs
+sys.path.insert(0, docs_dir)
+from fetch_latw import fetch_latw  # noqa: E402
+
+fetch_latw(here)
+
+# Copy the cross-repo developer guides (docs/*.md) into docs/source/devguides/
+# so myst_parser can render them inside the docs tree. Sphinx toctree entries
+# must live within the source directory, so we cannot point a toctree at
+# ../../docs/*.md directly -- we copy them in at build time instead.
+_devguides = [
+    "conventions",
+    "architecture-map",
+    "codebase-map",
+    "global-fit-launch",
+    "stock-stages-and-moves",
+    "multigpu-cluster-validation",
+]
+_devguides_dest = os.path.join(here, "devguides")
+os.makedirs(_devguides_dest, exist_ok=True)
+for _name in _devguides:
+    _src = os.path.join(docs_dir, _name + ".md")
+    if os.path.exists(_src):
+        shutil.copy(_src, os.path.join(_devguides_dest, _name + ".md"))
+    else:
+        print(f"[conf] WARNING: developer guide not found: {_src}")
 
 
 # -- General configuration ---------------------------------------------------
@@ -59,7 +73,11 @@ extensions = [
     "IPython.sphinxext.ipython_console_highlighting",
 ]
 
-source_suffix = [".rst"]
+source_suffix = [".rst", ".md"]
+
+# The LATW workshop notebooks ship with committed outputs; never re-execute
+# them at build time (they need the full LISA dev stack + data to run).
+nbsphinx_execute = "never"
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
@@ -67,7 +85,10 @@ templates_path = ["_templates"]
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+# readme.md is pulled into index.rst via an ``.. include::`` directive, so it
+# must not also be treated as a standalone source document now that ".md" is a
+# recognized source suffix (avoids a spurious orphan / duplicate-heading page).
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "readme.md"]
 
 import sphinx_rtd_theme
 
