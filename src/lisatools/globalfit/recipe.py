@@ -1283,9 +1283,16 @@ def build_gb_moves(
 
         data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
 
-        data_index = cp.asarray(data_index_1).astype(cp.int32)
+        # Build index/factor arrays on the ACA's backend (== the run's
+        # force_backend, shared by ``gb`` / ``gb_wdm_comp``), NOT the
+        # module-level ``cp`` (cupy on any node with cupy importable, even a
+        # CPU run) — otherwise a cupy array reaches the numpy ``gb_wdm_comp.xp``
+        # / numpy ``gb`` consumer below and raises the implicit-conversion
+        # TypeError.
+        _xp = acs.xp
+        data_index = _xp.asarray(data_index_1).astype(_xp.int32)
         # goes in as -h (subtract initial template from data residual)
-        factors = -cp.ones_like(data_index, dtype=cp.float64)
+        factors = -_xp.ones_like(data_index, dtype=_xp.float64)
 
         N_vals = band_N_vals[band_inds]
 
@@ -1315,7 +1322,7 @@ def build_gb_moves(
                 N=N_vals,
                 **waveform_kwargs,
             )
-            max_diff_templates = cp.abs(template_in[0] - acs.linear_data_arr[0]).max()
+            max_diff_templates = _xp.abs(template_in[0] - acs.linear_data_arr[0]).max()
             del template_in
             logger.debug(
                 f"Global GB template generated with max template in/out diff = "
