@@ -27,7 +27,7 @@ from lisatools.sources.emri.waveform import EMRITDIWaveform
 from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform
 from lisatools.globalfit.moves import TDMBHSpecialMove, EMRISpecialMove
 from eryn.moves.tempering import make_ladder
-from eryn.flows import ZukoFlow
+from eryn.flows import ZukoFlow, ModeMixtureFlow
 from eryn.flows.torch.flows import _strip_pickled_keys
 
 log("building settings + data (L1 processing)...")
@@ -98,14 +98,26 @@ emri_move = EMRISpecialMove(
 log("moves built")
 
 def load_flow_cpu(path):
+    """Load a checkpoint onto CPU (the stored config pins the training GPU).
+
+    Dispatches on the presence of the "mixture_state" dataset, which only
+    ModeMixtureFlow writes; the mixture state is restored exactly as
+    ModeMixtureFlow.load does (the class's own load() cannot be used here
+    because it would honour the checkpoint's device=cuda).
+    """
     with h5py.File(path, "r") as h:
         grp = h["flow"]
         cfg = _strip_pickled_keys(json.loads(grp.attrs["config"]))
         cfg["device"] = "cpu"
         cfg["data_transform"] = pickle.loads(bytes(grp["data_transform"][()]))
         cfg["conditioning"] = pickle.loads(bytes(grp["conditioning"][()]))
-        fl = ZukoFlow(**cfg)
+        is_mixture = "mixture_state" in grp
+        fl = (ModeMixtureFlow if is_mixture else ZukoFlow)(**cfg)
         fl.set_weights({k: torch.tensor(np.array(v)) for k, v in grp["weights"].items()})
+        if is_mixture:
+            fl.mode_state = pickle.loads(bytes(grp["mixture_state"][()]))
+            slots = {leaf: len(st.slots) for leaf, st in sorted(fl.mode_state.items())}
+            log(f"  {os.path.basename(path)}: mixture slots per leaf {slots}")
     return fl
 
 ART = "/data/asantini/globalfit/erebor_org_setup/mojito_runs/test_flow_joint_sources_stft_artifacts"

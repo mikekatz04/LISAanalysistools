@@ -148,6 +148,61 @@ joint-space islands are the real objects):
 **Step 6 — capacity bump** (GATED on Step-1 metric still showing within-mode
 gap after Steps 3/5): transforms 8→10, bins 8→12 for MBH.
 
+**Step 7 — mixture measurement gate: RUN 2026-07-14, backend step 290 → FAIL
+(deferred, not refuted).** Exact-MH acceptance, all candidates retrained on
+the same step-290 snapshot (per-leaf numbers are noisy at the ~2x level for
+the failing leaves — 192 draws/leaf — but the magnitudes are robust):
+
+| MBH config (w168)  | overall | L0    | L1    | L2        | L3    | L4    | L5    |
+|--------------------|---------|-------|-------|-----------|-------|-------|-------|
+| live ckpt (noise .1)| 0.002  | 0.005 | 0.007 | 0.001     | 0.000 | 0.000 | 0.000 |
+| noise0 (no pcov)   | 0.067   | 0.081 | 0.114 | 0.116     | 0.063 | 0.020 | 0.007 |
+| noise0 + pcov      | 0.071   | 0.095 | 0.165 | 0.130     | 0.021 | 0.005 | 0.007 |
+| **+ mixture (k8)** | **0.110**| 0.055| 0.251 | **0.325** | 0.006 | 0.007 | 0.015 |
+| + mixture (k12)    | 0.137   | 0.084 | 0.220 | **0.490** | 0.022 | 0.005 | 0.002 |
+
+EMRI (control): pcov 0.493 → mixture 0.589 (clustering returns K=1 on both
+leaves ⇒ wrapper degrades gracefully as designed; the delta is
+conditioning-shape/training noise, not a mixture effect).
+
+**Gate verdict: leaves 3/4/5 never reach the required 0.08 in any config.**
+
+Attribution (each measured, not argued):
+- NOT the mixture density: `dlogq = logq(y) − logq(x)` is 0.5–8.7 nats on
+  every leaf — the exact-mixture MH machinery works. The failure is entirely
+  in the likelihood term: median `dll` = −73…−4821 on L3/4/5 (draws land
+  off-posterior), vs −0.2…−3.7 on L0/1/2.
+- NOT the ceiling: re-ran the splice test at step 290 — same-mode walker
+  splices still accept at **0.57–0.68 on every leaf**, lags free, and
+  **cross-mode splices also 0.51–0.60 per leaf** (the sky images really are
+  degenerate). The headroom is there; the flow can't reach it.
+- NOT staleness: window smear ≈1.0 (w168 all leaves; w290 all but L0).
+- NOT rows-per-island: w290 gives L3/4/5 ~1740 rows/island on a *clean*
+  (smear ≈1.0) window and they still fail (0.005/0.012/0.047). (w290 does
+  destroy L0 — smear 5.77, its window reaches the burn-in migration — a
+  correct detection of the known stale-data mechanism.)
+- The one variable that tracks success is **sky-image occupancy**:
+  L0/L1/L2 occupy 1/2/2 images → acceptance 0.06–0.49; L3/L4/L5 occupy
+  6/4/7 images → ~0.01. The clustering under-resolves the many-image leaves
+  (L3: K=4 vs 6 images, L5: K=4 vs 7) and its K is window-unstable there.
+- **The plan's "over-splitting is nearly free" assumption is FALSE**:
+  k12 fragmenting L3 further pushed its median deficit −668 → −4821 nats.
+  Keep kmax conservative.
+
+**Why the gate is deferred rather than a verdict on the feature:** the
+4–7-image occupancy on L3/4/5 is the frozen legacy of the init-frame bug
+(walkers seeded ~23° off in a rotated frame, captured by whichever image was
+nearest, and the ladder is too cold to hop out; cross-mode splices ≈0 confirm
+they're all near-degenerate). The next launch seeds the TRUE mode, so those
+leaves should look like L0/L1/L2 (1–2 images ⇒ K=1–2), which is exactly the
+regime where the mixture is measured to work (L2: 0.13 → 0.33–0.49). Decision:
+**keep ModeMixtureFlow in the MBH settings** — it is exactness-safe, it is the
+best measured MBH config overall (0.110/0.137 vs 0.071 pcov), and it no-ops
+where K=1 — and re-run this gate on the restarted run's buffers, which is the
+first clean measurement of it. Do NOT tune kmax up in the meantime.
+Harness: `scripts/diagnostics/flow_proposal_harness/` (the scorer now
+dispatches ModeMixtureFlow checkpoints via the `mixture_state` dataset).
+
 ## Phase 3 — acceptance-gated num_repeats (lisatools)
 
 - [ ] Per-leaf cold-chain flow-acceptance counters on
