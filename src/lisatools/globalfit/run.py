@@ -443,8 +443,8 @@ class GlobalFit:
                 self.logger.debug("initializing emri inds to true")
 
                 self.logger.debug("override emri starting coords to be close to the injection")
-                # Env-adjustable; EMRI defaults to 0.0 = exact injection.
-                factor = float(os.environ.get("EMRI_START_FACTOR", "0.0"))
+                # Env-adjustable (EMRI_START_FACTOR=0 -> exact injection).
+                factor = float(os.environ.get("EMRI_START_FACTOR", "1e-5"))
 
                 # Multi-leaf safe: accepts either a flat ``(ndim,)`` injection
                 # (broadcast across all leaves) or a per-leaf ``(nleaves, ndim)``
