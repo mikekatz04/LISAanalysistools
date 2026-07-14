@@ -419,7 +419,10 @@ class GlobalFit:
                     self.logger.debug(
                         "override mbh starting coords to be close to the injection"
                     )
-                    factor = 1e-5
+                    # Starting-point scatter about the injection, env-adjustable:
+                    # MBH_START_FACTOR=0 -> exact injection (as the mojito null
+                    # checks use); larger -> push the starts further out.
+                    factor = float(os.environ.get("MBH_START_FACTOR", "1e-5"))
                     inj = np.asarray(self.curr.source_info["mbh"].injection)
                     if inj.ndim == 1:
                         inj = inj[None, :]
@@ -440,7 +443,8 @@ class GlobalFit:
                 self.logger.debug("initializing emri inds to true")
 
                 self.logger.debug("override emri starting coords to be close to the injection")
-                factor = 0.0
+                # Env-adjustable; EMRI defaults to 0.0 = exact injection.
+                factor = float(os.environ.get("EMRI_START_FACTOR", "0.0"))
 
                 # Multi-leaf safe: accepts either a flat ``(ndim,)`` injection
                 # (broadcast across all leaves) or a per-leaf ``(nleaves, ndim)``
@@ -471,7 +475,8 @@ class GlobalFit:
                     self.logger.debug(
                         "override sobbh starting coords to be close to the injection"
                     )
-                    factor = 1e-5
+                    # Env-adjustable (SOBBH_START_FACTOR=0 -> exact injection).
+                    factor = float(os.environ.get("SOBBH_START_FACTOR", "1e-5"))
                     inj = np.asarray(self.curr.source_info["sobbh"].injection)
                     if inj.ndim == 1:
                         inj = inj[None, :]
