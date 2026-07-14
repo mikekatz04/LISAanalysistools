@@ -22,6 +22,7 @@ variant module) so the ``lite=True`` kwarg works on those classes too.
 
 from __future__ import annotations
 
+from ...base import env_resolve
 from .all_sources import AllSourcesGlobalFit
 from .full_year_combined import FullYearCombinedGlobalFit
 from .gb_no_fg import GBNoForegroundGlobalFit
@@ -52,7 +53,10 @@ _COMMON_LITE = {
     "general.num_iterations": 3,
     "general.nwalkers": 4,
     "general.ntemps": 2,
-    "general.use_gpu": False,  # lite == CPU smoke; pass use_gpu=True to override
+    # lite defaults to a CPU smoke, but compute device is environmental (not a
+    # size knob), so the ``USE_GPU`` env var overrides this default at apply
+    # time (see ``_attach``); an explicit ``use_gpu=`` kwarg still beats both.
+    "general.use_gpu": False,
 }
 
 # all_sources: fixed small grid — nf=720, nt=180 (the validated smoke shape;
@@ -99,7 +103,19 @@ def _attach(cls, table: dict) -> None:
     """Give ``cls`` (and its lite twin, by inheritance) the preset table."""
 
     def lite_overrides(self) -> dict:
-        return dict(table)
+        overrides = dict(table)
+        # Compute device is environmental, not a size knob: the lite preset
+        # defaults to CPU but an explicit ``USE_GPU`` env var overrides that
+        # default (resolved here at apply time, using the table's value as the
+        # CPU fallback). An explicit ``use_gpu=`` kwarg is applied AFTER the
+        # preset in ``_apply_knobs`` and so still wins over both. This is a
+        # deliberate exception to the general "lite preset > env var"
+        # precedence, so ``USE_GPU=1 ... --stock <name>_lite`` runs on the GPU.
+        if "general.use_gpu" in overrides:
+            overrides["general.use_gpu"] = env_resolve(
+                "USE_GPU", bool(overrides["general.use_gpu"]), bool
+            )
+        return overrides
 
     lite_overrides.__doc__ = (
         f"Laptop-smoke preset for ``{cls.option_name}`` (see "
