@@ -504,8 +504,12 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     # each island ~N(0,1) in latent space; the shared NSF learns per-island
     # shape modulations selected through the leaf ⊕ mode one-hot conditioning.
     # Exact-mixture MH: the density factor uses logsumexp_m [log w_m + logq(x|leaf,m)]
-    # evaluated identically at both proposed and current points for MH exactness
-    # (see tasks/todo_flow_mbh_proposal.md Step 5 for validation).
+    # evaluated identically at both proposed and current points for MH exactness.
+    # Implementation is landed and reviewed, but the offline measurement gate
+    # (tasks/todo_flow_mbh_proposal.md Task 7: mixture acceptance >= 0.08 on
+    # leaves 3/4/5) has NOT been run yet against this config. Exactness is
+    # guaranteed by the mixture MH factors regardless, so the risk of an
+    # unmeasured config here is wasted proposals (poor acceptance), not bias.
     # Note: min_train_samples=1500 interacts with per-component min_rows_per_component=25;
     # with 6000-row buffers and ≤8 components this spacing is comfortable.
     flow = ModeMixtureFlow(
