@@ -89,34 +89,31 @@ ceiling" is a q-uncorrected diagnostic — a perfect flow reaches 1.0 (the
 q-ratio cancels the target ratio), so real headroom extends past 0.60.
 Every step below is measured offline with the harness before any run.
 
-**Step 1 — exact-MH scorer upgrade** (small). Score
-lnpdiff = [ℓ(y)−logq(y)] − [ℓ(x)−logq(x)] instead of the q-uncorrected Δℓ
-(logq(draws) already available; add flow.log_prob on current walkers). All
-later measurements use this. Track spread of r = ℓ − logq per config —
-acceptance = E[min(1, e^{r(y)−r(x)})]; perfect flow ⇔ r constant.
+**Step 1 — exact-MH scorer upgrade** ✅ (2026-07-14). Scorer now reports
+lnpdiff = [ℓ(y)−logq(y)] − [ℓ(x)−logq(x)]. Reframed Phase 1: the q-correction
+roughly halves MBH numbers (flow density still too narrow/offset) and slightly
+helps EMRI live. MBH noise0_w168: 0.080 exact-MH (was 0.191 q-uncorr).
 
-**Step 2 — EMRI buffer-size test** (config lever, untested; was the biggest
-single MBH lever). Train EMRI noise0 at 2–3× rows offline, score; if it
-wins, bump EMRI `max_buffer_samples` in the settings.
+**Step 2 — EMRI buffer-size test** ✅ (2026-07-14). EMRI exact-MH: live 0.370,
+noise0_w84 0.309, noise0_w168 0.437, noise0_w240 0.416 (no gain past 2×).
+Applied: EMRI `max_buffer_samples` 2000 → 4000 in the settings.
 
-**Step 3 — `WhiteningTransform(periodic_in_cholesky=True)` in Eryn** (highest
-leverage code change; helps BOTH branches — EMRI has 4 periodic dims with
-razor phase–intrinsic correlations). After CircularShift re-centers each
-periodic dim, include the shifted coords in the per-condition covariance/
-Cholesky (affine, constant Jacobian, exact density; wrap-cut contract and
-rare-crosser caveat unchanged). Default False for back-compat. Unit tests:
-round-trip, log-det, per-condition maps, wrap-cut behavior. Then offline
-train+score both branches.
+**Step 3 — `WhiteningTransform(periodic_in_cholesky=True)`** ✅ implemented
+(Eryn 5a0e577, review Approved; default-False path verified bit-identical;
+129 tests green). Measured: EMRI 0.427 → **0.501**; MBH overall 0.077 → 0.100
+with unimodal leaves up strongly (L1 0.146→0.315, L2 0.146→0.217) and
+multimodal leaves DOWN (island rotation makes the mixture harder for the
+NSF) — strengthens Step 5 as the multimodal fix. Applied:
+`periodic_in_cholesky=True` for both branches in the settings (post-restart
+buffers seed true modes, so the multimodal penalty mostly reflects the
+current frozen-mode state).
 
-**Step 4 — temperature-scaled base** ("same target broadened by 1/β").
-ZukoFlow: optional per-row `base_scale` s in sample/log_prob (base
-N(0, s²I); exact density). ConditionalFlowMove: s = β_row^{−1/2} using the
-move's per-leaf `betas_all`. At ladder ratio 1.2 (β ≥ 0.58) the inflation is
-≤1.31 — well within the Gaussian-broadening approximation; MH corrects the
-rest. Recovers the 3/4 of flow waveform evals currently auto-rejected on hot
-rows via the q(old) tail. Upgrade path if hot acceptance still lags:
-harvest all temps and condition on β as a continuous context feature (also
-tracks per-leaf ladder adaptation + improves mode coverage of buffers).
+**Step 4 — temperature-scaled base** ✅ implemented (Eryn c434068 +
+LAT 345eec2 wiring hook; 25/25 new+move tests green). `base_scale = β^{−1/2}`
+per temperature row from the move's per-leaf ladder; None default
+bit-identical. Effect shows up as hot-row acceptance in the next live run
+(offline harness scores β=1 only). Upgrade path if hot rows still lag:
+harvest all temps, condition on β as continuous context.
 
 **Step 5 — mode-mixture conditioning** (GATED: only if leaves 3/4/5 still
 lag after Step 3). Mode structure is estimated FROM THE BUFFER, per leaf,

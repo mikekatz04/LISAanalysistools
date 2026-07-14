@@ -507,8 +507,14 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         flow_class="NSF",
         device="cpu",  # proposal-side net; training runs on the executor's GPU
         conditioning=OneHotLeafConditioning(nleaves_max=nleaves_max_mbh),
+        # periodic_in_cholesky: decorrelate the shifted periodic angles against
+        # the rest in the per-leaf whitening. Exact-MH offline scoring
+        # (2026-07-14): unimodal leaves up (0.15 -> 0.2-0.3), multimodal leaves
+        # down (island rotation) -- net win now, and per-mode conditioning is
+        # the planned durable fix for multimodal leaves.
         data_transform=WhiteningTransform(
-            ndim=len(input_basis), periodic=flow_periodic, shared=False
+            ndim=len(input_basis), periodic=flow_periodic, shared=False,
+            periodic_in_cholesky=True,
         ),
         seed=general_set.random_seed,
         transforms=8,
@@ -782,8 +788,12 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         flow_class="NSF",
         device="cpu",  # proposal-side net; training runs on the executor's GPU
         conditioning=OneHotLeafConditioning(nleaves_max=nleaves_max_emri),
+        # periodic_in_cholesky: the 4 EMRI phase angles carry razor
+        # correlations with the intrinsic parameters; whitening them jointly
+        # lifted exact-MH offline acceptance 0.43 -> 0.50 (2026-07-14).
         data_transform=WhiteningTransform(
-            ndim=len(input_basis), periodic=flow_periodic, shared=False
+            ndim=len(input_basis), periodic=flow_periodic, shared=False,
+            periodic_in_cholesky=True,
         ),
         seed=general_set.random_seed,
         transforms=8,
@@ -802,15 +812,16 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     # defined here. With flow_buffer_thin=5 the move submits
     # (num_repeats/5) * nwalkers = 240 semi-independent rows per leaf per step:
     # min_train_samples=1500 triggers the first fit ~7 steps after submissions
-    # start and max_buffer_samples=2000 keeps a ~8-step history window per leaf.
+    # start and max_buffer_samples=4000 keeps a ~17-step history window per
+    # leaf (staleness splice-tested free; exact-MH offline scoring 2026-07-14:
+    # 2x buffer lifted EMRI acceptance 0.31->0.44, 3x added nothing).
     # Anti-memorization guards (the trainer previously collapsed onto the
     # correlated walker tracks, killing acceptance): val_split="temporal" holds
     # out the NEWEST rows so early stopping measures fresh-point NLL (the MH
     # factor). train_noise stays 0: the jitter acts in whitened latent space
-    # and smears the sharpest posterior directions; the splice-test harness
-    # (2026-07-14) measured implied acceptance 0.36 (noise 0.1) vs 0.44
-    # (noise 0) against a ~0.60 ceiling. The temporal split + patience are the
-    # anti-memorization guards that remain.
+    # and smears the sharpest posterior directions (exact-MH acceptance 0.25
+    # at noise 0.1 vs 0.31-0.44 at noise 0). The temporal split + patience are
+    # the anti-memorization guards that remain.
     # Monitoring: the latest fit is checkpointed atomically to HDF5 (reload
     # later via ZukoFlow.load(save_path)) and each training round writes loss/
     # val-NLL plots plus a corner overlay of training samples vs flow draws.
@@ -819,7 +830,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         worker_device=f"cuda:{flow_train_gpu}",
         epochs_per_round=150,
         min_train_samples=1500,
-        max_buffer_samples=2000,
+        max_buffer_samples=4000,
         fit_kwargs=dict(
             batch_size=1024,
             lr=1e-3,
