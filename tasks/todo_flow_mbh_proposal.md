@@ -115,13 +115,14 @@ bit-identical. Effect shows up as hot-row acceptance in the next live run
 (offline harness scores β=1 only). Upgrade path if hot rows still lag:
 harvest all temps, condition on β as continuous context.
 
-**Step 5 — mode-mixture conditioning** (GATE MET: Step-3 measurement showed
+**Step 5 — mode-mixture conditioning** ✅ (GATE MET: Step-3 measurement showed
 pcov *hurts* multimodal leaves — L3/4/5 at 0.005–0.012 — while helping
 unimodal ones; this is the fix). **Full implementation plan:**
 `Eryn/docs/superpowers/plans/2026-07-14-mode-mixture-conditioning.md`
 (7 tasks: LeafModeConditioning, estimate_modes GMM+BIC, ModeMixtureFlow
 fit/snapshot + mixture sampling/density, executor test, settings wiring,
-harness measurement gate ≥0.08 on L3/4/5). Design summary — mode structure
+harness measurement gate ≥0.08 on L3/4/5). **Eryn commits e91d6ef, 4f96192 landed + reviewed;
+LAT settings wiring complete (this commit)**. Design summary — mode structure
 is estimated FROM THE BUFFER, per leaf, each training round, trainer-side —
 never imposed (the 8-mode sky lattice was only a diagnostic frame;
 joint-space islands are the real objects):
