@@ -741,8 +741,17 @@ def select_gb_injection_subset_by_snr(
     # suffices: pass walker-0's AnalysisContainer.  ``get_ll_wdm`` wraps a lone
     # AnalysisContainer into a 1-element ACA under the hood, so the data path is
     # identical to the multi-walker band-buffer case.
-    params_phys = gb_info.transform.both_transforms(cp.asarray(sampling[in_band]), xp=cp)
-    di = cp.zeros(params_phys.shape[0], dtype=cp.int32)
+    #
+    # Build the injection params on ``gb_wdm_comp``'s OWN backend, not the
+    # module-level ``cp``: the comp is constructed with the run's
+    # ``force_backend`` (often "cpu" even on a GPU node), so a hardcoded
+    # ``cp.asarray`` would hand a cupy array to a numpy ``self.xp.atleast_2d``
+    # inside ``get_ll_wdm`` and raise the implicit-conversion TypeError.
+    _xp = gb_wdm_comp.xp
+    params_phys = gb_info.transform.both_transforms(
+        _xp.asarray(sampling[in_band]), xp=_xp
+    )
+    di = _xp.zeros(params_phys.shape[0], dtype=_xp.int32)
     if hasattr(gb_wdm_comp, "get_ll_wdm"):
         gb_wdm_comp.get_ll_wdm(params_phys, acs[0], data_index=di, noise_index=di)
     else:
@@ -908,7 +917,7 @@ def subtract_gb_neighbors_from_data(
 
     xp = gb_wdm_comp.xp
     params_phys = gb_info.transform.both_transforms(
-        cp.asarray(sampling[mask]), xp=cp)
+        xp.asarray(sampling[mask]), xp=xp)
     nwalkers = int(curr.general_info.nwalkers)
     params_tiled = xp.tile(xp.asarray(params_phys), (nwalkers, 1))
     data_index = xp.repeat(
