@@ -189,19 +189,47 @@ Attribution (each measured, not argued):
   k12 fragmenting L3 further pushed its median deficit −668 → −4821 nats.
   Keep kmax conservative.
 
-**Why the gate is deferred rather than a verdict on the feature:** the
-4–7-image occupancy on L3/4/5 is the frozen legacy of the init-frame bug
-(walkers seeded ~23° off in a rotated frame, captured by whichever image was
-nearest, and the ladder is too cold to hop out; cross-mode splices ≈0 confirm
-they're all near-degenerate). The next launch seeds the TRUE mode, so those
-leaves should look like L0/L1/L2 (1–2 images ⇒ K=1–2), which is exactly the
-regime where the mixture is measured to work (L2: 0.13 → 0.33–0.49). Decision:
-**keep ModeMixtureFlow in the MBH settings** — it is exactness-safe, it is the
-best measured MBH config overall (0.110/0.137 vs 0.071 pcov), and it no-ops
-where K=1 — and re-run this gate on the restarted run's buffers, which is the
-first clean measurement of it. Do NOT tune kmax up in the meantime.
+**CORRECTION (same day, before this doc was acted on): the multimodality is
+REAL and PERSISTENT — an earlier draft of this section claimed it was the
+frozen legacy of the init-frame bug and would vanish at restart. That was
+wrong.** Measured: `SkyMove` (an explicit sky-mode-hop proposal, weight 3×0.05
+in the MBH inner moves) accepts at **13–15%**, and walkers hop between the 8
+TRUE degenerate lattice images **18–135 times per walker over 290 steps**
+(per-leaf median: L0 32, L1 85, L2 18, L3 26, L4 104, L5 135). Combined with
+cross-mode splice acceptance 0.51–0.60, this says the MBHB sky images are
+genuinely quasi-degenerate and the chains actively explore them. So multi-image
+occupancy is the physically correct posterior, it will still be there after the
+restart, and **the many-image leaves are a standing unsolved problem, not a
+transient.** (The init bug still mattered — it corrupted truths/init/subtraction
+— but it is not what makes L3/4/5 multimodal.)
+
+**Honest verdict on the mixture.** Its measured value is real but narrow and
+leaf-dependent, and it does NOT do the job it was built for:
+- 2-image leaves — big, reproducible win: L2 0.130 → 0.325/0.490 (across two
+  independent scoring passes), L1 0.165 → 0.251.
+- 1-image leaf — small consistent LOSS: L0 0.095 → 0.055 (likely context
+  dilution: kmax=8 adds 8 mostly-unused one-hot slots to the conditioner).
+- 4–7-image leaves (its target) — no effect: ~0.01 with or without.
+Net MBH 0.071 → 0.110 (k8) / 0.137 (k12), i.e. the whole mixture contributes
+~+0.04 overall, while the *config* work (train_noise 0 + buffers + pcov) is what
+took MBH from 0.000 → 0.07. Decision: **keep it** (exactness-safe, best measured
+config, no-ops at K=1 — EMRI control returned K=1 on both leaves), but do not
+treat the multimodal leaves as solved, and do NOT tune kmax up.
 Harness: `scripts/diagnostics/flow_proposal_harness/` (the scorer now
 dispatches ModeMixtureFlow checkpoints via the `mixture_state` dataset).
+
+**What the many-image leaves actually need** (open, for a future session): the
+flow must fit 4–7 degenerate islands *and* the chain is hopping between them
+every few steps, so each island's buffer is both thin and non-persistent. The
+clustering under-resolves them (L5: K=4 vs 7 images) and its K is
+window-unstable. Candidate directions, none measured: (a) build the mode
+lattice ANALYTICALLY from the known sky-degeneracy transformations (the same
+maps `SkyMove` already applies) instead of clustering — the images are exact
+images of each other, so one fitted island + 7 deterministic maps could give an
+8-component mixture with full statistics per component; (b) accept that
+`SkyMove` already handles cross-image moves at 13–15% and restrict the flow to
+within-image proposals by conditioning on the current image label; (c) treat
+`num_repeats` reduction as an EMRI-only win for now.
 
 ## Phase 3 — acceptance-gated num_repeats (lisatools)
 
