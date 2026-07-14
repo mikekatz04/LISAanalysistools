@@ -181,11 +181,18 @@ class TDIonTheFly(LISAToolsParallelModule):
         )
         
         reshape_shape = (self.num_sub, self.tdi_config.nchannels, self.N)
+        # Propagate THIS generator's backend to the output object (as the four
+        # sibling from_tdi_output constructors do): without it the TDIOutput
+        # falls back to get_first_backend(supported_backends()), which resolves
+        # to CUDA on any cupy-equipped box regardless of the generator's actual
+        # backend -- so a CPU/numpy generator's arrays hit a cuda interpolant
+        # in build_spline and raise the nanobind device mismatch.
         return self.from_tdi_output(TDIOutput(
-            self.t_arr, 
-            tdi_amp.reshape(reshape_shape), 
-            tdi_phase.reshape(reshape_shape), 
-            phase_ref.reshape(self.t_arr.shape)
+            self.t_arr,
+            tdi_amp.reshape(reshape_shape),
+            tdi_phase.reshape(reshape_shape),
+            phase_ref.reshape(self.t_arr.shape),
+            force_backend=self.backend.name.split("_")[-1],
         ), fill_splines=return_spline)
     
     def from_tdi_output(self, tdi_output: TDIOutput, fill_splines: Optional[bool] = False) -> FDTDIOutput:
@@ -295,7 +302,8 @@ class TDTDIonTheFly(TDIonTheFly):
     def from_tdi_output(self, tdi_output: TDIOutput, fill_splines: Optional[bool] = False) -> FDTDIOutput:
         assert self.xp.allclose(tdi_output.x, self.t_arr)
         return TDTDIOutput(
-            tdi_output.x, tdi_output.tdi_amp, tdi_output.tdi_phase, tdi_output.phase_ref, fill_splines=fill_splines
+            tdi_output.x, tdi_output.tdi_amp, tdi_output.tdi_phase, tdi_output.phase_ref,
+            fill_splines=fill_splines, force_backend=tdi_output.backend.name.split("_")[-1]
         )
     
 
