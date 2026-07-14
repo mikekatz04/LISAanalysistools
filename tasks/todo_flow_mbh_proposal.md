@@ -261,3 +261,65 @@ within-image proposals by conditioning on the current image label; (c) treat
   genuinely near-degenerate, so occupancies may re-equilibrate once flow
   (cross-mode) proposals start accepting.
 - MBHB SNRs 227–1367; EMRI 53/65 (catalogue).
+
+---
+
+## 2026-07-14 (late): the reparametrization test — and a SkyMove finding
+
+Question asked: instead of *modelling* the sky multimodality (ModeMixtureFlow),
+can a **change of parametrization** remove it? Idea: the degeneracy group G is
+known analytically — `SkyMove` implements its two generators, both exact
+isometries of the sampling basis (|G| = 8). So fold every buffer row to a
+canonical image, train ONE flow on ALL the leaf's rows (8x the data of any
+clustered component), and propose `u ~ q_u ; g ~ Uniform(G) ; x = g(u)` with the
+G-symmetrised density `q_x(x) = (1/8) Σ_g q_u(g⁻¹x)` — exact, no clustering, no
+kmax, no window instability, cross-image jumps for free.
+
+Geometrically it looked perfect: folding to the image nearest a per-leaf
+reference (the antimode-cut trick, needed because G shifts λ and ψ *together*,
+so a naive fundamental domain tears any cloud straddling λ = kπ/2 — leaf 0 split
+K 1→2) collapsed **5 of 6 leaves to K=1 with all 4032 rows**, including leaf 4
+(5 islands × ~800 rows → 1 × 4032), and the folded cloud's marginals matched a
+single image's to 0–20%.
+
+**Measured: it FAILED — 0.016 overall (worse than everything).** The failure is
+diagnostic: the surviving-draw fraction is **0.146 / 0.109 / 0.130 on L0/L1/L2 =
+1/8**, survivors median dll −2.7, the rest −2447. Exactly the identity element
+survives; all 7 mapped images are catastrophic.
+
+**Root cause — `SkyMove`'s sky-mode maps are NOT symmetries of this likelihood.**
+Direct test (`scripts/diagnostics/flow_proposal_harness/map_test.py`): apply each
+group element to a walker's OWN converged params and score against that walker's
+own residual. Identity = 0.0 exactly (test is sound); the other seven cost
+**−32 to −105,000 nats**, every leaf:
+
+| leaf | g1 | g2 | g3 | g4 | g5 | g6 | g7 |
+|------|----|----|----|----|----|----|----|
+| 0 | −81632 | −378 | −77794 | −2388 | −105715 | −2416 | −107595 |
+| 1 | −12302 | −102 | −12527 | −575 | −8077 | −482 | −8384 |
+| 2 | −2575 | −31648 | −18887 | −31165 | −20452 | −16941 | −21544 |
+| 3 | −46 | −722 | −649 | −1988 | −1511 | −582 | −880 |
+| 4 | −2461 | −105 | −2249 | −270 | −2856 | −124 | −3212 |
+| 5 | −3212 | −277 | −3556 | −353 | −5468 | −33 | −3416 |
+
+The images are nonetheless genuinely quasi-degenerate **as regions** —
+cross-mode splices of *real converged samples* accept at 0.51–0.60. So the modes
+exist and are interchangeable; you simply cannot reach them by applying these
+maps. (Marginals of the mapped points match the target image to ~1σ, so the maps
+get the envelope right and the razor-thin correlation structure wrong.)
+
+**Implications, in order of value:**
+1. **`SkyMove` is close to a no-op for mode hopping.** Its logged 13–15%
+   acceptance is dominated by the k=0 identity of `long_transform` (25% of its
+   proposals are the current point → auto-accepted). Real hops are rare, so the
+   sky-mode occupancy in this run is largely **init-frozen** and the per-source
+   sky posteriors are NOT properly explored — a science-quality issue
+   independent of the flow work. (This restores the original "frozen modes"
+   reading; the intermediate "multimodality is dynamic" correction was based on
+   a lattice-labelling artifact.)
+2. **A correct degeneracy transformation is now the highest-value target.** It
+   would fix `SkyMove` *and* unlock the fold (one island, 8× data → the regime
+   where the flow measures 0.25–0.49). Acceptance test is 5 minutes:
+   `map_test.py` must return Δlogl ≈ 0 on all 8 images.
+3. Until then: keep the mixture (it is the best measured config), and do not
+   trust the MBH sky posteriors from runs using the current SkyMove.
