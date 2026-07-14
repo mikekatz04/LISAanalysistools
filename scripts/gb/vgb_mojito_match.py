@@ -41,7 +41,31 @@ from lisatools.sensitivity import XYZ2SensitivityMatrix
 REF = 97729089.327664
 PATH = "/Users/mkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/"
 VGB_L1 = os.path.join(PATH, "data", "VGB", "L1")
-BACKEND = "cpu"; DT = 10.0; TDI_GEN = "2nd generation"; NCH = 3; SENS = "scirdv1"
+def _resolve_backend():
+    """Env-driven backend: USE_GPU (auto|1|0) + GPU_BACKEND (auto|cudaXXx)."""
+    raw = os.environ.get("USE_GPU", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        use_gpu = True
+    elif raw in ("0", "false", "no", "off"):
+        use_gpu = False
+    else:  # unset / "auto"
+        try:
+            import cupy  # noqa: F401
+            use_gpu = True
+        except (ImportError, ModuleNotFoundError):
+            use_gpu = False
+    if not use_gpu:
+        return "cpu"
+    pref = os.environ.get("GPU_BACKEND", "auto").strip().lower()
+    if pref not in ("", "auto", "cuda", "gpu"):
+        return pref
+    try:
+        import cupy
+        return f"cuda{cupy.cuda.runtime.runtimeGetVersion() // 1000}x"
+    except Exception:
+        return "cuda12x"
+BACKEND = _resolve_backend(); print(f"[backend] {BACKEND}", flush=True)
+DT = 10.0; TDI_GEN = "2nd generation"; NCH = 3; SENS = "scirdv1"
 N_DAYS = float(os.environ.get("GB_DAYS", "90")); N_WIN = int(round(N_DAYS * 86400 / DT)); TOBS = N_WIN * DT
 TOPN = int(os.environ.get("GB_TOPN", "3"))
 BAND_UHZ = float(os.environ.get("GB_BAND_UHZ", "5.0"))  # +/- microHertz band half-width

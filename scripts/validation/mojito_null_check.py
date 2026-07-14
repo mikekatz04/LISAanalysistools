@@ -62,6 +62,7 @@ def main():
     print(f"[cfg] data_mode={gs.data_mode} source_ids={gs.mojito_source_ids} "
           f"CHOP_WINDOW={gs.chop_window} DT={gs.dt} "
           f"tobs_target={gs.tobs_target:.4e}s ({gs.tobs_target/86400:.1f}d)", flush=True)
+    print(f"[cfg] use_gpu={gs.use_gpu} gpu_backend={gs.gpu_backend} gpus={gs.gpus}", flush=True)
 
     curr = fit.build()
     gi = curr.general_info

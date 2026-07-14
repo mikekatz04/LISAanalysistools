@@ -36,9 +36,29 @@
 #                 via its RSS watchdog if it blows up).
 #   GB          -> GB_DAYS-day window (gb_mojito_match.py default 365 d).
 #   VGB         -> GB_DAYS-day window (vgb_mojito_match.py default 90 d).
+#
+# Compute backend (all sub-workers, EMRI/MBHB/SOBHB/GB/VGB):
+#   USE_GPU    -> 1/0 to force GPU/CPU; unset -> auto-detect (GPU if `cupy`
+#                 imports in this PY, else CPU).
+#   GPU_BACKEND -> "cuda12x" / "cuda11x" / "cuda13x" (explicit wheel); default
+#                 "auto" resolves the wheel matching this machine's cupy.
+#   GPUS       -> comma-separated device indices for the stock fit
+#                 (e.g. "0" or "2,3"); unset -> device 0 when GPU active.
+#
 # Overridable env: LAT_DIR, PY, MOJITO_DATA_PATH, LOGDIR, TOBS_MONTHS,
 #   FULL_TOBS, OMP_NUM_THREADS, DRY_RUN, GB_TOPN, VGB_TOPN, GB_DAYS,
-#   GB_BAND_UHZ, NULL_CHECK_MEM_GB.
+#   GB_BAND_UHZ, NULL_CHECK_MEM_GB, USE_GPU, GPU_BACKEND, GPUS.
+# Any other env var read by ``lisatools.globalfit.stock.erebor`` (e.g.
+# USE_TDIONFLY, MAKE_PLOTS, GF_NUM_ITER, WAVELET_DUR_MIN/MAX,
+# WINDOW_TUKEY_ALPHA, SYNTHETIC_INJECTIONS, GB_N_SUBBANDS, ...) passes
+# straight through to the null-check worker via the inherited environment.
+# NWALKERS / NTEMPS are pinned to 1 here -- null checks only need a single
+# walker at the exact injection coords.
+#
+# The metric the null check targets:
+#   chi^2 = <r|r> = <d-h|d-h>  ->  source_logL = -0.5 * chi^2
+# and the mismatch = 1 - <d|h>/sqrt(<d|d><h|h>).  A perfect template nulls
+# the data (<r|r>/<d|d> -> 0, mismatch -> 0, source_logL -> 0).
 set -uo pipefail
 
 LAT_DIR="${LAT_DIR:-/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools}"
@@ -69,9 +89,31 @@ mkdir -p "$LOGDIR"
 if command -v brew >/dev/null 2>&1; then
   export PKG_CONFIG_PATH="$(brew --prefix lapack 2>/dev/null)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 fi
+
+# --- compute backend resolution ---
+# USE_GPU unset -> probe cupy in the target PY (matches stock ``cupy_available``);
+# an explicit value (0/1/true/false) is honored verbatim. We resolve here so
+# both the null-check worker and the GB/VGB workers see the same choice.
+if [ -z "${USE_GPU:-}" ]; then
+  if "$PY" -c "import cupy" >/dev/null 2>&1; then
+    USE_GPU=1
+    echo "[compute] cupy import -> USE_GPU=1  (auto-detected)"
+  else
+    USE_GPU=0
+    echo "[compute] cupy not importable in $PY -> USE_GPU=0 (CPU)"
+  fi
+else
+  echo "[compute] USE_GPU=$USE_GPU (explicit)"
+fi
+GPU_BACKEND="${GPU_BACKEND:-auto}"
+GPUS_ENV="${GPUS:-}"  # empty -> stock default (device 0 when USE_GPU=1)
+echo "[compute] GPU_BACKEND=$GPU_BACKEND  GPUS=${GPUS_ENV:-<default>}  OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}"
+
 export DATA_PROCESSOR=mojito MOJITO_DATA_PATH NWALKERS=1 NTEMPS=1 \
        OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" \
-       NULL_CHECK_MEM_GB="${NULL_CHECK_MEM_GB:-24}"
+       NULL_CHECK_MEM_GB="${NULL_CHECK_MEM_GB:-24}" \
+       USE_GPU="$USE_GPU" GPU_BACKEND="$GPU_BACKEND"
+[ -n "$GPUS_ENV" ] && export GPUS="$GPUS_ENV"
 
 # class dir -> the env var that selects its source ids for the stock variant
 # (a function, not a `declare -A` -- macOS ships bash 3.2 with no assoc arrays)
