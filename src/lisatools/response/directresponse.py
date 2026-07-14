@@ -304,7 +304,12 @@ class pyResponseTDI(LISAToolsParallelModule):
         """Set response orbits."""
 
         if orbits is None:
-            orbits = EqualArmlengthOrbits()
+            # Inherit THIS response's backend. A bare EqualArmlengthOrbits()
+            # auto-selects a CUDA backend on any cupy-equipped machine, which
+            # then mismatches a CPU response and trips the tdi_orbits
+            # same-backend assertion below (it propagates here via
+            # ``tdi_orbits = self.response_orbits`` when tdi_orbits is None).
+            orbits = EqualArmlengthOrbits(force_backend=self.backend)
 
         assert isinstance(orbits, Orbits)
 
@@ -320,7 +325,9 @@ class pyResponseTDI(LISAToolsParallelModule):
         """Set TDI orbits."""
 
         if orbits is None:
-            orbits = EqualArmlengthOrbits()
+            # Match this response's backend (see response_orbits setter) so the
+            # same-backend assertion below holds instead of auto-selecting CUDA.
+            orbits = EqualArmlengthOrbits(force_backend=self.backend)
 
         assert isinstance(orbits, Orbits)
         assert orbits.backend.name.split("_")[-1] == self.backend.name.split("_")[-1]
