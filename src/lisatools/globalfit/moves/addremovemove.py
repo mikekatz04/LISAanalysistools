@@ -528,6 +528,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 if flow_move_available:
                     if isinstance(move_here, ConditionalFlowMove):
                         move_here.active_condition = leaf
+                        # Temperature-scaled base (see ConditionalFlowMove.active_betas):
+                        # refresh every repeat from this leaf's live beta ladder, the
+                        # same object the acceptance step below reads via
+                        # temperature_control_here.betas.
+                        move_here.active_betas = temperature_control_here.betas
 
                 # Split the ensemble in half and iterate over these two halves.
                 accepted = np.zeros((ntemps_full, self.nwalkers), dtype=bool)
