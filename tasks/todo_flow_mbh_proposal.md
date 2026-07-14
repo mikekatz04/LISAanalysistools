@@ -323,3 +323,43 @@ get the envelope right and the razor-thin correlation structure wrong.)
    `map_test.py` must return Δlogl ≈ 0 on all 8 images.
 3. Until then: keep the mixture (it is the best measured config), and do not
    trust the MBH sky posteriors from runs using the current SkyMove.
+
+### CORRECTION to the section above: "SkyMove's maps are wrong" was overstated
+
+Challenged (correctly) with: the modes ARE there, and they only appear when
+SkyMove is on — so SkyMove must work. Both are true. Reconciliation, measured:
+
+1. **The maps are structurally CORRECT.** Real converged samples in every
+   reflected/rotated mode sit exactly where the map predicts: agreement
+   0.001–0.06 rad in cosι/ψ/λ/sinβ across all populated images on leaves 3
+   and 5. The maps locate the modes properly.
+2. **The symmetry is APPROXIMATE, and its quality varies enormously.** Applying
+   a map to the TRUE injection params (`truth_map_test.py`, mode peak by
+   construction) costs anywhere from **−21 nats to −76,000 nats** depending on
+   (leaf, group element) — near-exact for a couple of elements per leaf
+   (L3 g1: −21.5, L4 g2: −31.1, L5 g6: −26.7), catastrophic for the rest.
+   Expected: the sky-mode degeneracy is exact for the dominant (2,2) mode in
+   the long-wavelength limit; **PhenomTHM carries higher modes**, which break
+   it, and at SNR 227–1367 the breaking is measured in thousands of nats.
+3. **So SkyMove did its job during burn-in and has since stopped.** Early, the
+   posterior was wide enough that a ~0.05-rad map error was sub-σ → hops
+   accepted → the modes got populated (exactly what was observed). As the
+   posterior tightened, that same error became hundreds of σ → hops now
+   rejected except through the few near-exact elements. The modes we see are
+   real and were reached legitimately; walkers then relaxed to each mode's own
+   local peak, which is why the map no longer lands on them.
+4. Consequently the earlier "SkyMove is close to a no-op" is WRONG as a general
+   statement — it is decisive early and ineffective at convergence — and the
+   claim that this run's sky occupancy is purely init-frozen is not supported
+   either: SkyMove populated modes during burn-in.
+
+**What this means for the flow work:**
+- The fold cannot use these maps *at convergence* (the −2000-nat elements
+  dominate) — the folded-flow failure at 0.016 is fully explained.
+- Since the secondary modes are NOT exact images (each has its own displaced
+  peak and its own correlation structure), a per-mode fitted density — i.e.
+  the mixture — is the right tool in principle after all. It failed only on
+  data starvation per component, not on concept.
+- A fold WOULD work with a *(2,2)-exact* or otherwise corrected transformation,
+  or on a lower-SNR/pre-higher-mode regime. `truth_map_test.py` is the
+  5-minute acceptance test for any candidate map: Δlogl ≈ 0 on all 8 images.
