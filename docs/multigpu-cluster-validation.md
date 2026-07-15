@@ -29,7 +29,7 @@ multi-GPU paths on ≥2 real devices. Run on the GPU cluster in `flr_env`
 
 ### Gate 1 — 1-GPU baseline vs current dev
 ```sh
-GPUS=0 GF_NUM_ITER=50 NWALKERS=8 NTEMPS=4 DATA_PROCESSOR=synthetic MAKE_PLOTS=0 \
+GPUS=0 NUM_ITERATIONS=50 NWALKERS=8 NTEMPS=4 DATA_MODE=synthetic MAKE_DIAGNOSTIC_PLOTS=0 \
   python scripts/run_global.py --stock gb_no_fg
 ```
 Must be statistically identical to pre-P1 dev (same seeds → same chain).

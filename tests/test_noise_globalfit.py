@@ -36,7 +36,7 @@ class NoiseVariantRegistrationTest(unittest.TestCase):
 class NoiseOnlyIntegrationTest(unittest.TestCase):
     def test_noise_only_recovers_injection(self):
         os.environ.setdefault("USE_GPU", "0")
-        os.environ.setdefault("MAKE_PLOTS", "0")
+        os.environ.setdefault("MAKE_DIAGNOSTIC_PLOTS", "0")
         from mpi4py import MPI
         from eryn.state import BranchSupplemental
 

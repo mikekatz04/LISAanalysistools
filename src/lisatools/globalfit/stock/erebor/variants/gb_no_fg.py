@@ -89,7 +89,7 @@ _DEBUG_ENV_PRESET = {
     "CHUNKED_N_SPARSE": "64",
     "CHUNKED_N_CP_SIG": "16",
     "CHUNKED_N_CP_ORBIT": "16",
-    "GF_NUM_ITER": "4",
+    "NUM_ITERATIONS": "4",
 }
 
 
@@ -469,7 +469,7 @@ class GBNoForegroundGlobalFit(EreborFit):
         self.general.tobs_target = env_resolve("TOBS_TARGET", 3 * 86400.0, float)
         self.general.nwalkers = env_resolve("NWALKERS", 3, int)
         self.general.ntemps = env_resolve("NTEMPS", 2, int)
-        self.general.num_iterations = env_resolve("GF_NUM_ITER", 4, int)
+        self.general.num_iterations = env_resolve("NUM_ITERATIONS", 4, int)
         self.gb.nt_sub = env_resolve("CHUNKED_NT_SUB", 64, int)
         self.gb.n_pad = env_resolve("CHUNKED_N_PAD", 8, int)
         self.gb.n_sparse = env_resolve("CHUNKED_N_SPARSE", 64, int)

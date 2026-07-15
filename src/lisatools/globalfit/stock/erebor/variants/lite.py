@@ -13,7 +13,13 @@ Both apply the same per-variant override table (:data:`ALL_SOURCES_LITE`,
 by assigning production values (``fit.general.tobs_target = YRSID_SI``,
 ``fit.gb.num_repeat_proposals = 100``, ...), or scale the full model DOWN
 with ``lite=True`` / individual assignments. Precedence when the preset is
-applied: explicit kwarg > lite preset > env var > class default.
+applied: explicit kwarg > env var > lite preset > class default.
+
+Env vars overrule the lite preset: each preset table has a companion
+``*_LITE_ENV`` map (dotted path -> env-var name) so that a set env var (e.g.
+``NWALKERS=16``, ``USE_GPU=1``) keeps its construction-time value instead of
+being stamped down by the preset. See :meth:`StockGlobalFit.apply_lite` /
+:meth:`StockGlobalFit.lite_env_vars`.
 
 This module is also the single home of the preset tables — they are
 attached to the FULL variant classes here (rather than edited into each
@@ -22,7 +28,6 @@ variant module) so the ``lite=True`` kwarg works on those classes too.
 
 from __future__ import annotations
 
-from ...base import env_resolve
 from .all_sources import AllSourcesGlobalFit
 from .full_year_combined import FullYearCombinedGlobalFit
 from .gb_no_fg import GBNoForegroundGlobalFit
@@ -42,8 +47,14 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Preset tables (dotted fit paths -> lite values)
+# Preset tables (dotted fit paths -> lite values) + their env-var maps
 # ---------------------------------------------------------------------------
+#
+# Each ``*_LITE`` table has a companion ``*_LITE_ENV`` map giving, for every
+# preset path that is ALSO env-backed, the env-var name that overrules it (a
+# set env var keeps its construction-time value; the preset is skipped for
+# that path). Paths with no env var (e.g. fixed-grid ``general.nf``/``nt``)
+# are simply absent from the map — the preset always applies to them.
 
 _COMMON_LITE = {
     # A few iterations is enough for a smoke: it exercises the whole pipeline
@@ -54,9 +65,16 @@ _COMMON_LITE = {
     "general.nwalkers": 4,
     "general.ntemps": 2,
     # lite defaults to a CPU smoke, but compute device is environmental (not a
-    # size knob), so the ``USE_GPU`` env var overrides this default at apply
-    # time (see ``_attach``); an explicit ``use_gpu=`` kwarg still beats both.
+    # size knob): ``USE_GPU`` is in _COMMON_LITE_ENV, so ``USE_GPU=1`` keeps
+    # the env-resolved value and this default is skipped. An explicit
+    # ``use_gpu=`` kwarg is applied after the preset and still beats both.
     "general.use_gpu": False,
+}
+_COMMON_LITE_ENV = {
+    "general.num_iterations": "NUM_ITERATIONS",
+    "general.nwalkers": "NWALKERS",
+    "general.ntemps": "NTEMPS",
+    "general.use_gpu": "USE_GPU",
 }
 
 # all_sources: fixed small grid — nf=720, nt=180 (the validated smoke shape;
@@ -75,12 +93,25 @@ ALL_SOURCES_LITE = {
     "gb.max_freq": 1.0e-2,
     "gb.num_repeat_proposals": 2,
 }
+ALL_SOURCES_LITE_ENV = {
+    **_COMMON_LITE_ENV,
+    # general.nf / general.nt are the fixed-grid override (not env-backed).
+    "general.plot_iterations": "PLOT_ITERATIONS",
+    "gb.min_freq": "GB_MIN_FREQ",
+    "gb.max_freq": "GB_MAX_FREQ",
+    "gb.num_repeat_proposals": "GB_NUM_REPEAT_PROPOSALS",
+}
 
 # gb_no_fg already runs a narrow band; lite shortens the span + proposals.
 GB_NO_FG_LITE = {
     **_COMMON_LITE,
     "general.tobs_target": 14 * 86400.0,
     "gb.num_repeat_proposals": 2,
+}
+GB_NO_FG_LITE_ENV = {
+    **_COMMON_LITE_ENV,
+    "general.tobs_target": "TOBS_TARGET",
+    "gb.num_repeat_proposals": "GB_NUM_REPEAT_PROPOSALS",
 }
 
 # full_year_combined: a month instead of a year (nwalkers/ntemps drop from
@@ -89,6 +120,10 @@ FULL_YEAR_COMBINED_LITE = {
     **_COMMON_LITE,
     "general.tobs_target": 30 * 86400.0,
 }
+FULL_YEAR_COMBINED_LITE_ENV = {
+    **_COMMON_LITE_ENV,
+    "general.tobs_target": "TOBS_TARGET",
+}
 
 # noise fits: quarter-length time grid on the stock 768-layer band.
 NOISE_ONLY_LITE = {
@@ -96,39 +131,45 @@ NOISE_ONLY_LITE = {
     "general.nf": 768,
     "general.nt": 256,
 }
+# general.nf / general.nt are not env-backed on the noise variants.
+NOISE_ONLY_LITE_ENV = dict(_COMMON_LITE_ENV)
 NOISE_SGWB_LITE = dict(NOISE_ONLY_LITE)
+NOISE_SGWB_LITE_ENV = dict(NOISE_ONLY_LITE_ENV)
 
 
-def _attach(cls, table: dict) -> None:
-    """Give ``cls`` (and its lite twin, by inheritance) the preset table."""
+def _attach(cls, table: dict, env_map: dict) -> None:
+    """Give ``cls`` (and its lite twin, by inheritance) the preset table + env map.
+
+    The env map (dotted path -> env-var name) is consulted by
+    :meth:`StockGlobalFit.apply_lite`: a path whose env var is set keeps its
+    construction-time (env-resolved) value and the preset is skipped for it,
+    so env vars overrule the preset (``USE_GPU`` included — no longer a
+    special case).
+    """
 
     def lite_overrides(self) -> dict:
-        overrides = dict(table)
-        # Compute device is environmental, not a size knob: the lite preset
-        # defaults to CPU but an explicit ``USE_GPU`` env var overrides that
-        # default (resolved here at apply time, using the table's value as the
-        # CPU fallback). An explicit ``use_gpu=`` kwarg is applied AFTER the
-        # preset in ``_apply_knobs`` and so still wins over both. This is a
-        # deliberate exception to the general "lite preset > env var"
-        # precedence, so ``USE_GPU=1 ... --stock <name>_lite`` runs on the GPU.
-        if "general.use_gpu" in overrides:
-            overrides["general.use_gpu"] = env_resolve(
-                "USE_GPU", bool(overrides["general.use_gpu"]), bool
-            )
-        return overrides
+        return dict(table)
+
+    def lite_env_vars(self) -> dict:
+        return dict(env_map)
 
     lite_overrides.__doc__ = (
         f"Laptop-smoke preset for ``{cls.option_name}`` (see "
         "``stock/erebor/variants/lite.py``)."
     )
+    lite_env_vars.__doc__ = (
+        f"Preset-path -> env-var map for ``{cls.option_name}`` (env vars "
+        "overrule the lite preset; see ``stock/erebor/variants/lite.py``)."
+    )
     cls.lite_overrides = lite_overrides
+    cls.lite_env_vars = lite_env_vars
 
 
-_attach(AllSourcesGlobalFit, ALL_SOURCES_LITE)
-_attach(GBNoForegroundGlobalFit, GB_NO_FG_LITE)
-_attach(FullYearCombinedGlobalFit, FULL_YEAR_COMBINED_LITE)
-_attach(NoiseOnlyGlobalFit, NOISE_ONLY_LITE)
-_attach(NoiseSGWBGlobalFit, NOISE_SGWB_LITE)
+_attach(AllSourcesGlobalFit, ALL_SOURCES_LITE, ALL_SOURCES_LITE_ENV)
+_attach(GBNoForegroundGlobalFit, GB_NO_FG_LITE, GB_NO_FG_LITE_ENV)
+_attach(FullYearCombinedGlobalFit, FULL_YEAR_COMBINED_LITE, FULL_YEAR_COMBINED_LITE_ENV)
+_attach(NoiseOnlyGlobalFit, NOISE_ONLY_LITE, NOISE_ONLY_LITE_ENV)
+_attach(NoiseSGWBGlobalFit, NOISE_SGWB_LITE, NOISE_SGWB_LITE_ENV)
 
 
 # ---------------------------------------------------------------------------

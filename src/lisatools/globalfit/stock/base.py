@@ -1,22 +1,36 @@
 """Erebor-agnostic machinery for stock global-fit configurations.
 
 A *stock global fit* is a configured-but-unbuilt run: a
-:class:`StockGlobalFit` subclass holds the full building-block pyramid as
+:class:`StockGlobalFit` subclass holds the full building-block stack as
 cheap, picklable settings objects and defers every heavy step (data load,
 domain pour, HDF backend creation, waveform construction) to an explicit
 :meth:`StockGlobalFit.build` call.
 
-The pyramid, bottom-up::
+The stack, top-down::
 
-    atoms (transforms, priors, MoveSpecs, injection tables)
-      -> branch blocks   (GBSettings, MBHSettings, ... dataclasses)
-      -> general block   (GeneralSettings) + recipe (RecipeSpec of stages)
-      -> the fit         (StockGlobalFit variant) --build()--> CurrentInfoGlobalFit
-      -> the run         (GlobalFit(curr, comm).run_global_fit())
+    the run      GlobalFit(curr, comm).run_global_fit()
+       ^  .build() -> GlobalFitSetup       (heavy: built config + live state)
+    the fit      StockGlobalFit variant    (cheap, picklable config)
+       |-- general   (GeneralSettings)                          run-wide
+       |-- branches  (GBSettings, MBHSettings, ... dataclasses) per-branch
+       +-- recipe    (RecipeSpec of stages/MoveSpecs)           run-wide
+             each composed of atoms: transforms, priors, MoveSpecs,
+             injection tables
 
-Every level is swapped by plain assignment or a paired ``add_*``/``pop_*``
-(or ``remove_*``) method; subbing a block replaces everything beneath it and
-nothing above it.
+``general``, the branch blocks and ``recipe`` are **peers** — three
+independently swappable attributes of the fit. Assigning one never replaces
+another (``fit.general = ...`` leaves ``fit.gb`` and ``fit.recipe`` alone);
+only containment nests, so swapping a block replaces the atoms inside it and
+swapping the fit replaces all three. Every block is swapped by plain
+assignment or a paired ``add_*``/``pop_*`` (or ``remove_*``) method.
+
+The one real ordering is **build-time resolution**, not hierarchy:
+:meth:`build` resolves ``general`` first (grid, ``Tobs``, domain, data); each
+branch then inherits any *unset* ``Tobs``/``dt`` — ``EreborFit`` also fills
+``domain_settings``/``log_dir`` — from the built general setup; the recipe is
+materialized last, with every ``MoveSpec.branch`` validated against the
+enabled branches. So general's run-wide choices flow *down* into the branches
+as defaults, but that is defaulting, not ownership.
 
 "Spec" objects (:class:`MoveSpec`, :class:`StageSpec`, :class:`RecipeSpec`)
 are declarative *specifications*: picklable descriptions of the runtime
@@ -29,6 +43,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import typing
+import warnings
 from copy import deepcopy
 
 from ..engine import (
@@ -40,15 +55,17 @@ from ..engine import (
     Setup,
 )
 from ..recipe import PERecipeStep, Recipe, RJRecipeStep, SearchRecipeStep
-from ..run import CurrentInfoGlobalFit
+from ..run import GlobalFitSetup
 
 __all__ = [
+    "ENV_ALIASES",
     "MoveSpec",
     "StageSpec",
     "RecipeSpec",
     "StockGlobalFit",
     "StockRegistry",
     "env_default",
+    "env_is_set",
     "env_resolve",
     "materialize_recipe",
 ]
@@ -61,16 +78,60 @@ __all__ = [
 _BOOL_TRUE = ("1", "true", "yes", "on")
 _BOOL_FALSE = ("0", "false", "no", "off")
 
+#: NAMING RULE: an environment knob is the **capitalized attribute name** of the
+#: field it seeds — ``general.data_mode`` -> ``DATA_MODE``,
+#: ``general.num_iterations`` -> ``NUM_ITERATIONS``. Per-branch blocks add the
+#: branch namespace as a prefix (``gb.min_freq`` -> ``GB_MIN_FREQ``) because the
+#: bare name would collide with the general block's field of the same name.
+#:
+#: This table maps each canonical name to the legacy names it replaced. The
+#: legacy spellings are still honored (with a DeprecationWarning) so existing
+#: runbooks keep working: an unrecognized env var is *silently ignored*, so a
+#: hard rename would quietly downgrade ``GF_NUM_ITER=1000`` to the default
+#: rather than fail loudly. Prefer the canonical name in new code.
+ENV_ALIASES: typing.Dict[str, typing.Tuple[str, ...]] = {
+    "NUM_ITERATIONS": ("GF_NUM_ITER",),
+    "DATA_MODE": ("DATA_PROCESSOR",),
+    "MAKE_DIAGNOSTIC_PLOTS": ("MAKE_PLOTS",),
+    "WAVELET_DURATION_MIN": ("WAVELET_DUR_MIN",),
+    "WAVELET_DURATION_MAX": ("WAVELET_DUR_MAX",),
+    "FIT_SGWB": ("ALL_SOURCES_SGWB",),
+    "GB_USE_ASTROPHYSICAL_F0_MC_PRIOR": ("GB_F0MC_GMM_PRIOR",),
+}
+
+
+def _env_lookup(var: str) -> typing.Optional[str]:
+    """Raw value for ``var``, falling back to its deprecated aliases.
+
+    A present-but-empty variable counts as unset. Returns ``None`` when
+    neither the canonical name nor any alias carries a value.
+    """
+    for name in (var, *ENV_ALIASES.get(var, ())):
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip() != "":
+            if name != var:
+                warnings.warn(
+                    f"Environment variable {name} is deprecated; use {var} instead "
+                    "(the capitalized attribute name it seeds). The old name still "
+                    "works for now.",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+            return raw
+    return None
+
 
 def env_resolve(var: str, default, cast=str):
     """Resolve ``default`` against the environment: env var wins over the hard default.
 
+    ``var`` is the canonical name — the capitalized attribute name (see
+    :data:`ENV_ALIASES`); deprecated aliases are still honored with a warning.
     ``cast`` converts the raw string; ``bool`` accepts 1/0, true/false,
     yes/no, on/off (case-insensitive). Explicit user kwargs always beat this
     (they never consult it).
     """
-    raw = os.environ.get(var)
-    if raw is None or raw.strip() == "":
+    raw = _env_lookup(var)
+    if raw is None:
         return default
     if cast is bool:
         low = raw.strip().lower()
@@ -80,6 +141,17 @@ def env_resolve(var: str, default, cast=str):
             return False
         raise ValueError(f"Environment variable {var}={raw!r} is not a valid boolean.")
     return cast(raw)
+
+
+def env_is_set(var: str) -> bool:
+    """True when ``var`` (or one of its deprecated aliases) holds a non-empty value.
+
+    Mirrors :func:`env_resolve`'s notion of "set" (a present-but-empty var
+    counts as unset), so it reports exactly when ``env_resolve`` would return
+    the environment's value rather than the hard default. Used by
+    :meth:`StockGlobalFit.apply_lite` to let env vars overrule the lite preset.
+    """
+    return _env_lookup(var) is not None
 
 
 def env_default(var: str, default, cast=str):
@@ -394,7 +466,7 @@ class MoveBuildContext:
 
     recipe: Recipe
     engine_info: typing.Any
-    curr: CurrentInfoGlobalFit
+    curr: GlobalFitSetup
     acs: typing.Any
     priors: dict
     state: typing.Any
@@ -473,18 +545,18 @@ def materialize_recipe(
 # The deferred-build fit object
 # ---------------------------------------------------------------------------
 
-# CurrentInfoGlobalFit attributes that only exist after build(); accessing
+# GlobalFitSetup attributes that only exist after build(); accessing
 # them earlier gets a helpful error instead of a bare AttributeError.
 _BUILT_ONLY_ATTRS = ("settings_dict", "current_info", "backend")
 
 
-class StockGlobalFit(CurrentInfoGlobalFit):
+class StockGlobalFit(GlobalFitSetup):
     """Base class for stock (configured-but-unbuilt) global fits.
 
     Subclasses fill in the default building blocks; ``__init__`` stays cheap
     (no data loads, no directories, no waveform or HDF-backend
     construction) and the object stays picklable until :meth:`build` runs.
-    After :meth:`build`, the instance IS the :class:`CurrentInfoGlobalFit`
+    After :meth:`build`, the instance IS the :class:`GlobalFitSetup`
     that :class:`~lisatools.globalfit.run.GlobalFit` consumes.
 
     Subclass contract — override:
@@ -534,7 +606,7 @@ class StockGlobalFit(CurrentInfoGlobalFit):
         main_rank: int = 0,
         **knobs,
     ):
-        # NOTE: deliberately does NOT call CurrentInfoGlobalFit.__init__ —
+        # NOTE: deliberately does NOT call GlobalFitSetup.__init__ —
         # that is the heavy stage, deferred to build().
         self.general = general if general is not None else self.default_general()
         self._branch_names: typing.List[str] = []
@@ -567,9 +639,11 @@ class StockGlobalFit(CurrentInfoGlobalFit):
     def _apply_knobs(self, knobs: dict):
         """Apply constructor kwargs: headline knobs and variant attributes.
 
-        ``lite=True`` applies the variant's laptop-smoke preset FIRST, so
-        every other explicit kwarg still wins over it (precedence:
-        explicit kwarg > lite preset > env var > class default).
+        ``lite=True`` applies the variant's laptop-smoke preset FIRST, but
+        :meth:`apply_lite` skips any preset path whose env var is set (env
+        vars overrule the preset), and every explicit kwarg is applied AFTER
+        the preset (kwargs win over both). Precedence: explicit kwarg > env
+        var > lite preset > class default.
         """
         if knobs.pop("lite", False):
             self.apply_lite()
@@ -596,7 +670,20 @@ class StockGlobalFit(CurrentInfoGlobalFit):
         ``*_lite`` twins — one table shared by both spellings. Empty in the
         base; variants provide it (Erebor's live in
         ``stock/erebor/variants/lite.py``). Precedence when applied:
-        explicit kwarg > lite preset > env var > class default.
+        explicit kwarg > env var > lite preset > class default (a set env var
+        overrules the preset for its path — see :meth:`lite_env_vars`).
+        """
+        return {}
+
+    def lite_env_vars(self) -> dict:
+        """Dotted-path -> environment-variable name for the ``lite`` preset.
+
+        Consulted by :meth:`apply_lite`: when a preset path's env var is set,
+        the env-resolved value (already on the field from construction) is
+        kept and the lite override for that path is skipped, so env vars
+        overrule the preset. Paths absent from this map are always overridden
+        by lite (they are not env-backed). Empty in the base; variants provide
+        it alongside :meth:`lite_overrides`.
         """
         return {}
 
@@ -605,7 +692,9 @@ class StockGlobalFit(CurrentInfoGlobalFit):
 
         Dotted paths resolve against the fit (``"general.num_iterations"``,
         ``"gb.num_repeat_proposals"``, ...); paths whose parent object is
-        missing (e.g. a removed branch) are skipped silently.
+        missing (e.g. a removed branch) are skipped silently. A path whose
+        :meth:`lite_env_vars` env var is set is also skipped, leaving the
+        env-resolved value in place (env vars overrule the preset).
         """
         overrides = self.lite_overrides()
         if not overrides:
@@ -613,7 +702,14 @@ class StockGlobalFit(CurrentInfoGlobalFit):
                 f"{type(self).__name__} has no lite preset (lite_overrides() "
                 "is empty) — override lite_overrides() on the variant."
             )
+        env_vars = self.lite_env_vars()
         for path, value in overrides.items():
+            # Env var overrules the lite preset: if the field's env var is
+            # set, construction already put the env value on the field — keep
+            # it and skip the preset override for this path.
+            var = env_vars.get(path)
+            if var is not None and env_is_set(var):
+                continue
             obj = self
             *parents, leaf = path.split(".")
             try:
@@ -636,8 +732,8 @@ class StockGlobalFit(CurrentInfoGlobalFit):
             raise AttributeError(name)
         if name in type(self)._HEADLINE_KNOBS:
             return getattr(self.general, name)
-        if name in _BUILT_ONLY_ATTRS or hasattr(CurrentInfoGlobalFit, name):
-            # Either a build-product attribute, or a CurrentInfoGlobalFit
+        if name in _BUILT_ONLY_ATTRS or hasattr(GlobalFitSetup, name):
+            # Either a build-product attribute, or a GlobalFitSetup
             # property that failed internally on one (property AttributeErrors
             # re-dispatch here under the property's own name).
             raise AttributeError(
@@ -763,7 +859,7 @@ class StockGlobalFit(CurrentInfoGlobalFit):
         return self._source_info
 
     def build(self, force: bool = False) -> "StockGlobalFit":
-        """Run the full heavy build and become a usable CurrentInfoGlobalFit."""
+        """Run the full heavy build and become a usable GlobalFitSetup."""
         if self.built and not force:
             return self
         if force:
@@ -783,7 +879,7 @@ class StockGlobalFit(CurrentInfoGlobalFit):
         )
         # The recipe spec rides along so the setup_function can materialize it.
         settings.source_metadata["recipe_spec"] = self.recipe
-        CurrentInfoGlobalFit.__init__(self, settings)
+        GlobalFitSetup.__init__(self, settings)
         # Post-deepcopy hook: attach runtime-only objects (e.g. per-branch
         # ``signal_gen`` adapters bound to the runtime general_info) onto the
         # deepcopied Setups — never onto the pre-build config.
@@ -816,19 +912,105 @@ class StockGlobalFit(CurrentInfoGlobalFit):
 
     # -- introspection / cloning / pickling ---------------------------------------
 
-    def describe(self) -> str:
-        """Multi-line summary of the configured blocks and headline knobs."""
+    @staticmethod
+    def _describe_value(value, maxlen: int = 100) -> str:
+        """Concise, tutorial-friendly repr of a settings value.
+
+        Arrays collapse to shape/dtype, classes/callables to their name, and
+        long reprs are truncated — so ``describe(full=True)`` stays readable
+        even with domain factories, priors, and injection tables present.
+        """
+        shape = getattr(value, "shape", None)
+        if shape is not None and hasattr(value, "dtype"):
+            return f"<{type(value).__name__} shape={tuple(shape)} dtype={value.dtype}>"
+        if isinstance(value, type):
+            return value.__name__
+        if callable(value):
+            return f"<callable {getattr(value, '__name__', None) or type(value).__name__}>"
+        r = repr(value)
+        return r if len(r) <= maxlen else r[: maxlen - 1] + "…"
+
+    def all_settings(self) -> dict:
+        """Every configured setting as a nested dict (general + branches + recipe).
+
+        Programmatic companion to ``describe(full=True)``::
+
+            {"option_name": ..., "headline": {knob: value, ...},
+             "general": {field: value, ...},
+             "branches": {name: {field: value, ...}, ...},
+             "recipe": [{"stage": ..., "kind": ..., "moves": [...]}, ...],
+             "setup_function": name}
+
+        Values are the live configured objects (use ``describe(full=True)``
+        for a printable illustration). Reflects the current config only —
+        build-time derived fields (``Tobs``, ``domain_settings``, ...) are
+        resolved later, in :meth:`build`.
+        """
+        general = {f.name: getattr(self.general, f.name) for f in dataclasses.fields(self.general)}
+        branches = {
+            name: {f.name: getattr(blk, f.name) for f in dataclasses.fields(blk)}
+            for name, blk in self.branches.items()
+        }
+        return {
+            "option_name": self.option_name,
+            "headline": {k: getattr(self.general, k, None) for k in self._HEADLINE_KNOBS},
+            "general": general,
+            "branches": branches,
+            "recipe": [
+                {"stage": st.name, "kind": st.kind, "moves": st.move_names()}
+                for st in self.recipe.stages
+            ],
+            "setup_function": getattr(self.setup_function, "__name__", None),
+        }
+
+    def describe(self, full: bool = False) -> str:
+        """Multi-line summary of the configured blocks and headline knobs.
+
+        ``full=False`` (default) shows the headline knobs, branch types, and
+        recipe. ``full=True`` illustrates EVERY setting: all fields of the
+        general block and of each branch block (not just the headline knobs).
+        Build-time derived fields (``Tobs``, ``domain_settings``, ...) show
+        their pre-build value (often ``None``); build the fit to resolve them.
+
+        Once the fit is built, each branch also reports its resolved product
+        (the ``*Setup`` it materialized into, and its sub-band count where the
+        branch has one), so this doubles as the post-build inspection view.
+        For what the *sampler* produced, see
+        :meth:`~lisatools.globalfit.run.GlobalFitSetup.summarize_run`.
+        """
         lines = [
             f"{type(self).__name__} ({self.option_name or 'unregistered'}) — "
             f"{self.description or 'no description'}",
             f"  built: {self.built}",
-            "  headline:",
         ]
-        for key in self._HEADLINE_KNOBS:
-            lines.append(f"    {key} = {getattr(self.general, key, None)!r}")
+        if full:
+            lines.append(f"  general ({type(self.general).__name__}):")
+            for f in dataclasses.fields(self.general):
+                lines.append(
+                    f"    {f.name} = {self._describe_value(getattr(self.general, f.name))}"
+                )
+        else:
+            lines.append("  headline:")
+            for key in self._HEADLINE_KNOBS:
+                lines.append(f"    {key} = {getattr(self.general, key, None)!r}")
         lines.append(f"  branches: {self._branch_names}")
+        # Once built, each branch's resolved Setup (and its sub-band count where
+        # it has one) rides alongside the config block it came from.
+        built_info = self.source_info if self.built else {}
         for name in self._branch_names:
-            lines.append(f"    {name}: {type(getattr(self, name)).__name__}")
+            blk = getattr(self, name)
+            setup = built_info.get(name)
+            extra = ""
+            if setup is not None:
+                band_edges = getattr(setup, "band_edges", None)
+                bands = "" if band_edges is None else f", {len(band_edges) - 1} sub-bands"
+                extra = f"  [built: {type(setup).__name__}{bands}]"
+            lines.append(f"    {name}: {type(blk).__name__}{extra}")
+            if full:
+                for f in dataclasses.fields(blk):
+                    lines.append(
+                        f"      {f.name} = {self._describe_value(getattr(blk, f.name))}"
+                    )
         lines.append("  recipe:")
         for ln in self.list_moves().splitlines():
             lines.append(f"    {ln}")
@@ -902,11 +1084,12 @@ class StockRegistry:
         return cls
 
     def options(self) -> typing.List[typing.Tuple[str, str]]:
-        """List of ``(option_name, description)`` pairs."""
-        return [(name, cls.description) for name, cls in self._classes.items()]
+        """List of ``(option_name, description)`` pairs, sorted by option name."""
+        return [(name, self._classes[name].description) for name in sorted(self._classes)]
 
     def names(self) -> typing.List[str]:
-        return list(self._classes)
+        """Registered option names, alphabetically sorted."""
+        return sorted(self._classes)
 
     def get(self, option: str, *args, **kwargs) -> StockGlobalFit:
         """Instantiate the stock fit registered under ``option``."""

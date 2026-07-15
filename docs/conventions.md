@@ -300,7 +300,7 @@ simultaneously.
 ## Deepcopy / pickle safety (LISA Analysis Tools–wide rule)
 
 Objects in this codebase routinely travel through ``copy.deepcopy``
-(``CurrentInfoGlobalFit`` deepcopies the whole settings tree) and
+(``GlobalFitSetup`` — formerly ``CurrentInfoGlobalFit`` — deepcopies the whole settings tree) and
 ``pickle`` (MPI workers, multiprocessing, cached states). Any object
 graph that transitively holds a raw Python **module** dies in both with
 ``TypeError: cannot pickle 'module' object``. Rules:

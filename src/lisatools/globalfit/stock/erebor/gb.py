@@ -96,9 +96,9 @@ class GBSettings(Settings):
     # ``f0`` and ``Mc`` for the 6-component astrophysical GMM fit from
     # ``heatmap_GMMs.ipynb`` (see :class:`lisatools.sampling.f0_mchirp_prior
     # .F0McGMMSampling`). Requires ``use_chirp_mass=True``. Env:
-    # ``GB_F0MC_GMM_PRIOR``.
+    # ``GB_USE_ASTROPHYSICAL_F0_MC_PRIOR``.
     use_astrophysical_f0_mc_prior: bool = dataclasses.field(
-        default_factory=env_default("GB_F0MC_GMM_PRIOR", False, bool)
+        default_factory=env_default("GB_USE_ASTROPHYSICAL_F0_MC_PRIOR", False, bool)
     )
     # Task-b: narrow per-band WDM slabs. Each per-band sub-band-buffer slab
     # spans a few WDM layers centered on the band instead of the full analysis

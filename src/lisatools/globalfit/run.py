@@ -48,12 +48,25 @@ from .utils import BasicResidualacsLikelihood
 
 
 logger = getLogger(__name__)
-class CurrentInfoGlobalFit:
-    """Manages the current state and configuration information for a global fit run.
+class GlobalFitSetup:
+    """The built configuration + live state of a global fit (the "Setup").
 
-    This class wraps the global fit settings and provides convenient access to
-    various configuration components including source information, rank assignments,
-    GPU assignments, and backend storage.
+    Produced from a :class:`~lisatools.globalfit.engine.GlobalFitSettings` the
+    same way each per-module ``*Setup`` is built from its ``*Settings``: the
+    (heavy) ``__init__`` deepcopies the settings into ``current_info`` and
+    opens the HDF backend, then exposes convenient read-only views over the
+    configuration — source information, branch states/backends, rank and GPU
+    assignments, engine info. This is the object the :class:`GlobalFit` runner
+    consumes; a ``GlobalFitSetup`` does not itself drive the sampler.
+
+    The stock layer builds on this: ``StockGlobalFit`` subclasses
+    ``GlobalFitSetup`` and defers the heavy ``__init__`` to ``.build()`` (see
+    :mod:`lisatools.globalfit.stock`), mirroring ``GlobalFitSettings ->
+    GlobalFitSetup -> GlobalFit(run)``.
+
+    .. note::
+       Historically named ``CurrentInfoGlobalFit``; that name remains as a
+       backward-compatible alias (see below the class).
 
     Args:
         settings: GlobalFitSettings object containing all configuration parameters
@@ -186,6 +199,41 @@ class CurrentInfoGlobalFit:
             if hasattr(setup, "injection") and setup.injection is not None
         }
 
+    def summarize_run(self, label: str = None, temp: int = 0) -> "GFHDFBackend":
+        """Print a compact readout of this fit's *sampled* run and return the reader.
+
+        Reads the fit's own HDF backend, so it works on anything built — a
+        stock fit after ``.run()``, or a :class:`GlobalFitSetup` reopened on an
+        existing output file. Reports the log-likelihood shape and the final
+        value on the ``temp``-th (default cold) chain, then, per branch, the
+        chain shape and how many leaves are alive in the last cold-chain
+        sample (RJ branches vary; fixed-dimension branches report ``-``).
+
+        Use :meth:`~lisatools.globalfit.stock.base.StockGlobalFit.describe` for
+        the *configuration* (and, once built, the resolved per-branch
+        products); this is the complement for what the sampler produced.
+
+        Args:
+            label: Optional heading, e.g. the stock option name.
+            temp: Temperature index to report (0 = the cold chain).
+
+        Returns:
+            The backend reader, for further ``get_chain``/``get_inds`` calls.
+        """
+        reader = self.backend
+        ll = reader.get_log_like()
+        chain, inds = reader.get_chain(), reader.get_inds()
+        print(f"=== {label or type(self).__name__} (sampled) ===")
+        print("branches   :", self.branch_names)
+        print(f"log_like   : {ll.shape}  final chain (temp {temp}):", np.round(ll[-1, temp], 2))
+        for name in self.branch_names:
+            alive = int(inds[name][-1, temp].sum()) if name in inds else "-"
+            print(
+                f"  {name:7s} chain {str(chain[name].shape):26s} "
+                f"alive-leaves(temp {temp},last)={alive}"
+            )
+        return reader
+
 
 def _periodic_names_to_indices(per_dict: dict, transform) -> dict:
     """Translate a per-branch periodic dict to integer parameter indices.
@@ -212,14 +260,25 @@ def _periodic_names_to_indices(per_dict: dict, transform) -> dict:
     return out
 
 
-class GlobalFit:
-    """Main class for managing the global fit MCMC sampling run.
+#: Backward-compatible alias for :class:`GlobalFitSetup` (its former name).
+#: Kept so existing imports (``from lisatools.globalfit.run import
+#: CurrentInfoGlobalFit``) and the legacy ``global_fit_input`` / ``mojito_input``
+#: settings files keep working unchanged.
+CurrentInfoGlobalFit = GlobalFitSetup
 
-    Coordinates MPI processes, GPU assignments, and the MCMC sampling workflow
-    for fitting multiple gravitational wave sources simultaneously.
+
+class GlobalFit:
+    """The global-fit RUNNER: builds and drives the MCMC sampling run.
+
+    Where :class:`GlobalFitSetup` holds the built configuration + state, this
+    class executes it — coordinating MPI rank roles (see
+    :meth:`resolve_rank_roles`), GPU assignments, logging, and the MCMC
+    workflow that fits multiple gravitational-wave source classes jointly. It
+    is composition, not inheritance: a ``GlobalFit`` is constructed with a
+    ``GlobalFitSetup`` (``self.curr``) and reads all configuration through it.
 
     Args:
-        curr: CurrentInfoGlobalFit object containing all run configuration.
+        curr: GlobalFitSetup object containing all run configuration.
         comm: MPI communicator for parallel processing.
     """
 
@@ -251,14 +310,14 @@ class GlobalFit:
             results_rank = spares.pop()
         return main_rank, results_rank, spares
 
-    def __init__(self, curr: CurrentInfoGlobalFit, comm: MPI.Comm):
+    def __init__(self, curr: GlobalFitSetup, comm: MPI.Comm):
         """Main class for managing the global fit MCMC sampling run.
 
         Coordinates MPI processes, GPU assignments, and the MCMC sampling workflow
         for fitting multiple gravitational wave sources simultaneously.
 
         Args:
-            curr: CurrentInfoGlobalFit object containing all run configuration.
+            curr: GlobalFitSetup object containing all run configuration.
             comm: MPI communicator for parallel processing.
         """
 
@@ -302,7 +361,7 @@ class GlobalFit:
 
         Used by whichever rank owns plotting: the main rank at np < 3, the
         dedicated results rank at np >= 3 (parallel-resources plan P2).
-        Opt-out via ``make_diagnostic_plots`` (MAKE_PLOTS env on the stock
+        Opt-out via ``make_diagnostic_plots`` (MAKE_DIAGNOSTIC_PLOTS env on the stock
         classes); cadence via ``plot_iterations`` (PLOT_ITERATIONS env).
         """
         if not getattr(self.curr.general_info, "make_diagnostic_plots", True):

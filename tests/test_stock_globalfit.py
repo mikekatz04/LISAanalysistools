@@ -50,6 +50,11 @@ class StockRegistryTest(unittest.TestCase):
         for _, description in erebor.get_stock_options():
             self.assertTrue(description)
 
+    def test_options_alphabetical(self):
+        names = [name for name, _ in erebor.get_stock_options()]
+        self.assertEqual(names, sorted(names))
+        self.assertEqual(list(erebor.__stock_globalfit_options__), sorted(names))
+
     def test_unknown_option(self):
         with self.assertRaises(ValueError) as ctx:
             erebor.get_stock("nope")
@@ -71,6 +76,48 @@ class StockRegistryTest(unittest.TestCase):
             erebor.get_stock("gb_no_fg", not_a_knob=3)
 
 
+class GlobalFitSetupTest(unittest.TestCase):
+    def test_currentinfo_alias(self):
+        from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFitSetup
+
+        self.assertIs(CurrentInfoGlobalFit, GlobalFitSetup)
+        self.assertTrue(issubclass(erebor.GBNoForegroundGlobalFit, GlobalFitSetup))
+
+    def test_describe_full_lists_all_fields(self):
+        fit = erebor.get_stock("gb_no_fg")
+        headline = fit.describe()
+        full = fit.describe(full=True)
+        # ``random_seed`` is a general-only field (never a headline knob), so
+        # it appears only in the full illustration.
+        self.assertNotIn("random_seed", headline)
+        self.assertIn("random_seed", full)
+        self.assertGreater(len(full.splitlines()), len(headline.splitlines()))
+
+    def test_summarize_run_is_a_globalfitsetup_method(self):
+        # The stock gallery (LATW 02) calls curr.summarize_run(...) on a built
+        # fit instead of defining a local helper; keep that contract.
+        from lisatools.globalfit.run import GlobalFitSetup
+
+        self.assertTrue(callable(getattr(GlobalFitSetup, "summarize_run", None)))
+        self.assertTrue(callable(getattr(erebor.get_stock("gb_no_fg"), "summarize_run", None)))
+
+    def test_describe_reports_built_products_only_when_built(self):
+        # Unbuilt: no built-product annotations (the built path is exercised by
+        # the gallery notebook, which builds for real).
+        self.assertNotIn("[built:", erebor.get_stock("gb_no_fg").describe())
+
+    def test_all_settings_structure(self):
+        fit = erebor.get_stock("gb_no_fg")
+        s = fit.all_settings()
+        self.assertTrue(
+            {"option_name", "headline", "general", "branches", "recipe", "setup_function"}
+            <= set(s)
+        )
+        self.assertIn("num_iterations", s["general"])
+        self.assertIn("gb", s["branches"])
+        self.assertIn("num_repeat_proposals", s["branches"]["gb"])
+
+
 class KnobTest(unittest.TestCase):
     def test_headline_knobs_delegate_to_general(self):
         fit = erebor.get_stock("gb_no_fg", nwalkers=8, base_file_name="knob_test")
@@ -88,7 +135,7 @@ class KnobTest(unittest.TestCase):
 
     def test_clone_honors_debug_preset(self):
         with _EnvGuard(GB_DEBUG=None, TOBS_TARGET=None, NWALKERS=None, NTEMPS=None,
-                       CHUNKED_NT_SUB=None, GF_NUM_ITER=None):
+                       CHUNKED_NT_SUB=None, NUM_ITERATIONS=None):
             clone = erebor.gb_no_fg(debug=True)
             self.assertTrue(clone.debug)
             self.assertEqual(clone.tobs_target, 3 * 86400.0)
@@ -98,7 +145,7 @@ class KnobTest(unittest.TestCase):
     def test_gb_debug_preset(self):
         with _EnvGuard(GB_DEBUG="1", TOBS_TARGET=None, NWALKERS=None, NTEMPS=None,
                        CHUNKED_NT_SUB=None, CHUNKED_N_PAD=None, CHUNKED_N_SPARSE=None,
-                       CHUNKED_N_CP_SIG=None, CHUNKED_N_CP_ORBIT=None, GF_NUM_ITER=None):
+                       CHUNKED_N_CP_SIG=None, CHUNKED_N_CP_ORBIT=None, NUM_ITERATIONS=None):
             fit = erebor.get_stock("gb_no_fg")
             self.assertTrue(fit.debug)
             self.assertEqual(fit.tobs_target, 3 * 86400.0)
@@ -130,6 +177,43 @@ class KnobTest(unittest.TestCase):
         with self.assertRaises(AttributeError) as ctx:
             fit.branch_names
         self.assertIn("build()", str(ctx.exception))
+
+
+class EnvNamingTest(unittest.TestCase):
+    """An env knob is the capitalized attribute name; legacy spellings alias to it."""
+
+    def test_canonical_name_matches_attribute(self):
+        with _EnvGuard(NUM_ITERATIONS="7", DATA_MODE="synthetic"):
+            fit = erebor.get_stock("gb_no_fg")
+            self.assertEqual(fit.general.num_iterations, 7)      # NUM_ITERATIONS
+            self.assertEqual(fit.general.data_mode, "synthetic")  # DATA_MODE
+
+    def test_canonical_wins_over_legacy_alias(self):
+        with _EnvGuard(NUM_ITERATIONS="7", GF_NUM_ITER="99"):
+            self.assertEqual(erebor.get_stock("gb_no_fg").general.num_iterations, 7)
+
+    def test_legacy_alias_still_honored_and_warns(self):
+        # A hard rename would SILENTLY ignore the old name (env vars are not
+        # validated), so the legacy spelling must keep working — loudly.
+        with _EnvGuard(NUM_ITERATIONS=None, GF_NUM_ITER="42"):
+            with self.assertWarns(DeprecationWarning):
+                fit = erebor.get_stock("gb_no_fg")
+            self.assertEqual(fit.general.num_iterations, 42)
+
+    def test_legacy_data_processor_alias(self):
+        with _EnvGuard(DATA_MODE=None, DATA_PROCESSOR="synthetic"):
+            with self.assertWarns(DeprecationWarning):
+                fit = erebor.get_stock("gb_no_fg")
+            self.assertEqual(fit.general.data_mode, "synthetic")
+
+    def test_alias_table_keys_are_upper_case(self):
+        from lisatools.globalfit.stock.base import ENV_ALIASES
+
+        for canonical, legacy in ENV_ALIASES.items():
+            self.assertEqual(canonical, canonical.upper())
+            for old in legacy:
+                self.assertEqual(old, old.upper())
+                self.assertNotEqual(old, canonical)
 
 
 class PickleTest(unittest.TestCase):
@@ -291,7 +375,7 @@ class DataProcessorSwapTest(unittest.TestCase):
             SyntheticGBProcessingStep,
         )
 
-        with _EnvGuard(DATA_PROCESSOR="synthetic"):
+        with _EnvGuard(DATA_MODE="synthetic"):
             gs = erebor.get_stock("gb_no_fg").make_general_settings()
         self.assertIs(gs.data_processor_class, SyntheticGBProcessingStep)
 
@@ -423,6 +507,32 @@ class LiteVariantTest(unittest.TestCase):
         self.assertEqual(
             fit.gb.num_repeat_proposals, heavy.gb.num_repeat_proposals
         )
+
+    # -- env vars overrule the lite preset (precedence: kwarg > env > lite) ---
+    def test_env_overrules_lite(self):
+        with _EnvGuard(NWALKERS="16", NUM_ITERATIONS="9", NTEMPS=None, USE_GPU=None):
+            fit = erebor.get_stock("gb_no_fg_lite")
+            self.assertEqual(fit.general.nwalkers, 16)       # env beats lite 4
+            self.assertEqual(fit.general.num_iterations, 9)  # env beats lite 3
+            self.assertEqual(fit.general.ntemps, 2)          # no env -> lite 2
+
+    def test_use_gpu_env_overrules_lite(self):
+        # USE_GPU is folded into the general env>lite mechanism (no longer a
+        # bespoke special case): the env var overrules the lite CPU default.
+        with _EnvGuard(USE_GPU="1", NWALKERS=None, NTEMPS=None, NUM_ITERATIONS=None):
+            self.assertIs(erebor.get_stock("gb_no_fg_lite").general.use_gpu, True)
+        with _EnvGuard(USE_GPU=None):
+            self.assertIs(erebor.get_stock("gb_no_fg_lite").general.use_gpu, False)
+
+    def test_kwarg_beats_env_beats_lite(self):
+        with _EnvGuard(NWALKERS="16"):
+            fit = erebor.get_stock("gb_no_fg_lite", nwalkers=8)
+            self.assertEqual(fit.general.nwalkers, 8)  # explicit kwarg wins
+
+    def test_gb_branch_env_overrules_lite(self):
+        with _EnvGuard(GB_NUM_REPEAT_PROPOSALS="50"):
+            fit = erebor.get_stock("gb_no_fg_lite")
+            self.assertEqual(fit.gb.num_repeat_proposals, 50)  # env beats lite 2
 
 
 class SyntheticFallbackTest(unittest.TestCase):

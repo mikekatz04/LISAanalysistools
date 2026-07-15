@@ -7,7 +7,7 @@ Both variants fit the LISA noise — there are no GW *source* branches:
 * ``noise_sgwb`` — the same, plus a power-law stochastic GW background
   (``sgwb``). Built end-to-end; its SGWB posterior is not validated here.
 
-Data (one knob, ``data_mode`` / env ``DATA_PROCESSOR``):
+Data (one knob, ``data_mode`` / env ``DATA_MODE``):
 
 * ``"mojito"`` (default) — the **real mojito NOISE brick**
   (``<mojito_data_path>/data/INSTRUMENT/L1/NOISE_*``), downsampled onto the
@@ -135,7 +135,7 @@ class NoiseGeneralSettings(EreborGeneralSettings):
     # draw from the injected covariance. Auto-falls back to synthetic when
     # the brick / mojito folder is missing.
     data_mode: str = dataclasses.field(
-        default_factory=env_default("DATA_PROCESSOR", "mojito", str)
+        default_factory=env_default("DATA_MODE", "mojito", str)
     )
     noise_seed: int = dataclasses.field(default_factory=env_default("NOISE_SEED", 0, int))
     t_start: float = 0.0

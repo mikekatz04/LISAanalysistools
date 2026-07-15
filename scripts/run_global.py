@@ -80,7 +80,7 @@ if __name__ == "__main__":
             "  srun -n 3 --gpus-per-node=<G> python scripts/run_global.py --stock <name>\n"
             "GPU count is a knob, not a rank: GPUS=0,1 selects the local devices the\n"
             "main rank drives (USE_GPU=0 forces CPU). Common env: NWALKERS, NTEMPS,\n"
-            "GF_NUM_ITER, DATA_PROCESSOR, TOBS_TARGET, MAKE_PLOTS."
+            "NUM_ITERATIONS, DATA_MODE, TOBS_TARGET, MAKE_DIAGNOSTIC_PLOTS."
         ),
     )
 

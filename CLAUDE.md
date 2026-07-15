@@ -188,19 +188,31 @@ fit.run()                              # build -> GlobalFit -> run_global_fit
 Every variant's data pipeline swaps with one knob: `fit.general.data_mode`
 (`"mojito"` default everywhere; `"synthetic"` builds all streams in-process
 with no external data; all_sources also keeps legacy `"sangria"`). Env:
-`DATA_PROCESSOR=<mode>`. An explicit `data_processor_class` swap always wins.
+`DATA_MODE=<mode>`. An explicit `data_processor_class` swap always wins.
 
 Architecture (building-block pyramid, `stock/base.py` + `stock/erebor/`):
-`StockGlobalFit` **inherits `CurrentInfoGlobalFit`** with the heavy
+`StockGlobalFit` **inherits `GlobalFitSetup`** (the built config/state object,
+formerly `CurrentInfoGlobalFit` — the name lives on as an alias) with the heavy
 `super().__init__` deferred to `.build()`; the per-branch knob layer is the
 existing `*Settings` dataclasses (variants fill defaults via subclasses);
 the recipe is a declarative `RecipeSpec` of stages/`MoveSpec`s materialized
 by the variant's module-level `setup_recipe`. Env vars resolve as field
-defaults (*explicit kwarg > env var > hard default*). Waveform-path
-defaults: SOBBH TDI-on-the-fly, MBH legacy phentax, EMRI legacy — per-branch
-`use_tdionfly` knobs; `USE_TDIONFLY` env flips both.
+defaults (*explicit kwarg > env var > lite preset > hard default* — a set env
+var overrules a `*_lite` preset via each variant's `lite_env_vars()` map).
+Waveform-path defaults: SOBBH TDI-on-the-fly, MBH legacy phentax, EMRI legacy
+— per-branch `use_tdionfly` knobs; `USE_TDIONFLY` env flips both.
 
 Rules:
+
+0. **Env knob = the capitalized attribute name.** An environment knob is
+   named for the field it seeds: `general.data_mode` → `DATA_MODE`,
+   `general.num_iterations` → `NUM_ITERATIONS`. Per-branch blocks prefix the
+   branch namespace (`gb.min_freq` → `GB_MIN_FREQ`) since the bare name would
+   collide with the general block's field. Never invent a new word for a knob
+   that already has an attribute name. Renaming a knob must go through
+   `stock/base.py::ENV_ALIASES` (canonical → legacy names, honored with a
+   `DeprecationWarning`): an unrecognized env var is *silently ignored*, so a
+   hard rename would quietly downgrade an existing runbook instead of failing.
 
 1. **No new global-fit settings files.** A new run variant is a
    `StockGlobalFit` subclass in `lisatools.globalfit.stock.<family>/variants/`

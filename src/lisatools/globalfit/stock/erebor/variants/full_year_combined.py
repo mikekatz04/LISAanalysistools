@@ -94,10 +94,10 @@ class FullYearGeneralSettings(EreborGeneralSettings):
     # construction (full span = 1 yr by default); env TOBS_TARGET wins.
     tobs_target: typing.Optional[float] = None
     wavelet_duration_min: float = dataclasses.field(
-        default_factory=env_default("WAVELET_DUR_MIN", 40000.0, float)
+        default_factory=env_default("WAVELET_DURATION_MIN", 40000.0, float)
     )
     wavelet_duration_max: float = dataclasses.field(
-        default_factory=env_default("WAVELET_DUR_MAX", 48000.0, float)
+        default_factory=env_default("WAVELET_DURATION_MAX", 48000.0, float)
     )
     min_freq: float = 1e-4
     max_freq: float = 2.5e-2
@@ -116,7 +116,7 @@ class FullYearGeneralSettings(EreborGeneralSettings):
     # "mojito": L1 loader + synthetic noise/foreground; "synthetic": build
     # every stream in-process (no mojito folder needed).
     data_mode: str = dataclasses.field(
-        default_factory=env_default("DATA_PROCESSOR", "mojito", str)
+        default_factory=env_default("DATA_MODE", "mojito", str)
     )
     mojito_source_ids: dict = dataclasses.field(default_factory=default_source_ids)
     # Mojito data window chopping (test/validation path): a merger-centered

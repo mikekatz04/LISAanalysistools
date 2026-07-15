@@ -20,7 +20,7 @@ The global fit separates its two parallel axes:
 
 Spare ranks never pay the data build: `scripts/run_global.py` resolves the
 roles *before* building, so only the main rank (and the saver at np≥3)
-construct the heavy `CurrentInfoGlobalFit`.
+construct the heavy `GlobalFitSetup` (formerly `CurrentInfoGlobalFit`).
 
 ## Commands
 
@@ -47,8 +47,8 @@ fit.build()
 fit.run()          # np=1; run under mpiexec for the saver-rank layout
 ```
 
-Common env knobs: `NWALKERS`, `NTEMPS`, `GF_NUM_ITER`, `DATA_PROCESSOR`
-(`mojito`/`synthetic`), `TOBS_TARGET`, `MAKE_PLOTS`, `GPUS`, `USE_GPU`,
+Common env knobs: `NWALKERS`, `NTEMPS`, `NUM_ITERATIONS`, `DATA_MODE`
+(`mojito`/`synthetic`), `TOBS_TARGET`, `MAKE_DIAGNOSTIC_PLOTS`, `GPUS`, `USE_GPU`,
 `GPU_BACKEND`.
 
 **Threading policy (2026-07): MPI-only — no OMP.** `run_global.py` pins

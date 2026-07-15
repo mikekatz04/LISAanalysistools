@@ -158,7 +158,7 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     # present branch's stream in-process (no external data needed);
     # "sangria" (legacy) loads the LDC training file.
     data_mode: str = dataclasses.field(
-        default_factory=env_default("DATA_PROCESSOR", "mojito", str)
+        default_factory=env_default("DATA_MODE", "mojito", str)
     )
     # Mojito-mode source selection per class (GB loads the whole galaxy
     # file; the id list just gates inclusion). Filtered by the branches
@@ -206,13 +206,13 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
         default_factory=env_default("GALFOR_MODULATION_PATH", None, str)
     )
 
-    # --- opt-in SGWB branch (env ALL_SOURCES_SGWB=1) ---
+    # --- opt-in SGWB branch (env FIT_SGWB=1) ---
     # Default off keeps the six-branch behaviour unchanged; when on, a
     # power-law SGWB is fit jointly with psd+galfor through the same PSDMove.
     # Note: the stock data processors do not yet inject an SGWB, so enable
     # this only with data that contains one (or extend the processor).
     fit_sgwb: bool = dataclasses.field(
-        default_factory=env_default("ALL_SOURCES_SGWB", False, bool)
+        default_factory=env_default("FIT_SGWB", False, bool)
     )
     sgwb_injection: typing.Sequence[float] = dataclasses.field(
         default_factory=lambda: [-9.5, 2.0 / 3.0]

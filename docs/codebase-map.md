@@ -87,7 +87,8 @@ picklable, unbuilt run config; the `erebor` family (`EreborFit`,
 `EreborGeneralSettings`) plus per-branch `*Settings`/`*Setup` dataclasses
 (`GBSettings`, `MBHSettings`, `EMRISettings`, `SOBBHSettings`, `PSDSettings`,
 `GalForSettings`) and a declarative `RecipeSpec` of `StageSpec`/`MoveSpec`.
-`.build()` → `CurrentInfoGlobalFit`; `GlobalFit(curr, comm).run_global_fit()`.
+`.build()` → `GlobalFitSetup` (formerly `CurrentInfoGlobalFit`, still an alias);
+`GlobalFit(curr, comm).run_global_fit()`.
 
 ```
 DomainSettingsBase ──paired──> DomainBase (TD/FD/STFT/WDM Signal)
@@ -100,7 +101,7 @@ DomainSettingsBase ──paired──> DomainBase (TD/FD/STFT/WDM Signal)
 signal_gen  ← response.* (pyResponseTDI / *TDIonTheFly) ← sources.* waveforms
 
 Global fit:  *Settings (branch blocks) + RecipeSpec (stages/moves)
-             └─ StockGlobalFit.build() ─> CurrentInfoGlobalFit
+             └─ StockGlobalFit.build() ─> GlobalFitSetup
                 └─ GlobalFit.run_global_fit()  [eryn EnsembleSampler + moves/]
 ```
 

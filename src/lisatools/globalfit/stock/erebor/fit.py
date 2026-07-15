@@ -56,18 +56,18 @@ class EreborGeneralSettings(GeneralSettings):
 
     # --- run shape (env-backed) ---
     num_iterations: int = dataclasses.field(
-        default_factory=env_default("GF_NUM_ITER", 500, int)
+        default_factory=env_default("NUM_ITERATIONS", 500, int)
     )
     nwalkers: int = dataclasses.field(default_factory=env_default("NWALKERS", 4, int))
     ntemps: int = dataclasses.field(default_factory=env_default("NTEMPS", 2, int))
     random_seed: int = 103209
     backup_iter: int = 5
     main_file_key: str = "testing"
-    # Diagnostic plotting during the run. MAKE_PLOTS=0 disables the eryn
+    # Diagnostic plotting during the run. MAKE_DIAGNOSTIC_PLOTS=0 disables the eryn
     # diagnostic plots entirely (fastest, and dodges plot-only crashes);
     # PLOT_ITERATIONS sets how many sampler iterations between plot refreshes.
     make_diagnostic_plots: bool = dataclasses.field(
-        default_factory=env_default("MAKE_PLOTS", True, bool)
+        default_factory=env_default("MAKE_DIAGNOSTIC_PLOTS", True, bool)
     )
     plot_iterations: int = dataclasses.field(
         default_factory=env_default("PLOT_ITERATIONS", 100, int)
@@ -91,10 +91,10 @@ class EreborGeneralSettings(GeneralSettings):
     nf: typing.Optional[int] = None
     nt: typing.Optional[int] = None
     wavelet_duration_min: float = dataclasses.field(
-        default_factory=env_default("WAVELET_DUR_MIN", 3600.0, float)
+        default_factory=env_default("WAVELET_DURATION_MIN", 3600.0, float)
     )
     wavelet_duration_max: float = dataclasses.field(
-        default_factory=env_default("WAVELET_DUR_MAX", 4400.0, float)
+        default_factory=env_default("WAVELET_DURATION_MAX", 4400.0, float)
     )
     min_freq: float = 1e-4
     max_freq: float = 2.5e-2
@@ -113,10 +113,10 @@ class EreborGeneralSettings(GeneralSettings):
     # swapped one in wholesale. Allowed values are variant-defined (every
     # variant supports "synthetic"; gb_no_fg/full_year default "mojito",
     # all_sources defaults "sangria"). One assignment (or
-    # DATA_PROCESSOR=<mode>) swaps the whole data pipeline; an explicit
+    # DATA_MODE=<mode>) swaps the whole data pipeline; an explicit
     # ``data_processor_class`` always wins over this knob.
     data_mode: str = dataclasses.field(
-        default_factory=env_default("DATA_PROCESSOR", "mojito", str)
+        default_factory=env_default("DATA_MODE", "mojito", str)
     )
     # Start time of the synthetic data stream (mojito/sangria modes pull the
     # start from the data files). Default 10,000 s — NOT 0 — so the TDI2
