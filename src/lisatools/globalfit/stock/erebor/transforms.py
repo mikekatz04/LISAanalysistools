@@ -25,6 +25,29 @@ def f_s_to_ms(x):
     return x * 1e3
 
 
+def mchirp_to_fdot_pair(f0_Hz, Mc):
+    """``(f0[Hz], Mc[Msol]) -> (f0[Hz], fdot[Hz/s])`` via the monochromatic-GB relation.
+
+    Named at module scope so the containing :class:`TransformContainer` stays
+    picklable. Consumers pair this with the single-param ``f0 -> f_ms_to_s``
+    transform so the sampling basis carries ``f0`` in mHz linearly and Mc in
+    solar masses, while the physical basis receives ``f0`` in Hz and fdot in
+    Hz/s (with fddot = 0 filled elsewhere).
+    """
+    from gbgpu.utils.utility import get_fdot
+
+    fdot = get_fdot(f=f0_Hz, Mc=Mc)
+    return f0_Hz, fdot
+
+
+def fdot_to_mchirp_pair(f0_Hz, fdot):
+    """Inverse of :func:`mchirp_to_fdot_pair`: ``(f0[Hz], fdot) -> (f0[Hz], Mc[Msol])``."""
+    from gbgpu.utils.utility import get_chirp_mass_from_f_fdot
+
+    Mc = get_chirp_mass_from_f_fdot(f0_Hz, fdot)
+    return f0_Hz, Mc
+
+
 def ten_to_the_x(x):
     """Return ``10 ** x`` (named 1-arg transform for pickling support).
 

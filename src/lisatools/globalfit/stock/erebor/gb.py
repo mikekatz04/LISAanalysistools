@@ -23,7 +23,14 @@ from ...hdfbackend import GBHDFBackend
 from ...loginfo import init_logger
 from ...priors.gbpriors import get_fdot_mojito
 from ...state import GBState
-from .transforms import f_ms_to_s, f_s_to_ms, make_gb_transform_container, ten_to_the_x
+from .transforms import (
+    f_ms_to_s,
+    f_s_to_ms,
+    fdot_to_mchirp_pair,
+    make_gb_transform_container,
+    mchirp_to_fdot_pair,
+    ten_to_the_x,
+)
 
 @dataclasses.dataclass
 class GBSettings(Settings):
@@ -69,6 +76,28 @@ class GBSettings(Settings):
     # untouched. Env: ``GB_N_SUBBANDS``.
     n_subbands: int = dataclasses.field(
         default_factory=env_default("GB_N_SUBBANDS", 1024, int)
+    )
+    # Sampling-basis knob: sample **chirp mass ``Mc``** at slot 2 (Msol)
+    # instead of ``fdot``. The physical basis is unchanged (fdot); the
+    # sampling->physical :class:`TransformContainer` gets a multi-parameter
+    # ``(f0, Mc) -> (f0, fdot)`` transform via
+    # :func:`gbgpu.utils.utility.get_fdot`, and ``key_map={"Mc": "fdot"}``
+    # places the sampled Mc at the fdot slot before the transform runs.
+    # **Default: True** -- Mc is the physically meaningful axis (fdot varies
+    # by ~10 orders of magnitude across the GB band, while Mc is ~O(1) Msol
+    # everywhere), and the F-stat proposal / astrophysical joint prior both
+    # live natively in the Mc axis. Set ``GB_USE_CHIRP_MASS=0`` to fall back
+    # to the legacy fdot sampling basis (requires ``fdot_lims`` populated).
+    use_chirp_mass: bool = dataclasses.field(
+        default_factory=env_default("GB_USE_CHIRP_MASS", True, bool)
+    )
+    # When ``use_chirp_mass`` is on, swap the separate uniform priors on
+    # ``f0`` and ``Mc`` for the 6-component astrophysical GMM fit from
+    # ``heatmap_GMMs.ipynb`` (see :class:`lisatools.sampling.f0_mchirp_prior
+    # .F0McGMMSampling`). Requires ``use_chirp_mass=True``. Env:
+    # ``GB_F0MC_GMM_PRIOR``.
+    use_astrophysical_f0_mc_prior: bool = dataclasses.field(
+        default_factory=env_default("GB_F0MC_GMM_PRIOR", False, bool)
     )
     # Task-b: narrow per-band WDM slabs. Each per-band sub-band-buffer slab
     # spans a few WDM layers centered on the band instead of the full analysis
@@ -135,8 +164,20 @@ class GBSetup(Setup, GBSettings):
         (``alpha`` / ``sin_delta``) -- the run frame is ICRS. ``A`` is
         sampled in ``ln A`` (the ``np.exp`` transform maps to the physical
         amplitude), ``f0`` in mHz.
+
+        When :attr:`GBSettings.use_chirp_mass` is on, slot 2 of the sampling
+        basis carries ``Mc`` (chirp mass, Msol) instead of ``fdot``. A
+        multi-parameter ``(f0, Mc) -> (f0, fdot)`` transform via
+        :func:`gbgpu.utils.utility.get_fdot` recovers the physical fdot after
+        ``fill_values`` moves the sampled ``Mc`` to the fdot slot (via
+        ``key_map={"Mc": "fdot"}``). When
+        :attr:`GBSettings.use_astrophysical_f0_mc_prior` is also on, the
+        separate ``f0`` and ``Mc`` uniforms are replaced by the 6-component
+        heatmap GMM from :func:`~lisatools.sampling.f0_mchirp_prior
+        .F0McGMMSampling.from_heatmap` under a tuple key ``("f0", "Mc")``.
         """
-        input_basis = ["A", "f0", "fdot", "phi0",
+        third_name = "Mc" if self.use_chirp_mass else "fdot"
+        input_basis = ["A", "f0", third_name, "phi0",
                        "cos_iota", "psi", "alpha", "sin_delta"]
 
         if self.transform is None:
@@ -146,8 +187,9 @@ class GBSetup(Setup, GBSettings):
                 "phi0": lambda x: -1 * x,  # flip sign of phi0 to match JaxGB convention.
                 "cos_iota": np.arccos,
                 "sin_delta": np.arcsin,
-
             }
+            gb_inverse_transform_fn_in = None
+            gb_key_map = None
 
             output_basis = [
                 "A", "f0", "fdot",
@@ -157,32 +199,82 @@ class GBSetup(Setup, GBSettings):
 
             gb_fill_dict = {"fddot": 0.0}
 
+            if self.use_chirp_mass:
+                # After fill_values, the Mc value lives at the fdot slot
+                # (key_map "Mc"->"fdot"). The multi-parameter transform then
+                # computes (f0[Hz], fdot) from (f0[Hz], Mc); the single-param
+                # f0: f_ms_to_s runs first so both f0 slots see Hz.
+                gb_transform_fn_in[("f0", "Mc")] = mchirp_to_fdot_pair
+                gb_inverse_transform_fn_in = {
+                    "A": np.log,
+                    "f0": f_s_to_ms,
+                    "phi0": lambda x: -1 * x,
+                    "cos_iota": np.cos,
+                    "sin_delta": np.sin,
+                    ("f0", "Mc"): fdot_to_mchirp_pair,
+                }
+                gb_key_map = {"Mc": "fdot"}
+
             self.transform = TransformContainer(
                 input_basis=input_basis,
                 output_basis=output_basis,
                 parameter_transforms=gb_transform_fn_in,
                 fill_dict=gb_fill_dict,
+                key_map=gb_key_map,
+                inverse_parameter_transforms=gb_inverse_transform_fn_in,
             )
 
         if self.periodic is None:
             self.periodic = {"gb": {"phi0": 2*np.pi, "psi": np.pi, "alpha": 2 * np.pi}}
 
         if self.priors is None:
-            priors_gb = {
-                input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
-                input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
-                input_basis[2]: uniform_dist(self.fdot_lims[0], self.fdot_lims[1]),
-                input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
-                # cos is DECREASING on [0, pi]: cos(iota_lims) comes out
-                # (max, min), so sort into increasing order before handing
-                # it to uniform_dist -- never rely on the dist silently
-                # swapping reversed bounds. (Same defensive sort on the
-                # sin(delta) line even though sin is increasing there.)
-                input_basis[4]: uniform_dist(*np.sort(np.cos(self.iota_lims))),
-                input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
-                input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
-                input_basis[7]: uniform_dist(*np.sort(np.sin(self.delta_lims))),
-            }
+            if self.use_chirp_mass and self.use_astrophysical_f0_mc_prior:
+                # Joint tuple-key prior on (f0[mHz], Mc[Msol]) from the
+                # heatmap 6-component GMM fit.
+                from lisatools.sampling.f0_mchirp_prior import F0McGMMSampling
+
+                priors_gb = {
+                    input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
+                    ("f0", "Mc"): F0McGMMSampling.from_heatmap(),
+                    input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
+                    input_basis[4]: uniform_dist(*np.sort(np.cos(self.iota_lims))),
+                    input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
+                    input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
+                    input_basis[7]: uniform_dist(*np.sort(np.sin(self.delta_lims))),
+                }
+            elif self.use_chirp_mass:
+                if not self.m_chirp_lims:
+                    raise ValueError(
+                        "use_chirp_mass=True requires GBSettings.m_chirp_lims "
+                        "to be set (a two-element [Mc_min, Mc_max] in Msol)."
+                    )
+                priors_gb = {
+                    input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
+                    input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),
+                    input_basis[2]: uniform_dist(self.m_chirp_lims[0], self.m_chirp_lims[1]),
+                    input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
+                    # cos is DECREASING on [0, pi]: sort defensively.
+                    input_basis[4]: uniform_dist(*np.sort(np.cos(self.iota_lims))),
+                    input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
+                    input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
+                    input_basis[7]: uniform_dist(*np.sort(np.sin(self.delta_lims))),
+                }
+            else:
+                priors_gb = {
+                    input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
+                    input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
+                    input_basis[2]: uniform_dist(self.fdot_lims[0], self.fdot_lims[1]),
+                    input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
+                    # cos is DECREASING on [0, pi]: cos(iota_lims) comes out
+                    # (max, min), so sort into increasing order before handing
+                    # it to uniform_dist -- never rely on the dist silently
+                    # swapping reversed bounds. (Same defensive sort on the
+                    # sin(delta) line even though sin is increasing there.)
+                    input_basis[4]: uniform_dist(*np.sort(np.cos(self.iota_lims))),
+                    input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
+                    input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
+                    input_basis[7]: uniform_dist(*np.sort(np.sin(self.delta_lims))),
+                }
 
             self.priors = {"gb": ProbDistContainer(priors_gb)}
 

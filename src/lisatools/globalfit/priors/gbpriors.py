@@ -9,11 +9,21 @@ from .gfpriors import BaseSourcePrior
 
 class GalacticBinaryPrior(BaseSourcePrior):
     """Galactic Binary specific prior infrastructure.
-    
-    If left as None, the initialisation defaults to a standard 8-parameter 
-    sampling basis mapped to a 9-parameter physical basis (injecting \ddot{f} = 0).
+
+    If left as None, the initialisation defaults to a standard 8-parameter
+    sampling basis mapped to a 9-parameter physical basis (injecting \\ddot{f} = 0).
+
+    Args:
+        chirp_mass: When True, the default sampling basis carries **chirp mass
+            ``Mc`` (solar masses)** in place of ``fdot``, and the default
+            ``param_transforms`` include a multi-parameter
+            ``(f0, Mc) -> (f0, fdot)`` map computed via
+            :func:`gbgpu.utils.utility.get_fdot` -- so the physical basis still
+            receives ``fdot`` while the sampler operates in chirp mass. Off by
+            default for backward compatibility; the stock erebor GB recipe
+            flips it on where appropriate.
     """
-    
+
     def __init__(
         self,
         param_priors: Dict[str | Tuple[str, ...], Callable[..., Any] | Any] | ProbDistContainer,
@@ -23,24 +33,31 @@ class GalacticBinaryPrior(BaseSourcePrior):
         physical_params: Optional[List[str]] = None,
         fill_dict: Optional[Dict[str, float]] = None,
         param_transforms: Optional[Dict[str | Tuple[str, ...], Callable[..., Any]] | TransformContainer] = None,
+        chirp_mass: bool = False,
+        key_map: Optional[Dict[str, str]] = None,
         use_cupy: bool = False,
         return_gpu: bool = False,
         verbose: bool = False
-    ):  
-        
+    ):
+
         source_name = source_name if source_name is not None else "gb"
-        
+
+        # Third-slot label in the sampling basis: fdot (legacy) or Mc (new).
+        third = "Mc" if chirp_mass else "fdot"
+
         if sampling_params is None:
             sampling_params = [
-                "A", "f0", "fdot", "phi0",
+                "A", "f0", third, "phi0",
                 "cos_iota", "psi", "alpha", "sin_delta"
             ]
 
         if physical_params is None:
-            # Names persist through the value transforms (exp / arccos /
-            # arcsin), matching GBSetup.init_sampling_info and
-            # make_gb_transform_container -- TransformContainer requires
-            # every sampling name to appear in the output basis.
+            # Physical basis is always the 9-param waveform basis with
+            # fdot at slot 2 and fddot at slot 3. In chirp-mass mode the
+            # sampling name "Mc" is mapped to the physical name "fdot" via
+            # ``key_map`` (see below), and a multi-parameter transform
+            # converts Mc -> fdot after fill_values() places the Mc value
+            # at the fdot slot.
             physical_params = [
                 "A", "f0", "fdot", "fddot",
                 "phi0", "cos_iota", "psi", "alpha", "sin_delta"
@@ -50,12 +67,25 @@ class GalacticBinaryPrior(BaseSourcePrior):
             fill_dict = {"fddot": 0.0}
 
         if param_transforms is None:
-            param_transforms = {
-                "A": np.exp,
-                "cos_iota": np.arccos,
-                "sin_delta": np.arcsin,
-            }
-            
+            if chirp_mass:
+                from ..stock.erebor.transforms import mchirp_to_fdot_pair
+
+                param_transforms = {
+                    "A": np.exp,
+                    ("f0", "Mc"): mchirp_to_fdot_pair,
+                    "cos_iota": np.arccos,
+                    "sin_delta": np.arcsin,
+                }
+            else:
+                param_transforms = {
+                    "A": np.exp,
+                    "cos_iota": np.arccos,
+                    "sin_delta": np.arcsin,
+                }
+
+        if key_map is None and chirp_mass:
+            key_map = {"Mc": "fdot"}
+
         super().__init__(
             source_name=source_name,
             sampling_params=sampling_params,
@@ -63,6 +93,7 @@ class GalacticBinaryPrior(BaseSourcePrior):
             param_prior_inputs=param_prior_inputs,
             physical_params=physical_params,
             fill_dict=fill_dict,
+            key_map=key_map,
             param_transforms=param_transforms,
             use_cupy=use_cupy,
             return_gpu=return_gpu,
