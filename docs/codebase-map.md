@@ -35,7 +35,7 @@ package.
 | `sensitivity.py` | `Sensitivity`/`SensitivityMatrix` hierarchy, `get_sensitivity`, TDI noise channels, `CompositeSensitivityMatrix`/`Backend`, `XYZSensitivityBackend`; mojito NOISE-brick model (`MojitoNoiseEstimates` tabulated component, `MojitoNoiseSensitivityMatrix`, `estimate_noise_params_from_file`). ~4300 lines. |
 | `detector.py` | `Orbits` (+ `EqualArmlength/ESA/L1/DefaultOrbits`), `LISAModel`. Python frontend over backend `OrbitsWrap`. |
 | `mojito_detector.py` | Mojito-dataset orbit/detector interop. |
-| `diagnostic.py` | `inner_product`, likelihood terms, Fisher `info_matrix`/`covariance`, SNR, Cutler–Vallisneri bias. |
+| `diagnostic.py` | `inner_product`, likelihood terms, information matrix `info_matrix`/`covariance`, SNR, Cutler–Vallisneri bias. |
 | `stochastic.py` | Stochastic foregrounds/SGWB (`FittedHyperbolicTangentGalacticForeground`, `PowerLawSGWB`, …). |
 | `chunked_het.py` | `WDMComputationsBase` — source-agnostic chunked-heterodyne WDM likelihood base (GB/SOBBH subclass it downstream). |
 | `wdm_het.py` / `signal_het.py` | WDM chunk geometry / window / layer-grouping helpers; sparse-time signal-heterodyne helpers. |

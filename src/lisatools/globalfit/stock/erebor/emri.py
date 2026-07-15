@@ -27,7 +27,7 @@ class EMRISettings(Settings):
     configuration, and search/sampling helpers consumed by :class:`EMRISetup`.
 
     # TODO/DOCS: confirm the role of ``info_matrix_gen`` and ``fill_values``
-    # in coordinating EMRI starts with the Fisher / search pipeline.
+    # in coordinating EMRI starts with the information matrix / search pipeline.
     """
 
     logm1_lims: typing.List[float] = dataclasses.field(default_factory=list)

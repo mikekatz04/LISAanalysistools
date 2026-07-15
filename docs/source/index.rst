@@ -21,12 +21,12 @@
    latw/00_SetupAndAtlas
    latw/01_GlobalFitQuickstart
    latw/02_StockGlobalFitGallery
-   latw/03_Foundations
-   latw/04_ResponseAndTDI
-   latw/05_SourceWaveforms
-   latw/06_ErynSmallToLarge
-   latw/07_BackendsAndDevWorkflow
-   latw/08_StockGlobalFitsInDepth
+   latw/03_StockGlobalFitsInDepth
+   latw/04_Foundations
+   latw/05_ResponseAndTDI
+   latw/06_SourceWaveforms
+   latw/07_ErynSmallToLarge
+   latw/08_BackendsAndDevWorkflow
 
 Workshop exercises
 ==================

@@ -1918,7 +1918,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
 
     def _compute_proposal_cholesky(self, model, band_sorter, ids):
-        """Batched Cholesky of the inverse Fisher matrix for ``ids``.
+        """Batched Cholesky of the inverse information matrix for ``ids``.
 
         Domain-symmetric through the fast computation objects:
         FD -> :meth:`GBFDComputations.information_matrix`,
@@ -1926,7 +1926,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         parent inverse-covariance rows keyed by walker; the legacy
         SharedMemory ``gb.information_matrix`` path is retired).
 
-        The Fisher comes back in PHYSICAL parameter space; it is mapped to
+        The information matrix comes back in PHYSICAL parameter space; it is mapped to
         the sampling basis with the (numerical, per-source diagonal)
         Jacobian of the transform container, conditioned by the fdot
         rescale, inverted, and factorized.
@@ -1954,7 +1954,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
 
         # Conditioning scales for the sampling basis (fdot spans ~1e-13 in
-        # sampled units; without the rescale the Fisher inversion is
+        # sampled units; without the rescale the information matrix inversion is
         # ill-conditioned). The proposal draws in the rescaled coordinates
         # y = x / s and maps back with * s (see in_model_proposal).
         s = xp.ones(ndim)
@@ -1979,8 +1979,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         info_y = info_phys * J[:, :, None] * J[:, None, :]
 
         self.mempool.free_all_blocks()
-        # Robust inverse-Fisher factor: near-zero-SNR (prior-drawn) sources
-        # give (numerically) singular Fishers. Eigendecompose and clamp the
+        # Robust inverse-information-matrix factor: near-zero-SNR (prior-drawn) sources
+        # give (numerically) singular information matrices. Eigendecompose and clamp the
         # spectrum to a relative floor; B = V diag(lambda^-1/2) satisfies
         # B B^T = inv(info) and is all the Gaussian proposal needs (the
         # proposal shape only -- M-H corrects).
@@ -2023,7 +2023,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             new_coords = q["gb"][0, :, 0, :]
             factors = factors.reshape(-1)
         else:
-            # Gaussian jump through the Fisher Cholesky (drawn in the
+            # Gaussian jump through the information matrix Cholesky (drawn in the
             # conditioned coordinates y = x / s; mapped back with * s).
             _rand = xp.random.randn(*coords.shape)
             dy = xp.einsum("...ij,...j->...i", chol, _rand)

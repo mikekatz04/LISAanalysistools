@@ -1132,7 +1132,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
         1.0e-6,    # beta
     )
 
-    def _fisher_param_eps(self, nparams, param_eps):
+    def _info_matrix_param_eps(self, nparams, param_eps):
         if param_eps is not None:
             eps = self.xp.asarray(param_eps, dtype=self.xp.float64)
             assert eps.shape[0] == nparams, (
@@ -1148,9 +1148,9 @@ class WDMComputationsBase(LISAToolsParallelModule):
                            noise_index=None,
                            convert_to_ra_dec: Optional[bool] = None,
                            **swap_kwargs):
-        """Per-source Fisher information matrix over the WDM domain.
+        """Per-source information matrix over the WDM domain.
 
-        Single-template parity with ``GBGPU.information_matrix``. The Fisher
+        Single-template parity with ``GBGPU.information_matrix``. The information matrix
         ``Gamma_ij = <dh/dtheta_i | dh/dtheta_j>`` is assembled from
         central-difference cross inner products ``<h_a | h_b>``, which
         :meth:`get_swap_ll_wdm` returns as its ``ar`` term with the canonical
@@ -1180,7 +1180,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
                 ``margin_layers``/``m_band_half_width``).
 
         Returns:
-            ``(num_bin, num_derivs, num_derivs)`` real Fisher matrices.
+            ``(num_bin, num_derivs, num_derivs)`` real information matrices.
         """
         p = self.xp.asarray(self.xp.atleast_2d(params)).copy()
         num_bin, nparams = p.shape[0], int(self._NPARAMS)
@@ -1197,7 +1197,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
         else:
             inds = [int(i) for i in self.xp.asarray(inds).tolist()]
         num_derivs = len(inds)
-        eps = self._fisher_param_eps(nparams, param_eps)
+        eps = self._info_matrix_param_eps(nparams, param_eps)
 
         plus, minus = [], []
         for ind in inds:
@@ -1208,7 +1208,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
 
         def _ar(pa, pb):
             # <h(pa) | h(pb)> per binary (index 6 of the get_swap_ll_wdm tuple).
-            # The Fisher only consumes template cross terms, so the data slab
+            # The information matrix only consumes template cross terms, so the data slab
             # is irrelevant -- but the layer-grouping path requires
             # data_index == noise_index, so align them.
             out = self.get_swap_ll_wdm(

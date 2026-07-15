@@ -1,4 +1,4 @@
-"""Inner products, likelihood terms, and Fisher / covariance diagnostics."""
+"""Inner products, likelihood terms, and information-matrix / covariance diagnostics."""
 
 from __future__ import annotations
 
@@ -625,8 +625,6 @@ def info_matrix(
     This calculates the information matrix for a given waveform model at a given set of parameters.
     The inverse of the information matrix gives the covariance matrix.
 
-    This is also referred to as the Fisher information matrix, but @MichaelKatz has chosen to leave out the name because of `this <https://www.newstatesman.com/long-reads/2020/07/ra-fisher-and-science-hatred>`_.
-
     The info matrix is given by:
 
     .. math::
@@ -861,7 +859,7 @@ def plot_covariance_contour(
 def get_eigeninfo(
     arr: np.ndarray, high_precision: Optional[bool] = False
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Performs eigenvalue decomposition and returns the eigenvalues and right-eigenvectors for the supplied fisher/covariance matrix.
+    """Performs eigenvalue decomposition and returns the eigenvalues and right-eigenvectors for the supplied information/covariance matrix.
 
     Args:
         arr: Input matrix for which to perform eigenvalue decomposition.

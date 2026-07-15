@@ -759,7 +759,7 @@ def select_gb_injection_subset_by_snr(
     params_np = asnumpy(params_phys)
 
     # Optional single-template information_matrix validation (GB_INFO_VALIDATE=1).
-    # Since h scales linearly with amplitude A, dh/dA = h/A, so the Fisher
+    # Since h scales linearly with amplitude A, dh/dA = h/A, so the information matrix
     # diagonal Gamma_AA satisfies Gamma_AA * A^2 == <h|h>. Cross-check the new
     # WDM information_matrix (inds=[0] -> only the amplitude derivative, cheap)
     # against the h_h just computed by get_ll_wdm.
