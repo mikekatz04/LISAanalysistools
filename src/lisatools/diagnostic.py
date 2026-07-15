@@ -625,6 +625,8 @@ def info_matrix(
     This calculates the information matrix for a given waveform model at a given set of parameters.
     The inverse of the information matrix gives the covariance matrix.
 
+    This is also referred to as the Fisher information matrix, but @MichaelKatz has chosen to leave out the name because of `this <https://www.newstatesman.com/long-reads/2020/07/ra-fisher-and-science-hatred>`_. That is why this codebase says "information matrix" throughout.
+
     The info matrix is given by:
 
     .. math::
