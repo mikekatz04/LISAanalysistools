@@ -29,6 +29,7 @@ from .transforms import (
     fdot_to_mchirp_pair,
     make_gb_transform_container,
     mchirp_to_fdot_pair,
+    negate,
     ten_to_the_x,
 )
 
@@ -184,7 +185,7 @@ class GBSetup(Setup, GBSettings):
             gb_transform_fn_in = {
                 "A": np.exp,
                 "f0": f_ms_to_s,
-                "phi0": lambda x: -1 * x,  # flip sign of phi0 to match JaxGB convention.
+                "phi0": negate,  # flip sign of phi0 to match JaxGB convention.
                 "cos_iota": np.arccos,
                 "sin_delta": np.arcsin,
             }
@@ -208,7 +209,7 @@ class GBSetup(Setup, GBSettings):
                 gb_inverse_transform_fn_in = {
                     "A": np.log,
                     "f0": f_s_to_ms,
-                    "phi0": lambda x: -1 * x,
+                    "phi0": negate,
                     "cos_iota": np.cos,
                     "sin_delta": np.sin,
                     ("f0", "Mc"): fdot_to_mchirp_pair,

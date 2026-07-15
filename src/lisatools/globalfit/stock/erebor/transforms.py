@@ -15,6 +15,12 @@ from eryn.utils import TransformContainer
 
 from lisatools.utils.constants import PC_SI
 
+def negate(x):
+    """Return ``-x`` (named 1-arg transform for pickling support; it is its
+    own functional inverse -- e.g. the GB phi0 sign flip)."""
+    return -x
+
+
 def f_ms_to_s(x):
     """Convert frequencies from mHz to Hz (named for pickling support)."""
     return x * 1e-3

@@ -191,9 +191,11 @@ def plot_corner(prop, injection_mu, injection_sigma, n_samples=20_000, title="",
                 # axis-0 of p2 is axis j.
                 if j < i:
                     p2 = p2 if _p2_axis_order(p2.shape, (j, i)) else p2.T
+                # Cells span node edges [ax[0], ax[-1]] -- cell-centre extents
+                # shift the heat map by half a cell and leave a gap strip.
                 extent = [
-                    cell_centres[j][0], cell_centres[j][-1],
-                    cell_centres[i][0], cell_centres[i][-1],
+                    axes[j][0], axes[j][-1],
+                    axes[i][0], axes[i][-1],
                 ]
                 a.imshow(
                     p2.T, origin="lower", extent=extent, aspect="auto",
