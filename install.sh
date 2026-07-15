@@ -81,7 +81,7 @@ echo ""
 # ----------------------------------------------------------------------
 pip install --upgrade pip
 pip install \
-    scikit_build_core uv uv_build setuptools_scm pybind11 \
+    scikit_build_core uv uv_build setuptools_scm pybind11 nanobind \
     numpy scipy ipython jupyter astropy lisaconstants Cython
 
 # Optional: macOS + brew lapack
