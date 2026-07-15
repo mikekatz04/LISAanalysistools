@@ -363,3 +363,51 @@ SkyMove is on — so SkyMove must work. Both are true. Reconciliation, measured:
 - A fold WOULD work with a *(2,2)-exact* or otherwise corrected transformation,
   or on a lower-SNR/pre-higher-mode regime. `truth_map_test.py` is the
   5-minute acceptance test for any candidate map: Δlogl ≈ 0 on all 8 images.
+
+### 2026-07-15: block proposal on the non-sky parameters (idea: skip modes entirely)
+
+Question: ditch the multimodal machinery — flow only on the parameters that are
+NOT multimodal, leave the sky block to SkyMove/stretch/DE.
+
+**Premise CONFIRMED.** The 7 non-sky dims (logM, Q, s1z, s2z, dL, phi_ref, t_L)
+are **K=1 on every leaf** — including 3/4/5 where the full 11-dim space is K=3-5.
+All the multimodality lives in the 4 sky/orientation dims. So a flow on that
+block faces one unimodal target with all 4032 rows: no clustering, no maps, no
+folding, no kmax, no window instability.
+
+**But the blocks are strongly coupled**: top canonical correlation between the
+blocks is 0.81-0.997 (per leaf, within the dominant mode). At 0.997 the
+conditional spread of that direction is sqrt(1-0.997^2) ~ 8% of its marginal, so
+a *marginal* block proposal lands ~13 conditional-sigma off.
+
+Measured (`block_test.py`, Gaussian per (leaf, mode), periodic dims unwrapped,
+per-mode pooled covariance -- an EARLIER version using each walker's own
+169-step track and un-unwrapped periodic dims is invalid and was discarded):
+
+| leaf | marginal safe-block | conditional safe\|sky |
+|------|--------------------|----------------------|
+| 0    | 0.000              | 0.019                |
+| 1    | 0.000              | 0.054                |
+| 2    | 0.023              | 0.109                |
+| 3/4/5| 0.000              | 0.003 / 0.000 / 0.000|
+
+- Conditioning is **load-bearing**: 5-20x over marginal, as the canonical
+  correlation predicts. Any block move MUST condition on the sky params (and
+  should carry the affine part explicitly -- a context-dependent whitening from
+  the leaf's joint covariance -- so the network only learns the residual).
+- **But a Gaussian conditional reaches only 0.02-0.11 on the clean leaves,
+  BELOW the existing full 11-dim flow (0.085/0.220/0.334).** So a block move
+  needs a conditional *flow* just to match what we already have, while
+  refreshing only 7 of 11 dims per accept. Not obviously a win.
+- Leaves 3/4/5: **inconclusive** -- the "same mode" selection used a
+  sky-distance percentile cut, which on a 4-7-image leaf mixes images and
+  poisons the covariance. Not evidence.
+
+**The open question this raises (highest value next test):** the safe block is
+unimodal on leaves 3/4/5, yet nothing -- full flow, mixture, fold, conditional
+Gaussian -- ever moves them off ~0.01 against a 0.57-0.68 ceiling. If a
+conditional proposal inside a *correctly isolated* single image (lattice labels,
+now known accurate to 0.001-0.06 rad) also fails there, then **multimodality is
+not what makes those leaves hard**, and every mode-related design (mixture,
+fold, block) is aimed at the wrong target for them. That test is ~10 minutes and
+should precede any further mode machinery.
