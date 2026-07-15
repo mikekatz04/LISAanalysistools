@@ -132,9 +132,17 @@ class FullYearGeneralSettings(EreborGeneralSettings):
     # Fixed PSD (no psd branch) -> report source-only log L = -1/2 <r|r>
     # (drop the constant -sum(log|detC|) noise normalization term).
     likelihood_source_only: bool = True
-    add_instrument_noise: bool = False
-    noise_soms_d: float = 15e-12
-    noise_sa_a: float = 3e-15
+    # False (default): no noise added to the data. True: auto — add the real
+    # mojito NOISE brick when the run uses mojito data and the brick is
+    # found, else a synthetic draw. "mojito" / "synthetic" force a source.
+    add_instrument_noise: typing.Union[bool, str] = False
+    # None -> auto at build: [Soms_d, Sa_a] fit to the mojito NOISE brick's
+    # tabulated estimates when available (see ``psd_from_noise_file`` /
+    # ``noise_file``), else the stock analytic 15e-12 / 3e-15. These levels
+    # feed BOTH the fixed sensitivity model and (in synthetic mode) the
+    # injected noise draw, so the two stay consistent.
+    noise_soms_d: typing.Optional[float] = None
+    noise_sa_a: typing.Optional[float] = None
     noise_seed: int = 12345
     add_galactic_foreground: bool = False
     foreground_params: typing.Optional[typing.Sequence[float]] = None
@@ -268,6 +276,21 @@ class FullYearCombinedGlobalFit(EreborFit):
         )
         return offset
 
+    def adjust_general(self, gs: FullYearGeneralSettings) -> None:
+        gs.add_instrument_noise = self.resolve_noise_source(gs)
+        # Noise levels: explicit > NOISE-brick fit > stock analytic. The same
+        # levels drive the fixed sensitivity AND (synthetic mode) the injected
+        # draw, so model and data stay consistent.
+        if gs.noise_soms_d is None or gs.noise_sa_a is None:
+            file_params = self.resolve_noise_file_psd_params(gs)
+            soms_d, sa_a = (
+                file_params if file_params is not None else (15e-12, 3e-15)
+            )
+            if gs.noise_soms_d is None:
+                gs.noise_soms_d = soms_d
+            if gs.noise_sa_a is None:
+                gs.noise_sa_a = sa_a
+
     def set_default_processor(self, gs: FullYearGeneralSettings) -> None:
         force_backend = gs.gpu_backend if gs.gpus is not None else "cpu"
         tobs = self.wdm_grid[3]
@@ -385,6 +408,17 @@ class FullYearCombinedGlobalFit(EreborFit):
                 ),
             ]
             gs.sensitivity_init_kwargs = base
+        # The instrument noise lives in extra_components; without this, the
+        # engine's default fixed_psd_kwargs would build a SECOND parametric
+        # InstrumentNoise on top of it (double-counted instrument PSD).
+        # psd_params=None makes the fixed walker matrices exactly the extra
+        # components.
+        if (
+            gs.fixed_psd_kwargs is None
+            and isinstance(gs.sensitivity_init_kwargs, dict)
+            and gs.sensitivity_init_kwargs.get("extra_components")
+        ):
+            gs.fixed_psd_kwargs = dict(psd_params=None, galfor_params=None)
 
     # -- branch resolution --------------------------------------------------------
 

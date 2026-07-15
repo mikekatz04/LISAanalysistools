@@ -167,13 +167,19 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     mojito_source_ids: dict = dataclasses.field(
         default_factory=lambda: {"GB": [0], "MBHB": [0], "EMRI": [1], "SOBHB": [0]}
     )
-    # Mojito L1 signals are noiseless: add synthetic instrument noise so the
-    # psd branch has something to fit (the loaded GB galaxy itself plays the
-    # role of the foreground for the galfor branch). The same knob feeds the
-    # synthetic-mode noise stream.
-    add_instrument_noise: bool = True
-    noise_soms_d: float = 15e-12
-    noise_sa_a: float = 3e-15
+    # Mojito L1 signals are noiseless: add instrument noise so the psd branch
+    # has something to fit (the loaded GB galaxy itself plays the role of the
+    # foreground for the galfor branch). True (default) auto-resolves to
+    # "mojito" — the real NOISE brick summed in by the L1 loader — when the
+    # run uses mojito data and the brick is found, else "synthetic" (the
+    # FD-correlated draw). Explicit "mojito"/"synthetic"/False force it.
+    add_instrument_noise: typing.Union[bool, str] = True
+    # None -> auto at build: [Soms_d, Sa_a] fit to the NOISE brick's
+    # tabulated estimates when available, else the stock 15e-12 / 3e-15.
+    # Feed the synthetic draw (and the psd-branch reference) so data and
+    # model stay consistent whichever noise source resolves.
+    noise_soms_d: typing.Optional[float] = None
+    noise_sa_a: typing.Optional[float] = None
     noise_seed: int = 12345
     # Synthetic-data start time. Default 10,000 s so the TDI2 warm-up
     # look-back stays inside the orbit span (which starts at t=0); the
@@ -186,9 +192,9 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
 
     # --- noise-branch knobs (identical to the noise variants) ---
     # PSD injection ``[Soms_d, Sa_a]`` consumed by prepare_psd_branch.
-    psd_injection: typing.Sequence[float] = dataclasses.field(
-        default_factory=lambda: list(PSD_INJECTION)
-    )
+    # None -> auto: the resolved (noise_soms_d, noise_sa_a) — i.e. the NOISE
+    # brick fit when available, else the stock PSD_INJECTION levels.
+    psd_injection: typing.Optional[typing.Sequence[float]] = None
     # Galactic-foreground truth reference (informational; the foreground in
     # the DATA is the GB galaxy itself in mojito mode).
     galfor_injection: typing.Sequence[float] = dataclasses.field(
@@ -260,6 +266,25 @@ class AllSourcesGlobalFit(EreborFit):
         "sobbh": SOBBHSetup,
         "sgwb": SGWBSetup,
     }
+
+    def resolve_data_source(self) -> None:
+        super().resolve_data_source()
+        # Resolve the noise source + levels on the FIT-LEVEL block (like the
+        # base data-source resolution): prepare_psd_branch reads the fit-level
+        # ``psd_injection``, so the resolved values must live there too.
+        gs = self.general
+        gs.add_instrument_noise = self.resolve_noise_source(gs)
+        if gs.noise_soms_d is None or gs.noise_sa_a is None:
+            file_params = self.resolve_noise_file_psd_params(gs)
+            soms_d, sa_a = (
+                file_params if file_params is not None else list(PSD_INJECTION)
+            )
+            if gs.noise_soms_d is None:
+                gs.noise_soms_d = soms_d
+            if gs.noise_sa_a is None:
+                gs.noise_sa_a = sa_a
+        if gs.psd_injection is None:
+            gs.psd_injection = [gs.noise_soms_d, gs.noise_sa_a]
 
     def adjust_general(self, gs: AllSourcesGeneralSettings) -> None:
         # Mojito L1 data is sampled at dt = 2.5 s (the class defaults are the

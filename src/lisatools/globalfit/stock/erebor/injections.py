@@ -946,12 +946,16 @@ def build_synthetic_source_streams(
 
 
 class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
-    """Mojito L1 source loader + synthetic FD noise + modulated foreground.
+    """Mojito L1 source loader + instrument noise + modulated foreground.
 
     Loads MBHB / EMRI / SOBHB source TD signals from a mojito L1 folder
-    (no NOISE, no GB / VGB), then optionally adds:
-      1. Synthetic FD-correlated instrument noise drawn from the
-         ``(noise_soms_d, noise_sa_a)`` covariance.
+    (no GB / VGB unless requested), then optionally adds:
+      1. Instrument noise — either the **real mojito NOISE brick**
+         (``add_instrument_noise="mojito"``: the loader sums the
+         ``INSTRUMENT/L1`` TD noise stream, which shares the sources' exact
+         time grid) or a synthetic FD-correlated draw from the
+         ``(noise_soms_d, noise_sa_a)`` covariance
+         (``add_instrument_noise=True`` / ``"synthetic"``).
       2. A galactic-foreground TD realization with the annual amplitude
          envelope applied per-sample.
 
@@ -969,7 +973,7 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         do_plots: bool = False,
         Tobs: float = None,
         window_start_offset: float = 0.0,
-        add_instrument_noise: bool = False,
+        add_instrument_noise: "bool | str" = False,
         noise_soms_d: float = 15e-12,
         noise_sa_a: float = 3e-15,
         noise_seed: int = 12345,
@@ -981,13 +985,22 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         annual_phase0: float = 0.0,
         tdi_generation: int = 2,
     ):
+        if add_instrument_noise not in (False, True, "synthetic", "mojito"):
+            raise ValueError(
+                f"add_instrument_noise={add_instrument_noise!r} not recognised; "
+                "use False, True, 'synthetic', or 'mojito'."
+            )
         # Drop any class whose source_ids list is empty (mojito's
         # L1DataLoader raises on missing IDs). GB / VGB load the whole
-        # galaxy file (ids just gate inclusion). Instrument noise + galactic
-        # foreground come from the synthetic generators, not from mojito.
+        # galaxy file (ids just gate inclusion). "mojito" instrument noise
+        # rides the base loader ("NOISE" reads INSTRUMENT/L1 and sums it
+        # into the data on the shared time grid); the synthetic instrument
+        # noise + galactic foreground come from the synthetic generators.
         source_types = [
             t for t in ["GB", "VGB", "MBHB", "EMRI", "SOBHB"] if source_ids.get(t)
         ]
+        if add_instrument_noise == "mojito":
+            source_types = ["NOISE"] + source_types
         if orbits_class is None:
             from lisatools.detector import L1Orbits
             orbits_class = L1Orbits
@@ -1016,7 +1029,7 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         combined = np.asarray(
             place_td_signal_on_grid(self.data[:nch], grid).arr
         )
-        if add_instrument_noise:
+        if add_instrument_noise in (True, "synthetic"):
             noise_td = generate_correlated_instrument_noise_td(
                 N=N, dt=self.dt,
                 Soms_d=noise_soms_d, Sa_a=noise_sa_a,
@@ -1066,7 +1079,7 @@ class SyntheticDataProcessor(BaseProcessingStep):
         tdi_gen_str: str = "2nd generation",
         sobbh_reference_time: Optional[float] = None,
         mbh_phenom_kwargs: Optional[dict] = None,
-        add_instrument_noise: bool = False,
+        add_instrument_noise: "bool | str" = False,
         noise_soms_d: float = 15e-12,
         noise_sa_a: float = 3e-15,
         noise_seed: int = 12345,
@@ -1117,7 +1130,13 @@ class SyntheticDataProcessor(BaseProcessingStep):
         )
 
         combined = emri_td + sobbh_td + mbh_td
-        if add_instrument_noise:
+        if add_instrument_noise == "mojito":
+            raise ValueError(
+                "add_instrument_noise='mojito' (the real NOISE brick) is a "
+                "mojito-data option; the all-synthetic processor only draws "
+                "synthetic noise."
+            )
+        if add_instrument_noise in (True, "synthetic"):
             noise_td = generate_correlated_instrument_noise_td(
                 N=target_N, dt=dt,
                 Soms_d=noise_soms_d, Sa_a=noise_sa_a,

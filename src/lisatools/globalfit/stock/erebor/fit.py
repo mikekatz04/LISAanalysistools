@@ -131,6 +131,22 @@ class EreborGeneralSettings(GeneralSettings):
             "/Users/mkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/",
         )
     )
+    # --- mojito NOISE brick (proper noise) ---
+    # Explicit path to a mojito NOISE L1 file. None -> auto-discover
+    # ``<mojito_data_path>/data/INSTRUMENT/L1/NOISE_*``.
+    noise_file: typing.Optional[str] = dataclasses.field(
+        default_factory=env_default("NOISE_FILE", None, str)
+    )
+    # Fixed-PSD variants (gb_no_fg, full_year_combined): read the
+    # instrument-noise parameters off the NOISE brick's tabulated estimates
+    # (linear least-squares of the analytic model, see
+    # ``lisatools.sensitivity.estimate_noise_params_from_file``) instead of
+    # the hardcoded stock levels. None -> auto: True when the run uses mojito
+    # data and the brick is found; explicit True errors if the brick is
+    # missing; False keeps the stock analytic levels.
+    psd_from_noise_file: typing.Optional[bool] = dataclasses.field(
+        default_factory=env_default("PSD_FROM_NOISE_FILE", None, bool)
+    )
     ldc_source_file: str = dataclasses.field(
         default_factory=env_default(
             "LDC_SOURCE_FILE",
@@ -291,6 +307,84 @@ class EreborFit(StockGlobalFit):
                 seed=gs.synthetic_injection_seed,
                 band=self._gb_injection_band(),
             )
+
+    def resolve_noise_file_psd_params(
+        self, gs: EreborGeneralSettings
+    ) -> typing.Optional[typing.List[float]]:
+        """``[Soms_d, Sa_a]`` read off the mojito NOISE brick, or ``None``.
+
+        Honors ``gs.psd_from_noise_file``: ``False`` -> ``None``; ``None``
+        (auto) -> only for mojito-data runs with a resolvable brick;
+        ``True`` -> required (raises when the brick is missing or the fit
+        fails). The scalar levels come from a linear least-squares fit of the
+        analytic instrument model to the brick's tabulated
+        ``noise_estimates`` (:func:`lisatools.sensitivity.estimate_noise_params_from_file`).
+        Results are cached per file path on the fit instance.
+        """
+        from .noise import noise_params_from_file, resolve_noise_file
+
+        want = gs.psd_from_noise_file
+        if want is False:
+            return None
+        if want is None and gs.data_mode != "mojito":
+            return None
+        noise_file = resolve_noise_file(gs.mojito_data_path, gs.noise_file)
+        if noise_file is None:
+            if want:
+                raise FileNotFoundError(
+                    "psd_from_noise_file=True but no mojito NOISE brick was "
+                    "found: set general.noise_file / NOISE_FILE or add "
+                    "data/INSTRUMENT/L1/NOISE_* under "
+                    f"{gs.mojito_data_path!r}."
+                )
+            return None
+        cache = getattr(self, "_noise_file_params_cache", None)
+        if cache is None:
+            cache = self._noise_file_params_cache = {}
+        if noise_file not in cache:
+            cache[noise_file] = noise_params_from_file(
+                noise_file, tdi_generation=gs.tdi_gen
+            )
+        params = cache[noise_file]
+        if params is None and want:
+            raise ValueError(
+                f"psd_from_noise_file=True but the noise-parameter fit failed "
+                f"for {noise_file!r} (see the warning above)."
+            )
+        return list(params) if params is not None else None
+
+    def resolve_noise_source(
+        self, gs: EreborGeneralSettings
+    ) -> typing.Union[bool, str]:
+        """Concrete data-noise source: ``False``, ``"synthetic"``, or ``"mojito"``.
+
+        Resolves a variant's ``add_instrument_noise`` knob: ``True`` (auto)
+        becomes ``"mojito"`` — the real NOISE brick summed into the data by
+        the L1 loader — when the run uses mojito data and the brick is found,
+        else ``"synthetic"`` (the FD-correlated draw). Explicit strings are
+        validated and passed through; ``"mojito"`` requires mojito data.
+        """
+        from .noise import resolve_noise_file
+
+        value = gs.add_instrument_noise
+        if value is True:
+            has_brick = (
+                gs.data_mode == "mojito"
+                and resolve_noise_file(gs.mojito_data_path, gs.noise_file) is not None
+            )
+            value = "mojito" if has_brick else "synthetic"
+            logger.info("add_instrument_noise=True resolved to %r.", value)
+        elif value is not False and value not in ("synthetic", "mojito"):
+            raise ValueError(
+                f"add_instrument_noise={gs.add_instrument_noise!r} not "
+                "recognised; use False, True (auto), 'synthetic', or 'mojito'."
+            )
+        if value == "mojito" and gs.data_mode != "mojito":
+            raise ValueError(
+                "add_instrument_noise='mojito' (the real NOISE brick) requires "
+                f"data_mode='mojito'; got data_mode={gs.data_mode!r}."
+            )
+        return value
 
     def _gb_injection_count(self) -> int:
         """Number of prior-drawn synthetic GB rows (mirrors the class counts)."""

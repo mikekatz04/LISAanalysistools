@@ -2159,11 +2159,17 @@ class SensitivityBackendBase(LISAToolsParallelModule):
 
         Args:
             name: Identifier recorded on the produced matrix.
-            psd_params: ``[Soms_d, Sa_a, ...]`` (sampling basis if ``transform_fn``).
+            psd_params: ``[Soms_d, Sa_a, ...]`` (sampling basis if ``transform_fn``),
+                or ``None`` for a fixed-PSD run whose instrument noise lives
+                entirely in the backend's ``extra_components`` (e.g. a
+                :class:`MojitoNoiseEstimates` table) — no parametric
+                instrument component is built then.
             galfor_params: Optional galactic-foreground parameters.
             sgwb_params: Optional SGWB spectral-template parameters.
             transform_fn: Optional PSD :class:`TransformContainer`.
         """
+        if psd_params is None:
+            return self._build_matrix(name, None, galfor_params, sgwb_params)
         params = np.asarray(psd_params, dtype=float)
         if transform_fn is not None:
             params = transform_fn.both_transforms(
@@ -3737,6 +3743,256 @@ class SGWB(SeparableComponent):
         return xp.asarray(self._modulation)
 
 
+def _interp1d_along_axis(
+    x_new: np.ndarray, x_old: np.ndarray, y: np.ndarray, axis: int
+) -> np.ndarray:
+    """Linear interpolation of ``y`` along ``axis`` with edge clamping.
+
+    ``x_old`` must be strictly increasing. Values of ``x_new`` outside the
+    tabulated range are clamped to the end values (matching ``np.interp``).
+    """
+    idx = np.searchsorted(x_old, x_new, side="right") - 1
+    idx = np.clip(idx, 0, len(x_old) - 2)
+    x_lo = x_old[idx]
+    x_hi = x_old[idx + 1]
+    w = np.clip((x_new - x_lo) / (x_hi - x_lo), 0.0, 1.0)
+    y_lo = np.take(y, idx, axis=axis)
+    y_hi = np.take(y, idx + 1, axis=axis)
+    shape = [1] * y.ndim
+    shape[axis] = len(x_new)
+    w = w.reshape(shape)
+    return y_lo * (1.0 - w) + y_hi * w
+
+
+class MojitoNoiseEstimates(NoiseComponent):
+    """Tabulated instrument-noise covariance read from a mojito NOISE L1 brick.
+
+    The mojito NOISE brick stores daily-estimated ``(nch, nch)`` noise
+    covariance matrices on a log-uniform frequency grid
+    (``noise_estimates/XYZ`` etc., units Hz^2/Hz of the raw laser-frequency
+    TDI). This component divides by ``laser_frequency**2`` — the PSD of the
+    dimensionless ``tdis.xyz_doppler`` data the global fit ingests — and
+    projects onto the domain basis:
+
+    * frequency: linear interpolation in ``log10(f)`` (the tabulated grid is
+      log-uniform); bins outside the tabulated range get ``fill_value``;
+    * FD basis: the interpolated (time-averaged) one-sided PSD, matching
+      :func:`get_sensitivity`'s FD convention;
+    * WDM basis: the interpolated full-resolution PSD is folded into the
+      wavelet basis through the same validated
+      ``FDSignal.wdmtransform(is_psd=True)`` path :class:`InstrumentNoise`
+      uses, so the two components are drop-in comparable. With
+      ``time_dependent=True`` (default) the slow daily variation is applied
+      as a per-layer ratio on top of the time-averaged fold. Domain times
+      are interpreted as seconds since the brick's TDI data start (plus
+      ``t_offset`` for runs whose data window does not begin at the file
+      start; the estimates vary by only a few percent over the year, so
+      modest offsets are benign).
+
+    Pickle/deepcopy-safe: only the path and scalar knobs are carried; the
+    loaded table is a lazy cache dropped on pickling (LISA Analysis Tools
+    settings-tree rule).
+
+    Args:
+        path: Path to the mojito NOISE L1 ``.h5`` file.
+        which: ``"xyz"`` (default) or ``"aet"`` — which TDI estimate table to
+            read. Use the one matching the run's TDI channels.
+        time_dependent: If ``True`` (default), apply the daily estimates'
+            time variation along the domain's time axis (WDM). ``False``
+            time-averages the estimates into a stationary covariance.
+        t_offset: Seconds added to the domain's time axis before matching it
+            to the brick's estimate times (e.g. a data-window start offset).
+        fill_value: Value assigned to frequency bins outside the tabulated
+            range (default ``0.0``; the zeroed cells are filtered by the
+            ``detC`` mask downstream, matching the composite-backend
+            convention).
+    """
+
+    name = "mojito_noise_estimates"
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        which: str = "xyz",
+        time_dependent: bool = True,
+        t_offset: float = 0.0,
+        fill_value: float = 0.0,
+    ):
+        if which not in ("xyz", "aet"):
+            raise ValueError(f"which must be 'xyz' or 'aet', got {which!r}.")
+        self.path = str(path)
+        self.which = which
+        self.time_dependent = bool(time_dependent)
+        self.t_offset = float(t_offset)
+        self.fill_value = float(fill_value)
+        self._tab = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_tab"] = None  # lazy cache; reload from ``path`` after unpickle
+        return state
+
+    def _load(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``(est_times_rel, est_freqs, cov)`` with ``cov`` shape ``(Nd, Nq, nch, nch)``.
+
+        ``est_times_rel`` is seconds since the brick's TDI data start;
+        ``cov`` is real, symmetrized, in fractional-frequency units.
+        """
+        if self._tab is None:
+            from mojito import MojitoL1File
+
+            with MojitoL1File(self.path) as f:
+                lam = float(f.laser_frequency)
+                est = f.noise_estimates
+                freqs = np.asarray(est.freq_sampling.f(), dtype=np.float64)
+                est_t = np.asarray(est.time_sampling.t(), dtype=np.float64)
+                data_t0 = float(f.tdis.time_sampling.t0)
+                cov = np.asarray(getattr(est, self.which)[:]).real / lam**2
+            cov = 0.5 * (cov + np.swapaxes(cov, -1, -2))
+            self._tab = (est_t - data_t0, freqs, np.ascontiguousarray(cov))
+        return self._tab
+
+    def _interp_freq(self, f_arr: np.ndarray, tab: np.ndarray, axis: int) -> np.ndarray:
+        """Interpolate the table onto ``f_arr`` (linear in log10 f) along ``axis``.
+
+        Frequencies outside the tabulated range get ``fill_value``.
+        """
+        _, est_f, _ = self._load()
+        in_range = (f_arr >= est_f[0]) & (f_arr <= est_f[-1])
+        f_safe = np.where(in_range, f_arr, est_f[0])
+        vals = _interp1d_along_axis(np.log10(f_safe), np.log10(est_f), tab, axis=axis)
+        mask_idx = [slice(None)] * vals.ndim
+        mask_idx[axis] = ~in_range
+        vals[tuple(mask_idx)] = self.fill_value
+        return vals
+
+    def covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        est_t, est_f, cov = self._load()
+        xp = settings.xp
+        nch = self.nchannels
+        if cov.shape[-1] != nch:
+            raise ValueError(
+                f"tabulated estimates are {cov.shape[-1]}x{cov.shape[-2]}; "
+                f"expected {nch} channels."
+            )
+        cov_avg = cov.mean(axis=0)  # (Nq, nch, nch)
+
+        if isinstance(settings, domains.FDSettings):
+            f_arr = np.asarray(asnumpy(settings.f_arr), dtype=np.float64)
+            vals = self._interp_freq(f_arr, cov_avg, axis=0)  # (Nf, nch, nch)
+            return xp.asarray(np.moveaxis(vals, (0, 1, 2), (2, 0, 1)))
+
+        if not isinstance(settings, domains.WDMSettings):
+            raise NotImplementedError(
+                f"MojitoNoiseEstimates supports FDSettings and WDMSettings; "
+                f"got {type(settings).__name__}."
+            )
+
+        # --- WDM: fold the interpolated full-resolution PSD into the wavelet
+        # basis exactly the way InstrumentNoise does (one fold per element on
+        # the time-averaged table), then apply the slow daily variation as a
+        # per-layer ratio. ---
+        f_full = np.asarray(
+            asnumpy(settings.xp.fft.rfftfreq(settings.N, settings.data_dt)),
+            dtype=np.float64,
+        )
+        full = self._interp_freq(f_full, cov_avg, axis=0)  # (Nfull, nch, nch)
+        basis_shape = tuple(settings.basis_shape_active)
+        fd_settings = domains.FDSettings(
+            f_full.shape[0],
+            float(f_full[1] - f_full[0]),
+            force_backend=settings.backend,
+        )
+        folded = np.empty((nch, nch, basis_shape[0]), dtype=np.float64)
+        for (i, j) in ELEMENTS:
+            psd_fd = domains.FDSignal(settings.xp.asarray(full[:, i, j]), fd_settings)
+            col = asnumpy(
+                np.real(psd_fd.wdmtransform(settings=settings, is_psd=True)[0])
+            )[:, 0]
+            folded[i, j] = col
+            folded[j, i] = col
+
+        if not self.time_dependent:
+            C = np.broadcast_to(folded[..., None], (nch, nch) + basis_shape)
+            return xp.asarray(np.ascontiguousarray(C))
+
+        # daily variation at the layer centres, as a ratio to the time average
+        f_layers = np.asarray(asnumpy(settings.f_arr), dtype=np.float64)
+        t_arr = np.asarray(asnumpy(settings.t_arr), dtype=np.float64) + self.t_offset
+        by_day = _interp1d_along_axis(t_arr, est_t, cov, axis=0)  # (Nt, Nq, nch, nch)
+        num = self._interp_freq(f_layers, by_day, axis=1)  # (Nt, Nf, nch, nch)
+        den = self._interp_freq(f_layers, cov_avg, axis=0)  # (Nf, nch, nch)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = num / den[None]
+        ratio[~np.isfinite(ratio)] = 1.0
+        # (Nt, Nf, nch, nch) -> (nch, nch, Nf, Nt)
+        ratio = np.moveaxis(ratio, (0, 1, 2, 3), (3, 2, 0, 1))
+        return xp.asarray(folded[..., None] * ratio)
+
+    def fit_scalar_params(
+        self,
+        band: Tuple[float, float] = (1e-4, 2.5e-2),
+        tdi_generation: int = 2,
+    ) -> Tuple[float, float]:
+        """Estimate scalar ``(Soms_d, Sa_a)`` from the tabulated estimates.
+
+        The TDI instrument PSD is linear in ``(Soms_d**2, Sa_a**2)``, so a
+        weighted linear least-squares of the analytic X-channel model against
+        the time-averaged tabulated diagonals over ``band`` recovers the
+        parameters exactly (1/S weighting so each decade counts equally).
+        Only meaningful for ``which="xyz"``.
+
+        Returns:
+            ``(Soms_d, Sa_a)`` in linear (square-root) units, the convention
+            of :class:`CompositeSensitivityBackend` / the psd-branch priors.
+        """
+        if self.which != "xyz":
+            raise ValueError("fit_scalar_params requires which='xyz'.")
+        if tdi_generation not in _XYZ_ELEMENT_SENS:
+            raise ValueError(f"tdi_generation must be 1 or 2, got {tdi_generation!r}.")
+        _, est_f, cov = self._load()
+        avg = cov.mean(axis=0)  # (Nq, nch, nch)
+        mask = (est_f >= band[0]) & (est_f <= band[1])
+        if not mask.any():
+            raise ValueError(f"band {band} has no overlap with the tabulated grid.")
+        fb = est_f[mask]
+        Xsens = _XYZ_ELEMENT_SENS[tdi_generation][0]
+        orbits = lisa_models.DefaultOrbits()
+        # LISAModel carries the SQUARED levels; unit-basis responses give the
+        # linear-model columns.
+        resp_oms = Xsens.get_Sn(fb, model=lisa_models.LISAModel(1.0, 0.0, orbits, "oms_basis"))
+        resp_acc = Xsens.get_Sn(fb, model=lisa_models.LISAModel(0.0, 1.0, orbits, "acc_basis"))
+        rows, rhs = [], []
+        for i in range(self.nchannels):
+            target = avg[mask, i, i]
+            w = 1.0 / target
+            rows.append(np.stack([resp_oms * w, resp_acc * w], axis=1))
+            rhs.append(target * w)
+        coef, *_ = np.linalg.lstsq(np.vstack(rows), np.concatenate(rhs), rcond=None)
+        if coef[0] < 0 or coef[1] < 0:
+            raise ValueError(
+                f"noise-parameter fit returned negative squared levels {coef}; "
+                "the tabulated estimates do not look like an instrument PSD."
+            )
+        return float(np.sqrt(coef[0])), float(np.sqrt(coef[1]))
+
+
+def estimate_noise_params_from_file(
+    path: str,
+    *,
+    band: Tuple[float, float] = (1e-4, 2.5e-2),
+    tdi_generation: int = 2,
+) -> Tuple[float, float]:
+    """``(Soms_d, Sa_a)`` fit to a mojito NOISE brick's tabulated estimates.
+
+    Thin wrapper over :meth:`MojitoNoiseEstimates.fit_scalar_params`.
+    """
+    return MojitoNoiseEstimates(path).fit_scalar_params(
+        band=band, tdi_generation=tdi_generation
+    )
+
+
 class CompositeSensitivityMatrix(SensitivityMatrixBase):
     """Sensitivity matrix built as a sum of :class:`NoiseComponent` objects.
 
@@ -3849,6 +4105,47 @@ class CompositeSensitivityMatrix(SensitivityMatrixBase):
 
         n_td = np.fft.irfft(n_fd, n=N, axis=-1) / dt
         return n_td.astype(np.float64)
+
+
+class MojitoNoiseSensitivityMatrix(CompositeSensitivityMatrix):
+    """Stock-style sensitivity matrix driven by a mojito NOISE brick.
+
+    One-liner counterpart of the parametric stock matrices
+    (:class:`XYZ2SensitivityMatrix` etc.) for the tabulated file-driven noise
+    model: a :class:`CompositeSensitivityMatrix` whose instrument component is
+    a :class:`MojitoNoiseEstimates` table, plus any ``extra_components``
+    (galactic foreground, SGWB, ...). Use it anywhere a sensitivity matrix is
+    accepted — e.g. SNRs via :class:`~lisatools.analysiscontainer.AnalysisContainer`
+    or :func:`~lisatools.diagnostic.inner_product` / ``snr``::
+
+        sens = MojitoNoiseSensitivityMatrix(settings, noise_file)
+        snr = inner_product(sig, sig, psd=sens).real ** 0.5
+
+    Args:
+        settings: Domain settings the matrix is evaluated on (FD, WDM, STFT).
+        path: Path to the mojito NOISE L1 ``.h5`` file.
+        extra_components: Additional :class:`NoiseComponent` instances summed
+            on top of the tabulated instrument noise.
+        skip_inv_det: Skip determinant/inverse computation (e.g. for slicing).
+        **component_kwargs: Forwarded to :class:`MojitoNoiseEstimates`
+            (``which``, ``time_dependent``, ``t_offset``, ``fill_value``).
+    """
+
+    def __init__(
+        self,
+        settings: domains.DomainSettingsBase,
+        path: str,
+        *,
+        extra_components: Sequence[NoiseComponent] = (),
+        skip_inv_det: bool = False,
+        **component_kwargs,
+    ):
+        component = MojitoNoiseEstimates(path, **component_kwargs)
+        super().__init__(
+            settings,
+            [component, *extra_components],
+            skip_inv_det=skip_inv_det,
+        )
 
 
 def generate_correlated_instrument_noise_td(
@@ -4134,7 +4431,10 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         Args:
             name: Identifier (e.g. ``"walker_3"``) recorded on the LISAModel.
             params: ``[Soms_d, Sa_a]`` in linear (square-root) units (physical
-                basis), matching :class:`XYZSensitivityBackend`.
+                basis), matching :class:`XYZSensitivityBackend`. ``None`` skips
+                the parametric instrument component entirely — the instrument
+                noise must then come from ``extra_components`` (fixed-PSD runs
+                driven by e.g. a :class:`MojitoNoiseEstimates` table).
             galfor_params: Optional galactic-foreground parameters. When given, a
                 :class:`GalacticForeground` component is added (with the backend's
                 ``galfor_modulation``).
@@ -4144,18 +4444,20 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         Returns:
             A freshly built :class:`CompositeSensitivityMatrix`.
         """
-        Soms_d = float(params[0])
-        Sa_a = float(params[1])
-        model = self.instrument_model_cls(
-            Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
-        )
-        components: list[NoiseComponent] = [
-            self.instrument_component_cls(
-                tdi_generation=self.tdi_generation,
-                model=model,
-                fill_nans=self.instrument_fill_nans,
-            ),
-        ]
+        components: list[NoiseComponent] = []
+        if params is not None:
+            Soms_d = float(params[0])
+            Sa_a = float(params[1])
+            model = self.instrument_model_cls(
+                Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
+            )
+            components.append(
+                self.instrument_component_cls(
+                    tdi_generation=self.tdi_generation,
+                    model=model,
+                    fill_nans=self.instrument_fill_nans,
+                )
+            )
         if galfor_params is not None:
             components.append(
                 GalacticForeground(
@@ -4174,5 +4476,12 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
                 )
             )
         components.extend(self.extra_components)
+        if not components:
+            raise ValueError(
+                "psd_params=None with no galfor/sgwb params and no "
+                "extra_components — the backend has no noise component to "
+                "build. Pass psd_params or construct the backend with "
+                "extra_components (e.g. a MojitoNoiseEstimates table)."
+            )
         _tmp = CompositeSensitivityMatrix(self.basis_settings, components)
         return _tmp

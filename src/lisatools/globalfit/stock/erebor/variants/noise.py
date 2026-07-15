@@ -1,15 +1,28 @@
 """Stock variants ``noise_only`` / ``noise_sgwb``: joint WDM noise fit(s).
 
-Both variants fit the LISA noise on a self-consistent synthetic WDM-domain
-realization (Cholesky-drawn from the *injected* composite covariance) — there
-are no GW *source* branches:
+Both variants fit the LISA noise — there are no GW *source* branches:
 
 * ``noise_only`` — instrument PSD (``psd``) + galactic-confusion foreground
   (``galfor``). **This is the tested variant.**
 * ``noise_sgwb`` — the same, plus a power-law stochastic GW background
   (``sgwb``). Built end-to-end; its SGWB posterior is not validated here.
 
-All three branches are sampled jointly by the single
+Data (one knob, ``data_mode`` / env ``DATA_PROCESSOR``):
+
+* ``"mojito"`` (default) — the **real mojito NOISE brick**
+  (``<mojito_data_path>/data/INSTRUMENT/L1/NOISE_*``), downsampled onto the
+  run grid; the psd branch's start/reference levels are read off the brick's
+  tabulated ``noise_estimates`` (see
+  :func:`lisatools.sensitivity.estimate_noise_params_from_file`). Falls back
+  to ``"synthetic"`` with a warning when the brick is missing. Note the
+  brick contains **instrument noise only** — the galfor branch then rails at
+  its amplitude floor; drop it with ``fit.remove_branch("galfor")`` for a
+  pure-instrument fit.
+* ``"synthetic"`` — a self-consistent WDM-domain realization Cholesky-drawn
+  from the *injected* composite covariance (instrument + foreground
+  [+ SGWB]), so the fit recovers the injected truths exactly.
+
+All branches are sampled jointly by the single
 :class:`~lisatools.globalfit.moves.psdmove.PSDMove`. The foreground time
 modulation flows through the general
 :class:`~lisatools.sensitivity.GalForTimeModulation` framework (default:
@@ -118,17 +131,19 @@ class NoiseGeneralSettings(EreborGeneralSettings):
     # term in the likelihood (source-only variants set this True to drop it).
     likelihood_source_only: bool = False
 
-    # Only "synthetic" is supported (swap ``data_processor_class`` for real data).
+    # "mojito" (default): the real NOISE brick; "synthetic": the Cholesky
+    # draw from the injected covariance. Auto-falls back to synthetic when
+    # the brick / mojito folder is missing.
     data_mode: str = dataclasses.field(
-        default_factory=env_default("DATA_PROCESSOR", "synthetic", str)
+        default_factory=env_default("DATA_PROCESSOR", "mojito", str)
     )
     noise_seed: int = dataclasses.field(default_factory=env_default("NOISE_SEED", 0, int))
     t_start: float = 0.0
 
     # Injections consumed by the synthetic processor + sensitivity backend.
-    psd_injection: typing.Sequence[float] = dataclasses.field(
-        default_factory=lambda: list(PSD_INJECTION)
-    )
+    # psd_injection None -> auto: the NOISE brick's fitted [Soms_d, Sa_a] in
+    # mojito mode, else the stock PSD_INJECTION.
+    psd_injection: typing.Optional[typing.Sequence[float]] = None
     galfor_injection: typing.Sequence[float] = dataclasses.field(
         default_factory=lambda: list(GALFOR_INJECTION)
     )
@@ -161,16 +176,63 @@ class _NoiseFitBase(EreborFit):
             Nf=Nf, Nt=Nt, min_freq=gs.min_freq, max_freq=gs.max_freq
         )
 
+    # -- data source: the real NOISE brick (mojito) or the synthetic draw --
+    def resolve_data_source(self) -> None:
+        super().resolve_data_source()
+        # Mutates the FIT-LEVEL block (like the base method): _prepare_psd
+        # reads self.general.psd_injection at branch prep.
+        gs = self.general
+        if gs.data_mode == "mojito":
+            from ..noise import resolve_noise_file
+
+            if resolve_noise_file(gs.mojito_data_path, gs.noise_file) is None:
+                logger.warning(
+                    "noise fit data_mode='mojito' but no NOISE brick was found "
+                    "under %s — falling back to data_mode='synthetic' (set "
+                    "NOISE_FILE / general.noise_file to use the real noise).",
+                    gs.mojito_data_path,
+                )
+                gs.data_mode = "synthetic"
+        if gs.psd_injection is None:
+            # NOISE-brick fit in mojito mode (auto), stock levels otherwise.
+            params = self.resolve_noise_file_psd_params(gs)
+            gs.psd_injection = list(params) if params is not None else list(PSD_INJECTION)
+
     def default_preprocess_kwargs(self) -> dict:
+        if self.general.data_mode == "mojito":
+            # Real NOISE brick (2.5 s native): downsample onto the run grid
+            # and keep the engine's default highpass / edge-trim / Tobs trim
+            # so exactly Nf*Nt samples survive to the WDM pour.
+            return dict(
+                downsample_kwargs=dict(target_fs=1.0 / self.general.dt),
+                normalize=False,
+            )
         # The synthetic WDM draw needs no highpass/trim/normalize.
         return dict(highpass_kwargs=None, trim_kwargs=None, Tobs=None, normalize=False)
 
-    # -- synthetic composite-noise data processor --
     def set_default_processor(self, gs: NoiseGeneralSettings) -> None:
+        if gs.data_mode == "mojito":
+            from lisatools.detector import L1Orbits
+
+            from ....preprocessing import L1ProcessingStep
+
+            force_backend = gs.gpu_backend if gs.gpus is not None else "cpu"
+            gs.data_processor_class = L1ProcessingStep
+            gs.processor_init_kwargs = dict(
+                L1_folder=gs.mojito_data_path,
+                source_types=["NOISE"],
+                source_ids=None,
+                orbits_class=L1Orbits,
+                orbits_kwargs=dict(
+                    force_backend=force_backend, frame=gs.orbits_frame
+                ),
+            )
+            return
         if gs.data_mode != "synthetic":
             raise ValueError(
-                f"noise fit data_mode={gs.data_mode!r}; only 'synthetic' is "
-                "supported (swap data_processor_class for a real-data loader)."
+                f"noise fit data_mode={gs.data_mode!r}; use 'mojito' (the real "
+                "NOISE brick) or 'synthetic' (or swap data_processor_class "
+                "wholesale)."
             )
         from ..injections import SyntheticNoiseProcessingStep
 

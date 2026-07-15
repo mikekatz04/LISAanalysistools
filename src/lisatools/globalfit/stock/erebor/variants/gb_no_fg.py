@@ -5,7 +5,10 @@ The installed version of ``global_fit_input/gb_no_foreground_global_fit_settings
 * **No galactic-foreground branch** — the foreground is not fit.
 * **Fixed PSD** — no ``psd`` branch; the sensitivity is a fixed
   :class:`InstrumentNoise` from ``general.fixed_psd_params`` via the
-  engine's no-psd-branch path.
+  engine's no-psd-branch path. Default levels are read off the mojito
+  NOISE brick's tabulated estimates when the run uses mojito data
+  (``psd_from_noise_file`` auto; stock analytic ``[15e-12, 3e-15]``
+  otherwise).
 * **Frequency band restricted to f > 6 mHz** so the unresolved galactic
   confusion is out of band — no foreground model needed anywhere.
 * Data: the mojito L1 GB galaxy (``catalogue["GB"]`` populated so leaves
@@ -262,9 +265,11 @@ class GBNoFgGeneralSettings(EreborGeneralSettings):
         default_factory=env_default("BASE_FILE_NAME", "gb_no_fg_test_2")
     )
     source_types: typing.Tuple[str, ...] = ("GB",)
-    fixed_psd_params: typing.Optional[typing.List[float]] = dataclasses.field(
-        default_factory=lambda: [15e-12, 3e-15]
-    )
+    # None -> auto at build: [Soms_d, Sa_a] fit to the mojito NOISE brick's
+    # tabulated estimates when available (mojito data mode; see
+    # ``psd_from_noise_file`` / ``noise_file``), else the stock analytic
+    # levels [15e-12, 3e-15]. An explicit list always wins.
+    fixed_psd_params: typing.Optional[typing.List[float]] = None
     # Fixed PSD (no psd branch) -> report source-only log L = -1/2 <r|r>
     # (drop the constant -sum(log|detC|) noise normalization term).
     likelihood_source_only: bool = True
@@ -504,6 +509,13 @@ class GBNoForegroundGlobalFit(EreborFit):
     # -- general resolution -----------------------------------------------------
 
     def adjust_general(self, gs: GBNoFgGeneralSettings) -> None:
+        # Fixed PSD levels: explicit list > mojito NOISE brick fit > stock.
+        if gs.fixed_psd_params is None:
+            file_params = self.resolve_noise_file_psd_params(gs)
+            gs.fixed_psd_params = (
+                file_params if file_params is not None else [15e-12, 3e-15]
+            )
+
         # ACA frequency clipping (memory knob): narrow the DATA band to
         # +-data_band_layers WDM layers around the GB band.
         gb = self.gb

@@ -32,7 +32,7 @@ package.
 | `datacontainer.py` | `DataResidualArray` — **deprecated** thin shim over `domains.DomainBase`. |
 | `domains.py` | Domain settings + signal containers: `DomainSettingsBase`/`DomainBase`, `TD/FD/STFT/WDM` `Settings`+`Signal` pairs, `DomainBaseArray`. ~2900 lines; the domain hub. |
 | `domaincomputation.py` | `BaseDomainComputationGroup` + `STFT/FD/WDMComputationGroup` — Python front to C++ batched `<d\|h>`/`<h\|h>`. |
-| `sensitivity.py` | `Sensitivity`/`SensitivityMatrix` hierarchy, `get_sensitivity`, TDI noise channels, `CompositeSensitivityMatrix`/`Backend`, `XYZSensitivityBackend`. ~4000 lines. |
+| `sensitivity.py` | `Sensitivity`/`SensitivityMatrix` hierarchy, `get_sensitivity`, TDI noise channels, `CompositeSensitivityMatrix`/`Backend`, `XYZSensitivityBackend`; mojito NOISE-brick model (`MojitoNoiseEstimates` tabulated component, `MojitoNoiseSensitivityMatrix`, `estimate_noise_params_from_file`). ~4300 lines. |
 | `detector.py` | `Orbits` (+ `EqualArmlength/ESA/L1/DefaultOrbits`), `LISAModel`. Python frontend over backend `OrbitsWrap`. |
 | `mojito_detector.py` | Mojito-dataset orbit/detector interop. |
 | `diagnostic.py` | `inner_product`, likelihood terms, Fisher `info_matrix`/`covariance`, SNR, Cutler–Vallisneri bias. |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import typing
 from typing import Any, Optional
 
@@ -17,6 +18,8 @@ from lisatools.utils.constants import YRSID_SI
 
 from ...engine import GeneralSetup, Settings, Setup
 from ...loginfo import init_logger
+
+logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class PSDSettings(Settings):
@@ -240,6 +243,65 @@ def resolve_galfor_modulation(path):
     from lisatools.sensitivity import GalForTimeModulation
 
     return GalForTimeModulation(path) if path else None
+
+
+def resolve_noise_file(
+    mojito_data_path: str, explicit: typing.Optional[str] = None
+) -> typing.Optional[str]:
+    """Resolve the mojito NOISE brick path for a run.
+
+    An ``explicit`` path (``general.noise_file`` / env ``NOISE_FILE``) wins and
+    must exist; otherwise look for the standard
+    ``<mojito_data_path>/data/INSTRUMENT/L1/NOISE_*`` brick. Returns ``None``
+    when nothing is found (callers fall back to the analytic stock levels).
+    """
+    if explicit:
+        if not os.path.isfile(explicit):
+            raise FileNotFoundError(
+                f"noise_file={explicit!r} does not exist; unset it or point it "
+                "at a mojito NOISE L1 .h5 file."
+            )
+        return explicit
+    folder = os.path.join(mojito_data_path, "data", "INSTRUMENT", "L1")
+    if not os.path.isdir(folder):
+        return None
+    from ...preprocessing import find_file
+
+    try:
+        return find_file(folder, "NOISE", 0)
+    except FileNotFoundError:
+        return None
+
+
+def noise_params_from_file(
+    noise_file: str,
+    band: typing.Optional[typing.Tuple[float, float]] = None,
+    tdi_generation: int = 2,
+) -> typing.Optional[typing.List[float]]:
+    """``[Soms_d, Sa_a]`` fit to the NOISE brick's tabulated estimates.
+
+    Wraps :func:`lisatools.sensitivity.estimate_noise_params_from_file`; the
+    fit band is clipped to the tabulated grid. Returns ``None`` (with a
+    warning) if the fit fails, so callers can fall back to the stock levels.
+    """
+    from lisatools.sensitivity import estimate_noise_params_from_file
+
+    kwargs = {"tdi_generation": tdi_generation}
+    if band is not None:
+        kwargs["band"] = (float(band[0]), float(band[1]))
+    try:
+        soms_d, sa_a = estimate_noise_params_from_file(noise_file, **kwargs)
+    except Exception as exc:  # fit problems must not kill a build
+        logger.warning(
+            "noise-parameter fit against %s failed (%s); falling back to the "
+            "stock analytic levels.", noise_file, exc,
+        )
+        return None
+    logger.info(
+        "noise parameters read from %s: Soms_d=%.6e, Sa_a=%.6e",
+        noise_file, soms_d, sa_a,
+    )
+    return [soms_d, sa_a]
 
 
 def prepare_psd_branch(psd, psd_injection=None):
