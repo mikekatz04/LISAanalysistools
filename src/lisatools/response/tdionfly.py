@@ -21,14 +21,11 @@ from gpubackendtools.interpolate import CubicSplineInterpolant
 
 from lisatools.detector import EqualArmlengthOrbits, Orbits
 from lisatools.utils.utility import AET
+from lisatools.utils.constants import C_SI, YRSID_SI
 from gpubackendtools import wrapper
             
 from .parallelbase import FastLISAResponseParallelModule
 from .tdiconfig import TDIConfig
-
-# TODO: need to update constants setup
-YRSID_SI = 31558149.763545603
-
 
 def get_factorial(n):
     fact = 1
@@ -43,7 +40,7 @@ from math import factorial
 
 factorials = np.array([factorial(i) for i in range(30)])
 
-C_inv = 3.3356409519815204e-09
+C_inv = 1. / C_SI
 
 
 class CubicSpline:

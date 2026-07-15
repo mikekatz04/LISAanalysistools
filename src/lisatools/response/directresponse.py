@@ -866,7 +866,7 @@ class pyResponseTDI(FastLISAResponseParallelModule):
 class ResponseWrapper(FastLISAResponseParallelModule):
     """Wrapper to produce LISA TDI from TD waveforms
 
-    This class takes a waveform generator that produces :math:`h_+ \pm ih_x`.
+    This class takes a waveform generator that produces :math:`h_+ \\pm ih_x`.
     (:code:`flip_hx` is used if the waveform produces :math:`h_+ - ih_x`).
     It takes the complex waveform in the SSB frame and produces the TDI channels
     according to settings chosen for :class:`pyResponseTDI`.
@@ -876,7 +876,7 @@ class ResponseWrapper(FastLISAResponseParallelModule):
 
     Args:
         waveform_gen (obj): Function or class (with a :code:`__call__` function) that takes parameters and produces
-            :math:`h_+ \pm h_x`.
+            :math:`h_+ \\pm h_x`.
         Tobs (double): Observation time in years.
         dt (double): Time between time samples in seconds. The inverse of the sampling frequency.
         index_lambda (int): The user will input parameters. The code will read these in
