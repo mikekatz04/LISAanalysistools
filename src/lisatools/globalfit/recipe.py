@@ -253,14 +253,19 @@ class BaseRecipeStep(RecipeStep):
 
 
 class SearchRecipeStep(BaseRecipeStep):
-    """Recipe step that completes immediately (one-shot search/initialization).
+    """Recipe step that is done when the search itself completes.
 
-    Used when the stopping criterion is embedded inside the move itself
-    rather than at the recipe level.
+    The stopping criterion is handled **internally**, inside the search move —
+    the move runs its own search to completion (e.g. to log-likelihood
+    convergence) before the recipe is consulted. So there is nothing left for
+    the recipe to wait on and this step reports done on its first call. That is
+    a statement about where the criterion lives, not about how much work was
+    done: compare :class:`RJRecipeStep`, which owns its criterion at the recipe
+    level and watches the leaf count across iterations.
     """
 
     def stopping_function(self, *args, **kwargs):
-        """Always stop after one call."""
+        """Done: the move has already run the search to completion."""
         return True
 
 
