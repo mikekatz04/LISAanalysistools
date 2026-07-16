@@ -20,8 +20,8 @@
 
    latw/00_SetupAndAtlas
    latw/01_GlobalFitQuickstart
-   latw/02_StockGlobalFitGallery
-   latw/03_StockGlobalFitsInDepth
+   latw/02_StockGlobalFitsInDepth
+   latw/03_StockGlobalFitGallery
    latw/04_Foundations
    latw/05_ResponseAndTDI
    latw/06_SourceWaveforms
