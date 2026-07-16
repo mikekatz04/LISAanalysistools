@@ -108,16 +108,3 @@ Run bookkeeping
 .. automodule:: lisatools.globalfit.utils
     :members:
     :show-inheritance:
-
-MBH search (developer tooling)
-++++++++++++++++++++++++++++++++
-
-``lisatools.globalfit.mbhsearch`` is retained for the developer MBH-search
-script (``scripts/mbh/dev_mbh_gf_search.py``); the everyday path is the stock
-recipes above.
-
-It is **not auto-documented here**: the module hardcodes ``use_gpu = True`` at
-module scope and raises ``ValueError("Requesting gpu with no GPU available or
-cupy issue.")`` on import, so it cannot be imported — and therefore cannot be
-rendered — on a CPU-only machine such as a docs builder. Read it at the source
-until that import-time GPU requirement is lifted.
