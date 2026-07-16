@@ -2,7 +2,7 @@
 
 Each registered stock model gets a ``*_lite`` twin whose ONLY difference is
 the lite preset: every knob turned down to a small, CPU-friendly smoke
-configuration (short WDM grid, ~10 iterations, 4 walkers x 2 temps, few GB
+configuration (short WDM grid, ~3 iterations, 4 walkers x 2 temps, few GB
 repeat proposals, CPU compute). Two equivalent spellings::
 
     fit = erebor.all_sources_lite()          # the registered twin
@@ -183,7 +183,7 @@ class AllSourcesLiteGlobalFit(AllSourcesGlobalFit):
     option_name = "all_sources_lite"
     description = (
         "Laptop-smoke twin of all_sources: the same six branches and "
-        "machinery on a small WDM grid (nf=720, nt=180), 10 iterations, "
+        "machinery on a small WDM grid (nf=720, nt=180), 3 iterations, "
         "4 walkers x 2 temps, narrow GB band, CPU. Scale any knob back up "
         "to reach the full model (and vice-versa via all_sources(lite=True))."
     )
@@ -198,7 +198,7 @@ class GBNoForegroundLiteGlobalFit(GBNoForegroundGlobalFit):
 
     option_name = "gb_no_fg_lite"
     description = (
-        "Laptop-smoke twin of gb_no_fg: two-week span, 10 iterations, "
+        "Laptop-smoke twin of gb_no_fg: two-week span, 3 iterations, "
         "4 walkers x 2 temps, 2 GB repeat proposals, CPU."
     )
 
@@ -213,7 +213,7 @@ class FullYearCombinedLiteGlobalFit(FullYearCombinedGlobalFit):
     option_name = "full_year_combined_lite"
     description = (
         "Laptop-smoke twin of full_year_combined: one month instead of a "
-        "year, 10 iterations, 4 walkers x 2 temps, CPU."
+        "year, 3 iterations, 4 walkers x 2 temps, CPU."
     )
 
     def __init__(self, **knobs):
@@ -227,7 +227,7 @@ class NoiseOnlyLiteGlobalFit(NoiseOnlyGlobalFit):
     option_name = "noise_only_lite"
     description = (
         "Laptop-smoke twin of noise_only: quarter-length time grid, "
-        "10 iterations, 4 walkers x 2 temps, CPU."
+        "3 iterations, 4 walkers x 2 temps, CPU."
     )
 
     def __init__(self, **knobs):
@@ -241,7 +241,7 @@ class NoiseSGWBLiteGlobalFit(NoiseSGWBGlobalFit):
     option_name = "noise_sgwb_lite"
     description = (
         "Laptop-smoke twin of noise_sgwb: quarter-length time grid, "
-        "10 iterations, 4 walkers x 2 temps, CPU."
+        "3 iterations, 4 walkers x 2 temps, CPU."
     )
 
     def __init__(self, **knobs):

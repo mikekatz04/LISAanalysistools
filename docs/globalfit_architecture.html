@@ -1,0 +1,683 @@
+<title>The LISA global fit — how it is built</title>
+
+<style>
+  /* Body is the scroll container: viewport height, scrolls internally. Its own
+     padding-bottom would be clipped at the scroll end, so the trailing space
+     lives on .wrap instead. */
+  html { height: 100%; font-size: 18.5px; }
+  :root {
+    --ground:#FBFCFE; --panel:#F3F6FB; --sunk:#E9EEF6; --ink:#131A26; --ink-soft:#59637A;
+    --rule:#DCE3ED; --blue:#2F6FD0; --blue-ink:#1B4F9E; --blue-soft:#E3EDFB;
+    --red:#BE4437; --red-ink:#9A3227; --red-soft:#FAE7E3; --mono-bg:#E8EEF7;
+    --display: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --ground:#0D131E; --panel:#141C2A; --sunk:#1B2434; --ink:#E7EDF7; --ink-soft:#94A0B5;
+    --rule:#273245; --blue:#6BA3F0; --blue-ink:#A9CBFA; --blue-soft:#16263F;
+    --red:#E4796B; --red-ink:#F0A79C; --red-soft:#331C18; --mono-bg:#1B2434; } }
+  :root[data-theme="dark"] {
+    --ground:#0D131E; --panel:#141C2A; --sunk:#1B2434; --ink:#E7EDF7; --ink-soft:#94A0B5;
+    --rule:#273245; --blue:#6BA3F0; --blue-ink:#A9CBFA; --blue-soft:#16263F;
+    --red:#E4796B; --red-ink:#F0A79C; --red-soft:#331C18; --mono-bg:#1B2434; }
+  :root[data-theme="light"] {
+    --ground:#FBFCFE; --panel:#F3F6FB; --sunk:#E9EEF6; --ink:#131A26; --ink-soft:#59637A;
+    --rule:#DCE3ED; --blue:#2F6FD0; --blue-ink:#1B4F9E; --blue-soft:#E3EDFB;
+    --red:#BE4437; --red-ink:#9A3227; --red-soft:#FAE7E3; --mono-bg:#E8EEF7; }
+
+  body { background:var(--ground); color:var(--ink); font-family:var(--body); font-size:1rem;
+    line-height:1.6; margin:0; padding:3.5rem 1.5rem 0;
+    height:100%; box-sizing:border-box;
+    overflow-y:auto; overflow-x:hidden; -webkit-overflow-scrolling:touch; }
+  .wrap { max-width:78ch; margin:0 auto; display:flex; flex-direction:column; gap:2rem;
+    padding-bottom:14rem; }
+  .eyebrow { font-family:var(--mono); font-size:.7rem; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--ink-soft); margin:0; }
+  h1 { font-family:var(--display); font-weight:600; font-size:clamp(2rem,5vw,2.8rem); line-height:1.08;
+    letter-spacing:-.015em; text-wrap:balance; margin:.35rem 0 0; }
+  h2 { font-family:var(--display); font-weight:600; font-size:1.4rem; letter-spacing:-.01em;
+    margin:1.25rem 0 0; padding-top:1.25rem; border-top:1px solid var(--rule); text-wrap:balance; }
+  p { margin:0; }
+  .lede { font-size:1.1rem; color:var(--ink-soft); text-wrap:pretty; }
+  .cap { font-size:.84rem; color:var(--ink-soft); text-wrap:pretty; }
+  .cap b { color:var(--ink); font-weight:650; }
+  code { font-family:var(--mono); font-size:.86em; background:var(--mono-bg); padding:.1em .34em; border-radius:3px; }
+  figure { margin:0; display:flex; flex-direction:column; gap:.65rem; }
+  .panel { background:var(--panel); border:1px solid var(--rule); border-radius:10px; padding:1.25rem; overflow-x:auto; }
+  .panel svg { display:block; width:100%; height:auto; min-width:30rem; }
+  pre { margin:0; font-family:var(--mono); font-size:.82rem; line-height:1.75; overflow-x:auto;
+    color:var(--ink); }
+  pre .c { color:var(--ink-soft); }
+  pre .k { color:var(--blue-ink); font-weight:600; }
+  .legend { display:flex; flex-wrap:wrap; gap:1.1rem; font-size:.75rem; color:var(--ink-soft); }
+  .key { display:flex; align-items:center; gap:.4rem; }
+  .sw { width:.8rem; height:.8rem; border-radius:2px; flex:none; }
+  .sw.b { background:var(--blue); } .sw.r { background:var(--red); }
+  /* svg text */
+  .t   { font-family:var(--mono); font-size:11px; fill:var(--ink); }
+  .tb  { font-family:var(--mono); font-size:11px; fill:var(--ink); font-weight:600; }
+  .ts  { font-family:var(--mono); font-size:9px;  fill:var(--ink-soft); }
+  .tl  { font-family:var(--body); font-size:10px; fill:var(--ink-soft); font-style:italic; }
+  .box { fill:var(--ground); stroke:var(--rule); stroke-width:1; }
+  .boxb{ fill:var(--ground); stroke:var(--blue); stroke-width:1.5; }
+  .boxr{ fill:var(--ground); stroke:var(--red);  stroke-width:1.5; }
+  .fill-b { fill:var(--blue-soft); stroke:var(--blue); stroke-width:1.2; }
+  .fill-r { fill:var(--red-soft);  stroke:var(--red);  stroke-width:1.2; }
+  .ln  { stroke:var(--blue); stroke-width:1.4; fill:none; }
+  .lnr { stroke:var(--red);  stroke-width:1.4; fill:none; }
+  .lnd { stroke:var(--ink-soft); stroke-width:1.1; fill:none; stroke-dasharray:3 3; }
+  @media print {
+    html, body { height:auto; overflow:visible; font-size:11pt; }
+    body { padding:0; }
+    .wrap { max-width:none; padding-bottom:0; gap:1.25rem; }
+    figure, .panel { break-inside:avoid; page-break-inside:avoid; }
+    h2 { break-after:avoid; page-break-after:avoid; }
+    .panel svg { min-width:0; }
+  }
+  @media (max-width:640px){ body{padding:2.5rem 1rem 4rem;} }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">lisatools.globalfit</p>
+    <h1>The LISA global fit — how it is built</h1>
+  </header>
+  <p class="lede">Four lines to run one. Three peer blocks to configure one. One container per walker to score one.</p>
+  <div class="legend">
+    <span class="key"><span class="sw b"></span> structure — what contains what</span>
+    <span class="key"><span class="sw r"></span> time — what happens when</span>
+  </div>
+
+  <h2>1 · Running one</h2>
+  <figure>
+    <div class="panel">
+<pre><span class="c">from</span> lisatools.globalfit.stock <span class="c">import</span> erebor
+
+fit  = erebor.gb_no_fg(nwalkers=<span class="k">4</span>)   <span class="c"># pick a stock fit</span>
+curr = fit.build()                 <span class="c"># heavy: data, domain, backend</span>
+fit.run()                          <span class="c"># sample</span></pre>
+    </div>
+    <figcaption class="cap"><b>That is the whole surface.</b> No settings file. Everything below is what those four lines work with.</figcaption>
+  </figure>
+
+  <h2>2 · The shape: three peers</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 250" role="img" aria-label="The fit contains three peer blocks, each composed of atoms.">
+        <defs>
+          <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--blue)"/></marker>
+          <marker id="ad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-soft)"/></marker>
+        </defs>
+        <rect class="fill-b" x="8" y="8" width="624" height="40" rx="6"/>
+        <text class="tb" x="20" y="26">StockGlobalFit</text>
+        <text class="ts" x="20" y="39">the fit — cheap, picklable config</text>
+        <path class="ln" d="M120,48 L120,74" marker-end="url(#ab)"/>
+        <path class="ln" d="M320,48 L320,74" marker-end="url(#ab)"/>
+        <path class="ln" d="M520,48 L520,74" marker-end="url(#ab)"/>
+        <g>
+          <rect class="boxb" x="20" y="76" width="200" height="52" rx="5"/>
+          <text class="tb" x="32" y="96">.general</text><text class="ts" x="32" y="112">run-wide</text>
+          <rect class="boxb" x="220" y="76" width="200" height="52" rx="5"/>
+          <text class="tb" x="232" y="96">.gb .mbh .emri …</text><text class="ts" x="232" y="112">per branch</text>
+          <rect class="boxb" x="420" y="76" width="200" height="52" rx="5"/>
+          <text class="tb" x="432" y="96">.recipe</text><text class="ts" x="432" y="112">run-wide</text>
+        </g>
+        <path class="lnd" d="M120,128 L120,152" marker-end="url(#ad)"/>
+        <path class="lnd" d="M320,128 L320,152" marker-end="url(#ad)"/>
+        <path class="lnd" d="M520,128 L520,152" marker-end="url(#ad)"/>
+        <g>
+          <rect class="box" x="20" y="154" width="200" height="60" rx="5"/>
+          <text class="ts" x="32" y="171">grid · Tobs · dt</text><text class="ts" x="32" y="185">band · data mode</text><text class="ts" x="32" y="199">run shape</text>
+          <rect class="box" x="220" y="154" width="200" height="60" rx="5"/>
+          <text class="ts" x="232" y="171">transform · priors</text><text class="ts" x="232" y="185">injection</text><text class="ts" x="232" y="199">nleaves · ndim</text>
+          <rect class="box" x="420" y="154" width="200" height="60" rx="5"/>
+          <text class="ts" x="432" y="171">StageSpec</text><text class="ts" x="432" y="185">MoveSpec</text>
+        </g>
+        <text class="tl" x="20" y="234">atoms — the only thing beneath a block</text>
+        <text class="tl" x="420" y="234">assigning one block never replaces another</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Peers, not a stack.</b> <code>fit.general = …</code> does not change <code>fit.gb</code> or <code>fit.recipe</code>.</figcaption>
+  </figure>
+
+  <h2>3 · Data in — one knob swaps the whole pipeline</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 300" role="img" aria-label="data_mode selects a data processor; mojito reads L1 files, synthetic builds streams in-process; both land on the same analysis domain.">
+        <defs>
+          <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--blue)"/></marker>
+          <marker id="apr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/></marker>
+        </defs>
+        <rect class="fill-b" x="200" y="8" width="240" height="30" rx="5"/>
+        <text class="tb" x="212" y="28">general.data_mode</text><text class="ts" x="352" y="28">env DATA_MODE</text>
+        <path class="ln" d="M260,38 L140,62" marker-end="url(#ap)"/>
+        <path class="ln" d="M320,38 L320,62" marker-end="url(#ap)"/>
+        <path class="ln" d="M380,38 L500,62" marker-end="url(#ap)"/>
+
+        <rect class="boxb" x="8" y="64" width="196" height="86" rx="5"/>
+        <text class="tb" x="20" y="83">"mojito"</text><text class="ts" x="92" y="83">the default</text>
+        <text class="ts" x="20" y="100">L1ProcessingStep</text>
+        <text class="ts" x="20" y="115">reads L1 XYZ</text>
+        <text class="ts" x="20" y="129">+ catalogue + L1Orbits</text>
+        <text class="ts" x="20" y="143">frame = icrs</text>
+
+        <rect class="fill-b" x="212" y="64" width="216" height="86" rx="5"/>
+        <text class="tb" x="224" y="83">"synthetic"</text><text class="ts" x="308" y="83">no external data</text>
+        <text class="ts" x="224" y="100">builds each branch's</text>
+        <text class="ts" x="224" y="115">stream in-process from</text>
+        <text class="ts" x="224" y="129">injections — the tutorials</text>
+        <text class="ts" x="224" y="143">all run this way</text>
+
+        <rect class="box" x="436" y="64" width="196" height="86" rx="5"/>
+        <text class="t" x="448" y="83">"sangria"</text><text class="ts" x="516" y="83">legacy</text>
+        <text class="ts" x="448" y="100">the LDC training file</text>
+        <text class="ts" x="448" y="115">all_sources only</text>
+
+        <path class="lnr" d="M106,150 L106,178" marker-end="url(#apr)"/>
+        <text class="tl" x="114" y="168">folder missing?</text>
+        <rect class="fill-r" x="8" y="180" width="196" height="40" rx="5"/>
+        <text class="ts" x="20" y="197">automatic fallback →</text>
+        <text class="ts" x="20" y="211">synthetic, prior draws</text>
+        <path class="lnr" d="M204,200 L280,200" marker-end="url(#apr)"/>
+
+        <rect class="boxb" x="284" y="176" width="348" height="48" rx="5"/>
+        <text class="t" x="296" y="194">general.synthetic_injections</text>
+        <text class="ts" x="296" y="210">"stock" = fixed tables · "prior" = seeded draws (+ _seed)</text>
+
+        <path class="ln" d="M320,150 L320,170"/>
+        <path class="ln" d="M320,224 L320,244" marker-end="url(#ap)"/>
+        <rect class="fill-b" x="140" y="246" width="360" height="44" rx="5"/>
+        <text class="tb" x="152" y="265">general_info.input_data_residual_array</text>
+        <text class="ts" x="152" y="280">a DomainBase on the analysis domain — whichever route it came by</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Every route lands in the same place.</b> The processor is chosen at <code>build()</code>; downstream, nothing knows which one ran. Swapping <code>data_processor_class</code> outright always wins over the knob — it lets you adjust the source of the inputs without changing anything else downstream.</figcaption>
+  </figure>
+
+  <h2>4 · general — the run-wide block</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 200" role="img" aria-label="general holds run-wide knob groups and flows down into branches at build.">
+        <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/></marker></defs>
+        <rect class="fill-b" x="8" y="8" width="624" height="98" rx="6"/>
+        <text class="tb" x="20" y="27">.general</text><text class="ts" x="86" y="27">— 92 fields · ~15 you turn</text>
+        <g>
+          <rect class="box" x="20" y="38" width="146" height="56" rx="5"/>
+          <text class="t" x="30" y="55">grid &amp; band</text>
+          <text class="ts" x="30" y="70">dt · tobs_target</text><text class="ts" x="30" y="83">nf/nt · min/max_freq</text>
+          <rect class="box" x="174" y="38" width="146" height="56" rx="5"/>
+          <text class="t" x="184" y="55">data</text>
+          <text class="ts" x="184" y="70">data_mode</text><text class="ts" x="184" y="83">synthetic_injections</text>
+          <rect class="box" x="328" y="38" width="146" height="56" rx="5"/>
+          <text class="t" x="338" y="55">run shape</text>
+          <text class="ts" x="338" y="70">num_iterations</text><text class="ts" x="338" y="83">nwalkers · ntemps</text>
+          <rect class="box" x="482" y="38" width="138" height="56" rx="5"/>
+          <text class="t" x="492" y="55">compute · output</text>
+          <text class="ts" x="492" y="70">use_gpu · gpus</text><text class="ts" x="492" y="83">file_store_dir</text>
+        </g>
+        <path class="lnr" d="M320,106 L320,140" marker-end="url(#ar)"/>
+        <text class="tl" x="330" y="128">at build: branches inherit what they left unset</text>
+        <rect class="boxr" x="180" y="142" width="280" height="42" rx="5"/>
+        <text class="t" x="192" y="160">branch.Tobs · dt · domain_settings</text>
+        <text class="ts" x="192" y="175">…only where the branch left them None</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Run-wide scope, and a defaulting source.</b> Its choices flow <em>down</em> into branches at build — defaulting, not ownership.</figcaption>
+  </figure>
+
+  <h2>5 · branches — one block per source class</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 210" role="img" aria-label="Six branch blocks, each holding its own transform, priors, injection and leaves.">
+        <g>
+          <rect class="fill-b" x="8" y="8" width="98" height="34" rx="5"/><text class="tb" x="18" y="29">gb</text>
+          <rect class="fill-b" x="114" y="8" width="98" height="34" rx="5"/><text class="tb" x="124" y="29">mbh</text>
+          <rect class="fill-b" x="220" y="8" width="98" height="34" rx="5"/><text class="tb" x="230" y="29">emri</text>
+          <rect class="fill-b" x="326" y="8" width="98" height="34" rx="5"/><text class="tb" x="336" y="29">sobbh</text>
+          <rect class="box" x="432" y="8" width="98" height="34" rx="5"/><text class="t" x="442" y="29">psd</text>
+          <rect class="box" x="538" y="8" width="94" height="34" rx="5"/><text class="t" x="548" y="29">galfor</text>
+        </g>
+        <text class="tl" x="8" y="60">source branches — leaves, RJ</text>
+        <text class="tl" x="432" y="60">noise branches</text>
+        <rect class="boxb" x="8" y="72" width="410" height="126" rx="6"/>
+        <text class="ts" x="20" y="90">one branch block holds</text>
+        <g>
+          <rect class="box" x="20" y="98" width="122" height="40" rx="4"/>
+          <text class="t" x="30" y="115">transform</text><text class="ts" x="30" y="130">sampling → waveform</text>
+          <rect class="box" x="150" y="98" width="122" height="40" rx="4"/>
+          <text class="t" x="160" y="115">priors</text><text class="ts" x="160" y="130">per parameter</text>
+          <rect class="box" x="280" y="98" width="126" height="40" rx="4"/>
+          <text class="t" x="290" y="115">injection</text><text class="ts" x="290" y="130">the truth table</text>
+          <rect class="box" x="20" y="146" width="122" height="40" rx="4"/>
+          <text class="t" x="30" y="163">nleaves min/max</text><text class="ts" x="30" y="178">how many sources</text>
+          <rect class="box" x="150" y="146" width="122" height="40" rx="4"/>
+          <text class="t" x="160" y="163">ndim</text><text class="ts" x="160" y="178">parameters each</text>
+          <rect class="box" x="280" y="146" width="126" height="40" rx="4"/>
+          <text class="t" x="290" y="163">signal_gen</text><text class="ts" x="290" y="178">params → DomainBase</text>
+        </g>
+        <rect class="box" x="430" y="72" width="202" height="126" rx="6"/>
+        <text class="ts" x="442" y="90">add / remove whole blocks</text>
+        <text class="t" x="442" y="112">fit.add_branch("gb", …)</text>
+        <text class="t" x="442" y="132">fit.remove_branch("galfor")</text>
+        <text class="tl" x="442" y="158">a move TAGGED with a branch is</text>
+        <text class="tl" x="442" y="172">checked against this set — at</text>
+        <text class="tl" x="442" y="186">materialize time, not on edit</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Per-source-class scope.</b> Each block owns its parameter basis.</figcaption>
+  </figure>
+
+  <h2>6 · recipe — a plan, not a move stack</h2>
+  <p class="cap"><b>The purpose: change the sampler's setup <em>while it runs</em>.</b> The recipe is handed to the sampler as its stopping function and consulted every iteration. When a stage is done, the next stage reconfigures the live sampler — the state, and everything the previous stage found, carries straight over.</p>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 210" role="img" aria-label="The recipe is the sampler's stopping function; when a stage's stopping criterion fires it marks it complete and the next stage swaps the moves on the live sampler.">
+        <defs>
+          <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-soft)"/></marker>
+          <marker id="ar6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/></marker>
+        </defs>
+        <rect class="boxb" x="8" y="60" width="130" height="44" rx="5"/>
+        <text class="tb" x="20" y="80">sampler</text><text class="ts" x="20" y="95">one iteration</text>
+        <path class="lnd" d="M138,82 L196,82" marker-end="url(#ag)"/>
+        <text class="tl" x="140" y="74">stopping_fn</text><text class="tl" x="140" y="118">every iteration</text>
+        <rect class="fill-r" x="198" y="58" width="180" height="48" rx="5"/>
+        <text class="tb" x="210" y="78">Recipe(iter, sample, …)</text>
+        <text class="ts" x="210" y="94">current step done?</text>
+        <path class="lnd" d="M288,106 L288,150" marker-end="url(#ag)"/>
+        <text class="tl" x="196" y="128">no</text>
+        <rect class="box" x="196" y="152" width="184" height="26" rx="4"/>
+        <text class="ts" x="206" y="169">keep sampling — same moves</text>
+        <path class="lnr" d="M378,82 L424,82" marker-end="url(#ar6)"/><text class="tl" x="384" y="74">yes</text>
+        <rect class="fill-r" x="426" y="14" width="206" height="30" rx="4"/>
+        <text class="ts" x="436" y="33">backend.completed_recipe_step()</text>
+        <text class="tl" x="436" y="58">persisted → a resume picks up mid-recipe</text>
+        <rect class="fill-r" x="426" y="66" width="206" height="32" rx="4"/>
+        <text class="ts" x="436" y="80">next step .setup_run(…)</text>
+        <text class="ts" x="436" y="93">sampler.moves = step.moves</text>
+        <path class="lnr" d="M480,44 L480,64" marker-end="url(#ar6)"/>
+        <path class="lnr" d="M529,98 L529,124" marker-end="url(#ar6)"/>
+        <rect class="boxr" x="426" y="126" width="206" height="30" rx="4"/>
+        <text class="ts" x="436" y="145">the LIVE sampler is reconfigured</text>
+        <text class="tl" x="426" y="176">state carries over untouched</text>
+        <text class="tl" x="8" y="192">SearchRecipeStep: done when the search completes — the criterion is handled internally, inside the move</text>
+        <text class="tl" x="8" y="206">PERecipeStep: runs nsteps · RJRecipeStep: done when the leaf count plateaus</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Each stage answers two questions:</b> <em>how should the sampler be set up for me?</em> (<code>setup_run</code>) and <em>when am I done?</em> (<code>stopping_function</code>).</figcaption>
+  </figure>
+
+  <h2>6a · What you would use it for: search → PE, in-process</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 200" role="img" aria-label="With a recipe, a search stage hands over to a PE stage automatically inside one run; without one, the transfer is a manual save, reconfigure and restart.">
+        <defs><marker id="ar7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/></marker>
+          <marker id="ag2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-soft)"/></marker></defs>
+        <text class="tl" x="8" y="16">with a recipe — one run</text>
+        <rect class="fill-r" x="8" y="24" width="270" height="58" rx="5"/>
+        <text class="tb" x="20" y="43">1 · "gb_search"</text><text class="ts" x="205" y="43">kind = rj</text>
+        <text class="ts" x="20" y="59">moves: RJ search · annealing</text>
+        <text class="ts" x="20" y="73">stop: leaf count plateaus</text>
+        <path class="lnr" d="M278,53 L330,53" marker-end="url(#ar7)"/>
+        <text class="tl" x="282" y="45">automatic</text>
+        <rect class="fill-r" x="332" y="24" width="270" height="58" rx="5"/>
+        <text class="tb" x="344" y="43">2 · "gb_pe"</text><text class="ts" x="529" y="43">kind = pe</text>
+        <text class="ts" x="344" y="59">moves: in-model/rj for PE</text>
+        <text class="ts" x="344" y="73">stop: after specified nsteps</text>
+        <text class="tl" x="8" y="98">the leaves the search found are already in the state — nothing is saved, reloaded or re-seeded</text>
+        <text class="tl" x="8" y="132">without one — four manual steps, outside the run</text>
+        <g opacity="0.75">
+          <rect class="box" x="8" y="140" width="140" height="26" rx="4"/><text class="ts" x="18" y="157">run a search</text>
+          <path class="lnd" d="M148,153 L166,153" marker-end="url(#ag2)"/>
+          <rect class="box" x="168" y="140" width="140" height="26" rx="4"/><text class="ts" x="178" y="157">save the HDF5</text>
+          <path class="lnd" d="M308,153 L326,153" marker-end="url(#ag2)"/>
+          <rect class="box" x="328" y="140" width="140" height="26" rx="4"/><text class="ts" x="338" y="157">reconfigure by hand</text>
+          <path class="lnd" d="M468,153 L486,153" marker-end="url(#ag2)"/>
+          <rect class="box" x="488" y="140" width="144" height="26" rx="4"/><text class="ts" x="498" y="157">reload · restart for PE</text>
+        </g>
+        <text class="tl" x="8" y="186">every hand-off is a chance to mis-seed the state — and none of it is recorded in the run</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>The recipe turns that four-step manual hand-off into two <code>StageSpec</code>s.</b> The search stage's own stopping criterion decides when it has found what it can; the sampler is then reconfigured for PE in place, and the completed stage is written to the backend so a resume knows where it was.</figcaption>
+  </figure>
+
+  <h2>6b · How a stage is described</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 190" role="img" aria-label="RecipeSpec holds stages of move specs, materialized into live moves at run setup.">
+        <defs><marker id="ab2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--blue)"/></marker>
+          <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/></marker></defs>
+        <rect class="fill-b" x="8" y="8" width="260" height="150" rx="6"/>
+        <text class="tb" x="20" y="27">RecipeSpec</text>
+        <rect class="boxb" x="20" y="38" width="236" height="52" rx="5"/>
+        <text class="t" x="30" y="56">StageSpec "full_pe"</text><text class="ts" x="30" y="72">kind = pe · search · rj</text>
+        <path class="ln" d="M138,90 L138,102" marker-end="url(#ab2)"/>
+        <rect class="box" x="20" y="104" width="236" height="46" rx="5"/>
+        <text class="ts" x="30" y="121">MoveSpec("psd_pe", branch="psd")</text>
+        <text class="ts" x="30" y="136">MoveSpec("rj_prior", branch="gb")</text>
+        <path class="lnr" d="M268,84 L360,84" marker-end="url(#ar2)"/>
+        <text class="tl" x="272" y="76">materialize_recipe()</text>
+        <text class="tl" x="272" y="100">at run setup</text>
+        <rect class="fill-r" x="362" y="8" width="270" height="150" rx="6"/>
+        <text class="tb" x="374" y="27">live moves</text>
+        <rect class="box" x="374" y="38" width="246" height="34" rx="5"/>
+        <text class="ts" x="384" y="59">GBSpecialRJPriorMove · PSDMove …</text>
+        <rect class="box" x="374" y="80" width="246" height="34" rx="5"/>
+        <text class="ts" x="384" y="101">each MoveSpec.branch checked</text>
+        <rect class="box" x="374" y="122" width="246" height="28" rx="5"/>
+        <text class="ts" x="384" y="141">propose(model, state) → state, accepted</text>
+        <text class="tl" x="8" y="178">a Spec is a picklable description — like importlib's ModuleSpec — not the object</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Declarative.</b> The spec pickles and travels; the live move is constructed only inside the run's setup. Your own module is just a <code>MoveSpec</code> with a factory.</figcaption>
+  </figure>
+
+  <h2>7 · Settings · Setup · State · HDFBackend</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 250" role="img" aria-label="Each source branch extends four base classes; noise branches extend two.">
+        <defs><marker id="ab3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--blue)"/></marker></defs>
+        <text class="ts" x="96" y="20">Settings</text><text class="ts" x="232" y="20">Setup</text>
+        <text class="ts" x="368" y="20">State</text><text class="ts" x="504" y="20">HDFBackend</text>
+        <rect class="fill-b" x="80" y="26" width="120" height="30" rx="5"/><text class="t" x="90" y="46">Settings</text>
+        <rect class="fill-b" x="216" y="26" width="120" height="30" rx="5"/><text class="t" x="226" y="46">Setup</text>
+        <rect class="fill-b" x="352" y="26" width="120" height="30" rx="5"/><text class="t" x="362" y="46">eryn State</text>
+        <rect class="fill-b" x="488" y="26" width="132" height="30" rx="5"/><text class="t" x="498" y="46">eryn HDFBackend</text>
+        <text class="tl" x="8" y="46">base</text>
+        <path class="ln" d="M140,56 L140,76" marker-end="url(#ab3)"/><path class="ln" d="M276,56 L276,76" marker-end="url(#ab3)"/>
+        <path class="ln" d="M412,56 L412,76" marker-end="url(#ab3)"/><path class="ln" d="M554,56 L554,76" marker-end="url(#ab3)"/>
+        <text class="tl" x="8" y="94">extended per branch</text>
+        <g>
+          <text class="tb" x="8" y="114">gb</text>
+          <rect class="box" x="80" y="100" width="120" height="24" rx="4"/><text class="ts" x="90" y="116">GBSettings</text>
+          <rect class="box" x="216" y="100" width="120" height="24" rx="4"/><text class="ts" x="226" y="116">GBSetup</text>
+          <rect class="box" x="352" y="100" width="120" height="24" rx="4"/><text class="ts" x="362" y="116">GBState · band_info</text>
+          <rect class="box" x="488" y="100" width="132" height="24" rx="4"/><text class="ts" x="498" y="116">GBHDFBackend</text>
+          <text class="tb" x="8" y="142">mbh</text>
+          <rect class="box" x="80" y="128" width="120" height="24" rx="4"/><text class="ts" x="90" y="144">MBHSettings</text>
+          <rect class="box" x="216" y="128" width="120" height="24" rx="4"/><text class="ts" x="226" y="144">MBHSetup</text>
+          <rect class="box" x="352" y="128" width="120" height="24" rx="4"/><text class="ts" x="362" y="144">MBHState · betas_all</text>
+          <rect class="box" x="488" y="128" width="132" height="24" rx="4"/><text class="ts" x="498" y="144">MBHHDFBackend</text>
+          <text class="tb" x="8" y="170">emri</text>
+          <rect class="box" x="80" y="156" width="120" height="24" rx="4"/><text class="ts" x="90" y="172">EMRISettings</text>
+          <rect class="box" x="216" y="156" width="120" height="24" rx="4"/><text class="ts" x="226" y="172">EMRISetup</text>
+          <rect class="box" x="352" y="156" width="120" height="24" rx="4"/><text class="ts" x="362" y="172">EMRIState · betas_all</text>
+          <rect class="box" x="488" y="156" width="132" height="24" rx="4"/><text class="ts" x="498" y="172">EMRIHDFBackend</text>
+          <text class="tb" x="8" y="198">sobbh</text>
+          <rect class="box" x="80" y="184" width="120" height="24" rx="4"/><text class="ts" x="90" y="200">SOBBHSettings</text>
+          <rect class="box" x="216" y="184" width="120" height="24" rx="4"/><text class="ts" x="226" y="200">SOBBHSetup</text>
+          <rect class="box" x="352" y="184" width="120" height="24" rx="4"/><text class="ts" x="362" y="200">SOBBHState · betas_all</text>
+          <rect class="box" x="488" y="184" width="132" height="24" rx="4"/><text class="ts" x="498" y="200">SOBBHHDFBackend</text>
+          <text class="tb" x="8" y="226">noise</text>
+          <rect class="box" x="80" y="212" width="120" height="24" rx="4"/><text class="ts" x="90" y="228">PSDSettings …</text>
+          <rect class="box" x="216" y="212" width="120" height="24" rx="4"/><text class="ts" x="226" y="228">PSDSetup …</text>
+          <rect x="352" y="212" width="120" height="24" rx="4" fill="none" stroke="var(--rule)" stroke-dasharray="3 3"/>
+          <text class="tl" x="380" y="228">— none —</text>
+          <rect x="488" y="212" width="132" height="24" rx="4" fill="none" stroke="var(--rule)" stroke-dasharray="3 3"/>
+          <text class="tl" x="524" y="228">— none —</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>The same four bases, extended per branch.</b> Source branches carry per-source bookkeeping — GB a per-<em>band</em> ladder, the rest a per-<em>leaf</em> one — so each needs a State to hold it and a backend to persist it. The noise branches (<code>psd</code>, <code>galfor</code>, <code>sgwb</code>) have none, so they stop at two. Each backend stores exactly what its State holds.</figcaption>
+  </figure>
+
+  <h2>8 · AnalysisContainer → AnalysisContainerArray</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 260" role="img" aria-label="Data, sensitivity and signal_gen compose an AnalysisContainer, one per walker; the AnalysisContainerArray rehomes them into one contiguous buffer per GPU.">
+        <defs><marker id="ab4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--blue)"/></marker>
+          <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/></marker></defs>
+        <rect class="box" x="8" y="14" width="150" height="26" rx="4"/><text class="ts" x="18" y="31">data — DomainBase</text>
+        <rect class="box" x="8" y="46" width="150" height="26" rx="4"/><text class="ts" x="18" y="63">SensitivityMatrix</text>
+        <rect class="box" x="8" y="78" width="150" height="26" rx="4"/><text class="ts" x="18" y="95">signal_gen {branch: fn}</text>
+        <path class="ln" d="M158,27 L206,52" marker-end="url(#ab4)"/>
+        <path class="ln" d="M158,59 L206,59" marker-end="url(#ab4)"/>
+        <path class="ln" d="M158,91 L206,66" marker-end="url(#ab4)"/>
+        <rect class="fill-b" x="208" y="40" width="150" height="40" rx="5"/>
+        <text class="tb" x="218" y="58">AnalysisContainer</text><text class="ts" x="218" y="72">likelihood · snr</text>
+        <text class="tl" x="208" y="98">one per walker</text>
+        <path class="ln" d="M358,60 L406,60" marker-end="url(#ab4)"/>
+        <g>
+          <rect class="boxb" x="408" y="30" width="112" height="18" rx="3"/><text class="ts" x="416" y="43">AC walker 0</text>
+          <rect class="boxb" x="408" y="52" width="112" height="18" rx="3"/><text class="ts" x="416" y="65">AC walker 1</text>
+          <rect class="boxb" x="408" y="74" width="112" height="18" rx="3"/><text class="ts" x="416" y="87">AC walker …</text>
+        </g>
+        <path class="lnr" d="M464,94 L464,124" marker-end="url(#ar4)"/>
+        <text class="tl" x="474" y="114">AnalysisContainerArray(acs, gpus)</text>
+        <rect class="fill-r" x="8" y="128" width="624" height="118" rx="6"/>
+        <text class="tb" x="20" y="147">AnalysisContainerArray</text>
+        <text class="ts" x="175" y="147">— rehomes their memory</text>
+        <rect class="box" x="20" y="158" width="290" height="34" rx="4"/>
+        <text class="ts" x="30" y="172">linear_data_arr · linear_psd_arr</text>
+        <text class="ts" x="30" y="186">one contiguous buffer per GPU shard</text>
+        <rect class="box" x="322" y="158" width="298" height="34" rx="4"/>
+        <text class="ts" x="332" y="172">each AC's array is rebound to a VIEW</text>
+        <text class="ts" x="332" y="186">into that buffer — not a copy</text>
+        <path class="lnd" d="M165,192 L165,208"/><path class="lnd" d="M470,192 L470,208"/>
+        <rect class="box" x="20" y="210" width="290" height="30" rx="4"/>
+        <text class="ts" x="30" y="229">batched ops sharded by index across GPUs</text>
+        <rect class="box" x="322" y="210" width="298" height="30" rx="4"/>
+        <text class="ts" x="332" y="229">BandView — per-band access for the GB band tree</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>The residual and the PSD live in the AnalysisContainerArray, not the containers.</b> Each walker gets its own residual copy and its own sensitivity (re-evaluated from that walker's <code>psd</code> coords); the AnalysisContainerArray then copies them into one contiguous buffer per GPU and points every container at a slice of it. That rebinding is what makes batched, multi-GPU likelihoods possible.</figcaption>
+  </figure>
+
+
+
+  <h2>8a · small → large — the same objects, scaled</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 268" role="img" aria-label="Two ladders converge on the global fit: the eryn sampler grows from a toy Gaussian by adding temperature and leaf axes, and the AnalysisContainer grows from one source's SNR to every walker's residual.">
+        <defs>
+          <marker id="abs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--blue)"/></marker>
+          <marker id="ars" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/></marker>
+        </defs>
+        <text class="tl" x="8" y="14">sampling — eryn</text>
+        <text class="tl" x="328" y="14">scoring — the analysis container</text>
+
+        <rect class="boxb" x="8" y="22" width="304" height="42" rx="5"/>
+        <text class="t" x="20" y="40">EnsembleSampler</text>
+        <text class="ts" x="20" y="55">a 2-D Gaussian · 1 leaf · 1 temperature</text>
+        <rect class="boxb" x="328" y="22" width="304" height="42" rx="5"/>
+        <text class="t" x="340" y="40">data + SensitivityMatrix</text>
+        <text class="ts" x="340" y="55">one source · one SNR</text>
+
+        <path class="ln" d="M160,64 L160,84" marker-end="url(#abs)"/>
+        <path class="ln" d="M480,64 L480,84" marker-end="url(#abs)"/>
+
+        <rect class="boxb" x="8" y="86" width="304" height="42" rx="5"/>
+        <text class="t" x="20" y="104">+ ntemps</text>
+        <text class="ts" x="20" y="119">tempering — the cold chain is temp 0</text>
+        <rect class="boxb" x="328" y="86" width="304" height="42" rx="5"/>
+        <text class="t" x="340" y="104">AnalysisContainer</text>
+        <text class="ts" x="340" y="119">likelihood for ONE source</text>
+
+        <path class="ln" d="M160,128 L160,148" marker-end="url(#abs)"/>
+        <path class="ln" d="M480,128 L480,148" marker-end="url(#abs)"/>
+
+        <rect class="boxb" x="8" y="150" width="304" height="42" rx="5"/>
+        <text class="t" x="20" y="168">+ branches · leaves · inds</text>
+        <text class="ts" x="20" y="183">RJ — an unknown number of sources</text>
+        <rect class="boxb" x="328" y="150" width="304" height="42" rx="5"/>
+        <text class="t" x="340" y="168">AnalysisContainerArray</text>
+        <text class="ts" x="340" y="183">one AC per walker — the residuals</text>
+
+        <path class="lnr" d="M160,192 L160,218" marker-end="url(#ars)"/>
+        <path class="lnr" d="M480,192 L480,218" marker-end="url(#ars)"/>
+
+        <rect class="fill-r" x="8" y="220" width="624" height="42" rx="6"/>
+        <text class="tb" x="20" y="238">the LISA global fit</text>
+        <text class="ts" x="20" y="253">the same sampler, the same container — only more axes filled in</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Nothing new is introduced at the top.</b> Both ladders end at the global fit because the global fit <em>is</em> the small case with more axes: the toy sampler already has the temperature and leaf axes, they are just length 1.</figcaption>
+  </figure>
+  <figure>
+    <div class="panel">
+<pre><span class="c"># one array — the same four axes the whole way up</span>
+<span class="c">#   state.branches_coords[branch] -> (ntemps, nwalkers, nleaves, ndim)</span>
+
+  a toy Gaussian      (  1,  32,   1,  2)
+  + tempering         ( 10,  32,   1,  2)
+  + RJ leaves         ( 10,  32, 100,  8)   <span class="c"># inds[] turns leaves on/off</span>
+  the global fit      ( 10,  32, 100,  8)   <span class="c"># ...once per branch</span>
+
+<span class="c"># and the scoring side</span>
+AnalysisContainer(data, sens, signal_gen).snr()   <span class="c"># one source</span>
+AnalysisContainerArray([ac_0 … ac_nwalkers])      <span class="c"># all walkers</span></pre>
+    </div>
+    <figcaption class="cap"><b>Shapes are illustrative; the axes are the point.</b> A toy chain and a production global fit read out of the same <code>(ntemps, nwalkers, nleaves, ndim)</code> block — which is why what you learn on a 2-D Gaussian transfers untouched, and why <code>gb</code>, <code>mbh</code>, <code>emri</code> … are just more of that block.</figcaption>
+  </figure>
+
+  <h2>8b · Backends — one source, three targets</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 200" role="img" aria-label="One C++/CUDA source compiles to both the CUDA and CPU backends; JAX is a separate pure-Python implementation. Each exposes its own array module.">
+        <defs>
+          <marker id="abk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--blue)"/></marker>
+        </defs>
+        <rect class="fill-b" x="8" y="8" width="404" height="38" rx="6"/>
+        <text class="tb" x="20" y="26">one C++/CUDA source</text>
+        <text class="ts" x="20" y="39">Detector.cu · LISAResponse.cu · domains.cu</text>
+        <rect class="fill-b" x="440" y="8" width="192" height="38" rx="6"/>
+        <text class="tb" x="452" y="26">pure JAX source</text>
+        <text class="ts" x="452" y="39">lisatools/jax/</text>
+        <path class="ln" d="M110,46 L110,74" marker-end="url(#abk)"/>
+        <path class="ln" d="M310,46 L310,74" marker-end="url(#abk)"/>
+        <path class="ln" d="M536,46 L536,74" marker-end="url(#abk)"/>
+        <text class="tl" x="116" y="64">nvcc</text>
+        <text class="tl" x="316" y="64">.cu copied to .cxx</text>
+        <rect class="boxb" x="20" y="76" width="196" height="44" rx="5"/>
+        <text class="t" x="32" y="95">lisatools_backend_cuda12x</text>
+        <text class="ts" x="32" y="111">xp = cupy</text>
+        <rect class="boxb" x="228" y="76" width="184" height="44" rx="5"/>
+        <text class="t" x="240" y="95">lisatools_backend_cpu</text>
+        <text class="ts" x="240" y="111">xp = numpy</text>
+        <rect class="boxb" x="440" y="76" width="192" height="44" rx="5"/>
+        <text class="t" x="452" y="95">jax backend</text>
+        <text class="ts" x="452" y="111">xp = jax.numpy</text>
+        <text class="tl" x="20" y="142">shipped as</text>
+        <rect class="box" x="20" y="150" width="196" height="26" rx="4"/>
+        <text class="ts" x="30" y="167">lisaanalysistools-cuda12x</text>
+        <rect class="box" x="228" y="150" width="184" height="26" rx="4"/>
+        <text class="ts" x="238" y="167">lisaanalysistools</text>
+        <rect class="box" x="440" y="150" width="192" height="26" rx="4"/>
+        <text class="ts" x="450" y="167">same wheel</text>
+        <text class="tl" x="20" y="194">plugin wheel, imported lazily — cupy is installed separately, matching your CUDA</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>The same <code>.cu</code> is compiled twice.</b> <code>nvcc</code> builds it for the GPU; the build copies it to <code>.cxx</code> and the C++ compiler builds it for the CPU — so the two can never drift. CUDA ships as separate plugin wheels the main package imports lazily.</figcaption>
+  </figure>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 130" role="img" aria-label="CUDA C++ is the reference implementation; CPU C++ must match it to machine precision; JAX may differ internally but must match at the inner-product level.">
+        <rect class="fill-r" x="8" y="8" width="170" height="34" rx="5"/>
+        <text class="tb" x="20" y="29">CUDA C++</text>
+        <text class="tl" x="188" y="29">the reference implementation — it leads</text>
+        <rect class="boxr" x="8" y="48" width="170" height="34" rx="5"/>
+        <text class="tb" x="20" y="69">CPU C++</text>
+        <text class="tl" x="188" y="63">mirrors it via #ifdef / shared macros</text>
+        <text class="tl" x="188" y="77">must match to machine precision</text>
+        <rect class="box" x="8" y="88" width="170" height="34" rx="5"/>
+        <text class="tb" x="20" y="109">JAX</text>
+        <text class="tl" x="188" y="103">free to differ inside — JAX-native idioms</text>
+        <text class="tl" x="188" y="117">must match at the inner product (≲ 1e-12)</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>One reference, two mirrors.</b> The hierarchy is what keeps three implementations honest: CPU is held to the GPU bit-for-bit, JAX only where it counts.</figcaption>
+  </figure>
+  <figure>
+    <div class="panel">
+<pre>gen = GBTDIonTheFly(..., <span class="k">force_backend</span>=<span class="k">"cuda12x"</span>)   <span class="c"># chosen ONCE, here</span>
+gen.backend.xp                                    <span class="c"># cupy | numpy | jax.numpy</span>
+
+lisatools.get_backend(<span class="k">"cuda"</span>)                    <span class="c"># first CUDA backend available</span>
+lisatools.has_backend(<span class="k">"cuda12x"</span>)                 <span class="c"># ask without raising</span></pre>
+    </div>
+    <figcaption class="cap"><b>The backend is picked at construction — never as a per-call keyword.</b> Every method dispatches on <code>self.backend</code>, so one object cannot be half CPU and half GPU. Python code stays array-module agnostic: resolve <code>xp</code> from the array, never <code>import cupy</code> unconditionally.</figcaption>
+  </figure>
+
+  <h2>9 · Lifecycle and ordering at the highest level</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 190" role="img" aria-label="Settings build into a Setup which a runner runs; build resolves general, then branches, then the recipe.">
+        <defs><marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/></marker></defs>
+        <rect class="boxb" x="8" y="14" width="180" height="46" rx="5"/>
+        <text class="tb" x="20" y="34">GlobalFitSettings</text><text class="ts" x="20" y="50">the knobs, as data</text>
+        <path class="lnr" d="M188,37 L236,37" marker-end="url(#ar5)"/><text class="tl" x="192" y="29">.build()</text>
+        <rect class="boxr" x="238" y="14" width="180" height="46" rx="5"/>
+        <text class="tb" x="250" y="34">GlobalFitSetup</text><text class="ts" x="250" y="50">built config + live state</text>
+        <path class="lnr" d="M418,37 L466,37" marker-end="url(#ar5)"/>
+        <rect class="boxr" x="468" y="14" width="164" height="46" rx="5"/>
+        <text class="tb" x="480" y="34">GlobalFit(curr).run()</text><text class="ts" x="480" y="50">MPI · GPUs · sampler</text>
+        <text class="tl" x="8" y="80">CurrentInfoGlobalFit is an alias of GlobalFitSetup · the runner holds one, it is not one</text>
+        <text class="ts" x="8" y="108">inside .build() —</text>
+        <rect class="fill-r" x="112" y="94" width="150" height="30" rx="4"/><text class="t" x="124" y="113">1 · general resolves</text>
+        <path class="lnr" d="M262,109 L296,109" marker-end="url(#ar5)"/>
+        <rect class="fill-r" x="298" y="94" width="164" height="30" rx="4"/><text class="t" x="310" y="113">2 · branches inherit</text>
+        <path class="lnr" d="M462,109 L496,109" marker-end="url(#ar5)"/>
+        <rect class="fill-r" x="498" y="94" width="134" height="30" rx="4"/><text class="t" x="510" y="113">3 · recipe built</text>
+        <text class="tl" x="112" y="142">grid · Tobs · domain · data</text>
+        <text class="tl" x="298" y="142">unset Tobs/dt/domain from general</text>
+        <text class="tl" x="498" y="142">checked vs branches</text>
+        <text class="tl" x="8" y="172">a dependency chain — not a hierarchy. general's choices default into branches; they do not own them.</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Same <code>*Settings → *Setup</code> pattern as every module, one level up.</b></figcaption>
+  </figure>
+
+  <h2>10 · The stock fits</h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 640 180" role="img" aria-label="Five stock fits, each with a lite twin.">
+        <text class="ts" x="8" y="18">five variants — branches they compose</text>
+        <g>
+          <rect class="fill-b" x="8" y="26" width="300" height="26" rx="4"/>
+          <text class="tb" x="18" y="44">all_sources</text><text class="ts" x="120" y="44">gb psd galfor mbh emri sobbh</text>
+          <rect class="boxb" x="8" y="56" width="300" height="26" rx="4"/>
+          <text class="tb" x="18" y="74">full_year_combined</text><text class="ts" x="150" y="74">mbh emri sobbh</text>
+          <rect class="boxb" x="8" y="86" width="300" height="26" rx="4"/>
+          <text class="tb" x="18" y="104">gb_no_fg</text><text class="ts" x="150" y="104">gb</text>
+          <rect class="boxb" x="8" y="116" width="300" height="26" rx="4"/>
+          <text class="tb" x="18" y="134">noise_only</text><text class="ts" x="150" y="134">psd galfor</text>
+          <rect class="boxb" x="8" y="146" width="300" height="26" rx="4"/>
+          <text class="tb" x="18" y="164">noise_sgwb</text><text class="ts" x="150" y="164">psd galfor sgwb</text>
+        </g>
+        <defs><marker id="ab5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--blue)"/></marker></defs>
+        <path class="ln" d="M310,99 L356,99" marker-end="url(#ab5)"/>
+        <text class="tl" x="314" y="91">lite=True</text>
+        <rect class="fill-b" x="358" y="26" width="274" height="146" rx="6"/>
+        <text class="tb" x="370" y="46">…_lite ×5</text>
+        <text class="ts" x="370" y="66">same code path, knobs turned down</text>
+        <text class="ts" x="370" y="84">erebor.gb_no_fg_lite()</text>
+        <text class="ts" x="370" y="100">erebor.gb_no_fg(lite=True)</text>
+        <text class="tl" x="370" y="122">not a separate configuration —</text>
+        <text class="tl" x="370" y="136">one preset table, two spellings</text>
+        <text class="tl" x="370" y="160">env vars overrule the preset</text>
+      </svg>
+    </div>
+    <figcaption class="cap"><b>Ten registered options; <code>erebor.get_stock_options()</code> lists them.</b> A new variant is a subclass, never a settings file.</figcaption>
+  </figure>
+
+</div>

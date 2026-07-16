@@ -1,7 +1,9 @@
 """Specialized ``eryn`` HDF5 backends for the global fit (GB / MBH / EMRI / GF)."""
 
+import os
 import shutil
 import time
+import warnings
 from logging import getLogger
 from typing import Optional
 
@@ -254,6 +256,11 @@ class GFHDFBackend(eryn_HDFBackend):
 
     Args:
         *args: Forwarded to :class:`eryn.backends.HDFBackend`.
+        name: Top-level HDF5 group the run is stored under. Defaults to
+            ``"global_fit"`` (eryn's own default is ``"mcmc"``). Files written
+            before this default changed store their run under ``"mcmc"``; such
+            a file is detected on open and honored, with a warning, so existing
+            runs stay readable and resumable.
         comm: Optional MPI communicator (required together with
             ``save_plot_rank`` for asynchronous saves).
         sub_backend: Mapping ``{branch_name: backend_class}`` for branch-
@@ -268,9 +275,14 @@ class GFHDFBackend(eryn_HDFBackend):
         ValueError: If only one of ``comm`` / ``save_plot_rank`` is provided.
     """
 
+    #: Group name used by files written before the ``"mcmc"`` -> ``"global_fit"``
+    #: rename (eryn's ``HDFBackend`` default).
+    LEGACY_NAME = "mcmc"
+
     def __init__(
         self,
         *args,
+        name: str = "global_fit",
         comm=None,
         sub_backend=None,
         sub_state_bases=None,
@@ -278,7 +290,30 @@ class GFHDFBackend(eryn_HDFBackend):
         **kwargs,
     ):
 
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, name=name, **kwargs)
+
+        # Back-compat: an existing file written under the old default keeps its
+        # "mcmc" group. Adopt it rather than silently looking for a group that
+        # is not there (which would read as "uninitialized" and start the run
+        # over the top of real samples).
+        if name != self.LEGACY_NAME and self.filename is not None:
+            try:
+                if os.path.exists(self.filename):
+                    with h5py.File(self.filename, "r") as f:
+                        if name not in f and self.LEGACY_NAME in f:
+                            warnings.warn(
+                                f"{self.filename!r} stores its run under the legacy "
+                                f"{self.LEGACY_NAME!r} group (the default is now "
+                                f"{name!r}); reading it as {self.LEGACY_NAME!r}. Pass "
+                                f"name={self.LEGACY_NAME!r} explicitly to silence this.",
+                                DeprecationWarning,
+                                stacklevel=2,
+                            )
+                            self.name = self.LEGACY_NAME
+            except OSError:
+                # unreadable/locked file: leave the requested name in place and
+                # let the real open() below report the problem properly
+                pass
 
         if comm is not None or save_plot_rank is not None:
             if comm is None or save_plot_rank is None:
@@ -520,7 +555,9 @@ class GFHDFBackend(eryn_HDFBackend):
             order = []
             keys = []
             for key in f[self.name]["recipe"]:
-                _recipe[key] = {key: val for key, val in f["mcmc"]["recipe"][key].attrs.items()}
+                _recipe[key] = {
+                    key: val for key, val in f[self.name]["recipe"][key].attrs.items()
+                }
                 order.append(_recipe[key]["order num"])
                 keys.append(key)
 
