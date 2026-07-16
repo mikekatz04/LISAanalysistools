@@ -195,11 +195,24 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             logger.debug("[%s_DEBUG] template build skipped: %r", self._dbg_prefix, exc)
             return None
 
-    @staticmethod
-    def _dbg_source_only_ll(residual_arr) -> float:
-        """Un-weighted -1/2<r|r> proxy (sum |r|^2) for a residual snapshot title."""
-        r = np.asarray(residual_arr)
-        return float(-0.5 * np.sum(np.abs(r) ** 2))
+    def _dbg_weighted_ll(self, residual_arr, walker) -> float:
+        """``-1/2 <r|r>`` for a residual snapshot, PSD-weighted.
+
+        Never hand-roll the inner product: build the snapshot as the domain
+        object the walker's container expects and let the container's OWN
+        installed :meth:`AnalysisContainer.inner_product` apply the sensitivity
+        weighting (the same primitive the sampler scores with). A raw
+        ``sum|r|^2`` drops the PSD entirely and is not a likelihood.
+        """
+        ac = self.acs[int(walker)]
+        settings = ac.data.settings
+        snapshot = settings.associated_class(asnumpy(residual_arr), settings)
+        saved = ac.data
+        try:
+            ac.data = snapshot
+            return -0.5 * float(np.real(ac.inner_product()))
+        finally:
+            ac.data = saved
 
     def _debug_plot_source_sequence(self, leaf, walker, snaps, template, meta) -> None:
         """Save a GB-style flip-book of ``[template | data | residual]`` frames.
@@ -295,7 +308,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 vmin_row.append(float(np.percentile(t, 20.0)) if use_log else 0.0)
 
             rr_entry = (
-                self._dbg_source_only_ll(snaps["before_removal"])
+                self._dbg_weighted_ll(snaps["before_removal"], walker)
                 if snaps.get("before_removal") is not None else float("nan")
             )
             os.makedirs(self.debug_plot_dir, exist_ok=True)
@@ -327,10 +340,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                             ax.set_title(ctitle, fontsize=9)
                         if ci == 0:
                             ax.set_ylabel(chan_labels[ch], fontsize=9)
-                rr_here = self._dbg_source_only_ll(residual)
+                rr_here = self._dbg_weighted_ll(residual, walker)
                 fig.suptitle(
                     f"{self.branch_name} leaf {leaf} walker {walker} step "
-                    f"{self._dbg_step} — {ftitle}  | -0.5<r|r> entry={rr_entry:.3e} "
+                    f"{self._dbg_step} — {ftitle}  | -0.5<r|r>_psd entry={rr_entry:.3e} "
                     f"here={rr_here:.3e}",
                     fontsize=10,
                 )
