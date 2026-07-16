@@ -324,8 +324,13 @@ class GFHDFBackend(eryn_HDFBackend):
 
         self.sub_backend = sub_backend
         if self.sub_backend is not None:
+            # Sub-backends write into OUR file, under f[name]["sub_backend"], so
+            # they must use the same group name we resolved above -- including
+            # the legacy fallback. They subclass eryn's HDFBackend directly, so
+            # left to their own default they would look for "mcmc" while the
+            # parent writes "global_fit".
             self.sub_backend = {
-                key: self.sub_backend[key](*args, **kwargs)
+                key: self.sub_backend[key](*args, name=self.name, **kwargs)
                 for key in self.sub_backend
                 if self.sub_backend[key] is not None
             }

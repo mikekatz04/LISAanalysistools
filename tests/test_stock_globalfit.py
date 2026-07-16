@@ -8,6 +8,9 @@ heavy build paths are covered by the parity/smoke harnesses.
 
 import copy
 import os
+import shutil
+import tempfile
+import warnings
 import pickle
 import unittest
 
@@ -664,3 +667,75 @@ class PriorInjectionDrawTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GFHDFBackendNameTest(unittest.TestCase):
+    """The run's HDF group name is a knob, and everything must agree on it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _path(self, name):
+        return os.path.join(self.tmp, name)
+
+    def test_default_is_global_fit(self):
+        from lisatools.globalfit.hdfbackend import GFHDFBackend
+
+        self.assertEqual(GFHDFBackend(self._path("a.h5")).name, "global_fit")
+
+    def test_explicit_name_honored(self):
+        from lisatools.globalfit.hdfbackend import GFHDFBackend
+
+        self.assertEqual(GFHDFBackend(self._path("b.h5"), name="zzz").name, "zzz")
+
+    def test_legacy_mcmc_file_is_adopted(self):
+        """A file written before the rename stores its run under "mcmc".
+
+        It must be detected and honored -- otherwise the run reads as
+        uninitialized and gets sampled over the top of real data.
+        """
+        import h5py
+
+        from lisatools.globalfit.hdfbackend import GFHDFBackend
+
+        p = self._path("legacy.h5")
+        with h5py.File(p, "w") as f:
+            f.create_group("mcmc")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            backend = GFHDFBackend(p)
+        self.assertEqual(backend.name, "mcmc")
+        self.assertTrue(any(issubclass(w.category, DeprecationWarning) for w in caught))
+
+    def test_new_style_file_not_hijacked(self):
+        import h5py
+
+        from lisatools.globalfit.hdfbackend import GFHDFBackend
+
+        p = self._path("new.h5")
+        with h5py.File(p, "w") as f:
+            f.create_group("global_fit")
+        self.assertEqual(GFHDFBackend(p).name, "global_fit")
+
+    def test_sub_backends_share_the_parent_name(self):
+        """Sub-backends write into f[name]["sub_backend"] of the PARENT's file.
+
+        They subclass eryn's HDFBackend directly, so left to their own default
+        they look for "mcmc" while the parent writes "global_fit" -- reset()
+        then dies with KeyError: object 'mcmc' doesn't exist.
+        """
+        from lisatools.globalfit.hdfbackend import (
+            GFHDFBackend,
+            MBHHDFBackend,
+            SOBBHHDFBackend,
+        )
+
+        backend = GFHDFBackend(
+            self._path("subs.h5"),
+            sub_backend={"mbh": MBHHDFBackend, "sobbh": SOBBHHDFBackend},
+        )
+        for name, sub in backend.sub_backend.items():
+            self.assertEqual(sub.name, backend.name, f"{name} sub-backend name drifted")
