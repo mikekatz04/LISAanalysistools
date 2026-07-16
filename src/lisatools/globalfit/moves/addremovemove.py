@@ -277,35 +277,37 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             kind = meta.get("domain", "wdm")
 
             def _ch(a, c):
-                a = np.abs(a)
+                # Signed real coefficients (WDM w_mn are real), so a diverging
+                # colour map centres an emptied template / clean residual at
+                # white and shows signal as colour.
+                a = np.real(np.asarray(a))
                 a = a[None] if a.ndim == 1 else a
                 return a[c] if a.shape[0] > c else a[0]
 
-            # Colour scale keyed to the RESIDUAL frames only (the other
-            # sources are already subtracted there, so a crowded band does
-            # not blow out the scale) and log10 by default so a source stays
-            # visible whether it is weak or sits among louder ones. The
-            # template/data columns share the same scale and simply saturate
-            # where they are loud. One (vmin, vmax) per channel, shared
-            # across all frames -> the flip-book is calibrated.
+            # Diverging colour scale (the WDM class default, RdBu), symmetric
+            # about zero and keyed to the RESIDUAL frames only (the other
+            # sources are already subtracted there, so a crowded band does not
+            # blow out the scale). SymLogNorm (the ``debug_log`` default) keeps
+            # a weak source visible against a large dynamic range; the
+            # template/data columns share the same norm and simply saturate
+            # where they are loud. One norm per channel, shared across all
+            # frames -> the flip-book is calibrated.
+            from matplotlib.colors import Normalize, SymLogNorm
+
             res_pool = [
                 np.concatenate([_ch(r, ch).ravel() for _, _, r in frames])
                 for ch in range(nch)
             ]
             use_log = bool(getattr(self, "debug_log", True)) and kind == "wdm"
-            if use_log:
-                _allpos = np.concatenate([p[p > 0] for p in res_pool if np.any(p > 0)]) \
-                    if any(np.any(p > 0) for p in res_pool) else np.array([1e-30])
-                _floor = float(np.median(_allpos)) * 1e-3 or 1e-30
-                xform = lambda x: np.log10(np.abs(x) + _floor)  # noqa: E731
-            else:
-                _floor = 0.0
-                xform = lambda x: np.abs(x)  # noqa: E731
-            vmin_row, vmax_row = [], []
+            norm_row = []
             for ch in range(nch):
-                t = xform(res_pool[ch])
-                vmax_row.append(float(np.percentile(t, 99.5)))
-                vmin_row.append(float(np.percentile(t, 20.0)) if use_log else 0.0)
+                a = np.abs(res_pool[ch])
+                vmax = float(np.percentile(a[a > 0], 99.5)) if np.any(a > 0) else 1.0
+                vmax = vmax or 1.0
+                norm_row.append(
+                    SymLogNorm(linthresh=vmax * 1e-3, vmin=-vmax, vmax=vmax, base=10)
+                    if use_log else Normalize(vmin=-vmax, vmax=vmax)
+                )
 
             rr_entry = (
                 self._dbg_weighted_ll(snaps["before_removal"], walker)
@@ -315,7 +317,13 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             base = f"{self.branch_name}_debug_leaf{leaf}_w{walker}_s{self._dbg_step:04d}"
 
             for fkey, ftitle, residual in frames:
-                cols = [("total template", tmpl), ("total data", data),
+                # The "total template" is the CURRENT total template = data -
+                # residual. When the source is removed (f1) it leaves the model
+                # and reappears in the residual, so with a single source its
+                # power switches from the template column to the residual
+                # column across the flip-book.
+                total_template = np.asarray(data) - np.asarray(residual)
+                cols = [("total template", total_template), ("total data", data),
                         (f"residual — {ftitle}", residual)]
                 fig, axes = plt.subplots(
                     nch, 3, figsize=(3.6 * 3, 2.7 * nch), squeeze=False, sharex=True,
@@ -326,16 +334,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         slab = _ch(a, ch)
                         if kind == "wdm" and slab.ndim == 2:
                             im = ax.imshow(
-                                xform(slab), aspect="auto", origin="lower",
-                                cmap="viridis", vmin=vmin_row[ch], vmax=vmax_row[ch],
+                                slab, aspect="auto", origin="lower",
+                                cmap="RdBu", norm=norm_row[ch],
                             )
                             if ci == 2:
                                 cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
-                                if use_log:
-                                    cb.set_label("log10|coeff|", fontsize=7)
+                                cb.set_label("coeff", fontsize=7)
                         else:
-                            ax.plot(np.abs(slab).ravel(), lw=0.6)
-                            ax.set_yscale("log")
+                            ax.plot(_ch(a, ch).ravel(), lw=0.6)
                         if ch == 0:
                             ax.set_title(ctitle, fontsize=9)
                         if ci == 0:
