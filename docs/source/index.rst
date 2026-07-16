@@ -12,6 +12,9 @@
    user/datacontainer
    user/diagnostic
    user/sources
+   user/globalfit
+   user/globalfitmoves
+   user/globalfitstock
    user/utility
 
 .. toctree::

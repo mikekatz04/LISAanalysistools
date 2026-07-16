@@ -81,6 +81,14 @@ def fetch_latw(docs_source_dir):
         glob.glob(os.path.join(tmp, "tutorials", "[0-9][0-9]_*.ipynb"))
     )
     os.makedirs(dest, exist_ok=True)
+    # Clear stale notebooks before copying. LATW renumbers its tutorials from
+    # time to time, and copying over the top would leave BOTH the old and the
+    # new names behind -- a reorder silently doubles the set, and every dropped
+    # name then warns "not included in any toctree" (or worse, renders an
+    # outdated page next to its replacement). The dir is generated + gitignored,
+    # so wiping the numbered set is safe.
+    for stale in glob.glob(os.path.join(dest, "[0-9][0-9]_*.ipynb")):
+        os.remove(stale)
     for nb in notebooks:
         shutil.copy(nb, os.path.join(dest, os.path.basename(nb)))
     shutil.rmtree(tmp, ignore_errors=True)
