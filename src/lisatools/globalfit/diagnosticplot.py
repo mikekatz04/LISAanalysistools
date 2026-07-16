@@ -12,6 +12,11 @@ import seaborn as sns
 
 from lisatools.globalfit.hdfbackend import GFHDFBackend
 
+#: Interactive debug hooks below are guarded by this (see
+#: globalfit/moves/addremovemove.py). A bare breakpoint() in shipped
+#: code hangs or BdbQuit-kills any non-interactive run.
+DEBUG_MODE = False
+
 
 def set_plotting_style(background_color: str = "white", front_color: str = "black") -> None:
     """
@@ -406,7 +411,8 @@ if __name__ == "__main__":
     discard = 0
 
     logl = reader.get_log_like(discard=discard)[:, 0]
-    breakpoint()
+    if DEBUG_MODE:  # stray dev hook; off by default
+        breakpoint()
     walkers_keep = np.where((logl > 0.9 * np.max(logl)).all(axis=0))[0]
     print(f"Keeping {len(walkers_keep)} walkers out of {logl.shape[1]} based on loglikelihood cut.")
 

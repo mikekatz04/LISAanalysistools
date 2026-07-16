@@ -33,7 +33,7 @@ def inner_product(
     normalize: Optional[bool | str] = False,
     complex: Optional[bool] = False,
 ) -> float | complex:
-    """Compute the inner product between two signals weighted by a psd.
+    r"""Compute the inner product between two signals weighted by a psd.
 
     The inner product between time series :math:`a(t)` and :math:`b(t)` is
 
@@ -375,7 +375,7 @@ def residual_full_source_and_noise_likelihood(
 def data_signal_source_likelihood_term(
     data_arr: DataResidualArray, sig_arr: DataResidualArray, **kwargs: dict
 ) -> float | complex:
-    """Calculate the source term in the Likelihood for separate signal and data.
+    r"""Calculate the source term in the Likelihood for separate signal and data.
 
     The source term in the likelihood is given by,
 

@@ -25,6 +25,11 @@ from gbgpu.utils.utility import get_N
 from lisatools.utils.constants import *
 from lisatools.utils.utility import asnumpy
 
+#: Interactive debug hooks below are guarded by this (see
+#: globalfit/moves/addremovemove.py). A bare breakpoint() in shipped
+#: code hangs or BdbQuit-kills any non-interactive run.
+DEBUG_MODE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -312,7 +317,8 @@ class GBGrouping:
             try:
                 overlap = self.get_overlap(base_params_in, check_params_in)
             except IndexError:
-                breakpoint()
+                if DEBUG_MODE:  # stray dev hook; off by default
+                    breakpoint()
 
             inds_success = np.unique(
                 np.concatenate([base_inds[overlap > 0.9], check_inds[overlap > 0.9]])
@@ -786,7 +792,8 @@ class GBGrouping:
             # remove any groups that have filled the full amount possible
             group_inds, group_pop = self.get_group_pop(all_samples_in, assigned_groups)
             if self.samples_so_far > 36:
-                breakpoint()
+                if DEBUG_MODE:  # stray dev hook; off by default
+                    breakpoint()
             groups_complete = group_inds[group_pop == self.samples_so_far]
             inds_still_going[np.in1d(assigned_groups, groups_complete)] = False
 
@@ -1093,11 +1100,15 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
     while not read_in_success:
         try:
             with h5py.File(gb_file, "r") as fp:
-                iteration_h5 = fp["mcmc"].attrs["iteration"]
-                gb_samples = fp["mcmc"]["chain"]["gb"][
+                # The run's top-level group: "global_fit" since the GFHDFBackend
+                # default changed; older files still carry eryn's "mcmc". Pick
+                # whichever the file actually has rather than assuming.
+                grp = "global_fit" if "global_fit" in fp else "mcmc"
+                iteration_h5 = fp[grp].attrs["iteration"]
+                gb_samples = fp[grp]["chain"]["gb"][
                     iteration_h5 - samples_keep : iteration_h5, 0, :, :, :
                 ]
-                gb_inds = fp["mcmc"]["inds"]["gb"][
+                gb_inds = fp[grp]["inds"]["gb"][
                     iteration_h5 - samples_keep : iteration_h5, 0, :, :
                 ]
             read_in_success = True
@@ -1672,7 +1683,8 @@ def gather_gb_samples(
                 ind2 = keep_map_back[1][keep_group_test]
 
             if not np.all(gb_inds_tmp[ind1, ind2]):
-                breakpoint()
+                if DEBUG_MODE:  # stray dev hook; off by default
+                    breakpoint()
             gb_inds_tmp[ind1, ind2] = False
 
             group = np.concatenate(
@@ -1683,17 +1695,20 @@ def gather_gb_samples(
                 axis=0,
             )
             if len(group) == 1:
-                breakpoint()
+                if DEBUG_MODE:  # stray dev hook; off by default
+                    breakpoint()
             if not np.any(
                 np.all(
                     ((gb_snrs_in > snr_lim_second_cut) & gb_inds_in)[keep_map_back][keep_group_test]
                 )
             ):
-                breakpoint()
+                if DEBUG_MODE:  # stray dev hook; off by default
+                    breakpoint()
 
             if (num_grouping + 1) > gb_samples.shape[0]:
                 # remove them from possible future grouping
-                breakpoint()
+                if DEBUG_MODE:  # stray dev hook; off by default
+                    breakpoint()
 
             keep_groups.append(group)
         logger.debug(f"samp_i: {samp_i + 1}, num: {gb_inds_tmp.sum()}")
@@ -1833,7 +1848,8 @@ def gather_gb_samples(
                     [keep_groups[new_group_i], keep_groups[i]]
                 )
             except ValueError:
-                breakpoint()
+                if DEBUG_MODE:  # stray dev hook; off by default
+                    breakpoint()
             new_groups_3[new_groups_3 == i] = new_group_i
             new_groups_3[i] = -1
             keep_groups[i] = None
