@@ -854,6 +854,35 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         shifted_t_arr = t_arr + self.xp.asarray(merger_time)[:, None] + self.waveform_t0
 
+        # Clip the pre-data window BEFORE paying for the response on it.
+        #
+        # Everything earlier than ``data_t0`` is cropped off again further down
+        # (``start_ind``), so the response compute spent on it is pure waste --
+        # and it is not a small tail: in synthetic mode ``waveform_t0`` sits at
+        # the orbit start, so a month-long pre-merger inspiral sits at t < 0
+        # where the orbits cannot even be evaluated. Those samples come back
+        # non-finite, get zeroed, and are then thrown away. On all_sources_lite
+        # that was ~1.5M samples per template against a ~10k-sample data grid,
+        # which is what made a six-branch run unrunnable on a laptop.
+        #
+        # A sample can only reach a KEPT sample through the TDI delays, which
+        # look back ~8 arm-delays; ``tdi_buffer_time`` is the margin allowed for
+        # exactly that. So anything before ``data_t0 - tdi_buffer_time`` cannot
+        # influence the output that survives, and dropping it changes nothing.
+        # The batch must stay rectangular, so crop by the SMALLEST safe amount
+        # across sources -- every source then keeps at least its own margin.
+        _keep_from = self.data_t0 - self.tdi_buffer_time
+        _lead = self.xp.floor((_keep_from - shifted_t_arr[:, 0]) / self.dt)
+        _lead = int(self.xp.maximum(_lead, 0).min())
+        # never clip the window out of existence (a wholly pre-data waveform
+        # still has to fall out of the start_ind crop below, not of an
+        # empty response call)
+        _lead = min(_lead, int(shifted_t_arr.shape[-1]) - 1)
+        if _lead > 0:
+            shifted_t_arr = shifted_t_arr[:, _lead:]
+            h_plus = h_plus[:, _lead:]
+            h_cross = h_cross[:, _lead:]
+
         # pad with zeros by num_buffer_ponts
         num_buffer_ponts = int(self.buffer_time / self.dt)
 
