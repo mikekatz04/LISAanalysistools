@@ -48,6 +48,10 @@ from .utils import BasicResidualacsLikelihood
 
 
 logger = getLogger(__name__)
+
+#: Branches with hand-written initialization in :meth:`GlobalFit.load_info`.
+#: Anything else is seeded by the metadata-driven generic path there.
+_LOAD_INFO_NAMED_BRANCHES = ("psd", "galfor", "sgwb", "mbh", "emri", "sobbh", "gb")
 class GlobalFitSetup:
     """The built configuration + live state of a global fit (the "Setup").
 
@@ -551,6 +555,41 @@ class GlobalFit:
                         self.ntemps, self.nwalkers, nleaves_sobbh, ndim_sobbh
                     )
 
+            # Generic path for any branch the ladder above does not name — a
+            # user-added source class. Driven off branch metadata instead of a
+            # literal name (see the TODO above): a fixed-leaf branch
+            # (nleaves_min == nleaves_max) is always on, and a branch declaring
+            # an ``injection`` (sampling basis) starts there, scattered by
+            # ``<BRANCH>_START_FACTOR`` — 0 gives the exact injection. Same
+            # convention as mbh/emri/sobbh. Without this, a new branch's leaves
+            # stay dead, so ``setup_acs`` never subtracts its template and the
+            # log-like never returns to ~0 at truth.
+            for key in self.engine_info.branch_names:
+                if key in _LOAD_INFO_NAMED_BRANCHES or key not in inds:
+                    continue
+                nleaves_max_key = self.engine_info.nleaves_max[key]
+                if self.engine_info.nleaves_min.get(key) == nleaves_max_key:
+                    inds[key][:] = True
+                    self.logger.debug(f"initializing {key} inds to true (fixed-leaf branch)")
+                inj = getattr(self.curr.source_info.get(key), "injection", None)
+                if inj is None:
+                    continue
+                factor = float(os.environ.get(f"{key.upper()}_START_FACTOR", "1e-5"))
+                inj = np.asarray(inj, dtype=float)
+                if inj.ndim == 1:
+                    inj = inj[None, :]
+                ndim_key = inj.shape[-1]
+                if inj.shape[0] == 1:
+                    inj = np.broadcast_to(inj, (nleaves_max_key, ndim_key))
+                assert inj.shape == (nleaves_max_key, ndim_key), (
+                    f"{key} injection shape {inj.shape} doesn't match "
+                    f"(nleaves_max={nleaves_max_key}, ndim={ndim_key})."
+                )
+                self.logger.debug(f"override {key} starting coords to be close to the injection")
+                coords[key] = inj[None, None] + factor * np.random.randn(
+                    self.ntemps, self.nwalkers, nleaves_max_key, ndim_key
+                )
+
             state = GFState(
                 coords,
                 inds=inds,
@@ -697,7 +736,12 @@ class GlobalFit:
             # not (yet) registered on ``signal_gen`` fall back to the
             # stft_tof ``source_info[...]["get_templates"]`` process so the
             # rebuild always works during the migration.
-            handled_by_signal_gen = set()
+            # A branch with a registered generator is handled by this path even
+            # when no leaf is currently alive (nothing to subtract) — seeding
+            # this from the map rather than from the alive-leaf params below
+            # keeps the fallback loop from warning about branches that are in
+            # fact correctly configured.
+            handled_by_signal_gen = set(signal_gen_map)
             for w, ac in enumerate(acs.flatten()):
                 gen_map = getattr(ac, "_signal_gen", None)
                 if not isinstance(gen_map, dict):
