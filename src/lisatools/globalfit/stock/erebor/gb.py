@@ -94,12 +94,28 @@ class GBSettings(Settings):
     )
     # When ``use_chirp_mass`` is on, swap the separate uniform priors on
     # ``f0`` and ``Mc`` for the 6-component astrophysical GMM fit from
-    # ``heatmap_GMMs.ipynb`` (see :class:`lisatools.sampling.f0_mchirp_prior
-    # .F0McGMMSampling`). Requires ``use_chirp_mass=True``. Env:
-    # ``GB_USE_ASTROPHYSICAL_F0_MC_PRIOR``.
+    # ``heatmap_GMMs.ipynb`` (combined heatmap of 102 population-synthesis
+    # models; :class:`lisatools.sampling.f0_mchirp_prior.F0McGMMSampling`,
+    # truncated to the run's (f0, Mc) box and renormalized). **Default:
+    # True** -- every GB-carrying stock fit now samples the astrophysical
+    # joint (f0, Mc) prior; set ``GB_USE_ASTROPHYSICAL_F0_MC_PRIOR=0`` for
+    # the legacy separate uniforms. Ignored (with the legacy fdot basis)
+    # when ``use_chirp_mass=False``.
     use_astrophysical_f0_mc_prior: bool = dataclasses.field(
-        default_factory=env_default("GB_USE_ASTROPHYSICAL_F0_MC_PRIOR", False, bool)
+        default_factory=env_default("GB_USE_ASTROPHYSICAL_F0_MC_PRIOR", True, bool)
     )
+    # Custom RJ-birth distribution for the prior RJ moves. An eryn
+    # duck-typed distribution over the FULL 8-column GB sampling basis
+    # (``rvs(size) -> (size, 8)`` with f0 in mHz at column 1 and Mc at
+    # column 2; ``logpdf((n, 8)) -> (n,)``). Build one from a 4-D intrinsic
+    # proposal (e.g. :class:`lisatools.sampling.fstat_proposal
+    # .FStatProposal4D`) with :func:`lisatools.sampling.fstat_proposal
+    # .make_gb_rj_birth_container`; wrap narrow proposals in a
+    # ``UniformFloorMixture`` so death factors stay finite wherever
+    # refined leaves can drift. Must pickle/deepcopy (sprint rule) --
+    # FStatProposal4D-backed containers do. None (default) keeps the
+    # stock global-prior births.
+    rj_birth_distribution: typing.Optional[typing.Any] = None
     # Task-b: narrow per-band WDM slabs. Each per-band sub-band-buffer slab
     # spans a few WDM layers centered on the band instead of the full analysis
     # band ``Nf_active``, cutting the dominant buffer memory term by
@@ -234,9 +250,20 @@ class GBSetup(Setup, GBSettings):
                 # heatmap 6-component GMM fit.
                 from lisatools.sampling.f0_mchirp_prior import F0McGMMSampling
 
+                # Truncate the heatmap GMM to the run's sampled box and
+                # renormalize (RJ birth/death compares prior masses across
+                # leaf counts, so the truncated prior must integrate to 1
+                # over exactly the space the sampler covers). Gaussian
+                # tails keep the density finite anywhere in the box, even
+                # outside the original heatmap support.
+                _f0_mc_prior = F0McGMMSampling.from_heatmap(
+                    f0_lims_mHz=tuple(np.asarray(self.f0_lims) * 1e3),
+                    mc_lims=tuple(self.m_chirp_lims) if self.m_chirp_lims
+                    else None,
+                )
                 priors_gb = {
                     input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
-                    ("f0", "Mc"): F0McGMMSampling.from_heatmap(),
+                    ("f0", "Mc"): _f0_mc_prior,
                     input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
                     input_basis[4]: uniform_dist(*np.sort(np.cos(self.iota_lims))),
                     input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),

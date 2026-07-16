@@ -188,7 +188,9 @@ Bugs found and fixed during verification:
   `scripts/fstat_proposal/PLAN_scattered_field_distributions.md`).
 - GPU sweep (one batched kernel launch replaces the ~170 ms/eval CPU cost
   that shaped the grid budgets here).
-- The astrophysical (f0, Mc) GMM prior
-  (`lisatools.sampling.f0_mchirp_prior.F0McGMMSampling`) is referenced by the
-  stock GB setup behind `GB_F0MC_GMM_PRIOR=1` but the module still lives
-  only on the other dev machine — push it before enabling that flag.
+- ~~The astrophysical (f0, Mc) GMM prior module was missing~~ — now
+  implemented (`lisatools.sampling.f0_mchirp_prior.F0McGMMSampling`, from
+  `heatmap_GMMs.ipynb`: 6-component GMM over (log10 f0, Mc), 102 population
+  models, R² = 0.99; truncated to the run box + renormalized) and **on by
+  default** for every GB-carrying stock fit
+  (`GB_USE_ASTROPHYSICAL_F0_MC_PRIOR=0` restores the legacy uniforms).

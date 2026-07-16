@@ -43,7 +43,7 @@ package.
 | `jax/` | Pure-JAX backend (`backend.py`, `jaxbase.py`, `orbits.py`) + `response/` and `wdm/` JAX mirrors. |
 | `cutils/` | All C++/CUDA sources + nanobind bindings + public headers (see §5). |
 | `sources/` | Per-source waveform generators: `bbh/`, `emri/`, `gb/`, `sobbh/`, plus `waveformbase.py`, `defaultresponse.py`, `utils.py`. |
-| `sampling/` | Eryn-based MCMC pieces: `prior.py`, `likelihood.py`, `gmm.py`, `stopping.py`, `fstat_proposal.py` (`FStatProposal4D` grid+inverse-CDF proposal over GB intrinsics `(f0, Mc, alpha, sin_delta)` fed by batched `get_fstat_ll_wdm`), `moves/`. |
+| `sampling/` | Eryn-based MCMC pieces: `prior.py`, `likelihood.py`, `gmm.py`, `stopping.py`, `fstat_proposal.py` (`FStatProposal4D` grid+inverse-CDF proposal over GB intrinsics + RJ-birth container helpers), `f0_mchirp_prior.py` (`F0McGMMSampling` astrophysical joint (f0, Mc) GB prior from the population heatmap GMM, box-truncated + renormalized), `moves/`. |
 | `globalfit/` | The global-fit pipeline (engine, run, recipe, per-branch modules, `moves/`, `priors/`, `stock/`). See §3–4. |
 | `utils/` | `parallelbase.py` (`LISAToolsParallelModule`), `constants.py`, `utility.py` (`get_array_module`, `AET`, `asnumpy`), `typing.py`. |
 | `orbit_files/` | Packaged orbit data. |

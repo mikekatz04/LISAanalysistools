@@ -1494,10 +1494,22 @@ def build_gb_moves(
     # "annealing" configuration) and OFF otherwise.
     _rj_phase_max = bool(int(os.environ.get("GB_RJ_PHASE_MAXIMIZE", "0")))
 
+    # Custom RJ-birth distribution hook (``GBSettings.rj_birth_distribution``):
+    # an eryn duck-typed distribution over the full 8-column GB sampling
+    # basis (see ``lisatools.sampling.fstat_proposal
+    # .make_gb_rj_birth_container``). When set, the prior RJ moves birth
+    # from it instead of the global prior; death factors evaluate its
+    # logpdf, so it must stay finite wherever leaves can live (wrap narrow
+    # proposals in a ``UniformFloorMixture``).
+    _custom_birth = getattr(gb_info, "rj_birth_distribution", None)
+    _rj_birth_prop = (
+        {"gb": _custom_birth} if _custom_birth is not None else gpu_priors
+    )
+
     #* ============================================= SEARCH MOVES =============================================
     gb_search_prune_move = GBSpecialRJPriorMove(
         *gb_move_args,
-        rj_proposal_distribution=gpu_priors,
+        rj_proposal_distribution=_rj_birth_prop,
         name="rj_prior_search",
         use_prior_removal=True,
         phase_maximize=_rj_phase_max,
@@ -1551,8 +1563,8 @@ def build_gb_moves(
 
     #* ============================================= PARAMETER ESTIMATION MOVES =============================================
     gb_pe_prior_move = GBSpecialRJPriorMove(
-        *gb_move_args, 
-        rj_proposal_distribution=gpu_priors,
+        *gb_move_args,
+        rj_proposal_distribution=_rj_birth_prop,
         name="rj_prior",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=_rj_phase_max,

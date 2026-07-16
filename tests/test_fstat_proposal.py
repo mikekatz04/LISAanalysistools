@@ -14,9 +14,13 @@ import unittest
 import numpy as np
 
 from lisatools.sampling.fstat_proposal import (
+    CombIntrinsicProposal,
     FStatProposal4D,
     GridSpec,
+    MixtureProposal,
+    UniformFloorMixture,
     compute_fstat,
+    make_gb_rj_birth_container,
 )
 
 MU = np.array([20.38, 0.466, 4.06, -0.786])
@@ -170,6 +174,138 @@ class ProposalTest(unittest.TestCase):
             float(np.asarray(self.prop.logpdf(x))[0]),
         )
         self.assertEqual(np.asarray(clone.rvs(size=(10,))).shape, (10, 4))
+
+
+FLOOR_LO = np.array([MU[0] - 1.0, 0.001, 0.0, -1.0])
+FLOOR_HI = np.array([MU[0] + 1.0, 1.0, 2 * np.pi, 1.0])
+
+
+class FloorMixtureTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.base = _make_prop(n_per_axis=16, seed=2)
+        cls.mix = UniformFloorMixture(cls.base, FLOOR_LO, FLOOR_HI,
+                                      eps=0.1, seed=4)
+
+    def test_logpdf_finite_across_floor_box(self):
+        # points far outside the base grid but inside the floor box
+        rng = np.random.default_rng(9)
+        pts = rng.uniform(FLOOR_LO, FLOOR_HI, size=(2000, 4))
+        lp = self.mix.logpdf(pts)
+        self.assertTrue(np.all(np.isfinite(lp)))
+        # outside the floor box AND the base box -> -inf
+        far = np.array([[MU[0] + 50.0, 0.5, 1.0, 0.0]])
+        self.assertEqual(float(self.mix.logpdf(far)[0]), -np.inf)
+
+    def test_normalized(self):
+        rng = np.random.default_rng(10)
+        pts = rng.uniform(FLOOR_LO, FLOOR_HI, size=(400_000, 4))
+        vol = float(np.prod(FLOOR_HI - FLOOR_LO))
+        integ = float(np.mean(np.exp(self.mix.logpdf(pts)))) * vol
+        self.assertLess(abs(integ - 1.0), 0.05)
+
+    def test_rvs_mix(self):
+        s = np.asarray(self.mix.rvs(size=(50_000,)))
+        self.assertEqual(s.shape, (50_000, 4))
+        # ~90% of draws follow the narrow base near MU; ~10% floor-spread
+        near = np.all(np.abs(s - MU) < 8 * SIGMA, axis=1).mean()
+        self.assertGreater(near, 0.8)
+        self.assertLess(near, 0.99)
+
+
+class BirthContainerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        base = _make_prop(n_per_axis=16, seed=3)
+        mix = UniformFloorMixture(base, FLOOR_LO, FLOOR_HI, eps=0.1, seed=5)
+        cls.A_lims = [1e-24, 1e-21]
+        cls.dist = make_gb_rj_birth_container(mix, cls.A_lims)
+
+    def test_rvs_shape_and_columns(self):
+        s = np.asarray(self.dist.rvs(size=1000))
+        self.assertEqual(s.shape, (1000, 8))
+        lnA, f0, Mc, phi0, ci, psi, alpha, sd = s.T
+        self.assertTrue(np.all((lnA >= np.log(self.A_lims[0]))
+                               & (lnA <= np.log(self.A_lims[1]))))
+        self.assertTrue(np.all((f0 >= FLOOR_LO[0]) & (f0 <= FLOOR_HI[0])))
+        self.assertTrue(np.all((Mc >= 0.001) & (Mc <= 1.0)))
+        self.assertTrue(np.all((phi0 >= 0) & (phi0 <= 2 * np.pi)))
+        self.assertTrue(np.all((ci >= -1) & (ci <= 1)))
+        self.assertTrue(np.all((psi >= 0) & (psi <= np.pi)))
+        self.assertTrue(np.all((alpha >= 0) & (alpha <= 2 * np.pi)))
+        self.assertTrue(np.all((sd >= -1) & (sd <= 1)))
+
+    def test_logpdf_shape_and_consistency(self):
+        s = np.asarray(self.dist.rvs(size=500))
+        lp = np.asarray(self.dist.logpdf(s))
+        self.assertEqual(lp.shape, (500,))
+        self.assertTrue(np.all(np.isfinite(lp)))
+
+    def test_pickles(self):
+        clone = pickle.loads(pickle.dumps(copy.deepcopy(self.dist)))
+        s = np.asarray(clone.rvs(size=16))
+        self.assertEqual(s.shape, (16, 8))
+
+
+class CombProposalTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # synthetic comb: two triangular peaks, F ratio 4:1
+        f0 = np.linspace(7.5, 7.6, 2001)
+        F = np.zeros_like(f0)
+        F += 400 * np.exp(-0.5 * ((f0 - 7.52) / 3e-4) ** 2)
+        F += 100 * np.exp(-0.5 * ((f0 - 7.58) / 3e-4) ** 2)
+        cls.comb = CombIntrinsicProposal(
+            f0, F, mc_lims=(0.001, 1.0), seed=6
+        )
+
+    def test_rvs_mass_ratio_linear_in_F(self):
+        s = np.asarray(self.comb.rvs(size=(100_000,)))
+        n1 = np.sum(np.abs(s[:, 0] - 7.52) < 2e-3)
+        n2 = np.sum(np.abs(s[:, 0] - 7.58) < 2e-3)
+        self.assertAlmostEqual(n1 / n2, 4.0, delta=0.4)
+
+    def test_logpdf_normalized(self):
+        rng = np.random.default_rng(12)
+        pts = np.column_stack([
+            rng.uniform(7.5, 7.6, 300_000),
+            rng.uniform(0.001, 1.0, 300_000),
+            rng.uniform(0, 2 * np.pi, 300_000),
+            rng.uniform(-1, 1, 300_000),
+        ])
+        vol = 0.1 * (1.0 - 0.001) * 2 * np.pi * 2.0
+        integ = float(np.mean(np.exp(self.comb.logpdf(pts)))) * vol
+        self.assertLess(abs(integ - 1.0), 0.05)
+
+    def test_outside_neg_inf(self):
+        self.assertEqual(
+            float(self.comb.logpdf(np.array([[7.7, 0.5, 1.0, 0.0]]))[0]),
+            -np.inf,
+        )
+
+
+class MixtureProposalTest(unittest.TestCase):
+    def test_weighted_mixture(self):
+        base = _make_prop(n_per_axis=12, seed=8)
+        f0 = np.linspace(MU[0] - 1, MU[0] + 1, 501)
+        F = np.full_like(f0, 10.0)
+        comb = CombIntrinsicProposal(f0, F, mc_lims=(0.001, 1.0), seed=7)
+        mix = MixtureProposal([base, comb], weights=[0.7, 0.3], seed=9)
+        s = np.asarray(mix.rvs(size=(20_000,)))
+        self.assertEqual(s.shape, (20_000, 4))
+        lp = np.asarray(mix.logpdf(s))
+        self.assertTrue(np.all(np.isfinite(lp)))
+        # exact: mixture logpdf == logaddexp of weighted component logpdfs
+        expected = np.logaddexp(
+            np.log(0.7) + np.asarray(base.logpdf(s)),
+            np.log(0.3) + np.asarray(comb.logpdf(s)),
+        )
+        self.assertTrue(np.allclose(lp, expected))
+        # draws split between components ~ per the weights: comb-only region
+        # (outside the base's narrow sin_delta box) holds ~the comb share
+        outside_base = np.abs(s[:, 3] - MU[3]) > 0.15
+        self.assertGreater(outside_base.mean(), 0.15)
+        self.assertLess(outside_base.mean(), 0.45)
 
 
 if __name__ == "__main__":

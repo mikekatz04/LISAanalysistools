@@ -41,7 +41,15 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-__all__ = ["GridSpec", "FStatProposal4D", "compute_fstat"]
+__all__ = [
+    "GridSpec",
+    "FStatProposal4D",
+    "UniformFloorMixture",
+    "MixtureProposal",
+    "CombIntrinsicProposal",
+    "compute_fstat",
+    "make_gb_rj_birth_container",
+]
 
 
 # Row-major upper-triangle layout of the symmetric (4, 4) filter Gram matrix
@@ -375,3 +383,205 @@ class FStatProposal4D:
         g_here = self._log_wcell[tuple(idx[:, j] for j in range(4))]
         out = g_here - self._log_norm
         return xp.where(inside, out, -xp.inf)
+
+
+class UniformFloorMixture:
+    """``(1 - eps) * base + eps * Uniform(box)`` over the 4 intrinsics.
+
+    RJ detailed-balance factors evaluate ``+logpdf(current leaf)`` for a
+    death: a leaf whose in-model refinement drifted outside the base
+    proposal's support would get ``-inf`` there and could never die. Mixing
+    in a small uniform floor over the full per-band prior box keeps
+    ``logpdf`` finite everywhere the sampler can go (the plan's
+    "mixture + background floor").
+
+    Args:
+        base: Intrinsic 4-D distribution (``rvs``/``logpdf`` duck-typed),
+            e.g. :class:`FStatProposal4D`.
+        box_lo, box_hi: Per-axis floor-box bounds in the sampling basis
+            ``(f0 [mHz], Mc, alpha, sin_delta)`` -- normally the band's f0
+            edges plus the full prior ranges of the other three axes.
+        eps: Floor mixture weight.
+        seed: RNG seed for ``rvs``.
+    """
+
+    ndim = 4
+
+    def __init__(self, base, box_lo, box_hi, eps: float = 0.05,
+                 seed: Optional[int] = None):
+        self.base = base
+        self.lo = np.asarray(box_lo, dtype=float)
+        self.hi = np.asarray(box_hi, dtype=float)
+        self.eps = float(eps)
+        self._rng = np.random.default_rng(seed)
+        self._log_vol = float(np.sum(np.log(self.hi - self.lo)))
+
+    def rvs(self, size=1):
+        if isinstance(size, int):
+            size = (size,)
+        n = int(np.prod(size))
+        out = np.empty((n, 4))
+        floor = self._rng.random(n) < self.eps
+        n_floor = int(floor.sum())
+        if n_floor:
+            out[floor] = self._rng.uniform(self.lo, self.hi, size=(n_floor, 4))
+        if n - n_floor:
+            out[~floor] = np.asarray(self.base.rvs(size=(n - n_floor,)))
+        return out.reshape(size + (4,))
+
+    def logpdf(self, x):
+        x = np.atleast_2d(np.asarray(x, dtype=float))
+        inside = np.all((x >= self.lo) & (x <= self.hi), axis=1)
+        lp_base = np.asarray(self.base.logpdf(x), dtype=float)
+        lp_floor = np.where(inside, -self._log_vol, -np.inf)
+        with np.errstate(invalid="ignore"):
+            out = np.logaddexp(np.log1p(-self.eps) + lp_base,
+                               np.log(self.eps) + lp_floor)
+        return np.where(np.isnan(out), -np.inf, out)
+
+
+def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False):
+    """Wrap a 4-D intrinsic proposal into the 8-column GB RJ birth container.
+
+    Mirrors the stock GMM birth container
+    (``gbspecialstretch.GBSpecialRJRefitMove.setup``): the intrinsics
+    ``(f0 [mHz], Mc, alpha, sin_delta)`` come from ``intrinsic_dist`` under a
+    tuple key; ``lnA`` and the remaining extrinsics come from the stock
+    prior uniforms (the band engines re-maximize phi0 analytically when
+    ``phase_maximize`` is on). Returns an eryn ``ProbDistContainer`` whose
+    ``rvs(size) -> (size, 8)`` / ``logpdf((n, 8)) -> (n,)`` match what
+    ``BandSorter`` expects of ``rj_proposal_distribution["gb"]``.
+
+    Args:
+        intrinsic_dist: 4-D distribution over the intrinsic sampling basis
+            (e.g. :class:`FStatProposal4D` or :class:`UniformFloorMixture`).
+        A_lims: ``[A_min, A_max]`` physical amplitude limits
+            (``GBSettings.A_lims``); lnA is drawn uniform in ``log(A_lims)``.
+        use_cupy: Match the run backend (False for CPU runs).
+    """
+    from eryn.prior import ProbDistContainer, uniform_dist
+
+    dist = ProbDistContainer(
+        {
+            "A": uniform_dist(*np.log(np.asarray(A_lims, dtype=float))),
+            ("f0", "Mc", "alpha", "sin_delta"): intrinsic_dist,
+            "phi0": uniform_dist(0.0, 2.0 * np.pi),
+            "cos_iota": uniform_dist(-1.0, 1.0),
+            "psi": uniform_dist(0.0, np.pi),
+        },
+        use_cupy=use_cupy,
+    )
+    # reset_key_order re-maps rvs/logpdf columns to the sampler layout
+    # (a bare ``key_order = [...]`` assignment would NOT re-map).
+    dist.reset_key_order(["A", "f0", "Mc", "phi0", "cos_iota", "psi",
+                          "alpha", "sin_delta"])
+    return dist
+
+
+class MixtureProposal:
+    """Weighted mixture of 4-D intrinsic proposals (``rvs``/``logpdf``)."""
+
+    ndim = 4
+
+    def __init__(self, components, weights=None, seed: Optional[int] = None):
+        self.components = list(components)
+        w = (np.ones(len(self.components)) if weights is None
+             else np.asarray(weights, dtype=float))
+        self.weights = w / w.sum()
+        self._rng = np.random.default_rng(seed)
+
+    def rvs(self, size=1):
+        if isinstance(size, int):
+            size = (size,)
+        n = int(np.prod(size))
+        which = self._rng.choice(len(self.components), size=n, p=self.weights)
+        out = np.empty((n, 4))
+        for k, comp in enumerate(self.components):
+            m = which == k
+            if m.any():
+                out[m] = np.asarray(comp.rvs(size=(int(m.sum()),)))
+        return out.reshape(size + (4,))
+
+    def logpdf(self, x):
+        x = np.atleast_2d(np.asarray(x, dtype=float))
+        lps = np.stack(
+            [np.log(w) + np.asarray(c.logpdf(x))
+             for c, w in zip(self.components, self.weights)]
+        )
+        m = np.max(lps, axis=0)
+        m = np.where(np.isfinite(m), m, 0.0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out = np.log(np.sum(np.exp(lps - m), axis=0)) + m
+        return np.where(np.isnan(out), -np.inf, out)
+
+
+class CombIntrinsicProposal:
+    """Comb-scan f0 density x uniform (Mc, alpha, sin_delta).
+
+    Built from a cached comb scan (``f0_nodes``, ``F_max``): the f0 marginal
+    is piecewise-constant with cell weights ``clip(F, 0) ** power``
+    (corner-averaged). ``power=1`` (linear-in-F) keeps proportional mass on
+    *every* comb peak -- the right successive-birth behavior: once the
+    sampler births and subtracts the loudest source, births there stop
+    gaining likelihood while the next peaks still carry proposal mass
+    (an ``exp(F)`` weighting would collapse onto the single loudest peak).
+    The other three axes are uniform over their prior boxes (the band
+    engines re-maximize phi0; sky/Mc refine in-model after birth).
+    """
+
+    ndim = 4
+
+    def __init__(self, f0_nodes_mHz, F_max, mc_lims, alpha_lims=(0.0, 2 * np.pi),
+                 sin_delta_lims=(-1.0, 1.0), power: float = 1.0,
+                 seed: Optional[int] = None):
+        self.f0_nodes = np.asarray(f0_nodes_mHz, dtype=float)
+        F = np.clip(np.asarray(F_max, dtype=float), 0.0, None) ** float(power)
+        w = 0.5 * (F[:-1] + F[1:])
+        total = w.sum()
+        if not np.isfinite(total) or total <= 0:
+            raise ValueError("comb weights are empty/non-finite")
+        self._w = w
+        self._cdf = np.cumsum(w) / total
+        spacing = float(self.f0_nodes[1] - self.f0_nodes[0])
+        # per-cell f0 density = w / (total * spacing)
+        with np.errstate(divide="ignore"):
+            self._log_f0_pdf = np.log(w) - np.log(total) - np.log(spacing)
+        self.mc_lims = tuple(map(float, mc_lims))
+        self.alpha_lims = tuple(map(float, alpha_lims))
+        self.sin_delta_lims = tuple(map(float, sin_delta_lims))
+        self._log_uni = -sum(
+            np.log(hi - lo) for lo, hi in
+            (self.mc_lims, self.alpha_lims, self.sin_delta_lims)
+        )
+        self._rng = np.random.default_rng(seed)
+
+    def rvs(self, size=1):
+        if isinstance(size, int):
+            size = (size,)
+        n = int(np.prod(size))
+        idx = np.searchsorted(self._cdf, self._rng.random(n), side="right")
+        idx = np.clip(idx, 0, len(self._w) - 1)
+        u = self._rng.random(n)
+        out = np.empty((n, 4))
+        out[:, 0] = (self.f0_nodes[idx]
+                     + u * (self.f0_nodes[idx + 1] - self.f0_nodes[idx]))
+        out[:, 1] = self._rng.uniform(*self.mc_lims, n)
+        out[:, 2] = self._rng.uniform(*self.alpha_lims, n)
+        out[:, 3] = self._rng.uniform(*self.sin_delta_lims, n)
+        return out.reshape(size + (4,))
+
+    def logpdf(self, x):
+        x = np.atleast_2d(np.asarray(x, dtype=float))
+        f0 = x[:, 0]
+        idx = np.searchsorted(self.f0_nodes, f0, side="right") - 1
+        in_f0 = (f0 >= self.f0_nodes[0]) & (f0 <= self.f0_nodes[-1])
+        idx = np.clip(idx, 0, len(self._w) - 1)
+        inside = (
+            in_f0
+            & (x[:, 1] >= self.mc_lims[0]) & (x[:, 1] <= self.mc_lims[1])
+            & (x[:, 2] >= self.alpha_lims[0]) & (x[:, 2] <= self.alpha_lims[1])
+            & (x[:, 3] >= self.sin_delta_lims[0])
+            & (x[:, 3] <= self.sin_delta_lims[1])
+        )
+        out = self._log_f0_pdf[idx] + self._log_uni
+        return np.where(inside, out, -np.inf)
