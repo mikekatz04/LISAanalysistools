@@ -21,18 +21,17 @@ def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit", log_dir=No
             still captured in the log files, but the console only sees
             warnings and errors.
     """
-    if console:
-        # Root stdout handler so propagated lisatools.* records show too.
-        logging.basicConfig(
-            level=logging.WARNING,
-            stream=sys.stdout,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        )
-    logging.getLogger("lisatools").setLevel(level)
+    lisatools_logger = logging.getLogger("lisatools")
+    lisatools_logger.setLevel(level)
+    # Propagated lisatools.* records: a named stdout handler when verbose
+    # (installed/removed per call, so the knob can flip within one process);
+    # when quiet they fall through to Python's last-resort stderr handler
+    # (warnings/errors only).
+    _set_console_handler(lisatools_logger, console, level, quiet_stream=None)
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    formatter = _formatter()
     if filename:
         if log_dir:
             filename = os.path.join(log_dir, filename)
@@ -44,19 +43,42 @@ def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit", log_dir=No
             rfhandler = logging.FileHandler(filename)
             rfhandler.setFormatter(formatter)
             logger.addHandler(rfhandler)
-    # FileHandler subclasses StreamHandler, so match on the exact type.
-    has_stream = any(type(h) is logging.StreamHandler for h in logger.handlers)
-    if not has_stream:
-        if console and level:
-            shandler = logging.StreamHandler(sys.stdout)
-            shandler.setLevel(level)
-        else:
-            # Quiet default: warnings/errors still surface on stderr.
-            shandler = logging.StreamHandler(sys.stderr)
-            shandler.setLevel(logging.WARNING)
-        shandler.setFormatter(formatter)
-        logger.addHandler(shandler)
+    # propagate=False: this logger needs its own console handler so that
+    # warnings/errors still surface when quiet.
+    _set_console_handler(logger, console, level, quiet_stream=sys.stderr)
     return logger
+
+
+#: Name tagging the (single, swappable) console handler this module manages.
+_CONSOLE_HANDLER_NAME = "lisatools-console"
+
+
+def _formatter():
+    return logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+
+def _set_console_handler(logger, console, level, quiet_stream):
+    """Install/replace/remove ``logger``'s managed console handler.
+
+    ``console=True``: a stdout handler at ``level``. ``console=False``: a
+    stderr WARNING handler when ``quiet_stream`` is given, else no console
+    handler at all. Re-running with a different ``console`` swaps the handler
+    (the verbose knob can differ between fits in one process/notebook).
+    """
+    for h in list(logger.handlers):
+        if h.get_name() == _CONSOLE_HANDLER_NAME:
+            logger.removeHandler(h)
+    if console and level:
+        shandler = logging.StreamHandler(sys.stdout)
+        shandler.setLevel(level)
+    elif quiet_stream is not None:
+        shandler = logging.StreamHandler(quiet_stream)
+        shandler.setLevel(logging.WARNING)
+    else:
+        return
+    shandler.set_name(_CONSOLE_HANDLER_NAME)
+    shandler.setFormatter(_formatter())
+    logger.addHandler(shandler)
 
 
 def setup_root_file_handler(log_dir, level=logging.DEBUG):
