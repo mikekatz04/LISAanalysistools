@@ -44,15 +44,9 @@ import typing
 import numpy as np
 
 from ....engine import GeneralSetup, Settings
-from ....recipe import MOJITO_REFERENCE_TIME, build_psd_moves
-from ...base import (
-    MoveBuildContext,
-    MoveSpec,
-    RecipeSpec,
-    StageSpec,
-    env_default,
-    materialize_recipe,
-)
+from ....moves import Move, MoveBuildContext
+from ....recipe import MOJITO_REFERENCE_TIME, Recipe, Stage, build_psd_moves
+from ...base import env_default
 from ..common import tdi_generation_info
 from ..emri import EMRISetup
 from ..fit import EreborFit, EreborGeneralSettings
@@ -324,19 +318,19 @@ class AllSourcesGlobalFit(EreborFit):
             branches["sgwb"] = AllSourcesSGWBSettings()
         return branches
 
-    def default_recipe(self) -> RecipeSpec:
+    def default_recipe(self) -> Recipe:
         # One combined PE stage, legacy order: psd, mbh, emri, sobbh, gb.
-        return RecipeSpec(
+        return Recipe(
             [
-                StageSpec(
+                Stage(
                     name="full_pe",
                     kind="pe",
                     moves=[
-                        MoveSpec("psd_pe", branch="psd"),
-                        MoveSpec("mbh_pe", branch="mbh"),
-                        MoveSpec("emri_pe", branch="emri"),
-                        MoveSpec("sobbh_pe", branch="sobbh"),
-                        MoveSpec("rj_prior", branch="gb"),
+                        Move("psd_pe", branch="psd"),
+                        Move("mbh_pe", branch="mbh"),
+                        Move("emri_pe", branch="emri"),
+                        Move("sobbh_pe", branch="sobbh"),
+                        Move("rj_prior", branch="gb"),
                     ],
                     combine_kwargs=dict(verbose=True, share_temperature_control=False),
                 )
@@ -631,13 +625,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
         cp.cuda.runtime.setDevice(gpus[0])
 
-    recipe_spec: RecipeSpec = curr.source_metadata["recipe_spec"]
-    requested = [
-        mv.name
-        for stage in recipe_spec.stages
-        for mv in stage.moves
-        if mv.instance is None and mv.target is None
-    ]
+    requested = recipe.stock_names()
     stock_moves = {}
 
     # --- GB: the shared gb_no_fg stack (chunked-het likelihood, seeding, moves) ---
@@ -671,9 +659,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     ctx = MoveBuildContext(
         recipe=recipe, engine_info=engine_info, curr=curr, acs=acs,
-        priors=priors, state=state,
+        priors=priors, state=state, stock_moves=stock_moves,
+        ntemps=ntemps, nwalkers=nwalkers,
     )
-    materialize_recipe(recipe, recipe_spec, ctx, stock_moves, ntemps, nwalkers)
+    recipe.setup(ctx)
 
 
 AllSourcesGlobalFit.default_setup_function = staticmethod(setup_recipe)

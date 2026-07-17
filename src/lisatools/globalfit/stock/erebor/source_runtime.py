@@ -625,7 +625,7 @@ def find_source_cfg(curr):
 
 def build_source_moves(curr, acs, priors, state, cfg) -> dict:
     """Build the mbh/emri/sobbh PE moves present on ``curr`` into a name->move
-    dict (matching the ``mbh_pe`` / ``emri_pe`` / ``sobbh_pe`` MoveSpec ids)."""
+    dict (matching the ``mbh_pe`` / ``emri_pe`` / ``sobbh_pe`` stock-move names)."""
     stock_moves = {}
     if "mbh" in curr.source_info:
         stock_moves["mbh_pe"] = build_mbh_move_runtime(curr, acs, priors, state, cfg)

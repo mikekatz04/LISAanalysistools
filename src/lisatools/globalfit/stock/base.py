@@ -8,13 +8,13 @@ domain pour, HDF backend creation, waveform construction) to an explicit
 
 The stack, top-down::
 
-    the run      GlobalFit(curr, comm).run_global_fit()
+    the run      GlobalFit(curr, comm).run_global_fit()   (or fit.sample())
        ^  .build() -> GlobalFitSetup       (heavy: built config + live state)
     the fit      StockGlobalFit variant    (cheap, picklable config)
        |-- general   (GeneralSettings)                          run-wide
        |-- branches  (GBSettings, MBHSettings, ... dataclasses) per-branch
-       +-- recipe    (RecipeSpec of stages/MoveSpecs)           run-wide
-             each composed of atoms: transforms, priors, MoveSpecs,
+       +-- recipe    (Recipe of Stages, each of Moves)          run-wide
+             each composed of atoms: transforms, priors, moves,
              injection tables
 
 ``general``, the branch blocks and ``recipe`` are **peers** — three
@@ -28,14 +28,19 @@ The one real ordering is **build-time resolution**, not hierarchy:
 :meth:`build` resolves ``general`` first (grid, ``Tobs``, domain, data); each
 branch then inherits any *unset* ``Tobs``/``dt`` — ``EreborFit`` also fills
 ``domain_settings``/``log_dir`` — from the built general setup; the recipe is
-materialized last, with every ``MoveSpec.branch`` validated against the
+materialized last, with every ``Move.branch`` validated against the
 enabled branches. So general's run-wide choices flow *down* into the branches
 as defaults, but that is defaulting, not ownership.
 
-"Spec" objects (:class:`MoveSpec`, :class:`StageSpec`, :class:`RecipeSpec`)
-are declarative *specifications*: picklable descriptions of the runtime
-moves/recipe steps that are materialized only inside the run's
-``setup_function`` (compare :class:`importlib.machinery.ModuleSpec`).
+The recipe layer has **one concept per level, each with a required
+``setup(ctx)`` hook run at materialization** (no separate "spec" classes):
+:class:`~lisatools.globalfit.moves.globalfitmove.Move` (a move IS a
+proposal; base = stock-name lookup, subclass+``setup(ctx)`` = custom,
+:class:`~lisatools.globalfit.moves.functionmove.FunctionMove` = a plain
+``fn(model, state)``), :class:`~lisatools.globalfit.recipe.Stage`, and the
+unified :class:`~lisatools.globalfit.recipe.Recipe` — declarative before the
+run, materializing itself into the runtime steps at run start. All of it is
+cheap-construct / heavy-setup, so a configured fit pickles.
 """
 
 from __future__ import annotations
@@ -46,6 +51,9 @@ import typing
 import warnings
 from copy import deepcopy
 
+import numpy as np
+from eryn.prior import ProbDistContainer
+
 from ..engine import (
     GeneralSettings,
     GeneralSetup,
@@ -54,20 +62,17 @@ from ..engine import (
     Settings,
     Setup,
 )
-from ..recipe import PERecipeStep, Recipe, RJRecipeStep, SearchRecipeStep
+from ..moves import FunctionMove, Move, MoveBuildContext
+from ..recipe import Recipe, Stage
 from ..run import GlobalFitSetup
 
 __all__ = [
     "ENV_ALIASES",
-    "MoveSpec",
-    "StageSpec",
-    "RecipeSpec",
     "StockGlobalFit",
     "StockRegistry",
     "env_default",
     "env_is_set",
     "env_resolve",
-    "materialize_recipe",
 ]
 
 
@@ -169,385 +174,25 @@ def env_default(var: str, default, cast=str):
 
 
 # ---------------------------------------------------------------------------
-# Declarative recipe layer: MoveSpec / StageSpec / RecipeSpec
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass
-class MoveSpec:
-    """Specification of one sampler move inside a recipe stage.
-
-    Args:
-        name: Unique (per recipe) move name. Stock variants reuse the
-            canonical names of the moves they wrap (``"rj_prior"``,
-            ``"rj_fstat_mcmc"``, ``"rj_refit"``, ``"gb_in_model"``,
-            ``"psd_pe"``, ``"mbh_pe"``, ...).
-        target: How to obtain the runtime move when the stage is
-            materialized. ``None`` means the variant's ``setup_function``
-            provides the move under ``name`` (the stock path). A callable is
-            invoked as ``target(ctx, **kwargs)`` where ``ctx`` is the
-            :class:`MoveBuildContext`; a class with a context-free
-            constructor may also be given and is called as
-            ``target(**kwargs)``.
-        kwargs: Keyword arguments for ``target`` (or forwarded to the stock
-            builder where supported).
-        branch: Branch this move samples (validated against enabled
-            branches at build).
-        weight: Optional weight used when the containing stage combines
-            moves in a weighted eryn move list.
-        instance: A fully constructed move. Takes precedence over
-            ``target``. NOTE: constructed moves often hold arrays or
-            device state — a fit configured with an ``instance`` may not be
-            picklable (the spec path is the primary interface).
-    """
-
-    name: str
-    target: typing.Any = None
-    kwargs: dict = dataclasses.field(default_factory=dict)
-    branch: typing.Optional[str] = None
-    weight: typing.Optional[float] = None
-    instance: typing.Any = None
-    # Move-level debug override applied at materialization via
-    # ``move.set_debug(...)``. ``None`` -> no override (the move keeps its
-    # env-resolved default: GB_DEBUG / {BRANCH}_DEBUG). ``True``/``False`` ->
-    # enable/disable; a ``dict`` -> ``set_debug(enabled=dict.pop("enabled",
-    # True), **dict)`` (keys: plot_dir/plot_walker/plot_leaf/plot_band/every).
-    # Takes precedence over the stage-level ``StageSpec.debug``.
-    debug: typing.Optional[typing.Union[bool, dict]] = None
-
-
-@dataclasses.dataclass
-class StageSpec:
-    """Specification of one recipe stage (materializes into a RecipeStep).
-
-    Args:
-        name: Unique stage name (e.g. ``"gb_pe"``, ``"gb_search"``).
-        kind: ``"search"`` | ``"pe"`` | ``"rj"`` — selects
-            :class:`SearchRecipeStep` / :class:`PERecipeStep` /
-            :class:`RJRecipeStep` at materialization.
-        moves: Ordered move specifications for this stage.
-        step_kwargs: Extra keyword arguments passed to the RecipeStep
-            constructor (stopping criteria, iteration caps, ...).
-        combine_kwargs: Extra keyword arguments for the ``GFCombineMove``
-            wrapping this stage's moves (stock materialization only).
-    """
-
-    name: str
-    kind: str = "pe"
-    moves: typing.List[MoveSpec] = dataclasses.field(default_factory=list)
-    step_kwargs: dict = dataclasses.field(default_factory=dict)
-    combine_kwargs: dict = dataclasses.field(default_factory=dict)
-    # Stage-level debug override: applied to every move in this stage that
-    # does not carry its own ``MoveSpec.debug``. Same value semantics as
-    # ``MoveSpec.debug`` (bool or options dict); ``None`` -> no override.
-    debug: typing.Optional[typing.Union[bool, dict]] = None
-
-    _KINDS = ("search", "pe", "rj")
-
-    def __post_init__(self):
-        if self.kind not in self._KINDS:
-            raise ValueError(f"StageSpec kind must be one of {self._KINDS}, got {self.kind!r}.")
-
-    def move_names(self) -> typing.List[str]:
-        return [m.name for m in self.moves]
-
-
-class RecipeSpec:
-    """Ordered, editable collection of :class:`StageSpec` blocks.
-
-    Supports whole-stage and per-move composition::
-
-        recipe.add_stage(StageSpec("gb_search", kind="search", moves=[...]))
-        recipe.pop_stage("gb_search")
-        recipe.add_move(MoveSpec("my_move", target=...), stage="gb_pe",
-                        after="rj_prior")
-        recipe.pop_move("rj_refit")
-        print(recipe.list_moves())
-    """
-
-    def __init__(self, stages: typing.Optional[typing.List[StageSpec]] = None):
-        self.stages: typing.List[StageSpec] = list(stages) if stages is not None else []
-        self._check_unique()
-
-    # -- internals ---------------------------------------------------------
-
-    def _check_unique(self):
-        stage_names = [s.name for s in self.stages]
-        if len(set(stage_names)) != len(stage_names):
-            raise ValueError(f"Duplicate stage names: {stage_names}.")
-        move_names = [m.name for s in self.stages for m in s.moves]
-        if len(set(move_names)) != len(move_names):
-            raise ValueError(f"Duplicate move names across recipe: {move_names}.")
-
-    def _stage(self, name: str) -> StageSpec:
-        for stage in self.stages:
-            if stage.name == name:
-                return stage
-        raise KeyError(
-            f"Unknown stage {name!r}. Available stages: {[s.name for s in self.stages]}."
-        )
-
-    def _find_move(
-        self, name: str, stage: typing.Optional[str] = None
-    ) -> typing.Tuple[StageSpec, int]:
-        hits = []
-        for st in self.stages if stage is None else [self._stage(stage)]:
-            for i, mv in enumerate(st.moves):
-                if mv.name == name:
-                    hits.append((st, i))
-        if not hits:
-            raise KeyError(
-                f"Unknown move {name!r}. Available moves: {self.move_names()}."
-            )
-        if len(hits) > 1:
-            raise KeyError(
-                f"Move name {name!r} appears in multiple stages "
-                f"({[st.name for st, _ in hits]}); pass stage=... to disambiguate."
-            )
-        return hits[0]
-
-    # -- stages --------------------------------------------------------------
-
-    def add_stage(
-        self,
-        stage: StageSpec,
-        before: typing.Optional[str] = None,
-        after: typing.Optional[str] = None,
-        index: typing.Optional[int] = None,
-    ) -> StageSpec:
-        if not isinstance(stage, StageSpec):
-            raise TypeError(f"add_stage expects a StageSpec, got {type(stage).__name__}.")
-        if sum(x is not None for x in (before, after, index)) > 1:
-            raise ValueError("Pass at most one of before=, after=, index=.")
-        if any(s.name == stage.name for s in self.stages):
-            raise ValueError(f"Stage name {stage.name!r} already present.")
-        if before is not None:
-            index = self.stages.index(self._stage(before))
-        elif after is not None:
-            index = self.stages.index(self._stage(after)) + 1
-        elif index is None:
-            index = len(self.stages)
-        self.stages.insert(index, stage)
-        self._check_unique()
-        return stage
-
-    def pop_stage(self, name: str) -> StageSpec:
-        stage = self._stage(name)
-        self.stages.remove(stage)
-        return stage
-
-    # -- moves ---------------------------------------------------------------
-
-    def move_names(self) -> typing.List[str]:
-        return [m.name for s in self.stages for m in s.moves]
-
-    def get_move(self, name: str, stage: typing.Optional[str] = None) -> MoveSpec:
-        st, i = self._find_move(name, stage)
-        return st.moves[i]
-
-    def pop_move(self, name: str, stage: typing.Optional[str] = None) -> MoveSpec:
-        st, i = self._find_move(name, stage)
-        return st.moves.pop(i)
-
-    def set_move_debug(
-        self,
-        name: str,
-        enabled: bool = True,
-        *,
-        stage: typing.Optional[str] = None,
-        **opts,
-    ) -> MoveSpec:
-        """Turn a single move's debug instrumentation on/off (materialize-time).
-
-        ``opts`` (plot_dir / plot_walker / plot_leaf / plot_band / every) are
-        forwarded to :meth:`GlobalFitMove.set_debug`. Overrides any
-        stage-level debug and the move's env default. Example::
-
-            fit.recipe.set_move_debug("emri_pe", plot_dir="./emri_dbg", every=5)
-            fit.recipe.set_move_debug("psd_pe", False)   # force off
-        """
-        mv = self.get_move(name, stage)
-        mv.debug = {"enabled": enabled, **opts} if opts else enabled
-        return mv
-
-    def set_stage_debug(
-        self, stage_name: str, enabled: bool = True, **opts
-    ) -> StageSpec:
-        """Turn debug on/off for every move in a stage (unless a move overrides).
-
-        ``opts`` are forwarded to each move's :meth:`GlobalFitMove.set_debug`.
-        Example::
-
-            fit.recipe.set_stage_debug("full_pe", plot_walker=2)
-        """
-        st = self._stage(stage_name)
-        st.debug = {"enabled": enabled, **opts} if opts else enabled
-        return st
-
-    def add_move(
-        self,
-        move: typing.Union[MoveSpec, typing.Any],
-        stage: typing.Optional[str] = None,
-        before: typing.Optional[str] = None,
-        after: typing.Optional[str] = None,
-        index: typing.Optional[int] = None,
-        name: typing.Optional[str] = None,
-    ) -> MoveSpec:
-        """Add a move to the recipe.
-
-        ``move`` is a :class:`MoveSpec` or a constructed move object (wrapped
-        into a spec via its ``.name`` attribute or the ``name=`` argument;
-        note the pickle caveat on :attr:`MoveSpec.instance`). Placement:
-        ``stage=`` names the stage (default: the only stage, error if
-        ambiguous) and at most one of ``before=``/``after=`` (move names) or
-        ``index=`` positions it inside the stage (default: append).
-        """
-        if not isinstance(move, MoveSpec):
-            mv_name = name or getattr(move, "name", None)
-            if not mv_name:
-                raise ValueError(
-                    "A constructed move needs a name: pass add_move(..., name=...) "
-                    "or give the move object a .name attribute."
-                )
-            move = MoveSpec(name=mv_name, instance=move)
-        if move.name in self.move_names():
-            raise ValueError(
-                f"Move name {move.name!r} already present "
-                f"(existing: {self.move_names()}). pop_move it first or rename."
-            )
-        if sum(x is not None for x in (before, after, index)) > 1:
-            raise ValueError("Pass at most one of before=, after=, index=.")
-
-        if stage is not None:
-            st = self._stage(stage)
-        elif before is not None or after is not None:
-            st, _ = self._find_move(before if before is not None else after)
-        elif len(self.stages) == 1:
-            st = self.stages[0]
-        else:
-            raise ValueError(
-                f"Multiple stages present ({[s.name for s in self.stages]}); "
-                "pass stage=... to say where the move goes."
-            )
-
-        if before is not None:
-            index = [m.name for m in st.moves].index(before)
-        elif after is not None:
-            index = [m.name for m in st.moves].index(after) + 1
-        elif index is None:
-            index = len(st.moves)
-        st.moves.insert(index, move)
-        return move
-
-    def list_moves(self) -> str:
-        """Human-readable, stage-grouped summary of the recipe."""
-        lines = []
-        for st in self.stages:
-            lines.append(f"[{st.kind}] {st.name}:")
-            if not st.moves:
-                lines.append("    (no moves)")
-            for mv in st.moves:
-                src = (
-                    "instance"
-                    if mv.instance is not None
-                    else (getattr(mv.target, "__name__", None) or mv.target or "stock")
-                )
-                extra = f" branch={mv.branch}" if mv.branch else ""
-                lines.append(f"    {mv.name}  <- {src}{extra}")
-        return "\n".join(lines) if lines else "(empty recipe)"
-
-    def __repr__(self):
-        return f"RecipeSpec({[s.name for s in self.stages]})"
-
-
-@dataclasses.dataclass
-class MoveBuildContext:
-    """Runtime context handed to MoveSpec targets during materialization."""
-
-    recipe: Recipe
-    engine_info: typing.Any
-    curr: GlobalFitSetup
-    acs: typing.Any
-    priors: dict
-    state: typing.Any
-
-
-_STEP_CLASSES = {"search": SearchRecipeStep, "pe": PERecipeStep, "rj": RJRecipeStep}
-
-
-def materialize_recipe(
-    recipe: Recipe,
-    recipe_spec: RecipeSpec,
-    ctx: MoveBuildContext,
-    stock_moves: typing.Dict[str, typing.Any],
-    ntemps: int,
-    nwalkers: int,
-) -> None:
-    """Materialize a :class:`RecipeSpec` into runtime recipe components.
-
-    ``stock_moves`` maps canonical move names to constructed move objects —
-    the variant's ``setup_function`` builds them (via ``build_gb_moves`` and
-    friends) for exactly the names present in the spec. Per move, resolution
-    order is ``instance`` > ``target`` > ``stock_moves[name]``.
-    """
-    import numpy as np
-
-    from ..moves import GFCombineMove
-
-    enabled = set(ctx.curr.engine_info.branch_names)
-    for st in recipe_spec.stages:
-        moves = []
-        weights = []
-        for mv in st.moves:
-            if mv.branch is not None and mv.branch not in enabled:
-                raise ValueError(
-                    f"Move {mv.name!r} targets branch {mv.branch!r} which is not an "
-                    f"enabled branch ({sorted(enabled)}). remove the move or add the branch."
-                )
-            if mv.instance is not None:
-                move = mv.instance
-            elif mv.target is not None:
-                try:
-                    move = mv.target(ctx, **mv.kwargs)
-                except TypeError:
-                    move = mv.target(**mv.kwargs)
-            elif mv.name in stock_moves:
-                move = stock_moves[mv.name]
-            else:
-                raise ValueError(
-                    f"Move {mv.name!r} has no instance/target and no stock builder "
-                    f"provided one (stock moves available: {sorted(stock_moves)})."
-                )
-            # Move/stage-level debug: move-spec wins over stage-spec; None
-            # leaves the move's env-resolved default untouched.
-            _dbg = mv.debug if mv.debug is not None else st.debug
-            if _dbg is not None and hasattr(move, "set_debug"):
-                if isinstance(_dbg, dict):
-                    _opts = dict(_dbg)
-                    move.set_debug(_opts.pop("enabled", True), **_opts)
-                else:
-                    move.set_debug(bool(_dbg))
-
-            moves.append(move)
-            weights.append(mv.weight if mv.weight is not None else 1.0)
-
-        if not moves:
-            raise ValueError(f"Stage {st.name!r} has no moves; pop_stage it or add moves.")
-
-        combined = GFCombineMove(moves=moves, **st.combine_kwargs)
-        if not hasattr(combined, "accepted") or combined.accepted is None:
-            combined.accepted = np.zeros((ntemps, nwalkers))
-        step_cls = _STEP_CLASSES[st.kind]
-        recipe.add_recipe_component(step_cls(moves=[combined], **st.step_kwargs), name=st.name)
-
-
-# ---------------------------------------------------------------------------
 # The deferred-build fit object
 # ---------------------------------------------------------------------------
 
 # GlobalFitSetup attributes that only exist after build(); accessing
 # them earlier gets a helpful error instead of a bare AttributeError.
 _BUILT_ONLY_ATTRS = ("settings_dict", "current_info", "backend")
+
+
+@dataclasses.dataclass
+class _InfoBranchSettings(Settings):
+    """Internal Settings for branches appended with plain branch info.
+
+    Not user-facing — :meth:`StockGlobalFit.add_branch` builds one under the
+    hood from the ``ndim``/``nleaves_max``/``priors``/... kwargs. Adds the
+    ``injection`` field the run's generic branch seeding reads (start walkers
+    scattered around it; ``<BRANCH>_START_FACTOR=0`` starts exactly there).
+    """
+
+    injection: typing.Optional[typing.Any] = None
 
 
 class StockGlobalFit(GlobalFitSetup):
@@ -567,7 +212,8 @@ class StockGlobalFit(GlobalFitSetup):
       instance;
     - :meth:`default_branches` returning an ordered ``{name: Settings}``
       dict;
-    - :meth:`default_recipe` returning the variant's :class:`RecipeSpec`;
+    - :meth:`default_recipe` returning the variant's
+      :class:`~lisatools.globalfit.recipe.Recipe`;
     - ``setup_classes`` mapping branch name -> Setup class;
     - ``default_setup_function`` (a named module-level function);
     - :meth:`make_general_settings` (optional) to resolve derived fields
@@ -597,7 +243,7 @@ class StockGlobalFit(GlobalFitSetup):
         *,
         general: typing.Optional[GeneralSettings] = None,
         branches: typing.Optional[typing.Dict[str, Settings]] = None,
-        recipe: typing.Optional[RecipeSpec] = None,
+        recipe: typing.Optional[Recipe] = None,
         setup_function: typing.Optional[typing.Callable] = None,
         # head_rank is a legacy alias from the retired multi-stage pipeline;
         # it defaults to the main rank (no separate role). GlobalFit assigns
@@ -610,6 +256,14 @@ class StockGlobalFit(GlobalFitSetup):
         # that is the heavy stage, deferred to build().
         self.general = general if general is not None else self.default_general()
         self._branch_names: typing.List[str] = []
+        # Branches appended with plain branch info (must be targeted by >= 1
+        # move — validated at recipe materialization).
+        self._info_branches: typing.List[str] = []
+        # Per-branch Setup-class overrides from add_branch(setup_class=...).
+        self._setup_class_overrides: typing.Dict[str, type] = {}
+        # Live GlobalFit runner while sample() is active (mid-run adds hook
+        # into it; branch appends are forbidden then).
+        self._runner = None
         for name, settings in (
             branches if branches is not None else self.default_branches()
         ).items():
@@ -631,7 +285,7 @@ class StockGlobalFit(GlobalFitSetup):
     def default_branches(self) -> typing.Dict[str, Settings]:
         raise NotImplementedError
 
-    def default_recipe(self) -> RecipeSpec:
+    def default_recipe(self) -> Recipe:
         raise NotImplementedError
 
     # -- knob application ------------------------------------------------------
@@ -755,13 +409,96 @@ class StockGlobalFit(GlobalFitSetup):
         """Ordered mapping of branch name -> branch Settings block."""
         return {name: getattr(self, name) for name in self._branch_names}
 
-    def add_branch(self, name: str, settings: Settings):
-        """Add (or replace) a branch block. ``fit.<name>`` becomes the settings."""
-        if not isinstance(settings, Settings):
-            raise TypeError(
-                f"Branch {name!r}: expected a Settings dataclass instance, got "
-                f"{type(settings).__name__}."
+    def add_branch(
+        self,
+        name: str,
+        settings: typing.Optional[Settings] = None,
+        *,
+        ndim: typing.Optional[int] = None,
+        nleaves_max: typing.Optional[int] = None,
+        nleaves_min: typing.Optional[int] = None,
+        priors=None,
+        moves: typing.Optional[typing.Sequence] = None,
+        stage: typing.Optional[str] = None,
+        injection=None,
+        signal_gen: typing.Optional[typing.Callable] = None,
+        sub_state=None,
+        sub_backend=None,
+        setup_class: typing.Optional[type] = None,
+        **branch_kwargs,
+    ):
+        """Add (or replace) a branch block. ``fit.<name>`` becomes the settings.
+
+        Two paths:
+
+        * **Stock path** — pass a ``Settings`` dataclass instance (the
+          pre-installed mechanism; the variant's ``setup_classes`` builds it).
+        * **Simple path** — pass plain branch info instead: ``ndim`` +
+          ``priors`` (+ optional ``nleaves_max``/``nleaves_min``/``injection``/
+          ``signal_gen``). The branch is stored in the main HDF file
+          (coords/inds/log_like) with no Settings/Setup subclassing, and
+          **must be targeted by at least one move** (``branch=name``) by run
+          start — pass ``moves=[...]`` here (each entry is anything
+          :meth:`add_move` accepts; they land in the recipe wrapped in the
+          basic single-stage recipe, ``stage=`` disambiguating when several
+          stages exist) or add them separately.
+
+        ``sub_state``/``sub_backend`` optionally register a per-branch state /
+        HDF sub-backend extension (the same hook stock branches use via their
+        Settings ``branch_state``/``branch_backend`` fields). ``setup_class``
+        overrides the Setup class used at build for this branch.
+
+        Timing: works before build (primary) and after build but before a run
+        — a post-build append incrementally builds just this branch against
+        the cached general setup, so the heavy data load is not redone.
+        Mid-run appends are not supported.
+        """
+        if getattr(self, "_runner", None) is not None:
+            raise RuntimeError(
+                "add_branch is not supported mid-run: the HDF backend and state "
+                "shapes are fixed at run start. Add branches before run()/sample()."
             )
+        if settings is None:
+            if ndim is None or priors is None:
+                raise TypeError(
+                    f"Branch {name!r}: pass a Settings dataclass instance, or the "
+                    "branch info (at least ndim= and priors=)."
+                )
+            if nleaves_max is None:
+                nleaves_max = 1
+            if nleaves_min is None:
+                # Fixed-leaf by default: the run's generic seeding turns a
+                # nleaves_min == nleaves_max branch always-on.
+                nleaves_min = nleaves_max
+            settings = _InfoBranchSettings(
+                ndim=ndim,
+                nleaves_max=nleaves_max,
+                nleaves_min=nleaves_min,
+                priors=self._coerce_priors(name, priors),
+                injection=injection,
+                signal_gen=signal_gen,
+                **branch_kwargs,
+            )
+            if name not in self._info_branches:
+                self._info_branches.append(name)
+        else:
+            if not isinstance(settings, Settings):
+                raise TypeError(
+                    f"Branch {name!r}: expected a Settings dataclass instance, got "
+                    f"{type(settings).__name__}."
+                )
+            if branch_kwargs:
+                raise TypeError(
+                    f"Branch {name!r}: branch-info kwargs {sorted(branch_kwargs)} only "
+                    "apply when no Settings instance is passed."
+                )
+        if sub_state is not None:
+            settings.branch_state = sub_state
+        if sub_backend is not None:
+            settings.branch_backend = sub_backend
+        if setup_class is not None:
+            self._setup_class_overrides[name] = setup_class
+
         if name not in self._branch_names:
             if (
                 name in self._HEADLINE_KNOBS
@@ -775,6 +512,39 @@ class StockGlobalFit(GlobalFitSetup):
             self._branch_names.append(name)
         object.__setattr__(self, name, settings)
 
+        if self.built:
+            # Incremental post-build append: build just this branch against the
+            # cached general setup and patch it into the built products (the
+            # heavy data load is preserved). engine_info derives from
+            # source_info, so it picks the branch up automatically.
+            general_setup = self.build_general(force=False)
+            setup = self.make_source_setup(
+                name, self.prepare_branch_settings(name, general_setup), general_setup
+            )
+            self._source_info[name] = setup  # also settings_dict.source_info
+            self.current_info.source_info[name] = deepcopy(setup)
+
+        for mv in moves or ():
+            self.add_move(mv, stage=stage, branch=name)
+
+    def _coerce_priors(self, name: str, priors) -> typing.Dict[str, ProbDistContainer]:
+        """Coerce the simple-path ``priors`` input to the ``{branch: container}`` form.
+
+        Accepts a :class:`~eryn.prior.ProbDistContainer`, a ``{param_index:
+        distribution}`` dict (wrapped in one), or the already-keyed
+        ``{branch_name: container}`` dict.
+        """
+        if isinstance(priors, ProbDistContainer):
+            return {name: priors}
+        if isinstance(priors, dict):
+            if priors and all(isinstance(k, int) for k in priors):
+                return {name: ProbDistContainer(priors)}
+            return priors
+        raise TypeError(
+            f"Branch {name!r}: priors must be a ProbDistContainer or a "
+            f"{{param_index: distribution}} dict, got {type(priors).__name__}."
+        )
+
     def remove_branch(self, name: str) -> Settings:
         """Remove a branch block and return its settings."""
         if name not in self._branch_names:
@@ -786,11 +556,65 @@ class StockGlobalFit(GlobalFitSetup):
         return settings
 
     # convenience aliases matching the recipe layer's add/pop vocabulary
-    def add_move(self, *args, **kwargs):
-        return self.recipe.add_move(*args, **kwargs)
+    def add_move(self, move, **kwargs) -> Move:
+        """Add a move (a.k.a. proposal) to the fit — the single entrance.
+
+        ``move`` is a :class:`~lisatools.globalfit.moves.globalfitmove.Move`,
+        a stock-move name, a constructed eryn move, or a plain
+        ``fn(model, state) -> (new_state, accepted)`` function (wrapped in a
+        :class:`~lisatools.globalfit.moves.functionmove.FunctionMove` that
+        only needs to touch ``model.analysis_container_arr``). Works before
+        build, after build, and mid-run (a live add starts firing on the next
+        iteration). See :meth:`Recipe.add_move
+        <lisatools.globalfit.recipe.Recipe.add_move>` for placement kwargs
+        (``stage=`` required when several stages exist).
+        """
+        mv = self.recipe.add_move(move, **kwargs)
+        self._materialize_live(mv)
+        return mv
 
     def pop_move(self, *args, **kwargs):
         return self.recipe.pop_move(*args, **kwargs)
+
+    def _materialize_live(self, move: Move) -> None:
+        """Materialize a just-added move into a live run (no-op pre-run).
+
+        Mid-run (``sample()`` active), the move's ``setup(ctx)`` runs with the
+        live context and the runtime move is appended into its stage's live
+        ``GFCombineMove`` — it proposes from the next iteration on. A whole
+        new stage is materialized and registered on the running recipe
+        (stages before the currently running one cannot be inserted mid-run).
+        """
+        runner = getattr(self, "_runner", None)
+        ctx = getattr(runner, "live_ctx", None) if runner is not None else None
+        if ctx is None:
+            return  # pre-run: declarative only, materialized at run start
+        stage, _ = self.recipe._find_move(move.name)
+        try:
+            step = self.recipe.get_step(stage.name)
+        except KeyError:
+            # The whole stage is new mid-run: materialize + register it (the
+            # runtime Recipe scans forward, so it runs when reached).
+            self.recipe.add_recipe_component(stage.setup(ctx), name=stage.name)
+            return
+        combined = step.moves[0]
+        runtime = move.materialize(ctx)
+        if getattr(runtime, "accepted", None) is None:
+            runtime.accepted = np.zeros((ctx.ntemps, ctx.nwalkers))
+        sampler = getattr(runner, "sampler", None)
+        if (
+            sampler is not None
+            and sampler.periodic is not None
+            and getattr(runtime, "periodic", None) is None
+        ):
+            runtime.periodic = sampler.periodic
+        if (
+            getattr(combined, "share_temperature_control", False)
+            and getattr(combined, "temperature_control", None) is not None
+            and getattr(runtime, "temperature_control", None) is None
+        ):
+            runtime.temperature_control = combined.temperature_control
+        combined.moves.append(runtime)
 
     def set_move_debug(self, *args, **kwargs):
         return self.recipe.set_move_debug(*args, **kwargs)
@@ -823,14 +647,28 @@ class StockGlobalFit(GlobalFitSetup):
         return self._general_setup
 
     def make_source_setup(self, name: str, settings: Settings, general_setup: GeneralSetup):
-        """Turn one branch Settings block into its Setup via ``setup_classes``."""
+        """Turn one branch Settings block into its Setup.
+
+        Resolution: an :meth:`add_branch` ``setup_class=`` override wins, then
+        the variant's ``setup_classes`` registry; a branch with neither falls
+        back to the plain generic :class:`~lisatools.globalfit.engine.Setup`
+        when its info is complete (``ndim``/``priors`` set) — the simple
+        branch-append path.
+        """
+        override = getattr(self, "_setup_class_overrides", {}).get(name)
+        if override is not None:
+            return override(settings)
         try:
             setup_cls = self.setup_classes[name]
         except KeyError:
+            if settings.ndim is not None and settings.priors is not None:
+                return Setup(settings)
             raise KeyError(
                 f"No Setup class registered for branch {name!r} on "
-                f"{type(self).__name__}.setup_classes ({sorted(self.setup_classes)}). "
-                "Register one or override make_source_setup."
+                f"{type(self).__name__}.setup_classes ({sorted(self.setup_classes)}), "
+                "and the branch info is incomplete (needs at least ndim and priors "
+                "for the generic Setup). Register a class, pass "
+                "add_branch(setup_class=...), or override make_source_setup."
             ) from None
         return setup_cls(settings)
 
@@ -877,9 +715,14 @@ class StockGlobalFit(GlobalFitSetup):
             rank_info=RankInfo(head_rank=self.head_rank, main_rank=self.main_rank),
             setup_function=self.setup_function,
         )
-        # The recipe spec rides along so the setup_function can materialize it.
-        settings.source_metadata["recipe_spec"] = self.recipe
+        # The recipe rides along so the run can materialize it.
+        settings.source_metadata["recipe"] = self.recipe
         GlobalFitSetup.__init__(self, settings)
+        # GlobalFitSetup.__init__ deepcopies the settings into current_info,
+        # which would freeze the recipe at build time. Re-point the copy at
+        # the LIVE recipe object so post-build edits (add_move / add_branch)
+        # reach the run.
+        self.current_info.source_metadata["recipe"] = self.recipe
         # Post-deepcopy hook: attach runtime-only objects (e.g. per-branch
         # ``signal_gen`` adapters bound to the runtime general_info) onto the
         # deepcopied Setups — never onto the pre-build config.
@@ -909,6 +752,32 @@ class StockGlobalFit(GlobalFitSetup):
 
         gf = GlobalFit(self, comm)
         return gf.run_global_fit(**run_kwargs)
+
+    def sample(self, iterations=None, **sample_kwargs):
+        """Generator run mode: build (if needed), then yield ``(model, state)`` per iteration.
+
+        The emcee-style loop, one level up from the engine's own ``sample``::
+
+            for model, state in fit.sample(iterations=100):
+                ...   # inspect/mutate model.analysis_container_arr and state
+                      # in place; the next iteration continues from them
+
+        Single-process (no MPI rank roles; ``run()`` owns MPI) — inside the
+        loop you may do whatever you need, including your own MPI, as long as
+        control returns synchronously. Moves added mid-loop via
+        :meth:`add_move` start firing on the next iteration. See
+        :meth:`GlobalFit.sample <lisatools.globalfit.run.GlobalFit.sample>`
+        for the keyword arguments and the backend-saving cadence.
+        """
+        self.build()
+        from ..run import GlobalFit
+
+        gf = GlobalFit(self, comm=None)
+        self._runner = gf
+        try:
+            yield from gf.sample(iterations=iterations, **sample_kwargs)
+        finally:
+            self._runner = None
 
     # -- introspection / cloning / pickling ---------------------------------------
 
@@ -1035,7 +904,7 @@ class StockGlobalFit(GlobalFitSetup):
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        for attr in ("_general_setup", "_source_info", *_BUILT_ONLY_ATTRS):
+        for attr in ("_general_setup", "_source_info", "_runner", *_BUILT_ONLY_ATTRS):
             state.pop(attr, None)
         return state
 

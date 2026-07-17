@@ -1,7 +1,149 @@
-"""Base mix-in tying ``eryn`` moves to global-fit MPI/GPU bookkeeping."""
+"""Base mix-in tying ``eryn`` moves to global-fit MPI/GPU bookkeeping.
+
+Also home of the declarative :class:`Move` base — the single user-facing
+"move" concept of the global-fit recipe layer (a move is a proposal; the
+words are synonymous). A ``Move`` is cheap to construct and picklable; the
+heavy work happens in its required ``setup(ctx)`` hook, run once at recipe
+materialization with a :class:`MoveBuildContext`.
+"""
+
+import dataclasses
+import typing
 
 import numpy as np
 from eryn.moves import CombineMove
+
+
+@dataclasses.dataclass
+class MoveBuildContext:
+    """Runtime context handed to every ``Move.setup`` at materialization.
+
+    Carries everything a move needs to build itself: the runtime
+    :class:`~lisatools.globalfit.recipe.Recipe`, the engine/branch metadata,
+    the built :class:`~lisatools.globalfit.run.GlobalFitSetup` (``curr``), the
+    shared :class:`~lisatools.analysiscontainer.AnalysisContainerArray`
+    (``acs``), the priors dict, the initial state, the variant-provided
+    ``stock_moves`` name lookup, and the sampler shape (``ntemps`` /
+    ``nwalkers``).
+    """
+
+    recipe: typing.Any
+    engine_info: typing.Any
+    curr: typing.Any
+    acs: typing.Any
+    priors: dict
+    state: typing.Any
+    stock_moves: dict = dataclasses.field(default_factory=dict)
+    ntemps: typing.Optional[int] = None
+    nwalkers: typing.Optional[int] = None
+
+
+class Move:
+    """Declarative, picklable recipe move (cheap-construct / heavy-setup).
+
+    A move IS a proposal — one object per adjustment the fit makes each
+    iteration. The base class resolves ``name`` against the variant's stock
+    moves at materialization; there are exactly two ways to customize:
+
+    * subclass ``Move`` and override :meth:`setup` — build and return the
+      runtime eryn move there (or return ``None`` to mean "``self`` is the
+      runtime move", in which case the subclass also implements ``propose``);
+    * pass a plain ``fn(model, state) -> (new_state, accepted)`` to
+      ``add_move`` — it is wrapped in a
+      :class:`~lisatools.globalfit.moves.functionmove.FunctionMove`.
+
+    Args:
+        name: Unique (per recipe) move name. For the base class this is the
+            stock-move name to look up (``"rj_prior"``, ``"psd_pe"``, ...).
+        branch: Branch this move samples (validated against enabled branches
+            at materialization).
+        debug: Move-level debug override applied at materialization via
+            ``set_debug`` — ``None`` keeps the move's env-resolved default,
+            ``True``/``False`` force it, a dict passes options
+            (``plot_dir``/``plot_walker``/``plot_leaf``/``plot_band``/
+            ``every``). Wins over the stage-level ``Stage.debug``.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        branch: typing.Optional[str] = None,
+        debug: typing.Optional[typing.Union[bool, dict]] = None,
+    ):
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"Move needs a non-empty string name, got {name!r}.")
+        self.name = name
+        self.branch = branch
+        self.debug = debug
+        self._runtime = None
+
+    @property
+    def is_stock(self) -> bool:
+        """True when this move resolves through the stock-name lookup (base ``setup``)."""
+        return type(self).setup is Move.setup
+
+    def setup(self, ctx: MoveBuildContext):
+        """Build/return the runtime eryn move (``None`` -> ``self`` IS the runtime move).
+
+        Default implementation: stock lookup — resolve
+        ``ctx.stock_moves[self.name]``, the move the variant's setup function
+        built under this name.
+        """
+        try:
+            return ctx.stock_moves[self.name]
+        except KeyError:
+            raise ValueError(
+                f"Move {self.name!r}: no stock move under this name (available: "
+                f"{sorted(ctx.stock_moves)}). Subclass Move and override setup(ctx) "
+                "to build a custom move, or add a plain fn(model, state) via add_move."
+            ) from None
+
+    def materialize(self, ctx: MoveBuildContext):
+        """Framework entry point: run :meth:`setup` and record the runtime move."""
+        runtime = self.setup(ctx)
+        if runtime is None:
+            runtime = self
+        self._runtime = runtime
+        return runtime
+
+    @property
+    def runtime(self):
+        """The materialized runtime move (``None`` before materialization)."""
+        return self._runtime
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_runtime"] = None
+        return state
+
+    def __repr__(self):
+        extra = f", branch={self.branch!r}" if self.branch else ""
+        return f"{type(self).__name__}({self.name!r}{extra})"
+
+
+class _RuntimeMove(Move):
+    """Private wrapper for a fully constructed runtime move added to a recipe.
+
+    Created by the recipe's move coercion when a user passes an
+    already-built eryn move to ``add_move``/``Stage(moves=[...])``. NOTE:
+    constructed moves often hold arrays or device state — a fit configured
+    with one may not be picklable (deliberately not dropped on pickle,
+    matching the historical ``instance`` caveat).
+    """
+
+    def __init__(self, move, *, name=None, branch=None, debug=None):
+        name = name or getattr(move, "name", None)
+        if not name:
+            raise ValueError(
+                "A constructed move needs a name: pass add_move(..., name=...) "
+                "or give the move object a .name attribute."
+            )
+        super().__init__(name, branch=branch, debug=debug)
+        self.move = move
+
+    def setup(self, ctx: MoveBuildContext):
+        return self.move
 
 
 class GlobalFitMove:
@@ -95,8 +237,8 @@ class GlobalFitMove:
         move already resolved from its env vars (``GB_DEBUG`` /
         ``{BRANCH}_DEBUG``); precedence is move-spec > stage-spec > env.
 
-        Applied by :func:`materialize_recipe` from the ``debug`` field on a
-        ``MoveSpec``/``StageSpec``, or callable directly on a built move.
+        Applied by ``Stage.setup`` from the ``debug`` field on a
+        :class:`Move`/``Stage``, or callable directly on a built move.
         Moves without debug hooks (e.g. ``PSDMove``) simply carry the flag
         inertly.
         """

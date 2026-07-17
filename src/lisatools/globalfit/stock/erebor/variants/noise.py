@@ -49,15 +49,9 @@ from eryn.prior import ProbDistContainer, uniform_dist
 from lisatools.domains import WDMSettings
 
 from ....engine import GeneralSetup, Settings
-from ....recipe import build_psd_moves
-from ...base import (
-    MoveBuildContext,
-    MoveSpec,
-    RecipeSpec,
-    StageSpec,
-    env_default,
-    materialize_recipe,
-)
+from ....moves import Move, MoveBuildContext
+from ....recipe import Recipe, Stage, build_psd_moves
+from ...base import env_default
 from ..fit import EreborFit, EreborGeneralSettings
 from ..noise import (
     GalForSettings,
@@ -300,14 +294,14 @@ class NoiseOnlyGlobalFit(_NoiseFitBase):
     def default_branches(self) -> typing.Dict[str, Settings]:
         return {"psd": NoisePSDSettings(), "galfor": GalForSettings()}
 
-    def default_recipe(self) -> RecipeSpec:
+    def default_recipe(self) -> Recipe:
         # One joint noise PE stage; galfor (+ sgwb) ride the single PSDMove.
-        return RecipeSpec(
+        return Recipe(
             [
-                StageSpec(
+                Stage(
                     name="noise_pe",
                     kind="pe",
-                    moves=[MoveSpec("psd_pe", branch="psd")],
+                    moves=[Move("psd_pe", branch="psd")],
                     combine_kwargs=dict(verbose=True, share_temperature_control=False),
                 )
             ]
@@ -368,13 +362,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
         cp.cuda.runtime.setDevice(gpus[0])
 
-    recipe_spec: RecipeSpec = curr.source_metadata["recipe_spec"]
-    requested = [
-        mv.name
-        for stage in recipe_spec.stages
-        for mv in stage.moves
-        if mv.instance is None and mv.target is None
-    ]
+    requested = recipe.stock_names()
     stock_moves = {}
     if "psd" in curr.source_info and any(n.startswith("psd") for n in requested):
         num_repeats = 5 if gpus is None else 60
@@ -386,9 +374,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     ctx = MoveBuildContext(
         recipe=recipe, engine_info=engine_info, curr=curr, acs=acs,
-        priors=priors, state=state,
+        priors=priors, state=state, stock_moves=stock_moves,
+        ntemps=ntemps, nwalkers=nwalkers,
     )
-    materialize_recipe(recipe, recipe_spec, ctx, stock_moves, ntemps, nwalkers)
+    recipe.setup(ctx)
 
 
 NoiseOnlyGlobalFit.default_setup_function = staticmethod(setup_recipe)

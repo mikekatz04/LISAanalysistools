@@ -40,7 +40,7 @@ from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings, Setup
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
-from .moves import GFCombineMove, GlobalFitMove
+from .moves import GFCombineMove, GlobalFitMove, MoveBuildContext
 from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter, save_residuals
 from .recipe import Recipe
 from .state import GFState
@@ -314,7 +314,7 @@ class GlobalFit:
             results_rank = spares.pop()
         return main_rank, results_rank, spares
 
-    def __init__(self, curr: GlobalFitSetup, comm: MPI.Comm):
+    def __init__(self, curr: GlobalFitSetup, comm: typing.Optional[MPI.Comm] = None):
         """Main class for managing the global fit MCMC sampling run.
 
         Coordinates MPI processes, GPU assignments, and the MCMC sampling workflow
@@ -322,12 +322,15 @@ class GlobalFit:
 
         Args:
             curr: GlobalFitSetup object containing all run configuration.
-            comm: MPI communicator for parallel processing.
+            comm: MPI communicator for parallel processing. ``None`` (the
+                single-process mode used by :meth:`sample`) resolves to
+                ``MPI.COMM_SELF``: this rank is main and saver in one, no
+                spares, synchronous backend saving.
         """
 
-        self.comm = comm
+        self.comm = comm if comm is not None else MPI.COMM_SELF
         self.curr = curr
-        self.rank = comm.Get_rank()
+        self.rank = self.comm.Get_rank()
         self.nwalkers: int = self.curr.general_info.nwalkers
         self.ntemps: int = self.curr.general_info.ntemps
         self.all_ranks = list(range(self.comm.Get_size()))
@@ -339,7 +342,7 @@ class GlobalFit:
         self.head_rank = self.curr.rank_info.head_rank
         self.main_rank = self.curr.rank_info.main_rank
         self.main_rank, self.results_rank, self.ranks_to_give = self.resolve_rank_roles(
-            comm, self.main_rank
+            self.comm, self.main_rank
         )
         self.used_ranks = [self.main_rank]
         if self.results_rank != self.main_rank:
@@ -798,11 +801,353 @@ class GlobalFit:
         """EngineInfo object containing branch configuration for the sampler engine."""
         return self.curr.engine_info
 
+    def prepare_main(self):
+        """Build everything the sampling rank needs: backend, state, ACS, engine, recipe.
+
+        Extracted from ``run_global_fit`` (identical behavior): opens the HDF
+        backend, loads/initializes the state, builds the shared analysis
+        containers and likelihood, constructs the :class:`GlobalFitEngine`,
+        invokes the ``setup_function`` (which materializes the recipe), and
+        wires the recipe/backend bookkeeping. Afterwards ``self.sampler`` /
+        ``self.state`` / ``self.priors`` / ``self.acs`` / ``self.run_backend``
+        / ``self.live_ctx`` are set; ``run_global_fit`` and :meth:`sample`
+        both start from here.
+        """
+        backend_path = self.curr.general_info.main_file_path
+
+        general_info = self.curr.general_info
+
+        branch_names = self.engine_info.branch_names
+        ndims = self.engine_info.ndims
+        nleaves_max = self.engine_info.nleaves_max
+        nleaves_min = self.engine_info.nleaves_min
+        nwalkers = general_info.nwalkers
+        ntemps = general_info.ntemps
+
+        priors = {}
+        periodic = {}
+        for name in branch_names:
+            # TODO: clean up, but also inform using current_info: Settings? = self.curr.source_info[name]
+            if name not in self.curr.source_info:
+                continue
+
+            if isinstance(self.curr.source_info[name], dict):
+                for key, value in self.curr.source_info[name]["priors"].items():
+                    priors[key] = value
+
+                if (
+                    "periodic" in self.curr.source_info[name]
+                    and self.curr.source_info[name]["periodic"] is not None
+                ):
+                    for key, value in self.curr.source_info[name]["periodic"].items():
+                        periodic[key] = _periodic_names_to_indices(
+                            value, self.curr.source_info[name].get("transform")
+                        )
+
+            # TODO: clean up
+            if isinstance(self.curr.source_info[name], Setup):
+                for key, value in self.curr.source_info[name].priors.items():
+                    priors[key] = value
+
+                if (
+                    hasattr(self.curr.source_info[name], "periodic")
+                    and self.curr.source_info[name].periodic is not None
+                ):
+                    for key, value in self.curr.source_info[name].periodic.items():
+                        periodic[key] = _periodic_names_to_indices(
+                            value, getattr(self.curr.source_info[name], "transform", None)
+                        )
+
+        state = self.load_info(priors)
+        self.logger.debug("state loaded")
+
+        supps_base_shape = (ntemps, nwalkers)
+        walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
+        supps = BranchSupplemental(
+            {"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True
+        )
+        state.supplemental = supps
+        # breakpoint()
+
+        # backend.reset(
+        #     nwalkers,
+        #     ndims,
+        #     nleaves_max=nleaves_max,
+        #     ntemps=ntemps,
+        #     branch_names=branch_names,
+        #     nbranches=len(branch_names),
+        #     rj=True,
+        #     moves=None,
+        #     num_mbhs=nleaves_max["mbh"],
+        #     num_bands=state.sub_states["gb"].band_info["num_bands"],
+        #     band_edges=state.sub_states["gb"].band_info["band_edges"],
+        # )
+
+        # backend.grow(1, None)
+
+        # gb_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_gb.h5")
+        # psd_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_psd.h5")
+        # mbh_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_mbh.h5")
+
+        # last_gb = gb_backend.get_last_sample()
+        # last_psd = psd_backend.get_last_sample()
+        # last_mbh = mbh_backend.get_last_sample()
+
+        # state.branches["gb"] = deepcopy(last_gb.branches["gb"])
+        # state.branches["psd"].coords[:] = last_psd.branches["psd"].coords[0, :nwalkers]
+        # # order of call function changed for galfor
+        # galfor_coords_orig = last_psd.branches["galfor"].coords[0, :nwalkers]
+        # galfor_coords = np.zeros_like(galfor_coords_orig)
+        # galfor_coords[:, :, 0] = galfor_coords_orig[:, :, 0]
+        # galfor_coords[:, :, 1] = galfor_coords_orig[:, :, 3]
+        # galfor_coords[:, :, 2] = galfor_coords_orig[:, :, 1]
+        # galfor_coords[:, :, 3] = galfor_coords_orig[:, :, 2]
+        # galfor_coords[:, :, 4] = galfor_coords_orig[:, :, 4]
+        # state.branches["galfor"].coords[:] = galfor_coords
+        # state.branches["mbh"].coords[:] = last_mbh.branches["mbh"].coords[0, :nwalkers]
+
+        # # FOR TESTING
+        # state.branches["gb"].coords[:] = state.branches["gb"].coords[0, 0][None, None, :, :]
+        # state.branches["gb"].inds[:] = state.branches["gb"].inds[0, 0][None, None, :]
+        # state.branches["mbh"].coords[:] = state.branches["mbh"].coords[0, 0][None, None, :, :]
+        # state.branches["psd"].coords[:] = state.branches["psd"].coords[0, 0][None, None, :, :]
+        # state.branches["galfor"].coords[:] = state.branches["galfor"].coords[0, 0][None, None, :, :]
+
+        # accepted = np.zeros((ntemps, nwalkers), dtype=int)
+        # swaps_accepted = np.zeros((ntemps - 1,), dtype=int)
+        # state.log_like = np.zeros((ntemps, nwalkers))
+        # state.log_prior = np.zeros((ntemps, nwalkers))
+        # state.betas = np.ones((ntemps,))
+
+        # backend.save_step(state, accepted, rj_accepted=accepted, swaps_accepted=swaps_accepted)
+
+        # A_inj = general_info.A_inj.copy()
+        # E_inj = general_info.E_inj.copy()
+
+        # generate = GenerateCurrentState(A_inj, E_inj)
+        # self.logger.debug("generate function created")
+
+        # rebuild_residuals=True: branches that registered a params-based
+        # ``signal_gen`` on their Setup get their current templates
+        # subtracted here, under the hood (the converted ``get_templates``
+        # process). Branches without one are skipped with a warning and
+        # may keep subtracting in their recipe (legacy path) -- no
+        # double-subtraction either way.
+        acs = self.setup_acs(state, rebuild_residuals=True)
+        self.logger.debug("acs setup done")
+
+        state.log_like[:] = acs.likelihood(complex=False)
+        logger.info(f"initial log likelihood: {state.log_like[0]}")
+
+        like_mix = BasicResidualacsLikelihood(acs)
+
+        backend = GFHDFBackend(
+            backend_path,  # self.curr.general_info["file_information"]["fp_main"],
+            # gzip-4 default: level 9 was CPU-heavy on the saver for
+            # marginal size gains on chain data (settings-overridable).
+            compression=getattr(
+                self.curr.general_info, "hdf_compression", "gzip"
+            ),
+            compression_opts=getattr(
+                self.curr.general_info, "hdf_compression_opts", 4
+            ),
+            comm=self.comm,
+            save_plot_rank=self.results_rank,
+            sub_backend=self.engine_info.branch_backends,
+            sub_state_bases=self.engine_info.branch_states,
+        )
+
+        extra_reset_kwargs = {}
+        # TODO: fix this somehow
+        for name in branch_names:
+            if name in state.sub_states and state.sub_states[name] is not None:
+                extra_reset_kwargs = {
+                    **extra_reset_kwargs,
+                    **state.sub_states[name].reset_kwargs,
+                }
+
+        if not backend.initialized:
+            # ``key_order`` mirrors what eryn's EnsembleSampler would
+            # pass to ``backend.reset`` itself when the backend is fresh;
+            # we have to feed it in here because our pre-reset disables
+            # that branch (``self.backend.initialized`` becomes True
+            # before the sampler is constructed). Without it, the
+            # sampler's later ``self.key_order != self.backend.key_order``
+            # check fires.
+            key_order = {
+                key: value.key_order for key, value in priors.items()
+            }
+            backend.reset(
+                nwalkers,
+                ndims,
+                nleaves_max=nleaves_max,
+                ntemps=ntemps,
+                branch_names=branch_names,
+                nbranches=len(branch_names),
+                rj=False,
+                moves=None,
+                key_order=key_order,
+                **extra_reset_kwargs,
+            )
+
+            # Persist the domain settings (FD / STFT / WDM) and the
+            # optional WDM lookup table so a re-run can reconstruct
+            # everything from a single HDF5 file. ``general_info``
+            # already holds the resolved instances at this point.
+            domain_settings = general_info.domain_settings
+            if domain_settings is not None:
+                backend.write_domain_settings(domain_settings)
+            if getattr(general_info, "wdm_lookup_table", None) is not None:
+                backend.write_wdm_lookup_table(general_info.wdm_lookup_table)
+
+        # setup_info_all = None
+        # for name in branch_names:
+        #     if name not in self.curr.source_info:
+        #         setup_info = SetupInfoTransfer(name=name)
+
+        #     elif "setup_func" in self.curr.source_info[name]:
+        #         setup_info = self.curr.source_info[name]["setup_func"](self.gf_branch_information, self.curr, acs, priors, state)
+        #     else:
+        #         setup_info = SetupInfoTransfer(name=name)
+
+        #     if setup_info_all is None:
+        #         setup_info_all = setup_info
+        #     else:
+        #         setup_info_all += setup_info
+
+        # The configured fit's recipe rides in source_metadata (stock
+        # path: fit.recipe IS the object that runs); the setup_function
+        # materializes it via recipe.setup(ctx). Legacy settings-file
+        # runs get a fresh empty Recipe to fill directly.
+        recipe = self.curr.source_metadata.get("recipe")
+        if recipe is None:
+            recipe = Recipe()
+        recipe._init_runtime()
+        self.recipe = recipe
+        setup_info_all = self.curr.settings_dict.setup_function(
+            self.recipe, self.engine_info, self.curr, acs, priors, state
+        )
+
+        print("need to setup moves that use parallel resources")
+
+        # backend.grow(1, None)
+        # accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
+        # swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
+        # backend.save_step(state, accepted, swaps_accepted=swaps_accepted)
+        # exit()
+
+        # Stop the spare processes. (The old move->rank dispatch that
+        # handed spares to moves was removed with the CPU distribution-
+        # fitting workers it served — GPU GMM fitting / neural flows
+        # replaced them; parallel-resources plan P3. A future coarse
+        # multi-node worker pool would re-enter here.)
+        for rank in self.all_ranks:
+            if rank in self.used_ranks:
+                continue
+            self.comm.send("stop", dest=rank)
+
+        from eryn.moves import StretchMove
+
+        _tmp_move = StretchMove(live_dangerously=True)
+        # permute False is there for the PSD sampling for now
+
+        # Diagnostic plotting ownership (parallel-resources plan P2): at
+        # np >= 3 the dedicated results rank renders the plots from the
+        # backend it writes, so the sampler never blocks on matplotlib;
+        # below that the main rank plots as before.
+        _plot_iterations = self._plot_iterations
+        plot_container = (
+            self.make_plot_container()
+            if self.results_rank == self.main_rank
+            else None
+        )
+        if plot_container is None:
+            # eryn auto-creates its own PlotContainer when
+            # plot_generator is None and plot_iterations > 0.
+            _plot_iterations = -1
+
+        # Wrap ``periodic`` as a ``PeriodicContainer`` with ``key_order``
+        # so eryn doesn't reject the string-keyed dict. The key_order
+        # for each branch comes from its prior's ``key_order``.
+        from eryn.utils import PeriodicContainer
+
+        periodic_key_order = {
+            key: value.key_order for key, value in priors.items()
+        }
+        if periodic and not isinstance(periodic, PeriodicContainer):
+            periodic = PeriodicContainer(periodic, key_order=periodic_key_order)
+
+        sampler_mix = GlobalFitEngine(
+            acs,
+            self.nwalkers,
+            ndims,  # assumes ndim_max
+            like_mix,
+            priors,
+            tempering_kwargs={"ntemps": self.ntemps},
+            nbranches=len(branch_names),
+            nleaves_max=nleaves_max,
+            nleaves_min=nleaves_min,
+            moves=_tmp_move,  # setup_info_all.in_model_moves_input,
+            rj_moves=None,  # setup_info_all.rj_moves_input,
+            kwargs=None,
+            backend=backend,
+            vectorize=True,
+            periodic=periodic,
+            branch_names=branch_names,
+            # update_fn=update_fn,
+            plot_generator=plot_container,
+            plot_iterations=_plot_iterations,
+            # update_iterations=1,
+            # update_fn=recipe,  # stop_converge_mix,
+            # update_iterations=1,  # TODO: change this?
+            provide_groups=True,
+            provide_supplemental=True,
+            track_moves=False,
+            stopping_fn=self.recipe,
+            stopping_iterations=1,
+        )
+        _tmp_move.temperature_control.swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
+
+        self.recipe.backend = backend
+        backend.add_recipe(self.recipe)
+
+        # ``sum_instead_of_trapz`` was a legacy ``inner_product`` knob
+        # that no longer exists; the modern inner_product already does
+        # the sum-style integration by default.
+        state.log_like[:] = acs.likelihood(complex=False)[None, :]
+        state.log_prior = np.zeros_like(
+            state.log_like
+        )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
+        self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
+
+        if self.curr.general_info.submission_parent_folder is not None:
+            gf_plotter = GlobalFitPlotter(curr=self.curr)
+            gf_plotter.save_input_data()
+
+        # Everything sample()/run_global_fit need to proceed, plus the live
+        # context that lets add_move materialize into a running fit.
+        self.sampler = sampler_mix
+        self.state = state
+        self.priors = priors
+        self.acs = acs
+        self.run_backend = backend
+        self.live_ctx = MoveBuildContext(
+            recipe=self.recipe,
+            engine_info=self.engine_info,
+            curr=self.curr,
+            acs=acs,
+            priors=priors,
+            state=state,
+            stock_moves=getattr(self.recipe, "stock_moves", {}),
+            ntemps=self.ntemps,
+            nwalkers=self.nwalkers,
+        )
+
     def run_global_fit(self):
         """Execute the main global fit MCMC sampling run.
 
         Coordinates the entire sampling workflow including:
-        - Setting up the backend for storing results
+        - Setting up the backend for storing results (see :meth:`prepare_main`)
         - Loading or initializing the state
         - Setting up analysis containers and likelihood
         - Configuring the sampler with moves and priors
@@ -818,314 +1163,14 @@ class GlobalFit:
             sub_state_bases=self.engine_info.branch_states,
         )
         if self.rank == self.curr.settings_dict.rank_info.main_rank:
+            self.prepare_main()
 
-            general_info = self.curr.general_info
-
-            branch_names = self.engine_info.branch_names
-            ndims = self.engine_info.ndims
-            nleaves_max = self.engine_info.nleaves_max
-            nleaves_min = self.engine_info.nleaves_min
-            nwalkers = general_info.nwalkers
-            ntemps = general_info.ntemps
-
-            priors = {}
-            periodic = {}
-            for name in branch_names:
-                # TODO: clean up, but also inform using current_info: Settings? = self.curr.source_info[name]
-                if name not in self.curr.source_info:
-                    continue
-
-                if isinstance(self.curr.source_info[name], dict):
-                    for key, value in self.curr.source_info[name]["priors"].items():
-                        priors[key] = value
-
-                    if (
-                        "periodic" in self.curr.source_info[name]
-                        and self.curr.source_info[name]["periodic"] is not None
-                    ):
-                        for key, value in self.curr.source_info[name]["periodic"].items():
-                            periodic[key] = _periodic_names_to_indices(
-                                value, self.curr.source_info[name].get("transform")
-                            )
-
-                # TODO: clean up
-                if isinstance(self.curr.source_info[name], Setup):
-                    for key, value in self.curr.source_info[name].priors.items():
-                        priors[key] = value
-
-                    if (
-                        hasattr(self.curr.source_info[name], "periodic")
-                        and self.curr.source_info[name].periodic is not None
-                    ):
-                        for key, value in self.curr.source_info[name].periodic.items():
-                            periodic[key] = _periodic_names_to_indices(
-                                value, getattr(self.curr.source_info[name], "transform", None)
-                            )
-
-            state = self.load_info(priors)
-            self.logger.debug("state loaded")
-
-            supps_base_shape = (ntemps, nwalkers)
-            walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
-            supps = BranchSupplemental(
-                {"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True
-            )
-            state.supplemental = supps
-            # breakpoint()
-
-            # backend.reset(
-            #     nwalkers,
-            #     ndims,
-            #     nleaves_max=nleaves_max,
-            #     ntemps=ntemps,
-            #     branch_names=branch_names,
-            #     nbranches=len(branch_names),
-            #     rj=True,
-            #     moves=None,
-            #     num_mbhs=nleaves_max["mbh"],
-            #     num_bands=state.sub_states["gb"].band_info["num_bands"],
-            #     band_edges=state.sub_states["gb"].band_info["band_edges"],
-            # )
-
-            # backend.grow(1, None)
-
-            # gb_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_gb.h5")
-            # psd_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_psd.h5")
-            # mbh_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_mbh.h5")
-
-            # last_gb = gb_backend.get_last_sample()
-            # last_psd = psd_backend.get_last_sample()
-            # last_mbh = mbh_backend.get_last_sample()
-
-            # state.branches["gb"] = deepcopy(last_gb.branches["gb"])
-            # state.branches["psd"].coords[:] = last_psd.branches["psd"].coords[0, :nwalkers]
-            # # order of call function changed for galfor
-            # galfor_coords_orig = last_psd.branches["galfor"].coords[0, :nwalkers]
-            # galfor_coords = np.zeros_like(galfor_coords_orig)
-            # galfor_coords[:, :, 0] = galfor_coords_orig[:, :, 0]
-            # galfor_coords[:, :, 1] = galfor_coords_orig[:, :, 3]
-            # galfor_coords[:, :, 2] = galfor_coords_orig[:, :, 1]
-            # galfor_coords[:, :, 3] = galfor_coords_orig[:, :, 2]
-            # galfor_coords[:, :, 4] = galfor_coords_orig[:, :, 4]
-            # state.branches["galfor"].coords[:] = galfor_coords
-            # state.branches["mbh"].coords[:] = last_mbh.branches["mbh"].coords[0, :nwalkers]
-
-            # # FOR TESTING
-            # state.branches["gb"].coords[:] = state.branches["gb"].coords[0, 0][None, None, :, :]
-            # state.branches["gb"].inds[:] = state.branches["gb"].inds[0, 0][None, None, :]
-            # state.branches["mbh"].coords[:] = state.branches["mbh"].coords[0, 0][None, None, :, :]
-            # state.branches["psd"].coords[:] = state.branches["psd"].coords[0, 0][None, None, :, :]
-            # state.branches["galfor"].coords[:] = state.branches["galfor"].coords[0, 0][None, None, :, :]
-
-            # accepted = np.zeros((ntemps, nwalkers), dtype=int)
-            # swaps_accepted = np.zeros((ntemps - 1,), dtype=int)
-            # state.log_like = np.zeros((ntemps, nwalkers))
-            # state.log_prior = np.zeros((ntemps, nwalkers))
-            # state.betas = np.ones((ntemps,))
-
-            # backend.save_step(state, accepted, rj_accepted=accepted, swaps_accepted=swaps_accepted)
-
-            # A_inj = general_info.A_inj.copy()
-            # E_inj = general_info.E_inj.copy()
-
-            # generate = GenerateCurrentState(A_inj, E_inj)
-            # self.logger.debug("generate function created")
-
-            # rebuild_residuals=True: branches that registered a params-based
-            # ``signal_gen`` on their Setup get their current templates
-            # subtracted here, under the hood (the converted ``get_templates``
-            # process). Branches without one are skipped with a warning and
-            # may keep subtracting in their recipe (legacy path) -- no
-            # double-subtraction either way.
-            acs = self.setup_acs(state, rebuild_residuals=True)
-            self.logger.debug("acs setup done")
-
-            state.log_like[:] = acs.likelihood(complex=False)
-            logger.info(f"initial log likelihood: {state.log_like[0]}")
-
-            like_mix = BasicResidualacsLikelihood(acs)
-
-            backend = GFHDFBackend(
-                backend_path,  # self.curr.general_info["file_information"]["fp_main"],
-                # gzip-4 default: level 9 was CPU-heavy on the saver for
-                # marginal size gains on chain data (settings-overridable).
-                compression=getattr(
-                    self.curr.general_info, "hdf_compression", "gzip"
-                ),
-                compression_opts=getattr(
-                    self.curr.general_info, "hdf_compression_opts", 4
-                ),
-                comm=self.comm,
-                save_plot_rank=self.results_rank,
-                sub_backend=self.engine_info.branch_backends,
-                sub_state_bases=self.engine_info.branch_states,
-            )
-
-            extra_reset_kwargs = {}
-            # TODO: fix this somehow
-            for name in branch_names:
-                if name in state.sub_states and state.sub_states[name] is not None:
-                    extra_reset_kwargs = {
-                        **extra_reset_kwargs,
-                        **state.sub_states[name].reset_kwargs,
-                    }
-
-            if not backend.initialized:
-                # ``key_order`` mirrors what eryn's EnsembleSampler would
-                # pass to ``backend.reset`` itself when the backend is fresh;
-                # we have to feed it in here because our pre-reset disables
-                # that branch (``self.backend.initialized`` becomes True
-                # before the sampler is constructed). Without it, the
-                # sampler's later ``self.key_order != self.backend.key_order``
-                # check fires.
-                key_order = {
-                    key: value.key_order for key, value in priors.items()
-                }
-                backend.reset(
-                    nwalkers,
-                    ndims,
-                    nleaves_max=nleaves_max,
-                    ntemps=ntemps,
-                    branch_names=branch_names,
-                    nbranches=len(branch_names),
-                    rj=False,
-                    moves=None,
-                    key_order=key_order,
-                    **extra_reset_kwargs,
-                )
-
-                # Persist the domain settings (FD / STFT / WDM) and the
-                # optional WDM lookup table so a re-run can reconstruct
-                # everything from a single HDF5 file. ``general_info``
-                # already holds the resolved instances at this point.
-                domain_settings = general_info.domain_settings
-                if domain_settings is not None:
-                    backend.write_domain_settings(domain_settings)
-                if getattr(general_info, "wdm_lookup_table", None) is not None:
-                    backend.write_wdm_lookup_table(general_info.wdm_lookup_table)
-
-            # setup_info_all = None
-            # for name in branch_names:
-            #     if name not in self.curr.source_info:
-            #         setup_info = SetupInfoTransfer(name=name)
-
-            #     elif "setup_func" in self.curr.source_info[name]:
-            #         setup_info = self.curr.source_info[name]["setup_func"](self.gf_branch_information, self.curr, acs, priors, state)
-            #     else:
-            #         setup_info = SetupInfoTransfer(name=name)
-
-            #     if setup_info_all is None:
-            #         setup_info_all = setup_info
-            #     else:
-            #         setup_info_all += setup_info
-
-            self.recipe = Recipe()
-            setup_info_all = self.curr.settings_dict.setup_function(
-                self.recipe, self.engine_info, self.curr, acs, priors, state
-            )
-
-            print("need to setup moves that use parallel resources")
-
-            # backend.grow(1, None)
-            # accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
-            # swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
-            # backend.save_step(state, accepted, swaps_accepted=swaps_accepted)
-            # exit()
-
-            # Stop the spare processes. (The old move->rank dispatch that
-            # handed spares to moves was removed with the CPU distribution-
-            # fitting workers it served — GPU GMM fitting / neural flows
-            # replaced them; parallel-resources plan P3. A future coarse
-            # multi-node worker pool would re-enter here.)
-            for rank in self.all_ranks:
-                if rank in self.used_ranks:
-                    continue
-                self.comm.send("stop", dest=rank)
-
-            from eryn.moves import StretchMove
-
-            _tmp_move = StretchMove(live_dangerously=True)
-            # permute False is there for the PSD sampling for now
-
-            # Diagnostic plotting ownership (parallel-resources plan P2): at
-            # np >= 3 the dedicated results rank renders the plots from the
-            # backend it writes, so the sampler never blocks on matplotlib;
-            # below that the main rank plots as before.
-            _plot_iterations = self._plot_iterations
-            plot_container = (
-                self.make_plot_container()
-                if self.results_rank == self.main_rank
-                else None
-            )
-            if plot_container is None:
-                # eryn auto-creates its own PlotContainer when
-                # plot_generator is None and plot_iterations > 0.
-                _plot_iterations = -1
-
-            # Wrap ``periodic`` as a ``PeriodicContainer`` with ``key_order``
-            # so eryn doesn't reject the string-keyed dict. The key_order
-            # for each branch comes from its prior's ``key_order``.
-            from eryn.utils import PeriodicContainer
-
-            periodic_key_order = {
-                key: value.key_order for key, value in priors.items()
-            }
-            if periodic and not isinstance(periodic, PeriodicContainer):
-                periodic = PeriodicContainer(periodic, key_order=periodic_key_order)
-
-            sampler_mix = GlobalFitEngine(
-                acs,
-                self.nwalkers,
-                ndims,  # assumes ndim_max
-                like_mix,
-                priors,
-                tempering_kwargs={"ntemps": self.ntemps},
-                nbranches=len(branch_names),
-                nleaves_max=nleaves_max,
-                nleaves_min=nleaves_min,
-                moves=_tmp_move,  # setup_info_all.in_model_moves_input,
-                rj_moves=None,  # setup_info_all.rj_moves_input,
-                kwargs=None,
-                backend=backend,
-                vectorize=True,
-                periodic=periodic,
-                branch_names=branch_names,
-                # update_fn=update_fn,
-                plot_generator=plot_container,
-                plot_iterations=_plot_iterations,
-                # update_iterations=1,
-                # update_fn=recipe,  # stop_converge_mix,
-                # update_iterations=1,  # TODO: change this?
-                provide_groups=True,
-                provide_supplemental=True,
-                track_moves=False,
-                stopping_fn=self.recipe,
-                stopping_iterations=1,
-            )
-            _tmp_move.temperature_control.swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
-
-            self.recipe.backend = backend
-            backend.add_recipe(self.recipe)
-
-            # ``sum_instead_of_trapz`` was a legacy ``inner_product`` knob
-            # that no longer exists; the modern inner_product already does
-            # the sum-style integration by default.
-            state.log_like[:] = acs.likelihood(complex=False)[None, :]
-            state.log_prior = np.zeros_like(
-                state.log_like
-            )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
-            self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
-
-            if self.curr.general_info.submission_parent_folder is not None:
-                gf_plotter = GlobalFitPlotter(curr=self.curr)
-                gf_plotter.save_input_data()
-
-            sampler_mix.run_mcmc(state, self.curr.general_info.num_iterations, thin_by=1, progress=True, store=True)
+            self.sampler.run_mcmc(self.state, self.curr.general_info.num_iterations, thin_by=1, progress=True, store=True)
 
             if self.curr.general_info.submission_parent_folder is not None:
                 self.logger.debug(f"saving submission to {self.curr.general_info.submission_parent_folder}")
-                submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
-                submission_writer.write_submission(acs)
+                submission_writer = SubmissionWriter(backend=self.run_backend, curr=self.curr, ess=20_000)
+                submission_writer.write_submission(self.acs)
 
             logger.info("Residuals saved.")
 
@@ -1154,3 +1199,80 @@ class GlobalFit:
             # removed with the move->rank machinery; plan P3.)
             info = self.comm.recv(source=self.main_rank)
             print(f"Process {self.rank} finished ({info!r}).")
+
+    def sample(
+        self,
+        iterations: typing.Optional[int] = None,
+        *,
+        thin_by: int = 1,
+        progress: bool = False,
+        store: bool = True,
+        sync_log_like: bool = True,
+    ):
+        """Generator run mode: yield ``(model, state)`` once per iteration.
+
+        The emcee-style loop, one level up from the engine's own ``sample``
+        (which it wraps)::
+
+            gf = GlobalFit(curr)              # comm=None -> single process
+            for model, state in gf.sample(iterations=100):
+                ...   # inspect/mutate model.analysis_container_arr and state
+                      # in place; the next iteration continues from them
+
+        In-place mutation propagates because the yielded ``state`` is exactly
+        the object fed to the next iteration. The recipe's stage-advance logic
+        runs here each iteration (under ``run_mcmc`` the stopping function
+        owns it), so multi-stage recipes behave identically; the loop ends
+        when the recipe finishes or ``iterations`` is exhausted.
+
+        Single-process only (``run_global_fit`` owns MPI): inside the loop you
+        may do whatever you need — including your own MPI — as long as control
+        returns synchronously.
+
+        .. note::
+           The backend saves each step *before* the yield, so an in-loop
+           mutation is persisted with the *next* saved step; mutations after
+           the final yield are not saved.
+
+        Args:
+            iterations: Iterations to run; ``None`` -> the configured
+                ``general.num_iterations``.
+            thin_by: Yield every ``thin_by``-th iteration (forwarded to the
+                engine).
+            progress: Show the engine's progress bar.
+            store: Save steps to the HDF backend.
+            sync_log_like: After each yield, re-sync ``state.log_like`` from
+                the residual (``acs.likelihood()``) so in-loop residual
+                mutations flow into the tempering/persistence bookkeeping. If
+                you mutate ``coords`` in place, update ``state.log_prior``
+                yourself.
+        """
+        if self.comm.Get_size() > 1:
+            raise RuntimeError(
+                "sample() is single-process; run under MPI with run_global_fit() "
+                "(sample() itself may be used inside code that does its own MPI)."
+            )
+        self.prepare_main()
+        sampler, state = self.sampler, self.state
+        if iterations is None:
+            iterations = self.curr.general_info.num_iterations
+        i = 0
+        try:
+            for state in sampler.sample(
+                state, iterations=iterations, thin_by=thin_by, store=store, progress=progress
+            ):
+                # Recipe stage-advance: run_mcmc drives this via stopping_fn;
+                # the engine's sample() generator does not, so drive it here
+                # at the same per-iteration cadence.
+                if self.recipe(i, state, sampler):
+                    break
+                yield sampler.get_model(), state
+                if sync_log_like:
+                    state.log_like[:] = sampler.analysis_container_arr.likelihood(
+                        complex=False
+                    )[None, :]
+                i += 1
+        finally:
+            # Resumable: a later run_mcmc/sample continues from the last state.
+            sampler._previous_state = state
+            self.live_ctx = None

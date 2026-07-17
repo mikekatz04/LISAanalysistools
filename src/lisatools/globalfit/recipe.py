@@ -1,12 +1,19 @@
 """Recipe orchestration for sequencing global-fit sampling stages.
 
-This module is the single home for the *installable* recipe machinery: the
-:class:`Recipe` engine, the generic recipe-step base classes
+This module is the single home for the recipe machinery: the unified
+:class:`Recipe` (declarative stage list + runtime engine in one object), the
+declarative :class:`Stage`, the generic recipe-step base classes
 (:class:`SearchRecipeStep` / :class:`PERecipeStep` / :class:`RJRecipeStep`), the
 per-source move-builder hierarchy (:class:`SourceMoveBuilder` and subclasses),
-and the injection / catalogue helpers. Settings files under ``global_fit_input/``
-*compose* these into a concrete recipe inside their ``setup_recipe`` — they do not
-re-implement the machinery. (Folded in from the retired ``recipe_steps.py``.)
+and the injection / catalogue helpers.
+
+A ``Recipe`` lives two lives on the same object: before the run it is a cheap,
+picklable, editable list of :class:`Stage` blocks (each holding
+:class:`~lisatools.globalfit.moves.globalfitmove.Move` objects); at run start
+the variant's setup function calls :meth:`Recipe.setup` with a
+:class:`~lisatools.globalfit.moves.globalfitmove.MoveBuildContext`, which
+materializes every stage (running each move's ``setup(ctx)``) into the runtime
+recipe steps that drive the sampler.
 """
 
 from __future__ import annotations
@@ -37,6 +44,10 @@ from eryn.prior import ProbDistContainer
 from ..sources.utils import icrs_to_ecliptic, evolve_galactic_binary
 from ..utils.utility import asnumpy
 from .moves import (
+    FunctionMove,
+    GFCombineMove,
+    Move,
+    MoveBuildContext,
     PSDMove,
     ResidualAddOneRemoveOneMove,
     GBSpecialRJPriorMove,
@@ -44,6 +55,7 @@ from .moves import (
     GBSpecialRJRefitMove,
 )
 from .moves.gbspecialstretch import GBSpecialBase
+from .moves.globalfitmove import _RuntimeMove
 
 # Type-only imports. These live under TYPE_CHECKING because ``run`` imports this
 # module (``run.py`` -> ``from .recipe import Recipe``); importing ``.run`` /
@@ -63,19 +75,313 @@ logger = logging.getLogger(__name__)
 MOJITO_REFERENCE_TIME = 97729089.327664
 
 class Recipe:
-    """Ordered sequence of :class:`RecipeStep` instances driving the sampler.
+    """The global-fit recipe: declarative stage list + runtime step engine, one object.
 
-    A ``Recipe`` is iterated by the global-fit driver. At each call it asks the
-    current step's stopping function whether to advance, and on advance it
-    invokes the next step's ``setup_run`` to reconfigure the sampler.
+    **Declarative life** (before the run): an ordered, editable list of
+    :class:`Stage` blocks, each holding
+    :class:`~lisatools.globalfit.moves.globalfitmove.Move` objects. Cheap and
+    picklable — this is what rides on a configured
+    ``StockGlobalFit`` (``fit.recipe``). Edit it with
+    :meth:`add_stage` / :meth:`add_move` / :meth:`pop_move` / ... .
+
+    **Runtime life** (from run start): :meth:`setup` materializes every stage
+    into a runtime :class:`RecipeStep`; the driver then iterates the object —
+    at each call it asks the current step's stopping function whether to
+    advance, and on advance it invokes the next step's ``setup_run`` to
+    reconfigure the sampler.
+
+    Args:
+        stages: Optional initial list of :class:`Stage` blocks.
     """
 
-    def __init__(self):
+    def __init__(self, stages: typing.Optional[typing.List["Stage"]] = None):
+        self.stages: typing.List["Stage"] = list(stages) if stages is not None else []
+        self._check_unique()
+        self._init_runtime()
+
+    def _init_runtime(self):
         self.recipe = []
         self.backend_added = False
         self._current_iter = 0
         self._current_recipe_step = None
         self._has_setup_first_step = False
+        self.stock_moves: typing.Dict[str, typing.Any] = {}
+
+    # -- pickling: runtime products never travel with the config ---------------
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        for attr in (
+            "recipe",
+            "_backend",
+            "backend_added",
+            "_current_iter",
+            "_current_recipe_step",
+            "_has_setup_first_step",
+            "stock_moves",
+        ):
+            state.pop(attr, None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._init_runtime()
+
+    # -- declarative editing API ------------------------------------------------
+
+    @staticmethod
+    def _coerce_move(move, *, name=None, branch=None, sync_log_like=True) -> Move:
+        """Coerce anything move-like into a :class:`Move`.
+
+        ``Move`` -> as-is; ``str`` -> stock-name :class:`Move`; an object with
+        ``.propose`` -> a private runtime wrapper (pickle caveat); a plain
+        callable -> :class:`~lisatools.globalfit.moves.functionmove.FunctionMove`.
+        """
+        if isinstance(move, Move):
+            if branch is not None and move.branch is None:
+                move.branch = branch
+            return move
+        if isinstance(move, str):
+            return Move(move, branch=branch)
+        if hasattr(move, "propose"):
+            return _RuntimeMove(move, name=name, branch=branch)
+        if callable(move):
+            return FunctionMove(move, name=name, branch=branch, sync_log_like=sync_log_like)
+        raise TypeError(
+            "add_move expects a Move, a stock-move name, a constructed eryn move, "
+            f"or a plain fn(model, state); got {type(move).__name__}."
+        )
+
+    def _check_unique(self):
+        stage_names = [s.name for s in self.stages]
+        if len(set(stage_names)) != len(stage_names):
+            raise ValueError(f"Duplicate stage names: {stage_names}.")
+        move_names = [m.name for s in self.stages for m in s.moves]
+        if len(set(move_names)) != len(move_names):
+            raise ValueError(f"Duplicate move names across recipe: {move_names}.")
+
+    def _stage(self, name: str) -> "Stage":
+        for stage in self.stages:
+            if stage.name == name:
+                return stage
+        raise KeyError(
+            f"Unknown stage {name!r}. Available stages: {[s.name for s in self.stages]}."
+        )
+
+    def _find_move(
+        self, name: str, stage: typing.Optional[str] = None
+    ) -> typing.Tuple["Stage", int]:
+        hits = []
+        for st in self.stages if stage is None else [self._stage(stage)]:
+            for i, mv in enumerate(st.moves):
+                if mv.name == name:
+                    hits.append((st, i))
+        if not hits:
+            raise KeyError(
+                f"Unknown move {name!r}. Available moves: {self.move_names()}."
+            )
+        if len(hits) > 1:
+            raise KeyError(
+                f"Move name {name!r} appears in multiple stages "
+                f"({[st.name for st, _ in hits]}); pass stage=... to disambiguate."
+            )
+        return hits[0]
+
+    def add_stage(
+        self,
+        stage: "Stage",
+        before: typing.Optional[str] = None,
+        after: typing.Optional[str] = None,
+        index: typing.Optional[int] = None,
+    ) -> "Stage":
+        if not isinstance(stage, Stage):
+            raise TypeError(f"add_stage expects a Stage, got {type(stage).__name__}.")
+        if sum(x is not None for x in (before, after, index)) > 1:
+            raise ValueError("Pass at most one of before=, after=, index=.")
+        if any(s.name == stage.name for s in self.stages):
+            raise ValueError(f"Stage name {stage.name!r} already present.")
+        if before is not None:
+            index = self.stages.index(self._stage(before))
+        elif after is not None:
+            index = self.stages.index(self._stage(after)) + 1
+        elif index is None:
+            index = len(self.stages)
+        self.stages.insert(index, stage)
+        self._check_unique()
+        return stage
+
+    def pop_stage(self, name: str) -> "Stage":
+        stage = self._stage(name)
+        self.stages.remove(stage)
+        return stage
+
+    def move_names(self) -> typing.List[str]:
+        return [m.name for s in self.stages for m in s.moves]
+
+    def stock_names(self) -> typing.List[str]:
+        """Names of the stock-resolved moves (base :class:`Move`) in this recipe.
+
+        The variant setup functions use this to build exactly the stock moves
+        the recipe asks for.
+        """
+        return [m.name for s in self.stages for m in s.moves if m.is_stock]
+
+    def get_move(self, name: str, stage: typing.Optional[str] = None) -> Move:
+        st, i = self._find_move(name, stage)
+        return st.moves[i]
+
+    def pop_move(self, name: str, stage: typing.Optional[str] = None) -> Move:
+        st, i = self._find_move(name, stage)
+        return st.moves.pop(i)
+
+    def set_move_debug(
+        self,
+        name: str,
+        enabled: bool = True,
+        *,
+        stage: typing.Optional[str] = None,
+        **opts,
+    ) -> Move:
+        """Turn a single move's debug instrumentation on/off (materialize-time).
+
+        ``opts`` (plot_dir / plot_walker / plot_leaf / plot_band / every) are
+        forwarded to :meth:`GlobalFitMove.set_debug`. Overrides any
+        stage-level debug and the move's env default. Example::
+
+            fit.recipe.set_move_debug("emri_pe", plot_dir="./emri_dbg", every=5)
+            fit.recipe.set_move_debug("psd_pe", False)   # force off
+        """
+        mv = self.get_move(name, stage)
+        mv.debug = {"enabled": enabled, **opts} if opts else enabled
+        return mv
+
+    def set_stage_debug(
+        self, stage_name: str, enabled: bool = True, **opts
+    ) -> "Stage":
+        """Turn debug on/off for every move in a stage (unless a move overrides).
+
+        ``opts`` are forwarded to each move's :meth:`GlobalFitMove.set_debug`.
+        Example::
+
+            fit.recipe.set_stage_debug("full_pe", plot_walker=2)
+        """
+        st = self._stage(stage_name)
+        st.debug = {"enabled": enabled, **opts} if opts else enabled
+        return st
+
+    def add_move(
+        self,
+        move,
+        stage: typing.Optional[str] = None,
+        before: typing.Optional[str] = None,
+        after: typing.Optional[str] = None,
+        index: typing.Optional[int] = None,
+        name: typing.Optional[str] = None,
+        branch: typing.Optional[str] = None,
+        sync_log_like: bool = True,
+    ) -> Move:
+        """Add a move (a.k.a. proposal) to the recipe — the single entrance.
+
+        ``move`` is a :class:`Move`, a stock-move name (``str``), a constructed
+        eryn move (wrapped; note the pickle caveat), or a plain
+        ``fn(model, state) -> (new_state, accepted)`` function (wrapped in a
+        :class:`~lisatools.globalfit.moves.functionmove.FunctionMove`;
+        ``sync_log_like`` applies to this case). Placement: with no stages an
+        initial ``Stage("main", kind="pe")`` is created; with one stage the
+        move lands there; with several, ``stage=`` is required. At most one of
+        ``before=``/``after=`` (move names) or ``index=`` positions it inside
+        the stage (default: append).
+        """
+        move = self._coerce_move(move, name=name, branch=branch, sync_log_like=sync_log_like)
+        if move.name in self.move_names():
+            raise ValueError(
+                f"Move name {move.name!r} already present "
+                f"(existing: {self.move_names()}). pop_move it first or rename."
+            )
+        if sum(x is not None for x in (before, after, index)) > 1:
+            raise ValueError("Pass at most one of before=, after=, index=.")
+
+        if not self.stages:
+            self.add_stage(Stage("main", kind="pe"))
+
+        if stage is not None:
+            st = self._stage(stage)
+        elif before is not None or after is not None:
+            st, _ = self._find_move(before if before is not None else after)
+        elif len(self.stages) == 1:
+            st = self.stages[0]
+        else:
+            raise ValueError(
+                f"Multiple stages present ({[s.name for s in self.stages]}); "
+                "pass stage=... to say where the move goes."
+            )
+
+        if before is not None:
+            index = [m.name for m in st.moves].index(before)
+        elif after is not None:
+            index = [m.name for m in st.moves].index(after) + 1
+        elif index is None:
+            index = len(st.moves)
+        st.moves.insert(index, move)
+        return move
+
+    def list_moves(self) -> str:
+        """Human-readable, stage-grouped summary of the recipe."""
+        lines = []
+        for st in self.stages:
+            lines.append(f"[{st.kind}] {st.name}:")
+            if not st.moves:
+                lines.append("    (no moves)")
+            for mv in st.moves:
+                src = "stock" if mv.is_stock else type(mv).__name__
+                extra = f" branch={mv.branch}" if mv.branch else ""
+                lines.append(f"    {mv.name}  <- {src}{extra}")
+        return "\n".join(lines) if lines else "(empty recipe)"
+
+    def __repr__(self):
+        return f"Recipe({[s.name for s in self.stages]})"
+
+    # -- materialization ---------------------------------------------------------
+
+    def setup(self, ctx: MoveBuildContext) -> None:
+        """Materialize the declarative stages into runtime recipe steps.
+
+        Called once at run start (by the variant's setup function) with the
+        live :class:`~lisatools.globalfit.moves.globalfitmove.MoveBuildContext`.
+        Runs every move's ``setup(ctx)`` via :meth:`Stage.setup` and registers
+        the resulting steps on this same object.
+        """
+        if not self.stages:
+            raise ValueError(
+                "Recipe has no stages; add a Stage (or add_move, which "
+                "auto-creates a 'main' PE stage)."
+            )
+        self.stock_moves = dict(ctx.stock_moves)
+        # Every branch appended with plain branch info must actually be
+        # adjusted by at least one move.
+        info_branches = tuple(getattr(ctx.curr, "_info_branches", ()) or ())
+        targeted = {m.branch for st in self.stages for m in st.moves if m.branch is not None}
+        missing = [b for b in info_branches if b not in targeted]
+        if missing:
+            raise ValueError(
+                f"Branch(es) {missing} were added with branch info but no move "
+                "targets them (branch=<name>). Add at least one move "
+                "(add_move / add_branch(moves=[...])) so the branch is actually "
+                "adjusted in the fit."
+            )
+        for st in self.stages:
+            self.add_recipe_component(st.setup(ctx), name=st.name)
+
+    # -- runtime engine ------------------------------------------------------------
+
+    def get_step(self, name: str):
+        """Return the materialized runtime step registered under ``name``."""
+        for entry in self.recipe:
+            if entry["name"] == name:
+                return entry["adjust"]
+        raise KeyError(
+            f"Unknown recipe step {name!r}. Available: {[e['name'] for e in self.recipe]}."
+        )
 
     @property
     def backend(self):
@@ -371,9 +677,98 @@ class RJRecipeStep(BaseRecipeStep):
                 print(f"Setting temperature control of move {move} to {sampler.temperature_control}")
                 move.temperature_control = sampler.temperature_control
             
-            # TODO: do we also need to set these? I think the current settings setup has ntemps covered, not sure about temp_cntrl            
-            # move.ntemps = sampler.ntemps 
-            
+            # TODO: do we also need to set these? I think the current settings setup has ntemps covered, not sure about temp_cntrl
+            # move.ntemps = sampler.ntemps
+
+
+_STEP_CLASSES = {"search": SearchRecipeStep, "pe": PERecipeStep, "rj": RJRecipeStep}
+
+
+class Stage:
+    """One declarative phase of the recipe (materializes into a :class:`RecipeStep`).
+
+    A stage groups the moves that run together during one phase of the fit
+    (they are wrapped in a single :class:`GFCombineMove` and proposed as a
+    unit), and its ``kind`` picks the runtime step class — i.e. when the
+    recipe advances past it:
+
+    * ``"search"`` -> :class:`SearchRecipeStep` (the move runs its search to
+      completion internally; the stage is done on its first check);
+    * ``"pe"`` -> :class:`PERecipeStep` (runs indefinitely);
+    * ``"rj"`` -> :class:`RJRecipeStep` (stops when the monitored branch's
+      cold-chain leaf count plateaus; knobs via ``step_kwargs``).
+
+    Args:
+        name: Unique stage name (e.g. ``"gb_pe"``, ``"main"``).
+        kind: ``"search"`` | ``"pe"`` | ``"rj"``.
+        moves: Ordered moves for this stage — each entry is anything
+            :meth:`Recipe.add_move` accepts (a
+            :class:`~lisatools.globalfit.moves.globalfitmove.Move`, a stock
+            name, a constructed eryn move, or a plain function).
+        step_kwargs: Extra keyword arguments for the RecipeStep constructor
+            (e.g. RJ plateau knobs).
+        combine_kwargs: Extra keyword arguments for the ``GFCombineMove``
+            wrapping this stage's moves.
+        debug: Stage-level debug override applied to every move that does not
+            carry its own ``Move.debug`` (same value semantics).
+    """
+
+    _KINDS = ("search", "pe", "rj")
+
+    def __init__(
+        self,
+        name: str,
+        kind: str = "pe",
+        moves: typing.Optional[typing.List] = None,
+        step_kwargs: typing.Optional[dict] = None,
+        combine_kwargs: typing.Optional[dict] = None,
+        debug: typing.Optional[typing.Union[bool, dict]] = None,
+    ):
+        if kind not in self._KINDS:
+            raise ValueError(f"Stage kind must be one of {self._KINDS}, got {kind!r}.")
+        self.name = name
+        self.kind = kind
+        self.moves = [Recipe._coerce_move(m) for m in (moves or [])]
+        self.step_kwargs = dict(step_kwargs or {})
+        self.combine_kwargs = dict(combine_kwargs or {})
+        self.debug = debug
+
+    def move_names(self) -> typing.List[str]:
+        return [m.name for m in self.moves]
+
+    def setup(self, ctx: MoveBuildContext) -> RecipeStep:
+        """Materialize this stage: run every move's ``setup(ctx)``, wrap, return the step."""
+        enabled = set(ctx.curr.engine_info.branch_names)
+        runtime_moves = []
+        for mv in self.moves:
+            if mv.branch is not None and mv.branch not in enabled:
+                raise ValueError(
+                    f"Move {mv.name!r} targets branch {mv.branch!r} which is not an "
+                    f"enabled branch ({sorted(enabled)}). remove the move or add the branch."
+                )
+            runtime = mv.materialize(ctx)
+            # Move-level debug wins over stage-level; None leaves the move's
+            # env-resolved default untouched.
+            _dbg = mv.debug if mv.debug is not None else self.debug
+            if _dbg is not None and hasattr(runtime, "set_debug"):
+                if isinstance(_dbg, dict):
+                    _opts = dict(_dbg)
+                    runtime.set_debug(_opts.pop("enabled", True), **_opts)
+                else:
+                    runtime.set_debug(bool(_dbg))
+            runtime_moves.append(runtime)
+
+        if not runtime_moves:
+            raise ValueError(f"Stage {self.name!r} has no moves; pop_stage it or add moves.")
+
+        combined = GFCombineMove(moves=runtime_moves, **self.combine_kwargs)
+        if not hasattr(combined, "accepted") or combined.accepted is None:
+            combined.accepted = np.zeros((ctx.ntemps, ctx.nwalkers))
+        return _STEP_CLASSES[self.kind](moves=[combined], **self.step_kwargs)
+
+    def __repr__(self):
+        return f"Stage({self.name!r}, kind={self.kind!r}, moves={self.move_names()})"
+
 
 def scatter_around_injection(
     state: GFState,

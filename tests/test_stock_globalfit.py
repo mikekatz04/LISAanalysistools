@@ -16,7 +16,7 @@ import unittest
 
 import numpy as np
 
-from lisatools.globalfit.stock import MoveSpec, RecipeSpec, StageSpec
+from lisatools.globalfit import FunctionMove, Move, MoveBuildContext, Recipe, Stage
 from lisatools.globalfit.stock import erebor
 
 
@@ -236,17 +236,22 @@ class PickleTest(unittest.TestCase):
     def test_roundtrip_after_mutation(self):
         fit = erebor.get_stock("gb_no_fg", nwalkers=13)
         fit.gb.a_lims = [1e-25, 1e-20]
-        fit.recipe.add_move(MoveSpec("rj_fstat_mcmc", branch="gb"), stage="gb_pe")
+        fit.add_move("rj_fstat_mcmc", branch="gb", stage="gb_pe")
         clone = self._roundtrip(fit)
         self.assertEqual(clone.gb.a_lims, [1e-25, 1e-20])
 
 
-class RecipeSpecTest(unittest.TestCase):
+def _fn_move(model, state):
+    """Named module-level move so fits carrying it stay picklable."""
+    return state, None
+
+
+class RecipeTest(unittest.TestCase):
     def _recipe(self):
-        return RecipeSpec(
+        return Recipe(
             [
-                StageSpec("s1", kind="search", moves=[MoveSpec("a"), MoveSpec("b")]),
-                StageSpec("s2", kind="pe", moves=[MoveSpec("c")]),
+                Stage("s1", kind="search", moves=[Move("a"), Move("b")]),
+                Stage("s2", kind="pe", moves=[Move("c")]),
             ]
         )
 
@@ -259,31 +264,31 @@ class RecipeSpecTest(unittest.TestCase):
 
     def test_add_placements(self):
         r = self._recipe()
-        r.add_move(MoveSpec("d"), before="b")
+        r.add_move(Move("d"), before="b")
         self.assertEqual([m.name for m in r._stage("s1").moves], ["a", "d", "b"])
-        r.add_move(MoveSpec("e"), stage="s2", index=0)
+        r.add_move(Move("e"), stage="s2", index=0)
         self.assertEqual([m.name for m in r._stage("s2").moves], ["e", "c"])
-        r.add_move(MoveSpec("f"), after="c")
+        r.add_move(Move("f"), after="c")
         self.assertEqual([m.name for m in r._stage("s2").moves], ["e", "c", "f"])
 
     def test_duplicate_name_rejected(self):
         r = self._recipe()
         with self.assertRaises(ValueError):
-            r.add_move(MoveSpec("a"), stage="s2")
+            r.add_move(Move("a"), stage="s2")
 
     def test_ambiguous_stage_required(self):
         r = self._recipe()
         with self.assertRaises(ValueError):
-            r.add_move(MoveSpec("g"))  # two stages, no placement
+            r.add_move(Move("g"))  # two stages, no placement
 
     def test_conflicting_placements_rejected(self):
         r = self._recipe()
         with self.assertRaises(ValueError):
-            r.add_move(MoveSpec("g"), before="a", index=0)
+            r.add_move(Move("g"), before="a", index=0)
 
     def test_stage_composition(self):
         r = self._recipe()
-        r.add_stage(StageSpec("s0", kind="pe", moves=[MoveSpec("z")]), before="s1")
+        r.add_stage(Stage("s0", kind="pe", moves=[Move("z")]), before="s1")
         self.assertEqual([s.name for s in r.stages], ["s0", "s1", "s2"])
         popped = r.pop_stage("s1")
         self.assertEqual(popped.name, "s1")
@@ -291,12 +296,192 @@ class RecipeSpecTest(unittest.TestCase):
 
     def test_bad_kind_rejected(self):
         with self.assertRaises(ValueError):
-            StageSpec("bad", kind="wiggle")
+            Stage("bad", kind="wiggle")
 
-    def test_instance_move_needs_name(self):
+    def test_runtime_move_needs_name(self):
+        class _Proposer:
+            def propose(self, model, state):
+                return state, None
+
         r = self._recipe()
         with self.assertRaises(ValueError):
+            r.add_move(_Proposer(), stage="s2")  # has .propose, no name
+        r.add_move(_Proposer(), stage="s2", name="prop")
+        self.assertIn("prop", r.move_names())
+
+    def test_non_move_rejected(self):
+        r = self._recipe()
+        with self.assertRaises(TypeError):
             r.add_move(object(), stage="s2")
+
+    def test_coercion(self):
+        r = self._recipe()
+        # str -> stock-name Move
+        mv = r.add_move("rj_prior", branch="gb", stage="s2")
+        self.assertIsInstance(mv, Move)
+        self.assertTrue(mv.is_stock)
+        self.assertEqual(mv.branch, "gb")
+        # plain fn -> FunctionMove
+        fm = r.add_move(_fn_move, stage="s2")
+        self.assertIsInstance(fm, FunctionMove)
+        self.assertFalse(fm.is_stock)
+        self.assertEqual(fm.name, "_fn_move")
+        self.assertIn("stock", r.list_moves())
+
+    def test_add_move_auto_creates_main_stage(self):
+        r = Recipe()
+        mv = r.add_move(_fn_move)
+        self.assertEqual([s.name for s in r.stages], ["main"])
+        self.assertEqual(r.stages[0].kind, "pe")
+        self.assertEqual(r.move_names(), [mv.name])
+
+    def test_stock_names_filter(self):
+        r = self._recipe()
+        r.add_move(_fn_move, stage="s2")
+        self.assertEqual(r.stock_names(), ["a", "b", "c"])
+
+    def test_recipe_pickles_without_runtime(self):
+        r = self._recipe()
+        r.stock_moves = {"a": object()}  # unpicklable runtime product
+        r.recipe.append({"name": "s1", "adjust": object(), "status": False})
+        clone = pickle.loads(pickle.dumps(copy.deepcopy(r)))
+        self.assertEqual(clone.move_names(), r.move_names())
+        self.assertEqual(clone.recipe, [])
+        self.assertEqual(clone.stock_moves, {})
+
+
+class _StubCurr:
+    """Minimal curr stub for Recipe/Stage.setup tests."""
+
+    class _EI:
+        branch_names = ["line"]
+
+    engine_info = _EI()
+    _info_branches = ()
+
+
+def _stub_ctx(**overrides):
+    kwargs = dict(
+        recipe=None, engine_info=None, curr=_StubCurr(), acs=None,
+        priors={}, state=None, stock_moves={}, ntemps=2, nwalkers=4,
+    )
+    kwargs.update(overrides)
+    return MoveBuildContext(**kwargs)
+
+
+class MoveSetupTest(unittest.TestCase):
+    def test_stock_lookup_missing_lists_options(self):
+        with self.assertRaises(ValueError) as ctx:
+            Move("nope").materialize(_stub_ctx(stock_moves={"psd_pe": object()}))
+        self.assertIn("psd_pe", str(ctx.exception))
+        self.assertIn("setup(ctx)", str(ctx.exception))
+
+    def test_stock_lookup_resolves(self):
+        runtime = object()
+        mv = Move("psd_pe")
+        self.assertIs(mv.materialize(_stub_ctx(stock_moves={"psd_pe": runtime})), runtime)
+        self.assertIs(mv.runtime, runtime)
+
+    def test_subclass_setup_none_means_self(self):
+        fm = FunctionMove(_fn_move)
+        self.assertIs(fm.materialize(_stub_ctx()), fm)
+        self.assertEqual(fm.accepted.shape, (2, 4))
+
+    def test_stage_setup_materializes(self):
+        from lisatools.globalfit.moves import GFCombineMove
+        from lisatools.globalfit.recipe import PERecipeStep
+
+        st = Stage("main", kind="pe", moves=[FunctionMove(_fn_move, branch="line")])
+        step = st.setup(_stub_ctx())
+        self.assertIsInstance(step, PERecipeStep)
+        combined = step.moves[0]
+        self.assertIsInstance(combined, GFCombineMove)
+        self.assertEqual(len(combined.moves), 1)
+        # CombineMove's ``accepted`` setter propagates onto the sub-moves (the
+        # combine-level array itself is initialized later by the sampler).
+        self.assertEqual(combined.moves[0].accepted.shape, (2, 4))
+
+    def test_stage_setup_rejects_unknown_branch(self):
+        st = Stage("main", moves=[FunctionMove(_fn_move, branch="nope")])
+        with self.assertRaises(ValueError):
+            st.setup(_stub_ctx())
+
+    def test_recipe_setup_requires_move_per_info_branch(self):
+        class _Curr(_StubCurr):
+            _info_branches = ("line",)
+
+        r = Recipe([Stage("main", moves=[FunctionMove(_fn_move)])])  # no branch tag
+        with self.assertRaises(ValueError) as ctx:
+            r.setup(_stub_ctx(curr=_Curr()))
+        self.assertIn("line", str(ctx.exception))
+
+    def test_recipe_setup_registers_steps(self):
+        r = Recipe([Stage("main", moves=[FunctionMove(_fn_move, branch="line")])])
+        r.setup(_stub_ctx())
+        self.assertEqual(len(r.recipe), 1)
+        self.assertIsNotNone(r.get_step("main"))
+        with self.assertRaises(KeyError):
+            r.get_step("zzz")
+
+
+class BranchInfoTest(unittest.TestCase):
+    def _fit(self):
+        return erebor.get_stock("blank", nwalkers=4, ntemps=2)
+
+    def test_blank_registered_zero_branches(self):
+        fit = self._fit()
+        self.assertEqual(list(fit.branches), [])
+        self.assertEqual([s.name for s in fit.recipe.stages], ["main"])
+        self.assertEqual(fit.recipe.move_names(), [])
+
+    def test_add_branch_info_path(self):
+        from eryn.prior import uniform_dist
+
+        fit = self._fit()
+        fit.add_branch(
+            "line", ndim=2,
+            priors={0: uniform_dist(0.0, 1.0), 1: uniform_dist(0.0, 1.0)},
+            moves=[_fn_move],
+        )
+        self.assertIn("line", fit.branches)
+        self.assertEqual(fit.line.ndim, 2)
+        self.assertEqual(fit.line.nleaves_max, 1)
+        self.assertEqual(fit.line.nleaves_min, 1)  # fixed-leaf default
+        self.assertIn("line", fit.line.priors)
+        self.assertEqual(fit._info_branches, ["line"])
+        mv = fit.recipe.get_move("_fn_move")
+        self.assertIsInstance(mv, FunctionMove)
+        self.assertEqual(mv.branch, "line")
+
+    def test_add_branch_info_requires_ndim_and_priors(self):
+        fit = self._fit()
+        with self.assertRaises(TypeError):
+            fit.add_branch("line", ndim=2)  # no priors
+
+    def test_zero_noise_default_adjustable(self):
+        from lisatools.globalfit.stock.erebor.injections import (
+            SyntheticNoiseProcessingStep,
+            ZeroDataProcessingStep,
+        )
+
+        gs = self._fit().make_general_settings()
+        self.assertIs(gs.data_processor_class, ZeroDataProcessingStep)
+        gs_noise = erebor.get_stock(
+            "blank", nwalkers=4, ntemps=2, include_noise=True
+        ).make_general_settings()
+        self.assertIs(gs_noise.data_processor_class, SyntheticNoiseProcessingStep)
+
+    def test_info_fit_pickles(self):
+        from eryn.prior import uniform_dist
+
+        fit = self._fit()
+        fit.add_branch(
+            "line", ndim=1, priors={0: uniform_dist(0.0, 1.0)}, moves=[_fn_move]
+        )
+        clone = pickle.loads(pickle.dumps(copy.deepcopy(fit)))
+        self.assertEqual(list(clone.branches), ["line"])
+        self.assertEqual(clone.recipe.move_names(), ["_fn_move"])
+        self.assertEqual(clone._info_branches, ["line"])
 
 
 class BranchCompositionTest(unittest.TestCase):

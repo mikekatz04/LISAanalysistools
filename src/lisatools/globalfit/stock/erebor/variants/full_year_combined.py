@@ -40,16 +40,9 @@ import numpy as np
 from lisatools.utils.constants import YRSID_SI
 
 from ....engine import GeneralSetup, Settings
-from ....recipe import MOJITO_REFERENCE_TIME
-from ...base import (
-    MoveBuildContext,
-    MoveSpec,
-    RecipeSpec,
-    StageSpec,
-    env_default,
-    env_resolve,
-    materialize_recipe,
-)
+from ....moves import Move, MoveBuildContext
+from ....recipe import MOJITO_REFERENCE_TIME, Recipe, Stage
+from ...base import env_default, env_resolve
 from ..emri import EMRISetup
 from ..fit import EreborFit, EreborGeneralSettings
 from ..injections import (
@@ -228,16 +221,16 @@ class FullYearCombinedGlobalFit(EreborFit):
             "sobbh": FullYearSOBBHSettings(),
         }
 
-    def default_recipe(self) -> RecipeSpec:
-        return RecipeSpec(
+    def default_recipe(self) -> Recipe:
+        return Recipe(
             [
-                StageSpec(
+                Stage(
                     name="full_pe",
                     kind="pe",
                     moves=[
-                        MoveSpec("mbh_pe", branch="mbh"),
-                        MoveSpec("emri_pe", branch="emri"),
-                        MoveSpec("sobbh_pe", branch="sobbh"),
+                        Move("mbh_pe", branch="mbh"),
+                        Move("emri_pe", branch="emri"),
+                        Move("sobbh_pe", branch="sobbh"),
                     ],
                     combine_kwargs=dict(verbose=True, share_temperature_control=False),
                 )
@@ -473,12 +466,12 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     stock_moves = build_source_moves(curr, acs, priors, state, cfg)
 
-    recipe_spec: RecipeSpec = curr.source_metadata["recipe_spec"]
     ctx = MoveBuildContext(
         recipe=recipe, engine_info=engine_info, curr=curr, acs=acs,
-        priors=priors, state=state,
+        priors=priors, state=state, stock_moves=stock_moves,
+        ntemps=ntemps, nwalkers=nwalkers,
     )
-    materialize_recipe(recipe, recipe_spec, ctx, stock_moves, ntemps, nwalkers)
+    recipe.setup(ctx)
 
 
 FullYearCombinedGlobalFit.default_setup_function = staticmethod(setup_recipe)

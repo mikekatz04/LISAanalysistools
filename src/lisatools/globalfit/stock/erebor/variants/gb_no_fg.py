@@ -22,7 +22,7 @@ Usage::
     fit.gb.min_freq = 9.8e-3           # direct GB band bounds (primary
     fit.gb.max_freq = 10.4e-3          #   interface; snapped to WDM layers)
     fit.gb.center_freq = 8.0e-3        # or: center/n_layers (secondary)
-    fit.recipe.add_move(MoveSpec("rj_fstat_mcmc", branch="gb"), stage="gb_pe")
+    fit.add_move("rj_fstat_mcmc", branch="gb", stage="gb_pe")
     fit.build()                        # heavy: loads + pours the data
     fit.run()                          # or hand it to run_global.py / GlobalFit
 
@@ -47,23 +47,18 @@ from gbgpu.utils.utility import get_fdot
 from lisatools.domains import FDSettings, WDMSettings
 
 from ....engine import GeneralSetup, Settings
+from ....moves import Move, MoveBuildContext
 from ....recipe import (
     MOJITO_REFERENCE_TIME,
+    Recipe,
+    Stage,
     build_gb_moves,
     gb_catalogue_to_sampling_basis,
     select_gb_injection_subset_by_snr,
     setup_state_for_injection,
     subtract_gb_neighbors_from_data,
 )
-from ...base import (
-    MoveBuildContext,
-    MoveSpec,
-    RecipeSpec,
-    StageSpec,
-    env_default,
-    env_resolve,
-    materialize_recipe,
-)
+from ...base import env_default, env_resolve
 from ..common import tdi_generation_info
 from ..fit import EreborFit, EreborGeneralSettings
 from ..gb import GBSettings, GBSetup
@@ -490,17 +485,17 @@ class GBNoForegroundGlobalFit(EreborFit):
     def default_branches(self) -> typing.Dict[str, Settings]:
         return {"gb": GBNoFgGBSettings()}
 
-    def default_recipe(self) -> RecipeSpec:
+    def default_recipe(self) -> Recipe:
         # Smoke-validated default: ONLY the prior-based RJ proposal (which
         # carries the in-model repeat blocks internally). Add
-        # MoveSpec("rj_fstat_mcmc"/"rj_refit", branch="gb") for the full PE
+        # Move("rj_fstat_mcmc"/"rj_refit", branch="gb") for the full PE
         # stack, or *_search names in a kind="search" stage.
-        return RecipeSpec(
+        return Recipe(
             [
-                StageSpec(
+                Stage(
                     name="gb_pe",
                     kind="pe",
-                    moves=[MoveSpec("rj_prior", branch="gb")],
+                    moves=[Move("rj_prior", branch="gb")],
                     combine_kwargs=dict(verbose=True, share_temperature_control=False),
                 )
             ]
@@ -760,16 +755,11 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                 )
 
     # ========================= MATERIALIZE THE RECIPE =========================
-    # The fit's RecipeSpec (carried through the settings deepcopy) names the
-    # GB moves to install; ``build_gb_moves`` owns the GB reference recipe
-    # and is steered by exactly those names.
-    recipe_spec: RecipeSpec = curr.source_metadata["recipe_spec"]
-    requested = [
-        mv.name
-        for stage in recipe_spec.stages
-        for mv in stage.moves
-        if mv.instance is None and mv.target is None
-    ]
+    # The fit's Recipe names the stock GB moves to install;
+    # ``build_gb_moves`` owns the GB reference recipe and is steered by
+    # exactly those names.
+    recipe: Recipe = curr.source_metadata["recipe"]
+    requested = recipe.stock_names()
     include_search = any(name.endswith("_search") for name in requested)
     include_refit = any(name.startswith("rj_refit") for name in requested)
     pe_names = [name for name in requested if not name.endswith("_search")]
@@ -787,14 +777,12 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     """Recipe setup for ``gb_no_fg`` (the run's ``setup_function``)."""
     general_info = curr.general_info
     stock_moves = setup_gb_moves(engine_info, curr, acs, priors, state)
-    recipe_spec: RecipeSpec = curr.source_metadata["recipe_spec"]
     ctx = MoveBuildContext(
         recipe=recipe, engine_info=engine_info, curr=curr, acs=acs,
-        priors=priors, state=state,
+        priors=priors, state=state, stock_moves=stock_moves,
+        ntemps=general_info.ntemps, nwalkers=general_info.nwalkers,
     )
-    materialize_recipe(
-        recipe, recipe_spec, ctx, stock_moves, general_info.ntemps, general_info.nwalkers
-    )
+    recipe.setup(ctx)
 
 
 GBNoForegroundGlobalFit.default_setup_function = staticmethod(setup_recipe)
