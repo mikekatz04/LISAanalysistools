@@ -194,9 +194,18 @@ Architecture (building-block pyramid, `stock/base.py` + `stock/erebor/`):
 `StockGlobalFit` **inherits `GlobalFitSetup`** (the built config/state object,
 formerly `CurrentInfoGlobalFit` — the name lives on as an alias) with the heavy
 `super().__init__` deferred to `.build()`; the per-branch knob layer is the
-existing `*Settings` dataclasses (variants fill defaults via subclasses);
-the recipe is a declarative `RecipeSpec` of stages/`MoveSpec`s materialized
-by the variant's module-level `setup_recipe`. Env vars resolve as field
+existing `*Settings` dataclasses (variants fill defaults via subclasses; for
+stock/pre-installed code only — simple user branches are appended as plain
+branch info via `fit.add_branch(name, ndim=..., priors=..., moves=[...])`);
+the recipe is a `Recipe` of `Stage`s of `Move`s — one concept per level, each
+with a required `setup(ctx)` hook run at materialization by the variant's
+module-level `setup_recipe` (a move IS a proposal: `fit.add_move` accepts a
+stock name, a `Move` subclass, a built eryn move, or a plain
+`fn(model, state)` function, which wraps as a `FunctionMove`). Besides
+`fit.run()` (MPI), `fit.sample()` is the single-process generator run mode
+(`for model, state in fit.sample(...)`: mutate the residual/state in place,
+the next iteration continues from them; `erebor.blank` is the zero-branch
+starting point). Env vars resolve as field
 defaults (*explicit kwarg > env var > lite preset > hard default* — a set env
 var overrules a `*_lite` preset via each variant's `lite_env_vars()` map).
 Waveform-path defaults: SOBBH TDI-on-the-fly, MBH legacy phentax, EMRI legacy

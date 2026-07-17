@@ -70,9 +70,12 @@ files:
 ```python
 from lisatools.globalfit.stock import erebor
 fit = erebor.gb_no_fg(nwalkers=4)      # or get_stock("gb_no_fg", ...); also
-fit.gb.center_freq = 8e-3              #   all_sources, full_year_combined
+fit.gb.center_freq = 8e-3              #   blank, all_sources, full_year_combined
 fit.recipe.pop_move("rj_refit")        # named move stacks per recipe stage
-fit.build(); fit.run()                 # heavy work only on command
+fit.add_move(my_fn, branch="gb")       # a move IS a proposal: fn(model, state)
+fit.build(); fit.run()                 # heavy work only on command; or the
+for model, state in fit.sample(iterations=10):   # single-process generator
+    ...
 ```
 
 A new run variant is a `StockGlobalFit` subclass under

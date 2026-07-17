@@ -86,9 +86,13 @@ kernels; source-specific subclasses (`GBWDMComputations`,
 picklable, unbuilt run config; the `erebor` family (`EreborFit`,
 `EreborGeneralSettings`) plus per-branch `*Settings`/`*Setup` dataclasses
 (`GBSettings`, `MBHSettings`, `EMRISettings`, `SOBBHSettings`, `PSDSettings`,
-`GalForSettings`) and a declarative `RecipeSpec` of `StageSpec`/`MoveSpec`.
+`GalForSettings`) and a `Recipe` of `Stage`/`Move` blocks (one concept per
+level, each with a `setup(ctx)` hook run at materialization; a plain
+`fn(model, state)` function wraps as a `FunctionMove`, and `fit.add_branch`
+takes plain branch info — no Settings class needed for simple modules).
 `.build()` → `GlobalFitSetup` (formerly `CurrentInfoGlobalFit`, still an alias);
-`GlobalFit(curr, comm).run_global_fit()`.
+`GlobalFit(curr, comm).run_global_fit()`, or single-process
+`for model, state in fit.sample(...)` (the generator run mode).
 
 ```
 DomainSettingsBase ──paired──> DomainBase (TD/FD/STFT/WDM Signal)
@@ -100,9 +104,10 @@ DomainSettingsBase ──paired──> DomainBase (TD/FD/STFT/WDM Signal)
 
 signal_gen  ← response.* (pyResponseTDI / *TDIonTheFly) ← sources.* waveforms
 
-Global fit:  *Settings (branch blocks) + RecipeSpec (stages/moves)
+Global fit:  *Settings (branch blocks) + Recipe (Stages of Moves)
              └─ StockGlobalFit.build() ─> GlobalFitSetup
                 └─ GlobalFit.run_global_fit()  [eryn EnsembleSampler + moves/]
+                   (or fit.sample() — the single-process generator run mode)
 ```
 
 ---
@@ -126,11 +131,14 @@ from lisatools.globalfit.stock import erebor
 erebor.get_stock_options()                 # [(name, description), ...]
 fit = erebor.gb_no_fg(nwalkers=4)          # or erebor.get_stock("gb_no_fg", ...)
 fit.gb.min_freq = 9.8e-3                    # plain attribute access on blocks
-fit.recipe.add_move(MoveSpec("rj_fstat_mcmc", branch="gb"), stage="gb_pe")
+fit.add_move("rj_fstat_mcmc", branch="gb", stage="gb_pe")
 fit.build()                                 # heavy: load + pour data
 fit.run()                                   # build -> GlobalFit -> run_global_fit
 ```
-Registered variants: `gb_no_fg`, `all_sources`, `full_year_combined`
+The simple entrances (`erebor.blank` + `fit.add_branch(ndim=..., priors=...,
+moves=[my_fn])` + `fit.sample()` generator) are documented in
+[`docs/stock-stages-and-moves.md`](stock-stages-and-moves.md).
+Registered variants: `blank`, `gb_no_fg`, `all_sources`, `full_year_combined`
 (`globalfit/stock/erebor/variants/`). `scripts/run_global.py --stock <name>`
 is the CLI entry (single-process or under `mpiexec` — rank layout and GPU
 knobs in [`docs/global-fit-launch.md`](global-fit-launch.md); the legacy

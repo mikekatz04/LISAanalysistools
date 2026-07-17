@@ -95,7 +95,7 @@ fit.set_move_debug("emri_pe", plot_dir="./emri_dbg", every=5)  # one move
 fit.set_stage_debug("full_pe", plot_walker=2)                  # whole stage
 fit.set_move_debug("psd_pe", False)                            # force off
 ```
-These set ``MoveSpec.debug`` / ``StageSpec.debug``, applied at
+These set ``Move.debug`` / ``Stage.debug``, applied at
 materialization through ``GlobalFitMove.set_debug(...)`` (options:
 ``plot_dir``, ``plot_walker``, ``plot_leaf`` / ``plot_band``, ``every``).
 
