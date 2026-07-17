@@ -79,7 +79,7 @@ if __name__ == "__main__":
             "  mpiexec -n 3 python scripts/run_global.py --stock <name>   # rank 2 = dedicated async saver rank\n"
             "  srun -n 3 --gpus-per-node=<G> python scripts/run_global.py --stock <name>\n"
             "GPU count is a knob, not a rank: GPUS=0,1 selects the local devices the\n"
-            "main rank drives (USE_GPU=0 forces CPU). Common env: NWALKERS, NTEMPS,\n"
+            "main rank drives (USE_GPU=0 forces CPU). Common env: VERBOSE, NWALKERS, NTEMPS,\n"
             "NUM_ITERATIONS, DATA_MODE, TOBS_TARGET, MAKE_DIAGNOSTIC_PLOTS."
         ),
     )

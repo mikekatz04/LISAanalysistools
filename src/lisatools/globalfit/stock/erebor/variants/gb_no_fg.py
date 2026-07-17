@@ -496,7 +496,7 @@ class GBNoForegroundGlobalFit(EreborFit):
                     name="gb_pe",
                     kind="pe",
                     moves=[Move("rj_prior", branch="gb")],
-                    combine_kwargs=dict(verbose=True, share_temperature_control=False),
+                    combine_kwargs=dict(share_temperature_control=False),
                 )
             ]
         )
@@ -557,6 +557,7 @@ class GBNoForegroundGlobalFit(EreborFit):
                 injection_params=np.atleast_2d(np.asarray(params, dtype=float)),
                 tdi_chan=gs.tdi_chan,
                 nchannels=gs.nchannels,
+                verbose=gs.verbose,
                 use_tdi2=tdi_generation_info(gs.tdi_chan)[0] == 2,
                 force_backend="cpu",
             )

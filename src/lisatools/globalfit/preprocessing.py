@@ -242,19 +242,19 @@ class L1DataLoader:
             if orbits is None:
                 _t0 = _t.perf_counter()
                 orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
-                print(f"[load_data] L1Orbits(...) (incl. _setup) took {_t.perf_counter()-_t0:.2f}s", flush=True)
+                logger.debug(f"[load_data] L1Orbits(...) (incl. _setup) took {_t.perf_counter()-_t0:.2f}s")
                 _t0 = _t.perf_counter()
                 # Eagerly build the interpolation grid here (data-load time is
                 # the right place to pay the one-time cost); equivalent to the
                 # lazy first-use configuration.
                 orbits._ensure_configured()
-                print(f"[load_data] orbits._ensure_configured() took {_t.perf_counter()-_t0:.2f}s", flush=True)
+                logger.debug(f"[load_data] orbits._ensure_configured() took {_t.perf_counter()-_t0:.2f}s")
                 logger.info(f"Initialized orbits from NOISE file.")
 
             with self._open(file_path) as f:
                 _t0 = _t.perf_counter()
                 xyz = f.tdis.xyz_doppler[:]
-                print(f"[load_data] NOISE f.tdis.xyz_doppler[:] took {_t.perf_counter()-_t0:.2f}s shape={xyz.shape}", flush=True)
+                logger.debug(f"[load_data] NOISE f.tdis.xyz_doppler[:] took {_t.perf_counter()-_t0:.2f}s shape={xyz.shape}")
 
                 tdi_dt = f.tdis.time_sampling.dt  # time step in seconds
                 tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
@@ -321,7 +321,7 @@ class L1DataLoader:
                     with self._open(file_path) as f:
                         _t0 = _t.perf_counter()
                         _xyz = f.tdis.xyz_doppler[:]
-                        print(f"[load_data] {source_type} source {source_id} f.tdis.xyz_doppler[:] took {_t.perf_counter()-_t0:.2f}s shape={_xyz.shape}", flush=True)
+                        logger.debug(f"[load_data] {source_type} source {source_id} f.tdis.xyz_doppler[:] took {_t.perf_counter()-_t0:.2f}s shape={_xyz.shape}")
                         _tdi_dt = f.tdis.time_sampling.dt  # time step in seconds
                         _tdi_times = f.tdis.time_sampling.t()
                         _tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
@@ -434,20 +434,20 @@ class SangriaDataLoader:
                 for source in self.remove_from_data:  # , "dgb", "igb"]:  # "vgb" ,
                     if source == "noise":
                         continue
-                    print(f"Removing {source} from data injection.")
+                    logger.info(f"Removing {source} from data injection.")
                     change_arr = f["sky"][source]["tdi"][:]
                     for change in ["X", "Y", "Z"]:
                         tXYZ[change] -= change_arr[change]
 
             else:
                 keys = list(f["sky"])
-                print("Initial keys in data injection: ", keys)
+                logger.info("Initial keys in data injection: %s", keys)
                 tmp_keys = keys.copy()
                 for key in tmp_keys:
-                    print(key)
+                    logger.debug(key)
                     if key in self.remove_from_data:
                         keys.remove(key)
-                        print(f"Removing {key} from data injection.")
+                        logger.info(f"Removing {key} from data injection.")
                 tXYZ = f["sky"][keys[0]]["tdi"][:]
                 for key in keys[1:]:
                     tXYZ["X"] += f["sky"][key]["tdi"][:]["X"]

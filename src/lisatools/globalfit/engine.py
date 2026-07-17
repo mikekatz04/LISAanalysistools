@@ -226,6 +226,12 @@ class GeneralSettings(Settings):
     sensitivity_backend_class: Optional[type] = None
     normalize_window: bool = False
     catalogue: typing.Optional[dict] = None
+    # Run-level console verbosity: False (default) keeps the console quiet —
+    # log statements go to the log files only, progress bars are off, and the
+    # stock moves/processors stay silent. True streams the logs to stdout and
+    # turns the progress bars back on. Stock fits expose this as a headline
+    # knob (erebor.<variant>(verbose=True) / env VERBOSE).
+    verbose: bool = False
 
     # --- run metadata (propagated to RunMetadata.from_curr) ---
     global_fit_codename: Optional[str] = None
@@ -273,7 +279,9 @@ class GeneralSetup(Setup, GeneralSettings):
         # on every rank) — check-then-create here is a startup race.
         os.makedirs(self.artifacts_file_dir, exist_ok=True)
         self.logger = init_logger(
-            filename="general_setup.log", level=level, name=name, log_dir=self.artifacts_file_dir
+            filename="general_setup.log", level=level, name=name,
+            log_dir=self.artifacts_file_dir,
+            console=bool(getattr(self, "verbose", False)),
         )
 
         self.init_setup()

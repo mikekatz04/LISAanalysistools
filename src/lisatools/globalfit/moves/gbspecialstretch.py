@@ -3624,7 +3624,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         state.log_prior = para_sampler.compute_log_prior(state.branches_coords)
         state.log_like = para_sampler.compute_log_like(state.branches_coords, logp=state.log_prior)
 
-        para_sampler.run_mcmc(state, nsteps_1, burn=burn_1, progress=True)
+        para_sampler.run_mcmc(state, nsteps_1, burn=burn_1, progress=getattr(self, "progress", False))
 
         samples = self.xp.asarray(para_sampler.get_chain()[:, :, 0])
         # Diagnostics disabled (stft_tof): computed-but-unused and each costs
@@ -3713,7 +3713,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         if np.any(np.isinf(new_state.log_prior)):
             breakpoint()
 
-        para_sampler_2.run_mcmc(new_state, nsteps_2, burn=burn_2, progress=True)
+        para_sampler_2.run_mcmc(new_state, nsteps_2, burn=burn_2, progress=getattr(self, "progress", False))
 
         samples_2 = self.xp.asarray(para_sampler_2.get_chain()[:, :, 0])
         # check_ll_2 = para_sampler_2.get_log_like()[:, :, 0]
@@ -4054,4 +4054,4 @@ def get_param_limits(array): # can be used for debugging of coordinate values
         param_values = array[..., i]
         min_array_i = param_values.min()
         max_array_i = param_values.max()
-        print(f"For parameter {param_label}, the minimun value is {min_array_i}, the maximum value is {max_array_i}")
+        logger.info(f"For parameter {param_label}, the minimun value is {min_array_i}, the maximum value is {max_array_i}")

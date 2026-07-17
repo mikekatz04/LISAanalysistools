@@ -7,7 +7,7 @@ import numpy as np
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 
 
-def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit", log_dir=None):
+def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit", log_dir=None, console=False):
     """Initialize a logger.
 
     Args:
@@ -16,29 +16,46 @@ def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit", log_dir=No
         name: Logger name (default: "GlobalFit").
         log_dir: Directory to place the log file in. When provided alongside filename,
             the log file is written to os.path.join(log_dir, filename) instead of CWD.
+        console: When True, also stream records to stdout at ``level`` (the
+            run-level ``verbose`` knob). Default False: log statements are
+            still captured in the log files, but the console only sees
+            warnings and errors.
     """
-    logging.basicConfig(
-        level=logging.WARNING,
-        stream=sys.stdout,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    if console:
+        # Root stdout handler so propagated lisatools.* records show too.
+        logging.basicConfig(
+            level=logging.WARNING,
+            stream=sys.stdout,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
     logging.getLogger("lisatools").setLevel(level)
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
-    if len(logger.handlers) < 2:
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        if filename:
-            if log_dir:
-                filename = os.path.join(log_dir, filename)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    if filename:
+        if log_dir:
+            filename = os.path.join(log_dir, filename)
+        filename = os.path.abspath(filename)
+        if not any(
+            isinstance(h, logging.FileHandler) and h.baseFilename == filename
+            for h in logger.handlers
+        ):
             rfhandler = logging.FileHandler(filename)
-            logger.addHandler(rfhandler)
             rfhandler.setFormatter(formatter)
-        if level:
+            logger.addHandler(rfhandler)
+    # FileHandler subclasses StreamHandler, so match on the exact type.
+    has_stream = any(type(h) is logging.StreamHandler for h in logger.handlers)
+    if not has_stream:
+        if console and level:
             shandler = logging.StreamHandler(sys.stdout)
             shandler.setLevel(level)
-            shandler.setFormatter(formatter)
-            logger.addHandler(shandler)
+        else:
+            # Quiet default: warnings/errors still surface on stderr.
+            shandler = logging.StreamHandler(sys.stderr)
+            shandler.setLevel(logging.WARNING)
+        shandler.setFormatter(formatter)
+        logger.addHandler(shandler)
     return logger
 
 

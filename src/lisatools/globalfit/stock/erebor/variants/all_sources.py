@@ -332,7 +332,7 @@ class AllSourcesGlobalFit(EreborFit):
                         Move("sobbh_pe", branch="sobbh"),
                         Move("rj_prior", branch="gb"),
                     ],
-                    combine_kwargs=dict(verbose=True, share_temperature_control=False),
+                    combine_kwargs=dict(share_temperature_control=False),
                 )
             ]
         )
@@ -364,7 +364,7 @@ class AllSourcesGlobalFit(EreborFit):
                 orbits_kwargs=dict(
                     force_backend=force_backend, frame=gs.orbits_frame
                 ),
-                verbose=True,
+                verbose=gs.verbose,
                 do_plots=False,
                 Tobs=gs.Tobs,
                 add_instrument_noise=gs.add_instrument_noise,
@@ -378,7 +378,9 @@ class AllSourcesGlobalFit(EreborFit):
             from lisatools.globalfit.preprocessing import SangriaProcessingStep
 
             gs.data_processor_class = SangriaProcessingStep
-            gs.processor_init_kwargs = dict(data_input_path=gs.ldc_source_file)
+            gs.processor_init_kwargs = dict(
+                data_input_path=gs.ldc_source_file, verbose=gs.verbose
+            )
             return
         if gs.data_mode == "synthetic":
             # In-process streams for the PRESENT branches, summed by
@@ -493,6 +495,7 @@ class AllSourcesGlobalFit(EreborFit):
                 t_start=gs.t_start,
                 processor_specs=specs,
                 nchannels=gs.nchannels,
+                verbose=gs.verbose,
             )
             return
         raise ValueError(

@@ -443,7 +443,10 @@ class PSDMove(GlobalFitMove, StretchMove):
 
     def run_move_for_loop(self, model, state, num_repeats):
         """Run :meth:`run_move` ``num_repeats`` times sequentially."""
-        for i in tqdm(range(num_repeats), desc="psd update"):
+        for i in tqdm(
+            range(num_repeats), desc="psd update",
+            disable=not getattr(self, "progress", False),
+        ):
             state, accepted = self.run_move(i, model, state)
         return state, accepted
 

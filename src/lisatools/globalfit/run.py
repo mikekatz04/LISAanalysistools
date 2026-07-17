@@ -24,7 +24,7 @@ except (ModuleNotFoundError, ImportError):
     import numpy as xp
     _xp_is_cupy = False
 
-    print(
+    logging.getLogger(__name__).info(
         "cupy not found, using numpy instead. This will be very slow for large runs. "
         "Please install cupy and a compatible CUDA version for GPU acceleration."
     )
@@ -350,10 +350,15 @@ class GlobalFit:
 
         level = logging.DEBUG
         name = "GlobalFit"
+        # Console verbosity (general_info.verbose / VERBOSE env / the stock
+        # fits' headline knob): quiet default — everything still goes to the
+        # run's log files, only warnings/errors reach the console.
+        self.verbose = bool(getattr(self.curr.general_info, "verbose", False))
         artifacts_dir = self.curr.general_info.artifacts_file_dir
         setup_root_file_handler(artifacts_dir, level=level)
         self.logger = init_logger(
-            filename="global_fit.log", level=level, name=name, log_dir=artifacts_dir
+            filename="global_fit.log", level=level, name=name, log_dir=artifacts_dir,
+            console=self.verbose,
         )
 
         if self.rank == self.main_rank:
@@ -1028,7 +1033,7 @@ class GlobalFit:
             self.recipe, self.engine_info, self.curr, acs, priors, state
         )
 
-        print("need to setup moves that use parallel resources")
+        logger.debug("need to setup moves that use parallel resources")
 
         # backend.grow(1, None)
         # accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
@@ -1165,7 +1170,7 @@ class GlobalFit:
         if self.rank == self.curr.settings_dict.rank_info.main_rank:
             self.prepare_main()
 
-            self.sampler.run_mcmc(self.state, self.curr.general_info.num_iterations, thin_by=1, progress=True, store=True)
+            self.sampler.run_mcmc(self.state, self.curr.general_info.num_iterations, thin_by=1, progress=self.verbose, store=True)
 
             if self.curr.general_info.submission_parent_folder is not None:
                 self.logger.debug(f"saving submission to {self.curr.general_info.submission_parent_folder}")
@@ -1198,7 +1203,7 @@ class GlobalFit:
             # instruction-dict dispatch that ran move workers here was
             # removed with the move->rank machinery; plan P3.)
             info = self.comm.recv(source=self.main_rank)
-            print(f"Process {self.rank} finished ({info!r}).")
+            logger.info(f"Process {self.rank} finished ({info!r}).")
 
     def sample(
         self,

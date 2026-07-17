@@ -731,7 +731,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             # fix this need to compute prev_logl for all walkers
             _free_pool()
-            for repeat in tqdm(range(self.num_repeats), desc=f"{self.branch_name} update, leaf {leaf}"):
+            for repeat in tqdm(
+                range(self.num_repeats), desc=f"{self.branch_name} update, leaf {leaf}",
+                disable=not getattr(self, "progress", False),
+            ):
 
                 # pick move
                 move_here = self.moves[

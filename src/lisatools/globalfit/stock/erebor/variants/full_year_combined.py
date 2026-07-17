@@ -232,7 +232,7 @@ class FullYearCombinedGlobalFit(EreborFit):
                         Move("emri_pe", branch="emri"),
                         Move("sobbh_pe", branch="sobbh"),
                     ],
-                    combine_kwargs=dict(verbose=True, share_temperature_control=False),
+                    combine_kwargs=dict(share_temperature_control=False),
                 )
             ]
         )
@@ -308,7 +308,7 @@ class FullYearCombinedGlobalFit(EreborFit):
                 source_ids={k: list(v) for k, v in gs.mojito_source_ids.items()},
                 orbits_class=L1Orbits,
                 orbits_kwargs=dict(force_backend=force_backend, frame=gs.orbits_frame),
-                verbose=True,
+                verbose=gs.verbose,
                 do_plots=False,
                 Tobs=tobs,
                 window_start_offset=self._mbh_chop_window_offset(),
@@ -336,7 +336,7 @@ class FullYearCombinedGlobalFit(EreborFit):
                 source_ids={k: list(v) for k, v in gs.mojito_source_ids.items()},
                 nchannels=gs.nchannels,
                 force_backend="cpu",
-                verbose=True,
+                verbose=gs.verbose,
                 do_plots=False,
                 tdi_chan=gs.tdi_chan,
                 tdi_gen_str=gs.tdi_gen_str,

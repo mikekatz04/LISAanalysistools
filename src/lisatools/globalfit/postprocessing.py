@@ -33,6 +33,10 @@ from ..domains import FDSettings, STFTSettings, TDSettings
 from ..utils.utility import windowfun
 from .gathergalaxy import gather_gb_samples
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from eryn.utils.transform import TransformContainer
     from ..detector import Orbits
@@ -490,7 +494,7 @@ class BackendConsumer:
 
         nsteps = None
         for branch in self.branches:
-            print(f"Processing branch '{branch}'")
+            logger.info(f"Processing branch '{branch}'")
             if nsteps == None:
                 nsteps = self.cold_chains[branch].shape[0]
                 if discard < 1.0:

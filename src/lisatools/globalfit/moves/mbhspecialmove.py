@@ -33,6 +33,10 @@ from ...utils.utility import asnumpy, tukey
 
 # from eryn.state import State
 from ..state import GFState
+
+import logging
+
+logger = logging.getLogger(__name__)
 from .addremovemove import ResidualAddOneRemoveOneMove, MultiGPUResidualAddRemoveMove
 from .globalfitmove import GlobalFitMove
 
@@ -46,7 +50,7 @@ if TYPE_CHECKING:
 
 def update_fn(i, last_sample, sampler):
     """Search-mode update hook that copies the cold chain into the hottest chain."""
-    print("max logl:", last_sample.log_like.max())
+    logger.info("max logl: %s", last_sample.log_like.max())
     last_sample.branches_coords["mbh"][-1] = last_sample.branches_coords["mbh"][0]
     last_sample.log_like[-1] = last_sample.log_like[0]
     last_sample.log_prior[-1] = last_sample.log_prior[0]
@@ -331,7 +335,7 @@ class MBHSpecialMove(
 
             t_lims = np.arange(t_start_ind, (t1.shape[0] - 1), delta) * dt
             # t_lims = np.array([0.0, 3600.0, Tobs - 3600.0, Tobs])
-            print(f"Not searching for {t_lims[-1]} to {t1[-1]}")
+            logger.info(f"Not searching for {t_lims[-1]} to {t1[-1]}")
 
             t_ref_lims = t_lims[1:-1]
             num_t_ref_bins = len(t_ref_lims) - 1
@@ -342,7 +346,7 @@ class MBHSpecialMove(
                 end_t = t_lims[t_i + 3]
                 # start_t = 0.0
                 keep_t = (t1 >= start_t) & (t1 < end_t)
-                print(i, keep_t.sum().item())
+                logger.debug("%s %s", i, keep_t.sum().item())
                 if keep_t.sum().item() == 0:
                     continue
                 tukey_alpha = 0.03
@@ -399,7 +403,8 @@ class MBHSpecialMove(
                 )  # , signal_gen=MBHWrap(wave_gen))
                 acs_tmp.append(analysis)
 
-                print(
+                logger.debug(
+                    "%s %s %s %s %s",
                     start_t,
                     t_ref_lims[i],
                     end_t,
@@ -556,11 +561,11 @@ class MBHSpecialMove(
             # checkit = ll_wrap(samples[-10:], ll_het, transform_fn_mbh)
 
             nsteps = 500
-            print("start like", acs.likelihood(source_only=True).max())
+            logger.info("start like %s", acs.likelihood(source_only=True).max())
             # check_params = np.load("check_params.npy")[None, :]
             # start_like4 = search_likelihood_wrap(mbh_params_best[None, :], *like_args)
-            final_state = sampler.run_mcmc(start_state, nsteps, thin_by=50, progress=True)
-            print("End like:", sampler.get_log_like().max())
+            final_state = sampler.run_mcmc(start_state, nsteps, thin_by=50, progress=getattr(self, "progress", False))
+            logger.info("End like: %s", sampler.get_log_like().max())
 
             full_kwargs["phase_maximize"] = True
             coords_post_like = final_state.branches["mbh"].coords[0, :, 0]
@@ -675,7 +680,7 @@ class MBHSpecialMove(
         __doc__ = ResidualAddOneRemoveOneMove.propose.__doc__
         assert np.all(state.branches["mbh"].nleaves[0, 0] == state.branches["mbh"].nleaves)
         if self.finished_search and state.branches["mbh"].nleaves[0, 0] == 0:
-            print("No MBHs in sampler. Skipping proposal.")
+            logger.debug("No MBHs in sampler. Skipping proposal.")
             ntemps, nwalkers = state.branches["mbh"].shape[:2]
             _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
             return state, _accepted

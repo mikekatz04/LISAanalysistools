@@ -49,7 +49,14 @@ fit.run()          # np=1; run under mpiexec for the saver-rank layout
 
 Common env knobs: `NWALKERS`, `NTEMPS`, `NUM_ITERATIONS`, `DATA_MODE`
 (`mojito`/`synthetic`), `TOBS_TARGET`, `MAKE_DIAGNOSTIC_PLOTS`, `GPUS`, `USE_GPU`,
-`GPU_BACKEND`.
+`GPU_BACKEND`, `VERBOSE`.
+
+**Console output is quiet by default.** Everything is still logged to the
+run's log files (`…_artifacts/global_fit.log`, `globalfit_run.log`,
+`general_setup.log`); only warnings/errors reach the console. Set
+`verbose=True` at construction (`erebor.<variant>(verbose=True)`, a headline
+knob — or `VERBOSE=1`) to stream the logs to stdout and turn the progress
+bars (eryn sampler, per-stage combine, move-internal) back on.
 
 **Threading policy (2026-07): MPI-only — no OMP.** `run_global.py` pins
 `OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` /

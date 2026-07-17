@@ -169,7 +169,9 @@ class BlankGlobalFit(EreborFit):
             from ..injections import ZeroDataProcessingStep
 
             gs.data_processor_class = ZeroDataProcessingStep
-            gs.processor_init_kwargs = dict(Tobs=gs.Tobs, dt=gs.dt, t_start=gs.t_start)
+            gs.processor_init_kwargs = dict(
+                Tobs=gs.Tobs, dt=gs.dt, t_start=gs.t_start, verbose=gs.verbose
+            )
             return
         from ..injections import SyntheticNoiseProcessingStep
 
@@ -183,6 +185,7 @@ class BlankGlobalFit(EreborFit):
             sgwb_injection=None,
             tdi_generation=gs.tdi_gen,
             seed=gs.noise_seed,
+            verbose=gs.verbose,
         )
 
 

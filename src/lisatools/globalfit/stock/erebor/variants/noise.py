@@ -220,6 +220,7 @@ class _NoiseFitBase(EreborFit):
                 orbits_kwargs=dict(
                     force_backend=force_backend, frame=gs.orbits_frame
                 ),
+                verbose=gs.verbose,
             )
             return
         if gs.data_mode != "synthetic":
@@ -242,6 +243,7 @@ class _NoiseFitBase(EreborFit):
             sgwb_stochastic_fn=gs.sgwb_stochastic_fn,
             tdi_generation=gs.tdi_gen,
             seed=gs.noise_seed,
+            verbose=gs.verbose,
         )
 
     # -- sensitivity backend: thread the per-branch NOISE-MODEL choice onto the
@@ -302,7 +304,7 @@ class NoiseOnlyGlobalFit(_NoiseFitBase):
                     name="noise_pe",
                     kind="pe",
                     moves=[Move("psd_pe", branch="psd")],
-                    combine_kwargs=dict(verbose=True, share_temperature_control=False),
+                    combine_kwargs=dict(share_temperature_control=False),
                 )
             ]
         )

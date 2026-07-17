@@ -29,6 +29,10 @@ except (ModuleNotFoundError, ImportError) as e:
 from lisatools.sampling.prior import FullGaussianMixtureModel
 from lisatools.utils.utility import asnumpy, searchsorted2d_vec
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def _check_shape(param, param_shape, name, xp=None):
     """Validate the shape of the input parameter 'param'.
@@ -1118,10 +1122,10 @@ class GaussianMixtureModel:
             f"converged {init_has_converged.sum()} out of {init_has_converged.shape[0]}."
         )
         if self.verbose == 1:
-            print(f"Initialization {converged_msg}.")
+            logger.info(f"Initialization {converged_msg}.")
         elif self.verbose >= 2:
             t = time() - self._init_prev_time
-            print(
+            logger.info(
                 f"Initialization {converged_msg}. time lapse {t:.5f}s\t lower bound" f" {lb:.5f}."
             )
 
@@ -1151,10 +1155,10 @@ class GaussianMixtureModel:
         """Print verbose message on initialization."""
         if n_iter % self.verbose_interval == 0:
             if self.verbose == 1:
-                print("  Iteration %d" % n_iter)
+                logger.info("  Iteration %d" % n_iter)
             elif self.verbose >= 2:
                 cur_time = time()
-                print(
+                logger.info(
                     "  Iteration %d\t time lapse %.5fs\t ll change %.5f"
                     % (n_iter, cur_time - self._iter_prev_time, diff_ll)
                 )
@@ -1544,9 +1548,9 @@ class GaussianMixtureModel:
     def _print_verbose_msg_init_beg(self, n_init):
         """Print verbose message on initialization."""
         if self.verbose == 1:
-            print("Initialization %d" % n_init)
+            logger.info("Initialization %d" % n_init)
         elif self.verbose >= 2:
-            print("Initialization %d" % n_init)
+            logger.info("Initialization %d" % n_init)
             self._init_prev_time = time()
             self._iter_prev_time = self._init_prev_time
 
@@ -2236,7 +2240,7 @@ def vec_fit_gmm_min_bic(
         if use_gpu:
             cp.get_default_memory_pool().free_all_blocks()
         if verbose:
-            print(f"{comp_i} components: {converged.sum()} converged out of {converged.shape[0]}.")
+            logger.info(f"{comp_i} components: {converged.sum()} converged out of {converged.shape[0]}.")
 
     if use_gpu:
         cp.get_default_memory_pool().free_all_blocks()

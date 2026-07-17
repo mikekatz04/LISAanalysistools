@@ -6,6 +6,10 @@ import numpy as np
 from eryn.utils.stopping import Stopping
 from eryn.utils.utility import thermodynamic_integration_log_evidence
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class SNRStopping(Stopping):
     """Stop sampling once the best in-chain SNR exceeds a threshold.
@@ -44,7 +48,7 @@ class SNRStopping(Stopping):
         # h_h_best = sampler.get_blobs()[:, :, :, 2].flatten()[ind]
 
         if self.verbose:
-            print(
+            logger.info(
                 "snr_best",
                 snr_best,
                 "limit:",
@@ -114,7 +118,7 @@ class NLeavesSearchStopping:
 
             if self.verbose:
                 dur = (time.perf_counter() - self.st) / 3600.0  # hours
-                print(
+                logger.info(
                     "\nnleaves max old:\n",
                     nleaves_cc_max_old,
                     "\nnleaves max new:\n",
@@ -163,7 +167,7 @@ class SearchConvergeStopping(Stopping):
             self.past_like_best = like_best
 
         if self.verbose:
-            print(
+            logger.info(
                 "\nITERS CONSECUTIVE:\n",
                 self.iters_consecutive,
                 self.past_like_best,
@@ -261,7 +265,7 @@ class SearchConvergeStopping2(Stopping):
             self.iters_consecutive += 1
 
         if self.verbose:
-            print(
+            logger.info(
                 "\nITERS CONSECUTIVE:\n",
                 self.iters_consecutive,
                 f"previous best: {self.past_like_best}, overall best: {like_best},",
@@ -307,11 +311,11 @@ class EvidenceStopping(Stopping):
         logls = sampler.get_log_like().mean(axis=(0, 2))
 
         logZ, dlogZ = thermodynamic_integration_log_evidence(betas, logls)
-        print(logZ, dlogZ)
+        logger.info(logZ, dlogZ)
         return False
 
         if self.verbose:
-            print(
+            logger.info(
                 "snr_best",
                 snr_best,
                 "limit:",

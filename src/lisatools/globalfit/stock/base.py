@@ -236,6 +236,7 @@ class StockGlobalFit(GlobalFitSetup):
         "base_file_name",
         "gpus",
         "gpu_backend",
+        "verbose",
     )
 
     def __init__(
@@ -601,6 +602,10 @@ class StockGlobalFit(GlobalFitSetup):
         runtime = move.materialize(ctx)
         if getattr(runtime, "accepted", None) is None:
             runtime.accepted = np.zeros((ctx.ntemps, ctx.nwalkers))
+        if not hasattr(runtime, "progress"):
+            runtime.progress = bool(
+                getattr(getattr(ctx.curr, "general_info", None), "verbose", False)
+            )
         sampler = getattr(runner, "sampler", None)
         if (
             sampler is not None

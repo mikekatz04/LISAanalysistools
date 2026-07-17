@@ -45,6 +45,10 @@ from .wrappers import (
     get_sobbh_response_wrapper,
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # ============================================================
 # *** EMRI injection (synthetic, in-process) ***
 # ============================================================
@@ -898,12 +902,12 @@ def build_synthetic_source_streams(
             role="injection", force_backend=force_backend,
         )
         for ii, params in enumerate(emri_injections):
-            print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [start]")
+            logger.info(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [start]")
             sig = np.asarray(emri_wave_gen(*params))
             emri_td += np.asarray(
                 place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
             )
-            print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [end]")
+            logger.info(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [end]")
 
     sobbh_td = zero.copy()
     if sobbh_injections.shape[0] > 0:
@@ -914,12 +918,12 @@ def build_synthetic_source_streams(
             reference_time=sobbh_reference_time,
         )
         for ii, params in enumerate(sobbh_injections):
-            print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
+            logger.info(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
             sig = np.asarray(sobbh_wave_gen(*params))
             sobbh_td += np.asarray(
                 place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
             )
-            print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [end]")
+            logger.info(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [end]")
 
     mbh_td = zero.copy()
     if mbh_injections.shape[0] > 0:
@@ -933,7 +937,7 @@ def build_synthetic_source_streams(
                 "(see get_mbh_phenom_wave_gen / make_mbh_transform_container)."
             )
         for ii, params in enumerate(mbh_injections):
-            print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [start]")
+            logger.info(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [start]")
             params_in = mbh_transform.both_transforms(
                 np.asarray(params, dtype=float)
             )
@@ -941,7 +945,7 @@ def build_synthetic_source_streams(
             mbh_td += np.asarray(
                 place_td_signal_on_grid(channels, grid, times=times).arr
             )[:nchannels]
-            print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [end]")
+            logger.info(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [end]")
     return emri_td, sobbh_td, mbh_td
 
 

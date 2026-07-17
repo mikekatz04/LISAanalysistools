@@ -650,8 +650,8 @@ class RJRecipeStep(BaseRecipeStep):
 
             
             dur = (time.perf_counter() - self.st) / 3600.0  # hours
-            print(f"Previous nleaves: {nleaves_cc_max_old} --> new nleaves: {nleaves_cc_max_new}")
-            print(f"TIME SINCE START: {dur} hours")
+            logger.info(f"Previous nleaves: {nleaves_cc_max_old} --> new nleaves: {nleaves_cc_max_new}")
+            logger.info(f"TIME SINCE START: {dur} hours")
 
         return stop
         
@@ -669,12 +669,12 @@ class RJRecipeStep(BaseRecipeStep):
         sampler.checkpoint_step = self.thin_by
         # sampler.override_thin_by = self.thin_by --> # TODO check this one
         
-        for move in self.moves: 
+        for move in self.moves:
             if sampler.periodic is not None and move.periodic is None:
-                print(f"Setting periodicity of move {move} to {sampler.periodic}")
+                logger.debug(f"Setting periodicity of move {move} to {sampler.periodic}")
                 move.periodic = sampler.periodic
             if sampler.temperature_control is not None and move.temperature_control is None:
-                print(f"Setting temperature control of move {move} to {sampler.temperature_control}")
+                logger.debug(f"Setting temperature control of move {move} to {sampler.temperature_control}")
                 move.temperature_control = sampler.temperature_control
             
             # TODO: do we also need to set these? I think the current settings setup has ntemps covered, not sure about temp_cntrl
@@ -761,7 +761,18 @@ class Stage:
         if not runtime_moves:
             raise ValueError(f"Stage {self.name!r} has no moves; pop_stage it or add moves.")
 
-        combined = GFCombineMove(moves=runtime_moves, **self.combine_kwargs)
+        # Console verbosity: the run-level knob feeds every move's internal
+        # progress bars (moves read ``self.progress``) and the combine bar,
+        # unless the stage/move sets its own explicitly.
+        run_verbose = bool(
+            getattr(getattr(ctx.curr, "general_info", None), "verbose", False)
+        )
+        for runtime in runtime_moves:
+            if not hasattr(runtime, "progress"):
+                runtime.progress = run_verbose
+        combine_kwargs = dict(self.combine_kwargs)
+        combine_kwargs.setdefault("verbose", run_verbose)
+        combined = GFCombineMove(moves=runtime_moves, **combine_kwargs)
         if not hasattr(combined, "accepted") or combined.accepted is None:
             combined.accepted = np.zeros((ctx.ntemps, ctx.nwalkers))
         return _STEP_CLASSES[self.kind](moves=[combined], **self.step_kwargs)

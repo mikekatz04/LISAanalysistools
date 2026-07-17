@@ -20,6 +20,10 @@ from ..domains import (
 from .plot import RunResultsProduction
 from .state import EMRIState, GBState, GFState, MBHState, SOBBHState
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 logger = getLogger(__name__)
 
 
@@ -802,7 +806,7 @@ class GBHDFBackend(eryn_HDFBackend):
                     successful = True
             except OSError:
                 num_try += 1
-                print(f"Tried to open h5 file {num_try} times.")
+                logger.warning(f"Tried to open h5 file {num_try} times.")
                 time.sleep(20.0)
         if not successful:
             raise OSError("Unable to open h5 file after many tries.")

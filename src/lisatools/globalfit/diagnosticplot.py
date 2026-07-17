@@ -12,6 +12,10 @@ import seaborn as sns
 
 from lisatools.globalfit.hdfbackend import GFHDFBackend
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 #: Interactive debug hooks below are guarded by this (see
 #: globalfit/moves/addremovemove.py). A bare breakpoint() in shipped
 #: code hangs or BdbQuit-kills any non-interactive run.
@@ -372,14 +376,14 @@ class DiagnosticPlotter:
                 else None
             )
 
-        print("Saving diagnostic plots to ", self.savedir)
+        logger.info("Saving diagnostic plots to %s", self.savedir)
 
     def __call__(self, iteration, last_sample, sampler):
         """Print per-move acceptance and write diagnostic plots every ``plot_every`` iterations."""
         if iteration > 0 and iteration % self.plot_every == 0:
 
             for move in sampler.moves:
-                print(
+                logger.info(
                     f"{move.__class__.__name__} acceptance fraction: {np.mean(move.acceptance_fraction[0]):.4f}"
                 )
             discard = int(0.1 * sampler.iteration)
@@ -400,7 +404,7 @@ class DiagnosticPlotter:
                             truths=truths_here,
                         )
                     except Exception as e:
-                        print(f"Error producing plots for branch {branch}: {e}")
+                        logger.error(f"Error producing plots for branch {branch}: {e}")
 
             plot_loglikelihood(sampler, discard=discard, save_dir=self.savedir)
 

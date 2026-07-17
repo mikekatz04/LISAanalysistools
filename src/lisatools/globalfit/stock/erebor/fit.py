@@ -69,6 +69,9 @@ class EreborGeneralSettings(GeneralSettings):
     make_diagnostic_plots: bool = dataclasses.field(
         default_factory=env_default("MAKE_DIAGNOSTIC_PLOTS", True, bool)
     )
+    # Console verbosity (headline knob; env VERBOSE). Default: quiet — logs
+    # go to the run's log files only, no progress bars.
+    verbose: bool = dataclasses.field(default_factory=env_default("VERBOSE", False, bool))
     plot_iterations: int = dataclasses.field(
         default_factory=env_default("PLOT_ITERATIONS", 100, int)
     )
@@ -501,6 +504,7 @@ class EreborFit(StockGlobalFit):
             source_ids=None,
             orbits_class=L1Orbits,
             orbits_kwargs=dict(force_backend=force_backend, frame=gs.orbits_frame),
+            verbose=gs.verbose,
             # NOTE: do NOT pass Tobs here. The engine's preprocess trims the
             # ends and then keeps the first ``Tobs`` seconds, so the final
             # data must be exactly Nf*Nt samples; pre-trimming at load would

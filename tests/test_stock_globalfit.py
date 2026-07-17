@@ -484,6 +484,28 @@ class BranchInfoTest(unittest.TestCase):
         self.assertEqual(clone._info_branches, ["line"])
 
 
+class VerboseKnobTest(unittest.TestCase):
+    def test_default_quiet_everywhere(self):
+        for name in ("blank", "gb_no_fg", "all_sources", "full_year_combined", "noise_only"):
+            with self.subTest(variant=name):
+                fit = erebor.get_stock(name)
+                self.assertFalse(fit.general.verbose)
+                self.assertFalse(fit.verbose)  # headline alias
+                # stock recipes no longer hardcode the combine progress bar on
+                for st in fit.recipe.stages:
+                    self.assertNotIn("verbose", st.combine_kwargs)
+
+    def test_headline_knob_and_env(self):
+        fit = erebor.get_stock("blank", verbose=True)
+        self.assertTrue(fit.general.verbose)
+        fit.verbose = False  # headline alias writes through to general
+        self.assertFalse(fit.general.verbose)
+        with _EnvGuard(VERBOSE="1"):
+            self.assertTrue(erebor.get_stock("blank").general.verbose)
+        with _EnvGuard(VERBOSE="0"):
+            self.assertFalse(erebor.get_stock("blank", ).general.verbose)
+
+
 class BranchCompositionTest(unittest.TestCase):
     def test_add_remove_swap(self):
         fit = erebor.get_stock("all_sources")
