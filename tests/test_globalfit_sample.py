@@ -95,6 +95,20 @@ class BlankSampleSmokeTest(unittest.TestCase):
         last = reader.get_last_sample()
         self.assertIn("line", last.branches)
 
+    def test_bare_canvas_runs(self):
+        # nothing added at all: the hidden idle branch/move keeps the
+        # generator ticking, and store=False leaves storage to the user
+        bare = erebor.blank(
+            nwalkers=4, ntemps=2,
+            file_store_dir=self.tmpdir + "/bare/",
+            make_diagnostic_plots=False,
+        )
+        my_records = []
+        for model, state in bare.sample(iterations=2, store=False, progress=False):
+            my_records.append(state.log_like[0].copy())
+        self.assertEqual(len(my_records), 2)
+        self.assertIn("idle", bare.branches)
+
     def test_post_build_branch_append(self):
         from eryn.prior import uniform_dist
 

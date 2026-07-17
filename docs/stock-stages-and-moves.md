@@ -50,31 +50,32 @@ def my_move(model, state):
 fit.add_branch("line", ndim=2, priors={0: ..., 1: ...}, moves=[my_move])
 
 fit.run()                                     # entrance A: run generally
+
+# the added branch was stored by the default storage machinery — read it back:
+from lisatools.globalfit.hdfbackend import GFHDFBackend
+reader = GFHDFBackend(fit.general_info.main_file_path)
+print(reader.iteration, reader.get_chain()["line"].shape)
 ```
 
 ```python
-# entrance B: the generator — adjust things inside the loop yourself
-for model, state in fit.sample(iterations=100):
-    ...   # inspect/mutate model.analysis_container_arr and state in place;
-          # the next iteration continues from them
-```
+# entrance B: the generator — the loop after build.
+fit = erebor.blank(nwalkers=4, ntemps=2)
+# adjust the branches like above — or keep it with nothing (a hidden no-op
+# "idle" branch keeps the sampler ticking on a bare canvas)
+fit.build()
 
-Storage in the generator is a choice. Add your branch and the **default
-storage machinery** records it every step — coords/inds/log-likes plus the
-recipe bookkeeping land in the run's HDF backend, read back with
-`GFHDFBackend(fit.general_info.main_file_path)`. Or pass ``store=False`` and
-**do the storage yourself inside the loop**, in whatever form you want:
-
-```python
-my_records = []
 for model, state in fit.sample(iterations=100, store=False):
-    my_records.append(state.log_like[0].copy())   # your quantities, your format
+    ...   # customized storage operation user implements
 ```
 
-The two entrances compose: any added branches/moves also run inside the
-generator, and `fit.add_move(...)` mid-loop starts firing on the next
-iteration. You never have to call `build()` — `run()`/`sample()` build on
-demand (an explicit `fit.build()` still works and is where the heavy data
+In the loop, in-place mutations of `model.analysis_container_arr` / `state`
+feed the next iteration. Storage is yours in entrance B: with ``store=False``
+the backend is skipped and you record what you want, in whatever form you
+want; drop it and the default machinery also records every step, exactly as
+in entrance A. The two entrances compose: any added branches/moves also run
+inside the generator, and `fit.add_move(...)` mid-loop starts firing on the
+next iteration. You never have to call `build()` — `run()`/`sample()` build
+on demand (an explicit `fit.build()` still works and is where the heavy data
 load happens).
 
 Bookkeeping the framework owns for a function move: acceptance normalization

@@ -20,12 +20,14 @@ Usage::
         "line", ndim=2, priors={0: uniform_dist(1e-3, 8e-3), 1: uniform_dist(0, 1)},
         moves=[my_move],
     )
-    fit.run()                                # or, the generator:
-    for model, state in fit.sample(iterations=100):
-        ...
-    # storage is a choice: the added branch is recorded to the HDF backend
-    # by the default storage machinery every step, or pass store=False and
-    # record what you want yourself inside the loop.
+    fit.run()   # the added branch is stored by the default storage machinery
+                # (read back with GFHDFBackend(fit.general_info.main_file_path))
+
+    # or, the generator — adjust the branches like above, or keep it with
+    # nothing (a hidden no-op "idle" branch keeps the sampler ticking):
+    fit.build()
+    for model, state in fit.sample(iterations=100, store=False):
+        ...     # customized storage operation user implements
 
 Data: **all zeros by default** on a small fixed WDM grid — the residual starts
 at exactly zero, so the null log-like is exactly 0 and everything you see in
@@ -107,8 +109,20 @@ class BlankGeneralSettings(EreborGeneralSettings):
     likelihood_source_only: bool = True
 
 
+def idle_move(model, state):
+    """No-op move: keeps a bare blank canvas ticking (nothing proposed)."""
+    return state, None
+
+
 class BlankGlobalFit(EreborFit):
-    """Zero-branch stock fit: add your branch + move(s) and run/sample."""
+    """Zero-branch stock fit: add your branch + move(s) and run/sample.
+
+    A truly bare canvas still runs: if nothing was added by build time, a
+    hidden minimal ``idle`` branch (1 parameter, fixed leaf) with a no-op
+    move keeps the sampler ticking, so ``for model, state in fit.sample():``
+    works with nothing configured at all — adjust the residual/state inside
+    the loop and do your own storage there.
+    """
 
     option_name = "blank"
     description = (
@@ -126,6 +140,18 @@ class BlankGlobalFit(EreborFit):
     def default_recipe(self) -> Recipe:
         # One empty PE stage: add_move / add_branch(moves=...) land here.
         return Recipe([Stage("main", kind="pe")])
+
+    def build(self, force: bool = False) -> "BlankGlobalFit":
+        if not self._branch_names and not self.built:
+            # Bare canvas: the engine needs at least one branch and the recipe
+            # at least one move — inject the hidden no-op pair so the
+            # sample() loop can drive everything itself.
+            from eryn.prior import uniform_dist
+
+            self.add_branch(
+                "idle", ndim=1, priors={0: uniform_dist(0.0, 1.0)}, moves=[idle_move]
+            )
+        return super().build(force=force)
 
     def default_preprocess_kwargs(self) -> dict:
         # The synthetic WDM draw needs no highpass/trim/normalize.
