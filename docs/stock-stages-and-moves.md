@@ -59,10 +59,23 @@ for model, state in fit.sample(iterations=100):
           # the next iteration continues from them
 ```
 
-The two compose: any added branches/moves also run inside the generator, and
-`fit.add_move(...)` mid-loop starts firing on the next iteration. You never
-have to call `build()` — `run()`/`sample()` build on demand (an explicit
-`fit.build()` still works and is where the heavy data load happens).
+Storage in the generator is a choice. Add your branch and the **default
+storage machinery** records it every step — coords/inds/log-likes plus the
+recipe bookkeeping land in the run's HDF backend, read back with
+`GFHDFBackend(fit.general_info.main_file_path)`. Or pass ``store=False`` and
+**do the storage yourself inside the loop**, in whatever form you want:
+
+```python
+my_records = []
+for model, state in fit.sample(iterations=100, store=False):
+    my_records.append(state.log_like[0].copy())   # your quantities, your format
+```
+
+The two entrances compose: any added branches/moves also run inside the
+generator, and `fit.add_move(...)` mid-loop starts firing on the next
+iteration. You never have to call `build()` — `run()`/`sample()` build on
+demand (an explicit `fit.build()` still works and is where the heavy data
+load happens).
 
 Bookkeeping the framework owns for a function move: acceptance normalization
 and re-syncing `state.log_like` from the residual after each call (opt out

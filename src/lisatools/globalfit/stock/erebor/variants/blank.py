@@ -23,6 +23,9 @@ Usage::
     fit.run()                                # or, the generator:
     for model, state in fit.sample(iterations=100):
         ...
+    # storage is a choice: the added branch is recorded to the HDF backend
+    # by the default storage machinery every step, or pass store=False and
+    # record what you want yourself inside the loop.
 
 Data: **all zeros by default** on a small fixed WDM grid — the residual starts
 at exactly zero, so the null log-like is exactly 0 and everything you see in
