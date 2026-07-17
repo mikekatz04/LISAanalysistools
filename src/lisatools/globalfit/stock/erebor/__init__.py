@@ -68,6 +68,7 @@ get_stock = _registry.get
 get_stock_options = _registry.options
 
 from .variants.all_sources import AllSourcesGlobalFit  # noqa: E402
+from .variants.blank import BlankGlobalFit  # noqa: E402
 from .variants.full_year_combined import FullYearCombinedGlobalFit  # noqa: E402
 from .variants.gb_no_fg import GBNoForegroundGlobalFit  # noqa: E402
 from .variants.lite import (  # noqa: E402
@@ -80,6 +81,7 @@ from .variants.lite import (  # noqa: E402
 from .variants.noise import NoiseOnlyGlobalFit, NoiseSGWBGlobalFit  # noqa: E402
 
 for _cls in (
+    BlankGlobalFit,
     GBNoForegroundGlobalFit,
     AllSourcesGlobalFit,
     FullYearCombinedGlobalFit,
@@ -102,6 +104,7 @@ __stock_globalfit_options__ = _registry.names()
 # changes the session-wide default for later clones — deliberate, but shared.
 # Every full model has a ``*_lite`` laptop-smoke twin (same machinery, all
 # knobs turned down; equivalently ``erebor.<name>(lite=True)``).
+blank = BlankGlobalFit()
 gb_no_fg = GBNoForegroundGlobalFit()
 all_sources = AllSourcesGlobalFit()
 full_year_combined = FullYearCombinedGlobalFit()

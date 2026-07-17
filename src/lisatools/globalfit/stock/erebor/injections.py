@@ -1314,3 +1314,86 @@ class SyntheticNoiseProcessingStep(BaseProcessingStep):
         if return_orbits:
             return data_signal, self.orbits
         return data_signal
+
+
+class UserDataProcessor(BaseProcessingStep):
+    """Bring-your-own-data processor: wrap user arrays as a run's data source.
+
+    The simplest way to run any stock variant on your own data — hand it the
+    time-domain channels (and optionally your own orbits) and swap it in; an
+    explicit ``data_processor_class`` always wins over the variant default::
+
+        fit = erebor.blank(
+            data_processor_class=UserDataProcessor,
+            processor_init_kwargs=dict(data=my_xyz, dt=5.0, orbits=my_orbits),
+        )
+
+    The inherited ``process``/``pour`` pipeline handles conditioning and the
+    transform into the run's analysis domain, exactly as for loaded data.
+
+    Args:
+        data: Time-domain channel data, shape ``(nchannels, N)`` (a 1D array
+            is treated as one channel).
+        dt: Sample spacing (seconds).
+        t_start: Start time of the stream (seconds).
+        orbits: Optional orbits instance; ``None`` keeps the run's configured
+            orbits.
+        catalogue: Optional injection-truth metadata dict (mojito-shaped),
+            recorded alongside the run.
+    """
+
+    def __init__(
+        self,
+        data: np.ndarray,
+        dt: float,
+        t_start: float = 0.0,
+        orbits=None,
+        catalogue: Optional[dict] = None,
+        verbose: bool = True,
+        do_plots: bool = False,
+    ):
+        data = np.atleast_2d(np.asarray(data, dtype=float))
+        times = np.arange(data.shape[-1]) * dt + t_start
+        BaseProcessingStep.__init__(
+            self, times, data, 1.0 / dt, verbose=verbose, do_plots=do_plots
+        )
+        # ``pour(return_orbits=True)`` hands these to the engine; orbits=None
+        # keeps the settings' orbits.
+        self.orbits = orbits
+        self.catalogue = dict(catalogue) if catalogue else {}
+
+
+class ZeroDataProcessingStep(BaseProcessingStep):
+    """All-zero data streams: the truly blank canvas.
+
+    The residual starts at exactly zero, so with a fixed PSD and a source-only
+    likelihood the null log-like is exactly 0 — inject your own signal (or
+    don't) and everything you see in the residual is yours. Default data
+    source of the ``blank`` stock variant (``include_noise=True`` swaps in the
+    synthetic noise realization instead).
+
+    Args:
+        Tobs: Observation span (seconds); the time grid is ``N = round(Tobs/dt)``.
+        dt: Sample spacing (seconds).
+        t_start: Start time of the stream (seconds).
+        nchannels: Number of TDI channels (3 for XYZ).
+    """
+
+    def __init__(
+        self,
+        Tobs: float,
+        dt: float,
+        t_start: float = 0.0,
+        nchannels: int = 3,
+        verbose: bool = True,
+        do_plots: bool = False,
+    ):
+        N = int(round(Tobs / dt))
+        times = np.arange(N) * dt + t_start
+        BaseProcessingStep.__init__(
+            self, times, np.zeros((nchannels, N)), 1.0 / dt, verbose=verbose, do_plots=do_plots
+        )
+        # pour(return_orbits=True) hands these to the engine; orbits=None keeps
+        # the settings' orbits (the base pour transforms the zero TD stream).
+        self.orbits = None
+        self.catalogue = {}
