@@ -914,6 +914,23 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             self.remove_cold_chain_sources(add_coords_in)
 
+            if os.environ.get("ADDREMOVE_ROUNDTRIP"):
+                _rc = np.asarray(removal_coords)[_dbg_w]
+                _ac = np.asarray(add_coords)[_dbg_w]
+                _same = bool(np.allclose(_rc, _ac))
+                _b = self._dbg_snaps.get("before_removal")
+                _a = self._dbg_snaps.get("after_readd")
+                _dd = lambda x: float(np.sum(np.abs(np.asarray(x)) ** 2)) if x is not None else float("nan")
+                # capture the current residual explicitly (after_readd snapshot
+                # is only taken under _dbg_leaf below)
+                _now = self._dbg_residual(_dbg_w)
+                logger.warning(
+                    "[ROUNDTRIP %s leaf %d w%d] coords_same=%s  |dcoords|=%.3e  "
+                    "sum|resid|^2: before=%.6e  after_readd=%.6e",
+                    self.branch_name, leaf, _dbg_w, _same,
+                    float(np.max(np.abs(_rc - _ac))), _dd(_b), _dd(_now),
+                )
+
             if _dbg_leaf:
                 try:
                     self._dbg_snaps["after_readd"] = self._dbg_residual(_dbg_w)
