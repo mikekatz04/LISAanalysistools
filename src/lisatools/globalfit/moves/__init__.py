@@ -7,6 +7,7 @@ from .gbspecialstretch import (
     GBSpecialRJRefitMove,
     GBSpecialRJSerialSearchMCMC,
     GBSpecialStretchMove,
+    VGBSpecialStretchMove,
 )
 from .globalfitmove import GFCombineMove, GlobalFitMove, Move, MoveBuildContext
 from .mbhspecialmove import MBHSpecialMove, TDMBHSpecialMove

@@ -53,6 +53,7 @@ from .moves import (
     GBSpecialRJPriorMove,
     GBSpecialRJSerialSearchMCMC,
     GBSpecialRJRefitMove,
+    VGBSpecialStretchMove,
 )
 from .moves.gbspecialstretch import GBSpecialBase
 from .moves.globalfitmove import _RuntimeMove
@@ -1015,34 +1016,52 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
         Parameter vector of shape ``(8,)`` in the (V)GB sampling basis
         (ICRS or LISA frame for sky/time parameters).
     """
-    amp = np.array(catalogue_entry["Amplitude"])
-    logA = np.log(amp)
-
     # VALIDATED mojito GB convention (scripts/gb/gb_mojito_match.py +
     # gb_mojito_mcmc_three_ways.py, mm ~ 1e-8 vs band-passed data):
     # catalogue params are consumed AT the catalogue reference epoch
     # (TimeReferenceSSBFrame == MOJITO_REFERENCE_TIME) with NO trim
     # evolution -- the GB kernels' ``t_ref`` is that same epoch. The
-    # PHYSICAL phase is phi0 = +TrueAnomaly; the sampling basis stores
-    # -phi0 because the transform container flips the sign
-    # (``phi0: x -> -x``, JaxGB convention).
+    # PHYSICAL phase is phi0 = +TrueAnomaly; the sampling-basis sign (and
+    # every other basis convention) is single-sourced in
+    # ``make_gb_transform_container`` -- this function only builds the
+    # PHYSICAL row and routes through the container's inverse.
+    from .stock.erebor.transforms import make_gb_transform_container
+
     del trim_duration  # accepted for signature compat; anchor is REF
-    f_init = np.array(catalogue_entry["GW22FrequencySSBFrame"])
-    fdot = np.array(catalogue_entry["GW22FrequencyDerivativeSourceFrame"])
-    phi_init = (-np.array(catalogue_entry["TrueAnomaly"])) % (2 * np.pi)
 
-    f0_mHz = f_init * 1e3
-    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))# % (np.pi)
+    amp = np.asarray(catalogue_entry["Amplitude"], dtype=float)
+    # Physical row in the container's output basis:
+    # [A, f0 (Hz), fdot, fddot, phi0 (+TrueAnomaly), iota, psi, alpha (RA),
+    #  delta (Dec)] -- output columns keep the sampling-style names but hold
+    # the physical values (see the factory docstring).
+    physical = np.stack(
+        [
+            amp,
+            np.asarray(catalogue_entry["GW22FrequencySSBFrame"], dtype=float),
+            np.asarray(
+                catalogue_entry["GW22FrequencyDerivativeSourceFrame"], dtype=float
+            ),
+            np.zeros_like(amp),  # fddot
+            np.asarray(catalogue_entry["TrueAnomaly"], dtype=float),
+            np.asarray(catalogue_entry["InclinationAngle"], dtype=float),
+            np.asarray(catalogue_entry["PolarisationAngle"], dtype=float),
+            np.asarray(catalogue_entry["RightAscension"], dtype=float),
+            np.asarray(catalogue_entry["Declination"], dtype=float),
+        ],
+        axis=-1,
+    )
 
-    ra = np.array(catalogue_entry["RightAscension"]) # alpha
-    dec = np.array(catalogue_entry["Declination"]) # delta
-    psi_icrs = np.array(catalogue_entry["PolarisationAngle"]) % np.pi  # ensure polarization is within [0, pi]
-    # lam_ecl, beta_ecl, psi_ecl= icrs_to_ecliptic(ra, dec, psi_icrs)
+    # fdot basis regardless of the run's chirp-mass mode: this function's
+    # contract is fdot in slot 2 (chirp-mass runs convert downstream).
+    tc = make_gb_transform_container(use_chirp_mass=False)
+    sampled = tc.both_inverse_transforms(physical)
 
-    alpha = ra % (2 * np.pi)
-    sin_delta = np.sin(dec)
-
-    return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_icrs, alpha, sin_delta]).T
+    # Wrap the periodic parameters into the prior support [0, period).
+    input_basis = list(tc.input_basis)
+    sampled[..., input_basis.index("phi0")] %= 2 * np.pi
+    sampled[..., input_basis.index("psi")] %= np.pi
+    sampled[..., input_basis.index("alpha")] %= 2 * np.pi
+    return sampled
 
 
 def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None, priors: ProbDistContainer | None = None):
@@ -1074,7 +1093,32 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
 
         if subset_inds is not None:
             injection_params = injection_params[subset_inds, :]
-        
+
+        # Chirp-mass sampling basis: the catalogue conversion emits fdot in
+        # slot 2; map it onto Mc(f0, fdot).
+        #
+        # TODO(MAJOR, fdot < 0): interacting DWDs with fdot <= 0 have NO
+        # GW-relation chirp mass -- the Mc sampling basis cannot represent
+        # them. They are seeded at the Mc prior floor (fdot ~ 0) below,
+        # which mis-models their frequency evolution (band75 example: the
+        # 7.56749 mHz source, fdot = -9.9e-16; the wdwd mojito catalogue is
+        # an interacting population, so this hits real sources). Chirp-mass
+        # PE silently biases every such source until this gets a proper
+        # treatment: sample fdot directly (legacy basis,
+        # GB_USE_CHIRP_MASS=0), a signed-Mc/fdot extension of the basis, or
+        # a per-source basis switch.
+        if branch_name == "gb" and getattr(curr.source_info[branch_name], "use_chirp_mass", False):
+            from gbgpu.utils.utility import get_chirp_mass_from_f_fdot
+
+            f0_Hz = injection_params[:, 1] * 1e-3
+            fdot = injection_params[:, 2]
+            mc_lo, mc_hi = curr.source_info[branch_name].m_chirp_lims
+            with np.errstate(invalid="ignore"):
+                mc = get_chirp_mass_from_f_fdot(f0_Hz, fdot)
+            injection_params[:, 2] = np.clip(
+                np.where(fdot > 0.0, mc, mc_lo), mc_lo, mc_hi
+            )
+
         # Store injection truths for diagnostic plots
         try:
             setattr(curr.source_info[branch_name], "injection", injection_params)
@@ -2016,6 +2060,189 @@ def build_gb_moves(
 
     return gb_search_moves, gb_pe_moves
 
+def build_vgb_moves(
+    engine_info,
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    state: GFState,
+    *,
+    Tmax: float = 1e6,
+) -> typing.List[VGBSpecialStretchMove]:
+    """Build the VGB in-model stretch move (fixed-dimensional, no RJ).
+
+    The VGB analog of :func:`build_gb_moves`, reduced to what a
+    fixed-dimensional known-source branch needs: seed-template subtraction
+    (leaf-aware transform through the per-leaf fill container), band-info
+    initialization on ``sub_states["vgb"]``, and ONE
+    :class:`~lisatools.globalfit.moves.VGBSpecialStretchMove` named
+    ``"vgb_pe"`` (plain same-leaf stretch; no friends, no info-matrix, no
+    phase maximization; band-temperature swaps run on this move since no RJ
+    move exists to carry them).
+
+    Returns a one-element list (the PE move).
+    """
+    vgb_info = curr.source_info["vgb"]
+    general_info: GeneralSetup = curr.general_info
+    nwalkers: int = general_info.nwalkers
+    ntemps: int = general_info.ntemps
+    data_start_freq_ind = int(acs.start_freq_ind[0])
+    gpus: list[int] = general_info.gpus
+    domain_settings = general_info.domain_settings
+
+    from gbgpu.gbgpu import GBGPU
+    import gbgpu
+
+    _gb_backend = gbgpu.get_backend(general_info.force_backend)
+    if gpus is not None:
+        _gb_backend.set_cuda_device(gpus[0])
+    gb = GBGPU(force_backend=general_info.force_backend, orbits=general_info.gpu_orbits)
+    gb.gpus = gpus if gpus is not None else None
+
+    use_gpu_priors = gpus is not None
+    gpu_priors_in = deepcopy(priors["vgb"].priors_in)
+    for _, item in gpu_priors_in.items():
+        item.use_cupy = use_gpu_priors
+    gpu_priors = {"vgb": ProbDistContainer(gpu_priors_in, use_cupy=use_gpu_priors)}
+
+    band_edges = vgb_info.band_edges
+    band_N_vals = vgb_info.band_N_vals
+    assert band_edges is not None and band_N_vals is not None
+
+    tc = vgb_info.transform
+    input_basis = list(tc.input_basis)
+    nleaves_max_vgb = state.branches["vgb"].shape[-2]
+
+    # VGB coords are seeded by the generic fixed-leaf path in run.py
+    # (multiplicative ``x*(1 + VGB_START_FACTOR*randn)`` scatter around the
+    # injection — magnitude-robust, so fdot ~1e-16 and amp scatter sensibly
+    # without a per-dimension prior-width scale; 0 -> exact truth). The
+    # periodic wrap + prior-bounds check happen in the subtraction block
+    # below.
+
+    # ---- subtract the seeded VGB templates from the residuals ----
+    if (
+        getattr(vgb_info, "signal_gen", None) is None
+        and state.branches["vgb"].inds[0].sum() > 0
+    ):
+        inds0 = state.branches["vgb"].inds[0]  # (nwalkers, nleaves)
+        coords_out = state.branches["vgb"].coords[0, inds0]
+        for _name, _per in (("phi0", 2 * np.pi), ("psi", np.pi)):
+            _i = input_basis.index(_name)
+            coords_out[:, _i] = coords_out[:, _i] % _per
+
+        check = priors["vgb"].logpdf(coords_out)
+        if np.any(np.isinf(check)):
+            raise ValueError(
+                "VGB starting coordinates fall outside the priors; check the "
+                "VGB prior limits against the catalogue values."
+            )
+
+        leaf_inds = np.tile(np.arange(nleaves_max_vgb), (nwalkers, 1))[inds0]
+        coords_in_in = tc.both_transforms(coords_out, leaf_inds=leaf_inds)
+
+        band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
+        walker_vals = np.tile(
+            np.arange(nwalkers), (nleaves_max_vgb, 1)
+        ).transpose((1, 0))[inds0]
+
+        _xp = acs.xp
+        data_index = _xp.asarray(walker_vals).astype(_xp.int32)
+        # goes in as -h (subtract initial template from data residual)
+        factors = -_xp.ones_like(data_index, dtype=_xp.float64)
+        N_vals = band_N_vals[band_inds]
+
+        logger.debug("Subtracting seeded VGB templates from the residuals")
+        if isinstance(domain_settings, FDSettings):
+            num_per_gpu_walker = (
+                len(acs.gpu_splits[0])
+                if (acs.gpus is not None and len(acs.gpus) > 1)
+                else None
+            )
+            gb.generate_global_template(
+                coords_in_in,
+                data_index,
+                acs.linear_data_arr,
+                data_length=acs.data_length,
+                factors=factors,
+                data_splits=acs.gpu_map,
+                num_per_gpu=num_per_gpu_walker,
+                N=N_vals,
+                **{
+                    k: v
+                    for k, v in vgb_info.waveform_kwargs.items()
+                    if k != "N"
+                },
+            )
+        elif isinstance(domain_settings, WDMSettings):
+            if vgb_info.gb_wdm_comp is None:
+                raise ValueError(
+                    "WDM-domain VGB initialization requires "
+                    "vgb_info.gb_wdm_comp (a GBWDMComputations); the variant "
+                    "setup builds it before calling build_vgb_moves."
+                )
+            xp = vgb_info.gb_wdm_comp.xp
+            vgb_info.gb_wdm_comp.fill_global_wdm(
+                coords_in_in,
+                acs.gather_linear_data_arr(),
+                data_index=xp.asarray(data_index),
+                factors=xp.asarray(factors).astype(xp.float64),
+            )
+        else:
+            raise NotImplementedError(
+                f"Domain settings {type(domain_settings).__name__} are not "
+                "supported for VGB initialization."
+            )
+
+    # ---- per-band temperature ladders on the vgb sub-state ----
+    band_temps = np.tile(np.asarray(vgb_info.betas), (len(band_edges) - 1, 1))
+    state.sub_states["vgb"].initialize_band_information(
+        nwalkers, ntemps, band_edges, band_temps
+    )
+    state.sub_states["vgb"].band_info["band_temps"][:] = band_temps
+
+    effective_ndim = engine_info.ndims["vgb"]
+    temperature_control = TemperatureControl(
+        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+    )
+
+    vgb_move = VGBSpecialStretchMove(
+        gb,
+        priors,
+        data_start_freq_ind,
+        acs.end_shape[0],
+        acs,
+        band_edges,
+        band_N_vals,
+        gpu_priors,
+        branch_name="vgb",
+        name="vgb_pe",
+        waveform_kwargs=vgb_info.waveform_kwargs,
+        parameter_transforms=tc,
+        provide_betas=True,
+        skip_supp_names_update=["group_move_points"],
+        random_seed=general_info.random_seed,
+        force_backend=general_info.force_backend,
+        nfriends=nwalkers,
+        temperature_control=temperature_control,
+        num_repeat_proposals=vgb_info.num_repeat_proposals,
+        gb_wdm_comp=vgb_info.gb_wdm_comp,
+        gb_fd_comp=getattr(vgb_info, "gb_fd_comp", None),
+        orbits=getattr(vgb_info, "orbits", None),
+        tdi_config=getattr(vgb_info, "tdi_config", None),
+        t_ref=float(getattr(vgb_info, "t0", 0.0) or 0.0),
+        run_swaps=True,
+        gpus=[],
+        **{
+            k: v
+            for k, v in (vgb_info.group_proposal_kwargs or {}).items()
+            if k != "num_repeat_proposals"
+        },
+    )
+    vgb_move.accepted = np.zeros((ntemps, nwalkers))
+    return [vgb_move]
+
+
 # ======================================================================
 # Source move-builder hierarchy
 #
@@ -2205,6 +2432,25 @@ class GBMoveBuilder(SourceMoveBuilder):
             include_search=self.include_search,
             include_refit=self.include_refit,
             pe_move_names=self.pe_move_names,
+        )
+
+
+class VGBMoveBuilder(SourceMoveBuilder):
+    """Build the VGB in-model stretch move (wraps :func:`build_vgb_moves`).
+
+    No search moves — verification binaries are known sources; the single
+    PE move is the fixed-dimensional same-leaf stretch.
+    """
+
+    branch_name = "vgb"
+
+    def __init__(self, *, Tmax: float = 1e6):
+        super().__init__(branch_name="vgb")
+        self.Tmax = Tmax
+
+    def build(self, engine_info, curr, acs, priors, state):
+        return [], build_vgb_moves(
+            engine_info, curr, acs, priors, state, Tmax=self.Tmax
         )
 
 

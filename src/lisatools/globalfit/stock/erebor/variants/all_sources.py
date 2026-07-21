@@ -78,6 +78,8 @@ from ..source_runtime import (
 )
 from ..stochastic import SGWBSetup
 from .gb_no_fg import GB_MOJITO_T_REF, GBNoFgGBSettings, prepare_gb_branch, setup_gb_moves
+from .vgb import setup_vgb_moves
+from ..vgb import VGBSettings, VGBSetup, prepare_vgb_branch
 from .noise import (
     GALFOR_INJECTION,
     PSD_INJECTION,
@@ -159,7 +161,9 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     # actually present on the fit. In synthetic mode the per-class COUNTS
     # set how many stock injections are built.
     mojito_source_ids: dict = dataclasses.field(
-        default_factory=lambda: {"GB": [0], "MBHB": [0], "EMRI": [1], "SOBHB": [0]}
+        default_factory=lambda: {
+            "GB": [0], "VGB": [0], "MBHB": [0], "EMRI": [1], "SOBHB": [0]
+        }
     )
     # Mojito L1 signals are noiseless: add instrument noise so the psd branch
     # has something to fit (the loaded GB galaxy itself plays the role of the
@@ -253,6 +257,7 @@ class AllSourcesGlobalFit(EreborFit):
     general_settings_class = AllSourcesGeneralSettings
     setup_classes = {
         "gb": GBSetup,
+        "vgb": VGBSetup,
         "psd": PSDSetup,
         "galfor": GalForSetup,
         "mbh": MBHSetup,
@@ -308,6 +313,7 @@ class AllSourcesGlobalFit(EreborFit):
     def default_branches(self) -> typing.Dict[str, Settings]:
         branches = {
             "gb": AllSourcesGBSettings(),
+            "vgb": VGBSettings(),
             "psd": AllSourcesPSDSettings(),
             "galfor": GalForSettings(),
             "mbh": AllSourcesMBHSettings(),
@@ -333,7 +339,15 @@ class AllSourcesGlobalFit(EreborFit):
                         Move("rj_prior", branch="gb"),
                     ],
                     combine_kwargs=dict(share_temperature_control=False),
-                )
+                ),
+                # Verification binaries run in their own dedicated stage
+                # (fixed-dimensional 5D branch, same-leaf stretch, no RJ).
+                Stage(
+                    name="vgb_pe",
+                    kind="pe",
+                    moves=[Move("vgb_pe", branch="vgb")],
+                    combine_kwargs=dict(share_temperature_control=False),
+                ),
             ]
         )
 
@@ -345,7 +359,8 @@ class AllSourcesGlobalFit(EreborFit):
 
             force_backend = gs.gpu_backend if gs.gpus is not None else "cpu"
             branch_to_class = {
-                "gb": "GB", "mbh": "MBHB", "emri": "EMRI", "sobbh": "SOBHB"
+                "gb": "GB", "vgb": "VGB", "mbh": "MBHB", "emri": "EMRI",
+                "sobbh": "SOBHB",
             }
             source_ids = {
                 cls: list(gs.mojito_source_ids.get(cls, []))
@@ -556,6 +571,11 @@ class AllSourcesGlobalFit(EreborFit):
             synthetic_t_start=float(self.general.t_start),
         )
 
+    def _prepare_vgb(self, vgb: VGBSettings, general_setup: GeneralSetup):
+        return prepare_vgb_branch(
+            vgb, general_setup, data_mode=self.general.data_mode
+        )
+
     def _prepare_psd(self, psd: AllSourcesPSDSettings, general_setup: GeneralSetup):
         return prepare_psd_branch(psd, self.general.psd_injection)
 
@@ -636,6 +656,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         n.startswith("rj_") or n.startswith("gb_") for n in requested
     ):
         stock_moves.update(setup_gb_moves(engine_info, curr, acs, priors, state))
+
+    # --- VGB: the fixed-dimensional same-leaf stretch stack ---
+    if "vgb" in curr.source_info and "vgb_pe" in requested:
+        stock_moves.update(setup_vgb_moves(engine_info, curr, acs, priors, state))
 
     # --- PSD (galfor + sgwb ride the same PSDMove) ---
     if "psd" in curr.source_info and any(n.startswith("psd") for n in requested):

@@ -338,6 +338,11 @@ class GFHDFBackend(eryn_HDFBackend):
                 for key in self.sub_backend
                 if self.sub_backend[key] is not None
             }
+            # Stamp each sub-backend with its branch so per-branch group
+            # names resolve correctly (e.g. GBHDFBackend serves both the
+            # "gb" and "vgb" branches; default class attr is "gb").
+            for key, sub in self.sub_backend.items():
+                sub.sub_name = key
 
         self.sub_state_bases = sub_state_bases
         self.recipe_added = False
@@ -394,6 +399,14 @@ class GFHDFBackend(eryn_HDFBackend):
         saved kwargs (merged with any new caller kwargs) are then used to
         reset each sub-backend.
         """
+        # Per-branch sub-backend reset kwargs (``{branch: {...}}``). Routes
+        # branch-specific sizing (e.g. GB and VGB each carry their OWN
+        # ``num_bands`` / ``band_edges``) to the matching sub-backend, since a
+        # flat kwargs merge would let two GB-style branches clobber each
+        # other's band structure. Popped here so eryn's ``super().reset()``
+        # never sees it.
+        sub_reset_kwargs = kwargs.pop("sub_reset_kwargs", None) or {}
+
         # Store sub-backend kwargs before super().reset() deletes the HDF5 group.
         # super().reset() calls `del f[self.name]` which wipes everything,
         # including the sub_backend group. We need to preserve the kwargs
@@ -430,6 +443,11 @@ class GFHDFBackend(eryn_HDFBackend):
                 # Use saved kwargs if available, otherwise fall back to
                 # kwargs passed directly to this reset call.
                 sub_backend_kwargs = sub_backend_saved_kwargs.get(key, {})
+                # Per-branch overrides win (branch-specific band structure);
+                # they take precedence over both the saved and the shared
+                # kwargs so two GB-style branches don't share one band grid.
+                for kw_key, kw_val in sub_reset_kwargs.get(key, {}).items():
+                    sub_backend_kwargs[kw_key] = kw_val
                 # Merge in any kwargs passed by the caller (e.g. num_mbhs,
                 # num_bands, band_edges). Don't use hasattr() to check for
                 # reset_kwargs — it's a @property that reads from the HDF5
@@ -610,7 +628,14 @@ class GFHDFBackend(eryn_HDFBackend):
 
 
 class GBHDFBackend(eryn_HDFBackend):
-    """Sub-backend that persists per-band GB sampler counters."""
+    """Sub-backend that persists per-band GB sampler counters.
+
+    Serves any GB-style banded branch; :class:`GFHDFBackend` stamps
+    :attr:`sub_name` with the branch name at construction (``"gb"``,
+    ``"vgb"``, ...), which keys this sub-backend's HDF group.
+    """
+
+    sub_name: str = "gb"
 
     def reset(self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs):
         """Create the per-band datasets used to back :class:`GBState`."""
@@ -621,7 +646,7 @@ class GBHDFBackend(eryn_HDFBackend):
         with self.open("a") as f:
             g = f[self.name]["sub_backend"]
 
-            band_info = g.create_group("gb")
+            band_info = g.create_group(self.sub_name)
 
             band_info.create_dataset(
                 "band_edges",
@@ -721,13 +746,13 @@ class GBHDFBackend(eryn_HDFBackend):
     def num_bands(self):
         """Get num_bands from h5 file."""
         with self.open() as f:
-            return f[self.name]["sub_backend"]["gb"].attrs["num_bands"]
+            return f[self.name]["sub_backend"][self.sub_name].attrs["num_bands"]
 
     @property
     def band_edges(self):
         """Get band_edges from h5 file."""
         with self.open() as f:
-            return f[self.name]["sub_backend"]["gb"]["band_edges"][:]
+            return f[self.name]["sub_backend"][self.sub_name]["band_edges"][:]
 
     @property
     def reset_kwargs(self):
@@ -739,7 +764,7 @@ class GBHDFBackend(eryn_HDFBackend):
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
-            band_info = g["sub_backend"]["gb"]
+            band_info = g["sub_backend"][self.sub_name]
             # resize all the arrays accordingly
             ntot = g.attrs["iteration"] + ngrow
             for key in band_info:
@@ -798,7 +823,7 @@ class GBHDFBackend(eryn_HDFBackend):
                             "results"
                         )
 
-                    gb_group = g["sub_backend"]["gb"]
+                    gb_group = g["sub_backend"][self.sub_name]
                     v_all = {
                         key: gb_group[key][slice_vals] for key in gb_group if key != "band_edges"
                     }
@@ -846,7 +871,7 @@ class GBHDFBackend(eryn_HDFBackend):
             # minus one because it was updated in the super function
             iteration = g.attrs["iteration"] - 1
 
-            gb_group = g["sub_backend"]["gb"]
+            gb_group = g["sub_backend"][self.sub_name]
 
             # make sure the backend has all the information needed to store everything
             for key in [
@@ -856,7 +881,7 @@ class GBHDFBackend(eryn_HDFBackend):
                     setattr(self, key, g.attrs[key])
 
             # branch-specific
-            for name, dat in state.sub_states["gb"].band_info.items():
+            for name, dat in state.sub_states[self.sub_name].band_info.items():
                 if not isinstance(dat, np.ndarray) or name == "band_edges":
                     continue
                 if name not in gb_group:
@@ -866,7 +891,7 @@ class GBHDFBackend(eryn_HDFBackend):
                 gb_group[name][iteration] = dat
 
         # reset the counter for band info
-        state.sub_states["gb"].reset_band_counters()
+        state.sub_states[self.sub_name].reset_band_counters()
 
     def get_a_sample(self, it):
         """Access a sample in the chain

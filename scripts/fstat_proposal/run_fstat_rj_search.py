@@ -20,6 +20,9 @@ Environment knobs::
     NITER              (engine iterations; default 20)
     NWALKERS / NTEMPS  (default 16 / 6)
     GB_N_LAYERS        (highest target only; default 3)
+    FSTAT_RESUME       (=1: keep an existing backend and continue from its
+                        last sample; pin TOBS_TARGET/NWALKERS/NTEMPS/
+                        CHUNKED_* to the original run's values)
 
 Outputs: run logs + diagnostics under FIT_DIR (default ./gf_runs_fstat_rj/):
 leaf-count and logL traces, alive-leaf f0 traces vs the catalogue, and a
@@ -127,8 +130,12 @@ def main():
     ntemps = int(os.environ.get("NTEMPS", 6))
     peak_grids = [p for p in os.environ.get("FSTAT_PEAK_GRIDS", "").split(",")
                   if p.strip()]
-    if not peak_grids:
-        sys.exit("FSTAT_PEAK_GRIDS is required (comma-separated npz paths)")
+    # In GB_MODE=pe (injection-seeded debug) the F-stat birth distribution is
+    # not needed -- leaves start at truth and the seeded residual is measured
+    # before any RJ birth. Grids are only required for the search.
+    _pe_mode = os.environ.get("GB_MODE", "search") == "pe"
+    if not peak_grids and not _pe_mode:
+        sys.exit("FSTAT_PEAK_GRIDS is required for the search (comma-separated npz paths)")
     comb_cache = os.environ.get("FSTAT_COMB_CACHE", "").strip() or None
     fit_dir = os.environ.get("FIT_DIR", f"./gf_runs_fstat_rj/{target}/")
 
@@ -136,12 +143,16 @@ def main():
           f"  niter={niter}  nwalkers={nwalkers} ntemps={ntemps}", flush=True)
 
     fit = erebor.gb_no_fg(nwalkers=nwalkers, ntemps=ntemps)
-    fit.gb.mode = "search"
+    # search (default) = zero-leaf start; GB_MODE=pe = injection-seeded
+    # leaves (debug-at-truth runs)
+    fit.gb.mode = os.environ.get("GB_MODE", "search")
     fit.general.file_store_dir = fit_dir
     if target == "highest":
         fit.gb.center_freq = src["f0_mHz"] * 1e-3
         fit.gb.n_layers = int(os.environ.get("GB_N_LAYERS", 3))
-    fit.gb.use_chirp_mass = True
+    # GB_USE_CHIRP_MASS=0 -> legacy fdot basis (handles fdot<0 interacting
+    # sources; see the fdot<0 TODO in recipe.setup_state_for_injection)
+    fit.gb.use_chirp_mass = os.environ.get("GB_USE_CHIRP_MASS", "1") == "1"
 
     # empirical tabulated PSD; injection-only data (stock gb_no_fg mojito)
     noise_file = resolve_noise_file(fit.general.mojito_data_path)
@@ -151,12 +162,14 @@ def main():
         extra_components=[MojitoNoiseEstimates(noise_file, which="xyz")],
     )
 
-    # the birth proposal (from cached F-stat grids; no kernel sweep needed)
-    fit.gb.rj_birth_distribution = build_birth_distribution(
-        fit, peak_grids, comb_cache=comb_cache,
-        floor_eps=float(os.environ.get("FSTAT_FLOOR_EPS", 0.1)),
-        comb_weight=float(os.environ.get("FSTAT_COMB_WEIGHT", 0.0)),
-    )
+    # the birth proposal (from cached F-stat grids; no kernel sweep needed).
+    # Skipped when no grids are given in pe mode (default-prior RJ births).
+    if peak_grids:
+        fit.gb.rj_birth_distribution = build_birth_distribution(
+            fit, peak_grids, comb_cache=comb_cache,
+            floor_eps=float(os.environ.get("FSTAT_FLOOR_EPS", 0.1)),
+            comb_weight=float(os.environ.get("FSTAT_COMB_WEIGHT", 0.0)),
+        )
 
     fit.general.num_iterations = niter
 
@@ -165,7 +178,11 @@ def main():
     curr = fit.build()
     print(f"[main]   built in {time.time() - t0:.1f}s", flush=True)
     bp = curr.general_info.main_file_path
-    if bp and os.path.exists(bp):
+    if os.environ.get("FSTAT_RESUME", "0") == "1":
+        # keep the backend: run.py resumes from its last stored sample (the
+        # sampler shape env knobs must match the original run's)
+        print(f"[main] resuming from existing backend {bp}", flush=True)
+    elif bp and os.path.exists(bp):
         os.remove(bp)
         print(f"[main] removed stale backend {bp}", flush=True)
 

@@ -220,6 +220,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         is_rj_prop: Marks this move as a reversible-jump proposal.
         num_repeat_proposals: Inner repeat count per call.
         name: Move name (used for logging and bookkeeping).
+        branch_name: Eryn branch this move operates on. Default ``"gb"``;
+            the VGB move passes ``"vgb"``. All state / prior / periodic
+            dict keys go through this.
+        use_info_mat_proposal: When ``False``, the in-model repeats never
+            build the information-matrix Cholesky proposal (pure stretch).
+            Default ``True`` (GB behavior).
+        swap_on_in_model: Run the band-temperature swap stage even when this
+            move is not an RJ proposal. Default ``False`` (GB reference
+            recipe runs swaps on its RJ moves); the fixed-dimensional VGB
+            move sets ``True`` since it has no RJ move to carry the swaps.
+        preserve_leaf_identity: Write accepted coordinates back to each
+            source's ORIGINAL leaf index instead of re-indexing leaves
+            densely in frequency order. ``None`` (default) auto-resolves to
+            ``True`` when ``f0`` is a per-leaf transform fill (leaf i is a
+            specific physical source, e.g. VGBs) and ``False`` otherwise.
         use_prior_removal: If ``True``, draw RJ proposals from the prior.
         phase_maximize: If ``True``, marginalize over phase in the
             likelihood.
@@ -256,6 +271,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         is_rj_prop=False,
         num_repeat_proposals=100,
         name=None,
+        branch_name="gb",
+        use_info_mat_proposal=True,
+        swap_on_in_model=False,
+        preserve_leaf_identity=None,
         use_prior_removal=False,
         phase_maximize=False,
         gpus=[],
@@ -455,6 +474,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # time, so ACA changes only rewire the engine (see _bind_parent_acs,
         # re-invoked from propose()).
         self.transform_fn = self.parameter_transforms
+
+        # Branch + sampled-basis roles, derived from the transform container
+        # (never hardcoded index literals): the GB reference basis keeps its
+        # historical columns (f0@1, fdot@2, phi0@3) because that is what its
+        # input_basis says, and a reduced basis (e.g. the 5D VGB basis with
+        # f0/sky as per-leaf fills) resolves to its own columns / to None.
+        self.branch_name = branch_name
+        self.use_info_mat_proposal = bool(use_info_mat_proposal)
+        self.swap_on_in_model = bool(swap_on_in_model)
+        if self.transform_fn is not None and hasattr(self.transform_fn, "input_basis"):
+            _ib = list(self.transform_fn.input_basis)
+            self._f0_col = _ib.index("f0") if "f0" in _ib else None
+            self._phi0_col = _ib.index("phi0") if "phi0" in _ib else None
+            self._fdot_col = next(
+                (_ib.index(_k) for _k in ("fdot", "Mc") if _k in _ib), None
+            )
+        else:
+            # legacy GB layout when no container is supplied
+            self._f0_col, self._fdot_col, self._phi0_col = 1, 2, 3
+        # Per-leaf fill metadata (Eryn per-leaf fill_dict): position of f0
+        # among the fill keys + the (nleaves, n_fill) value table, for band
+        # assignment when f0 is not a sampled column.
+        self._per_leaf_fill = getattr(self.transform_fn, "n_leaf_fills", None) is not None
+        self._f0_fill_col = None
+        if self._per_leaf_fill:
+            _fill_keys = list(self.transform_fn.original_fill_dict[0].keys())
+            if "f0" in _fill_keys:
+                self._f0_fill_col = _fill_keys.index("f0")
+        if self._f0_col is None and self._f0_fill_col is None:
+            raise ValueError(
+                f"{type(self).__name__}: 'f0' must be either a sampled column of the "
+                "transform input basis or a per-leaf fill key (band machinery needs it)."
+            )
+        if preserve_leaf_identity is None:
+            preserve_leaf_identity = self._f0_col is None
+        self.preserve_leaf_identity = bool(preserve_leaf_identity)
+        # Whether propose() builds the cold-chain frequency friend table for
+        # the group stretch (subclasses with their own partner scheme skip it).
+        self._build_friend_table = True
         self._gb_fd_comp_user_supplied = gb_fd_comp is not None
         self.gb_fd_comp = gb_fd_comp
         self._proposal_orbits = orbits
@@ -921,7 +979,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if n_src == 0:
                 return np.zeros((nc, Nf_a, Nt_a))
             coords = band_sorter.coords[mask]
-            params_phys = self.transform_fn.both_transforms(coords, xp=cp)
+            params_phys = self.transform_fn.both_transforms(
+                coords, xp=cp,
+                leaf_inds=band_sorter.leaf_inds[mask] if self._per_leaf_fill else None,
+            )
             scratch = cp.zeros(nc * Nf_a * Nt_a)
 
             class _Scratch:
@@ -1746,9 +1807,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         alive = band_sorter.inds[ids].copy()   # True -> death proposal
 
         params = band_sorter.coords[ids].copy()
-        params[:] = self.periodic.wrap({"gb": params[:, None, :]}, xp=xp)["gb"][:, 0]
+        params[:] = self.periodic.wrap({self.branch_name: params[:, None, :]}, xp=xp)[self.branch_name][:, 0]
 
-        logp = cp.asarray(self.gpu_priors["gb"].logpdf(params))
+        logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(params))
         prev_logp = cp.zeros_like(logp)
         curr_logp = cp.zeros_like(logp)
         prev_logp[alive] = logp[alive]
@@ -1898,8 +1959,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             band_sorter.inds[acc_ids] = ~band_sorter.inds[acc_ids]
             # Phase-maximised births carry the rotated phi0 forward.
             band_sorter.coords[acc_ids] = self.periodic.wrap(
-                {"gb": params[accept][:, None, :]}, xp=xp
-            )["gb"][:, 0]
+                {self.branch_name: params[accept][:, None, :]}, xp=xp
+            )[self.branch_name][:, 0]
 
             ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += delta_ll[accept]
             acc_counts[0][t_i[accept], w_i[accept], b_i[accept]] += 1
@@ -1910,11 +1971,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 buffer_obj.add_sources_to_band_buffer(
                     band_sorter.coords[ids[birth_acc]],
                     slots[birth_acc], N_vals[birth_acc],
+                    leaf_inds=band_sorter.leaf_inds[ids[birth_acc]],
                 )
             if bool(death_acc.any()):
                 buffer_obj.remove_sources_from_band_buffer(
                     band_sorter.coords[ids[death_acc]],
                     slots[death_acc], N_vals[death_acc],
+                    leaf_inds=band_sorter.leaf_inds[ids[death_acc]],
                 )
 
     def _compute_proposal_cholesky(self, model, band_sorter, ids):
@@ -1931,9 +1994,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Jacobian of the transform container, conditioned by the fdot
         rescale, inverted, and factorized.
 
-        TODO(known GBs): the fdot conditioning column (sampling index 2) and
-        the 8->9 test_inds layout are still GB-specific; revisit with the
-        known-GB branch.
+        Not used by pure-stretch moves (``use_info_mat_proposal=False``,
+        e.g. the VGB move); the fdot conditioning column is resolved from
+        the transform container's input basis (``self._fdot_col``).
         """
         xp = self.xp
         coords = band_sorter.coords[ids]
@@ -1958,7 +2021,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # ill-conditioned). The proposal draws in the rescaled coordinates
         # y = x / s and maps back with * s (see in_model_proposal).
         s = xp.ones(ndim)
-        s[2] = self._fdot_scale
+        if self._fdot_col is not None:
+            s[self._fdot_col] = self._fdot_scale
         self._proposal_param_scales = s
 
         # Numerical diagonal Jacobian d(phys[test_inds[i]]) / d(y_i) through
@@ -2016,15 +2080,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # stretch math + (ndim-1)*log(zz) factors through find_friends.
             self._friends_for_stretch = band_sorter.draw_friends(source_ids)
             q, factors = self.get_proposal(
-                {"gb": coords[None, :, None, :]},
+                {self.branch_name: coords[None, :, None, :]},
                 model.random,
-                s_inds_all={"gb": xp.ones((1, coords.shape[0], 1), dtype=bool)},
+                s_inds_all={self.branch_name: xp.ones((1, coords.shape[0], 1), dtype=bool)},
             )
-            new_coords = q["gb"][0, :, 0, :]
+            new_coords = q[self.branch_name][0, :, 0, :]
             factors = factors.reshape(-1)
         else:
             # Gaussian jump through the information matrix Cholesky (drawn in the
             # conditioned coordinates y = x / s; mapped back with * s).
+            assert chol is not None, (
+                "info-matrix branch requires use_info_mat_proposal=True"
+            )
             _rand = xp.random.randn(*coords.shape)
             dy = xp.einsum("...ij,...j->...i", chol, _rand)
             new_coords = coords + self.jump_factor * dy * self._proposal_param_scales[None, :]
@@ -2058,10 +2125,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         t_i = picked["temp_inds"][alive]
         w_i = picked["walker_inds"][alive]
         b_i = picked["band_inds"][alive]
+        # Original eryn leaf index of each picked source: threads per-leaf
+        # transform fills (Eryn per-leaf fill_dict) through every buffer
+        # likelihood/fill call below. Scalar-fill containers ignore it.
+        l_i = band_sorter.leaf_inds[ids]
         beta = band_temps[b_i, t_i]
 
         curr = band_sorter.coords[ids].copy()
-        curr[:] = self.periodic.wrap({"gb": curr[:, None, :]}, xp=xp)["gb"][:, 0]
+        curr[:] = self.periodic.wrap({self.branch_name: curr[:, None, :]}, xp=xp)[self.branch_name][:, 0]
 
         # Debug 3x3 sequence figures (channels x template/data/residual) at
         # the four buffer moments of this repeat block, for the chosen
@@ -2094,13 +2165,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 seq["data_const"] = _true
 
         # Take the source out of the cell residual for the whole repeat block.
-        buffer_obj.remove_sources_from_band_buffer(curr, slots, N_vals)
+        buffer_obj.remove_sources_from_band_buffer(curr, slots, N_vals, leaf_inds=l_i)
 
         if seq is not None:
             seq["snaps"]["after_removal"] = self._debug_slab_snapshot(
                 buffer_obj, seq["slot"])
 
-        chol = self._compute_proposal_cholesky(model, band_sorter, ids)
+        # Pure-stretch moves (use_info_mat_proposal=False, e.g. the fixed-
+        # dimensional VGB move) never build the info-matrix Cholesky.
+        chol = (
+            self._compute_proposal_cholesky(model, band_sorter, ids)
+            if self.use_info_mat_proposal
+            else None
+        )
         # Per-source likelihood setup for the repeat block (same stage as
         # the proposal cholesky / friend table). Chunked-het / FD engines
         # no-op; a sig-het computation builds its heterodyne reference
@@ -2108,13 +2185,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # the whole repeat block, so ll_ref below and every repeat's
         # get_add_ll score through the same likelihood.
         sighet_active = bool(
-            buffer_obj.setup_in_model_likelihood(curr, slots, N_vals)
+            buffer_obj.setup_in_model_likelihood(curr, slots, N_vals, leaf_inds=l_i)
         )
         # Drift-refresh anchor: the sampling-basis coords each source's
         # sig-het reference was built at (see the refresh block below).
         ref_track = curr.copy() if sighet_active else None
-        ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals)
-        curr_prior = cp.asarray(self.gpu_priors["gb"].logpdf(curr))
+        ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals, leaf_inds=l_i)
+        curr_prior = cp.asarray(self.gpu_priors[self.branch_name].logpdf(curr))
 
         n4 = (N_vals / 4).astype(int)
         lo_bin = (buffer_obj.frequency_lims[0][slots] / self.df).astype(int)
@@ -2122,17 +2199,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         for move_i in range(self.num_repeat_proposals):
             new, factors = self.in_model_proposal(curr, chol, band_sorter, ids, model)
-            new[:] = self.periodic.wrap({"gb": new[:, None, :]}, xp=xp)["gb"][:, 0]
+            new[:] = self.periodic.wrap({self.branch_name: new[:, None, :]}, xp=xp)[self.branch_name][:, 0]
 
-            new_logp = cp.asarray(self.gpu_priors["gb"].logpdf(new))
+            new_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(new))
             # In-model steps stay within +- N/4 bins of the current source
-            # and inside the band window (widened by N/4).
-            new_bin = cp.abs(new[:, 1] / 1e3 / self.df).astype(int)
-            new_logp[
-                (cp.abs(new[:, 1] / 1e3 - curr[:, 1] / 1e3) / self.df).astype(int) > n4
-            ] = -np.inf
-            new_logp[new_bin < lo_bin - n4] = -np.inf
-            new_logp[new_bin > hi_bin + n4] = -np.inf
+            # and inside the band window (widened by N/4). Skipped when f0 is
+            # a per-leaf fill (not sampled): the proposal cannot move it.
+            if self._f0_col is not None:
+                _fc = self._f0_col
+                new_bin = cp.abs(new[:, _fc] / 1e3 / self.df).astype(int)
+                new_logp[
+                    (cp.abs(new[:, _fc] / 1e3 - curr[:, _fc] / 1e3) / self.df).astype(int) > n4
+                ] = -np.inf
+                new_logp[new_bin < lo_bin - n4] = -np.inf
+                new_logp[new_bin > hi_bin + n4] = -np.inf
 
             keep = ~cp.isinf(new_logp)
             new_ll = cp.full(len(ids), -1e300)
@@ -2140,12 +2220,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 new_ll[keep] = buffer_obj.get_add_ll(
                     new[keep], slots[keep], slots[keep], N_vals[keep],
                     phase_maximize=self.phase_maximize,
+                    leaf_inds=l_i[keep],
                 )
                 if self.phase_maximize and buffer_obj.phase_angle is not None:
-                    new[keep, 3] = new[keep, 3] - buffer_obj.phase_angle
+                    new[keep, self._phi0_col] = (
+                        new[keep, self._phi0_col] - buffer_obj.phase_angle
+                    )
                     new[keep] = self.periodic.wrap(
-                        {"gb": new[keep][:, None, :]}, xp=xp
-                    )["gb"][:, 0]
+                        {self.branch_name: new[keep][:, None, :]}, xp=xp
+                    )[self.branch_name][:, 0]
 
             delta_ll = new_ll - ll_ref
             lnpdiff = beta * delta_ll + (new_logp - curr_prior) + factors
@@ -2201,10 +2284,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 far = far & (beta >= self.sighet_refresh_min_beta)
                 if bool(far.any()):
                     buffer_obj.setup_in_model_likelihood(
-                        curr[far], slots[far], N_vals[far]
+                        curr[far], slots[far], N_vals[far], leaf_inds=l_i[far]
                     )
                     ll_ref[far] = buffer_obj.get_add_ll(
-                        curr[far], slots[far], slots[far], N_vals[far]
+                        curr[far], slots[far], slots[far], N_vals[far],
+                        leaf_inds=l_i[far],
                     )
                     ref_track[far] = curr[far]
                     logger.debug(
@@ -2226,13 +2310,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # Final get_ll value for the traced source (post-repeats), for
             # the addback delta-ll cross-check in the sequence figures.
             seq["ll_ref_final"] = float(_to_numpy(ll_ref)[seq["idx"]])
-        buffer_obj.add_sources_to_band_buffer(curr, slots, N_vals)
+        buffer_obj.add_sources_to_band_buffer(curr, slots, N_vals, leaf_inds=l_i)
         if seq is not None:
             seq["snaps"]["after_addback"] = self._debug_slab_snapshot(
                 buffer_obj, seq["slot"])
+            _idx_sl = slice(seq["idx"], seq["idx"] + 1)
             seq["f0_new"] = float(_to_numpy(
                 self.transform_fn.both_transforms(
-                    curr[seq["idx"]:seq["idx"] + 1], xp=cp)[0, 1]))
+                    curr[_idx_sl], xp=cp,
+                    leaf_inds=l_i[_idx_sl] if self._per_leaf_fill else None,
+                )[0, 1]))
             self._debug_plot_band_sequence(buffer_obj, seq)
 
     def _permute_walkers_for_swaps(self):
@@ -2511,8 +2598,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         TODO: NEED TO PROPERLY MOVE SUPPLEMENTAL INFO BASED ON OLD LEAVES
         (``inds_old`` below is the source-side index for that move).
+
+        With ``preserve_leaf_identity`` (fixed-dimensional branches whose
+        leaf i IS a specific physical source, e.g. VGBs), sources go back
+        to their ORIGINAL leaf index at their CURRENT (temp, walker) labels
+        (tempering only relabels temp/walker; leaves never move), so the
+        per-leaf transform fills stay attached to the right source.
         """
         alive = band_sorter.inds
+
+        if self.preserve_leaf_identity:
+            bn = self.branch_name
+            inds_new = (
+                _to_numpy(band_sorter.temp_inds[alive]),
+                _to_numpy(band_sorter.walker_inds[alive]),
+                _to_numpy(band_sorter.leaf_inds[alive]),
+            )
+            new_state.branches[bn].coords[inds_new] = _to_numpy(
+                band_sorter.coords[alive]
+            )
+            new_state.branches[bn].inds[:] = False
+            new_state.branches[bn].inds[inds_new] = True
+            return
         special_indices_finish = (
             band_sorter.temp_inds[alive] * self.nwalkers
             + band_sorter.walker_inds[alive]
@@ -2544,11 +2651,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _to_numpy(band_sorter.orig_walker_inds[alive]),
             _to_numpy(band_sorter.orig_leaf_inds[alive]),
         )
-        new_state.branches["gb"].coords[inds_new] = _to_numpy(band_sorter.coords[alive])
-        new_state.branches["gb"].inds[:] = False
+        new_state.branches[self.branch_name].coords[inds_new] = _to_numpy(band_sorter.coords[alive])
+        new_state.branches[self.branch_name].inds[:] = False
         # turn on all the ones that are there
-        new_state.branches["gb"].inds[inds_new] = True
-        # new_state.branches["gb"].branch_supplemental[inds_new] = state.branches["gb"].branch_supplemental[inds_old]
+        new_state.branches[self.branch_name].inds[inds_new] = True
+        # new_state.branches[self.branch_name].branch_supplemental[inds_new] = state.branches[self.branch_name].branch_supplemental[inds_old]
 
     def _band_residual_lls(self, acs):
         """Per-band cold-walker residual ll ``-1/2 <r|r>`` from the parent ACA.
@@ -2651,7 +2758,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         increment the iteration counter and running best reset, so the next
         level must re-converge on its own evidence.
         """
-        bi = new_state.sub_states["gb"].band_info
+        bi = new_state.sub_states[self.branch_name].band_info
         cap = bi["band_leaf_cap"]
         iters = bi["band_cap_iters"]
         best = bi["band_best_ll"]
@@ -2667,7 +2774,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.leaf_cap_require_occupancy:
             cold_counts = _to_numpy(band_counts[0])  # (nwalkers, num_bands)
             converged &= cold_counts.max(axis=0) >= cap
-        nleaves_max = new_state.branches["gb"].shape[2]
+        nleaves_max = new_state.branches[self.branch_name].shape[2]
         converged &= cap < nleaves_max
 
         if np.any(converged):
@@ -2721,9 +2828,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # print("start stretch")
 
         # Check that the dimensions are compatible.
-        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb"].shape
+        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords[self.branch_name].shape
 
-        if not self.is_rj_prop and not np.any(state.branches["gb"].inds):
+        if not self.is_rj_prop and not np.any(state.branches[self.branch_name].inds):
             return state, np.zeros((ntemps, nwalkers), dtype=bool)
 
         self.nwalkers = nwalkers
@@ -2737,7 +2844,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # mutates it in place.
         self._band_leaf_cap = None
         if self._leaf_cap_enabled and self.is_rj_prop:
-            bi = state.sub_states["gb"].band_info
+            bi = state.sub_states[self.branch_name].band_info
             ensure_leaf_cap_fields(bi, self.num_bands)
             if np.all(bi["band_leaf_cap"] < 0):
                 bi["band_leaf_cap"][:] = int(self.leaf_cap_start)
@@ -2760,12 +2867,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         new_state = GFState(state, copy=True)
         assert new_state.log_like is not None
 
-        band_temps = cp.asarray(state.sub_states["gb"].band_info["band_temps"].copy())
+        band_temps = cp.asarray(state.sub_states[self.branch_name].band_info["band_temps"].copy())
 
         if self.is_rj_prop:
             orig_store = new_state.log_like[0].copy()
 
-        gb_coords = cp.asarray(new_state.branches["gb"].coords)
+        gb_coords = cp.asarray(new_state.branches[self.branch_name].coords)
 
         self.mempool.free_all_blocks()
 
@@ -2773,12 +2880,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if "N" in waveform_kwargs_now:
             waveform_kwargs_now.pop("N")
 
-        rj_prop = None if not self.is_rj_prop else self.rj_proposal_distribution["gb"]
+        rj_prop = None if not self.is_rj_prop else self.rj_proposal_distribution[self.branch_name]
 
         # make sure all periodic parameters have been put into their range
-        new_state.branches["gb"].coords[:] = self.periodic.wrap(
-            {"gb": new_state.branches["gb"].coords[:].reshape(ntemps * nwalkers, nleaves_max, ndim)}
-        )["gb"].reshape(ntemps, nwalkers, nleaves_max, ndim)
+        new_state.branches[self.branch_name].coords[:] = self.periodic.wrap(
+            {self.branch_name: new_state.branches[self.branch_name].coords[:].reshape(ntemps * nwalkers, nleaves_max, ndim)}
+        )[self.branch_name].reshape(ntemps, nwalkers, nleaves_max, ndim)
 
         # TODO Ask Michael about this print("is this okay for rj? I do not think so, check with below use of gb_inds_in")
         if self.use_prior_removal:  # TODO: make this stronger?
@@ -2788,7 +2895,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         with tm.span("sorter_build"):
             band_sorter = BandSorter(
-                new_state.branches["gb"],
+                new_state.branches[self.branch_name],
                 self.band_edges,
                 self.band_N_vals,
                 force_backend=self.force_backend,
@@ -2807,7 +2914,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Cold-chain friend table for the group-stretch half of the in-model
         # mix (rebuilt every proposal; cheap sort of the cold-chain f0s).
         self._infomat_wdm_logged = False
-        if self.stretch_probability > 0.0:
+        if self.stretch_probability > 0.0 and self._build_friend_table:
             with tm.span("friend_index"):
                 band_sorter.build_friend_index(self.nfriends)
 
@@ -2846,7 +2953,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # print("CHECKING 0:", store_max_diff, self.is_rj_prop)
         # self.check_ll_inject(new_state, verbose=True)
         # assert np.all(start_diffs < 2.0)
-        num_active_leaves = new_state.branches["gb"].inds[0].sum(axis=-1) # cold chain only
+        num_active_leaves = new_state.branches[self.branch_name].inds[0].sum(axis=-1) # cold chain only
         logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
@@ -2901,7 +3008,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.temperature_control is not None
             and self.time % 1 == 0
             and self.ntemps > 1
-            and self.is_rj_prop
+            and (self.is_rj_prop or self.swap_on_in_model)
             and self.run_swaps
             # and False
         ):
@@ -2946,16 +3053,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         et_all = time.perf_counter()
         logger.info(f"Full runtime of {self.name} is {round(et_all - st_all, 3)} seconds.")
-        num_active_leaves = new_state.branches["gb"].inds[0].sum(axis=-1)
+        num_active_leaves = new_state.branches[self.branch_name].inds[0].sum(axis=-1)
         logger.info(f"Number of active leaves in cold chain after proposal: {num_active_leaves}")
 
-        new_inds = cp.asarray(new_state.branches_inds["gb"])
+        new_inds = cp.asarray(new_state.branches_inds[self.branch_name])
         del band_sorter
         with tm.span("mempool_free"):
             self.mempool.free_all_blocks()
         with tm.span("sorter_rebuild"):
             new_band_sorter = BandSorter(
-                new_state.branches["gb"],
+                new_state.branches[self.branch_name],
                 self.band_edges,
                 self.band_N_vals,
                 force_backend=self.force_backend,
@@ -2970,7 +3077,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
 
         # in-model inds will not change
-        tmp_freqs_find_bands = cp.asarray(new_state.branches_coords["gb"][:, :, :, 1])
+        tmp_freqs_find_bands = cp.asarray(new_state.branches_coords[self.branch_name][:, :, :, 1])
 
         # calculate current band counts
         band_here = (
@@ -3001,7 +3108,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # prop/acc counts: row 0 = RJ, row 1 = in-model; band_info wants
         # (num_bands, ntemps) summed over walkers. The two families are
         # recorded separately (one propose produces both kinds).
-        sub = new_state.sub_states["gb"]
+        sub = new_state.sub_states[self.branch_name]
         sub.band_info["band_temps"][:] = _to_numpy(band_temps)
         sub.band_info["band_num_binaries"][:] = band_info["band_counts"]
         sub.accumulate_proposals(
@@ -3034,12 +3141,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._update_band_leaf_caps(model, new_state, band_info["band_counts"])
 
         # if self.is_rj_prop:
-        #     pass  # print(self.name, "2nd count check:", new_state.branches["gb"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
+        #     pass  # print(self.name, "2nd count check:", new_state.branches[self.branch_name].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
 
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplemental)
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
 
-        num_active_sources = new_state.branches["gb"].inds.sum(axis=-1)[0]
+        num_active_sources = new_state.branches[self.branch_name].inds.sum(axis=-1)[0]
         logger.info(f"Current number of active sources in cold chain is {num_active_sources}")
 
         # Stage-timing breakdown for this propose (see _ProposeTimer).
@@ -3106,7 +3213,106 @@ class GBSpecialStretchMove(GBSpecialBase):
     here.
     """
 
-    pass
+
+class VGBSpecialStretchMove(GBSpecialBase):
+    """In-model move for known (verification) galactic binaries.
+
+    Fixed-dimensional (``nleaves_min == nleaves_max``, leaf i = one specific
+    physical source at every walker/temperature), NO RJ. The proposal is a
+    plain Goodman-Weare affine-invariant stretch over the sampled columns:
+    each picked source is stretched against a random OTHER walker of the
+    SAME physical source (same leaf, same temperature). No friend table, no
+    info-matrix Cholesky, no phase maximization.
+
+    The move stores nothing that feeds the proposal: it reshapes the
+    block-start ensemble and hands it to :meth:`eryn.moves.StretchMove.get_proposal`,
+    which does the affine-invariant sampling itself (picks each mover's
+    complement via ``choose_c_vals``, draws the stretch factor ``z``, and
+    returns the ``(ndim - 1) * log(z)`` detailed-balance factors with the
+    true sampled dimensionality — the coords are natively the reduced
+    sampled basis, so nothing to adjust).
+
+    The fixed per-leaf parameters (f0, sky) live in the transform
+    container's per-leaf ``fill_dict`` (Eryn per-leaf fills, selected by
+    ``leaf_inds``).
+    """
+
+    def __init__(self, *args, **kwargs):
+        if kwargs.get("rj_proposal_distribution") is not None or kwargs.get(
+            "is_rj_prop"
+        ):
+            raise ValueError("VGBSpecialStretchMove is in-model only (no RJ).")
+        if kwargs.get("phase_maximize"):
+            raise ValueError("Phase maximization is not used for VGBs.")
+        kwargs.setdefault("branch_name", "vgb")
+        kwargs.setdefault("use_info_mat_proposal", False)
+        # No RJ move carries the band-temperature swaps for this branch.
+        kwargs.setdefault("swap_on_in_model", True)
+        kwargs.setdefault("stretch_probability", 1.0)
+        super().__init__(*args, **kwargs)
+        # Eryn's stretch picks the complement itself; no friend table needed.
+        self._build_friend_table = False
+
+    def in_model_proposal(self, coords, chol, band_sorter, source_ids, model):
+        """Goodman-Weare red-blue stretch over the sampled columns (nothing stored).
+
+        Overrides the base's group-stretch / info-matrix mix. Every picked
+        source is a mover; its complement pool is the OPPOSITE walker-parity
+        walkers of the SAME ``(temperature, leaf)`` -- the same physical
+        source across the ensemble -- read from the block-start sorter
+        coords. Because a source's complement is strictly the other parity,
+        no mover is ever its own (or a same-parity mover's) complement, so
+        the simultaneous update is an unbiased red-blue sweep (both halves
+        move against the fixed other half). Eryn's stretch primitives do the
+        complement draw + affine math + the ``(ndim-1)*log(z)`` factors; the
+        coords are natively the reduced sampled basis, so nothing to adjust.
+
+        NOTE: this is one red-blue sweep per call. With
+        ``num_repeat_proposals == 1`` (the VGB default) the base repeat block
+        calls it exactly once against the block-start ensemble -- correct and
+        unbiased. Running more repeats would reuse the same block-start
+        complement and let the ensemble drift ahead of it (a stale-complement
+        ratchet); a per-repeat complement refresh in the base block would be
+        needed first.
+        """
+        xp = self.xp
+        nw = self.nwalkers
+        assert nw >= 2 and nw % 2 == 0, (
+            "the VGB red-blue stretch needs an even walker count >= 2"
+        )
+        t_i = band_sorter.temp_inds[source_ids]
+        w_i = band_sorter.walker_inds[source_ids]
+        l_i = band_sorter.leaf_inds[source_ids]
+        ndim = coords.shape[-1]
+
+        # block-start ensemble as (ntemps, nwalkers, nleaves, ndim). Valid
+        # because VGB is fixed-dimensional: every leaf is alive at every
+        # (temp, walker), so the flattened sorter coords reshape to the grid.
+        ens4 = band_sorter.coords.reshape(
+            self.ntemps, nw, band_sorter.nleaves_max, ndim
+        )
+        # complement pool per mover: the walkers of its (temp, leaf) in the
+        # OPPOSITE parity (the "fixed other half" of the red-blue split).
+        walker_axis = xp.arange(nw)
+        even_ws = walker_axis[walker_axis % 2 == 0]
+        odd_ws = walker_axis[walker_axis % 2 == 1]
+        # (n_src, nw/2) opposite-parity walker indices for each mover
+        opp_ws = xp.where((w_i % 2 == 0)[:, None], odd_ws[None, :], even_ws[None, :])
+        comp = ens4[t_i[:, None], opp_ws, l_i[:, None], :]        # (n_src, nw/2, ndim)
+
+        # Eryn stretch primitives (each mover is its own single-walker group
+        # on the ntemps axis): choose one complement + affine stretch + z.
+        # Called explicitly so the base's GroupMove.choose_c_vals is bypassed.
+        n, nc = comp.shape[0], comp.shape[1]
+        s = coords[:, None, None, :]                              # (n, 1, 1, ndim)
+        c = comp[:, :, None, :]                                   # (n, nc, 1, ndim)
+        rng = model.random if not self.use_gpu else self.xp.random
+        c_temp = StretchMove.choose_c_vals(self, c, nc, 1, n, rng)
+        new = StretchMove.get_new_points(
+            self, self.branch_name, s, c_temp, 1, s.shape, 0, rng
+        )
+        factors = (ndim - 1.0) * xp.log(self.zz)                  # (n, 1)
+        return new[:, 0, 0, :], factors.reshape(-1)
 
 
 class GBSpecialRJPriorMove(GBSpecialBase):
@@ -3519,7 +3725,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         # run paraensemble MCMC.
         max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
         self.gb.d_d = model.analysis_container_arr.inner_product()[max_logl_walker] # 0.0
-        ndim = branches["gb"].ndim
+        ndim = branches[self.branch_name].ndim
         priors_global = self.priors if not self.backend.uses_cuda else self.gpu_priors            
 
         if self.num_bands == 1:
@@ -3560,13 +3766,13 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         fdot_max = get_fdot_mojito(f0_max, sign="+")
         fdot_min = get_fdot_mojito(f0_max, sign="-")
 
-        priors_in = deepcopy(priors_global)["gb"].priors_in
+        priors_in = deepcopy(priors_global)[self.branch_name].priors_in
         priors_in["f0"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
         priors_in["fdot"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
         priors = {
-            "gb": ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
+            self.branch_name: ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
         }
-        start_params = priors["gb"].rvs(size=(ngroups, ntemps, nwalkers))
+        start_params = priors[self.branch_name].rvs(size=(ngroups, ntemps, nwalkers))
         prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, fdot_min, fdot_max)
         prior_transform_fn.transform_from_prior_basis(start_params, self.xp.arange(ngroups))
 
@@ -3613,14 +3819,14 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             # stopping_fn: Callable = None,
             # stopping_iterations: int=-1,
             prior_transform_fn=prior_transform_fn,
-            name="gb",
+            name=self.branch_name,
             gibbs_sampling_setup=gibbs_sampling_setup,
             # provide_supplemental=False,
         )
 
         from eryn.state import ParaState
 
-        state = ParaState({"gb": start_params}, groups_running=self.xp.ones(ngroups, dtype=bool))
+        state = ParaState({self.branch_name: start_params}, groups_running=self.xp.ones(ngroups, dtype=bool))
         state.log_prior = para_sampler.compute_log_prior(state.branches_coords)
         state.log_like = para_sampler.compute_log_like(state.branches_coords, logp=state.log_prior)
 
@@ -3697,13 +3903,13 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             # stopping_fn: Callable = None,
             # stopping_iterations: int=-1,
             prior_transform_fn=prior_transform_fn_2,
-            name="gb",
+            name=self.branch_name,
             gibbs_sampling_setup=gibbs_sampling_setup_2,
             # provide_supplemental=False,
         )
 
         new_state = ParaState(
-            {"gb": start_params_2}, groups_running=self.xp.ones(ngroups_2, dtype=bool)
+            {self.branch_name: start_params_2}, groups_running=self.xp.ones(ngroups_2, dtype=bool)
         )
         new_state.log_prior = para_sampler_2.compute_log_prior(new_state.branches_coords)
         new_state.log_like = para_sampler_2.compute_log_like(
@@ -3809,7 +4015,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         # gen_ll, gen_opt_snr = para_log_like(gen_samp, *ll_args, fstat=False, return_snr=True)
         # print(gen_ll, self.gb.d_h / gen_opt_snr, gen_opt_snr)
         # breakpoint()
-        self.rj_proposal_distribution = {"gb": rj_dist}
+        self.rj_proposal_distribution = {self.branch_name: rj_dist}
 
 
 # GBSpecialRJSearchMove (the MPI multi-GPU search delegate) was removed
@@ -3854,21 +4060,21 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         #     use_cupy=True,
         # )
         # rj_dist.key_order = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
-        # self.rj_proposal_distribution = {"gb": rj_dist}
+        # self.rj_proposal_distribution = {self.branch_name: rj_dist}
         # return
         # run paraensemble MCMC.
 
         max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
         self.gb.d_d = 0.0  # model.analysis_container_arr.inner_product()[max_logl_walker]
         reader = GFHDFBackend(
-            self.fp, sub_state_bases={"gb": GBState}, sub_backend={"gb": GBHDFBackend}
+            self.fp, sub_state_bases={self.branch_name: GBState}, sub_backend={self.branch_name: GBHDFBackend}
         )
 
         st = time.perf_counter()
         sens_mat = model.analysis_container_arr[max_logl_walker].sens_mat
         if reader.iteration < 2 * samples_keep:
             logger.info("Not enough samples to perform refitting, reverting to priors.")
-            self.rj_proposal_distribution = {"gb": self.priors if not self.backend.uses_cuda else self.gpu_priors}
+            self.rj_proposal_distribution = {self.branch_name: self.priors if not self.backend.uses_cuda else self.gpu_priors}
             return
 
         num_compare_samples = 1
@@ -3912,7 +4118,7 @@ class GBSpecialRJRefitMove(GBSpecialBase):
                 f"Reverting to priors."
             )
             self.rj_proposal_distribution = {
-                "gb": self.priors if not self.backend.uses_cuda else self.gpu_priors
+                self.branch_name: self.priors if not self.backend.uses_cuda else self.gpu_priors
             }
             return
 
@@ -3930,7 +4136,7 @@ class GBSpecialRJRefitMove(GBSpecialBase):
                 f"Reverting to priors..."
             )
             self.rj_proposal_distribution = {
-                "gb": self.priors if not self.backend.uses_cuda else self.gpu_priors
+                self.branch_name: self.priors if not self.backend.uses_cuda else self.gpu_priors
             }
             return
 
@@ -4017,7 +4223,7 @@ class GBSpecialRJRefitMove(GBSpecialBase):
             },
             use_cupy=True,
         )
-        rj_dist.key_order = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+        rj_dist.reset_key_order(["A", "f0", "fdot", "phi0", "cos_iota", "psi", "alpha", "sin_delta"])
         # if self.ranks_needed == 0:
         #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
         #     gmm_info = gather_gmms(gmms)
@@ -4037,7 +4243,7 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         # print(gen_ll, self.gb.d_h / gen_opt_snr, gen_opt_snr)
         # breakpoint()
 
-        self.rj_proposal_distribution = {"gb": rj_dist}
+        self.rj_proposal_distribution = {self.branch_name: rj_dist}
 
 
 def get_param_limits(array): # can be used for debugging of coordinate values

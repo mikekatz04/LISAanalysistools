@@ -212,13 +212,18 @@ def prepare_emri_branch(emri, general_setup: GeneralSetup, gs):
     else:
         inj_mode, inj_seed = synthetic_injection_mode(gs)
         full_basis = make_emri_injections(n, mode=inj_mode, seed=inj_seed)
-    tc = make_emri_transform_container([full_basis[0, 5], full_basis[0, -2]])
+    # PER-LEAF transform fills: [xI0, Phi_theta0] per source (xI0 is the
+    # intrinsic prograde/retrograde flag from the catalogue and can differ
+    # per leaf). ``both_inverse_transforms`` (unfill) is value-independent,
+    # so the injection inverse needs no leaf indices.
+    leaf_fill_values = full_basis[:, [5, 12]]
+    tc = make_emri_transform_container(leaf_fill_values)
     if emri.injection is None:
         emri.injection = tc.both_inverse_transforms(full_basis)
     if getattr(emri, "fill_values", None) is None or not np.asarray(
         emri.fill_values
     ).size:
-        emri.fill_values = np.array([full_basis[0, 5], full_basis[0, 12]])
+        emri.fill_values = leaf_fill_values
     # Full-range priors: None keeps the wide defaults in EMRISetup.
     for lims in ("logm1_lims", "m2_lims", "a_lims", "p0_lims", "e0_lims"):
         if not getattr(emri, lims):
@@ -566,7 +571,7 @@ class SourceSignalGen:
         self.general_info = general_info
         self.cfg = cfg
 
-    def __call__(self, *params, apply_transform=True, **kwargs):
+    def __call__(self, *params, apply_transform=True, leaf_inds=None, **kwargs):
         """Build this branch's template from ``params``.
 
         Args:
@@ -575,11 +580,17 @@ class SourceSignalGen:
                 branch transform and ``params`` are waveform-basis — used by
                 the add/remove move, whose choreography transforms once up
                 front (the transform must be applied exactly once).
+            leaf_inds: Per-row leaf indices, forwarded to the transform.
+                Required (by Eryn) when the branch transform carries
+                per-leaf fills (e.g. EMRI xI0/Phi_theta0) and
+                ``apply_transform=True``; ignored otherwise.
             **kwargs: Forwarded to the wave wrap.
         """
         params_arr = np.asarray(params, dtype=float)
         params_in = (
-            self.transform.both_transforms(params_arr) if apply_transform else params_arr
+            self.transform.both_transforms(params_arr, leaf_inds=leaf_inds)
+            if apply_transform
+            else params_arr
         )
         if self.branch == "emri":
             return get_emri_wave_wrap(self.general_info, self.cfg)(*params_in, **kwargs)

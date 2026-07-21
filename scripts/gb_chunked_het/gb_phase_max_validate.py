@@ -170,8 +170,8 @@ def main():
     # the moves) flips phi0's sign ("phi0": x -> -x, JaxGB convention),
     # so the move-side "sampling col 3 -= angle" equals the physical
     # "phi0 += angle" this engine convention requires. NOTE:
-    # make_gb_transform_container() (the ecliptic-basis stock container)
-    # has NO phi0 flip -- do not pair it with phase-maximised proposals.
+    # make_gb_transform_container() is now THE single stock factory and
+    # carries this same phi0 flip (the old ecliptic no-flip variant is gone).
     from eryn.utils import TransformContainer
     tc = TransformContainer(
         input_basis=["A", "f0", "fdot", "phi0",

@@ -748,7 +748,14 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                 _gb_draws = (
                     _gb_draws.get() if hasattr(_gb_draws, "get") else np.asarray(_gb_draws)
                 )
-                _gb_spread = 1e-4 * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
+                # GB_START_FACTOR: per-dimension seed scatter as a fraction
+                # of each prior width (the "start factor"). 0 seeds walkers
+                # EXACTLY at truth (residual -> 0, per-source convention
+                # check); the default 1e-4 gives a tight true-point start.
+                # With N sources the start logL offset accumulates over
+                # ~8*N dims, so it is only ~0 when this is 0/near-0.
+                _start_factor = float(os.environ.get("GB_START_FACTOR", "1e-4"))
+                _gb_spread = _start_factor * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
                 setup_state_for_injection(
                     curr, state, source_type="GB", branch_name="gb",
                     subset_inds=gb_snr_subset_inds, priors=priors,

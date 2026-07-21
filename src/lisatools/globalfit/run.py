@@ -594,8 +594,18 @@ class GlobalFit:
                     f"(nleaves_max={nleaves_max_key}, ndim={ndim_key})."
                 )
                 self.logger.debug(f"override {key} starting coords to be close to the injection")
-                coords[key] = inj[None, None] + factor * np.random.randn(
-                    self.ntemps, self.nwalkers, nleaves_max_key, ndim_key
+                # MULTIPLICATIVE scatter ``x * (1 + factor * randn)``: each
+                # parameter is perturbed by a FRACTION of its own value, so
+                # dimensions of wildly different magnitude (e.g. GB/VGB fdot
+                # ~1e-16 alongside a ln-amplitude ~-50) all scatter sensibly
+                # off the injection without a per-dimension covariance/width
+                # scale. ``factor = 0`` -> exact injection (truth-null checks).
+                coords[key] = inj[None, None] * (
+                    1.0
+                    + factor
+                    * np.random.randn(
+                        self.ntemps, self.nwalkers, nleaves_max_key, ndim_key
+                    )
                 )
 
             state = GFState(
@@ -606,14 +616,20 @@ class GlobalFit:
             )
 
             # TODO: generalize all this stuff here (?)
-            if "gb" in inds:
+            # GB-style banded branches (gb + the fixed-dimensional vgb) need
+            # their band_info sub-state initialized; the real per-band
+            # temperature ladders are set later in build_gb_moves /
+            # build_vgb_moves.
+            for _banded in ("gb", "vgb"):
+                if _banded not in inds:
+                    continue
                 band_temps = np.zeros(
-                    (len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps)
+                    (len(self.curr.source_info[_banded].band_edges) - 1, self.ntemps)
                 )
-                state.sub_states["gb"].initialize_band_information(
+                state.sub_states[_banded].initialize_band_information(
                     self.nwalkers,
                     self.ntemps,
-                    self.curr.source_info["gb"].band_edges,
+                    self.curr.source_info[_banded].band_edges,
                     band_temps,
                 )
 
@@ -755,21 +771,43 @@ class GlobalFit:
                 if not isinstance(gen_map, dict):
                     continue  # this walker's branches use the fallback below
                 params = {}
+                params_pre_transformed = []
                 for name in self.curr.engine_info.branch_names:
                     if name in ("psd", "galfor") or name not in gen_map:
                         continue
                     inds_w = state.branches_inds[name][0, w]
                     if not inds_w.any():
                         continue
-                    params[name] = state.branches_coords[name][0, w][inds_w]
+                    rows = state.branches_coords[name][0, w][inds_w]
+                    tf = getattr(self.curr.source_info.get(name), "transform", None)
+                    if getattr(tf, "n_leaf_fills", None) is not None:
+                        # PER-LEAF transform fills (e.g. EMRI xI0): the leaf
+                        # identity of each row is needed, so pre-transform
+                        # here and hand the generator waveform-basis rows.
+                        leaf_ids = np.where(inds_w)[0]
+                        params_pre_transformed.append(
+                            (name, tf.both_transforms(rows, leaf_inds=leaf_ids))
+                        )
+                    else:
+                        params[name] = rows
                 handled_by_signal_gen.update(params.keys())
-                if not params:
-                    continue
-                template = ac.build_template(params)
-                # breakpoint()  # debug hook: inspect template vs ac.data here
-                ac.data.add_signal(template, sign=-1)
+                handled_by_signal_gen.update(
+                    name for name, _ in params_pre_transformed
+                )
+                if params:
+                    template = ac.build_template(params)
+                    # breakpoint()  # debug hook: inspect template vs ac.data here
+                    ac.data.add_signal(template, sign=-1)
+                for name, phys_rows in params_pre_transformed:
+                    template = ac.build_template(
+                        {name: phys_rows}, apply_transform=False
+                    )
+                    ac.data.add_signal(template, sign=-1)
 
             # stft_tof fallback for branches without a registered generator.
+            # TODO: add a vgb signal_gen rebuild hook — the per-leaf fill
+            # container makes it trivial (coords + leaf_inds); until then
+            # vgb follows the GB precedent (setup-time subtraction only).
             for name, source_info in self.curr.source_info.items():
                 if name not in self.curr.engine_info.branch_names:
                     continue
@@ -963,12 +1001,18 @@ class GlobalFit:
         )
 
         extra_reset_kwargs = {}
+        # Per-branch reset kwargs, routed to each sub-backend by name so two
+        # GB-style branches (gb + vgb) do not clobber each other's
+        # ``num_bands`` / ``band_edges`` in the flat merge below.
+        sub_reset_kwargs = {}
         # TODO: fix this somehow
         for name in branch_names:
             if name in state.sub_states and state.sub_states[name] is not None:
+                _rk = state.sub_states[name].reset_kwargs
+                sub_reset_kwargs[name] = _rk
                 extra_reset_kwargs = {
                     **extra_reset_kwargs,
-                    **state.sub_states[name].reset_kwargs,
+                    **_rk,
                 }
 
         if not backend.initialized:
@@ -992,6 +1036,7 @@ class GlobalFit:
                 rj=False,
                 moves=None,
                 key_order=key_order,
+                sub_reset_kwargs=sub_reset_kwargs,
                 **extra_reset_kwargs,
             )
 

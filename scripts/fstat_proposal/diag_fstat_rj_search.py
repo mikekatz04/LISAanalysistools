@@ -57,11 +57,12 @@ def main():
     truth = TRUTH[target]
 
     with h5py.File(fp, "r") as f:
-        chain = f["mcmc/chain/gb"][:]          # (it, 1, T, W, L, 8)
-        inds = f["mcmc/inds/gb"][:].astype(bool)
-        ll = f["mcmc/log_like"][:]             # (it, 1, T, W)
-        band_edges = f["mcmc/sub_backend/gb/band_edges"][:]
-        caps = f["mcmc/sub_backend/gb/band_leaf_cap"][:]
+        g = f["mcmc"] if "mcmc" in f else f["global_fit"]
+        chain = g["chain/gb"][:]               # (it, 1, T, W, L, 8)
+        inds = g["inds/gb"][:].astype(bool)
+        ll = g["log_like"][:]                  # (it, 1, T, W)
+        band_edges = g["sub_backend/gb/band_edges"][:]
+        caps = g["sub_backend/gb/band_leaf_cap"][:]
 
     nit, _, T, W, L, ndim = chain.shape
     print(f"iterations={nit}  ntemps={T}  nwalkers={W}  nleaves_max={L}")

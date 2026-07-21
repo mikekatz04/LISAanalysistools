@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from copy import deepcopy
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 try:
     import cupy as xp
@@ -75,10 +75,10 @@ class MoveSignalGen:
     def waveform_gen(self) -> Callable:
         return self._waveform_gen if self._waveform_gen is not None else self.move.waveform_gen
 
-    def __call__(self, *params, apply_transform: bool = True, **kwargs):
+    def __call__(self, *params, apply_transform: bool = True, leaf_inds=None, **kwargs):
         if apply_transform:
             params = self.move.transform_fn.both_transforms(
-                np.asarray(params, dtype=float)
+                np.asarray(params, dtype=float), leaf_inds=leaf_inds
             )
         return self.waveform_gen(*params, **kwargs)
 
@@ -685,6 +685,31 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """Per-iteration setup hook (no-op by default)."""
         return
 
+    #: Leaf currently being processed by the per-leaf proposal loop. The
+    #: transform helper below reads it because some transform call sites
+    #: (the tempering likelihood callback) have an eryn-fixed signature and
+    #: cannot receive leaf indices as arguments.
+    _current_leaf: Optional[int] = None
+
+    def _to_phys(self, coords):
+        """Sampling -> physical rows through the branch transform.
+
+        For containers with PER-LEAF fills (Eryn per-leaf ``fill_dict``,
+        e.g. the EMRI xI0/Phi_theta0 prograde-retrograde flags), every row
+        handled by this move belongs to the leaf currently being processed
+        (``self._current_leaf``); scalar-fill containers (SOBBH/MBH) take
+        the plain path.
+        """
+        if getattr(self.transform_fn, "n_leaf_fills", None) is not None:
+            assert self._current_leaf is not None, (
+                "per-leaf transform used outside the per-leaf loop"
+            )
+            leaf_inds = np.full(
+                np.shape(coords)[:-1], int(self._current_leaf), dtype=int
+            )
+            return self.transform_fn.both_transforms(coords, leaf_inds=leaf_inds)
+        return self.transform_fn.both_transforms(coords)
+
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
         """
         Compute the log likelihood for the given coordinates and data index for use in fancy swapping.
@@ -707,7 +732,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         coords = x[self.branch_name].reshape(-1, x[self.branch_name].shape[-1])
         data_index_in = np.tile(np.arange(self.nwalkers), (ntemps, 1)).flatten().astype(np.int32)
 
-        coords_in = self.transform_fn.both_transforms(coords)
+        coords_in = self._to_phys(coords)
 
         # TODO: need to be careful here when heterodyning about if it is "close"
         output = (
@@ -774,6 +799,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             )
             if not state.branches[self.branch_name].inds[0, 0, leaf]:
                 continue
+            # leaf identity for the per-leaf transform fills (see _to_phys)
+            self._current_leaf = int(leaf)
             # second step of randomizing order (making sure it does not run over)
 
             # fill this temperature control with temperatures from current state
@@ -812,7 +839,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             # remove cold chain sources
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
-            removal_coords_in = self.transform_fn.both_transforms(removal_coords)
+            removal_coords_in = self._to_phys(removal_coords)
             self.add_back_in_cold_chain_sources(removal_coords_in)
 
             if _dbg_leaf:
@@ -832,7 +859,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .coords[: self.ntemps, :, leaf]
                 .reshape(-1, ndim)
             )
-            old_coords_in = self.transform_fn.both_transforms(old_coords)
+            old_coords_in = self._to_phys(old_coords)
 
             data_index_in = (
                 np.tile(np.arange(self.nwalkers), (self.ntemps, 1)).flatten().astype(np.int32)
@@ -944,7 +971,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         if self.pad_out_of_prior and np.any(~in_prior):
                             padded = new_points.reshape(-1, ndim).copy()
                             padded[~in_prior] = new_points.reshape(-1, ndim)[in_prior][0]
-                            new_points_in = self.transform_fn.both_transforms(padded)
+                            new_points_in = self._to_phys(padded)
 
                             data_index = np.asarray(walker_inds_here.astype(np.int32))
 
@@ -952,7 +979,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                             logl = np.where(in_prior, all_logl, -1e300)
 
                         else:
-                            new_points_in = self.transform_fn.both_transforms(
+                            new_points_in = self._to_phys(
                                 new_points.reshape(-1, ndim)[in_prior]
                             )
 
@@ -1061,7 +1088,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             _free_pool()
 
             add_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
-            add_coords_in = self.transform_fn.both_transforms(add_coords)
+            add_coords_in = self._to_phys(add_coords)
 
             _dbg_tmpl = None
             if _dbg_leaf:
@@ -1178,11 +1205,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """
         for leaf in range(old_state.branches[self.branch_name].shape[-2]):
             removal_coords = old_state.branches[self.branch_name].coords[0, :, leaf]
-            removal_coords_in = self.transform_fn.both_transforms(removal_coords)
+            self._current_leaf = int(leaf)
+            removal_coords_in = self._to_phys(removal_coords)
             self._apply_cold_chain_sources(removal_coords_in, sign=+1)
 
             add_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
-            add_coords_in = self.transform_fn.both_transforms(add_coords)
+            add_coords_in = self._to_phys(add_coords)
             self._apply_cold_chain_sources(add_coords_in, sign=-1)
 
         _free_pool()

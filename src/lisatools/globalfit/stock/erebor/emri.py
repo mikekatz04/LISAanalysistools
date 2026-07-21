@@ -40,7 +40,12 @@ class EMRISettings(Settings):
     waveform_kwargs: Optional[dict] = None
     injection: Optional[np.ndarray] = None  # AS here only for the starting state
     info_matrix_gen: Optional[Any] = None  # todo change name to info matrix or smth
-    fill_values: np.ndarray = dataclasses.field(default_factory=lambda: np.array([1.0, 0.0]))
+    # ``[xI0, Phi_theta0]`` transform fills. None -> resolved per leaf from
+    # the injection catalogue in ``prepare_emri_branch`` (an ``(nleaves, 2)``
+    # table — xI0 is the intrinsic prograde/retrograde flag and can differ
+    # per leaf), with a ``[1.0, 0.0]`` prograde fallback in
+    # ``init_sampling_info`` when nothing resolves it.
+    fill_values: Optional[np.ndarray] = None
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
     num_prop_repeats: Optional[int] = 10
@@ -83,6 +88,9 @@ class EMRISetup(Setup):
             "Phi_r0",
         ]
 
+        if self.fill_values is None:
+            # prograde-equatorial fallback (synthetic/no-catalogue runs)
+            self.fill_values = np.array([1.0, 0.0])
         if self.transform is None:
             self.transform = make_emri_transform_container(self.fill_values)
 
@@ -188,13 +196,31 @@ class EMRISetup(Setup):
         # combinations the Kerr ecc-eq grid cannot generate get logpdf -inf
         # (and rvs rejection-resamples), matching the -1e300 likelihood
         # sentinel applied when a waveform call fails on a domain error.
+        # Shared prior-level FEW domain gate. With PER-LEAF fills the prior
+        # has no leaf identity: a uniform prograde/retrograde population
+        # keeps its exact gate; mixed populations fall back to the prograde
+        # grid here and rely on the likelihood's FEW domain-error sentinel
+        # (-1e300) for per-leaf validity.
+        # TODO: per-leaf domain gate in EMRIKerrDomainPrior.
+        _fv = np.asarray(self.fill_values, dtype=float)
+        _xi_vals = np.unique(_fv[:, 0]) if _fv.ndim == 2 else _fv[:1]
+        if len(_xi_vals) == 1:
+            _xi_fill = float(_xi_vals[0])
+        else:
+            self.logger.warning(
+                "EMRI leaves mix prograde and retrograde xI0 "
+                f"({_xi_vals.tolist()}); the shared prior domain gate uses "
+                "the prograde grid (per-leaf validity via the likelihood's "
+                "FEW domain-error sentinel)."
+            )
+            _xi_fill = 1.0
         self.priors = {
             "emri": EMRIKerrDomainPrior(
                 priors_emri,
                 a_index=input_basis.index("a"),
                 p0_index=input_basis.index("p0"),
                 e0_index=input_basis.index("e0"),
-                xI_fill=float(np.asarray(self.fill_values)[0]),
+                xI_fill=_xi_fill,
             )
         }
 

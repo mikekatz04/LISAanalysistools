@@ -510,7 +510,8 @@ class BranchCompositionTest(unittest.TestCase):
     def test_add_remove_swap(self):
         fit = erebor.get_stock("all_sources")
         self.assertEqual(
-            list(fit.branches), ["gb", "psd", "galfor", "mbh", "emri", "sobbh"]
+            list(fit.branches),
+            ["gb", "vgb", "psd", "galfor", "mbh", "emri", "sobbh"],
         )
         removed = fit.remove_branch("galfor")
         self.assertNotIn("galfor", fit.branches)
@@ -613,7 +614,7 @@ class DataProcessorSwapTest(unittest.TestCase):
         self.assertIs(gs.data_processor_class, L1ProcessingStepWithSyntheticNoise)
         self.assertEqual(
             sorted(gs.processor_init_kwargs["source_ids"]),
-            ["EMRI", "GB", "MBHB", "SOBHB"],
+            ["EMRI", "GB", "MBHB", "SOBHB", "VGB"],
         )
 
         gs = erebor.get_stock("all_sources", data_mode="sangria").make_general_settings()

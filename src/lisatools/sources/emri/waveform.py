@@ -29,7 +29,10 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import numpy as np
+
 from ...utils.constants import YRSID_SI
+from ..utils import icrs_to_ecliptic
 
 # imports
 from ..waveformbase import AETTDIWaveform
@@ -41,6 +44,78 @@ from ..waveformbase import AETTDIWaveform
 EMRI_STOCK_RESPONSE_ORDER = 40
 EMRI_STOCK_TDI_GENERATION = "2nd generation"
 EMRI_STOCK_TDI_CHAN = "XYZ"
+
+
+def emri_catalogue_to_waveform_basis(entry: dict) -> np.ndarray:
+    """Convert one mojito EMRI catalogue entry to the 14-param FEW waveform basis.
+
+    This is the *catalogue -> physical (transform-container output basis)*
+    glue: named-field selection, the ICRS -> ecliptic frame rotation, and
+    unit conversions. Everything downstream of the returned physical row
+    routes through the EMRI :class:`~eryn.utils.TransformContainer`
+    (``both_inverse_transforms`` for the sampling-basis injection).
+
+    SPECIAL EMRI frame (validated 2026-06-19,
+    ``scripts/sobbh/emri_frame_convert_check.py``): ECLIPTIC-POLAR sky angles
+    (``qS = pi/2 - ecliptic latitude``, ``phiS = ecliptic longitude``,
+    converted from the catalogue ICRS RA/Dec) together with the RAW catalogue
+    spin angles (``qK``/``phiK`` NOT converted — ecliptic-converting the spin
+    produced the spurious 1.49x amplitude).
+
+    ``xI0`` is the INTRINSIC orbital prograde/retrograde flag — entirely
+    separate from the response's viewing-inclination geometry (which FEW
+    derives internally from the qS/qK sky+spin angles). The catalogue
+    encodes it as ``InclinationAngle`` in {0, pi}:
+    ``xI0 = cos(InclinationAngle)`` snapped to exactly +-1
+    (FastKerrEccentricEquatorialFlux requires exactly +-1). It is fixed per
+    source and can differ per leaf — carried through the sampler by the
+    transform container's per-leaf ``fill_dict``.
+
+    Pair with a ``get_emri_response_wrapper(special_frame=True)`` generator so
+    the sky is converted back ecliptic -> ICRS for ``frame="icrs"`` orbits.
+
+    The ICRS -> ecliptic conversion is the LISA-DDPC-SEG-TN-007 fixed-obliquity
+    rotation (``lisatools.sources.utils.icrs_to_ecliptic``, the mojito
+    convention) — the same one the validated full_year settings used — NOT the
+    astropy ``barycentrictrueecliptic`` version in
+    ``lisatools.response.directresponse`` (they differ by ~1e-4 rad).
+
+    Args:
+        entry: One source's catalogue dict (mojito L1 ``catalogue["EMRI"][i]``).
+
+    Returns:
+        ``(14,)`` array ``[M, mu, a, p0, e0, xI0, dist (Gpc), qS, phiS, qK,
+        phiK, Phi_phi0, Phi_theta0, Phi_r0]``.
+    """
+    ra = float(entry["RightAscension"]) % (2 * np.pi)
+    dec = float(entry["Declination"])
+    lam_S, beta_S = icrs_to_ecliptic(ra, dec)
+    # intrinsic prograde/retrograde flag, snapped to exactly +-1
+    xI0 = float(np.cos(float(entry["InclinationAngle"])))
+    if not np.isclose(abs(xI0), 1.0, atol=1e-8):
+        raise ValueError(
+            "EMRI catalogue InclinationAngle must be 0 or pi (prograde/"
+            f"retrograde flag); got {float(entry['InclinationAngle'])!r}."
+        )
+    xI0 = float(np.sign(xI0))
+    return np.array(
+        [
+            entry["PrimaryMassSSBFrame"],  # M
+            entry["SecondaryMassSSBFrame"],  # mu
+            entry["PrimarySpinParameter"],  # a
+            entry["SemiLatusRectum"],  # p0
+            entry["Eccentricity"],  # e0
+            xI0,  # intrinsic prograde (+1) / retrograde (-1)
+            entry["LuminosityDistance"] / 1e3,  # dist (Mpc -> Gpc)
+            float(np.pi / 2 - beta_S),  # qS (ecliptic polar)
+            float(lam_S) % (2 * np.pi),  # phiS (ecliptic longitude)
+            entry["PolarAnglePrimarySpin"],  # qK (RAW file spin)
+            entry["AzimuthalAnglePrimarySpin"],  # phiK (RAW file spin)
+            entry["AzimuthalPhase"],  # Phi_phi0
+            entry["PolarPhase"],  # Phi_theta0
+            entry["RadialPhase"],  # Phi_r0
+        ]
+    )
 
 
 class EMRITDIWaveform(AETTDIWaveform):

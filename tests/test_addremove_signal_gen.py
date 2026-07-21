@@ -38,7 +38,7 @@ class RecordingTransform:
     def __init__(self):
         self.calls = 0
 
-    def both_transforms(self, params):
+    def both_transforms(self, params, leaf_inds=None):
         self.calls += 1
         out = np.array(params, dtype=float)
         out[..., 0] = 2.0 * out[..., 0]

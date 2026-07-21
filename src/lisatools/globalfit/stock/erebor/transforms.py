@@ -63,50 +63,99 @@ def ten_to_the_x(x):
     return 10.0 ** x
 
 
-def make_gb_transform_container():
-    """Build the stock GB :class:`TransformContainer` (forward + inverse).
+def make_gb_transform_container(
+    *,
+    use_chirp_mass: bool = False,
+    input_basis: list | None = None,
+    fill_dict: dict | list | None = None,
+) -> TransformContainer:
+    """THE stock (V)GB :class:`TransformContainer` factory (forward + inverse).
 
-    Sampling basis: ``A (ln), f0 (mHz), fdot, phi0, cos_iota, psi, lam,
-    sin_beta``; output basis adds the filled ``fddot``. The inverse
-    transforms enable ``both_inverse_transforms`` (full basis -> sampling
-    basis).
+    Single source of the GB transform convention — the ICRS run frame and,
+    in particular, the **phi0 sign**: sampling ``phi0`` is NEGATED to the
+    physical basis ("match JaxGB convention"). The physical/waveform phase
+    is ``phi0 = +TrueAnomaly`` (validated GB<->mojito convention); the
+    sampling coordinate therefore stores ``-TrueAnomaly``. Do not encode
+    this sign anywhere else — catalogue conversions must route through this
+    container's ``both_inverse_transforms``.
+
+    Full sampling basis: ``A (ln), f0 (mHz), Mc|fdot, phi0, cos_iota, psi,
+    alpha, sin_delta`` (ICRS sky); the 9-name output basis adds the filled
+    ``fddot``. Output columns keep the sampling-style names but hold the
+    PHYSICAL values after the registered transforms run (``A``: amplitude,
+    ``f0``: Hz, ``cos_iota``: iota, ``sin_delta``: delta).
+
+    Args:
+        use_chirp_mass: Slot 2 carries ``Mc`` (Msol) instead of ``fdot``;
+            the ``(f0, Mc) -> (f0, fdot)`` pair transform + ``key_map``
+            recover the physical fdot (the GBSetup chirp-mass convention).
+        input_basis: Subset (in order) of the full sampling basis actually
+            sampled. Default: all 8. The 5D VGB basis passes
+            ``["A", "fdot", "phi0", "cos_iota", "psi"]`` with the fixed
+            ``f0``/``alpha``/``sin_delta`` supplied through ``fill_dict``.
+        fill_dict: Fill spec for the non-sampled output parameters. Default
+            ``{"fddot": 0.0}``. May be a LIST of per-leaf dicts (Eryn
+            per-leaf fills; transform calls then need ``leaf_inds``) for
+            fixed-source branches, e.g. ``{"fddot": 0.0, "f0": f0_i,
+            "alpha": alpha_i, "sin_delta": sin_delta_i}`` per VGB leaf.
+            Fill values are in SAMPLING units (f0 in mHz, ``sin_delta`` —
+            not delta): the registered transforms run on the filled columns
+            exactly like on sampled ones, so the physical basis comes out
+            in Hz / delta.
     """
-    input_basis = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
+    full_sampling_basis = [
+        "A", "f0", "Mc" if use_chirp_mass else "fdot", "phi0",
+        "cos_iota", "psi", "alpha", "sin_delta",
+    ]
+    if input_basis is None:
+        input_basis = full_sampling_basis
+    else:
+        unknown = [key for key in input_basis if key not in full_sampling_basis]
+        if unknown:
+            raise ValueError(
+                f"input_basis entries {unknown} are not in the GB sampling "
+                f"basis {full_sampling_basis}."
+            )
+        input_basis = list(input_basis)
+
+    output_basis = [
+        "A", "f0", "fdot", "fddot", "phi0",
+        "cos_iota", "psi", "alpha", "sin_delta",
+    ]
 
     gb_transform_fn_in = {
         "A": np.exp,
         "f0": f_ms_to_s,
+        "phi0": negate,  # flip sign of phi0 to match JaxGB convention.
         "cos_iota": np.arccos,
-        "sin_beta": np.arcsin,
+        "sin_delta": np.arcsin,
     }
-
     gb_inverse_transform_fn_in = {
         "A": np.log,
         "f0": f_s_to_ms,
+        "phi0": negate,  # its own inverse
         "cos_iota": np.cos,
-        "sin_beta": np.sin,
+        "sin_delta": np.sin,
     }
+    gb_key_map = None
+    if use_chirp_mass:
+        # After fill_values, the Mc value lives at the fdot slot (key_map
+        # "Mc"->"fdot"). The multi-parameter transform then computes
+        # (f0[Hz], fdot) from (f0[Hz], Mc); the single-param f0: f_ms_to_s
+        # runs first so both f0 slots see Hz.
+        gb_transform_fn_in[("f0", "Mc")] = mchirp_to_fdot_pair
+        gb_inverse_transform_fn_in[("f0", "Mc")] = fdot_to_mchirp_pair
+        gb_key_map = {"Mc": "fdot"}
 
-    output_basis = [
-        "A",
-        "f0",
-        "fdot",
-        "fddot",
-        "phi0",
-        "cos_iota",
-        "psi",
-        "lam",
-        "sin_beta",
-    ]
-    gb_fill_dict = {"fddot": 0.0}
-
-    # gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
+    if fill_dict is None:
+        fill_dict = {"fddot": 0.0}
 
     return TransformContainer(
         input_basis=input_basis,
         output_basis=output_basis,
         parameter_transforms=gb_transform_fn_in,
-        fill_dict=gb_fill_dict,
+        fill_dict=fill_dict,
+        key_map=gb_key_map,
         inverse_parameter_transforms=gb_inverse_transform_fn_in,
     )
 
@@ -218,8 +267,12 @@ def make_emri_transform_container(fill_values):
     ``both_inverse_transforms`` (full basis -> sampling basis).
 
     Args:
-        fill_values: Length-2 sequence with the fill values for ``xI0``
-            (inclination) and ``Phi_theta0``.
+        fill_values: EITHER a length-2 sequence ``[xI0, Phi_theta0]`` filled
+            identically for every leaf, OR an ``(nleaves, 2)`` array (or
+            list of per-leaf pairs) — one fill per leaf (Eryn per-leaf
+            ``fill_dict``: ``xI0`` is the intrinsic prograde/retrograde flag
+            fixed per EMRI source, so it can differ per leaf; transform
+            calls then require ``leaf_inds``).
     """
     input_basis = [
         "logm1",
@@ -255,10 +308,17 @@ def make_emri_transform_container(fill_values):
 
     # for transforms
 
-    emri_fill_dict = {
-        "xI0": fill_values[0],  # inclination
-        "Phi_theta0": fill_values[1],  # Phi_theta
-    }
+    _fv = np.asarray(fill_values, dtype=float)
+    if _fv.ndim == 2:
+        # per-leaf fills (Eryn per-leaf fill_dict) — one dict per leaf
+        emri_fill_dict = [
+            {"xI0": row[0], "Phi_theta0": row[1]} for row in _fv
+        ]
+    else:
+        emri_fill_dict = {
+            "xI0": _fv[0],  # inclination (prograde/retrograde flag)
+            "Phi_theta0": _fv[1],  # Phi_theta
+        }
 
     emri_transform_fn_in = {
         output_basis[0]: np.exp,  # M

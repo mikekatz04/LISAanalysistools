@@ -38,6 +38,7 @@ from .stochastic import (  # noqa: F401
     get_sgwb_erebor_settings,
 )
 from .sobbh import SOBBHHDFBackend, SOBBHSettings, SOBBHSetup, SOBBHState  # noqa: F401
+from .vgb import VGBSettings, VGBSetup, prepare_vgb_branch  # noqa: F401
 from .transforms import (  # noqa: F401
     LISA_to_SSB,
     SSB_to_LISA,
@@ -79,10 +80,12 @@ from .variants.lite import (  # noqa: E402
     NoiseSGWBLiteGlobalFit,
 )
 from .variants.noise import NoiseOnlyGlobalFit, NoiseSGWBGlobalFit  # noqa: E402
+from .variants.vgb import VGBGlobalFit  # noqa: E402
 
 for _cls in (
     BlankGlobalFit,
     GBNoForegroundGlobalFit,
+    VGBGlobalFit,
     AllSourcesGlobalFit,
     FullYearCombinedGlobalFit,
     NoiseOnlyGlobalFit,
@@ -106,6 +109,10 @@ __stock_globalfit_options__ = _registry.names()
 # knobs turned down; equivalently ``erebor.<name>(lite=True)``).
 blank = BlankGlobalFit()
 gb_no_fg = GBNoForegroundGlobalFit()
+# NOTE: rebinds the package attribute ``erebor.vgb`` from the branch
+# submodule (stock/erebor/vgb.py) to the default fit instance — the module
+# stays importable as ``lisatools.globalfit.stock.erebor.vgb`` (sys.modules).
+vgb = VGBGlobalFit()
 all_sources = AllSourcesGlobalFit()
 full_year_combined = FullYearCombinedGlobalFit()
 noise_only = NoiseOnlyGlobalFit()

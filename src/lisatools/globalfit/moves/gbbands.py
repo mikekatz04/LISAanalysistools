@@ -360,6 +360,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
         self.special_indices_unique = special_indices_unique
         self.transform_fn = transform_fn
+        # Container-derived roles: phi0's sampled column (phase-max rotation)
+        # and whether the container holds per-leaf fills (Eryn per-leaf
+        # fill_dict) -- in that case every sampling->physical conversion in
+        # this buffer needs the per-row ``leaf_inds``.
+        _ib = list(getattr(transform_fn, "input_basis", []) or [])
+        self._phi0_col = _ib.index("phi0") if "phi0" in _ib else 3
+        self._per_leaf_fill = getattr(transform_fn, "n_leaf_fills", None) is not None
         self.waveform_kwargs = waveform_kwargs
         self.opt_snr_rej_samp_limit = opt_snr_rej_samp_limit
         self.use_template_arr = use_template_arr
@@ -1014,7 +1021,17 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     # shadows the inherited per-AC ACA dispatch).
     band_likelihoods = likelihood
 
-    def get_swap_ll(self, params_remove, params_add, data_index, N_vals, phase_maximize=False):
+    def _to_phys(self, params, leaf_inds=None):
+        """Sampling -> physical rows through the transform container.
+
+        ``leaf_inds`` (per-row leaf indices) is required by containers built
+        with a per-leaf ``fill_dict`` list (Eryn validates); scalar-fill
+        containers ignore it.
+        """
+        return self.transform_fn.both_transforms(params, xp=cp, leaf_inds=leaf_inds)
+
+    def get_swap_ll(self, params_remove, params_add, data_index, N_vals, phase_maximize=False,
+                    leaf_inds=None):
         """Per-proposal swap log-likelihood difference.
 
         Domain-agnostic: dispatches to ``self._likelihood_engine.get_swap_ll``,
@@ -1025,8 +1042,8 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         rejection-sampling clamp and the phase-maximisation correction live
         here so the engine stays a thin wrapper around the kernel.
         """
-        params_remove_phys = self.transform_fn.both_transforms(params_remove, xp=cp)
-        params_add_phys = self.transform_fn.both_transforms(params_add, xp=cp)
+        params_remove_phys = self._to_phys(params_remove, leaf_inds=leaf_inds)
+        params_add_phys = self._to_phys(params_add, leaf_inds=leaf_inds)
 
         result = self._likelihood_engine.get_swap_ll(
             self,
@@ -1049,7 +1066,9 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             # Engine returns the per-proposal phase rotation applied during
             # phase-maximisation; subtract it from phi0 so the accepted
             # parameters reflect the maximised draw.
-            params_add[kept, 3] = params_add[kept, 3] - result.phase_angle
+            params_add[kept, self._phi0_col] = (
+                params_add[kept, self._phi0_col] - result.phase_angle
+            )
 
         # Rejection sampling on SNR: only applied to *add* proposals (the
         # remove side's opt_snr is meaningless when amp_add is tiny).
@@ -1062,7 +1081,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         return ll_diff
 
     def get_ll(self, params, data_index, noise_index, N_vals, phase_maximize=False,
-               return_inner_products=False):
+               return_inner_products=False, leaf_inds=None):
         """Per-source log-likelihood against the cell residuals.
 
         Domain-agnostic dispatch like :meth:`get_swap_ll`. Returns the
@@ -1074,7 +1093,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         :attr:`d_h_out` / :attr:`h_h_out`, and :attr:`phase_angle` carries
         the maximising rotation when ``phase_maximize=True``.
         """
-        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        params_phys = self._to_phys(params, leaf_inds=leaf_inds)
         ll = self._likelihood_engine.get_ll(
             self,
             params_phys,
@@ -1095,7 +1114,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             return ll, self.d_h_out, self.h_h_out, self.phase_angle
         return ll
 
-    def setup_in_model_likelihood(self, params, data_index, N_vals=None) -> None:
+    def setup_in_model_likelihood(self, params, data_index, N_vals=None, leaf_inds=None) -> None:
         """Per-source in-model likelihood setup (once per repeat block).
 
         Forwards the picked sources' CURRENT sampling-basis params
@@ -1110,7 +1129,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         Returns the engine hook's value: truthy when a sig-het reference
         is now active (the move uses this to arm its mid-block drift
         refresh), ``None`` from the no-op hooks."""
-        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        params_phys = self._to_phys(params, leaf_inds=leaf_inds)
         return self._likelihood_engine.setup_in_model(
             self, params_phys, data_index, N_vals=N_vals)
 
@@ -1118,7 +1137,8 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         """Deactivate the per-source in-model setup (no-op engines ignore)."""
         self._likelihood_engine.clear_in_model()
 
-    def get_add_ll(self, params, data_index, noise_index, N_vals, phase_maximize=False):
+    def get_add_ll(self, params, data_index, noise_index, N_vals, phase_maximize=False,
+                   leaf_inds=None):
         """Log-likelihood delta of ADDING a source to the model.
 
         ``ll(r - h) - ll(r) = <r|h> - 0.5 <h|h>`` where ``r`` is the current
@@ -1129,12 +1149,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         ``phase_maximize=True``. Sources rejected by the engine's bounds
         check (:attr:`kept_out`) come back as ``-1e300``.
         """
-        self.get_ll(params, data_index, noise_index, N_vals, phase_maximize=phase_maximize)
+        self.get_ll(params, data_index, noise_index, N_vals, phase_maximize=phase_maximize,
+                    leaf_inds=leaf_inds)
         delta = self.d_h_out.real - 0.5 * self.h_h_out.real
         delta[~self.kept_out] = -1e300
         return delta
 
-    def get_removal_ll(self, params, data_index, noise_index, N_vals):
+    def get_removal_ll(self, params, data_index, noise_index, N_vals, leaf_inds=None):
         """Log-likelihood delta of REMOVING a source that is in the residual.
 
         For a residual ``r`` that still *contains* the subtracted template
@@ -1146,13 +1167,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         ``d_d`` term cancels. Bounds-rejected sources come back as
         ``-1e300`` (see :attr:`kept_out`).
         """
-        self.get_ll(params, data_index, noise_index, N_vals)
+        self.get_ll(params, data_index, noise_index, N_vals, leaf_inds=leaf_inds)
         delta = -self.d_h_out.real - 0.5 * self.h_h_out.real
         delta[~self.kept_out] = -1e300
         return delta
 
     def get_ll_grad(self, params, data_index, noise_index, N_vals,
-                     *, param_eps=None, chunk=None):
+                     *, param_eps=None, chunk=None, leaf_inds=None):
         """Per-source gradient of ``L = <d|h> - 0.5 <h|h>`` w.r.t. params.
 
         Dispatches to ``self._likelihood_engine.get_ll_grad`` -- only
@@ -1172,7 +1193,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         rule there is no runtime ``backend=`` kwarg; build a JAX-
         backed ``gb_wdm_comp`` if you need the autograd path.
         """
-        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        params_phys = self._to_phys(params, leaf_inds=leaf_inds)
         return self._likelihood_engine.get_ll_grad(
             self,
             params_phys,
@@ -1186,7 +1207,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     def hessian(self, params, data_index, noise_index, N_vals,
                  *, chunk=None,
-                 psd_fix=False, psd_floor_rel=1e-30):
+                 psd_fix=False, psd_floor_rel=1e-30, leaf_inds=None):
         """Per-source Hessian of ``L = <d|h> - 0.5 <h|h>``.
 
         Dispatches to ``self._likelihood_engine.hessian``. Returns
@@ -1205,7 +1226,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         sprint-wide rule the backend is fixed on the underlying
         ``gb_wdm_comp`` instance -- no runtime ``backend=`` kwarg.
         """
-        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        params_phys = self._to_phys(params, leaf_inds=leaf_inds)
         return self._likelihood_engine.hessian(
             self,
             params_phys,
@@ -1386,7 +1407,8 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         buf[slots_b] = tmp[:]
 
     def _adjust_via_engine(
-        self, factor, target_aca, params, params_index, N_vals, *args, **kwargs
+        self, factor, target_aca, params, params_index, N_vals, *args,
+        leaf_inds=None, **kwargs
     ) -> None:
         """Domain-agnostic dispatch into ``self._likelihood_engine.fill_template``.
 
@@ -1397,7 +1419,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         one it's filling.
         """
         assert isinstance(factor, int) and (factor == -1 or factor == +1)
-        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        params_phys = self._to_phys(params, leaf_inds=leaf_inds)
         # Task-b: forward this buffer's narrow per-band slab metadata so the
         # template write matches the narrow slab layout. Passed ONLY when this
         # is a narrow WDM buffer (band_slab_Nf set) so the FD engine's
@@ -1576,7 +1598,7 @@ class BandSorter(LISAToolsParallelModule):
 
         if rj_prop is not None:
             if keep_all_inds:
-                self.coords = self.xp.asarray(gb_branch.coords.reshape(-1, 8))
+                self.coords = self.xp.asarray(gb_branch.coords.reshape(-1, self.ndim))
                 self.inds = self.orig_inds.flatten()
             else:
                 self.coords = self.xp.asarray(gb_branch.coords[gb_branch.inds])
@@ -1627,9 +1649,8 @@ class BandSorter(LISAToolsParallelModule):
         self.num_sources = self.coords.shape[0]
         self.set_main_band_sorter_info(main_band_sorter, inds_main_band_sorter)
 
-        self.freqs = self.coords[:, 1] / 1e3
-        self.band_inds = self.xp.searchsorted(band_edges, self.freqs, side="right") - 1
         self.max_data_store_size = max_data_store_size
+        self.transform_fn = transform_fn
 
         self.temp_inds = self.xp.repeat(
             self.xp.arange(self.ntemps), self.nwalkers * self.nleaves_max
@@ -1640,6 +1661,12 @@ class BandSorter(LISAToolsParallelModule):
         self.leaf_inds = self.xp.tile(
             self.xp.arange(self.nleaves_max), ((self.ntemps, self.nwalkers, 1))
         )[tmp_inds_shaped]
+
+        # Per-source frequency: the sampled f0 column when the container has
+        # one; the per-leaf f0 fill (Eryn per-leaf fill_dict) otherwise --
+        # needs ``leaf_inds``, so computed after the label arrays above.
+        self.freqs = self._source_freqs_hz()
+        self.band_inds = self.xp.searchsorted(band_edges, self.freqs, side="right") - 1
         self.special_band_inds = self.get_special_band_index(
             self.temp_inds, self.walker_inds, self.band_inds
         )
@@ -1649,7 +1676,31 @@ class BandSorter(LISAToolsParallelModule):
         self.orig_leaf_inds = self.leaf_inds.copy()
         self.orig_special_band_inds = self.special_band_inds.copy()
         self.orig_band_inds = self.band_inds.copy()
-        self.transform_fn = transform_fn
+
+    def _source_freqs_hz(self) -> np.ndarray:
+        """Per-source frequency in Hz.
+
+        Sampling-basis f0 is in mHz; when f0 is not a sampled column it must
+        be a per-leaf transform fill and each source's value is looked up by
+        its leaf index (fixed-source branches, e.g. VGBs).
+        """
+        tf = self.transform_fn
+        input_basis = list(getattr(tf, "input_basis", []) or [])
+        if "f0" in input_basis:
+            return self.coords[:, input_basis.index("f0")] / 1e3
+        if tf is None or getattr(tf, "n_leaf_fills", None) is None:
+            # legacy layout without a container: f0 at sampling column 1
+            return self.coords[:, 1] / 1e3
+        fill_keys = list(tf.original_fill_dict[0].keys())
+        if "f0" not in fill_keys:
+            raise ValueError(
+                "BandSorter: 'f0' is neither a sampled column nor a per-leaf "
+                "fill key of the transform container."
+            )
+        f0_fill_mhz = self.xp.asarray(tf.fill_dict["fill_values"])[
+            :, fill_keys.index("f0")
+        ]
+        return f0_fill_mhz[self.leaf_inds] / 1e3
 
     def set_main_band_sorter_info(self, main_band_sorter, inds_main_band_sorter):
         if main_band_sorter is None:
@@ -1661,7 +1712,11 @@ class BandSorter(LISAToolsParallelModule):
 
     @property
     def coords_in(self) -> np.ndarray:
-        return self.transform_fn.both_transforms(self.coords, xp=self.xp)
+        # leaf_inds is ignored by scalar-fill containers and required by
+        # per-leaf-fill ones (Eryn per-leaf fill_dict).
+        return self.transform_fn.both_transforms(
+            self.coords, xp=self.xp, leaf_inds=self.leaf_inds
+        )
 
     def get_special_band_index(
         self, temp_inds: np.ndarray, walker_inds: np.ndarray, band_inds: np.ndarray
@@ -1896,11 +1951,20 @@ class BandSorter(LISAToolsParallelModule):
 
         assert len(inject_index) == len(coords_to_inject)
 
+        # leaf identity threads the per-leaf transform fills (ignored by
+        # scalar-fill containers)
+        inject_leaf_inds = self.main_band_sorter.leaf_inds[
+            sources_inject_now_map
+        ].copy()
         inj_args = (coords_to_inject, inject_index, inject_N_vals)
         if buffer_obj.use_template_arr:
-            buffer_obj.add_sources_to_template_buffer(*inj_args)
+            buffer_obj.add_sources_to_template_buffer(
+                *inj_args, leaf_inds=inject_leaf_inds
+            )
         else:
-            buffer_obj.add_sources_to_band_buffer(*inj_args)
+            buffer_obj.add_sources_to_band_buffer(
+                *inj_args, leaf_inds=inject_leaf_inds
+            )
 
         return buffer_obj
 

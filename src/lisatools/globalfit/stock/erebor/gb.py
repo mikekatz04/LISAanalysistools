@@ -11,7 +11,6 @@ import numpy as np
 from eryn.moves import Move
 from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
-from eryn.utils import TransformContainer
 from gbgpu.utils.utility import get_fdot, get_N
 
 from lisatools.domains import DomainSettingsBase, FDSettings, WDMSettings
@@ -23,15 +22,7 @@ from ...hdfbackend import GBHDFBackend
 from ...loginfo import init_logger
 from ...priors.gbpriors import get_fdot_mojito
 from ...state import GBState
-from .transforms import (
-    f_ms_to_s,
-    f_s_to_ms,
-    fdot_to_mchirp_pair,
-    make_gb_transform_container,
-    mchirp_to_fdot_pair,
-    negate,
-    ten_to_the_x,
-)
+from .transforms import make_gb_transform_container
 
 @dataclasses.dataclass
 class GBSettings(Settings):
@@ -198,47 +189,10 @@ class GBSetup(Setup, GBSettings):
                        "cos_iota", "psi", "alpha", "sin_delta"]
 
         if self.transform is None:
-            gb_transform_fn_in = {
-                "A": np.exp,
-                "f0": f_ms_to_s,
-                "phi0": negate,  # flip sign of phi0 to match JaxGB convention.
-                "cos_iota": np.arccos,
-                "sin_delta": np.arcsin,
-            }
-            gb_inverse_transform_fn_in = None
-            gb_key_map = None
-
-            output_basis = [
-                "A", "f0", "fdot",
-                "fddot", "phi0", "cos_iota",
-                "psi", "alpha", "sin_delta"
-            ]
-
-            gb_fill_dict = {"fddot": 0.0}
-
-            if self.use_chirp_mass:
-                # After fill_values, the Mc value lives at the fdot slot
-                # (key_map "Mc"->"fdot"). The multi-parameter transform then
-                # computes (f0[Hz], fdot) from (f0[Hz], Mc); the single-param
-                # f0: f_ms_to_s runs first so both f0 slots see Hz.
-                gb_transform_fn_in[("f0", "Mc")] = mchirp_to_fdot_pair
-                gb_inverse_transform_fn_in = {
-                    "A": np.log,
-                    "f0": f_s_to_ms,
-                    "phi0": negate,
-                    "cos_iota": np.cos,
-                    "sin_delta": np.sin,
-                    ("f0", "Mc"): fdot_to_mchirp_pair,
-                }
-                gb_key_map = {"Mc": "fdot"}
-
-            self.transform = TransformContainer(
-                input_basis=input_basis,
-                output_basis=output_basis,
-                parameter_transforms=gb_transform_fn_in,
-                fill_dict=gb_fill_dict,
-                key_map=gb_key_map,
-                inverse_parameter_transforms=gb_inverse_transform_fn_in,
+            # THE single GB transform factory (phi0 sign convention lives
+            # there, nowhere else).
+            self.transform = make_gb_transform_container(
+                use_chirp_mass=self.use_chirp_mass
             )
 
         if self.periodic is None:

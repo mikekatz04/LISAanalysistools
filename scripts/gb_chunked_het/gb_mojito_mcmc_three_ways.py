@@ -110,7 +110,10 @@ def build_shared():
     # sampled 8-vector (REF): [logA, f0(mHz), fdot, phi0, cos_iota, psi, alpha, sin_delta]
     # phi0 (2pi), psi (pi) and alpha (2pi) are periodic; the cache stores them in a
     # signed range, so wrap into the prior support [0, period) (physically identical).
-    inj_sampled = np.array([np.log(amp), f0 * 1e3, fdot, phi0 % (2 * np.pi),
+    # SAMPLING phi0 = -physical phi0: make_gb_transform_container is now the single
+    # stock factory and negates phi0 sampling->physical (JaxGB convention), so the
+    # sampled seed stores the negated value and the container recovers +phi0.
+    inj_sampled = np.array([np.log(amp), f0 * 1e3, fdot, (-phi0) % (2 * np.pi),
                             np.cos(inc), psi % np.pi, ra % (2 * np.pi), np.sin(dec)])
 
     m_floor = int(f0 / layer_df); BAND = 15

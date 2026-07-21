@@ -174,9 +174,24 @@ class GBState(eryn_State):
             # lack the nwalkers/ntemps/num_bands scalars -- backfill them
             # from the array shapes before validating.
             bi = self.band_info
+            # Arrays loaded through GBHDFBackend.get_band_info keep the
+            # backend's leading step axis; in-run consumers index the bare
+            # per-iteration shapes, so strip it. Rank-based (not
+            # shape[0]==1) so genuine single-band/single-temp axes survive.
+            _bare_ndim = {
+                "band_temps": 2, "band_num_proposed": 2, "band_num_accepted": 2,
+                "band_num_proposed_rj": 2, "band_num_accepted_rj": 2,
+                "band_swaps_proposed": 2, "band_swaps_accepted": 2,
+                "band_num_binaries": 3, "band_leaf_cap": 1,
+                "band_cap_iters": 1, "band_best_ll": 1,
+            }
+            for _key, _nd in _bare_ndim.items():
+                _arr = bi.get(_key)
+                if isinstance(_arr, np.ndarray) and _arr.ndim == _nd + 1:
+                    bi[_key] = _arr[-1]
             bi.setdefault("num_bands", len(bi["band_edges"]) - 1)
             bi.setdefault("ntemps", int(bi["band_temps"].shape[-1]))
-            bi.setdefault("nwalkers", int(bi["band_num_binaries"].shape[1]))
+            bi.setdefault("nwalkers", int(bi["band_num_binaries"].shape[-2]))
             ensure_leaf_cap_fields(bi, bi["num_bands"])
             assert nwalkers == bi["nwalkers"]
             assert ntemps == bi["ntemps"]
