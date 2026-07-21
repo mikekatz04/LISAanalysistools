@@ -90,6 +90,16 @@ class FileManagerDisabledAccess(FileManagerException):
         super().__init__(*args, **kwargs)
 
 
+### Waveform-related exceptions
+class WaveformDomainError(LISAToolsException):
+    """Exception raised when source parameters fall outside a waveform model's domain of validity.
+
+    Raised (in place of the model's bare ``ValueError``/``AssertionError``) so
+    sampling machinery can catch it narrowly and score the proposal at the
+    log-likelihood floor instead of crashing the run.
+    """
+
+
 ### Trajectory-related exceptions
 class TrajectoryOffGridException(Exception):
     """Exception raised when a trajectory goes off-grid (except for the lower boundary in p)."""

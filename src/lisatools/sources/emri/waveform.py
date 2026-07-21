@@ -152,4 +152,8 @@ class EMRITDIWaveform(AETTDIWaveform):
         Returns:
             The list of per-channel TDI arrays from the underlying response.
         """
-        return self.response(*args, **kwargs)
+        # Typed re-raise of FEW's bare out-of-domain errors (see .domain).
+        from .domain import few_domain_guard
+
+        with few_domain_guard():
+            return self.response(*args, **kwargs)

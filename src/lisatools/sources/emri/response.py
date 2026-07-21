@@ -22,6 +22,7 @@ from ...response.tdiconfig import TDIConfig
 from ...utils.constants import YRSID_SI
 from ...utils.utility import get_array_module
 from ..utils import icrs_to_ecliptic
+from .domain import few_domain_guard
 
 # Shared inspiral / sum / mode-selector defaults (mirrors the settings files).
 EMRI_INSPIRAL_KWARGS = {
@@ -256,7 +257,11 @@ class EMRIWaveWrap:
     def __call__(self, *params, **kwargs):
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
-        raw = self.wave_gen(*params, **call_kwargs)
+        # Prior boxes leak outside the FEW interpolation grid; convert FEW's
+        # bare out-of-domain ValueError/AssertionError into the typed
+        # WaveformDomainError the sampling machinery catches (ll -> -1e300).
+        with few_domain_guard():
+            raw = self.wave_gen(*params, **call_kwargs)
         # ResponseWrapper returns a list of per-channel TDI arrays on the
         # response backend (cupy on GPU); stack on that backend rather than
         # forcing host with np.asarray.

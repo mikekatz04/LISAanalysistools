@@ -33,6 +33,8 @@ from few.utils.utility import get_polarization_angle, get_viewing_angles
 
 from lisatools.response.tdionfly import TDTDIonTheFly
 
+from .domain import few_domain_guard
+
 
 class EMRITDIonFly:
     """Build the TDI response of a FEW EMRI waveform mode-by-mode on the fly.
@@ -102,25 +104,28 @@ class EMRITDIonFly:
         lam = phiS
         beta = np.pi / 2 - qS
 
-        Kerr_wave = self.wave_gen(
-            m1,
-            m2,
-            a,
-            p0,
-            e0,
-            x0,
-            theta,
-            phi,
-            dist=dist,
-            Phi_phi0=Phi_phi0,
-            Phi_theta0=Phi_theta0,
-            Phi_r0=Phi_r0,
-            T=self.T,
-            dt=self.dt,
-            return_sparse_holder=True,
-            include_minus_mkn=include_minus_mkn,
-            **kwargs,
-        )
+        # Out-of-domain (a, p0, e0) raises bare ValueError/AssertionError in
+        # FEW; re-raise typed so the sampler can score the point at -1e300.
+        with few_domain_guard():
+            Kerr_wave = self.wave_gen(
+                m1,
+                m2,
+                a,
+                p0,
+                e0,
+                x0,
+                theta,
+                phi,
+                dist=dist,
+                Phi_phi0=Phi_phi0,
+                Phi_theta0=Phi_theta0,
+                Phi_r0=Phi_r0,
+                T=self.T,
+                dt=self.dt,
+                return_sparse_holder=True,
+                include_minus_mkn=include_minus_mkn,
+                **kwargs,
+            )
 
         mode_amp_phase = np.unwrap(np.angle(Kerr_wave.teuk_modes), axis=0)
         mode_amp_amp = np.abs(Kerr_wave.teuk_modes)

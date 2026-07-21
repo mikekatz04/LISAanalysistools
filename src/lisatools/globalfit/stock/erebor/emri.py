@@ -12,6 +12,8 @@ from eryn.moves import Move
 from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
 
+from ....sampling.prior import EMRIKerrDomainPrior
+
 from ...engine import Settings, Setup
 from ...hdfbackend import EMRIHDFBackend
 from ...loginfo import init_logger
@@ -182,7 +184,19 @@ class EMRISetup(Setup):
                 )
                 priors_emri[input_basis[i]] = uniform_dist(*getattr(self, lims))
 
-        self.priors = {"emri": ProbDistContainer(priors_emri)}
+        # Joint (a, p0, e0) FEW domain-of-validity cut on top of the boxes:
+        # combinations the Kerr ecc-eq grid cannot generate get logpdf -inf
+        # (and rvs rejection-resamples), matching the -1e300 likelihood
+        # sentinel applied when a waveform call fails on a domain error.
+        self.priors = {
+            "emri": EMRIKerrDomainPrior(
+                priors_emri,
+                a_index=input_basis.index("a"),
+                p0_index=input_basis.index("p0"),
+                e0_index=input_basis.index("e0"),
+                xI_fill=float(np.asarray(self.fill_values)[0]),
+            )
+        }
 
     def init_setup(self):
         """Run sampling-info and state-backend initialization."""

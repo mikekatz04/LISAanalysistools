@@ -35,6 +35,7 @@ from tqdm import tqdm
 from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray
+from ...utils.exceptions import WaveformDomainError
 from ...utils.utility import asnumpy, get_array_module
 from .globalfitmove import GlobalFitMove
 from .multigpumove import MultiGPUMoveBase
@@ -533,12 +534,26 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         import gc
         for i in range(coords.shape[0]):
             ac = self.acs[int(i)]
-            sig = ac.build_template(
-                {self.branch_name: coords[i]},
-                waveform_kwargs=self._branch_waveform_kwargs(),
-                signal_gen=self._resolve_signal_gen_override(ac),
-                apply_transform=False,
-            )
+            try:
+                sig = ac.build_template(
+                    {self.branch_name: coords[i]},
+                    waveform_kwargs=self._branch_waveform_kwargs(),
+                    signal_gen=self._resolve_signal_gen_override(ac),
+                    apply_transform=False,
+                )
+            except WaveformDomainError as exc:
+                # A current-state source outside the waveform's domain of
+                # validity (e.g. a bad start point). Deterministic, so the
+                # add and remove passes skip identically: its template is
+                # zero, matching its -1e300 likelihood sentinel.
+                logger.warning(
+                    "%s cold-chain walker %d is outside the waveform domain; "
+                    "treating its template as zero: %s",
+                    self.branch_name,
+                    i,
+                    exc,
+                )
+                continue
             self.acs.signal_operation(sign, [sig], data_index=np.array([i]))
             del sig
             gc.collect()
@@ -624,17 +639,26 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         ll = np.full(len(data_index_np), -1e300, dtype=float)
         for i in range(coords_in.shape[0]):
             ac = self.acs[int(data_index_np[i])]
-            ll[i] = ac.calculate_signal_likelihood(
-                {self.branch_name: coords_in[i]},
-                signal_gen=(
-                    custom_override if custom_override is not None
-                    else self._resolve_signal_gen_override(ac)
-                ),
-                waveform_kwargs=self._branch_waveform_kwargs(),
-                apply_transform=False,
-                source_only=source_only,
-                **kwargs,
-            )
+            try:
+                ll[i] = ac.calculate_signal_likelihood(
+                    {self.branch_name: coords_in[i]},
+                    signal_gen=(
+                        custom_override if custom_override is not None
+                        else self._resolve_signal_gen_override(ac)
+                    ),
+                    waveform_kwargs=self._branch_waveform_kwargs(),
+                    apply_transform=False,
+                    source_only=source_only,
+                    **kwargs,
+                )
+            except WaveformDomainError as exc:
+                # Prior support leaks outside the waveform's domain of
+                # validity; score the point at the floor instead of crashing.
+                logger.debug(
+                    "%s waveform domain error -> ll = -1e300: %s",
+                    self.branch_name,
+                    exc,
+                )
 
         return ll
 
@@ -841,7 +865,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             #         else:
             #             raise ValueError(f"Large difference in log likelihood encountered: {np.abs(diff).max()}. This could be a sign of numerical issues.")
 
-            if np.any(prev_logl < -1e10) or np.any(prev_logl > 1e30):
+            # -1e300 is the out-of-domain sentinel, not a numerical issue.
+            if np.any((prev_logl < -1e10) & (prev_logl > -1e299)) or np.any(prev_logl > 1e30):
                 logger.warning(f"Very low log likelihood encountered in propose: min = {prev_logl.min()}, max = {prev_logl.max()}. This could be a sign of numerical issues.")
                 if DEBUG_MODE:
                     breakpoint()
@@ -942,7 +967,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     if DEBUG_MODE:
                         logger.debug(f"average proposed logl: {logl[in_prior].mean()}.")
     
-                    if np.any(logl[in_prior] < -1e10) or np.any(logl[in_prior] > 1e30):
+                    # -1e300 is the out-of-domain sentinel, not a numerical issue.
+                    _logl_in = logl[in_prior]
+                    if np.any((_logl_in < -1e10) & (_logl_in > -1e299)) or np.any(_logl_in > 1e30):
                         logger.warning(f"Suspicious likelihood encountered in propose: min = {logl[~np.isinf(logp)].min()}, max = {logl[~np.isinf(logp)].max()}. This could be a sign of numerical issues.")
                         if DEBUG_MODE:
                             breakpoint()

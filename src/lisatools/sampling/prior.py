@@ -2,11 +2,12 @@
 
 import numpy as np
 from eryn.moves.multipletry import logsumexp
+from eryn.prior import ProbDistContainer
 from scipy import stats
 
 from ..sensitivity import get_sensitivity
 from ..utils.constants import *
-from ..utils.utility import asnumpy
+from ..utils.utility import asnumpy, get_array_module
 
 try:
     from ..cutils.psd_gpu import compute_logpdf
@@ -26,6 +27,94 @@ try:
 
 except (ModuleNotFoundError, ImportError) as e:
     pass
+
+
+class EMRIKerrDomainPrior(ProbDistContainer):
+    """:class:`ProbDistContainer` with the FEW Kerr ecc-eq domain-of-validity cut.
+
+    The per-parameter EMRI priors are independent boxes, but the FEW
+    Kerr eccentric-equatorial waveform is only valid on a joint ``(a, p0, e0)``
+    region (interpolation grid + separatrix buffer). On top of the standard
+    container behavior this class:
+
+    - returns ``-inf`` from :meth:`logpdf` for rows outside that region
+      (matching the ``-1e300`` log-likelihood sentinel used when a waveform
+      call itself fails on a domain error), and
+    - rejection-resamples :meth:`rvs` so drawn points are always in-domain.
+
+    The validity test is :func:`lisatools.sources.emri.domain.emri_kerr_domain_mask`
+    (cheap, no waveform generated). The cut is skipped when ``keys`` restricts
+    evaluation to a parameter subset, since the joint constraint is undefined
+    there.
+
+    Args:
+        priors_in: As for :class:`ProbDistContainer`.
+        a_index: Column of the spin ``a`` in the sampling basis.
+        p0_index: Column of the initial semi-latus rectum ``p0``.
+        e0_index: Column of the initial eccentricity ``e0``.
+        xI_fill: Fill value used for ``x0`` (``+1`` or ``-1``) in the waveform
+            basis (the stock EMRI transform fills ``x0``; it is not sampled).
+    """
+
+    def __init__(
+        self,
+        priors_in,
+        a_index: int = 2,
+        p0_index: int = 3,
+        e0_index: int = 4,
+        xI_fill: float = 1.0,
+        **kwargs,
+    ):
+        super().__init__(priors_in, **kwargs)
+        self.a_index = int(a_index)
+        self.p0_index = int(p0_index)
+        self.e0_index = int(e0_index)
+        self.xI_fill = float(xI_fill)
+
+    def _in_domain(self, x) -> np.ndarray:
+        """Boolean mask over rows of ``x`` (sampling basis) inside the FEW domain."""
+        from ..sources.emri.domain import emri_kerr_domain_mask
+
+        x_np = np.atleast_2d(asnumpy(x))
+        return emri_kerr_domain_mask(
+            x_np[:, self.a_index],
+            x_np[:, self.p0_index],
+            x_np[:, self.e0_index],
+            xI=self.xI_fill,
+        )
+
+    def logpdf(self, x, keys=None, **kwargs):
+        lp = super().logpdf(x, keys=keys, **kwargs)
+        if keys is not None:
+            return lp
+        ok = self._in_domain(x)
+        if np.ndim(lp) == 0:
+            # 1D input squeezes to a scalar in the base class.
+            return lp if bool(ok[0]) else -np.inf
+        xp_here = get_array_module(lp)
+        return xp_here.where(xp_here.asarray(ok), lp, -np.inf)
+
+    def rvs(self, size=1, keys=None, max_tries: int = 1000, **kwargs):
+        out = super().rvs(size=size, keys=keys, **kwargs)
+        if keys is not None:
+            return out
+        out_np = asnumpy(out)
+        shape = out_np.shape
+        flat = out_np.reshape(-1, self.ndim)
+        bad = ~self._in_domain(flat)
+        tries = 0
+        while np.any(bad):
+            tries += 1
+            if tries > max_tries:
+                raise RuntimeError(
+                    "EMRIKerrDomainPrior.rvs: could not draw in-domain samples "
+                    f"after {max_tries} resampling rounds; check the prior limits."
+                )
+            n_bad = int(bad.sum())
+            repl = asnumpy(super().rvs(size=n_bad, **kwargs)).reshape(n_bad, self.ndim)
+            flat[bad] = repl
+            bad = ~self._in_domain(flat)
+        return flat.reshape(shape)
 
 
 class AmplitudeFrequencySNRPrior:
