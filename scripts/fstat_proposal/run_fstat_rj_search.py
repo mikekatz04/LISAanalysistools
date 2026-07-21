@@ -123,8 +123,12 @@ def main():
     from lisatools.sensitivity import MojitoNoiseEstimates
     from lisatools.globalfit.stock.erebor.noise import resolve_noise_file
 
-    target = os.environ.get("FSTAT_TARGET", "highest").strip().lower()
-    src = {"highest": MOJITO_HIGHEST_GB, "band75": MOJITO_BAND75_GB}[target]
+    target = os.environ.get("FSTAT_TARGET", "band75").strip().lower()
+    src = {"highest": MOJITO_HIGHEST_GB, "band75": MOJITO_BAND75_GB}.get(target)
+    # GB_HIGHEST_FREQUENCIES=N is the general band selector (centers on the
+    # N-th highest-frequency catalogue source, resolved at build via the stock
+    # GBSettings field). When set it supersedes FSTAT_TARGET's band.
+    highest_n = os.environ.get("GB_HIGHEST_FREQUENCIES")
     niter = int(os.environ.get("NITER", 20))
     nwalkers = int(os.environ.get("NWALKERS", 16))
     ntemps = int(os.environ.get("NTEMPS", 6))
@@ -139,17 +143,23 @@ def main():
     comb_cache = os.environ.get("FSTAT_COMB_CACHE", "").strip() or None
     fit_dir = os.environ.get("FIT_DIR", f"./gf_runs_fstat_rj/{target}/")
 
-    print(f"[main] target={target} (GB {src['ID']} at {src['f0_mHz']:.4f} mHz)"
-          f"  niter={niter}  nwalkers={nwalkers} ntemps={ntemps}", flush=True)
+    if highest_n:
+        _band = f"GB_HIGHEST_FREQUENCIES={highest_n} (N-th highest catalogue source)"
+    else:
+        _band = (f"GB {src['ID']} at {src['f0_mHz']:.4f} mHz" if src
+                 else f"FSTAT_TARGET={target}")
+    print(f"[main] band={_band}  niter={niter}  "
+          f"nwalkers={nwalkers} ntemps={ntemps}", flush=True)
 
     fit = erebor.gb_no_fg(nwalkers=nwalkers, ntemps=ntemps)
     # search (default) = zero-leaf start; GB_MODE=pe = injection-seeded
     # leaves (debug-at-truth runs)
     fit.gb.mode = os.environ.get("GB_MODE", "search")
     fit.general.file_store_dir = fit_dir
-    if target == "highest":
-        fit.gb.center_freq = src["f0_mHz"] * 1e-3
-        fit.gb.n_layers = int(os.environ.get("GB_N_LAYERS", 3))
+    # Band selection is driven by the stock GBSettings field
+    # ``highest_frequencies`` (GB_HIGHEST_FREQUENCIES) resolved from the
+    # catalogue at build, or the stock default band otherwise. No hardcoded
+    # per-source centering here.
     # GB_USE_CHIRP_MASS=0 -> legacy fdot basis (handles fdot<0 interacting
     # sources; see the fdot<0 TODO in recipe.setup_state_for_injection)
     fit.gb.use_chirp_mass = os.environ.get("GB_USE_CHIRP_MASS", "1") == "1"

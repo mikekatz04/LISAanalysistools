@@ -195,6 +195,15 @@ class GBNoFgGBSettings(GBSettings):
     n_layers: typing.Optional[int] = dataclasses.field(
         default_factory=env_default("GB_N_LAYERS", None, int)
     )
+    # GB_HIGHEST_FREQUENCIES (N, 1-based): center the GB band on the N-th
+    # HIGHEST-frequency catalogue source (1 = highest, 2 = 2nd highest, ...),
+    # ``n_layers`` wide. None (default) leaves the band at min_freq/max_freq
+    # (or center_freq/n_layers). When set it OVERRIDES those, resolving the
+    # source f0 from the loaded catalogue at build. General replacement for
+    # the debug runner's hardcoded per-source dicts.
+    highest_frequencies: typing.Optional[int] = dataclasses.field(
+        default_factory=env_default("GB_HIGHEST_FREQUENCIES", None, int)
+    )
     # DATA_BAND_LAYERS (memory knob): clip the DATA band — and every
     # per-walker ACA slab — to +-N layers around the GB band. None = full band.
     data_band_layers: typing.Optional[int] = dataclasses.field(
@@ -357,6 +366,38 @@ def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
 
     is_fd = isinstance(domain_settings, FDSettings)
     layer_df = 1.0 / (2 * general_setup.domain_settings.Nf * gb.dt) if not is_fd else None
+
+    # GB_HIGHEST_FREQUENCIES=N: center the band on the N-th highest-frequency
+    # catalogue GB (1-based). Only overrides the band when set; resolves the
+    # source f0 from the loaded catalogue (f0 = GW22FrequencySSBFrame at REF).
+    _highest = getattr(gb, "highest_frequencies", None)
+    if _highest:
+        n_th = int(_highest)
+        cat = (getattr(general_setup, "catalogue", None) or {}).get("GB", {})
+        f0_all = np.concatenate(
+            [np.asarray(cat[k]["GW22FrequencySSBFrame"], dtype=float).ravel()
+             for k in sorted(cat.keys())]
+        ) if cat else np.array([])
+        if f0_all.size == 0:
+            raise ValueError(
+                "GB_HIGHEST_FREQUENCIES set but no GB catalogue is available "
+                "to resolve source frequencies."
+            )
+        if n_th < 1 or n_th > f0_all.size:
+            raise ValueError(
+                f"GB_HIGHEST_FREQUENCIES={n_th} out of range "
+                f"(1..{f0_all.size} catalogue sources)."
+            )
+        # N-th highest = smallest of the top-N.
+        nth_f0 = float(np.sort(f0_all[np.argpartition(f0_all, -n_th)[-n_th:]])[0])
+        gb.center_freq = nth_f0
+        if gb.n_layers is None:
+            gb.n_layers = 3
+        logger.info(
+            "GB_HIGHEST_FREQUENCIES=%d -> centering GB band on catalogue "
+            "source f0=%.6f mHz (%d layers).", n_th, nth_f0 * 1e3, gb.n_layers,
+        )
+
     _center_mode = gb.center_freq is not None or gb.n_layers is not None
     if is_fd:
         # FD basis has no WDM layers: the narrow ``gb.min_freq/max_freq``
