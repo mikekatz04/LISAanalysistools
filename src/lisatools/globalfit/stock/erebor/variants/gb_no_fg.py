@@ -343,6 +343,36 @@ def _resolve_nleaves_max(gb, general_setup, is_fd, layer_df) -> int:
     return out
 
 
+def _nth_highest_catalogue_f0(mojito_data_path: str, n_th: int) -> float:
+    """f0 (Hz) of the N-th HIGHEST-frequency GB in the mojito catalogue file.
+
+    Reads only the frequency column of the GB catalogue HDF5 (in the
+    ``catalogues/`` folder, which is separate from the L1 data), so it can run
+    during general-settings adjustment -- before the data processor loads the
+    galaxy -- to let the DATA band track the chosen source. 1-based N.
+    """
+    import h5py
+
+    cat_path = os.path.join(
+        mojito_data_path, "catalogues", "wdwd_cat_mojito_lite_processed.hdf5"
+    )
+    if not os.path.exists(cat_path):
+        raise ValueError(
+            f"GB_HIGHEST_FREQUENCIES needs the GB catalogue file, not found at "
+            f"{cat_path!r}."
+        )
+    with h5py.File(cat_path, "r") as f:
+        f0 = np.asarray(
+            f["Binaries"]["GW22FrequencySSBFrame"][:], dtype=float
+        ).ravel()
+    if n_th < 1 or n_th > f0.size:
+        raise ValueError(
+            f"GB_HIGHEST_FREQUENCIES={n_th} out of range (1..{f0.size})."
+        )
+    # N-th highest = smallest of the top-N.
+    return float(np.sort(f0[np.argpartition(f0, -n_th)[-n_th:]])[0])
+
+
 def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
     """gb_no_fg-style GB branch prep: band derivation + f0/fdot/nleaves/betas.
 
@@ -368,10 +398,12 @@ def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
     layer_df = 1.0 / (2 * general_setup.domain_settings.Nf * gb.dt) if not is_fd else None
 
     # GB_HIGHEST_FREQUENCIES=N: center the band on the N-th highest-frequency
-    # catalogue GB (1-based). Only overrides the band when set; resolves the
-    # source f0 from the loaded catalogue (f0 = GW22FrequencySSBFrame at REF).
+    # catalogue GB (1-based). Fallback path for when the center was NOT already
+    # resolved in adjust_general (e.g. non-mojito variants) -- reads the loaded
+    # general_setup.catalogue. For mojito gb_no_fg, adjust_general has already
+    # set center_freq (so the DATA band tracks it) and this is skipped.
     _highest = getattr(gb, "highest_frequencies", None)
-    if _highest:
+    if _highest and gb.center_freq is None:
         n_th = int(_highest)
         cat = (getattr(general_setup, "catalogue", None) or {}).get("GB", {})
         f0_all = np.concatenate(
@@ -552,9 +584,27 @@ class GBNoForegroundGlobalFit(EreborFit):
                 file_params if file_params is not None else [15e-12, 3e-15]
             )
 
+        gb = self.gb
+        # GB_HIGHEST_FREQUENCIES: resolve the band center from the catalogue
+        # HERE (before the data-band derivation below) so the DATA band tracks
+        # the chosen source. Reads the catalogue file directly since the data
+        # processor has not populated general_setup.catalogue yet. mojito only;
+        # prepare_gb_branch handles the (already-loaded) catalogue fallback.
+        _highest = getattr(gb, "highest_frequencies", None)
+        if _highest and gb.center_freq is None and gs.data_mode == "mojito":
+            gb.center_freq = _nth_highest_catalogue_f0(
+                gs.mojito_data_path, int(_highest)
+            )
+            if gb.n_layers is None:
+                gb.n_layers = 3
+            logger.info(
+                "GB_HIGHEST_FREQUENCIES=%d -> band center f0=%.6f mHz "
+                "(from catalogue; data band will track it).",
+                int(_highest), gb.center_freq * 1e3,
+            )
+
         # ACA frequency clipping (memory knob): narrow the DATA band to
         # +-data_band_layers WDM layers around the GB band.
-        gb = self.gb
         if gb.data_band_layers is not None:
             layer_df = self.layer_df
             L = int(gb.data_band_layers)
