@@ -13,6 +13,22 @@ def return_x(x):
     return x
 
 
+def branch_nleaves_max(possible_state, name: str) -> int:
+    """``nleaves_max`` for branch ``name`` from a coords-like dict OR an eryn ``State``.
+
+    The per-branch sub-state constructors historically assumed a
+    ``{branch: coords}`` dict input, but on HDF reload
+    (``GFHDFBackend.get_a_sample``) they receive a plain
+    :class:`eryn.state.State`, which is not subscriptable. Both carry the
+    ``(ntemps, nwalkers, nleaves_max, ndim)`` shape; dispatch on which one
+    arrived.
+    """
+    branches = getattr(possible_state, "branches", None)
+    if branches is not None:
+        return int(branches[name].shape[-2])
+    return int(possible_state[name].shape[-2])
+
+
 def ensure_leaf_cap_fields(band_info: dict, num_bands: int) -> None:
     """Backfill the per-band progressive leaf-cap arrays on ``band_info``.
 
@@ -353,7 +369,7 @@ class MBHState(eryn_State):
             self.num_mbhs = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_mbhs = possible_state["mbh"].shape[-2]
+            self.num_mbhs = branch_nleaves_max(possible_state, "mbh")
 
     @property
     def reset_kwargs(self):
@@ -376,7 +392,7 @@ class EMRIState(eryn_State):
             self.num_emris = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_emris = possible_state["emri"].shape[-2]
+            self.num_emris = branch_nleaves_max(possible_state, "emri")
 
     @property
     def reset_kwargs(self):
@@ -401,7 +417,7 @@ class SOBBHState(eryn_State):
             self.num_sobbhs = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_sobbhs = possible_state["sobbh"].shape[-2]
+            self.num_sobbhs = branch_nleaves_max(possible_state, "sobbh")
 
     @property
     def reset_kwargs(self):
