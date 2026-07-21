@@ -8,7 +8,9 @@
 # Assumes you have already cloned this repo:
 #   git clone https://github.com/lisa-analysis-tools/lisa-analysis-tools.git
 #   cd lisa-analysis-tools
-#   ./install.sh
+#   ./install.sh                # full dev install (clone + pull + pip)
+#   ./install.sh --pull-only    # update-only: checkout + ff-pull every repo,
+#                               # no pip/compile (see PULL_ONLY below)
 #
 # Sibling repos are cloned into the same parent directory as this clone,
 # producing a layout like:
@@ -35,6 +37,14 @@
 #                                 # remote (non-fast-forward) so you never build
 #                                 # on a silently stale/conflicting tree. Set
 #                                 # GIT_PULL=0 to skip pulling (offline / pinned).
+#   PULL_ONLY=0                   # set to 1 (or pass --pull-only) to ONLY
+#                                 # checkout + fast-forward-pull every repo and
+#                                 # skip ALL pip installs. Every package is
+#                                 # editable-installed (Python imports straight
+#                                 # from the source trees), so this is a full
+#                                 # Python-level update with no C/CUDA rebuild.
+#                                 # Re-run the full ./install.sh when native
+#                                 # code, dependencies, or packaging change.
 #   GBT_LAPACKE_DETECT_WITH=PKGCONFIG
 #                                 # (default) how the compiled packages locate
 #                                 # LAPACKE: AUTO | CMAKE | PKGCONFIG | DISABLE.
@@ -54,6 +64,14 @@ SKIP_FEW="${SKIP_FEW:-0}"
 SKIP_PHENTAX="${SKIP_PHENTAX:-0}"
 SKIP_LISA_ON_GPU="${SKIP_LISA_ON_GPU:-1}"
 GIT_PULL="${GIT_PULL:-1}"
+PULL_ONLY="${PULL_ONLY:-0}"
+if [ "${1:-}" = "--pull-only" ] || [ "${1:-}" = "pull" ]; then
+    PULL_ONLY=1
+fi
+if [ "$PULL_ONLY" = "1" ]; then
+    # pulling IS the point of this mode
+    GIT_PULL=1
+fi
 GBT_LAPACKE_DETECT_WITH="${GBT_LAPACKE_DETECT_WITH:-PKGCONFIG}"
 GBT_LAPACKE_FETCH="${GBT_LAPACKE_FETCH:-}"
 GBT_LAPACKE_EXTRA_LIBS="${GBT_LAPACKE_EXTRA_LIBS:-}"
@@ -71,6 +89,11 @@ export PIP_CONSTRAINT="$CONSTRAINTS"
 echo "LAT repo:    $LAT_DIR"
 echo "Dev root:    $DEV_ROOT"
 echo "Constraints: $PIP_CONSTRAINT"
+if [ "$PULL_ONLY" = "1" ]; then
+    echo "Mode:        pull-only (checkout + ff-pull; NO pip installs)"
+else
+    echo "Mode:        full install"
+fi
 echo "LAPACKE:     detect=${GBT_LAPACKE_DETECT_WITH}" \
      "fetch=${GBT_LAPACKE_FETCH:-<package default>}" \
      "extra_libs=${GBT_LAPACKE_EXTRA_LIBS:-<package default>}"
@@ -79,10 +102,12 @@ echo ""
 # ----------------------------------------------------------------------
 # Base build deps
 # ----------------------------------------------------------------------
-pip install --upgrade pip
-pip install \
-    scikit_build_core uv uv_build setuptools_scm pybind11 nanobind \
-    numpy scipy ipython jupyter astropy lisaconstants Cython
+if [ "$PULL_ONLY" != "1" ]; then
+    pip install --upgrade pip
+    pip install \
+        scikit_build_core uv uv_build setuptools_scm pybind11 nanobind \
+        numpy scipy ipython jupyter astropy lisaconstants Cython
+fi
 
 # Optional: macOS + brew lapack
 #export CC=/usr/bin/clang
@@ -147,6 +172,12 @@ editable_install() {
     cd "$repo_path"
     git checkout "$branch"
     pull_or_stop "$repo_path" "$branch"
+    if [ "$PULL_ONLY" = "1" ]; then
+        # Editable installs import Python from the source tree, so the pull
+        # above already IS the update — skip the (slow, C-compiling) pip step.
+        echo "===> PULL_ONLY: skipping pip install for $(basename "$repo_path")"
+        return 0
+    fi
     pip install --no-build-isolation -e . "$@"
 }
 
@@ -190,11 +221,12 @@ fi
 # ----------------------------------------------------------------------
 # Optional / external
 # ----------------------------------------------------------------------
-if [ "$SKIP_PHENTAX" != "1" ]; then
+if [ "$SKIP_PHENTAX" != "1" ] && [ "$PULL_ONLY" != "1" ]; then
     echo ""
     echo "===> installing phentax (MBH IMRPhenomTHM)"
     # Equivalent to BBHx's `phentax` extra (pip install 'bbhx[phentax]');
     # installed directly here since BBHx is already editable-installed above.
+    # Not a local editable clone, so there is nothing to pull in PULL_ONLY mode.
     pip install git+https://github.com/asantini29/phentax.git
 fi
 
@@ -212,5 +244,12 @@ if [ "$SKIP_LISA_ON_GPU" != "1" ]; then
 fi
 
 echo ""
-echo "==> done. Verify with:"
-echo "    python -c 'import lisatools, eryn, bbhx, gbgpu, gpubackendtools; print(\"all import OK\")'"
+if [ "$PULL_ONLY" = "1" ]; then
+    echo "==> pull-only update done (no pip installs run)."
+    echo "    Python changes are live immediately: the editable installs import"
+    echo "    from the source trees. Re-run the full ./install.sh after C/CUDA,"
+    echo "    dependency, or packaging (pyproject) changes."
+else
+    echo "==> done. Verify with:"
+    echo "    python -c 'import lisatools, eryn, bbhx, gbgpu, gpubackendtools; print(\"all import OK\")'"
+fi
