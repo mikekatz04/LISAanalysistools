@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import time
@@ -44,7 +45,43 @@ DEBUG_MODE = False
 if TYPE_CHECKING:
     from ...sources.waveformbase import TDWaveformBase
     from ...domaincomputation import DomainComputationGroupArray
-    
+
+
+class MoveSignalGen:
+    """Engine-convention params-based generator adapter for one move.
+
+    Follows the same call convention as the engine-installed per-branch
+    generators (e.g. the stock ``SourceSignalGen``):
+    ``fn(*sampling_params, apply_transform=True, **waveform_kwargs) ->
+    DomainBase``, with the branch transform applied inside by default and
+    ``apply_transform=False`` meaning the caller already applied it (the
+    add/remove move always calls this way — its choreography transforms once
+    up front, so the transform is applied exactly once either way).
+
+    Registered into a container's dict-based ``signal_gen`` under the move's
+    branch name when the container does not already carry a usable generator
+    there. Reads ``transform_fn`` / ``waveform_gen`` off the move at call
+    time so later reassignment (e.g. the multi-GPU subclass swapping
+    ``waveform_gen`` after the base ``__init__``) stays honored; a specific
+    ``waveform_gen`` override (heterodyne hook) can be pinned instead.
+    """
+
+    def __init__(self, move: "ResidualAddOneRemoveOneMove", waveform_gen: Callable = None):
+        self.move = move
+        self._waveform_gen = waveform_gen
+
+    @property
+    def waveform_gen(self) -> Callable:
+        return self._waveform_gen if self._waveform_gen is not None else self.move.waveform_gen
+
+    def __call__(self, *params, apply_transform: bool = True, **kwargs):
+        if apply_transform:
+            params = self.move.transform_fn.both_transforms(
+                np.asarray(params, dtype=float)
+            )
+        return self.waveform_gen(*params, **kwargs)
+
+
 class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     """
     Move that handles adding and removing sources to and from the residuals stored in the analysis container array.
@@ -55,7 +92,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     Args:
         branch_name: name of the branch that this move will operate on.
         coords_shape: shape of the coordinates of the sources in the branch that this move will operate on.
-        waveform_gen: function that generates the waveforms for the sources given their coordinates.
+        waveform_gen: function that generates the waveforms for the sources given their (waveform-basis) coordinates. All operations on the analysis container array run through the containers' ``signal_gen`` machinery (:meth:`AnalysisContainer.build_template` / :meth:`AnalysisContainer.calculate_signal_likelihood`) and default to the generator the engine already installed on each container under ``branch_name``; ``waveform_gen`` is the fallback, wrapped as a :class:`MoveSignalGen` and added to containers that do not carry the branch (see :meth:`_resolve_signal_gen_override`). Because the move transforms coordinates once up front, the containers' generators are always called with ``apply_transform=False`` — the transform is applied exactly once on every path.
         waveform_gen_kwargs: keyword arguments for the waveform generator function.
         waveform_like_kwargs: keyword arguments for the likelihood computation function.
         acs: analysis container array that contains the residuals and other information needed for the likelihood computation.
@@ -184,11 +221,19 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """Host copy of one source's template array, in the residual's domain shape.
 
         ``coords_row_in`` is a single already-transformed (waveform-basis)
-        coordinate row. Returns ``None`` on any failure (debug must never
-        break the sampler).
+        coordinate row. Built through the walker's container ``signal_gen``
+        machinery — the same path :meth:`_apply_cold_chain_sources` folds into
+        the residual — so the plotted template matches the fit exactly.
+        Returns ``None`` on any failure (debug must never break the sampler).
         """
         try:
-            sig = self.waveform_gen(*coords_row_in, **self.waveform_gen_kwargs)
+            ac = self.acs[int(walker)]
+            sig = ac.build_template(
+                {self.branch_name: np.asarray(coords_row_in)},
+                waveform_kwargs=self._branch_waveform_kwargs(),
+                signal_gen=self._resolve_signal_gen_override(ac),
+                apply_transform=False,
+            )
             arr = sig.arr if hasattr(sig, "arr") else sig
             return asnumpy(arr).copy()
         except Exception as exc:  # noqa: BLE001
@@ -399,16 +444,101 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         for i in range(self.nleaves_max):
             self.temperature_controls[i].skip_swap_branches = skip_swap_branches
 
-    def _apply_cold_chain_sources(self, coords, sign):
-        """One-at-a-time waveform generation + apply to keep peak RAM flat.
+    @property
+    def own_signal_gen(self) -> MoveSignalGen:
+        """This move's engine-convention generator adapter (lazy singleton)."""
+        if getattr(self, "_own_signal_gen", None) is None:
+            self._own_signal_gen = MoveSignalGen(self)
+        return self._own_signal_gen
 
-        ``sign=-1`` subtracts (add_back), ``sign=+1`` adds (remove). Matches
-        the previous batched path semantically but never holds more than a
-        single source's waveform in memory.
+    def _supports_apply_transform(self, gen) -> bool:
+        """``True`` when ``gen`` explicitly accepts the ``apply_transform`` kwarg.
+
+        The move feeds waveform-basis parameters, so a generator is only
+        usable as the branch default if it can be told to skip its internal
+        sampling→waveform transform (a bare ``**kwargs`` doesn't count — it
+        would silently forward the flag into the wave wrap). Results are
+        cached per generator object.
+        """
+        cache = getattr(self, "_apply_transform_support_cache", None)
+        if cache is None:
+            cache = self._apply_transform_support_cache = {}
+        key = id(gen)
+        if key not in cache:
+            try:
+                parameters = inspect.signature(gen).parameters
+                cache[key] = any(
+                    p.name == "apply_transform"
+                    and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)
+                    for p in parameters.values()
+                )
+            except (TypeError, ValueError):
+                cache[key] = False
+        return cache[key]
+
+    def _resolve_signal_gen_override(self, ac):
+        """Resolve the branch generator for one container: installed first.
+
+        Default (returns ``None``): the generator already installed on the
+        container's dict-based ``signal_gen`` under :attr:`branch_name` —
+        the same generator the engine uses for residual rebuilds — provided
+        it supports the ``apply_transform`` kwarg the move relies on.
+
+        When the container does not carry that model name, this move's
+        :attr:`own_signal_gen` is added: durably registered when that cannot
+        clobber anything (no generator installed, or a dict without the
+        key), otherwise (bare single-callable ``signal_gen``, or an
+        installed entry without ``apply_transform`` support) injected for
+        the call only via the returned per-call ``{branch: gen}`` mapping.
+        """
+        gen_map = getattr(ac, "_signal_gen", None)
+        if isinstance(gen_map, dict):
+            installed = gen_map.get(self.branch_name)
+            if installed is not None:
+                if self._supports_apply_transform(installed):
+                    return None
+                # installed under our name but cannot skip its transform:
+                # score/apply with our own generator, without clobbering it.
+                return {self.branch_name: self.own_signal_gen}
+            new_map = dict(gen_map)
+            new_map[self.branch_name] = self.own_signal_gen
+            ac.signal_gen = new_map
+            return None
+        if gen_map is None:
+            ac.signal_gen = {self.branch_name: self.own_signal_gen}
+            return None
+        # bare single-callable installed by someone else: never clobber it.
+        return {self.branch_name: self.own_signal_gen}
+
+    def _branch_waveform_kwargs(self) -> dict:
+        """Per-model ``waveform_kwargs`` mapping for this branch's generator."""
+        return {self.branch_name: self.waveform_gen_kwargs}
+
+    def _apply_cold_chain_sources(self, coords, sign):
+        """One-at-a-time template build + apply to keep peak RAM flat.
+
+        ``sign=-1`` subtracts (add_back), ``sign=+1`` adds (remove). ``coords``
+        are already-transformed (waveform-basis) rows, one per walker. Each
+        walker's template is assembled by its container's ``signal_gen``
+        machinery (:meth:`AnalysisContainer.build_template`), defaulting to
+        the generator the engine installed for this branch — with
+        ``apply_transform=False`` since the move already applied the branch
+        transform (applied exactly once either way) — and falling back to
+        this move's own :class:`MoveSignalGen` when the container doesn't
+        carry the branch (see :meth:`_resolve_signal_gen_override`). The
+        template is then applied with the device-aware
+        :meth:`AnalysisContainerArray.signal_operation`. Never holds more
+        than a single source's waveform in memory.
         """
         import gc
         for i in range(coords.shape[0]):
-            sig = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+            ac = self.acs[int(i)]
+            sig = ac.build_template(
+                {self.branch_name: coords[i]},
+                waveform_kwargs=self._branch_waveform_kwargs(),
+                signal_gen=self._resolve_signal_gen_override(ac),
+                apply_transform=False,
+            )
             self.acs.signal_operation(sign, [sig], data_index=np.array([i]))
             del sig
             gc.collect()
@@ -455,14 +585,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """Hook for subclasses to set up state before computing the likelihood."""
         pass
 
-    def compute_acs_like(self, coords_in, data_index, signal_gen, **kwargs):
+    def compute_acs_like(self, coords_in, data_index, signal_gen=None, **kwargs):
         """
         Compute the likelihood for the given coordinates and data index using the analysis container array.
 
         Args:
-            coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
+            coords_in: already-transformed (waveform-basis) coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim). The containers' generators are called with ``apply_transform=False`` so the branch transform — applied once by this move's choreography — is never applied twice.
             data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
-            signal_gen: waveform generator function to use for computing the likelihood. This is needed because in some cases we need to compute the likelihood with a different waveform generator than the one used for proposing new sources, for example when using heterodyned likelihoods.
+            signal_gen: optional waveform generator override. By default (``None``) each targeted container's own installed generator for this branch is used (falling back to this move's generator when the container doesn't carry it — see :meth:`_resolve_signal_gen_override`), so scoring and residual bookkeeping share one template-assembly path. Pass a waveform-basis callable to score with a different generator than the one used for proposing, for example when using heterodyned likelihoods; it is wrapped in :class:`MoveSignalGen` and swapped in per call.
             kwargs: additional keyword arguments for the likelihood computation function.
 
         Returns:
@@ -471,45 +601,38 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # TODO: we should probably move the prior in here even though
         # in general with current setup it should only be points in the prior
         # that make it here
-        # Normalize to a 2D ``(n_sources, ndim)`` batch so the per-source loop
-        # below works whether the caller passed a single 1D ``(ndim,)`` source
-        # or a 2D batch. ``atleast_2d`` on a 1D vector yields ``(1, ndim)``
-        # (row), which is exactly one source -- NOT ndim sources.
+        # Normalize to a 2D ``(n_sources, ndim)`` batch: ``atleast_2d`` on a
+        # 1D vector yields ``(1, ndim)`` (row), which is exactly one source --
+        # NOT ndim sources.
         coords_in = get_array_module(coords_in).atleast_2d(coords_in)
-        data_index_np = np.atleast_1d(asnumpy(data_index))
-        ll = np.full_like(data_index_np, -1e300, dtype=float)
+        data_index_np = np.atleast_1d(asnumpy(data_index)).astype(int)
         source_only = kwargs.pop("source_only", False)
 
-        # TODO: VECTORIZATION. Every generator currently wired into this move
-        # is SINGLE-SOURCE: EMRI (FEW GenerateEMRIWaveform), SOBBH / MBH
-        # (the tdionfly + legacy ResponseWrapper wraps all build ONE combined
-        # template per call). The old batched form ``signal_gen(*coords_in.T)``
-        # passed each parameter as a length-n_sources VECTOR, which crashes the
-        # single-source FEW generator (and would silently sum candidates for
-        # the ``combine=True`` tdionfly wraps). So generate per-source in a
-        # plain loop for now. To vectorize later, branch on a per-generator
-        # capability flag (e.g. ``getattr(signal_gen, "vectorized_over_sources",
-        # False)``) and, when True, restore the single batched call — the
-        # ``WaveformBase.get_signals_for_residuals`` style already returns a
-        # per-source DomainBaseArray that ``all_templates[i]`` can index.
-        all_templates = [
-            signal_gen(*coords_in[i], **self.waveform_gen_kwargs)
-            for i in range(coords_in.shape[0])
-        ]
-
+        # Params-based likelihood through each targeted container's
+        # signal_gen machinery (template assembly + scoring live in
+        # :meth:`AnalysisContainer.calculate_signal_likelihood`; the move no
+        # longer generates waveforms itself). Rows are evaluated one at a
+        # time, which is required anyway: every generator currently wired
+        # into this move is SINGLE-SOURCE (EMRI FEW GenerateEMRIWaveform;
+        # the SOBBH / MBH tdionfly + legacy ResponseWrapper wraps all build
+        # ONE combined template per call), so a batched
+        # ``signal_gen(*coords_in.T)`` would crash or silently sum candidates.
+        custom_override = (
+            None if signal_gen is None
+            else {self.branch_name: MoveSignalGen(self, signal_gen)}
+        )
+        ll = np.full(len(data_index_np), -1e300, dtype=float)
         for i in range(coords_in.shape[0]):
-            template = all_templates[i]
-            if isinstance(template, np.ndarray) or (
-                xp is not np and isinstance(template, xp.ndarray)
-            ):
-                # raw-array batch output: tag it with the data's settings so
-                # template_likelihood receives a DomainBase (DataResidualArray
-                # is deprecated -- domains are communicated by settings class).
-                settings = self.acs[int(data_index_np[i])].data.settings
-                template = settings.associated_class(template, settings)
-            ll[i] = self.acs[int(data_index_np[i])].template_likelihood(
-                template,
-                include_psd_info=not source_only,
+            ac = self.acs[int(data_index_np[i])]
+            ll[i] = ac.calculate_signal_likelihood(
+                {self.branch_name: coords_in[i]},
+                signal_gen=(
+                    custom_override if custom_override is not None
+                    else self._resolve_signal_gen_override(ac)
+                ),
+                waveform_kwargs=self._branch_waveform_kwargs(),
+                apply_transform=False,
+                source_only=source_only,
                 **kwargs,
             )
 
@@ -519,15 +642,19 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """
         Compute the likelihood for the given coordinates and data index.
 
+        Defaults to each container's installed generator for this branch
+        (see :meth:`compute_acs_like`), so proposal scoring uses the same
+        template-assembly path as the residual bookkeeping.
+
         Args:
-            coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
+            coords_in: already-transformed (waveform-basis) coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
             data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
 
         Returns:
             ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
         """
         return self.compute_acs_like(
-            coords_in, data_index, signal_gen=self.waveform_gen, **self.waveform_like_kwargs
+            coords_in, data_index, **self.waveform_like_kwargs
         )
 
     def setup(self, model, state):
@@ -1013,7 +1140,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     def replace_residuals(self, old_state, new_state):
         """Swap the cold-chain contribution from ``old_state`` to ``new_state``.
 
-        Domain-agnostic: the waveform generator returns a
+        Domain-agnostic: each template is assembled through the containers'
+        ``signal_gen`` machinery (see :meth:`_apply_cold_chain_sources`) as a
         :class:`~lisatools.domains.DomainBase` (FD, STFT, WDM, ...) and the
         :class:`AnalysisContainerArray` dispatches the actual residual
         update by basis. The old FD-only implementation hand-assembled

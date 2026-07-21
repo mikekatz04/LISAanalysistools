@@ -6,6 +6,7 @@ import math
 import warnings
 from abc import ABC
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -232,6 +233,27 @@ class AnalysisContainer:
                 )
             self._signal_gen = signal_gen
 
+    @contextmanager
+    def _swapped_signal_gen(self, signal_gen: Optional[SignalGenSpec]):
+        """Temporarily replace :attr:`signal_gen` for the duration of a call.
+
+        ``None`` is a no-op (the installed generator, if any, stays in
+        place). Restores the previous state on exit, including the
+        "no generator installed" state.
+        """
+        if signal_gen is None:
+            yield
+            return
+        prev_gen = self._signal_gen if hasattr(self, "_signal_gen") else None
+        self.signal_gen = signal_gen
+        try:
+            yield
+        finally:
+            if prev_gen is None:
+                del self._signal_gen
+            else:
+                self._signal_gen = prev_gen
+
     @property
     def is_multi_model(self) -> bool:
         """``True`` iff :attr:`signal_gen` is configured as a per-model dict."""
@@ -314,6 +336,8 @@ class AnalysisContainer:
         params: Union[tuple, list, np.ndarray, Mapping[str, Any]],
         waveform_kwargs: Union[dict, Mapping[str, dict], None] = None,
         per_model_per_signal: bool = False,
+        signal_gen: Optional[SignalGenSpec] = None,
+        apply_transform: Optional[bool] = None,
     ):
         """Build a combined template from ``params`` using :attr:`signal_gen`.
 
@@ -336,12 +360,41 @@ class AnalysisContainer:
             per_model_per_signal: If ``True``, in the multi-model case return
                 the per-model / per-signal :class:`DomainBase` list without
                 summing -- handy for inspecting individual contributions.
+            signal_gen: In-scope waveform generator (callable or dict).
+                Replaces :attr:`signal_gen` for this call when given.
+            apply_transform: Call-time transform control. When not ``None``,
+                forwarded as an ``apply_transform=<bool>`` kwarg to every
+                generator call. Generators following the engine convention
+                (e.g. the stock ``SourceSignalGen``) apply their internal
+                sampling→waveform transform by default; ``False`` tells them
+                the caller already applied it (``params`` are waveform-basis),
+                so the transform is applied exactly once. Leave ``None``
+                (default) for generators that do not accept the kwarg.
 
         Returns:
             A :class:`DomainBase` template (or a structured dict when
             ``per_model_per_signal=True`` in multi-model mode).
         """
+        with self._swapped_signal_gen(signal_gen):
+            return self._build_template(
+                params, waveform_kwargs, per_model_per_signal, apply_transform
+            )
+
+    def _build_template(
+        self,
+        params: Union[tuple, list, np.ndarray, Mapping[str, Any]],
+        waveform_kwargs: Union[dict, Mapping[str, dict], None] = None,
+        per_model_per_signal: bool = False,
+        apply_transform: Optional[bool] = None,
+    ):
+        """:meth:`build_template` body against the currently-installed generator."""
         waveform_kwargs = waveform_kwargs or {}
+
+        def _with_flag(kw: dict) -> dict:
+            # inject the call-time transform control into a generator's kwargs
+            if apply_transform is None:
+                return kw
+            return {**kw, "apply_transform": apply_transform}
 
         if not self.is_multi_model:
             if isinstance(params, Mapping):
@@ -352,7 +405,7 @@ class AnalysisContainer:
                 )
             return self._call_single_model(
                 self._signal_gen, params,
-                waveform_kwargs if isinstance(waveform_kwargs, dict) else {},
+                _with_flag(waveform_kwargs if isinstance(waveform_kwargs, dict) else {}),
             )
 
         # multi-model path
@@ -379,7 +432,7 @@ class AnalysisContainer:
             structured: Dict[str, List[DomainBase]] = {}
             for name, p in params.items():
                 fn = self._signal_gen[name]
-                wf = per_model_kwargs.get(name, {})
+                wf = _with_flag(per_model_kwargs.get(name, {}))
                 arr_like = np.asarray(p, dtype=object) if not hasattr(p, "ndim") else p
                 if getattr(arr_like, "ndim", 1) == 1:
                     structured[name] = [self._to_data_domain(fn(*tuple(p), **wf), fn)]
@@ -392,9 +445,15 @@ class AnalysisContainer:
         combined: Optional[DomainBase] = None
         for name, p in params.items():
             fn = self._signal_gen[name]
-            wf = per_model_kwargs.get(name, {})
+            wf = _with_flag(per_model_kwargs.get(name, {}))
             per_model = self._call_single_model(fn, p, wf)
             if combined is None:
+                if len(params) == 1:
+                    # single-entry dict: no cross-model summation to protect,
+                    # so return the generator's template directly (matches the
+                    # single-model path and avoids a full-grid copy — this is
+                    # the hot path for per-branch residual/likelihood ops).
+                    return per_model
                 combined = self._data.settings.associated_class(
                     per_model.arr.copy(), self._data.settings,
                 )
@@ -440,24 +499,38 @@ class AnalysisContainer:
     # Direct add/subtract of templates against the data residual
     # ------------------------------------------------------------------
 
-    def add_signal_to_data(self, template, sign: int = +1) -> DomainBase:
+    def add_signal_to_data(
+        self,
+        template,
+        sign: int = +1,
+        waveform_kwargs: Union[dict, Mapping[str, dict], None] = None,
+        signal_gen: Optional[SignalGenSpec] = None,
+        apply_transform: Optional[bool] = None,
+    ) -> DomainBase:
         """Add ``template`` to ``self.data`` (in-place, domain-aware).
 
         ``template`` may be a :class:`DomainBase`, a :class:`DataResidualArray`,
         a tuple/array of parameters, or a multi-model params ``dict``. In the
         latter cases :meth:`build_template` is used to assemble the combined
-        template from :attr:`signal_gen`.
+        template from :attr:`signal_gen`; ``waveform_kwargs`` / ``signal_gen``
+        / ``apply_transform`` are forwarded to it (call-time generator swap and
+        transform control — see :meth:`build_template`).
         """
         if isinstance(template, (DomainBase, DataResidualArray)):
             tmpl = self._to_data_domain(template)
         else:
-            tmpl = self.build_template(template)
+            tmpl = self.build_template(
+                template,
+                waveform_kwargs=waveform_kwargs,
+                signal_gen=signal_gen,
+                apply_transform=apply_transform,
+            )
         self._data.add_signal(tmpl, sign=sign)
         return self._data
 
-    def subtract_signal_from_data(self, template) -> DomainBase:
+    def subtract_signal_from_data(self, template, **kwargs) -> DomainBase:
         """Subtract ``template`` from ``self.data`` (in-place, see :meth:`add_signal_to_data`)."""
-        return self.add_signal_to_data(template, sign=-1)
+        return self.add_signal_to_data(template, sign=-1, **kwargs)
 
     def loglog(self) -> Tuple[plt.Figure, plt.Axes]:
         """Produce loglog plot of both source and sensitivity information.
@@ -781,6 +854,7 @@ class AnalysisContainer:
         transform_fn: Optional[TransformContainer] = None,
         signal_gen: Optional[SignalGenSpec] = None,
         per_model_per_signal: bool = False,
+        apply_transform: Optional[bool] = None,
         **kwargs: dict,
     ) -> float | complex:
         """Build a template from ``signal_gen`` and run a likelihood/SNR/inner-product op.
@@ -807,6 +881,13 @@ class AnalysisContainer:
             per_model_per_signal: Multi-model only. If ``True``, skip the
                 summation step and return a structured per-model /
                 per-signal dict of results instead of a scalar.
+            apply_transform: Call-time transform control forwarded to the
+                generator calls (see :meth:`build_template`). ``False`` marks
+                the parameters as already waveform-basis so an
+                engine-convention generator skips its internal transform;
+                ``None`` (default) injects nothing. Distinct from
+                ``transform_fn``, which transforms the parameters *here*
+                before generation.
             **kwargs: Forwarded to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
@@ -817,10 +898,7 @@ class AnalysisContainer:
             source_only = getattr(self, "likelihood_source_only", False)
 
         # Temporarily swap in a per-call signal_gen if provided.
-        prev_gen = self._signal_gen if hasattr(self, "_signal_gen") else None
-        if signal_gen is not None:
-            self.signal_gen = signal_gen
-        try:
+        with self._swapped_signal_gen(signal_gen):
             multi = self.is_multi_model
 
             if multi:
@@ -836,10 +914,11 @@ class AnalysisContainer:
                         "signal_gen callable."
                     )
                 params = args[0]
-                template_or_struct = self.build_template(
+                template_or_struct = self._build_template(
                     params,
                     waveform_kwargs=waveform_kwargs or {},
                     per_model_per_signal=per_model_per_signal,
+                    apply_transform=apply_transform,
                 )
 
                 if per_model_per_signal:
@@ -857,16 +936,11 @@ class AnalysisContainer:
                     args_in = tuple(transform_fn.both_transforms(args_tmp))
                 else:
                     args_in = args
-                template = self.build_template(
+                template = self._build_template(
                     args_in,
                     waveform_kwargs=waveform_kwargs or {},
+                    apply_transform=apply_transform,
                 )
-        finally:
-            if signal_gen is not None:
-                if prev_gen is None:
-                    del self._signal_gen
-                else:
-                    self._signal_gen = prev_gen
 
         if "include_psd_info" in kwargs:
             assert kwargs["include_psd_info"] == (not source_only)

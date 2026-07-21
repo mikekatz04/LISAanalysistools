@@ -566,8 +566,21 @@ class SourceSignalGen:
         self.general_info = general_info
         self.cfg = cfg
 
-    def __call__(self, *params, **kwargs):
-        params_in = self.transform.both_transforms(np.asarray(params, dtype=float))
+    def __call__(self, *params, apply_transform=True, **kwargs):
+        """Build this branch's template from ``params``.
+
+        Args:
+            *params: Sampling-basis parameters by default. With
+                ``apply_transform=False`` the caller has already applied the
+                branch transform and ``params`` are waveform-basis — used by
+                the add/remove move, whose choreography transforms once up
+                front (the transform must be applied exactly once).
+            **kwargs: Forwarded to the wave wrap.
+        """
+        params_arr = np.asarray(params, dtype=float)
+        params_in = (
+            self.transform.both_transforms(params_arr) if apply_transform else params_arr
+        )
         if self.branch == "emri":
             return get_emri_wave_wrap(self.general_info, self.cfg)(*params_in, **kwargs)
         if self.branch == "sobbh":
