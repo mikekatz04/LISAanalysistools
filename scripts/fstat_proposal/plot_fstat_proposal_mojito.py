@@ -441,11 +441,34 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
                  F_all=F, sky_alpha=sky_al, sky_sin_delta=sky_sd)
         print(f"[cache] wrote {comb_cache}", flush=True)
 
-    # --- comb figure: F(f0) vs the catalogue comb ---
+    # --- comb figure: F(f0) vs the catalogue comb + proposal draws ---
     try:
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(12, 4.5))
+        # rvs draws from the two comb-implied f0 densities (cheap, numpy):
+        # beta=1 (w ~ exp(F): the true birth proposal -- collapses onto the
+        # loudest peak) and tempered linear-in-F (w ~ F: proportional mass
+        # on every peak, the successive-birth weighting).
+        rng_s = np.random.default_rng(11)
+
+        def _draw_f0(w_cells, n):
+            w = np.clip(w_cells, 0, None)
+            cdf = np.cumsum(w)
+            cdf /= cdf[-1]
+            idx = np.searchsorted(cdf, rng_s.random(n), side="right")
+            idx = np.clip(idx, 0, len(w) - 1)
+            u = rng_s.random(n)
+            return f0_nodes[idx] + u * (f0_nodes[idx + 1] - f0_nodes[idx])
+
+        g = F_max - F_max.max()
+        s_exp = _draw_f0(0.5 * (np.exp(g[:-1]) + np.exp(g[1:])), 3000)
+        s_lin = _draw_f0(0.5 * (F_max[:-1] + F_max[1:]), 3000)
+        y_exp = np.interp(s_exp, f0_nodes, F_max) * 10 ** rng_s.uniform(
+            0.10, 0.45, s_exp.size)
+        y_lin = np.interp(s_lin, f0_nodes, F_max) * 10 ** rng_s.uniform(
+            0.10, 0.45, s_lin.size)
+
+        fig, ax = plt.subplots(figsize=(12, 4.8))
         ax.semilogy(f0_nodes, np.clip(F_max, 1e-3, None), "-", lw=0.7,
                     color="C0", label="max-over-sky F-stat")
         if cat_sources is not None:
@@ -455,11 +478,18 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
                            alpha=float(min(1.0, 0.2 + 0.8 * camp[i] / camp.max())),
                            zorder=0, label="catalogue GBs" if i == 0 else None)
         ax.axvline(src["f0_mHz"], color="r", ls="--", lw=1.2, label="target GB")
+        ax.scatter(s_lin, y_lin, s=4, alpha=0.15, color="darkorange", zorder=3,
+                   label="3k rvs draws, tempered (w ∝ F)")
+        ax.scatter(s_exp, y_exp, s=4, alpha=0.15, color="green", zorder=4,
+                   label="3k rvs draws, β=1 (w ∝ e^F)")
         ax.set_xlabel("f0 [mHz]")
         ax.set_ylabel("F-stat (max over sky)")
-        ax.set_title(f"F-stat comb scan, {len(f0_nodes)} nodes, Tobs="
-                     f"{Tobs / 86400:.0f} d (peak width ~ 1/Tobs)")
-        ax.legend(fontsize=8, loc="upper right")
+        ax.set_ylim(max(1e-3, np.clip(F_max, 1e-3, None).min() * 0.5),
+                    F_max.max() * 10 ** 0.7)
+        ax.set_title(f"F-stat comb scan + proposal draws, {len(f0_nodes)} "
+                     f"nodes, Tobs={Tobs / 86400:.0f} d (draws jittered "
+                     "above the curve)")
+        ax.legend(fontsize=8, loc="upper left")
         fig.tight_layout()
         comb_path = out_path.replace(".png", "_comb.png")
         fig.savefig(comb_path, dpi=140)
@@ -802,10 +832,28 @@ def main():
     if design == "comb":
         # --- Stage A: dense-in-f0 comb scan (the narrow-peak-correct locate) ---
         gi = curr.general_info
-        f0_nodes, F_max, peaks, extras = run_comb_scan(
-            gb_wdm_comp, wdm_holder, gb_info, gi, src, out_path, cat_sources,
-            cache_path=cache_path,
-        )
+        comb_cache_file = (cache_path.replace(".npz", "_comb.npz")
+                           if cache_path else "")
+        if (os.environ.get("FSTAT_COMB_CACHE_REUSE", "0") == "1"
+                and comb_cache_file and os.path.exists(comb_cache_file)):
+            # Reuse a previous sweep (e.g. to fit more peaks without paying
+            # the ~35-min comb again).
+            d = np.load(comb_cache_file)
+            f0_nodes, F_max = d["f0_nodes_mHz"], d["F_max"]
+            extras = dict(sky_alpha=d["sky_alpha"],
+                          sky_sin_delta=d["sky_sin_delta"], F_all=d["F_all"],
+                          mc_fix=float(os.environ.get(
+                              "FSTAT_COMB_MC",
+                              src.get("Mc_eff_Msol", src.get("Mc_Msol", 0.3)))),
+                          spacing=float(f0_nodes[1] - f0_nodes[0]))
+            peaks = [(float(f0), float(F), 0) for f0, F in d["peaks"]]
+            print(f"[comb] reused cache {comb_cache_file} "
+                  f"({len(f0_nodes)} nodes, {len(peaks)} peaks)", flush=True)
+        else:
+            f0_nodes, F_max, peaks, extras = run_comb_scan(
+                gb_wdm_comp, wdm_holder, gb_info, gi, src, out_path,
+                cat_sources, cache_path=cache_path,
+            )
 
         # Ultra-dense 1-D profile through the top peak: measures the actual
         # peak FWHM against the ~1/Tobs matched-filter prediction.
