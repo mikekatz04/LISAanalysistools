@@ -155,11 +155,15 @@ class EMRISetup(Setup):
                 sampler's input basis.
         """
 
+        # The logm1 / m2 / p0 boxes must contain every mojito_light catalogue
+        # source (a start point outside the prior makes lnpdiff NaN and
+        # freezes the sampler): the catalogue spans M in [3.92e5, 1e7],
+        # m2 up to 127.7, p0 down to 2.12.
         priors_emri = {
-            input_basis[0]: uniform_dist(np.log(5e5), np.log(5e6)),  # log m1
-            input_basis[1]: uniform_dist(1, 100),  # m2
+            input_basis[0]: uniform_dist(np.log(3e5), np.log(1.5e7)),  # log m1
+            input_basis[1]: uniform_dist(1, 200),  # m2
             input_basis[2]: uniform_dist(0.01, 0.999),  # a
-            input_basis[3]: uniform_dist(5.0, 100.0),  # p0
+            input_basis[3]: uniform_dist(2.0, 100.0),  # p0
             input_basis[4]: uniform_dist(0.001, 0.8),  # e0
             input_basis[5]: uniform_dist(0.01, 100.0),  # dist in Gpc
             input_basis[6]: uniform_dist(-0.99999, 0.99999),  # qS
