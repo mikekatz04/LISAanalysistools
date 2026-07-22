@@ -1,6 +1,7 @@
 """Diagnostic plotting utilities (corner plots, log-likelihood traces, styling)."""
 
 import os
+import shutil
 
 import chainconsumer
 import corner
@@ -34,9 +35,13 @@ def set_plotting_style(background_color: str = "white", front_color: str = "blac
     if background_color == front_color:
         raise ValueError("Background color and main color cannot be the same.")
 
-    # text settings
-    mpl.rcParams["text.usetex"] = True  # Use LaTeX for text rendering
-    mpl.rcParams["text.latex.preamble"] = r"\usepackage{amsmath}"  # Use AMS math package
+    # text settings -- only enable LaTeX rendering when latex is actually
+    # installed, else matplotlib crashes on machines without it (fall back to
+    # mathtext). Applies to every global-fit plot (grid-gen, debug, diag).
+    _has_latex = shutil.which("latex") is not None
+    mpl.rcParams["text.usetex"] = _has_latex  # Use LaTeX for text rendering
+    if _has_latex:
+        mpl.rcParams["text.latex.preamble"] = r"\usepackage{amsmath}"  # AMS math
     mpl.rcParams["font.family"] = "serif"  # Use serif font for text
     mpl.rcParams["font.serif"] = ["Computer Modern Roman"]  # Use Computer Modern font for LaTeX
     mpl.rcParams["font.weight"] = "medium"
@@ -249,7 +254,7 @@ def base_branch_plots(
 
         plot_config = {
             "serif": True,
-            "usetex": True,
+            "usetex": shutil.which("latex") is not None,
             "spacing": 1.5,
         }
         C.set_plot_config(chainconsumer.PlotConfig(**plot_config))

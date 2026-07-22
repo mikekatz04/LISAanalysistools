@@ -566,7 +566,11 @@ def run_peak_profile(gb_wdm_comp, wdm_holder, general_info, src, peak_f0_mHz,
           f"f0={f0_nodes[i_max]:.6f} mHz; FWHM={fwhm:.3e} mHz "
           f"({fwhm / df_T:.2f}/Tobs)", flush=True)
 
+    import matplotlib
     import matplotlib.pyplot as plt
+    # A transitive import (globalfit.diagnosticplot) flips usetex back on;
+    # kill it here so a missing latex install can't crash the profile plot.
+    matplotlib.rcParams["text.usetex"] = False
 
     fig, ax = plt.subplots(figsize=(11, 4.2))
     ax.plot(f0_nodes, F_prof, "-", lw=1.0, color="C0",
@@ -859,8 +863,14 @@ def main():
         # peak FWHM against the ~1/Tobs matched-filter prediction.
         if peaks and os.environ.get("FSTAT_PEAK_PROFILE", "1") not in (
                 "0", "false", "False"):
-            run_peak_profile(gb_wdm_comp, wdm_holder, gi, src, peaks[0][0],
-                             extras, out_path, cat_sources, rank=0)
+            # Diagnostic only -- never let a plot failure block Stage B (the
+            # peak-grid writing below).
+            try:
+                run_peak_profile(gb_wdm_comp, wdm_holder, gi, src, peaks[0][0],
+                                 extras, out_path, cat_sources, rank=0)
+            except Exception as e:
+                print(f"[profile] plot skipped (non-fatal, grids still "
+                      f"written): {e!r}", flush=True)
 
         # --- Stage B: local 4-D proposal around the top comb peak(s) ---
         n_fit = int(os.environ.get("FSTAT_PEAKS_TO_FIT", 1))
