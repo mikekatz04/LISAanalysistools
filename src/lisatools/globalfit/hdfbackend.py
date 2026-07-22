@@ -976,7 +976,9 @@ class MBHHDFBackend(eryn_HDFBackend):
         thin = self.iteration - it if it != self.iteration else 1
         discard = it + 1 - thin
 
-        betas_all = self.get_betas_all(discard=discard, thin=thin)
+        # [0] squeezes the (single) iteration axis to the live (num_mbhs,
+        # ntemps) shape (see EMRIHDFBackend.get_a_sample for the rationale).
+        betas_all = self.get_betas_all(discard=discard, thin=thin)[0]
 
         sample = MBHState(None, betas_all=betas_all)
         return sample
@@ -1131,7 +1133,12 @@ class EMRIHDFBackend(eryn_HDFBackend):
         thin = self.iteration - it if it != self.iteration else 1
         discard = it + 1 - thin
 
-        betas_all = self.get_betas_all(discard=discard, thin=thin)
+        # [0] squeezes the (single) iteration axis so betas_all matches the
+        # live per-leaf shape (num_emris, ntemps) — mirrors eryn's get_a_sample,
+        # which indexes each stored quantity [0]. Without it the array stays
+        # (1, num_emris, ntemps) and per-leaf tempering (betas_all[leaf]) would
+        # index the iteration axis on warm-start.
+        betas_all = self.get_betas_all(discard=discard, thin=thin)[0]
 
         sample = EMRIState(None, betas_all=betas_all)
         return sample
@@ -1226,7 +1233,9 @@ class SOBBHHDFBackend(eryn_HDFBackend):
         thin = self.iteration - it if it != self.iteration else 1
         discard = it + 1 - thin
 
-        betas_all = self.get_betas_all(discard=discard, thin=thin)
+        # [0] squeezes the (single) iteration axis to the live (num_sobbhs,
+        # ntemps) shape (see EMRIHDFBackend.get_a_sample for the rationale).
+        betas_all = self.get_betas_all(discard=discard, thin=thin)[0]
 
         sample = SOBBHState(None, betas_all=betas_all)
         return sample
