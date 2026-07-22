@@ -846,6 +846,11 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                 # With N sources the start logL offset accumulates over
                 # ~8*N dims, so it is only ~0 when this is 0/near-0.
                 _start_factor = float(os.environ.get("GB_START_FACTOR", "1e-4"))
+                logger.info(
+                    "GB true-point start: GB_START_FACTOR=%g (per-dimension "
+                    "seed scatter as a fraction of prior width; 0 = exact "
+                    "truth).", _start_factor,
+                )
                 _gb_spread = _start_factor * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
                 setup_state_for_injection(
                     curr, state, source_type="GB", branch_name="gb",
