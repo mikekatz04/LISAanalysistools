@@ -3,9 +3,12 @@
 The stock EMRI priors are independent boxes on ``(a, p0, e0, ...)`` whose
 corners extend beyond the FEW Kerr eccentric-equatorial interpolation grid, so
 prior draws / proposals can hit parameters the waveform cannot generate. FEW
-rejects those with bare ``ValueError`` ("... outside of our domain of
-validity.") at init or ``AssertionError`` ("Interpolation: p ... out of
-bounds.") from the trajectory. Two layers keep the sampler safe:
+rejects those with a bare ``ValueError`` ("... outside of our domain of
+validity.") at init, an ``AssertionError`` ("Interpolation: p ... out of
+bounds.") from the trajectory, or its typed
+``few.utils.exceptions.TrajectoryOffGridException`` (raised when the trajectory
+integrator steps off the interpolation grid mid-inspiral). Two layers keep the
+sampler safe:
 
 - :func:`few_domain_guard` converts those errors into the typed
   :class:`~lisatools.utils.exceptions.WaveformDomainError` that the global-fit
@@ -47,17 +50,44 @@ FEW_DOMAIN_ERROR_PATTERNS = (
 )
 
 
+def _few_off_grid_exceptions():
+    """FEW's typed off-grid trajectory exception(s), as an ``except`` tuple.
+
+    Imported lazily so this module does not require ``few`` at import time
+    (matching :func:`emri_kerr_domain_mask`). Returns an empty tuple — which
+    ``except`` treats as "match nothing" — when ``few`` is unavailable, so the
+    guard degrades to the message-pattern path.
+    """
+    try:
+        from few.utils.exceptions import TrajectoryOffGridException
+    except (ImportError, ModuleNotFoundError):
+        return ()
+    return (TrajectoryOffGridException,)
+
+
 @contextlib.contextmanager
 def few_domain_guard():
     """Convert FEW out-of-domain errors into :class:`WaveformDomainError`.
 
-    Wrap the FEW waveform call with this. Any ``ValueError`` or
-    ``AssertionError`` whose message matches :data:`FEW_DOMAIN_ERROR_PATTERNS`
-    is re-raised as a :class:`WaveformDomainError` (chained); anything else
-    propagates untouched.
+    Wrap the FEW waveform call with this. Two FEW failure modes are re-raised
+    (chained) as a :class:`WaveformDomainError`:
+
+    * FEW's typed ``TrajectoryOffGridException`` (the trajectory integrator
+      stepped off the interpolation grid mid-inspiral), regardless of message;
+      and
+    * any ``ValueError``/``AssertionError`` whose message matches
+      :data:`FEW_DOMAIN_ERROR_PATTERNS` (``sanity_check_init`` and the
+      trajectory ``isvalid_*`` bounds checks).
+
+    Anything else propagates untouched.
     """
     try:
         yield
+    except _few_off_grid_exceptions() as exc:
+        # Typed off-grid signal from FEW: a domain error by construction, so no
+        # message match is needed (the p lower boundary — a valid inspiral end
+        # — is handled inside FEW and never reaches here).
+        raise WaveformDomainError(str(exc)) from exc
     except (AssertionError, ValueError) as exc:
         msg = str(exc)
         if any(pattern in msg for pattern in FEW_DOMAIN_ERROR_PATTERNS):
