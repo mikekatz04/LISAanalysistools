@@ -54,7 +54,9 @@ def main():
     fp = sys.argv[1]
     target = sys.argv[2] if len(sys.argv) > 2 else "highest"
     out = sys.argv[3] if len(sys.argv) > 3 else fp.replace(".h5", "_diag.png")
-    truth = TRUTH[target]
+    # Target is optional: unknown/generic bands (e.g. a slid m=55 layer) just
+    # get the catalogue comb + traces, no single-source "truth" annotations.
+    truth = TRUTH.get(target)
 
     with h5py.File(fp, "r") as f:
         g = f["mcmc"] if "mcmc" in f else f["global_fit"]
@@ -84,8 +86,8 @@ def main():
     ax.set_xlabel("iteration")
     ax.set_ylabel("alive leaves")
     ax.legend(fontsize=8)
-    ax.set_title(f"Zero-leaf F-stat-proposal search — {target} "
-                 f"(GB {truth['ID']})")
+    _tt = f" (GB {truth['ID']})" if truth else ""
+    ax.set_title(f"Zero-leaf F-stat-proposal search — {target}{_tt}")
 
     ax = axes[1]
     dl = ll_cold - ll0
@@ -104,7 +106,8 @@ def main():
             ax.axhline(fv, color="0.6", lw=0.8,
                        alpha=float(min(1.0, 0.2 + 0.8 * camp[i] / camp.max())),
                        zorder=0, label="catalogue GBs" if i == 0 else None)
-    ax.axhline(truth["f0"], color="r", ls="--", lw=1.2, label="target GB")
+    if truth:
+        ax.axhline(truth["f0"], color="r", ls="--", lw=1.2, label="target GB")
     for it in range(nit):
         f0s = chain[it, 0, 0][alive_cold[it]][:, 1]
         ax.plot(np.full(f0s.shape, it), f0s, ".", color="C0", ms=5, alpha=0.6,
@@ -126,11 +129,12 @@ def main():
         print("\nfinal cold-chain alive-leaf parameters (median [5%, 95%]):")
         for j, nm in enumerate(names):
             print(f"  {nm:6s} {med[j]:10.5f}  [{lo[j]:10.5f}, {hi[j]:10.5f}]")
-        print(f"\ntruth: f0={truth['f0']:.5f}  Mc_eff={truth['Mc_eff']}  "
-              f"alpha={truth['alpha']}  sin_delta={truth['sin_delta']}")
-        df0 = np.abs(pars[:, 1] - truth["f0"])
-        print(f"|f0 - truth|: median {np.median(df0):.2e} mHz  "
-              f"max {df0.max():.2e} mHz")
+        if truth:
+            print(f"\ntruth: f0={truth['f0']:.5f}  Mc_eff={truth['Mc_eff']}  "
+                  f"alpha={truth['alpha']}  sin_delta={truth['sin_delta']}")
+            df0 = np.abs(pars[:, 1] - truth["f0"])
+            print(f"|f0 - truth|: median {np.median(df0):.2e} mHz  "
+                  f"max {df0.max():.2e} mHz")
 
 
 if __name__ == "__main__":

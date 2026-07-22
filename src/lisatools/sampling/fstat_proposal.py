@@ -24,6 +24,20 @@ Sampling basis (matches the stock erebor GB chirp-mass basis):
 waveform rows for the kernel, so the proposal lives natively in the chirp-mass
 sampling basis used by :class:`lisatools.globalfit.stock.erebor.gb.GBSetup`.
 
+TODO (fdot proposal / interacting DWDs): the ``(f0, Mc)`` basis can only
+propose ``fdot > 0`` (``Mc > 0`` -> ``fdot > 0`` through the GW relation), so
+the F-stat proposal structurally cannot birth the interacting DWDs that have
+``fdot < 0`` (e.g. mass transfer). We should examine doing the F-stat proposal
+directly in ``(f0, fdot)`` instead of ``(f0, Mc)`` so negative fdot is
+representable -- making sure the fdot grid range is SCALED to each sub-band's
+frequency (the physical fdot bounds are f0-dependent; cf.
+``lisatools.globalfit.priors.gbpriors.get_fdot_mojito(f, sign=+/-)`` which
+gives the +/- fdot envelope per f0). Pairs with the legacy-basis sampling
+route and the ``fdot < 0`` seeding TODO in
+``recipe.setup_state_for_injection``. For now the workaround is to run
+sub-bands that contain no ``fdot < 0`` catalogue sources (or subtract them as
+known signals).
+
 The distribution object is eryn duck-typed -- ``rvs(size) -> size + (4,)``
 and ``logpdf((n, 4)) -> (n,)`` -- so it registers directly in a
 ``ProbDistContainer`` under a tuple key, e.g.
