@@ -384,7 +384,14 @@ class MBHState(eryn_State):
             self.num_mbhs = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_mbhs = branch_nleaves_max(possible_state, "mbh")
+            if possible_state is None:
+                # HDF warm-start: get_a_sample passes possible_state=None and
+                # only betas_all (num_mbhs, ntemps) — its second-to-last axis is
+                # num_mbhs. The coords live in the main GFState, so there is no
+                # branch to index here.
+                self.num_mbhs = betas_all.shape[-2] if betas_all is not None else 20
+            else:
+                self.num_mbhs = branch_nleaves_max(possible_state, "mbh")
 
     @property
     def reset_kwargs(self):
@@ -407,7 +414,14 @@ class EMRIState(eryn_State):
             self.num_emris = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_emris = branch_nleaves_max(possible_state, "emri")
+            if possible_state is None:
+                # HDF warm-start: get_a_sample passes possible_state=None and
+                # only betas_all (num_emris, ntemps) — its second-to-last axis is
+                # num_emris. The coords live in the main GFState, so there is no
+                # branch to index here.
+                self.num_emris = betas_all.shape[-2] if betas_all is not None else 20
+            else:
+                self.num_emris = branch_nleaves_max(possible_state, "emri")
 
     @property
     def reset_kwargs(self):
@@ -432,7 +446,14 @@ class SOBBHState(eryn_State):
             self.num_sobbhs = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_sobbhs = branch_nleaves_max(possible_state, "sobbh")
+            if possible_state is None:
+                # HDF warm-start: get_a_sample passes possible_state=None and
+                # only betas_all (num_sobbhs, ntemps) — its second-to-last axis
+                # is num_sobbhs. The coords live in the main GFState, so there is
+                # no branch to index here.
+                self.num_sobbhs = betas_all.shape[-2] if betas_all is not None else 20
+            else:
+                self.num_sobbhs = branch_nleaves_max(possible_state, "sobbh")
 
     @property
     def reset_kwargs(self):
