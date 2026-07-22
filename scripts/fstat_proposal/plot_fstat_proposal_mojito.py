@@ -48,6 +48,17 @@ import time
 
 import numpy as np
 
+
+def _to_host(x):
+    """cupy/numpy array -> host numpy. No-op on numpy (GPU-safety helper).
+
+    ``get_fstat_ll_wdm`` and ``FStatProposal4D`` return cupy arrays on the
+    CUDA backends; this script stores/plots/serializes with numpy, so every
+    kernel/proposal output is funneled through here.
+    """
+    return x.get() if hasattr(x, "get") else np.asarray(x)
+
+
 # The stock recipe defaults expect mojito.
 os.environ.setdefault(
     "MOJITO_DATA_PATH",
@@ -120,6 +131,7 @@ def _maybe_patch_slab_kernel_args(gb_wdm_comp, wdm_holder, f0_probe_hz):
     params = np.zeros((1, 9))
     params[:, 0] = 1e-22
     params[:, 1] = float(f0_probe_hz)  # keep the probe inside the active band
+    params = gb_wdm_comp.xp.asarray(params)   # -> device on the CUDA backends
     try:
         gb_wdm_comp.get_fstat_ll_wdm(params, wdm_holder)
         print("[patch] installed GBGPU binding accepts slab args; no patch",
@@ -306,12 +318,12 @@ def build_fstat_proposal(gb_wdm_comp, wdm_holder, src, gb_info,
 def _zoom_box(prop, n_cells: float = 2.0):
     """Zoom box centred on the stage-1 argmax cell: +/- ``n_cells`` stage-1
     cell widths per axis, clipped to the stage-1 box."""
-    g = np.asarray(prop._logp_grid[:-1, :-1, :-1, :-1])
+    g = _to_host(prop._logp_grid[:-1, :-1, :-1, :-1])
     idx = np.unravel_index(np.argmax(g), g.shape)
     names = ("f0_range", "Mc_range", "alpha_range", "sin_delta_range")
     box = {}
     for j, name in enumerate(names):
-        ax = np.asarray(prop._axes[j])
+        ax = _to_host(prop._axes[j])
         centre = 0.5 * (ax[idx[j]] + ax[idx[j] + 1])
         half = n_cells * float(prop._dx[j])
         box[name] = (max(float(ax[0]), centre - half),
@@ -396,6 +408,7 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
           f"{spacing / (1e3 / Tobs):.2f}/Tobs; Mc fixed at {mc_fix:.3f})",
           flush=True)
 
+    xp = gb_wdm_comp.xp
     F = np.zeros((n_sky, len(f0_nodes)))
     t0 = time.time()
     for k in range(n_sky):
@@ -408,12 +421,11 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
         params[:, 5] = 0.5 * np.pi
         params[:, 7] = sky_al[k]
         params[:, 8] = np.arcsin(sky_sd[k])
+        params = xp.asarray(params)   # -> device on the CUDA backends
         for s in range(0, len(f0_nodes), 4096):
             e = min(s + 4096, len(f0_nodes))
             N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
-            F[k, s:e] = np.asarray(
-                compute_fstat(np.asarray(N_arr), np.asarray(M_up))
-            )
+            F[k, s:e] = _to_host(compute_fstat(N_arr, M_up))
         print(f"[comb] sky {k + 1}/{n_sky} done ({time.time() - t0:.0f}s)",
               flush=True)
     F_max = F.max(axis=0)
@@ -534,6 +546,7 @@ def run_peak_profile(gb_wdm_comp, wdm_holder, general_info, src, peak_f0_mHz,
           f"{spacing:.2e} mHz (= 1/(10 Tobs)), sky (alpha={alpha_best:.3f}, "
           f"sin_delta={sd_best:.3f}), Mc={mc_fix:.3f}", flush=True)
 
+    xp = gb_wdm_comp.xp
     params = np.zeros((len(f0_nodes), 9))
     params[:, 0] = 1e-22
     params[:, 1] = f0_nodes * 1e-3
@@ -541,13 +554,12 @@ def run_peak_profile(gb_wdm_comp, wdm_holder, general_info, src, peak_f0_mHz,
     params[:, 5] = 0.5 * np.pi
     params[:, 7] = alpha_best
     params[:, 8] = np.arcsin(sd_best)
+    params = xp.asarray(params)   # -> device on the CUDA backends
     F_prof = np.zeros(len(f0_nodes))
     for s in range(0, len(f0_nodes), 4096):
         e = min(s + 4096, len(f0_nodes))
         N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
-        F_prof[s:e] = np.asarray(
-            compute_fstat(np.asarray(N_arr), np.asarray(M_up))
-        )
+        F_prof[s:e] = _to_host(compute_fstat(N_arr, M_up))
 
     # measured FWHM around the maximum
     i_max = int(np.argmax(F_prof))
@@ -615,7 +627,7 @@ def _filter_cat(cat_sources, f0_lo_mHz, f0_hi_mHz):
 
 def _report(prop, src, stage):
     """Print the argmax cell + rvs/logpdf diagnostics for one stage."""
-    g = np.asarray(prop._logp_grid[:-1, :-1, :-1, :-1])
+    g = _to_host(prop._logp_grid[:-1, :-1, :-1, :-1])
     i0, i1, i2, i3 = np.unravel_index(np.argmax(g), g.shape)
     axes = prop._axes
     peak = (float(axes[0][i0]), float(axes[1][i1]),
@@ -631,14 +643,15 @@ def _report(prop, src, stage):
 
     inj_sampling = np.array([[src["f0_mHz"], mc_eff, src["RA_rad"],
                               float(np.sin(src["Dec_rad"]))]])
-    lp_at_injection = float(np.asarray(prop.logpdf(inj_sampling))[0])
+    lp_at_injection = float(_to_host(prop.logpdf(inj_sampling))[0])
     s = prop.rvs(size=(5000,))
-    lp = np.asarray(prop.logpdf(s))
+    lp = _to_host(prop.logpdf(s))
+    s = _to_host(s)
     print(f"[diag:{stage}] logpdf @ injection: {lp_at_injection:.3f}", flush=True)
     print(f"[diag:{stage}] logpdf on samples: median={np.median(lp):.3f}  "
           f"5%={np.percentile(lp, 5):.3f}  95%={np.percentile(lp, 95):.3f}",
           flush=True)
-    print(f"[diag:{stage}] sample mean: {np.asarray(s).mean(axis=0)}", flush=True)
+    print(f"[diag:{stage}] sample mean: {s.mean(axis=0)}", flush=True)
     print(f"[diag:{stage}] injection:   {inj_sampling[0]}", flush=True)
 
 
@@ -649,12 +662,12 @@ def _save_grid_cache(prop, cache_path, stage):
     try:
         np.savez(
             path,
-            logp_grid=np.asarray(prop._logp_grid),
-            f0_ax=np.asarray(prop._axes[0]),
-            Mc_ax=np.asarray(prop._axes[1]),
-            alpha_ax=np.asarray(prop._axes[2]),
-            sin_delta_ax=np.asarray(prop._axes[3]),
-            log_norm=float(prop._log_norm),
+            logp_grid=_to_host(prop._logp_grid),
+            f0_ax=_to_host(prop._axes[0]),
+            Mc_ax=_to_host(prop._axes[1]),
+            alpha_ax=_to_host(prop._axes[2]),
+            sin_delta_ax=_to_host(prop._axes[3]),
+            log_norm=float(_to_host(prop._log_norm)),
         )
         print(f"[cache] wrote {path}", flush=True)
     except Exception as e:
@@ -682,9 +695,9 @@ def plot_corner(prop, src, n_samples=20_000,
         src["f0_mHz"], mc_eff, src["RA_rad"], float(np.sin(src["Dec_rad"])),
     ])
 
-    g_cells = np.asarray(prop._logp_grid[:-1, :-1, :-1, :-1])
+    g_cells = _to_host(prop._logp_grid[:-1, :-1, :-1, :-1])
     p_cells = np.exp(g_cells - g_cells.max())
-    samples = np.asarray(prop.rvs(size=(n_samples,)))
+    samples = _to_host(prop.rvs(size=(n_samples,)))
     cell_centres = [0.5 * (axes[i][:-1] + axes[i][1:]) for i in range(4)]
 
     # Truth values per sampling axis for every in-box catalogue source
@@ -814,6 +827,7 @@ def main():
     probe[:, 5] = 0.5 * np.pi
     probe[:, 7] = rng.uniform(0, 2 * np.pi, probe_n)
     probe[:, 8] = rng.uniform(-1, 1, probe_n)
+    probe = gb_wdm_comp.xp.asarray(probe)   # -> device on the CUDA backends
     t0 = time.time()
     gb_wdm_comp.get_fstat_ll_wdm(probe, wdm_holder)
     per_eval = (time.time() - t0) / probe_n
@@ -830,6 +844,26 @@ def main():
     if cat_sources is not None:
         print(f"[cat] {len(cat_sources['f0'])} catalogue GBs in the analysis "
               "band", flush=True)
+        # The FSTAT_TARGET dict source is only a label. On a slid band (e.g.
+        # GB_CENTER_FREQ_HZ set) it can be out of the analysis band, which
+        # makes the diagnostics reference a source that isn't there (the
+        # confusing "logpdf @ injection: -inf"). Reference the loudest IN-BAND
+        # catalogue GB instead so the peak/plot diagnostics are meaningful.
+        f0_lo_b = float(gb_info.f0_lims[0]) * 1e3
+        f0_hi_b = float(gb_info.f0_lims[-1]) * 1e3
+        if len(cat_sources["f0"]) and not (f0_lo_b <= src["f0_mHz"] <= f0_hi_b):
+            i = int(np.argmax(cat_sources["amp"]))
+            _mc = float(cat_sources["Mc_eff"][i])
+            src = {
+                "ID": "band-loudest",
+                "f0_mHz": float(cat_sources["f0"][i]),
+                "Mc_eff_Msol": _mc, "Mc_Msol": _mc,
+                "RA_rad": float(cat_sources["alpha"][i]),
+                "Dec_rad": float(np.arcsin(cat_sources["sin_delta"][i])),
+            }
+            print(f"[main] configured source out of band; diagnostics now "
+                  f"reference the loudest in-band GB f0={src['f0_mHz']:.4f} "
+                  f"mHz (Mc_eff={_mc:.4f}).", flush=True)
 
     design = os.environ.get("FSTAT_DESIGN", "comb").strip().lower()
 
@@ -886,14 +920,18 @@ def main():
             prop = build_fstat_proposal(gb_wdm_comp, wdm_holder, src, gb_info,
                                          n_per_axis=n_per_axis, box=box,
                                          stage=stage)
-            _save_grid_cache(prop, cache_path, stage)
-            _report(prop, src, stage)
-            pk_cat = _filter_cat(cat_sources, *box["f0_range"])
-            plot_corner(prop, src, n_samples=20_000,
-                        out_path=out_path.replace(".png", f"_{stage}.png"),
-                        cat_sources=pk_cat,
-                        stage=f"local proposal @ comb peak {rank} "
-                              f"(f0={f0_pk:.5f} mHz, F={F_pk:.1f})")
+            _save_grid_cache(prop, cache_path, stage)   # grids first (protected)
+            try:
+                _report(prop, src, stage)
+                pk_cat = _filter_cat(cat_sources, *box["f0_range"])
+                plot_corner(prop, src, n_samples=20_000,
+                            out_path=out_path.replace(".png", f"_{stage}.png"),
+                            cat_sources=pk_cat,
+                            stage=f"local proposal @ comb peak {rank} "
+                                  f"(f0={f0_pk:.5f} mHz, F={F_pk:.1f})")
+            except Exception as e:
+                print(f"[{stage}] report/plot skipped (non-fatal, grid "
+                      f"written): {e!r}", flush=True)
         return
 
     # --- Legacy coarse design (kept as the narrow-peak negative control) ---

@@ -110,7 +110,16 @@ def build_birth_distribution(fit, peak_grid_paths, comb_cache=None,
     mix = UniformFloorMixture(base, lo, hi, eps=float(floor_eps))
     print(f"[birth] floor box f0=[{f0_lo:.5f}, {f0_hi:.5f}] mHz  "
           f"eps={floor_eps}", flush=True)
-    return make_gb_rj_birth_container(mix, fit.gb.A_lims, use_cupy=False)
+    # Match the birth container's array module to the run's compute backend
+    # (cupy on the CUDA path) -- resolve it exactly as the engine does so a
+    # GPU run doesn't hand a numpy container into a cupy-resident state.
+    from lisatools.globalfit.stock.erebor.common import resolve_compute
+    _gpus, _ = resolve_compute(
+        fit.general.use_gpu, fit.general.gpu_backend, fit.general.gpus
+    )
+    use_cupy = _gpus is not None
+    print(f"[birth] container use_cupy={use_cupy}", flush=True)
+    return make_gb_rj_birth_container(mix, fit.gb.A_lims, use_cupy=use_cupy)
 
 
 def main():
