@@ -696,6 +696,115 @@ class GBNoForegroundGlobalFit(EreborFit):
             synthetic_t_start=self.general.synthetic_t_start,
         )
 
+    def attach_runtime_objects(self) -> None:
+        """Register the GB engine ``signal_gen`` and resolve the pe seed EARLY.
+
+        With the generator registered, run.py's ``load_info`` seeds the GB
+        leaves (named gb seeder) and ``setup_acs(rebuild_residuals=True)``
+        subtracts them through the engine together with every other branch;
+        the recipe-side late seeding + manual subtraction auto-skip. The
+        SNR cut runs HERE against a NOISE-ONLY ``AnalysisContainer`` (a
+        zeroed copy of the input data + the run's fixed sensitivity --
+        existing pieces only, no acs needed): ``<h|h>`` reads only invC.
+        WDM path only; FD keeps the legacy late path.
+        """
+        from copy import deepcopy
+
+        from lisatools.analysiscontainer import AnalysisContainer
+
+        from ....recipe import (
+            MOJITO_REFERENCE_TIME,
+            GBFillGlobalSignalGen,
+            gb_catalogue_to_sampling_basis,
+            select_gb_injection_subset_by_snr,
+        )
+
+        info = self.source_info["gb"]
+        gi = self.general_info
+        if not isinstance(gi.domain_settings, WDMSettings):
+            return  # FD: legacy late seeding/subtraction path
+        info.signal_gen = GBFillGlobalSignalGen(
+            "gb", info.transform, gi, info
+        )
+
+        if getattr(info, "mode", "pe") == "search":
+            return  # zero-leaf start: nothing to seed
+        catalogue = (getattr(gi, "catalogue", None) or {}).get("GB", {})
+        if not catalogue:
+            return  # no catalogue (e.g. synthetic): legacy behavior (no seed)
+
+        # Noise-only AC: zeroed data copy + the run's fixed sensitivity.
+        data0 = deepcopy(gi.input_data_residual_array)
+        data0.arr[:] = 0.0
+        sens0 = gi.sensitivity_backend("gb_seed_snr", **gi.fixed_psd_kwargs)
+        ac0 = AnalysisContainer(data0, sens0)
+
+        # Disjointness with the neighbor-subtraction window (legacy pairing):
+        # when subtract_neighbors is on, only the CENTRAL layer's sources
+        # are modeled; the neighbors get subtracted as known signals later.
+        _f0_lims = None
+        if getattr(info, "subtract_neighbors", False) and not getattr(
+            info, "subtract_out_of_band", False
+        ):
+            layer_df = self.layer_df
+            k_center = int(math.floor(
+                getattr(info, "center_freq", 7.5e-3) / layer_df
+            ))
+            _f0_lims = (k_center * layer_df, (k_center + 1) * layer_df)
+
+        subset_inds = select_gb_injection_subset_by_snr(
+            self, [ac0], info, info.signal_gen._comp(),
+            snr_threshold=getattr(info, "snr_threshold", 3.0),
+            f0_lims=_f0_lims,
+        )
+        if not len(subset_inds):
+            return
+
+        if getattr(info, "start", "truth") == "prior":
+            # PE dimensionality WITHOUT truth: same leaf count, prior rows.
+            _prior = list(info.priors.values())[0]
+            rows = _prior.rvs(size=int(len(subset_inds)))
+            rows = rows.get() if hasattr(rows, "get") else np.asarray(rows)
+            logger.info(
+                "GB start='prior': %d leaves seeded from PRIOR draws "
+                "(load_info path).", len(subset_inds),
+            )
+        else:
+            trim_duration = gi.data_t0 - MOJITO_REFERENCE_TIME
+            sampling = np.array([
+                gb_catalogue_to_sampling_basis(
+                    catalogue[k], trim_duration=trim_duration
+                )
+                for k in sorted(catalogue.keys())
+            ])
+            if sampling.ndim == 3:
+                sampling = sampling.reshape(-1, sampling.shape[-1])
+            rows = sampling[subset_inds].copy()
+            # gb_catalogue_to_sampling_basis returns FDOT-basis rows by
+            # contract; chirp-mass runs sample Mc in slot 2 -- convert
+            # (same as setup_state_for_injection). TODO(fdot<0):
+            # interacting DWDs have no GW-relation Mc; clamped at the
+            # prior floor (mis-modeled) until the (f0, fdot) proposal
+            # basis lands.
+            if getattr(info, "use_chirp_mass", False):
+                from gbgpu.utils.utility import get_chirp_mass_from_f_fdot
+
+                _mc_lims = list(info.m_chirp_lims) or [0.001, 1.0]
+                f0_hz = rows[:, 1] * 1e-3
+                fdot = rows[:, 2]
+                mc = np.full_like(fdot, float(_mc_lims[0]))
+                _pos = fdot > 0
+                mc[_pos] = get_chirp_mass_from_f_fdot(f0_hz[_pos], fdot[_pos])
+                rows[:, 2] = np.clip(mc, float(_mc_lims[0]), float(_mc_lims[-1]))
+                if int((~_pos).sum()):
+                    logger.warning(
+                        "GB seeding: %d fdot<=0 source(s) clamped to the Mc "
+                        "floor (mis-modeled; see the fdot<0 TODO).",
+                        int((~_pos).sum()),
+                    )
+        info.injection = rows
+        info.injection_subset_inds = np.asarray(subset_inds)
+
 def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
     """Build the ``gb_no_fg``-style GB move stack (shared helper).
 
@@ -837,7 +946,19 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
         # mode="search": NO true-point seeding — the gb branch keeps the
         # engine's zero-leaf state and the sampler must FIND the sources
         # through RJ under the per-band progressive leaf cap.
-        if getattr(gb_info, "mode", "pe") != "search":
+        # Early-seeded runs (attach_runtime_objects resolved gb.injection +
+        # registered the signal_gen): load_info seeded and the engine
+        # rebuild subtracted -- the late path must not run again.
+        _early_seeded = (
+            getattr(gb_info, "signal_gen", None) is not None
+            and getattr(gb_info, "injection", None) is not None
+        )
+        if _early_seeded:
+            logger.info(
+                "GB seeding handled in load_info (engine signal_gen path); "
+                "late seeding skipped."
+            )
+        if getattr(gb_info, "mode", "pe") != "search" and not _early_seeded:
             gb_snr_subset_inds = select_gb_injection_subset_by_snr(
                 curr, acs, gb_info, gb_info.gb_wdm_comp,
                 snr_threshold=getattr(gb_info, "snr_threshold", 3.0),

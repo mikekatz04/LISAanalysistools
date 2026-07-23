@@ -536,6 +536,45 @@ class GlobalFit:
                 coords["emri"] = inj[None, None] + factor * np.random.randn(
                     self.ntemps, self.nwalkers, nleaves_emri, ndim_emri
                 )
+            if "gb" in inds and getattr(
+                self.curr.source_info.get("gb"), "injection", None
+            ) is not None:
+                # gb: RJ branch seeded from the attach-time SNR-cut rows
+                # (``gb_info.injection``; gb_no_fg resolves them against a
+                # noise-only AnalysisContainer). Only the subset's leaves go
+                # alive -- gb is NOT a fixed-leaf branch. Scatter keeps the
+                # legacy semantics: per-dimension GB_START_FACTOR x
+                # prior-width ADDITIVE scatter (0 -> exact truth). Seeding
+                # here (with everything else) lets setup_acs's engine
+                # rebuild subtract the templates through the registered
+                # signal_gen in the same pass as every other branch.
+                inj = np.asarray(
+                    self.curr.source_info["gb"].injection, dtype=float
+                )
+                n_inj, ndim_gb = inj.shape
+                nleaves_gb = self.engine_info.nleaves_max["gb"]
+                assert n_inj <= nleaves_gb, (
+                    f"GB injection rows ({n_inj}) exceed nleaves_max "
+                    f"({nleaves_gb})."
+                )
+                factor = float(os.environ.get("GB_START_FACTOR", "1e-4"))
+                _draws = priors["gb"].rvs(size=20000)
+                _draws = (
+                    _draws.get() if hasattr(_draws, "get")
+                    else np.asarray(_draws)
+                )
+                spread = factor * (_draws.max(axis=0) - _draws.min(axis=0))
+                inds["gb"][:] = False
+                inds["gb"][:, :, :n_inj] = True
+                coords["gb"][:, :, :n_inj, :] = inj[None, None] + spread[
+                    None, None, None, :
+                ] * np.random.randn(self.ntemps, self.nwalkers, n_inj, ndim_gb)
+                self.logger.info(
+                    f"gb: seeded {n_inj} true-point leaves in load_info "
+                    f"(GB_START_FACTOR={factor:g}); engine rebuild subtracts "
+                    "them with every other branch."
+                )
+
             if "sobbh" in inds:
                 inds["sobbh"][:] = True
                 self.logger.debug("initializing sobbh inds to true")
