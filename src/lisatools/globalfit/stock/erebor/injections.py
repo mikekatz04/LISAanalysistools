@@ -328,6 +328,15 @@ class SyntheticGBProcessingStep(BaseProcessingStep):
         # source dephased by 2*phi0 -- measured 2026-07-23 as data-template
         # overlap cos(2*phi0) (-0.74 on the 2-source stock table) at the
         # correct power, i.e. synthetic-mode truth-null reads were invalid.
+        #
+        # TODO(synthetic-amp-evolution): post-fix, a ~0.7%-weighted residual
+        # remains between this synthetic stream and the on-the-fly template
+        # (vgb 55-source SF=0 initial ll ~ -82 vs ~0 on real mojito data;
+        # 2-source overlap 0.9997 with |d-h|^2/|d|^2 ~ 5.6e-4). Suspected
+        # amplitude-evolution (ucb_amplitude 1 + (2/3) fdot/f0 dt) and/or
+        # windowing differences between the legacy FD kernel here and
+        # gb_tdi_on_the_fly -- quantify per source and reconcile so
+        # synthetic truth-null reads ~0 like mojito.
         gb = GBGPU(force_backend=force_backend, orbits=orbits,
                    flip_ref_phase=True)
         # ``GBGPU.generate_global_template`` reads ``self.gpus`` directly,
