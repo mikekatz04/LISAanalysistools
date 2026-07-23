@@ -377,9 +377,15 @@ void compute_logpdf_binding(array_type<double> logpdf_out, array_type<int> compo
                     array_type<double> means, array_type<double> invcovs, array_type<double> dets, array_type<double> log_Js,
                     int num_points, array_type<int> start_index, int num_components, int ndim)
 {
+    // component_index is the flattened per-point candidate-component pair
+    // list (variable length = start_index[num_points]); start_index has one
+    // start offset per point plus the terminator. The old declared lengths
+    // (num_points / num_components + 1) matched neither and made every CPU
+    // call throw -- the CUDA build compiles the checks out, which is why the
+    // GPU path never saw it.
     compute_logpdf_wrap(
         return_ptr(logpdf_out,        "logpdf_out",   num_points,                  1),
-        return_ptr(component_index,   "component_index", num_points,               1),
+        return_ptr(component_index,   "component_index", (int)component_index.size(), 1),
         return_ptr(points,            "points",       num_points * ndim,           1),
         return_ptr(weights,           "weights",      num_components,              1),
         return_ptr(mins,              "mins",         num_components * ndim,       1),
@@ -389,7 +395,7 @@ void compute_logpdf_binding(array_type<double> logpdf_out, array_type<int> compo
         return_ptr(dets,              "dets",         num_components,              1),
         return_ptr(log_Js,            "log_Js",       num_components,              1),
         num_points,
-        return_ptr(start_index, "start_index", num_components + 1, 1),
+        return_ptr(start_index, "start_index", num_points + 1, 1),
         num_components, ndim
     );
 }
