@@ -1664,6 +1664,61 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         return ll_change_log, prop_counts, acc_counts
 
+    def _cached_get_buffer(self, sorter, acs, specials, **kwargs):
+        """Propose-scoped SubBandBuffer reuse (ONE cached ACA per signature).
+
+        First call for a given ``(cell count, construction kwargs)``
+        signature allocates through ``get_buffer``; every later same-
+        signature call performs a FULL rebind of that cached ACA (the
+        existing ``inds_fill``/``buffer_obj`` path — construction minus
+        allocation), so the steady state is one allocation per signature
+        per proposal instead of one per parity unit. The template twin
+        rides in the signature: proposal-phase buffers never carry it (its
+        guarded fill paths are tempering-only). The cache lives from
+        ``propose`` start to ``return`` (see the lifecycle block there).
+        """
+        cache = getattr(self, "_prop_buffer_cache", None)
+        if cache is None:
+            cache = self._prop_buffer_cache = {}
+        key = (int(specials.shape[0]), tuple(sorted(kwargs.items())))
+        buf = cache.get(key)
+        if buf is None:
+            buf = sorter.get_buffer(acs, specials, **kwargs)
+            cache[key] = buf
+            self._prop_buffer_builds = getattr(self, "_prop_buffer_builds", 0) + 1
+        else:
+            sorter.get_buffer(
+                acs, specials,
+                inds_fill=self.xp.arange(int(specials.shape[0])),
+                buffer_obj=buf,
+            )
+        return buf
+
+    def _buffer_cache_teardown(self):
+        """Drop the propose-scoped buffer cache; free the device pool when
+        it grew past the (optional) budget. One summary line per propose."""
+        cache = getattr(self, "_prop_buffer_cache", None)
+        n_builds = getattr(self, "_prop_buffer_builds", 0)
+        self._prop_buffer_cache = None
+        self._prop_buffer_builds = 0
+        if not self.backend.uses_cupy:
+            return
+        used = self.mempool.used_bytes() / 1e9
+        total = self.mempool.total_bytes() / 1e9
+        logger.info(
+            "%s: buffer lifecycle -- %d allocation(s) this propose "
+            "(%d cached signature(s)); GPU pool used %.2f / total %.2f GB.",
+            self.name, n_builds, len(cache or {}), used, total,
+        )
+        warn_gb = float(os.environ.get("GB_GPU_MEM_WARN_GB", "0") or 0)
+        if warn_gb and total > warn_gb:
+            logger.warning(
+                "%s: GPU pool total %.2f GB exceeds GB_GPU_MEM_WARN_GB=%.1f;"
+                " freeing all blocks.", self.name, total, warn_gb,
+            )
+            self.xp.cuda.runtime.deviceSynchronize()
+            self.mempool.free_all_blocks()
+
     def _run_band_unit(self, model, band_sorter, subset, band_temps,
                        ll_change_log, prop_counts, acc_counts):
         """Drive one parity unit's cells through the sub-band buffer."""
@@ -1672,8 +1727,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             subset.special_band_inds, self.num_band_preload, xp=self.xp
         )
         with _tspan(tm, "buffer_build"):
-            buffer_obj = subset.get_buffer(
-                model.analysis_container_arr, scheduler.slot_specials.copy()
+            buffer_obj = self._cached_get_buffer(
+                subset, model.analysis_container_arr,
+                scheduler.slot_specials.copy(),
             )
         if tm is not None:
             tm.count("cells", int(scheduler.n_cells))
@@ -2466,7 +2522,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             (band_index, temp_index, walkers_permuted, special_index,
              num_bands_unit) = self._tempering_swap_grid(band_sorter, start)
 
-            num_bands_preload_temp = 200
+            # Tempering chunk size as a CELL budget (rows x ntemps), not a
+            # row count: the historic hardcoded 200 rows meant 200*ntemps
+            # cells, which scaled the buffer (and its host-side staging)
+            # linearly with the temperature ladder -- a 24-temp run built
+            # 4800-cell chunks and OOM-killed a 64 GB host allocation
+            # (2026-07-23). Default 1200 cells == the validated 6-temp size.
+            _cell_budget = int(os.environ.get("GB_TEMPER_PRELOAD_CELLS", "1200"))
+            num_bands_preload_temp = max(1, _cell_budget // self.ntemps)
             num_bands_run = 0
             while num_bands_run < self.nwalkers * num_bands_unit:
                 start_ind = num_bands_run
@@ -2480,8 +2543,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 special_inds_now_flat = special_inds_now.flatten()
 
                 with _tspan(getattr(self, "_prop_timer", None), "temper_buffer"):
-                    buffer_obj = band_sorter.get_buffer(
-                        model.analysis_container_arr,
+                    buffer_obj = self._cached_get_buffer(
+                        band_sorter, model.analysis_container_arr,
                         special_inds_now_flat,
                         use_template_arr=True,
                     )
@@ -2813,6 +2876,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.backend.uses_cupy and os.environ.get("GB_PROP_TIMING_SYNC", "0") == "1":
             _tm_sync = self.xp.cuda.runtime.deviceSynchronize
         self._prop_timer = tm = _ProposeTimer(sync_fn=_tm_sync)
+        # Propose-scoped SubBandBuffer cache: one allocation per signature
+        # for the whole proposal (units rebind in place); torn down with a
+        # memory-checker summary right before the final return.
+        self._prop_buffer_cache = {}
+        self._prop_buffer_builds = 0
 
         if self.backend.uses_cupy:
             self.xp.cuda.runtime.setDevice(model.analysis_container_arr.gpus[0])
@@ -3155,6 +3223,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.name,
             tm.report(time.perf_counter() - st_all),
         )
+
+        self._buffer_cache_teardown()
 
         return new_state, accepted
 

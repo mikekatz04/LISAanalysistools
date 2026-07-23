@@ -447,14 +447,27 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             * np.dtype(self._per_band_data_dtype).itemsize / 1e6
         )
         _n_copies = 2 if self.use_template_arr else 1
+        _pool = ""
+        if self.backend.uses_cupy:
+            _mp = cp.get_default_memory_pool()
+            _pool = (f"  [GPU pool used {_mp.used_bytes() / 1e9:.2f} / "
+                     f"total {_mp.total_bytes() / 1e9:.2f} GB]")
+        # Host watermark alongside: SIGKILL-class failures are host-side --
+        # this line is the last breadcrumb before a cgroup OOM kill.
+        import resource as _resource
+        import sys as _sys
+
+        _rss_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+        _rss_gb = _rss_kb / (1e9 if _sys.platform == "darwin" else 1e6)
+        _pool += f"  [host maxRSS {_rss_gb:.1f} GB]"
         logger.info(
             "SubBandBuffer: %d cells x %s per-cell (%s) ~ %.0f MB%s "
-            "[band_slab_Nf=%s]",
+            "[band_slab_Nf=%s]%s",
             self.num_bands_now, tuple(self._per_band_data_shape),
             np.dtype(self._per_band_data_dtype).name,
             _n_copies * self.num_bands_now * _cell_mb,
             " (incl. template twin)" if self.use_template_arr else "",
-            self.band_slab_Nf,
+            self.band_slab_Nf, _pool,
         )
 
         # Build the domain-aware likelihood engine. Dispatch is on
@@ -1962,6 +1975,17 @@ class BandSorter(LISAToolsParallelModule):
             assert inds_fill.max() <= buffer_obj.num_bands_now
             # THIS NEEDS TO HAPPEN before updating data
             buffer_obj.update_special_indices(special_indices_unique, inds_fill=inds_fill)
+            if int(inds_fill.shape[0]) == int(buffer_obj.num_bands_now):
+                # FULL rebind (cross-unit reuse of a cached buffer: same
+                # allocation, new parity unit): refresh the subset-derived
+                # source maps so the rebind is exactly construction minus
+                # allocation. Partial rebinds (in-round slot rotation) must
+                # NOT touch these -- their maps cover only the rotated slots.
+                buffer_obj.sources_now_map = sources_now_map
+                buffer_obj.sources_inject_now_map = sources_inject_now_map
+                buffer_obj.params_interest = points_curr_tmp
+                buffer_obj.special_band_inds = curr_special_band_inds
+                buffer_obj.now_index = buffer_obj.get_index(curr_special_band_inds)
 
         buffer_obj.fill_buffer_residual_and_psd_from_acs(acs, inds_fill=inds_fill)
         buffer_obj.parent_acs = acs
