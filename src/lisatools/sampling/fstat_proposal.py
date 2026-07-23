@@ -51,6 +51,7 @@ deepcopy/pickle rule no array module is stored as an attribute.
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import Optional, Tuple
 
 import numpy as np
@@ -58,12 +59,118 @@ import numpy as np
 __all__ = [
     "GridSpec",
     "FStatProposal4D",
+    "StackedFStatProposal4D",
     "UniformFloorMixture",
     "MixtureProposal",
     "CombIntrinsicProposal",
+    "ColumnPermutedProposal",
     "compute_fstat",
     "make_gb_rj_birth_container",
+    "fit_gmm_to_stacked",
+    "pack_gmm_components",
+    "unpack_gmm_components",
+    "build_peak_gmm",
+    "FSTAT_KNOB_DEFAULTS",
+    "fstat_knob",
+    "fstat_peak_min_F",
+    "fstat_n_f0",
+    "fstat_n_axis",
 ]
+
+
+# ======================================================================
+# FSTAT_* environment knobs -- the single source of truth for defaults.
+# The grid-prep script, the search runner, and the selection helpers all
+# resolve knobs through here; an explicit environment value always wins.
+# ======================================================================
+FSTAT_KNOB_DEFAULTS = {
+    "FSTAT_BATCH": 4096,           # kernel rows per get_fstat_ll_wdm call
+    "FSTAT_PEAK_MIN_SNR": 5.0,     # selection floor (F = SNR^2 / 2)
+    "FSTAT_PEAKS_PER_BAND": 35,    # per-sub-band peak cap
+    "FSTAT_PEAK_HALF_MHZ": 2.5e-3, # peak-box f0 half width [mHz]
+    "FSTAT_MC_MIN": 0.01,          # Mc grid-box floor
+    "FSTAT_N_MC": 3,               # anisotropic node counts: Mc / sky are
+    "FSTAT_N_ALPHA": 8,            #   per-band unmeasurable, so coarse
+    "FSTAT_N_SINDELTA": 8,
+    "FSTAT_COMB_NSKY": 6,          # comb sky points
+    "FSTAT_FLOOR_EPS": 0.1,        # uniform-floor mixture weight
+    "FSTAT_COMB_WEIGHT": 0.3,      # comb component weight. 2026-07 study
+                                   #   (band75): unboxed-source coverage
+                                   #   scales ~linearly with w while boxed
+                                   #   mass drops only ~9% at 0.3 (the
+                                   #   linear-in-F comb concentrates on the
+                                   #   same loud sources); off-source waste
+                                   #   flat ~5.5% (floor-only) at any w.
+    "FSTAT_PEAK_SAMPLING": "grid", # production draw layer (gmm = option)
+    "FSTAT_FIT_GMM": 0,            # prep-time GMM fit is OPT-IN
+    "FSTAT_GMM_SAMPLES": 4096,     # GMM fit: draws per box
+    "FSTAT_GMM_MAX_COMP": 12,      # GMM fit: max components per box
+    "FSTAT_PLOT_PEAKS": 2,         # prep: corner plots for the top boxes
+}
+
+
+def fstat_knob(name: str, cast=float):
+    """Resolve an ``FSTAT_*`` env knob against :data:`FSTAT_KNOB_DEFAULTS`
+    (explicit environment value wins)."""
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        return cast(raw)
+    return cast(FSTAT_KNOB_DEFAULTS[name])
+
+
+def fstat_peak_min_F() -> float:
+    """Peak-selection floor in F units (``F = SNR^2 / 2``).
+
+    Precedence: explicit ``FSTAT_PEAK_MIN_SNR`` > explicit
+    ``FSTAT_PEAK_MIN_F`` > the default SNR
+    (``FSTAT_KNOB_DEFAULTS['FSTAT_PEAK_MIN_SNR']`` = 5, i.e. F = 12.5).
+    """
+    snr = os.environ.get("FSTAT_PEAK_MIN_SNR", "").strip()
+    if snr:
+        return 0.5 * float(snr) ** 2
+    f = os.environ.get("FSTAT_PEAK_MIN_F", "").strip()
+    if f:
+        return float(f)
+    return 0.5 * float(FSTAT_KNOB_DEFAULTS["FSTAT_PEAK_MIN_SNR"]) ** 2
+
+
+def fstat_n_f0(box_width_mHz: float, Tobs_s: float) -> int:
+    """f0 node count for a peak box.
+
+    Precedence: explicit ``FSTAT_N_F0`` > explicit ``FSTAT_N_PER_AXIS`` >
+    AUTO -- one cell per ~1/Tobs (the matched-filter peak width), clamped to
+    ``[12, 96]`` (~40 for the default +-2.5e-3 mHz box at 90 d). The f0
+    cell width is the proposal's sharpest efficiency lever: cells much wider
+    than the peak spread birth mass off-source.
+    """
+    raw = os.environ.get("FSTAT_N_F0", "").strip()
+    if raw:
+        return int(raw)
+    per = os.environ.get("FSTAT_N_PER_AXIS", "").strip()
+    if per:
+        return int(per)
+    cells = round(float(box_width_mHz) / (1e3 / float(Tobs_s)))
+    return int(np.clip(cells + 1, 12, 96))
+
+
+def fstat_n_axis(name: str) -> int:
+    """Node count for the Mc / alpha / sin_delta axes.
+
+    Precedence: explicit ``FSTAT_N_MC``/``_ALPHA``/``_SINDELTA`` > explicit
+    ``FSTAT_N_PER_AXIS`` > the anisotropic defaults (3 / 8 / 8).
+    """
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        return int(raw)
+    per = os.environ.get("FSTAT_N_PER_AXIS", "").strip()
+    if per:
+        return int(per)
+    return int(FSTAT_KNOB_DEFAULTS[name])
+
+
+def _host(x):
+    """cupy/numpy array -> host numpy (no-op on numpy)."""
+    return x.get() if hasattr(x, "get") else np.asarray(x)
 
 
 # Row-major upper-triangle layout of the symmetric (4, 4) filter Gram matrix
@@ -399,6 +506,296 @@ class FStatProposal4D:
         return xp.where(inside, out, -xp.inf)
 
 
+class StackedFStatProposal4D:
+    """Vectorized flat mixture of K same-shape 4-D grid proposals.
+
+    The per-sub-band peak refactor produces one local ``(n_f0, n_Mc,
+    n_alpha, n_sin_delta)`` grid box per selected comb peak -- ~35 per
+    sub-band, hundreds to thousands across a full-band run. A
+    :class:`MixtureProposal` over that many :class:`FStatProposal4D`
+    components evaluates ``rvs``/``logpdf`` in a per-component Python loop;
+    this class instead stacks all K node grids into one ``(K, n0, n1, n2,
+    n3)`` array so both operations are single vectorized array pipelines.
+    It is an *implementation* of the flat mixture, not a per-band router --
+    the consumer still sees one global 4-D distribution.
+
+    Requirements (true by construction in the grid-gen pipeline):
+
+    * every box shares the same node shape (the global ``FSTAT_N_*`` design);
+    * the Mc / alpha / sin_delta node axes are IDENTICAL across boxes (the
+      global Mc box + full sky); only the f0 axis differs per box (peak
+      position, clamped to its sub-band, so per-box ``lo``/``dx``).
+
+    Cell semantics match :class:`FStatProposal4D` exactly: piecewise-
+    constant density on the ``(n-1)^4`` cells with corner-averaged
+    (trapezoid) cell weights, so per-box ``rvs``/``logpdf`` are mutually
+    exact; the mixture weighting is exact on top of that.
+
+    Args:
+        logp_grids: ``(K, n0, n1, n2, n3)`` node grids of ``beta * F``
+            (numpy or cupy; computation stays on the input's module).
+        f0_los: ``(K,)`` per-box f0 axis start [mHz].
+        f0_dxs: ``(K,)`` per-box f0 node spacing [mHz].
+        mc_ax, alpha_ax, sin_delta_ax: shared node axes (uniform spacing).
+        weights: ``(K,)`` mixture weights (normalized internally);
+            ``None`` -> equal.
+        seed: RNG seed for :meth:`rvs`.
+        mem_budget_mb: When set and the stacked cell arrays exceed this
+            budget, the K axis is held/evaluated in chunks that fit it
+            (``FSTAT_GRID_MEM_MB`` in the scripts). ``rvs``/``logpdf``
+            stay fully vectorized within each chunk.
+    """
+
+    param_names = ("f0", "Mc", "alpha", "sin_delta")
+    ndim = 4
+
+    def __init__(self, logp_grids, f0_los, f0_dxs, mc_ax, alpha_ax,
+                 sin_delta_ax, weights=None, seed: Optional[int] = None,
+                 mem_budget_mb: Optional[float] = None):
+        from ..utils.utility import get_array_module
+
+        xp = get_array_module(logp_grids)
+        K = int(logp_grids.shape[0])
+        node_shape = tuple(int(n) for n in logp_grids.shape[1:])
+        if len(node_shape) != 4:
+            raise ValueError("logp_grids must be (K, n_f0, n_Mc, n_alpha, n_sd)")
+        self._node_shape = node_shape
+        self._cell_shape = tuple(n - 1 for n in node_shape)
+        self._ncells = int(np.prod(self._cell_shape))
+        self.K = K
+        self._rng = np.random.default_rng(seed)
+
+        # host metadata (small)
+        self._f0_lo = np.asarray(_host(f0_los), dtype=float).ravel()
+        self._f0_dx = np.asarray(_host(f0_dxs), dtype=float).ravel()
+        assert self._f0_lo.shape == (K,) and self._f0_dx.shape == (K,)
+        self._f0_hi = self._f0_lo + (node_shape[0] - 1) * self._f0_dx
+        axes3 = [np.asarray(_host(a), dtype=float) for a in
+                 (mc_ax, alpha_ax, sin_delta_ax)]
+        self._lo3 = np.array([a[0] for a in axes3])
+        self._hi3 = np.array([a[-1] for a in axes3])
+        self._dx3 = np.array([a[1] - a[0] for a in axes3])
+        self._axes3 = axes3
+
+        w = (np.ones(K) if weights is None
+             else np.asarray(_host(weights), dtype=float).ravel())
+        assert w.shape == (K,) and np.all(w >= 0) and w.sum() > 0
+        self.weights = w / w.sum()
+
+        # K-chunking: per-box cell working set ~ log_wcell + cdf.
+        per_box_bytes = 2 * self._ncells * 8
+        if mem_budget_mb:
+            k_chunk = max(1, int(float(mem_budget_mb) * 1e6 / per_box_bytes))
+        else:
+            k_chunk = K
+        self._k_chunk = k_chunk
+
+        # Build per-chunk cell weights + a GLOBAL-cumulative flat CDF.
+        self._chunks = []
+        running_mass = 0.0
+        log_norm = np.empty(K)
+        for k0 in range(0, K, k_chunk):
+            k1 = min(k0 + k_chunk, K)
+            g = xp.asarray(logp_grids[k0:k1])            # (Kc, n0..n3)
+            gmax = g.reshape(g.shape[0], -1).max(axis=1)  # (Kc,)
+            p = xp.exp(g - gmax[:, None, None, None, None])
+            for ax in range(1, 5):
+                lo_sl = [slice(None)] * 5
+                hi_sl = [slice(None)] * 5
+                lo_sl[ax] = slice(None, -1)
+                hi_sl[ax] = slice(1, None)
+                p = 0.5 * (p[tuple(lo_sl)] + p[tuple(hi_sl)])
+            # p: (Kc,) + cell_shape corner-averaged relative cell weights
+            with np.errstate(divide="ignore"):
+                log_wcell = xp.log(p) + gmax[:, None, None, None, None]
+            total = p.reshape(p.shape[0], -1).sum(axis=1)  # (Kc,)
+            total_h = _host(total)
+            cell_vol = self._f0_dx[k0:k1] * float(np.prod(self._dx3))
+            with np.errstate(divide="ignore"):
+                log_norm[k0:k1] = (_host(gmax) + np.log(total_h)
+                                   + np.log(cell_vol))
+            # sampling mass per cell: w_k * (cell weight / box total)
+            scale = xp.asarray(self.weights[k0:k1] / np.clip(total_h, 1e-300, None))
+            mass = (p.reshape(p.shape[0], -1) * scale[:, None]).ravel()
+            cdf = xp.cumsum(mass) + running_mass
+            running_mass = float(_host(cdf[-1]))
+            self._chunks.append(dict(k0=k0, k1=k1, log_wcell=log_wcell, cdf=cdf))
+        if not np.isfinite(running_mass) or running_mass <= 0.0:
+            raise ValueError(
+                "StackedFStatProposal4D: zero/non-finite total mixture mass "
+                "(every F-stat grid cell was -inf?)"
+            )
+        for ch in self._chunks:
+            ch["cdf"] = ch["cdf"] / running_mass
+        self._chunk_cum = np.array(
+            [float(_host(ch["cdf"][-1])) for ch in self._chunks]
+        )
+        self._log_norm = log_norm  # per-box log Z (host)
+
+        # f0-interval overlap structure for logpdf: boxes sorted by lo, plus
+        # the ACTUAL max overlap depth D (several kept peaks can share one
+        # box width -- comparable-F rescue -- so never assume a fixed depth).
+        self._order = np.argsort(self._f0_lo, kind="stable")
+        self._lo_sorted = self._f0_lo[self._order]
+        his_sorted_all = np.sort(self._f0_hi)
+        depth = np.arange(1, K + 1) - np.searchsorted(
+            his_sorted_all, self._lo_sorted, side="left"
+        )
+        self._overlap_depth = int(max(1, depth.max()))
+
+    # ------------------------------------------------------------------
+    @property
+    def xp(self):
+        from ..utils.utility import get_array_module
+
+        return get_array_module(self._chunks[0]["log_wcell"])
+
+    @classmethod
+    def from_cache(cls, d, weights=None, seed: Optional[int] = None,
+                   mem_budget_mb: Optional[float] = None,
+                   use_cupy: bool = False):
+        """Rebuild from a stacked-cache mapping (the ``*_peaks_stacked.npz``
+        contents): keys ``logp_grids``, ``f0_los``, ``f0_dxs``, ``mc_ax``,
+        ``alpha_ax``, ``sin_delta_ax``. ``use_cupy`` moves the stack to the
+        GPU (rvs/logpdf then run on-device; numpy query inputs still work
+        via ``cupy.asarray``)."""
+        if use_cupy:
+            import cupy as _cp
+
+            grids = _cp.asarray(np.asarray(d["logp_grids"], dtype=float))
+        else:
+            grids = np.asarray(d["logp_grids"], dtype=float)
+        return cls(
+            grids,
+            np.asarray(d["f0_los"], dtype=float),
+            np.asarray(d["f0_dxs"], dtype=float),
+            np.asarray(d["mc_ax"], dtype=float),
+            np.asarray(d["alpha_ax"], dtype=float),
+            np.asarray(d["sin_delta_ax"], dtype=float),
+            weights=weights, seed=seed, mem_budget_mb=mem_budget_mb,
+        )
+
+    # ------------------------------------------------------------------
+    def _corners_from_cells(self, kk, cell_flat, xp):
+        """(box index, flat cell index) -> cell corner coords ``(n, 4)``."""
+        multi = xp.unravel_index(cell_flat, self._cell_shape)
+        f0_lo = xp.asarray(self._f0_lo)[kk]
+        f0_dx = xp.asarray(self._f0_dx)[kk]
+        lo3 = xp.asarray(self._lo3)
+        dx3 = xp.asarray(self._dx3)
+        out = xp.empty((cell_flat.shape[0], 4), dtype=xp.float64)
+        out[:, 0] = f0_lo + multi[0] * f0_dx
+        for j in range(3):
+            out[:, j + 1] = lo3[j] + multi[j + 1] * dx3[j]
+        return out, f0_dx
+
+    def rvs(self, size=1):
+        """Exact draws from the stacked piecewise-constant mixture; returns
+        ``size + (4,)`` in ``(f0 [mHz], Mc, alpha, sin_delta)``."""
+        xp = self.xp
+        if isinstance(size, int):
+            size = (size,)
+        n = int(np.prod(size))
+        u = self._rng.random(n)
+        jit = self._rng.random((n, 4))
+        out = xp.empty((n, 4), dtype=xp.float64)
+        chunk_of = np.searchsorted(self._chunk_cum, u, side="right")
+        chunk_of = np.clip(chunk_of, 0, len(self._chunks) - 1)
+        for ci, ch in enumerate(self._chunks):
+            m = chunk_of == ci
+            if not m.any():
+                continue
+            uu = xp.asarray(u[m])
+            flat = xp.searchsorted(ch["cdf"], uu, side="right")
+            flat = xp.clip(flat, 0, ch["cdf"].shape[0] - 1)
+            k_local = flat // self._ncells
+            cell = flat - k_local * self._ncells
+            kk = k_local + ch["k0"]
+            corners, f0_dx = self._corners_from_cells(kk, cell, xp)
+            j = xp.asarray(jit[m])
+            corners[:, 0] += j[:, 0] * f0_dx
+            corners[:, 1:] += j[:, 1:] * xp.asarray(self._dx3)[None, :]
+            out[xp.asarray(np.where(m)[0])] = corners
+        return out.reshape(size + (4,))
+
+    def rvs_per_box(self, n_per_box: int):
+        """``(K, n, 4)`` draws, ``n`` from EACH box's own grid density
+        (ignoring mixture weights) -- the GMM-fitting sample source."""
+        xp = self.xp
+        out = xp.empty((self.K, int(n_per_box), 4), dtype=xp.float64)
+        for ch in self._chunks:
+            Kc = ch["k1"] - ch["k0"]
+            lw = ch["log_wcell"].reshape(Kc, -1)
+            m = xp.exp(lw - lw.max(axis=1, keepdims=True))
+            cdf = xp.cumsum(m, axis=1)
+            cdf = cdf / cdf[:, -1:]
+            u = xp.asarray(self._rng.random((Kc, int(n_per_box))))
+            offs = xp.arange(Kc, dtype=xp.float64)[:, None]
+            idx = xp.searchsorted((cdf + offs).ravel(), (u + offs).ravel(),
+                                  side="right")
+            k_local = xp.repeat(xp.arange(Kc), int(n_per_box))
+            cell = xp.clip(idx - k_local * self._ncells, 0, self._ncells - 1)
+            kk = k_local + ch["k0"]
+            corners, f0_dx = self._corners_from_cells(kk, cell, xp)
+            j = xp.asarray(self._rng.random((corners.shape[0], 4)))
+            corners[:, 0] += j[:, 0] * f0_dx
+            corners[:, 1:] += j[:, 1:] * xp.asarray(self._dx3)[None, :]
+            out[ch["k0"]:ch["k1"]] = corners.reshape(Kc, int(n_per_box), 4)
+        return out
+
+    def logpdf(self, x):
+        """Normalized mixture log density at ``x`` of shape ``(n, 4)``;
+        vectorized gather over the (actual) max f0-overlap depth D."""
+        xp = self.xp
+        x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
+        n = x.shape[0]
+        f0 = x[:, 0]
+
+        lo3 = xp.asarray(self._lo3)
+        hi3 = xp.asarray(self._hi3)
+        dx3 = xp.asarray(self._dx3)
+        inside3 = xp.all((x[:, 1:] >= lo3[None, :]) & (x[:, 1:] <= hi3[None, :]),
+                         axis=1)
+        idx3 = xp.floor((x[:, 1:] - lo3[None, :]) / dx3[None, :]).astype(xp.int64)
+        idx3 = xp.clip(idx3, 0, xp.asarray(
+            np.array(self._cell_shape[1:]) - 1)[None, :])
+
+        D = self._overlap_depth
+        j = xp.searchsorted(xp.asarray(self._lo_sorted), f0, side="right")
+        cand_pos = j[:, None] - 1 - xp.arange(D)[None, :]        # (n, D)
+        valid = cand_pos >= 0
+        cand_pos = xp.clip(cand_pos, 0, self.K - 1)
+        kk = xp.asarray(self._order)[cand_pos]                   # (n, D)
+        f0_lo_k = xp.asarray(self._f0_lo)[kk]
+        f0_hi_k = xp.asarray(self._f0_hi)[kk]
+        valid &= (f0[:, None] >= f0_lo_k) & (f0[:, None] <= f0_hi_k)
+        i0 = xp.floor((f0[:, None] - f0_lo_k)
+                      / xp.asarray(self._f0_dx)[kk]).astype(xp.int64)
+        i0 = xp.clip(i0, 0, self._cell_shape[0] - 1)
+
+        lp = xp.full((n, D), -xp.inf, dtype=xp.float64)
+        log_w = xp.asarray(np.log(np.clip(self.weights, 1e-300, None)))
+        log_norm = xp.asarray(self._log_norm)
+        for ch in self._chunks:
+            sel = valid & (kk >= ch["k0"]) & (kk < ch["k1"])
+            if not bool(sel.any()):
+                continue
+            rows, cols = xp.where(sel)
+            k_sel = kk[rows, cols]
+            g = ch["log_wcell"][
+                k_sel - ch["k0"], i0[rows, cols],
+                idx3[rows, 0], idx3[rows, 1], idx3[rows, 2],
+            ]
+            lp[rows, cols] = g + log_w[k_sel] - log_norm[k_sel]
+
+        m = xp.max(lp, axis=1)
+        m_safe = xp.where(xp.isfinite(m), m, 0.0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out = xp.log(xp.sum(xp.exp(lp - m_safe[:, None]), axis=1)) + m_safe
+        out = xp.where(xp.isfinite(m), out, -xp.inf)
+        return xp.where(inside3, out, -xp.inf)
+
+
 class UniformFloorMixture:
     """``(1 - eps) * base + eps * Uniform(box)`` over the 4 intrinsics.
 
@@ -440,18 +837,23 @@ class UniformFloorMixture:
         if n_floor:
             out[floor] = self._rng.uniform(self.lo, self.hi, size=(n_floor, 4))
         if n - n_floor:
-            out[~floor] = np.asarray(self.base.rvs(size=(n - n_floor,)))
+            out[~floor] = _host(self.base.rvs(size=(n - n_floor,)))
         return out.reshape(size + (4,))
 
     def logpdf(self, x):
-        x = np.atleast_2d(np.asarray(x, dtype=float))
-        inside = np.all((x >= self.lo) & (x <= self.hi), axis=1)
-        lp_base = np.asarray(self.base.logpdf(x), dtype=float)
-        lp_floor = np.where(inside, -self._log_vol, -np.inf)
+        from ..utils.utility import get_array_module
+
+        xp = get_array_module(x)
+        x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
+        lo = xp.asarray(self.lo)
+        hi = xp.asarray(self.hi)
+        inside = xp.all((x >= lo) & (x <= hi), axis=1)
+        lp_base = xp.asarray(self.base.logpdf(x), dtype=xp.float64)
+        lp_floor = xp.where(inside, -self._log_vol, -xp.inf)
         with np.errstate(invalid="ignore"):
-            out = np.logaddexp(np.log1p(-self.eps) + lp_base,
+            out = xp.logaddexp(np.log1p(-self.eps) + lp_base,
                                np.log(self.eps) + lp_floor)
-        return np.where(np.isnan(out), -np.inf, out)
+        return xp.where(xp.isnan(out), -xp.inf, out)
 
 
 def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False):
@@ -473,15 +875,15 @@ def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False):
             (``GBSettings.A_lims``); lnA is drawn uniform in ``log(A_lims)``.
         use_cupy: Match the run backend (False for CPU runs).
     """
-    from eryn.prior import ProbDistContainer, uniform_dist
+    from eryn.priors import ProbDistContainer, UniformDistribution
 
     dist = ProbDistContainer(
         {
-            "A": uniform_dist(*np.log(np.asarray(A_lims, dtype=float))),
+            "A": UniformDistribution(*np.log(np.asarray(A_lims, dtype=float))),
             ("f0", "Mc", "alpha", "sin_delta"): intrinsic_dist,
-            "phi0": uniform_dist(0.0, 2.0 * np.pi),
-            "cos_iota": uniform_dist(-1.0, 1.0),
-            "psi": uniform_dist(0.0, np.pi),
+            "phi0": UniformDistribution(0.0, 2.0 * np.pi),
+            "cos_iota": UniformDistribution(-1.0, 1.0),
+            "psi": UniformDistribution(0.0, np.pi),
         },
         use_cupy=use_cupy,
     )
@@ -513,20 +915,23 @@ class MixtureProposal:
         for k, comp in enumerate(self.components):
             m = which == k
             if m.any():
-                out[m] = np.asarray(comp.rvs(size=(int(m.sum()),)))
+                out[m] = _host(comp.rvs(size=(int(m.sum()),)))
         return out.reshape(size + (4,))
 
     def logpdf(self, x):
-        x = np.atleast_2d(np.asarray(x, dtype=float))
-        lps = np.stack(
-            [np.log(w) + np.asarray(c.logpdf(x))
+        from ..utils.utility import get_array_module
+
+        xp = get_array_module(x)
+        x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
+        lps = xp.stack(
+            [np.log(w) + xp.asarray(c.logpdf(x))
              for c, w in zip(self.components, self.weights)]
         )
-        m = np.max(lps, axis=0)
-        m = np.where(np.isfinite(m), m, 0.0)
+        m = xp.max(lps, axis=0)
+        m = xp.where(xp.isfinite(m), m, 0.0)
         with np.errstate(invalid="ignore", divide="ignore"):
-            out = np.log(np.sum(np.exp(lps - m), axis=0)) + m
-        return np.where(np.isnan(out), -np.inf, out)
+            out = xp.log(xp.sum(xp.exp(lps - m), axis=0)) + m
+        return xp.where(xp.isnan(out), -xp.inf, out)
 
 
 class CombIntrinsicProposal:
@@ -585,11 +990,15 @@ class CombIntrinsicProposal:
         return out.reshape(size + (4,))
 
     def logpdf(self, x):
-        x = np.atleast_2d(np.asarray(x, dtype=float))
+        from ..utils.utility import get_array_module
+
+        xp = get_array_module(x)
+        x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
         f0 = x[:, 0]
-        idx = np.searchsorted(self.f0_nodes, f0, side="right") - 1
-        in_f0 = (f0 >= self.f0_nodes[0]) & (f0 <= self.f0_nodes[-1])
-        idx = np.clip(idx, 0, len(self._w) - 1)
+        f0_nodes = xp.asarray(self.f0_nodes)
+        idx = xp.searchsorted(f0_nodes, f0, side="right") - 1
+        in_f0 = (f0 >= f0_nodes[0]) & (f0 <= f0_nodes[-1])
+        idx = xp.clip(idx, 0, len(self._w) - 1)
         inside = (
             in_f0
             & (x[:, 1] >= self.mc_lims[0]) & (x[:, 1] <= self.mc_lims[1])
@@ -597,5 +1006,151 @@ class CombIntrinsicProposal:
             & (x[:, 3] >= self.sin_delta_lims[0])
             & (x[:, 3] <= self.sin_delta_lims[1])
         )
-        out = self._log_f0_pdf[idx] + self._log_uni
-        return np.where(inside, out, -np.inf)
+        out = xp.asarray(self._log_f0_pdf)[idx] + self._log_uni
+        return xp.where(inside, out, -xp.inf)
+
+
+# ======================================================================
+# GMM sampling layer, built FROM the stacked grids (reuse-only wrappers
+# around lisatools.sampling.gmm.vec_fit_gmm_min_bic /
+# lisatools.sampling.prior.FullGaussianMixtureModel)
+# ======================================================================
+
+# ``FullGaussianMixtureModel.logpdf`` culls components by frequency-sorted
+# windowing on COLUMN 1 of its native basis (its stock consumer is the 8-col
+# GB basis where f0 is column 1). The intrinsic sampling basis here is
+# (f0, Mc, alpha, sin_delta) with f0 at column 0, so the fitted components
+# are permuted to a native (Mc, f0, alpha, sin_delta) order for the model
+# and wrapped back through :class:`ColumnPermutedProposal` -- without this
+# the culling would window on Mc (correct but a no-op: every component gets
+# evaluated for every query, O(n x n_components) per RJ step).
+_GMM_COLUMN_PERM = (1, 0, 2, 3)
+
+
+class ColumnPermutedProposal:
+    """View of a distribution whose native columns are a permutation of the
+    canonical ``(f0, Mc, alpha, sin_delta)`` basis (Jacobian = 1).
+
+    ``perm`` maps canonical -> native: ``x_native = x[..., perm]``.
+    """
+
+    ndim = 4
+
+    def __init__(self, base, perm):
+        self.base = base
+        self._perm = tuple(int(p) for p in perm)
+        inv = [0] * len(self._perm)
+        for i, p in enumerate(self._perm):
+            inv[p] = i
+        self._inv = tuple(inv)
+
+    def rvs(self, size=1):
+        out = self.base.rvs(size=size)
+        return out[..., list(self._inv)]
+
+    def logpdf(self, x):
+        return self.base.logpdf(x[..., list(self._perm)])
+
+
+def fit_gmm_to_stacked(stacked, n_samples_per_box: int = 4096, gpu=None,
+                       min_comp: int = 1, max_comp: int = 12,
+                       verbose: bool = False):
+    """Fit per-box GMMs to a :class:`StackedFStatProposal4D`: draw
+    ``n_samples_per_box`` from each box's grid density and hand the
+    ``(K, n, 4)`` block to the existing GPU-batched min-BIC fitter
+    :func:`lisatools.sampling.gmm.vec_fit_gmm_min_bic`.
+
+    The GMM is the OPTIONAL memory-light sampling layer for the F-stat
+    birth proposal (the stacked grids are the production layer).
+    TODO(fstat-gmm-deprecation): may be deprecated for that use once the
+    grid path proves out at full-band GPU scale; the serial-search / refit
+    container path is a separate consumer of the GMM machinery.
+
+    Returns the raw component lists ``[weights, means, covs, invcovs, dets,
+    mins, maxs]`` (canonical column order) for caching via
+    :func:`pack_gmm_components`.
+    """
+    from .gmm import vec_fit_gmm_min_bic
+
+    samples = _host(stacked.rvs_per_box(int(n_samples_per_box)))
+    return vec_fit_gmm_min_bic(
+        samples, min_comp=int(min_comp), max_comp=int(max_comp),
+        gpu=gpu, verbose=verbose, return_components=True,
+    )
+
+
+def pack_gmm_components(comps) -> dict:
+    """Flatten ragged per-box GMM component lists into npz-storable arrays."""
+    weights, means, covs, invcovs, dets, mins, maxs = comps
+    return dict(
+        gmm_ncomp=np.array([len(_host(w)) for w in weights], dtype=int),
+        gmm_weights=np.concatenate([_host(w) for w in weights]),
+        gmm_means=np.concatenate([_host(m) for m in means], axis=0),
+        gmm_covs=np.concatenate([_host(c) for c in covs], axis=0),
+        gmm_invcovs=np.concatenate([_host(c) for c in invcovs], axis=0),
+        gmm_dets=np.concatenate([_host(d) for d in dets]),
+        gmm_mins=np.vstack([_host(m) for m in mins]),
+        gmm_maxs=np.vstack([_host(m) for m in maxs]),
+    )
+
+
+def unpack_gmm_components(d):
+    """Inverse of :func:`pack_gmm_components` (accepts an npz mapping)."""
+    ncomp = np.asarray(d["gmm_ncomp"], dtype=int)
+    splits = np.cumsum(ncomp)[:-1]
+    return [
+        np.split(np.asarray(d["gmm_weights"], dtype=float), splits),
+        np.split(np.asarray(d["gmm_means"], dtype=float), splits, axis=0),
+        np.split(np.asarray(d["gmm_covs"], dtype=float), splits, axis=0),
+        np.split(np.asarray(d["gmm_invcovs"], dtype=float), splits, axis=0),
+        np.split(np.asarray(d["gmm_dets"], dtype=float), splits),
+        [row for row in np.asarray(d["gmm_mins"], dtype=float)],
+        [row for row in np.asarray(d["gmm_maxs"], dtype=float)],
+    ]
+
+
+def build_peak_gmm(comps, box_weights=None, use_cupy: bool = False,
+                   limit: float = 10.0):
+    """Assemble the batched peak-GMM sampling object from fitted components.
+
+    TODO(fstat-gmm-deprecation): optional layer (``FSTAT_PEAK_SAMPLING=gmm``)
+    -- may be deprecated once the grid path proves out at full-band GPU
+    scale.
+
+    Wraps :class:`lisatools.sampling.prior.FullGaussianMixtureModel` (the
+    existing batched mixture with single-array-op ``rvs``/``logpdf`` over
+    thousands of Gaussians). ``box_weights`` re-weights the per-box shares
+    (default equal per box, the model's native convention): pass the peak F
+    values for the ``w ~ F`` default, or ``None``/uniform for equal weights.
+    Component arrays are permuted so f0 is the model's column 1 (its
+    frequency-culling axis); the returned object speaks the canonical
+    ``(f0, Mc, alpha, sin_delta)`` basis.
+    """
+    from .prior import FullGaussianMixtureModel
+
+    perm = np.asarray(_GMM_COLUMN_PERM)
+    weights, means, covs, invcovs, dets, mins, maxs = comps
+    K = len(weights)
+    weights = [np.asarray(_host(w), dtype=float) for w in weights]
+    if box_weights is not None:
+        bw = np.asarray(_host(box_weights), dtype=float).ravel()
+        assert bw.shape == (K,) and np.all(bw >= 0) and bw.sum() > 0
+        bw = bw / bw.sum()
+        # The model gives each box an equal 1/K share
+        # (``concatenate(weights) / K``); pre-scaling each box's (unit-sum)
+        # weight vector by K * bw_k turns that into the bw_k share while the
+        # grand total stays exactly 1.
+        weights = [w * (float(b) * K) for w, b in zip(weights, bw)]
+    means_p = [np.asarray(_host(m), dtype=float)[:, perm] for m in means]
+    covs_p = [np.asarray(_host(c), dtype=float)[:, perm][:, :, perm]
+              for c in covs]
+    invcovs_p = [np.asarray(_host(c), dtype=float)[:, perm][:, :, perm]
+                 for c in invcovs]
+    dets = [np.asarray(_host(d), dtype=float) for d in dets]
+    mins_p = [np.asarray(_host(m), dtype=float)[perm] for m in mins]
+    maxs_p = [np.asarray(_host(m), dtype=float)[perm] for m in maxs]
+    model = FullGaussianMixtureModel(
+        weights, means_p, covs_p, invcovs_p, dets, mins_p, maxs_p,
+        limit=limit, use_cupy=use_cupy,
+    )
+    return ColumnPermutedProposal(model, _GMM_COLUMN_PERM)

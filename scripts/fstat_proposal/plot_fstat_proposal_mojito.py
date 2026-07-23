@@ -1,43 +1,89 @@
-"""Real-F-stat visualization: FStatProposal4D against ``get_fstat_ll_wdm``
-on a mojito WDM residual centred on the highest-frequency GB.
+"""F-stat proposal grid prep on real mojito data: per-sub-band peak grids
++ the GMM sampling layer, driven by the global fit's GB sub-band structure.
 
 Reuses the ``erebor.gb_no_fg`` stock recipe to stand up the full WDM stack
 (orbits, TDIConfig, WDMSettings, chunked-het ``GBWDMComputations``, and the
-``AnalysisContainerArray`` from the mojito residual), then invokes the
-F-stat proposal on a grid around the source.
+``AnalysisContainerArray`` from the mojito residual), then runs the FIT
+pipeline of the F-stat RJ-birth proposal:
 
-The mojito catalogue's highest-freq GB (from the L1 catalogue) is::
+1. **Band** from the stock GB band knobs (``GB_MIN_FREQ``/``GB_MAX_FREQ``,
+   ``GB_CENTER_FREQ``+``GB_N_LAYERS``, or ``GB_HIGHEST_FREQUENCIES=N``); the
+   stock build derives ``band_edges`` -> sub-bands and ``f0_lims``.
+2. **Comb scan**: ONE batched kernel sweep over (all f0 nodes at 1/(2*Tobs)
+   spacing spanning every interior sub-band) x (sky points), Mc fixed.
+3. **Peak selection** (vectorized, on-device): two-tier non-maximum
+   suppression -> F floor -> per-sub-band cap; each peak tagged with its
+   sub-band index.
+4. **Local grids**: every peak's 4-D box (f0 CLAMPED to its sub-band) swept
+   in ONE chunked kernel stream -> stacked ``(K, n_f0, n_Mc, n_alpha,
+   n_sd)`` grids (``StackedFStatProposal4D``) -- the production sampling
+   layer. f0 nodes default to ~1/Tobs cells (the peak width); Mc/sky stay
+   anisotropic-coarse (3/8/8).
+5. **Save** one ``*_peaks_stacked.npz`` (grids + metadata, + the
+   ``*_comb.npz``). ``FSTAT_FIT_GMM=1`` additionally fits the batched
+   per-box GMM (``vec_fit_gmm_min_bic``) into the cache -- the optional
+   memory-light sampling layer.
 
-    ID 7725228, f0 = 20.380 mHz, Mc = 0.519 Msol,
-    RA = 4.062 rad, Dec = -0.905 rad, fdot = 1.03e-13
+Batching invariant: EVERY F-stat computation here runs as single chunked
+``get_fstat_ll_wdm`` calls spanning all sub-bands being run -- per-band /
+per-sky / per-peak Python loops around kernel calls are forbidden.
 
 The data contains ONLY the GB injection (no noise realization); the fixed
 whitening PSD is the *tabulated empirical* estimate from the mojito NOISE
-brick (``MojitoNoiseEstimates``, extras-only fixed-PSD path).
+brick (``MojitoNoiseEstimates``, extras-only fixed-PSD path). Diagnostics
+reference the loudest in-band catalogue source (no hardcoded targets).
 
 Environment knobs::
 
-    FSTAT_TARGET       ("highest" [default] or "band75" = ~7.5 mHz band)
-    FSTAT_DESIGN       ("comb" [default]: dense-f0 scan + local peak fits;
+    GB_MIN_FREQ / GB_MAX_FREQ / GB_CENTER_FREQ / GB_N_LAYERS /
+    GB_HIGHEST_FREQUENCIES
+                       (stock band knobs -- SAME semantics as the runner /
+                        stock fit, so one setting sizes prep + search
+                        identically; GB_CENTER_FREQ_HZ is a deprecated
+                        alias for GB_CENTER_FREQ)
+    FSTAT_DESIGN       ("comb" [default]: dense-f0 scan + stacked peak fits;
                         "coarse": legacy 4-D tensor grid + zoom -- kept as
-                        the narrow-peak negative control, it cannot resolve
-                        ~1/Tobs peaks)
-    FSTAT_F0_SPACING_MHZ / FSTAT_COMB_NSKY / FSTAT_COMB_MC / FSTAT_TOP_K
+                        the narrow-peak negative control)
+    FSTAT_F0_SPACING_MHZ / FSTAT_COMB_NSKY / FSTAT_COMB_MC
                        (comb scan: f0 node spacing [default 1/(2*Tobs)],
-                        sky-point count [6], fixed Mc [target's Mc_eff],
-                        reported peak count [10])
+                        sky-point count [6], fixed Mc [mean(m_chirp_lims)])
+    FSTAT_PEAK_MIN_SNR / FSTAT_PEAK_MIN_F
+                       (absolute selection floor, F = SNR^2/2; default
+                        SNR 5 [F 12.5]; explicit SNR wins over explicit F.
+                        Gates BOTH tiers -- the tier-2 local-max rescue is
+                        never relative to the window max)
+    FSTAT_PEAKS_PER_BAND
+                       (per-sub-band peak cap [35])
     FSTAT_PEAKS_TO_FIT / FSTAT_PEAK_HALF_MHZ
-                       (local 4-D proposals per comb peak [1]; f0 half-width
-                        of the peak box [2.5e-3 mHz ~ Doppler envelope])
-    GB_CENTER_FREQ_HZ  (default = target's f0; band75 keeps the stock band)
-    GB_N_LAYERS        (default 12 -- WDM layer count in the analysis band)
-    FSTAT_N_PER_AXIS   (default 24; FSTAT_N_F0/_MC/_ALPHA/_SINDELTA override
-                        per axis)
-    FSTAT_GRID_CACHE   (optional .npz path to dump the swept F-stat grids)
-    FSTAT_OUT          (default /tmp/fstat_proposal_mojito_<target>.png)
+                       (global cap on fitted peaks [all]; f0 half-width of
+                        the peak box [2.5e-3 mHz ~ Doppler envelope],
+                        clamped to the peak's sub-band)
+    FSTAT_MC_MIN       (Mc grid-box floor [0.01])
+    FSTAT_N_F0         (f0 nodes per box; AUTO default = one cell per
+                        ~1/Tobs, clamped [12, 96] -- ~40 at 90 d)
+    FSTAT_N_MC / FSTAT_N_ALPHA / FSTAT_N_SINDELTA
+                       (anisotropic defaults 3 / 8 / 8 -- Mc/sky are
+                        per-band unmeasurable)
+    FSTAT_N_PER_AXIS   (blanket override for all four axes when set)
+    FSTAT_BATCH        (kernel rows per get_fstat_ll_wdm call [4096])
+    FSTAT_GRID_MEM_MB  (K-axis memory budget for the stacked grids)
+    FSTAT_FIT_GMM=1    (ALSO fit the optional per-box GMM sampling layer
+                        into the cache [off; the grids are production])
+    FSTAT_GMM_SAMPLES / FSTAT_GMM_MAX_COMP
+                       (GMM fit: samples per box [4096]; max components
+                        per box [12])
+    FSTAT_GRID_CACHE   (.npz base path for the comb + stacked caches)
+    FSTAT_COMB_CACHE_REUSE=1
+                       (reuse an existing *_comb.npz; peak selection is
+                        re-run with the CURRENT knobs from the cached sweep)
+    FSTAT_SAVE_PER_BOX=1
+                       (also write legacy per-box *_peak<i>.npz caches)
+    FSTAT_PLOT_PEAKS   (corner plots for the top-N fitted peaks [2])
+    FSTAT_OUT          (default /tmp/fstat_proposal_mojito.png)
     MOJITO_DATA_PATH   (default ~/.mojito_cache/brickmarket/mojito_light_v1_0_0/)
 
-Output: corner plot at ``FSTAT_OUT``.
+Outputs: ``*_comb.npz`` + ``*_peaks_stacked.npz`` (grids + GMM + metadata)
+under FSTAT_GRID_CACHE, plus diagnostic figures next to FSTAT_OUT.
 """
 
 from __future__ import annotations
@@ -70,39 +116,14 @@ os.environ.setdefault("NWALKERS", "2")
 os.environ.setdefault("NTEMPS", "1")
 os.environ.setdefault("GB_USE_CHIRP_MASS", "1")
 
-# Mojito's highest-frequency GB (from the L1 catalogue, verified interactively).
-#
-# NOTE on the two chirp masses: the wdwd catalogue is an *interacting* DWD
-# population, so the injected fdot is not purely GW-driven. ``Mc_Msol`` is the
-# catalogue's mass-based chirp mass; ``Mc_eff_Msol`` is the chirp mass implied
-# by the injected ``(f0, fdot)`` through the monochromatic-GB relation -- and
-# since the proposal grid maps Mc -> fdot through exactly that relation, the
-# F-stat must peak at ``Mc_eff``, not at the mass-based value.
-MOJITO_HIGHEST_GB = {
-    "ID": 7725228,
-    "f0_mHz": 20.380377,
-    "Mc_Msol": 0.5192,       # catalogue mass-based (tides suppress fdot)
-    "Mc_eff_Msol": 0.4658,   # from (f0, fdot): get_chirp_mass_from_f_fdot
-    "RA_rad": 4.0617,
-    "Dec_rad": -0.9049,
-    "fdot": 1.0245e-13,
-    "A": 1.371e-22,
-}
-
-# Loudest GB inside the stock gb_no_fg band [7.36, 7.78] mHz (~30 catalogue
-# sources live there; ID 14399620 at 7.3545 mHz is louder but sits just below
-# the band edge). Select with FSTAT_TARGET=band75; the band75 run keeps the
-# variant's default analysis band instead of recentring on the source.
-MOJITO_BAND75_GB = {
-    "ID": 1229636,
-    "f0_mHz": 7.580260,
-    "Mc_Msol": 0.3356,
-    "Mc_eff_Msol": 0.3355,
-    "RA_rad": 4.9791,
-    "Dec_rad": -0.0631,
-    "fdot": 1.578e-15,
-    "A": 9.072e-23,
-}
+# NOTE on the two chirp masses (kept for the diagnostics): the wdwd catalogue
+# is an *interacting* DWD population, so the injected fdot is not purely
+# GW-driven. ``Mc_Msol`` is the catalogue's mass-based chirp mass;
+# ``Mc_eff_Msol`` is the chirp mass implied by the injected ``(f0, fdot)``
+# through the monochromatic-GB relation -- and since the proposal grid maps
+# Mc -> fdot through exactly that relation, the F-stat must peak at
+# ``Mc_eff``, not at the mass-based value. The diagnostic reference source is
+# always resolved from the catalogue (loudest in band), never hardcoded.
 
 
 def _resolve_matplotlib():
@@ -145,11 +166,16 @@ def _maybe_patch_slab_kernel_args(gb_wdm_comp, wdm_holder, f0_probe_hz):
               "(pre-task-b GBGPU binding)", flush=True)
 
 
-def build_gb_wdm_comp_and_holder(center_freq_hz: float, n_layers: int):
-    """Configure ``erebor.gb_no_fg`` on mojito with the GB analysis band centred
-    on ``center_freq_hz`` (``n_layers`` layers wide), build it, run
-    ``load_info`` + ``setup_acs`` to get the ``AnalysisContainerArray``, then
-    manually construct ``GBWDMComputations`` from the pre-built settings.
+def build_gb_wdm_comp_and_holder():
+    """Configure ``erebor.gb_no_fg`` on mojito, build it, run ``load_info`` +
+    ``setup_acs`` to get the ``AnalysisContainerArray``, then manually
+    construct ``GBWDMComputations`` from the pre-built settings.
+
+    The GB analysis band comes from the SAME stock knobs the runner / stock
+    fit honor (``GB_MIN_FREQ``/``GB_MAX_FREQ``, ``GB_CENTER_FREQ`` +
+    ``GB_N_LAYERS``, ``GB_HIGHEST_FREQUENCIES`` -- consumed by the stock
+    ``GBSettings`` env-backed defaults at construction), so one band setting
+    sizes grid prep and search identically.
 
     Returns ``(gb_wdm_comp, wdm_holder, curr)`` where ``wdm_holder`` is the
     residual ``AnalysisContainerArray`` (what ``get_fstat_ll_wdm`` consumes).
@@ -162,9 +188,12 @@ def build_gb_wdm_comp_and_holder(center_freq_hz: float, n_layers: int):
 
     print("[build] configuring erebor.gb_no_fg...", flush=True)
     fit = erebor.gb_no_fg(nwalkers=2, ntemps=1)
-    if center_freq_hz is not None:
-        fit.gb.center_freq = float(center_freq_hz)
-        fit.gb.n_layers = int(n_layers)
+    # Deprecated alias: this script's old private band knob. The stock
+    # GB_CENTER_FREQ (+ GB_N_LAYERS) is the supported interface.
+    if "GB_CENTER_FREQ_HZ" in os.environ and fit.gb.center_freq is None:
+        fit.gb.center_freq = float(os.environ["GB_CENTER_FREQ_HZ"])
+        print("[build] GB_CENTER_FREQ_HZ is DEPRECATED; use GB_CENTER_FREQ "
+              "(same value, stock knob).", flush=True)
     fit.gb.use_chirp_mass = True
 
     # --- Empirical PSD from the mojito NOISE brick (tabulated estimates) ---
@@ -289,7 +318,7 @@ def build_fstat_proposal(gb_wdm_comp, wdm_holder, src, gb_info,
         box = dict(
             f0_range=(float(gb_info.f0_lims[0]) * 1e3,
                       float(gb_info.f0_lims[-1]) * 1e3),
-            Mc_range=(0.1, 1.0),
+            Mc_range=_mc_grid_range(gb_info),
             alpha_range=(0.0, 2 * np.pi),
             sin_delta_range=(-1.0, 1.0),
         )
@@ -370,6 +399,160 @@ def _band_catalogue_sources(f0_lo_mHz, f0_hi_mHz):
         return None
 
 
+def _mc_grid_range(gb_info):
+    """Mc GRID-box range: ``[max(prior floor, FSTAT_MC_MIN), prior top]``.
+
+    The proposal/prior Mc limits stay the full ``m_chirp_lims``; the grid
+    box floors at ``FSTAT_MC_MIN`` (default 0.01) because below that fdot is
+    indistinguishable from 0 over months of data -- grid nodes there waste
+    kernel evals without adding proposal coverage (the uniform floor mixture
+    covers the full prior box).
+    """
+    from lisatools.sampling.fstat_proposal import fstat_knob
+
+    mc_lims = list(getattr(gb_info, "m_chirp_lims", None) or [0.001, 1.0])
+    mc_min = fstat_knob("FSTAT_MC_MIN", float)
+    return (max(float(mc_lims[0]), mc_min), float(mc_lims[-1]))
+
+
+def _comb_mc_fix(gb_info):
+    """Comb-scan fixed Mc: ``FSTAT_COMB_MC`` env else ``mean(m_chirp_lims)``."""
+    mc_lims = list(getattr(gb_info, "m_chirp_lims", None) or [0.001, 1.0])
+    return float(os.environ.get(
+        "FSTAT_COMB_MC", 0.5 * (float(mc_lims[0]) + float(mc_lims[-1]))
+    ))
+
+
+def _windowed_max(a, w, xp):
+    """Sliding max over ``[i - w, i + w]`` via O(log w) shifted-max folds
+    (xp-generic; no scipy)."""
+    n = a.shape[0]
+    pad = xp.full(w, -xp.inf, dtype=a.dtype)
+    b = xp.concatenate([pad, a, pad])
+    width = 2 * w + 1
+    r = b.copy()
+    done = 1
+    while done < width:
+        step = min(done, width - done)
+        r[: r.shape[0] - step] = xp.maximum(r[: r.shape[0] - step], r[step:])
+        done += step
+    return r[:n]
+
+
+def _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params, label=""):
+    """ONE chunked kernel stream over a pre-assembled physical params array.
+
+    The batching invariant: every F-stat computation in this script sweeps a
+    single concatenated parameter set spanning ALL sub-bands / sky points /
+    peak boxes at once, in ``FSTAT_BATCH``-row ``get_fstat_ll_wdm`` calls --
+    never a per-band / per-sky / per-peak kernel loop. Returns the F values
+    on the compute backend's array module.
+    """
+    from lisatools.sampling.fstat_proposal import compute_fstat, fstat_knob
+
+    xp = gb_wdm_comp.xp
+    params = xp.asarray(params)
+    n = params.shape[0]
+    batch = fstat_knob("FSTAT_BATCH", int)
+    F = xp.empty(n, dtype=xp.float64)
+    t0 = time.time()
+    last = t0
+    for s in range(0, n, batch):
+        e = min(s + batch, n)
+        N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
+        F[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
+        if time.time() - last > 30:
+            last = time.time()
+            print(f"[sweep{label}] {e}/{n} evals "
+                  f"({time.time() - t0:.0f}s)", flush=True)
+    print(f"[sweep{label}] {n} evals in one chunked stream "
+          f"(batch={batch}, {time.time() - t0:.0f}s)", flush=True)
+    return F
+
+
+def select_comb_peaks(f0_nodes, F_max, gb_info, spacing, xp):
+    """Vectorized per-sub-band peak selection from the comb's ``F_max(f0)``.
+
+    All-array pipeline over every sub-band at once (xp-generic: stays
+    on-device on the CUDA backends; only the final small peak table moves to
+    host). Two-tier candidate set -> absolute SNR floor + interior-band mask
+    -> per-band cap:
+
+    * **Tier 1** (window champion): a node survives iff it carries the max F
+      within +-``min_sep`` nodes (the Doppler envelope ~3e-3 mHz).
+    * **Tier 2** (local-max rescue): ALSO keep any strict 3-point local
+      maximum. The rescue is ABSOLUTE -- gated only by the shared SNR floor
+      below, never by the local window max -- so a quiet real source inside
+      a loud neighbor's Doppler window still gets its own grid (an extra
+      grid on a sky image is harmless redundancy bounded by the per-band
+      cap; a missing grid on a real source is the bad failure).
+
+    The floor is SNR-based (``F = SNR^2 / 2``): set it as
+    ``FSTAT_PEAK_MIN_SNR`` (wins when set) or directly as
+    ``FSTAT_PEAK_MIN_F`` (default 20 ~ SNR 6.3).
+
+    Returns a host ``(N, 4)`` array of ``(f0_mHz, F, node_idx, band_idx)``
+    sorted by F descending. band_idx indexes ``gb_info.band_edges`` cells;
+    only interior sub-bands (1 .. num_sub_bands - 2, the ``f0_lims`` span)
+    are kept -- the consumer's per-cell gate rejects births elsewhere.
+    """
+    from lisatools.sampling.fstat_proposal import fstat_knob, fstat_peak_min_F
+
+    f0_nodes = xp.asarray(f0_nodes)
+    F_max = xp.asarray(F_max)
+    # band_edges is Hz; ALL script-side f0 values are mHz. Convert ONCE.
+    band_edges_mHz = xp.asarray(np.asarray(gb_info.band_edges, dtype=float) * 1e3)
+    num_sub_bands = int(len(gb_info.band_edges) - 1)
+    band_of_node = xp.searchsorted(band_edges_mHz, f0_nodes, side="right") - 1
+
+    min_sep = max(1, int(round(3e-3 / spacing)))
+    wmax = _windowed_max(F_max, min_sep, xp)
+    tier1 = F_max >= wmax
+    local3 = xp.zeros(F_max.shape, dtype=bool)
+    local3[1:-1] = (F_max[1:-1] > F_max[:-2]) & (F_max[1:-1] > F_max[2:])
+    tier2 = local3
+
+    min_F = fstat_peak_min_F()
+    interior = (band_of_node >= 1) & (band_of_node <= num_sub_bands - 2)
+    cand = (tier1 | tier2) & (F_max >= min_F) & interior
+
+    idx = xp.where(cand)[0]
+    if int(idx.shape[0]) == 0:
+        print(f"[peaks] NO peaks above F >= {min_F} in the interior "
+              "sub-bands.", flush=True)
+        return np.empty((0, 4))
+    b = band_of_node[idx]
+    Fv = F_max[idx]
+
+    # Vectorized per-band cap: sort by (band, -F), within-band rank via the
+    # band-group start offsets, keep rank < cap.
+    cap = fstat_knob("FSTAT_PEAKS_PER_BAND", int)
+    order = xp.lexsort(xp.stack([-Fv, b.astype(xp.float64)]))
+    b_sorted = b[order]
+    rank = xp.arange(order.shape[0]) - xp.searchsorted(
+        b_sorted, b_sorted, side="left"
+    )
+    idx_keep = idx[order[rank < cap]]
+
+    f0_h = _to_host(f0_nodes[idx_keep])
+    F_h = _to_host(F_max[idx_keep])
+    b_h = _to_host(band_of_node[idx_keep])
+    peaks = np.column_stack([f0_h, F_h, _to_host(idx_keep), b_h])
+    peaks = peaks[np.argsort(peaks[:, 1])[::-1]]
+
+    counts = np.bincount(b_h.astype(int), minlength=num_sub_bands)
+    print(f"[peaks] {len(peaks)} peaks (F >= {min_F:.1f} ~ SNR "
+          f"{np.sqrt(2 * min_F):.1f}, cap {cap}/band); "
+          f"per-interior-band counts: "
+          f"{dict(enumerate(counts.tolist()))}", flush=True)
+    zero_bands = [k for k in range(1, num_sub_bands - 1) if counts[k] == 0]
+    if zero_bands:
+        print(f"[peaks] WARNING: interior sub-band(s) {zero_bands} have ZERO "
+              "peaks -- births there fall to the comb/floor components only.",
+              flush=True)
+    return peaks
+
+
 def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
                   out_path, cat_sources, cache_path=None):
     """Dense-in-f0 F-stat comb scan across the sub-band.
@@ -380,76 +563,65 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
     so Mc is nearly unmeasurable per band and can be held FIXED, and sky only
     enters through the Doppler ridge (peak shifts up to ~f0*v/c ~ 2e-3 mHz).
     The right scan is therefore dense in f0 (spacing ~ 1/(2*Tobs)) x a small
-    spread of sky points, maximized over sky per f0 node.
+    spread of sky points, maximized over sky per f0 node. The whole
+    (sky x f0) design is assembled into ONE parameter set and swept in a
+    single chunked kernel stream (the batching invariant -- no per-sky
+    loop); peak selection is the vectorized per-sub-band pipeline of
+    :func:`select_comb_peaks`.
 
-    Returns ``(f0_nodes_mHz, F_max, peaks)`` where ``peaks`` is the
-    greedily-separated list of top local maxima ``(f0_mHz, F)``.
+    Returns ``(f0_nodes_mHz, F_max, peaks, extras)`` where ``peaks`` is the
+    host ``(N, 4)`` array ``(f0_mHz, F, node_idx, band_idx)``.
     """
     from gbgpu.utils.utility import get_fdot
-
-    from lisatools.sampling.fstat_proposal import compute_fstat
 
     Tobs = float(general_info.Tobs)
     f0_lo = float(gb_info.f0_lims[0]) * 1e3
     f0_hi = float(gb_info.f0_lims[-1]) * 1e3
     spacing = float(os.environ.get("FSTAT_F0_SPACING_MHZ", 0.5 / Tobs * 1e3))
     f0_nodes = np.arange(f0_lo, f0_hi + 0.5 * spacing, spacing)
-    n_sky = int(os.environ.get("FSTAT_COMB_NSKY", 6))
+    from lisatools.sampling.fstat_proposal import fstat_knob
+    n_sky = fstat_knob("FSTAT_COMB_NSKY", int)
     # golden-ratio spread over the sphere
     ks = np.arange(n_sky)
     sky_sd = -1.0 + 2.0 * (ks + 0.5) / n_sky
     sky_al = (2.0 * np.pi * ks * 0.6180339887) % (2.0 * np.pi)
-    mc_fix = float(os.environ.get(
-        "FSTAT_COMB_MC", src.get("Mc_eff_Msol", src.get("Mc_Msol", 0.3))
-    ))
+    mc_fix = _comb_mc_fix(gb_info)
 
-    print(f"[comb] {len(f0_nodes)} f0 nodes x {n_sky} sky points = "
-          f"{len(f0_nodes) * n_sky} evals  (spacing {spacing:.3e} mHz = "
-          f"{spacing / (1e3 / Tobs):.2f}/Tobs; Mc fixed at {mc_fix:.3f})",
-          flush=True)
+    n_nodes = len(f0_nodes)
+    print(f"[comb] {n_nodes} f0 nodes x {n_sky} sky points = "
+          f"{n_nodes * n_sky} evals in ONE chunked stream (spacing "
+          f"{spacing:.3e} mHz = {spacing / (1e3 / Tobs):.2f}/Tobs; Mc fixed "
+          f"at {mc_fix:.3f})", flush=True)
 
+    # Assemble the full (sky-major) design once, sweep once, scatter back.
     xp = gb_wdm_comp.xp
-    F = np.zeros((n_sky, len(f0_nodes)))
-    t0 = time.time()
-    for k in range(n_sky):
-        params = np.zeros((len(f0_nodes), 9))
-        params[:, 0] = 1e-22
-        params[:, 1] = f0_nodes * 1e-3
-        params[:, 2] = get_fdot(
-            f=params[:, 1], Mc=np.full(len(f0_nodes), mc_fix)
-        )
-        params[:, 5] = 0.5 * np.pi
-        params[:, 7] = sky_al[k]
-        params[:, 8] = np.arcsin(sky_sd[k])
-        params = xp.asarray(params)   # -> device on the CUDA backends
-        for s in range(0, len(f0_nodes), 4096):
-            e = min(s + 4096, len(f0_nodes))
-            N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
-            F[k, s:e] = _to_host(compute_fstat(N_arr, M_up))
-        print(f"[comb] sky {k + 1}/{n_sky} done ({time.time() - t0:.0f}s)",
-              flush=True)
-    F_max = F.max(axis=0)
+    params = np.zeros((n_sky * n_nodes, 9))
+    params[:, 0] = 1e-22
+    params[:, 1] = np.tile(f0_nodes, n_sky) * 1e-3
+    params[:, 2] = get_fdot(f=params[:, 1], Mc=np.full(params.shape[0], mc_fix))
+    params[:, 5] = 0.5 * np.pi
+    params[:, 7] = np.repeat(sky_al, n_nodes)
+    params[:, 8] = np.arcsin(np.repeat(sky_sd, n_nodes))
+    F_dev = _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params,
+                                 label=":comb").reshape(n_sky, n_nodes)
+    F_max_dev = F_dev.max(axis=0)
 
-    # Greedy top-K local maxima with a Doppler-envelope minimum separation.
-    min_sep = max(1, int(round(3e-3 / spacing)))
-    order = np.argsort(F_max)[::-1]
-    top_k = int(os.environ.get("FSTAT_TOP_K", 10))
-    peaks = []
-    for idx in order:
-        if len(peaks) >= top_k:
-            break
-        if all(abs(int(idx) - p[2]) >= min_sep for p in peaks):
-            peaks.append((float(f0_nodes[idx]), float(F_max[idx]), int(idx)))
-    print("[comb] top peaks (f0 [mHz], F):", flush=True)
-    for f0p, Fp, _ in peaks:
-        print(f"[comb]   {f0p:.5f}  {Fp:10.2f}", flush=True)
+    peaks = select_comb_peaks(f0_nodes, F_max_dev, gb_info, spacing, xp)
+    print("[comb] top peaks (f0 [mHz], F, band):", flush=True)
+    for f0p, Fp, _, bi in peaks[:10]:
+        print(f"[comb]   {f0p:.5f}  {Fp:10.2f}  band {int(bi)}", flush=True)
+
+    F = _to_host(F_dev)
+    F_max = _to_host(F_max_dev)
 
     # Persist the sweep BEFORE any plotting -- a cosmetic figure failure must
-    # never lose ~half an hour of kernel work.
+    # never lose the kernel work. peaks is (N, 3): (f0, F, band_idx) +
+    # band_edges so the runner/diagnostics can bin without a rebuild.
     if cache_path:
         comb_cache = cache_path.replace(".npz", "_comb.npz")
         np.savez(comb_cache, f0_nodes_mHz=f0_nodes, F_max=F_max,
-                 peaks=np.array([(p[0], p[1]) for p in peaks]),
+                 peaks=peaks[:, (0, 1, 3)] if len(peaks) else np.empty((0, 3)),
+                 band_edges=np.asarray(gb_info.band_edges, dtype=float),
                  F_all=F, sky_alpha=sky_al, sky_sin_delta=sky_sd)
         print(f"[cache] wrote {comb_cache}", flush=True)
 
@@ -781,40 +953,259 @@ def plot_corner(prop, src, n_samples=20_000,
     print(f"[plot] wrote {out_path}", flush=True)
 
 
+def _resolve_reference_src(cat_sources, gb_info):
+    """Diagnostic reference = the loudest IN-BAND catalogue source.
+
+    The reference is always resolved from the catalogue (no hardcoded
+    per-source dicts). Guards: empty catalogue -> a minimal band-centre
+    reference; loudest source with ``fdot <= 0`` (nan ``Mc_eff``,
+    interacting DWD) -> substitute ``mean(m_chirp_lims)``.
+    """
+    mc_lims = list(getattr(gb_info, "m_chirp_lims", None) or [0.001, 1.0])
+    mc_mean = 0.5 * (float(mc_lims[0]) + float(mc_lims[-1]))
+    f0_lo = float(gb_info.f0_lims[0]) * 1e3
+    f0_hi = float(gb_info.f0_lims[-1]) * 1e3
+    if cat_sources is not None and len(cat_sources["f0"]):
+        i = int(np.argmax(cat_sources["amp"]))
+        mc = float(cat_sources["Mc_eff"][i])
+        if not np.isfinite(mc):
+            mc = mc_mean
+        src = {
+            "ID": "band-loudest",
+            "f0_mHz": float(cat_sources["f0"][i]),
+            "Mc_eff_Msol": mc, "Mc_Msol": mc,
+            "RA_rad": float(cat_sources["alpha"][i]),
+            "Dec_rad": float(np.arcsin(cat_sources["sin_delta"][i])),
+        }
+        print(f"[main] diagnostics reference the loudest in-band catalogue "
+              f"GB: f0={src['f0_mHz']:.4f} mHz (Mc_eff={mc:.4f}).", flush=True)
+        return src
+    print("[main] no catalogue sources in band; diagnostics use a minimal "
+          "band-centre reference.", flush=True)
+    return {"ID": "band-centre", "f0_mHz": 0.5 * (f0_lo + f0_hi),
+            "Mc_eff_Msol": mc_mean, "Mc_Msol": mc_mean,
+            "RA_rad": 0.0, "Dec_rad": 0.0}
+
+
+def run_stacked_peak_sweep(gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax,
+                           alpha_ax, sd_ax, node_shape):
+    """ONE chunked kernel stream over EVERY peak box of EVERY sub-band.
+
+    ``node_shape`` is ``(K, n_f0, n_Mc, n_alpha, n_sd)``. Rows are assembled
+    per chunk from index arithmetic (so the full ``n_total x 9`` array never
+    materializes); the kernel sees a single ``FSTAT_BATCH``-chunked stream --
+    never a per-peak loop. Returns the node-shaped ``F`` array on the
+    compute backend's module.
+    """
+    from gbgpu.utils.utility import get_fdot
+
+    from lisatools.sampling.fstat_proposal import compute_fstat, fstat_knob
+
+    xp = gb_wdm_comp.xp
+    n_total = int(np.prod(node_shape))
+    batch = fstat_knob("FSTAT_BATCH", int)
+    f0_los_d = xp.asarray(f0_los)
+    f0_dxs_d = xp.asarray(f0_dxs)
+    mc_d = xp.asarray(mc_ax)
+    al_d = xp.asarray(alpha_ax)
+    sd_d = xp.asarray(sd_ax)
+    F_flat = xp.empty(n_total, dtype=xp.float64)
+    t0 = time.time()
+    last = t0
+    for s in range(0, n_total, batch):
+        e = min(s + batch, n_total)
+        k, i0, i1, i2, i3 = xp.unravel_index(xp.arange(s, e), node_shape)
+        pr = xp.zeros((e - s, 9), dtype=xp.float64)
+        pr[:, 0] = 1e-22
+        pr[:, 1] = (f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
+        pr[:, 2] = xp.asarray(get_fdot(f=pr[:, 1], Mc=mc_d[i1]))
+        pr[:, 5] = 0.5 * np.pi
+        pr[:, 7] = al_d[i2]
+        pr[:, 8] = xp.arcsin(sd_d[i3])
+        N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(pr, wdm_holder)
+        F_flat[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
+        if time.time() - last > 30:
+            last = time.time()
+            print(f"[stageB] {e}/{n_total} evals ({time.time() - t0:.0f}s)",
+                  flush=True)
+    print(f"[stageB] {n_total} evals in one chunked stream (batch={batch}, "
+          f"{time.time() - t0:.0f}s)", flush=True)
+    return F_flat.reshape(node_shape)
+
+
+def run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks, src,
+                        out_path, cat_sources, cache_path):
+    """Stage B: clamped boxes -> ONE batched sweep -> stacked grids.
+
+    Assemble (host, cheap): every selected peak's 4-D box with its f0 range
+    CLAMPED to its sub-band edges (unclamped boxes would propose f0 the
+    consumer's per-cell gate rejects -- wasted birth attempts). Sweep: one
+    chunked kernel stream over all boxes (:func:`run_stacked_peak_sweep`).
+    Build: ONE :class:`StackedFStatProposal4D` from the ``(K, ...)`` stack
+    -- the grids ARE the production sampling layer. Node shape: f0 auto
+    ~1/Tobs cells (:func:`fstat_n_f0`), Mc/sky anisotropic-coarse
+    (:func:`fstat_n_axis`). Optionally (``FSTAT_FIT_GMM=1``) fit the
+    batched per-box GMM FROM the grids as the memory-light alternative
+    sampling layer. Save: one ``*_peaks_stacked.npz`` (grids first, GMM
+    appended -- a GMM failure never loses the sweep).
+    """
+    from lisatools.sampling.fstat_proposal import (
+        FStatProposal4D,
+        StackedFStatProposal4D,
+        fit_gmm_to_stacked,
+        fstat_knob,
+        fstat_n_axis,
+        fstat_n_f0,
+        pack_gmm_components,
+    )
+
+    if len(peaks) == 0:
+        print("[stageB] no peaks selected; nothing to fit.", flush=True)
+        return None
+
+    half_f0 = fstat_knob("FSTAT_PEAK_HALF_MHZ", float)
+    n_f0 = fstat_n_f0(2.0 * half_f0, float(curr.general_info.Tobs))
+    n_Mc = fstat_n_axis("FSTAT_N_MC")
+    n_alpha = fstat_n_axis("FSTAT_N_ALPHA")
+    n_sd = fstat_n_axis("FSTAT_N_SINDELTA")
+    n_fit_env = os.environ.get("FSTAT_PEAKS_TO_FIT", "").strip()
+    if n_fit_env:
+        peaks = peaks[: int(n_fit_env)]
+        print(f"[stageB] FSTAT_PEAKS_TO_FIT caps the fit to the top "
+              f"{len(peaks)} peaks (of the full selection).", flush=True)
+
+    # Clamped per-box f0 axes (assembly bookkeeping).
+    band_edges_mHz = np.asarray(gb_info.band_edges, dtype=float) * 1e3
+    f0_los, f0_dxs, keep = [], [], []
+    for row in peaks:
+        f0p, _F, _node, bi = float(row[0]), float(row[1]), row[2], int(row[3])
+        lo = max(f0p - half_f0, band_edges_mHz[bi])
+        hi = min(f0p + half_f0, band_edges_mHz[bi + 1])
+        if not hi - lo > 0:
+            print(f"[stageB] WARNING: degenerate clamped box at "
+                  f"f0={f0p:.5f} mHz (band {bi}); skipped.", flush=True)
+            continue
+        f0_los.append(lo)
+        f0_dxs.append((hi - lo) / (n_f0 - 1))
+        keep.append(row)
+    peaks = np.asarray(keep)
+    K = len(peaks)
+    f0_los = np.asarray(f0_los)
+    f0_dxs = np.asarray(f0_dxs)
+    band_idx = peaks[:, 3].astype(int)
+
+    mc_range = _mc_grid_range(gb_info)
+    mc_ax = np.linspace(mc_range[0], mc_range[1], n_Mc)
+    alpha_ax = np.linspace(0.0, 2 * np.pi, n_alpha)
+    sd_ax = np.linspace(-1.0, 1.0, n_sd)
+    node_shape = (K, n_f0, n_Mc, n_alpha, n_sd)
+    print(f"[stageB] {K} peak boxes x {n_f0}x{n_Mc}x{n_alpha}x{n_sd} nodes; "
+          f"Mc box {mc_range}; f0 boxes clamped to their sub-bands.",
+          flush=True)
+
+    logp_grids = run_stacked_peak_sweep(
+        gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax, alpha_ax, sd_ax,
+        node_shape,
+    )  # beta = 1: logp = F
+
+    mem_mb = os.environ.get("FSTAT_GRID_MEM_MB", "").strip()
+    stacked = StackedFStatProposal4D(
+        logp_grids, f0_los, f0_dxs, mc_ax, alpha_ax, sd_ax,
+        weights=np.clip(peaks[:, 1], 0.0, None),  # report-time w ~ F
+        mem_budget_mb=float(mem_mb) if mem_mb else None,
+    )
+
+    # Save the grids FIRST -- the GMM fit must never lose the kernel sweep.
+    stacked_path = None
+    save_fields = None
+    if cache_path:
+        stacked_path = cache_path.replace(".npz", "_peaks_stacked.npz")
+        save_fields = dict(
+            logp_grids=_to_host(logp_grids), f0_los=f0_los, f0_dxs=f0_dxs,
+            mc_ax=mc_ax, alpha_ax=alpha_ax, sin_delta_ax=sd_ax,
+            peak_f0_mHz=peaks[:, 0], peak_F=peaks[:, 1], band_idx=band_idx,
+            band_f0_lo=band_edges_mHz[band_idx],
+            band_f0_hi=band_edges_mHz[band_idx + 1],
+            band_edges=np.asarray(gb_info.band_edges, dtype=float),
+        )
+        np.savez(stacked_path, **save_fields)
+        print(f"[cache] wrote {stacked_path} (grids; GMM appended next)",
+              flush=True)
+        if os.environ.get("FSTAT_SAVE_PER_BOX", "0") == "1":
+            for i in range(K):
+                f0_ax_i = f0_los[i] + f0_dxs[i] * np.arange(n_f0)
+                np.savez(cache_path.replace(".npz", f"_peak{i}.npz"),
+                         logp_grid=_to_host(logp_grids[i]), f0_ax=f0_ax_i,
+                         Mc_ax=mc_ax, alpha_ax=alpha_ax, sin_delta_ax=sd_ax,
+                         log_norm=0.0)
+            print(f"[cache] wrote {K} legacy per-box *_peak<i>.npz caches",
+                  flush=True)
+
+    # OPT-IN (FSTAT_FIT_GMM=1): batched per-box GMM fit FROM the stacked
+    # grids (reuses vec_fit_gmm_min_bic) -- the memory-light alternative
+    # sampling layer. The grids are the production layer; the runner's
+    # FSTAT_PEAK_SAMPLING=gmm mode fits on load when the cache carries no
+    # components, so skipping here loses nothing.
+    if fstat_knob("FSTAT_FIT_GMM", int):
+        gpus = getattr(curr.general_info, "gpus", None)
+        try:
+            t0 = time.time()
+            comps = fit_gmm_to_stacked(
+                stacked,
+                n_samples_per_box=fstat_knob("FSTAT_GMM_SAMPLES", int),
+                gpu=(gpus[0] if gpus else None),
+                max_comp=fstat_knob("FSTAT_GMM_MAX_COMP", int),
+            )
+            n_comp = [len(w) for w in comps[0]]
+            print(f"[gmm] fitted {K} boxes in {time.time() - t0:.1f}s "
+                  f"(components/box: min {min(n_comp)}, max {max(n_comp)})",
+                  flush=True)
+            if stacked_path:
+                save_fields.update(pack_gmm_components(comps))
+                np.savez(stacked_path, **save_fields)
+                print(f"[cache] re-wrote {stacked_path} with GMM components",
+                      flush=True)
+        except Exception as e:
+            print(f"[gmm] fit FAILED (grids still cached; the runner fits "
+                  f"on load): {e!r}", flush=True)
+    else:
+        print("[gmm] prep-time GMM fit skipped (opt in with FSTAT_FIT_GMM=1;"
+              " the grid stack is the production sampling layer).",
+              flush=True)
+
+    # Reports + corner plots for the top boxes (cosmetic, non-fatal;
+    # from_grid rebuilds are plotting-only -- no kernel work).
+    n_plot = fstat_knob("FSTAT_PLOT_PEAKS", int)
+    for i in range(min(n_plot, K)):
+        stage = f"peak{i}"
+        try:
+            f0_ax_i = f0_los[i] + f0_dxs[i] * np.arange(n_f0)
+            prop_i = FStatProposal4D.from_grid(
+                (f0_ax_i, mc_ax, alpha_ax, sd_ax), _to_host(logp_grids[i])
+            )
+            _report(prop_i, src, stage)
+            pk_cat = _filter_cat(cat_sources, f0_ax_i[0], f0_ax_i[-1])
+            plot_corner(prop_i, src, n_samples=20_000,
+                        out_path=out_path.replace(".png", f"_{stage}.png"),
+                        cat_sources=pk_cat,
+                        stage=f"local proposal @ peak {i} "
+                              f"(f0={peaks[i, 0]:.5f} mHz, "
+                              f"F={peaks[i, 1]:.1f}, band {int(peaks[i, 3])})")
+        except Exception as e:
+            print(f"[{stage}] report/plot skipped (non-fatal, grids "
+                  f"written): {e!r}", flush=True)
+    return stacked
+
+
 def main():
     _resolve_matplotlib()
 
-    target = os.environ.get("FSTAT_TARGET", "highest").strip().lower()
-    src = {"highest": MOJITO_HIGHEST_GB, "band75": MOJITO_BAND75_GB}[target]
-    # band75 keeps the variant's stock analysis band ([7.36, 7.78] mHz);
-    # other targets recentre a 12-layer band on the source.
-    if "GB_CENTER_FREQ_HZ" in os.environ:
-        center_freq_hz = float(os.environ["GB_CENTER_FREQ_HZ"])
-    elif target == "band75":
-        center_freq_hz = None
-    else:
-        center_freq_hz = src["f0_mHz"] * 1e-3
-    n_layers = int(os.environ.get("GB_N_LAYERS", 12))
     n_per_axis = int(os.environ.get("FSTAT_N_PER_AXIS", 24))
-    out_path = os.environ.get(
-        "FSTAT_OUT", f"/tmp/fstat_proposal_mojito_{target}.png"
-    )
+    out_path = os.environ.get("FSTAT_OUT", "/tmp/fstat_proposal_mojito.png")
 
-    print(f"[main] Target ({target}): mojito GB ID {src['ID']}, "
-          f"f0={src['f0_mHz']:.4f} mHz", flush=True)
-    if center_freq_hz is None:
-        print("[main] Analysis band: variant default (min_freq/max_freq)",
-              flush=True)
-    else:
-        print(f"[main] Analysis band centre: {center_freq_hz * 1e3:.4f} mHz "
-              f"({n_layers} layers)", flush=True)
-
-    gb_wdm_comp, wdm_holder, curr = build_gb_wdm_comp_and_holder(
-        center_freq_hz, n_layers,
-    )
+    gb_wdm_comp, wdm_holder, curr = build_gb_wdm_comp_and_holder()
     gb_info = curr.source_info["gb"]
-    if center_freq_hz is None:
-        center_freq_hz = float(src["f0_mHz"]) * 1e-3
+    center_freq_hz = float(gb_info.center_freq)
 
     _maybe_patch_slab_kernel_args(gb_wdm_comp, wdm_holder, center_freq_hz)
 
@@ -831,12 +1222,10 @@ def main():
     t0 = time.time()
     gb_wdm_comp.get_fstat_ll_wdm(probe, wdm_holder)
     per_eval = (time.time() - t0) / probe_n
-    print(f"[probe] F-stat: {per_eval * 1e3:.3f} ms/eval -> full "
-          f"{n_per_axis}^4 sweep ~ {per_eval * n_per_axis**4 / 60:.1f} min",
-          flush=True)
+    print(f"[probe] F-stat: {per_eval * 1e3:.3f} ms/eval", flush=True)
 
-    # Optional cache for the F-stat grids (suffixes _stage1/_zoom). Enable
-    # via FSTAT_GRID_CACHE=/path/to/grid.npz.
+    # Optional cache base for the comb + stacked grids. Enable via
+    # FSTAT_GRID_CACHE=/path/to/grid.npz.
     cache_path = os.environ.get("FSTAT_GRID_CACHE", "").strip()
     cat_sources = _band_catalogue_sources(
         float(gb_info.f0_lims[0]) * 1e3, float(gb_info.f0_lims[-1]) * 1e3
@@ -844,26 +1233,7 @@ def main():
     if cat_sources is not None:
         print(f"[cat] {len(cat_sources['f0'])} catalogue GBs in the analysis "
               "band", flush=True)
-        # The FSTAT_TARGET dict source is only a label. On a slid band (e.g.
-        # GB_CENTER_FREQ_HZ set) it can be out of the analysis band, which
-        # makes the diagnostics reference a source that isn't there (the
-        # confusing "logpdf @ injection: -inf"). Reference the loudest IN-BAND
-        # catalogue GB instead so the peak/plot diagnostics are meaningful.
-        f0_lo_b = float(gb_info.f0_lims[0]) * 1e3
-        f0_hi_b = float(gb_info.f0_lims[-1]) * 1e3
-        if len(cat_sources["f0"]) and not (f0_lo_b <= src["f0_mHz"] <= f0_hi_b):
-            i = int(np.argmax(cat_sources["amp"]))
-            _mc = float(cat_sources["Mc_eff"][i])
-            src = {
-                "ID": "band-loudest",
-                "f0_mHz": float(cat_sources["f0"][i]),
-                "Mc_eff_Msol": _mc, "Mc_Msol": _mc,
-                "RA_rad": float(cat_sources["alpha"][i]),
-                "Dec_rad": float(np.arcsin(cat_sources["sin_delta"][i])),
-            }
-            print(f"[main] configured source out of band; diagnostics now "
-                  f"reference the loudest in-band GB f0={src['f0_mHz']:.4f} "
-                  f"mHz (Mc_eff={_mc:.4f}).", flush=True)
+    src = _resolve_reference_src(cat_sources, gb_info)
 
     design = os.environ.get("FSTAT_DESIGN", "comb").strip().lower()
 
@@ -874,19 +1244,20 @@ def main():
                            if cache_path else "")
         if (os.environ.get("FSTAT_COMB_CACHE_REUSE", "0") == "1"
                 and comb_cache_file and os.path.exists(comb_cache_file)):
-            # Reuse a previous sweep (e.g. to fit more peaks without paying
-            # the ~35-min comb again).
+            # Reuse a previous sweep; peak selection is RE-RUN with the
+            # current knobs from the cached F_max, so old caches (any peaks
+            # format, Nx2 or Nx3) feed the new per-sub-band pipeline.
             d = np.load(comb_cache_file)
             f0_nodes, F_max = d["f0_nodes_mHz"], d["F_max"]
+            spacing = float(f0_nodes[1] - f0_nodes[0])
             extras = dict(sky_alpha=d["sky_alpha"],
                           sky_sin_delta=d["sky_sin_delta"], F_all=d["F_all"],
-                          mc_fix=float(os.environ.get(
-                              "FSTAT_COMB_MC",
-                              src.get("Mc_eff_Msol", src.get("Mc_Msol", 0.3)))),
-                          spacing=float(f0_nodes[1] - f0_nodes[0]))
-            peaks = [(float(f0), float(F), 0) for f0, F in d["peaks"]]
-            print(f"[comb] reused cache {comb_cache_file} "
-                  f"({len(f0_nodes)} nodes, {len(peaks)} peaks)", flush=True)
+                          mc_fix=_comb_mc_fix(gb_info), spacing=spacing)
+            peaks = select_comb_peaks(f0_nodes, F_max, gb_info, spacing,
+                                      gb_wdm_comp.xp)
+            print(f"[comb] reused cache {comb_cache_file} ({len(f0_nodes)} "
+                  f"nodes; selection re-run -> {len(peaks)} peaks)",
+                  flush=True)
         else:
             f0_nodes, F_max, peaks, extras = run_comb_scan(
                 gb_wdm_comp, wdm_holder, gb_info, gi, src, out_path,
@@ -894,44 +1265,21 @@ def main():
             )
 
         # Ultra-dense 1-D profile through the top peak: measures the actual
-        # peak FWHM against the ~1/Tobs matched-filter prediction.
-        if peaks and os.environ.get("FSTAT_PEAK_PROFILE", "1") not in (
+        # peak FWHM against the ~1/Tobs matched-filter prediction. (A single
+        # already-chunked stream -- consistent with the batching invariant.)
+        if len(peaks) and os.environ.get("FSTAT_PEAK_PROFILE", "1") not in (
                 "0", "false", "False"):
-            # Diagnostic only -- never let a plot failure block Stage B (the
-            # peak-grid writing below).
             try:
-                run_peak_profile(gb_wdm_comp, wdm_holder, gi, src, peaks[0][0],
-                                 extras, out_path, cat_sources, rank=0)
+                run_peak_profile(gb_wdm_comp, wdm_holder, gi, src,
+                                 float(peaks[0][0]), extras, out_path,
+                                 cat_sources, rank=0)
             except Exception as e:
                 print(f"[profile] plot skipped (non-fatal, grids still "
                       f"written): {e!r}", flush=True)
 
-        # --- Stage B: local 4-D proposal around the top comb peak(s) ---
-        n_fit = int(os.environ.get("FSTAT_PEAKS_TO_FIT", 1))
-        half_f0 = float(os.environ.get("FSTAT_PEAK_HALF_MHZ", 2.5e-3))
-        for rank, (f0_pk, F_pk, _) in enumerate(peaks[:n_fit]):
-            box = dict(
-                f0_range=(f0_pk - half_f0, f0_pk + half_f0),
-                Mc_range=(0.1, 1.0),
-                alpha_range=(0.0, 2 * np.pi),
-                sin_delta_range=(-1.0, 1.0),
-            )
-            stage = f"peak{rank}"
-            prop = build_fstat_proposal(gb_wdm_comp, wdm_holder, src, gb_info,
-                                         n_per_axis=n_per_axis, box=box,
-                                         stage=stage)
-            _save_grid_cache(prop, cache_path, stage)   # grids first (protected)
-            try:
-                _report(prop, src, stage)
-                pk_cat = _filter_cat(cat_sources, *box["f0_range"])
-                plot_corner(prop, src, n_samples=20_000,
-                            out_path=out_path.replace(".png", f"_{stage}.png"),
-                            cat_sources=pk_cat,
-                            stage=f"local proposal @ comb peak {rank} "
-                                  f"(f0={f0_pk:.5f} mHz, F={F_pk:.1f})")
-            except Exception as e:
-                print(f"[{stage}] report/plot skipped (non-fatal, grid "
-                      f"written): {e!r}", flush=True)
+        # --- Stage B: stacked local grids over ALL selected peaks ---
+        run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks,
+                            src, out_path, cat_sources, cache_path)
         return
 
     # --- Legacy coarse design (kept as the narrow-peak negative control) ---
