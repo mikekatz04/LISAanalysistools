@@ -21,6 +21,8 @@ Run:
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import matplotlib
 
@@ -39,15 +41,20 @@ from lisatools.sampling.fstat_proposal import (
 matplotlib.rcParams["text.usetex"] = False
 
 
-# Highest-frequency GB in mojito (from the L1 catalogue).
-MOJITO_HIGHEST_GB = {
-    "ID": 7725228,
-    "f0_mHz": 20.380377,
-    "Mc_Msol": 0.5192,
-    "RA_rad": 4.0617,
-    "Dec_rad": -0.9049,
-    "fdot": 1.025e-13,
-}
+def _mock_injection_spec():
+    """Env-overridable mock-injection point (defaults keep the hermetic
+    behaviour of the historic values -- mojito's highest-frequency GB).
+
+    MOCK_F0_MHZ / MOCK_MC / MOCK_RA_RAD / MOCK_DEC_RAD override per axis.
+    """
+    return {
+        "ID": os.environ.get("MOCK_ID", "mock"),
+        "f0_mHz": float(os.environ.get("MOCK_F0_MHZ", 20.380377)),
+        "Mc_Msol": float(os.environ.get("MOCK_MC", 0.5192)),
+        "RA_rad": float(os.environ.get("MOCK_RA_RAD", 4.0617)),
+        "Dec_rad": float(os.environ.get("MOCK_DEC_RAD", -0.9049)),
+        "fdot": 1.025e-13,
+    }
 
 
 class MockGaussianFstat:
@@ -225,8 +232,8 @@ def _p2_axis_order(p2_shape, axes_kept):
 
 
 def main():
-    src = MOJITO_HIGHEST_GB
-    print(f"Target: mojito GB ID {src['ID']}  f0={src['f0_mHz']:.4f}mHz  "
+    src = _mock_injection_spec()
+    print(f"Target: mock GB ID {src['ID']}  f0={src['f0_mHz']:.4f}mHz  "
           f"Mc={src['Mc_Msol']:.4f}Msol  RA={src['RA_rad']:.4f}  Dec={src['Dec_rad']:.4f}",
           flush=True)
 

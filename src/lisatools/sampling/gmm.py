@@ -2269,6 +2269,95 @@ def vec_fit_gmm_min_bic(
     return full_gmm
 
 
+def fit_gb_gmm_rj_container(
+    samples,
+    use_chirp_mass: bool = False,
+    use_cupy: bool = True,
+    gpu=None,
+    min_comp: int = 1,
+    max_comp: int = 30,
+    n_samp_bic_test: int = 5000,
+    verbose: bool = False,
+):
+    """Per-group GB samples -> batched GMM -> 8-column RJ birth container.
+
+    The standalone "samples -> batched GMM container" entry point: the
+    guard checks + :func:`vec_fit_gmm_min_bic` fit + eryn container assembly
+    that the GB serial-search move used to drive inline through its
+    ``ParaEnsembleSampler`` chains. Any (n_groups, n_samples, 6) sample
+    block works -- per-band search chains, per-leaf PE chains, grid draws.
+
+    Args:
+        samples: ``(n_groups, n_samples, 6)`` in the NON-PHASE columns of
+            the GB sampling basis -- ``(lnA, f0 [mHz], fdot|Mc, cos_iota,
+            alpha, sin_delta)``, i.e. columns ``[0, 1, 2, 4, 6, 7]`` of the
+            8-column sampler layout.
+        use_chirp_mass: Column 2's meaning: ``False`` -> legacy ``fdot``
+            basis, ``True`` -> chirp-mass basis (``Mc`` slot), matching the
+            run's ``GBSettings.use_chirp_mass``.
+        use_cupy: Array module of the returned container (match the run
+            backend).
+        gpu: GPU device index for the fit (``None`` -> CPU).
+        min_comp / max_comp / n_samp_bic_test / verbose: forwarded to
+            :func:`vec_fit_gmm_min_bic`.
+
+    Returns:
+        An eryn ``ProbDistContainer`` whose ``rvs``/``logpdf`` columns
+        follow the sampler layout (``reset_key_order`` re-maps them -- a
+        bare ``key_order = [...]`` assignment would NOT).
+
+    Raises:
+        ValueError: On non-finite samples or degenerate (zero-range)
+            features -- the failure modes the caller should log-and-skip.
+    """
+    from eryn.priors import ProbDistContainer, UniformDistribution
+
+    xp_here = cp if gpu is not None else np
+    samples = xp_here.asarray(samples)
+    if samples.ndim != 3 or samples.shape[-1] != 6:
+        raise ValueError(
+            f"expected (n_groups, n_samples, 6) samples; got {samples.shape}"
+        )
+    n_nan = int(xp_here.isnan(samples).sum())
+    n_inf = int(xp_here.isinf(samples).sum())
+    if n_nan or n_inf:
+        raise ValueError(
+            f"samples contain NaN/Inf before GMM fitting (NaN: {n_nan}, "
+            f"Inf: {n_inf})"
+        )
+    ranges = samples.max(axis=1) - samples.min(axis=1)
+    if bool((ranges == 0).any()):
+        bad_groups, bad_feats = xp_here.where(ranges == 0)
+        raise ValueError(
+            f"degenerate (zero-range) features in groups {bad_groups} for "
+            f"features {bad_feats}; the [-1, 1] GMM basis map would produce "
+            "NaN"
+        )
+
+    full_gmm = vec_fit_gmm_min_bic(
+        samples,
+        min_comp=min_comp,
+        max_comp=max_comp,
+        n_samp_bic_test=n_samp_bic_test,
+        gpu=gpu,
+        verbose=verbose,
+    )
+
+    third = "Mc" if use_chirp_mass else "fdot"
+    rj_dist = ProbDistContainer(
+        {
+            ("A", "f0", third, "cos_iota", "alpha", "sin_delta"): full_gmm,
+            "phi0": UniformDistribution(0.0, 2.0 * np.pi),
+            "psi": UniformDistribution(0.0, np.pi),
+        },
+        use_cupy=use_cupy,
+    )
+    rj_dist.reset_key_order(
+        ["A", "f0", third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+    )
+    return rj_dist
+
+
 if __name__ == "__main__":
     samples_tmp = np.load("samples_examples.npy")[:, :, :, np.array([0, 1, 2, 4, 6, 7])]  # [:1]
     samples_tmp = samples_tmp.reshape(samples_tmp.shape[0], -1, samples_tmp.shape[-1])

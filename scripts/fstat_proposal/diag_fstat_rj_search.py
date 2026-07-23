@@ -108,6 +108,12 @@ def main():
                        zorder=0, label="catalogue GBs" if i == 0 else None)
     if truth:
         ax.axhline(truth["f0"], color="r", ls="--", lw=1.2, label="target GB")
+    elif cf0 is not None and len(cf0):
+        # Generic band (no legacy TRUTH label): annotate the loudest in-band
+        # catalogue source as the reference instead of nothing.
+        i_loud = int(np.argmax(camp))
+        ax.axhline(cf0[i_loud], color="r", ls="--", lw=1.2,
+                   label="loudest in-band GB")
     for it in range(nit):
         f0s = chain[it, 0, 0][alive_cold[it]][:, 1]
         ax.plot(np.full(f0s.shape, it), f0s, ".", color="C0", ms=5, alpha=0.6,
@@ -135,6 +141,12 @@ def main():
             df0 = np.abs(pars[:, 1] - truth["f0"])
             print(f"|f0 - truth|: median {np.median(df0):.2e} mHz  "
                   f"max {df0.max():.2e} mHz")
+        elif cf0 is not None and len(cf0):
+            # Generic band: nearest catalogue source per alive leaf.
+            df0 = np.abs(pars[:, 1][:, None] - cf0[None, :]).min(axis=1)
+            print(f"\n|f0 - nearest catalogue GB|: median "
+                  f"{np.median(df0):.2e} mHz  max {df0.max():.2e} mHz  "
+                  f"(loudest in-band at {cf0[int(np.argmax(camp))]:.5f} mHz)")
 
 
 if __name__ == "__main__":

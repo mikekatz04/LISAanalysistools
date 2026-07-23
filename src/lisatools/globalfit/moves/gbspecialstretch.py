@@ -60,7 +60,7 @@ except ModuleNotFoundError:
 from eryn.moves import GroupStretchMove, Move, StretchMove
 from eryn.moves.multipletry import get_mt_computations, logsumexp
 from eryn.paraensemble import ParaEnsembleSampler
-from eryn.prior import ProbDistContainer, uniform_dist
+from eryn.priors import ProbDistContainer, UniformDistribution
 from eryn.utils import PeriodicContainer
 from eryn.utils.utility import groups_from_inds
 
@@ -3516,174 +3516,20 @@ class PriorTransformFn:
         return
 
 
-class BayesGMMFit:
-    """Variational Bayesian GMM fit to per-leaf GB samples (sklearn ``BayesianGaussianMixture``).
+def _gb_sampling_third_name(move) -> str:
+    """Column-2 name of the run's GB sampling basis.
 
-    Stores the per-feature min/max so samples can be transformed in/out of
-    a ``[-1, 1]`` GMM basis.
-
-    Args:
-        samples_in: 2D NumPy array of GB samples to fit.
+    ``"fdot"`` for the legacy basis, ``"Mc"`` for chirp-mass runs
+    (``GBSettings.use_chirp_mass``), read off the move's transform-container
+    ``input_basis`` -- so GMM RJ containers assemble in the SAME basis the
+    sampler walks in.
     """
-
-    def __init__(self, samples_in):
-
-        assert isinstance(samples_in, np.ndarray)
-
-        run = True
-        min_bic = np.inf
-        self.sample_mins = sample_mins = samples_in.min(axis=0)
-        self.sample_maxs = sample_maxs = samples_in.max(axis=0)
-
-        samples = self.transform_to_gmm_basis(samples_in)
-
-        mixture = BayesianGaussianMixture(
-            weight_concentration_prior_type="dirichlet_distribution",
-            n_components=60,
-            # reg_covar=0,
-            # init_params="random",
-            max_iter=5000,
-            # mean_precision_prior=0.8,
-            # random_state=random_state,
-        )
-        mixture.fit(samples)
-
-        self.keep_mix = mixture
-
-    def transform_to_gmm_basis(self, samples):
-        """Map samples from physical to ``[-1, 1]`` GMM basis."""
-        return (
-            (samples - self.sample_mins[None, :])
-            / (self.sample_maxs[None, :] - self.sample_mins[None, :])
-        ) * 2 - 1
-
-    def transform_from_gmm_basis(self, samples):
-        """Map samples from ``[-1, 1]`` GMM basis back to physical."""
-        return (samples + 1.0) / 2.0 * (
-            self.sample_maxs[None, :] - self.sample_mins[None, :]
-        ) + self.sample_mins[None, :]
+    ib = list(getattr(getattr(move, "transform_fn", None), "input_basis", None) or [])
+    return "Mc" if "Mc" in ib else "fdot"
 
 
-from sklearn.mixture import GaussianMixture
 
-
-class GMMFit:
-    """Plain GMM fit to per-leaf GB samples (sklearn ``GaussianMixture``).
-
-    Args:
-        samples_in: 2D NumPy array of GB samples to fit.
-    """
-
-    def __init__(self, samples_in):
-
-        assert isinstance(samples_in, np.ndarray)
-
-        run = True
-        min_bic = np.inf
-        self.sample_mins = sample_mins = samples_in.min(axis=0)
-        self.sample_maxs = sample_maxs = samples_in.max(axis=0)
-
-        samples = self.transform_to_gmm_basis(samples_in)
-
-        mixture = GaussianMixture(n_components=30, verbose=False, verbose_interval=2)
-
-        mixture.fit(samples)
-
-        # bad = False
-        # for n_components in range(1, 31)[-1:]:
-        #     if not run:
-        #         continue
-        #     #fit_gaussian_mixture_model(n_components, samples)
-        #     #breakpoint()
-        #     try:
-        #         mixture = GaussianMixture(n_components=n_components, verbose=False, verbose_interval=2)
-
-        #         mixture.fit(samples)
-        #         test_bic = mixture.bic(samples)
-        #     except ValueError:
-        #         # print("ValueError", samples)
-        #         run = False
-        #         bad = True
-        #         continue
-        #     # print(n_components, test_bic)
-        #     if test_bic < min_bic:
-        #         min_bic = test_bic
-        #         keep_mix = mixture
-        #         keep_components = n_components
-
-        #     else:
-        #         run = False
-
-        #         # print(leaf, n_components - 1, et - st)
-
-        #     """if keep_components >= 9:
-        #         new_samples = keep_mix.sample(n_samples=100000)[0]
-        #         old_samples = samples
-        #         fig = corner.corner(old_samples, hist_kwargs=dict(density=True, color="r"), color="r", plot_datapoints=False, plot_density=False)
-        #         corner.corner(new_samples, hist_kwargs=dict(density=True, color="b"), color="b", plot_datapoints=False, plot_contours=True, plot_density=False, fig=fig)
-        #         fig.savefig("mix_check.png")
-        #         plt.close()
-        #         breakpoint()"""
-
-        # if bad:
-        #     print("BAD")
-        # if keep_components >= 19:
-        #     print(keep_components)
-        # # output_list = [keep_mix.weights_, keep_mix.means_, keep_mix.covariances_, np.array([np.linalg.inv(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), np.array([np.linalg.det(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), sample_mins, sample_maxs]
-
-        self.keep_mix = mixture
-
-    def transform_to_gmm_basis(self, samples):
-        """Map samples from physical to ``[-1, 1]`` GMM basis."""
-        return (
-            (samples - self.sample_mins[None, :])
-            / (self.sample_maxs[None, :] - self.sample_mins[None, :])
-        ) * 2 - 1
-
-    def transform_from_gmm_basis(self, samples):
-        """Map samples from ``[-1, 1]`` GMM basis back to physical."""
-        return (samples + 1.0) / 2.0 * (
-            self.sample_maxs[None, :] - self.sample_mins[None, :]
-        ) + self.sample_mins[None, :]
-
-
-def gather_gmms(gmms):
-    """Pack a list of GMM fits into the legacy make_gmm dict format."""
-    weights = []
-    means = []
-    covs = []
-    inv_covs = []
-    dets = []
-    sample_mins = []
-    sample_maxs = []
-
-    for gmm in gmms:
-        weights.append(gmm.keep_mix.weights_)
-        means.append(gmm.keep_mix.means_)
-        covs.append(gmm.keep_mix.covariances_)
-        inv_covs.append(
-            np.array(
-                [
-                    np.linalg.inv(gmm.keep_mix.covariances_[i])
-                    for i in range(len(gmm.keep_mix.weights_))
-                ]
-            )
-        )
-        dets.append(
-            np.array(
-                [
-                    np.linalg.det(gmm.keep_mix.covariances_[i])
-                    for i in range(len(gmm.keep_mix.weights_))
-                ]
-            )
-        )
-        sample_mins.append(gmm.sample_mins)
-        sample_maxs.append(gmm.sample_maxs)
-
-    return (weights, means, covs, inv_covs, dets, sample_mins, sample_maxs)
-
-
-from lisatools.sampling.gmm import vec_fit_gmm_min_bic
+from lisatools.sampling.gmm import fit_gb_gmm_rj_container
 
 class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
     """Reversible-jump GB move that runs a serial F-statistic MCMC search per band.
@@ -3705,22 +3551,6 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         snr_threshold: float = self.search_kwargs["snr_threshold"]
         burn_2: int = self.search_kwargs["burn_2"]
         nsteps_2: int = self.search_kwargs["nsteps_2"]
-
-        # FOR FAST TESTING/DEBUGGING
-        # import pickle
-        # with open("gmm_tmp.pickle", "rb") as fp:
-        #     full_gmm = pickle.load(fp)
-
-        # rj_dist = ProbDistContainer(
-        #     {
-        #         ("A", "f0", "fdot", "cos_iota", "alpha", "sin_delta"): full_gmm,
-        #         "phi0": uniform_dist(0.0, 2 * np.pi),
-        #         "psi": uniform_dist(0.0, np.pi),
-        #     },
-        #     use_cupy=True,
-        # )
-        # rj_dist.reset_key_order(["A", "f0", "fdot", "phi0", "cos_iota", "psi", "alpha", "sin_delta"])
-        # return
 
         # run paraensemble MCMC.
         max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
@@ -3767,8 +3597,8 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         fdot_min = get_fdot_mojito(f0_max, sign="-")
 
         priors_in = deepcopy(priors_global)[self.branch_name].priors_in
-        priors_in["f0"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
-        priors_in["fdot"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        priors_in["f0"] = UniformDistribution(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        priors_in["fdot"] = UniformDistribution(0.0, 1.0, use_cupy=self.backend.uses_cupy)
         priors = {
             self.branch_name: ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
         }
@@ -3942,79 +3772,22 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             :, :, np.array([0, 1, 2, 4, 6, 7])
         ]
 
-        if self.xp.isnan(samples_2_tmp).any() or self.xp.isinf(samples_2_tmp).any():
-            logger.warning(
-                f"samples_2_tmp contains NaN or Inf before GMM fitting. \
-                NaN count: {self.xp.isnan(samples_2_tmp).sum()}. \
-                Inf count: {self.xp.isinf(samples_2_tmp).sum()}. \
-                Skipping search..."
+        # Standalone samples -> batched-GMM-container entry point (guards +
+        # vec_fit_gmm_min_bic + basis-aware container assembly live there).
+        try:
+            rj_dist = fit_gb_gmm_rj_container(
+                samples_2_tmp,
+                use_chirp_mass=_gb_sampling_third_name(self) == "Mc",
+                use_cupy=True,
+                gpu=self.xp.cuda.runtime.getDevice(),
             )
+        except ValueError as e:
+            logger.warning(f"GB search GMM fit skipped: {e}")
             return
-            # breakpoint()
-            # raise ValueError(
-            #     f"samples_2_tmp contains NaN or Inf before GMM fitting. "
-            #     f"NaN count: {self.xp.isnan(samples_2_tmp).sum()}, "
-            #     f"Inf count: {self.xp.isinf(samples_2_tmp).sum()}"
-            # )
 
-        ranges = samples_2_tmp.max(axis=1) - samples_2_tmp.min(axis=1)  # (n_groups, n_features)
-        degenerate = (ranges == 0)
-        if degenerate.any():
-            bad_groups, bad_feats = self.xp.where(degenerate)
-            logger.warning(
-                f"Degenerate features (zero range) in groups {bad_groups} \
-                for features {bad_feats}. transform_to_gmm_basis will produce NaN. \
-                Skipping search..."
-            )
-            return
-            # breakpoint()
-            # raise ValueError(
-            #     f"Degenerate features (zero range) in groups {bad_groups} "
-            #     f"for features {bad_feats}. transform_to_gmm_basis will produce NaN."
-            # )
-
-        full_gmm = vec_fit_gmm_min_bic(
-            samples_2_tmp,
-            min_comp=1,
-            max_comp=30,
-            n_samp_bic_test=5000,
-            gpu=self.xp.cuda.runtime.getDevice(),
-            verbose=False,
+        logger.info(
+            f"Runtime of GPU GMM FIT: {round(time.perf_counter() - st, 3)} seconds"
         )
-        # import pickle
-        # with open("gmm_tmp.pickle", "wb") as fp:
-        #     pickle.dump(full_gmm, fp, pickle.HIGHEST_PROTOCOL)
-
-        et = time.perf_counter()
-        logger.info(f"Runtime of GPU GMM FIT: {round(et - st,3)} seconds")
-
-        rj_dist = ProbDistContainer(
-            {
-                ("A", "f0", "fdot", "cos_iota", "alpha", "sin_delta"): full_gmm,
-                "phi0": uniform_dist(0.0, 2 * np.pi),
-                "psi": uniform_dist(0.0, np.pi),
-            },
-            use_cupy=True,
-        )
-        rj_dist.reset_key_order(["A", "f0", "fdot", "phi0", "cos_iota", "psi", "alpha", "sin_delta"])
-        # if self.ranks_needed == 0:
-        #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
-        #     gmm_info = gather_gmms(gmms)
-
-        # else:
-        #     if self.comm_info is None:
-        #         # this only happens the first time through
-        #         self.comm_info = self.comm.recv(tag=232342)
-
-        #     gmm_info = fit_gmm(samples_2.get(), self.comm, self.comm_info)
-
-        # full_gmm = FullGaussianMixtureModel(*gmm_info, use_cupy=self.use_gpu)
-        # breakpoint()
-
-        # gen_samp = self.xp.asarray(rj_dist.rvs(1000))
-        # gen_ll, gen_opt_snr = para_log_like(gen_samp, *ll_args, fstat=False, return_snr=True)
-        # print(gen_ll, self.gb.d_h / gen_opt_snr, gen_opt_snr)
-        # breakpoint()
         self.rj_proposal_distribution = {self.branch_name: rj_dist}
 
 
@@ -4046,23 +3819,6 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         samples_keep = self.search_kwargs["refit_start_iteration"]
         nwalkers = self.search_kwargs["nwalkers"]
         num_compare_samples = 1
-        # FOR FAST TESTING/DEBUGGING
-        # import pickle
-        # with open("gmm_tmp.pickle", "rb") as fp:
-        #     full_gmm = pickle.load(fp)
-
-        # rj_dist = ProbDistContainer(
-        #     {
-        #         ("A", "f0", "fdot", "cos_iota", "alpha", "sin_delta"): full_gmm,
-        #         "phi0": uniform_dist(0.0, 2 * np.pi),
-        #         "psi": uniform_dist(0.0, np.pi),
-        #     },
-        #     use_cupy=True,
-        # )
-        # rj_dist.key_order = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
-        # self.rj_proposal_distribution = {self.branch_name: rj_dist}
-        # return
-        # run paraensemble MCMC.
 
         max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
         self.gb.d_d = 0.0  # model.analysis_container_arr.inner_product()[max_logl_walker]
@@ -4215,34 +3971,21 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         )
 
         logger.info(f"Runtime GMM Refit: {round(time.perf_counter() - st)}")
+        # Basis-aware container: column 2 is "fdot" (legacy) or "Mc"
+        # (use_chirp_mass runs) -- the refitted chains are in the run's
+        # sampling basis, so the container's key map must follow it.
+        _third = _gb_sampling_third_name(self)
         rj_dist = ProbDistContainer(
             {
-                ("A", "f0", "fdot", "cos_iota", "alpha", "sin_delta"): full_gmm,
-                "phi0": uniform_dist(0.0, 2 * np.pi),
-                "psi": uniform_dist(0.0, np.pi),
+                ("A", "f0", _third, "cos_iota", "alpha", "sin_delta"): full_gmm,
+                "phi0": UniformDistribution(0.0, 2 * np.pi),
+                "psi": UniformDistribution(0.0, np.pi),
             },
             use_cupy=True,
         )
-        rj_dist.reset_key_order(["A", "f0", "fdot", "phi0", "cos_iota", "psi", "alpha", "sin_delta"])
-        # if self.ranks_needed == 0:
-        #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
-        #     gmm_info = gather_gmms(gmms)
-
-        # else:
-        #     if self.comm_info is None:
-        #         # this only happens the first time through
-        #         self.comm_info = self.comm.recv(tag=232342)
-
-        #     gmm_info = fit_gmm(samples_2.get(), self.comm, self.comm_info)
-
-        # full_gmm = FullGaussianMixtureModel(*gmm_info, use_cupy=self.use_gpu)
-        # breakpoint()
-
-        # gen_samp = self.xp.asarray(rj_dist.rvs(1000))
-        # gen_ll, gen_opt_snr = para_log_like(gen_samp, *ll_args, fstat=False, return_snr=True)
-        # print(gen_ll, self.gb.d_h / gen_opt_snr, gen_opt_snr)
-        # breakpoint()
-
+        rj_dist.reset_key_order(
+            ["A", "f0", _third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+        )
         self.rj_proposal_distribution = {self.branch_name: rj_dist}
 
 

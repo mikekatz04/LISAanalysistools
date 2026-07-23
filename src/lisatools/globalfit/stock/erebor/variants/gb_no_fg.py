@@ -228,6 +228,13 @@ class GBNoFgGBSettings(GBSettings):
         default_factory=env_default("GB_SUBTRACT_NEIGHBORS", False, bool)
     )
     neighbor_window_layers: int = 4
+    # Opt-in generalization of the above: subtract EVERY catalogue source
+    # OUTSIDE the sampled band (``f0_lims``) as a known signal, over the
+    # whole remaining data band. Default OFF -- out-of-band sources stay in
+    # the data. Supersedes ``subtract_neighbors`` when on.
+    subtract_out_of_band: bool = dataclasses.field(
+        default_factory=env_default("GB_SUBTRACT_OUT_OF_BAND", False, bool)
+    )
 
     # -- chunked-het kernel sizes (WDM likelihood; validated defaults) --
     nt_sub: int = dataclasses.field(default_factory=env_default("CHUNKED_NT_SUB", 256, int))
@@ -796,7 +803,30 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
         layer_df = 1.0 / (2 * general_info.domain_settings.Nf * gb_info.dt)
         k_center = int(math.floor(getattr(gb_info, "center_freq", 7.5e-3) / layer_df))
         _injection_f0_lims = None
-        if getattr(gb_info, "subtract_neighbors", False):
+        if getattr(gb_info, "subtract_out_of_band", False):
+            # Remove ALL catalogue sources OUTSIDE the sampled band
+            # (f0_lims) as known signals, over the whole remaining data
+            # band. exclude_f0_lims == the band select_gb_injection_subset_
+            # by_snr samples, so subtracted sources and injected/modeled
+            # leaves stay disjoint.
+            _band_lims = (float(gb_info.f0_lims[0]), float(gb_info.f0_lims[1]))
+            _injection_f0_lims = _band_lims
+            _window_hz = max(
+                _band_lims[0] - float(general_info.min_freq),
+                float(general_info.max_freq) - _band_lims[1],
+                0.0,
+            )
+            _n_oob = subtract_gb_neighbors_from_data(
+                curr, acs, gb_info, gb_info.gb_wdm_comp,
+                exclude_f0_lims=_band_lims,
+                window_hz=_window_hz,
+            )
+            logger.info(
+                "GB_SUBTRACT_OUT_OF_BAND=1: subtracted %d out-of-band "
+                "catalogue sources (outside [%.6e, %.6e] Hz, within the "
+                "data band).", _n_oob, _band_lims[0], _band_lims[1],
+            )
+        elif getattr(gb_info, "subtract_neighbors", False):
             _central_lims = (k_center * layer_df, (k_center + 1) * layer_df)
             _injection_f0_lims = _central_lims
             subtract_gb_neighbors_from_data(
