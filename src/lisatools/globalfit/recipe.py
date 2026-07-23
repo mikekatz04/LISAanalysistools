@@ -1202,8 +1202,17 @@ def select_gb_injection_subset_by_snr(
     # ``force_backend`` (often "cpu" even on a GPU node), so a hardcoded
     # ``cp.asarray`` would hand a cupy array to a numpy ``self.xp.atleast_2d``
     # inside ``get_ll_wdm`` and raise the implicit-conversion TypeError.
+    #
+    # ``gb_catalogue_to_sampling_basis`` returns FDOT-basis rows by contract
+    # (slot 2 = fdot, negatives preserved for interacting DWDs), so the
+    # physical rows must come from the fdot-basis transform -- the RUN's
+    # transform would read slot 2 as Mc on chirp-mass runs (fdot ~1e-15 as
+    # Mc -> template fdot ~ 0; fdot < 0 -> (neg)^(5/3) = NaN template).
+    from .stock.erebor.transforms import make_gb_transform_container
+
+    _tc_fdot = make_gb_transform_container(use_chirp_mass=False)
     _xp = gb_wdm_comp.xp
-    params_phys = gb_info.transform.both_transforms(
+    params_phys = _tc_fdot.both_transforms(
         _xp.asarray(sampling[in_band]), xp=_xp
     )
     di = _xp.zeros(params_phys.shape[0], dtype=_xp.int32)
@@ -1364,8 +1373,14 @@ def subtract_gb_neighbors_from_data(
                     f"window around [{lo:.6e}, {hi:.6e}] Hz.")
         return 0
 
+    # FDOT-basis physical rows (same contract note as in
+    # select_gb_injection_subset_by_snr: the run transform would misread
+    # slot 2 as Mc on chirp-mass runs and NaN the fdot < 0 sources).
+    from .stock.erebor.transforms import make_gb_transform_container
+
+    _tc_fdot = make_gb_transform_container(use_chirp_mass=False)
     xp = gb_wdm_comp.xp
-    params_phys = gb_info.transform.both_transforms(
+    params_phys = _tc_fdot.both_transforms(
         xp.asarray(sampling[mask]), xp=xp)
     nwalkers = int(curr.general_info.nwalkers)
     params_tiled = xp.tile(xp.asarray(params_phys), (nwalkers, 1))
