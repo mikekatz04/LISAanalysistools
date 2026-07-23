@@ -634,6 +634,11 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
         self.covs = xp.asarray(np.concatenate(covs, axis=0))
         self.invcovs = xp.asarray(np.concatenate(invcovs, axis=0))
         self.dets = xp.asarray(np.concatenate(dets, axis=0))
+        # Cholesky factors for rvs: draws are ``mean + L z`` with
+        # ``L L^T = cov`` -- multiplying by the covariance itself (the old
+        # code) produces draws with covariance cov^2, silently inconsistent
+        # with logpdf (and therefore with RJ detailed balance).
+        self.chols = xp.linalg.cholesky(self.covs)
         self.ndim = self.means.shape[1]
 
         self.mins = xp.asarray(np.vstack(mins))
@@ -690,6 +695,13 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
 
         k = self.ndim
 
+        if k != 6:
+            # The compiled kernel is PDF_NDIM == 6 (the 6 non-phase columns
+            # of the GB refit basis) and hard-rejects any other dimension;
+            # other bases (e.g. the 4-D F-stat intrinsic proposal) evaluate
+            # through the xp mirror of the same math instead.
+            return self._logpdf_xp(x)
+
         inds_sort = xp.argsort(x[:, 1])
         f_sort = x[:, 1][inds_sort]
         points_sorted = x[inds_sort]
@@ -723,22 +735,40 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
 
         logpdf_out_tmp = xp.zeros(points_sorted_in.shape[0])
 
-        self.compute_logpdf(
-            logpdf_out_tmp,
-            components_keep_in.astype(xp.int32),
-            points_sorted_in,
-            self.weights,
-            self.mins_in_pdf,
-            self.maxs_in_pdf,
-            self.means_in_pdf,
-            self.invcovs_in_pdf,
-            self.dets,
-            self.log_det_J,
-            points_sorted_in.shape[0],
-            start_index_in_pdf,
-            self.weights.shape[0],
-            x.shape[1],
-        )
+        try:
+            self.compute_logpdf(
+                logpdf_out_tmp,
+                components_keep_in.astype(xp.int32),
+                points_sorted_in,
+                self.weights,
+                self.mins_in_pdf,
+                self.maxs_in_pdf,
+                self.means_in_pdf,
+                self.invcovs_in_pdf,
+                self.dets,
+                self.log_det_J,
+                points_sorted_in.shape[0],
+                start_index_in_pdf,
+                self.weights.shape[0],
+                x.shape[1],
+            )
+        except ValueError:
+            # CPU binaries built before the binding_detector.cxx length-check
+            # fix reject the variable-length component_index / per-point
+            # start_index (CUDA builds compile the checks out, so the GPU
+            # path never threw). The xp mirror is the exact same math --
+            # fall back until the CPU backend is rebuilt.
+            if not getattr(self, "_warned_stale_logpdf_binding", False):
+                self._warned_stale_logpdf_binding = True
+                import warnings
+
+                warnings.warn(
+                    "compute_logpdf CPU binding rejected its inputs (stale "
+                    "pre-fix binary); using the xp logpdf mirror. Rebuild "
+                    "lisatools to restore the compiled path.",
+                    RuntimeWarning,
+                )
+            return self._logpdf_xp(x)
 
         # need to reverse the sort
         logpdf_out = xp.full(x.shape[0], -xp.inf)
@@ -763,6 +793,44 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
         assert xp.allclose(logpdf_full_dist, logpdf_out)
 
         return logpdf_full_dist"""
+
+    def _logpdf_xp(self, x, batch_size: int = 4096):
+        """xp mirror of the compiled ``compute_logpdf`` kernel.
+
+        Same math per (point, component): map into the component's box,
+        Gaussian in mapped coordinates, ``+ log_det_J`` jacobian, with the
+        same column-1 ``limit`` window culling; log-sum-exp over the kept
+        components (``-inf`` when none). Vectorized in single array ops per
+        point batch (numpy or cupy) -- used for every ``ndim != 6`` mixture,
+        where the compiled kernel (``PDF_NDIM == 6``) cannot run.
+        """
+        xp = cp if self.use_cupy else np
+        x = xp.asarray(x)
+        n, k = x.shape
+        mins_c = self.mins[self.indexing]      # (C, d)
+        maxs_c = self.maxs[self.indexing]
+        out = xp.full(n, -np.inf)
+        log_w = xp.log(self.weights)
+        log_norm = -0.5 * k * np.log(2.0 * np.pi) - 0.5 * xp.log(self.dets)
+        for s in range(0, n, int(batch_size)):
+            e = min(s + int(batch_size), n)
+            xb = x[s:e]
+            keep = ((xb[:, None, 1] >= self.min_limit_f[None, :])
+                    & (xb[:, None, 1] <= self.max_limit_f[None, :]))
+            xm = ((xb[:, None, :] - mins_c[None]) / (maxs_c - mins_c)[None]
+                  * 2.0 - 1.0)
+            diff = xm - self.means[None]
+            maha = xp.einsum("bcd,cde,bce->bc", diff, self.invcovs, diff)
+            lw = (log_w[None] + log_norm[None] - 0.5 * maha
+                  + self.log_det_J[None])
+            lw = xp.where(keep, lw, -np.inf)
+            m = xp.max(lw, axis=1)
+            m_safe = xp.where(xp.isfinite(m), m, 0.0)
+            with np.errstate(divide="ignore"):
+                val = (xp.log(xp.sum(xp.exp(lw - m_safe[:, None]), axis=1))
+                       + m_safe)
+            out[s:e] = xp.where(xp.isfinite(m), val, -np.inf)
+        return out
 
     def map_input(self, x, mins, maxs):
         """Map physical coordinates into the :math:`[-1, 1]^d` box."""
@@ -798,12 +866,15 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
         ).reshape(draw.shape)
 
         mean_here = self.means[component]
-        cov_here = self.covs[component]
+        chol_here = self.chols[component]
 
+        # mean + L z with L L^T = cov (the covariance matrix itself is NOT a
+        # valid mixing matrix -- it would give cov^2 draws, inconsistent with
+        # logpdf and hence with RJ detailed balance).
         new_points = mean_here + xp.einsum(
             "...kj,...j->...k",
-            cov_here,
-            np.random.randn(*(component.shape + (self.ndim,))),
+            chol_here,
+            xp.random.randn(*(component.shape + (self.ndim,))),
         )
 
         index_here = self.indexing[component]
