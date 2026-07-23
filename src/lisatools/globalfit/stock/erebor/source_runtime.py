@@ -129,6 +129,13 @@ class SourceMBHSettings(MBHSettings):
     logM_prior: typing.Tuple[float, float] = (np.log(1e5), np.log(1e8))
     dist_prior: typing.Tuple[float, float] = (0.1, 150.0)  # Gpc
     t_plunge_pad: float = 3600.0
+    # An MBH is only added to the sampler if its merger lands within the
+    # observed data plus this buffer past the end (seconds): keep iff
+    # ``t_merge < observation_end + mbh_merger_time_buffer``. Default ~2 days.
+    # (Merger-window filtering is MBH-only for now.)
+    mbh_merger_time_buffer: float = dataclasses.field(
+        default_factory=env_default("MBH_MERGER_TIME_BUFFER", 2 * 86400.0, float)
+    )
 
 
 @dataclasses.dataclass
@@ -298,17 +305,48 @@ def prepare_mbh_branch(mbh, general_setup: GeneralSetup, gs):
         mbh.initialize_kwargs = make_mbh_initialize_kwargs(mbh, general_setup, gs)
     cat = source_catalogue(general_setup, "MBHB") if gs.data_mode == "mojito" else None
     if cat is not None:
+        inj_ids = sorted(cat.keys())
         injection = np.stack(
-            [mbh_catalogue_to_sampling_basis(cat[i]) for i in sorted(cat.keys())],
+            [mbh_catalogue_to_sampling_basis(cat[i]) for i in inj_ids],
             axis=0,
         )
     else:
+        inj_ids = list(range(n))
         inj_mode, inj_seed = synthetic_injection_mode(gs)
         injection = make_mbh_injections(
             n, general_setup.Tobs, mode=inj_mode, seed=inj_seed
         )
+
+    # Merger-window filter (MBH-only for now): only add an MBH to the sampler
+    # if its merger falls within the observed data plus a small buffer past the
+    # end, i.e. ``t_merge < observation_end + buffer``. The sampling-basis
+    # ``t_plunge`` (injection[:, -1], == TimeCoalescencePhenomTPHMSSBFrame in
+    # mojito mode) and the data window are both referenced to
+    # ``gs.mbh_waveform_t0``, so the data ends at
+    # ``(data_t0 - mbh_waveform_t0) + Tobs`` in that frame.
+    buffer = getattr(mbh, "mbh_merger_time_buffer", 0.0)
+    obs_end = (general_setup.data_t0 - gs.mbh_waveform_t0) + general_setup.Tobs
+    t_merge = np.asarray(injection[:, -1], dtype=float)
+    keep = t_merge < (obs_end + buffer)
+    if not bool(keep.all()):
+        dropped = [inj_ids[k] for k in range(len(inj_ids)) if not keep[k]]
+        logger.info(
+            "MBH merger-window filter: dropping %d/%d MBHB source(s) %s with "
+            "t_merge >= observation_end (%.6e s) + buffer (%.6e s).",
+            len(dropped), len(inj_ids), dropped, obs_end, buffer,
+        )
+        injection = injection[keep]
+    if injection.shape[0] == 0:
+        logger.warning(
+            "MBH merger-window filter removed every requested MBHB source; the "
+            "MBH branch will have zero leaves (nothing merges before "
+            "observation_end + buffer = %.6e s).",
+            obs_end + buffer,
+        )
     if mbh.injection is None:
         mbh.injection = injection
+    # nleaves follow the (possibly filtered) injection, not the requested count.
+    n = int(np.asarray(mbh.injection).shape[0])
     if mbh.transform is None:
         mbh.transform = make_mbh_transform_container()
     if mbh.priors is None:
