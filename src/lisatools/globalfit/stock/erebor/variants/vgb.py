@@ -21,6 +21,17 @@ Usage::
 
 ``VGB_START_FACTOR=0`` starts every leaf exactly at the catalogue truth
 (the default small scatter is ``1e-5``).
+
+``data_mode="synthetic"`` (env ``DATA_MODE=synthetic``) builds the data
+in-process by injecting ALL catalogue VGBs at the synthetic epoch -- it
+needs only the (small) ``catalogues/vgb_cat_mojito_lite_processed.hdf5``
+file, not the L1 VGB data brick, so it runs before any data transfer.
+Truth-null conventions (``VGB_START_FACTOR=0`` -> residual ~ 0) hold
+identically.
+
+Band separations DEFAULT to the same per-WDM-layer edges as the GB branch;
+``VGB_BAND_LAYERS=L`` coarsens them to L layers per band. Only bands that
+contain VGB leaves do any work (the band sorter holds real leaves only).
 """
 
 from __future__ import annotations
@@ -98,12 +109,72 @@ class VGBGlobalFit(EreborFit):
                 file_params if file_params is not None else [15e-12, 3e-15]
             )
 
+    def set_default_processor(self, gs: VGBGeneralSettings) -> None:
+        if gs.data_mode == "mojito":
+            super().set_default_processor(gs)
+            return
+        if gs.data_mode == "synthetic":
+            # Catalogue-faithful in-process injection: build the physical
+            # 9-parameter rows for ALL catalogue VGBs from the (small)
+            # catalogue file -- no L1 data brick needed -- and inject them
+            # with the synthetic GB processor at the synthetic epoch (the
+            # branch's t0 resolves to the same epoch in prepare_vgb_branch,
+            # so a VGB_START_FACTOR=0 run is truth-null exactly like the
+            # mojito-mode checks).
+            from ..common import tdi_generation_info
+            from ..injections import SyntheticGBProcessingStep
+            from ..transforms import make_gb_transform_container
+            from ..vgb import load_vgb_catalogue_file
+            from ....recipe import gb_catalogue_to_sampling_basis
+
+            cat = load_vgb_catalogue_file(gs.mojito_data_path)
+            rows = np.array(
+                [gb_catalogue_to_sampling_basis(cat[k]) for k in sorted(cat)]
+            )
+            if rows.ndim == 3:
+                rows = rows.reshape(-1, rows.shape[-1])
+            tc = make_gb_transform_container(use_chirp_mass=False)
+            params_phys = np.asarray(tc.both_transforms(rows), dtype=float)
+
+            gs.data_processor_class = SyntheticGBProcessingStep
+            gs.processor_init_kwargs = dict(
+                Tobs=self.wdm_grid[3],
+                dt=gs.dt,
+                t_start=gs.synthetic_t_start,
+                injection_params=np.atleast_2d(params_phys),
+                tdi_chan=gs.tdi_chan,
+                nchannels=gs.nchannels,
+                verbose=gs.verbose,
+                use_tdi2=tdi_generation_info(gs.tdi_chan)[0] == 2,
+                force_backend="cpu",
+            )
+            logger.info(
+                "VGB synthetic mode: injecting %d catalogue VGBs in-process "
+                "(catalogue file only; no L1 data).", params_phys.shape[0],
+            )
+            return
+        raise ValueError(
+            f"vgb data_mode={gs.data_mode!r} not recognised; use 'mojito' or "
+            "'synthetic' (or swap data_processor_class wholesale)."
+        )
+
+    def default_preprocess_kwargs(self) -> dict:
+        if self.general.data_mode == "synthetic":
+            # The synthetic stream covers exactly Tobs = Nf*Nt*dt; skip the
+            # engine's default highpass + edge-trim + Tobs trim so the WDM
+            # shape stays exact (same convention as gb_no_fg synthetic).
+            return dict(
+                highpass_kwargs=None, trim_kwargs=None, Tobs=None, normalize=False
+            )
+        return super().default_preprocess_kwargs()
+
     def prepare_branch_settings(self, name: str, general_setup: GeneralSetup) -> Settings:
         settings = super().prepare_branch_settings(name, general_setup)
         if name != "vgb":
             return settings
         return prepare_vgb_branch(
-            settings, general_setup, data_mode=self.general.data_mode
+            settings, general_setup, data_mode=self.general.data_mode,
+            synthetic_t_start=self.general.synthetic_t_start,
         )
 
 

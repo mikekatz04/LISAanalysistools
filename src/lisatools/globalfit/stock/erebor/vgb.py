@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import typing
 
 import numpy as np
@@ -92,6 +93,13 @@ class VGBSettings(GBSettings):
     fixed_params: typing.Optional[typing.Any] = None
     # (nleaves, 5) sampling-basis truth rows (seeds the fixed-leaf start).
     injection: typing.Optional[typing.Any] = None
+    # VGB band separations DEFAULT to the same per-WDM-layer edges as the GB
+    # branch (GBSetup.init_band_structure) for ease; this knob coarsens them
+    # to L layers per band. Only bands that actually contain VGB leaves do
+    # any work (the band sorter holds real leaves only).
+    band_layers: int = dataclasses.field(
+        default_factory=env_default("VGB_BAND_LAYERS", 1, int)
+    )
 
 
 class VGBSetup(GBSetup):
@@ -111,6 +119,29 @@ class VGBSetup(GBSetup):
         super().init_band_structure()
         if _fdot_lims_in is not None:
             self.fdot_lims = _fdot_lims_in
+
+        # Band separations default to the SAME per-WDM-layer edges as the GB
+        # branch (what super() just built). VGB_BAND_LAYERS > 1 coarsens the
+        # separation to L layers per band; the interior-band bookkeeping
+        # (f0_lims, num_sub_bands, band_N_vals) is recomputed to match.
+        L = int(getattr(self, "band_layers", 1) or 1)
+        if L > 1:
+            edges = np.asarray(self.band_edges)
+            keep = edges[::L]
+            if keep[-1] != edges[-1]:
+                keep = np.append(keep, edges[-1])
+            # per-band N: max over the merged fine bands (unused on WDM,
+            # conservative on FD)
+            n_vals = np.asarray(self.band_N_vals)
+            grp = np.arange(len(n_vals)) // L
+            self.band_N_vals = np.maximum.reduceat(n_vals, np.unique(grp, return_index=True)[1])[: len(keep) - 1]
+            self.band_edges = keep
+            self.f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
+            self.num_sub_bands = len(self.band_edges) - 1
+            self.logger.info(
+                "VGB band separations coarsened to %d WDM layers/band "
+                "(VGB_BAND_LAYERS): %d sub-bands.", L, self.num_sub_bands,
+            )
 
     def init_sampling_info(self):
         if self.fixed_params is None:
@@ -187,7 +218,33 @@ class VGBSetup(GBSetup):
         super().init_sampling_info()
 
 
-def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *, data_mode: str):
+def load_vgb_catalogue_file(mojito_data_path: str) -> dict:
+    """Read the (small) VGB catalogue file directly into the L1-loader
+    layout ``{"vgb": {column: array}}``.
+
+    The catalogue lives in ``catalogues/`` separately from the (large) L1
+    data bricks, so it is available without any data transfer -- this is
+    what lets ``data_mode="synthetic"`` build a catalogue-faithful VGB run
+    fully in-process.
+    """
+    import h5py
+
+    path = os.path.join(
+        mojito_data_path, "catalogues", "vgb_cat_mojito_lite_processed.hdf5"
+    )
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"VGB catalogue file not found at {path!r} (needed for the "
+            "synthetic VGB mode)."
+        )
+    with h5py.File(path, "r") as f:
+        B = f["Binaries"]
+        entry = {k: np.asarray(B[k][:]) for k in B.keys()}
+    return {"vgb": entry}
+
+
+def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
+                       data_mode: str, synthetic_t_start: float | None = None):
     """Resolve the VGB branch from the mojito VGB catalogue.
 
     Builds the sampling-basis rows through the single GB factory convention
@@ -196,13 +253,20 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *, data_mo
     per-leaf columns (``fixed_params``); sets the fixed-dimensional leaf
     count and the band structure bounds (one guard band each side — the
     band machinery never proposes in the first/last band).
+
+    ``data_mode="synthetic"``: the catalogue is read straight from the
+    (small) catalogue file — no L1 data needed — and the phase/frequency
+    reference epoch is the synthetic stream start, matching the in-process
+    injection built by the variant's synthetic processor.
     """
-    if data_mode != "mojito":
+    if data_mode not in ("mojito", "synthetic"):
         raise ValueError(
             "The VGB branch needs the mojito VGB catalogue "
-            f"(data_mode='mojito'); got data_mode={data_mode!r}."
+            f"(data_mode='mojito' or 'synthetic'); got data_mode={data_mode!r}."
         )
     catalogue = (getattr(general_setup, "catalogue", None) or {}).get("VGB", {})
+    if not catalogue and data_mode == "synthetic":
+        catalogue = load_vgb_catalogue_file(general_setup.mojito_data_path)
     if not catalogue:
         raise ValueError(
             "No VGB catalogue on the general setup: include 'VGB' in the "
@@ -233,8 +297,14 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *, data_mo
     vgb.nleaves_min = vgb.nleaves_max = n
 
     if vgb.t0 in (None, 0.0):
-        # phase/frequency reference epoch = the mojito catalogue epoch
-        vgb.t0 = MOJITO_REFERENCE_TIME
+        # phase/frequency reference epoch: the mojito catalogue epoch, or
+        # the synthetic stream start (the synthetic processor injects the
+        # same rows at that epoch, so truth-null holds identically).
+        if data_mode == "synthetic":
+            vgb.t0 = float(synthetic_t_start if synthetic_t_start is not None
+                           else 10_000.0)
+        else:
+            vgb.t0 = MOJITO_REFERENCE_TIME
 
     # Band structure bounds from the fixed f0 table, one guard band per
     # side: run_proposal never proposes in the first/last band, and
@@ -244,7 +314,9 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *, data_mo
 
     domain_settings = general_setup.domain_settings
     if isinstance(domain_settings, WDMSettings):
-        guard = 2.0 * float(domain_settings.layer_df)
+        # one guard BAND each side; a band is band_layers WDM layers wide
+        _L = int(getattr(vgb, "band_layers", 1) or 1)
+        guard = 2.0 * _L * float(domain_settings.layer_df)
     else:
         # FD bands are ~(2 N + buffer) * df wide; a conservative guard.
         from gbgpu.utils.utility import get_N
