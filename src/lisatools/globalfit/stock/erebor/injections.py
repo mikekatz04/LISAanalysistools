@@ -321,7 +321,15 @@ class SyntheticGBProcessingStep(BaseProcessingStep):
         # ecliptic lam/beta injection basis.
         if orbits is None:
             orbits = EqualArmlengthOrbits(force_backend=force_backend)
-        gb = GBGPU(force_backend=force_backend, orbits=orbits)
+        # flip_ref_phase=True: the legacy fastGB kernel carries e^{+i*phi0};
+        # the analysis side (on-the-fly chunked-het template, the GB
+        # sampling transform's phi0 negation, and the mojito L1 data) is
+        # LDC/JaxGB e^{-i*phi0}. Injecting without the flip leaves every
+        # source dephased by 2*phi0 -- measured 2026-07-23 as data-template
+        # overlap cos(2*phi0) (-0.74 on the 2-source stock table) at the
+        # correct power, i.e. synthetic-mode truth-null reads were invalid.
+        gb = GBGPU(force_backend=force_backend, orbits=orbits,
+                   flip_ref_phase=True)
         # ``GBGPU.generate_global_template`` reads ``self.gpus`` directly,
         # which is only set elsewhere (e.g. in the move setup). For a
         # standalone injection we set it explicitly.

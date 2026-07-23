@@ -73,6 +73,12 @@ class GBXYZTDIWaveform:
 
         if orbits is None:
             orbits = EqualArmlengthOrbits(force_backend=force_backend)
+        # NOTE(phi0 convention): GBGPU without flip_ref_phase carries
+        # e^{+i*phi0}; the analysis side (on-the-fly template, GB sampling
+        # transform, mojito data) is LDC/JaxGB e^{-i*phi0}. Any consumer
+        # comparing THIS legacy-FD path against those must reconcile the
+        # sign (cf. the 2026-07-23 synthetic-injection fix in
+        # stock/erebor/injections.py).
         self.wave_gen = GBGPU(force_backend=force_backend, orbits=orbits)
         # ``generate_global_template`` reads ``self.gpus`` directly (set
         # elsewhere in the move setup); a stand-alone template needs it set.

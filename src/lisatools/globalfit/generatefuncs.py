@@ -157,6 +157,10 @@ class GetGBTemplates:
     def __call__(self, current_state, gb_info, general_info):
         """Generate per-walker GB templates summed over all active leaves."""
 
+        # NOTE(phi0 convention): plain GBGPU here is e^{+i*phi0}; the
+        # on-the-fly/chunked-het analysis side is LDC/JaxGB e^{-i*phi0} --
+        # reconcile before comparing across paths (cf. the synthetic
+        # injection fix in stock/erebor/injections.py, 2026-07-23).
         gb_gen = GBGPU(**self.initialization_kwargs)
 
         use_gpu = "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]
