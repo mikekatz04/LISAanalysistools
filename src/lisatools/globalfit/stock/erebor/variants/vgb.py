@@ -177,6 +177,25 @@ class VGBGlobalFit(EreborFit):
             synthetic_t_start=self.general.synthetic_t_start,
         )
 
+    def attach_runtime_objects(self) -> None:
+        """Register the engine-side ``signal_gen`` on the vgb Setup.
+
+        One GB-family generator (:class:`~lisatools.globalfit.recipe.
+        GBFillGlobalSignalGen`) prepares transform/index/factor inputs for
+        the GBGPU ``fill_global`` kernels. With it registered, run.py's
+        ``setup_acs(rebuild_residuals=True)`` subtracts the seeded VGB
+        templates itself (initial log likelihood reads ~0 at
+        ``VGB_START_FACTOR=0``) and the recipe's manual subtraction block
+        skips (it gates on ``signal_gen is None``); warm-start reloads
+        rebuild identically.
+        """
+        from ....recipe import GBFillGlobalSignalGen
+
+        info = self.source_info["vgb"]
+        info.signal_gen = GBFillGlobalSignalGen(
+            "vgb", info.transform, self.general_info, info
+        )
+
 
 def setup_vgb_moves(engine_info, curr, acs, priors, state) -> dict:
     """Build the ``vgb`` move stack (shared helper, all_sources reuses it).

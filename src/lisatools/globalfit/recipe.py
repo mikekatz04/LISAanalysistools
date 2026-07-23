@@ -1130,6 +1130,108 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
         )
 
 
+class GBFillGlobalSignalGen:
+    """ONE engine-side ``signal_gen`` for the GB-family branches (gb / vgb).
+
+    Pure Python PREPARATION feeding the installed GBGPU ``fill_global``
+    machinery -- it organizes (transform -> physical rows -> index/factor
+    arrays -> zeroed template buffer) and passes into the C kernels
+    (``fill_global_wdm`` on WDM, ``generate_global_template`` on FD); no
+    waveform code of its own. Every branch difference (chirp-mass vs fdot
+    basis, the VGB per-leaf fixed f0/sky fills) lives in the branch's
+    transform container: per-leaf transforms arrive pre-transformed from
+    the engine (``apply_transform=False``), everything else is transformed
+    here, so the SAME class serves both branches.
+
+    Extra ``*fill_args`` / ``**fill_kwargs`` given at construction are
+    forwarded to every ``fill_global`` call (call-time ``**kwargs`` win).
+
+    The heavy likelihood comp is NOT held here: it is read from (or built
+    onto) ``source_info.gb_wdm_comp`` lazily on first call, so the
+    pre-build fit config stays picklable and the moves reuse the same comp.
+    """
+
+    def __init__(self, branch, transform, general_info, source_info,
+                 *fill_args, **fill_kwargs):
+        self.branch = branch
+        self.transform = transform
+        self.general_info = general_info
+        self.source_info = source_info
+        self.fill_args = tuple(fill_args)
+        self.fill_kwargs = dict(fill_kwargs)
+
+    # -- lazy comp -------------------------------------------------------
+    def _comp(self):
+        comp = getattr(self.source_info, "gb_wdm_comp", None)
+        if comp is not None:
+            return comp
+        from lisatools.domains import WDMSettings
+        from gbgpu.gbcomps import GBWDMComputations
+
+        gi = self.general_info
+        si = self.source_info
+        if not isinstance(gi.domain_settings, WDMSettings):
+            raise NotImplementedError(
+                "GBFillGlobalSignalGen lazy comp build is WDM-only; on FD "
+                "the branch installs its own generator handles."
+            )
+        _wdm = gi.domain_settings
+        _wdm.t0 = float(getattr(gi, "data_t0", 0.0))
+        tdi_gen = 2 if getattr(si, "use_tdi2", True) else 1
+        comp = GBWDMComputations(
+            _wdm,
+            t_ref=si.t0,
+            Nt_sub=int(si.nt_sub),
+            n_pad=int(si.n_pad),
+            N_sparse=int(si.n_sparse),
+            N_cp_sig=int(si.n_cp_sig),
+            N_cp_orbit=int(si.n_cp_orbit),
+            orbits=gi.gpu_orbits,
+            tdi_config=f"{tdi_gen}{'nd' if tdi_gen == 2 else 'st'} generation",
+            force_backend=gi.force_backend,
+            tdi_type="XYZ",
+        )
+        si.gb_wdm_comp = comp  # shared with the move setup (same guard there)
+        return comp
+
+    def __call__(self, *params, apply_transform=True, leaf_inds=None, **kwargs):
+        """Sum-of-sources template for this branch as a ``DomainBase``.
+
+        ``*params``: sampling-basis rows by default; waveform-basis with
+        ``apply_transform=False`` (the engine pre-transforms per-leaf-fill
+        branches like vgb, passing ``leaf_inds`` upstream).
+        """
+        from lisatools.domains import WDMSettings
+
+        comp = self._comp()
+        xp = comp.xp
+        params_arr = np.asarray(params, dtype=float)
+        params_in = (
+            self.transform.both_transforms(params_arr, leaf_inds=leaf_inds)
+            if apply_transform
+            else params_arr
+        )
+        params_in = xp.atleast_2d(xp.asarray(params_in))
+
+        gi = self.general_info
+        settings = gi.domain_settings
+        assert isinstance(settings, WDMSettings)
+        nchannels = int(getattr(gi, "nchannels", 3))
+        shape = (nchannels, int(settings.Nf_active), int(settings.Nt_active))
+        template = xp.zeros(int(np.prod(shape)), dtype=xp.float64)
+
+        # single-buffer fill: every row lands in template 0 with factor +1
+        data_index = xp.zeros(params_in.shape[0], dtype=xp.int32)
+        factors = xp.ones(params_in.shape[0], dtype=xp.float64)
+        fk = dict(self.fill_kwargs)
+        fk.update(kwargs)
+        comp.fill_global_wdm(
+            params_in, template, *self.fill_args,
+            data_index=data_index, factors=factors, **fk,
+        )
+        return settings.associated_class(template.reshape(shape), settings)
+
+
 def select_gb_injection_subset_by_snr(
     curr: CurrentInfoGlobalFit,
     acs: AnalysisContainerArray,

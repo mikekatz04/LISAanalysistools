@@ -439,6 +439,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # inspect it; it tracks the shape of the per-band PSD view.
         self.psd_shape = (self.num_bands_now,) + self._per_band_sens_shape
 
+        # Geometry line: the buffer is the dominant per-proposal allocation
+        # (cells x per-cell slab); one INFO read diagnoses an OOM-scale
+        # configuration (e.g. many bands with slab slicing off).
+        _cell_mb = (
+            np.prod(self._per_band_data_shape)
+            * np.dtype(self._per_band_data_dtype).itemsize / 1e6
+        )
+        _n_copies = 2 if self.use_template_arr else 1
+        logger.info(
+            "SubBandBuffer: %d cells x %s per-cell (%s) ~ %.0f MB%s "
+            "[band_slab_Nf=%s]",
+            self.num_bands_now, tuple(self._per_band_data_shape),
+            np.dtype(self._per_band_data_dtype).name,
+            _n_copies * self.num_bands_now * _cell_mb,
+            " (incl. template twin)" if self.use_template_arr else "",
+            self.band_slab_Nf,
+        )
+
         # Build the domain-aware likelihood engine. Dispatch is on
         # ``isinstance(basis_settings, ...)`` -- no string-level mode flag.
         # The engine takes an AnalysisContainerArray at call time, so the
@@ -742,6 +760,18 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             # origin lives in ``slab_min_f`` (the kernel arg), not here -- so
             # we pin ``ind_max_f`` to make ``Nf_active == band_slab_Nf``.
             parent = self._basis_settings
+            # The slab extent must ride IN the constructor args: consumers
+            # (WDMDomain.__init__) re-build the settings from args/kwargs, so
+            # a post-construction ``ind_max_f`` mutation is silently lost and
+            # the per-band domain reverts to the full active band (shape
+            # assert). ``ind_max_f = int(max_freq / layer_df)`` (inclusive);
+            # the half-layer offset keeps the floor rounding-safe.
+            slab_Nf = self.band_slab_Nf
+            _ind_max_f = (
+                int(parent.ind_min_f) + int(slab_Nf) - 1
+                if slab_Nf is not None
+                else int(parent.ind_max_f)
+            )
             per_band = WDMSettings(
                 Nf=parent.Nf,
                 Nt=parent.Nt,
@@ -751,13 +781,10 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 window=parent.window,
                 omega=parent.omega,
                 min_freq=parent.ind_min_f * parent.layer_df,
-                max_freq=parent.ind_max_f * parent.layer_df,
+                max_freq=(_ind_max_f + 0.5) * parent.layer_df,
                 min_time=parent.ind_min_t * parent.layer_dt,
                 max_time=parent.ind_max_t * parent.layer_dt,
             )
-            slab_Nf = self.band_slab_Nf
-            if slab_Nf is not None:
-                per_band.ind_max_f = int(per_band.ind_min_f) + int(slab_Nf) - 1
             return per_band
         else:
             raise NotImplementedError(
