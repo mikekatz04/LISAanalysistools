@@ -89,9 +89,10 @@ def main() -> None:
     ax.set_xlabel("frequency [Hz]")
     ax.set_ylabel(r"$\sqrt{\mathrm{PSD}}$  (WDM diagonal, per channel)")
     ax.set_title(
-        "Mojito 731-day NOISE brick through the stock noise_only fit\n"
-        f"fitted Soms_d={soms_d:.4e} ({soms_d / 15e-12:.3f}×scird),  "
-        f"Sa_a={sa_a:.4e} ({sa_a / 3e-15:.3f}×scird)"
+        "Mojito 731-day NOISE brick via the stock fit\n"
+        f"Soms_d {soms_d:.3e} ({soms_d / 15e-12:.3f}×scird)   "
+        f"Sa_a {sa_a:.3e} ({sa_a / 3e-15:.3f}×scird)",
+        fontsize=11,
     )
     ax.legend(frameon=False, fontsize=9, title="MojitoNoiseSensitivityMatrix")
     ax.grid(True, which="both", alpha=0.15)

@@ -169,8 +169,9 @@ def main() -> None:
         ax.legend(frameon=False, fontsize=9)
         ax.grid(True, alpha=0.15)
     fig.suptitle(
-        f"{args.branch.upper()} fast likelihood ≡ AnalysisContainer, vs mojito "
-        f"data  (top-{len(labels)} highest-f, max reldiff {max_rd:.1e})"
+        f"{args.branch.upper()} fast likelihood ≡ AnalysisContainer (mojito data)"
+        f"\ntop-{len(labels)} highest-f  ·  max reldiff {max_rd:.1e}",
+        fontsize=11,
     )
     fig.tight_layout()
     os.makedirs(PLOT_DIR, exist_ok=True)
