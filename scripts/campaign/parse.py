@@ -18,9 +18,9 @@ from __future__ import annotations
 import math
 import re
 
-_RESULT_RE = re.compile(r"^\[RESULT\]\s+(.*)$", re.M)
+_RESULT_RE = re.compile(r"^\s*\[RESULT\]\s+(.*)$", re.M)
 _GF_TIMING_RE = re.compile(
-    r"^\[GF_TIMING\]\s+stage=(?P<stage>\S+)\s+move=(?P<move>\S+)\s+it=(?P<it>\d+)"
+    r"^\s*\[GF_TIMING\]\s+stage=(?P<stage>\S+)\s+move=(?P<move>\S+)\s+it=(?P<it>\d+)"
     r"\s+wall_s=(?P<wall>[-\d.eE+]+)"
     r"(?:\s+rss_mb=(?P<rss>[-\d.eE+]+))?"
     r"(?:\s+d_rss_mb=(?P<drss>[-\d.eE+]+))?"
@@ -29,7 +29,7 @@ _GF_TIMING_RE = re.compile(
     re.M,
 )
 _GB_TIMING_RE = re.compile(
-    r"^\[GB_TIMING\s+(?P<move>[^\]]+)\]\s+total=(?P<total>[\d.eE+-]+)s", re.M
+    r"^\s*\[GB_TIMING\s+(?P<move>[^\]]+)\]\s+total=(?P<total>[\d.eE+-]+)s", re.M
 )
 _SUBBAND_RE = re.compile(
     r"SubBandBuffer:\s+(?P<cells>\d+)\s+cells.*?~\s*(?P<mb>[\d.]+)\s*MB", re.S

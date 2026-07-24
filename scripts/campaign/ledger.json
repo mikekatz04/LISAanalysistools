@@ -248,7 +248,10 @@
     },
     "t1-gt-mbh": {
       "confirmed": [],
-      "evidence": [],
+      "evidence": [
+        "evidence/t1-gt-mbh.log",
+        "evidence/t1-gt-mbh__null-check.log"
+      ],
       "history": [
         {
           "note": "manual: demo blue light",
@@ -259,10 +262,45 @@
           "note": "manual: revert demo",
           "state": "pending",
           "ts": "2026-07-24T07:35:51Z"
+        },
+        {
+          "note": "run: criteria unmet: null_rr_dd_MBH_max missing (wanted <= 0.003)",
+          "state": "red",
+          "ts": "2026-07-24T07:53:15Z"
+        },
+        {
+          "note": "ingest: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T07:54:06Z"
         }
       ],
-      "metrics": {},
-      "state": "pending"
+      "metrics": {
+        "branch": "mbh",
+        "data_snr": 1418.0345,
+        "dd": 2010822.0,
+        "dh": 2037379.0,
+        "hh": 2067077.0,
+        "mbh_mismatch_max": 0.0006753,
+        "mismatch": 0.0006753,
+        "null_rr_dd_MBH_max": 0.001562,
+        "overlap": 0.99932466,
+        "result_branch": "mbh",
+        "result_data_snr": 1418.0345,
+        "result_dd": 2010822.0,
+        "result_dh": 2037379.0,
+        "result_hh": 2067077.0,
+        "result_mismatch": 0.0006753,
+        "result_overlap": 0.99932466,
+        "result_rr": 3141.736,
+        "result_rr_over_dd": 0.001562,
+        "result_source_logL": -1570.868,
+        "result_xcheck": "True",
+        "rr": 3141.736,
+        "rr_over_dd": 0.001562,
+        "source_logL": -1570.868,
+        "xcheck": "True"
+      },
+      "state": "green"
     },
     "t1-gt-noise": {
       "confirmed": [],
@@ -563,6 +601,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T07:35:51Z",
+  "updated": "2026-07-24T07:54:06Z",
   "version": 1
 }
