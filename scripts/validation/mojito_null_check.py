@@ -109,9 +109,12 @@ def main():
     ac = acs_data.flatten()[0]
     d_d = float(np.ravel(np.asarray(ac.inner_product(complex=False)).real)[0])
 
-    # template h at the injection coords (one leaf)
+    # template h at the injection coords (one leaf). Pass leaf_inds=0: the
+    # EMRI branch transform carries per-leaf fills (xI0/Phi_theta0) and Eryn
+    # requires leaf_inds when apply_transform=True; scalar transforms (MBH/
+    # SOBBH) ignore it, so it is safe unconditionally.
     _t0 = time.time()
-    h = setup.signal_gen(*inj[0])
+    h = setup.signal_gen(*inj[0], leaf_inds=0)
     print(f"[template] built {branch} template in {time.time() - _t0:.1f}s", flush=True)
 
     opt, det = ac.template_snr(h)
@@ -148,8 +151,12 @@ def main():
 
     # Single machine-parseable line for the run_mojito_null_checks.sh driver.
     ov = d_h.real / np.sqrt(d_d * h_h)
+    # active catalogue id(s) for this run (driver sets one *_IDS per source).
+    _act_ids = gs.mojito_source_ids.get(active[0], []) if active else []
+    _src_id = int(_act_ids[0]) if _act_ids else -1
     print(
-        f"[RESULT] branch={branch} data_snr={np.sqrt(abs(d_d)):.4f} dd={d_d:.6e} "
+        f"[RESULT] branch={branch} id={_src_id} "
+        f"data_snr={np.sqrt(abs(d_d)):.4f} dd={d_d:.6e} "
         f"hh={h_h:.6e} dh={d_h.real:.6e} rr={r_r:.6e} overlap={ov:.8f} "
         f"mismatch={1 - ov:.3e} rr_over_dd={r_r / d_d:.3e} "
         f"source_logL={logL_source:.6e} xcheck={xcheck}",
