@@ -132,7 +132,7 @@ GATES: tuple = (
                 ),
             ),
         ),
-        proof_plots=("gb_match_*.png",),
+        proof_plots=("gb_mojito_match.png",),
     ),
     Gate(
         id="t1-gt-vgb",
@@ -151,7 +151,7 @@ GATES: tuple = (
                 ),
             ),
         ),
-        proof_plots=("vgb_match_*.png",),
+        proof_plots=("vgb_mojito_match.png",),
     ),
     Gate(
         id="t1-gt-mbh",
@@ -226,7 +226,14 @@ GATES: tuple = (
                 command="{py} -m unittest tests.test_mojito_noise",
                 criteria=({"metric": "tests_failed", "op": "==", "value": 0},),
             ),
+            Check(
+                id="noise-proof",
+                command="{py} scripts/campaign/runners/noise_proof.py",
+                criteria=({"metric": "noise_proof_ok", "op": "==", "value": 1},),
+                notes="per-channel brick PSD through the stock MojitoNoiseSensitivityMatrix",
+            ),
         ),
+        proof_plots=("mojito_noise_psd*.png",),
     ),
     Gate(
         id="t1-alignment",

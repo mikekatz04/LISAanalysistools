@@ -159,7 +159,7 @@ def main():
         axes[rank].semilogy((ff[sel] - f0) * 1e6, np.abs(FB[sel]), ":", label="GBTDIonTheFly", lw=1.2)
         axes[rank].set_title(f"VGB rank {rank}: f0={f0*1e3:.4f} mHz, 1-|O|={1-abs(O):.2e}")
         axes[rank].set_xlabel("f - f0 [uHz]"); axes[rank].legend(fontsize=8)
-    fig.tight_layout(); out_png = "/tmp/vgb_mojito_match.png"; fig.savefig(out_png, dpi=110); plt.close(fig)
+    fig.tight_layout(); out_png = os.path.join(os.environ.get("CAMPAIGN_PLOT_DIR", "/tmp"), "vgb_mojito_match.png"); fig.savefig(out_png, dpi=110); plt.close(fig)
     print(f"\nDONE.  plot -> {out_png}", flush=True)
 
 

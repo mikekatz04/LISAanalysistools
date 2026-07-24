@@ -84,16 +84,47 @@
     "t1-gt-noise": {
       "confirmed": [],
       "evidence": [
-        "evidence/t1-gt-noise.log"
+        "evidence/t1-gt-noise.log",
+        "evidence/t1-gt-noise/mojito_noise_psd.png"
       ],
       "history": [
         {
           "note": "run: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-24T06:04:44Z"
+        },
+        {
+          "note": "check noise-proof exited 1",
+          "state": "red",
+          "ts": "2026-07-24T06:19:20Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T06:20:15Z"
         }
       ],
       "metrics": {
+        "brick": "NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5",
+        "error": "TypeError",
+        "n_layers": 50,
+        "noise_proof": "ok",
+        "noise_proof_ok": 1,
+        "plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-gt-noise/mojito_noise_psd.png",
+        "result_brick": "NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5",
+        "result_error": "TypeError",
+        "result_n_layers": 50,
+        "result_noise_proof": "ok",
+        "result_noise_proof_ok": 1,
+        "result_plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-gt-noise/mojito_noise_psd.png",
+        "result_sa_a": 2.982412e-15,
+        "result_sa_ratio_scird": 0.9941,
+        "result_soms_d": 1.496182e-11,
+        "result_soms_ratio_scird": 0.9975,
+        "sa_a": 2.982412e-15,
+        "sa_ratio_scird": 0.9941,
+        "soms_d": 1.496182e-11,
+        "soms_ratio_scird": 0.9975,
         "tests_failed": 0,
         "tests_ran": 15
       },
@@ -319,6 +350,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T06:04:44Z",
+  "updated": "2026-07-24T06:20:15Z",
   "version": 1
 }

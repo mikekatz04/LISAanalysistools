@@ -282,6 +282,9 @@ def cmd_run(args):
     raw_dir = os.path.join(RAW_ROOT, gate.id)
     os.makedirs(raw_dir, exist_ok=True)
     env = dict(os.environ)
+    # Every check drops its proof plots into the gate's raw dir; runners and
+    # match scripts honor CAMPAIGN_PLOT_DIR so proof_plots capture finds them.
+    env["CAMPAIGN_PLOT_DIR"] = raw_dir
     # Laptop CPU budget: campaign work stays below 50% of the machine. Every
     # thread pool is pinned to 1 (macOS Accelerate reads VECLIB_*, not OMP_*)
     # and gates run strictly one at a time.
