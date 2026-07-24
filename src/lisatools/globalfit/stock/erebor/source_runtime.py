@@ -145,6 +145,27 @@ def _device_local_orbits(orbits, xp, primary_device):
     return replica
 
 
+def _wrap_device_and_orbits(general_info):
+    """``(xp, dev, orbits)`` for a per-device EMRI/SOBBH source wave wrap.
+
+    ``dev`` is the run's cupy current device (None on CPU / single-GPU) -- set
+    by the move's per-shard ``device_context`` -- used to key the wave-wrap
+    cache and to build the FEW/bbhx generator tables locally. ``orbits`` is a
+    per-device replica of ``general_info.orbits`` (the CPU/processor orbits the
+    EMRI and SOBBH generators use): on a non-primary device it has a DISTINCT
+    ``id(orbits)``, which fans the inner ``id(orbits)``-keyed generator caches
+    (get_emri_response_wrapper / get_sobbh_tdionfly_gen / ...) out per device
+    too, without touching those lower-level getters. On CPU / single-GPU /
+    the primary device the shared orbits is reused unchanged.
+    """
+    xp = _general_info_xp(general_info)
+    dev = current_device(xp)
+    orbits = _device_local_orbits(
+        general_info.orbits, xp, _primary_device(general_info)
+    )
+    return xp, dev, orbits
+
+
 def default_source_ids() -> dict:
     """Per-class source IDs; env MBHB_IDS / EMRI_IDS / SOBHB_IDS override."""
     ids = {"MBHB": [], "EMRI": [1], "SOBHB": []}
@@ -508,8 +529,18 @@ _WAVE_WRAP_CACHE = {}
 
 
 def get_emri_wave_wrap(general_info, cfg):
-    """EMRI legacy ResponseWrapper wrap (REF-anchored SPECIAL frame)."""
-    key = ("emri", id(general_info), cfg["nchannels"])
+    """EMRI legacy ResponseWrapper wrap (REF-anchored SPECIAL frame).
+
+    Per-device (multi-GPU walker shards): the wrap and its FEW
+    ``GenerateEMRIWaveform`` are cached and BUILT per current device, so each
+    walker shard scores through a generator whose interpolation tables
+    (ampinterp2d / modeselector) live on its OWN device -- eliminating the
+    peer-access flood off the primary device that gave EMRI zero 2-GPU
+    speedup. On CPU / single-GPU this collapses to one entry, byte-identical
+    to the old path.
+    """
+    xp, dev, orbits = _wrap_device_and_orbits(general_info)
+    key = ("emri", id(general_info), cfg["nchannels"], dev)
     if key in _WAVE_WRAP_CACHE:
         return _WAVE_WRAP_CACHE[key]
     force_backend = general_info.force_backend
@@ -526,114 +557,138 @@ def get_emri_wave_wrap(general_info, cfg):
     out_N = int(round(general_info.Tobs / dt))
     resp_Tobs = (out_N + offset_int) * dt
 
-    template_wave_gen = get_emri_response_wrapper(
-        Tobs=resp_Tobs,
-        dt=dt,
-        t_start=ref,
-        t0_shift_to_data=t0_shift,
-        tdi_config=tdi_config,
-        tdi_chan=cfg["tdi_chan"],
-        role="template",
-        order=cfg["emri_response_order"],
-        force_backend=force_backend,
-        orbits=general_info.orbits,
-    )
-    wrap = EMRIWaveWrap(
-        template_wave_gen,
-        general_info.data_td_settings,
-        general_info.domain_settings,
-        td_window=None,
-        nchannels=cfg["nchannels"],
-        offset_int=offset_int,
-    )
+    # Build on the owning device so the FEW cuda tables are device-local.
+    with device_context(xp, dev):
+        template_wave_gen = get_emri_response_wrapper(
+            Tobs=resp_Tobs,
+            dt=dt,
+            t_start=ref,
+            t0_shift_to_data=t0_shift,
+            tdi_config=tdi_config,
+            tdi_chan=cfg["tdi_chan"],
+            role="template",
+            order=cfg["emri_response_order"],
+            force_backend=force_backend,
+            orbits=orbits,
+        )
+        wrap = EMRIWaveWrap(
+            template_wave_gen,
+            general_info.data_td_settings,
+            general_info.domain_settings,
+            td_window=None,
+            nchannels=cfg["nchannels"],
+            offset_int=offset_int,
+        )
     _WAVE_WRAP_CACHE[key] = wrap
     return wrap
 
 
 def get_sobbh_wave_wrap(general_info, cfg):
-    """SOBBH wrap: TDI-on-the-fly (default) or legacy ResponseWrapper."""
-    key = ("sobbh", id(general_info), cfg["nchannels"])
+    """SOBBH wrap: TDI-on-the-fly (default) or legacy ResponseWrapper.
+
+    Per-device (multi-GPU walker shards): the wrap and its bbhx generator
+    (``SOBBHTDIonFly`` / ResponseWrapper around ``SOBBHWaveform``) are cached
+    and BUILT per current device, so each walker shard generates on its OWN
+    device -- no peer access off the primary device. On CPU / single-GPU this
+    collapses to one entry, byte-identical to the old path.
+    """
+    xp, dev, orbits = _wrap_device_and_orbits(general_info)
+    key = ("sobbh", id(general_info), cfg["nchannels"], dev)
     if key in _WAVE_WRAP_CACHE:
         return _WAVE_WRAP_CACHE[key]
     force_backend = general_info.force_backend
     tdi_config = TDIConfig(cfg["tdi_gen_str"], force_backend=force_backend)
     reference_time = cfg["sobbh_reference_time"]
 
-    if cfg["sobbh_use_tdionfly"]:
-        gen = get_sobbh_tdionfly_gen(
-            Tobs=general_info.Tobs,
-            dt=general_info.dt,
-            t_start=general_info.data_t0,
-            tdi_config=tdi_config,
-            reference_time=reference_time,
-            orbits=general_info.orbits,
-            n_grid=cfg["sobbh_n_grid"],
-            buffer_time=cfg["sobbh_buffer_time"],
-            force_backend=force_backend,
-        )
-        n = int(round(general_info.Tobs / general_info.dt))
-        t_arr = np.arange(n) * general_info.dt + general_info.data_t0
-        wrap = SOBBHTDIonFlyWaveWrap(
-            gen,
-            t_arr,
-            general_info.data_td_settings,
-            general_info.domain_settings,
-            td_window=None,
-            nchannels=cfg["nchannels"],
-        )
-    else:
-        template_wave_gen = get_sobbh_response_wrapper(
-            Tobs=general_info.Tobs,
-            dt=general_info.dt,
-            t_start=general_info.data_t0,
-            tdi_config=tdi_config,
-            tdi_chan=cfg["tdi_chan"],
-            role="template",
-            order=cfg["sobbh_response_order"],
-            force_backend=force_backend,
-            orbits=general_info.orbits,
-            reference_time=reference_time,
-        )
-        wrap = SOBBHWaveWrap(
-            template_wave_gen,
-            general_info.data_td_settings,
-            general_info.domain_settings,
-            td_window=None,
-            nchannels=cfg["nchannels"],
-        )
+    # Build on the owning device so the bbhx cuda tables are device-local.
+    with device_context(xp, dev):
+        if cfg["sobbh_use_tdionfly"]:
+            gen = get_sobbh_tdionfly_gen(
+                Tobs=general_info.Tobs,
+                dt=general_info.dt,
+                t_start=general_info.data_t0,
+                tdi_config=tdi_config,
+                reference_time=reference_time,
+                orbits=orbits,
+                n_grid=cfg["sobbh_n_grid"],
+                buffer_time=cfg["sobbh_buffer_time"],
+                force_backend=force_backend,
+            )
+            n = int(round(general_info.Tobs / general_info.dt))
+            t_arr = np.arange(n) * general_info.dt + general_info.data_t0
+            wrap = SOBBHTDIonFlyWaveWrap(
+                gen,
+                t_arr,
+                general_info.data_td_settings,
+                general_info.domain_settings,
+                td_window=None,
+                nchannels=cfg["nchannels"],
+            )
+        else:
+            template_wave_gen = get_sobbh_response_wrapper(
+                Tobs=general_info.Tobs,
+                dt=general_info.dt,
+                t_start=general_info.data_t0,
+                tdi_config=tdi_config,
+                tdi_chan=cfg["tdi_chan"],
+                role="template",
+                order=cfg["sobbh_response_order"],
+                force_backend=force_backend,
+                orbits=orbits,
+                reference_time=reference_time,
+            )
+            wrap = SOBBHWaveWrap(
+                template_wave_gen,
+                general_info.data_td_settings,
+                general_info.domain_settings,
+                td_window=None,
+                nchannels=cfg["nchannels"],
+            )
     _WAVE_WRAP_CACHE[key] = wrap
     return wrap
 
 
 def get_mbh_tdionfly_wave_wrap(general_info, cfg):
-    """MBH TDI-on-the-fly wrap (source-independent phentax window)."""
-    key = ("mbh_tdionfly", id(general_info), cfg["nchannels"])
+    """MBH TDI-on-the-fly wrap (source-independent phentax window).
+
+    Like the legacy phentax path this is a JAX (phentax) waveform + cupy/C++
+    (bbhx) response on ``gpu_orbits``; per device (multi-GPU) the wrap + its
+    ``MBHTDIonFly`` are cached and built with a device-local orbits replica so
+    the ``id(orbits)``-keyed generator cache fans out per device. The caller
+    (:meth:`SourceSignalGen.__call__`) enters device_context+jax_device_context
+    so both the build and the call land on the owning device.
+    """
+    xp = _general_info_xp(general_info)
+    dev = current_device(xp)
+    base_orbits = (
+        general_info.gpu_orbits if general_info.gpus is not None else general_info.orbits
+    )
+    orbits = _device_local_orbits(base_orbits, xp, _primary_device(general_info))
+    key = ("mbh_tdionfly", id(general_info), cfg["nchannels"], dev)
     if key in _WAVE_WRAP_CACHE:
         return _WAVE_WRAP_CACHE[key]
     force_backend = general_info.force_backend
     tdi_config = TDIConfig(cfg["tdi_gen_str"], force_backend=force_backend)
-    orbits = (
-        general_info.gpu_orbits if general_info.gpus is not None else general_info.orbits
-    )
     n = int(round(general_info.Tobs / general_info.dt))
     t_arr = np.arange(n) * general_info.dt + general_info.data_t0
     dur_s = general_info.Tobs + cfg["mbh_tdionfly_margin"]
-    gen = get_mbh_tdionfly_gen(
-        dt=general_info.dt,
-        t_start=cfg["mbh_waveform_t0"],
-        dur_s=dur_s,
-        tdi_config=tdi_config,
-        orbits=orbits,
-        waveform_duration=dur_s,
-        force_backend=force_backend,
-    )
-    wrap = MBHTDIonFlyWaveWrap(
-        gen,
-        t_arr,
-        general_info.data_td_settings,
-        general_info.domain_settings,
-        nchannels=cfg["nchannels"],
-    )
+    with device_context(xp, dev):
+        gen = get_mbh_tdionfly_gen(
+            dt=general_info.dt,
+            t_start=cfg["mbh_waveform_t0"],
+            dur_s=dur_s,
+            tdi_config=tdi_config,
+            orbits=orbits,
+            waveform_duration=dur_s,
+            force_backend=force_backend,
+        )
+        wrap = MBHTDIonFlyWaveWrap(
+            gen,
+            t_arr,
+            general_info.data_td_settings,
+            general_info.domain_settings,
+            nchannels=cfg["nchannels"],
+        )
     _WAVE_WRAP_CACHE[key] = wrap
     return wrap
 
@@ -711,29 +766,42 @@ class SourceSignalGen:
             if apply_transform
             else params_arr
         )
-        if self.branch == "emri":
-            return get_emri_wave_wrap(self.general_info, self.cfg)(*params_in, **kwargs)
-        if self.branch == "sobbh":
-            return get_sobbh_wave_wrap(self.general_info, self.cfg)(*params_in, **kwargs)
-        if self.branch == "mbh":
-            if self.cfg["mbh_use_tdionfly"]:
-                return get_mbh_tdionfly_wave_wrap(self.general_info, self.cfg)(
+        if self.branch not in ("emri", "sobbh", "mbh"):
+            raise ValueError(f"Unknown branch {self.branch!r} for SourceSignalGen.")
+
+        # Per-shard device discipline (multi-GPU walker shards): generate on
+        # the walker's OWNING cupy device so the template, its residual/invC
+        # views, and the (per-device) generator tables all live on one device
+        # -- no peer access off the primary device. The move already entered
+        # this context; re-entering the current device is a no-op, and it also
+        # makes SourceSignalGen self-sufficient when called from other paths.
+        # CPU / single-GPU: dev is None / the primary, so every context below
+        # collapses to a no-op and behaviour is unchanged.
+        xp = _general_info_xp(self.general_info)
+        dev = current_device(xp)
+        with device_context(xp, dev):
+            if self.branch == "emri":
+                return get_emri_wave_wrap(self.general_info, self.cfg)(
                     *params_in, **kwargs
                 )
-            # Legacy phentax MBH: a JAX (phentax) waveform + cupy/C++
-            # (pyResponseTDI) response. On a multi-GPU shard, the caller has
-            # entered the walker's owning cupy device; enter the matching JAX
-            # default device so phentax's scalar inputs and traced kernels
-            # land there too (cupy's device_context does NOT move JAX). Both
-            # the (lazy, cache-miss) generator BUILD inside
-            # ``get_mbh_phenom_gen`` and the generation call must run under
-            # these contexts. CPU / single-GPU: both collapse to no-ops.
-            dev = current_device(_general_info_xp(self.general_info))
-            with device_context(_general_info_xp(self.general_info), dev), \
-                    jax_device_context(dev):
-                gen = get_mbh_phenom_gen(self.general_info, self.cfg)
-                return gen.get_signals_for_residuals(*params_in, **kwargs)
-        raise ValueError(f"Unknown branch {self.branch!r} for SourceSignalGen.")
+            if self.branch == "sobbh":
+                return get_sobbh_wave_wrap(self.general_info, self.cfg)(
+                    *params_in, **kwargs
+                )
+            if self.branch == "mbh":
+                # BOTH MBH paths are a JAX (phentax) waveform + cupy/C++
+                # (pyResponseTDI / bbhx) response. cupy's device_context does
+                # NOT move JAX, so ALSO pin the matching JAX default device
+                # (phentax scalar inputs / traced kernels land there). No-op on
+                # CPU / single-GPU / when JAX can't see the device.
+                with jax_device_context(dev):
+                    if self.cfg["mbh_use_tdionfly"]:
+                        return get_mbh_tdionfly_wave_wrap(
+                            self.general_info, self.cfg
+                        )(*params_in, **kwargs)
+                    gen = get_mbh_phenom_gen(self.general_info, self.cfg)
+                    return gen.get_signals_for_residuals(*params_in, **kwargs)
+        # Unreachable: the branch is validated above.
 
 
 # ============================================================

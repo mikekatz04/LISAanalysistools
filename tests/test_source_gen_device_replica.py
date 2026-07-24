@@ -19,6 +19,7 @@ grids) can only be validated on the cluster; these tests pin the routing.
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -115,6 +116,44 @@ class DeviceLocalOrbitsTest(unittest.TestCase):
                 self.orbits, self.xp, primary_device=0)
         self.assertIsNot(rep1, rep2)
         self.assertEqual(len(self.sr._DEVICE_ORBITS_REPLICAS), 2)
+
+
+class WrapDeviceAndOrbitsTest(unittest.TestCase):
+    """The EMRI/SOBBH resolver: run cupy device + per-device orbits, keeping
+    the shared orbits on the primary device (so the wave-wrap cache and the
+    inner id(orbits) generator caches fan out per device)."""
+
+    def setUp(self):
+        try:
+            from lisatools.globalfit.stock.erebor import source_runtime as sr
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"source_runtime not available: {exc}")
+        self.sr = sr
+        sr._DEVICE_ORBITS_REPLICAS.clear()
+        self.addCleanup(sr._DEVICE_ORBITS_REPLICAS.clear)
+        self.xp = RecordingXp()
+        self.orbits = _FakeOrbits(tag="shared")
+        # gpu_orbits only needs an ``xp`` handle (the run's cupy module).
+        self.gi = SimpleNamespace(
+            orbits=self.orbits,
+            gpu_orbits=SimpleNamespace(xp=self.xp),
+            gpus=[0, 1],
+        )
+
+    def test_primary_device_shares_orbits(self):
+        xp, dev, orb = self.sr._wrap_device_and_orbits(self.gi)
+        self.assertIs(xp, self.xp)
+        self.assertEqual(dev, 0)                 # RecordingXp default device
+        self.assertIs(orb, self.orbits)          # primary reuses shared
+        self.assertEqual(len(self.sr._DEVICE_ORBITS_REPLICAS), 0)
+
+    def test_nonprimary_device_gets_replica(self):
+        with self.xp.cuda.Device(1):
+            xp, dev, orb = self.sr._wrap_device_and_orbits(self.gi)
+        self.assertEqual(dev, 1)
+        self.assertIsNot(orb, self.orbits)
+        self.assertIsInstance(orb, _FakeOrbits)
+        self.assertEqual(orb.kwargs["tag"], "shared")
 
 
 if __name__ == "__main__":
