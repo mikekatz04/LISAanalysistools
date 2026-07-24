@@ -10,11 +10,134 @@
 #include "Detector.hpp"
 #include "lat_tdi_on_the_fly.hh"
 
+#include <cstdlib>
+#include <cstring>
+
 #ifdef __CUDACC__
 #define NUM_THREADS_HERE 128
 #else
 #define NUM_THREADS_HERE 1
 #endif
+
+#ifdef __CUDACC__
+// ---------------------------------------------------------------
+// Shared-memory-vs-global scratch launch helpers (GPU only)
+// ---------------------------------------------------------------
+// The td/fd spline kernels stage the phase-extract/unwrap scratch
+// (get_tdi_buffer_size(N) = 21*N bytes) in dynamic shared memory. For large
+// N (dense MBH chirp grids) that overruns the per-block shared budget, so we
+// keep it in shared memory where it fits (opting in past the 48 KB default
+// when the device allows) and fall back to per-block global memory above the
+// device ceiling. See lat_tdi_on_the_fly.cu:get_tdi for the buffer carve.
+
+// Per-block stride into the global-memory scratch fallback. The buffer is
+// carved doubles-first (flip/pjump) in LISATDIonTheFly::get_tdi, so every
+// block's slice must be 8-byte aligned; buffer_length = 21*N is aligned only
+// when N % 8 == 0. Round up to 256 (>= double alignment, matches cudaMalloc
+// granularity). MUST be identical host-side (allocation) and device-side
+// (per-block offset), so it is __host__ __device__.
+__host__ __device__ inline size_t spline_tdi_scratch_stride(int buffer_length)
+{
+    return ((size_t)buffer_length + 255) & ~(size_t)255;
+}
+
+// LISATOOLS_VERBOSE=1 (any non-empty, non-"0" value): print the shared-vs-
+// global launch decision per call. Read once via a function-local static so
+// there is no wrap/Python signature change and it works from every entry
+// point. Matches the project's env-var debug-knob convention (GB_DEBUG=1).
+static bool spline_tdi_verbose()
+{
+    static const bool v = [] {
+        const char *e = std::getenv("LISATOOLS_VERBOSE");
+        return e != nullptr && e[0] != '\0' && std::strcmp(e, "0") != 0;
+    }();
+    return v;
+}
+
+// Max dynamic shared bytes `kernel_func` may opt into on the CURRENT device:
+// the opt-in ceiling minus the kernel's static shared footprint (params_here,
+// link arrays, cub::BlockScan TempStorage). This is the shared-vs-global
+// decision boundary that also guarantees the cudaFuncSetAttribute below is a
+// legal value. Queried per call -- cheap next to the per-call cudaMallocs in
+// these wraps, and correct per-device under multi-GPU runs.
+static size_t spline_tdi_max_dynamic_shared(const void *kernel_func)
+{
+    int device = 0;
+    gpuErrchk(cudaGetDevice(&device));
+    int optin_max = 0;
+    gpuErrchk(cudaDeviceGetAttribute(&optin_max,
+        cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    cudaFuncAttributes attrs;
+    gpuErrchk(cudaFuncGetAttributes(&attrs, kernel_func));
+    return (size_t)optin_max - attrs.sharedSizeBytes;
+}
+
+// Shared scratch-placement decision for the td_spline/fd_spline kernels: keep
+// dynamic shared memory when it fits (default 48 KB, or the device opt-in
+// ceiling after cudaFuncSetAttribute), otherwise allocate a per-block global
+// scratch. Mirrors + completes the GB fix (gb_tdi_on_the_fly.cu, commit
+// 3cbdcf0), which opts in but has no fallback above the device ceiling.
+//
+// Returns the dynamic-shared byte count to launch with; 0 means "use the
+// global fallback" and *d_scratch_out is set to the freshly cudaMalloc'd
+// per-block scratch (caller frees after the launch), else *d_scratch_out is
+// nullptr. `kernel_func` is passed only to cudaFunc{Get,Set}Attribute -- the
+// actual <<<>>> launch stays on the concrete kernel name in each wrap (the
+// codebase's established pattern; see gb_run_wave_tdi_kernel). `tag` names the
+// kernel in verbose output ("td_spline" / "fd_spline").
+static size_t spline_tdi_prepare_scratch(const char *tag, const void *kernel_func,
+    int buffer_length, int N, int num_bin, char **d_scratch_out)
+{
+    const size_t DEFAULT_DYN_SMEM = 48 * 1024;  // default per-block cap, sm_70+
+    size_t shared_bytes = (size_t)buffer_length;
+    *d_scratch_out = nullptr;
+
+    if (shared_bytes <= DEFAULT_DYN_SMEM)
+    {
+        // Legacy fast path: dynamic shared, no opt-in (bit-for-bit unchanged).
+        if (spline_tdi_verbose())
+            fprintf(stderr, "lisatools %s TDI-on-the-fly: N=%d, scratch=%d B "
+                "<= 48 KB default; dynamic shared memory, no opt-in.\n",
+                tag, N, buffer_length);
+        return shared_bytes;
+    }
+
+    const size_t ceiling = spline_tdi_max_dynamic_shared(kernel_func);
+    if (shared_bytes <= ceiling)
+    {
+        // Fast path: opt in to the larger per-block shared cap.
+        if (spline_tdi_verbose())
+            fprintf(stderr, "lisatools %s TDI-on-the-fly: N=%d, scratch=%d B "
+                "> 48 KB default; cudaFuncSetAttribute opt-in "
+                "(device ceiling %zu B), still dynamic shared memory.\n",
+                tag, N, buffer_length, ceiling);
+        gpuErrchk(cudaFuncSetAttribute(kernel_func,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shared_bytes));
+        return shared_bytes;
+    }
+
+    // Slow path: per-block global scratch. One-time notice even without
+    // VERBOSE; every-call detail with it.
+    const size_t stride = spline_tdi_scratch_stride(buffer_length);
+    static bool warned = false;
+    if (spline_tdi_verbose() || !warned)
+    {
+        fprintf(stderr, "lisatools %s TDI-on-the-fly: N=%d, scratch=%d B "
+            "exceeds device dynamic-shared ceiling (%zu B); global-memory "
+            "scratch fallback (%zu B = num_bin %d x %zu B/block; slower).\n",
+            tag, N, buffer_length, ceiling,
+            (size_t)num_bin * stride, num_bin, stride);
+        warned = true;
+    }
+    // Footprint = num_bin x roundup(21*N, 256) -- one slice per block, smaller
+    // than the 3*N*num_bin-double tdi_amp/tdi_phase arrays this call already
+    // fills. If it ever bites, cap the grid at min(num_bin, max_blocks) and
+    // allocate one slice per launched block: run_wave_tdi already grid-strides
+    // bin_i by gridDim.x, so a grid smaller than num_bin is supported as-is.
+    gpuErrchk(cudaMalloc(d_scratch_out, (size_t)num_bin * stride));
+    return 0;
+}
+#endif // __CUDACC__
 
 // ---------------------------------------------------------------
 // FDSplineTDIWaveform::get_tdi (was TDIonTheFly.cu:9660-9689)
@@ -74,12 +197,18 @@ double TDSplineTDIWaveform::get_phase(double t, double *params, int spline_i)
 // ---------------------------------------------------------------
 #ifdef __CUDACC__
 CUDA_KERNEL
-void td_spline_run_wave_tdi_kernel(TDSplineTDIWaveform *tdi_on_fly, int buffer_length, cmplx *tdi_channels_arr, 
-    double *tdi_amp, double *tdi_phase, double *phi_ref, 
+void td_spline_run_wave_tdi_kernel(TDSplineTDIWaveform *tdi_on_fly, int buffer_length, char *global_buffer, cmplx *tdi_channels_arr,
+    double *tdi_amp, double *tdi_phase, double *phi_ref,
     double *params, double *t_arr, int N, int num_bin, int n_params, int nchannels)
 {
     extern CUDA_SHARED char shared_mem[];
-    void *buffer = (void*)shared_mem;
+    // Scratch selection: dynamic shared when the host launched with it
+    // (global_buffer == nullptr), otherwise this block's slice of the global
+    // scratch. run_wave_tdi grid-strides bin_i by gridDim.x, so the blockIdx.x
+    // slice is private to this block across all its bins.
+    void *buffer = (global_buffer != nullptr)
+        ? (void*)(global_buffer + (size_t)blockIdx.x * spline_tdi_scratch_stride(buffer_length))
+        : (void*)shared_mem;
     tdi_on_fly->run_wave_tdi(buffer, buffer_length, tdi_channels_arr, tdi_amp, tdi_phase, phi_ref,
         params, t_arr, N, num_bin, n_params, nchannels);
 }
@@ -116,13 +245,19 @@ void td_spline_run_wave_tdi_wrap(TDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_cha
     cudaMalloc(&d_wave_here, sizeof(TDSplineTDIWaveform));
     gpuErrchk(cudaMemcpy(d_wave_here, wave_here, sizeof(TDSplineTDIWaveform), cudaMemcpyHostToDevice));
 
-    int buffer_length = tdi_on_fly->get_td_spline_buffer_size(N); 
-    
-    td_spline_run_wave_tdi_kernel<<<num_bin, NUM_THREADS_HERE, buffer_length>>>(d_wave_here, buffer_length, tdi_channels_arr, tdi_amp, tdi_phase, phi_ref,
+    int buffer_length = tdi_on_fly->get_td_spline_buffer_size(N);
+
+    char *d_scratch = nullptr;
+    size_t shared_bytes = spline_tdi_prepare_scratch("td_spline",
+        (const void *)td_spline_run_wave_tdi_kernel, buffer_length, N, num_bin, &d_scratch);
+
+    td_spline_run_wave_tdi_kernel<<<num_bin, NUM_THREADS_HERE, shared_bytes>>>(
+        d_wave_here, buffer_length, d_scratch, tdi_channels_arr, tdi_amp, tdi_phase, phi_ref,
         params, t_arr, N, num_bin, n_params, nchannels);
 
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
+    if (d_scratch != nullptr) gpuErrchk(cudaFree(d_scratch));
 
     gpuErrchk(cudaFree(d_orbits));
     gpuErrchk(cudaFree(d_tdi_config));
@@ -216,12 +351,16 @@ double FDSplineTDIWaveform::get_phase_ref(double t, double *params, int bin_i)
 // ---------------------------------------------------------------
 #ifdef __CUDACC__
 CUDA_KERNEL
-void fd_spline_run_wave_tdi_kernel(FDSplineTDIWaveform *tdi_on_fly, int buffer_length, cmplx *tdi_channels_arr, 
-    double *tdi_amp, double *tdi_phase, double *phi_ref, 
+void fd_spline_run_wave_tdi_kernel(FDSplineTDIWaveform *tdi_on_fly, int buffer_length, char *global_buffer, cmplx *tdi_channels_arr,
+    double *tdi_amp, double *tdi_phase, double *phi_ref,
     double *params, double *t_arr, int N, int num_bin, int n_params, int nchannels)
 {
     extern CUDA_SHARED char shared_mem[];
-    void *buffer = (void*)shared_mem;
+    // See td_spline_run_wave_tdi_kernel: shared when launched with it,
+    // otherwise this block's private slice of the global scratch.
+    void *buffer = (global_buffer != nullptr)
+        ? (void*)(global_buffer + (size_t)blockIdx.x * spline_tdi_scratch_stride(buffer_length))
+        : (void*)shared_mem;
     tdi_on_fly->run_wave_tdi(buffer, buffer_length, tdi_channels_arr, tdi_amp, tdi_phase, phi_ref,
         params, t_arr, N, num_bin, n_params, nchannels);
 }
@@ -258,13 +397,19 @@ void fd_spline_run_wave_tdi_wrap(FDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_cha
     cudaMalloc(&d_wave_here, sizeof(FDSplineTDIWaveform));
     gpuErrchk(cudaMemcpy(d_wave_here, wave_here, sizeof(FDSplineTDIWaveform), cudaMemcpyHostToDevice));
 
-    int buffer_length = tdi_on_fly->get_fd_spline_buffer_size(N); 
-    
-    fd_spline_run_wave_tdi_kernel<<<num_bin, NUM_THREADS_HERE, buffer_length>>>(d_wave_here, buffer_length, tdi_channels_arr, tdi_amp, tdi_phase, phi_ref,
+    int buffer_length = tdi_on_fly->get_fd_spline_buffer_size(N);
+
+    char *d_scratch = nullptr;
+    size_t shared_bytes = spline_tdi_prepare_scratch("fd_spline",
+        (const void *)fd_spline_run_wave_tdi_kernel, buffer_length, N, num_bin, &d_scratch);
+
+    fd_spline_run_wave_tdi_kernel<<<num_bin, NUM_THREADS_HERE, shared_bytes>>>(
+        d_wave_here, buffer_length, d_scratch, tdi_channels_arr, tdi_amp, tdi_phase, phi_ref,
         params, t_arr, N, num_bin, n_params, nchannels);
 
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
+    if (d_scratch != nullptr) gpuErrchk(cudaFree(d_scratch));
 
     gpuErrchk(cudaFree(d_orbits));
     gpuErrchk(cudaFree(d_tdi_config));

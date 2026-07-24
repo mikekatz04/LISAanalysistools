@@ -12,8 +12,9 @@
 //   lisa-on-gpu/src/fastlisaresponse/cutils/TDIonTheFly.cu:9659-9774
 //                                                          :9841-9986
 // to LISAanalysistools. lat_spline_tdi_waveform.cu compiles the method
-// bodies + the kernel/wrap host launchers; lisa-on-gpu's CMakeLists
-// copy-compiles it in-place via the LISAResponse.cu pattern.
+// bodies + the kernel/wrap host launchers. LAT's own CPU (.cxx copy) and
+// GPU static libs are the only compilers of this TU -- lisa-on-gpu retired
+// its cutils/ copy-compile at Phase 3L.7n (2026-06-04).
 
 #include "gbt_global.h"
 #include "Detector.hpp"        // Orbits, Vec
