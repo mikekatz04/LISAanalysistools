@@ -29,6 +29,7 @@ _SLL = re.compile(r"source_logL=(-?[\d.eE+-]+)")
 _SNR = re.compile(r"data_snr=([\d.eE+-]+)")
 _ID = re.compile(r"(?<![\w])id=(-?\d+)")
 _MM = re.compile(r"mismatch=([\d.eE+-]+)")
+_TOBS = re.compile(r"tobs_d=([\d.eE+-]+)")
 
 _YR = 31558149.7635456  # YRSID_SI
 
@@ -87,13 +88,14 @@ def main() -> None:
             continue
         rr = float(rrm.group(1))
         sllm, snrm = _SLL.search(line), _SNR.search(line)
-        idm, mmm = _ID.search(line), _MM.search(line)
+        idm, mmm, tbm = _ID.search(line), _MM.search(line), _TOBS.search(line)
         rows.append({
             "rr": rr,
             "logL": float(sllm.group(1)) if sllm else -0.5 * rr,
             "snr": float(snrm.group(1)) if snrm else np.nan,
             "id": int(idm.group(1)) if idm else -1,
             "mm": float(mmm.group(1)) if mmm else np.nan,
+            "tobs": float(tbm.group(1)) if tbm else np.nan,
         })
     if not rows:
         print("[RESULT] null_proof=SKIP reason=no_rows", flush=True)
@@ -111,13 +113,14 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(max(7, 1.15 * n + 2.5), 5.4))
     x = np.arange(n)
     ax.bar(x, rr, color="#2a78d6", zorder=3, width=0.68)
-    # per-bar annotation: mismatch + noiseless logL at injection
+    # per-bar annotation: data SNR + mismatch + noiseless logL at injection
     for xi, r in zip(x, rows):
+        snr = f"SNR {r['snr']:.0f}\n" if np.isfinite(r["snr"]) else ""
         mm = f"mm {r['mm']:.1e}\n" if np.isfinite(r["mm"]) else ""
-        ax.annotate(f"{mm}logL {_fmt(r['logL'])}", (xi, r["rr"]),
+        ax.annotate(f"{snr}{mm}logL {_fmt(r['logL'])}", (xi, r["rr"]),
                     textcoords="offset points", xytext=(0, 3), ha="center",
                     fontsize=7, color="#52514e")
-    # multi-line x labels: catalogue ID, total mass + merger time (MBH), SNR
+    # multi-line x labels: catalogue ID + total mass / merger time (MBH)
     labels = []
     for r in rows:
         parts = [f"ID {r['id']}" if r["id"] >= 0 else "ID ?"]
@@ -125,15 +128,15 @@ def main() -> None:
             mtot, tc = cat[r["id"]]
             parts.append(f"$M_{{tot}}$ {mtot / 1e6:.2f}e6")
             parts.append(f"$t_c$ {tc:.2f} yr")
-        if np.isfinite(r["snr"]):
-            parts.append(f"SNR {r['snr']:.0f}")
         labels.append("\n".join(parts))
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=7.5)
     ax.set_yscale("log")
     ax.set_ylabel(r"raw $\langle r|r\rangle$ at injection")
+    tobs = np.nanmedian([r["tobs"] for r in rows])
+    win = f"  ·  Tobs {tobs:.0f} d ({tobs / 30.44:.1f} mo)" if np.isfinite(tobs) else ""
     ax.set_title(
-        f"{cls} noiseless null at injection  (logL = -0.5 <r|r>)\n"
+        f"{cls} noiseless null at injection  (logL = -0.5 <r|r>){win}\n"
         f"worst <r|r> {rr.max():.2e}   logL {_fmt(-0.5 * rr.max())}   "
         f"{n} source(s)",
         fontsize=11,

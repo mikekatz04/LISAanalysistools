@@ -58,6 +58,14 @@ def main():
     # CHOP_WINDOW, TOBS_TARGET, DT-family defaults).
     fit = erebor.full_year_combined(nwalkers=1, ntemps=1)
     gs = fit.general
+    # Optional analysis-band low-frequency cut (Hz). The general min_freq field
+    # is not env-backed, so honor MIN_FREQ here — useful for probing how much
+    # of an MBH mismatch lives below a given frequency (e.g. the <5e-4 Hz
+    # content the Lagrange-interp legacy response truncates).
+    _mf = os.environ.get("MIN_FREQ")
+    if _mf:
+        gs.min_freq = float(_mf)
+        print(f"[cfg] MIN_FREQ override -> min_freq={gs.min_freq:.3e} Hz", flush=True)
     active = [k for k, v in gs.mojito_source_ids.items() if v]
     print(f"[cfg] data_mode={gs.data_mode} source_ids={gs.mojito_source_ids} "
           f"CHOP_WINDOW={gs.chop_window} DT={gs.dt} "
@@ -156,6 +164,7 @@ def main():
     _src_id = int(_act_ids[0]) if _act_ids else -1
     print(
         f"[RESULT] branch={branch} id={_src_id} "
+        f"tobs_d={gi.Tobs / 86400:.2f} "
         f"data_snr={np.sqrt(abs(d_d)):.4f} dd={d_d:.6e} "
         f"hh={h_h:.6e} dh={d_h.real:.6e} rr={r_r:.6e} overlap={ov:.8f} "
         f"mismatch={1 - ov:.3e} rr_over_dd={r_r / d_d:.3e} "

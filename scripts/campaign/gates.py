@@ -245,11 +245,11 @@ GATES: tuple = (
         checks=(
             Check(
                 id="null-check",
-                command="bash scripts/validation/run_mojito_null_checks.sh EMRI",
+                command="TOBS_MONTHS=6 bash scripts/validation/run_mojito_null_checks.sh EMRI",
                 criteria=(
                     {"metric": "null_rr_dd_EMRI_max", "op": "<=", "value": NULL_BASELINE_2X["EMRI"]},
                 ),
-                notes="3-month window (driver default)",
+                notes="6-month window from data start (long-duration source)",
             ),
             Check(
                 id="null-proof",
@@ -273,10 +273,11 @@ GATES: tuple = (
         checks=(
             Check(
                 id="null-check",
-                command="bash scripts/validation/run_mojito_null_checks.sh SOBHB",
+                command="TOBS_MONTHS=6 bash scripts/validation/run_mojito_null_checks.sh SOBHB",
                 criteria=(
                     {"metric": "null_rr_dd_SOBBH_max", "op": "<=", "value": NULL_BASELINE_2X["SOBBH"]},
                 ),
+                notes="6-month window from data start (long-duration source)",
             ),
             Check(
                 id="null-proof",
