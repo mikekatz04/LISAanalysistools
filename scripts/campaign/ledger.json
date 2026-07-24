@@ -139,10 +139,35 @@
     },
     "t1-gt-vgb": {
       "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
+      "evidence": [
+        "evidence/t1-gt-vgb.log",
+        "evidence/t1-gt-vgb/vgb_mojito_match.png"
+      ],
+      "history": [
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T06:24:57Z"
+        }
+      ],
+      "metrics": {
+        "class": "VGB",
+        "det_snr": 32.27,
+        "f0_mhz": 3.78835,
+        "mismatch": 5.67e-13,
+        "mm_taustar": 5.451e-13,
+        "overlap": 1.0,
+        "rank": 2,
+        "result_class": "VGB",
+        "result_det_snr": 32.27,
+        "result_f0_mhz": 3.78835,
+        "result_mismatch": 5.67e-13,
+        "result_mm_taustar": 5.451e-13,
+        "result_overlap": 1.0,
+        "result_rank": 2,
+        "vgb_mismatch_max": 1.66e-12
+      },
+      "state": "green"
     },
     "t2-composition": {
       "confirmed": [],
@@ -350,6 +375,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T06:20:15Z",
+  "updated": "2026-07-24T06:24:57Z",
   "version": 1
 }
