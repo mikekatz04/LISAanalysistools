@@ -53,6 +53,215 @@
       },
       "state": "green"
     },
+    "t1-alignment": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t1-gt-emri": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t1-gt-gb": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t1-gt-mbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t1-gt-noise": {
+      "confirmed": [],
+      "evidence": [
+        "evidence/t1-gt-noise.log"
+      ],
+      "history": [
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T06:04:44Z"
+        }
+      ],
+      "metrics": {
+        "tests_failed": 0,
+        "tests_ran": 15
+      },
+      "state": "green"
+    },
+    "t1-gt-sobbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t1-gt-vgb": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-composition": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-infra-blank": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-lite-emri": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-lite-gb": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-lite-mbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-lite-noise": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-lite-sobbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-lite-vgb": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t3-gpu-emri": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t3-gpu-gb": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t3-gpu-mbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t3-gpu-sobbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t4-heavy-emri": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t4-heavy-gb": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t4-heavy-mbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t4-heavy-noise": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t4-heavy-sobbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t5-mg-correctness": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t5-mg-scaling": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t6-allsources-2yr": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t6-science-close": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    }
+  },
+  "retired": {
     "t1-mojito-ground-truth": {
       "confirmed": [],
       "evidence": [],
@@ -108,36 +317,8 @@
       "history": [],
       "metrics": {},
       "state": "pending"
-    },
-    "t5-mg-correctness": {
-      "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
-    },
-    "t5-mg-scaling": {
-      "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
-    },
-    "t6-allsources-2yr": {
-      "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
-    },
-    "t6-science-close": {
-      "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
     }
   },
-  "updated": "2026-07-24T02:04:11Z",
+  "updated": "2026-07-24T06:04:44Z",
   "version": 1
 }

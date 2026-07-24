@@ -25,6 +25,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -36,6 +37,73 @@ import parse as P  # noqa: E402
 LEDGER = os.path.join(HERE, "ledger.json")
 EVIDENCE = os.path.join(HERE, "evidence")
 RAW_ROOT = os.path.join(REPO, "gf_output", "campaign")
+LOCK = os.path.join(RAW_ROOT, ".running.lock")
+
+# Laptop CPU budget (user directive): campaign work stays well below 50% of the
+# machine. Enforced three ways — a lockfile so only ONE gate runs at a time,
+# `nice` so an interactive session always outranks campaign work, and every
+# thread pool pinned to 1 in the child env.
+NICE = os.environ.get("CAMPAIGN_NICE", "10")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def _acquire_lock(gate_id: str, force: bool = False):
+    """Refuse to start a second gate while one is running."""
+    os.makedirs(RAW_ROOT, exist_ok=True)
+    if os.path.exists(LOCK):
+        try:
+            with open(LOCK) as f:
+                held = json.load(f)
+        except Exception:
+            held = {}
+        pid = int(held.get("pid", -1))
+        if pid > 0 and _pid_alive(pid):
+            if not force:
+                sys.exit(
+                    f"[campaign] {held.get('gate')} is already running (pid {pid}, "
+                    f"since {held.get('started')}). One gate at a time — wait for it, "
+                    f"or `kill {pid}` first."
+                )
+            print(f"[campaign] --force: taking the lock from pid {pid}")
+        else:
+            print(f"[campaign] clearing stale lock from {held.get('gate')} (pid {pid} gone)")
+    with open(LOCK, "w") as f:
+        json.dump({"gate": gate_id, "pid": os.getpid(), "started": _now()}, f)
+
+
+def _release_lock():
+    try:
+        os.remove(LOCK)
+    except FileNotFoundError:
+        pass
+
+
+def _cpu_snapshot() -> str:
+    """Total CPU% of python processes, as a fraction of the whole machine."""
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pcpu,comm"], capture_output=True, text=True, timeout=10
+        ).stdout
+        total = sum(
+            float(ln.split()[0])
+            for ln in out.splitlines()[1:]
+            if len(ln.split()) > 1 and "python" in ln.split()[1].lower()
+        )
+        ncpu = int(
+            subprocess.run(["sysctl", "-n", "hw.ncpu"], capture_output=True,
+                           text=True, timeout=10).stdout.strip()
+            or 1
+        )
+        return f"{total:.0f}% of one core = {total / ncpu:.0f}% of machine"
+    except Exception:
+        return "unavailable"
 
 
 def _now():
@@ -209,6 +277,8 @@ def cmd_run(args):
     if deps and not args.force:
         print(f"[campaign] warning: deps not green: {deps} (running anyway, "
               f"gate cannot go green until they are)")
+    if not args.dry_run:
+        _acquire_lock(gate.id, force=args.force)
     raw_dir = os.path.join(RAW_ROOT, gate.id)
     os.makedirs(raw_dir, exist_ok=True)
     env = dict(os.environ)
@@ -233,19 +303,25 @@ def cmd_run(args):
             print(f"[campaign] {gate.id}/{ch.id}: manual/aggregation check, skipping run")
             continue
         cmd = ch.command.format(py=sys.executable)
+        # `nice` the whole check so an interactive session always wins the CPU.
+        niced = f"nice -n {NICE} sh -c {shlex.quote(cmd)}"
         print(f"[campaign] {gate.id}/{ch.id}: {cmd}")
         if args.dry_run:
             continue
+        print(f"[campaign]   cpu before: {_cpu_snapshot()}")
+        t0 = time.time()
         log_path = os.path.join(raw_dir, f"{ch.id}.log")
         with open(log_path, "w") as lf:
             proc = subprocess.run(
-                cmd, shell=True, cwd=REPO, env=env,
+                niced, shell=True, cwd=REPO, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
             lf.write(proc.stdout)
         combined.append(proc.stdout)
         tail = "\n".join(proc.stdout.splitlines()[-8:])
         print(tail)
+        print(f"[campaign]   {ch.id} took {time.time() - t0:.0f}s; "
+              f"cpu after: {_cpu_snapshot()}")
         if proc.returncode != 0:
             failed_check = (ch.id, proc.returncode)
             print(f"[campaign] {gate.id}/{ch.id} FAILED (exit {proc.returncode})")
@@ -266,6 +342,7 @@ def cmd_run(args):
     else:
         _record(led, gate, text, [], [os.path.relpath(trimmed, HERE)], "run")
     save_ledger(led)
+    _release_lock()
     cmd_render(args)
 
 
