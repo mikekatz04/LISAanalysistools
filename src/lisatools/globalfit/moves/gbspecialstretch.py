@@ -928,10 +928,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # SNR proxy, not bare amplitude: an edge-on source can
                     # carry the biggest amplitude at a fraction of the
                     # SNR. amp * sqrt(((1+cos^2 i)/2)^2 + cos^2 i) uses the
-                    # sampling coords directly (col 0 = logA, col 4 =
-                    # cos_iota); sky/psi response factors are O(1).
+                    # sampling coords directly (col 4 = cos_iota); sky/psi
+                    # response factors are O(1). Slot 0 is lnA (amplitude
+                    # basis) or distance (distance basis) -> amplitude via
+                    # the run transform either way.
                     c2 = cell_coords[:, 4] ** 2
-                    snr_proxy = np.exp(cell_coords[:, 0]) * np.sqrt(
+                    _amp = _to_numpy(self.transform_fn.both_transforms(
+                        cell_coords))[:, 0]
+                    snr_proxy = _amp * np.sqrt(
                         ((1.0 + c2) / 2.0) ** 2 + c2)
                     target_id = int(cell_ids[np.argmax(snr_proxy)])
                 else:
@@ -3462,7 +3466,18 @@ def para_log_like(
             **waveform_kwargs,
         )
 
-        x[:, 0] = np.log(gb.A_max)
+        # Write the F-stat-maximized (amplitude, phi0, iota, psi) back into
+        # the sampling coords. Slot 0 is lnA in the amplitude basis, but the
+        # DISTANCE basis samples distance there -- convert A_max -> distance
+        # (A propto 1/d: dist = gb_amp_from_dist(f0, Mc, 1) / A_max) or the
+        # maximized amplitude lands out of the distance prior box and every
+        # birth is rejected.
+        if list(getattr(transform_fn, "input_basis", []))[:1] == ["dist"]:
+            from lisatools.globalfit.stock.erebor.transforms import gb_amp_from_dist
+
+            x[:, 0] = gb_amp_from_dist(x[:, 1] * 1e-3, x[:, 2], 1.0) / gb.A_max
+        else:
+            x[:, 0] = np.log(gb.A_max)
         x[:, 3] = gb.phi0_max % (2 * np.pi)
         x[:, 4] = np.cos(gb.iota_max % (np.pi))
         x[:, 5] = gb.psi_max % (np.pi)
