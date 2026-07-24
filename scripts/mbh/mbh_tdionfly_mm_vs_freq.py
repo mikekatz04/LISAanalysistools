@@ -20,7 +20,7 @@ def _wd():
         time.sleep(0.3)
 
 from lisatools.detector import L1Orbits
-from lisatools.globalfit.preprocessing import find_file
+from lisatools.globalfit.preprocessing import find_file, L1DataLoader
 from lisatools.globalfit.recipe import mbh_catalogue_to_sampling_basis
 from lisatools.globalfit.stock.erebor import make_mbh_transform_container
 from lisatools.response.tdiconfig import TDIConfig
@@ -45,6 +45,24 @@ INC = float(os.environ.get("MBH_INC", str(np.pi / 2)))   # edge-on default
 CG_SCALE = float(os.environ.get("MBH_CG_SCALE", "12.0"))  # coarse-grain density (pts/cycle)
 MBH_TRANSFORM = make_mbh_transform_container()
 DATA_CACHE = f"/tmp/mbh_mojito_data_id{MBHB_ID}.npz"
+
+
+def load_cat():
+    """MBH catalogue params for MBHB_ID. Only the catalogue is needed here (A and
+    B are generated fresh), so read it straight from the mojito brick when the
+    /tmp cache is absent -- no full L1 data-stream load. Mirrors the loader's
+    load_single_binary semantics (group[key][id], numeric fields only)."""
+    if os.path.exists(DATA_CACHE):
+        return np.load(DATA_CACHE, allow_pickle=True)["cat"].item()
+    import h5py
+    ld = L1DataLoader(L1_folder=PATH, source_types=["MBHB"],
+                      source_ids={"MBHB": [MBHB_ID]}, verbose=False)
+    catf = os.path.join(ld.catalogues_folder, ld.catalogues_map["MBHB"])
+    print(f"[cat] reading {catf} (id={MBHB_ID})", flush=True)
+    with h5py.File(catf, "r") as f:
+        b = f["Binaries"]
+        return {k: float(np.asarray(b[k][MBHB_ID])) for k in b.keys()
+                if np.asarray(b[k][MBHB_ID]).dtype.kind in "fi"}
 
 
 def banner(s): print("\n" + "=" * 78 + f"\n {s}\n" + "=" * 78, flush=True)
@@ -104,7 +122,7 @@ def gen_B(wave_gen, orbit, wf, window_t0, N_WIN, dur_s):
 def main():
     threading.Thread(target=_wd, daemon=True).start()
     banner(f"A-vs-B TDI mismatch vs FREQUENCY (id={MBHB_ID}, inc={INC:.4f})")
-    z = np.load(DATA_CACHE, allow_pickle=True); cat = z["cat"].item()
+    cat = load_cat()
     wf = np.asarray(MBH_TRANSFORM.both_transforms(
         np.asarray(mbh_catalogue_to_sampling_basis(cat), float)), float)
     wf[6] = INC
