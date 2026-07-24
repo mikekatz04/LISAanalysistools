@@ -266,6 +266,11 @@ def asnumpy(arr) -> np.ndarray:
         return arr
     if hasattr(arr, "get"):  # cupy.ndarray, multi-GPU views, etc.
         return arr.get()
+    if isinstance(arr, (list, tuple)):
+        # Containers of device arrays (e.g. a ResponseWrapper's list of
+        # TDI channels): np.asarray would trip cupy's implicit-conversion
+        # guard on the elements, so pull each to host first.
+        return np.asarray([asnumpy(a) for a in arr])
     return np.asarray(arr)
 
 
