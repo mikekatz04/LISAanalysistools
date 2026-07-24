@@ -138,6 +138,7 @@ def _card(gate, entry, base_dir):
     parts = [f'<div class="card {cls}">']
     parts.append(
         f'<span class="badge"><span class="ic">{ic}</span>{html.escape(label)}</span>'
+        f'<span class="where">{html.escape(gate.branch)}</span>'
         f'<span class="where">{gate.where}</span>'
     )
     parts.append(f'<div class="gid">{gate.id}</div>')

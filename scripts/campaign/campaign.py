@@ -57,6 +57,10 @@ def save_ledger(led):
             {"state": "pending", "metrics": {}, "evidence": [], "history": [],
              "confirmed": []},
         )
+    # DAG restructures rename gates; park entries whose id no longer exists so
+    # their evidence/history stay findable without cluttering the dashboard.
+    for gid in [k for k in led["gates"] if k not in G.GATES_BY_ID]:
+        led.setdefault("retired", {})[gid] = led["gates"].pop(gid)
     with open(LEDGER, "w") as f:
         json.dump(led, f, indent=2, sort_keys=True)
         f.write("\n")
