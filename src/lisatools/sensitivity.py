@@ -2968,7 +2968,33 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
     def _setup_det_and_inv(self):
         """use the c++ backend to compute the log-determinant and inverse of the sensitivity matrix."""
         c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(self.sens_mat, flatten=True)
-        self.invC, self.detC = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
+        invC, detC = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
+
+        # Sanitize pixels the noise model / 3x3 inverse cannot represent.
+        # The analytic instrument-noise model diverges as f -> 0 (Sa_d ~
+        # (2*pi*f)^-4, Soms_d ~ (2e-3/f)^4), so the WDM f=0 layer inverts to
+        # inf/NaN; a singular XYZ covariance does the same. Physically these
+        # are infinite-noise pixels carrying zero information, so give them
+        # zero inverse-covariance weight and a unit determinant (zero
+        # log-det contribution) -- the likelihood stays finite and those
+        # pixels simply don't contribute. On empirical (mojito NOISE-brick)
+        # PSDs every pixel is finite, so this is a no-op there.
+        xp = self.xp
+        bad = ~xp.isfinite(invC)
+        if bool(xp.any(bad)):
+            n_bad = int(xp.count_nonzero(bad))
+            invC = xp.where(bad, xp.zeros_like(invC), invC)
+            logger.warning(
+                "sensitivity invC: zeroed %d non-finite element(s) "
+                "(infinite-noise / singular-covariance pixels -> zero "
+                "weight; expected for the analytic-PSD f=0 WDM layer).",
+                n_bad,
+            )
+        det_bad = ~xp.isfinite(detC) | (detC <= 0)
+        if bool(xp.any(det_bad)):
+            detC = xp.where(det_bad, xp.ones_like(detC), detC)
+
+        self.invC, self.detC = invC, detC
 
     def _inverse_det_wrapper(
         self,
