@@ -1435,6 +1435,32 @@ class SensitivityMatrixBase:
             mat_axes_rev = full_shape_rev[len(self.data_shape):]
             transpose_shape_rev = mat_axes_rev + basis_axes_rev
             self._invC = invC.transpose(transpose_shape_rev)
+
+        # Sanitize pixels the noise model / matrix inverse cannot represent.
+        # The analytic instrument-noise model diverges as f -> 0 (Sa_d ~
+        # (2*pi*f)^-4, Soms_d ~ (2e-3/f)^4), so the WDM f=0 layer carries inf
+        # covariance entries. ``xp.linalg.inv`` does NOT raise on inf/NaN
+        # input -- it silently returns inf/NaN -- so the LinAlgError guard
+        # above never fires and the non-finite inverse reaches the
+        # likelihood as -inf. Physically these are infinite-noise pixels
+        # carrying zero information: give them zero inverse-covariance
+        # weight (and a unit determinant, i.e. no log-det contribution) so
+        # the likelihood stays finite and they simply drop out. On empirical
+        # (mojito NOISE-brick) PSDs every pixel is finite -> no-op.
+        bad = ~xp.isfinite(self._invC)
+        if bool(xp.any(bad)):
+            n_bad = int(xp.count_nonzero(bad))
+            self._invC = xp.where(bad, xp.zeros_like(self._invC), self._invC)
+            logger.warning(
+                "sensitivity invC: zeroed %d non-finite element(s) "
+                "(infinite-noise / singular-covariance pixels -> zero "
+                "weight; expected for the analytic-PSD f=0 WDM layer).",
+                n_bad,
+            )
+        det_bad = ~xp.isfinite(self._detC)
+        if bool(xp.any(det_bad)):
+            self._detC = xp.where(det_bad, xp.ones_like(self._detC), self._detC)
+
         self._inv_det_dirty = False
             
     @property
