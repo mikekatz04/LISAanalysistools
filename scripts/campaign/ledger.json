@@ -210,22 +210,64 @@
     "t1-gt-emri": {
       "confirmed": [],
       "evidence": [
-        "evidence/t1-gt-emri.log"
+        "evidence/t1-gt-emri.log",
+        "evidence/t1-gt-emri/emri_null_residual.png"
       ],
       "history": [
         {
           "note": "run: criteria unmet: null_rr_dd_EMRI_max missing (wanted <= 0.0012); null_proof_ok missing (wanted == 1)",
           "state": "red",
           "ts": "2026-07-24T08:28:26Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T09:01:52Z"
         }
       ],
       "metrics": {
-        "null_proof": "SKIP",
+        "branch": "emri",
+        "data_snr": 4.7943,
+        "dd": 22.98577,
+        "dh": 23.04305,
+        "emri_mismatch_max": 0.000359,
+        "hh": 23.11706,
+        "id": 1,
+        "mismatch": 0.000359,
+        "n_sources": 1,
+        "null_proof": "ok",
+        "null_proof_ok": 1,
+        "null_rr_dd_EMRI_max": 0.0007281,
+        "overlap": 0.99964104,
+        "plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-gt-emri/emri_null_residual.png",
         "reason": "no_rows",
-        "result_null_proof": "SKIP",
-        "result_reason": "no_rows"
+        "result_branch": "emri",
+        "result_data_snr": 4.7943,
+        "result_dd": 22.98577,
+        "result_dh": 23.04305,
+        "result_hh": 23.11706,
+        "result_id": 1,
+        "result_mismatch": 0.000359,
+        "result_n_sources": 1,
+        "result_null_proof": "ok",
+        "result_null_proof_ok": 1,
+        "result_overlap": 0.99964104,
+        "result_plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-gt-emri/emri_null_residual.png",
+        "result_reason": "no_rows",
+        "result_rr": 0.01673613,
+        "result_rr_over_dd": 0.0007281,
+        "result_source_logL": -0.008368064,
+        "result_worst_logL_noiseless": -0.008368065,
+        "result_worst_rr": 0.01673613,
+        "result_xcheck": "True",
+        "rr": 0.01673613,
+        "rr_over_dd": 0.0007281,
+        "source_logL": -0.008368064,
+        "worst_logL_noiseless": -0.008368065,
+        "worst_rr": 0.01673613,
+        "xcheck": "True"
       },
-      "state": "red"
+      "state": "green"
     },
     "t1-gt-gb": {
       "confirmed": [],
@@ -573,7 +615,21 @@
       "metrics": {},
       "state": "pending"
     },
+    "t3-gpu-noise": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
     "t3-gpu-sobbh": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t3-gpu-vgb": {
       "confirmed": [],
       "evidence": [],
       "history": [],
@@ -702,6 +758,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T08:56:16Z",
+  "updated": "2026-07-24T09:01:52Z",
   "version": 1
 }
