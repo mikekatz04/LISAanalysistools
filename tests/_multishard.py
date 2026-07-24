@@ -109,6 +109,7 @@ class FakeMultiShardACA:
                  dtype=complex):
         self.xp = RecordingXp()
         self.acs_total_entries = int(num_acs)
+        self._num_acs = int(num_acs)
         self.gpus = list(range(num_shards))
         if layout == "striped":
             self.gpu_map = np.array(
@@ -165,6 +166,11 @@ class FakeMultiShardACA:
             buf.reshape((len(rows),) + self.per_band_shape)
             for buf, rows in zip(self.linear_psd_arr, self.gpu_splits)
         ]
+
+    def __len__(self):
+        # Mirror AnalysisContainerArray.__len__ (== number of containers):
+        # the engines read len(holder) as num_data/num_noise.
+        return self._num_acs
 
     def reference_rows(self):
         """(num_acs, *per_band_shape) reference in global row order."""

@@ -36,6 +36,9 @@ class _StubEngine:
     def fill_template(self, holder, params_phys, params_index, N_vals, *,
                       factor, waveform_kwargs, **kwargs):
         assert len(holder.linear_data_arr) == 1, "engine must see one shard"
+        # Real engines read len(holder) as num_data/num_noise -- exercise the
+        # __len__ dunder so a missing one fails HERE, not on the cluster.
+        assert len(holder) == holder.acs_total_entries
         self._record(
             "fill", holder,
             intra=np.asarray(params_index).copy(),
@@ -49,6 +52,7 @@ class _StubEngine:
     def get_ll(self, holder, params_phys, *, data_index, noise_index,
                N_vals, phase_maximize=False, waveform_kwargs, **kwargs):
         assert len(holder.linear_data_arr) == 1
+        assert len(holder) == holder.acs_total_entries
         intra = np.asarray(data_index)
         dev = holder.gpus[0] if holder.gpus is not None else 0
         self._record("get_ll", holder, intra=intra.copy(),
@@ -66,6 +70,7 @@ class _StubEngine:
         from gbgpu.gb_likelihood import SwapLLResult
 
         assert len(holder.linear_data_arr) == 1
+        assert len(holder) == holder.acs_total_entries
         intra = np.asarray(data_index).astype(float)
         dev = holder.gpus[0] if holder.gpus is not None else 0
         n = len(intra)
@@ -228,8 +233,16 @@ class ShardRouterTest(unittest.TestCase):
         view = self.ShardView(self.holder, 1)
         self.assertEqual(len(view.linear_data_arr), 1)
         self.assertIs(view.linear_data_arr[0], self.holder.linear_data_arr[1])
+        self.assertEqual(len(view.linear_psd_arr), 1)
+        self.assertEqual(len(view.data_shaped), 1)
         self.assertEqual(view.acs_total_entries,
                          len(self.holder.gpu_splits[1]))
+        # ``len(view)`` is what the chunked-het / gb_likelihood engines read
+        # as ``num_data``/``num_noise``. It MUST be an explicit dunder --
+        # len() resolves __len__ on the type, bypassing __getattr__
+        # delegation -- and must equal the shard's cell count.
+        self.assertEqual(len(view), len(self.holder.gpu_splits[1]))
+        self.assertEqual(len(view), view.acs_total_entries)
         self.assertEqual(view.gpus, [1])
         np.testing.assert_array_equal(
             view.start_freq_ind,

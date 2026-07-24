@@ -310,9 +310,20 @@ class _ShardHolderView:
             arr = np.asarray(asnumpy(sfi))
             self._start_freq_ind_view = arr[self._rows] if arr.ndim else arr
 
+    def __len__(self) -> int:
+        # The engines read ``len(holder)`` as the shard's row (cell) count
+        # -> ``num_data``/``num_noise`` for the flat single-shard buffer.
+        # MUST be an explicit dunder: ``len()`` resolves ``__len__`` on the
+        # TYPE, bypassing ``__getattr__`` delegation, so a parent-forwarded
+        # ``__len__`` is never seen. Mirrors AnalysisContainerArray.__len__
+        # (== the number of containers on this split).
+        return int(self.acs_total_entries)
+
     def __getattr__(self, name):
         # Guard dunder/underscore probing (deepcopy/pickle safety rule);
         # delegate the public long tail (settings, df, nchannels, ...).
+        # NOTE: implicitly-invoked dunders (len(), iter(), ...) resolve on
+        # the type and never reach here -- define each one explicitly above.
         if name.startswith("_"):
             raise AttributeError(name)
         return getattr(self._parent, name)
