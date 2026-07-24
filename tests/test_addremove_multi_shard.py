@@ -22,17 +22,34 @@ except ImportError:
     from _multishard import FakeMultiShardACA
 
 
+class _FakeData:
+    """Residual-array stand-in recording the sign + device of each apply."""
+
+    def __init__(self, xp):
+        self._xp = xp
+        self.applied = []  # list of (sign, device)
+
+    def add_signal(self, sig, sign):
+        self.applied.append((sign, self._xp.current_device))
+
+
 class _FakeAC:
-    """Container stand-in recording the device its likelihood ran under."""
+    """Container stand-in recording the device its ops ran under."""
 
     def __init__(self, row, xp):
         self.row = row
         self._xp = xp
-        self.seen_devices = []
+        self.seen_devices = []       # calculate_signal_likelihood
+        self.built_devices = []      # build_template
+        self.data = _FakeData(xp)
 
     def calculate_signal_likelihood(self, params_dict, **kwargs):
         self.seen_devices.append(self._xp.current_device)
         return float(self.row)
+
+    def build_template(self, params_dict, **kwargs):
+        self.built_devices.append(self._xp.current_device)
+        return ("sig", self.row)
 
 
 class _FakeIndexableACA(FakeMultiShardACA):
@@ -42,6 +59,11 @@ class _FakeIndexableACA(FakeMultiShardACA):
 
     def __getitem__(self, i):
         return self._acs[int(i)]
+
+    def _signal_on_device(self, sig, gpu):
+        # Real ACA migrates the array; the fake just records nothing and
+        # returns it (device residency is exercised via the context stack).
+        return sig
 
 
 class ComputeAcsLikeShardTest(unittest.TestCase):
@@ -114,6 +136,53 @@ class ComputeAcsLikeShardTest(unittest.TestCase):
         ll = self.MoveCls.compute_acs_like(self.fake_move, coords, data_index)
         self.assertEqual(ll[0], -1e300)
         self.assertEqual(ll[1], 4.0)
+
+
+class ApplyColdChainShardTest(unittest.TestCase):
+    """`_apply_cold_chain_sources` builds + applies each walker's template
+    INSIDE its owning device context (the serial per-walker loop that
+    previously made source moves identical on 1 vs 2 GPU)."""
+
+    NUM_ACS = 6
+    NUM_SHARDS = 2
+
+    def setUp(self):
+        try:
+            from lisatools.globalfit.moves.addremovemove import (
+                ResidualAddOneRemoveOneMove)
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"addremovemove not available: {exc}")
+        self.MoveCls = ResidualAddOneRemoveOneMove
+
+    def _run(self, run_threaded):
+        acs = _FakeIndexableACA((3, 4), self.NUM_ACS, self.NUM_SHARDS,
+                                layout="blocked", run_threaded=run_threaded)
+        fake_move = SimpleNamespace(
+            acs=acs,
+            branch_name="emri",
+            _resolve_signal_gen_override=lambda ac: None,
+            _branch_waveform_kwargs=lambda: {},
+        )
+        coords = np.zeros((self.NUM_ACS, 4))
+        self.MoveCls._apply_cold_chain_sources(fake_move, coords, sign=-1)
+        return acs
+
+    def test_serial_builds_and_applies_on_owning_device(self):
+        acs = self._run(run_threaded=False)
+        for i in range(self.NUM_ACS):
+            ac = acs[i]
+            dev = int(acs.gpu_map[i])
+            self.assertEqual(ac.built_devices, [dev])       # built on its device
+            self.assertEqual(ac.data.applied, [(-1, dev)])  # applied there, sign -1
+
+    def test_threaded_builds_and_applies_on_owning_device(self):
+        acs = self._run(run_threaded=True)
+        for i in range(self.NUM_ACS):
+            ac = acs[i]
+            dev = int(acs.gpu_map[i])
+            self.assertEqual(ac.built_devices, [dev])
+            self.assertEqual(ac.data.applied, [(-1, dev)])
+        self.assertEqual(set(acs.xp.device_log), {0, 1})    # both shards entered
 
 
 class _StubComputationGroup:

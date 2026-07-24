@@ -735,32 +735,64 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         than a single source's waveform in memory.
         """
         import gc
-        for i in range(coords.shape[0]):
-            ac = self.acs[int(i)]
+
+        # Shard-aware (2026-07 multi-GPU pass): group the cold-chain walkers by
+        # owning ACA split and build+apply each group's templates INSIDE that
+        # device context. Generation is device-local (per-device generator +
+        # domain-settings replicas) and the residual view it writes lives on the
+        # same device, so the shards run CONCURRENTLY when the ACA is
+        # run_threaded -- this is the serial per-walker loop that previously
+        # made the source moves identical on 1 vs 2 GPU. gc/pool-free run once
+        # per shard (not per walker), keeping peak RAM to one live template per
+        # device while dropping the per-walker gc cost.
+        def _worker(split, rows):
+            dev = (
+                None if self.acs.gpus is None
+                else int(self.acs.gpus[int(split)])
+            )
+            with device_context(self.acs.xp, dev):
+                for i in rows:
+                    ii = int(i)
+                    ac = self.acs[ii]
+                    try:
+                        sig = ac.build_template(
+                            {self.branch_name: coords[ii]},
+                            waveform_kwargs=self._branch_waveform_kwargs(),
+                            signal_gen=self._resolve_signal_gen_override(ac),
+                            apply_transform=False,
+                        )
+                    except WaveformDomainError as exc:
+                        # A current-state source outside the waveform's domain
+                        # of validity (e.g. a bad start point). Deterministic,
+                        # so the add and remove passes skip identically: its
+                        # template is zero, matching its -1e300 sentinel.
+                        logger.warning(
+                            "%s cold-chain walker %d is outside the waveform "
+                            "domain; treating its template as zero: %s",
+                            self.branch_name,
+                            ii,
+                            exc,
+                        )
+                        continue
+                    # Migrate the template onto the owning device (no-op when it
+                    # was already generated there) and add it in place, mirroring
+                    # AnalysisContainerArray.signal_operation's per-row worker.
+                    if dev is not None:
+                        sig = self.acs._signal_on_device(sig, dev)
+                    ac.data.add_signal(sig, sign=sign)
+                    del sig
+                gc.collect()
+                _free_pool()
+
+        split_to_rows = self.acs._split_rows(np.arange(int(coords.shape[0])))
+        if self.acs.gpus is None:
+            self.acs._run_per_split(_worker, split_to_rows)
+        else:
+            main_gpu = self.acs.xp.cuda.runtime.getDevice()
             try:
-                sig = ac.build_template(
-                    {self.branch_name: coords[i]},
-                    waveform_kwargs=self._branch_waveform_kwargs(),
-                    signal_gen=self._resolve_signal_gen_override(ac),
-                    apply_transform=False,
-                )
-            except WaveformDomainError as exc:
-                # A current-state source outside the waveform's domain of
-                # validity (e.g. a bad start point). Deterministic, so the
-                # add and remove passes skip identically: its template is
-                # zero, matching its -1e300 likelihood sentinel.
-                logger.warning(
-                    "%s cold-chain walker %d is outside the waveform domain; "
-                    "treating its template as zero: %s",
-                    self.branch_name,
-                    i,
-                    exc,
-                )
-                continue
-            self.acs.signal_operation(sign, [sig], data_index=np.array([i]))
-            del sig
-            gc.collect()
-            _free_pool()
+                self.acs._run_per_split(_worker, split_to_rows)
+            finally:
+                self.acs.xp.cuda.runtime.setDevice(main_gpu)
 
     def add_back_in_cold_chain_sources(self, coords):
         """Subtract current cold-chain sources from the residual (one walker at a time)."""
