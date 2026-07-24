@@ -67,7 +67,10 @@ def main() -> None:
     layer_idx = np.where(np.asarray(wdm.frequency_layer_mask))[0]
     freqs = layer_idx * float(wdm.layer_df)  # center freq of each active layer
     nch = arr.shape[0]
-    chan = (["A", "E", "T"][:nch] if nch == 3 else [str(i) for i in range(nch)])
+    # Stock run frame is XYZ (the mojito data and GB comp are tdi_type="XYZ"),
+    # so the sensitivity diagonal is XX/YY/ZZ. XX≈YY≈ZZ is the XYZ signature
+    # (in AET the T channel would sit well below the A/E pair).
+    chan = (["X", "Y", "Z"][:nch] if nch == 3 else [str(i) for i in range(nch)])
 
     # --- figure: per-channel measured sqrt(PSD) vs frequency ---------------
     fig, ax = plt.subplots(figsize=(9, 5.2))

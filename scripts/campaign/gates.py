@@ -154,6 +154,58 @@ GATES: tuple = (
         proof_plots=("vgb_mojito_match.png",),
     ),
     Gate(
+        id="t1-fastlike-gb",
+        tier=1,
+        branch="gb",
+        title="GB fast likelihood ≡ AnalysisContainer",
+        objective=(
+            "The fast GB WDM chunked-heterodyne likelihood matches the "
+            "AnalysisContainer likelihood — the chain-of-custody link tying the "
+            "in-sampler fast path back to the data-level checks."
+        ),
+        where="laptop",
+        depends_on=("t1-gt-gb",),
+        checks=(
+            Check(
+                id="gb-fastlike-vs-ac",
+                command=(
+                    "{py} scripts/campaign/runners/fastlike_vs_ac.py --branch gb --topn 3"
+                ),
+                criteria=(
+                    {"metric": "fastlike_max_reldiff", "op": "<=", "value": 1e-4},
+                    {"metric": "fastlike_sources", "op": ">=", "value": 3},
+                ),
+                notes="3 highest-frequency mojito GB sources; d_h & h_h fast vs AC",
+            ),
+        ),
+        proof_plots=("fastlike_gb*.png",),
+    ),
+    Gate(
+        id="t1-fastlike-vgb",
+        tier=1,
+        branch="vgb",
+        title="VGB fast likelihood ≡ AnalysisContainer",
+        objective=(
+            "The fast VGB WDM likelihood matches the AnalysisContainer "
+            "likelihood for the verification binaries."
+        ),
+        where="laptop",
+        depends_on=("t1-gt-vgb",),
+        checks=(
+            Check(
+                id="vgb-fastlike-vs-ac",
+                command=(
+                    "{py} scripts/campaign/runners/fastlike_vs_ac.py --branch vgb --topn 3"
+                ),
+                criteria=(
+                    {"metric": "fastlike_max_reldiff", "op": "<=", "value": 1e-4},
+                    {"metric": "fastlike_sources", "op": ">=", "value": 3},
+                ),
+            ),
+        ),
+        proof_plots=("fastlike_vgb*.png",),
+    ),
+    Gate(
         id="t1-gt-mbh",
         tier=1,
         branch="mbh",

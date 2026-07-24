@@ -60,6 +60,20 @@
       "metrics": {},
       "state": "pending"
     },
+    "t1-fastlike-gb": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t1-fastlike-vgb": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
     "t1-gt-emri": {
       "confirmed": [],
       "evidence": [],
@@ -102,6 +116,11 @@
           "note": "run: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-24T06:20:15Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T06:45:36Z"
         }
       ],
       "metrics": {
@@ -375,6 +394,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T06:24:57Z",
+  "updated": "2026-07-24T06:45:36Z",
   "version": 1
 }
