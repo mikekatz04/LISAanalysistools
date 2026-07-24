@@ -1925,10 +1925,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                  + band_sorter.walker_inds) * num_bands
                 + band_sorter.band_inds
             )
-            cell_counts = xp.bincount(
-                flat_all[band_sorter.inds],
-                minlength=self.ntemps * self.nwalkers * num_bands,
-            )
+            # Guard empty input: numpy.bincount([]) returns zeros, but
+            # CuPy's bincount computes max(x) first and raises on a
+            # zero-size array (the zero-leaf search start hits this on GPU).
+            _alive_cells = flat_all[band_sorter.inds]
+            _nbins = self.ntemps * self.nwalkers * num_bands
+            if _alive_cells.shape[0] == 0:
+                cell_counts = xp.zeros(_nbins, dtype=xp.int64)
+            else:
+                cell_counts = xp.bincount(_alive_cells, minlength=_nbins)
             cell_flat = (
                 (picked["temp_inds"].astype(xp.int64) * self.nwalkers
                  + picked["walker_inds"]) * num_bands
