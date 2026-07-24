@@ -49,8 +49,14 @@ def f_ms_to_s(x):
     return x * 1e-3
 
 
-def build_fixture(seed=42):
-    """Small FD global-fit fixture with K_SOURCES live GBs per walker."""
+def build_fixture(seed=42, use_fdot_astro=False):
+    """Small FD global-fit fixture with K_SOURCES live GBs per walker.
+
+    ``use_fdot_astro`` builds the 9-column ratio basis (``[A, f0, Mc, phi0,
+    cos_iota, psi, alpha, sin_delta, fdot_astro_ratio]``) via the real
+    :func:`make_gb_transform_container` factory, so the move-propose flow is
+    exercised in the same basis the stock chirp-mass+astro-prior run walks.
+    """
     from gbgpu.gbgpu import GBGPU
 
     from eryn.moves.tempering import TemperatureControl
@@ -92,29 +98,54 @@ def build_fixture(seed=42):
     # excluded from proposals by the move.
     f0_prior_lo = (band_edges[1] + 0.2 * band_width) * 1e3   # mHz
     f0_prior_hi = (band_edges[N_BANDS - 1] - 0.2 * band_width) * 1e3
-    priors_in = {
-        0: uniform_dist(np.log(5e-22), np.log(1e-20)),
-        1: uniform_dist(f0_prior_lo, f0_prior_hi),
-        2: uniform_dist(-1e-13, 1e-13),
-        3: uniform_dist(0.0, 2 * np.pi),
-        4: uniform_dist(-1, 1),
-        5: uniform_dist(0.0, np.pi),
-        6: uniform_dist(0.0, 2 * np.pi),
-        7: uniform_dist(-1, 1),
-    }
-    priors = {"gb": ProbDistContainer(priors_in)}
+    ndim = 9 if use_fdot_astro else NDIM
+    ratio_max = 5.0
+    mc_lims = (0.001, 1.0)
+    if use_fdot_astro:
+        # Real 9-column ratio-basis factory: col 2 = Mc (modest box keeps
+        # fdot_gr*(1+r) inside the fixture band), col 8 = r ~ U[-M, M]
+        # (r < -1 gives fdot < 0, exercising the interacting branch).
+        from lisatools.globalfit.stock.erebor.transforms import (
+            make_gb_transform_container,
+        )
 
-    transform = TransformContainer(
-        input_basis=["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"],
-        output_basis=["A", "f0", "fdot", "fddot", "phi0", "cos_iota", "psi", "lam", "sin_beta"],
-        parameter_transforms={
-            "A": np.exp,
-            "f0": f_ms_to_s,
-            "cos_iota": np.arccos,
-            "sin_beta": np.arcsin,
-        },
-        fill_dict={"fddot": 0.0},
-    )
+        priors_in = {
+            0: uniform_dist(np.log(5e-22), np.log(1e-20)),
+            1: uniform_dist(f0_prior_lo, f0_prior_hi),
+            2: uniform_dist(0.15, 0.45),           # Mc [Msol]
+            3: uniform_dist(0.0, 2 * np.pi),
+            4: uniform_dist(-1, 1),
+            5: uniform_dist(0.0, np.pi),
+            6: uniform_dist(0.0, 2 * np.pi),
+            7: uniform_dist(-1, 1),
+            8: uniform_dist(-ratio_max, ratio_max),  # fdot_astro_ratio
+        }
+        transform = make_gb_transform_container(
+            use_chirp_mass=True, use_fdot_astro=True, mc_lims=mc_lims,
+        )
+    else:
+        priors_in = {
+            0: uniform_dist(np.log(5e-22), np.log(1e-20)),
+            1: uniform_dist(f0_prior_lo, f0_prior_hi),
+            2: uniform_dist(-1e-13, 1e-13),
+            3: uniform_dist(0.0, 2 * np.pi),
+            4: uniform_dist(-1, 1),
+            5: uniform_dist(0.0, np.pi),
+            6: uniform_dist(0.0, 2 * np.pi),
+            7: uniform_dist(-1, 1),
+        }
+        transform = TransformContainer(
+            input_basis=["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"],
+            output_basis=["A", "f0", "fdot", "fddot", "phi0", "cos_iota", "psi", "lam", "sin_beta"],
+            parameter_transforms={
+                "A": np.exp,
+                "f0": f_ms_to_s,
+                "cos_iota": np.arccos,
+                "sin_beta": np.arcsin,
+            },
+            fill_dict={"fddot": 0.0},
+        )
+    priors = {"gb": ProbDistContainer(priors_in)}
     waveform_kwargs = dict(dt=dt, T=Tobs, tdi_channel_setup="XYZ")
 
     nchan = 3
@@ -141,7 +172,7 @@ def build_fixture(seed=42):
     acs = AnalysisContainerArray(acs_list, gpus=None, complex_psd=True)
 
     # K_SOURCES live sources per walker, identical across temperatures.
-    gb_coords = np.zeros((NTEMPS, NWALKERS, NLEAVES_MAX, NDIM))
+    gb_coords = np.zeros((NTEMPS, NWALKERS, NLEAVES_MAX, ndim))
     gb_inds = np.zeros((NTEMPS, NWALKERS, NLEAVES_MAX), dtype=bool)
     for w in range(NWALKERS):
         draws = priors["gb"].rvs(size=K_SOURCES)
@@ -183,7 +214,7 @@ def build_fixture(seed=42):
     )
     move_args = (gb, priors, ind_lo, acs.data_length, acs, band_edges, band_N_vals, priors)
 
-    tc = TemperatureControl(NDIM, NWALKERS, betas=betas)
+    tc = TemperatureControl(ndim, NWALKERS, betas=betas)
 
     return dict(
         gb=gb, priors=priors, transform=transform, acs=acs, model=model,
@@ -278,10 +309,26 @@ class BufferIdentityTest(unittest.TestCase):
 
 @unittest.skipUnless(_have_gbgpu(), "requires gbgpu")
 class ProposeFlowTest(unittest.TestCase):
+    USE_FDOT_ASTRO = False
+
+    def _fixture(self):
+        return build_fixture(use_fdot_astro=self.USE_FDOT_ASTRO)
+
+    def _assert_basis(self, state):
+        gb = np.asarray(state.branches["gb"].coords)
+        exp = 9 if self.USE_FDOT_ASTRO else 8
+        self.assertEqual(gb.shape[-1], exp)
+        if self.USE_FDOT_ASTRO:
+            # fdot_astro_ratio (col 8) stays inside the U[-M, M] prior box
+            inds = np.asarray(state.branches["gb"].inds)
+            r = gb[..., 8][inds]
+            if r.size:
+                self.assertTrue(np.all(np.abs(r) <= 5.0 + 1e-9))
+
     def test_rj_propose(self):
         from lisatools.globalfit.moves.gbspecialstretch import GBSpecialRJPriorMove
 
-        fx = build_fixture()
+        fx = self._fixture()
         move = GBSpecialRJPriorMove(
             *fx["move_args"], is_rj_prop=True, name="rj_flow",
             **{**fx["move_kwargs"], "rj_proposal_distribution": fx["priors"]},
@@ -292,6 +339,7 @@ class ProposeFlowTest(unittest.TestCase):
         new_state, accepted = move.propose(fx["model"], fx["state"])
 
         self.assertTrue(np.all(np.isfinite(new_state.log_like)))
+        self._assert_basis(new_state)
         # every eligible source visited exactly once -> RJ proposals recorded
         band_info = new_state.sub_states["gb"].band_info
         self.assertGreater(int(band_info["band_num_proposed_rj"].sum()), 0)
@@ -302,7 +350,7 @@ class ProposeFlowTest(unittest.TestCase):
     def test_in_model_propose_two_passes(self):
         from lisatools.globalfit.moves.gbspecialstretch import GBSpecialStretchMove
 
-        fx = build_fixture()
+        fx = self._fixture()
         move = GBSpecialStretchMove(
             *fx["move_args"], is_rj_prop=False, name="stretch_flow",
             stretch_probability=0.5,
@@ -313,6 +361,7 @@ class ProposeFlowTest(unittest.TestCase):
 
         state_1, _ = move.propose(fx["model"], fx["state"])
         self.assertTrue(np.all(np.isfinite(state_1.log_like)))
+        self._assert_basis(state_1)
         # source count must be unchanged by a pure in-model move
         self.assertEqual(
             int(state_1.branches["gb"].inds.sum()),
@@ -324,6 +373,17 @@ class ProposeFlowTest(unittest.TestCase):
         self.assertGreater(
             int(state_2.sub_states["gb"].band_info["band_num_proposed"].sum()), 0
         )
+
+
+@unittest.skipUnless(_have_gbgpu(), "requires gbgpu")
+class ProposeFlowFdotAstroTest(ProposeFlowTest):
+    """The same propose flow on the 9-column fdot_astro ratio basis.
+
+    Exercises the info-matrix Cholesky (with the ratio row zeroed) and the
+    RJ birth/death with fdot<0 (interacting) templates from ratio < -1.
+    """
+
+    USE_FDOT_ASTRO = True
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 # Authors: The scikit-learn developers
 # SPDX-License-Identifier: BSD-3-Clause
 
+import typing
 import warnings
 from abc import ABCMeta, abstractmethod
 from numbers import Integral, Real
@@ -2278,8 +2279,9 @@ def fit_gb_gmm_rj_container(
     max_comp: int = 30,
     n_samp_bic_test: int = 5000,
     verbose: bool = False,
+    fdot_astro_ratio_max: typing.Optional[float] = None,
 ):
-    """Per-group GB samples -> batched GMM -> 8-column RJ birth container.
+    """Per-group GB samples -> batched GMM -> 8/9-column RJ birth container.
 
     The standalone "samples -> batched GMM container" entry point: the
     guard checks + :func:`vec_fit_gmm_min_bic` fit + eryn container assembly
@@ -2295,6 +2297,11 @@ def fit_gb_gmm_rj_container(
         use_chirp_mass: Column 2's meaning: ``False`` -> legacy ``fdot``
             basis, ``True`` -> chirp-mass basis (``Mc`` slot), matching the
             run's ``GBSettings.use_chirp_mass``.
+        fdot_astro_ratio_max: When not ``None``, append a 9th
+            ``fdot_astro_ratio`` column drawn from ``U[-M, M]`` (the
+            fdot_astro ratio basis; the GMM still fits only the 6 intrinsic
+            columns, births draw the ratio from its prior). ``None`` ->
+            8-column container.
         use_cupy: Array module of the returned container (match the run
             backend).
         gpu: GPU device index for the fit (``None`` -> CPU).
@@ -2344,17 +2351,20 @@ def fit_gb_gmm_rj_container(
     )
 
     third = "Mc" if use_chirp_mass else "fdot"
-    rj_dist = ProbDistContainer(
-        {
-            ("A", "f0", third, "cos_iota", "alpha", "sin_delta"): full_gmm,
-            "phi0": UniformDistribution(0.0, 2.0 * np.pi),
-            "psi": UniformDistribution(0.0, np.pi),
-        },
-        use_cupy=use_cupy,
-    )
-    rj_dist.reset_key_order(
-        ["A", "f0", third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
-    )
+    priors_in = {
+        ("A", "f0", third, "cos_iota", "alpha", "sin_delta"): full_gmm,
+        "phi0": UniformDistribution(0.0, 2.0 * np.pi),
+        "psi": UniformDistribution(0.0, np.pi),
+    }
+    key_order = ["A", "f0", third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+    if fdot_astro_ratio_max is not None:
+        # 9th column: births draw the fdot_astro ratio from its U[-M, M]
+        # prior (the GMM did not fit it -- degenerate with Mc under F-stat).
+        M = float(fdot_astro_ratio_max)
+        priors_in["fdot_astro_ratio"] = UniformDistribution(-M, M)
+        key_order.append("fdot_astro_ratio")
+    rj_dist = ProbDistContainer(priors_in, use_cupy=use_cupy)
+    rj_dist.reset_key_order(key_order)
     return rj_dist
 
 

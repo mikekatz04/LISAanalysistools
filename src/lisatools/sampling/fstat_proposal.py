@@ -856,8 +856,9 @@ class UniformFloorMixture:
         return xp.where(xp.isnan(out), -xp.inf, out)
 
 
-def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False):
-    """Wrap a 4-D intrinsic proposal into the 8-column GB RJ birth container.
+def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False,
+                               fdot_astro_ratio_max=None):
+    """Wrap a 4-D intrinsic proposal into the 8/9-column GB RJ birth container.
 
     Mirrors the stock GMM birth container
     (``gbspecialstretch.GBSpecialRJRefitMove.setup``): the intrinsics
@@ -865,8 +866,9 @@ def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False):
     tuple key; ``lnA`` and the remaining extrinsics come from the stock
     prior uniforms (the band engines re-maximize phi0 analytically when
     ``phase_maximize`` is on). Returns an eryn ``ProbDistContainer`` whose
-    ``rvs(size) -> (size, 8)`` / ``logpdf((n, 8)) -> (n,)`` match what
-    ``BandSorter`` expects of ``rj_proposal_distribution["gb"]``.
+    ``rvs(size) -> (size, N)`` / ``logpdf((n, N)) -> (n,)`` match what
+    ``BandSorter`` expects of ``rj_proposal_distribution["gb"]``
+    (``N = 8``, or ``9`` with ``fdot_astro_ratio_max``).
 
     Args:
         intrinsic_dist: 4-D distribution over the intrinsic sampling basis
@@ -874,23 +876,29 @@ def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False):
         A_lims: ``[A_min, A_max]`` physical amplitude limits
             (``GBSettings.A_lims``); lnA is drawn uniform in ``log(A_lims)``.
         use_cupy: Match the run backend (False for CPU runs).
+        fdot_astro_ratio_max: When not ``None``, append a 9th
+            ``fdot_astro_ratio`` column drawn from ``U[-M, M]`` (births draw
+            the ratio from its prior; it is degenerate with Mc under the
+            F-stat). ``None`` -> 8-column container.
     """
     from eryn.priors import ProbDistContainer, UniformDistribution
 
-    dist = ProbDistContainer(
-        {
-            "A": UniformDistribution(*np.log(np.asarray(A_lims, dtype=float))),
-            ("f0", "Mc", "alpha", "sin_delta"): intrinsic_dist,
-            "phi0": UniformDistribution(0.0, 2.0 * np.pi),
-            "cos_iota": UniformDistribution(-1.0, 1.0),
-            "psi": UniformDistribution(0.0, np.pi),
-        },
-        use_cupy=use_cupy,
-    )
+    priors_in = {
+        "A": UniformDistribution(*np.log(np.asarray(A_lims, dtype=float))),
+        ("f0", "Mc", "alpha", "sin_delta"): intrinsic_dist,
+        "phi0": UniformDistribution(0.0, 2.0 * np.pi),
+        "cos_iota": UniformDistribution(-1.0, 1.0),
+        "psi": UniformDistribution(0.0, np.pi),
+    }
+    key_order = ["A", "f0", "Mc", "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+    if fdot_astro_ratio_max is not None:
+        M = float(fdot_astro_ratio_max)
+        priors_in["fdot_astro_ratio"] = UniformDistribution(-M, M)
+        key_order.append("fdot_astro_ratio")
+    dist = ProbDistContainer(priors_in, use_cupy=use_cupy)
     # reset_key_order re-maps rvs/logpdf columns to the sampler layout
     # (a bare ``key_order = [...]`` assignment would NOT re-map).
-    dist.reset_key_order(["A", "f0", "Mc", "phi0", "cos_iota", "psi",
-                          "alpha", "sin_delta"])
+    dist.reset_key_order(key_order)
     return dist
 
 

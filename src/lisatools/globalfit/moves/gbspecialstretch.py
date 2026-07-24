@@ -492,9 +492,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._fdot_col = next(
                 (_ib.index(_k) for _k in ("fdot", "Mc") if _k in _ib), None
             )
+            # 9th column of the fdot_astro ratio basis (None otherwise).
+            self._fdot_astro_col = (
+                _ib.index("fdot_astro_ratio") if "fdot_astro_ratio" in _ib
+                else None
+            )
         else:
             # legacy GB layout when no container is supplied
             self._f0_col, self._fdot_col, self._phi0_col = 1, 2, 3
+            self._fdot_astro_col = None
         # Per-leaf fill metadata (Eryn per-leaf fill_dict): position of f0
         # among the fill keys + the (nleaves, n_fill) value table, for band
         # assignment when f0 is not a sampled column.
@@ -2129,7 +2135,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             xp.abs(evals).max(axis=-1, keepdims=True), 1e-300
         )
         evals = xp.maximum(xp.abs(evals), floor)
-        return evecs / xp.sqrt(evals)[:, None, :]
+        chol = evecs / xp.sqrt(evals)[:, None, :]
+        if self._fdot_astro_col is not None:
+            # fdot_astro_ratio is likelihood-degenerate with Mc (both enter
+            # only through the product fdot_gr(Mc)*(1+r)) and its test_inds
+            # target is the dead fddot slot, so the diagonal-Jacobian
+            # information matrix carries NO real curvature for it -- the
+            # eigen-floor would otherwise hand it an arbitrary huge jump.
+            # Zero its proposal row so the info-matrix Gaussian leaves it
+            # fixed; the in-model group-stretch component (symmetric, all
+            # ndim columns) explores the (Mc, r) ridge. A tailored on-ridge
+            # proposal is a documented follow-up.
+            chol[:, self._fdot_astro_col, :] = 0.0
+        return chol
 
     def in_model_proposal(self, coords, chol, band_sorter, source_ids, model):
         """Default in-model proposal: group-stretch / info-matrix mix.
@@ -3595,6 +3613,21 @@ def _gb_sampling_third_name(move) -> str:
     return "Mc" if "Mc" in ib else "fdot"
 
 
+def _gb_fdot_astro_ratio_max(move):
+    """Half-width M of the U[-M, M] fdot_astro_ratio prior, or None.
+
+    Read off the move's own run prior so RJ-birth / GMM-refit containers
+    append the 9th column with the SAME bounds the sampler walks in
+    (``None`` for the 8-column bases). Independent of the move subclass.
+    """
+    if getattr(move, "_fdot_astro_col", None) is None:
+        return None
+    priors = getattr(move, "priors", None)
+    cont = priors.get(move.branch_name) if isinstance(priors, dict) else None
+    d = getattr(cont, "priors_in", {}).get("fdot_astro_ratio") if cont else None
+    return float(d.maximum) if d is not None else None
+
+
 
 from lisatools.sampling.gmm import fit_gb_gmm_rj_container
 
@@ -3606,6 +3639,53 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
     band-restricted prior via :class:`PriorTransformFn`.
     """
     comm_info = None
+
+    def _third_col_search_bounds(self, f0_max):
+        """(min, max) arrays for the sampling-basis third column vs f0_max.
+
+        Legacy fdot basis: the f-dependent ``get_fdot_mojito`` envelopes.
+        Chirp-mass basis: the flat ``m_chirp_lims`` box (the F-stat search
+        maximizes over the whole chirp-mass range) -- read off the run's Mc
+        prior (GMM ``mc_lims`` or the uniform's bounds). Fixing the third
+        column to the RIGHT quantity is the pre-existing chirp-mass search
+        bug (fdot bounds were being written into the Mc slot).
+        """
+        if _gb_sampling_third_name(self) != "Mc":
+            return get_fdot_mojito(f0_max, sign="-"), get_fdot_mojito(f0_max, sign="+")
+        pr = self.priors[self.branch_name].priors_in
+        gmm = pr.get(("f0", "Mc"))
+        if gmm is not None and getattr(gmm, "mc_lims", None) is not None:
+            lo, hi = gmm.mc_lims
+        elif "Mc" in pr:
+            lo, hi = float(pr["Mc"].minimum), float(pr["Mc"].maximum)
+        else:
+            lo, hi = 0.001, 1.0
+        return np.full_like(f0_max, float(lo)), np.full_like(f0_max, float(hi))
+
+    def _band_restricted_priors_in(self, priors_global):
+        """priors_in with the f0 + third columns swapped for unit-cube uniforms.
+
+        Preserves the run's column layout (string-key column = dict
+        insertion order): the joint ``("f0", "Mc")`` GMM (or the legacy
+        single ``f0``/``fdot`` keys) is replaced IN PLACE by two
+        band-restricted unit-cube singles, so ``PriorTransformFn`` maps
+        columns 1 and 2 back to physical. Every other prior -- crucially the
+        9th ``fdot_astro_ratio`` U[-M, M] -- is carried through unchanged.
+        """
+        third = _gb_sampling_third_name(self)
+        uc = self.backend.uses_cupy
+        src = deepcopy(priors_global)[self.branch_name].priors_in
+        out = {}
+        for key, dist in src.items():
+            if key in ("f0", "fdot", "Mc", ("f0", "Mc"), ("f0", "fdot")):
+                # Emit the two band-restricted singles once, at the position
+                # of the first f0/third key (keeps columns 1 and 2).
+                if "f0" not in out:
+                    out["f0"] = UniformDistribution(0.0, 1.0, use_cupy=uc)
+                    out[third] = UniformDistribution(0.0, 1.0, use_cupy=uc)
+            else:
+                out[key] = dist
+        return out
 
     def setup(self, model, branches):
         assert isinstance(self.search_kwargs, dict)
@@ -3660,17 +3740,21 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         logger.info(f"The current number of active bands is {ngroups}")
 
-        fdot_max = get_fdot_mojito(f0_max, sign="+")
-        fdot_min = get_fdot_mojito(f0_max, sign="-")
+        # Band-restricted proposal bounds for the f0 + third columns. The
+        # third column is fdot (legacy basis) or Mc (chirp-mass): its
+        # PriorTransformFn range must match what it actually holds --
+        # f-dependent fdot envelopes vs the flat chirp-mass box (the latter
+        # was the pre-existing chirp-mass search bug). The 9th
+        # fdot_astro_ratio column keeps its real U[-M, M] prior untouched
+        # (drawn from prior, not band-remapped).
+        third_min, third_max = self._third_col_search_bounds(f0_max)
 
-        priors_in = deepcopy(priors_global)[self.branch_name].priors_in
-        priors_in["f0"] = UniformDistribution(0.0, 1.0, use_cupy=self.backend.uses_cupy)
-        priors_in["fdot"] = UniformDistribution(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        priors_in = self._band_restricted_priors_in(priors_global)
         priors = {
             self.branch_name: ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
         }
         start_params = priors[self.branch_name].rvs(size=(ngroups, ntemps, nwalkers))
-        prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, fdot_min, fdot_max)
+        prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, third_min, third_max)
         prior_transform_fn.transform_from_prior_basis(start_params, self.xp.arange(ngroups))
 
         #? print("phase maximizing here right now (?)")
@@ -3697,8 +3781,16 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         #     *ll_args
         # )
 
-        gibbs_sampling_setup = np.ones(8, dtype=bool)
-        gibbs_sampling_setup[np.array([0, 3, 4, 5])] = False
+        # Stage 1 (F-stat MCMC): search f0 + intrinsic sky; A/phi0/cos_iota/
+        # psi are analytically maximized (off). The fdot_astro_ratio column
+        # (if present) is ALSO off -- the F-stat is exactly flat along the
+        # (Mc, ratio) split, so it is held at its prior-drawn birth value
+        # and refined by stage 2 / the in-model stretch.
+        gibbs_sampling_setup = np.ones(ndim, dtype=bool)
+        _off = [0, 3, 4, 5]
+        if self._fdot_astro_col is not None:
+            _off.append(self._fdot_astro_col)
+        gibbs_sampling_setup[np.array(_off)] = False
         para_sampler = ParaEnsembleSampler(
             ndim,
             nwalkers,
@@ -3742,7 +3834,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         #     .reshape(samples.shape[:-1])
         # )
         check_real_ll, opt_snr = para_log_like(
-            samples.reshape(-1, 8), *ll_args_2, fstat=False, return_snr=True
+            samples.reshape(-1, samples.shape[-1]), *ll_args_2, fstat=False, return_snr=True
         )
         check_real_ll = asnumpy(check_real_ll.reshape(samples.shape[:-1]))
         opt_snr = asnumpy(opt_snr.reshape(samples.shape[:-1]))
@@ -3770,15 +3862,18 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         start_params_2 = np.tile(samples[-1][groups_running_now, None], (1, ntemps, 1, 1))
         # Maybe not start from maximized values?
-        gibbs_sampling_setup_2 = np.ones(8, dtype=bool)
+        # Stage 2 (full-likelihood refine): sample all columns INCLUDING
+        # fdot_astro_ratio (it explores the degenerate (Mc, ratio) ridge
+        # here); only phi0 drops out when phase-maximizing.
+        gibbs_sampling_setup_2 = np.ones(ndim, dtype=bool)
         if ll_args_2[4]: # phase_maximization
             gibbs_sampling_setup_2[np.array([3])] = False
 
         prior_transform_fn_2 = PriorTransformFn(
             f0_min[groups_running_now] * 1e3,
             f0_max[groups_running_now] * 1e3,
-            fdot_min[groups_running_now],
-            fdot_max[groups_running_now],
+            third_min[groups_running_now],
+            third_max[groups_running_now],
         )
         ngroups_2 = groups_running_now.sum().item()
         # prior_transform_fn_2.transform_from_prior_basis(start_params_2, self.xp.arange(ngroups_2))
@@ -3847,6 +3942,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
                 use_chirp_mass=_gb_sampling_third_name(self) == "Mc",
                 use_cupy=True,
                 gpu=self.xp.cuda.runtime.getDevice(),
+                fdot_astro_ratio_max=_gb_fdot_astro_ratio_max(self),
             )
         except ValueError as e:
             logger.warning(f"GB search GMM fit skipped: {e}")
@@ -4043,17 +4139,22 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         # (use_chirp_mass runs) -- the refitted chains are in the run's
         # sampling basis, so the container's key map must follow it.
         _third = _gb_sampling_third_name(self)
-        rj_dist = ProbDistContainer(
-            {
-                ("A", "f0", _third, "cos_iota", "alpha", "sin_delta"): full_gmm,
-                "phi0": UniformDistribution(0.0, 2 * np.pi),
-                "psi": UniformDistribution(0.0, np.pi),
-            },
-            use_cupy=True,
-        )
-        rj_dist.reset_key_order(
-            ["A", "f0", _third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
-        )
+        _refit_priors = {
+            ("A", "f0", _third, "cos_iota", "alpha", "sin_delta"): full_gmm,
+            "phi0": UniformDistribution(0.0, 2 * np.pi),
+            "psi": UniformDistribution(0.0, np.pi),
+        }
+        _key_order = ["A", "f0", _third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+        _ratio_max = _gb_fdot_astro_ratio_max(self)
+        if _ratio_max is not None:
+            # 9th column: refit births draw the fdot_astro ratio from its
+            # U[-M, M] prior (the GMM fit only the 6 intrinsic columns).
+            _refit_priors["fdot_astro_ratio"] = UniformDistribution(
+                -_ratio_max, _ratio_max
+            )
+            _key_order.append("fdot_astro_ratio")
+        rj_dist = ProbDistContainer(_refit_priors, use_cupy=True)
+        rj_dist.reset_key_order(_key_order)
         self.rj_proposal_distribution = {self.branch_name: rj_dist}
 
 

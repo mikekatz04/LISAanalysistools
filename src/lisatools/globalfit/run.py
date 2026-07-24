@@ -39,7 +39,7 @@ from eryn.utils.plot import PlotContainer
 from contextlib import nullcontext as _nullcontext
 
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from ..utils.device import pin_main_device
+from ..utils.device import device_context, pin_main_device
 from ..utils.utility import asnumpy
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings, Setup
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
@@ -430,6 +430,22 @@ class GlobalFit:
             # up artifacts, before the first save_step.)
             if getattr(backend, "initialized", False) and getattr(backend, "iteration", 0) > 0:
                 state = backend.get_last_sample()  # .get_a_sample(0)
+                # Guard against resuming a backend whose per-branch sampled
+                # dimensionality no longer matches the run config -- the most
+                # likely cause is toggling GB_USE_ASTROPHYSICAL_F0_MC_PRIOR /
+                # GB_USE_CHIRP_MASS (8 <-> 9 column GB basis) between runs.
+                for _name, _nd in self.curr.ndims.items():
+                    _coords = getattr(state, "branches_coords", {}).get(_name)
+                    if _coords is not None and _coords.shape[-1] != _nd:
+                        raise ValueError(
+                            f"Cannot resume {backend_path!r}: branch {_name!r} "
+                            f"stored with ndim {_coords.shape[-1]} but the run "
+                            f"config expects {_nd}. For GB this usually means "
+                            f"GB_USE_ASTROPHYSICAL_F0_MC_PRIOR / "
+                            f"GB_USE_CHIRP_MASS differ from the stored run "
+                            f"(8-col vs 9-col fdot_astro_ratio basis). Start a "
+                            f"fresh backend or match the original config."
+                        )
 
         if state is None and self.curr.general_info.past_file_for_start is not None:
             # THIS DOES A DIRECT RESTART FROM AN OLD FILE, NO STATISTICAL GENERATION
@@ -733,8 +749,31 @@ class GlobalFit:
             )
             ll_source_only = False
 
-        acs_tmp = []
-        for w in range(self.nwalkers):
+        # Walker -> owning device, mirroring AnalysisContainerArray's
+        # contiguous ``np.array_split`` (analysiscontainer.py). Each walker's
+        # data + sensitivity is then BUILT on the device that will own its
+        # shard, so no later op touches an array resident on another device.
+        # Without this the whole per-walker sensitivity (forward sens_mat,
+        # detC) is allocated on the current device (gpus[0]) while the ACA
+        # assigns half the walkers to gpus[1], and every subsequent read
+        # (diagnostic.py noise term, domains.py residual add, the linalg.inv
+        # batch) silently trips cupy's automatic peer access -- slow, and a
+        # hard failure on nodes without P2P.
+        _gpus_for_split = general_info.gpus
+        _walker_device = {}
+        if _gpus_for_split is not None and len(_gpus_for_split) > 1:
+            for _s, _blk in enumerate(
+                np.array_split(np.arange(self.nwalkers), len(_gpus_for_split))
+            ):
+                for _w in _blk:
+                    _walker_device[int(_w)] = int(_gpus_for_split[_s])
+
+        def _build_walker_ac(w):
+            """Build walker ``w``'s AnalysisContainer (data + sensitivity).
+
+            Called inside the walker's owning-device context so every array
+            is allocated on the device that will hold its shard.
+            """
             data_res_arr = deepcopy(general_info.input_data_residual_array)
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
@@ -777,16 +816,17 @@ class GlobalFit:
                     f"walker_{w}", **general_info.fixed_psd_kwargs
                 )
 
-            acs_tmp.append(
-                (
-                    _analysis_tmp := AnalysisContainer(
-                        deepcopy(data_res_arr),
-                        deepcopy(sens_here),
-                        signal_gen=dict(signal_gen_map) if signal_gen_map else None,
-                        likelihood_source_only=ll_source_only,
-                    )
-                )
+            return AnalysisContainer(
+                deepcopy(data_res_arr),
+                deepcopy(sens_here),
+                signal_gen=dict(signal_gen_map) if signal_gen_map else None,
+                likelihood_source_only=ll_source_only,
             )
+
+        acs_tmp = []
+        for w in range(self.nwalkers):
+            with device_context(xp, _walker_device.get(w)):
+                acs_tmp.append(_build_walker_ac(w))
 
         gpus = general_info.gpus
         if gpus is not None and len(gpus) > 1 and self.nwalkers % len(gpus) != 0:
@@ -824,42 +864,48 @@ class GlobalFit:
             # fact correctly configured.
             handled_by_signal_gen = set(signal_gen_map)
             for w, ac in enumerate(acs.flatten()):
-                gen_map = getattr(ac, "_signal_gen", None)
-                if not isinstance(gen_map, dict):
-                    continue  # this walker's branches use the fallback below
-                params = {}
-                params_pre_transformed = []
-                for name in self.curr.engine_info.branch_names:
-                    if name in ("psd", "galfor") or name not in gen_map:
-                        continue
-                    inds_w = state.branches_inds[name][0, w]
-                    if not inds_w.any():
-                        continue
-                    rows = state.branches_coords[name][0, w][inds_w]
-                    tf = getattr(self.curr.source_info.get(name), "transform", None)
-                    if getattr(tf, "n_leaf_fills", None) is not None:
-                        # PER-LEAF transform fills (e.g. EMRI xI0): the leaf
-                        # identity of each row is needed, so pre-transform
-                        # here and hand the generator waveform-basis rows.
-                        leaf_ids = np.where(inds_w)[0]
-                        params_pre_transformed.append(
-                            (name, tf.both_transforms(rows, leaf_inds=leaf_ids))
-                        )
-                    else:
-                        params[name] = rows
-                handled_by_signal_gen.update(params.keys())
-                handled_by_signal_gen.update(
-                    name for name, _ in params_pre_transformed
-                )
-                if params:
-                    template = ac.build_template(params)
-                    # breakpoint()  # debug hook: inspect template vs ac.data here
-                    ac.data.add_signal(template, sign=-1)
-                for name, phys_rows in params_pre_transformed:
-                    template = ac.build_template(
-                        {name: phys_rows}, apply_transform=False
+                # Generate + subtract this walker's templates on the device
+                # that owns its shard: ``ac.data`` is a view into the ACA's
+                # shard buffer (on gpus[split]), so building the template and
+                # the in-place ``add_signal`` (domains.py residual add) both
+                # run on that device -- no cross-device peer access.
+                with device_context(xp, _walker_device.get(w)):
+                    gen_map = getattr(ac, "_signal_gen", None)
+                    if not isinstance(gen_map, dict):
+                        continue  # this walker's branches use the fallback below
+                    params = {}
+                    params_pre_transformed = []
+                    for name in self.curr.engine_info.branch_names:
+                        if name in ("psd", "galfor") or name not in gen_map:
+                            continue
+                        inds_w = state.branches_inds[name][0, w]
+                        if not inds_w.any():
+                            continue
+                        rows = state.branches_coords[name][0, w][inds_w]
+                        tf = getattr(self.curr.source_info.get(name), "transform", None)
+                        if getattr(tf, "n_leaf_fills", None) is not None:
+                            # PER-LEAF transform fills (e.g. EMRI xI0): the leaf
+                            # identity of each row is needed, so pre-transform
+                            # here and hand the generator waveform-basis rows.
+                            leaf_ids = np.where(inds_w)[0]
+                            params_pre_transformed.append(
+                                (name, tf.both_transforms(rows, leaf_inds=leaf_ids))
+                            )
+                        else:
+                            params[name] = rows
+                    handled_by_signal_gen.update(params.keys())
+                    handled_by_signal_gen.update(
+                        name for name, _ in params_pre_transformed
                     )
-                    ac.data.add_signal(template, sign=-1)
+                    if params:
+                        template = ac.build_template(params)
+                        # breakpoint()  # debug hook: inspect template vs ac.data here
+                        ac.data.add_signal(template, sign=-1)
+                    for name, phys_rows in params_pre_transformed:
+                        template = ac.build_template(
+                            {name: phys_rows}, apply_transform=False
+                        )
+                        ac.data.add_signal(template, sign=-1)
 
             # stft_tof fallback for branches without a registered generator.
             # TODO: add a vgb signal_gen rebuild hook — the per-leaf fill

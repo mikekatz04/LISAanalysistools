@@ -140,7 +140,11 @@ class GBNoFgGBSettings(GBSettings):
     # unless set explicitly.
 
     # -- shape / sampling --
-    ndim: int = 8
+    # None (default) -> resolved at build in ``prepare_gb_branch`` to 8, or
+    # 9 when ``use_fdot_astro`` (use_chirp_mass and
+    # use_astrophysical_f0_mc_prior) appends the ``fdot_astro_ratio``
+    # column. Explicit int wins (e.g. a downstream override).
+    ndim: typing.Optional[int] = None
     nleaves_min: int = 0
     # None (default) -> resolved at build to 2x the number of catalogue
     # sources inside the SAMPLED central band (the f0 prior span). The RJ
@@ -400,6 +404,11 @@ def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
     if not gb.fdot_lims:
         fdot_max_val = get_fdot(gb.f0_lims[-1], Mc=gb.m_chirp_lims[-1])
         gb.fdot_lims = [-fdot_max_val, fdot_max_val]
+    if gb.ndim is None:
+        # 9-parameter sampling basis adds the fdot_astro_ratio column iff
+        # the astrophysical-prior package is on (single source of truth:
+        # GBSettings.use_fdot_astro). See gb.py init_sampling_info.
+        gb.ndim = 8 + int(getattr(gb, "use_fdot_astro", False))
 
     is_fd = isinstance(domain_settings, FDSettings)
     layer_df = 1.0 / (2 * general_setup.domain_settings.Nf * gb.dt) if not is_fd else None
@@ -781,26 +790,30 @@ class GBNoForegroundGlobalFit(EreborFit):
                 sampling = sampling.reshape(-1, sampling.shape[-1])
             rows = sampling[subset_inds].copy()
             # gb_catalogue_to_sampling_basis returns FDOT-basis rows by
-            # contract; chirp-mass runs sample Mc in slot 2 -- convert
-            # (same as setup_state_for_injection). TODO(fdot<0):
-            # interacting DWDs have no GW-relation Mc; clamped at the
-            # prior floor (mis-modeled) until the (f0, fdot) proposal
-            # basis lands.
-            if getattr(info, "use_chirp_mass", False):
-                from gbgpu.utils.utility import get_chirp_mass_from_f_fdot
+            # contract; map onto the run's sampling basis (Mc + optional
+            # fdot_astro_ratio) with the transform's own conventions. The
+            # 9-col ratio basis represents fdot<=0 sources exactly; the
+            # 8-col Mc basis still floor-clamps them (mis-modeled).
+            _use_fa = getattr(info, "use_fdot_astro", False)
+            _use_cm = getattr(info, "use_chirp_mass", False)
+            if _use_cm:
+                from ....recipe import gb_fdot_rows_to_run_basis
 
-                _mc_lims = list(info.m_chirp_lims) or [0.001, 1.0]
-                f0_hz = rows[:, 1] * 1e-3
-                fdot = rows[:, 2]
-                mc = np.full_like(fdot, float(_mc_lims[0]))
-                _pos = fdot > 0
-                mc[_pos] = get_chirp_mass_from_f_fdot(f0_hz[_pos], fdot[_pos])
-                rows[:, 2] = np.clip(mc, float(_mc_lims[0]), float(_mc_lims[-1]))
-                if int((~_pos).sum()):
+                _nneg = int((rows[:, 2] <= 0).sum())
+                rows = gb_fdot_rows_to_run_basis(
+                    rows, use_chirp_mass=_use_cm, use_fdot_astro=_use_fa,
+                    m_chirp_lims=info.m_chirp_lims,
+                )
+                if _nneg and _use_fa:
+                    logger.info(
+                        "GB seeding: %d fdot<=0 source(s) represented via "
+                        "fdot_astro_ratio (~ -2).", _nneg,
+                    )
+                elif _nneg:
                     logger.warning(
                         "GB seeding: %d fdot<=0 source(s) clamped to the Mc "
-                        "floor (mis-modeled; see the fdot<0 TODO).",
-                        int((~_pos).sum()),
+                        "floor (mis-modeled; enable the astrophysical prior "
+                        "for the fdot_astro_ratio basis).", _nneg,
                     )
         info.injection = rows
         info.injection_subset_inds = np.asarray(subset_inds)

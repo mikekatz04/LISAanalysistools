@@ -1068,6 +1068,52 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     return sampled
 
 
+def gb_fdot_rows_to_run_basis(rows, *, use_chirp_mass, use_fdot_astro,
+                              m_chirp_lims):
+    """Convert FDOT-basis GB rows (slot 2 = fdot) to the run's sampling basis.
+
+    ``gb_catalogue_to_sampling_basis`` returns rows with physical ``fdot`` in
+    slot 2 by contract; the run may sample a different slot-2 axis. This maps
+    the seeding rows onto whatever the run actually samples, using the SAME
+    conventions as ``make_gb_transform_container`` (single source of truth):
+
+    * ``use_fdot_astro`` (9-col Mc + ``fdot_astro_ratio``): the mirror
+      convention of :class:`~...transforms.McFdotAstroRatioTripleInverse` --
+      ``Mc = clip(Mc_GW(f0, |fdot|), m_chirp_lims)`` and
+      ``r = fdot / fdot_gr(f0, Mc) - 1`` appended as a new last column.
+      Represents interacting ``fdot <= 0`` systems EXACTLY (seeds at
+      ``r ~ -2``), resolving the historical fdot<0 mis-modeling.
+    * ``use_chirp_mass`` only (8-col Mc, no ratio): fdot cannot carry a sign,
+      so ``fdot <= 0`` sources are clamped to the Mc floor (the legacy
+      behavior; still mis-modeled -- only the 9-col basis fixes it).
+    * legacy fdot basis: returned unchanged.
+
+    ``rows`` is not mutated; a converted copy is returned.
+    """
+    rows = np.array(rows, dtype=float, copy=True)
+    mc_lims = list(m_chirp_lims) if m_chirp_lims else [0.001, 1.0]
+    if use_fdot_astro:
+        from .stock.erebor.transforms import McFdotAstroRatioTripleInverse
+
+        f0_hz = rows[:, 1] * 1e-3
+        fdot = rows[:, 2]
+        _, mc, ratio = McFdotAstroRatioTripleInverse(tuple(mc_lims))(
+            f0_hz, fdot, np.zeros_like(fdot)
+        )
+        rows[:, 2] = mc
+        rows = np.concatenate([rows, ratio[..., None]], axis=-1)
+    elif use_chirp_mass:
+        from gbgpu.utils.utility import get_chirp_mass_from_f_fdot
+
+        f0_hz = rows[:, 1] * 1e-3
+        fdot = rows[:, 2]
+        mc = np.full_like(fdot, float(mc_lims[0]))
+        _pos = fdot > 0
+        mc[_pos] = get_chirp_mass_from_f_fdot(f0_hz[_pos], fdot[_pos])
+        rows[:, 2] = np.clip(mc, float(mc_lims[0]), float(mc_lims[-1]))
+    return rows
+
+
 def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None, priors: ProbDistContainer | None = None):
     """Initialize 'branch_name' walkers from catalogue injection parameters"""
 
@@ -1090,37 +1136,31 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
             injection_params_list.append(sampling_params)
 
         injection_params = np.array(injection_params_list)
-        
-        ndim = state.branches_coords[branch_name].shape[-1]
+
+        # Reshape by the PRODUCED row width (the catalogue basis), NOT the
+        # state ndim -- for a 9-col fdot_astro run the state is 9-wide while
+        # the conversion emits 8-col fdot-basis rows (widened just below).
+        src_ndim = injection_params.shape[-1]
         if injection_params.ndim == 3:
-            injection_params = injection_params.reshape(-1, ndim)
+            injection_params = injection_params.reshape(-1, src_ndim)
 
         if subset_inds is not None:
             injection_params = injection_params[subset_inds, :]
 
-        # Chirp-mass sampling basis: the catalogue conversion emits fdot in
-        # slot 2; map it onto Mc(f0, fdot).
-        #
-        # TODO(MAJOR, fdot < 0): interacting DWDs with fdot <= 0 have NO
-        # GW-relation chirp mass -- the Mc sampling basis cannot represent
-        # them. They are seeded at the Mc prior floor (fdot ~ 0) below,
-        # which mis-models their frequency evolution (band75 example: the
-        # 7.56749 mHz source, fdot = -9.9e-16; the wdwd mojito catalogue is
-        # an interacting population, so this hits real sources). Chirp-mass
-        # PE silently biases every such source until this gets a proper
-        # treatment: sample fdot directly (legacy basis,
-        # GB_USE_CHIRP_MASS=0), a signed-Mc/fdot extension of the basis, or
-        # a per-source basis switch.
-        if branch_name == "gb" and getattr(curr.source_info[branch_name], "use_chirp_mass", False):
-            from gbgpu.utils.utility import get_chirp_mass_from_f_fdot
-
-            f0_Hz = injection_params[:, 1] * 1e-3
-            fdot = injection_params[:, 2]
-            mc_lo, mc_hi = curr.source_info[branch_name].m_chirp_lims
-            with np.errstate(invalid="ignore"):
-                mc = get_chirp_mass_from_f_fdot(f0_Hz, fdot)
-            injection_params[:, 2] = np.clip(
-                np.where(fdot > 0.0, mc, mc_lo), mc_lo, mc_hi
+        # Map the FDOT-basis catalogue rows onto the run's sampling basis
+        # (Mc + optional fdot_astro_ratio) with the transform's own
+        # conventions. The 9-col ratio basis RESOLVES the historical
+        # fdot<0 mis-modeling (interacting DWDs seed at r ~ -2, exact); the
+        # 8-col Mc basis still floor-clamps them.
+        if branch_name == "gb" and getattr(
+            curr.source_info[branch_name], "use_chirp_mass", False
+        ):
+            info = curr.source_info[branch_name]
+            injection_params = gb_fdot_rows_to_run_basis(
+                injection_params,
+                use_chirp_mass=True,
+                use_fdot_astro=getattr(info, "use_fdot_astro", False),
+                m_chirp_lims=info.m_chirp_lims,
             )
 
         # Store injection truths for diagnostic plots
@@ -1567,6 +1607,26 @@ def subtract_initial_signal(
 
     #breakpoint()
 
+def _reference_sens_mat(acs):
+    """First AC's sensitivity matrix, or ``None`` if not introspectable.
+
+    Used to decide whether the per-device DCGA replica path is viable.
+    Returns ``None`` (meaning "don't block the build") when the ACA has no
+    inspectable container list, rather than raising -- keeps stubbed test
+    ACAs and non-standard containers on the build path.
+    """
+    inner = getattr(acs, "acs", None)
+    if inner is None:
+        return None
+    try:
+        flat = inner.flatten()
+    except AttributeError:
+        return None
+    if len(flat) == 0:
+        return None
+    return getattr(flat[0], "sens_mat", None)
+
+
 def get_shared_dcga(acs):
     """The run's ONE shared :class:`DomainComputationGroupArray`.
 
@@ -1579,6 +1639,34 @@ def get_shared_dcga(acs):
     """
     if acs.gpus is None or len(acs.gpus) <= 1:
         return None
+
+    # The per-device replica path rebuilds the C++ domain objects on each
+    # device, which needs an orbits-carrying sensitivity matrix (i.e. the
+    # XYZSensitivityBackend family). The stock runs use
+    # CompositeSensitivityBackend, whose CompositeSensitivityMatrix has no
+    # ``orbits`` -- so fall back to the plain shard-aware move paths rather
+    # than asserting deep inside DomainComputationGroupArray. Those paths
+    # are already multi-GPU correct (rows are grouped by ``split_map`` and
+    # evaluated inside their owning device context); they just don't get
+    # per-device replicas. We fall back ONLY when we can positively see a
+    # sens_mat that lacks orbits/kwargs; if the ACA isn't introspectable
+    # (or the backend does carry orbits) we build as before.
+    _sens = _reference_sens_mat(acs)
+    if _sens is not None and not (
+        hasattr(_sens, "orbits")
+        and hasattr(getattr(_sens, "orbits", None), "kwargs")
+        and hasattr(_sens, "kwargs")
+    ):
+        if not getattr(acs, "_shared_dcga_unavailable_logged", False):
+            logger.info(
+                "Per-device DomainComputationGroupArray replicas unavailable "
+                "(%s carries no orbits/kwargs); using the plain shard-aware "
+                "move paths, which are already multi-GPU correct.",
+                type(_sens).__name__,
+            )
+            acs._shared_dcga_unavailable_logged = True
+        return None
+
     dcga = getattr(acs, "_shared_dcga", None)
     if dcga is None:
         from ..domaincomputation import DomainComputationGroupArray

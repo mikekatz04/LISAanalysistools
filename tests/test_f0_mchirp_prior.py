@@ -147,15 +147,20 @@ class GBSetupIntegrationTest(unittest.TestCase):
         cls.setup.init_sampling_info()
 
     def test_prior_container_builds_and_draws(self):
+        # astro prior on => 9-column basis (Mc @2, fdot_astro_ratio @8)
+        self.assertTrue(self.setup.use_fdot_astro)
         pri = self.setup.priors["gb"]
         s = np.asarray(pri.rvs(size=500))
-        self.assertEqual(s.shape, (500, 8))
+        self.assertEqual(s.shape, (500, 9))
         # column layout: f0 [mHz] at 1, Mc at 2 -- bounds are the band
         # structure's resolved f0_lims, not the pre-init settings values
         f0_lims_mHz = np.asarray(self.setup.f0_lims) * 1e3
         self.assertTrue(np.all((s[:, 1] >= f0_lims_mHz[0])
                                & (s[:, 1] <= f0_lims_mHz[-1])))
         self.assertTrue(np.all((s[:, 2] >= 0.001) & (s[:, 2] <= 1.0)))
+        # fdot_astro_ratio @8 ~ U[-M, M]
+        M = self.setup.fdot_astro_ratio_max
+        self.assertTrue(np.all(np.abs(s[:, 8]) <= M))
         lp = np.asarray(pri.logpdf(s))
         self.assertEqual(lp.shape, (500,))
         self.assertTrue(np.all(np.isfinite(lp)))
@@ -171,7 +176,25 @@ class GBSetupIntegrationTest(unittest.TestCase):
         clone = pickle.loads(pickle.dumps(copy.deepcopy(
             self.setup.priors["gb"]
         )))
-        self.assertEqual(np.asarray(clone.rvs(size=16)).shape, (16, 8))
+        self.assertEqual(np.asarray(clone.rvs(size=16)).shape, (16, 9))
+
+    def test_astro_prior_off_is_eight_col(self):
+        # astro prior off => 8-column chirp-mass basis (no ratio column)
+        from lisatools.globalfit.stock import erebor
+        from lisatools.globalfit.stock.erebor.gb import GBSetup
+
+        fit = erebor.gb_no_fg(nwalkers=2, ntemps=1)
+        gs = fit.gb
+        gs.use_chirp_mass = True
+        gs.use_astrophysical_f0_mc_prior = False
+        gs.f0_lims = [6e-3, 2.5e-2]
+        gs.Tobs = 365.25 * 24 * 3600.0
+        gs.dt = 5.0
+        setup = GBSetup(gs)
+        setup.init_sampling_info()
+        self.assertFalse(setup.use_fdot_astro)
+        s = np.asarray(setup.priors["gb"].rvs(size=200))
+        self.assertEqual(s.shape, (200, 8))
 
 
 if __name__ == "__main__":

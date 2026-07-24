@@ -54,6 +54,64 @@ def fdot_to_mchirp_pair(f0_Hz, fdot):
     return f0_Hz, Mc
 
 
+class McFdotAstroRatioTriple:
+    """``(f0[Hz], Mc[Msol], r) -> (f0, fdot_gr*(1+r), 0.0)`` (fdot_astro basis).
+
+    ``r = fdot_astro / fdot_gr`` is the sampled dimensionless ratio: the
+    physical ``fdot = fdot_gr(f0, Mc) * (1 + r)`` (astrophysical processes
+    add linearly to the GW chirp; ``r < -1`` gives the interacting
+    ``fdot < 0`` systems), and the fddot slot -- which carried the sampled
+    ``r`` after ``fill_values`` -- is overwritten with exactly 0.
+
+    Measure note (why the ratio basis): the total fdot is bounded to
+    ``(1 +/- M) * fdot_gr`` by construction under an ``r ~ U[-M, M]``
+    prior, so fdot_astro can never dominate unphysically. The induced
+    physical prior at fixed ``(f0, Mc)`` is uniform in fdot with density
+    ``1 / (2 M fdot_gr)`` -- along a measured-fdot ridge the Mc marginal
+    therefore carries a ``1/fdot_gr(Mc) ~ Mc^(-5/3)`` tilt relative to the
+    f0-Mc prior. Any proposal whose density is defined in PHYSICAL fdot
+    space must multiply by the Jacobian ``fdot_gr`` when converted to this
+    sampling basis; everything in the stock stack defines densities in the
+    sampling basis directly, so no such factor appears today.
+
+    Module-level class so the containing :class:`TransformContainer`
+    pickles.
+    """
+
+    def __call__(self, f0_Hz, Mc, ratio):
+        from gbgpu.utils.utility import get_fdot
+
+        return f0_Hz, get_fdot(f=f0_Hz, Mc=Mc) * (1.0 + ratio), f0_Hz * 0.0
+
+
+class McFdotAstroRatioTripleInverse:
+    """Mirror-convention split ``(f0[Hz], fdot, fddot) -> (f0, Mc, r)``.
+
+    The ``(Mc, r)`` split of a physical fdot is likelihood-degenerate (the
+    waveform sees only the total), so the inverse picks the convention
+    ``Mc = Mc_GW(f0, |fdot|)`` (exact GW inversion of the fdot MAGNITUDE,
+    clipped into ``mc_lims``) with the remainder in the ratio: in-box this
+    lands every source at exactly ``r = 0`` (fdot > 0) or ``r = -2``
+    (fdot < 0) -- both well inside any sensible ``U[-M, M]`` prior box --
+    and reproduces the physical fdot exactly for either sign (no NaNs).
+    """
+
+    _TINY_FDOT = 1e-30  # inverts to an Mc far below any box floor -> clip
+
+    def __init__(self, mc_lims=(0.001, 1.0)):
+        self.mc_lims = tuple(mc_lims)
+
+    def __call__(self, f0_Hz, fdot, fddot):
+        from gbgpu.utils.utility import get_chirp_mass_from_f_fdot, get_fdot
+
+        with np.errstate(invalid="ignore"):
+            Mc = get_chirp_mass_from_f_fdot(
+                f0_Hz, np.maximum(np.abs(fdot), self._TINY_FDOT)
+            )
+        Mc = np.clip(Mc, *self.mc_lims)
+        return f0_Hz, Mc, fdot / get_fdot(f=f0_Hz, Mc=Mc) - 1.0
+
+
 def ten_to_the_x(x):
     """Return ``10 ** x`` (named 1-arg transform for pickling support).
 
@@ -66,8 +124,10 @@ def ten_to_the_x(x):
 def make_gb_transform_container(
     *,
     use_chirp_mass: bool = False,
+    use_fdot_astro: bool = False,
     input_basis: list | None = None,
     fill_dict: dict | list | None = None,
+    mc_lims: tuple = (0.001, 1.0),
 ) -> TransformContainer:
     """THE stock (V)GB :class:`TransformContainer` factory (forward + inverse).
 
@@ -80,33 +140,56 @@ def make_gb_transform_container(
     container's ``both_inverse_transforms``.
 
     Full sampling basis: ``A (ln), f0 (mHz), Mc|fdot, phi0, cos_iota, psi,
-    alpha, sin_delta`` (ICRS sky); the 9-name output basis adds the filled
-    ``fddot``. Output columns keep the sampling-style names but hold the
-    PHYSICAL values after the registered transforms run (``A``: amplitude,
-    ``f0``: Hz, ``cos_iota``: iota, ``sin_delta``: delta).
+    alpha, sin_delta`` (ICRS sky), plus a 9th ``fdot_astro_ratio`` column
+    appended when ``use_fdot_astro``; the 9-name output basis adds
+    ``fddot`` (filled 0, or transform-zeroed in the fdot_astro mode).
+    Output columns keep the sampling-style names but hold the PHYSICAL
+    values after the registered transforms run (``A``: amplitude, ``f0``:
+    Hz, ``cos_iota``: iota, ``sin_delta``: delta).
 
     Args:
         use_chirp_mass: Slot 2 carries ``Mc`` (Msol) instead of ``fdot``;
             the ``(f0, Mc) -> (f0, fdot)`` pair transform + ``key_map``
             recover the physical fdot (the GBSetup chirp-mass convention).
+        use_fdot_astro: Requires ``use_chirp_mass=True``. APPENDS a 9th
+            sampled column ``fdot_astro_ratio`` (``r = fdot_astro /
+            fdot_gr``, dimensionless) so columns 0-7 keep their meaning;
+            the physical ``fdot = fdot_gr(f0, Mc) * (1 + r)`` via
+            :class:`McFdotAstroRatioTriple` and ``fddot`` comes out exactly
+            0 from the transform itself. ``key_map`` routes ``r`` to the
+            fddot slot and ``fill_dict`` defaults to ``{}`` in this mode:
+            an EMPTY dict keeps the sampled->output reorder scatter, while
+            ``None`` would skip it, and nothing may fill the fddot slot the
+            sampled ``r`` occupies.
         input_basis: Subset (in order) of the full sampling basis actually
-            sampled. Default: all 8. The 5D VGB basis passes
-            ``["A", "fdot", "phi0", "cos_iota", "psi"]`` with the fixed
-            ``f0``/``alpha``/``sin_delta`` supplied through ``fill_dict``.
+            sampled. Default: all 8 (9 with ``use_fdot_astro``). The 5D VGB
+            basis passes ``["A", "fdot", "phi0", "cos_iota", "psi"]`` with
+            the fixed ``f0``/``alpha``/``sin_delta`` supplied through
+            ``fill_dict``.
         fill_dict: Fill spec for the non-sampled output parameters. Default
-            ``{"fddot": 0.0}``. May be a LIST of per-leaf dicts (Eryn
-            per-leaf fills; transform calls then need ``leaf_inds``) for
-            fixed-source branches, e.g. ``{"fddot": 0.0, "f0": f0_i,
-            "alpha": alpha_i, "sin_delta": sin_delta_i}`` per VGB leaf.
-            Fill values are in SAMPLING units (f0 in mHz, ``sin_delta`` —
-            not delta): the registered transforms run on the filled columns
-            exactly like on sampled ones, so the physical basis comes out
-            in Hz / delta.
+            ``{"fddot": 0.0}`` (``{}`` with ``use_fdot_astro``). May be a
+            LIST of per-leaf dicts (Eryn per-leaf fills; transform calls
+            then need ``leaf_inds``) for fixed-source branches, e.g.
+            ``{"fddot": 0.0, "f0": f0_i, "alpha": alpha_i, "sin_delta":
+            sin_delta_i}`` per VGB leaf. Fill values are in SAMPLING units
+            (f0 in mHz, ``sin_delta`` — not delta): the registered
+            transforms run on the filled columns exactly like on sampled
+            ones, so the physical basis comes out in Hz / delta.
+        mc_lims: ``[Mc_min, Mc_max]`` box used by the fdot_astro inverse
+            (mirror convention clips ``Mc_GW(f0, |fdot|)`` into it).
+            Ignored unless ``use_fdot_astro``.
     """
+    if use_fdot_astro and not use_chirp_mass:
+        raise ValueError(
+            "use_fdot_astro=True requires use_chirp_mass=True (the ratio "
+            "multiplies fdot_gr(f0, Mc))."
+        )
     full_sampling_basis = [
         "A", "f0", "Mc" if use_chirp_mass else "fdot", "phi0",
         "cos_iota", "psi", "alpha", "sin_delta",
     ]
+    if use_fdot_astro:
+        full_sampling_basis.append("fdot_astro_ratio")
     if input_basis is None:
         input_basis = full_sampling_basis
     else:
@@ -138,7 +221,24 @@ def make_gb_transform_container(
         "sin_delta": np.sin,
     }
     gb_key_map = None
-    if use_chirp_mass:
+    if use_fdot_astro:
+        # After fill_values, Mc lives at the fdot slot and the sampled
+        # ratio r at the fddot slot (key_map below). The triple transform
+        # then computes (f0[Hz], fdot_gr*(1+r), 0.0) in output-index space;
+        # the single-param f0: f_ms_to_s runs first so it sees Hz.
+        gb_transform_fn_in[("f0", "Mc", "fdot_astro_ratio")] = (
+            McFdotAstroRatioTriple()
+        )
+        gb_inverse_transform_fn_in[("f0", "Mc", "fdot_astro_ratio")] = (
+            McFdotAstroRatioTripleInverse(mc_lims)
+        )
+        gb_key_map = {"Mc": "fdot", "fdot_astro_ratio": "fddot"}
+        if fill_dict is None:
+            # {} KEEPS the reorder scatter (None would skip fill_values
+            # entirely); the fddot slot carries the sampled r, so no fill
+            # may write it -- the transform zeroes it after use.
+            fill_dict = {}
+    elif use_chirp_mass:
         # After fill_values, the Mc value lives at the fdot slot (key_map
         # "Mc"->"fdot"). The multi-parameter transform then computes
         # (f0[Hz], fdot) from (f0[Hz], Mc); the single-param f0: f_ms_to_s

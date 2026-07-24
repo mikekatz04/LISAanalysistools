@@ -107,7 +107,8 @@ class GBGrouping:
     @params.setter
     def params(self, params: np.ndarray) -> None:
         assert params.ndim == 2
-        assert params.shape[-1] == 8
+        # 8-col sampling basis, or 9-col with the fdot_astro_ratio column.
+        assert params.shape[-1] in (8, 9)
 
         self._params = params
 
@@ -151,7 +152,7 @@ class GBGrouping:
 
     @property
     def median_sources(self) -> np.ndarray:
-        median_sources = np.zeros((len(self.unique_groups), 8))
+        median_sources = np.zeros((len(self.unique_groups), self.params.shape[-1]))
         for i, group in enumerate(self.unique_groups):
             inds_group = self.groups == group
 
@@ -165,7 +166,7 @@ class GBGrouping:
 
     @property
     def min_sources(self) -> np.ndarray:
-        min_sources = np.zeros((len(self.unique_groups), 8))
+        min_sources = np.zeros((len(self.unique_groups), self.params.shape[-1]))
         for i, group in enumerate(self.unique_groups):
             inds_group = self.groups == group
             ind_min = np.argsort(self.params[inds_group, 1])[0]
@@ -178,7 +179,7 @@ class GBGrouping:
 
     @property
     def max_sources(self) -> np.ndarray:
-        max_sources = np.zeros((len(self.unique_groups), 8))
+        max_sources = np.zeros((len(self.unique_groups), self.params.shape[-1]))
         for i, group in enumerate(self.unique_groups):
             inds_group = self.groups == group
             ind_max = np.argsort(self.params[inds_group, 1])[-1]
@@ -1558,7 +1559,7 @@ def gather_gb_samples(
 
     for samp_i in tqdm(range(len(gb_samples) - 1)[:num_compare_samples], desc="Comparing samples"):
 
-        first_sample = gb_samples[random_samples[samp_i]].reshape(-1, 8)
+        first_sample = gb_samples[random_samples[samp_i]].reshape(-1, gb_samples.shape[-1])
         first_sample_snrs = gb_snrs[random_samples[samp_i]].flatten()
         inds_keep_i = np.delete(np.arange(gb_samples.shape[0]), random_samples[: samp_i + 1])
         gb_samples_in = gb_samples[inds_keep_i]

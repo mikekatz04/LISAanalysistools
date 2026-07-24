@@ -251,6 +251,38 @@ class GetSharedDcgaTest(unittest.TestCase):
         self.assertEqual(len(built), 1)
         self.assertIs(acs._shared_dcga, d1)
 
+    def test_fallback_when_sens_mat_lacks_orbits(self):
+        # A multi-GPU ACA whose sensitivity matrix carries no ``orbits``
+        # (the stock CompositeSensitivityBackend case) must NOT build a DCGA
+        # -- the per-device C++ replicas would assert. get_shared_dcga
+        # returns None so the moves take the plain shard-aware path.
+        built = []
+
+        class _FakeDCGA:
+            def __init__(self, acs):
+                built.append(acs)
+
+        class _NoOrbitsSens:  # no ``orbits`` / ``kwargs`` attributes
+            pass
+
+        class _Inner:
+            def __init__(self, sens):
+                self._sens = sens
+
+            def flatten(self):
+                return [SimpleNamespace(sens_mat=self._sens)]
+
+        real = self.dc.DomainComputationGroupArray
+        self.dc.DomainComputationGroupArray = _FakeDCGA
+        try:
+            acs = SimpleNamespace(gpus=[0, 1], acs=_Inner(_NoOrbitsSens()))
+            result = self.get_shared_dcga(acs)
+        finally:
+            self.dc.DomainComputationGroupArray = real
+        self.assertIsNone(result)
+        self.assertEqual(len(built), 0)  # never constructed
+        self.assertIsNone(getattr(acs, "_shared_dcga", None))
+
 
 if __name__ == "__main__":
     unittest.main()
