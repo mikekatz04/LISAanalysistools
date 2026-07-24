@@ -223,6 +223,11 @@
           "note": "run: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-24T09:01:52Z"
+        },
+        {
+          "note": "manual: 3-month result stands (rr/dd 7.3e-4); 6-month re-run deferred \u2014 laptop 9GB RAM insufficient",
+          "state": "green",
+          "ts": "2026-07-24T09:17:40Z"
         }
       ],
       "metrics": {
@@ -758,6 +763,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T09:01:52Z",
+  "updated": "2026-07-24T09:18:09Z",
   "version": 1
 }
