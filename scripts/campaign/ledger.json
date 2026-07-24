@@ -209,10 +209,23 @@
     },
     "t1-gt-emri": {
       "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
+      "evidence": [
+        "evidence/t1-gt-emri.log"
+      ],
+      "history": [
+        {
+          "note": "run: criteria unmet: null_rr_dd_EMRI_max missing (wanted <= 0.0012); null_proof_ok missing (wanted == 1)",
+          "state": "red",
+          "ts": "2026-07-24T08:28:26Z"
+        }
+      ],
+      "metrics": {
+        "null_proof": "SKIP",
+        "reason": "no_rows",
+        "result_null_proof": "SKIP",
+        "result_reason": "no_rows"
+      },
+      "state": "red"
     },
     "t1-gt-gb": {
       "confirmed": [],
@@ -288,6 +301,11 @@
           "note": "run: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-24T08:23:48Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T08:56:16Z"
         }
       ],
       "metrics": {
@@ -296,6 +314,7 @@
         "dd": 2010822.0,
         "dh": 2037379.0,
         "hh": 2067077.0,
+        "id": 19,
         "mbh_mismatch_max": 0.0006753,
         "mismatch": 0.0006753,
         "n_sources": 6,
@@ -309,6 +328,7 @@
         "result_dd": 2010822.0,
         "result_dh": 2037379.0,
         "result_hh": 2067077.0,
+        "result_id": 19,
         "result_mismatch": 0.0006753,
         "result_n_sources": 6,
         "result_null_proof": "ok",
@@ -682,6 +702,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T08:23:48Z",
+  "updated": "2026-07-24T08:56:16Z",
   "version": 1
 }
