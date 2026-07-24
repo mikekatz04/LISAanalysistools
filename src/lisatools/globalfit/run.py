@@ -36,8 +36,11 @@ from eryn.state import BranchSupplemental
 from eryn.state import State as eryn_State
 from eryn.utils.plot import PlotContainer
 
+from contextlib import nullcontext as _nullcontext
+
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from ..utils.device import pin_main_device
+from ..utils.utility import asnumpy
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings, Setup
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
@@ -1053,6 +1056,32 @@ class GlobalFit:
 
         state.log_like[:] = acs.likelihood(complex=False)
         logger.info(f"initial log likelihood: {state.log_like[0]}")
+
+        # Localize a non-finite initial likelihood before it trips Eryn's
+        # opaque "initial log_like was +/- infinite". Reports, per shard,
+        # whether the NON-finite values live in the residual buffers (a
+        # waveform-production NaN) or the inverse-PSD buffers (a PSD /
+        # sensitivity zero -> inf, e.g. the f=0 noise-model bin). Only runs
+        # on the error path, so no cost to healthy runs.
+        _ll0 = np.asarray(asnumpy(state.log_like[0]))
+        if not np.all(np.isfinite(_ll0)):
+            xp_a = acs.xp
+            for si, (dbuf, pbuf) in enumerate(
+                zip(acs.linear_data_arr, acs.linear_psd_arr)
+            ):
+                with (
+                    xp_a.cuda.Device(int(acs.gpus[si]))
+                    if acs.gpus is not None else _nullcontext()
+                ):
+                    d_bad = int(xp_a.sum(~xp_a.isfinite(dbuf)))
+                    p_bad = int(xp_a.sum(~xp_a.isfinite(pbuf)))
+                logger.warning(
+                    "initial ll non-finite (shard %d): %d non-finite "
+                    "residual value(s), %d non-finite invC value(s). "
+                    "residual-side -> waveform-production NaN; invC-side "
+                    "-> PSD/sensitivity zero (e.g. f=0 bin).",
+                    si, d_bad, p_bad,
+                )
 
         like_mix = BasicResidualacsLikelihood(acs)
 
