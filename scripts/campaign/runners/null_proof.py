@@ -65,12 +65,15 @@ def main() -> None:
     order = np.argsort(rr)[::-1]
     rr, snrs, sll = rr[order], snrs[order], sll[order]
 
+    def _fmt(v):  # decimals when O(1)+, scientific when tiny — readable for both
+        return f"{v:.2f}" if abs(v) >= 0.005 else f"{v:.1e}"
+
     fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(rr) + 3), 4.6))
     x = np.arange(len(rr))
     ax.bar(x, rr, color="#2a78d6", zorder=3)
     # annotate each bar with the noiseless logL at injection (= -0.5<r|r>)
     for xi, rv, lv in zip(x, rr, sll):
-        ax.annotate(f"logL={lv:.2f}", (xi, rv), textcoords="offset points",
+        ax.annotate(f"logL={_fmt(lv)}", (xi, rv), textcoords="offset points",
                     xytext=(0, 3), ha="center", fontsize=7, color="#52514e")
     ax.set_yscale("log")
     ax.set_xticks(x)
@@ -81,7 +84,7 @@ def main() -> None:
     ax.set_title(
         f"{cls}: residual power + noiseless logL at injection "
         f"(logL = -0.5<r|r>) — {len(rr)} source(s)\n"
-        f"worst <r|r> = {rr.max():.3e}  (logL = {(-0.5 * rr.max()):.2f})"
+        f"worst <r|r> = {rr.max():.3e}  (logL = {_fmt(-0.5 * rr.max())})"
     )
     ax.grid(True, which="both", axis="y", alpha=0.15)
     fig.tight_layout()

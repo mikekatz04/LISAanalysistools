@@ -34,6 +34,11 @@ import numpy as np
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.sources.emri import emri_catalogue_to_waveform_basis
 from lisatools.utils.constants import YRSID_SI
+from lisatools.utils.device import (
+    current_device,
+    device_context,
+    jax_device_context,
+)
 
 from ...engine import GeneralSetup
 from ...preprocessing import normalize_source_ids
@@ -76,6 +81,68 @@ logger = logging.getLogger(__name__)
 # sized from the DATA span + this margin so it is source-independent (the
 # per-source merger time enters only as the call-time ``t_merge``).
 MBH_TDIONFLY_MARGIN = 6.0 * 86400.0
+
+
+# ============================================================
+# Per-device source-generator replicas (multi-GPU walker shards)
+# ============================================================
+# On a multi-GPU walker-shard run, each walker's residual/PSD views live on
+# its owning device (``AnalysisContainerArray`` split). The source moves score
+# each walker INSIDE that device context (addremovemove.compute_acs_like), so
+# the template generator must build on the SAME device -- otherwise a walker on
+# shard >= 1 generates through a generator whose orbit grid and (for MBH) JAX
+# tables live on the primary device, tripping cupy/JAX peer access: slow, and a
+# hard failure on nodes without P2P.
+#
+# Rather than a separate multi-GPU code path, generation stays UNIFIED: the
+# device-keyed replica cache below has exactly one entry on CPU / single-GPU
+# (the run's primary device reuses the shared orbits + shared generator cache,
+# byte-identical to the pre-multi-GPU path) and one entry per device on
+# multi-GPU. ``current_device(xp)`` -- set by the move's per-shard
+# ``device_context`` -- selects the entry.
+_DEVICE_ORBITS_REPLICAS: dict = {}
+
+
+def _general_info_xp(general_info):
+    """Array module (cupy/numpy) for a run's orbits (CPU path -> numpy)."""
+    orbits = (
+        general_info.gpu_orbits
+        if general_info.gpus is not None
+        else general_info.orbits
+    )
+    return orbits.xp
+
+
+def _primary_device(general_info):
+    """The run's main device (``gpus[0]``), or None on the CPU path."""
+    gpus = general_info.gpus
+    return int(gpus[0]) if gpus is not None else None
+
+
+def _device_local_orbits(orbits, xp, primary_device):
+    """An orbits replica resident on the cupy current device.
+
+    CPU / single-GPU / the run's primary device reuse the shared ``orbits``
+    (zero extra memory -- identical to the pre-multi-GPU path). A non-primary
+    device gets a lazily-built, cached ``orbits.__class__(*args, **kwargs)``
+    replica whose grid arrays land on the current device (the
+    :class:`~lisatools.domaincomputation.DomainComputationGroupArray`
+    ``build_cpp_objects`` pattern), so a generator built around it reads orbit
+    data locally instead of via peer access off the primary device.
+
+    Built once per (orbits, device) and kept for the whole run
+    (memory-lifecycle rule: allocate-once, persist).
+    """
+    dev = current_device(xp)
+    if dev is None or dev == primary_device:
+        return orbits
+    key = (id(orbits), dev)
+    replica = _DEVICE_ORBITS_REPLICAS.get(key)
+    if replica is None:
+        with device_context(xp, dev):
+            replica = orbits.__class__(*orbits.args, **orbits.kwargs)
+        _DEVICE_ORBITS_REPLICAS[key] = replica
+    return replica
 
 
 def default_source_ids() -> dict:
@@ -572,16 +639,30 @@ def get_mbh_tdionfly_wave_wrap(general_info, cfg):
 
 
 def get_mbh_phenom_gen(general_info, cfg):
-    """MBH legacy ``PhenomTHMTDIWaveform`` (cached in ..wrappers)."""
+    """MBH legacy ``PhenomTHMTDIWaveform`` (cached in ..wrappers).
+
+    On a multi-GPU shard run this is called from inside the owning walker's
+    ``device_context`` (see :meth:`compute_acs_like`); it then resolves a
+    device-local orbits replica so the ``id(orbits)``-keyed
+    :func:`get_mbh_phenom_wave_gen` cache yields one phentax generator per
+    device -- built on that device (cupy response tables) and, when wrapped in
+    :func:`jax_device_context`, with its phentax JAX tables local too. On CPU /
+    single-GPU the primary device reuses the shared orbits, so this collapses
+    to the original single cached generator.
+    """
+    base_orbits = (
+        general_info.gpu_orbits
+        if general_info.gpus is not None
+        else general_info.orbits
+    )
+    orbits = _device_local_orbits(
+        base_orbits, _general_info_xp(general_info), _primary_device(general_info)
+    )
     return get_mbh_phenom_wave_gen(
         data_td_settings=general_info.data_td_settings,
         waveform_t0=cfg["mbh_waveform_t0"],
         dt=general_info.dt,
-        orbits=(
-            general_info.gpu_orbits
-            if general_info.gpus is not None
-            else general_info.orbits
-        ),
+        orbits=orbits,
         output_domain_settings=general_info.domain_settings,
         tukey_alpha=general_info.window_alpha,
         force_backend=general_info.force_backend,
@@ -639,8 +720,19 @@ class SourceSignalGen:
                 return get_mbh_tdionfly_wave_wrap(self.general_info, self.cfg)(
                     *params_in, **kwargs
                 )
-            gen = get_mbh_phenom_gen(self.general_info, self.cfg)
-            return gen.get_signals_for_residuals(*params_in, **kwargs)
+            # Legacy phentax MBH: a JAX (phentax) waveform + cupy/C++
+            # (pyResponseTDI) response. On a multi-GPU shard, the caller has
+            # entered the walker's owning cupy device; enter the matching JAX
+            # default device so phentax's scalar inputs and traced kernels
+            # land there too (cupy's device_context does NOT move JAX). Both
+            # the (lazy, cache-miss) generator BUILD inside
+            # ``get_mbh_phenom_gen`` and the generation call must run under
+            # these contexts. CPU / single-GPU: both collapse to no-ops.
+            dev = current_device(_general_info_xp(self.general_info))
+            with device_context(_general_info_xp(self.general_info), dev), \
+                    jax_device_context(dev):
+                gen = get_mbh_phenom_gen(self.general_info, self.cfg)
+                return gen.get_signals_for_residuals(*params_in, **kwargs)
         raise ValueError(f"Unknown branch {self.branch!r} for SourceSignalGen.")
 
 

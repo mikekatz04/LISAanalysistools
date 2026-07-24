@@ -283,6 +283,11 @@
           "note": "run: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-24T08:06:01Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T08:23:48Z"
         }
       ],
       "metrics": {
@@ -383,10 +388,61 @@
     },
     "t1-gt-sobbh": {
       "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "running"
+      "evidence": [
+        "evidence/t1-gt-sobbh.log",
+        "evidence/t1-gt-sobbh/sobbh_null_residual.png"
+      ],
+      "history": [
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T08:22:34Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T08:23:46Z"
+        }
+      ],
+      "metrics": {
+        "branch": "sobbh",
+        "data_snr": 5.5692,
+        "dd": 31.01576,
+        "dh": 31.01575,
+        "hh": 31.01573,
+        "mismatch": 5.913e-10,
+        "n_sources": 2,
+        "null_proof": "ok",
+        "null_proof_ok": 1,
+        "null_rr_dd_SOBBH_max": 1.395e-06,
+        "overlap": 1.0,
+        "plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-gt-sobbh/sobbh_null_residual.png",
+        "result_branch": "sobbh",
+        "result_data_snr": 5.5692,
+        "result_dd": 31.01576,
+        "result_dh": 31.01575,
+        "result_hh": 31.01573,
+        "result_mismatch": 5.913e-10,
+        "result_n_sources": 2,
+        "result_null_proof": "ok",
+        "result_null_proof_ok": 1,
+        "result_overlap": 1.0,
+        "result_plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-gt-sobbh/sobbh_null_residual.png",
+        "result_rr": 3.668423e-08,
+        "result_rr_over_dd": 1.183e-09,
+        "result_source_logL": -1.834211e-08,
+        "result_worst_logL_noiseless": -1.838463e-05,
+        "result_worst_rr": 3.676926e-05,
+        "result_xcheck": "True",
+        "rr": 3.668423e-08,
+        "rr_over_dd": 1.183e-09,
+        "sobbh_mismatch_max": 6.976e-07,
+        "source_logL": -1.834211e-08,
+        "worst_logL_noiseless": -1.838463e-05,
+        "worst_rr": 3.676926e-05,
+        "xcheck": "True"
+      },
+      "state": "green"
     },
     "t1-gt-vgb": {
       "confirmed": [],
@@ -626,6 +682,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T08:06:07Z",
+  "updated": "2026-07-24T08:23:48Z",
   "version": 1
 }

@@ -845,26 +845,28 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             else {self.branch_name: MoveSignalGen(self, signal_gen)}
         )
         ll = np.full(len(data_index_np), -1e300, dtype=float)
-        # Shard-aware scoring (2026-07 multi-GPU pass): rows are grouped by
-        # the walker's owning ACA split and evaluated INSIDE that device
-        # context, so templates are generated on the same device as the
-        # residual/invC views they are scored against (walkers on shard >= 1
-        # previously hit cross-device failures here).
-        split_of_row = np.asarray(
-            asnumpy(self.acs.split_map), dtype=int
-        )[data_index_np]
-        for s in np.unique(split_of_row):
+
+        # Shard-aware scoring (2026-07 multi-GPU pass): rows are grouped by the
+        # walker's owning ACA split and evaluated INSIDE that device context,
+        # so each template is generated on the same device as the residual/invC
+        # views it is scored against (and per-device source-generator replicas
+        # keep generation local -- no peer access off the primary device).
+        # Dispatch goes through the ACA's shared per-split runner -- the SAME
+        # primitive signal_operation / _vectorized_dispatch use -- so shards
+        # run CONCURRENTLY when the ACA is run_threaded (multi-GPU) and serially
+        # on CPU / single-GPU. Each split writes DISJOINT ``ll`` positions, so
+        # the shared array needs no lock.
+        def _score_split(split, rows):
             dev = (
                 None if self.acs.gpus is None
-                else int(self.acs.gpus[int(s)])
+                else int(self.acs.gpus[int(split)])
             )
-            rows = np.where(split_of_row == s)[0]
             with device_context(self.acs.xp, dev):
                 for i in rows:
-                    ac = self.acs[int(data_index_np[i])]
+                    ac = self.acs[int(data_index_np[int(i)])]
                     try:
-                        ll[i] = ac.calculate_signal_likelihood(
-                            {self.branch_name: coords_in[i]},
+                        ll[int(i)] = ac.calculate_signal_likelihood(
+                            {self.branch_name: coords_in[int(i)]},
                             signal_gen=(
                                 custom_override if custom_override is not None
                                 else self._resolve_signal_gen_override(ac)
@@ -882,6 +884,19 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                             self.branch_name,
                             exc,
                         )
+
+        split_to_rows = self.acs._split_rows(data_index_np)
+        if self.acs.gpus is None:
+            self.acs._run_per_split(_score_split, split_to_rows)
+        else:
+            # Restore the run's main device after the per-shard workers, exactly
+            # as signal_operation does (threaded workers set the device on their
+            # own thread; the serial path leaves the last shard's device set).
+            main_gpu = self.acs.xp.cuda.runtime.getDevice()
+            try:
+                self.acs._run_per_split(_score_split, split_to_rows)
+            finally:
+                self.acs.xp.cuda.runtime.setDevice(main_gpu)
 
         return ll
 

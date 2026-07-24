@@ -79,6 +79,28 @@ class ComputeAcsLikeShardTest(unittest.TestCase):
             self.assertEqual(ac.seen_devices,
                              [int(self.acs.gpu_map[int(i)])])
 
+    def test_threaded_dispatch_scores_each_ac_on_its_device(self):
+        # run_threaded=True -> the per-split runner fans shards out across the
+        # thread pool; each AC must still be scored exactly once and INSIDE its
+        # own owning device context (RecordingXp tracks device thread-locally).
+        acs = _FakeIndexableACA((3, 4), self.NUM_ACS, self.NUM_SHARDS,
+                                layout="blocked", run_threaded=True)
+        fake_move = SimpleNamespace(
+            acs=acs,
+            branch_name="emri",
+            _resolve_signal_gen_override=lambda ac: None,
+            _branch_waveform_kwargs=lambda: {},
+        )
+        data_index = np.arange(self.NUM_ACS)
+        coords = np.zeros((self.NUM_ACS, 4))
+        ll = self.MoveCls.compute_acs_like(fake_move, coords, data_index)
+        np.testing.assert_array_equal(ll, data_index.astype(float))
+        for i in range(self.NUM_ACS):
+            ac = acs[i]
+            self.assertEqual(ac.seen_devices, [int(acs.gpu_map[i])])
+        # both shards were actually entered (real fan-out, not all-on-primary)
+        self.assertEqual(set(acs.xp.device_log), {0, 1})
+
     def test_domain_error_scores_floor(self):
         from lisatools.utils.exceptions import WaveformDomainError
 

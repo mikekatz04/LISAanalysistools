@@ -14,6 +14,8 @@ and the LAT shard router consume.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 
@@ -23,24 +25,29 @@ class RecordingXp:
     ``cuda.Device(i)`` context entries push/pop a current-device stack and
     append to :attr:`device_log`, so a test can assert the device each
     operation was routed to.
+
+    The current-device stack is **thread-local** (like cupy's real current
+    device), so a threaded per-split dispatch records each worker on its own
+    device without the workers clobbering each other. :attr:`device_log` stays
+    shared (append is atomic under the GIL) for aggregate assertions.
     """
 
     __name__ = "numpy"
 
     def __init__(self):
         self.device_log = []
-        self._current = [0]
+        self._tl = threading.local()
 
         outer = self
 
         class _Runtime:
             @staticmethod
             def getDevice():
-                return outer._current[-1]
+                return outer._stack()[-1]
 
             @staticmethod
             def setDevice(gpu):
-                outer._current[-1] = int(gpu)
+                outer._stack()[-1] = int(gpu)
 
             @staticmethod
             def deviceSynchronize():
@@ -60,24 +67,31 @@ class RecordingXp:
 
         self.cuda = _Cuda()
 
+    def _stack(self):
+        """Per-thread current-device stack (mirrors cupy thread-locality)."""
+        stack = getattr(self._tl, "stack", None)
+        if stack is None:
+            stack = self._tl.stack = [0]
+        return stack
+
     def _device_ctx(self, gpu):
         outer = self
 
         class _Ctx:
             def __enter__(self_inner):
-                outer._current.append(int(gpu))
+                outer._stack().append(int(gpu))
                 outer.device_log.append(int(gpu))
                 return None
 
             def __exit__(self_inner, exc_type, exc, tb):
-                outer._current.pop()
+                outer._stack().pop()
                 return False
 
         return _Ctx()
 
     @property
     def current_device(self):
-        return self._current[-1]
+        return self._stack()[-1]
 
     # numpy passthrough for everything else (asarray, zeros, where, ...)
     def __getattr__(self, name):
@@ -106,11 +120,13 @@ class FakeMultiShardACA:
 
     def __init__(self, per_band_shape: tuple, num_acs: int, num_shards: int,
                  layout: str = "striped", with_min_freq_inds: bool = False,
-                 dtype=complex):
+                 dtype=complex, run_threaded: bool = False):
         self.xp = RecordingXp()
         self.acs_total_entries = int(num_acs)
         self._num_acs = int(num_acs)
         self.gpus = list(range(num_shards))
+        self.run_threaded = bool(run_threaded)
+        self._thread_pool = None
         if layout == "striped":
             self.gpu_map = np.array(
                 [b % num_shards for b in range(num_acs)], dtype=int
@@ -171,6 +187,42 @@ class FakeMultiShardACA:
         # Mirror AnalysisContainerArray.__len__ (== number of containers):
         # the engines read len(holder) as num_data/num_noise.
         return self._num_acs
+
+    # --- per-split runner (mirrors AnalysisContainerArray) -------------
+    # Same interface the real ACA exposes so the shard router and the
+    # add/remove move can dispatch through it unchanged.
+    @property
+    def thread_pool(self):
+        from concurrent.futures import ThreadPoolExecutor
+        if self._thread_pool is None:
+            self._thread_pool = ThreadPoolExecutor(
+                max_workers=max(1, len(self.gpu_splits))
+            )
+        return self._thread_pool
+
+    def _split_rows(self, index_arr) -> dict:
+        """Group flat row positions by owning split: ``{split: rows}``."""
+        split_per_row = self.split_map[np.asarray(index_arr, dtype=int)]
+        return {
+            int(s): np.where(split_per_row == s)[0]
+            for s in np.unique(split_per_row)
+        }
+
+    def _run_per_split(self, worker, split_to_rows: dict,
+                       run_threaded=None) -> None:
+        """Run ``worker(split, rows)`` once per populated split."""
+        if run_threaded is None:
+            run_threaded = self.run_threaded
+        items = [(s, rows) for s, rows in split_to_rows.items() if len(rows)]
+        if run_threaded and len(items) > 1:
+            futures = [
+                self.thread_pool.submit(worker, s, rows) for s, rows in items
+            ]
+            for f in futures:
+                f.result()
+        else:
+            for s, rows in items:
+                worker(s, rows)
 
     def reference_rows(self):
         """(num_acs, *per_band_shape) reference in global row order."""

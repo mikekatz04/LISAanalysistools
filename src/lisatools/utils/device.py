@@ -21,7 +21,12 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Optional, Sequence, Union
 
-__all__ = ["device_context", "pin_main_device", "current_device"]
+__all__ = [
+    "device_context",
+    "pin_main_device",
+    "current_device",
+    "jax_device_context",
+]
 
 
 def _first_gpu(gpus: Union[int, Sequence[int], None]) -> Optional[int]:
@@ -64,3 +69,37 @@ def current_device(xp) -> Optional[int]:
     if not hasattr(xp, "cuda"):
         return None
     return int(xp.cuda.runtime.getDevice())
+
+
+def jax_device_context(device: Optional[int], *, kind: str = "gpu"):
+    """Pin JAX's default device to match cupy ``device`` (JAX-backed gens).
+
+    CuPy's :func:`device_context` does NOT move JAX ops: JAX placement is
+    governed by ``jax.default_device`` / ``jax.device_put``. So any
+    per-device JAX generation (the phentax MBH waveform) must ALSO enter this
+    context, otherwise scalar ``device_put(x, device=None)`` inputs and the
+    traced kernels land on JAX's *default* device (gpu0) regardless of the
+    surrounding cupy :func:`device_context`. This is the JAX twin of
+    :func:`device_context`; the two are entered together at each per-shard
+    source-generation site.
+
+    Assumes JAX and cupy enumerate CUDA devices in the same order (the DLPack
+    precondition already documented in ``lisatools/jax/jaxbase.py``): the
+    cupy device id indexes ``jax.devices(kind)`` directly.
+
+    Returns ``nullcontext()`` when ``device`` is None (CPU / single-device /
+    the run's primary device), when JAX is unavailable, or when JAX cannot
+    see a device at ``jax.devices(kind)[device]`` -- so call sites need no
+    guards and single-GPU/CPU behaviour is unchanged.
+    """
+    if device is None:
+        return nullcontext()
+    try:
+        import jax
+    except (ImportError, ModuleNotFoundError):
+        return nullcontext()
+    try:
+        return jax.default_device(jax.devices(kind)[int(device)])
+    except (RuntimeError, IndexError):
+        # JAX on CPU while cupy on GPU, or fewer JAX devices than cupy sees.
+        return nullcontext()
