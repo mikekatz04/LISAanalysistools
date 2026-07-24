@@ -1,0 +1,143 @@
+{
+  "gates": {
+    "t0-foundation": {
+      "confirmed": [],
+      "evidence": [
+        "evidence/t0-foundation.log",
+        "evidence/t0-foundation/selftest_parse_roundtrip.png",
+        "evidence/t0-foundation__unit-fast.log",
+        "evidence/t0-foundation__build-all-lite.log",
+        "evidence/t0-foundation__move-timing.log",
+        "evidence/t0-foundation__campaign-selftest.log"
+      ],
+      "history": [
+        {
+          "note": "check unit-fast exited 1",
+          "state": "red",
+          "ts": "2026-07-24T01:22:09Z"
+        },
+        {
+          "note": "check build-all-lite exited 1",
+          "state": "red",
+          "ts": "2026-07-24T01:44:30Z"
+        },
+        {
+          "note": "run: criteria unmet: variants_built missing (wanted >= 7); build_failures missing (wanted == 0); selftest_failed missing (wanted == 0)",
+          "state": "red",
+          "ts": "2026-07-24T02:02:41Z"
+        },
+        {
+          "note": "ingest: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T02:04:11Z"
+        }
+      ],
+      "metrics": {
+        "build": "ok",
+        "build_failures": 0,
+        "moves": 53,
+        "result_build": "ok",
+        "result_build_failures": 0,
+        "result_exit": 1,
+        "result_moves": 53,
+        "result_rss_mb": 410,
+        "result_selftest_failed": 0,
+        "result_variant": "blank",
+        "result_variants_built": 7,
+        "rss_mb": 410,
+        "selftest_failed": 0,
+        "tests_failed": 0,
+        "tests_ran": 101,
+        "variant": "blank",
+        "variants_built": 7
+      },
+      "state": "green"
+    },
+    "t1-mojito-ground-truth": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-composition-lite": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-gbfamily-lite": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t2-sources-lite": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t3-gb-gpu": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t3-sources-gpu": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t4-gb-heavy": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t4-sources-noise-heavy": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t5-mg-correctness": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t5-mg-scaling": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t6-allsources-2yr": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    },
+    "t6-science-close": {
+      "confirmed": [],
+      "evidence": [],
+      "history": [],
+      "metrics": {},
+      "state": "pending"
+    }
+  },
+  "updated": "2026-07-24T02:04:11Z",
+  "version": 1
+}
