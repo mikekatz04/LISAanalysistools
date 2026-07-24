@@ -2208,16 +2208,15 @@ def build_gb_moves(
     # logpdf, so it must stay finite wherever leaves can live (wrap narrow
     # proposals in a ``UniformFloorMixture``).
     _custom_birth = getattr(gb_info, "rj_birth_distribution", None)
+    # The custom RJ-birth container (fstat / f0_mchirp astro prior) is
+    # array-module agnostic: its component proposals dispatch on the input
+    # coords via ``get_array_module`` and ``StackedFStatProposal4D`` builds
+    # cupy tables under ``from_cache(use_cupy=True)``, so it runs on GPU
+    # coords without the "Implicit conversion to a NumPy array" trip. Birth
+    # from it directly when set; otherwise the device-correct global prior.
     _rj_birth_prop = (
         {"gb": _custom_birth} if _custom_birth is not None else gpu_priors
     )
-    # TEMP (2026-07-24): the custom RJ-birth container (fstat / f0_mchirp astro
-    # prior) is numpy-backed and trips BandSorter's rj_prop.logpdf on cupy
-    # coords (gbbands.py: ``numpy.asarray(cupy)`` -> "Implicit conversion to a
-    # NumPy array is not allowed"). Birth from the device-correct global prior
-    # (``gpu_priors``: cupy on GPU, numpy on CPU) for now; the astro-birth
-    # container itself is left untouched. Revert by deleting this override.
-    _rj_birth_prop = gpu_priors
 
     #* ============================================= SEARCH MOVES =============================================
     gb_search_prune_move = GBSpecialRJPriorMove(

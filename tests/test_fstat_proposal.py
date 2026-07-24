@@ -247,6 +247,60 @@ class BirthContainerTest(unittest.TestCase):
         self.assertEqual(s.shape, (16, 8))
 
 
+class DistanceRatioBirthContainerTest(unittest.TestCase):
+    """9-column distance + fdot_astro_ratio birth container.
+
+    This is the container the stock recipe now feeds directly into the RJ
+    birth path (the earlier ``_rj_birth_prop = gpu_priors`` override that
+    bypassed it has been removed). It must round-trip rvs -> logpdf, keep
+    every column inside its prior support, and survive deepcopy/pickle, so a
+    regression here surfaces before it reaches a GPU run. The array-module
+    agnosticism the override worried about (cupy coords through ``logpdf``)
+    can only be exercised on a device; the components dispatch via
+    ``get_array_module`` on their inputs, so the CPU round-trip pins the
+    layout and leaves the device path to the GPU smoke.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        base = _make_prop(n_per_axis=16, seed=3)
+        mix = UniformFloorMixture(base, FLOOR_LO, FLOOR_HI, eps=0.1, seed=5)
+        cls.A_lims = [1e-24, 1e-21]
+        cls.dist_lims = [0.001, 40.0]
+        cls.M = 5.0
+        cls.dist = make_gb_rj_birth_container(
+            mix, cls.A_lims, fdot_astro_ratio_max=cls.M,
+            dist_lims=cls.dist_lims,
+        )
+
+    def test_rvs_shape_and_columns(self):
+        s = np.asarray(self.dist.rvs(size=1000))
+        self.assertEqual(s.shape, (1000, 9))
+        dist, f0, Mc, phi0, ci, psi, alpha, sd, ratio = s.T
+        # slot 0 is luminosity distance (kpc), NOT lnA
+        self.assertTrue(np.all((dist >= self.dist_lims[0])
+                               & (dist <= self.dist_lims[1])))
+        self.assertTrue(np.all((f0 >= FLOOR_LO[0]) & (f0 <= FLOOR_HI[0])))
+        self.assertTrue(np.all((Mc >= 0.001) & (Mc <= 1.0)))
+        self.assertTrue(np.all((phi0 >= 0) & (phi0 <= 2 * np.pi)))
+        self.assertTrue(np.all((ci >= -1) & (ci <= 1)))
+        self.assertTrue(np.all((psi >= 0) & (psi <= np.pi)))
+        self.assertTrue(np.all((alpha >= 0) & (alpha <= 2 * np.pi)))
+        self.assertTrue(np.all((sd >= -1) & (sd <= 1)))
+        self.assertTrue(np.all((ratio >= -self.M) & (ratio <= self.M)))
+
+    def test_logpdf_shape_and_consistency(self):
+        s = np.asarray(self.dist.rvs(size=500))
+        lp = np.asarray(self.dist.logpdf(s))
+        self.assertEqual(lp.shape, (500,))
+        self.assertTrue(np.all(np.isfinite(lp)))
+
+    def test_pickles(self):
+        clone = pickle.loads(pickle.dumps(copy.deepcopy(self.dist)))
+        s = np.asarray(clone.rvs(size=16))
+        self.assertEqual(s.shape, (16, 9))
+
+
 class CombProposalTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
