@@ -127,10 +127,85 @@
     },
     "t1-fastlike-vgb": {
       "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
+      "evidence": [
+        "evidence/t1-fastlike-vgb.log",
+        "evidence/t1-fastlike-vgb/fastlike_vgb.png"
+      ],
+      "history": [
+        {
+          "note": "check vgb-fastlike-vs-ac exited 1",
+          "state": "red",
+          "ts": "2026-07-24T07:17:57Z"
+        },
+        {
+          "note": "check vgb-fastlike-vs-ac exited 1",
+          "state": "red",
+          "ts": "2026-07-24T07:19:35Z"
+        },
+        {
+          "note": "check vgb-fastlike-vs-ac exited 1",
+          "state": "red",
+          "ts": "2026-07-24T07:21:54Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T07:23:19Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T07:27:00Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T07:30:35Z"
+        }
+      ],
+      "metrics": {
+        "branch": "vgb",
+        "comp": "False",
+        "d_h_ac": 100.5007,
+        "d_h_fast": 100.5007,
+        "error": "ValueError",
+        "f0": 1.1382e-16,
+        "f0_mhz": 3.78835,
+        "fastlike_max_reldiff": 1.207e-09,
+        "fastlike_ok": 1,
+        "fastlike_sources": 3,
+        "h_h_ac": 100.5007,
+        "h_h_fast": 100.5007,
+        "n_injected": 55,
+        "plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-fastlike-vgb/fastlike_vgb.png",
+        "reason": "no_engine",
+        "reldiff_dh": 2.365e-11,
+        "reldiff_hh": 4.73e-11,
+        "result_branch": "vgb",
+        "result_comp": "False",
+        "result_d_h_ac": 100.5007,
+        "result_d_h_fast": 100.5007,
+        "result_error": "ValueError",
+        "result_f0": 1.1382e-16,
+        "result_f0_mhz": 3.78835,
+        "result_fastlike_max_reldiff": 1.207e-09,
+        "result_fastlike_ok": 1,
+        "result_fastlike_sources": 3,
+        "result_h_h_ac": 100.5007,
+        "result_h_h_fast": 100.5007,
+        "result_n_injected": 55,
+        "result_plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-fastlike-vgb/fastlike_vgb.png",
+        "result_reason": "no_engine",
+        "result_reldiff_dh": 2.365e-11,
+        "result_reldiff_hh": 4.73e-11,
+        "result_signal_gen": "True",
+        "result_src": 2,
+        "result_topn": 3,
+        "signal_gen": "True",
+        "src": 2,
+        "topn": 3
+      },
+      "state": "green"
     },
     "t1-gt-emri": {
       "confirmed": [],
@@ -477,6 +552,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T07:14:24Z",
+  "updated": "2026-07-24T07:30:35Z",
   "version": 1
 }

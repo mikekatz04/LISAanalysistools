@@ -60,8 +60,12 @@ def main() -> None:
     curr = fit.build()
 
     info = curr.source_info[args.branch]
-    comp = getattr(info, "gb_wdm_comp", None)
     signal_gen = getattr(info, "signal_gen", None)
+    # GB sets info.gb_wdm_comp eagerly; VGB builds it lazily on the
+    # container-level source_info, reachable via the signal_gen's _comp().
+    comp = getattr(info, "gb_wdm_comp", None)
+    if comp is None and signal_gen is not None and hasattr(signal_gen, "_comp"):
+        comp = signal_gen._comp()
     if comp is None or signal_gen is None:
         print(f"[RESULT] fastlike_ok=0 reason=no_engine "
               f"comp={comp is not None} signal_gen={signal_gen is not None}",
@@ -89,21 +93,37 @@ def main() -> None:
     acs = gf.setup_acs(state, rebuild_residuals=False)
     ac = acs.flatten()[0]
 
-    # highest-frequency sources (sampling col 1 = f0 in the fdot basis)
-    f0_col = 1
-    order = np.argsort(inj[:, f0_col])[::-1][: args.topn]
+    # Resolve each leaf's f0 to pick the 3 highest-FREQUENCY sources.
+    # GB samples f0 directly (injection col 1). VGB fixes f0 PER-LEAF
+    # (VGB_FIXED_BASIS = [f0, alpha, sin_delta]), so its injection col 1 is
+    # fdot and f0 lives in the transform's per-leaf fill_dict.
+    # f0 in sampling units (mHz). GB samples f0 in injection col 1. VGB fixes
+    # it per-leaf: Eryn stores fills as {'fill_inds': [full-basis cols],
+    # 'fill_values': (n_leaves, k)}; f0 is full-basis col 1, so read the
+    # fill_values column at the position where fill_inds == 1.
+    tc = getattr(signal_gen, "transform", None) or getattr(info, "transform", None)
+    fd = getattr(tc, "fill_dict", None)
+    f0_vals = inj[:, 1]
+    if isinstance(fd, dict) and "fill_values" in fd and "fill_inds" in fd:
+        fill_inds = list(np.asarray(fd["fill_inds"]).ravel())
+        if 1 in fill_inds:
+            f0_vals = np.asarray(fd["fill_values"])[:, fill_inds.index(1)]
+    order = np.argsort(f0_vals)[::-1][: args.topn].astype(int)
     sources = inj[order]
+    f0_sel = f0_vals[order]
     print(f"[RESULT] branch={args.branch} n_injected={inj.shape[0]} "
-          f"topn={sources.shape[0]}", flush=True)
+          f"topn={sources.shape[0]} "
+          f"f0_mhz={np.round(f0_sel, 4).tolist()}", flush=True)
 
     # --- fast engine: all sources at once against walker-0's mojito data ----
-    # info.injection is stored in the RUN sampling basis (the 9-col fdot_astro
-    # basis by default), so use the fit's OWN transform — the exact one
-    # signal_gen applies — to reach the physical GBGPU basis, NOT the standalone
-    # 8-col fdot factory the seed helper uses.
+    # info.injection is the RUN sampling basis, so use the fit's OWN transform
+    # (the exact one signal_gen applies) to reach the physical GBGPU basis.
+    # VGB's transform carries per-leaf fills, so it needs leaf_inds = the
+    # selected sources' leaf indices; scalar GB transforms ignore leaf_inds, so
+    # passing them unconditionally is safe.
     xp = comp.xp
-    tc = getattr(signal_gen, "transform", None) or getattr(info, "transform", None)
-    params_phys = tc.both_transforms(xp.asarray(sources), xp=xp)
+    leaf_inds = xp.asarray(order)
+    params_phys = tc.both_transforms(xp.asarray(sources), leaf_inds=leaf_inds, xp=xp)
     di = xp.zeros(params_phys.shape[0], dtype=xp.int32)
     comp.get_ll_wdm(params_phys, acs[0], data_index=di, noise_index=di)
     d_h_fast = asnumpy(comp.d_h_out).real
@@ -112,7 +132,9 @@ def main() -> None:
     # --- AnalysisContainer reference on the SAME mojito data -----------------
     reldiffs, dh_pairs, hh_pairs, labels = [], [], [], []
     for i, row in enumerate(sources):
-        h = signal_gen(*row)
+        # *row unpacks to a 1-D param vector (leading shape ()), so leaf_inds
+        # is the matching scalar leaf index.
+        h = signal_gen(*row, leaf_inds=int(order[i]))
         opt, det = ac.template_snr(h)
         h_h_ac = float(opt) ** 2
         d_h_ac = float(np.real(complex(ac.non_marg_d_h)))
@@ -122,8 +144,8 @@ def main() -> None:
         reldiffs += [rd_dh, rd_hh]
         dh_pairs.append((d_h_ac, dhf))
         hh_pairs.append((h_h_ac, hhf))
-        labels.append(f"f0={row[f0_col]:.4g}")
-        print(f"[RESULT] src={i} f0={row[f0_col]:.5g} "
+        labels.append(f"f0={f0_sel[i]:.4f} mHz")
+        print(f"[RESULT] src={i} f0_mhz={f0_sel[i]:.5f} "
               f"d_h_fast={dhf:.6e} d_h_ac={d_h_ac:.6e} "
               f"h_h_fast={hhf:.6e} h_h_ac={h_h_ac:.6e} "
               f"reldiff_dh={rd_dh:.3e} reldiff_hh={rd_hh:.3e}", flush=True)
