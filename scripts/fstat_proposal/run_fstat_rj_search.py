@@ -311,7 +311,19 @@ def build_birth_distribution(fit, floor_eps=0.1, comb_weight=0.0):
     print(f"[birth] floor box f0=[{f0_lo:.5f}, {f0_hi:.5f}] mHz  "
           f"eps={floor_eps}", flush=True)
     print(f"[birth] container use_cupy={use_cupy}", flush=True)
-    return make_gb_rj_birth_container(mix, fit.gb.A_lims, use_cupy=use_cupy)
+    # 9-column ratio basis (use_chirp_mass & use_astrophysical_f0_mc_prior):
+    # the birth container must emit the fdot_astro_ratio column too, drawn
+    # from its U[-M, M] prior (the F-stat intrinsics stay the 4-D f0/Mc/sky).
+    ratio_max = (
+        fit.gb.fdot_astro_ratio_max if getattr(fit.gb, "use_fdot_astro", False)
+        else None
+    )
+    if ratio_max is not None:
+        print(f"[birth] appending fdot_astro_ratio ~ U[-{ratio_max}, "
+              f"{ratio_max}] (9-column basis)", flush=True)
+    return make_gb_rj_birth_container(
+        mix, fit.gb.A_lims, use_cupy=use_cupy, fdot_astro_ratio_max=ratio_max
+    )
 
 
 def main():
