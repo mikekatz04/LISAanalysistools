@@ -278,6 +278,11 @@
           "note": "run: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-24T07:56:01Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T08:06:01Z"
         }
       ],
       "metrics": {
@@ -308,11 +313,15 @@
         "result_rr": 3141.736,
         "result_rr_over_dd": 0.001562,
         "result_source_logL": -1570.868,
+        "result_worst_logL_noiseless": -1570.868,
+        "result_worst_rr": 3141.736,
         "result_worst_rr_dd": 0.001562,
         "result_xcheck": "True",
         "rr": 3141.736,
         "rr_over_dd": 0.001562,
         "source_logL": -1570.868,
+        "worst_logL_noiseless": -1570.868,
+        "worst_rr": 3141.736,
         "worst_rr_dd": 0.001562,
         "xcheck": "True"
       },
@@ -377,7 +386,7 @@
       "evidence": [],
       "history": [],
       "metrics": {},
-      "state": "pending"
+      "state": "running"
     },
     "t1-gt-vgb": {
       "confirmed": [],
@@ -617,6 +626,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T07:56:01Z",
+  "updated": "2026-07-24T08:06:07Z",
   "version": 1
 }
