@@ -663,6 +663,7 @@ class DataProcessorSwapTest(unittest.TestCase):
 class LiteVariantTest(unittest.TestCase):
     LITE_NAMES = (
         "gb_no_fg_lite",
+        "vgb_lite",
         "all_sources_lite",
         "full_year_combined_lite",
         "noise_only_lite",

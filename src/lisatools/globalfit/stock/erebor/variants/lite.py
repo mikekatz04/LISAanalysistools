@@ -32,6 +32,7 @@ from .all_sources import AllSourcesGlobalFit
 from .full_year_combined import FullYearCombinedGlobalFit
 from .gb_no_fg import GBNoForegroundGlobalFit
 from .noise import NoiseOnlyGlobalFit, NoiseSGWBGlobalFit
+from .vgb import VGBGlobalFit
 
 __all__ = [
     "ALL_SOURCES_LITE",
@@ -39,11 +40,13 @@ __all__ = [
     "GB_NO_FG_LITE",
     "NOISE_ONLY_LITE",
     "NOISE_SGWB_LITE",
+    "VGB_LITE",
     "AllSourcesLiteGlobalFit",
     "FullYearCombinedLiteGlobalFit",
     "GBNoForegroundLiteGlobalFit",
     "NoiseOnlyLiteGlobalFit",
     "NoiseSGWBLiteGlobalFit",
+    "VGBLiteGlobalFit",
 ]
 
 # ---------------------------------------------------------------------------
@@ -125,6 +128,17 @@ FULL_YEAR_COMBINED_LITE_ENV = {
     "general.tobs_target": "TOBS_TARGET",
 }
 
+# vgb: fixed 5-D leaves need no RJ machinery — the lite twin just shortens
+# the span (matching gb_no_fg_lite) on top of the common smoke shape.
+VGB_LITE = {
+    **_COMMON_LITE,
+    "general.tobs_target": 14 * 86400.0,
+}
+VGB_LITE_ENV = {
+    **_COMMON_LITE_ENV,
+    "general.tobs_target": "TOBS_TARGET",
+}
+
 # noise fits: quarter-length time grid on the stock 768-layer band.
 NOISE_ONLY_LITE = {
     **_COMMON_LITE,
@@ -170,6 +184,7 @@ _attach(GBNoForegroundGlobalFit, GB_NO_FG_LITE, GB_NO_FG_LITE_ENV)
 _attach(FullYearCombinedGlobalFit, FULL_YEAR_COMBINED_LITE, FULL_YEAR_COMBINED_LITE_ENV)
 _attach(NoiseOnlyGlobalFit, NOISE_ONLY_LITE, NOISE_ONLY_LITE_ENV)
 _attach(NoiseSGWBGlobalFit, NOISE_SGWB_LITE, NOISE_SGWB_LITE_ENV)
+_attach(VGBGlobalFit, VGB_LITE, VGB_LITE_ENV)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +257,20 @@ class NoiseSGWBLiteGlobalFit(NoiseSGWBGlobalFit):
     description = (
         "Laptop-smoke twin of noise_sgwb: quarter-length time grid, "
         "3 iterations, 4 walkers x 2 temps, CPU."
+    )
+
+    def __init__(self, **knobs):
+        knobs.setdefault("lite", True)
+        super().__init__(**knobs)
+
+
+class VGBLiteGlobalFit(VGBGlobalFit):
+    """``vgb`` with the lite preset applied at construction."""
+
+    option_name = "vgb_lite"
+    description = (
+        "Laptop-smoke twin of vgb: two-week span, 3 iterations, "
+        "4 walkers x 2 temps, CPU."
     )
 
     def __init__(self, **knobs):

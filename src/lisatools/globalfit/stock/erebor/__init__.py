@@ -78,6 +78,7 @@ from .variants.lite import (  # noqa: E402
     GBNoForegroundLiteGlobalFit,
     NoiseOnlyLiteGlobalFit,
     NoiseSGWBLiteGlobalFit,
+    VGBLiteGlobalFit,
 )
 from .variants.noise import NoiseOnlyGlobalFit, NoiseSGWBGlobalFit  # noqa: E402
 from .variants.vgb import VGBGlobalFit  # noqa: E402
@@ -95,6 +96,7 @@ for _cls in (
     FullYearCombinedLiteGlobalFit,
     NoiseOnlyLiteGlobalFit,
     NoiseSGWBLiteGlobalFit,
+    VGBLiteGlobalFit,
 ):
     _registry.register(_cls)
 
@@ -118,6 +120,7 @@ full_year_combined = FullYearCombinedGlobalFit()
 noise_only = NoiseOnlyGlobalFit()
 noise_sgwb = NoiseSGWBGlobalFit()
 gb_no_fg_lite = GBNoForegroundLiteGlobalFit()
+vgb_lite = VGBLiteGlobalFit()
 all_sources_lite = AllSourcesLiteGlobalFit()
 full_year_combined_lite = FullYearCombinedLiteGlobalFit()
 noise_only_lite = NoiseOnlyLiteGlobalFit()
