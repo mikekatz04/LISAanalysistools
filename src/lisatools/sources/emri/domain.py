@@ -47,6 +47,10 @@ FEW_DOMAIN_ERROR_PATTERNS = (
     "not allowed",  # Schwarzschild e0 > 0.75
     "not physical",  # e0 < 0
     "Initial p0 is too large",  # Schwarzschild outer p0 bound
+    # CubicSplineInterpolant: near-plunge trajectory with < 3 sparse points —
+    # too short for the batched tridiagonal spline solve (the GPU cusparse
+    # kernel requires m >= 3 and would otherwise hard-exit the process).
+    "must have length greater than 2",
 )
 
 
