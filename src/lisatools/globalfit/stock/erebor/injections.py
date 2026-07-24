@@ -165,8 +165,10 @@ class SyntheticEMRIProcessingStep(BaseProcessingStep):
             force_backend=force_backend,
         )
 
-        td_signal = np.asarray(
-            wave_gen(*injection_params_full_basis)
+        # asnumpy: GPU-backend generators return device arrays (data
+        # production follows the run backend); streams accumulate on host.
+        td_signal = np.atleast_2d(
+            asnumpy(wave_gen(*injection_params_full_basis))
         )
         td_signal = np.atleast_2d(td_signal)[:nchannels]
 
@@ -221,10 +223,11 @@ class SyntheticSOBBHProcessingStep(BaseProcessingStep):
             force_backend=force_backend,
         )
 
-        td_signal = np.asarray(
-            wave_gen(*injection_params_full_basis)
-        )
-        td_signal = np.atleast_2d(td_signal)[:nchannels]
+        # asnumpy: GPU-backend generators return device arrays (data
+        # production follows the run backend); streams accumulate on host.
+        td_signal = np.atleast_2d(
+            asnumpy(wave_gen(*injection_params_full_basis))
+        )[:nchannels]
 
         target_N = int(round(Tobs / dt))
         if td_signal.shape[-1] < target_N:
@@ -924,7 +927,8 @@ def build_synthetic_source_streams(
         )
         for ii, params in enumerate(emri_injections):
             logger.info(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [start]")
-            sig = np.asarray(emri_wave_gen(*params))
+            # asnumpy: GPU-backend generator output -> host accumulation.
+            sig = asnumpy(emri_wave_gen(*params))
             emri_td += np.asarray(
                 place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
             )
@@ -940,7 +944,8 @@ def build_synthetic_source_streams(
         )
         for ii, params in enumerate(sobbh_injections):
             logger.info(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
-            sig = np.asarray(sobbh_wave_gen(*params))
+            # asnumpy: GPU-backend generator output -> host accumulation.
+            sig = asnumpy(sobbh_wave_gen(*params))
             sobbh_td += np.asarray(
                 place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
             )
@@ -963,8 +968,11 @@ def build_synthetic_source_streams(
                 np.asarray(params, dtype=float)
             )
             times, channels = mbh_wave_gen.compute_tdi_channels(*params_in)
+            # asnumpy: GPU-backend generator output -> host grid placement.
             mbh_td += np.asarray(
-                place_td_signal_on_grid(channels, grid, times=times).arr
+                place_td_signal_on_grid(
+                    asnumpy(channels), grid, times=asnumpy(times)
+                ).arr
             )[:nchannels]
             logger.info(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [end]")
     return emri_td, sobbh_td, mbh_td
