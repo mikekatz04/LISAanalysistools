@@ -341,8 +341,12 @@ class SyntheticGBProcessingStep(BaseProcessingStep):
                    flip_ref_phase=True)
         # ``GBGPU.generate_global_template`` reads ``self.gpus`` directly,
         # which is only set elsewhere (e.g. in the move setup). For a
-        # standalone injection we set it explicitly.
-        gb.gpus = None if force_backend == "cpu" else [0]
+        # standalone injection we pin to whatever device the caller already
+        # selected rather than hardcoding device 0.
+        from lisatools.utils.device import current_device
+
+        _dev = None if force_backend == "cpu" else current_device(gb.xp)
+        gb.gpus = None if _dev is None else [_dev]
         xp = gb.xp
 
         # NOTE: ``generate_global_template`` internally ``.flatten()``s any

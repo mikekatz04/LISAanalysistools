@@ -35,10 +35,10 @@ from tqdm import tqdm
 from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray
+from ...utils.device import device_context
 from ...utils.exceptions import WaveformDomainError
 from ...utils.utility import asnumpy, get_array_module
 from .globalfitmove import GlobalFitMove
-from .multigpumove import MultiGPUMoveBase
 
 logger = logging.getLogger(__name__)
 DEBUG_MODE = False
@@ -124,6 +124,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         betas_all: np.ndarray = None,
         permute_every: int = 20,
         pad_out_of_prior: bool = False,
+        dcga: DomainComputationGroupArray = None,
+        waveform_gen_method: str = None,
+        waveform_like_method: str = None,
+        run_async: bool = False,
+        run_threaded: bool = False,
         **kwargs,
     ):
 
@@ -131,6 +136,27 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         StretchMove.__init__(self, **kwargs)
 
         self.ntemps, self.nwalkers, self.nleaves_max, self.ndim = coords_shape
+
+        # ONE move structure (2026-07 multi-GPU pass): pass ``dcga=`` to run
+        # waveform generation + likelihood scoring on per-device replicas —
+        # how many GPUs the move uses is set by the DCGA it is built with.
+        # Without a DCGA the move runs the per-container ACA path (which is
+        # itself shard-aware; see compute_acs_like). Same object either way.
+        # With ``dcga``, ``waveform_gen`` is the generator OBJECT (its
+        # ``.kwargs`` seed the replicas) and ``waveform_gen_method`` names
+        # the method; without, ``waveform_gen`` is the bound callable.
+        self._dcga = dcga
+        self._run_async = run_async
+        self._run_threaded = run_threaded
+        self._waveform_gen_obj = None
+        self.waveform_gen_method = waveform_gen_method
+        self.waveform_like_method = waveform_like_method or waveform_gen_method
+        if dcga is not None:
+            if acs is None:
+                acs = dcga.acs
+            if waveform_gen_method is not None:
+                self._waveform_gen_obj = waveform_gen
+                waveform_gen = getattr(waveform_gen, waveform_gen_method)
 
         self.branch_name = branch_name
         self.acs = acs
@@ -171,6 +197,180 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # make sure to propagate the periodic information to the inner moves if it is included in kwargs
         if 'periodic' in kwargs:
             self.periodic = kwargs['periodic']
+
+        if self._dcga is not None and self._waveform_gen_obj is not None:
+            self.create_waveform_gen_replicas()
+
+    # ------------------------------------------------------------------
+    # DCGA (multi-device) spread — absorbed from the legacy
+    # MultiGPUResidualAddRemoveMove in the 2026-07 multi-GPU pass (one
+    # move structure; active when the move is constructed with ``dcga=``).
+    # ------------------------------------------------------------------
+
+    @property
+    def dcga(self) -> DomainComputationGroupArray:
+        return self._dcga
+
+    @property
+    def run_async(self) -> bool:
+        return self._run_async
+
+    @property
+    def run_threaded(self) -> bool:
+        return self._run_threaded
+
+    def create_waveform_gen_replicas(self):
+        """One waveform generator per device, seeded from the generator
+        object's ``.kwargs`` with the split's device-local orbits."""
+        gen_obj = self._waveform_gen_obj
+        if not hasattr(gen_obj, "kwargs"):
+            raise ValueError(
+                "Waveform generator must have a 'kwargs' attribute that "
+                "contains the keyword arguments to initialize the waveform "
+                "generator (needed to build per-device replicas)."
+            )
+        self._waveform_generators = []
+        for i, device in enumerate(
+            self.dcga.gpus
+            if self.dcga.gpus is not None
+            else [None] * self.dcga.num_splits
+        ):
+            with self.dcga.device_context(device):
+                init_kwargs = gen_obj.kwargs.copy()
+                if "orbits" in init_kwargs:
+                    init_kwargs["orbits"] = (
+                        self.dcga.computation_groups[i].orbits
+                    )
+                self._waveform_generators.append(
+                    gen_obj.__class__(**init_kwargs)
+                )
+
+    @property
+    def waveform_generators(self) -> list:
+        return self._waveform_generators
+
+    def make_args_tuple(self, coords) -> tuple:
+        """Unpack coordinates into per-parameter arrays for the generator
+        (JAX needs the separate memory addresses)."""
+        return tuple(xp.array(coords[:, i]) for i in range(coords.shape[1]))
+
+    def prepare_inputs(self, coords, data_index):
+        """Partition coordinates/indices by split and place them on device."""
+        positions_per_split, data_intra_index_per_split, _ = (
+            self.dcga.unpack_indices(data_index)
+        )
+        coords_per_split = self.dcga.unpack_coords(
+            positions_per_split, coords, keep_tuple=True
+        )
+
+        data_intra_index_per_split, coords_per_split = (
+            self.dcga.place_on_device(
+                items=(data_intra_index_per_split, coords_per_split)
+            )
+        )
+
+        waveform_args_per_split = self.dcga._loop_operation(
+            operation=[
+                self.make_args_tuple for _ in self.dcga.computation_groups
+            ],
+            operation_args_per_split=coords_per_split,
+        )
+
+        return (
+            positions_per_split,
+            data_intra_index_per_split,
+            waveform_args_per_split,
+        )
+
+    def aggregate_waveforms(self, waveforms_per_split) -> list[DomainBase]:
+        """Flatten per-split waveform lists into one list."""
+        waveforms = []
+        for waveforms_split in waveforms_per_split:
+            waveforms.extend(waveforms_split)
+        return waveforms
+
+    def _get_waveform_here_dcga(self, coords: np.ndarray) -> list[DomainBase]:
+        self.free_gpu_memory()
+
+        data_index = np.arange(coords.shape[0], dtype=np.int32)
+
+        _, _, waveform_args_per_split = self.prepare_inputs(coords, data_index)
+
+        operations = [
+            getattr(waveform_gen, self.waveform_gen_method)
+            for waveform_gen in self.waveform_generators
+        ]
+
+        waveforms_out = self.dcga._loop_operation(
+            operation=operations,
+            operation_args_per_split=waveform_args_per_split,
+            operation_kwargs=self.waveform_gen_kwargs,
+            aggregate_fn=self.aggregate_waveforms,
+            run_threaded=self.run_threaded,
+        )
+
+        self.dcga.synchronize()
+
+        return waveforms_out
+
+    def _compute_like_dcga(
+        self, coords_in: np.ndarray, data_index: np.ndarray
+    ) -> np.ndarray:
+        (
+            positions_per_split,
+            data_intra_index_per_split,
+            waveform_args_per_split,
+        ) = self.prepare_inputs(coords_in, data_index)
+
+        waveform_like_operations = [
+            getattr(waveform_gen, self.waveform_like_method)
+            for waveform_gen in self.waveform_generators
+        ]
+
+        likelihood_args_per_split = self.dcga._loop_operation(
+            operation=waveform_like_operations,
+            operation_args_per_split=waveform_args_per_split,
+            operation_kwargs=self.waveform_like_kwargs,
+            positions_per_split=positions_per_split,
+            run_threaded=self.run_threaded,
+        )
+
+        if not self.run_async:
+            self.dcga.synchronize()
+
+        likelihoods = self.dcga.compute_signal_likelihood(
+            positions_per_split=positions_per_split,
+            data_intra_per_split=data_intra_index_per_split,
+            noise_intra_per_split=data_intra_index_per_split,
+            likelihood_args_per_split=likelihood_args_per_split,
+            likelihood_kwargs={'run_async': self.run_async},
+            run_threaded=self.run_threaded,
+        )
+
+        # Release GPU arrays before freeing the pool: the large template
+        # arrays must be dereferenced before free_all_blocks() so those
+        # blocks are actually returned rather than staying pool-owned.
+        del (
+            likelihood_args_per_split,
+            waveform_args_per_split,
+            data_intra_index_per_split,
+        )
+
+        self.free_gpu_memory()
+
+        if np.any(~np.isfinite(likelihoods)):
+            logger.warning(
+                f"Non-finite likelihoods encountered: {likelihoods}. "
+                "This could be a sign of numerical issues."
+            )
+            if DEBUG_MODE:
+                breakpoint()
+
+        likelihoods = np.where(
+            np.isfinite(likelihoods), likelihoods, -1e300
+        )
+
+        return likelihoods
 
     # ------------------------------------------------------------------
     # Debug / instrumentation plotting (mirrors the GB special-stretch move,
@@ -422,6 +622,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     tmp_move.periodic = periodic
 
     def free_gpu_memory(self):
+        if self._dcga is not None:
+            self._dcga.free_gpu_memory()
+            return
         if self.xp is not np:
             self.xp.get_default_memory_pool().free_all_blocks()
 
@@ -588,6 +791,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             :class:`~lisatools.domains.DomainBaseArray` of length ``n_sources``.
 
         """
+        if self._dcga is not None:
+            return self._get_waveform_here_dcga(coords)
+
         _free_pool()
 
         waveforms = []
@@ -597,8 +803,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return DomainBaseArray(waveforms)
 
     def setup_likelihood_here(self, coords):
-        """Hook for subclasses to set up state before computing the likelihood."""
-        pass
+        """Set up state before computing the likelihood (DCGA path computes
+        the per-split <d|d> terms; the plain path needs nothing)."""
+        if self._dcga is not None:
+            self._dcga.compute_d_d_terms()
 
     def compute_acs_like(self, coords_in, data_index, signal_gen=None, **kwargs):
         """
@@ -637,28 +845,43 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             else {self.branch_name: MoveSignalGen(self, signal_gen)}
         )
         ll = np.full(len(data_index_np), -1e300, dtype=float)
-        for i in range(coords_in.shape[0]):
-            ac = self.acs[int(data_index_np[i])]
-            try:
-                ll[i] = ac.calculate_signal_likelihood(
-                    {self.branch_name: coords_in[i]},
-                    signal_gen=(
-                        custom_override if custom_override is not None
-                        else self._resolve_signal_gen_override(ac)
-                    ),
-                    waveform_kwargs=self._branch_waveform_kwargs(),
-                    apply_transform=False,
-                    source_only=source_only,
-                    **kwargs,
-                )
-            except WaveformDomainError as exc:
-                # Prior support leaks outside the waveform's domain of
-                # validity; score the point at the floor instead of crashing.
-                logger.debug(
-                    "%s waveform domain error -> ll = -1e300: %s",
-                    self.branch_name,
-                    exc,
-                )
+        # Shard-aware scoring (2026-07 multi-GPU pass): rows are grouped by
+        # the walker's owning ACA split and evaluated INSIDE that device
+        # context, so templates are generated on the same device as the
+        # residual/invC views they are scored against (walkers on shard >= 1
+        # previously hit cross-device failures here).
+        split_of_row = np.asarray(
+            asnumpy(self.acs.split_map), dtype=int
+        )[data_index_np]
+        for s in np.unique(split_of_row):
+            dev = (
+                None if self.acs.gpus is None
+                else int(self.acs.gpus[int(s)])
+            )
+            rows = np.where(split_of_row == s)[0]
+            with device_context(self.acs.xp, dev):
+                for i in rows:
+                    ac = self.acs[int(data_index_np[i])]
+                    try:
+                        ll[i] = ac.calculate_signal_likelihood(
+                            {self.branch_name: coords_in[i]},
+                            signal_gen=(
+                                custom_override if custom_override is not None
+                                else self._resolve_signal_gen_override(ac)
+                            ),
+                            waveform_kwargs=self._branch_waveform_kwargs(),
+                            apply_transform=False,
+                            source_only=source_only,
+                            **kwargs,
+                        )
+                    except WaveformDomainError as exc:
+                        # Prior support leaks outside the waveform's domain
+                        # of validity; score at the floor instead of crashing.
+                        logger.debug(
+                            "%s waveform domain error -> ll = -1e300: %s",
+                            self.branch_name,
+                            exc,
+                        )
 
         return ll
 
@@ -677,6 +900,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         Returns:
             ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
         """
+        if self._dcga is not None:
+            return self._compute_like_dcga(coords_in, data_index)
         return self.compute_acs_like(
             coords_in, data_index, **self.waveform_like_kwargs
         )
@@ -1220,32 +1445,15 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 # per-device waveform-generator replicas. Kept through the merge; its
 # interaction with the dev-side ACA sharding is reviewed in the dedicated
 # multi-GPU pass.
-class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBase):
+class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove):
+    """Deprecated alias — :class:`ResidualAddOneRemoveOneMove` is ONE
+    structure that takes ``dcga=`` directly (2026-07 multi-GPU pass). This
+    shim maps the legacy ``MultiGPUResidualAddRemoveMove(dcga, waveform_gen,
+    ...)`` signature onto it.
     """
-    Wrapper around ResidualAddOneRemoveOneMove that runs the waveform generation and likelihood computation on multiple GPUs.
 
-    Args:
-    dcga: DomainComputationGroupArray that contains the information about the domain computation groups and the GPUs to use for each group.
-    waveform_gen: waveform generator class that generates the waveforms for the sources given their coordinates.
-    branch_name: name of the branch that this move will operate on.
-    coords_shape: shape of the coordinates of the sources in the branch that this move will operate on.
-    waveform_gen_method: name of the method of the waveform generator class to use for generating the waveforms for residual operations.
-    waveform_gen_kwargs: keyword arguments for the waveform generator method.
-    waveform_like_kwargs: keyword arguments for the likelihood computation function.
-    num_repeats: number of times to repeat the proposal step for each leaf.
-    transform_fn: transform container that contains the transforms to be applied to the coordinates before generating waveforms and computing likelihoods.
-    priors: prior distribution container that contains the prior distributions for the sources in the branch.
-    inner_moves: list of moves and their corresponding weights to be used for proposing new sources for each leaf.
-    Tmax: maximum temperature for the temperature control.
-    betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
-    permute_every: number of repeats after which to permute the walkers during a temperature swap. 
-    pad_out_of_prior: whether to pad proposed sources that are out of the prior bounds to avoid JIT compilation issues. If True, proposed sources that are out of the prior bounds will be replaced with the first in-prior point. 
-    run_async: whether to run the waveform generation and likelihood computation asynchronously for each GPU. If True, the synchronization will happen on the python side after the kernel calls. 
-    run_threaded: whether to run the waveform generation and likelihood computation in separate threads for each GPU.
-    waveform_like_method: name of the method of the waveform generator class to use for generating the waveforms for likelihood computation. If None, will use the same method as waveform_gen_method.
-    """
     def __init__(
-        self, 
+        self,
         dcga: DomainComputationGroupArray,
         waveform_gen: Any,
         branch_name: str,
@@ -1264,13 +1472,22 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         run_async: bool = False,
         run_threaded: bool = False,
         waveform_like_method: str = None,
-        **kwargs
+        **kwargs,
     ):
+        import warnings
+
+        warnings.warn(
+            "MultiGPUResidualAddRemoveMove is deprecated: construct "
+            "ResidualAddOneRemoveOneMove(..., dcga=...) directly (one move "
+            "structure).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         ResidualAddOneRemoveOneMove.__init__(
             self,
             branch_name=branch_name,
             coords_shape=coords_shape,
-            waveform_gen=getattr(waveform_gen, waveform_gen_method),
+            waveform_gen=waveform_gen,
             waveform_gen_kwargs=waveform_gen_kwargs,
             waveform_like_kwargs=waveform_like_kwargs,
             acs=dcga.acs,
@@ -1282,165 +1499,10 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             betas_all=betas_all,
             permute_every=permute_every,
             pad_out_of_prior=pad_out_of_prior,
-            **kwargs
+            dcga=dcga,
+            waveform_gen_method=waveform_gen_method,
+            waveform_like_method=waveform_like_method,
+            run_async=run_async,
+            run_threaded=run_threaded,
+            **kwargs,
         )
-
-        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
-
-        self.waveform_gen = waveform_gen
-        self.waveform_gen_method = waveform_gen_method
-        self.waveform_like_method = waveform_like_method or waveform_gen_method
-
-        self.create_waveform_gen_replicas()
-
-    def create_waveform_gen_replicas(self, ):
-        """
-        Create replicas of the waveform generator for each GPU.
-        """
-
-        self._waveform_generators = []
-        for i, device in enumerate(
-            self.dcga.gpus if self.dcga.gpus is not None else [None] * self.dcga.num_splits
-        ):
-            if not hasattr(self.waveform_gen, "kwargs"):
-                raise ValueError("Waveform generator must have a 'kwargs' attribute that contains the keyword arguments to initialize the waveform generator.")    
-            
-            with self.dcga.device_context(device):
-                # if i == 0:
-                #     # Reuse the initial waveform generator for the first split to save memory
-                #     self._waveform_generators.append(self.waveform_gen)
-                # else:
-                init_kwargs = self.waveform_gen.kwargs.copy()
-                if "orbits" in init_kwargs:
-                    init_kwargs["orbits"] = self.dcga.computation_groups[i].orbits
-
-                self._waveform_generators.append(
-                    self.waveform_gen.__class__(**init_kwargs)
-                )
-
-    def free_gpu_memory(self):
-        self.dcga.free_gpu_memory()
-
-    @property
-    def waveform_generators(self) -> list:
-        return self._waveform_generators
-    
-    def make_args_tuple(self, coords) -> tuple:
-        """
-        Make a tuple of arguments for the waveform generator from the given coordinates.
-        """
-        # unpack the coordinates into separate arguments for the waveform generator
-        return tuple(xp.array(coords[:, i]) for i in range(coords.shape[1])) # had to do in this way to give JAX the right memory addresses
-
-    def prepare_inputs(self, coords, data_index):
-        """
-        Prepare the inputs for the waveform generator from the given coordinates and data index.
-        """
-
-        positions_per_split, data_intra_index_per_split, _ = self.dcga.unpack_indices(data_index)
-        coords_per_split = self.dcga.unpack_coords(positions_per_split, coords, keep_tuple=True)
-
-        data_intra_index_per_split, coords_per_split = self.dcga.place_on_device(
-            items=(data_intra_index_per_split, coords_per_split)
-        )
-
-        waveform_args_per_split = self.dcga._loop_operation(
-            operation=[self.make_args_tuple for _ in self.dcga.computation_groups],
-            operation_args_per_split=coords_per_split,
-        )
-
-        return positions_per_split, data_intra_index_per_split, waveform_args_per_split
-    
-    def aggregate_waveforms(self, waveforms_per_split: list[DomainBaseArray | list[DomainBase]]) -> list[DomainBase]:
-        """
-        Aggregate the waveforms from each split into a single list of DomainBase objects.
-        """
-        waveforms = []
-        for waveforms_split in waveforms_per_split:
-            waveforms.extend(waveforms_split)
-        return waveforms
-
-    def get_waveform_here(self, coords: np.ndarray) -> list[DomainBase]:
-        """Get the waveforms for the given source coordinates.
-
-        """
-        self.free_gpu_memory()
-
-        data_index = np.arange(coords.shape[0], dtype=np.int32)
-
-        _, _, waveform_args_per_split = self.prepare_inputs(coords, data_index)
-
-        operations = [getattr(waveform_gen, self.waveform_gen_method) for waveform_gen in self.waveform_generators]
-
-        waveforms_out = self.dcga._loop_operation(
-            operation=operations,
-            operation_args_per_split=waveform_args_per_split,
-            operation_kwargs=self.waveform_gen_kwargs,
-            aggregate_fn=self.aggregate_waveforms,
-            run_threaded=self.run_threaded,
-        )
-
-        self.dcga.synchronize()
-
-        return waveforms_out
-
-    def setup_likelihood_here(self, coords: np.ndarray) -> None:
-        """
-        Set up the likelihood computation. In the general case, this means computing the :math:\\langle d | d \\rangle term.
-        """
-
-        self.dcga.compute_d_d_terms()
-
-    def compute_like(self, coords_in: np.ndarray, data_index: np.ndarray) -> np.ndarray:
-        """
-        Compute the likelihood for the given coordinates and data index.
-
-        Args:
-            coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
-            data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
-        
-        Returns:
-            ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
-        """
-
-        positions_per_split, data_intra_index_per_split, waveform_args_per_split = self.prepare_inputs(coords_in, data_index)
-
-        waveform_like_operations = [getattr(waveform_gen, self.waveform_like_method) for waveform_gen in self.waveform_generators]
-
-        likelihood_args_per_split = self.dcga._loop_operation(
-            operation=waveform_like_operations,
-            operation_args_per_split=waveform_args_per_split,
-            operation_kwargs=self.waveform_like_kwargs,
-            positions_per_split=positions_per_split,
-            run_threaded=self.run_threaded,
-        ) 
-
-        if not self.run_async:
-            self.dcga.synchronize()
-
-        likelihoods = self.dcga.compute_signal_likelihood(
-            positions_per_split=positions_per_split,
-            data_intra_per_split=data_intra_index_per_split,
-            noise_intra_per_split=data_intra_index_per_split,
-            likelihood_args_per_split=likelihood_args_per_split,
-            likelihood_kwargs={'run_async': self.run_async},
-            run_threaded=self.run_threaded,
-        )
-
-        # Release GPU arrays before freeing the pool.
-        # waveform_args_per_split / data_intra_index_per_split are small coord arrays
-        # from place_on_device/make_args_tuple; likelihood_args_per_split holds the
-        # large template arrays.  All must be dereferenced before free_all_blocks() so
-        # those blocks are actually returned to CUDA rather than staying "owned" in the pool.
-        del likelihood_args_per_split, waveform_args_per_split, data_intra_index_per_split
-        
-        self.free_gpu_memory()
-
-        if np.any(~np.isfinite(likelihoods)):
-                logger.warning(f"Non-finite likelihoods encountered: {likelihoods}. This could be a sign of numerical issues.")
-                if DEBUG_MODE:
-                    breakpoint()
-
-        likelihoods = np.where(np.isfinite(likelihoods), likelihoods, -1e300)
-
-        return likelihoods

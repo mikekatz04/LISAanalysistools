@@ -34,6 +34,7 @@ from ...analysiscontainer import (
 from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
+from ...utils.device import device_context, pin_main_device
 from ...utils.utility import asnumpy
 from gbgpu.gb_likelihood import (
     BandLikelihoodEngine,
@@ -105,6 +106,7 @@ from .gbbands import (
     BandSorter,
     Buffer,
     SubBandBuffer,
+    _RoutedBandEngine,
     pack_special_index,
     return_x,
     unpack_special_index,
@@ -610,8 +612,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # open/close). Same domain dispatch as the sub-band buffer's engine;
         # the parent ACA has no per-slot ``min_freq_inds``, so the FD engine
         # falls back to ``start_freq_inds`` (one shared window start per
-        # walker row).
-        self._likelihood_engine = make_band_likelihood_engine(
+        # walker row). Routed: a multi-shard parent ACA partitions each
+        # fill by the walker's owning GPU split.
+        self._likelihood_engine = _RoutedBandEngine(make_band_likelihood_engine(
             self._basis_settings,
             gb=self.gb,
             gb_fd_comp=self.gb_fd_comp,
@@ -621,7 +624,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             df=self.df,
             start_freq_inds=self._parent_start_inds,
             data_length=acs.data_length,
-        )
+        ))
         self._parent_acs_token = token
 
     def setup(self, model, branches):
@@ -1695,10 +1698,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return buf
 
     def _buffer_cache_teardown(self):
-        """Drop the propose-scoped buffer cache; free the device pool when
-        it grew past the (optional) budget. One summary line per propose."""
+        """Drop the propose-scoped buffer cache and clear its device memory.
+
+        Proposal-exit contract (memory-lifecycle rule): SubBandBuffer scratch
+        is strictly proposal-scoped — when the proposal returns state, every
+        shard's buffers are dropped and each owning device's pool is swept so
+        the memory is available to the other modules' moves. Main-ACA / DCGA
+        persistent allocations are untouched. Engine bindings and shard
+        views cache on the buffers themselves, so they die here with the
+        cache (a fresh proposal's buffers start with no stale bindings).
+        """
         cache = getattr(self, "_prop_buffer_cache", None)
         n_builds = getattr(self, "_prop_buffer_builds", 0)
+        devices = set()
+        for buf in (cache or {}).values():
+            for dev in (getattr(buf, "gpus", None) or []):
+                devices.add(int(dev))
         self._prop_buffer_cache = None
         self._prop_buffer_builds = 0
         if not self.backend.uses_cupy:
@@ -1710,14 +1725,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "(%d cached signature(s)); GPU pool used %.2f / total %.2f GB.",
             self.name, n_builds, len(cache or {}), used, total,
         )
-        warn_gb = float(os.environ.get("GB_GPU_MEM_WARN_GB", "0") or 0)
-        if warn_gb and total > warn_gb:
-            logger.warning(
-                "%s: GPU pool total %.2f GB exceeds GB_GPU_MEM_WARN_GB=%.1f;"
-                " freeing all blocks.", self.name, total, warn_gb,
-            )
-            self.xp.cuda.runtime.deviceSynchronize()
+        self.xp.cuda.runtime.deviceSynchronize()
+        if not devices:
+            # gpus=None CUDA mode: everything lives on the current device.
             self.mempool.free_all_blocks()
+            return
+        main_dev = self.xp.cuda.runtime.getDevice()
+        try:
+            for dev in sorted(devices):
+                with self.xp.cuda.Device(dev):
+                    self.xp.cuda.runtime.deviceSynchronize()
+                    self.xp.get_default_memory_pool().free_all_blocks()
+        finally:
+            self.xp.cuda.runtime.setDevice(main_dev)
 
     def _run_band_unit(self, model, band_sorter, subset, band_temps,
                        ll_change_log, prop_counts, acc_counts):
@@ -2882,8 +2902,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._prop_buffer_cache = {}
         self._prop_buffer_builds = 0
 
-        if self.backend.uses_cupy:
-            self.xp.cuda.runtime.setDevice(model.analysis_container_arr.gpus[0])
+        pin_main_device(self.xp, model.analysis_container_arr.gpus)
         # Run-time source of truth is the ACA that arrives with the model:
         # refresh the domain quantities and re-bind the parent engine (FD
         # prototype comp + move-level engine) if this ACA differs from the
@@ -3243,35 +3262,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     @staticmethod
     def _snapshot_linear_data_arr(aca):
-        """Per-GPU shard copy of ``aca.linear_data_arr``. Returns a list of
-        device-local buffers (one per entry in ``aca.linear_data_arr``).
-        """
-        if aca.gpus is None:
-            return [b.copy() for b in aca.linear_data_arr]
-        main_gpu = cp.cuda.runtime.getDevice()
-        try:
-            out = []
-            for i, gpu in enumerate(aca.gpus):
-                with cp.cuda.Device(int(gpu)):
-                    out.append(aca.linear_data_arr[i].copy())
-            return out
-        finally:
-            cp.cuda.runtime.setDevice(main_gpu)
+        """Thin alias for :meth:`AnalysisContainerArray.snapshot_linear_data_arr`."""
+        return aca.snapshot_linear_data_arr()
 
     @staticmethod
     def _restore_linear_data_arr(aca, snapshot):
-        """In-place restore of every shard from the matching snapshot entry."""
-        if aca.gpus is None:
-            for buf, snap in zip(aca.linear_data_arr, snapshot):
-                buf[:] = snap[:]
-            return
-        main_gpu = cp.cuda.runtime.getDevice()
-        try:
-            for i, gpu in enumerate(aca.gpus):
-                with cp.cuda.Device(int(gpu)):
-                    aca.linear_data_arr[i][:] = snapshot[i][:]
-        finally:
-            cp.cuda.runtime.setDevice(main_gpu)
+        """Thin alias for :meth:`AnalysisContainerArray.restore_linear_data_arr`."""
+        aca.restore_linear_data_arr(snapshot)
 
 
 class GBSpecialStretchMove(GBSpecialBase):
@@ -3966,7 +3963,8 @@ class GBSpecialRJRefitMove(GBSpecialBase):
             }
             return
 
-        cp.cuda.runtime.setDevice(gpu)
+        if self.backend.uses_cupy:
+            self.xp.cuda.runtime.setDevice(gpu)
         output_info = []
         step = 5
         steps = np.arange(num_in_groups_fin.min(), num_in_groups_fin.max(), step)

@@ -840,6 +840,20 @@ class BaseProcessingStep(SignalProcessor):
             f"and channels: {self.data.shape[0]}"
         )
 
+    def release_transients(self) -> None:
+        """Drop large intermediate arrays kept only for data production.
+
+        Called once by ``run.py::setup_acs`` at the build->sampling
+        transition, after the produced data/residuals have been installed
+        into the shared :class:`AnalysisContainerArray`. Subclasses that
+        cache big device (or host) arrays during production — waveform
+        buffers, full-rate streams already poured into the ACA — should
+        override this to ``del``/None them so the following per-device
+        memory-pool sweep can actually return the memory. The default is a
+        no-op; settings-relevant attributes (e.g. ``td_signal.settings``)
+        must survive.
+        """
+
     def process(
         self,
         highpass_kwargs: dict = None,

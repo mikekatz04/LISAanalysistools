@@ -1927,6 +1927,44 @@ class AnalysisContainerArray:
 
         self.xp.cuda.runtime.setDevice(main_gpu)
 
+    def snapshot_linear_data_arr(self):
+        """Per-shard copy of ``linear_data_arr``.
+
+        Returns a list of device-local buffers (one per shard), each copied
+        inside its owning device context. Pair with
+        :meth:`restore_linear_data_arr` for propose-scoped save/restore of
+        the residual plane.
+        """
+        if self.gpus is None:
+            return [b.copy() for b in self.linear_data_arr]
+        main_gpu = self.xp.cuda.runtime.getDevice()
+        try:
+            out = []
+            for i, gpu in enumerate(self.gpus):
+                with self.xp.cuda.Device(int(gpu)):
+                    out.append(self.linear_data_arr[i].copy())
+            return out
+        finally:
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
+    def restore_linear_data_arr(self, snapshot):
+        """In-place restore of every shard from the matching snapshot entry.
+
+        Writes into the existing shard buffers (never reallocates) so views
+        bound by :meth:`reset_linear_data_arr` stay valid.
+        """
+        if self.gpus is None:
+            for buf, snap in zip(self.linear_data_arr, snapshot):
+                buf[:] = snap[:]
+            return
+        main_gpu = self.xp.cuda.runtime.getDevice()
+        try:
+            for i, gpu in enumerate(self.gpus):
+                with self.xp.cuda.Device(int(gpu)):
+                    self.linear_data_arr[i][:] = snapshot[i][:]
+        finally:
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
     def reset_linear_data_arr(self):
         """Repack each container's data residual into the contiguous per-GPU data buffer."""
         if self.gpus is not None:
@@ -2694,15 +2732,84 @@ class AnalysisContainerArray:
         For single-GPU runs this returns ``linear_data_arr[0]`` directly (no copy).
         For multi-GPU runs it gathers every shard onto ``target_gpu`` (default
         ``self.gpus[0]``). Use this for legacy callers that expect a single buffer.
+
+        .. warning:: On multi-shard runs the return is a **copy** — mutating
+            it does NOT propagate to the shards. Write changes back with
+            :meth:`scatter_linear_data_arr`.
         """
         return self._gather_per_gpu_to_single(self.linear_data_arr, target_gpu)
 
     def gather_linear_psd_arr(self, target_gpu: Optional[int] = None):
         """Return the inverse-PSD buffer as a single flat array (concatenated across shards).
 
-        Same semantics as :meth:`gather_linear_data_arr` for the PSD side.
+        Same semantics as :meth:`gather_linear_data_arr` for the PSD side,
+        including the multi-shard copy caveat (write back with
+        :meth:`scatter_linear_psd_arr`).
         """
         return self._gather_per_gpu_to_single(self.linear_psd_arr, target_gpu)
+
+    def _scatter_single_to_per_gpu(self, flat, per_gpu_list: list):
+        """Inverse of :meth:`_gather_per_gpu_to_single`: write a flat gathered
+        buffer back into the per-shard buffers **in place**.
+
+        Mirrors the gather's three paths exactly:
+
+        - Single-shard: the gather fast path returned the buffer itself, so a
+          write-back with that same array is a no-op; a different array is
+          copied in.
+        - CPU multi-shard: the gather concatenated in shard order — split back
+          in shard order.
+        - Multi-shard GPU: the gather produced global-AC order — route each
+          shard's rows back through host (no P2P), inside the owning device
+          context.
+
+        Shard buffers are never reallocated (memory-lifecycle rule), so views
+        bound by ``reset_linear_*`` stay valid.
+        """
+        if len(per_gpu_list) == 1:
+            if flat is not per_gpu_list[0]:
+                per_gpu_list[0][:] = self.xp.asarray(flat)
+            return
+        if self.gpus is None:
+            offset = 0
+            for buf in per_gpu_list:
+                buf[:] = flat[offset : offset + buf.size]
+                offset += buf.size
+            return
+
+        sizes_per_ac = [int(buf.size // max(len(self.gpu_splits[i]), 1))
+                        for i, buf in enumerate(per_gpu_list)]
+        if sizes_per_ac and len(set(sizes_per_ac)) != 1:
+            raise RuntimeError(
+                f"Per-AC element size mismatch across shards: {sizes_per_ac}. "
+                "Cannot scatter; shard layout must be uniform."
+            )
+        per_ac = sizes_per_ac[0] if sizes_per_ac else 0
+
+        flat_host = flat.get() if hasattr(flat, "get") else np.asarray(flat)
+        flat_host = flat_host.reshape(self.acs_total_entries, per_ac)
+
+        main_gpu = self.xp.cuda.runtime.getDevice()
+        try:
+            for i, gpu in enumerate(self.gpus):
+                split = self.gpu_splits[i]
+                if len(split) == 0:
+                    continue
+                src = flat_host[np.asarray(split, dtype=int)].reshape(-1)
+                with self.xp.cuda.Device(int(gpu)):
+                    per_gpu_list[i][:] = self.xp.asarray(src)
+        finally:
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
+    def scatter_linear_data_arr(self, flat):
+        """Write a flat gathered residual buffer (from
+        :meth:`gather_linear_data_arr`) back into the per-shard buffers."""
+        self._scatter_single_to_per_gpu(flat, self.linear_data_arr)
+
+    def scatter_linear_psd_arr(self, flat):
+        """Write a flat gathered inverse-PSD buffer (from
+        :meth:`gather_linear_psd_arr`) back into the per-shard buffers."""
+        self._scatter_single_to_per_gpu(flat, self.linear_psd_arr)
 
     def gather_data_shaped(self):
         """Return the full ``(num_acs, nchannels, *end_shape)`` residual ndarray.

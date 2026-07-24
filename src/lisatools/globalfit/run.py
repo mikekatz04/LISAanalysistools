@@ -37,6 +37,7 @@ from eryn.state import State as eryn_State
 from eryn.utils.plot import PlotContainer
 
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from ..utils.device import pin_main_device
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings, Setup
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
@@ -701,8 +702,7 @@ class GlobalFit:
             sensitivity for all walkers.
         """
         general_info = self.curr.general_info
-        if _xp_is_cupy and general_info.gpus is not None:
-            xp.cuda.runtime.setDevice(general_info.gpus[0])
+        pin_main_device(xp, general_info.gpus)
 
         # Per-branch params-based template generators registered into every
         # AC's dictionary-based ``signal_gen``. Settings expose them as
@@ -786,7 +786,22 @@ class GlobalFit:
             )
 
         gpus = general_info.gpus
-        acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
+        if gpus is not None and len(gpus) > 1 and self.nwalkers % len(gpus) != 0:
+            logger.warning(
+                "nwalkers=%d is not divisible by len(gpus)=%d: contiguous "
+                "np.array_split shards are uneven, so per-shard batch sizes "
+                "differ and any fixed-block intra-shard indexing is invalid "
+                "(GBGPU uses rank-based indexing and stays correct). Prefer "
+                "nwalkers %% ngpus == 0 for balanced device loads.",
+                self.nwalkers, len(gpus),
+            )
+        acs = AnalysisContainerArray(
+            acs_tmp,
+            gpus=gpus,
+            # Overlap per-split work (vectorized dispatch / signal_operation)
+            # across devices; single-GPU/CPU runs stay serial.
+            run_threaded=gpus is not None and len(gpus) > 1,
+        )
 
         if rebuild_residuals:
             # Residual rebuild, replicating the stft_tof ``get_templates``
@@ -872,9 +887,27 @@ class GlobalFit:
                 del templates_tmp
                 logger.info(f"added {name} templates to acs residuals (get_templates path).")
 
-            if xp.__name__ == "cupy":
-                xp.get_default_memory_pool().free_all_blocks()
             logger.info("rebuilt residuals from state coords/inds.")
+
+        # One-time build->sampling reclamation (memory-lifecycle rule): the
+        # residual/PSD plane now lives in the ACA's persistent shard buffers,
+        # so drop the data processor's production transients and sweep every
+        # device's memory pool ONCE. Never repeated during sampling; never
+        # touches ACA/DCGA persistent allocations.
+        proc = getattr(general_info, "data_processor", None)
+        release = getattr(proc, "release_transients", None)
+        if callable(release):
+            release()
+        if _xp_is_cupy:
+            try:
+                if gpus is not None:
+                    for dev in gpus:
+                        with xp.cuda.Device(int(dev)):
+                            xp.get_default_memory_pool().free_all_blocks()
+                else:
+                    xp.get_default_memory_pool().free_all_blocks()
+            except Exception as exc:  # cupy installed but no usable device
+                logger.debug("post-production pool sweep skipped: %s", exc)
 
         return acs
 

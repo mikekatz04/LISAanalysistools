@@ -45,6 +45,7 @@ import numpy as np
 
 from ....engine import GeneralSetup, Settings
 from ....moves import Move, MoveBuildContext
+from .....utils.device import pin_main_device
 from ....recipe import MOJITO_REFERENCE_TIME, Recipe, Stage, build_psd_moves
 from ...base import env_default
 from ..common import tdi_generation_info
@@ -412,6 +413,10 @@ class AllSourcesGlobalFit(EreborFit):
             )
 
             use_tdi2 = tdi_generation_info(gs.tdi_chan)[0] == 2
+            # Data production follows the run backend (same rule as the
+            # mojito path above). Production transients are reclaimed once
+            # at the build->sampling transition (see run.py::setup_acs).
+            force_backend = gs.gpu_backend if gs.gpus is not None else "cpu"
             specs = []
             if "gb" in self._branch_names:
                 params = (
@@ -428,7 +433,7 @@ class AllSourcesGlobalFit(EreborFit):
                             ),
                             tdi_chan=gs.tdi_chan,
                             use_tdi2=use_tdi2,
-                            force_backend="cpu",
+                            force_backend=force_backend,
                         ),
                     )
                 )
@@ -476,7 +481,7 @@ class AllSourcesGlobalFit(EreborFit):
                                 n_inj["MBHB"], gs.Tobs, mode=inj_mode, seed=inj_seed
                             ),
                             source_ids=source_ids,
-                            force_backend="cpu",
+                            force_backend=force_backend,
                             tdi_chan=gs.tdi_chan,
                             tdi_gen_str=gs.tdi_gen_str,
                             sobbh_reference_time=gs.sobbh_reference_time,
@@ -643,10 +648,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     general_info = curr.general_info
     nwalkers, ntemps = general_info.nwalkers, general_info.ntemps
     gpus = general_info.gpus
-    if gpus is not None:
-        import cupy as cp
-
-        cp.cuda.runtime.setDevice(gpus[0])
+    pin_main_device(acs.xp, gpus)
 
     requested = recipe.stock_names()
     stock_moves = {}

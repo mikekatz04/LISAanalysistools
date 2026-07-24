@@ -49,6 +49,7 @@ from ...analysiscontainer import (
 )
 from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
+from ...utils.device import device_context
 from ...utils.parallelbase import LISAToolsParallelModule
 from ...utils.utility import asnumpy
 
@@ -196,6 +197,433 @@ class BandScheduler:
         # slots beyond the replacements retire
         self.slot_active[finished_slots[n_replace:]] = False
         return inds_fill, self.cell_specials[new_cells]
+
+
+class _ShardHolderView:
+    """Single-shard holder view over one GPU split of a multi-shard ACA.
+
+    The gbgpu band engines are single-shard by contract: they consume
+    ``holder.linear_data_arr[0]`` / ``linear_psd_arr[0]``, index rows by an
+    intra-buffer ``data_index``, and cache pointer-bound bindings on the
+    holder. This view presents ONE split of a multi-shard
+    :class:`~lisatools.analysiscontainer.AnalysisContainerArray` (a
+    :class:`SubBandBuffer` or the parent residual ACA) through exactly that
+    protocol:
+
+    * ``linear_data_arr`` / ``linear_psd_arr`` are one-element lists holding
+      the owning split's live buffer (zero-copy);
+    * ``acs_total_entries`` is the split's row count — engine row indices
+      are INTRA-shard (:class:`_RoutedBandEngine` translates);
+    * ``min_freq_inds`` / ``start_freq_ind`` are persistent per-shard stores
+      refreshed IN PLACE from the parent (:meth:`refresh_row_metadata`) so
+      the engines' pointer-binding contract survives cell swaps;
+    * everything else (settings, df, xp, ...) delegates to the parent.
+
+    Engine bindings (``_gb_fd_binding``) cache on this object, so a view
+    must live exactly as long as its shard buffers: the router stores views
+    on the holder itself (``holder._shard_holder_views``), which dies with
+    the holder at proposal teardown (memory-lifecycle rule).
+    """
+
+    def __init__(self, parent, split_index: int):
+        self._parent = parent
+        self._split = int(split_index)
+        rows = np.asarray(asnumpy(parent.gpu_splits[self._split]), dtype=int)
+        self._rows = rows
+        self.acs_total_entries = int(rows.shape[0])
+        self.device = (
+            None if parent.gpus is None else int(parent.gpus[self._split])
+        )
+        self.gpus = None if parent.gpus is None else [self.device]
+        self.gpu_splits = [np.arange(rows.shape[0])]
+        self.split_map = np.zeros(rows.shape[0], dtype=int)
+        self.gpu_map = (
+            np.zeros(rows.shape[0], dtype=int)
+            if self.device is None
+            else np.full(rows.shape[0], self.device, dtype=int)
+        )
+        self._min_freq_inds_view = None
+        self._start_freq_ind_view = None
+        self.refresh_row_metadata()
+
+    @property
+    def rows(self):
+        """Global row ids owned by this shard (ascending)."""
+        return self._rows
+
+    @property
+    def linear_data_arr(self):
+        return [self._parent.linear_data_arr[self._split]]
+
+    @property
+    def linear_psd_arr(self):
+        return [self._parent.linear_psd_arr[self._split]]
+
+    @property
+    def data_shaped(self):
+        return [self._parent.data_shaped[self._split]]
+
+    @property
+    def psd_shaped(self):
+        return [self._parent.psd_shaped[self._split]]
+
+    @property
+    def xp(self):
+        return self._parent.xp
+
+    @property
+    def min_freq_inds(self):
+        return self._min_freq_inds_view
+
+    @property
+    def start_freq_ind(self):
+        return self._start_freq_ind_view
+
+    def refresh_row_metadata(self) -> None:
+        """Re-slice per-row metadata from the parent.
+
+        Updates the persistent per-shard ``min_freq_inds`` store IN PLACE
+        (the FD binding holds a pointer to it) instead of rebinding.
+        """
+        xp = self._parent.xp
+        starts = getattr(self._parent, "min_freq_inds", None)
+        if starts is None:
+            self._min_freq_inds_view = None
+        else:
+            vals_host = np.ascontiguousarray(
+                np.asarray(asnumpy(starts))[self._rows].astype(np.int32)
+            )
+            with device_context(xp, self.device):
+                if (
+                    self._min_freq_inds_view is not None
+                    and self._min_freq_inds_view.shape == vals_host.shape
+                ):
+                    self._min_freq_inds_view[...] = xp.asarray(vals_host)
+                else:
+                    self._min_freq_inds_view = xp.ascontiguousarray(
+                        xp.asarray(vals_host)
+                    )
+        sfi = getattr(self._parent, "start_freq_ind", None)
+        if sfi is None:
+            self._start_freq_ind_view = None
+        else:
+            arr = np.asarray(asnumpy(sfi))
+            self._start_freq_ind_view = arr[self._rows] if arr.ndim else arr
+
+    def __getattr__(self, name):
+        # Guard dunder/underscore probing (deepcopy/pickle safety rule);
+        # delegate the public long tail (settings, df, nchannels, ...).
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._parent, name)
+
+
+class _RoutedBandEngine:
+    """Multi-shard router in front of a single-shard band likelihood engine.
+
+    Wraps a :func:`gbgpu.gb_likelihood.make_band_likelihood_engine` product.
+    Single-shard holders pass straight through (no overhead). For
+    multi-shard holders each call's rows are partitioned by owning split
+    (``holder.split_map``), run per shard inside the owning device context
+    against a persistent :class:`_ShardHolderView`, and the outputs are
+    reassembled full-length on the caller's device. Cross-shard movement is
+    host-routed (no P2P), matching the ACA conventions. Per-launch
+    host->device upload of wrapper structs (LISA Analysis Tools-wide
+    convention) keeps kernel config device-local under each context.
+
+    Sig-het in-model references (a truthy ``setup_in_model``) are
+    single-shard state on the shared computation object and are rejected on
+    multi-shard holders until per-shard comp replicas exist.
+    """
+
+    #: fill_template kwargs holding one value PER BUFFER SLOT — sliced to the
+    #: shard's rows so intra-shard indexing stays aligned.
+    _PER_SLOT_KWARGS = ("slab_min_f",)
+
+    def __init__(self, engine):
+        self._engine = engine
+
+    @property
+    def wrapped_engine(self):
+        """The underlying single-shard engine."""
+        return self._engine
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._engine, name)
+
+    # ---------------- shard bookkeeping ----------------
+
+    @staticmethod
+    def _is_multi(holder) -> bool:
+        return len(holder.linear_data_arr) > 1
+
+    @staticmethod
+    def _shard_views(holder):
+        views = getattr(holder, "_shard_holder_views", None)
+        n = len(holder.linear_data_arr)
+        if views is None or len(views) != n:
+            views = [_ShardHolderView(holder, s) for s in range(n)]
+            holder._shard_holder_views = views
+        else:
+            for v in views:
+                v.refresh_row_metadata()
+        return views
+
+    @staticmethod
+    def _partition(holder, data_index, noise_index=None):
+        """Per-shard ``(positions, intra_data, intra_noise)`` partition.
+
+        ``positions`` index into the call's row batch; ``intra_*`` are the
+        corresponding intra-shard buffer rows. ``data_index`` and
+        ``noise_index`` rows must be co-located on the same shard.
+        """
+        idx = np.asarray(asnumpy(data_index), dtype=int)
+        split_map = np.asarray(asnumpy(holder.split_map), dtype=int)
+        intra = np.empty(int(holder.acs_total_entries), dtype=int)
+        for rows in holder.gpu_splits:
+            rr = np.asarray(asnumpy(rows), dtype=int)
+            intra[rr] = np.arange(rr.shape[0])
+        nidx = None
+        if noise_index is not None:
+            nidx = np.asarray(asnumpy(noise_index), dtype=int)
+            if not np.array_equal(split_map[idx], split_map[nidx]):
+                raise ValueError(
+                    "data_index and noise_index rows must live on the same "
+                    "shard (cross-shard noise rows are unsupported)."
+                )
+        parts = []
+        for s in range(len(holder.linear_data_arr)):
+            pos = np.where(split_map[idx] == s)[0]
+            parts.append((
+                pos,
+                intra[idx[pos]],
+                None if nidx is None else intra[nidx[pos]],
+            ))
+        return parts
+
+    @staticmethod
+    def _assemble(num, pieces, default, xp):
+        """Host-assemble per-shard outputs into one xp array (row order).
+
+        ``pieces`` is ``[(positions, host_values_or_None), ...]``. Returns
+        None when every shard produced None (e.g. ``phase_angle`` without
+        phase maximisation).
+        """
+        first = next(
+            (np.asarray(v) for _, v in pieces if v is not None), None
+        )
+        if first is None:
+            return None
+        out = np.full(
+            (num,) + tuple(first.shape[1:]), default, dtype=first.dtype
+        )
+        for pos, vals in pieces:
+            if vals is None or len(pos) == 0:
+                continue
+            out[pos] = np.asarray(vals)
+        return xp.asarray(out)
+
+    def _mirror_engine_outputs(self):
+        """Refresh routed-output attrs from the wrapped engine after a
+        passthrough call so stale routed values never shadow them."""
+        for name in ("d_h_out", "h_h_out", "phase_angle", "kept_out"):
+            if hasattr(self._engine, name):
+                setattr(self, name, getattr(self._engine, name))
+
+    # ---------------- routed engine protocol ----------------
+
+    def fill_template(self, holder, params_phys, params_index, N_vals, *,
+                      factor, waveform_kwargs, **kwargs):
+        if not self._is_multi(holder):
+            return self._engine.fill_template(
+                holder, params_phys, params_index, N_vals,
+                factor=factor, waveform_kwargs=waveform_kwargs, **kwargs)
+        xp = holder.xp
+        views = self._shard_views(holder)
+        parts = self._partition(holder, params_index)
+        params_host = asnumpy(params_phys)
+        N_host = None if N_vals is None else asnumpy(N_vals)
+        slot_kwargs_host = {
+            k: np.asarray(asnumpy(kwargs[k]))
+            for k in self._PER_SLOT_KWARGS
+            if kwargs.get(k) is not None
+        }
+        for view, (pos, intra, _) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            kw_s = dict(kwargs)
+            with device_context(xp, view.device):
+                for k, host_vals in slot_kwargs_host.items():
+                    kw_s[k] = xp.asarray(host_vals[view.rows])
+                self._engine.fill_template(
+                    view, xp.asarray(params_host[pos]), intra,
+                    None if N_host is None else xp.asarray(N_host[pos]),
+                    factor=factor, waveform_kwargs=waveform_kwargs, **kw_s)
+
+    def get_ll(self, holder, params_phys, *, data_index, noise_index,
+               N_vals, phase_maximize=False, waveform_kwargs, **kwargs):
+        if not self._is_multi(holder):
+            out = self._engine.get_ll(
+                holder, params_phys, data_index=data_index,
+                noise_index=noise_index, N_vals=N_vals,
+                phase_maximize=phase_maximize,
+                waveform_kwargs=waveform_kwargs, **kwargs)
+            self._mirror_engine_outputs()
+            return out
+        xp = holder.xp
+        views = self._shard_views(holder)
+        parts = self._partition(holder, data_index, noise_index)
+        num = int(params_phys.shape[0])
+        params_host = asnumpy(params_phys)
+        N_host = None if N_vals is None else asnumpy(N_vals)
+        ll_p, dh_p, hh_p, ang_p, kept_p = [], [], [], [], []
+        for view, (pos, intra, intra_noise) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            with device_context(xp, view.device):
+                ll_s = self._engine.get_ll(
+                    view, xp.asarray(params_host[pos]),
+                    data_index=intra,
+                    noise_index=intra if intra_noise is None else intra_noise,
+                    N_vals=None if N_host is None else xp.asarray(N_host[pos]),
+                    phase_maximize=phase_maximize,
+                    waveform_kwargs=waveform_kwargs, **kwargs)
+                ll_p.append((pos, asnumpy(ll_s)))
+                dh_p.append((pos, asnumpy(self._engine.d_h_out)))
+                hh_p.append((pos, asnumpy(self._engine.h_h_out)))
+                ang = getattr(self._engine, "phase_angle", None)
+                ang_p.append((pos, None if ang is None else asnumpy(ang)))
+                kept = getattr(self._engine, "kept_out", None)
+                kept_p.append((pos, None if kept is None else asnumpy(kept)))
+        ll = self._assemble(num, ll_p, -1e300, xp)
+        if ll is None:
+            ll = xp.full(num, -1e300)
+        self.d_h_out = self._assemble(num, dh_p, 0.0, xp)
+        self.h_h_out = self._assemble(num, hh_p, 0.0, xp)
+        self.phase_angle = self._assemble(num, ang_p, 0.0, xp)
+        kept_arr = self._assemble(num, kept_p, False, xp)
+        self.kept_out = (
+            xp.ones(num, dtype=bool) if kept_arr is None else kept_arr
+        )
+        return ll
+
+    def get_swap_ll(self, holder, params_remove_phys, params_add_phys, *,
+                    data_index, noise_index, N_vals, phase_maximize=False,
+                    waveform_kwargs, **kwargs):
+        if not self._is_multi(holder):
+            return self._engine.get_swap_ll(
+                holder, params_remove_phys, params_add_phys,
+                data_index=data_index, noise_index=noise_index,
+                N_vals=N_vals, phase_maximize=phase_maximize,
+                waveform_kwargs=waveform_kwargs, **kwargs)
+        from gbgpu.gb_likelihood import SwapLLResult
+
+        xp = holder.xp
+        views = self._shard_views(holder)
+        parts = self._partition(holder, data_index, noise_index)
+        num = int(params_add_phys.shape[0])
+        rem_host = asnumpy(params_remove_phys)
+        add_host = asnumpy(params_add_phys)
+        N_host = None if N_vals is None else asnumpy(N_vals)
+        fields = ("ll_diff", "d_h_add", "d_h_remove", "hh_add",
+                  "hh_remove", "hh_cross", "opt_snr_add", "phase_angle",
+                  "kept")
+        pieces = {f: [] for f in fields}
+        for view, (pos, intra, intra_noise) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            with device_context(xp, view.device):
+                res = self._engine.get_swap_ll(
+                    view, xp.asarray(rem_host[pos]), xp.asarray(add_host[pos]),
+                    data_index=intra,
+                    noise_index=intra if intra_noise is None else intra_noise,
+                    N_vals=None if N_host is None else xp.asarray(N_host[pos]),
+                    phase_maximize=phase_maximize,
+                    waveform_kwargs=waveform_kwargs, **kwargs)
+                for f in fields:
+                    v = getattr(res, f)
+                    pieces[f].append((pos, None if v is None else asnumpy(v)))
+        defaults = dict(ll_diff=-1e300, opt_snr_add=0.0, kept=False)
+        out = {}
+        for f in fields:
+            out[f] = self._assemble(num, pieces[f], defaults.get(f, 0.0), xp)
+        if out["ll_diff"] is None:
+            out["ll_diff"] = xp.full(num, -1e300)
+        if out["opt_snr_add"] is None:
+            out["opt_snr_add"] = xp.zeros(num)
+        if out["kept"] is None:
+            out["kept"] = xp.zeros(num, dtype=bool)
+        return SwapLLResult(**out)
+
+    def setup_in_model(self, holder, params_phys, data_index, N_vals=None):
+        if not self._is_multi(holder):
+            return self._engine.setup_in_model(
+                holder, params_phys, data_index, N_vals=N_vals)
+        xp = holder.xp
+        views = self._shard_views(holder)
+        parts = self._partition(holder, data_index)
+        params_host = asnumpy(params_phys)
+        N_host = None if N_vals is None else asnumpy(N_vals)
+        for view, (pos, intra, _) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            with device_context(xp, view.device):
+                ret = self._engine.setup_in_model(
+                    view, xp.asarray(params_host[pos]), intra,
+                    N_vals=None if N_host is None else xp.asarray(N_host[pos]))
+            if ret:
+                self._engine.clear_in_model()
+                raise NotImplementedError(
+                    "sig-het in-model references hold single-shard state on "
+                    "the shared computation object; multi-shard buffers need "
+                    "per-shard comp replicas (follow-on work). Run the "
+                    "sig-het in-model path on a single GPU for now."
+                )
+        return None
+
+    def clear_in_model(self):
+        return self._engine.clear_in_model()
+
+    def _route_matrix(self, method_name, holder, params_phys, *, data_index,
+                      noise_index, N_vals, **kwargs):
+        """Shared row-wise routing for matrix-valued outputs (grad/hessian)."""
+        method = getattr(self._engine, method_name)
+        if not self._is_multi(holder):
+            return method(holder, params_phys, data_index=data_index,
+                          noise_index=noise_index, N_vals=N_vals, **kwargs)
+        xp = holder.xp
+        views = self._shard_views(holder)
+        parts = self._partition(holder, data_index, noise_index)
+        num = int(params_phys.shape[0])
+        params_host = asnumpy(params_phys)
+        N_host = None if N_vals is None else asnumpy(N_vals)
+        pieces = []
+        for view, (pos, intra, intra_noise) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            with device_context(xp, view.device):
+                out_s = method(
+                    view, xp.asarray(params_host[pos]),
+                    data_index=intra,
+                    noise_index=intra if intra_noise is None else intra_noise,
+                    N_vals=None if N_host is None else xp.asarray(N_host[pos]),
+                    **kwargs)
+                pieces.append((pos, asnumpy(out_s)))
+        return self._assemble(num, pieces, 0.0, xp)
+
+    def get_ll_grad(self, holder, params_phys, *, data_index, noise_index,
+                    N_vals, **kwargs):
+        return self._route_matrix(
+            "get_ll_grad", holder, params_phys, data_index=data_index,
+            noise_index=noise_index, N_vals=N_vals, **kwargs)
+
+    def hessian(self, holder, params_phys, *, data_index, noise_index,
+                N_vals, **kwargs):
+        return self._route_matrix(
+            "hessian", holder, params_phys, data_index=data_index,
+            noise_index=noise_index, N_vals=N_vals, **kwargs)
 
 
 class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
@@ -489,7 +917,9 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 # reach both FD comps clones).
                 self._acs_template_buffer.min_freq_inds = self._min_freq_inds_store
 
-        self._likelihood_engine = make_band_likelihood_engine(
+        # Routed: multi-shard buffers partition every engine call by owning
+        # GPU split; single-shard buffers pass straight through.
+        self._likelihood_engine = _RoutedBandEngine(make_band_likelihood_engine(
             self._basis_settings,
             gb=self.gb,
             gb_fd_comp=self.gb_fd_comp,
@@ -500,7 +930,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             start_freq_inds=getattr(self, "start_freq_inds", None),
             data_length=self.data_length,
             opt_snr_rej_samp_limit=self.opt_snr_rej_samp_limit,
-        )
+        ))
 
         # TODO: fix this 4????
         self.special_band_inds = special_band_inds

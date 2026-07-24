@@ -33,7 +33,6 @@ from ...sensitivity import XYZSensitivityBackend
 from ...utils.utility import asnumpy
 from ..state import GFState
 from .globalfitmove import GlobalFitMove
-from .multigpumove import MultiGPUMoveBase
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +71,28 @@ class PSDMove(GlobalFitMove, StretchMove):
         galfor_transform_fn: TransformContainer = None,
         permute_every: int = 20,
         tolerance: float = 0.0,
+        dcga: DomainComputationGroupArray = None,
+        run_async: bool = False,
+        run_threaded: bool = False,
         **kwargs,
     ):
 
         GlobalFitMove.__init__(self, *args, **kwargs)
         StretchMove.__init__(self, *args, **kwargs)
+        # ONE move structure (2026-07 multi-GPU pass): pass ``dcga=`` to run
+        # the kernel fast path through per-device replicas — how many GPUs
+        # the move uses is set by the DCGA it is built with. Without a DCGA
+        # the move runs its single-device path. Same object, same propose.
+        self._dcga = dcga
+        self._run_async = run_async
+        self._run_threaded = run_threaded
+        if dcga is not None:
+            if acs is None:
+                acs = dcga.acs
+            if sensitivity_backend is None:
+                sensitivity_backend = (
+                    dcga.computation_groups[0].sensitivity_backend
+                )
         self.acs = acs
         self.psd_kwargs = psd_kwargs
         self.priors = priors
@@ -90,6 +106,22 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         self.permute_every = permute_every
         self.tolerance = tolerance
+
+        # Debug escape hatch (see the note in the legacy MultiGPUPSDMove):
+        # when True, psd_log_like bypasses the DCGA routing entirely.
+        self._force_parent_path = False
+
+    @property
+    def dcga(self) -> DomainComputationGroupArray:
+        return self._dcga
+
+    @property
+    def run_async(self) -> bool:
+        return self._run_async
+
+    @property
+    def run_threaded(self) -> bool:
+        return self._run_threaded
 
     # ------------------------------------------------------------------
     # stft_tof kernel fast path
@@ -212,6 +244,11 @@ class PSDMove(GlobalFitMove, StretchMove):
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
 
+        if self._dcga is not None and not getattr(self, "_force_parent_path", False):
+            # GPU-spread path: per-device replicas via the DCGA this move was
+            # constructed with (one move structure; see __init__).
+            return self._psd_log_like_dcga(x, supps=supps, **sens_kwargs)
+
         xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
 
         wi = supps["walker_inds"]
@@ -249,7 +286,9 @@ class PSDMove(GlobalFitMove, StretchMove):
         basis = self.sensitivity_backend.basis_settings
         if not isinstance(basis, (FDSettings, STFTSettings)):
             return False
-        return len(self.acs.linear_data_arr) == 1
+        # A DCGA-configured move scores each shard on its own replica, so
+        # the kernel path stays available on multi-shard ACAs.
+        return self._dcga is not None or len(self.acs.linear_data_arr) == 1
 
     # ------------------------------------------------------------------
     # dev ACA path + hybrid dispatch
@@ -557,64 +596,15 @@ class PSDMove(GlobalFitMove, StretchMove):
         return new_state, accepted
 
 
-# stft_tof addition: multi-GPU variant of the PSD move running the kernel
-# fast path through DomainComputationGroupArray's per-device replicas. Kept
-# through the merge; its interaction with the dev-side ACA sharding is
-# reviewed in the dedicated multi-GPU pass.
-class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
-    def __init__(
-        self,
-        dcga: DomainComputationGroupArray,
-        priors,
-        *args,
-        num_repeats: int = 1,
-        max_logl_mode: bool = False,
-        psd_kwargs: dict = {},
-        psd_transform_fn: TransformContainer = None,
-        galfor_transform_fn: TransformContainer = None,
-        permute_every: int = 20,
-        tolerance: float = 0.0,
-        run_async: bool = False,
-        run_threaded: bool = False,
-        **kwargs,
-    ):
+    # ------------------------------------------------------------------
+    # DCGA (multi-device) kernel path — absorbed from the legacy
+    # MultiGPUPSDMove in the 2026-07 multi-GPU pass (one move structure).
+    # ------------------------------------------------------------------
 
-        PSDMove.__init__(
-            self,
-            dcga.acs,
-            priors,
-            *args,
-            num_repeats=num_repeats,
-            max_logl_mode=max_logl_mode,
-            psd_kwargs=psd_kwargs,
-            sensitivity_backend=dcga.computation_groups[0].sensitivity_backend,
-            psd_transform_fn=psd_transform_fn,
-            galfor_transform_fn=galfor_transform_fn,
-            permute_every=permute_every,
-            tolerance=tolerance,
-            **kwargs,
-        )
-        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
-
-        # TEST FLAG: when True, MultiGPUPSDMove.psd_log_like delegates to the
-        # parent PSDMove.psd_log_like, completely bypassing DCGA's unpack/place/
-        # loop_operation machinery. Only meaningful on single-GPU setups.
-        # If flipping this to True makes CHECK1/CHECK2 stop firing, the bug is
-        # localized to the DCGA path (unpack_coords/place_on_device/
-        # _loop_operation/_compute_group_likelihood). Set from the settings
-        # file via `psd_move._force_parent_path = True` after move construction.
-        self._force_parent_path = False
-
-    def psd_log_like(self, x: list, supps=None, **sens_kwargs):
-        """ """
+    def _psd_log_like_dcga(self, x: list, supps=None, **sens_kwargs):
+        """Kernel fast path through the DCGA's per-device replicas."""
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
-
-        # Single-GPU debug path: skip DCGA entirely and run the parent's direct
-        # sensitivity_backend.compute_log_like call. This isolates whether the
-        # bug is in the MultiGPU routing (DCGA unpack/place/loop) or elsewhere.
-        if getattr(self, "_force_parent_path", False):
-            return PSDMove.psd_log_like(self, x, supps=supps, **sens_kwargs)
 
         wi = supps["walker_inds"]
 
@@ -663,3 +653,23 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
 
         self.dcga.free_gpu_memory()
         return ll
+
+
+class MultiGPUPSDMove(PSDMove):
+    """Deprecated alias — :class:`PSDMove` is ONE structure that takes
+    ``dcga=`` directly (2026-07 multi-GPU pass). This shim maps the legacy
+    ``MultiGPUPSDMove(dcga, priors, ...)`` signature onto it.
+    """
+
+    def __init__(self, dcga: DomainComputationGroupArray, priors, *args,
+                 run_async: bool = False, run_threaded: bool = False,
+                 **kwargs):
+        warnings.warn(
+            "MultiGPUPSDMove is deprecated: construct "
+            "PSDMove(acs, priors, dcga=...) directly (one move structure).",
+            DeprecationWarning, stacklevel=2,
+        )
+        PSDMove.__init__(
+            self, dcga.acs, priors, *args, dcga=dcga,
+            run_async=run_async, run_threaded=run_threaded, **kwargs,
+        )

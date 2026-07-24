@@ -1489,10 +1489,15 @@ def subtract_gb_neighbors_from_data(
     data_index = xp.repeat(
         xp.arange(nwalkers, dtype=xp.int32), n_sub).astype(xp.int32)
     factors = -xp.ones(params_tiled.shape[0], dtype=xp.float64)
+    # Multi-shard gather is a COPY: fill it, then scatter back so the
+    # subtraction actually lands in the per-shard residual buffers
+    # (single-shard gather returns the buffer itself; scatter no-ops).
+    _flat_res = acs.gather_linear_data_arr()
     gb_wdm_comp.fill_global_wdm(
-        params_tiled, acs.gather_linear_data_arr(),
+        params_tiled, _flat_res,
         data_index=data_index, factors=factors,
     )
+    acs.scatter_linear_data_arr(_flat_res)
     logger.info(
         "Neighbor subtraction: subtracted %d known catalogue sources "
         "(window %.3e Hz around [%.6e, %.6e] Hz) from %d walkers.",
@@ -1557,6 +1562,31 @@ def subtract_initial_signal(
         logger.info(f"No initial signals for {source_name}")
 
     #breakpoint()
+
+def get_shared_dcga(acs):
+    """The run's ONE shared :class:`DomainComputationGroupArray`.
+
+    Built lazily on the first move that wants the per-device replica path
+    and cached on the ACA, so it persists for the whole run
+    (memory-lifecycle rule: DCGA orbit/sensitivity replicas are allocated
+    once, never torn down mid-run). Returns ``None`` on CPU / single-GPU
+    runs — the plain shard-aware move paths are already correct there and
+    replicas would only add memory.
+    """
+    if acs.gpus is None or len(acs.gpus) <= 1:
+        return None
+    dcga = getattr(acs, "_shared_dcga", None)
+    if dcga is None:
+        from ..domaincomputation import DomainComputationGroupArray
+
+        dcga = DomainComputationGroupArray(acs)
+        acs._shared_dcga = dcga
+        logger.info(
+            "Built the run-shared DomainComputationGroupArray "
+            "(%d splits over gpus=%s).", dcga.num_splits, list(acs.gpus),
+        )
+    return dcga
+
 
 def build_psd_moves(
     engine_info: Setup,
@@ -1623,6 +1653,11 @@ def build_psd_moves(
         # Match the run's compute setup: hardcoding True makes eryn's
         # StretchMove call .get() on numpy arrays in CPU runs.
         use_gpu=general_info.gpus is not None,
+        # Multi-GPU spread: the unified PSDMove takes the run-shared DCGA
+        # directly (one move structure); None on CPU/single-GPU runs. The
+        # FD/STFT kernel gate keeps WDM runs on the fallback path.
+        dcga=get_shared_dcga(acs),
+        run_threaded=acs.gpus is not None and len(acs.gpus) > 1,
     )
 
     psd_search_move = PSDMove(
@@ -1792,11 +1827,9 @@ def build_gb_moves(
     # around because the WDM-domain ``GBWDMComputations`` consumes it
     # directly.
     gb = GBGPU(force_backend=gb_force_backend, orbits=general_info.gpu_orbits)
-    if gpus is not None:
-        cp.cuda.runtime.setDevice(gpus[0])
-        gb.gpus = gpus
-    else:
-        gb.gpus = None
+    # Device pinning happened via ``_gb_backend.set_cuda_device(gpus[0])``
+    # above — recipe-level device control never touches module-level ``cp``.
+    gb.gpus = gpus
 
     logger.debug(f"GBGPU initialized with gpus: {gb.gpus} and backend: {gb.backend}")
 
@@ -1910,16 +1943,18 @@ def build_gb_moves(
             num_bin = coords_in_in.shape[0]
             xp = gb_info.gb_wdm_comp.xp
             factors_arr = xp.asarray(factors).astype(xp.float64)
-            # GB WDM init writes templates into a single flat buffer.
-            # Use gather_linear_data_arr so multi-GPU ACAs gather to one
-            # buffer first; single-GPU runs return the underlying buffer
-            # directly (no copy).
+            # GB WDM init writes templates into a single flat buffer. The
+            # multi-shard gather is a COPY, so scatter the result back into
+            # the per-shard buffers (single-shard: gather returns the buffer
+            # itself and scatter no-ops).
+            _flat_res = acs.gather_linear_data_arr()
             gb_info.gb_wdm_comp.fill_global_wdm(
                 coords_in_in,
-                acs.gather_linear_data_arr(),
+                _flat_res,
                 data_index=xp.asarray(data_index),
                 factors=factors_arr,
             )
+            acs.scatter_linear_data_arr(_flat_res)
         else:
             raise NotImplementedError(
                 f"Domain settings {type(domain_settings).__name__} are not "
@@ -2299,12 +2334,16 @@ def build_vgb_moves(
                     "setup builds it before calling build_vgb_moves."
                 )
             xp = vgb_info.gb_wdm_comp.xp
+            # Gather is a copy on multi-shard ACAs — scatter the filled
+            # buffer back or the VGB subtraction silently no-ops there.
+            _flat_res = acs.gather_linear_data_arr()
             vgb_info.gb_wdm_comp.fill_global_wdm(
                 coords_in_in,
-                acs.gather_linear_data_arr(),
+                _flat_res,
                 data_index=xp.asarray(data_index),
                 factors=xp.asarray(factors).astype(xp.float64),
             )
+            acs.scatter_linear_data_arr(_flat_res)
         else:
             raise NotImplementedError(
                 f"Domain settings {type(domain_settings).__name__} are not "
@@ -2469,10 +2508,33 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
         else:
             wf_like_kw = dict()
 
+        # Multi-GPU spread (one move structure): hand the run-shared DCGA to
+        # the unified move when the generator can be replicated per device —
+        # a bound method of an object exposing ``.kwargs``. Otherwise the
+        # move runs its shard-aware ACA path (correct on any shard count).
+        wave_gen_in = self.wave_gen
+        dcga_kwargs = {}
+        dcga = get_shared_dcga(acs)
+        if dcga is not None:
+            gen_obj = getattr(self.wave_gen, "__self__", None)
+            if gen_obj is not None and hasattr(gen_obj, "kwargs"):
+                wave_gen_in = gen_obj
+                dcga_kwargs = dict(
+                    dcga=dcga,
+                    waveform_gen_method=self.wave_gen.__name__,
+                    run_threaded=True,
+                )
+            else:
+                logger.info(
+                    "%s: per-device replica path unavailable (wave_gen has "
+                    "no .kwargs-bearing object); using the shard-aware ACA "
+                    "path.", self.branch_name,
+                )
+
         move = ResidualAddOneRemoveOneMove(
             self.branch_name,
             coords_shape,
-            self.wave_gen,
+            wave_gen_in,
             wf_gen_kw,
             wf_like_kw,
             acs,
@@ -2484,6 +2546,7 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
             betas_all=betas_all,
             permute_every=self.permute_every,
             name=self.move_name,
+            **dcga_kwargs,
             **self.move_kwargs,
         )
         move.accepted = np.zeros((ntemps, nwalkers))

@@ -396,6 +396,14 @@ class WDMComputationsBase(LISAToolsParallelModule):
         """
         # Already an ACA (or anything exposing the flat buffers) -> pass through.
         if hasattr(wdm_holder, "linear_data_arr"):
+            if len(wdm_holder.linear_data_arr) != 1:
+                raise NotImplementedError(
+                    "the *_wdm kernels are single-shard by contract (they "
+                    "consume linear_data_arr[0]). Multi-shard holders must "
+                    "go through the LAT shard router (lisatools.globalfit."
+                    "moves.gbbands._RoutedBandEngine), which presents one "
+                    "per-split view per call."
+                )
             return wdm_holder
         from .analysiscontainer import AnalysisContainer, AnalysisContainerArray
         if isinstance(wdm_holder, AnalysisContainer):
@@ -893,6 +901,14 @@ class WDMComputationsBase(LISAToolsParallelModule):
         # into. Raw ndarrays keep the legacy path below.
         from .domains import DomainBase as _DomainBase
         if hasattr(templates, "linear_data_arr"):
+            if len(templates.linear_data_arr) != 1:
+                raise NotImplementedError(
+                    "fill_global_wdm writes into linear_data_arr[0] and is "
+                    "single-shard by contract. For a multi-shard ACA either "
+                    "go through the LAT shard router (_RoutedBandEngine "
+                    "fill_template) or gather -> fill -> "
+                    "scatter_linear_data_arr (init-time pattern)."
+                )
             templates = templates.linear_data_arr[0]
         elif isinstance(templates, _DomainBase):
             templates = templates.arr
