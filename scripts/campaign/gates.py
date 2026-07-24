@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-STATES = ("pending", "red", "yellow", "green")
+STATES = ("pending", "running", "red", "yellow", "green")
 
 # Baselines from the 2026-07-11 mojito fidelity run (scripts/validation/
 # run_mojito_null_checks.sh) with the campaign's 2x regression margin applied.

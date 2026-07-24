@@ -249,7 +249,18 @@
     "t1-gt-mbh": {
       "confirmed": [],
       "evidence": [],
-      "history": [],
+      "history": [
+        {
+          "note": "manual: demo blue light",
+          "state": "running",
+          "ts": "2026-07-24T07:35:28Z"
+        },
+        {
+          "note": "manual: revert demo",
+          "state": "pending",
+          "ts": "2026-07-24T07:35:51Z"
+        }
+      ],
       "metrics": {},
       "state": "pending"
     },
@@ -552,6 +563,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T07:30:35Z",
+  "updated": "2026-07-24T07:35:51Z",
   "version": 1
 }

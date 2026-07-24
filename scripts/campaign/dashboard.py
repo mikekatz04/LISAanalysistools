@@ -17,10 +17,12 @@ import os
 STATUS = {
     # state -> (icon, label, css class)
     "green": ("✓", "green — verified", "st-green"),
+    "running": ("●", "running…", "st-running"),
     "yellow": ("◌", "yellow — unverified", "st-yellow"),
     "red": ("✗", "red — broken", "st-red"),
     "pending": ("⋯", "pending", "st-pending"),
 }
+_COUNT_ORDER = ("green", "running", "yellow", "red", "pending")
 
 _CSS = """
 :root {
@@ -28,20 +30,21 @@ _CSS = """
   --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
   --muted: #898781; --grid: #e1e0d9; --border: rgba(11,11,11,0.10);
   --good: #0ca30c; --warn: #fab219; --crit: #d03b3b; --series-1: #2a78d6;
+  --running: #2a78d6;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
     --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
     --muted: #898781; --grid: #2c2c2a; --border: rgba(255,255,255,0.10);
-    --series-1: #3987e5;
+    --series-1: #3987e5; --running: #3987e5;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
   --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
   --muted: #898781; --grid: #2c2c2a; --border: rgba(255,255,255,0.10);
-  --series-1: #3987e5;
+  --series-1: #3987e5; --running: #3987e5;
 }
 * { box-sizing: border-box; }
 body { background: var(--page); color: var(--ink);
@@ -73,11 +76,22 @@ h1 { font-size: 20px; margin: 0 0 4px; }
 .st-yellow .status-dot { background: var(--warn); }
 .st-red    .status-dot { background: var(--crit); }
 .st-pending .status-dot { background: var(--muted); }
+.st-running .status-dot { background: var(--running);
+  animation: pulse 1.3s ease-in-out infinite; }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--running); }
+  50%      { box-shadow: 0 0 0 2px var(--surface),
+             0 0 0 6px color-mix(in srgb, var(--running) 30%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .st-running .status-dot { animation: none; }
+}
 .badge { display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; font-weight: 600; border-radius: 999px;
   padding: 1px 8px; border: 1px solid var(--border); color: var(--ink); }
 .badge .ic { font-size: 12px; }
 .st-green  .badge .ic { color: var(--good); }
+.st-running .badge .ic { color: var(--running); }
 .st-yellow .badge .ic { color: var(--warn); }
 .st-red    .badge .ic { color: var(--crit); }
 .st-pending .badge .ic { color: var(--muted); }
@@ -233,9 +247,9 @@ def render(gates, ledger, base_dir, out_path=None):
     entries = {g.id: ledger["gates"].get(g.id, {"state": "pending", "metrics": {},
                                                "evidence": [], "history": []})
                for g in gates}
-    counts = {s: 0 for s in ("green", "yellow", "red", "pending")}
+    counts = {s: 0 for s in _COUNT_ORDER}
     for e in entries.values():
-        counts[e["state"]] += 1
+        counts[e["state"]] = counts.get(e["state"], 0) + 1
 
     tiers: dict = {}
     for g in gates:
@@ -258,7 +272,7 @@ def render(gates, ledger, base_dir, out_path=None):
     count_html = "".join(
         f'<div class="count"><b>{counts[s]}</b> '
         f'{STATUS[s][0]} {html.escape(s)}</div>'
-        for s in ("green", "yellow", "red", "pending")
+        for s in _COUNT_ORDER
     )
 
     doc = f"""<title>LISA Global Fit — Testing Campaign</title>

@@ -279,6 +279,11 @@ def cmd_run(args):
               f"gate cannot go green until they are)")
     if not args.dry_run:
         _acquire_lock(gate.id, force=args.force)
+        # Light the gate blue (running) as the first action so the dashboard
+        # shows in-progress until a result lands.
+        _entry(led, gate.id)["state"] = "running"
+        save_ledger(led)
+        cmd_render(args)
     raw_dir = os.path.join(RAW_ROOT, gate.id)
     os.makedirs(raw_dir, exist_ok=True)
     env = dict(os.environ)
