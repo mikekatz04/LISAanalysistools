@@ -55,6 +55,27 @@ if TYPE_CHECKING:
 
 logger = getLogger(__name__)
 
+#: Counts already reported by :func:`_warn_zeroed_invc`. The analytic noise
+#: model diverges at f -> 0, so the same pixels are re-zeroed on every
+#: sensitivity rebuild (per walker, per PSD proposal). Warn once per distinct
+#: count -- a *changed* count is new information and warns again; a repeat is
+#: demoted to debug so long runs aren't buried in identical warnings.
+_INVC_ZEROED_REPORTED: set = set()
+
+
+def _warn_zeroed_invc(n_bad: int) -> None:
+    """Report zeroed non-finite inverse-covariance elements (once per count)."""
+    msg = (
+        "sensitivity invC: zeroed %d non-finite element(s) (infinite-noise / "
+        "singular-covariance pixels -> zero weight; expected for the "
+        "analytic-PSD f=0 WDM layer)."
+    )
+    if n_bad in _INVC_ZEROED_REPORTED:
+        logger.debug(msg, n_bad)
+    else:
+        _INVC_ZEROED_REPORTED.add(n_bad)
+        logger.warning(msg + " Further identical reports are logged at DEBUG.", n_bad)
+
 NUM_SPLINE_THREADS = 256
 
 class Sensitivity(ABC):
@@ -1429,12 +1450,7 @@ class SensitivityMatrixBase:
         if bool(xp.any(bad)):
             n_bad = int(xp.count_nonzero(bad))
             self._invC = xp.where(bad, xp.zeros_like(self._invC), self._invC)
-            logger.warning(
-                "sensitivity invC: zeroed %d non-finite element(s) "
-                "(infinite-noise / singular-covariance pixels -> zero "
-                "weight; expected for the analytic-PSD f=0 WDM layer).",
-                n_bad,
-            )
+            _warn_zeroed_invc(n_bad)
         det_bad = ~xp.isfinite(self._detC)
         if bool(xp.any(det_bad)):
             self._detC = xp.where(det_bad, xp.ones_like(self._detC), self._detC)
@@ -2891,12 +2907,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         if bool(xp.any(bad)):
             n_bad = int(xp.count_nonzero(bad))
             invC = xp.where(bad, xp.zeros_like(invC), invC)
-            logger.warning(
-                "sensitivity invC: zeroed %d non-finite element(s) "
-                "(infinite-noise / singular-covariance pixels -> zero "
-                "weight; expected for the analytic-PSD f=0 WDM layer).",
-                n_bad,
-            )
+            _warn_zeroed_invc(n_bad)
         det_bad = ~xp.isfinite(detC) | (detC <= 0)
         if bool(xp.any(det_bad)):
             detC = xp.where(det_bad, xp.ones_like(detC), detC)
