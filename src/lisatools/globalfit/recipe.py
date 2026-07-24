@@ -2211,6 +2211,13 @@ def build_gb_moves(
     _rj_birth_prop = (
         {"gb": _custom_birth} if _custom_birth is not None else gpu_priors
     )
+    # TEMP (2026-07-24): the custom RJ-birth container (fstat / f0_mchirp astro
+    # prior) is numpy-backed and trips BandSorter's rj_prop.logpdf on cupy
+    # coords (gbbands.py: ``numpy.asarray(cupy)`` -> "Implicit conversion to a
+    # NumPy array is not allowed"). Birth from the device-correct global prior
+    # (``gpu_priors``: cupy on GPU, numpy on CPU) for now; the astro-birth
+    # container itself is left untouched. Revert by deleting this override.
+    _rj_birth_prop = gpu_priors
 
     #* ============================================= SEARCH MOVES =============================================
     gb_search_prune_move = GBSpecialRJPriorMove(
