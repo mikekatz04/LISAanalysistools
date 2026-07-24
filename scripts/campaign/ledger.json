@@ -62,10 +62,68 @@
     },
     "t1-fastlike-gb": {
       "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
+      "evidence": [
+        "evidence/t1-fastlike-gb.log",
+        "evidence/t1-fastlike-gb/fastlike_gb.png",
+        "evidence/t1-fastlike-gb__gb-fastlike-vs-ac.log"
+      ],
+      "history": [
+        {
+          "note": "check gb-fastlike-vs-ac exited 1",
+          "state": "red",
+          "ts": "2026-07-24T07:01:14Z"
+        },
+        {
+          "note": "check gb-fastlike-vs-ac exited 1",
+          "state": "red",
+          "ts": "2026-07-24T07:05:26Z"
+        },
+        {
+          "note": "run: criteria pass but deps not green: ['t1-gt-gb']",
+          "state": "yellow",
+          "ts": "2026-07-24T07:10:24Z"
+        },
+        {
+          "note": "ingest: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T07:12:50Z"
+        }
+      ],
+      "metrics": {
+        "branch": "gb",
+        "d_h_ac": 23.76423,
+        "d_h_fast": 23.76423,
+        "error": "ValueError",
+        "f0": 7.5997,
+        "fastlike_max_reldiff": 2.504e-09,
+        "fastlike_ok": 1,
+        "fastlike_sources": 3,
+        "h_h_ac": 27.36259,
+        "h_h_fast": 27.36259,
+        "n_injected": 14,
+        "plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-fastlike-gb/fastlike_gb.png",
+        "reldiff_dh": 4.322e-10,
+        "reldiff_hh": 1.274e-10,
+        "result_branch": "gb",
+        "result_d_h_ac": 23.76423,
+        "result_d_h_fast": 23.76423,
+        "result_error": "ValueError",
+        "result_f0": 7.5997,
+        "result_fastlike_max_reldiff": 2.504e-09,
+        "result_fastlike_ok": 1,
+        "result_fastlike_sources": 3,
+        "result_h_h_ac": 27.36259,
+        "result_h_h_fast": 27.36259,
+        "result_n_injected": 14,
+        "result_plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-fastlike-gb/fastlike_gb.png",
+        "result_reldiff_dh": 4.322e-10,
+        "result_reldiff_hh": 1.274e-10,
+        "result_src": 2,
+        "result_topn": 3,
+        "src": 2,
+        "topn": 3
+      },
+      "state": "green"
     },
     "t1-fastlike-vgb": {
       "confirmed": [],
@@ -83,10 +141,35 @@
     },
     "t1-gt-gb": {
       "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
+      "evidence": [
+        "evidence/t1-gt-gb.log",
+        "evidence/t1-gt-gb/gb_mojito_match.png"
+      ],
+      "history": [
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T07:12:33Z"
+        }
+      ],
+      "metrics": {
+        "class": "GB",
+        "det_snr": 116.29,
+        "f0_mhz": 16.71629,
+        "gb_mismatch_max": 2.975e-10,
+        "mismatch": 1.17e-10,
+        "mm_taustar": 1.169e-10,
+        "overlap": 1.0,
+        "rank": 2,
+        "result_class": "GB",
+        "result_det_snr": 116.29,
+        "result_f0_mhz": 16.71629,
+        "result_mismatch": 1.17e-10,
+        "result_mm_taustar": 1.169e-10,
+        "result_overlap": 1.0,
+        "result_rank": 2
+      },
+      "state": "green"
     },
     "t1-gt-mbh": {
       "confirmed": [],
@@ -394,6 +477,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T06:45:36Z",
+  "updated": "2026-07-24T07:14:24Z",
   "version": 1
 }

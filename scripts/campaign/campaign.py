@@ -297,6 +297,7 @@ def cmd_run(args):
     ):
         env.setdefault(var, "1")
     env.setdefault("MPLBACKEND", "Agg")
+    env.setdefault("PYTHONUNBUFFERED", "1")  # child flushes -> log streams live
     combined = []
     failed_check = None
     for ch in gate.checks:
@@ -314,14 +315,21 @@ def cmd_run(args):
         print(f"[campaign]   cpu before: {_cpu_snapshot()}")
         t0 = time.time()
         log_path = os.path.join(raw_dir, f"{ch.id}.log")
-        with open(log_path, "w") as lf:
-            proc = subprocess.run(
+        # Stream straight to the log file (line-buffered) so a long build is
+        # observable live via `tail -f` and never lost if the wrapper dies.
+        with open(log_path, "w", buffering=1) as lf:
+            rc = subprocess.run(
                 niced, shell=True, cwd=REPO, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            )
-            lf.write(proc.stdout)
-        combined.append(proc.stdout)
-        tail = "\n".join(proc.stdout.splitlines()[-8:])
+                stdout=lf, stderr=subprocess.STDOUT, text=True,
+            ).returncode
+        with open(log_path) as lf:
+            out = lf.read()
+
+        class _P:
+            returncode = rc
+        proc = _P()
+        combined.append(out)
+        tail = "\n".join(out.splitlines()[-8:])
         print(tail)
         print(f"[campaign]   {ch.id} took {time.time() - t0:.0f}s; "
               f"cpu after: {_cpu_snapshot()}")

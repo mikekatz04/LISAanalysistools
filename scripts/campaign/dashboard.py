@@ -58,13 +58,25 @@ h1 { font-size: 20px; margin: 0 0 4px; }
 .tier { min-width: 250px; max-width: 300px; flex: 1 0 250px; }
 .tier h2 { font-size: 13px; color: var(--ink-2); text-transform: uppercase;
   letter-spacing: 0.04em; margin: 0 0 8px; }
-.card { background: var(--surface); border: 1px solid var(--border);
-  border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
-  border-left-width: 4px; }
+.card { position: relative; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; margin-bottom: 10px; border-left-width: 4px; }
 .card.st-green  { border-left-color: var(--good); }
 .card.st-yellow { border-left-color: var(--warn); }
 .card.st-red    { border-left-color: var(--crit); border-left-style: dashed; }
 .card.st-pending{ border-left-color: var(--muted); }
+/* Circular status indicator, sitting in the card's clear top-right corner.
+   A 2px surface ring lifts it off the card; a faint outer hairline keeps a
+   pending (muted) dot visible on both themes. */
+.status-dot { position: absolute; top: 11px; right: 11px;
+  width: 11px; height: 11px; border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--border); }
+.hdr { display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+  padding-right: 16px; }
+.st-green  .status-dot { background: var(--good); }
+.st-yellow .status-dot { background: var(--warn); }
+.st-red    .status-dot { background: var(--crit); }
+.st-pending .status-dot { background: var(--muted); }
 .badge { display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; font-weight: 600; border-radius: 999px;
   padding: 1px 8px; border: 1px solid var(--border); color: var(--ink); }
@@ -136,10 +148,15 @@ _METRIC_ORDER = (
 def _card(gate, entry, base_dir):
     ic, label, cls = STATUS[entry["state"]]
     parts = [f'<div class="card {cls}">']
+    # Circular status indicator in the clear top-right corner (title attr keeps
+    # it labeled for hover / screen readers; the badge below carries the word).
+    parts.append(f'<span class="status-dot" title="{html.escape(label)}"></span>')
     parts.append(
+        '<div class="hdr">'
         f'<span class="badge"><span class="ic">{ic}</span>{html.escape(label)}</span>'
         f'<span class="where">{html.escape(gate.branch)}</span>'
-        f'<span class="where">{gate.where}</span>'
+        f'<span class="where">{html.escape(gate.where)}</span>'
+        '</div>'
     )
     parts.append(f'<div class="gid">{gate.id}</div>')
     parts.append(f'<div class="title">{html.escape(gate.title)}</div>')

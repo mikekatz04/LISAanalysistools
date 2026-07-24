@@ -53,9 +53,6 @@ def main() -> None:
 
     from lisatools.globalfit.run import GlobalFit
     from lisatools.globalfit.stock import erebor
-    from lisatools.globalfit.stock.erebor.transforms import (
-        make_gb_transform_container,
-    )
     from lisatools.utils.utility import asnumpy
 
     variant = "gb_no_fg" if args.branch == "gb" else "vgb"
@@ -85,8 +82,11 @@ def main() -> None:
     inj = np.asarray(info.injection, dtype=float)
     if inj.ndim == 1:
         inj = inj[None, :]
-    state.branches_coords[args.branch][:] = inj[None, None]
-    acs = gf.setup_acs(state, rebuild_residuals=False)  # residual == raw data
+    # Data-only AC: residual == raw mojito data, independent of the sampler
+    # coords, so we leave load_info's seeded leaves untouched (no need to
+    # stuff the injection into branches_coords — that is only for the
+    # rebuild_residuals=True null pipeline).
+    acs = gf.setup_acs(state, rebuild_residuals=False)
     ac = acs.flatten()[0]
 
     # highest-frequency sources (sampling col 1 = f0 in the fdot basis)
@@ -97,8 +97,12 @@ def main() -> None:
           f"topn={sources.shape[0]}", flush=True)
 
     # --- fast engine: all sources at once against walker-0's mojito data ----
+    # info.injection is stored in the RUN sampling basis (the 9-col fdot_astro
+    # basis by default), so use the fit's OWN transform — the exact one
+    # signal_gen applies — to reach the physical GBGPU basis, NOT the standalone
+    # 8-col fdot factory the seed helper uses.
     xp = comp.xp
-    tc = make_gb_transform_container(use_chirp_mass=False)
+    tc = getattr(signal_gen, "transform", None) or getattr(info, "transform", None)
     params_phys = tc.both_transforms(xp.asarray(sources), xp=xp)
     di = xp.zeros(params_phys.shape[0], dtype=xp.int32)
     comp.get_ll_wdm(params_phys, acs[0], data_index=di, noise_index=di)
