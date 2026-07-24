@@ -60,11 +60,7 @@ h1 { font-size: 20px; margin: 0 0 4px; }
   letter-spacing: 0.04em; margin: 0 0 8px; }
 .card { position: relative; background: var(--surface);
   border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 12px; margin-bottom: 10px; border-left-width: 4px; }
-.card.st-green  { border-left-color: var(--good); }
-.card.st-yellow { border-left-color: var(--warn); }
-.card.st-red    { border-left-color: var(--crit); border-left-style: dashed; }
-.card.st-pending{ border-left-color: var(--muted); }
+  padding: 10px 12px; margin-bottom: 10px; }
 /* Circular status indicator, sitting in the card's clear top-right corner.
    A 2px surface ring lifts it off the card; a faint outer hairline keeps a
    pending (muted) dot visible on both themes. */
