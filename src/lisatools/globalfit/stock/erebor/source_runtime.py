@@ -145,8 +145,50 @@ def _device_local_orbits(orbits, xp, primary_device):
     return replica
 
 
+# Per-device WDM/domain-settings replicas. The wave wraps project the raw TD
+# channels onto ``general_info.domain_settings`` (a WDMSettings) via
+# ``.transform()``, which multiplies by ``settings.window`` (the WDM analysis
+# window). That window lives on the primary device, so a shard-1 walker's
+# device-local template * primary-device window trips peer access on EVERY
+# generation (domains.py ``before_ifft[:] *= base_window``). A per-device
+# settings replica moves the window onto the owning device.
+_DEVICE_DOMAIN_REPLICAS: dict = {}
+
+
+def _device_local_domain_settings(settings, xp, primary_device):
+    """A domain-settings replica whose device arrays live on the current device.
+
+    CPU / single-GPU / the primary device reuse the shared ``settings``
+    (byte-identical to the pre-multi-GPU path). A non-primary device rebuilds
+    ``settings.__class__(*args, **kwargs)`` with the device-resident WDM
+    ``window`` / ``omega`` DROPPED, so ``__init__`` regenerates them on THIS
+    device via ``setup_window()`` -- deterministic in ``(Nf, Nt, dt,
+    oversample)``, hence numerically identical to the primary-device window
+    (lnL parity preserved), just with no peer access off the primary device.
+    Domain types without those keys (FD / STFT / TD) rebuild harmlessly from
+    their scalar args. Built once per (settings, device) and kept for the run.
+    """
+    dev = current_device(xp)
+    if dev is None or dev == primary_device:
+        return settings
+    if not (hasattr(settings, "args") and hasattr(settings, "kwargs")):
+        return settings  # unknown settings type -> leave shared
+    key = (id(settings), dev)
+    replica = _DEVICE_DOMAIN_REPLICAS.get(key)
+    if replica is None:
+        kw = dict(settings.kwargs)
+        # Regenerate the WDM window/omega on the target device (no-op key pops
+        # for non-WDM domain types).
+        kw.pop("window", None)
+        kw.pop("omega", None)
+        with device_context(xp, dev):
+            replica = settings.__class__(*settings.args, **kw)
+        _DEVICE_DOMAIN_REPLICAS[key] = replica
+    return replica
+
+
 def _wrap_device_and_orbits(general_info):
-    """``(xp, dev, orbits)`` for a per-device EMRI/SOBBH source wave wrap.
+    """``(xp, dev, orbits, domain_settings)`` for a per-device source wave wrap.
 
     ``dev`` is the run's cupy current device (None on CPU / single-GPU) -- set
     by the move's per-shard ``device_context`` -- used to key the wave-wrap
@@ -155,15 +197,20 @@ def _wrap_device_and_orbits(general_info):
     EMRI and SOBBH generators use): on a non-primary device it has a DISTINCT
     ``id(orbits)``, which fans the inner ``id(orbits)``-keyed generator caches
     (get_emri_response_wrapper / get_sobbh_tdionfly_gen / ...) out per device
-    too, without touching those lower-level getters. On CPU / single-GPU /
-    the primary device the shared orbits is reused unchanged.
+    too, without touching those lower-level getters. ``domain_settings`` is a
+    per-device replica of ``general_info.domain_settings`` so the wave wrap's
+    WDM ``.transform()`` multiplies by a device-local window (no peer access).
+    On CPU / single-GPU / the primary device the shared objects are reused
+    unchanged.
     """
     xp = _general_info_xp(general_info)
     dev = current_device(xp)
-    orbits = _device_local_orbits(
-        general_info.orbits, xp, _primary_device(general_info)
+    primary = _primary_device(general_info)
+    orbits = _device_local_orbits(general_info.orbits, xp, primary)
+    domain_settings = _device_local_domain_settings(
+        general_info.domain_settings, xp, primary
     )
-    return xp, dev, orbits
+    return xp, dev, orbits, domain_settings
 
 
 def default_source_ids() -> dict:
@@ -539,7 +586,7 @@ def get_emri_wave_wrap(general_info, cfg):
     speedup. On CPU / single-GPU this collapses to one entry, byte-identical
     to the old path.
     """
-    xp, dev, orbits = _wrap_device_and_orbits(general_info)
+    xp, dev, orbits, domain_settings = _wrap_device_and_orbits(general_info)
     key = ("emri", id(general_info), cfg["nchannels"], dev)
     if key in _WAVE_WRAP_CACHE:
         return _WAVE_WRAP_CACHE[key]
@@ -574,7 +621,7 @@ def get_emri_wave_wrap(general_info, cfg):
         wrap = EMRIWaveWrap(
             template_wave_gen,
             general_info.data_td_settings,
-            general_info.domain_settings,
+            domain_settings,
             td_window=None,
             nchannels=cfg["nchannels"],
             offset_int=offset_int,
@@ -592,7 +639,7 @@ def get_sobbh_wave_wrap(general_info, cfg):
     device -- no peer access off the primary device. On CPU / single-GPU this
     collapses to one entry, byte-identical to the old path.
     """
-    xp, dev, orbits = _wrap_device_and_orbits(general_info)
+    xp, dev, orbits, domain_settings = _wrap_device_and_orbits(general_info)
     key = ("sobbh", id(general_info), cfg["nchannels"], dev)
     if key in _WAVE_WRAP_CACHE:
         return _WAVE_WRAP_CACHE[key]
@@ -620,7 +667,7 @@ def get_sobbh_wave_wrap(general_info, cfg):
                 gen,
                 t_arr,
                 general_info.data_td_settings,
-                general_info.domain_settings,
+                domain_settings,
                 td_window=None,
                 nchannels=cfg["nchannels"],
             )
@@ -640,7 +687,7 @@ def get_sobbh_wave_wrap(general_info, cfg):
             wrap = SOBBHWaveWrap(
                 template_wave_gen,
                 general_info.data_td_settings,
-                general_info.domain_settings,
+                domain_settings,
                 td_window=None,
                 nchannels=cfg["nchannels"],
             )
@@ -660,10 +707,14 @@ def get_mbh_tdionfly_wave_wrap(general_info, cfg):
     """
     xp = _general_info_xp(general_info)
     dev = current_device(xp)
+    primary = _primary_device(general_info)
     base_orbits = (
         general_info.gpu_orbits if general_info.gpus is not None else general_info.orbits
     )
-    orbits = _device_local_orbits(base_orbits, xp, _primary_device(general_info))
+    orbits = _device_local_orbits(base_orbits, xp, primary)
+    domain_settings = _device_local_domain_settings(
+        general_info.domain_settings, xp, primary
+    )
     key = ("mbh_tdionfly", id(general_info), cfg["nchannels"], dev)
     if key in _WAVE_WRAP_CACHE:
         return _WAVE_WRAP_CACHE[key]
@@ -686,7 +737,7 @@ def get_mbh_tdionfly_wave_wrap(general_info, cfg):
             gen,
             t_arr,
             general_info.data_td_settings,
-            general_info.domain_settings,
+            domain_settings,
             nchannels=cfg["nchannels"],
         )
     _WAVE_WRAP_CACHE[key] = wrap
@@ -705,20 +756,23 @@ def get_mbh_phenom_gen(general_info, cfg):
     single-GPU the primary device reuses the shared orbits, so this collapses
     to the original single cached generator.
     """
+    xp = _general_info_xp(general_info)
+    primary = _primary_device(general_info)
     base_orbits = (
         general_info.gpu_orbits
         if general_info.gpus is not None
         else general_info.orbits
     )
-    orbits = _device_local_orbits(
-        base_orbits, _general_info_xp(general_info), _primary_device(general_info)
+    orbits = _device_local_orbits(base_orbits, xp, primary)
+    output_domain_settings = _device_local_domain_settings(
+        general_info.domain_settings, xp, primary
     )
     return get_mbh_phenom_wave_gen(
         data_td_settings=general_info.data_td_settings,
         waveform_t0=cfg["mbh_waveform_t0"],
         dt=general_info.dt,
         orbits=orbits,
-        output_domain_settings=general_info.domain_settings,
+        output_domain_settings=output_domain_settings,
         tukey_alpha=general_info.window_alpha,
         force_backend=general_info.force_backend,
         data_span=general_info.Tobs,
