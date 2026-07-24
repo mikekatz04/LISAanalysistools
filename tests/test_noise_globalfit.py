@@ -42,7 +42,12 @@ class NoiseOnlyIntegrationTest(unittest.TestCase):
 
         from lisatools.globalfit.run import GlobalFit
 
-        fit = erebor.noise_only(nwalkers=4, ntemps=2)
+        # The recovery premise requires data actually drawn from the injected
+        # covariance — pin synthetic mode explicitly. Under the default
+        # data_mode="mojito" (when the local mojito cache exists) the data are
+        # the real NOISE brick and psd_injection is only the brick-FITTED
+        # 2-parameter approximation, which a prior draw can legitimately beat.
+        fit = erebor.noise_only(nwalkers=4, ntemps=2, data_mode="synthetic")
         curr = fit.build()
         psd_inj = list(curr.general_info.psd_injection)
         galfor_inj = list(curr.general_info.galfor_injection)
