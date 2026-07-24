@@ -95,6 +95,32 @@ class GBSettings(Settings):
     use_astrophysical_f0_mc_prior: bool = dataclasses.field(
         default_factory=env_default("GB_USE_ASTROPHYSICAL_F0_MC_PRIOR", True, bool)
     )
+    # Half-width M of the uniform prior on the 9th sampled parameter
+    # ``fdot_astro_ratio`` (see :attr:`use_fdot_astro`): ``r = fdot_astro /
+    # fdot_gr ~ U[-M, M]``, physical ``fdot = fdot_gr(f0, Mc) * (1 + r)``,
+    # so ``r < -1`` represents interacting ``fdot < 0`` systems and the
+    # total fdot is bounded to ``(1 +/- M) * fdot_gr`` by construction.
+    # Catalogue facts (scripts/gb/fdot_astro_prior_study.py, full wdwd
+    # catalogue): at truth Mc the whole population lies in ``r`` in
+    # ``[-1.5, +5e-4]``; the mirror-convention seeds land at ``r = 0`` /
+    # ``r = -2``; the most negative sources need ``r`` down to ``-4.83``
+    # even at Mc = 1.0 -- so M >= 5 keeps every catalogue source
+    # representable (M = 3 would exclude the loudest accretors). Env:
+    # ``GB_FDOT_ASTRO_RATIO_MAX``.
+    fdot_astro_ratio_max: float = dataclasses.field(
+        default_factory=env_default("GB_FDOT_ASTRO_RATIO_MAX", 5.0, float)
+    )
+
+    @property
+    def use_fdot_astro(self) -> bool:
+        """9-parameter basis switch (deliberately NOT a separate knob).
+
+        The ``fdot_astro_ratio`` column is part of the astrophysical-prior
+        package: active iff ``use_chirp_mass and
+        use_astrophysical_f0_mc_prior``. ``GB_USE_ASTROPHYSICAL_F0_MC_PRIOR
+        =0`` (or ``GB_USE_CHIRP_MASS=0``) reverts to the 8-parameter basis.
+        """
+        return bool(self.use_chirp_mass and self.use_astrophysical_f0_mc_prior)
     # Custom RJ-birth distribution for the prior RJ moves. An eryn
     # duck-typed distribution over the FULL 8-column GB sampling basis
     # (``rvs(size) -> (size, 8)`` with f0 in mHz at column 1 and Mc at
@@ -113,12 +139,21 @@ class GBSettings(Settings):
     # ~Nf_active/slab_Nf. WDM path only (FD is already per-band narrow).
     # Requires the chunked-het backend built with the task-b per-slab origin
     # (the default CUDA/CPU build). Env: GB_WDM_BAND_SLAB_LAYERS.
-    #   None -> OFF (full active band; bit-identical to pre-task-b). [default]
     #   0    -> AUTO: band layer span + 2*(leakage + wdm_slab_guard_layers),
-    #           leakage=2 (recommended-Tukey estimate) -> ~band_span + 6.
+    #           leakage=2 (recommended-Tukey estimate) -> ~band_span + 6. [default]
     #   N>0  -> EXPLICIT N layers.
+    #   None -> OFF (full active band; bit-identical to pre-task-b). Not
+    #           reachable from the env knob (which casts to int); set it
+    #           programmatically (``fit.gb.wdm_band_slab_layers = None``) to
+    #           restore the pre-task-b full-band buffers.
+    #
+    # AUTO is the default because the full-band slab is the dominant sub-band
+    # buffer term: a cell spans the whole analysis band (e.g. 180 WDM layers)
+    # when the GB band itself occupies only a few, so AUTO cuts per-cell
+    # memory by ~Nf_active/slab_Nf (~20x at Nf_active=180) on both the device
+    # buffers and the host staging copies in the ACA repack.
     wdm_band_slab_layers: typing.Optional[int] = dataclasses.field(
-        default_factory=env_default("GB_WDM_BAND_SLAB_LAYERS", None, int)
+        default_factory=env_default("GB_WDM_BAND_SLAB_LAYERS", 0, int)
     )
     # Adjustable guard (extra WDM layers each side) used by the AUTO slab size
     # (wdm_band_slab_layers=0). Env: GB_WDM_SLAB_GUARD_LAYERS.
@@ -182,17 +217,31 @@ class GBSetup(Setup, GBSettings):
         :attr:`GBSettings.use_astrophysical_f0_mc_prior` is also on, the
         separate ``f0`` and ``Mc`` uniforms are replaced by the 6-component
         heatmap GMM from :func:`~lisatools.sampling.f0_mchirp_prior
-        .F0McGMMSampling.from_heatmap` under a tuple key ``("f0", "Mc")``.
+        .F0McGMMSampling.from_heatmap` under a tuple key ``("f0", "Mc")``,
+        AND the basis gains a 9th sampled column ``fdot_astro_ratio``
+        (:attr:`GBSettings.use_fdot_astro`): ``r = fdot_astro / fdot_gr ~
+        U[-M, M]`` (M = :attr:`GBSettings.fdot_astro_ratio_max`), physical
+        ``fdot = fdot_gr(f0, Mc) * (1 + r)`` with ``fddot`` exactly 0 --
+        interacting ``fdot < 0`` systems live at ``r < -1``.
         """
         third_name = "Mc" if self.use_chirp_mass else "fdot"
         input_basis = ["A", "f0", third_name, "phi0",
                        "cos_iota", "psi", "alpha", "sin_delta"]
+        if self.use_fdot_astro:
+            # 9th sampled column: r = fdot_astro / fdot_gr (dimensionless;
+            # physical fdot = fdot_gr(f0, Mc) * (1 + r), fddot stays 0).
+            input_basis.append("fdot_astro_ratio")
 
         if self.transform is None:
             # THE single GB transform factory (phi0 sign convention lives
             # there, nowhere else).
             self.transform = make_gb_transform_container(
-                use_chirp_mass=self.use_chirp_mass
+                use_chirp_mass=self.use_chirp_mass,
+                use_fdot_astro=self.use_fdot_astro,
+                mc_lims=(
+                    tuple(self.m_chirp_lims) if self.m_chirp_lims
+                    else (0.001, 1.0)
+                ),
             )
 
         if self.periodic is None:
@@ -223,6 +272,15 @@ class GBSetup(Setup, GBSettings):
                     input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
                     input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
                     input_basis[7]: uniform_dist(*np.sort(np.sin(self.delta_lims))),
+                    # 9th column (this branch implies use_fdot_astro):
+                    # appended LAST so dict insertion order puts r at
+                    # column 8. Prior defined in the SAMPLING basis (no
+                    # in-sampler Jacobian); the induced physical prior at
+                    # fixed (f0, Mc) is uniform in fdot with width
+                    # 2*M*fdot_gr -- see McFdotAstroRatioTriple.
+                    "fdot_astro_ratio": uniform_dist(
+                        -self.fdot_astro_ratio_max, self.fdot_astro_ratio_max
+                    ),
                 }
             elif self.use_chirp_mass:
                 if not self.m_chirp_lims:
