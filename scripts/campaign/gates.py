@@ -586,6 +586,55 @@ GATES: tuple = (
         proof_plots=("parity_*.png", "timing_*.png"),
     ),
     Gate(
+        id="t3-gpu-vgb",
+        tier=3,
+        branch="vgb",
+        title="VGB on one GPU",
+        objective="VGB fixed-leaf PE runs on a single GPU (same GB-family WDM engine).",
+        where="cluster",
+        depends_on=("t2-lite-vgb",),
+        checks=(
+            Check(
+                id="vgb-gpu",
+                command=(
+                    "USE_GPU=1 GPUS=0 GPU_BACKEND=cuda12x GF_MOVE_TIMING=1 "
+                    "python scripts/campaign/runners/branch_lite.py "
+                    "--variant vgb_lite --iterations 10"
+                ),
+                criteria=(
+                    _ll_finite(),
+                    {"manual": "|ll - t2 CPU ll| / |ll| <= 1e-8 at the seeded start"},
+                    {"manual": "vgb move in [GF_TIMING]; GPU pool below GB_GPU_MEM_WARN_GB"},
+                ),
+            ),
+        ),
+        proof_plots=("parity_*.png", "timing_*.png"),
+    ),
+    Gate(
+        id="t3-gpu-noise",
+        tier=3,
+        branch="noise",
+        title="Noise on one GPU",
+        objective="noise_sgwb (PSD+galfor+SGWB) runs on a single GPU.",
+        where="cluster",
+        depends_on=("t2-lite-noise",),
+        checks=(
+            Check(
+                id="noise-gpu",
+                command=(
+                    "USE_GPU=1 GPUS=0 GPU_BACKEND=cuda12x NUM_ITERATIONS=25 "
+                    "GF_MOVE_TIMING=1 MAKE_DIAGNOSTIC_PLOTS=0 "
+                    "python scripts/run_global.py --stock noise_sgwb"
+                ),
+                criteria=(
+                    _ll_finite(),
+                    {"manual": "psd move in [GF_TIMING]; GPU pool below GB_GPU_MEM_WARN_GB"},
+                ),
+            ),
+        ),
+        proof_plots=("timing_*.png",),
+    ),
+    Gate(
         id="t3-gpu-mbh",
         tier=3,
         branch="mbh",
