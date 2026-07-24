@@ -3631,6 +3631,17 @@ def _gb_fdot_astro_ratio_max(move):
     return float(d.maximum) if d is not None else None
 
 
+def _gb_use_distance(move) -> bool:
+    """True when slot 0 of the run's GB sampling basis is ``dist`` (kpc).
+
+    Read off the move's transform-container ``input_basis`` so GMM/refit
+    containers assemble slot 0 in the SAME basis the sampler walks in
+    (``dist`` vs ``A``).
+    """
+    ib = list(getattr(getattr(move, "transform_fn", None), "input_basis", None) or [])
+    return len(ib) > 0 and ib[0] == "dist"
+
+
 
 from lisatools.sampling.gmm import fit_gb_gmm_rj_container
 
@@ -3753,9 +3764,15 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         third_min, third_max = self._third_col_search_bounds(f0_max)
 
         priors_in = self._band_restricted_priors_in(priors_global)
-        priors = {
-            self.branch_name: ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
-        }
+        _band_prior = ProbDistContainer(
+            priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy
+        )
+        if _gb_use_distance(self):
+            # The ("dist","alpha","sin_delta") joint grabbed consecutive
+            # columns by insertion order; remap by name to the real basis
+            # (dist->0, alpha->6, sin_delta->7; f0/Mc singles at 1/2).
+            _band_prior.reset_key_order(list(self.transform_fn.input_basis))
+        priors = {self.branch_name: _band_prior}
         start_params = priors[self.branch_name].rvs(size=(ngroups, ntemps, nwalkers))
         prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, third_min, third_max)
         prior_transform_fn.transform_from_prior_basis(start_params, self.xp.arange(ngroups))
@@ -3946,6 +3963,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
                 use_cupy=True,
                 gpu=self.xp.cuda.runtime.getDevice(),
                 fdot_astro_ratio_max=_gb_fdot_astro_ratio_max(self),
+                use_distance=_gb_use_distance(self),
             )
         except ValueError as e:
             logger.warning(f"GB search GMM fit skipped: {e}")
@@ -4142,12 +4160,14 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         # (use_chirp_mass runs) -- the refitted chains are in the run's
         # sampling basis, so the container's key map must follow it.
         _third = _gb_sampling_third_name(self)
+        # slot 0 is "dist" (distance basis) or "A" (lnA), read off the run basis.
+        _first = "dist" if _gb_use_distance(self) else "A"
         _refit_priors = {
-            ("A", "f0", _third, "cos_iota", "alpha", "sin_delta"): full_gmm,
+            (_first, "f0", _third, "cos_iota", "alpha", "sin_delta"): full_gmm,
             "phi0": UniformDistribution(0.0, 2 * np.pi),
             "psi": UniformDistribution(0.0, np.pi),
         }
-        _key_order = ["A", "f0", _third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+        _key_order = [_first, "f0", _third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
         _ratio_max = _gb_fdot_astro_ratio_max(self)
         if _ratio_max is not None:
             # 9th column: refit births draw the fdot_astro ratio from its

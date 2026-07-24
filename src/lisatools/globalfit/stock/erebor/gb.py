@@ -110,6 +110,27 @@ class GBSettings(Settings):
     fdot_astro_ratio_max: float = dataclasses.field(
         default_factory=env_default("GB_FDOT_ASTRO_RATIO_MAX", 5.0, float)
     )
+    # Distance box [d_min, d_max] in kpc for slot 0 of the distance basis
+    # (see :attr:`use_distance`): the amplitude is DERIVED from the sampled
+    # (dist, f0, Mc), so distance -- not lnA -- is the free parameter. The
+    # 1 pc floor keeps A finite (A propto 1/d). PLACEHOLDER uniform box per
+    # the incoming Galaxy 3-D (dist, sky) distribution; tighten when that
+    # lands. Env: ``GB_DIST_LIMS`` (comma pair) is not wired -- set the
+    # field directly. Units: kpc (gbgpu ``get_amplitude`` convention).
+    dist_lims: typing.List[float] = dataclasses.field(
+        default_factory=lambda: [0.001, 40.0]
+    )
+    # Incoming 3-D joint prior over ``(dist, alpha, sin_delta)`` (the
+    # Galaxy-shaped sky+distance distribution). An eryn duck-typed
+    # distribution: ``rvs(size) -> (size, 3)`` columns (dist[kpc],
+    # alpha[rad], sin_delta), ``logpdf((n, 3)) -> (n,)``; must pickle
+    # (sprint rule). None (default) -> a placeholder nested
+    # ``ProbDistContainer`` of independent uniforms (dist over ``dist_lims``,
+    # alpha over ``alpha_lims``, sin_delta over ``sin(delta_lims)``) is built
+    # in :meth:`GBSetup.init_sampling_info`. Swap this in for the real
+    # distribution; the birth container's independent U(dist) then needs a
+    # p(dist | sky) draw (documented follow-up).
+    sky_dist_distribution: typing.Optional[typing.Any] = None
 
     @property
     def use_fdot_astro(self) -> bool:
@@ -121,6 +142,18 @@ class GBSettings(Settings):
         =0`` (or ``GB_USE_CHIRP_MASS=0``) reverts to the 8-parameter basis.
         """
         return bool(self.use_chirp_mass and self.use_astrophysical_f0_mc_prior)
+
+    @property
+    def use_distance(self) -> bool:
+        """Distance-basis switch (slot 0 = ``dist`` instead of ``lnA``).
+
+        Part of the SAME astrophysical package as :attr:`use_fdot_astro`
+        (also NOT a separate knob): once Mc is sampled the amplitude is
+        derived, so distance is the natural free parameter and the prior can
+        carry a 3-D (dist, sky) joint. Active exactly when
+        :attr:`use_fdot_astro` is.
+        """
+        return self.use_fdot_astro
     # Custom RJ-birth distribution for the prior RJ moves. An eryn
     # duck-typed distribution over the FULL 8-column GB sampling basis
     # (``rvs(size) -> (size, 8)`` with f0 in mHz at column 1 and Mc at
@@ -225,7 +258,10 @@ class GBSetup(Setup, GBSettings):
         interacting ``fdot < 0`` systems live at ``r < -1``.
         """
         third_name = "Mc" if self.use_chirp_mass else "fdot"
-        input_basis = ["A", "f0", third_name, "phi0",
+        # Slot 0 is the luminosity DISTANCE (kpc) in the distance basis --
+        # amplitude is derived from the sampled (dist, f0, Mc) -- else lnA.
+        slot0_name = "dist" if self.use_distance else "A"
+        input_basis = [slot0_name, "f0", third_name, "phi0",
                        "cos_iota", "psi", "alpha", "sin_delta"]
         if self.use_fdot_astro:
             # 9th sampled column: r = fdot_astro / fdot_gr (dimensionless;
@@ -238,6 +274,7 @@ class GBSetup(Setup, GBSettings):
             self.transform = make_gb_transform_container(
                 use_chirp_mass=self.use_chirp_mass,
                 use_fdot_astro=self.use_fdot_astro,
+                use_distance=self.use_distance,
                 mc_lims=(
                     tuple(self.m_chirp_lims) if self.m_chirp_lims
                     else (0.001, 1.0)
@@ -264,20 +301,33 @@ class GBSetup(Setup, GBSettings):
                     mc_lims=tuple(self.m_chirp_lims) if self.m_chirp_lims
                     else None,
                 )
+                # Slot 0 is DISTANCE (kpc) in this branch (use_distance): the
+                # sky and distance share a 3-D JOINT prior over
+                # (dist, alpha, sin_delta) -- the Galaxy-shaped distribution
+                # is incoming, so this is a tuple-key slot. For now the joint
+                # is a placeholder nested ProbDistContainer of independent
+                # uniforms (dist over dist_lims, sky uniform); swap
+                # sky_dist_distribution for the real 3-D distribution.
+                sky_dist = self.sky_dist_distribution
+                if sky_dist is None:
+                    sky_dist = ProbDistContainer({
+                        0: uniform_dist(self.dist_lims[0], self.dist_lims[1]),
+                        1: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
+                        2: uniform_dist(*np.sort(np.sin(self.delta_lims))),
+                    })
                 priors_gb = {
-                    input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
+                    # tuple members get CONSECUTIVE columns by insertion
+                    # order; reset_key_order below remaps them to the real
+                    # basis columns (dist->0, alpha->6, sin_delta->7).
+                    ("dist", "alpha", "sin_delta"): sky_dist,
                     ("f0", "Mc"): _f0_mc_prior,
-                    input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
-                    input_basis[4]: uniform_dist(*np.sort(np.cos(self.iota_lims))),
-                    input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
-                    input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
-                    input_basis[7]: uniform_dist(*np.sort(np.sin(self.delta_lims))),
-                    # 9th column (this branch implies use_fdot_astro):
-                    # appended LAST so dict insertion order puts r at
-                    # column 8. Prior defined in the SAMPLING basis (no
-                    # in-sampler Jacobian); the induced physical prior at
-                    # fixed (f0, Mc) is uniform in fdot with width
-                    # 2*M*fdot_gr -- see McFdotAstroRatioTriple.
+                    "phi0": uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
+                    "cos_iota": uniform_dist(*np.sort(np.cos(self.iota_lims))),
+                    "psi": uniform_dist(self.psi_lims[0], self.psi_lims[1]),
+                    # 9th column: r ~ U[-M, M]. Prior defined in the SAMPLING
+                    # basis (no in-sampler Jacobian); induced physical prior
+                    # at fixed (f0, Mc) is uniform in fdot -- see
+                    # McDistFdotAstroQuad.
                     "fdot_astro_ratio": uniform_dist(
                         -self.fdot_astro_ratio_max, self.fdot_astro_ratio_max
                     ),
@@ -316,7 +366,16 @@ class GBSetup(Setup, GBSettings):
                     input_basis[7]: uniform_dist(*np.sort(np.sin(self.delta_lims))),
                 }
 
-            self.priors = {"gb": ProbDistContainer(priors_gb)}
+            _gb_prior = ProbDistContainer(priors_gb)
+            # The distance branch inserts the ("dist","alpha","sin_delta")
+            # joint FIRST, so its members grabbed consecutive columns 0/1/2;
+            # remap by name to the real basis columns (dist->0, alpha->6,
+            # sin_delta->7). A no-op for the other branches (already in
+            # column order), so it is safe to apply whenever the input basis
+            # is available.
+            if self.use_distance:
+                _gb_prior.reset_key_order(list(input_basis))
+            self.priors = {"gb": _gb_prior}
 
         if self.betas is None:
             # snrs_ladder = np.array(

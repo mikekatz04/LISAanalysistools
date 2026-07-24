@@ -321,8 +321,15 @@ def build_birth_distribution(fit, floor_eps=0.1, comb_weight=0.0):
     if ratio_max is not None:
         print(f"[birth] appending fdot_astro_ratio ~ U[-{ratio_max}, "
               f"{ratio_max}] (9-column basis)", flush=True)
+    # Distance basis: slot 0 is dist (kpc) drawn uniform in dist_lims instead
+    # of lnA (amplitude is derived from the sampled dist + Mc + f0).
+    dist_lims = fit.gb.dist_lims if getattr(fit.gb, "use_distance", False) else None
+    if dist_lims is not None:
+        print(f"[birth] slot 0 = dist ~ U[{dist_lims[0]}, {dist_lims[1]}] kpc "
+              "(distance basis)", flush=True)
     return make_gb_rj_birth_container(
-        mix, fit.gb.A_lims, use_cupy=use_cupy, fdot_astro_ratio_max=ratio_max
+        mix, fit.gb.A_lims, use_cupy=use_cupy, fdot_astro_ratio_max=ratio_max,
+        dist_lims=dist_lims,
     )
 
 
@@ -357,13 +364,20 @@ def main():
     # sources; see the fdot<0 TODO in recipe.setup_state_for_injection)
     fit.gb.use_chirp_mass = os.environ.get("GB_USE_CHIRP_MASS", "1") == "1"
 
-    # empirical tabulated PSD; injection-only data (stock gb_no_fg mojito)
-    noise_file = resolve_noise_file(fit.general.mojito_data_path)
-    fit.general.fixed_psd_kwargs = dict(psd_params=None, galfor_params=None)
-    fit.general.sensitivity_init_kwargs = dict(
-        tdi_generation=fit.general.tdi_gen,
-        extra_components=[MojitoNoiseEstimates(noise_file, which="xyz")],
-    )
+    # Noise model: the empirical tabulated NOISE-brick PSD in mojito mode;
+    # in synthetic mode (DATA_MODE=synthetic) there is no mojito data to
+    # derive it from, so fall through to the stock ANALYTIC sensitivity
+    # model (sensitivity_init_kwargs stays None -> the default backend).
+    if fit.general.data_mode == "mojito":
+        noise_file = resolve_noise_file(fit.general.mojito_data_path)
+        fit.general.fixed_psd_kwargs = dict(psd_params=None, galfor_params=None)
+        fit.general.sensitivity_init_kwargs = dict(
+            tdi_generation=fit.general.tdi_gen,
+            extra_components=[MojitoNoiseEstimates(noise_file, which="xyz")],
+        )
+    else:
+        print(f"[noise] data_mode={fit.general.data_mode!r}: using the stock "
+              "ANALYTIC sensitivity model (no mojito NOISE brick).", flush=True)
 
     # The birth proposal (from the cached stacked grids; no kernel sweep
     # needed). In GB_MODE=pe no grids are required -- leaves start at

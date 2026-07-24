@@ -857,40 +857,53 @@ class UniformFloorMixture:
 
 
 def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False,
-                               fdot_astro_ratio_max=None):
+                               fdot_astro_ratio_max=None, dist_lims=None):
     """Wrap a 4-D intrinsic proposal into the 8/9-column GB RJ birth container.
 
     Mirrors the stock GMM birth container
     (``gbspecialstretch.GBSpecialRJRefitMove.setup``): the intrinsics
     ``(f0 [mHz], Mc, alpha, sin_delta)`` come from ``intrinsic_dist`` under a
-    tuple key; ``lnA`` and the remaining extrinsics come from the stock
-    prior uniforms (the band engines re-maximize phi0 analytically when
-    ``phase_maximize`` is on). Returns an eryn ``ProbDistContainer`` whose
-    ``rvs(size) -> (size, N)`` / ``logpdf((n, N)) -> (n,)`` match what
-    ``BandSorter`` expects of ``rj_proposal_distribution["gb"]``
-    (``N = 8``, or ``9`` with ``fdot_astro_ratio_max``).
+    tuple key; slot 0 (``lnA`` or ``dist``) and the remaining extrinsics come
+    from the stock prior uniforms (the band engines re-maximize phi0
+    analytically when ``phase_maximize`` is on). Returns an eryn
+    ``ProbDistContainer`` whose ``rvs(size) -> (size, N)`` /
+    ``logpdf((n, N)) -> (n,)`` match what ``BandSorter`` expects of
+    ``rj_proposal_distribution["gb"]`` (``N = 8``, or ``9`` with
+    ``fdot_astro_ratio_max``).
 
     Args:
         intrinsic_dist: 4-D distribution over the intrinsic sampling basis
             (e.g. :class:`FStatProposal4D` or :class:`UniformFloorMixture`).
         A_lims: ``[A_min, A_max]`` physical amplitude limits
-            (``GBSettings.A_lims``); lnA is drawn uniform in ``log(A_lims)``.
+            (``GBSettings.A_lims``); lnA is drawn uniform in ``log(A_lims)``
+            when ``dist_lims`` is None.
         use_cupy: Match the run backend (False for CPU runs).
         fdot_astro_ratio_max: When not ``None``, append a 9th
             ``fdot_astro_ratio`` column drawn from ``U[-M, M]`` (births draw
             the ratio from its prior; it is degenerate with Mc under the
             F-stat). ``None`` -> 8-column container.
+        dist_lims: When not ``None``, slot 0 is the luminosity DISTANCE
+            (kpc) drawn uniform in ``dist_lims`` (linear) instead of lnA --
+            the distance basis. Follow-up: when the real 3-D (dist, sky)
+            distribution lands, births should draw ``dist | sky`` from it.
     """
     from eryn.priors import ProbDistContainer, UniformDistribution
 
+    if dist_lims is not None:
+        slot0_name = "dist"
+        slot0_prior = UniformDistribution(float(dist_lims[0]), float(dist_lims[1]))
+    else:
+        slot0_name = "A"
+        slot0_prior = UniformDistribution(*np.log(np.asarray(A_lims, dtype=float)))
     priors_in = {
-        "A": UniformDistribution(*np.log(np.asarray(A_lims, dtype=float))),
+        slot0_name: slot0_prior,
         ("f0", "Mc", "alpha", "sin_delta"): intrinsic_dist,
         "phi0": UniformDistribution(0.0, 2.0 * np.pi),
         "cos_iota": UniformDistribution(-1.0, 1.0),
         "psi": UniformDistribution(0.0, np.pi),
     }
-    key_order = ["A", "f0", "Mc", "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+    key_order = [slot0_name, "f0", "Mc", "phi0", "cos_iota", "psi",
+                 "alpha", "sin_delta"]
     if fdot_astro_ratio_max is not None:
         M = float(fdot_astro_ratio_max)
         priors_in["fdot_astro_ratio"] = UniformDistribution(-M, M)

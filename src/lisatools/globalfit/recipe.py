@@ -1069,13 +1069,14 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
 
 
 def gb_fdot_rows_to_run_basis(rows, *, use_chirp_mass, use_fdot_astro,
-                              m_chirp_lims):
-    """Convert FDOT-basis GB rows (slot 2 = fdot) to the run's sampling basis.
+                              m_chirp_lims, use_distance=False):
+    """Convert FDOT-basis GB rows (slot 0 = lnA, slot 2 = fdot) to the run basis.
 
     ``gb_catalogue_to_sampling_basis`` returns rows with physical ``fdot`` in
-    slot 2 by contract; the run may sample a different slot-2 axis. This maps
-    the seeding rows onto whatever the run actually samples, using the SAME
-    conventions as ``make_gb_transform_container`` (single source of truth):
+    slot 2 (and ``lnA`` in slot 0) by contract; the run may sample different
+    slot-0/slot-2 axes. This maps the seeding rows onto whatever the run
+    actually samples, using the SAME conventions as
+    ``make_gb_transform_container`` (single source of truth):
 
     * ``use_fdot_astro`` (9-col Mc + ``fdot_astro_ratio``): the mirror
       convention of :class:`~...transforms.McFdotAstroRatioTripleInverse` --
@@ -1083,6 +1084,10 @@ def gb_fdot_rows_to_run_basis(rows, *, use_chirp_mass, use_fdot_astro,
       ``r = fdot / fdot_gr(f0, Mc) - 1`` appended as a new last column.
       Represents interacting ``fdot <= 0`` systems EXACTLY (seeds at
       ``r ~ -2``), resolving the historical fdot<0 mis-modeling.
+    * ``use_distance`` (with ``use_fdot_astro``): slot 0 ``lnA`` becomes the
+      luminosity distance (kpc), inverted from the physical amplitude and the
+      mirror ``Mc`` via ``dist = gb_amp_from_dist(f0, Mc, 1) / exp(lnA)`` --
+      reproduces the catalogue amplitude exactly through the forward quad.
     * ``use_chirp_mass`` only (8-col Mc, no ratio): fdot cannot carry a sign,
       so ``fdot <= 0`` sources are clamped to the Mc floor (the legacy
       behavior; still mis-modeled -- only the 9-col basis fixes it).
@@ -1093,13 +1098,19 @@ def gb_fdot_rows_to_run_basis(rows, *, use_chirp_mass, use_fdot_astro,
     rows = np.array(rows, dtype=float, copy=True)
     mc_lims = list(m_chirp_lims) if m_chirp_lims else [0.001, 1.0]
     if use_fdot_astro:
-        from .stock.erebor.transforms import McFdotAstroRatioTripleInverse
+        from .stock.erebor.transforms import (
+            McFdotAstroRatioTripleInverse, gb_amp_from_dist,
+        )
 
         f0_hz = rows[:, 1] * 1e-3
         fdot = rows[:, 2]
         _, mc, ratio = McFdotAstroRatioTripleInverse(tuple(mc_lims))(
             f0_hz, fdot, np.zeros_like(fdot)
         )
+        if use_distance:
+            # slot 0: lnA -> distance (kpc) using the mirror Mc, so the
+            # forward quad reproduces the catalogue amplitude exactly.
+            rows[:, 0] = gb_amp_from_dist(f0_hz, mc, 1.0) / np.exp(rows[:, 0])
         rows[:, 2] = mc
         rows = np.concatenate([rows, ratio[..., None]], axis=-1)
     elif use_chirp_mass:
@@ -1160,6 +1171,7 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
                 injection_params,
                 use_chirp_mass=True,
                 use_fdot_astro=getattr(info, "use_fdot_astro", False),
+                use_distance=getattr(info, "use_distance", False),
                 m_chirp_lims=info.m_chirp_lims,
             )
 

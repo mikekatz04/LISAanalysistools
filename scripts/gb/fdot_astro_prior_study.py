@@ -159,9 +159,80 @@ def load_validation_columns(keep_idx):
         for key in ["Amplitude", "TrueAnomaly", "InclinationAngle",
                     "PolarisationAngle", "RightAscension", "Declination",
                     "GW22FrequencySSBFrame", "ChirpMassSSBFrame",
-                    "GW22FrequencyDerivativeSourceFrame"]:
+                    "GW22FrequencyDerivativeSourceFrame", "LuminosityDistance"]:
             cols[key] = B[key][:][keep_idx]
     return cols
+
+
+def distance_transform_check(rng, n_val=200_000):
+    """Validate the DISTANCE basis against catalogue amplitude + distance.
+
+    Builds the real 9-column distance-basis container, seeds it from the
+    catalogue via the recipe helper, and checks (a) forward reproduces the
+    catalogue Amplitude EXACTLY, (b) the derived distance matches the
+    catalogue LuminosityDistance (Mpc -> kpc) for fdot>0 sources (where the
+    mirror Mc == truth Mc), (c) the fraction of derived distances inside the
+    [0.001, 40] kpc box.
+    """
+    print("\n=== 9-column DISTANCE-basis validation (the LIBRARY factory) ===")
+    from lisatools.globalfit.recipe import gb_fdot_rows_to_run_basis
+
+    with h5py.File(CAT_PATH, "r") as f:
+        n_total = f["Binaries"]["Amplitude"].shape[0]
+    keep = np.sort(rng.choice(n_total, size=min(n_val, n_total), replace=False))
+    cols = load_validation_columns(keep)
+    f0 = cols["GW22FrequencySSBFrame"]
+    fdot_cat = cols["GW22FrequencyDerivativeSourceFrame"]
+    A_cat = cols["Amplitude"]
+    lumdist_kpc = cols["LuminosityDistance"] * 1e3  # Mpc -> kpc
+
+    # FDOT-basis seeding rows: [lnA, f0_mHz, fdot, phi0, cos_i, psi, alpha, sin_d]
+    rows = np.column_stack([
+        np.log(A_cat), f0 * 1e3, fdot_cat,
+        (-cols["TrueAnomaly"]) % (2 * np.pi), np.cos(cols["InclinationAngle"]),
+        cols["PolarisationAngle"], cols["RightAscension"],
+        np.sin(cols["Declination"]),
+    ])
+    seeded = gb_fdot_rows_to_run_basis(
+        rows, use_chirp_mass=True, use_fdot_astro=True, use_distance=True,
+        m_chirp_lims=MC_LIMS)
+    tc = make_gb_transform_container(
+        use_chirp_mass=True, use_fdot_astro=True, use_distance=True,
+        mc_lims=MC_LIMS)
+    phys = tc.both_transforms(seeded)
+
+    dist_seed = seeded[:, 0]
+    pos = fdot_cat > 0
+    rel_A = np.abs(phys[:, 0] - A_cat) / np.maximum(np.abs(A_cat), 1e-300)
+    # derived-distance vs catalogue LuminosityDistance (fdot>0 branch)
+    rel_d = np.abs(dist_seed[pos] - lumdist_kpc[pos]) / np.maximum(
+        lumdist_kpc[pos], 1e-30)
+    checks = {
+        "forward A rel err (max)": float(np.max(rel_A)),
+        "derived dist > 0 (all)": float(np.mean(dist_seed > 0)),
+        "derived dist vs LumDist, fdot>0 (median rel)": float(np.median(rel_d)),
+        "derived dist vs LumDist, fdot>0 (max rel)": float(np.max(rel_d)),
+        "frac derived dist in [0.001, 40] kpc": float(
+            np.mean((dist_seed >= 0.001) & (dist_seed <= 40.0))),
+    }
+    print(f"validation rows: {rows.shape[0]} "
+          f"({int((~pos).sum())} with fdot <= 0)")
+    for name, val in checks.items():
+        print(f"  {name:48s} {val:12.6g}")
+    print("catalogue LuminosityDistance range (kpc): "
+          f"[{lumdist_kpc.min():.3f}, {lumdist_kpc.max():.3f}]; derived dist "
+          f"range [{dist_seed.min():.4f}, {dist_seed.max():.3f}]")
+    print("  (fdot>0 dist deviates from LumDist only by the tiny positive-"
+          "branch fdot_astro offset -> mirror Mc slightly != mass Mc; the "
+          "physical amplitude is reproduced EXACTLY regardless.)")
+    # forward A must be exact; the fdot>0 derived distance must MEDIAN-match
+    # the catalogue distance (the max is the positive-branch fdot_astro
+    # offset, physically correct); fdot<=0 distances just stay positive.
+    ok = (checks["forward A rel err (max)"] < 1e-10
+          and checks["derived dist > 0 (all)"] == 1.0
+          and checks["derived dist vs LumDist, fdot>0 (median rel)"] < 1e-2)
+    print(f"DISTANCE-basis validation: {'ALL PASS' if ok else 'CHECK ABOVE'}")
+    return ok
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1028,7 @@ def main():
     ratio_prior_analysis(f0, mc, fdot, fdot_gr, ratio, neg, rng,
                          os.path.join(OUT_DIR, "f9_ratio_prior.png"))
     validate_transform(rng)
+    distance_transform_check(rng)
     print(f"\nfigures in: {OUT_DIR}")
 
 

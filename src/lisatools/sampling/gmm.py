@@ -2280,6 +2280,7 @@ def fit_gb_gmm_rj_container(
     n_samp_bic_test: int = 5000,
     verbose: bool = False,
     fdot_astro_ratio_max: typing.Optional[float] = None,
+    use_distance: bool = False,
 ):
     """Per-group GB samples -> batched GMM -> 8/9-column RJ birth container.
 
@@ -2351,12 +2352,15 @@ def fit_gb_gmm_rj_container(
     )
 
     third = "Mc" if use_chirp_mass else "fdot"
+    # slot 0 is the luminosity distance (kpc) in the distance basis, else lnA;
+    # the 6-D GMM fits whatever column 0 holds either way.
+    first = "dist" if use_distance else "A"
     priors_in = {
-        ("A", "f0", third, "cos_iota", "alpha", "sin_delta"): full_gmm,
+        (first, "f0", third, "cos_iota", "alpha", "sin_delta"): full_gmm,
         "phi0": UniformDistribution(0.0, 2.0 * np.pi),
         "psi": UniformDistribution(0.0, np.pi),
     }
-    key_order = ["A", "f0", third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
+    key_order = [first, "f0", third, "phi0", "cos_iota", "psi", "alpha", "sin_delta"]
     if fdot_astro_ratio_max is not None:
         # 9th column: births draw the fdot_astro ratio from its U[-M, M]
         # prior (the GMM did not fit it -- degenerate with Mc under F-stat).

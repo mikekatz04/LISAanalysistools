@@ -802,6 +802,7 @@ class GBNoForegroundGlobalFit(EreborFit):
                 _nneg = int((rows[:, 2] <= 0).sum())
                 rows = gb_fdot_rows_to_run_basis(
                     rows, use_chirp_mass=_use_cm, use_fdot_astro=_use_fa,
+                    use_distance=getattr(info, "use_distance", False),
                     m_chirp_lims=info.m_chirp_lims,
                 )
                 if _nneg and _use_fa:

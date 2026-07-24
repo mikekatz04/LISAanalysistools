@@ -147,23 +147,36 @@ class GBSetupIntegrationTest(unittest.TestCase):
         cls.setup.init_sampling_info()
 
     def test_prior_container_builds_and_draws(self):
-        # astro prior on => 9-column basis (Mc @2, fdot_astro_ratio @8)
+        # astro prior on => 9-column DISTANCE basis: dist @0, f0 @1, Mc @2,
+        # alpha @6, sin_delta @7, fdot_astro_ratio @8 (remapped by
+        # reset_key_order from the ("dist","alpha","sin_delta") joint).
         self.assertTrue(self.setup.use_fdot_astro)
+        self.assertTrue(self.setup.use_distance)
+        self.assertEqual(self.setup.transform.input_basis[0], "dist")
         pri = self.setup.priors["gb"]
         s = np.asarray(pri.rvs(size=500))
         self.assertEqual(s.shape, (500, 9))
+        # dist @0 in dist_lims (kpc)
+        dlo, dhi = self.setup.dist_lims
+        self.assertTrue(np.all((s[:, 0] >= dlo) & (s[:, 0] <= dhi)))
         # column layout: f0 [mHz] at 1, Mc at 2 -- bounds are the band
         # structure's resolved f0_lims, not the pre-init settings values
         f0_lims_mHz = np.asarray(self.setup.f0_lims) * 1e3
         self.assertTrue(np.all((s[:, 1] >= f0_lims_mHz[0])
                                & (s[:, 1] <= f0_lims_mHz[-1])))
         self.assertTrue(np.all((s[:, 2] >= 0.001) & (s[:, 2] <= 1.0)))
+        # sky at cols 6/7 (from the remapped joint)
+        self.assertTrue(np.all((s[:, 6] >= 0.0) & (s[:, 6] <= 2 * np.pi + 1e-9)))
+        self.assertTrue(np.all(np.abs(s[:, 7]) <= 1.0 + 1e-9))
         # fdot_astro_ratio @8 ~ U[-M, M]
         M = self.setup.fdot_astro_ratio_max
         self.assertTrue(np.all(np.abs(s[:, 8]) <= M))
         lp = np.asarray(pri.logpdf(s))
         self.assertEqual(lp.shape, (500,))
         self.assertTrue(np.all(np.isfinite(lp)))
+        # the derived physical amplitude is positive and finite
+        phys = self.setup.transform.both_transforms(s[:32])
+        self.assertTrue(np.all(phys[:, 0] > 0) and np.all(np.isfinite(phys[:, 0])))
 
     def test_astro_prior_reshapes_f0(self):
         # the GMM strongly prefers the low-f0 end of [6, 25] mHz vs uniform

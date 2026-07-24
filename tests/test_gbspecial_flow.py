@@ -49,14 +49,17 @@ def f_ms_to_s(x):
     return x * 1e-3
 
 
-def build_fixture(seed=42, use_fdot_astro=False):
+def build_fixture(seed=42, use_fdot_astro=False, use_distance=False):
     """Small FD global-fit fixture with K_SOURCES live GBs per walker.
 
     ``use_fdot_astro`` builds the 9-column ratio basis (``[A, f0, Mc, phi0,
     cos_iota, psi, alpha, sin_delta, fdot_astro_ratio]``) via the real
-    :func:`make_gb_transform_container` factory, so the move-propose flow is
-    exercised in the same basis the stock chirp-mass+astro-prior run walks.
+    :func:`make_gb_transform_container` factory; ``use_distance`` swaps slot 0
+    from lnA to the distance basis (``dist`` kpc, amplitude derived). Either
+    exercises the move-propose flow in the same basis the stock
+    chirp-mass+astro-prior run walks.
     """
+    use_fdot_astro = use_fdot_astro or use_distance
     from gbgpu.gbgpu import GBGPU
 
     from eryn.moves.tempering import TemperatureControl
@@ -109,8 +112,11 @@ def build_fixture(seed=42, use_fdot_astro=False):
             make_gb_transform_container,
         )
 
+        # slot 0: lnA (ratio basis) or distance kpc (distance basis)
+        slot0 = (uniform_dist(1.0, 30.0) if use_distance
+                 else uniform_dist(np.log(5e-22), np.log(1e-20)))
         priors_in = {
-            0: uniform_dist(np.log(5e-22), np.log(1e-20)),
+            0: slot0,
             1: uniform_dist(f0_prior_lo, f0_prior_hi),
             2: uniform_dist(0.15, 0.45),           # Mc [Msol]
             3: uniform_dist(0.0, 2 * np.pi),
@@ -121,7 +127,8 @@ def build_fixture(seed=42, use_fdot_astro=False):
             8: uniform_dist(-ratio_max, ratio_max),  # fdot_astro_ratio
         }
         transform = make_gb_transform_container(
-            use_chirp_mass=True, use_fdot_astro=True, mc_lims=mc_lims,
+            use_chirp_mass=True, use_fdot_astro=True, use_distance=use_distance,
+            mc_lims=mc_lims,
         )
     else:
         priors_in = {
@@ -310,20 +317,27 @@ class BufferIdentityTest(unittest.TestCase):
 @unittest.skipUnless(_have_gbgpu(), "requires gbgpu")
 class ProposeFlowTest(unittest.TestCase):
     USE_FDOT_ASTRO = False
+    USE_DISTANCE = False
 
     def _fixture(self):
-        return build_fixture(use_fdot_astro=self.USE_FDOT_ASTRO)
+        return build_fixture(use_fdot_astro=self.USE_FDOT_ASTRO,
+                             use_distance=self.USE_DISTANCE)
 
     def _assert_basis(self, state):
         gb = np.asarray(state.branches["gb"].coords)
-        exp = 9 if self.USE_FDOT_ASTRO else 8
-        self.assertEqual(gb.shape[-1], exp)
-        if self.USE_FDOT_ASTRO:
-            # fdot_astro_ratio (col 8) stays inside the U[-M, M] prior box
+        nine = self.USE_FDOT_ASTRO or self.USE_DISTANCE
+        self.assertEqual(gb.shape[-1], 9 if nine else 8)
+        if nine:
             inds = np.asarray(state.branches["gb"].inds)
+            # fdot_astro_ratio (col 8) stays inside the U[-M, M] prior box
             r = gb[..., 8][inds]
             if r.size:
                 self.assertTrue(np.all(np.abs(r) <= 5.0 + 1e-9))
+            if self.USE_DISTANCE:
+                # slot 0 is a positive distance (kpc), not lnA
+                d = gb[..., 0][inds]
+                if d.size:
+                    self.assertTrue(np.all(d > 0.0))
 
     def test_rj_propose(self):
         from lisatools.globalfit.moves.gbspecialstretch import GBSpecialRJPriorMove
@@ -384,6 +398,18 @@ class ProposeFlowFdotAstroTest(ProposeFlowTest):
     """
 
     USE_FDOT_ASTRO = True
+
+
+@unittest.skipUnless(_have_gbgpu(), "requires gbgpu")
+class ProposeFlowDistanceTest(ProposeFlowTest):
+    """The same propose flow on the 9-column DISTANCE basis (slot 0 = dist).
+
+    The stock default when the astrophysical prior is on: amplitude is
+    derived from the sampled (dist, f0, Mc). Exercises the info-matrix
+    Cholesky and RJ birth/death with the derived-amplitude quad transform.
+    """
+
+    USE_DISTANCE = True
 
 
 if __name__ == "__main__":

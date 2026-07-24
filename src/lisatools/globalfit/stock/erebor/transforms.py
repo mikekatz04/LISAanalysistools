@@ -112,6 +112,79 @@ class McFdotAstroRatioTripleInverse:
         return f0_Hz, Mc, fdot / get_fdot(f=f0_Hz, Mc=Mc) - 1.0
 
 
+# get_chirp_mass(m, m) == m / 2^(1/5), so the equal-mass pair reproducing a
+# target Mc is m1 = m2 = Mc * 2^(1/5).
+_TWO_POW_1_5 = 2.0 ** 0.2
+
+
+def gb_amp_from_dist(f0_Hz, Mc, dist_kpc):
+    """GB strain amplitude from ``(f0[Hz], Mc[Msol], distance[kpc])``.
+
+    Wraps :func:`gbgpu.utils.utility.get_amplitude` via the equal-mass pair
+    ``m1 = m2 = Mc * 2^(1/5)`` (``get_chirp_mass(m, m) == Mc`` exactly), so
+    the amplitude shares the EXACT constant set (MSUN/G/c) with
+    :func:`get_fdot`. ``A = 2 (G Mc)^{5/3} / (c^4 d) (pi f)^{2/3}`` -- A is
+    strictly ``propto 1/d``, which the inverse exploits. Named module-level
+    function for pickling support.
+    """
+    from gbgpu.utils.utility import get_amplitude
+
+    m = Mc * _TWO_POW_1_5
+    return get_amplitude(m, m, f0_Hz, dist_kpc)
+
+
+class McDistFdotAstroQuad:
+    """``(dist[kpc], f0[Hz], Mc[Msol], r) -> (A, f0, fdot_gr*(1+r), 0.0)``.
+
+    The distance + chirp-mass + fdot_astro sampling basis. Because Mc is
+    sampled, the amplitude is no longer a free parameter: it is DERIVED from
+    ``(dist, f0, Mc)`` via :func:`gb_amp_from_dist`. fdot comes from the
+    ratio (interacting ``fdot < 0`` at ``r < -1``) and fddot is exactly 0.
+
+    After ``fill_values`` the four inputs sit at the OUTPUT columns
+    ``dist -> A (0)``, ``f0 (1)``, ``Mc -> fdot (2)``, ``r -> fddot (3)``
+    (via ``key_map``); the single ``f0`` mHz->Hz runs first so this multi
+    sees f0 in Hz. One class computes all derived physical values, avoiding
+    any two-transform ordering subtlety. Module-level for pickling.
+    """
+
+    def __call__(self, dist_kpc, f0_Hz, Mc, ratio):
+        from gbgpu.utils.utility import get_fdot
+
+        A = gb_amp_from_dist(f0_Hz, Mc, dist_kpc)
+        return A, f0_Hz, get_fdot(f=f0_Hz, Mc=Mc) * (1.0 + ratio), f0_Hz * 0.0
+
+
+class McDistFdotAstroQuadInverse:
+    """Mirror-convention split ``(A, f0[Hz], fdot, fddot) -> (dist, f0, Mc, r)``.
+
+    ``(Mc, r)`` come from the same ``|fdot|`` mirror as
+    :class:`McFdotAstroRatioTripleInverse` (Mc from the GW inversion of the
+    fdot magnitude, clipped into ``mc_lims``; r = fdot/fdot_gr - 1). The
+    distance then falls straight out of ``A propto 1/d``:
+    ``dist = gb_amp_from_dist(f0, Mc, 1) / A``. Reproduces the physical A and
+    fdot EXACTLY for either fdot sign (no NaNs); distance is NOT clipped to
+    any box (exactness over box membership).
+    """
+
+    _TINY_FDOT = 1e-30
+
+    def __init__(self, mc_lims=(0.001, 1.0)):
+        self.mc_lims = tuple(mc_lims)
+
+    def __call__(self, A, f0_Hz, fdot, fddot):
+        from gbgpu.utils.utility import get_chirp_mass_from_f_fdot, get_fdot
+
+        with np.errstate(invalid="ignore"):
+            Mc = get_chirp_mass_from_f_fdot(
+                f0_Hz, np.maximum(np.abs(fdot), self._TINY_FDOT)
+            )
+        Mc = np.clip(Mc, *self.mc_lims)
+        ratio = fdot / get_fdot(f=f0_Hz, Mc=Mc) - 1.0
+        dist = gb_amp_from_dist(f0_Hz, Mc, 1.0) / A  # A(d=1 kpc) / A
+        return dist, f0_Hz, Mc, ratio
+
+
 def ten_to_the_x(x):
     """Return ``10 ** x`` (named 1-arg transform for pickling support).
 
@@ -125,6 +198,7 @@ def make_gb_transform_container(
     *,
     use_chirp_mass: bool = False,
     use_fdot_astro: bool = False,
+    use_distance: bool = False,
     input_basis: list | None = None,
     fill_dict: dict | list | None = None,
     mc_lims: tuple = (0.001, 1.0),
@@ -175,6 +249,14 @@ def make_gb_transform_container(
             (f0 in mHz, ``sin_delta`` — not delta): the registered
             transforms run on the filled columns exactly like on sampled
             ones, so the physical basis comes out in Hz / delta.
+        use_distance: Requires ``use_fdot_astro`` (one astrophysical
+            package). Slot 0 carries ``dist`` (luminosity distance, kpc)
+            instead of ``A``: because Mc is sampled, the physical amplitude
+            is DERIVED (``A = gb_amp_from_dist(f0, Mc, dist)``), so the free
+            parameter becomes distance. A single 4-input multi
+            ``(dist, f0, Mc, fdot_astro_ratio) -> (A, f0, fdot, fddot)``
+            (``McDistFdotAstroQuad``) replaces the ``A: exp`` single AND the
+            fdot ratio triple; ``key_map`` gains ``{"dist": "A"}``.
         mc_lims: ``[Mc_min, Mc_max]`` box used by the fdot_astro inverse
             (mirror convention clips ``Mc_GW(f0, |fdot|)`` into it).
             Ignored unless ``use_fdot_astro``.
@@ -184,8 +266,15 @@ def make_gb_transform_container(
             "use_fdot_astro=True requires use_chirp_mass=True (the ratio "
             "multiplies fdot_gr(f0, Mc))."
         )
+    if use_distance and not use_fdot_astro:
+        raise ValueError(
+            "use_distance=True requires use_fdot_astro=True (one "
+            "astrophysical package; the amplitude is derived from the "
+            "sampled Mc + distance)."
+        )
     full_sampling_basis = [
-        "A", "f0", "Mc" if use_chirp_mass else "fdot", "phi0",
+        "dist" if use_distance else "A",
+        "f0", "Mc" if use_chirp_mass else "fdot", "phi0",
         "cos_iota", "psi", "alpha", "sin_delta",
     ]
     if use_fdot_astro:
@@ -206,22 +295,39 @@ def make_gb_transform_container(
         "cos_iota", "psi", "alpha", "sin_delta",
     ]
 
+    # Slot-0 single transform: lnA -> A (np.exp), or NONE in distance mode
+    # (dist is sampled linearly in kpc and consumed by the quad transform).
     gb_transform_fn_in = {
-        "A": np.exp,
         "f0": f_ms_to_s,
         "phi0": negate,  # flip sign of phi0 to match JaxGB convention.
         "cos_iota": np.arccos,
         "sin_delta": np.arcsin,
     }
     gb_inverse_transform_fn_in = {
-        "A": np.log,
         "f0": f_s_to_ms,
         "phi0": negate,  # its own inverse
         "cos_iota": np.cos,
         "sin_delta": np.sin,
     }
+    if not use_distance:
+        gb_transform_fn_in["A"] = np.exp
+        gb_inverse_transform_fn_in["A"] = np.log
     gb_key_map = None
-    if use_fdot_astro:
+    if use_distance:
+        # After fill_values: dist -> A slot (0), f0 (1), Mc -> fdot slot (2),
+        # r -> fddot slot (3). ONE 4-input multi derives the physical
+        # (A, f0, fdot, fddot); the single f0 mHz->Hz runs first so it sees
+        # Hz. Replaces both the A single and the fdot ratio triple.
+        gb_transform_fn_in[("dist", "f0", "Mc", "fdot_astro_ratio")] = (
+            McDistFdotAstroQuad()
+        )
+        gb_inverse_transform_fn_in[("dist", "f0", "Mc", "fdot_astro_ratio")] = (
+            McDistFdotAstroQuadInverse(mc_lims)
+        )
+        gb_key_map = {"dist": "A", "Mc": "fdot", "fdot_astro_ratio": "fddot"}
+        if fill_dict is None:
+            fill_dict = {}  # see the use_fdot_astro note below
+    elif use_fdot_astro:
         # After fill_values, Mc lives at the fdot slot and the sampled
         # ratio r at the fddot slot (key_map below). The triple transform
         # then computes (f0[Hz], fdot_gr*(1+r), 0.0) in output-index space;

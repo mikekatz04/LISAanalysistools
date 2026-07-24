@@ -210,5 +210,122 @@ class RJContainerTest(unittest.TestCase):
         self.assertTrue(np.all(np.abs(b[:, 8]) <= 5.0))
 
 
+DIST_LIMS = (0.001, 40.0)
+
+
+def _dist_row(dist=10.0, f0_mHz=7.5, Mc=0.3, phi0=1.0, cos_i=0.4,
+              psi=1.0, alpha=2.0, sin_d=0.1, ratio=0.0):
+    return np.array([[dist, f0_mHz, Mc, phi0, cos_i, psi, alpha, sin_d, ratio]])
+
+
+class DistanceBasisTest(unittest.TestCase):
+    """The 9-column distance basis: slot 0 = dist(kpc), A derived."""
+
+    def setUp(self):
+        self.tc = make_gb_transform_container(
+            use_chirp_mass=True, use_fdot_astro=True, use_distance=True,
+            mc_lims=MC_LIMS,
+        )
+
+    def test_basis(self):
+        self.assertEqual(self.tc.ndim, 9)
+        self.assertEqual(self.tc.input_basis[0], "dist")
+        self.assertEqual(self.tc.input_basis[-1], "fdot_astro_ratio")
+
+    def test_forward_amplitude_and_fdot(self):
+        from lisatools.globalfit.stock.erebor.transforms import gb_amp_from_dist
+
+        f0_mHz, Mc, dist, r = 7.5, 0.3, 10.0, -2.0
+        phys = self.tc.both_transforms(
+            _dist_row(dist=dist, f0_mHz=f0_mHz, Mc=Mc, ratio=r))
+        A_exp = gb_amp_from_dist(f0_mHz * 1e-3, Mc, dist)
+        self.assertAlmostEqual(phys[0, 0], A_exp, delta=abs(A_exp) * 1e-12)
+        self.assertAlmostEqual(
+            phys[0, 2], get_fdot(f=f0_mHz * 1e-3, Mc=Mc) * (1.0 + r),
+            delta=abs(get_fdot(f=f0_mHz * 1e-3, Mc=Mc)) * 1e-12)
+        self.assertLess(phys[0, 2], 0.0)       # fdot<0 via r=-2
+        self.assertEqual(phys[0, 3], 0.0)      # fddot
+        # A propto 1/d: doubling distance halves the amplitude
+        phys2 = self.tc.both_transforms(_dist_row(dist=20.0, Mc=Mc, f0_mHz=f0_mHz))
+        phys1 = self.tc.both_transforms(_dist_row(dist=10.0, Mc=Mc, f0_mHz=f0_mHz))
+        self.assertAlmostEqual(phys2[0, 0] * 2.0, phys1[0, 0],
+                               delta=abs(phys1[0, 0]) * 1e-12)
+
+    def test_inverse_round_trip_incl_fdot_negative(self):
+        rows = np.vstack([
+            _dist_row(dist=5.0, Mc=0.3, ratio=-3.0),   # fdot<0
+            _dist_row(dist=15.0, Mc=0.2, ratio=0.0),   # fdot>0
+        ])
+        phys = self.tc.both_transforms(rows)
+        back = self.tc.both_inverse_transforms(phys)
+        self.assertFalse(np.any(np.isnan(back)))
+        self.assertTrue(np.all(back[:, 0] > 0.0))  # positive distances
+        # PHYSICAL A and fdot are preserved exactly for either sign (the
+        # invariant the likelihood sees); the (dist, Mc) SPLIT need not be
+        # recovered when fdot<0 (mirror Mc != truth Mc -> dist compensates).
+        phys2 = self.tc.both_transforms(back)
+        np.testing.assert_allclose(phys2[:, [0, 1, 2, 3]], phys[:, [0, 1, 2, 3]],
+                                   rtol=1e-9)
+        # fdot>0 in-box row DOES recover (dist, Mc) exactly
+        self.assertAlmostEqual(back[1, 0], rows[1, 0], delta=rows[1, 0] * 1e-9)
+        self.assertAlmostEqual(back[1, 2], rows[1, 2], delta=rows[1, 2] * 1e-9)
+
+    def test_pickle(self):
+        rows = _dist_row(ratio=-2.0)
+        phys = self.tc.both_transforms(rows)
+        clone = pickle.loads(pickle.dumps(copy.deepcopy(self.tc)))
+        self.assertTrue(np.array_equal(clone.both_transforms(rows), phys))
+
+    def test_requires_fdot_astro(self):
+        with self.assertRaises(ValueError):
+            make_gb_transform_container(use_chirp_mass=True, use_distance=True)
+
+    def test_seeding_reproduces_catalogue_amplitude(self):
+        from lisatools.globalfit.recipe import gb_fdot_rows_to_run_basis
+
+        # FDOT-basis rows: [lnA, f0_mHz, fdot, phi0, cos_i, psi, alpha, sin_d]
+        rows = np.array([
+            [np.log(1e-22), 7.5803, 3.0e-16, 1.0, 0.5, 1.0, 2.0, 0.1],
+            [np.log(5e-23), 7.56749, -9.9e-16, 0.3, -0.2, 0.5, 4.9, -0.06],
+        ])
+        out = gb_fdot_rows_to_run_basis(
+            rows, use_chirp_mass=True, use_fdot_astro=True, use_distance=True,
+            m_chirp_lims=MC_LIMS)
+        self.assertEqual(out.shape, (2, 9))
+        self.assertTrue(np.all(out[:, 0] > 0.0))   # positive distances
+        phys = self.tc.both_transforms(out)
+        # forward reproduces the catalogue amplitude (and fdot, incl fdot<0)
+        np.testing.assert_allclose(phys[:, 0], np.exp(rows[:, 0]), rtol=1e-9)
+        np.testing.assert_allclose(phys[:, 2], rows[:, 2], rtol=1e-9)
+
+    def test_birth_container_distance(self):
+        from lisatools.sampling.fstat_proposal import make_gb_rj_birth_container
+
+        rng = np.random.default_rng(2)
+
+        class Intr4:
+            ndim = 4
+            use_cupy = False
+            return_gpu = False
+
+            def rvs(self, size, **kw):
+                shape = (size,) if isinstance(size, int) else tuple(size)
+                n = int(np.prod(shape))
+                out = np.column_stack([
+                    rng.uniform(7.4, 7.6, n), rng.uniform(0.1, 0.9, n),
+                    rng.uniform(0, 2 * np.pi, n), rng.uniform(-1, 1, n)])
+                return out.reshape((*shape, 4))
+
+            def logpdf(self, x, **kw):
+                return np.zeros(x.shape[0])
+
+        c = make_gb_rj_birth_container(
+            Intr4(), [7e-26, 1e-19], use_cupy=False, fdot_astro_ratio_max=5.0,
+            dist_lims=list(DIST_LIMS))
+        b = np.asarray(c.rvs(size=50))
+        self.assertEqual(b.shape, (50, 9))
+        self.assertTrue(np.all((b[:, 0] >= DIST_LIMS[0]) & (b[:, 0] <= DIST_LIMS[1])))
+
+
 if __name__ == "__main__":
     unittest.main()
