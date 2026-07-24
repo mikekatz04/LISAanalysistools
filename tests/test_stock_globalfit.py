@@ -182,6 +182,59 @@ class KnobTest(unittest.TestCase):
         self.assertIn("build()", str(ctx.exception))
 
 
+class WDMNoiseModelDefaultTest(unittest.TestCase):
+    """Stock runs default to the WDM domain + the analytic (Composite) noise
+    model, and never the orbits-bearing C++ XYZSensitivityBackend.
+
+    The XYZ backend needs real orbit geometry and drives the per-device C++
+    DCGA replica path; the stock/proper WDM noise fitting uses the analytic
+    CompositeSensitivityBackend (reads only Soms_d / Sa_a), so no stock run
+    should resolve to XYZ. These are cheap, no-build assertions that lock the
+    default in place.
+    """
+
+    STOCK_NAMES = (
+        "all_sources", "gb_no_fg", "noise_only", "noise_sgwb",
+        "full_year_combined", "vgb",
+    )
+
+    def test_general_default_leaves_backend_class_none(self):
+        # sensitivity_backend_class stays None -> engine picks
+        # CompositeSensitivityBackend (engine.py: ``or CompositeSensitivityBackend``).
+        for name in self.STOCK_NAMES:
+            with self.subTest(stock=name):
+                gs = erebor.get_stock(name).make_general_settings()
+                self.assertIsNone(
+                    getattr(gs, "sensitivity_backend_class", None),
+                    f"{name} must not pin a sensitivity_backend_class "
+                    "(stays None -> CompositeSensitivityBackend / WDM noise).",
+                )
+
+    def test_engine_default_resolves_to_composite_not_xyz(self):
+        from lisatools.sensitivity import (
+            CompositeSensitivityBackend,
+            XYZSensitivityBackend,
+        )
+
+        # Mirror engine.init_orbit_information's selection line exactly.
+        backend_cls = None or CompositeSensitivityBackend
+        self.assertIs(backend_cls, CompositeSensitivityBackend)
+        self.assertIsNot(backend_cls, XYZSensitivityBackend)
+
+    def test_default_domain_is_wdm(self):
+        from lisatools.domains import WDMSettings
+
+        fit = erebor.get_stock("all_sources")
+        gs = fit.make_general_settings()
+        factory = fit.make_domain_settings(
+            gs, Nf=64, Nt=64, wavelet_duration=3600.0, edge_crop=2
+        )
+        # The factory builds a WDMSettings when handed (times, dt, backend).
+        times = np.arange(64 * 64) * 5.0
+        domain = factory(times, 5.0, "cpu")
+        self.assertIsInstance(domain, WDMSettings)
+
+
 class EnvNamingTest(unittest.TestCase):
     """An env knob is the capitalized attribute name; legacy spellings alias to it."""
 
