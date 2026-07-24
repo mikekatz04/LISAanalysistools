@@ -748,6 +748,9 @@ class Stage:
                     f"enabled branch ({sorted(enabled)}). remove the move or add the branch."
                 )
             runtime = mv.materialize(ctx)
+            # Tag the runtime move with its declarative name so run-level
+            # instrumentation (GF_MOVE_TIMING) can label output per move.
+            runtime.gf_move_name = mv.name
             # Move-level debug wins over stage-level; None leaves the move's
             # env-resolved default untouched.
             _dbg = mv.debug if mv.debug is not None else self.debug
@@ -774,6 +777,7 @@ class Stage:
         combine_kwargs = dict(self.combine_kwargs)
         combine_kwargs.setdefault("verbose", run_verbose)
         combined = GFCombineMove(moves=runtime_moves, **combine_kwargs)
+        combined.gf_stage_name = self.name
         if not hasattr(combined, "accepted") or combined.accepted is None:
             combined.accepted = np.zeros((ctx.ntemps, ctx.nwalkers))
         return _STEP_CLASSES[self.kind](moves=[combined], **self.step_kwargs)

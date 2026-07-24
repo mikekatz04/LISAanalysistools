@@ -8,6 +8,10 @@ materialization with a :class:`MoveBuildContext`.
 """
 
 import dataclasses
+import os
+import resource
+import sys
+import time
 import typing
 
 import numpy as np
@@ -274,12 +278,86 @@ class GlobalFitMove:
         self._gpus = gpus
 
 
+def _gf_rss_mb() -> float:
+    """Peak resident set size of this process in MB (monotone; darwin=bytes)."""
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru / 1e6 if sys.platform == "darwin" else ru / 1e3
+
+
+def _gf_gpu_pool_mb():
+    """(used, total) MB of the default cupy memory pool, or (None, None).
+
+    Only queries cupy when the run has already imported it — a CPU run must
+    never trigger a cupy/CUDA initialization from instrumentation.
+    """
+    if "cupy" not in sys.modules:
+        return None, None
+    try:
+        pool = sys.modules["cupy"].get_default_memory_pool()
+        return pool.used_bytes() / 1e6, pool.total_bytes() / 1e6
+    except Exception:
+        return None, None
+
+
 class GFCombineMove(CombineMove, GlobalFitMove):
     """An ``eryn`` :class:`CombineMove` that participates in global-fit bookkeeping.
 
     Inheriting both :class:`~eryn.moves.CombineMove` and :class:`GlobalFitMove`
     lets a sequence of moves share rank/GPU state and likelihood-comparison
     cadence with the rest of the global fit.
+
+    ``GF_MOVE_TIMING=1`` arms per-move instrumentation in :meth:`propose`:
+    one ``[GF_TIMING]`` line per wrapped move per iteration (wall time, peak
+    RSS, cupy pool) plus a ``move=__total__`` per-iteration line.  The env var
+    is read at call time — construction, pickling, and deepcopy behavior are
+    untouched, and with the variable unset the eryn code path runs unchanged.
+    ``GF_MOVE_TIMING_SYNC=1`` additionally synchronizes the current cupy
+    stream at each move boundary so asynchronous kernel time is attributed to
+    the move that launched it.
     """
 
     update_comm_special = True
+
+    def propose(self, model, state):
+        if os.environ.get("GF_MOVE_TIMING", "0") != "1":
+            return super().propose(model, state)
+
+        self._gf_timing_iter = getattr(self, "_gf_timing_iter", 0) + 1
+        it = self._gf_timing_iter
+        stage = getattr(self, "gf_stage_name", "?")
+        sync = os.environ.get("GF_MOVE_TIMING_SYNC", "0") == "1"
+
+        accepted_out = None
+        t_all = time.perf_counter()
+        for move in self.moves:
+            if isinstance(move, tuple):
+                move = move[0]
+            rss0 = _gf_rss_mb()
+            t0 = time.perf_counter()
+            state, accepted = move.propose(model, state)
+            if sync and "cupy" in sys.modules:
+                try:
+                    sys.modules["cupy"].cuda.get_current_stream().synchronize()
+                except Exception:
+                    pass
+            wall = time.perf_counter() - t0
+            rss1 = _gf_rss_mb()
+            used, total = _gf_gpu_pool_mb()
+            name = getattr(move, "gf_move_name", type(move).__name__)
+            print(
+                f"[GF_TIMING] stage={stage} move={name} it={it} "
+                f"wall_s={wall:.4f} rss_mb={rss1:.0f} d_rss_mb={rss1 - rss0:.0f} "
+                f"gpu_used_mb={used if used is not None else -1:.0f} "
+                f"gpu_pool_mb={total if total is not None else -1:.0f}",
+                flush=True,
+            )
+            if accepted_out is None:
+                accepted_out = accepted.copy()
+            else:
+                accepted_out += accepted
+        print(
+            f"[GF_TIMING] stage={stage} move=__total__ it={it} "
+            f"wall_s={time.perf_counter() - t_all:.4f} rss_mb={_gf_rss_mb():.0f}",
+            flush=True,
+        )
+        return state, accepted_out
