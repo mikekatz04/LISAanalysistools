@@ -131,7 +131,12 @@ class EreborGeneralSettings(GeneralSettings):
     mojito_data_path: str = dataclasses.field(
         default_factory=env_default(
             "MOJITO_DATA_PATH",
-            "/Users/mkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/",
+            # Home-relative so the same default resolves on any machine
+            # (laptop /Users/<u>, cluster /home/<u>); override with
+            # MOJITO_DATA_PATH when the cache lives elsewhere.
+            os.path.expanduser(
+                "~/.mojito_cache/brickmarket/mojito_light_v1_0_0/"
+            ),
         )
     )
     # --- mojito NOISE brick (proper noise) ---
