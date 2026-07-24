@@ -222,6 +222,15 @@ GATES: tuple = (
                 ),
                 notes="merger-centered chop windows, all catalogue ids",
             ),
+            Check(
+                id="null-proof",
+                command=(
+                    "{py} scripts/campaign/runners/null_proof.py "
+                    "--branch mbh --gate t1-gt-mbh"
+                ),
+                criteria=({"metric": "null_proof_ok", "op": "==", "value": 1},),
+                notes="rr/dd-per-source bar plot vs the null threshold",
+            ),
         ),
         proof_plots=("mbh_null_*.png",),
     ),
@@ -242,6 +251,14 @@ GATES: tuple = (
                 ),
                 notes="3-month window (driver default)",
             ),
+            Check(
+                id="null-proof",
+                command=(
+                    "{py} scripts/campaign/runners/null_proof.py "
+                    "--branch emri --gate t1-gt-emri"
+                ),
+                criteria=({"metric": "null_proof_ok", "op": "==", "value": 1},),
+            ),
         ),
         proof_plots=("emri_null_*.png",),
     ),
@@ -260,6 +277,14 @@ GATES: tuple = (
                 criteria=(
                     {"metric": "null_rr_dd_SOBBH_max", "op": "<=", "value": NULL_BASELINE_2X["SOBBH"]},
                 ),
+            ),
+            Check(
+                id="null-proof",
+                command=(
+                    "{py} scripts/campaign/runners/null_proof.py "
+                    "--branch sobbh --gate t1-gt-sobbh"
+                ),
+                criteria=({"metric": "null_proof_ok", "op": "==", "value": 1},),
             ),
         ),
         proof_plots=("sobbh_null_*.png",),

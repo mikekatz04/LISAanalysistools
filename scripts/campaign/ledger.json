@@ -250,7 +250,8 @@
       "confirmed": [],
       "evidence": [
         "evidence/t1-gt-mbh.log",
-        "evidence/t1-gt-mbh__null-check.log"
+        "evidence/t1-gt-mbh__null-check.log",
+        "evidence/t1-gt-mbh/mbh_null_residual.png"
       ],
       "history": [
         {
@@ -272,6 +273,11 @@
           "note": "ingest: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-24T07:54:06Z"
+        },
+        {
+          "note": "run: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-24T07:56:01Z"
         }
       ],
       "metrics": {
@@ -282,22 +288,32 @@
         "hh": 2067077.0,
         "mbh_mismatch_max": 0.0006753,
         "mismatch": 0.0006753,
+        "n_sources": 6,
+        "null_proof": "ok",
+        "null_proof_ok": 1,
         "null_rr_dd_MBH_max": 0.001562,
         "overlap": 0.99932466,
+        "plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-gt-mbh/mbh_null_residual.png",
         "result_branch": "mbh",
         "result_data_snr": 1418.0345,
         "result_dd": 2010822.0,
         "result_dh": 2037379.0,
         "result_hh": 2067077.0,
         "result_mismatch": 0.0006753,
+        "result_n_sources": 6,
+        "result_null_proof": "ok",
+        "result_null_proof_ok": 1,
         "result_overlap": 0.99932466,
+        "result_plot": "/Users/mkatz/Research/lisa_sprint_2026/LISAanalysistools/gf_output/campaign/t1-gt-mbh/mbh_null_residual.png",
         "result_rr": 3141.736,
         "result_rr_over_dd": 0.001562,
         "result_source_logL": -1570.868,
+        "result_worst_rr_dd": 0.001562,
         "result_xcheck": "True",
         "rr": 3141.736,
         "rr_over_dd": 0.001562,
         "source_logL": -1570.868,
+        "worst_rr_dd": 0.001562,
         "xcheck": "True"
       },
       "state": "green"
@@ -601,6 +617,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-24T07:54:06Z",
+  "updated": "2026-07-24T07:56:01Z",
   "version": 1
 }
