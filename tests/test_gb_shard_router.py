@@ -95,6 +95,34 @@ class _StubEngine:
         self._record("clear_in_model", None)
 
 
+class _StubComp:
+    """Raw-comp stand-in exposing ``information_matrix`` (the proposal-Cholesky
+    entry point that bypasses the wrapped engine). Encodes (device, intra
+    noise row) into the Fisher stack so routing + reassembly is verifiable.
+    """
+
+    def __init__(self, ndim=3):
+        self.ndim = ndim
+        self.calls = []
+
+    def information_matrix(self, params, holder, *, inds, noise_index,
+                           **swap_kwargs):
+        assert len(holder.linear_data_arr) == 1, "comp must see one shard"
+        assert len(holder) == holder.acs_total_entries
+        intra = np.asarray(noise_index)
+        dev = holder.gpus[0] if holder.gpus is not None else 0
+        self.calls.append(dict(holder=holder, intra=intra.copy(),
+                               nparams=np.asarray(params).shape[0]))
+        n = len(intra)
+        nd = len(inds) if inds is not None else self.ndim
+        out = np.zeros((n, nd, nd), dtype=float)
+        # diagonal encodes 1000*device + intra so scatter order is checkable
+        diag = 1000.0 * dev + intra.astype(float)
+        for r in range(n):
+            np.fill_diagonal(out[r], diag[r])
+        return out
+
+
 class ShardRouterTest(unittest.TestCase):
     PER_BAND = (3, 8)
     NUM_ACS = 7
@@ -268,6 +296,35 @@ class ShardRouterTest(unittest.TestCase):
         # router mirrors engine outputs after passthrough
         np.testing.assert_array_equal(
             np.asarray(router.d_h_out), idx.astype(float))
+
+    def test_information_matrix_routes_and_reassembles(self):
+        comp = _StubComp(ndim=3)
+        idx = np.array([5, 0, 3, 2, 1])  # global walker/noise rows
+        params = np.arange(len(idx) * 3, dtype=float).reshape(len(idx), 3)
+        info = self.RoutedEngine.route_information_matrix(
+            comp, self.holder, params, inds=[0, 1, 2], noise_index=idx)
+        info = np.asarray(info)
+        self.assertEqual(info.shape, (len(idx), 3, 3))
+        # each source scored once, on its owning device, at the right intra row
+        split_map = np.asarray(self.holder.split_map)
+        intra_lut = np.empty(self.holder.acs_total_entries, dtype=int)
+        for rows in self.holder.gpu_splits:
+            intra_lut[np.asarray(rows)] = np.arange(len(rows))
+        for row, g in enumerate(idx):
+            dev = int(self.holder.gpu_map[g])
+            expected = 1000.0 * dev + intra_lut[g]
+            np.testing.assert_allclose(np.diag(info[row]), expected)
+
+    def test_information_matrix_single_shard_passthrough(self):
+        comp = _StubComp(ndim=3)
+        single = FakeMultiShardACA(self.PER_BAND, 4, 1, layout="striped")
+        idx = np.array([2, 0, 3])
+        params = np.zeros((3, 3))
+        info = np.asarray(self.RoutedEngine.route_information_matrix(
+            comp, single, params, inds=[0, 1, 2], noise_index=idx))
+        self.assertIs(comp.calls[0]["holder"], single)  # no view wrapping
+        for row, g in enumerate(idx):
+            np.testing.assert_allclose(np.diag(info[row]), float(g))
 
     def test_sig_het_in_model_rejected_multi_shard(self):
         self.engine.return_truthy = True

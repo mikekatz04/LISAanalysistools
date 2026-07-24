@@ -2087,16 +2087,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _test_inds = np.asarray(self.parameter_transforms.fill_dict["test_inds"])
         walker_inds = band_sorter.walker_inds[ids].astype(xp.int32)
 
-        if isinstance(self._basis_settings, FDSettings):
-            info_phys = self.gb_fd_comp.information_matrix(
-                params_phys, model.analysis_container_arr,
-                inds=_test_inds, noise_index=walker_inds,
-            )
-        else:
-            info_phys = self.gb_wdm_comp.information_matrix(
-                params_phys, model.analysis_container_arr,
-                inds=_test_inds, noise_index=walker_inds,
-            )
+        # Route the Fisher matrix per shard: the comp is single-shard by
+        # contract, but ``model.analysis_container_arr`` may span GPUs (the
+        # noise_index rows can live on different devices). Single-shard /
+        # CPU holders pass straight through.
+        _info_comp = (
+            self.gb_fd_comp
+            if isinstance(self._basis_settings, FDSettings)
+            else self.gb_wdm_comp
+        )
+        info_phys = _RoutedBandEngine.route_information_matrix(
+            _info_comp, model.analysis_container_arr, params_phys,
+            inds=_test_inds, noise_index=walker_inds,
+        )
 
         # Conditioning scales for the sampling basis (fdot spans ~1e-13 in
         # sampled units; without the rescale the information matrix inversion is

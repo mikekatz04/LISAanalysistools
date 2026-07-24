@@ -636,6 +636,44 @@ class _RoutedBandEngine:
             "hessian", holder, params_phys, data_index=data_index,
             noise_index=noise_index, N_vals=N_vals, **kwargs)
 
+    @classmethod
+    def route_information_matrix(cls, comp, holder, params_phys, *, inds,
+                                noise_index, **swap_kwargs):
+        """Route ``comp.information_matrix`` per shard.
+
+        The Fisher/information matrix is computed on the RAW GB comp
+        (``gb_wdm_comp`` / ``gb_fd_comp``) for the proposal Cholesky, not on
+        the wrapped likelihood engine -- so it can't go through the instance
+        router and needs its own entry point. Each binary's matrix depends
+        only on its walker's PSD (``noise_index``; the data slab is
+        irrelevant, per ``information_matrix``), so partition binaries by the
+        owning shard of their walker, compute per shard against a persistent
+        :class:`_ShardHolderView` inside the owning device context, and
+        reassemble the ``(num_bin, nd, nd)`` stack on the caller's device.
+        Single-shard holders pass straight through.
+        """
+        if not cls._is_multi(holder):
+            return comp.information_matrix(
+                params_phys, holder, inds=inds,
+                noise_index=noise_index, **swap_kwargs)
+        xp = holder.xp
+        views = cls._shard_views(holder)
+        # info matrix weights by noise only -> data_index == noise_index.
+        parts = cls._partition(holder, noise_index, noise_index)
+        params_host = np.atleast_2d(asnumpy(params_phys))
+        num = int(params_host.shape[0])
+        pieces = []
+        for view, (pos, intra, intra_noise) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            with device_context(xp, view.device):
+                out_s = comp.information_matrix(
+                    xp.asarray(params_host[pos]), view, inds=inds,
+                    noise_index=intra if intra_noise is None else intra_noise,
+                    **swap_kwargs)
+                pieces.append((pos, asnumpy(out_s)))
+        return cls._assemble(num, pieces, 0.0, xp)
+
 
 class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     """Per-(temp, walker, band) scratch buffers for the GB special moves.
