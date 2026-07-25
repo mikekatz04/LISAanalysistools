@@ -65,6 +65,7 @@ __all__ = [
     "CombIntrinsicProposal",
     "ColumnPermutedProposal",
     "compute_fstat",
+    "fstat_maximized_extrinsics",
     "make_gb_rj_birth_container",
     "fit_gmm_to_stacked",
     "pack_gmm_components",
@@ -219,6 +220,72 @@ def compute_fstat(N_arr, M_upper, ridge: float = 1e-12):
     sol = xp.linalg.solve(M4, N_arr[..., None])[..., 0]
     F = 0.5 * xp.sum(N_arr * sol, axis=-1)
     return xp.where(xp.isfinite(F), F, -xp.inf)
+
+
+def fstat_maximized_extrinsics(N_arr, M_upper, ridge: float = 1e-12):
+    """``(A_max, phi0_max, iota_max, psi_max, F)`` from the F-stat ``(N, M)``.
+
+    Ports the Jaranowski-Krol amplitude-vector inversion from
+    ``gbgpu.GBGPU.get_fstat_ll`` to the ``(N, M)`` pieces returned by the new
+    ``GBFDComputations.get_fstat_ll_fd`` / ``GBWDMComputations.get_fstat_ll_wdm``
+    -- which build the SAME 4 basis filters at the SAME fixed reference
+    ``(A, iota, psi, phi0) = (2, pi/2, {0,pi/4,0,pi/4}, {0,pi,3pi/2,pi/2})`` and
+    return the SAME 10-element upper-triangle ``M`` layout, so the inversion is
+    identical. ``a = M^-1 N`` is the ML amplitude vector; ``A_max`` is the
+    physical maximized amplitude (reference A=2 baked into the filters, matching
+    the legacy formula) and ``F = 0.5 * a . N``.
+
+    Numerically guarded (ridge on ``M``, non-negative discriminant, clipped
+    ``arccos``) so near-singular / off-peak births return finite maxima instead
+    of NaN. Same array module as the inputs.
+
+    TODO (known F-stat adjustment): the F-stat computation needs a slight
+    adjustment (a normalization/scale correction we already know about) before
+    ``A_max`` here is exactly the physical maximized amplitude. It is not yet
+    applied; add it in this one place once finalized so both the FD and WDM
+    paths (which share this routine) inherit it. Until then treat ``A_max`` /
+    ``dist*`` as approximate -- fine as a proposal center, but verify the
+    absolute distance scale after the adjustment lands.
+    """
+    from ..utils.utility import get_array_module
+
+    xp = get_array_module(N_arr)
+    N_arr = xp.atleast_2d(xp.asarray(N_arr))
+    M_upper = xp.atleast_2d(xp.asarray(M_upper))
+    num_bin = N_arr.shape[0]
+
+    M4 = xp.empty((num_bin, 4, 4), dtype=xp.float64)
+    for k, (i, j) in enumerate(zip(_TRIU_ROWS, _TRIU_COLS)):
+        M4[:, i, j] = M_upper[:, k]
+        M4[:, j, i] = M_upper[:, k]
+    diag_scale = xp.clip(
+        xp.mean(xp.abs(M4[:, (0, 1, 2, 3), (0, 1, 2, 3)]), axis=-1), 1e-300, None
+    )
+    M4 = M4 + (ridge * diag_scale)[:, None, None] * xp.eye(4)[None]
+
+    a = xp.linalg.solve(M4, N_arr[..., None])[..., 0]
+    F = 0.5 * xp.sum(N_arr * a, axis=-1)
+    a1, a2, a3, a4 = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+
+    r1 = xp.sqrt((a1 + a4) ** 2 + (a2 - a3) ** 2)
+    r2 = xp.sqrt((a1 - a4) ** 2 + (a2 + a3) ** 2)
+    A_plus = r1 + r2
+    A_cross = r1 - r2
+    disc = xp.sqrt(xp.clip(A_plus ** 2 - A_cross ** 2, 0.0, None))
+
+    A_max = (A_plus + disc) / 2.0
+    psi_max = (0.5 * xp.arctan2(
+        A_plus * a4 - A_cross * a1, -(A_cross * a2 + A_plus * a3))) % np.pi
+    iota_max = xp.arccos(
+        xp.clip(-A_cross / xp.clip(A_plus + disc, 1e-300, None), -1.0, 1.0)) % np.pi
+    c = xp.sign(xp.sin(2.0 * psi_max))
+    phi0_max = xp.arctan2(
+        c * (A_plus * a4 - A_cross * a1),
+        -c * (A_cross * a2 + A_plus * a3)) % (2.0 * np.pi)
+
+    A_max = xp.where(xp.isfinite(A_max), A_max, 0.0)
+    F = xp.where(xp.isfinite(F), F, -xp.inf)
+    return A_max, phi0_max, iota_max, psi_max, F
 
 
 @dataclasses.dataclass

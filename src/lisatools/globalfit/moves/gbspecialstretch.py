@@ -463,20 +463,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # their F-stat maxima. It is a real proposal (density enters the RJ
         # factor), so unlike the pin it is detailed-balance-valid.
         #
-        # DEFAULT OFF: the current implementation sources A_max from the
-        # LEGACY ``gb.get_fstat_ll`` (SharedMemoryGBGPU, plain FREQUENCY-domain
-        # kernel), which is incompatible with the WDM/chunked-het search buffer
-        # -- it indexes absolute FD bins against a WDM-shaped data_length,
-        # floods "Above full noise range" per thread, and yields a meaningless
-        # A_max. Must be rewired to the NEW infrastructure
-        # ``GBWDMComputations.get_fstat_ll_wdm`` (returns per-binary (N, M) over
-        # the WDM domain, consistent with the buffer and the proposal grid);
-        # compute ``a = M^-1 N`` and the JK inversion on THOSE pieces. Until
-        # then the search uses the WDM-consistent d_h/h_h center above.
-        # ``GB_RJ_FSTAT_DIST_BIRTH=1`` force-enables the (legacy, broken) path.
+        # A_max comes from the NEW domain-native F-stat comps
+        # (``GBFDComputations.get_fstat_ll_fd`` / ``GBWDMComputations.
+        # get_fstat_ll_wdm`` -> per-binary (N, M)); the Jaranowski-Krol
+        # maximization is a SINGLE shared routine
+        # (``fstat_maximized_extrinsics``) applied identically to either
+        # domain's (N, M). Never the legacy SharedMemoryGBGPU
+        # ``gb.get_fstat_ll`` (FD-only; floods a WDM buffer). Defaults to
+        # follow ``rj_amp_maximize`` (on under the search config); when on it
+        # replaces the d_h/h_h pin. ``GB_RJ_FSTAT_DIST_BIRTH=0`` falls back to
+        # that pin. NOTE: the (N,M)->F path is validated (the proposal grid
+        # finds the real source), but the A_max inversion on those pieces is
+        # new -- verify births land at sane distances on the first GPU run.
         _fdb_env = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
         self.rj_fstat_dist_birth = (
-            bool(int(_fdb_env)) if _fdb_env is not None else False
+            bool(int(_fdb_env)) if _fdb_env is not None
+            else bool(self.rj_amp_maximize)
         )
         self._log_dist_range_cache = None
 
@@ -1958,33 +1960,52 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._log_dist_range_cache = val
         return val
 
+    def _fstat_NM(self, model, params_phys, walker_ref):
+        """Per-binary F-stat ``(N, M)`` from the domain-appropriate comp.
+
+        Domain is the ONLY thing that differs between FD and WDM: pick the
+        matching comp and call its ``get_fstat_ll_{fd,wdm}`` against the
+        reference walker's residual (``model.analysis_container_arr``). Both
+        return the same ``(N (num_bin,4), M_upper (num_bin,10))`` layout at the
+        same fixed basis-filter reference, so everything downstream -- the
+        Jaranowski-Krol maximization -- is shared and identical. NOTE: routed
+        through the NEW GBFDComputations / GBWDMComputations, never the legacy
+        SharedMemoryGBGPU ``gb.get_fstat_ll`` (FD-only; floods a WDM buffer).
+        """
+        xp = self.xp
+        di = xp.full(params_phys.shape[0], int(walker_ref), dtype=xp.int32)
+        holder = model.analysis_container_arr
+        if isinstance(self._basis_settings, FDSettings):
+            return self.gb_fd_comp.get_fstat_ll_fd(
+                params_phys, holder, data_index=di, noise_index=di,
+                convert_to_ra_dec=False)
+        return self.gb_wdm_comp.get_fstat_ll_wdm(
+            params_phys, holder, data_index=di, noise_index=di,
+            convert_to_ra_dec=False)
+
     def _fstat_dist_centers(self, model, rows_params, walker_ref):
         """F-stat 4-parameter extrinsic maxima for a set of birth/death rows.
 
-        Runs ``gb.get_fstat_ll`` (which fills ``gb.A_max / phi0_max / iota_max /
-        psi_max`` via the Jaranowski-Krol amplitude-vector inversion) on the
-        intrinsic + sky columns of ``rows_params`` against the reference
-        walker's residual, and returns the maxima plus the F-stat value ``F``
-        (``SNR^2 = 2F``). The amplitude/phase/iota/psi input columns are
-        ignored by the F-stat, so the placeholder distance in ``rows_params``
-        does not matter. Returns cupy/numpy arrays on ``self.xp``.
+        Transforms ``rows_params`` to physical, gets the F-stat ``(N, M)`` from
+        the domain-appropriate comp (:meth:`_fstat_NM`), then runs the SINGLE
+        shared Jaranowski-Krol inversion
+        (:func:`lisatools.sampling.fstat_proposal.fstat_maximized_extrinsics`)
+        -- identical for FD and WDM -- to recover ``(A_max, phi0_max, iota_max,
+        psi_max, F)`` (``SNR^2 = 2F``). The amplitude/phase/iota/psi input
+        columns are ignored by the F-stat, so the placeholder distance in
+        ``rows_params`` does not matter. Returns arrays on ``self.xp``.
         """
+        from ...sampling.fstat_proposal import fstat_maximized_extrinsics
+
         xp = self.xp
-        gb = self.gb
-        acs = model.analysis_container_arr
-        x_tmp = self.transform_fn.both_transforms(rows_params, xp=xp)
         # physical layout: [A, f0, fdot, fddot, phi0, iota, psi, alpha, delta]
-        x_in = x_tmp[:, xp.array([1, 2, 3, 7, 8])]
-        di = xp.full(rows_params.shape[0], int(walker_ref), dtype=xp.int32)
-        F = gb.get_fstat_ll(
-            x_in, acs.linear_data_arr, acs.linear_psd_arr,
-            data_index=di, noise_index=di, data_length=acs.end_shape[0],
-            data_splits=np.array([gb.gpus[0]]), phase_maximize=True,
-            return_cupy=True, N=512, **self.waveform_kwargs,
-        )
+        x_phys = self.transform_fn.both_transforms(rows_params, xp=xp)
+        N_arr, M_upper = self._fstat_NM(model, x_phys, walker_ref)
+        A_max, phi0_max, iota_max, psi_max, F = fstat_maximized_extrinsics(
+            N_arr, M_upper)
         return (
-            xp.asarray(gb.A_max), xp.asarray(gb.phi0_max),
-            xp.asarray(gb.iota_max), xp.asarray(gb.psi_max), xp.asarray(F),
+            xp.asarray(A_max), xp.asarray(phi0_max),
+            xp.asarray(iota_max), xp.asarray(psi_max), xp.asarray(F),
         )
 
     def _dist_center_and_width(self, rows_params, A_max, F):
