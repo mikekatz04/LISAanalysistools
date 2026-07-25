@@ -51,7 +51,7 @@ from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
 from ...utils.device import device_context
 from ...utils.parallelbase import LISAToolsParallelModule
-from ...utils.utility import asnumpy
+from ...utils.utility import asnumpy, get_array_module
 
 __all__ = [
     "pack_special_index",
@@ -91,7 +91,10 @@ def pack_special_index(temp_inds, walker_inds, band_inds, nwalkers: int):
 
 def unpack_special_index(special_band_inds, nwalkers: int) -> tuple:
     """Recover ``(temp, walker, band)`` arrays from packed special indices."""
-    temp_walker_inds = cp.floor(special_band_inds / _SPECIAL_INDEX_BASE).astype(int)
+    # input-driven array module (NOT the module-level cp): this helper runs
+    # on numpy inputs during CPU-resolved runs on cupy-installed machines.
+    xp = get_array_module(special_band_inds)
+    temp_walker_inds = xp.floor(special_band_inds / _SPECIAL_INDEX_BASE).astype(int)
     temp_inds = temp_walker_inds // nwalkers
     walker_inds = temp_walker_inds % nwalkers
     band_inds = (special_band_inds - temp_walker_inds * _SPECIAL_INDEX_BASE).astype(int)
@@ -2124,15 +2127,21 @@ class BandSorter(LISAToolsParallelModule):
                 self.inds = self.xp.ones(self.coords.shape[:-1], dtype=bool)
 
             if self.xp.any(~self.inds):
-                new_sources = cp.full_like(self.coords[~self.inds], np.nan)
-                fix = cp.full(new_sources.shape[0], True)
-                while cp.any(fix):
-                    new_sources[fix] = rj_prop.rvs(size=fix.sum().item())
-                    fix = cp.any(cp.isnan(new_sources), axis=-1)
+                # self.xp (run backend), NOT the module-level cp: on a
+                # CPU-resolved run on a cupy-installed machine cp is cupy
+                # while self.coords is numpy -- mixing them crashes the
+                # assignment below (module-cp-vs-force_backend trap).
+                new_sources = self.xp.full_like(self.coords[~self.inds], np.nan)
+                fix = self.xp.full(new_sources.shape[0], True)
+                while self.xp.any(fix):
+                    new_sources[fix] = self.xp.asarray(
+                        rj_prop.rvs(size=fix.sum().item())
+                    )
+                    fix = self.xp.any(self.xp.isnan(new_sources), axis=-1)
 
                 self.coords[~self.inds] = new_sources
 
-            proposal_logpdf = cp.zeros(self.coords.shape[0])
+            proposal_logpdf = self.xp.zeros(self.coords.shape[0])
 
             batch_here = int(1e6)
             inds_splitting = np.arange(0, self.coords.shape[0], batch_here)
@@ -2149,13 +2158,13 @@ class BandSorter(LISAToolsParallelModule):
                 self.xp.get_default_memory_pool().free_all_blocks()
 
             if keep_all_inds:
-                self.factors = (cp.asarray(proposal_logpdf) * -1) * (~self.orig_inds).flatten() + (
-                    cp.asarray(proposal_logpdf) * +1
+                self.factors = (self.xp.asarray(proposal_logpdf) * -1) * (~self.orig_inds).flatten() + (
+                    self.xp.asarray(proposal_logpdf) * +1
                 ) * (self.orig_inds).flatten()
                 tmp_inds_shaped = self.xp.full_like(self.orig_inds, True)
             else:
                 assert self.xp.all(self.inds)
-                self.factors = cp.asarray(proposal_logpdf) * +1
+                self.factors = self.xp.asarray(proposal_logpdf) * +1
                 tmp_inds_shaped = self.orig_inds.copy()
 
         else:
