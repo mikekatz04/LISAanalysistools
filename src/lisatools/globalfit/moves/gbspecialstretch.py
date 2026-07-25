@@ -456,19 +456,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # F-stat distance-birth proposal (step 2, supersedes the d_h/h_h pin
         # above). Centers the birth on the F-statistic's 4-parameter maximized
-        # amplitude ``gb.A_max`` (Jaranowski-Krol inversion in
-        # ``gbgpu.get_fstat_ll``), converts A_max -> distance via (f0, Mc), and
-        # DRAWS the birth distance from a lognormal about that center with
-        # width set by the F-stat SNR (``ln dist ~ N(ln dist*, 1/SNR)``). phi0,
-        # iota, psi are centered on their F-stat maxima. Unlike the pin this is
-        # a real proposal: its density enters the RJ factor, so it is
-        # detailed-balance-valid. Defaults to follow ``rj_amp_maximize``;
-        # ``GB_RJ_FSTAT_DIST_BIRTH`` overrides. When on it REPLACES the
-        # d_h/h_h pin.
+        # amplitude ``A_max`` (Jaranowski-Krol inversion of ``a = M^-1 N``),
+        # converts A_max -> distance via (f0, Mc), and DRAWS the birth distance
+        # from a lognormal about that center with width set by the F-stat SNR
+        # (``ln dist ~ N(ln dist*, 1/SNR)``); phi0/iota/psi are centered on
+        # their F-stat maxima. It is a real proposal (density enters the RJ
+        # factor), so unlike the pin it is detailed-balance-valid.
+        #
+        # DEFAULT OFF: the current implementation sources A_max from the
+        # LEGACY ``gb.get_fstat_ll`` (SharedMemoryGBGPU, plain FREQUENCY-domain
+        # kernel), which is incompatible with the WDM/chunked-het search buffer
+        # -- it indexes absolute FD bins against a WDM-shaped data_length,
+        # floods "Above full noise range" per thread, and yields a meaningless
+        # A_max. Must be rewired to the NEW infrastructure
+        # ``GBWDMComputations.get_fstat_ll_wdm`` (returns per-binary (N, M) over
+        # the WDM domain, consistent with the buffer and the proposal grid);
+        # compute ``a = M^-1 N`` and the JK inversion on THOSE pieces. Until
+        # then the search uses the WDM-consistent d_h/h_h center above.
+        # ``GB_RJ_FSTAT_DIST_BIRTH=1`` force-enables the (legacy, broken) path.
         _fdb_env = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
         self.rj_fstat_dist_birth = (
-            bool(int(_fdb_env)) if _fdb_env is not None
-            else bool(self.rj_amp_maximize)
+            bool(int(_fdb_env)) if _fdb_env is not None else False
         )
         self._log_dist_range_cache = None
 
