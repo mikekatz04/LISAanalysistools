@@ -1989,6 +1989,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 float(logp[births].min()) if nb else 0.0,
                 float(logp[births].max()) if nb else 0.0,
             )
+            # One-time per-sub-prior breakdown: which column of the GLOBAL
+            # prior forbids the births? Iterate the ProbDistContainer's
+            # (inds, dist) pairs and evaluate each on the birth coordinates.
+            if nb and prior_inf and not getattr(self, "_birth_prior_broke_down", False):
+                self._birth_prior_broke_down = True
+                bparams = params[births]
+                pc = self.gpu_priors[self.branch_name]
+                for inds, prior_i in pc.priors:
+                    try:
+                        sub = prior_i.logpdf(bparams[:, list(inds)])
+                        sub = cp.asarray(sub)
+                        ninf = int((~cp.isfinite(sub)).sum())
+                        col_lo = [float(bparams[:, j].min()) for j in inds]
+                        col_hi = [float(bparams[:, j].max()) for j in inds]
+                        logger.info(
+                            "%s [birth-prior] cols=%s -inf=%d/%d | drawn range "
+                            "min=%s max=%s | %s",
+                            self.name, list(inds), ninf, len(sub),
+                            col_lo, col_hi, type(prior_i).__name__,
+                        )
+                    except Exception as e:  # pragma: no cover - diagnostic only
+                        logger.info("%s [birth-prior] cols=%s eval FAILED: %r",
+                                    self.name, list(inds), e)
 
         if bool(keep.any()):
             k_ids = xp.arange(len(ids))[keep]
