@@ -29,7 +29,15 @@ from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform
 from lisatools.domains import TDSettings, FDSettings, TDSignal, place_td_signal_on_grid
 from lisatools.analysiscontainer import AnalysisContainer
 from lisatools.sensitivity import XYZ2SensitivityMatrix
+from lisatools.utils.utility import get_array_module
 import phentax.waveform as pw
+
+
+def to_host(x):
+    """Backend array (cupy/numpy) -> numpy host array. On the cuda backend the
+    waveform/response arrays are cupy; A and B are consumed as numpy (np.fft,
+    TDSignal input), so convert at the gen_A/gen_B boundary. No-op on CPU."""
+    return x.get() if hasattr(x, "get") else np.asarray(x)
 
 REF = 97729089.327664
 # Mojito brick location. Same knob as the stock global fits (fit.py
@@ -65,6 +73,11 @@ def _first_available_mbhb_id():
 MBHB_ID = int(os.environ["MBHB_ID"]) if "MBHB_ID" in os.environ else _first_available_mbhb_id()
 print(f"[mbhb] using source id {MBHB_ID}  (MBHB_L1={MBHB_L1})", flush=True)
 BACKEND = "cpu"; SENS_MODEL = "scirdv1"; DT = 10.0
+# The A-vs-B mismatch is backend-agnostic: generate the waveforms on BACKEND
+# (GPU exercises the spline TDI-on-the-fly kernel), bring A/B to host, and run
+# the FD/inner-product metric on CPU. Keeps the metric pipeline off the
+# host/device-consistency edges in TDSignal/transform (numpy window etc.).
+METRIC_BACKEND = "cpu"
 TDI_GEN_STR = "2nd generation"; TDI_CHAN = "XYZ"; NCH = 3
 F_MIN, F_MAX = 1e-4, 2.5e-2
 HMS = (21, 33, 44); TOL = 1e-12; ORDER = 30; BUFFER = 15_000.0; START_FREQ = 7e-5
@@ -122,7 +135,8 @@ def gen_A(wf, window_t0, N_WIN, dur_s, orbit):
         stft_dt=None, freq_min=F_MIN, freq_max=F_MAX, fft_batch_size=2, buffer_time=BUFFER,
         output_domain_settings=None, force_backend=BACKEND)
     times, ch = gen.compute_tdi_channels(*wf)
-    arr = np.asarray(place_td_signal_on_grid(np.atleast_2d(ch)[:NCH], grid, times=times).arr)
+    xp = get_array_module(ch)   # cupy on the GPU backend; keep the placement on-backend
+    arr = to_host(place_td_signal_on_grid(xp.atleast_2d(ch)[:NCH], grid, times=times).arr)
     del gen; gc.collect(); return arr
 
 
@@ -143,7 +157,8 @@ def gen_B(wave_gen, orbit, wf, window_t0, N_WIN, dur_s):
     grid_t = np.arange(N_WIN) * DT + window_t0
     ntdi = np.zeros((out.t_arr.shape[0], 3, N_WIN))
     keep = (grid_t >= out.t_arr.min().item()) & (grid_t <= out.t_arr.max().item())
-    ntdi[:, :, keep] = out.eval_tdi(grid_t[keep])
+    xp = get_array_module(out.t_arr)   # cupy on the GPU backend
+    ntdi[:, :, keep] = to_host(out.eval_tdi(xp.asarray(grid_t[keep])))
     arr = ntdi.sum(axis=0)[:NCH]
     del g, out; gc.collect(); return arr
 
@@ -169,10 +184,10 @@ def main():
                                t_low_fit=True, coarse_grain=True, atol=TOL, rtol=TOL,
                                coarse_graining_scale_factor=CG_SCALE)
     B = gen_B(wave_gen, orbit, wf, window_t0, N_WIN, dur_s)
-    win = tukey(N_WIN, TUKEY_ALPHA); td_set = TDSettings(N_WIN, DT, t0=window_t0, force_backend=BACKEND)
+    win = tukey(N_WIN, TUKEY_ALPHA); td_set = TDSettings(N_WIN, DT, t0=window_t0, force_backend=METRIC_BACKEND)
 
     def mm_band(lo, hi):
-        fd = FDSettings(N=N_WIN // 2 + 1, df=1.0 / (N_WIN * DT), min_freq=lo, max_freq=hi, force_backend=BACKEND)
+        fd = FDSettings(N=N_WIN // 2 + 1, df=1.0 / (N_WIN * DT), min_freq=lo, max_freq=hi, force_backend=METRIC_BACKEND)
         a = AnalysisContainer(TDSignal(A, td_set).transform(fd, window=win),
                               XYZ2SensitivityMatrix(fd, model=SENS_MODEL))
         t = TDSignal(B, td_set).transform(fd, window=win)
