@@ -1629,6 +1629,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         against the residual of the best-fitting walker. Computed once per
         ``run_proposal`` (the residual drifts within a proposal, but the
         reference only sets the proposal CENTER, not the accept test).
+
+        TODO (fstat refit cadence): the F-stat PEAK GRID (band_peaks_stacked
+        .npz driving the birth container's intrinsics) is built ONCE up front
+        against the initial residual, so it goes stale as sources are
+        subtracted. Examine refitting the F-stat (grid + this reference) at the
+        BEGINNING OF EACH PROPOSAL so births track the evolving residual --
+        gated on the wall-time cost of the refit (grid rebuild was ~7s comb +
+        ~13s stage-B; per-proposal that may or may not pay for itself vs. the
+        ~130s/iter dominated by in-model repeats). Measure before adopting.
         """
         try:
             return int(np.argmax(_to_numpy(model.analysis_container_arr.likelihood())))
