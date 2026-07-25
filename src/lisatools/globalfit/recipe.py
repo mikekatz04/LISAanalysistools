@@ -1945,8 +1945,21 @@ def build_gb_moves(
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
     for _, item in gpu_priors_in.items():
         item.use_cupy = use_gpu_priors
-    gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=use_gpu_priors)}
-    
+    _gpu_gb_prior = ProbDistContainer(gpu_priors_in, use_cupy=use_gpu_priors)
+    # ``priors_in`` is the ORIGINAL insertion-order dict, so a fresh container
+    # lays multi-column tuple priors (the (dist,alpha,sin_delta) sky/distance
+    # joint and the (f0,Mc) GMM) out at CONSECUTIVE columns. The CPU prior
+    # ``priors["gb"]`` may have had ``reset_key_order`` applied to scatter them
+    # to their true basis columns (dist->0, f0->1, Mc->2, alpha->6,
+    # sin_delta->7); re-apply that same key order here or the GPU prior the GB
+    # moves evaluate against is column-misaligned and forbids every RJ birth
+    # (logp=-inf on in-band F-stat draws). No-op when the CPU prior was never
+    # reordered (its key_order already equals insertion order).
+    _cpu_key_order = list(getattr(priors["gb"], "key_order", []))
+    if _cpu_key_order and list(_gpu_gb_prior.key_order) != _cpu_key_order:
+        _gpu_gb_prior.reset_key_order(_cpu_key_order)
+    gpu_priors = {"gb": _gpu_gb_prior}
+
     nleaves_max_gb = state.branches["gb"].shape[-2]
     
     #* Get band information
@@ -2365,7 +2378,15 @@ def build_vgb_moves(
     gpu_priors_in = deepcopy(priors["vgb"].priors_in)
     for _, item in gpu_priors_in.items():
         item.use_cupy = use_gpu_priors
-    gpu_priors = {"vgb": ProbDistContainer(gpu_priors_in, use_cupy=use_gpu_priors)}
+    _gpu_vgb_prior = ProbDistContainer(gpu_priors_in, use_cupy=use_gpu_priors)
+    # Same key-order preservation as the GB branch: a fresh container built
+    # from insertion-order ``priors_in`` must inherit any ``reset_key_order``
+    # the CPU prior applied, or multi-column tuple priors land on the wrong
+    # columns. Guarded no-op when the CPU prior was never reordered.
+    _cpu_vgb_key_order = list(getattr(priors["vgb"], "key_order", []))
+    if _cpu_vgb_key_order and list(_gpu_vgb_prior.key_order) != _cpu_vgb_key_order:
+        _gpu_vgb_prior.reset_key_order(_cpu_vgb_key_order)
+    gpu_priors = {"vgb": _gpu_vgb_prior}
 
     band_edges = vgb_info.band_edges
     band_N_vals = vgb_info.band_N_vals
