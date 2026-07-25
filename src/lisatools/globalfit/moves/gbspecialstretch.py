@@ -1993,7 +1993,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         snr = xp.sqrt(xp.clip(2.0 * F, 1.0, None))
         sigma = 1.0 / snr
         if _gb_use_distance(self):
-            from lisatools.globalfit.stock.erebor.transforms import gb_amp_from_dist
+            from ..stock.erebor.transforms import gb_amp_from_dist
             k_amp = gb_amp_from_dist(rows_params[:, 1] * 1e-3, rows_params[:, 2], 1.0)
             ln_center = xp.log(xp.clip(k_amp / A_max, 1e-300, None))
         else:
