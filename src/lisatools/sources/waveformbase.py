@@ -844,15 +844,20 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         """
         single_source = isinstance(ra, float)
 
-        ra = self.xp.atleast_1d(ra)
-        dec = self.xp.atleast_1d(dec)
-        merger_time = self.xp.atleast_1d(merger_time)
+        # wave_gen (e.g. phentax) can return host (numpy) arrays while the
+        # response backend is cupy; xp.atleast_*() does not move host arrays
+        # onto the device, so coerce every input onto self.xp before the device
+        # arithmetic below. asarray is a no-op when the array is already on
+        # backend, so the CPU path is unchanged.
+        ra = self.xp.atleast_1d(self.xp.asarray(ra))
+        dec = self.xp.atleast_1d(self.xp.asarray(dec))
+        merger_time = self.xp.atleast_1d(self.xp.asarray(merger_time))
 
-        t_arr = self.xp.atleast_2d(t_arr)
-        h_plus = self.xp.atleast_2d(h_plus)
-        h_cross = self.xp.atleast_2d(h_cross)
+        t_arr = self.xp.atleast_2d(self.xp.asarray(t_arr))
+        h_plus = self.xp.atleast_2d(self.xp.asarray(h_plus))
+        h_cross = self.xp.atleast_2d(self.xp.asarray(h_cross))
 
-        shifted_t_arr = t_arr + self.xp.asarray(merger_time)[:, None] + self.waveform_t0
+        shifted_t_arr = t_arr + merger_time[:, None] + self.waveform_t0
 
         # Clip the pre-data window BEFORE paying for the response on it.
         #
