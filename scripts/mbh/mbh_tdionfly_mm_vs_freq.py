@@ -5,7 +5,7 @@ driven by higher modes) and computes the noise-weighted mismatch in frequency
 bands + cumulative, to localize where the per-mode response discrepancy lives.
 Marks the (2,2)/(3,3)/(4,4) merger frequencies.
 """
-import os, sys, gc, time, threading, resource
+import os, sys, gc, time, threading, resource, warnings
 os.environ.setdefault("OMP_NUM_THREADS", "8")
 import numpy as np
 import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
@@ -113,20 +113,60 @@ def tukey(N, a):
     return _t(N, a)
 
 
+def _available_memory_bytes():
+    """Best-effort free memory for the active backend (bytes), or None if it
+    cannot be determined. Host RAM for the CPU backend; free device memory for a
+    CUDA backend."""
+    if BACKEND == "cpu":
+        try:
+            import psutil
+            return int(psutil.virtual_memory().available)
+        except Exception:
+            try:  # POSIX fallback: available pages * page size
+                return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+            except (ValueError, OSError, AttributeError):
+                return None
+    try:
+        import cupy as cp
+        free, _total = cp.cuda.runtime.memGetInfo()
+        return int(free)
+    except Exception:
+        return None
+
+
 def build_orbit(window_t0, TOBS):
     orb = L1Orbits(find_file(MBHB_L1, "MBHB", MBHB_ID), force_backend=BACKEND, frame="icrs")
-    # The manual ltt trim is a low-memory hack for the 8.6 GB laptop: it shortens
-    # the ltt grid but NOT the spacecraft-position grid, leaving the two with
-    # inconsistent lengths. That is harmless for the windowed pyResponse path
-    # (gen_A) but makes the on-the-fly kernel index the ltt spline out of bounds
-    # on GPU (illegal global read). Only trim on CPU; on GPU configure the full
-    # orbit (ample memory), keeping the ltt and position grids consistent.
-    if BACKEND == "cpu":
+    # Trimming ltt to the analysis window is a memory optimization, but it
+    # shortens ONLY the ltt grid (not the spacecraft positions), leaving the two
+    # inconsistent -> the on-the-fly kernel can index ltt out of bounds (silent
+    # garbage on CPU, illegal global read on GPU). configure() duplicates the ltt
+    # + positions onto the backend and pyResponseTDI deepcopies them, so budget
+    # ~3x the ltt footprint. Trim only when the full orbit would not comfortably
+    # fit (>50% of free memory); otherwise keep it whole so the grids stay
+    # consistent. The decision is reported (and a warning is raised when we trim).
+    try:
+        need = 3 * int(orb.ltt.nbytes)
+    except Exception:
+        need = 0
+    avail = _available_memory_bytes()
+    avail_s = "unknown" if avail is None else f"{avail / 1e9:.1f} GB free"
+    should_trim = need > 0 and avail is not None and need > 0.5 * avail
+    if should_trim:
+        warnings.warn(
+            f"[build_orbit] full orbit needs ~{need / 1e9:.1f} GB (>50% of the "
+            f"{avail_s}); trimming ltt to the window to save memory. NOTE: this "
+            f"leaves the ltt and position grids inconsistent, so the on-the-fly "
+            f"(gen_B) path can read ltt out of bounds if any eval time falls "
+            f"outside the window (illegal memory access on GPU).",
+            RuntimeWarning, stacklevel=2)
         pad = 1.0e5
         lo = max(window_t0 - pad, float(orb.sc_t0)); hi = min(window_t0 + TOBS + pad, float(orb._sc_t_base[-1]))
         ltt_t = np.asarray(orb.ltt_t); m = (ltt_t >= lo) & (ltt_t <= hi)
         orb.ltt = np.asarray(orb.ltt)[m].copy(); orb.ltt_t = ltt_t[m].copy(); orb.ltt_t0 = float(orb.ltt_t[0])
         del ltt_t; gc.collect()
+    else:
+        print(f"[build_orbit] full orbit (~{need / 1e9:.2f} GB need, {avail_s}) "
+              f"-> no trim; ltt and position grids stay consistent.", flush=True)
     orb.configure(linear_interp_setup=True, dt=POS_DT)
     return orb
 
