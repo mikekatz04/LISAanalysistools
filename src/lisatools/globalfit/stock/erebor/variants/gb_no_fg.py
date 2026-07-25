@@ -253,6 +253,14 @@ class GBNoFgGBSettings(GBSettings):
         default_factory=env_default("CHUNKED_N_CP_ORBIT", 32, int)
     )
     # Sig-het in-model scoring (chunked-het delegate for RJ/fills/swaps).
+    # TODO(sighet cleanup): these three knobs are the temporary switch for the
+    # signal-heterodyne in-model likelihood. Sig-het is CPU-only right now
+    # (GBSignalHetComputations.supported_backends()==["cpu"]; the CUDA kernels
+    # in gb_tdi_on_the_fly.cu still `#ifdef __CUDACC__ throw` -- see
+    # gb_signal_het_get_ll_wrap ~L1878). Once the sig-het GPU kernels land,
+    # revisit: promote sighet_inmodel to the default in-model path (the
+    # compression is the point) and fold nt_layer / n_sparse_fd into the
+    # validated chunked-het size block above rather than a separate knob group.
     sighet_inmodel: bool = dataclasses.field(
         default_factory=env_default("GB_SIGHET_INMODEL", False, bool)
     )
