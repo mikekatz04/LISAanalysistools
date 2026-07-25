@@ -454,6 +454,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             bool(int(_amp_env)) if _amp_env is not None else bool(phase_maximize)
         )
 
+        # F-stat distance-birth proposal (step 2, supersedes the d_h/h_h pin
+        # above). Centers the birth on the F-statistic's 4-parameter maximized
+        # amplitude ``gb.A_max`` (Jaranowski-Krol inversion in
+        # ``gbgpu.get_fstat_ll``), converts A_max -> distance via (f0, Mc), and
+        # DRAWS the birth distance from a lognormal about that center with
+        # width set by the F-stat SNR (``ln dist ~ N(ln dist*, 1/SNR)``). phi0,
+        # iota, psi are centered on their F-stat maxima. Unlike the pin this is
+        # a real proposal: its density enters the RJ factor, so it is
+        # detailed-balance-valid. Defaults to follow ``rj_amp_maximize``;
+        # ``GB_RJ_FSTAT_DIST_BIRTH`` overrides. When on it REPLACES the
+        # d_h/h_h pin.
+        _fdb_env = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
+        self.rj_fstat_dist_birth = (
+            bool(int(_fdb_env)) if _fdb_env is not None
+            else bool(self.rj_amp_maximize)
+        )
+        self._log_dist_range_cache = None
+
         self.snr_lim = snr_lim
 
         self.band_edges = self.xp.asarray(self.band_edges)
@@ -1594,6 +1612,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as e:
             logger.warning("[GB_DEBUG %s] band plot skipped: %r", self.name, e)
 
+    def _fstat_reference_walker(self, model):
+        """Max-likelihood walker used as the F-stat distance-birth reference.
+
+        Mirrors the serial-search move: the F-stat centers are computed
+        against the residual of the best-fitting walker. Computed once per
+        ``run_proposal`` (the residual drifts within a proposal, but the
+        reference only sets the proposal CENTER, not the accept test).
+        """
+        try:
+            return int(np.argmax(_to_numpy(model.analysis_container_arr.likelihood())))
+        except Exception:
+            return 0
+
     def run_proposal(self, model, state, band_sorter, band_temps):
         """One full pass of per-band proposals.
 
@@ -1624,6 +1655,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._dbg_null_logged = False
         self._dbg_seq_done = False
         self._dbg_rj_done = False
+
+        # Reference walker for the F-stat distance-birth proposal center
+        # (computed once per proposal; see _fstat_reference_walker).
+        self._fstat_walker_ref = (
+            self._fstat_reference_walker(model)
+            if self.rj_fstat_dist_birth else 0
+        )
 
         units = self.band_units if self.num_bands > 1 else 1
         start_unit = model.random.randint(units)
@@ -1887,6 +1925,100 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "N_vals": band_sorter.band_N_vals[band_inds].copy(),
         }
 
+    def _log_dist_range(self, band_sorter):
+        """``log(width)`` of the birth container's uniform distance (slot 0).
+
+        The container draws ``dist ~ U[dist_lims]``, so its contribution to the
+        proposal ``logpdf`` for slot 0 is the constant ``-log(width)``
+        regardless of the drawn value. The F-stat distance proposal replaces
+        that term, so we need ``log(width)`` to neutralize it in the RJ factor.
+        Cached after first lookup.
+        """
+        if self._log_dist_range_cache is not None:
+            return self._log_dist_range_cache
+        cont = getattr(band_sorter, "rj_prop", None)
+        if isinstance(cont, dict):
+            cont = cont.get(self.branch_name)
+        val = float(np.log(40.0 - 0.001))  # distance-basis default fallback
+        try:
+            for inds, dist in cont.priors:
+                if 0 in list(inds) and hasattr(dist, "width"):
+                    val = float(np.log(float(dist.width)))
+                    break
+        except Exception:
+            pass
+        self._log_dist_range_cache = val
+        return val
+
+    def _fstat_dist_centers(self, model, rows_params, walker_ref):
+        """F-stat 4-parameter extrinsic maxima for a set of birth/death rows.
+
+        Runs ``gb.get_fstat_ll`` (which fills ``gb.A_max / phi0_max / iota_max /
+        psi_max`` via the Jaranowski-Krol amplitude-vector inversion) on the
+        intrinsic + sky columns of ``rows_params`` against the reference
+        walker's residual, and returns the maxima plus the F-stat value ``F``
+        (``SNR^2 = 2F``). The amplitude/phase/iota/psi input columns are
+        ignored by the F-stat, so the placeholder distance in ``rows_params``
+        does not matter. Returns cupy/numpy arrays on ``self.xp``.
+        """
+        xp = self.xp
+        gb = self.gb
+        acs = model.analysis_container_arr
+        x_tmp = self.transform_fn.both_transforms(rows_params, xp=xp)
+        # physical layout: [A, f0, fdot, fddot, phi0, iota, psi, alpha, delta]
+        x_in = x_tmp[:, xp.array([1, 2, 3, 7, 8])]
+        di = xp.full(rows_params.shape[0], int(walker_ref), dtype=xp.int32)
+        F = gb.get_fstat_ll(
+            x_in, acs.linear_data_arr, acs.linear_psd_arr,
+            data_index=di, noise_index=di, data_length=acs.end_shape[0],
+            data_splits=np.array([gb.gpus[0]]), phase_maximize=True,
+            return_cupy=True, N=512, **self.waveform_kwargs,
+        )
+        return (
+            xp.asarray(gb.A_max), xp.asarray(gb.phi0_max),
+            xp.asarray(gb.iota_max), xp.asarray(gb.psi_max), xp.asarray(F),
+        )
+
+    def _dist_center_and_width(self, rows_params, A_max, F):
+        """``(ln_center, sigma)`` of the slot-0 log proposal from the F-stat.
+
+        Distance basis: center ``ln dist* = ln(gb_amp_from_dist(f0,Mc,1)/A_max)``.
+        Amplitude basis: center ``ln A* = ln A_max`` (slot 0 is lnA directly).
+        Width ``sigma = 1/SNR`` with ``SNR = sqrt(max(2F, 1))`` (fractional
+        amplitude/distance uncertainty from the F-stat curvature), floored so a
+        weak/off-peak F-stat gives a broad -- not degenerate -- proposal.
+        """
+        xp = self.xp
+        A_max = xp.clip(A_max, 1e-300, None)
+        snr = xp.sqrt(xp.clip(2.0 * F, 1.0, None))
+        sigma = 1.0 / snr
+        if _gb_use_distance(self):
+            from ...stock.erebor.transforms import gb_amp_from_dist
+            k_amp = gb_amp_from_dist(rows_params[:, 1] * 1e-3, rows_params[:, 2], 1.0)
+            ln_center = xp.log(xp.clip(k_amp / A_max, 1e-300, None))
+        else:
+            ln_center = xp.log(A_max)
+        return ln_center, sigma
+
+    def _slot0_log_proposal(self, slot0_vals, ln_center, sigma):
+        """``log g`` of the slot-0 value under the F-stat lognormal proposal.
+
+        The proposal is Gaussian in the LOG of slot 0 (log-distance or lnA),
+        so the density in the sampled coordinate ``v`` is
+        ``g(v) = N(ln v; ln_center, sigma) / v`` (the ``1/v`` is the
+        ``ln v -> v`` Jacobian). For the amplitude basis slot 0 is ALREADY lnA
+        (sampled in log space), so there is no Jacobian term there.
+        """
+        xp = self.xp
+        lv = xp.log(xp.clip(slot0_vals, 1e-300, None)) if _gb_use_distance(self) else slot0_vals
+        logg = (
+            -0.5 * ((lv - ln_center) / sigma) ** 2
+            - xp.log(sigma) - 0.5 * np.log(2.0 * np.pi)
+        )
+        if _gb_use_distance(self):
+            logg = logg - lv  # Jacobian d(ln dist)/d(dist) = 1/dist
+        return logg
+
     def _run_rj_step(self, model, band_sorter, buffer_obj, band_temps, picked,
                      ll_change_log, prop_counts, acc_counts, round_i, scheduler):
         """Birth/death proposal for each picked source (vectorized over cells).
@@ -1963,6 +2095,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         h_h = cp.zeros_like(logp)
         keep = ~cp.isinf(curr_logp)
 
+        # Per-row RJ-factor correction from the F-stat distance-birth proposal
+        # (replaces the container's uniform slot-0 term with the lognormal
+        # proposal density). Stays None when that path is off.
+        _fstat_factor_corr = None
+
         # One-shot birth-funnel diagnostic (GB_RJ_BIRTH_DEBUG=1): report where
         # births die BEFORE the likelihood eval. A birth reaches scoring only
         # if the GLOBAL prior (self.gpu_priors) accepts its drawn coordinate
@@ -2031,7 +2168,53 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 return bad_rows
 
             oob_rows = xp.zeros(0, dtype=int)
-            if self.phase_maximize and len(birth_k):
+            if self.rj_fstat_dist_birth and (len(birth_k) or len(death_k)):
+                # ---- F-stat distance-birth proposal (step 2) ----
+                # Center each birth on the F-stat 4-parameter maximum: draw the
+                # distance from a lognormal about ``dist* = amp_from_dist(f0,Mc,
+                # 1)/A_max`` (A_max = gbgpu Jaranowski-Krol inversion), and set
+                # iota/psi to their F-stat maxima; phi0 is refined against the
+                # cell residual by the phase-max in ``_eval``. The proposal
+                # density enters the RJ factor (below), so unlike the step-1
+                # pin this is detailed-balance-valid. Deaths evaluate the
+                # reverse-proposal density at the removed source's own center.
+                walker_ref = getattr(self, "_fstat_walker_ref", 0)
+                _fstat_factor_corr = cp.zeros(len(ids))
+                _log_range = self._log_dist_range(band_sorter)
+                if len(birth_k):
+                    A_max, phi0_max, iota_max, psi_max, F = self._fstat_dist_centers(
+                        model, params[birth_k], walker_ref)
+                    ln_center, sigma = self._dist_center_and_width(
+                        params[birth_k], A_max, F)
+                    z = xp.asarray(cp.random.randn(len(birth_k)))
+                    ln_draw = ln_center + sigma * z
+                    if _gb_use_distance(self):
+                        params[birth_k, 0] = xp.exp(ln_draw)
+                    else:
+                        params[birth_k, 0] = ln_draw  # slot 0 is lnA already
+                    params[birth_k, 4] = xp.cos(iota_max % np.pi)
+                    params[birth_k, 5] = psi_max % np.pi
+                    params[birth_k, 3] = phi0_max % (2 * np.pi)
+                    _bl = self._slot0_log_proposal(params[birth_k, 0], ln_center, sigma)
+                    _fstat_factor_corr[birth_k] = -_bl - _log_range
+                    # Re-evaluate the global prior at the drawn distance/angles
+                    # (the earlier curr_logp used the placeholder draw); f0,
+                    # band and leaf-cap gating are unchanged by this overwrite.
+                    curr_logp[birth_k] = cp.asarray(
+                        self.gpu_priors[self.branch_name].logpdf(params[birth_k]))
+                    oob_rows = _eval(birth_k, True)
+                    if buffer_obj.phase_angle is not None:
+                        params[birth_k, 3] = params[birth_k, 3] - buffer_obj.phase_angle
+                if len(death_k):
+                    oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
+                    Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
+                        model, params[death_k], walker_ref)
+                    ln_center_d, sigma_d = self._dist_center_and_width(
+                        params[death_k], Ad, Fd)
+                    _dl = self._slot0_log_proposal(
+                        params[death_k, 0], ln_center_d, sigma_d)
+                    _fstat_factor_corr[death_k] = _dl + _log_range
+            elif self.phase_maximize and len(birth_k):
                 # Maximise the birth phase; deaths keep the true phase.
                 oob_rows = _eval(birth_k, True)
                 if buffer_obj.phase_angle is not None:
@@ -2041,21 +2224,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             else:
                 oob_rows = _eval(k_ids, False)
 
-            # Analytic amplitude maximisation for births (search heuristic;
-            # see ``self.rj_amp_maximize``). ``get_ll`` above already returned
-            # the CELL-residual ``d_h`` (phase-maximised to |D| when
-            # phase-max is on) and ``h_h`` for the DRAWN amplitude. The
-            # amplitude enters linearly, so the ML rescale is ``s = d_h/h_h``:
-            # rewrite the sampled amplitude/distance coordinate to ``s`` and
-            # set ``d_h, h_h`` to their maximised values ``0.5*d_h^2/h_h``
-            # (both equal ``SNR^2``) so the delta/opt_snr formulas below
-            # consume the maximised template. Scoring stays consistent because
-            # ``d_h, h_h`` come from the same buffer the birth is tested
-            # against -- NOT the global F-stat. NOTE (step 2): the prior
-            # ``curr_logp`` and the proposal ``factors`` were evaluated on the
-            # drawn coordinate; the proper RJ q-ratio / prior re-eval on the
-            # rescaled coordinate is a follow-up.
-            if self.rj_amp_maximize and len(birth_k):
+            # Legacy step-1 amplitude pin: scale the drawn amplitude by the
+            # empirical residual ratio ``s = d_h/h_h`` (a 1-parameter fit at the
+            # drawn iota/psi). Superseded by the F-stat distance proposal above
+            # and only runs when that path is OFF (GB_RJ_FSTAT_DIST_BIRTH=0).
+            if (not self.rj_fstat_dist_birth) and self.rj_amp_maximize and len(birth_k):
                 hh_b = h_h[birth_k]
                 good = hh_b > 0.0
                 hh_safe = xp.where(good, hh_b, 1.0)
@@ -2105,6 +2278,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         beta = band_temps[picked["band_inds"], picked["temp_inds"]]
         factors = band_sorter.factors[ids]
+        if _fstat_factor_corr is not None:
+            # Swap the container's uniform slot-0 proposal term for the F-stat
+            # lognormal distance proposal density (births: -log g; deaths:
+            # +log g; the +/-log_range neutralizes the uniform's constant).
+            factors = factors + _fstat_factor_corr
         lnpdiff = beta * delta_ll + (curr_logp - prev_logp) + factors
         accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
 
@@ -3583,6 +3761,20 @@ def para_log_like(
             **waveform_kwargs,
         )
 
+        # TODO(gb fstat-dist-birth step 2): examine exactly what this
+        # post-get_fstat_ll writeback does and WHY it lives here. It pins the
+        # sampling coords to the 4-parameter F-stat maximum -- amplitude
+        # (A_max, converted A_max -> distance for the distance basis),
+        # phi0_max, iota_max, psi_max -- computed by gbgpu.get_fstat_ll's
+        # Jaranowski-Krol inversion (a_i = M^-1 N -> A_plus/A_cross -> A_max;
+        # gbgpu.py:1370-1391). The RJ birth path must REUSE this A_max ->
+        # distance center (NOT the empirical d_h/h_h residual rescale added in
+        # step 1) and then draw the birth distance from a distribution about
+        # that center (ln dist ~ N(ln dist*, 1/SNR*), SNR*^2 = 2F), with the
+        # proposal density carried into the RJ factor. Decide here whether the
+        # deterministic pin of phi0/iota/psi is what we want for the birth
+        # proposal or whether those also need a spread for detailed balance.
+        #
         # Write the F-stat-maximized (amplitude, phi0, iota, psi) back into
         # the sampling coords. Slot 0 is lnA in the amplitude basis, but the
         # DISTANCE basis samples distance there -- convert A_max -> distance
