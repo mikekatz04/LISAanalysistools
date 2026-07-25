@@ -40,7 +40,30 @@ PATH = os.environ.get(
     os.path.expanduser("~/.mojito_cache/brickmarket/mojito_light_v1_0_0/"),
 )
 MBHB_L1 = os.path.join(PATH, "data", "MBHB", "L1")
-MBHB_ID = int(os.environ.get("MBHB_ID", "0"))
+
+
+def _first_available_mbhb_id():
+    """Lowest MBHB source id whose L1 data file is present in MBHB_L1. Not every
+    source's L1 file is downloaded on every machine (e.g. id 0 may be absent on
+    the cluster), so when MBHB_ID is unset we scan ids in order and take the
+    first that actually has a file. Filenames look like ``MBHB_..._source{id}_``
+    (same convention find_file matches)."""
+    ids = set()
+    for f in os.listdir(MBHB_L1):
+        if not f.startswith("MBHB_") or "source" not in f:
+            continue
+        try:
+            ids.add(int(f.split("source", 1)[1].split("_", 1)[0]))
+        except (IndexError, ValueError):
+            continue
+    if not ids:
+        raise FileNotFoundError(f"No MBHB L1 source files found in {MBHB_L1}")
+    return min(ids)
+
+
+# Explicit MBHB_ID wins; otherwise auto-pick the first id present on this box.
+MBHB_ID = int(os.environ["MBHB_ID"]) if "MBHB_ID" in os.environ else _first_available_mbhb_id()
+print(f"[mbhb] using source id {MBHB_ID}  (MBHB_L1={MBHB_L1})", flush=True)
 BACKEND = "cpu"; SENS_MODEL = "scirdv1"; DT = 10.0
 TDI_GEN_STR = "2nd generation"; TDI_CHAN = "XYZ"; NCH = 3
 F_MIN, F_MAX = 1e-4, 2.5e-2
