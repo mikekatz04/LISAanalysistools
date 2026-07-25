@@ -3782,7 +3782,7 @@ def para_log_like(
         # maximized amplitude lands out of the distance prior box and every
         # birth is rejected.
         if list(getattr(transform_fn, "input_basis", []))[:1] == ["dist"]:
-            from lisatools.globalfit.stock.erebor.transforms import gb_amp_from_dist
+            from ..stock.erebor.transforms import gb_amp_from_dist
 
             x[:, 0] = gb_amp_from_dist(x[:, 1] * 1e-3, x[:, 2], 1.0) / gb.A_max
         else:
