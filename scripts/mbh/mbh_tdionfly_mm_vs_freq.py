@@ -147,9 +147,21 @@ def gen_B(wave_gen, orbit, wf, window_t0, N_WIN, dur_s):
         m1, m2, s1z, s2z, dist, phi_ref, inc, psi, delta_t=DTMIN, t_min=-dur_s, t_ref=0.0)
     amp_m = np.asarray(sca) / 2.0; ph_m = np.pi - np.asarray(scp)
     nmodes = wave_gen.num_modes
-    _nt = np.asarray(nt[nm] + t_plunge + REF); nta = np.repeat(_nt[None, :], nmodes, axis=0)
+    _nt = np.asarray(nt[nm] + t_plunge + REF)
     amp = np.asarray(amp_m[0][:, nm[0]]); phase = np.asarray(ph_m[0][:, nm[0]])
-    tb = int(1000 / DT); eval_t = nta[:, tb:-tb]
+    # Zero-amp / held-phase tail past the last node. The on-the-fly TDI reads
+    # amp/phase at RETARDED times slightly past the final node (sky-dependent),
+    # running off the end of the spline -- silent garbage on CPU but an ILLEGAL
+    # MEMORY ACCESS on GPU. Mirror MBHTDIonFly's n_tail padding (bbhx
+    # mbhtdionfly.py). The eval window is unchanged; only the spline domain
+    # (t_input/amp/phase) is extended, so the mismatch is unaffected.
+    n_tail = 120; dt_tail = 10.0
+    tail_t = _nt[-1] + dt_tail * np.arange(1, n_tail + 1)
+    _nt = np.concatenate([_nt, tail_t])
+    amp = np.concatenate([amp, np.zeros((amp.shape[0], n_tail))], axis=1)
+    phase = np.concatenate([phase, np.repeat(phase[:, -1:], n_tail, axis=1)], axis=1)
+    nta = np.repeat(_nt[None, :], nmodes, axis=0)
+    tb = int(1000 / DT); eval_t = nta[:, tb:-(tb + n_tail)]
     g = TDTDIonTheFly(eval_t, amp, phase, sampling_frequency=1.0 / DT, num_sub=nmodes,
                       t_input=nta, tdi_config=tdi_config, orbits=orbit, force_backend=BACKEND)
     out = g(np.full(nmodes, 0.0), np.full(nmodes, psi), np.full(nmodes, ra), np.full(nmodes, dec),
