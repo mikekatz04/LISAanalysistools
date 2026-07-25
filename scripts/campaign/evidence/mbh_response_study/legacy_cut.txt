@@ -1,0 +1,6 @@
+[RESULT] branch=mbh id=18 tobs_d=47.54 data_snr=94.7704 dd=8.981421e+03 hh=8.967800e+03 dh=8.974534e+03 rr=1.524166e-01 overlap=0.99999180 mismatch=8.204e-06 rr_over_dd=1.697e-05 source_logL=-7.620829e-02 xcheck=True
+[RESULT] branch=mbh id=1 tobs_d=47.54 data_snr=182.8643 dd=3.343935e+04 hh=3.343920e+04 dh=3.343839e+04 rr=1.774436e+00 overlap=0.99997347 mismatch=2.653e-05 rr_over_dd=5.306e-05 source_logL=-8.872180e-01 xcheck=True
+[RESULT] branch=mbh id=17 tobs_d=47.54 data_snr=350.9250 dd=1.231484e+05 hh=1.232085e+05 dh=1.231784e+05 rr=1.035422e-01 overlap=0.99999961 mismatch=3.905e-07 rr_over_dd=8.408e-07 source_logL=-5.177110e-02 xcheck=True
+[RESULT] branch=mbh id=0 tobs_d=47.54 data_snr=180.4995 dd=3.258006e+04 hh=3.257993e+04 dh=3.257984e+04 rr=3.118686e-01 overlap=0.99999521 mismatch=4.786e-06 rr_over_dd=9.572e-06 source_logL=-1.559343e-01 xcheck=True
+[RESULT] branch=mbh id=19 tobs_d=47.54 data_snr=634.9803 dd=4.031999e+05 hh=4.038457e+05 dh=4.035202e+05 rr=5.103500e+00 overlap=0.99999400 mismatch=6.004e-06 rr_over_dd=1.266e-05 source_logL=-2.551750e+00 xcheck=True
+[RESULT] branch=mbh id=16 tobs_d=47.54 data_snr=67.6589 dd=4.577730e+03 hh=4.581777e+03 dh=4.579751e+03 rr=3.691912e-03 overlap=0.99999969 mismatch=3.055e-07 rr_over_dd=8.065e-07 source_logL=-1.845956e-03 xcheck=True
