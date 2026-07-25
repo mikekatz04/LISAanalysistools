@@ -440,6 +440,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._configure_domain(acs)
         self.phase_maximize = phase_maximize
 
+        # Analytic amplitude maximisation of RJ births (search heuristic that
+        # pairs with phase_maximize). The template is linear in amplitude, so
+        # a birth's add-delta ``s*d_h - 0.5*s^2*h_h`` is maximised at the ML
+        # scale ``s* = d_h/h_h``; rescaling the sampled amplitude/distance to
+        # s* lets a well-placed intrinsic draw (e.g. an F-stat proposal on a
+        # real peak) reach ``delta ~ 0.5*SNR^2`` instead of being rejected on
+        # a random prior-drawn amplitude. Like phase-max this relaxes strict
+        # reversibility, so it is a search move only. Defaults to follow
+        # ``phase_maximize``; ``GB_RJ_AMP_MAXIMIZE`` overrides.
+        _amp_env = os.environ.get("GB_RJ_AMP_MAXIMIZE")
+        self.rj_amp_maximize = (
+            bool(int(_amp_env)) if _amp_env is not None else bool(phase_maximize)
+        )
+
         self.snr_lim = snr_lim
 
         self.band_edges = self.xp.asarray(self.band_edges)
@@ -1976,6 +1990,38 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
             else:
                 oob_rows = _eval(k_ids, False)
+
+            # Analytic amplitude maximisation for births (search heuristic;
+            # see ``self.rj_amp_maximize``). ``get_ll`` above already returned
+            # the CELL-residual ``d_h`` (phase-maximised to |D| when
+            # phase-max is on) and ``h_h`` for the DRAWN amplitude. The
+            # amplitude enters linearly, so the ML rescale is ``s = d_h/h_h``:
+            # rewrite the sampled amplitude/distance coordinate to ``s`` and
+            # set ``d_h, h_h`` to their maximised values ``0.5*d_h^2/h_h``
+            # (both equal ``SNR^2``) so the delta/opt_snr formulas below
+            # consume the maximised template. Scoring stays consistent because
+            # ``d_h, h_h`` come from the same buffer the birth is tested
+            # against -- NOT the global F-stat. NOTE (step 2): the prior
+            # ``curr_logp`` and the proposal ``factors`` were evaluated on the
+            # drawn coordinate; the proper RJ q-ratio / prior re-eval on the
+            # rescaled coordinate is a follow-up.
+            if self.rj_amp_maximize and len(birth_k):
+                hh_b = h_h[birth_k]
+                good = hh_b > 0.0
+                hh_safe = xp.where(good, hh_b, 1.0)
+                s = xp.where(good, d_h[birth_k] / hh_safe, 1.0)
+                if _gb_use_distance(self):
+                    # A propto 1/dist  ->  dist_new = dist / s
+                    params[birth_k, 0] = xp.where(
+                        good, params[birth_k, 0] / s, params[birth_k, 0]
+                    )
+                else:
+                    params[birth_k, 0] = xp.where(
+                        good, params[birth_k, 0] + xp.log(s), params[birth_k, 0]
+                    )
+                snr2 = xp.where(good, d_h[birth_k] ** 2 / hh_safe, d_h[birth_k])
+                d_h[birth_k] = snr2
+                h_h[birth_k] = snr2
 
             delta_all = xp.where(alive, -d_h - 0.5 * h_h, d_h - 0.5 * h_h)
             delta_ll[keep] = delta_all[keep]
