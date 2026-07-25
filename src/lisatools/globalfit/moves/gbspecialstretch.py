@@ -1963,6 +1963,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         h_h = cp.zeros_like(logp)
         keep = ~cp.isinf(curr_logp)
 
+        # One-shot birth-funnel diagnostic (GB_RJ_BIRTH_DEBUG=1): report where
+        # births die BEFORE the likelihood eval. A birth reaches scoring only
+        # if the GLOBAL prior (self.gpu_priors) accepts its drawn coordinate
+        # AND it is in-band AND under the per-band leaf cap. If the F-stat
+        # birth container draws coordinates the global prior forbids (range
+        # mismatch in dist / Mc / fdot_astro_ratio), every birth is -inf here
+        # and the amplitude/phase maximisation below never runs.
+        if os.environ.get("GB_RJ_BIRTH_DEBUG"):
+            births = ~alive
+            nb = int(births.sum())
+            prior_inf = int((births & cp.isinf(logp)).sum())
+            oob_b = int((births & out_of_band).sum())
+            kept_b = int((births & keep).sum())
+            fac = band_sorter.factors[ids]
+            fb = fac[births]
+            logger.info(
+                "%s [birth-funnel] births=%d killed{global_prior_inf=%d "
+                "out_of_band=%d} kept=%d | factors[births] min=%.3g max=%.3g "
+                "nonfinite=%d | logp[births] min=%.3g max=%.3g",
+                self.name, nb, prior_inf, oob_b, kept_b,
+                float(fb.min()) if nb else 0.0,
+                float(fb.max()) if nb else 0.0,
+                int((~cp.isfinite(fb)).sum()) if nb else 0,
+                float(logp[births].min()) if nb else 0.0,
+                float(logp[births].max()) if nb else 0.0,
+            )
+
         if bool(keep.any()):
             k_ids = xp.arange(len(ids))[keep]
             birth_k = k_ids[~alive[keep]]
@@ -2031,6 +2058,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             opt_snr = xp.sqrt(xp.maximum(h_h, 0.0))
             reject = (~alive) & keep & (opt_snr < buffer_obj.opt_snr_rej_samp_limit)
             delta_ll[reject] = -1e300
+
+            if os.environ.get("GB_RJ_BIRTH_DEBUG"):
+                kb = (~alive) & keep
+                nkb = int(kb.sum())
+                if nkb:
+                    logger.info(
+                        "%s [birth-score] kept_births=%d snr_clamped=%d | "
+                        "delta_ll[kept] max=%.3g median=%.3g | opt_snr[kept] "
+                        "max=%.3g | snr_rej_limit=%.3g",
+                        self.name, nkb,
+                        int((reject & kb).sum()),
+                        float(delta_ll[kb].max()),
+                        float(xp.median(delta_ll[kb])),
+                        float(opt_snr[kb].max()),
+                        float(buffer_obj.opt_snr_rej_samp_limit),
+                    )
 
             self._debug_verify_rj_step(
                 buffer_obj, params, alive, slots, N_vals, delta_ll, keep,
