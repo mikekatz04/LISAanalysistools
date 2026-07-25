@@ -90,7 +90,9 @@ def build_gb_prior(*, A_lims, f0_lims_hz, fdot_lims, beta_lims=None):
         "f0":       uniform_dist(f0_lims_hz[0] * 1e3, f0_lims_hz[1] * 1e3),
         "fdot":     uniform_dist(fdot_lims[0], fdot_lims[1]),
         "phi0":     uniform_dist(0.0, 2.0 * np.pi),
-        "cos_iota": uniform_dist(*np.cos(iota_lims)),
+        # np.cos maps the increasing iota range to a DECREASING pair; newer
+        # eryn validates max > min, so sort.
+        "cos_iota": uniform_dist(*np.sort(np.cos(iota_lims))),
         "psi":      uniform_dist(0.0, np.pi),
         "lam":      uniform_dist(0.0, 2.0 * np.pi),
         "sin_beta": uniform_dist(*np.sin(beta_lims)),

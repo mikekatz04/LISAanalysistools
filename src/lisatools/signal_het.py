@@ -51,31 +51,48 @@ def bin_fold_real(data_complex, c0_complex, invC, n_b_idx_local, stride,
     Moved verbatim (numerics-identical) from the sig-het dev prototype's
     ``python_bin_fold_real``; the proof of the real-projection identity (1e-13) lives
     in the dev ``gb_sighet_realproj_proto.py``.
+
+    xp-generic: the array module follows ``data_complex`` (numpy or cupy) so
+    the GPU sig-het setup can fold device-resident residual slabs without a
+    host round-trip.
     """
+    try:
+        from .utils.utility import get_array_module
+        xp = get_array_module(data_complex)
+    except (ImportError, ValueError):
+        xp = np
+
     nch, Nf_act, _ = c0_complex.shape
     N_sparse_t = len(n_b_idx_local)
     bin_edges = np.arange(N_sparse_t + 1) * stride
     bin_edges[-1] = Nt_active
     bin_idx = np.repeat(np.arange(N_sparse_t), np.diff(bin_edges).astype(int))
     assert bin_idx.shape[0] == Nt_active
-    n_off = (np.arange(Nt_active) - np.asarray(n_b_idx_local)[bin_idx]).astype(float)
+    n_b_local_np = np.asarray(
+        n_b_idx_local.get() if hasattr(n_b_idx_local, "get") else n_b_idx_local
+    )
+    n_off_np = (np.arange(Nt_active) - n_b_local_np[bin_idx]).astype(float)
+    bin_idx_x = xp.asarray(bin_idx)
+    n_off = xp.asarray(n_off_np)
 
-    Re_d = np.real(data_complex)
-    iC = np.real(invC)
-    u = np.real(c0_complex)
-    w = np.imag(c0_complex)
+    c0_complex = xp.asarray(c0_complex)
+    invC = xp.asarray(invC)
+    Re_d = xp.real(data_complex)
+    iC = xp.real(invC)
+    u = xp.real(c0_complex)
+    w = xp.imag(c0_complex)
 
     # ---- <d|h> repack: A0re/A0im integrands packed into one complex ----
     if tdi_type == "XYZ":
-        Dre = np.einsum("cmn,cdmn->dmn", Re_d, iC)
+        Dre = xp.einsum("cmn,cdmn->dmn", Re_d, iC)
     else:
         Dre = Re_d * iC
     wA_re = Dre * u
     wA_im = Dre * w
-    A0p = np.zeros((nch, Nf_act, N_sparse_t), dtype=np.complex128)
-    A1p = np.zeros((nch, Nf_act, N_sparse_t), dtype=np.complex128)
+    A0p = xp.zeros((nch, Nf_act, N_sparse_t), dtype=xp.complex128)
+    A1p = xp.zeros((nch, Nf_act, N_sparse_t), dtype=xp.complex128)
     for b in range(N_sparse_t):
-        m = bin_idx == b
+        m = bin_idx_x == b
         nf = n_off[m]
         A0p[:, :, b] = 2.0 * (wA_re[:, :, m].sum(-1) + 1j * wA_im[:, :, m].sum(-1))
         A1p[:, :, b] = 2.0 * ((wA_re[:, :, m] * nf).sum(-1) + 1j * (wA_im[:, :, m] * nf).sum(-1))
@@ -89,12 +106,12 @@ def bin_fold_real(data_complex, c0_complex, invC, n_b_idx_local, stride,
         Ec = c0_complex.conj() * iC * c0_complex
         En = c0_complex * iC * c0_complex
         shp = (nch, Nf_act, N_sparse_t)
-    B0 = np.zeros(shp, dtype=np.complex128)
-    B1 = np.zeros(shp, dtype=np.complex128)
-    B0nc = np.zeros(shp, dtype=np.complex128)
-    B1nc = np.zeros(shp, dtype=np.complex128)
+    B0 = xp.zeros(shp, dtype=xp.complex128)
+    B1 = xp.zeros(shp, dtype=xp.complex128)
+    B0nc = xp.zeros(shp, dtype=xp.complex128)
+    B1nc = xp.zeros(shp, dtype=xp.complex128)
     for b in range(N_sparse_t):
-        m = bin_idx == b
+        m = bin_idx_x == b
         nf = n_off[m]
         B0[..., b] = Ec[..., m].sum(-1)
         B1[..., b] = (Ec[..., m] * nf).sum(-1)

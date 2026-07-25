@@ -243,6 +243,7 @@ def main():
                 2,
                 layer_df, dt,
                 3, 0, n_rfft,
+                -1.0,   # max_r clip (binding arg added later); <=0 = off
             )
 
             # ---- B) Stage 2a C++ (sparse, X_het from dense slice) ----
@@ -261,6 +262,7 @@ def main():
                 2,
                 layer_df, dt,
                 3, 0, N_SPARSE_FD,
+                -1.0,   # max_r clip (binding arg added later); <=0 = off
             )
 
             # ---- C) Stage 2b C++ (in-kernel X_het via gb_run_fd_wave_tdi) ----
@@ -274,6 +276,9 @@ def main():
                 d_h_s2b, h_h_s2b,
                 c0_sparse_all,
                 A0_all, A1_all, B0_all, B1_all,
+                # B0nc/B1nc: unused at project_real=0 (legacy complex path);
+                # binding validates their length, so pass zero blocks.
+                np.zeros_like(B0_all), np.zeros_like(B1_all),
                 window_full, n_sparse_local,
                 params_cand_all, params_ref_all, data_index_all,
                 1, 1,
@@ -286,6 +291,7 @@ def main():
                 Tobs, t_start,
                 3, 0, N_SPARSE_FD,
                 TUKEY_ALPHA,
+                -1.0, 0,   # max_r (off), project_real=0 (legacy complex)
             )
 
             ll_s1 = float(d_h_s1[0]) - 0.5 * float(h_h_s1[0])

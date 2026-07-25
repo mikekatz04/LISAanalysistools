@@ -418,6 +418,10 @@ def main():
                 layer_df, dt,
                 3, 0,
                 n_rfft,
+                # max_r amp/phase clip (binding arg added after this script
+                # was written); <=0 disables -> preserves the original
+                # prototype-comparison semantics.
+                float(os.environ.get("MAX_R", "-1.0")),
             )
             d_h_cpp = float(d_h_out[0])
             h_h_cpp = float(h_h_out[0])

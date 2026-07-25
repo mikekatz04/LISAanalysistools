@@ -63,6 +63,8 @@ def call_get_ll(cpp, tdi_wrap, params_cand, params_ref,
         d_h, h_h,
         c0_sparse_all,
         A0_all, A1_all, B0_all, B1_all,
+        # B0nc/B1nc: unused at project_real=0; binding validates length.
+        np.zeros_like(B0_all), np.zeros_like(B1_all),
         window_full, n_sparse_local,
         params_cand_all, params_ref, data_index_all,
         1, 1,
@@ -75,6 +77,7 @@ def call_get_ll(cpp, tdi_wrap, params_cand, params_ref,
         Tobs, t_start,
         3, 0, N_SPARSE_FD,
         tukey_alpha,
+        -1.0, 0,   # max_r (off), project_real=0 (legacy complex)
     )
     return float(d_h[0]), float(h_h[0])
 
@@ -248,6 +251,7 @@ def main():
             Tobs, t_start,
             3, 0, N_SPARSE_FD,
             TUKEY_ALPHA,
+            -1.0,   # max_r clip (binding arg added later); <=0 = off
         )
         ll_central_cpp = float(d_h_central_cpp[0]) - 0.5 * float(h_h_central_cpp[0])
 

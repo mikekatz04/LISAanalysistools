@@ -219,6 +219,7 @@ def main():
             2,
             layer_df, dt,
             3, 0, n_rfft,
+            -1.0,   # max_r clip (binding arg added later); <=0 = off
         )
 
         # ---- B) Stage 2a C++ (sparse FD input) ----
@@ -237,6 +238,7 @@ def main():
             2,
             layer_df, dt,
             3, 0, N_SPARSE_FD,
+            -1.0,   # max_r clip (binding arg added later); <=0 = off
         )
 
         # ---- C) Stage 2a Python mirror ----
