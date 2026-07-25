@@ -82,12 +82,31 @@ class JaxBase:
             raise TypeError(f"Unsupported type for _to_jax: {type(x)}")
         
     def _from_jax(self, x: jnp.ndarray, do_synchronize: bool = False, to_host: bool = False) -> np.ndarray | cp.ndarray:
-        """Convert a JAX array back to either a NumPy or CuPy array, depending on the backend."""
+        """Convert a JAX array back to a NumPy or CuPy array matching the consumer's backend.
+
+        The target is ``self.xp`` (numpy for a CPU backend, cupy for a GPU
+        backend), NOT merely "cupy if importable" -- otherwise a CPU-backend
+        waveform on a GPU box (cupy installed) would be handed device arrays
+        that its numpy response then rejects. Callers rely on this: they index
+        the result against other ``_from_jax`` outputs and pass it straight into
+        ``xp=self.xp`` helpers.
+        """
         if do_synchronize:
             x.block_until_ready()
 
-        x_cp = cp.from_dlpack(x)
-        if to_host and hasattr(x_cp, 'get'):
-            return x_cp.get()  # Convert to NumPy array
-        return x_cp
+        xp = getattr(self, "xp", np)
+        want_cupy = (
+            cupy_available
+            and not to_host
+            and getattr(xp, "__name__", "numpy") != "numpy"
+        )
+        if not want_cupy:
+            return np.asarray(x)  # JAX (any device) -> host numpy
+
+        # GPU backend: zero-copy when x is already on the device; otherwise
+        # (JAX resolved onto CPU) bounce through host so the result is cupy.
+        try:
+            return cp.from_dlpack(x)
+        except Exception:
+            return cp.asarray(np.asarray(x))
         
