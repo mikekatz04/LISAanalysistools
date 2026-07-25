@@ -32,7 +32,13 @@ from lisatools.sensitivity import XYZ2SensitivityMatrix
 import phentax.waveform as pw
 
 REF = 97729089.327664
-PATH = "/Users/mkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/"
+# Mojito brick location. Same knob as the stock global fits (fit.py
+# GeneralSettings.mojito_data_path): env MOJITO_DATA_PATH, home-relative
+# default so it resolves on any machine (laptop /Users/<u>, cluster /home/<u>).
+PATH = os.environ.get(
+    "MOJITO_DATA_PATH",
+    os.path.expanduser("~/.mojito_cache/brickmarket/mojito_light_v1_0_0/"),
+)
 MBHB_L1 = os.path.join(PATH, "data", "MBHB", "L1")
 MBHB_ID = int(os.environ.get("MBHB_ID", "0"))
 BACKEND = "cpu"; SENS_MODEL = "scirdv1"; DT = 10.0
