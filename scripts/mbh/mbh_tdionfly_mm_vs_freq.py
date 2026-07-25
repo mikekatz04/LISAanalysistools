@@ -115,11 +115,18 @@ def tukey(N, a):
 
 def build_orbit(window_t0, TOBS):
     orb = L1Orbits(find_file(MBHB_L1, "MBHB", MBHB_ID), force_backend=BACKEND, frame="icrs")
-    pad = 1.0e5
-    lo = max(window_t0 - pad, float(orb.sc_t0)); hi = min(window_t0 + TOBS + pad, float(orb._sc_t_base[-1]))
-    ltt_t = np.asarray(orb.ltt_t); m = (ltt_t >= lo) & (ltt_t <= hi)
-    orb.ltt = np.asarray(orb.ltt)[m].copy(); orb.ltt_t = ltt_t[m].copy(); orb.ltt_t0 = float(orb.ltt_t[0])
-    del ltt_t; gc.collect()
+    # The manual ltt trim is a low-memory hack for the 8.6 GB laptop: it shortens
+    # the ltt grid but NOT the spacecraft-position grid, leaving the two with
+    # inconsistent lengths. That is harmless for the windowed pyResponse path
+    # (gen_A) but makes the on-the-fly kernel index the ltt spline out of bounds
+    # on GPU (illegal global read). Only trim on CPU; on GPU configure the full
+    # orbit (ample memory), keeping the ltt and position grids consistent.
+    if BACKEND == "cpu":
+        pad = 1.0e5
+        lo = max(window_t0 - pad, float(orb.sc_t0)); hi = min(window_t0 + TOBS + pad, float(orb._sc_t_base[-1]))
+        ltt_t = np.asarray(orb.ltt_t); m = (ltt_t >= lo) & (ltt_t <= hi)
+        orb.ltt = np.asarray(orb.ltt)[m].copy(); orb.ltt_t = ltt_t[m].copy(); orb.ltt_t0 = float(orb.ltt_t[0])
+        del ltt_t; gc.collect()
     orb.configure(linear_interp_setup=True, dt=POS_DT)
     return orb
 
