@@ -31,6 +31,8 @@
 #   SKIP_FEW=1                    # skip FastEMRIWaveforms (EMRI users only)
 #   SKIP_PHENTAX=1                # skip phentax (MBH PhenomTHM)
 #   SKIP_LISA_ON_GPU=1            # skip retiring lisa-on-gpu (default)
+#   SKIP_GBGPU=1                  # pull GBGPU checkout but skip its (slow CUDA)
+#                                 # recompile; rebuild by hand when .cu changed
 #   GIT_PULL=1                    # (default) after checkout, fast-forward-pull
 #                                 # origin/<branch> for each package. The install
 #                                 # ABORTS if any package has diverged from its
@@ -63,6 +65,7 @@ ORG="${ORG:-lisa-analysis-tools}"
 SKIP_FEW="${SKIP_FEW:-0}"
 SKIP_PHENTAX="${SKIP_PHENTAX:-0}"
 SKIP_LISA_ON_GPU="${SKIP_LISA_ON_GPU:-1}"
+SKIP_GBGPU="${SKIP_GBGPU:-0}"
 GIT_PULL="${GIT_PULL:-1}"
 PULL_ONLY="${PULL_ONLY:-0}"
 if [ "${1:-}" = "--pull-only" ] || [ "${1:-}" = "pull" ]; then
@@ -205,8 +208,18 @@ editable_install "$LAT_DIR" dev "${LAPACKE_FLAGS[@]}"
 clone_or_reuse_sibling "$ORG" BBHx
 editable_install "$DEV_ROOT/BBHx" dev "${LAPACKE_FLAGS[@]}"
 
+# GBGPU carries the CUDA sig-het/chunked-het kernels, so its build is the
+# slowest in the stack. SKIP_GBGPU=1 leaves the existing editable install in
+# place (checkout is still ff-pulled so the source is current) and skips only
+# the recompile -- rebuild it by hand when its .cu/.cxx actually changed:
+#   cd GBGPU && pip install --no-build-isolation -e . \
+#       --config-settings=cmake.define.GBT_LAPACKE_DETECT_WITH=PKGCONFIG
 clone_or_reuse_sibling "$ORG" GBGPU
-editable_install "$DEV_ROOT/GBGPU" dev "${LAPACKE_FLAGS[@]}"
+if [ "$SKIP_GBGPU" != "1" ]; then
+    editable_install "$DEV_ROOT/GBGPU" dev "${LAPACKE_FLAGS[@]}"
+else
+    echo "===> SKIP_GBGPU=1: checkout pulled, skipping GBGPU recompile"
+fi
 
 if clone_or_reuse_sibling "$ORG" LATW; then
     # Tutorials repo: pure-Python, never pip-installed. The dev branch is the
