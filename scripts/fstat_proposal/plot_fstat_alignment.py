@@ -54,9 +54,20 @@ def _recovered_leaves(h5_path, it):
     with h5py.File(h5_path, "r") as f:
         chain = f["global_fit/chain/gb"]
         inds = f["global_fit/inds/gb"]
-        # layout (niter, ntemps, nwalkers, nleaves_max, ndim)
-        coords = np.asarray(chain[it][0])   # (nwalkers, nleaves_max, ndim)
-        alive = np.asarray(inds[it][0]).astype(bool)  # (nwalkers, nleaves_max)
+        # RAW-h5py layout is (niters, ngroups, ntemps, nwalkers, nleaves_max
+        # [, ndim]) -- the backend's own getters strip the ngroups axis, but
+        # this offline reader hits the file directly, so strip it here. Then
+        # take the COLD chain only: without the strip, [it][0] silently
+        # pools ALL temperatures (hot-chain leaves masqueraded as recovered
+        # sources in early versions of this plot).
+        coords = np.asarray(chain[it])
+        alive = np.asarray(inds[it])
+        while coords.ndim > 4:
+            coords = coords[0]
+        while alive.ndim > 3:
+            alive = alive[0]
+        coords = coords[0]                    # cold temp: (nwalkers, nleaves, ndim)
+        alive = alive[0].astype(bool)         # (nwalkers, nleaves)
     return coords[alive]
 
 
