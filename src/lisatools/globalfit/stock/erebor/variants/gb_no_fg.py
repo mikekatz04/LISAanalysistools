@@ -942,11 +942,18 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
             # leaves stay disjoint.
             _band_lims = (float(gb_info.f0_lims[0]), float(gb_info.f0_lims[1]))
             _injection_f0_lims = _band_lims
+            # Extend the subtraction window a BUFFER of WDM layers PAST the
+            # data-band edges: a source whose carrier sits just outside the
+            # band still has WDM support (wavelet ~a few layers wide) leaking
+            # INTO the edge layers, so it must be subtracted too or it leaves
+            # residual pinned at the first/last active layer. GB_SUBTRACT_
+            # BUFFER_LAYERS (default 8) sets the buffer in layers.
+            _buffer_hz = int(os.environ.get("GB_SUBTRACT_BUFFER_LAYERS", "8")) * layer_df
             _window_hz = max(
                 _band_lims[0] - float(general_info.min_freq),
                 float(general_info.max_freq) - _band_lims[1],
                 0.0,
-            )
+            ) + _buffer_hz
             _n_oob = subtract_gb_neighbors_from_data(
                 curr, acs, gb_info, gb_info.gb_wdm_comp,
                 exclude_f0_lims=_band_lims,

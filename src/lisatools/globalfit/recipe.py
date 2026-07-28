@@ -1526,6 +1526,12 @@ def subtract_gb_neighbors_from_data(
     mask = (((f0_hz >= lo - window_hz) & (f0_hz < lo))
             | ((f0_hz > hi) & (f0_hz <= hi + window_hz)))
     n_sub = int(mask.sum())
+    logger.info(
+        "Neighbor subtraction: catalogue f0 [%.6e, %.6e] Hz (%d sources); "
+        "window [%.6e, %.6e] Hz -> %d to subtract.",
+        float(f0_hz.min()), float(f0_hz.max()), len(f0_hz),
+        lo - window_hz, hi + window_hz, n_sub,
+    )
     if n_sub == 0:
         logger.info("Neighbor subtraction: no catalogue sources in the "
                     f"window around [{lo:.6e}, {hi:.6e}] Hz.")

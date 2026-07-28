@@ -1233,6 +1233,33 @@ class GlobalFit:
         state.log_like[:] = acs.likelihood(complex=False)
         logger.info(f"initial log likelihood (after recipe setup): {state.log_like[0]}")
 
+        # [layer-chi2 diag; GB_LAYER_CHI2=1] Where does the post-subtraction
+        # residual live in frequency? Edge layers -> out-of-window source
+        # leakage (not subtracted); center -> subtraction bug; even -> global.
+        if os.environ.get("GB_LAYER_CHI2"):
+            try:
+                _ds = self.curr.general_info.domain_settings
+                _res = np.asarray(asnumpy(acs.flatten()[0].data_res_arr.arr))
+                if _res.ndim == 3:  # (nchannels, Nf, Nt)
+                    _pl = (np.abs(_res) ** 2).sum(axis=(0, 2))  # -> (Nf,)
+                    _ldf = float(getattr(_ds, "layer_df", 0.0))
+                    _k0 = int(getattr(_ds, "_ind_min_f", 0))
+                    _k1 = int(getattr(_ds, "_ind_max_f", len(_pl) - 1))
+                    _lay = (list(range(_k0, _k1 + 1))
+                            if len(_pl) == (_k1 - _k0 + 1) else list(range(len(_pl))))
+                    _tot = float(_pl.sum()) or 1.0
+                    logger.info("[layer-chi2] residual |r|^2 by WDM layer (total=%.4e, active %d..%d):",
+                                _tot, _k0, _k1)
+                    for _i, _L in enumerate(_lay):
+                        if _pl[_i] > _tot * 1e-3:
+                            logger.info("  layer %3d  f=%.6e Hz  |r|^2=%.4e  (%.1f%%)",
+                                        _L, _L * _ldf, _pl[_i], 100.0 * _pl[_i] / _tot)
+                else:
+                    logger.warning("[layer-chi2] unexpected residual ndim=%d shape=%s",
+                                   _res.ndim, _res.shape)
+            except Exception as _e:  # diagnostic only, never break the run
+                logger.warning("[layer-chi2] failed: %r", _e)
+
         logger.debug("need to setup moves that use parallel resources")
 
         # backend.grow(1, None)
