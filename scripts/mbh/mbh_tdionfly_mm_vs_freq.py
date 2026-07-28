@@ -260,7 +260,9 @@ def main():
     print(f"  M={M:.3e} Msun  approx merger f22~{f22:.2e} Hz", flush=True)
 
     orbit = build_orbit(window_t0, TOBS)
+    print("[main] orbit built -> starting gen_A (pyResponse reference)", flush=True)
     A = gen_A(wf, window_t0, N_WIN, dur_s, orbit)
+    print("[main] gen_A done", flush=True)
     print(f"  coarse_graining_scale_factor = {CG_SCALE}", flush=True)
     wave_gen = pw.IMRPhenomTHM(T=dur_s, higher_modes=list(HMS), include_negative_modes=True,
                                t_low_fit=True, coarse_grain=True, atol=TOL, rtol=TOL,
