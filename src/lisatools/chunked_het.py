@@ -402,7 +402,9 @@ class WDMComputationsBase(LISAToolsParallelModule):
                     "consume linear_data_arr[0]). Multi-shard holders must "
                     "go through the LAT shard router (lisatools.globalfit."
                     "moves.gbbands._RoutedBandEngine), which presents one "
-                    "per-split view per call."
+                    "per-split view per call (engine ops via the instance "
+                    "router; raw-comp F-stat via the route_fstat_ll "
+                    "classmethod)."
                 )
             return wdm_holder
         from .analysiscontainer import AnalysisContainer, AnalysisContainerArray

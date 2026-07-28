@@ -122,6 +122,24 @@ class _StubComp:
             np.fill_diagonal(out[r], diag[r])
         return out
 
+    def get_fstat_ll_wdm(self, params, wdm_holder, data_index=None,
+                         noise_index=None, **kwargs):
+        """F-stat raw-comp stand-in: (N (n,4), M (n,10)) encode
+        1000*device + intra (+ column offset) so routing + reassembly
+        order is checkable, mirroring ``information_matrix``."""
+        assert len(wdm_holder.linear_data_arr) == 1, "comp must see one shard"
+        assert len(wdm_holder) == wdm_holder.acs_total_entries
+        intra = np.asarray(data_index)
+        dev = wdm_holder.gpus[0] if wdm_holder.gpus is not None else 0
+        self.calls.append(dict(kind="fstat", holder=wdm_holder,
+                               intra=intra.copy(),
+                               nparams=np.asarray(params).shape[0],
+                               kwargs=dict(kwargs)))
+        base = 1000.0 * dev + intra.astype(float)
+        N = base[:, None] + np.arange(4)[None, :]
+        M = base[:, None] + np.arange(10)[None, :]
+        return N, M
+
 
 class ShardRouterTest(unittest.TestCase):
     PER_BAND = (3, 8)
@@ -325,6 +343,63 @@ class ShardRouterTest(unittest.TestCase):
         self.assertIs(comp.calls[0]["holder"], single)  # no view wrapping
         for row, g in enumerate(idx):
             np.testing.assert_allclose(np.diag(info[row]), float(g))
+
+    def test_fstat_routes_and_reassembles(self):
+        comp = _StubComp()
+        N, M = self.RoutedEngine.route_fstat_ll(
+            comp.get_fstat_ll_wdm, self.holder, self.params,
+            data_index=self.data_index, noise_index=self.data_index,
+            convert_to_ra_dec=False)
+        dev = np.asarray(self.holder.gpu_map)[self.data_index].astype(float)
+        intra = self._expected_intra(self.data_index).astype(float)
+        base = 1000.0 * dev + intra
+        np.testing.assert_array_equal(
+            np.asarray(N), base[:, None] + np.arange(4)[None, :])
+        np.testing.assert_array_equal(
+            np.asarray(M), base[:, None] + np.arange(10)[None, :])
+        # every comp call saw a single-shard view on its owning device,
+        # with the extra kwarg passed through
+        fcalls = [c for c in comp.calls if c.get("kind") == "fstat"]
+        for call in fcalls:
+            self.assertEqual(len(call["holder"].linear_data_arr), 1)
+            self.assertIs(call["kwargs"]["convert_to_ra_dec"], False)
+        seen = sorted(c["holder"].gpus[0] for c in fcalls)
+        self.assertEqual(
+            seen,
+            sorted(set(
+                np.asarray(self.holder.gpu_map)[self.data_index].tolist())),
+        )
+
+    def test_fstat_single_shard_passthrough(self):
+        comp = _StubComp()
+        single = FakeMultiShardACA(self.PER_BAND, 4, 1, layout="striped")
+        di = np.array([2, 0, 1])
+        params = self.params[:3]
+        self.RoutedEngine.route_fstat_ll(
+            comp.get_fstat_ll_wdm, single, params,
+            data_index=di, noise_index=di)
+        # passthrough: comp saw the ORIGINAL holder and ORIGINAL indices
+        self.assertEqual(len(comp.calls), 1)
+        self.assertIs(comp.calls[0]["holder"], single)
+        np.testing.assert_array_equal(comp.calls[0]["intra"], di)
+
+    def test_fstat_multi_shard_requires_data_index(self):
+        comp = _StubComp()
+        with self.assertRaises(ValueError):
+            self.RoutedEngine.route_fstat_ll(
+                comp.get_fstat_ll_wdm, self.holder, self.params,
+                data_index=None)
+
+    def test_fstat_rejects_slab_holders(self):
+        comp = _StubComp()
+        self.holder.slab_min_f = np.zeros(self.NUM_ACS)
+        try:
+            with self.assertRaises(NotImplementedError):
+                self.RoutedEngine.route_fstat_ll(
+                    comp.get_fstat_ll_wdm, self.holder, self.params,
+                    data_index=self.data_index)
+        finally:
+            del self.holder.slab_min_f
 
     def test_sig_het_in_model_rejected_multi_shard(self):
         self.engine.return_truthy = True

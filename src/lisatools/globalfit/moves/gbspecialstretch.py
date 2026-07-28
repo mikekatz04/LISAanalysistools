@@ -2014,17 +2014,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Jaranowski-Krol maximization -- is shared and identical. NOTE: routed
         through the NEW GBFDComputations / GBWDMComputations, never the legacy
         SharedMemoryGBGPU ``gb.get_fstat_ll`` (FD-only; floods a WDM buffer).
+
+        Multi-GPU: the comps are single-shard by contract, so the call goes
+        through :meth:`_RoutedBandEngine.route_fstat_ll` (the raw-comp shard
+        route, same fashion as ``get_ll`` / ``route_information_matrix``) --
+        single-shard holders pass straight through; on a sharded parent ACA
+        the reference walker's rows run on its owning device and (N, M) come
+        back on the caller's device.
         """
         xp = self.xp
         di = xp.full(params_phys.shape[0], int(walker_ref), dtype=xp.int32)
         holder = model.analysis_container_arr
-        if isinstance(self._basis_settings, FDSettings):
-            return self.gb_fd_comp.get_fstat_ll_fd(
-                params_phys, holder, data_index=di, noise_index=di,
-                convert_to_ra_dec=False)
-        return self.gb_wdm_comp.get_fstat_ll_wdm(
-            params_phys, holder, data_index=di, noise_index=di,
-            convert_to_ra_dec=False)
+        comp_method = (
+            self.gb_fd_comp.get_fstat_ll_fd
+            if isinstance(self._basis_settings, FDSettings)
+            else self.gb_wdm_comp.get_fstat_ll_wdm
+        )
+        return _RoutedBandEngine.route_fstat_ll(
+            comp_method, holder, params_phys,
+            data_index=di, noise_index=di, convert_to_ra_dec=False)
 
     def _fstat_dist_centers(self, model, rows_params, walker_ref):
         """F-stat 4-parameter extrinsic maxima for a set of birth/death rows.

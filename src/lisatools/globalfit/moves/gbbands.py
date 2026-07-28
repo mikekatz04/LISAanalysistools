@@ -677,6 +677,63 @@ class _RoutedBandEngine:
                 pieces.append((pos, asnumpy(out_s)))
         return cls._assemble(num, pieces, 0.0, xp)
 
+    @classmethod
+    def route_fstat_ll(cls, comp_method, holder, params_phys, *,
+                       data_index, noise_index=None, **kwargs):
+        """Route a raw F-stat comp entry per shard.
+
+        ``comp_method`` is a bound single-shard F-stat entry
+        (``GBWDMComputations.get_fstat_ll_wdm`` /
+        ``GBFDComputations.get_fstat_ll_fd``): batched over binaries,
+        consuming ``holder.linear_data_arr[0]`` and returning
+        ``(N (num_bin, 4), M_upper (num_bin, 10))``. Like
+        :meth:`route_information_matrix` it runs on the RAW comp (the
+        F-stat basis filters are not an engine op), so it gets its own
+        classmethod entry rather than the instance router. Single-shard
+        holders pass straight through (no overhead). Multi-shard holders
+        are partitioned by the owning shard of each binary's walker
+        (``data_index``), computed per shard against a persistent
+        :class:`_ShardHolderView` inside the owning device context, and
+        ``(N, M)`` are reassembled full-length on the caller's device
+        (host-routed, no P2P).
+        """
+        if not cls._is_multi(holder):
+            return comp_method(
+                params_phys, holder, data_index=data_index,
+                noise_index=noise_index, **kwargs)
+        if data_index is None:
+            raise ValueError(
+                "route_fstat_ll requires an explicit data_index on "
+                "multi-shard holders (the all-zeros default is only "
+                "meaningful for a single-shard buffer).")
+        if getattr(holder, "slab_min_f", None) is not None:
+            raise NotImplementedError(
+                "route_fstat_ll does not support narrow per-band slab "
+                "holders (slab_min_f is per buffer slot and would need the "
+                "per-shard slice fill_template applies); F-stat runs on the "
+                "parent residual ACA, which carries no slab metadata.")
+        xp = holder.xp
+        views = cls._shard_views(holder)
+        parts = cls._partition(holder, data_index, noise_index)
+        params_host = np.atleast_2d(asnumpy(params_phys))
+        num = int(params_host.shape[0])
+        N_pieces, M_pieces = [], []
+        for view, (pos, intra, intra_noise) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            with device_context(xp, view.device):
+                N_s, M_s = comp_method(
+                    xp.asarray(params_host[pos]), view,
+                    data_index=intra,
+                    noise_index=intra if intra_noise is None else intra_noise,
+                    **kwargs)
+                N_pieces.append((pos, asnumpy(N_s)))
+                M_pieces.append((pos, asnumpy(M_s)))
+        return (
+            cls._assemble(num, N_pieces, 0.0, xp),
+            cls._assemble(num, M_pieces, 0.0, xp),
+        )
+
 
 class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     """Per-(temp, walker, band) scratch buffers for the GB special moves.
