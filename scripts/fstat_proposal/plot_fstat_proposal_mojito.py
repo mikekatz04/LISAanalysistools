@@ -579,50 +579,91 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
     f0_hi = float(gb_info.f0_lims[-1]) * 1e3
     spacing = float(os.environ.get("FSTAT_F0_SPACING_MHZ", 0.5 / Tobs * 1e3))
     f0_nodes = np.arange(f0_lo, f0_hi + 0.5 * spacing, spacing)
-    from lisatools.sampling.fstat_proposal import fstat_knob
-    n_sky = fstat_knob("FSTAT_COMB_NSKY", int)
-    # golden-ratio spread over the sphere
-    ks = np.arange(n_sky)
-    sky_sd = -1.0 + 2.0 * (ks + 0.5) / n_sky
-    sky_al = (2.0 * np.pi * ks * 0.6180339887) % (2.0 * np.pi)
     mc_fix = _comb_mc_fix(gb_info)
-
     n_nodes = len(f0_nodes)
-    print(f"[comb] {n_nodes} f0 nodes x {n_sky} sky points = "
-          f"{n_nodes * n_sky} evals in ONE chunked stream (spacing "
-          f"{spacing:.3e} mHz = {spacing / (1e3 / Tobs):.2f}/Tobs; Mc fixed "
-          f"at {mc_fix:.3f})", flush=True)
-
-    # Assemble the full (sky-major) design once, sweep once, scatter back.
     xp = gb_wdm_comp.xp
-    params = np.zeros((n_sky * n_nodes, 9))
-    params[:, 0] = 1e-22
-    params[:, 1] = np.tile(f0_nodes, n_sky) * 1e-3
-    params[:, 2] = get_fdot(f=params[:, 1], Mc=np.full(params.shape[0], mc_fix))
-    params[:, 5] = 0.5 * np.pi
-    params[:, 7] = np.repeat(sky_al, n_nodes)
-    params[:, 8] = np.arcsin(np.repeat(sky_sd, n_nodes))
-    F_dev = _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params,
-                                 label=":comb").reshape(n_sky, n_nodes)
-    F_max_dev = F_dev.max(axis=0)
 
+    # Per-node sky count. FIXED if FSTAT_COMB_NSKY is set (back-compat);
+    # otherwise ADAPTIVE: the comb resolves a source through its Doppler ridge
+    # (peak shift ~ f0*v/c), so the sky grid must scale as ~(f0*Tobs*v/c)^2.
+    # Floored at FSTAT_COMB_NSKY_MIN (default 16, "something we know works"),
+    # capped at FSTAT_COMB_NSKY_MAX, and snapped up to powers of two so the
+    # sweep runs as a few rectangular (n_sky x n_nodes_at_level) batches
+    # instead of one giant fixed-n_sky design that over-samples low f.
+    vc = float(os.environ.get("FSTAT_COMB_SKY_VC", "1e-4"))
+    nsky_min = int(os.environ.get("FSTAT_COMB_NSKY_MIN", "16"))
+    nsky_max = int(os.environ.get("FSTAT_COMB_NSKY_MAX", "512"))
+    _fixed = os.environ.get("FSTAT_COMB_NSKY", "").strip()
+    if _fixed:
+        nsky_per_node = np.full(n_nodes, int(_fixed), dtype=int)
+    else:
+        req = np.ceil((f0_nodes * 1e-3 * Tobs * vc) ** 2)
+        lvl = (2 ** np.ceil(np.log2(np.clip(req, 1.0, None)))).astype(int)
+        nsky_per_node = np.clip(lvl, nsky_min, nsky_max).astype(int)
+
+    def _sky_grid(n):
+        # golden-ratio spread over the sphere
+        ks = np.arange(n)
+        return ((2.0 * np.pi * ks * 0.6180339887) % (2.0 * np.pi),  # alpha
+                -1.0 + 2.0 * (ks + 0.5) / n)                         # sin_delta
+
+    levels = np.unique(nsky_per_node)
+    print(f"[comb] {n_nodes} f0 nodes; sky "
+          f"{'FIXED=' + str(int(levels[0])) if len(levels) == 1 else 'ADAPTIVE'} "
+          f"[{int(nsky_per_node.min())}..{int(nsky_per_node.max())}] over "
+          f"{len(levels)} level(s) (min={nsky_min}, ~(f0*Tobs*{vc:g})^2); "
+          f"spacing {spacing:.3e} mHz = {spacing / (1e3 / Tobs):.2f}/Tobs; "
+          f"Mc fixed {mc_fix:.3f}", flush=True)
+
+    # Sweep each sky level as its own rectangular batch; fill the per-node max
+    # F and the best-sky (alpha, sin_delta) per node (the sky row that won).
+    F_max_host = np.zeros(n_nodes)
+    best_al_host = np.zeros(n_nodes)
+    best_sd_host = np.zeros(n_nodes)
+    total_evals = 0
+    for lv in levels:
+        idx = np.where(nsky_per_node == lv)[0]
+        nodes = f0_nodes[idx]
+        nn = len(nodes)
+        al, sd = _sky_grid(int(lv))
+        al = np.asarray(al); sd = np.asarray(sd)
+        params = np.zeros((int(lv) * nn, 9))
+        params[:, 0] = 1e-22
+        params[:, 1] = np.tile(nodes, int(lv)) * 1e-3
+        params[:, 2] = get_fdot(f=params[:, 1], Mc=np.full(params.shape[0], mc_fix))
+        params[:, 5] = 0.5 * np.pi
+        params[:, 7] = np.repeat(al, nn)
+        params[:, 8] = np.arcsin(np.repeat(sd, nn))
+        Fd = _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params,
+                                  label=f":comb.nsky{int(lv)}").reshape(int(lv), nn)
+        _kb = _to_host(Fd.argmax(axis=0)).astype(int)
+        F_max_host[idx] = _to_host(Fd.max(axis=0))
+        best_al_host[idx] = al[_kb]
+        best_sd_host[idx] = sd[_kb]
+        total_evals += int(lv) * nn
+    print(f"[comb] total {total_evals} F-stat evals across {len(levels)} sky "
+          f"level(s)", flush=True)
+
+    F_max_dev = xp.asarray(F_max_host)
     peaks = select_comb_peaks(f0_nodes, F_max_dev, gb_info, spacing, xp)
     print("[comb] top peaks (f0 [mHz], F, band):", flush=True)
     for f0p, Fp, _, bi in peaks[:10]:
         print(f"[comb]   {f0p:.5f}  {Fp:10.2f}  band {int(bi)}", flush=True)
 
-    F = _to_host(F_dev)
-    F_max = _to_host(F_max_dev)
+    F_max = F_max_host
 
     # Persist the sweep BEFORE any plotting -- a cosmetic figure failure must
     # never lose the kernel work. peaks is (N, 3): (f0, F, band_idx) +
     # band_edges so the runner/diagnostics can bin without a rebuild.
     if cache_path:
         comb_cache = cache_path.replace(".npz", "_comb.npz")
+        _al_top, _sd_top = _sky_grid(int(nsky_per_node.max()))
         np.savez(comb_cache, f0_nodes_mHz=f0_nodes, F_max=F_max,
                  peaks=peaks[:, (0, 1, 3)] if len(peaks) else np.empty((0, 3)),
                  band_edges=np.asarray(gb_info.band_edges, dtype=float),
-                 F_all=F, sky_alpha=sky_al, sky_sin_delta=sky_sd)
+                 F_all=F_max[None, :], sky_alpha=_al_top, sky_sin_delta=_sd_top,
+                 best_alpha=best_al_host, best_sin_delta=best_sd_host,
+                 nsky_per_node=nsky_per_node)
         print(f"[cache] wrote {comb_cache}", flush=True)
 
     # --- comb figure: F(f0) vs the catalogue comb + proposal draws ---
@@ -682,8 +723,10 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
     except Exception as e:  # pragma: no cover - figure is cosmetic
         print(f"[plot] comb figure failed (data cached): {e}", flush=True)
 
-    extras = dict(sky_alpha=sky_al, sky_sin_delta=sky_sd, F_all=F,
-                  mc_fix=mc_fix, spacing=spacing)
+    _al_top, _sd_top = _sky_grid(int(nsky_per_node.max()))
+    extras = dict(sky_alpha=_al_top, sky_sin_delta=_sd_top, F_all=F_max[None, :],
+                  best_alpha=best_al_host, best_sin_delta=best_sd_host,
+                  mc_fix=mc_fix, spacing=spacing, nsky_per_node=nsky_per_node)
     return f0_nodes, F_max, peaks, extras
 
 
@@ -710,9 +753,14 @@ def run_peak_profile(gb_wdm_comp, wdm_holder, general_info, src, peak_f0_mHz,
     # comb's value at the global-max column (rank-0 peak; profile only runs
     # there by default).
     F_all = comb_extras["F_all"]
-    k_best = int(np.argmax(F_all[:, int(np.argmax(F_all.max(axis=0)))]))
-    alpha_best = float(comb_extras["sky_alpha"][k_best])
-    sd_best = float(comb_extras["sky_sin_delta"][k_best])
+    best_col = int(np.argmax(np.asarray(F_all).max(axis=0)))
+    if comb_extras.get("best_alpha") is not None:  # adaptive sky: per-node best
+        alpha_best = float(np.asarray(comb_extras["best_alpha"])[best_col])
+        sd_best = float(np.asarray(comb_extras["best_sin_delta"])[best_col])
+    else:                                          # legacy fixed sky grid
+        k_best = int(np.argmax(np.asarray(F_all)[:, best_col]))
+        alpha_best = float(comb_extras["sky_alpha"][k_best])
+        sd_best = float(comb_extras["sky_sin_delta"][k_best])
     mc_fix = float(comb_extras["mc_fix"])
     print(f"[profile] peak {rank}: {len(f0_nodes)} nodes, spacing "
           f"{spacing:.2e} mHz (= 1/(10 Tobs)), sky (alpha={alpha_best:.3f}, "
@@ -1252,6 +1300,8 @@ def main():
             spacing = float(f0_nodes[1] - f0_nodes[0])
             extras = dict(sky_alpha=d["sky_alpha"],
                           sky_sin_delta=d["sky_sin_delta"], F_all=d["F_all"],
+                          best_alpha=d["best_alpha"] if "best_alpha" in d else None,
+                          best_sin_delta=d["best_sin_delta"] if "best_sin_delta" in d else None,
                           mc_fix=_comb_mc_fix(gb_info), spacing=spacing)
             peaks = select_comb_peaks(f0_nodes, F_max, gb_info, spacing,
                                       gb_wdm_comp.xp)

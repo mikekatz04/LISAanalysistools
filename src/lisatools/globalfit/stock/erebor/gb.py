@@ -43,6 +43,15 @@ class GBSettings(Settings):
     delta_lims: typing.List[float] = dataclasses.field(default_factory=list)
     start_freq: float = 0.0001  # this might get adjusted ?
     end_freq: float = 0.025
+    # Explicit band_edges override (Hz, ascending, one value per band
+    # boundary). If set (e.g. ``fit.gb.band_edges_override = np.array([...])``)
+    # it REPLACES the per-WDM-layer edges derived in ``compute_band_edges``.
+    band_edges_override: typing.Optional[typing.Any] = None
+    # Subdivide each WDM layer into ``subband_divisor`` sub-bands when deriving
+    # band_edges (2 -> half-layer_df edges). Ignored if band_edges_override set.
+    subband_divisor: int = dataclasses.field(
+        default_factory=env_default("GB_SUBBAND_DIVISOR", 1, int)
+    )
     oversample: int = 4. # FD
     extra_buffer: int = 5
     start_resample_iter: Optional[typing.Tuple[int]] = (-1,)  # -1 so that it starts right at the start of PE
@@ -517,25 +526,37 @@ class GBSetup(Setup, GBSettings):
                     "or the GB start/end_freq.".format(wdm_min, wdm_max)
                 )
 
-        if isinstance(self.domain_settings, WDMSettings):
-            # WDM path: one band per WDM frequency layer. Edges land on
-            # ``k * layer_df`` boundaries so the band grid aligns with the
-            # WDM grid; ``band_N_vals`` is unused by the WDM likelihood
-            # engine but is preserved with one entry per band for shape
-            # parity with the FD layout.
+        _edges_override = getattr(self, "band_edges_override", None)
+        if _edges_override is not None and np.size(_edges_override) >= 2:
+            # Explicit user override: use the supplied band_edges verbatim
+            # (Hz, ascending). ``fit.gb.band_edges_override = np.array([...])``.
+            self.band_edges = np.asarray(_edges_override, dtype=float)
+            self.band_N_vals = np.asarray(
+                [
+                    get_N(1e-30, edge, self.Tobs, oversample=self.oversample).item()
+                    for edge in self.band_edges[:-1]
+                ]
+            )
+        elif isinstance(self.domain_settings, WDMSettings):
+            # WDM path: one band per WDM frequency layer, or per
+            # 1/``subband_divisor`` layer (GB_SUBBAND_DIVISOR=2 -> half-layer
+            # edges). Edges land on ``k * layer_df / div`` boundaries so the
+            # band grid aligns with the WDM grid; ``band_N_vals`` is unused by
+            # the WDM likelihood engine but is preserved for shape parity.
             wdm = self.domain_settings
             layer_df = float(wdm.layer_df)
-            k_lo = int(np.ceil(self.start_freq / layer_df))
-            k_hi = int(np.floor(self.end_freq / layer_df))
+            div = max(1, int(getattr(self, "subband_divisor", 1)))
+            k_lo = int(np.ceil(self.start_freq / layer_df)) * div
+            k_hi = int(np.floor(self.end_freq / layer_df)) * div
             if k_hi <= k_lo:
                 raise ValueError(
                     "GB frequency range [{:.4e}, {:.4e}] spans fewer than "
-                    "one WDM layer (layer_df={:.4e}).".format(
-                        self.start_freq, self.end_freq, layer_df
+                    "one WDM sub-band (layer_df/div={:.4e}).".format(
+                        self.start_freq, self.end_freq, layer_df / div
                     )
                 )
             self.band_edges = np.asarray(
-                [k * layer_df for k in range(k_lo, k_hi + 1)]
+                [k * layer_df / div for k in range(k_lo, k_hi + 1)]
             )
             self.band_N_vals = np.asarray(
                 [
