@@ -40,17 +40,23 @@ def bin_fold_real(data_complex, c0_complex, invC, n_b_idx_local, stride,
                   Nt_active, tdi_type="XYZ"):
     """REAL-projection sig-het bin-fold coefficients (match the REAL WDM likelihood).
 
-    ``data_complex`` / ``c0_complex`` ``(nch, Nf_active, Nt_active)`` complex WDM
+    ``data_complex`` / ``c0_complex`` ``(..., nch, Nf_active, Nt_active)`` complex WDM
     (data, reference carrier); ``invC`` the WDM inverse-sensitivity. Returns
-    ``A0p, A1p`` ``(nch, Nf_active, N_sparse_t)`` (the repacked ``<d|h>`` coeffs the
+    ``A0p, A1p`` ``(..., nch, Nf_active, N_sparse_t)`` (the repacked ``<d|h>`` coeffs the
     kernel forms ``0.5 Re(A0p*r + A1p*dr)`` from) and ``B0, B1, B0nc, B1nc``
-    (``(nch, nch, Nf_active, N_sparse_t)`` for ``tdi_type="XYZ"``; ``(nch, ...)``
+    (``(..., nch, nch, Nf_active, N_sparse_t)`` for ``tdi_type="XYZ"``; ``(..., nch, ...)``
     otherwise) -- the conj + nonconj ``<h|h>`` blocks that give the real projection
     ``0.5 Re(B0 conj(rc)rc2 + B0nc rc rc2 + B1/B1nc dr terms)``.
 
-    Moved verbatim (numerics-identical) from the sig-het dev prototype's
-    ``python_bin_fold_real``; the proof of the real-projection identity (1e-13) lives
-    in the dev ``gb_sighet_realproj_proto.py``.
+    Any number of LEADING BATCH AXES is supported and broadcast between the
+    three inputs, so a whole in-model block folds in ONE call (per-source
+    residual + invC + reference) instead of one call per source, and a shared
+    ``data_complex``/``invC`` may be folded against a stack of references.
+
+    Ported from the sig-het dev prototype's ``python_bin_fold_real``; the proof of
+    the real-projection identity (1e-13) lives in the dev
+    ``gb_sighet_realproj_proto.py``. Term-for-term identical to that prototype
+    EXCEPT for summation order -- see the segment-matrix note below.
 
     xp-generic: the array module follows ``data_complex`` (numpy or cupy) so
     the GPU sig-het setup can fold device-resident residual slabs without a
@@ -62,7 +68,6 @@ def bin_fold_real(data_complex, c0_complex, invC, n_b_idx_local, stride,
     except (ImportError, ValueError):
         xp = np
 
-    nch, Nf_act, _ = c0_complex.shape
     N_sparse_t = len(n_b_idx_local)
     bin_edges = np.arange(N_sparse_t + 1) * stride
     bin_edges[-1] = Nt_active
@@ -72,8 +77,24 @@ def bin_fold_real(data_complex, c0_complex, invC, n_b_idx_local, stride,
         n_b_idx_local.get() if hasattr(n_b_idx_local, "get") else n_b_idx_local
     )
     n_off_np = (np.arange(Nt_active) - n_b_local_np[bin_idx]).astype(float)
-    bin_idx_x = xp.asarray(bin_idx)
-    n_off = xp.asarray(n_off_np)
+
+    # Segment-sum matrices. Every per-bin reduction below is a sum over a
+    # CONTIGUOUS run of the time axis (bin b spans [bin_edges[b],
+    # bin_edges[b+1])), so the whole bin loop collapses into two
+    # (Nt_active, N_sparse_t) matmuls: ``S`` for the plain sum and ``Sw`` for
+    # the n_off-weighted sum. That replaces 2*N_sparse_t boolean-masked
+    # reductions -- each a separate kernel launch allocating a gather -- with
+    # 6 batched GEMMs, and it broadcasts over leading batch axes for free.
+    # Built on the host and uploaded once (tiny; independent of the batch).
+    #
+    # NOTE: summation ORDER changes vs the old per-bin ``.sum(-1)``, so
+    # results move at FP epsilon (~1e-16 relative). That is far inside the
+    # 1e-10/1e-12 sig-het parity budgets and the ~1e-15 C++-mirror check; the
+    # C++ kernel still folds bin-by-bin and is unchanged.
+    S_np = np.zeros((Nt_active, N_sparse_t), dtype=np.float64)
+    S_np[np.arange(Nt_active), bin_idx] = 1.0
+    S = xp.asarray(S_np)
+    Sw = xp.asarray(S_np * n_off_np[:, None])
 
     c0_complex = xp.asarray(c0_complex)
     invC = xp.asarray(invC)
@@ -84,37 +105,23 @@ def bin_fold_real(data_complex, c0_complex, invC, n_b_idx_local, stride,
 
     # ---- <d|h> repack: A0re/A0im integrands packed into one complex ----
     if tdi_type == "XYZ":
-        Dre = xp.einsum("cmn,cdmn->dmn", Re_d, iC)
+        Dre = xp.einsum("...cmn,...cdmn->...dmn", Re_d, iC)
     else:
         Dre = Re_d * iC
     wA_re = Dre * u
     wA_im = Dre * w
-    A0p = xp.zeros((nch, Nf_act, N_sparse_t), dtype=xp.complex128)
-    A1p = xp.zeros((nch, Nf_act, N_sparse_t), dtype=xp.complex128)
-    for b in range(N_sparse_t):
-        m = bin_idx_x == b
-        nf = n_off[m]
-        A0p[:, :, b] = 2.0 * (wA_re[:, :, m].sum(-1) + 1j * wA_im[:, :, m].sum(-1))
-        A1p[:, :, b] = 2.0 * ((wA_re[:, :, m] * nf).sum(-1) + 1j * (wA_im[:, :, m] * nf).sum(-1))
+    A0p = 2.0 * ((wA_re @ S) + 1j * (wA_im @ S))
+    A1p = 2.0 * ((wA_re @ Sw) + 1j * (wA_im @ Sw))
 
     # ---- <h|h>: conj + nonconj blocks (real invC) ----
     if tdi_type == "XYZ":
-        Ec = c0_complex.conj()[:, None] * iC * c0_complex[None, :]
-        En = c0_complex[:, None] * iC * c0_complex[None, :]
-        shp = (nch, nch, Nf_act, N_sparse_t)
+        Ec = c0_complex.conj()[..., :, None, :, :] * iC * c0_complex[..., None, :, :, :]
+        En = c0_complex[..., :, None, :, :] * iC * c0_complex[..., None, :, :, :]
     else:
         Ec = c0_complex.conj() * iC * c0_complex
         En = c0_complex * iC * c0_complex
-        shp = (nch, Nf_act, N_sparse_t)
-    B0 = xp.zeros(shp, dtype=xp.complex128)
-    B1 = xp.zeros(shp, dtype=xp.complex128)
-    B0nc = xp.zeros(shp, dtype=xp.complex128)
-    B1nc = xp.zeros(shp, dtype=xp.complex128)
-    for b in range(N_sparse_t):
-        m = bin_idx_x == b
-        nf = n_off[m]
-        B0[..., b] = Ec[..., m].sum(-1)
-        B1[..., b] = (Ec[..., m] * nf).sum(-1)
-        B0nc[..., b] = En[..., m].sum(-1)
-        B1nc[..., b] = (En[..., m] * nf).sum(-1)
+    B0 = Ec @ S
+    B1 = Ec @ Sw
+    B0nc = En @ S
+    B1nc = En @ Sw
     return A0p, A1p, B0, B1, B0nc, B1nc
