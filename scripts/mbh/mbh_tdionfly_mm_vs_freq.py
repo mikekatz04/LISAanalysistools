@@ -10,13 +10,36 @@ os.environ.setdefault("OMP_NUM_THREADS", "8")
 import numpy as np
 import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
 
-MEM_CAP_GB = 6.5; _IS_MAC = sys.platform == "darwin"
+_IS_MAC = sys.platform == "darwin"
+def _total_ram_gb():
+    try:
+        import psutil
+        return psutil.virtual_memory().total / 1e9
+    except Exception:
+        try:
+            return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1e9
+        except (ValueError, OSError, AttributeError):
+            return None
+# Host-RSS watchdog cap. The old hardcoded 6.5 GB was tuned for the 8.6 GB
+# laptop and silently os._exit(42)'d a big-RAM cluster box the moment gen_A
+# built the full orbit. Env MEM_CAP_GB wins; else 80% of total RAM, floored at
+# 6.5 GB so the laptop stays protected.
+_env_cap = os.environ.get("MEM_CAP_GB")
+if _env_cap is not None:
+    MEM_CAP_GB = float(_env_cap)
+else:
+    _tot = _total_ram_gb()
+    MEM_CAP_GB = 6.5 if _tot is None else max(6.5, 0.8 * _tot)
 def rss_gb():
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return r / 1e9 if _IS_MAC else r / 1e6
 def _wd():
     while True:
-        if rss_gb() > MEM_CAP_GB: os._exit(42)
+        if rss_gb() > MEM_CAP_GB:
+            sys.stderr.write(f"[watchdog] RSS {rss_gb():.1f} GB > MEM_CAP_GB "
+                             f"{MEM_CAP_GB:.1f} GB -> os._exit(42)\n")
+            sys.stderr.flush()
+            os._exit(42)
         time.sleep(0.3)
 
 from lisatools.detector import L1Orbits
