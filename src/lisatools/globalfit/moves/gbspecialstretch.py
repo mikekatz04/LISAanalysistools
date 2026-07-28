@@ -2583,6 +2583,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # flips band_sorter.inds on accepted births/deaths, so this mask
         # includes freshly-born sources (they get the repeat block) and drops
         # freshly-killed ones (their template is already out of the residual).
+        # Nested spans under the top-level ``inmodel_repeats`` span (see
+        # _ProposeTimer._TOP -- ``inmodel_*`` are reported but excluded from
+        # the tracked/untracked accounting, so they don't double-count).
+        # This is the breakdown the sig-het GPU work needs: per-block setup
+        # (cholesky / sighet_setup) vs the per-repeat scoring kernel
+        # (inmodel_get_add_ll) vs host-side MH overhead (inmodel_accept).
+        tm = getattr(self, "_prop_timer", None)
         alive = band_sorter.inds[picked["ids"]]
         if not bool(alive.any()):
             return
@@ -2643,7 +2650,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 seq["data_const"] = _true
 
         # Take the source out of the cell residual for the whole repeat block.
-        buffer_obj.remove_sources_from_band_buffer(curr, slots, N_vals, leaf_inds=l_i)
+        with _tspan(tm, "inmodel_removal"):
+            buffer_obj.remove_sources_from_band_buffer(curr, slots, N_vals, leaf_inds=l_i)
 
         if seq is not None:
             seq["snaps"]["after_removal"] = self._debug_slab_snapshot(
@@ -2651,84 +2659,106 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # Pure-stretch moves (use_info_mat_proposal=False, e.g. the fixed-
         # dimensional VGB move) never build the info-matrix Cholesky.
-        chol = (
-            self._compute_proposal_cholesky(model, band_sorter, ids)
-            if self.use_info_mat_proposal
-            else None
-        )
+        with _tspan(tm, "inmodel_cholesky"):
+            chol = (
+                self._compute_proposal_cholesky(model, band_sorter, ids)
+                if self.use_info_mat_proposal
+                else None
+            )
         # Per-source likelihood setup for the repeat block (same stage as
         # the proposal cholesky / friend table). Chunked-het / FD engines
         # no-op; a sig-het computation builds its heterodyne reference
         # against the source-free residual HERE and holds it CONSTANT for
         # the whole repeat block, so ll_ref below and every repeat's
         # get_add_ll score through the same likelihood.
-        sighet_active = bool(
-            buffer_obj.setup_in_model_likelihood(curr, slots, N_vals, leaf_inds=l_i)
-        )
+        with _tspan(tm, "inmodel_sighet_setup"):
+            sighet_active = bool(
+                buffer_obj.setup_in_model_likelihood(curr, slots, N_vals, leaf_inds=l_i)
+            )
         # Drift-refresh anchor: the sampling-basis coords each source's
         # sig-het reference was built at (see the refresh block below).
         ref_track = curr.copy() if sighet_active else None
-        ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals, leaf_inds=l_i)
-        curr_prior = cp.asarray(self.gpu_priors[self.branch_name].logpdf(curr))
+        with _tspan(tm, "inmodel_ll_ref"):
+            ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals, leaf_inds=l_i)
+            curr_prior = cp.asarray(self.gpu_priors[self.branch_name].logpdf(curr))
+        if tm is not None:
+            # Per-block scale, so a wall time can be read as a per-source /
+            # per-repeat cost without cross-referencing the run config.
+            tm.count("inmodel_sources", len(ids))
+            tm.count("inmodel_blocks")
 
         n4 = (N_vals / 4).astype(int)
         lo_bin = (buffer_obj.frequency_lims[0][slots] / self.df).astype(int)
         hi_bin = (buffer_obj.frequency_lims[1][slots] / self.df).astype(int)
 
         for move_i in range(self.num_repeat_proposals):
-            new, factors = self.in_model_proposal(curr, chol, band_sorter, ids, model)
-            new[:] = self.periodic.wrap({self.branch_name: new[:, None, :]}, xp=xp)[self.branch_name][:, 0]
+            with _tspan(tm, "inmodel_proposal"):
+                new, factors = self.in_model_proposal(curr, chol, band_sorter, ids, model)
+                new[:] = self.periodic.wrap({self.branch_name: new[:, None, :]}, xp=xp)[self.branch_name][:, 0]
 
-            new_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(new))
-            # In-model steps stay within +- N/4 bins of the current source
-            # and inside the band window (widened by N/4). Skipped when f0 is
-            # a per-leaf fill (not sampled): the proposal cannot move it.
-            if self._f0_col is not None:
-                _fc = self._f0_col
-                new_bin = cp.abs(new[:, _fc] / 1e3 / self.df).astype(int)
-                new_logp[
-                    (cp.abs(new[:, _fc] / 1e3 - curr[:, _fc] / 1e3) / self.df).astype(int) > n4
-                ] = -np.inf
-                new_logp[new_bin < lo_bin - n4] = -np.inf
-                new_logp[new_bin > hi_bin + n4] = -np.inf
+            with _tspan(tm, "inmodel_prior"):
+                new_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(new))
+                # In-model steps stay within +- N/4 bins of the current source
+                # and inside the band window (widened by N/4). Skipped when f0 is
+                # a per-leaf fill (not sampled): the proposal cannot move it.
+                if self._f0_col is not None:
+                    _fc = self._f0_col
+                    new_bin = cp.abs(new[:, _fc] / 1e3 / self.df).astype(int)
+                    new_logp[
+                        (cp.abs(new[:, _fc] / 1e3 - curr[:, _fc] / 1e3) / self.df).astype(int) > n4
+                    ] = -np.inf
+                    new_logp[new_bin < lo_bin - n4] = -np.inf
+                    new_logp[new_bin > hi_bin + n4] = -np.inf
 
-            keep = ~cp.isinf(new_logp)
+                keep = ~cp.isinf(new_logp)
             new_ll = cp.full(len(ids), -1e300)
-            if bool(keep.any()):
-                new_ll[keep] = buffer_obj.get_add_ll(
-                    new[keep], slots[keep], slots[keep], N_vals[keep],
-                    phase_maximize=self.phase_maximize,
-                    leaf_inds=l_i[keep],
-                )
-                if self.phase_maximize and buffer_obj.phase_angle is not None:
-                    new[keep, self._phi0_col] = (
-                        new[keep, self._phi0_col] - buffer_obj.phase_angle
+            # THE per-repeat scoring call: the sig-het fused in-kernel
+            # likelihood when a reference is active, the chunked-het/FD
+            # engine otherwise. This span is the headline number for the
+            # in-model GB/GB speedup work.
+            with _tspan(tm, "inmodel_get_add_ll"):
+                if bool(keep.any()):
+                    new_ll[keep] = buffer_obj.get_add_ll(
+                        new[keep], slots[keep], slots[keep], N_vals[keep],
+                        phase_maximize=self.phase_maximize,
+                        leaf_inds=l_i[keep],
                     )
-                    new[keep] = self.periodic.wrap(
-                        {self.branch_name: new[keep][:, None, :]}, xp=xp
-                    )[self.branch_name][:, 0]
+                    if self.phase_maximize and buffer_obj.phase_angle is not None:
+                        new[keep, self._phi0_col] = (
+                            new[keep, self._phi0_col] - buffer_obj.phase_angle
+                        )
+                        new[keep] = self.periodic.wrap(
+                            {self.branch_name: new[keep][:, None, :]}, xp=xp
+                        )[self.branch_name][:, 0]
+            if tm is not None:
+                tm.count("inmodel_repeat_calls")
 
             delta_ll = new_ll - ll_ref
-            lnpdiff = beta * delta_ll + (new_logp - curr_prior) + factors
-            accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
+            # Host-side MH bookkeeping. On CuPy every ``bool(...any())`` here
+            # is a device sync, so this span is the launch-overhead signal:
+            # if it rivals inmodel_get_add_ll the block is host-bound (too
+            # few sources per launch), not kernel-bound.
+            with _tspan(tm, "inmodel_accept"):
+                lnpdiff = beta * delta_ll + (new_logp - curr_prior) + factors
+                accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
 
-            bad_mask = (new_ll <= -1e299) | (new_logp <= -1e229)
-            bad_accepts = accept & bad_mask
-            if bool(xp.any(bad_accepts)):
-                if bool(xp.any(beta[bad_accepts] != 0.0)):
-                    logger.warning(
-                        f"{self.name}: accepted an out-of-prior in-model "
-                        "coordinate at beta > 0."
-                    )
-                accept[bad_accepts] = False
+                bad_mask = (new_ll <= -1e299) | (new_logp <= -1e229)
+                bad_accepts = accept & bad_mask
+                if bool(xp.any(bad_accepts)):
+                    if bool(xp.any(beta[bad_accepts] != 0.0)):
+                        logger.warning(
+                            f"{self.name}: accepted an out-of-prior in-model "
+                            "coordinate at beta > 0."
+                        )
+                    accept[bad_accepts] = False
 
-            prop_counts[1][t_i, w_i, b_i] += 1
-            if bool(accept.any()):
-                curr[accept] = new[accept]
-                ll_ref[accept] = new_ll[accept]
-                curr_prior[accept] = new_logp[accept]
-                ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += delta_ll[accept]
-                acc_counts[1][t_i[accept], w_i[accept], b_i[accept]] += 1
+                prop_counts[1][t_i, w_i, b_i] += 1
+                if bool(accept.any()):
+                    curr[accept] = new[accept]
+                    ll_ref[accept] = new_ll[accept]
+                    curr_prior[accept] = new_logp[accept]
+                    ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += delta_ll[accept]
+                    acc_counts[1][t_i[accept], w_i[accept], b_i[accept]] += 1
 
             self._debug_verify_in_model(
                 buffer_obj, curr, new, slots, N_vals, delta_ll, keep,
@@ -2761,14 +2791,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # beta-suppressed and each refresh is a full setup.
                 far = far & (beta >= self.sighet_refresh_min_beta)
                 if bool(far.any()):
-                    buffer_obj.setup_in_model_likelihood(
-                        curr[far], slots[far], N_vals[far], leaf_inds=l_i[far]
-                    )
-                    ll_ref[far] = buffer_obj.get_add_ll(
-                        curr[far], slots[far], slots[far], N_vals[far],
-                        leaf_inds=l_i[far],
-                    )
+                    with _tspan(tm, "inmodel_sighet_refresh"):
+                        buffer_obj.setup_in_model_likelihood(
+                            curr[far], slots[far], N_vals[far], leaf_inds=l_i[far]
+                        )
+                        ll_ref[far] = buffer_obj.get_add_ll(
+                            curr[far], slots[far], slots[far], N_vals[far],
+                            leaf_inds=l_i[far],
+                        )
                     ref_track[far] = curr[far]
+                    if tm is not None:
+                        tm.count("inmodel_refreshed_sources", int(far.sum()))
                     logger.debug(
                         f"{self.name}: sig-het reference refresh for "
                         f"{int(far.sum())}/{len(ids)} sources at repeat "
@@ -2788,7 +2821,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # Final get_ll value for the traced source (post-repeats), for
             # the addback delta-ll cross-check in the sequence figures.
             seq["ll_ref_final"] = float(_to_numpy(ll_ref)[seq["idx"]])
-        buffer_obj.add_sources_to_band_buffer(curr, slots, N_vals, leaf_inds=l_i)
+        with _tspan(tm, "inmodel_addback"):
+            buffer_obj.add_sources_to_band_buffer(curr, slots, N_vals, leaf_inds=l_i)
         if seq is not None:
             seq["snaps"]["after_addback"] = self._debug_slab_snapshot(
                 buffer_obj, seq["slot"])
