@@ -51,6 +51,10 @@ def build(N):
     eval_t = xp.repeat(eval_t[None, :], NMODES, axis=0)
 
     orbit = EqualArmlengthOrbits(force_backend=BACKEND)
+    # Build the linear-interp position/ltt tables + device OrbitsWrap explicitly
+    # (the on-the-fly kernel reads them); do not rely on lazy config, which the
+    # device path may not trigger before the kernel dereferences the orbit.
+    orbit.configure(linear_interp_setup=True, dt=DT)
     tdi_config = TDIConfig("2nd generation", force_backend=BACKEND)
 
     g = TDTDIonTheFly(
