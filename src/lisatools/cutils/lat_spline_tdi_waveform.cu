@@ -12,6 +12,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <new>
 
 #ifdef __CUDACC__
 #define NUM_THREADS_HERE 128
@@ -212,14 +213,26 @@ void td_spline_run_wave_tdi_kernel(TDSplineTDIWaveform *tdi_on_fly, int buffer_l
     tdi_on_fly->run_wave_tdi(buffer, buffer_length, tdi_channels_arr, tdi_amp, tdi_phase, phi_ref,
         params, t_arr, N, num_bin, n_params, nchannels);
 }
+
+// Construct the polymorphic wave object IN device memory (placement new) so its
+// vtable is the DEVICE vtable. A host-`new`'d object cudaMemcpy'd to the device
+// carries a HOST vtable pointer; the first virtual get_amp/get_phase call in the
+// kernel then dereferences host memory -> illegal access on GPU (silent on CPU,
+// which never leaves host). The member pointers are the already-device-mirrored
+// d_orbits / d_tdi_config / d_amp_spline / d_phase_spline.
+CUDA_KERNEL
+void td_spline_construct_kernel(TDSplineTDIWaveform *obj, Orbits *orbits, TDIConfig *tdi_config,
+    CubicSpline *amp_spline, CubicSpline *phase_spline)
+{
+    new (obj) TDSplineTDIWaveform(orbits, tdi_config, amp_spline, phase_spline);
+}
 #endif
 
-void td_spline_run_wave_tdi_wrap(TDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_channels_arr, 
-    double *tdi_amp, double *tdi_phase, double *phi_ref, 
+void td_spline_run_wave_tdi_wrap(TDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_channels_arr,
+    double *tdi_amp, double *tdi_phase, double *phi_ref,
     double *params, double *t_arr, int N, int num_bin, int n_params, int nchannels)
 {
 #ifdef __CUDACC__
-    TDSplineTDIWaveform *wave_here = new TDSplineTDIWaveform(tdi_on_fly->orbits, tdi_on_fly->tdi_config, tdi_on_fly->amp_spline, tdi_on_fly->phase_spline);
     Orbits *d_orbits;
     cudaMalloc(&d_orbits, sizeof(Orbits));
     gpuErrchk(cudaMemcpy(d_orbits, tdi_on_fly->orbits, sizeof(Orbits), cudaMemcpyHostToDevice));
@@ -236,14 +249,13 @@ void td_spline_run_wave_tdi_wrap(TDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_cha
     cudaMalloc(&d_phase_spline, sizeof(CubicSpline));
     gpuErrchk(cudaMemcpy(d_phase_spline, tdi_on_fly->phase_spline, sizeof(CubicSpline), cudaMemcpyHostToDevice));
 
-    wave_here->orbits = d_orbits;
-    wave_here->tdi_config = d_tdi_config;
-    wave_here->amp_spline = d_amp_spline;
-    wave_here->phase_spline = d_phase_spline;
-
+    // Build the wave object on the device (device vtable) rather than host-new +
+    // cudaMemcpy (which would copy a host vtable pointer).
     TDSplineTDIWaveform *d_wave_here;
     cudaMalloc(&d_wave_here, sizeof(TDSplineTDIWaveform));
-    gpuErrchk(cudaMemcpy(d_wave_here, wave_here, sizeof(TDSplineTDIWaveform), cudaMemcpyHostToDevice));
+    td_spline_construct_kernel<<<1, 1>>>(d_wave_here, d_orbits, d_tdi_config, d_amp_spline, d_phase_spline);
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaGetLastError());
 
     int buffer_length = tdi_on_fly->get_td_spline_buffer_size(N);
 
@@ -264,7 +276,6 @@ void td_spline_run_wave_tdi_wrap(TDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_cha
     gpuErrchk(cudaFree(d_amp_spline));
     gpuErrchk(cudaFree(d_phase_spline));
     gpuErrchk(cudaFree(d_wave_here));
-    delete wave_here;
 #else
 
     // make buffer 
@@ -364,14 +375,23 @@ void fd_spline_run_wave_tdi_kernel(FDSplineTDIWaveform *tdi_on_fly, int buffer_l
     tdi_on_fly->run_wave_tdi(buffer, buffer_length, tdi_channels_arr, tdi_amp, tdi_phase, phi_ref,
         params, t_arr, N, num_bin, n_params, nchannels);
 }
+
+// Device-side placement-new construction (device vtable) -- see
+// td_spline_construct_kernel for why host-new + cudaMemcpy is wrong for a
+// polymorphic object.
+CUDA_KERNEL
+void fd_spline_construct_kernel(FDSplineTDIWaveform *obj, Orbits *orbits, TDIConfig *tdi_config,
+    CubicSpline *amp_spline, CubicSpline *freq_spline)
+{
+    new (obj) FDSplineTDIWaveform(orbits, tdi_config, amp_spline, freq_spline);
+}
 #endif
 
-void fd_spline_run_wave_tdi_wrap(FDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_channels_arr, 
-    double *tdi_amp, double *tdi_phase, double *phi_ref, 
+void fd_spline_run_wave_tdi_wrap(FDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_channels_arr,
+    double *tdi_amp, double *tdi_phase, double *phi_ref,
     double *params, double *t_arr, int N, int num_bin, int n_params, int nchannels)
 {
 #ifdef __CUDACC__
-    FDSplineTDIWaveform *wave_here = new FDSplineTDIWaveform(tdi_on_fly->orbits, tdi_on_fly->tdi_config, tdi_on_fly->amp_spline, tdi_on_fly->freq_spline);
     Orbits *d_orbits;
     cudaMalloc(&d_orbits, sizeof(Orbits));
     gpuErrchk(cudaMemcpy(d_orbits, tdi_on_fly->orbits, sizeof(Orbits), cudaMemcpyHostToDevice));
@@ -388,14 +408,11 @@ void fd_spline_run_wave_tdi_wrap(FDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_cha
     cudaMalloc(&d_freq_spline, sizeof(CubicSpline));
     gpuErrchk(cudaMemcpy(d_freq_spline, tdi_on_fly->freq_spline, sizeof(CubicSpline), cudaMemcpyHostToDevice));
 
-    wave_here->orbits = d_orbits;
-    wave_here->tdi_config = d_tdi_config;
-    wave_here->amp_spline = d_amp_spline;
-    wave_here->freq_spline = d_freq_spline;
-
     FDSplineTDIWaveform *d_wave_here;
     cudaMalloc(&d_wave_here, sizeof(FDSplineTDIWaveform));
-    gpuErrchk(cudaMemcpy(d_wave_here, wave_here, sizeof(FDSplineTDIWaveform), cudaMemcpyHostToDevice));
+    fd_spline_construct_kernel<<<1, 1>>>(d_wave_here, d_orbits, d_tdi_config, d_amp_spline, d_freq_spline);
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaGetLastError());
 
     int buffer_length = tdi_on_fly->get_fd_spline_buffer_size(N);
 
@@ -416,7 +433,6 @@ void fd_spline_run_wave_tdi_wrap(FDSplineTDIWaveform *tdi_on_fly, cmplx *tdi_cha
     gpuErrchk(cudaFree(d_amp_spline));
     gpuErrchk(cudaFree(d_freq_spline));
     gpuErrchk(cudaFree(d_wave_here));
-    delete wave_here;
 #else
 
     // make buffer 
