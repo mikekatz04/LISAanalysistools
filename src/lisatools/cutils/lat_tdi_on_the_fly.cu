@@ -1382,6 +1382,23 @@ void LISATDIonTheFly::run_wave_tdi(void *buffer, int buffer_length, cmplx *tdi_c
 #endif
     CUDA_SHARED double params_here[N_PARAMS_MAX];  // TODO: maybe shared? only if registers are filled up
 
+#ifdef __CUDACC__
+    // TDIDBG: temporary instrumentation to locate the on-the-fly GPU OOB.
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        printf("[TDIDBG] orbits=%p ltt_arr=%p x_arr=%p n_arr=%p sc_r=%p sc_e=%p links=%p\n",
+               (void*)orbits, (void*)orbits->ltt_arr, (void*)orbits->x_arr, (void*)orbits->n_arr,
+               (void*)orbits->sc_r, (void*)orbits->sc_e, (void*)orbits->links);
+        printf("[TDIDBG] ltt_t0=%.6e ltt_dt=%.6e ltt_N=%d | sc_t0=%.6e sc_dt=%.6e sc_N=%d | nlinks=%d nsc=%d\n",
+               orbits->ltt_t0, orbits->ltt_dt, orbits->ltt_N, orbits->sc_t0, orbits->sc_dt, orbits->sc_N,
+               orbits->nlinks, orbits->nspacecraft);
+        printf("[TDIDBG] tdi_config=%p num_units=%d unit_starts=%p base_link=%p combos=%p signs=%p | t_arr=%p N=%d num_bin=%d n_params=%d nchan=%d\n",
+               (void*)tdi_config, tdi_config->num_units, (void*)tdi_config->unit_starts,
+               (void*)tdi_config->tdi_base_link, (void*)tdi_config->tdi_link_combinations,
+               (void*)tdi_config->tdi_signs_in, (void*)t_arr, N, num_bin, n_params, nchannels);
+    }
+#endif
+
      // TODO: CHECK THIS!!
     for (int bin_i = start; bin_i < num_bin; bin_i += increment)
     {
