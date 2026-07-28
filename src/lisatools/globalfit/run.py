@@ -1225,6 +1225,14 @@ class GlobalFit:
             self.recipe, self.engine_info, self.curr, acs, priors, state
         )
 
+        # Recipe setup can change the residual (GB_SUBTRACT_OUT_OF_BAND /
+        # subtract_neighbors remove known out-of-band catalogue GBs from acs),
+        # and it runs AFTER the initial-logL print above. Re-evaluate so the
+        # logged value -- and the sampler's starting state.log_like -- reflect
+        # the post-subtraction residual (no-op when nothing subtracted).
+        state.log_like[:] = acs.likelihood(complex=False)
+        logger.info(f"initial log likelihood (after recipe setup): {state.log_like[0]}")
+
         logger.debug("need to setup moves that use parallel resources")
 
         # backend.grow(1, None)
