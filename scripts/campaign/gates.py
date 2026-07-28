@@ -69,10 +69,20 @@ def _ll_finite():
 
 
 # Shell prefixes selecting exactly one source class in full_year_combined
-# (empty id list -> branch dropped).
-_ONLY_MBH = "EMRI_IDS= SOBHB_IDS= "
-_ONLY_EMRI = "MBHB_IDS= SOBHB_IDS= "
-_ONLY_SOBBH = "MBHB_IDS= EMRI_IDS= "
+# (empty id list -> branch dropped). default_source_ids() defaults are
+# MBHB=[] EMRI=[1] SOBHB=[]; setting ANY *_IDS switches to env-driven
+# resolution where an unset class stays at its (possibly empty) default, so
+# each prefix sets its OWN class explicitly and clears the other two (valid
+# mojito ids we hold locally: MBHB 0/1, EMRI 1, SOBHB 0/1).
+# MBHB id 18 (17.2e6 Msun) merges at ~day 92 of the mojito data -- the EARLIEST
+# local MBH merger (none merge in the first month). The lite window is only 30 d,
+# so a single MBH is sampled via CHOP_WINDOW=1 (a merger-centered snippet: the
+# 30-d window is offset so the merger sits at merger_frac through it), added to
+# the mbh gate command. Without it every MBH id gives nleaves_max=0 -> the eryn
+# tempering ladder can't build (make_ladder(0) ValueError).
+_ONLY_MBH = "MBHB_IDS=18 EMRI_IDS= SOBHB_IDS= "
+_ONLY_EMRI = "MBHB_IDS= EMRI_IDS=1 SOBHB_IDS= "
+_ONLY_SOBBH = "MBHB_IDS= EMRI_IDS= SOBHB_IDS=0 "
 
 GATES: tuple = (
     # ------------------------------------------------------------------ T0
@@ -436,7 +446,7 @@ GATES: tuple = (
             Check(
                 id="mbh-run",
                 command=(
-                    _ONLY_MBH + "MBH_DEBUG=1 "
+                    _ONLY_MBH + "CHOP_WINDOW=1 MBH_DEBUG=1 "
                     "MBH_DEBUG_DIR=gf_output/campaign/t2-lite-mbh "
                     "GF_MOVE_TIMING=1 {py} scripts/campaign/runners/branch_lite.py "
                     "--variant full_year_combined --lite --iterations 3"

@@ -48,6 +48,27 @@ def main() -> None:
     if not args.full and not name.endswith("_lite") and name != "blank":
         kwargs["lite"] = True
     fit = getattr(erebor, name)(**kwargs)
+
+    # Smoke gates must start from a FRESH backend. The stock fit auto-resumes
+    # an existing HDF checkpoint (run.py::load_info), and different sub-checks
+    # of one variant can carry different sampler geometry -- e.g. GB_DEBUG=1
+    # routes through apply_debug_preset which resets nwalkers (4 -> 3). So the
+    # gb-search sub-check would resume the gb-pe sub-check's 4-walker
+    # checkpoint under nwalkers=3 and die with a cryptic ``(3,)`` vs
+    # ``(2,4)`` broadcast in prepare_main. Remove the stale backend so every
+    # invocation initializes from priors, which is the correct semantics for a
+    # smoke run anyway (it exercises the fresh-init path, not resume).
+    try:
+        g = fit.general
+        backend_path = (
+            f"{g.file_store_dir}{g.base_file_name}_{g.main_file_key}.h5"
+        )
+        if os.path.exists(backend_path):
+            os.remove(backend_path)
+            print(f"[RESULT] fresh_backend removed={backend_path}", flush=True)
+    except Exception as exc:  # never let cleanup abort the gate
+        print(f"[RESULT] fresh_backend_skip err={type(exc).__name__}", flush=True)
+
     t_build = time.perf_counter()
     fit.build()
     print(f"[RESULT] variant={name} build=ok build_s={time.perf_counter() - t_build:.1f}",
