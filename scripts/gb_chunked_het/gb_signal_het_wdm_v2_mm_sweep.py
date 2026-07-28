@@ -396,54 +396,53 @@ def main():
     draws = []                                                  # list of (params_ref, params_cand, fd_rfft_cand, wdm_inj_real_arr_cand, c0_dense_complex_ref, snr_ref)
     t0_draws = time.perf_counter()
     sens_mat_full = None
+    # SNR is EXACTLY linear in amplitude (h ∝ A, <h|h> ∝ A²), so instead of
+    # rejection-sampling the prior until SNR lands in [SNR_MIN, SNR_MAX] (which
+    # rejects most draws for a narrow high-SNR window), draw ONE source, measure
+    # its SNR, then draw a target SNR ~ U(SNR_MIN, SNR_MAX) and rescale the
+    # amplitude (physical col 0) by target/snr0. Two waveform evals per draw
+    # (reference + candidate), never more -- independent of the window width.
+    rng_snr = np.random.default_rng(SEED + 777)
     for di in range(N_DRAWS):
-        chosen = None
-        for _ in range(MAX_REJECT):
-            x_samp = prior.rvs(size=1)
-            params_i = tc.both_transforms(x_samp.copy())[0]
-            td_i = real_td_cb(params_i)
-            wdm_inj_real = TDSignal(td_i, settings=td_set).transform(
-                wdm_set_real, window=window,
+        x_samp = prior.rvs(size=1)
+        params_i = tc.both_transforms(x_samp.copy())[0]
+        td_i = np.asarray(real_td_cb(params_i))
+        wdm_inj_real = TDSignal(td_i, settings=td_set).transform(
+            wdm_set_real, window=window,
+        )
+        inj_data_arr = DataResidualArray(wdm_inj_real)
+        if sens_mat_full is None:
+            sens_mat_full = XYZ2SensitivityMatrix(
+                inj_data_arr.data_res_arr.settings, model="scirdv1",
             )
-            inj_data_arr = DataResidualArray(wdm_inj_real)
-            if sens_mat_full is None:
-                sens_mat_full = XYZ2SensitivityMatrix(
-                    inj_data_arr.data_res_arr.settings, model="scirdv1",
-                )
-            analysis = AnalysisContainer(inj_data_arr, sens_mat_full)
-            snr_i = float(analysis.snr())
-            if SNR_MIN <= snr_i <= SNR_MAX:
-                # x_inj IS the reference x_ref (the heterodyne is centered on the
-                # injection's true params). c0 = lisatools dense complex WDM(x_ref).
-                wdm_ref_complex = np.asarray(
-                    TDSignal(td_i, settings=td_set).transform(
-                        wdm_set_complex, window=window,
-                    ).arr
-                ).copy()
-                # x_cand = x_ref + Delta_f0; we then build the lisatools "ground
-                # truth" template at x_cand (this is the 'data' for mm5/mm2),
-                # and feed x_cand to v2 to reconstruct via heterodyne.
-                params_cand = params_i.copy()
-                params_cand[1] = params_i[1] + DF0_FRAC * layer_df
-                td_cand = real_td_cb(params_cand)
-                # Match the Tukey applied to data wdmtransform so v2's polyphase
-                # input is consistent with what the dense reference sees.
-                fd_rfft_cand = np.fft.rfft(
-                    np.asarray(td_cand) * window, axis=-1,
-                )
-                wdm_cand_real = TDSignal(td_cand, settings=td_set).transform(
-                    wdm_set_real, window=window,
-                )
-                wdm_cand_arr = np.asarray(wdm_cand_real.arr).copy()
-                chosen = (params_i, params_cand, fd_rfft_cand,
-                          wdm_cand_arr, wdm_ref_complex, snr_i)
-                break
-        if chosen is None:
-            print(f"[warn] draw {di}: exhausted reject; keeping last (snr={snr_i:.2f})",
-                  flush=True)
-        draws.append(chosen)
+        analysis = AnalysisContainer(inj_data_arr, sens_mat_full)
+        snr0 = float(analysis.snr())
+        target = float(rng_snr.uniform(SNR_MIN, SNR_MAX))
+        scale = target / max(snr0, 1e-30)
+        params_i[0] *= scale                  # amplitude (physical col 0)
+        snr_i = target
+        # reference c0 = dense complex WDM at the (rescaled) x_ref. td is linear
+        # in A so td_ref = td_i * scale exactly -- no waveform re-eval.
+        td_ref = td_i * scale
+        wdm_ref_complex = np.asarray(
+            TDSignal(td_ref, settings=td_set).transform(
+                wdm_set_complex, window=window,
+            ).arr
+        ).copy()
+        # x_cand = x_ref + Delta_f0 (f0 shift is nonlinear -> must re-eval the
+        # candidate waveform; params_cand already carries the scaled amplitude).
+        params_cand = params_i.copy()
+        params_cand[1] = params_i[1] + DF0_FRAC * layer_df
+        td_cand = np.asarray(real_td_cb(params_cand))
+        fd_rfft_cand = np.fft.rfft(td_cand * window, axis=-1)
+        wdm_cand_real = TDSignal(td_cand, settings=td_set).transform(
+            wdm_set_real, window=window,
+        )
+        wdm_cand_arr = np.asarray(wdm_cand_real.arr).copy()
+        draws.append((params_i, params_cand, fd_rfft_cand,
+                      wdm_cand_arr, wdm_ref_complex, snr_i))
         if (di + 1) % 5 == 0 or di == N_DRAWS - 1:
-            print(f"  draw {di+1}/{N_DRAWS}  snr={chosen[5]:.1f}", flush=True)
+            print(f"  draw {di+1}/{N_DRAWS}  snr={snr_i:.1f}", flush=True)
     print(
         f"[draws] elapsed {time.perf_counter() - t0_draws:.1f}s for {N_DRAWS} draws",
         flush=True,

@@ -88,12 +88,15 @@ def _catalogue(f0_lo_mHz, f0_hi_mHz):
         fdot = B["GW22FrequencyDerivativeSourceFrame"][keep]
         ra = B["RightAscension"][keep]
         dec = B["Declination"][keep]
+        # LuminosityDistance is in Mpc; the recovered distance basis is kpc.
+        dist_kpc = B["LuminosityDistance"][keep] * 1e3
     f0 = f0[keep]
     with np.errstate(invalid="ignore"):
         mc_eff = np.where(fdot > 0,
                           get_chirp_mass_from_f_fdot(f0 * 1e-3, np.clip(fdot, 0, None)),
                           np.nan)
-    return dict(f0=f0, amp=amp, Mc_eff=mc_eff, alpha=ra, sin_delta=np.sin(dec), fdot=fdot)
+    return dict(f0=f0, amp=amp, Mc_eff=mc_eff, alpha=ra, sin_delta=np.sin(dec),
+                fdot=fdot, dist_kpc=dist_kpc)
 
 
 def main():
@@ -133,8 +136,8 @@ def main():
         d = np.load(comb_npz)
         comb = (d["f0_nodes_mHz"], d["F_max"])
 
-    fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
-    axA, axB, axC, axD = axes
+    fig, axes = plt.subplots(5, 1, figsize=(11, 16), sharex=True)
+    axA, axB, axC, axD, axE = axes
 
     # A. F(f0) comb + injected f0 stems + recovered f0
     if comb is not None:
@@ -174,9 +177,25 @@ def main():
     axD.axhline(0.0, color="0.6", lw=0.8)
     axD.axhline(-2.0, color="tab:blue", lw=0.8, ls="--", label="r=-2 (interacting DWD seed)")
     axD.set_ylabel("fdot_astro_ratio")
-    axD.set_xlabel("f0 [mHz]")
     axD.legend(loc="upper right", fontsize=8)
 
+    # E. distance: recovered (kpc) vs injected LuminosityDistance (Mpc -> kpc)
+    if cat is not None:
+        axE.scatter(cat["f0"], cat["dist_kpc"], s=60, marker="x", color="tab:green",
+                    label="injected dist (LuminosityDistance)")
+    axE.scatter(r_f0, r_dist, s=18, color="tab:red", alpha=0.6, label="recovered dist")
+    axE.set_yscale("log")
+    axE.set_ylabel("distance [kpc]")
+    axE.set_xlabel("f0 [mHz]")
+    axE.legend(loc="upper right", fontsize=8)
+    axE.annotate("interacting (fdot<0) leaves: recovered dist is the (Mc, r)-split "
+                 "value, not the catalogue distance",
+                 xy=(0.01, 0.03), xycoords="axes fraction", fontsize=7, color="0.4")
+
+    # shared x-window: F0_LO_MHZ/F0_HI_MHZ zoom the frequency axis (all panels,
+    # sharex) so the catalogue selection and the view match. Defaults span the
+    # recovered leaves.
+    axE.set_xlim(lo, hi)
     out = _env("OUT_PNG", "./fstat_alignment.png")
     fig.tight_layout()
     fig.savefig(out, dpi=140, bbox_inches="tight")
