@@ -570,10 +570,41 @@
     },
     "t2-lite-emri": {
       "confirmed": [],
-      "evidence": [],
-      "history": [],
-      "metrics": {},
-      "state": "pending"
+      "evidence": [
+        "evidence/t2-lite-emri__domain-guard.log"
+      ],
+      "history": [
+        {
+          "note": "ingest: criteria unmet: ll_finite missing (wanted == 1); debug_pngs missing (wanted >= 1)",
+          "state": "red",
+          "ts": "2026-07-28T04:35:52Z"
+        }
+      ],
+      "metrics": {
+        "build": "ok",
+        "fired_p0": 1.0,
+        "floored": 1,
+        "guard_ll_floor": 1,
+        "p0": 1.0,
+        "p0_inj": 4.8621,
+        "p_sep": "n/a",
+        "process_survived": 1,
+        "result_build": "ok",
+        "result_fired_p0": 1.0,
+        "result_floored": 1,
+        "result_guard_ll_floor": 1,
+        "result_p0": 1.0,
+        "result_p0_inj": 4.8621,
+        "result_p_sep": "n/a",
+        "result_process_survived": 1,
+        "result_status": "domain_error",
+        "result_valid_finite": 1,
+        "result_valid_status": "ok",
+        "status": "domain_error",
+        "valid_finite": 1,
+        "valid_status": "ok"
+      },
+      "state": "red"
     },
     "t2-lite-gb": {
       "confirmed": [],
@@ -623,7 +654,18 @@
     },
     "t2-lite-mbh": {
       "confirmed": [],
-      "evidence": [],
+      "evidence": [
+        "evidence/t2-lite-mbh__mbh-run.log",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0001_f0.png",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0001_f1.png",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0001_f2.png",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0002_f0.png",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0002_f1.png",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0002_f2.png",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0003_f0.png",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0003_f1.png",
+        "evidence/t2-lite-mbh/mbh_debug_leaf0_w0_s0003_f2.png"
+      ],
       "history": [
         {
           "note": "check mbh-run exited 1",
@@ -649,35 +691,45 @@
           "note": "manual: chop_window fix VALIDATED: it0+it1 ll_finite=-5.57 (stationary) + 3 MBH debug PNGs; SIGKILL(-9)/OOM at it2 on 8GB laptop (RSS 4GB, 47min). Correctness proven; full 3-iter run -> cluster (like sobbh).",
           "state": "yellow",
           "ts": "2026-07-26T13:29:12Z"
+        },
+        {
+          "note": "ingest: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-28T04:12:28Z"
         }
       ],
       "metrics": {
         "build": "ok",
-        "build_s": 22.3,
-        "it": 1,
-        "it_wall_s": 890.42,
-        "iterations_timed": 2,
+        "build_s": 1.7,
+        "debug_pngs": 9,
+        "it": 2,
+        "it_wall_s": 16.11,
+        "iterations": 3,
+        "iterations_timed": 3,
         "ll_finite": 1,
-        "ll_max": -5.565897,
-        "ll_max_last": -5.565897,
+        "ll_max": -5.218482,
+        "ll_max_last": -5.218482,
         "move_wall_s_mean": {
-          "mbh_pe": 890.4129499999999
+          "mbh_pe": 16.128066666666665
         },
-        "peak_rss_mb": 4063.0,
+        "peak_rss_mb": 13084.0,
         "removed": "./gf_output/full_year_combined_run_testing.h5",
         "result_build": "ok",
-        "result_build_s": 22.3,
-        "result_it": 1,
-        "result_it_wall_s": 890.42,
-        "result_ll_max": -5.565897,
+        "result_build_s": 1.7,
+        "result_debug_pngs": 9,
+        "result_it": 2,
+        "result_it_wall_s": 16.11,
+        "result_iterations": 3,
+        "result_ll_finite": 1,
+        "result_ll_max": -5.218482,
         "result_removed": "./gf_output/full_year_combined_run_testing.h5",
         "result_variant": "full_year_combined",
-        "s_per_it": 890.4137000000001,
-        "s_per_it_max": 890.4696,
+        "s_per_it": 16.12816666666667,
+        "s_per_it_max": 16.2517,
         "timed_moves": 1,
         "variant": "full_year_combined"
       },
-      "state": "yellow"
+      "state": "green"
     },
     "t2-lite-noise": {
       "confirmed": [],
@@ -724,7 +776,18 @@
     },
     "t2-lite-sobbh": {
       "confirmed": [],
-      "evidence": [],
+      "evidence": [
+        "evidence/t2-lite-sobbh__sobbh-run.log",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0001_f0.png",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0001_f1.png",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0001_f2.png",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0002_f0.png",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0002_f1.png",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0002_f2.png",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0003_f0.png",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0003_f1.png",
+        "evidence/t2-lite-sobbh/sobbh_debug_leaf0_w0_s0003_f2.png"
+      ],
       "history": [
         {
           "note": "check sobbh-run exited 1",
@@ -735,10 +798,45 @@
           "note": "manual: build OK (28s, SOBHB_IDS=0 fix); 3-iter TDI-on-the-fly sampling too slow+thrashing on 8GB laptop (16min CPU on iter1, UN/swap). Defer to cluster or add fast SOBBH-lite config.",
           "state": "yellow",
           "ts": "2026-07-26T10:19:23Z"
+        },
+        {
+          "note": "ingest: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-28T06:13:54Z"
         }
       ],
-      "metrics": {},
-      "state": "yellow"
+      "metrics": {
+        "build": "ok",
+        "build_s": 1.7,
+        "debug_pngs": 9,
+        "it": 2,
+        "it_wall_s": 365.03,
+        "iterations": 3,
+        "iterations_timed": 3,
+        "ll_finite": 1,
+        "ll_max": -6.37479,
+        "ll_max_last": -6.37479,
+        "move_wall_s_mean": {
+          "sobbh_pe": 365.8352
+        },
+        "peak_rss_mb": 12751.0,
+        "removed": "./gf_output/full_year_combined_run_testing.h5",
+        "result_build": "ok",
+        "result_build_s": 1.7,
+        "result_debug_pngs": 9,
+        "result_it": 2,
+        "result_it_wall_s": 365.03,
+        "result_iterations": 3,
+        "result_ll_finite": 1,
+        "result_ll_max": -6.37479,
+        "result_removed": "./gf_output/full_year_combined_run_testing.h5",
+        "result_variant": "full_year_combined",
+        "s_per_it": 365.83526666666666,
+        "s_per_it_max": 366.8488,
+        "timed_moves": 1,
+        "variant": "full_year_combined"
+      },
+      "state": "green"
     },
     "t2-lite-vgb": {
       "confirmed": [],
@@ -947,6 +1045,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-26T23:22:52Z",
+  "updated": "2026-07-28T06:13:54Z",
   "version": 1
 }
