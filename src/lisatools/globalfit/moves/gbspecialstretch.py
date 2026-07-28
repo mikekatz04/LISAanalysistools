@@ -1002,12 +1002,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return None
 
     def _debug_slab_snapshot(self, buffer_obj, slot):
-        """Copy one cell's residual slab as (nchannels, Nf_active, Nt_active)."""
-        bs = self._basis_settings
-        Nf_a = int(getattr(bs, "Nf_active", None) or bs.Nf)
-        Nt_a = int(getattr(bs, "Nt_active", None) or bs.Nt)
-        nc = buffer_obj.nchannels
-        return _to_numpy(buffer_obj.band_buffer[slot]).copy().reshape(nc, Nf_a, Nt_a)
+        """Copy one cell's residual slab as ``(nchannels, Nf_band, Nt_active)``.
+
+        ``band_buffer[slot]`` is a PER-BAND slab whose frequency extent is the
+        band's local layer count (``band_N``), NOT the full-domain
+        ``bs.Nf_active``. Search mode's per-band leaf caps make the two differ
+        (e.g. a 7-layer band slab vs. the 137-layer full domain), so infer Nf
+        from the slab size rather than assuming the global value -- otherwise
+        ``reshape`` raises ``cannot reshape array of size N``. Returns None on
+        failure (debug-only: never break the sampler), matching the sibling
+        ``_debug_cell_total_template`` / ``_debug_walker_true_data`` helpers.
+        """
+        try:
+            bs = self._basis_settings
+            Nt_a = int(getattr(bs, "Nt_active", None) or bs.Nt)
+            nc = int(buffer_obj.nchannels)
+            arr = _to_numpy(buffer_obj.band_buffer[slot]).copy()
+            denom = nc * Nt_a
+            if denom <= 0 or arr.size % denom != 0:
+                logger.warning(
+                    "[GB_DEBUG %s] slab snapshot skipped: size %d not "
+                    "divisible by nc*Nt=%d", self.name, arr.size, denom,
+                )
+                return None
+            Nf_band = arr.size // denom
+            return arr.reshape(nc, Nf_band, Nt_a)
+        except Exception as e:  # debug-only: never break the sampler
+            logger.warning(
+                "[GB_DEBUG %s] slab snapshot skipped: %r", self.name, e,
+            )
+            return None
 
     def _debug_cell_total_template(self, buffer_obj, band_sorter, seq):
         """Sum of ALL modeled templates of the traced cell (scratch fill).
@@ -1027,9 +1051,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 & band_sorter.inds
             )
             bs = self._basis_settings
-            Nf_a = int(getattr(bs, "Nf_active", None) or bs.Nf)
             Nt_a = int(getattr(bs, "Nt_active", None) or bs.Nt)
-            nc = buffer_obj.nchannels
+            nc = int(buffer_obj.nchannels)
+            # PER-BAND slab geometry: match the traced cell's band_buffer slot
+            # (search mode's per-band caps make Nf band-local, not the global
+            # bs.Nf_active), so the scratch total-template combines cleanly with
+            # the per-band residual snapshot (``before_removal + total``).
+            _denom = nc * Nt_a
+            _slab_sz = int(_to_numpy(buffer_obj.band_buffer[seq["slot"]]).size)
+            Nf_a = (
+                _slab_sz // _denom
+                if _denom and _slab_sz % _denom == 0
+                else int(getattr(bs, "Nf_active", None) or bs.Nf)
+            )
             n_src = int(mask.sum())
             if n_src == 0:
                 return np.zeros((nc, Nf_a, Nt_a))
@@ -2584,9 +2618,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _t_tot = self._debug_cell_total_template(
                 buffer_obj, band_sorter, seq)
             seq["t_tot"] = _t_tot
+            # Combine only when the total template matches the (per-band)
+            # residual slab shape; a geometry mismatch degrades to no
+            # reconstructed data_const rather than crashing the sampler
+            # (debug-only invariant, and _true below often supersedes it).
+            _br = seq["snaps"]["before_removal"]
             seq["data_const"] = (
-                None if _t_tot is None
-                else seq["snaps"]["before_removal"] + _t_tot
+                _br + _t_tot
+                if (
+                    _t_tot is not None
+                    and _br is not None
+                    and getattr(_t_tot, "shape", None) == getattr(_br, "shape", None)
+                )
+                else None
             )
             # TRUE data guard: prefer the injection-data slab (minus
             # non-GB models) over the residual+templates reconstruction --
