@@ -1204,6 +1204,17 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     logger.info("[%s_DEBUG] snapshot skipped: %r", self._dbg_prefix, exc)
                     _dbg_leaf = False
 
+            if self.swap_debug:
+                _acs_cold_pre = asnumpy(self.acs.likelihood())
+                logger.info(
+                    "[STAGE] %s leaf %d PRE-EXPOSE  ACS cold lnL min/med/max "
+                    "%.3f / %.3f / %.3f",
+                    self.branch_name, leaf,
+                    float(np.min(_acs_cold_pre)),
+                    float(np.median(_acs_cold_pre)),
+                    float(np.max(_acs_cold_pre)),
+                )
+
             # remove cold chain sources
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             removal_coords_in = self._to_phys(removal_coords)
@@ -1504,6 +1515,27 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 _dbg_tmpl = self._dbg_template(add_coords_in[_dbg_w], _dbg_w)
 
             self.remove_cold_chain_sources(add_coords_in)
+
+            if self.swap_debug:
+                _acs_cold_post = asnumpy(self.acs.likelihood())
+                _believed = np.asarray(prev_logl[0], dtype=float)
+                _delta = _believed - _acs_cold_post
+                logger.info(
+                    "[STAGE] %s leaf %d POST-READD ACS cold lnL min/med/max "
+                    "%.3f / %.3f / %.3f | move-believed cold prev_logl "
+                    "min/med/max %.3f / %.3f / %.3f | believed-ACS median "
+                    "offset %.3f spread %.3f  (spread ~0 = consistent "
+                    "bookkeeping; large spread = state/residual corruption)",
+                    self.branch_name, leaf,
+                    float(np.min(_acs_cold_post)),
+                    float(np.median(_acs_cold_post)),
+                    float(np.max(_acs_cold_post)),
+                    float(np.min(_believed)),
+                    float(np.median(_believed)),
+                    float(np.max(_believed)),
+                    float(np.median(_delta)),
+                    float(np.max(_delta) - np.min(_delta)),
+                )
 
             if os.environ.get("ADDREMOVE_ROUNDTRIP"):
                 _rc = np.asarray(removal_coords)[_dbg_w]
