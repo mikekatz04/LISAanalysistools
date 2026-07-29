@@ -409,6 +409,22 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.check_ll_every = max(
             1, int(os.environ.get(f"{p}_CHECK_LL_EVERY", "1"))
         )
+        # Tempering diagnostics: {BRANCH}_SWAP_DEBUG=1 logs one [SWAP_DBG]
+        # line per repeat (cold-chain lnL before/after the temperature swap,
+        # inner acceptance, per-rung swap counts, fancy flag).
+        self.swap_debug = bool(int(os.environ.get(f"{p}_SWAP_DEBUG", "0")))
+        # {BRANCH}_PERMUTE_EVERY overrides the ctor permute_every; <= 0
+        # DISABLES the walker-permuting (fancy) swap entirely — the A/B lever
+        # for isolating fancy-swap pathologies.
+        _pe_env = os.environ.get(f"{p}_PERMUTE_EVERY") or os.environ.get(
+            "ADDREMOVE_PERMUTE_EVERY"
+        )
+        if _pe_env is not None:
+            self.permute_every = int(_pe_env)
+            logger.info(
+                "[%s] permute_every overridden via env -> %d (<=0 disables "
+                "the fancy swap)", p, self.permute_every,
+            )
         # Colour scale keyed to the RESIDUAL (where the other sources are
         # already subtracted) and log10 by default, so this source stays
         # visible even in a crowded band. {P}_DEBUG_LOG=0 -> linear.
@@ -1233,6 +1249,16 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             ):
                 self._verify_prev_logl(prev_logl, old_coords_in, data_index_in, leaf)
 
+            if self.swap_debug:
+                logger.info(
+                    "[SWAP_DBG] %s leaf %d ENTRY cold prev_logl min/med/max "
+                    "%.3f / %.3f / %.3f",
+                    self.branch_name, leaf,
+                    float(prev_logl[0].min()),
+                    float(np.median(prev_logl[0])),
+                    float(prev_logl[0].max()),
+                )
+
             # -1e300 is the out-of-domain sentinel, not a numerical issue.
             if np.any((prev_logl < -1e10) & (prev_logl > -1e299)) or np.any(prev_logl > 1e30):
                 logger.warning(f"Very low log likelihood encountered in propose: min = {prev_logl.min()}, max = {prev_logl.max()}. This could be a sign of numerical issues.")
@@ -1395,8 +1421,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # swap unreachable (stock EMRI/SOBBH default: 10 repeats vs
                 # permute_every 20 -> it never fired); clamp so it fires at
                 # least once per leaf visit, on the last repeat.
-                _pe = min(self.permute_every, max(self.num_repeats - 1, 1))
-                fancy_swap = (repeat > 0) and (repeat % _pe == 0)
+                # permute_every <= 0 ({BRANCH}_PERMUTE_EVERY=0) disables it.
+                if self.permute_every <= 0:
+                    fancy_swap = False
+                else:
+                    _pe = min(self.permute_every, max(self.num_repeats - 1, 1))
+                    fancy_swap = (repeat > 0) and (repeat % _pe == 0)
                 if fancy_swap:
                     logger.debug(
                         "%s leaf %d repeat %d: fancy (walker-permuting) "
@@ -1406,6 +1436,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 #if fancy_swap:
                     # logger.debug(f"Permuting walkers before swap.")
                 compute_log_like = self.log_like_for_fancy_swaping
+
+                if self.swap_debug:
+                    _cold_before = np.array(prev_logl[0], copy=True)
 
                 # TODO: check permute make sure it is okay
                 (
@@ -1427,6 +1460,28 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     compute_log_like=compute_log_like,
                     permute_here=fancy_swap,
                 )
+
+                if self.swap_debug:
+                    _cold_after = np.asarray(prev_logl[0])
+                    _drop = _cold_before - _cold_after
+                    logger.info(
+                        "[SWAP_DBG] %s leaf %d rep %d fancy=%d | inner cold "
+                        "acc %d/%d | cold lnL max/med %.3f / %.3f -> %.3f / "
+                        "%.3f | worst walker drop %.3f | swaps_acc %s",
+                        self.branch_name, leaf, repeat, int(fancy_swap),
+                        int(np.asarray(accepted[0]).sum()), self.nwalkers,
+                        float(_cold_before.max()),
+                        float(np.median(_cold_before)),
+                        float(_cold_after.max()),
+                        float(np.median(_cold_after)),
+                        float(_drop.max()),
+                        np.array2string(
+                            np.asarray(
+                                temperature_control_here.swaps_accepted
+                            ),
+                            precision=0,
+                        ),
+                    )
 
                 temperature_control_here.adapt_temps()
 
