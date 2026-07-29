@@ -86,6 +86,36 @@ heavy in `__init__`; the pre-build fit must pickle/deepcopy). The
 compatibility stubs — do not grow them back. Full rules + architecture in
 `LISAanalysistools/CLAUDE.md` ("Stock global fits").
 
+## Global-fit storage: cold-chain main backend + per-branch sub-backends
+
+On-disk format `gf_format_version=2` (the cold-chain storage rework):
+
+- **The main backend/state store ONLY the cold chain** (the engine runs
+  `ntemps=1` — the joint solution). There is no meaningful tempered
+  information at the run level: each module tempers internally.
+- **Each branch owns its full tempered ensemble** — chain/inds, per-branch
+  log-likelihood/prior where meaningful, its ladder (`betas`, per-band
+  `band_temps`, or per-leaf `betas_all`), proposal/swap counters, and the
+  per-leaf cold-chain `d_h`/`h_h` record — in its `ModuleSubState`
+  (in-memory) and `ModuleSubBackend` (HDF group
+  `global_fit/sub_backend/<branch>` in the same file).
+- **"The sub-state IS the schema"**: a sub-state declares its storage
+  through setup methods + name lists (`storage_arrays`/`static_arrays`/
+  `storage_attrs`, `make_template`/`from_stored`); the backend derives every
+  dataset from the arrays the sub-state allocates. No separate schema/Spec
+  layer — extending a module's storage means extending its sub-state.
+- **Per-branch ladder knobs**: `Settings.ntemps` per branch
+  (`GB_NTEMPS` 24 / `VGB_NTEMPS` 12 / `MBH|EMRI|SOBBH_NTEMPS` 4 /
+  `PSD_NTEMPS` 12; an explicit `betas` array wins). The legacy `NTEMPS` env
+  var RAISES on stock variants; `erebor.blank` keeps it because simple-API
+  branches temper on the engine ladder.
+- **Cold-row consistency is enforced**: every stage entry verifies the main
+  state's cold row matches each sub-state's row 0
+  (`ModuleSubState.check_cold_row`; `GF_SUBSTATE_CHECK=0` disables). Moves
+  write their sub-state and mirror row 0 via `sync_cold_row`.
+- **Clean break**: files written before format v2 cannot be resumed (the
+  `load_info` gate raises with instructions); no migration tooling.
+
 ## No backend strings as function kwargs (LISA Analysis Tools–wide rule)
 
 When a class or function needs a compute backend (CPU C++, CUDA C++,

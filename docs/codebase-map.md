@@ -258,6 +258,17 @@ templated kernels.
 - **No new global-fit settings files**: new run = `StockGlobalFit` subclass;
   nothing heavy in `__init__` (data load in `.build()`); pre-build fit must
   pickle/deepcopy.
+- **Global-fit storage is cold-chain-only in the main backend**
+  (`gf_format_version=2`): the engine runs `ntemps=1`; each branch owns its
+  full tempered ensemble (chain/inds/ll/ladder/counters + per-leaf
+  `d_h`/`h_h`) in its `ModuleSubState` / `ModuleSubBackend`
+  (`sub_backend/<branch>` in the same HDF file). Per-branch ladder knobs
+  `<BRANCH>_NTEMPS` (gb 24 / vgb 12 / mbh-emri-sobbh 4 / psd 12); the legacy
+  `NTEMPS` env raises on stock variants (`erebor.blank` keeps it — simple-API
+  branches temper on the engine ladder). "The sub-state IS the schema": a
+  sub-state's setup methods + name lists define its datasets; no Spec layer.
+  Cold-row agreement is checked at every stage entry (`GF_SUBSTATE_CHECK=0`
+  disables). Pre-rework files cannot be resumed (clean break).
 - **Backend implementation hierarchy**: GPU C++ leads → CPU C++ mirrors via
   `#ifdef` → JAX diverges internally but must match C++ inner products
   (reldiff ≲ 1e-12). Narrowband WDM validation via `mm5`/`mm2`.
