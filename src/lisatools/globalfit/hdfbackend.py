@@ -379,7 +379,8 @@ class GFHDFBackend(eryn_HDFBackend):
                 with self.open() as f:
                     if self.name in f and "sub_backend" in f[self.name]:
                         existing_keys = set(f[self.name]["sub_backend"].keys())
-            except Exception:
+            except OSError:
+                # No file yet (fresh run) -- nothing on disk to read back.
                 pass
             # Now read reset_kwargs from each existing sub-backend
             # (outside the parent file handle to avoid nested opens).
@@ -387,8 +388,12 @@ class GFHDFBackend(eryn_HDFBackend):
                 if key in existing_keys:
                     try:
                         base_kwargs.update(sub_backend_tmp.reset_kwargs)
-                    except Exception:
-                        pass
+                    except (KeyError, OSError) as e:
+                        logger.warning(
+                            "could not read reset_kwargs from sub-backend %r: %s",
+                            key,
+                            e,
+                        )
         return base_kwargs
 
     def reset(self, *args, **kwargs):
@@ -419,7 +424,8 @@ class GFHDFBackend(eryn_HDFBackend):
                 with self.open() as f:
                     if self.name in f and "sub_backend" in f[self.name]:
                         existing_keys = set(f[self.name]["sub_backend"].keys())
-            except Exception:
+            except OSError:
+                # No file yet (fresh run) -- nothing on disk to preserve.
                 pass
             # Now read reset_kwargs from each existing sub-backend
             # (outside the parent file handle to avoid nested opens).
@@ -427,8 +433,13 @@ class GFHDFBackend(eryn_HDFBackend):
                 if key in existing_keys:
                     try:
                         sub_backend_saved_kwargs[key] = sub_backend_tmp.reset_kwargs
-                    except Exception:
-                        pass
+                    except (KeyError, OSError) as e:
+                        logger.warning(
+                            "could not preserve reset_kwargs from sub-backend %r "
+                            "across reset: %s",
+                            key,
+                            e,
+                        )
 
         # regular reset — this deletes and recreates f[self.name]
         super().reset(*args, **kwargs)
@@ -1101,9 +1112,10 @@ class EMRIHDFBackend(eryn_HDFBackend):
 
     @property
     def num_emris(self):
-        """Get num_bands from h5 file."""
+        """Get num_emris from the emri sub-backend group in the h5 file."""
+        # reset() writes this attr on the emri sub-group, not the top group.
         with self.open() as f:
-            return f[self.name].attrs["num_emris"]
+            return f[self.name]["sub_backend"]["emri"].attrs["num_emris"]
 
     @property
     def reset_kwargs(self):
@@ -1260,9 +1272,10 @@ class SOBBHHDFBackend(eryn_HDFBackend):
 
     @property
     def num_sobbhs(self):
-        """Get num_sobbhs from h5 file."""
+        """Get num_sobbhs from the sobbh sub-backend group in the h5 file."""
+        # reset() writes this attr on the sobbh sub-group, not the top group.
         with self.open() as f:
-            return f[self.name].attrs["num_sobbhs"]
+            return f[self.name]["sub_backend"]["sobbh"].attrs["num_sobbhs"]
 
     @property
     def reset_kwargs(self):

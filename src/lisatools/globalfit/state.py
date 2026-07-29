@@ -256,105 +256,6 @@ class GBState(eryn_State):
         self.band_info["band_swaps_proposed"][:] = 0
         self.band_info["band_swaps_accepted"][:] = 0
 
-    def reset_backend(self, h5_group, h5_kwargs, nwalkers, *args, ntemps=1, **kwargs):
-        """Initialize the per-band HDF5 datasets used to store the chain."""
-        assert self.band_initialized
-
-        band_group = h5_group.create_group("gb_sub_state")
-
-        band_group.create_dataset("band_edges", data=self.band_info["band_edges"], **h5_kwargs)
-        num_bands = self.band_info["num_bands"]
-        band_group.attrs["num_bands"] = num_bands
-
-        band_group.create_dataset(
-            "band_temps",
-            (0, num_bands, ntemps),
-            maxshape=(None, num_bands, ntemps),
-            **h5_kwargs,
-        )
-
-        band_group.create_dataset(
-            "band_swaps_proposed",
-            (0, num_bands, ntemps - 1),
-            maxshape=(None, num_bands, ntemps - 1),
-            **h5_kwargs,
-        )
-
-        band_group.create_dataset(
-            "band_swaps_accepted",
-            (0, num_bands, ntemps - 1),
-            maxshape=(None, num_bands, ntemps - 1),
-            **h5_kwargs,
-        )
-
-        band_group.create_dataset(
-            "band_num_proposed",
-            (0, num_bands, ntemps),
-            maxshape=(None, num_bands, ntemps),
-            **h5_kwargs,
-        )
-
-        band_group.create_dataset(
-            "band_num_accepted",
-            (0, num_bands, ntemps),
-            maxshape=(None, num_bands, ntemps),
-            **h5_kwargs,
-        )
-
-        band_group.create_dataset(
-            "band_num_proposed_rj",
-            (0, num_bands, ntemps),
-            maxshape=(None, num_bands, ntemps),
-            **h5_kwargs,
-        )
-
-        band_group.create_dataset(
-            "band_num_accepted_rj",
-            (0, num_bands, ntemps),
-            maxshape=(None, num_bands, ntemps),
-            **h5_kwargs,
-        )
-
-        band_group.create_dataset(
-            "band_num_binaries",
-            (0, ntemps, nwalkers, num_bands),
-            maxshape=(None, ntemps, nwalkers, num_bands),
-            **h5_kwargs,
-        )
-
-    def grow_backend(self, h5_group, ngrow, *args):
-        """Grow per-band datasets to ``ngrow`` rows."""
-        band_group = h5_group["gb_sub_state"]
-        for key in band_group:
-            if key == "band_edges":
-                continue
-            band_group[key].resize(ngrow, axis=0)
-
-    def save_step(self, iteration, h5_group, state, *args, **kwargs):
-        """Persist this iteration's per-band info into ``h5_group``.
-
-        Args:
-            iteration: Index along the leading dataset axis to write to.
-            h5_group: HDF5 group containing the ``gb_sub_state`` subgroup.
-            state: Active sampler state (its ``sub_states["gb"]`` is read).
-        """
-        # make sure the backend has all the information needed to store everything
-        gb_group = h5_group["gb_sub_state"]
-        for key in [
-            "num_bands",
-        ]:
-            if not hasattr(self, key):
-                setattr(self, key, gb_group.attrs[key])
-
-        # branch-specific
-        for name, dat in state.sub_states["gb"].band_info.items():
-            if not isinstance(dat, np.ndarray) or name == "band_edges":
-                continue
-            gb_group[name][iteration] = dat
-
-        # reset the counter for band info
-        state.sub_states["gb"].reset_band_counters()
-
     @property
     def reset_kwargs(self):
         """Kwargs passed back to the backend when re-initializing the state."""
@@ -381,7 +282,7 @@ class MBHState(eryn_State):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
-            self.num_mbhs = betas_all.shape[0] if betas_all is not None else 20
+            self.num_mbhs = possible_state.num_mbhs
         else:
             self.betas_all = betas_all
             if possible_state is None:
@@ -411,7 +312,7 @@ class EMRIState(eryn_State):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
-            self.num_emris = betas_all.shape[0] if betas_all is not None else 20
+            self.num_emris = possible_state.num_emris
         else:
             self.betas_all = betas_all
             if possible_state is None:
@@ -443,7 +344,7 @@ class SOBBHState(eryn_State):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
-            self.num_sobbhs = betas_all.shape[0] if betas_all is not None else 20
+            self.num_sobbhs = possible_state.num_sobbhs
         else:
             self.betas_all = betas_all
             if possible_state is None:

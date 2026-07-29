@@ -462,7 +462,6 @@ class GlobalFit:
             ).get_last_sample()  # .get_a_sample(0)
 
             # TODO: adjust this so it is automated
-            state.sub_states["gb"].initialized = False
             band_temps = np.zeros((len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps))
             state.sub_states["gb"].initialize_band_information(
                 self.nwalkers,
@@ -1199,15 +1198,12 @@ class GlobalFit:
                 **extra_reset_kwargs,
             )
 
-            # Persist the domain settings (FD / STFT / WDM) and the
-            # optional WDM lookup table so a re-run can reconstruct
-            # everything from a single HDF5 file. ``general_info``
+            # Persist the domain settings (FD / STFT / WDM) so a re-run can
+            # reconstruct everything from a single HDF5 file. ``general_info``
             # already holds the resolved instances at this point.
             domain_settings = general_info.domain_settings
             if domain_settings is not None:
                 backend.write_domain_settings(domain_settings)
-            if getattr(general_info, "wdm_lookup_table", None) is not None:
-                backend.write_wdm_lookup_table(general_info.wdm_lookup_table)
 
         # setup_info_all = None
         # for name in branch_names:
