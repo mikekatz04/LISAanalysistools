@@ -244,7 +244,12 @@ def _env_optional_duration(var: str, default: float):
 class SourceMBHSettings(MBHSettings):
     """MBH branch block. Default path: LEGACY ``PhenomTHMTDIWaveform``."""
 
-    num_prop_repeats: int = 2
+    # In-model stretch repeats per leaf visit: the expose/fold residual
+    # round-trip and the prev_logl batch are paid once per visit, so more
+    # repeats amortize the add/remove overhead across more proposals.
+    num_prop_repeats: int = dataclasses.field(
+        default_factory=env_default("MBH_NUM_PROP_REPEATS", 2, int)
+    )
     ndim: int = 11
     # Waveform path: legacy phentax (False, default) vs TDI-on-the-fly.
     use_tdionfly: bool = dataclasses.field(
@@ -277,7 +282,9 @@ class SourceMBHSettings(MBHSettings):
 class SourceEMRISettings(EMRISettings):
     """EMRI branch block (always the legacy ResponseWrapper path)."""
 
-    num_prop_repeats: int = 2
+    num_prop_repeats: int = dataclasses.field(
+        default_factory=env_default("EMRI_NUM_PROP_REPEATS", 2, int)
+    )
     ndim: int = 12
     response_order: int = 40
 
@@ -286,7 +293,9 @@ class SourceEMRISettings(EMRISettings):
 class SourceSOBBHSettings(SOBBHSettings):
     """SOBBH branch block. Default path: TDI-ON-THE-FLY (validated)."""
 
-    num_prop_repeats: int = 2
+    num_prop_repeats: int = dataclasses.field(
+        default_factory=env_default("SOBBH_NUM_PROP_REPEATS", 2, int)
+    )
     ndim: int = 11
     use_tdionfly: bool = dataclasses.field(
         default_factory=env_default("USE_TDIONFLY", True, bool)
