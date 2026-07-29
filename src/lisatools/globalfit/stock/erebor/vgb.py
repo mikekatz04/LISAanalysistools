@@ -64,14 +64,14 @@ class VGBSettings(GBSettings):
     # fdot is sampled directly (no chirp-mass basis for known binaries)
     use_chirp_mass: bool = False
     use_astrophysical_f0_mc_prior: bool = False
-    # ONE red-blue stretch sweep per iteration. VGBSpecialStretchMove.in_model_proposal
-    # does a Goodman-Weare red-blue sweep against the BLOCK-START ensemble
-    # (each mover's complement is the opposite walker-parity of its
-    # (temp, leaf)). One sweep against the block-start complement is exact;
-    # the gbspecialstretch repeat block, however, reuses that SAME block-start
-    # complement for every repeat, so with >1 repeat the ensemble drifts
-    # ahead of the stale complement (a pure-stretch ratchet). Keep this at 1
-    # until the base repeat block refreshes the complement per repeat.
+    # Red-blue stretch sweeps per iteration. VGBSpecialStretchMove runs each
+    # repeat as eryn's sequential red-blue split (even-parity walkers move
+    # against the current odd half, then odd against the UPDATED even half,
+    # complement synced before each half; sequential_parity_repeats=True in
+    # gbspecialstretch). Every half-sweep is an invariant kernel, so this
+    # count is a COST knob, not a bias knob -- raise it freely (e.g. to
+    # amortize the sig-het per-block reference build across many repeats,
+    # mirroring the GB branch's default of 100).
     num_repeat_proposals: int = dataclasses.field(
         default_factory=env_default("VGB_NUM_REPEAT_PROPOSALS", 1, int)
     )

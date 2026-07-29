@@ -191,6 +191,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     use try-force rejection, optional phase maximization, and GPU-resident
     band-aware buffers (:class:`Buffer`, :class:`BandSorter`).
 
+    ``sequential_parity_repeats`` (class flag, default ``False``): when
+    ``True``, :meth:`_run_in_model_repeats` runs each repeat as TWO
+    sequential half-sweeps split by walker parity — eryn's
+    :class:`~eryn.moves.RedBlueMove` split structure, with the complement
+    always at its CURRENT state — so every half-sweep is an invariant
+    kernel and ``num_repeat_proposals`` is a cost knob, not a bias knob.
+    ``False`` keeps the single full-batch sweep per repeat, which is
+    correct for the group-stretch / info-matrix proposals whose complement
+    structures (friend table, Cholesky) are block-start snapshots by
+    design. Set ``True`` only on moves whose ``in_model_proposal`` reads
+    its complement from ``band_sorter.coords``
+    (:class:`VGBSpecialStretchMove`).
+
     # TODO/DOCS: full argument list — many constructor kwargs are passed
     through unmodified to ``GroupStretchMove``. Intended use is via the
     concrete subclasses :class:`GBSpecialStretchMove`,
@@ -250,6 +263,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             :class:`~lisatools.domains.WDMSettings`; ignored otherwise.
     """
 
+    # See the class docstring; True only on VGBSpecialStretchMove.
+    sequential_parity_repeats = False
+
     @property
     def xp(self) -> Union[ModuleType, numpy , cupy]:
         """Active array module (NumPy or CuPy) for this move."""
@@ -300,9 +316,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_cap_ll_nsigma=3.0,
         leaf_cap_require_occupancy=True,
         leaf_cap_update=True,
-        sighet_refresh_every=20,
+        sighet_refresh_every=0,
         sighet_refresh_dphase=0.5,
         sighet_refresh_min_beta=0.1,
+        sighet_drift_check=False,
         debug_seq_pick="first",
         debug=False,
         debug_plot_dir="./gf_output/gb_debug/",
@@ -388,18 +405,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.leaf_cap_update = bool(leaf_cap_update)
         self._band_leaf_cap = None
 
-        # Mid-block drift refresh for sig-het in-model scoring: every
-        # ``sighet_refresh_every`` repeats, a LIGHT parameter-space test
-        # (accumulated carrier-phase drift vs the reference + amplitude
-        # ratio) finds the sources that walked too far from their
-        # heterodyne expansion point, and ONLY those get their reference
-        # coefficients rebuilt (and their ll_ref re-based). Hot chains
-        # take the big accepted steps, so in practice this fires mostly
-        # at high temperature -- the per-source test handles that with no
-        # temperature special-casing. Inert when the engine's setup hook
-        # is a no-op (chunked-het / FD).
+        # Sig-het reference policy (ALL in-model proposals): the heterodyne
+        # reference is built ONCE per repeat block, against the source-free
+        # residual, and held FIXED for the whole block --
+        # ``sighet_refresh_every=0`` (the default) disables the legacy
+        # mid-block drift refresh entirely. The block's addback cross-check
+        # keeps the STORED ll exact regardless; the fixed reference only
+        # bounds the per-repeat MH deltas by the heterodyne linearization
+        # over one block's walk. Set ``sighet_drift_check=True``
+        # (GB_SIGHET_DRIFT_CHECK=1) to LOG the end-of-block drift metric
+        # (accumulated carrier-phase drift + amplitude ratio vs the
+        # expansion point) without changing the sampling -- the audit knob
+        # for that approximation.
+        #
+        # ``sighet_refresh_every=N > 0`` re-enables the legacy per-source
+        # mid-block refresh (drift test every N repeats, only offenders
+        # rebuilt, ll_ref re-based; beta-gated below). Diagnostic /
+        # comparison use. Inert when the engine's setup hook is a no-op
+        # (chunked-het / FD).
         self.sighet_refresh_every = int(sighet_refresh_every)
         self.sighet_refresh_dphase = float(sighet_refresh_dphase)
+        self.sighet_drift_check = bool(sighet_drift_check)
         # Refresh only where the scoring error matters: below this beta a
         # stale reference's ll error is beta-suppressed in the acceptance
         # exponent, while every refresh costs a full reference rebuild --
@@ -2699,9 +2725,39 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         lo_bin = (buffer_obj.frequency_lims[0][slots] / self.df).astype(int)
         hi_bin = (buffer_obj.frequency_lims[1][slots] / self.df).astype(int)
 
+        # Sequential red-blue repeats (VGB): each repeat runs as TWO
+        # half-sweeps split by walker parity, with the sorter coords synced
+        # to ``curr`` before each half so the stretch complement (read from
+        # ``band_sorter.coords`` inside ``in_model_proposal``) is always the
+        # CURRENT opposite half -- blue updates red, then blue moves against
+        # the UPDATED red, exactly eryn's ``RedBlueMove`` split structure.
+        # Each half-sweep is then an invariant kernel and the repeat count
+        # is a cost knob, not a bias knob. The default single full-batch
+        # sweep stays for the GB moves, whose group-stretch friend table /
+        # info-matrix Cholesky complements are block-start structures by
+        # design (repeats DO matter there).
+        if self.sequential_parity_repeats:
+            halves = [xp.where(w_i % 2 == p)[0] for p in (0, 1)]
+            halves = [h for h in halves if h.size > 0]
+        else:
+            halves = [None]
+
         for move_i in range(self.num_repeat_proposals):
+          for sub in halves:
+            if sub is None:
+                sl = slice(None)          # full batch (original behavior)
+                n_sub = len(ids)
+            else:
+                sl = sub
+                n_sub = int(sub.size)
+                # Complement <- current state (including the other half's
+                # accepted moves) for this half's proposal.
+                band_sorter.coords[ids] = curr
+
             with _tspan(tm, "inmodel_proposal"):
-                new, factors = self.in_model_proposal(curr, chol, band_sorter, ids, model)
+                new, factors = self.in_model_proposal(
+                    curr[sl], None if chol is None else chol[sl],
+                    band_sorter, ids[sl], model)
                 new[:] = self.periodic.wrap({self.branch_name: new[:, None, :]}, xp=xp)[self.branch_name][:, 0]
 
             with _tspan(tm, "inmodel_prior"):
@@ -2711,15 +2767,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # a per-leaf fill (not sampled): the proposal cannot move it.
                 if self._f0_col is not None:
                     _fc = self._f0_col
+                    n4_s, lo_s, hi_s = n4[sl], lo_bin[sl], hi_bin[sl]
                     new_bin = cp.abs(new[:, _fc] / 1e3 / self.df).astype(int)
                     new_logp[
-                        (cp.abs(new[:, _fc] / 1e3 - curr[:, _fc] / 1e3) / self.df).astype(int) > n4
+                        (cp.abs(new[:, _fc] / 1e3 - curr[sl][:, _fc] / 1e3) / self.df).astype(int) > n4_s
                     ] = -np.inf
-                    new_logp[new_bin < lo_bin - n4] = -np.inf
-                    new_logp[new_bin > hi_bin + n4] = -np.inf
+                    new_logp[new_bin < lo_s - n4_s] = -np.inf
+                    new_logp[new_bin > hi_s + n4_s] = -np.inf
 
                 keep = ~cp.isinf(new_logp)
-            new_ll = cp.full(len(ids), -1e300)
+            new_ll = cp.full(n_sub, -1e300)
+            slots_s, N_s, l_s = slots[sl], N_vals[sl], l_i[sl]
             # THE per-repeat scoring call: the sig-het fused in-kernel
             # likelihood when a reference is active, the chunked-het/FD
             # engine otherwise. This span is the headline number for the
@@ -2727,9 +2785,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             with _tspan(tm, "inmodel_get_add_ll"):
                 if bool(keep.any()):
                     new_ll[keep] = buffer_obj.get_add_ll(
-                        new[keep], slots[keep], slots[keep], N_vals[keep],
+                        new[keep], slots_s[keep], slots_s[keep], N_s[keep],
                         phase_maximize=self.phase_maximize,
-                        leaf_inds=l_i[keep],
+                        leaf_inds=l_s[keep],
                     )
                     if self.phase_maximize and buffer_obj.phase_angle is not None:
                         new[keep, self._phi0_col] = (
@@ -2741,36 +2799,39 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if tm is not None:
                 tm.count("inmodel_repeat_calls")
 
-            delta_ll = new_ll - ll_ref
+            delta_ll = new_ll - ll_ref[sl]
             # Host-side MH bookkeeping. On CuPy every ``bool(...any())`` here
             # is a device sync, so this span is the launch-overhead signal:
             # if it rivals inmodel_get_add_ll the block is host-bound (too
             # few sources per launch), not kernel-bound.
             with _tspan(tm, "inmodel_accept"):
-                lnpdiff = beta * delta_ll + (new_logp - curr_prior) + factors
+                lnpdiff = beta[sl] * delta_ll + (new_logp - curr_prior[sl]) + factors
                 accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
 
                 bad_mask = (new_ll <= -1e299) | (new_logp <= -1e229)
                 bad_accepts = accept & bad_mask
                 if bool(xp.any(bad_accepts)):
-                    if bool(xp.any(beta[bad_accepts] != 0.0)):
+                    if bool(xp.any(beta[sl][bad_accepts] != 0.0)):
                         logger.warning(
                             f"{self.name}: accepted an out-of-prior in-model "
                             "coordinate at beta > 0."
                         )
                     accept[bad_accepts] = False
 
-                prop_counts[1][t_i, w_i, b_i] += 1
+                prop_counts[1][t_i[sl], w_i[sl], b_i[sl]] += 1
                 if bool(accept.any()):
-                    curr[accept] = new[accept]
-                    ll_ref[accept] = new_ll[accept]
-                    curr_prior[accept] = new_logp[accept]
-                    ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += delta_ll[accept]
-                    acc_counts[1][t_i[accept], w_i[accept], b_i[accept]] += 1
+                    # Global positions of the accepted movers: a boolean mask
+                    # on the full path, the half's index array otherwise.
+                    gi = accept if sub is None else sub[accept]
+                    curr[gi] = new[accept]
+                    ll_ref[gi] = new_ll[accept]
+                    curr_prior[gi] = new_logp[accept]
+                    ll_change_log[t_i[gi], w_i[gi], b_i[gi]] += delta_ll[accept]
+                    acc_counts[1][t_i[gi], w_i[gi], b_i[gi]] += 1
 
             self._debug_verify_in_model(
-                buffer_obj, curr, new, slots, N_vals, delta_ll, keep,
-                (asnumpy(t_i), asnumpy(w_i), asnumpy(b_i)), move_i,
+                buffer_obj, curr[sl], new, slots_s, N_s, delta_ll, keep,
+                (asnumpy(t_i[sl]), asnumpy(w_i[sl]), asnumpy(b_i[sl])), move_i,
             )
 
             # Sig-het drift refresh: every ``sighet_refresh_every``
@@ -2784,6 +2845,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # reference so the MH deltas never mix references.
             if (
                 sighet_active
+                # once per REPEAT: only after the last parity half-sweep
+                # (halves == [None] on the full-batch path, so this is
+                # always true there).
+                and sub is halves[-1]
                 and self.sighet_refresh_every > 0
                 and (move_i + 1) % self.sighet_refresh_every == 0
                 and move_i + 1 < self.num_repeat_proposals
@@ -2815,6 +2880,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         f"{int(far.sum())}/{len(ids)} sources at repeat "
                         f"{move_i + 1}."
                     )
+
+        # End-of-block drift AUDIT (sighet_drift_check / GB_SIGHET_DRIFT_CHECK):
+        # with the fixed-reference policy (sighet_refresh_every=0) this logs
+        # how far each source walked from its heterodyne expansion point over
+        # the block -- same parameter-space metric the legacy refresh gated
+        # on -- WITHOUT changing the sampling. Pure arithmetic, no kernel.
+        if sighet_active and self.sighet_drift_check:
+            Tobs = float(self._basis_settings.Tobs)
+            df0_hz = cp.abs(curr[:, 1] - ref_track[:, 1]) / 1e3
+            dfdot = cp.abs(curr[:, 2] - ref_track[:, 2])
+            drift = 2.0 * np.pi * df0_hz * Tobs + np.pi * dfdot * Tobs**2
+            damp = cp.abs(curr[:, 0] - ref_track[:, 0])
+            n_over = int((drift > self.sighet_refresh_dphase).sum())
+            logger.info(
+                f"{self.name}: sig-het end-of-block drift ({len(ids)} sources, "
+                f"{self.num_repeat_proposals} repeats): phase max="
+                f"{float(drift.max()):.3e} median={float(cp.median(drift)):.3e} rad, "
+                f"{n_over} over dphase={self.sighet_refresh_dphase}; "
+                f"|dlnA| max={float(damp.max()):.3e}."
+            )
 
         # Repeat block over: deactivate the per-source likelihood setup so
         # everything outside the block (RJ, removal, fills) scores through
@@ -3735,18 +3820,36 @@ class VGBSpecialStretchMove(GBSpecialBase):
     SAME physical source (same leaf, same temperature). No friend table, no
     info-matrix Cholesky, no phase maximization.
 
-    The move stores nothing that feeds the proposal: it reshapes the
-    block-start ensemble and hands it to :meth:`eryn.moves.StretchMove.get_proposal`,
-    which does the affine-invariant sampling itself (picks each mover's
-    complement via ``choose_c_vals``, draws the stretch factor ``z``, and
-    returns the ``(ndim - 1) * log(z)`` detailed-balance factors with the
-    true sampled dimensionality — the coords are natively the reduced
-    sampled basis, so nothing to adjust).
+    The move stores nothing that feeds the proposal: it hands the CURRENT
+    ensemble to stock :meth:`eryn.moves.StretchMove.get_proposal`, which does
+    the affine-invariant sampling itself (picks each mover's complement,
+    draws the stretch factor ``z``, and returns the ``(ndim - 1) * log(z)``
+    detailed-balance factors — the coords are natively the reduced sampled
+    basis, so nothing to adjust). ``sequential_parity_repeats = True`` makes
+    the base repeat block run each repeat as eryn's red-blue split: even-
+    parity walkers move against the current odd half, then odd against the
+    UPDATED even half, with ``band_sorter.coords`` synced before each half.
+    Every half-sweep is an invariant kernel, so ``num_repeat_proposals``
+    (``VGB_NUM_REPEAT_PROPOSALS``) is a cost knob, not a bias knob.
 
     The fixed per-leaf parameters (f0, sky) live in the transform
     container's per-leaf ``fill_dict`` (Eryn per-leaf fills, selected by
     ``leaf_inds``).
     """
+
+    # This move IS eryn's plain stretch. GBSpecialBase's MRO inherits
+    # GroupStretchMove(GroupMove, StretchMove), and GroupMove overrides
+    # choose_c_vals with a friend-table variant of a DIFFERENT signature --
+    # re-point the pieces StretchMove.get_proposal dispatches through so the
+    # stock proposal runs the textbook affine-invariant sweep. (The VGB flow
+    # never builds a friend table: _build_friend_table = False below.)
+    choose_c_vals = StretchMove.choose_c_vals
+    get_new_points = StretchMove.get_new_points
+
+    # Base repeat block runs eryn's red-blue split per repeat (see
+    # GBSpecialBase._run_in_model_repeats): repeats compose invariant
+    # kernels, so the repeat count is free.
+    sequential_parity_repeats = True
 
     def __init__(self, *args, **kwargs):
         if kwargs.get("rj_proposal_distribution") is not None or kwargs.get(
@@ -3765,26 +3868,24 @@ class VGBSpecialStretchMove(GBSpecialBase):
         self._build_friend_table = False
 
     def in_model_proposal(self, coords, chol, band_sorter, source_ids, model):
-        """Goodman-Weare red-blue stretch over the sampled columns (nothing stored).
+        """One parity HALF of a Goodman-Weare red-blue sweep, via eryn's stretch.
 
-        Overrides the base's group-stretch / info-matrix mix. Every picked
-        source is a mover; its complement pool is the OPPOSITE walker-parity
-        walkers of the SAME ``(temperature, leaf)`` -- the same physical
-        source across the ensemble -- read from the block-start sorter
-        coords. Because a source's complement is strictly the other parity,
-        no mover is ever its own (or a same-parity mover's) complement, so
-        the simultaneous update is an unbiased red-blue sweep (both halves
-        move against the fixed other half). Eryn's stretch primitives do the
-        complement draw + affine math + the ``(ndim-1)*log(z)`` factors; the
-        coords are natively the reduced sampled basis, so nothing to adjust.
+        The base repeat block (``sequential_parity_repeats = True``) calls
+        this once per parity half per repeat -- even-parity movers first,
+        then odd -- and syncs ``band_sorter.coords`` to the tracked
+        coordinates before each call, so the complement read here is the
+        CURRENT opposite half (for the second half, including this repeat's
+        accepted moves). That is eryn's :class:`~eryn.moves.RedBlueMove`
+        split structure; each half-sweep is an invariant kernel.
 
-        NOTE: this is one red-blue sweep per call. With
-        ``num_repeat_proposals == 1`` (the VGB default) the base repeat block
-        calls it exactly once against the block-start ensemble -- correct and
-        unbiased. Running more repeats would reuse the same block-start
-        complement and let the ensemble drift ahead of it (a stale-complement
-        ratchet); a per-repeat complement refresh in the base block would be
-        needed first.
+        The proposal itself is stock
+        :meth:`eryn.moves.StretchMove.get_proposal` -- complement draw,
+        affine stretch, ``(ndim - 1) * log(z)`` factors -- with each mover
+        entering as its own single-walker row and its opposite-parity
+        walkers of the SAME ``(temperature, leaf)`` as the complement pool.
+        The class-level ``choose_c_vals`` / ``get_new_points`` aliases keep
+        ``get_proposal``'s internal dispatch on the plain stretch rather
+        than GroupMove's friend-table overrides.
         """
         xp = self.xp
         nw = self.nwalkers
@@ -3796,14 +3897,15 @@ class VGBSpecialStretchMove(GBSpecialBase):
         l_i = band_sorter.leaf_inds[source_ids]
         ndim = coords.shape[-1]
 
-        # block-start ensemble as (ntemps, nwalkers, nleaves, ndim). Valid
+        # CURRENT ensemble as (ntemps, nwalkers, nleaves, ndim) -- the base
+        # repeat block wrote ``curr`` back just before this call. Valid
         # because VGB is fixed-dimensional: every leaf is alive at every
         # (temp, walker), so the flattened sorter coords reshape to the grid.
         ens4 = band_sorter.coords.reshape(
             self.ntemps, nw, band_sorter.nleaves_max, ndim
         )
         # complement pool per mover: the walkers of its (temp, leaf) in the
-        # OPPOSITE parity (the "fixed other half" of the red-blue split).
+        # OPPOSITE parity (the other half of the red-blue split).
         walker_axis = xp.arange(nw)
         even_ws = walker_axis[walker_axis % 2 == 0]
         odd_ws = walker_axis[walker_axis % 2 == 1]
@@ -3811,19 +3913,16 @@ class VGBSpecialStretchMove(GBSpecialBase):
         opp_ws = xp.where((w_i % 2 == 0)[:, None], odd_ws[None, :], even_ws[None, :])
         comp = ens4[t_i[:, None], opp_ws, l_i[:, None], :]        # (n_src, nw/2, ndim)
 
-        # Eryn stretch primitives (each mover is its own single-walker group
-        # on the ntemps axis): choose one complement + affine stretch + z.
-        # Called explicitly so the base's GroupMove.choose_c_vals is bypassed.
-        n, nc = comp.shape[0], comp.shape[1]
-        s = coords[:, None, None, :]                              # (n, 1, 1, ndim)
-        c = comp[:, :, None, :]                                   # (n, nc, 1, ndim)
+        # Stock eryn stretch: each mover is its own single-walker row on the
+        # leading axis with its own complement pool.
         rng = model.random if not self.use_gpu else self.xp.random
-        c_temp = StretchMove.choose_c_vals(self, c, nc, 1, n, rng)
-        new = StretchMove.get_new_points(
-            self, self.branch_name, s, c_temp, 1, s.shape, 0, rng
+        newpos, factors = StretchMove.get_proposal(
+            self,
+            {self.branch_name: coords[:, None, None, :]},        # (n, 1, 1, ndim)
+            {self.branch_name: [comp[:, :, None, :]]},           # (n, nc, 1, ndim)
+            rng,
         )
-        factors = (ndim - 1.0) * xp.log(self.zz)                  # (n, 1)
-        return new[:, 0, 0, :], factors.reshape(-1)
+        return newpos[self.branch_name][:, 0, 0, :], factors.reshape(-1)
 
 
 class GBSpecialRJPriorMove(GBSpecialBase):

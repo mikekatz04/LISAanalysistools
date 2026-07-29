@@ -2209,13 +2209,16 @@ def build_gb_moves(
             int(os.environ.get("GB_LEAF_CAP_OCCUPANCY", "1"))
         ),
         leaf_cap_update=True,
-        # Sig-het in-model drift refresh: every N repeats, re-anchor the
-        # heterodyne references of sources whose accumulated carrier-phase
-        # drift exceeds the threshold (radians). Inert on chunked/FD.
-        sighet_refresh_every=int(os.environ.get("GB_SIGHET_REFRESH_EVERY", "20")),
+        # Sig-het reference policy: built once per repeat block and FIXED
+        # (default 0 = no mid-block refresh). GB_SIGHET_REFRESH_EVERY=N>0
+        # re-enables the legacy per-source drift refresh (diagnostic);
+        # GB_SIGHET_DRIFT_CHECK=1 logs the end-of-block drift metric
+        # without changing the sampling. Inert on chunked/FD.
+        sighet_refresh_every=int(os.environ.get("GB_SIGHET_REFRESH_EVERY", "0")),
         sighet_refresh_dphase=float(os.environ.get("GB_SIGHET_REFRESH_DPHASE", "0.5")),
         sighet_refresh_min_beta=float(
             os.environ.get("GB_SIGHET_REFRESH_MIN_BETA", "0.1")),
+        sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v
             for k, v in gb_info.group_proposal_kwargs.items()
@@ -2537,6 +2540,14 @@ def build_vgb_moves(
         t_ref=float(getattr(vgb_info, "t0", 0.0) or 0.0),
         run_swaps=True,
         gpus=[],
+        # Same sig-het reference-policy knobs as the GB move (fixed
+        # reference by default; see build_gb_moves) so the two branches
+        # audit identically.
+        sighet_refresh_every=int(os.environ.get("GB_SIGHET_REFRESH_EVERY", "0")),
+        sighet_refresh_dphase=float(os.environ.get("GB_SIGHET_REFRESH_DPHASE", "0.5")),
+        sighet_refresh_min_beta=float(
+            os.environ.get("GB_SIGHET_REFRESH_MIN_BETA", "0.1")),
+        sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v
             for k, v in (vgb_info.group_proposal_kwargs or {}).items()
