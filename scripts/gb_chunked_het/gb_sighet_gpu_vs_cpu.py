@@ -31,7 +31,11 @@ Harness self-test (CPU vs CPU; diffs must be ~0):
     GPU_BACKEND=cpu python gb_sighet_gpu_vs_cpu.py
 
 Env knobs: GPU_BACKEND (default cuda12x), N_CAND (default 8), SEED,
-NT_LAYER (default 64), N_SPARSE_FD (default 1024), RTOL_LL, RTOL_COEF.
+NT_LAYER (default 64), N_SPARSE_FD (default 1024), RTOL_LL, RTOL_COEF,
+N_REF (default 1) -- number of heterodyne references / buffer slots. N_REF>1
+exercises the BATCHED setup_in_model (one bin_fold_real call over the slot
+axis) and the partial mid-block refresh; GB_SIGHET_FOLD_MAX_BYTES forces the
+batched fold to split into multiple chunks.
 """
 from __future__ import annotations
 
@@ -74,52 +78,68 @@ def build_sighet(backend, wdm_kwargs, comp_kwargs, nt_layer, n_sparse_fd):
     return comp, chunked, wdm_set
 
 
-def evaluate(comp, chunked, wdm_set, A, cands):
-    """Build the in-model scenario on this comp's backend; return numpy dict."""
+def evaluate(comp, chunked, wdm_set, A_all, cands, cand_slots, patch_slots):
+    """Build the in-model scenario on this comp's backend; return numpy dict.
+
+    ``A_all`` is ``(n_ref, 9)``: one heterodyne reference per buffer slot, laid
+    out on the slot axis exactly as the band buffer does. ``cand_slots`` maps
+    each candidate to the slot (hence reference) it scores against, and
+    ``patch_slots`` is the SUBSET refreshed mid-block. With ``n_ref == 1`` this
+    reduces to the original single-reference scenario.
+    """
     xp = comp.xp
     nch = 3
     Nf, Nt = wdm_set.Nf, wdm_set.Nt
-
-    # data = dense chunked template(A) on the active band; identity cross invC
-    hA = xp.zeros((nch, Nf, Nt))
-    chunked.fill_global_wdm(xp.asarray(A[None, :]), hA, convert_to_ra_dec=False)
+    n_ref = A_all.shape[0]
     ilo, ihi = wdm_set.ind_min_f, wdm_set.ind_max_f + 1
-    hA_act = xp.ascontiguousarray(hA[:, ilo:ihi, wdm_set.active_slice_t])
-    nfa, nta = hA_act.shape[1], hA_act.shape[2]
-    invC = xp.zeros((nch, nch, nfa, nta))
+
+    # One residual slab PER SLOT (each reference sees its own data), stacked on
+    # the slot axis; identity cross invC per slot.
+    slabs = []
+    for i in range(n_ref):
+        h = xp.zeros((nch, Nf, Nt))
+        chunked.fill_global_wdm(xp.asarray(A_all[i][None, :]), h,
+                                convert_to_ra_dec=False)
+        slabs.append(xp.ascontiguousarray(h[:, ilo:ihi, wdm_set.active_slice_t]))
+    data_act = xp.stack(slabs)                       # (n_ref, nch, nfa, nta)
+    nfa, nta = data_act.shape[2], data_act.shape[3]
+    invC = xp.zeros((n_ref, nch, nch, nfa, nta))
     for c in range(nch):
-        invC[c, c] = 1.0
-    holder = _FullGridWDMHolder(xp, hA_act, invC)
+        invC[:, c, c] = 1.0
+    holder = _FullGridWDMHolder(xp, data_act, invC)
 
     out = {}
+    slots = np.arange(n_ref)
 
-    # 1) reference cache
-    assert comp.setup_in_model(holder, xp.asarray(A[None, :]),
-                               np.array([0])) is True
+    # 1) reference cache (n_ref references in ONE batched setup_in_model)
+    assert comp.setup_in_model(holder, xp.asarray(A_all), slots) is True
     for name in ("c0_sparse_all", "A0_all", "A1_all", "B0_all", "B1_all",
                  "B0nc_all", "B1nc_all"):
         out[name] = _to_np(getattr(comp, name)).copy()
 
-    # 2) fused get_ll over the candidate batch
-    ll = comp.get_ll(xp.asarray(cands), data_index=np.zeros(len(cands), int))
+    # 2) fused get_ll over the candidate batch (candidates spread across slots)
+    ll = comp.get_ll(xp.asarray(cands), data_index=cand_slots)
     out["ll"] = _to_np(ll).copy()
     out["d_h"] = _to_np(comp.last_d_h).copy()
     out["h_h"] = _to_np(comp.last_h_h).copy()
 
     # 3) phase-maximized path
-    ll_pm = comp.get_ll(xp.asarray(cands),
-                        data_index=np.zeros(len(cands), int),
+    ll_pm = comp.get_ll(xp.asarray(cands), data_index=cand_slots,
                         phase_maximize=True)
     out["ll_pm"] = _to_np(ll_pm).copy()
     out["d_h_pm"] = _to_np(comp.last_d_h).copy()
     out["phase_angle"] = _to_np(comp.phase_angle).copy()
 
-    # 4) mid-block patch (drift refresh) at a shifted reference, re-score
-    A_shift = A.copy()
-    A_shift[4] += 0.1
-    assert comp.setup_in_model(holder, xp.asarray(A_shift[None, :]),
-                               np.array([0])) is True
-    ll2 = comp.get_ll(xp.asarray(cands), data_index=np.zeros(len(cands), int))
+    # 4) mid-block patch (drift refresh) on a SUBSET of slots, then re-score.
+    #    Exercises the ref_idx scatter back into the coefficient stash -- the
+    #    partial-update path a real drift refresh takes.
+    A_shift = A_all.copy()
+    A_shift[patch_slots, 4] += 0.1
+    assert comp.setup_in_model(holder, xp.asarray(A_shift[patch_slots]),
+                               patch_slots) is True
+    for name in ("c0_sparse_all", "A0_all", "B0nc_all"):
+        out[f"{name}_patched"] = _to_np(getattr(comp, name)).copy()
+    ll2 = comp.get_ll(xp.asarray(cands), data_index=cand_slots)
     out["ll_patched"] = _to_np(ll2).copy()
 
     comp.clear_in_model()
@@ -131,6 +151,7 @@ def main():
     n_cand = int(os.environ.get("N_CAND", 8))
     seed = int(os.environ.get("SEED", 2026))
     nt_layer = int(os.environ.get("NT_LAYER", 64))
+    n_ref = int(os.environ.get("N_REF", 1))
     n_sparse_fd = int(os.environ.get("N_SPARSE_FD", 1024))
     rtol_ll = float(os.environ.get("RTOL_LL", 1e-10))
     rtol_coef = float(os.environ.get("RTOL_COEF", 1e-12))
@@ -150,10 +171,26 @@ def main():
     A = np.array([1e-21, f0_A, 1e-17, 0.0, 1.2, 0.7, 0.4, 2.0, 0.5])
 
     rng = np.random.default_rng(seed)
-    cands = np.tile(A, (n_cand, 1))
+
+    # n_ref references, one per buffer slot: spread in f0 (well-separated
+    # layers) and given distinct sky/phase so no two references are alike.
+    A_all = np.tile(A, (n_ref, 1))
+    A_all[:, 1] = f0_A + np.arange(n_ref) * 7.0 * layer_df
+    A_all[:, 4] = (A[4] + 0.31 * np.arange(n_ref)) % (2 * np.pi)
+    A_all[:, 7] = (A[7] + 0.17 * np.arange(n_ref)) % (2 * np.pi)
+    A_all[:, 0] = A[0] * (1.0 + 0.05 * np.arange(n_ref))
+
+    # Candidates round-robin over the slots, each perturbed around ITS OWN
+    # reference -- so a slot -> reference mix-up shows up as a large ll error.
+    cand_slots = np.arange(n_cand) % n_ref
+    cands = A_all[cand_slots].copy()
     cands[:, 0] *= 1.0 + 0.1 * rng.standard_normal(n_cand)
     cands[:, 1] += 0.05 * layer_df * rng.standard_normal(n_cand)
     cands[:, 4] = rng.uniform(0.0, 2 * np.pi, n_cand)
+
+    # Refresh a strict subset mid-block (every other slot) so the partial
+    # scatter back into the stash is exercised, not a full rebuild.
+    patch_slots = np.arange(0, n_ref, 2)
 
     comp_kwargs = dict(
         t_ref=t_start, Nt_sub=128, n_pad=16, N_sparse=256,
@@ -174,7 +211,8 @@ def main():
             failures.append(name)
 
     print(f"[sighet] building cpu + {gpu_backend} engine comps "
-          f"(nt_layer={nt_layer}, n_sparse_fd={n_sparse_fd}) ...")
+          f"(nt_layer={nt_layer}, n_sparse_fd={n_sparse_fd}, "
+          f"n_ref={n_ref}, n_cand={n_cand}) ...")
     comp_cpu, chk_cpu, wdm_cpu = build_sighet(
         "cpu", wdm_kwargs, comp_kwargs, nt_layer, n_sparse_fd)
     comp_gpu, chk_gpu, wdm_gpu = build_sighet(
@@ -182,11 +220,16 @@ def main():
     print(f"[sighet] backends: cpu={comp_cpu.backend.name} "
           f"gpu={comp_gpu.backend.name}")
 
-    res_cpu = evaluate(comp_cpu, chk_cpu, wdm_cpu, A, cands)
-    res_gpu = evaluate(comp_gpu, chk_gpu, wdm_gpu, A, cands)
+    res_cpu = evaluate(comp_cpu, chk_cpu, wdm_cpu, A_all, cands,
+                       cand_slots, patch_slots)
+    res_gpu = evaluate(comp_gpu, chk_gpu, wdm_gpu, A_all, cands,
+                       cand_slots, patch_slots)
 
     for name in ("c0_sparse_all", "A0_all", "A1_all", "B0_all", "B1_all",
                  "B0nc_all", "B1nc_all"):
+        compare(name, res_cpu[name], res_gpu[name], rtol_coef)
+    for name in ("c0_sparse_all_patched", "A0_all_patched",
+                 "B0nc_all_patched"):
         compare(name, res_cpu[name], res_gpu[name], rtol_coef)
     for name in ("d_h", "h_h", "ll", "ll_pm", "d_h_pm", "phase_angle",
                  "ll_patched"):
