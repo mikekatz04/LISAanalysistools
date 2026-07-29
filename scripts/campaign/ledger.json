@@ -353,6 +353,11 @@
           "note": "run: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-24T08:56:16Z"
+        },
+        {
+          "note": "manual: DOWNGRADED per PI: MBH response-vs-mojito match is NOT at satisfactory limiting-bias levels. Open from the legacy-vs-TDI-on-the-fly response investigation: legacy is the front-runner but its worst source still mismatches (~6.75e-4) and the <5e-4 band shows artifacts; TOF is worse (spurious <5e-4 transient at t_c). Response choice + bias budget PARKED. The rr/dd null criterion passed numerically, but the physics match is not certified -> yellow.",
+          "state": "yellow",
+          "ts": "2026-07-28T08:32:59Z"
         }
       ],
       "metrics": {
@@ -397,7 +402,7 @@
         "worst_rr_dd": 0.001562,
         "xcheck": "True"
       },
-      "state": "green"
+      "state": "yellow"
     },
     "t1-gt-noise": {
       "confirmed": [],
@@ -571,28 +576,49 @@
     "t2-lite-emri": {
       "confirmed": [],
       "evidence": [
-        "evidence/t2-lite-emri__domain-guard.log"
+        "evidence/t2-lite-emri__domain-guard.log",
+        "evidence/t2-lite-emri__emri-run.log",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0001_f0.png",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0001_f1.png",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0001_f2.png",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0002_f0.png",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0002_f1.png",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0002_f2.png",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0003_f0.png",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0003_f1.png",
+        "evidence/t2-lite-emri/emri_debug_leaf0_w0_s0003_f2.png"
       ],
       "history": [
         {
           "note": "ingest: criteria unmet: ll_finite missing (wanted == 1); debug_pngs missing (wanted >= 1)",
           "state": "red",
           "ts": "2026-07-28T04:35:52Z"
+        },
+        {
+          "note": "ingest: all criteria pass, manual confirmed, deps green",
+          "state": "green",
+          "ts": "2026-07-28T07:46:55Z"
         }
       ],
       "metrics": {
         "build": "ok",
+        "debug_pngs": 9,
         "fired_p0": 1.0,
         "floored": 1,
         "guard_ll_floor": 1,
+        "iterations": 3,
+        "ll_finite": 1,
         "p0": 1.0,
         "p0_inj": 4.8621,
         "p_sep": "n/a",
         "process_survived": 1,
         "result_build": "ok",
+        "result_debug_pngs": 9,
         "result_fired_p0": 1.0,
         "result_floored": 1,
         "result_guard_ll_floor": 1,
+        "result_iterations": 3,
+        "result_ll_finite": 1,
         "result_p0": 1.0,
         "result_p0_inj": 4.8621,
         "result_p_sep": "n/a",
@@ -600,11 +626,13 @@
         "result_status": "domain_error",
         "result_valid_finite": 1,
         "result_valid_status": "ok",
+        "result_variant": "full_year_combined",
         "status": "domain_error",
         "valid_finite": 1,
-        "valid_status": "ok"
+        "valid_status": "ok",
+        "variant": "full_year_combined"
       },
-      "state": "red"
+      "state": "green"
     },
     "t2-lite-gb": {
       "confirmed": [],
@@ -696,6 +724,11 @@
           "note": "ingest: all criteria pass, manual confirmed, deps green",
           "state": "green",
           "ts": "2026-07-28T04:12:28Z"
+        },
+        {
+          "note": "manual: DOWNGRADED per PI: sampling MECHANICS are green (3 iters, ll_finite=1, 9 template/data/residual proof frames), but it samples with the MBH response whose mojito mismatch / limiting-bias is UNRESOLVED (legacy vs TDI-on-the-fly, parked). End-to-end sampling proven; response physics-accuracy NOT certified -> yellow.",
+          "state": "yellow",
+          "ts": "2026-07-28T08:32:59Z"
         }
       ],
       "metrics": {
@@ -729,7 +762,7 @@
         "timed_moves": 1,
         "variant": "full_year_combined"
       },
-      "state": "green"
+      "state": "yellow"
     },
     "t2-lite-noise": {
       "confirmed": [],
@@ -1045,6 +1078,6 @@
       "state": "pending"
     }
   },
-  "updated": "2026-07-28T06:13:54Z",
+  "updated": "2026-07-28T08:32:59Z",
   "version": 1
 }
