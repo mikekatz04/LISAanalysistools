@@ -985,6 +985,46 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """Per-iteration setup hook (no-op by default)."""
         return
 
+    def _verify_entry_vs_acs(self, prev_logl, cold_ref, leaf):
+        """The expose invariant (2026-07-28): the cold-chain ``prev_logl``
+        scored against the freshly EXPOSED residual must reproduce the full
+        ACS likelihoods from just before the expose — algebraically
+        ``r_exposed - h_current == r_full``, so the two are the same number.
+        A large per-walker SPREAD in the difference means the expose/fold
+        choreography (or the scoring path) is inconsistent with the residual
+        state — this is the check that catches the d-2h expose-sign class of
+        bug that corrupted all add/remove sampling from 6d33265 (2026-05-22)
+        until today. A constant offset with ~zero spread is a benign
+        normalization convention. Shares {BRANCH}_CHECK_LL gating/severity.
+        """
+        if cold_ref is None:
+            return
+        cold = np.asarray(prev_logl[0], dtype=float)
+        ref = np.asarray(cold_ref, dtype=float).reshape(cold.shape)
+        both = (
+            np.isfinite(cold) & np.isfinite(ref)
+            & (cold > -1e299) & (ref > -1e299)
+        )
+        if not np.any(both):
+            return
+        diff = cold[both] - ref[both]
+        spread = float(diff.max() - diff.min())
+        med = float(np.median(diff))
+        if spread <= 1e-1 and abs(med) <= 5.0:
+            return
+        msg = (
+            f"{self.branch_name} leaf {leaf}: EXPOSE INVARIANT VIOLATED — "
+            f"cold prev_logl vs pre-expose ACS lnL: median offset "
+            f"{med:.6e}, spread {spread:.6e} over {int(both.sum())} walkers. "
+            "Large spread/offset means the exposed residual or scoring path "
+            "is wrong (e.g. template subtracted instead of added at expose)."
+        )
+        if self.check_ll_mode == "strict":
+            raise ValueError(msg)
+        logger.warning(msg)
+        if DEBUG_MODE:
+            breakpoint()
+
     def _verify_prev_logl(self, prev_logl, old_coords_in, data_index_in, leaf):
         """Cross-check the move's scoring path against the ACS container path.
 
@@ -1204,21 +1244,36 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     logger.info("[%s_DEBUG] snapshot skipped: %r", self._dbg_prefix, exc)
                     _dbg_leaf = False
 
+            # Cold-chain ACS reference BEFORE the expose: consumed by the
+            # [STAGE] print and by the default-on expose invariant
+            # (_verify_entry_vs_acs) — scoring the current coords against the
+            # exposed residual must reproduce these values.
+            _cold_ref = None
+            if self.swap_debug or (
+                self.check_ll_mode != "0"
+                and self._dbg_step % self.check_ll_every == 0
+            ):
+                _cold_ref = asnumpy(self.acs.likelihood())
             if self.swap_debug:
-                _acs_cold_pre = asnumpy(self.acs.likelihood())
                 logger.info(
                     "[STAGE] %s leaf %d PRE-EXPOSE  ACS cold lnL min/med/max "
                     "%.3f / %.3f / %.3f",
                     self.branch_name, leaf,
-                    float(np.min(_acs_cold_pre)),
-                    float(np.median(_acs_cold_pre)),
-                    float(np.max(_acs_cold_pre)),
+                    float(np.min(_cold_ref)),
+                    float(np.median(_cold_ref)),
+                    float(np.max(_cold_ref)),
                 )
 
-            # remove cold chain sources
+            # remove cold chain sources FROM THE FIT: add their templates back
+            # into the residual (r = d - h  ->  r = d), exposing this leaf.
+            # NOTE 2026-07-28: propose() had these two calls SWAPPED since the
+            # 6d33265 sign refactor (2026-05-22) — the expose step SUBTRACTED
+            # the template (r -> d - 2h), so every proposal was scored against
+            # a corrupted target (prev_logl ~ -2<d|d> at truth) and accepted
+            # updates folded back against it degraded the true residual.
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             removal_coords_in = self._to_phys(removal_coords)
-            self.add_back_in_cold_chain_sources(removal_coords_in)
+            self.remove_cold_chain_sources(removal_coords_in)
 
             if _dbg_leaf:
                 # source-isolated residual = the "data" this source is fit
@@ -1259,6 +1314,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 self._dbg_step % self.check_ll_every == 0
             ):
                 self._verify_prev_logl(prev_logl, old_coords_in, data_index_in, leaf)
+                self._verify_entry_vs_acs(prev_logl, _cold_ref, leaf)
 
             if self.swap_debug:
                 logger.info(
@@ -1514,7 +1570,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # traced walker (built before it is folded back in).
                 _dbg_tmpl = self._dbg_template(add_coords_in[_dbg_w], _dbg_w)
 
-            self.remove_cold_chain_sources(add_coords_in)
+            # fold the (updated) cold-chain sources back INTO the fit:
+            # subtract their templates from the residual (r = d -> d - h_new).
+            self.add_back_in_cold_chain_sources(add_coords_in)
 
             if self.swap_debug:
                 _acs_cold_post = asnumpy(self.acs.likelihood())
