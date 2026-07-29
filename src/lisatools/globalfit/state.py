@@ -52,7 +52,69 @@ def ensure_leaf_cap_fields(band_info: dict, num_bands: int) -> None:
     band_info.setdefault("band_best_ll", np.full(num_bands, -np.inf))
 
 
-class GBState(eryn_State):
+class ModuleSubState(eryn_State):
+    """Base class for the per-module (per-branch) global-fit sub-states.
+
+    A sub-state owns the module-specific sampler information for one branch
+    (temperature ladders, per-band counters, ...). Its storage contract is
+    "the sub-state IS the schema": the matching
+    :class:`~lisatools.globalfit.hdfbackend.ModuleSubBackend` derives every
+    HDF5 dataset from the arrays the sub-state allocates -- there is no
+    separate schema layer. Subclasses implement/extend small setup methods
+    and name lists:
+
+    - :meth:`storage_arrays`: ``{on-disk name: array}`` written every saved
+      iteration.
+    - :meth:`static_arrays`: ``{on-disk name: array}`` written once at
+      backend reset (e.g. ``band_edges``).
+    - :meth:`storage_attrs`: ``{name: scalar}`` written as HDF5 group attrs
+      at reset (e.g. ``num_bands``).
+    - ``static_names`` / ``dim_attr_names``: name lists the backend uses to
+      read ``reset_kwargs`` back from an existing file.
+    - :meth:`make_template`: allocate a zeroed instance from dimension
+      kwargs; the backend's ``reset`` shapes every dataset from it.
+    - :meth:`from_stored`: rebuild an instance from one stored iteration.
+    - :meth:`reset_delta_counters`: zero per-iteration-delta counters after
+      each save (default: nothing to zero).
+    """
+
+    static_names: tuple = ()
+    dim_attr_names: tuple = ()
+
+    def storage_arrays(self) -> dict:
+        """``{on-disk name: array}`` persisted every saved iteration."""
+        raise NotImplementedError
+
+    def static_arrays(self) -> dict:
+        """``{on-disk name: array}`` persisted once at backend reset."""
+        return {}
+
+    def storage_attrs(self) -> dict:
+        """``{name: scalar}`` written as HDF5 group attributes at reset."""
+        return {}
+
+    @classmethod
+    def make_template(cls, nwalkers, ntemps, **dims):
+        """Allocate a zeroed instance from dimension kwargs (extras ignored)."""
+        raise NotImplementedError
+
+    @classmethod
+    def from_stored(cls, arrays, statics=None, attrs=None):
+        """Rebuild an instance from one stored iteration's arrays."""
+        raise NotImplementedError
+
+    def reset_delta_counters(self):
+        """Zero per-iteration-delta counters (called after each save)."""
+
+    @property
+    def reset_kwargs(self):
+        """Kwargs passed back to the backend when re-initializing the state."""
+        out = {name: value for name, value in self.storage_attrs().items()}
+        out.update(self.static_arrays())
+        return out
+
+
+class GBState(ModuleSubState):
     """Galactic-binary (GB) sampler state with per-band bookkeeping.
 
     Tracks per-band temperature ladders, swap counters, and binary-count
@@ -256,110 +318,148 @@ class GBState(eryn_State):
         self.band_info["band_swaps_proposed"][:] = 0
         self.band_info["band_swaps_accepted"][:] = 0
 
-    @property
-    def reset_kwargs(self):
-        """Kwargs passed back to the backend when re-initializing the state."""
-        # TODO: this okay for future?
-        return dict(
-            num_bands=len(self.band_info["band_edges"]) - 1,
-            band_edges=self.band_info["band_edges"],
+    # ------------------------------------------------------------------
+    # ModuleSubState storage contract
+    # ------------------------------------------------------------------
+
+    static_names = ("band_edges",)
+    dim_attr_names = ("num_bands",)
+
+    def storage_arrays(self):
+        """Every per-band array except the static ``band_edges``."""
+        return {
+            name: dat
+            for name, dat in self.band_info.items()
+            if isinstance(dat, np.ndarray) and name != "band_edges"
+        }
+
+    def static_arrays(self):
+        return {"band_edges": self.band_info["band_edges"]}
+
+    def storage_attrs(self):
+        return {"num_bands": len(self.band_info["band_edges"]) - 1}
+
+    @classmethod
+    def make_template(cls, nwalkers, ntemps, num_bands=None, band_edges=None, **kwargs):
+        if num_bands is None or band_edges is None:
+            raise ValueError("Must provide num_bands and band_edges kwargs.")
+        template = cls(None)
+        template.initialize_band_information(
+            nwalkers, ntemps, band_edges, np.zeros((num_bands, ntemps))
         )
+        return template
+
+    @classmethod
+    def from_stored(cls, arrays, statics=None, attrs=None):
+        # The stored arrays keep their leading step axis; GBState's
+        # initialize_band_information strips it rank-based on reload.
+        band_info = dict(arrays)
+        band_info["band_edges"] = statics["band_edges"]
+        band_info["initialized"] = True
+        return cls(None, band_info=band_info)
+
+    def reset_delta_counters(self):
+        self.reset_band_counters()
 
 
-class MBHState(eryn_State):
-    """Massive black-hole binary sampler state with per-leaf temperature ladder.
+class PerLeafLadderState(ModuleSubState):
+    """Shared base for sub-states carrying one temperature ladder per leaf.
+
+    ``betas_all`` has shape ``(nleaves_max, ntemps)`` -- one independent
+    ladder per source. Concrete classes set ``branch_name`` and the legacy
+    per-branch leaf-count attribute name (``num_mbhs`` / ``num_emris`` /
+    ``num_sobbhs``) via ``leaf_count_name``.
 
     Args:
-        possible_state: Existing :class:`MBHState` or coords-like dict.
-        betas_all: Optional ``(num_mbhs, ntemps)`` array of inverse
-            temperatures, one row per MBH leaf.
+        possible_state: Existing instance of the same class or coords-like
+            dict.
+        betas_all: Optional ``(nleaves_max, ntemps)`` array of inverse
+            temperatures, one row per leaf.
         copy: If ``True``, deep-copy data from ``possible_state``.
     """
 
+    branch_name: str = None
+    leaf_count_name: str = None
     remove_kwargs = ["betas_all"]
 
     def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
-            self.num_mbhs = possible_state.num_mbhs
+            self._set_leaf_count(getattr(possible_state, self.leaf_count_name))
         else:
             self.betas_all = betas_all
             if possible_state is None:
-                # HDF warm-start: get_a_sample passes possible_state=None and
-                # only betas_all (num_mbhs, ntemps) — its second-to-last axis is
-                # num_mbhs. The coords live in the main GFState, so there is no
-                # branch to index here.
-                self.num_mbhs = betas_all.shape[-2] if betas_all is not None else 20
+                # HDF warm-start: from_stored passes possible_state=None and
+                # only betas_all (nleaves, ntemps) — its second-to-last axis
+                # is the leaf count. The coords live in the main GFState, so
+                # there is no branch to index here.
+                self._set_leaf_count(
+                    betas_all.shape[-2] if betas_all is not None else 20
+                )
             else:
-                self.num_mbhs = branch_nleaves_max(possible_state, "mbh")
+                self._set_leaf_count(
+                    branch_nleaves_max(possible_state, self.branch_name)
+                )
+
+    def _set_leaf_count(self, n):
+        setattr(self, self.leaf_count_name, int(n))
 
     @property
-    def reset_kwargs(self):
-        """Kwargs passed back to the backend when re-initializing the state."""
-        # TODO: this okay for future?
-        return dict(
-            num_mbhs=self.num_mbhs,
-        )
+    def num_leaves(self):
+        """Leaf count under its generic name (aliases ``num_mbhs`` etc.)."""
+        return getattr(self, self.leaf_count_name)
+
+    # ------------------------------------------------------------------
+    # ModuleSubState storage contract
+    # ------------------------------------------------------------------
+
+    def storage_arrays(self):
+        return {"betas_all": self.betas_all}
+
+    def storage_attrs(self):
+        return {self.leaf_count_name: self.num_leaves}
+
+    @classmethod
+    def make_template(cls, nwalkers, ntemps, **dims):
+        num_leaves = dims.get(cls.leaf_count_name)
+        if num_leaves is None:
+            raise ValueError(f"Must provide {cls.leaf_count_name} kwarg.")
+        return cls(None, betas_all=np.zeros((num_leaves, ntemps)))
+
+    @classmethod
+    def from_stored(cls, arrays, statics=None, attrs=None):
+        # [0] squeezes the (single) iteration axis to the live
+        # (nleaves, ntemps) shape.
+        return cls(None, betas_all=arrays["betas_all"][0])
 
 
-class EMRIState(eryn_State):
+class MBHState(PerLeafLadderState):
+    """Massive black-hole binary sampler state with per-leaf temperature ladder."""
+
+    branch_name = "mbh"
+    leaf_count_name = "num_mbhs"
+    dim_attr_names = ("num_mbhs",)
+
+
+class EMRIState(PerLeafLadderState):
     """Extreme mass-ratio inspiral sampler state with per-leaf temperature ladder."""
 
-    remove_kwargs = ["betas_all"]
-
-    def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
-        if isinstance(possible_state, self.__class__):
-            dc = deepcopy if copy else return_x
-            self.betas_all = dc(possible_state.betas_all)
-            self.num_emris = possible_state.num_emris
-        else:
-            self.betas_all = betas_all
-            if possible_state is None:
-                # HDF warm-start: get_a_sample passes possible_state=None and
-                # only betas_all (num_emris, ntemps) — its second-to-last axis is
-                # num_emris. The coords live in the main GFState, so there is no
-                # branch to index here.
-                self.num_emris = betas_all.shape[-2] if betas_all is not None else 20
-            else:
-                self.num_emris = branch_nleaves_max(possible_state, "emri")
-
-    @property
-    def reset_kwargs(self):
-        """Kwargs passed back to the backend when re-initializing the state."""
-        # TODO: this okay for future?
-        return dict(num_emris=self.num_emris)  # self.betas_all.shape[0]
+    branch_name = "emri"
+    leaf_count_name = "num_emris"
+    dim_attr_names = ("num_emris",)
 
 
-class SOBBHState(eryn_State):
+class SOBBHState(PerLeafLadderState):
     """Stellar-origin BBH (SOBBH) sampler state with per-leaf temperature ladder.
 
     Mirrors :class:`EMRIState` — one row of ``betas_all`` per SOBBH leaf so each
     source carries its own tempering ladder.
     """
 
-    remove_kwargs = ["betas_all"]
-
-    def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
-        if isinstance(possible_state, self.__class__):
-            dc = deepcopy if copy else return_x
-            self.betas_all = dc(possible_state.betas_all)
-            self.num_sobbhs = possible_state.num_sobbhs
-        else:
-            self.betas_all = betas_all
-            if possible_state is None:
-                # HDF warm-start: get_a_sample passes possible_state=None and
-                # only betas_all (num_sobbhs, ntemps) — its second-to-last axis
-                # is num_sobbhs. The coords live in the main GFState, so there is
-                # no branch to index here.
-                self.num_sobbhs = betas_all.shape[-2] if betas_all is not None else 20
-            else:
-                self.num_sobbhs = branch_nleaves_max(possible_state, "sobbh")
-
-    @property
-    def reset_kwargs(self):
-        """Kwargs passed back to the backend when re-initializing the state."""
-        return dict(num_sobbhs=self.num_sobbhs)
+    branch_name = "sobbh"
+    leaf_count_name = "num_sobbhs"
+    dim_attr_names = ("num_sobbhs",)
 
 
 class GFState(eryn_State):

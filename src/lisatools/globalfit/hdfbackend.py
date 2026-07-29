@@ -638,7 +638,164 @@ class GFHDFBackend(eryn_HDFBackend):
             recipe_step_group.attrs["status"] = True
 
 
-class GBHDFBackend(eryn_HDFBackend):
+class ModuleSubBackend(eryn_HDFBackend):
+    """Generic per-branch sub-backend writing under ``sub_backend/<branch>``.
+
+    "The sub-state IS the schema": this backend has no dataset table of its
+    own. ``reset`` derives every dataset from a zeroed template built by
+    ``state_class.make_template`` (statics written once, everything else a
+    growable per-iteration dataset shaped ``(0, *arr.shape)``); ``save_step``
+    writes ``state.sub_states[self.sub_name].storage_arrays()`` by name and
+    then zeroes the sub-state's delta counters; ``get_a_sample`` rebuilds a
+    sub-state via ``state_class.from_stored``. Subclasses set
+    :attr:`state_class`; :class:`GFHDFBackend` stamps :attr:`sub_name` with
+    the branch name at construction.
+    """
+
+    state_class = None
+    sub_name: str = None
+
+    def _group(self, f):
+        """This branch's HDF5 group inside an open file handle."""
+        return f[self.name]["sub_backend"][self.sub_name]
+
+    def reset(self, nwalkers, *args, ntemps=1, **kwargs):
+        """Create this branch's datasets from a zeroed template sub-state."""
+        template = self.state_class.make_template(nwalkers, ntemps, **kwargs)
+
+        with self.open("a") as f:
+            grp = f[self.name]["sub_backend"].create_group(self.sub_name)
+
+            for name, value in template.storage_attrs().items():
+                grp.attrs[name] = value
+
+            for name, arr in template.static_arrays().items():
+                grp.create_dataset(
+                    name,
+                    data=arr,
+                    dtype=self.dtype,
+                    compression=self.compression,
+                    compression_opts=self.compression_opts,
+                )
+
+            for name, arr in template.storage_arrays().items():
+                arr = np.asarray(arr)
+                grp.create_dataset(
+                    name,
+                    (0,) + arr.shape,
+                    maxshape=(None,) + arr.shape,
+                    dtype=self.dtype,
+                    compression=self.compression,
+                    compression_opts=self.compression_opts,
+                )
+
+    @property
+    def reset_kwargs(self):
+        """Dimension kwargs read back from this branch's group on disk."""
+        out = {}
+        with self.open() as f:
+            grp = self._group(f)
+            for name in self.state_class.dim_attr_names:
+                out[name] = grp.attrs[name]
+            for name in self.state_class.static_names:
+                out[name] = grp[name][:]
+        return out
+
+    def grow(self, ngrow, *args):
+        """Grow every non-static dataset by ``ngrow`` rows."""
+        with self.open("a") as f:
+            g = f[self.name]
+            grp = g["sub_backend"][self.sub_name]
+            ntot = g.attrs["iteration"] + ngrow
+            static = set(self.state_class.static_names)
+            for key in grp:
+                if key in static:
+                    continue
+                grp[key].resize(ntot, axis=0)
+
+    def save_step(self, state, *args, **kwargs):
+        """Persist this iteration's sub-state arrays, then zero delta counters."""
+        with self.open("a") as f:
+            g = f[self.name]
+            # minus one because the parent save_step already advanced it
+            iteration = g.attrs["iteration"] - 1
+            grp = g["sub_backend"][self.sub_name]
+
+            for name, arr in state.sub_states[self.sub_name].storage_arrays().items():
+                if name not in grp:
+                    # e.g. arrays added on an HDF file created before they
+                    # existed: skip rather than corrupt the resume.
+                    continue
+                grp[name][iteration] = arr
+
+        state.sub_states[self.sub_name].reset_delta_counters()
+
+    def get_value(self, name, thin=1, discard=0, slice_vals=None):
+        """Read one of this branch's datasets (statics returned whole).
+
+        Args:
+            name (str): Name of value requested.
+            thin (int, optional): Take only every ``thin`` steps from the
+                chain. (default: ``1``)
+            discard (int, optional): Discard the first ``discard`` steps in
+                the chain as burn-in. (default: ``0``)
+            slice_vals (indexing np.ndarray or slice, optional): If provided,
+                slice the array directly from the HDF5 file with
+                slice = ``slice_vals``; ``thin`` and ``discard`` are then
+                ignored. (default: ``None``)
+        """
+        if not self.initialized:
+            raise AttributeError(
+                "You must run the sampler with " "'store == True' before accessing the " "results"
+            )
+
+        if slice_vals is None:
+            slice_vals = slice(discard + thin - 1, self.iteration, thin)
+
+        with self.open() as f:
+            g = f[self.name]
+            if g.attrs["iteration"] <= 0:
+                raise AttributeError(
+                    "You must run the sampler with "
+                    "'store == True' before accessing the "
+                    "results"
+                )
+            grp = g["sub_backend"][self.sub_name]
+            if name not in grp:
+                raise ValueError(f"No {name} in this backend.")
+            if name in self.state_class.static_names:
+                return grp[name][:]
+            return grp[name][slice_vals]
+
+    def get_a_sample(self, it):
+        """Rebuild this branch's sub-state from iteration ``it``."""
+        thin = self.iteration - it if it != self.iteration else 1
+        discard = it + 1 - thin
+        slice_vals = slice(discard + thin - 1, self.iteration, thin)
+
+        with self.open() as f:
+            grp = self._group(f)
+            static = set(self.state_class.static_names)
+            arrays = {key: grp[key][slice_vals] for key in grp if key not in static}
+            statics = {key: grp[key][:] for key in static}
+            attrs = dict(grp.attrs)
+
+        return self.state_class.from_stored(arrays, statics=statics, attrs=attrs)
+
+
+class PerLeafLadderHDFBackend(ModuleSubBackend):
+    """Sub-backend persisting a per-leaf temperature ladder (``betas_all``)."""
+
+    def get_betas_all(self, **kwargs):
+        """The stored ``(nsteps, nleaves, ntemps)`` ladder history.
+
+        Accepts the standard ``thin`` / ``discard`` / ``slice_vals`` kwargs
+        of :meth:`get_value`.
+        """
+        return self.get_value("betas_all", **kwargs)
+
+
+class GBHDFBackend(ModuleSubBackend):
     """Sub-backend that persists per-band GB sampler counters.
 
     Serves any GB-style banded branch; :class:`GFHDFBackend` stamps
@@ -646,112 +803,8 @@ class GBHDFBackend(eryn_HDFBackend):
     ``"vgb"``, ...), which keys this sub-backend's HDF group.
     """
 
+    state_class = GBState
     sub_name: str = "gb"
-
-    def reset(self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs):
-        """Create the per-band datasets used to back :class:`GBState`."""
-        if num_bands is None or band_edges is None:
-            raise ValueError("Must provide num_bands and band_edges kwargs.")
-
-        # open file in append mode
-        with self.open("a") as f:
-            g = f[self.name]["sub_backend"]
-
-            band_info = g.create_group(self.sub_name)
-
-            band_info.create_dataset(
-                "band_edges",
-                data=band_edges,
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            band_info.attrs["num_bands"] = len(band_edges) - 1
-
-            band_info.create_dataset(
-                "band_temps",
-                (0, num_bands, ntemps),
-                maxshape=(None, num_bands, ntemps),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            band_info.create_dataset(
-                "band_swaps_proposed",
-                (0, num_bands, ntemps - 1),
-                maxshape=(None, num_bands, ntemps - 1),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            band_info.create_dataset(
-                "band_swaps_accepted",
-                (0, num_bands, ntemps - 1),
-                maxshape=(None, num_bands, ntemps - 1),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            band_info.create_dataset(
-                "band_num_proposed",
-                (0, num_bands, ntemps),
-                maxshape=(None, num_bands, ntemps),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            band_info.create_dataset(
-                "band_num_accepted",
-                (0, num_bands, ntemps),
-                maxshape=(None, num_bands, ntemps),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            band_info.create_dataset(
-                "band_num_proposed_rj",
-                (0, num_bands, ntemps),
-                maxshape=(None, num_bands, ntemps),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            band_info.create_dataset(
-                "band_num_accepted_rj",
-                (0, num_bands, ntemps),
-                maxshape=(None, num_bands, ntemps),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            band_info.create_dataset(
-                "band_num_binaries",
-                (0, ntemps, nwalkers, num_bands),
-                maxshape=(None, ntemps, nwalkers, num_bands),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
-
-            # Per-band progressive leaf-cap state (search mode; see
-            # lisatools.globalfit.state.ensure_leaf_cap_fields).
-            for cap_key in ("band_leaf_cap", "band_cap_iters", "band_best_ll"):
-                band_info.create_dataset(
-                    cap_key,
-                    (0, num_bands),
-                    maxshape=(None, num_bands),
-                    dtype=self.dtype,
-                    compression=self.compression,
-                    compression_opts=self.compression_opts,
-                )
 
     @property
     def num_bands(self):
@@ -764,24 +817,6 @@ class GBHDFBackend(eryn_HDFBackend):
         """Get band_edges from h5 file."""
         with self.open() as f:
             return f[self.name]["sub_backend"][self.sub_name]["band_edges"][:]
-
-    @property
-    def reset_kwargs(self):
-        """Get reset_kwargs from h5 file."""
-        return dict(num_bands=self.num_bands, band_edges=self.band_edges)
-
-    def grow(self, ngrow, *args):
-        """Grow every per-band dataset by ``ngrow`` rows."""
-        # open the file in append mode
-        with self.open("a") as f:
-            g = f[self.name]
-            band_info = g["sub_backend"][self.sub_name]
-            # resize all the arrays accordingly
-            ntot = g.attrs["iteration"] + ngrow
-            for key in band_info:
-                if key == "band_edges":
-                    continue
-                band_info[key].resize(ntot, axis=0)
 
     def get_value(self, name, thin=1, discard=0, slice_vals=None):
         """Returns a requested value to user.
@@ -873,37 +908,6 @@ class GBHDFBackend(eryn_HDFBackend):
         tmp["initialized"] = True
         return tmp
 
-    def save_step(self, state, *args, **kwargs):
-        """Persist the current ``GBState.band_info`` arrays for one iteration."""
-        # open for appending in with statement
-        with self.open("a") as f:
-            g = f[self.name]
-            # get the iteration left off on
-            # minus one because it was updated in the super function
-            iteration = g.attrs["iteration"] - 1
-
-            gb_group = g["sub_backend"][self.sub_name]
-
-            # make sure the backend has all the information needed to store everything
-            for key in [
-                "num_bands",
-            ]:
-                if not hasattr(self, key):
-                    setattr(self, key, g.attrs[key])
-
-            # branch-specific
-            for name, dat in state.sub_states[self.sub_name].band_info.items():
-                if not isinstance(dat, np.ndarray) or name == "band_edges":
-                    continue
-                if name not in gb_group:
-                    # e.g. the leaf-cap arrays on an HDF file created before
-                    # they existed: skip rather than corrupt the resume.
-                    continue
-                gb_group[name][iteration] = dat
-
-        # reset the counter for band info
-        state.sub_states[self.sub_name].reset_band_counters()
-
     def get_a_sample(self, it):
         """Access a sample in the chain
 
@@ -927,414 +931,46 @@ class GBHDFBackend(eryn_HDFBackend):
         return sample
 
 
-class MBHHDFBackend(eryn_HDFBackend):
+class MBHHDFBackend(PerLeafLadderHDFBackend):
     """Sub-backend that persists the per-leaf MBH temperature ladder."""
 
-    def reset(self, nwalkers, *args, ntemps=1, num_mbhs: int = None, **kwargs):
-        """Create a ``betas_all`` dataset of shape ``(*, num_mbhs, ntemps)``."""
-        if num_mbhs is None:
-            raise ValueError("Must provide num_mbhs kwarg.")
-
-        # open file in append mode
-        with self.open("a") as f:
-            g = f[self.name]["sub_backend"]
-
-            mbh_group = g.create_group("mbh")
-
-            mbh_group.attrs["num_mbhs"] = num_mbhs
-
-            mbh_group.create_dataset(
-                "betas_all",
-                (0, num_mbhs, ntemps),
-                maxshape=(None, num_mbhs, ntemps),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
+    state_class = MBHState
+    sub_name: str = "mbh"
 
     @property
     def num_mbhs(self):
-        """Get num_bands from h5 file."""
+        """Get num_mbhs from the mbh sub-backend group in the h5 file."""
         with self.open() as f:
-            mbh_group = f[self.name]["sub_backend"]["mbh"]
-            return mbh_group.attrs["num_mbhs"]
-
-    @property
-    def reset_kwargs(self):
-        """Get reset_kwargs from h5 file."""
-        return dict(num_mbhs=self.num_mbhs)
-
-    def grow(self, ngrow, *args):
-        """Grow ``betas_all`` by ``ngrow`` rows."""
-        # open the file in append mode
-        with self.open("a") as f:
-            g = f[self.name]
-            mbh_group = f[self.name]["sub_backend"]["mbh"]
-            # resize all the arrays accordingly
-            ntot = g.attrs["iteration"] + ngrow
-            mbh_group["betas_all"].resize(ntot, axis=0)
-
-    def get_value(self, name, thin=1, discard=0, slice_vals=None):
-        """Returns a requested value to user.
-
-        This function helps to streamline the backend for both
-        basic and hdf backend.
-
-        Args:
-            name (str): Name of value requested.
-            thin (int, optional): Take only every ``thin`` steps from the
-                chain. (default: ``1``)
-            discard (int, optional): Discard the first ``discard`` steps in
-                the chain as burn-in. (default: ``0``)
-            slice_vals (indexing np.ndarray or slice, optional): If provided, slice the array directly
-                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be
-                ignored if slice_vals is not ``None``. This is particularly useful if files are
-                very large and the user only wants a small subset of the overall array.
-                (default: ``None``)
-
-        Returns:
-            dict or np.ndarray: Values requested.
-
-        """
-        # check if initialized
-        if not self.initialized:
-            raise AttributeError(
-                "You must run the sampler with " "'store == True' before accessing the " "results"
-            )
-
-        if name != "betas_all":
-            raise ValueError(f"No {name} in this backend.")
-
-        if slice_vals is None:
-            slice_vals = slice(discard + thin - 1, self.iteration, thin)
-
-        # open the file wrapped in a "with" statement
-        with self.open() as f:
-            # get the group that everything is stored in
-            g = f[self.name]
-            iteration = g.attrs["iteration"]
-            if iteration <= 0:
-                raise AttributeError(
-                    "You must run the sampler with "
-                    "'store == True' before accessing the "
-                    "results"
-                )
-
-            mbh_group = g["sub_backend"]["mbh"]
-            v_all = mbh_group["betas_all"][slice_vals]
-        return v_all
-
-    def get_betas_all(self, **kwargs):
-        """Get the stored chain of MCMC samples
-
-        Args:
-            thin (int, optional): Take only every ``thin`` steps from the
-                chain. (default: ``1``)
-            discard (int, optional): Discard the first ``discard`` steps in
-                the chain as burn-in. (default: ``0``)
-            slice_vals (indexing np.ndarray or slice, optional): This is only available in :class:`eryn.backends.hdfbackend`.
-                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``.
-                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``.
-                This is particularly useful if files are very large and the user only wants a
-                small subset of the overall array. (default: ``None``)
-
-        Returns:
-            dict: MCMC samples
-                The dictionary contains np.ndarrays of samples
-                across the branches.
-
-        """
-        return self.get_value("betas_all", **kwargs)
-
-    def save_step(self, state, *args, **kwargs):
-        """Persist this iteration's ``betas_all`` from the current MBH sub-state."""
-        # open for appending in with statement
-        with self.open("a") as f:
-            g = f[self.name]
-            # get the iteration left off on
-            # minus one because it was updated in the super function
-            iteration = g.attrs["iteration"] - 1
-            mbh_group = g["sub_backend"]["mbh"]
-            mbh_group["betas_all"][iteration] = state.sub_states["mbh"].betas_all
-
-    def get_a_sample(self, it):
-        """Access a sample in the chain
-
-        Args:
-            it (int): iteration of GFState to return.
-
-        Returns:
-            GFState: :class:`eryn.state.GFState` object containing the sample from the chain.
-
-        Raises:
-            AttributeError: Backend is not initialized.
-
-        """
-        thin = self.iteration - it if it != self.iteration else 1
-        discard = it + 1 - thin
-
-        # [0] squeezes the (single) iteration axis to the live (num_mbhs,
-        # ntemps) shape (see EMRIHDFBackend.get_a_sample for the rationale).
-        betas_all = self.get_betas_all(discard=discard, thin=thin)[0]
-
-        sample = MBHState(None, betas_all=betas_all)
-        return sample
+            return self._group(f).attrs["num_mbhs"]
 
 
-# TODO: @ alessandro, we can use the same for EMRIs and MBHs
-# for now, but I assume we will want it separate in the end
-
-
-class EMRIHDFBackend(eryn_HDFBackend):
+class EMRIHDFBackend(PerLeafLadderHDFBackend):
     """Sub-backend that persists the per-leaf EMRI temperature ladder."""
 
-    def reset(self, nwalkers, *args, ntemps=1, num_emris: int = None, **kwargs):
-        """Create a ``betas_all`` dataset of shape ``(*, num_emris, ntemps)``."""
-        if num_emris is None:
-            raise ValueError("Must provide num_emris kwarg.")
-
-        # open file in append mode
-        with self.open("a") as f:
-            g = f[self.name]["sub_backend"]
-
-            emri_group = g.create_group("emri")
-
-            emri_group.attrs["num_emris"] = num_emris
-
-            emri_group.create_dataset(
-                "betas_all",
-                (0, num_emris, ntemps),
-                maxshape=(None, num_emris, ntemps),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
+    state_class = EMRIState
+    sub_name: str = "emri"
 
     @property
     def num_emris(self):
         """Get num_emris from the emri sub-backend group in the h5 file."""
-        # reset() writes this attr on the emri sub-group, not the top group.
         with self.open() as f:
-            return f[self.name]["sub_backend"]["emri"].attrs["num_emris"]
-
-    @property
-    def reset_kwargs(self):
-        """Get reset_kwargs from h5 file."""
-        return dict(num_emris=self.num_emris)
-
-    def grow(self, ngrow, *args):
-        """Grow ``betas_all`` by ``ngrow`` rows."""
-        # open the file in append mode
-        with self.open("a") as f:
-            g = f[self.name]
-            emri_group = f[self.name]["sub_backend"]["emri"]
-            # resize all the arrays accordingly
-            ntot = g.attrs["iteration"] + ngrow
-            emri_group["betas_all"].resize(ntot, axis=0)
-
-    def get_value(self, name, thin=1, discard=0, slice_vals=None):
-        """Returns a requested value to user.
-
-        This function helps to streamline the backend for both
-        basic and hdf backend.
-
-        Args:
-            name (str): Name of value requested.
-            thin (int, optional): Take only every ``thin`` steps from the
-                chain. (default: ``1``)
-            discard (int, optional): Discard the first ``discard`` steps in
-                the chain as burn-in. (default: ``0``)
-            slice_vals (indexing np.ndarray or slice, optional): If provided, slice the array directly
-                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be
-                ignored if slice_vals is not ``None``. This is particularly useful if files are
-                very large and the user only wants a small subset of the overall array.
-                (default: ``None``)
-
-        Returns:
-            dict or np.ndarray: Values requested.
-
-        """
-        # check if initialized
-        if not self.initialized:
-            raise AttributeError(
-                "You must run the sampler with " "'store == True' before accessing the " "results"
-            )
-
-        if name != "betas_all":
-            raise ValueError(f"No {name} in this backend.")
-
-        if slice_vals is None:
-            slice_vals = slice(discard + thin - 1, self.iteration, thin)
-
-        # open the file wrapped in a "with" statement
-        with self.open() as f:
-            # get the group that everything is stored in
-            g = f[self.name]
-            iteration = g.attrs["iteration"]
-            if iteration <= 0:
-                raise AttributeError(
-                    "You must run the sampler with "
-                    "'store == True' before accessing the "
-                    "results"
-                )
-
-            emri_group = g["sub_backend"]["emri"]
-            v_all = emri_group["betas_all"][slice_vals]
-        return v_all
-
-    def get_betas_all(self, **kwargs):
-        """Get the stored chain of MCMC samples
-
-        Args:
-            thin (int, optional): Take only every ``thin`` steps from the
-                chain. (default: ``1``)
-            discard (int, optional): Discard the first ``discard`` steps in
-                the chain as burn-in. (default: ``0``)
-            slice_vals (indexing np.ndarray or slice, optional): This is only available in :class:`eryn.backends.hdfbackend`.
-                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``.
-                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``.
-                This is particularly useful if files are very large and the user only wants a
-                small subset of the overall array. (default: ``None``)
-
-        Returns:
-            dict: MCMC samples
-                The dictionary contains np.ndarrays of samples
-                across the branches.
-
-        """
-        return self.get_value("betas_all", **kwargs)
-
-    def save_step(self, state, *args, **kwargs):
-        """Persist this iteration's ``betas_all`` from the current EMRI sub-state."""
-        # open for appending in with statement
-        with self.open("a") as f:
-            g = f[self.name]
-            # get the iteration left off on
-            # minus one because it was updated in the super function
-            iteration = g.attrs["iteration"] - 1
-            emri_group = g["sub_backend"]["emri"]
-            emri_group["betas_all"][iteration] = state.sub_states["emri"].betas_all
-
-    def get_a_sample(self, it):
-        """Access a sample in the chain
-
-        Args:
-            it (int): iteration of GFState to return.
-
-        Returns:
-            GFState: :class:`eryn.state.GFState` object containing the sample from the chain.
-
-        Raises:
-            AttributeError: Backend is not initialized.
-
-        """
-        thin = self.iteration - it if it != self.iteration else 1
-        discard = it + 1 - thin
-
-        # [0] squeezes the (single) iteration axis so betas_all matches the
-        # live per-leaf shape (num_emris, ntemps) — mirrors eryn's get_a_sample,
-        # which indexes each stored quantity [0]. Without it the array stays
-        # (1, num_emris, ntemps) and per-leaf tempering (betas_all[leaf]) would
-        # index the iteration axis on warm-start.
-        betas_all = self.get_betas_all(discard=discard, thin=thin)[0]
-
-        sample = EMRIState(None, betas_all=betas_all)
-        return sample
+            return self._group(f).attrs["num_emris"]
 
 
-class SOBBHHDFBackend(eryn_HDFBackend):
+class SOBBHHDFBackend(PerLeafLadderHDFBackend):
     """Sub-backend that persists the per-leaf SOBBH temperature ladder.
 
     Mirrors :class:`EMRIHDFBackend` — one ``betas_all`` row per leaf, sliced
     out at save time and restored from disk for warm-starts.
     """
 
-    def reset(self, nwalkers, *args, ntemps=1, num_sobbhs: int = None, **kwargs):
-        """Create a ``betas_all`` dataset of shape ``(*, num_sobbhs, ntemps)``."""
-        if num_sobbhs is None:
-            raise ValueError("Must provide num_sobbhs kwarg.")
-
-        with self.open("a") as f:
-            g = f[self.name]["sub_backend"]
-
-            sobbh_group = g.create_group("sobbh")
-
-            sobbh_group.attrs["num_sobbhs"] = num_sobbhs
-
-            sobbh_group.create_dataset(
-                "betas_all",
-                (0, num_sobbhs, ntemps),
-                maxshape=(None, num_sobbhs, ntemps),
-                dtype=self.dtype,
-                compression=self.compression,
-                compression_opts=self.compression_opts,
-            )
+    state_class = SOBBHState
+    sub_name: str = "sobbh"
 
     @property
     def num_sobbhs(self):
         """Get num_sobbhs from the sobbh sub-backend group in the h5 file."""
-        # reset() writes this attr on the sobbh sub-group, not the top group.
         with self.open() as f:
-            return f[self.name]["sub_backend"]["sobbh"].attrs["num_sobbhs"]
+            return self._group(f).attrs["num_sobbhs"]
 
-    @property
-    def reset_kwargs(self):
-        """Get reset_kwargs from h5 file."""
-        return dict(num_sobbhs=self.num_sobbhs)
 
-    def grow(self, ngrow, *args):
-        """Grow ``betas_all`` by ``ngrow`` rows."""
-        with self.open("a") as f:
-            g = f[self.name]
-            sobbh_group = f[self.name]["sub_backend"]["sobbh"]
-            ntot = g.attrs["iteration"] + ngrow
-            sobbh_group["betas_all"].resize(ntot, axis=0)
-
-    def get_value(self, name, thin=1, discard=0, slice_vals=None):
-        """Return ``betas_all`` slices from the file. See :meth:`EMRIHDFBackend.get_value`."""
-        if not self.initialized:
-            raise AttributeError(
-                "You must run the sampler with 'store == True' before accessing the results"
-            )
-
-        if name != "betas_all":
-            raise ValueError(f"No {name} in this backend.")
-
-        if slice_vals is None:
-            slice_vals = slice(discard + thin - 1, self.iteration, thin)
-
-        with self.open() as f:
-            g = f[self.name]
-            iteration = g.attrs["iteration"]
-            if iteration <= 0:
-                raise AttributeError(
-                    "You must run the sampler with 'store == True' before accessing the results"
-                )
-
-            sobbh_group = g["sub_backend"]["sobbh"]
-            v_all = sobbh_group["betas_all"][slice_vals]
-        return v_all
-
-    def get_betas_all(self, **kwargs):
-        """Get the stored SOBBH ``betas_all`` history."""
-        return self.get_value("betas_all", **kwargs)
-
-    def save_step(self, state, *args, **kwargs):
-        """Persist this iteration's ``betas_all`` from the current SOBBH sub-state."""
-        with self.open("a") as f:
-            g = f[self.name]
-            iteration = g.attrs["iteration"] - 1
-            sobbh_group = g["sub_backend"]["sobbh"]
-            sobbh_group["betas_all"][iteration] = state.sub_states["sobbh"].betas_all
-
-    def get_a_sample(self, it):
-        """Access a sample in the chain. See :meth:`EMRIHDFBackend.get_a_sample`."""
-        thin = self.iteration - it if it != self.iteration else 1
-        discard = it + 1 - thin
-
-        # [0] squeezes the (single) iteration axis to the live (num_sobbhs,
-        # ntemps) shape (see EMRIHDFBackend.get_a_sample for the rationale).
-        betas_all = self.get_betas_all(discard=discard, thin=thin)[0]
-
-        sample = SOBBHState(None, betas_all=betas_all)
-        return sample
