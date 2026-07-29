@@ -842,7 +842,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # Normalize to a 2D ``(n_sources, ndim)`` batch: ``atleast_2d`` on a
         # 1D vector yields ``(1, ndim)`` (row), which is exactly one source --
         # NOT ndim sources.
-        coords_in = get_array_module(coords_in).atleast_2d(coords_in)
+        # Host-normalize: sampling-basis params are host-convention scalars
+        # for the engine generators (they np.asarray the row).
+        coords_in = np.atleast_2d(asnumpy(coords_in))
         data_index_np = np.atleast_1d(asnumpy(data_index)).astype(int)
         source_only = kwargs.pop("source_only", False)
 

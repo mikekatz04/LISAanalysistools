@@ -2092,6 +2092,7 @@ class AnalysisContainerArray:
         op_kwargs: Optional[dict] = None,
         reshape_to_acs_shape: bool = True,
         domain_error_value: Optional[float] = None,
+        payload_to_device: bool = True,
     ) -> np.ndarray | tuple:
         """Apply ``op_name`` on each row of ``payload`` against the AC named by ``index[row]``.
 
@@ -2231,7 +2232,12 @@ class AnalysisContainerArray:
                 with self.xp.cuda.Device(int(self.gpus[split])):
                     for r in rows:
                         ac_i = int(index_arr[int(r)])
-                        sub = _to_device(_slice_row(payload, int(r)))
+                        sub = _slice_row(payload, int(r))
+                        # Params-based ops keep HOST rows (the engine
+                        # generators do np.asarray(params)); template ops
+                        # migrate their arrays to the owning device.
+                        if payload_to_device:
+                            sub = _to_device(sub)
                         res = _call_one(acs_flat[ac_i], sub)
                         results[int(r)] = _to_host(res)
 
@@ -2399,6 +2405,9 @@ class AnalysisContainerArray:
             index=index,
             op_kwargs=kwargs,
             domain_error_value=domain_error_value,
+            # sampling-basis params stay on host: the engine-convention
+            # generators (SourceSignalGen / MoveSignalGen) np.asarray them.
+            payload_to_device=False,
         )
 
     def calculate_signal_inner_product(self, params, index=None, **kwargs):
@@ -2412,6 +2421,7 @@ class AnalysisContainerArray:
             payload=params,
             index=index,
             op_kwargs=kwargs,
+            payload_to_device=False,
         )
 
     def calculate_signal_snr(self, params, index=None, **kwargs):
@@ -2425,6 +2435,7 @@ class AnalysisContainerArray:
             payload=params,
             index=index,
             op_kwargs=kwargs,
+            payload_to_device=False,
         )
 
     def template_inner_product(self, template, index=None, **kwargs):
