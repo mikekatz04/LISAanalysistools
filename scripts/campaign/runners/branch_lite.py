@@ -41,6 +41,21 @@ def main() -> None:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MPLBACKEND", "Agg")
 
+    # GF_LOG_LEVEL=INFO (or DEBUG/WARNING) configures the root logger.
+    # Nothing in the stack calls logging.basicConfig, so without a shell-side
+    # logging setup the [GB_TIMING] per-span breakdown, the sig-het
+    # SIGNAL-HET/drift lines, and the ll-drift rebuild warnings are all
+    # silently dropped -- an A/B log then carries only the [GF_TIMING]
+    # headline, which is not decomposable.
+    _lvl = os.environ.get("GF_LOG_LEVEL")
+    if _lvl:
+        import logging
+
+        logging.basicConfig(
+            level=getattr(logging, _lvl.upper(), logging.INFO),
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
+
     from lisatools.globalfit.stock import erebor
 
     name = args.variant
