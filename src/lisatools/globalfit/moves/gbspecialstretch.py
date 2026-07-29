@@ -2715,6 +2715,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         with _tspan(tm, "inmodel_ll_ref"):
             ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals, leaf_inds=l_i)
             curr_prior = cp.asarray(self.gpu_priors[self.branch_name].logpdf(curr))
+
+        # Cold-chain <d|h>, <h|h> capture on the sorter's flat source storage
+        # (leaf labels are only final after the repack in _write_back_state):
+        # seeded from the block-reference get_add_ll (which just filled
+        # buffer_obj.d_h_out/h_h_out for ``curr``), updated at each accepted
+        # move below. Zero extra likelihood evaluations.
+        if getattr(buffer_obj, "d_h_out", None) is not None:
+            if getattr(self, "_sorter_dh", None) is None:
+                n_src = band_sorter.inds.shape[0]
+                self._sorter_dh = cp.full(n_src, np.nan)
+                self._sorter_hh = cp.full(n_src, np.nan)
+            self._sorter_dh[ids] = cp.asarray(buffer_obj.d_h_out).real
+            self._sorter_hh[ids] = cp.asarray(buffer_obj.h_h_out).real
         if tm is not None:
             # Per-block scale, so a wall time can be read as a per-source /
             # per-repeat cost without cross-referencing the run config.
@@ -2828,6 +2841,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     curr_prior[gi] = new_logp[accept]
                     ll_change_log[t_i[gi], w_i[gi], b_i[gi]] += delta_ll[accept]
                     acc_counts[1][t_i[gi], w_i[gi], b_i[gi]] += 1
+                    if (
+                        getattr(self, "_sorter_dh", None) is not None
+                        and getattr(buffer_obj, "d_h_out", None) is not None
+                    ):
+                        # d_h_out/h_h_out hold the per-repeat get_add_ll
+                        # outputs for the ``keep`` subset; select the
+                        # accepted rows within it
+                        _acc_kept = accept[keep]
+                        self._sorter_dh[ids[gi]] = cp.asarray(
+                            buffer_obj.d_h_out
+                        ).real[_acc_kept]
+                        self._sorter_hh[ids[gi]] = cp.asarray(
+                            buffer_obj.h_h_out
+                        ).real[_acc_kept]
 
             self._debug_verify_in_model(
                 buffer_obj, curr[sl], new, slots_s, N_s, delta_ll, keep,
@@ -3231,6 +3258,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             work.coords[inds_new] = _to_numpy(band_sorter.coords[alive])
             work.inds[:] = False
             work.inds[inds_new] = True
+            self._scatter_leaf_products(new_state, alive, inds_new)
             self._sync_cold_row(new_state)
             return
         special_indices_finish = (
@@ -3269,7 +3297,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # turn on all the ones that are there
         work.inds[inds_new] = True
         # work.branch_supplemental[inds_new] = state.branches[self.branch_name].branch_supplemental[inds_old]
+        self._scatter_leaf_products(new_state, alive, inds_new)
         self._sync_cold_row(new_state)
+
+    def _scatter_leaf_products(self, new_state, alive, inds_new) -> None:
+        """Write the captured cold-chain per-leaf ``<d|h>``/``<h|h>`` into the sub-state.
+
+        The capture lives on the sorter's flat source storage
+        (``self._sorter_dh``/``_hh``, filled in ``_run_in_model_repeats``);
+        here — after the leaf repack — the alive sources' values land at
+        their FINAL (walker, leaf) positions, cold chain only.
+        """
+        sub_states = getattr(new_state, "sub_states", None) or {}
+        sub = sub_states.get(self.branch_name)
+        if (
+            getattr(self, "_sorter_dh", None) is None
+            or sub is None
+            or getattr(sub, "d_h", None) is None
+        ):
+            return
+        t_new, w_new, leaf_new = inds_new
+        cold = t_new == 0
+        dh_alive = _to_numpy(self._sorter_dh[alive])
+        hh_alive = _to_numpy(self._sorter_hh[alive])
+        sub.d_h[:] = np.nan
+        sub.h_h[:] = np.nan
+        sub.d_h[w_new[cold], leaf_new[cold]] = dh_alive[cold]
+        sub.h_h[w_new[cold], leaf_new[cold]] = hh_alive[cold]
 
     def _band_residual_lls(self, acs):
         """Per-band cold-walker residual ll ``-1/2 <r|r>`` from the parent ACA.
@@ -3523,6 +3577,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             keep_all_inds = True
 
         with tm.span("sorter_build"):
+            self._sorter_dh = None
+            self._sorter_hh = None
             band_sorter = BandSorter(
                 work,
                 self.band_edges,

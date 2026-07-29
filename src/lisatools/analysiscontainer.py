@@ -786,6 +786,12 @@ class AnalysisContainer:
             amp_factor = d_h.real / h_h.real
             d_h *= amp_factor
             h_h *= amp_factor**2
+        # Stash the individual terms AS USED in the likelihood below (post
+        # phase/amp maximization) -- readable after the call like
+        # ``non_marg_d_h`` above, e.g. for per-source inner-product recording.
+        self.last_d_h = d_h
+        self.last_h_h = h_h
+        self.last_d_d = d_d
         # breakpoint()
         like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
 

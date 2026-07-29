@@ -68,6 +68,9 @@ def _tempered_schema(branch):
     out = {
         "chain": (NTEMPS, NWALKERS, nleaves, ndim),
         "inds": (NTEMPS, NWALKERS, nleaves),
+        # per-leaf cold-chain inner products (NaN = dead / not recorded)
+        "d_h": (NWALKERS, nleaves),
+        "h_h": (NWALKERS, nleaves),
     }
     if branch == "gb":
         # band_info carries the GB tempering record; no per-branch ll/counters

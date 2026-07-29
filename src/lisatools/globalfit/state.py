@@ -105,6 +105,8 @@ class ModuleSubState(eryn_State):
         "log_like",
         "log_prior",
         "betas",
+        "d_h",
+        "h_h",
         "in_model_proposed",
         "in_model_accepted",
         "rj_proposed",
@@ -200,6 +202,11 @@ class ModuleSubState(eryn_State):
         self.log_prior = np.zeros(self._ll_shape())
         if self.betas_attr_name == "betas" and getattr(self, "betas", None) is None:
             self.betas = np.ones(self.ntemps)
+        # per-leaf cold-chain inner products <d|h> and <h|h>, recorded by the
+        # in-model moves at the end of their repeat blocks (NaN = dead leaf
+        # or not recorded this iteration)
+        self.d_h = np.full((self.nwalkers, self.nleaves_max), np.nan)
+        self.h_h = np.full((self.nwalkers, self.nleaves_max), np.nan)
         self.in_model_proposed = np.zeros(self._counter_shape(), dtype=int)
         self.in_model_accepted = np.zeros(self._counter_shape(), dtype=int)
         self.rj_proposed = np.zeros(self._counter_shape(), dtype=int)
@@ -292,6 +299,9 @@ class ModuleSubState(eryn_State):
         }
         if self.betas_attr_name == "betas" and getattr(self, "betas", None) is not None:
             out["betas"] = self.betas
+        for name in ("d_h", "h_h"):
+            if getattr(self, name, None) is not None:
+                out[name] = getattr(self, name)
         for name in self.delta_counter_names:
             out[name] = getattr(self, name)
         return out
@@ -305,7 +315,13 @@ class ModuleSubState(eryn_State):
         self.initialize_tempered(*coords.shape, coords=coords, inds=inds)
         # some branches (GB) store only chain/inds -- band_info carries the
         # rest of their tempering record
-        for name in ("log_like", "log_prior", "betas") + self.delta_counter_names:
+        for name in (
+            "log_like",
+            "log_prior",
+            "betas",
+            "d_h",
+            "h_h",
+        ) + self.delta_counter_names:
             if name in arrays and getattr(self, name, None) is not None:
                 getattr(self, name)[:] = arrays[name][0]
 
@@ -602,6 +618,9 @@ class GBState(ModuleSubState):
         if self.tempered_initialized:
             out["chain"] = self.coords
             out["inds"] = self.inds
+            for name in ("d_h", "h_h"):
+                if getattr(self, name, None) is not None:
+                    out[name] = getattr(self, name)
         return out
 
     def static_arrays(self):

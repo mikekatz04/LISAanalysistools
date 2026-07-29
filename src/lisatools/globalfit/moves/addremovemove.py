@@ -1141,6 +1141,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         new_state = deepcopy(state)
         # the copy's working branch: a view over new_state's sub-state arrays
         work = self._work_branch(new_state)
+        # fresh per-iteration inner-product record (NaN = dead / not visited)
+        _sub0 = (getattr(new_state, "sub_states", None) or {}).get(self.branch_name)
+        if _sub0 is not None and getattr(_sub0, "d_h", None) is not None:
+            _sub0.d_h[:] = np.nan
+            _sub0.h_h[:] = np.nan
 
         # per-step debug reset (trace at most one leaf per propose call)
         self._dbg_step += 1
@@ -1523,6 +1528,25 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # recovered template = the accepted cold-chain source for the
                 # traced walker (built before it is folded back in).
                 _dbg_tmpl = self._dbg_template(add_coords_in[_dbg_w], _dbg_w)
+
+            # Record this leaf's cold-chain <d|h>, <h|h> on the sub-state:
+            # one extra nwalkers-row evaluation against the leaf-isolated
+            # residual (the likelihood setup for this leaf is still bound).
+            # Goes through compute_acs_like directly so each container stashes
+            # last_d_h/last_h_h (the DCGA kernel path records nothing).
+            _sub = (getattr(new_state, "sub_states", None) or {}).get(self.branch_name)
+            if _sub is not None and getattr(_sub, "d_h", None) is not None:
+                self.compute_acs_like(
+                    add_coords_in,
+                    np.arange(self.nwalkers, dtype=np.int32),
+                    **self.waveform_like_kwargs,
+                )
+                for _w in range(self.nwalkers):
+                    _d_h_w = getattr(self.acs[_w], "last_d_h", None)
+                    _h_h_w = getattr(self.acs[_w], "last_h_h", None)
+                    if _d_h_w is not None and _h_h_w is not None:
+                        _sub.d_h[_w, leaf] = float(np.real(_d_h_w))
+                        _sub.h_h[_w, leaf] = float(np.real(_h_h_w))
 
             # fold the (updated) cold-chain sources back INTO the fit:
             # subtract their templates from the residual (r = d -> d - h_new).
