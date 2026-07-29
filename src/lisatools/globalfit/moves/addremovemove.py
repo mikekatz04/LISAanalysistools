@@ -397,6 +397,18 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         _leaf = os.environ.get(f"{p}_DEBUG_PLOT_LEAF")
         self.debug_plot_leaf = int(_leaf) if _leaf not in (None, "") else None
         self.debug_every = max(1, int(os.environ.get(f"{p}_DEBUG_EVERY", "1")))
+        # prev_logl consistency check (DEFAULT ON): cross-check the move's
+        # scoring path (compute_like — the DCGA/GPU path when active) against
+        # the per-container ACS path at the current-state points each leaf
+        # visit. "0" disables, "1" warns (default), "strict" raises. Costs one
+        # extra ntemps*nwalkers likelihood batch per leaf per propose.
+        self.check_ll_mode = (
+            os.environ.get(f"{p}_CHECK_LL")
+            or os.environ.get("ADDREMOVE_CHECK_LL", "1")
+        ).strip().lower()
+        self.check_ll_every = max(
+            1, int(os.environ.get(f"{p}_CHECK_LL_EVERY", "1"))
+        )
         # Colour scale keyed to the RESIDUAL (where the other sources are
         # already subtracted) and log10 by default, so this source stays
         # visible even in a crowded band. {P}_DEBUG_LOG=0 -> linear.
@@ -957,6 +969,66 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """Per-iteration setup hook (no-op by default)."""
         return
 
+    def _verify_prev_logl(self, prev_logl, old_coords_in, data_index_in, leaf):
+        """Cross-check the move's scoring path against the ACS container path.
+
+        ``prev_logl`` came from :meth:`compute_like` — the DCGA (multi-device)
+        path when active, else the container path with the engine-installed
+        generator and ``waveform_like_kwargs``. This recomputes the SAME
+        current-state points through :meth:`compute_acs_like` with the move's
+        OWN generator and ``source_only=True`` (the resurrected intent of the
+        original commented validation). Any bookkeeping drift between the
+        residual state and the scoring path — the failure mode that silently
+        walks a chain away from truth — shows up here as a per-point
+        difference. Default mode warns loudly; ``{BRANCH}_CHECK_LL=strict``
+        raises; ``0`` disables; ``{BRANCH}_CHECK_LL_EVERY=N`` thins the cost.
+
+        A CONSTANT per-walker offset (identical across temperatures) can also
+        arise from a benign ``source_only`` convention mismatch — the warning
+        distinguishes the two by reporting the spread of the difference in
+        addition to its maximum.
+        """
+        like_kwargs = {
+            k: v for k, v in self.waveform_like_kwargs.items() if k != "source_only"
+        }
+        acs_like = (
+            self.compute_acs_like(
+                old_coords_in,
+                data_index=data_index_in,
+                signal_gen=self.waveform_gen,
+                source_only=True,
+                **like_kwargs,
+            )
+            .reshape(prev_logl.shape)
+            .real
+        )
+        both = (
+            np.isfinite(prev_logl)
+            & np.isfinite(acs_like)
+            & (prev_logl > -1e299)
+            & (acs_like > -1e299)
+        )
+        if not np.any(both):
+            return
+        diff = prev_logl[both] - acs_like[both]
+        max_abs = float(np.abs(diff).max())
+        if max_abs <= 1e-1:
+            return
+        spread = float(diff.max() - diff.min())
+        msg = (
+            f"{self.branch_name} leaf {leaf}: prev_logl (move scoring path) vs "
+            f"ACS container path disagree: max|diff|={max_abs:.6e}, "
+            f"spread={spread:.6e} over {int(both.sum())} points. A large SPREAD "
+            "means residual/scoring bookkeeping drift (real bug); a constant "
+            "offset (spread ~ 0) can be a benign source_only convention "
+            "difference."
+        )
+        if self.check_ll_mode == "strict":
+            raise ValueError(msg)
+        logger.warning(msg)
+        if DEBUG_MODE:
+            breakpoint()
+
     #: Leaf currently being processed by the per-leaf proposal loop. The
     #: transform helper below reads it because some transform call sites
     #: (the tempering likelihood callback) have an eryn-fixed signature and
@@ -998,6 +1070,13 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             blobs: blobs for the given coordinates and data index. Default is None.
         """
         assert x[self.branch_name].ndim == 4 and x[self.branch_name].shape[1] == self.nwalkers
+        # Single-leaf slices only: rows are scored per walker, and with
+        # per-leaf transform fills the fixed ``_current_leaf`` identity must
+        # apply to every row (a multi-leaf slice would silently apply one
+        # leaf's fills to all leaves).
+        assert x[self.branch_name].shape[2] == 1, (
+            "log_like_for_fancy_swaping expects a single-leaf coordinate slice"
+        )
         # shape is (nwalkers, 1 (nleaves_max), ndim)
         ntemps = x[self.branch_name].shape[0]
 
@@ -1149,20 +1228,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .real
             )
 
-            # if hasattr(self, "waveform_gen_method"):
-            #     signal_gen = getattr(self.waveform_gen, self.waveform_gen_method)
-            # else:
-            #     signal_gen = self.waveform_gen
-            
-            # acs_like_here = self.compute_acs_like(old_coords_in, data_index=data_index_in, signal_gen=signal_gen, source_only=True).reshape((self.ntemps, self.nwalkers)).real
-            # diff = prev_logl - acs_like_here
-
-            # if np.any(np.abs(diff) > 1e-1):
-            #         logger.warning(f"acs likelihood: {acs_like_here.flatten()}. proposed likelihood: {prev_logl.flatten()}. This could be a sign of numerical issues.")
-            #         if DEBUG_MODE:
-            #             breakpoint()
-            #         else:
-            #             raise ValueError(f"Large difference in log likelihood encountered: {np.abs(diff).max()}. This could be a sign of numerical issues.")
+            if self.check_ll_mode != "0" and (
+                self._dbg_step % self.check_ll_every == 0
+            ):
+                self._verify_prev_logl(prev_logl, old_coords_in, data_index_in, leaf)
 
             # -1e300 is the out-of-domain sentinel, not a numerical issue.
             if np.any((prev_logl < -1e10) & (prev_logl > -1e299)) or np.any(prev_logl > 1e30):
@@ -1322,7 +1391,18 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     ].copy()[:, :, None]
                 }
 
-                fancy_swap = (repeat % self.permute_every == 0) and (repeat > 0)
+                # permute_every >= num_repeats would make the walker-permuting
+                # swap unreachable (stock EMRI/SOBBH default: 10 repeats vs
+                # permute_every 20 -> it never fired); clamp so it fires at
+                # least once per leaf visit, on the last repeat.
+                _pe = min(self.permute_every, max(self.num_repeats - 1, 1))
+                fancy_swap = (repeat > 0) and (repeat % _pe == 0)
+                if fancy_swap:
+                    logger.debug(
+                        "%s leaf %d repeat %d: fancy (walker-permuting) "
+                        "temperature swap firing",
+                        self.branch_name, leaf, repeat,
+                    )
                 #if fancy_swap:
                     # logger.debug(f"Permuting walkers before swap.")
                 compute_log_like = self.log_like_for_fancy_swaping

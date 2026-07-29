@@ -1012,30 +1012,24 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                     "(start='prior'; truth seeding skipped).", _n_true,
                 )
             else:
-                # Per-dimension scatter for the true-point start, sized to a
-                # small fraction of each prior dimension's width (the stock
-                # scalar default is ~10 orders too wide for GB fdot).
-                _gb_draws = priors["gb"].rvs(size=20000)
-                _gb_draws = (
-                    _gb_draws.get() if hasattr(_gb_draws, "get") else np.asarray(_gb_draws)
-                )
-                # GB_START_FACTOR: per-dimension seed scatter as a fraction
-                # of each prior width (the "start factor"). 0 seeds walkers
-                # EXACTLY at truth (residual -> 0, per-source convention
-                # check); the default 1e-4 gives a tight true-point start.
-                # With N sources the start logL offset accumulates over
-                # ~8*N dims, so it is only ~0 when this is 0/near-0.
+                # GB_START_FACTOR: MULTIPLICATIVE ``x * (1 + factor * randn)``
+                # seed scatter around the injection (the sprint-wide
+                # START_FACTOR convention; magnitude-robust, so fdot ~1e-16
+                # scatters sensibly without a prior-width scale). 0 seeds
+                # walkers EXACTLY at truth (residual -> 0, per-source
+                # convention check). With N sources the start logL offset
+                # accumulates over ~8*N dims, so it is only ~0 when this is
+                # 0/near-0.
                 _start_factor = float(os.environ.get("GB_START_FACTOR", "1e-4"))
                 logger.info(
-                    "GB true-point start: GB_START_FACTOR=%g (per-dimension "
-                    "seed scatter as a fraction of prior width; 0 = exact "
-                    "truth).", _start_factor,
+                    "GB true-point start: GB_START_FACTOR=%g (multiplicative "
+                    "x*(1 + factor*randn) scatter; 0 = exact truth).",
+                    _start_factor,
                 )
-                _gb_spread = _start_factor * (_gb_draws.max(axis=0) - _gb_draws.min(axis=0))
                 setup_state_for_injection(
                     curr, state, source_type="GB", branch_name="gb",
                     subset_inds=gb_snr_subset_inds, priors=priors,
-                    spread=_gb_spread,
+                    relative_spread=_start_factor,
                 )
 
     # ========================= MATERIALIZE THE RECIPE =========================

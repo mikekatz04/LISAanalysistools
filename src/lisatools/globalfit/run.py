@@ -511,8 +511,10 @@ class GlobalFit:
                         "override mbh starting coords to be close to the injection"
                     )
                     # Starting-point scatter about the injection, env-adjustable:
-                    # MBH_START_FACTOR=0 -> exact injection (as the mojito null
-                    # checks use); larger -> push the starts further out.
+                    # MULTIPLICATIVE ``x * (1 + factor * randn)`` (the sprint-wide
+                    # START_FACTOR convention). MBH_START_FACTOR=0 -> exact
+                    # injection (as the mojito null checks use); larger -> push
+                    # the starts further out.
                     factor = float(os.environ.get("MBH_START_FACTOR", "1e-5"))
                     inj = np.asarray(self.curr.source_info["mbh"].injection)
                     if inj.ndim == 1:
@@ -525,16 +527,21 @@ class GlobalFit:
                         f"MBH injection shape {inj.shape} doesn't match "
                         f"(nleaves_max={nleaves_mbh}, ndim={ndim_mbh})."
                     )
-                    coords["mbh"] = inj[None, None] + factor * np.random.randn(
-                        self.ntemps, self.nwalkers, nleaves_mbh, ndim_mbh
-                    ) 
+                    coords["mbh"] = inj[None, None] * (
+                        1.0
+                        + factor
+                        * np.random.randn(
+                            self.ntemps, self.nwalkers, nleaves_mbh, ndim_mbh
+                        )
+                    )
 
             if "emri" in inds:
                 inds["emri"][:] = True
                 self.logger.debug("initializing emri inds to true")
 
                 self.logger.debug("override emri starting coords to be close to the injection")
-                # Env-adjustable (EMRI_START_FACTOR=0 -> exact injection).
+                # Env-adjustable, MULTIPLICATIVE ``x * (1 + factor * randn)``
+                # (EMRI_START_FACTOR=0 -> exact injection).
                 factor = float(os.environ.get("EMRI_START_FACTOR", "1e-5"))
 
                 # Multi-leaf safe: accepts either a flat ``(ndim,)`` injection
@@ -553,8 +560,12 @@ class GlobalFit:
                     f"EMRI injection shape {inj.shape} doesn't match "
                     f"(nleaves_max={nleaves_emri}, ndim={ndim_emri})."
                 )
-                coords["emri"] = inj[None, None] + factor * np.random.randn(
-                    self.ntemps, self.nwalkers, nleaves_emri, ndim_emri
+                coords["emri"] = inj[None, None] * (
+                    1.0
+                    + factor
+                    * np.random.randn(
+                        self.ntemps, self.nwalkers, nleaves_emri, ndim_emri
+                    )
                 )
             if "gb" in inds and getattr(
                 self.curr.source_info.get("gb"), "injection", None
@@ -562,9 +573,9 @@ class GlobalFit:
                 # gb: RJ branch seeded from the attach-time SNR-cut rows
                 # (``gb_info.injection``; gb_no_fg resolves them against a
                 # noise-only AnalysisContainer). Only the subset's leaves go
-                # alive -- gb is NOT a fixed-leaf branch. Scatter keeps the
-                # legacy semantics: per-dimension GB_START_FACTOR x
-                # prior-width ADDITIVE scatter (0 -> exact truth). Seeding
+                # alive -- gb is NOT a fixed-leaf branch. Scatter follows the
+                # sprint-wide START_FACTOR convention: MULTIPLICATIVE
+                # ``x * (1 + factor * randn)`` (0 -> exact truth). Seeding
                 # here (with everything else) lets setup_acs's engine
                 # rebuild subtract the templates through the registered
                 # signal_gen in the same pass as every other branch.
@@ -578,17 +589,13 @@ class GlobalFit:
                     f"({nleaves_gb})."
                 )
                 factor = float(os.environ.get("GB_START_FACTOR", "1e-4"))
-                _draws = priors["gb"].rvs(size=20000)
-                _draws = (
-                    _draws.get() if hasattr(_draws, "get")
-                    else np.asarray(_draws)
-                )
-                spread = factor * (_draws.max(axis=0) - _draws.min(axis=0))
                 inds["gb"][:] = False
                 inds["gb"][:, :, :n_inj] = True
-                coords["gb"][:, :, :n_inj, :] = inj[None, None] + spread[
-                    None, None, None, :
-                ] * np.random.randn(self.ntemps, self.nwalkers, n_inj, ndim_gb)
+                coords["gb"][:, :, :n_inj, :] = inj[None, None] * (
+                    1.0
+                    + factor
+                    * np.random.randn(self.ntemps, self.nwalkers, n_inj, ndim_gb)
+                )
                 self.logger.info(
                     f"gb: seeded {n_inj} true-point leaves in load_info "
                     f"(GB_START_FACTOR={factor:g}); engine rebuild subtracts "
@@ -605,7 +612,8 @@ class GlobalFit:
                     self.logger.debug(
                         "override sobbh starting coords to be close to the injection"
                     )
-                    # Env-adjustable (SOBBH_START_FACTOR=0 -> exact injection).
+                    # Env-adjustable, MULTIPLICATIVE ``x * (1 + factor * randn)``
+                    # (SOBBH_START_FACTOR=0 -> exact injection).
                     factor = float(os.environ.get("SOBBH_START_FACTOR", "1e-5"))
                     inj = np.asarray(self.curr.source_info["sobbh"].injection)
                     if inj.ndim == 1:
@@ -618,8 +626,12 @@ class GlobalFit:
                         f"SOBBH injection shape {inj.shape} doesn't match "
                         f"(nleaves_max={nleaves_sobbh}, ndim={ndim_sobbh})."
                     )
-                    coords["sobbh"] = inj[None, None] + factor * np.random.randn(
-                        self.ntemps, self.nwalkers, nleaves_sobbh, ndim_sobbh
+                    coords["sobbh"] = inj[None, None] * (
+                        1.0
+                        + factor
+                        * np.random.randn(
+                            self.ntemps, self.nwalkers, nleaves_sobbh, ndim_sobbh
+                        )
                     )
 
             # Generic path for any branch the ladder above does not name — a

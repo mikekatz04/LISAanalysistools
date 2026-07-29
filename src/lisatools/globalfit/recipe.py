@@ -1125,8 +1125,14 @@ def gb_fdot_rows_to_run_basis(rows, *, use_chirp_mass, use_fdot_astro,
     return rows
 
 
-def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None, priors: ProbDistContainer | None = None):
-    """Initialize 'branch_name' walkers from catalogue injection parameters"""
+def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None, priors: ProbDistContainer | None = None, relative_spread: float | None = None):
+    """Initialize 'branch_name' walkers from catalogue injection parameters.
+
+    ``relative_spread`` (the START_FACTOR convention) overrides ``spread``
+    with the sprint-wide MULTIPLICATIVE form ``x * (1 + factor * randn)``:
+    per-leaf diagonal covariances sized to ``factor`` times each injection
+    value (0 -> exact truth).
+    """
 
     catalogue = getattr(curr.general_info, "catalogue", {})
     catalogue = catalogue.get(source_type, {})
@@ -1181,6 +1187,11 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
         except AttributeError:
             logger.warning(f"No injection data is saved for {branch_name}.")
         
+        if relative_spread is not None:
+            _rows = np.atleast_2d(np.asarray(injection_params, dtype=float))
+            spread = np.stack(
+                [np.diag((float(relative_spread) * row) ** 2) for row in _rows]
+            )
         scatter_around_injection(
             state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas"), priors=priors
         )
@@ -2621,9 +2632,34 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
         gi = curr.general_info
         ntemps, nwalkers = gi.ntemps, gi.nwalkers
 
-        betas = (
-            self.betas if self.betas is not None else make_ladder(info.ndim, ntemps=ntemps)
-        )
+        # Ladder resolution honors the class contract ("any argument left
+        # None falls back to the matching field on source_info"): an explicit
+        # builder ladder wins, then the branch-configured ladder
+        # (e.g. EMRISetup's dense 1/1.2^k), then the make_ladder default.
+        # Previously info.betas was skipped entirely, so the configured EMRI
+        # ladder never reached the move's per-leaf temperature controls.
+        betas = self.betas
+        if betas is None:
+            betas = getattr(info, "betas", None)
+            if betas is not None:
+                betas = np.asarray(betas, dtype=float)
+                if len(betas) < ntemps:
+                    logger.warning(
+                        "%s: configured betas ladder has %d temps < run "
+                        "ntemps %d; falling back to make_ladder.",
+                        self.branch_name, len(betas), ntemps,
+                    )
+                    betas = None
+                elif len(betas) > ntemps:
+                    logger.warning(
+                        "%s: truncating configured %d-temp betas ladder to "
+                        "the run's ntemps=%d (max T %.3g -> %.3g).",
+                        self.branch_name, len(betas), ntemps,
+                        1.0 / betas[-1], 1.0 / betas[ntemps - 1],
+                    )
+                    betas = betas[:ntemps]
+        if betas is None:
+            betas = make_ladder(info.ndim, ntemps=ntemps)
         # Side effects (parity with the old build_mbh_moves_phenom): stash the
         # ladder on the source info and the tiled ladder on the sub-state.
         info.betas = betas
