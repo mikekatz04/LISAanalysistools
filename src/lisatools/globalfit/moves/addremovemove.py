@@ -101,7 +101,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         inner_moves: list of moves and their corresponding weights to be used for proposing new sources for the leaf.
         Tmax: maximum temperature for the temperature control.
         betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
-        permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
+        permute_every: gate for the walker-permuting (fancy) temperature swap: > 0 enables it — it fires exactly ONCE per leaf visit, on the final in-model repeat — and <= 0 disables it entirely (``{BRANCH}_PERMUTE_EVERY`` env override). The numeric value is no longer a cadence.
         pad_out_of_prior: whether to pad proposed sources that are out of the prior bounds to avoid JIT compilation issues. If True, proposed sources that are out of the prior bounds will be replaced with the first in-prior point. 
         **kwargs: additional keyword arguments for the Move class.
     """
@@ -1429,16 +1429,15 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     ].copy()[:, :, None]
                 }
 
-                # permute_every >= num_repeats would make the walker-permuting
-                # swap unreachable (stock EMRI/SOBBH default: 10 repeats vs
-                # permute_every 20 -> it never fired); clamp so it fires at
-                # least once per leaf visit, on the last repeat.
-                # permute_every <= 0 ({BRANCH}_PERMUTE_EVERY=0) disables it.
-                if self.permute_every <= 0:
-                    fancy_swap = False
-                else:
-                    _pe = min(self.permute_every, max(self.num_repeats - 1, 1))
-                    fancy_swap = (repeat > 0) and (repeat % _pe == 0)
+                # Walker-permuting (fancy) swap: exactly ONCE per leaf visit,
+                # on the FINAL in-model repeat — the in-model stretch repeats
+                # run undisturbed, then the ensemble permutes across the
+                # ladder before the updated sources fold back. permute_every
+                # is now a pure gate: > 0 enables, <= 0 disables
+                # ({BRANCH}_PERMUTE_EVERY env override).
+                fancy_swap = (
+                    self.permute_every > 0 and repeat == self.num_repeats - 1
+                )
                 if fancy_swap:
                     logger.debug(
                         "%s leaf %d repeat %d: fancy (walker-permuting) "
