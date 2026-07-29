@@ -34,6 +34,8 @@ class GBSettings(Settings):
 
     A_lims: typing.List[float] = dataclasses.field(default_factory=list)
     f0_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    # GB's own tempering ladder size (the engine runs cold-chain only)
+    ntemps: int = dataclasses.field(default_factory=env_default("GB_NTEMPS", 24, int))
     m_chirp_lims: typing.List[float] = dataclasses.field(default_factory=list)
     fdot_lims: typing.List[float] = dataclasses.field(default_factory=list)
     phi0_lims: typing.List[float] = dataclasses.field(default_factory=list)

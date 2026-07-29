@@ -173,6 +173,32 @@ def env_default(var: str, default, cast=str):
     return _factory
 
 
+def engine_ntemps_default():
+    """``default_factory`` for the retired engine-level ``ntemps`` knob.
+
+    Stock variants run the engine cold-chain only (each module tempers
+    internally on its own per-branch ladder), so ``general.ntemps`` is
+    pinned to 1. A set legacy ``NTEMPS`` environment variable raises here
+    rather than being silently ignored — it would otherwise quietly
+    downgrade a runbook that expects it to control tempering.
+    """
+
+    def _factory():
+        if os.environ.get("NTEMPS") is not None:
+            raise ValueError(
+                "NTEMPS no longer controls stock global fits: the engine "
+                "runs cold-chain only (ntemps=1) and each branch tempers on "
+                "its own ladder. Set the per-branch knobs instead "
+                "(GB_NTEMPS, VGB_NTEMPS, MBH_NTEMPS, EMRI_NTEMPS, "
+                "SOBBH_NTEMPS, PSD_NTEMPS), or unset NTEMPS. "
+                "(erebor.blank keeps NTEMPS for simple-API branches, which "
+                "temper on the engine ladder.)"
+            )
+        return 1
+
+    return _factory
+
+
 # ---------------------------------------------------------------------------
 # The deferred-build fit object
 # ---------------------------------------------------------------------------

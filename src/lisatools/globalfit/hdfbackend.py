@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 logger = getLogger(__name__)
 
+#: on-disk storage-format version written by GFHDFBackend.reset. 2 = the
+#: cold-chain storage rework (main backend stores only the engine ladder;
+#: each branch's tempered ensemble lives in its sub-backend).
+GF_FORMAT_VERSION = 2
+
 
 # ----------------------------------------------------------------------
 # Domain-settings (de)serialization helpers.
@@ -354,6 +359,26 @@ class GFHDFBackend(eryn_HDFBackend):
         self.sub_state_bases = sub_state_bases
         self.recipe_added = False
 
+    @property
+    def format_version(self):
+        """The on-disk ``gf_format_version`` (``None`` for pre-rework files)."""
+        with self.open() as f:
+            return f[self.name].attrs.get("gf_format_version", None)
+
+    def check_format_version(self, context: str):
+        """Raise with an actionable message when the file predates format v2."""
+        version = self.format_version
+        if version is None or int(version) < GF_FORMAT_VERSION:
+            raise ValueError(
+                f"{context}: {self.filename!r} was written with the "
+                f"pre-cold-chain storage layout (gf_format_version="
+                f"{version}). This code stores only the cold chain in the "
+                "main backend, with each branch's tempered ensemble in its "
+                "sub-backend, and cannot resume old-layout files (clean "
+                "break, no migration). Start a fresh backend, or check out "
+                "the pre-rework code to keep using this file."
+            )
+
     # ------------------------------------------------------------------
     # Domain-settings persistence
     # ------------------------------------------------------------------
@@ -482,6 +507,11 @@ class GFHDFBackend(eryn_HDFBackend):
 
         with self.open("a") as f:
             f[self.name].attrs["has_recipe"] = False
+            # storage-format discriminator: 2 = cold-chain main backend with
+            # per-branch tempered sub-backends (the cold-chain storage
+            # rework). Files without the attr predate the rework and cannot
+            # be resumed by this code (clean break).
+            f[self.name].attrs["gf_format_version"] = GF_FORMAT_VERSION
 
     def grow(self, ngrow, *args):
         """Grow the main backend and every sub-backend by ``ngrow`` rows."""
@@ -740,12 +770,12 @@ class ModuleSubBackend(eryn_HDFBackend):
             grp = g["sub_backend"][self.sub_name]
 
             arrays = state.sub_states[self.sub_name].storage_arrays()
-            # dead-leaf masking on write only, mirroring eryn's
-            # store_missing_leaves handling of the main chain (the live
-            # sub-state keeps its stale coords)
+            # dead-leaf masking on write only, using eryn's own
+            # store_missing_leaves sentinel (the live sub-state keeps its
+            # stale coords, exactly like the main chain)
             if "chain" in arrays and "inds" in arrays:
                 chain = np.array(arrays["chain"], copy=True)
-                chain[~np.asarray(arrays["inds"], dtype=bool)] = np.nan
+                chain[~np.asarray(arrays["inds"], dtype=bool)] = self.store_missing_leaves
                 arrays = {**arrays, "chain": chain}
 
             for name, arr in arrays.items():

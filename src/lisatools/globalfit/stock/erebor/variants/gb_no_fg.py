@@ -78,7 +78,7 @@ GB_MOJITO_T_REF = 97729089.327664
 _DEBUG_ENV_PRESET = {
     "TOBS_TARGET": str(3 * 86400.0),  # 3 days
     "NWALKERS": "3",
-    "NTEMPS": "2",
+    "GB_NTEMPS": "2",
     "CHUNKED_NT_SUB": "64",
     "CHUNKED_N_PAD": "8",
     "CHUNKED_N_SPARSE": "64",
@@ -516,7 +516,9 @@ def prepare_gb_branch(gb, general_setup, *, data_mode, synthetic_t_start):
     gb.use_tdi2 = tdi_generation_info(general_setup.tdi_chan)[0] == 2
     gb.initialize_kwargs = dict(force_backend=general_setup.force_backend)
     if gb.betas is None:
-        betas = 1.0 / 1.2 ** np.arange(general_setup.ntemps)
+        # GB's OWN ladder, sized by the per-branch knob (the engine runs
+        # cold-chain only)
+        betas = 1.0 / 1.2 ** np.arange(gb.ntemps)
         betas[-1] = 1e-4
         gb.betas = betas
     gb.gb_wdm_comp = None
@@ -560,7 +562,7 @@ class GBNoForegroundGlobalFit(EreborFit):
         os.environ.setdefault("GB_DEBUG", "1")
         self.general.tobs_target = env_resolve("TOBS_TARGET", 3 * 86400.0, float)
         self.general.nwalkers = env_resolve("NWALKERS", 3, int)
-        self.general.ntemps = env_resolve("NTEMPS", 2, int)
+        self.gb.ntemps = env_resolve("GB_NTEMPS", 2, int)
         self.general.num_iterations = env_resolve("NUM_ITERATIONS", 4, int)
         self.gb.nt_sub = env_resolve("CHUNKED_NT_SUB", 64, int)
         self.gb.n_pad = env_resolve("CHUNKED_N_PAD", 8, int)

@@ -3218,19 +3218,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per-leaf transform fills stay attached to the right source.
         """
         alive = band_sorter.inds
+        # the working branch (the sub-state's tempered ensemble; writes land
+        # on the sub-state arrays through the shared-memory view)
+        work = self._work_branch(new_state)
 
         if self.preserve_leaf_identity:
-            bn = self.branch_name
             inds_new = (
                 _to_numpy(band_sorter.temp_inds[alive]),
                 _to_numpy(band_sorter.walker_inds[alive]),
                 _to_numpy(band_sorter.leaf_inds[alive]),
             )
-            new_state.branches[bn].coords[inds_new] = _to_numpy(
-                band_sorter.coords[alive]
-            )
-            new_state.branches[bn].inds[:] = False
-            new_state.branches[bn].inds[inds_new] = True
+            work.coords[inds_new] = _to_numpy(band_sorter.coords[alive])
+            work.inds[:] = False
+            work.inds[inds_new] = True
+            self._sync_cold_row(new_state)
             return
         special_indices_finish = (
             band_sorter.temp_inds[alive] * self.nwalkers
@@ -3263,11 +3264,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _to_numpy(band_sorter.orig_walker_inds[alive]),
             _to_numpy(band_sorter.orig_leaf_inds[alive]),
         )
-        new_state.branches[self.branch_name].coords[inds_new] = _to_numpy(band_sorter.coords[alive])
-        new_state.branches[self.branch_name].inds[:] = False
+        work.coords[inds_new] = _to_numpy(band_sorter.coords[alive])
+        work.inds[:] = False
         # turn on all the ones that are there
-        new_state.branches[self.branch_name].inds[inds_new] = True
-        # new_state.branches[self.branch_name].branch_supplemental[inds_new] = state.branches[self.branch_name].branch_supplemental[inds_old]
+        work.inds[inds_new] = True
+        # work.branch_supplemental[inds_new] = state.branches[self.branch_name].branch_supplemental[inds_old]
+        self._sync_cold_row(new_state)
 
     def _band_residual_lls(self, acs):
         """Per-band cold-walker residual ll ``-1/2 <r|r>`` from the parent ACA.
@@ -3386,7 +3388,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.leaf_cap_require_occupancy:
             cold_counts = _to_numpy(band_counts[0])  # (nwalkers, num_bands)
             converged &= cold_counts.max(axis=0) >= cap
-        nleaves_max = new_state.branches[self.branch_name].shape[2]
+        nleaves_max = self._work_branch(new_state).shape[2]
         converged &= cap < nleaves_max
 
         if np.any(converged):
@@ -3443,11 +3445,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # np.random.seed(10)
         # print("start stretch")
 
-        # Check that the dimensions are compatible.
-        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords[self.branch_name].shape
+        # cold-row agreement between the main state and this branch's
+        # sub-state (GF_SUBSTATE_CHECK=0 disables)
+        self._check_substate_consistency(state, [self.branch_name])
 
-        if not self.is_rj_prop and not np.any(state.branches[self.branch_name].inds):
-            return state, np.zeros((ntemps, nwalkers), dtype=bool)
+        # The working ensemble is the SUB-STATE's tempered branch (module
+        # ladder); the main state carries only the engine's cold chain, so
+        # eryn-facing ``accepted`` arrays use the engine shape.
+        work_in = self._work_branch(state)
+        ntemps, nwalkers, nleaves_max, ndim = work_in.coords.shape
+        engine_ntemps = state.log_like.shape[0]
+
+        if not self.is_rj_prop and not np.any(work_in.inds):
+            return state, np.zeros((engine_ntemps, nwalkers), dtype=bool)
 
         self.nwalkers = nwalkers
         self.ntemps = ntemps
@@ -3478,17 +3488,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # variants whose setup() has not produced one yet) cannot run. Pure
         # in-model moves don't need one.
         if self.is_rj_prop and self.rj_proposal_distribution is None:
-            return state, np.zeros((ntemps, nwalkers), dtype=bool)
+            return state, np.zeros((engine_ntemps, nwalkers), dtype=bool)
 
         new_state = GFState(state, copy=True)
         assert new_state.log_like is not None
+
+        # the copy's working branch: a view over new_state's sub-state arrays
+        work = self._work_branch(new_state)
 
         band_temps = cp.asarray(state.sub_states[self.branch_name].band_info["band_temps"].copy())
 
         if self.is_rj_prop:
             orig_store = new_state.log_like[0].copy()
 
-        gb_coords = cp.asarray(new_state.branches[self.branch_name].coords)
+        gb_coords = cp.asarray(work.coords)
 
         self.mempool.free_all_blocks()
 
@@ -3499,8 +3512,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         rj_prop = None if not self.is_rj_prop else self.rj_proposal_distribution[self.branch_name]
 
         # make sure all periodic parameters have been put into their range
-        new_state.branches[self.branch_name].coords[:] = self.periodic.wrap(
-            {self.branch_name: new_state.branches[self.branch_name].coords[:].reshape(ntemps * nwalkers, nleaves_max, ndim)}
+        work.coords[:] = self.periodic.wrap(
+            {self.branch_name: work.coords[:].reshape(ntemps * nwalkers, nleaves_max, ndim)}
         )[self.branch_name].reshape(ntemps, nwalkers, nleaves_max, ndim)
 
         # TODO Ask Michael about this print("is this okay for rj? I do not think so, check with below use of gb_inds_in")
@@ -3511,7 +3524,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         with tm.span("sorter_build"):
             band_sorter = BandSorter(
-                new_state.branches[self.branch_name],
+                work,
                 self.band_edges,
                 self.band_N_vals,
                 force_backend=self.force_backend,
@@ -3569,7 +3582,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # print("CHECKING 0:", store_max_diff, self.is_rj_prop)
         # self.check_ll_inject(new_state, verbose=True)
         # assert np.all(start_diffs < 2.0)
-        num_active_leaves = new_state.branches[self.branch_name].inds[0].sum(axis=-1) # cold chain only
+        num_active_leaves = work.inds[0].sum(axis=-1) # cold chain only
         logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
@@ -3669,16 +3682,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         et_all = time.perf_counter()
         logger.info(f"Full runtime of {self.name} is {round(et_all - st_all, 3)} seconds.")
-        num_active_leaves = new_state.branches[self.branch_name].inds[0].sum(axis=-1)
+        num_active_leaves = work.inds[0].sum(axis=-1)
         logger.info(f"Number of active leaves in cold chain after proposal: {num_active_leaves}")
 
-        new_inds = cp.asarray(new_state.branches_inds[self.branch_name])
+        new_inds = cp.asarray(work.inds)
         del band_sorter
         with tm.span("mempool_free"):
             self.mempool.free_all_blocks()
         with tm.span("sorter_rebuild"):
             new_band_sorter = BandSorter(
-                new_state.branches[self.branch_name],
+                work,
                 self.band_edges,
                 self.band_N_vals,
                 force_backend=self.force_backend,
@@ -3693,7 +3706,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
 
         # in-model inds will not change
-        tmp_freqs_find_bands = cp.asarray(new_state.branches_coords[self.branch_name][:, :, :, 1])
+        tmp_freqs_find_bands = cp.asarray(work.coords[:, :, :, 1])
 
         # calculate current band counts
         band_here = (
@@ -3760,9 +3773,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         #     pass  # print(self.name, "2nd count check:", new_state.branches[self.branch_name].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
 
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplemental)
-        accepted = np.zeros((ntemps, nwalkers), dtype=bool)
+        accepted = np.zeros((engine_ntemps, nwalkers), dtype=bool)
 
-        num_active_sources = new_state.branches[self.branch_name].inds.sum(axis=-1)[0]
+        num_active_sources = work.inds.sum(axis=-1)[0]
         logger.info(f"Current number of active sources in cold chain is {num_active_sources}")
 
         # Stage-timing breakdown for this propose (see _ProposeTimer).

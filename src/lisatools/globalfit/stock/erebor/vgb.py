@@ -58,6 +58,8 @@ class VGBSettings(GBSettings):
     """
 
     ndim: int = 5
+    # VGB's own tempering ladder size (overrides the GB default)
+    ntemps: int = dataclasses.field(default_factory=env_default("VGB_NTEMPS", 12, int))
     # resolved to the catalogue source count at prepare time
     nleaves_min: typing.Optional[int] = None
     nleaves_max: typing.Optional[int] = None

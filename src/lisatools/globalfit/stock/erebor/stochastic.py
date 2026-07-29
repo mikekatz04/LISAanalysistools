@@ -23,6 +23,7 @@ from ...engine import GeneralSetup, Settings, Setup
 from ...hdfbackend import ModuleSubBackend
 from ...state import ModuleSubState
 from ...loginfo import init_logger
+from ..base import env_default
 
 
 @dataclasses.dataclass
@@ -37,6 +38,8 @@ class SGWBSettings(Settings):
     matching ``sgwb_stochastic_fn`` on the sensitivity backend.
     """
 
+    # shares the joint PSDMove ladder; must match psd's ntemps
+    ntemps: int = dataclasses.field(default_factory=env_default("SGWB_NTEMPS", 12, int))
     sgwb_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     transform: Optional[TransformContainer] = None
     nleaves_max: int = 1

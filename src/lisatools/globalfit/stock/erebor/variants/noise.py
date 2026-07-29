@@ -113,7 +113,8 @@ class NoiseGeneralSettings(EreborGeneralSettings):
     window_tukey_alpha: float = 0.0  # rectangular; the WDM draw ignores the window
     edge_crop_wavelets: typing.Optional[int] = 0  # no time crop -> draw matches grid
     nwalkers: int = dataclasses.field(default_factory=env_default("NWALKERS", 4, int))
-    ntemps: int = dataclasses.field(default_factory=env_default("NTEMPS", 2, int))
+    # engine ntemps inherited from EreborGeneralSettings: retired to 1
+    # (branches temper internally; see the per-branch <BRANCH>_NTEMPS knobs)
     file_store_dir: str = dataclasses.field(
         default_factory=env_default("FILE_STORE_DIR", "./gf_output_noise/")
     )

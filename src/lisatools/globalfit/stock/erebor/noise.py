@@ -20,6 +20,7 @@ from ...engine import GeneralSetup, Settings, Setup
 from ...hdfbackend import ModuleSubBackend
 from ...state import ModuleSubState
 from ...loginfo import init_logger
+from ..base import env_default
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ class PSDSettings(Settings):
     # spline-style PSD parameterizations vs. the default 4-parameter setup.
     """
 
+    # the joint PSDMove ladder size (previously hard-coded at 24; galfor and
+    # sgwb share this ladder and inherit the value at build)
+    ntemps: int = dataclasses.field(default_factory=env_default("PSD_NTEMPS", 12, int))
     psd_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     nleaves_max: int = 1
     nleaves_min: int = 1
@@ -94,11 +98,9 @@ class PSDSetup(Setup):
             self.logger.info("Using custom priors for PSD branch")
 
         if self.betas is None:
-            # TODO: fix this to be generic
-            ntemps_pe = 24  # len(snrs_ladder)
-            # betas =  1 / snrs_ladder ** 2  #
-
-            betas = make_ladder(self.ndim * 10, Tmax=np.inf, ntemps=ntemps_pe)
+            # the joint PSD/galfor/sgwb ladder, sized by the ntemps knob
+            # (an explicit betas array wins and defines its own ntemps)
+            betas = make_ladder(self.ndim * 10, Tmax=np.inf, ntemps=self.ntemps)
             self.betas = betas
 
         if self.other_tempering_kwargs is None:
@@ -131,6 +133,8 @@ class GalForSettings(Settings):
     foreground (amplitude, knee, slopes, etc.).
     """
 
+    # shares the joint PSDMove ladder; must match psd's ntemps
+    ntemps: int = dataclasses.field(default_factory=env_default("GALFOR_NTEMPS", 12, int))
     galfor_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     transform: Optional[TransformContainer] = None
     nleaves_max: int = 1

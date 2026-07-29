@@ -97,12 +97,14 @@ class ModuleSubState(eryn_State):
     dim_attr_names: tuple = ("ntemps", "nwalkers", "nleaves_max", "ndim")
 
     #: arrays carried by the tempered block (allocated by
-    #: :meth:`initialize_tempered`, copied by the copy path)
+    #: :meth:`initialize_tempered`, copied by the copy path; missing names
+    #: are skipped so subclasses with their own ladder storage compose)
     tempered_array_names: tuple = (
         "coords",
         "inds",
         "log_like",
         "log_prior",
+        "betas",
         "in_model_proposed",
         "in_model_accepted",
         "rj_proposed",
@@ -110,6 +112,10 @@ class ModuleSubState(eryn_State):
         "swaps_proposed",
         "swaps_accepted",
     )
+    #: name of the ladder array this class stores. The base allocates and
+    #: persists a flat ``betas (ntemps,)``; subclasses with richer ladders
+    #: (``band_temps``, ``betas_all``) override this and skip the flat one.
+    betas_attr_name: str = "betas"
     #: counters zeroed after every save (per-iteration deltas)
     delta_counter_names: tuple = (
         "in_model_proposed",
@@ -192,6 +198,8 @@ class ModuleSubState(eryn_State):
 
         self.log_like = np.zeros(self._ll_shape())
         self.log_prior = np.zeros(self._ll_shape())
+        if self.betas_attr_name == "betas" and getattr(self, "betas", None) is None:
+            self.betas = np.ones(self.ntemps)
         self.in_model_proposed = np.zeros(self._counter_shape(), dtype=int)
         self.in_model_accepted = np.zeros(self._counter_shape(), dtype=int)
         self.rj_proposed = np.zeros(self._counter_shape(), dtype=int)
@@ -207,7 +215,8 @@ class ModuleSubState(eryn_State):
         for name in ("ntemps", "nwalkers", "nleaves_max", "ndim"):
             setattr(self, name, getattr(other, name))
         for name in self.tempered_array_names:
-            setattr(self, name, dc(getattr(other, name)))
+            if hasattr(other, name):
+                setattr(self, name, dc(getattr(other, name)))
         self._tempered_initialized = True
 
     @property
@@ -281,6 +290,8 @@ class ModuleSubState(eryn_State):
             "log_like": self.log_like,
             "log_prior": self.log_prior,
         }
+        if self.betas_attr_name == "betas" and getattr(self, "betas", None) is not None:
+            out["betas"] = self.betas
         for name in self.delta_counter_names:
             out[name] = getattr(self, name)
         return out
@@ -294,8 +305,8 @@ class ModuleSubState(eryn_State):
         self.initialize_tempered(*coords.shape, coords=coords, inds=inds)
         # some branches (GB) store only chain/inds -- band_info carries the
         # rest of their tempering record
-        for name in ("log_like", "log_prior") + self.delta_counter_names:
-            if name in arrays:
+        for name in ("log_like", "log_prior", "betas") + self.delta_counter_names:
+            if name in arrays and getattr(self, name, None) is not None:
                 getattr(self, name)[:] = arrays[name][0]
 
     def storage_arrays(self) -> dict:
@@ -558,6 +569,8 @@ class GBState(ModuleSubState):
 
     static_names = ("band_edges",)
     dim_attr_names = ("num_bands", "ntemps", "nwalkers", "nleaves_max", "ndim")
+    # GB's ladder is per band (band_info["band_temps"]); no flat betas
+    betas_attr_name = "band_temps"
     #: all band arrays keep the backend float dtype (pre-rework layout)
     legacy_dtype_names = (
         "band_edges",
@@ -691,6 +704,8 @@ class PerLeafLadderState(ModuleSubState):
     # ------------------------------------------------------------------
 
     legacy_dtype_names = ("betas_all",)
+    # the ladder is per leaf (betas_all); no flat betas
+    betas_attr_name = "betas_all"
 
     # per-leaf resolution: each leaf carries its own ladder, likelihood
     # rows, and counters

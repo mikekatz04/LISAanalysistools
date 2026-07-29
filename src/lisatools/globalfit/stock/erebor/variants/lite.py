@@ -66,7 +66,16 @@ _COMMON_LITE = {
     # a laptop's memory even inside a notebook kernel. Scale up for real runs.
     "general.num_iterations": 3,
     "general.nwalkers": 4,
-    "general.ntemps": 2,
+    # per-branch ladders (general.ntemps is retired: the engine runs
+    # cold-chain only; entries for branches a variant lacks are skipped)
+    "gb.ntemps": 2,
+    "vgb.ntemps": 2,
+    "mbh.ntemps": 2,
+    "emri.ntemps": 2,
+    "sobbh.ntemps": 2,
+    "psd.ntemps": 2,
+    "galfor.ntemps": 2,
+    "sgwb.ntemps": 2,
     # lite defaults to a CPU smoke, but compute device is environmental (not a
     # size knob): ``USE_GPU`` is in _COMMON_LITE_ENV, so ``USE_GPU=1`` keeps
     # the env-resolved value and this default is skipped. An explicit
@@ -76,7 +85,14 @@ _COMMON_LITE = {
 _COMMON_LITE_ENV = {
     "general.num_iterations": "NUM_ITERATIONS",
     "general.nwalkers": "NWALKERS",
-    "general.ntemps": "NTEMPS",
+    "gb.ntemps": "GB_NTEMPS",
+    "vgb.ntemps": "VGB_NTEMPS",
+    "mbh.ntemps": "MBH_NTEMPS",
+    "emri.ntemps": "EMRI_NTEMPS",
+    "sobbh.ntemps": "SOBBH_NTEMPS",
+    "psd.ntemps": "PSD_NTEMPS",
+    "galfor.ntemps": "GALFOR_NTEMPS",
+    "sgwb.ntemps": "SGWB_NTEMPS",
     "general.use_gpu": "USE_GPU",
 }
 

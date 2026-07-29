@@ -1747,10 +1747,16 @@ def build_psd_moves(
     """
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
-    ntemps: int = general_info.ntemps
     psd_info = curr.source_info["psd"]
     galfor_info = curr.source_info.get("galfor", None)
     sgwb_info = curr.source_info.get("sgwb", None)
+    # the joint noise ladder is the PSD branch's OWN (the engine runs
+    # cold-chain only); an explicit betas array wins over the ntemps knob
+    ntemps: int = (
+        len(psd_info.betas)
+        if psd_info.betas is not None
+        else int(getattr(psd_info, "ntemps", None) or general_info.ntemps)
+    )
 
     # The single joint PSDMove samples psd (+ optional galfor + optional sgwb),
     # so the tempering ladder dimension is the sum of the present branch ndims.
@@ -1760,7 +1766,12 @@ def build_psd_moves(
     if sgwb_info is not None:
         effective_ndim += engine_info.ndims["sgwb"]
     temperature_control = TemperatureControl(
-        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+        effective_ndim,
+        nwalkers,
+        betas=psd_info.betas,
+        ntemps=ntemps,
+        Tmax=Tmax,
+        permute=False,
     )
 
     psd_move_kwargs = dict(
@@ -1926,10 +1937,16 @@ def build_gb_moves(
     gb_info: GBSetup = curr.source_info["gb"]
     general_info: GeneralSetup = curr.general_info
     nwalkers: int = general_info.nwalkers
-    ntemps: int = general_info.ntemps
     data_start_freq_ind = int(acs.start_freq_ind[0])
-    
+
     gb_betas = gb_info.betas
+    # GB's OWN ladder size (the engine runs cold-chain only); an explicit
+    # betas array wins over the ntemps knob
+    ntemps: int = (
+        len(gb_betas)
+        if gb_betas is not None
+        else int(getattr(gb_info, "ntemps", None) or general_info.ntemps)
+    )
     gpus: list[int] = general_info.gpus
 
     domain_settings = general_info.domain_settings
@@ -2380,7 +2397,13 @@ def build_vgb_moves(
     vgb_info = curr.source_info["vgb"]
     general_info: GeneralSetup = curr.general_info
     nwalkers: int = general_info.nwalkers
-    ntemps: int = general_info.ntemps
+    # VGB's OWN ladder size (the engine runs cold-chain only); an explicit
+    # betas array wins over the ntemps knob
+    ntemps: int = (
+        len(vgb_info.betas)
+        if getattr(vgb_info, "betas", None) is not None
+        else int(getattr(vgb_info, "ntemps", None) or general_info.ntemps)
+    )
     data_start_freq_ind = int(acs.start_freq_ind[0])
     gpus: list[int] = general_info.gpus
     domain_settings = general_info.domain_settings
@@ -2641,7 +2664,15 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
     def build(self, engine_info, curr, acs, priors, state):
         info = curr.source_info[self.branch_name]
         gi = curr.general_info
-        ntemps, nwalkers = gi.ntemps, gi.nwalkers
+        nwalkers = gi.nwalkers
+        # this branch's OWN per-leaf ladder size (the engine runs cold-chain
+        # only); an explicit betas ladder wins over the ntemps knob
+        _info_betas = getattr(info, "betas", None)
+        ntemps = (
+            len(_info_betas)
+            if _info_betas is not None
+            else int(getattr(info, "ntemps", None) or gi.ntemps)
+        )
 
         # Ladder resolution honors the class contract ("any argument left
         # None falls back to the matching field on source_info"): an explicit

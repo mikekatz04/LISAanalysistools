@@ -1124,12 +1124,23 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.setup(model, state)
         tic = time.time()
 
-        if not np.any(state.branches[self.branch_name].inds):
-            ntemps, nwalkers = state.branches[self.branch_name].shape[:2]
-            _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
+        # cold-row agreement between the main state and this branch's
+        # sub-state (GF_SUBSTATE_CHECK=0 disables)
+        self._check_substate_consistency(state, [self.branch_name])
+
+        # The working ensemble is the SUB-STATE's tempered branch (module
+        # ladder); the main state carries only the engine's cold chain, so
+        # eryn-facing ``accepted`` arrays use the engine shape.
+        work_in = self._work_branch(state)
+        engine_ntemps = state.log_like.shape[0]
+
+        if not np.any(work_in.inds):
+            _accepted = np.zeros((engine_ntemps, self.nwalkers), dtype=bool)
             return state, _accepted
 
         new_state = deepcopy(state)
+        # the copy's working branch: a view over new_state's sub-state arrays
+        work = self._work_branch(new_state)
 
         # per-step debug reset (trace at most one leaf per propose call)
         self._dbg_step += 1
@@ -1148,10 +1159,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         for leaf in leaves_random_order:
             # guard against leaves with False
             assert np.all(
-                state.branches[self.branch_name].inds[0, 0, leaf]
-                == state.branches[self.branch_name].inds[:, :, leaf]
+                work_in.inds[0, 0, leaf] == work_in.inds[:, :, leaf]
             )
-            if not state.branches[self.branch_name].inds[0, 0, leaf]:
+            if not work_in.inds[0, 0, leaf]:
                 continue
             # leaf identity for the per-leaf transform fills (see _to_phys)
             self._current_leaf = int(leaf)
@@ -1167,7 +1177,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             ]  # as: make sure only local ntemps are used
             ntemps_full = new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
 
-            ndim = new_state.branches[self.branch_name].coords.shape[-1]
+            ndim = work.coords.shape[-1]
 
             # Debug: trace ONE leaf per step (the configured leaf, else the
             # first alive one). Snapshot the residual the sampler will score
@@ -1218,7 +1228,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # the template (r -> d - 2h), so every proposal was scored against
             # a corrupted target (prev_logl ~ -2<d|d> at truth) and accepted
             # updates folded back against it degraded the true residual.
-            removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
+            removal_coords = work.coords[0, :, leaf]
             removal_coords_in = self._to_phys(removal_coords)
             self.remove_cold_chain_sources(removal_coords_in)
 
@@ -1235,9 +1245,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.setup_likelihood_here(removal_coords_in)
 
             old_coords = (
-                new_state.branches[self.branch_name]
-                .coords[: self.ntemps, :, leaf]
-                .reshape(-1, ndim)
+                work.coords[: self.ntemps, :, leaf].reshape(-1, ndim)
             )
             old_coords_in = self._to_phys(old_coords)
 
@@ -1321,8 +1329,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     # prepare the sets for each model
                     # goes into the proposal as (ntemps * (nwalkers / subset size), nleaves_max, ndim)
                     sets = [
-                        new_state.branches[self.branch_name]
-                        .coords[: self.ntemps][inds == j][:, leaf]
+                        work.coords[: self.ntemps][inds == j][:, leaf]
                         .reshape(self.ntemps, -1, 1, ndim)
                         for j in range(self.nsplits)
                     ]
@@ -1405,7 +1412,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     accepted[: self.ntemps][(temp_inds_update, walker_inds_update)] = True
 
                     # update state information
-                    new_state.branches[self.branch_name].coords[
+                    work.coords[
                         (
                             temp_inds_update,
                             walker_inds_update,
@@ -1417,7 +1424,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     prev_logp[(temp_inds_update, walker_inds_update)] = logp[keep].flatten()
                     prev_logP[(temp_inds_update, walker_inds_update)] = logP[keep].flatten()
 
-                # acceptance tracking
+                # acceptance tracking (module-ladder resolution; the engine
+                # presets an engine-shaped array, so re-shape on first use)
+                if np.shape(getattr(self, "accepted", None)) != accepted.shape:
+                    self.accepted = np.zeros(accepted.shape)
                 self.accepted += accepted
                 # print(self.accepted[0])
                 self.num_proposals += 1
@@ -1426,9 +1436,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # temperature swaps
                 # make swaps
                 coords_for_swap = {
-                    self.branch_name: new_state.branches_coords[self.branch_name][
-                        :, :, leaf
-                    ].copy()[:, :, None]
+                    self.branch_name: work.coords[:, :, leaf].copy()[:, :, None]
                 }
 
                 # Walker-permuting (fancy) swap: exactly ONCE per leaf visit,
@@ -1498,7 +1506,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                 temperature_control_here.adapt_temps()
 
-                new_state.branches_coords[self.branch_name][:, :, leaf] = coords_for_swap[
+                work.coords[:, :, leaf] = coords_for_swap[
                     self.branch_name
                 ][:, :, 0]
 
@@ -1507,7 +1515,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # add back cold chain sources
             _free_pool()
 
-            add_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
+            add_coords = work.coords[0, :, leaf]
             add_coords_in = self._to_phys(add_coords)
 
             _dbg_tmpl = None
@@ -1599,8 +1607,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         current_lp = (
             self.priors[self.branch_name]
-            .logpdf(new_state.branches[self.branch_name].coords[0, :, :].reshape(-1, ndim))
-            .reshape(new_state.branches[self.branch_name].shape[1:-1])
+            .logpdf(work.coords[0, :, :].reshape(-1, ndim))
+            .reshape(work.shape[1:-1])
             .sum(axis=-1)
         )
 
@@ -1632,7 +1640,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
         # breakpoint()
         logger.debug(f"mean accepted fraction: {np.mean(self.accepted[0] / self.num_proposals)}. elapsed: {time.time() - tic}")
-        return new_state, accepted
+        # mirror the updated cold row into the main (engine) state and hand
+        # eryn an engine-shaped acceptance array
+        self._sync_cold_row(new_state)
+        return new_state, np.asarray(accepted)[:engine_ntemps]
 
     def replace_residuals(self, old_state, new_state):
         """Swap the cold-chain contribution from ``old_state`` to ``new_state``.

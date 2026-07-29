@@ -82,6 +82,10 @@ class BlankGeneralSettings(EreborGeneralSettings):
     window_tukey_alpha: float = 0.0  # rectangular; the WDM draw ignores the window
     edge_crop_wavelets: typing.Optional[int] = 0  # no time crop -> draw matches grid
     nwalkers: int = dataclasses.field(default_factory=env_default("NWALKERS", 4, int))
+    # blank intentionally keeps a REAL engine ladder: simple-API branches
+    # (fit.add_branch) have no module sub-states and temper on the engine's
+    # eryn ladder, so NTEMPS stays meaningful here (unlike stock variants,
+    # where general.ntemps is retired to 1 and branches temper internally).
     ntemps: int = dataclasses.field(default_factory=env_default("NTEMPS", 2, int))
     file_store_dir: str = dataclasses.field(
         default_factory=env_default("FILE_STORE_DIR", "./gf_output_blank/")

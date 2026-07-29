@@ -17,6 +17,7 @@ from ....sampling.prior import EMRIKerrDomainPrior
 from ...engine import Settings, Setup
 from ...hdfbackend import EMRIHDFBackend
 from ...loginfo import init_logger
+from ..base import env_default
 from ...state import EMRIState
 from .transforms import make_emri_transform_container
 
@@ -34,6 +35,8 @@ class EMRISettings(Settings):
 
     logm1_lims: typing.List[float] = dataclasses.field(default_factory=list)
     m2_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    # per-leaf ladder size for the add/remove move (engine is cold-chain only)
+    ntemps: int = dataclasses.field(default_factory=env_default("EMRI_NTEMPS", 4, int))
     a_lims: typing.List[float] = dataclasses.field(default_factory=list)
     p0_lims: typing.List[float] = dataclasses.field(default_factory=list)
     e0_lims: typing.List[float] = dataclasses.field(default_factory=list)

@@ -80,6 +80,9 @@ def _tempered_schema(branch):
         ll_shape = (NTEMPS, NWALKERS)
         counter_shape = (NTEMPS,)
         swaps_shape = (NTEMPS - 1,)
+        # base branches carry the flat module ladder (GB uses band_temps,
+        # per-leaf branches use betas_all)
+        out["betas"] = (NTEMPS,)
     out.update(
         {
             "log_like": ll_shape,

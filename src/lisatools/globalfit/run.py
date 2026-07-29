@@ -391,14 +391,33 @@ class GlobalFit:
         branches_plot = [
             name for name in branch_names if name not in exclude_from_plot
         ]
+        # the tempering (swap-fraction) plot is meaningless at engine
+        # ntemps=1 -- module tempering lives in the sub-backends now
+        _plots = ["base", "tempering"] if self.ntemps > 1 else ["base"]
         return PlotContainer(
-            plots=["base", "tempering"],
+            plots=_plots,
             branches=branches_plot,
             parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
             tempering_palette="icefire",
             discard=0.3,
             truths=truths_plot,
         )
+
+    def _branch_ntemps(self, name: str) -> int:
+        """The branch's OWN tempering-ladder size (the engine is cold-chain only).
+
+        An explicit per-branch ``betas`` ladder wins and defines its length;
+        otherwise the branch's ``ntemps`` setting. Branches with neither
+        (e.g. simple-API branches) run on the engine ladder.
+        """
+        info = self.curr.source_info.get(name)
+        if info is None:
+            return self.ntemps
+        betas = getattr(info, "betas", None)
+        if betas is not None:
+            return len(betas)
+        nt = getattr(info, "ntemps", None)
+        return int(nt) if nt else self.ntemps
 
     def load_info(self, priors: typing.Dict[str, typing.Any]) -> GFState:
         """
@@ -429,6 +448,10 @@ class GlobalFit:
             # initialization. (An empty file gets created when the run sets
             # up artifacts, before the first save_step.)
             if getattr(backend, "initialized", False) and getattr(backend, "iteration", 0) > 0:
+                # clean-break gate: old-layout files (full-ntemps main chain)
+                # cannot be resumed; this fires with an actionable message
+                # BEFORE eryn's opaque backend-shape check would.
+                backend.check_format_version("resume")
                 state = backend.get_last_sample()  # .get_a_sample(0)
                 # Guard against resuming a backend whose per-branch sampled
                 # dimensionality no longer matches the run config -- the most
@@ -455,17 +478,20 @@ class GlobalFit:
                 )
 
             # TODO: make this adjust to more leaves if needed
-            state = GFHDFBackend(
+            _restart_backend = GFHDFBackend(
                 file_for_restart,
                 sub_state_bases=self.engine_info.branch_states,
                 sub_backend=self.engine_info.branch_backends,
-            ).get_last_sample()  # .get_a_sample(0)
+            )
+            _restart_backend.check_format_version("past_file_for_start")
+            state = _restart_backend.get_last_sample()  # .get_a_sample(0)
 
             # TODO: adjust this so it is automated
-            band_temps = np.zeros((len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps))
+            _nt_gb = self._branch_ntemps("gb")
+            band_temps = np.zeros((len(self.curr.source_info["gb"].band_edges) - 1, _nt_gb))
             state.sub_states["gb"].initialize_band_information(
                 self.nwalkers,
-                self.ntemps,
+                _nt_gb,
                 self.curr.source_info["gb"].band_edges,
                 band_temps,
             )
@@ -474,16 +500,28 @@ class GlobalFit:
             self.logger.debug("update this somehow")
             # print("update this somehow")
             # # breakpoint()
-            # start from priors by default
+            # start from priors by default. Draw at the WIDEST ladder any
+            # branch needs, then slice: the engine keeps only its own ladder
+            # (cold chain for stock variants) while each sub-state takes its
+            # branch's full ladder. Draws are iid along the temp axis, so
+            # per-branch slicing preserves the draw statistics.
+            nt_draw = max(
+                [self.ntemps]
+                + [
+                    self._branch_ntemps(key)
+                    for key in self.engine_info.branch_names
+                    if self.engine_info.branch_states.get(key) is not None
+                ]
+            )
             coords = {
                 key: priors[key].rvs(
-                    size=(self.ntemps, self.nwalkers, self.engine_info.nleaves_max[key])
+                    size=(nt_draw, self.nwalkers, self.engine_info.nleaves_max[key])
                 )
                 for key in self.engine_info.branch_names
             }
             inds = {
                 key: np.zeros(
-                    (self.ntemps, self.nwalkers, self.engine_info.nleaves_max[key]),
+                    (nt_draw, self.nwalkers, self.engine_info.nleaves_max[key]),
                     dtype=bool,
                 )
                 for key in self.engine_info.branch_names
@@ -530,7 +568,7 @@ class GlobalFit:
                         1.0
                         + factor
                         * np.random.randn(
-                            self.ntemps, self.nwalkers, nleaves_mbh, ndim_mbh
+                            nt_draw, self.nwalkers, nleaves_mbh, ndim_mbh
                         )
                     )
 
@@ -563,7 +601,7 @@ class GlobalFit:
                     1.0
                     + factor
                     * np.random.randn(
-                        self.ntemps, self.nwalkers, nleaves_emri, ndim_emri
+                        nt_draw, self.nwalkers, nleaves_emri, ndim_emri
                     )
                 )
             if "gb" in inds and getattr(
@@ -593,7 +631,7 @@ class GlobalFit:
                 coords["gb"][:, :, :n_inj, :] = inj[None, None] * (
                     1.0
                     + factor
-                    * np.random.randn(self.ntemps, self.nwalkers, n_inj, ndim_gb)
+                    * np.random.randn(nt_draw, self.nwalkers, n_inj, ndim_gb)
                 )
                 self.logger.info(
                     f"gb: seeded {n_inj} true-point leaves in load_info "
@@ -629,7 +667,7 @@ class GlobalFit:
                         1.0
                         + factor
                         * np.random.randn(
-                            self.ntemps, self.nwalkers, nleaves_sobbh, ndim_sobbh
+                            nt_draw, self.nwalkers, nleaves_sobbh, ndim_sobbh
                         )
                     )
 
@@ -674,9 +712,15 @@ class GlobalFit:
                     1.0
                     + factor
                     * np.random.randn(
-                        self.ntemps, self.nwalkers, nleaves_max_key, ndim_key
+                        nt_draw, self.nwalkers, nleaves_max_key, ndim_key
                     )
                 )
+
+            # the main state keeps only the engine's ladder (cold chain for
+            # stock variants); each sub-state takes its branch's full ladder
+            coords_full, inds_full = coords, inds
+            coords = {key: value[: self.ntemps].copy() for key, value in coords_full.items()}
+            inds = {key: value[: self.ntemps].copy() for key, value in inds_full.items()}
 
             state = GFState(
                 coords,
@@ -684,6 +728,19 @@ class GlobalFit:
                 random_state=np.random.get_state(),
                 sub_state_bases=self.engine_info.branch_states,
             )
+
+            for key, sub in state.sub_states.items():
+                if sub is None:
+                    continue
+                nt_branch = self._branch_ntemps(key)
+                sub.initialize_tempered(
+                    nt_branch,
+                    self.nwalkers,
+                    self.engine_info.nleaves_max[key],
+                    self.engine_info.ndims[key],
+                    coords=coords_full[key][:nt_branch],
+                    inds=inds_full[key][:nt_branch],
+                )
 
             # TODO: generalize all this stuff here (?)
             # GB-style banded branches (gb + the fixed-dimensional vgb) need
@@ -693,12 +750,13 @@ class GlobalFit:
             for _banded in ("gb", "vgb"):
                 if _banded not in inds:
                     continue
+                _nt_banded = self._branch_ntemps(_banded)
                 band_temps = np.zeros(
-                    (len(self.curr.source_info[_banded].band_edges) - 1, self.ntemps)
+                    (len(self.curr.source_info[_banded].band_edges) - 1, _nt_banded)
                 )
                 state.sub_states[_banded].initialize_band_information(
                     self.nwalkers,
-                    self.ntemps,
+                    _nt_banded,
                     self.curr.source_info[_banded].band_edges,
                     band_temps,
                 )
@@ -707,12 +765,12 @@ class GlobalFit:
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
             # self.logger.debug("pickle state load success")
 
-        # Mirror each branch's full ensemble into its sub-state (the dual
-        # representation of the storage rework; GFCombineMove keeps the two
-        # in sync at every stage boundary).
+        # Sub-states that arrived without a tempered block (e.g. a resumed
+        # file written before this branch had one) initialize from the main
+        # state's ensemble.
         if state is not None and getattr(state, "sub_states", None):
             for _name, _sub in state.sub_states.items():
-                if _sub is not None:
+                if _sub is not None and not _sub.tempered_initialized:
                     _sub.pull_from_main(state, _name)
 
         return state

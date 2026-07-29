@@ -25,7 +25,7 @@ from copy import deepcopy
 from lisatools.domains import WDMSettings
 
 from ...engine import GeneralSettings, GeneralSetup, Settings
-from ..base import StockGlobalFit, env_default
+from ..base import StockGlobalFit, engine_ntemps_default, env_default
 from .common import (
     default_edge_crop_wavelets,
     derive_wdm_grid,
@@ -59,7 +59,11 @@ class EreborGeneralSettings(GeneralSettings):
         default_factory=env_default("NUM_ITERATIONS", 500, int)
     )
     nwalkers: int = dataclasses.field(default_factory=env_default("NWALKERS", 4, int))
-    ntemps: int = dataclasses.field(default_factory=env_default("NTEMPS", 2, int))
+    # RETIRED as a tempering knob: the engine runs cold-chain only (each
+    # branch tempers internally; see the per-branch <BRANCH>_NTEMPS knobs).
+    # A set NTEMPS env var raises. erebor.blank overrides this field to keep
+    # a real engine ladder for simple-API branches.
+    ntemps: int = dataclasses.field(default_factory=engine_ntemps_default())
     random_seed: int = 103209
     backup_iter: int = 5
     main_file_key: str = "testing"

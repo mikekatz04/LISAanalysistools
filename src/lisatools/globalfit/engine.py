@@ -140,6 +140,11 @@ class Settings:
     nleaves_max: Optional[int] = None
     nleaves_min: Optional[int] = None
     ndim: Optional[int] = None
+    # This branch's OWN temperature count (each module tempers internally;
+    # the engine runs cold-chain only). An explicit ``betas`` ladder wins
+    # and defines ntemps = len(betas); otherwise ``ntemps`` sizes the
+    # default ladder the branch's move builder constructs.
+    ntemps: Optional[int] = None
     betas: Optional[np.ndarray] = None
     other_tempering_kwargs: Optional[dict] = None
     branch_state: Optional[eryn_State] = None

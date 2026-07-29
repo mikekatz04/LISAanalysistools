@@ -21,6 +21,7 @@ except (ModuleNotFoundError, ImportError):
     import numpy as cp
 from eryn.model import Model
 from eryn.moves import RedBlueMove, StretchMove
+from eryn.state import BranchSupplemental
 from eryn.state import State as eryn_State
 from eryn.utils.transform import TransformContainer
 
@@ -526,14 +527,38 @@ class PSDMove(GlobalFitMove, StretchMove):
         Returns:
             Tuple ``(new_state, accepted)``.
         """
-        # setup model framework for passing necessary
+        noise_branches = [
+            key for key in ["psd", "galfor", "sgwb"] if key in state.branches_coords
+        ]
+
+        # cold-row agreement between the main state and these branches'
+        # sub-states (GF_SUBSTATE_CHECK=0 disables)
+        self._check_substate_consistency(state, noise_branches)
+        engine_ntemps = state.log_like.shape[0]
+
+        # The working ensembles are the SUB-STATES' tempered branches (the
+        # joint module ladder); the main state carries only the engine's
+        # cold chain.
         tmp_branches_coords = {
-            key: state.branches_coords[key]
-            for key in ["psd", "galfor", "sgwb"]
-            if key in state.branches_coords
+            key: self._work_branch(state, key).coords for key in noise_branches
         }
 
-        tmp_state = GFState(tmp_branches_coords, copy=True, supplemental=state.supplemental)
+        # move-local supplemental at the MODULE ladder shape (the main
+        # state's supplemental is engine-shaped)
+        nt_mod, nwalkers_mod = tmp_branches_coords[noise_branches[0]].shape[:2]
+        tmp_supps = BranchSupplemental(
+            {"walker_inds": np.tile(np.arange(nwalkers_mod), (nt_mod, 1))},
+            base_shape=(nt_mod, nwalkers_mod),
+            copy=True,
+        )
+
+        # module-ladder acceptance tracking (the stage combine-move setter
+        # presets an engine-shaped array, so re-shape on first use)
+        _acc = getattr(self, "_accepted", None)
+        if _acc is None or np.shape(_acc) != (nt_mod, nwalkers_mod):
+            self.accepted = np.zeros((nt_mod, nwalkers_mod))
+
+        tmp_state = GFState(tmp_branches_coords, copy=True, supplemental=tmp_supps)
 
         # ensuring it is up to date. Should not change anything.
         before_vals = model.analysis_container_arr.likelihood().copy()
@@ -563,13 +588,26 @@ class PSDMove(GlobalFitMove, StretchMove):
         # CHECK THIS STATE SETUP
         new_state = GFState(state, copy=True)
 
-        for key in ["psd", "galfor", "sgwb"]:
+        for key in noise_branches:
             if key not in tmp_state.branches:
                 continue
-            new_state.branches[key].coords[:] = tmp_state.branches[key].coords[:]
+            # full-ladder write into the sub-state (shared-memory view),
+            # cold row mirrored into the main (engine) state
+            self._work_branch(new_state, key).coords[:] = tmp_state.branches[key].coords[:]
+            self._sync_cold_row(new_state, key)
+            sub = (new_state.sub_states or {}).get(key)
+            if sub is not None and getattr(sub, "tempered_initialized", False):
+                # the module-tempered record lives on the sub-states: the
+                # joint ll/prior rows and the (shared) adapted ladder
+                sub.log_like[:] = tmp_state.log_like[:]
+                sub.log_prior[:] = tmp_state.log_prior[:]
+                if hasattr(sub, "betas") and sub.betas is not None:
+                    sub.betas[:] = self.temperature_control.betas
 
-        new_state.log_like[:] = tmp_state.log_like[:]
-        new_state.log_prior[:] = tmp_state.log_prior[:]
+        # the engine state keeps only the cold row (row 0 rewritten from the
+        # refreshed ACS below)
+        new_state.log_like[0] = tmp_state.log_like[0]
+        new_state.log_prior[0] = tmp_state.log_prior[0]
 
         # TODO: check speed of this? (needed?)
         nwalkers = len(self.acs)
@@ -593,7 +631,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         after_vals = self.acs.likelihood()
 
         new_state.log_like[0] = after_vals
-        return new_state, accepted
+        # eryn-facing acceptance uses the engine (cold-chain) shape
+        return new_state, np.asarray(accepted)[:engine_ntemps]
 
 
     # ------------------------------------------------------------------

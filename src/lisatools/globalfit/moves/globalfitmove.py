@@ -165,6 +165,29 @@ class GlobalFitMove:
             should be reset. ``-1`` disables.
     """
 
+    def _work_branch(self, state, branch_name=None):
+        """The ensemble a move samples: the sub-state's tempered Branch view.
+
+        The returned eryn ``Branch`` shares memory with the sub-state's
+        coords/inds (the module owns its full ladder; the main state carries
+        only the engine's cold chain). Falls back to the main state's branch
+        when no tempered sub-state exists (e.g. simple-API branches).
+        """
+        name = branch_name if branch_name is not None else self.branch_name
+        sub_states = getattr(state, "sub_states", None) or {}
+        sub = sub_states.get(name)
+        if sub is not None and getattr(sub, "tempered_initialized", False):
+            return sub.branch
+        return state.branches[name]
+
+    def _sync_cold_row(self, state, branch_name=None):
+        """Mirror the sub-state's cold row into the main (engine) state."""
+        name = branch_name if branch_name is not None else self.branch_name
+        sub_states = getattr(state, "sub_states", None) or {}
+        sub = sub_states.get(name)
+        if sub is not None and getattr(sub, "tempered_initialized", False):
+            sub.sync_cold_row(state, name)
+
     def _check_substate_consistency(self, state, branch_names=None):
         """Verify main-state cold rows match each sub-state's row 0.
 
@@ -346,7 +369,12 @@ class GFCombineMove(CombineMove, GlobalFitMove):
     update_comm_special = True
 
     def propose(self, model, state):
-        had_sub_states = getattr(state, "sub_states", None) is not None
+        # Simple-API branches (sub_states all None, e.g. erebor.blank) temper
+        # on the engine ladder through plain eryn moves, which legitimately
+        # rebuild the State -- only arm the guards when a real module
+        # sub-state is present.
+        _subs = getattr(state, "sub_states", None) or {}
+        had_sub_states = any(sub is not None for sub in _subs.values())
         if had_sub_states:
             # stage-entry guard: every branch's cold row must agree between
             # the main state and its sub-state (GF_SUBSTATE_CHECK=0 disables)
@@ -363,14 +391,6 @@ class GFCombineMove(CombineMove, GlobalFitMove):
                     "the input state or a new GFState (e.g. "
                     "GFState(state, copy=True))."
                 )
-            # Dual-representation sync: mirror the main state's ensembles
-            # into the sub-states at the stage boundary. (Removed when the
-            # sub-states take ownership of the tempered ensembles at the
-            # cold-chain flip.)
-            for name, sub in state.sub_states.items():
-                if sub is not None:
-                    sub.pull_from_main(state, name)
-
         return state, accepted
 
     def _propose_moves(self, model, state):

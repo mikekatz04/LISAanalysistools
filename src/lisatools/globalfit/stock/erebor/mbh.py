@@ -15,6 +15,7 @@ from eryn.prior import ProbDistContainer, log_uniform, uniform_dist
 from ...engine import Settings, Setup
 from ...hdfbackend import MBHHDFBackend
 from ...loginfo import init_logger
+from ..base import env_default
 from ...state import MBHState
 from .transforms import make_mbh_transform_container
 
@@ -23,6 +24,8 @@ class MBHSettings(Settings):
     """Settings dataclass describing the MBH branch in an Erebor-style recipe."""
 
     waveform_kwargs: Optional[dict] = None
+    # per-leaf ladder size for the add/remove move (engine is cold-chain only)
+    ntemps: int = dataclasses.field(default_factory=env_default("MBH_NTEMPS", 4, int))
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
     num_prop_repeats: Optional[int] = 200

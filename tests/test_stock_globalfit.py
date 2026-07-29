@@ -733,7 +733,12 @@ class LiteVariantTest(unittest.TestCase):
         fit = erebor.all_sources_lite()
         self.assertEqual(fit.general.num_iterations, 3)
         self.assertEqual(fit.general.nwalkers, 4)
-        self.assertEqual(fit.general.ntemps, 2)
+        # general.ntemps is retired (the engine runs cold-chain only); the
+        # lite preset sizes the PER-BRANCH ladders instead
+        self.assertEqual(fit.general.ntemps, 1)
+        self.assertEqual(fit.gb.ntemps, 2)
+        self.assertEqual(fit.mbh.ntemps, 2)
+        self.assertEqual(fit.psd.ntemps, 2)
         self.assertIs(fit.general.use_gpu, False)
         self.assertEqual(fit.general.nt, 180)
         self.assertEqual(fit.gb.num_repeat_proposals, 2)
@@ -775,11 +780,16 @@ class LiteVariantTest(unittest.TestCase):
 
     # -- env vars overrule the lite preset (precedence: kwarg > env > lite) ---
     def test_env_overrules_lite(self):
-        with _EnvGuard(NWALKERS="16", NUM_ITERATIONS="9", NTEMPS=None, USE_GPU=None):
+        with _EnvGuard(
+            NWALKERS="16", NUM_ITERATIONS="9", GB_NTEMPS=None, USE_GPU=None
+        ):
             fit = erebor.get_stock("gb_no_fg_lite")
             self.assertEqual(fit.general.nwalkers, 16)       # env beats lite 4
             self.assertEqual(fit.general.num_iterations, 9)  # env beats lite 3
-            self.assertEqual(fit.general.ntemps, 2)          # no env -> lite 2
+            self.assertEqual(fit.gb.ntemps, 2)               # no env -> lite 2
+        with _EnvGuard(GB_NTEMPS="5"):
+            fit = erebor.get_stock("gb_no_fg_lite")
+            self.assertEqual(fit.gb.ntemps, 5)               # env beats lite 2
 
     def test_use_gpu_env_overrules_lite(self):
         # USE_GPU is folded into the general env>lite mechanism (no longer a

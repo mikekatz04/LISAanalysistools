@@ -15,6 +15,7 @@ from eryn.prior import ProbDistContainer, uniform_dist
 from ...engine import Settings, Setup
 from ...hdfbackend import SOBBHHDFBackend
 from ...loginfo import init_logger
+from ..base import env_default
 from ...state import SOBBHState
 from .transforms import make_sobbh_transform_container
 
@@ -35,6 +36,8 @@ class SOBBHSettings(Settings):
     logm2_lims: typing.List[float] = dataclasses.field(default_factory=list)
     s1_lims: typing.List[float] = dataclasses.field(default_factory=list)
     s2_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    # per-leaf ladder size for the add/remove move (engine is cold-chain only)
+    ntemps: int = dataclasses.field(default_factory=env_default("SOBBH_NTEMPS", 4, int))
     f_low_lims: typing.List[float] = dataclasses.field(default_factory=list)
     waveform_kwargs: Optional[dict] = None
     injection: Optional[np.ndarray] = None
