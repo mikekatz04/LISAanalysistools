@@ -1216,6 +1216,11 @@ void compute_logpdf(double* logpdf_out, int* component_index, double* points,
       }
       CUDA_SYNC_THREADS;
 
+#else
+      // CPU evaluates one (point, component) pair per round: the readout
+      // below is max + log(log_sum_arr[0]), which expects exp-space, not the
+      // raw log value (feeding the raw value returns lw + log(lw)).
+      log_sum_arr[0] = exp(log_sum_arr[0] - max_log_all);
 #endif
       // do it again to add next round if there
       if (tid == 0) {
@@ -1244,7 +1249,13 @@ void compute_logpdf(double* logpdf_out, int* component_index, double* points,
       // if ((blockIdx.x == 0) && (tid == 0)) printf("%d, %d\n",
       // start_index_here, end_index_here);
       CUDA_SYNC_THREADS;
+#ifdef __CUDACC__
       start_index_here += PDF_NUM_THREADS;
+#else
+      // one pair per round on CPU -- a PDF_NUM_THREADS stride would skip
+      // every component after the first for each point.
+      start_index_here += 1;
+#endif
     }
     logpdf_out[i] = total_log_sum;
   }
