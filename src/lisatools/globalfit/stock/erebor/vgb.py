@@ -88,6 +88,25 @@ class VGBSettings(GBSettings):
     n_cp_orbit: int = dataclasses.field(
         default_factory=env_default("CHUNKED_N_CP_ORBIT", 32, int)
     )
+    # Signal-heterodyne in-model likelihood: same three knobs (and the same
+    # GB_SIGHET_* / SIGHET_* env names) as the GB branch, so the two branches
+    # switch engines identically. Duplicated here rather than inherited
+    # because the GB copies live on gb_no_fg's own GBNoFgGBSettings subclass,
+    # not on the shared GBSettings -- matching how nt_sub/n_sparse above are
+    # duplicated per branch.
+    #
+    # VGB is fixed-dimensional (no RJ), so toggling this is the clean
+    # apples-to-apples chunked-het vs sig-het comparison: identical sources,
+    # moves and iteration count, only the in-model likelihood differs.
+    sighet_inmodel: bool = dataclasses.field(
+        default_factory=env_default("GB_SIGHET_INMODEL", False, bool)
+    )
+    sighet_nt_layer: int = dataclasses.field(
+        default_factory=env_default("SIGHET_NT_LAYER", 64, int)
+    )
+    sighet_n_sparse_fd: int = dataclasses.field(
+        default_factory=env_default("SIGHET_N_SPARSE_FD", 1024, int)
+    )
     # (nleaves, 3) per-leaf fixed [f0 (mHz), alpha, sin_delta] in SAMPLING
     # units, ordered like VGB_FIXED_BASIS; feeds the per-leaf fill list.
     fixed_params: typing.Optional[typing.Any] = None

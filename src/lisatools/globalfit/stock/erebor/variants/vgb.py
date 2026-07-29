@@ -243,6 +243,41 @@ def setup_vgb_moves(engine_info, curr, acs, priors, state) -> dict:
             vgb_info.gb_wdm_comp.Nt_sub, vgb_info.gb_wdm_comp.N_sparse,
         )
 
+    # Sig-het in-model scoring: wrap the chunked comp so ONLY the in-model
+    # repeat proposals route through the sig-het kernel; fills / swaps /
+    # information matrices delegate to the chunked comp byte-identically
+    # (pure type dispatch). Mirrors setup_gb_moves' block in gb_no_fg.
+    #
+    # VGB is FIXED-DIMENSIONAL -- no RJ leg, a catalogue-fixed source count,
+    # and f0/sky fixed per leaf -- so this is the clean apples-to-apples A/B
+    # against pure chunked-het: same sources, same moves, same iterations,
+    # only the in-model likelihood differs. The GB branch's births/deaths
+    # change the work per iteration between arms and confound the timing.
+    #
+    # NOTE the knob is GB_SIGHET_INMODEL (VGBSettings inherits GBSettings'
+    # field, env name included), so in a run carrying BOTH branches -- e.g.
+    # all_sources -- it flips gb and vgb together.
+    if isinstance(general_info.domain_settings, WDMSettings) and getattr(
+        vgb_info, "sighet_inmodel", False
+    ):
+        from gbgpu.gbsignalhetcomputations import GBSignalHetComputations
+
+        # Idempotent: setup runs again on resume / all_sources reuse, and the
+        # chunked build above is skipped once gb_wdm_comp is non-None, so a
+        # second pass must not wrap the wrapper.
+        if not isinstance(vgb_info.gb_wdm_comp, GBSignalHetComputations):
+            vgb_info.gb_wdm_comp = GBSignalHetComputations.for_band_engine(
+                vgb_info.gb_wdm_comp,
+                nt_layer=int(vgb_info.sighet_nt_layer),
+                n_sparse_fd=int(vgb_info.sighet_n_sparse_fd),
+            )
+            logger.info(
+                "VGB in-model likelihood: SIGNAL-HET (nt_layer=%d, "
+                "n_sparse_fd=%d; chunked-het delegate for fills / swaps).",
+                int(vgb_info.sighet_nt_layer),
+                int(vgb_info.sighet_n_sparse_fd),
+            )
+
     if isinstance(general_info.domain_settings, FDSettings):
         if getattr(vgb_info, "orbits", None) is None:
             vgb_info.orbits = general_info.gpu_orbits
