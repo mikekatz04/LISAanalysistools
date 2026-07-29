@@ -2902,7 +2902,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # how far each source walked from its heterodyne expansion point over
         # the block -- same parameter-space metric the legacy refresh gated
         # on -- WITHOUT changing the sampling. Pure arithmetic, no kernel.
-        if sighet_active and self.sighet_drift_check:
+        _audit = sighet_active and self.sighet_drift_check
+        if _audit:
             drift, damp = self._sighet_drift_metrics(curr, ref_track, l_i)
             n_over = int((drift > self.sighet_refresh_dphase).sum())
             logger.info(
@@ -2912,11 +2913,41 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"{n_over} over dphase={self.sighet_refresh_dphase}; "
                 f"|dlnA| max={float(damp.max()):.3e}."
             )
+            # The sig-het delta the CHAIN actually used at the final coords
+            # (tracked ll_ref), captured before the engine reverts.
+            _ll_het_final = ll_ref.copy()
 
         # Repeat block over: deactivate the per-source likelihood setup so
         # everything outside the block (RJ, removal, fills) scores through
         # the standard engine path again.
         buffer_obj.clear_in_model_likelihood()
+
+        # End-of-block LIKELIHOOD accuracy AUDIT (same knob as the drift
+        # audit): re-score the block's FINAL coordinates through the EXACT
+        # engine -- after clear_in_model the buffer routes to the chunked
+        # delegate natively -- and compare against the sig-het value the MH
+        # chain used. This is the accuracy tracker for the fixed-reference
+        # policy at the chain's actual operating points: |dll| is directly
+        # comparable to the het budget (dlnL ~ SNR^2 * mm), reported for all
+        # temps and for the COLD chain separately (hot walkers legitimately
+        # roam where the linearization is worst and beta suppresses the
+        # error's effect there). Costs ONE exact batched call per block.
+        if _audit:
+            with _tspan(tm, "inmodel_accuracy_check"):
+                _ll_exact = buffer_obj.get_add_ll(
+                    curr, slots, slots, N_vals,
+                    phase_maximize=self.phase_maximize, leaf_inds=l_i)
+            _err = cp.abs(_ll_het_final - _ll_exact)
+            _cold = beta > 0.999
+            _n_c = int(_cold.sum())
+            _cmax = float(_err[_cold].max()) if _n_c else float("nan")
+            _cmed = float(cp.median(_err[_cold])) if _n_c else float("nan")
+            logger.info(
+                f"{self.name}: sig-het end-of-block ll AUDIT vs exact "
+                f"({len(ids)} sources): |dll| max={float(_err.max()):.3e} "
+                f"median={float(cp.median(_err)):.3e}; COLD ({_n_c}): "
+                f"max={_cmax:.3e} median={_cmed:.3e}."
+            )
 
         # Final coordinates back into the residual and the sorter.
         band_sorter.coords[ids] = curr
