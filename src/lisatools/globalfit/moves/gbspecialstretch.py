@@ -2601,6 +2601,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         return new_coords, factors
 
+    def _sighet_drift_metrics(self, curr, ref_track, leaf_inds):
+        """Per-source drift vs the heterodyne expansion point, PHYSICAL basis.
+
+        Returns ``(drift, damp)``: accumulated carrier-phase drift
+        ``2*pi*|df0|*Tobs + pi*|dfdot|*Tobs**2`` (rad) and the amplitude
+        ratio ``|ln(A/A_ref)|``. Computed by transforming BOTH coordinate
+        sets to physical parameters, so it is branch-agnostic: reduced
+        sampling bases (e.g. VGB's 5-col, where f0/sky are per-leaf fills)
+        get exactly-zero contributions from the fixed parameters. Reading
+        sampling columns directly (the old form) silently misread reduced
+        bases -- VGB's column 1 is not f0, which made the drift audit
+        report ~1e13 rad of impossible "drift"."""
+        li = leaf_inds if self._per_leaf_fill else None
+        pc = self.transform_fn.both_transforms(curr, xp=cp, leaf_inds=li)
+        pr = self.transform_fn.both_transforms(ref_track, xp=cp, leaf_inds=li)
+        Tobs = float(self._basis_settings.Tobs)
+        drift = (2.0 * np.pi * cp.abs(pc[:, 1] - pr[:, 1]) * Tobs
+                 + np.pi * cp.abs(pc[:, 2] - pr[:, 2]) * Tobs**2)
+        damp = cp.abs(cp.log(cp.abs(pc[:, 0]) / cp.abs(pr[:, 0])))
+        return drift, damp
+
     def _run_in_model_repeats(self, model, band_sorter, buffer_obj, band_temps,
                               picked, ll_change_log, prop_counts, acc_counts):
         """``num_repeat_proposals`` in-model rounds on the picked live sources.
@@ -2853,13 +2874,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 and (move_i + 1) % self.sighet_refresh_every == 0
                 and move_i + 1 < self.num_repeat_proposals
             ):
-                Tobs = float(self._basis_settings.Tobs)
-                df0_hz = cp.abs(curr[:, 1] - ref_track[:, 1]) / 1e3
-                dfdot = cp.abs(curr[:, 2] - ref_track[:, 2])
-                drift = 2.0 * np.pi * df0_hz * Tobs + np.pi * dfdot * Tobs**2
-                far = (drift > self.sighet_refresh_dphase) | (
-                    cp.abs(curr[:, 0] - ref_track[:, 0]) > np.log(2.0)
-                )
+                drift, damp = self._sighet_drift_metrics(curr, ref_track, l_i)
+                far = (drift > self.sighet_refresh_dphase) | (damp > np.log(2.0))
                 # Hot cells keep their stale reference: the ll error is
                 # beta-suppressed and each refresh is a full setup.
                 far = far & (beta >= self.sighet_refresh_min_beta)
@@ -2887,11 +2903,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # the block -- same parameter-space metric the legacy refresh gated
         # on -- WITHOUT changing the sampling. Pure arithmetic, no kernel.
         if sighet_active and self.sighet_drift_check:
-            Tobs = float(self._basis_settings.Tobs)
-            df0_hz = cp.abs(curr[:, 1] - ref_track[:, 1]) / 1e3
-            dfdot = cp.abs(curr[:, 2] - ref_track[:, 2])
-            drift = 2.0 * np.pi * df0_hz * Tobs + np.pi * dfdot * Tobs**2
-            damp = cp.abs(curr[:, 0] - ref_track[:, 0])
+            drift, damp = self._sighet_drift_metrics(curr, ref_track, l_i)
             n_over = int((drift > self.sighet_refresh_dphase).sum())
             logger.info(
                 f"{self.name}: sig-het end-of-block drift ({len(ids)} sources, "
