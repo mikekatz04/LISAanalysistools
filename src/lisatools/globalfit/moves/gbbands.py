@@ -1740,16 +1740,23 @@ class BandSorter(LISAToolsParallelModule):
 
         num_band_preload = len(special_indices_unique)
 
+        # Array module from the SORTER's arrays, not the module-level ``cp``:
+        # on a CPU run on a machine where cupy imports (cluster), ``cp`` is
+        # cupy while the sorter holds numpy -- cp.isin then dies with
+        # ``TypeError: Unsupported type <class 'numpy.ndarray'>`` (and
+        # cp.arange/cp.asarray would silently UPLOAD host data instead).
+        xp = get_array_module(self.main_band_sorter.special_band_inds)
+
         # CAN USE main_band_sorter TO GET SOURCES IN BANDS OF INTEREST THAT ARE NOT CURRENTLY OF INTEREST THEMSELVES
 
-        sources_now_map = cp.arange(self.main_band_sorter.special_band_inds.shape[0])[
-            cp.isin(self.main_band_sorter.special_band_inds, special_indices_unique)
+        sources_now_map = xp.arange(self.main_band_sorter.special_band_inds.shape[0])[
+            xp.isin(self.main_band_sorter.special_band_inds, special_indices_unique)
         ]
 
         # NOTE: self.main_band_sorter.inds needed to only inject real sources
         # inject sources must include sources that have been turned off in these bands
-        sources_inject_now_map = cp.arange(self.main_band_sorter.special_band_inds.shape[0])[
-            cp.isin(self.main_band_sorter.special_band_inds, special_indices_unique)
+        sources_inject_now_map = xp.arange(self.main_band_sorter.special_band_inds.shape[0])[
+            xp.isin(self.main_band_sorter.special_band_inds, special_indices_unique)
             & self.main_band_sorter.inds
         ]
 
@@ -1758,7 +1765,7 @@ class BandSorter(LISAToolsParallelModule):
             special_indices_unique
         )
 
-        all_unique_band_combos = cp.asarray([temp_inds_now, walker_inds_now, band_inds_now]).T
+        all_unique_band_combos = xp.asarray([temp_inds_now, walker_inds_now, band_inds_now]).T
         num_bands_here_total = all_unique_band_combos.shape[0]
         num_bands_now = special_indices_unique.shape[0]
 
@@ -1767,7 +1774,7 @@ class BandSorter(LISAToolsParallelModule):
 
         # sort these sources by band
         if inds_fill is None:
-            inds_fill = cp.arange(num_band_preload)
+            inds_fill = xp.arange(num_band_preload)
             assert buffer_obj is None
             buffer_obj = SubBandBuffer(
                 self.rj_prop,
