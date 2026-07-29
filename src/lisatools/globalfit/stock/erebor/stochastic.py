@@ -20,6 +20,8 @@ from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.utils import TransformContainer
 
 from ...engine import GeneralSetup, Settings, Setup
+from ...hdfbackend import ModuleSubBackend
+from ...state import ModuleSubState
 from ...loginfo import init_logger
 
 
@@ -104,8 +106,16 @@ class SGWBSetup(Setup):
         assert not self.other_tempering_kwargs["permute"]
 
     def init_setup(self):
-        """Run sampling-info initialization for the SGWB branch."""
+        """Run sampling-info and state-backend initialization for the SGWB branch."""
         self.init_sampling_info()
+        self.init_state_backend_info()
+
+    def init_state_backend_info(self):
+        """Default the SGWB state/backend to the generic module sub-state/backend."""
+        if self.branch_state is None:
+            self.branch_state = ModuleSubState
+        if self.branch_backend is None:
+            self.branch_backend = ModuleSubBackend
 
 
 def get_sgwb_erebor_settings(general_set: GeneralSetup) -> SGWBSetup:

@@ -13,6 +13,21 @@ def return_x(x):
     return x
 
 
+def _scalar_or_none(value):
+    """``value`` as an int if it is scalar-like, else ``None``.
+
+    The main backend's flat kwargs merge can hand branch-keyed dicts (e.g.
+    ``nleaves_max={branch: n}``) to a sub-backend reset; those are not this
+    branch's dimensions and are treated as absent.
+    """
+    if value is None or isinstance(value, dict):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def branch_nleaves_max(possible_state, name: str) -> int:
     """``nleaves_max`` for branch ``name`` from a coords-like dict OR an eryn ``State``.
 
@@ -79,11 +94,213 @@ class ModuleSubState(eryn_State):
     """
 
     static_names: tuple = ()
-    dim_attr_names: tuple = ()
+    dim_attr_names: tuple = ("ntemps", "nwalkers", "nleaves_max", "ndim")
+
+    #: arrays carried by the tempered block (allocated by
+    #: :meth:`initialize_tempered`, copied by the copy path)
+    tempered_array_names: tuple = (
+        "coords",
+        "inds",
+        "log_like",
+        "log_prior",
+        "in_model_proposed",
+        "in_model_accepted",
+        "rj_proposed",
+        "rj_accepted",
+        "swaps_proposed",
+        "swaps_accepted",
+    )
+    #: counters zeroed after every save (per-iteration deltas)
+    delta_counter_names: tuple = (
+        "in_model_proposed",
+        "in_model_accepted",
+        "rj_proposed",
+        "rj_accepted",
+        "swaps_proposed",
+        "swaps_accepted",
+    )
+    #: arrays stored with the backend's float dtype for continuity with the
+    #: pre-rework files (everything else keeps its in-memory dtype)
+    legacy_dtype_names: tuple = ()
+
+    def __init__(self, possible_state=None, copy=False, **kwargs):
+        if isinstance(possible_state, self.__class__):
+            self._copy_tempered_from(possible_state, deepcopy if copy else return_x)
+
+    # ------------------------------------------------------------------
+    # Tempered ensemble block: the module's full (ntemps, nwalkers, ...)
+    # ensemble, owned by the sub-state
+    # ------------------------------------------------------------------
+
+    @property
+    def tempered_initialized(self) -> bool:
+        """Whether the tempered ensemble block has been allocated."""
+        return getattr(self, "_tempered_initialized", False)
+
+    def _ll_shape(self):
+        return (self.ntemps, self.nwalkers)
+
+    def _counter_shape(self):
+        return (self.ntemps,)
+
+    def _swaps_shape(self):
+        return (max(self.ntemps - 1, 0),)
+
+    def initialize_tempered(self, ntemps, nwalkers, nleaves_max, ndim, coords=None, inds=None):
+        """Allocate (or validate + refill) the module's tempered ensemble.
+
+        Idempotent: on an already-initialized sub-state the geometry must
+        match exactly and any provided ``coords`` / ``inds`` are copied in.
+        """
+        dims = (int(ntemps), int(nwalkers), int(nleaves_max), int(ndim))
+        if self.tempered_initialized:
+            current = (self.ntemps, self.nwalkers, self.nleaves_max, self.ndim)
+            if current != dims:
+                raise ValueError(
+                    f"tempered geometry mismatch: sub-state has "
+                    f"(ntemps, nwalkers, nleaves_max, ndim)={current}, "
+                    f"initialize_tempered got {dims}."
+                )
+            if coords is not None:
+                self.coords[:] = coords
+            if inds is not None:
+                self.inds[:] = inds
+            return
+
+        self.ntemps, self.nwalkers, self.nleaves_max, self.ndim = dims
+        shape = dims[:1] + dims[1:2] + (self.nleaves_max, self.ndim)
+        if coords is not None:
+            coords = np.array(coords, dtype=float, copy=True)
+            if coords.shape != shape:
+                raise ValueError(
+                    f"coords shape {coords.shape} does not match tempered "
+                    f"geometry {shape}."
+                )
+            self.coords = coords
+        else:
+            self.coords = np.zeros(shape)
+        if inds is not None:
+            inds = np.array(inds, dtype=bool, copy=True)
+            if inds.shape != shape[:-1]:
+                raise ValueError(
+                    f"inds shape {inds.shape} does not match tempered "
+                    f"geometry {shape[:-1]}."
+                )
+            self.inds = inds
+        else:
+            self.inds = np.ones(shape[:-1], dtype=bool)
+
+        self.log_like = np.zeros(self._ll_shape())
+        self.log_prior = np.zeros(self._ll_shape())
+        self.in_model_proposed = np.zeros(self._counter_shape(), dtype=int)
+        self.in_model_accepted = np.zeros(self._counter_shape(), dtype=int)
+        self.rj_proposed = np.zeros(self._counter_shape(), dtype=int)
+        self.rj_accepted = np.zeros(self._counter_shape(), dtype=int)
+        self.swaps_proposed = np.zeros(self._swaps_shape(), dtype=int)
+        self.swaps_accepted = np.zeros(self._swaps_shape(), dtype=int)
+        self._tempered_initialized = True
+
+    def _copy_tempered_from(self, other, dc):
+        """Copy the tempered block (if any) from ``other`` using copier ``dc``."""
+        if not getattr(other, "tempered_initialized", False):
+            return
+        for name in ("ntemps", "nwalkers", "nleaves_max", "ndim"):
+            setattr(self, name, getattr(other, name))
+        for name in self.tempered_array_names:
+            setattr(self, name, dc(getattr(other, name)))
+        self._tempered_initialized = True
+
+    @property
+    def branch(self) -> eryn_Branch:
+        """An eryn ``Branch`` VIEW over this sub-state's coords/inds (shared memory)."""
+        return eryn_Branch(self.coords, inds=self.inds)
+
+    def sync_cold_row(self, main_state, branch_name: str):
+        """Write this sub-state's cold row (temp 0) into the main state."""
+        main_branch = main_state.branches[branch_name]
+        main_branch.coords[0] = self.coords[0]
+        main_branch.inds[0] = self.inds[0]
+
+    def check_cold_row(self, main_state, branch_name: str):
+        """Verify the main state's cold row matches this sub-state's row 0.
+
+        Raises:
+            ValueError: labeled description of the mismatch (inds or coords).
+        """
+        main_branch = main_state.branches[branch_name]
+        if not np.array_equal(main_branch.inds[0], self.inds[0]):
+            n_bad = int(np.sum(main_branch.inds[0] != self.inds[0]))
+            raise ValueError(
+                f"[{branch_name}] cold-chain inds mismatch between the main "
+                f"state and its sub-state ({n_bad} differing leaf slots). "
+                "A move updated one representation without the other."
+            )
+        main_alive = main_branch.coords[0][main_branch.inds[0]]
+        sub_alive = self.coords[0][self.inds[0]]
+        if not np.array_equal(main_alive, sub_alive):
+            n_bad = int(np.sum(np.any(main_alive != sub_alive, axis=-1)))
+            raise ValueError(
+                f"[{branch_name}] cold-chain coords mismatch between the "
+                f"main state and its sub-state ({n_bad} of {len(sub_alive)} "
+                "alive leaves differ). A move updated one representation "
+                "without the other."
+            )
+
+    def pull_from_main(self, main_state, branch_name: str):
+        """Mirror the main state's full ensemble for this branch into the sub-state.
+
+        Initializes the tempered block from the main branch on first use;
+        afterwards copies coords/inds at every temperature (the Phase-2
+        dual-representation sync).
+        """
+        main_branch = main_state.branches[branch_name]
+        if not self.tempered_initialized:
+            self.initialize_tempered(
+                main_branch.ntemps,
+                main_branch.nwalkers,
+                main_branch.nleaves_max,
+                main_branch.ndim,
+                coords=main_branch.coords,
+                inds=main_branch.inds,
+            )
+            return
+        self.coords[:] = main_branch.coords
+        self.inds[:] = main_branch.inds
+
+    # ------------------------------------------------------------------
+    # Storage contract
+    # ------------------------------------------------------------------
+
+    def tempered_storage_arrays(self) -> dict:
+        """The standard tempered dict (``chain``/``inds``/logL/logP + counters)."""
+        if not self.tempered_initialized:
+            return {}
+        out = {
+            "chain": self.coords,
+            "inds": self.inds,
+            "log_like": self.log_like,
+            "log_prior": self.log_prior,
+        }
+        for name in self.delta_counter_names:
+            out[name] = getattr(self, name)
+        return out
+
+    def _load_tempered_from_stored(self, arrays):
+        """Fill the tempered block from one stored iteration (leading axis 1)."""
+        if "chain" not in arrays:
+            return
+        coords = np.asarray(arrays["chain"][0])
+        inds = np.asarray(arrays["inds"][0]).astype(bool)
+        self.initialize_tempered(*coords.shape, coords=coords, inds=inds)
+        # some branches (GB) store only chain/inds -- band_info carries the
+        # rest of their tempering record
+        for name in ("log_like", "log_prior") + self.delta_counter_names:
+            if name in arrays:
+                getattr(self, name)[:] = arrays[name][0]
 
     def storage_arrays(self) -> dict:
         """``{on-disk name: array}`` persisted every saved iteration."""
-        raise NotImplementedError
+        return self.tempered_storage_arrays()
 
     def static_arrays(self) -> dict:
         """``{on-disk name: array}`` persisted once at backend reset."""
@@ -91,20 +308,36 @@ class ModuleSubState(eryn_State):
 
     def storage_attrs(self) -> dict:
         """``{name: scalar}`` written as HDF5 group attributes at reset."""
-        return {}
+        if not self.tempered_initialized:
+            return {}
+        return {
+            "ntemps": self.ntemps,
+            "nwalkers": self.nwalkers,
+            "nleaves_max": self.nleaves_max,
+            "ndim": self.ndim,
+        }
 
     @classmethod
-    def make_template(cls, nwalkers, ntemps, **dims):
+    def make_template(cls, nwalkers, ntemps, nleaves_max=None, ndim=None, **dims):
         """Allocate a zeroed instance from dimension kwargs (extras ignored)."""
-        raise NotImplementedError
+        template = cls(None)
+        if _scalar_or_none(nleaves_max) is None or _scalar_or_none(ndim) is None:
+            raise ValueError("Must provide nleaves_max and ndim kwargs.")
+        template.initialize_tempered(ntemps, nwalkers, nleaves_max, ndim)
+        return template
 
     @classmethod
     def from_stored(cls, arrays, statics=None, attrs=None):
         """Rebuild an instance from one stored iteration's arrays."""
-        raise NotImplementedError
+        instance = cls(None)
+        instance._load_tempered_from_stored(arrays)
+        return instance
 
     def reset_delta_counters(self):
         """Zero per-iteration-delta counters (called after each save)."""
+        if self.tempered_initialized:
+            for name in self.delta_counter_names:
+                getattr(self, name)[:] = 0
 
     @property
     def reset_kwargs(self):
@@ -144,6 +377,7 @@ class GBState(ModuleSubState):
             dc = deepcopy if copy else return_x
             if possible_state.band_initialized and hasattr(possible_state, "band_info"):
                 self.band_info = dc(possible_state.band_info)
+            self._copy_tempered_from(possible_state, dc)
         elif band_info is not None:
             self.band_info = band_info
 
@@ -323,40 +557,81 @@ class GBState(ModuleSubState):
     # ------------------------------------------------------------------
 
     static_names = ("band_edges",)
-    dim_attr_names = ("num_bands",)
+    dim_attr_names = ("num_bands", "ntemps", "nwalkers", "nleaves_max", "ndim")
+    #: all band arrays keep the backend float dtype (pre-rework layout)
+    legacy_dtype_names = (
+        "band_edges",
+        "band_temps",
+        "band_swaps_proposed",
+        "band_swaps_accepted",
+        "band_num_proposed",
+        "band_num_accepted",
+        "band_num_proposed_rj",
+        "band_num_accepted_rj",
+        "band_num_binaries",
+        "band_leaf_cap",
+        "band_cap_iters",
+        "band_best_ll",
+    )
 
     def storage_arrays(self):
-        """Every per-band array except the static ``band_edges``."""
-        return {
+        """Every per-band array plus the tempered ``chain``/``inds``.
+
+        The per-branch ``log_like``/``log_prior`` and base counters are
+        omitted -- ``band_info`` carries the GB tempering record
+        (``band_temps`` + ``band_num_*``) at per-band resolution.
+        """
+        out = {
             name: dat
             for name, dat in self.band_info.items()
             if isinstance(dat, np.ndarray) and name != "band_edges"
         }
+        if self.tempered_initialized:
+            out["chain"] = self.coords
+            out["inds"] = self.inds
+        return out
 
     def static_arrays(self):
         return {"band_edges": self.band_info["band_edges"]}
 
     def storage_attrs(self):
-        return {"num_bands": len(self.band_info["band_edges"]) - 1}
+        out = dict(super().storage_attrs())
+        out["num_bands"] = len(self.band_info["band_edges"]) - 1
+        return out
 
     @classmethod
-    def make_template(cls, nwalkers, ntemps, num_bands=None, band_edges=None, **kwargs):
+    def make_template(
+        cls,
+        nwalkers,
+        ntemps,
+        num_bands=None,
+        band_edges=None,
+        nleaves_max=None,
+        ndim=None,
+        **kwargs,
+    ):
         if num_bands is None or band_edges is None:
             raise ValueError("Must provide num_bands and band_edges kwargs.")
         template = cls(None)
         template.initialize_band_information(
             nwalkers, ntemps, band_edges, np.zeros((num_bands, ntemps))
         )
+        if _scalar_or_none(nleaves_max) is not None and _scalar_or_none(ndim) is not None:
+            template.initialize_tempered(ntemps, nwalkers, nleaves_max, ndim)
         return template
 
     @classmethod
     def from_stored(cls, arrays, statics=None, attrs=None):
-        # The stored arrays keep their leading step axis; GBState's
+        # The stored band arrays keep their leading step axis; GBState's
         # initialize_band_information strips it rank-based on reload.
-        band_info = dict(arrays)
+        band_info = {
+            name: value for name, value in arrays.items() if name.startswith("band_")
+        }
         band_info["band_edges"] = statics["band_edges"]
         band_info["initialized"] = True
-        return cls(None, band_info=band_info)
+        instance = cls(None, band_info=band_info)
+        instance._load_tempered_from_stored(arrays)
+        return instance
 
     def reset_delta_counters(self):
         self.reset_band_counters()
@@ -387,6 +662,7 @@ class PerLeafLadderState(ModuleSubState):
             dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
             self._set_leaf_count(getattr(possible_state, self.leaf_count_name))
+            self._copy_tempered_from(possible_state, dc)
         else:
             self.betas_all = betas_all
             if possible_state is None:
@@ -414,24 +690,48 @@ class PerLeafLadderState(ModuleSubState):
     # ModuleSubState storage contract
     # ------------------------------------------------------------------
 
+    legacy_dtype_names = ("betas_all",)
+
+    # per-leaf resolution: each leaf carries its own ladder, likelihood
+    # rows, and counters
+    def _ll_shape(self):
+        return (self.nleaves_max, self.ntemps, self.nwalkers)
+
+    def _counter_shape(self):
+        return (self.nleaves_max, self.ntemps)
+
+    def _swaps_shape(self):
+        return (self.nleaves_max, max(self.ntemps - 1, 0))
+
     def storage_arrays(self):
-        return {"betas_all": self.betas_all}
+        out = {"betas_all": self.betas_all}
+        out.update(self.tempered_storage_arrays())
+        return out
 
     def storage_attrs(self):
-        return {self.leaf_count_name: self.num_leaves}
+        out = dict(super().storage_attrs())
+        out[self.leaf_count_name] = self.num_leaves
+        return out
 
     @classmethod
-    def make_template(cls, nwalkers, ntemps, **dims):
-        num_leaves = dims.get(cls.leaf_count_name)
+    def make_template(cls, nwalkers, ntemps, nleaves_max=None, ndim=None, **dims):
+        num_leaves = _scalar_or_none(dims.get(cls.leaf_count_name))
+        if num_leaves is None:
+            num_leaves = _scalar_or_none(nleaves_max)
         if num_leaves is None:
             raise ValueError(f"Must provide {cls.leaf_count_name} kwarg.")
-        return cls(None, betas_all=np.zeros((num_leaves, ntemps)))
+        template = cls(None, betas_all=np.zeros((num_leaves, ntemps)))
+        if _scalar_or_none(ndim) is not None:
+            template.initialize_tempered(ntemps, nwalkers, num_leaves, ndim)
+        return template
 
     @classmethod
     def from_stored(cls, arrays, statics=None, attrs=None):
         # [0] squeezes the (single) iteration axis to the live
         # (nleaves, ntemps) shape.
-        return cls(None, betas_all=arrays["betas_all"][0])
+        instance = cls(None, betas_all=arrays["betas_all"][0])
+        instance._load_tempered_from_stored(arrays)
+        return instance
 
 
 class MBHState(PerLeafLadderState):
@@ -439,7 +739,7 @@ class MBHState(PerLeafLadderState):
 
     branch_name = "mbh"
     leaf_count_name = "num_mbhs"
-    dim_attr_names = ("num_mbhs",)
+    dim_attr_names = ("num_mbhs", "ntemps", "nwalkers", "nleaves_max", "ndim")
 
 
 class EMRIState(PerLeafLadderState):
@@ -447,7 +747,7 @@ class EMRIState(PerLeafLadderState):
 
     branch_name = "emri"
     leaf_count_name = "num_emris"
-    dim_attr_names = ("num_emris",)
+    dim_attr_names = ("num_emris", "ntemps", "nwalkers", "nleaves_max", "ndim")
 
 
 class SOBBHState(PerLeafLadderState):
@@ -459,7 +759,7 @@ class SOBBHState(PerLeafLadderState):
 
     branch_name = "sobbh"
     leaf_count_name = "num_sobbhs"
-    dim_attr_names = ("num_sobbhs",)
+    dim_attr_names = ("num_sobbhs", "ntemps", "nwalkers", "nleaves_max", "ndim")
 
 
 class GFState(eryn_State):

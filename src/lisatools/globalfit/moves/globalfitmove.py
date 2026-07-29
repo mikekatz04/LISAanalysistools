@@ -165,6 +165,25 @@ class GlobalFitMove:
             should be reset. ``-1`` disables.
     """
 
+    def _check_substate_consistency(self, state, branch_names=None):
+        """Verify main-state cold rows match each sub-state's row 0.
+
+        Delegates to :meth:`ModuleSubState.check_cold_row` for every
+        tempered-initialized sub-state (or just ``branch_names``). No-op when
+        ``GF_SUBSTATE_CHECK=0`` or the state carries no sub-states.
+        """
+        if not substate_check_enabled():
+            return
+        sub_states = getattr(state, "sub_states", None)
+        if not sub_states:
+            return
+        names = branch_names if branch_names is not None else sub_states.keys()
+        for name in names:
+            sub = sub_states.get(name)
+            if sub is None or not getattr(sub, "tempered_initialized", False):
+                continue
+            sub.check_cold_row(state, name)
+
     def __init__(
         self,
         *args,
@@ -299,6 +318,14 @@ def _gf_gpu_pool_mb():
         return None, None
 
 
+def substate_check_enabled() -> bool:
+    """Whether the cold-chain sub-state consistency check is armed.
+
+    Always on; disable with ``GF_SUBSTATE_CHECK=0`` (read at call time).
+    """
+    return os.environ.get("GF_SUBSTATE_CHECK", "1") != "0"
+
+
 class GFCombineMove(CombineMove, GlobalFitMove):
     """An ``eryn`` :class:`CombineMove` that participates in global-fit bookkeeping.
 
@@ -319,6 +346,34 @@ class GFCombineMove(CombineMove, GlobalFitMove):
     update_comm_special = True
 
     def propose(self, model, state):
+        had_sub_states = getattr(state, "sub_states", None) is not None
+        if had_sub_states:
+            # stage-entry guard: every branch's cold row must agree between
+            # the main state and its sub-state (GF_SUBSTATE_CHECK=0 disables)
+            self._check_substate_consistency(state)
+
+        state, accepted = self._propose_moves(model, state)
+
+        if had_sub_states:
+            if getattr(state, "sub_states", None) is None:
+                raise ValueError(
+                    f"stage {getattr(self, 'gf_stage_name', '?')!r}: a wrapped "
+                    "move returned a plain eryn State, destroying the "
+                    "GFState sub-states. Every global-fit move must return "
+                    "the input state or a new GFState (e.g. "
+                    "GFState(state, copy=True))."
+                )
+            # Dual-representation sync: mirror the main state's ensembles
+            # into the sub-states at the stage boundary. (Removed when the
+            # sub-states take ownership of the tempered ensembles at the
+            # cold-chain flip.)
+            for name, sub in state.sub_states.items():
+                if sub is not None:
+                    sub.pull_from_main(state, name)
+
+        return state, accepted
+
+    def _propose_moves(self, model, state):
         if os.environ.get("GF_MOVE_TIMING", "0") != "1":
             return super().propose(model, state)
 

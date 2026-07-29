@@ -1,11 +1,11 @@
 """Round-trip tests for the global-fit sub-state / sub-backend storage layer.
 
-Written against the storage behavior as of the start of the cold-chain
-storage rework (branch ``cold-chain-storage``): these tests pin the on-disk
-schema (dataset names, shapes, attrs) and the save/load round-trip semantics
-of the per-branch sub-backends, so the re-expression of the concrete
-sub-backends on the ``ModuleSubBackend`` base can be verified to be
-byte-compatible.
+Phase-2 form (cold-chain storage rework): every sub-state owns the module's
+full tempered ensemble (``chain``/``inds`` + per-branch log_like/log_prior +
+delta counters) alongside its module extras (GB band_info, per-leaf
+``betas_all``). These tests pin the on-disk schema (dataset names, shapes,
+attrs), the save/load round-trip, the delta-counter semantics, the GFState
+copy path, and the cold-row sync/check primitives.
 """
 
 import os
@@ -19,6 +19,7 @@ from lisatools.globalfit.hdfbackend import (
     GBHDFBackend,
     GFHDFBackend,
     MBHHDFBackend,
+    ModuleSubBackend,
     SOBBHHDFBackend,
 )
 from lisatools.globalfit.state import (
@@ -26,6 +27,7 @@ from lisatools.globalfit.state import (
     GBState,
     GFState,
     MBHState,
+    ModuleSubState,
     SOBBHState,
 )
 
@@ -48,7 +50,7 @@ SUB_BACKENDS = {
     "mbh": MBHHDFBackend,
     "emri": EMRIHDFBackend,
     "sobbh": SOBBHHDFBackend,
-    "psd": None,
+    "psd": ModuleSubBackend,
 }
 
 SUB_STATE_BASES = {
@@ -56,12 +58,45 @@ SUB_STATE_BASES = {
     "mbh": MBHState,
     "emri": EMRIState,
     "sobbh": SOBBHState,
-    "psd": None,
+    "psd": ModuleSubState,
 }
 
+
+def _tempered_schema(branch):
+    """The standard tempered datasets for one branch (shapes after step axis)."""
+    nleaves, ndim = BRANCH_SHAPES[branch]
+    out = {
+        "chain": (NTEMPS, NWALKERS, nleaves, ndim),
+        "inds": (NTEMPS, NWALKERS, nleaves),
+    }
+    if branch == "gb":
+        # band_info carries the GB tempering record; no per-branch ll/counters
+        return out
+    if branch in ("mbh", "emri", "sobbh"):
+        ll_shape = (nleaves, NTEMPS, NWALKERS)
+        counter_shape = (nleaves, NTEMPS)
+        swaps_shape = (nleaves, NTEMPS - 1)
+    else:
+        ll_shape = (NTEMPS, NWALKERS)
+        counter_shape = (NTEMPS,)
+        swaps_shape = (NTEMPS - 1,)
+    out.update(
+        {
+            "log_like": ll_shape,
+            "log_prior": ll_shape,
+            "in_model_proposed": counter_shape,
+            "in_model_accepted": counter_shape,
+            "rj_proposed": counter_shape,
+            "rj_accepted": counter_shape,
+            "swaps_proposed": swaps_shape,
+            "swaps_accepted": swaps_shape,
+        }
+    )
+    return out
+
+
 # The exact per-branch datasets the sub-backends put on disk (shapes after
-# the leading step axis). Phase 1 of the storage rework must reproduce this
-# schema exactly for existing branches.
+# the leading step axis).
 EXPECTED_SUB_SCHEMA = {
     "gb": {
         "band_edges": (NUM_BANDS + 1,),
@@ -76,10 +111,21 @@ EXPECTED_SUB_SCHEMA = {
         "band_leaf_cap": (NUM_BANDS,),
         "band_cap_iters": (NUM_BANDS,),
         "band_best_ll": (NUM_BANDS,),
+        **_tempered_schema("gb"),
     },
-    "mbh": {"betas_all": (BRANCH_SHAPES["mbh"][0], NTEMPS)},
-    "emri": {"betas_all": (BRANCH_SHAPES["emri"][0], NTEMPS)},
-    "sobbh": {"betas_all": (BRANCH_SHAPES["sobbh"][0], NTEMPS)},
+    "mbh": {
+        "betas_all": (BRANCH_SHAPES["mbh"][0], NTEMPS),
+        **_tempered_schema("mbh"),
+    },
+    "emri": {
+        "betas_all": (BRANCH_SHAPES["emri"][0], NTEMPS),
+        **_tempered_schema("emri"),
+    },
+    "sobbh": {
+        "betas_all": (BRANCH_SHAPES["sobbh"][0], NTEMPS),
+        **_tempered_schema("sobbh"),
+    },
+    "psd": _tempered_schema("psd"),
 }
 
 # band_edges is written once with the data (no step axis); everything else
@@ -116,6 +162,9 @@ def make_state(rng):
         state.sub_states[name].betas_all = np.tile(
             np.linspace(1.0, 0.05, NTEMPS), (nleaves, 1)
         )
+    # mirror the tempered ensembles into every sub-state
+    for name, sub in state.sub_states.items():
+        sub.pull_from_main(state, name)
     return state
 
 
@@ -132,6 +181,14 @@ class GFSubStateRoundTripTest(unittest.TestCase):
         )
         ndims = {name: shape[1] for name, shape in BRANCH_SHAPES.items()}
         nleaves_max = {name: shape[0] for name, shape in BRANCH_SHAPES.items()}
+        sub_reset_kwargs = {
+            name: dict(nleaves_max=shape[0], ndim=shape[1])
+            for name, shape in BRANCH_SHAPES.items()
+        }
+        sub_reset_kwargs["gb"].update(num_bands=NUM_BANDS, band_edges=BAND_EDGES)
+        sub_reset_kwargs["mbh"].update(num_mbhs=BRANCH_SHAPES["mbh"][0])
+        sub_reset_kwargs["emri"].update(num_emris=BRANCH_SHAPES["emri"][0])
+        sub_reset_kwargs["sobbh"].update(num_sobbhs=BRANCH_SHAPES["sobbh"][0])
         self.backend.reset(
             NWALKERS,
             ndims,
@@ -141,12 +198,7 @@ class GFSubStateRoundTripTest(unittest.TestCase):
             nbranches=len(BRANCH_SHAPES),
             rj=False,
             moves=None,
-            sub_reset_kwargs={
-                "gb": dict(num_bands=NUM_BANDS, band_edges=BAND_EDGES),
-                "mbh": dict(num_mbhs=BRANCH_SHAPES["mbh"][0]),
-                "emri": dict(num_emris=BRANCH_SHAPES["emri"][0]),
-                "sobbh": dict(num_sobbhs=BRANCH_SHAPES["sobbh"][0]),
-            },
+            sub_reset_kwargs=sub_reset_kwargs,
         )
 
     def tearDown(self):
@@ -178,6 +230,15 @@ class GFSubStateRoundTripTest(unittest.TestCase):
                         self.assertEqual(
                             on_disk, (1,) + bare_shape, f"{branch}/{dset_name}"
                         )
+                # inds native bool, chain float
+                self.assertEqual(grp["inds"].dtype, np.dtype(bool), branch)
+                self.assertEqual(grp["chain"].dtype, np.dtype(float), branch)
+                # tempered geometry attrs
+                nleaves, ndim = BRANCH_SHAPES[branch]
+                self.assertEqual(grp.attrs["ntemps"], NTEMPS)
+                self.assertEqual(grp.attrs["nwalkers"], NWALKERS)
+                self.assertEqual(grp.attrs["nleaves_max"], nleaves)
+                self.assertEqual(grp.attrs["ndim"], ndim)
             # legacy count attrs
             self.assertEqual(sub["gb"].attrs["num_bands"], NUM_BANDS)
             self.assertEqual(sub["mbh"].attrs["num_mbhs"], BRANCH_SHAPES["mbh"][0])
@@ -192,11 +253,13 @@ class GFSubStateRoundTripTest(unittest.TestCase):
 
         state0 = make_state(self.rng)
         state0.sub_states["gb"].band_info["band_num_accepted"][:] = 7
+        state0.sub_states["psd"].in_model_accepted[:] = 3
         self._save_one(state0)
         # delta semantics: counters zeroed on the live state after the save
         self.assertTrue(
             np.all(state0.sub_states["gb"].band_info["band_num_accepted"] == 0)
         )
+        self.assertTrue(np.all(state0.sub_states["psd"].in_model_accepted == 0))
 
         state1 = make_state(self.rng)
         state1.sub_states["mbh"].betas_all *= 0.5
@@ -210,21 +273,31 @@ class GFSubStateRoundTripTest(unittest.TestCase):
                     state_in.branches[name].coords,
                     err_msg=f"coords mismatch branch {name} it {it}",
                 )
+                # sub-state tempered ensemble round-trips too
+                np.testing.assert_allclose(
+                    state_out.sub_states[name].coords,
+                    state_in.sub_states[name].coords,
+                    err_msg=f"sub-state coords mismatch branch {name} it {it}",
+                )
+                np.testing.assert_array_equal(
+                    state_out.sub_states[name].inds,
+                    state_in.sub_states[name].inds,
+                    err_msg=f"sub-state inds mismatch branch {name} it {it}",
+                )
             for name in ("mbh", "emri", "sobbh"):
                 np.testing.assert_allclose(
                     state_out.sub_states[name].betas_all,
                     state_in.sub_states[name].betas_all,
                     err_msg=f"betas_all mismatch branch {name} it {it}",
                 )
-            # GBHDFBackend.get_a_sample keeps the leading step axis on the
-            # band_info arrays (stripped later by initialize_band_information's
+            # GBHDFBackend keeps the leading step axis on the band_info
+            # arrays (stripped later by initialize_band_information's
             # rank-based logic) -- pin that behavior here.
             np.testing.assert_allclose(
                 state_out.sub_states["gb"].band_info["band_temps"][0],
                 state_in.sub_states["gb"].band_info["band_temps"],
                 err_msg=f"band_temps mismatch it {it}",
             )
-            self.assertIsNone(state_out.sub_states["psd"])
 
     def test_reset_kwargs_roundtrip(self):
         """Sub-backend reset_kwargs read back from disk (incl. the EMRI/SOBBH attrs fix).
@@ -244,9 +317,15 @@ class GFSubStateRoundTripTest(unittest.TestCase):
         self.assertEqual(
             sub["sobbh"].reset_kwargs["num_sobbhs"], BRANCH_SHAPES["sobbh"][0]
         )
+        for name, (nleaves, ndim) in BRANCH_SHAPES.items():
+            kwargs = sub[name].reset_kwargs
+            self.assertEqual(kwargs["ntemps"], NTEMPS, name)
+            self.assertEqual(kwargs["nwalkers"], NWALKERS, name)
+            self.assertEqual(kwargs["nleaves_max"], nleaves, name)
+            self.assertEqual(kwargs["ndim"], ndim, name)
 
     def test_gfstate_copy_preserves_substates(self):
-        """GFState(state, copy=True) deep-copies sub-states and leaf counts."""
+        """GFState(state, copy=True) deep-copies sub-states incl. tempered blocks."""
         state = make_state(self.rng)
         copied = GFState(state, copy=True)
 
@@ -263,6 +342,34 @@ class GFSubStateRoundTripTest(unittest.TestCase):
         self.assertFalse(
             np.any(state.sub_states["gb"].band_info["band_temps"] == -1.0)
         )
+        for name in BRANCH_SHAPES:
+            self.assertTrue(copied.sub_states[name].tempered_initialized, name)
+            copied.sub_states[name].coords[:] = -99.0
+            self.assertFalse(
+                np.any(state.sub_states[name].coords == -99.0), name
+            )
+
+    def test_cold_row_check_and_sync(self):
+        """check_cold_row trips on divergence; sync_cold_row repairs it."""
+        state = make_state(self.rng)
+        sub = state.sub_states["gb"]
+
+        sub.check_cold_row(state, "gb")  # consistent after pull_from_main
+
+        # a move that updates the sub-state without the main state
+        sub.coords[0, 0, 0, 0] += 1.0
+        with self.assertRaises(ValueError):
+            sub.check_cold_row(state, "gb")
+
+        sub.sync_cold_row(state, "gb")
+        sub.check_cold_row(state, "gb")
+
+        # inds divergence trips too
+        sub.inds[0, 0, 0] = False
+        with self.assertRaises(ValueError):
+            sub.check_cold_row(state, "gb")
+        sub.sync_cold_row(state, "gb")
+        sub.check_cold_row(state, "gb")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,14 @@ from ..domains import (
     WDMSettings,
 )
 from .plot import RunResultsProduction
-from .state import EMRIState, GBState, GFState, MBHState, SOBBHState
+from .state import (
+    EMRIState,
+    GBState,
+    GFState,
+    MBHState,
+    ModuleSubState,
+    SOBBHState,
+)
 
 import logging
 
@@ -466,7 +473,12 @@ class GFHDFBackend(eryn_HDFBackend):
                 for kw_key, kw_val in kwargs.items():
                     if kw_key not in sub_backend_kwargs:
                         sub_backend_kwargs[kw_key] = kw_val
-                sub_backend_tmp.reset(*args, **sub_backend_kwargs)
+                # nwalkers is the sub-backends' first positional argument; a
+                # per-branch value in the routed kwargs replaces it there.
+                sub_args = list(args)
+                if "nwalkers" in sub_backend_kwargs and len(sub_args) >= 1:
+                    sub_args[0] = sub_backend_kwargs.pop("nwalkers")
+                sub_backend_tmp.reset(*sub_args, **sub_backend_kwargs)
 
         with self.open("a") as f:
             f[self.name].attrs["has_recipe"] = False
@@ -652,7 +664,7 @@ class ModuleSubBackend(eryn_HDFBackend):
     the branch name at construction.
     """
 
-    state_class = None
+    state_class = ModuleSubState
     sub_name: str = None
 
     def _group(self, f):
@@ -662,6 +674,10 @@ class ModuleSubBackend(eryn_HDFBackend):
     def reset(self, nwalkers, *args, ntemps=1, **kwargs):
         """Create this branch's datasets from a zeroed template sub-state."""
         template = self.state_class.make_template(nwalkers, ntemps, **kwargs)
+        # Arrays named in legacy_dtype_names keep the backend float dtype
+        # (continuity with pre-rework files); everything else stores its
+        # in-memory dtype (bool inds, int counters, ...).
+        legacy_dtype = set(getattr(template, "legacy_dtype_names", ()))
 
         with self.open("a") as f:
             grp = f[self.name]["sub_backend"].create_group(self.sub_name)
@@ -670,21 +686,23 @@ class ModuleSubBackend(eryn_HDFBackend):
                 grp.attrs[name] = value
 
             for name, arr in template.static_arrays().items():
+                dtype = self.dtype if name in legacy_dtype else np.asarray(arr).dtype
                 grp.create_dataset(
                     name,
                     data=arr,
-                    dtype=self.dtype,
+                    dtype=dtype,
                     compression=self.compression,
                     compression_opts=self.compression_opts,
                 )
 
             for name, arr in template.storage_arrays().items():
                 arr = np.asarray(arr)
+                dtype = self.dtype if name in legacy_dtype else arr.dtype
                 grp.create_dataset(
                     name,
                     (0,) + arr.shape,
                     maxshape=(None,) + arr.shape,
-                    dtype=self.dtype,
+                    dtype=dtype,
                     compression=self.compression,
                     compression_opts=self.compression_opts,
                 )
@@ -721,7 +739,16 @@ class ModuleSubBackend(eryn_HDFBackend):
             iteration = g.attrs["iteration"] - 1
             grp = g["sub_backend"][self.sub_name]
 
-            for name, arr in state.sub_states[self.sub_name].storage_arrays().items():
+            arrays = state.sub_states[self.sub_name].storage_arrays()
+            # dead-leaf masking on write only, mirroring eryn's
+            # store_missing_leaves handling of the main chain (the live
+            # sub-state keeps its stale coords)
+            if "chain" in arrays and "inds" in arrays:
+                chain = np.array(arrays["chain"], copy=True)
+                chain[~np.asarray(arrays["inds"], dtype=bool)] = np.nan
+                arrays = {**arrays, "chain": chain}
+
+            for name, arr in arrays.items():
                 if name not in grp:
                     # e.g. arrays added on an HDF file created before they
                     # existed: skip rather than corrupt the resume.
@@ -847,7 +874,10 @@ class GBHDFBackend(ModuleSubBackend):
             )
 
         if name != "band_info":
-            raise ValueError(f"No {name} in this backend.")
+            # anything else (chain, inds, ...) is a plain per-dataset read
+            return super().get_value(
+                name, thin=thin, discard=discard, slice_vals=slice_vals
+            )
 
         if slice_vals is None:
             slice_vals = slice(discard + thin - 1, self.iteration, thin)
@@ -870,8 +900,12 @@ class GBHDFBackend(ModuleSubBackend):
                         )
 
                     gb_group = g["sub_backend"][self.sub_name]
+                    # band_* datasets only: the group also holds the tempered
+                    # chain/inds, which are not part of the band_info dict.
                     v_all = {
-                        key: gb_group[key][slice_vals] for key in gb_group if key != "band_edges"
+                        key: gb_group[key][slice_vals]
+                        for key in gb_group
+                        if key.startswith("band_") and key != "band_edges"
                     }
                     v_all["band_edges"] = gb_group["band_edges"][:]
                     successful = True
@@ -907,29 +941,6 @@ class GBHDFBackend(ModuleSubBackend):
         tmp = self.get_value("band_info", **kwargs)
         tmp["initialized"] = True
         return tmp
-
-    def get_a_sample(self, it):
-        """Access a sample in the chain
-
-        Args:
-            it (int): iteration of GFState to return.
-
-        Returns:
-            GFState: :class:`eryn.state.GFState` object containing the sample from the chain.
-
-        Raises:
-            AttributeError: Backend is not initialized.
-
-        """
-
-        thin = self.iteration - it if it != self.iteration else 1
-        discard = it + 1 - thin
-
-        band_info = self.get_band_info(discard=discard, thin=thin)
-        sample = GBState(None, band_info=band_info)
-        sample.band_info["initialized"] = True
-        return sample
-
 
 class MBHHDFBackend(PerLeafLadderHDFBackend):
     """Sub-backend that persists the per-leaf MBH temperature ladder."""

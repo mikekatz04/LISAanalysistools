@@ -17,6 +17,8 @@ from lisatools.detector import EqualArmlengthOrbits
 from lisatools.utils.constants import YRSID_SI
 
 from ...engine import GeneralSetup, Settings, Setup
+from ...hdfbackend import ModuleSubBackend
+from ...state import ModuleSubState
 from ...loginfo import init_logger
 
 logger = logging.getLogger(__name__)
@@ -108,8 +110,16 @@ class PSDSetup(Setup):
         assert not self.other_tempering_kwargs["permute"]
 
     def init_setup(self):
-        """Run sampling-info initialization for the PSD branch."""
+        """Run sampling-info and state-backend initialization for the PSD branch."""
         self.init_sampling_info()
+        self.init_state_backend_info()
+
+    def init_state_backend_info(self):
+        """Default the PSD state/backend to the generic module sub-state/backend."""
+        if self.branch_state is None:
+            self.branch_state = ModuleSubState
+        if self.branch_backend is None:
+            self.branch_backend = ModuleSubBackend
 
 
 @dataclasses.dataclass
@@ -192,8 +202,16 @@ class GalForSetup(Setup):
         assert not self.other_tempering_kwargs["permute"]
 
     def init_setup(self):
-        """Run sampling-info initialization for the galactic-foreground branch."""
+        """Run sampling-info and state-backend initialization for the foreground branch."""
         self.init_sampling_info()
+        self.init_state_backend_info()
+
+    def init_state_backend_info(self):
+        """Default the foreground state/backend to the generic module sub-state/backend."""
+        if self.branch_state is None:
+            self.branch_state = ModuleSubState
+        if self.branch_backend is None:
+            self.branch_backend = ModuleSubBackend
 
 
 def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:

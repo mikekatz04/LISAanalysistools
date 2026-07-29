@@ -707,6 +707,14 @@ class GlobalFit:
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
             # self.logger.debug("pickle state load success")
 
+        # Mirror each branch's full ensemble into its sub-state (the dual
+        # representation of the storage rework; GFCombineMove keeps the two
+        # in sync at every stage boundary).
+        if state is not None and getattr(state, "sub_states", None):
+            for _name, _sub in state.sub_states.items():
+                if _sub is not None:
+                    _sub.pull_from_main(state, _name)
+
         return state
 
     def setup_acs(self, state: GFState, rebuild_residuals: bool = False) -> AnalysisContainerArray:
@@ -1163,6 +1171,10 @@ class GlobalFit:
         # GB-style branches (gb + vgb) do not clobber each other's
         # ``num_bands`` / ``band_edges`` in the flat merge below.
         sub_reset_kwargs = {}
+        # Names the main reset call passes explicitly: keep them out of the
+        # flat merge (sub-state reset_kwargs carry their own per-branch
+        # ntemps/nwalkers/... geometry, which is routed via sub_reset_kwargs).
+        _main_reset_names = {"ntemps", "nwalkers", "nleaves_max", "ndim", "ndims"}
         # TODO: fix this somehow
         for name in branch_names:
             if name in state.sub_states and state.sub_states[name] is not None:
@@ -1170,7 +1182,11 @@ class GlobalFit:
                 sub_reset_kwargs[name] = _rk
                 extra_reset_kwargs = {
                     **extra_reset_kwargs,
-                    **_rk,
+                    **{
+                        key: value
+                        for key, value in _rk.items()
+                        if key not in _main_reset_names
+                    },
                 }
 
         if not backend.initialized:
