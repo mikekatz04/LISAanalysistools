@@ -35,8 +35,6 @@ from tqdm import tqdm
 from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray
-from ...utils.device import device_context
-from ...utils.exceptions import WaveformDomainError
 from ...utils.utility import asnumpy, get_array_module
 from .globalfitmove import GlobalFitMove
 
@@ -762,65 +760,22 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         :meth:`AnalysisContainerArray.signal_operation`. Never holds more
         than a single source's waveform in memory.
         """
-        import gc
-
-        # Shard-aware (2026-07 multi-GPU pass): group the cold-chain walkers by
-        # owning ACA split and build+apply each group's templates INSIDE that
-        # device context. Generation is device-local (per-device generator +
-        # domain-settings replicas) and the residual view it writes lives on the
-        # same device, so the shards run CONCURRENTLY when the ACA is
-        # run_threaded -- this is the serial per-walker loop that previously
-        # made the source moves identical on 1 vs 2 GPU. gc/pool-free run once
-        # per shard (not per walker), keeping peak RAM to one live template per
-        # device while dropping the per-walker gc cost.
-        def _worker(split, rows):
-            dev = (
-                None if self.acs.gpus is None
-                else int(self.acs.gpus[int(split)])
-            )
-            with device_context(self.acs.xp, dev):
-                for i in rows:
-                    ii = int(i)
-                    ac = self.acs[ii]
-                    try:
-                        sig = ac.build_template(
-                            {self.branch_name: coords[ii]},
-                            waveform_kwargs=self._branch_waveform_kwargs(),
-                            signal_gen=self._resolve_signal_gen_override(ac),
-                            apply_transform=False,
-                        )
-                    except WaveformDomainError as exc:
-                        # A current-state source outside the waveform's domain
-                        # of validity (e.g. a bad start point). Deterministic,
-                        # so the add and remove passes skip identically: its
-                        # template is zero, matching its -1e300 sentinel.
-                        logger.warning(
-                            "%s cold-chain walker %d is outside the waveform "
-                            "domain; treating its template as zero: %s",
-                            self.branch_name,
-                            ii,
-                            exc,
-                        )
-                        continue
-                    # Migrate the template onto the owning device (no-op when it
-                    # was already generated there) and add it in place, mirroring
-                    # AnalysisContainerArray.signal_operation's per-row worker.
-                    if dev is not None:
-                        sig = self.acs._signal_on_device(sig, dev)
-                    ac.data.add_signal(sig, sign=sign)
-                    del sig
-                gc.collect()
-                _free_pool()
-
-        split_to_rows = self.acs._split_rows(np.arange(int(coords.shape[0])))
-        if self.acs.gpus is None:
-            self.acs._run_per_split(_worker, split_to_rows)
-        else:
-            main_gpu = self.acs.xp.cuda.runtime.getDevice()
-            try:
-                self.acs._run_per_split(_worker, split_to_rows)
-            finally:
-                self.acs.xp.cuda.runtime.setDevice(main_gpu)
+        # Delegated to the ACA (2026-07-28): apply_signal_from_params is the
+        # shard-aware fused build+apply primitive (one live template per
+        # split, per-split device contexts, gc/pool hygiene) — the move no
+        # longer reimplements the ACA's residual machinery. A current-state
+        # source outside the waveform's domain of validity is skipped
+        # ("skip"): deterministic, so the add and remove passes skip
+        # identically — its template is zero, matching its -1e300 sentinel.
+        self.acs.apply_signal_from_params(
+            sign,
+            {self.branch_name: coords},
+            index=np.arange(int(np.shape(coords)[0])),
+            waveform_kwargs=self._branch_waveform_kwargs(),
+            signal_gen_resolver=self._resolve_signal_gen_override,
+            apply_transform=False,
+            domain_error="skip",
+        )
 
     def add_back_in_cold_chain_sources(self, coords):
         """Subtract current cold-chain sources from the residual (one walker at a time)."""
@@ -904,60 +859,50 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             None if signal_gen is None
             else {self.branch_name: MoveSignalGen(self, signal_gen)}
         )
-        ll = np.full(len(data_index_np), -1e300, dtype=float)
 
-        # Shard-aware scoring (2026-07 multi-GPU pass): rows are grouped by the
-        # walker's owning ACA split and evaluated INSIDE that device context,
-        # so each template is generated on the same device as the residual/invC
-        # views it is scored against (and per-device source-generator replicas
-        # keep generation local -- no peer access off the primary device).
-        # Dispatch goes through the ACA's shared per-split runner -- the SAME
-        # primitive signal_operation / _vectorized_dispatch use -- so shards
-        # run CONCURRENTLY when the ACA is run_threaded (multi-GPU) and serially
-        # on CPU / single-GPU. Each split writes DISJOINT ``ll`` positions, so
-        # the shared array needs no lock.
-        def _score_split(split, rows):
-            dev = (
-                None if self.acs.gpus is None
-                else int(self.acs.gpus[int(split)])
-            )
-            with device_context(self.acs.xp, dev):
-                for i in rows:
-                    ac = self.acs[int(data_index_np[int(i)])]
-                    try:
-                        ll[int(i)] = ac.calculate_signal_likelihood(
-                            {self.branch_name: coords_in[int(i)]},
-                            signal_gen=(
-                                custom_override if custom_override is not None
-                                else self._resolve_signal_gen_override(ac)
-                            ),
-                            waveform_kwargs=self._branch_waveform_kwargs(),
-                            apply_transform=False,
-                            source_only=source_only,
-                            **kwargs,
-                        )
-                    except WaveformDomainError as exc:
-                        # Prior support leaks outside the waveform's domain
-                        # of validity; score at the floor instead of crashing.
-                        logger.debug(
-                            "%s waveform domain error -> ll = -1e300: %s",
-                            self.branch_name,
-                            exc,
-                        )
-
-        split_to_rows = self.acs._split_rows(data_index_np)
-        if self.acs.gpus is None:
-            self.acs._run_per_split(_score_split, split_to_rows)
+        # Delegated to the ACA (2026-07-28): scoring goes through the ACA's
+        # vectorized dispatcher (calculate_signal_likelihood), which owns the
+        # shard grouping, per-split device contexts, and the -1e300
+        # WaveformDomainError sentinel — the move no longer reimplements the
+        # sharded scoring loop. The per-container generator override is
+        # resolved up front (this also durably registers the move's generator
+        # on containers that don't carry the branch); rows are grouped by
+        # resolved override so each group is ONE vectorized call.
+        n_rows = len(data_index_np)
+        if custom_override is not None:
+            groups = [(custom_override, np.arange(n_rows))]
         else:
-            # Restore the run's main device after the per-shard workers, exactly
-            # as signal_operation does (threaded workers set the device on their
-            # own thread; the serial path leaves the last shard's device set).
-            main_gpu = self.acs.xp.cuda.runtime.getDevice()
-            try:
-                self.acs._run_per_split(_score_split, split_to_rows)
-            finally:
-                self.acs.xp.cuda.runtime.setDevice(main_gpu)
+            def _ov_key(ov):
+                return (
+                    None if ov is None
+                    else tuple(sorted((k, id(v)) for k, v in ov.items()))
+                )
 
+            by_key: dict = {}
+            for pos, i in enumerate(data_index_np):
+                ov = self._resolve_signal_gen_override(self.acs[int(i)])
+                key = _ov_key(ov)
+                if key not in by_key:
+                    by_key[key] = (ov, [])
+                by_key[key][1].append(pos)
+            groups = [
+                (ov, np.asarray(rows, dtype=int))
+                for ov, rows in by_key.values()
+            ]
+
+        ll = np.full(n_rows, -1e300, dtype=float)
+        for ov, rows in groups:
+            vals = self.acs.calculate_signal_likelihood(
+                {self.branch_name: coords_in[rows]},
+                index=data_index_np[rows],
+                domain_error_value=-1e300,
+                signal_gen=ov,
+                waveform_kwargs=self._branch_waveform_kwargs(),
+                apply_transform=False,
+                source_only=source_only,
+                **kwargs,
+            )
+            ll[rows] = np.real(np.asarray(vals))
         return ll
 
     def compute_like(self, coords_in, data_index):

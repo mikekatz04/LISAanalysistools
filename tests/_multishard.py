@@ -93,6 +93,16 @@ class RecordingXp:
     def current_device(self):
         return self._stack()[-1]
 
+    def get_default_memory_pool(self):
+        """No-op cupy-style pool (the real ACA frees it after GPU applies)."""
+
+        class _Pool:
+            @staticmethod
+            def free_all_blocks():
+                return None
+
+        return _Pool()
+
     # numpy passthrough for everything else (asarray, zeros, where, ...)
     def __getattr__(self, name):
         return getattr(np, name)

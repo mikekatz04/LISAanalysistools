@@ -53,9 +53,34 @@ class _FakeAC:
 
 
 class _FakeIndexableACA(FakeMultiShardACA):
+    """Fake ACA running the REAL ACA entry points the move delegates to.
+
+    The move no longer carries its own sharded loops (2026-07-28 ACA
+    delegation): ``compute_acs_like`` -> ``calculate_signal_likelihood`` and
+    ``_apply_cold_chain_sources`` -> ``apply_signal_from_params``. Binding
+    the real methods onto the fake means these tests exercise the REAL
+    dispatcher / fused build+apply code against the recording xp/device
+    machinery — same assertions, deeper coverage.
+    """
+
+    from lisatools.analysiscontainer import AnalysisContainerArray as _RealACA
+
+    calculate_signal_likelihood = _RealACA.calculate_signal_likelihood
+    _vectorized_dispatch = _RealACA._vectorized_dispatch
+    apply_signal_from_params = _RealACA.apply_signal_from_params
+    _payload_leading = staticmethod(_RealACA._payload_leading)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._acs = [_FakeAC(i, self.xp) for i in range(self.acs_total_entries)]
+
+    @property
+    def num_acs(self):
+        return self.acs_total_entries
+
+    @property
+    def acs(self):
+        return SimpleNamespace(flatten=lambda: self._acs)
 
     def __getitem__(self, i):
         return self._acs[int(i)]

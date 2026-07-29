@@ -6,7 +6,7 @@ import math
 import warnings
 from abc import ABC
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -36,6 +36,7 @@ from .diagnostic import (
     residual_source_likelihood_term,
 )
 from .sensitivity import SensitivityMatrix, SensitivityMatrixBase
+from .utils.exceptions import WaveformDomainError
 from .stochastic import FittedHyperbolicTangentGalacticForeground, StochasticContribution
 from .utils.constants import *
 from .utils.utility import AET, get_array_module, asnumpy
@@ -2090,6 +2091,7 @@ class AnalysisContainerArray:
         index: Optional[np.ndarray] = None,
         op_kwargs: Optional[dict] = None,
         reshape_to_acs_shape: bool = True,
+        domain_error_value: Optional[float] = None,
     ) -> np.ndarray | tuple:
         """Apply ``op_name`` on each row of ``payload`` against the AC named by ``index[row]``.
 
@@ -2180,12 +2182,24 @@ class AnalysisContainerArray:
             attr = getattr(ac, op_name)
             if not callable(attr):
                 return attr
-            if p_row is None:
-                return attr(**op_kwargs)
-            if isinstance(p_row, Mapping):
-                # Multi-model path: AC expects a single dict positional arg.
+            try:
+                if p_row is None:
+                    return attr(**op_kwargs)
+                # Multi-model path (Mapping): AC expects a single dict
+                # positional arg — same call shape as the plain-row path.
                 return attr(p_row, **op_kwargs)
-            return attr(p_row, **op_kwargs)
+            except WaveformDomainError as exc:
+                # Prior support can leak outside a waveform's domain of
+                # validity; when the caller opted in (samplers pass the
+                # -1e300 sentinel), score the row at the floor instead of
+                # aborting the whole batch.
+                if domain_error_value is None:
+                    raise
+                logger.debug(
+                    "%s: waveform domain error -> %s: %s",
+                    op_name, domain_error_value, exc,
+                )
+                return domain_error_value
 
         def _to_host(res):
             if isinstance(res, tuple):
@@ -2359,7 +2373,9 @@ class AnalysisContainerArray:
             "snr", payload=None, index=index, op_kwargs=kwargs
         )
 
-    def calculate_signal_likelihood(self, params, index=None, **kwargs):
+    def calculate_signal_likelihood(
+        self, params, index=None, domain_error_value=None, **kwargs
+    ):
         """Vectorized signal-likelihood across many (params, AC) rows.
 
         ``params`` is row-major with leading axis ``N`` (and may be a
@@ -2367,6 +2383,10 @@ class AnalysisContainerArray:
         ``signal_gen`` case). ``index[i]`` names the AC that row ``i``
         targets. When ``index`` is None, ``N == num_acs`` is required and
         the implicit mapping is one row per AC.
+
+        ``domain_error_value``: when set (samplers pass ``-1e300``), a
+        per-row :class:`WaveformDomainError` scores that row at this value
+        instead of aborting the batch.
 
         Returns a host ``np.ndarray`` of per-row likelihoods. The
         dispatcher groups rows by ``self.gpu_map[index]`` so the per-AC
@@ -2378,6 +2398,7 @@ class AnalysisContainerArray:
             payload=params,
             index=index,
             op_kwargs=kwargs,
+            domain_error_value=domain_error_value,
         )
 
     def calculate_signal_inner_product(self, params, index=None, **kwargs):
@@ -2612,6 +2633,127 @@ class AnalysisContainerArray:
             self._run_per_split(_worker, split_to_rows)
         finally:
             self.xp.cuda.runtime.setDevice(main_gpu)
+
+    def apply_signal_from_params(
+        self,
+        sign: int,
+        params: Any,
+        index: Optional[np.ndarray] = None,
+        *,
+        waveform_kwargs: Optional[dict] = None,
+        signal_gen: Any = None,
+        signal_gen_resolver: Optional[Callable] = None,
+        apply_transform: bool = True,
+        domain_error: str = "raise",
+    ) -> None:
+        """Build each row's template and apply ``sign * template`` to its AC.
+
+        The generation+application analogue of :meth:`signal_operation` for
+        params-based templates: each row's template is assembled through the
+        targeted container's own ``signal_gen`` machinery
+        (:meth:`AnalysisContainer.build_template`) and applied to that
+        container's residual ONE ROW AT A TIME — never more than one live
+        template per split (the peak-memory guard the source moves rely
+        on). Rows are grouped by owning split and run inside that split's
+        device context through the shared per-split runner, so shards run
+        concurrently when the array is ``run_threaded`` (multi-GPU) and
+        serially on CPU / single GPU.
+
+        Args:
+            sign: ``+1`` adds to the residual array, ``-1`` subtracts.
+            params: Row-major params — an array with leading axis ``N`` or a
+                ``Mapping`` of ``{model_name: rows}`` — sliced per row and
+                handed to :meth:`AnalysisContainer.build_template`.
+            index: 1-D int array mapping row ``i`` to
+                ``self.acs.flatten()[index[i]]``; ``None`` means one row per
+                AC (``N == num_acs``).
+            waveform_kwargs: Forwarded to ``build_template``.
+            signal_gen: Static generator override forwarded to
+                ``build_template`` (may itself be a callable generator — it
+                is passed through untouched).
+            signal_gen_resolver: Optional ``resolver(ac) -> override``
+                evaluated per targeted container (e.g. a move's
+                installed-generator resolution); wins over ``signal_gen``.
+            apply_transform: Forwarded to ``build_template``.
+            domain_error: ``"raise"`` (default) propagates
+                :class:`WaveformDomainError`; ``"skip"`` treats that row's
+                template as zero (logged) — the sampling convention where
+                the row's likelihood carries the ``-1e300`` sentinel
+                elsewhere.
+        """
+        import gc
+
+        if domain_error not in ("raise", "skip"):
+            raise ValueError(
+                f"domain_error must be 'raise' or 'skip'; got {domain_error!r}"
+            )
+
+        n_rows = self._payload_leading(params)
+        if index is None:
+            if n_rows != self.num_acs:
+                raise ValueError(
+                    f"params leading axis ({n_rows}) must equal num_acs "
+                    f"({self.num_acs}) when index is None"
+                )
+            index_arr = np.arange(self.num_acs)
+        else:
+            index_arr = np.atleast_1d(np.asarray(index, dtype=int))
+            if n_rows != len(index_arr):
+                raise ValueError(
+                    f"params leading axis ({n_rows}) must equal len(index) "
+                    f"({len(index_arr)})"
+                )
+
+        acs_flat = self.acs.flatten()
+
+        def _slice_row(p, r):
+            if isinstance(p, Mapping):
+                return {k: v[r] for k, v in p.items()}
+            return p[r]
+
+        def _worker(split, rows):
+            dev = None if self.gpus is None else int(self.gpus[int(split)])
+            with (nullcontext() if dev is None else self.xp.cuda.Device(dev)):
+                for r in rows:
+                    ac = acs_flat[int(index_arr[int(r)])]
+                    try:
+                        sig = ac.build_template(
+                            _slice_row(params, int(r)),
+                            waveform_kwargs=waveform_kwargs,
+                            signal_gen=(
+                                signal_gen_resolver(ac)
+                                if signal_gen_resolver is not None
+                                else signal_gen
+                            ),
+                            apply_transform=apply_transform,
+                        )
+                    except WaveformDomainError as exc:
+                        if domain_error == "raise":
+                            raise
+                        logger.warning(
+                            "apply_signal_from_params: row %d (AC %d) is "
+                            "outside the waveform domain; treating its "
+                            "template as zero: %s",
+                            int(r), int(index_arr[int(r)]), exc,
+                        )
+                        continue
+                    if dev is not None:
+                        sig = self._signal_on_device(sig, dev)
+                    ac.data.add_signal(sig, sign=sign)
+                    del sig
+                gc.collect()
+                if self.gpus is not None:
+                    self.xp.get_default_memory_pool().free_all_blocks()
+
+        split_to_rows = self._split_rows(index_arr)
+        if self.gpus is None:
+            self._run_per_split(_worker, split_to_rows)
+        else:
+            main_gpu = self.xp.cuda.runtime.getDevice()
+            try:
+                self._run_per_split(_worker, split_to_rows)
+            finally:
+                self.xp.cuda.runtime.setDevice(main_gpu)
 
     def _signal_on_device(self, signal: DomainBase, gpu: int) -> DomainBase:
         """Return ``signal`` with its array resident on ``gpu``.
