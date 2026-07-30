@@ -557,29 +557,48 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 return a[c] if a.shape[0] > c else a[0]
 
             # Diverging colour scale (the WDM class default, RdBu), symmetric
-            # about zero and keyed to the RESIDUAL frames only (the other
-            # sources are already subtracted there, so a crowded band does not
-            # blow out the scale). SymLogNorm (the ``debug_log`` default) keeps
-            # a weak source visible against a large dynamic range; the
-            # template/data columns share the same norm and simply saturate
-            # where they are loud. One norm per channel, shared across all
-            # frames -> the flip-book is calibrated.
+            # about zero and keyed to the TOTAL DATA column — the
+            # source-isolated residual, i.e. THIS source's own signal (other
+            # sources are already subtracted there, so a crowded band cannot
+            # blow out the scale). Keying to the residual instead (the old
+            # behavior) backfires on clean/noiseless fits: the residual is
+            # numerical dust, its percentile becomes the vmax, and the whole
+            # plane lights up with ~1e-31-level leakage texture. Keyed to the
+            # signal, a clean residual renders WHITE and colour appears only
+            # where the source sits. SymLogNorm (the ``debug_log`` default)
+            # keeps the weak wings visible; one norm per channel shared
+            # across all frames -> the flip-book is calibrated.
             from matplotlib.colors import Normalize, SymLogNorm
 
-            res_pool = [
-                np.concatenate([_ch(r, ch).ravel() for _, _, r in frames])
-                for ch in range(nch)
-            ]
             use_log = bool(getattr(self, "debug_log", True)) and kind == "wdm"
             norm_row = []
             for ch in range(nch):
-                a = np.abs(res_pool[ch])
-                vmax = float(np.percentile(a[a > 0], 99.5)) if np.any(a > 0) else 1.0
+                a = np.abs(_ch(data, ch))
+                vmax = float(np.max(a)) if np.any(a > 0) else 1.0
                 vmax = vmax or 1.0
                 norm_row.append(
                     SymLogNorm(linthresh=vmax * 1e-3, vmin=-vmax, vmax=vmax, base=10)
                     if use_log else Normalize(vmin=-vmax, vmax=vmax)
                 )
+
+            # Crop the frequency axis to the layers the source actually
+            # occupies (a narrow-band source spans a handful of the full
+            # band's layers — GB debug plots read well because they are
+            # per-band slabs; mirror that). Margin keeps leakage wings
+            # visible; the full band returns if the source is broadband.
+            ylim = None
+            if kind == "wdm":
+                occ = np.zeros(0, dtype=int)
+                for ch in range(nch):
+                    slab = np.abs(_ch(data, ch))
+                    if slab.ndim == 2 and np.any(slab > 0):
+                        thr = float(np.max(slab)) * 1e-3
+                        occ = np.union1d(occ, np.where(np.any(slab > thr, axis=1))[0])
+                if occ.size:
+                    pad = 25
+                    lo = max(int(occ.min()) - pad, 0)
+                    hi = int(occ.max()) + pad
+                    ylim = (lo, hi)
 
             rr_entry = (
                 self._dbg_weighted_ll(snaps["before_removal"], walker)
@@ -609,6 +628,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                                 slab, aspect="auto", origin="lower",
                                 cmap="RdBu", norm=norm_row[ch],
                             )
+                            if ylim is not None:
+                                ax.set_ylim(*ylim)
                             if ci == 2:
                                 cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
                                 cb.set_label("coeff", fontsize=7)
