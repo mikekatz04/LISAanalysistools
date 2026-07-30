@@ -46,6 +46,7 @@ from ...recipe import (
     MOJITO_REFERENCE_TIME,
     EMRIMoveBuilder,
     MBHMoveBuilder,
+    SOBBHChunkedMoveBuilder,
     SOBBHMoveBuilder,
     build_mbh_moves_phenom,
     mbh_catalogue_to_sampling_basis,
@@ -303,6 +304,26 @@ class SourceSOBBHSettings(SOBBHSettings):
     n_grid: int = 2048
     buffer_time: float = 5000.0
     response_order: int = 40
+    # Which likelihood scores the add/remove proposals: "full" = the exact
+    # full-TD container path; "chunked" = SOBBHChunkedLikeMove over the
+    # chunked-heterodyne WDM kernel (one vectorized call per batch; the
+    # residual expose/fold stays on the exact generator either way).
+    likelihood: str = dataclasses.field(
+        default_factory=env_default("SOBBH_LIKELIHOOD", "full", str)
+    )
+    # chunked-path knobs (see lisatools.chunked_het.WDMComputationsBase)
+    nt_sub: int = dataclasses.field(
+        default_factory=env_default("SOBBH_NT_SUB", 256, int)
+    )
+    n_sparse: int = dataclasses.field(
+        default_factory=env_default("SOBBH_N_SPARSE", 256, int)
+    )
+    n_pad: int = dataclasses.field(
+        default_factory=env_default("SOBBH_N_PAD", 32, int)
+    )
+    m_band_half_width: int = dataclasses.field(
+        default_factory=env_default("SOBBH_M_BAND_HALF_WIDTH", 1, int)
+    )
 
 
 # ============================================================
@@ -568,6 +589,11 @@ def source_signal_cfg(gs, mbh, sobbh, emri) -> dict:
         sobbh_response_order=sobbh.response_order,
         sobbh_n_grid=sobbh.n_grid,
         sobbh_buffer_time=sobbh.buffer_time,
+        sobbh_likelihood=sobbh.likelihood,
+        sobbh_nt_sub=sobbh.nt_sub,
+        sobbh_n_sparse=sobbh.n_sparse,
+        sobbh_n_pad=sobbh.n_pad,
+        sobbh_m_band_half_width=sobbh.m_band_half_width,
         mbh_phenom_kwargs=dict(
             waveform_duration=mbh.waveform_duration,
             higher_modes=mbh.higher_modes,
@@ -876,9 +902,63 @@ def build_emri_move_runtime(curr, acs, priors, state, cfg):
     return moves[0]
 
 
+def get_sobbh_chunked_comp(general_info, cfg):
+    """Build (and cache) the ``SOBBHWDMComputations`` for the chunked SOBBH move.
+
+    WDM-only: the chunked-heterodyne kernels score directly against the run's
+    WDM residual buffers, so the run's ``domain_settings`` must be a
+    :class:`~lisatools.domains.WDMSettings`. ``t_ref`` is the catalogue
+    reference epoch — the SAME resolution as :func:`get_sobbh_wave_wrap`'s
+    ``reference_time`` (f_low / phi_c are defined there; the bbhx C++ t_ref
+    fix makes the kernel intrinsics honor it). ``d_d = 0``: the move folds
+    the exposed-residual ``<r|r>`` in via its per-walker offset.
+    """
+    from lisatools.domains import WDMSettings
+
+    xp, dev, orbits, domain_settings = _wrap_device_and_orbits(general_info)
+    key = ("sobbh_chunked", id(general_info), cfg["nchannels"], dev)
+    if key in _WAVE_WRAP_CACHE:
+        return _WAVE_WRAP_CACHE[key]
+    if not isinstance(domain_settings, WDMSettings):
+        raise ValueError(
+            "SOBBH_LIKELIHOOD=chunked needs a WDM run domain "
+            f"(general.domain_settings is {type(domain_settings).__name__}); "
+            "use SOBBH_LIKELIHOOD=full for FD/STFT runs."
+        )
+    from bbhx.sobbhcomps import SOBBHWDMComputations
+
+    force_backend = general_info.force_backend
+    tdi_config = TDIConfig(cfg["tdi_gen_str"], force_backend=force_backend)
+    with device_context(xp, dev):
+        comp = SOBBHWDMComputations(
+            domain_settings,
+            t_ref=cfg["sobbh_reference_time"],
+            Nt_sub=cfg["sobbh_nt_sub"],
+            n_pad=cfg["sobbh_n_pad"],
+            N_sparse=cfg["sobbh_n_sparse"],
+            orbits=orbits,
+            tdi_config=tdi_config,
+            tdi_type=cfg["tdi_chan"],
+            d_d=0.0,
+            force_backend=force_backend,
+        )
+    _WAVE_WRAP_CACHE[key] = comp
+    return comp
+
+
 def build_sobbh_move_runtime(curr, acs, priors, state, cfg):
     wave_gen = get_sobbh_wave_wrap(curr.general_info, cfg)
-    _, moves = SOBBHMoveBuilder(wave_gen=wave_gen).build(None, curr, acs, priors, state)
+    if cfg.get("sobbh_likelihood", "full") == "chunked":
+        comp = get_sobbh_chunked_comp(curr.general_info, cfg)
+        _, moves = SOBBHChunkedMoveBuilder(
+            wave_gen=wave_gen,
+            chunked_comp=comp,
+            m_band_half_width=cfg["sobbh_m_band_half_width"],
+        ).build(None, curr, acs, priors, state)
+    else:
+        _, moves = SOBBHMoveBuilder(wave_gen=wave_gen).build(
+            None, curr, acs, priors, state
+        )
     return moves[0]
 
 
