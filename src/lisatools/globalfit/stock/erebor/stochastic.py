@@ -16,6 +16,7 @@ import typing
 from typing import Optional
 
 import numpy as np
+from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.utils import TransformContainer
 
@@ -38,13 +39,16 @@ class SGWBSettings(Settings):
     matching ``sgwb_stochastic_fn`` on the sensitivity backend.
     """
 
-    # shares the joint PSDMove ladder; must match psd's ntemps
+    # the sgwb move's OWN ladder size (noise-move split 2026-07)
     ntemps: int = dataclasses.field(default_factory=env_default("SGWB_NTEMPS", 12, int))
     sgwb_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     transform: Optional[TransformContainer] = None
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 2
+    num_prop_repeats: int = dataclasses.field(
+        default_factory=env_default("SGWB_NUM_PROP_REPEATS", 50, int)
+    )
     injection: Optional[np.ndarray] = None
     # SGWB spectral-template choice for this branch — swap it the way a source
     # branch swaps its waveform (``fit.sgwb.stochastic_fn = "LogNormalSGWB"``,
@@ -99,6 +103,12 @@ class SGWBSetup(Setup):
 
         else:
             self.logger.info("Using custom priors for SGWB branch")
+
+        if self.betas is None:
+            # the sgwb move's own ladder, sized by the ntemps knob
+            # (SGWB_NTEMPS; an explicit betas array wins)
+            betas = make_ladder(self.ndim * 10, Tmax=np.inf, ntemps=self.ntemps)
+            self.betas = betas
 
         if self.other_tempering_kwargs is None:
             self.other_tempering_kwargs = dict(permute=False)

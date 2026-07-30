@@ -36,8 +36,8 @@ class PSDSettings(Settings):
     # spline-style PSD parameterizations vs. the default 4-parameter setup.
     """
 
-    # the joint PSDMove ladder size (previously hard-coded at 24; galfor and
-    # sgwb share this ladder and inherit the value at build)
+    # the psd move's OWN ladder size (noise-move split 2026-07: psd, galfor,
+    # and sgwb each carry an independent move + ladder + ntemps knob)
     ntemps: int = dataclasses.field(default_factory=env_default("PSD_NTEMPS", 12, int))
     psd_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     nleaves_max: int = 1
@@ -46,7 +46,9 @@ class PSDSettings(Settings):
     transform: Optional[TransformContainer] = None
     injection: Optional[np.ndarray] = None
     nknots: Optional[int] = None
-    num_prop_repeats: int = 50
+    num_prop_repeats: int = dataclasses.field(
+        default_factory=env_default("PSD_NUM_PROP_REPEATS", 50, int)
+    )
     # Instrument-noise model choice for this branch — swap it the way a source
     # branch swaps its waveform. ``None`` -> the backend default
     # (``InstrumentNoise`` + ``LISAModel``, name ``model_name``). The variant's
@@ -98,8 +100,8 @@ class PSDSetup(Setup):
             self.logger.info("Using custom priors for PSD branch")
 
         if self.betas is None:
-            # the joint PSD/galfor/sgwb ladder, sized by the ntemps knob
-            # (an explicit betas array wins and defines its own ntemps)
+            # the psd move's own ladder, sized by the ntemps knob (an
+            # explicit betas array wins and defines its own ntemps)
             betas = make_ladder(self.ndim * 10, Tmax=np.inf, ntemps=self.ntemps)
             self.betas = betas
 
@@ -133,13 +135,16 @@ class GalForSettings(Settings):
     foreground (amplitude, knee, slopes, etc.).
     """
 
-    # shares the joint PSDMove ladder; must match psd's ntemps
+    # the galfor move's OWN ladder size (noise-move split 2026-07)
     ntemps: int = dataclasses.field(default_factory=env_default("GALFOR_NTEMPS", 12, int))
     galfor_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     transform: Optional[TransformContainer] = None
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 5
+    num_prop_repeats: int = dataclasses.field(
+        default_factory=env_default("GALFOR_NUM_PROP_REPEATS", 50, int)
+    )
     # Spectral / modulation model choice for this branch — swap it the way a
     # source branch swaps its waveform (``fit.galfor.stochastic_fn = ...``).
     # ``None`` -> the sensitivity backend's default
@@ -189,13 +194,11 @@ class GalForSetup(Setup):
             # TODO: orbits check against sangria/sangria_hm
             self.priors = {"galfor": ProbDistContainer(priors_galfor)}
 
-        # if self.betas is None:
-        #     # TODO: fix this to be generic
-        #     ntemps_pe = 24  # len(snrs_ladder)
-        #     # betas =  1 / snrs_ladder ** 2  #
-
-        #     betas = make_ladder(self.ndim * 10, Tmax=np.inf, ntemps=ntemps_pe)
-        #     self.betas = betas
+        if self.betas is None:
+            # the galfor move's own ladder, sized by the ntemps knob
+            # (GALFOR_NTEMPS; an explicit betas array wins)
+            betas = make_ladder(self.ndim * 10, Tmax=np.inf, ntemps=self.ntemps)
+            self.betas = betas
 
         if self.other_tempering_kwargs is None:
             self.other_tempering_kwargs = dict(permute=False)

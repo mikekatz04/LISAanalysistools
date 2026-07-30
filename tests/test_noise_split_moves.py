@@ -1,0 +1,287 @@
+"""Noise-move split (2026-07): PSDMove parameterized over sampled_branches.
+
+Pins the split semantics at the unit level: sampled-vs-fixed coordinate
+merging, prior restriction, the sgwb kernel gate, frozen cold rows feeding
+the ACA likelihood route, the ladder-mismatch guard in build_noise_moves,
+and the full-model cold prior. End-to-end split behavior (independent
+ladders on disk, per-branch sub-state write-back) is covered by the
+noise_only smoke runs.
+"""
+
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+
+import numpy as np
+
+try:
+    from tests._multishard import FakeMultiShardACA
+except ImportError:
+    from _multishard import FakeMultiShardACA
+
+
+def _priors():
+    from eryn.prior import ProbDistContainer, uniform_dist
+
+    return {
+        "psd": ProbDistContainer(
+            {0: uniform_dist(0.0, 1.0), 1: uniform_dist(0.0, 1.0)}
+        ),
+        "galfor": ProbDistContainer(
+            {i: uniform_dist(0.0, 1.0) for i in range(3)}
+        ),
+        "sgwb": ProbDistContainer(
+            {i: uniform_dist(0.0, 1.0) for i in range(2)}
+        ),
+    }
+
+
+class _FakeSingleShardACS:
+    """Minimal per-walker container ACA for the domain-agnostic route."""
+
+    class _AC:
+        def __init__(self):
+            self.sens_mat = "original"
+
+    def __init__(self, nwalkers):
+        self._acs = [self._AC() for _ in range(nwalkers)]
+        self.linear_data_arr = [np.zeros(8, dtype=complex)]
+        self.linear_psd_arr = [np.ones(8)]
+        self.gpus = None
+        self.xp = np
+        self.reset_calls = 0
+
+    def __len__(self):
+        return len(self._acs)
+
+    def __getitem__(self, i):
+        return self._acs[i]
+
+    def reset_linear_psd_arr(self):
+        self.reset_calls += 1
+
+    def likelihood(self):
+        # distinguishable per-walker values
+        return 10.0 * np.arange(len(self._acs), dtype=float)
+
+
+class NoiseSplitUnitTest(unittest.TestCase):
+    def setUp(self):
+        try:
+            from lisatools.domains import FDSettings, WDMSettings  # noqa: F401
+            from lisatools.globalfit.moves.psdmove import PSDMove
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"psdmove not available: {exc}")
+        self.PSDMove = PSDMove
+        self.FDSettings = FDSettings
+        self.nwalkers = 4
+        self.priors = _priors()
+
+    def _move(self, sampled=None, acs=None, basis=None):
+        backend = SimpleNamespace(
+            use_splines=False,
+            basis_settings=basis if basis is not None else self.FDSettings(N=16, df=1e-4),
+        )
+        return self.PSDMove(
+            acs if acs is not None else _FakeSingleShardACS(self.nwalkers),
+            self.priors,
+            sampled_branches=sampled,
+            sensitivity_backend=backend,
+            name="noise split test",
+        )
+
+    @staticmethod
+    def _state(branches, nwalkers, nt=1):
+        rng = np.random.default_rng(7)
+        coords = {
+            b: rng.uniform(0.2, 0.8, size=(nt, nwalkers, 1, nd))
+            for b, nd in branches.items()
+        }
+        return SimpleNamespace(branches_coords=coords)
+
+    # ------------------------------------------------------------------
+    # sampled/fixed resolution + merging
+    # ------------------------------------------------------------------
+
+    def test_ctor_validates_and_orders(self):
+        move = self._move(sampled=["galfor", "psd"])
+        self.assertEqual(move.sampled_branches, ["psd", "galfor"])  # canonical
+        with self.assertRaises(ValueError):
+            self._move(sampled=["psd", "bogus"])
+
+    def test_resolve_sampled_requires_presence(self):
+        move = self._move(sampled=["galfor"])
+        state = self._state({"psd": 2}, self.nwalkers)  # no galfor branch
+        with self.assertRaises(ValueError):
+            move._resolve_sampled(state)
+        state2 = self._state({"psd": 2, "galfor": 3}, self.nwalkers)
+        self.assertEqual(move._resolve_sampled(state2), ["galfor"])
+        # default = all present, canonical order
+        move_all = self._move(sampled=None)
+        self.assertEqual(move_all._resolve_sampled(state2), ["psd", "galfor"])
+
+    def test_merged_rows_sampled_vs_fixed(self):
+        move = self._move(sampled=["galfor"])
+        nt_mod, nw = 3, self.nwalkers
+        cold_psd = np.arange(nw * 2, dtype=float).reshape(nw, 2)
+        move._fixed_noise_coords = {"psd": cold_psd}
+
+        rng = np.random.default_rng(3)
+        galfor = rng.uniform(size=(nt_mod, nw, 1, 3))
+        logp_keep = np.ones((nt_mod, nw), dtype=bool)
+        logp_keep[1, 2] = False  # one row dropped by the prior cut
+        walker_inds = np.tile(np.arange(nw), (nt_mod, 1))[logp_keep]
+
+        merged = move._merged_noise_rows(
+            {"galfor": galfor}, logp_keep, walker_inds
+        )
+        # sampled branch: proposal rows surviving the cut
+        np.testing.assert_array_equal(
+            merged["galfor"], galfor[logp_keep][:, 0]
+        )
+        # fixed branch: the frozen cold row of each row's physical walker
+        np.testing.assert_array_equal(merged["psd"], cold_psd[walker_inds])
+        self.assertNotIn("sgwb", merged)
+
+    # ------------------------------------------------------------------
+    # priors
+    # ------------------------------------------------------------------
+
+    def test_log_prior_restricted_to_sampled(self):
+        state = self._state({"psd": 2, "galfor": 3}, self.nwalkers, nt=2)
+        coords = state.branches_coords
+
+        joint = self._move(sampled=None).compute_log_prior(coords)
+        galfor_only = self._move(sampled=["galfor"]).compute_log_prior(coords)
+        psd_only = self._move(sampled=["psd"]).compute_log_prior(coords)
+
+        # in-prior uniform draws: each branch contributes 0 here, but the
+        # restriction must hold pointwise for the sum decomposition
+        np.testing.assert_allclose(joint, galfor_only + psd_only)
+        # and the galfor-only move ignores psd coords entirely
+        coords_bad_psd = dict(coords)
+        coords_bad_psd["psd"] = np.full_like(coords["psd"], 5.0)  # out of prior
+        np.testing.assert_allclose(
+            self._move(sampled=["galfor"]).compute_log_prior(coords_bad_psd),
+            galfor_only,
+        )
+
+    def test_cold_noise_log_prior_sums_model(self):
+        move = self._move(sampled=["galfor"])
+        state = self._state({"psd": 2, "galfor": 3}, self.nwalkers)
+        lp = move._cold_noise_log_prior(state)
+        self.assertEqual(lp.shape, (self.nwalkers,))
+        # all draws in-prior on U(0,1) boxes -> log prior 0 per branch
+        np.testing.assert_allclose(lp, 0.0)
+        # push one walker's psd out of prior: the FULL-model sum must see it
+        state.branches_coords["psd"][0, 1] = 5.0
+        lp2 = move._cold_noise_log_prior(state)
+        self.assertTrue(np.isneginf(lp2[1]))
+        self.assertTrue(np.all(np.isfinite(np.delete(lp2, 1))))
+
+    # ------------------------------------------------------------------
+    # kernel gate
+    # ------------------------------------------------------------------
+
+    def test_kernel_gate(self):
+        from lisatools.domains import WDMSettings  # noqa: F401 (import gate)
+
+        move = self._move(sampled=["psd"])
+        self.assertTrue(move._kernel_fast_path_available())
+        # sgwb anywhere in the noise MODEL -> kernel path off
+        self.assertFalse(move._kernel_fast_path_available(has_sgwb=True))
+        # no backend -> off
+        move.sensitivity_backend = None
+        self.assertFalse(move._kernel_fast_path_available())
+
+    # ------------------------------------------------------------------
+    # ACA route consumes frozen cold rows for fixed branches
+    # ------------------------------------------------------------------
+
+    def test_aca_route_uses_frozen_cold_rows(self):
+        acs = _FakeSingleShardACS(self.nwalkers)
+        # WDM-less trick: disable the kernel gate via a non-FD basis
+        move = self._move(sampled=["galfor"], acs=acs, basis=object())
+        self.assertFalse(move._kernel_fast_path_available())
+
+        cold_psd = 100.0 + np.arange(self.nwalkers * 2, dtype=float).reshape(
+            self.nwalkers, 2
+        )
+        move._fixed_noise_coords = {"psd": cold_psd}
+
+        recorded = []
+
+        def fake_build(w, psd_params, galfor_params, sgwb_params=None):
+            recorded.append((int(w), np.array(psd_params), np.array(galfor_params)))
+            return f"sens_{w}"
+
+        move._build_sensitivity_for_walker = fake_build
+
+        nt_mod = 2
+        rng = np.random.default_rng(11)
+        galfor = rng.uniform(0.2, 0.8, size=(nt_mod, self.nwalkers, 1, 3))
+        from eryn.state import BranchSupplemental
+
+        supps = BranchSupplemental(
+            {"walker_inds": np.tile(np.arange(self.nwalkers), (nt_mod, 1))},
+            base_shape=(nt_mod, self.nwalkers),
+            copy=True,
+        )
+        logl, _ = move.compute_log_like({"galfor": galfor}, supps=supps)
+
+        self.assertEqual(logl.shape, (nt_mod, self.nwalkers))
+        # every scored row saw ITS walker's frozen psd cold row
+        for w, psd_params, galfor_params in recorded:
+            np.testing.assert_array_equal(psd_params, cold_psd[w])
+        # per-walker likelihoods routed back by walker index
+        np.testing.assert_allclose(
+            logl, np.tile(10.0 * np.arange(self.nwalkers), (nt_mod, 1))
+        )
+        # original sens restored + linear buffer reset both times
+        self.assertTrue(all(ac.sens_mat == "original" for ac in acs._acs))
+        self.assertGreaterEqual(acs.reset_calls, 2)
+
+    # ------------------------------------------------------------------
+    # builder-level ladder-mismatch guard
+    # ------------------------------------------------------------------
+
+    def test_build_noise_moves_ladder_mismatch_guard(self):
+        from lisatools.globalfit.recipe import build_noise_moves
+
+        general_info = SimpleNamespace(nwalkers=4, ntemps=1, gpus=None)
+        curr = SimpleNamespace(
+            general_info=general_info,
+            source_info={
+                "psd": SimpleNamespace(
+                    betas=np.ones(8), ntemps=8, transform=None,
+                    num_prop_repeats=5,
+                ),
+                "galfor": SimpleNamespace(
+                    betas=np.ones(4), ntemps=4, transform=None,
+                    num_prop_repeats=5,
+                ),
+            },
+        )
+        engine_info = SimpleNamespace(ndims={"psd": 2, "galfor": 5})
+        acs = _FakeSingleShardACS(4)
+
+        with self.assertRaises(ValueError) as ctx:
+            build_noise_moves(
+                engine_info, curr, acs, self.priors,
+                sampled_branches=["psd", "galfor"],
+            )
+        msg = str(ctx.exception)
+        self.assertIn("GALFOR_NTEMPS", msg)
+        self.assertIn("ntemps=8", msg)
+        self.assertIn("ntemps=4", msg)
+
+        with self.assertRaises(ValueError):
+            build_noise_moves(
+                engine_info, curr, acs, self.priors,
+                sampled_branches=["sgwb"],  # not in the run
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

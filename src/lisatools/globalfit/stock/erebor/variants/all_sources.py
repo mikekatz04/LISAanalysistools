@@ -46,7 +46,7 @@ import numpy as np
 from ....engine import GeneralSetup, Settings
 from ....moves import Move, MoveBuildContext
 from .....utils.device import pin_main_device
-from ....recipe import MOJITO_REFERENCE_TIME, Recipe, Stage, build_psd_moves
+from ....recipe import MOJITO_REFERENCE_TIME, Recipe, Stage, build_noise_moves
 from ...base import env_default
 from ..common import tdi_generation_info
 from ..emri import EMRISetup
@@ -326,14 +326,22 @@ class AllSourcesGlobalFit(EreborFit):
         return branches
 
     def default_recipe(self) -> Recipe:
-        # One combined PE stage, legacy order: psd, mbh, emri, sobbh, gb.
+        # One combined PE stage, legacy order: noise moves first (split:
+        # psd / galfor / sgwb each under their own ladder), then mbh, emri,
+        # sobbh, gb.
+        noise_moves = [
+            Move("psd_pe", branch="psd"),
+            Move("galfor_pe", branch="galfor"),
+        ]
+        if self.general.fit_sgwb:
+            noise_moves.append(Move("sgwb_pe", branch="sgwb"))
         return Recipe(
             [
                 Stage(
                     name="full_pe",
                     kind="pe",
-                    moves=[
-                        Move("psd_pe", branch="psd"),
+                    moves=noise_moves
+                    + [
                         Move("mbh_pe", branch="mbh"),
                         Move("emri_pe", branch="emri"),
                         Move("sobbh_pe", branch="sobbh"),
@@ -663,17 +671,22 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     if "vgb" in curr.source_info and "vgb_pe" in requested:
         stock_moves.update(setup_vgb_moves(engine_info, curr, acs, priors, state))
 
-    # --- PSD (galfor + sgwb ride the same PSDMove) ---
-    if "psd" in curr.source_info and any(n.startswith("psd") for n in requested):
-        psd_info = curr.source_info["psd"]
-        num_repeats_psd = getattr(psd_info, "num_repeats", None)
-        if num_repeats_psd is None:
-            num_repeats_psd = 5 if gpus is None else 60
-        psd_search_move, psd_pe_move = build_psd_moves(
-            engine_info, curr, acs, priors, num_repeats=num_repeats_psd
+    # --- Noise moves (split: psd / galfor / sgwb each with own ladder) ---
+    noise_move_spec = {"psd": ["psd"], "galfor": ["galfor"], "sgwb": ["sgwb"]}
+    for name, sampled in noise_move_spec.items():
+        if not all(b in curr.source_info for b in sampled):
+            continue
+        if not any(n.startswith(name) for n in requested):
+            continue
+        # CPU runs use few repeats (laptop smokes); GPU runs default to the
+        # branch settings' num_prop_repeats
+        num_repeats = 5 if gpus is None else None
+        search_move, pe_move = build_noise_moves(
+            engine_info, curr, acs, priors,
+            sampled_branches=sampled, num_repeats=num_repeats,
         )
-        stock_moves["psd_pe"] = psd_pe_move
-        stock_moves["psd_search"] = psd_search_move
+        stock_moves[f"{name}_pe"] = pe_move
+        stock_moves[f"{name}_search"] = search_move
 
     # --- MBH / EMRI / SOBBH: the shared full_year runtime builders ---
     source_present = [b for b in _SOURCE_BRANCH_TO_CLASS if b in curr.source_info]

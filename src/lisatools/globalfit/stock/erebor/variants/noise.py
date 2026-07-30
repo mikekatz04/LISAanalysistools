@@ -50,7 +50,7 @@ from lisatools.domains import WDMSettings
 
 from ....engine import GeneralSetup, Settings
 from ....moves import Move, MoveBuildContext
-from ....recipe import Recipe, Stage, build_psd_moves
+from ....recipe import Recipe, Stage, build_noise_moves
 from ...base import env_default
 from ..fit import EreborFit, EreborGeneralSettings
 from ..noise import (
@@ -298,13 +298,18 @@ class NoiseOnlyGlobalFit(_NoiseFitBase):
         return {"psd": NoisePSDSettings(), "galfor": GalForSettings()}
 
     def default_recipe(self) -> Recipe:
-        # One joint noise PE stage; galfor (+ sgwb) ride the single PSDMove.
+        # Noise-move split (2026-07): each noise branch gets its OWN move +
+        # ladder inside the one PE stage (share_temperature_control=False is
+        # what keeps the per-move ladders independent under GFCombineMove).
         return Recipe(
             [
                 Stage(
                     name="noise_pe",
                     kind="pe",
-                    moves=[Move("psd_pe", branch="psd")],
+                    moves=[
+                        Move("psd_pe", branch="psd"),
+                        Move("galfor_pe", branch="galfor"),
+                    ],
                     combine_kwargs=dict(share_temperature_control=False),
                 )
             ]
@@ -325,6 +330,11 @@ class NoiseSGWBGlobalFit(NoiseOnlyGlobalFit):
         branches = super().default_branches()
         branches["sgwb"] = NoiseSGWBSettings()
         return branches
+
+    def default_recipe(self) -> Recipe:
+        recipe = super().default_recipe()
+        recipe.stages[0].moves.append(Move("sgwb_pe", branch="sgwb"))
+        return recipe
 
     def _sgwb_injection(self, gs: NoiseGeneralSettings):
         return list(gs.sgwb_injection)
@@ -356,7 +366,7 @@ class NoiseSGWBGlobalFit(NoiseOnlyGlobalFit):
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
-    """Recipe setup: build the joint PSDMove, then materialize."""
+    """Recipe setup: build one independent move pair per noise branch, then materialize."""
     general_info = curr.general_info
     nwalkers, ntemps = general_info.nwalkers, general_info.ntemps
     gpus = general_info.gpus
@@ -367,13 +377,23 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     requested = recipe.stock_names()
     stock_moves = {}
-    if "psd" in curr.source_info and any(n.startswith("psd") for n in requested):
-        num_repeats = 5 if gpus is None else 60
-        psd_search_move, psd_pe_move = build_psd_moves(
-            engine_info, curr, acs, priors, num_repeats=num_repeats
+    # noise-move split: each present noise branch gets its own move pair +
+    # ladder; the stock names are <branch>_pe / <branch>_search
+    noise_move_spec = {"psd": ["psd"], "galfor": ["galfor"], "sgwb": ["sgwb"]}
+    for name, sampled in noise_move_spec.items():
+        if not all(b in curr.source_info for b in sampled):
+            continue
+        if not any(n.startswith(name) for n in requested):
+            continue
+        # CPU runs use few repeats (laptop smokes); GPU runs use the branch
+        # settings' num_prop_repeats
+        num_repeats = 5 if gpus is None else None
+        search_move, pe_move = build_noise_moves(
+            engine_info, curr, acs, priors,
+            sampled_branches=sampled, num_repeats=num_repeats,
         )
-        stock_moves["psd_pe"] = psd_pe_move
-        stock_moves["psd_search"] = psd_search_move
+        stock_moves[f"{name}_pe"] = pe_move
+        stock_moves[f"{name}_search"] = search_move
 
     ctx = MoveBuildContext(
         recipe=recipe, engine_info=engine_info, curr=curr, acs=acs,
