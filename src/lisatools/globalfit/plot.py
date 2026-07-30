@@ -177,29 +177,24 @@ def produce_psd_plots(psd_reader, discard=0, save_file=None, fig=None):
     if fig is not None:
         plt.close()
 
-    samples = np.concatenate(
-        [
-            psd_reader.get_chain(discard=discard)["galfor"][:, 0].reshape(-1, 5),
-            psd_reader.get_chain(discard=discard)["psd"][:, 0].reshape(-1, 4),
-        ],
-        axis=-1,
-    )
+    # ndim-agnostic: psd may be 2-param (Soms/Sa) or 4-param (A/E split) or
+    # spline-style; galfor 5-param by default — read the widths off the chains
+    chains = psd_reader.get_chain(discard=discard)
+    blocks, labels = [], []
+    for branch, prefix in (("galfor", "galfor"), ("psd", "psd")):
+        if branch not in chains:
+            continue
+        arr = np.asarray(chains[branch][:, 0])
+        arr = arr.reshape(-1, arr.shape[-1])
+        blocks.append(arr)
+        labels += [f"{prefix} p{i}" for i in range(arr.shape[-1])]
+    samples = np.concatenate(blocks, axis=-1)
     fig = corner.corner(
         samples,
         plot_datapoints=False,
         smooth=0.6,
         levels=1 - np.exp(-0.5 * np.array([1, 2, 3]) ** 2),
-        labels=[
-            "GB amplitude",
-            "GB par1",
-            "GB par2",
-            "GB par3",
-            "GB par4",
-            "A_oms",
-            "A_acc",
-            "E_oms",
-            "E_acc",
-        ],
+        labels=labels,
     )
     save_file_tmp = save_file[:-4] + "_psd_corner.png"
     fig.savefig(save_file_tmp)

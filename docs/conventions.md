@@ -115,6 +115,27 @@ On-disk format `gf_format_version=2` (the cold-chain storage rework):
   write their sub-state and mirror row 0 via `sync_cold_row`.
 - **Clean break**: files written before format v2 cannot be resumed (the
   `load_info` gate raises with instructions); no migration tooling.
+- **Noise moves are split** (2026-07): psd, galfor, and sgwb each run their
+  OWN `PSDMove` instance (`sampled_branches=[...]`) with an independent
+  ladder — `PSD_NTEMPS` / `GALFOR_NTEMPS` / `SGWB_NTEMPS` now govern both
+  the sub-state AND the move (mismatches raise at build; pre-split they
+  silently sized only the sub-states). The likelihood always evaluates the
+  FULL noise model with non-sampled branches frozen at their cold rows, so
+  a noise branch's sub-state `log_like` is the full-noise-model tempered
+  lnL of ITS ensemble (the pre-split identical triple-write is gone). The
+  stock names are `psd_pe` / `galfor_pe` / `sgwb_pe` (+ `_search`), built
+  by `recipe.build_noise_moves`; per-branch repeats via
+  `{PSD,GALFOR,SGWB}_NUM_PROP_REPEATS`.
+- **SOBBH proposal scoring is swappable** (`SOBBH_LIKELIHOOD`): `full` =
+  the exact per-row full-TD container path; `chunked` =
+  `SOBBHChunkedLikeMove`, one vectorized chunked-heterodyne
+  `get_ll_wdm` call per batch against the live WDM residual buffers
+  (~100x per-batch on CPU; knobs `SOBBH_NT_SUB` / `SOBBH_N_SPARSE` /
+  `SOBBH_N_PAD` / `SOBBH_M_BAND_HALF_WIDTH`). The residual expose/fold
+  ALWAYS uses the exact generator; the built-in fast-vs-slow cross-check
+  (`SOBBH_CHECK_LL`, tolerance `SOBBH_CHECK_LL_TOL`) recomputes through
+  the slow path at matching convention. Chunked is WDM-domain,
+  single-shard, no-DCGA (loud errors otherwise).
 
 ## No backend strings as function kwargs (LISA Analysis Tools–wide rule)
 
