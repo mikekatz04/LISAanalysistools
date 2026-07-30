@@ -304,12 +304,17 @@ class SourceSOBBHSettings(SOBBHSettings):
     n_grid: int = 2048
     buffer_time: float = 5000.0
     response_order: int = 40
-    # Which likelihood scores the add/remove proposals: "full" = the exact
-    # full-TD container path; "chunked" = SOBBHChunkedLikeMove over the
-    # chunked-heterodyne WDM kernel (one vectorized call per batch; the
-    # residual expose/fold stays on the exact generator either way).
+    # Which likelihood scores the add/remove proposals: "chunked" (DEFAULT,
+    # A/B-gated 2026-07-30: identical cold-chain lnL, zero cross-check
+    # warnings at tol 0.5, ~4x wall even with the check every leaf) =
+    # SOBBHChunkedLikeMove over the chunked-heterodyne WDM kernel (one
+    # vectorized call per batch); "full" = the exact full-TD container path
+    # (the escape hatch — required for FD/STFT domains, multi-shard, DCGA).
+    # The residual expose/fold stays on the exact generator either way, and
+    # the built-in fast-vs-slow cross-check stays on (thin it with
+    # SOBBH_CHECK_LL_EVERY=10 in production; SOBBH_CHECK_LL=0 disables).
     likelihood: str = dataclasses.field(
-        default_factory=env_default("SOBBH_LIKELIHOOD", "full", str)
+        default_factory=env_default("SOBBH_LIKELIHOOD", "chunked", str)
     )
     # chunked-path knobs (see lisatools.chunked_het.WDMComputationsBase)
     nt_sub: int = dataclasses.field(
@@ -929,10 +934,15 @@ def get_sobbh_chunked_comp(general_info, cfg):
 
     force_backend = general_info.force_backend
     tdi_config = TDIConfig(cfg["tdi_gen_str"], force_backend=force_backend)
+    # None -> the data window start, mirroring SOBBHWaveform's
+    # ``reference_time = t0 if reference_time is None`` resolution
+    t_ref = cfg["sobbh_reference_time"]
+    if t_ref is None:
+        t_ref = general_info.data_t0
     with device_context(xp, dev):
         comp = SOBBHWDMComputations(
             domain_settings,
-            t_ref=cfg["sobbh_reference_time"],
+            t_ref=float(t_ref),
             Nt_sub=cfg["sobbh_nt_sub"],
             n_pad=cfg["sobbh_n_pad"],
             N_sparse=cfg["sobbh_n_sparse"],

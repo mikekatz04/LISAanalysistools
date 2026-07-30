@@ -260,6 +260,17 @@ class SOBBHChunkedParityTest(unittest.TestCase):
         setup = SOBBHSetup(s)
         self.assertEqual(len(setup.betas), s.ntemps)
 
+    def test_chunked_is_the_stock_default(self):
+        # A/B-gated default flip (2026-07-30); SOBBH_LIKELIHOOD=full is the
+        # escape hatch
+        import os
+
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            SourceSOBBHSettings)
+
+        assert "SOBBH_LIKELIHOOD" not in os.environ
+        self.assertEqual(SourceSOBBHSettings().likelihood, "chunked")
+
 
 if __name__ == "__main__":
     unittest.main()
