@@ -111,8 +111,9 @@ class SOBBHSetup(Setup):
         self.setup_priors(input_basis)
 
         if self.betas is None:
-            ntemps_pe = 24
-            betas = 1 / 1.2 ** np.arange(ntemps_pe)
+            # sized by the branch's own ntemps knob (SOBBH_NTEMPS); a
+            # hard-coded 24 here used to shadow it (and the lite presets)
+            betas = 1 / 1.2 ** np.arange(self.ntemps)
             self.betas = betas
 
         self.logger.info(f"Using betas: {self.betas} in SOBBH branch")
