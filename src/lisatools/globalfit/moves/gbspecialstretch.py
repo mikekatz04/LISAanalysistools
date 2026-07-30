@@ -2948,6 +2948,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"median={float(cp.median(_err)):.3e}; COLD ({_n_c}): "
                 f"max={_cmax:.3e} median={_cmed:.3e}."
             )
+            # Name the worst COLD offender when it exceeds O(1) in lnL:
+            # which source/walker still breaks the fixed-reference
+            # expansion, and how far it walked from its anchor. ``drift``
+            # / ``damp`` are the drift-audit metrics computed above.
+            if _n_c and _cmax > 1.0:
+                _ci = cp.where(_cold)[0]
+                _ic = int(_ci[int(cp.argmax(_err[_cold]))])
+                _f0 = float(_to_numpy(self.transform_fn.both_transforms(
+                    curr[_ic:_ic + 1], xp=cp,
+                    leaf_inds=(l_i[_ic:_ic + 1]
+                               if self._per_leaf_fill else None),
+                )[0, 1]))
+                logger.warning(
+                    f"{self.name}: ll AUDIT worst cold offender: "
+                    f"temp={int(t_i[_ic])} walker={int(w_i[_ic])} "
+                    f"band={int(b_i[_ic])} f0={_f0:.6e} Hz "
+                    f"|dll|={float(_err[_ic]):.3e} "
+                    f"dlnA={float(damp[_ic]):.3e} "
+                    f"dphase={float(drift[_ic]):.3e} rad "
+                    f"ll_exact={float(_ll_exact[_ic]):.3e}"
+                )
 
         # Final coordinates back into the residual and the sorter.
         band_sorter.coords[ids] = curr
