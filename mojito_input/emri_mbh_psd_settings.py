@@ -29,7 +29,7 @@ from eryn.utils import TransformContainer
 from eryn.prior import ProbDistContainer
 from eryn.moves import StretchMove, TemperatureControl, DEMove, ConditionalFlowMove
 from eryn.moves.tempering import make_ladder
-from eryn.flows import ZukoFlow, WhiteningTransform, OneHotLeafConditioning, ModeMixtureFlow, ProcessExecutor
+from eryn.flows import ZukoFlow, WhiteningTransform, OneHotLeafConditioning, ProcessExecutor
 
 from lisatools.domains import STFTSettings, FDSettings
 from lisatools.sensitivity import XYZSensitivityBackend
@@ -498,29 +498,20 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         for name in [r"$\phi_{\rm ref}$", r"$\psi_L$", r"$\lambda_L$"]
     }
 
-    # Per-island whitening (shared=False, per-mode conditioning):
-    # the 6 MBHBs live in different regions of parameter space; the sky-mode
-    # islands within each leaf are further separated. Per-condition maps keep
-    # each island ~N(0,1) in latent space; the shared NSF learns per-island
-    # shape modulations selected through the leaf ⊕ mode one-hot conditioning.
-    # Exact-mixture MH: the density factor uses logsumexp_m [log w_m + logq(x|leaf,m)]
-    # evaluated identically at both proposed and current points for MH exactness.
-    # Implementation is landed and reviewed, but the offline measurement gate
-    # (tasks/todo_flow_mbh_proposal.md Task 7: mixture acceptance >= 0.08 on
-    # leaves 3/4/5) has NOT been run yet against this config. Exactness is
-    # guaranteed by the mixture MH factors regardless, so the risk of an
-    # unmeasured config here is wasted proposals (poor acceptance), not bias.
-    # Note: min_train_samples=1500 interacts with per-component min_rows_per_component=25;
-    # with 6000-row buffers and ≤8 components this spacing is comfortable.
-    flow = ModeMixtureFlow(
+    # Per-leaf whitening (shared=False, one-hot leaf conditioning): the 6 MBHBs
+    # live in different regions of parameter space; per-condition maps keep each
+    # leaf ~N(0,1) in latent space and the shared NSF learns per-leaf shape
+    # modulations selected through the leaf one-hot. periodic_in_cholesky folds
+    # the periodic sky/phase angles into the whitening Cholesky (exact, constant
+    # Jacobian). See tasks/todo_flow_mbh_proposal.md for the offline acceptance
+    # sweep that fixed train_noise=0 and this buffer/whitening config; the
+    # per-mode mixture variant it also explored was pruned (measured +0.04
+    # overall, failing the >=0.08 gate on the multimodal leaves 3/4/5).
+    flow = ZukoFlow(
         dims=len(input_basis),
-        nleaves_max=nleaves_max_mbh,
-        kmax=8,                    # sky-mode lattice size; over-splitting is cheap
-        mode_floor=0.02,
-        cluster_seed=general_set.random_seed,
-        periodic=flow_periodic,
         flow_class="NSF",
         device="cpu",  # proposal-side net; training runs on the executor's GPU
+        conditioning=OneHotLeafConditioning(nleaves_max=nleaves_max_mbh),
         data_transform=WhiteningTransform(
             ndim=len(input_basis), periodic=flow_periodic, shared=False,
             periodic_in_cholesky=True,

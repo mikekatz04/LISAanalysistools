@@ -4,6 +4,24 @@ Date: 2026-07-13. Basis: splice test on the live joint run
 (`test_flow_joint_sources_stft`, backend step 182, cold chain), harness at
 `~/.claude/jobs/f7a00a42/tmp/splice_test.py` (results `splice_results.npz`).
 
+## PRUNE (2026-07-30): mode-mixture machinery removed
+
+The measured verdict below stands, but the ModeMixtureFlow route it produced
+was pruned as not worth its footprint: it bought only **+0.04 overall**
+(0.071 → 0.110) and **failed the ≥0.08 gate on the multimodal leaves 3/4/5**
+in every config — exactly the leaves it was built for. It helped only leaf 2
+(1–2 sky images: 0.13 → 0.33), and MBH at 0.11 is nowhere near the ~0.5 that a
+`num_repeats` cut needs, so the mixture did not advance the actual goal.
+
+Removed: Eryn `flows/torch/mixture.py`, `flows/modes.py`,
+`LeafModeConditioning` (`flows/conditioning.py`), their exports + tests, and the
+mode-mixture plan doc; LAT harness `fold_utils.py` / `block_test.py` /
+`map_test.py` / `truth_map_test.py` (dead reparametrization probes). The MBH
+flow in `emri_mbh_psd_settings.py` reverted to `ZukoFlow` + one-hot leaf
+conditioning with the **kept** config wins (`train_noise=0`,
+`periodic_in_cholesky=True`, buffer 6000). Kept: `base_scale`/`active_betas`,
+the frame fix, and the `splice/train/score` offline gate driver.
+
 ## Measured facts (splice test — decides everything below)
 
 Offline rebuild of the run's residuals + exact move `compute_like` path,

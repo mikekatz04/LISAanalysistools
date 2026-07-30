@@ -20,7 +20,7 @@ import h5py
 import numpy as np
 import torch
 torch.set_num_threads(4)
-from eryn.flows import ZukoFlow, WhiteningTransform, OneHotLeafConditioning, ModeMixtureFlow
+from eryn.flows import ZukoFlow, WhiteningTransform, OneHotLeafConditioning
 
 TMP = "/home/asantini/.claude/jobs/f7a00a42/tmp"
 OUT = f"{TMP}/offline_flows"
@@ -47,23 +47,15 @@ BRANCH = {
                            9: (0.0, 2 * np.pi), 10: (0.0, 2 * np.pi)}),
 }
 
-def make_flow(branch, pcov=False, mixture=False, kmax=8):
-    """Build a candidate flow. mixture=True mirrors the settings' MBH block
-    (ModeMixtureFlow: buffer-estimated per-island conditions + exact mixture MH)."""
+def make_flow(branch, pcov=False):
+    """Build a candidate ZukoFlow for one branch/config (one-hot leaf conditioning)."""
     b = BRANCH[branch]
-    common = dict(
+    return ZukoFlow(
+        dims=b["dims"], conditioning=OneHotLeafConditioning(nleaves_max=b["nleaves"]),
         flow_class="NSF", device="cuda",
         data_transform=WhiteningTransform(ndim=b["dims"], periodic=b["periodic"], shared=False,
                                           periodic_in_cholesky=pcov),
         seed=SEED, transforms=8, hidden_features=(128, 128, 128), bins=8,
-    )
-    if mixture:
-        return ModeMixtureFlow(
-            dims=b["dims"], nleaves_max=b["nleaves"], kmax=kmax, mode_floor=0.02,
-            cluster_seed=SEED, periodic=b["periodic"], **common,
-        )
-    return ZukoFlow(
-        dims=b["dims"], conditioning=OneHotLeafConditioning(nleaves_max=b["nleaves"]), **common,
     )
 
 CANDS = {
@@ -75,18 +67,6 @@ CANDS = {
         ("noise0_w84_e250",dict(window=84,  train_noise=0.0,  n_epochs=250)),
         ("noise0_w168_pcov", dict(window=168, train_noise=0.0, n_epochs=150, pcov=True)),
         ("noise0_w84_pcov",  dict(window=84,  train_noise=0.0, n_epochs=150, pcov=True)),
-        # Task-7 gate: the settings' MBH config (mixture + pcov). k12 probes the
-        # plan's first fallback knob if the multimodal leaves miss >= 0.08.
-        ("noise0_w168_mixture", dict(window=168, train_noise=0.0, n_epochs=150,
-                                     pcov=True, mixture=True)),
-        ("noise0_w168_mixture_k12", dict(window=168, train_noise=0.0, n_epochs=150,
-                                         pcov=True, mixture=True, kmax=12)),
-        # rows-per-island test: max available window (290 steps = 6960 rows/leaf
-        # -> ~1740/island at K=4, i.e. leaf-2's working regime). Staleness is
-        # splice-free and the window is stationary (smear ~1.0), so the only
-        # thing that changes is rows per component.
-        ("noise0_w290_mixture", dict(window=290, train_noise=0.0, n_epochs=150,
-                                     pcov=True, mixture=True)),
         ("noise0_w290_pcov", dict(window=290, train_noise=0.0, n_epochs=150, pcov=True)),
     ],
     "emri": [
@@ -96,10 +76,6 @@ CANDS = {
         ("noise0_w168",    dict(window=168, train_noise=0.0,  n_epochs=150)),
         ("noise0_w240",    dict(window=240, train_noise=0.0,  n_epochs=150)),
         ("noise0_w168_pcov", dict(window=168, train_noise=0.0, n_epochs=150, pcov=True)),
-        # EMRI is unimodal (settings keep plain ZukoFlow); mixture should be a
-        # no-op here (K=1 per leaf) -- a control on the wrapper's neutrality.
-        ("noise0_w168_mixture", dict(window=168, train_noise=0.0, n_epochs=150,
-                                     pcov=True, mixture=True)),
     ],
 }
 
@@ -110,8 +86,7 @@ for branch, cands in CANDS.items():
             continue
         samples = buffer(branch, BRANCH[branch]["nleaves"], cfg["window"])
         rows = sum(len(v) for v in samples.values())
-        flow = make_flow(branch, pcov=cfg.get("pcov", False),
-                         mixture=cfg.get("mixture", False), kmax=cfg.get("kmax", 8))
+        flow = make_flow(branch, pcov=cfg.get("pcov", False))
         hist = flow.fit(
             samples, n_epochs=cfg["n_epochs"], batch_size=1024, lr=1e-3,
             lr_annealing=True, optimizer="adamw", patience=30,
