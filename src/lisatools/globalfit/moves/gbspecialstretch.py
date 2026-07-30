@@ -319,6 +319,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sighet_refresh_every=0,
         sighet_refresh_dphase=0.5,
         sighet_refresh_min_beta=0.1,
+        sighet_trust_dlna=1.5,
+        sighet_trust_dphase=0.5,
         sighet_drift_check=False,
         debug_seq_pick="first",
         debug=False,
@@ -433,6 +435,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # grids; hot junk sources otherwise trip the drift test at nearly
         # every checkpoint).
         self.sighet_refresh_min_beta = float(sighet_refresh_min_beta)
+        # Sig-het TRUST REGION (prior = -inf outside): in-model candidates
+        # whose PHYSICAL-amplitude ratio vs the block's heterodyne anchor
+        # exceeds ``sighet_trust_dlna`` e-folds (or whose carrier-phase
+        # drift exceeds ``sighet_trust_dphase`` rad) are rejected before
+        # scoring. The expansion is only trusted near its reference
+        # (measured: exact to ~3e-6 through |dlnA| ~ 8 on a clean source,
+        # but in-run weak-source offenders corrupt at large excursions),
+        # and a detectable source's posterior never comes near the gate
+        # (lnA width ~ 1/SNR). MH-valid as a proposal-support restriction:
+        # the anchor is the block-start state (re-anchored on refresh), so
+        # the current point always sits inside its own region and the
+        # indicator is symmetric in (x, y). 0 disables. Inert on
+        # chunked-het / FD (no sig-het reference active).
+        self.sighet_trust_dlna = float(sighet_trust_dlna)
+        self.sighet_trust_dphase = float(sighet_trust_dphase)
 
         self.priors = priors
         self.gb = gb
@@ -2622,6 +2639,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         damp = cp.abs(cp.log(cp.abs(pc[:, 0]) / cp.abs(pr[:, 0])))
         return drift, damp
 
+    def _sighet_anchor_phys(self, ref_track, leaf_inds):
+        """Anchor-side physical quantities for the trust-region gate.
+
+        Returns ``(|A|, f0, fdot)`` of the heterodyne expansion points so
+        the per-repeat gate only transforms the CANDIDATES (the anchor side
+        is fixed for the block, modulo mid-block refresh)."""
+        li = leaf_inds if self._per_leaf_fill else None
+        pr = self.transform_fn.both_transforms(ref_track, xp=cp, leaf_inds=li)
+        return cp.abs(pr[:, 0]), pr[:, 1].copy(), pr[:, 2].copy()
+
     def _run_in_model_repeats(self, model, band_sorter, buffer_obj, band_temps,
                               picked, ll_change_log, prop_counts, acc_counts):
         """``num_repeat_proposals`` in-model rounds on the picked live sources.
@@ -2733,6 +2760,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Drift-refresh anchor: the sampling-basis coords each source's
         # sig-het reference was built at (see the refresh block below).
         ref_track = curr.copy() if sighet_active else None
+        # Trust-region gate cache: anchor-side (|A|, f0, fdot) in the
+        # physical basis, so each repeat only transforms the candidates.
+        anchor_phys = (
+            self._sighet_anchor_phys(ref_track, l_i)
+            if sighet_active and self.sighet_trust_dlna > 0.0
+            else None
+        )
+        trust_Tobs = float(self._basis_settings.Tobs)
         with _tspan(tm, "inmodel_ll_ref"):
             ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals, leaf_inds=l_i)
             curr_prior = cp.asarray(self.gpu_priors[self.branch_name].logpdf(curr))
@@ -2795,6 +2830,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     ] = -np.inf
                     new_logp[new_bin < lo_s - n4_s] = -np.inf
                     new_logp[new_bin > hi_s + n4_s] = -np.inf
+
+                # Sig-het TRUST REGION: reject candidates outside the
+                # expansion's validity region around the block anchor
+                # (physical |dlnA| / carrier-phase gates; see the ctor
+                # comment for thresholds + MH-validity). Gated rows drop
+                # out of ``keep`` below, so they also skip the ll kernel.
+                if anchor_phys is not None:
+                    _pc = self.transform_fn.both_transforms(
+                        new, xp=cp,
+                        leaf_inds=l_i[sl] if self._per_leaf_fill else None,
+                    )
+                    _damp_n = cp.abs(cp.log(
+                        cp.abs(_pc[:, 0]) / anchor_phys[0][sl]))
+                    _drift_n = (
+                        2.0 * np.pi * cp.abs(_pc[:, 1] - anchor_phys[1][sl])
+                        * trust_Tobs
+                        + np.pi * cp.abs(_pc[:, 2] - anchor_phys[2][sl])
+                        * trust_Tobs**2
+                    )
+                    new_logp[
+                        (_damp_n > self.sighet_trust_dlna)
+                        | (_drift_n > self.sighet_trust_dphase)
+                    ] = -np.inf
 
                 keep = ~cp.isinf(new_logp)
             new_ll = cp.full(n_sub, -1e300)
@@ -2889,6 +2947,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             leaf_inds=l_i[far],
                         )
                     ref_track[far] = curr[far]
+                    # Re-anchor the trust-region cache with the refreshed
+                    # references (refresh is rare; full recompute is cheap).
+                    if anchor_phys is not None:
+                        anchor_phys = self._sighet_anchor_phys(ref_track, l_i)
                     if tm is not None:
                         tm.count("inmodel_refreshed_sources", int(far.sum()))
                     logger.debug(

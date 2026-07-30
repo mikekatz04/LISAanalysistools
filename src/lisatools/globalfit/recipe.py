@@ -2218,6 +2218,12 @@ def build_gb_moves(
         sighet_refresh_dphase=float(os.environ.get("GB_SIGHET_REFRESH_DPHASE", "0.5")),
         sighet_refresh_min_beta=float(
             os.environ.get("GB_SIGHET_REFRESH_MIN_BETA", "0.1")),
+        # Trust region: reject in-model candidates beyond these gates from
+        # the block's heterodyne anchor (physical |dlnA| e-folds / carrier
+        # phase rad); 0 disables. Inert on chunked-het / FD.
+        sighet_trust_dlna=float(os.environ.get("GB_SIGHET_TRUST_DLNA", "1.5")),
+        sighet_trust_dphase=float(
+            os.environ.get("GB_SIGHET_TRUST_DPHASE", "0.5")),
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v
@@ -2547,6 +2553,12 @@ def build_vgb_moves(
         sighet_refresh_dphase=float(os.environ.get("GB_SIGHET_REFRESH_DPHASE", "0.5")),
         sighet_refresh_min_beta=float(
             os.environ.get("GB_SIGHET_REFRESH_MIN_BETA", "0.1")),
+        # Trust region: reject in-model candidates beyond these gates from
+        # the block's heterodyne anchor (physical |dlnA| e-folds / carrier
+        # phase rad); 0 disables. Inert on chunked-het / FD.
+        sighet_trust_dlna=float(os.environ.get("GB_SIGHET_TRUST_DLNA", "1.5")),
+        sighet_trust_dphase=float(
+            os.environ.get("GB_SIGHET_TRUST_DPHASE", "0.5")),
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v
