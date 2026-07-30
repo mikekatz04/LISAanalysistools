@@ -21,6 +21,8 @@ Checks:
 
 Run:  python scripts/gb_chunked_het/gb_sighet_inmodel_validate.py
 """
+import os
+
 import numpy as np
 
 from lisatools.detector import ESAOrbits
@@ -79,7 +81,10 @@ def main():
         force_backend=backend, d_d=0.0, tdi_type="XYZ",
     )
     chunked.convert_to_ra_dec = False
-    sighet = GBSignalHetComputations.for_band_engine(chunked)
+    # SWEEP_MAX_R overrides the ratio-clip knob (library default: disabled).
+    _mr = os.environ.get("SWEEP_MAX_R")
+    sighet = GBSignalHetComputations.for_band_engine(
+        chunked, **({"max_r": float(_mr)} if _mr is not None else {}))
 
     eng_c = WDMBandLikelihoodEngine(chunked, wdm_set, nchannels=3,
                                     tdi_channel_setup="XYZ")
@@ -165,6 +170,75 @@ def main():
         print("  ** sig-het error budget exceeded relative to chunked **")
     else:
         print("  in-model sig-het accuracy within budget [OK]")
+
+    # 2b. Optional displacement sweep (SWEEP=1): how does each het
+    # scheme's error vs dense grow as the candidate walks AWAY from the
+    # reference along one parameter direction? Same machinery as section
+    # 2 (reference still anchored at A); errors are RELATIVE to the
+    # dense delta computed with the same (identity) weighting, so this
+    # measures the expansion's validity radius, not physical lnL units.
+    if os.environ.get("SWEEP", "0") == "1":
+        # SWEEP_PIN_N=1: pin the waveform bandwidth N at the REFERENCE's
+        # value for the reference build and every candidate evaluation --
+        # production semantics (_run_in_model_repeats passes the same
+        # N_vals to setup_in_model_likelihood and every get_add_ll). In
+        # pinned mode the dense truth is UNPINNED, so sighet-vs-chunked
+        # agreement (both pinned) is the production-relevant column.
+        kw_sw = kw
+        if os.environ.get("SWEEP_PIN_N", "0") == "1":
+            from gbgpu.utils.utility import get_N
+            N_pin = int(np.atleast_1d(get_N(
+                np.array([A[0]]), np.array([A[1]]), Nf * Nt * dt))[0])
+            kw_sw = dict(kw)
+            kw_sw["N_vals"] = np.array([N_pin], dtype=np.int32)
+            sighet.clear_in_model()
+            sighet.setup_in_model(holder, A[None, :], zeros,
+                                  N_vals=kw_sw["N_vals"])
+            print(f"  [SWEEP] N pinned at reference value: {N_pin}")
+        print("  [SWEEP] per-direction displacement sweep (ref = A)")
+        directions = [
+            ("lnA",  0, "mul", [-4.0, -2.0, -1.0, 0.1, 0.5, 1.0, 1.5, 2.0, 4.0, 8.0]),
+            ("phi0", PHYS_IDX_PHI0, "add", [0.1, 0.5, 1.0, 2.0, 3.0]),
+            ("iota", 5, "add", [0.05, 0.2, 0.5, 1.0, 2.0]),
+            ("psi",  6, "add", [0.05, 0.2, 0.5, 1.0, 1.5]),
+            ("f0_layers", 1, "addf", [0.05, 0.2, 0.5, 1.0]),
+        ]
+        for name, idx, mode, steps in directions:
+            for s in steps:
+                p = A.copy()
+                if mode == "mul":
+                    p[idx] *= np.exp(s)
+                elif mode == "addf":
+                    p[idx] += s * layer_df
+                else:
+                    p[idx] += s
+                dh_d, hh_d = dense_terms(p)
+                delta_d = norm * (dh_d - 0.5 * hh_d)
+                eng_c.get_ll(holder, p[None, :], phase_maximize=False, **kw_sw)
+                delta_c = float(eng_c.d_h_out[0] - 0.5 * eng_c.h_h_out[0])
+                eng_s.get_ll(holder, p[None, :], phase_maximize=False, **kw_sw)
+                delta_s = float(eng_s.d_h_out[0] - 0.5 * eng_s.h_h_out[0])
+                scale = abs(delta_d) if abs(delta_d) > 0 else 1.0
+                scale_c = abs(delta_c) if abs(delta_c) > 0 else 1.0
+                print(f"  SWEEP {name:9s} +{s:<5g} |delta_dense|={abs(delta_d):.3e} "
+                      f"chunked rel={abs(delta_c - delta_d) / scale:.2e} "
+                      f"sighet rel={abs(delta_s - delta_d) / scale:.2e} "
+                      f"sighet-vs-chunked rel={abs(delta_s - delta_c) / scale_c:.2e}")
+        # combined ridge-like excursion: amplitude + phase + polarization
+        p = A.copy()
+        p[0] *= np.exp(2.0)
+        p[PHYS_IDX_PHI0] += 1.0
+        p[6] += 0.5
+        dh_d, hh_d = dense_terms(p)
+        delta_d = norm * (dh_d - 0.5 * hh_d)
+        eng_c.get_ll(holder, p[None, :], phase_maximize=False, **kw)
+        delta_c = float(eng_c.d_h_out[0] - 0.5 * eng_c.h_h_out[0])
+        eng_s.get_ll(holder, p[None, :], phase_maximize=False, **kw)
+        delta_s = float(eng_s.d_h_out[0] - 0.5 * eng_s.h_h_out[0])
+        scale = abs(delta_d) if abs(delta_d) > 0 else 1.0
+        print(f"  SWEEP combined(lnA+2,phi0+1,psi+.5) |delta_dense|={abs(delta_d):.3e} "
+              f"chunked rel={abs(delta_c - delta_d) / scale:.2e} "
+              f"sighet rel={abs(delta_s - delta_d) / scale:.2e}")
 
     # 3. Phase-max through the mixin on the sig-het path: internal
     # consistency (|D| equals the plain d_h at phi0 + angle).

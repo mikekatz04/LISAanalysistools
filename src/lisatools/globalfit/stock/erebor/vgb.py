@@ -107,6 +107,13 @@ class VGBSettings(GBSettings):
     sighet_n_sparse_fd: int = dataclasses.field(
         default_factory=env_default("SIGHET_N_SPARSE_FD", 1024, int)
     )
+    # Heterodyne-ratio magnitude clip; 0 = disabled (the kernel's FLOOR_EPS
+    # guards the divide-by-small). A positive value silently saturates any
+    # candidate whose amplitude ratio vs the fixed reference exceeds it —
+    # diagnostic only, never for sampling runs.
+    sighet_max_r: float = dataclasses.field(
+        default_factory=env_default("SIGHET_MAX_R", 0.0, float)
+    )
     # (nleaves, 3) per-leaf fixed [f0 (mHz), alpha, sin_delta] in SAMPLING
     # units, ordered like VGB_FIXED_BASIS; feeds the per-leaf fill list.
     fixed_params: typing.Optional[typing.Any] = None
