@@ -506,7 +506,7 @@ def _ckpt_clear(parts_dir, prefix):
 
 
 def _ckpt_secs():
-    return float(os.environ.get("FSTAT_CKPT_SECS", "300"))
+    return float(os.environ.get("FSTAT_CKPT_SECS", "60"))
 
 
 def _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params, label="", ckpt=None):
@@ -532,20 +532,38 @@ def _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params, label="", ckpt=None):
     F_prev, start = _ckpt_load(ckpt, n, fp)
     if F_prev is not None and start > 0:
         F[:start] = xp.asarray(F_prev[:start])
+    if ckpt and start == 0:
+        # Write the progress file up front (done=0): its presence confirms
+        # checkpointing is armed and where the parts live -- and a very early
+        # death still leaves a valid (empty) resume point.
+        _ckpt_save(ckpt, np.empty(0), 0, n, fp)
+        print(f"[ckpt] progress file: {ckpt}.progress.npz "
+              f"(every {_ckpt_secs():.0f}s + on interrupt)", flush=True)
     t0 = time.time()
     last = t0
     last_ckpt = t0
-    for s in range(start, n, batch):
-        e = min(s + batch, n)
-        N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
-        F[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
-        if time.time() - last > 30:
-            last = time.time()
-            print(f"[sweep{label}] {e}/{n} evals "
-                  f"({time.time() - t0:.0f}s)", flush=True)
-        if ckpt and e < n and time.time() - last_ckpt > _ckpt_secs():
-            last_ckpt = time.time()
-            _ckpt_save(ckpt, _to_host(F[:e]), e, n, fp)
+    done = start
+    try:
+        for s in range(start, n, batch):
+            e = min(s + batch, n)
+            N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
+            F[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
+            done = e
+            if time.time() - last > 30:
+                last = time.time()
+                print(f"[sweep{label}] {e}/{n} evals "
+                      f"({time.time() - t0:.0f}s)", flush=True)
+            if ckpt and e < n and time.time() - last_ckpt > _ckpt_secs():
+                last_ckpt = time.time()
+                _ckpt_save(ckpt, _to_host(F[:e]), e, n, fp)
+                print(f"[ckpt] saved {e}/{n} rows", flush=True)
+    except BaseException:
+        # Ctrl-C / SIGTERM / OOM between cadence saves: keep every completed
+        # row (SIGKILL is the only death the cadence alone must cover).
+        if ckpt and done > start:
+            _ckpt_save(ckpt, _to_host(F[:done]), done, n, fp)
+            print(f"[ckpt] interrupt: saved {done}/{n} rows", flush=True)
+        raise
     if ckpt and start < n:
         _ckpt_save(ckpt, _to_host(F), n, n, fp)
     print(f"[sweep{label}] {n} evals in one chunked stream "
@@ -1160,28 +1178,41 @@ def run_stacked_peak_sweep(gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax,
     F_prev, start = _ckpt_load(ckpt, n_total, fp)
     if F_prev is not None and start > 0:
         F_flat[:start] = xp.asarray(F_prev[:start])
+    if ckpt and start == 0:
+        _ckpt_save(ckpt, np.empty(0), 0, n_total, fp)
+        print(f"[ckpt] progress file: {ckpt}.progress.npz "
+              f"(every {_ckpt_secs():.0f}s + on interrupt)", flush=True)
     t0 = time.time()
     last = t0
     last_ckpt = t0
-    for s in range(start, n_total, batch):
-        e = min(s + batch, n_total)
-        k, i0, i1, i2, i3 = xp.unravel_index(xp.arange(s, e), node_shape)
-        pr = xp.zeros((e - s, 9), dtype=xp.float64)
-        pr[:, 0] = 1e-22
-        pr[:, 1] = (f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
-        pr[:, 2] = xp.asarray(get_fdot(f=pr[:, 1], Mc=mc_d[i1]))
-        pr[:, 5] = 0.5 * np.pi
-        pr[:, 7] = al_d[i2]
-        pr[:, 8] = xp.arcsin(sd_d[i3])
-        N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(pr, wdm_holder)
-        F_flat[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
-        if time.time() - last > 30:
-            last = time.time()
-            print(f"[stageB] {e}/{n_total} evals ({time.time() - t0:.0f}s)",
-                  flush=True)
-        if ckpt and e < n_total and time.time() - last_ckpt > _ckpt_secs():
-            last_ckpt = time.time()
-            _ckpt_save(ckpt, _to_host(F_flat[:e]), e, n_total, fp)
+    done = start
+    try:
+        for s in range(start, n_total, batch):
+            e = min(s + batch, n_total)
+            k, i0, i1, i2, i3 = xp.unravel_index(xp.arange(s, e), node_shape)
+            pr = xp.zeros((e - s, 9), dtype=xp.float64)
+            pr[:, 0] = 1e-22
+            pr[:, 1] = (f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
+            pr[:, 2] = xp.asarray(get_fdot(f=pr[:, 1], Mc=mc_d[i1]))
+            pr[:, 5] = 0.5 * np.pi
+            pr[:, 7] = al_d[i2]
+            pr[:, 8] = xp.arcsin(sd_d[i3])
+            N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(pr, wdm_holder)
+            F_flat[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
+            done = e
+            if time.time() - last > 30:
+                last = time.time()
+                print(f"[stageB] {e}/{n_total} evals ({time.time() - t0:.0f}s)",
+                      flush=True)
+            if ckpt and e < n_total and time.time() - last_ckpt > _ckpt_secs():
+                last_ckpt = time.time()
+                _ckpt_save(ckpt, _to_host(F_flat[:e]), e, n_total, fp)
+                print(f"[ckpt] saved {e}/{n_total} rows", flush=True)
+    except BaseException:
+        if ckpt and done > start:
+            _ckpt_save(ckpt, _to_host(F_flat[:done]), done, n_total, fp)
+            print(f"[ckpt] interrupt: saved {done}/{n_total} rows", flush=True)
+        raise
     if ckpt and start < n_total:
         _ckpt_save(ckpt, _to_host(F_flat), n_total, n_total, fp)
     print(f"[stageB] {n_total} evals in one chunked stream (batch={batch}, "
