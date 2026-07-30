@@ -12,3 +12,4 @@ from .gbspecialstretch import (
 from .globalfitmove import GFCombineMove, GlobalFitMove, Move, MoveBuildContext
 from .mbhspecialmove import MBHSpecialMove, TDMBHSpecialMove
 from .psdmove import PSDMove, MultiGPUPSDMove
+from .sobbhspecialmove import SOBBHChunkedLikeMove

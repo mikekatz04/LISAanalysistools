@@ -928,6 +928,40 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             coords_in, data_index, **self.waveform_like_kwargs
         )
 
+    def _record_leaf_inner_products(self, new_state, add_coords_in, leaf):
+        """Record this leaf's cold-chain ``<d|h>``, ``<h|h>`` on the sub-state.
+
+        Called once per leaf at the end of the in-model block, just before
+        the accepted cold-chain sources are folded back into the residual
+        (the likelihood setup for this leaf is still bound). The base
+        implementation pays one extra ``nwalkers``-row evaluation through
+        :meth:`compute_acs_like` so each container stashes
+        ``last_d_h``/``last_h_h`` (the DCGA kernel path records nothing).
+        Fast-likelihood subclasses override this to record from their own
+        kernel's inner-product outputs instead.
+
+        Args:
+            new_state: The move's working :class:`GFState` (its sub-state
+                receives the values).
+            add_coords_in: Waveform-basis cold-chain coords for this leaf,
+                shape ``(nwalkers, ndim)``.
+            leaf: Leaf index being recorded.
+        """
+        _sub = (getattr(new_state, "sub_states", None) or {}).get(self.branch_name)
+        if _sub is None or getattr(_sub, "d_h", None) is None:
+            return
+        self.compute_acs_like(
+            add_coords_in,
+            np.arange(self.nwalkers, dtype=np.int32),
+            **self.waveform_like_kwargs,
+        )
+        for _w in range(self.nwalkers):
+            _d_h_w = getattr(self.acs[_w], "last_d_h", None)
+            _h_h_w = getattr(self.acs[_w], "last_h_h", None)
+            if _d_h_w is not None and _h_h_w is not None:
+                _sub.d_h[_w, leaf] = float(np.real(_d_h_w))
+                _sub.h_h[_w, leaf] = float(np.real(_h_h_w))
+
     def setup(self, model, state):
         """Per-iteration setup hook (no-op by default)."""
         return
@@ -1529,24 +1563,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # traced walker (built before it is folded back in).
                 _dbg_tmpl = self._dbg_template(add_coords_in[_dbg_w], _dbg_w)
 
-            # Record this leaf's cold-chain <d|h>, <h|h> on the sub-state:
-            # one extra nwalkers-row evaluation against the leaf-isolated
-            # residual (the likelihood setup for this leaf is still bound).
-            # Goes through compute_acs_like directly so each container stashes
-            # last_d_h/last_h_h (the DCGA kernel path records nothing).
-            _sub = (getattr(new_state, "sub_states", None) or {}).get(self.branch_name)
-            if _sub is not None and getattr(_sub, "d_h", None) is not None:
-                self.compute_acs_like(
-                    add_coords_in,
-                    np.arange(self.nwalkers, dtype=np.int32),
-                    **self.waveform_like_kwargs,
-                )
-                for _w in range(self.nwalkers):
-                    _d_h_w = getattr(self.acs[_w], "last_d_h", None)
-                    _h_h_w = getattr(self.acs[_w], "last_h_h", None)
-                    if _d_h_w is not None and _h_h_w is not None:
-                        _sub.d_h[_w, leaf] = float(np.real(_d_h_w))
-                        _sub.h_h[_w, leaf] = float(np.real(_h_h_w))
+            self._record_leaf_inner_products(new_state, add_coords_in, leaf)
 
             # fold the (updated) cold-chain sources back INTO the fit:
             # subtract their templates from the residual (r = d -> d - h_new).
