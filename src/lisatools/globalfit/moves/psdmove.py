@@ -1,4 +1,10 @@
-"""MCMC move that updates the LISA noise PSD (and optional galactic foreground).
+"""MCMC move that updates the LISA noise model (psd / galfor / sgwb branches).
+
+Noise-move split (2026-07): ONE parameterized move class. Each instance
+samples ``sampled_branches`` under its OWN temperature ladder while the
+likelihood always evaluates the full noise model, with non-sampled noise
+branches frozen at their cold-chain rows. ``sampled_branches=None``
+reproduces the historical joint psd+galfor+sgwb move exactly.
 
 stft_tof merge (2026-06): hybrid likelihood routing. The move keeps the
 dev-side domain-agnostic structure (per-walker sensitivity matrices installed
@@ -42,34 +48,59 @@ DEBUG_MODE = False
 
 class PSDMove(GlobalFitMove, StretchMove):
     """
-    Move for sampling over PSD parameters. Can also include galactic foreground parameters if desired.
+    Noise-model move: samples ``sampled_branches`` of the noise model
+    (``psd``, ``galfor``, ``sgwb``) while the likelihood always evaluates the
+    FULL noise model — non-sampled noise branches contribute their cold-chain
+    coordinates (per walker), the same "temper your own ensemble against the
+    cold-chain rest" structure the add/remove source branches use. With the
+    default ``sampled_branches=None`` every noise branch present in the state
+    is sampled jointly (the historical single-joint-move behavior).
 
     Args:
         acs: AnalysisContainerArray containing the data and sensitivity information.
         priors: dictionary of priors for the parameters.
         *args: additional arguments for the Move class.
+        sampled_branches: which noise branches THIS move samples (subset of
+            ``["psd", "galfor", "sgwb"]``). ``None`` samples all present
+            branches jointly. Each move instance carries its own
+            ``temperature_control`` ladder for its sampled block.
         num_repeats: number of times to repeat the move before returning.
         max_logl_mode: if True, will keep running the move until the maximum log likelihood does not change for a certain number of checks. This is useful for finding the maximum likelihood point.
         psd_kwargs: additional keyword arguments for the psd_log_like function.
         sensitivity_backend: instance of XYZSensitivityBackend to use for computing the likelihood.
         psd_transform_fn: TransformContainer for transforming the PSD parameters.
-        galfor_transform_fn: TransformContainer for transforming the galactic foreground parameters.
+        galfor_transform_fn: TransformContainer for transforming the galactic
+            foreground parameters. NOTE the long-standing order convention is
+            preserved as-is: the galfor prior/sampling basis is labelled
+            ``[amp, knee, alpha, Slope1, Slope2]`` while the kernel unpack
+            reads ``[Amp, alpha, f_1, kn, f_2]`` (see
+            :meth:`prepare_likelihood_inputs`; history in the commented
+            reorder block in ``run.py``). Do not reorder here.
+        sgwb_transform_fn: TransformContainer hook for the SGWB parameters
+            (plumbed for symmetry; SGWB coordinates are currently consumed
+            untransformed on the ACA route, matching historical behavior).
         permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
         tolerance: minimum allowed distance between spline knot positions in the sensitivity model.
         **kwargs: additional keyword arguments for the Move class.
     """
+
+    # canonical noise-model branch order (psd is mandatory in the model;
+    # galfor/sgwb optional)
+    NOISE_BRANCHES = ("psd", "galfor", "sgwb")
 
     def __init__(
         self,
         acs: AnalysisContainerArray,
         priors,
         *args,
+        sampled_branches: list = None,
         num_repeats: int = 1,
         max_logl_mode: bool = False,
         psd_kwargs: dict = {},
         sensitivity_backend: XYZSensitivityBackend = None,
         psd_transform_fn: TransformContainer = None,
         galfor_transform_fn: TransformContainer = None,
+        sgwb_transform_fn: TransformContainer = None,
         permute_every: int = 20,
         tolerance: float = 0.0,
         dcga: DomainComputationGroupArray = None,
@@ -101,9 +132,24 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.max_logl_mode = max_logl_mode
         self.starting_now = True
 
+        if sampled_branches is not None:
+            unknown = [b for b in sampled_branches if b not in self.NOISE_BRANCHES]
+            if unknown:
+                raise ValueError(
+                    f"Unknown noise branch(es) {unknown}; sampled_branches must be a "
+                    f"subset of {list(self.NOISE_BRANCHES)}."
+                )
+            # canonical order regardless of input order
+            sampled_branches = [b for b in self.NOISE_BRANCHES if b in sampled_branches]
+        self.sampled_branches = sampled_branches
+        # cold-row snapshot of the non-sampled noise branches, refreshed at
+        # every propose(); empty when this move samples the whole model
+        self._fixed_noise_coords = {}
+
         self.sensitivity_backend = sensitivity_backend
         self.psd_transform_fn = psd_transform_fn
         self.galfor_transform_fn = galfor_transform_fn
+        self.sgwb_transform_fn = sgwb_transform_fn
 
         self.permute_every = permute_every
         self.tolerance = tolerance
@@ -123,6 +169,63 @@ class PSDMove(GlobalFitMove, StretchMove):
     @property
     def run_threaded(self) -> bool:
         return self._run_threaded
+
+    # ------------------------------------------------------------------
+    # sampled-vs-fixed noise-branch resolution
+    # ------------------------------------------------------------------
+
+    def _noise_model_branches(self, state) -> list:
+        """Noise branches present in ``state`` (the full noise MODEL)."""
+        return [key for key in self.NOISE_BRANCHES if key in state.branches_coords]
+
+    def _resolve_sampled(self, state) -> list:
+        """Branches THIS move samples; validated against the state's model."""
+        model = self._noise_model_branches(state)
+        if self.sampled_branches is None:
+            return model
+        missing = [b for b in self.sampled_branches if b not in model]
+        if missing:
+            raise ValueError(
+                f"PSDMove configured to sample {self.sampled_branches} but branch(es) "
+                f"{missing} are not in the state (noise model: {model})."
+            )
+        return list(self.sampled_branches)
+
+    def _merged_noise_rows(self, coords, logp_keep, walker_inds_keep) -> dict:
+        """Per-row full-noise-model coordinates (sampling basis).
+
+        Sampled branches come from the proposal ``coords`` dict (rows
+        surviving the prior cut); fixed branches come from the cold-row
+        snapshot taken at ``propose`` entry, indexed by each row's physical
+        walker. This is the single seam both likelihood routes consume.
+        """
+        merged = {}
+        for key in self.NOISE_BRANCHES:
+            if key in coords:
+                merged[key] = coords[key][logp_keep][:, 0]
+            elif key in self._fixed_noise_coords:
+                merged[key] = self._fixed_noise_coords[key][walker_inds_keep]
+        return merged
+
+    def _cold_noise_log_prior(self, state) -> np.ndarray:
+        """Sum of ALL noise-branch priors at the cold-row coordinates.
+
+        Written into the engine ``log_prior[0]`` so the cold prior does not
+        flip-flop between per-branch partial priors as split noise moves run
+        in sequence within a stage.
+        """
+        lp = None
+        for key in self._noise_model_branches(state):
+            coords_b = np.asarray(state.branches_coords[key][0])
+            ndim = coords_b.shape[-1]
+            vals = (
+                self.priors[key]
+                .logpdf(coords_b.reshape(-1, ndim))
+                .reshape(coords_b.shape[:2])
+                .sum(axis=-1)
+            )
+            lp = vals if lp is None else lp + vals
+        return lp
 
     # ------------------------------------------------------------------
     # stft_tof kernel fast path
@@ -274,14 +377,18 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         return ll.get() if hasattr(ll, "get") else ll
 
-    def _kernel_fast_path_available(self) -> bool:
+    def _kernel_fast_path_available(self, has_sgwb: bool = False) -> bool:
         """True when the C++ XYZ sensitivity kernel can score this proposal.
 
         Conditions: a sensitivity backend is configured, the data basis is FD
         or STFT (the kernel's two domains — the WDM counterpart is planned in
-        domains.cu), and the ACA holds a single shard (the kernel reads
-        ``linear_data_arr[0]`` directly).
+        domains.cu), the ACA holds a single shard (the kernel reads
+        ``linear_data_arr[0]`` directly), and the noise MODEL carries no sgwb
+        branch — the kernel has no SGWB component, so scoring an sgwb-bearing
+        model through it (sampled or fixed) would silently drop that term.
         """
+        if has_sgwb:
+            return False
         if self.sensitivity_backend is None:
             return False
         basis = self.sensitivity_backend.basis_settings
@@ -354,11 +461,26 @@ class PSDMove(GlobalFitMove, StretchMove):
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
 
-        if self._kernel_fast_path_available():
+        # ``walker_inds`` is broadcast (ntemps, nwalkers) — flatten and mask
+        # to the rows that survived the prior cut. ``BranchSupplemental``'s
+        # ``__getitem__`` expects an integer/slice index, so reach into
+        # ``.holder`` to fetch the named entry.
+        walker_inds_all = np.asarray(supps.holder["walker_inds"]).reshape(logp.shape)
+        walker_inds_keep = walker_inds_all[logp_keep].astype(int)
+
+        # full noise model per row: sampled branches from the proposal,
+        # fixed branches from the cold-row snapshot (per walker)
+        merged = self._merged_noise_rows(coords, logp_keep, walker_inds_keep)
+        psd_coords = merged["psd"]
+        has_galfor = "galfor" in merged
+        galfor_coords = merged.get("galfor")
+        has_sgwb = "sgwb" in merged
+        sgwb_coords = merged.get("sgwb")
+
+        if self._kernel_fast_path_available(has_sgwb=has_sgwb):
             # stft_tof fast path: C++ shared-memory kernel.
-            psd_coords = coords["psd"][logp_keep][:, 0]
-            if "galfor" in coords:
-                input_args = [psd_coords, coords["galfor"][logp_keep][:, 0]]
+            if has_galfor:
+                input_args = [psd_coords, galfor_coords]
             else:
                 input_args = [psd_coords]
 
@@ -367,19 +489,6 @@ class PSDMove(GlobalFitMove, StretchMove):
 
             self.prev_logl = logl.copy()
             return logl, None
-
-        # ``walker_inds`` is broadcast (ntemps, nwalkers) — flatten and mask
-        # to the rows that survived the prior cut. ``BranchSupplemental``'s
-        # ``__getitem__`` expects an integer/slice index, so reach into
-        # ``.holder`` to fetch the named entry.
-        walker_inds_all = np.asarray(supps.holder["walker_inds"]).reshape(logp.shape)
-        walker_inds_keep = walker_inds_all[logp_keep]
-
-        psd_coords = coords["psd"][logp_keep][:, 0]
-        has_galfor = "galfor" in coords
-        galfor_coords = coords["galfor"][logp_keep][:, 0] if has_galfor else None
-        has_sgwb = "sgwb" in coords
-        sgwb_coords = coords["sgwb"][logp_keep][:, 0] if has_sgwb else None
 
         # Cache and restore the per-walker sensitivity matrix so we don't
         # corrupt the state seen by other moves. After all proposals are
@@ -410,7 +519,12 @@ class PSDMove(GlobalFitMove, StretchMove):
         return logl, None
 
     def compute_log_prior(self, branches_coords, *args, **kwargs):
-        """Sum the per-branch log priors over PSD and (optional) galfor coordinates.
+        """Sum the per-branch log priors over THIS move's sampled branches.
+
+        Fixed (non-sampled) noise branches are constants during this move's
+        Metropolis-Hastings updates, so their priors cancel in the acceptance
+        ratio and must not be summed here (a split move using the joint prior
+        would double-count them against another noise move).
 
         Args:
             branches_coords: Branch-keyed dict of coordinates.
@@ -420,8 +534,10 @@ class PSDMove(GlobalFitMove, StretchMove):
         """
         # wait to get ntemps, nwalkers
         logp = None
-        for key in ["psd", "galfor", "sgwb"]:
+        for key in self.NOISE_BRANCHES:
             if key not in branches_coords:
+                continue
+            if self.sampled_branches is not None and key not in self.sampled_branches:
                 continue
             ntemps, nwalkers, _, ndim = branches_coords[key].shape
             if logp is None:
@@ -517,31 +633,50 @@ class PSDMove(GlobalFitMove, StretchMove):
         return state, accepted
 
     def propose(self, model, state):
-        """Propose a PSD update and refresh per-walker sensitivity matrices.
+        """Propose a noise-model update and refresh per-walker sensitivity matrices.
 
-        Builds a temporary :class:`GFState` containing only the PSD/galfor
-        branches, runs the inner stretch-move loop, then writes the accepted
-        coordinates back into a copy of ``state`` and refreshes each walker's
+        Builds a temporary :class:`GFState` containing only THIS move's
+        sampled noise branches (non-sampled noise branches are frozen at
+        their cold rows and merged into every likelihood evaluation), runs
+        the inner stretch-move loop, then writes the accepted coordinates
+        back into a copy of ``state`` and refreshes each walker's
         sensitivity matrix in :attr:`acs`.
 
         Returns:
             Tuple ``(new_state, accepted)``.
         """
-        noise_branches = [
-            key for key in ["psd", "galfor", "sgwb"] if key in state.branches_coords
-        ]
+        model_branches = self._noise_model_branches(state)
+        noise_branches = self._resolve_sampled(state)
 
-        # cold-row agreement between the main state and these branches'
-        # sub-states (GF_SUBSTATE_CHECK=0 disables)
-        self._check_substate_consistency(state, noise_branches)
+        # cold-row agreement between the main state and the noise-model
+        # branches' sub-states — fixed inputs included, they feed the
+        # likelihood too (GF_SUBSTATE_CHECK=0 disables)
+        self._check_substate_consistency(state, model_branches)
         engine_ntemps = state.log_like.shape[0]
 
-        # The working ensembles are the SUB-STATES' tempered branches (the
-        # joint module ladder); the main state carries only the engine's
+        # freeze the non-sampled noise branches at their cold rows for the
+        # duration of this proposal block (consumed by _merged_noise_rows)
+        self._fixed_noise_coords = {
+            key: np.asarray(state.branches_coords[key][0, :, 0]).copy()
+            for key in model_branches
+            if key not in noise_branches
+        }
+
+        # The working ensembles are the SUB-STATES' tempered branches (this
+        # move's module ladder); the main state carries only the engine's
         # cold chain.
         tmp_branches_coords = {
             key: self._work_branch(state, key).coords for key in noise_branches
         }
+
+        shapes = {key: tmp_branches_coords[key].shape[:2] for key in noise_branches}
+        if len(set(shapes.values())) != 1:
+            raise ValueError(
+                "Noise branches sampled by ONE move must share (ntemps, nwalkers); "
+                f"got {shapes}. Match the branches' ntemps knobs "
+                "(PSD_NTEMPS / GALFOR_NTEMPS / SGWB_NTEMPS) or sample them "
+                "with separate moves."
+            )
 
         # move-local supplemental at the MODULE ladder shape (the main
         # state's supplemental is engine-shaped)
@@ -569,7 +704,6 @@ class PSDMove(GlobalFitMove, StretchMove):
         )[0]
         self.starting_now = False
 
-        tmp_coords_check = state.branches["psd"].coords[0, :, 0].copy()
         tmp_model = Model(
             state,
             self.compute_log_like,
@@ -592,22 +726,24 @@ class PSDMove(GlobalFitMove, StretchMove):
             if key not in tmp_state.branches:
                 continue
             # full-ladder write into the sub-state (shared-memory view),
-            # cold row mirrored into the main (engine) state
+            # cold row mirrored into the main (engine) state. Only the
+            # SAMPLED branches are written: each noise branch's sub-state is
+            # owned by the move that samples it (full-noise-model tempered
+            # lnL of ITS ensemble + ITS move's adapted ladder).
             self._work_branch(new_state, key).coords[:] = tmp_state.branches[key].coords[:]
             self._sync_cold_row(new_state, key)
             sub = (new_state.sub_states or {}).get(key)
             if sub is not None and getattr(sub, "tempered_initialized", False):
-                # the module-tempered record lives on the sub-states: the
-                # joint ll/prior rows and the (shared) adapted ladder
                 sub.log_like[:] = tmp_state.log_like[:]
                 sub.log_prior[:] = tmp_state.log_prior[:]
                 if hasattr(sub, "betas") and sub.betas is not None:
                     sub.betas[:] = self.temperature_control.betas
 
         # the engine state keeps only the cold row (row 0 rewritten from the
-        # refreshed ACS below)
+        # refreshed ACS below). The cold prior is the FULL noise-model sum so
+        # it doesn't flip-flop between partial priors as split moves run.
         new_state.log_like[0] = tmp_state.log_like[0]
-        new_state.log_prior[0] = tmp_state.log_prior[0]
+        new_state.log_prior[0] = self._cold_noise_log_prior(new_state)
 
         # TODO: check speed of this? (needed?)
         nwalkers = len(self.acs)
