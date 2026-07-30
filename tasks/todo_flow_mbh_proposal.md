@@ -22,6 +22,59 @@ conditioning with the **kept** config wins (`train_noise=0`,
 `periodic_in_cholesky=True`, buffer 6000). Kept: `base_scale`/`active_betas`,
 the frame fix, and the `splice/train/score` offline gate driver.
 
+## FIX (2026-07-30): periodic alias sum — the flow density is now normalized
+
+Root cause found while answering "should the angles be reparametrized?". A
+periodic coordinate is only defined modulo its period, so `WhiteningTransform`'s
+coords → latent map is many-to-one and the density of the folded variable is the
+**wrapped** density `sum_k q_Z(z + delta_k)`. The code evaluated only `k = 0`,
+i.e. one term of a positive sum, so:
+
+- the density **under-integrated over a period** (toy: 0.730 instead of 1.0);
+- `sample_and_log_prob` (density at the alias it DREW) disagreed with
+  `log_prob` (density at `k = 0`) — and the MH statistic takes the proposal's
+  density from the first and the current point's from the second. Measured on
+  the real step-290 checkpoints: **up to 590 nats** on MBH (1.4–3.2% of draws on
+  leaves 3/4/5, 0.15% on L1), and **0** on EMRI and MBH L0/L2.
+
+`CircularShiftTransform._inverse`'s docstring had documented this deliberately
+as "up to a few nats" — the real magnitude is 2 orders of magnitude larger, so
+the recorded tradeoff rested on a bad estimate.
+
+Fixed in Eryn: `WhiteningTransform.periodic_alias_offsets` (exact latent offsets,
+derived from the affine tail) + `ZukoFlow.periodic_aliases` (default 1) summing
+the density over the alias lattice in `log_prob` / `sample_and_log_prob` /
+`log_prob_and_grad`. Post-fix the self-inconsistency is **identically zero** on
+every leaf of both branches (alias-invariance makes the two paths the same
+function), and the toy integrates to 1.000.
+
+**Why the offsets explain everything measured**: the offset norm is the latent
+distance to the nearest alias. MBH L3/4/5 have norms **3.9–19** — the whole
+period spans only ~4–19 latent sigma, so aliasing is first-order there. MBH
+L0/L2 (257–6612) and both EMRI leaves (22–1748) are far, hence their exactly
+zero defect. `periodic_in_cholesky=True` is what compresses those periods.
+
+**The axis shell is NOT sufficient** (my first attempt): on L3/4/5 it differs
+from the full 3^P lattice by 43–55 nats, because with three short periods the
+multi-dimension aliases contribute too. `order=2` adds < 0.2 nats, so order 1 +
+full lattice is the right setting. The full lattice is made affordable by a
+per-batch prune (drop aliases with `||delta|| > 2 max||z|| + 5 sqrt(dims)`),
+validated **bit-exact** (0.000e+00) against the unpruned lattice on all 8 leaves.
+
+Cost, 1500 points, quiet machine (legacy baseline ~50–100 ms):
+
+| leaf | aliases kept | time |
+|---|---|---|
+| MBH L0 / L2 | 1 / 1 | 74 / 51 ms |
+| MBH L1 | 7 | 309 ms |
+| MBH L3 / L4 / L5 | 21 / 27 / 27 | 899 / 1361 / 1333 ms |
+| EMRI L0 / L1 | 3 / 1 | 142 / 49 ms |
+
+So EMRI is free and MBH L3/4/5 pay ~20x on the density call — **watch step time
+on relaunch**; `periodic_aliases=0` restores the old speed and old bug. Honest
+scope: this is a correctness/normalization fix worth <= 3% of proposals on
+leaves sitting at 0.005–0.02, NOT an acceptance fix.
+
 ## Measured facts (splice test — decides everything below)
 
 Offline rebuild of the run's residuals + exact move `compute_like` path,

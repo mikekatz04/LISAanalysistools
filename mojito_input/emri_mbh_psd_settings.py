@@ -507,6 +507,16 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     # sweep that fixed train_noise=0 and this buffer/whitening config; the
     # per-mode mixture variant it also explored was pruned (measured +0.04
     # overall, failing the >=0.08 gate on the multimodal leaves 3/4/5).
+    #
+    # periodic_aliases (ZukoFlow default 1) sums the coords density over the
+    # periodic alias lattice, which is what makes it normalized over the period.
+    # It matters most HERE: periodic_in_cholesky compresses the sky/phase periods
+    # to only ~4-19 latent sigma on leaves 3/4/5, so the flow spills across the
+    # window and the legacy single-image density was off by up to 590 nats on
+    # 1.4-3.2% of draws. Cost: those leaves keep 21-27 aliases (~20x on the
+    # density call, ~1.3 s / 1500 pts); leaves 0/2 collapse to 1 alias and are
+    # free. WATCH STEP TIME on relaunch -- set periodic_aliases=0 to trade the
+    # normalization back for the old speed.
     flow = ZukoFlow(
         dims=len(input_basis),
         flow_class="NSF",
@@ -788,6 +798,11 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         flow_class="NSF",
         device="cpu",  # proposal-side net; training runs on the executor's GPU
         conditioning=OneHotLeafConditioning(nleaves_max=nleaves_max_emri),
+        # periodic_aliases (ZukoFlow default 1) is FREE here: the 4 EMRI phase
+        # periods are 22-1748 latent sigma wide, so every alias is pruned and
+        # the density collapses to a single evaluation (measured single-image
+        # error exactly 0 on both leaves). Kept on so the density stays
+        # normalized if a future fit compresses those periods.
         # periodic_in_cholesky: the 4 EMRI phase angles carry razor
         # correlations with the intrinsic parameters; whitening them jointly
         # lifted exact-MH offline acceptance 0.43 -> 0.50 (2026-07-14).
