@@ -46,6 +46,15 @@ VGB_SAMPLED_BASIS = ["A", "fdot", "phi0", "cos_iota", "psi"]
 #: Fixed per-leaf parameter names (per-leaf fill keys, besides ``fddot``).
 VGB_FIXED_BASIS = ["f0", "alpha", "sin_delta"]
 
+#: Distance-basis variants (``VGBSettings.sample_distance``): slot 0 samples
+#: the luminosity DISTANCE (kpc) with the amplitude DERIVED from the
+#: per-leaf ``(f0, Mc)`` through the factory's astro package, and the
+#: ``fdot_astro_ratio`` column carries the frequency-derivative freedom
+#: (``fdot = fdot_gr(f0, Mc) * (1 + r)``) so mass-transfer systems stay
+#: reachable. Mc joins the per-leaf fills (known binaries).
+VGB_SAMPLED_BASIS_DIST = ["dist", "phi0", "cos_iota", "psi", "fdot_astro_ratio"]
+VGB_FIXED_BASIS_DIST = ["f0", "alpha", "sin_delta", "Mc"]
+
 
 @dataclasses.dataclass
 class VGBSettings(GBSettings):
@@ -64,6 +73,17 @@ class VGBSettings(GBSettings):
     # fdot is sampled directly (no chirp-mass basis for known binaries)
     use_chirp_mass: bool = False
     use_astrophysical_f0_mc_prior: bool = False
+    # Distance sampling basis (default ON): slot 0 = luminosity distance
+    # (kpc) with A DERIVED from the per-leaf (f0, Mc) catalogue values; the
+    # fdot_astro_ratio column keeps fdot free (mass transfer reachable).
+    # Named ``sample_distance`` because the inherited ``use_distance`` is a
+    # read-only property of the GB astro-package switches. Prior boxes:
+    # inherited ``dist_lims`` (kpc) and ``fdot_astro_ratio_max``
+    # (U[-max, max] on r). VGB_SAMPLE_DISTANCE=0 reverts to the (lnA, fdot)
+    # basis.
+    sample_distance: bool = dataclasses.field(
+        default_factory=env_default("VGB_SAMPLE_DISTANCE", True, bool)
+    )
     # Red-blue stretch sweeps per iteration. VGBSpecialStretchMove runs each
     # repeat as eryn's sequential red-blue split (even-parity walkers move
     # against the current odd half, then odd against the UPDATED even half,
@@ -178,7 +198,11 @@ class VGBSetup(GBSetup):
             )
         fixed = np.asarray(self.fixed_params, dtype=float)
         n_leaves = fixed.shape[0]
-        assert fixed.shape == (n_leaves, len(VGB_FIXED_BASIS))
+        _fixed_basis = (VGB_FIXED_BASIS_DIST if self.sample_distance
+                        else VGB_FIXED_BASIS)
+        _sampled_basis = (VGB_SAMPLED_BASIS_DIST if self.sample_distance
+                          else VGB_SAMPLED_BASIS)
+        assert fixed.shape == (n_leaves, len(_fixed_basis))
         if self.nleaves_max is not None:
             assert int(self.nleaves_max) == n_leaves, (
                 f"fixed_params rows ({n_leaves}) != nleaves_max "
@@ -188,22 +212,35 @@ class VGBSetup(GBSetup):
         if self.transform is None:
             # One per-leaf fill dict per source, keys shared across leaves
             # (asserted by Eryn). Values in SAMPLING units — the factory's
-            # registered transforms convert the filled columns.
+            # registered transforms convert the filled columns. In the
+            # distance basis the astro quad transform EMITS fddot (exactly
+            # 0), so the fills must not touch that slot.
             fill_list = [
                 {
-                    "fddot": 0.0,
+                    **({} if self.sample_distance else {"fddot": 0.0}),
                     **{
                         name: fixed[leaf, j]
-                        for j, name in enumerate(VGB_FIXED_BASIS)
+                        for j, name in enumerate(_fixed_basis)
                     },
                 }
                 for leaf in range(n_leaves)
             ]
-            self.transform = make_gb_transform_container(
-                use_chirp_mass=False,
-                input_basis=list(VGB_SAMPLED_BASIS),
-                fill_dict=fill_list,
-            )
+            if self.sample_distance:
+                _mc = fixed[:, _fixed_basis.index("Mc")]
+                self.transform = make_gb_transform_container(
+                    use_chirp_mass=True,
+                    use_fdot_astro=True,
+                    use_distance=True,
+                    input_basis=list(_sampled_basis),
+                    fill_dict=fill_list,
+                    mc_lims=(0.5 * float(_mc.min()), 2.0 * float(_mc.max())),
+                )
+            else:
+                self.transform = make_gb_transform_container(
+                    use_chirp_mass=False,
+                    input_basis=list(_sampled_basis),
+                    fill_dict=fill_list,
+                )
 
         if self.periodic is None:
             self.periodic = {"vgb": {"phi0": 2 * np.pi, "psi": np.pi}}
@@ -211,31 +248,89 @@ class VGBSetup(GBSetup):
         if self.priors is None:
             from eryn.prior import ProbDistContainer, uniform_dist
 
-            # Global uniforms over the 5 sampled params. fdot_lims must
-            # cover every catalogue fdot (checked below with margin).
-            cat_fdot = None
-            if self.injection is not None:
-                inj = np.asarray(self.injection, dtype=float)
-                cat_fdot = inj[:, VGB_SAMPLED_BASIS.index("fdot")]
-                if not (
-                    (cat_fdot > self.fdot_lims[0]).all()
-                    and (cat_fdot < self.fdot_lims[1]).all()
-                ):
-                    raise ValueError(
-                        "VGB fdot prior "
-                        f"[{self.fdot_lims[0]:.3e}, {self.fdot_lims[1]:.3e}] "
-                        "does not cover the catalogue fdot range "
-                        f"[{cat_fdot.min():.3e}, {cat_fdot.max():.3e}]; "
-                        "widen VGBSettings.fdot_lims."
+            if self.sample_distance:
+                # Global uniforms over [dist, phi0, cos_iota, psi, r]. The
+                # r box must cover every catalogue ratio (r_cat = 0 exactly
+                # for GW-driven catalogues) and the dist box every
+                # catalogue distance.
+                _rmax = float(self.fdot_astro_ratio_max)
+                if self.injection is not None:
+                    inj = np.asarray(self.injection, dtype=float)
+                    _d = inj[:, VGB_SAMPLED_BASIS_DIST.index("dist")]
+                    _r = inj[:, VGB_SAMPLED_BASIS_DIST.index(
+                        "fdot_astro_ratio")]
+                    if not ((_d > self.dist_lims[0]).all()
+                            and (_d < self.dist_lims[1]).all()):
+                        raise ValueError(
+                            f"VGB dist prior {self.dist_lims} kpc does not "
+                            "cover the catalogue distances "
+                            f"[{_d.min():.3e}, {_d.max():.3e}] kpc."
+                        )
+                    if not (np.abs(_r) < _rmax).all():
+                        raise ValueError(
+                            f"VGB fdot_astro_ratio prior [-{_rmax}, {_rmax}]"
+                            " does not cover the catalogue ratios "
+                            f"[{_r.min():.3f}, {_r.max():.3f}]; raise "
+                            "VGBSettings.fdot_astro_ratio_max."
+                        )
+                # Distance prior MATCHES the GB distance-basis setup
+                # (gb.py, use_distance branch): the placeholder there is a
+                # 3-D (dist, alpha, sin_delta) joint of independent
+                # uniforms with dist ~ U(dist_lims) LINEAR in kpc. VGB sky
+                # is per-leaf fixed, so the samplable piece is exactly that
+                # dist marginal — same box, same linear uniform. When the
+                # real Galaxy 3-D distribution replaces the placeholder
+                # (GBSettings.sky_dist_distribution), VGB needs the
+                # PER-LEAF conditional p(dist | alpha_i, sin_delta_i),
+                # which the shared prior container cannot express yet —
+                # same documented follow-up as the GB birth container's
+                # independent-U(dist) draw. Fail loudly rather than
+                # silently ignoring the joint.
+                if self.sky_dist_distribution is not None:
+                    raise NotImplementedError(
+                        "VGB distance basis with a joint "
+                        "sky_dist_distribution needs per-leaf conditional "
+                        "p(dist | sky) priors (not yet supported); unset "
+                        "it or use VGB_SAMPLE_DISTANCE=0."
                     )
-            priors_vgb = {
-                0: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
-                1: uniform_dist(self.fdot_lims[0], self.fdot_lims[1]),
-                2: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
-                # cos is DECREASING on [0, pi]: sort defensively.
-                3: uniform_dist(*np.sort(np.cos(self.iota_lims))),
-                4: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
-            }
+                priors_vgb = {
+                    0: uniform_dist(self.dist_lims[0], self.dist_lims[1]),
+                    1: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
+                    # cos is DECREASING on [0, pi]: sort defensively.
+                    2: uniform_dist(*np.sort(np.cos(self.iota_lims))),
+                    3: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
+                    # r ~ U[-M, M] in the SAMPLING basis (no in-sampler
+                    # Jacobian): induced physical prior at fixed (f0, Mc)
+                    # is uniform in fdot — same convention as GB.
+                    4: uniform_dist(-_rmax, _rmax),
+                }
+            else:
+                # Global uniforms over the 5 sampled params. fdot_lims must
+                # cover every catalogue fdot (checked below with margin).
+                cat_fdot = None
+                if self.injection is not None:
+                    inj = np.asarray(self.injection, dtype=float)
+                    cat_fdot = inj[:, VGB_SAMPLED_BASIS.index("fdot")]
+                    if not (
+                        (cat_fdot > self.fdot_lims[0]).all()
+                        and (cat_fdot < self.fdot_lims[1]).all()
+                    ):
+                        raise ValueError(
+                            "VGB fdot prior "
+                            f"[{self.fdot_lims[0]:.3e}, "
+                            f"{self.fdot_lims[1]:.3e}] "
+                            "does not cover the catalogue fdot range "
+                            f"[{cat_fdot.min():.3e}, {cat_fdot.max():.3e}]; "
+                            "widen VGBSettings.fdot_lims."
+                        )
+                priors_vgb = {
+                    0: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
+                    1: uniform_dist(self.fdot_lims[0], self.fdot_lims[1]),
+                    2: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
+                    # cos is DECREASING on [0, pi]: sort defensively.
+                    3: uniform_dist(*np.sort(np.cos(self.iota_lims))),
+                    4: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
+                }
             self.priors = {"vgb": ProbDistContainer(priors_vgb)}
 
         # Shared tail (betas / waveform kwargs / group_proposal_kwargs):
@@ -316,10 +411,54 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
     full_basis = list(make_gb_transform_container(use_chirp_mass=False).input_basis)
     sampled_idx = [full_basis.index(name) for name in VGB_SAMPLED_BASIS]
     fixed_idx = [full_basis.index(name) for name in VGB_FIXED_BASIS]
-
-    vgb.injection = rows[:, sampled_idx]
-    vgb.fixed_params = rows[:, fixed_idx]
     n = rows.shape[0]
+
+    if vgb.sample_distance:
+        # Distance basis: dist/Mc come straight from the catalogue columns
+        # (same sorted-key concatenation order as ``rows``), the ratio from
+        # the catalogue fdot vs the GW-driven fdot_gr(f0, Mc), and
+        # phi0/cos_iota/psi from the standard sampling rows (the phi0 sign
+        # convention stays routed through the container).
+        from .transforms import McDistFdotAstroQuad, gb_amp_from_dist
+
+        def _cat_col(name):
+            return np.concatenate([
+                np.atleast_1d(np.asarray(catalogue[k][name], dtype=float))
+                for k in sorted(catalogue.keys())
+            ])
+
+        # Catalogue LuminosityDistance is in Mpc; the gbgpu amplitude
+        # convention (gb_amp_from_dist) takes kpc. Verified against the
+        # catalogue Amplitude column: the ratio is exactly 1000, and after
+        # conversion the (f0, Mc, d) -> A relation reproduces Amplitude
+        # (hard-checked below, so a future catalogue convention change
+        # fails loudly instead of shifting every injection).
+        d_kpc = _cat_col("LuminosityDistance") * 1e3
+        mc = _cat_col("ChirpMassSSBFrame")
+        f0_hz_rows = rows[:, full_basis.index("f0")] * 1e-3
+        a_phys = np.exp(rows[:, full_basis.index("A")])
+        fdot_phys = rows[:, full_basis.index("fdot")]
+        _, _, fdot_gr, _ = McDistFdotAstroQuad()(
+            d_kpc, f0_hz_rows, mc, np.zeros_like(d_kpc))
+        ratio = fdot_phys / fdot_gr - 1.0
+        rel = np.abs(gb_amp_from_dist(f0_hz_rows, mc, d_kpc) / a_phys - 1.0)
+        if rel.max() > 1e-3:
+            raise ValueError(
+                "VGB catalogue (f0, Mc, dist) does not reproduce the "
+                f"catalogue Amplitude (max rel {rel.max():.3e}); check the "
+                "LuminosityDistance units / amplitude convention."
+            )
+        inj = np.empty((n, len(VGB_SAMPLED_BASIS_DIST)))
+        inj[:, VGB_SAMPLED_BASIS_DIST.index("dist")] = d_kpc
+        for name in ("phi0", "cos_iota", "psi"):
+            inj[:, VGB_SAMPLED_BASIS_DIST.index(name)] = (
+                rows[:, full_basis.index(name)])
+        inj[:, VGB_SAMPLED_BASIS_DIST.index("fdot_astro_ratio")] = ratio
+        vgb.injection = inj
+        vgb.fixed_params = np.column_stack([rows[:, fixed_idx], mc])
+    else:
+        vgb.injection = rows[:, sampled_idx]
+        vgb.fixed_params = rows[:, fixed_idx]
     vgb.nleaves_min = vgb.nleaves_max = n
 
     if vgb.t0 in (None, 0.0):
