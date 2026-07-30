@@ -2224,6 +2224,12 @@ def build_gb_moves(
         sighet_trust_dlna=float(os.environ.get("GB_SIGHET_TRUST_DLNA", "1.5")),
         sighet_trust_dphase=float(
             os.environ.get("GB_SIGHET_TRUST_DPHASE", "0.5")),
+        # SNR scaling of the amplitude gate: per-source dlnA_max =
+        # clip(C/snr_ref, dlna_min, GB_SIGHET_TRUST_DLNA); C=0 -> uniform.
+        sighet_trust_snr_c=float(
+            os.environ.get("GB_SIGHET_TRUST_SNR_C", "30")),
+        sighet_trust_dlna_min=float(
+            os.environ.get("GB_SIGHET_TRUST_DLNA_MIN", "0.3")),
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v
@@ -2559,6 +2565,12 @@ def build_vgb_moves(
         sighet_trust_dlna=float(os.environ.get("GB_SIGHET_TRUST_DLNA", "1.5")),
         sighet_trust_dphase=float(
             os.environ.get("GB_SIGHET_TRUST_DPHASE", "0.5")),
+        # SNR scaling of the amplitude gate: per-source dlnA_max =
+        # clip(C/snr_ref, dlna_min, GB_SIGHET_TRUST_DLNA); C=0 -> uniform.
+        sighet_trust_snr_c=float(
+            os.environ.get("GB_SIGHET_TRUST_SNR_C", "30")),
+        sighet_trust_dlna_min=float(
+            os.environ.get("GB_SIGHET_TRUST_DLNA_MIN", "0.3")),
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v

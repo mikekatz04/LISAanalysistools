@@ -321,6 +321,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sighet_refresh_min_beta=0.1,
         sighet_trust_dlna=1.5,
         sighet_trust_dphase=0.5,
+        sighet_trust_snr_c=30.0,
+        sighet_trust_dlna_min=0.3,
         sighet_drift_check=False,
         debug_seq_pick="first",
         debug=False,
@@ -450,6 +452,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # chunked-het / FD (no sig-het reference active).
         self.sighet_trust_dlna = float(sighet_trust_dlna)
         self.sighet_trust_dphase = float(sighet_trust_dphase)
+        # PER-SOURCE SNR SCALING of the amplitude gate. The sig-het
+        # truncation error is RELATIVE to the source's own template power,
+        # so the ABSOLUTE lnL error a walker can accrue at the gate
+        # boundary scales with h_h ~ SNR^2: a uniform gate lets an SNR-80
+        # source carry an O(1) absolute error at |dlnA| = 1.5 while an
+        # SNR-3 source's error there is negligible. Scaling the gate as
+        #
+        #     dlnA_max(i) = clip(C / snr_ref(i), dlna_min, sighet_trust_dlna)
+        #
+        # makes the absolute error ceiling roughly uniform across the
+        # catalogue. snr_ref = sqrt(h_h) at the block anchor -- free from
+        # the ll_ref evaluation. Statistically the scaled gate never binds
+        # for detectable sources: their lnA posterior width is ~1/SNR, so
+        # C = 30 sits ~30 sigma out; weak sources keep the global cap,
+        # where their absolute error is small. C = 0 reverts to the
+        # uniform gate (back-compat); the whole gate still disables via
+        # sighet_trust_dlna = 0. Refresh re-anchors snr_ref along with
+        # the reference.
+        self.sighet_trust_snr_c = float(sighet_trust_snr_c)
+        self.sighet_trust_dlna_min = float(sighet_trust_dlna_min)
 
         self.priors = priors
         self.gb = gb
@@ -2639,6 +2661,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         damp = cp.abs(cp.log(cp.abs(pc[:, 0]) / cp.abs(pr[:, 0])))
         return drift, damp
 
+    def _sighet_trust_dlna_vec(self, buffer_obj, n):
+        """Per-source amplitude gate ``clip(C/snr_ref, dlna_min, dlna_cap)``.
+
+        Reads the reference template power ``h_h_out`` stashed on the
+        buffer by the most recent ``get_ll``/``get_add_ll`` call (i.e. the
+        block's ``ll_ref`` evaluation, or a refresh's re-basing call for
+        the refreshed subset). ``C = 0`` returns the uniform cap."""
+        if self.sighet_trust_snr_c <= 0.0:
+            return cp.full(n, self.sighet_trust_dlna)
+        hh = cp.asarray(buffer_obj.h_h_out).real
+        snr_ref = cp.sqrt(cp.clip(hh, 0.0, None))
+        return cp.clip(
+            self.sighet_trust_snr_c / cp.maximum(snr_ref, 1e-30),
+            self.sighet_trust_dlna_min, self.sighet_trust_dlna,
+        )
+
     def _sighet_anchor_phys(self, ref_track, leaf_inds):
         """Anchor-side physical quantities for the trust-region gate.
 
@@ -2771,6 +2809,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         with _tspan(tm, "inmodel_ll_ref"):
             ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals, leaf_inds=l_i)
             curr_prior = cp.asarray(self.gpu_priors[self.branch_name].logpdf(curr))
+        # Per-source SNR-scaled amplitude gate (see the ctor comment):
+        # snr_ref = sqrt(h_h) at the anchor, stashed by the ll_ref
+        # evaluation just above. Vectorized once per block; the repeat
+        # loop compares candidates against ``trust_dlna[sl]``.
+        trust_dlna = None
+        if anchor_phys is not None:
+            trust_dlna = self._sighet_trust_dlna_vec(buffer_obj, len(ids))
         if tm is not None:
             # Per-block scale, so a wall time can be read as a per-source /
             # per-repeat cost without cross-referencing the run config.
@@ -2850,7 +2895,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         * trust_Tobs**2
                     )
                     new_logp[
-                        (_damp_n > self.sighet_trust_dlna)
+                        (_damp_n > trust_dlna[sl])
                         | (_drift_n > self.sighet_trust_dphase)
                     ] = -np.inf
 
@@ -2949,8 +2994,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     ref_track[far] = curr[far]
                     # Re-anchor the trust-region cache with the refreshed
                     # references (refresh is rare; full recompute is cheap).
+                    # The re-basing get_add_ll above stashed h_h for the
+                    # refreshed subset, so the SNR-scaled gate re-anchors
+                    # from the same call.
                     if anchor_phys is not None:
                         anchor_phys = self._sighet_anchor_phys(ref_track, l_i)
+                        trust_dlna[far] = self._sighet_trust_dlna_vec(
+                            buffer_obj, int(far.sum()))
                     if tm is not None:
                         tm.count("inmodel_refreshed_sources", int(far.sum()))
                     logger.debug(
@@ -2968,12 +3018,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if _audit:
             drift, damp = self._sighet_drift_metrics(curr, ref_track, l_i)
             n_over = int((drift > self.sighet_refresh_dphase).sum())
+            _gate = (
+                f" gate=[{float(trust_dlna.min()):.2f}..{float(trust_dlna.max()):.2f}]"
+                if trust_dlna is not None else ""
+            )
             logger.info(
                 f"{self.name}: sig-het end-of-block drift ({len(ids)} sources, "
                 f"{self.num_repeat_proposals} repeats): phase max="
                 f"{float(drift.max()):.3e} median={float(cp.median(drift)):.3e} rad, "
                 f"{n_over} over dphase={self.sighet_refresh_dphase}; "
-                f"|dlnA| max={float(damp.max()):.3e}."
+                f"|dlnA| max={float(damp.max()):.3e}.{_gate}"
             )
             # The sig-het delta the CHAIN actually used at the final coords
             # (tracked ll_ref), captured before the engine reverts.
