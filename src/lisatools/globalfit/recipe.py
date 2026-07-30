@@ -2230,6 +2230,8 @@ def build_gb_moves(
             os.environ.get("GB_SIGHET_TRUST_SNR_C", "30")),
         sighet_trust_dlna_min=float(
             os.environ.get("GB_SIGHET_TRUST_DLNA_MIN", "0.3")),
+        sighet_anchor_check=os.environ.get(
+            "GB_SIGHET_ANCHOR_CHECK", "0") == "1",
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v
@@ -2571,6 +2573,8 @@ def build_vgb_moves(
             os.environ.get("GB_SIGHET_TRUST_SNR_C", "30")),
         sighet_trust_dlna_min=float(
             os.environ.get("GB_SIGHET_TRUST_DLNA_MIN", "0.3")),
+        sighet_anchor_check=os.environ.get(
+            "GB_SIGHET_ANCHOR_CHECK", "0") == "1",
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v

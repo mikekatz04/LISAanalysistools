@@ -323,6 +323,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sighet_trust_dphase=0.5,
         sighet_trust_snr_c=30.0,
         sighet_trust_dlna_min=0.3,
+        sighet_anchor_check=False,
         sighet_drift_check=False,
         debug_seq_pick="first",
         debug=False,
@@ -472,6 +473,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # the reference.
         self.sighet_trust_snr_c = float(sighet_trust_snr_c)
         self.sighet_trust_dlna_min = float(sighet_trust_dlna_min)
+        # ANCHOR CHECK (debug, GB_SIGHET_ANCHOR_CHECK=1): at block start,
+        # after the reference build and ll_ref evaluation, score the SAME
+        # anchor coordinates through the exact engine and compare. At the
+        # anchor the heterodyne ratio is exactly 1, so any discrepancy is
+        # an ANCHOR-LEVEL offset in the reference/coefficients for that
+        # source (window/slab truncation, geometry) — cleanly separated
+        # from candidate-displacement error, which the end-of-block audit
+        # measures. Found via the 2026-07-30 CPU offender log: a source at
+        # |dll| = 7.6 with dlnA = 3e-3 can only be an anchor offset.
+        # Costs one exact batched call + one reference rebuild per block.
+        self.sighet_anchor_check = bool(sighet_anchor_check)
 
         self.priors = priors
         self.gb = gb
@@ -2816,6 +2828,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         trust_dlna = None
         if anchor_phys is not None:
             trust_dlna = self._sighet_trust_dlna_vec(buffer_obj, len(ids))
+        # Anchor check (debug knob; see ctor comment): sig-het vs exact at
+        # the block anchor itself, where the ratio is exactly 1. Rebuilds
+        # the reference afterwards (fresh == patched is bit-exact).
+        if sighet_active and self.sighet_anchor_check:
+            with _tspan(tm, "inmodel_anchor_check"):
+                buffer_obj.clear_in_model_likelihood()
+                _ll_ex0 = buffer_obj.get_add_ll(
+                    curr, slots, slots, N_vals, leaf_inds=l_i)
+                buffer_obj.setup_in_model_likelihood(
+                    curr, slots, N_vals, leaf_inds=l_i)
+            _e0 = cp.abs(ll_ref - _ll_ex0)
+            _i0 = int(cp.argmax(_e0))
+            _f0_0 = float(_to_numpy(self.transform_fn.both_transforms(
+                curr[_i0:_i0 + 1], xp=cp,
+                leaf_inds=(l_i[_i0:_i0 + 1]
+                           if self._per_leaf_fill else None),
+            )[0, 1]))
+            logger.info(
+                f"{self.name}: sig-het ANCHOR check ({len(ids)} sources): "
+                f"|dll@anchor| max={float(_e0.max()):.3e} "
+                f"median={float(cp.median(_e0)):.3e}; worst: "
+                f"temp={int(t_i[_i0])} walker={int(w_i[_i0])} "
+                f"band={int(b_i[_i0])} f0={_f0_0:.6e} Hz "
+                f"ll_het={float(ll_ref[_i0]):.3e} "
+                f"ll_exact={float(_ll_ex0[_i0]):.3e}"
+            )
         if tm is not None:
             # Per-block scale, so a wall time can be read as a per-source /
             # per-repeat cost without cross-referencing the run config.
