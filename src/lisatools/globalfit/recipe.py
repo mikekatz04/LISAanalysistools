@@ -22,6 +22,7 @@ import os
 import time
 import logging
 import typing
+import warnings
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -50,6 +51,7 @@ from .moves import (
     MoveBuildContext,
     PSDMove,
     ResidualAddOneRemoveOneMove,
+    SOBBHChunkedLikeMove,
     GBSpecialRJPriorMove,
     GBSpecialRJSerialSearchMCMC,
     GBSpecialRJRefitMove,
@@ -1709,77 +1711,121 @@ def get_shared_dcga(acs):
     return dcga
 
 
-def build_psd_moves(
+def build_noise_moves(
     engine_info: Setup,
     curr: CurrentInfoGlobalFit,
     acs: AnalysisContainerArray,
     priors: dict,
     *,
-    num_repeats: int = 60,
+    sampled_branches: list,
+    num_repeats: int = None,
     permute_every: int = 50,
     Tmax: float = 1e6,
 ) -> tuple[PSDMove, PSDMove]:
-    """Build PSD search and PE moves.
+    """Build a search + PE noise-move pair over ``sampled_branches``.
 
-    Both moves share the same ``acs``, ``priors``, and
-    ``TemperatureControl`` instance, so updates to ``acs`` (e.g. signal
-    subtraction by another branch) are visible to both moves at runtime.
+    Noise-move split (2026-07): each call builds ONE independent move pair
+    (its own :class:`TemperatureControl`) that samples exactly
+    ``sampled_branches`` — e.g. ``["psd"]``, ``["galfor"]``, ``["sgwb"]`` for
+    the fully split stock recipes, or several branches for a joint move. The
+    likelihood always evaluates the full noise model; the move freezes
+    non-sampled branches at their cold rows (see :class:`PSDMove`).
+
+    Both returned moves share the same ``acs``/``priors`` (by reference) and
+    the same ladder object.
 
     Parameters
     ----------
     engine_info :
         Engine info object exposing ``ndims``.
     curr : CurrentInfoGlobalFit
-        Current run info; reads ``source_info["psd"]`` and ``general_info``.
+        Current run info; reads ``source_info[<branch>]`` and ``general_info``.
     acs :
         Shared analysis container (passed by reference).
     priors : dict
         Shared priors dict (passed by reference).
+    sampled_branches : list
+        Noise branches THIS move pair samples (subset of
+        ``["psd", "galfor", "sgwb"]``, all present in the run). The first
+        entry is the "lead" branch whose settings size the ladder and the
+        default ``num_repeats``.
     num_repeats : int, optional
-        Number of internal PSD move repeats. Default 60.
+        Number of internal move repeats. Default: the lead branch's
+        ``num_prop_repeats`` setting.
     Tmax : float, optional
         Maximum temperature for ``TemperatureControl``. Default 1e6.
 
     Returns
     -------
-    psd_search_move : PSDMove
-    psd_pe_move : PSDMove
+    search_move : PSDMove
+    pe_move : PSDMove
     """
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
-    psd_info = curr.source_info["psd"]
+    if not sampled_branches:
+        raise ValueError("sampled_branches must name at least one noise branch.")
+    missing = [b for b in sampled_branches if b not in curr.source_info]
+    if missing:
+        raise ValueError(
+            f"build_noise_moves: branch(es) {missing} not in this run "
+            f"(sampled_branches={sampled_branches})."
+        )
+    lead = sampled_branches[0]
+    lead_info = curr.source_info[lead]
+    psd_info = curr.source_info.get("psd", None)
     galfor_info = curr.source_info.get("galfor", None)
     sgwb_info = curr.source_info.get("sgwb", None)
-    # the joint noise ladder is the PSD branch's OWN (the engine runs
+
+    # this move's OWN ladder, sized by the lead branch (the engine runs
     # cold-chain only); an explicit betas array wins over the ntemps knob
     ntemps: int = (
-        len(psd_info.betas)
-        if psd_info.betas is not None
-        else int(getattr(psd_info, "ntemps", None) or general_info.ntemps)
+        len(lead_info.betas)
+        if lead_info.betas is not None
+        else int(getattr(lead_info, "ntemps", None) or general_info.ntemps)
     )
 
-    # The single joint PSDMove samples psd (+ optional galfor + optional sgwb),
-    # so the tempering ladder dimension is the sum of the present branch ndims.
-    effective_ndim = engine_info.ndims["psd"]
-    if galfor_info is not None:
-        effective_ndim += engine_info.ndims["galfor"]
-    if sgwb_info is not None:
-        effective_ndim += engine_info.ndims["sgwb"]
+    # Loud guard replacing the old silent trap: every sampled branch's
+    # sub-state is sized by its OWN ntemps/betas (run.py::_branch_ntemps);
+    # the move writes its ladder rows into those sub-states, so the two
+    # MUST agree.
+    for branch in sampled_branches:
+        info_b = curr.source_info[branch]
+        nt_b = (
+            len(info_b.betas)
+            if info_b.betas is not None
+            else int(getattr(info_b, "ntemps", None) or general_info.ntemps)
+        )
+        if nt_b != ntemps:
+            raise ValueError(
+                f"Noise branches sampled by one move must share a ladder "
+                f"size: '{lead}' has ntemps={ntemps} but '{branch}' has "
+                f"ntemps={nt_b}. Match the knobs (PSD_NTEMPS / GALFOR_NTEMPS "
+                f"/ SGWB_NTEMPS or the branches' betas), or sample them with "
+                "separate moves."
+            )
+
+    if num_repeats is None:
+        num_repeats = int(getattr(lead_info, "num_prop_repeats", None) or 50)
+
+    # the ladder dimension is the sum of the SAMPLED branch ndims
+    effective_ndim = sum(engine_info.ndims[b] for b in sampled_branches)
     temperature_control = TemperatureControl(
         effective_ndim,
         nwalkers,
-        betas=psd_info.betas,
+        betas=lead_info.betas,
         ntemps=ntemps,
         Tmax=Tmax,
         permute=False,
     )
 
-    psd_move_kwargs = dict(
+    move_kwargs = dict(
+        sampled_branches=list(sampled_branches),
         num_repeats=num_repeats,
         permute_every=permute_every,
         live_dangerously=True,
-        psd_transform_fn=psd_info.transform,
+        psd_transform_fn=psd_info.transform if psd_info is not None else None,
         galfor_transform_fn=galfor_info.transform if galfor_info is not None else None,
+        sgwb_transform_fn=sgwb_info.transform if sgwb_info is not None else None,
         sensitivity_backend=general_info.sensitivity_backend,
         temperature_control=temperature_control,
         # Match the run's compute setup: hardcoding True makes eryn's
@@ -1792,15 +1838,54 @@ def build_psd_moves(
         run_threaded=acs.gpus is not None and len(acs.gpus) > 1,
     )
 
-    psd_search_move = PSDMove(
-        acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
+    tag = "+".join(sampled_branches)
+    search_move = PSDMove(
+        acs, priors, max_logl_mode=True, name=f"{tag} search move", **move_kwargs
     )
-    psd_pe_move = PSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
+    pe_move = PSDMove(
+        acs, priors, max_logl_mode=False, name=f"{tag} pe move", **move_kwargs
+    )
 
-    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
-    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
+    search_move.accepted = np.zeros((ntemps, nwalkers))
+    pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    return psd_search_move, psd_pe_move
+    return search_move, pe_move
+
+
+def build_psd_moves(
+    engine_info: Setup,
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    *,
+    num_repeats: int = 60,
+    permute_every: int = 50,
+    Tmax: float = 1e6,
+) -> tuple[PSDMove, PSDMove]:
+    """Deprecated wrapper: the historical JOINT psd(+galfor)(+sgwb) move pair.
+
+    Use :func:`build_noise_moves` with an explicit ``sampled_branches`` list;
+    this wrapper samples every noise branch present in the run under one
+    ladder (the pre-split behavior).
+    """
+    warnings.warn(
+        "build_psd_moves is deprecated: use build_noise_moves("
+        "sampled_branches=[...]) — the stock recipes now build independent "
+        "psd/galfor/sgwb moves.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    sampled = [b for b in ("psd", "galfor", "sgwb") if b in curr.source_info]
+    return build_noise_moves(
+        engine_info,
+        curr,
+        acs,
+        priors,
+        sampled_branches=sampled,
+        num_repeats=num_repeats,
+        permute_every=permute_every,
+        Tmax=Tmax,
+    )
 
 
 def build_mbh_moves_phenom(
@@ -2632,6 +2717,14 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
     #: the subclass while the construction stays shared.
     like_kwargs_from_waveform_kwargs: bool = False
 
+    #: The move class this builder constructs — subclasses override to swap in
+    #: a fast-likelihood ResidualAddOneRemoveOneMove subclass.
+    move_class: type = ResidualAddOneRemoveOneMove
+
+    #: Whether the builder may hand the run-shared DCGA to the move. Fast
+    #: kernel moves with no multi-device path set this False.
+    use_dcga: bool = True
+
     def __init__(
         self,
         *,
@@ -2729,7 +2822,7 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
         # move runs its shard-aware ACA path (correct on any shard count).
         wave_gen_in = self.wave_gen
         dcga_kwargs = {}
-        dcga = get_shared_dcga(acs)
+        dcga = get_shared_dcga(acs) if self.use_dcga else None
         if dcga is not None:
             gen_obj = getattr(self.wave_gen, "__self__", None)
             if gen_obj is not None and hasattr(gen_obj, "kwargs"):
@@ -2746,7 +2839,7 @@ class SingleSourcePEBuilder(SourceMoveBuilder):
                     "path.", self.branch_name,
                 )
 
-        move = ResidualAddOneRemoveOneMove(
+        move = self.move_class(
             self.branch_name,
             coords_shape,
             wave_gen_in,
@@ -2790,6 +2883,20 @@ class SOBBHMoveBuilder(SingleSourcePEBuilder):
 
     branch_name = "sobbh"
     like_kwargs_from_waveform_kwargs = True
+
+
+class SOBBHChunkedMoveBuilder(SOBBHMoveBuilder):
+    """:class:`SOBBHMoveBuilder` constructing :class:`SOBBHChunkedLikeMove`.
+
+    ``wave_gen`` stays the SLOW exact wrap (residual expose/fold + the
+    fast-vs-slow cross-check); the chunked comp and its band knob are passed
+    through ``move_kwargs`` (``chunked_comp=``, ``m_band_half_width=``).
+    The DCGA branch is skipped — the chunked kernel is single-shard by
+    contract and the move raises if handed a dcga.
+    """
+
+    move_class = SOBBHChunkedLikeMove
+    use_dcga = False
 
 
 class GBMoveBuilder(SourceMoveBuilder):
@@ -2850,22 +2957,41 @@ class VGBMoveBuilder(SourceMoveBuilder):
 
 
 class PSDMoveBuilder(SourceMoveBuilder):
-    """Build the PSD search + PE moves (wraps :func:`build_psd_moves`)."""
+    """Build a noise search + PE move pair (wraps :func:`build_noise_moves`).
+
+    ``sampled_branches`` selects which noise branches THIS pair samples
+    (noise-move split 2026-07). ``None`` keeps the historical joint
+    behavior (all noise branches present in the run, one ladder).
+    """
 
     branch_name = "psd"
 
-    def __init__(self, *, num_repeats: int = 60, permute_every: int = 50, Tmax: float = 1e6):
-        super().__init__(branch_name="psd")
+    def __init__(
+        self,
+        *,
+        sampled_branches: list = None,
+        num_repeats: int = None,
+        permute_every: int = 50,
+        Tmax: float = 1e6,
+    ):
+        super().__init__(branch_name=(sampled_branches or ["psd"])[0])
+        self.sampled_branches = sampled_branches
         self.num_repeats = num_repeats
         self.permute_every = permute_every
         self.Tmax = Tmax
 
     def build(self, engine_info, curr, acs, priors, state):
-        search_move, pe_move = build_psd_moves(
+        sampled = self.sampled_branches
+        if sampled is None:
+            sampled = [
+                b for b in ("psd", "galfor", "sgwb") if b in curr.source_info
+            ]
+        search_move, pe_move = build_noise_moves(
             engine_info,
             curr,
             acs,
             priors,
+            sampled_branches=sampled,
             num_repeats=self.num_repeats,
             permute_every=self.permute_every,
             Tmax=self.Tmax,
