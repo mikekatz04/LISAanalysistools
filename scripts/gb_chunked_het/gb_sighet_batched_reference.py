@@ -147,6 +147,7 @@ class GBSignalHetReferenceSet:
             g["nt_layer"], g["N_sparse_t"], g["stride"],
             g["ind_min_t"], g["ind_min_f"], g["m_half"],
             g["layer_df"], g["dt"], g["Tobs"], g["t0"],
-            3, 0, g["n_sparse_fd"], g["tukey_alpha"], g["max_r"], 1)
+            3, 0, g["n_sparse_fd"], g["tukey_alpha"], g["max_r"], 1,
+        0)  # n_cp_sig=0: direct build (script baseline)
         self.last_d_h = np.asarray(d_h).copy(); self.last_h_h = np.asarray(h_h).copy()
         return -0.5 * self.d_d + np.asarray(d_h) - 0.5 * np.asarray(h_h)

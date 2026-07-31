@@ -453,6 +453,12 @@ class GlobalFit:
                 # BEFORE eryn's opaque backend-shape check would.
                 backend.check_format_version("resume")
                 state = backend.get_last_sample()  # .get_a_sample(0)
+                self.logger.info(
+                    "RESUMING from existing backend %s at stored iteration %d "
+                    "(the 'initial log likelihood' below is that state, NOT a "
+                    "fresh start; new iterations append).",
+                    backend_path, int(backend.iteration),
+                )
                 # Guard against resuming a backend whose per-branch sampled
                 # dimensionality no longer matches the run config -- the most
                 # likely cause is toggling GB_USE_ASTROPHYSICAL_F0_MC_PRIOR /
@@ -497,9 +503,11 @@ class GlobalFit:
             )
 
         if state is None:
-            self.logger.debug("update this somehow")
-            # print("update this somehow")
-            # # breakpoint()
+            self.logger.info(
+                "FRESH START: no resumable backend (missing, empty, or "
+                "zero stored iterations) and no past_file_for_start — "
+                "initializing from priors/injection."
+            )
             # start from priors by default. Draw at the WIDEST ladder any
             # branch needs, then slice: the engine keeps only its own ladder
             # (cold chain for stock variants) while each sub-state takes its

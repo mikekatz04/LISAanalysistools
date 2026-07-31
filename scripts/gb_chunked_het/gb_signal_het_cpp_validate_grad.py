@@ -77,8 +77,8 @@ def call_get_ll(cpp, tdi_wrap, params_cand, params_ref,
         Tobs, t_start,
         3, 0, N_SPARSE_FD,
         tukey_alpha,
-        -1.0, 0,   # max_r (off), project_real=0 (legacy complex)
-    )
+        -1.0, 0,   # max_r (off), project_real=0 (legacy complex),
+        0)  # n_cp_sig=0: direct build (script baseline)
     return float(d_h[0]), float(h_h[0])
 
 

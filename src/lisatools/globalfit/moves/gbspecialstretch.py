@@ -319,6 +319,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sighet_refresh_every=0,
         sighet_refresh_dphase=0.5,
         sighet_refresh_min_beta=0.1,
+        sighet_trust_dlna=1.5,
+        sighet_trust_dphase=0.5,
+        sighet_trust_snr_c=30.0,
+        sighet_trust_dlna_min=0.3,
+        sighet_anchor_check=False,
         sighet_drift_check=False,
         debug_seq_pick="first",
         debug=False,
@@ -433,6 +438,52 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # grids; hot junk sources otherwise trip the drift test at nearly
         # every checkpoint).
         self.sighet_refresh_min_beta = float(sighet_refresh_min_beta)
+        # Sig-het TRUST REGION (prior = -inf outside): in-model candidates
+        # whose PHYSICAL-amplitude ratio vs the block's heterodyne anchor
+        # exceeds ``sighet_trust_dlna`` e-folds (or whose carrier-phase
+        # drift exceeds ``sighet_trust_dphase`` rad) are rejected before
+        # scoring. The expansion is only trusted near its reference
+        # (measured: exact to ~3e-6 through |dlnA| ~ 8 on a clean source,
+        # but in-run weak-source offenders corrupt at large excursions),
+        # and a detectable source's posterior never comes near the gate
+        # (lnA width ~ 1/SNR). MH-valid as a proposal-support restriction:
+        # the anchor is the block-start state (re-anchored on refresh), so
+        # the current point always sits inside its own region and the
+        # indicator is symmetric in (x, y). 0 disables. Inert on
+        # chunked-het / FD (no sig-het reference active).
+        self.sighet_trust_dlna = float(sighet_trust_dlna)
+        self.sighet_trust_dphase = float(sighet_trust_dphase)
+        # PER-SOURCE SNR SCALING of the amplitude gate. The sig-het
+        # truncation error is RELATIVE to the source's own template power,
+        # so the ABSOLUTE lnL error a walker can accrue at the gate
+        # boundary scales with h_h ~ SNR^2: a uniform gate lets an SNR-80
+        # source carry an O(1) absolute error at |dlnA| = 1.5 while an
+        # SNR-3 source's error there is negligible. Scaling the gate as
+        #
+        #     dlnA_max(i) = clip(C / snr_ref(i), dlna_min, sighet_trust_dlna)
+        #
+        # makes the absolute error ceiling roughly uniform across the
+        # catalogue. snr_ref = sqrt(h_h) at the block anchor -- free from
+        # the ll_ref evaluation. Statistically the scaled gate never binds
+        # for detectable sources: their lnA posterior width is ~1/SNR, so
+        # C = 30 sits ~30 sigma out; weak sources keep the global cap,
+        # where their absolute error is small. C = 0 reverts to the
+        # uniform gate (back-compat); the whole gate still disables via
+        # sighet_trust_dlna = 0. Refresh re-anchors snr_ref along with
+        # the reference.
+        self.sighet_trust_snr_c = float(sighet_trust_snr_c)
+        self.sighet_trust_dlna_min = float(sighet_trust_dlna_min)
+        # ANCHOR CHECK (debug, GB_SIGHET_ANCHOR_CHECK=1): at block start,
+        # after the reference build and ll_ref evaluation, score the SAME
+        # anchor coordinates through the exact engine and compare. At the
+        # anchor the heterodyne ratio is exactly 1, so any discrepancy is
+        # an ANCHOR-LEVEL offset in the reference/coefficients for that
+        # source (window/slab truncation, geometry) — cleanly separated
+        # from candidate-displacement error, which the end-of-block audit
+        # measures. Found via the 2026-07-30 CPU offender log: a source at
+        # |dll| = 7.6 with dlnA = 3e-3 can only be an anchor offset.
+        # Costs one exact batched call + one reference rebuild per block.
+        self.sighet_anchor_check = bool(sighet_anchor_check)
 
         self.priors = priors
         self.gb = gb
@@ -2601,6 +2652,53 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         return new_coords, factors
 
+    def _sighet_drift_metrics(self, curr, ref_track, leaf_inds):
+        """Per-source drift vs the heterodyne expansion point, PHYSICAL basis.
+
+        Returns ``(drift, damp)``: accumulated carrier-phase drift
+        ``2*pi*|df0|*Tobs + pi*|dfdot|*Tobs**2`` (rad) and the amplitude
+        ratio ``|ln(A/A_ref)|``. Computed by transforming BOTH coordinate
+        sets to physical parameters, so it is branch-agnostic: reduced
+        sampling bases (e.g. VGB's 5-col, where f0/sky are per-leaf fills)
+        get exactly-zero contributions from the fixed parameters. Reading
+        sampling columns directly (the old form) silently misread reduced
+        bases -- VGB's column 1 is not f0, which made the drift audit
+        report ~1e13 rad of impossible "drift"."""
+        li = leaf_inds if self._per_leaf_fill else None
+        pc = self.transform_fn.both_transforms(curr, xp=cp, leaf_inds=li)
+        pr = self.transform_fn.both_transforms(ref_track, xp=cp, leaf_inds=li)
+        Tobs = float(self._basis_settings.Tobs)
+        drift = (2.0 * np.pi * cp.abs(pc[:, 1] - pr[:, 1]) * Tobs
+                 + np.pi * cp.abs(pc[:, 2] - pr[:, 2]) * Tobs**2)
+        damp = cp.abs(cp.log(cp.abs(pc[:, 0]) / cp.abs(pr[:, 0])))
+        return drift, damp
+
+    def _sighet_trust_dlna_vec(self, buffer_obj, n):
+        """Per-source amplitude gate ``clip(C/snr_ref, dlna_min, dlna_cap)``.
+
+        Reads the reference template power ``h_h_out`` stashed on the
+        buffer by the most recent ``get_ll``/``get_add_ll`` call (i.e. the
+        block's ``ll_ref`` evaluation, or a refresh's re-basing call for
+        the refreshed subset). ``C = 0`` returns the uniform cap."""
+        if self.sighet_trust_snr_c <= 0.0:
+            return cp.full(n, self.sighet_trust_dlna)
+        hh = cp.asarray(buffer_obj.h_h_out).real
+        snr_ref = cp.sqrt(cp.clip(hh, 0.0, None))
+        return cp.clip(
+            self.sighet_trust_snr_c / cp.maximum(snr_ref, 1e-30),
+            self.sighet_trust_dlna_min, self.sighet_trust_dlna,
+        )
+
+    def _sighet_anchor_phys(self, ref_track, leaf_inds):
+        """Anchor-side physical quantities for the trust-region gate.
+
+        Returns ``(|A|, f0, fdot)`` of the heterodyne expansion points so
+        the per-repeat gate only transforms the CANDIDATES (the anchor side
+        is fixed for the block, modulo mid-block refresh)."""
+        li = leaf_inds if self._per_leaf_fill else None
+        pr = self.transform_fn.both_transforms(ref_track, xp=cp, leaf_inds=li)
+        return cp.abs(pr[:, 0]), pr[:, 1].copy(), pr[:, 2].copy()
+
     def _run_in_model_repeats(self, model, band_sorter, buffer_obj, band_temps,
                               picked, ll_change_log, prop_counts, acc_counts):
         """``num_repeat_proposals`` in-model rounds on the picked live sources.
@@ -2712,6 +2810,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Drift-refresh anchor: the sampling-basis coords each source's
         # sig-het reference was built at (see the refresh block below).
         ref_track = curr.copy() if sighet_active else None
+        # Trust-region gate cache: anchor-side (|A|, f0, fdot) in the
+        # physical basis, so each repeat only transforms the candidates.
+        anchor_phys = (
+            self._sighet_anchor_phys(ref_track, l_i)
+            if sighet_active and self.sighet_trust_dlna > 0.0
+            else None
+        )
+        trust_Tobs = float(self._basis_settings.Tobs)
         with _tspan(tm, "inmodel_ll_ref"):
             ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals, leaf_inds=l_i)
             curr_prior = cp.asarray(self.gpu_priors[self.branch_name].logpdf(curr))
@@ -2720,7 +2826,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # (leaf labels are only final after the repack in _write_back_state):
         # seeded from the block-reference get_add_ll (which just filled
         # buffer_obj.d_h_out/h_h_out for ``curr``), updated at each accepted
-        # move below. Zero extra likelihood evaluations.
+        # move below. Zero extra likelihood evaluations. MUST run before the
+        # sig-het anchor check below — its exact-path re-evaluation
+        # overwrites d_h_out/h_h_out.
         if getattr(buffer_obj, "d_h_out", None) is not None:
             if getattr(self, "_sorter_dh", None) is None:
                 n_src = band_sorter.inds.shape[0]
@@ -2728,6 +2836,40 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self._sorter_hh = cp.full(n_src, np.nan)
             self._sorter_dh[ids] = cp.asarray(buffer_obj.d_h_out).real
             self._sorter_hh[ids] = cp.asarray(buffer_obj.h_h_out).real
+
+        # Per-source SNR-scaled amplitude gate (see the ctor comment):
+        # snr_ref = sqrt(h_h) at the anchor, stashed by the ll_ref
+        # evaluation just above. Vectorized once per block; the repeat
+        # loop compares candidates against ``trust_dlna[sl]``.
+        trust_dlna = None
+        if anchor_phys is not None:
+            trust_dlna = self._sighet_trust_dlna_vec(buffer_obj, len(ids))
+        # Anchor check (debug knob; see ctor comment): sig-het vs exact at
+        # the block anchor itself, where the ratio is exactly 1. Rebuilds
+        # the reference afterwards (fresh == patched is bit-exact).
+        if sighet_active and self.sighet_anchor_check:
+            with _tspan(tm, "inmodel_anchor_check"):
+                buffer_obj.clear_in_model_likelihood()
+                _ll_ex0 = buffer_obj.get_add_ll(
+                    curr, slots, slots, N_vals, leaf_inds=l_i)
+                buffer_obj.setup_in_model_likelihood(
+                    curr, slots, N_vals, leaf_inds=l_i)
+            _e0 = cp.abs(ll_ref - _ll_ex0)
+            _i0 = int(cp.argmax(_e0))
+            _f0_0 = float(_to_numpy(self.transform_fn.both_transforms(
+                curr[_i0:_i0 + 1], xp=cp,
+                leaf_inds=(l_i[_i0:_i0 + 1]
+                           if self._per_leaf_fill else None),
+            )[0, 1]))
+            logger.info(
+                f"{self.name}: sig-het ANCHOR check ({len(ids)} sources): "
+                f"|dll@anchor| max={float(_e0.max()):.3e} "
+                f"median={float(cp.median(_e0)):.3e}; worst: "
+                f"temp={int(t_i[_i0])} walker={int(w_i[_i0])} "
+                f"band={int(b_i[_i0])} f0={_f0_0:.6e} Hz "
+                f"ll_het={float(ll_ref[_i0]):.3e} "
+                f"ll_exact={float(_ll_ex0[_i0]):.3e}"
+            )
         if tm is not None:
             # Per-block scale, so a wall time can be read as a per-source /
             # per-repeat cost without cross-referencing the run config.
@@ -2787,6 +2929,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     ] = -np.inf
                     new_logp[new_bin < lo_s - n4_s] = -np.inf
                     new_logp[new_bin > hi_s + n4_s] = -np.inf
+
+                # Sig-het TRUST REGION: reject candidates outside the
+                # expansion's validity region around the block anchor
+                # (physical |dlnA| / carrier-phase gates; see the ctor
+                # comment for thresholds + MH-validity). Gated rows drop
+                # out of ``keep`` below, so they also skip the ll kernel.
+                if anchor_phys is not None:
+                    _pc = self.transform_fn.both_transforms(
+                        new, xp=cp,
+                        leaf_inds=l_i[sl] if self._per_leaf_fill else None,
+                    )
+                    _damp_n = cp.abs(cp.log(
+                        cp.abs(_pc[:, 0]) / anchor_phys[0][sl]))
+                    _drift_n = (
+                        2.0 * np.pi * cp.abs(_pc[:, 1] - anchor_phys[1][sl])
+                        * trust_Tobs
+                        + np.pi * cp.abs(_pc[:, 2] - anchor_phys[2][sl])
+                        * trust_Tobs**2
+                    )
+                    new_logp[
+                        (_damp_n > trust_dlna[sl])
+                        | (_drift_n > self.sighet_trust_dphase)
+                    ] = -np.inf
 
                 keep = ~cp.isinf(new_logp)
             new_ll = cp.full(n_sub, -1e300)
@@ -2880,13 +3045,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 and (move_i + 1) % self.sighet_refresh_every == 0
                 and move_i + 1 < self.num_repeat_proposals
             ):
-                Tobs = float(self._basis_settings.Tobs)
-                df0_hz = cp.abs(curr[:, 1] - ref_track[:, 1]) / 1e3
-                dfdot = cp.abs(curr[:, 2] - ref_track[:, 2])
-                drift = 2.0 * np.pi * df0_hz * Tobs + np.pi * dfdot * Tobs**2
-                far = (drift > self.sighet_refresh_dphase) | (
-                    cp.abs(curr[:, 0] - ref_track[:, 0]) > np.log(2.0)
-                )
+                drift, damp = self._sighet_drift_metrics(curr, ref_track, l_i)
+                far = (drift > self.sighet_refresh_dphase) | (damp > np.log(2.0))
                 # Hot cells keep their stale reference: the ll error is
                 # beta-suppressed and each refresh is a full setup.
                 far = far & (beta >= self.sighet_refresh_min_beta)
@@ -2900,6 +3060,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             leaf_inds=l_i[far],
                         )
                     ref_track[far] = curr[far]
+                    # Re-anchor the trust-region cache with the refreshed
+                    # references (refresh is rare; full recompute is cheap).
+                    # The re-basing get_add_ll above stashed h_h for the
+                    # refreshed subset, so the SNR-scaled gate re-anchors
+                    # from the same call.
+                    if anchor_phys is not None:
+                        anchor_phys = self._sighet_anchor_phys(ref_track, l_i)
+                        trust_dlna[far] = self._sighet_trust_dlna_vec(
+                            buffer_obj, int(far.sum()))
                     if tm is not None:
                         tm.count("inmodel_refreshed_sources", int(far.sum()))
                     logger.debug(
@@ -2913,25 +3082,77 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # how far each source walked from its heterodyne expansion point over
         # the block -- same parameter-space metric the legacy refresh gated
         # on -- WITHOUT changing the sampling. Pure arithmetic, no kernel.
-        if sighet_active and self.sighet_drift_check:
-            Tobs = float(self._basis_settings.Tobs)
-            df0_hz = cp.abs(curr[:, 1] - ref_track[:, 1]) / 1e3
-            dfdot = cp.abs(curr[:, 2] - ref_track[:, 2])
-            drift = 2.0 * np.pi * df0_hz * Tobs + np.pi * dfdot * Tobs**2
-            damp = cp.abs(curr[:, 0] - ref_track[:, 0])
+        _audit = sighet_active and self.sighet_drift_check
+        if _audit:
+            drift, damp = self._sighet_drift_metrics(curr, ref_track, l_i)
             n_over = int((drift > self.sighet_refresh_dphase).sum())
+            _gate = (
+                f" gate=[{float(trust_dlna.min()):.2f}..{float(trust_dlna.max()):.2f}]"
+                if trust_dlna is not None else ""
+            )
             logger.info(
                 f"{self.name}: sig-het end-of-block drift ({len(ids)} sources, "
                 f"{self.num_repeat_proposals} repeats): phase max="
                 f"{float(drift.max()):.3e} median={float(cp.median(drift)):.3e} rad, "
                 f"{n_over} over dphase={self.sighet_refresh_dphase}; "
-                f"|dlnA| max={float(damp.max()):.3e}."
+                f"|dlnA| max={float(damp.max()):.3e}.{_gate}"
             )
+            # The sig-het delta the CHAIN actually used at the final coords
+            # (tracked ll_ref), captured before the engine reverts.
+            _ll_het_final = ll_ref.copy()
 
         # Repeat block over: deactivate the per-source likelihood setup so
         # everything outside the block (RJ, removal, fills) scores through
         # the standard engine path again.
         buffer_obj.clear_in_model_likelihood()
+
+        # End-of-block LIKELIHOOD accuracy AUDIT (same knob as the drift
+        # audit): re-score the block's FINAL coordinates through the EXACT
+        # engine -- after clear_in_model the buffer routes to the chunked
+        # delegate natively -- and compare against the sig-het value the MH
+        # chain used. This is the accuracy tracker for the fixed-reference
+        # policy at the chain's actual operating points: |dll| is directly
+        # comparable to the het budget (dlnL ~ SNR^2 * mm), reported for all
+        # temps and for the COLD chain separately (hot walkers legitimately
+        # roam where the linearization is worst and beta suppresses the
+        # error's effect there). Costs ONE exact batched call per block.
+        if _audit:
+            with _tspan(tm, "inmodel_accuracy_check"):
+                _ll_exact = buffer_obj.get_add_ll(
+                    curr, slots, slots, N_vals,
+                    phase_maximize=self.phase_maximize, leaf_inds=l_i)
+            _err = cp.abs(_ll_het_final - _ll_exact)
+            _cold = beta > 0.999
+            _n_c = int(_cold.sum())
+            _cmax = float(_err[_cold].max()) if _n_c else float("nan")
+            _cmed = float(cp.median(_err[_cold])) if _n_c else float("nan")
+            logger.info(
+                f"{self.name}: sig-het end-of-block ll AUDIT vs exact "
+                f"({len(ids)} sources): |dll| max={float(_err.max()):.3e} "
+                f"median={float(cp.median(_err)):.3e}; COLD ({_n_c}): "
+                f"max={_cmax:.3e} median={_cmed:.3e}."
+            )
+            # Name the worst COLD offender when it exceeds O(1) in lnL:
+            # which source/walker still breaks the fixed-reference
+            # expansion, and how far it walked from its anchor. ``drift``
+            # / ``damp`` are the drift-audit metrics computed above.
+            if _n_c and _cmax > 1.0:
+                _ci = cp.where(_cold)[0]
+                _ic = int(_ci[int(cp.argmax(_err[_cold]))])
+                _f0 = float(_to_numpy(self.transform_fn.both_transforms(
+                    curr[_ic:_ic + 1], xp=cp,
+                    leaf_inds=(l_i[_ic:_ic + 1]
+                               if self._per_leaf_fill else None),
+                )[0, 1]))
+                logger.warning(
+                    f"{self.name}: ll AUDIT worst cold offender: "
+                    f"temp={int(t_i[_ic])} walker={int(w_i[_ic])} "
+                    f"band={int(b_i[_ic])} f0={_f0:.6e} Hz "
+                    f"|dll|={float(_err[_ic]):.3e} "
+                    f"dlnA={float(damp[_ic]):.3e} "
+                    f"dphase={float(drift[_ic]):.3e} rad "
+                    f"ll_exact={float(_ll_exact[_ic]):.3e}"
+                )
 
         # Final coordinates back into the residual and the sorter.
         band_sorter.coords[ids] = curr

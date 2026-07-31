@@ -2320,6 +2320,20 @@ def build_gb_moves(
         sighet_refresh_dphase=float(os.environ.get("GB_SIGHET_REFRESH_DPHASE", "0.5")),
         sighet_refresh_min_beta=float(
             os.environ.get("GB_SIGHET_REFRESH_MIN_BETA", "0.1")),
+        # Trust region: reject in-model candidates beyond these gates from
+        # the block's heterodyne anchor (physical |dlnA| e-folds / carrier
+        # phase rad); 0 disables. Inert on chunked-het / FD.
+        sighet_trust_dlna=float(os.environ.get("GB_SIGHET_TRUST_DLNA", "1.5")),
+        sighet_trust_dphase=float(
+            os.environ.get("GB_SIGHET_TRUST_DPHASE", "0.5")),
+        # SNR scaling of the amplitude gate: per-source dlnA_max =
+        # clip(C/snr_ref, dlna_min, GB_SIGHET_TRUST_DLNA); C=0 -> uniform.
+        sighet_trust_snr_c=float(
+            os.environ.get("GB_SIGHET_TRUST_SNR_C", "30")),
+        sighet_trust_dlna_min=float(
+            os.environ.get("GB_SIGHET_TRUST_DLNA_MIN", "0.3")),
+        sighet_anchor_check=os.environ.get(
+            "GB_SIGHET_ANCHOR_CHECK", "0") == "1",
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v
@@ -2655,6 +2669,20 @@ def build_vgb_moves(
         sighet_refresh_dphase=float(os.environ.get("GB_SIGHET_REFRESH_DPHASE", "0.5")),
         sighet_refresh_min_beta=float(
             os.environ.get("GB_SIGHET_REFRESH_MIN_BETA", "0.1")),
+        # Trust region: reject in-model candidates beyond these gates from
+        # the block's heterodyne anchor (physical |dlnA| e-folds / carrier
+        # phase rad); 0 disables. Inert on chunked-het / FD.
+        sighet_trust_dlna=float(os.environ.get("GB_SIGHET_TRUST_DLNA", "1.5")),
+        sighet_trust_dphase=float(
+            os.environ.get("GB_SIGHET_TRUST_DPHASE", "0.5")),
+        # SNR scaling of the amplitude gate: per-source dlnA_max =
+        # clip(C/snr_ref, dlna_min, GB_SIGHET_TRUST_DLNA); C=0 -> uniform.
+        sighet_trust_snr_c=float(
+            os.environ.get("GB_SIGHET_TRUST_SNR_C", "30")),
+        sighet_trust_dlna_min=float(
+            os.environ.get("GB_SIGHET_TRUST_DLNA_MIN", "0.3")),
+        sighet_anchor_check=os.environ.get(
+            "GB_SIGHET_ANCHOR_CHECK", "0") == "1",
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
         **{
             k: v

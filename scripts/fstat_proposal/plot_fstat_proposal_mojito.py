@@ -439,7 +439,77 @@ def _windowed_max(a, w, xp):
     return r[:n]
 
 
-def _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params, label=""):
+# --- sweep checkpointing (FSTAT_GRID_CACHE runs only) -----------------------
+# Every expensive sweep funnels through _chunked_fstat_sweep /
+# run_stacked_peak_sweep, so checkpointing the row cursor of those two
+# loops makes the whole ~hours-scale grid prep restartable: rerunning the
+# SAME command resumes each unfinished sweep from its last saved row (a
+# fingerprint of the sweep's actual inputs guards against resuming across
+# changed knobs), and finished stages short-circuit through their final
+# npz caches (*_comb.npz via FSTAT_COMB_CACHE_REUSE=1). Progress files live
+# in ``<FSTAT_GRID_CACHE base>_parts/`` and are deleted once the stage's
+# final npz is written. Cadence: FSTAT_CKPT_SECS (default 300).
+
+def _ckpt_fingerprint(*arrays, extra=""):
+    import hashlib
+    h = hashlib.md5(extra.encode())
+    for a in arrays:
+        a = np.ascontiguousarray(_to_host(a))
+        step = max(1, a.size // 257)
+        h.update(str(a.shape).encode())
+        h.update(a.reshape(-1)[::step].tobytes())
+    return h.hexdigest()
+
+
+def _ckpt_load(ckpt, n, fingerprint):
+    """Returns (host F array or None, completed row count)."""
+    if not ckpt:
+        return None, 0
+    path = ckpt + ".progress.npz"
+    if not os.path.exists(path):
+        return None, 0
+    try:
+        d = np.load(path, allow_pickle=False)
+        if str(d["fingerprint"]) != fingerprint or int(d["n"]) != n:
+            print(f"[ckpt] {path}: inputs changed -> restarting this sweep",
+                  flush=True)
+            return None, 0
+        done = int(d["done"])
+        print(f"[ckpt] resuming {os.path.basename(ckpt)} at {done}/{n} rows",
+              flush=True)
+        return np.array(d["F"]), done
+    except Exception as exc:  # unreadable/partial file -> recompute
+        print(f"[ckpt] {path}: unreadable ({exc}) -> restarting this sweep",
+              flush=True)
+        return None, 0
+
+
+def _ckpt_save(ckpt, F_host, done, n, fingerprint):
+    if not ckpt:
+        return
+    path = ckpt + ".progress.npz"
+    tmp = ckpt + ".progress.tmp.npz"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez(tmp, F=F_host, done=done, n=n, fingerprint=fingerprint)
+    os.replace(tmp, path)
+
+
+def _ckpt_clear(parts_dir, prefix):
+    if not parts_dir or not os.path.isdir(parts_dir):
+        return
+    for fn in os.listdir(parts_dir):
+        if fn.startswith(prefix) and fn.endswith(".progress.npz"):
+            try:
+                os.remove(os.path.join(parts_dir, fn))
+            except OSError:
+                pass
+
+
+def _ckpt_secs():
+    return float(os.environ.get("FSTAT_CKPT_SECS", "60"))
+
+
+def _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params, label="", ckpt=None):
     """ONE chunked kernel stream over a pre-assembled physical params array.
 
     The batching invariant: every F-stat computation in this script sweeps a
@@ -447,26 +517,58 @@ def _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params, label=""):
     peak boxes at once, in ``FSTAT_BATCH``-row ``get_fstat_ll_wdm`` calls --
     never a per-band / per-sky / per-peak kernel loop. Returns the F values
     on the compute backend's array module.
+
+    ``ckpt``: optional progress-file base path; the sweep then resumes from
+    the last saved row on rerun (see the checkpointing block above).
     """
     from lisatools.sampling.fstat_proposal import compute_fstat, fstat_knob
 
     xp = gb_wdm_comp.xp
+    fp = _ckpt_fingerprint(params, extra=label) if ckpt else ""
     params = xp.asarray(params)
     n = params.shape[0]
     batch = fstat_knob("FSTAT_BATCH", int)
     F = xp.empty(n, dtype=xp.float64)
+    F_prev, start = _ckpt_load(ckpt, n, fp)
+    if F_prev is not None and start > 0:
+        F[:start] = xp.asarray(F_prev[:start])
+    if ckpt and start == 0:
+        # Write the progress file up front (done=0): its presence confirms
+        # checkpointing is armed and where the parts live -- and a very early
+        # death still leaves a valid (empty) resume point.
+        _ckpt_save(ckpt, np.empty(0), 0, n, fp)
+        print(f"[ckpt] progress file: {ckpt}.progress.npz "
+              f"(every {_ckpt_secs():.0f}s + on interrupt)", flush=True)
     t0 = time.time()
     last = t0
-    for s in range(0, n, batch):
-        e = min(s + batch, n)
-        N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
-        F[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
-        if time.time() - last > 30:
-            last = time.time()
-            print(f"[sweep{label}] {e}/{n} evals "
-                  f"({time.time() - t0:.0f}s)", flush=True)
+    last_ckpt = t0
+    done = start
+    try:
+        for s in range(start, n, batch):
+            e = min(s + batch, n)
+            N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
+            F[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
+            done = e
+            if time.time() - last > 30:
+                last = time.time()
+                print(f"[sweep{label}] {e}/{n} evals "
+                      f"({time.time() - t0:.0f}s)", flush=True)
+            if ckpt and e < n and time.time() - last_ckpt > _ckpt_secs():
+                last_ckpt = time.time()
+                _ckpt_save(ckpt, _to_host(F[:e]), e, n, fp)
+                print(f"[ckpt] saved {e}/{n} rows", flush=True)
+    except BaseException:
+        # Ctrl-C / SIGTERM / OOM between cadence saves: keep every completed
+        # row (SIGKILL is the only death the cadence alone must cover).
+        if ckpt and done > start:
+            _ckpt_save(ckpt, _to_host(F[:done]), done, n, fp)
+            print(f"[ckpt] interrupt: saved {done}/{n} rows", flush=True)
+        raise
+    if ckpt and start < n:
+        _ckpt_save(ckpt, _to_host(F), n, n, fp)
     print(f"[sweep{label}] {n} evals in one chunked stream "
-          f"(batch={batch}, {time.time() - t0:.0f}s)", flush=True)
+          f"(batch={batch}, {time.time() - t0:.0f}s"
+          f"{f', resumed at {start}' if start else ''})", flush=True)
     return F
 
 
@@ -617,6 +719,7 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
 
     # Sweep each sky level as its own rectangular batch; fill the per-node max
     # F and the best-sky (alpha, sin_delta) per node (the sky row that won).
+    parts_dir = cache_path.replace(".npz", "_parts") if cache_path else None
     F_max_host = np.zeros(n_nodes)
     best_al_host = np.zeros(n_nodes)
     best_sd_host = np.zeros(n_nodes)
@@ -634,8 +737,11 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
         params[:, 5] = 0.5 * np.pi
         params[:, 7] = np.repeat(al, nn)
         params[:, 8] = np.arcsin(np.repeat(sd, nn))
-        Fd = _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params,
-                                  label=f":comb.nsky{int(lv)}").reshape(int(lv), nn)
+        Fd = _chunked_fstat_sweep(
+            gb_wdm_comp, wdm_holder, params, label=f":comb.nsky{int(lv)}",
+            ckpt=(os.path.join(parts_dir, f"comb_nsky{int(lv)}")
+                  if parts_dir else None),
+        ).reshape(int(lv), nn)
         _kb = _to_host(Fd.argmax(axis=0)).astype(int)
         F_max_host[idx] = _to_host(Fd.max(axis=0))
         best_al_host[idx] = al[_kb]
@@ -665,6 +771,9 @@ def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
                  best_alpha=best_al_host, best_sin_delta=best_sd_host,
                  nsky_per_node=nsky_per_node)
         print(f"[cache] wrote {comb_cache}", flush=True)
+        # The comb npz is now the durable artifact; drop the per-level
+        # progress files so a later knob change can't resurrect stale rows.
+        _ckpt_clear(parts_dir, "comb_")
 
     # --- comb figure: F(f0) vs the catalogue comb + proposal draws ---
     try:
@@ -1036,7 +1145,7 @@ def _resolve_reference_src(cat_sources, gb_info):
 
 
 def run_stacked_peak_sweep(gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax,
-                           alpha_ax, sd_ax, node_shape):
+                           alpha_ax, sd_ax, node_shape, ckpt=None):
     """ONE chunked kernel stream over EVERY peak box of EVERY sub-band.
 
     ``node_shape`` is ``(K, n_f0, n_Mc, n_alpha, n_sd)``. Rows are assembled
@@ -1044,6 +1153,10 @@ def run_stacked_peak_sweep(gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax,
     materializes); the kernel sees a single ``FSTAT_BATCH``-chunked stream --
     never a per-peak loop. Returns the node-shaped ``F`` array on the
     compute backend's module.
+
+    ``ckpt``: optional progress-file base path; the sweep then resumes from
+    the last saved row on rerun. The fingerprint hashes the box axes, so a
+    changed peak selection or grid-density knob restarts cleanly.
     """
     from gbgpu.utils.utility import get_fdot
 
@@ -1052,32 +1165,59 @@ def run_stacked_peak_sweep(gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax,
     xp = gb_wdm_comp.xp
     n_total = int(np.prod(node_shape))
     batch = fstat_knob("FSTAT_BATCH", int)
+    fp = (_ckpt_fingerprint(np.asarray(f0_los), np.asarray(f0_dxs),
+                            np.asarray(mc_ax), np.asarray(alpha_ax),
+                            np.asarray(sd_ax), extra=str(node_shape))
+          if ckpt else "")
     f0_los_d = xp.asarray(f0_los)
     f0_dxs_d = xp.asarray(f0_dxs)
     mc_d = xp.asarray(mc_ax)
     al_d = xp.asarray(alpha_ax)
     sd_d = xp.asarray(sd_ax)
     F_flat = xp.empty(n_total, dtype=xp.float64)
+    F_prev, start = _ckpt_load(ckpt, n_total, fp)
+    if F_prev is not None and start > 0:
+        F_flat[:start] = xp.asarray(F_prev[:start])
+    if ckpt and start == 0:
+        _ckpt_save(ckpt, np.empty(0), 0, n_total, fp)
+        print(f"[ckpt] progress file: {ckpt}.progress.npz "
+              f"(every {_ckpt_secs():.0f}s + on interrupt)", flush=True)
     t0 = time.time()
     last = t0
-    for s in range(0, n_total, batch):
-        e = min(s + batch, n_total)
-        k, i0, i1, i2, i3 = xp.unravel_index(xp.arange(s, e), node_shape)
-        pr = xp.zeros((e - s, 9), dtype=xp.float64)
-        pr[:, 0] = 1e-22
-        pr[:, 1] = (f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
-        pr[:, 2] = xp.asarray(get_fdot(f=pr[:, 1], Mc=mc_d[i1]))
-        pr[:, 5] = 0.5 * np.pi
-        pr[:, 7] = al_d[i2]
-        pr[:, 8] = xp.arcsin(sd_d[i3])
-        N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(pr, wdm_holder)
-        F_flat[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
-        if time.time() - last > 30:
-            last = time.time()
-            print(f"[stageB] {e}/{n_total} evals ({time.time() - t0:.0f}s)",
-                  flush=True)
+    last_ckpt = t0
+    done = start
+    try:
+        for s in range(start, n_total, batch):
+            e = min(s + batch, n_total)
+            k, i0, i1, i2, i3 = xp.unravel_index(xp.arange(s, e), node_shape)
+            pr = xp.zeros((e - s, 9), dtype=xp.float64)
+            pr[:, 0] = 1e-22
+            pr[:, 1] = (f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
+            pr[:, 2] = xp.asarray(get_fdot(f=pr[:, 1], Mc=mc_d[i1]))
+            pr[:, 5] = 0.5 * np.pi
+            pr[:, 7] = al_d[i2]
+            pr[:, 8] = xp.arcsin(sd_d[i3])
+            N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(pr, wdm_holder)
+            F_flat[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
+            done = e
+            if time.time() - last > 30:
+                last = time.time()
+                print(f"[stageB] {e}/{n_total} evals ({time.time() - t0:.0f}s)",
+                      flush=True)
+            if ckpt and e < n_total and time.time() - last_ckpt > _ckpt_secs():
+                last_ckpt = time.time()
+                _ckpt_save(ckpt, _to_host(F_flat[:e]), e, n_total, fp)
+                print(f"[ckpt] saved {e}/{n_total} rows", flush=True)
+    except BaseException:
+        if ckpt and done > start:
+            _ckpt_save(ckpt, _to_host(F_flat[:done]), done, n_total, fp)
+            print(f"[ckpt] interrupt: saved {done}/{n_total} rows", flush=True)
+        raise
+    if ckpt and start < n_total:
+        _ckpt_save(ckpt, _to_host(F_flat), n_total, n_total, fp)
     print(f"[stageB] {n_total} evals in one chunked stream (batch={batch}, "
-          f"{time.time() - t0:.0f}s)", flush=True)
+          f"{time.time() - t0:.0f}s"
+          f"{f', resumed at {start}' if start else ''})", flush=True)
     return F_flat.reshape(node_shape)
 
 
@@ -1151,9 +1291,11 @@ def run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks, src,
           f"Mc box {mc_range}; f0 boxes clamped to their sub-bands.",
           flush=True)
 
+    _parts = cache_path.replace(".npz", "_parts") if cache_path else None
     logp_grids = run_stacked_peak_sweep(
         gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax, alpha_ax, sd_ax,
         node_shape,
+        ckpt=os.path.join(_parts, "stageb") if _parts else None,
     )  # beta = 1: logp = F
 
     mem_mb = os.environ.get("FSTAT_GRID_MEM_MB", "").strip()
@@ -1179,6 +1321,8 @@ def run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks, src,
         np.savez(stacked_path, **save_fields)
         print(f"[cache] wrote {stacked_path} (grids; GMM appended next)",
               flush=True)
+        # Stacked npz is now the durable artifact for stage B.
+        _ckpt_clear(cache_path.replace(".npz", "_parts"), "stageb")
         if os.environ.get("FSTAT_SAVE_PER_BOX", "0") == "1":
             for i in range(K):
                 f0_ax_i = f0_los[i] + f0_dxs[i] * np.arange(n_f0)
