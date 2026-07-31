@@ -936,16 +936,29 @@ def build_synthetic_source_streams(
 
     sobbh_td = zero.copy()
     if sobbh_injections.shape[0] > 0:
-        sobbh_wave_gen = get_sobbh_response_wrapper(
+        # TDI-on-the-fly injection generator (2026-07-30): the SAME response
+        # family the PE templates use (analytic delays), ~70-200x faster than
+        # the legacy pyResponseTDI path — whose Lagrange-interp output also
+        # carried a ~3.4e3 s effective time-anchor offset vs the on-the-fly
+        # output on the synthetic grid, corrupting truth-start residuals.
+        from lisatools.sources.sobbh.response import get_sobbh_tdionfly_gen
+
+        from .wrappers import SOBBHTDIonFlyWaveWrap
+
+        sobbh_gen = get_sobbh_tdionfly_gen(
             Tobs=Tobs, dt=dt, t_start=t_start,
-            tdi_config=tdi_config, tdi_chan=tdi_chan,
-            role="injection", force_backend=force_backend,
+            tdi_config=tdi_config,
             reference_time=sobbh_reference_time,
+            force_backend=force_backend,
+        )
+        t_arr_sobbh = np.arange(target_N) * dt + t_start
+        sobbh_wrap = SOBBHTDIonFlyWaveWrap(
+            sobbh_gen, t_arr_sobbh, grid, None, nchannels=nchannels
         )
         for ii, params in enumerate(sobbh_injections):
             logger.info(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
             # asnumpy: GPU-backend generator output -> host accumulation.
-            sig = asnumpy(sobbh_wave_gen(*params))
+            sig = asnumpy(sobbh_wrap.raw_td(*params))
             sobbh_td += np.asarray(
                 place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
             )

@@ -86,15 +86,23 @@ class WDMComputationsBase(LISAToolsParallelModule):
                  tukey_alpha=USE_RECOMMENDED_TUKEY, use_tukey=True,
                  N_cp_sig=0, N_cp_orbit=0,
                  orbits=None, tdi_config=None, force_backend=None,
-                 d_d=0.0, tdi_type="XYZ"):
+                 d_d=0.0, tdi_type="XYZ", t_obs_start=None):
         """Args:
             wdm_settings: :class:`lisatools.domains.WDMSettings` instance
                 exposing the WDM grid (``Nf``, ``Nt``, ``data_dt``,
                 ``Tobs``, ``t0``, ``layer_df``, ``layer_dt``) that the
                 global template buffer is built on. ``fill_global_wdm`` /
                 ``get_ll_wdm`` operate over this domain.
-            t_ref: source-phase reference time in seconds. Forwarded to
-                the kernel as ``t_ref_full``.
+            t_ref: source-phase reference time in seconds (PHYSICAL epoch
+                where ``f0``/``phi_c`` are defined). Forwarded to the
+                kernel as ``t_ref_full``.
+            t_obs_start: PHYSICAL start time of the first grid sample.
+                Defaults to ``wdm_settings.t0`` — override it when the
+                run's WDM settings carry an array-space ``t0`` (e.g. the
+                stock global-fit domains are 0-based) while the data
+                actually starts elsewhere, so source phase/orbits are
+                evaluated at true absolute times and ``t_ref`` keeps its
+                physical meaning.
             Nt_sub: per-chunk WDM time pixels.
             n_pad: WDM pixels discarded at each chunk edge during the
                 stitch.
@@ -131,7 +139,9 @@ class WDMComputationsBase(LISAToolsParallelModule):
         self.dt       = float(wdm_settings.data_dt)
         self.T        = float(wdm_settings.Tobs)
         self.t_ref    = float(t_ref)
-        self.t_obs_start = float(wdm_settings.t0)
+        self.t_obs_start = float(
+            wdm_settings.t0 if t_obs_start is None else t_obs_start
+        )
         self.Nt_sub   = int(Nt_sub)
         self.n_pad    = int(n_pad)
         self.N_sparse = int(N_sparse)

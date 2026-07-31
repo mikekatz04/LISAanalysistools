@@ -316,15 +316,20 @@ class SourceSOBBHSettings(SOBBHSettings):
     likelihood: str = dataclasses.field(
         default_factory=env_default("SOBBH_LIKELIHOOD", "chunked", str)
     )
-    # chunked-path knobs (see lisatools.chunked_het.WDMComputationsBase)
+    # chunked-path knobs (see lisatools.chunked_het.WDMComputationsBase).
+    # Nt_sub errs SMALL (short chunks): the per-chunk heterodyne collapses
+    # a source whose intra-chunk frequency sweep exceeds the band (measured
+    # on full_year-lite: Nt_sub=256 -> 2 chunks -> template plateaus at the
+    # chunk carriers). SOBBH scoring is cheap, so safety wins over the
+    # per-chunk FFT amortization.
     nt_sub: int = dataclasses.field(
-        default_factory=env_default("SOBBH_NT_SUB", 256, int)
+        default_factory=env_default("SOBBH_NT_SUB", 32, int)
     )
     n_sparse: int = dataclasses.field(
         default_factory=env_default("SOBBH_N_SPARSE", 256, int)
     )
     n_pad: int = dataclasses.field(
-        default_factory=env_default("SOBBH_N_PAD", 32, int)
+        default_factory=env_default("SOBBH_N_PAD", 4, int)
     )
     m_band_half_width: int = dataclasses.field(
         default_factory=env_default("SOBBH_M_BAND_HALF_WIDTH", 1, int)
@@ -951,6 +956,12 @@ def get_sobbh_chunked_comp(general_info, cfg):
             tdi_type=cfg["tdi_chan"],
             d_d=0.0,
             force_backend=force_backend,
+            # the stock WDM domain settings carry an ARRAY-SPACE t0 (=0)
+            # while the data physically starts at data_t0; anchor the
+            # chunk times at the true absolute start so t_ref keeps its
+            # physical meaning (source phase AND orbits evaluated at the
+            # real epoch)
+            t_obs_start=float(general_info.data_t0),
         )
     _WAVE_WRAP_CACHE[key] = comp
     return comp
