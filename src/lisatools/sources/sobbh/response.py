@@ -167,10 +167,19 @@ def get_sobbh_tdionfly_gen(
         reference_time,
         n_grid,
         buffer_time,
-        id(orbits),
+        "default-orbits" if orbits is None else id(orbits),
     )
     if key in _SOBBH_TDIONFLY_GEN_CACHE:
         return _SOBBH_TDIONFLY_GEN_CACHE[key]
+
+    if orbits is None:
+        # Default the orbits on THIS generator's backend (mirrors
+        # get_sobbh_response_wrapper). Leaving None lets the downstream
+        # response default them with AUTO backend resolution, which picks
+        # the best available LAT backend — on a GPU machine that hands
+        # cupy orbit tables to a CPU-resolved generator (e.g. a CPU-only
+        # bbhx build) and dies in OrbitsWrap.
+        orbits = EqualArmlengthOrbits(force_backend=force_backend)
 
     from bbhx.sobbhtdionfly import SOBBHTDIonFly
 
