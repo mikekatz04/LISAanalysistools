@@ -277,6 +277,13 @@ class GBNoFgGBSettings(GBSettings):
     sighet_max_r: float = dataclasses.field(
         default_factory=env_default("SIGHET_MAX_R", 0.0, float)
     )
+    # Control-point count for the sig-het spline waveform build (shared
+    # machinery with chunked-het's N_cp_sig splines). -1 = AUTO (one node
+    # per ~4 days of Tobs, clamped [32, 256]); 0 = direct per-point
+    # evaluation (legacy); >1 = explicit count.
+    sighet_n_cp: int = dataclasses.field(
+        default_factory=env_default("SIGHET_N_CP", -1, int)
+    )
     # NOTE: no __post_init__ here — Setup.__init__ re-runs this dataclass's
     # __init__ on the (non-dataclass) GBSetup instance, which cannot resolve
     # dataclass hooks. Value validation happens in prepare_branch_settings.
@@ -921,6 +928,7 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                 nt_layer=int(gb_info.sighet_nt_layer),
                 n_sparse_fd=int(gb_info.sighet_n_sparse_fd),
                 max_r=float(getattr(gb_info, "sighet_max_r", 0.0)),
+                n_cp_build=int(getattr(gb_info, "sighet_n_cp", -1)),
             )
             logger.info(
                 "GB in-model likelihood: SIGNAL-HET "

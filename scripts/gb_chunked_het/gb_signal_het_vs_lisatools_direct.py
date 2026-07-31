@@ -232,8 +232,7 @@ def main():
             layer_df, dt,
             Tobs, t_start,
             3, 0, N_SPARSE_FD,
-            TUKEY_ALPHA,
-        )
+            TUKEY_ALPHA, 0)
         logL_get_ll = float(d_h_g[0]) - 0.5 * float(h_h_g[0])
 
         rd_get_ll = (abs(logL_get_ll - logL_direct)

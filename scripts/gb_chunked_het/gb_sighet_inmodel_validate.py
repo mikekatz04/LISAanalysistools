@@ -82,9 +82,17 @@ def main():
     )
     chunked.convert_to_ra_dec = False
     # SWEEP_MAX_R overrides the ratio-clip knob (library default: disabled).
+    # SWEEP_N_CP overrides the spline-build control-point count
+    # (-1 = auto spline [library default], 0 = direct build).
     _mr = os.environ.get("SWEEP_MAX_R")
+    _ncp = os.environ.get("SWEEP_N_CP")
     sighet = GBSignalHetComputations.for_band_engine(
-        chunked, **({"max_r": float(_mr)} if _mr is not None else {}))
+        chunked,
+        **({"max_r": float(_mr)} if _mr is not None else {}),
+        **({"n_cp_build": int(_ncp)} if _ncp is not None else {}),
+    )
+    print(f"  [build] sig-het n_cp_build = {sighet._g['n_cp_build']}"
+          f" ({'spline' if sighet._g['n_cp_build'] > 1 else 'direct'})")
 
     eng_c = WDMBandLikelihoodEngine(chunked, wdm_set, nchannels=3,
                                     tdi_channel_setup="XYZ")

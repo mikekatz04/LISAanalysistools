@@ -202,8 +202,7 @@ def run(Nt):
         NTL, N_sparse_t, stride,
         ind_min_t, ind_min_f, 2,
         layer_df, DT, Tobs, t_start,
-        3, 0, NSFD, TUK, MAX_R, int(PROJECT_REAL),
-    )
+        3, 0, NSFD, TUK, MAX_R, int(PROJECT_REAL), 0)
     ll_getll = -0.5 * d_d_m + float(d_h[0]) - 0.5 * float(h_h[0])
     mm_getll = -2.0 * ll_getll / d_d_m   # eff_mm over the MATCHED pixel set
     rd_dh = abs(d_h[0] - d_d_m) / max(d_d_m, 1e-300)

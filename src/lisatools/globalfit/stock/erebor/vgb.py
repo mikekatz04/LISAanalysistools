@@ -134,6 +134,13 @@ class VGBSettings(GBSettings):
     sighet_max_r: float = dataclasses.field(
         default_factory=env_default("SIGHET_MAX_R", 0.0, float)
     )
+    # Control-point count for the sig-het spline waveform build (shared
+    # machinery with chunked-het's N_cp_sig splines). -1 = AUTO (one node
+    # per ~4 days of Tobs, clamped [32, 256]); 0 = direct per-point
+    # evaluation (legacy); >1 = explicit count.
+    sighet_n_cp: int = dataclasses.field(
+        default_factory=env_default("SIGHET_N_CP", -1, int)
+    )
     # (nleaves, 3) per-leaf fixed [f0 (mHz), alpha, sin_delta] in SAMPLING
     # units, ordered like VGB_FIXED_BASIS; feeds the per-leaf fill list.
     fixed_params: typing.Optional[typing.Any] = None

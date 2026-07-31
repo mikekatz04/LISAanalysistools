@@ -368,8 +368,7 @@ def build_pack(
             ind_min_t, ind_min_f, 2,
             layer_df, dt, Tobs, t_start,
             3, 0, N_SPARSE_FD,
-            TUKEY_ALPHA, MAX_R,
-        )
+            TUKEY_ALPHA, MAX_R, 0)
         ll = -0.5 * d_d_lt + np.asarray(d_h_out) - 0.5 * np.asarray(h_h_out)
         bad = ~np.isfinite(ll) | (ll > ll_ceiling)
         return np.where(bad, ll_reject, ll)

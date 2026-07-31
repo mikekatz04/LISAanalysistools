@@ -291,8 +291,8 @@ def main():
                 Tobs, t_start,
                 3, 0, N_SPARSE_FD,
                 TUKEY_ALPHA,
-                -1.0, 0,   # max_r (off), project_real=0 (legacy complex)
-            )
+                -1.0, 0,   # max_r (off), project_real=0 (legacy complex),
+        0)  # n_cp_sig=0: direct build (script baseline)
 
             ll_s1 = float(d_h_s1[0]) - 0.5 * float(h_h_s1[0])
             ll_s2a = float(d_h_s2a[0]) - 0.5 * float(h_h_s2a[0])
