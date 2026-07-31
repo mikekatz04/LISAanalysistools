@@ -254,6 +254,10 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
                 h_h[pos] = np.real(np.asarray(asnumpy(self.comp.h_h_out)))
         return ll, d_h, h_h
 
+    #: The chunked record is one cheap vectorized call -> default ON
+    #: (SOBBH_RECORD_DH=0 disables).
+    _record_dh_default = "1"
+
     def _record_leaf_inner_products(self, new_state, add_coords_in, leaf):
         """Record cold-chain ``<d|h>``, ``<h|h>`` from the chunked kernel.
 
@@ -261,6 +265,8 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         (narrow ``m_band_half_width`` band) — one vectorized ``nwalkers``
         call instead of the base's slow container batch.
         """
+        if not getattr(self, "record_inner_products", False):
+            return
         _sub = (getattr(new_state, "sub_states", None) or {}).get(self.branch_name)
         if _sub is None or getattr(_sub, "d_h", None) is None:
             return

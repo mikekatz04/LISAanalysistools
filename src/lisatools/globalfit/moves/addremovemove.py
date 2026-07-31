@@ -407,6 +407,15 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.check_ll_every = max(
             1, int(os.environ.get(f"{p}_CHECK_LL_EVERY", "1"))
         )
+        # Per-leaf cold-chain <d|h>/<h|h> sub-state record. On the slow
+        # container path it costs one EXTRA nwalkers waveform batch per
+        # leaf per iteration, so it defaults OFF here; fast-kernel
+        # subclasses flip ``_record_dh_default`` (their record is one
+        # cheap vectorized call). ``{BRANCH}_RECORD_DH`` overrides either
+        # way; when off the sub-state d_h/h_h stay NaN.
+        self.record_inner_products = bool(int(
+            os.environ.get(f"{p}_RECORD_DH", self._record_dh_default)
+        ))
         # Tempering diagnostics: {BRANCH}_SWAP_DEBUG=1 logs one [SWAP_DBG]
         # line per repeat (cold-chain lnL before/after the temperature swap,
         # inner acceptance, per-rung swap counts, fancy flag).
@@ -949,6 +958,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             coords_in, data_index, **self.waveform_like_kwargs
         )
 
+    #: Default for the per-leaf <d|h>/<h|h> record ({BRANCH}_RECORD_DH
+    #: overrides): OFF on the slow container path (one extra nwalkers
+    #: waveform batch per leaf); fast-kernel subclasses set "1".
+    _record_dh_default = "0"
+
     def _record_leaf_inner_products(self, new_state, add_coords_in, leaf):
         """Record this leaf's cold-chain ``<d|h>``, ``<h|h>`` on the sub-state.
 
@@ -957,9 +971,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         (the likelihood setup for this leaf is still bound). The base
         implementation pays one extra ``nwalkers``-row evaluation through
         :meth:`compute_acs_like` so each container stashes
-        ``last_d_h``/``last_h_h`` (the DCGA kernel path records nothing).
-        Fast-likelihood subclasses override this to record from their own
-        kernel's inner-product outputs instead.
+        ``last_d_h``/``last_h_h`` (the DCGA kernel path records nothing) —
+        which is why it is gated OFF by default (``{BRANCH}_RECORD_DH=1``
+        arms it). Fast-likelihood subclasses override this to record from
+        their own kernel's inner-product outputs instead (cheap; default
+        ON there).
 
         Args:
             new_state: The move's working :class:`GFState` (its sub-state
@@ -968,6 +984,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 shape ``(nwalkers, ndim)``.
             leaf: Leaf index being recorded.
         """
+        if not getattr(self, "record_inner_products", False):
+            return
         _sub = (getattr(new_state, "sub_states", None) or {}).get(self.branch_name)
         if _sub is None or getattr(_sub, "d_h", None) is None:
             return

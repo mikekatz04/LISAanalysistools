@@ -98,7 +98,12 @@ On-disk format `gf_format_version=2` (the cold-chain storage rework):
   `band_temps`, or per-leaf `betas_all`), proposal/swap counters, and the
   per-leaf cold-chain `d_h`/`h_h` record — in its `ModuleSubState`
   (in-memory) and `ModuleSubBackend` (HDF group
-  `global_fit/sub_backend/<branch>` in the same file).
+  `global_fit/sub_backend/<branch>` in the same file). The add/remove
+  branches' `d_h`/`h_h` record is gated by `{BRANCH}_RECORD_DH`: OFF by
+  default on the slow container path (it costs one extra `nwalkers`
+  waveform batch per leaf per iteration; the datasets stay NaN), ON by
+  default where it is cheap (the chunked SOBBH kernel) or free (GB's
+  in-kernel capture, always on).
 - **"The sub-state IS the schema"**: a sub-state declares its storage
   through setup methods + name lists (`storage_arrays`/`static_arrays`/
   `storage_attrs`, `make_template`/`from_stored`); the backend derives every
