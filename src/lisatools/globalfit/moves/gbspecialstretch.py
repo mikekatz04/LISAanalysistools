@@ -2817,7 +2817,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if sighet_active and self.sighet_trust_dlna > 0.0
             else None
         )
-        trust_Tobs = float(self._basis_settings.Tobs)
+        # Tobs only exists on time-frequency bases (WDM/STFT) — and is only
+        # consumed by the trust-region gate math, which is active exactly
+        # when ``anchor_phys`` is (dev regression: the unconditional read
+        # broke every FD-domain GB flow).
+        trust_Tobs = (
+            float(self._basis_settings.Tobs) if anchor_phys is not None else 0.0
+        )
         with _tspan(tm, "inmodel_ll_ref"):
             ll_ref = buffer_obj.get_add_ll(curr, slots, slots, N_vals, leaf_inds=l_i)
             curr_prior = cp.asarray(self.gpu_priors[self.branch_name].logpdf(curr))
