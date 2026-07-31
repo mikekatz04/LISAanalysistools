@@ -272,5 +272,84 @@ class SOBBHChunkedParityTest(unittest.TestCase):
         self.assertEqual(SourceSOBBHSettings().likelihood, "chunked")
 
 
+class SOBBHChunkedRoutingTest(unittest.TestCase):
+    """Multi-shard (multi-GPU walker-shard) routing in compute_like.
+
+    Uses the shared FakeMultiShardACA + a stub comp: verifies rows are
+    partitioned by owning split, scored against THAT split's buffer with
+    INTRA-shard indices under the owning device context, and reassembled
+    in global row order (d_h/h_h included)."""
+
+    def test_multi_shard_routing(self):
+        try:
+            from tests._multishard import FakeMultiShardACA
+        except ImportError:
+            from _multishard import FakeMultiShardACA
+        from types import SimpleNamespace
+
+        from eryn.moves import StretchMove
+        from eryn.prior import ProbDistContainer, uniform_dist
+
+        from lisatools.globalfit.moves import SOBBHChunkedLikeMove
+
+        nwalkers, ntemps = 6, 2
+        acs = FakeMultiShardACA((3, 8), nwalkers, 2, layout="blocked",
+                                dtype=float)
+
+        class _StubComp:
+            d_d = 0.0
+            wdm_settings = SimpleNamespace(
+                ind_min_f=0, ind_max_f=999, layer_df=1e-3
+            )
+
+            def __init__(self):
+                self.calls = []
+
+            def get_ll_wdm(self, params, holder, data_index=None,
+                           noise_index=None, m_band_half_width=1):
+                fp = float(np.real(np.asarray(holder.linear_data_arr[0])[0]))
+                intra = np.asarray(data_index, dtype=int)
+                self.calls.append((fp, intra.copy()))
+                self.d_h_out = fp * 10.0 + intra.astype(float)
+                self.h_h_out = 2.0 * self.d_h_out
+                return self.d_h_out - 0.5 * self.h_h_out + fp
+
+        comp = _StubComp()
+        betas = 1 / 1.2 ** np.arange(ntemps)
+        move = SOBBHChunkedLikeMove(
+            "sobbh", (ntemps, nwalkers, 1, 11), None, {}, {}, acs, 1, None,
+            {"sobbh": ProbDistContainer(
+                {i: uniform_dist(-1e10, 1e10) for i in range(11)})},
+            [(StretchMove(), 1.0)],
+            betas_all=np.tile(betas, (1, 1)),
+            chunked_comp=comp,
+            name="sobbh routing test",
+        )
+        move._exposed_offset = np.zeros(nwalkers)
+
+        rows = np.tile(REF_STOCK, (nwalkers, 1))
+        idx = np.arange(nwalkers, dtype=np.int32)
+        out = move.compute_like(rows, idx)
+
+        # blocked layout: walkers 0-2 -> shard 0 (buffer fingerprint 1.0,
+        # first owned row 0), walkers 3-5 -> shard 1 (fingerprint 4.0)
+        self.assertEqual(len(comp.calls), 2)
+        fps = sorted(c[0] for c in comp.calls)
+        self.assertEqual(fps, [1.0, 4.0])
+        for fp, intra in comp.calls:
+            np.testing.assert_array_equal(intra, np.arange(3))
+        expected = np.array([
+            (1.0 if w < 3 else 4.0) for w in range(nwalkers)
+        ])
+        np.testing.assert_allclose(out, expected)
+        # d_h/h_h reassembled in global row order with intra offsets
+        np.testing.assert_allclose(
+            move._last_d_h,
+            [10.0, 11.0, 12.0, 40.0, 41.0, 42.0],
+        )
+        # each split ran under its owning device context
+        self.assertEqual(sorted(set(acs.xp.device_log)), [0, 1])
+
+
 if __name__ == "__main__":
     unittest.main()

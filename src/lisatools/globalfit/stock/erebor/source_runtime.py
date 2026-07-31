@@ -334,6 +334,13 @@ class SourceSOBBHSettings(SOBBHSettings):
     m_band_half_width: int = dataclasses.field(
         default_factory=env_default("SOBBH_M_BAND_HALF_WIDTH", 1, int)
     )
+    # band half-width for the RESIDUAL/template fill (the engine-installed
+    # chunked signal_gen). Wider than the scoring band on purpose: fill
+    # truncation lands in the SHARED residual every other branch sees, so
+    # err wide (fill mismatch ~3e-4 at 6; scoring stays narrow and fast).
+    fill_m_band_half_width: int = dataclasses.field(
+        default_factory=env_default("SOBBH_FILL_M_BAND_HALF_WIDTH", 8, int)
+    )
 
 
 # ============================================================
@@ -604,6 +611,7 @@ def source_signal_cfg(gs, mbh, sobbh, emri) -> dict:
         sobbh_n_sparse=sobbh.n_sparse,
         sobbh_n_pad=sobbh.n_pad,
         sobbh_m_band_half_width=sobbh.m_band_half_width,
+        sobbh_fill_m_band_half_width=sobbh.fill_m_band_half_width,
         mbh_phenom_kwargs=dict(
             waveform_duration=mbh.waveform_duration,
             higher_modes=mbh.higher_modes,
@@ -884,6 +892,16 @@ class SourceSignalGen:
                     *params_in, **kwargs
                 )
             if self.branch == "sobbh":
+                # chunked mode: the ENGINE-side template/residual generator
+                # is the chunked-het fill too (wide FILL band; same family
+                # as the move's scoring kernel), so residual bookkeeping,
+                # load-time rebuilds, and scoring are mutually consistent
+                # and all fast. The move's cross-check stays independent —
+                # it verifies against the slow tdionfly wrap explicitly.
+                if self.cfg.get("sobbh_likelihood", "full") == "chunked":
+                    return get_sobbh_chunked_signal_gen(
+                        self.general_info, self.cfg
+                    )(*params_in, **kwargs)
                 return get_sobbh_wave_wrap(self.general_info, self.cfg)(
                     *params_in, **kwargs
                 )
@@ -965,6 +983,48 @@ def get_sobbh_chunked_comp(general_info, cfg):
         )
     _WAVE_WRAP_CACHE[key] = comp
     return comp
+
+
+def get_sobbh_chunked_signal_gen(general_info, cfg):
+    """Engine-convention SOBBH template generator backed by the chunked fill.
+
+    Returns a cached (per device) callable ``fn(*waveform_params, ...) ->
+    WDMSignal`` that renders the template via ``fill_global_wdm`` on the
+    active-band grid — the SAME family the move's scoring kernel uses, so
+    residual bookkeeping, load-time rebuilds, and scoring stay mutually
+    consistent (and all fast). Band width = ``SOBBH_FILL_M_BAND_HALF_WIDTH``
+    (wide: the truncation lands in the shared residual). The move's
+    fast-vs-slow cross-check remains independent — it explicitly verifies
+    against the slow tdionfly wrap.
+    """
+    xp, dev, orbits, domain_settings = _wrap_device_and_orbits(general_info)
+    key = ("sobbh_chunked_gen", id(general_info), cfg["nchannels"], dev)
+    if key in _WAVE_WRAP_CACHE:
+        return _WAVE_WRAP_CACHE[key]
+
+    from lisatools.domains import WDMSignal
+
+    from ...moves.sobbhspecialmove import SOBBHChunkedLikeMove
+
+    comp = get_sobbh_chunked_comp(general_info, cfg)
+    wdm = domain_settings
+    nch = int(cfg["nchannels"])
+    m_fill = int(cfg["sobbh_fill_m_band_half_width"])
+
+    def sobbh_chunked_gen(*params, apply_transform=False, leaf_inds=None,
+                          **kwargs):
+        row = np.asarray(params[:11], dtype=float).reshape(1, 11)
+        p = SOBBHChunkedLikeMove.to_chunked_basis(row)
+        buf = comp.xp.zeros(
+            (nch, int(wdm.Nf_active), int(wdm.Nt_active)), dtype=float
+        )
+        comp.fill_global_wdm(
+            p, buf, convert_to_ra_dec=False, m_band_half_width=m_fill
+        )
+        return WDMSignal(buf, wdm)
+
+    _WAVE_WRAP_CACHE[key] = sobbh_chunked_gen
+    return sobbh_chunked_gen
 
 
 def build_sobbh_move_runtime(curr, acs, priors, state, cfg):

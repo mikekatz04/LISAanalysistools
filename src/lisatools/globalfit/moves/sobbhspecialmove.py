@@ -55,8 +55,10 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
             chunk's carrier — the chunked path's one live accuracy/speed
             knob (``SOBBH_M_BAND_HALF_WIDTH``).
         **kwargs: Keyword arguments of :class:`ResidualAddOneRemoveOneMove`.
-            ``dcga`` must be ``None`` — the chunked kernel scores against the
-            single-shard ACA buffers directly and has no multi-device path.
+            ``dcga`` must be ``None`` — the chunked kernel scores against
+            the ACA buffers directly (multi-GPU walker shards are handled
+            by per-split routing inside :meth:`compute_like`, not by the
+            DCGA replica machinery).
     """
 
     #: Column permutation from the stock SOBBH waveform basis
@@ -71,10 +73,11 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
     def __init__(self, *args, chunked_comp=None, m_band_half_width=1, **kwargs):
         if kwargs.get("dcga") is not None:
             raise ValueError(
-                "SOBBHChunkedLikeMove has no DCGA (multi-device) path: the "
-                "chunked kernel reads the single-shard ACA buffers directly. "
-                "Build it without dcga= (the SOBBHChunkedMoveBuilder skips "
-                "the DCGA branch), or use the stock full-TD move."
+                "SOBBHChunkedLikeMove has no DCGA (replica) path: the "
+                "chunked kernel reads the ACA buffers directly, and "
+                "multi-GPU walker shards are served by per-split routing "
+                "inside compute_like. Build it without dcga= (the "
+                "SOBBHChunkedMoveBuilder skips the DCGA branch)."
             )
         if chunked_comp is None:
             raise ValueError(
@@ -93,16 +96,12 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
             )
 
         # the *_wdm kernels are single-shard by contract (they consume
-        # linear_data_arr[0]); multi-shard runs need the gbbands
-        # _RoutedBandEngine-style router (documented follow-up)
-        n_shards = len(self.acs.linear_data_arr)
-        if n_shards != 1:
-            raise NotImplementedError(
-                f"SOBBHChunkedLikeMove is single-shard only (ACA has "
-                f"{n_shards} shards). Multi-GPU sharding needs a shard "
-                "router (see lisatools.globalfit.moves.gbbands."
-                "_RoutedBandEngine); use SOBBH_LIKELIHOOD=full there."
-            )
+        # linear_data_arr[0]); multi-shard (multi-GPU walker-shard) ACAs
+        # are served by per-split routing in compute_like (gbbands
+        # _ShardHolderView + partition, each split under its own device
+        # context — the comp re-asserts its geometry arrays per call so
+        # they land on the current device)
+        self._n_shards = len(self.acs.linear_data_arr)
 
         # in-band carrier window from the comp's WDM settings: proposals
         # whose f_low falls outside score as invalid (-1e300) to mirror the
@@ -197,17 +196,63 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         if not np.any(valid):
             return out
 
-        ll = self.comp.get_ll_wdm(
-            params[valid],
-            self.acs,
-            data_index=idx[valid],
-            noise_index=idx[valid],
-            m_band_half_width=self.m_band_half_width,
-        )
-        out[valid] = np.asarray(asnumpy(ll), dtype=float) + self._exposed_offset[idx[valid]]
-        self._last_d_h[valid] = np.real(np.asarray(asnumpy(self.comp.d_h_out)))
-        self._last_h_h[valid] = np.real(np.asarray(asnumpy(self.comp.h_h_out)))
+        ll, d_h, h_h = self._kernel_ll(params[valid], idx[valid])
+        out[valid] = ll + self._exposed_offset[idx[valid]]
+        self._last_d_h[valid] = d_h
+        self._last_h_h[valid] = h_h
         return out
+
+    def _kernel_ll(self, params, idx):
+        """One chunked-het scoring pass, shard-routed when the ACA is split.
+
+        Args:
+            params: ``(N, 11)`` chunked-basis host rows (all valid).
+            idx: ``(N,)`` GLOBAL walker indices.
+
+        Returns:
+            ``(ll, d_h, h_h)`` host arrays in row order.
+        """
+        if len(self.acs.linear_data_arr) == 1:
+            ll = self.comp.get_ll_wdm(
+                params, self.acs,
+                data_index=idx, noise_index=idx,
+                m_band_half_width=self.m_band_half_width,
+            )
+            return (
+                np.asarray(asnumpy(ll), dtype=float),
+                np.real(np.asarray(asnumpy(self.comp.d_h_out))),
+                np.real(np.asarray(asnumpy(self.comp.h_h_out))),
+            )
+
+        # multi-GPU walker shards: reuse the GB shard-router primitives —
+        # per-split single-shard views + the split partition — and run each
+        # split's rows under the owning device context (cross-shard movement
+        # is host-routed, matching the ACA conventions)
+        from ...utils.device import device_context
+        from .gbbands import _RoutedBandEngine
+
+        holder = self.acs
+        views = _RoutedBandEngine._shard_views(holder)
+        parts = _RoutedBandEngine._partition(holder, idx)
+        xp = holder.xp
+        n = params.shape[0]
+        ll = np.full(n, -1e300, dtype=float)
+        d_h = np.full(n, np.nan)
+        h_h = np.full(n, np.nan)
+        for view, (pos, intra, _) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            with device_context(xp, view.device):
+                vals = self.comp.get_ll_wdm(
+                    params[pos], view,
+                    data_index=np.asarray(intra, dtype=np.int32),
+                    noise_index=np.asarray(intra, dtype=np.int32),
+                    m_band_half_width=self.m_band_half_width,
+                )
+                ll[pos] = np.asarray(asnumpy(vals), dtype=float)
+                d_h[pos] = np.real(np.asarray(asnumpy(self.comp.d_h_out)))
+                h_h[pos] = np.real(np.asarray(asnumpy(self.comp.h_h_out)))
+        return ll, d_h, h_h
 
     def _record_leaf_inner_products(self, new_state, add_coords_in, leaf):
         """Record cold-chain ``<d|h>``, ``<h|h>`` from the chunked kernel.
