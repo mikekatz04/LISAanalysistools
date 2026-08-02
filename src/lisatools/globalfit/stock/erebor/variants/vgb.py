@@ -272,15 +272,17 @@ def setup_vgb_moves(engine_info, curr, acs, priors, state) -> dict:
                 n_sparse_fd=int(vgb_info.sighet_n_sparse_fd),
                 max_r=float(getattr(vgb_info, "sighet_max_r", 0.0)),
                 n_cp_build=int(getattr(vgb_info, "sighet_n_cp", -1)),
+                v3_n_nodes=int(getattr(vgb_info, "sighet_v3_nodes", 0)),
             )
             logger.info(
                 "VGB in-model likelihood: SIGNAL-HET (nt_layer=%d, "
-                "n_sparse_fd=%d, max_r=%s, n_cp=%d; chunked-het delegate "
-                "for fills / swaps).",
+                "n_sparse_fd=%d, max_r=%s, n_cp=%d, v3_nodes=%d; "
+                "chunked-het delegate for fills / swaps).",
                 int(vgb_info.sighet_nt_layer),
                 int(vgb_info.sighet_n_sparse_fd),
                 float(getattr(vgb_info, "sighet_max_r", 0.0)),
                 int(vgb_info.gb_wdm_comp._g["n_cp_build"]),
+                int(vgb_info.gb_wdm_comp._g.get("v3_n_nodes", 0)),
             )
 
     if isinstance(general_info.domain_settings, FDSettings):

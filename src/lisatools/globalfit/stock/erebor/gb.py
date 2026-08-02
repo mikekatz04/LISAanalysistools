@@ -177,6 +177,36 @@ class GBSettings(Settings):
     # FStatProposal4D-backed containers do. None (default) keeps the
     # stock global-prior births.
     rj_birth_distribution: typing.Optional[typing.Any] = None
+    # -- search RJ cycle knobs (2026-08-01; search mode ONLY, i.e.
+    # GB_MODE=search) -- when on, the variant's recipe setup inserts the
+    # matching stock move(s) right after the fstat-birth prior move
+    # (``rj_prior``) in its stage, so the stage's GFCombineMove runs the
+    # per-iteration cycle fstat-birth -> fstat-REPLACE -> prior-REMOVAL in
+    # guaranteed order (eryn CombineMove proposes its moves sequentially in
+    # list order). PE recipes are untouched. Plain bools -> deepcopy/pickle
+    # safe.
+    #
+    # search_rj_replace: build + install the fixed-dimension REPLACEMENT
+    # move ``rj_replace`` (GBSpecialRJPriorMove(rj_replace=True) drawing
+    # from the rj/fstat birth container; see
+    # GBSpecialBase._run_replace_step). Env: GB_SEARCH_RJ_REPLACE.
+    search_rj_replace: bool = dataclasses.field(
+        default_factory=env_default("GB_SEARCH_RJ_REPLACE", False, bool)
+    )
+    # search_prior_removal: build + install the removal-only pruning move
+    # ``rj_prior_removal`` (GBSpecialRJPriorMove with the PRIOR container +
+    # rj_removal_only=True: births force-rejected, deaths untouched). Env:
+    # GB_SEARCH_PRIOR_REMOVAL.
+    search_prior_removal: bool = dataclasses.field(
+        default_factory=env_default("GB_SEARCH_PRIOR_REMOVAL", False, bool)
+    )
+    # leaf_cap_iter_only: per-band progressive leaf caps advance on a FIXED
+    # schedule -- the only gate is ``iters >= GB_LEAF_CAP_MIN_ITERS`` (the
+    # lnL-plateau and occupancy tests are skipped; the cap < nleaves_max
+    # guard stays). Env: GB_LEAF_CAP_ITER_ONLY.
+    leaf_cap_iter_only: bool = dataclasses.field(
+        default_factory=env_default("GB_LEAF_CAP_ITER_ONLY", False, bool)
+    )
     # Task-b: narrow per-band WDM slabs. Each per-band sub-band-buffer slab
     # spans a few WDM layers centered on the band instead of the full analysis
     # band ``Nf_active``, cutting the dominant buffer memory term by

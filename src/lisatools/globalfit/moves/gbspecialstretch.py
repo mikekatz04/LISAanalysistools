@@ -231,6 +231,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         waveform_kwargs: Forwarded to ``gb`` waveform calls.
         parameter_transforms: :class:`TransformContainer` for GBs.
         snr_lim: Optional SNR cut.
+        opt_snr_rej_samp_limit: GB SNR PRIOR BOUNDARY (user policy,
+            default 5.0; applies in SEARCH AND PE -- it is a boundary in
+            the high-dimensional prior): any proposed GB state -- RJ
+            birth, replacement NEW side, or IN-MODEL update -- whose
+            optimal SNR ``sqrt(h_h)`` falls below this limit is
+            force-rejected (delta lnL -> -1e300) before the accept step;
+            moving OUT of the violating region remains allowed
+            (new-point test only). ONE limit shared with the optional
+            detected test below.
+        snr_rej_detected: Also test the DETECTED SNR ``d_h/sqrt(h_h)``
+            against the same limit. Default OFF (user 2026-08-02: the
+            observed-SNR gate is adjustable but not wanted by default --
+            it fluctuates with the noise realization near threshold).
+            ``None`` resolves from env ``GB_SNR_REJ_DETECTED``.
+            Threaded through the BandSorter into the SubBandBuffer (single
+            source of truth; the buffer's own default matches). NOT the
+            same knob as ``snr_lim`` above.
         rj_proposal_distribution: Distribution used to draw RJ proposals.
         is_rj_prop: Marks this move as a reversible-jump proposal.
         num_repeat_proposals: Inner repeat count per call.
@@ -251,6 +268,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             ``True`` when ``f0`` is a per-leaf transform fill (leaf i is a
             specific physical source, e.g. VGBs) and ``False`` otherwise.
         use_prior_removal: If ``True``, draw RJ proposals from the prior.
+        rj_removal_only: Search-mode pruning heuristic (2026-08-01). When
+            ``True`` every BIRTH row of the RJ step is force-rejected
+            (``curr_logp = -inf`` routes it through the existing ``keep``
+            machinery, so it never reaches the likelihood kernel); DEATH
+            rows run unchanged, with the death factors evaluated on THIS
+            instance's ``rj_proposal_distribution`` logpdf as always. A
+            death-only kernel is not self-reversible, so this is NOT a
+            valid MH move on its own -- the USER has explicitly waived
+            detailed-balance concerns for search mode. Pair it with a
+            birth-capable RJ move in the same stage cycle; never use in PE.
+        rj_replace: Search-mode REPLACEMENT proposal (2026-08-01). The
+            dimension NEVER changes: each picked ALIVE leaf gets a fresh
+            draw from ``rj_proposal_distribution`` and the move scores
+            ``add(new) - add(old)`` against the old-source-exposed cell
+            residual through :meth:`SubBandBuffer.get_replace_ll`
+            (phase-maximized in search); on accept the standard swap
+            (subtract old's template, add new's) is applied and ``inds``
+            is untouched. Dead slots are never drawn for. Acceptance uses
+            the phase-maximized ``add(old)`` as a comparison value only
+            (a surviving source keeps its ORIGINAL parameters exactly),
+            so this is a search heuristic, not exact MH (USER ruling).
+            Mutually exclusive with ``rj_removal_only``.
         phase_maximize: If ``True``, marginalize over phase in the
             likelihood.
         gpus: GPU device list for this move (intra-node knob).
@@ -285,6 +324,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         waveform_kwargs={},
         parameter_transforms: Optional[TransformContainer] = None,
         snr_lim=1e-10,
+        opt_snr_rej_samp_limit=5.0,
+        snr_rej_detected=None,
         rj_proposal_distribution=None,
         is_rj_prop=False,
         num_repeat_proposals=100,
@@ -294,6 +335,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         swap_on_in_model=False,
         preserve_leaf_identity=None,
         use_prior_removal=False,
+        rj_removal_only=False,
+        rj_replace=False,
         phase_maximize=False,
         gpus=[],
         num_band_preload=20000,
@@ -315,6 +358,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_cap_min_iters=50,
         leaf_cap_ll_nsigma=3.0,
         leaf_cap_require_occupancy=True,
+        leaf_cap_iter_only=False,
         leaf_cap_update=True,
         sighet_refresh_every=0,
         sighet_refresh_dphase=0.5,
@@ -363,6 +407,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.wdm_slab_guard_layers = wdm_slab_guard_layers
         self.band_preload_size = self.max_data_store_size = max_data_store_size
         self.use_prior_removal = use_prior_removal
+        # Search-mode RJ variants (see the class docstring): removal-only
+        # prunes (births force-rejected in _run_rj_step); replace swaps an
+        # alive leaf's parameters at fixed dimension (_run_replace_step).
+        self.rj_removal_only = bool(rj_removal_only)
+        self.rj_replace = bool(rj_replace)
+        if self.rj_removal_only and self.rj_replace:
+            raise ValueError(
+                "rj_removal_only and rj_replace are mutually exclusive "
+                "(build one move instance per mode)."
+            )
         self.has_setup_group = False
 
         # GB-sampler verification instrumentation. When ``debug`` is on, the
@@ -407,6 +461,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.leaf_cap_min_iters = int(leaf_cap_min_iters)
         self.leaf_cap_ll_nsigma = float(leaf_cap_ll_nsigma)
         self.leaf_cap_require_occupancy = bool(leaf_cap_require_occupancy)
+        # Iteration-only cap advancement (2026-08-01): when True the cap
+        # increment gate in ``_update_band_leaf_caps`` is ONLY
+        # ``iters >= leaf_cap_min_iters`` -- the lnL-plateau and occupancy
+        # tests are skipped (the ``cap < nleaves_max`` guard stays). A
+        # fixed-schedule annealing knob for search runs.
+        self.leaf_cap_iter_only = bool(leaf_cap_iter_only)
         self.leaf_cap_update = bool(leaf_cap_update)
         self._band_leaf_cap = None
 
@@ -560,6 +620,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._log_dist_range_cache = None
 
         self.snr_lim = snr_lim
+        self.opt_snr_rej_samp_limit = float(opt_snr_rej_samp_limit)
+        if snr_rej_detected is None:
+            snr_rej_detected = (
+                os.environ.get("GB_SNR_REJ_DETECTED", "0") == "1")
+        self.snr_rej_detected = bool(snr_rej_detected)
+        logger.info(
+            "%s: GB SNR prior boundary opt_snr_rej_samp_limit = %.2f "
+            "(optimal SNR; search AND pe; births + replacement new-side "
+            "+ in-model updates; detected-SNR test %s).",
+            name, self.opt_snr_rej_samp_limit,
+            "ON" if self.snr_rej_detected else "OFF",
+        )
 
         self.band_edges = self.xp.asarray(self.band_edges)
 
@@ -1971,10 +2043,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # BEFORE the in-model sequence figures.
                 rj_seq = self._debug_rj_select(buffer_obj, picked)
                 with _tspan(tm, "rj_step"):
-                    self._run_rj_step(
-                        model, band_sorter, buffer_obj, band_temps, picked,
-                        ll_change_log, prop_counts, acc_counts, round_i, scheduler,
-                    )
+                    if self.rj_replace:
+                        # Fixed-dimension replacement instead of birth/death.
+                        self._run_replace_step(
+                            model, band_sorter, buffer_obj, band_temps,
+                            picked, ll_change_log, prop_counts, acc_counts,
+                            round_i, scheduler,
+                        )
+                    else:
+                        self._run_rj_step(
+                            model, band_sorter, buffer_obj, band_temps, picked,
+                            ll_change_log, prop_counts, acc_counts, round_i, scheduler,
+                        )
                 self._debug_plot_rj_pair(buffer_obj, rj_seq)
 
             with _tspan(tm, "inmodel_repeats"):
@@ -2204,6 +2284,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         prev_logp[alive] = logp[alive]
         curr_logp[~alive] = logp[~alive]
 
+        # Removal-only mode (search pruning heuristic; see the ctor
+        # docstring): force-reject every birth row -- the -inf routes it
+        # through the existing ``keep`` machinery, so it never reaches the
+        # likelihood kernel and the bad-accept guard rejects it at beta > 0.
+        # Deaths run untouched; their factors are this instance's
+        # ``rj_proposal_distribution`` logpdf as usual (a prior-removal
+        # instance = GBSpecialRJPriorMove with the PRIOR container).
+        if self.rj_removal_only:
+            curr_logp[~alive] = -np.inf
+
         # Births outside this cell's frequency window are unphysical.
         f_hz = params[:, 1] / 1e3
         out_of_band = (
@@ -2407,9 +2497,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             delta_ll[keep] = delta_all[keep]
             delta_ll[oob_rows] = -1e300
 
-            # SNR rejection-sampling clamp on births.
+            # SNR prior boundary on births (search AND pe): optimal SNR
+            # always; detected d_h/sqrt(h_h) only when snr_rej_detected
+            # (default OFF). For amp-maximized rows d_h == h_h == snr^2,
+            # so det == opt there and the extra test is a no-op anyway.
             opt_snr = xp.sqrt(xp.maximum(h_h, 0.0))
-            reject = (~alive) & keep & (opt_snr < buffer_obj.opt_snr_rej_samp_limit)
+            _lim = buffer_obj.opt_snr_rej_samp_limit
+            _bad_snr = opt_snr < _lim
+            if getattr(buffer_obj, "snr_rej_detected", False):
+                det_snr = d_h / xp.maximum(opt_snr, 1e-300)
+                _bad_snr = _bad_snr | (det_snr < _lim)
+            reject = (~alive) & keep & _bad_snr
             delta_ll[reject] = -1e300
 
             if os.environ.get("GB_RJ_BIRTH_DEBUG"):
@@ -2518,7 +2616,531 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     leaf_inds=band_sorter.leaf_inds[ids[death_acc]],
                 )
 
+    def _run_replace_step(self, model, band_sorter, buffer_obj, band_temps,
+                          picked, ll_change_log, prop_counts, acc_counts,
+                          round_i, scheduler):
+        """Fixed-dimension REPLACEMENT proposal on the picked ALIVE sources.
+
+        Search heuristic (USER ruling, 2026-08-01; detailed balance waived
+        for search): the dimension never changes and ``inds`` is untouched.
+        Each picked alive leaf gets a fresh draw from the RJ proposal
+        container (intrinsics from the fstat/rj container; dead slots are
+        never drawn for), scored by
+        :meth:`SubBandBuffer.get_replace_ll` -- a self-contained
+        expose(old) -> score(both, phase-maximized) -> restore(bit-exact)
+        wrapper -- and accepted on
+
+            ln alpha = beta * [add(new) - add(old)]
+                       + ln p_prior(new) - ln p_prior(old)
+                       + proposal factors (container logpdf bookkeeping,
+                         same convention as birth/death),
+
+        where add(old) is the PHASE-MAXIMIZED comparison value only: on
+        reject the old source keeps its ORIGINAL parameters exactly, and
+        on accept the standard path applies the swap (subtract old's
+        template, add new's) with the maximizing phase written back into
+        new's phi0. ``ll_change_log`` records the EXACT residual-ll change
+        (phase-maxed add(new) minus ACTUAL-phase add(old)).
+
+        With ``rj_fstat_dist_birth`` the new draw's distance/phi0/iota/psi
+        are recentered on the F-stat 4-parameter maximum computed on the
+        EXPOSED residual: the parity class is open here, so the reference
+        walker's parent residual holds the raw data in this band -- the
+        Jaranowski-Krolak inversion sees the old source's full power. The
+        old side evaluates the reverse density at its own recentered
+        center (death convention).
+
+        Cross-band replacements follow the RJ-birth convention: a new draw
+        outside this cell's frequency window (band edges widened by N/4 on
+        RJ buffers -- the same window the in-model repeats respect) is
+        forbidden with ``-inf``.
+        """
+        xp = self.xp
+        alive = band_sorter.inds[picked["ids"]]
+        if not bool(alive.any()):
+            return
+        sel = xp.where(alive)[0]
+        ids = picked["ids"][sel]
+        slots = picked["slot_index"][sel]
+        N_vals = picked["N_vals"][sel]
+        t_i = picked["temp_inds"][sel]
+        w_i = picked["walker_inds"][sel]
+        b_i = picked["band_inds"][sel]
+        l_i = band_sorter.leaf_inds[ids]
+        n_prop = len(ids)
+
+        params_old = band_sorter.coords[ids].copy()
+        params_old[:] = self.periodic.wrap(
+            {self.branch_name: params_old[:, None, :]}, xp=xp
+        )[self.branch_name][:, 0]
+
+        # Fresh replacement draw (NaN-repair loop mirrors the BandSorter
+        # birth pre-draw). ``rj_prop`` is the resolved per-branch container.
+        cont = band_sorter.rj_prop
+        params_new = xp.full_like(params_old, np.nan)
+        fix = xp.full(n_prop, True)
+        while bool(xp.any(fix)):
+            params_new[fix] = xp.asarray(cont.rvs(size=int(fix.sum().item())))
+            fix = xp.any(xp.isnan(params_new), axis=-1)
+        params_new[:] = self.periodic.wrap(
+            {self.branch_name: params_new[:, None, :]}, xp=xp
+        )[self.branch_name][:, 0]
+
+        prev_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(params_old))
+        curr_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(params_new))
+
+        # Cross-band gate (RJ-birth convention; see docstring).
+        f_hz = params_new[:, 1] / 1e3
+        out_of_band = (
+            (f_hz < buffer_obj.frequency_lims[0][slots])
+            | (f_hz > buffer_obj.frequency_lims[1][slots])
+        )
+        curr_logp[out_of_band] = -np.inf
+
+        # Proposal factors, existing-machinery convention: death side for
+        # the replaced source is the sorter's precomputed +logpdf
+        # (band_sorter.factors); birth side for the fresh draw is -logpdf.
+        factors = band_sorter.factors[ids] - cp.asarray(cont.logpdf(params_new))
+
+        keep = ~cp.isinf(curr_logp)
+        delta_old = cp.full(n_prop, -1e300)
+        delta_new = cp.full(n_prop, -1e300)
+        delta_old_actual = cp.full(n_prop, -1e300)
+        h_h_new = cp.zeros(n_prop)
+
+        if self.rj_fstat_dist_birth and bool(keep.any()):
+            # F-stat recentering-after-expose (preferred path): reuse the
+            # birth machinery's helpers against the OPEN parent residual
+            # (raw data in this parity's bands -> the old source's power is
+            # exposed to the F-stat).
+            walker_ref = getattr(self, "_fstat_walker_ref", 0)
+            k_idx = xp.arange(n_prop)[keep]
+            _log_range = self._log_dist_range(band_sorter)
+            A_max, phi0_max, iota_max, psi_max, F = self._fstat_dist_centers(
+                model, params_new[k_idx], walker_ref)
+            ln_center, sigma = self._dist_center_and_width(
+                params_new[k_idx], A_max, F)
+            z = xp.asarray(cp.random.randn(len(k_idx)))
+            ln_draw = ln_center + sigma * z
+            if _gb_use_distance(self):
+                params_new[k_idx, 0] = xp.exp(ln_draw)
+            else:
+                params_new[k_idx, 0] = ln_draw  # slot 0 is lnA already
+            params_new[k_idx, 4] = xp.cos(iota_max % np.pi)
+            params_new[k_idx, 5] = psi_max % np.pi
+            params_new[k_idx, 3] = phi0_max % (2 * np.pi)
+            _bl = self._slot0_log_proposal(params_new[k_idx, 0], ln_center, sigma)
+            # Reverse side: old's slot-0 density about its OWN recentered
+            # center (death convention). The +/- log_range pair cancels but
+            # is kept for symmetry with the birth/death bookkeeping.
+            Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
+                model, params_old[k_idx], walker_ref)
+            ln_center_d, sigma_d = self._dist_center_and_width(
+                params_old[k_idx], Ad, Fd)
+            _dl = self._slot0_log_proposal(
+                params_old[k_idx, 0], ln_center_d, sigma_d)
+            factors[k_idx] = factors[k_idx] + (-_bl - _log_range) + (_dl + _log_range)
+            # Re-evaluate the global prior at the recentered draw (f0 and
+            # the band gate are unchanged by the overwrite).
+            curr_logp[k_idx] = cp.asarray(
+                self.gpu_priors[self.branch_name].logpdf(params_new[k_idx]))
+            keep = ~cp.isinf(curr_logp)
+
+        if bool(keep.any()):
+            k_idx = xp.arange(n_prop)[keep]
+            # GB_REPLACE_DEBUG=1: assert the wrapper is pure -- the residual
+            # rows are BIT-IDENTICAL before the call and after it (which is
+            # exactly the rejected-replacement invariant: on reject nothing
+            # else touches the buffer).
+            _replace_debug = os.environ.get("GB_REPLACE_DEBUG", "0") == "1"
+            if _replace_debug:
+                _rt_rows = xp.unique(slots[k_idx].astype(xp.int64))
+                _rt_snap = buffer_obj.band_buffer[_rt_rows].copy()
+            d_old, d_new, phase_new, d_old_act = buffer_obj.get_replace_ll(
+                params_old[k_idx], params_new[k_idx], slots[k_idx],
+                slots[k_idx], N_vals[k_idx],
+                phase_maximize=self.phase_maximize, leaf_inds=l_i[k_idx],
+            )
+            if _replace_debug:
+                _rt_after = buffer_obj.band_buffer[_rt_rows]
+                assert bool(xp.all(_rt_after == _rt_snap)), (
+                    f"{self.name}: get_replace_ll did not restore the "
+                    "residual bit-exactly (expose/score/restore leak)."
+                )
+                logger.info(
+                    "%s [GB_REPLACE_DEBUG] expose/score/restore round-trip "
+                    "bit-identical on %d cell rows.",
+                    self.name, int(_rt_rows.shape[0]),
+                )
+            delta_old[k_idx] = d_old
+            delta_new[k_idx] = d_new
+            delta_old_actual[k_idx] = d_old_act
+            h_h_new[k_idx] = buffer_obj.replace_h_h_new
+            if self.phase_maximize and phase_new is not None:
+                # Maximizing phase into NEW's phi0 (the accepted parameters
+                # carry it; a rejected old source is never re-phased).
+                params_new[k_idx, self._phi0_col] = (
+                    params_new[k_idx, self._phi0_col] - phase_new
+                )
+
+        delta_ll = cp.full(n_prop, -1e300)
+        ok = keep & (delta_new > -1e299) & (delta_old > -1e299)
+        delta_ll[ok] = delta_new[ok] - delta_old[ok]
+
+        # SNR rejection-sampling clamp on the NEW side (add-side convention,
+        # same ONE limit as births, applied to BOTH statistics -- optimal
+        # sqrt(h_h) AND detected d_h/sqrt(h_h); user policy: effectively a
+        # prior boundary): a sub-threshold replacement would silently
+        # delete the source without death bookkeeping. d_h_new is recovered
+        # from the add-convention delta (delta = d_h - 0.5*h_h on the
+        # exposed residual). Skipped under the debug force-accept knob
+        # (smoke-only residual-identity exercise).
+        _force_accept = os.environ.get("GB_REPLACE_FORCE_ACCEPT", "0") == "1"
+        if not _force_accept:
+            opt_snr_new = xp.sqrt(xp.maximum(h_h_new, 0.0))
+            _lim = buffer_obj.opt_snr_rej_samp_limit
+            _bad_new = opt_snr_new < _lim
+            if getattr(buffer_obj, "snr_rej_detected", False):
+                det_snr_new = ((delta_new + 0.5 * h_h_new)
+                               / xp.maximum(opt_snr_new, 1e-300))
+                _bad_new = _bad_new | (det_snr_new < _lim)
+            delta_ll[ok & _bad_new] = -1e300
+
+        beta = band_temps[b_i, t_i]
+        lnpdiff = beta * delta_ll + (curr_logp - prev_logp) + factors
+        accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
+
+        bad_mask = (delta_ll <= -1e299) | (curr_logp <= -1e229)
+        bad_accepts = accept & bad_mask
+        if bool(xp.any(bad_accepts)):
+            if bool(xp.any(beta[bad_accepts] != 0.0)) and not (
+                "fstat" in self.name or "refit" in self.name
+                or "replace" in self.name
+            ):
+                logger.warning(
+                    f"{self.name}: accepted an out-of-prior REPLACE "
+                    "coordinate at beta > 0."
+                )
+            accept[bad_accepts] = False
+        if _force_accept:
+            # Debug knob (GB_REPLACE_FORCE_ACCEPT=1, smoke only): accept
+            # every finite replacement so the accepted-swap residual
+            # identity can be asserted deterministically. NEVER for real
+            # sampling.
+            accept = ~bad_mask & (prev_logp > -1e229)
+
+        prop_counts[0][t_i, w_i, b_i] += 1
+
+        if bool(accept.any()):
+            acc_ids = ids[accept]
+            wrapped_new = self.periodic.wrap(
+                {self.branch_name: params_new[accept][:, None, :]}, xp=xp
+            )[self.branch_name][:, 0]
+
+            _replace_debug = os.environ.get("GB_REPLACE_DEBUG", "0") == "1"
+            _dbg_slot = _dbg_before = None
+            if _replace_debug:
+                _dbg_slot = int(slots[accept][0])
+                _dbg_before = buffer_obj.band_buffer[_dbg_slot].copy()
+
+            # STANDARD accept path applies the swap: subtract old's template
+            # (= add it to the residual), add new's (= subtract it).
+            buffer_obj.remove_sources_from_band_buffer(
+                params_old[accept], slots[accept], N_vals[accept],
+                leaf_inds=l_i[accept],
+            )
+            buffer_obj.add_sources_to_band_buffer(
+                wrapped_new, slots[accept], N_vals[accept],
+                leaf_inds=l_i[accept],
+            )
+            band_sorter.coords[acc_ids] = wrapped_new
+            # inds untouched: the dimension never changes.
+
+            if _replace_debug:
+                self._debug_verify_replace_swap(
+                    buffer_obj, _dbg_slot, _dbg_before,
+                    params_old[accept][:1], wrapped_new[:1],
+                    slots[accept][:1], N_vals[accept][:1],
+                    None if l_i is None else l_i[accept][:1],
+                )
+
+            # Exact tracked ll change: phase-maxed add(new) minus the old
+            # source's ACTUAL-phase add-delta (what the swap really removed).
+            tracked = delta_new - delta_old_actual
+            ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += tracked[accept]
+            acc_counts[0][t_i[accept], w_i[accept], b_i[accept]] += 1
+
+    def _debug_verify_replace_swap(self, buffer_obj, slot, r_before,
+                                   p_old, p_new, slot_arr, n_arr, l_arr):
+        """GB_REPLACE_DEBUG=1: assert an accepted replacement changed the
+        residual by exactly ``h_old - h_new`` (direct fill_template
+        comparison on one cell). The templates are materialized by filling
+        each source into the zeroed slot row; the row is restored to the
+        post-swap state afterwards."""
+        xp = self.xp
+        r_after = buffer_obj.band_buffer[slot].copy()
+        try:
+            buffer_obj.band_buffer[slot] = xp.zeros_like(r_after)
+            # factor=+1 through the standard fill path -> +h_old in the row.
+            buffer_obj.remove_sources_from_band_buffer(
+                p_old, slot_arr, n_arr, leaf_inds=l_arr)
+            h_old = buffer_obj.band_buffer[slot].copy()
+            buffer_obj.band_buffer[slot] = xp.zeros_like(r_after)
+            buffer_obj.remove_sources_from_band_buffer(
+                p_new, slot_arr, n_arr, leaf_inds=l_arr)
+            h_new = buffer_obj.band_buffer[slot].copy()
+        finally:
+            buffer_obj.band_buffer[slot] = r_after
+        expected = (r_before + h_old) - h_new
+        diff = float(xp.abs(r_after - expected).max())
+        scale = float(xp.abs(expected).max()) or 1.0
+        assert diff <= 1e-12 * scale, (
+            f"{self.name}: accepted replacement residual identity violated: "
+            f"max |r_after - (r_before + h_old - h_new)| = {diff:.3e} "
+            f"(scale {scale:.3e})"
+        )
+        logger.info(
+            "%s [GB_REPLACE_DEBUG] accepted-swap residual identity OK: "
+            "max abs dev = %.3e (scale %.3e, slot %d)",
+            self.name, diff, scale, slot,
+        )
+
     def _compute_proposal_cholesky(self, model, band_sorter, ids):
+        """Param-keyed Fisher/Cholesky cache wrapper (2026-08-01).
+
+        The proposal covariance depends on the PHYSICAL parameters only (a
+        proposal shape -- M-H corrects any choice), and in a running fit
+        thousands of (temp, walker) slots sit on nearly the same physical
+        source, recomputing an identical ~17-waveform-eval information
+        matrix every iteration (measured: 60% of a search iteration).
+        Cache the factored proposal per QUANTIZED-parameter key, shared
+        across walkers/temps/leaves: ~340 B/entry host-side, capped
+        (GB_FISHER_CACHE_MAX, default 200k ~ 65 MB) -- vs the infeasible
+        ~8 GB of a per-slot cache.  Quantization IS the staleness rule: a
+        leaf drifting out of its cell gets a new key and a fresh Fisher.
+        GB_FISHER_CACHE=0 disables; GB_FISHER_CACHE_REL sets the log-space
+        cell width (default 0.05).  Noise-index differences between
+        walkers are deliberately ignored by the key (shape-only use).
+
+        # TODO(user 2026-08-02): reconsider the PER-SLOT cache we ruled
+        # out for size (~8.4 GB host for the full slot space) -- a few GB
+        # of host RAM may be a fair price for exact per-leaf reuse with no
+        # quantization/staleness policy at all (hit == slot unchanged
+        # since last iteration).  Assess after the shared-cache smoke
+        # measures its real hit rate: if quantized hits are <~90%, the
+        # per-slot variant (or a hybrid: per-slot LRU over the cold chain
+        # only, shared cache for hot rungs) is worth the memory.
+        """
+        if os.environ.get("GB_FISHER_AUDIT", "0") == "1":
+            return self._compute_proposal_cholesky_audit(
+                model, band_sorter, ids)
+        if os.environ.get("GB_FISHER_CACHE", "1") != "1":
+            return self._compute_proposal_cholesky_direct(
+                model, band_sorter, ids)
+        xp = self.xp
+        coords = band_sorter.coords[ids]
+        ch = coords.get() if hasattr(coords, "get") else np.asarray(coords)
+        ndim = ch.shape[1]
+        # scales must be set every propose (the direct path only runs on
+        # misses); identical to the direct body's construction.
+        s = xp.ones(ndim)
+        if self._fdot_col is not None:
+            s[self._fdot_col] = self._fdot_scale
+        self._proposal_param_scales = s
+
+        self._fisher_cache_init(ch)
+        kb = self._fisher_cache_keys(ch)
+        cache = self._fisher_cache
+        miss = np.array([k not in cache for k in kb], dtype=bool)
+        self._fisher_cache_stats[0] += int((~miss).sum())
+        self._fisher_cache_stats[1] += len(kb)
+        if miss.any():
+            ids_h = ids.get() if hasattr(ids, "get") else np.asarray(ids)
+            chol_new = self._compute_proposal_cholesky_direct(
+                model, band_sorter, xp.asarray(ids_h[miss]))
+            chol_new_h = (chol_new.get() if hasattr(chol_new, "get")
+                          else np.asarray(chol_new))
+            for j, k in enumerate(np.array(kb, dtype=object)[miss]):
+                cache[k] = chol_new_h[j].astype(np.float32)
+                if len(cache) > self._fisher_cache_max:
+                    cache.popitem(last=False)
+        hits, tot = self._fisher_cache_stats
+        if tot and tot % self._fisher_cache_log < len(kb):
+            logger.info(
+                "%s: fisher cache hit rate %.1f%% (%d entries)",
+                self.name, 100.0 * hits / tot, len(cache))
+        # Gather + LRU touch in one pass: without move_to_end the OrderedDict
+        # evicts by INSERTION order, so a constantly-hit entry is discarded
+        # while a one-shot neighbour survives.
+        out = np.empty((len(kb), ch.shape[1], ch.shape[1]), dtype=np.float64)
+        for i, k in enumerate(kb):
+            out[i] = cache[k]
+            cache.move_to_end(k)
+        return xp.asarray(out)
+
+    def _fisher_cache_init(self, ch):
+        """One-time setup of the fixed-grid cache (steps, cap, counters).
+
+        The quantization steps are frozen on the FIRST batch: log cells of
+        relative width ``GB_FISHER_CACHE_REL`` for positive columns spanning
+        more than a decade, linear cells scaled by the batch's 10-90
+        percentile spread otherwise.  Both the log/linear classification and
+        the linear step therefore depend on what the first band block happens
+        to contain -- a single-source first batch collapses every column to
+        the 1e-12 floor (no hit is ever possible again).  That fragility is
+        the reason the reuse geometry is being measured (``GB_FISHER_AUDIT``)
+        rather than tuned blind.
+        """
+        if hasattr(self, "_fisher_cache"):
+            return
+        from collections import OrderedDict
+        ndim = ch.shape[1]
+        self._fisher_cache = OrderedDict()
+        rel = float(os.environ.get("GB_FISHER_CACHE_REL", "0.05"))
+        steps = []
+        for c in range(ndim):
+            col = ch[:, c]
+            pos_only = np.all(col > 0) and col.size > 1
+            if pos_only and col.max() / max(col.min(), 1e-300) > 10.0:
+                steps.append(("log", rel))
+            else:
+                spread = float(np.percentile(col, 90) - np.percentile(col, 10))
+                steps.append(("lin", max(0.4 * rel * abs(spread), 1e-12)))
+        self._fisher_cache_steps = steps
+        self._fisher_cache_max = int(
+            os.environ.get("GB_FISHER_CACHE_MAX", "200000"))
+        self._fisher_cache_log = int(
+            os.environ.get("GB_FISHER_CACHE_LOG", "50000"))
+        self._fisher_cache_stats = [0, 0]   # hits, total
+
+    def _fisher_cache_keys(self, ch):
+        """Quantized-cell key (bytes) per row of the host coord block."""
+        keys = np.empty(ch.shape, dtype=np.int64)
+        for c, (kind, st) in enumerate(self._fisher_cache_steps):
+            if kind == "log":
+                keys[:, c] = np.floor(
+                    np.log(np.maximum(np.abs(ch[:, c]), 1e-300)) / st)
+            else:
+                keys[:, c] = np.floor(ch[:, c] / st)
+        return [row.tobytes() for row in keys]
+
+    def _periodic_dx(self, x_from, x_to):
+        """``x_to - x_from`` with the branch's angular periods folded in.
+
+        Without this an ``alpha`` crossing 2pi -> 0 registers as a 6-radian
+        "drift", which would make the reuse geometry look far worse than it
+        is.  Host-side (numpy) -- the audit is a measurement path.
+        """
+        return np.asarray(self.periodic.distance(
+            {self.branch_name: np.asarray(x_from, dtype=np.float64)},
+            {self.branch_name: np.asarray(x_to, dtype=np.float64)},
+            xp=np,
+        )[self.branch_name])
+
+    def _compute_proposal_cholesky_audit(self, model, band_sorter, ids):
+        """``GB_FISHER_AUDIT=1``: direct factors + reuse-geometry measurement.
+
+        Returns the DIRECT (uncached) factors, so an audit run reproduces
+        cache-off physics exactly; the audit only reads them.  See
+        :mod:`lisatools.globalfit.moves._fisher_audit` for what is measured
+        (per-slot temporal drift in the cached Fisher's own metric, per-call
+        cross-slot cluster counts vs tolerance, the shipped fixed-grid hit
+        rate, all broken down by temperature rung).
+        """
+        from ._fisher_audit import FisherProposalAudit
+
+        chol = self._compute_proposal_cholesky_direct(model, band_sorter, ids)
+        ch = asnumpy(band_sorter.coords[ids])
+        if getattr(self, "_fisher_audit", None) is None:
+            self._fisher_audit = FisherProposalAudit(
+                self.name, ch.shape[1], skip_cols=(self._fdot_astro_col,),
+                basis_names=list(getattr(self.transform_fn, "input_basis", [])),
+            )
+        self._fisher_cache_init(ch)
+        self._fisher_audit.record(
+            ch,
+            asnumpy(chol),
+            asnumpy(band_sorter.temp_inds[ids]),
+            asnumpy(band_sorter.walker_inds[ids]),
+            asnumpy(band_sorter.leaf_inds[ids]),
+            grid_keys=self._fisher_cache_keys(ch),
+            periodic_distance=self._periodic_dx,
+        )
+        self._fisher_probe_sensitivity(model, band_sorter, ids, chol)
+        return chol
+
+    # Perturbations scanned by the sensitivity probe: relative for the
+    # log-scaled columns (dist / f0 / Mc / fdot), absolute (radians, or the
+    # native unit of cos_iota / sin_delta / ratio columns) for the rest.
+    # The two tiny steps are the CONTROL: a smooth function must give a
+    # covariance change proportional to the step, so if 1e-4 already moves
+    # the covariance by tens of percent the factor is discontinuous
+    # (eigen-floor reshuffling), not steeply parameter-dependent.
+    _FISHER_PROBE_REL = (1e-4, 1e-3, 0.01, 0.05, 0.2)
+    _FISHER_PROBE_ABS = (1e-4, 1e-3, 0.02, 0.1, 0.5)
+
+    def _fisher_probe_sensitivity(self, model, band_sorter, ids, chol):
+        """Direct per-column sensitivity scan (``GB_FISHER_AUDIT_PROBE=<n>``).
+
+        Recomputes the REAL information matrix at ``x + delta e_c`` for each
+        sampling column ``c`` and compares the resulting proposal covariance
+        against the unperturbed one.  Unlike the pair/temporal statistics --
+        which say how often reuse happens to be safe in the sampler's own
+        trajectory -- this measures the underlying function directly, so it
+        sets a cache key's admissible cell width per column and exposes
+        columns that do not belong in the key at all.
+
+        Runs at most ``GB_FISHER_AUDIT_PROBE`` sources for the whole process
+        (it costs ``ndim x len(deltas)`` extra Fisher evaluations per probed
+        source) and restores ``band_sorter.coords`` in a ``finally``.
+
+        Two selection rules keep the answer representative.  ``GB_FISHER_
+        AUDIT_PROBE_AFTER`` delays the scan past the first N calls, because a
+        search starts every leaf at a PRIOR draw and a near-zero-SNR source
+        has a (numerically) singular information matrix whose factor is set
+        by the eigen-floor, not by the waveform -- its sensitivity would
+        describe the floor.  For the same reason the probed subset is the
+        BEST-CONSTRAINED sources of the batch (smallest covariance trace),
+        which are the ones a real cache would be reusing.
+        """
+        n_want = int(os.environ.get("GB_FISHER_AUDIT_PROBE", "0"))
+        aud = self._fisher_audit
+        after = int(os.environ.get("GB_FISHER_AUDIT_PROBE_AFTER", "0"))
+        if n_want <= 0 or aud.n_probed >= n_want or aud.n_calls < after:
+            return
+        from ._fisher_audit import _cov_from_chol, _cov_reldiff
+
+        n_take = int(min(len(ids), n_want - aud.n_probed, 4))
+        C_all = _cov_from_chol(asnumpy(chol), aud.valid)
+        order = np.argsort(np.einsum("nii->n", C_all))[:n_take]
+        sub = ids[self.xp.asarray(order)]
+        ndim = band_sorter.coords.shape[1]
+        C_base = C_all[order]
+        log_cols = set(aud.log_cols.tolist())
+
+        saved = band_sorter.coords[sub].copy()
+        try:
+            for c in range(ndim):
+                if not aud.valid[c]:
+                    continue
+                rel = c in log_cols
+                for d in (self._FISHER_PROBE_REL if rel
+                          else self._FISHER_PROBE_ABS):
+                    band_sorter.coords[sub, c] = (
+                        saved[:, c] * (1.0 + d) if rel else saved[:, c] + d
+                    )
+                    chol_p = self._compute_proposal_cholesky_direct(
+                        model, band_sorter, sub)
+                    C_p = _cov_from_chol(asnumpy(chol_p), aud.valid)
+                    aud.record_probe(c, d, _cov_reldiff(C_p, C_base))
+                    band_sorter.coords[sub, c] = saved[:, c]
+        finally:
+            band_sorter.coords[sub] = saved
+        aud.n_probed += n_take
+        logger.info("%s: fisher sensitivity probe done on %d/%d sources",
+                    self.name, aud.n_probed, n_want)
+
+    def _compute_proposal_cholesky_direct(self, model, band_sorter, ids):
         """Batched Cholesky of the inverse information matrix for ``ids``.
 
         Domain-symmetric through the fast computation objects:
@@ -2583,7 +3205,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         info_y = info_phys * J[:, :, None] * J[:, None, :]
 
-        self.mempool.free_all_blocks()
+        # Pool trim THROTTLED (2026-08-01): freeing the whole CuPy pool on
+        # every block forces cudaMalloc storms in everything downstream;
+        # keep the pressure valve but only every 16th call.
+        self._fisher_pool_ctr = getattr(self, "_fisher_pool_ctr", 0) + 1
+        if self._fisher_pool_ctr % 16 == 0:
+            self.mempool.free_all_blocks()
         # Robust inverse-information-matrix factor: near-zero-SNR (prior-drawn) sources
         # give (numerically) singular information matrices. Eigendecompose and clamp the
         # spectrum to a relative floor; B = V diag(lambda^-1/2) satisfies
@@ -2984,6 +3611,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 tm.count("inmodel_repeat_calls")
 
             delta_ll = new_ll - ll_ref[sl]
+
+            # SNR prior-boundary clamp on IN-MODEL updates (user policy
+            # 2026-08-02: ONE limit, optimal sqrt(h_h) AND detected
+            # d_h/sqrt(h_h), enforced on ALL GB moves as effective prior
+            # support). Applies to the NEW point only, so a source already
+            # below the limit can still move OUT of the violating region;
+            # it can never move further in or laterally within it.
+            # d_h_out/h_h_out are the per-repeat get_add_ll outputs for the
+            # ``keep`` subset (the same arrays the sorter stash consumes).
+            if getattr(buffer_obj, "d_h_out", None) is not None:
+                _hh_im = cp.asarray(buffer_obj.h_h_out).real
+                _opt_im = cp.sqrt(cp.maximum(_hh_im, 0.0))
+                _lim_im = buffer_obj.opt_snr_rej_samp_limit
+                _viol_im = _opt_im < _lim_im
+                if getattr(buffer_obj, "snr_rej_detected", False):
+                    _dh_im = cp.asarray(buffer_obj.d_h_out).real
+                    _det_im = _dh_im / cp.maximum(_opt_im, 1e-300)
+                    _viol_im = _viol_im | (_det_im < _lim_im)
+                if bool(_viol_im.any()):
+                    _rows_im = cp.where(cp.asarray(keep))[0][_viol_im]
+                    new_ll[_rows_im] = -1e300
+                    delta_ll = new_ll - ll_ref[sl]
+
             # Host-side MH bookkeeping. On CuPy every ``bool(...any())`` here
             # is a device sync, so this span is the launch-overhead signal:
             # if it rivals inmodel_get_add_ll the block is host-bound (too
@@ -3652,6 +4302,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Bands increment independently; nothing waits on other bands. On
         increment the iteration counter and running best reset, so the next
         level must re-converge on its own evidence.
+
+        With ``leaf_cap_iter_only`` the gate is ONLY test 1 (a fixed
+        annealing schedule): the lnL-plateau and occupancy tests are
+        skipped; the ``cap < nleaves_max`` guard and the log-line format
+        are unchanged.
         """
         bi = new_state.sub_states[self.branch_name].band_info
         cap = bi["band_leaf_cap"]
@@ -3662,13 +4317,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         best[:] = np.maximum(best, lls.max(axis=0))
         iters += 1
 
-        tol = self.leaf_cap_ll_nsigma * np.sqrt(self._band_dof / 2.0)
-        converged = (iters >= self.leaf_cap_min_iters) & (
-            (best - lls.min(axis=0)) <= tol
-        )
-        if self.leaf_cap_require_occupancy:
-            cold_counts = _to_numpy(band_counts[0])  # (nwalkers, num_bands)
-            converged &= cold_counts.max(axis=0) >= cap
+        if self.leaf_cap_iter_only:
+            # Iteration-only mode (see ctor): a fixed schedule -- every band
+            # increments after ``leaf_cap_min_iters`` iterations at its
+            # current cap, regardless of lnL plateau or occupancy.
+            converged = iters >= self.leaf_cap_min_iters
+        else:
+            tol = self.leaf_cap_ll_nsigma * np.sqrt(self._band_dof / 2.0)
+            converged = (iters >= self.leaf_cap_min_iters) & (
+                (best - lls.min(axis=0)) <= tol
+            )
+            if self.leaf_cap_require_occupancy:
+                cold_counts = _to_numpy(band_counts[0])  # (nwalkers, num_bands)
+                converged &= cold_counts.max(axis=0) >= cap
         nleaves_max = self._work_branch(new_state).shape[2]
         converged &= cap < nleaves_max
 
@@ -3740,6 +4401,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if not self.is_rj_prop and not np.any(work_in.inds):
             return state, np.zeros((engine_ntemps, nwalkers), dtype=bool)
 
+        # Alive-only RJ variants (replace / prune) are no-ops on an empty
+        # model -- and their keep_all_inds=False BandSorter cannot be built
+        # from zero sources (the logpdf batching indexes an empty split
+        # array), so return before constructing it.
+        if (
+            (self.rj_replace or self.use_prior_removal)
+            and not np.any(work_in.inds)
+        ):
+            return state, np.zeros((engine_ntemps, nwalkers), dtype=bool)
+
         self.nwalkers = nwalkers
         self.ntemps = ntemps
 
@@ -3798,7 +4469,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )[self.branch_name].reshape(ntemps, nwalkers, nleaves_max, ndim)
 
         # TODO Ask Michael about this print("is this okay for rj? I do not think so, check with below use of gb_inds_in")
-        if self.use_prior_removal:  # TODO: make this stronger?
+        # rj_replace joins use_prior_removal here: both act only on ALIVE
+        # leaves, so the sorter carries just the alive sources (no dead-slot
+        # pre-draws; the replacement draw happens per pick in
+        # _run_replace_step). The sorter's +logpdf factors then carry the
+        # removed/replaced source's death-side proposal term.
+        if self.use_prior_removal or self.rj_replace:  # TODO: make this stronger?
             keep_all_inds = False
         else:
             keep_all_inds = True
@@ -3821,6 +4497,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 waveform_kwargs=self.waveform_kwargs,
                 rj_prop=rj_prop,
                 keep_all_inds=keep_all_inds,
+                opt_snr_rej_samp_limit=self.opt_snr_rej_samp_limit,
+                snr_rej_detected=self.snr_rej_detected,
             )
 
         # Cold-chain friend table for the group-stretch half of the in-model

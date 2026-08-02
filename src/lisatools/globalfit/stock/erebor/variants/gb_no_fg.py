@@ -284,6 +284,13 @@ class GBNoFgGBSettings(GBSettings):
     sighet_n_cp: int = dataclasses.field(
         default_factory=env_default("SIGHET_N_CP", -1, int)
     )
+    # Signal-het V3: ratio-spline candidate build (r modeled directly from
+    # n raw evals per candidate; no FFT/polyphase/division). 0 = off (v2
+    # exact build); >0 = fixed node count; -1 = ADAPTIVE from the batch's
+    # predicted displacement (prototype-calibrated policy, clip [8, 64]).
+    sighet_v3_nodes: int = dataclasses.field(
+        default_factory=env_default("SIGHET_V3_NODES", 0, int)
+    )
     # NOTE: no __post_init__ here — Setup.__init__ re-runs this dataclass's
     # __init__ on the (non-dataclass) GBSetup instance, which cannot resolve
     # dataclass hooks. Value validation happens in prepare_branch_settings.
@@ -931,6 +938,7 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                 n_sparse_fd=int(gb_info.sighet_n_sparse_fd),
                 max_r=float(getattr(gb_info, "sighet_max_r", 0.0)),
                 n_cp_build=int(getattr(gb_info, "sighet_n_cp", -1)),
+                v3_n_nodes=int(getattr(gb_info, "sighet_v3_nodes", 0)),
             )
             logger.info(
                 "GB in-model likelihood: SIGNAL-HET "
@@ -1055,6 +1063,38 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
     # ``build_gb_moves`` owns the GB reference recipe and is steered by
     # exactly those names.
     recipe: Recipe = curr.source_metadata["recipe"]
+
+    # Search RJ cycle wiring (2026-08-01; GB_MODE=search only): insert the
+    # replace / prior-removal moves right AFTER the fstat-birth prior move
+    # (``rj_prior``) in its stage. The stage's moves are wrapped in ONE
+    # GFCombineMove, and eryn's CombineMove.propose runs them sequentially
+    # in list order every iteration -- that is the ordering guarantee for
+    # the per-iteration cycle fstat-birth -> fstat-REPLACE -> prior-REMOVAL.
+    if getattr(gb_info, "mode", "pe") == "search":
+        _names = recipe.move_names()
+        _anchor = "rj_prior" if "rj_prior" in _names else None
+        if _anchor is None and (
+            getattr(gb_info, "search_rj_replace", False)
+            or getattr(gb_info, "search_prior_removal", False)
+        ):
+            logger.warning(
+                "GB search RJ cycle knobs set but the recipe has no "
+                "'rj_prior' move to anchor the cycle on; skipping the "
+                "rj_replace / rj_prior_removal insertion."
+            )
+        if _anchor is not None:
+            if (
+                getattr(gb_info, "search_rj_replace", False)
+                and "rj_replace" not in _names
+            ):
+                recipe.add_move("rj_replace", after=_anchor, branch="gb")
+                _anchor = "rj_replace"
+            if (
+                getattr(gb_info, "search_prior_removal", False)
+                and "rj_prior_removal" not in recipe.move_names()
+            ):
+                recipe.add_move("rj_prior_removal", after=_anchor, branch="gb")
+
     requested = recipe.stock_names()
     include_search = any(name.endswith("_search") for name in requested)
     include_refit = any(name.startswith("rj_refit") for name in requested)

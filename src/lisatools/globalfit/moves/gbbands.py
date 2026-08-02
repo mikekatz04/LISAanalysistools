@@ -820,6 +820,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         sources_inject_now_map,
         special_band_inds,
         opt_snr_rej_samp_limit=5.0,
+        snr_rej_detected=False,
         force_backend="gpu",
         use_template_arr=False,
         basis_settings: Optional[DomainSettingsBase] = None,
@@ -906,6 +907,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         self._per_leaf_fill = getattr(transform_fn, "n_leaf_fills", None) is not None
         self.waveform_kwargs = waveform_kwargs
         self.opt_snr_rej_samp_limit = opt_snr_rej_samp_limit
+        self.snr_rej_detected = bool(snr_rej_detected)
         self.use_template_arr = use_template_arr
         # Per-band sensitivity storage. Only the inverse covariance ``invC``
         # feeds the WDM / FD likelihood kernels (the ACA repacks
@@ -1039,6 +1041,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             start_freq_inds=getattr(self, "start_freq_inds", None),
             data_length=self.data_length,
             opt_snr_rej_samp_limit=self.opt_snr_rej_samp_limit,
+            snr_rej_detected=self.snr_rej_detected,
         ))
 
         # TODO: fix this 4????
@@ -1652,9 +1655,13 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # Rejection sampling on SNR: only applied to *add* proposals (the
         # remove side's opt_snr is meaningless when amp_add is tiny).
         reject = self.xp.zeros(kept.shape[0], dtype=bool)
-        reject[kept] = (result.opt_snr_add[kept] < self.opt_snr_rej_samp_limit) & (
-            params_add_phys[kept, 0] > 1e-30
-        )
+        _bad_swap = result.opt_snr_add[kept] < self.opt_snr_rej_samp_limit
+        if getattr(self, "snr_rej_detected", False) and (
+                getattr(result, "d_h_add", None) is not None):
+            _det_add = self.xp.asarray(result.d_h_add)[kept].real / self.xp.maximum(
+                result.opt_snr_add[kept], 1e-300)
+            _bad_swap = _bad_swap | (_det_add < self.opt_snr_rej_samp_limit)
+        reject[kept] = _bad_swap & (params_add_phys[kept, 0] > 1e-30)
         ll_diff[reject] = -1e300
 
         return ll_diff
@@ -1750,6 +1757,97 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         delta = -self.d_h_out.real - 0.5 * self.h_h_out.real
         delta[~self.kept_out] = -1e300
         return delta
+
+    def get_replace_ll(self, params_old, params_new, data_index, noise_index,
+                       N_vals, phase_maximize=False, leaf_inds=None):
+        """Log-likelihood deltas for REPLACING an in-model source (search RJ).
+
+        Self-contained expose -> score -> restore (pure function on the
+        residual buffer):
+
+        1. **Expose** the old source: its template is added back into the
+           cell residual through :meth:`remove_sources_from_band_buffer`
+           (the fixed addremove convention -- removing a source from the
+           model ADDS its template to the residual, dev 1928032), so the
+           scored residual is ``r' = r + h_old``: the residual as if old
+           had never been fit.
+        2. **Score** BOTH parameter sets against ``r'`` as add-deltas
+           ``<r'|h> - 0.5<h|h>`` in ONE batched :meth:`get_ll` call
+           (rows ``[old; new]``), optionally phase-maximized (the engine's
+           two-quadrature maximisation; search convention).
+        3. **Restore** the touched slots' residual rows from a pre-expose
+           snapshot -- bit-exact by construction (a refill with the
+           opposite factor would instead round ``(r + h) - h``).
+
+        Row ``i`` of ``params_old`` / ``params_new`` must target the same
+        buffer slot ``data_index[i]`` (the old source's cell). Engine
+        bounds-rejected rows come back ``-1e300`` (see the ``replace_kept_*``
+        attributes).
+
+        Returns:
+            ``(delta_old, delta_new, phase_angle_new, delta_old_actual)``:
+            add-deltas of the old and new rows vs ``r'``;
+            ``phase_angle_new`` is the per-row maximizing rotation of the
+            NEW half (``None`` unless ``phase_maximize``);
+            ``delta_old_actual`` is the old row's add-delta at its ACTUAL
+            phase (equals ``delta_old`` without phase maximisation) -- the
+            exact bookkeeping value for an accepted swap's residual-ll
+            change, since a rejected/accepted old source is never
+            re-phased. Also stashed: :attr:`replace_h_h_old` /
+            :attr:`replace_h_h_new` (for SNR clamps) and
+            :attr:`replace_kept_old` / :attr:`replace_kept_new`.
+        """
+        xp = self.xp
+        n = params_old.shape[0]
+
+        # (1) snapshot the touched residual rows, then expose the old source.
+        slot_rows = xp.unique(xp.asarray(data_index).astype(xp.int64))
+        snapshot = self.band_buffer[slot_rows].copy()
+        self.remove_sources_from_band_buffer(
+            params_old, data_index, N_vals, leaf_inds=leaf_inds
+        )
+        try:
+            # (2) one batched scoring call over [old; new].
+            params_cat = xp.concatenate([params_old, params_new], axis=0)
+            di_cat = xp.concatenate([data_index, data_index], axis=0)
+            ni_cat = xp.concatenate([noise_index, noise_index], axis=0)
+            nv_cat = xp.concatenate([N_vals, N_vals], axis=0)
+            li_cat = (
+                None if leaf_inds is None
+                else xp.concatenate([leaf_inds, leaf_inds], axis=0)
+            )
+            self.get_ll(
+                params_cat, di_cat, ni_cat, nv_cat,
+                phase_maximize=phase_maximize, leaf_inds=li_cat,
+            )
+            d_h = self.d_h_out.real.copy()
+            h_h = self.h_h_out.real.copy()
+            kept = self.kept_out.copy()
+            delta = d_h - 0.5 * h_h
+            delta[~kept] = -1e300
+            phase_angle_new = None
+            if phase_maximize and self.phase_angle is not None:
+                phase_angle_new = self.phase_angle[n:].copy()
+            # Old rows at their ACTUAL phase: the two-quadrature engines
+            # stash the un-maximized <r'|h> as ``non_marg_d_h``. Guarded --
+            # on a multi-shard route it is not assembled, so fall back to
+            # the maximized value (the propose-level ll-drift rebuild then
+            # corrects the tracked sum).
+            delta_old_actual = delta[:n].copy()
+            if phase_maximize:
+                _nm = getattr(self._likelihood_engine, "non_marg_d_h", None)
+                if _nm is not None and getattr(_nm, "shape", (0,))[0] == 2 * n:
+                    delta_old_actual = xp.asarray(_nm).real[:n] - 0.5 * h_h[:n]
+                    delta_old_actual[~kept[:n]] = -1e300
+        finally:
+            # (3) bit-exact restore of the pre-expose residual.
+            self.band_buffer[slot_rows] = snapshot
+
+        self.replace_h_h_old = h_h[:n]
+        self.replace_h_h_new = h_h[n:]
+        self.replace_kept_old = kept[:n]
+        self.replace_kept_new = kept[n:]
+        return delta[:n], delta[n:], phase_angle_new, delta_old_actual
 
     def get_ll_grad(self, params, data_index, noise_index, N_vals,
                      *, param_eps=None, chunk=None, leaf_inds=None):
@@ -2102,10 +2200,18 @@ class BandSorter(LISAToolsParallelModule):
         keep_all_inds=True,
         wdm_band_slab_layers: Optional[int] = None,
         wdm_slab_guard_layers: int = 1,
+        opt_snr_rej_samp_limit: float = 5.0,
+        snr_rej_detected: bool = False,
     ):
 
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         self.force_backend = force_backend
+        # RJ SNR rejection-sampling clamp (user policy, default 5.0):
+        # forwarded into every SubBandBuffer this sorter builds; the copy
+        # constructor path below overwrites it with the source sorter's
+        # value (attribute copy loop), keeping one source of truth.
+        self.opt_snr_rej_samp_limit = float(opt_snr_rej_samp_limit)
+        self.snr_rej_detected = bool(snr_rej_detected)
 
         dc = deepcopy if copy else return_x
         if hasattr(gb_branch, "num_sources"):
@@ -2519,6 +2625,10 @@ class BandSorter(LISAToolsParallelModule):
                 force_backend=self.force_backend,
                 wdm_band_slab_layers=self.wdm_band_slab_layers,
                 wdm_slab_guard_layers=self.wdm_slab_guard_layers,
+                opt_snr_rej_samp_limit=getattr(
+                    self, "opt_snr_rej_samp_limit", 5.0),
+                snr_rej_detected=getattr(
+                    self, "snr_rej_detected", False),
                 **kwargs,
             )
 

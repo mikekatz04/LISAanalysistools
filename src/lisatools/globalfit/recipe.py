@@ -1255,6 +1255,11 @@ class GBFillGlobalSignalGen:
             N_sparse=int(si.n_sparse),
             N_cp_sig=int(si.n_cp_sig),
             N_cp_orbit=int(si.n_cp_orbit),
+            # SINGLE-SOURCE WINDOW (2026-07-31 audit): the run's resolved
+            # data-window alpha, NOT the comp's internal FAST_WDM default --
+            # the two only agreed by coincidence of defaults. The sig-het
+            # wrapper inherits this via resolved_tukey_alpha.
+            tukey_alpha=float(getattr(gi, "window_alpha", 0.0)),
             orbits=gi.gpu_orbits,
             tdi_config=f"{tdi_gen}{'nd' if tdi_gen == 2 else 'st'} generation",
             force_backend=gi.force_backend,
@@ -2310,6 +2315,10 @@ def build_gb_moves(
         leaf_cap_require_occupancy=bool(
             int(os.environ.get("GB_LEAF_CAP_OCCUPANCY", "1"))
         ),
+        # Iteration-only cap advancement (GBSettings.leaf_cap_iter_only /
+        # GB_LEAF_CAP_ITER_ONLY): the increment gate is ONLY
+        # iters >= leaf_cap_min_iters (lnL-plateau + occupancy skipped).
+        leaf_cap_iter_only=bool(getattr(gb_info, "leaf_cap_iter_only", False)),
         leaf_cap_update=True,
         # Sig-het reference policy: built once per repeat block and FIXED
         # (default 0 = no mid-block refresh). GB_SIGHET_REFRESH_EVERY=N>0
@@ -2422,14 +2431,65 @@ def build_gb_moves(
         [gb_search_fstat_mcmc_move, gb_search_prune_move] if include_search else []
     )
 
+    #* ===================== SEARCH RJ CYCLE (GB_MODE=search only) =====================
+    # Optional companions to the fstat-birth ``rj_prior`` move (2026-08-01):
+    # a fixed-dimension REPLACEMENT move and a removal-only pruning move.
+    # The variant's recipe setup inserts them right after ``rj_prior`` in
+    # its stage, so the stage's GFCombineMove runs the per-iteration cycle
+    # fstat-birth -> fstat-REPLACE -> prior-REMOVAL in list order (eryn
+    # CombineMove.propose is sequential). Search heuristics by USER ruling
+    # (phase-max comparison scoring / death-only kernels are not exact MH);
+    # never installed in PE. ``leaf_cap_update`` stays designated on
+    # ``rj_prior`` alone (the first move of the cycle) so the cap counters
+    # advance exactly once per iteration; the companions only enforce the
+    # gate.
+    _gb_mode_search = getattr(gb_info, "mode", "pe") == "search"
+    gb_replace_move = None
+    if _gb_mode_search and getattr(gb_info, "search_rj_replace", False):
+        gb_replace_move = GBSpecialRJPriorMove(
+            *gb_move_args,
+            rj_proposal_distribution=_rj_birth_prop,  # intrinsics: rj/fstat container
+            name="rj_replace",
+            rj_replace=True,
+            phase_maximize=_rj_phase_max,
+            run_swaps=False,
+            gpus=[],
+            **{**gb_move_kwargs, "leaf_cap_update": False},
+        )
+        gb_replace_move.accepted = np.zeros((ntemps, nwalkers))
+    gb_prior_removal_move = None
+    if _gb_mode_search and getattr(gb_info, "search_prior_removal", False):
+        gb_prior_removal_move = GBSpecialRJPriorMove(
+            *gb_move_args,
+            rj_proposal_distribution=gpu_priors,  # THE prior container
+            name="rj_prior_removal",
+            rj_removal_only=True,
+            # Deaths never phase-maximize; False also keeps the amp-pin /
+            # fstat-dist-birth ctor defaults off, so death factors are the
+            # plain prior logpdf.
+            phase_maximize=False,
+            run_swaps=False,
+            gpus=[],
+            **{**gb_move_kwargs, "leaf_cap_update": False},
+        )
+        gb_prior_removal_move.accepted = np.zeros((ntemps, nwalkers))
+
     #* ============================================= PARAMETER ESTIMATION MOVES =============================================
+    # PE births draw the EXTRINSICS (distance/amplitude, phi0, cos-iota,
+    # psi) from the PRIOR distributions (the rj birth container's extrinsic
+    # slots ARE the stock prior uniforms; see make_gb_rj_birth_container)
+    # with intrinsics still from the fstat grids when a custom container is
+    # set: no recentering, no pinning, no phase-max (USER ruling,
+    # 2026-08-01). In PE mode phase_maximize is therefore forced off on the
+    # birth instance (under GB_MODE=search the seeded GB_RJ_PHASE_MAXIMIZE
+    # keeps the search behavior unchanged).
     gb_pe_prior_move = GBSpecialRJPriorMove(
         *gb_move_args,
         rj_proposal_distribution=_rj_birth_prop,
         name="rj_prior",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
-        phase_maximize=_rj_phase_max,
-        run_swaps=True, 
+        phase_maximize=_rj_phase_max if _gb_mode_search else False,
+        run_swaps=True,
         gpus=[],
         **gb_move_kwargs
     )
@@ -2448,7 +2508,16 @@ def build_gb_moves(
 
     # Prior + fstat moves always build; the refit move is inserted only when
     # its GMM-refit file is available (see ``_refit_available`` above).
+    # The search-cycle companions (GB_MODE=search + knobs) ride in this
+    # list too: the current search campaign runs through the pe-NAMED stage
+    # (single ``rj_prior`` move under GB_MODE=search), and the
+    # ``pe_move_names`` filter below keeps exactly the recipe-requested
+    # subset either way.
     gb_pe_moves = [gb_pe_prior_move, gb_pe_fstat_mcmc_move]
+    if gb_replace_move is not None:
+        gb_pe_moves.append(gb_replace_move)
+    if gb_prior_removal_move is not None:
+        gb_pe_moves.append(gb_prior_removal_move)
     if _refit_available:
         gb_pe_refit_move = GBSpecialRJRefitMove(
             *gb_move_args,

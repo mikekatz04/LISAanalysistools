@@ -143,6 +143,13 @@ class VGBSettings(GBSettings):
     sighet_n_cp: int = dataclasses.field(
         default_factory=env_default("SIGHET_N_CP", -1, int)
     )
+    # Signal-het V3: ratio-spline candidate build (r modeled directly from
+    # n raw evals per candidate; no FFT/polyphase/division). 0 = off (v2
+    # exact build); >0 = fixed node count; -1 = ADAPTIVE from the batch's
+    # predicted displacement (prototype-calibrated policy, clip [8, 64]).
+    sighet_v3_nodes: int = dataclasses.field(
+        default_factory=env_default("SIGHET_V3_NODES", 0, int)
+    )
     # (nleaves, 3) per-leaf fixed [f0 (mHz), alpha, sin_delta] in SAMPLING
     # units, ordered like VGB_FIXED_BASIS; feeds the per-leaf fill list.
     fixed_params: typing.Optional[typing.Any] = None

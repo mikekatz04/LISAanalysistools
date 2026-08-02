@@ -110,6 +110,22 @@ class EreborGeneralSettings(GeneralSettings):
         default_factory=env_default("WINDOW_TUKEY_ALPHA", 0.05, float)
     )
     edge_crop_wavelets: typing.Optional[int] = None  # None -> auto from alpha
+    # Deterministic taper width in WDM wavelets (each Nf*dt seconds). When
+    # > 0 this OVERRIDES window_tukey_alpha with 2*K/Nt: the taper is a
+    # fixed ABSOLUTE duration set by the wavelet grid, not a fraction of
+    # Tobs (a fixed alpha burns alpha/2 * Tobs of data per side -- ~18 d
+    # at 2 yr). DERIVATION of the default (2 wavelets): a Tukey ramp of
+    # duration tau leaks over bandwidth ~1/tau; confining edge leakage to
+    # ~one WDM layer requires tau >= 1/layer_df = 2*Nf*dt = 2 wavelet
+    # widths -- shorter smears across layers, longer only discards data.
+    # The DIRTY region (taper + the wavelet's own ~2-pixel support +
+    # boundary-wavelet contamination) is removed from the ANALYZED region
+    # by the edge crop (min_time/max_time, auto = max(20, taper+4), floor
+    # dominating), so the analysis always sees window == 1 on clean
+    # wavelets. 0 = legacy fraction-of-Tobs via window_tukey_alpha.
+    window_taper_wavelets: int = dataclasses.field(
+        default_factory=env_default("WINDOW_TAPER_WAVELETS", 2, int)
+    )
 
     # --- TDI / channels ---
     tdi_chan: str = "XYZ"
@@ -443,8 +459,20 @@ class EreborFit(StockGlobalFit):
             gs.Tobs = tobs
 
         # Window taper realized from the alpha knob on the resolved grid.
+        # window_taper_wavelets > 0 pins the taper to a fixed wavelet count
+        # (deterministic per WDM settings) instead of a Tobs fraction.
+        if int(getattr(gs, "window_taper_wavelets", 0) or 0) > 0:
+            gs.window_tukey_alpha = min(
+                1.0, 2.0 * int(gs.window_taper_wavelets) / float(Nt))
         if gs.window_taper_duration is None:
             gs.window_taper_duration = gs.window_tukey_alpha * gs.Tobs
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "window taper: %.1f s = %.2f wavelets per side "
+            "(alpha=%.5f of Tobs=%.3e s)",
+            0.5 * gs.window_taper_duration,
+            0.5 * gs.window_taper_duration / (gs.Tobs / Nt),
+            gs.window_tukey_alpha, gs.Tobs)
 
         # WDM time-edge crop: cover boundary wavelets AND the Tukey taper.
         edge_crop = (
