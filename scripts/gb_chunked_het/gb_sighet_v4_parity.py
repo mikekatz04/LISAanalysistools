@@ -111,10 +111,29 @@ def make_scaffold(backend="cpu", *, v3_n_nodes=64, v4_knots=128,
         edge = int(os.environ.get("V4_EDGE", str(max(2, Nt // 40))))
     if tk is None:
         tk = int(os.environ.get("V4_TK", str(max(2, int(0.025 * Nt)))))
+    # The SCORER kernels (v3/v4) carry r + dr for every (channel, active-m,
+    # sparse-time) pixel: 2*3*M*N_sparse_t*16 bytes, and N_sparse_t is set by
+    # PHYSICS (Tobs / sparse-sampling interval), not by grid shape -- so a
+    # 1-yr run with production sparse resolution wants ~250 KB and does not
+    # fit an A100's 164 KB. Cap N_sparse_t on GPU by coarsening nt_layer
+    # (V4_NSP_MAX / V4_NTL override). This is the constraint that the v4
+    # Phase-2 moment contraction is designed to remove entirely.
+    if gpu:
+        nsp_max = int(os.environ.get("V4_NSP_MAX", "256"))
+        nt_act = Nt - 2 * edge
+        stride_need = max(1, -(-nt_act // nsp_max))
+        nt_layer = int(os.environ.get("V4_NTL", str(max(1, Nt // stride_need))))
     shb = (Nt + n_sparse_fd + nt_layer) * 16
-    print(f"[grid] Nf={Nf} Nt={Nt} edge={edge} taper={tk} "
-          f"| make_reference shared = {shb/1024:.0f} KB "
-          f"({'OK' if shb <= 163840 else 'EXCEEDS A100 164KB'})")
+    nsp_est = (Nt - 2 * edge) // max(1, Nt // max(1, nt_layer))
+    M = 5
+    sc_v3 = 2 * 3 * M * nsp_est * 16 + 40 * 1024
+    sc_v4 = sc_v3 + 3 * nsp_est * 16 + (1 + 6 + 18) * 1024
+    print(f"[grid] Nf={Nf} Nt={Nt} nt_layer={nt_layer} edge={edge} "
+          f"taper={tk}")
+    print(f"[shmem] make_reference {shb/1024:.0f} KB "
+          f"({'OK' if shb <= 163840 else 'TOO BIG'}) | scorer ~N_sparse_t="
+          f"{nsp_est}: v3 {sc_v3/1024:.0f} KB, v4 {sc_v4/1024:.0f} KB "
+          f"({'OK' if sc_v4 <= 163840 else 'TOO BIG -- lower V4_NSP_MAX'})")
     t_start = int(0.5 * YRSID_SI / dt) * dt
     orbits = ESAOrbits(force_backend=backend)
     wdm_set = WDMSettings(Nf, Nt, dt, t0=t_start, min_freq=1e-4,

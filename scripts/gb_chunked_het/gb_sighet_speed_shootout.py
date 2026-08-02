@@ -67,9 +67,26 @@ def build(nt, nr, knots, band):
     t0 = int(0.5 * YRSID_SI / dt) * dt
     edge = max(2, int(round(0.027 * nt)))
     tk = max(2, int(round(0.025 * nt)))
-    shb = (nt + 512 + 512) * 16
-    print(f"[grid] Nf={Nf} Nt={nt} | make_reference shared = "
-          f"{shb/1024:.0f} KB ({'OK' if shb <= 163840 else 'TOO BIG for A100'})")
+    # The v3/v4 SCORER kernels carry r + dr per (channel, active-m,
+    # sparse-time) pixel: 2*3*M*N_sparse_t*16 bytes. N_sparse_t is fixed by
+    # PHYSICS (Tobs / sparse interval), so 1-yr production sparse resolution
+    # wants ~250 KB -- past an A100's 164 KB. Coarsen nt_layer on GPU so the
+    # scorer fits (SHOOT_NSP_MAX / SHOOT_NTL override); v4 Phase-2's moment
+    # contraction is what removes this ceiling for good.
+    edge_n = edge
+    nt_layer = 512
+    if USE_GPU:
+        nsp_max = int(os.environ.get("SHOOT_NSP_MAX", "256"))
+        stride_need = max(1, -(-(nt - 2 * edge_n) // nsp_max))
+        nt_layer = int(os.environ.get("SHOOT_NTL",
+                                      str(max(1, nt // stride_need))))
+    shb = (nt + 512 + nt_layer) * 16
+    nsp_est = (nt - 2 * edge_n) // max(1, nt // max(1, nt_layer))
+    sc_v4 = 2 * 3 * 5 * nsp_est * 16 + 3 * nsp_est * 16 + 65 * 1024
+    print(f"[grid] Nf={Nf} Nt={nt} nt_layer={nt_layer}")
+    print(f"[shmem] make_reference {shb/1024:.0f} KB | scorer "
+          f"~N_sparse_t={nsp_est}: v4 ~{sc_v4/1024:.0f} KB "
+          f"({'OK' if sc_v4 <= 163840 else 'TOO BIG -- lower SHOOT_NSP_MAX'})")
     orbits = ESAOrbits(force_backend=BACKEND)
     ws = WDMSettings(Nf, nt, dt, t0=t0, min_freq=1e-4, max_freq=2e-2,
                      min_time=edge * Nf * dt, max_time=(nt - edge) * Nf * dt,
@@ -82,16 +99,16 @@ def build(nt, nr, knots, band):
     chunked.convert_to_ra_dec = False
     engines = {}
     engines["v2"] = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=512,
+        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
         m_active_half_width=2)
     engines["v3"] = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=512,
+        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
         m_active_half_width=2, v3_n_nodes=nr)
     engines["v4-pcr"] = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=512,
+        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
         m_active_half_width=2, v3_n_nodes=nr, v4_knots=knots, v4_band=0)
     engines["v4-band"] = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=512,
+        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
         m_active_half_width=2, v3_n_nodes=nr, v4_knots=knots,
         v4_band=band)
     return ws, chunked, engines, Nf, dt, t0
