@@ -1,0 +1,211 @@
+"""Tiered accuracy assessment for sig-het v2 / rung-i (USER spec 2026-08-02).
+
+Requirement: for candidates whose TRUE lnL sits within T of the maximum
+(reference), the sig-het error dLL = |(arm delta) - (dense delta)| must obey
+    T <= 50    ->  dLL << 1 (~0.01-0.1)
+    T ~  100   ->  dLL <~ 1
+    T ~ 1000   ->  dLL ~ 10-20   (i.e. relative 1e-2 to 1e-3)
+with everything beyond T ~ 1000 gateable (-inf prior / trust region).
+
+Deltas are taken FROM THE REFERENCE for both the arm and dense
+(delta-vs-delta), which is the sampling-relevant comparison and removes any
+constant reference-point offset.
+
+For each ref (seed-19 many-ref draws: spans clean -> catastrophic incl the
+ref02 builder-slip case) and each direction (f0, lnA, iota, psi, lam), the
+displacement is scaled to hit each tier: probe at s0, then
+s = s0*sqrt(T/|dLL0|) with one refinement.
+
+Run: /Users/mkatz/miniconda3/envs/deving/bin/python gb_sighet_tier_assess.py
+Env: TIER_NREF (8), TIER_LIST ("1,10,50,100,1000"), TIER_NR (64),
+     ENV_OUT (./ratio_proto_out)
+"""
+import os
+
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gb_sighet_ratio_build_prototype as proto
+
+from lisatools.detector import ESAOrbits
+from lisatools.domains import WDMSettings
+from lisatools.utils.constants import YRSID_SI
+from gbgpu.gbcomps import GBWDMComputations
+from gbgpu.gbsignalhetcomputations import GBSignalHetComputations
+from gbgpu.gb_likelihood import WDMBandLikelihoodEngine
+
+
+def main():
+    out_dir = os.environ.get("ENV_OUT", "./ratio_proto_out")
+    os.makedirs(out_dir, exist_ok=True)
+    n_ref = int(os.environ.get("TIER_NREF", "8"))
+    tiers = [float(x) for x in
+             os.environ.get("TIER_LIST", "1,10,50,100,1000").split(",")]
+    nr = int(os.environ.get("TIER_NR", "64"))
+
+    backend = "cpu"
+    dt = 10.0
+    Nf, Nt = 256, 12288
+    t_start = int(0.5 * YRSID_SI / dt) * dt
+    edge, tk = 330, 307
+    orbits = ESAOrbits(force_backend=backend)
+    wdm_set = WDMSettings(Nf, Nt, dt, t0=t_start, min_freq=1e-4,
+                          max_freq=2e-2, min_time=edge * Nf * dt,
+                          max_time=(Nt - edge) * Nf * dt,
+                          force_backend=backend)
+    chunked = GBWDMComputations(
+        wdm_set, t_ref=t_start, Nt_sub=128, n_pad=16, N_sparse=256,
+        N_cp_sig=0, N_cp_orbit=0, orbits=orbits,
+        tdi_config="2nd generation", force_backend=backend, d_d=0.0,
+        tdi_type="XYZ", tukey_alpha=2.0 * tk / Nt)
+    chunked.convert_to_ra_dec = False
+    sighet = GBSignalHetComputations.for_band_engine(
+        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=512,
+        m_active_half_width=2)
+    g = sighet._g
+    N = g["n_sparse_fd"]
+    eng_s = WDMBandLikelihoodEngine(sighet, wdm_set, nchannels=3,
+                                    tdi_channel_setup="XYZ")
+    gen = None
+
+    ilo, ihi = wdm_set.ind_min_f, wdm_set.ind_max_f + 1
+    from lisatools.sensitivity import XYZ2SensitivityMatrix
+    invC = np.ascontiguousarray(
+        np.asarray(XYZ2SensitivityMatrix(wdm_set, model="scirdv1").invC),
+        dtype=np.float64)
+    zeros = np.zeros(1, dtype=np.int32)
+    kw = dict(data_index=zeros, noise_index=zeros, N_vals=None,
+              waveform_kwargs={})
+    tau_slow = np.arange(N) * (g["Tobs"] / N)
+    drift_u = 1.0 / (2 * np.pi * g["Tobs"])
+
+    rngr = np.random.default_rng(19)
+    refs = []
+    for _ in range(n_ref):
+        refs.append(np.array([
+            10 ** rngr.uniform(-22.5, -21.0),
+            rngr.uniform(1.5e-3, 1.5e-2),
+            rngr.uniform(0.0, 3e-16),
+            0.0,
+            rngr.uniform(0, 2 * np.pi),
+            np.arccos(rngr.uniform(-1, 1)),
+            rngr.uniform(0, np.pi),
+            rngr.uniform(0, 2 * np.pi),
+            np.arcsin(rngr.uniform(-1, 1)),
+        ]))
+
+    DIRS = [("f0", 1, 0.05 * drift_u), ("lnA", 0, 0.03),
+            ("iota", 5, 0.03), ("psi", 6, 0.03), ("lam", 7, 0.01)]
+
+    def displace(ref, idx, s):
+        p = ref.copy()
+        if idx == 0:
+            p[0] *= np.exp(s)
+        else:
+            p[idx] += s
+        return p
+
+    rows = []
+    for rrr, ref in enumerate(refs):
+        href = np.zeros((3, Nf, Nt))
+        chunked.fill_global_wdm(ref[None, :], href, convert_to_ra_dec=False)
+        h_act = np.ascontiguousarray(
+            href[:, ilo:ihi, wdm_set.active_slice_t])
+        holder = proto._FullGridWDMHolder(h_act, invC)
+
+        def dense(p):
+            ht = np.zeros((3, Nf, Nt))
+            chunked.fill_global_wdm(p[None, :], ht, convert_to_ra_dec=False)
+            ht_a = ht[:, ilo:ihi, wdm_set.active_slice_t]
+            dh = float(np.einsum("cmn,cdmn,dmn->", h_act, invC, ht_a))
+            hh = float(np.einsum("cmn,cdmn,dmn->", ht_a, invC, ht_a))
+            return dh - 0.5 * hh
+
+        sighet.clear_in_model()
+        sighet.setup_in_model(holder, ref[None, :], zeros)
+        if gen is None:
+            gen_l = sighet._keep_alive["gb_gen"]
+        gen_l = sighet._keep_alive["gb_gen"]
+        spl_r = proto.build_spl(gen_l, ref)
+        s_ref, kf0_r, _ = proto.slow_series(gen_l, ref, None, N, g,
+                                            spl=spl_r)
+        good_r = proto.good_samples(s_ref)
+        a_norm = np.abs(s_ref)
+        min_env = float((a_norm / a_norm.max(axis=1, keepdims=True)).min())
+        c0_all = np.asarray(sighet.c0_sparse_all)[0]
+
+        def v2_delta(p):
+            eng_s.get_ll(holder, p[None, :], phase_maximize=False, **kw)
+            return float(eng_s.d_h_out[0] - 0.5 * eng_s.h_h_out[0])
+
+        def rungi_delta(p):
+            m_act = proto.m_active_for(p[1], g)
+            s_c, _, _ = proto.slow_series(gen_l, p, None, N, g,
+                                          kf0_pin=kf0_r)
+            rh, _ = proto.fit_ratio(s_c / s_ref, tau_slow, nr, "cubic",
+                                    good=good_r)
+            X_u = proto.X_lin_from_slow(rh(tau_slow) * s_ref, g, N)
+            c1_u = proto.polyphase_py(
+                X_u, kf0_r, m_act, g,
+                np.asarray(sighet.window_full, dtype=np.float64),
+                np.asarray(sighet.n_sparse_local))
+            c0r = c0_all[:, np.asarray(m_act) - g["ind_min_f"], :]
+            r, dr, _ = proto.ratio_dr(c1_u, c0r, g["stride"], g["max_r"])
+            dh, hh = proto.fold_py(r, dr, m_act, sighet)
+            return dh - 0.5 * hh
+
+        d0 = dense(ref)
+        v0 = v2_delta(ref)
+        i0 = rungi_delta(ref)
+        print(f"\n[ref{rrr:02d}] f0={ref[1]*1e3:.4f} mHz min_env={min_env:.4f}"
+              f"  ref-point offset: v2 {v0 - d0:+.2f} rung-i {i0 - d0:+.2f}")
+
+        for dname, idx, s0 in DIRS:
+            s = s0
+            dl = dense(displace(ref, idx, s)) - d0
+            tries = 0
+            while abs(dl) < 0.05 and tries < 3:
+                s *= 10.0
+                dl = dense(displace(ref, idx, s)) - d0
+                tries += 1
+            if abs(dl) < 0.05:
+                continue
+            for T in tiers:
+                sc = s * np.sqrt(T / abs(dl))
+                p = displace(ref, idx, sc)
+                dT = dense(p) - d0
+                if abs(dT) > 0.05:      # one refinement toward the tier
+                    sc *= np.sqrt(T / abs(dT))
+                    p = displace(ref, idx, sc)
+                    dT = dense(p) - d0
+                ev2 = abs((v2_delta(p) - v0) - dT)
+                eri = abs((rungi_delta(p) - i0) - dT)
+                rows.append((rrr, min_env, dname, T, dT, ev2, eri))
+                print(f"    {dname:4s} T={T:6.0f} trueDLL={dT:9.2f} "
+                      f"dLL_v2={ev2:9.4f} dLL_rung-i={eri:9.4f}")
+
+    arr = np.array([(r[0], r[1], r[3], r[4], r[5], r[6]) for r in rows])
+    np.savez(os.path.join(out_dir, "tier_assess.npz"),
+             rows=arr, dirs=np.array([r[2] for r in rows]))
+    # spec check: allowed(T) = max(0.1, T/100) target, T/50 loose
+    print("\n[spec] per-tier worst / median over all (ref, dir):")
+    for T in tiers:
+        m = arr[:, 2] == T
+        if not m.any():
+            continue
+        for lbl, col in (("v2", 4), ("rung-i", 5)):
+            v = arr[m, col]
+            allowed = max(0.1, T / 100.0)
+            print(f"    T={T:6.0f} {lbl:6s}: median {np.median(v):9.4f} "
+                  f"worst {v.max():9.4f}  vs allowed ~{allowed:.1f} "
+                  f"-> pass {(v <= allowed).mean()*100:.0f}%")
+
+
+if __name__ == "__main__":
+    main()
