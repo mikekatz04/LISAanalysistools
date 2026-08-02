@@ -200,8 +200,9 @@ class PhenomTHMWaveformBase(JaxBase):
         ref_freq: float = None,
         use_reference_time: bool = True,
         use_coalescence_time: bool = True,
+        time_bounded_start: bool = True,
     ) -> None:
-        
+
         JaxBase.__init__(self)
 
         if not phentax_available:
@@ -215,6 +216,7 @@ class PhenomTHMWaveformBase(JaxBase):
         self.ref_freq = jnp.asarray(ref_freq) if ref_freq is not None else None
         self.use_reference_time = use_reference_time
         self.ref_time = jnp.asarray(0.0)  if use_coalescence_time else None
+        self.time_bounded_start = time_bounded_start
 
     @property
     def phenom_kwargs(self) -> dict:
@@ -236,6 +238,7 @@ class PhenomTHMWaveformBase(JaxBase):
             "ref_freq": self.ref_freq,
             "use_reference_time": self.use_reference_time,
             "use_coalescence_time": self.ref_time is not None,
+            "time_bounded_start": self.time_bounded_start,
             }
         
     
@@ -319,11 +322,28 @@ class PhenomTHMWaveformBase(JaxBase):
         start_freq = self._to_jax(start_freq) if start_freq is not None else self.start_freq
         ref_freq = self._to_jax(ref_freq) if ref_freq is not None else self.ref_freq
 
+        # Waveform start: phentax derives t_min from f_min ONLY when t_min is
+        # NaN ("f_min ... Used if t_min is NaN to set the minimum time for
+        # waveform generation").  Leaving t_min unset therefore starts the
+        # template at the moment the (2,2) mode sweeps through ``start_freq``,
+        # which for a high-mass MBH is only a few days before merger -- the
+        # template is then identically zero over most of the analysis window
+        # and the (3,3)/(4,4) modes are missing at the low-frequency band edge
+        # (measured on mojito id19: legacy zero over 94.6% of a 48 d window;
+        # dropping start_freq 7e-5 -> 2e-5 improved the in-band mismatch 6.6x).
+        # ``time_bounded_start`` instead bounds the template in TIME at
+        # ``t_min = -Tobs``, matching ``bbhx.mbhtdionfly.MBHTDIonFly`` (which
+        # passes ``t_min=-waveform_duration, t_ref=-t_merge``), so the template
+        # spans its full stated duration regardless of the source's mass.
+        # ``start_freq`` is still passed and remains the fallback.
+        extra = ({'t_min': self._to_jax(-float(self.waveform.T))}
+                 if self.time_bounded_start else {})
+
         if self.use_reference_time:
             ref_time = self._to_jax(-merger_time) if self.ref_time is None else self.ref_time
-            return {'t_ref': ref_time, 'f_min': start_freq}
+            return {'t_ref': ref_time, 'f_min': start_freq, **extra}
         else:
-            return {'f_min': start_freq, 'f_ref': ref_freq}
+            return {'f_min': start_freq, 'f_ref': ref_freq, **extra}
 
 class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
     """
@@ -379,6 +399,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         ref_freq: float = None,
         use_reference_time: bool = True,
         use_coalescence_time: bool = False,
+        time_bounded_start: bool = True,
         *args: Any,
         order: int = MBH_PHENOM_DEFAULT_RESPONSE_ORDER,
         buffer_time: int = MBH_PHENOM_DEFAULT_BUFFER_TIME,
@@ -418,6 +439,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             ref_freq=ref_freq,
             use_reference_time=use_reference_time,
             use_coalescence_time=use_coalescence_time,
+            time_bounded_start=time_bounded_start,
         )
 
     @property

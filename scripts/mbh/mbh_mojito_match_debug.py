@@ -112,7 +112,18 @@ SENS_MODEL = "scirdv1"
 # options: 17 -> 2969,  10 -> 1963,  19 -> 1925,  7 -> 1367,  13 -> 1088, ...
 MBHB_ID = int(os.environ.get("MBHB_ID", "0"))
 
-DT = 10.0                      # decimate from 2.5 s native
+# Analysis sampling. DEFAULTS TO THE MOJITO NATIVE RATE -- a mojito comparison must be
+# pinned to mojito's own settings, never to a convenience value. The window is built by
+# NAIVE SUBSAMPLING (data_full[..., ::deci]) with no anti-alias filter while the template
+# is generated natively at this DT, so any DT > native silently changes the physics being
+# measured: at DT=10 the in-band corruption of the DATA is A 3.1e-5 / E 3.9e-5 but
+# T 1.8e-2 -- LARGER than the response error under investigation, because T carries power
+# above the DT=10 Nyquist and its in-band content is near-null. L/c ~ 8.3 s is also
+# sub-sample at DT=10, so the TDI delay chain interpolates below one sample.
+# Decimation is therefore OPT-IN (MBH_ALLOW_DECIMATE=1) and is checked against the file
+# at load time; T-channel conclusions from a decimated run are invalid.
+MOJITO_NATIVE_DT = 2.5         # asserted against loader.dt below
+DT = float(os.environ.get("MBH_DT", str(MOJITO_NATIVE_DT)))
 TDI_GEN_STR = "2nd generation"
 TDI_CHAN = "XYZ"
 NCHANNELS = 3
@@ -159,7 +170,10 @@ N_WIN = NF * NT
 TOBS = N_WIN * DT
 
 DATA_CACHE = f"/tmp/mbh_mojito_data_id{MBHB_ID}.npz"
-TMPL_CACHE = "/tmp/mbh_mojito_tmpl_id{id}_{tag}.npy"
+# .npz: the cache now carries its grid key (n_win/dt/window_t0/id) alongside the
+# array and is validated on load. The old bare-.npy caches are not readable here
+# and are regenerated.
+TMPL_CACHE = "/tmp/mbh_mojito_tmpl_id{id}_{tag}.npz"
 
 MBH_TRANSFORM = make_mbh_transform_container()
 _ORBITS = [None]            # memoized L1Orbits (freed once the wave_gen is built)
@@ -183,12 +197,22 @@ def tukey(N, alpha):
 def load_data_cached():
     if os.path.exists(DATA_CACHE):
         z = np.load(DATA_CACHE, allow_pickle=True)
-        if tuple(z["data_td"].shape) == (NCHANNELS, N_WIN):
-            print(f"[cache] data window from {DATA_CACHE}", flush=True)
+        # Shape ALONE is not a valid key: 48 d @ dt=10 and 12 d @ dt=2.5 are BOTH
+        # (3, 414720), so a shape-only check silently accepts a window whose time
+        # axis is wrong by the decimation factor (observed: merger at 34.56 d by
+        # convention vs 8.62 d empirically). dt must match too, and a window with
+        # no dt recorded predates this check and cannot be validated -> re-read.
+        shape_ok = tuple(z["data_td"].shape) == (NCHANNELS, N_WIN)
+        dt_ok = "dt" in z.files and abs(float(z["dt"]) - DT) < 1e-9
+        if shape_ok and dt_ok:
+            print(f"[cache] data window from {DATA_CACHE}  (dt={float(z['dt'])})",
+                  flush=True)
             return (z["data_td"], float(z["window_t0"]), float(z["data_t0"]),
                     z["cat"].item(), float(z["abs_merger"]))
-        print(f"[cache] STALE ({z['data_td'].shape} != "
-              f"({NCHANNELS},{N_WIN})) -> re-read", flush=True)
+        why = (f"shape {z['data_td'].shape} != ({NCHANNELS},{N_WIN})" if not shape_ok
+               else (f"dt {float(z['dt'])} != {DT}" if "dt" in z.files
+                     else "no dt recorded (pre-dates the dt check)"))
+        print(f"[cache] STALE ({why}) -> re-read", flush=True)
 
     print("[cache] MISS -> reading mojito MBHB via L1ProcessingStep "
           "(one time)...", flush=True)
@@ -208,7 +232,25 @@ def load_data_cached():
     t_plunge = cat["TimeCoalescencePhenomTPHMSSBFrame"]
     abs_merger = MBH_WAVEFORM_T0 + t_plunge          # convention: REF + t_plunge
 
+    # --- pin the analysis settings to the mojito file's own settings ---
+    if abs(dt_native - MOJITO_NATIVE_DT) > 1e-9:
+        print(f"[mojito] NOTE file dt={dt_native} differs from the assumed native "
+              f"{MOJITO_NATIVE_DT}; trusting the FILE.", flush=True)
     deci = int(round(DT / dt_native))
+    if deci != 1:
+        if os.environ.get("MBH_ALLOW_DECIMATE", "0") not in ("1", "true", "True"):
+            raise SystemExit(
+                f"REFUSING to decimate mojito data {deci}x (MBH_DT={DT} vs file "
+                f"dt={dt_native}).\nNaive subsampling with no anti-alias filter "
+                f"corrupts the near-null T channel in-band by ~2e-2 (A/E ~3e-5), "
+                f"which exceeds the response error under study; L/c~8.3 s also goes "
+                f"sub-sample above dt=8.3.\nRe-run with MBH_DT={dt_native} (native), "
+                f"or set MBH_ALLOW_DECIMATE=1 if you accept that ALL T-channel "
+                f"results from this run are invalid.")
+        print("#" * 78 + f"\n!! DECIMATING mojito data {deci}x "
+              f"(dt {dt_native} -> {DT}) with NO anti-alias filter.\n"
+              f"!! A/E remain usable; ANY T-CHANNEL RESULT FROM THIS RUN IS INVALID.\n"
+              + "#" * 78, flush=True)
     n_full = data_full.shape[1]
     merger_idx_full = int(round((abs_merger - data_t0) / dt_native))
     start_full = merger_idx_full - int(round(MERGER_FRAC * N_WIN)) * deci
@@ -217,8 +259,11 @@ def load_data_cached():
     data_td = data_full[:, start_full: start_full + N_WIN * deci: deci][:, :N_WIN].copy()
     window_t0 = data_t0 + start_full * dt_native
 
+    # dt/dt_native travel WITH the window so downstream scripts cannot silently
+    # assume a different sampling than the one the data was built at.
     np.savez(DATA_CACHE, data_td=data_td, window_t0=window_t0, data_t0=data_t0,
-             cat=cat, abs_merger=abs_merger)
+             cat=cat, abs_merger=abs_merger, dt=DT, dt_native=dt_native,
+             deci=deci)
     print(f"[cache] wrote {DATA_CACHE}  shape={data_td.shape}", flush=True)
     # Free the full-stream data AND the loader's full-mission orbit (~1.6 GB)
     # before get_orbits() builds the ltt-sliced one (8.6 GB box).
@@ -319,10 +364,32 @@ def signal_gen(sampling_params, window_t0, wdm_full):
 def template_td_cached(tag, sampling_params, window_t0, wdm_full):
     """Raw TD TDI channels (same PhenomTHMTDIWaveform), placed on the window
     grid -- used for the fast FD tau/phase scan + narrowband WDM.  Cached."""
+    # The cache MUST be keyed on the grid it was built for. Keying on (id, tag)
+    # alone is silently wrong whenever the window changes: e.g. 48 d @ dt=10 and
+    # 12 d @ dt=2.5 are BOTH 414720 samples, so a stale template loads with a
+    # matching shape and yields plausible garbage. Validate against the grid and
+    # regenerate on any mismatch.
     p = TMPL_CACHE.format(id=MBHB_ID, tag=tag)
+    key = dict(n_win=int(N_WIN), dt=float(DT), window_t0=float(window_t0),
+               mbhb_id=int(MBHB_ID))
     if os.path.exists(p):
-        print(f"[cache] template '{tag}' from {p}", flush=True)
-        return np.load(p)
+        try:
+            with np.load(p, allow_pickle=True) as zc:
+                ok = (int(zc["n_win"]) == key["n_win"]
+                      and abs(float(zc["dt"]) - key["dt"]) < 1e-9
+                      and abs(float(zc["window_t0"]) - key["window_t0"]) < 1e-6
+                      and int(zc["mbhb_id"]) == key["mbhb_id"])
+                if ok:
+                    print(f"[cache] template '{tag}' from {p}", flush=True)
+                    return zc["arr"]
+                print(f"[cache] STALE template '{tag}' ({p}): built for "
+                      f"n_win={int(zc['n_win'])} dt={float(zc['dt'])} "
+                      f"t0={float(zc['window_t0']):.3f}, need "
+                      f"n_win={key['n_win']} dt={key['dt']} "
+                      f"t0={key['window_t0']:.3f} -> regenerating", flush=True)
+        except Exception as e:                       # legacy bare-.npy caches
+            print(f"[cache] unusable template cache {p} ({e}) -> regenerating",
+                  flush=True)
     wave_gen = get_wave_gen(window_t0, wdm_full)
     params_in = MBH_TRANSFORM.both_transforms(np.asarray(sampling_params, dtype=float))
     times, channels = wave_gen.compute_tdi_channels(*params_in)
@@ -330,8 +397,9 @@ def template_td_cached(tag, sampling_params, window_t0, wdm_full):
     arr = np.asarray(
         place_td_signal_on_grid(np.atleast_2d(channels)[:NCHANNELS], grid, times=times).arr
     )
-    np.save(p, arr)
-    print(f"[cache] wrote template '{tag}' -> {p}", flush=True)
+    np.savez(p, arr=arr, **key)
+    print(f"[cache] wrote template '{tag}' -> {p}  "
+          f"(n_win={key['n_win']} dt={key['dt']})", flush=True)
     return arr
 
 

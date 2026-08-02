@@ -38,10 +38,21 @@ import phentax.waveform as pw
 REF = 97729089.327664
 PATH = "/Users/mkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/"
 MBHB_L1 = os.path.join(PATH, "data", "MBHB", "L1")
-MBHB_ID = 0; BACKEND = "cpu"; SENS_MODEL = "scirdv1"; DT = 10.0
+MBHB_ID = int(os.environ.get("MBHB_ID", "0")); BACKEND = "cpu"; SENS_MODEL = "scirdv1"
+# Must match MBH_DT used to build the cached window (mbh_mojito_match_debug.py).
+# dt=2.5 is the mojito NATIVE rate (no decimation); dt=10 decimates 4x with no
+# anti-alias filter, which corrupts the near-null T channel in-band by ~2e-2.
+DT = float(os.environ.get("MBH_DT", "2.5"))   # mojito native; overridden by the window file
 TDI_GEN_STR = "2nd generation"; TDI_CHAN = "XYZ"; NCH = 3
 F_MIN, F_MAX = 1e-4, 2.5e-2
-HMS = (21, 33, 44); TOL = 1e-12; ORDER = 30; BUFFER = 15_000.0; START_FREQ = 7e-5
+HMS = (21, 33, 44); TOL = 1e-12; ORDER = 30; BUFFER = 15_000.0
+# Legacy waveform start: phentax derives t_min from f_min when t_min is not
+# given, so START_FREQ -- not Tobs -- sets how far back the legacy template
+# exists. Env-driven so the truncation can be swept.
+START_FREQ = float(os.environ.get("MBH_START_FREQ", "7e-5"))
+# Legacy start bounded in TIME (t_min=-Tobs, matching MBHTDIonFly) vs the old
+# frequency-only bound. =0 reproduces the pre-fix behaviour for A/B controls.
+TIME_BOUNDED_START = os.environ.get("MBH_TIME_BOUNDED_START", "1") not in ("0", "false", "False")
 TUKEY_ALPHA = 0.05; POS_DT = 300.0; DTMIN = 0.1
 MBH_TRANSFORM = make_mbh_transform_container()
 DATA_CACHE = f"/tmp/mbh_mojito_data_id{MBHB_ID}.npz"
@@ -54,11 +65,29 @@ def tukey(N, a):
 
 
 def main():
+    global DT          # adopted from the cached window below; nested helpers use it
     threading.Thread(target=_wd, daemon=True).start()
     banner("THREE-WAY compare: data D / pyTDResponse A / on-the-fly B (injection params)")
     z = np.load(DATA_CACHE, allow_pickle=True)
     D = z["data_td"]; window_t0 = float(z["window_t0"]); cat = z["cat"].item()
     abs_merger = float(z["abs_merger"])
+    # The window carries the dt it was BUILT at; adopt it rather than assuming one.
+    # A mismatch here silently reinterprets the data's time axis.
+    if "dt" in z.files:
+        DT = float(z["dt"])
+        if "deci" in z.files and int(z["deci"]) != 1:
+            print(f"!! window was DECIMATED {int(z['deci'])}x from dt="
+                  f"{float(z['dt_native'])} -- T-channel results are INVALID",
+                  flush=True)
+        print(f"  [cache] adopting dt={DT} from the window file", flush=True)
+    else:
+        # A window with no recorded dt cannot be validated, and a shape-only match
+        # is not sufficient (48 d @ dt=10 and 12 d @ dt=2.5 are both 414720
+        # samples). Refuse rather than silently adopt a possibly-wrong time axis.
+        raise SystemExit(
+            f"{DATA_CACHE} has no recorded dt -- it predates the dt check and may "
+            f"have been built at a different sampling than MBH_DT={DT}. Delete it "
+            f"and re-run mbh_mojito_match_debug.py to rebuild the window.")
     N_WIN = D.shape[1]; TOBS = N_WIN * DT
     wf = np.asarray(MBH_TRANSFORM.both_transforms(
         np.asarray(mbh_catalogue_to_sampling_basis(cat), float)), float)
@@ -78,6 +107,7 @@ def main():
                              t_low_fit=True, coarse_grain=False, atol=TOL, rtol=TOL),
         Tobs=dur_s, start_freq=START_FREQ, use_reference_time=True, waveform_t0=REF,
         data_td_settings=grid, tdi_generation=TDI_GEN_STR, tdi_channels=TDI_CHAN,
+        time_bounded_start=TIME_BOUNDED_START,
         sampling_frequency=1.0 / DT, orbits=orb, order=ORDER, tukey_alpha=TUKEY_ALPHA,
         stft_dt=None, freq_min=F_MIN, freq_max=F_MAX, fft_batch_size=2, buffer_time=BUFFER,
         output_domain_settings=None, force_backend=BACKEND)
@@ -118,6 +148,15 @@ def main():
             print(f"  {tag:7s} 1-Re(O)={r:.4e}  1-|O|={a:.4e}  arg={ph:+7.2f}deg  "
                   f"tau*={ts:+.3f}s  mm@tau*={mt:.4e}", flush=True)
 
+    # ---- dump the TD arrays so closeups can be re-zoomed without regenerating ----
+    _abs_merger = abs_merger
+    np.savez_compressed(
+        f"/tmp/mbh_three_way_td_id{MBHB_ID}.npz",
+        D=D, A=A, B=B, window_t0=window_t0, abs_merger=_abs_merger,
+        dt=DT, n_win=N_WIN, inc=inc,
+    )
+    print(f"[cache] TD arrays -> /tmp/mbh_three_way_td_id{MBHB_ID}.npz", flush=True)
+
     # ---- plots ----
     f = np.fft.rfftfreq(N_WIN, DT)
     FD = np.fft.rfft(D[0] * win) * DT; FA = np.fft.rfft(A[0] * win) * DT; FB = np.fft.rfft(B[0] * win) * DT
@@ -139,7 +178,7 @@ def main():
     ax[2].loglog(f[sel], np.abs((FB - FD)[sel]), label="|on-fly - data|", lw=0.9)
     ax[2].loglog(f[sel], np.abs((FA - FB)[sel]), ":", color="purple", label="|pyResp - on-fly|", lw=1.0)
     ax[2].set_xlim(F_MIN, F_MAX); ax[2].legend(); ax[2].set_title("FD |X| residuals"); ax[2].set_xlabel("f [Hz]")
-    fig.suptitle(f"MBHB id=0 injection: data vs pyTDResponse vs TDI-on-the-fly (inc={inc:.3f})")
+    fig.suptitle(f"MBHB id={MBHB_ID} injection: data vs pyTDResponse vs TDI-on-the-fly (inc={inc:.3f})")
     fig.tight_layout(rect=[0, 0, 1, 0.985])
     out = f"/tmp/mbh_three_way_id{MBHB_ID}.png"; fig.savefig(out, dpi=110); plt.close(fig)
     print(f"\nDONE.  plot -> {out}", flush=True)
