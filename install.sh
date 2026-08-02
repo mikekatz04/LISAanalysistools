@@ -35,6 +35,12 @@
 #   SKIP_BBHX=1                   # pull BBHx checkout but skip its recompile
 #   SKIP_GBGPU=1                  # pull GBGPU checkout but skip its (slow CUDA)
 #                                 # recompile; rebuild by hand when .cu changed
+#   GBGPU_WITH_SHAREDMEM=OFF      # (default) skip the legacy SharedMemoryGBGPU
+#                                 # kernels: much faster build, no cuFFTDx /
+#                                 # nvidia-mathdx download. Set to ON if you
+#                                 # need get_fstat_ll, generate_global_template,
+#                                 # GBAETWaveform.run_wave, or gathergalaxy's
+#                                 # swap_likelihood_difference.
 #   GIT_PULL=1                    # (default) after checkout, fast-forward-pull
 #                                 # origin/<branch> for each package. The install
 #                                 # ABORTS if any package has diverged from its
@@ -230,9 +236,23 @@ fi
 # the recompile -- rebuild it by hand when its .cu/.cxx actually changed:
 #   cd GBGPU && pip install --no-build-isolation -e . \
 #       --config-settings=cmake.define.GBT_LAPACKE_DETECT_WITH=PKGCONFIG
+#
+# GBGPU_WITH_SHAREDMEM defaults to OFF here (2026-08-02): the legacy
+# SharedMemoryGBGPU.cu family is ~4k lines of templated CUDA and the only
+# consumer of cuFFTDx, so it dominates the build AND forces a configure-time
+# nvidia-mathdx download. The modern kernels the sprint runs on
+# (GBTDIonTheFly, chunked-heterodyne, sig-het v2/v3/v4) do not use it. The
+# seven SharedMemory*_wrap methods stay BOUND and raise RuntimeError if
+# called. Set GBGPU_WITH_SHAREDMEM=ON for the paths that still need it:
+# GB F-stat RJ births (GBGPU.get_fstat_ll), synthetic GB injections /
+# FD global-template subtraction (generate_global_template), GBAETWaveform
+# (run_wave), and gathergalaxy's swap_likelihood_difference.
+GBGPU_WITH_SHAREDMEM="${GBGPU_WITH_SHAREDMEM:-OFF}"
 clone_or_reuse_sibling "$ORG" GBGPU
 if [ "$SKIP_GBGPU" != "1" ]; then
-    editable_install "$DEV_ROOT/GBGPU" dev "${LAPACKE_FLAGS[@]}"
+    echo "===> GBGPU_WITH_SHAREDMEM=$GBGPU_WITH_SHAREDMEM"
+    editable_install "$DEV_ROOT/GBGPU" dev "${LAPACKE_FLAGS[@]}" \
+        "--config-settings=cmake.define.GBGPU_WITH_SHAREDMEM=$GBGPU_WITH_SHAREDMEM"
 else
     echo "===> SKIP_GBGPU=1: checkout pulled, skipping GBGPU recompile"
 fi
