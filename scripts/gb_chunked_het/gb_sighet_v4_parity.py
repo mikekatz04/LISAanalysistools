@@ -90,11 +90,31 @@ def make_refs(n_ref=8):
 
 
 def make_scaffold(backend="cpu", *, v3_n_nodes=64, v4_knots=128,
-                  Nt=12288, nt_layer=512, n_sparse_fd=512, edge=330,
-                  tk=307):
-    """The tier-assess 1-yr scaffold (defaults) or a smoke-sized variant."""
+                  Nt=None, Nf=None, nt_layer=512, n_sparse_fd=512,
+                  edge=None, tk=None):
+    """The tier-assess scaffold; GRID IS CONFIGURABLE (V4_NT / V4_NF).
+
+    GPU NOTE: gb_signal_het_make_reference_kernel asks for
+    ``(Nt + n_sparse_fd + nt_layer) * 16`` bytes of dynamic shared memory,
+    so the CPU-convenient tall-and-thin grid (Nf=256, Nt=12288 -> 208 KB)
+    exceeds an A100's 164 KB cap. The PRODUCTION grid shape is the
+    opposite (Nf=1440, Nt=2160 -> ~51 KB) and fits comfortably; default
+    to that under a non-cpu backend.
+    """
     dt = 10.0
-    Nf = 256
+    gpu = backend != "cpu"
+    if Nt is None:
+        Nt = int(os.environ.get("V4_NT", "2160" if gpu else "12288"))
+    if Nf is None:
+        Nf = int(os.environ.get("V4_NF", "1440" if gpu else "256"))
+    if edge is None:
+        edge = int(os.environ.get("V4_EDGE", str(max(2, Nt // 40))))
+    if tk is None:
+        tk = int(os.environ.get("V4_TK", str(max(2, int(0.025 * Nt)))))
+    shb = (Nt + n_sparse_fd + nt_layer) * 16
+    print(f"[grid] Nf={Nf} Nt={Nt} edge={edge} taper={tk} "
+          f"| make_reference shared = {shb/1024:.0f} KB "
+          f"({'OK' if shb <= 163840 else 'EXCEEDS A100 164KB'})")
     t_start = int(0.5 * YRSID_SI / dt) * dt
     orbits = ESAOrbits(force_backend=backend)
     wdm_set = WDMSettings(Nf, Nt, dt, t0=t_start, min_freq=1e-4,

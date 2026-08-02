@@ -57,10 +57,19 @@ def sync():
 
 
 def build(nt, nr, knots, band):
-    dt, Nf = 10.0, 256
+    # GPU NOTE: gb_signal_het_make_reference_kernel asks for
+    # (Nt + n_sparse_fd + nt_layer)*16 bytes of dynamic shared memory, so a
+    # tall-and-thin grid (Nf=256, Nt=12288 -> 208 KB) blows an A100's 164 KB
+    # cap. The production WDM grid is the opposite shape (Nf=1440, Nt=2160
+    # -> ~51 KB); default to it on GPU, keep the thin grid for CPU smokes.
+    dt = 10.0
+    Nf = int(os.environ.get("SHOOT_NF", "1440" if USE_GPU else "256"))
     t0 = int(0.5 * YRSID_SI / dt) * dt
-    edge = max(4, int(round(330 * nt / 12288)))
-    tk = max(2, int(round(307 * nt / 12288)))
+    edge = max(2, int(round(0.027 * nt)))
+    tk = max(2, int(round(0.025 * nt)))
+    shb = (nt + 512 + 512) * 16
+    print(f"[grid] Nf={Nf} Nt={nt} | make_reference shared = "
+          f"{shb/1024:.0f} KB ({'OK' if shb <= 163840 else 'TOO BIG for A100'})")
     orbits = ESAOrbits(force_backend=BACKEND)
     ws = WDMSettings(Nf, nt, dt, t0=t0, min_freq=1e-4, max_freq=2e-2,
                      min_time=edge * Nf * dt, max_time=(nt - edge) * Nf * dt,
@@ -89,7 +98,7 @@ def build(nt, nr, knots, band):
 
 
 def main():
-    nt = int(os.environ.get("SHOOT_NT", "12288"))
+    nt = int(os.environ.get("SHOOT_NT", "2160" if USE_GPU else "12288"))
     batches = [int(x) for x in
                os.environ.get("SHOOT_BATCHES", "1,8,64,256").split(",")]
     nr = int(os.environ.get("SHOOT_NR", "64"))
