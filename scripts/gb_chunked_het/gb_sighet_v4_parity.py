@@ -161,6 +161,18 @@ def make_candidates(ref, Tobs):
     return cands
 
 
+
+def asnp(a):
+    """Host numpy view of a numpy OR cupy array (GPU-safe).
+
+    The compiled engines return device arrays under a CUDA backend, and
+    ``np.asarray`` refuses to implicitly copy those -- everything that
+    leaves the kernel for host-side arithmetic goes through here.
+    """
+    get = getattr(a, "get", None)
+    return get() if callable(get) else np.asarray(a)
+
+
 def compiled_delta(sighet, p, *, v3_n_nodes=0, v4_knots=0):
     """Raw delta d_h - 0.5*h_h through the compiled kernels, selected by
     temporarily setting the routing knobs (v4 wins when both are set)."""
@@ -172,8 +184,8 @@ def compiled_delta(sighet, p, *, v3_n_nodes=0, v4_knots=0):
                       data_index=np.zeros(1, dtype=np.int32))
     finally:
         g["v3_n_nodes"], g["v4_knots"] = saved
-    dh = float(np.asarray(sighet.last_d_h)[0])
-    hh = float(np.asarray(sighet.last_h_h)[0])
+    dh = float(asnp(sighet.last_d_h)[0])
+    hh = float(asnp(sighet.last_h_h)[0])
     return dh - 0.5 * hh
 
 
@@ -187,6 +199,14 @@ def main():
     K = int(os.environ.get("V4_K", "128"))
     ref_sel = [int(x) for x in
                os.environ.get("V4_REF_SEL", "0,2,5").split(",")]
+    # The python reference arm runs on HOST arrays (proto.fold_py /
+    # slow_series); under a CUDA backend the stash lives on the device, so
+    # it is skipped by default there. v4-compiled vs v3-compiled is the
+    # comparison that validates the CUDA kernel.
+    skip_py = os.environ.get(
+        "V4_SKIP_PY", "0" if backend == "cpu" else "1") == "1"
+    if skip_py:
+        print("[mode] python arm SKIPPED (compiled v3 vs compiled v4 only)")
 
     sc = make_scaffold(backend=backend, v3_n_nodes=nr, v4_knots=K)
     sighet = sc["sighet"]
@@ -199,12 +219,12 @@ def main():
     # Fixed-knot grid + KERNEL-convention pixel times (pix-off = 0):
     # tau_b = (ind_min_t + n_sparse_local[b]) * Nf * dt, identical to the
     # compiled v3/v4 evaluation time t - t_start.
-    n_sl = np.asarray(sighet.n_sparse_local)
-    n_global = g["ind_min_t"] + n_sl
-    tau_pix0 = n_global.astype(float) * g["Nf"] * g["dt"]
-    tau_k = np.linspace(0.0, g["Tobs"], K)
-    Lm = _CS(tau_k, np.eye(K), axis=0)(tau_pix0)             # (Nsp, K)
-    Lm = np.ascontiguousarray(Lm)
+    if not skip_py:
+        n_sl = asnp(sighet.n_sparse_local)
+        n_global = g["ind_min_t"] + n_sl
+        tau_pix0 = n_global.astype(float) * g["Nf"] * g["dt"]
+        tau_k = np.linspace(0.0, g["Tobs"], K)
+        Lm = np.ascontiguousarray(_CS(tau_k, np.eye(K), axis=0)(tau_pix0))
 
     has_v4 = hasattr(sighet.cpp, "gb_signal_het_v4_get_ll")
     if golden_mode:
@@ -240,11 +260,11 @@ def main():
         setup_ref(sc, ref)
         print(f"\n[ref{rrr:02d}] f0={ref[1]*1e3:.4f} mHz")
 
-        if not golden_mode:
+        if not golden_mode and not skip_py:
             gen_l = sighet._keep_alive["gb_gen"]
             s_ref, kf0_r, _ = proto.slow_series(gen_l, ref, None, N, g)
             good_r = proto.good_samples(s_ref)
-            c0_all = np.asarray(sighet.c0_sparse_all)[0]
+            c0_all = asnp(sighet.c0_sparse_all)[0]
             ref_ctx = (gen_l, s_ref, good_r, kf0_r, c0_all)
 
         for name, p in make_candidates(ref, g["Tobs"]):
@@ -254,11 +274,16 @@ def main():
                 print(f"    {name:10s} v3C={d_v3c:+.10e}")
                 continue
             d_v4c = compiled_delta(sighet, p, v3_n_nodes=nr, v4_knots=K)
-            d_v4p = python_v4_delta(p, ref_ctx)
+            if skip_py:
+                d_v4p = np.nan
+                print(f"    {name:10s} v3C={d_v3c:+.6e} v4C={d_v4c:+.6e} "
+                      f"|v4C-v3C|={abs(d_v4c-d_v3c):.3e}")
+            else:
+                d_v4p = python_v4_delta(p, ref_ctx)
+                print(f"    {name:10s} v3C={d_v3c:+.6e} v4C={d_v4c:+.6e} "
+                      f"v4P={d_v4p:+.6e} |v4C-v3C|={abs(d_v4c-d_v3c):.3e} "
+                      f"|v4C-v4P|={abs(d_v4c-d_v4p):.3e}")
             rows.append((rrr, name, d_v3c, d_v4c, d_v4p))
-            print(f"    {name:10s} v3C={d_v3c:+.6e} v4C={d_v4c:+.6e} "
-                  f"v4P={d_v4p:+.6e} |v4C-v3C|={abs(d_v4c-d_v3c):.3e} "
-                  f"|v4C-v4P|={abs(d_v4c-d_v4p):.3e}")
 
     if golden_mode:
         np.savez(golden_path,
@@ -272,12 +297,16 @@ def main():
     v4c = np.array([r[3] for r in rows])
     v4p = np.array([r[4] for r in rows])
     print("\n[parity] over all (ref, candidate):")
-    print(f"    max |v4C - v4P| (compiled vs python v4) = "
-          f"{np.abs(v4c - v4p).max():.6e}")
+    d43 = np.abs(v4c - v3c)
+    scale = max(np.abs(v3c).max(), 1e-300)
     print(f"    max |v4C - v3C| (resampling stage only) = "
-          f"{np.abs(v4c - v3c).max():.6e}")
-    print(f"    max |v4P - v3C|                          = "
-          f"{np.abs(v4p - v3c).max():.6e}")
+          f"{d43.max():.6e}   (rel to raw scale {scale:.3e}: "
+          f"{d43.max()/scale:.2e})")
+    if not np.all(np.isnan(v4p)):
+        print(f"    max |v4C - v4P| (compiled vs python v4) = "
+              f"{np.abs(v4c - v4p).max():.6e}")
+        print(f"    max |v4P - v3C|                          = "
+              f"{np.abs(v4p - v3c).max():.6e}")
     scale = np.abs(v4c).max()
     print(f"    (raw |delta| scale: max {scale:.3e})")
 
