@@ -60,10 +60,15 @@ BACKEND = shoot.BACKEND
 # Categorical hues in FIXED order, CVD-validated (adjacent-pair dE >= 8 under
 # deuteranopia and protanopia, normal-vision dE >= 15).  Colour follows the
 # engine, never its rank.
-ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band"]
+ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band", "v4-tuned"]
 CLR = {"chunked": "#666666", "v2": "#E69F00", "v3": "#0072B2",
-       "v4-pcr": "#009E73", "v4-band": "#D55E00"}
-MRK = {"chunked": "o", "v2": "s", "v3": "^", "v4-pcr": "D", "v4-band": "v"}
+       "v4-pcr": "#009E73", "v4-band": "#D55E00", "v4-tuned": "#D55E00"}
+# v4-tuned IS v4-banded with a T_obs-matched node count: same entity, so the
+# same hue, distinguished by line style (never by a new colour).
+LS = {n: "-" for n in ("chunked", "v2", "v3", "v4-pcr", "v4-band")}
+LS["v4-tuned"] = "--"
+MRK = {"chunked": "o", "v2": "s", "v3": "^", "v4-pcr": "D",
+       "v4-band": "v", "v4-tuned": "*"}
 INK, INK2, GRID = "#1a1a1a", "#555555", "#d8d8d8"
 
 
@@ -73,9 +78,37 @@ def asnp(a):
 
 
 def build_all(nt, nr, knots, band):
-    """Scaffold + all five engines at one Tobs (grid sized to the device)."""
+    """Scaffold + every engine at one Tobs (grid sized to the device).
+
+    Adds "v4-tuned": v4-banded with the node count matched to the baseline
+    by nr_law, so the figure shows BOTH the fixed-node line (flat cost, the
+    scaling claim) and the tuned line (what the baseline actually needs).
+    """
     ws, chunked, engines, Nf, dt, t0 = shoot.build(nt, nr, knots, band)
+    from gbgpu.gbsignalhetcomputations import GBSignalHetComputations as _G
+    ntl = engines["v3"]._g["nt_layer"]
+    nr_t = nr_law(nt, Nf, dt, base=nr)
+    engines["v4-tuned"] = _G.for_band_engine(
+        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=ntl,
+        m_active_half_width=2, v3_n_nodes=nr_t, v4_knots=knots,
+        v4_band=band)
+    print(f"[tuned] Nt={nt}: n_r {nr} -> {nr_t} "
+          f"({nt*Nf*dt/86400/365.25:.2f} yr)")
     return ws, chunked, engines, Nf, dt, t0
+
+
+
+def nr_law(nt, Nf=1440, dt=10.0, base=64):
+    """Fit nodes predicted for this baseline.
+
+    The ratio is structured by the ANNUAL modulation, so the node count a
+    spline needs scales as T_obs / 1 yr (polynomial phase costs none).
+    ``base`` is the value calibrated at 1 yr.  Used for the "v4-tuned"
+    line: same engine as v4-banded, node count matched to the baseline
+    instead of pinned at 64 -- which is where short observations get a
+    near-linear speedup, since raw node evals dominate the cost.
+    """
+    return int(np.clip(round(base * nt * Nf * dt / 86400.0 / 365.25), 4, 256))
 
 
 def make_refs(n):
@@ -179,12 +212,46 @@ def main():
             for n in ENGINES[1:]))
     err = err_nt[speed_nt]
 
+    # ---- persist BOTH axes, not just the figure ------------------------
+    # speed_rows : (nt, batch, engine_index, us_per_candidate)
+    # err_rows   : (nt, engine_index, tier, error)  -- every measurement,
+    #              so the accuracy claims are reproducible from the file
+    #              alone and can be re-binned without re-running.
+    speed_rows = np.array([[nt, nb, ENGINES.index(n), speed[(nt, nb, n)]]
+                           for nt in nt_list for nb in batches
+                           for n in ENGINES], dtype=float)
+    err_rows = np.array(
+        [[nt, ENGINES.index(n), T, e]
+         for nt in nt_list for n in ENGINES[1:] for T in tiers
+         for e in err_nt[nt][n][T]], dtype=float) if err_nt else np.zeros((0, 4))
     np.savez(os.path.join(out_dir, "proof_figure.npz"),
-             speed=np.array([[nt, nb, ENGINES.index(n), speed[(nt, nb, n)]]
-                             for nt in nt_list for nb in batches
-                             for n in ENGINES]),
+             speed=speed_rows, err=err_rows, engines=np.array(ENGINES),
              tiers=np.array(tiers), nt_list=np.array(nt_list),
              batches=np.array(batches))
+
+    # ---- printed accuracy table (the log carries the numbers too) -------
+    print("\n[ACCURACY] worst / median |dlnL| vs the chunked reference"
+          "   (allowed = max(0.1, T/100))")
+    hdr = "  Tobs[yr] engine     " + "".join(f"{('T=' + str(int(T))):>18s}"
+                                             for T in tiers)
+    print(hdr)
+    for nt in nt_list:
+        for n in ENGINES[1:]:
+            cells = ""
+            for T in tiers:
+                v = err_nt[nt][n][T]
+                if v:
+                    ok = "OK " if max(v) <= max(0.1, T / 100.0) else "OVER"
+                    cells += f"{max(v):8.2e}/{np.median(v):7.1e}{ok:>3s}"
+                else:
+                    cells += f"{'--':>18s}"
+            print(f"  {meta[nt]['Tobs_d']/365.25:7.2f}  {n:10s}{cells}")
+    print("\n[SPEED] us/candidate at batch " + str(batches[-1]))
+    print("  Tobs[yr] " + "".join(f"{n:>12s}" for n in ENGINES))
+    for nt in nt_list:
+        print(f"  {meta[nt]['Tobs_d']/365.25:7.2f} "
+              + "".join(f"{speed[(nt, batches[-1], n)]:12.1f}"
+                        for n in ENGINES))
     make_figure(out_dir, nt_list, batches, speed_nt, tiers, speed, err,
                 err_nt, shmem, occ, meta, nr, knots, band)
 
@@ -301,7 +368,8 @@ def make_figure(out_dir, nt_list, batches, speed_nt, tiers, speed, err,
     ax = fig.add_subplot(gs[0, 0]); style(ax)
     for n in ENGINES:
         y = [speed[(nt, nb_ref, n)] for nt in nt_list]
-        ax.plot(tobs, y, marker=MRK[n], color=CLR[n], lw=2, ms=7, label=n)
+        ax.plot(tobs, y, marker=MRK[n], color=CLR[n], lw=2, ms=7,
+                ls=LS.get(n, "-"), label=n)
         ax.annotate(f"{y[-1]:.0f}", (tobs[-1], y[-1]), color=INK,
                     fontsize=8, xytext=(6, 0), textcoords="offset points",
                     va="center")
@@ -317,7 +385,8 @@ def make_figure(out_dir, nt_list, batches, speed_nt, tiers, speed, err,
     for n in ENGINES[1:]:
         y = [speed[(nt, nb_ref, "chunked")] / speed[(nt, nb_ref, n)]
              for nt in nt_list]
-        ax.plot(tobs, y, marker=MRK[n], color=CLR[n], lw=2, ms=7, label=n)
+        ax.plot(tobs, y, marker=MRK[n], color=CLR[n], lw=2, ms=7,
+                ls=LS.get(n, "-"), label=n)
         ax.annotate(f"{y[-1]:.0f}$\\times$", (tobs[-1], y[-1]), color=INK,
                     fontsize=8, xytext=(6, 0), textcoords="offset points",
                     va="center")
@@ -338,7 +407,8 @@ def make_figure(out_dir, nt_list, batches, speed_nt, tiers, speed, err,
     for n in ENGINES[1:]:
         med = [np.median(err[n][T]) if err[n][T] else np.nan for T in tiers]
         wor = [np.max(err[n][T]) if err[n][T] else np.nan for T in tiers]
-        ax.plot(tiers, med, marker=MRK[n], color=CLR[n], lw=2, ms=6, label=n)
+        ax.plot(tiers, med, marker=MRK[n], color=CLR[n], lw=2, ms=6,
+                ls=LS.get(n, "-"), label=n)
         ax.plot(tiers, wor, color=CLR[n], lw=1, ls=":", alpha=0.8)
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("true $|\\Delta\\ln L|$ from reference,  T")
@@ -376,8 +446,8 @@ def make_figure(out_dir, nt_list, batches, speed_nt, tiers, speed, err,
     for n in ENGINES:
         y = np.array([speed[(speed_nt, nb, n)] for nb in batches], float)
         eff = np.nanmin(y) / y                      # 1.0 = saturated
-        ax.plot(batches, 100 * eff, marker=MRK[n], color=CLR[n], lw=2, ms=7,
-                label=n)
+        ax.plot(batches, 100 * eff, marker=MRK[n], color=CLR[n], lw=2,
+                ms=7, ls=LS.get(n, "-"), label=n)
         sat = next((b for b, e in zip(batches, eff) if e >= 0.95), None)
         if sat is not None:
             ax.axvline(sat, color=CLR[n], lw=0.8, ls=":", alpha=0.5)
