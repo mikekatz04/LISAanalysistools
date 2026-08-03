@@ -186,7 +186,8 @@ def make_scaffold(backend="cpu", *, v3_n_nodes=64, v4_knots=128,
     print(f"[shmem] device limit {lim/1024:.0f} KB | make_reference "
           f"{shb/1024:.0f} KB | N_sparse_t={nsp_est}: v3 {b3/1024:.0f} KB, "
           f"v4-pcr {b4/1024:.0f} KB, v4-band {b4b/1024:.0f} KB "
-          f"({'OK' if max(b3, b4, b4b) <= lim else 'TOO BIG'})")
+          + ("" if not gpu else
+             f" ({'OK' if max(b3, b4, b4b) <= lim else 'TOO BIG'})"))
     t_start = int(0.5 * YRSID_SI / dt) * dt
     orbits = ESAOrbits(force_backend=backend)
     wdm_set = WDMSettings(Nf, Nt, dt, t0=t_start, min_freq=1e-4,

@@ -142,7 +142,8 @@ def build(nt, nr, knots, band):
     print(f"[shmem] device limit {lim/1024:.0f} KB | make_reference "
           f"{shb/1024:.0f} KB | N_sparse_t={nsp_est}: v3 {b3/1024:.0f} KB, "
           f"v4-pcr {b4/1024:.0f} KB, v4-band {b4b/1024:.0f} KB "
-          f"({'OK' if max(b3, b4, b4b) <= lim else 'TOO BIG'})")
+          + ("" if not USE_GPU else
+             f" ({'OK' if max(b3, b4, b4b) <= lim else 'TOO BIG'})"))
     orbits = ESAOrbits(force_backend=BACKEND)
     ws = WDMSettings(Nf, nt, dt, t0=t0, min_freq=1e-4, max_freq=2e-2,
                      min_time=edge * Nf * dt, max_time=(nt - edge) * Nf * dt,
