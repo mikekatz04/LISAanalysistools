@@ -150,6 +150,22 @@ class VGBSettings(GBSettings):
     sighet_v3_nodes: int = dataclasses.field(
         default_factory=env_default("SIGHET_V3_NODES", 0, int)
     )
+    # Signal-het V4: the fitted ratio is resampled onto ``sighet_v4_knots``
+    # FIXED, candidate-independent knots as linear complex values before the
+    # pixel-time evaluation -- the representation that makes the fold a fixed
+    # linear operator.  0 = off (v3/v2 path).  128 is the measured-converged
+    # value; 64 is lossy, 256 buys nothing.  Requires sighet_v3_nodes > 0
+    # (v4 reuses the v3 node fit).
+    sighet_v4_knots: int = dataclasses.field(
+        default_factory=env_default("SIGHET_V4_KNOTS", 0, int)
+    )
+    # V4 evaluation mode: 0 = cooperative fixed-knot spline solve (PCR on
+    # GPU); >0 = precomputed cardinal weights with this half-band -- no
+    # solve, no block syncs, ~18 KB less shared memory.  Banded and PCR agree
+    # to 1e-11 relative at half-band 16 and banded is never slower.
+    sighet_v4_band: int = dataclasses.field(
+        default_factory=env_default("SIGHET_V4_BAND", 0, int)
+    )
     # (nleaves, 3) per-leaf fixed [f0 (mHz), alpha, sin_delta] in SAMPLING
     # units, ordered like VGB_FIXED_BASIS; feeds the per-leaf fill list.
     fixed_params: typing.Optional[typing.Any] = None
