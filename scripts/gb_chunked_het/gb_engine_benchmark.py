@@ -248,18 +248,25 @@ def build(nt, Nf, nr, knots, band, quiet=False):
     # OVERLAP that compute_chunk_geometry's partial-slide case already trims
     # via keep_lo/keep_hi -- the same machinery the GPU path uses. Kept
     # pixels then sum to exactly Nt: no double-count, no gap.
-    # CPU_NT_SUB_MAX: Nt_sub=8192 SEGFAULTS the CPU chunk kernel (measured on
-    # the cluster: 4096 fine at Nt=2160, 8192 dies in the first
-    # fill_global_wdm at Nt=4320, and an 8192 override died at Nt=540 too --
-    # so the limit is the ABSOLUTE size, not the overhang). 4096 is the
-    # largest size proven to work. Capping costs one extra chunk at Nt=8640
-    # (3 instead of 2, 1.42x vs 1.90x computed) and nothing anywhere else,
-    # since the floor power of two is already <= 4096 for Nt <= 4320.
+    # CPU_NT_SUB_MAX = FAST_WDM_NT_SUB_MAX, the CPU compile-time cap in
+    # lisatools/cutils/lat_chunked_het_kernels.hh. On the CPU branch the
+    # kernel's "shared" buffers are STACK arrays sized at that maximum
+    # (layer_buf_cpu[NCHANNELS_MAX * NT_SUB_MAX]), and nothing checks Nt_sub
+    # against it -- so Nt_sub=8192 overruns the stack and segfaults. That is
+    # the whole story behind the cluster crashes: absolute size, not overhang.
+    #
+    # Take the CEILING power of two, capped there. Ceiling gives ONE chunk
+    # wherever it fits, and one chunk is measurably faster than two of half
+    # the size even though the computed span is identical -- per-chunk fixed
+    # cost is real on CPU, where chunks are a sequential loop. Measured at
+    # Nt=540, batch 32: Nt_sub=1024 (1 chunk) 4848 us vs Nt_sub=512
+    # (2 chunks) 8235 us, i.e. the floor variant was 1.70x SLOWER. The cap
+    # only binds for Nt > 4096, which then splits into 2 or 3 chunks.
     CPU_NT_SUB_MAX = 4096
     nt_sub = int(os.environ.get(
         "BENCH_NT_SUB",
         128 if USE_GPU
-        else min(1 << int(np.floor(np.log2(max(nt, 64)))), CPU_NT_SUB_MAX)))
+        else min(1 << int(np.ceil(np.log2(max(nt, 64)))), CPU_NT_SUB_MAX)))
     chunked = GBWDMComputations(
         ws, t_ref=t0, Nt_sub=nt_sub, n_pad=16, N_sparse=256, N_cp_sig=48,
         N_cp_orbit=32, orbits=orbits, tdi_config="2nd generation",
