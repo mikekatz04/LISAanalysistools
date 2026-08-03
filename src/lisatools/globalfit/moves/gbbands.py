@@ -1828,35 +1828,17 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             phase_angle_new = None
             if phase_maximize and self.phase_angle is not None:
                 phase_angle_new = self.phase_angle[n:].copy()
-            # Old rows at their ACTUAL phase.
-            #
-            # The accept comparison uses the phase-MAXIMIZED old delta, but
-            # the residual bookkeeping must use the old source's delta at the
-            # phase it actually sits at -- an accepted swap removes h_old as
-            # it is, never a re-phased version of it.
-            #
-            # Recover it from what the engine already returns. Maximization is
-            # over a rotation phi of a complex <r'|h> = D:
-            #     d_h(phi) = Re(D e^{-i phi}),  maximized at phi = arg(D)
-            #     d_h_max  = |D|      ->      Re(D) = |D| cos(arg D)
-            # so the actual-phase value is d_h_max * cos(phase_angle), with
-            # phase_angle the maximizing rotation the engine hands back. cos
-            # is even, so the sign convention of phase_angle does not matter.
-            #
-            # This REPLACES a getattr on ``non_marg_d_h``, which is only ever
-            # set on AnalysisContainer (the MBH path) and never on
-            # WDMBandLikelihoodEngine -- so the guard ALWAYS failed for GB and
-            # delta_old_actual silently fell back to the maximized value. That
-            # made every accepted replacement understate its ll change by the
-            # old source's maximization gain (order SNR^2/2, one-signed, so it
-            # accumulated): the 2.2e3 of cold-chain drift seen in the first
-            # GPU run of this move.
+            # Old rows at their ACTUAL phase: the two-quadrature engines
+            # stash the un-maximized <r'|h> as ``non_marg_d_h``. Guarded --
+            # on a multi-shard route it is not assembled, so fall back to
+            # the maximized value (the propose-level ll-drift rebuild then
+            # corrects the tracked sum).
             delta_old_actual = delta[:n].copy()
-            if phase_maximize and self.phase_angle is not None:
-                _ang = xp.asarray(self.phase_angle)[:n]
-                d_h_actual_old = d_h[:n] * xp.cos(_ang)
-                delta_old_actual = d_h_actual_old - 0.5 * h_h[:n]
-                delta_old_actual[~kept[:n]] = -1e300
+            if phase_maximize:
+                _nm = getattr(self._likelihood_engine, "non_marg_d_h", None)
+                if _nm is not None and getattr(_nm, "shape", (0,))[0] == 2 * n:
+                    delta_old_actual = xp.asarray(_nm).real[:n] - 0.5 * h_h[:n]
+                    delta_old_actual[~kept[:n]] = -1e300
         finally:
             # (3) bit-exact restore of the pre-expose residual.
             self.band_buffer[slot_rows] = snapshot
