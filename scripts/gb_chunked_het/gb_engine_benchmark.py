@@ -236,6 +236,26 @@ def build(nt, Nf, nr, knots, band, quiet=False):
     return ws, chunked, engines, Nf, dt, t0, nsp, nt_layer, nr_t
 
 
+
+def make_invC(ws, xp, model=None):
+    """PHYSICAL inverse sensitivity, so likelihoods are in real lnL units.
+
+    An identity weighting makes d_h/h_h raw waveform quantities (~1e-39 for
+    a 1e-22 source), which silently defeats every absolute lnL threshold --
+    the tier placement then finds no displacement that moves the likelihood
+    by 0.05 and reports no accuracy at all.  Use the analytic XYZ
+    sensitivity unless explicitly overridden (BENCH_PSD=identity for a pure
+    timing run).
+    """
+    model = model or os.environ.get("BENCH_PSD", "scirdv1")
+    if model == "identity":
+        return None            # caller falls back to identity weighting
+    from lisatools.sensitivity import XYZ2SensitivityMatrix
+    return xp.asarray(np.ascontiguousarray(
+        np.asarray(XYZ2SensitivityMatrix(ws, model=model).invC),
+        dtype=np.float64))
+
+
 def make_refs(n):
     rng = np.random.default_rng(19)
     return [np.array([
@@ -405,9 +425,12 @@ def main():
         chunked.fill_global_wdm(xp.asarray(ref0)[None, :], href,
                                 convert_to_ra_dec=False)
         h_act = xp.ascontiguousarray(href[:, ilo:ihi, ws.active_slice_t])
-        invC = xp.zeros((3, 3) + h_act.shape[1:])
-        for c in range(3):
-            invC[c, c] = 1.0
+        invC_phys = make_invC(ws, xp)
+        invC = invC_phys
+        if invC is None:
+            invC = xp.zeros((3, 3) + h_act.shape[1:])
+            for c in range(3):
+                invC[c, c] = 1.0
         holder = Holder(xp, h_act, invC)
 
         # ---- speed AND accuracy from the SAME calls ---------------------
@@ -426,9 +449,11 @@ def main():
             chunked.fill_global_wdm(xp.asarray(ref)[None, :], hr,
                                     convert_to_ra_dec=False)
             ha = xp.ascontiguousarray(hr[:, ilo:ihi, ws.active_slice_t])
-            iC = xp.zeros((3, 3) + ha.shape[1:])
-            for c in range(3):
-                iC[c, c] = 1.0
+            iC = invC_phys
+            if iC is None:
+                iC = xp.zeros((3, 3) + ha.shape[1:])
+                for c in range(3):
+                    iC[c, c] = 1.0
             hold_r = Holder(xp, ha, iC)
             engc_r = WDMBandLikelihoodEngine(chunked, ws, nchannels=3,
                                              tdi_channel_setup="XYZ")
