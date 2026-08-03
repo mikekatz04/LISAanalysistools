@@ -251,9 +251,14 @@ def make_invC(ws, xp, model=None):
     if model == "identity":
         return None            # caller falls back to identity weighting
     from lisatools.sensitivity import XYZ2SensitivityMatrix
-    return xp.asarray(np.ascontiguousarray(
-        np.asarray(XYZ2SensitivityMatrix(ws, model=model).invC),
-        dtype=np.float64))
+    inv = XYZ2SensitivityMatrix(ws, model=model).invC
+    # invC already lives on the settings' own backend: cupy under CUDA,
+    # numpy on CPU. Only move it when the two disagree -- cupy refuses an
+    # implicit host conversion, and xp.asarray on a matching module is a
+    # no-op rather than a copy.
+    if xp is np and hasattr(inv, "get"):
+        inv = inv.get()
+    return xp.ascontiguousarray(xp.asarray(inv, dtype=xp.float64))
 
 
 def make_refs(n):
