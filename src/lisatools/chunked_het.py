@@ -162,6 +162,12 @@ class WDMComputationsBase(LISAToolsParallelModule):
             f"N_sparse={self.N_sparse} must be a power of two.")
         assert 2 ** self.log2_Nt_sub == self.Nt_sub, (
             f"Nt_sub={self.Nt_sub} must be a power of two.")
+        # NOTE: this power-of-two requirement, combined with Nt never being
+        # one, is what forces every uniform chunking to compute ~1.9x the
+        # pixels actually needed on CPU. See the "CPU two-size chunks" TODO
+        # above compute_chunk_geometry in wdm_het.py for the fix (one big +
+        # one remainder-sized chunk -> 1.007x) and for why the GPU path
+        # should keep uniform sizing.
 
         # ``d_d`` constant the source-side likelihood adds to
         # ``h_h - 2 d_h``. Defaults to 0 -> source-only.

@@ -91,6 +91,62 @@ def resolve_tukey_alpha(tukey_alpha, use_tukey, path, N_sparse=None):
 # Chunk geometry + WDM window
 # ----------------------------------------------------------------------
 
+# TODO(CPU two-size chunks, 2026-08-03): allow the chunk transform to use
+# TWO Nt_sub sizes instead of one, to stop paying ~1.9x the necessary work
+# on CPU.
+#
+# THE PROBLEM. Nt_sub must be a power of two (radix-2 FFT; asserted in
+# chunked_het.ChunkedHetBase) and Nt essentially never is, so a uniform
+# Nt_sub leaves only two bad options:
+#
+#   ceil power of two  -> ONE chunk, but it overhangs the data by up to
+#                         1.9x (7744 pixels past the end at Nt=8640).
+#                         Reads past the buffer; segfaults on some builds.
+#   floor power of two -> TWO chunks, no overhang, but the second chunk is
+#                         full-size to cover a small remainder, so the
+#                         interior overlap is enormous: 2 x 8192 = 16384
+#                         pixels computed for the 8640 actually needed.
+#
+# Both land at 1.896x the required work at EVERY baseline (verified for
+# Nt = 540 / 1080 / 2160 / 4320 / 8640).
+#
+# THE FIX. Size the last chunk to the remainder instead of to the first
+# chunk: one big power-of-two covering the bulk, plus one SMALL power of
+# two covering (Nt - big + n_pad) -- the leftover plus a single halo so
+# the stitch still overlaps. Measured cost:
+#
+#     Nt     big   small   computed   vs Nt      uniform   vs Nt
+#    540     512      64        576   1.067x        1024   1.896x
+#   1080    1024     128       1152   1.067x        2048   1.896x
+#   2160    2048     128       2176   1.007x        4096   1.896x
+#   4320    4096     256       4352   1.007x        8192   1.896x
+#   8640    8192     512       8704   1.007x       16384   1.896x
+#
+# i.e. ~1.9x less transform work, and the two-size split generalises to a
+# per-chunk size array if a future geometry wants more than two.
+#
+# WHAT IT TOUCHES. Nt_sub is scalar today and the window is built once for
+# it (compute_wdm_window(Nf, Nt_sub, dt) -> length tied to Nt_sub). Two
+# sizes needs: a per-chunk Nt_sub array alongside starts/keep_lo/keep_hi,
+# one window per DISTINCT size (two arrays, not n_chunks), and the kernel
+# selecting window + transform length per chunk. keep_lo/keep_hi already
+# express arbitrary per-chunk trimming, so the stitching logic itself does
+# not change -- this is a sizing change, not a correctness change.
+#
+# WHY CPU SPECIFICALLY. On GPU the chunks ARE the parallel decomposition:
+# they map to CUDA blocks (grid_dim defaults to n_chunks), so redundant
+# span is hidden by concurrency and uniform sizing keeps the launch
+# regular -- leave the GPU path alone. On CPU the chunks are a sequential
+# loop, so every redundant pixel is wall-clock.
+#
+# INTERIM. A uniform Nt_sub sweep already recovers much of it, and the
+# optimum is NOT the largest size: at Nt=8640, Nt_sub=512 computes 9216
+# pixels (1.07x) across 18 chunks vs 16384 (1.90x) for two 8192 chunks.
+# That trades transform waste for per-chunk fixed cost, which is why it
+# should be measured (scripts/gb_chunked_het/gb_engine_benchmark.py,
+# BENCH_NT_SUB) rather than modelled. The two-size split gets the same
+# 1.007x with only TWO chunks, so it dominates the sweep once implemented.
+
 def compute_chunk_geometry(Nt, Nt_sub, n_pad):
     """Pre-compute per-chunk stitching geometry for the het kernels.
 
