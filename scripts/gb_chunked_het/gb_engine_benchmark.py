@@ -276,6 +276,28 @@ def build(nt, Nf, nr, knots, band, quiet=False):
                                       v4_band=band)}
     engines = {n: f() for n, f in builders.items() if n in ENGINES}
     nsp = next(iter(engines.values()))._g["N_sparse_t"]
+
+    # Drop engines whose scorer cannot fit this device's shared memory.
+    # Without this the kernel launches anyway and dies on
+    # "GPUassert: invalid argument" inside the .cu, which reads like a bug in
+    # the engine rather than a grid that was simply set too fine -- and it
+    # takes the whole sweep down with it. An explicit skip keeps the engines
+    # that DO fit measurable, which is the entire point of a grid override.
+    if USE_GPU:
+        lim = device_shared_limit()
+        need = {"v2": v2_shared_bytes(3, 2, nt_layer, nsp, 512),
+                "v3": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, False),
+                "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
+                "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True)}
+        for n in [k for k in engines if need.get(k, 0) > lim]:
+            print(f"  [skip] {n}: scorer needs {need[n]/1024:.0f} KB > "
+                  f"{lim/1024:.0f} KB device limit at N_sparse_t={nsp} "
+                  f"(nt_layer={nt_layer}). Lower BENCH_NTL to include it.")
+            engines.pop(n)
+        if not engines:
+            raise RuntimeError(
+                f"no sig-het engine fits {lim/1024:.0f} KB at "
+                f"N_sparse_t={nsp}; lower BENCH_NTL")
     if not quiet:
         lim = device_shared_limit()
         b = {k: v for k, v in {
@@ -543,6 +565,9 @@ def main():
                 kw = dict(data_index=z, noise_index=z, N_vals=None,
                           waveform_kwargs={})
                 for name in ENGINES:
+                    if name not in eng_of:      # skipped: exceeds shared mem
+                        speed[(nt, nb, name)] = np.nan
+                        continue
                     try:
                         us, dv, dr = timed_and_scored(eng_of[name], hold_r,
                                                       batch, kw, reps)
@@ -554,20 +579,39 @@ def main():
                     drift_max = max(drift_max, dr)
                     if ri == 0:
                         speed[(nt, nb, name)] = us
-                    # Accuracy from the FIRST batch this engine scores
-                    # successfully. The arithmetic is identical at every
-                    # batch, so one sample suffices -- but keying it to the
-                    # largest batch loses accuracy entirely whenever an
-                    # engine cannot run there (memory), which is exactly
-                    # how a whole column turns into NaN.
-                    if name != "chunked" and not scored.get((ri, name)):
-                        scored[(ri, name)] = True
+                    # Accuracy from the first batch this engine scores that
+                    # actually CONTAINS tier rows. The arithmetic is identical
+                    # at every batch, so one sample suffices -- but keying it
+                    # to the largest batch loses accuracy entirely whenever an
+                    # engine cannot run there (memory), which is exactly how a
+                    # whole column turns into NaN.
+                    #
+                    # The flag must be set only once a sample is really taken.
+                    # pad_batch TRUNCATES when nb < len(rows), so a batch
+                    # smaller than the tier count carries only row 0 (the
+                    # reference) and the loop below is empty -- marking the
+                    # engine scored there would silently forfeit accuracy for
+                    # this reference at every LARGER batch too. That is what
+                    # emptied every accuracy column as soon as BENCH_BATCHES
+                    # started at 1 instead of 256.
+                    if name != "chunked":
                         base = dv[0]
-                        for k in range(1, min(n_acc, len(dv))):
+                        # scored[] holds the number of tier rows ALREADY
+                        # recorded for this (reference, engine), starting at 1
+                        # because row 0 is the reference itself. Batches are
+                        # ascending and pad_batch truncates, so a small batch
+                        # carries only the first few tier rows; picking up
+                        # where the last batch stopped accumulates the full
+                        # set without ever double-counting a row.
+                        start = scored.get((ri, name), 1)
+                        stop = min(n_acc, len(dv))
+                        for k in range(start, stop):
                             T = min(tiers,
                                     key=lambda t: abs(t - abs(trueT[k])))
                             err_nt[nt][name][T].append(
                                 abs((dv[k] - base) - trueT[k]))
+                        if stop > start:
+                            scored[(ri, name)] = stop
                 if ri == 0:
                     print("[speed] batch %6d: " % nb + " ".join(
                         f"{n}={speed[(nt, nb, n)]:.1f}" for n in ENGINES)
@@ -801,7 +845,11 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
     for n in ENGINES:
         ax.plot(yrs, [speed[(nt, nb, n)] for nt in nts], marker=MRK[n],
                 color=CLR[n], lw=2, ms=7, ls=LS[n], label=n)
-    ax.set_yscale("log"); ax.set_xlabel("observation time [yr]")
+    # logsafe, not a bare set_yscale: an engine that could not run leaves an
+    # all-NaN column, and matplotlib only raises "cannot be log-scaled" at
+    # savefig -- which throws away the whole figure for one empty panel.
+    logsafe(ax, "y")
+    ax.set_xlabel("observation time [yr]")
     ax.set_ylabel("per-candidate cost [$\\mu$s]")
     ax.set_title("A · cost vs baseline", fontsize=10, loc="left")
     ax.legend(frameon=False, fontsize=7.5, labelcolor=INK2, ncol=2)
@@ -911,6 +959,22 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
     ax.set_xticklabels(names, fontsize=8, color=INK2)
     ax.set_ylabel("scorer shared memory [KB]")
     ax.set_title("H · what limits the grid", fontsize=10, loc="left")
+
+    # Global log-scale guard. logsafe() only inspects ax.get_lines(), so a
+    # panel drawn with bar/scatter (or one whose series are all NaN) can still
+    # be left log-scaled with nothing positive on it -- and matplotlib does
+    # not complain until savefig, which then discards the ENTIRE figure over
+    # one empty panel. Walk every axis and drop log scaling wherever no
+    # positive data exists.
+    for _ax in fig.get_axes():
+        for _axis, _get, _set in (("x", _ax.get_xscale, _ax.set_xscale),
+                                  ("y", _ax.get_yscale, _ax.set_yscale)):
+            if _get() != "log":
+                continue
+            lim = _ax.dataLim
+            vals = ([lim.x0, lim.x1] if _axis == "x" else [lim.y0, lim.y1])
+            if not any(np.isfinite(v) and v > 0 for v in vals):
+                _set("linear")
 
     fig.suptitle("GB likelihood engines — accuracy and speed, one measurement",
                  fontsize=15, color=INK, x=0.05, ha="left", y=0.962)
