@@ -1522,6 +1522,40 @@ def subtract_gb_neighbors_from_data(
     exclude_f0_lims)`` so injected leaves and subtracted neighbors are
     disjoint (a source must never be modeled AND pre-subtracted).
     """
+    # TODO(verify GB_SUBTRACT_OUT_OF_BAND, 2026-08-03): this path has never
+    # been confirmed to work end to end in a real run. Three things are open.
+    #
+    # 1. IS IT STILL SLOW? The f0 pre-filter below took the basis conversion
+    #    from 11.3 s (15,539,324 catalogue sources, ~2.1 GB of temporaries)
+    #    to 0.13 s (the 422 that land in an 8-layer window around 6.25-7.78
+    #    mHz) with bit-identical output. But 11 s alone never explained the
+    #    reported slowness, so the fix may not be the whole story. Remaining
+    #    suspects, in order: the ~3 GB catalogue LOAD itself (upstream of
+    #    here, and possibly repeated); memory pressure on a node already
+    #    holding the catalogue plus a GPU pool; and gather/scatter of the
+    #    residual on multi-shard holders, where the gather is a real copy.
+    #    Time this function directly before optimising anything else.
+    #
+    # 2. DOES IT ACTUALLY REMOVE THE FLOOR? The motivating measurement was a
+    #    -40,694 residual floor from out-of-band neighbours plus -1,577 of
+    #    edge leakage (the latter is what set GB_SUBTRACT_BUFFER_LAYERS=8).
+    #    The check is cheap and immediate: the run's INITIAL log-likelihood
+    #    at zero leaves should drop noticeably versus the same run with the
+    #    flag off (-107,217 on the 6.11-7.92 mHz, 90 d configuration). If it
+    #    does not move, the window caught nothing useful -- compare the
+    #    "-> %d to subtract" count against the catalogue f0 range in the same
+    #    log line before concluding the subtraction itself is at fault.
+    #
+    # 3. DOES IT FIX THE REPLACE MOVE? The hypothesis this was reached for:
+    #    rj_replace draws a candidate anywhere in the band and phase-maximises
+    #    it against the EXPOSED residual, so unmodelled neighbour power is
+    #    something a draw can latch onto, scoring a delta the accept path
+    #    cannot reproduce. A separate ledger bug in get_replace_ll has since
+    #    been fixed (gbbands.py, the delta_old_actual phase recovery), so
+    #    these two must be tested SEPARATELY or neither conclusion is clean.
+    #
+    # Until (1) and (2) are answered, treat this flag as unvalidated rather
+    # than merely slow.
     catalogue = getattr(curr.general_info, "catalogue", {}) or {}
     catalogue = catalogue.get(source_type, {})
     if not catalogue:
