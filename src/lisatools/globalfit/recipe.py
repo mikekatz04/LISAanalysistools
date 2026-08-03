@@ -1533,22 +1533,59 @@ def subtract_gb_neighbors_from_data(
     keys = sorted(catalogue.keys())
     conversion_func = globals().get(f"{branch_name}_catalogue_to_sampling_basis")
     trim_duration = curr.general_info.data_t0 - MOJITO_REFERENCE_TIME
-    sampling = np.array(
-        [conversion_func(catalogue[k], trim_duration=trim_duration) for k in keys]
-    )
-    if sampling.ndim == 3:
-        sampling = sampling.reshape(-1, sampling.shape[-1])
-
-    f0_hz = np.asarray(sampling[:, 1], dtype=float) * 1e-3
     lo, hi = float(exclude_f0_lims[0]), float(exclude_f0_lims[1])
-    mask = (((f0_hz >= lo - window_hz) & (f0_hz < lo))
-            | ((f0_hz > hi) & (f0_hz <= hi + window_hz)))
-    n_sub = int(mask.sum())
+
+    # PRE-FILTER on f0 BEFORE converting. Selection needs only f0, which the
+    # catalogue already carries in Hz as ``GW22FrequencySSBFrame`` -- there is
+    # no reason to run the basis conversion on sources about to be discarded.
+    # This previously converted the ENTIRE catalogue and masked afterwards,
+    # and since gb_catalogue_to_sampling_basis constructs a fresh
+    # TransformContainer on every call, that was one container build per
+    # catalogue source. It dominated build() badly enough to make
+    # GB_SUBTRACT_OUT_OF_BAND unusable on a full-band catalogue. Converting
+    # only the survivors makes the cost scale with the number of neighbours
+    # actually subtracted (hundreds) instead of the catalogue size.
+    def _in_window(f0_hz_arr):
+        return (((f0_hz_arr >= lo - window_hz) & (f0_hz_arr < lo))
+                | ((f0_hz_arr > hi) & (f0_hz_arr <= hi + window_hz)))
+
+    rows = []
+    n_total, f0_min, f0_max = 0, np.inf, -np.inf
+    for k in keys:
+        entry = catalogue[k]
+        f0_entry = np.atleast_1d(
+            np.asarray(entry["GW22FrequencySSBFrame"], dtype=float))
+        n_total += int(f0_entry.size)
+        f0_min = min(f0_min, float(f0_entry.min()))
+        f0_max = max(f0_max, float(f0_entry.max()))
+        hit = _in_window(f0_entry)
+        if not bool(hit.any()):
+            continue
+        # Sub-select the ENTRY, not the converted rows. A mojito GB catalogue
+        # is a SINGLE key holding parallel arrays of ~1.5e7 sources, so
+        # converting the whole entry and slicing afterwards would still pay
+        # the full cost. Every per-source array (length == f0_entry.size) is
+        # masked; scalars and anything else pass through untouched.
+        sub = {
+            kk: (np.asarray(vv)[hit]
+                 if np.ndim(vv) >= 1 and np.shape(vv)[0] == f0_entry.size
+                 else vv)
+            for kk, vv in entry.items()
+        }
+        conv = np.asarray(conversion_func(sub, trim_duration=trim_duration))
+        rows.append(conv.reshape(-1, conv.shape[-1]))
+
+    sampling = (np.concatenate(rows, axis=0) if rows
+                else np.zeros((0, 8), dtype=float))
+    n_sub = int(sampling.shape[0])
+    # Every retained row is in-window by construction, so the downstream
+    # ``sampling[mask]`` is a no-op kept for readability.
+    mask = np.ones(n_sub, dtype=bool)
     logger.info(
         "Neighbor subtraction: catalogue f0 [%.6e, %.6e] Hz (%d sources); "
-        "window [%.6e, %.6e] Hz -> %d to subtract.",
-        float(f0_hz.min()), float(f0_hz.max()), len(f0_hz),
-        lo - window_hz, hi + window_hz, n_sub,
+        "window [%.6e, %.6e] Hz -> %d to subtract (converted %d of %d).",
+        f0_min, f0_max, n_total,
+        lo - window_hz, hi + window_hz, n_sub, n_sub, n_total,
     )
     if n_sub == 0:
         logger.info("Neighbor subtraction: no catalogue sources in the "
