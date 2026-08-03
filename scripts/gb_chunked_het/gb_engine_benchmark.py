@@ -534,6 +534,20 @@ def main():
             for nr_i in nr_ladder(nt, Nf, dt, base=nr):
                 for K_i in (max(64, knots // 2), knots, min(512, knots * 2)):
                     for band_i in (0, band):
+                        # A config whose scorer exceeds the device's shared
+                        # memory aborts the PROCESS (GPUassert), not the
+                        # Python call -- the grid was sized for the default
+                        # nodes/knots, so a larger frontier point must be
+                        # skipped BEFORE it is launched.
+                        need = sighet_shared_bytes(nr_i, K_i, 3, 2, nsp,
+                                                   band_i, v4=True)
+                        lim_i = device_shared_limit()
+                        if USE_GPU and need > lim_i:
+                            print(f"[set  ] nr={nr_i:3d} K={K_i:3d} "
+                                  f"{'band' if band_i else 'pcr ':>4s}: "
+                                  f"SKIP -- needs {need/1024:.0f} KB > "
+                                  f"{lim_i/1024:.0f} KB")
+                            continue
                         try:
                             sh = GBSignalHetComputations.for_band_engine(
                                 chunked, n_sparse_fd=512, n_cp_build=93,
