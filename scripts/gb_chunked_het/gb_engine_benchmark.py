@@ -419,6 +419,7 @@ def main():
         engc = WDMBandLikelihoodEngine(chunked, ws, nchannels=3,
                                        tdi_channel_setup="XYZ")
         err_nt[nt] = {n: {T: [] for T in tiers} for n in ENGINES[1:]}
+        scored = {}          # (ref index, engine) -> accuracy already taken
         drift_max = 0.0
         for ri, ref in enumerate(refs):
             hr = xp.zeros((3, Nf, nt))
@@ -450,18 +451,25 @@ def main():
                         us, dv, dr = timed_and_scored(eng_of[name], hold_r,
                                                       batch, kw, reps)
                     except Exception as exc:                 # noqa: BLE001
-                        print(f"  [{name}] nb={nb} FAILED: {exc}")
+                        print(f"  [{name}] nb={nb} FAILED: "
+                              f"{type(exc).__name__}: {exc}")
                         speed[(nt, nb, name)] = np.nan
                         continue
                     drift_max = max(drift_max, dr)
                     if ri == 0:
                         speed[(nt, nb, name)] = us
-                    # accuracy from the largest batch only (identical
-                    # arithmetic at every batch; one sample is enough)
-                    if nb == batches[-1] and name != "chunked":
+                    # Accuracy from the FIRST batch this engine scores
+                    # successfully. The arithmetic is identical at every
+                    # batch, so one sample suffices -- but keying it to the
+                    # largest batch loses accuracy entirely whenever an
+                    # engine cannot run there (memory), which is exactly
+                    # how a whole column turns into NaN.
+                    if name != "chunked" and not scored.get((ri, name)):
+                        scored[(ri, name)] = True
                         base = dv[0]
                         for k in range(1, min(n_acc, len(dv))):
-                            T = min(tiers, key=lambda t: abs(t - abs(trueT[k])))
+                            T = min(tiers,
+                                    key=lambda t: abs(t - abs(trueT[k])))
                             err_nt[nt][name][T].append(
                                 abs((dv[k] - base) - trueT[k]))
                 if ri == 0:
@@ -471,6 +479,14 @@ def main():
         print(f"[verify] max |first-call - last-call| over every timed "
               f"loop = {drift_max:.3e}  "
               f"({'OK: timed == scored' if drift_max == 0.0 else 'NONZERO -- timing and accuracy are NOT the same call'})")
+        nsamp = {n: sum(len(v) for v in err_nt[nt][n].values())
+                 for n in ENGINES[1:]}
+        print("[acc  ] samples/engine: " + " ".join(
+            f"{n}={nsamp[n]}" for n in ENGINES[1:]))
+        if not any(nsamp.values()):
+            print("  [warn] NO accuracy samples at this baseline -- either no "
+                  "tier candidate could be placed, or every engine failed to "
+                  "score. The speed columns are still valid.")
         print("[acc  ] worst |dlnL| @T=%d: " % T_rep + " ".join(
             f"{n}={wm(err_nt[nt][n][T_rep])[0]:.2e}" for n in ENGINES[1:]))
 
