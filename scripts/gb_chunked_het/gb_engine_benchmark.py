@@ -227,15 +227,22 @@ def build(nt, Nf, nr, knots, band, quiet=False):
                      force_backend=BACKEND)
     # chunked-het splits the baseline into Nt_sub blocks because a GPU block
     # must hold one chunk in shared memory. On CPU there is no such limit and
-    # the reference implementation does the whole transform in one go, so
-    # chunking there is pure overhead: Nt_sub=128 costs 6 chunks at 3 months
-    # rising to 90 at 4 years, each paying the per-chunk fixed cost and the
-    # n_pad halo (160 samples of work per 128 useful). Left in, it charges
-    # chunked-het an overhead that grows linearly with Tobs and inflates every
-    # sig-het speedup. Default: 128 on GPU, ONE whole chunk on CPU.
+    # chunking is pure overhead: the old hard-coded Nt_sub=128 cost 6 chunks
+    # at 3 months rising to 90 at 4 years, each paying per-chunk fixed cost
+    # plus the n_pad halo -- an overhead that GROWS WITH Tobs and so inflated
+    # both the level and the shape of the CPU curve.
+    #
+    # Nt_sub must be a power of two (radix-2 FFT, asserted in chunked_het),
+    # and Nt never is, so "one chunk" would mean Nt_sub = ceil-power-of-two:
+    # a chunk overhanging the data by up to 1.9x (7744 pixels past the end at
+    # Nt=8640). That segfaults. Take the FLOOR power of two instead: two
+    # chunks, ZERO pixels past the data, and the redundant span is interior
+    # OVERLAP that compute_chunk_geometry's partial-slide case already trims
+    # via keep_lo/keep_hi -- the same machinery the GPU path uses. Kept
+    # pixels then sum to exactly Nt: no double-count, no gap.
     nt_sub = int(os.environ.get(
         "BENCH_NT_SUB",
-        128 if USE_GPU else 1 << int(np.ceil(np.log2(max(nt, 2))))))
+        128 if USE_GPU else 1 << int(np.floor(np.log2(max(nt, 64))))))
     chunked = GBWDMComputations(
         ws, t_ref=t0, Nt_sub=nt_sub, n_pad=16, N_sparse=256, N_cp_sig=48,
         N_cp_orbit=32, orbits=orbits, tdi_config="2nd generation",
