@@ -2185,8 +2185,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Domain-symmetric through the fast computation objects:
         FD -> :meth:`GBFDComputations.information_matrix`,
-        WDM -> :meth:`GBWDMComputations.information_matrix` (both against the
-        parent inverse-covariance rows keyed by walker; the legacy
+        WDM -> :meth:`GBWDMComputations.information_matrix`,
+        STFT -> :meth:`STFTGBComputations.information_matrix` (all against
+        the parent inverse-covariance rows keyed by walker; the legacy
         SharedMemory ``gb.information_matrix`` path is retired).
 
         The Fisher comes back in PHYSICAL parameter space; it is mapped to
@@ -2206,26 +2207,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         walker_inds = band_sorter.walker_inds[ids].astype(xp.int32)
 
         if isinstance(self._basis_settings, STFTSettings):
-            # Interim STFT proposal shaping: STFTGBComputations has no
-            # information_matrix kernel yet, so return an identity Cholesky
-            # in the RESCALED sampling coordinates (y = x / s). Proposal
-            # shape only -- M-H corrects; the group-stretch half of
-            # in_model_proposal is unaffected. Native STFT Fisher is a
-            # documented follow-up.
-            s = xp.ones(ndim)
-            s[2] = self._fdot_scale
-            self._proposal_param_scales = s
-            if not getattr(self, "_stft_chol_warned", False):
-                logger.warning(
-                    f"{self.name}: STFT basis has no native information_matrix "
-                    "yet; using an identity proposal Cholesky (rescaled "
-                    "sampling coordinates). Gaussian in-model jumps are "
-                    "unshaped; group-stretch proposals are unaffected."
-                )
-                self._stft_chol_warned = True
-            return xp.repeat(xp.eye(ndim)[None, :, :], n_src, axis=0)
-
-        if isinstance(self._basis_settings, FDSettings):
+            info_phys = self.gb_stft_comp.information_matrix(
+                params_phys, model.analysis_container_arr,
+                inds=_test_inds, noise_index=walker_inds,
+            )
+        elif isinstance(self._basis_settings, FDSettings):
             info_phys = self.gb_fd_comp.information_matrix(
                 params_phys, model.analysis_container_arr,
                 inds=_test_inds, noise_index=walker_inds,
