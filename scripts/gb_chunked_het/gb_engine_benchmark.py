@@ -1,7 +1,7 @@
 """THE GB likelihood-engine benchmark: accuracy and speed, one run, one output.
 
 Single entry point.  Measures, in the same sweep and against the same
-reference, for chunked-het / sig-het v2 / v3 / v4-PCR / v4-banded / v4-tuned:
+reference, for chunked-het / sig-het v2 / v3 / v4-PCR / v4-banded:
 
   * per-candidate cost across an observation-time ladder and a batch sweep
   * tiered likelihood error at every observation time
@@ -64,17 +64,14 @@ from gbgpu.gb_likelihood import WDMBandLikelihoodEngine
 USE_GPU = os.environ.get("USE_GPU", "0") == "1"
 BACKEND = os.environ.get("GPU_BACKEND", "cuda12x") if USE_GPU else "cpu"
 
-ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band", "v4-tuned"]
+ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band"]
 # Categorical hues in FIXED order, CVD-validated (adjacent-pair dE >= 8 under
 # deuteranopia and protanopia).  Colour follows the ENGINE, never its rank;
-# v4-tuned is v4-banded at a different node count, so it shares that hue and
-# is distinguished by line style.
 CLR = {"chunked": "#666666", "v2": "#E69F00", "v3": "#0072B2",
-       "v4-pcr": "#009E73", "v4-band": "#D55E00", "v4-tuned": "#D55E00"}
+       "v4-pcr": "#009E73", "v4-band": "#D55E00"}
 MRK = {"chunked": "o", "v2": "s", "v3": "^", "v4-pcr": "D",
-       "v4-band": "v", "v4-tuned": "*"}
+       "v4-band": "v"}
 LS = {n: "-" for n in ENGINES}
-LS["v4-tuned"] = "--"
 RAMP = ["#c6dbef", "#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#08519c",
         "#08306b"]
 K_MRK = {64: "o", 128: "s", 256: "^", 512: "P"}
@@ -215,8 +212,6 @@ def build(nt, Nf, nr, knots, band, quiet=False):
                "v3": mk(v3_n_nodes=nr),
                "v4-pcr": mk(v3_n_nodes=nr, v4_knots=knots, v4_band=0),
                "v4-band": mk(v3_n_nodes=nr, v4_knots=knots, v4_band=band)}
-    nr_t = nr_law(nt, Nf, dt, base=nr)
-    engines["v4-tuned"] = mk(v3_n_nodes=nr_t, v4_knots=knots, v4_band=band)
     nsp = engines["v3"]._g["N_sparse_t"]
     if not quiet:
         lim = device_shared_limit()
@@ -232,8 +227,8 @@ def build(nt, Nf, nr, knots, band, quiet=False):
             f"{k} {v/1024:.0f}" for k, v in b.items())
             + (" KB  " + ("OK" if max(b.values()) <= lim else "TOO BIG")
                if USE_GPU else " KB"))
-        print(f"[nodes] n_r fixed={nr}, tuned={nr_t} (law: n ~ Tobs/yr)")
-    return ws, chunked, engines, Nf, dt, t0, nsp, nt_layer, nr_t
+        print(f"[nodes] n_r={nr}, K={knots}, half-band={band}")
+    return ws, chunked, engines, Nf, dt, t0, nsp, nt_layer
 
 
 
@@ -418,12 +413,12 @@ def main():
 
     for nt in nts:
         print(f"\n=== Nt={nt} " + "=" * 52)
-        ws, chunked, engs, Nf_, dt, t0, nsp, ntl, nr_t = build(
+        ws, chunked, engs, Nf_, dt, t0, nsp, ntl = build(
             nt, Nf, nr, knots, band)
         xp = chunked.xp
         ilo, ihi = ws.ind_min_f, ws.ind_max_f + 1
         meta[nt] = dict(Tobs_yr=nt * Nf * dt / 86400.0 / 365.25, nsp=nsp,
-                        ntl=ntl, nr_tuned=nr_t,
+                        ntl=ntl,
                         stride_h=max(1, nt // ntl) * Nf * dt / 3600.0)
         ref0 = np.array([1e-22, 7.5e-3, 1e-16, 0.0, 1.2, 0.9, 0.4, 2.0, 0.3])
         href = xp.zeros((3, Nf, nt))
@@ -446,6 +441,8 @@ def main():
         # timed calls reproduced the scored call exactly.
         engc = WDMBandLikelihoodEngine(chunked, ws, nchannels=3,
                                        tdi_channel_setup="XYZ")
+        ref_ctx = []          # (ref, holder, chunked engine) per reference,
+                              # reused by the settings frontier below
         err_nt[nt] = {n: {T: [] for T in tiers} for n in ENGINES[1:]}
         scored = {}          # (ref index, engine) -> accuracy already taken
         drift_max = 0.0
@@ -462,6 +459,7 @@ def main():
             hold_r = Holder(xp, ha, iC)
             engc_r = WDMBandLikelihoodEngine(chunked, ws, nchannels=3,
                                              tdi_channel_setup="XYZ")
+            ref_ctx.append((ref, hold_r, engc_r))
             rows, trueT = build_tier_batch(engc_r, hold_r, xp, ref, nt, Nf,
                                            dt, tiers)
             eng_of = {"chunked": engc_r}
@@ -554,22 +552,33 @@ def main():
                                 nt_layer=ntl, m_active_half_width=2,
                                 v3_n_nodes=nr_i, v4_knots=K_i,
                                 v4_band=band_i)
-                            sh.clear_in_model()
-                            sh.setup_in_model(holder,
-                                              xp.asarray(ref0)[None, :],
-                                              np.zeros(1, np.int32))
-                            en = WDMBandLikelihoodEngine(
-                                sh, ws, nchannels=3, tdi_channel_setup="XYZ")
-                            rows_s, trueT_s = build_tier_batch(
-                                engc, holder, xp, ref0, nt, Nf, dt, [T_rep])
-                            b_s, n_as = pad_batch(rows_s, nb_s, xp)
-                            z_s = np.zeros(b_s.shape[0], dtype=np.int32)
-                            kw_s = dict(data_index=z_s, noise_index=z_s,
-                                        N_vals=None, waveform_kwargs={})
-                            cost, dv_s, _ = timed_and_scored(
-                                en, holder, b_s, kw_s, max(1, reps // 2))
-                            e_s = [abs((dv_s[k] - dv_s[0]) - trueT_s[k])
-                                   for k in range(1, min(n_as, len(dv_s)))]
+                            # Score against the SAME reference battery the
+                            # engine comparison uses. A frontier measured on
+                            # one benign source understates the error by
+                            # orders of magnitude -- the errors are dominated
+                            # by specific hard geometries, not by the knobs.
+                            e_s, cost = [], None
+                            for ref_s, hold_s, engc_s in ref_ctx:
+                                sh.clear_in_model()
+                                sh.setup_in_model(
+                                    hold_s, xp.asarray(ref_s)[None, :],
+                                    np.zeros(1, np.int32))
+                                en = WDMBandLikelihoodEngine(
+                                    sh, ws, nchannels=3,
+                                    tdi_channel_setup="XYZ")
+                                rows_s, trueT_s = build_tier_batch(
+                                    engc_s, hold_s, xp, ref_s, nt, Nf, dt,
+                                    [T_rep])
+                                b_s, n_as = pad_batch(rows_s, nb_s, xp)
+                                z_s = np.zeros(b_s.shape[0], dtype=np.int32)
+                                kw_s = dict(data_index=z_s, noise_index=z_s,
+                                            N_vals=None, waveform_kwargs={})
+                                c_i, dv_s, _ = timed_and_scored(
+                                    en, hold_s, b_s, kw_s, max(1, reps // 2))
+                                cost = c_i if cost is None else min(cost, c_i)
+                                e_s += [abs((dv_s[k] - dv_s[0]) - trueT_s[k])
+                                        for k in range(1, min(n_as,
+                                                              len(dv_s)))]
                             w_, m_ = wm(e_s)
                             settings[(nt, nr_i, K_i, band_i)] = dict(
                                 cost=cost, med=m_, worst=w_)
@@ -615,11 +624,10 @@ def report(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
                         if len(v) else f"{'--':>20s}")
             print(f"  {meta[nt]['Tobs_yr']:7.2f}  {n:9s}{row}")
     print("\n[GRID] sparse-time resolution actually used")
-    print("  Tobs[yr]  N_sparse_t  stride[h]  n_r tuned")
+    print("  Tobs[yr]  N_sparse_t  stride[h]")
     for nt in nts:
         m = meta[nt]
-        print(f"  {m['Tobs_yr']:7.2f}  {m['nsp']:10d}  {m['stride_h']:9.0f}"
-              f"  {m['nr_tuned']:9d}")
+        print(f"  {m['Tobs_yr']:7.2f}  {m['nsp']:10d}  {m['stride_h']:9.0f}")
     if settings:
         allowed = max(0.1, T_rep / 100.0)
         print(f"\n[RECOMMEND] cheapest configuration meeting the bar at "
@@ -655,8 +663,7 @@ def report(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
         settings_columns=np.array(["Nt", "nr", "K", "band", "cost_us",
                                    "median_err", "worst_err"]),
         meta=np.array([[nt, meta[nt]["Tobs_yr"], meta[nt]["nsp"],
-                        meta[nt]["stride_h"], meta[nt]["nr_tuned"]]
-                       for nt in nts], dtype=float))
+                        meta[nt]["stride_h"]] for nt in nts], dtype=float))
     try:
         figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm,
                occ, meta, Nf, nr, knots, band)
