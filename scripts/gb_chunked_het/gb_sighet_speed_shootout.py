@@ -57,6 +57,19 @@ def sync():
 
 
 
+
+class XpGridWDMHolder:
+    """xp-aware holder: device-resident slabs on CUDA so the engines never
+    round-trip through host (mirrors gb_sighet_v4_parity.XpGridWDMHolder)."""
+
+    def __init__(self, xp, data_full, invC_full):
+        self.linear_data_arr = [xp.ascontiguousarray(data_full).ravel()]
+        self.linear_psd_arr = [xp.ascontiguousarray(invC_full).ravel()]
+
+    def __len__(self):
+        return 1
+
+
 def sighet_shared_bytes(n_nodes, n_knots, nchannels, m_half, N_sparse_t,
                         band_len, v4=True):
     """EXACT mirror of gb_sighet_v3/v4_shared_bytes in gb_tdi_on_the_fly.cu.
@@ -186,18 +199,22 @@ def main():
     print(f"[cfg] backend={BACKEND} Nt={nt} nr={nr} K={knots} band={band} "
           f"reps={reps} batches={batches}")
 
-    # reference source + data stash (shared by every engine)
+    # reference source + data stash (shared by every engine).  Arrays live
+    # on the engine's array module: numpy on CPU, cupy under a CUDA backend
+    # (fill_global_wdm asserts the template buffer is self.xp.ndarray).
+    xp = chunked.xp
     rng = np.random.default_rng(19)
     ref = np.array([1e-22, 7.5e-3, 1e-16, 0.0, 1.2, 0.9, 0.4, 2.0, 0.3])
     ilo, ihi = ws.ind_min_f, ws.ind_max_f + 1
-    href = np.zeros((3, Nf, nt))
-    chunked.fill_global_wdm(ref[None, :], href, convert_to_ra_dec=False)
-    h_act = np.ascontiguousarray(href[:, ilo:ihi, ws.active_slice_t])
+    href = xp.zeros((3, Nf, nt))
+    chunked.fill_global_wdm(xp.asarray(ref)[None, :], href,
+                            convert_to_ra_dec=False)
+    h_act = xp.ascontiguousarray(href[:, ilo:ihi, ws.active_slice_t])
     nfa, nta = h_act.shape[1], h_act.shape[2]
-    invC = np.zeros((3, 3, nfa, nta))
+    invC = xp.zeros((3, 3, nfa, nta))
     for c in range(3):
         invC[c, c] = 1.0
-    holder = proto._FullGridWDMHolder(h_act, invC)
+    holder = XpGridWDMHolder(xp, h_act, invC)
 
     results = {}
     for nb in batches:
@@ -206,6 +223,7 @@ def main():
         cands[:, 0] *= np.exp(0.01 * rng.standard_normal(nb))
         cands[:, 1] += 1e-9 * rng.standard_normal(nb)
         cands[:, 5] += 0.01 * rng.standard_normal(nb)
+        cands = xp.asarray(cands)
         z = np.zeros(nb, dtype=np.int32)
         kw = dict(data_index=z, noise_index=z, N_vals=None,
                   waveform_kwargs={})
@@ -226,7 +244,8 @@ def main():
 
         for name, sh in engines.items():
             sh.clear_in_model()
-            sh.setup_in_model(holder, ref[None, :], np.zeros(1, np.int32))
+            sh.setup_in_model(holder, xp.asarray(ref)[None, :],
+                              np.zeros(1, np.int32))
             eng = WDMBandLikelihoodEngine(sh, ws, nchannels=3,
                                           tdi_channel_setup="XYZ")
             try:
