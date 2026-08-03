@@ -883,7 +883,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
     def __init__(
         self, 
         dcga: AnalysisContainerArray | DomainComputationGroupArray,
-        waveform_gen: Any,
+        waveform_gen: Any | list[Any],
         branch_name: str,
         coords_shape: tuple,
         waveform_gen_method: str,
@@ -933,11 +933,29 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             batch_size_per_gpu=batch_size_per_gpu,
         )
 
-        self.waveform_gen = waveform_gen
         self.waveform_gen_method = waveform_gen_method
         self.waveform_like_method = waveform_like_method or waveform_gen_method
 
-        self.create_waveform_gen_replicas()
+        self.ensure_waveform_gen_replicas(waveform_gen)
+
+    def ensure_waveform_gen_replicas(self, waveform_gen: Any | list[Any]):
+        """
+        Ensure that the waveform generator replicas are created for each GPU.
+
+        Args:
+            waveform_gen: waveform generator class that generates the waveforms for the sources given their coordinates. 
+                            If a list is provided, assume that the entries are already the correct replicas for each GPU and do not create new ones. If a single waveform generator is provided, create replicas for each GPU.
+        """
+
+        if isinstance(waveform_gen, list):
+            if len(waveform_gen) != self.acs.num_splits:
+                raise ValueError(f"Number of waveform generator replicas ({len(waveform_gen)}) does not match number of splits ({self.acs.num_splits}).")
+            self._waveform_generators = waveform_gen
+            self.waveform_gen = waveform_gen[0]
+        else:
+            self.waveform_gen = waveform_gen
+            self.create_waveform_gen_replicas()
+        
 
     def create_waveform_gen_replicas(self, ):
         """
@@ -952,10 +970,6 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
                 raise ValueError("Waveform generator must have a 'kwargs' attribute that contains the keyword arguments to initialize the waveform generator.")    
             
             with self.acs.device_context(device):
-                # if i == 0:
-                #     # Reuse the initial waveform generator for the first split to save memory
-                #     self._waveform_generators.append(self.waveform_gen)
-                # else:
                 init_kwargs = self.waveform_gen.kwargs.copy()
                 if "orbits" in init_kwargs:
                     init_kwargs["orbits"] = self.acs.cpp_split(i).orbits
