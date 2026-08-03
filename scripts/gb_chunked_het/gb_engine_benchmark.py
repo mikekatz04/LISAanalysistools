@@ -64,7 +64,19 @@ from gbgpu.gb_likelihood import WDMBandLikelihoodEngine
 USE_GPU = os.environ.get("USE_GPU", "0") == "1"
 BACKEND = os.environ.get("GPU_BACKEND", "cuda12x") if USE_GPU else "cpu"
 
-ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band"]
+ALL_ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band"]
+# BENCH_ENGINES selects the engines to build and score. "chunked" is the
+# accuracy reference and is always kept. This is not only a time-saver:
+# every sig-het engine is built with ONE nt_layer, and v2 costs 960 B per
+# sparse-time point against v4-banded's 528, so leaving v2 in PINS the
+# sparse grid for everyone at what v2 can afford (this is the whole reason
+# N_sparse_t sat at 127 in the 5-baseline sweep). Dropping v2 lets
+# fit_nt_layer size the grid to the engines actually under test.
+ENGINES = [n for n in ALL_ENGINES
+           if n == "chunked"
+           or n in {s.strip() for s in
+                    os.environ.get("BENCH_ENGINES",
+                                   ",".join(ALL_ENGINES)).split(",")}]
 # Categorical hues in FIXED order, CVD-validated (adjacent-pair dE >= 8 under
 # deuteranopia and protanopia).  Colour follows the ENGINE, never its rank;
 CLR = {"chunked": "#666666", "v2": "#E69F00", "v3": "#0072B2",
@@ -114,19 +126,33 @@ def device_shared_limit(default=163840):
 
 def fit_nt_layer(nt, edge, nr, knots, nch=3, m_half=2, n_sparse_fd=512,
                  margin=0.92):
-    """Finest sparse resolution fitting EVERY engine on this device."""
+    """Finest sparse resolution fitting every ENABLED engine on this device.
+
+    Sized to ``ENGINES`` rather than to all four: the engines share one
+    nt_layer, so an engine that is not under test must not set the grid for
+    the ones that are. v2 is the expensive one (960 B per sparse point vs
+    528 for v4-banded), so excluding it via BENCH_ENGINES is what lets the
+    v3/v4 family run the finer grid it can actually afford.
+    """
     lim = device_shared_limit() * margin
+    cost = {
+        "v2": lambda ntl, nsp: v2_shared_bytes(nch, m_half, ntl, nsp,
+                                               n_sparse_fd),
+        "v3": lambda ntl, nsp: sighet_shared_bytes(nr, knots, nch, m_half,
+                                                   nsp, 0, False),
+        "v4-pcr": lambda ntl, nsp: sighet_shared_bytes(nr, knots, nch, m_half,
+                                                       nsp, 0, True),
+        "v4-band": lambda ntl, nsp: sighet_shared_bytes(nr, knots, nch, m_half,
+                                                        nsp, 16, True),
+    }
+    active = [f for n, f in cost.items() if n in ENGINES] or list(cost.values())
     for stride in range(1, nt):
         if nt % stride:
             continue
         ntl, nsp = nt // stride, (nt - 2 * edge) // stride
         if nsp < 8:
             break
-        need = max(v2_shared_bytes(nch, m_half, ntl, nsp, n_sparse_fd),
-                   sighet_shared_bytes(nr, knots, nch, m_half, nsp, 0, False),
-                   sighet_shared_bytes(nr, knots, nch, m_half, nsp, 0, True),
-                   sighet_shared_bytes(nr, knots, nch, m_half, nsp, 16, True))
-        if need <= lim:
+        if max(f(ntl, nsp) for f in active) <= lim:
             return ntl, nsp
     return 1, 8
 
@@ -208,17 +234,21 @@ def build(nt, Nf, nr, knots, band, quiet=False):
     mk = lambda **kw: GBSignalHetComputations.for_band_engine(     # noqa: E731
         chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
         m_active_half_width=2, **kw)
-    engines = {"v2": mk(),
-               "v3": mk(v3_n_nodes=nr),
-               "v4-pcr": mk(v3_n_nodes=nr, v4_knots=knots, v4_band=0),
-               "v4-band": mk(v3_n_nodes=nr, v4_knots=knots, v4_band=band)}
-    nsp = engines["v3"]._g["N_sparse_t"]
+    builders = {"v2": lambda: mk(),
+                "v3": lambda: mk(v3_n_nodes=nr),
+                "v4-pcr": lambda: mk(v3_n_nodes=nr, v4_knots=knots, v4_band=0),
+                "v4-band": lambda: mk(v3_n_nodes=nr, v4_knots=knots,
+                                      v4_band=band)}
+    engines = {n: f() for n, f in builders.items() if n in ENGINES}
+    nsp = next(iter(engines.values()))._g["N_sparse_t"]
     if not quiet:
         lim = device_shared_limit()
-        b = {"v2": v2_shared_bytes(3, 2, nt_layer, nsp, 512),
-             "v3": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, False),
-             "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
-             "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True)}
+        b = {k: v for k, v in {
+            "v2": v2_shared_bytes(3, 2, nt_layer, nsp, 512),
+            "v3": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, False),
+            "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
+            "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
+        }.items() if k in ENGINES}
         print(f"[grid] Nf={Nf} Nt={nt} nt_layer={nt_layer} | Tobs="
               f"{nt*Nf*dt/86400:.0f} d ({nt*Nf*dt/86400/365.25:.2f} yr), "
               f"sparse stride={max(1, nt//nt_layer)} "
@@ -519,11 +549,12 @@ def main():
             f"{n}={wm(err_nt[nt][n][T_rep])[0]:.2e}" for n in ENGINES[1:]))
 
         lim = device_shared_limit()
-        shm[nt] = {"v2": v2_shared_bytes(3, 2, ntl, nsp, 512),
-                   "v3": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, False),
-                   "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
-                   "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16,
-                                                  True)}
+        shm[nt] = {k: v for k, v in {
+            "v2": v2_shared_bytes(3, 2, ntl, nsp, 512),
+            "v3": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, False),
+            "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
+            "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
+        }.items() if k in ENGINES}
         occ[nt] = {k: max(1, int(lim // v)) for k, v in shm[nt].items()}
 
         # ---- settings frontier ------------------------------------------
@@ -824,7 +855,7 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
                  loc="left")
 
     ax = fig.add_subplot(gs[1, 3]); style(ax)
-    names = ["v2", "v3", "v4-pcr", "v4-band"]
+    names = [n for n in ["v2", "v3", "v4-pcr", "v4-band"] if n in ENGINES]
     vals = [shm[nts[len(nts)//2]][n] / 1024 for n in names]
     bars = ax.bar(range(len(names)), vals, color=[CLR[n] for n in names],
                   width=0.62)
