@@ -225,8 +225,19 @@ def build(nt, Nf, nr, knots, band, quiet=False):
     ws = WDMSettings(Nf, nt, dt, t0=t0, min_freq=1e-4, max_freq=2e-2,
                      min_time=edge * Nf * dt, max_time=(nt - edge) * Nf * dt,
                      force_backend=BACKEND)
+    # chunked-het splits the baseline into Nt_sub blocks because a GPU block
+    # must hold one chunk in shared memory. On CPU there is no such limit and
+    # the reference implementation does the whole transform in one go, so
+    # chunking there is pure overhead: Nt_sub=128 costs 6 chunks at 3 months
+    # rising to 90 at 4 years, each paying the per-chunk fixed cost and the
+    # n_pad halo (160 samples of work per 128 useful). Left in, it charges
+    # chunked-het an overhead that grows linearly with Tobs and inflates every
+    # sig-het speedup. Default: 128 on GPU, ONE whole chunk on CPU.
+    nt_sub = int(os.environ.get(
+        "BENCH_NT_SUB",
+        128 if USE_GPU else 1 << int(np.ceil(np.log2(max(nt, 2))))))
     chunked = GBWDMComputations(
-        ws, t_ref=t0, Nt_sub=128, n_pad=16, N_sparse=256, N_cp_sig=48,
+        ws, t_ref=t0, Nt_sub=nt_sub, n_pad=16, N_sparse=256, N_cp_sig=48,
         N_cp_orbit=32, orbits=orbits, tdi_config="2nd generation",
         force_backend=BACKEND, d_d=0.0, tdi_type="XYZ",
         tukey_alpha=2.0 * tk / nt)
@@ -249,6 +260,9 @@ def build(nt, Nf, nr, knots, band, quiet=False):
             "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
             "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
         }.items() if k in ENGINES}
+        print(f"[chunk] Nt_sub={nt_sub} -> chunked-het n_chunks="
+              f"{chunked.n_chunks}"
+              + ("" if USE_GPU else "  (CPU: one whole chunk expected)"))
         print(f"[grid] Nf={Nf} Nt={nt} nt_layer={nt_layer} | Tobs="
               f"{nt*Nf*dt/86400:.0f} d ({nt*Nf*dt/86400/365.25:.2f} yr), "
               f"sparse stride={max(1, nt//nt_layer)} "
