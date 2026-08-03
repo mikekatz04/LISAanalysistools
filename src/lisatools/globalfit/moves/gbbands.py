@@ -2698,17 +2698,36 @@ class BandSorter(LISAToolsParallelModule):
         Returns ``False`` (and clears the table) when there are too few
         cold-chain sources to form a window.
         """
-        self.nfriends = int(nfriends)
+        table = self.build_friend_table(nfriends)
+        return self.index_friends(table, nfriends)
+
+    def build_friend_table(self, nfriends: int):
+        """The frequency-sorted cold-chain coordinate table, or ``None``.
+
+        Split out of :meth:`build_friend_index` so the table can be built ONCE
+        per larger iteration and shared across the GB moves of a cycle, while
+        :meth:`index_friends` still runs per proposal (each proposal's sorter
+        holds a different set of sources).
+        """
         cold = self.inds & (self.temp_inds == 0)
-        n_cold = int(cold.sum())
-        if n_cold < max(2, self.nfriends):
+        if int(cold.sum()) < max(2, int(nfriends)):
+            return None
+        cold_coords = self.coords[cold]
+        order = self.xp.argsort(cold_coords[:, 1])
+        return cold_coords[order].copy()
+
+    def index_friends(self, friends_coords_sorted, nfriends: int) -> bool:
+        """Window every source into ``friends_coords_sorted`` (per proposal)."""
+        self.nfriends = int(nfriends)
+        if friends_coords_sorted is None or len(friends_coords_sorted) < max(
+            2, self.nfriends
+        ):
             self.friend_start_inds = None
             return False
 
-        cold_coords = self.coords[cold]
-        order = self.xp.argsort(cold_coords[:, 1])
-        self.friends_coords_sorted = cold_coords[order].copy()
-        self.friends_freqs_sorted = self.friends_coords_sorted[:, 1].copy()
+        n_cold = len(friends_coords_sorted)
+        self.friends_coords_sorted = friends_coords_sorted
+        self.friends_freqs_sorted = friends_coords_sorted[:, 1].copy()
 
         starts = (
             self.xp.searchsorted(self.friends_freqs_sorted, self.coords[:, 1], side="right")
@@ -2728,6 +2747,54 @@ class BandSorter(LISAToolsParallelModule):
         deviation = self.xp.random.randint(0, self.nfriends, size=len(starts))
         take = self.xp.clip(starts + deviation, 0, len(self.friends_freqs_sorted) - 1)
         return self.friends_coords_sorted[take]
+
+    # ------------------------------------------------------------------
+    # Shared info-matrix Cholesky table (group-stretch friends analogue)
+    # ------------------------------------------------------------------
+
+    def build_infomat_index(self, infomat_freqs_sorted, infomat_chol_sorted) -> bool:
+        """Map every source onto the NEAREST entry of a shared Cholesky table.
+
+        The direct counterpart of :meth:`build_friend_index`: that method
+        windows each source into a frequency-sorted table of cold-chain
+        COORDINATES, this one points each source at the single closest entry
+        of a frequency-sorted table of cold-chain proposal CHOLESKY factors
+        (built by the move every N iterations, since it needs the likelihood
+        model the sorter has no handle on).  Sources at every temperature and
+        walker index into the same cold-chain table, exactly as friends do.
+
+        Returns ``False`` (and clears the index) when the supplied table is
+        empty, so the caller can fall back to computing factors directly.
+        """
+        if infomat_freqs_sorted is None or len(infomat_freqs_sorted) == 0:
+            self.infomat_take_inds = None
+            return False
+
+        self.infomat_freqs_sorted = infomat_freqs_sorted
+        self.infomat_chol_sorted = infomat_chol_sorted
+        n_tab = len(infomat_freqs_sorted)
+
+        # searchsorted gives the right-hand neighbour; pick whichever of the
+        # bracketing pair is closer in frequency (clamped at the table edges).
+        hi = self.xp.searchsorted(infomat_freqs_sorted, self.coords[:, 1], side="left")
+        hi = self.xp.clip(hi, 0, n_tab - 1)
+        lo = self.xp.clip(hi - 1, 0, n_tab - 1)
+        d_hi = self.xp.abs(infomat_freqs_sorted[hi] - self.coords[:, 1])
+        d_lo = self.xp.abs(infomat_freqs_sorted[lo] - self.coords[:, 1])
+        self.infomat_take_inds = self.xp.where(d_lo <= d_hi, lo, hi).astype(
+            self.xp.int32
+        )
+        return True
+
+    def draw_infomat(self, source_ids):
+        """Nearest-in-frequency Cholesky factor per source in ``source_ids``.
+
+        Requires :meth:`build_infomat_index` to have been run this proposal;
+        mirrors :meth:`draw_friends`, but the pick is deterministic (nearest)
+        rather than a uniform draw from a window.
+        """
+        take = self.infomat_take_inds[source_ids]
+        return self.infomat_chol_sorted[take]
 
     def get_band_info(self):
 

@@ -81,6 +81,68 @@ class _NoOpMempool:
         return
 
 
+class _SharedProposalTables:
+    """PARKED, NOT IN USE -- cold-chain proposal tables shared across proposals.
+
+    Reached only through ``share_proposal_tables=True``, which currently raises
+    ``NotImplementedError`` (see the TODO in
+    :meth:`GBSpecialBase._ensure_proposal_tables`). The default path rebuilds
+    both tables between every RJ step and its in-model sequence; this class is
+    the plumbing for reusing one build across the moves of a cycle, kept so the
+    option can be evaluated later rather than rewritten.
+
+    A GB search iteration runs several GB moves back to back (fstat-birth ->
+    replace -> prior-removal), and each of them wants the same two cold-chain
+    products: the group-stretch friend table (frequency-sorted coordinates)
+    and the info-matrix Cholesky table (frequency-sorted proposal factors).
+    Rebuilding those per move is pure duplication -- the Cholesky side costs
+    ~17 waveform evaluations per cold-chain source -- so they are built ONCE
+    per larger iteration and reused.
+
+    Lives on the run-shared :class:`AnalysisContainerArray` (see
+    :func:`_shared_proposal_tables`), the same lazy-attach idiom as the
+    run-shared ``DomainComputationGroupArray``, so no extra wiring is needed
+    through the recipe and nothing is added to the picklable settings tree.
+
+    ``iteration`` is the move's own ``self.time``: every move in the cycle
+    proposes once per larger iteration, so they agree on it. A move that runs
+    on a different cadence simply disagrees and triggers a rebuild -- extra
+    work, never a stale table.
+
+    The two products keep SEPARATE stamps so that, if this is ever enabled,
+    the cheap friend sort and the expensive Cholesky build can run on
+    different cadences.
+    """
+
+    def __init__(self):
+        self.friends_iteration = None
+        self.friends_coords_sorted = None
+        self.infomat_iteration = None
+        self.infomat_freqs_sorted = None
+        self.infomat_chol_sorted = None
+
+    def needs_friends(self, iteration) -> bool:
+        return self.friends_iteration != iteration
+
+    def needs_infomat(self, iteration, every) -> bool:
+        if self.infomat_chol_sorted is None:
+            return True
+        if self.infomat_iteration == iteration:
+            return False            # already built by another move this cycle
+        return iteration % max(int(every), 1) == 0
+
+
+def _shared_proposal_tables(acs, branch_name) -> _SharedProposalTables:
+    """The run's ONE :class:`_SharedProposalTables` for ``branch_name``."""
+    store = getattr(acs, "_gb_shared_proposal_tables", None)
+    if store is None:
+        store = {}
+        acs._gb_shared_proposal_tables = store
+    if branch_name not in store:
+        store[branch_name] = _SharedProposalTables()
+    return store[branch_name]
+
+
 # ``_to_numpy`` was the file-local cupy/numpy-agnostic ``.get()`` helper.
 # Use the central :func:`lisatools.utils.utility.asnumpy` instead.
 _to_numpy = asnumpy
@@ -386,6 +448,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # get_new_points read are set explicitly here.
         self.a = float(kwargs.get("a", 2.0))
         self.nfriends = int(kwargs.get("nfriends", 32))
+        # Cold-chain info-matrix Cholesky table: rebuilt between this move's RJ
+        # step and its in-model sequence, then every source (any temp / walker)
+        # borrows the nearest-in-frequency entry for the whole in-model
+        # sequence.
+        # Sources per batched information-matrix call when the table is built.
+        self.infomat_table_batch = int(kwargs.get("infomat_table_batch", 2048))
+        # NOT IMPLEMENTED -- reusing one table across proposals instead of
+        # rebuilding per RJ proposal. See the TODO in _ensure_proposal_tables.
+        self.share_proposal_tables = bool(kwargs.get("share_proposal_tables", False))
         self.return_gpu = True
         self.use_gpu = self.backend.uses_cupy
 
@@ -712,6 +783,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Whether propose() builds the cold-chain frequency friend table for
         # the group stretch (subclasses with their own partner scheme skip it).
         self._build_friend_table = True
+        # Shared info-matrix Cholesky table (cold-chain, frequency-sorted).
+        # Persists ACROSS proposals -- unlike the friend table, rebuilding it
+        # costs ~17 waveform evaluations per cold-chain source, so it is
+        # refreshed on a cadence rather than every proposal.
+        self._infomat_freqs_sorted = None
+        self._infomat_chol_sorted = None
+        # Set per proposal; guards the once-per-sorter table indexing.
+        self._tables_indexed = False
         self._gb_fd_comp_user_supplied = gb_fd_comp is not None
         self.gb_fd_comp = gb_fd_comp
         self._proposal_orbits = orbits
@@ -2905,242 +2984,132 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.name, diff, scale, slot,
         )
 
-    def _compute_proposal_cholesky(self, model, band_sorter, ids):
-        """Param-keyed Fisher/Cholesky cache wrapper (2026-08-01).
+    def _ensure_proposal_tables(self, model, band_sorter):
+        """Rebuild the cold-chain proposal tables for THIS proposal.
 
-        The proposal covariance depends on the PHYSICAL parameters only (a
-        proposal shape -- M-H corrects any choice), and in a running fit
-        thousands of (temp, walker) slots sit on nearly the same physical
-        source, recomputing an identical ~17-waveform-eval information
-        matrix every iteration (measured: 60% of a search iteration).
-        Cache the factored proposal per QUANTIZED-parameter key, shared
-        across walkers/temps/leaves: ~340 B/entry host-side, capped
-        (GB_FISHER_CACHE_MAX, default 200k ~ 65 MB) -- vs the infeasible
-        ~8 GB of a per-slot cache.  Quantization IS the staleness rule: a
-        leaf drifting out of its cell gets a new key and a fresh Fisher.
-        GB_FISHER_CACHE=0 disables; GB_FISHER_CACHE_REL sets the log-space
-        cell width (default 0.05).  Noise-index differences between
-        walkers are deliberately ignored by the key (shape-only use).
+        Called from the first in-model block of the proposal -- i.e. between
+        this move's RJ step and its in-model sequence, so both tables describe
+        the post-RJ cold chain -- and a no-op on every later block of the same
+        proposal.
 
-        # TODO(user 2026-08-02): reconsider the PER-SLOT cache we ruled
-        # out for size (~8.4 GB host for the full slot space) -- a few GB
-        # of host RAM may be a fair price for exact per-leaf reuse with no
-        # quantization/staleness policy at all (hit == slot unchanged
-        # since last iteration).  Assess after the shared-cache smoke
-        # measures its real hit rate: if quantized hits are <~90%, the
-        # per-slot variant (or a hybrid: per-slot LRU over the cold chain
-        # only, shared cache for hot rungs) is worth the memory.
+        Both products come from the cold chain only (``inds & temp_inds == 0``,
+        all walkers): the group-stretch friend table (frequency-sorted
+        coordinates) and the info-matrix Cholesky table (frequency-sorted
+        proposal factors). Every source at every temperature then indexes into
+        them, so the factor cost is one cold chain rather than one per
+        (temp, walker) block -- roughly a factor ``ntemps`` fewer information
+        matrices per proposal, while each RJ proposal still gets factors built
+        at its own post-RJ parameters.
         """
-        if os.environ.get("GB_FISHER_AUDIT", "0") == "1":
-            return self._compute_proposal_cholesky_audit(
-                model, band_sorter, ids)
-        if os.environ.get("GB_FISHER_CACHE", "1") != "1":
-            return self._compute_proposal_cholesky_direct(
-                model, band_sorter, ids)
-        xp = self.xp
-        coords = band_sorter.coords[ids]
-        ch = coords.get() if hasattr(coords, "get") else np.asarray(coords)
-        ndim = ch.shape[1]
-        # scales must be set every propose (the direct path only runs on
-        # misses); identical to the direct body's construction.
-        s = xp.ones(ndim)
+        if self._tables_indexed:
+            return
+        self._tables_indexed = True
+
+        if self.share_proposal_tables:
+            # TODO: LOOK AT THIS MORE CLOSELY BEFORE ENABLING. Reusing one
+            # table across proposals (e.g. once per larger iteration, shared
+            # by the fstat-birth -> replace -> prior-removal cycle) removes
+            # most of the remaining cost, and _SharedProposalTables /
+            # _shared_proposal_tables below implement the plumbing for it. It
+            # is OFF because the staleness is not understood: RJ births and
+            # deaths change the cold chain between the moves of a cycle, so a
+            # later move would index into a table describing a source
+            # population that no longer exists, and the factors themselves
+            # drift as the fit evolves. Needs an acceptance-rate comparison
+            # against per-proposal rebuilds before it can be trusted.
+            raise NotImplementedError(
+                "share_proposal_tables=True is not implemented: sharing the "
+                "cold-chain friend / info-matrix tables ACROSS proposals is "
+                "unvalidated (the cold chain changes between the RJ moves of "
+                "a cycle). Leave it False; see the TODO in "
+                "_ensure_proposal_tables."
+            )
+
+        tm = getattr(self, "_prop_timer", None)
+        with _tspan(tm, "proposal_tables"):
+            if self._build_friend_table and self.stretch_probability > 0.0:
+                band_sorter.index_friends(
+                    band_sorter.build_friend_table(self.nfriends), self.nfriends)
+            if self.use_info_mat_proposal:
+                self._refresh_infomat_table(model, band_sorter)
+                band_sorter.build_infomat_index(
+                    self._infomat_freqs_sorted, self._infomat_chol_sorted)
+
+    def _refresh_infomat_table(self, model, band_sorter):
+        """Rebuild the shared cold-chain info-matrix Cholesky table.
+
+        The group-stretch friend table's counterpart for proposal COVARIANCES.
+        The cold-chain sources (``inds & temp_inds == 0``, all walkers) are
+        sorted in frequency and their Cholesky factors computed in ONE batched
+        call; the table then serves every source at every temperature for this
+        proposal's in-model sequence, each one taking the nearest entry in
+        frequency (see :meth:`BandSorter.build_infomat_index`).
+
+        Two properties make this sound enough to be worth the approximation:
+        the information matrix depends only on the parameters and the noise --
+        never on the residual -- so a table entry does not go stale as the fit
+        subtracts sources; and the factor is only a proposal SHAPE, which M-H
+        corrects. It is the same class of approximation as drawing a
+        group-stretch partner from a frequency window.
+
+        # TODO: REVIEW THIS PROCESS -- the information matrices change as the
+        # fit evolves, and a table refreshed only every N proposals hands
+        # sources a covariance built at parameters (and, for the hot chains, at
+        # a temperature and a walker's noise realisation) that are not their
+        # own. Worth checking: the acceptance-rate cost of the refresh cadence
+        # vs computing per block; whether nearest-in-frequency is the right
+        # partner rule once sources differ substantially in SNR (the factor
+        # scales with amplitude, so a loud neighbour hands a quiet source a
+        # badly-sized jump); and whether the cold-chain table should be
+        # temperature-corrected before the hot rungs borrow from it.
+        """
+        cold = band_sorter.inds & (band_sorter.temp_inds == 0)
+        n_cold = int(cold.sum())
+        if n_cold == 0:
+            self._infomat_freqs_sorted = None
+            self._infomat_chol_sorted = None
+            return False
+
+        cold_ids = self.xp.where(cold)[0]
+        order = self.xp.argsort(band_sorter.coords[cold_ids, 1])
+        cold_ids = cold_ids[order]
+        # Chunked: the per-block call this replaces passed 1-2 sources, while
+        # the whole cold chain is (nwalkers x live leaves) and each source
+        # costs ~17 waveform evaluations, so one unbounded call would spike
+        # peak device memory at production leaf counts.
+        step = max(int(self.infomat_table_batch), 1)
+        parts = [
+            self._compute_proposal_cholesky(model, band_sorter, cold_ids[i:i + step])
+            for i in range(0, n_cold, step)
+        ]
+        self._infomat_chol_sorted = (
+            parts[0] if len(parts) == 1 else self.xp.concatenate(parts, axis=0)
+        )
+        self._infomat_freqs_sorted = band_sorter.coords[cold_ids, 1].copy()
+        logger.info(
+            "%s: info-matrix table rebuilt from %d cold-chain sources "
+            "(iteration %d)", self.name, n_cold, self.time,
+        )
+        return True
+
+    def _proposal_cholesky(self, model, band_sorter, ids):
+        """Proposal Cholesky factors for ``ids``: table lookup, else direct.
+
+        Falls back to the direct per-block computation whenever the table is
+        unavailable -- a cold chain with no live sources, or a caller that
+        reaches the in-model step without ``_ensure_proposal_tables``.
+        """
+        if getattr(band_sorter, "infomat_take_inds", None) is None:
+            return self._compute_proposal_cholesky(model, band_sorter, ids)
+        # The direct path sets these as a side effect; the table path must
+        # set them too (in_model_proposal maps the drawn jump back with them).
+        s = self.xp.ones(band_sorter.coords.shape[1])
         if self._fdot_col is not None:
             s[self._fdot_col] = self._fdot_scale
         self._proposal_param_scales = s
+        return band_sorter.draw_infomat(ids)
 
-        self._fisher_cache_init(ch)
-        kb = self._fisher_cache_keys(ch)
-        cache = self._fisher_cache
-        miss = np.array([k not in cache for k in kb], dtype=bool)
-        self._fisher_cache_stats[0] += int((~miss).sum())
-        self._fisher_cache_stats[1] += len(kb)
-        if miss.any():
-            ids_h = ids.get() if hasattr(ids, "get") else np.asarray(ids)
-            chol_new = self._compute_proposal_cholesky_direct(
-                model, band_sorter, xp.asarray(ids_h[miss]))
-            chol_new_h = (chol_new.get() if hasattr(chol_new, "get")
-                          else np.asarray(chol_new))
-            for j, k in enumerate(np.array(kb, dtype=object)[miss]):
-                cache[k] = chol_new_h[j].astype(np.float32)
-                if len(cache) > self._fisher_cache_max:
-                    cache.popitem(last=False)
-        hits, tot = self._fisher_cache_stats
-        if tot and tot % self._fisher_cache_log < len(kb):
-            logger.info(
-                "%s: fisher cache hit rate %.1f%% (%d entries)",
-                self.name, 100.0 * hits / tot, len(cache))
-        # Gather + LRU touch in one pass: without move_to_end the OrderedDict
-        # evicts by INSERTION order, so a constantly-hit entry is discarded
-        # while a one-shot neighbour survives.
-        out = np.empty((len(kb), ch.shape[1], ch.shape[1]), dtype=np.float64)
-        for i, k in enumerate(kb):
-            out[i] = cache[k]
-            cache.move_to_end(k)
-        return xp.asarray(out)
-
-    def _fisher_cache_init(self, ch):
-        """One-time setup of the fixed-grid cache (steps, cap, counters).
-
-        The quantization steps are frozen on the FIRST batch: log cells of
-        relative width ``GB_FISHER_CACHE_REL`` for positive columns spanning
-        more than a decade, linear cells scaled by the batch's 10-90
-        percentile spread otherwise.  Both the log/linear classification and
-        the linear step therefore depend on what the first band block happens
-        to contain -- a single-source first batch collapses every column to
-        the 1e-12 floor (no hit is ever possible again).  That fragility is
-        the reason the reuse geometry is being measured (``GB_FISHER_AUDIT``)
-        rather than tuned blind.
-        """
-        if hasattr(self, "_fisher_cache"):
-            return
-        from collections import OrderedDict
-        ndim = ch.shape[1]
-        self._fisher_cache = OrderedDict()
-        rel = float(os.environ.get("GB_FISHER_CACHE_REL", "0.05"))
-        steps = []
-        for c in range(ndim):
-            col = ch[:, c]
-            pos_only = np.all(col > 0) and col.size > 1
-            if pos_only and col.max() / max(col.min(), 1e-300) > 10.0:
-                steps.append(("log", rel))
-            else:
-                spread = float(np.percentile(col, 90) - np.percentile(col, 10))
-                steps.append(("lin", max(0.4 * rel * abs(spread), 1e-12)))
-        self._fisher_cache_steps = steps
-        self._fisher_cache_max = int(
-            os.environ.get("GB_FISHER_CACHE_MAX", "200000"))
-        self._fisher_cache_log = int(
-            os.environ.get("GB_FISHER_CACHE_LOG", "50000"))
-        self._fisher_cache_stats = [0, 0]   # hits, total
-
-    def _fisher_cache_keys(self, ch):
-        """Quantized-cell key (bytes) per row of the host coord block."""
-        keys = np.empty(ch.shape, dtype=np.int64)
-        for c, (kind, st) in enumerate(self._fisher_cache_steps):
-            if kind == "log":
-                keys[:, c] = np.floor(
-                    np.log(np.maximum(np.abs(ch[:, c]), 1e-300)) / st)
-            else:
-                keys[:, c] = np.floor(ch[:, c] / st)
-        return [row.tobytes() for row in keys]
-
-    def _periodic_dx(self, x_from, x_to):
-        """``x_to - x_from`` with the branch's angular periods folded in.
-
-        Without this an ``alpha`` crossing 2pi -> 0 registers as a 6-radian
-        "drift", which would make the reuse geometry look far worse than it
-        is.  Host-side (numpy) -- the audit is a measurement path.
-        """
-        return np.asarray(self.periodic.distance(
-            {self.branch_name: np.asarray(x_from, dtype=np.float64)},
-            {self.branch_name: np.asarray(x_to, dtype=np.float64)},
-            xp=np,
-        )[self.branch_name])
-
-    def _compute_proposal_cholesky_audit(self, model, band_sorter, ids):
-        """``GB_FISHER_AUDIT=1``: direct factors + reuse-geometry measurement.
-
-        Returns the DIRECT (uncached) factors, so an audit run reproduces
-        cache-off physics exactly; the audit only reads them.  See
-        :mod:`lisatools.globalfit.moves._fisher_audit` for what is measured
-        (per-slot temporal drift in the cached Fisher's own metric, per-call
-        cross-slot cluster counts vs tolerance, the shipped fixed-grid hit
-        rate, all broken down by temperature rung).
-        """
-        from ._fisher_audit import FisherProposalAudit
-
-        chol = self._compute_proposal_cholesky_direct(model, band_sorter, ids)
-        ch = asnumpy(band_sorter.coords[ids])
-        if getattr(self, "_fisher_audit", None) is None:
-            self._fisher_audit = FisherProposalAudit(
-                self.name, ch.shape[1], skip_cols=(self._fdot_astro_col,),
-                basis_names=list(getattr(self.transform_fn, "input_basis", [])),
-            )
-        self._fisher_cache_init(ch)
-        self._fisher_audit.record(
-            ch,
-            asnumpy(chol),
-            asnumpy(band_sorter.temp_inds[ids]),
-            asnumpy(band_sorter.walker_inds[ids]),
-            asnumpy(band_sorter.leaf_inds[ids]),
-            grid_keys=self._fisher_cache_keys(ch),
-            periodic_distance=self._periodic_dx,
-        )
-        self._fisher_probe_sensitivity(model, band_sorter, ids, chol)
-        return chol
-
-    # Perturbations scanned by the sensitivity probe: relative for the
-    # log-scaled columns (dist / f0 / Mc / fdot), absolute (radians, or the
-    # native unit of cos_iota / sin_delta / ratio columns) for the rest.
-    # The two tiny steps are the CONTROL: a smooth function must give a
-    # covariance change proportional to the step, so if 1e-4 already moves
-    # the covariance by tens of percent the factor is discontinuous
-    # (eigen-floor reshuffling), not steeply parameter-dependent.
-    _FISHER_PROBE_REL = (1e-4, 1e-3, 0.01, 0.05, 0.2)
-    _FISHER_PROBE_ABS = (1e-4, 1e-3, 0.02, 0.1, 0.5)
-
-    def _fisher_probe_sensitivity(self, model, band_sorter, ids, chol):
-        """Direct per-column sensitivity scan (``GB_FISHER_AUDIT_PROBE=<n>``).
-
-        Recomputes the REAL information matrix at ``x + delta e_c`` for each
-        sampling column ``c`` and compares the resulting proposal covariance
-        against the unperturbed one.  Unlike the pair/temporal statistics --
-        which say how often reuse happens to be safe in the sampler's own
-        trajectory -- this measures the underlying function directly, so it
-        sets a cache key's admissible cell width per column and exposes
-        columns that do not belong in the key at all.
-
-        Runs at most ``GB_FISHER_AUDIT_PROBE`` sources for the whole process
-        (it costs ``ndim x len(deltas)`` extra Fisher evaluations per probed
-        source) and restores ``band_sorter.coords`` in a ``finally``.
-
-        Two selection rules keep the answer representative.  ``GB_FISHER_
-        AUDIT_PROBE_AFTER`` delays the scan past the first N calls, because a
-        search starts every leaf at a PRIOR draw and a near-zero-SNR source
-        has a (numerically) singular information matrix whose factor is set
-        by the eigen-floor, not by the waveform -- its sensitivity would
-        describe the floor.  For the same reason the probed subset is the
-        BEST-CONSTRAINED sources of the batch (smallest covariance trace),
-        which are the ones a real cache would be reusing.
-        """
-        n_want = int(os.environ.get("GB_FISHER_AUDIT_PROBE", "0"))
-        aud = self._fisher_audit
-        after = int(os.environ.get("GB_FISHER_AUDIT_PROBE_AFTER", "0"))
-        if n_want <= 0 or aud.n_probed >= n_want or aud.n_calls < after:
-            return
-        from ._fisher_audit import _cov_from_chol, _cov_reldiff
-
-        n_take = int(min(len(ids), n_want - aud.n_probed, 4))
-        C_all = _cov_from_chol(asnumpy(chol), aud.valid)
-        order = np.argsort(np.einsum("nii->n", C_all))[:n_take]
-        sub = ids[self.xp.asarray(order)]
-        ndim = band_sorter.coords.shape[1]
-        C_base = C_all[order]
-        log_cols = set(aud.log_cols.tolist())
-
-        saved = band_sorter.coords[sub].copy()
-        try:
-            for c in range(ndim):
-                if not aud.valid[c]:
-                    continue
-                rel = c in log_cols
-                for d in (self._FISHER_PROBE_REL if rel
-                          else self._FISHER_PROBE_ABS):
-                    band_sorter.coords[sub, c] = (
-                        saved[:, c] * (1.0 + d) if rel else saved[:, c] + d
-                    )
-                    chol_p = self._compute_proposal_cholesky_direct(
-                        model, band_sorter, sub)
-                    C_p = _cov_from_chol(asnumpy(chol_p), aud.valid)
-                    aud.record_probe(c, d, _cov_reldiff(C_p, C_base))
-                    band_sorter.coords[sub, c] = saved[:, c]
-        finally:
-            band_sorter.coords[sub] = saved
-        aud.n_probed += n_take
-        logger.info("%s: fisher sensitivity probe done on %d/%d sources",
-                    self.name, aud.n_probed, n_want)
-
-    def _compute_proposal_cholesky_direct(self, model, band_sorter, ids):
+    def _compute_proposal_cholesky(self, model, band_sorter, ids):
         """Batched Cholesky of the inverse information matrix for ``ids``.
 
         Domain-symmetric through the fast computation objects:
@@ -3205,12 +3174,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         info_y = info_phys * J[:, :, None] * J[:, None, :]
 
-        # Pool trim THROTTLED (2026-08-01): freeing the whole CuPy pool on
-        # every block forces cudaMalloc storms in everything downstream;
-        # keep the pressure valve but only every 16th call.
-        self._fisher_pool_ctr = getattr(self, "_fisher_pool_ctr", 0) + 1
-        if self._fisher_pool_ctr % 16 == 0:
-            self.mempool.free_all_blocks()
+        self.mempool.free_all_blocks()
         # Robust inverse-information-matrix factor: near-zero-SNR (prior-drawn) sources
         # give (numerically) singular information matrices. Eigendecompose and clamp the
         # spectrum to a relative floor; B = V diag(lambda^-1/2) satisfies
@@ -3338,6 +3302,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the BandSorter.
         """
         xp = self.xp
+        # Cold-chain proposal tables (friends + info-matrix Cholesky) are
+        # built HERE, on the first in-model block of the proposal: that point
+        # is after this iteration's first RJ step, so the tables describe the
+        # post-RJ cold chain, and they are shared with the other GB moves of
+        # the cycle. A no-op on every later block.
+        self._ensure_proposal_tables(model, band_sorter)
         # Read ``inds`` from the MAIN sorter AFTER the RJ step: _run_rj_step
         # flips band_sorter.inds on accepted births/deaths, so this mask
         # includes freshly-born sources (they get the repeat block) and drops
@@ -3420,7 +3390,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # dimensional VGB move) never build the info-matrix Cholesky.
         with _tspan(tm, "inmodel_cholesky"):
             chol = (
-                self._compute_proposal_cholesky(model, band_sorter, ids)
+                self._proposal_cholesky(model, band_sorter, ids)
                 if self.use_info_mat_proposal
                 else None
             )
@@ -3620,7 +3590,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # it can never move further in or laterally within it.
             # d_h_out/h_h_out are the per-repeat get_add_ll outputs for the
             # ``keep`` subset (the same arrays the sorter stash consumes).
-            if getattr(buffer_obj, "d_h_out", None) is not None:
+            # ``keep.any()`` is REQUIRED here, not just defensive: get_add_ll
+            # above runs only under that same condition, so a repeat whose
+            # candidates are all prior/trust-rejected leaves d_h_out/h_h_out
+            # holding the PREVIOUS call's rows. Without this guard the clamp
+            # indexes ``where(keep)[0]`` (length 0) with a stale-length mask.
+            if getattr(buffer_obj, "d_h_out", None) is not None and bool(keep.any()):
                 _hh_im = cp.asarray(buffer_obj.h_h_out).real
                 _opt_im = cp.sqrt(cp.maximum(_hh_im, 0.0))
                 _lim_im = buffer_obj.opt_snr_rej_samp_limit
@@ -4504,9 +4479,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Cold-chain friend table for the group-stretch half of the in-model
         # mix (rebuilt every proposal; cheap sort of the cold-chain f0s).
         self._infomat_wdm_logged = False
-        if self.stretch_probability > 0.0 and self._build_friend_table:
-            with tm.span("friend_index"):
-                band_sorter.build_friend_index(self.nfriends)
+        # The cold-chain friend / info-matrix tables are NOT built here: they
+        # are built lazily at the first in-model block of the proposal, which
+        # is after that iteration's first RJ step, so they see the post-RJ
+        # source population (see _ensure_proposal_tables). This flag makes the
+        # per-proposal indexing happen exactly once per sorter.
+        self._tables_indexed = False
 
         do_synchronize = False
         device = self.xp.cuda.runtime.getDevice() if self.backend.uses_cupy else -1
