@@ -56,6 +56,57 @@ def sync():
         cp.cuda.runtime.deviceSynchronize()
 
 
+
+def sighet_shared_bytes(n_nodes, n_knots, nchannels, m_half, N_sparse_t,
+                        band_len, v4=True):
+    """EXACT mirror of gb_sighet_v3/v4_shared_bytes in gb_tdi_on_the_fly.cu.
+
+    Kept in lockstep with the C++ so the harness can size N_sparse_t to the
+    device instead of guessing (N_PARAMS_MAX = 20 there).
+    """
+    M = 2 * m_half + 1
+    b = 2 * 20 * 8                       # cand + ref params
+    b += n_nodes * 8                     # t_nodes
+    b += 2 * nchannels * n_nodes * 16    # tdi cand + ref
+    b += 2 * n_nodes * 8                 # phiun c + r
+    b += 2 * n_nodes * 8                 # amp_y + ph_y
+    b += 2 * n_nodes * 8                 # flip + pjump
+    b += n_nodes * 4 + n_nodes * 1       # count + fix_c
+    b += 2 * nchannels * n_nodes * 8     # dlnA + dphi
+    b += 6 * nchannels * n_nodes * 8     # spline coeffs
+    n_fit_max = max(n_knots, n_nodes) if v4 else n_nodes
+    b += n_fit_max * 8 + 8 * n_fit_max * 8       # B_b + pcr
+    if v4:
+        b += n_knots * 8                          # t_knots
+        b += 2 * nchannels * n_knots * 8          # rk re/im
+        if band_len <= 0:
+            b += 6 * nchannels * n_knots * 8      # cR/cI
+        b += nchannels * N_sparse_t * 16          # r_pix
+    b += 2 * nchannels * M * N_sparse_t * 16      # r + dr
+    return b + 64
+
+
+def device_shared_limit(default=163840):
+    """Max dynamic shared memory per block on device 0 (bytes)."""
+    try:
+        import cupy as cp
+        return int(cp.cuda.Device(0).attributes[
+            "MaxSharedMemoryPerBlockOptin"])
+    except Exception:                                   # noqa: BLE001
+        return default
+
+
+def max_n_sparse_t(n_nodes, n_knots, nchannels, m_half, band_len, v4=True,
+                   margin=0.92):
+    """Largest N_sparse_t whose scorer shared footprint fits the device."""
+    lim = device_shared_limit() * margin
+    n = 8
+    while sighet_shared_bytes(n_nodes, n_knots, nchannels, m_half, n + 8,
+                              band_len, v4) < lim:
+        n += 8
+    return n
+
+
 def build(nt, nr, knots, band):
     # GPU NOTE: gb_signal_het_make_reference_kernel asks for
     # (Nt + n_sparse_fd + nt_layer)*16 bytes of dynamic shared memory, so a
@@ -76,17 +127,22 @@ def build(nt, nr, knots, band):
     edge_n = edge
     nt_layer = 512
     if USE_GPU:
-        nsp_max = int(os.environ.get("SHOOT_NSP_MAX", "256"))
+        nsp_max = int(os.environ.get(
+            "SHOOT_NSP_MAX", str(max_n_sparse_t(nr, knots, 3, 2, 0, v4=True))))
         stride_need = max(1, -(-(nt - 2 * edge_n) // nsp_max))
         nt_layer = int(os.environ.get("SHOOT_NTL",
                                       str(max(1, nt // stride_need))))
     shb = (nt + 512 + nt_layer) * 16
     nsp_est = (nt - 2 * edge_n) // max(1, nt // max(1, nt_layer))
-    sc_v4 = 2 * 3 * 5 * nsp_est * 16 + 3 * nsp_est * 16 + 65 * 1024
+    lim = device_shared_limit() if USE_GPU else 163840
+    b3 = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 0, v4=False)
+    b4 = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 0, v4=True)
+    b4b = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 16, v4=True)
     print(f"[grid] Nf={Nf} Nt={nt} nt_layer={nt_layer}")
-    print(f"[shmem] make_reference {shb/1024:.0f} KB | scorer "
-          f"~N_sparse_t={nsp_est}: v4 ~{sc_v4/1024:.0f} KB "
-          f"({'OK' if sc_v4 <= 163840 else 'TOO BIG -- lower SHOOT_NSP_MAX'})")
+    print(f"[shmem] device limit {lim/1024:.0f} KB | make_reference "
+          f"{shb/1024:.0f} KB | N_sparse_t={nsp_est}: v3 {b3/1024:.0f} KB, "
+          f"v4-pcr {b4/1024:.0f} KB, v4-band {b4b/1024:.0f} KB "
+          f"({'OK' if max(b3, b4, b4b) <= lim else 'TOO BIG'})")
     orbits = ESAOrbits(force_backend=BACKEND)
     ws = WDMSettings(Nf, nt, dt, t0=t0, min_freq=1e-4, max_freq=2e-2,
                      min_time=edge * Nf * dt, max_time=(nt - edge) * Nf * dt,

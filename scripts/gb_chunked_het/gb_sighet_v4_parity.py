@@ -89,6 +89,57 @@ def make_refs(n_ref=8):
     return refs
 
 
+
+def sighet_shared_bytes(n_nodes, n_knots, nchannels, m_half, N_sparse_t,
+                        band_len, v4=True):
+    """EXACT mirror of gb_sighet_v3/v4_shared_bytes in gb_tdi_on_the_fly.cu.
+
+    Kept in lockstep with the C++ so the harness can size N_sparse_t to the
+    device instead of guessing (N_PARAMS_MAX = 20 there).
+    """
+    M = 2 * m_half + 1
+    b = 2 * 20 * 8                       # cand + ref params
+    b += n_nodes * 8                     # t_nodes
+    b += 2 * nchannels * n_nodes * 16    # tdi cand + ref
+    b += 2 * n_nodes * 8                 # phiun c + r
+    b += 2 * n_nodes * 8                 # amp_y + ph_y
+    b += 2 * n_nodes * 8                 # flip + pjump
+    b += n_nodes * 4 + n_nodes * 1       # count + fix_c
+    b += 2 * nchannels * n_nodes * 8     # dlnA + dphi
+    b += 6 * nchannels * n_nodes * 8     # spline coeffs
+    n_fit_max = max(n_knots, n_nodes) if v4 else n_nodes
+    b += n_fit_max * 8 + 8 * n_fit_max * 8       # B_b + pcr
+    if v4:
+        b += n_knots * 8                          # t_knots
+        b += 2 * nchannels * n_knots * 8          # rk re/im
+        if band_len <= 0:
+            b += 6 * nchannels * n_knots * 8      # cR/cI
+        b += nchannels * N_sparse_t * 16          # r_pix
+    b += 2 * nchannels * M * N_sparse_t * 16      # r + dr
+    return b + 64
+
+
+def device_shared_limit(default=163840):
+    """Max dynamic shared memory per block on device 0 (bytes)."""
+    try:
+        import cupy as cp
+        return int(cp.cuda.Device(0).attributes[
+            "MaxSharedMemoryPerBlockOptin"])
+    except Exception:                                   # noqa: BLE001
+        return default
+
+
+def max_n_sparse_t(n_nodes, n_knots, nchannels, m_half, band_len, v4=True,
+                   margin=0.92):
+    """Largest N_sparse_t whose scorer shared footprint fits the device."""
+    lim = device_shared_limit() * margin
+    n = 8
+    while sighet_shared_bytes(n_nodes, n_knots, nchannels, m_half, n + 8,
+                              band_len, v4) < lim:
+        n += 8
+    return n
+
+
 def make_scaffold(backend="cpu", *, v3_n_nodes=64, v4_knots=128,
                   Nt=None, Nf=None, nt_layer=512, n_sparse_fd=512,
                   edge=None, tk=None):
@@ -119,120 +170,25 @@ def make_scaffold(backend="cpu", *, v3_n_nodes=64, v4_knots=128,
     # (V4_NSP_MAX / V4_NTL override). This is the constraint that the v4
     # Phase-2 moment contraction is designed to remove entirely.
     if gpu:
-        nsp_max = int(os.environ.get("V4_NSP_MAX", "256"))
+        # Size N_sparse_t to the DEVICE using the exact C++ formula (v4-PCR
+        # is the heaviest variant, so fit that one).
+        nsp_max = int(os.environ.get(
+            "V4_NSP_MAX",
+            str(max_n_sparse_t(v3_n_nodes, v4_knots, 3, 2, 0, v4=True))))
         nt_act = Nt - 2 * edge
         stride_need = max(1, -(-nt_act // nsp_max))
         nt_layer = int(os.environ.get("V4_NTL", str(max(1, Nt // stride_need))))
     shb = (Nt + n_sparse_fd + nt_layer) * 16
     nsp_est = (Nt - 2 * edge) // max(1, Nt // max(1, nt_layer))
-    M = 5
-    sc_v3 = 2 * 3 * M * nsp_est * 16 + 40 * 1024
-    sc_v4 = sc_v3 + 3 * nsp_est * 16 + (1 + 6 + 18) * 1024
-    print(f"[grid] Nf={Nf} Nt={Nt} nt_layer={nt_layer} edge={edge} "
-          f"taper={tk}")
-    print(f"[shmem] make_reference {shb/1024:.0f} KB "
-          f"({'OK' if shb <= 163840 else 'TOO BIG'}) | scorer ~N_sparse_t="
-          f"{nsp_est}: v3 {sc_v3/1024:.0f} KB, v4 {sc_v4/1024:.0f} KB "
-          f"({'OK' if sc_v4 <= 163840 else 'TOO BIG -- lower V4_NSP_MAX'})")
-    t_start = int(0.5 * YRSID_SI / dt) * dt
-    orbits = ESAOrbits(force_backend=backend)
-    wdm_set = WDMSettings(Nf, Nt, dt, t0=t_start, min_freq=1e-4,
-                          max_freq=2e-2, min_time=edge * Nf * dt,
-                          max_time=(Nt - edge) * Nf * dt,
-                          force_backend=backend)
-    chunked = GBWDMComputations(
-        wdm_set, t_ref=t_start, Nt_sub=128, n_pad=16, N_sparse=256,
-        N_cp_sig=0, N_cp_orbit=0, orbits=orbits,
-        tdi_config="2nd generation", force_backend=backend, d_d=0.0,
-        tdi_type="XYZ", tukey_alpha=2.0 * tk / Nt)
-    chunked.convert_to_ra_dec = False
-    sighet = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=n_sparse_fd, n_cp_build=93, nt_layer=nt_layer,
-        m_active_half_width=2, v3_n_nodes=v3_n_nodes, v4_knots=v4_knots)
-    ilo, ihi = wdm_set.ind_min_f, wdm_set.ind_max_f + 1
-    from lisatools.sensitivity import XYZ2SensitivityMatrix
-    xp = sighet.xp
-    invC = xp.ascontiguousarray(
-        xp.asarray(XYZ2SensitivityMatrix(wdm_set, model="scirdv1").invC,
-                   dtype=xp.float64))
-    return dict(chunked=chunked, sighet=sighet, wdm_set=wdm_set, invC=invC,
-                ilo=int(ilo), ihi=int(ihi), Nf=Nf, Nt=Nt, dt=dt,
-                t_start=t_start, xp=xp)
-
-
-def setup_ref(sc, ref):
-    """Inject the reference + build the in-model sig-het stash for it."""
-    xp = sc["xp"]
-    href = xp.zeros((3, sc["Nf"], sc["Nt"]))
-    sc["chunked"].fill_global_wdm(xp.asarray(ref)[None, :], href,
-                                  convert_to_ra_dec=False)
-    h_act = href[:, sc["ilo"]:sc["ihi"], sc["wdm_set"].active_slice_t]
-    holder = XpGridWDMHolder(xp, h_act, sc["invC"])
-    sc["sighet"].clear_in_model()
-    sc["sighet"].setup_in_model(holder, xp.asarray(ref)[None, :],
-                                np.zeros(1, dtype=np.int32))
-    return holder
-
-
-DIRS = [("f0", 1), ("lnA", 0), ("iota", 5), ("psi", 6), ("lam", 7)]
-
-
-def displace(ref, idx, s):
-    p = ref.copy()
-    if idx == 0:
-        p[0] *= np.exp(s)
-    else:
-        p[idx] += s
-    return p
-
-
-def make_candidates(ref, Tobs):
-    """10 deterministic trust-region candidates: the tier script's s0 per
-    direction at scales {1x, 3x}."""
-    drift_u = 1.0 / (2 * np.pi * Tobs)
-    s0 = {"f0": 0.05 * drift_u, "lnA": 0.03, "iota": 0.03, "psi": 0.03,
-          "lam": 0.01}
-    cands = []
-    for name, idx in DIRS:
-        for scale in (1.0, 3.0):
-            cands.append((f"{name}x{scale:g}",
-                          displace(ref, idx, scale * s0[name])))
-    return cands
-
-
-
-def asnp(a):
-    """Host numpy view of a numpy OR cupy array (GPU-safe).
-
-    The compiled engines return device arrays under a CUDA backend, and
-    ``np.asarray`` refuses to implicitly copy those -- everything that
-    leaves the kernel for host-side arithmetic goes through here.
-    """
-    get = getattr(a, "get", None)
-    return get() if callable(get) else np.asarray(a)
-
-
-def compiled_delta(sighet, p, *, v3_n_nodes=0, v4_knots=0):
-    """Raw delta d_h - 0.5*h_h through the compiled kernels, selected by
-    temporarily setting the routing knobs (v4 wins when both are set)."""
-    g = sighet._g
-    saved = (g["v3_n_nodes"], g["v4_knots"])
-    g["v3_n_nodes"], g["v4_knots"] = int(v3_n_nodes), int(v4_knots)
-    try:
-        sighet.get_ll(np.asarray(p)[None, :],
-                      data_index=np.zeros(1, dtype=np.int32))
-    finally:
-        g["v3_n_nodes"], g["v4_knots"] = saved
-    dh = float(asnp(sighet.last_d_h)[0])
-    hh = float(asnp(sighet.last_h_h)[0])
-    return dh - 0.5 * hh
-
-
-def main():
-    out_dir = os.environ.get("ENV_OUT", "./ratio_proto_out")
-    os.makedirs(out_dir, exist_ok=True)
-    golden_path = os.path.join(out_dir, "v4_parity_v3_golden.npz")
-    golden_mode = int(os.environ.get("GOLDEN", "0")) == 1
+    lim = device_shared_limit() if gpu else 163840
+    b3 = sighet_shared_bytes(v3_n_nodes, v4_knots, 3, 2, nsp_est, 0, v4=False)
+    b4 = sighet_shared_bytes(v3_n_nodes, v4_knots, 3, 2, nsp_est, 0, v4=True)
+    b4b = sighet_shared_bytes(v3_n_nodes, v4_knots, 3, 2, nsp_est, 16, v4=True)
+    print(f"[grid] Nf={Nf} Nt={Nt} nt_layer={nt_layer} edge={edge} taper={tk}")
+    print(f"[shmem] device limit {lim/1024:.0f} KB | make_reference "
+          f"{shb/1024:.0f} KB | N_sparse_t={nsp_est}: v3 {b3/1024:.0f} KB, "
+          f"v4-pcr {b4/1024:.0f} KB, v4-band {b4b/1024:.0f} KB "
+          f"({'OK' if max(b3, b4, b4b) <= lim else 'TOO BIG'})")
     backend = os.environ.get("BACKEND", "cpu")
     nr = int(os.environ.get("V4_NR", "64"))
     K = int(os.environ.get("V4_K", "128"))
