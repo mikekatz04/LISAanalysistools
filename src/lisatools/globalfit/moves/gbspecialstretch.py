@@ -2261,10 +2261,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         xp = self.xp
         di = xp.full(params_phys.shape[0], int(walker_ref), dtype=xp.int32)
         holder = model.analysis_container_arr
+        # Under GB_SIGHET_INMODEL=1 ``gb_wdm_comp`` is a
+        # GBSignalHetComputations wrapper, which forwards only the band-engine
+        # surface (fill_global_wdm / get_ll_wdm / get_swap_ll_wdm / grads /
+        # information_matrix) to its chunked delegate -- it has no
+        # __getattr__, so get_fstat_ll_wdm is not reachable through it. Unwrap
+        # to the delegate: the F-stat is scored against the parent ACA residual
+        # passed explicitly below, never against the in-model heterodyne
+        # reference, so the chunked delegate is the correct target whether or
+        # not a sig-het reference is currently active.
+        wdm_comp = getattr(self.gb_wdm_comp, "chunked", self.gb_wdm_comp)
         comp_method = (
             self.gb_fd_comp.get_fstat_ll_fd
             if isinstance(self._basis_settings, FDSettings)
-            else self.gb_wdm_comp.get_fstat_ll_wdm
+            else wdm_comp.get_fstat_ll_wdm
         )
         return _RoutedBandEngine.route_fstat_ll(
             comp_method, holder, params_phys,
