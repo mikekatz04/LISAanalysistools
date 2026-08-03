@@ -217,10 +217,18 @@ def build(nt, Nf, nr, knots, band, quiet=False):
     t0 = int(0.5 * YRSID_SI / dt) * dt
     edge = max(2, int(round(0.027 * nt)))
     tk = max(2, int(round(0.025 * nt)))
+    # nt_layer sets the sig-het sparse-time grid: stride = Nt // nt_layer,
+    # N_sparse_t = Nt_active // stride. On GPU it is fitted to the shared
+    # memory the enabled engines can afford. On CPU there is no such limit,
+    # so the old hard-coded 512 gave N_sparse_t ~ 510 at EVERY baseline --
+    # 2.5-4x the pixel work of the 127-204 the GPU actually runs, which
+    # silently handicapped sig-het in every CPU-vs-GPU comparison. BENCH_NTL
+    # was also trapped inside the GPU branch, so there was no way to correct
+    # it. It now applies to both paths.
     nt_layer = 512
     if USE_GPU:
         nt_layer, _ = fit_nt_layer(nt, edge, nr, knots)
-        nt_layer = int(os.environ.get("BENCH_NTL", str(nt_layer)))
+    nt_layer = int(os.environ.get("BENCH_NTL", str(nt_layer)))
     orbits = ESAOrbits(force_backend=BACKEND)
     ws = WDMSettings(Nf, nt, dt, t0=t0, min_freq=1e-4, max_freq=2e-2,
                      min_time=edge * Nf * dt, max_time=(nt - edge) * Nf * dt,
