@@ -189,7 +189,12 @@ def build(nt, nr, knots, band):
     b3 = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 0, v4=False)
     b4 = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 0, v4=True)
     b4b = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 16, v4=True)
-    print(f"[grid] Nf={Nf} Nt={nt} nt_layer={nt_layer}")
+    tobs_d = nt * Nf * dt / 86400.0
+    stride_eff = max(1, nt // max(1, nt_layer))
+    print(f"[grid] Nf={Nf} Nt={nt} nt_layer={nt_layer} | Tobs="
+          f"{tobs_d:.1f} d ({tobs_d/365.25:.2f} yr), pixel="
+          f"{Nf*dt/3600:.1f} h, sparse stride={stride_eff} "
+          f"({stride_eff*Nf*dt/3600:.1f} h)")
     print(f"[shmem] device limit {lim/1024:.0f} KB | make_reference "
           f"{shb/1024:.0f} KB | N_sparse_t={nsp_est}: v2 {b2/1024:.0f} KB, "
           f"v3 {b3/1024:.0f} KB, v4-pcr {b4/1024:.0f} KB, "
