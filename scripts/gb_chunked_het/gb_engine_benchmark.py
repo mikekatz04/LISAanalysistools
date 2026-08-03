@@ -343,6 +343,11 @@ def build_tier_batch(engc, holder, xp, ref, nt, Nf, dt, tiers):
                 dT = delta(engc, p) - d0
             rows.append(p)
             trueT.append(dT)
+    if len(rows) == 1:
+        print(f"  [warn] Nt={nt}: no tier candidate could be placed "
+              f"(displacements never reached |dlnL| > 0.05). Accuracy will "
+              f"be MISSING at this baseline -- it is below the regime the "
+              f"tiers are defined for.")
     return np.array(rows), np.array(trueT)
 
 
@@ -592,8 +597,47 @@ def report(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
         meta=np.array([[nt, meta[nt]["Tobs_yr"], meta[nt]["nsp"],
                         meta[nt]["stride_h"], meta[nt]["nr_tuned"]]
                        for nt in nts], dtype=float))
-    figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
-           meta, Nf, nr, knots, band)
+    try:
+        figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm,
+               occ, meta, Nf, nr, knots, band)
+    except Exception as exc:                                 # noqa: BLE001
+        # the measurement is the product; a plotting failure must never
+        # discard it -- the npz and the printed tables are already written
+        import traceback
+        print(f"\n[warn] figure failed ({type(exc).__name__}: {exc}); "
+              f"data is saved -- replot from the npz.")
+        traceback.print_exc()
+
+
+
+def finite_xy(xs, ys):
+    """Keep only pairs where BOTH are finite and positive (log axes)."""
+    xs, ys = np.asarray(xs, float), np.asarray(ys, float)
+    m = np.isfinite(xs) & np.isfinite(ys) & (xs > 0) & (ys > 0)
+    return xs[m], ys[m]
+
+
+def logsafe(ax, which="both"):
+    """Apply log scaling only if the axis actually holds positive data --
+    a run whose accuracy rows are all missing must still produce a figure."""
+    try:
+        if which in ("x", "both"):
+            xs = np.concatenate([np.asarray(l.get_xdata(), float)
+                                 for l in ax.get_lines()]) if ax.get_lines() \
+                else np.array([])
+            if np.isfinite(xs).any() and (xs[np.isfinite(xs)] > 0).any():
+                ax.set_xscale("log")
+        if which in ("y", "both"):
+            ys = np.concatenate([np.asarray(l.get_ydata(), float)
+                                 for l in ax.get_lines()]) if ax.get_lines() \
+                else np.array([])
+            if np.isfinite(ys).any() and (ys[np.isfinite(ys)] > 0).any():
+                ax.set_yscale("log")
+            else:
+                ax.text(0.5, 0.5, "no finite data", transform=ax.transAxes,
+                        ha="center", va="center", color=INK2, fontsize=9)
+    except Exception:                                        # noqa: BLE001
+        pass
 
 
 def style(ax):
@@ -648,7 +692,7 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
                 marker=MRK[n], color=CLR[n], lw=2, ms=6, ls=LS[n], label=n)
         ax.plot(tiers, [wm(err_nt[nt_ref][n][T])[0] for T in tiers],
                 color=CLR[n], lw=1, ls=":", alpha=0.85)
-    ax.set_xscale("log"); ax.set_yscale("log")
+    logsafe(ax)
     ax.set_xlabel("true $|\\Delta\\ln L|$ from reference, T")
     ax.set_ylabel("likelihood error")
     ax.set_title(f"C · tiered accuracy @ {meta[nt_ref]['Tobs_yr']:.2f} yr",
@@ -660,7 +704,8 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
         ax.plot(yrs, [wm(err_nt[nt][n][T_rep])[0] for nt in nts],
                 marker=MRK[n], color=CLR[n], lw=2, ms=7, ls=LS[n], label=n)
     ax.axhline(max(0.1, T_rep / 100.0), color=OKC, lw=1.6, ls="--")
-    ax.set_yscale("log"); ax.set_xlabel("observation time [yr]")
+    logsafe(ax, "y")
+    ax.set_xlabel("observation time [yr]")
     ax.set_ylabel(f"worst error at T={T_rep:.0f}")
     ax.set_title("D · does accuracy hold as the baseline grows?", fontsize=10,
                  loc="left")
@@ -674,8 +719,9 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
                    color=CLR[n], marker=MRK[n], edgecolor="white", lw=1.2,
                    zorder=3, label=n)
     ax.axhline(max(0.1, T_rep / 100.0), color=OKC, lw=1.6, ls="--")
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("cost [$\\mu$s]"); ax.set_ylabel(f"worst error T={T_rep:.0f}")
+    logsafe(ax)
+    ax.set_xlabel("cost [$\\mu$s]")
+    ax.set_ylabel(f"worst error T={T_rep:.0f}")
     ax.set_title("E · accuracy vs cost (size = baseline)", fontsize=10,
                  loc="left")
     ax.legend(frameon=False, fontsize=7, labelcolor=INK2, loc="upper right")
@@ -704,7 +750,7 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
                        edgecolor="white" if b_i else INK2,
                        lw=1.5 if b_i else 0.9, zorder=3)
         ax.axhline(max(0.1, T_rep / 100.0), color=OKC, lw=1.6, ls="--")
-        ax.set_xscale("log"); ax.set_yscale("log")
+        logsafe(ax)
         ax.set_xlabel("cost [$\\mu$s]")
         ax.set_ylabel(f"worst error T={T_rep:.0f}")
     ax.set_title("G · settings frontier (dark = more nodes)", fontsize=10,
