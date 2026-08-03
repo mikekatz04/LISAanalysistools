@@ -2872,6 +2872,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     params_new[k_idx, self._phi0_col] - phase_new
                 )
 
+        # Independently re-verify the scored deltas through get_add_ll, the
+        # same way _run_rj_step does via _debug_verify_rj_step. Replace was
+        # the ONLY move without this hook -- _debug_verify_replace_swap
+        # checks the RESIDUAL identity but never the likelihood, which is
+        # why a ledger defect here stays invisible until it shows up as
+        # propose-level drift.
+        self._debug_verify_replace_step(
+            buffer_obj, params_old, params_new, slots, N_vals, l_i,
+            delta_old_actual, delta_new, keep,
+        )
+
         delta_ll = cp.full(n_prop, -1e300)
         ok = keep & (delta_new > -1e299) & (delta_old > -1e299)
         delta_ll[ok] = delta_new[ok] - delta_old[ok]
@@ -2958,6 +2969,90 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             tracked = delta_new - delta_old_actual
             ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += tracked[accept]
             acc_counts[0][t_i[accept], w_i[accept], b_i[accept]] += 1
+
+    def _debug_verify_replace_step(self, buffer_obj, params_old, params_new,
+                                   slots, N_vals, leaf_inds,
+                                   delta_old_actual, delta_new, keep) -> None:
+        """At the REPLACE scoring site: re-verify both scored deltas through
+        ``get_add_ll`` on the exposed residual, the same way
+        :meth:`_debug_verify_rj_step` re-verifies births and deaths.
+
+        Walks the swap one stage at a time and reports the likelihood at
+        each, so a mismatch localises itself:
+
+        1. ``ll_expose`` -- add-delta of the OLD source once it is exposed
+           (``r' = r + h_old``). Must equal ``delta_old_actual``. A mismatch
+           means the old-side bookkeeping, not the swap.
+        2. ``ll_new`` -- add-delta of the FINAL new parameters (after the
+           phi0 write-back) against that same ``r'``. Must equal
+           ``delta_new``, which was scored PHASE-MAXIMISED on the
+           pre-write-back parameters. **A mismatch here means the phi0
+           write-back does not reproduce the maximising template** -- the
+           applied source differs from the scored one, so every accept
+           mis-reports its ll change by the difference.
+
+        Uses only ``get_add_ll`` and the buffer's own expose/restore path --
+        no likelihood is reimplemented. The residual is restored from a
+        snapshot, so this is a pure observation.
+        """
+        if not self.debug:
+            return
+        try:
+            xp = self.xp
+            k = _to_numpy(keep).astype(bool)
+            if not k.any():
+                return
+            idx = xp.asarray(np.where(k)[0])
+            di = slots[idx]
+            li = None if leaf_inds is None else leaf_inds[idx]
+            rows = xp.unique(xp.asarray(di).astype(xp.int64))
+            snapshot = buffer_obj.band_buffer[rows].copy()
+            try:
+                # Stage 1: expose the old source -> r' = r + h_old.
+                buffer_obj.remove_sources_from_band_buffer(
+                    params_old[idx], di, N_vals[idx], leaf_inds=li)
+                d_old_chk = buffer_obj.get_add_ll(
+                    params_old[idx], di, di, N_vals[idx], leaf_inds=li)
+                # Stage 2: the FINAL new parameters against the same r'.
+                d_new_chk = buffer_obj.get_add_ll(
+                    params_new[idx], di, di, N_vals[idx], leaf_inds=li)
+            finally:
+                buffer_obj.band_buffer[rows] = snapshot
+
+            def _rel(a, b):
+                fin = xp.isfinite(a) & xp.isfinite(b) & (b > -1e290)
+                if not bool(fin.any()):
+                    return float("nan")
+                return float(xp.max(xp.abs(a[fin] - b[fin])
+                                    / xp.maximum(xp.abs(b[fin]), 1.0)))
+
+            r_old = _rel(d_old_chk, delta_old_actual[idx])
+            r_new = _rel(d_new_chk, delta_new[idx])
+            logger.info(
+                "[GB_DEBUG %s] REPLACE old-side delta vs get_add_ll on the "
+                "exposed residual: max rel %.3e", self.name, r_old,
+            )
+            logger.info(
+                "[GB_DEBUG %s] REPLACE new-side delta (final phi0) vs "
+                "get_add_ll: max rel %.3e  <- large here means the phi0 "
+                "write-back does not reproduce the phase-maximised template",
+                self.name, r_new,
+            )
+            # Absolute ll scale of the swap, for comparison against the
+            # propose-level drift this move reports.
+            tracked = (delta_new[idx] - delta_old_actual[idx])
+            direct = (d_new_chk - d_old_chk)
+            fin = xp.isfinite(tracked) & xp.isfinite(direct)
+            if bool(fin.any()):
+                logger.info(
+                    "[GB_DEBUG %s] REPLACE tracked vs direct swap dll: max "
+                    "ABS dev %.3e (tracked |max| %.3e)", self.name,
+                    float(xp.max(xp.abs(tracked[fin] - direct[fin]))),
+                    float(xp.max(xp.abs(tracked[fin]))),
+                )
+        except Exception as e:  # debug-only: never break the sampler
+            logger.warning(
+                "[GB_DEBUG %s] verify_replace_step skipped: %r", self.name, e)
 
     def _debug_verify_replace_swap(self, buffer_obj, slot, r_before,
                                    p_old, p_new, slot_arr, n_arr, l_arr):
