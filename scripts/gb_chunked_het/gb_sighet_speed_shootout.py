@@ -120,6 +120,46 @@ def max_n_sparse_t(n_nodes, n_knots, nchannels, m_half, band_len, v4=True,
     return n
 
 
+
+def v2_shared_bytes(nchannels, m_half, Nt_layer, N_sparse_t, n_sparse_fd):
+    """EXACT mirror of the v2 in-kernel scorer's shared budget
+    (gb_signal_het_get_ll_in_kernel_wrap): consumer_offset + consumer_bytes.
+
+    v2 is the HEAVIEST engine here -- it carries THREE sparse arrays per
+    (channel, active-m) row plus a per-layer buffer, where v3/v4 carry two
+    -- so it, not v4, sets the maximum N_sparse_t that fits a device.
+    (build_bytes is the other term of the C++ max(); it is far smaller at
+    these sizes, so the consumer term governs.)
+    """
+    M = 2 * m_half + 1
+    consumer_offset = 20 * 8 + n_sparse_fd * 8 + nchannels * n_sparse_fd * 16
+    consumer_bytes = (nchannels * M * Nt_layer
+                      + 3 * nchannels * M * N_sparse_t) * 16
+    return consumer_offset + consumer_bytes
+
+
+def fit_nt_layer(nt, edge, nr, knots, nchannels=3, m_half=2, n_sparse_fd=512,
+                 margin=0.92):
+    """Largest sparse resolution (smallest stride) fitting EVERY engine."""
+    lim = device_shared_limit() * margin
+    for stride in range(1, nt):
+        if nt % stride:
+            continue
+        ntl = nt // stride
+        nsp = (nt - 2 * edge) // stride
+        if nsp < 8:
+            break
+        need = max(
+            v2_shared_bytes(nchannels, m_half, ntl, nsp, n_sparse_fd),
+            sighet_shared_bytes(nr, knots, nchannels, m_half, nsp, 0, v4=False),
+            sighet_shared_bytes(nr, knots, nchannels, m_half, nsp, 0, v4=True),
+            sighet_shared_bytes(nr, knots, nchannels, m_half, nsp, 16, v4=True),
+        )
+        if need <= lim:
+            return ntl, nsp
+    return 1, 8
+
+
 def build(nt, nr, knots, band):
     # GPU NOTE: gb_signal_het_make_reference_kernel asks for
     # (Nt + n_sparse_fd + nt_layer)*16 bytes of dynamic shared memory, so a
@@ -140,23 +180,22 @@ def build(nt, nr, knots, band):
     edge_n = edge
     nt_layer = 512
     if USE_GPU:
-        nsp_max = int(os.environ.get(
-            "SHOOT_NSP_MAX", str(max_n_sparse_t(nr, knots, 3, 2, 0, v4=True))))
-        stride_need = max(1, -(-(nt - 2 * edge_n) // nsp_max))
-        nt_layer = int(os.environ.get("SHOOT_NTL",
-                                      str(max(1, nt // stride_need))))
+        ntl_fit, _ = fit_nt_layer(nt, edge_n, nr, knots)
+        nt_layer = int(os.environ.get("SHOOT_NTL", str(ntl_fit)))
     shb = (nt + 512 + nt_layer) * 16
     nsp_est = (nt - 2 * edge_n) // max(1, nt // max(1, nt_layer))
     lim = device_shared_limit() if USE_GPU else 163840
+    b2 = v2_shared_bytes(3, 2, nt_layer, nsp_est, 512)
     b3 = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 0, v4=False)
     b4 = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 0, v4=True)
     b4b = sighet_shared_bytes(nr, knots, 3, 2, nsp_est, 16, v4=True)
     print(f"[grid] Nf={Nf} Nt={nt} nt_layer={nt_layer}")
     print(f"[shmem] device limit {lim/1024:.0f} KB | make_reference "
-          f"{shb/1024:.0f} KB | N_sparse_t={nsp_est}: v3 {b3/1024:.0f} KB, "
-          f"v4-pcr {b4/1024:.0f} KB, v4-band {b4b/1024:.0f} KB "
+          f"{shb/1024:.0f} KB | N_sparse_t={nsp_est}: v2 {b2/1024:.0f} KB, "
+          f"v3 {b3/1024:.0f} KB, v4-pcr {b4/1024:.0f} KB, "
+          f"v4-band {b4b/1024:.0f} KB"
           + ("" if not USE_GPU else
-             f" ({'OK' if max(b3, b4, b4b) <= lim else 'TOO BIG'})"))
+             f" ({'OK' if max(b2, b3, b4, b4b) <= lim else 'TOO BIG'})"))
     orbits = ESAOrbits(force_backend=BACKEND)
     ws = WDMSettings(Nf, nt, dt, t0=t0, min_freq=1e-4, max_freq=2e-2,
                      min_time=edge * Nf * dt, max_time=(nt - edge) * Nf * dt,
