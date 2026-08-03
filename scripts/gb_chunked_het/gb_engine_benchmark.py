@@ -267,81 +267,98 @@ def disp(ref, idx, s):
     return p
 
 
-def timeit(engine, holder, cands, kw, reps):
-    engine.get_ll(holder, cands, phase_maximize=False, **kw)
+def timed_and_scored(engine, holder, batch, kw, reps):
+    """Time a call AND take the accuracy sample from that same call.
+
+    Accuracy and speed must come from the SAME computational unit, or a
+    timing loop could be measuring different work than the one that was
+    validated (a degenerate config, a silently-clamped batch, a cached
+    path).  So:
+
+      1. one pre-loop call, whose OUTPUT is the accuracy sample;
+      2. the timing loop, running the identical call, outputs unused;
+      3. re-read the outputs afterwards and verify the last iteration
+         reproduces the first EXACTLY -- these kernels are deterministic,
+         so any nonzero drift means the timed calls were not the call we
+         scored, and the measurement is void.
+
+    Returns (us_per_candidate, deltas_from_first_call, drift).
+    """
+    def _deltas():
+        return (asnp(engine.d_h_out).real.astype(float)
+                - 0.5 * asnp(engine.h_h_out).real.astype(float))
+
+    engine.get_ll(holder, batch, phase_maximize=False, **kw)
     sync()
+    first = _deltas().copy()
     ts = []
     for _ in range(reps):
         t = time.perf_counter()
-        engine.get_ll(holder, cands, phase_maximize=False, **kw)
+        engine.get_ll(holder, batch, phase_maximize=False, **kw)
         sync()
         ts.append(time.perf_counter() - t)
-    return min(ts) / cands.shape[0] * 1e6
+    last = _deltas()
+    n = min(len(first), len(last))
+    drift = float(np.max(np.abs(first[:n] - last[:n]))) if n else 0.0
+    return min(ts) / batch.shape[0] * 1e6, first, drift
+
+
+
+def build_tier_batch(engc, holder, xp, ref, nt, Nf, dt, tiers):
+    """Row 0 = the reference point; rows 1.. = candidates placed at each
+    tier (true |dlnL| = T) in each direction.
+
+    Scoring this ONE batch gives every engine its delta-from-reference for
+    every tier -- so the accuracy sample and the timed call are literally
+    the same kernel launch.  The placement uses the chunked reference
+    engine, which also supplies the TRUE dlnL each row sits at.
+    """
+    def delta(e, p):
+        z = np.zeros(1, dtype=np.int32)
+        e.get_ll(holder, xp.asarray(p)[None, :], phase_maximize=False,
+                 data_index=z, noise_index=z, N_vals=None,
+                 waveform_kwargs={})
+        return (float(asnp(e.d_h_out)[0]) - 0.5 * float(asnp(e.h_h_out)[0]))
+
+    drift = 1.0 / (2 * np.pi * (nt * Nf * dt))
+    DIRS = [(1, 0.05 * drift), (0, 0.03), (5, 0.03), (6, 0.03), (7, 0.01)]
+    d0 = delta(engc, ref)
+    rows, trueT = [ref.copy()], [0.0]
+    for idx, s0 in DIRS:
+        s, tries = s0, 0
+        dl = delta(engc, disp(ref, idx, s)) - d0
+        while abs(dl) < 0.05 and tries < 3:
+            s *= 10.0
+            dl = delta(engc, disp(ref, idx, s)) - d0
+            tries += 1
+        if abs(dl) < 0.05:
+            continue
+        for T in tiers:
+            sc = s * np.sqrt(T / abs(dl))
+            p = disp(ref, idx, sc)
+            dT = delta(engc, p) - d0
+            if abs(dT) > 0.05:
+                sc *= np.sqrt(T / abs(dT))
+                p = disp(ref, idx, sc)
+                dT = delta(engc, p) - d0
+            rows.append(p)
+            trueT.append(dT)
+    return np.array(rows), np.array(trueT)
+
+
+def pad_batch(rows, nb, xp):
+    """Grow (or truncate) the tier rows to the requested batch size by
+    repeating them; accuracy always reads the first len(rows) entries."""
+    if nb <= rows.shape[0]:
+        return xp.asarray(rows[:nb]), nb
+    reps = int(np.ceil(nb / rows.shape[0]))
+    return xp.asarray(np.tile(rows, (reps, 1))[:nb]), rows.shape[0]
 
 
 def sync():
     if USE_GPU:
         import cupy as cp
         cp.cuda.runtime.deviceSynchronize()
-
-
-def measure_accuracy(ws, chunked, engs, Nf, dt, nt, tiers, refs):
-    """Tiered |dlnL| error for each engine, vs the chunked reference."""
-    xp = chunked.xp
-    ilo, ihi = ws.ind_min_f, ws.ind_max_f + 1
-    err = {n: {T: [] for T in tiers} for n in engs}
-    drift = 1.0 / (2 * np.pi * (nt * Nf * dt))
-    DIRS = [(1, 0.05 * drift), (0, 0.03), (5, 0.03), (6, 0.03), (7, 0.01)]
-    for ref in refs:
-        href = xp.zeros((3, Nf, nt))
-        chunked.fill_global_wdm(xp.asarray(ref)[None, :], href,
-                                convert_to_ra_dec=False)
-        h_act = xp.ascontiguousarray(href[:, ilo:ihi, ws.active_slice_t])
-        invC = xp.zeros((3, 3) + h_act.shape[1:])
-        for c in range(3):
-            invC[c, c] = 1.0
-        holder = Holder(xp, h_act, invC)
-        engc = WDMBandLikelihoodEngine(chunked, ws, nchannels=3,
-                                       tdi_channel_setup="XYZ")
-        eng_of = {}
-        for name, sh in engs.items():
-            sh.clear_in_model()
-            sh.setup_in_model(holder, xp.asarray(ref)[None, :],
-                              np.zeros(1, np.int32))
-            eng_of[name] = WDMBandLikelihoodEngine(sh, ws, nchannels=3,
-                                                   tdi_channel_setup="XYZ")
-
-        def delta(e, p):
-            z = np.zeros(1, dtype=np.int32)
-            e.get_ll(holder, xp.asarray(p)[None, :], phase_maximize=False,
-                     data_index=z, noise_index=z, N_vals=None,
-                     waveform_kwargs={})
-            return (float(asnp(e.d_h_out)[0])
-                    - 0.5 * float(asnp(e.h_h_out)[0]))
-
-        d0 = {"chunked": delta(engc, ref)}
-        for n in eng_of:
-            d0[n] = delta(eng_of[n], ref)
-        for idx, s0 in DIRS:
-            s, tries = s0, 0
-            dl = delta(engc, disp(ref, idx, s)) - d0["chunked"]
-            while abs(dl) < 0.05 and tries < 3:
-                s *= 10.0
-                dl = delta(engc, disp(ref, idx, s)) - d0["chunked"]
-                tries += 1
-            if abs(dl) < 0.05:
-                continue
-            for T in tiers:
-                sc = s * np.sqrt(T / abs(dl))
-                p = disp(ref, idx, sc)
-                dT = delta(engc, p) - d0["chunked"]
-                if abs(dT) > 0.05:
-                    sc *= np.sqrt(T / abs(dT))
-                    p = disp(ref, idx, sc)
-                    dT = delta(engc, p) - d0["chunked"]
-                for n in eng_of:
-                    err[n][T].append(abs((delta(eng_of[n], p) - d0[n]) - dT))
-    return err
 
 
 def main():
@@ -388,36 +405,67 @@ def main():
             invC[c, c] = 1.0
         holder = Holder(xp, h_act, invC)
 
-        # ---- speed ------------------------------------------------------
-        rng = np.random.default_rng(7)
-        for nb in batches:
-            cands = np.repeat(ref0[None, :], nb, axis=0)
-            cands[:, 0] *= np.exp(0.01 * rng.standard_normal(nb))
-            cands[:, 5] += 0.01 * rng.standard_normal(nb)
-            cands = xp.asarray(cands)
-            z = np.zeros(nb, dtype=np.int32)
-            kw = dict(data_index=z, noise_index=z, N_vals=None,
-                      waveform_kwargs={})
-            e = WDMBandLikelihoodEngine(chunked, ws, nchannels=3,
-                                        tdi_channel_setup="XYZ")
-            speed[(nt, nb, "chunked")] = timeit(e, holder, cands, kw, reps)
+        # ---- speed AND accuracy from the SAME calls ---------------------
+        # For each reference: build one batch whose row 0 is the reference
+        # and whose remaining rows sit at each accuracy tier. Every engine
+        # scores that batch; the pre-loop call supplies the accuracy sample,
+        # the loop supplies the timing, and a post-loop re-read proves the
+        # timed calls reproduced the scored call exactly.
+        engc = WDMBandLikelihoodEngine(chunked, ws, nchannels=3,
+                                       tdi_channel_setup="XYZ")
+        err_nt[nt] = {n: {T: [] for T in tiers} for n in ENGINES[1:]}
+        drift_max = 0.0
+        for ri, ref in enumerate(refs):
+            hr = xp.zeros((3, Nf, nt))
+            chunked.fill_global_wdm(xp.asarray(ref)[None, :], hr,
+                                    convert_to_ra_dec=False)
+            ha = xp.ascontiguousarray(hr[:, ilo:ihi, ws.active_slice_t])
+            iC = xp.zeros((3, 3) + ha.shape[1:])
+            for c in range(3):
+                iC[c, c] = 1.0
+            hold_r = Holder(xp, ha, iC)
+            engc_r = WDMBandLikelihoodEngine(chunked, ws, nchannels=3,
+                                             tdi_channel_setup="XYZ")
+            rows, trueT = build_tier_batch(engc_r, hold_r, xp, ref, nt, Nf,
+                                           dt, tiers)
+            eng_of = {"chunked": engc_r}
             for name, sh in engs.items():
                 sh.clear_in_model()
-                sh.setup_in_model(holder, xp.asarray(ref0)[None, :],
+                sh.setup_in_model(hold_r, xp.asarray(ref)[None, :],
                                   np.zeros(1, np.int32))
-                ee = WDMBandLikelihoodEngine(sh, ws, nchannels=3,
-                                             tdi_channel_setup="XYZ")
-                try:
-                    speed[(nt, nb, name)] = timeit(ee, holder, cands, kw, reps)
-                except Exception as exc:                     # noqa: BLE001
-                    print(f"  [{name}] batch {nb} FAILED: {exc}")
-                    speed[(nt, nb, name)] = np.nan
-            print("[speed] batch %6d: " % nb + " ".join(
-                f"{n}={speed[(nt, nb, n)]:.1f}" for n in ENGINES) + " us")
-
-        # ---- accuracy ---------------------------------------------------
-        err_nt[nt] = measure_accuracy(ws, chunked, engs, Nf, dt, nt, tiers,
-                                      refs)
+                eng_of[name] = WDMBandLikelihoodEngine(
+                    sh, ws, nchannels=3, tdi_channel_setup="XYZ")
+            for nb in batches:
+                batch, n_acc = pad_batch(rows, nb, xp)
+                z = np.zeros(batch.shape[0], dtype=np.int32)
+                kw = dict(data_index=z, noise_index=z, N_vals=None,
+                          waveform_kwargs={})
+                for name in ENGINES:
+                    try:
+                        us, dv, dr = timed_and_scored(eng_of[name], hold_r,
+                                                      batch, kw, reps)
+                    except Exception as exc:                 # noqa: BLE001
+                        print(f"  [{name}] nb={nb} FAILED: {exc}")
+                        speed[(nt, nb, name)] = np.nan
+                        continue
+                    drift_max = max(drift_max, dr)
+                    if ri == 0:
+                        speed[(nt, nb, name)] = us
+                    # accuracy from the largest batch only (identical
+                    # arithmetic at every batch; one sample is enough)
+                    if nb == batches[-1] and name != "chunked":
+                        base = dv[0]
+                        for k in range(1, min(n_acc, len(dv))):
+                            T = min(tiers, key=lambda t: abs(t - abs(trueT[k])))
+                            err_nt[nt][name][T].append(
+                                abs((dv[k] - base) - trueT[k]))
+                if ri == 0:
+                    print("[speed] batch %6d: " % nb + " ".join(
+                        f"{n}={speed[(nt, nb, n)]:.1f}" for n in ENGINES)
+                        + " us")
+        print(f"[verify] max |first-call - last-call| over every timed "
+              f"loop = {drift_max:.3e}  "
+              f"({'OK: timed == scored' if drift_max == 0.0 else 'NONZERO -- timing and accuracy are NOT the same call'})")
         print("[acc  ] worst |dlnL| @T=%d: " % T_rep + " ".join(
             f"{n}={wm(err_nt[nt][n][T_rep])[0]:.2e}" for n in ENGINES[1:]))
 
@@ -432,10 +480,6 @@ def main():
         # ---- settings frontier ------------------------------------------
         if do_settings:
             nb_s = batches[-1]
-            cands = xp.asarray(np.repeat(ref0[None, :], nb_s, axis=0))
-            z = np.zeros(nb_s, dtype=np.int32)
-            kw = dict(data_index=z, noise_index=z, N_vals=None,
-                      waveform_kwargs={})
             for nr_i in nr_ladder(nt, Nf, dt, base=nr):
                 for K_i in (max(64, knots // 2), knots, min(512, knots * 2)):
                     for band_i in (0, band):
@@ -451,11 +495,17 @@ def main():
                                               np.zeros(1, np.int32))
                             en = WDMBandLikelihoodEngine(
                                 sh, ws, nchannels=3, tdi_channel_setup="XYZ")
-                            cost = timeit(en, holder, cands, kw, max(1, reps // 2))
-                            e1 = measure_accuracy(ws, chunked, {"c": sh}, Nf,
-                                                  dt, nt, [T_rep],
-                                                  refs[:max(1, n_ref // 2)])
-                            w_, m_ = wm(e1["c"][T_rep])
+                            rows_s, trueT_s = build_tier_batch(
+                                engc, holder, xp, ref0, nt, Nf, dt, [T_rep])
+                            b_s, n_as = pad_batch(rows_s, nb_s, xp)
+                            z_s = np.zeros(b_s.shape[0], dtype=np.int32)
+                            kw_s = dict(data_index=z_s, noise_index=z_s,
+                                        N_vals=None, waveform_kwargs={})
+                            cost, dv_s, _ = timed_and_scored(
+                                en, holder, b_s, kw_s, max(1, reps // 2))
+                            e_s = [abs((dv_s[k] - dv_s[0]) - trueT_s[k])
+                                   for k in range(1, min(n_as, len(dv_s)))]
+                            w_, m_ = wm(e_s)
                             settings[(nt, nr_i, K_i, band_i)] = dict(
                                 cost=cost, med=m_, worst=w_)
                             print(f"[set  ] nr={nr_i:3d} K={K_i:3d} "
