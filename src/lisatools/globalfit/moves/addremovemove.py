@@ -120,6 +120,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.moves = moves_tmp
         self.move_weights = move_weights / np.sum(move_weights)
 
+        # `propose` is never called on the inner moves -- this move drives them
+        # through `get_proposal` directly -- so nothing else initialises their
+        # acceptance counters. Do it here so `sub_moves` can promise that
+        # `acceptance_fraction` is valid on every child.
+        for inner_move in self.moves:
+            inner_move.accepted = np.zeros((self.ntemps, self.nwalkers))
+            inner_move.num_proposals = 0
+
         self.temperature_controls = [None for _ in range(self.nleaves_max)]
         for i in range(self.nleaves_max):
             if betas_all is not None:
@@ -162,21 +170,24 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     tmp_move.periodic = periodic
     
     @property
-    def inner_moves_acceptance_fractions(self):
+    def sub_moves(self):
+        """Inner moves driven by this move; each keeps its own acceptance counters."""
+        return self.moves
+
+    def _record_inner_acceptance(self, inner_move, accepted):
+        """Fold one repeat's result into ``inner_move``'s standard counters.
+
+        Args:
+            inner_move (:class:`eryn.moves.Move`): The move that was drawn.
+            accepted (np.ndarray): Boolean acceptance for this repeat, shape
+                ``(ntemps_full, nwalkers)``. Only the temperatures this move
+                uses are ever set, so the tail is dropped.
+
         """
-        Return the acceptance fractions for each inner move at each step.
-        """
-        if hasattr(self, "_inner_moves_acceptance_fractions"):
-            return self._inner_moves_acceptance_fractions
-        
-        return None
-    
-    @inner_moves_acceptance_fractions.setter
-    def inner_moves_acceptance_fractions(self, acceptance_fractions):
-        """
-        Set the acceptance fractions for each inner move at each step.
-        """
-        self._inner_moves_acceptance_fractions = acceptance_fractions
+        # the counter array is float: `bool += bool` saturates at 1 and would
+        # cap every per-move count at a single accept per walker
+        inner_move.accepted += accepted[: self.ntemps]
+        inner_move.num_proposals += 1
 
     def free_gpu_memory(self):
         if self.xp is not np:
@@ -422,12 +433,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         leaves_random_order = np.random.permutation(np.arange(self.nleaves_max))
 
         ring_buffer = dict() # prepare a ring buffer to store the proposed points to be submitted to an eventual flow proposal.
-        
-        inner_moves_accepted = dict() # prepare a dictionary to store the accepted fraction for each inner move
-        inner_moves_counter = dict() # prepare a dictionary to store the number of proposals for each inner move
-        for move in self.moves:
-            inner_moves_accepted[move.__class__.__name__] = None
-            inner_moves_counter[move.__class__.__name__] = 0
 
         for leaf in leaves_random_order:
 
@@ -660,15 +665,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # print(self.accepted[0])
                 self.num_proposals += 1
 
-                inner_moves_counter[move_name] += 1
-                if inner_moves_accepted[move_name] is None:
-                    # int, not bool: `bool += bool` saturates at 1 and would cap
-                    # every per-move acceptance count at a single accept per walker.
-                    # Only the used temperatures (:self.ntemps) are ever set in
-                    # `accepted`; track those and drop the ntemps_full tail.
-                    inner_moves_accepted[move_name] = accepted[: self.ntemps].astype(int)
-                else:
-                    inner_moves_accepted[move_name] += accepted[: self.ntemps]
+                self._record_inner_acceptance(move_here, accepted)
 
                 # TODO: include PSD likelihood in swaps?
                 # temperature swaps
@@ -799,30 +796,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         self.free_gpu_memory()
 
-        # mean acceptance fraction per used temperature (averaged over walkers);
-        # shape (self.ntemps,) per move, or the -1. sentinel if the move was never drawn.
-        latest_acceptance_fraction = {
-            k: inner_moves_accepted[k].mean(axis=1) / inner_moves_counter[k]
-            if inner_moves_counter[k] > 0
-            else -1.
-            for k in inner_moves_accepted.keys()
-        }
-
-        if hasattr(self, "_inner_moves_acceptance_fractions"):
-            for move in self.moves:
-                move_name = move.__class__.__name__
-                self._inner_moves_acceptance_fractions[move_name].append(
-                    latest_acceptance_fraction[move_name]
-                    )
-        else:
-            self._inner_moves_acceptance_fractions = dict()
-            for move in self.moves:
-                move_name = move.__class__.__name__
-                self._inner_moves_acceptance_fractions[move_name] = [
-                    latest_acceptance_fraction[move_name]
-                ]
-
-        logger.debug(f"inner moves acceptance fractions: {latest_acceptance_fraction}. elapsed: {time.time() - tic}")
+        logger.debug(
+            "inner moves acceptance fractions: "
+            f"{ {m.__class__.__name__: float(np.mean(m.acceptance_fraction[0])) for m in self.moves} }. "
+            f"elapsed: {time.time() - tic}"
+        )
         logger.debug(f"mean accepted fraction: {np.mean(self.accepted[0] / self.num_proposals)}. elapsed: {time.time() - tic}")
 
 
