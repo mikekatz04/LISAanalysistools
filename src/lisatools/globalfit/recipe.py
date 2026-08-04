@@ -53,6 +53,8 @@ from .moves import (
     ResidualAddOneRemoveOneMove,
     SOBBHChunkedLikeMove,
     GBSpecialRJPriorMove,
+    GBSpecialRJFStatGridMove,
+    GBSpecialStretchMove,
     GBSpecialRJSerialSearchMCMC,
     GBSpecialRJRefitMove,
     VGBSpecialStretchMove,
@@ -2447,10 +2449,44 @@ def build_gb_moves(
         {"gb": _custom_birth} if _custom_birth is not None else gpu_priors
     )
 
+    # In-move F-stat grid fit (GB_FSTAT_FIT_IN_MOVE=1): swap the RJ birth
+    # move class so its setup() fits the comb/peak grids against the live
+    # residual instead of consuming a prebuilt offline npz. Move NAMES are
+    # unchanged, so stage lists, pop_move, pe_move_names and the
+    # leaf_cap_update designation all keep working untouched.
+    _fit_in_move = bool(getattr(gb_info, "fstat_fit_in_move", False))
+    _RJBirth = GBSpecialRJFStatGridMove if _fit_in_move else GBSpecialRJPriorMove
+    _fit_kwargs = {}
+    if _fit_in_move:
+        _fit_dir = getattr(gb_info, "fstat_fit_dir", "") or os.path.join(
+            os.path.dirname(str(general_info.main_file_path)), "gb_fstat_fit")
+        _fit_kwargs = dict(
+            fstat_fit_dir=_fit_dir,
+            fstat_refit_every=int(getattr(gb_info, "fstat_refit_every", 0)),
+            fstat_fit_kwargs=dict(
+                A_lims=gb_info.A_lims,
+                mc_lims=list(getattr(gb_info, "m_chirp_lims", None) or []),
+                dist_lims=(gb_info.dist_lims
+                           if getattr(gb_info, "use_distance", False) else None),
+                fdot_astro_ratio_max=(
+                    gb_info.fdot_astro_ratio_max
+                    if getattr(gb_info, "use_fdot_astro", False) else None),
+            ),
+        )
+        if _custom_birth is not None:
+            logger.warning(
+                "GB_FSTAT_FIT_IN_MOVE=1 supersedes the supplied "
+                "rj_birth_distribution; drop a prebuilt grid into "
+                "%s/<move name>/epoch_0000/ to have it loaded instead.",
+                _fit_dir,
+            )
+
     #* ============================================= SEARCH MOVES =============================================
-    gb_search_prune_move = GBSpecialRJPriorMove(
+    gb_search_prune_move = _RJBirth(
         *gb_move_args,
-        rj_proposal_distribution=_rj_birth_prop,
+        rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
+        **({"is_rj_prop": True} if _fit_in_move else {}),
+        **_fit_kwargs,
         name="rj_prior_search",
         use_prior_removal=True,
         phase_maximize=_rj_phase_max,
@@ -2528,6 +2564,30 @@ def build_gb_moves(
             **{**gb_move_kwargs, "leaf_cap_update": False},
         )
         gb_replace_move.accepted = np.zeros((ntemps, nwalkers))
+    # Pure IN-MODEL move (2026-08-04): no RJ step at all -- ``is_rj_prop=False``
+    # skips the birth/death branch in the round loop, so every pick round is
+    # just ``num_repeat_proposals`` in-model repeats on the live sources.
+    # Placed between the fstat-birth move and the removal move so freshly-born
+    # sources get a full refinement pass to climb the likelihood BEFORE
+    # ``rj_prior_removal`` judges them for death (a source still sitting at its
+    # birth coordinates looks far more deletable than the same source after it
+    # has walked onto its peak).
+    gb_in_model_move = None
+    if _gb_mode_search and getattr(gb_info, "search_in_model", False):
+        gb_in_model_move = GBSpecialStretchMove(
+            *gb_move_args,
+            rj_proposal_distribution=None,
+            is_rj_prop=False,          # THE switch: in-model repeats only
+            name="in_model",
+            phase_maximize=False,      # in-model scoring is at the actual phase
+            run_swaps=False,
+            gpus=[],
+            # Cap counters advance exactly once per iteration on ``rj_prior``;
+            # this move must not touch them (it changes no dimensions).
+            **{**gb_move_kwargs, "leaf_cap_update": False},
+        )
+        gb_in_model_move.accepted = np.zeros((ntemps, nwalkers))
+
     gb_prior_removal_move = None
     if _gb_mode_search and getattr(gb_info, "search_prior_removal", False):
         gb_prior_removal_move = GBSpecialRJPriorMove(
@@ -2554,9 +2614,11 @@ def build_gb_moves(
     # 2026-08-01). In PE mode phase_maximize is therefore forced off on the
     # birth instance (under GB_MODE=search the seeded GB_RJ_PHASE_MAXIMIZE
     # keeps the search behavior unchanged).
-    gb_pe_prior_move = GBSpecialRJPriorMove(
+    gb_pe_prior_move = _RJBirth(
         *gb_move_args,
-        rj_proposal_distribution=_rj_birth_prop,
+        rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
+        **({"is_rj_prop": True} if _fit_in_move else {}),
+        **_fit_kwargs,
         name="rj_prior",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=_rj_phase_max if _gb_mode_search else False,
@@ -2587,6 +2649,8 @@ def build_gb_moves(
     gb_pe_moves = [gb_pe_prior_move, gb_pe_fstat_mcmc_move]
     if gb_replace_move is not None:
         gb_pe_moves.append(gb_replace_move)
+    if gb_in_model_move is not None:
+        gb_pe_moves.append(gb_in_model_move)
     if gb_prior_removal_move is not None:
         gb_pe_moves.append(gb_prior_removal_move)
     if _refit_available:

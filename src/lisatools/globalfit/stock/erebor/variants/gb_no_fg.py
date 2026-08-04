@@ -252,6 +252,24 @@ class GBNoFgGBSettings(GBSettings):
     n_cp_orbit: int = dataclasses.field(
         default_factory=env_default("CHUNKED_N_CP_ORBIT", 32, int)
     )
+    # In-move F-stat grid fit (GBSpecialRJFStatGridMove). Opt-in: when set,
+    # the RJ birth move fits its own comb/peak grids inside setup() against
+    # the live residual on its first hit, so a run needs no offline
+    # plot_fstat_proposal_mojito.py prep. Scalars only (deepcopy/pickle-safe).
+    # Pure in-model move inserted between the fstat-birth and removal moves
+    # (GB_MODE=search only). Off by default -- opt in with GB_SEARCH_IN_MODEL=1.
+    search_in_model: bool = dataclasses.field(
+        default_factory=env_default("GB_SEARCH_IN_MODEL", False, bool)
+    )
+    fstat_fit_in_move: bool = dataclasses.field(
+        default_factory=env_default("GB_FSTAT_FIT_IN_MOVE", False, bool)
+    )
+    fstat_refit_every: int = dataclasses.field(
+        default_factory=env_default("GB_FSTAT_REFIT_EVERY", 0, int)
+    )
+    fstat_fit_dir: str = dataclasses.field(
+        default_factory=env_default("GB_FSTAT_FIT_DIR", "", str)
+    )
     # Sig-het in-model scoring (chunked-het delegate for RJ/fills/swaps).
     # TODO(sighet cleanup): these three knobs are the temporary switch for the
     # signal-heterodyne in-model likelihood. Sig-het is CPU-only right now
@@ -1093,6 +1111,7 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
         _anchor = "rj_prior" if "rj_prior" in _names else None
         if _anchor is None and (
             getattr(gb_info, "search_rj_replace", False)
+            or getattr(gb_info, "search_in_model", False)
             or getattr(gb_info, "search_prior_removal", False)
         ):
             logger.warning(
@@ -1107,6 +1126,15 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
             ):
                 recipe.add_move("rj_replace", after=_anchor, branch="gb")
                 _anchor = "rj_replace"
+            # Pure in-model refinement BEFORE the removal move: freshly-born
+            # sources get a full repeat block to climb the likelihood before
+            # rj_prior_removal judges them for death.
+            if (
+                getattr(gb_info, "search_in_model", False)
+                and "in_model" not in recipe.move_names()
+            ):
+                recipe.add_move("in_model", after=_anchor, branch="gb")
+                _anchor = "in_model"
             if (
                 getattr(gb_info, "search_prior_removal", False)
                 and "rj_prior_removal" not in recipe.move_names()

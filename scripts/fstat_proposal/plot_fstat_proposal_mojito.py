@@ -95,14 +95,97 @@ import time
 import numpy as np
 
 
-def _to_host(x):
-    """cupy/numpy array -> host numpy. No-op on numpy (GPU-safety helper).
+# Host transfer + every compute core now live in the library
+# (lisatools.sampling.fstat_gridfit); this script is the plotting /
+# data-build wrapper around them. Do NOT reintroduce local copies.
+from lisatools.sampling.fstat_gridfit import (  # noqa: E402
+    ckpt_clear as _ckpt_clear,
+    run_comb_scan as _lib_run_comb_scan,
+    run_stacked_peak_sweep as _lib_stacked_peak_sweep,
+    select_comb_peaks as _lib_select_comb_peaks,
+)
+from lisatools.sampling.fstat_proposal import _host as _to_host  # noqa: E402
 
-    ``get_fstat_ll_wdm`` and ``FStatProposal4D`` return cupy arrays on the
-    CUDA backends; this script stores/plots/serializes with numpy, so every
-    kernel/proposal output is funneled through here.
-    """
-    return x.get() if hasattr(x, "get") else np.asarray(x)
+
+def _call_fstat(gb_wdm_comp, wdm_holder):
+    """The injectable kernel entry the library sweeps drive."""
+    return lambda params: gb_wdm_comp.get_fstat_ll_wdm(params, wdm_holder)
+
+
+def select_comb_peaks(f0_nodes, F_max, gb_info, spacing, xp):
+    """gb_info-flavoured shim over the library selector."""
+    return _lib_select_comb_peaks(f0_nodes, F_max, gb_info.band_edges,
+                                  spacing, xp)
+
+
+def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
+                  out_path, cat_sources, cache_path=None):
+    """Library comb scan + this script's comb figure."""
+    f0_nodes, F_max, peaks, extras = _lib_run_comb_scan(
+        _call_fstat(gb_wdm_comp, wdm_holder), xp=gb_wdm_comp.xp,
+        Tobs=float(general_info.Tobs), band_edges_hz=gb_info.band_edges,
+        f0_lims_hz=gb_info.f0_lims,
+        mc_lims=getattr(gb_info, "m_chirp_lims", None),
+        cache_path=cache_path,
+    )
+    try:
+        _plot_comb(f0_nodes, F_max, src, cat_sources, out_path,
+                   float(general_info.Tobs))
+    except Exception as e:  # pragma: no cover - figure is cosmetic
+        print(f"[plot] comb figure failed (data cached): {e}", flush=True)
+    return f0_nodes, F_max, peaks, extras
+
+
+def _plot_comb(f0_nodes, F_max, src, cat_sources, out_path, Tobs):
+    """F(f0) vs the catalogue comb + proposal draws."""
+    import matplotlib.pyplot as plt
+
+    rng_s = np.random.default_rng(11)
+
+    def _draw_f0(w_cells, n):
+        w = np.clip(w_cells, 0, None)
+        cdf = np.cumsum(w)
+        cdf /= cdf[-1]
+        idx = np.searchsorted(cdf, rng_s.random(n), side="right")
+        idx = np.clip(idx, 0, len(w) - 1)
+        u = rng_s.random(n)
+        return f0_nodes[idx] + u * (f0_nodes[idx + 1] - f0_nodes[idx])
+
+    g = F_max - F_max.max()
+    s_exp = _draw_f0(0.5 * (np.exp(g[:-1]) + np.exp(g[1:])), 3000)
+    s_lin = _draw_f0(0.5 * (F_max[:-1] + F_max[1:]), 3000)
+    y_exp = np.interp(s_exp, f0_nodes, F_max) * 10 ** rng_s.uniform(
+        0.10, 0.45, s_exp.size)
+    y_lin = np.interp(s_lin, f0_nodes, F_max) * 10 ** rng_s.uniform(
+        0.10, 0.45, s_lin.size)
+
+    fig, ax = plt.subplots(figsize=(12, 4.8))
+    ax.semilogy(f0_nodes, np.clip(F_max, 1e-3, None), "-", lw=0.7,
+                color="C0", label="max-over-sky F-stat")
+    if cat_sources is not None:
+        cf0, camp = cat_sources["f0"], cat_sources["amp"]
+        for i in range(len(cf0)):
+            ax.axvline(cf0[i], color="0.6", lw=0.8,
+                       alpha=float(min(1.0, 0.2 + 0.8 * camp[i] / camp.max())),
+                       zorder=0, label="catalogue GBs" if i == 0 else None)
+    ax.axvline(src["f0_mHz"], color="r", ls="--", lw=1.2, label="target GB")
+    ax.scatter(s_lin, y_lin, s=4, alpha=0.15, color="darkorange", zorder=3,
+               label="3k rvs draws, tempered (w ∝ F)")
+    ax.scatter(s_exp, y_exp, s=4, alpha=0.15, color="green", zorder=4,
+               label="3k rvs draws, β=1 (w ∝ e^F)")
+    ax.set_xlabel("f0 [mHz]")
+    ax.set_ylabel("F-stat (max over sky)")
+    ax.set_ylim(max(1e-3, np.clip(F_max, 1e-3, None).min() * 0.5),
+                F_max.max() * 10 ** 0.7)
+    ax.set_title(f"F-stat comb scan + proposal draws, {len(f0_nodes)} "
+                 f"nodes, Tobs={Tobs / 86400:.0f} d (draws jittered "
+                 "above the curve)")
+    ax.legend(fontsize=8, loc="upper left")
+    fig.tight_layout()
+    comb_path = out_path.replace(".png", "_comb.png")
+    fig.savefig(comb_path, dpi=140)
+    plt.close(fig)
+    print(f"[plot] wrote {comb_path}", flush=True)
 
 
 # The stock recipe defaults expect mojito.
@@ -113,7 +196,11 @@ os.environ.setdefault(
 os.environ.setdefault("DATA_PROCESSOR", "mojito")
 os.environ.setdefault("MAKE_PLOTS", "0")
 os.environ.setdefault("NWALKERS", "2")
-os.environ.setdefault("NTEMPS", "1")
+# NOTE: do NOT setdefault NTEMPS here. The engine is cold-chain only
+# (general.ntemps pinned to 1) since the cold-chain rework, and
+# stock/base.py::engine_ntemps_default RAISES on any set NTEMPS -- including
+# "1" -- so seeding it made this script unrunnable. Per-branch tempering is
+# GB_NTEMPS et al., which this script does not need (it never samples).
 os.environ.setdefault("GB_USE_CHIRP_MASS", "1")
 
 # NOTE on the two chirp masses (kept for the diagnostics): the wdwd catalogue
@@ -423,422 +510,6 @@ def _comb_mc_fix(gb_info):
     ))
 
 
-def _windowed_max(a, w, xp):
-    """Sliding max over ``[i - w, i + w]`` via O(log w) shifted-max folds
-    (xp-generic; no scipy)."""
-    n = a.shape[0]
-    pad = xp.full(w, -xp.inf, dtype=a.dtype)
-    b = xp.concatenate([pad, a, pad])
-    width = 2 * w + 1
-    r = b.copy()
-    done = 1
-    while done < width:
-        step = min(done, width - done)
-        r[: r.shape[0] - step] = xp.maximum(r[: r.shape[0] - step], r[step:])
-        done += step
-    return r[:n]
-
-
-# --- sweep checkpointing (FSTAT_GRID_CACHE runs only) -----------------------
-# Every expensive sweep funnels through _chunked_fstat_sweep /
-# run_stacked_peak_sweep, so checkpointing the row cursor of those two
-# loops makes the whole ~hours-scale grid prep restartable: rerunning the
-# SAME command resumes each unfinished sweep from its last saved row (a
-# fingerprint of the sweep's actual inputs guards against resuming across
-# changed knobs), and finished stages short-circuit through their final
-# npz caches (*_comb.npz via FSTAT_COMB_CACHE_REUSE=1). Progress files live
-# in ``<FSTAT_GRID_CACHE base>_parts/`` and are deleted once the stage's
-# final npz is written. Cadence: FSTAT_CKPT_SECS (default 300).
-
-def _ckpt_fingerprint(*arrays, extra=""):
-    import hashlib
-    h = hashlib.md5(extra.encode())
-    for a in arrays:
-        a = np.ascontiguousarray(_to_host(a))
-        step = max(1, a.size // 257)
-        h.update(str(a.shape).encode())
-        h.update(a.reshape(-1)[::step].tobytes())
-    return h.hexdigest()
-
-
-def _ckpt_load(ckpt, n, fingerprint):
-    """Returns (host F array or None, completed row count)."""
-    if not ckpt:
-        return None, 0
-    path = ckpt + ".progress.npz"
-    if not os.path.exists(path):
-        return None, 0
-    try:
-        d = np.load(path, allow_pickle=False)
-        if str(d["fingerprint"]) != fingerprint or int(d["n"]) != n:
-            print(f"[ckpt] {path}: inputs changed -> restarting this sweep",
-                  flush=True)
-            return None, 0
-        done = int(d["done"])
-        print(f"[ckpt] resuming {os.path.basename(ckpt)} at {done}/{n} rows",
-              flush=True)
-        return np.array(d["F"]), done
-    except Exception as exc:  # unreadable/partial file -> recompute
-        print(f"[ckpt] {path}: unreadable ({exc}) -> restarting this sweep",
-              flush=True)
-        return None, 0
-
-
-def _ckpt_save(ckpt, F_host, done, n, fingerprint):
-    if not ckpt:
-        return
-    path = ckpt + ".progress.npz"
-    tmp = ckpt + ".progress.tmp.npz"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez(tmp, F=F_host, done=done, n=n, fingerprint=fingerprint)
-    os.replace(tmp, path)
-
-
-def _ckpt_clear(parts_dir, prefix):
-    if not parts_dir or not os.path.isdir(parts_dir):
-        return
-    for fn in os.listdir(parts_dir):
-        if fn.startswith(prefix) and fn.endswith(".progress.npz"):
-            try:
-                os.remove(os.path.join(parts_dir, fn))
-            except OSError:
-                pass
-
-
-def _ckpt_secs():
-    return float(os.environ.get("FSTAT_CKPT_SECS", "60"))
-
-
-def _chunked_fstat_sweep(gb_wdm_comp, wdm_holder, params, label="", ckpt=None):
-    """ONE chunked kernel stream over a pre-assembled physical params array.
-
-    The batching invariant: every F-stat computation in this script sweeps a
-    single concatenated parameter set spanning ALL sub-bands / sky points /
-    peak boxes at once, in ``FSTAT_BATCH``-row ``get_fstat_ll_wdm`` calls --
-    never a per-band / per-sky / per-peak kernel loop. Returns the F values
-    on the compute backend's array module.
-
-    ``ckpt``: optional progress-file base path; the sweep then resumes from
-    the last saved row on rerun (see the checkpointing block above).
-    """
-    from lisatools.sampling.fstat_proposal import compute_fstat, fstat_knob
-
-    xp = gb_wdm_comp.xp
-    fp = _ckpt_fingerprint(params, extra=label) if ckpt else ""
-    params = xp.asarray(params)
-    n = params.shape[0]
-    batch = fstat_knob("FSTAT_BATCH", int)
-    F = xp.empty(n, dtype=xp.float64)
-    F_prev, start = _ckpt_load(ckpt, n, fp)
-    if F_prev is not None and start > 0:
-        F[:start] = xp.asarray(F_prev[:start])
-    if ckpt and start == 0:
-        # Write the progress file up front (done=0): its presence confirms
-        # checkpointing is armed and where the parts live -- and a very early
-        # death still leaves a valid (empty) resume point.
-        _ckpt_save(ckpt, np.empty(0), 0, n, fp)
-        print(f"[ckpt] progress file: {ckpt}.progress.npz "
-              f"(every {_ckpt_secs():.0f}s + on interrupt)", flush=True)
-    t0 = time.time()
-    last = t0
-    last_ckpt = t0
-    done = start
-    try:
-        for s in range(start, n, batch):
-            e = min(s + batch, n)
-            N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(params[s:e], wdm_holder)
-            F[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
-            done = e
-            if time.time() - last > 30:
-                last = time.time()
-                print(f"[sweep{label}] {e}/{n} evals "
-                      f"({time.time() - t0:.0f}s)", flush=True)
-            if ckpt and e < n and time.time() - last_ckpt > _ckpt_secs():
-                last_ckpt = time.time()
-                _ckpt_save(ckpt, _to_host(F[:e]), e, n, fp)
-                print(f"[ckpt] saved {e}/{n} rows", flush=True)
-    except BaseException:
-        # Ctrl-C / SIGTERM / OOM between cadence saves: keep every completed
-        # row (SIGKILL is the only death the cadence alone must cover).
-        if ckpt and done > start:
-            _ckpt_save(ckpt, _to_host(F[:done]), done, n, fp)
-            print(f"[ckpt] interrupt: saved {done}/{n} rows", flush=True)
-        raise
-    if ckpt and start < n:
-        _ckpt_save(ckpt, _to_host(F), n, n, fp)
-    print(f"[sweep{label}] {n} evals in one chunked stream "
-          f"(batch={batch}, {time.time() - t0:.0f}s"
-          f"{f', resumed at {start}' if start else ''})", flush=True)
-    return F
-
-
-def select_comb_peaks(f0_nodes, F_max, gb_info, spacing, xp):
-    """Vectorized per-sub-band peak selection from the comb's ``F_max(f0)``.
-
-    All-array pipeline over every sub-band at once (xp-generic: stays
-    on-device on the CUDA backends; only the final small peak table moves to
-    host). Two-tier candidate set -> absolute SNR floor + interior-band mask
-    -> per-band cap:
-
-    * **Tier 1** (window champion): a node survives iff it carries the max F
-      within +-``min_sep`` nodes (the Doppler envelope ~3e-3 mHz).
-    * **Tier 2** (local-max rescue): ALSO keep any strict 3-point local
-      maximum. The rescue is ABSOLUTE -- gated only by the shared SNR floor
-      below, never by the local window max -- so a quiet real source inside
-      a loud neighbor's Doppler window still gets its own grid (an extra
-      grid on a sky image is harmless redundancy bounded by the per-band
-      cap; a missing grid on a real source is the bad failure).
-
-    The floor is SNR-based (``F = SNR^2 / 2``): set it as
-    ``FSTAT_PEAK_MIN_SNR`` (wins when set) or directly as
-    ``FSTAT_PEAK_MIN_F`` (default 20 ~ SNR 6.3).
-
-    Returns a host ``(N, 4)`` array of ``(f0_mHz, F, node_idx, band_idx)``
-    sorted by F descending. band_idx indexes ``gb_info.band_edges`` cells;
-    only interior sub-bands (1 .. num_sub_bands - 2, the ``f0_lims`` span)
-    are kept -- the consumer's per-cell gate rejects births elsewhere.
-    """
-    from lisatools.sampling.fstat_proposal import fstat_knob, fstat_peak_min_F
-
-    f0_nodes = xp.asarray(f0_nodes)
-    F_max = xp.asarray(F_max)
-    # band_edges is Hz; ALL script-side f0 values are mHz. Convert ONCE.
-    band_edges_mHz = xp.asarray(np.asarray(gb_info.band_edges, dtype=float) * 1e3)
-    num_sub_bands = int(len(gb_info.band_edges) - 1)
-    band_of_node = xp.searchsorted(band_edges_mHz, f0_nodes, side="right") - 1
-
-    min_sep = max(1, int(round(3e-3 / spacing)))
-    wmax = _windowed_max(F_max, min_sep, xp)
-    tier1 = F_max >= wmax
-    local3 = xp.zeros(F_max.shape, dtype=bool)
-    local3[1:-1] = (F_max[1:-1] > F_max[:-2]) & (F_max[1:-1] > F_max[2:])
-    tier2 = local3
-
-    min_F = fstat_peak_min_F()
-    interior = (band_of_node >= 1) & (band_of_node <= num_sub_bands - 2)
-    cand = (tier1 | tier2) & (F_max >= min_F) & interior
-
-    idx = xp.where(cand)[0]
-    if int(idx.shape[0]) == 0:
-        print(f"[peaks] NO peaks above F >= {min_F} in the interior "
-              "sub-bands.", flush=True)
-        return np.empty((0, 4))
-    b = band_of_node[idx]
-    Fv = F_max[idx]
-
-    # Vectorized per-band cap: sort by (band, -F), within-band rank via the
-    # band-group start offsets, keep rank < cap.
-    cap = fstat_knob("FSTAT_PEAKS_PER_BAND", int)
-    order = xp.lexsort(xp.stack([-Fv, b.astype(xp.float64)]))
-    b_sorted = b[order]
-    rank = xp.arange(order.shape[0]) - xp.searchsorted(
-        b_sorted, b_sorted, side="left"
-    )
-    idx_keep = idx[order[rank < cap]]
-
-    f0_h = _to_host(f0_nodes[idx_keep])
-    F_h = _to_host(F_max[idx_keep])
-    b_h = _to_host(band_of_node[idx_keep])
-    peaks = np.column_stack([f0_h, F_h, _to_host(idx_keep), b_h])
-    peaks = peaks[np.argsort(peaks[:, 1])[::-1]]
-
-    counts = np.bincount(b_h.astype(int), minlength=num_sub_bands)
-    print(f"[peaks] {len(peaks)} peaks (F >= {min_F:.1f} ~ SNR "
-          f"{np.sqrt(2 * min_F):.1f}, cap {cap}/band); "
-          f"per-interior-band counts: "
-          f"{dict(enumerate(counts.tolist()))}", flush=True)
-    zero_bands = [k for k in range(1, num_sub_bands - 1) if counts[k] == 0]
-    if zero_bands:
-        print(f"[peaks] WARNING: interior sub-band(s) {zero_bands} have ZERO "
-              "peaks -- births there fall to the comb/floor components only.",
-              flush=True)
-    return peaks
-
-
-def run_comb_scan(gb_wdm_comp, wdm_holder, gb_info, general_info, src,
-                  out_path, cat_sources, cache_path=None):
-    """Dense-in-f0 F-stat comb scan across the sub-band.
-
-    With months of data the F-stat f0 peaks are ~1/Tobs wide (~1e-4 mHz) --
-    far too narrow for any feasible 4-D tensor grid to land on (the plan's
-    "narrow-peak" regime). But over the same stretch ``fdot*Tobs << 1/Tobs``,
-    so Mc is nearly unmeasurable per band and can be held FIXED, and sky only
-    enters through the Doppler ridge (peak shifts up to ~f0*v/c ~ 2e-3 mHz).
-    The right scan is therefore dense in f0 (spacing ~ 1/(2*Tobs)) x a small
-    spread of sky points, maximized over sky per f0 node. The whole
-    (sky x f0) design is assembled into ONE parameter set and swept in a
-    single chunked kernel stream (the batching invariant -- no per-sky
-    loop); peak selection is the vectorized per-sub-band pipeline of
-    :func:`select_comb_peaks`.
-
-    Returns ``(f0_nodes_mHz, F_max, peaks, extras)`` where ``peaks`` is the
-    host ``(N, 4)`` array ``(f0_mHz, F, node_idx, band_idx)``.
-    """
-    from gbgpu.utils.utility import get_fdot
-
-    Tobs = float(general_info.Tobs)
-    f0_lo = float(gb_info.f0_lims[0]) * 1e3
-    f0_hi = float(gb_info.f0_lims[-1]) * 1e3
-    spacing = float(os.environ.get("FSTAT_F0_SPACING_MHZ", 0.5 / Tobs * 1e3))
-    f0_nodes = np.arange(f0_lo, f0_hi + 0.5 * spacing, spacing)
-    mc_fix = _comb_mc_fix(gb_info)
-    n_nodes = len(f0_nodes)
-    xp = gb_wdm_comp.xp
-
-    # Per-node sky count. FIXED if FSTAT_COMB_NSKY is set (back-compat);
-    # otherwise ADAPTIVE: the comb resolves a source through its Doppler ridge
-    # (peak shift ~ f0*v/c), so the sky grid must scale as ~(f0*Tobs*v/c)^2.
-    # Floored at FSTAT_COMB_NSKY_MIN (default 16, "something we know works"),
-    # capped at FSTAT_COMB_NSKY_MAX, and snapped up to powers of two so the
-    # sweep runs as a few rectangular (n_sky x n_nodes_at_level) batches
-    # instead of one giant fixed-n_sky design that over-samples low f.
-    vc = float(os.environ.get("FSTAT_COMB_SKY_VC", "1e-4"))
-    nsky_min = int(os.environ.get("FSTAT_COMB_NSKY_MIN", "16"))
-    nsky_max = int(os.environ.get("FSTAT_COMB_NSKY_MAX", "512"))
-    _fixed = os.environ.get("FSTAT_COMB_NSKY", "").strip()
-    if _fixed:
-        nsky_per_node = np.full(n_nodes, int(_fixed), dtype=int)
-    else:
-        req = np.ceil((f0_nodes * 1e-3 * Tobs * vc) ** 2)
-        lvl = (2 ** np.ceil(np.log2(np.clip(req, 1.0, None)))).astype(int)
-        nsky_per_node = np.clip(lvl, nsky_min, nsky_max).astype(int)
-
-    def _sky_grid(n):
-        # golden-ratio spread over the sphere
-        ks = np.arange(n)
-        return ((2.0 * np.pi * ks * 0.6180339887) % (2.0 * np.pi),  # alpha
-                -1.0 + 2.0 * (ks + 0.5) / n)                         # sin_delta
-
-    levels = np.unique(nsky_per_node)
-    print(f"[comb] {n_nodes} f0 nodes; sky "
-          f"{'FIXED=' + str(int(levels[0])) if len(levels) == 1 else 'ADAPTIVE'} "
-          f"[{int(nsky_per_node.min())}..{int(nsky_per_node.max())}] over "
-          f"{len(levels)} level(s) (min={nsky_min}, ~(f0*Tobs*{vc:g})^2); "
-          f"spacing {spacing:.3e} mHz = {spacing / (1e3 / Tobs):.2f}/Tobs; "
-          f"Mc fixed {mc_fix:.3f}", flush=True)
-
-    # Sweep each sky level as its own rectangular batch; fill the per-node max
-    # F and the best-sky (alpha, sin_delta) per node (the sky row that won).
-    parts_dir = cache_path.replace(".npz", "_parts") if cache_path else None
-    F_max_host = np.zeros(n_nodes)
-    best_al_host = np.zeros(n_nodes)
-    best_sd_host = np.zeros(n_nodes)
-    total_evals = 0
-    for lv in levels:
-        idx = np.where(nsky_per_node == lv)[0]
-        nodes = f0_nodes[idx]
-        nn = len(nodes)
-        al, sd = _sky_grid(int(lv))
-        al = np.asarray(al); sd = np.asarray(sd)
-        params = np.zeros((int(lv) * nn, 9))
-        params[:, 0] = 1e-22
-        params[:, 1] = np.tile(nodes, int(lv)) * 1e-3
-        params[:, 2] = get_fdot(f=params[:, 1], Mc=np.full(params.shape[0], mc_fix))
-        params[:, 5] = 0.5 * np.pi
-        params[:, 7] = np.repeat(al, nn)
-        params[:, 8] = np.arcsin(np.repeat(sd, nn))
-        Fd = _chunked_fstat_sweep(
-            gb_wdm_comp, wdm_holder, params, label=f":comb.nsky{int(lv)}",
-            ckpt=(os.path.join(parts_dir, f"comb_nsky{int(lv)}")
-                  if parts_dir else None),
-        ).reshape(int(lv), nn)
-        _kb = _to_host(Fd.argmax(axis=0)).astype(int)
-        F_max_host[idx] = _to_host(Fd.max(axis=0))
-        best_al_host[idx] = al[_kb]
-        best_sd_host[idx] = sd[_kb]
-        total_evals += int(lv) * nn
-    print(f"[comb] total {total_evals} F-stat evals across {len(levels)} sky "
-          f"level(s)", flush=True)
-
-    F_max_dev = xp.asarray(F_max_host)
-    peaks = select_comb_peaks(f0_nodes, F_max_dev, gb_info, spacing, xp)
-    print("[comb] top peaks (f0 [mHz], F, band):", flush=True)
-    for f0p, Fp, _, bi in peaks[:10]:
-        print(f"[comb]   {f0p:.5f}  {Fp:10.2f}  band {int(bi)}", flush=True)
-
-    F_max = F_max_host
-
-    # Persist the sweep BEFORE any plotting -- a cosmetic figure failure must
-    # never lose the kernel work. peaks is (N, 3): (f0, F, band_idx) +
-    # band_edges so the runner/diagnostics can bin without a rebuild.
-    if cache_path:
-        comb_cache = cache_path.replace(".npz", "_comb.npz")
-        _al_top, _sd_top = _sky_grid(int(nsky_per_node.max()))
-        np.savez(comb_cache, f0_nodes_mHz=f0_nodes, F_max=F_max,
-                 peaks=peaks[:, (0, 1, 3)] if len(peaks) else np.empty((0, 3)),
-                 band_edges=np.asarray(gb_info.band_edges, dtype=float),
-                 F_all=F_max[None, :], sky_alpha=_al_top, sky_sin_delta=_sd_top,
-                 best_alpha=best_al_host, best_sin_delta=best_sd_host,
-                 nsky_per_node=nsky_per_node)
-        print(f"[cache] wrote {comb_cache}", flush=True)
-        # The comb npz is now the durable artifact; drop the per-level
-        # progress files so a later knob change can't resurrect stale rows.
-        _ckpt_clear(parts_dir, "comb_")
-
-    # --- comb figure: F(f0) vs the catalogue comb + proposal draws ---
-    try:
-        import matplotlib.pyplot as plt
-
-        # rvs draws from the two comb-implied f0 densities (cheap, numpy):
-        # beta=1 (w ~ exp(F): the true birth proposal -- collapses onto the
-        # loudest peak) and tempered linear-in-F (w ~ F: proportional mass
-        # on every peak, the successive-birth weighting).
-        rng_s = np.random.default_rng(11)
-
-        def _draw_f0(w_cells, n):
-            w = np.clip(w_cells, 0, None)
-            cdf = np.cumsum(w)
-            cdf /= cdf[-1]
-            idx = np.searchsorted(cdf, rng_s.random(n), side="right")
-            idx = np.clip(idx, 0, len(w) - 1)
-            u = rng_s.random(n)
-            return f0_nodes[idx] + u * (f0_nodes[idx + 1] - f0_nodes[idx])
-
-        g = F_max - F_max.max()
-        s_exp = _draw_f0(0.5 * (np.exp(g[:-1]) + np.exp(g[1:])), 3000)
-        s_lin = _draw_f0(0.5 * (F_max[:-1] + F_max[1:]), 3000)
-        y_exp = np.interp(s_exp, f0_nodes, F_max) * 10 ** rng_s.uniform(
-            0.10, 0.45, s_exp.size)
-        y_lin = np.interp(s_lin, f0_nodes, F_max) * 10 ** rng_s.uniform(
-            0.10, 0.45, s_lin.size)
-
-        fig, ax = plt.subplots(figsize=(12, 4.8))
-        ax.semilogy(f0_nodes, np.clip(F_max, 1e-3, None), "-", lw=0.7,
-                    color="C0", label="max-over-sky F-stat")
-        if cat_sources is not None:
-            cf0, camp = cat_sources["f0"], cat_sources["amp"]
-            for i in range(len(cf0)):
-                ax.axvline(cf0[i], color="0.6", lw=0.8,
-                           alpha=float(min(1.0, 0.2 + 0.8 * camp[i] / camp.max())),
-                           zorder=0, label="catalogue GBs" if i == 0 else None)
-        ax.axvline(src["f0_mHz"], color="r", ls="--", lw=1.2, label="target GB")
-        ax.scatter(s_lin, y_lin, s=4, alpha=0.15, color="darkorange", zorder=3,
-                   label="3k rvs draws, tempered (w ∝ F)")
-        ax.scatter(s_exp, y_exp, s=4, alpha=0.15, color="green", zorder=4,
-                   label="3k rvs draws, β=1 (w ∝ e^F)")
-        ax.set_xlabel("f0 [mHz]")
-        ax.set_ylabel("F-stat (max over sky)")
-        ax.set_ylim(max(1e-3, np.clip(F_max, 1e-3, None).min() * 0.5),
-                    F_max.max() * 10 ** 0.7)
-        ax.set_title(f"F-stat comb scan + proposal draws, {len(f0_nodes)} "
-                     f"nodes, Tobs={Tobs / 86400:.0f} d (draws jittered "
-                     "above the curve)")
-        ax.legend(fontsize=8, loc="upper left")
-        fig.tight_layout()
-        comb_path = out_path.replace(".png", "_comb.png")
-        fig.savefig(comb_path, dpi=140)
-        plt.close(fig)
-        print(f"[plot] wrote {comb_path}", flush=True)
-    except Exception as e:  # pragma: no cover - figure is cosmetic
-        print(f"[plot] comb figure failed (data cached): {e}", flush=True)
-
-    _al_top, _sd_top = _sky_grid(int(nsky_per_node.max()))
-    extras = dict(sky_alpha=_al_top, sky_sin_delta=_sd_top, F_all=F_max[None, :],
-                  best_alpha=best_al_host, best_sin_delta=best_sd_host,
-                  mc_fix=mc_fix, spacing=spacing, nsky_per_node=nsky_per_node)
-    return f0_nodes, F_max, peaks, extras
-
-
 def run_peak_profile(gb_wdm_comp, wdm_holder, general_info, src, peak_f0_mHz,
                      comb_extras, out_path, cat_sources, rank=0):
     """Ultra-dense 1-D f0 scan through one comb peak at its best-fit sky.
@@ -1144,83 +815,6 @@ def _resolve_reference_src(cat_sources, gb_info):
             "RA_rad": 0.0, "Dec_rad": 0.0}
 
 
-def run_stacked_peak_sweep(gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax,
-                           alpha_ax, sd_ax, node_shape, ckpt=None):
-    """ONE chunked kernel stream over EVERY peak box of EVERY sub-band.
-
-    ``node_shape`` is ``(K, n_f0, n_Mc, n_alpha, n_sd)``. Rows are assembled
-    per chunk from index arithmetic (so the full ``n_total x 9`` array never
-    materializes); the kernel sees a single ``FSTAT_BATCH``-chunked stream --
-    never a per-peak loop. Returns the node-shaped ``F`` array on the
-    compute backend's module.
-
-    ``ckpt``: optional progress-file base path; the sweep then resumes from
-    the last saved row on rerun. The fingerprint hashes the box axes, so a
-    changed peak selection or grid-density knob restarts cleanly.
-    """
-    from gbgpu.utils.utility import get_fdot
-
-    from lisatools.sampling.fstat_proposal import compute_fstat, fstat_knob
-
-    xp = gb_wdm_comp.xp
-    n_total = int(np.prod(node_shape))
-    batch = fstat_knob("FSTAT_BATCH", int)
-    fp = (_ckpt_fingerprint(np.asarray(f0_los), np.asarray(f0_dxs),
-                            np.asarray(mc_ax), np.asarray(alpha_ax),
-                            np.asarray(sd_ax), extra=str(node_shape))
-          if ckpt else "")
-    f0_los_d = xp.asarray(f0_los)
-    f0_dxs_d = xp.asarray(f0_dxs)
-    mc_d = xp.asarray(mc_ax)
-    al_d = xp.asarray(alpha_ax)
-    sd_d = xp.asarray(sd_ax)
-    F_flat = xp.empty(n_total, dtype=xp.float64)
-    F_prev, start = _ckpt_load(ckpt, n_total, fp)
-    if F_prev is not None and start > 0:
-        F_flat[:start] = xp.asarray(F_prev[:start])
-    if ckpt and start == 0:
-        _ckpt_save(ckpt, np.empty(0), 0, n_total, fp)
-        print(f"[ckpt] progress file: {ckpt}.progress.npz "
-              f"(every {_ckpt_secs():.0f}s + on interrupt)", flush=True)
-    t0 = time.time()
-    last = t0
-    last_ckpt = t0
-    done = start
-    try:
-        for s in range(start, n_total, batch):
-            e = min(s + batch, n_total)
-            k, i0, i1, i2, i3 = xp.unravel_index(xp.arange(s, e), node_shape)
-            pr = xp.zeros((e - s, 9), dtype=xp.float64)
-            pr[:, 0] = 1e-22
-            pr[:, 1] = (f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
-            pr[:, 2] = xp.asarray(get_fdot(f=pr[:, 1], Mc=mc_d[i1]))
-            pr[:, 5] = 0.5 * np.pi
-            pr[:, 7] = al_d[i2]
-            pr[:, 8] = xp.arcsin(sd_d[i3])
-            N_arr, M_up = gb_wdm_comp.get_fstat_ll_wdm(pr, wdm_holder)
-            F_flat[s:e] = compute_fstat(xp.asarray(N_arr), xp.asarray(M_up))
-            done = e
-            if time.time() - last > 30:
-                last = time.time()
-                print(f"[stageB] {e}/{n_total} evals ({time.time() - t0:.0f}s)",
-                      flush=True)
-            if ckpt and e < n_total and time.time() - last_ckpt > _ckpt_secs():
-                last_ckpt = time.time()
-                _ckpt_save(ckpt, _to_host(F_flat[:e]), e, n_total, fp)
-                print(f"[ckpt] saved {e}/{n_total} rows", flush=True)
-    except BaseException:
-        if ckpt and done > start:
-            _ckpt_save(ckpt, _to_host(F_flat[:done]), done, n_total, fp)
-            print(f"[ckpt] interrupt: saved {done}/{n_total} rows", flush=True)
-        raise
-    if ckpt and start < n_total:
-        _ckpt_save(ckpt, _to_host(F_flat), n_total, n_total, fp)
-    print(f"[stageB] {n_total} evals in one chunked stream (batch={batch}, "
-          f"{time.time() - t0:.0f}s"
-          f"{f', resumed at {start}' if start else ''})", flush=True)
-    return F_flat.reshape(node_shape)
-
-
 def run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks, src,
                         out_path, cat_sources, cache_path):
     """Stage B: clamped boxes -> ONE batched sweep -> stacked grids.
@@ -1292,9 +886,9 @@ def run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks, src,
           flush=True)
 
     _parts = cache_path.replace(".npz", "_parts") if cache_path else None
-    logp_grids = run_stacked_peak_sweep(
-        gb_wdm_comp, wdm_holder, f0_los, f0_dxs, mc_ax, alpha_ax, sd_ax,
-        node_shape,
+    logp_grids = _lib_stacked_peak_sweep(
+        _call_fstat(gb_wdm_comp, wdm_holder), f0_los, f0_dxs, mc_ax,
+        alpha_ax, sd_ax, node_shape, xp=gb_wdm_comp.xp,
         ckpt=os.path.join(_parts, "stageb") if _parts else None,
     )  # beta = 1: logp = F
 

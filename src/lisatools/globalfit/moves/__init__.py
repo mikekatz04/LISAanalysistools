@@ -4,6 +4,7 @@ from .addremovemove import ResidualAddOneRemoveOneMove
 from .functionmove import FunctionMove
 from .gbspecialstretch import (
     GBSpecialRJPriorMove,
+    GBSpecialRJFStatGridMove,
     GBSpecialRJRefitMove,
     GBSpecialRJSerialSearchMCMC,
     GBSpecialStretchMove,
