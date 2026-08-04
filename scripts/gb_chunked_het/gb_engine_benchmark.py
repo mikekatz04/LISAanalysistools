@@ -64,7 +64,18 @@ from gbgpu.gb_likelihood import WDMBandLikelihoodEngine
 USE_GPU = os.environ.get("USE_GPU", "0") == "1"
 BACKEND = os.environ.get("GPU_BACKEND", "cuda12x") if USE_GPU else "cpu"
 
-ALL_ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band"]
+ALL_ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band", "v5", "v5-ctl"]
+# "v5"     = v4-banded with the per-candidate fold scratch ELIMINATED
+#            (r_sparse/dr_sparse are r_pix times a candidate-independent mask
+#            bit, so v5 keeps the bit and rebuilds r/dr in registers) AND the
+#            shared arena overlaid by lifetime phase. 27.6 KB, constant in
+#            N_sparse_t up to N ~ 450 -> ~5 blocks/SM on an A100 against
+#            v4-banded's 1. "v5-ctl" = the same kernel with a FLAT carve:
+#            identical arithmetic and traffic at ~3 blocks/SM, so v5-vs-v5-ctl
+#            isolates OCCUPANCY and v5-ctl-vs-v4-band isolates everything
+#            else. Neither is in the default selection below by design: they
+#            are opt-in via BENCH_ENGINES so an unrelated run's grid is never
+#            resized by them.
 # BENCH_ENGINES selects the engines to build and score. "chunked" is the
 # accuracy reference and is always kept. This is not only a time-saver:
 # every sig-het engine is built with ONE nt_layer, and v2 costs 960 B per
@@ -72,17 +83,23 @@ ALL_ENGINES = ["chunked", "v2", "v3", "v4-pcr", "v4-band"]
 # sparse grid for everyone at what v2 can afford (this is the whole reason
 # N_sparse_t sat at 127 in the 5-baseline sweep). Dropping v2 lets
 # fit_nt_layer size the grid to the engines actually under test.
+#
+# The default is now the chunked/v4/v5 comparison -- the live question. v2,
+# v3 and v4-pcr are opt-in (BENCH_ENGINES="chunked,v2,v3,v4-pcr,v4-band")
+# for the historical 5-engine sweep.
+DEFAULT_ENGINES = ["chunked", "v4-band", "v5", "v5-ctl"]
 ENGINES = [n for n in ALL_ENGINES
            if n == "chunked"
            or n in {s.strip() for s in
                     os.environ.get("BENCH_ENGINES",
-                                   ",".join(ALL_ENGINES)).split(",")}]
+                                   ",".join(DEFAULT_ENGINES)).split(",")}]
 # Categorical hues in FIXED order, CVD-validated (adjacent-pair dE >= 8 under
 # deuteranopia and protanopia).  Colour follows the ENGINE, never its rank;
 CLR = {"chunked": "#666666", "v2": "#E69F00", "v3": "#0072B2",
-       "v4-pcr": "#009E73", "v4-band": "#D55E00"}
+       "v4-pcr": "#009E73", "v4-band": "#D55E00", "v5": "#CC79A7",
+       "v5-ctl": "#8C6BB1"}
 MRK = {"chunked": "o", "v2": "s", "v3": "^", "v4-pcr": "D",
-       "v4-band": "v"}
+       "v4-band": "v", "v5": "X", "v5-ctl": "P"}
 LS = {n: "-" for n in ENGINES}
 RAMP = ["#c6dbef", "#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#08519c",
         "#08306b"]
@@ -116,6 +133,64 @@ def sighet_shared_bytes(n_nodes, n_knots, nch, m_half, N_sparse_t, band_len,
     return b + 2 * nch * M * N_sparse_t * 16 + 64
 
 
+def sighet_v5_shared_bytes(n_nodes, n_knots, nch, m_half, N_sparse_t,
+                           band_len, alias=True):
+    """Per-block dynamic shared request of the V5 scorer.
+
+    Exact mirror of ``gb_sighet_v5_region_sizes`` + ``gb_sighet_v5_shared_bytes``
+    in gb_tdi_on_the_fly.cu. Region letters match the table in that file's V5
+    header; ``_al`` is its GB_SIGHET_V5_AL 16-byte round-up.
+
+    With ``alias=True`` the regions whose lifetimes are disjoint are overlaid
+    (F over E, G over B+C+Bk+D), so the request is the widest PHASE rather
+    than the sum of the arrays -- and it is CONSTANT in ``N_sparse_t`` until
+    the fold phase overtakes the node phase around N ~ 450. ``alias=False`` is
+    the flat carve, i.e. the occupancy control.
+    """
+    def _al(x):
+        return (int(x) + 15) & ~15
+
+    M = 2 * m_half + 1
+    nwords = (N_sparse_t + 63) // 64
+    n_fit = n_nodes if band_len > 0 else max(n_knots, n_nodes)
+
+    szA = _al(2 * 20 * 8)                            # params_c/r (N_PARAMS_MAX)
+    szB = _al(n_nodes * 8)                           # t_nodes
+    szC = _al(8 * nch * n_nodes * 8)                 # dlnA/dphi + cA1-3/cP1-3
+    szBk = _al(n_knots * 8)                          # t_knots
+    szD = _al(9 * n_fit * 8)                         # B_b + pcr
+    szE = _al(2 * nch * n_nodes * 16 + 6 * n_nodes * 8
+              + n_nodes * 4 + n_nodes * 1)           # extraction scratch
+    szF = _al(2 * nch * n_knots * 8)                 # rk_re/rk_im
+    szCI = 0 if band_len > 0 else _al(6 * nch * n_knots * 8)
+    szG = _al(2 * nch * N_sparse_t * 8               # rpix_re/rpix_im
+              + nch * M * nwords * 8)                # staged mask words
+
+    if band_len > 0 and alias:
+        # max(szE, szF): F overlays E, and n_knots > 2*n_nodes would make F
+        # the larger of the two -- see the note in gb_sighet_v5_shared_bytes.
+        return max(szA + max(szE, szF) + szB + szC + szBk + szD,  # node stage
+                   szA + szF + szG)                               # r_pix/fold
+    return szA + szB + szC + szBk + szD + szE + szF + szCI + szG
+
+
+def blocks_per_sm(dyn_shared_bytes, nthreads=128, static_shared=2176,
+                  per_block_reserved=1024, per_sm_shared=167936,
+                  max_blocks_per_sm=32, max_threads_per_sm=2048):
+    """Shared-memory-limited resident blocks per SM (register limits aside).
+
+    ``static_shared`` covers the kernel's ``d_h_tmp``/``h_h_tmp`` staging
+    (2 x nthreads x 8 B) plus cub's BlockReduce temp storage;
+    ``per_block_reserved`` is the 1 KB the driver reserves per block on
+    sm_80+. Both are omitted from the design note's arithmetic and together
+    they are worth a whole block at the v5 footprint. Defaults are A100
+    (per_sm_shared=167936); pass 233472 for H100.
+    """
+    per_block = dyn_shared_bytes + static_shared + per_block_reserved
+    return max(1, min(int(per_sm_shared // per_block), max_blocks_per_sm,
+                      int(max_threads_per_sm // nthreads)))
+
+
 def device_shared_limit(default=163840):
     try:
         import cupy as cp
@@ -144,6 +219,11 @@ def fit_nt_layer(nt, edge, nr, knots, nch=3, m_half=2, n_sparse_fd=512,
                                                        nsp, 0, True),
         "v4-band": lambda ntl, nsp: sighet_shared_bytes(nr, knots, nch, m_half,
                                                         nsp, 16, True),
+        "v5": lambda ntl, nsp: sighet_v5_shared_bytes(nr, knots, nch, m_half,
+                                                      nsp, 16, True),
+        "v5-ctl": lambda ntl, nsp: sighet_v5_shared_bytes(nr, knots, nch,
+                                                          m_half, nsp, 16,
+                                                          False),
     }
     active = [f for n, f in cost.items() if n in ENGINES] or list(cost.values())
     for stride in range(1, nt):
@@ -280,7 +360,13 @@ def build(nt, Nf, nr, knots, band, quiet=False):
                 "v3": lambda: mk(v3_n_nodes=nr),
                 "v4-pcr": lambda: mk(v3_n_nodes=nr, v4_knots=knots, v4_band=0),
                 "v4-band": lambda: mk(v3_n_nodes=nr, v4_knots=knots,
-                                      v4_band=band)}
+                                      v4_band=band),
+                # v5 == v4-banded with the per-pixel fold scratch relocated;
+                # v5=1 -> global slab, v5=2 -> shared control.
+                "v5": lambda: mk(v3_n_nodes=nr, v4_knots=knots,
+                                 v4_band=band, v5=1),
+                "v5-ctl": lambda: mk(v3_n_nodes=nr, v4_knots=knots,
+                                     v4_band=band, v5=2)}
     engines = {n: f() for n, f in builders.items() if n in ENGINES}
     nsp = next(iter(engines.values()))._g["N_sparse_t"]
 
@@ -295,7 +381,10 @@ def build(nt, Nf, nr, knots, band, quiet=False):
         need = {"v2": v2_shared_bytes(3, 2, nt_layer, nsp, 512),
                 "v3": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, False),
                 "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
-                "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True)}
+                "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
+                "v5": sighet_v5_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
+                "v5-ctl": sighet_v5_shared_bytes(nr, knots, 3, 2, nsp, 16,
+                                                 False)}
         for n in [k for k in engines if need.get(k, 0) > lim]:
             print(f"  [skip] {n}: scorer needs {need[n]/1024:.0f} KB > "
                   f"{lim/1024:.0f} KB device limit at N_sparse_t={nsp} "
@@ -312,6 +401,8 @@ def build(nt, Nf, nr, knots, band, quiet=False):
             "v3": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, False),
             "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
             "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
+            "v5": sighet_v5_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
+            "v5-ctl": sighet_v5_shared_bytes(nr, knots, 3, 2, nsp, 16, False),
         }.items() if k in ENGINES}
         print(f"[chunk] Nt_sub={nt_sub} -> chunked-het n_chunks="
               f"{chunked.n_chunks}"
@@ -643,6 +734,8 @@ def main():
             "v3": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, False),
             "v4-pcr": sighet_shared_bytes(nr, knots, 3, 2, nsp, 0, True),
             "v4-band": sighet_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
+            "v5": sighet_v5_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
+            "v5-ctl": sighet_v5_shared_bytes(nr, knots, 3, 2, nsp, 16, False),
         }.items() if k in ENGINES}
         occ[nt] = {k: max(1, int(lim // v)) for k, v in shm[nt].items()}
 
@@ -948,7 +1041,8 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
                  loc="left")
 
     ax = fig.add_subplot(gs[1, 3]); style(ax)
-    names = [n for n in ["v2", "v3", "v4-pcr", "v4-band"] if n in ENGINES]
+    names = [n for n in ["v2", "v3", "v4-pcr", "v4-band", "v5", "v5-ctl"]
+             if n in ENGINES]
     vals = [shm[nts[len(nts)//2]][n] / 1024 for n in names]
     bars = ax.bar(range(len(names)), vals, color=[CLR[n] for n in names],
                   width=0.62)

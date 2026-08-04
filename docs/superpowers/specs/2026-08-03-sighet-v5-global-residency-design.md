@@ -1,7 +1,24 @@
 # Sig-het v5 — global-memory residency for the reference fold blocks
 
+> **SUPERSEDED, 2026-08-04.** The "Why this could win" section below is
+> **factually wrong** and the architecture it implies was not built. `A0/A1/
+> B0/B1/B0nc/B1nc` and `c0_sparse_all` are already kernel pointer arguments
+> read straight from global memory in v4 — they are never staged into shared,
+> so there is no per-block duplication to remove and no L2-sharing win. The
+> 528 B/point the spec attributes to them is in fact `r_pix` + `r_sparse` +
+> `dr_sparse`, which are **per-candidate scratch**.
+>
+> The byte arithmetic, the 143.4 KB / 1-block-per-SM diagnosis and the
+> occupancy hypothesis all survive; only the mechanism and the remedy change.
+> v5 as built *eliminates* the per-candidate scratch instead of relocating it,
+> and reaches 5 blocks/SM (not 4) while **removing** 95 KB/candidate of global
+> traffic rather than adding ~700 KB.
+>
+> Read `../2026-08-04-v5-progress.md` instead. This file is kept for the
+> record of what was originally decided and scoped.
+
 **Date:** 2026-08-03
-**Status:** design approved, not implemented
+**Status:** SUPERSEDED — see the banner above
 **Scope:** one experiment. Prove or disprove that moving sig-het's per-pixel
 reference arrays out of shared memory buys speed.
 

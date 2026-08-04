@@ -1,4 +1,4 @@
-"""GB likelihood-engine speed shootout: chunked / v2 / v3 / v4-PCR / v4-banded.
+"""GB likelihood-engine speed shootout: chunked / v2 / v3 / v4 / v5.
 
 Times the per-candidate scoring cost of every engine at a MATCHED
 configuration (same grid, same reference stash, same fold), over a batch-size
@@ -14,6 +14,20 @@ Engines
   v4-pcr  : fixed-knot resample, knot->pixel via the cooperative spline solve
   v4-band : fixed-knot resample, knot->pixel via precomputed cardinal weights
             (no solve, no block sync, fewer shared arrays)
+  v5      : v4-banded with the per-candidate fold scratch ELIMINATED
+            (r_sparse/dr_sparse are r_pix times a candidate-independent mask
+            bit, precomputed in setup_in_model) and the shared arena overlaid
+            by lifetime phase. 27.6 KB vs v4-banded's 143.4 KB at
+            N_sparse_t=204 -> ~5 blocks/SM on an A100 against v4's 1.
+            Bit-identical to v4-band.
+  v5-ctl  : the same kernel with a FLAT carve -- identical arithmetic and
+            traffic at ~3 blocks/SM. v5-vs-v5-ctl isolates OCCUPANCY;
+            v5-ctl-vs-v4-band isolates everything else.
+
+SHOOT_ENGINES picks the arms. The default is the chunked/v4/v5 comparison,
+which is the live question; v2 and v3 are opt-in because they are the
+HEAVIEST engines and would otherwise pin the sparse grid for everyone (v2
+costs 960 B per sparse-time point against v4-banded's 528 and v5's 48).
 
 Run on the GPU box:
     USE_GPU=1 GPU_BACKEND=cuda12x python gb_sighet_speed_shootout.py
@@ -21,6 +35,7 @@ CPU smoke (verifies the harness before handoff; timings are not meaningful):
     SHOOT_NT=512 SHOOT_BATCHES=1,8 python gb_sighet_speed_shootout.py
 
 Env: SHOOT_NT (12288 = 1 yr; 512 for the smoke), SHOOT_BATCHES ("1,8,64,256"),
+     SHOOT_ENGINES ("v4-band,v5,v5-ctl"; chunked is always the baseline),
      SHOOT_NR (64 fit nodes), SHOOT_K (128 knots), SHOOT_BAND (16 half-band),
      SHOOT_REPS (5 timed repetitions, min reported), BACKEND (cpu|gpu via
      USE_GPU/GPU_BACKEND), ENV_OUT (./ratio_proto_out)
@@ -48,6 +63,18 @@ from gbgpu.gb_likelihood import WDMBandLikelihoodEngine
 
 USE_GPU = os.environ.get("USE_GPU", "0") == "1"
 BACKEND = os.environ.get("GPU_BACKEND", "cuda12x") if USE_GPU else "cpu"
+
+ALL_ENGINES = ["v2", "v3", "v4-pcr", "v4-band", "v5", "v5-ctl"]
+# chunked is the baseline and is always timed. The default arms are the
+# chunked/v4/v5 comparison; v2 and v3 are opt-in because they are the
+# heaviest engines and fit_nt_layer sizes the sparse grid for EVERY selected
+# arm -- leaving v2 in pins N_sparse_t at what v2 can afford (this is why the
+# 5-baseline sweep sat at 127) and would understate v5, whose whole claim is
+# that its footprint no longer scales with the grid.
+ENGINES = [n for n in ALL_ENGINES
+           if n in {s.strip() for s in
+                    os.environ.get("SHOOT_ENGINES",
+                                   "v4-band,v5,v5-ctl").split(",")}]
 
 
 def sync():
@@ -139,8 +166,21 @@ def v2_shared_bytes(nchannels, m_half, Nt_layer, N_sparse_t, n_sparse_fd):
 
 
 def fit_nt_layer(nt, edge, nr, knots, nchannels=3, m_half=2, n_sparse_fd=512,
-                 margin=0.92):
-    """Largest sparse resolution (smallest stride) fitting EVERY engine."""
+                 margin=0.92, band=16):
+    """Largest sparse resolution (smallest stride) fitting every SELECTED arm.
+
+    Sized over ``ENGINES`` rather than all of them: an unselected engine must
+    not shrink the grid the selected ones are compared on. With the default
+    chunked/v4/v5 selection the binding constraint is v4-banded, which is the
+    honest matched-grid choice -- v5 alone would allow a far finer grid, and
+    measuring it there would conflate residency with resolution.
+    """
+    # gb_engine_benchmark owns the v5 budget mirror (itself checked against
+    # the C++ carve); import it rather than keeping a second copy in sync.
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from gb_engine_benchmark import sighet_v5_shared_bytes
+
     lim = device_shared_limit() * margin
     for stride in range(1, nt):
         if nt % stride:
@@ -149,13 +189,26 @@ def fit_nt_layer(nt, edge, nr, knots, nchannels=3, m_half=2, n_sparse_fd=512,
         nsp = (nt - 2 * edge) // stride
         if nsp < 8:
             break
-        need = max(
-            v2_shared_bytes(nchannels, m_half, ntl, nsp, n_sparse_fd),
-            sighet_shared_bytes(nr, knots, nchannels, m_half, nsp, 0, v4=False),
-            sighet_shared_bytes(nr, knots, nchannels, m_half, nsp, 0, v4=True),
-            sighet_shared_bytes(nr, knots, nchannels, m_half, nsp, 16, v4=True),
-        )
-        if need <= lim:
+        need = [0]
+        if "v2" in ENGINES:
+            need.append(v2_shared_bytes(nchannels, m_half, ntl, nsp,
+                                        n_sparse_fd))
+        if "v3" in ENGINES:
+            need.append(sighet_shared_bytes(nr, knots, nchannels, m_half, nsp,
+                                            0, v4=False))
+        if "v4-pcr" in ENGINES:
+            need.append(sighet_shared_bytes(nr, knots, nchannels, m_half, nsp,
+                                            0, v4=True))
+        if "v4-band" in ENGINES:
+            need.append(sighet_shared_bytes(nr, knots, nchannels, m_half, nsp,
+                                            band, v4=True))
+        if "v5" in ENGINES:
+            need.append(sighet_v5_shared_bytes(nr, knots, nchannels, m_half,
+                                               nsp, band, True))
+        if "v5-ctl" in ENGINES:
+            need.append(sighet_v5_shared_bytes(nr, knots, nchannels, m_half,
+                                               nsp, band, False))
+        if max(need) <= lim:
             return ntl, nsp
     return 1, 8
 
@@ -180,7 +233,7 @@ def build(nt, nr, knots, band):
     edge_n = edge
     nt_layer = 512
     if USE_GPU:
-        ntl_fit, _ = fit_nt_layer(nt, edge_n, nr, knots)
+        ntl_fit, _ = fit_nt_layer(nt, edge_n, nr, knots, band=band)
         nt_layer = int(os.environ.get("SHOOT_NTL", str(ntl_fit)))
     shb = (nt + 512 + nt_layer) * 16
     nsp_est = (nt - 2 * edge_n) // max(1, nt // max(1, nt_layer))
@@ -211,20 +264,24 @@ def build(nt, nr, knots, band):
         tdi_config="2nd generation", force_backend=BACKEND, d_d=0.0,
         tdi_type="XYZ", tukey_alpha=2.0 * tk / nt)
     chunked.convert_to_ra_dec = False
-    engines = {}
-    engines["v2"] = GBSignalHetComputations.for_band_engine(
+    # Built ONLY for the selected arms: for_band_engine allocates per-engine
+    # device state, and an unselected engine would pay for itself in memory
+    # on top of having already pinned the grid in fit_nt_layer.
+    mk = lambda **kw: GBSignalHetComputations.for_band_engine(
         chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
-        m_active_half_width=2)
-    engines["v3"] = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
-        m_active_half_width=2, v3_n_nodes=nr)
-    engines["v4-pcr"] = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
-        m_active_half_width=2, v3_n_nodes=nr, v4_knots=knots, v4_band=0)
-    engines["v4-band"] = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=nt_layer,
-        m_active_half_width=2, v3_n_nodes=nr, v4_knots=knots,
-        v4_band=band)
+        m_active_half_width=2, **kw)
+    factories = {
+        "v2": lambda: mk(),
+        "v3": lambda: mk(v3_n_nodes=nr),
+        "v4-pcr": lambda: mk(v3_n_nodes=nr, v4_knots=knots, v4_band=0),
+        "v4-band": lambda: mk(v3_n_nodes=nr, v4_knots=knots, v4_band=band),
+        # v5 IS v4-banded (same v4_knots/v4_band); the v5 knob only selects
+        # the carve: 1 = phase-lifetime arena, 2 = flat control.
+        "v5": lambda: mk(v3_n_nodes=nr, v4_knots=knots, v4_band=band, v5=1),
+        "v5-ctl": lambda: mk(v3_n_nodes=nr, v4_knots=knots, v4_band=band,
+                             v5=2),
+    }
+    engines = {n: factories[n]() for n in ENGINES}
     return ws, chunked, engines, Nf, dt, t0
 
 
@@ -306,7 +363,7 @@ def main():
                 print(f"  [{name}] batch {nb} FAILED: {type(e).__name__}: {e}")
                 results.setdefault(name, {})[nb] = float("nan")
 
-    names = ["chunked", "v2", "v3", "v4-pcr", "v4-band"]
+    names = ["chunked"] + ENGINES
     print("\n[per-candidate microseconds]")
     print("batch    " + "".join(f"{n:>12s}" for n in names))
     for nb in batches:
