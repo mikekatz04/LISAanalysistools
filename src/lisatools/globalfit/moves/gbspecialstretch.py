@@ -3265,9 +3265,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 band_sorter.index_friends(
                     band_sorter.build_friend_table(self.nfriends), self.nfriends)
             if self.use_info_mat_proposal:
-                self._refresh_infomat_table(model, band_sorter)
-                band_sorter.build_infomat_index(
-                    self._infomat_freqs_sorted, self._infomat_chol_sorted)
+                # GB_INFOMAT_PER_BLOCK=1 RETIRES the borrow: skip the
+                # cold-chain table entirely so ``_proposal_cholesky`` takes
+                # its existing direct branch and every block computes EXACT
+                # matrices for its OWN sources. Still built ONCE per block,
+                # before the repeats and held constant during them. Only the
+                # info-matrix half is skipped -- the group-stretch FRIEND
+                # table above is a separate product and is still required.
+                # Affordable only with the sig-het path (SIGHET_INFOMAT=1):
+                # ~2.4 ms/source instead of 46.44, which makes per-block
+                # exact CHEAPER than the borrowed table (54 s vs 115 s per
+                # proposal) as well as correct.
+                if os.environ.get("GB_INFOMAT_PER_BLOCK", "0") == "1":
+                    self._infomat_freqs_sorted = None
+                    self._infomat_chol_sorted = None
+                    logger.info(
+                        "%s: per-block EXACT info matrices (borrow retired)",
+                        self.name)
+                else:
+                    self._refresh_infomat_table(model, band_sorter)
+                    band_sorter.build_infomat_index(
+                        self._infomat_freqs_sorted, self._infomat_chol_sorted)
 
     def _refresh_infomat_table(self, model, band_sorter):
         """Rebuild the shared cold-chain info-matrix Cholesky table.
@@ -4950,6 +4968,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         num_active_sources = work.inds.sum(axis=-1)[0]
         logger.info(f"Current number of active sources in cold chain is {num_active_sources}")
+
+        # ACCEPTANCE RATES for this propose, split RJ vs in-model, cold chain
+        # (temp 0) and all-temperature. Nothing logged them before, which made
+        # every proposal-machinery A/B unjudgeable -- exact-vs-borrowed info
+        # matrices, whether the pure in_model move still earns its place, a
+        # changed jump scale. Pure logging; counters already exist.
+        try:
+            _pc, _ac = _to_numpy(prop_counts), _to_numpy(acc_counts)
+
+            def _rate(row, cold_only):
+                pr = _pc[row][0] if cold_only else _pc[row]
+                ac = _ac[row][0] if cold_only else _ac[row]
+                tot = float(pr.sum())
+                return (float(ac.sum()) / tot if tot > 0 else float("nan"), tot)
+
+            (rj_c, rj_cn), (rj_a, rj_an) = _rate(0, True), _rate(0, False)
+            (im_c, im_cn), (im_a, im_an) = _rate(1, True), _rate(1, False)
+            logger.info(
+                "[GB_ACCEPT %s] rj cold %.4f (n=%.0f) all %.4f (n=%.0f) | "
+                "in-model cold %.4f (n=%.0f) all %.4f (n=%.0f)",
+                self.name, rj_c, rj_cn, rj_a, rj_an, im_c, im_cn, im_a, im_an,
+            )
+        except Exception as exc:  # never break a propose for a log line
+            logger.debug("[GB_ACCEPT %s] skipped: %r", self.name, exc)
 
         # Stage-timing breakdown for this propose (see _ProposeTimer).
         logger.info(

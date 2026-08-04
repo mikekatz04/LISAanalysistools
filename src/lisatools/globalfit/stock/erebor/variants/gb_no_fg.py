@@ -322,6 +322,15 @@ class GBNoFgGBSettings(GBSettings):
     # GPU); >0 = precomputed cardinal weights with this half-band -- no
     # solve, no block syncs, ~18 KB less shared memory.  Banded and PCR agree
     # to 1e-11 relative at half-band 16 and banded is never slower.
+    # Signal-het V5: v4-banded with the per-candidate fold scratch relocated
+    # out of shared memory. IDENTICAL arithmetic and ordering to v4-banded
+    # (bit-identical likelihoods, verified in the engine bench-off); it only
+    # changes where scratch lives, buying occupancy. 0 = off (v4 path),
+    # 1 = phase-aliased shared arena, 2 = flat carve (the occupancy control).
+    # Requires sighet_v4_knots > 0. Env: SIGHET_V5.
+    sighet_v5: int = dataclasses.field(
+        default_factory=env_default("SIGHET_V5", 0, int)
+    )
     sighet_v4_band: int = dataclasses.field(
         default_factory=env_default("SIGHET_V4_BAND", 0, int)
     )
@@ -975,6 +984,8 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                 v3_n_nodes=int(getattr(gb_info, "sighet_v3_nodes", 0)),
                 v4_knots=int(getattr(gb_info, "sighet_v4_knots", 0)),
                 v4_band=int(getattr(gb_info, "sighet_v4_band", 0)),
+                **({"v5": int(getattr(gb_info, "sighet_v5", 0))}
+                   if int(getattr(gb_info, "sighet_v5", 0)) else {}),
             )
             logger.info(
                 "GB in-model likelihood: SIGNAL-HET "
