@@ -210,12 +210,15 @@ def build_birth_distribution(fit, floor_eps=0.1, comb_weight=0.0):
 
     # The stacked grid proposal: production sampling layer by default
     # (and the reference / GMM-fit sample source on the gmm path). Lives
-    # on-device for cupy runs.
+    # on-device for cupy runs -- on the run's OWN device: this container is
+    # built before ``fit.build()``, i.e. before the run pins its main device,
+    # so an unpinned upload would put the grids on device 0 while a
+    # ``GPUS=2`` run samples on device 2.
     mem_mb = os.environ.get("FSTAT_GRID_MEM_MB", "").strip()
     stacked = StackedFStatProposal4D.from_cache(
         cache, weights=box_weights,
         mem_budget_mb=float(mem_mb) if mem_mb else None,
-        use_cupy=use_cupy,
+        use_cupy=use_cupy, device=gpu_index,
     )
 
     # Peak sampling layer. Default: the grid stack itself -- exact

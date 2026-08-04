@@ -720,16 +720,29 @@ class StackedFStatProposal4D:
     @classmethod
     def from_cache(cls, d, weights=None, seed: Optional[int] = None,
                    mem_budget_mb: Optional[float] = None,
-                   use_cupy: bool = False):
+                   use_cupy: bool = False, device: Optional[int] = None):
         """Rebuild from a stacked-cache mapping (the ``*_peaks_stacked.npz``
         contents): keys ``logp_grids``, ``f0_los``, ``f0_dxs``, ``mc_ax``,
         ``alpha_ax``, ``sin_delta_ax``. ``use_cupy`` moves the stack to the
         GPU (rvs/logpdf then run on-device; numpy query inputs still work
-        via ``cupy.asarray``)."""
+        via ``cupy.asarray``).
+
+        ``device`` pins WHICH GPU the grid stack lands on. Without it the
+        upload takes cupy's process-current device, which for a container
+        built BEFORE the run pins its main device
+        (``lisatools.utils.device.pin_main_device``, reached from
+        ``GlobalFit.setup_acs``) is device 0 regardless of ``GPUS`` -- every
+        subsequent ``rvs`` / ``logpdf`` would then mix a device-0 grid with
+        the run's coordinates on another device. Passing the run's GPU makes
+        the container safe to build anywhere in the setup order.
+        """
         if use_cupy:
             import cupy as _cp
 
-            grids = _cp.asarray(np.asarray(d["logp_grids"], dtype=float))
+            from ..utils.device import device_context
+
+            with device_context(_cp, device):
+                grids = _cp.asarray(np.asarray(d["logp_grids"], dtype=float))
         else:
             grids = np.asarray(d["logp_grids"], dtype=float)
         return cls(

@@ -51,17 +51,34 @@ Assert:
    the GPU count and confirm the `nwalkers=... not divisible by len(gpus)`
    warning fires.
 
+## 2b. GB sig-het / F-stat parity gate (automated)
+
+The two GB paths the all_sources smoke above does NOT exercise —
+`GB_SIGHET_INMODEL=1` in-model references and the `GB_MODE=search` F-stat
+birth route — have their own scripted 1-vs-N-GPU gate, which runs each arm
+twice in separate processes and requires the initial per-walker lnL to be
+**bit-identical**:
+
+```sh
+GPUS=0,1 OMP_NUM_THREADS=1 NUM_ITERATIONS=2 \
+    python scripts/gb_chunked_het/gb_multigpu_parity.py
+# one arm only:
+GPUS=0,1 python scripts/gb_chunked_het/gb_multigpu_parity.py --arms sighet
+```
+
+Exits non-zero on the first failing arm and prints the offending walker's two
+values. Both arms go through the stock API (`erebor.vgb()` / `erebor.gb_no_fg()`
+→ `fit.build()`); there are no settings files.
+
 ## 3. Known limits (expected, not failures)
 
-- **Sig-het in-model GB references** (`GB_MODE` sig-het in-model path) raise
-  `NotImplementedError` on multi-shard buffers — single-shard state on the
-  shared computation object; per-shard comp replicas are the follow-on.
-  Run that path on a single GPU.
 - **WDM-basis PSD move** stays on the (correct) rebuild fallback — the
   FD/STFT kernel gate keeps the DCGA replica path off.
-- **Comp-level device-sticky caches**: kernel config flows through
-  per-launch host→device wrapper uploads (LISA Analysis Tools convention),
-  which is device-safe; if a comp-level cache (e.g. an orbit spline eval
-  cache) turns out to be pinned to the device it was first built on, it
-  shows up here as a cross-device error in the GB FD path — report with the
-  shard id and the failing kernel name.
+- **Comp-level device-sticky caches**: the GB comps' own buffers (chunk
+  geometry, WDM window, `OrbitsWrap` / `TDIConfigWrap` pointer fields) are
+  now replicated per device by the shard router — a shard whose device
+  differs from the comp's build device gets its own comp
+  (`source_runtime._device_local_gb_comp`). If some *other* comp-level cache
+  is still pinned to its build device, the router's permanent guard now names
+  it: `GB comp <Class> holds buffers on device X but this shard launches on
+  device Y`. Report with the class name and the shard id.

@@ -125,6 +125,32 @@ class WDMComputationsBase(LISAToolsParallelModule):
         """
         super().__init__(force_backend=force_backend)
 
+        # ---- multi-GPU replica metadata (see ``_device_local_gb_comp`` in
+        # ``globalfit/stock/erebor/source_runtime.py``) --------------------
+        # Everything this constructor allocates -- the chunk geometry, the
+        # WDM window, ``cpp_orbits`` / ``cpp_tdi_config`` -- lands on
+        # whatever CUDA device is current RIGHT NOW and is never migrated.
+        # Record (a) that device, so a routed launch can assert its shard's
+        # kernels are reading device-local pointers, and (b) the constructor
+        # arguments, so a non-primary shard can rebuild an equivalent comp
+        # inside its own device context. Same "remember your constructor
+        # arguments so a replica can be rebuilt" contract ``Orbits.args`` /
+        # ``DomainSettingsBase.args`` already carry; the recorded objects are
+        # the ones this instance already holds, so nothing new reaches the
+        # settings tree (pickle-safety rule).
+        from .utils.device import current_device as _current_device
+
+        self._build_device = _current_device(self.xp)
+        self._ctor_args = (wdm_settings, t_ref)
+        self._ctor_kwargs = dict(
+            Nt_sub=Nt_sub, n_pad=n_pad, N_sparse=N_sparse,
+            tukey_alpha=tukey_alpha, use_tukey=use_tukey,
+            N_cp_sig=N_cp_sig, N_cp_orbit=N_cp_orbit,
+            orbits=orbits, tdi_config=tdi_config,
+            force_backend=force_backend, d_d=d_d, tdi_type=tdi_type,
+            t_obs_start=t_obs_start,
+        )
+
         if not isinstance(wdm_settings, WDMSettings):
             raise TypeError(
                 "wdm_settings must be a lisatools.domains.WDMSettings "
@@ -247,6 +273,23 @@ class WDMComputationsBase(LISAToolsParallelModule):
     @property
     def xp(self) -> object:
         return self.backend.xp
+
+    @property
+    def args(self) -> tuple:
+        """Positional arguments for recreating this comp (``(wdm_settings, t_ref)``).
+
+        Mirrors :attr:`lisatools.detector.Orbits.args` /
+        :attr:`lisatools.domains.DomainSettingsBase.args`: the per-device
+        replica helper rebuilds ``type(comp)(*comp.args, **comp.kwargs)``
+        inside the owning device context so every buffer and every ``*Wrap``
+        pointer field is device-local.
+        """
+        return self._ctor_args
+
+    @property
+    def kwargs(self) -> dict:
+        """Keyword arguments for recreating this comp (see :attr:`args`)."""
+        return dict(self._ctor_kwargs)
 
     @property
     def orbits(self) -> object:

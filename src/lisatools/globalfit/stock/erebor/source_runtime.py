@@ -188,6 +188,186 @@ def _device_local_domain_settings(settings, xp, primary_device):
     return replica
 
 
+# Per-device TDI-config replicas. ``TDIConfig.__init__`` uploads its six
+# link/sign/channel tables (``pytdiconfig_args``,
+# ``response/tdiconfig.py``) at construction, and a GB comp's
+# ``cpp_tdi_config = backend.TDIConfigWrap(*tdi_config.pytdiconfig_args)``
+# captures those pointers verbatim -- so a comp replica handed the SHARED
+# TDIConfig would still dereference the primary device's tables. The
+# rebuild is exact: ``tdi_combinations`` is the constructor's own input.
+_DEVICE_TDI_CONFIG_REPLICAS: dict = {}
+
+
+def _device_local_tdi_config(tdi_config, xp, device, primary_device):
+    """A TDI-config replica whose link tables live on ``device``.
+
+    CPU / the comp's own build device reuse the shared object (byte-identical
+    to the single-GPU path, zero extra memory). Anything else gets one cached
+    replica built from ``tdi_config.tdi_combinations`` -- the very list the
+    constructor consumes -- inside the target device context, so the six
+    ``pytdiconfig_args`` tables (and therefore the ``TDIConfigWrap`` pointer
+    fields a comp builds from them) are device-local.
+    """
+    if tdi_config is None or device is None or primary_device is None:
+        return tdi_config
+    if int(device) == int(primary_device):
+        return tdi_config
+    if not hasattr(tdi_config, "tdi_combinations"):
+        return tdi_config  # a string / unknown spec -> the comp rebuilds it
+    key = (id(tdi_config), int(device))
+    hit = _DEVICE_TDI_CONFIG_REPLICAS.get(key)
+    if hit is not None:
+        return hit[1]
+    with device_context(xp, int(device)):
+        replica = type(tdi_config)(
+            tdi_config.tdi_combinations, force_backend=tdi_config.backend
+        )
+    # Keep a strong reference to the prototype in the VALUE: the key holds
+    # only ``id(prototype)``, so a garbage-collected prototype could
+    # otherwise let a recycled id alias a stale replica.
+    _DEVICE_TDI_CONFIG_REPLICAS[key] = (tdi_config, replica)
+    return replica
+
+
+# Per-device GB computation-object replicas (the chunked-het / FD / sig-het
+# comps the GB band moves score through). The comps are built ONCE at variant
+# build time -- ``gb_info.gb_wdm_comp`` / ``gb_fd_comp`` -- and pin every
+# buffer they allocate (chunk geometry, WDM window, ``OrbitsWrap`` /
+# ``TDIConfigWrap`` pointer fields, and for sig-het the ``window_full`` /
+# ``n_sparse_local`` / ``tdi_wrap`` / reference stash) to the device current
+# at that moment. The GB shard router launches each walker shard inside its
+# OWN device context (``_RoutedBandEngine``), so on a multi-GPU run every
+# non-primary shard would dereference the primary device's pointers: a silent
+# peer-access tax where P2P is enabled, an illegal access where it is not.
+#
+# One replica per (comp, device) closes it for every routed entry point at
+# once -- ``get_ll`` / ``get_swap_ll`` / ``fill_template`` / the information
+# matrix / the F-stat -- and, for sig-het, gives each shard its own reference
+# stash, its own slot->reference map and its own ``_in_model`` flag, which is
+# what makes multi-shard in-model scoring correct at all (see
+# ``docs/superpowers/2026-08-03-multigpu-sighet-audit.md``).
+_DEVICE_GB_COMP_REPLICAS: dict = {}
+
+
+def _device_local_gb_comp(comp, xp, device, primary_device):
+    """A GB comp replica resident on ``device``.
+
+    ``primary_device`` is the device the prototype's own buffers live on
+    (``comp._build_device`` where the router can read it, else ``gpus[0]``):
+    that device -- and the CPU path (``device is None``) -- reuses the shared
+    object, so single-GPU behaviour is byte-identical and allocates nothing.
+    Any other device gets ONE lazily-built, cached replica.
+
+    Three comp shapes are handled, all by duck-typing so this module keeps no
+    import dependency on gbgpu:
+
+    * the sig-het wrapper (``GBSignalHetComputations``) -- built through
+      ``for_band_engine(chunked_comp, **knobs)``, never ``__class__(*args)``,
+      so it is rebuilt the same way around a device-local delegate with the
+      knobs recovered from the instance's own ``_g`` grid/knob dict;
+    * ``WDMComputationsBase`` subclasses (``GBWDMComputations``) and
+      ``GBFDComputations`` -- rebuilt from the recorded ``comp.args`` /
+      ``comp.kwargs`` with the device-resident ``orbits`` / ``tdi_config`` /
+      WDM-settings arguments swapped for their own device-local replicas;
+    * anything else -- returned shared, unchanged (no silent half-fix).
+
+    Built once per (comp, device) and kept for the whole run
+    (memory-lifecycle rule: allocate-once, persist; module-level cache, never
+    the settings tree, never the proposal-lifetime holder).
+    """
+    if comp is None or device is None or primary_device is None:
+        return comp
+    if int(device) == int(primary_device):
+        return comp
+    key = (id(comp), int(device))
+    hit = _DEVICE_GB_COMP_REPLICAS.get(key)
+    if hit is not None:
+        return hit[1]
+    with device_context(xp, int(device)):
+        replica = _build_gb_comp_replica(comp, xp, int(device),
+                                         int(primary_device))
+    if replica is comp:
+        return comp
+    # Prototype kept alive in the VALUE (see _device_local_tdi_config).
+    _DEVICE_GB_COMP_REPLICAS[key] = (comp, replica)
+    return replica
+
+
+#: ``GBSignalHetComputations.for_band_engine`` knob name -> the key it is
+#: recorded under in the instance's ``_g`` dict. Deriving the replica's knobs
+#: from ``_g`` (rather than a second stash) keeps the sig-het class free of
+#: replica-only state; the recorded values are already RESOLVED (snapped
+#: ``nt_layer``, resolved ``n_cp_build``), and both resolutions are
+#: idempotent, so a rebuild reproduces the prototype exactly.
+_SIGHET_REPLICA_KNOBS = {
+    "nt_layer": "nt_layer",
+    "n_sparse_fd": "n_sparse_fd",
+    "m_active_half_width": "m_half",
+    "max_r": "max_r",
+    "n_cp_build": "n_cp_build",
+    "v3_n_nodes": "v3_n_nodes",
+    "v4_knots": "v4_knots",
+    "v4_band": "v4_band",
+    "v5": "v5",
+}
+
+
+def _build_gb_comp_replica(comp, xp, device, primary_device):
+    """Construct one GB comp replica (called inside ``device``'s context)."""
+    # --- sig-het wrapper: rebuilt through its own factory -----------------
+    chunked = getattr(comp, "chunked", None)
+    if chunked is not None and hasattr(type(comp), "for_band_engine"):
+        g = getattr(comp, "_g", None)
+        if g is None:
+            return comp
+        knobs = {
+            name: g[gkey]
+            for name, gkey in _SIGHET_REPLICA_KNOBS.items()
+            if gkey in g
+        }
+        return type(comp).for_band_engine(
+            _device_local_gb_comp(chunked, xp, device, primary_device),
+            **knobs,
+        )
+
+    # --- chunked-het / FD comps: rebuilt from recorded ctor arguments -----
+    if not (hasattr(comp, "args") and hasattr(comp, "kwargs")):
+        return comp
+    args = list(comp.args)
+    kw = dict(comp.kwargs)
+    # The first positional is the domain settings (WDMSettings / FDSettings).
+    # WDMSettings carries a device-resident analysis ``window``; the existing
+    # domain replica helper regenerates it on THIS device from the same
+    # deterministic (Nf, Nt, dt, oversample), so values are unchanged.
+    if args and hasattr(args[0], "args") and hasattr(args[0], "kwargs"):
+        args[0] = _device_local_domain_settings_on(
+            args[0], xp, device, primary_device
+        )
+    # ``orbits=None`` is fine: the comp's setter builds EqualArmlengthOrbits
+    # and configures it HERE, i.e. on this device.
+    if kw.get("orbits") is not None:
+        kw["orbits"] = _device_local_orbits(kw["orbits"], xp, primary_device)
+    if kw.get("tdi_config") is not None:
+        kw["tdi_config"] = _device_local_tdi_config(
+            kw["tdi_config"], xp, device, primary_device
+        )
+    return type(comp)(*args, **kw)
+
+
+def _device_local_domain_settings_on(settings, xp, device, primary_device):
+    """:func:`_device_local_domain_settings` with an EXPLICIT target device.
+
+    The source-move callers already sit inside their shard's ``device_context``
+    so the current-device form is enough for them; the GB replica builder
+    resolves a device it was handed, so it needs the explicit spelling. Same
+    cache, same "primary reuses the shared object" rule.
+    """
+    if device is None or primary_device is None or int(device) == int(primary_device):
+        return settings
+    with device_context(xp, int(device)):
+        return _device_local_domain_settings(settings, xp, primary_device)
+
+
 def _wrap_device_and_orbits(general_info):
     """``(xp, dev, orbits, domain_settings)`` for a per-device source wave wrap.
 

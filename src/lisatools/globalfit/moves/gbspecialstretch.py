@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import logging
@@ -41,7 +42,6 @@ from gbgpu.gb_likelihood import (
     FDBandLikelihoodEngine,
     SwapLLResult,
     WDMBandLikelihoodEngine,
-    make_band_likelihood_engine,
 )
 from .globalfitmove import GFCombineMove, GlobalFitMove
 from ..priors.gbpriors import get_fdot_mojito
@@ -169,6 +169,7 @@ from .gbbands import (
     Buffer,
     SubBandBuffer,
     _RoutedBandEngine,
+    make_routed_band_engine,
     pack_special_index,
     return_x,
     unpack_special_index,
@@ -889,9 +890,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # the parent ACA has no per-slot ``min_freq_inds``, so the FD engine
         # falls back to ``start_freq_inds`` (one shared window start per
         # walker row). Routed: a multi-shard parent ACA partitions each
-        # fill by the walker's owning GPU split.
-        self._likelihood_engine = _RoutedBandEngine(make_band_likelihood_engine(
+        # fill by the walker's owning GPU split and runs each shard against
+        # its own device-local comp replica.
+        self._likelihood_engine = make_routed_band_engine(
             self._basis_settings,
+            xp=self.xp,
             gb=self.gb,
             gb_fd_comp=self.gb_fd_comp,
             gb_wdm_comp=self.gb_wdm_comp,
@@ -900,7 +903,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             df=self.df,
             start_freq_inds=self._parent_start_inds,
             data_length=acs.data_length,
-        ))
+        )
         self._parent_acs_token = token
 
     def setup(self, model, branches):
@@ -2271,13 +2274,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # reference, so the chunked delegate is the correct target whether or
         # not a sig-het reference is currently active.
         wdm_comp = getattr(self.gb_wdm_comp, "chunked", self.gb_wdm_comp)
-        comp_method = (
-            self.gb_fd_comp.get_fstat_ll_fd
+        # The router takes the comp OBJECT plus the entry-point NAME (not a
+        # bound method) so it can resolve the shard's device-local replica
+        # before binding.
+        comp, method_name = (
+            (self.gb_fd_comp, "get_fstat_ll_fd")
             if isinstance(self._basis_settings, FDSettings)
-            else wdm_comp.get_fstat_ll_wdm
+            else (wdm_comp, "get_fstat_ll_wdm")
         )
         return _RoutedBandEngine.route_fstat_ll(
-            comp_method, holder, params_phys,
+            comp, method_name, holder, params_phys,
             data_index=di, noise_index=di, convert_to_ra_dec=False)
 
     def _fstat_dist_centers(self, model, rows_params, walker_ref):
@@ -2865,6 +2871,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             delta_new[k_idx] = d_new
             delta_old_actual[k_idx] = d_old_act
             h_h_new[k_idx] = buffer_obj.replace_h_h_new
+            # GB_DEBUG: keep the EXACT rows that were scored, before the
+            # phi0 write-back mutates them, so the verifier can separate
+            # "the write-back changed the answer" from "the scored value is
+            # not reproducible at all".
+            if self.debug:
+                self._dbg_params_new_prewb = params_new.copy()
             if self.phase_maximize and phase_new is not None:
                 # Maximizing phase into NEW's phi0 (the accepted parameters
                 # carry it; a rejected old source is never re-phased).
@@ -3016,6 +3028,70 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # Stage 2: the FINAL new parameters against the same r'.
                 d_new_chk = buffer_obj.get_add_ll(
                     params_new[idx], di, di, N_vals[idx], leaf_inds=li)
+                # Stage 2b: re-MAXIMISE on the final parameters. Phase
+                # maximisation is invariant to phi0, so ``d_new_max`` must
+                # reproduce ``delta_new`` exactly; the residual rotation
+                # ``phase_angle`` must be ~0 if the write-back landed the
+                # template on its maximum. This separates the two causes:
+                #   |resid angle| ~ 0 but d_new_chk != delta_new  -> the
+                #       maximised value itself is not attainable at ANY phi0
+                #       (an amplitude/basis convention issue, not phi0).
+                #   |resid angle| >> 0 -> the write-back is wrong.
+                d_new_max = buffer_obj.get_add_ll(
+                    params_new[idx], di, di, N_vals[idx], leaf_inds=li,
+                    phase_maximize=True)
+                resid_ang = getattr(buffer_obj, "phase_angle", None)
+                resid_ang = None if resid_ang is None else resid_ang.copy()
+                # Stage 2c: BATCHING control. The scored value came from a
+                # 2n-row call ([old; new] sharing the same slot rows); the
+                # re-maximised value above came from an n-row call. Score the
+                # new half two more ways to separate "the batch layout" from
+                # "the row content":
+                #   cat_on:  concat([old, new])  -> new half at rows [n:]
+                #   cat_dup: concat([new, new])  -> same 2n layout, no old
+                # If cat_on's new half != solo but cat_dup's halves == solo,
+                # the OLD rows are corrupting the NEW rows in a shared batch.
+                _nn = int(idx.shape[0])
+                _di2 = xp.concatenate([di, di])
+                _nv2 = xp.concatenate([N_vals[idx], N_vals[idx]])
+                _li2 = None if li is None else xp.concatenate([li, li])
+                d_cat_on = buffer_obj.get_add_ll(
+                    xp.concatenate([params_old[idx], params_new[idx]], axis=0),
+                    _di2, _di2, _nv2, leaf_inds=_li2, phase_maximize=True)
+                d_cat_dup = buffer_obj.get_add_ll(
+                    xp.concatenate([params_new[idx], params_new[idx]], axis=0),
+                    _di2, _di2, _nv2, leaf_inds=_li2, phase_maximize=True)
+                # Stage 2d: the EXACT pre-write-back rows that were scored.
+                # Phase maximisation is invariant to phi0, so this must equal
+                # both ``delta_new`` and the post-write-back maximum. If it
+                # equals delta_new but the post-write-back value differs, the
+                # maximum is NOT phi0-invariant -- the quadrature partner is
+                # not h(phi0 + pi/2) in the sampled basis.
+                _pre = getattr(self, "_dbg_params_new_prewb", None)
+                d_pre_max = None if _pre is None else buffer_obj.get_add_ll(
+                    _pre[idx], di, di, N_vals[idx], leaf_inds=li,
+                    phase_maximize=True)
+                d_pre_act = None if _pre is None else buffer_obj.get_add_ll(
+                    _pre[idx], di, di, N_vals[idx], leaf_inds=li)
+                # Stage 2e: is the scored maximum ATTAINABLE at all? Scan the
+                # actual-phase add-delta over a grid of phi0 and take the best.
+                # The two-quadrature |D| is an analytic maximum that assumes
+                # <r|h(phi0)> is exactly sinusoidal in phi0; the narrow m-band
+                # truncation breaks that, so the true attainable maximum can
+                # sit BELOW the analytic one. Uses only get_add_ll.
+                _ngrid = 24
+                _scan = None
+                if _pre is not None:
+                    _base = _pre[idx].copy()
+                    _best = None
+                    for _g in range(_ngrid):
+                        _t = _base.copy()
+                        _t[:, self._phi0_col] = (
+                            _base[:, self._phi0_col] + 2 * np.pi * _g / _ngrid)
+                        _v = buffer_obj.get_add_ll(
+                            _t, di, di, N_vals[idx], leaf_inds=li)
+                        _best = _v if _best is None else xp.maximum(_best, _v)
+                    _scan = _best
             finally:
                 buffer_obj.band_buffer[rows] = snapshot
 
@@ -3037,6 +3113,59 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 "get_add_ll: max rel %.3e  <- large here means the phi0 "
                 "write-back does not reproduce the phase-maximised template",
                 self.name, r_new,
+            )
+            # Localise the new-side mismatch: is the maximum reproducible at
+            # all, and did the write-back land on it?
+            r_max = _rel(d_new_max, delta_new[idx])
+            if resid_ang is not None:
+                _wr = (xp.abs((resid_ang + np.pi) % (2 * np.pi) - np.pi))
+                _fin = xp.isfinite(_wr)
+                ang = float(xp.max(_wr[_fin])) if bool(_fin.any()) else float("nan")
+            else:
+                ang = float("nan")
+            if _scan is not None:
+                # SIGNED: positive => the analytic maximum sits ABOVE anything
+                # actually attainable, i.e. every phase-maximised score is
+                # inflated and the ledger drifts up on every accept.
+                _ex = delta_new[idx] - _scan
+                _fs = xp.isfinite(_ex) & (delta_new[idx] > -1e290)
+                logger.info(
+                    "[GB_DEBUG %s] REPLACE attainability: scored max MINUS "
+                    "best over a %d-point phi0 scan -> max %+.3e, median "
+                    "%+.3e (positive => the two-quadrature maximum is NOT "
+                    "attainable at any phi0; the ledger is inflated)",
+                    self.name, _ngrid,
+                    float(xp.max(_ex[_fs])) if bool(_fs.any()) else float("nan"),
+                    float(xp.median(_ex[_fs])) if bool(_fs.any()) else float("nan"),
+                )
+            if d_pre_max is not None:
+                logger.info(
+                    "[GB_DEBUG %s] REPLACE phi0-invariance: PRE-write-back max "
+                    "vs scored %.3e | PRE max vs POST max %.3e | PRE actual-"
+                    "phase vs POST max %.3e  (col2 large => the maximum is not "
+                    "phi0-invariant, i.e. h(phi0+pi/2) is not the quadrature "
+                    "partner in the SAMPLED basis)",
+                    self.name,
+                    _rel(d_pre_max, delta_new[idx]),
+                    _rel(d_pre_max, d_new_max),
+                    _rel(d_pre_act, d_new_max),
+                )
+            logger.info(
+                "[GB_DEBUG %s] REPLACE batching control: cat[old;new] new-half "
+                "vs solo %.3e | cat[new;new] first-half vs solo %.3e | "
+                "cat[new;new] halves self-consistent %.3e  (first large + rest "
+                "~0 => old rows corrupt new rows in a shared batch)",
+                self.name,
+                _rel(d_cat_on[_nn:], d_new_max),
+                _rel(d_cat_dup[:_nn], d_new_max),
+                _rel(d_cat_dup[_nn:], d_cat_dup[:_nn]),
+            )
+            logger.info(
+                "[GB_DEBUG %s] REPLACE new-side split: remaximised vs scored "
+                "max rel %.3e | residual phase angle at final phi0 max |ang| "
+                "%.3e rad  (angle~0 + rel>0 => the scored maximum is not "
+                "attainable at any phi0; angle>>0 => write-back is wrong)",
+                self.name, r_max, ang,
             )
             # Absolute ll scale of the swap, for comparison against the
             # propose-level drift this move reports.
@@ -4985,6 +5114,244 @@ class VGBSpecialStretchMove(GBSpecialBase):
 class GBSpecialRJPriorMove(GBSpecialBase):
     """Reversible-jump GB move that draws proposals from the prior distribution."""
     pass
+
+
+#: Process-local cache of fitted F-stat birth grids, keyed by epoch cache
+#: directory -> ``(container, epoch, n_peaks)``. Lets every move sharing a
+#: fit dir reuse the FIRST one's result with no refit and no npz reload.
+#: Cleared only by process exit; the on-disk epoch caches are the
+#: cross-process equivalent.
+_FSTAT_GRID_REGISTRY: dict = {}
+
+
+class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
+    """RJ birth move that FITS its own F-stat grid inside ``setup()``.
+
+    The offline prep (``scripts/fstat_proposal/plot_fstat_proposal_mojito.py``
+    -> ``*_comb.npz`` + ``*_peaks_stacked.npz``) becomes unnecessary: on the
+    first hit this move runs the full comb scan -> peak selection -> stage-B
+    grid build against the **current residual**, installs the result as its
+    RJ birth proposal, and then lets ``propose()`` continue normally. The
+    compute cores are the library ones
+    (:mod:`lisatools.sampling.fstat_gridfit`) -- nothing is reimplemented
+    here; this class only decides *when* to fit and wires the result in.
+
+    ``setup()`` runs once per ``propose()`` (``GBSpecialBase.setup`` is
+    called immediately before ``rj_proposal_distribution`` is read), so the
+    decision logic below is what keeps the expensive path off every hit:
+
+    * ``fstat_refit_every <= 0`` (default): fit exactly once, ever.
+    * otherwise: refit when ``num_proposals`` has advanced that many hits
+      since the last fit.
+
+    Each fit gets its own ``epoch_<k>`` cache directory, and the sweep
+    checkpoints are salted with the epoch, so a mid-fit death resumes
+    exactly where it stopped and a later epoch can never resume an earlier
+    epoch's rows. A prebuilt offline grid drops in as ``epoch_0000/``.
+    """
+
+    def __init__(self, *args, fstat_fit_dir: str = "",
+                 fstat_refit_every: int = 0,
+                 fstat_fit_kwargs: Optional[dict] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not fstat_fit_dir:
+            raise ValueError(
+                "GBSpecialRJFStatGridMove needs fstat_fit_dir (the root for "
+                "its epoch_<k> grid caches)."
+            )
+        self.fstat_fit_dir = str(fstat_fit_dir)
+        self.fstat_refit_every = int(fstat_refit_every)
+        self.fstat_fit_kwargs = dict(fstat_fit_kwargs or {})
+        self._fstat_epoch = None
+        self._fstat_last_fit_hit = -1
+
+    # ---- epoch bookkeeping -------------------------------------------------
+
+    @property
+    def _fstat_root(self) -> str:
+        """Where this move's epochs live.
+
+        SHARED by default (``<fit_dir>/shared``): several moves in one run
+        want the SAME birth grid -- the search cycle's ``rj_prior_search``
+        and the PE ``rj_prior`` both score births against the same residual,
+        so making each fit its own copy would pay the (potentially
+        hours-scale) sweep once per move for an identical answer. Whichever
+        move's ``setup()`` fires first does the fit; the rest pick it up
+        from :data:`_FSTAT_GRID_REGISTRY` (same process, no disk round trip)
+        or from the epoch's npz caches (fresh process / restart).
+
+        ``GB_FSTAT_FIT_PER_MOVE=1`` restores per-move grids for the case
+        where two moves genuinely need different ones.
+        """
+        if os.environ.get("GB_FSTAT_FIT_PER_MOVE", "0") == "1":
+            return os.path.join(self.fstat_fit_dir, self.name)
+        return os.path.join(self.fstat_fit_dir, "shared")
+
+    def _epoch_dir(self, k: int) -> str:
+        return os.path.join(self._fstat_root, f"epoch_{k:04d}")
+
+    @staticmethod
+    def _epoch_complete(d: str) -> bool:
+        """An epoch is done when its stage-B npz OR its manifest exists.
+
+        The manifest covers the legitimate zero-peak case, where no
+        ``*_peaks_stacked.npz`` is ever written but the fit did run and must
+        not be repeated forever.
+        """
+        from lisatools.sampling.fstat_gridfit import GRID_BASENAME
+
+        return (os.path.exists(os.path.join(
+                    d, GRID_BASENAME.replace(".npz", "_peaks_stacked.npz")))
+                or os.path.exists(os.path.join(d, "DONE.json")))
+
+    def _latest_epoch(self):
+        root = self._fstat_root
+        if not os.path.isdir(root):
+            return None
+        ks = sorted(int(n.split("_")[1]) for n in os.listdir(root)
+                    if n.startswith("epoch_") and n[6:].isdigit())
+        return ks[-1] if ks else None
+
+    def _fstat_fit_decision(self):
+        """Pure decision helper -> ``(action, epoch)``.
+
+        ``action`` is one of ``"skip"`` (keep the installed proposal),
+        ``"load"`` (a complete epoch exists on disk) or ``"fit"``.
+        Factored out so the state machine is table-testable without a
+        sampler.
+        """
+        if self.rj_proposal_distribution is not None:
+            if self.fstat_refit_every <= 0:
+                return "skip", self._fstat_epoch
+            if (self.num_proposals - self._fstat_last_fit_hit
+                    < self.fstat_refit_every):
+                return "skip", self._fstat_epoch
+            return "fit", (self._fstat_epoch or 0) + 1
+        k_latest = self._latest_epoch()
+        if k_latest is None:
+            return "fit", 0
+        if self._epoch_complete(self._epoch_dir(k_latest)):
+            return "load", k_latest
+        # Mid-fit death: resume the SAME epoch (its checkpoints are live).
+        return "fit", k_latest
+
+    # ---- the fit -----------------------------------------------------------
+
+    def _fstat_call(self, model, walker_ref):
+        """The injectable kernel entry the library sweeps drive.
+
+        Same routing as :meth:`_fstat_NM` -- the sig-het wrapper unwrap and
+        the multi-shard route are both load-bearing, so this reuses that
+        method rather than re-deriving the comp.
+        """
+        return lambda params: self._fstat_NM(model, params, walker_ref)
+
+    def _run_fstat_fit(self, model, k: int):
+        from lisatools.sampling.fstat_gridfit import run_fstat_grid_fit
+
+        cache_dir = self._epoch_dir(k)
+        os.makedirs(cache_dir, exist_ok=True)
+        walker_ref = self._fstat_reference_walker(model)
+        band_edges = _to_numpy(self.band_edges)
+        # f0_lims convention (gb.py): the interior span, band_edges[1:-1].
+        f0_lims = (float(band_edges[1]), float(band_edges[-2]))
+        mc_lims = self.fstat_fit_kwargs.get("mc_lims") or [0.001, 1.0]
+        t0 = time.perf_counter()
+        logger.info("%s: F-stat grid fit epoch %d starting (walker_ref=%d, "
+                    "cache %s)", self.name, k, walker_ref, cache_dir)
+        stacked, n_peaks = run_fstat_grid_fit(
+            self._fstat_call(model, walker_ref),
+            xp=self.xp,
+            Tobs=float(self._basis_settings.Tobs),
+            band_edges_hz=band_edges,
+            f0_lims_hz=f0_lims,
+            mc_lims=mc_lims,
+            cache_dir=cache_dir,
+            fingerprint_extra=f"|epoch={k}",
+        )
+        wall = time.perf_counter() - t0
+        logger.info("%s: F-stat grid fit epoch %d done in %.1fs (%d peaks)",
+                    self.name, k, wall, n_peaks)
+        try:
+            with open(os.path.join(cache_dir, "DONE.json"), "w") as f:
+                json.dump(dict(epoch=k, walker_ref=int(walker_ref),
+                               n_peaks=int(n_peaks), wall_seconds=wall,
+                               num_proposals=int(self.num_proposals)), f)
+        except OSError as exc:  # manifest is bookkeeping, never fatal
+            logger.warning("%s: could not write DONE.json (%r)", self.name, exc)
+        return stacked, n_peaks
+
+    def _install(self, k: int, stacked=None, n_peaks=None):
+        from lisatools.sampling.fstat_gridfit import build_gb_birth_distribution
+
+        kw = self.fstat_fit_kwargs
+        container = build_gb_birth_distribution(
+            cache_dir=self._epoch_dir(k),
+            mc_lims=kw.get("mc_lims") or [0.001, 1.0],
+            A_lims=kw.get("A_lims"),
+            dist_lims=kw.get("dist_lims"),
+            fdot_astro_ratio_max=kw.get("fdot_astro_ratio_max"),
+            use_cupy=self.backend.uses_cupy,
+            stacked_live=stacked,
+        )
+        if container is None:
+            # Zero peaks (or a stage that produced nothing): fall back to the
+            # prior so births still happen, and leave the epoch COMPLETE so
+            # this does not turn into a refit loop. ``priors`` / ``gpu_priors``
+            # are ALREADY branch-keyed dicts (recipe.py builds them as
+            # ``{"gb": ...}`` and hands them to the removal move unwrapped),
+            # so they are assigned straight through -- re-wrapping them would
+            # nest a dict where a distribution is expected.
+            logger.warning(
+                "%s: F-stat fit epoch %d produced no birth distribution "
+                "(%s peaks); falling back to the prior for births.",
+                self.name, k, n_peaks,
+            )
+            self.rj_proposal_distribution = (
+                self.priors if not self.backend.uses_cuda else self.gpu_priors
+            )
+        else:
+            self.rj_proposal_distribution = {self.branch_name: container}
+        self._fstat_epoch = k
+        self._fstat_last_fit_hit = int(self.num_proposals)
+        # Publish for the other moves sharing this fit dir (see
+        # :data:`_FSTAT_GRID_REGISTRY`). Store the assembled
+        # rj_proposal_distribution, so the prior-fallback case is shared too
+        # and a second move cannot re-run a fit that legitimately found
+        # nothing.
+        _FSTAT_GRID_REGISTRY[self._epoch_dir(k)] = (
+            self.rj_proposal_distribution, k, n_peaks,
+        )
+
+    def setup(self, model, branches):
+        action, k = self._fstat_fit_decision()
+        if action == "skip":
+            return
+
+        # Cross-move reuse: another move sharing this fit dir may already
+        # have built (or loaded) this exact epoch in THIS process. Take its
+        # container verbatim -- no refit, no npz reload.
+        if action in ("load", "fit"):
+            hit = _FSTAT_GRID_REGISTRY.get(self._epoch_dir(k))
+            if hit is not None:
+                container, epoch, n_peaks = hit
+                logger.info(
+                    "%s: reusing the F-stat birth grid already fitted this "
+                    "process (epoch %d, %s peaks) -- no refit.",
+                    self.name, epoch, n_peaks,
+                )
+                self.rj_proposal_distribution = container
+                self._fstat_epoch = epoch
+                self._fstat_last_fit_hit = int(self.num_proposals)
+                return
+
+        if action == "load":
+            logger.info("%s: loading complete F-stat grid epoch %d from %s",
+                        self.name, k, self._epoch_dir(k))
+            self._install(k)
+            return
+        stacked, n_peaks = self._run_fstat_fit(model, k)
+        self._install(k, stacked=stacked, n_peaks=n_peaks)
 
 
 def para_log_like(

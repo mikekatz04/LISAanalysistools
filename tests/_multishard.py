@@ -9,7 +9,9 @@ executed), so tests can assert WHICH device each call ran under.
 
 Promoted from ``test_band_view_multi_shard.py`` and extended with the flat
 ``linear_data_arr`` / ``linear_psd_arr`` protocol the gbgpu band engines
-and the LAT shard router consume.
+and the LAT shard router consume, plus :class:`FakeDeviceComp` -- a GB comp
+stand-in carrying the ``_build_device`` / ``args`` / ``kwargs`` replica
+contract so the router's per-device comp replicas are testable without a GPU.
 """
 
 from __future__ import annotations
@@ -106,6 +108,66 @@ class RecordingXp:
     # numpy passthrough for everything else (asarray, zeros, where, ...)
     def __getattr__(self, name):
         return getattr(np, name)
+
+
+class FakeDeviceComp:
+    """Duck-typed GB comp recording the device it was constructed on.
+
+    Implements the replica contract the real comps record --
+    ``_build_device`` plus ``args`` / ``kwargs``
+    (``lisatools.chunked_het.WDMComputationsBase`` /
+    ``gbgpu.gbcomps.GBFDComputations``) -- so
+    ``source_runtime._device_local_gb_comp`` can rebuild it and the router's
+    per-shard replica dispatch is exercisable on a machine with no GPU. Every
+    compute entry point stamps the comp's OWN build device into its output,
+    so a test can prove a shard ran against a device-local comp rather than
+    the prototype.
+    """
+
+    def __init__(self, xp, tag: str = "comp", ndim: int = 3):
+        from lisatools.utils.device import current_device
+
+        self.xp = xp
+        self.tag = tag
+        self.ndim = int(ndim)
+        self._build_device = current_device(xp)
+        self.calls = []
+
+    @property
+    def args(self) -> tuple:
+        # Empty: everything this comp needs to be rebuilt is keyword-only,
+        # which also keeps the helper's "first positional is the domain
+        # settings" branch out of the way.
+        return ()
+
+    @property
+    def kwargs(self) -> dict:
+        return dict(xp=self.xp, tag=self.tag, ndim=self.ndim)
+
+    def _record(self, kind, holder, **info):
+        self.calls.append(
+            dict(kind=kind, holder=holder, build_device=self._build_device,
+                 **info)
+        )
+
+    def information_matrix(self, params, holder, *, inds, noise_index,
+                           **swap_kwargs):
+        intra = np.asarray(noise_index)
+        self._record("info", holder, intra=intra.copy())
+        nd = len(inds) if inds is not None else self.ndim
+        out = np.zeros((len(intra), nd, nd), dtype=float)
+        for r in range(len(intra)):
+            np.fill_diagonal(out[r], float(self._build_device))
+        return out
+
+    def get_fstat_ll_wdm(self, params, wdm_holder, data_index=None,
+                         noise_index=None, **kwargs):
+        intra = np.asarray(data_index)
+        self._record("fstat", wdm_holder, intra=intra.copy(),
+                     kwargs=dict(kwargs))
+        base = np.full(len(intra), float(self._build_device))
+        return base[:, None] + np.zeros(4)[None, :], \
+            base[:, None] + np.zeros(10)[None, :]
 
 
 class FakeMultiShardACA:
