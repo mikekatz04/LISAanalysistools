@@ -1,5 +1,34 @@
 # Multi-GPU correctness for the GB F-stat + sig-het paths — implementation
 
+> **Follow-up review, 2026-08-04 (main session).** Three additions after an
+> independent read of the implementation:
+>
+> * **F-stat audit item D4 closed.** `plot_fstat_proposal_mojito.py` now
+>   refuses `len(gpus) > 1` *before* `fit.build()` loads the mojito data,
+>   naming the fix. Previously a multi-GPU grid prep sharded the parent ACA
+>   and died at the first probe inside `chunked_het` with a shard-router
+>   message that is correct but says nothing about grid prep — after the data
+>   load. Grid prep is single-device by design (it comb-scans one walker's
+>   full residual); multi-GPU applies to the in-fit F-stat, not to this
+>   offline step.
+> * **New regression test for the PRODUCTION F-stat call shape**
+>   (`test_fstat_all_rows_on_one_non_primary_shard`). `_fstat_NM` sends every
+>   row to a single walker — `di = xp.full(n, walker_ref)` — so exactly one
+>   shard is non-empty, and the failure case is that shard being non-primary.
+>   The existing dispatch test uses a *spread* `data_index`, which cannot
+>   catch a partition bug that only appears when one shard is populated.
+> * **`test_fstat_dispatches_to_device_local_comp` was weaker than it read.**
+>   Its `seen = {...for c in comp.calls}` loop inspects only the PROTOTYPE's
+>   call log, and a non-primary shard runs on a *replica* — a different
+>   object with its own log — so that dict never contained more than the
+>   primary shard and the loop was close to vacuous. It now walks
+>   `_DEVICE_GB_COMP_REPLICAS` and asserts every shard that owned a row ran on
+>   its own comp. The test's first assertion (the device stamped into the
+>   output) was always the real proof and still passes unchanged.
+>
+> Suite: 30 → 31 tests, and 85 across all multi-shard suites, all passing.
+> Still nothing run on a GPU.
+
 **Date:** 2026-08-04
 **Status:** IMPLEMENTED, in the working tree, **not committed**.
 **Machine:** laptop, no GPU. Everything below is CPU-validated; every GPU

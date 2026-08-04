@@ -306,6 +306,23 @@ def build_gb_wdm_comp_and_holder():
     print(f"[build] empirical PSD: MojitoNoiseEstimates({os.path.basename(noise_file)})",
           flush=True)
 
+    # Grid prep is single-device BY DESIGN: it scans one walker's full
+    # residual and hands the parent ACA straight to get_fstat_ll_wdm, which
+    # is single-shard by contract. With more than one GPU the ACA shards and
+    # the first probe dies inside chunked_het with a shard-router message
+    # that is correct but says nothing about grid prep -- after fit.build()
+    # has already loaded the mojito data. Fail here instead, with the fix.
+    _gpus = fit.general.gpus
+    if _gpus is not None and len(list(_gpus)) > 1:
+        raise SystemExit(
+            f"GPUS={','.join(str(g) for g in _gpus)}: F-stat grid prep is "
+            "single-GPU by design (it comb-scans ONE walker's full residual, "
+            "and the raw comps are single-shard by contract). Re-run pinned "
+            f"to one device, e.g. GPUS={list(_gpus)[0]}. Multi-GPU applies to "
+            "the in-fit F-stat -- lisatools.globalfit.moves.gbbands."
+            "_RoutedBandEngine.route_fstat_ll -- not to this offline prep."
+        )
+
     print(f"[build] fit.build() -- loads mojito data...", flush=True)
     t0 = time.time()
     curr = fit.build()

@@ -537,10 +537,86 @@ class ShardRouterTest(unittest.TestCase):
         dev = np.asarray(self.holder.gpu_map)[self.data_index].astype(float)
         # column 0 carries the build device of the comp that produced the row
         np.testing.assert_array_equal(np.asarray(N)[:, 0], dev)
-        # ... and every shard's comp reports its own device, not shard 0's
-        seen = {c["holder"].gpus[0]: c["build_device"] for c in comp.calls}
-        for shard_dev, build_dev in seen.items():
-            self.assertEqual(int(build_dev), int(shard_dev))
+
+        # ... and every shard's comp reports its own device, not shard 0's.
+        # NOTE: a non-primary shard runs on a REPLICA, which is a separate
+        # object with its own call log -- so ``comp.calls`` holds the primary
+        # shard's call and nothing else. Checking only it would be nearly
+        # vacuous; walk the replica cache for the rest.
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            _DEVICE_GB_COMP_REPLICAS,
+        )
+        primary = self.RoutedEngine._primary_device(comp, self.holder)
+        by_device = {int(primary): comp}
+        for (proto_id, cdev), (_proto, replica) in (
+                _DEVICE_GB_COMP_REPLICAS.items()):
+            if proto_id == id(comp):
+                by_device[int(cdev)] = replica
+
+        ran = set()
+        for cdev, c in by_device.items():
+            for call in c.calls:
+                self.assertEqual(int(call["build_device"]), int(cdev))
+                self.assertEqual(int(call["holder"].gpus[0]), int(cdev))
+                ran.add(int(cdev))
+        # every shard that owned a row actually ran, on its own comp
+        self.assertEqual(
+            ran, {int(d) for d in
+                  np.asarray(self.holder.gpu_map)[self.data_index]})
+
+    def test_fstat_all_rows_on_one_non_primary_shard(self):
+        """The PRODUCTION F-stat call shape, and the one that actually fails
+        without replicas.
+
+        ``_fstat_NM`` scores every candidate against a single reference
+        walker -- ``di = xp.full(n, walker_ref)`` -- so unlike the spread
+        ``data_index`` above, exactly ONE shard is ever non-empty. When
+        ``_fstat_reference_walker``'s argmax lands on a non-primary shard
+        (roughly half of all proposals, since sharding splits walkers
+        contiguously) that shard launches against comp buffers belonging to
+        another device. A spread-index test cannot catch a partition bug that
+        only shows up when a single shard is populated, so pin the real shape.
+        """
+        comp = self._fake_comp()
+        gpu_map = np.asarray(self.holder.gpu_map)
+        primary = self.RoutedEngine._primary_device(comp, self.holder)
+        self.assertIsNotNone(
+            primary, "fixture must emulate devices or this test is vacuous")
+
+        foreign = [int(r) for r in range(self.NUM_ACS)
+                   if int(gpu_map[r]) != int(primary)]
+        self.assertTrue(foreign, "need a row owned by a non-primary shard")
+        walker_ref = foreign[0]
+        ref_dev = int(gpu_map[walker_ref])
+
+        n = 6
+        di = np.full(n, walker_ref, dtype=int)
+        N, _M = self.RoutedEngine.route_fstat_ll(
+            comp, "get_fstat_ll_wdm", self.holder, np.zeros((n, 3)),
+            data_index=di, noise_index=di)
+
+        # every row scored by a comp resident on the REFERENCE walker's
+        # device, not on the prototype's
+        np.testing.assert_array_equal(
+            np.asarray(N)[:, 0], np.full(n, float(ref_dev)))
+        self.assertNotEqual(ref_dev, int(primary))
+
+        # The prototype itself must NOT have run: the work went to a replica,
+        # which is a different object with its own call log. (This is also why
+        # asserting over ``comp.calls`` alone is weak -- for a non-primary
+        # shard it is empty by construction.)
+        self.assertEqual(comp.calls, [])
+
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            _DEVICE_GB_COMP_REPLICAS,
+        )
+        replica = _DEVICE_GB_COMP_REPLICAS[(id(comp), ref_dev)][1]
+        self.assertIsNot(replica, comp)
+        # exactly one shard ran -- an empty shard must be skipped, not
+        # launched with a zero-row batch
+        self.assertEqual(len(replica.calls), 1)
+        self.assertEqual(int(replica.calls[0]["build_device"]), ref_dev)
+        self.assertEqual(int(replica.calls[0]["holder"].gpus[0]), ref_dev)
 
     def test_information_matrix_dispatches_to_device_local_comp(self):
         comp = self._fake_comp()
