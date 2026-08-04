@@ -81,3 +81,25 @@ def test_recording_drops_the_unused_temperature_tail():
 def test_bespoke_history_attribute_is_gone():
     move = _build_move([StretchMove()])
     assert not hasattr(move, "inner_moves_acceptance_fractions")
+
+
+def test_recording_survives_a_foreign_owner_replacing_the_buffer():
+    # a shared inner move can also be handed to an EnsembleSampler as one of
+    # its own `moves`; ensemble.py unconditionally does
+    # `move.accepted = np.zeros((ntemps, nwalkers))` for every move it owns,
+    # which can stomp the buffer with a different shape. Recording must
+    # re-seed rather than raise inside `propose`.
+    inner = StretchMove()
+    move = _build_move([inner])
+
+    # simulate the foreign owner (different ntemps/nwalkers) replacing the buffer
+    inner.accepted = np.zeros((NTEMPS + 6, NWALKERS + 44))
+
+    accepted = np.zeros((NTEMPS, NWALKERS), dtype=bool)
+    accepted[0, 0] = True
+
+    move._record_inner_acceptance(inner, accepted)
+
+    assert inner.accepted.shape == (NTEMPS, NWALKERS)
+    assert inner.accepted[0, 0] == 1.0
+    assert inner.num_proposals == 1

@@ -171,8 +171,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     
     @property
     def sub_moves(self):
-        """Inner moves driven by this move; each keeps its own acceptance counters."""
-        return self.moves
+        """Inner moves driven by this move; each keeps its own acceptance counters.
+
+        Returns a fresh list (mirroring :class:`eryn.moves.CombineMove.sub_moves`)
+        so a caller mutating the returned list cannot corrupt ``self.moves``.
+        """
+        return list(self.moves)
 
     def _record_inner_acceptance(self, inner_move, accepted):
         """Fold one repeat's result into ``inner_move``'s standard counters.
@@ -183,9 +187,20 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 ``(ntemps_full, nwalkers)``. Only the temperatures this move
                 uses are ever set, so the tail is dropped.
 
+        An inner move instance can also be shared with an ``EnsembleSampler``
+        (e.g. via ``mbh_info["pe_info"]["inner_moves"]``), which unconditionally
+        overwrites ``move.accepted`` with a freshly zeroed ``(ntemps, nwalkers)``
+        buffer of its own on every run; if that buffer's shape does not match
+        ours we re-seed it here instead of raising inside ``propose`` and
+        taking down a multi-hour run.
         """
         # the counter array is float: `bool += bool` saturates at 1 and would
         # cap every per-move count at a single accept per walker
+        expected = (self.ntemps, self.nwalkers)
+        current = getattr(inner_move, "_accepted", None)
+        if current is None or current.shape != expected:
+            inner_move.accepted = np.zeros(expected)
+            inner_move.num_proposals = 0
         inner_move.accepted += accepted[: self.ntemps]
         inner_move.num_proposals += 1
 
@@ -798,7 +813,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         logger.debug(
             "inner moves acceptance fractions: "
-            f"{ {m.__class__.__name__: float(np.mean(m.acceptance_fraction[0])) for m in self.moves} }. "
+            f"{ {m.__class__.__name__: (float(np.mean(m.acceptance_fraction[0])) if m.num_proposals else -1.0) for m in self.moves} }. "
             f"elapsed: {time.time() - tic}"
         )
         logger.debug(f"mean accepted fraction: {np.mean(self.accepted[0] / self.num_proposals)}. elapsed: {time.time() - tic}")
