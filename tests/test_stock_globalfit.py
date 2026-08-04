@@ -324,10 +324,29 @@ class RecipeTest(unittest.TestCase):
         r.add_move(Move("f"), after="c")
         self.assertEqual([m.name for m in r._stage("s2").moves], ["e", "c", "f"])
 
-    def test_duplicate_name_rejected(self):
+    def test_duplicate_name_rejected_within_stage(self):
         r = self._recipe()
         with self.assertRaises(ValueError):
-            r.add_move(Move("a"), stage="s2")
+            r.add_move(Move("a"), stage="s1")
+        with self.assertRaises(ValueError):
+            Recipe([Stage("s", kind="pe", moves=[Move("a"), Move("a")])])
+
+    def test_same_move_allowed_in_several_stages(self):
+        """A staged run installs one stock move in several stages.
+
+        e.g. ``psd_pe``/``galfor_pe`` keep sampling the noise model through
+        both the GB search stage and the GB PE stage. Both resolve to the
+        same runtime object and the stages run sequentially.
+        """
+        r = self._recipe()
+        r.add_move(Move("a"), stage="s2")
+        self.assertEqual([m.name for m in r._stage("s1").moves], ["a", "b"])
+        self.assertEqual([m.name for m in r._stage("s2").moves], ["c", "a"])
+        # the name is now ambiguous -> pop/get require stage=
+        with self.assertRaises(KeyError):
+            r.pop_move("a")
+        self.assertEqual(r.pop_move("a", stage="s2").name, "a")
+        self.assertEqual([m.name for m in r._stage("s2").moves], ["c"])
 
     def test_ambiguous_stage_required(self):
         r = self._recipe()

@@ -161,9 +161,21 @@ class Recipe:
         stage_names = [s.name for s in self.stages]
         if len(set(stage_names)) != len(stage_names):
             raise ValueError(f"Duplicate stage names: {stage_names}.")
-        move_names = [m.name for s in self.stages for m in s.moves]
-        if len(set(move_names)) != len(move_names):
-            raise ValueError(f"Duplicate move names across recipe: {move_names}.")
+        # Move names are unique WITHIN a stage, not across the recipe: a
+        # staged run legitimately installs the same stock move in several
+        # stages (e.g. ``psd_pe``/``galfor_pe`` keep sampling the noise model
+        # through both the GB search stage and the GB PE stage). Both
+        # resolve to the SAME runtime object via the stock-name lookup, and
+        # stages run sequentially, so sharing it is safe. ``_find_move`` has
+        # always handled the multi-stage case by asking for ``stage=`` to
+        # disambiguate — that path was unreachable while this check was
+        # global.
+        for stage in self.stages:
+            names = [m.name for m in stage.moves]
+            if len(set(names)) != len(names):
+                raise ValueError(
+                    f"Duplicate move names within stage {stage.name!r}: {names}."
+                )
 
     def _stage(self, name: str) -> "Stage":
         for stage in self.stages:
@@ -298,11 +310,6 @@ class Recipe:
         the stage (default: append).
         """
         move = self._coerce_move(move, name=name, branch=branch, sync_log_like=sync_log_like)
-        if move.name in self.move_names():
-            raise ValueError(
-                f"Move name {move.name!r} already present "
-                f"(existing: {self.move_names()}). pop_move it first or rename."
-            )
         if sum(x is not None for x in (before, after, index)) > 1:
             raise ValueError("Pass at most one of before=, after=, index=.")
 
@@ -319,6 +326,15 @@ class Recipe:
             raise ValueError(
                 f"Multiple stages present ({[s.name for s in self.stages]}); "
                 "pass stage=... to say where the move goes."
+            )
+
+        # Uniqueness is per-stage (see ``_check_unique``): the same stock move
+        # may appear in several stages of a staged run.
+        if move.name in [m.name for m in st.moves]:
+            raise ValueError(
+                f"Move name {move.name!r} already present in stage {st.name!r} "
+                f"(existing: {[m.name for m in st.moves]}). pop_move it first "
+                "or rename."
             )
 
         if before is not None:
