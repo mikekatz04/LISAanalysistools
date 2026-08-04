@@ -393,12 +393,17 @@ def build(nt, Nf, nr, knots, band, quiet=False):
                 "v5": sighet_v5_shared_bytes(nr, knots, 3, 2, nsp, 16, True),
                 "v5-ctl": sighet_v5_shared_bytes(nr, knots, 3, 2, nsp, 16,
                                                  False)}
+        n_requested = len(engines)
         for n in [k for k in engines if need.get(k, 0) > lim]:
             print(f"  [skip] {n}: scorer needs {need[n]/1024:.0f} KB > "
                   f"{lim/1024:.0f} KB device limit at N_sparse_t={nsp} "
                   f"(nt_layer={nt_layer}). Lower BENCH_NTL to include it.")
             engines.pop(n)
-        if not engines:
+        # Only an error when engines were REQUESTED and every one was skipped.
+        # A chunked-only run (BENCH_ENGINES=chunked) legitimately has none, and
+        # must not be turned into a failure -- it is the natural first step
+        # when bisecting a benchmark problem.
+        if n_requested and not engines:
             raise RuntimeError(
                 f"no sig-het engine fits {lim/1024:.0f} KB at "
                 f"N_sparse_t={nsp}; lower BENCH_NTL")
