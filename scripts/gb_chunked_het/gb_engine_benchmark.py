@@ -368,7 +368,15 @@ def build(nt, Nf, nr, knots, band, quiet=False):
                 "v5-ctl": lambda: mk(v3_n_nodes=nr, v4_knots=knots,
                                      v4_band=band, v5=2)}
     engines = {n: f() for n, f in builders.items() if n in ENGINES}
-    nsp = next(iter(engines.values()))._g["N_sparse_t"]
+    # ``engines`` holds the SIG-HET engines only -- ``chunked`` is tracked
+    # separately and always kept -- so a chunked-only run (BENCH_ENGINES=chunked,
+    # the natural first step when bisecting a failure) leaves this dict EMPTY.
+    # Build one throwaway engine purely to read the sparse-grid geometry rather
+    # than raising StopIteration on ``next(iter(...))``.
+    if engines:
+        nsp = next(iter(engines.values()))._g["N_sparse_t"]
+    else:
+        nsp = builders["v4-band"]()._g["N_sparse_t"]
 
     # Drop engines whose scorer cannot fit this device's shared memory.
     # Without this the kernel launches anyway and dies on
