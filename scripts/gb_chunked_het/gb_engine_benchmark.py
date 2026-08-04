@@ -95,6 +95,21 @@ ENGINES = [n for n in ALL_ENGINES
                                    ",".join(DEFAULT_ENGINES)).split(",")}]
 # Categorical hues in FIXED order, CVD-validated (adjacent-pair dE >= 8 under
 # deuteranopia and protanopia).  Colour follows the ENGINE, never its rank;
+# Settings-frontier ARMS. Historically the frontier swept only the v4 axis
+# (pcr = unbanded, band = banded), which is the wrong axis once v5 is the live
+# question. BENCH_SETTINGS_ARMS picks which scorer variants the (n_r x K)
+# ladder is measured on:
+#     pcr   -> v4, unbanded          band  -> v4, banded
+#     v5    -> v5 aliased arena      v5ctl -> v5 flat carve (occupancy control)
+# Default is the live comparison; add "pcr" for the historical control.
+_ARM_SPEC = {"pcr":   dict(v4_band=0, v5=0),
+             "band":  dict(v4_band=None, v5=0),   # None -> the run's --band
+             "v5":    dict(v4_band=None, v5=1),
+             "v5ctl": dict(v4_band=None, v5=2)}
+SETTINGS_ARMS = [a for a in os.environ.get("BENCH_SETTINGS_ARMS",
+                                           "band,v5").split(",")
+                 if a.strip() in _ARM_SPEC]
+
 CLR = {"chunked": "#666666", "v2": "#E69F00", "v3": "#0072B2",
        "v4-pcr": "#009E73", "v4-band": "#D55E00", "v5": "#CC79A7",
        "v5-ctl": "#8C6BB1"}
@@ -764,18 +779,25 @@ def main():
             nb_s = batches[-1]
             for nr_i in nr_ladder(nt, Nf, dt, base=nr):
                 for K_i in (max(64, knots // 2), knots, min(512, knots * 2)):
-                    for band_i in (0, band):
+                    for _arm in SETTINGS_ARMS:
+                        _spec = _ARM_SPEC[_arm]
+                        band_i = (band if _spec["v4_band"] is None
+                                  else _spec["v4_band"])
+                        v5_i = _spec["v5"]
                         # A config whose scorer exceeds the device's shared
                         # memory aborts the PROCESS (GPUassert), not the
                         # Python call -- the grid was sized for the default
                         # nodes/knots, so a larger frontier point must be
                         # skipped BEFORE it is launched.
-                        need = sighet_shared_bytes(nr_i, K_i, 3, 2, nsp,
-                                                   band_i, v4=True)
+                        need = (sighet_v5_shared_bytes(nr_i, K_i, 3, 2, nsp,
+                                                       band_i, v5_i == 1)
+                                if v5_i else
+                                sighet_shared_bytes(nr_i, K_i, 3, 2, nsp,
+                                                    band_i, v4=True))
                         lim_i = device_shared_limit()
                         if USE_GPU and need > lim_i:
                             print(f"[set  ] nr={nr_i:3d} K={K_i:3d} "
-                                  f"{'band' if band_i else 'pcr ':>4s}: "
+                                  f"{_arm:>5s}: "
                                   f"SKIP -- needs {need/1024:.0f} KB > "
                                   f"{lim_i/1024:.0f} KB")
                             continue
@@ -784,7 +806,7 @@ def main():
                                 chunked, n_sparse_fd=512, n_cp_build=93,
                                 nt_layer=ntl, m_active_half_width=2,
                                 v3_n_nodes=nr_i, v4_knots=K_i,
-                                v4_band=band_i)
+                                v4_band=band_i, **({"v5": v5_i} if v5_i else {}))
                             # Score against the SAME reference battery the
                             # engine comparison uses. A frontier measured on
                             # one benign source understates the error by
@@ -813,14 +835,14 @@ def main():
                                         for k in range(1, min(n_as,
                                                               len(dv_s)))]
                             w_, m_ = wm(e_s)
-                            settings[(nt, nr_i, K_i, band_i)] = dict(
+                            settings[(nt, nr_i, K_i, band_i, _arm)] = dict(
                                 cost=cost, med=m_, worst=w_)
                             print(f"[set  ] nr={nr_i:3d} K={K_i:3d} "
-                                  f"{'band' if band_i else 'pcr ':>4s}: "
+                                  f"{_arm:>5s}: "
                                   f"{cost:7.2f} us worst={w_:.3e}")
                         except Exception as exc:             # noqa: BLE001
                             print(f"[set  ] nr={nr_i} K={K_i} "
-                                  f"band={band_i} FAILED: {exc}")
+                                  f"arm={_arm} FAILED: {exc}")
 
     report(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
            meta, Nf, nr, knots, band)
@@ -1044,7 +1066,7 @@ def figure(out, nts, batches, tiers, T_rep, speed, err_nt, settings, shm, occ,
     ax = fig.add_subplot(gs[1, 2]); style(ax)
     if settings:
         all_nr = sorted({k[1] for k in settings})
-        for (nt, nr_i, K_i, b_i), v in settings.items():
+        for (nt, nr_i, K_i, b_i, _arm), v in settings.items():
             i = all_nr.index(nr_i)
             col = RAMP[min(int(round(i * (len(RAMP) - 1)
                                      / max(1, len(all_nr) - 1))),
