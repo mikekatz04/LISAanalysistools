@@ -38,7 +38,16 @@ def set_plotting_style(background_color: str = "white", front_color: str = "blac
     # text settings -- only enable LaTeX rendering when latex is actually
     # installed, else matplotlib crashes on machines without it (fall back to
     # mathtext). Applies to every global-fit plot (grid-gen, debug, diag).
-    _has_latex = shutil.which("latex") is not None
+    # usetex shells out to a LaTeX process for EVERY text layout. On a cluster
+    # with latex on PATH that measured ~487 s across 5 calls of
+    # matplotlib.text._get_layout (with a stray luatex child alive for
+    # minutes) -- comparable to the entire compute of a short run. mathtext
+    # renders the same labels with no subprocess, so LaTeX is now opt-in via
+    # LISATOOLS_USETEX=1 rather than "on whenever latex happens to exist".
+    _has_latex = (
+        os.environ.get("LISATOOLS_USETEX", "0") not in ("0", "")
+        and shutil.which("latex") is not None
+    )
     mpl.rcParams["text.usetex"] = _has_latex  # Use LaTeX for text rendering
     if _has_latex:
         mpl.rcParams["text.latex.preamble"] = r"\usepackage{amsmath}"  # AMS math
@@ -254,7 +263,12 @@ def base_branch_plots(
 
         plot_config = {
             "serif": True,
-            "usetex": shutil.which("latex") is not None,
+            # Opt-in, same reason as set_plotting_style: LaTeX text layout
+            # costs a subprocess per label.
+            "usetex": (
+                os.environ.get("LISATOOLS_USETEX", "0") not in ("0", "")
+                and shutil.which("latex") is not None
+            ),
             "spacing": 1.5,
         }
         C.set_plot_config(chainconsumer.PlotConfig(**plot_config))
