@@ -424,10 +424,17 @@ def build(nt, Nf, nr, knots, band, quiet=False):
               f"{nt*Nf*dt/86400:.0f} d ({nt*Nf*dt/86400/365.25:.2f} yr), "
               f"sparse stride={max(1, nt//nt_layer)} "
               f"({max(1, nt//nt_layer)*Nf*dt/3600:.0f} h), N_sparse_t={nsp}")
-        print(f"[shmem] limit {lim/1024:.0f} KB | " + ", ".join(
-            f"{k} {v/1024:.0f}" for k, v in b.items())
-            + (" KB  " + ("OK" if max(b.values()) <= lim else "TOO BIG")
-               if USE_GPU else " KB"))
+        # ``b`` is empty on a chunked-only run (no sig-het engine requested);
+        # max() would raise. Report the limit and move on -- chunked-het does
+        # not use the per-block shared arena this line is about.
+        if b:
+            print(f"[shmem] limit {lim/1024:.0f} KB | " + ", ".join(
+                f"{k} {v/1024:.0f}" for k, v in b.items())
+                + (" KB  " + ("OK" if max(b.values()) <= lim else "TOO BIG")
+                   if USE_GPU else " KB"))
+        else:
+            print(f"[shmem] limit {lim/1024:.0f} KB | no sig-het engine "
+                  "requested (chunked-het does not use the shared arena)")
         print(f"[nodes] n_r={nr}, K={knots}, half-band={band}")
     return ws, chunked, engines, Nf, dt, t0, nsp, nt_layer
 
