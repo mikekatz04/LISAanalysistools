@@ -1040,10 +1040,35 @@ def place_td_signal_on_grid(
             arr = signals[..., :N_target]
         return TDSignal(arr, settings)
 
+    if times.ndim == 2:
+        # Batched: ``times`` is (nbatch, num_times) and ``signals`` is
+        # (nbatch, ..., num_times). Sources generally start at different
+        # samples -- ``_apply_response`` crops the batch by a single shared
+        # ``start_ind`` but each source keeps its own t0 -- so the placement
+        # offset is per source and the sources are placed one at a time.
+        #
+        # This loop is bookkeeping, not compute: it is a slice-assign per
+        # source into a preallocated grid, with no waveform or response work
+        # in it. The expensive stages upstream (waveform, TDI response) and
+        # downstream (WDM transform, inner products) are all genuinely
+        # batched, so this stays in the noise.
+        nbatch = times.shape[0]
+        if signals.shape[0] != nbatch:
+            raise ValueError(
+                f"Batched place_td_signal_on_grid: signals batch dim "
+                f"{signals.shape[0]} != times batch dim {nbatch}."
+            )
+        out = xp.zeros(signals.shape[:-1] + (N_target,), dtype=signals.dtype)
+        for b in range(nbatch):
+            out[b] = place_td_signal_on_grid(
+                signals[b], settings, times=times[b]
+            ).arr
+        return TDSignal(out, settings)
+
     if times.ndim != 1:
         raise NotImplementedError(
-            "place_td_signal_on_grid handles one source at a time; loop over "
-            "the batch dimension for batched inputs."
+            f"place_td_signal_on_grid handles 1D (single source) or 2D "
+            f"(batched) time arrays; got ndim={times.ndim}."
         )
 
     # Drop leading samples before the grid start (unobserved).
@@ -1300,9 +1325,17 @@ class FDSignal(FDSettings, DomainBase):
         return FDSettings(*self.args, **self.kwargs)
 
     def pad_array(self, arr: np.ndarray) -> np.ndarray:
-        """Zero-pad ``arr`` (2D) back to the full ``N``-bin grid before an inverse transform."""
-        assert arr.ndim == 2
-        _arr = self.xp.pad(arr, ((0, 0), (self.ind_min - 1, self.N - 1 - self.ind_max)), mode="constant", constant_values=0.0)
+        """Zero-pad ``arr`` back to the full ``N``-bin grid before an inverse transform.
+
+        Pads the trailing (frequency) axis only, so it accepts both the
+        unbatched ``(nchannels, N)`` layout and the batched
+        ``(nbatch, nchannels, N)`` one.
+        """
+        assert arr.ndim >= 2
+        pad_width = [(0, 0)] * (arr.ndim - 1) + [
+            (self.ind_min - 1, self.N - 1 - self.ind_max)
+        ]
+        _arr = self.xp.pad(arr, pad_width, mode="constant", constant_values=0.0)
         return _arr
 
     def ifft(self, settings=None, window=None):
@@ -1411,32 +1444,42 @@ class FDSignal(FDSettings, DomainBase):
             warnings.warn("Doing an ifft with a trimmed frequency domain array. Zero-padding.")
             arr_in = self.pad_array(arr_in)
 
-        before_ifft = arr_in[:, k] / settings.data_dt
+        # Every index below addresses the TRAILING axes -- (..., n_special, Nt)
+        # for the layer grid, (..., N) for the frequency axis -- so the same
+        # code serves the unbatched ``(nchannels, N)`` layout and the batched
+        # ``(nbatch, nchannels, N)`` one. ``k``, ``herm`` and ``set_zero`` are
+        # all (n_special, Nt) masks over the two trailing axes; indexing them
+        # positionally (``arr[:, k]``) silently addressed the CHANNEL axis as
+        # soon as a batch axis was present, which is why a batched WDM
+        # transform used to raise IndexError instead of broadcasting.
+        before_ifft = arr_in[..., k] / settings.data_dt
 
         if not is_psd:
             if herm.any():
-                before_ifft[:, herm] = self.xp.conj(before_ifft[:, herm])
+                before_ifft[..., herm] = self.xp.conj(before_ifft[..., herm])
 
         if is_psd:
             tmp_arr = before_ifft.copy()
-            tmp_arr[:] *= (base_window[None, None, :]) ** 2 * np.pi * settings.data_dt
+            tmp_arr *= base_window**2 * np.pi * settings.data_dt
             psd_sum_tmp = tmp_arr.sum(axis=-1)
             psd_sum_tmp /= settings.Nf * settings.Nt   # = N
 
-            wdmpsd_active = self.xp.zeros((self.nchannels, Nf_act, settings.Nt), dtype=complex)
+            wdmpsd_active = self.xp.zeros(
+                self.outer_shape + (Nf_act, settings.Nt), dtype=complex
+            )
             if include_top:
                 # row 0 == m=0, row -1 == m=Nf, rows 1..Nf_act-1 == m=1..ind_max_f
-                wdmpsd_active[:, 1:] = psd_sum_tmp[:, 1:Nf_act, None]
-                wdmpsd_active[:, 0, 0::2] = psd_sum_tmp[:, 0, None]
-                wdmpsd_active[:, 0, 1::2] = psd_sum_tmp[:, -1, None]
+                wdmpsd_active[..., 1:, :] = psd_sum_tmp[..., 1:Nf_act, None]
+                wdmpsd_active[..., 0, 0::2] = psd_sum_tmp[..., 0, None]
+                wdmpsd_active[..., 0, 1::2] = psd_sum_tmp[..., -1, None]
             else:
                 # rows 0..Nf_act-1 map directly to m=ind_min_f..ind_max_f
-                wdmpsd_active[:] = psd_sum_tmp[:, :Nf_act, None]
+                wdmpsd_active[...] = psd_sum_tmp[..., :Nf_act, None]
 
-            wdmpsd_out = wdmpsd_active[:, :, settings.active_slice_t]
+            wdmpsd_out = wdmpsd_active[..., settings.active_slice_t]
             return wdmpsd_out
 
-        before_ifft[:] *= base_window[None, None, :]
+        before_ifft *= base_window
         after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
 
         # TODO: fix this
@@ -1448,31 +1491,35 @@ class FDSignal(FDSettings, DomainBase):
 
         is_complex = bool(getattr(settings, "is_complex", False))
         out_dtype = complex if is_complex else float
-        tmp_w_mn = self.xp.zeros((self.nchannels, n_special, settings.Nt), dtype=out_dtype)
+        tmp_w_mn = self.xp.zeros(
+            self.outer_shape + (n_special, settings.Nt), dtype=out_dtype
+        )
         kappa = 2 * np.sqrt(np.pi * settings.data_dt) / settings.Nf
         m_here = self.xp.repeat(m_special_1d[:, None], settings.Nt, axis=-1)
         n_here = self.xp.tile(self.xp.arange(settings.Nt), (n_special, 1))
         set_zero = ((m_here == settings.Nf) | (m_here == 0)) & ((m_here + n_here) % 2 != 0)
-        projected = self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])) * after_ifft[:, ~set_zero]
+        projected = self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])) * after_ifft[..., ~set_zero]
         if is_complex:
             # keep both Re (standard WDM) and Im (Hilbert/quadrature companion)
-            tmp_w_mn[:, ~set_zero] = (
+            tmp_w_mn[..., ~set_zero] = (
                 kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * projected
             )
         else:
-            tmp_w_mn[:, ~set_zero] = (
+            tmp_w_mn[..., ~set_zero] = (
                 kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * self.xp.real(projected)
             )
 
-        w_mn_active = self.xp.zeros((self.nchannels, Nf_act, settings.Nt), dtype=out_dtype)
+        w_mn_active = self.xp.zeros(
+            self.outer_shape + (Nf_act, settings.Nt), dtype=out_dtype
+        )
         if include_top:
-            w_mn_active[:, 1:] = tmp_w_mn[:, 1:Nf_act]
-            w_mn_active[:, 0, 0::2] = tmp_w_mn[:, 0, 0::2] / np.sqrt(2.)
-            w_mn_active[:, 0, 1::2] = tmp_w_mn[:, -1, 0::2] / np.sqrt(2.)
+            w_mn_active[..., 1:, :] = tmp_w_mn[..., 1:Nf_act, :]
+            w_mn_active[..., 0, 0::2] = tmp_w_mn[..., 0, 0::2] / np.sqrt(2.)
+            w_mn_active[..., 0, 1::2] = tmp_w_mn[..., -1, 0::2] / np.sqrt(2.)
         else:
-            w_mn_active[:] = tmp_w_mn[:, :Nf_act]
+            w_mn_active[...] = tmp_w_mn[..., :Nf_act, :]
 
-        output = w_mn_active[:, :, settings.active_slice_t]
+        output = w_mn_active[..., settings.active_slice_t]
 
         return WDMSignal(output, settings=settings)
 

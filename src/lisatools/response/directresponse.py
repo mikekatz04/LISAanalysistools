@@ -11,7 +11,7 @@ import h5py
 from scipy.interpolate import CubicSpline
 
 from lisatools.detector import EqualArmlengthOrbits, Orbits
-from lisatools.utils.utility import AET
+from lisatools.utils.utility import AET, asnumpy
 
 from ..utils.parallelbase import LISAToolsParallelModule
 from .tdiconfig import TDIConfig
@@ -506,6 +506,27 @@ class pyResponseTDI(LISAToolsParallelModule):
         lam = self.xp.atleast_1d(self.xp.asarray(lam, dtype=self.xp.float64))
         beta = self.xp.atleast_1d(self.xp.asarray(beta, dtype=self.xp.float64))
         batch_size = len(lam)
+
+        # ``t_arr`` below is ONE relative evaluation grid shared by the whole
+        # batch, and t0_shift_to_data (the sub-sample data-grid alignment) has
+        # to live on it -- it cannot be folded into the per-source ``t0_arr``,
+        # because the kernel indexes the waveform array via ``delay - t0_arr``
+        # and the shift would cancel itself out (see the note below). So a
+        # batch can only be launched together if every source needs the SAME
+        # sub-sample alignment. Callers hand us a per-source array; collapse it
+        # when it is uniform and refuse when it is not, rather than silently
+        # broadcasting a 2-D eval grid into code that indexes ``t_arr[0]``.
+        _shift = np.atleast_1d(np.asarray(asnumpy(t0_shift_to_data), dtype=np.float64))
+        if _shift.size > 1 and not np.allclose(_shift, _shift[0], rtol=0.0, atol=1e-12):
+            raise ValueError(
+                "pyResponseTDI batched projections need one shared sub-sample "
+                "alignment: t0_shift_to_data must be identical across the "
+                f"batch, got spread {float(_shift.max() - _shift.min()):.6e} s "
+                f"over {_shift.size} sources. Sources whose start times differ "
+                "by a non-integer number of samples cannot share a launch -- "
+                "evaluate them in separate calls."
+            )
+        t0_shift_to_data = float(_shift[0])
 
         assert np.abs(t0_shift_to_data) < self.dt, (
             "t0_shift_to_data should be less than the data time step (dt)."

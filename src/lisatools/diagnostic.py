@@ -106,11 +106,31 @@ def inner_product(
     
     nchannels = sig1.nchannels
 
-    xp = get_array_module(sig1[0])
+    # Batch support. Either signal may carry a leading source axis; the common
+    # case is an unbatched data stream against a batched template stack, which
+    # broadcasts to a (nbatch,) vector of inner products. ``psd`` is never
+    # batched. Channels live on the axis just above the basis axes, so a batched
+    # signal is indexed ``arr[:, i]`` and an unbatched one ``arr[i]`` -- the
+    # plain ``sig[i]`` used before silently addressed the SOURCE axis once a
+    # batch was present.
+    batched = sig1.is_batched or sig2.is_batched
+
+    def _channel(sig, i):
+        return sig.arr[:, i] if sig.is_batched else sig.arr[i]
+
+    def _drop_leading_basis(sig, arr, ind_start):
+        """Slice ``ind_start`` off the first BASIS axis, whatever the layout."""
+        if ind_start == 0:
+            return arr
+        return arr[:, ind_start:] if sig.is_batched else arr[ind_start:]
+
+    xp = get_array_module(_channel(sig1, 0))
 
     # checks
     for i in range(sig1.nchannels):
-        if not type(sig1[0]) == type(sig1[i]) and type(sig1[0]) == type(sig2[i]):
+        if not type(_channel(sig1, 0)) == type(_channel(sig1, i)) and type(
+            _channel(sig1, 0)
+        ) == type(_channel(sig2, i)):
             raise ValueError(
                 "Array in sig1, index 0 sets array module. Not all arrays match that module type (Numpy or Cupy)"
             )
@@ -140,7 +160,7 @@ def inner_product(
     operational_sets = []
 
     if len(psd.channel_shape) == 2:
-        assert psd.shape[0] == psd.shape[1] == sig1.shape[0] == sig2.shape[0]
+        assert psd.shape[0] == psd.shape[1] == sig1.nchannels == sig2.nchannels
 
         # this avoids 9 inner products for 6 (with symmetry)
         for i in range(psd.shape[0]):
@@ -157,7 +177,7 @@ def inner_product(
                 )
 
     elif len(psd.channel_shape) == 1:
-        assert psd.shape[0] == sig1.shape[0] == sig2.shape[0]
+        assert psd.shape[0] == sig1.nchannels == sig2.nchannels
         for i in range(psd.shape[0]):
             operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=i, psd_ind=i))
 
@@ -177,8 +197,8 @@ def inner_product(
     # account for hp and hx if included in time domain signal
     for op_set in operational_sets:
         factor = op_set["factor"]
-        temp1 = sig1[op_set["sig1_ind"]]
-        temp2 = sig2[op_set["sig2_ind"]]
+        temp1 = _channel(sig1, op_set["sig1_ind"])
+        temp2 = _channel(sig2, op_set["sig2_ind"])
         inv_psd_tmp = psd.invC[op_set["psd_ind"]]
 
         if hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") or hasattr(sig2.data_res_arr, "apply_frequency_layer_mask"):
@@ -199,8 +219,8 @@ def inner_product(
         # fix nan in first spot if it is there
         if True:  # inv_psd_tmp.ndim == 1 or :
             ind_start = 1 if np.any(np.isnan(inv_psd_tmp[0])) else 0
-            sig_component_1 = temp1[ind_start:]
-            sig_component_2 = temp2[ind_start:]
+            sig_component_1 = _drop_leading_basis(sig1, temp1, ind_start)
+            sig_component_2 = _drop_leading_basis(sig2, temp2, ind_start)
             inv_psd_component = inv_psd_tmp[ind_start:]
 
         # elif inv_psd_tmp.ndim == 2:
@@ -217,7 +237,10 @@ def inner_product(
         )  # assumes right summation rule
 
         # switching to summation for comp to other domains
-        tmp_out = factor * 4 * xp.sum(y) * psd.differential_component
+        # Batched: reduce the basis (and channel-broadcast) axes only, so the
+        # leading source axis survives as one inner product per source.
+        _sum_axes = tuple(range(1, y.ndim)) if batched else None
+        tmp_out = factor * 4 * xp.sum(y, axis=_sum_axes) * psd.differential_component
         # y = (
         #     func((sig_component_1.conj() * sig_component_2) + (sig_component_2.conj() * sig_component_1)) * inv_psd_component
         # )  # assumes right summation rule
@@ -278,14 +301,17 @@ def inner_product(
         _is_jax = isinstance(out, (jax.Array, jax.core.Tracer))
     except (ImportError, ModuleNotFoundError):
         _is_jax = False
-    if not _is_jax:
+    # A batched call returns one value per source, so it stays an array on
+    # whatever backend it was computed on -- only the scalar (unbatched) case
+    # is concretized to a Python/NumPy number as before.
+    if not _is_jax and not batched:
         try:
             out = out.item()
         except AttributeError:
             pass
 
     # add copy function to complex value for compatibility
-    if complex and not _is_jax:
+    if complex and not _is_jax and not batched:
         out = np.complex128(out)
 
     return out

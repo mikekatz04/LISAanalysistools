@@ -537,6 +537,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         ref_freq: float | np.ndarray | cp.ndarray = None,
         start_freq: float | np.ndarray | cp.ndarray = None,
         synchronize: bool = False,
+        onset_ramp: bool = True,
         **kwargs,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Generate polarizations for a batch of sources using phentax's vectorised path.
@@ -594,6 +595,26 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         num_keep = times_out.shape[-1]
 
         num_pad = num_keep - mask.sum(axis=1).astype(int)  # (Nbatch,)
+
+        if not onset_ramp:
+            # Bit-identical-to-``wave_gen`` mode. The batch is rectangular, so
+            # a source with fewer valid samples than the longest one carries
+            # ``num_pad`` leading samples from OUTSIDE its own mask -- the ramp
+            # is what suppresses those, so dropping it is only sound when no
+            # source needs padding. Refuse rather than silently splice
+            # unmasked waveform into the template.
+            if int(self.xp.max(num_pad)) > 0:
+                raise ValueError(
+                    "onset_ramp=False requires every source in the batch to "
+                    "produce the same number of valid samples (num_pad == 0 "
+                    f"for all); got max num_pad = {int(self.xp.max(num_pad))}. "
+                    "Sources of differing length need the onset ramp to mask "
+                    "their leading pad -- either batch equal-length sources, "
+                    "or leave onset_ramp=True and rebuild any injection with "
+                    "the same setting so both sides of the likelihood match."
+                )
+            return (times_out, hplus[:, -num_keep:], hcross[:, -num_keep:])
+
         taper_length = int(self.tdi_buffer_time * 5 / self.dt)
         ramp = self._leading_onset_ramp(num_points=num_keep, num_pad=num_pad, taper_length=taper_length, xp=self.xp)  # (Nbatch, num_keep)
 
