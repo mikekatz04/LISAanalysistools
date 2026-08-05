@@ -88,6 +88,13 @@ class PSDMove(GlobalFitMove, StretchMove):
     # galfor/sgwb optional)
     NOISE_BRANCHES = ("psd", "galfor", "sgwb")
 
+    # per-iteration acceptance deltas; allocated by propose() at the module
+    # ladder shape, so run_move() skips the tally when called on its own.
+    _tally_in_model_proposed = None
+    _tally_in_model_accepted = None
+    _tally_swaps_proposed = None
+    _tally_swaps_accepted = None
+
     def __init__(
         self,
         acs: AnalysisContainerArray,
@@ -494,20 +501,35 @@ class PSDMove(GlobalFitMove, StretchMove):
         # corrupt the state seen by other moves. After all proposals are
         # scored we put each AC's original sens_mat back; the caller (the
         # ``propose`` loop) reinstalls the accepted PSD onto the ACs.
+        # There are ntemps*nwalkers proposal rows but only nwalkers ACs, and
+        # ``walker_inds`` maps every rung of walker w onto acs[w]. Scoring all
+        # rows in one pass would let each rung overwrite the previous one's
+        # sens_mat, and the single batched ``likelihood()`` would then hand
+        # every rung of a walker the SAME value (the last one written) --
+        # the cold rung scored with a hot rung's parameters, so the Metropolis
+        # ratio compares unrelated likelihoods and accepts nearly everything.
+        # Score in batches instead, each holding a walker at most once.
         original_sens = {}
+        tmp_logl = np.empty(walker_inds_keep.shape[0], dtype=float)
         try:
-            for row, walker_idx in enumerate(walker_inds_keep):
-                w = int(walker_idx)
-                if w not in original_sens:
-                    original_sens[w] = self.acs[w].sens_mat
-                galfor_here = None if not has_galfor else galfor_coords[row]
-                sgwb_here = None if not has_sgwb else sgwb_coords[row]
-                self.acs[w].sens_mat = self._build_sensitivity_for_walker(
-                    w, psd_coords[row], galfor_here, sgwb_here
-                )
-            self.acs.reset_linear_psd_arr()
-            walker_ll = self.acs.likelihood()
-            tmp_logl = asnumpy(np.asarray(walker_ll)[walker_inds_keep.astype(int)])
+            remaining = np.arange(walker_inds_keep.shape[0])
+            while remaining.size:
+                # first remaining row for each distinct walker -> one batch
+                _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+                batch = remaining[np.sort(first)]
+                for row in batch:
+                    w = int(walker_inds_keep[row])
+                    if w not in original_sens:
+                        original_sens[w] = self.acs[w].sens_mat
+                    galfor_here = None if not has_galfor else galfor_coords[row]
+                    sgwb_here = None if not has_sgwb else sgwb_coords[row]
+                    self.acs[w].sens_mat = self._build_sensitivity_for_walker(
+                        w, psd_coords[row], galfor_here, sgwb_here
+                    )
+                self.acs.reset_linear_psd_arr()
+                walker_ll = asnumpy(np.asarray(self.acs.likelihood()))
+                tmp_logl[batch] = walker_ll[walker_inds_keep[batch].astype(int)]
+                remaining = np.setdiff1d(remaining, batch)
             logl[logp_keep] = tmp_logl
         finally:
             for w, sens in original_sens.items():
@@ -564,6 +586,16 @@ class PSDMove(GlobalFitMove, StretchMove):
         """
         new_state, accepted = super(PSDMove, self).propose(model, state)
 
+        # in-model bookkeeping: eryn returns (ntemps, nwalkers) acceptances and
+        # every walker is proposed once per call, so the per-temperature deltas
+        # are the row sums / the walker count. Tallies are reset per propose()
+        # and written into the sub-states there (see delta_counter_names).
+        acc = np.asarray(accepted)
+        acc = acc.reshape(acc.shape[0], -1)
+        if self._tally_in_model_accepted is not None:
+            self._tally_in_model_accepted += acc.sum(axis=-1).astype(int)
+            self._tally_in_model_proposed += acc.shape[-1]
+
         if move_i % self.permute_every == 0:
             x = new_state.branches_coords
             logl = new_state.log_like
@@ -594,6 +626,17 @@ class PSDMove(GlobalFitMove, StretchMove):
             new_state.log_like[:] = logl[:]
             new_state.log_prior[:] = logp[:]
             new_state.supplemental = supps
+
+            # swap bookkeeping: TemperatureControl refreshes swaps_accepted on
+            # every call and holds swaps_proposed fixed at nwalkers per rung.
+            tc = self.temperature_control
+            if self._tally_swaps_accepted is not None:
+                sa = getattr(tc, "swaps_accepted", None)
+                sp = getattr(tc, "swaps_proposed", None)
+                if sa is not None:
+                    self._tally_swaps_accepted += np.asarray(sa).ravel().astype(int)
+                if sp is not None:
+                    self._tally_swaps_proposed += np.asarray(sp).ravel().astype(int)
 
         return new_state, accepted
 
@@ -681,6 +724,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         # move-local supplemental at the MODULE ladder shape (the main
         # state's supplemental is engine-shaped)
         nt_mod, nwalkers_mod = tmp_branches_coords[noise_branches[0]].shape[:2]
+
+        # per-iteration acceptance deltas, accumulated across the repeat block
+        # by run_move and written into each sampled branch's sub-state below.
+        self._tally_in_model_proposed = np.zeros(nt_mod, dtype=int)
+        self._tally_in_model_accepted = np.zeros(nt_mod, dtype=int)
+        self._tally_swaps_proposed = np.zeros(max(nt_mod - 1, 0), dtype=int)
+        self._tally_swaps_accepted = np.zeros(max(nt_mod - 1, 0), dtype=int)
         tmp_supps = BranchSupplemental(
             {"walker_inds": np.tile(np.arange(nwalkers_mod), (nt_mod, 1))},
             base_shape=(nt_mod, nwalkers_mod),
@@ -738,6 +788,14 @@ class PSDMove(GlobalFitMove, StretchMove):
                 sub.log_prior[:] = tmp_state.log_prior[:]
                 if hasattr(sub, "betas") and sub.betas is not None:
                     sub.betas[:] = self.temperature_control.betas
+                # acceptance deltas for this iteration (the backend zeroes
+                # them after each save, so these are per-iteration counts).
+                # rj_* stay zero: this move never changes leaf count.
+                sub.in_model_proposed[:] = self._tally_in_model_proposed
+                sub.in_model_accepted[:] = self._tally_in_model_accepted
+                if sub.swaps_proposed.size:
+                    sub.swaps_proposed[:] = self._tally_swaps_proposed
+                    sub.swaps_accepted[:] = self._tally_swaps_accepted
 
         # the engine state keeps only the cold row (row 0 rewritten from the
         # refreshed ACS below). The cold prior is the FULL noise-model sum so
