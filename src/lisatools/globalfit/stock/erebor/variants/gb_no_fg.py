@@ -740,7 +740,13 @@ class GBNoForegroundGlobalFit(EreborFit):
                 nchannels=gs.nchannels,
                 verbose=gs.verbose,
                 use_tdi2=tdi_generation_info(gs.tdi_chan)[0] == 2,
-                force_backend="cpu",
+                # Follow the run's compute setup. This used to be pinned to
+                # "cpu", which was harmless when the injection was a legacy
+                # per-source FD kernel but defeats the batched chunked-het
+                # generator: a whole-galaxy injection wants the GPU.
+                force_backend=(
+                    gs.gpu_backend if gs.gpus is not None else "cpu"
+                ),
             )
             return
         raise ValueError(

@@ -390,7 +390,16 @@ class SyntheticGBProcessingStep(BaseProcessingStep):
             fd_settings, float(t_start), t_start=float(t_start),
             N_sparse=int(os.environ.get("GB_SYNTH_N_SPARSE", "2048")),
             orbits=orbits,
-            tdi_config="2nd generation" if use_tdi2 else "1st generation",
+            # Build the TDIConfig HERE with an explicit backend. Handing the
+            # comp a bare string makes its setter do ``TDIConfig(tc)`` with
+            # no force_backend, which picks the ambient default (cupy when
+            # a GPU is visible) while the comp itself may be on another
+            # backend -- the wrap then rejects the mismatched arrays with
+            # "incompatible function arguments".
+            tdi_config=TDIConfig(
+                "2nd generation" if use_tdi2 else "1st generation",
+                force_backend=force_backend,
+            ),
             tdi_type=tdi_chan, nchannels=nchannels_full,
             force_backend=force_backend,
         )
