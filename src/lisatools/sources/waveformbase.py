@@ -1318,7 +1318,21 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         """
         delta_t = self.xp.diff(input_times, axis=-1)
 
-        pad_length_left, pad_length_right, left_dt, right_dt = self.get_tdi_buffers(delta_t)
+        _, _, left_dt, right_dt = self.get_tdi_buffers(delta_t)
+
+        # Padding is a minimum physical support requirement, so round up.  The
+        # evaluation-grid trimming policy deliberately remains in
+        # ``get_tdi_buffers``; changing its historical floor would discard an
+        # additional adaptive node at each edge.  On sparse MBHB grids,
+        # flooring the spline padding itself can provide substantially less
+        # than ``tdi_buffer_time`` and leave valid retarded link evaluations
+        # outside the amplitude/phase spline.
+        pad_length_left = max(
+            int(self.xp.ceil(self.tdi_buffer_time / left_dt)), 1
+        )
+        pad_length_right = max(
+            int(self.xp.ceil(self.tdi_buffer_time / right_dt)), 1
+        )
 
         padded_times = self.xp.concatenate(
             [
