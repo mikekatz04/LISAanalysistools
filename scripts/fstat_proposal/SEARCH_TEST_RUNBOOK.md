@@ -291,76 +291,57 @@ new native code (`f4c54dc` → `gb_tdi_on_the_fly.cu/.hh`,
 `binding_gbgpu.cxx/.hpp`). **LAT needs no rebuild** — the 2026-08-04 changes
 are pure Python.
 
-### Configuration
-
-```bash
-export RUN=./gf_runs_fstat_rj/overnight_v5/
-mkdir -p $RUN
-
-export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
-export USE_GPU=1 GPU_BACKEND=cuda12x
-
-# ---- identical to overnight_2 ----
-export NITER=100 NWALKERS=16 NTEMPS=6
-export GB_NTEMPS=12                    # branch ladder (general NTEMPS is 6)
-export GB_MODE=search GB_USE_CHIRP_MASS=1
-export GB_MIN_FREQ=6.0e-3 GB_MAX_FREQ=8.0e-3   # snaps to 6.1111-7.9167 mHz,
-                                               # 13 sub-bands (layers 44..57)
-export TOBS_TARGET=7776000.0           # 90 d
-export GB_NUM_REPEAT_PROPOSALS=100
-export GB_N_SUBBANDS=1024
-export GB_SEARCH_PRIOR_REMOVAL=1
-export GB_LEAF_CAP_ITER_ONLY=1
-export FIT_DIR=$RUN
-
-# ---- new: in-move F-stat fit (no offline grid prep) ----
-export GB_FSTAT_FIT_IN_MOVE=1
-export GB_FSTAT_FIT_DIR=$RUN/gb_fstat_fit
-export FSTAT_PEAKS_PER_BAND=100        # saturating cap (200 == 100)
-
-# ---- new: sig-het v5 in-model scoring ----
-# ALL FOUR required: v5 is gated on v4_knots, and v5=1's phase-aliased
-# arena is gated on v4_band. A guard raises if they disagree rather than
-# silently running v3 or the v5=2 control arm.
-export GB_SIGHET_INMODEL=1 SIGHET_V5=1
-export SIGHET_V3_NODES=64 SIGHET_V4_KNOTS=128 SIGHET_V4_BAND=16
-export SIGHET_NT_LAYER=512
-
-# ---- new: per-block EXACT info matrices, all borrowing retired ----
-# Chunked backend. Do NOT set SIGHET_INFOMAT: its fast route is not
-# reachable from the move yet (2026-08-04 audit), so it would change
-# nothing except to look like it had.
-export GB_INFOMAT_PER_BLOCK=1
-
-# ---- new: no source cap ----
-export GB_LEAF_CAP_START=              # EMPTY disables the cap.
-                                       # "0" would cap at ZERO leaves.
-export GB_SEARCH_IN_MODEL=0            # the pure in-model move is redundant
-                                       # once every source gets its own info
-                                       # matrix; set 1 to keep it.
-```
-
 ### 4a. One GPU — shakedown
 
+Everything inline, one command (mirrors the other tests in this runbook).
+`GB_LEAF_CAP_START=` is deliberately EMPTY — that is what disables the cap;
+`0` would cap at ZERO leaves.
+
 ```bash
-GPUS=0 NITER=5 \
-  python scripts/fstat_proposal/run_fstat_rj_search.py 2>&1 | tee $RUN/shakedown.log
+mkdir -p ./gf_runs_fstat_rj/overnight_v5/ && \
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+USE_GPU=1 GPU_BACKEND=cuda12x GPUS=0 \
+NITER=5 NWALKERS=16 NTEMPS=6 GB_NTEMPS=12 \
+GB_MODE=search GB_USE_CHIRP_MASS=1 \
+GB_MIN_FREQ=6.0e-3 GB_MAX_FREQ=8.0e-3 TOBS_TARGET=7776000.0 \
+GB_NUM_REPEAT_PROPOSALS=100 GB_N_SUBBANDS=1024 \
+GB_SEARCH_PRIOR_REMOVAL=1 GB_LEAF_CAP_ITER_ONLY=1 \
+FIT_DIR=./gf_runs_fstat_rj/overnight_v5/ \
+GB_FSTAT_FIT_IN_MOVE=1 \
+GB_FSTAT_FIT_DIR=./gf_runs_fstat_rj/overnight_v5/gb_fstat_fit \
+FSTAT_PEAKS_PER_BAND=100 \
+GB_SIGHET_INMODEL=1 SIGHET_V5=1 \
+SIGHET_V3_NODES=64 SIGHET_V4_KNOTS=128 SIGHET_V4_BAND=16 SIGHET_NT_LAYER=512 \
+GB_INFOMAT_PER_BLOCK=1 \
+GB_LEAF_CAP_START= GB_SEARCH_IN_MODEL=0 \
+  python scripts/fstat_proposal/run_fstat_rj_search.py 2>&1 \
+  | tee ./gf_runs_fstat_rj/overnight_v5/shakedown.log
 ```
+
+Knob notes:
+* `GB_NTEMPS=12` is the branch ladder; the general `NTEMPS=6` is separate.
+* `GB_MIN_FREQ/GB_MAX_FREQ` snap inward to 6.1111–7.9167 mHz = 13 sub-bands
+  (WDM layers 44..57) — the overnight_2 band.
+* The four sig-het knobs must all be present: v5 is gated on `v4_knots`, and
+  `v5=1`'s arena on `v4_band`. A guard raises rather than silently running v3.
+* Do NOT set `SIGHET_INFOMAT`: its fast route is not reachable from the move
+  yet (2026-08-04 audit), so it would change nothing but appear to.
 
 **Pass:**
 - `GB_FSTAT_FIT_IN_MOVE=1: ... skipping the offline grid load.`
 - `GB in-model likelihood: SIGNAL-HET` (the v5 guard did not raise).
-- One in-move fit runs, leaving `gb_fstat_fit/<move>/epoch_0000/` with
+- One in-move fit runs, leaving `gb_fstat_fit/*/epoch_0000/` with
   `fstat_grid_comb.npz`, `fstat_grid_peaks_stacked.npz`, `DONE.json`;
-  iteration 2+ does **not** refit.
+  iterations 2-5 do **not** refit.
 - Peaks populate multiple of the 13 interior sub-bands.
 - `[GB_ACCEPT ...]` shows non-zero rj and in-model acceptance.
-- `[GB_TIMING]` reports `inmodel_cholesky` per block (per-block info
-  matrices being computed, not borrowed).
+- `[GB_TIMING]` reports `inmodel_cholesky` per block (per-block info matrices
+  being computed, not borrowed). If it dominates the iteration, that is the
+  signal to go fix the sig-het info-matrix route.
 
 ### 4b. One GPU — overnight
 
-Same block with `NITER=100`. The `epoch_0000/` grid from 4a is reused when
+Same command with `NITER=100`. The `epoch_0000/` grid from 4a is reused when
 `GB_FSTAT_FIT_DIR` is unchanged, so the fit cost is paid once.
 
 ### 4c. Two or more GPUs
@@ -368,8 +349,7 @@ Same block with `NITER=100`. The `epoch_0000/` grid from 4a is reused when
 Only once 4a/4b look right:
 
 ```bash
-GPUS=0,1 NITER=5 \
-  python scripts/fstat_proposal/run_fstat_rj_search.py 2>&1 | tee $RUN/shakedown_2gpu.log
+# the 4a command with GPUS=0,1 and a different log
 ```
 
 **Pass:** the initial log-likelihood matches the 1-GPU run **bit-identically**
@@ -381,5 +361,6 @@ device.
 
 ```bash
 python scripts/fstat_proposal/diag_fstat_rj_search.py \
-  $RUN/gb_no_fg_test_2_testing.h5 band68 $RUN/diag.png
+  ./gf_runs_fstat_rj/overnight_v5/gb_no_fg_test_2_testing.h5 band68 \
+  ./gf_runs_fstat_rj/overnight_v5/diag.png
 ```
