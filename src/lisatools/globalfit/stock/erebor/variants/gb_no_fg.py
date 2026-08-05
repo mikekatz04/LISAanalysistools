@@ -975,6 +975,33 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
         if getattr(gb_info, "sighet_inmodel", False):
             from gbgpu.gbsignalhetcomputations import GBSignalHetComputations
 
+            # v5 is gated INSIDE the kernel selector on v4_knots, and its
+            # phase-aliased arena additionally needs a non-zero band
+            # (band_len == 0 falls back to the flat carve, i.e. v5=2). Both
+            # degrade SILENTLY to a slower path, so a run that asked for v5
+            # would look fine and quietly not be v5. Fail loudly instead.
+            _v5 = int(getattr(gb_info, "sighet_v5", 0))
+            if _v5:
+                _knots = int(getattr(gb_info, "sighet_v4_knots", 0))
+                _band = int(getattr(gb_info, "sighet_v4_band", 0))
+                if _knots <= 0:
+                    raise ValueError(
+                        f"SIGHET_V5={_v5} requires SIGHET_V4_KNOTS > 0 (got "
+                        f"{_knots}): the v5 kernel is selected only when the "
+                        "v4 fixed-knot resample is active, so v5 would be "
+                        "silently ignored. Benchmarked config: "
+                        "SIGHET_V3_NODES=64 SIGHET_V4_KNOTS=128 "
+                        "SIGHET_V4_BAND=16."
+                    )
+                if _v5 == 1 and _band <= 0:
+                    raise ValueError(
+                        f"SIGHET_V5=1 requires SIGHET_V4_BAND > 0 (got "
+                        f"{_band}): with an empty band the kernel takes the "
+                        "flat carve, which is the v5=2 control arm, not the "
+                        "phase-aliased arena. Set SIGHET_V4_BAND=16, or ask "
+                        "for the control explicitly with SIGHET_V5=2."
+                    )
+
             gb_info.gb_wdm_comp = GBSignalHetComputations.for_band_engine(
                 gb_info.gb_wdm_comp,
                 nt_layer=int(gb_info.sighet_nt_layer),
