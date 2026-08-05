@@ -142,6 +142,14 @@ class GBSettings(Settings):
     # distribution; the birth container's independent U(dist) then needs a
     # p(dist | sky) draw (documented follow-up).
     sky_dist_distribution: typing.Optional[typing.Any] = None
+    # Build the 3-D Milky Way prior over (dist, alpha, sin_delta) instead of
+    # the independent-uniform placeholder. Ignored when
+    # ``sky_dist_distribution`` is set explicitly (that always wins).
+    # See lisatools.globalfit.priors.galaxy_sky_dist; validate with
+    # scripts/gb/check_galaxy_sky_dist.py.
+    use_galaxy_prior: bool = dataclasses.field(
+        default_factory=env_default("GB_USE_GALAXY_PRIOR", False, bool)
+    )
 
     @property
     def use_fdot_astro(self) -> bool:
@@ -350,6 +358,21 @@ class GBSetup(Setup, GBSettings):
                 # uniforms (dist over dist_lims, sky uniform); swap
                 # sky_dist_distribution for the real 3-D distribution.
                 sky_dist = self.sky_dist_distribution
+                if sky_dist is None and getattr(
+                    self, "use_galaxy_prior", False
+                ):
+                    from ...priors.galaxy_sky_dist import (
+                        build_gb_galaxy_sky_dist,
+                    )
+
+                    sky_dist = build_gb_galaxy_sky_dist(
+                        dist_lims=self.dist_lims
+                    )
+                    logger.info(
+                        "GB sky/distance prior: 3-D Milky Way "
+                        "(GB_USE_GALAXY_PRIOR=1), dist_lims=%s kpc.",
+                        list(self.dist_lims),
+                    )
                 if sky_dist is None:
                     sky_dist = ProbDistContainer({
                         0: uniform_dist(self.dist_lims[0], self.dist_lims[1]),
