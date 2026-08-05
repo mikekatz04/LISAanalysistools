@@ -387,17 +387,31 @@ def main():
     # truth and the seeded residual is measured before any RJ birth.
     from lisatools.sampling.fstat_proposal import fstat_knob
 
-    birth = build_birth_distribution(
-        fit,
-        floor_eps=fstat_knob("FSTAT_FLOOR_EPS", float),
-        comb_weight=fstat_knob("FSTAT_COMB_WEIGHT", float),
-    )
-    _pe_mode = os.environ.get("GB_MODE", "search") == "pe"
-    if birth is None and not _pe_mode:
-        sys.exit("FSTAT_GRID_DIR (or the test-only FSTAT_PEAK_GRIDS) is "
-                 "required for the search.")
-    if birth is not None:
-        fit.gb.rj_birth_distribution = birth
+    # GB_FSTAT_FIT_IN_MOVE=1: the RJ birth move fits its OWN comb/peak grids
+    # in setup(), against the live residual, and caches them under
+    # GB_FSTAT_FIT_DIR -- so there is no offline npz to load and
+    # FSTAT_GRID_DIR is not required. Everything else about this run
+    # (MojitoNoiseEstimates sensitivity, fixed PSD, band knobs) is
+    # unchanged, which is what keeps it a like-for-like of the offline-grid
+    # runs. This is also the multi-GPU path: the in-move fit routes through
+    # route_fstat_ll, while offline prep is single-device by design.
+    if getattr(fit.gb, "fstat_fit_in_move", False):
+        print("[main] GB_FSTAT_FIT_IN_MOVE=1: the RJ birth move fits its own "
+              "F-stat grids in setup(); skipping the offline grid load.",
+              flush=True)
+    else:
+        birth = build_birth_distribution(
+            fit,
+            floor_eps=fstat_knob("FSTAT_FLOOR_EPS", float),
+            comb_weight=fstat_knob("FSTAT_COMB_WEIGHT", float),
+        )
+        _pe_mode = os.environ.get("GB_MODE", "search") == "pe"
+        if birth is None and not _pe_mode:
+            sys.exit("FSTAT_GRID_DIR (or the test-only FSTAT_PEAK_GRIDS) is "
+                     "required for the search. With GB_FSTAT_FIT_IN_MOVE=1 no "
+                     "offline grid is needed.")
+        if birth is not None:
+            fit.gb.rj_birth_distribution = birth
 
     fit.general.num_iterations = niter
 

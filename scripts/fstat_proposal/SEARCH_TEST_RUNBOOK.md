@@ -258,99 +258,128 @@ signal.
 
 ---
 
-## Test 4 — 6–8 mHz with the 2026-08 updates (1 GPU → multi-GPU)
+## Test 4 — 6–8 mHz, exact mirror of the 2026-08-03 overnight run + the new updates
 
-Re-runs the 6–8 mHz search with the in-move F-stat fit, sig-het v5 in-model
-scoring, and per-block exact information matrices. **No offline grid prep** —
-that is the point of `GB_FSTAT_FIT_IN_MOVE=1`, and it is also what makes the
-run multi-GPU-capable: offline prep (`plot_fstat_proposal_mojito.py`) is
-single-device *by design* and now refuses `len(gpus) > 1` (b2a0ebf), whereas
-the in-move fit goes through `_fstat_NM` → `route_fstat_ll`, the multi-shard
-route.
+Reproduces the `overnight_2` run (`gf_runs_fstat_rj/overnight/`,
+`gb_no_fg_test_2`) knob-for-knob, changing ONLY the new machinery. Every
+setting below that is not under "What changed" was read back out of that
+run's `run_settings.log`, so this is a like-for-like.
 
-Because there is no grid to load, `run_fstat_rj_search.py` (which hard-exits
-without `FSTAT_GRID_DIR`) is **not** the entry point here — use the stock
-runner.
+Same entry point as before — `run_fstat_rj_search.py` — because it is what
+supplies the run's noise model (`MojitoNoiseEstimates(noise_file,
+which="xyz")` + `fixed_psd_kwargs`, i.e. the empirical NOISE-brick table, not
+the analytic sensitivity). `run_global.py --stock gb_no_fg` would NOT
+reproduce that.
+
+### What changed vs. overnight_2
+
+| | overnight_2 | now |
+|---|---|---|
+| F-stat grids | offline prep → `FSTAT_GRID_DIR` | **fitted in-move**, first proposal that needs them (`GB_FSTAT_FIT_IN_MOVE=1`) |
+| in-model scoring | chunked-het | **sig-het v5** (`SIGHET_V5=1` + the three knobs it is gated on) |
+| info matrices | borrowed from a shared nearest-in-frequency table | **per-block exact, borrowing retired** (`GB_INFOMAT_PER_BLOCK=1`, chunked backend) |
+| leaf cap | progressive, start 1 | **off** — all leaves available immediately |
+| acceptance | not logged | `[GB_ACCEPT]` per proposal |
+| GPUs | `[0]` | `[0]` first, then 2+ |
+
+`num_repeat_proposals` was ALREADY 100 in overnight_2 — unchanged.
 
 ### Rebuild
 
-`GBGPU` must be built in the target env: the v5 kernel and its bindings are
-new native code (`f4c54dc` touches `gb_tdi_on_the_fly.cu/.hh`,
-`binding_gbgpu.cxx/.hpp`). LAT needs no rebuild for these updates — the
-2026-08-04 changes are pure Python.
+**GBGPU must be rebuilt** in the target env: the v5 kernel and bindings are
+new native code (`f4c54dc` → `gb_tdi_on_the_fly.cu/.hh`,
+`binding_gbgpu.cxx/.hpp`). **LAT needs no rebuild** — the 2026-08-04 changes
+are pure Python.
 
-### Shared configuration
+### Configuration
 
 ```bash
-export RUN=./gf_runs_fstat_68/run1
+export RUN=./gf_runs_fstat_rj/overnight_v5/
 mkdir -p $RUN
 
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export USE_GPU=1 GPU_BACKEND=cuda12x
 
-# band + data (90 d mojito)
+# ---- identical to overnight_2 ----
+export NITER=100 NWALKERS=16 NTEMPS=6
+export GB_NTEMPS=12                    # branch ladder (general NTEMPS is 6)
 export GB_MODE=search GB_USE_CHIRP_MASS=1
-export GB_MIN_FREQ=6.0e-3 GB_MAX_FREQ=8.0e-3
-export TOBS_TARGET=7776000.0
-export NWALKERS=16 NTEMPS=6
+export GB_MIN_FREQ=6.0e-3 GB_MAX_FREQ=8.0e-3   # snaps to 6.1111-7.9167 mHz,
+                                               # 13 sub-bands (layers 44..57)
+export TOBS_TARGET=7776000.0           # 90 d
+export GB_NUM_REPEAT_PROPOSALS=100
+export GB_N_SUBBANDS=1024
+export GB_SEARCH_PRIOR_REMOVAL=1
+export GB_LEAF_CAP_ITER_ONLY=1
+export FIT_DIR=$RUN
 
-# in-move F-stat fit: fits once on the first proposal that needs it,
-# then every other proposal reuses it (shared <fit_dir>/shared cache).
+# ---- new: in-move F-stat fit (no offline grid prep) ----
 export GB_FSTAT_FIT_IN_MOVE=1
 export GB_FSTAT_FIT_DIR=$RUN/gb_fstat_fit
-export FSTAT_PEAKS_PER_BAND=100          # saturating cap (200 == 100)
+export FSTAT_PEAKS_PER_BAND=100        # saturating cap (200 == 100)
 
-# sig-het v5 in-model scoring. ALL FOUR are required -- v5 is gated on
-# v4_knots, and v5=1's arena is gated on v4_band. A guard now raises if
-# they disagree instead of silently running v3 or the v5=2 control.
+# ---- new: sig-het v5 in-model scoring ----
+# ALL FOUR required: v5 is gated on v4_knots, and v5=1's phase-aliased
+# arena is gated on v4_band. A guard raises if they disagree rather than
+# silently running v3 or the v5=2 control arm.
 export GB_SIGHET_INMODEL=1 SIGHET_V5=1
 export SIGHET_V3_NODES=64 SIGHET_V4_KNOTS=128 SIGHET_V4_BAND=16
 export SIGHET_NT_LAYER=512
 
-# per-block EXACT information matrices; all borrowing retired.
-# Chunked backend (SIGHET_INFOMAT is NOT set -- its fast route is not
-# reachable from the move yet, see the 2026-08-04 audit).
+# ---- new: per-block EXACT info matrices, all borrowing retired ----
+# Chunked backend. Do NOT set SIGHET_INFOMAT: its fast route is not
+# reachable from the move yet (2026-08-04 audit), so it would change
+# nothing except to look like it had.
 export GB_INFOMAT_PER_BLOCK=1
 
-# no source cap + in-model repeats
-export GB_LEAF_CAP_START=                # EMPTY disables the cap.
-                                         # NOTE: "0" would cap at ZERO leaves.
-export GB_NUM_REPEAT_PROPOSALS=100
-export GB_SEARCH_IN_MODEL=0              # the pure in-model move is redundant
-                                         # once every source gets its own
-                                         # info matrix; set 1 to keep it.
+# ---- new: no source cap ----
+export GB_LEAF_CAP_START=              # EMPTY disables the cap.
+                                       # "0" would cap at ZERO leaves.
+export GB_SEARCH_IN_MODEL=0            # the pure in-model move is redundant
+                                       # once every source gets its own info
+                                       # matrix; set 1 to keep it.
 ```
 
-### 4a. One GPU — shakedown (do this first)
+### 4a. One GPU — shakedown
 
 ```bash
-GPUS=0 NUM_ITERATIONS=5 FILE_STORE_DIR=$RUN BASE_FILE_NAME=fstat68_1gpu \
-  python scripts/run_global.py --stock gb_no_fg 2>&1 | tee $RUN/shakedown.log
+GPUS=0 NITER=5 \
+  python scripts/fstat_proposal/run_fstat_rj_search.py 2>&1 | tee $RUN/shakedown.log
 ```
 
 **Pass:**
-- `GB in-model likelihood: SIGNAL-HET` in the log (v5 guard did not raise).
-- One in-move F-stat fit runs, then `epoch_0000/` holds `fstat_grid_comb.npz`,
-  `fstat_grid_peaks_stacked.npz`, `DONE.json`; iteration 2+ does NOT refit.
-- `[GB_ACCEPT ...]` lines report non-zero rj and in-model acceptance.
-- `[GB_TIMING]` shows `inmodel_cholesky` per block (per-block info matrices
-  are being computed, not borrowed).
-- Peaks populate multiple interior sub-bands.
+- `GB_FSTAT_FIT_IN_MOVE=1: ... skipping the offline grid load.`
+- `GB in-model likelihood: SIGNAL-HET` (the v5 guard did not raise).
+- One in-move fit runs, leaving `gb_fstat_fit/<move>/epoch_0000/` with
+  `fstat_grid_comb.npz`, `fstat_grid_peaks_stacked.npz`, `DONE.json`;
+  iteration 2+ does **not** refit.
+- Peaks populate multiple of the 13 interior sub-bands.
+- `[GB_ACCEPT ...]` shows non-zero rj and in-model acceptance.
+- `[GB_TIMING]` reports `inmodel_cholesky` per block (per-block info
+  matrices being computed, not borrowed).
 
 ### 4b. One GPU — overnight
 
-Same, with `NUM_ITERATIONS` set for the night and a fresh `BASE_FILE_NAME`.
-The `epoch_0000/` grid from 4a is reused if `GB_FSTAT_FIT_DIR` is unchanged.
+Same block with `NITER=100`. The `epoch_0000/` grid from 4a is reused when
+`GB_FSTAT_FIT_DIR` is unchanged, so the fit cost is paid once.
 
 ### 4c. Two or more GPUs
 
-Only after 4a/4b look right:
+Only once 4a/4b look right:
 
 ```bash
-GPUS=0,1 NUM_ITERATIONS=5 FILE_STORE_DIR=$RUN BASE_FILE_NAME=fstat68_2gpu \
-  python scripts/run_global.py --stock gb_no_fg 2>&1 | tee $RUN/shakedown_2gpu.log
+GPUS=0,1 NITER=5 \
+  python scripts/fstat_proposal/run_fstat_rj_search.py 2>&1 | tee $RUN/shakedown_2gpu.log
 ```
 
-**Pass:** the initial log-likelihood must match the 1-GPU run **bit-identically**
+**Pass:** the initial log-likelihood matches the 1-GPU run **bit-identically**
 (the established multi-GPU gate — sharding changes where work runs, never the
-answer), and per-device comp/engine replicas appear once per non-primary device.
+answer), and per-device comp/engine replicas are built once per non-primary
+device.
+
+### Diagnose (unchanged)
+
+```bash
+python scripts/fstat_proposal/diag_fstat_rj_search.py \
+  $RUN/gb_no_fg_test_2_testing.h5 band68 $RUN/diag.png
+```
