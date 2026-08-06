@@ -537,7 +537,25 @@ class pyResponseTDI(LISAToolsParallelModule):
         # the waveform array via ``delay - t0_arr``, so a shift baked into t0_arr cancels
         # against the same shift in the eval time and the waveform ends up sampled off the
         # data grid by t0_shift_to_data.
-        t0_arr = self.xp.atleast_1d(self.xp.asarray(t0, dtype=np.float64))
+        # ascontiguousarray, NOT asarray. The kernels receive a bare base
+        # pointer and read it at UNIT stride
+        # (LISAResponse.cu:557 `t0_offset = t0_arr[batch_ind]`, :606
+        # `t = t_data[i] + t0_arr[batch_ind]`), and the nanobind alias carries
+        # no nb::c_contig (binding_flr.hpp:23) while the length check validates
+        # only .size() (binding_flr.hpp:45-58). ``asarray`` on a float64 array
+        # is a no-op, so a strided view was passed straight through.
+        #
+        # _apply_response hands us t0 = shifted_t_arr[:, 0]: a COLUMN of the
+        # (batch, num_pts) time grid, stride num_pts*8. Read at unit stride
+        # that is shifted_t_arr[0, 0:B] -- source 0's first B TIME SAMPLES --
+        # so source k was evaluated at t0 + k*dt instead of its own t0. Source
+        # 0 was correct (element 0 is at the same address for any stride) and
+        # the error grew linearly with k because that row is a uniform time
+        # grid. Measured: 1.245e-5 relative per source index in y_gw, which is
+        # the constellation geometry retarded by k*dt.
+        t0_arr = self.xp.ascontiguousarray(
+            self.xp.atleast_1d(self.xp.asarray(t0, dtype=np.float64))
+        )
         if t0_arr.ndim == 1 and t0_arr.shape[0] == 1:
             # broadcast a shared t0 across the batch
             t0_arr = t0_arr.repeat(batch_size)
