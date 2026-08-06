@@ -1447,7 +1447,13 @@ class FDSignal(FDSettings, DomainBase):
         m_special_1d, k, herm, _ = settings.fold_shift_map()
         base_window = (settings.window[:])
 
-        arr_in = self.arr.copy()
+        # No .copy(): every use below is a READ. The gather ``arr_in[..., k]``
+        # produces a new array and all arithmetic happens on that, so nothing
+        # ever writes through to ``self.arr``. The copy duplicated the whole
+        # frequency-domain array -- 1.2 GiB for a batch of 8 over two years,
+        # the single largest allocation in this transform -- for nothing.
+        # ``pad_array`` already returns a fresh array on the trimmed path.
+        arr_in = self.arr
 
         if self.ind_min != 0 or self.ind_max != self.N - 1:
             warnings.warn("Doing an ifft with a trimmed frequency domain array. Zero-padding.")
@@ -1485,9 +1491,31 @@ class FDSignal(FDSettings, DomainBase):
 
         is_complex = bool(getattr(settings, "is_complex", False))
         out_dtype = complex if is_complex else float
+        # Only the ACTIVE time columns are ever returned -- the old code built
+        # all Nt and threw the rest away at the last line. When min_time /
+        # max_time narrow the box (an MBHB occupies ~100 of 1451 layers at two
+        # years) that is most of two large arrays wasted. Keep the active
+        # columns and, for the two rows whose assembly reads other columns
+        # (m=0 pulls from m=Nf at n-1), keep those two rows at full length --
+        # two rows out of n_special is nothing.
+        _t_sl = settings.active_slice_t
+        t_lo = 0 if _t_sl.start is None else int(_t_sl.start)
+        t_hi = settings.Nt if _t_sl.stop is None else int(_t_sl.stop)
+        if _t_sl.step not in (None, 1):
+            # Strided active slices are not something the assembly below can
+            # express column-wise; fall back to the full axis and slice at the
+            # end, exactly as before.
+            t_lo, t_hi = 0, settings.Nt
+            _slice_at_end = True
+        else:
+            _slice_at_end = False
+        Nt_keep = t_hi - t_lo
+
         tmp_w_mn = self.xp.zeros(
-            self.outer_shape + (n_special, settings.Nt), dtype=out_dtype
+            self.outer_shape + (n_special, Nt_keep), dtype=out_dtype
         )
+        # Rows the m=0 assembly reads from, kept over the full time axis.
+        _full_rows = {} if not include_top else {0: None, n_special - 1: None}
         kappa = 2 * np.sqrt(np.pi * settings.data_dt) / settings.Nf
 
         # Frequency layers are INDEPENDENT: layer m needs only its own row of
@@ -1545,7 +1573,10 @@ class FDSignal(FDSettings, DomainBase):
             _blk[..., ~set_zero] = (
                 _phase * projected if is_complex else _phase * self.xp.real(projected)
             )
-            tmp_w_mn[..., _lo:_hi, :] = _blk
+            for _r in _full_rows:
+                if _lo <= _r < _hi:
+                    _full_rows[_r] = _blk[..., _r - _lo, :].copy()
+            tmp_w_mn[..., _lo:_hi, :] = _blk[..., t_lo:t_hi]
             del projected, _blk
 
         if self.backend.uses_cupy:
@@ -1554,16 +1585,28 @@ class FDSignal(FDSettings, DomainBase):
             cache.clear()
 
         w_mn_active = self.xp.zeros(
-            self.outer_shape + (Nf_act, settings.Nt), dtype=out_dtype
+            self.outer_shape + (Nf_act, Nt_keep), dtype=out_dtype
         )
         if include_top:
             w_mn_active[..., 1:, :] = tmp_w_mn[..., 1:Nf_act, :]
-            w_mn_active[..., 0, 0::2] = tmp_w_mn[..., 0, 0::2] / np.sqrt(2.)
-            w_mn_active[..., 0, 1::2] = tmp_w_mn[..., -1, 0::2] / np.sqrt(2.)
+            # Row 0 interleaves two sources by ABSOLUTE column parity: even
+            # columns come from m=0 at the same column, odd columns from m=Nf
+            # at column n-1. Windowing shifts the local index, so resolve the
+            # parity against absolute indices and read the two special rows,
+            # which were kept full length for exactly this reason.
+            _abs = self.xp.arange(t_lo, t_hi)
+            _even = (_abs % 2) == 0
+            _r0 = _full_rows[0]
+            _rN = _full_rows[n_special - 1]
+            w_mn_active[..., 0, _even] = _r0[..., _abs[_even]] / np.sqrt(2.)
+            w_mn_active[..., 0, ~_even] = _rN[..., _abs[~_even] - 1] / np.sqrt(2.)
         else:
             w_mn_active[...] = tmp_w_mn[..., :Nf_act, :]
 
-        output = w_mn_active[..., settings.active_slice_t]
+        # Already restricted to the active columns above, unless a strided
+        # active slice forced the old full-axis path.
+        output = (w_mn_active[..., settings.active_slice_t]
+                  if _slice_at_end else w_mn_active)
 
         return WDMSignal(output, settings=settings)
 
