@@ -65,6 +65,16 @@ def ensure_leaf_cap_fields(band_info: dict, num_bands: int) -> None:
     band_info.setdefault("band_leaf_cap", np.full(num_bands, -1, dtype=int))
     band_info.setdefault("band_cap_iters", np.zeros(num_bands, dtype=int))
     band_info.setdefault("band_best_ll", np.full(num_bands, -np.inf))
+    # ``band_cold_ll``: the per-band residual ll of EVERY cold-chain walker,
+    # refreshed each step. ``band_best_ll`` is the running max over this;
+    # keeping the full per-walker array makes the cap decision auditable
+    # after the fact (and is what the lnL-improvement criterion is judged
+    # from). ``(nwalkers, num_bands)``.
+    _nw = int(band_info.get("nwalkers", 0) or 0)
+    if _nw:
+        band_info.setdefault(
+            "band_cold_ll", np.full((_nw, num_bands), -np.inf)
+        )
 
 
 class ModuleSubState(eryn_State):
@@ -507,6 +517,7 @@ class GBState(ModuleSubState):
                 "band_swaps_proposed": 2, "band_swaps_accepted": 2,
                 "band_num_binaries": 3, "band_leaf_cap": 1,
                 "band_cap_iters": 1, "band_best_ll": 1,
+                "band_cold_ll": 2,
             }
             for _key, _nd in _bare_ndim.items():
                 _arr = bi.get(_key)
@@ -601,6 +612,7 @@ class GBState(ModuleSubState):
         "band_leaf_cap",
         "band_cap_iters",
         "band_best_ll",
+        "band_cold_ll",
     )
 
     def storage_arrays(self):

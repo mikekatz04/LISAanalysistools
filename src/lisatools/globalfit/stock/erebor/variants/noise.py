@@ -83,7 +83,7 @@ PSD_INJECTION = [15e-12, 3e-15]  # (Soms_d, Sa_a), sqrt units
 # error in S_gal at 3 mHz, 1.6e19 at 8 mHz).
 GALFOR_INJECTION = [
     3.26651613e-44,  # amp
-    2.09278117e-03,  # fk (knee)
+    2.09278117e-03,  # fk (knee) [Hz]
     1.18300266e00,   # alpha
     1.14556409e-03,  # f_1 (Hz), = slope1 ** (-1/alpha)
     3.38095297e-04,  # f_2 (Hz), = 1 / slope2

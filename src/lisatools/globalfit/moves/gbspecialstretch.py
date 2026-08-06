@@ -418,6 +418,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_units=2,
         jump_factor=0.005,
         leaf_cap_start=None,
+        leaf_cap_ll_improve=False,
+        leaf_cap_ndim=8.0,
         leaf_cap_min_iters=50,
         leaf_cap_ll_nsigma=3.0,
         leaf_cap_require_occupancy=True,
@@ -529,6 +531,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # ``_update_band_leaf_caps``); ``leaf_cap_update`` marks the single
         # RJ move per iteration that advances the cap state.
         self.leaf_cap_start = leaf_cap_start
+        # lnL-improvement cap gate (takes precedence over
+        # ``leaf_cap_iter_only``): hold a band's cap while its cold
+        # chain keeps finding a max ll better than the stored best by
+        # >= leaf_cap_ndim/2. D = 8 for GBs.
+        self.leaf_cap_ll_improve = bool(leaf_cap_ll_improve)
+        self.leaf_cap_ndim = float(leaf_cap_ndim)
         self._leaf_cap_enabled = leaf_cap_start is not None
         self.leaf_cap_min_iters = int(leaf_cap_min_iters)
         self.leaf_cap_ll_nsigma = float(leaf_cap_ll_nsigma)
@@ -3395,10 +3403,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if isinstance(self._basis_settings, FDSettings)
             else self.gb_wdm_comp
         )
-        info_phys = _RoutedBandEngine.route_information_matrix(
-            _info_comp, model.analysis_container_arr, params_phys,
-            inds=_test_inds, noise_index=walker_inds,
-        )
+        # Sub-spans: ``inmodel_cholesky`` was 84% of the overnight_v5
+        # iteration and lumps three very different costs together (the
+        # information-matrix kernel, the numerical Jacobian, and the
+        # eigendecomposition). Split them so the next run attributes it.
+        _tm = getattr(self, "_prop_timer", None)
+        with _tspan(_tm, "infomat_kernel"):
+            info_phys = _RoutedBandEngine.route_information_matrix(
+                _info_comp, model.analysis_container_arr, params_phys,
+                inds=_test_inds, noise_index=walker_inds,
+            )
 
         # Conditioning scales for the sampling basis (fdot spans ~1e-13 in
         # sampled units; without the rescale the information matrix inversion is
@@ -3411,18 +3425,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # Numerical diagonal Jacobian d(phys[test_inds[i]]) / d(y_i) through
         # the transform container -- generic in the container's transforms.
-        J = xp.zeros((n_src, ndim))
-        for i in range(ndim):
-            h = 1e-6 * xp.maximum(xp.abs(coords[:, i]), 1e-3)
-            up = coords.copy()
-            dn = coords.copy()
-            up[:, i] += h
-            dn[:, i] -= h
-            dphys = (
-                self.transform_fn.both_transforms(up, xp=cp)[:, _test_inds[i]]
-                - self.transform_fn.both_transforms(dn, xp=cp)[:, _test_inds[i]]
-            )
-            J[:, i] = dphys / (2.0 * h) * s[i]
+        # Numerical diagonal Jacobian d(phys[test_inds[i]]) / d(y_i) through
+        # the transform container -- generic in the container's transforms.
+        #
+        # NOTE(infomat-jacobian-batching): this runs 2*ndim separate
+        # ``both_transforms`` calls (18 on the 9-column basis) on the full
+        # (n_src, ndim) block, which looks like an obvious batching target
+        # -- stack every perturbed copy into one (2*ndim*n_src, ndim) call.
+        # An attempt at that did NOT reproduce this loop (two columns off by
+        # ~4e-2, far too large for roundoff, cause not isolated), so it is
+        # deliberately left alone: this feeds the proposal covariance and a
+        # silently-wrong Jacobian would bias every in-model jump. The
+        # ``infomat_jacobian`` span measures whether it is worth revisiting.
+        with _tspan(_tm, "infomat_jacobian"):
+            J = xp.zeros((n_src, ndim))
+            for i in range(ndim):
+                h = 1e-6 * xp.maximum(xp.abs(coords[:, i]), 1e-3)
+                up = coords.copy()
+                dn = coords.copy()
+                up[:, i] += h
+                dn[:, i] -= h
+                dphys = (
+                    self.transform_fn.both_transforms(up, xp=cp)[:, _test_inds[i]]
+                    - self.transform_fn.both_transforms(dn, xp=cp)[:, _test_inds[i]]
+                )
+                J[:, i] = dphys / (2.0 * h) * s[i]
 
         info_y = info_phys * J[:, :, None] * J[:, None, :]
 
@@ -3432,12 +3459,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # spectrum to a relative floor; B = V diag(lambda^-1/2) satisfies
         # B B^T = inv(info) and is all the Gaussian proposal needs (the
         # proposal shape only -- M-H corrects).
-        evals, evecs = xp.linalg.eigh(info_y)
-        floor = 1e-10 * xp.maximum(
-            xp.abs(evals).max(axis=-1, keepdims=True), 1e-300
-        )
-        evals = xp.maximum(xp.abs(evals), floor)
-        chol = evecs / xp.sqrt(evals)[:, None, :]
+        with _tspan(_tm, "infomat_eigh"):
+            evals, evecs = xp.linalg.eigh(info_y)
+            floor = 1e-10 * xp.maximum(
+                xp.abs(evals).max(axis=-1, keepdims=True), 1e-300
+            )
+            evals = xp.maximum(xp.abs(evals), floor)
+            chol = evecs / xp.sqrt(evals)[:, None, :]
         if self._fdot_astro_col is not None:
             # fdot_astro_ratio is likelihood-degenerate with Mc (both enter
             # only through the product fdot_gr(Mc)*(1+r)) and its test_inds
@@ -4530,6 +4558,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         increment the iteration counter and running best reset, so the next
         level must re-converge on its own evidence.
 
+        With ``leaf_cap_ll_improve`` the gate is instead: increment once
+        the band's cold-chain MAX ll has failed to improve on its stored
+        best by ``leaf_cap_ndim / 2`` for ``leaf_cap_min_iters``
+        consecutive iterations. Every cold walker's per-band ll is
+        stored in ``band_info['band_cold_ll']`` each step.
+
         With ``leaf_cap_iter_only`` the gate is ONLY test 1 (a fixed
         annealing schedule): the lnL-plateau and occupancy tests are
         skipped; the ``cap < nleaves_max`` guard and the log-line format
@@ -4541,15 +4575,47 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         best = bi["band_best_ll"]
 
         lls = self._band_residual_lls(model.analysis_container_arr)
-        best[:] = np.maximum(best, lls.max(axis=0))
-        iters += 1
+        cur_max = lls.max(axis=0)
+        # Store every cold walker's per-band ll, every step, so the cap
+        # decision is auditable after the run (and so a post-hoc study can
+        # try a different criterion on the same trace).
+        if "band_cold_ll" in bi and bi["band_cold_ll"].shape == lls.shape:
+            bi["band_cold_ll"][:] = lls
 
-        if self.leaf_cap_iter_only:
+        if self.leaf_cap_ll_improve:
+            # Coarse likelihood-based gate: a band's cap holds while the
+            # cold chain keeps finding a max that beats the stored best by
+            # at least D/2 -- the log-likelihood a genuinely new source of
+            # D parameters has to buy to be worth admitting. Once no such
+            # improvement appears for ``leaf_cap_min_iters`` consecutive
+            # iterations, the band has stopped paying for its current
+            # allowance and the cap increments.
+            #
+            # Deliberately MAX-only: it asks "is the best walker still
+            # finding better fits", not "have all walkers converged
+            # together" (the older nsigma test below).
+            #
+            # TODO(leaf-cap-min-ll): consider the MIN over cold walkers too.
+            # Max-only cannot tell a band where every walker is climbing
+            # from one where a single walker carries the band while the
+            # rest are stuck -- the second case is a mixing problem the cap
+            # will happily paper over by incrementing on schedule.
+            thresh = 0.5 * float(self.leaf_cap_ndim)
+            improved = cur_max > (best + thresh)
+            best[:] = np.maximum(best, cur_max)
+            iters[improved] = 0
+            iters[~improved] += 1
+            converged = iters >= self.leaf_cap_min_iters
+        elif self.leaf_cap_iter_only:
+            best[:] = np.maximum(best, cur_max)
+            iters += 1
             # Iteration-only mode (see ctor): a fixed schedule -- every band
             # increments after ``leaf_cap_min_iters`` iterations at its
             # current cap, regardless of lnL plateau or occupancy.
             converged = iters >= self.leaf_cap_min_iters
         else:
+            best[:] = np.maximum(best, cur_max)
+            iters += 1
             tol = self.leaf_cap_ll_nsigma * np.sqrt(self._band_dof / 2.0)
             converged = (iters >= self.leaf_cap_min_iters) & (
                 (best - lls.min(axis=0)) <= tol

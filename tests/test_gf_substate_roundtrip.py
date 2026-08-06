@@ -117,6 +117,8 @@ EXPECTED_SUB_SCHEMA = {
         "band_leaf_cap": (NUM_BANDS,),
         "band_cap_iters": (NUM_BANDS,),
         "band_best_ll": (NUM_BANDS,),
+        # per-cold-walker per-band ll, stored every step (leaf-cap audit)
+        "band_cold_ll": (NWALKERS, NUM_BANDS),
         **_tempered_schema("gb"),
     },
     "mbh": {

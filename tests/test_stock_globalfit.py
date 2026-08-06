@@ -693,8 +693,8 @@ class DataProcessorSwapTest(unittest.TestCase):
         self.assertIs(gs.data_processor_class, SangriaProcessingStep)
 
         fit = erebor.get_stock("all_sources", data_mode="synthetic")
-        fit.remove_branch("sobbh")
-        fit.pop_move("sobbh_pe")
+        fit.remove_branch("sobbh")  # also drops sobbh_pe
+        self.assertNotIn("sobbh_pe", fit.recipe.move_names())
         gs = fit.make_general_settings()
         self.assertIs(gs.data_processor_class, SyntheticCombinedProcessingStep)
         specs = dict(

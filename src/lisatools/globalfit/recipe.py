@@ -1209,6 +1209,18 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
         
         if relative_spread is not None:
             _rows = np.atleast_2d(np.asarray(injection_params, dtype=float))
+            if _rows.size == 0:
+                # Empty ``subset_inds`` (e.g. no catalogue source cleared the
+                # SNR cut over this window) used to reach np.stack([]) and
+                # raise a bare "need at least one array to stack" from deep
+                # inside numpy. Say what actually happened.
+                raise ValueError(
+                    f"Branch {branch_name!r}: no {source_type} injections to "
+                    "seed from — the catalogue subset selected 0 sources. "
+                    "Over a short window nothing clears the SNR cut; lengthen "
+                    "Tobs (nf/nt), widen the branch band, or lower the "
+                    "selection threshold."
+                )
             spread = np.stack(
                 [np.diag((float(relative_spread) * row) ** 2) for row in _rows]
             )
@@ -2400,6 +2412,12 @@ def build_gb_moves(
         leaf_cap_start=(int(os.environ["GB_LEAF_CAP_START"])
                         if os.environ.get("GB_LEAF_CAP_START") else None),
         leaf_cap_min_iters=int(os.environ.get("GB_LEAF_CAP_MIN_ITERS", "50")),
+        # Coarse lnL-improvement cap gate. Wins over GB_LEAF_CAP_ITER_ONLY:
+        # a band holds its cap while the cold chain keeps finding a max ll
+        # better than the stored best by >= GB_LEAF_CAP_NDIM/2, and
+        # increments once it has not for GB_LEAF_CAP_MIN_ITERS iterations.
+        leaf_cap_ll_improve=os.environ.get("GB_LEAF_CAP_LL_IMPROVE", "0") == "1",
+        leaf_cap_ndim=float(os.environ.get("GB_LEAF_CAP_NDIM", "8")),
         leaf_cap_ll_nsigma=float(os.environ.get("GB_LEAF_CAP_LL_NSIGMA", "3.0")),
         leaf_cap_require_occupancy=bool(
             int(os.environ.get("GB_LEAF_CAP_OCCUPANCY", "1"))

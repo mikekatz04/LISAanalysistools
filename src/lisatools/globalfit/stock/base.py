@@ -46,6 +46,7 @@ cheap-construct / heavy-setup, so a configured fit pickles.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 import typing
 import warnings
@@ -65,6 +66,8 @@ from ..engine import (
 from ..moves import FunctionMove, Move, MoveBuildContext
 from ..recipe import Recipe, Stage
 from ..run import GlobalFitSetup
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ENV_ALIASES",
@@ -587,13 +590,42 @@ class StockGlobalFit(GlobalFitSetup):
         )
 
     def remove_branch(self, name: str) -> Settings:
-        """Remove a branch block and return its settings."""
+        """Remove a branch block, and the recipe moves that sample it.
+
+        Composing a branch out is one call: the moves declared against it go
+        with it (a left-behind ``Move(..., branch=name)`` has no stock move to
+        resolve at materialization, so it would raise a KeyError there). A
+        stage emptied by the removal is dropped too. Re-adding the branch with
+        :meth:`add_branch` does NOT restore its moves — pass them via
+        ``add_branch(..., moves=[...])``.
+        """
         if name not in self._branch_names:
             raise KeyError(
                 f"Unknown branch {name!r}. Present branches: {self._branch_names}."
             )
         self._branch_names.remove(name)
         settings = self.__dict__.pop(name)
+
+        dropped = [
+            mv.name
+            for st in self.recipe.stages
+            for mv in st.moves
+            if getattr(mv, "branch", None) == name
+        ]
+        for mv_name in dropped:
+            self.recipe.pop_move(mv_name)
+        empty = [st.name for st in self.recipe.stages if not st.moves]
+        for st_name in empty:
+            self.recipe.pop_stage(st_name)
+        if dropped:
+            logger.info(
+                "remove_branch(%r) also dropped move(s) %s%s.",
+                name,
+                ", ".join(repr(m) for m in dropped),
+                f" and now-empty stage(s) {', '.join(repr(s) for s in empty)}"
+                if empty
+                else "",
+            )
         return settings
 
     # convenience aliases matching the recipe layer's add/pop vocabulary
