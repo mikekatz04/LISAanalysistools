@@ -1209,6 +1209,18 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
         
         if relative_spread is not None:
             _rows = np.atleast_2d(np.asarray(injection_params, dtype=float))
+            if _rows.size == 0:
+                # Empty ``subset_inds`` (e.g. no catalogue source cleared the
+                # SNR cut over this window) used to reach np.stack([]) and
+                # raise a bare "need at least one array to stack" from deep
+                # inside numpy. Say what actually happened.
+                raise ValueError(
+                    f"Branch {branch_name!r}: no {source_type} injections to "
+                    "seed from — the catalogue subset selected 0 sources. "
+                    "Over a short window nothing clears the SNR cut; lengthen "
+                    "Tobs (nf/nt), widen the branch band, or lower the "
+                    "selection threshold."
+                )
             spread = np.stack(
                 [np.diag((float(relative_spread) * row) ** 2) for row in _rows]
             )
