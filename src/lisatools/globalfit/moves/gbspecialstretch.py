@@ -3403,10 +3403,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if isinstance(self._basis_settings, FDSettings)
             else self.gb_wdm_comp
         )
-        info_phys = _RoutedBandEngine.route_information_matrix(
-            _info_comp, model.analysis_container_arr, params_phys,
-            inds=_test_inds, noise_index=walker_inds,
-        )
+        # Sub-spans: ``inmodel_cholesky`` was 84% of the overnight_v5
+        # iteration and lumps three very different costs together (the
+        # information-matrix kernel, the numerical Jacobian, and the
+        # eigendecomposition). Split them so the next run attributes it.
+        _tm = getattr(self, "_prop_timer", None)
+        with _tspan(_tm, "infomat_kernel"):
+            info_phys = _RoutedBandEngine.route_information_matrix(
+                _info_comp, model.analysis_container_arr, params_phys,
+                inds=_test_inds, noise_index=walker_inds,
+            )
 
         # Conditioning scales for the sampling basis (fdot spans ~1e-13 in
         # sampled units; without the rescale the information matrix inversion is
@@ -3419,18 +3425,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # Numerical diagonal Jacobian d(phys[test_inds[i]]) / d(y_i) through
         # the transform container -- generic in the container's transforms.
-        J = xp.zeros((n_src, ndim))
-        for i in range(ndim):
-            h = 1e-6 * xp.maximum(xp.abs(coords[:, i]), 1e-3)
-            up = coords.copy()
-            dn = coords.copy()
-            up[:, i] += h
-            dn[:, i] -= h
-            dphys = (
-                self.transform_fn.both_transforms(up, xp=cp)[:, _test_inds[i]]
-                - self.transform_fn.both_transforms(dn, xp=cp)[:, _test_inds[i]]
-            )
-            J[:, i] = dphys / (2.0 * h) * s[i]
+        # Numerical diagonal Jacobian d(phys[test_inds[i]]) / d(y_i) through
+        # the transform container -- generic in the container's transforms.
+        #
+        # NOTE(infomat-jacobian-batching): this runs 2*ndim separate
+        # ``both_transforms`` calls (18 on the 9-column basis) on the full
+        # (n_src, ndim) block, which looks like an obvious batching target
+        # -- stack every perturbed copy into one (2*ndim*n_src, ndim) call.
+        # An attempt at that did NOT reproduce this loop (two columns off by
+        # ~4e-2, far too large for roundoff, cause not isolated), so it is
+        # deliberately left alone: this feeds the proposal covariance and a
+        # silently-wrong Jacobian would bias every in-model jump. The
+        # ``infomat_jacobian`` span measures whether it is worth revisiting.
+        with _tspan(_tm, "infomat_jacobian"):
+            J = xp.zeros((n_src, ndim))
+            for i in range(ndim):
+                h = 1e-6 * xp.maximum(xp.abs(coords[:, i]), 1e-3)
+                up = coords.copy()
+                dn = coords.copy()
+                up[:, i] += h
+                dn[:, i] -= h
+                dphys = (
+                    self.transform_fn.both_transforms(up, xp=cp)[:, _test_inds[i]]
+                    - self.transform_fn.both_transforms(dn, xp=cp)[:, _test_inds[i]]
+                )
+                J[:, i] = dphys / (2.0 * h) * s[i]
 
         info_y = info_phys * J[:, :, None] * J[:, None, :]
 
@@ -3440,12 +3459,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # spectrum to a relative floor; B = V diag(lambda^-1/2) satisfies
         # B B^T = inv(info) and is all the Gaussian proposal needs (the
         # proposal shape only -- M-H corrects).
-        evals, evecs = xp.linalg.eigh(info_y)
-        floor = 1e-10 * xp.maximum(
-            xp.abs(evals).max(axis=-1, keepdims=True), 1e-300
-        )
-        evals = xp.maximum(xp.abs(evals), floor)
-        chol = evecs / xp.sqrt(evals)[:, None, :]
+        with _tspan(_tm, "infomat_eigh"):
+            evals, evecs = xp.linalg.eigh(info_y)
+            floor = 1e-10 * xp.maximum(
+                xp.abs(evals).max(axis=-1, keepdims=True), 1e-300
+            )
+            evals = xp.maximum(xp.abs(evals), floor)
+            chol = evecs / xp.sqrt(evals)[:, None, :]
         if self._fdot_astro_col is not None:
             # fdot_astro_ratio is likelihood-degenerate with Mc (both enter
             # only through the product fdot_gr(Mc)*(1+r)) and its test_inds
