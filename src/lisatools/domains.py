@@ -49,6 +49,15 @@ import logging
 
 logger = logging.getLogger("lisatools.domains")
 
+# Byte budget for the per-block complex intermediates inside
+# ``FDSignal.wdmtransform``. Frequency layers are independent, so the transform
+# walks them in blocks sized to keep the two temporary (outer..., block, Nt)
+# complex arrays under this. 256 MiB is small enough to keep a large batch off
+# the memory ceiling and large enough that the block loop stays short.
+# Override per-settings with ``wdm_layer_budget_bytes`` / ``wdm_layer_chunk``.
+_WDM_LAYER_BUDGET = 256 * 1024 * 1024
+
+
 @dataclasses.dataclass
 class DomainSettingsBase(LISAToolsParallelModule):
     """Base class for domain settings (TD, FD, STFT, WDM, ...).
@@ -1452,13 +1461,8 @@ class FDSignal(FDSettings, DomainBase):
         # positionally (``arr[:, k]``) silently addressed the CHANNEL axis as
         # soon as a batch axis was present, which is why a batched WDM
         # transform used to raise IndexError instead of broadcasting.
-        before_ifft = arr_in[..., k] / settings.data_dt
-
-        if not is_psd:
-            if herm.any():
-                before_ifft[..., herm] = self.xp.conj(before_ifft[..., herm])
-
         if is_psd:
+            before_ifft = arr_in[..., k] / settings.data_dt
             tmp_arr = before_ifft.copy()
             tmp_arr *= base_window**2 * np.pi * settings.data_dt
             psd_sum_tmp = tmp_arr.sum(axis=-1)
@@ -1479,35 +1483,75 @@ class FDSignal(FDSettings, DomainBase):
             wdmpsd_out = wdmpsd_active[..., settings.active_slice_t]
             return wdmpsd_out
 
-        before_ifft *= base_window
-        after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
-
-        # TODO: fix this
-
-        if self.backend.uses_cupy:
-            # some issue with cupy and xp.real/imag
-            cache = self.xp.fft.config.get_plan_cache()
-            cache.clear()
-
         is_complex = bool(getattr(settings, "is_complex", False))
         out_dtype = complex if is_complex else float
         tmp_w_mn = self.xp.zeros(
             self.outer_shape + (n_special, settings.Nt), dtype=out_dtype
         )
         kappa = 2 * np.sqrt(np.pi * settings.data_dt) / settings.Nf
-        m_here = self.xp.repeat(m_special_1d[:, None], settings.Nt, axis=-1)
-        n_here = self.xp.tile(self.xp.arange(settings.Nt), (n_special, 1))
-        set_zero = ((m_here == settings.Nf) | (m_here == 0)) & ((m_here + n_here) % 2 != 0)
-        projected = self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])) * after_ifft[..., ~set_zero]
-        if is_complex:
-            # keep both Re (standard WDM) and Im (Hilbert/quadrature companion)
-            tmp_w_mn[..., ~set_zero] = (
-                kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * projected
+
+        # Frequency layers are INDEPENDENT: layer m needs only its own row of
+        # ``k`` and its own length-Nt iFFT. Doing all n_special at once
+        # materialises two (outer..., n_special, Nt) COMPLEX arrays at the same
+        # time -- 2.6 GiB of the 4.0 GiB peak for a batch of 8 over 2 years,
+        # for a template that occupies ~60 of 1451 time layers. Walking the
+        # layer axis in blocks bounds those two intermediates without changing
+        # a single arithmetic operation, so the result is bitwise identical.
+        #
+        # The block size is chosen from a byte budget rather than exposed as a
+        # tuning knob: the whole point is that the caller should not have to
+        # know n_special or Nt to avoid an out-of-memory failure.
+        per_layer_bytes = int(np.prod(self.outer_shape)) * settings.Nt * 16
+        budget = int(getattr(settings, "wdm_layer_budget_bytes", 0) or 0) or _WDM_LAYER_BUDGET
+        layer_chunk = int(getattr(settings, "wdm_layer_chunk", 0) or 0) or max(
+            1, min(n_special, budget // max(per_layer_bytes, 1))
+        )
+
+        for _lo in range(0, n_special, layer_chunk):
+            _hi = min(_lo + layer_chunk, n_special)
+            m_here = self.xp.repeat(m_special_1d[_lo:_hi, None], settings.Nt, axis=-1)
+            n_here = self.xp.tile(self.xp.arange(settings.Nt), (_hi - _lo, 1))
+
+            # Gather THIS block's frequency bins only, so the (outer, block, Nt)
+            # complex array is the largest thing alive rather than the full
+            # (outer, n_special, Nt).
+            _k = k[_lo:_hi]
+            _b = arr_in[..., _k] / settings.data_dt
+            # ``herm`` is what fold_shift_map returns; it IS ``neg_k | over_k``,
+            # both of which are now local to that method.
+            _herm = herm[_lo:_hi]
+            if _herm.any():
+                _b[..., _herm] = self.xp.conj(_b[..., _herm])
+            _b *= base_window
+            _a = self.xp.fft.ifft(_b, axis=-1)
+            del _b
+
+            set_zero = ((m_here == settings.Nf) | (m_here == 0)) & (
+                (m_here + n_here) % 2 != 0
             )
-        else:
-            tmp_w_mn[..., ~set_zero] = (
-                kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * self.xp.real(projected)
+            projected = self.xp.conj(
+                settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])
+            ) * _a[..., ~set_zero]
+            del _a
+            _phase = kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero]
+
+            # Write via an explicit block, not chained indexing: assigning into
+            # ``tmp_w_mn[..., lo:hi, :][..., mask]`` relies on the first index
+            # returning a view, which is true for basic slicing but is exactly
+            # the sort of thing that silently stops being true.
+            _blk = self.xp.zeros(
+                self.outer_shape + (_hi - _lo, settings.Nt), dtype=out_dtype
             )
+            _blk[..., ~set_zero] = (
+                _phase * projected if is_complex else _phase * self.xp.real(projected)
+            )
+            tmp_w_mn[..., _lo:_hi, :] = _blk
+            del projected, _blk
+
+        if self.backend.uses_cupy:
+            # some issue with cupy and xp.real/imag
+            cache = self.xp.fft.config.get_plan_cache()
+            cache.clear()
 
         w_mn_active = self.xp.zeros(
             self.outer_shape + (Nf_act, settings.Nt), dtype=out_dtype
