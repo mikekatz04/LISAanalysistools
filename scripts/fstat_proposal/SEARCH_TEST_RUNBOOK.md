@@ -291,6 +291,36 @@ new native code (`f4c54dc` → `gb_tdi_on_the_fly.cu/.hh`,
 `binding_gbgpu.cxx/.hpp`). **LAT needs no rebuild** — the 2026-08-04 changes
 are pure Python.
 
+### !! CHECK BEFORE LAUNCHING: the n_r conflict !!
+
+`SIGHET_V3_NODES` is the ratio-EVALUATION node count `n_r` — the raw
+waveform evaluations, which DOMINATE the per-candidate sig-het cost. It is
+NOT the same as `SIGHET_V4_KNOTS` (the in-kernel resample, measured to be
+"not a lever"). The v5 kernel consumes **both**
+(`gbsignalhetcomputations.py:985`).
+
+**Two results disagree and one of them is wrong:**
+
+| source | claim |
+|---|---|
+| v4/v5 shootout | `n_r = 64`, NOT 32 — 32 was too coarse |
+| `TODO(T_obs-aware node law)` | short baselines are OVER-resolved; ~8 should match at 3 months |
+
+Both cannot hold at the same `T_obs`. The runbook commands pass
+`SIGHET_V3_NODES=64`, so **the safe value is already in them** — the
+adaptive law (GBGPU `28ca7f6`) is opt-in via `SIGHET_V3_NODES=-1` and is
+UNVALIDATED.
+
+**Do not set `SIGHET_V3_NODES=-1` until this is swept.** The sweep:
+`n_r ∈ {8,16,32,64}` at `T_obs = 0.25 yr` with
+`gb_sighet_proof_figure.py`, find where `|ΔlnL|` breaks the tiered budget
+(`allowed(T) ~ max(0.1, T/100)`). If 8 holds at 3 months, the adaptive law
+is a near-linear speedup on the dominant cost and is a live candidate for
+why overnight_v5 measured NO v5 gain. If 64 is genuinely needed, the TODO's
+reasoning is wrong and should be struck.
+
+Full context: `docs/superpowers/2026-08-06-wdm-subband-leakage-plan.md`.
+
 ### 4a. One GPU — shakedown
 
 Everything inline, one command (mirrors the other tests in this runbook).
