@@ -183,12 +183,26 @@ class GalForSetup(Setup):
 
         if self.priors is None:
             # TODO: change to scaled linear in amplitude!?!
+            # Slots 3/4 are FREQUENCIES in Hz, not slopes.
+            # ``HyperbolicTangentGalacticForeground.specific_Sh_function``
+            # evaluates ``exp(-(f/f_1)**alpha)`` and ``tanh(-(f - fk)/f_2)``,
+            # so f_1/f_2 are scale frequencies. The historical
+            # Robson-&-Cornish-style priors here were the RECIPROCAL slope
+            # convention (gamma in 1/Hz, ~1e3): fed in as frequencies those
+            # make both factors inert (exp -> 1, tanh -> 0), collapsing the
+            # whole model to a bare ``amp * f**(-7/3)`` power law with no
+            # knee -- 4 of the 5 parameters unidentifiable. Ranges cover the
+            # LISA band and bracket the reference scales (~3.3e-4 Hz) by
+            # ~1.5 decades each side. (Box WIDTH is not why ~43% of stretch
+            # proposals land out of prior: stretch is x' = y + z(x - y) with
+            # x, y from the same box, so the in-box rate is scale-free --
+            # measured 56.6% = 0.892**5 both before and after this change.)
             priors_galfor = {
                 0: uniform_dist(1e-45, 2e-43),  # amp
-                1: uniform_dist(1e-4, 5e-2),  # knee
+                1: uniform_dist(1e-4, 5e-2),  # knee frequency f_k [Hz]
                 2: uniform_dist(0.01, 3.0),  # alpha
-                3: uniform_dist(1e0, 1e7),  # Slope1
-                4: uniform_dist(5e1, 8e3),  # Slope2
+                3: uniform_dist(1e-5, 1e-2),  # f_1, exponential scale freq [Hz]
+                4: uniform_dist(1e-5, 1e-2),  # f_2, tanh transition width [Hz]
             }
 
             # TODO: orbits check against sangria/sangria_hm

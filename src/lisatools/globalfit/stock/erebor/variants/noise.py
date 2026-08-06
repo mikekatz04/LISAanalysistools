@@ -70,12 +70,18 @@ logger = logging.getLogger(__name__)
 # Injection truths. These parameterize the covariance the synthetic data are
 # drawn from AND sit inside the sampled priors, so the fit should recover them.
 PSD_INJECTION = [15e-12, 3e-15]  # (Soms_d, Sa_a), sqrt units
+# Slots 3/4 are SCALE FREQUENCIES in Hz (``exp(-(f/f_1)**alpha)`` and
+# ``tanh(-(f - fk)/f_2)``), not the reciprocal slopes (1/Hz, ~3e3) this list
+# used to carry. As slopes they made both factors inert and the foreground
+# collapsed to a bare ``amp * f**(-7/3)``; these are those values inverted
+# (1/3014.30978, 1/2957.74596), which land at ~3.3e-4 Hz -- physical scales
+# just below the ~2.1e-3 Hz knee.
 GALFOR_INJECTION = [
     3.26651613e-44,  # amp
-    2.09278117e-03,  # fk (knee)
+    2.09278117e-03,  # fk (knee) [Hz]
     1.18300266e00,   # alpha
-    3.01430978e03,   # slope 1
-    2.95774596e03,   # slope 2
+    3.31752845e-04,  # f_1, exponential scale frequency [Hz]
+    3.38095629e-04,  # f_2, tanh transition width [Hz]
 ]
 # PowerLawSGWB amplitude is Omega_gw at 25 Hz; chosen detectable in a short
 # datastream (the stock SGWB prior (-22, -18) would NOT contain this).
