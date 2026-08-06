@@ -418,6 +418,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_units=2,
         jump_factor=0.005,
         leaf_cap_start=None,
+        leaf_cap_ll_improve=False,
+        leaf_cap_ndim=8.0,
         leaf_cap_min_iters=50,
         leaf_cap_ll_nsigma=3.0,
         leaf_cap_require_occupancy=True,
@@ -529,6 +531,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # ``_update_band_leaf_caps``); ``leaf_cap_update`` marks the single
         # RJ move per iteration that advances the cap state.
         self.leaf_cap_start = leaf_cap_start
+        # lnL-improvement cap gate (takes precedence over
+        # ``leaf_cap_iter_only``): hold a band's cap while its cold
+        # chain keeps finding a max ll better than the stored best by
+        # >= leaf_cap_ndim/2. D = 8 for GBs.
+        self.leaf_cap_ll_improve = bool(leaf_cap_ll_improve)
+        self.leaf_cap_ndim = float(leaf_cap_ndim)
         self._leaf_cap_enabled = leaf_cap_start is not None
         self.leaf_cap_min_iters = int(leaf_cap_min_iters)
         self.leaf_cap_ll_nsigma = float(leaf_cap_ll_nsigma)
@@ -4530,6 +4538,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         increment the iteration counter and running best reset, so the next
         level must re-converge on its own evidence.
 
+        With ``leaf_cap_ll_improve`` the gate is instead: increment once
+        the band's cold-chain MAX ll has failed to improve on its stored
+        best by ``leaf_cap_ndim / 2`` for ``leaf_cap_min_iters``
+        consecutive iterations. Every cold walker's per-band ll is
+        stored in ``band_info['band_cold_ll']`` each step.
+
         With ``leaf_cap_iter_only`` the gate is ONLY test 1 (a fixed
         annealing schedule): the lnL-plateau and occupancy tests are
         skipped; the ``cap < nleaves_max`` guard and the log-line format
@@ -4541,15 +4555,47 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         best = bi["band_best_ll"]
 
         lls = self._band_residual_lls(model.analysis_container_arr)
-        best[:] = np.maximum(best, lls.max(axis=0))
-        iters += 1
+        cur_max = lls.max(axis=0)
+        # Store every cold walker's per-band ll, every step, so the cap
+        # decision is auditable after the run (and so a post-hoc study can
+        # try a different criterion on the same trace).
+        if "band_cold_ll" in bi and bi["band_cold_ll"].shape == lls.shape:
+            bi["band_cold_ll"][:] = lls
 
-        if self.leaf_cap_iter_only:
+        if self.leaf_cap_ll_improve:
+            # Coarse likelihood-based gate: a band's cap holds while the
+            # cold chain keeps finding a max that beats the stored best by
+            # at least D/2 -- the log-likelihood a genuinely new source of
+            # D parameters has to buy to be worth admitting. Once no such
+            # improvement appears for ``leaf_cap_min_iters`` consecutive
+            # iterations, the band has stopped paying for its current
+            # allowance and the cap increments.
+            #
+            # Deliberately MAX-only: it asks "is the best walker still
+            # finding better fits", not "have all walkers converged
+            # together" (the older nsigma test below).
+            #
+            # TODO(leaf-cap-min-ll): consider the MIN over cold walkers too.
+            # Max-only cannot tell a band where every walker is climbing
+            # from one where a single walker carries the band while the
+            # rest are stuck -- the second case is a mixing problem the cap
+            # will happily paper over by incrementing on schedule.
+            thresh = 0.5 * float(self.leaf_cap_ndim)
+            improved = cur_max > (best + thresh)
+            best[:] = np.maximum(best, cur_max)
+            iters[improved] = 0
+            iters[~improved] += 1
+            converged = iters >= self.leaf_cap_min_iters
+        elif self.leaf_cap_iter_only:
+            best[:] = np.maximum(best, cur_max)
+            iters += 1
             # Iteration-only mode (see ctor): a fixed schedule -- every band
             # increments after ``leaf_cap_min_iters`` iterations at its
             # current cap, regardless of lnL plateau or occupancy.
             converged = iters >= self.leaf_cap_min_iters
         else:
+            best[:] = np.maximum(best, cur_max)
+            iters += 1
             tol = self.leaf_cap_ll_nsigma * np.sqrt(self._band_dof / 2.0)
             converged = (iters >= self.leaf_cap_min_iters) & (
                 (best - lls.min(axis=0)) <= tol

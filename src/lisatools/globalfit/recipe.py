@@ -2400,6 +2400,12 @@ def build_gb_moves(
         leaf_cap_start=(int(os.environ["GB_LEAF_CAP_START"])
                         if os.environ.get("GB_LEAF_CAP_START") else None),
         leaf_cap_min_iters=int(os.environ.get("GB_LEAF_CAP_MIN_ITERS", "50")),
+        # Coarse lnL-improvement cap gate. Wins over GB_LEAF_CAP_ITER_ONLY:
+        # a band holds its cap while the cold chain keeps finding a max ll
+        # better than the stored best by >= GB_LEAF_CAP_NDIM/2, and
+        # increments once it has not for GB_LEAF_CAP_MIN_ITERS iterations.
+        leaf_cap_ll_improve=os.environ.get("GB_LEAF_CAP_LL_IMPROVE", "0") == "1",
+        leaf_cap_ndim=float(os.environ.get("GB_LEAF_CAP_NDIM", "8")),
         leaf_cap_ll_nsigma=float(os.environ.get("GB_LEAF_CAP_LL_NSIGMA", "3.0")),
         leaf_cap_require_occupancy=bool(
             int(os.environ.get("GB_LEAF_CAP_OCCUPANCY", "1"))
