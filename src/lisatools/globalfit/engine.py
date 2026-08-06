@@ -237,6 +237,12 @@ class GeneralSettings(Settings):
     # turns the progress bars back on. Stock fits expose this as a headline
     # knob (erebor.<variant>(verbose=True) / env VERBOSE).
     verbose: bool = False
+    # Progress bar ONLY, decoupled from log streaming. ``None`` (default)
+    # follows ``verbose``, preserving the historical pairing; ``True`` turns
+    # the sampler's tqdm bar on while the console stays quiet, ``False``
+    # suppresses the bar even under ``verbose=True`` (wanted when stdout is a
+    # log file). Stock fits expose it as ``progress=`` / env ``PROGRESS``.
+    progress: Optional[bool] = None
 
     # --- run metadata (propagated to RunMetadata.from_curr) ---
     global_fit_codename: Optional[str] = None

@@ -15,6 +15,11 @@ from eryn.utils import TransformContainer
 
 from lisatools.utils.constants import PC_SI
 
+# canonical home is ``stock/base`` (bbhx-free, so the noise branch can use
+# it too); re-exported here because this is where transform atoms live
+from ..base import ten_to_the_x  # noqa: F401
+
+
 def negate(x):
     """Return ``-x`` (named 1-arg transform for pickling support; it is its
     own functional inverse -- e.g. the GB phi0 sign flip)."""
@@ -183,15 +188,6 @@ class McDistFdotAstroQuadInverse:
         ratio = fdot / get_fdot(f=f0_Hz, Mc=Mc) - 1.0
         dist = gb_amp_from_dist(f0_Hz, Mc, 1.0) / A  # A(d=1 kpc) / A
         return dist, f0_Hz, Mc, ratio
-
-
-def ten_to_the_x(x):
-    """Return ``10 ** x`` (named 1-arg transform for pickling support).
-
-    Used as a per-parameter :class:`~eryn.utils.TransformContainer` transform for
-    PSD / foreground amplitudes sampled in ``log10`` space.
-    """
-    return 10.0 ** x
 
 
 def make_gb_transform_container(

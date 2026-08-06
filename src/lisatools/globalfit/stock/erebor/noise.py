@@ -20,9 +20,68 @@ from ...engine import GeneralSetup, Settings, Setup
 from ...hdfbackend import ModuleSubBackend
 from ...state import ModuleSubState
 from ...loginfo import init_logger
-from ..base import env_default
+from ..base import env_default, ten_to_the_x
 
 logger = logging.getLogger(__name__)
+
+# Physical (linear) support of the 2-parameter instrument-noise prior,
+# ``(Soms_d, Sa_a)`` in sqrt units. The log-sampled branch covers exactly the
+# same range -- uniform in ln instead of uniform in S.
+PSD_PRIOR_RANGE = ((6.0e-12, 20.0e-11), (1.0e-15, 20.0e-14))
+
+
+def psd_prior_dict(log_sampling: bool = False) -> dict:
+    """``{label: uniform_dist}`` for the 2-param instrument PSD branch.
+
+    ``log_sampling`` switches the sampling basis to ``ln(Soms_d), ln(Sa_a)``
+    over the same physical support (:data:`PSD_PRIOR_RANGE`); pair it with
+    :func:`make_psd_log_transform_container` so the likelihood still receives
+    linear levels.
+    """
+    (oms_lo, oms_hi), (tm_lo, tm_hi) = PSD_PRIOR_RANGE
+    if not log_sampling:
+        return {
+            r"$S_{\rm oms}$": uniform_dist(oms_lo, oms_hi),  # Soms_d
+            r"$S_{\rm tm}$": uniform_dist(tm_lo, tm_hi),  # Sa_a
+        }
+    return {
+        r"$\ln S_{\rm oms}$": uniform_dist(np.log(oms_lo), np.log(oms_hi)),
+        r"$\ln S_{\rm tm}$": uniform_dist(np.log(tm_lo), np.log(tm_hi)),
+    }
+
+
+def check_psd_log_sampling(psd) -> bool:
+    """``psd.log_sampling``, refused for anything but the 2-param branch.
+
+    The log basis is defined for ``(Soms_d, Sa_a)`` only; a spline-style psd
+    branch would silently exponentiate its knot positions/amplitudes.
+    """
+    log_sampling = bool(getattr(psd, "log_sampling", False))
+    if log_sampling and getattr(psd, "ndim", None) not in (None, 2):
+        raise ValueError(
+            "psd.log_sampling is only defined for the 2-parameter "
+            f"(Soms_d, Sa_a) branch, but ndim={psd.ndim}. Unset it "
+            "(PSD_LOG_SAMPLING=0) or supply your own prior + transform."
+        )
+    return log_sampling
+
+
+def make_psd_log_transform_container() -> TransformContainer:
+    """``(ln Soms_d, ln Sa_a) -> (Soms_d, Sa_a)`` for the log-sampled psd branch.
+
+    Same ``np.exp`` / ``np.log`` pair (and the same picklable-by-reference
+    ufuncs) the EMRI/SOBBH ``logm1`` bases use. Lives here rather than in
+    ``transforms.py`` so the noise path keeps its import surface -- the
+    transform module pulls in ``bbhx`` at import.
+    """
+    return TransformContainer(
+        input_basis=["logSoms_d", "logSa_a"],
+        output_basis=["Soms_d", "Sa_a"],
+        parameter_transforms={"Soms_d": np.exp, "Sa_a": np.exp},
+        inverse_parameter_transforms={"Soms_d": np.log, "Sa_a": np.log},
+        key_map={"logSoms_d": "Soms_d", "logSa_a": "Sa_a"},
+    )
+
 
 @dataclasses.dataclass
 class PSDSettings(Settings):
@@ -55,7 +114,23 @@ class PSDSettings(Settings):
     # ``finalize_general`` threads these onto the CompositeSensitivityBackend.
     instrument_component_cls: Any = None
     instrument_model_cls: Any = None
+    # Extra constructor arguments for ``instrument_component_cls``. Needed by
+    # models carrying more than the two levels — notably
+    # ``UnequalArmInstrumentNoise``, which takes ``ltts=`` (a plain (6,) or
+    # (Nt, 6) numpy array of per-link light travel times). Keep it plain data:
+    # this dataclass is deepcopied and pickled with the rest of the settings
+    # tree, so an orbits object must not be stored here.
+    instrument_component_kwargs: Optional[dict] = None
     model_name: Optional[str] = None
+    # Sample ``ln(Soms_d), ln(Sa_a)`` instead of the linear levels (2-param
+    # branch only). The branch then carries a uniform-in-ln prior over the
+    # SAME physical support plus an ``exp`` transform, so every consumer
+    # (PSDMove, the sensitivity backend) still sees linear levels -- the two
+    # levels span decades, so a linear-uniform prior/proposal wastes most of
+    # its steps at the top of the range. Knob: ``PSD_LOG_SAMPLING``.
+    log_sampling: bool = dataclasses.field(
+        default_factory=env_default("PSD_LOG_SAMPLING", False, bool)
+    )
 
 class PSDSetup(Setup):
     """:class:`Setup` for the instrumental PSD branch in the Erebor recipe.
@@ -84,20 +159,17 @@ class PSDSetup(Setup):
         if self.initialize_kwargs is None:
             self.initialize_kwargs = {}
 
-        if self.priors is None:
-            # TODO: change to scaled linear in amplitude!?!
-            priors_psd = {
-                r"$S_{\rm oms}$": uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
-                r"$S_{\rm tm}$": uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
-                # 2: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
-                # 3: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
-            }
+        log_sampling = check_psd_log_sampling(self)
 
+        if self.priors is None:
             # TODO: orbits check against sangria/sangria_hm
-            self.priors = {"psd": ProbDistContainer(priors_psd)}
+            self.priors = {"psd": ProbDistContainer(psd_prior_dict(log_sampling))}
 
         else:
             self.logger.info("Using custom priors for PSD branch")
+
+        if log_sampling and self.transform is None:
+            self.transform = make_psd_log_transform_container()
 
         if self.betas is None:
             # the psd move's own ladder, sized by the ntemps knob (an
@@ -126,6 +198,104 @@ class PSDSetup(Setup):
             self.branch_backend = ModuleSubBackend
 
 
+# Physical (linear) support of the 5-parameter galactic-foreground prior, in
+# the model's own order ``(amp, fk, alpha, f_1, f_2)`` -- the argument order of
+# ``HyperbolicTangentGalacticForeground.specific_Sh_function``.
+#
+# ``f_1``/``f_2`` are the exponential roll-off and tanh-transition frequency
+# scales, in **Hz** -- NOT the "Slope1"/"Slope2" numbers tabulated on
+# ``FittedHyperbolicTangentGalacticForeground``. Those are converted before
+# use (``stochastic.py``: ``F1 = slope1 ** (-1/alpha)``, ``F2 = 1/slope2``),
+# which for the 4-yr entry lands at f_1 ~ 1.15e-3 Hz and f_2 ~ 3.38e-4 Hz --
+# both mHz-band, like every other frequency in this model. The pre-2026-08
+# ranges (f_1 in 1..1e7, f_2 in 50..8000) were the slope-unit numbers and
+# EXCLUDED the physical values, so a foreground fit could not place the knee
+# in band: f_1 railed at its floor, and alpha -> 0 plus a shrinking amp
+# compensated by flattening ``(f/f_1)**alpha`` into a constant. The floors
+# below reach 1e-5 Hz for both; the old ceilings are kept so a configuration
+# still carrying slope-unit values validates rather than erroring.
+# amp centred on the GALFOR brick's measured level (2026-08). A
+# least-squares fit of this model to the brick's own X-channel PSD
+# (scripts/noise/fit_galfor.py) gives amp ~ 1.2e-44, i.e. log10 -43.9, within
+# half a decade of the stock injection -- once ``X2TDISens.stochastic_transform``
+# carries the TDI-2 factor sin^2(2x) (fixed in the same change; see
+# sensitivity.py). Before that fix the foreground was ~1.6 decades too loud
+# per unit amp, so the sampler drove amp down to ~1e-45 and railed at the
+# floor. Three decades either side of the measured value.
+GALFOR_PRIOR_RANGE = (
+    (1e-47, 1e-41),  # amp
+    (1e-5, 1e-1),  # fk (knee)
+    (1e-3, 5.0),  # alpha
+    (1e-5, 1e7),  # f_1
+    (1e-5, 1e4),  # f_2
+)
+GALFOR_BASIS = ("amp", "fk", "alpha", "f_1", "f_2")
+# Everything except the power-law index spans decades and is strictly
+# positive, so those four are the ones a log basis helps.
+GALFOR_LOG_PARAMS = ("amp", "fk", "f_1", "f_2")
+
+
+def galfor_prior_dict(log_sampling: bool = False) -> dict:
+    """``{index: uniform_dist}`` for the 5-param galactic-foreground branch.
+
+    ``log_sampling`` switches ``amp, fk, f_1, f_2`` (:data:`GALFOR_LOG_PARAMS`)
+    to ``log10`` over the same physical support (:data:`GALFOR_PRIOR_RANGE`);
+    ``alpha`` is an O(1) power-law index and stays linear. Pair it with
+    :func:`make_galfor_log_transform_container`.
+
+    **Base-10, not natural log** (2026-08): these four span 4-12 decades and
+    every one of them is quoted in decades in the literature and in run logs,
+    so a chain value of ``-43.5`` reads directly as ``10**-43.5``. The psd
+    branch stays in ``ln`` (:func:`psd_prior_dict`) -- it carries two O(1)-
+    spread levels where the basis is a wash, and flipping it would invalidate
+    stored chains. Uniform-in-log10 and uniform-in-ln are the SAME measure up
+    to the constant ``ln 10``, so the posterior is unchanged; only the stored
+    numbers and the step scale differ.
+    """
+    priors = {}
+    for i, (name, (lo, hi)) in enumerate(zip(GALFOR_BASIS, GALFOR_PRIOR_RANGE)):
+        if log_sampling and name in GALFOR_LOG_PARAMS:
+            lo, hi = np.log10(lo), np.log10(hi)
+        priors[i] = uniform_dist(lo, hi)
+    return priors
+
+
+def check_galfor_log_sampling(galfor) -> bool:
+    """``galfor.log_sampling``, refused for anything but the 5-param branch."""
+    log_sampling = bool(getattr(galfor, "log_sampling", False))
+    if log_sampling and getattr(galfor, "ndim", None) not in (None, 5):
+        raise ValueError(
+            "galfor.log_sampling is only defined for the 5-parameter "
+            f"(amp, fk, alpha, f_1, f_2) branch, but ndim={galfor.ndim}. "
+            "Unset it (GALFOR_LOG_SAMPLING=0) or supply your own prior + "
+            "transform."
+        )
+    return log_sampling
+
+
+def make_galfor_log_transform_container() -> TransformContainer:
+    """``(log10 amp, log10 fk, alpha, log10 f_1, log10 f_2) -> the linear five``.
+
+    ``alpha`` passes through untouched (it is in both bases under its own
+    name), so the output order stays exactly what the foreground model's
+    ``specific_Sh_function`` takes.
+
+    ``ten_to_the_x`` is imported from ``stock.base`` rather than the sibling
+    ``transforms`` module: both define it, but ``transforms`` imports ``bbhx``
+    at module scope and the noise path keeps a narrower import surface. Both
+    it and ``np.log10`` are module-level names, so the container pickles.
+    """
+    return TransformContainer(
+        input_basis=[
+            f"log10_{name}" if name in GALFOR_LOG_PARAMS else name for name in GALFOR_BASIS
+        ],
+        output_basis=list(GALFOR_BASIS),
+        parameter_transforms={name: ten_to_the_x for name in GALFOR_LOG_PARAMS},
+        inverse_parameter_transforms={name: np.log10 for name in GALFOR_LOG_PARAMS},
+        key_map={f"log10_{name}": name for name in GALFOR_LOG_PARAMS},
+    )
+
+
 @dataclasses.dataclass
 class GalForSettings(Settings):
     """Settings dataclass describing the galactic-foreground branch in an Erebor-style recipe.
@@ -152,6 +322,15 @@ class GalForSettings(Settings):
     # ``finalize_general`` threads these onto the CompositeSensitivityBackend.
     stochastic_fn: Any = None
     modulation: Any = None
+    # Sample log10(amp), log10(fk), log10(f_1), log10(f_2) -- alpha stays
+    # linear (see GALFOR_LOG_PARAMS). Same deal as PSDSettings.log_sampling,
+    # in base 10 rather than e: a uniform-in-log10 prior over the SAME
+    # physical support plus a ``10**x`` transform, so the foreground model
+    # still receives linear parameters. Each of the four spans 4-12 decades,
+    # where linear proposals crawl. Knob: ``GALFOR_LOG_SAMPLING``.
+    log_sampling: bool = dataclasses.field(
+        default_factory=env_default("GALFOR_LOG_SAMPLING", False, bool)
+    )
 
 
 class GalForSetup(Setup):
@@ -181,18 +360,14 @@ class GalForSetup(Setup):
         if self.initialize_kwargs is None:
             self.initialize_kwargs = {}
 
-        if self.priors is None:
-            # TODO: change to scaled linear in amplitude!?!
-            priors_galfor = {
-                0: uniform_dist(1e-45, 2e-43),  # amp
-                1: uniform_dist(1e-4, 5e-2),  # knee
-                2: uniform_dist(0.01, 3.0),  # alpha
-                3: uniform_dist(1e0, 1e7),  # Slope1
-                4: uniform_dist(5e1, 8e3),  # Slope2
-            }
+        log_sampling = check_galfor_log_sampling(self)
 
+        if self.priors is None:
             # TODO: orbits check against sangria/sangria_hm
-            self.priors = {"galfor": ProbDistContainer(priors_galfor)}
+            self.priors = {"galfor": ProbDistContainer(galfor_prior_dict(log_sampling))}
+
+        if log_sampling and self.transform is None:
+            self.transform = make_galfor_log_transform_container()
 
         if self.betas is None:
             # the galfor move's own ladder, sized by the ntemps knob
@@ -330,31 +505,48 @@ def noise_params_from_file(
 
 
 def prepare_psd_branch(psd, psd_injection=None):
-    """Fill the 2-param instrument PSD prior + (optional) injection.
+    """Fill the 2-param instrument PSD prior, transform, and (optional) injection.
 
-    The injection ``[Soms_d, Sa_a]`` sits inside the sampled prior so the fit
-    recovers it. Shared by the noise variants and all_sources.
+    The injection ``[Soms_d, Sa_a]`` is given in LINEAR units and sits inside
+    the sampled prior so the fit recovers it. With ``psd.log_sampling``
+    (``PSD_LOG_SAMPLING``) the branch samples ``ln`` of the two levels: same
+    physical support, uniform in ln, an ``exp``
+    :class:`~eryn.utils.TransformContainer` back to linear for every consumer,
+    and the injection carried into the sampling basis so injection-truth
+    overlays stay aligned with the chain. Shared by the noise variants and
+    all_sources.
     """
+    log_sampling = check_psd_log_sampling(psd)
     if psd.initialize_kwargs is None:
         psd.initialize_kwargs = dict()
     if psd.priors is None:
-        psd.priors = {
-            "psd": ProbDistContainer(
-                {
-                    r"$S_{\rm oms}$": uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
-                    r"$S_{\rm tm}$": uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
-                }
-            )
-        }
+        psd.priors = {"psd": ProbDistContainer(psd_prior_dict(log_sampling))}
+    if log_sampling and psd.transform is None:
+        psd.transform = make_psd_log_transform_container()
     if psd.injection is None and psd_injection is not None:
-        psd.injection = np.asarray(psd_injection, dtype=float)
+        injection = np.asarray(psd_injection, dtype=float)
+        psd.injection = np.log(injection) if log_sampling else injection
     return psd
 
 
 def prepare_galfor_branch(galfor):
-    """Galactic-foreground branch prep (prior comes from ``GalForSetup``)."""
+    """Galactic-foreground branch prep: prior + transform for the sampling basis.
+
+    With ``galfor.log_sampling`` (``GALFOR_LOG_SAMPLING``) the branch samples
+    ``log10`` of ``amp, fk, f_1, f_2`` (alpha stays linear) over the same
+    physical support, with a ``10**x``
+    :class:`~eryn.utils.TransformContainer` back to the foreground model's own
+    basis. Note the base: the psd branch is ``ln``, this one is ``log10``. Filling them here rather than leaving it to
+    :class:`GalForSetup` keeps the knob effective for callers that pass their
+    own Setup. Shared by the noise variants and all_sources.
+    """
+    log_sampling = check_galfor_log_sampling(galfor)
     if galfor.initialize_kwargs is None:
         galfor.initialize_kwargs = {}
+    if galfor.priors is None:
+        galfor.priors = {"galfor": ProbDistContainer(galfor_prior_dict(log_sampling))}
+    if log_sampling and galfor.transform is None:
+        galfor.transform = make_galfor_log_transform_container()
     return galfor
 
 
@@ -378,7 +570,12 @@ def noise_sensitivity_init_kwargs(
         branch_mod if branch_mod is not None else resolve_galfor_modulation(galfor_modulation_path)
     )
     if psd is not None:
-        for attr in ("instrument_component_cls", "instrument_model_cls", "model_name"):
+        for attr in (
+            "instrument_component_cls",
+            "instrument_model_cls",
+            "instrument_component_kwargs",
+            "model_name",
+        ):
             val = getattr(psd, attr, None)
             if val is not None:
                 out[attr] = val

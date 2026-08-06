@@ -409,10 +409,28 @@ class PSDMove(GlobalFitMove, StretchMove):
     # dev ACA path + hybrid dispatch
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _to_physical(transform_fn, params):
+        """One branch's sampling-basis row -> the physical basis the model wants.
+
+        ``both_transforms`` can hand back a leading axis for a single row, so
+        squeeze it the way :meth:`SensitivityBackendBase.__call__` does.
+        """
+        if transform_fn is None or params is None:
+            return params
+        out = transform_fn.both_transforms(np.asarray(params, dtype=float))
+        return np.atleast_1d(np.asarray(out).squeeze())
+
     def _build_sensitivity_for_walker(
         self, walker_index: int, psd_params, galfor_params, sgwb_params=None
     ):
         """Build the per-walker sensitivity matrix for the given parameters.
+
+        Takes every branch's row in ITS SAMPLING BASIS and applies that
+        branch's transform here, so a transformed branch behaves the same on
+        this route as on the kernel fast path (:meth:`transform_coords`) --
+        the backend only ever knows about the psd transform, so a log-sampled
+        galfor/sgwb would otherwise reach the model unexponentiated.
 
         Routes through the configured :class:`XYZSensitivityBackend`. The
         returned :class:`SensitivityMatrix` is what will be installed on the
@@ -422,12 +440,12 @@ class PSDMove(GlobalFitMove, StretchMove):
         # ``sgwb_params`` is only forwarded when present so the legacy
         # XYZSensitivityBackend (whose __call__ has no sgwb kwarg) keeps
         # working for runs without an sgwb branch.
+        sgwb_params = self._to_physical(self.sgwb_transform_fn, sgwb_params)
         extra = {} if sgwb_params is None else dict(sgwb_params=sgwb_params)
         return self.sensitivity_backend(
             f"walker_{walker_index}",
-            psd_params,
-            galfor_params=galfor_params,
-            transform_fn=self.psd_transform_fn,
+            self._to_physical(self.psd_transform_fn, psd_params),
+            galfor_params=self._to_physical(self.galfor_transform_fn, galfor_params),
             **extra,
         )
 

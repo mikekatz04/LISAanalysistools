@@ -1395,28 +1395,14 @@ class FDSignal(FDSettings, DomainBase):
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
 
-        # Only transform layers inside the active band [ind_min_f, ind_max_f].
-        # When ind_min_f == 0 we additionally need layer Nf because the m=0
-        # odd-n slots of the final w_mn are sourced from layer Nf's even-n IFFT.
+        # Layer selection + rFFT gather map: shared with the PSD-fold fast
+        # path in sensitivity.get_sensitivity, and cached on the settings
+        # (it depends only on the grid and the active band).
+        # TODO: WITH ROBBIE CHECK SECOND TO TOP INDEX START AND END
         Nf_act = settings.Nf_active
         include_top = (settings.ind_min_f == 0)
         n_special = Nf_act + (1 if include_top else 0)
-        if include_top:
-            m_special_1d = self.xp.concatenate([
-                self.xp.arange(settings.ind_min_f, settings.ind_max_f + 1),
-                self.xp.array([settings.Nf]),
-            ])
-        else:
-            m_special_1d = self.xp.arange(settings.ind_min_f, settings.ind_max_f + 1)
-        m_special = self.xp.repeat(m_special_1d[:, None], settings.Nt, axis=-1)
-
-        # removed zero frequency and mirrored
-        # TODO: WITH ROBBIE CHECK SECOND TO TOP INDEX START AND END
-        k = settings.get_shift_map(m_special)
-        neg_k = (k < 0)
-        over_k = (k > int(settings.N / 2))
-        k[neg_k] = np.abs(k[neg_k])
-        k[over_k] = settings.N - k[over_k]
+        m_special_1d, k, herm, _ = settings.fold_shift_map()
         base_window = (settings.window[:])
 
         arr_in = self.arr.copy()
@@ -1428,7 +1414,6 @@ class FDSignal(FDSettings, DomainBase):
         before_ifft = arr_in[:, k] / settings.data_dt
 
         if not is_psd:
-            herm = neg_k | over_k
             if herm.any():
                 before_ifft[:, herm] = self.xp.conj(before_ifft[:, herm])
 
@@ -2324,7 +2309,67 @@ class WDMSettings(DomainSettingsBase):
             raise ValueError("m must be 1D or 2D array.")
 
         return m_in * int(self.Nt / 2) + self.xp.arange(-int(self.Nt / 2),  int(self.Nt / 2))[None, :]
-        
+
+    def fold_shift_map(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Cached rFFT gather map used by the FD -> WDM transform.
+
+        The transform only ever reads the Fourier-domain array at the bins
+        named by this map, so it is both the index set
+        :meth:`~lisatools.domains.FDSignal.wdmtransform` gathers with and the
+        *only* frequencies a PSD has to be evaluated at before being folded
+        (see :func:`lisatools.sensitivity.get_sensitivity`). For a narrow
+        active band that is a small fraction of the full rFFT grid -- on the
+        stock 768x1024 / 0.3-8 mHz noise grid, 30,720 of 393,217 bins.
+
+        The map depends only on the wavelet grid and the active band, so it is
+        computed once and cached; the cache is keyed on those values and
+        recomputes if they are reassigned.
+
+        Returns:
+            ``(m_special_1d, k, herm, unique_k)`` -- the layer indices being
+            transformed, the ``(n_special, Nt)`` rFFT bin map (already folded
+            into ``[0, N/2]``), the mask of bins that were mirrored (and so
+            need conjugating for non-PSD input), and the sorted unique bins.
+        """
+        key = (
+            self.Nf, self.Nt, self.N,
+            self.ind_min_f, self.ind_max_f,
+        )
+        cached = getattr(self, "_fold_shift_map_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        # Only transform layers inside the active band [ind_min_f, ind_max_f].
+        # When ind_min_f == 0 we additionally need layer Nf because the m=0
+        # odd-n slots of the final w_mn are sourced from layer Nf's even-n IFFT.
+        if self.ind_min_f == 0:
+            m_special_1d = self.xp.concatenate([
+                self.xp.arange(self.ind_min_f, self.ind_max_f + 1),
+                self.xp.array([self.Nf]),
+            ])
+        else:
+            m_special_1d = self.xp.arange(self.ind_min_f, self.ind_max_f + 1)
+        m_special = self.xp.repeat(m_special_1d[:, None], self.Nt, axis=-1)
+
+        # removed zero frequency and mirrored
+        k = self.get_shift_map(m_special)
+        neg_k = (k < 0)
+        over_k = (k > int(self.N / 2))
+        k[neg_k] = self.xp.abs(k[neg_k])
+        k[over_k] = self.N - k[over_k]
+        herm = neg_k | over_k
+        unique_k = self.xp.unique(k)
+
+        out = (m_special_1d, k, herm, unique_k)
+        self._fold_shift_map_cache = (key, out)
+        return out
+
+    @property
+    def fold_frequency_indices(self) -> np.ndarray:
+        """Sorted unique rFFT bins the WDM fold reads (see :meth:`fold_shift_map`)."""
+        return self.fold_shift_map()[3]
+
+
     # def window_norm(self) -> float:
     #     dOmega_s = np.pi / self.Nf
     #     (2 * np.pi) / self.N 

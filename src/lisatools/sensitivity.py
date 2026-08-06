@@ -38,6 +38,7 @@ except (ModuleNotFoundError, ImportError):
 from cudakima import AkimaInterpolant1D
 
 from . import detector as lisa_models
+from . import _unequal_arm_expressions as _ua_expr
 from .detector import L1Orbits, Orbits
 from .domains import DomainSettingsBase
 from .stochastic import (
@@ -76,6 +77,64 @@ def _warn_zeroed_invc(n_bad: int) -> None:
         _INVC_ZEROED_REPORTED.add(n_bad)
         logger.warning(msg + " Further identical reports are logged at DEBUG.", n_bad)
 
+def _mat3x3_det_inv(C: np.ndarray, xp) -> tuple:
+    """Determinant and inverse of a stack of 3x3 matrices, via the adjugate.
+
+    ``C`` has shape ``(3, 3, *data_shape)``; the returned determinant has shape
+    ``data_shape`` and the inverse ``(3, 3, *data_shape)``.
+
+    This replaces a ``transpose -> reshape -> xp.linalg.det/inv`` round trip
+    over ``prod(data_shape)`` tiny matrices, which is dominated by LAPACK
+    per-matrix overhead (~40x slower here on a 59x1024 TDI grid). It is not a
+    precision compromise: on the stock XYZ TDI covariances the adjugate's
+    residual ``||C^-1 C - I||`` measures *better* than LAPACK's, both sitting
+    at the ~1e-9 floor set by the matrices' own conditioning (max cond ~1e7).
+
+    The general (not symmetric-specialised) cofactor expansion is used so this
+    stays correct for any 3x3 stack, symmetric or not.
+
+    NaN off-diagonals are zeroed before inversion, and non-invertible pixels
+    fall out as zero inverse-covariance weight / unit determinant -- matching
+    the general path below.
+    """
+    det = (
+        C[0, 0] * (C[1, 1] * C[2, 2] - C[1, 2] * C[2, 1])
+        - C[0, 1] * (C[1, 0] * C[2, 2] - C[1, 2] * C[2, 0])
+        + C[0, 2] * (C[1, 0] * C[2, 1] - C[1, 1] * C[2, 0])
+    )
+
+    # adjust for nans in off-diagonals (the reference path does this AFTER
+    # taking the determinant, so a NaN off-diagonal still poisons detC and is
+    # sanitised to 1 below -- preserved here).
+    M = C
+    off_nan = xp.isnan(C)
+    for i in range(3):
+        off_nan[i, i] = False
+    if bool(xp.any(off_nan)):
+        M = xp.where(off_nan, xp.zeros_like(C), C)
+
+    adj_det = (
+        M[0, 0] * (M[1, 1] * M[2, 2] - M[1, 2] * M[2, 1])
+        - M[0, 1] * (M[1, 0] * M[2, 2] - M[1, 2] * M[2, 0])
+        + M[0, 2] * (M[1, 0] * M[2, 1] - M[1, 1] * M[2, 0])
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        idet = 1.0 / adj_det
+        inv = xp.empty_like(M)
+        # adjugate transpose: inv[i, j] = cofactor[j, i] / det
+        inv[0, 0] = (M[1, 1] * M[2, 2] - M[1, 2] * M[2, 1]) * idet
+        inv[0, 1] = (M[0, 2] * M[2, 1] - M[0, 1] * M[2, 2]) * idet
+        inv[0, 2] = (M[0, 1] * M[1, 2] - M[0, 2] * M[1, 1]) * idet
+        inv[1, 0] = (M[1, 2] * M[2, 0] - M[1, 0] * M[2, 2]) * idet
+        inv[1, 1] = (M[0, 0] * M[2, 2] - M[0, 2] * M[2, 0]) * idet
+        inv[1, 2] = (M[0, 2] * M[1, 0] - M[0, 0] * M[1, 2]) * idet
+        inv[2, 0] = (M[1, 0] * M[2, 1] - M[1, 1] * M[2, 0]) * idet
+        inv[2, 1] = (M[0, 1] * M[2, 0] - M[0, 0] * M[2, 1]) * idet
+        inv[2, 2] = (M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]) * idet
+
+    return det, inv
+
+
 NUM_SPLINE_THREADS = 256
 
 class Sensitivity(ABC):
@@ -86,6 +145,16 @@ class Sensitivity(ABC):
     """
 
     channel: str = None
+
+    #: Whether :meth:`transform` is a linear map of the
+    #: :class:`~lisatools.detector.CurrentNoises` levels -- i.e. a sum of
+    #: ``transfer_i(f) * noise_level_i`` with parameter-free transfer functions.
+    #: Every stock TDI transform in this module is. Consumers use this to
+    #: precompute the covariance at unit noise levels and recombine it linearly
+    #: instead of re-evaluating the model per proposal (see
+    #: :meth:`InstrumentNoise.base_covariance`). A subclass whose ``transform``
+    #: mixes the levels non-linearly MUST set this to ``False``.
+    linear_in_noise_levels: bool = True
 
     @staticmethod
     def get_xp(array: np.ndarray) -> object:
@@ -176,13 +245,37 @@ class Sensitivity(ABC):
             # stochastic-only: skip the instrument term entirely (no model needed)
             Sout = 0.0
 
-        # will add zero if ignored
-        stochastic_contribution = cls.stochastic_transform(
-            f, cls.get_stochastic_contribution(f, **kwargs), **kwargs
-        )
-
-        Sout += stochastic_contribution
+        # The stochastic term is genuinely zero unless a stochastic model was
+        # requested, but evaluating it is not free -- ``stochastic_transform``
+        # builds its transfer function over the whole frequency array. Skip it
+        # outright rather than adding a computed zero (this is ~6% of a WDM
+        # noise-PE run, where the instrument covariance is rebuilt per
+        # proposal). ``_has_stochastic`` is the same condition
+        # ``get_stochastic_contribution`` uses to decide whether to fill.
+        if cls._has_stochastic(**kwargs):
+            stochastic_contribution = cls.stochastic_transform(
+                f, cls.get_stochastic_contribution(f, **kwargs), **kwargs
+            )
+            Sout += stochastic_contribution
+        elif not include_instrument:
+            # no instrument term AND no stochastic term: still return an array
+            # shaped like ``f`` rather than the scalar 0.0.
+            Sout = cls.get_xp(f).zeros_like(f)
         return Sout
+
+    @staticmethod
+    def _has_stochastic(
+        stochastic_params: Optional[tuple] = (),
+        stochastic_kwargs: Optional[dict] = {},
+        stochastic_function: Optional[StochasticContribution | str] = None,
+        **kwargs: dict,
+    ) -> bool:
+        """Whether :meth:`get_stochastic_contribution` would produce a non-zero term."""
+        return bool(
+            (stochastic_params is not None and tuple(stochastic_params) != tuple())
+            or (stochastic_kwargs is not None and stochastic_kwargs != {})
+            or stochastic_function is not None
+        )
 
     @classmethod
     def get_stochastic_contribution(
@@ -507,8 +600,22 @@ class X2TDISens(Sensitivity):
         )
         xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
-        # TODO: check these functions for TDI2
-        t = 4.0 * x**2 * xp.sin(x) ** 2
+        # TDI-2. The stochastic term carries the SAME generation as this
+        # class's instrument ``transform`` (Cxx = 16 sin^2(x) sin^2(2x)), so
+        # the TDI-1.5 kernel 4 x^2 sin^2(x) needs the 1.5 -> 2 conversion
+        # factor 4 sin^2(2x) on top of ldasoft's x^2 sin^2(x) base:
+        #     4 x^2 sin^2(x) * sin^2(2x)  ==  [x^2 sin^2(x)] * [4 sin^2(2x)]
+        # Fixed 2026-08 (was the bare TDI-1.5 kernel, behind a "check these
+        # functions for TDI2" TODO). sin^2(2x) ~ 1/41 at 1.5 mHz, so the old
+        # form made the foreground ~1.6 decades too loud for a given amp and
+        # drove the galfor amplitude down into its prior floor.
+        # Verified against the GALFOR 731 d brick through both X (median
+        # residual -0.011 dec) and A (-0.167 dec, vs -0.176 predicted by
+        # C_AA = C_XX - C_XY = 3/2 C_XX for an isotropic background).
+        # NOTE: the TDI-1.5 siblings (X1/A1/T1/XY1) keep 4 x^2 sin^2(x). Under
+        # the same ldasoft convention that base should be x^2 sin^2(x), i.e.
+        # 4x smaller -- unverified here for lack of TDI-1.5 data.
+        t = 4.0 * x**2 * xp.sin(x) ** 2 * xp.sin(2.0 * x) ** 2
         return Sh * t
 
 
@@ -630,8 +737,22 @@ class XY2TDISens(Sensitivity):
         """
         xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
-        # Placeholder - using TDI1 form scaled by -0.5
-        t = -0.5 * (4.0 * x**2 * xp.sin(x) ** 2)
+        # TDI-2. The stochastic term carries the SAME generation as this
+        # class's instrument ``transform`` (Cxx = 16 sin^2(x) sin^2(2x)), so
+        # the TDI-1.5 kernel 4 x^2 sin^2(x) needs the 1.5 -> 2 conversion
+        # factor 4 sin^2(2x) on top of ldasoft's x^2 sin^2(x) base:
+        #     4 x^2 sin^2(x) * sin^2(2x)  ==  [x^2 sin^2(x)] * [4 sin^2(2x)]
+        # Fixed 2026-08 (was the bare TDI-1.5 kernel, behind a "check these
+        # functions for TDI2" TODO). sin^2(2x) ~ 1/41 at 1.5 mHz, so the old
+        # form made the foreground ~1.6 decades too loud for a given amp and
+        # drove the galfor amplitude down into its prior floor.
+        # Verified against the GALFOR 731 d brick through both X (median
+        # residual -0.011 dec) and A (-0.167 dec, vs -0.176 predicted by
+        # C_AA = C_XX - C_XY = 3/2 C_XX for an isotropic background).
+        # NOTE: the TDI-1.5 siblings (X1/A1/T1/XY1) keep 4 x^2 sin^2(x). Under
+        # the same ldasoft convention that base should be x^2 sin^2(x), i.e.
+        # 4x smaller -- unverified here for lack of TDI-1.5 data.
+        t = -0.5 * (4.0 * x**2 * xp.sin(x) ** 2 * xp.sin(2.0 * x) ** 2)
         return Sh * t
 
 
@@ -884,8 +1005,22 @@ class A2TDISens(X2TDISens, Sensitivity):
         )
         xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
-        # TODO: check these functions for TDI2
-        t = 4.0 * x**2 * xp.sin(x) ** 2
+        # TDI-2. The stochastic term carries the SAME generation as this
+        # class's instrument ``transform`` (Cxx = 16 sin^2(x) sin^2(2x)), so
+        # the TDI-1.5 kernel 4 x^2 sin^2(x) needs the 1.5 -> 2 conversion
+        # factor 4 sin^2(2x) on top of ldasoft's x^2 sin^2(x) base:
+        #     4 x^2 sin^2(x) * sin^2(2x)  ==  [x^2 sin^2(x)] * [4 sin^2(2x)]
+        # Fixed 2026-08 (was the bare TDI-1.5 kernel, behind a "check these
+        # functions for TDI2" TODO). sin^2(2x) ~ 1/41 at 1.5 mHz, so the old
+        # form made the foreground ~1.6 decades too loud for a given amp and
+        # drove the galfor amplitude down into its prior floor.
+        # Verified against the GALFOR 731 d brick through both X (median
+        # residual -0.011 dec) and A (-0.167 dec, vs -0.176 predicted by
+        # C_AA = C_XX - C_XY = 3/2 C_XX for an isotropic background).
+        # NOTE: the TDI-1.5 siblings (X1/A1/T1/XY1) keep 4 x^2 sin^2(x). Under
+        # the same ldasoft convention that base should be x^2 sin^2(x), i.e.
+        # 4x smaller -- unverified here for lack of TDI-1.5 data.
+        t = 4.0 * x**2 * xp.sin(x) ** 2 * xp.sin(2.0 * x) ** 2
         return Sh * t
 
 
@@ -951,8 +1086,22 @@ class T2TDISens(X2TDISens, Sensitivity):
         )
         xp = Sensitivity.get_xp(f)
         x = 2.0 * np.pi * lisaLT * f
-        # TODO: check these functions for TDI2
-        t = 4.0 * x**2 * xp.sin(x) ** 2
+        # TDI-2. The stochastic term carries the SAME generation as this
+        # class's instrument ``transform`` (Cxx = 16 sin^2(x) sin^2(2x)), so
+        # the TDI-1.5 kernel 4 x^2 sin^2(x) needs the 1.5 -> 2 conversion
+        # factor 4 sin^2(2x) on top of ldasoft's x^2 sin^2(x) base:
+        #     4 x^2 sin^2(x) * sin^2(2x)  ==  [x^2 sin^2(x)] * [4 sin^2(2x)]
+        # Fixed 2026-08 (was the bare TDI-1.5 kernel, behind a "check these
+        # functions for TDI2" TODO). sin^2(2x) ~ 1/41 at 1.5 mHz, so the old
+        # form made the foreground ~1.6 decades too loud for a given amp and
+        # drove the galfor amplitude down into its prior floor.
+        # Verified against the GALFOR 731 d brick through both X (median
+        # residual -0.011 dec) and A (-0.167 dec, vs -0.176 predicted by
+        # C_AA = C_XX - C_XY = 3/2 C_XX for an isotropic background).
+        # NOTE: the TDI-1.5 siblings (X1/A1/T1/XY1) keep 4 x^2 sin^2(x). Under
+        # the same ldasoft convention that base should be x^2 sin^2(x), i.e.
+        # 4x smaller -- unverified here for lack of TDI-1.5 data.
+        t = 4.0 * x**2 * xp.sin(x) ** 2 * xp.sin(2.0 * x) ** 2
         return Sh * t
 
 
@@ -1404,6 +1553,9 @@ class SensitivityMatrixBase:
         if len(self.channel_shape) == 1:
             self._detC = xp.prod(self.sens_mat, axis=0)
             self._invC = 1 / self.sens_mat
+
+        elif tuple(self.channel_shape) == (3, 3):
+            self._detC, self._invC = _mat3x3_det_inv(self.sens_mat, xp)
 
         # TODO switch to Cholesky decomposition and inversion!
         else:
@@ -1994,7 +2146,15 @@ def get_sensitivity(
             # time-column independent, so we keep a single representative column.
             f_full = xp.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
             df = float(f_full[1] - f_full[0])
-            psd_full = sensitivity.get_Sn(f_full, *_args, **_kwargs)
+            # The fold only ever reads the bins in ``fold_frequency_indices``
+            # (a small fraction of the rFFT grid for a narrow active band), and
+            # evaluating the noise model is far more expensive than the gather
+            # itself -- so score just those bins and leave the rest zero. The
+            # folded output is bit-identical to evaluating the full grid.
+            idx = basis_settings.fold_frequency_indices
+            psd_active = xp.asarray(sensitivity.get_Sn(f_full[idx], *_args, **_kwargs))
+            psd_full = xp.zeros(f_full.shape, dtype=psd_active.dtype)
+            psd_full[idx] = psd_active
             psd_fd = domains.FDSignal(
                 psd_full,
                 domains.FDSettings(
@@ -3510,11 +3670,58 @@ class GalForTimeModulation:
         path: Path to the whitespace-delimited modulation table.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, t0: float = 0.0):
         self.path = str(path)
+        # Subtracted from the table's time column, i.e. the absolute epoch the
+        # table is written against. Tables tabulated on an ABSOLUTE mission
+        # clock need this, because the domains hand out a 0-based ``t_arr``
+        # (``WDMSettings.t_arr = t0 + arange(NT)*dt``, and the noise runs leave
+        # that t0 at 0). Pass the first sample time of the data. Default 0.0
+        # keeps a table already written relative to the data start unchanged.
+        self.t0 = float(t0)
+
+    def _table(self):
+        """``(199, 7)``-style array: time column first, then XX YY ZZ XY XZ YZ.
+
+        Accepts the transposed layout (7 rows x Ntime columns) as well, because
+        ``np.savetxt`` of a ``(7, N)`` stack writes it that way and the two are
+        trivially distinguishable. Getting this wrong used to be SILENT: for a
+        (7, N) file ``glass[:, 0]`` is the first time-sample's column
+        ``[t, XX, YY, ZZ, XY, XZ, YZ]``, which is non-monotonic but usually
+        still brackets the requested times, so ``interp1d`` interpolated
+        nonsense instead of raising.
+        """
+        g = np.loadtxt(self.path)
+        if g.ndim != 2:
+            raise ValueError(
+                f"{self.path}: expected a 2-D modulation table, got shape {g.shape}."
+            )
+        if g.shape[1] == 7 and g.shape[0] != 7:
+            pass                      # (Ntime, 7): the documented layout
+        elif g.shape[0] == 7 and g.shape[1] != 7:
+            g = g.T                   # (7, Ntime): transposed, accept it
+        elif g.shape == (7, 7):
+            raise ValueError(
+                f"{self.path}: 7x7 table is ambiguous (cannot tell columns from "
+                "rows). Write it as (Ntime, 7) with Ntime != 7."
+            )
+        else:
+            raise ValueError(
+                f"{self.path}: modulation table must have 7 columns "
+                f"(t, XX, YY, ZZ, XY, XZ, YZ) or be its transpose; got {g.shape}."
+            )
+        t = g[:, 0]
+        if not np.all(np.diff(t) > 0):
+            raise ValueError(
+                f"{self.path}: the time column is not strictly increasing after "
+                "layout detection -- the table is malformed or the columns are "
+                "not in the order t, XX, YY, ZZ, XY, XZ, YZ."
+            )
+        return g
 
     def __call__(self, t_arr):
-        glass = np.loadtxt(self.path)
+        glass = self._table()
+        t_tab = glass[:, 0] - self.t0
         mod = np.array(
             [
                 [glass[:, 1], glass[:, 4], glass[:, 5]],
@@ -3522,7 +3729,16 @@ class GalForTimeModulation:
                 [glass[:, 5], glass[:, 6], glass[:, 3]],
             ]
         )
-        return interpolate.interp1d(glass[:, 0], mod)(np.asarray(asnumpy(t_arr)))
+        t_req = np.asarray(asnumpy(t_arr))
+        if t_req.min() < t_tab.min() or t_req.max() > t_tab.max():
+            raise ValueError(
+                f"{self.path}: requested times [{t_req.min():.6g}, "
+                f"{t_req.max():.6g}] fall outside the table's coverage "
+                f"[{t_tab.min():.6g}, {t_tab.max():.6g}] (after subtracting "
+                f"t0={self.t0:.6g}). A table written on an absolute mission "
+                "clock needs t0 set to the data's first sample time."
+            )
+        return interpolate.interp1d(t_tab, mod)(t_req)
 
 
 class NoiseComponent:
@@ -3605,29 +3821,692 @@ class InstrumentNoise(SeparableComponent):
         model: LISA noise model (name or :class:`~lisatools.detector.LISAModel`).
         fill_nans: Passed to :func:`get_sensitivity` (default ``np.nan``, matching
             the stock matrices, leaves the ``f=0`` bin non-finite).
+        basis_cache: Optional caller-owned dict enabling the two-basis fast
+            path (see :meth:`base_covariance`). ``None`` (default) computes the
+            covariance from scratch on every call, exactly as before. Pass a
+            dict that outlives the component -- typically owned by the object
+            that rebuilds the matrix per MCMC proposal, e.g.
+            :class:`CompositeSensitivityBackend` -- to reuse the bases.
     """
 
     name = "instrument"
 
-    def __init__(self, tdi_generation: int = 2, model="sangria", fill_nans: float = np.nan):
+    def __init__(
+        self,
+        tdi_generation: int = 2,
+        model="sangria",
+        fill_nans: float = np.nan,
+        basis_cache: Optional[dict] = None,
+    ):
         if tdi_generation not in _XYZ_ELEMENT_SENS:
             raise ValueError(f"tdi_generation must be 1 or 2, got {tdi_generation!r}.")
         self.tdi_generation = tdi_generation
         self.model = model
         self.fill_nans = fill_nans
         self.element_sens_fns = _XYZ_ELEMENT_SENS[tdi_generation]
+        self.basis_cache = basis_cache
 
-    def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+    def _linear_in_noise_levels(self) -> bool:
+        """Whether this component's covariance is linear in ``(Soms_d, Sa_a)``.
+
+        True for the stock analytic model: :meth:`LISAModel.lisanoises
+        <lisatools.detector.LISAModel.lisanoises>` scales ``Sop`` / ``Spm`` by
+        ``Soms_d`` / ``Sa_a`` times a parameter-free shape function, and every
+        stock TDI ``transform`` is a sum of ``transfer(f) * noise_level``. A
+        model that overrides ``lisanoises``, a tabulated ``Sn_spl`` model, or a
+        sensitivity class that declares ``linear_in_noise_levels = False``
+        breaks that and takes the direct path.
+        """
+        model = self.model
+        if isinstance(model, str) or getattr(model, "Sn_spl", None) is not None:
+            return False
+        if type(model).lisanoises is not lisa_models.LISAModel.lisanoises:
+            return False
+        return all(
+            getattr(fn, "linear_in_noise_levels", False) for fn in self.element_sens_fns
+        )
+
+    def _direct_base_covariance(self, settings, model) -> np.ndarray:
         xp = settings.xp
         nch = self.nchannels
         elems = [
-            get_sensitivity(settings, sens_fn=fn, model=self.model, fill_nans=self.fill_nans)
+            get_sensitivity(settings, sens_fn=fn, model=model, fill_nans=self.fill_nans)
             for fn in self.element_sens_fns
         ]
         C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=elems[0].dtype)
         for (i, j), arr in zip(ELEMENTS, elems):
             C[i, j] = arr
             C[j, i] = arr
+        return C
+
+    def _basis_cache_key_extra(self) -> tuple:
+        """Extra hashable state distinguishing this component's cached bases.
+
+        The default component is fully described by the fields already in
+        :meth:`_bases`' key. A subclass whose covariance depends on more than
+        the noise levels (e.g. :class:`UnequalArmInstrumentNoise`, whose bases
+        depend on the light-travel times) MUST extend the key here — the cache
+        is shared across every component built from one backend, so two
+        components differing only in that state would otherwise collide and
+        silently serve each other's bases.
+        """
+        return ()
+
+    def _bases(self, settings: domains.DomainSettingsBase):
+        """The two unit-level covariances ``(C|Soms_d=1,Sa_a=0, C|Soms_d=0,Sa_a=1)``."""
+        key = (
+            id(settings),
+            self.tdi_generation,
+            self.fill_nans,
+            tuple(self.element_sens_fns),
+            type(self.model),
+            self._basis_cache_key_extra(),
+        )
+        # ``id(settings)`` can be recycled after a settings object is freed, so
+        # pin the object in the entry and confirm identity on lookup.
+        hit = self.basis_cache.get(key)
+        if hit is not None and hit[0] is settings:
+            return hit[1], hit[2]
+
+        orbits = getattr(self.model, "orbits", None) or lisa_models.DefaultOrbits()
+        bases = tuple(
+            self._direct_base_covariance(
+                settings,
+                lisa_models.LISAModel(soms_d, sa_a, orbits, "instrument_basis"),
+            )
+            for soms_d, sa_a in ((1.0, 0.0), (0.0, 1.0))
+        )
+        self.basis_cache[key] = (settings, bases[0], bases[1])
+        return bases
+
+    def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        """Dense ``(nch, nch, *basis_shape_active)`` instrument covariance.
+
+        Always returns the full dense matrix. When a ``basis_cache`` was
+        supplied and the model is the stock analytic one, the result is
+        assembled as ``Soms_d * B_oms + Sa_a * B_acc`` from two cached
+        unit-level covariances instead of re-evaluating the noise model and
+        the TDI transfer functions over the whole frequency grid. That is an
+        algebraic identity, not an approximation -- it reproduces the direct
+        path to machine precision (~1e-16 relative), and it is what makes a
+        noise MCMC (which rebuilds this per proposal, per walker, per
+        temperature) affordable on CPU.
+        """
+        if self.basis_cache is None or not self._linear_in_noise_levels():
+            return self._direct_base_covariance(settings, self.model)
+
+        B_oms, B_acc = self._bases(settings)
+        # ``LISAModel`` stores the SQUARED levels, and the covariance is linear
+        # in exactly those stored values.
+        return float(self.model.Soms_d) * B_oms + float(self.model.Sa_a) * B_acc
+
+
+# ---------------------------------------------------------------------------
+# Unequal-arm (orbit-informed) instrument noise
+# ---------------------------------------------------------------------------
+#
+# The stock ``X2TDISens`` family above assumes a single, constant armlength
+# ``L_SI`` -- every TDI transfer function is built from ``x = 2 pi f L/c``. The
+# real constellation breathes (the three arms differ by ~1%) and rotates (the
+# Sagnac splitting makes ``d_ij != d_ji``), which shifts the transfer-function
+# nulls per arm and gives the cross-spectra a non-zero imaginary part. Fitting
+# an equal-arm model to unequal-arm data leaves exactly that structure in the
+# residual.
+#
+# The closed forms in ``_unequal_arm_expressions`` carry all six link delays
+# independently, so they capture both effects. They reduce to the stock
+# equal-arm elements exactly when all six delays coincide.
+
+
+#: Link ordering for every ``ltts`` array on the unequal-arm path. Matches
+#: :data:`lisatools.detector.LINKS`, so an array built by evaluating
+#: :meth:`~lisatools.detector.Orbits.get_light_travel_times` over ``LINKS``
+#: needs no reordering.
+UNEQUAL_ARM_LINKS = [12, 23, 31, 13, 32, 21]
+
+
+def _ltt_kwargs(ltts) -> dict:
+    """Map a length-6 LTT array in :data:`UNEQUAL_ARM_LINKS` order to ``d_ij`` kwargs."""
+    return {f"d_{link}": ltts[i] for i, link in enumerate(UNEQUAL_ARM_LINKS)}
+
+
+class _UnequalArmSensMixin:
+    """Shared ``get_Sn`` for the six unequal-arm TDI-2 XYZ covariance elements.
+
+    Overrides :meth:`Sensitivity.get_Sn` rather than
+    :meth:`Sensitivity.transform` because the closed forms need the *raw*
+    ``Soms_d`` / ``Sa_a`` levels -- they build their own shape functions
+    internally -- whereas ``transform`` receives a
+    :class:`~lisatools.detector.CurrentNoises` whose shapes are already applied.
+    The stochastic branch is inherited unchanged from the equal-arm sibling
+    each subclass also derives from, so a stochastic background added through
+    this class behaves exactly as before.
+    """
+
+    #: ``"XX"`` ... ``"YZ"``; the auto elements are realified (see below).
+    element: str = None
+    #: The generated closed form, as a ``staticmethod``.
+    _expr = None
+
+    @classmethod
+    def get_Sn(
+        cls,
+        f: float | np.ndarray,
+        model: Optional[lisa_models.LISAModel | str] = lisa_models.sangria,
+        include_instrument: bool = True,
+        ltts: Optional[np.ndarray] = None,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """PSD / CSD element at ``f`` for the supplied per-link light travel times.
+
+        Args:
+            f: Frequency array (Hz).
+            model: :class:`~lisatools.detector.LISAModel` carrying the squared
+                levels ``Soms_d`` / ``Sa_a``. Spline (``Sn_spl``) models are not
+                supported on this path.
+            include_instrument: ``False`` drops the instrument term, leaving only
+                any stochastic contribution (same contract as the base class).
+            ltts: Length-6 light travel times (s) in :data:`UNEQUAL_ARM_LINKS`
+                order. Required when ``include_instrument`` is ``True``.
+            **kwargs: Stochastic-contribution arguments, forwarded unchanged.
+        """
+        xp = cls.get_xp(f)
+        if include_instrument:
+            if ltts is None:
+                raise ValueError(
+                    f"{cls.__name__} needs per-link light travel times: pass "
+                    "ltts=<length-6 array in UNEQUAL_ARM_LINKS order>. Build "
+                    "one with UnequalArmInstrumentNoise.ltts_from_orbits()."
+                )
+            model = lisa_models.check_lisa_model(model)
+            if getattr(model, "Sn_spl", None) is not None:
+                raise ValueError(
+                    f"{cls.__name__} models the covariance analytically from the "
+                    "orbit delays; a tabulated Sn_spl model has no unequal-arm "
+                    "form. Use the stock equal-arm sensitivity for spline models."
+                )
+            ltts = xp.asarray(ltts)
+            # f == 0 divides by zero in the closed forms exactly as it does in
+            # the stock elements; ``get_sensitivity``'s ``fill_nans`` cleans the
+            # DC bin afterwards, so only silence the warning here.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                Sout = cls._expr(
+                    f,
+                    Soms_d=float(model.Soms_d),
+                    Sa_a=float(model.Sa_a),
+                    **_ltt_kwargs(ltts),
+                )
+            if cls.element in ("XX", "YY", "ZZ"):
+                # Hermitian => the autos are real; the closed forms carry a
+                # ~1e-14 relative imaginary residue from the phase bookkeeping.
+                Sout = xp.real(Sout)
+        else:
+            Sout = 0.0
+
+        if cls._has_stochastic(**kwargs):
+            Sout = Sout + cls.stochastic_transform(
+                f, cls.get_stochastic_contribution(f, **kwargs), **kwargs
+            )
+        elif not include_instrument:
+            Sout = xp.zeros_like(f)
+        return Sout
+
+
+class UnequalArmXX2TDISens(_UnequalArmSensMixin, X2TDISens):
+    """Unequal-arm TDI-2 ``C_XX``."""
+
+    element = "XX"
+    _expr = staticmethod(_ua_expr.noise_cov_XX)
+
+
+class UnequalArmYY2TDISens(_UnequalArmSensMixin, Y2TDISens):
+    """Unequal-arm TDI-2 ``C_YY``."""
+
+    element = "YY"
+    _expr = staticmethod(_ua_expr.noise_cov_YY)
+
+
+class UnequalArmZZ2TDISens(_UnequalArmSensMixin, Z2TDISens):
+    """Unequal-arm TDI-2 ``C_ZZ``."""
+
+    element = "ZZ"
+    _expr = staticmethod(_ua_expr.noise_cov_ZZ)
+
+
+class UnequalArmXY2TDISens(_UnequalArmSensMixin, XY2TDISens):
+    """Unequal-arm TDI-2 ``C_XY`` (complex)."""
+
+    element = "XY"
+    _expr = staticmethod(_ua_expr.noise_cov_XY)
+
+
+class UnequalArmXZ2TDISens(_UnequalArmSensMixin, ZX2TDISens):
+    """Unequal-arm TDI-2 ``C_XZ`` (complex).
+
+    Note the element is ``C_XZ`` -- the ``(0, 2)`` entry, matching this class's
+    slot in :data:`ELEMENTS` -- even though the equal-arm sibling it derives
+    from is spelled ``ZX``. For the real equal-arm CSD the two coincide; here
+    they are conjugates, so the distinction matters.
+    """
+
+    element = "XZ"
+    _expr = staticmethod(_ua_expr.noise_cov_XZ)
+
+
+class UnequalArmYZ2TDISens(_UnequalArmSensMixin, YZ2TDISens):
+    """Unequal-arm TDI-2 ``C_YZ`` (complex)."""
+
+    element = "YZ"
+    _expr = staticmethod(_ua_expr.noise_cov_YZ)
+
+
+#: Unequal-arm XYZ element classes in :data:`ELEMENTS` order.
+_UNEQUAL_ARM_ELEMENT_SENS = [
+    UnequalArmXX2TDISens,
+    UnequalArmYY2TDISens,
+    UnequalArmZZ2TDISens,
+    UnequalArmXY2TDISens,
+    UnequalArmXZ2TDISens,
+    UnequalArmYZ2TDISens,
+]
+
+
+class LinkDelayTable:
+    """Per-link light travel times tabulated against an absolute clock.
+
+    The delays breathe by ~1.5-1.8% over a two-year run -- far more than the
+    ~0.2% spread between the time-averaged arms -- so collapsing them to one
+    epoch throws away the dominant variation. This holds the delays as a time
+    series and averages them **over each WDM time slice**, giving
+    :class:`UnequalArmInstrumentNoise` one delay set per wavelet time column
+    that represents the whole column rather than a point sample of it.
+
+    Holds plain numpy arrays only, so it rides through the settings-tree
+    deepcopy / pickle round trip (sprint deepcopy/pickle rule).
+
+    Args:
+        t: Sample times in seconds on the **absolute** clock the delays are
+            tabulated against (for a mojito L1 brick, ``/ltts/sampling`` ``t0``
+            plus ``k*dt``). Must be increasing.
+        ltts: ``(len(t), 6)`` light travel times in :data:`UNEQUAL_ARM_LINKS`
+            order.
+        data_t0: Absolute time corresponding to domain time zero. Domains hand
+            out a 0-based ``t_arr``, so this is what lines the two clocks up --
+            normally the first sample time of the data being analysed.
+    """
+
+    def __init__(self, t, ltts, data_t0: float = 0.0):
+        self.t = np.asarray(t, dtype=float).ravel()
+        self.ltts = np.asarray(ltts, dtype=float)
+        if self.ltts.ndim != 2 or self.ltts.shape != (self.t.size, 6):
+            raise ValueError(
+                f"ltts must have shape (len(t), 6) = ({self.t.size}, 6); "
+                f"got {self.ltts.shape}."
+            )
+        if self.t.size > 1 and not np.all(np.diff(self.t) > 0):
+            raise ValueError("t must be strictly increasing.")
+        self.data_t0 = float(data_t0)
+        # Per-domain slice averages are reused across the two basis builds and
+        # every per-walker rebuild; keyed by id + identity like the parent's
+        # basis cache.
+        self._slice_cache: dict = {}
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state["_slice_cache"] = {}  # derived; rebuilt on demand in the copy
+        return state
+
+    @property
+    def digest(self) -> tuple:
+        """Cheap hashable identity, for the component's basis-cache key."""
+        return (self.t.size, float(self.t[0]), float(self.t[-1]),
+                self.data_t0, hash(self.ltts.tobytes()))
+
+    def run_average(self) -> np.ndarray:
+        """``(6,)`` mean over the whole table (the stationary approximation)."""
+        return self.ltts.mean(axis=0)
+
+    def slice_averages(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        """``(Nt, 6)`` delays, each the mean over one domain time slice.
+
+        Slices are centred on the domain's ``t_arr`` and one column-spacing
+        wide. Columns the table does not cover (a table coarser than the grid,
+        or a grid running past the tabulated span) fall back to linear
+        interpolation at the column centre, so the result is always finite.
+        """
+        t_arr = getattr(settings, "t_arr", None)
+        if t_arr is None:
+            raise ValueError(
+                f"{type(settings).__name__} has no time axis, so per-slice "
+                "delays are undefined. Use run_average() for a stationary "
+                "(6,) array instead."
+            )
+        hit = self._slice_cache.get(id(settings))
+        if hit is not None and hit[0] is settings:
+            return hit[1]
+
+        centres = asnumpy(t_arr).astype(float).ravel()
+        nt = centres.size
+        width = float(centres[1] - centres[0]) if nt > 1 else 1.0
+        edges = np.concatenate([centres - 0.5 * width, [centres[-1] + 0.5 * width]])
+        edges = edges + self.data_t0
+
+        idx = np.searchsorted(edges, self.t, side="right") - 1
+        keep = (idx >= 0) & (idx < nt)
+        counts = np.bincount(idx[keep], minlength=nt)
+        out = np.empty((nt, 6), dtype=float)
+        for k in range(6):
+            sums = np.bincount(
+                idx[keep], weights=self.ltts[keep, k], minlength=nt
+            )
+            with np.errstate(invalid="ignore", divide="ignore"):
+                out[:, k] = sums / counts
+        empty = counts == 0
+        if empty.any():
+            abs_centres = centres[empty] + self.data_t0
+            for k in range(6):
+                out[empty, k] = np.interp(abs_centres, self.t, self.ltts[:, k])
+
+        self._slice_cache[id(settings)] = (settings, out)
+        return out
+
+    @classmethod
+    def from_l1_file(
+        cls, path: str, stride: int = 200, data_t0: Optional[float] = None
+    ) -> "LinkDelayTable":
+        """Build from a mojito L1 brick's ``/ltts`` group.
+
+        Args:
+            path: Path to the L1 file.
+            stride: Decimation of the tabulated delays. They vary on month
+                timescales while the full table is one sample per 2.5 s, so a
+                stride of a few hundred keeps every feature at a fraction of
+                the memory and read cost.
+            data_t0: Absolute time of domain time zero. ``None`` (default) uses
+                the file's own ``t0``, which is right whenever the analysed data
+                is this file's own span.
+        """
+        import h5py
+
+        with h5py.File(path, "r") as fh:
+            grp = fh["ltts"]
+            samp = grp["sampling"].attrs
+            t0, dt = float(samp["t0"]), float(samp["dt"])
+            cols = [np.asarray(grp[f"ltt_{link}"][::stride]) for link in UNEQUAL_ARM_LINKS]
+        ltts = np.stack(cols, axis=1)
+        t = t0 + np.arange(ltts.shape[0], dtype=float) * (dt * stride)
+        return cls(t, ltts, data_t0=t0 if data_t0 is None else data_t0)
+
+
+class UnequalArmInstrumentNoise(InstrumentNoise):
+    """Orbit-informed TDI-2 instrument covariance with independent arm delays.
+
+    Drop-in replacement for :class:`InstrumentNoise` inside a
+    :class:`CompositeSensitivityMatrix`: same ``(nch, nch, *basis_shape_active)``
+    contribution, same linear-in-``(Soms_d, Sa_a)`` basis caching, but the six
+    link light travel times are carried independently instead of collapsing to
+    one constant ``L_SI``.
+
+    Unlike :class:`XYZSensitivityBackend` (which also models unequal arms, in
+    C++) this keeps the whole composite machinery -- galactic foreground, SGWB,
+    time modulation -- so it can be swapped in without giving any of that up.
+
+    The covariance is **complex Hermitian** in a frequency-domain basis: the
+    cross-spectra acquire an imaginary part once ``d_ij != d_ji``. In a WDM
+    (real wavelet) basis the fold keeps only ``Re[C_ij]``, which is the correct
+    same-pixel covariance -- the antisymmetric part of a CSD contributes to
+    cross-*pixel* correlations, which this diagonal-per-pixel framework does
+    not represent either way.
+
+    Args:
+        ltts: Per-link light travel times in seconds, in
+            :data:`UNEQUAL_ARM_LINKS` order. One of
+
+            * :class:`LinkDelayTable` -- **the recommended form.** A delay time
+              series that is averaged over each domain time slice at first use,
+              giving one delay set per wavelet time column. This tracks the
+              ~1.5-1.8% breathing over a two-year run, which a single epoch
+              cannot.
+            * ``(6,)`` -- one epoch, i.e. stationary noise. Captures the
+              arm-to-arm asymmetry but not the breathing. Cheapest to build.
+            * ``(Nt, 6)`` -- explicit per-column delays, if you want to supply
+              the slice averages yourself. Requires a domain with a time axis.
+
+            Both time-resolved forms fold once per column, which dominates
+            setup; it happens once and is cached, so the per-proposal MCMC cost
+            is the same as the stationary case either way.
+        tdi_generation: Must be 2; the generated closed forms are TDI-2 only.
+        model: Noise model supplying the squared levels (name or
+            :class:`~lisatools.detector.LISAModel`).
+        fill_nans: Forwarded to :func:`get_sensitivity` for the ``f=0`` bin.
+        basis_cache: Caller-owned dict enabling the two-basis fast path, exactly
+            as on :class:`InstrumentNoise`.
+    """
+
+    name = "instrument_unequal_arm"
+
+    def __init__(
+        self,
+        ltts,
+        tdi_generation: int = 2,
+        model="sangria",
+        fill_nans: float = np.nan,
+        basis_cache: Optional[dict] = None,
+    ):
+        if tdi_generation != 2:
+            raise ValueError(
+                "UnequalArmInstrumentNoise is TDI-2 only (the closed forms in "
+                f"_unequal_arm_expressions are generated for gen 2); got "
+                f"tdi_generation={tdi_generation!r}. Use InstrumentNoise for TDI 1.5."
+            )
+        super().__init__(
+            tdi_generation=2, model=model, fill_nans=fill_nans, basis_cache=basis_cache
+        )
+        if not isinstance(ltts, LinkDelayTable):
+            ltts = np.asarray(ltts, dtype=float)
+            if ltts.ndim not in (1, 2) or ltts.shape[-1] != 6:
+                raise ValueError(
+                    f"ltts must be a LinkDelayTable or have shape (6,) / (Nt, 6) "
+                    f"in UNEQUAL_ARM_LINKS order {UNEQUAL_ARM_LINKS}; "
+                    f"got {ltts.shape}."
+                )
+        self.ltts = ltts
+        # Replaces the stock equal-arm element classes the parent installed.
+        self.element_sens_fns = _UNEQUAL_ARM_ELEMENT_SENS
+
+    @staticmethod
+    def ltts_from_orbits(orbits, t=None, mode: str = "averaged") -> np.ndarray:
+        """Per-link light travel times off a configured orbits object.
+
+        Args:
+            orbits: A configured :class:`~lisatools.detector.Orbits` (e.g.
+                :class:`~lisatools.detector.L1Orbits`).
+            t: Epoch(s) in seconds to evaluate at. ``None`` uses the orbits'
+                native LTT grid.
+            mode: ``"averaged"`` returns a ``(6,)`` mean over ``t`` -- the
+                stationary case. ``"per_epoch"`` returns ``(len(t), 6)``.
+
+        Returns:
+            ``(6,)`` or ``(n_epochs, 6)`` light travel times in
+            :data:`UNEQUAL_ARM_LINKS` order.
+
+        Note:
+            Returns a plain numpy array on purpose. The orbits object holds a
+            C++/nanobind wrap and must not enter a settings tree that gets
+            deepcopied or pickled (sprint deepcopy/pickle rule); the LTT array
+            is the picklable summary that does.
+        """
+        xp = orbits.xp
+        if t is None:
+            t_arr = xp.asarray(orbits.ltt_t)
+        else:
+            t_arr = xp.atleast_1d(xp.asarray(t))
+        n = t_arr.shape[0]
+        tiled = xp.tile(t_arr[:, None], (1, 6)).flatten()
+        links = xp.tile(xp.asarray(UNEQUAL_ARM_LINKS), (n,))
+        ltts = orbits.get_light_travel_times(tiled, links).reshape(n, 6)
+        ltts = asnumpy(ltts)
+        if mode == "averaged":
+            return ltts.mean(axis=0)
+        if mode == "per_epoch":
+            return ltts
+        raise ValueError(f"mode must be 'averaged' or 'per_epoch', got {mode!r}.")
+
+    @staticmethod
+    def ltts_from_l1_file(
+        path: str, mode: str = "averaged", t=None, stride: int = 1
+    ) -> np.ndarray:
+        """Per-link light travel times read straight out of a mojito L1 brick.
+
+        The brick tabulates every directed link at the full TDI cadence under
+        ``/ltts/ltt_<ij>`` -- the delays the data was actually generated with,
+        with no orbit interpolation in between. Prefer this over
+        :meth:`ltts_from_orbits` when the file is at hand: it agrees with an
+        :class:`~lisatools.detector.L1Orbits` built from the same file to ~1e-11
+        relative, and it needs no configured orbits object (so nothing
+        unpicklable is constructed just to read six numbers).
+
+        Args:
+            path: Path to the L1 file.
+            mode: ``"averaged"`` returns the ``(6,)`` run-mean, read in blocks so
+                the six 25M-sample columns are never all in memory.
+                ``"per_epoch"`` returns ``(len(t), 6)`` sampled at ``t``.
+            t: Epochs in seconds on the file's own clock (``/ltts/sampling``
+                ``t0``); required for ``"per_epoch"``, ignored otherwise.
+            stride: Decimation for the averaged pass. The delays vary smoothly
+                on month timescales, so a stride of a few hundred changes the
+                mean in the 12th digit while reading a fraction of the data.
+
+        Returns:
+            ``(6,)`` or ``(len(t), 6)`` light travel times in
+            :data:`UNEQUAL_ARM_LINKS` order.
+        """
+        import h5py
+
+        with h5py.File(path, "r") as fh:
+            grp = fh["ltts"]
+
+            if mode == "averaged":
+                out = np.empty(6, dtype=float)
+                block = max(1, 4_000_000 // max(1, stride)) * max(1, stride)
+                for k, link in enumerate(UNEQUAL_ARM_LINKS):
+                    dset = grp[f"ltt_{link}"]
+                    total, count = 0.0, 0
+                    for i in range(0, dset.shape[0], block):
+                        chunk = dset[i : i + block : stride]
+                        total += float(chunk.sum())
+                        count += chunk.size
+                    out[k] = total / count
+                return out
+
+            if mode == "per_epoch":
+                if t is None:
+                    raise ValueError("mode='per_epoch' needs t=<epochs in seconds>.")
+                samp = grp["sampling"].attrs
+                t0, dt = float(samp["t0"]), float(samp["dt"])
+                size = int(samp["size"])
+                idx = np.rint(
+                    (np.atleast_1d(np.asarray(t, dtype=float)) - t0) / dt
+                ).astype(np.int64)
+                if idx.min() < 0 or idx.max() >= size:
+                    raise ValueError(
+                        f"requested epochs fall outside the file's span: sample "
+                        f"indices {idx.min()}..{idx.max()} vs 0..{size - 1}. Note "
+                        f"t is on the file's clock (t0={t0})."
+                    )
+                # h5py fancy indexing wants strictly increasing, duplicate-free
+                # indices; go through the unique set and scatter back.
+                uniq, inv = np.unique(idx, return_inverse=True)
+                out = np.empty((idx.size, 6), dtype=float)
+                for k, link in enumerate(UNEQUAL_ARM_LINKS):
+                    out[:, k] = np.asarray(grp[f"ltt_{link}"][uniq])[inv]
+                return out
+
+        raise ValueError(f"mode must be 'averaged' or 'per_epoch', got {mode!r}.")
+
+    def _linear_in_noise_levels(self) -> bool:
+        """Always linear for a level-carrying model.
+
+        The closed forms take ``Soms_d`` / ``Sa_a`` directly and bake in their
+        own shape functions -- they never call ``model.lisanoises`` -- so the
+        parent's check (which inspects that method) does not apply here. What
+        matters is only that the model actually carries the two levels.
+        """
+        model = self.model
+        return not isinstance(model, str) and getattr(model, "Sn_spl", None) is None
+
+    def _basis_cache_key_extra(self) -> tuple:
+        """Distinguish cached bases built from different light travel times."""
+        if isinstance(self.ltts, LinkDelayTable):
+            return self.ltts.digest
+        return (self.ltts.shape, self.ltts.tobytes())
+
+    def _resolve_ltts(self, settings) -> np.ndarray:
+        """The delays this domain actually needs: ``(6,)`` or ``(Nt, 6)``.
+
+        A :class:`LinkDelayTable` collapses here -- to per-slice means on a
+        domain with a time axis, or to the run mean on one without.
+        """
+        if not isinstance(self.ltts, LinkDelayTable):
+            return self.ltts
+        if getattr(settings, "t_arr", None) is None:
+            return self.ltts.run_average()
+        return self.ltts.slice_averages(settings)
+
+    def _sensitivity_kwargs(self, settings, model) -> dict:
+        """``get_sensitivity`` kwargs selecting the stationary / per-column path."""
+        ltts = self._resolve_ltts(settings)
+        if ltts.ndim == 1:
+            return dict(model=model, ltts=ltts)
+
+        # (Nt, 6): one LTT row per wavelet time column.
+        time_axis = _basis_time_axis(settings)
+        if time_axis is None:
+            raise ValueError(
+                f"{type(settings).__name__} has no time axis, so per-epoch light "
+                "travel times (Nt, 6) cannot be used. Pass a (6,) orbit-averaged "
+                "ltts array instead (ltts_from_orbits(..., mode='averaged'))."
+            )
+        nt = getattr(settings, "Nt", None)
+        if nt is None or ltts.shape[0] != nt:
+            raise ValueError(
+                f"ltts has {ltts.shape[0]} epochs but the domain has Nt={nt}; "
+                "the non-stationary path needs one LTT row per wavelet time column."
+            )
+        # get_sensitivity does NOT merge the top-level kwargs into kwargs_list,
+        # so every entry has to carry the model as well as its own delays.
+        return dict(
+            model=model,
+            stationary=False,
+            kwargs_list=[dict(model=model, ltts=row) for row in ltts],
+        )
+
+    def _direct_base_covariance(self, settings, model) -> np.ndarray:
+        """Hermitian ``(nch, nch, *basis)`` covariance from the closed forms.
+
+        Differs from the parent in two ways: the per-link delays are threaded
+        through to the element classes, and the lower triangle gets the
+        **conjugate** (the parent mirrors the value, which is only right for the
+        real equal-arm CSDs).
+        """
+        xp = settings.xp
+        nch = self.nchannels
+        kw = self._sensitivity_kwargs(settings, model)
+        elems = [
+            xp.asarray(
+                get_sensitivity(
+                    settings, sens_fn=fn, fill_nans=self.fill_nans, **kw
+                )
+            )
+            for fn in self.element_sens_fns
+        ]
+        # FD keeps the complex cross-spectra; the WDM fold has already taken the
+        # real part, so there the promotion is a no-op.
+        dtype = xp.result_type(*[e.dtype for e in elems])
+        C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=dtype)
+        for (i, j), arr in zip(ELEMENTS, elems):
+            C[i, j] = arr
+            C[j, i] = arr if i == j else xp.conj(arr)
         return C
 
 
@@ -4447,6 +5326,12 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         sgwb_stochastic_fn: SGWB spectral-template class or stock name used for
             the optional :class:`SGWB` component (only used when the caller
             supplies ``sgwb_params``).
+        instrument_component_kwargs: Extra constructor arguments for
+            ``instrument_component_cls``, merged into the per-walker rebuild.
+            Use for instrument models needing more than the noise levels — e.g.
+            ``dict(ltts=...)`` for :class:`UnequalArmInstrumentNoise`. Keep the
+            contents plain data: this rides along in the settings tree, which is
+            deepcopied and pickled.
         extra_components: Additional :class:`NoiseComponent` instances added
             to every constructed matrix — e.g. a stationary SGWB. These are
             held by reference so they're built once and reused.
@@ -4464,17 +5349,32 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         sgwb_stochastic_fn="PowerLawSGWB",
         instrument_component_cls=None,
         instrument_model_cls=None,
+        instrument_component_kwargs: Optional[dict] = None,
         extra_components: Optional[Sequence[NoiseComponent]] = None,
         force_backend: Optional[str] = None,
+        cache_instrument_basis: bool = True,
     ):
         SensitivityBackendBase.__init__(
             self, settings, tdi_generation=tdi_generation, force_backend=force_backend
         )
         self.model_name = model_name
         self.instrument_fill_nans = instrument_fill_nans
+        # Two unit-level instrument covariances, reused across the per-walker
+        # rebuilds this backend exists to serve (see
+        # :meth:`InstrumentNoise.base_covariance`). Backend-owned rather than
+        # component-owned because ``_build_matrix`` builds a fresh component
+        # per call; a per-component cache would never be hit. Purely derived
+        # state -- dropped on pickle, rebuilt on demand.
+        self._instrument_basis_cache = {} if cache_instrument_basis else None
         # Swappable instrument-noise model (defaults preserve current behavior).
         self.instrument_component_cls = instrument_component_cls or InstrumentNoise
         self.instrument_model_cls = instrument_model_cls or lisa_models.LISAModel
+        # Extra constructor arguments for the instrument component, for models
+        # that need more than the levels -- e.g.
+        # :class:`UnequalArmInstrumentNoise` needs ``ltts=``. Kept as plain data
+        # (the LTT array, not the orbits object) so the backend still survives
+        # the settings-tree deepcopy / pickle round trip.
+        self.instrument_component_kwargs = dict(instrument_component_kwargs or {})
         self.galfor_stochastic_fn = galfor_stochastic_fn
         self.galfor_modulation = galfor_modulation
         self.sgwb_stochastic_fn = sgwb_stochastic_fn
@@ -4482,6 +5382,19 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         # ``LISAModel.lisanoises`` only reads Soms_d / Sa_a — the orbits field
         # is just a carrier here, so one shared instance is fine.
         self._orbits = lisa_models.DefaultOrbits()
+
+    def __getstate__(self):
+        """Drop the derived instrument-basis cache from pickles / deepcopies.
+
+        Sprint deepcopy/pickle rule: this backend can ride along in a settings
+        tree that gets deepcopied, and the cache holds two full dense
+        covariances (tens of MB on a production grid). It is purely derived
+        state, so it is rebuilt on first use in the copy.
+        """
+        state = dict(self.__dict__)
+        if state.get("_instrument_basis_cache") is not None:
+            state["_instrument_basis_cache"] = {}
+        return state
 
     def _build_matrix(
         self, name: str, params, galfor_params=None, sgwb_params=None
@@ -4514,13 +5427,17 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
             model = self.instrument_model_cls(
                 Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
             )
-            components.append(
-                self.instrument_component_cls(
-                    tdi_generation=self.tdi_generation,
-                    model=model,
-                    fill_nans=self.instrument_fill_nans,
-                )
+            component_kwargs = dict(
+                tdi_generation=self.tdi_generation,
+                model=model,
+                fill_nans=self.instrument_fill_nans,
+                **self.instrument_component_kwargs,
             )
+            if self._instrument_basis_cache is not None and issubclass(
+                self.instrument_component_cls, InstrumentNoise
+            ):
+                component_kwargs["basis_cache"] = self._instrument_basis_cache
+            components.append(self.instrument_component_cls(**component_kwargs))
         if galfor_params is not None:
             components.append(
                 GalacticForeground(

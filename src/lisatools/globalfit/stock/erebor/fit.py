@@ -76,6 +76,10 @@ class EreborGeneralSettings(GeneralSettings):
     # Console verbosity (headline knob; env VERBOSE). Default: quiet — logs
     # go to the run's log files only, no progress bars.
     verbose: bool = dataclasses.field(default_factory=env_default("VERBOSE", False, bool))
+    # None -> follow verbose (see GeneralSettings.progress). Env: PROGRESS.
+    progress: typing.Optional[bool] = dataclasses.field(
+        default_factory=env_default("PROGRESS", None, bool)
+    )
     plot_iterations: int = dataclasses.field(
         default_factory=env_default("PLOT_ITERATIONS", 100, int)
     )

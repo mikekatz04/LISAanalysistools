@@ -358,6 +358,12 @@ class GlobalFit:
         # fits' headline knob): quiet default — everything still goes to the
         # run's log files, only warnings/errors reach the console.
         self.verbose = bool(getattr(self.curr.general_info, "verbose", False))
+        # Progress bar is a separate knob (general_info.progress / PROGRESS):
+        # None follows verbose -- the historical pairing -- so a run that only
+        # wants the tqdm bar can have it without DEBUG logs on the console,
+        # and a verbose run writing to a log file can suppress the bar.
+        _progress = getattr(self.curr.general_info, "progress", None)
+        self.progress = self.verbose if _progress is None else bool(_progress)
         artifacts_dir = self.curr.general_info.artifacts_file_dir
         setup_root_file_handler(artifacts_dir, level=level)
         self.logger = init_logger(
@@ -889,10 +895,16 @@ class GlobalFit:
                         else sgwb_params
                     )
                     extra_sens_kwargs["sgwb_params"] = sgwb_params
+                # NO transform_fn= here: psd_params (like galfor/sgwb above)
+                # is ALREADY in the physical basis. The backend applies
+                # transform_fn itself (sensitivity.py
+                # SensitivityBackendBase.__call__), so passing both would
+                # transform twice -- invisible while every stock psd
+                # transform was None, wrong as soon as one is set (a
+                # log-sampled branch would exponentiate exp(ln S)).
                 sens_here = general_info.sensitivity_backend(
                     f"walker_{w}",
                     psd_params,
-                    transform_fn=self.curr.source_info["psd"].transform_fn,
                     galfor_params=galfor_params,
                     **extra_sens_kwargs,
                 )
@@ -1487,7 +1499,7 @@ class GlobalFit:
         if self.rank == self.curr.settings_dict.rank_info.main_rank:
             self.prepare_main()
 
-            self.sampler.run_mcmc(self.state, self.curr.general_info.num_iterations, thin_by=1, progress=self.verbose, store=True)
+            self.sampler.run_mcmc(self.state, self.curr.general_info.num_iterations, thin_by=1, progress=self.progress, store=True)
 
             if self.curr.general_info.submission_parent_folder is not None:
                 self.logger.debug(f"saving submission to {self.curr.general_info.submission_parent_folder}")

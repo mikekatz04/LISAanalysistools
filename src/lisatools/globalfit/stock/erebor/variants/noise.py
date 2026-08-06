@@ -70,12 +70,23 @@ logger = logging.getLogger(__name__)
 # Injection truths. These parameterize the covariance the synthetic data are
 # drawn from AND sit inside the sampled priors, so the fit should recover them.
 PSD_INJECTION = [15e-12, 3e-15]  # (Soms_d, Sa_a), sqrt units
+# f_1 / f_2 are in the MODEL's basis (Hz), i.e. the arguments
+# ``HyperbolicTangentGalacticForeground.specific_Sh_function`` actually takes
+# -- not the "Slope1"/"Slope2" numbers tabulated on
+# ``FittedHyperbolicTangentGalacticForeground``. Those need the same
+# conversion that class applies before calling the model (stochastic.py):
+#     f_1 = slope1 ** (-1/alpha) = 3.01430978e03 ** (-1/1.18300266) = 1.1456e-3
+#     f_2 = 1 / slope2          = 1 / 2.95774596e03                 = 3.3810e-4
+# Fixed 2026-08: the raw slope values were injected here, which put the
+# roll-off and the tanh knee at kHz and left the injected foreground a pure
+# f^(-7/3) power law with no bend anywhere in the LISA band (a factor 2.4e3
+# error in S_gal at 3 mHz, 1.6e19 at 8 mHz).
 GALFOR_INJECTION = [
     3.26651613e-44,  # amp
     2.09278117e-03,  # fk (knee)
     1.18300266e00,   # alpha
-    3.01430978e03,   # slope 1
-    2.95774596e03,   # slope 2
+    1.14556409e-03,  # f_1 (Hz), = slope1 ** (-1/alpha)
+    3.38095297e-04,  # f_2 (Hz), = 1 / slope2
 ]
 # PowerLawSGWB amplitude is Omega_gw at 25 Hz; chosen detectable in a short
 # datastream (the stock SGWB prior (-22, -18) would NOT contain this).
@@ -125,6 +136,28 @@ class NoiseGeneralSettings(EreborGeneralSettings):
     # The NOISE is the signal here, so keep the ``-logdet_factor * sum log det C``
     # term in the likelihood (source-only variants set this True to drop it).
     likelihood_source_only: bool = False
+    # Sample psd + galfor in ONE move on ONE ladder instead of the default
+    # per-branch split (2026-08). Knob: ``JOINT_NOISE_MOVE``.
+    #
+    # Default (False): one PSDMove per branch, each on its own ladder, run
+    # in sequence with the partner frozen at its cold row -- Metropolis-
+    # within-Gibbs. Correct (the loop is closed: each move sees the previous
+    # move's update), and cheaper per iteration, but it proposes along the
+    # coordinate axes, so it climbs the psd<->galfor correlation ridge in a
+    # staircase. That ridge is real: both branches sum into one covariance
+    # C = instrument + foreground and overlap in the 1-3 mHz window, which is
+    # why ln S_tm and ln amp come out correlated.
+    #
+    # True: a single PSDMove over ["psd", "galfor"], so the stretch proposal
+    # moves all 7 parameters together and can travel ALONG the ridge, and the
+    # tempered ladder is genuinely joint (in the split scheme each branch's
+    # hot rungs are scored against the partner's COLD row, so tempering
+    # cannot carry the pair across a barrier together). Costs a wider
+    # proposal to tune and requires PSD_NTEMPS == GALFOR_NTEMPS -- both
+    # default to 12; ``build_noise_moves`` raises if they disagree.
+    joint_noise_move: bool = dataclasses.field(
+        default_factory=env_default("JOINT_NOISE_MOVE", False, bool)
+    )
 
     # "mojito" (default): the real NOISE brick; "synthetic": the Cholesky
     # draw from the injected covariance. Auto-falls back to synthetic when
@@ -297,19 +330,59 @@ class NoiseOnlyGlobalFit(_NoiseFitBase):
     def default_branches(self) -> typing.Dict[str, Settings]:
         return {"psd": NoisePSDSettings(), "galfor": GalForSettings()}
 
+    def _apply_knobs(self, knobs: dict):
+        """Rebuild the default recipe when ``joint_noise_move`` arrives as a kwarg.
+
+        Base ``__init__`` builds the recipe (base.py:312) BEFORE applying
+        knobs (base.py:319), so :meth:`default_recipe` sees only the
+        env-resolved value -- already on the field by then, which is why
+        ``JOINT_NOISE_MOVE=1`` works unaided but
+        ``noise_only(joint_noise_move=True)`` would not. Catch the change
+        here, the documented interception point for variant knobs
+        (``apply_overrides``), so both spellings agree.
+
+        Rebuilds ONLY when the current recipe is still exactly what
+        ``default_recipe`` produced under the old value -- a caller-supplied
+        or already-edited recipe is never silently replaced.
+        """
+        before = getattr(self.general, "joint_noise_move", False)
+        current = [m.name for st in self.recipe.stages for m in st.moves]
+        super()._apply_knobs(knobs)
+        after = getattr(self.general, "joint_noise_move", False)
+        if after == before:
+            return
+        self.general.joint_noise_move = before
+        try:
+            pristine = [m.name for st in self.default_recipe().stages for m in st.moves]
+        finally:
+            self.general.joint_noise_move = after
+        if current == pristine:
+            self.recipe = self.default_recipe()
+
     def default_recipe(self) -> Recipe:
         # Noise-move split (2026-07): each noise branch gets its OWN move +
         # ladder inside the one PE stage (share_temperature_control=False is
         # what keeps the per-move ladders independent under GFCombineMove).
+        # ``general.joint_noise_move`` collapses the two into ONE move over
+        # both branches instead -- see the knob's comment for the trade-off.
+        # Safe to read self.general here: base.py sets it (298) before it
+        # calls default_recipe (312).
+        if getattr(self.general, "joint_noise_move", False):
+            moves = [Move("noise_pe", branch="psd")]
+        else:
+            moves = [
+                Move("psd_pe", branch="psd"),
+                Move("galfor_pe", branch="galfor"),
+            ]
         return Recipe(
             [
                 Stage(
                     name="noise_pe",
                     kind="pe",
-                    moves=[
-                        Move("psd_pe", branch="psd"),
-                        Move("galfor_pe", branch="galfor"),
-                    ],
+                    moves=moves,
+                    # kept in the joint case too: NoiseSGWBGlobalFit appends
+                    # its own sgwb move to this stage, and that one still
+                    # needs an independent ladder.
                     combine_kwargs=dict(share_temperature_control=False),
                 )
             ]
@@ -378,10 +451,23 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     requested = recipe.stock_names()
     stock_moves = {}
     # noise-move split: each present noise branch gets its own move pair +
-    # ladder; the stock names are <branch>_pe / <branch>_search
-    noise_move_spec = {"psd": ["psd"], "galfor": ["galfor"], "sgwb": ["sgwb"]}
+    # ladder; the stock names are <branch>_pe / <branch>_search.
+    # ``joint_noise_move`` instead groups psd+galfor under ONE move pair
+    # named noise_pe / noise_search, sampled together on a single ladder.
+    # sgwb keeps its own move either way -- it is a separate physical
+    # component and is not what the ridge couples.
+    if getattr(general_info, "joint_noise_move", False):
+        noise_move_spec = {"noise": ["psd", "galfor"], "sgwb": ["sgwb"]}
+    else:
+        noise_move_spec = {"psd": ["psd"], "galfor": ["galfor"], "sgwb": ["sgwb"]}
     for name, sampled in noise_move_spec.items():
-        if not all(b in curr.source_info for b in sampled):
+        # Drop branches this run does not have rather than skipping the whole
+        # group: it lets the joint move degrade cleanly to the branches that
+        # ARE present (instrument mode removes galfor, so noise_pe becomes a
+        # psd-only move) instead of vanishing and leaving the recipe asking
+        # for a stock name nobody built.
+        sampled = [b for b in sampled if b in curr.source_info]
+        if not sampled:
             continue
         if not any(n.startswith(name) for n in requested):
             continue

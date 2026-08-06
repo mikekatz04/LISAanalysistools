@@ -173,6 +173,20 @@ def env_default(var: str, default, cast=str):
     return _factory
 
 
+def ten_to_the_x(x):
+    """Return ``10 ** x`` (named 1-arg transform for pickling support).
+
+    Used as a per-parameter :class:`~eryn.utils.TransformContainer` transform
+    for PSD / foreground amplitudes and frequency scales sampled in ``log10``
+    space; ``np.log10`` is its inverse and is already a picklable ufunc.
+
+    Lives here rather than in ``erebor/transforms.py`` (which re-exports it)
+    because the noise branch needs it and that module pulls in ``bbhx`` at
+    import — see :func:`~lisatools.globalfit.stock.erebor.noise.make_galfor_log_transform_container`.
+    """
+    return 10.0**x
+
+
 def engine_ntemps_default():
     """``default_factory`` for the retired engine-level ``ntemps`` knob.
 
