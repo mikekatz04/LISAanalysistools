@@ -31,6 +31,20 @@ psd/galfor correlation ridge makes the split version mix slowly.
 A per-iteration progress bar is on by default (``--no-progress`` to suppress
 it); ``--verbose`` additionally streams the run's DEBUG logs to the console.
 
+CPU runs are serial by default and dominated by the per-walker sensitivity
+rebuild (these fits use a WDM basis, where the batched C++ likelihood kernel
+does not apply). Three knobs, in descending order of payoff::
+
+    --joint-noise      one move over psd+galfor instead of two -> ~2x fewer
+                       covariance rebuilds per iteration, and it samples
+                       along the psd/galfor ridge rather than across it
+    --parallel-modes   with --mode both, the two fits run concurrently -> 2x
+    --build-threads N  spread one batch's builds over N threads -> ~1.8x
+                       (saturates at N=4; the arrays are too small for more)
+
+They compose. All three are off by default, so the stock behaviour is
+unchanged.
+
 Lite laptop-smoke preset by default; ``--full`` for production sampling::
 
     python scripts/noise/run_noise_only.py
@@ -42,6 +56,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
+import sys
 
 import numpy as np
 
@@ -188,6 +204,7 @@ def build_fit(mode, args):
         ("nwalkers", args.nwalkers),
         ("num_iterations", args.iterations),
         ("gpus", args.gpus),
+        ("psd_build_threads", args.build_threads),
     ):
         if value is not None:
             knobs[key] = value
@@ -303,14 +320,16 @@ def build_fit(mode, args):
         )
 
     if mode == "instrument":
-        # Drop the branch AND its move: setup_recipe skips building a move whose
-        # branch is gone, but the recipe would still request it and fail.
+        # One call drops the branch AND the moves declared against it: since
+        # LAT bd02f94 remove_branch pops every Move(..., branch="galfor"), so
+        # the split-noise galfor_pe goes with it. Popping it again here raises
+        # KeyError.
+        #
+        # In joint mode there is nothing extra to drop either way -- the single
+        # noise_pe move is declared on the psd branch and survives, degrading to
+        # psd-only because setup_recipe filters each group to the branches the
+        # run actually has.
         fit.remove_branch("galfor")
-        if not args.joint_noise:
-            fit.pop_move("galfor_pe")
-        # In joint mode there is no galfor_pe to pop -- the single noise_pe
-        # move degrades to psd-only on its own, because setup_recipe filters
-        # each group to the branches the run actually has.
 
     return fit
 
@@ -384,6 +403,29 @@ def parse_args(argv=None):
         help="stream the run's DEBUG logs to the console as well (the progress "
         "bar alone does not need this)",
     )
+    p.add_argument(
+        "--build-threads",
+        type=int,
+        metavar="N",
+        help="CPU threads for the per-walker sensitivity builds inside the "
+        "noise move (default 1, i.e. serial). These fits run on a WDM basis, "
+        "where the batched C++ likelihood kernel is unavailable and every "
+        "proposal row rebuilds its covariance in Python -- the run's dominant "
+        "cost. Scaling saturates at ~4 (3.11 ms/walker serial -> 1.73 at 4 -> "
+        "1.78 at 6 on the stock 59x1024 active grid): the arrays are small, "
+        "so Python orchestration, not the kernels, sets the floor. Output is "
+        "bitwise-identical to the serial path. Ignored on GPU runs",
+    )
+    p.add_argument(
+        "--parallel-modes",
+        action="store_true",
+        help="with --mode both, run the instrument and foreground fits as two "
+        "concurrent subprocesses instead of one after the other. They share "
+        "nothing but the input bricks and write separate backends, so this is "
+        "a straight 2x on wall clock. Each child's output goes to "
+        "<out-dir>/run_<mode>.log (two live progress bars on one terminal are "
+        "unreadable). Ignored unless --mode both",
+    )
     p.add_argument("--nwalkers", type=int)
     p.add_argument("--iterations", type=int)
     p.add_argument("--gpus", type=int, nargs="+", help="GPU device ids (omit for CPU)")
@@ -397,6 +439,74 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _argv_for_mode(argv, mode):
+    """``argv`` with any --mode / --parallel-modes stripped and ``mode`` set."""
+    out = []
+    skip_next = False
+    for tok in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--mode":
+            skip_next = True  # drop its value too
+            continue
+        if tok.startswith("--mode="):
+            continue
+        if tok == "--parallel-modes":
+            continue
+        out.append(tok)
+    return out + ["--mode", mode]
+
+
+def run_modes_in_parallel(args, argv):
+    """Run instrument + foreground as concurrent subprocesses.
+
+    The two fits share nothing but the input bricks — different branches,
+    different backends (``base_file_name`` carries the mode), different
+    artifact dirs — so there is nothing to coordinate. Output is redirected
+    per mode because two live progress bars on one terminal interleave into
+    noise.
+    """
+    procs = []
+    logs = []
+    for mode in ("instrument", "foreground"):
+        log_path = os.path.join(args.out_dir, f"run_{mode}.log")
+        log = open(log_path, "w")
+        logs.append(log_path)
+        cmd = [sys.executable, os.path.abspath(__file__), *_argv_for_mode(argv, mode)]
+        print(f"[{mode}] -> {log_path}", flush=True)
+        procs.append(
+            (mode, log, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT))
+        )
+
+    # The progress bars are still there, they are just in the logs now. Say so
+    # and hand over the command -- otherwise this looks exactly like a hang,
+    # and under --unequal-arm the first bar update is several MINUTES out (the
+    # per-WDM-time-slice LTT fold runs once before iteration 1).
+    print(
+        "\nBoth runs are live; their progress bars are in the logs above.\n"
+        f"  watch both:  tail -f {' '.join(logs)}\n"
+        "Under --unequal-arm expect several minutes of silence before the "
+        "first iteration ticks (one-time light-travel-time fold).\n"
+        "Drop --parallel-modes to get the bar on your terminal instead.",
+        flush=True,
+    )
+
+    failed = []
+    for mode, log, proc in procs:
+        rc = proc.wait()
+        log.close()
+        status = "done" if rc == 0 else f"FAILED (exit {rc})"
+        print(f"[{mode}] {status} — output under {args.out_dir}", flush=True)
+        if rc != 0:
+            failed.append(mode)
+
+    if failed:
+        raise SystemExit(
+            f"{', '.join(failed)} failed; see <out-dir>/run_<mode>.log for the traceback"
+        )
+
+
 def main(argv=None):
     args = parse_args(argv)
     # The engine builds paths by string concatenation
@@ -405,6 +515,14 @@ def main(argv=None):
     # directory instead of inside it.
     args.out_dir = os.path.join(args.out_dir, "")
     os.makedirs(args.out_dir, exist_ok=True)
+
+    if args.mode == "both" and args.parallel_modes:
+        # Re-invoke this script once per mode. Done here, before any of the
+        # heavy imports/build, so each child owns its own process from the
+        # start (the two fits build independent data + backends anyway).
+        run_modes_in_parallel(args, list(sys.argv[1:] if argv is None else argv))
+        return
+
     for mode in ["instrument", "foreground"] if args.mode == "both" else [args.mode]:
         print(f"\n{f' {mode} ':=^72}\n", flush=True)
         fit = build_fit(mode, args)

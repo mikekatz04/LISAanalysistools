@@ -17,6 +17,7 @@ counterpart kernels land in domains.cu.
 
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import logging
 
@@ -113,6 +114,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         dcga: DomainComputationGroupArray = None,
         run_async: bool = False,
         run_threaded: bool = False,
+        build_threads: int = 1,
         **kwargs,
     ):
 
@@ -125,6 +127,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         self._dcga = dcga
         self._run_async = run_async
         self._run_threaded = run_threaded
+        # ACA-route per-walker sensitivity builds, spread over threads. See
+        # :attr:`build_threads`. Pool is lazy and never pickled.
+        self._build_threads = max(1, int(build_threads))
+        self._build_pool = None
+        # One-time serial warm of the backend's walker-independent caches
+        # (see the note in :meth:`_build_batch`).
+        self._build_warmed = False
         if dcga is not None:
             if acs is None:
                 acs = dcga.acs
@@ -176,6 +185,84 @@ class PSDMove(GlobalFitMove, StretchMove):
     @property
     def run_threaded(self) -> bool:
         return self._run_threaded
+
+    @property
+    def build_threads(self) -> int:
+        """Threads used for the ACA route's per-walker sensitivity builds.
+
+        1 (default) keeps the historical serial loop. Higher values spread
+        one batch's builds over :attr:`build_pool`; the batching in
+        :meth:`compute_log_like` already guarantees one row per walker per
+        batch, so the workers touch disjoint ``acs[w]``.
+
+        This pays off only because the work releases the GIL: the LAT
+        nanobind kernels are declared with
+        ``nb::call_guard<nb::gil_scoped_release>()`` and the composite
+        assembly is numpy. Measured on the stock noise grid (0.3-8 mHz =>
+        59x1024 active cells): 3.11 ms/walker serial -> 1.73 at 4 threads
+        (1.8x) -> 1.78 at 6, i.e. it **saturates at ~4**. The arrays are
+        small enough that Python-level orchestration, not the kernels, sets
+        the floor, so do not expect linear scaling and do not raise this
+        past ~4 hoping for more.
+
+        Output is bitwise-identical to the serial path: the rows are
+        independent and nothing is reduced across them.
+        """
+        return self._build_threads
+
+    @property
+    def build_pool(self) -> ThreadPoolExecutor:
+        """Lazy pool for :attr:`build_threads` (mirrors ``AnalysisContainerArray``)."""
+        if self._build_pool is None:
+            self._build_pool = ThreadPoolExecutor(max_workers=self._build_threads)
+        return self._build_pool
+
+    @property
+    def _skip_linear_psd_repack(self) -> bool:
+        """True when the ACA route can leave ``acs.linear_psd_arr`` untouched.
+
+        ``reset_linear_psd_arr`` repacks EVERY container's ``invC`` (a
+        ``(3,3,*basis)`` array — 4.5 MB each on the stock noise grid) into the
+        ACA's contiguous buffer and rebinds ``sens_mat.invC`` to a view of it.
+        The buffer exists for ONE reason: so a single C++/CUDA kernel can take
+        one flat pointer spanning all walkers and index it by ``data_index``.
+        Its only consumers are ``DomainComputationGroupArray`` (multi-GPU
+        replicas) and the GB chunked-heterodyne kernels in ``chunked_het``.
+
+        The ACA likelihood route reads ``ac.sens_mat.invC`` per container and
+        never touches the buffer, so on a run with no such kernel the repack is
+        pure memcpy — measured at 16.1 ms/call, ~4.7 s of an ~11 s sampling
+        iteration on the stock noise fit (~40% of it).
+
+        .. warning::
+           **TODO (WDM C++ likelihood kernel).** This skip is only valid while
+           the WDM basis has NO batched C++ likelihood kernel — that absence is
+           exactly why this move falls back to the ACA route
+           (:meth:`_kernel_fast_path_available` accepts FD/STFT only). When the
+           WDM kernel lands in ``domains.cu`` it WILL read
+           ``linear_psd_arr[0]``, and this must go back to repacking — or the
+           kernel will silently score a stale inverse covariance. That failure
+           mode is quiet and has bitten before (the walker-0 frozen-readout bug,
+           2026-07-10, documented in ``chunked_het.py``). Delete this property
+           and its call sites in the same commit that adds the kernel.
+
+           Gating on the backend name is DELIBERATELY conservative but is NOT a
+           proof of "no consumer": ``chunked_het`` is backend-dispatched and
+           runs on CPU too, so a CPU run that puts a GB chunked-het move and
+           this move on ONE ACA would read a stale buffer. That configuration
+           does not exist today (the stock CPU noise fits carry no GB branch),
+           and the ``_dcga`` guard below covers the multi-GPU consumer.
+        """
+        if self._dcga is not None:
+            return False  # DCGA replicas read the buffer directly
+        backend = getattr(self.sensitivity_backend, "backend", None)
+        return str(getattr(backend, "name", "")).endswith("_cpu")
+
+    def __getstate__(self):
+        """Drop the thread pool from pickles / deepcopies (sprint pickle rule)."""
+        state = dict(self.__dict__)
+        state["_build_pool"] = None
+        return state
 
     # ------------------------------------------------------------------
     # sampled-vs-fixed noise-branch resolution
@@ -449,6 +536,42 @@ class PSDMove(GlobalFitMove, StretchMove):
             **extra,
         )
 
+    def _build_batch(self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords):
+        """Install the proposed sensitivity matrix for every row in ``batch``.
+
+        ``batch`` holds at most one row per walker (see the batching in
+        :meth:`compute_log_like`), so each row owns its ``acs[w]`` outright
+        and the rows are independent. With :attr:`build_threads` > 1 they
+        run concurrently in :attr:`build_pool`.
+
+        The first row of the first batch is always built serially: the
+        sensitivity backend fills walker-independent caches on its first
+        call (``CompositeSensitivityBackend._instrument_basis_cache`` -- the
+        per-WDM-time-slice fold under ``--unequal-arm`` is minutes of work),
+        and letting N threads race into a cold cache would just do that work
+        N times. Once warm, every later call is a lookup.
+        """
+        def _one(row):
+            row = int(row)
+            w = int(walker_inds_keep[row])
+            galfor_here = None if galfor_coords is None else galfor_coords[row]
+            sgwb_here = None if sgwb_coords is None else sgwb_coords[row]
+            self.acs[w].sens_mat = self._build_sensitivity_for_walker(
+                w, psd_coords[row], galfor_here, sgwb_here
+            )
+
+        rows = list(batch)
+        if not self._build_warmed and rows:
+            _one(rows.pop(0))
+            self._build_warmed = True
+
+        if self._build_threads > 1 and len(rows) > 1:
+            # list() forces consumption so worker exceptions re-raise here.
+            list(self.build_pool.map(_one, rows))
+        else:
+            for row in rows:
+                _one(row)
+
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
         """Compute the PSD/galfor branch log-likelihood.
 
@@ -535,16 +658,26 @@ class PSDMove(GlobalFitMove, StretchMove):
                 # first remaining row for each distinct walker -> one batch
                 _, first = np.unique(walker_inds_keep[remaining], return_index=True)
                 batch = remaining[np.sort(first)]
+                # Snapshot the originals serially before any building: the
+                # threaded path overwrites acs[w].sens_mat, so this must not
+                # race with it (and it is a bare attribute read anyway).
                 for row in batch:
                     w = int(walker_inds_keep[row])
                     if w not in original_sens:
                         original_sens[w] = self.acs[w].sens_mat
-                    galfor_here = None if not has_galfor else galfor_coords[row]
-                    sgwb_here = None if not has_sgwb else sgwb_coords[row]
-                    self.acs[w].sens_mat = self._build_sensitivity_for_walker(
-                        w, psd_coords[row], galfor_here, sgwb_here
-                    )
-                self.acs.reset_linear_psd_arr()
+                self._build_batch(
+                    batch,
+                    walker_inds_keep,
+                    psd_coords,
+                    galfor_coords if has_galfor else None,
+                    sgwb_coords if has_sgwb else None,
+                )
+                # See _skip_linear_psd_repack -- WARNING there before adding a
+                # WDM C++ likelihood kernel. acs.likelihood() reads
+                # ac.sens_mat.invC, not the buffer, so on a no-kernel run this
+                # repack is ~16 ms/call of memcpy nobody reads.
+                if not self._skip_linear_psd_repack:
+                    self.acs.reset_linear_psd_arr()
                 walker_ll = asnumpy(np.asarray(self.acs.likelihood()))
                 tmp_logl[batch] = walker_ll[walker_inds_keep[batch].astype(int)]
                 remaining = np.setdiff1d(remaining, batch)
@@ -552,7 +685,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         finally:
             for w, sens in original_sens.items():
                 self.acs[w].sens_mat = sens
-            self.acs.reset_linear_psd_arr()
+            if not self._skip_linear_psd_repack:
+                self.acs.reset_linear_psd_arr()
 
         self.prev_logl = logl.copy()
 
@@ -839,6 +973,13 @@ class PSDMove(GlobalFitMove, StretchMove):
             )
             self.acs[w].sens_mat = new_sens
 
+        # NOT gated by _skip_linear_psd_repack, deliberately. This is the one
+        # repack that PUBLISHES the accepted noise model to the rest of the
+        # run, and it fires once per propose (~16 ms) rather than once per
+        # scoring batch (~295x per iteration) -- so skipping it would buy
+        # ~0.15% while opening the buffer to staleness across moves. Keeping
+        # it means the only window where linear_psd_arr is stale is INSIDE
+        # compute_log_like's scoring loop, where no other move can observe it.
         self.acs.reset_linear_psd_arr()
         after_vals = self.acs.likelihood()
 

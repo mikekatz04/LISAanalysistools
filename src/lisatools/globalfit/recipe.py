@@ -1942,6 +1942,10 @@ def build_noise_moves(
         # FD/STFT kernel gate keeps WDM runs on the fallback path.
         dcga=get_shared_dcga(acs),
         run_threaded=acs.gpus is not None and len(acs.gpus) > 1,
+        # CPU thread count for the ACA route's per-walker sensitivity builds
+        # (see PSDMove.build_threads). getattr: only the noise fits' settings
+        # carry the knob; every other fit keeps the serial default.
+        build_threads=int(getattr(general_info, "psd_build_threads", 1) or 1),
     )
 
     tag = "+".join(sampled_branches)

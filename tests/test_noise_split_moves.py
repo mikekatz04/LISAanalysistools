@@ -243,6 +243,180 @@ class NoiseSplitUnitTest(unittest.TestCase):
         self.assertGreaterEqual(acs.reset_calls, 2)
 
     # ------------------------------------------------------------------
+    # threaded per-walker builds (build_threads)
+    # ------------------------------------------------------------------
+
+    def _aca_route_run(self, build_threads):
+        """Score one ACA-route proposal block; return (logl, per-walker builds)."""
+        import threading
+
+        acs = _FakeSingleShardACS(self.nwalkers)
+        move = self.PSDMove(
+            acs,
+            self.priors,
+            sampled_branches=["galfor"],
+            sensitivity_backend=SimpleNamespace(
+                use_splines=False, basis_settings=object()  # non-FD -> ACA route
+            ),
+            build_threads=build_threads,
+            name="threaded build test",
+        )
+        move._fixed_noise_coords = {
+            "psd": 100.0
+            + np.arange(self.nwalkers * 2, dtype=float).reshape(self.nwalkers, 2)
+        }
+
+        recorded = []
+        lock = threading.Lock()
+
+        def fake_build(w, psd_params, galfor_params, sgwb_params=None):
+            with lock:
+                recorded.append((int(w), np.array(galfor_params)))
+            return f"sens_{w}"
+
+        move._build_sensitivity_for_walker = fake_build
+
+        nt_mod = 3
+        rng = np.random.default_rng(11)
+        galfor = rng.uniform(0.2, 0.8, size=(nt_mod, self.nwalkers, 1, 3))
+        from eryn.state import BranchSupplemental
+
+        supps = BranchSupplemental(
+            {"walker_inds": np.tile(np.arange(self.nwalkers), (nt_mod, 1))},
+            base_shape=(nt_mod, self.nwalkers),
+            copy=True,
+        )
+        logl, _ = move.compute_log_like({"galfor": galfor}, supps=supps)
+        return move, acs, logl, sorted(recorded, key=lambda r: (r[0], r[1].tobytes()))
+
+    def test_threaded_builds_match_serial(self):
+        """build_threads>1 must not change what is built or scored."""
+        _, acs1, logl1, rec1 = self._aca_route_run(1)
+        _, acs4, logl4, rec4 = self._aca_route_run(4)
+
+        np.testing.assert_array_equal(logl1, logl4)
+        self.assertEqual(len(rec1), len(rec4))
+        for (w1, g1), (w4, g4) in zip(rec1, rec4):
+            self.assertEqual(w1, w4)
+            np.testing.assert_array_equal(g1, g4)
+        # bookkeeping is unaffected: originals restored, buffers reset
+        for acs in (acs1, acs4):
+            self.assertTrue(all(ac.sens_mat == "original" for ac in acs._acs))
+
+    def test_build_threads_default_is_serial(self):
+        move = self._move(sampled=["galfor"])
+        self.assertEqual(move.build_threads, 1)
+        self.assertIsNone(move._build_pool)
+
+    def test_first_build_is_serial_then_threaded(self):
+        """The cold backend cache is filled exactly once, unraced."""
+        move, _, _, _ = self._aca_route_run(4)
+        self.assertTrue(move._build_warmed)
+
+    def test_thread_pool_never_enters_a_copy(self):
+        """Sprint deepcopy/pickle rule: the pool must not ride along.
+
+        Asserted on ``__getstate__`` directly rather than on a full
+        ``deepcopy(move)`` -- the move also holds the ACA, which is
+        unpicklable by design (nanobind wraps; ``_FakeSingleShardACS`` stands
+        in for that here by holding a module). ``__getstate__`` is what both
+        ``copy.deepcopy`` and ``pickle`` route through, so this pins the
+        contract at the point the rule cares about.
+        """
+        move, _, _, _ = self._aca_route_run(4)
+        self.assertIsNotNone(move._build_pool)  # the run created one
+
+        state = move.__getstate__()
+        self.assertIsNone(state["_build_pool"])
+        self.assertEqual(state["_build_threads"], 4)  # knob survives
+        self.assertIsNotNone(move._build_pool)  # live move keeps its pool
+
+        # a restored copy rebuilds lazily
+        restored = object.__new__(type(move))
+        restored.__dict__.update(state)
+        self.assertIsNone(restored._build_pool)
+        self.assertIsNotNone(restored.build_pool)
+        restored.build_pool.shutdown(wait=False)
+
+    # ------------------------------------------------------------------
+    # linear_psd_arr repack skip (CPU, no C++ kernel consumer)
+    # ------------------------------------------------------------------
+
+    def _move_with_backend(self, backend_name, dcga=None):
+        backend = SimpleNamespace(
+            use_splines=False,
+            basis_settings=object(),  # non-FD -> ACA route
+            backend=SimpleNamespace(name=backend_name),
+        )
+        return self.PSDMove(
+            _FakeSingleShardACS(self.nwalkers),
+            self.priors,
+            sampled_branches=["galfor"],
+            sensitivity_backend=backend,
+            dcga=dcga,
+            name="repack gate test",
+        )
+
+    def test_repack_skipped_on_cpu_only(self):
+        """The skip is CPU-only and never applies when a DCGA reads the buffer."""
+        self.assertTrue(self._move_with_backend("lisatools_cpu")._skip_linear_psd_repack)
+        for gpu_name in ("lisatools_cuda12x", "lisatools_cuda11x", "lisatools_cuda13x"):
+            self.assertFalse(
+                self._move_with_backend(gpu_name)._skip_linear_psd_repack,
+                f"{gpu_name} must keep repacking",
+            )
+        # a DCGA consumer wins over the backend name
+        self.assertFalse(
+            self._move_with_backend(
+                "lisatools_cpu", dcga=SimpleNamespace()
+            )._skip_linear_psd_repack
+        )
+        # unknown/missing backend => conservative (repack)
+        move = self._move_with_backend("lisatools_cpu")
+        move.sensitivity_backend = SimpleNamespace(use_splines=False, basis_settings=object())
+        self.assertFalse(move._skip_linear_psd_repack)
+
+    def test_skipping_the_repack_does_not_change_scores(self):
+        """WARNING guard: the skip is only valid while nothing reads the buffer.
+
+        The ACA route reads ``ac.sens_mat.invC`` per container, so skipping the
+        repack must be score-neutral. If a WDM C++ likelihood kernel is added
+        that reads ``linear_psd_arr``, this stops being true -- see the warning
+        on ``PSDMove._skip_linear_psd_repack``.
+        """
+        results = {}
+        for backend_name in ("lisatools_cpu", "lisatools_cuda12x"):
+            acs = _FakeSingleShardACS(self.nwalkers)
+            move = self._move_with_backend(backend_name)
+            move.acs = acs
+            move._fixed_noise_coords = {
+                "psd": 100.0
+                + np.arange(self.nwalkers * 2, dtype=float).reshape(self.nwalkers, 2)
+            }
+            move._build_sensitivity_for_walker = (
+                lambda w, p, g, s=None: f"sens_{w}"
+            )
+            nt_mod = 2
+            rng = np.random.default_rng(5)
+            galfor = rng.uniform(0.2, 0.8, size=(nt_mod, self.nwalkers, 1, 3))
+            from eryn.state import BranchSupplemental
+
+            supps = BranchSupplemental(
+                {"walker_inds": np.tile(np.arange(self.nwalkers), (nt_mod, 1))},
+                base_shape=(nt_mod, self.nwalkers),
+                copy=True,
+            )
+            logl, _ = move.compute_log_like({"galfor": galfor}, supps=supps)
+            results[backend_name] = (logl, acs.reset_calls)
+
+        np.testing.assert_array_equal(
+            results["lisatools_cpu"][0], results["lisatools_cuda12x"][0]
+        )
+        # and the CPU path really did skip the repacks the GPU path performed
+        self.assertEqual(results["lisatools_cpu"][1], 0)
+        self.assertGreater(results["lisatools_cuda12x"][1], 0)
+
+    # ------------------------------------------------------------------
     # builder-level ladder-mismatch guard
     # ------------------------------------------------------------------
 

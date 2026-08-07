@@ -159,6 +159,18 @@ class NoiseGeneralSettings(EreborGeneralSettings):
         default_factory=env_default("JOINT_NOISE_MOVE", False, bool)
     )
 
+    # CPU threads for the per-walker sensitivity builds inside the noise move
+    # (PSDMove.build_threads; knob ``PSD_BUILD_THREADS``). 1 = the historical
+    # serial loop. Only bites on the ACA route -- i.e. the WDM basis these
+    # fits use, where the C++ XYZ kernel fast path is unavailable. Scaling
+    # saturates at ~4 (3.11 ms/walker serial -> 1.73 at 4 -> 1.78 at 6 on
+    # the stock 59x1024 active grid): the arrays are small, so Python
+    # orchestration sets the floor. Ignored by the GPU path, which spreads
+    # over devices instead.
+    psd_build_threads: int = dataclasses.field(
+        default_factory=env_default("PSD_BUILD_THREADS", 1, int)
+    )
+
     # "mojito" (default): the real NOISE brick; "synthetic": the Cholesky
     # draw from the injected covariance. Auto-falls back to synthetic when
     # the brick / mojito folder is missing.

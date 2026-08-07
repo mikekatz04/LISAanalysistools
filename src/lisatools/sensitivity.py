@@ -97,11 +97,20 @@ def _mat3x3_det_inv(C: np.ndarray, xp) -> tuple:
     fall out as zero inverse-covariance weight / unit determinant -- matching
     the general path below.
     """
-    det = (
-        C[0, 0] * (C[1, 1] * C[2, 2] - C[1, 2] * C[2, 1])
-        - C[0, 1] * (C[1, 0] * C[2, 2] - C[1, 2] * C[2, 0])
-        + C[0, 2] * (C[1, 0] * C[2, 1] - C[1, 1] * C[2, 0])
-    )
+    # First-column cofactors, reused for both the determinant and the adjugate:
+    # expanding along row 0 gives det = M00*c00 + M01*c10 + M02*c20, and those
+    # same three minors ARE inv[0,0], inv[1,0], inv[2,0] (times 1/det). Written
+    # out below rather than recomputed three times -- every one of these terms
+    # is a full-grid temporary, so this is memory traffic, not flops.
+    def _first_col_cofactors(M):
+        c00 = M[1, 1] * M[2, 2] - M[1, 2] * M[2, 1]
+        c10 = M[1, 2] * M[2, 0] - M[1, 0] * M[2, 2]
+        c20 = M[1, 0] * M[2, 1] - M[1, 1] * M[2, 0]
+        # == M00*(c00) - M01*(M10*M22 - M12*M20) + M02*(c20); the sign is folded
+        # into c10, which is exact in IEEE (negation and a-b/-(b-a) are exact).
+        return c00, c10, c20, M[0, 0] * c00 + M[0, 1] * c10 + M[0, 2] * c20
+
+    c00, c10, c20, det = _first_col_cofactors(C)
 
     # adjust for nans in off-diagonals (the reference path does this AFTER
     # taking the determinant, so a NaN off-diagonal still poisons detC and is
@@ -111,24 +120,25 @@ def _mat3x3_det_inv(C: np.ndarray, xp) -> tuple:
     for i in range(3):
         off_nan[i, i] = False
     if bool(xp.any(off_nan)):
+        # Only here do the sanitised matrix and its determinant differ from
+        # C's; otherwise ``adj_det`` IS ``det`` and recomputing it was pure
+        # duplicated work over the whole grid.
         M = xp.where(off_nan, xp.zeros_like(C), C)
+        c00, c10, c20, adj_det = _first_col_cofactors(M)
+    else:
+        adj_det = det
 
-    adj_det = (
-        M[0, 0] * (M[1, 1] * M[2, 2] - M[1, 2] * M[2, 1])
-        - M[0, 1] * (M[1, 0] * M[2, 2] - M[1, 2] * M[2, 0])
-        + M[0, 2] * (M[1, 0] * M[2, 1] - M[1, 1] * M[2, 0])
-    )
     with np.errstate(divide="ignore", invalid="ignore"):
         idet = 1.0 / adj_det
         inv = xp.empty_like(M)
         # adjugate transpose: inv[i, j] = cofactor[j, i] / det
-        inv[0, 0] = (M[1, 1] * M[2, 2] - M[1, 2] * M[2, 1]) * idet
+        inv[0, 0] = c00 * idet
+        inv[1, 0] = c10 * idet
+        inv[2, 0] = c20 * idet
         inv[0, 1] = (M[0, 2] * M[2, 1] - M[0, 1] * M[2, 2]) * idet
         inv[0, 2] = (M[0, 1] * M[1, 2] - M[0, 2] * M[1, 1]) * idet
-        inv[1, 0] = (M[1, 2] * M[2, 0] - M[1, 0] * M[2, 2]) * idet
         inv[1, 1] = (M[0, 0] * M[2, 2] - M[0, 2] * M[2, 0]) * idet
         inv[1, 2] = (M[0, 2] * M[1, 0] - M[0, 0] * M[1, 2]) * idet
-        inv[2, 0] = (M[1, 0] * M[2, 1] - M[1, 1] * M[2, 0]) * idet
         inv[2, 1] = (M[0, 1] * M[2, 0] - M[0, 0] * M[2, 1]) * idet
         inv[2, 2] = (M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]) * idet
 
@@ -4150,17 +4160,37 @@ class LinkDelayTable:
         # every per-walker rebuild; keyed by id + identity like the parent's
         # basis cache.
         self._slice_cache: dict = {}
+        self._digest: Optional[tuple] = None
 
     def __getstate__(self):
         state = dict(self.__dict__)
         state["_slice_cache"] = {}  # derived; rebuilt on demand in the copy
+        state["_digest"] = None  # ditto -- one hash of the table to rebuild
         return state
 
     @property
     def digest(self) -> tuple:
-        """Cheap hashable identity, for the component's basis-cache key."""
-        return (self.t.size, float(self.t[0]), float(self.t[-1]),
-                self.data_t0, hash(self.ltts.tobytes()))
+        """Cheap hashable identity, for the component's basis-cache key.
+
+        Computed once. The key has to pin the table's *contents*, so it hashes
+        all ``(len(t), 6)`` of it -- ~6 MB and ~1.5 ms on a production brick
+        (a 731 d / 2.5 s file at ``stride=200`` is 126k rows). This is read on
+        every per-walker covariance rebuild, i.e. once per proposal row, so
+        recomputing it cost ~6 s of every ~19 s sampling iteration on the
+        stock noise fit -- a third of the run, spent hashing an array that
+        never changes.
+
+        Caching assumes ``ltts`` is not mutated in place after ``__init__``.
+        That is already this class's contract (``_slice_cache`` makes the same
+        assumption, and the table is documented as plain-data settings-tree
+        carriage). Build a new table rather than writing into ``ltts``.
+        """
+        if self._digest is None:
+            self._digest = (
+                self.t.size, float(self.t[0]), float(self.t[-1]),
+                self.data_t0, hash(self.ltts.tobytes()),
+            )
+        return self._digest
 
     def run_average(self) -> np.ndarray:
         """``(6,)`` mean over the whole table (the stationary approximation)."""
