@@ -3666,6 +3666,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             seq["snaps"]["after_removal"] = self._debug_slab_snapshot(
                 buffer_obj, seq["slot"])
 
+        # Per-source likelihood setup for the repeat block (same stage as
+        # the proposal cholesky / friend table). Chunked-het / FD engines
+        # no-op; a sig-het computation builds its heterodyne reference
+        # against the source-free residual HERE and holds it CONSTANT for
+        # the whole repeat block, so ll_ref below and every repeat's
+        # get_add_ll score through the same likelihood.
+        #
+        # ORDER (2026-08-09): this MUST precede the proposal Cholesky below.
+        # ``GBSignalHetComputations.information_matrix`` only takes its fast
+        # ``SIGHET_INFOMAT`` route -- second differences of the likelihood
+        # through ``get_ll_wdm``, i.e. at sig-het (v5) speed against the
+        # reference this call builds -- while ``_in_model`` is live. Built
+        # the other way round it silently fell through to the chunked
+        # delegate at ~46 ms/source instead of ~2.4 ms, which is why
+        # ``inmodel_cholesky`` was 84% of the overnight_v5 iteration and why
+        # that run measured NO v5 gain: v5 accelerates sig-het scoring, and
+        # the dominant cost never reached sig-het. The reference is built
+        # against the SOURCE-FREE residual, which is exactly the right one
+        # for that source's own curvature.
+        with _tspan(tm, "inmodel_sighet_setup"):
+            sighet_active = bool(
+                buffer_obj.setup_in_model_likelihood(curr, slots, N_vals, leaf_inds=l_i)
+            )
         # Pure-stretch moves (use_info_mat_proposal=False, e.g. the fixed-
         # dimensional VGB move) never build the info-matrix Cholesky.
         with _tspan(tm, "inmodel_cholesky"):
@@ -3673,16 +3696,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self._proposal_cholesky(model, band_sorter, ids)
                 if self.use_info_mat_proposal
                 else None
-            )
-        # Per-source likelihood setup for the repeat block (same stage as
-        # the proposal cholesky / friend table). Chunked-het / FD engines
-        # no-op; a sig-het computation builds its heterodyne reference
-        # against the source-free residual HERE and holds it CONSTANT for
-        # the whole repeat block, so ll_ref below and every repeat's
-        # get_add_ll score through the same likelihood.
-        with _tspan(tm, "inmodel_sighet_setup"):
-            sighet_active = bool(
-                buffer_obj.setup_in_model_likelihood(curr, slots, N_vals, leaf_inds=l_i)
             )
         # Drift-refresh anchor: the sampling-basis coords each source's
         # sig-het reference was built at (see the refresh block below).
