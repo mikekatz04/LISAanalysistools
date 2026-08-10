@@ -137,6 +137,17 @@ class JointMaxLogLSearch(Move):
         super().__init__(name, **kwargs)
         self.inner_names = list(inner_names)
 
+    def stock_dependencies(self):
+        """The stock moves this wraps -- without this they are never BUILT.
+
+        Variant setup functions construct only the stock moves the recipe
+        asks for (``recipe.stock_names()``). This move resolves by its own
+        ``setup``, so its name tells the builder nothing about the moves it
+        composes; under STAGE_NOISE_ONLY, where these are the only moves in
+        the recipe, that left ``ctx.stock_moves`` completely empty.
+        """
+        return list(self.inner_names)
+
     def setup(self, ctx):
         from lisatools.globalfit.moves.globalfitmove import MaxLogLCombineMove
 

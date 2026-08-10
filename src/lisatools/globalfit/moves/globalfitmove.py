@@ -87,6 +87,21 @@ class Move:
         """True when this move resolves through the stock-name lookup (base ``setup``)."""
         return type(self).setup is Move.setup
 
+    def stock_dependencies(self) -> typing.List[str]:
+        """Stock-move names this move's :meth:`setup` pulls from ``ctx``.
+
+        Only meaningful on subclasses that override :meth:`setup`: a custom
+        move resolves by its own code rather than by name, so the variant
+        setup functions cannot tell from ``Recipe.stock_names()`` that it
+        COMPOSES stock moves. Declare them here and they get built.
+
+        Empty by default -- a custom move that builds everything itself needs
+        nothing. Returning a name that the variant does not provide fails at
+        materialization with the available list, which is the intended
+        behaviour (better than a silent no-op).
+        """
+        return []
+
     def setup(self, ctx: MoveBuildContext):
         """Build/return the runtime eryn move (``None`` -> ``self`` IS the runtime move).
 
