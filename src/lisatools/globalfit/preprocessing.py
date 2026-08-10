@@ -76,6 +76,51 @@ def find_file(folder: str, source_type: str, source_id: int) -> str:
     )
 
 
+def find_combined_file(folder: str) -> str:
+    """The combined L1 brick in ``folder``, whatever it is called.
+
+    Unlike the per-class bricks, the combined stream has no stable
+    ``{TYPE}_..._source{id}_`` naming: the mojito-light release ships e.g.
+    ``mojito_light_731d_2.5s_L1_0_0_<stamp>.h5``, which matches neither the
+    ``COMBINED_`` prefix nor the ``source0_`` infix :func:`find_file`
+    requires. Since ``data/COMBINED/L1`` holds exactly one data file, resolve
+    it by folder rather than by name.
+
+    ``MOJITO_COMBINED_FILE`` overrides with an explicit path (absolute, or a
+    basename inside ``folder``) when a folder does hold more than one.
+    """
+    override = os.environ.get("MOJITO_COMBINED_FILE", "").strip()
+    if override:
+        path = override if os.path.isabs(override) else os.path.join(folder, override)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"MOJITO_COMBINED_FILE={override!r} does not exist (looked at {path})."
+            )
+        return path
+
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(
+            f"No combined-data folder at {folder!r}. The combined stream is "
+            "expected under <mojito_data_path>/COMBINED/L1."
+        )
+    cands = sorted(
+        f for f in os.listdir(folder)
+        if f.endswith(".h5") and not f.startswith(".")
+    )
+    if not cands:
+        raise FileNotFoundError(f"No .h5 file in {folder!r}.")
+    if len(cands) > 1:
+        # Prefer an explicitly-named one, else refuse to guess.
+        named = [f for f in cands if f.upper().startswith("COMBINED_")]
+        if len(named) == 1:
+            return os.path.join(folder, named[0])
+        raise ValueError(
+            f"{len(cands)} .h5 files in {folder!r} ({cands}); set "
+            "MOJITO_COMBINED_FILE to pick one."
+        )
+    return os.path.join(folder, cands[0])
+
+
 def normalize_source_ids(d: dict) -> dict:
     """Coerce a per-class source-id mapping to lists.
 
@@ -257,7 +302,7 @@ class L1DataLoader:
                     "the NOISE brick would double-count it. Drop NOISE."
                 )
             subfolder = os.path.join(self.data_folder, "COMBINED", "L1")
-            file_path = find_file(subfolder, "COMBINED", 0)
+            file_path = find_combined_file(subfolder)
 
             _t0 = _t.perf_counter()
             orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
