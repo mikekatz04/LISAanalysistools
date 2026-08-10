@@ -851,7 +851,7 @@ class _RoutedBandEngine:
 
     @classmethod
     def route_information_matrix(cls, comp, holder, params_phys, *, inds,
-                                noise_index, **swap_kwargs):
+                                noise_index, data_index=None, **swap_kwargs):
         """Route ``comp.information_matrix`` per shard.
 
         The Fisher/information matrix is computed on the RAW GB comp
@@ -869,15 +869,26 @@ class _RoutedBandEngine:
         (:meth:`_comp_for`), so the kernel never dereferences another
         device's chunk geometry / window / wrap pointers.
         """
+        # ``data_index`` is only meaningful to the sig-het wrapper, where it
+        # is the per-source BUFFER SLOT feeding the in-model reference
+        # lookup; raw comps have no such parameter. Forward it ONLY when the
+        # caller supplied one, and slice it with the rows -- passing it
+        # full-length while ``params_host[pos]`` is a subset would misalign
+        # every shard but the first.
+        _di = {} if data_index is None else {"data_index": data_index}
         if not cls._is_multi(holder):
             return comp.information_matrix(
                 params_phys, holder, inds=inds,
-                noise_index=noise_index, **swap_kwargs)
+                noise_index=noise_index, **_di, **swap_kwargs)
         xp = holder.xp
         views = cls._shard_views(holder)
-        # info matrix weights by noise only -> data_index == noise_index.
+        # Partition by the owning shard of each source's WALKER: the matrix
+        # weights by that walker's PSD. (Historically data_index was assumed
+        # irrelevant here and aliased to noise_index -- true for the chunked
+        # Fisher, false once the sig-het route consumes a slot index.)
         parts = cls._partition(holder, noise_index, noise_index)
         params_host = np.atleast_2d(asnumpy(params_phys))
+        di_host = None if data_index is None else np.atleast_1d(asnumpy(data_index))
         num = int(params_host.shape[0])
         pieces = []
         for view, (pos, intra, intra_noise) in zip(views, parts):
@@ -885,10 +896,12 @@ class _RoutedBandEngine:
                 continue
             comp_s = cls._comp_for(comp, holder, view)
             with device_context(xp, view.device):
+                _di_s = ({} if di_host is None
+                         else {"data_index": xp.asarray(di_host[pos])})
                 out_s = comp_s.information_matrix(
                     xp.asarray(params_host[pos]), view, inds=inds,
                     noise_index=intra if intra_noise is None else intra_noise,
-                    **swap_kwargs)
+                    **_di_s, **swap_kwargs)
                 pieces.append((pos, asnumpy(out_s)))
         return cls._assemble(num, pieces, 0.0, xp)
 

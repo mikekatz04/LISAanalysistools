@@ -87,6 +87,21 @@ class Move:
         """True when this move resolves through the stock-name lookup (base ``setup``)."""
         return type(self).setup is Move.setup
 
+    def stock_dependencies(self) -> typing.List[str]:
+        """Stock-move names this move's :meth:`setup` pulls from ``ctx``.
+
+        Only meaningful on subclasses that override :meth:`setup`: a custom
+        move resolves by its own code rather than by name, so the variant
+        setup functions cannot tell from ``Recipe.stock_names()`` that it
+        COMPOSES stock moves. Declare them here and they get built.
+
+        Empty by default -- a custom move that builds everything itself needs
+        nothing. Returning a name that the variant does not provide fails at
+        materialization with the available list, which is the intended
+        behaviour (better than a silent no-op).
+        """
+        return []
+
     def setup(self, ctx: MoveBuildContext):
         """Build/return the runtime eryn move (``None`` -> ``self`` IS the runtime move).
 
@@ -364,9 +379,20 @@ class GFCombineMove(CombineMove, GlobalFitMove):
     ``GF_MOVE_TIMING_SYNC=1`` additionally synchronizes the current cupy
     stream at each move boundary so asynchronous kernel time is attributed to
     the move that launched it.
+
+    ``random_choice=True`` draws ONE wrapped move per step (uniformly, with
+    replacement, from ``model.random``) instead of running all of them in a
+    fixed order -- the stock eryn move-selection semantics. Default ``False``
+    keeps eryn's run-them-all behaviour, so existing stages are untouched.
+    Useful for a PE stage where the moves are alternative proposals for the
+    same state rather than a pipeline that has to run start to finish.
     """
 
     update_comm_special = True
+
+    def __init__(self, *args, random_choice: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.random_choice = bool(random_choice)
 
     def propose(self, model, state):
         # Simple-API branches (sub_states all None, e.g. erebor.blank) temper
@@ -393,7 +419,25 @@ class GFCombineMove(CombineMove, GlobalFitMove):
                 )
         return state, accepted
 
+    def _propose_moves_once(self, model, state):
+        """One pass over the wrapped moves (the plain GFCombineMove body)."""
+        return GFCombineMove._propose_moves(self, model, state)
+
     def _propose_moves(self, model, state):
+        if getattr(self, "random_choice", False) and len(self.moves) > 1:
+            # One move per step, drawn from the sampler's RNG so the choice
+            # is reproducible under a fixed seed. Sub-state guards in
+            # propose() still apply to whichever move ran.
+            k = int(model.random.randint(len(self.moves)))
+            move = self.moves[k]
+            if isinstance(move, tuple):  # (move, weight); weight unused here
+                move = move[0]
+            name = getattr(move, "gf_move_name", type(move).__name__)
+            if os.environ.get("GF_MOVE_TIMING", "0") == "1":
+                print(f"[GF_TIMING] stage={getattr(self, 'gf_stage_name', '?')} "
+                      f"random_choice -> {name}", flush=True)
+            return move.propose(model, state)
+
         if os.environ.get("GF_MOVE_TIMING", "0") != "1":
             return super().propose(model, state)
 
@@ -436,3 +480,93 @@ class GFCombineMove(CombineMove, GlobalFitMove):
             flush=True,
         )
         return state, accepted_out
+
+
+class MaxLogLCombineMove(GFCombineMove):
+    """Combine move whose max-logL convergence spans ALL wrapped moves.
+
+    ``PSDMove(max_logl_mode=True)`` converges each noise branch SEPARATELY:
+    every move runs its own ``run_move_max_likelihood`` loop to its own
+    plateau. For a joint search that is the wrong criterion -- psd and galfor
+    are two parameterizations of ONE noise model, so maximizing them
+    independently can stall each at a plateau the pair could climb past
+    together (galfor moves change the residual the psd move is fitting, and
+    vice versa).
+
+    This promotes the criterion one level: the wrapped moves each run a
+    single pass, and THIS object owns the loop, checking the cold-chain max
+    log-likelihood over the whole set. Effectively one move, maximizing
+    ``logl`` over repeated iterations of psd AND galfor together.
+
+    Wrap the ``*_pe`` moves, not the ``*_search`` ones. ``max_logl_mode`` is
+    consulted in exactly one place (``psdmove.py:918``) -- it only chooses
+    between the plateau loop and a single ``run_move_for_loop`` -- so the pe
+    move IS the search move minus its private loop, which is precisely the
+    inner behaviour wanted here. Wrapping the search moves would nest two
+    plateau loops.
+
+    The plateau rule mirrors ``PSDMove.run_move_max_likelihood`` exactly:
+    exit after ``num_checks`` consecutive non-improving iterations, and only
+    start counting once the likelihood has moved at least once (so a move
+    that has not yet taken effect cannot trip the exit immediately).
+    """
+
+    def __init__(self, *args, num_checks: int = 5, max_iter: int = 0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_checks = int(num_checks)
+        # Hard ceiling on the plateau loop. 0 = unbounded, which is what
+        # PSDMove.run_move_max_likelihood does -- fine when one move owns a
+        # cheap likelihood, dangerous here: this can wrap several moves over
+        # a basis with no compiled kernel (the WDM noise likelihood falls
+        # back to the ACA route), so a likelihood that keeps twitching by
+        # 1e-9 never trips the plateau and the stage never ends.
+        # MAXLOGL_MAX_ITER overrides.
+        self.max_iter = int(os.environ.get("MAXLOGL_MAX_ITER", max_iter))
+
+    def _propose_moves(self, model, state):
+        num_so_far = 0
+        max_logl = -np.inf
+        changed_once = False
+        accepted = None
+        n_iter = 0
+        t0 = time.perf_counter()
+        stage = getattr(self, "gf_stage_name", "?")
+        # Progress EVERY iteration by default. This loop has no natural
+        # output and no fixed length, so without it a long stage is
+        # indistinguishable from a hung one -- which is exactly what the
+        # first full-band run looked like. MAXLOGL_LOG_EVERY=0 silences it.
+        log_every = int(os.environ.get("MAXLOGL_LOG_EVERY", "1"))
+        while num_so_far < self.num_checks:
+            state, accepted = self._propose_moves_once(model, state)
+            n_iter += 1
+            cur = float(state.log_like[0].max())
+            if cur != max_logl and not np.isinf(max_logl):
+                changed_once = True
+            improved = cur > max_logl
+            if improved:
+                max_logl = cur
+                num_so_far = 0
+            elif changed_once:
+                num_so_far += 1
+            if log_every and (n_iter % log_every == 0):
+                print(
+                    f"[MAXLOGL] stage={stage} iter={n_iter} "
+                    f"logl={cur:.6f} best={max_logl:.6f} "
+                    f"{'IMPROVED' if improved else f'flat {num_so_far}/{self.num_checks}'}"
+                    f" changed_once={changed_once} "
+                    f"elapsed_s={time.perf_counter() - t0:.1f}",
+                    flush=True,
+                )
+            if self.max_iter and n_iter >= self.max_iter:
+                print(
+                    f"[MAXLOGL] stage={stage} hit max_iter={self.max_iter} "
+                    f"before plateau (best={max_logl:.6f}); advancing.",
+                    flush=True,
+                )
+                break
+        print(
+            f"[MAXLOGL] stage={stage} done after {n_iter} iterations "
+            f"(best={max_logl:.6f}, {time.perf_counter() - t0:.1f}s)",
+            flush=True,
+        )
+        return state, accepted

@@ -291,7 +291,7 @@ new native code (`f4c54dc` → `gb_tdi_on_the_fly.cu/.hh`,
 `binding_gbgpu.cxx/.hpp`). **LAT needs no rebuild** — the 2026-08-04 changes
 are pure Python.
 
-### !! CHECK BEFORE LAUNCHING: the n_r conflict !!
+### the n_r conflict — RESOLVED 2026-08-09
 
 `SIGHET_V3_NODES` is the ratio-EVALUATION node count `n_r` — the raw
 waveform evaluations, which DOMINATE the per-candidate sig-het cost. It is
@@ -299,25 +299,63 @@ NOT the same as `SIGHET_V4_KNOTS` (the in-kernel resample, measured to be
 "not a lever"). The v5 kernel consumes **both**
 (`gbsignalhetcomputations.py:985`).
 
-**Two results disagree and one of them is wrong:**
+**Measured** with `gb_sighet_tier_assess.py` (whose `ii16`/`ii32`/`ii64`
+columns ARE the `n_r` sweep, fed to `proto.fit_ratio`) at
+`TIER_NT=3072` (0.25 yr), `TIER_NT_LAYER=180`, 8 references x 5 directions.
+Worst `|dLL|` over all (ref, dir):
 
-| source | claim |
-|---|---|
-| v4/v5 shootout | `n_r = 64`, NOT 32 — 32 was too coarse |
-| `TODO(T_obs-aware node law)` | short baselines are OVER-resolved; ~8 should match at 3 months |
+| tier | allowed | `ii16` | `ii32` | `ii64` |
+|---|---|---|---|---|
+| T=1 | 0.1 | 0.0084 | 0.0003 | 0.0004 |
+| T=10 | 0.1 | **0.0627** | 0.0030 | 0.0035 |
+| T=50 | 0.5 | 0.0865 | 0.0141 | 0.0155 |
+| T=100 | 1.0 | 0.1377 | 0.0243 | 0.0270 |
+| T=1000 | 10.0 | 0.2278 | 0.0517 | 0.0596 |
 
-Both cannot hold at the same `T_obs`. The runbook commands pass
-`SIGHET_V3_NODES=64`, so **the safe value is already in them** — the
-adaptive law (GBGPU `28ca7f6`) is opt-in via `SIGHET_V3_NODES=-1` and is
-UNVALIDATED.
+Everything passes 100% at every tier at 3 months. The **same harness at 1 yr**
+(`TIER_NT=12288 TIER_NT_LAYER=512`) inverts the picture — worst |dLL| and
+pass rate at T=1000:
 
-**Do not set `SIGHET_V3_NODES=-1` until this is swept.** The sweep:
-`n_r ∈ {8,16,32,64}` at `T_obs = 0.25 yr` with
-`gb_sighet_proof_figure.py`, find where `|ΔlnL|` breaks the tiered budget
-(`allowed(T) ~ max(0.1, T/100)`). If 8 holds at 3 months, the adaptive law
-is a near-linear speedup on the dominant cost and is a live candidate for
-why overnight_v5 measured NO v5 gain. If 64 is genuinely needed, the TODO's
-reasoning is wrong and should be struck.
+| `T_obs` | `n_r=16` | `n_r=32` | `n_r=64` |
+|---|---|---|---|
+| 0.25 yr | 0.23 / 100% | 0.052 / 100% | 0.060 / 100% |
+| 1.0 yr | 350 / 68% | 49.6 / 85% | 26.5 / 98% |
+
+Verdict:
+
+* **`n_r` is a function of `T_obs`, and BOTH prior results were right.** At
+  3 months 32 is indistinguishable from 64; at 1 yr 32 genuinely fails
+  (85% vs 98%), which is exactly the shootout's "64 NOT 32". They were
+  never measured at the same baseline, which is why they looked
+  contradictory.
+* **`n_r = 16` is never worth it**: at 3 months it passes but leaves only
+  1.6x margin at T=10 (the binding tier) against 33x for 32; at 1 yr it
+  collapses to 68%.
+* The `TODO(T_obs-aware node law)` is directionally right (short baselines
+  ARE over-resolved at 64) but **too aggressive**: 8 was never tested and
+  16 is already thin at 3 months and useless at 1 yr.
+* **Medians hide all of this.** At 1 yr the median is small at every `n_r`
+  (0.09 at T=1000 for 64) — only the worst references blow up. Never assess
+  this with a median.
+* At 1 yr **even 64 does not reach 100%** (92–98%). That residual is NOT an
+  `n_r` problem — nodes have saturated by 64 — it is the known hard-reference
+  population. Do not try to buy it back with more nodes.
+
+**Use `SIGHET_V3_NODES=32` at 3 months** (a 2x saving on the dominant cost
+for no measurable accuracy change) and **64 at 1 yr and beyond**. This is now
+the built-in tiered lookup — see `_NR_TIERS` / `_NR_DEFAULT` in
+`gbsignalhetcomputations.py`.
+
+**Still do NOT set `SIGHET_V3_NODES=-1`.** The adaptive law
+(GBGPU `28ca7f6`) computes `ceil(16 * (T_obs/yr) * (d_max/0.4)^0.25)`
+clipped to `[8, 64]`, which at 0.25 yr lands on **8** for any realistic
+`d_max` — 4x below the validated value and 2x below the already-thin 16.
+Either raise its constant or leave the knob explicit.
+
+Caveat: this is the CPU prototype ratio-fit path
+(`gb_sighet_ratio_build_prototype.fit_ratio`), so it measures the
+ALGORITHM's node requirement. Confirm on the GPU kernel before flipping the
+production default.
 
 Full context: `docs/superpowers/2026-08-06-wdm-subband-leakage-plan.md`.
 
@@ -335,18 +373,36 @@ NITER=5 NWALKERS=16 NTEMPS=6 GB_NTEMPS=12 \
 GB_MODE=search GB_USE_CHIRP_MASS=1 \
 GB_MIN_FREQ=6.0e-3 GB_MAX_FREQ=8.0e-3 TOBS_TARGET=7776000.0 \
 GB_NUM_REPEAT_PROPOSALS=100 GB_N_SUBBANDS=1024 \
-GB_SEARCH_PRIOR_REMOVAL=1 GB_LEAF_CAP_ITER_ONLY=1 \
+GB_SEARCH_PRIOR_REMOVAL=1 \
+GB_LEAF_CAP_LL_IMPROVE=1 GB_LEAF_CAP_NDIM=8 \
 FIT_DIR=./gf_runs_fstat_rj/overnight_v5/ \
 GB_FSTAT_FIT_IN_MOVE=1 \
 GB_FSTAT_FIT_DIR=./gf_runs_fstat_rj/overnight_v5/gb_fstat_fit \
-FSTAT_PEAKS_PER_BAND=100 \
+FSTAT_PEAKS_PER_BAND=200 \
 GB_SIGHET_INMODEL=1 SIGHET_V5=1 \
-SIGHET_V3_NODES=64 SIGHET_V4_KNOTS=128 SIGHET_V4_BAND=16 SIGHET_NT_LAYER=512 \
+SIGHET_V3_NODES=32 SIGHET_V4_KNOTS=128 SIGHET_V4_BAND=16 SIGHET_NT_LAYER=180 \
 GB_INFOMAT_PER_BLOCK=1 \
 GB_LEAF_CAP_START= GB_SEARCH_IN_MODEL=0 \
   python scripts/fstat_proposal/run_fstat_rj_search.py 2>&1 \
   | tee ./gf_runs_fstat_rj/overnight_v5/shakedown.log
 ```
+
+Changed from the overnight_v5 command (2026-08-09/10):
+* `SIGHET_V3_NODES` 64 -> **32**: measured equal to 64 at 3 months and a 2x
+  saving on the dominant sig-het cost. Use 64 at 1 yr and beyond — see the
+  n_r section above.
+* `SIGHET_NT_LAYER` 512 -> **180**: the 3-month value (512 is the 1-yr one).
+* `FSTAT_PEAKS_PER_BAND` 100 -> **200**: more sources around 4 mHz.
+* Leaf cap `GB_LEAF_CAP_ITER_ONLY=1` -> **`GB_LEAF_CAP_LL_IMPROVE=1
+  GB_LEAF_CAP_NDIM=8`**: increment the cap only when the cold-chain per-band
+  max lnL fails to improve by D/2 over `N_CAP_ITERATIONS`. overnight_v5 ran
+  with the cap effectively OFF (27 arming lines in overnight_2, zero in v5),
+  which is why it started at 89.2 leaves instead of 11.0.
+* `SIGHET_INFOMAT` still UNSET — see the note above; it is misindexed.
+* `GB_SUBBAND_DIVISOR` still UNSET (default 1). The WDM leakage study cleared
+  sub-division physically (2-layer separation has 5 orders of headroom), but
+  the knob has ZERO tests and has never been exercised. Do not take the
+  parallelism win in the same run as everything else.
 
 Knob notes:
 * `GB_NTEMPS=12` is the branch ladder; the general `NTEMPS=6` is separate.
@@ -354,8 +410,36 @@ Knob notes:
   (WDM layers 44..57) — the overnight_2 band.
 * The four sig-het knobs must all be present: v5 is gated on `v4_knots`, and
   `v5=1`'s arena on `v4_band`. A guard raises rather than silently running v3.
-* Do NOT set `SIGHET_INFOMAT`: its fast route is not reachable from the move
-  yet (2026-08-04 audit), so it would change nothing but appear to.
+* **DO NOT SET `SIGHET_INFOMAT` — it is reachable now but MISINDEXED.**
+  Two separate facts, do not conflate them:
+  1. *Reachability (fixed).* The 2026-08-04 audit was right at the time: the
+     proposal Cholesky ran BEFORE `setup_in_model_likelihood`, so `_in_model`
+     was `None` and `information_matrix` fell through to the chunked delegate
+     (~46 ms/source vs ~2.4). That is why `inmodel_cholesky` was 84% of the
+     overnight_v5 iteration AND why that run saw no v5 gain — the dominant
+     cost never reached sig-het. The blocks were swapped 2026-08-09 so
+     `inmodel_sighet_setup` now precedes `inmodel_cholesky`.
+  2. *Correctness (NOT fixed).* With `_in_model` live, `get_ll_wdm` IGNORES
+     the holder and reads `data_index` as a **buffer-slot** index
+     (`_slot_to_ref_xp[data_index]`, built by `setup_in_model` as
+     `slot_map[slots] = arange(n)`). But `_compute_proposal_cholesky` passes
+     `noise_index=walker_inds` — **walker** indices — and the sig-het
+     `information_matrix` falls back to it (`di = data_index or noise_index`).
+     Walker indices are in range, so nothing raises: it silently builds the
+     proposal covariance from the WRONG sources' references.
+
+  The swap is SAFE with the knob unset (default): `information_matrix` takes
+  its chunked branch, exactly as in overnight_v5. So run with it unset until
+  `data_index=slots` is threaded through
+  `_proposal_cholesky` -> `_compute_proposal_cholesky` ->
+  `route_information_matrix`. Then validate with `SIGHET_INFOMAT_VALIDATE=1`
+  on a shakedown before trusting it.
+
+  When it is fixed, note the fast route returns the OBSERVED information
+  (`-d_i d_j lnL`), not Fisher; the two differ by `<r|d_i d_j h>` away from
+  the peak. That is fine for a proposal — `_compute_proposal_cholesky`
+  already takes `abs(evals)` and clamps to a relative floor — but it is why
+  the validate reldiff will not be ~0.
 
 **Pass:**
 - `GB_FSTAT_FIT_IN_MOVE=1: ... skipping the offline grid load.`

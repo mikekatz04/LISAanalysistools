@@ -50,6 +50,97 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+#: Preferred synthetic-GB heterodyne length when the device can afford it.
+#: See the convergence table in ``SyntheticGBProcessingStep``.
+_SYNTH_N_SPARSE_PREFERRED = 2048
+
+
+def gb_fd_shared_bytes(n_sparse: int, nchannels: int) -> int:
+    """Shared memory the FD heterodyne kernel needs, in bytes.
+
+    Python mirror of ``GBTDIonTheFly::get_gb_fd_buffer_size``
+    (``GBGPU/src/gbgpu/cutils/gb_tdi_on_the_fly.cu``), which is also exposed
+    as ``GBTDIonTheFlyWrap.get_fd_buffer_size(N_sparse, nchannels)`` --
+    ``tests/test_synth_n_sparse.py`` pins the two together so this cannot
+    drift silently. Mirrored rather than called because the default has to
+    be resolved BEFORE a comp (and therefore a wrap) exists.
+
+    The kernel reserves the max of a direct-path region and a spline arena;
+    the synthetic generator uses ``n_cp_sig = 0``, i.e. the direct path.
+    """
+    common = 20 * 8 + n_sparse * 8 + nchannels * n_sparse * 16
+    direct = 2 * nchannels * n_sparse * 8 + n_sparse * 8 + 21 * n_sparse
+    return int(common + direct)
+
+
+def gb_fd_shared_limit(force_backend: Optional[str]) -> Optional[int]:
+    """Per-block dynamic shared-memory budget, or ``None`` when unbounded.
+
+    ``None`` on the CPU backend: that path holds the same working set on the
+    heap, so nothing caps ``N_sparse`` there but memory.
+    """
+    if force_backend is not None and str(force_backend).startswith("cpu"):
+        return None
+    try:
+        import cupy as cp
+
+        attrs = cp.cuda.Device().attributes
+        limit = attrs.get("MaxSharedMemoryPerBlockOptin") or attrs.get(
+            "MaxSharedMemoryPerBlock"
+        )
+        return int(limit) if limit else None
+    except Exception:  # no cupy / no visible device -> treat as unbounded
+        return None
+
+
+def _resolve_synth_n_sparse(nchannels: int, force_backend: Optional[str]) -> int:
+    """``GB_SYNTH_N_SPARSE`` if set (validated), else the largest that fits.
+
+    Raises on an explicit value the device cannot run, naming the knob --
+    the alternative is a bare ``GPUassert: invalid argument`` from the
+    kernel launch, which points at neither the knob nor the limit.
+    """
+    limit = gb_fd_shared_limit(force_backend)
+    explicit = os.environ.get("GB_SYNTH_N_SPARSE", "").strip()
+
+    if explicit:
+        n = int(explicit)
+        need = gb_fd_shared_bytes(n, nchannels)
+        if limit is not None and need > limit:
+            raise ValueError(
+                f"GB_SYNTH_N_SPARSE={n} needs {need / 1024:.0f} KB of shared "
+                f"memory for {nchannels} channels, but this device allows "
+                f"{limit / 1024:.0f} KB per block. Use "
+                f"{_largest_fitting_n_sparse(nchannels, limit)} or less "
+                f"(the FD heterodyne kernel holds its whole per-source "
+                f"working set in shared memory)."
+            )
+        return n
+
+    if limit is None:
+        return _SYNTH_N_SPARSE_PREFERRED
+    n = _largest_fitting_n_sparse(nchannels, limit)
+    if n < _SYNTH_N_SPARSE_PREFERRED:
+        logger.info(
+            "synthetic GB: N_sparse %d (not the preferred %d) -- %d channels "
+            "would need %.0f KB of shared memory against this device's "
+            "%.0f KB/block. Accuracy is ~first order in N_sparse; set "
+            "GB_SYNTH_N_SPARSE to override.",
+            n, _SYNTH_N_SPARSE_PREFERRED, nchannels,
+            gb_fd_shared_bytes(_SYNTH_N_SPARSE_PREFERRED, nchannels) / 1024,
+            limit / 1024,
+        )
+    return n
+
+
+def _largest_fitting_n_sparse(nchannels: int, limit: int) -> int:
+    """Largest power-of-two ``N_sparse`` within ``limit``, capped at the
+    preferred value. Powers of two because the kernel FFTs this length."""
+    n = _SYNTH_N_SPARSE_PREFERRED
+    while n > 64 and gb_fd_shared_bytes(n, nchannels) > limit:
+        n //= 2
+    return n
+
 # ============================================================
 # *** EMRI injection (synthetic, in-process) ***
 # ============================================================
@@ -386,9 +477,19 @@ class SyntheticGBProcessingStep(BaseProcessingStep):
         # with Tobs, so 2048 is <= 1.6e-4 at the 90-d production baseline --
         # comfortably past the ~5.6e-4 the retired legacy FD kernel managed
         # against the same reference. Raise it if a run needs more.
+        #
+        # ...but ONLY if it fits. The FD kernel keeps its whole per-source
+        # working set in SHARED memory, so N_sparse is capped by the device,
+        # and 2048 x 3 channels needs ~266 KB against an A100's 164 KB. The
+        # launch then fails as a bare "GPUassert: invalid argument"
+        # (cudaFuncSetAttribute's return is not checked), which says nothing
+        # about the knob that caused it. Resolve the default against the
+        # actual limit, and reject an explicit over-budget value with a
+        # message that names the knob.
+        n_sparse = _resolve_synth_n_sparse(nchannels_full, force_backend)
         comp = GBFDComputations(
             fd_settings, float(t_start), t_start=float(t_start),
-            N_sparse=int(os.environ.get("GB_SYNTH_N_SPARSE", "2048")),
+            N_sparse=n_sparse,
             orbits=orbits,
             # Build the TDIConfig HERE with an explicit backend. Handing the
             # comp a bare string makes its setter do ``TDIConfig(tc)`` with

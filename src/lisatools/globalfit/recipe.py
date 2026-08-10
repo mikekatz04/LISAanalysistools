@@ -236,12 +236,31 @@ class Recipe:
         return [m.name for s in self.stages for m in s.moves]
 
     def stock_names(self) -> typing.List[str]:
-        """Names of the stock-resolved moves (base :class:`Move`) in this recipe.
+        """Stock-move names this recipe needs built.
 
         The variant setup functions use this to build exactly the stock moves
-        the recipe asks for.
+        the recipe asks for -- so a name missing here is simply never built,
+        and the move that wanted it fails at materialization with an empty
+        ``ctx.stock_moves``.
+
+        Two sources:
+
+        * base :class:`Move` entries, which resolve BY name; and
+        * ``Move.stock_dependencies()`` on custom subclasses, which resolve by
+          their own ``setup`` but may COMPOSE stock moves (e.g. a combine move
+          wrapping ``psd_pe`` + ``galfor_pe``). Those dependencies are
+          invisible from the move's own name, so a subclass that pulls things
+          out of ``ctx.stock_moves`` must declare them here or they will not
+          exist when it looks.
         """
-        return [m.name for s in self.stages for m in s.moves if m.is_stock]
+        names = []
+        for s in self.stages:
+            for m in s.moves:
+                if m.is_stock:
+                    names.append(m.name)
+                else:
+                    names.extend(m.stock_dependencies())
+        return names
 
     def get_move(self, name: str, stage: typing.Optional[str] = None) -> Move:
         st, i = self._find_move(name, stage)
