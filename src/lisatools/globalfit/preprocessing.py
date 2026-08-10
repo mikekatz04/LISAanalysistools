@@ -42,7 +42,13 @@ if not logger.handlers:
     # * Prevent duplicate messages*
     logger.propagate = False
 
-ALLOWED_SOURCES = ["NOISE", "GB", "VGB", "MBHB", "EMRI", "SOBHB"]
+#: ``COMBINED`` is mojito's pre-summed L1 stream (``data/COMBINED/L1``) --
+#: instrument noise plus every source class in one brick. It is a DATA source,
+#: not a source CLASS: it carries no catalogue, so listing it alongside the
+#: per-class types means "take the data from here, but still read those
+#: classes' catalogues" (see ``load_data``). Listing it with ``NOISE`` is an
+#: error -- the noise is already in it.
+ALLOWED_SOURCES = ["NOISE", "COMBINED", "GB", "VGB", "MBHB", "EMRI", "SOBHB"]
 
 
 def find_file(folder: str, source_type: str, source_id: int) -> str:
@@ -235,6 +241,58 @@ class L1DataLoader:
             )  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis.
 
         import time as _t
+
+        # COMBINED: mojito's pre-summed stream. Same role as NOISE below --
+        # it establishes ``xyz`` and the orbits -- but it ALREADY contains
+        # every source class, so the per-class loop must not add their
+        # waveforms on top. It still runs, to read their CATALOGUES: those
+        # feed VGB seeding, nleaves sizing and the F-stat overlays, and are
+        # metadata rather than data.
+        combined_base = "COMBINED" in self.source_types
+        if combined_base:
+            if "NOISE" in self.source_types:
+                raise ValueError(
+                    "source_types lists both COMBINED and NOISE: the combined "
+                    "stream already contains the instrument noise, so adding "
+                    "the NOISE brick would double-count it. Drop NOISE."
+                )
+            subfolder = os.path.join(self.data_folder, "COMBINED", "L1")
+            file_path = find_file(subfolder, "COMBINED", 0)
+
+            _t0 = _t.perf_counter()
+            orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
+            orbits._ensure_configured()
+            logger.debug(
+                f"[load_data] COMBINED orbits took {_t.perf_counter()-_t0:.2f}s"
+            )
+            logger.info("Initialized orbits from COMBINED file.")
+
+            with self._open(file_path) as f:
+                _t0 = _t.perf_counter()
+                xyz = f.tdis.xyz_doppler[:]
+                logger.debug(
+                    f"[load_data] COMBINED f.tdis.xyz_doppler[:] took "
+                    f"{_t.perf_counter()-_t0:.2f}s shape={xyz.shape}"
+                )
+                tdi_dt = f.tdis.time_sampling.dt
+                tdi_fs = f.tdis.time_sampling.fs
+                tdi_times = f.tdis.time_sampling.t()
+
+                if self.store_individual_timeseries:
+                    _individual_timeseries["COMBINED_DATA"] = xyz.T.copy()
+
+            self.source_types.remove("COMBINED")
+
+            if self.verbose:
+                logger.info(f"Loaded COMBINED data from {file_path}")
+                logger.info(
+                    "data, times and orbits initialized from COMBINED file; "
+                    "remaining source types contribute CATALOGUES ONLY "
+                    "(their signal is already in the combined stream)."
+                )
+                logger.info(f"TDI time step: {tdi_dt} seconds")
+                logger.info(f"TDI sampling frequency: {tdi_fs} Hz")
+
         if "NOISE" in self.source_types:
             subfolder = os.path.join(self.data_folder, "INSTRUMENT", "L1")
             file_path = find_file(subfolder, "NOISE", 00)
@@ -308,7 +366,14 @@ class L1DataLoader:
                 for source_id in tqdm(
                     ids, desc=f"Loading {source_type} sources", disable=not self.verbose
                 ):
-                    file_path = find_file(subfolder, source_type, source_id)
+                    # Resolve the per-class brick ONLY when its waveform is
+                    # actually needed: under COMBINED the signal is already in
+                    # the data, so requiring the file to exist would make the
+                    # combined stream depend on bricks it does not read.
+                    file_path = (
+                        None if combined_base
+                        else find_file(subfolder, source_type, source_id)
+                    )
 
                     self.catalogue[source_type][source_id] = self.load_single_binary(
                         binary_params, source_id, source_type
@@ -317,6 +382,12 @@ class L1DataLoader:
                         logger.info(
                             f"Loaded catalogue parameters for {source_type} source ID {source_id} from catalogue."
                         )
+
+                    if combined_base:
+                        # Catalogue read; the waveform is ALREADY in the
+                        # combined stream, so loading the brick would
+                        # double-count it (and cost a multi-GB read).
+                        continue
 
                     with self._open(file_path) as f:
                         _t0 = _t.perf_counter()
