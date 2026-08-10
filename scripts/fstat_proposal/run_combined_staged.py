@@ -187,6 +187,19 @@ def build_fit():
             moves=joint_noise_search + vgb,
             combine_kwargs=dict(share_temperature_control=False),
         ))
+    if _env_flag("STAGE_NOISE_ONLY"):
+        # Stages 1-2 only: watch the joint psd+galfor search converge without
+        # paying for the F-stat grid fit (which lives in the gb_search RJ
+        # birth move's setup) or any GB work. The noise stages run FIRST in
+        # the full recipe too, so nothing here changes their behaviour -- it
+        # just stops afterwards.
+        if not stages:
+            raise ValueError(
+                "STAGE_NOISE_ONLY=1 with STAGE_SKIP_NOISE=1 leaves no stages."
+            )
+        fit.recipe = Recipe(stages)
+        return fit
+
     stages += [
         Stage(
             name="gb_search", kind="rj",
