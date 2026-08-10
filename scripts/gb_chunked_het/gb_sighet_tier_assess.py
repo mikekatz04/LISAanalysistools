@@ -51,9 +51,17 @@ def main():
 
     backend = "cpu"
     dt = 10.0
-    Nf, Nt = 256, 12288
+    # Grid knobs (defaults = the original ~1 yr configuration). TIER_NT is what
+    # sets T_obs = Nf*Nt*dt, so the n_r-vs-T_obs question is swept with it:
+    # Nt=12288 -> 1.0 yr, Nt=3072 -> 0.25 yr.
+    Nf = int(os.environ.get("TIER_NF", "256"))
+    Nt = int(os.environ.get("TIER_NT", "12288"))
     t_start = int(0.5 * YRSID_SI / dt) * dt
-    edge, tk = 330, 307
+    # Edge crop and Tukey taper are fractions of the time axis, so they scale
+    # with Nt; the literals are the 1-yr values they came from.
+    _sc = Nt / 12288.0
+    edge = int(os.environ.get("TIER_EDGE", str(max(4, round(330 * _sc)))))
+    tk = int(os.environ.get("TIER_TK", str(max(4, round(307 * _sc)))))
     orbits = ESAOrbits(force_backend=backend)
     wdm_set = WDMSettings(Nf, Nt, dt, t0=t_start, min_freq=1e-4,
                           max_freq=2e-2, min_time=edge * Nf * dt,
@@ -66,7 +74,8 @@ def main():
         tdi_type="XYZ", tukey_alpha=2.0 * tk / Nt)
     chunked.convert_to_ra_dec = False
     sighet = GBSignalHetComputations.for_band_engine(
-        chunked, n_sparse_fd=512, n_cp_build=93, nt_layer=512,
+        chunked, n_sparse_fd=512, n_cp_build=93,
+        nt_layer=int(os.environ.get("TIER_NT_LAYER", "512")),
         m_active_half_width=2)
     g = sighet._g
     N = g["n_sparse_fd"]
