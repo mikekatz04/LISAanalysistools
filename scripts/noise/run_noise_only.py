@@ -45,10 +45,12 @@ does not apply). Three knobs, in descending order of payoff::
 They compose. All three are off by default, so the stock behaviour is
 unchanged.
 
-Lite laptop-smoke preset by default; ``--full`` for production sampling::
+Lite laptop-smoke preset by default; ``--full`` for production sampling and
+``--two-years`` for the complete brick duration::
 
     python scripts/noise/run_noise_only.py
     python scripts/noise/run_noise_only.py --mode foreground --full --iterations 20000
+    python scripts/noise/run_noise_only.py --mode foreground --full --two-years
     mpirun -n 4 python scripts/noise/run_noise_only.py --full --gpus 0
 """
 
@@ -71,6 +73,8 @@ GALFOR_FILE = os.path.join(SPRINT_ROOT, "GALFOR_731d_2.5s_L1.h5")
 # read by lisatools.sensitivity.GalForTimeModulation. Sits next to this script.
 # NOT a default -- see --modulation.
 MODULATION_FILE = os.path.join(HERE, "modulation_multi.dat")
+RUN_DT = 5.0
+RUN_NF = 768
 
 
 def _read_xyz(path):
@@ -82,6 +86,40 @@ def _read_xyz(path):
         times = np.asarray(f.tdis.time_sampling.t())
         fs = f.tdis.time_sampling.fs
     return xyz, times, fs
+
+
+def _two_year_grid(path, dt=RUN_DT, nf=RUN_NF):
+    """Return the largest even-``Nt`` WDM grid covered by the whole brick.
+
+    The WDM transform requires even ``Nf`` and ``Nt``.  At the stock 5 s / 768
+    layer grid the 731-day brick leaves only 392 downsampled samples (32.7 min)
+    outside the last complete WDM block, rather than losing the 200 hours at
+    each edge plus everything after the stock 45.5-day observation.
+    """
+    from mojito import MojitoL1File
+
+    with MojitoL1File(path) as f:
+        n_native = int(f.tdis.time_sampling.size)
+        fs_native = float(f.tdis.time_sampling.fs)
+
+    decimation = fs_native * dt
+    decimation_int = int(round(decimation))
+    if decimation_int < 1 or not np.isclose(decimation, decimation_int):
+        raise SystemExit(
+            "--two-years requires the input cadence to be an integer divisor "
+            f"of the {dt:g} s run cadence; {path!r} has fs={fs_native:g} Hz"
+        )
+
+    # scipy.signal.resample_poly, used by the preprocessing path, returns the
+    # ceiling of the input length divided by an integer decimation factor.
+    n_downsampled = (n_native + decimation_int - 1) // decimation_int
+    nt = n_downsampled // nf
+    nt -= nt % 2
+    if nt < 2:
+        raise SystemExit(
+            f"--two-years input {path!r} is too short for an even {nf}xNt WDM grid"
+        )
+    return nf, nt, n_downsampled
 
 
 class NoiseBrickStep(BaseProcessingStep):
@@ -196,10 +234,14 @@ def build_fit(mode, args):
     # linear backend would read ln-basis walkers out of linear coords and
     # never fail -- so the basis goes in the default tag too, naming the
     # branches this mode actually samples.
-    tag = args.tag or (("full" if args.full else "lite") + _basis_tag(mode, args))
+    profile = ("2yr_" if args.two_years else "") + ("full" if args.full else "lite")
+    tag = args.tag or (profile + _basis_tag(mode, args))
     knobs = {"file_store_dir": args.out_dir, "base_file_name": f"noise_{mode}_{tag}"}
     if not args.full:
         knobs["lite"] = True
+    if args.two_years:
+        nf, nt, n_available = _two_year_grid(args.noise_file)
+        knobs.update(nf=nf, nt=nt)
     for key, value in (
         ("nwalkers", args.nwalkers),
         ("num_iterations", args.iterations),
@@ -232,6 +274,27 @@ def build_fit(mode, args):
 
     fit = erebor.noise_only(**knobs)
     gs = fit.general
+
+    if args.two_years:
+        # Mojito L1 is already conditioned.  Bypass the engine's default
+        # highpass and 200-hour edge trim, downsample the whole brick, then
+        # retain the largest complete even WDM grid.  Tobs is explicit so a
+        # future preprocessing-default change cannot silently shorten it.
+        tobs = nf * nt * gs.dt
+        gs.preprocess_kwargs = dict(
+            highpass_kwargs=None,
+            trim_kwargs=None,
+            downsample_kwargs=dict(target_fs=1.0 / gs.dt),
+            Tobs=tobs,
+            normalize=False,
+        )
+        dropped = n_available - nf * nt
+        print(
+            f"[two-years] WDM grid Nf={nf}, Nt={nt}, dt={gs.dt:g} s; "
+            f"Tobs={tobs / 86400.0:.6f} d ({dropped} trailing "
+            f"downsampled samples outside the final complete WDM block)",
+            flush=True,
+        )
 
     # Sample ln(Soms_d), ln(Sa_a) and log10 of the galfor scales. The
     # prepare_*_branch helpers (stock/erebor/noise.py) turn each flag into the
@@ -343,6 +406,16 @@ def parse_args(argv=None):
     p.add_argument("--galfor-file", default=GALFOR_FILE)
     p.add_argument("--full", action="store_true", help="drop the lite laptop-smoke preset")
     p.add_argument(
+        "--two-years",
+        action="store_true",
+        help="process the complete 731-day (~2 year) input brick instead of "
+        "the lite/full preset's short WDM time grid. Uses the largest complete "
+        "even 768xNt grid (730.489 days for the bundled brick), bypassing the "
+        "default highpass and 200-hour edge trim because mojito L1 is already "
+        "conditioned. Sampling scale remains independent: combine with --full "
+        "for production walkers/temperatures/iterations",
+    )
+    p.add_argument(
         "--linear-psd",
         action="store_true",
         help="sample the instrument levels linearly instead of in ln "
@@ -432,9 +505,9 @@ def parse_args(argv=None):
     p.add_argument("--out-dir", default="./gf_output_noise/")
     p.add_argument(
         "--tag",
-        help="backend file tag (default: lite/full plus the sampling basis, "
-        "e.g. lite_log). Change it when you change nwalkers/ntemps/grid so the "
-        "run does not resume an incompatible file.",
+        help="backend file tag (default: lite/full or 2yr_lite/2yr_full, plus "
+        "the sampling basis, e.g. 2yr_full_log). Change it when you change "
+        "nwalkers/ntemps/grid so the run does not resume an incompatible file.",
     )
     return p.parse_args(argv)
 

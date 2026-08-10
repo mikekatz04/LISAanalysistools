@@ -17,6 +17,11 @@ cold slice from there instead (useful when comparing against the ladder).
 Every run also prints a chain-diagnostics table -- integrated autocorrelation
 time ``tau`` per parameter and the resulting effective sample size -- unless
 ``--no-diagnostics`` is passed.
+
+This script stays on the h5py + numpy floor deliberately, so it only ever looks
+at the CHAIN. To see the fit against the DATA -- posterior draws of the fitted
+evolutionary PSD over the data's own measured variance -- see ``ppc_noise.py``,
+which needs the full lisatools stack and the mojito bricks to rebuild both.
 """
 
 from __future__ import annotations
@@ -150,9 +155,7 @@ def load_samples(path, branch, discard=0, thin=1, tempered=False, group="global_
             chain, inds = chain[:, 0], inds[:, 0]  # cold slice of the ladder
         else:
             if branch not in g["chain"]:
-                raise SystemExit(
-                    f"{path}: no branch {branch!r}; present: {list(g['chain'])}"
-                )
+                raise SystemExit(f"{path}: no branch {branch!r}; present: {list(g['chain'])}")
             chain, inds = g["chain"][branch][sl], g["inds"][branch][sl]
 
     ndim = chain.shape[-1]
@@ -282,9 +285,7 @@ def print_diagnostics(trace, labels, thin=1):
     step = "1 stored step = 1 iteration" if thin == 1 else f"1 stored step = {thin} iterations"
     w = max(max(len(x) for x in labels), 8)
     print(f"\nautocorrelation: {nwalkers} walkers x {niter} stored steps ({step})")
-    print(
-        f"  {'':{w}s} {'tau':>8s} {'N/tau':>7s} {'ESS':>9s} {'rho(1)':>7s} {'rho(10)':>8s}"
-    )
+    print(f"  {'':{w}s} {'tau':>8s} {'N/tau':>7s} {'ESS':>9s} {'rho(1)':>7s} {'rho(10)':>8s}")
     for i, lab in enumerate(labels):
         if not np.isfinite(taus[i]):
             print(f"  {lab:{w}s} {'--':>8s}   (constant in every walker)")
@@ -312,11 +313,19 @@ def print_diagnostics(trace, labels, thin=1):
 
 
 def plot_trace(iters, trace, labels, truths, out):
-    """One row per parameter, one line per walker."""
+    """One row per parameter, one scatter point per walker per stored step.
+
+    Points, not connected lines: a walker crossing between modes would draw a
+    full-height segment joining them, and a handful of those blanket the panel
+    that is supposed to show WHERE the modes are and how the walkers divide
+    between them. Unjoined points also make the occupancy of each mode read by
+    density, which is the thing worth seeing in a multimodal trace.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     _, nwalkers, ndim = trace.shape
     # Walker index is ORDINAL, not categorical, so it takes a perceptual ramp
@@ -325,12 +334,26 @@ def plot_trace(iters, trace, labels, truths, out):
     # Truncated at 0.85 to keep the pale end off a white background.
     colors = plt.cm.viridis(np.linspace(0.0, 0.85, nwalkers))
 
+    # A trace panel is a density, not a set of individually readable marks, so
+    # the marker shrinks and fades as the panel fills: ~4 pt / opaque on a few
+    # hundred points, ~1 pt / faint once a long chain x many walkers puts tens
+    # of thousands in the same strip. Both clipped so neither extreme degenerates.
+    npts = max(trace.shape[0] * nwalkers, 1)
+    ms = float(np.clip(200.0 / np.sqrt(npts), 3.0, 6.0))
+    alpha = float(np.clip(6000.0 / npts, 0.15, 0.9))
+
     fig, axes = plt.subplots(ndim, 1, sharex=True, figsize=(10, 1.9 * ndim), squeeze=False)
     for i, ax in enumerate(axes[:, 0]):
         for w in range(nwalkers):
             ax.plot(
-                iters, trace[:, w, i], lw=0.8, alpha=0.85, color=colors[w],
-                label=f"walker {w}" if i == 0 and nwalkers <= 8 else None,
+                iters,
+                trace[:, w, i],
+                ls="none",
+                marker=".",
+                ms=ms,
+                mew=0,
+                alpha=alpha,
+                color=colors[w],
             )
         if truths is not None and truths[i] is not None:
             # reference line wears neutral ink, never a series color
@@ -341,7 +364,20 @@ def plot_trace(iters, trace, labels, truths, out):
         ax.spines["right"].set_visible(False)
     axes[-1, 0].set_xlabel("iteration")
     if nwalkers <= 8:
-        axes[0, 0].legend(ncol=min(nwalkers, 4), fontsize=7, frameon=False, loc="best")
+        # Explicit proxies: the plotted markers are deliberately small and
+        # semi-transparent, and a legend key at that size identifies nothing.
+        axes[0, 0].legend(
+            handles=[
+                Line2D(
+                    [], [], ls="none", marker="o", ms=4, mew=0, color=colors[w], label=f"walker {w}"
+                )
+                for w in range(nwalkers)
+            ],
+            ncol=min(nwalkers, 4),
+            fontsize=7,
+            frameon=False,
+            loc="best",
+        )
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight", dpi=130)
     plt.close(fig)
@@ -361,8 +397,10 @@ def load_joint(path, branches, basis="auto", **kwargs):
         arr = load_samples(path, branch, mask=False, **kwargs)
         cols.append(arr)
         lab, tr, _ = labels_and_truths(branch, arr, basis)
-        labels += [f"{branch}: {x}" for x in (lab if len(lab) == arr.shape[1] else
-                                              [f"p{i}" for i in range(arr.shape[1])])]
+        labels += [
+            f"{branch}: {x}"
+            for x in (lab if len(lab) == arr.shape[1] else [f"p{i}" for i in range(arr.shape[1])])
+        ]
         truths += list(tr) if tr and len(tr) == arr.shape[1] else [None] * arr.shape[1]
     n = {c.shape[0] for c in cols}
     if len(n) != 1:
@@ -371,7 +409,9 @@ def load_joint(path, branches, basis="auto", **kwargs):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("file", help="run HDF5, e.g. noise-pe/noise_instrument_testing.h5")
     p.add_argument(
         "--branch",
@@ -415,9 +455,7 @@ def main(argv=None):
     read_kwargs = dict(discard=args.discard, thin=args.thin, tempered=args.tempered)
 
     if len(branches) > 1:
-        samples, labels, truths = load_joint(
-            args.file, branches, basis=args.basis, **read_kwargs
-        )
+        samples, labels, truths = load_joint(args.file, branches, basis=args.basis, **read_kwargs)
     else:
         samples = load_samples(args.file, branches[0], **read_kwargs)
         labels, truths, basis = labels_and_truths(branches[0], samples, args.basis)
