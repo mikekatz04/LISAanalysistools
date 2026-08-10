@@ -496,9 +496,17 @@ class MaxLogLCombineMove(GFCombineMove):
     that has not yet taken effect cannot trip the exit immediately).
     """
 
-    def __init__(self, *args, num_checks: int = 5, **kwargs):
+    def __init__(self, *args, num_checks: int = 5, max_iter: int = 0, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_checks = int(num_checks)
+        # Hard ceiling on the plateau loop. 0 = unbounded, which is what
+        # PSDMove.run_move_max_likelihood does -- fine when one move owns a
+        # cheap likelihood, dangerous here: this can wrap several moves over
+        # a basis with no compiled kernel (the WDM noise likelihood falls
+        # back to the ACA route), so a likelihood that keeps twitching by
+        # 1e-9 never trips the plateau and the stage never ends.
+        # MAXLOGL_MAX_ITER overrides.
+        self.max_iter = int(os.environ.get("MAXLOGL_MAX_ITER", max_iter))
 
     def _propose_moves(self, model, state):
         num_so_far = 0
@@ -506,22 +514,44 @@ class MaxLogLCombineMove(GFCombineMove):
         changed_once = False
         accepted = None
         n_iter = 0
+        t0 = time.perf_counter()
+        stage = getattr(self, "gf_stage_name", "?")
+        # Progress EVERY iteration by default. This loop has no natural
+        # output and no fixed length, so without it a long stage is
+        # indistinguishable from a hung one -- which is exactly what the
+        # first full-band run looked like. MAXLOGL_LOG_EVERY=0 silences it.
+        log_every = int(os.environ.get("MAXLOGL_LOG_EVERY", "1"))
         while num_so_far < self.num_checks:
             state, accepted = self._propose_moves_once(model, state)
             n_iter += 1
-            cur = state.log_like[0].max()
+            cur = float(state.log_like[0].max())
             if cur != max_logl and not np.isinf(max_logl):
                 changed_once = True
-            if cur > max_logl:
+            improved = cur > max_logl
+            if improved:
                 max_logl = cur
                 num_so_far = 0
             elif changed_once:
                 num_so_far += 1
-        if os.environ.get("GF_MOVE_TIMING", "0") == "1":
-            print(
-                f"[GF_TIMING] stage={getattr(self, 'gf_stage_name', '?')} "
-                f"max_logl_combine converged after {n_iter} iterations "
-                f"(max_logl={max_logl:.6f})",
-                flush=True,
-            )
+            if log_every and (n_iter % log_every == 0):
+                print(
+                    f"[MAXLOGL] stage={stage} iter={n_iter} "
+                    f"logl={cur:.6f} best={max_logl:.6f} "
+                    f"{'IMPROVED' if improved else f'flat {num_so_far}/{self.num_checks}'}"
+                    f" changed_once={changed_once} "
+                    f"elapsed_s={time.perf_counter() - t0:.1f}",
+                    flush=True,
+                )
+            if self.max_iter and n_iter >= self.max_iter:
+                print(
+                    f"[MAXLOGL] stage={stage} hit max_iter={self.max_iter} "
+                    f"before plateau (best={max_logl:.6f}); advancing.",
+                    flush=True,
+                )
+                break
+        print(
+            f"[MAXLOGL] stage={stage} done after {n_iter} iterations "
+            f"(best={max_logl:.6f}, {time.perf_counter() - t0:.1f}s)",
+            flush=True,
+        )
         return state, accepted

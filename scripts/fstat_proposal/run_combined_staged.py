@@ -255,10 +255,14 @@ def build_fit():
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    # Only configure logging if nothing else has: the global-fit framework
+    # installs its own handler, and adding a second one duplicates EVERY
+    # line (which is what the first full-band run did).
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
     if _env_flag("COMBINED_SMOKE"):
         _apply_smoke_defaults()
         print("[combined] SMOKE mode: shrunk axes, GB_DEBUG + VGB_DEBUG on.",
