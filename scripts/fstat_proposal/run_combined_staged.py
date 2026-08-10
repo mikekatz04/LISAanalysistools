@@ -107,8 +107,8 @@ def _apply_smoke_defaults() -> None:
 from lisatools.globalfit.moves.globalfitmove import Move  # noqa: E402
 
 
-class JointNoiseSearch(Move):
-    """psd + galfor converging under ONE max-logl criterion.
+class JointMaxLogLSearch(Move):
+    """A set of stock moves converging under ONE max-logl criterion.
 
     ``PSDMove(max_logl_mode=True)`` converges each noise branch separately,
     to its own plateau. psd and galfor are two parameterizations of the same
@@ -123,16 +123,31 @@ class JointNoiseSearch(Move):
     minus its private loop -- the right inner behaviour here. Wrapping the
     ``*_search`` moves would nest two plateau loops.
 
+    This is also what makes ``Stage(kind="search")`` correct for these
+    stages: ``SearchRecipeStep`` reports done on its FIRST check, because the
+    stopping criterion is supposed to live INSIDE the move. A stage that
+    listed the moves side by side would run one pass and advance -- the
+    criterion has to span the whole stage, which is what this object is.
+
     Module level, not a closure: the pre-build fit must pickle/deepcopy
     (LISA Analysis Tools-wide rule), so a local class would break it.
     """
 
+    def __init__(self, name, inner_names, **kwargs):
+        super().__init__(name, **kwargs)
+        self.inner_names = list(inner_names)
+
     def setup(self, ctx):
         from lisatools.globalfit.moves.globalfitmove import MaxLogLCombineMove
 
-        inner = [ctx.stock_moves["psd_pe"], ctx.stock_moves["galfor_pe"]]
+        missing = [n for n in self.inner_names if n not in ctx.stock_moves]
+        if missing:
+            raise ValueError(
+                f"{self.name}: no stock move(s) {missing} (available: "
+                f"{sorted(ctx.stock_moves)})."
+            )
         mv = MaxLogLCombineMove(
-            inner,
+            [ctx.stock_moves[n] for n in self.inner_names],
             num_checks=int(os.environ.get("NOISE_SEARCH_CHECKS", "5")),
             share_temperature_control=False,
         )
@@ -172,19 +187,23 @@ def build_fit():
     # and biasing the PSD.
     vgb = [Move("vgb_pe", branch="vgb")]
 
-    joint_noise_search = [JointNoiseSearch("noise_joint_search", branch="psd")]
+    # Stage 1: noise alone. Stage 2 and the GB search: noise + VGBs, with the
+    # max-logl criterion spanning ALL of them -- one object per stage, so the
+    # convergence is joint rather than each move plateauing separately.
+    noise_only = [JointMaxLogLSearch(
+        "noise_joint_search", ["psd_pe", "galfor_pe"], branch="psd")]
+    noise_vgb = [JointMaxLogLSearch(
+        "noise_vgb_joint_search", ["psd_pe", "galfor_pe", "vgb_pe"],
+        branch="psd")]
 
     stages = []
     if not _env_flag("STAGE_SKIP_NOISE"):
-        # Stage 1: noise ONLY -- no VGBs yet.
         stages.append(Stage(
-            name="noise_search", kind="search", moves=joint_noise_search,
+            name="noise_search", kind="search", moves=noise_only,
             combine_kwargs=dict(share_temperature_control=False),
         ))
-        # Stage 2: the same joint noise search, now WITH the VGBs sampling.
         stages.append(Stage(
-            name="noise_vgb_search", kind="search",
-            moves=joint_noise_search + vgb,
+            name="noise_vgb_search", kind="search", moves=noise_vgb,
             combine_kwargs=dict(share_temperature_control=False),
         ))
     if _env_flag("STAGE_NOISE_ONLY"):
@@ -206,7 +225,7 @@ def build_fit():
             # Noise stays in SEARCH (joint max-logl) mode through the GB
             # search. Per-stage move-name uniqueness (recipe.py ebd8612) is
             # what lets these recur across stages.
-            moves=joint_noise_search + vgb + [
+            moves=noise_vgb + [
                 Move("rj_fstat_mcmc_search", branch="gb"),
                 Move("rj_prior_removal", branch="gb"),
             ],
