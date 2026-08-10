@@ -3352,15 +3352,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
         return True
 
-    def _proposal_cholesky(self, model, band_sorter, ids):
+    def _proposal_cholesky(self, model, band_sorter, ids, slots=None):
         """Proposal Cholesky factors for ``ids``: table lookup, else direct.
 
         Falls back to the direct per-block computation whenever the table is
         unavailable -- a cold chain with no live sources, or a caller that
         reaches the in-model step without ``_ensure_proposal_tables``.
+
+        ``slots`` are the per-source buffer slots, aligned row-for-row with
+        ``ids`` (both are ``picked[...][alive]``). They are what the sig-het
+        fast info-matrix route needs; ``None`` (the shared-table path, which
+        spans the whole cold chain and has no single block's slots) keeps the
+        validated chunked route.
         """
         if getattr(band_sorter, "infomat_take_inds", None) is None:
-            return self._compute_proposal_cholesky(model, band_sorter, ids)
+            return self._compute_proposal_cholesky(
+                model, band_sorter, ids, slots=slots)
         # The direct path sets these as a side effect; the table path must
         # set them too (in_model_proposal maps the drawn jump back with them).
         s = self.xp.ones(band_sorter.coords.shape[1])
@@ -3369,7 +3376,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._proposal_param_scales = s
         return band_sorter.draw_infomat(ids)
 
-    def _compute_proposal_cholesky(self, model, band_sorter, ids):
+    def _compute_proposal_cholesky(self, model, band_sorter, ids, slots=None):
         """Batched Cholesky of the inverse information matrix for ``ids``.
 
         Domain-symmetric through the fast computation objects:
@@ -3407,11 +3414,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # iteration and lumps three very different costs together (the
         # information-matrix kernel, the numerical Jacobian, and the
         # eigendecomposition). Split them so the next run attributes it.
+        # The sig-het fast route (SIGHET_INFOMAT) scores through get_ll_wdm
+        # against the in-model reference, and while that reference is live
+        # ``data_index`` means the per-source BUFFER SLOT -- not the walker.
+        # Raw comps take no such argument, so it goes only to the sig-het
+        # wrapper (identified by its ``.chunked`` delegate, the same idiom
+        # _fstat_NM uses). Without slots the wrapper falls back to chunked,
+        # which is what the shared-table caller wants.
+        _di = {}
+        if slots is not None and hasattr(_info_comp, "chunked"):
+            _di["data_index"] = xp.asarray(slots, dtype=xp.int32)
+
         _tm = getattr(self, "_prop_timer", None)
         with _tspan(_tm, "infomat_kernel"):
             info_phys = _RoutedBandEngine.route_information_matrix(
                 _info_comp, model.analysis_container_arr, params_phys,
-                inds=_test_inds, noise_index=walker_inds,
+                inds=_test_inds, noise_index=walker_inds, **_di,
             )
 
         # Conditioning scales for the sampling basis (fdot spans ~1e-13 in
@@ -3693,7 +3711,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # dimensional VGB move) never build the info-matrix Cholesky.
         with _tspan(tm, "inmodel_cholesky"):
             chol = (
-                self._proposal_cholesky(model, band_sorter, ids)
+                self._proposal_cholesky(model, band_sorter, ids, slots=slots)
                 if self.use_info_mat_proposal
                 else None
             )
