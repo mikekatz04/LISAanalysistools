@@ -404,6 +404,10 @@ class GFCombineMove(CombineMove, GlobalFitMove):
                 )
         return state, accepted
 
+    def _propose_moves_once(self, model, state):
+        """One pass over the wrapped moves (the plain GFCombineMove body)."""
+        return GFCombineMove._propose_moves(self, model, state)
+
     def _propose_moves(self, model, state):
         if getattr(self, "random_choice", False) and len(self.moves) > 1:
             # One move per step, drawn from the sampler's RNG so the choice
@@ -461,3 +465,63 @@ class GFCombineMove(CombineMove, GlobalFitMove):
             flush=True,
         )
         return state, accepted_out
+
+
+class MaxLogLCombineMove(GFCombineMove):
+    """Combine move whose max-logL convergence spans ALL wrapped moves.
+
+    ``PSDMove(max_logl_mode=True)`` converges each noise branch SEPARATELY:
+    every move runs its own ``run_move_max_likelihood`` loop to its own
+    plateau. For a joint search that is the wrong criterion -- psd and galfor
+    are two parameterizations of ONE noise model, so maximizing them
+    independently can stall each at a plateau the pair could climb past
+    together (galfor moves change the residual the psd move is fitting, and
+    vice versa).
+
+    This promotes the criterion one level: the wrapped moves each run a
+    single pass, and THIS object owns the loop, checking the cold-chain max
+    log-likelihood over the whole set. Effectively one move, maximizing
+    ``logl`` over repeated iterations of psd AND galfor together.
+
+    Wrap the ``*_pe`` moves, not the ``*_search`` ones. ``max_logl_mode`` is
+    consulted in exactly one place (``psdmove.py:918``) -- it only chooses
+    between the plateau loop and a single ``run_move_for_loop`` -- so the pe
+    move IS the search move minus its private loop, which is precisely the
+    inner behaviour wanted here. Wrapping the search moves would nest two
+    plateau loops.
+
+    The plateau rule mirrors ``PSDMove.run_move_max_likelihood`` exactly:
+    exit after ``num_checks`` consecutive non-improving iterations, and only
+    start counting once the likelihood has moved at least once (so a move
+    that has not yet taken effect cannot trip the exit immediately).
+    """
+
+    def __init__(self, *args, num_checks: int = 5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_checks = int(num_checks)
+
+    def _propose_moves(self, model, state):
+        num_so_far = 0
+        max_logl = -np.inf
+        changed_once = False
+        accepted = None
+        n_iter = 0
+        while num_so_far < self.num_checks:
+            state, accepted = self._propose_moves_once(model, state)
+            n_iter += 1
+            cur = state.log_like[0].max()
+            if cur != max_logl and not np.isinf(max_logl):
+                changed_once = True
+            if cur > max_logl:
+                max_logl = cur
+                num_so_far = 0
+            elif changed_once:
+                num_so_far += 1
+        if os.environ.get("GF_MOVE_TIMING", "0") == "1":
+            print(
+                f"[GF_TIMING] stage={getattr(self, 'gf_stage_name', '?')} "
+                f"max_logl_combine converged after {n_iter} iterations "
+                f"(max_logl={max_logl:.6f})",
+                flush=True,
+            )
+        return state, accepted

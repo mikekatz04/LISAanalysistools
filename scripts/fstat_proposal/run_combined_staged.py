@@ -78,9 +78,13 @@ def _apply_smoke_defaults() -> None:
         "GB_NTEMPS": "6",
         "VGB_NTEMPS": "4",
         "PSD_NTEMPS": "4",
-        # --- band: ~2 sub-bands instead of 13 ---
+        # --- band: 5 WDM layers instead of 13 ---
+        # _band_klohi snaps INWARD and requires >= 3 whole layers, so the
+        # span must clear ~4*layer_df (1.3889e-4 Hz) after snapping. 7.0-7.3
+        # mHz gives k_lo=51, k_hi=52 -> ONE layer, and raises.
+        # 7.0-7.8 mHz gives k_lo=51, k_hi=56 -> 5 layers, 3 interior.
         "GB_MIN_FREQ": "7.0e-3",
-        "GB_MAX_FREQ": "7.3e-3",
+        "GB_MAX_FREQ": "7.8e-3",
         "GB_NUM_REPEAT_PROPOSALS": "20",
         "GB_N_SUBBANDS": "256",
         # --- F-stat fit: every stage still RUNS, each does less work ---
@@ -98,6 +102,42 @@ def _apply_smoke_defaults() -> None:
     }
     for k, v in smoke.items():
         os.environ.setdefault(k, v)
+
+
+from lisatools.globalfit.moves.globalfitmove import Move  # noqa: E402
+
+
+class JointNoiseSearch(Move):
+    """psd + galfor converging under ONE max-logl criterion.
+
+    ``PSDMove(max_logl_mode=True)`` converges each noise branch separately,
+    to its own plateau. psd and galfor are two parameterizations of the same
+    noise model -- galfor moves change the residual the psd move is fitting
+    and vice versa -- so maximizing them independently can stall each where
+    the pair could still climb together. This promotes the criterion to span
+    both.
+
+    Wraps the ``*_pe`` moves DELIBERATELY: ``max_logl_mode`` is consulted in
+    exactly one place (``psdmove.py:918``), choosing between the plateau loop
+    and a single ``run_move_for_loop``. So the pe move IS the search move
+    minus its private loop -- the right inner behaviour here. Wrapping the
+    ``*_search`` moves would nest two plateau loops.
+
+    Module level, not a closure: the pre-build fit must pickle/deepcopy
+    (LISA Analysis Tools-wide rule), so a local class would break it.
+    """
+
+    def setup(self, ctx):
+        from lisatools.globalfit.moves.globalfitmove import MaxLogLCombineMove
+
+        inner = [ctx.stock_moves["psd_pe"], ctx.stock_moves["galfor_pe"]]
+        mv = MaxLogLCombineMove(
+            inner,
+            num_checks=int(os.environ.get("NOISE_SEARCH_CHECKS", "5")),
+            share_temperature_control=False,
+        )
+        mv.gf_move_name = self.name
+        return mv
 
 
 def build_fit():
@@ -132,19 +172,28 @@ def build_fit():
     # and biasing the PSD.
     vgb = [Move("vgb_pe", branch="vgb")]
 
+    joint_noise_search = [JointNoiseSearch("noise_joint_search", branch="psd")]
+
     stages = []
     if not _env_flag("STAGE_SKIP_NOISE"):
+        # Stage 1: noise ONLY -- no VGBs yet.
         stages.append(Stage(
-            name="noise_search", kind="search", moves=noise_search + vgb,
+            name="noise_search", kind="search", moves=joint_noise_search,
+            combine_kwargs=dict(share_temperature_control=False),
+        ))
+        # Stage 2: the same joint noise search, now WITH the VGBs sampling.
+        stages.append(Stage(
+            name="noise_vgb_search", kind="search",
+            moves=joint_noise_search + vgb,
             combine_kwargs=dict(share_temperature_control=False),
         ))
     stages += [
         Stage(
             name="gb_search", kind="rj",
-            # Noise stays in SEARCH (max-logl) mode through the GB search --
-            # not PE. Per-stage move-name uniqueness (recipe.py ebd8612) is
-            # what lets psd_search/galfor_search/vgb_pe recur across stages.
-            moves=noise_search + vgb + [
+            # Noise stays in SEARCH (joint max-logl) mode through the GB
+            # search. Per-stage move-name uniqueness (recipe.py ebd8612) is
+            # what lets these recur across stages.
+            moves=joint_noise_search + vgb + [
                 Move("rj_fstat_mcmc_search", branch="gb"),
                 Move("rj_prior_removal", branch="gb"),
             ],
