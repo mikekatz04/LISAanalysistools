@@ -116,25 +116,38 @@ def build_fit():
     for branch in ("mbh", "emri", "sobbh"):
         fit.remove_branch(branch)
 
+    # Registered GB move names (build_gb_moves / setup_gb_moves) differ from
+    # the shorthand the run is discussed in:
+    #   gb_rj_fstat_search  -> rj_fstat_mcmc_search
+    #   gb_rj_prior_removal -> rj_prior_removal
+    #   gb_rj_fstat_pe      -> rj_fstat_mcmc
+    #   gb_rj_prior_pe      -> rj_prior
     noise_search = [Move("psd_search", branch="psd"),
                     Move("galfor_search", branch="galfor")]
     noise_pe = [Move("psd_pe", branch="psd"),
                 Move("galfor_pe", branch="galfor")]
+    # VGBs are KNOWN sources: fixed-dimensional, no RJ, nothing to search
+    # for. They sample from the first stage onward so their power is being
+    # fitted while the noise converges, rather than sitting in the residual
+    # and biasing the PSD.
+    vgb = [Move("vgb_pe", branch="vgb")]
 
     stages = []
     if not _env_flag("STAGE_SKIP_NOISE"):
         stages.append(Stage(
-            name="noise_search", kind="search", moves=noise_search,
+            name="noise_search", kind="search", moves=noise_search + vgb,
             combine_kwargs=dict(share_temperature_control=False),
         ))
     stages += [
         Stage(
             name="gb_search", kind="rj",
-            # Noise keeps sampling in PE mode underneath the GB search, so
-            # the search sees a live PSD. Per-stage move-name uniqueness
-            # (recipe.py ebd8612) is what lets psd_pe/galfor_pe recur below.
-            moves=noise_pe + [Move("rj_prior_search", branch="gb"),
-                              Move("in_model", branch="gb")],
+            # Noise stays in SEARCH (max-logl) mode through the GB search --
+            # not PE. Per-stage move-name uniqueness (recipe.py ebd8612) is
+            # what lets psd_search/galfor_search/vgb_pe recur across stages.
+            moves=noise_search + vgb + [
+                Move("rj_fstat_mcmc_search", branch="gb"),
+                Move("rj_prior_removal", branch="gb"),
+            ],
             step_kwargs=dict(
                 plateau_branch="gb",
                 convergence_iter=int(os.environ.get("GB_PLATEAU_ITERS", "5")),
@@ -142,11 +155,18 @@ def build_fit():
             combine_kwargs=dict(share_temperature_control=False),
         ),
         Stage(
-            name="gb_pe", kind="pe",
-            moves=noise_pe + [Move("in_model", branch="gb"),
-                              Move("rj_prior", branch="gb"),
-                              Move("vgb_pe", branch="vgb")],
-            combine_kwargs=dict(share_temperature_control=False),
+            name="full_pe", kind="pe",
+            moves=noise_pe + [
+                Move("rj_fstat_mcmc", branch="gb"),
+                Move("rj_prior", branch="gb"),
+            ] + vgb,
+            # Draw ONE move per step (with replacement) instead of running
+            # all five in a fixed order -- the stock eryn move-selection
+            # semantics. Needs GFCombineMove(random_choice=True).
+            combine_kwargs=dict(
+                share_temperature_control=False,
+                random_choice=_env_flag("FULL_PE_RANDOM_CHOICE", "1"),
+            ),
         ),
     ]
     fit.recipe = Recipe(stages)

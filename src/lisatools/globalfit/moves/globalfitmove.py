@@ -364,9 +364,20 @@ class GFCombineMove(CombineMove, GlobalFitMove):
     ``GF_MOVE_TIMING_SYNC=1`` additionally synchronizes the current cupy
     stream at each move boundary so asynchronous kernel time is attributed to
     the move that launched it.
+
+    ``random_choice=True`` draws ONE wrapped move per step (uniformly, with
+    replacement, from ``model.random``) instead of running all of them in a
+    fixed order -- the stock eryn move-selection semantics. Default ``False``
+    keeps eryn's run-them-all behaviour, so existing stages are untouched.
+    Useful for a PE stage where the moves are alternative proposals for the
+    same state rather than a pipeline that has to run start to finish.
     """
 
     update_comm_special = True
+
+    def __init__(self, *args, random_choice: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.random_choice = bool(random_choice)
 
     def propose(self, model, state):
         # Simple-API branches (sub_states all None, e.g. erebor.blank) temper
@@ -394,6 +405,20 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         return state, accepted
 
     def _propose_moves(self, model, state):
+        if getattr(self, "random_choice", False) and len(self.moves) > 1:
+            # One move per step, drawn from the sampler's RNG so the choice
+            # is reproducible under a fixed seed. Sub-state guards in
+            # propose() still apply to whichever move ran.
+            k = int(model.random.randint(len(self.moves)))
+            move = self.moves[k]
+            if isinstance(move, tuple):  # (move, weight); weight unused here
+                move = move[0]
+            name = getattr(move, "gf_move_name", type(move).__name__)
+            if os.environ.get("GF_MOVE_TIMING", "0") == "1":
+                print(f"[GF_TIMING] stage={getattr(self, 'gf_stage_name', '?')} "
+                      f"random_choice -> {name}", flush=True)
+            return move.propose(model, state)
+
         if os.environ.get("GF_MOVE_TIMING", "0") != "1":
             return super().propose(model, state)
 
