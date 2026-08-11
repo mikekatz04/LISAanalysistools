@@ -15,6 +15,7 @@ single shard. The WDM basis falls back to the ACA route until the WDM
 counterpart kernels land in domains.cu.
 """
 
+import os
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -173,6 +174,110 @@ class PSDMove(GlobalFitMove, StretchMove):
         # Debug escape hatch (see the note in the legacy MultiGPUPSDMove):
         # when True, psd_log_like bypasses the DCGA routing entirely.
         self._force_parent_path = False
+        self._setup_debug()
+
+    # Noise-model twin of the per-branch ``{BRANCH}_DEBUG`` plot hooks in
+    # addremovemove/gbspecialstretch. The prefix follows the move's sampled
+    # branch: ``PSD_DEBUG`` on the psd move, ``GALFOR_DEBUG`` (alias
+    # ``FG_DEBUG``) on the galfor move, ``SGWB_DEBUG`` on sgwb. Knobs:
+    #   {P}_DEBUG             "1" arms the plot hook (default off)
+    #   {P}_DEBUG_DIR         output folder (default ./gf_output/{branch}_debug/)
+    #   {P}_DEBUG_PLOT_WALKER walker / analysis container plotted (0)
+    #   {P}_DEBUG_EVERY       plot only every Nth propose (1)
+    def _setup_debug(self) -> None:
+        """Read the ``{PSD,GALFOR/FG,SGWB}_DEBUG`` env options (from __init__)."""
+        sampled = list(self.sampled_branches or self.NOISE_BRANCHES)
+        if sampled == ["galfor"]:
+            prefixes = ("GALFOR", "FG")
+        elif sampled == ["sgwb"]:
+            prefixes = ("SGWB",)
+        else:
+            prefixes = ("PSD",)
+        self._debug_prefix = prefixes[0]
+
+        def _opt(name, default):
+            for p in prefixes:
+                v = os.environ.get(f"{p}_{name}")
+                if v not in (None, ""):
+                    return v
+            return default
+
+        self.debug = bool(int(_opt("DEBUG", "0")))
+        self.debug_plot_dir = _opt("DEBUG_DIR", f"./gf_output/{sampled[0]}_debug/")
+        self.debug_plot_walker = int(_opt("DEBUG_PLOT_WALKER", "0"))
+        self.debug_every = max(1, int(_opt("DEBUG_EVERY", "1")))
+        self._debug_step = 0
+        if self.debug:
+            logger.info(
+                "[%s_DEBUG] armed: dir=%s walker=%d every=%d",
+                self._debug_prefix, self.debug_plot_dir,
+                self.debug_plot_walker, self.debug_every,
+            )
+
+    def _debug_plot_psd_vs_residual(self) -> None:
+        """Overlay the walker's current noise model on the residual's
+        per-layer power. For the WDM basis ``E[w_mn^2] == S_wdm[m]`` (the
+        fold validation contract), so on a converged noise fit the two
+        curves sit on top of each other; a mismatch localizes which layers
+        the fit is missing."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            def _h(a):
+                return a.get() if hasattr(a, "get") else np.asarray(a)
+
+            w = self.debug_plot_walker
+            ac = self.acs[w]
+            res = _h(ac.data.arr)
+            S = _h(ac.sens_mat[:])
+
+            nch = res.shape[0]
+            res_pow = np.abs(res) ** 2
+            if res_pow.ndim == 3:
+                res_pow = res_pow.mean(axis=-1)
+            if S.ndim == res.ndim + 1 and S.shape[0] == S.shape[1]:
+                Sd = np.stack([S[i, i] for i in range(nch)])
+            else:
+                Sd = S[:nch]
+            if Sd.ndim == 3:
+                Sd = Sd.mean(axis=-1)
+
+            settings = getattr(ac.sens_mat, "basis_settings", None)
+            f = _h(settings.f_arr) if hasattr(settings, "f_arr") else None
+            n_layer = res_pow.shape[-1]
+            if f is None or len(f) != n_layer:
+                f = np.arange(n_layer, dtype=float)
+            good = f > 0
+
+            os.makedirs(self.debug_plot_dir, exist_ok=True)
+            move = getattr(self, "gf_move_name", self._debug_prefix.lower())
+            labels = ("X", "Y", "Z")
+            fig, axes = plt.subplots(nch, 1, figsize=(8, 2.6 * nch), sharex=True)
+            axes = np.atleast_1d(axes)
+            for i in range(nch):
+                ch = labels[i] if i < len(labels) else str(i)
+                axes[i].loglog(f[good], res_pow[i][good], lw=0.8,
+                               label=f"residual E[w^2] ({ch})")
+                axes[i].loglog(f[good], np.real(Sd[i])[good], "k--", lw=1.0,
+                               label="noise model S")
+                axes[i].legend(fontsize=7, loc="upper right")
+                axes[i].set_ylabel("power")
+            axes[-1].set_xlabel("f [Hz]")
+            axes[0].set_title(f"{move}: walker {w}, propose {self._debug_step}")
+            fname = os.path.join(
+                self.debug_plot_dir,
+                f"{move}_psd_vs_res_{self._debug_step:05d}.png",
+            )
+            fig.savefig(fname, dpi=110, bbox_inches="tight")
+            plt.close(fig)
+            logger.info("[%s_DEBUG] wrote %s", self._debug_prefix, fname)
+        except Exception as e:  # debug hooks must never kill a run
+            logger.warning(
+                "[%s_DEBUG] psd-vs-residual plot skipped: %r",
+                self._debug_prefix, e,
+            )
 
     @property
     def dcga(self) -> DomainComputationGroupArray:
@@ -982,6 +1087,11 @@ class PSDMove(GlobalFitMove, StretchMove):
         # compute_log_like's scoring loop, where no other move can observe it.
         self.acs.reset_linear_psd_arr()
         after_vals = self.acs.likelihood()
+
+        if self.debug:
+            if self._debug_step % self.debug_every == 0:
+                self._debug_plot_psd_vs_residual()
+            self._debug_step += 1
 
         new_state.log_like[0] = after_vals
         # eryn-facing acceptance uses the engine (cold-chain) shape
