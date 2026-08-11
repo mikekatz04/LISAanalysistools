@@ -266,5 +266,211 @@ class InstrumentBasisCacheDeviceKeyTest(unittest.TestCase):
             sens_mod.current_device = orig
 
 
+class BatchedLikelihoodParityTest(unittest.TestCase):
+    """Tier 3: the batched likelihood twin matches the per-walker producer."""
+
+    def _parity(self, settings, complex_data=False):
+        from lisatools.diagnostic import (
+            batched_residual_full_source_and_noise_likelihoods,
+            residual_full_source_and_noise_likelihood,
+        )
+        from lisatools.sensitivity import SensitivityMatrixBase, _mat3x3_det_inv
+
+        basis = tuple(settings.basis_shape_active)
+        nw, nch = 5, 3
+        rng = np.random.default_rng(3)
+        # random SPD covariance stacks (elementwise over the basis grid)
+        A = rng.normal(size=(nw, nch, nch) + basis)
+        C = np.einsum("wik...,wjk...->wij...", A, A)
+        for i in range(nch):
+            C[:, i, i] += 3.0
+        if complex_data:
+            res = rng.normal(size=(nw, nch) + basis) + 1j * rng.normal(
+                size=(nw, nch) + basis
+            )
+        else:
+            res = rng.normal(size=(nw, nch) + basis)
+
+        per_walker = []
+        for w in range(nw):
+            sm = SensitivityMatrixBase(settings)
+            sm.sens_mat = C[w].copy()
+            sig = settings.associated_class(res[w].copy(), settings)
+            per_walker.append(
+                residual_full_source_and_noise_likelihood(sig, sm)
+            )
+        per_walker = np.asarray(per_walker, dtype=float)
+
+        Cb = np.moveaxis(C, 0, 2)  # (nch, nch, nw, *basis)
+        detC, invC = _mat3x3_det_inv(Cb, np)
+        bad = ~np.isfinite(invC)
+        if bad.any():
+            invC = np.where(bad, 0.0, invC)
+        det_bad = ~np.isfinite(detC)
+        if det_bad.any():
+            detC = np.where(det_bad, 1.0, detC)
+        batched = np.asarray(
+            batched_residual_full_source_and_noise_likelihoods(
+                res, Cb, invC, detC, settings
+            ),
+            dtype=float,
+        )
+        self.assertTrue(np.all(np.isfinite(batched)))
+        np.testing.assert_allclose(batched, per_walker, rtol=1e-12)
+
+    def test_wdm_parity(self):
+        try:
+            from lisatools.domains import WDMSettings
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"lisatools not available: {exc}")
+        self._parity(WDMSettings(8, 8, 5.0))
+
+    def test_fd_parity(self):
+        try:
+            from lisatools.domains import FDSettings
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"lisatools not available: {exc}")
+        self._parity(FDSettings(N=64, df=1e-4), complex_data=True)
+
+
+class BatchedMoveStockParityTest(unittest.TestCase):
+    """Tier 3, end to end: PSD_BATCH route vs the per-walker route on the
+    real synthetic noise_only fit (real ACA, real composite backend, real
+    WDM grid) — scores equal to <= 1e-12 and identical seeded accept/reject
+    decisions."""
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        import tempfile
+
+        os.environ.setdefault("USE_GPU", "0")
+        os.environ.setdefault("MAKE_DIAGNOSTIC_PLOTS", "0")
+        cls._file_store = tempfile.mkdtemp(prefix="psdbatch_test_")
+        cls._old_store = os.environ.get("FILE_STORE_DIR")
+        os.environ["FILE_STORE_DIR"] = cls._file_store
+
+    @classmethod
+    def tearDownClass(cls):
+        import os
+        import shutil
+
+        if cls._old_store is None:
+            os.environ.pop("FILE_STORE_DIR", None)
+        else:
+            os.environ["FILE_STORE_DIR"] = cls._old_store
+        shutil.rmtree(cls._file_store, ignore_errors=True)
+
+    def _fixture(self, variant="noise_only", sampled=("psd", "galfor")):
+        try:
+            from mpi4py import MPI
+            from eryn.state import BranchSupplemental
+
+            from lisatools.globalfit.recipe import build_noise_moves
+            from lisatools.globalfit.run import GlobalFit
+            from lisatools.globalfit.stock import erebor
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"stock global-fit stack not available: {exc}")
+
+        np.random.seed(1234)  # load_info start draws -> reproducible fixture
+        fit = getattr(erebor, variant)(
+            nwalkers=4, ntemps=2, data_mode="synthetic"
+        )
+        curr = fit.build()
+        gf = GlobalFit(curr, MPI.COMM_WORLD)
+        priors = {}
+        for name in curr.branch_names:
+            priors.update(curr.source_info[name].priors)
+        state = gf.load_info(priors)
+        nt, nw = gf.ntemps, gf.nwalkers
+        state.supplemental = BranchSupplemental(
+            {"walker_inds": np.tile(np.arange(nw), (nt, 1))},
+            base_shape=(nt, nw),
+            copy=True,
+        )
+        acs = gf.setup_acs(state)
+
+        def make_move(psd_batch=True):
+            _, pe_move = build_noise_moves(
+                curr.engine_info, curr, acs, priors,
+                sampled_branches=list(sampled), num_repeats=1,
+            )
+            pe_move.psd_batch = bool(psd_batch)
+            return pe_move
+
+        return curr, state, acs, make_move, tuple(sampled)
+
+    def _log_like_parity(self, variant, sampled):
+        curr, state, acs, make_move, sampled = self._fixture(
+            variant=variant, sampled=sampled
+        )
+        from eryn.state import BranchSupplemental
+
+        move_b = make_move(psd_batch=True)
+        move_p = make_move(psd_batch=False)
+
+        coords = {
+            k: np.array(move_b._work_branch(state, k).coords)
+            for k in sampled
+        }
+        nt_mod, nw_mod = coords["psd"].shape[:2]
+        supps = BranchSupplemental(
+            {"walker_inds": np.tile(np.arange(nw_mod), (nt_mod, 1))},
+            base_shape=(nt_mod, nw_mod),
+            copy=True,
+        )
+
+        self.assertTrue(
+            move_b._batched_route_ready(),
+            f"batched route unexpectedly OFF: {move_b._batch_route_reason}",
+        )
+        self.assertFalse(move_p._batched_route_ready())
+
+        logl_b, _ = move_b.compute_log_like(coords, supps=supps)
+        logl_p, _ = move_p.compute_log_like(coords, supps=supps)
+
+        finite = np.isfinite(logl_p) & (logl_p > -1e299)
+        self.assertTrue(finite.any())
+        np.testing.assert_allclose(logl_b, logl_p, rtol=1e-12)
+
+    def test_compute_log_like_parity(self):
+        self._log_like_parity("noise_only", ("psd", "galfor"))
+
+    def test_compute_log_like_parity_sgwb(self):
+        # covers the batched SGWB magnitude branch (kernel fast path is
+        # gated off whenever the model carries an sgwb branch)
+        self._log_like_parity("noise_sgwb", ("psd", "galfor", "sgwb"))
+
+    def test_seeded_propose_decisions_match(self):
+        from copy import deepcopy
+        from types import SimpleNamespace
+
+        results = []
+        for psd_batch in (True, False):
+            curr, state, acs, make_move, _ = self._fixture()
+            move = make_move(psd_batch=psd_batch)
+            model = SimpleNamespace(
+                analysis_container_arr=acs,
+                map_fn=map,
+                random=np.random.RandomState(42),
+            )
+            np.random.seed(7)  # temperature swaps / permutations
+            new_state, accepted = move.propose(model, deepcopy(state))
+            results.append(
+                dict(
+                    accepted=np.asarray(accepted).copy(),
+                    psd=np.array(new_state.branches_coords["psd"]),
+                    galfor=np.array(new_state.branches_coords["galfor"]),
+                    logl=np.array(new_state.log_like),
+                )
+            )
+
+        b, p = results
+        np.testing.assert_array_equal(b["accepted"], p["accepted"])
+        np.testing.assert_allclose(b["psd"], p["psd"], rtol=0, atol=0)
+        np.testing.assert_allclose(b["galfor"], p["galfor"], rtol=0, atol=0)
+        np.testing.assert_allclose(b["logl"], p["logl"], rtol=1e-10)
+
+
 if __name__ == "__main__":
     unittest.main()

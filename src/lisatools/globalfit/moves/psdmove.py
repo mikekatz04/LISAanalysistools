@@ -36,9 +36,19 @@ from eryn.utils.transform import TransformContainer
 from tqdm import tqdm
 
 from ...analysiscontainer import AnalysisContainerArray
+from ...diagnostic import batched_residual_full_source_and_noise_likelihoods
 from ...domaincomputation import DomainComputationGroupArray
-from ...domains import FDSettings, STFTSettings
-from ...sensitivity import XYZSensitivityBackend
+from ...domains import FDSettings, FDSignal, STFTSettings, WDMSettings
+from ...sensitivity import (
+    _XYZ_ELEMENT_SENS,
+    _mat3x3_det_inv,
+    CompositeSensitivityBackend,
+    GalacticForeground,
+    InstrumentNoise,
+    SGWB,
+    XYZSensitivityBackend,
+)
+from ...stochastic import check_stochastic
 from ...utils.device import device_context
 from ...utils.utility import asnumpy
 from ..state import GFState
@@ -85,6 +95,21 @@ class PSDMove(GlobalFitMove, StretchMove):
         permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
         tolerance: minimum allowed distance between spline knot positions in the sensitivity model.
         **kwargs: additional keyword arguments for the Move class.
+
+    Env knobs:
+        ``PSD_BATCH`` (seeds :attr:`psd_batch`, default ``1``): on the ACA
+        (composite / WDM) route, score each walker batch through ONE batched
+        covariance build + ONE batched likelihood per shard instead of the
+        per-walker Python loop — same numbers (parity asserted at
+        rtol <= 1e-12 in ``tests/test_psd_move_batched.py``), O(1) kernel
+        launches per scoring batch per device instead of O(nwalkers), and no
+        per-batch sens-mat install/restore or ``linear_psd_arr`` repack.
+        ``PSD_BATCH=0`` restores the historical per-walker path (the
+        ``_force_parent_path``-style escape hatch). The batched route
+        engages only when supported (CompositeSensitivityBackend with the
+        instrument basis cache, a linear-in-noise-levels instrument model,
+        3x3 channel structure, no frequency-layer mask, full-likelihood
+        containers); anything else silently keeps the per-walker path.
     """
 
     # canonical noise-model branch order (psd is mandatory in the model;
@@ -177,6 +202,18 @@ class PSDMove(GlobalFitMove, StretchMove):
         # Debug escape hatch (see the note in the legacy MultiGPUPSDMove):
         # when True, psd_log_like bypasses the DCGA routing entirely.
         self._force_parent_path = False
+
+        # Walker-batched ACA-route scoring (see the class docstring's
+        # PSD_BATCH entry). ``_batch_runtime`` caches the per-device
+        # walker-independent pieces (instrument bases handles, modulation
+        # matrices, extra-component covariances) — built once per device and
+        # persisted for the run (allocate-once rule); dropped from pickles.
+        self.psd_batch = bool(int(os.environ.get("PSD_BATCH", "1")))
+        self._batch_runtime = {}
+        self._batch_route_state = None  # lazily resolved: True/False
+        self._batch_route_reason = None
+        self._batch_mem_logged = set()
+
         self._setup_debug()
 
     # Noise-model twin of the per-branch ``{BRANCH}_DEBUG`` plot hooks in
@@ -370,6 +407,9 @@ class PSDMove(GlobalFitMove, StretchMove):
         """Drop the thread pool from pickles / deepcopies (sprint pickle rule)."""
         state = dict(self.__dict__)
         state["_build_pool"] = None
+        # runtime device arrays (per-device bases/modulations/extras);
+        # purely derived state, rebuilt on first use in the copy
+        state["_batch_runtime"] = {}
         return state
 
     # ------------------------------------------------------------------
@@ -794,6 +834,411 @@ class PSDMove(GlobalFitMove, StretchMove):
             run_threaded=True if self._run_threaded else None,
         )
 
+    # ------------------------------------------------------------------
+    # walker-batched ACA-route scoring (PSD_BATCH; tier 3)
+    # ------------------------------------------------------------------
+    # The per-walker ACA route builds one CompositeSensitivityMatrix per
+    # proposal row (2 basis multiplies + a WDM stochastic fold + a 3x3
+    # det/inv per walker) and reads one likelihood per container -- O(nb)
+    # Python-orchestrated kernel chains per scoring batch. Everything in
+    # that chain is either LINEAR in per-walker scalars (the instrument
+    # bases), a per-walker 1-D curve feeding a linear fold (the stochastic
+    # components), or elementwise over the basis grid (_mat3x3_det_inv, the
+    # likelihood sums) -- so a walker axis slots straight in and the whole
+    # batch is O(1) kernel launches per device. Parity with the per-walker
+    # route is exact by construction (same operations, same order); tested
+    # at rtol <= 1e-12 in tests/test_psd_move_batched.py.
+
+    def _batched_route_ready(self) -> bool:
+        """Whether the PSD_BATCH walker-batched route scores this move.
+
+        Resolved once (the run's configuration cannot change mid-run) and
+        logged; ``_batch_route_reason`` records why the per-walker path was
+        kept."""
+        if self._batch_route_state is None:
+            self._batch_route_state = ok = self._resolve_batched_route()
+            if ok:
+                logger.info("[PSD_BATCH] walker-batched ACA scoring: ON")
+            else:
+                logger.info(
+                    "[PSD_BATCH] walker-batched ACA scoring: OFF (%s)",
+                    self._batch_route_reason,
+                )
+        return self._batch_route_state
+
+    def _resolve_batched_route(self) -> bool:
+        def _no(reason):
+            self._batch_route_reason = reason
+            return False
+
+        if not self.psd_batch:
+            return _no("PSD_BATCH=0")
+        backend = self.sensitivity_backend
+        if not isinstance(backend, CompositeSensitivityBackend):
+            return _no(
+                f"sensitivity backend is {type(backend).__name__}, "
+                "not CompositeSensitivityBackend"
+            )
+        if backend._instrument_basis_cache is None:
+            return _no("instrument basis cache disabled")
+        if not issubclass(backend.instrument_component_cls, InstrumentNoise):
+            return _no("instrument component is not an InstrumentNoise")
+        if not isinstance(backend.basis_settings, (FDSettings, WDMSettings)):
+            return _no(
+                f"unsupported domain {type(backend.basis_settings).__name__}"
+            )
+        try:
+            if not self._batch_instrument_probe()._linear_in_noise_levels():
+                return _no("instrument model is not linear in the noise levels")
+        except Exception as exc:  # duck-typed test backends etc.
+            return _no(f"instrument probe failed: {exc!r}")
+        acs = getattr(self, "acs", None)
+        for attr in (
+            "linear_data_arr", "gpu_splits", "split_map", "nchannels",
+            "end_shape", "shape_sens", "_run_per_split", "_split_rows",
+        ):
+            if not hasattr(acs, attr):
+                return _no(f"ACA lacks {attr}")
+        if tuple(acs.shape_sens) != (3, 3):
+            return _no(f"channel structure {tuple(acs.shape_sens)} != (3, 3)")
+        try:
+            settings = acs.settings
+        except Exception:
+            settings = backend.basis_settings
+        if getattr(settings, "frequency_layer_mask", None) is not None:
+            # ``apply_frequency_layer_mask`` is a no-op on active-grid
+            # arrays (``arr.shape[-2] == Nf_active`` — exactly what the
+            # ACA's data / invC slices are); it only compresses FULL-grid
+            # arrays, and the batched route does not reproduce that.
+            if tuple(acs.end_shape) != tuple(settings.basis_shape_active):
+                return _no(
+                    "frequency_layer_mask would compress the data "
+                    f"(end_shape {tuple(acs.end_shape)} != active basis "
+                    f"{tuple(settings.basis_shape_active)})"
+                )
+        try:
+            for w in range(len(acs)):
+                if getattr(acs[w], "likelihood_source_only", False):
+                    return _no("a container is likelihood_source_only")
+        except Exception as exc:
+            return _no(f"container check failed: {exc!r}")
+        return True
+
+    def _batch_instrument_probe(self):
+        """A representative instrument component sharing the backend's cache.
+
+        Built exactly the way :meth:`CompositeSensitivityBackend._build_matrix`
+        builds the per-walker components (same class, same kwargs, same
+        basis-cache dict, a model of the same class), so ``probe._bases``
+        warms/reads the SAME cache entry the per-walker route uses and
+        ``probe._linear_in_noise_levels()`` answers for the real per-walker
+        models."""
+        backend = self.sensitivity_backend
+        model = backend.instrument_model_cls(
+            1.0, 1.0, backend._orbits, f"{backend.model_name}:psd_batch_probe"
+        )
+        component_kwargs = dict(
+            tdi_generation=backend.tdi_generation,
+            model=model,
+            fill_nans=backend.instrument_fill_nans,
+            **backend.instrument_component_kwargs,
+        )
+        component_kwargs["basis_cache"] = backend._instrument_basis_cache
+        return backend.instrument_component_cls(**component_kwargs)
+
+    def _batch_device_runtime(self, device) -> dict:
+        """Per-device walker-independent pieces of the batched build.
+
+        Instrument bases (via the shared basis cache), stochastic model
+        classes + modulation matrices, and the extra components' (fixed)
+        covariances -- built ONCE per device inside its context and kept for
+        the run (allocate-once rule); never pickled."""
+        rt = self._batch_runtime.get(device)
+        if rt is not None:
+            return rt
+        backend = self.sensitivity_backend
+        settings = self._backend_settings_for_device(device)
+        probe = self._batch_instrument_probe()
+        B_oms, B_acc = probe._bases(settings)
+        galfor_probe = GalacticForeground(
+            foreground_params=(0.0,) * 5,
+            modulation=backend.galfor_modulation,
+            tdi_generation=backend.tdi_generation,
+            stochastic_fn=backend.galfor_stochastic_fn,
+        )
+        sgwb_probe = SGWB(
+            sgwb_params=(0.0,),
+            stochastic_fn=backend.sgwb_stochastic_fn,
+            tdi_generation=backend.tdi_generation,
+        )
+        rt = dict(
+            settings=settings,
+            B_oms=B_oms,
+            B_acc=B_acc,
+            Xsens=_XYZ_ELEMENT_SENS[backend.tdi_generation][0],
+            galfor_fn=check_stochastic(backend.galfor_stochastic_fn),
+            galfor_mod=galfor_probe.time_modulation(settings),
+            sgwb_fn=check_stochastic(backend.sgwb_stochastic_fn),
+            sgwb_mod=sgwb_probe.time_modulation(settings),
+            extra_covs=[
+                comp.covariance(settings) for comp in backend.extra_components
+            ],
+        )
+        self._batch_runtime[device] = rt
+        return rt
+
+    def _batched_stochastic_mag(self, settings, param_rows, stoch_fn, Xsens, xp):
+        """Per-walker stochastic-only magnitudes, batched.
+
+        WDM: evaluates each walker's (cheap, 1-D) spectrum on the fold's
+        rFFT bins, then runs ONE batched fold through the existing
+        ``FDSignal.wdmtransform(is_psd=True)`` with the walkers stacked on
+        the channel axis -- the exact per-walker ``_wdm_layer_psd`` math
+        (see :func:`~lisatools.sensitivity.get_sensitivity`), one gather /
+        window-square / sum for the whole batch. Returns ``(nb, Nf_active)``
+        columns (broadcast along time downstream, mirroring the stationary
+        ``repeat``). FD: per-row :func:`get_sensitivity` (1-D, cheap),
+        stacked to ``(nb, Nf)``."""
+        if isinstance(settings, WDMSettings):
+            f_full = xp.fft.rfftfreq(settings.N, settings.data_dt)
+            df = float(f_full[1] - f_full[0])
+            idx = settings.fold_frequency_indices
+            f_idx = f_full[idx]
+            psd_full = None
+            for r in range(len(param_rows)):
+                psd_active = xp.asarray(
+                    Xsens.get_Sn(
+                        f_idx,
+                        stochastic_params=tuple(
+                            np.asarray(param_rows[r], dtype=float)
+                        ),
+                        stochastic_function=stoch_fn,
+                        include_instrument=False,
+                    )
+                )
+                if psd_full is None:
+                    psd_full = xp.zeros(
+                        (len(param_rows), f_full.shape[0]),
+                        dtype=psd_active.dtype,
+                    )
+                psd_full[r, idx] = psd_active
+            psd_fd = FDSignal(
+                psd_full,
+                FDSettings(
+                    f_full.shape[0], df, force_backend=settings.backend
+                ),
+            )
+            folded = xp.real(
+                psd_fd.wdmtransform(settings=settings, is_psd=True)
+            )
+            col = folded[:, :, 0]
+            # get_sensitivity's fill_nans=0.0 on the folded PSD
+            col[xp.isnan(col)] = 0.0
+            return col
+
+        from ...sensitivity import get_sensitivity
+
+        rows = [
+            xp.asarray(
+                get_sensitivity(
+                    settings,
+                    sens_fn=Xsens,
+                    stochastic_params=tuple(np.asarray(p, dtype=float)),
+                    stochastic_function=stoch_fn,
+                    include_instrument=False,
+                    fill_nans=0.0,
+                )
+            )
+            for p in param_rows
+        ]
+        return xp.stack(rows)
+
+    @staticmethod
+    def _add_modulated_mag(C, mag, mod, settings, xp):
+        """Add a stochastic component's ``mag x modulation`` into ``C`` in place.
+
+        The batched twin of :meth:`SeparableComponent.covariance` for the
+        magnitude-on-every-element components (galfor / sgwb): ``C`` is
+        ``(nch, nch, nb, *basis)``; ``mag`` is ``(nb, Nf)`` for the WDM
+        basis (broadcast along the trailing time axis) or ``(nb, *basis)``
+        generally."""
+        from ...sensitivity import _basis_time_axis
+
+        nch = C.shape[0]
+        nbasis = C.ndim - 3
+        if mag.ndim - 1 < nbasis:
+            mag = mag[..., None]  # WDM column -> broadcast over time
+        if mod is None:
+            for i in range(nch):
+                for j in range(nch):
+                    C[i, j] += mag
+            return
+        mod = xp.asarray(mod)
+        if mod.ndim == 2:
+            for i in range(nch):
+                for j in range(nch):
+                    C[i, j] += mag * mod[i, j]
+            return
+        if mod.ndim == 3:
+            time_axis = _basis_time_axis(settings)
+            if time_axis is None:
+                raise ValueError(
+                    "time-varying modulation on a domain with no time axis"
+                )
+            ntime = mod.shape[2]
+            shape = [1] * (1 + nbasis)  # broadcast against (nb, *basis)
+            shape[1 + time_axis] = ntime
+            for i in range(nch):
+                for j in range(nch):
+                    C[i, j] += mag * mod[i, j].reshape(shape)
+            return
+        raise ValueError("modulation must be 2D (nch,nch) or 3D (nch,nch,Ntime).")
+
+    def _score_split_batch(
+        self, split, device, walkers, psd_phys, galfor_phys, sgwb_phys
+    ) -> np.ndarray:
+        """Score one shard's walker batch: batched build + batched likelihood.
+
+        Must be called inside ``device``'s context. ``walkers`` are the
+        (unique) physical walker indices owned by ``split``; params are
+        physical-basis host rows."""
+        acs = self.acs
+        xp = acs.xp
+        rt = self._batch_device_runtime(device)
+        settings = rt["settings"]
+        nb = len(walkers)
+        basis_nd = rt["B_oms"].ndim - 2
+
+        # instrument: C[..] = Soms_d^2 * B_oms + Sa_a^2 * B_acc, walker axis
+        # broadcast (the exact per-walker InstrumentNoise.base_covariance
+        # fast path, LISAModel stores the squared levels)
+        Soms2 = xp.asarray(np.asarray(psd_phys[:, 0], dtype=float) ** 2)
+        Sa2 = xp.asarray(np.asarray(psd_phys[:, 1], dtype=float) ** 2)
+        bshape = (1, 1, nb) + (1,) * basis_nd
+        C = (
+            rt["B_oms"][:, :, None] * Soms2.reshape(bshape)
+            + rt["B_acc"][:, :, None] * Sa2.reshape(bshape)
+        )
+        if galfor_phys is not None:
+            mag = self._batched_stochastic_mag(
+                settings, galfor_phys, rt["galfor_fn"], rt["Xsens"], xp
+            )
+            self._add_modulated_mag(C, mag, rt["galfor_mod"], settings, xp)
+        if sgwb_phys is not None:
+            mag = self._batched_stochastic_mag(
+                settings, sgwb_phys, rt["sgwb_fn"], rt["Xsens"], xp
+            )
+            self._add_modulated_mag(C, mag, rt["sgwb_mod"], settings, xp)
+        for cov in rt["extra_covs"]:
+            C += cov[:, :, None]
+
+        # batched det/inv + the same sanitization as _setup_det_and_inv
+        detC, invC = _mat3x3_det_inv(C, xp)
+        bad = ~xp.isfinite(invC)
+        if bool(xp.any(bad)):
+            invC = xp.where(bad, xp.zeros_like(invC), invC)
+        det_bad = ~xp.isfinite(detC)
+        if bool(xp.any(det_bad)):
+            detC = xp.where(det_bad, xp.ones_like(detC), detC)
+
+        # residual gather straight off the shard's contiguous buffer (the
+        # per-container views are rebinds INTO it, so it is authoritative)
+        split_rows = np.asarray(acs.gpu_splits[split], dtype=int)
+        order = np.argsort(split_rows)
+        intra = order[
+            np.searchsorted(split_rows[order], np.asarray(walkers, dtype=int))
+        ]
+        shaped = acs.linear_data_arr[split].reshape(
+            (len(split_rows), int(acs.nchannels)) + tuple(acs.end_shape)
+        )
+        res_batch = shaped[intra]
+
+        if (device, nb) not in self._batch_mem_logged:
+            self._batch_mem_logged.add((device, nb))
+            logger.info(
+                "[PSD_BATCH] device %s: batched build for %d walkers -- "
+                "C %.1f MB + invC %.1f MB + detC %.1f MB + residual gather "
+                "%.1f MB (total ~%.1f MB)",
+                device, nb, C.nbytes / 1e6, invC.nbytes / 1e6,
+                detC.nbytes / 1e6, res_batch.nbytes / 1e6,
+                (C.nbytes + invC.nbytes + detC.nbytes + res_batch.nbytes) / 1e6,
+            )
+
+        ll = batched_residual_full_source_and_noise_likelihoods(
+            res_batch, C, invC, detC, settings
+        )
+        return asnumpy(ll)
+
+    def _score_walker_batch(
+        self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+    ) -> np.ndarray:
+        """Score one one-row-per-walker batch through the batched route.
+
+        Applies the branch transforms per row on the host (identical to the
+        per-walker :meth:`_build_sensitivity_for_walker` seam), then runs one
+        :meth:`_score_split_batch` per populated shard through the ACA's
+        ``_run_per_split`` (threaded per split on multi-GPU)."""
+        acs = self.acs
+        xp = acs.xp
+        batch = np.asarray(batch, dtype=int)
+        walkers = np.asarray(walker_inds_keep, dtype=int)[batch]
+
+        def _phys(transform_fn, coords):
+            if coords is None:
+                return None
+            return np.stack([
+                np.asarray(
+                    self._to_physical(transform_fn, coords[int(r)]),
+                    dtype=float,
+                )
+                for r in batch
+            ])
+
+        psd_phys = _phys(self.psd_transform_fn, psd_coords)
+        galfor_phys = _phys(self.galfor_transform_fn, galfor_coords)
+        sgwb_phys = _phys(self.sgwb_transform_fn, sgwb_coords)
+
+        out = np.empty(len(batch), dtype=float)
+        split_to_pos = acs._split_rows(walkers)
+
+        def _worker(split, positions):
+            positions = np.asarray(positions, dtype=int)
+            device = None if acs.gpus is None else int(acs.gpus[split])
+            with device_context(xp, device):
+                ll = self._score_split_batch(
+                    split, device, walkers[positions], psd_phys[positions],
+                    None if galfor_phys is None else galfor_phys[positions],
+                    None if sgwb_phys is None else sgwb_phys[positions],
+                )
+            out[positions] = np.asarray(ll, dtype=float)
+
+        acs._run_per_split(
+            _worker, split_to_pos,
+            run_threaded=True if self._run_threaded else None,
+        )
+        return out
+
+    def _compute_log_like_batched(
+        self, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+    ) -> np.ndarray:
+        """Batched scoring of all surviving rows, grouped one-row-per-walker.
+
+        The grouping mirrors the per-walker route's batching loop -- here it
+        bounds the batched build's memory at ``nwalkers`` covariance stacks
+        per group (not ``ntemps * nwalkers``), NOT because anything is
+        installed on the containers (nothing is)."""
+        n = int(np.asarray(walker_inds_keep).shape[0])
+        tmp_logl = np.empty(n, dtype=float)
+        remaining = np.arange(n)
+        while remaining.size:
+            _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+            batch = remaining[np.sort(first)]
+            tmp_logl[batch] = self._score_walker_batch(
+                batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+            )
+            remaining = np.setdiff1d(remaining, batch)
+        return tmp_logl
+
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
         """Compute the PSD/galfor branch log-likelihood.
 
@@ -857,6 +1302,22 @@ class PSDMove(GlobalFitMove, StretchMove):
             supps_keep = supps[logp_keep]
             logl[logp_keep] = self.psd_log_like(input_args, supps=supps_keep, **self.psd_kwargs)
 
+            self.prev_logl = logl.copy()
+            return logl, None
+
+        if self._batched_route_ready():
+            # PSD_BATCH walker-batched route (tier 3): one batched covariance
+            # build + one batched likelihood per shard per scoring group.
+            # Nothing is installed on the containers, so there is no
+            # sens-mat snapshot/restore and no linear_psd_arr repack here
+            # (the publish repack in propose() still runs and is what the
+            # rest of the run reads).
+            logl[logp_keep] = self._compute_log_like_batched(
+                walker_inds_keep,
+                psd_coords,
+                galfor_coords if has_galfor else None,
+                sgwb_coords if has_sgwb else None,
+            )
             self.prev_logl = logl.copy()
             return logl, None
 
