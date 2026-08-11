@@ -1033,6 +1033,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as e:  # debug-only: never break the sampler
             logger.warning("[GB_DEBUG %s] cold-chain snapshot skipped: %r", self.name, e)
 
+    @staticmethod
+    def _debug_slab_kwargs(buffer_obj):
+        """Slab-layout kwargs for DIRECT engine.fill_template calls in the
+        GB_DEBUG hooks. The production fills go through
+        ``SubBandBuffer._adjust_via_engine`` which forwards these; the debug
+        hooks bypass it and were failing layout inference on narrow slab
+        buffers ("templates flat size ... matches neither dense nor
+        active")."""
+        if getattr(buffer_obj, "band_slab_Nf", None) is not None:
+            return dict(band_slab_Nf=buffer_obj.band_slab_Nf,
+                        slab_min_f=buffer_obj.slab_min_f)
+        return {}
+
     def _debug_verify_rj_step(self, buffer_obj, params, alive, slots, N_vals,
                               delta_ll, keep, picked, round_i, scheduler) -> None:
         """At the RJ scoring site: independently re-verify the birth/death
@@ -1087,7 +1100,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 params_phys = self.transform_fn.both_transforms(params[d], xp=cp)
                 di = slots[d].astype(xp.int32)
                 eng.fill_template(buffer_obj, params_phys, di, N_vals[d],
-                                  factor=+1, waveform_kwargs=self.waveform_kwargs)
+                                  factor=+1, waveform_kwargs=self.waveform_kwargs,
+                                  **self._debug_slab_kwargs(buffer_obj))
                 try:
                     buffer_obj.get_ll(params[d], slots[d], slots[d], N_vals[d])
                     expected = (d_h_1 + h_h_1).real
@@ -1099,7 +1113,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     )
                 finally:
                     eng.fill_template(buffer_obj, params_phys, di, N_vals[d],
-                                      factor=-1, waveform_kwargs=self.waveform_kwargs)
+                                      factor=-1, waveform_kwargs=self.waveform_kwargs,
+                                      **self._debug_slab_kwargs(buffer_obj))
 
             if round_i in (0, 1):
                 map_cpu = (
@@ -1148,7 +1163,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         params_phys = self.transform_fn.both_transforms(params_add, xp=cp)
         di = data_index.astype(xp.int32)
         eng.fill_template(buffer_obj.acs_buffer, params_phys, di, swap_N_vals,
-                          factor=-1, waveform_kwargs=self.waveform_kwargs)
+                          factor=-1, waveform_kwargs=self.waveform_kwargs,
+                          **self._debug_slab_kwargs(buffer_obj))
         try:
             buffer_obj.get_ll(params_add, data_index, data_index, swap_N_vals)
             d_h2 = xp.asarray(buffer_obj.d_h_out).real
@@ -1165,7 +1181,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
         finally:
             eng.fill_template(buffer_obj.acs_buffer, params_phys, di, swap_N_vals,
-                              factor=+1, waveform_kwargs=self.waveform_kwargs)
+                              factor=+1, waveform_kwargs=self.waveform_kwargs,
+                              **self._debug_slab_kwargs(buffer_obj))
 
     def _debug_seq_select(self, buffer_obj, band_sorter, ids, t_i, w_i, b_i,
                           slots, curr):
@@ -1319,6 +1336,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 def __len__(self):
                     return 1
 
+            # The scratch is ONE slot; on the narrow-slab path pass the traced
+            # slot's slab origin so the engine writes the slab layout the
+            # reshape below expects.
+            _slab_kw = {}
+            if getattr(buffer_obj, "band_slab_Nf", None) is not None:
+                _slab_kw = dict(
+                    band_slab_Nf=Nf_a,
+                    slab_min_f=buffer_obj.slab_min_f[[seq["slot"]]],
+                )
             buffer_obj._likelihood_engine.fill_template(
                 _Scratch(), params_phys,
                 cp.zeros(n_src, dtype=cp.int32),
@@ -1326,6 +1352,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     cp.full(n_src, b, dtype=int)
                 ],
                 factor=+1, waveform_kwargs=self.waveform_kwargs,
+                **_slab_kw,
             )
             return _to_numpy(scratch).reshape(nc, Nf_a, Nt_a)
         except Exception as e:  # debug-only: never break the sampler
