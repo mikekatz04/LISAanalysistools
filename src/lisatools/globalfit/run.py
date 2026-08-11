@@ -38,6 +38,19 @@ from eryn.utils.plot import PlotContainer
 
 from contextlib import nullcontext as _nullcontext
 
+
+def _rss_mb() -> float:
+    """Current process max-RSS in MB (Linux reports KB, macOS bytes).
+
+    Used by the fresh-start checkpoint logging: a run killed by a cgroup /
+    OOM limit dies silently mid-allocation, so each checkpoint stamps the
+    high-water mark that was reached before it."""
+    import resource
+    import sys
+
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru / 1024.0 if sys.platform.startswith("linux") else ru / (1024.0**2)
+
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from ..utils.device import device_context, pin_main_device
 from ..utils.utility import asnumpy
@@ -527,12 +540,22 @@ class GlobalFit:
                     if self.engine_info.branch_states.get(key) is not None
                 ]
             )
-            coords = {
-                key: priors[key].rvs(
-                    size=(nt_draw, self.nwalkers, self.engine_info.nleaves_max[key])
+            # Per-branch checkpoints with the RSS high-water mark: a cgroup /
+            # OOM kill in this segment is silent, so the last line that made
+            # it to global_fit.log localizes the allocation that died.
+            self.logger.info(
+                "fresh start: drawing priors at nt_draw=%d nwalkers=%d "
+                "(RSS %.0f MB)", nt_draw, self.nwalkers, _rss_mb(),
+            )
+            coords = {}
+            for key in self.engine_info.branch_names:
+                shape = (nt_draw, self.nwalkers, self.engine_info.nleaves_max[key])
+                self.logger.info(
+                    "fresh start: drawing '%s' priors, shape %s (RSS %.0f MB)",
+                    key, shape, _rss_mb(),
                 )
-                for key in self.engine_info.branch_names
-            }
+                coords[key] = priors[key].rvs(size=shape)
+            self.logger.info("fresh start: prior draws done (RSS %.0f MB)", _rss_mb())
             inds = {
                 key: np.zeros(
                     (nt_draw, self.nwalkers, self.engine_info.nleaves_max[key]),
@@ -736,6 +759,7 @@ class GlobalFit:
             coords = {key: value[: self.ntemps].copy() for key, value in coords_full.items()}
             inds = {key: value[: self.ntemps].copy() for key, value in inds_full.items()}
 
+            self.logger.info("fresh start: building GFState (RSS %.0f MB)", _rss_mb())
             state = GFState(
                 coords,
                 inds=inds,
@@ -747,6 +771,10 @@ class GlobalFit:
                 if sub is None:
                     continue
                 nt_branch = self._branch_ntemps(key)
+                self.logger.info(
+                    "fresh start: tempered sub-state '%s' nt=%d (RSS %.0f MB)",
+                    key, nt_branch, _rss_mb(),
+                )
                 sub.initialize_tempered(
                     nt_branch,
                     self.nwalkers,
@@ -765,6 +793,9 @@ class GlobalFit:
                 if _banded not in inds:
                     continue
                 _nt_banded = self._branch_ntemps(_banded)
+                self.logger.info(
+                    "fresh start: band info '%s' (RSS %.0f MB)", _banded, _rss_mb()
+                )
                 band_temps = np.zeros(
                     (len(self.curr.source_info[_banded].band_edges) - 1, _nt_banded)
                 )
@@ -921,9 +952,18 @@ class GlobalFit:
             )
 
         acs_tmp = []
+        self.logger.info(
+            "setup_acs: building %d walker ACs (RSS %.0f MB)",
+            self.nwalkers, _rss_mb(),
+        )
         for w in range(self.nwalkers):
             with device_context(xp, _walker_device.get(w)):
                 acs_tmp.append(_build_walker_ac(w))
+            if w % 8 == 7 or w == self.nwalkers - 1:
+                self.logger.info(
+                    "setup_acs: walker AC %d/%d built (RSS %.0f MB)",
+                    w + 1, self.nwalkers, _rss_mb(),
+                )
 
         gpus = general_info.gpus
         if gpus is not None and len(gpus) > 1 and self.nwalkers % len(gpus) != 0:
@@ -1120,7 +1160,7 @@ class GlobalFit:
                         )
 
         state = self.load_info(priors)
-        self.logger.debug("state loaded")
+        self.logger.debug("state loaded (RSS %.0f MB)", _rss_mb())
 
         supps_base_shape = (ntemps, nwalkers)
         walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
