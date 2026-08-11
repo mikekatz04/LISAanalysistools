@@ -73,6 +73,11 @@ BASE_ENV = dict(
     OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1",
     VECLIB_MAXIMUM_THREADS="1", NUMEXPR_NUM_THREADS="1",
     MPLBACKEND="Agg", GF_MOVE_TIMING="1",
+    # The timing parser reads lisatools INFO lines ([comb]/[stageB]/fit
+    # wall), which reach the console only via the run's verbose knob since
+    # loginfo's propagate=False rework (7d63b95). No progress bars in the
+    # parsed stream.
+    VERBOSE="1", PROGRESS="0",
 )
 
 #: the ambient preset forces only what makes the in-move fit live; every

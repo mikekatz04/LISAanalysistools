@@ -157,6 +157,11 @@ def _spawn(arm: str, gpus: str, iterations: int) -> tuple[int, list[str]]:
     env["GPUS"] = gpus
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("MPLBACKEND", "Agg")
+    # Progress visibility: since loginfo's propagate=False rework (7d63b95)
+    # lisatools INFO lines reach the console only via the run's verbose
+    # knob -- the child's logging.basicConfig alone no longer shows them.
+    env.setdefault("VERBOSE", "1")
+    env.setdefault("PROGRESS", "0")
     env["NUM_ITERATIONS"] = str(iterations)
     cmd = [sys.executable, os.path.abspath(__file__), "--child", arm,
            "--iterations", str(iterations)]
