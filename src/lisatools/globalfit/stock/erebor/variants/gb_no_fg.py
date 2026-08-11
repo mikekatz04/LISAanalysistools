@@ -343,8 +343,15 @@ class GBNoFgGBSettings(GBSettings):
 class GBNoFgGeneralSettings(EreborGeneralSettings):
     """General block for ``gb_no_fg`` (defaults mirror the legacy file)."""
 
-    min_freq: float = 6e-3  # foreground-free band restriction
-    max_freq: float = 2.5e-2
+    # foreground-free band restriction; env-backed so MIN_FREQ/MAX_FREQ
+    # widen the data band (they were plain defaults before, which silently
+    # ignored the env vars while the GB band guard told users to set them)
+    min_freq: float = dataclasses.field(
+        default_factory=env_default("MIN_FREQ", 6e-3, float)
+    )
+    max_freq: float = dataclasses.field(
+        default_factory=env_default("MAX_FREQ", 2.5e-2, float)
+    )
     file_store_dir: str = dataclasses.field(
         default_factory=env_default("FILE_STORE_DIR", "./gf_output_gb_no_fg/")
     )
