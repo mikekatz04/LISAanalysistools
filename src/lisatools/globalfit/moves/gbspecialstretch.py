@@ -5433,8 +5433,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         walker's residual once and evaluates every candidate through the
         ``gb_signal_het_fstat_get_ll`` kernel. Requires the GB comp to be a
         ``GBSignalHetComputations`` (GB_SIGHET_INMODEL=1 wiring) built with
-        ``v4_knots > 0``, a WDM basis, and a single-shard holder; anything
-        else falls back to the chunked path with a warning.
+        ``v4_knots > 0`` and a WDM basis; anything else falls back to the
+        chunked path with a warning. Multi-shard holders go through
+        :meth:`_RoutedBandEngine.route_sighet_fstat`, which pins the scorer
+        (reference build + every score) to the reference walker's shard on
+        a device-local comp replica; single-shard holders pass through it
+        unchanged.
         """
         if os.environ.get("FSTAT_USE_SIGHET", "0") == "1":
             sig_comp = self.gb_wdm_comp
@@ -5449,16 +5453,9 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                 logger.warning(
                     "%s: FSTAT_USE_SIGHET=1 is WDM-only; falling back to "
                     "the chunked F-stat.", self.name)
-            elif _RoutedBandEngine._is_multi(holder):
-                logger.warning(
-                    "%s: FSTAT_USE_SIGHET=1 does not support multi-shard "
-                    "holders yet; falling back to the chunked F-stat.",
-                    self.name)
             else:
-                from ...sampling.fstat_gridfit import build_sighet_call_fstat
-
                 band_edges = _to_numpy(self.band_edges)
-                return build_sighet_call_fstat(
+                return _RoutedBandEngine.route_sighet_fstat(
                     sig_comp, holder, xp=self.xp,
                     Tobs=float(self._basis_settings.Tobs),
                     f0_lims_hz=(float(band_edges[0]),

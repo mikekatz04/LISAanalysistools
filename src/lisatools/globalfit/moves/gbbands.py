@@ -988,6 +988,79 @@ class _RoutedBandEngine:
             cls._assemble(num, M_pieces, 0.0, xp),
         )
 
+    @classmethod
+    def route_sighet_fstat(cls, comp, holder, *, xp, Tobs, f0_lims_hz,
+                           data_index, noise_index=None, **build_kwargs):
+        """Shard-route the sig-het shared-reference F-stat scorer.
+
+        ``comp`` is the sig-het wrapper (``GBSignalHetComputations``). Its
+        F-stat surface is stateful -- ``setup_fstat_references`` folds the
+        reference walker's residual into a stash ON the comp that every
+        later ``get_fstat_ll_wdm`` scores through -- so unlike
+        :meth:`route_fstat_ll` (one routed call per batch) the whole SCORER
+        pins to one shard: the F-stat is single-shard by contract (every
+        candidate scores against the ONE reference walker ``data_index``),
+        making the partition trivial -- that walker's shard owns every
+        call. Setup and score both run against the same module-cached
+        device-local comp replica (:meth:`_comp_for`), so the stash the
+        lazy reference-block builds write is the stash the score calls
+        read, on buffers the shard's kernels can legally dereference.
+
+        Returns the ``call_fstat`` closure from
+        :func:`lisatools.sampling.fstat_gridfit.build_sighet_call_fstat`
+        built against the reference walker's :class:`_ShardHolderView` with
+        its INTRA-shard row index; candidates in / ``(N, M)`` out are
+        host-routed across the shard's ``device_context`` (no P2P), so the
+        adapter and the sweeps never see the sharding. Single-shard holders
+        pass straight through (no overhead, no wrapper).
+        """
+        from ...sampling.fstat_gridfit import build_sighet_call_fstat
+
+        if not cls._is_multi(holder):
+            return build_sighet_call_fstat(
+                comp, holder, xp=xp, Tobs=Tobs, f0_lims_hz=f0_lims_hz,
+                data_index=data_index, noise_index=noise_index,
+                **build_kwargs)
+        if data_index is None:
+            raise ValueError(
+                "route_sighet_fstat requires an explicit data_index on "
+                "multi-shard holders (the reference walker's row; the "
+                "all-zeros default is only meaningful for a single-shard "
+                "buffer).")
+        if getattr(holder, "slab_min_f", None) is not None:
+            # Same scope assertion as route_fstat_ll: the F-stat scans one
+            # walker's FULL residual on the parent ACA, never a per-band
+            # slab -- a slab holder here means an unvalidated caller path.
+            raise NotImplementedError(
+                "route_sighet_fstat does not support narrow per-band slab "
+                "holders; F-stat runs on the parent residual ACA, which "
+                "carries no slab metadata.")
+        views = cls._shard_views(holder)
+        parts = cls._partition(
+            holder, np.atleast_1d(int(data_index)),
+            None if noise_index is None else np.atleast_1d(int(noise_index)))
+        view, (_pos, intra, intra_noise) = next(
+            (v, p) for v, p in zip(views, parts) if p[0].shape[0])
+        comp_s = cls._comp_for(comp, holder, view)
+        inner = build_sighet_call_fstat(
+            comp_s, view, xp=xp, Tobs=Tobs, f0_lims_hz=f0_lims_hz,
+            data_index=int(intra[0]),
+            noise_index=(None if intra_noise is None
+                         else int(intra_noise[0])),
+            **build_kwargs)
+
+        def call_fstat(params):
+            # Candidates in / (N, M) out are host-routed; the scorer --
+            # including the lazy reference-block builds it triggers -- runs
+            # inside the owning shard's device context.
+            params_host = np.atleast_2d(asnumpy(params))
+            with device_context(holder.xp, view.device):
+                N_s, M_s = inner(xp.asarray(params_host))
+                N_host, M_host = asnumpy(N_s), asnumpy(M_s)
+            return xp.asarray(N_host), xp.asarray(M_host)
+
+        return call_fstat
+
 
 def make_routed_band_engine(basis_settings, *, xp, gb_wdm_comp=None,
                             gb_fd_comp=None, **engine_kwargs):

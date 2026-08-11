@@ -6,8 +6,8 @@ single-shard engine: row partitioning, intra-shard index mapping, per-shard
 device-context entry, output scatter order, ``min_freq_inds`` pointer
 identity across in-place parent updates, per-slot kwarg slicing, the
 per-slot ``slab_min_f`` shard slice, the per-device comp / engine replicas
-(including the sig-het in-model reference isolation), and the single-shard
-passthrough.
+(including the sig-het in-model reference isolation), the sig-het F-stat
+scorer route (``route_sighet_fstat``), and the single-shard passthrough.
 """
 
 from __future__ import annotations
@@ -191,6 +191,75 @@ class _StubSigHetEngine:
     def clear_in_model(self):
         self._in_model = None
         self._slot_to_ref = None
+
+
+class _FakeSigHetFStatComp:
+    """Sig-het wrapper stand-in carrying the F-stat scorer contract.
+
+    Reproduces the three things ``route_sighet_fstat`` depends on:
+
+    * the STATEFUL reference stash -- ``setup_fstat_references`` folds the
+      holder row it is given into ``_fstat`` ON the comp, and
+      ``get_fstat_ll_wdm`` refuses to score without it -- so a route that
+      set up on one comp object and scored through another fails loudly;
+    * the replica contract (``chunked`` delegate + ``for_band_engine`` +
+      the ``_g`` knob dict) so ``_device_local_gb_comp`` can rebuild it;
+    * outputs derived ONLY from the stashed residual row and the candidate
+      params -- FakeMultiShardACA seeds global row ``b`` with ``b + 1``, so
+      routing to the wrong shard/row changes the numbers, while identically
+      seeded 1-shard and n-shard holders give IDENTICAL results. The device
+      each call ran under is recorded in ``calls`` (never in the output).
+    """
+
+    def __init__(self, chunked, v4_knots=128):
+        self.chunked = chunked
+        self.xp = chunked.xp
+        self._g = dict(v4_knots=int(v4_knots))
+        self._fstat = None
+        self.calls = []
+
+    @classmethod
+    def for_band_engine(cls, chunked_comp, *, v4_knots=128, **_knobs):
+        return cls(chunked_comp, v4_knots=v4_knots)
+
+    def setup_fstat_references(self, params_ref_phys, wdm_holder,
+                               data_index=0, noise_index=None,
+                               assert_max_df0=None):
+        assert len(wdm_holder.linear_data_arr) == 1, "comp must see one shard"
+        assert len(wdm_holder) == wdm_holder.acs_total_entries
+        refs = np.asarray(params_ref_phys, dtype=float)
+        row_val = float(np.real(np.asarray(
+            wdm_holder.linear_data_arr[0]).reshape(len(wdm_holder), -1)
+        )[int(data_index), 0])
+        self._fstat = dict(refs=refs.copy(), data_val=row_val)
+        self.calls.append(dict(
+            kind="setup_fstat", holder=wdm_holder,
+            data_index=int(data_index),
+            noise_index=None if noise_index is None else int(noise_index),
+            device=self.xp.current_device,
+            build_device=self.chunked._build_device,
+            n_refs=len(refs)))
+        return len(refs)
+
+    def clear_fstat_references(self):
+        self._fstat = None
+
+    def get_fstat_ll_wdm(self, params, wdm_holder=None, data_index=None,
+                         noise_index=None, fstat_mode=None, **kwargs):
+        if self._fstat is None:
+            raise RuntimeError("no reference stash; call "
+                               "setup_fstat_references first.")
+        x = np.atleast_2d(np.asarray(params, dtype=float))
+        di = (np.zeros(x.shape[0], dtype=int) if data_index is None
+              else np.asarray(data_index, dtype=int))
+        self.calls.append(dict(
+            kind="fstat", n=int(x.shape[0]), data_index=di.copy(),
+            device=self.xp.current_device,
+            build_device=self.chunked._build_device))
+        base = (self._fstat["data_val"] + 1e3 * x[:, 1]
+                + self._fstat["refs"][di, 1])
+        return (base[:, None] + np.arange(4)[None, :],
+                base[:, None] + np.arange(10)[None, :])
 
 
 class ShardRouterTest(unittest.TestCase):
@@ -752,6 +821,167 @@ class ShardRouterTest(unittest.TestCase):
             router.setup_in_model(holder, params, np.arange(6))
 
 
+class SigHetFStatRouteTest(unittest.TestCase):
+    """``route_sighet_fstat``: the stateful sig-het F-stat scorer route.
+
+    Unlike ``route_fstat_ll`` (stateless, one routed call per batch) the
+    sig-het scorer keeps its reference stash ON the comp, so the route must
+    pin the WHOLE scorer -- reference builds and every score -- to the
+    reference walker's shard on ONE stable device-local comp replica.
+    Structural half on the CPU fakes; the numerical half (real CPU comp,
+    bit-identical across holders) is ``SigHetFStatRouteRealCompTest``.
+    """
+
+    PER_BAND = (3, 8)
+    NUM_ACS = 6
+    # Tobs chosen so sighet_fstat_ref_margin_hz(128, TOBS) == 1.18e-6 --
+    # the measured-anchor scale, keeping the default ref spacing realistic.
+    TOBS = 7.776e6
+    F0_LO = 1e-3
+
+    def setUp(self):
+        try:
+            from lisatools.globalfit.moves.gbbands import _RoutedBandEngine
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"gbbands router not available: {exc}")
+        from lisatools.sampling.fstat_gridfit import (
+            sighet_fstat_ref_margin_hz)
+
+        self.RoutedEngine = _RoutedBandEngine
+        self.margin = sighet_fstat_ref_margin_hz(128, self.TOBS)
+        # blocked layout: rows 0-2 on shard 0, rows 3-5 on shard 1
+        self.holder = FakeMultiShardACA(
+            self.PER_BAND, self.NUM_ACS, 2, layout="blocked")
+        self.comp = _FakeSigHetFStatComp(
+            FakeDeviceComp(self.holder.xp, tag="sighet-chunked"))
+
+    def _route(self, comp, holder, walker_ref, **kw):
+        # spacing pinned so a stray FSTAT_SIGHET_REF_SPACING_HZ in the test
+        # environment cannot move the bucket layout the assertions rely on.
+        return self.RoutedEngine.route_sighet_fstat(
+            comp, holder, xp=holder.xp, Tobs=self.TOBS,
+            f0_lims_hz=(self.F0_LO, self.F0_LO + 10.0 * self.margin),
+            data_index=walker_ref, noise_index=walker_ref,
+            spacing_hz=self.margin, **kw)
+
+    def _candidates(self, fracs):
+        """9-col rows at ``F0_LO + frac * margin`` (all inside the comb)."""
+        p = np.zeros((len(fracs), 9))
+        p[:, 0] = 1e-22
+        p[:, 1] = self.F0_LO + np.asarray(fracs) * self.margin
+        return p
+
+    def _replica(self, comp, device):
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            _DEVICE_GB_COMP_REPLICAS)
+
+        return _DEVICE_GB_COMP_REPLICAS[(id(comp), int(device))][1]
+
+    def test_routes_to_reference_shard_with_intra_index(self):
+        """Walker 4 lives on shard 1 (blocked): setup + score must land on a
+        device-1 replica, against the shard view, with the INTRA-shard row
+        (4 -> 1), inside device 1's context."""
+        call = self._route(self.comp, self.holder, walker_ref=4)
+        self.holder.xp.device_log.clear()
+        call(self._candidates([0.3, 2.6, 5.1]))
+
+        # the prototype never ran; the work went to the device-1 replica
+        self.assertEqual(self.comp.calls, [])
+        replica = self._replica(self.comp, 1)
+        self.assertIsNot(replica, self.comp)
+        setup_calls = [c for c in replica.calls if c["kind"] == "setup_fstat"]
+        score_calls = [c for c in replica.calls if c["kind"] == "fstat"]
+        self.assertEqual(len(setup_calls), 1)
+        self.assertEqual(len(score_calls), 1)
+        setup = setup_calls[0]
+        # intra-shard translation: global row 4 -> intra row 1 on shard 1
+        self.assertEqual(setup["data_index"], 1)
+        self.assertEqual(setup["noise_index"], 1)
+        # ... against the shard VIEW (single-shard protocol, device 1)
+        self.assertEqual(len(setup["holder"].linear_data_arr), 1)
+        self.assertEqual(setup["holder"].gpus, [1])
+        # ... inside device 1's context, on a device-1 replica
+        for c in setup_calls + score_calls:
+            self.assertEqual(int(c["device"]), 1)
+            self.assertEqual(int(c["build_device"]), 1)
+        self.assertEqual(set(self.holder.xp.device_log), {1})
+
+    def test_results_identical_to_single_shard_passthrough(self):
+        """Identically seeded 1-shard and 2-shard holders must give
+        IDENTICAL (N, M) -- the route changes where the scorer runs, never
+        what it computes."""
+        fracs = [0.3, 1.4, 2.6, 5.1]
+        single = FakeMultiShardACA(
+            self.PER_BAND, self.NUM_ACS, 1, layout="blocked")
+        comp_single = _FakeSigHetFStatComp(
+            FakeDeviceComp(single.xp, tag="sighet-chunked"))
+        call_s = self._route(comp_single, single, walker_ref=4)
+        N_s, M_s = call_s(self._candidates(fracs))
+        # passthrough: the comp saw the ORIGINAL holder and GLOBAL index
+        setup = comp_single.calls[0]
+        self.assertIs(setup["holder"], single)
+        self.assertEqual(setup["data_index"], 4)
+
+        call_m = self._route(self.comp, self.holder, walker_ref=4)
+        N_m, M_m = call_m(self._candidates(fracs))
+        np.testing.assert_array_equal(np.asarray(N_m), np.asarray(N_s))
+        np.testing.assert_array_equal(np.asarray(M_m), np.asarray(M_s))
+
+    def test_replica_stable_across_setup_and_score(self):
+        """The stash lives ON the comp, so setup and every later score must
+        resolve the SAME module-cached replica -- and a scorer rebuild must
+        reuse it too (allocate-once rule)."""
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            _DEVICE_GB_COMP_REPLICAS)
+
+        call = self._route(self.comp, self.holder, walker_ref=4)
+        call(self._candidates([0.3]))
+        call(self._candidates([1.4, 2.6]))
+        replica = self._replica(self.comp, 1)
+        # stash on the replica (where the scores read it), not the prototype
+        self.assertIsNone(self.comp._fstat)
+        self.assertIsNotNone(replica._fstat)
+        # same block -> ONE reference build, both score batches through it
+        kinds = [c["kind"] for c in replica.calls]
+        self.assertEqual(kinds, ["setup_fstat", "fstat", "fstat"])
+        # a second scorer build resolves the SAME replica object
+        call2 = self._route(self.comp, self.holder, walker_ref=4)
+        call2(self._candidates([0.3]))
+        self.assertIs(self._replica(self.comp, 1), replica)
+        mine = [k for k in _DEVICE_GB_COMP_REPLICAS if k[0] == id(self.comp)]
+        self.assertEqual(len(mine), 1)
+
+    def test_primary_shard_reuses_prototype_comp(self):
+        """A reference walker on the prototype's own shard runs on the
+        prototype itself -- no replica, nothing allocated."""
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            _DEVICE_GB_COMP_REPLICAS)
+
+        call = self._route(self.comp, self.holder, walker_ref=1)
+        call(self._candidates([0.3]))
+        self.assertEqual([c["kind"] for c in self.comp.calls],
+                         ["setup_fstat", "fstat"])
+        self.assertEqual(self.comp.calls[0]["data_index"], 1)  # intra == global here
+        self.assertEqual(
+            [k for k in _DEVICE_GB_COMP_REPLICAS if k[0] == id(self.comp)],
+            [])
+
+    def test_multi_shard_requires_data_index(self):
+        with self.assertRaises(ValueError):
+            self.RoutedEngine.route_sighet_fstat(
+                self.comp, self.holder, xp=self.holder.xp, Tobs=self.TOBS,
+                f0_lims_hz=(self.F0_LO, self.F0_LO + 10.0 * self.margin),
+                data_index=None)
+
+    def test_rejects_slab_holders(self):
+        self.holder.slab_min_f = np.zeros(self.NUM_ACS)
+        try:
+            with self.assertRaises(NotImplementedError):
+                self._route(self.comp, self.holder, walker_ref=4)
+        finally:
+            del self.holder.slab_min_f
+
+
 def _have_gbgpu_comps() -> bool:
     try:
         from gbgpu.gbcomps import GBFDComputations, GBWDMComputations  # noqa
@@ -861,6 +1091,102 @@ class GBCompReplicaContractTest(unittest.TestCase):
         np.testing.assert_array_equal(np.asarray(replica.n_sparse_local),
                                       np.asarray(sig.n_sparse_local))
         self.assertIsNone(replica._in_model)
+
+
+@unittest.skipUnless(
+    _have_gbgpu_comps(),
+    "requires gbgpu.gbcomps / gbgpu.gbsignalhetcomputations",
+)
+class SigHetFStatRouteRealCompTest(unittest.TestCase):
+    """Numerical half of the sig-het F-stat route proof, on the REAL comp.
+
+    The structural tests above prove WHERE the scorer runs; this proves the
+    route changes nothing about WHAT it computes: setup refs + score a
+    batch through ``route_sighet_fstat`` on a fake 2-shard holder vs a
+    1-shard holder seeded identically (per GLOBAL row id), expecting
+    bit-identical (N, M). The 2-shard run's reference walker sits on the
+    NON-primary shard on purpose, so it exercises the full replica rebuild
+    (``for_band_engine`` around a rebuilt chunked delegate) -- the path a
+    cluster run takes about half the time.
+
+    Small grid on purpose (the GBCompReplicaContractTest scale); the cost
+    is dominated by the orbit configuration of the comp + its replica.
+    """
+
+    NUM_ACS = 4
+    WALKER_REF = 3          # blocked 4/2 -> shard 1, intra 1 (non-primary)
+
+    @classmethod
+    def setUpClass(cls):
+        from gbgpu.gbcomps import GBWDMComputations
+        from gbgpu.gbsignalhetcomputations import GBSignalHetComputations
+        from lisatools.domains import WDMSettings
+
+        chunked = GBWDMComputations(
+            WDMSettings(Nf=32, Nt=64, dt=15.0, force_backend="cpu"),
+            t_ref=0.0, Nt_sub=16, n_pad=2, N_sparse=64,
+            tdi_config="1st generation", force_backend="cpu")
+        cls.sig = GBSignalHetComputations.for_band_engine(
+            chunked, nt_layer=8, n_sparse_fd=128, v3_n_nodes=64,
+            v4_knots=128, v4_band=16)
+
+    def _seeded_holder(self, num_shards):
+        """Holder whose per-row slabs depend only on the GLOBAL row id, so
+        1-shard and 2-shard instances hold byte-identical rows."""
+        g = self.sig._g
+        NfA, NtA = int(g["Nf_active"]), int(g["Nt_active"])
+        holder = FakeMultiShardACA(
+            (3, NfA * NtA), self.NUM_ACS, num_shards, layout="blocked")
+        rng = np.random.default_rng(11)
+        data = rng.normal(size=(self.NUM_ACS, 3, NfA, NtA)) * 1e-22
+        invc = np.zeros((self.NUM_ACS, 3, 3, NfA, NtA))
+        for c in range(3):
+            invc[:, c, c] = 1e44
+        # overwrite the fake's constant-seeded buffers with the layouts the
+        # real comp consumes: (rows, 3, NfA, NtA) data and (rows, 3, 3,
+        # NfA, NtA) XYZ cross-channel invC, flat per shard.
+        holder.linear_data_arr = [
+            np.ascontiguousarray(data[rows]).ravel()
+            for rows in holder.gpu_splits]
+        holder.linear_psd_arr = [
+            np.ascontiguousarray(invc[rows]).ravel()
+            for rows in holder.gpu_splits]
+        return holder
+
+    def test_two_shard_route_bit_identical_to_single_shard(self):
+        from lisatools.globalfit.moves.gbbands import _RoutedBandEngine
+        from lisatools.sampling.fstat_gridfit import (
+            sighet_fstat_ref_margin_hz)
+
+        g = self.sig._g
+        Tobs = float(g["Tobs"])
+        margin = sighet_fstat_ref_margin_hz(int(g["v4_knots"]), Tobs)
+        f0_lo = (g["ind_min_f"] + g["Nf_active"] // 2 + 0.3) * g["layer_df"]
+        rng = np.random.default_rng(5)
+        n = 6
+        cands = np.zeros((n, 9))
+        cands[:, 0] = 1e-22
+        cands[:, 1] = f0_lo + rng.uniform(0.0, 3.0, n) * margin
+        cands[:, 2] = 1e-17
+        cands[:, 5] = rng.uniform(0, np.pi, n)
+        cands[:, 6] = rng.uniform(0, np.pi, n)
+        cands[:, 7] = rng.uniform(0, 2 * np.pi, n)
+        cands[:, 8] = np.arcsin(rng.uniform(-1.0, 1.0, n))
+
+        results = {}
+        for shards in (1, 2):
+            self.sig.clear_fstat_references()
+            call = _RoutedBandEngine.route_sighet_fstat(
+                self.sig, self._seeded_holder(shards), xp=np, Tobs=Tobs,
+                f0_lims_hz=(f0_lo, f0_lo + 3.0 * margin),
+                data_index=self.WALKER_REF, noise_index=self.WALKER_REF,
+                spacing_hz=margin)
+            results[shards] = tuple(np.asarray(a) for a in call(cands))
+
+        (N1, M1), (N2, M2) = results[1], results[2]
+        self.assertTrue(np.all(np.isfinite(N1)) and np.all(np.isfinite(M1)))
+        np.testing.assert_array_equal(N2, N1)
+        np.testing.assert_array_equal(M2, M1)
 
 
 if __name__ == "__main__":
