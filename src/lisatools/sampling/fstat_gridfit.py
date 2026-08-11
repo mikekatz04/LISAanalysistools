@@ -266,16 +266,26 @@ def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
             noise_index=noise_index,
             assert_max_df0=0.5 * spacing_hz * (1.0 + 1e-9))
         state["block"] = b
-        state["built"] = state.get("built", 0) + 1
-        # Blocks build LAZILY as the sweep crosses f0, so there is no single
-        # "build stage done" moment -- per-block lines go to DEBUG and INFO
-        # reports every ~10% of the block count.
-        logger.debug("[sighet-fstat] built reference block %d/%d "
-                     "(%d refs)", b + 1, n_blocks, hi - lo)
-        step = max(1, n_blocks // 10)
-        if state["built"] % step == 0 or state["built"] == n_blocks:
-            logger.info("[sighet-fstat] reference blocks built: %d/%d",
-                        state["built"], n_blocks)
+        # ONE block is resident at a time (each is ~GBs), so re-entering an
+        # evicted block REBUILDS it. Track unique builds and rebuilds
+        # separately -- an earlier version summed them into one "built k/N"
+        # counter, which read as 387/36 under cyclic eviction.
+        seen = state.setdefault("seen", set())
+        if b in seen:
+            state["rebuilds"] = state.get("rebuilds", 0) + 1
+            if state["rebuilds"] % 256 == 0:
+                logger.info(
+                    "[sighet-fstat] %d reference-block rebuilds (single-"
+                    "resident cache; heavy rebuilding means the sweep's row "
+                    "order is not f0-local).", state["rebuilds"])
+        else:
+            seen.add(b)
+            step = max(1, n_blocks // 10)
+            if len(seen) % step == 0 or len(seen) == n_blocks:
+                logger.info(
+                    "[sighet-fstat] reference blocks built: %d/%d unique "
+                    "(%d rebuilds)", len(seen), n_blocks,
+                    state.get("rebuilds", 0))
 
     def call_fstat(params):
         p = xp.atleast_2d(xp.asarray(params, dtype=xp.float64))
@@ -508,22 +518,31 @@ def run_comb_scan(call_fstat: Callable, *, xp, Tobs: float, band_edges_hz,
         al, sd = _sky_grid(int(lv))
         al = np.asarray(al)
         sd = np.asarray(sd)
+        # NODE-MAJOR row order (f0 slow, sky fast). Sky-major (f0 fastest)
+        # made every sky point sweep the whole band, so batch-sequential
+        # scorers with f0-local state -- the sig-het shared-reference cache
+        # keeps ONE ~GB block resident -- rebuilt that state once per block
+        # PER SKY POINT (cyclic-eviction worst case: ~nsky x n_blocks
+        # rebuilds per level, measured 387+ on the first full-band run).
+        # Node-major visits each f0 neighborhood exactly once per level.
+        # Ordering changes the checkpoint fingerprint, so pre-existing comb
+        # progress files restart cleanly rather than resuming misordered.
         params = np.zeros((int(lv) * nn, 9))
         params[:, 0] = 1e-22
-        params[:, 1] = np.tile(nodes, int(lv)) * 1e-3
+        params[:, 1] = np.repeat(nodes, int(lv)) * 1e-3
         params[:, 2] = get_fdot(f=params[:, 1],
                                 Mc=np.full(params.shape[0], mc_fix))
         params[:, 5] = 0.5 * np.pi
-        params[:, 7] = np.repeat(al, nn)
-        params[:, 8] = np.arcsin(np.repeat(sd, nn))
+        params[:, 7] = np.tile(al, nn)
+        params[:, 8] = np.arcsin(np.tile(sd, nn))
         Fd = chunked_fstat_sweep(
             call_fstat, params, xp=xp, label=f":comb.nsky{int(lv)}",
             ckpt=(os.path.join(parts_dir, f"comb_nsky{int(lv)}")
                   if parts_dir else None),
             fingerprint_extra=fingerprint_extra,
-        ).reshape(int(lv), nn)
-        _kb = _to_host(Fd.argmax(axis=0)).astype(int)
-        F_max_host[idx] = _to_host(Fd.max(axis=0))
+        ).reshape(nn, int(lv))
+        _kb = _to_host(Fd.argmax(axis=1)).astype(int)
+        F_max_host[idx] = _to_host(Fd.max(axis=1))
         best_al_host[idx] = al[_kb]
         best_sd_host[idx] = sd[_kb]
         total_evals += int(lv) * nn
