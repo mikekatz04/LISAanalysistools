@@ -50,6 +50,8 @@ __all__ = [
     "run_stacked_stage_b",
     "run_fstat_grid_fit",
     "build_gb_birth_distribution",
+    "sighet_fstat_ref_margin_hz",
+    "build_sighet_call_fstat",
     "GRID_BASENAME",
 ]
 
@@ -148,6 +150,152 @@ def ckpt_clear(parts_dir: Optional[str], prefix: str) -> None:
 
 def ckpt_secs() -> float:
     return float(os.environ.get("FSTAT_CKPT_SECS", "300"))
+
+
+# --------------------------------------------------------------------------
+# sig-het call_fstat builder (FSTAT_USE_SIGHET=1)
+# --------------------------------------------------------------------------
+
+def sighet_fstat_ref_margin_hz(n_knots: int, Tobs: float) -> float:
+    """Max safe |f0_candidate - f0_reference| for the sig-het F-stat path.
+
+    The limiter is the knot-Nyquist ceiling of the fixed-knot COMPLEX
+    resample: the residual beat ``e^{2 pi i df0 tau}`` (analytically
+    restored at the knots before the linear-complex spline) must stay
+    resolvable by K uniform knots, so the margin scales as K and 1/Tobs.
+
+    Measured anchors (``gb_sighet_f0_tolerance.py``, K = 128): the v5
+    scorer's tiered-allowance crossing sits between the 57.8-rad last-pass
+    and the 140-rad first-fail sweep points (2026-08-11 rerun; the earlier
+    2.9e-6 Hz @ 90 d anchor = 141.7 rad was the optimistic edge of the same
+    bracket). This returns the LAST-PASS point -- 57.8 rad, i.e. 9.2 beat
+    cycles = (K/2)/7 -- as the margin: 1.18e-6 Hz at Tobs = 7.776e6 s
+    (90 d), scaled by K/128 and 7.776e6/Tobs. The default reference spacing
+    equals this margin, so the worst bucket displacement (spacing/2) keeps
+    a further 2x headroom under the measured last-pass.
+
+    The sweeps also showed the error is VIOLENTLY NON-MONOTONIC past the
+    envelope (a displaced point can look fine and its neighbor be off by
+    thousands), so consumers must HARD-assert every displacement against
+    this margin -- never trust a lucky point.
+    """
+    return 1.18e-6 * (float(n_knots) / 128.0) * (7.776e6 / float(Tobs))
+
+
+def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
+                            f0_lims_hz, data_index: int = 0,
+                            noise_index: Optional[int] = None,
+                            spacing_hz: Optional[float] = None,
+                            ref_block: Optional[int] = None,
+                            fstat_mode: Optional[int] = None):
+    """Reference-bucketing ``call_fstat`` over the sig-het F-stat kernel.
+
+    Returns a ``call_fstat(params_phys_9col) -> (N (n, 4), M_upper (n, 10))``
+    closure that scores through
+    ``GBSignalHetComputations.get_fstat_ll_wdm`` against SHARED heterodyne
+    references instead of the chunked per-candidate heterodyne
+    (``GBWDMComputations.get_fstat_ll_wdm``): drop-in for
+    :func:`chunked_fstat_sweep` / :func:`run_fstat_grid_fit`.
+
+    Reference layout: an f0 comb across ``f0_lims_hz`` at ``spacing_hz``
+    (env ``FSTAT_SIGHET_REF_SPACING_HZ``; default = the measured margin
+    :func:`sighet_fstat_ref_margin_hz`, so the worst bucket displacement
+    spacing/2 sits at HALF the measured envelope -- 2x safety). A spacing
+    wider than twice the margin is REFUSED at build time. References carry
+    fdot = 0 and a fixed canonical sky (the v5 derotation absorbs the
+    candidate's df0/dfdot analytically, and the measured sky arm holds
+    across the full sphere); their extrinsics are forced to the basis frame
+    by ``setup_fstat_references`` (the amplitude-scale rule).
+
+    Memory: the compact per-reference stash is built in CONTIGUOUS BLOCKS
+    of ``ref_block`` references (env ``FSTAT_SIGHET_REF_BLOCK``, default
+    512), one block resident at a time -- each incoming batch is grouped by
+    block, and a block rebuild only happens when the sweep crosses a block
+    boundary (the comb/stage-B sweeps are f0-ordered per segment, so
+    thrash is bounded). Every row is HARD-asserted to sit within the margin
+    of its bucketed reference (the kernel-side assert in
+    ``setup_fstat_references(assert_max_df0=...)``).
+    """
+    n_knots = int(sighet_comp._g.get("v4_knots", 0))
+    if n_knots <= 0:
+        raise ValueError(
+            "build_sighet_call_fstat needs a sig-het comp constructed with "
+            "v4_knots > 0 (the fixed-knot scorer).")
+    margin = sighet_fstat_ref_margin_hz(n_knots, Tobs)
+    env_sp = os.environ.get("FSTAT_SIGHET_REF_SPACING_HZ", "").strip()
+    if spacing_hz is None:
+        spacing_hz = float(env_sp) if env_sp else margin
+    spacing_hz = float(spacing_hz)
+    if spacing_hz > 2.0 * margin:
+        raise ValueError(
+            f"FSTAT_SIGHET_REF_SPACING_HZ={spacing_hz:.3e} puts the worst "
+            f"bucket displacement {0.5 * spacing_hz:.3e} Hz beyond the "
+            f"measured sig-het envelope {margin:.3e} Hz (K={n_knots}, "
+            f"Tobs={Tobs:.3e}); the scorer is non-monotonic past it.")
+    if ref_block is None:
+        ref_block = int(os.environ.get("FSTAT_SIGHET_REF_BLOCK", "512"))
+    ref_block = max(1, int(ref_block))
+
+    f0_lo = float(f0_lims_hz[0])
+    f0_hi = float(f0_lims_hz[-1])
+    node_f0 = np.arange(f0_lo - spacing_hz, f0_hi + 2.0 * spacing_hz,
+                        spacing_hz)
+    n_nodes = len(node_f0)
+    n_blocks = (n_nodes + ref_block - 1) // ref_block
+    logger.info(
+        "[sighet-fstat] %d references over [%.4e, %.4e] Hz, spacing %.3e Hz "
+        "(margin %.3e Hz, K=%d, Tobs=%.3e s), %d block(s) of <= %d",
+        n_nodes, node_f0[0], node_f0[-1], spacing_hz, margin, Tobs,
+        n_blocks, ref_block)
+
+    state = {"block": -1}
+
+    def _ensure_block(b: int):
+        if state["block"] == b:
+            return
+        lo = b * ref_block
+        hi = min(lo + ref_block, n_nodes)
+        refs = np.zeros((hi - lo, 9))
+        refs[:, 1] = node_f0[lo:hi]
+        # canonical sky; extrinsics are overridden to the basis frame by
+        # setup_fstat_references itself.
+        refs[:, 7] = 0.0
+        refs[:, 8] = 0.0
+        sighet_comp.setup_fstat_references(
+            refs, wdm_holder, data_index=data_index,
+            noise_index=noise_index,
+            assert_max_df0=0.5 * spacing_hz * (1.0 + 1e-9))
+        state["block"] = b
+        logger.info("[sighet-fstat] built reference block %d/%d "
+                    "(%d refs)", b + 1, n_blocks, hi - lo)
+
+    def call_fstat(params):
+        p = xp.atleast_2d(xp.asarray(params, dtype=xp.float64))
+        f0_h = _to_host(p[:, 1])
+        k = np.clip(np.round((f0_h - node_f0[0]) / spacing_hz).astype(int),
+                    0, n_nodes - 1)
+        worst = np.abs(f0_h - node_f0[k]).max() if len(f0_h) else 0.0
+        if worst > 0.5 * spacing_hz * (1.0 + 1e-9):
+            raise RuntimeError(
+                f"[sighet-fstat] candidate f0 {worst:.3e} Hz from its "
+                f"bucketed reference (> spacing/2 = "
+                f"{0.5 * spacing_hz:.3e}); the reference comb does not "
+                "cover the requested f0 range.")
+        blocks = k // ref_block
+        N_all = xp.zeros((p.shape[0], 4), dtype=xp.float64)
+        M_all = xp.zeros((p.shape[0], 10), dtype=xp.float64)
+        for b in np.unique(blocks):
+            sel = np.where(blocks == b)[0]
+            _ensure_block(int(b))
+            di = xp.asarray((k[sel] - int(b) * ref_block).astype(np.int32))
+            N_b, M_b = sighet_comp.get_fstat_ll_wdm(
+                p[xp.asarray(sel)], None, data_index=di,
+                fstat_mode=fstat_mode)
+            N_all[xp.asarray(sel)] = N_b
+            M_all[xp.asarray(sel)] = M_b
+        return N_all, M_all
+
+    return call_fstat
 
 
 # --------------------------------------------------------------------------

@@ -5421,10 +5421,50 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     def _fstat_call(self, model, walker_ref):
         """The injectable kernel entry the library sweeps drive.
 
-        Same routing as :meth:`_fstat_NM` -- the sig-het wrapper unwrap and
-        the multi-shard route are both load-bearing, so this reuses that
-        method rather than re-deriving the comp.
+        Default: same routing as :meth:`_fstat_NM` -- the sig-het wrapper
+        unwrap and the multi-shard route are both load-bearing, so this
+        reuses that method rather than re-deriving the comp.
+
+        ``FSTAT_USE_SIGHET=1`` (opt-in; default stays the chunked path)
+        swaps in the signal-het shared-reference F-stat: the comb/stage-B
+        sweeps score through
+        :func:`lisatools.sampling.fstat_gridfit.build_sighet_call_fstat`,
+        which builds bucketed heterodyne references against the reference
+        walker's residual once and evaluates every candidate through the
+        ``gb_signal_het_fstat_get_ll`` kernel. Requires the GB comp to be a
+        ``GBSignalHetComputations`` (GB_SIGHET_INMODEL=1 wiring) built with
+        ``v4_knots > 0``, a WDM basis, and a single-shard holder; anything
+        else falls back to the chunked path with a warning.
         """
+        if os.environ.get("FSTAT_USE_SIGHET", "0") == "1":
+            sig_comp = self.gb_wdm_comp
+            holder = model.analysis_container_arr
+            if not hasattr(sig_comp, "setup_fstat_references"):
+                logger.warning(
+                    "%s: FSTAT_USE_SIGHET=1 but the GB comp has no sig-het "
+                    "F-stat surface (need GB_SIGHET_INMODEL=1 with "
+                    "v4_knots set); falling back to the chunked F-stat.",
+                    self.name)
+            elif isinstance(self._basis_settings, FDSettings):
+                logger.warning(
+                    "%s: FSTAT_USE_SIGHET=1 is WDM-only; falling back to "
+                    "the chunked F-stat.", self.name)
+            elif _RoutedBandEngine._is_multi(holder):
+                logger.warning(
+                    "%s: FSTAT_USE_SIGHET=1 does not support multi-shard "
+                    "holders yet; falling back to the chunked F-stat.",
+                    self.name)
+            else:
+                from ...sampling.fstat_gridfit import build_sighet_call_fstat
+
+                band_edges = _to_numpy(self.band_edges)
+                return build_sighet_call_fstat(
+                    sig_comp, holder, xp=self.xp,
+                    Tobs=float(self._basis_settings.Tobs),
+                    f0_lims_hz=(float(band_edges[0]),
+                                float(band_edges[-1])),
+                    data_index=int(walker_ref),
+                    noise_index=int(walker_ref))
         return lambda params: self._fstat_NM(model, params, walker_ref)
 
     def _run_fstat_fit(self, model, k: int):
