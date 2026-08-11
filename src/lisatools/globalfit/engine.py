@@ -300,12 +300,17 @@ class GeneralSetup(Setup, GeneralSettings):
     @property
     def main_file_path(self) -> str:
         """Filesystem path of the primary HDF5 backend file."""
-        return self.file_store_dir + self.base_file_name + "_" + self.main_file_key + ".h5"
+        # os.path.join, NOT string concat: FILE_STORE_DIR without a trailing
+        # slash must not silently rename the run (observed on a cluster
+        # relaunch: '<dir>global_fit_..._artifacts' beside the real run dir).
+        return os.path.join(
+            self.file_store_dir, self.base_file_name + "_" + self.main_file_key + ".h5"
+        )
 
     @property
     def artifacts_file_dir(self) -> str:
         """Directory where logs and diagnostic plots are stored for this run."""
-        return self.file_store_dir + self.base_file_name + "_artifacts/"
+        return os.path.join(self.file_store_dir, self.base_file_name + "_artifacts/")
 
     @property
     def data_t0(self) -> float:
