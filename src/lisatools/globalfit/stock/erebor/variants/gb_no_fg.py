@@ -425,10 +425,24 @@ def _resolve_nleaves_max(gb, general_setup, is_fd, layer_df) -> int:
     lo, hi = gb.start_freq + layer_df, gb.end_freq - layer_df
     n_in = int(((f0_hz >= lo) & (f0_hz <= hi)).sum())
     out = max(2 * n_in, 4)
+    cap = int(getattr(gb, "nleaves_max_cap", 20000) or 20000)
+    if out > cap:
+        # Uncapped, the fresh-start prior draw at (ntemps, nwalkers,
+        # nleaves_max, ndim) float64 x several copies OOMs the host on a
+        # full-band catalogue (83.8 GB peak observed on the 3-month
+        # combined run). GB_NLEAVES_MAX_CAP raises the ceiling; setting
+        # gb.nleaves_max explicitly bypasses the resolver entirely.
+        logger.warning(
+            "GB nleaves_max: dynamic sizing 2 x %d = %d exceeds the cap "
+            "%d (GB_NLEAVES_MAX_CAP); clamping. Leaf slots cover %.0f%% of "
+            "the in-band catalogue.",
+            n_in, out, cap, 100.0 * cap / max(n_in, 1),
+        )
+        out = cap
     logger.info(
         "GB nleaves_max: %d catalogue sources in the sampled band "
-        "[%.6e, %.6e] Hz -> nleaves_max = 2 x %d = %d.",
-        n_in, lo, hi, n_in, out,
+        "[%.6e, %.6e] Hz -> nleaves_max = %d (cap %d).",
+        n_in, lo, hi, out, cap,
     )
     return out
 
