@@ -50,6 +50,9 @@ Key env knobs
     GB_DEBUG_PLOT_BAND   ONE band index -- unset means EVERY band, which at
                          ~1150 cells renders thousands of figures per proposal
     STAGE_SKIP_NOISE=1   start at stage 2 (noise already converged)
+    STAGE_NOISE_ONLY=1   run only the two noise search stages, then stop
+    STAGE_NOISE_VGB_PE=1 searches, then PE-sample psd+galfor+vgb (no GB);
+                         bounded by NUM_ITERATIONS
 """
 from __future__ import annotations
 
@@ -227,6 +230,22 @@ def build_fit():
             raise ValueError(
                 "STAGE_NOISE_ONLY=1 with STAGE_SKIP_NOISE=1 leaves no stages."
             )
+        fit.recipe = Recipe(stages)
+        return fit
+
+    if _env_flag("STAGE_NOISE_VGB_PE"):
+        # Searches, then PE-sample psd+galfor+vgb — the gate between "the
+        # noise search converged" and "turn on the GB machinery": posterior
+        # sampling of every non-GB branch, no F-stat fit, no RJ. PE never
+        # stops on its own, so NUM_ITERATIONS bounds the run.
+        stages.append(Stage(
+            name="noise_vgb_pe", kind="pe",
+            moves=noise_pe + vgb,
+            combine_kwargs=dict(
+                share_temperature_control=False,
+                random_choice=_env_flag("FULL_PE_RANDOM_CHOICE", "1"),
+            ),
+        ))
         fit.recipe = Recipe(stages)
         return fit
 
