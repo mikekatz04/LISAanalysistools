@@ -505,15 +505,29 @@ class MaxLogLCombineMove(GFCombineMove):
     inner behaviour wanted here. Wrapping the search moves would nest two
     plateau loops.
 
-    The plateau rule mirrors ``PSDMove.run_move_max_likelihood`` exactly:
-    exit after ``num_checks`` consecutive non-improving iterations, and only
-    start counting once the likelihood has moved at least once (so a move
-    that has not yet taken effect cannot trip the exit immediately).
+    The plateau rule mirrors ``PSDMove.run_move_max_likelihood`` -- exit
+    after ``num_checks`` consecutive non-improving iterations, counting only
+    once the likelihood has moved at least once (so a move that has not yet
+    taken effect cannot trip the exit immediately) -- with one refinement:
+    an improvement only counts (resets the counter) when it beats the
+    baseline by more than ``tol`` log-likelihood units. A stretch ensemble
+    near the mode produces small strict improvements almost every iteration,
+    so a search on a ~1e7-scale lnL would otherwise polish the noise floor
+    indefinitely. Sub-``tol`` gains do NOT advance the baseline either, so a
+    slow accumulated climb (more than ``tol`` per ``num_checks`` window)
+    still registers as progress and keeps the stage alive.
     """
 
-    def __init__(self, *args, num_checks: int = 5, max_iter: int = 0, **kwargs):
+    def __init__(
+        self, *args, num_checks: int = 5, max_iter: int = 0, tol: float = 5.0, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.num_checks = int(num_checks)
+        # Absolute lnL units. The default is deliberately soft (a search
+        # stage only needs the noise model roughly converged before the next
+        # stage samples it in PE mode); MAXLOGL_TOL overrides, 0 restores
+        # the strict any-improvement rule.
+        self.tol = float(os.environ.get("MAXLOGL_TOL", tol))
         # Hard ceiling on the plateau loop. 0 = unbounded, which is what
         # PSDMove.run_move_max_likelihood does -- fine when one move owns a
         # cheap likelihood, dangerous here: this can wrap several moves over
@@ -525,7 +539,8 @@ class MaxLogLCombineMove(GFCombineMove):
 
     def _propose_moves(self, model, state):
         num_so_far = 0
-        max_logl = -np.inf
+        max_logl = -np.inf   # true running best (logging only)
+        ref_logl = -np.inf   # baseline at the last counter reset (plateau test)
         changed_once = False
         accepted = None
         n_iter = 0
@@ -540,11 +555,13 @@ class MaxLogLCombineMove(GFCombineMove):
             state, accepted = self._propose_moves_once(model, state)
             n_iter += 1
             cur = float(state.log_like[0].max())
-            if cur != max_logl and not np.isinf(max_logl):
+            if cur != ref_logl and not np.isinf(ref_logl):
                 changed_once = True
-            improved = cur > max_logl
-            if improved:
+            if cur > max_logl:
                 max_logl = cur
+            improved = cur > ref_logl + self.tol or np.isinf(ref_logl)
+            if improved:
+                ref_logl = cur
                 num_so_far = 0
             elif changed_once:
                 num_so_far += 1
