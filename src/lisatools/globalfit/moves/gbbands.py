@@ -1084,16 +1084,22 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     def get_index(self, special_inds_test):
         """Map a special-index test value to its position inside the buffer."""
+        # Array module from the OPERANDS, never the module-level ``cp``: on
+        # a CPU-backend run on a machine where cupy imports (cluster), the
+        # module-level ``cp`` is cupy while these are numpy --
+        # cupy.searchsorted then raises "Only int or ndarray are supported
+        # for a". Same trap as get_buffer's sorter xp (see :2860).
+        xp = get_array_module(self.special_indices_unique)
         now_index = (
             self.special_indices_unique_sort[
-                cp.searchsorted(
+                xp.searchsorted(
                     self.special_indices_unique[self.special_indices_unique_sort],
-                    special_inds_test,
+                    xp.asarray(special_inds_test),
                     side="right",
                 )
                 - 1
             ]
-        ).astype(cp.int32)
+        ).astype(xp.int32)
         return now_index
 
     def __init__(
