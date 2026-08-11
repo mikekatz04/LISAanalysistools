@@ -56,12 +56,20 @@ def _run(tag, fit_dir, store_dir):
     env = {**os.environ, **CHILD_ENV,
            "GB_FSTAT_FIT_DIR": fit_dir, "FILE_STORE_DIR": store_dir}
     os.makedirs(store_dir, exist_ok=True)
-    p = subprocess.run([sys.executable, "-c", CHILD], env=env,
-                       capture_output=True, text=True)
-    out = p.stdout + p.stderr
+    # Stream the child live (progress is minutes-scale on GPU); the phase
+    # assertions below still grep the collected text.
+    print(f"[smoke] phase {tag}: starting", flush=True)
+    p = subprocess.Popen([sys.executable, "-c", CHILD], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, bufsize=1)
+    lines = []
+    for line in p.stdout:
+        sys.stdout.write(line)
+        lines.append(line)
+    p.wait()
+    out = "".join(lines)
     print(f"[smoke] phase {tag}: exit={p.returncode}")
     if p.returncode != 0:
-        print(out[-4000:])
         raise SystemExit(f"[smoke] phase {tag} FAILED")
     return out
 
