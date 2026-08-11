@@ -733,22 +733,66 @@ class PSDMove(GlobalFitMove, StretchMove):
                 w, psd_coords[row], galfor_here, sgwb_here
             )
 
-        rows = []
-        for row in batch:
+        self._run_rows_per_split(_one, list(batch), walker_inds_keep)
+
+    def _run_rows_per_split(self, one_fn, rows, walker_inds_keep):
+        """Run ``one_fn(row)`` for every row, grouped by owning ACA split.
+
+        The first row seen for each not-yet-warm device runs serially first
+        (the per-device cache warm described in :meth:`_build_batch`); the
+        rest dispatch through ``acs._run_per_split`` (the
+        ``addremovemove.compute_acs_like`` / ``_vectorized_dispatch``
+        primitive): serial on CPU / single split, one thread per populated
+        split under ``run_threaded`` (multi-GPU). ``one_fn`` enters its own
+        walker's ``device_context`` (see
+        :meth:`_build_sensitivity_for_walker`), so the workers need no extra
+        device pinning. Within a split, :attr:`build_threads` > 1 keeps the
+        historical intra-split thread spread.
+
+        The move's ``run_threaded`` flag forces threaded dispatch; otherwise
+        the ACA's own ``run_threaded`` default decides (the
+        ``compute_acs_like`` precedent).
+        """
+        pending = []
+        for row in rows:
             dev = self._walker_device(int(walker_inds_keep[int(row)]))
             if dev not in self._build_warmed:
                 # serial per-device cache warm
                 self._build_warmed.add(dev)
-                _one(row)
+                one_fn(row)
             else:
-                rows.append(row)
+                pending.append(row)
+        rows = pending
+        if not len(rows):
+            return
 
-        if self._build_threads > 1 and len(rows) > 1:
-            # list() forces consumption so worker exceptions re-raise here.
-            list(self.build_pool.map(_one, rows))
-        else:
-            for row in rows:
-                _one(row)
+        def _run_group(group_rows):
+            if self._build_threads > 1 and len(group_rows) > 1:
+                # list() forces consumption so worker exceptions re-raise.
+                list(self.build_pool.map(one_fn, group_rows))
+            else:
+                for row in group_rows:
+                    one_fn(row)
+
+        acs = getattr(self, "acs", None)
+        if acs is None or not (
+            hasattr(acs, "_run_per_split") and hasattr(acs, "_split_rows")
+        ):
+            _run_group(list(rows))
+            return
+
+        rows_arr = np.asarray(list(rows), dtype=int)
+        split_to_pos = acs._split_rows(
+            np.asarray(walker_inds_keep, dtype=int)[rows_arr]
+        )
+
+        def _worker(split, positions):
+            _run_group(rows_arr[np.asarray(positions, dtype=int)])
+
+        acs._run_per_split(
+            _worker, split_to_pos,
+            run_threaded=True if self._run_threaded else None,
+        )
 
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
         """Compute the PSD/galfor branch log-likelihood.
@@ -1133,9 +1177,14 @@ class PSDMove(GlobalFitMove, StretchMove):
         new_state.log_like[0] = tmp_state.log_like[0]
         new_state.log_prior[0] = self._cold_noise_log_prior(new_state)
 
-        # TODO: check speed of this? (needed?)
+        # Publish the accepted (cold-row) noise model onto every walker's
+        # AnalysisContainer. Same per-shard dispatch as the scoring builds:
+        # each walker's build runs on its owning device, split groups run
+        # concurrently under run_threaded (multi-GPU), serially otherwise.
         nwalkers = len(self.acs)
-        for w in range(nwalkers):
+
+        def _publish_one(w):
+            w = int(w)
             psd_params = new_state.branches_coords["psd"][0, w, 0]
             if "galfor" in new_state.branches_coords:
                 galfor_params = new_state.branches_coords["galfor"][0, w, 0]
@@ -1150,6 +1199,10 @@ class PSDMove(GlobalFitMove, StretchMove):
                 w, psd_params, galfor_params, sgwb_params
             )
             self.acs[w].sens_mat = new_sens
+
+        self._run_rows_per_split(
+            _publish_one, np.arange(nwalkers), np.arange(nwalkers)
+        )
 
         # NOT gated by _skip_linear_psd_repack, deliberately. This is the one
         # repack that PUBLISHES the accepted noise model to the rest of the

@@ -141,6 +141,89 @@ class DeviceLocalBuildTest(unittest.TestCase):
         self.assertEqual(move._build_warmed, {0, 1})
 
 
+class PerSplitDispatchTest(unittest.TestCase):
+    """Tier 2: batch builds dispatch through ``acs._run_per_split``."""
+
+    def setUp(self):
+        try:
+            from lisatools.domains import WDMSettings
+            from lisatools.globalfit.moves.psdmove import PSDMove
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"psdmove not available: {exc}")
+        self.PSDMove = PSDMove
+        self.settings = WDMSettings(8, 8, 5.0)
+
+    def _spy_run_per_split(self, acs, record):
+        orig = acs._run_per_split
+
+        def spy(worker, split_to_rows, run_threaded=None):
+            record.append(
+                dict(splits=sorted(split_to_rows), run_threaded=run_threaded)
+            )
+            return orig(worker, split_to_rows, run_threaded=run_threaded)
+
+        acs._run_per_split = spy
+
+    def test_build_batch_dispatches_per_split(self):
+        acs = FakeMultiShardACA((3, 4), 4, 2, layout="blocked")
+        backend = _RecordingBackend(acs, self.settings)
+        move = _make_move(self.PSDMove, acs, backend)
+        record = []
+        self._spy_run_per_split(acs, record)
+
+        move._build_batch(np.arange(4), np.arange(4),
+                          np.tile([1.0e-11, 3.0e-15], (4, 1)), None, None)
+        # one dispatch; the two warm rows (one per device) ran serially
+        # before it, leaving one row per split
+        self.assertEqual(len(record), 1)
+        self.assertEqual(record[0]["splits"], [0, 1])
+        # ACA default decides threading unless the move forces it
+        self.assertIsNone(record[0]["run_threaded"])
+        self.assertEqual(len(backend.calls), 4)
+        by_name = {c["name"]: c for c in backend.calls}
+        for w in range(4):
+            self.assertEqual(by_name[f"walker_{w}"]["device"],
+                             int(acs.gpu_map[w]))
+
+    def test_threaded_dispatch_keeps_device_routing(self):
+        acs = FakeMultiShardACA((3, 4), 4, 2, layout="blocked",
+                                run_threaded=True)
+        backend = _RecordingBackend(acs, self.settings)
+        move = _make_move(self.PSDMove, acs, backend)
+        # warm both devices first so the second batch is fully threaded
+        move._build_batch(np.arange(4), np.arange(4),
+                          np.tile([1.0e-11, 3.0e-15], (4, 1)), None, None)
+        backend.calls.clear()
+        move._build_batch(np.arange(4), np.arange(4),
+                          np.tile([1.0e-11, 3.0e-15], (4, 1)), None, None)
+        self.assertEqual(len(backend.calls), 4)
+        by_name = {c["name"]: c for c in backend.calls}
+        for w in range(4):
+            self.assertEqual(by_name[f"walker_{w}"]["device"],
+                             int(acs.gpu_map[w]))
+
+    def test_move_run_threaded_flag_forces_threaded(self):
+        acs = FakeMultiShardACA((3, 4), 4, 2, layout="blocked")
+        backend = _RecordingBackend(acs, self.settings)
+        move = _make_move(self.PSDMove, acs, backend, run_threaded=True)
+        record = []
+        self._spy_run_per_split(acs, record)
+        move._build_batch(np.arange(4), np.arange(4),
+                          np.tile([1.0e-11, 3.0e-15], (4, 1)), None, None)
+        self.assertEqual(len(record), 1)
+        self.assertIs(record[0]["run_threaded"], True)
+
+    def test_run_rows_per_split_warms_and_runs_each_row_once(self):
+        acs = FakeMultiShardACA((3, 4), 4, 2, layout="blocked")
+        backend = _RecordingBackend(acs, self.settings)
+        move = _make_move(self.PSDMove, acs, backend)
+        ran = []
+        move._run_rows_per_split(lambda r: ran.append(int(r)),
+                                 np.arange(4), np.arange(4))
+        self.assertEqual(sorted(ran), [0, 1, 2, 3])
+        self.assertEqual(move._build_warmed, {0, 1})
+
+
 class InstrumentBasisCacheDeviceKeyTest(unittest.TestCase):
     """Tier 1: ``InstrumentNoise._bases`` keys its cache by current device."""
 
