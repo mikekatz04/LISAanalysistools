@@ -2238,8 +2238,11 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # owning shard at the right intra-shard band position; on
         # single-shard ACAs the reshape view is touched directly. No
         # outer-buffer materialisation needed.
+        # NOTE self.xp, never the module-level ``cp``: on a CPU-backend run
+        # on a machine where cupy imports, cp is cupy while the buffer /
+        # sorter arrays are numpy (same trap as get_index / the sorter xp).
         if inds_fill is None:
-            inds_fill = cp.arange(self.num_bands_now)
+            inds_fill = self.xp.arange(self.num_bands_now)
 
         outer_data_view = acs.data_shaped_view()
         outer_psd_view = acs.psd_shaped_view()
@@ -2280,20 +2283,21 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             # PER-SLOT rather than a shared 0..Nf_active-1 ramp. Data axis
             # position is unique_band_combos[:, 1] (the parent walker index).
             if inds_fill is None:
-                inds_fill = cp.arange(self.num_bands_now)
+                inds_fill = self.xp.arange(self.num_bands_now)
+            xp = self.xp  # NOT module-level cp (see fill_buffer note)
 
             Nt_active = self._basis_settings.Nt_active
             slab_Nf = self.band_slab_Nf
             if slab_Nf is None:
                 # Full active band: shared layer ramp 0..Nf_active-1.
                 Nf_use = self._basis_settings.Nf_active
-                layer_lo = cp.zeros(len(inds_fill), dtype=cp.int32)
+                layer_lo = xp.zeros(len(inds_fill), dtype=xp.int32)
             else:
                 # Narrow: per-slot parent-local layer offset.
                 Nf_use = int(slab_Nf)
                 layer_lo = (
                     self.slab_min_f[inds_fill] - int(self._basis_settings.ind_min_f)
-                ).astype(cp.int32)
+                ).astype(xp.int32)
 
             if is_psd and self.tdi_channel_setup == "XYZ":
                 # target shape: (len(inds_fill), nchannels, nchannels, Nf_use, Nt_active)
@@ -2304,27 +2308,28 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 # index axis 0 with the raw walker index and need a full
                 # 5-tuple to cover all five axes.
                 inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None, None]
-                inds2 = cp.arange(self.nchannels)[None, :, None, None, None]
-                inds3 = cp.arange(self.nchannels)[None, None, :, None, None]
+                inds2 = xp.arange(self.nchannels)[None, :, None, None, None]
+                inds3 = xp.arange(self.nchannels)[None, None, :, None, None]
                 inds4 = (layer_lo[:, None, None, None, None]
-                         + cp.arange(Nf_use)[None, None, None, :, None])
-                inds5 = cp.arange(Nt_active)[None, None, None, None, :]
+                         + xp.arange(Nf_use)[None, None, None, :, None])
+                inds5 = xp.arange(Nt_active)[None, None, None, None, :]
                 return inds1, inds2, inds3, inds4, inds5
 
             # target shape: (len(inds_fill), nchannels, Nf_use, Nt_active)
             inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None]
-            inds2 = cp.arange(self.nchannels)[None, :, None, None]
+            inds2 = xp.arange(self.nchannels)[None, :, None, None]
             inds3 = (layer_lo[:, None, None, None]
-                     + cp.arange(Nf_use)[None, None, :, None])
-            inds4 = cp.arange(Nt_active)[None, None, None, :]
+                     + xp.arange(Nf_use)[None, None, :, None])
+            inds4 = xp.arange(Nt_active)[None, None, None, :]
             return inds1, inds2, inds3, inds4
         if not isinstance(self._basis_settings, FDSettings):
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
             )
 
+        xp = self.xp  # NOT module-level cp (see fill_buffer note)
         if inds_fill is None:
-            inds_fill = cp.arange(self.num_bands_now)
+            inds_fill = xp.arange(self.num_bands_now)
 
         assert np.all(acs.start_freq_ind[0] == acs.start_freq_ind)
         start_freq_ind = acs.start_freq_ind[0]
@@ -2347,9 +2352,9 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             # (num_walkers, nchan, nchan, n_bins) -- axis 0 is the raw
             # walker index (mirrors the WDM XYZ 5-tuple below).
             inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None]
-            inds2 = cp.arange(self.nchannels)[None, :, None, None]
-            inds3 = cp.arange(self.nchannels)[None, None, :, None]
-            inds4 = start_inds[:, None, None, None] + cp.arange(
+            inds2 = xp.arange(self.nchannels)[None, :, None, None]
+            inds3 = xp.arange(self.nchannels)[None, None, :, None]
+            inds4 = start_inds[:, None, None, None] + xp.arange(
                 self.band_buffer.shape[-1]
             )[None, None, None, :]
             return inds1, inds2, inds3, inds4
@@ -2357,8 +2362,8 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         else:
             # Target output shape: (len(inds_fill), self.nchannels, self.band_buffer.shape[-1])
             inds1 = self.unique_band_combos[inds_fill, 1][:, None, None]
-            inds2 = cp.arange(self.nchannels)[None, :, None]
-            inds3 = start_inds[:, None, None] + cp.arange(self.band_buffer.shape[-1])[None, None, :]
+            inds2 = xp.arange(self.nchannels)[None, :, None]
+            inds3 = start_inds[:, None, None] + xp.arange(self.band_buffer.shape[-1])[None, None, :]
 
         return inds1, inds2, inds3
 

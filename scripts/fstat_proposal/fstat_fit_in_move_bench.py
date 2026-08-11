@@ -180,14 +180,15 @@ def _leg_env(preset: str, leg_gpus: str, leg_dir: str) -> dict:
     env["FILE_STORE_DIR"] = os.path.join(leg_dir, "store") + os.sep
     if leg_gpus == "cpu":
         env.pop("GPUS", None)
-        env["GPU_BACKEND"] = "cpu"
+        env["USE_GPU"] = "0"
     else:
         env["GPUS"] = leg_gpus
-        # The smoke preset rides the lite variant, whose preset backend is
-        # CPU; an explicit env var outranks a lite preset (stock precedence),
-        # so pin the CUDA backend for device legs -- otherwise a "GPU" leg
-        # on the cluster silently benches the CPU path.
-        env.setdefault("GPU_BACKEND", "cuda")
+        # The smoke preset rides the lite variant, which defaults to a CPU
+        # smoke ("general.use_gpu": False). USE_GPU is the preset's
+        # documented env escape hatch (env overrules lite); forced here
+        # because a device leg exists to bench the CUDA path. The wheel
+        # flavor stays on the auto resolver (GPU_BACKEND unset).
+        env["USE_GPU"] = "1"
     return env
 
 
