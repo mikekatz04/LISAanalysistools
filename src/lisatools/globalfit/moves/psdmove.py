@@ -39,6 +39,7 @@ from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import FDSettings, STFTSettings
 from ...sensitivity import XYZSensitivityBackend
+from ...utils.device import device_context
 from ...utils.utility import asnumpy
 from ..state import GFState
 from .globalfitmove import GlobalFitMove
@@ -132,9 +133,11 @@ class PSDMove(GlobalFitMove, StretchMove):
         # :attr:`build_threads`. Pool is lazy and never pickled.
         self._build_threads = max(1, int(build_threads))
         self._build_pool = None
-        # One-time serial warm of the backend's walker-independent caches
-        # (see the note in :meth:`_build_batch`).
-        self._build_warmed = False
+        # One-time serial warm of the backend's walker-independent caches,
+        # tracked PER DEVICE on multi-GPU ACAs (see the note in
+        # :meth:`_build_batch`). Holds the devices already warmed (``None``
+        # is the CPU / single-device entry).
+        self._build_warmed = set()
         if dcga is not None:
             if acs is None:
                 acs = dcga.acs
@@ -601,6 +604,54 @@ class PSDMove(GlobalFitMove, StretchMove):
     # dev ACA path + hybrid dispatch
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # multi-GPU walker-shard plumbing (ACA route)
+    # ------------------------------------------------------------------
+    # The ACA shards walkers across devices (``acs.gpu_map`` /
+    # ``acs.gpu_splits``); scoring already runs per shard inside the owning
+    # device context (``AnalysisContainerArray._vectorized_dispatch``). The
+    # helpers below give the per-walker sensitivity BUILDS the same
+    # discipline: each build enters the owning walker's ``device_context``
+    # and evaluates against a per-device domain-settings replica (the
+    # ``source_runtime`` precedent), so nothing reads the primary device's
+    # caches cross-device. CPU / single-GPU paths are byte-identical to the
+    # historical behavior (device ``None`` -> nullcontext + shared objects).
+
+    def _walker_device(self, walker_index: int):
+        """The CUDA device owning walker ``walker_index``'s shard (None on CPU)."""
+        # getattr chain: some unit tests build the move via ``__new__`` with
+        # no ACA at all — treat that like the CPU path.
+        gpus = getattr(getattr(self, "acs", None), "gpus", None)
+        if gpus is None:
+            return None
+        return int(self.acs.gpu_map[int(walker_index)])
+
+    def _backend_settings_for_device(self, device):
+        """Per-device replica of the sensitivity backend's domain settings.
+
+        CPU / single-GPU / the run's primary device return the backend's own
+        (shared) ``basis_settings`` unchanged — zero extra memory, identical
+        objects. A non-primary device returns the cached device-local replica
+        from ``source_runtime._device_local_domain_settings_on`` (built once
+        per (settings, device) and kept for the run), whose WDM window /
+        fold caches live on that device.
+        """
+        backend = self.sensitivity_backend
+        settings = getattr(backend, "basis_settings", None)
+        gpus = getattr(getattr(self, "acs", None), "gpus", None)
+        if settings is None or device is None or gpus is None:
+            return settings
+        primary = int(gpus[0])
+        if int(device) == primary:
+            return settings
+        from ..stock.erebor.source_runtime import (
+            _device_local_domain_settings_on,
+        )
+
+        return _device_local_domain_settings_on(
+            settings, self.acs.xp, int(device), primary
+        )
+
     @staticmethod
     def _to_physical(transform_fn, params):
         """One branch's sampling-basis row -> the physical basis the model wants.
@@ -628,18 +679,33 @@ class PSDMove(GlobalFitMove, StretchMove):
         returned :class:`SensitivityMatrix` is what will be installed on the
         AnalysisContainer for the matching walker when we accept proposals
         (see :meth:`propose`).
+
+        Multi-GPU: the build runs inside the walker's owning
+        ``device_context`` and (composite backend) against a per-device
+        domain-settings replica, so the produced matrix — covariance,
+        ``invC``, ``detC`` — is resident on the walker's shard device.
         """
         # ``sgwb_params`` is only forwarded when present so the legacy
         # XYZSensitivityBackend (whose __call__ has no sgwb kwarg) keeps
         # working for runs without an sgwb branch.
         sgwb_params = self._to_physical(self.sgwb_transform_fn, sgwb_params)
         extra = {} if sgwb_params is None else dict(sgwb_params=sgwb_params)
-        return self.sensitivity_backend(
-            f"walker_{walker_index}",
-            self._to_physical(self.psd_transform_fn, psd_params),
-            galfor_params=self._to_physical(self.galfor_transform_fn, galfor_params),
-            **extra,
-        )
+        dev = self._walker_device(walker_index)
+        settings_here = self._backend_settings_for_device(dev)
+        if settings_here is not None and settings_here is not getattr(
+            self.sensitivity_backend, "basis_settings", None
+        ):
+            # only forwarded when it differs so duck-typed / legacy backends
+            # without the kwarg keep working on the shared-settings path
+            extra["basis_settings"] = settings_here
+        xp = getattr(getattr(self, "acs", None), "xp", np)
+        with device_context(xp, dev):
+            return self.sensitivity_backend(
+                f"walker_{walker_index}",
+                self._to_physical(self.psd_transform_fn, psd_params),
+                galfor_params=self._to_physical(self.galfor_transform_fn, galfor_params),
+                **extra,
+            )
 
     def _build_batch(self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords):
         """Install the proposed sensitivity matrix for every row in ``batch``.
@@ -649,12 +715,14 @@ class PSDMove(GlobalFitMove, StretchMove):
         and the rows are independent. With :attr:`build_threads` > 1 they
         run concurrently in :attr:`build_pool`.
 
-        The first row of the first batch is always built serially: the
+        The first row seen for EACH device is always built serially: the
         sensitivity backend fills walker-independent caches on its first
         call (``CompositeSensitivityBackend._instrument_basis_cache`` -- the
         per-WDM-time-slice fold under ``--unequal-arm`` is minutes of work),
-        and letting N threads race into a cold cache would just do that work
-        N times. Once warm, every later call is a lookup.
+        those caches are per device (each keyed on the device / its settings
+        replica), and letting N threads race into a cold cache would just do
+        that work N times. Once a device is warm, every later call on it is
+        a lookup.
         """
         def _one(row):
             row = int(row)
@@ -665,10 +733,15 @@ class PSDMove(GlobalFitMove, StretchMove):
                 w, psd_coords[row], galfor_here, sgwb_here
             )
 
-        rows = list(batch)
-        if not self._build_warmed and rows:
-            _one(rows.pop(0))
-            self._build_warmed = True
+        rows = []
+        for row in batch:
+            dev = self._walker_device(int(walker_inds_keep[int(row)]))
+            if dev not in self._build_warmed:
+                # serial per-device cache warm
+                self._build_warmed.add(dev)
+                _one(row)
+            else:
+                rows.append(row)
 
         if self._build_threads > 1 and len(rows) > 1:
             # list() forces consumption so worker exceptions re-raise here.

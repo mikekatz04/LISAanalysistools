@@ -170,6 +170,19 @@ class FakeDeviceComp:
             base[:, None] + np.zeros(10)[None, :]
 
 
+class FakeWalkerAC:
+    """Minimal per-walker AnalysisContainer stand-in.
+
+    Carries the one attribute the PSD move's build path writes
+    (``sens_mat``); the owning :class:`FakeMultiShardACA` hands these out
+    through ``__getitem__`` so ``acs[w].sens_mat = ...`` works on the fake.
+    """
+
+    def __init__(self, index: int):
+        self.index = int(index)
+        self.sens_mat = None
+
+
 class FakeMultiShardACA:
     """Duck-typed multi-shard ACA over NumPy arrays.
 
@@ -259,6 +272,17 @@ class FakeMultiShardACA:
         # Mirror AnalysisContainerArray.__len__ (== number of containers):
         # the engines read len(holder) as num_data/num_noise.
         return self._num_acs
+
+    def __getitem__(self, index):
+        """Per-walker fake AC (mirrors ``AnalysisContainerArray.__getitem__``).
+
+        Lazily built :class:`FakeWalkerAC` holders, one per row, so move
+        code that installs per-walker sensitivity matrices
+        (``acs[w].sens_mat = ...``) runs against the fake unchanged.
+        """
+        if not hasattr(self, "_fake_acs"):
+            self._fake_acs = [FakeWalkerAC(i) for i in range(self._num_acs)]
+        return self._fake_acs[int(index)]
 
     # --- per-split runner (mirrors AnalysisContainerArray) -------------
     # Same interface the real ACA exposes so the shard router and the

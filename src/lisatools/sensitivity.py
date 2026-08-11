@@ -48,6 +48,7 @@ from .stochastic import (
     check_stochastic,
 )
 from .utils.constants import *
+from .utils.device import current_device
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
 
@@ -2358,6 +2359,7 @@ class SensitivityBackendBase(LISAToolsParallelModule):
         galfor_params=None,
         sgwb_params=None,
         transform_fn: Optional[TransformContainer] = None,
+        basis_settings: Optional[DomainSettingsBase] = None,
     ) -> "SensitivityMatrixBase":
         """Build a per-walker sensitivity matrix from noise parameters.
 
@@ -2377,21 +2379,39 @@ class SensitivityBackendBase(LISAToolsParallelModule):
             galfor_params: Optional galactic-foreground parameters.
             sgwb_params: Optional SGWB spectral-template parameters.
             transform_fn: Optional PSD :class:`TransformContainer`.
+            basis_settings: Optional domain settings to evaluate the matrix
+                on instead of the backend's own :attr:`basis_settings`. Must
+                compare value-equal to them (``DomainSettingsBase.__eq__``);
+                the multi-GPU noise move passes a per-device replica so the
+                per-walker build allocates and reads on the walker's owning
+                device (see ``PSDMove``). ``None`` (default) keeps the
+                historical behavior exactly.
         """
         if psd_params is None:
-            return self._build_matrix(name, None, galfor_params, sgwb_params)
+            return self._build_matrix(
+                name, None, galfor_params, sgwb_params,
+                basis_settings=basis_settings,
+            )
         params = np.asarray(psd_params, dtype=float)
         if transform_fn is not None:
             params = transform_fn.both_transforms(
                 params, copy=True, return_transpose=False
             )
             params = np.atleast_1d(np.asarray(params).squeeze())
-        return self._build_matrix(name, params, galfor_params, sgwb_params)
+        return self._build_matrix(
+            name, params, galfor_params, sgwb_params,
+            basis_settings=basis_settings,
+        )
 
-    def _build_matrix(self, name, params, galfor_params, sgwb_params):
+    def _build_matrix(self, name, params, galfor_params, sgwb_params,
+                      basis_settings=None):
         """Construct the sensitivity matrix for the (already-transformed) params.
 
         Subclass hook. ``params`` is the physical-basis ``[Soms_d, Sa_a, ...]``.
+        ``basis_settings`` optionally overrides the backend's own settings with
+        a value-equal (per-device) replica; a subclass that cannot honor it
+        may ignore it (the native XYZ backend shares its kernel-bound arrays
+        by shallow copy and does).
         """
         raise NotImplementedError
 
@@ -3505,13 +3525,17 @@ class XYZSensitivityBackend(SensitivityBackendBase, SensitivityMatrixBase):
         return spline_knots_position, spline_knots_amplitude
 
     def _build_matrix(
-        self, name: str, params: np.ndarray, galfor_params=None, sgwb_params=None
+        self, name: str, params: np.ndarray, galfor_params=None, sgwb_params=None,
+        basis_settings=None,
     ) -> "XYZSensitivityBackend":
         """Create a configured copy of this backend with updated noise parameters.
 
         Backend hook (see :meth:`SensitivityBackendBase.__call__`). ``params`` is
         the physical-basis noise vector; ``sgwb_params`` is accepted for signature
-        parity but ignored (the native XYZ kernel has no SGWB term).
+        parity but ignored (the native XYZ kernel has no SGWB term), as is
+        ``basis_settings`` (the shallow copy shares the parent's kernel-bound
+        basis arrays by design; per-device replicas apply to the composite
+        backend only).
 
         Used by :class:`~lisatools.globalfit.moves.psdmove.PSDMove` to produce a
         per-walker sensitivity matrix at each MCMC step without re-initialising
@@ -3904,6 +3928,15 @@ class InstrumentNoise(SeparableComponent):
         """The two unit-level covariances ``(C|Soms_d=1,Sa_a=0, C|Soms_d=0,Sa_a=1)``."""
         key = (
             id(settings),
+            # Multi-GPU: cupy's current device (None on the CPU path, so
+            # single-device runs key exactly as before). A build entered
+            # under a non-primary ``device_context`` warms its OWN bases on
+            # that device instead of reading the primary device's arrays
+            # cross-device on every proposal. Per-device domain-settings
+            # replicas already fan the ``id(settings)`` component out; this
+            # keeps the cache correct even when a shared settings object is
+            # used under more than one device.
+            current_device(settings.xp),
             self.tdi_generation,
             self.fill_nans,
             tuple(self.element_sens_fns),
@@ -5425,7 +5458,8 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         return state
 
     def _build_matrix(
-        self, name: str, params, galfor_params=None, sgwb_params=None
+        self, name: str, params, galfor_params=None, sgwb_params=None,
+        basis_settings=None,
     ) -> CompositeSensitivityMatrix:
         """Build a per-walker :class:`CompositeSensitivityMatrix`.
 
@@ -5491,5 +5525,16 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
                 "build. Pass psd_params or construct the backend with "
                 "extra_components (e.g. a MojitoNoiseEstimates table)."
             )
-        _tmp = CompositeSensitivityMatrix(self.basis_settings, components)
+        # ``basis_settings`` (a value-equal per-device replica; see
+        # ``SensitivityBackendBase.__call__``) threads through to every
+        # component's ``covariance(settings)`` via the matrix, so a build
+        # entered under a non-primary ``device_context`` reads the WDM fold
+        # caches / window off ITS settings replica and warms ITS
+        # ``_bases`` entry (the instrument basis cache is keyed on
+        # ``id(settings)`` + current device) instead of touching the
+        # primary device's arrays.
+        _tmp = CompositeSensitivityMatrix(
+            basis_settings if basis_settings is not None else self.basis_settings,
+            components,
+        )
         return _tmp
