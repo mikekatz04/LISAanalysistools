@@ -247,6 +247,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.debug_plot_walker = int(_opt("DEBUG_PLOT_WALKER", "0"))
         self.debug_every = max(1, int(_opt("DEBUG_EVERY", "1")))
         self._debug_step = 0
+        self._debug_walker_params = None
         if self.debug:
             logger.info(
                 "[%s_DEBUG] armed: dir=%s walker=%d every=%d",
@@ -291,6 +292,28 @@ class PSDMove(GlobalFitMove, StretchMove):
                 f = np.arange(n_layer, dtype=float)
             good = f > 0
 
+            # Instrument-only reference (same psd params, foreground/sgwb
+            # zeroed): the gap between this and the total model IS the
+            # fitted foreground contribution per layer — without it a
+            # galfor-absorbed galaxy and no galaxy at all look identical.
+            S_instr = None
+            dbg = self._debug_walker_params
+            if dbg is not None and (dbg[2] is not None or dbg[3] is not None):
+                try:
+                    Si = _h(self._build_sensitivity_for_walker(
+                        dbg[0], dbg[1], None, None)[:])
+                    if Si.ndim == res.ndim + 1 and Si.shape[0] == Si.shape[1]:
+                        S_instr = np.stack([Si[i, i] for i in range(nch)])
+                    else:
+                        S_instr = Si[:nch]
+                    if S_instr.ndim == 3:
+                        S_instr = S_instr.mean(axis=-1)
+                except Exception as e:
+                    logger.warning(
+                        "[%s_DEBUG] instrument-only reference skipped: %r",
+                        self._debug_prefix, e,
+                    )
+
             os.makedirs(self.debug_plot_dir, exist_ok=True)
             move = getattr(self, "gf_move_name", self._debug_prefix.lower())
             labels = ("X", "Y", "Z")
@@ -301,7 +324,10 @@ class PSDMove(GlobalFitMove, StretchMove):
                 axes[i].loglog(f[good], res_pow[i][good], lw=0.8,
                                label=f"residual E[w^2] ({ch})")
                 axes[i].loglog(f[good], np.real(Sd[i])[good], "k--", lw=1.0,
-                               label="noise model S")
+                               label="noise model S (total)")
+                if S_instr is not None:
+                    axes[i].loglog(f[good], np.real(S_instr[i])[good], "r:",
+                                   lw=1.0, label="instrument-only S")
                 axes[i].legend(fontsize=7, loc="upper right")
                 axes[i].set_ylabel("power")
             axes[-1].set_xlabel("f [Hz]")
@@ -1660,6 +1686,12 @@ class PSDMove(GlobalFitMove, StretchMove):
                 w, psd_params, galfor_params, sgwb_params
             )
             self.acs[w].sens_mat = new_sens
+            if self.debug and w == self.debug_plot_walker:
+                # accepted params of the plotted walker, for the
+                # instrument-only reference curve in the debug overlay
+                self._debug_walker_params = (
+                    w, psd_params, galfor_params, sgwb_params
+                )
 
         self._run_rows_per_split(
             _publish_one, np.arange(nwalkers), np.arange(nwalkers)
