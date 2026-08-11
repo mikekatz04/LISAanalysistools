@@ -266,8 +266,16 @@ def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
             noise_index=noise_index,
             assert_max_df0=0.5 * spacing_hz * (1.0 + 1e-9))
         state["block"] = b
-        logger.info("[sighet-fstat] built reference block %d/%d "
-                    "(%d refs)", b + 1, n_blocks, hi - lo)
+        state["built"] = state.get("built", 0) + 1
+        # Blocks build LAZILY as the sweep crosses f0, so there is no single
+        # "build stage done" moment -- per-block lines go to DEBUG and INFO
+        # reports every ~10% of the block count.
+        logger.debug("[sighet-fstat] built reference block %d/%d "
+                     "(%d refs)", b + 1, n_blocks, hi - lo)
+        step = max(1, n_blocks // 10)
+        if state["built"] % step == 0 or state["built"] == n_blocks:
+            logger.info("[sighet-fstat] reference blocks built: %d/%d",
+                        state["built"], n_blocks)
 
     def call_fstat(params):
         p = xp.atleast_2d(xp.asarray(params, dtype=xp.float64))
