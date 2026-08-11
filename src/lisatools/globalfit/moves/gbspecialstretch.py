@@ -2016,6 +2016,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             with _tspan(getattr(self, "_prop_timer", None), "mempool_free"):
                 if self.backend.uses_cupy:
+                    # Debug knob for the 2-GPU incremental-ll-drift hunt:
+                    # deviceSynchronize() only syncs the CURRENT device, so
+                    # kernels launched inside another shard's device context
+                    # (cold-chain fills, per-shard scoring) may still be in
+                    # flight when a later step reads their output via peer
+                    # access. GB_MULTIGPU_SYNC_DEBUG=1 fences EVERY run
+                    # device at each unit boundary: drift gone under the
+                    # knob = cross-device stream race confirmed.
+                    if os.environ.get("GB_MULTIGPU_SYNC_DEBUG", "0") == "1":
+                        for _dev in (
+                            getattr(model.analysis_container_arr, "gpus", None)
+                            or []
+                        ):
+                            with self.xp.cuda.Device(int(_dev)):
+                                self.xp.cuda.runtime.deviceSynchronize()
                     self.xp.cuda.runtime.deviceSynchronize()
                 self.mempool.free_all_blocks()
 

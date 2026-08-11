@@ -20,6 +20,7 @@ This module owns the sub-band machinery that the GB proposal moves in
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from copy import deepcopy
 from types import ModuleType
@@ -651,6 +652,16 @@ class _RoutedBandEngine:
                     view, xp.asarray(params_host[pos]), intra,
                     None if N_host is None else xp.asarray(N_host[pos]),
                     factor=factor, waveform_kwargs=waveform_kwargs, **kw_s)
+        # Drift-hunt debug fence (see gbspecialstretch run_proposal): the
+        # fills above are enqueued on each shard's own device stream; a
+        # caller that immediately reads the filled shard from another
+        # device (peer access) is not ordered against them.
+        if (os.environ.get("GB_MULTIGPU_SYNC_DEBUG", "0") == "1"
+                and getattr(xp, "cuda", None) is not None):
+            for view in views:
+                if view.device is not None:
+                    with device_context(xp, view.device):
+                        xp.cuda.runtime.deviceSynchronize()
 
     def get_ll(self, holder, params_phys, *, data_index, noise_index,
                N_vals, phase_maximize=False, waveform_kwargs, **kwargs):
