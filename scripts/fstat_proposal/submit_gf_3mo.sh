@@ -63,6 +63,11 @@ export GB_NLEAVES_MAX=10000
 export GB_N_SUBBANDS=2560
 export GB_FSTAT_REFIT_EVERY=100    # production cadence (5 was verify-only)
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
+# Slab 5 (user ruling): measured-safe (+-1 layer holds >=1-1e-7 of tone
+# energy; 5 = 2x that need) and ~30%% smaller band buffers than the AUTO 7.
+# Smoke 2 exonerated the slab as the VGB [GB_CELL_LL] growth cause (growth
+# persisted at slab 7).
+export GB_WDM_BAND_SLAB_LAYERS=5
 
 # ---- VGB: exact chunked-het in-model scorer (sig-het accuracy at the
 #      loudest-VGB SNRs is unverified -- [GB_CELL_LL] growth in smoke 1) ----

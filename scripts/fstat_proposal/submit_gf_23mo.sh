@@ -91,6 +91,9 @@ export GB_FSTAT_REFIT_EVERY=100
 # 500, not the 200 default (user ruling): ~8x finer comb resolves more
 # distinct peaks per sub-band at 23 mo; the cap must not squeeze them out.
 export FSTAT_PEAKS_PER_BAND=500
+# Slab 5 (user ruling; see submit_gf_3mo.sh) -- the per-cell slab is
+# (3, 5, Nt) so the saving matters more at Nt=16800.
+export GB_WDM_BAND_SLAB_LAYERS=5
 
 # ---- VGB: exact chunked-het in-model scorer (see submit_gf_3mo.sh) ---------
 export VGB_SIGHET_INMODEL=0
