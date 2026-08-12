@@ -16,12 +16,17 @@ on-hardware questions it cannot:
   configuration that reads foreign-device comp buffers when something is
   still shared. On the chunked path expect *no speedup* from the second
   GPU (single-shard scoring by design). On the sig-het path
-  (``FSTAT_USE_SIGHET=1``) the scorer now fans candidate batches out over
-  EVERY run device against per-device reference replicas
-  (``_RoutedBandEngine._sighet_fstat_multidevice``), so the 2-GPU leg's
-  fit wall should drop toward ~1/N_dev of the 1-GPU leg's while the grid
-  parity gate still holds bit-for-bit (``FSTAT_SIGHET_MULTIDEV=0``
-  restores the pinned single-device scorer).
+  (``FSTAT_USE_SIGHET=1``) an OPT-IN fan-out (``FSTAT_SIGHET_MULTIDEV=1``;
+  default OFF -- its first on-GPU run FAILED grid parity, 2026-08-12)
+  splits candidate batches over EVERY run device against per-device
+  reference replicas (``_RoutedBandEngine._sighet_fstat_multidevice``).
+  Before re-arming it, run the bisector leg:
+  ``FSTAT_SIGHET_MULTIDEV=check`` shadows every batch with the pinned
+  single-device scorer and raises on the first diverging row, naming the
+  lane/device/comp -- one bench run localizes the divergence. Also compare
+  ``walker_ref`` across the legs' DONE.json first: different reference
+  walkers produce exactly the observed empty-band F_max scatter with both
+  legs individually healthy.
 * **Do all legs fit identical grids?** The comb npz and the stacked stage-B
   npz must match across legs (same synthetic data, same reference walker,
   deterministic sweep). Bit-identical is the expectation; ``--rtol`` is the

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -243,7 +244,13 @@ class _FakeSigHetFStatComp:
         row_val = float(np.real(np.asarray(
             wdm_holder.linear_data_arr[0]).reshape(len(wdm_holder), -1)
         )[int(data_index), 0])
-        self._fstat = dict(refs=refs.copy(), data_val=row_val)
+        # Fold the inverse-PSD row too (mirroring the real comp's
+        # data+invC consumption) so a wrong noise-row slice changes the
+        # numbers, not just the data row.
+        ni = int(data_index if noise_index is None else noise_index)
+        psd_val = float(np.asarray(
+            wdm_holder.linear_psd_arr[0]).reshape(len(wdm_holder), -1)[ni, 0])
+        self._fstat = dict(refs=refs.copy(), data_val=row_val + psd_val)
         self.calls.append(dict(
             kind="setup_fstat", holder=wdm_holder,
             data_index=int(data_index),
@@ -266,6 +273,12 @@ class _FakeSigHetFStatComp:
         b = getattr(self, "barrier", None)
         if b is not None:
             b.wait()
+        # Completion-order hook: a per-comp delay forces one lane to
+        # finish LAST, so the merge's row attribution is exercised under
+        # out-of-order lane completion.
+        d = getattr(self, "delay", 0.0)
+        if d:
+            time.sleep(d)
         x = np.atleast_2d(np.asarray(params, dtype=float))
         di = (np.zeros(x.shape[0], dtype=int) if data_index is None
               else np.asarray(data_index, dtype=int))
@@ -1009,7 +1022,9 @@ class SigHetFStatRouteTest(unittest.TestCase):
 
 
 class SigHetFStatMultiDevTest(unittest.TestCase):
-    """``route_sighet_fstat``'s default all-device fan-out.
+    """``route_sighet_fstat``'s all-device fan-out (OPT-IN:
+    ``FSTAT_SIGHET_MULTIDEV=1``; default OFF pending the on-GPU parity
+    gate; ``=check`` adds the pinned shadow comparison).
 
     With >= 2 run devices every device gets its own lane -- a comp replica
     plus a private one-row holder carrying a copy of the reference walker's
@@ -1183,6 +1198,124 @@ class SigHetFStatMultiDevTest(unittest.TestCase):
         self.assertIs(setup["holder"], single)
         self.assertEqual(setup["data_index"], 4)
         self.assertIsNone(single._thread_pool)
+
+    # ---- GPU-failure hardening (2026-08-12 divergence follow-up) ----
+
+    def _distinct_psd_rows(self, holder):
+        """Overwrite the fake's uniform-1.0 psd buffers with per-GLOBAL-row
+        values (100 + row) so a wrong noise-row slice CHANGES the numbers
+        (the fake comp folds the psd row's first element)."""
+        per_row = int(np.prod(self.PER_BAND))
+        for s, rows in enumerate(holder.gpu_splits):
+            buf = holder.linear_psd_arr[s]
+            for intra, b in enumerate(rows):
+                buf[intra * per_row:(intra + 1) * per_row] = 100.0 + float(b)
+
+    def test_out_of_order_lane_completion_keeps_attribution(self):
+        """Lane 0 (prototype) is forced to finish LAST; the merged rows
+        must still match the pinned scorer bit-for-bit -- attribution is by
+        row range, never by completion order."""
+        fracs = [0.3, 0.9, 1.4, 2.6, 5.1]
+        pinned = FakeMultiShardACA(
+            self.PER_BAND, self.NUM_ACS, 2, layout="blocked")
+        self._distinct_psd_rows(pinned)
+        comp_p = _FakeSigHetFStatComp(
+            FakeDeviceComp(pinned.xp, tag="sighet-chunked"))
+        N_ref, M_ref = (np.asarray(a) for a in self._route(
+            comp_p, pinned, walker_ref=4, multidev="0")(
+                self._candidates(fracs)))
+
+        self._distinct_psd_rows(self.holder)
+        call = self._route(self.comp, self.holder, walker_ref=4)
+        call(self._candidates(fracs[:2]))       # materialize both lanes
+        replica = self._replica(self.comp, 1)
+        self.comp.delay = 0.25                  # prototype lane lags
+        try:
+            N, M = (np.asarray(a) for a in call(self._candidates(fracs)))
+        finally:
+            self.comp.delay = 0.0
+        np.testing.assert_array_equal(N, N_ref)
+        np.testing.assert_array_equal(M, M_ref)
+        self.assertGreater(len(replica.calls), 0)
+
+    def test_shared_comp_block_state_self_heals(self):
+        """The stash lives on the COMP but block residency lived on the
+        CLOSURE: two scorers sharing one comp desynchronized, and the stale
+        closure scored against the other's block. The identity guard in
+        ``_ensure_block`` must rebuild instead."""
+        from lisatools.sampling.fstat_gridfit import build_sighet_call_fstat
+
+        single = FakeMultiShardACA(
+            self.PER_BAND, self.NUM_ACS, 1, layout="blocked")
+        comp = _FakeSigHetFStatComp(
+            FakeDeviceComp(single.xp, tag="sighet-chunked"))
+        kw = dict(xp=single.xp, Tobs=self.TOBS,
+                  f0_lims_hz=(self.F0_LO, self.F0_LO + 10.0 * self.margin),
+                  data_index=4, noise_index=4, spacing_hz=self.margin,
+                  ref_block=4)
+        a1 = build_sighet_call_fstat(comp, single, **kw)
+        a2 = build_sighet_call_fstat(comp, single, **kw)
+        rows_b0 = self._candidates([0.3, 1.4])   # bucket k in {1, 2}: block 0
+        rows_b1 = self._candidates([5.1, 6.2])   # bucket k in {6, 7}: block 1
+        first = np.asarray(a1(rows_b0)[0]).copy()
+        a2(rows_b1)      # a2 swaps the SHARED comp's stash to block 1
+        again = np.asarray(a1(rows_b0)[0])
+        # without the guard a1 trusted its closure record and scored the
+        # block-0 rows against a2's block-1 references
+        np.testing.assert_array_equal(again, first)
+        n_setups = sum(1 for c in comp.calls if c["kind"] == "setup_fstat")
+        self.assertEqual(n_setups, 3)            # a1 b0, a2 b1, a1 REBUILD
+
+    def test_check_mode_passes_when_consistent(self):
+        """``FSTAT_SIGHET_MULTIDEV=check``: the pinned shadow scores every
+        batch too; consistent lanes pass and return the pinned values.
+        (Walker 4 -> the shadow SHARES the device-1 replica with lane 1,
+        so this also exercises the stash guard on a live shared comp.)"""
+        fracs = [0.3, 0.9, 1.4, 2.6, 5.1]
+        self._distinct_psd_rows(self.holder)
+        call = self._route(self.comp, self.holder, walker_ref=4,
+                           multidev="check")
+        N, M = (np.asarray(a) for a in call(self._candidates(fracs)))
+
+        pinned = FakeMultiShardACA(
+            self.PER_BAND, self.NUM_ACS, 2, layout="blocked")
+        self._distinct_psd_rows(pinned)
+        comp_p = _FakeSigHetFStatComp(
+            FakeDeviceComp(pinned.xp, tag="sighet-chunked"))
+        N_ref, M_ref = (np.asarray(a) for a in self._route(
+            comp_p, pinned, walker_ref=4, multidev="0")(
+                self._candidates(fracs)))
+        np.testing.assert_array_equal(N, N_ref)
+        np.testing.assert_array_equal(M, M_ref)
+
+    def test_check_mode_flags_diverging_lane(self):
+        """A lane whose comp mis-scores must be NAMED by the check: corrupt
+        the device-1 replica (walker on shard 0, so the shadow shares the
+        PROTOTYPE with lane 0 and the replica is check-independent) and
+        expect a RuntimeError localizing lane 1."""
+        call = self._route(self.comp, self.holder, walker_ref=1,
+                           multidev="check")
+        call(self._candidates([0.3, 2.6]))       # materialize + clean pass
+        replica = self._replica(self.comp, 1)
+        orig = replica.get_fstat_ll_wdm
+
+        def corrupted(*a, **k):
+            N, M = orig(*a, **k)
+            return N + 1.0, M
+
+        replica.get_fstat_ll_wdm = corrupted
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                call(self._candidates([0.3, 0.9, 1.4, 2.6]))
+        finally:
+            replica.get_fstat_ll_wdm = orig
+        msg = str(ctx.exception)
+        self.assertIn("MULTIDEV CHECK FAILED", msg)
+        self.assertIn("lane 1", msg)
+        self.assertIn("replica", msg)
+        # the healthy lane's range reports zero bad rows
+        self.assertIn("lane 0 dev 0 rows [0:2) comp=PINNED-SHARED bad 0/2",
+                      msg)
 
 
 class RouterThreadedDispatchTest(unittest.TestCase):
@@ -1458,8 +1591,13 @@ class SigHetFStatRouteRealCompTest(unittest.TestCase):
         rng = np.random.default_rng(11)
         data = rng.normal(size=(self.NUM_ACS, 3, NfA, NtA)) * 1e-22
         invc = np.zeros((self.NUM_ACS, 3, 3, NfA, NtA))
+        # Per-ROW-distinct invC (2026-08-12 GPU-divergence follow-up): with
+        # identical rows a wrong noise-row slice was invisible to the
+        # bit-identity legs; scaling by the global row id makes the psd row
+        # slicing load-bearing in every leg comparison.
+        row_scale = 1.0 + 0.01 * np.arange(self.NUM_ACS)
         for c in range(3):
-            invc[:, c, c] = 1e44
+            invc[:, c, c] = 1e44 * row_scale[:, None, None]
         # overwrite the fake's constant-seeded buffers with the layouts the
         # real comp consumes: (rows, 3, NfA, NtA) data and (rows, 3, 3,
         # NfA, NtA) XYZ cross-channel invC, flat per shard.
@@ -1500,9 +1638,13 @@ class SigHetFStatRouteRealCompTest(unittest.TestCase):
         cands = self._candidates(f0_lo, margin)
 
         results = {}
+        # ref_block=2 splits the 6-node comb over >= 2 reference blocks, so
+        # every leg exercises block eviction/rebuild (and, on the check
+        # leg, the shared-comp stash guard) across the two batches.
         for label, shards, multidev in (("single", 1, "1"),
                                         ("pinned", 2, "0"),
-                                        ("multidev", 2, "1")):
+                                        ("multidev", 2, "1"),
+                                        ("check", 2, "check")):
             self.sig.clear_fstat_references()
             with mock.patch.dict(os.environ,
                                  {"FSTAT_SIGHET_MULTIDEV": multidev}):
@@ -1510,14 +1652,21 @@ class SigHetFStatRouteRealCompTest(unittest.TestCase):
                     self.sig, self._seeded_holder(shards), xp=np, Tobs=Tobs,
                     f0_lims_hz=(f0_lo, f0_lo + 3.0 * margin),
                     data_index=self.WALKER_REF, noise_index=self.WALKER_REF,
-                    spacing_hz=margin)
-            results[label] = tuple(np.asarray(a) for a in call(cands))
+                    spacing_hz=margin, ref_block=2)
+            out1 = tuple(np.asarray(a).copy() for a in call(cands))
+            out2 = tuple(np.asarray(a).copy() for a in call(cands[::-1]))
+            results[label] = out1 + out2
 
-        N1, M1 = results["single"]
+        N1, M1 = results["single"][:2]
         self.assertTrue(np.all(np.isfinite(N1)) and np.all(np.isfinite(M1)))
-        for label in ("pinned", "multidev"):
-            np.testing.assert_array_equal(results[label][0], N1)
-            np.testing.assert_array_equal(results[label][1], M1)
+        # batch 2 is batch 1 reversed: row-permutation consistency within
+        # the single leg first, then every leg against the single leg.
+        np.testing.assert_array_equal(results["single"][2], N1[::-1])
+        np.testing.assert_array_equal(results["single"][3], M1[::-1])
+        for label in ("pinned", "multidev", "check"):
+            for part in range(4):
+                np.testing.assert_array_equal(results[label][part],
+                                              results["single"][part])
 
     def test_router_threaded_chunked_fstat_bit_identical(self):
         """GB_ROUTER_THREADED on the REAL chunked comp: the routed

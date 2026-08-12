@@ -257,10 +257,19 @@ def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
         n_nodes, node_f0[0], node_f0[-1], spacing_hz, margin, n_knots, Tobs,
         n_blocks, ref_block)
 
-    state = {"block": -1}
+    state = {"block": -1, "stash": None}
 
     def _ensure_block(b: int):
-        if state["block"] == b:
+        # Residency is only valid while the COMP still holds the stash THIS
+        # closure built: the record lives on the closure but the stash lives
+        # on the comp, so a second scorer sharing the comp (the multidev
+        # check mode's pinned shadow; any future concurrent fit) silently
+        # replaces it -- without the identity check this closure would score
+        # against a foreign block's references (the kernel df0 assert turns
+        # that into a hard error; this guard makes it a rebuild instead).
+        if (state["block"] == b
+                and getattr(sighet_comp, "_fstat", None) is not None
+                and sighet_comp._fstat is state["stash"]):
             return
         lo = b * ref_block
         hi = min(lo + ref_block, n_nodes)
@@ -275,6 +284,11 @@ def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
             noise_index=noise_index,
             assert_max_df0=0.5 * spacing_hz * (1.0 + 1e-9))
         state["block"] = b
+        # Strong ref on purpose: while scorers share a comp, each keeps at
+        # most its own last-built block alive alongside the comp's resident
+        # one (a rebuild replaces both refs). Lanes never share in
+        # production, so the extra block only exists in the check mode.
+        state["stash"] = sighet_comp._fstat
         # ONE block is resident at a time (each is ~GBs), so re-entering an
         # evicted block REBUILDS it. Track unique builds and rebuilds
         # separately -- an earlier version summed them into one "built k/N"

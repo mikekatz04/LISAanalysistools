@@ -1164,12 +1164,16 @@ class _RoutedBandEngine:
         adapter and the sweeps never see the sharding. Single-shard holders
         pass straight through (no overhead, no wrapper).
 
-        With TWO OR MORE run devices (``holder.gpus``) the scorer instead
-        fans out over ALL of them (:meth:`_sighet_fstat_multidevice`): the
-        F-stat is single-shard by contract, so the pinned form leaves every
-        other GPU idle for the whole comb + stage-B fit. Kill-switch
-        ``FSTAT_SIGHET_MULTIDEV=0`` restores the single-device pin; CPU and
-        single-GPU holders never take the fan-out path at all.
+        With TWO OR MORE run devices (``holder.gpus``),
+        ``FSTAT_SIGHET_MULTIDEV=1`` fans the scorer out over ALL of them
+        (:meth:`_sighet_fstat_multidevice`): the F-stat is single-shard by
+        contract, so the pinned form leaves every other GPU idle for the
+        whole comb + stage-B fit. OPT-IN (default 0) until the on-GPU
+        parity gate passes; ``FSTAT_SIGHET_MULTIDEV=check`` runs the
+        fan-out WITH a pinned single-device shadow scorer and hard-compares
+        every batch (the on-cluster bisector for the observed GPU
+        divergence). CPU and single-GPU holders never take the fan-out
+        path at all.
         """
         from ...sampling.fstat_gridfit import build_sighet_call_fstat
 
@@ -1199,19 +1203,29 @@ class _RoutedBandEngine:
         view, (_pos, intra, intra_noise) = next(
             (v, p) for v, p in zip(views, parts) if p[0].shape[0])
         gpus = getattr(holder, "gpus", None)
-        if (gpus is not None and len(gpus) >= 2
-                and os.environ.get("FSTAT_SIGHET_MULTIDEV", "0") == "1"):
-                # DEFAULT OFF (2026-08-12): the first on-GPU run of the
-                # fan-out produced grids that DIFFER from the single-device
-                # path (F_max rel up to 0.81, best-sky sign flips) while the
-                # CPU fake/real-comp bit-identity tests pass -- a
-                # GPU-execution defect (suspect: chunk-merge ordering /
-                # cross-device copy sync). Opt-in until the GPU parity gate
-                # passes; the single-device pin is the validated scorer.
+        mode = os.environ.get("FSTAT_SIGHET_MULTIDEV", "0")
+        if gpus is not None and len(gpus) >= 2 and mode in ("1", "check"):
+            # DEFAULT OFF (2026-08-12): the first on-GPU run of the
+            # fan-out produced grids that DIFFER from the single-device
+            # path (F_max rel up to 0.81, best-sky sign flips) while the
+            # CPU fake/real-comp bit-identity tests pass. The 2026-08-11
+            # code audit EXCLUDED the merge bookkeeping (disjoint host row
+            # ranges), the transfer ordering (every lane D2H is a blocking
+            # .get() behind the wraps' own cudaDeviceSynchronize) and the
+            # holder row layouts (both ACA buffers carry exactly len(split)
+            # rows; the slices mirror setup_fstat_references' own
+            # reshapes); the kernel wraps hold the GIL, so lanes cannot
+            # race in C++ either. What CPU cannot reach is the on-GPU
+            # scoring of the non-primary lane's comp replica -- mode
+            # "check" shadows every batch with the pinned scorer and fails
+            # loudly on the first diverging row, localizing it to a lane.
+            # Opt-in until that gate passes; the single-device pin is the
+            # validated scorer.
             return cls._sighet_fstat_multidevice(
                 comp, holder, view, int(intra[0]),
                 int(intra[0] if intra_noise is None else intra_noise[0]),
-                xp=xp, Tobs=Tobs, f0_lims_hz=f0_lims_hz, **build_kwargs)
+                xp=xp, Tobs=Tobs, f0_lims_hz=f0_lims_hz,
+                check=(mode == "check"), **build_kwargs)
         comp_s = cls._comp_for(comp, holder, view)
         inner = build_sighet_call_fstat(
             comp_s, view, xp=xp, Tobs=Tobs, f0_lims_hz=f0_lims_hz,
@@ -1235,7 +1249,7 @@ class _RoutedBandEngine:
     @classmethod
     def _sighet_fstat_multidevice(cls, comp, holder, view, intra_data,
                                   intra_noise, *, xp, Tobs, f0_lims_hz,
-                                  **build_kwargs):
+                                  check=False, **build_kwargs):
         """All-device fan-out for the sig-het F-stat scorer.
 
         REPLICATE, don't partition, the resident state: every run device
@@ -1266,6 +1280,19 @@ class _RoutedBandEngine:
         runs unchanged inside every lane, and the merge below is a pure
         permutation into disjoint host row ranges -- no reductions ever
         cross devices.
+
+        ``check=True`` (``FSTAT_SIGHET_MULTIDEV=check``): every batch is
+        ALSO scored through the pinned single-device scorer (the exact
+        else-branch construction) and hard-compared bit-for-bit. On the
+        first divergence it logs per-lane forensics -- which lane's row
+        range diverges, on which device, through the prototype comp or a
+        replica -- and raises. This is the on-cluster bisector for the
+        observed GPU divergence: a mismatch confined to the non-primary
+        lane's range convicts that lane's comp replica; a mismatch pattern
+        crossing lane boundaries convicts the merge/transfer machinery.
+        The pinned shadow may SHARE a comp with the walker-shard lane;
+        ``build_sighet_call_fstat``'s stash-identity guard makes the two
+        closures rebuild instead of scoring a foreign block.
         """
         from ...sampling.fstat_gridfit import build_sighet_call_fstat
 
@@ -1281,20 +1308,70 @@ class _RoutedBandEngine:
                     n_slabs, -1)[int(intra_noise)]))
 
         lanes = []
+        lane_comps = []
         for dev in [int(g) for g in holder.gpus]:
             with device_context(holder.xp, dev):
                 ref_holder = _FStatRefRowHolder(
                     holder, dev,
                     xp.asarray(data_row_host), xp.asarray(psd_row_host))
             comp_d = cls._comp_for(comp, holder, ref_holder)
+            lane_comps.append(comp_d)
             lanes.append((dev, build_sighet_call_fstat(
                 comp_d, ref_holder, xp=xp, Tobs=Tobs,
                 f0_lims_hz=f0_lims_hz, data_index=0, noise_index=0,
                 **build_kwargs)))
         logger.info(
-            "[sighet-fstat] multi-device scorer: %d lanes on devices %s "
+            "[sighet-fstat] multi-device scorer: %d lanes on devices %s%s "
             "(FSTAT_SIGHET_MULTIDEV=0 restores the single-device pin)",
-            len(lanes), [dev for dev, _ in lanes])
+            len(lanes), [dev for dev, _ in lanes],
+            " + pinned shadow CHECK" if check else "")
+
+        if check:
+            # The exact pinned construction (the route's else branch): the
+            # walker-shard replica scoring against the live shard view.
+            comp_pin = cls._comp_for(comp, holder, view)
+            inner_pin = build_sighet_call_fstat(
+                comp_pin, view, xp=xp, Tobs=Tobs, f0_lims_hz=f0_lims_hz,
+                data_index=int(intra_data), noise_index=int(intra_noise),
+                **build_kwargs)
+        else:
+            comp_pin = inner_pin = None
+
+        def _check_batch(params_host, N_host, M_host):
+            """Shadow-score the batch on the pinned scorer; fail loudly on
+            the first diverging row with lane-resolved forensics."""
+            with device_context(holder.xp, view.device):
+                N_ref, M_ref = inner_pin(xp.asarray(params_host))
+                N_ref, M_ref = asnumpy(N_ref), asnumpy(M_ref)
+            if np.array_equal(N_host, N_ref) and np.array_equal(M_host, M_ref):
+                return
+            n = int(params_host.shape[0])
+            bounds = (n * np.arange(len(lanes) + 1)) // len(lanes)
+            bad = (np.any(N_host != N_ref, axis=1)
+                   | np.any(M_host != M_ref, axis=1))
+            lines = []
+            for i, (dev, _inner) in enumerate(lanes):
+                s, e = int(bounds[i]), int(bounds[i + 1])
+                nb = int(bad[s:e].sum())
+                dN = np.abs(N_host[s:e] - N_ref[s:e])
+                dM = np.abs(M_host[s:e] - M_ref[s:e])
+                if lane_comps[i] is comp_pin:
+                    kind = "PINNED-SHARED"
+                elif lane_comps[i] is comp:
+                    kind = "prototype"
+                else:
+                    kind = "replica"
+                lines.append(
+                    f"lane {i} dev {dev} rows [{s}:{e}) comp={kind} "
+                    f"bad {nb}/{e - s} maxdN {dN.max() if dN.size else 0:.3e} "
+                    f"maxdM {dM.max() if dM.size else 0:.3e}")
+            first = int(np.argmax(bad))
+            msg = ("[sighet-fstat] MULTIDEV CHECK FAILED: fan-out != pinned "
+                   f"scorer on {int(bad.sum())}/{n} rows (first bad row "
+                   f"{first}, f0={params_host[first, 1]:.9e} Hz).\n  "
+                   + "\n  ".join(lines))
+            logger.error(msg)
+            raise RuntimeError(msg)
 
         def call_fstat(params):
             params_host = np.atleast_2d(asnumpy(params))
@@ -1326,6 +1403,8 @@ class _RoutedBandEngine:
             else:
                 for i in active:
                     _score(i)
+            if inner_pin is not None:
+                _check_batch(params_host, N_host, M_host)
             return xp.asarray(N_host), xp.asarray(M_host)
 
         return call_fstat

@@ -14,14 +14,25 @@ reference walker, so `_RoutedBandEngine.route_fstat_ll` lands 100% of the
 rows on that walker's shard. On the chunked path expect **no speedup from
 the second GPU** — that 2-GPU leg is a correctness gate (device-local comp
 buffers, no peer access, identical grids), not a performance target.
-**Exception: the sig-het path** (`FSTAT_USE_SIGHET=1`) now row-splits every
-candidate batch over ALL run devices against per-device reference replicas
-(`_RoutedBandEngine._sighet_fstat_multidevice`): during `[sweep:comb.*]` /
-`[stageB]` `nvidia-smi` should show every device busy and the 2-GPU leg's
-fit wall should drop toward ~half of the 1-GPU leg's — while the grid
-parity gate must STILL hold bit-for-bit (the multi-device merge is a pure
-permutation; `FSTAT_SIGHET_MULTIDEV=0` is the kill-switch back to the
-pinned scorer).
+**Exception: the sig-het path** (`FSTAT_USE_SIGHET=1`) has an OPT-IN
+fan-out (`FSTAT_SIGHET_MULTIDEV=1`, **default OFF** — its first on-GPU run
+FAILED grid parity, 2026-08-12) that row-splits every candidate batch over
+ALL run devices against per-device reference replicas
+(`_RoutedBandEngine._sighet_fstat_multidevice`). Re-arming procedure:
+
+1. compare `walker_ref` in the two legs' `epoch_0000/DONE.json` — different
+   reference walkers reproduce the observed empty-band F_max scatter with
+   both legs individually healthy;
+2. run one 2-GPU leg with `FSTAT_SIGHET_MULTIDEV=check`: every batch is
+   ALSO scored by the pinned single-device scorer and the first diverging
+   row raises with per-lane forensics (which lane's row range, which
+   device, prototype vs replica comp) — a mismatch confined to the
+   non-primary lane convicts that device's comp replica; a pattern crossing
+   lane boundaries convicts the merge/transfer machinery;
+3. only after a full `check` fit passes clean, flip to
+   `FSTAT_SIGHET_MULTIDEV=1`: `nvidia-smi` should show every device busy
+   through `[sweep:comb.*]` / `[stageB]`, the fit wall dropping toward
+   ~half — and the cross-leg grid parity gate still bit-for-bit.
 
 ## 0. Prerequisites
 
