@@ -227,7 +227,6 @@ class _ProposeTimer:
             "sorter_build", "friend_index", "resid_open_close", "ll_checks",
             "run_proposal", "run_tempering", "write_back", "sorter_rebuild",
             "band_info", "ll_inject_final", "ll_inject_drift", "mempool_free",
-            "band_ll_audit",
         )
         items = sorted(self.stages.items(), key=lambda kv: -kv[1])
         tracked = sum(v for k, v in self.stages.items() if k in top)
@@ -2285,6 +2284,94 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         finally:
             self.xp.cuda.runtime.setDevice(main_dev)
 
+    def _cell_ll_state_init(self, scheduler):
+        """Per-unit state for buffer before/after cell ll crediting."""
+        xp = scheduler.xp
+        n = scheduler.n_slots
+        spec = scheduler.slot_specials
+        return {
+            "ll0": xp.zeros(n),
+            "led0": xp.zeros(n),
+            "rep0": xp.zeros(n, dtype=int),
+            "spec": xp.zeros(n, dtype=spec.dtype),
+            "open": xp.zeros(n, dtype=bool),
+            "n_done": 0,
+            "sum_abs_mm": 0.0,
+            "max_mm": 0.0,
+            "max_rate": 0.0,
+            "worst": None,
+        }
+
+    def _cell_ll_open(self, st, buffer_obj, slots, specials,
+                      ll_change_log, prop_counts):
+        """Snapshot slab ll + ledger/repeat baselines for freshly filled slots."""
+        if len(slots) == 0:
+            return
+        lls = buffer_obj.band_likelihoods(source_only=True)
+        t_i, w_i, b_i = unpack_special_index(specials, self.nwalkers)
+        st["ll0"][slots] = lls[slots]
+        st["led0"][slots] = ll_change_log[t_i, w_i, b_i]
+        st["rep0"][slots] = prop_counts[1][t_i, w_i, b_i]
+        st["spec"][slots] = specials
+        st["open"][slots] = True
+
+    def _cell_ll_finalize(self, st, buffer_obj, slots, ll_change_log,
+                          prop_counts):
+        """Credit switched-out cells with the realized slab ll difference.
+
+        The smallest running unit (2026-08-12 user design): a cell's stay in
+        the buffer is fill -> ll -> rj -> in-model repeats -> ll. The
+        before/after slab difference replaces the cell's ACCUMULATED sampled
+        lls in ``ll_change_log``, so the ledger tracks the residual the
+        buffer actually holds; the sampled-vs-realized difference is checked
+        per in-model repeat right here (and only here).
+        """
+        if len(slots) == 0:
+            return
+        xp = get_array_module(st["ll0"])
+        lls = buffer_obj.band_likelihoods(source_only=True)
+        spec = st["spec"][slots]
+        t_i, w_i, b_i = unpack_special_index(spec, self.nwalkers)
+        actual = lls[slots] - st["ll0"][slots]
+        sampled = ll_change_log[t_i, w_i, b_i] - st["led0"][slots]
+        nrep = prop_counts[1][t_i, w_i, b_i] - st["rep0"][slots]
+        mm = actual - sampled
+        ll_change_log[t_i, w_i, b_i] = st["led0"][slots] + actual
+        rate = xp.abs(mm) / xp.maximum(nrep, 1)
+        k = int(rate.argmax())
+        r_k = float(rate[k])
+        if r_k > st["max_rate"]:
+            st["max_rate"] = r_k
+            st["worst"] = (
+                int(t_i[k]), int(w_i[k]), int(b_i[k]), int(nrep[k]),
+                float(mm[k]), r_k,
+            )
+        st["max_mm"] = max(st["max_mm"], float(xp.abs(mm).max()))
+        st["sum_abs_mm"] += float(xp.abs(mm).sum())
+        st["n_done"] += int(len(slots))
+        st["open"][slots] = False
+
+    def _cell_ll_report(self, st):
+        """One line per unit: sampled-vs-realized stats over finished cells."""
+        if st["n_done"] == 0 or st["worst"] is None:
+            return
+        t_i, w_i, b_i, nrep, mm, rate = st["worst"]
+        logger.info(
+            f"[GB_CELL_LL {self.name}] unit: {st['n_done']} cells credited"
+            f" from the buffer before/after ll; |sampled-actual| mean"
+            f" {st['sum_abs_mm'] / st['n_done']:.3e} max {st['max_mm']:.3e};"
+            f" worst per-repeat {rate:.3e}/rep (temp {t_i}, walker {w_i},"
+            f" band {b_i}, {nrep} reps, diff {mm:.3e})."
+        )
+        tol = float(os.environ.get("GB_CELL_LL_REP_TOL", "0.05"))
+        if rate > tol:
+            logger.warning(
+                f"[GB_CELL_LL {self.name}] per-repeat sampled-vs-actual diff"
+                f" {rate:.3e} exceeds {tol} (temp {t_i}, walker {w_i}, band"
+                f" {b_i}, {nrep} repeats): the sampled lls and the realized"
+                " buffer residual disagree beyond the expected floor."
+            )
+
     def _run_band_unit(self, model, band_sorter, subset, band_temps,
                        ll_change_log, prop_counts, acc_counts):
         """Drive one parity unit's cells through the sub-band buffer."""
@@ -2300,6 +2387,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if tm is not None:
             tm.count("cells", int(scheduler.n_cells))
         self._debug_log_band_null(buffer_obj)
+
+        # Buffer before/after cell ll crediting (2026-08-12 user design):
+        # a cell's stay in a buffer slot is the smallest running unit --
+        # fill -> ll -> rj -> in-model repeats -> ll -> diff at switch-out.
+        # The diff replaces the cell's accumulated sampled lls in
+        # ll_change_log (see _cell_ll_finalize). GB_CELL_LL_CREDIT=0
+        # restores the pure sampled-ll ledger.
+        cell_ll_state = None
+        if os.environ.get("GB_CELL_LL_CREDIT", "1") == "1":
+            cell_ll_state = self._cell_ll_state_init(scheduler)
+            _slots0 = scheduler.xp.arange(scheduler.n_slots)[
+                scheduler.slot_active
+            ]
+            with _tspan(tm, "cell_ll"):
+                self._cell_ll_open(
+                    cell_ll_state, buffer_obj, _slots0,
+                    scheduler.slot_specials[_slots0],
+                    ll_change_log, prop_counts,
+                )
 
         # Pick eligibility lives on the MAIN sorter: only sources inside this
         # unit's subset are candidates (for in-model moves the subset already
@@ -2348,12 +2454,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             scheduler.record_picks(picked["specials"])
             inds_fill, new_specials = scheduler.advance()
             if len(inds_fill):
+                # Switch-out: credit the outgoing cells from their slab
+                # before/after ll BEFORE the refill overwrites the slots.
+                if cell_ll_state is not None:
+                    with _tspan(tm, "cell_ll"):
+                        self._cell_ll_finalize(
+                            cell_ll_state, buffer_obj, inds_fill,
+                            ll_change_log, prop_counts,
+                        )
                 with _tspan(tm, "buffer_build"):
                     subset.get_buffer(
                         model.analysis_container_arr, new_specials,
                         inds_fill=inds_fill, buffer_obj=buffer_obj,
                     )
                 self._debug_log_band_null(buffer_obj)
+                if cell_ll_state is not None:
+                    with _tspan(tm, "cell_ll"):
+                        self._cell_ll_open(
+                            cell_ll_state, buffer_obj, inds_fill,
+                            new_specials, ll_change_log, prop_counts,
+                        )
             round_i += 1
             # GPU efficiency (parallel-resources plan P1): freeing the WHOLE
             # CuPy pool every pick round forces cudaFree/cudaMalloc churn
@@ -2364,6 +2484,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if os.environ.get("GB_MEMPOOL_FREE_EACH_ROUND", "0") == "1":
                 with _tspan(tm, "mempool_free"):
                     self.mempool.free_all_blocks()
+        if cell_ll_state is not None:
+            # Unit end: cells still resident (active or retired-in-place)
+            # never hit a refill -- finalize them against the final slab.
+            _open_slots = scheduler.xp.arange(scheduler.n_slots)[
+                cell_ll_state["open"]
+            ]
+            with _tspan(tm, "cell_ll"):
+                self._cell_ll_finalize(
+                    cell_ll_state, buffer_obj, _open_slots,
+                    ll_change_log, prop_counts,
+                )
+            self._cell_ll_report(cell_ll_state)
+
         if tm is not None:
             tm.count("pick_rounds", round_i)
 
@@ -5167,23 +5300,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # assert np.all(start_diffs < 2.0)
         num_active_leaves = work.inds[0].sum(axis=-1) # cold chain only
         logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
-
-        # Before/after ACA ll accounting (2026-08-12 user design): snapshot
-        # the per-band cold-walker residual lls before the rj+in-model loop;
-        # once the loop has fully restored the residual, the per-band
-        # difference is the EXACT ll change of the whole operation.
-        # GB_ACA_LL_CREDIT=1 (default) credits log_like from that difference
-        # instead of the cumulative accept/reject ledger; either way the
-        # ledger is compared per sub-band every proposal ([GB_BAND_DRIFT])
-        # so a run's log verifies the two agree band by band.
-        _aca_credit = os.environ.get("GB_ACA_LL_CREDIT", "1") == "1"
-        _band_audit = _aca_credit or os.environ.get("GB_BAND_LL_AUDIT", "0") == "1"
-        _band_lls_before = None
-        if _band_audit:
-            with tm.span("band_ll_audit"):
-                _band_lls_before = self._band_residual_lls(
-                    model.analysis_container_arr
-                )
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
         with tm.span("run_proposal"):
@@ -5200,49 +5316,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # TODO ask michael about this print("NEED TO FIX ANALYSIS CONTAINER extra factor")
         ll_change_sum = ll_change_log.sum(axis=-1)
-        _band_actual = None
-        if _band_lls_before is not None:
-            with tm.span("band_ll_audit"):
-                _band_lls_after = self._band_residual_lls(
-                    model.analysis_container_arr
-                )
-            _band_actual = _band_lls_after - _band_lls_before
-            _mm = _band_actual - _to_numpy(ll_change_log[0])
-            if (
-                getattr(self, "_band_drift_cum", None) is None
-                or self._band_drift_cum.shape != _mm.shape
-            ):
-                self._band_drift_cum = np.zeros_like(_mm)
-                self._band_drift_n = 0
-            self._band_drift_cum += _mm
-            self._band_drift_n += 1
-            _pi = np.unravel_index(np.abs(_mm).argmax(), _mm.shape)
-            _ci = np.unravel_index(
-                np.abs(self._band_drift_cum).argmax(),
-                self._band_drift_cum.shape,
-            )
-            logger.info(
-                f"[GB_BAND_DRIFT {self.name}] actual-vs-credited per band:"
-                f" this proposal max |diff| {abs(_mm[_pi]):.3e} (walker"
-                f" {_pi[0]}, band {_pi[1]}); cumulative max |sum|"
-                f" {abs(self._band_drift_cum[_ci]):.3e} (walker {_ci[0]},"
-                f" band {_ci[1]}) over {self._band_drift_n} proposals."
-            )
-            if abs(_mm[_pi]) > 0.05:
-                logger.warning(
-                    f"[GB_BAND_DRIFT {self.name}] per-proposal band drift"
-                    f" {abs(_mm[_pi]):.3e} exceeds 0.05 (walker {_pi[0]},"
-                    f" band {_pi[1]}): accept/reject ledger and residual"
-                    " disagree beyond the scoring floor."
-                )
-        if _aca_credit and _band_actual is not None:
-            # Credit the ACTUAL change: log_like moves exactly with the
-            # residual, so the after-proposal check below only measures
-            # leakage outside the band tiling (the drift rebuild below
-            # stays as the backstop either way).
-            new_state.log_like[0] += _band_actual.sum(axis=-1)
-        else:
-            new_state.log_like[0] += _to_numpy(ll_change_sum[0])
+        new_state.log_like[0] += _to_numpy(ll_change_sum[0])
 
         self._debug_sync_all_devices(model)
         with tm.span("ll_checks"):
