@@ -157,7 +157,10 @@ class GBSettings(Settings):
     # See lisatools.globalfit.priors.galaxy_sky_dist; validate with
     # scripts/gb/check_galaxy_sky_dist.py.
     use_galaxy_prior: bool = dataclasses.field(
-        default_factory=env_default("GB_USE_GALAXY_PRIOR", False, bool)
+        # Default ON (2026-08-12 user ruling): the 3-D Milky Way joint is the
+        # production prior; GB_USE_GALAXY_PRIOR=0 restores the independent
+        # uniforms (dist x sky placeholder).
+        default_factory=env_default("GB_USE_GALAXY_PRIOR", True, bool)
     )
 
     @property
