@@ -2690,6 +2690,22 @@ def build_gb_moves(
     # implicit 1.0. {BRANCH}_RJ_FLIP_FRACTION / an explicit kwarg override.
     _rj_flip_default = 1.0 if _gb_mode_search else 0.1
 
+    # GB_PE_MOVES_STRICT=1 (2026-08-12 user ruling, for STAGED recipes that
+    # carry BOTH search-named and pe-named GB stages in ONE process, e.g.
+    # run_combined_staged.py): the pe-NAMED instances (rj_prior /
+    # rj_fstat_mcmc / rj_refit) are configured strictly for PE -- no leaf
+    # caps, no birth phase-max, flip fraction 0.1 -- regardless of GB_MODE,
+    # so GB_MODE=search arms ONLY the search-named stage's moves. Default
+    # OFF because the single-stage campaigns (gb_no_fg GB_MODE=search) run
+    # the SEARCH through the pe-named stage and rely on the mode-following
+    # behavior below.
+    _pe_strict = os.environ.get("GB_PE_MOVES_STRICT", "0") == "1"
+    _pe_cap_off = (
+        {"leaf_cap_start": None, "leaf_cap_update": False} if _pe_strict else {}
+    )
+    if _pe_strict:
+        _rj_flip_default = 0.1
+
     gb_pe_prior_move = _RJBirth(
         *gb_move_args,
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
@@ -2697,10 +2713,13 @@ def build_gb_moves(
         **_fit_kwargs,
         name="rj_prior",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
-        phase_maximize=_rj_phase_max if _gb_mode_search else False,
+        phase_maximize=(
+            _rj_phase_max if (_gb_mode_search and not _pe_strict) else False
+        ),
         run_swaps=True,
         gpus=[],
-        **{**gb_move_kwargs, "rj_flip_fraction_default": _rj_flip_default}
+        **{**gb_move_kwargs, "rj_flip_fraction_default": _rj_flip_default,
+           **_pe_cap_off}
     )
     gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2712,7 +2731,7 @@ def build_gb_moves(
         phase_maximize=False,
         gpus=[],
         **{**gb_move_kwargs, "leaf_cap_update": False,
-           "rj_flip_fraction_default": _rj_flip_default}
+           "rj_flip_fraction_default": _rj_flip_default, **_pe_cap_off}
     )
     gb_pe_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2739,7 +2758,7 @@ def build_gb_moves(
             fp=_refit_fp,
             phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],
             gpus=[],
-            **{**gb_move_kwargs, "leaf_cap_update": False}
+            **{**gb_move_kwargs, "leaf_cap_update": False, **_pe_cap_off}
         )
         gb_pe_refit_move.accepted = np.zeros((ntemps, nwalkers))
         gb_pe_moves.insert(1, gb_pe_refit_move)  # [prior, refit, fstat]

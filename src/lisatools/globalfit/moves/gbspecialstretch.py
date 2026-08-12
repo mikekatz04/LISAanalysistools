@@ -2070,6 +2070,43 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 (band_sorter.band_inds < self.num_bands - 1) & (band_sorter.band_inds > 0)
             ) if self.num_bands > 1 else None
 
+            # AT-CAP RJ pick skip (2026-08-12, GB_RJ_SKIP_CAPPED=0 disables):
+            # a birth into a band already holding cap[b] alive sources is
+            # prior-forbidden, and _run_rj_step already keeps it away from
+            # the likelihood kernel -- but the SCHEDULER still picked the
+            # dead slots, burning pick rounds and diluting the acceptance
+            # counters (a cap-saturated verify showed rj cold 0.0000 over
+            # n=2104 all-impossible proposals). Exclude dead slots of
+            # AT-CAP cells from the pick pool up front: deaths (alive
+            # slots) stay proposable, so caps can still shed sources, and
+            # a cell freed by a death mid-unit simply waits one unit for
+            # its birth slots (the -inf enforcement in _run_rj_step remains
+            # the correctness backstop either way). Counts are taken at
+            # unit open, mirroring _run_rj_step's bincount arithmetic.
+            if (
+                self.is_rj_prop
+                and not self.rj_removal_only
+                and self._band_leaf_cap is not None
+                and os.environ.get("GB_RJ_SKIP_CAPPED", "1") == "1"
+            ):
+                xp_s = get_array_module(band_sorter.band_inds)
+                _nb = self.num_bands
+                _flat = (
+                    (band_sorter.temp_inds.astype(xp_s.int64) * self.nwalkers
+                     + band_sorter.walker_inds) * _nb
+                    + band_sorter.band_inds
+                )
+                _alive_cells = _flat[band_sorter.inds]
+                _nbins = self.ntemps * self.nwalkers * _nb
+                if _alive_cells.shape[0] == 0:
+                    _cell_counts = xp_s.zeros(_nbins, dtype=xp_s.int64)
+                else:
+                    _cell_counts = xp_s.bincount(_alive_cells, minlength=_nbins)
+                _cap = xp_s.asarray(self._band_leaf_cap)
+                _at_cap = _cell_counts[_flat] >= _cap[band_sorter.band_inds]
+                _rj_ok = band_sorter.inds | ~_at_cap
+                extra_bool = _rj_ok if extra_bool is None else (extra_bool & _rj_ok)
+
             subset = band_sorter.get_subset(
                 units=units,
                 remainder=remainder,

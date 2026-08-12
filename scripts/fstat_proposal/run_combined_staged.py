@@ -173,6 +173,14 @@ def build_fit():
     from lisatools.globalfit.recipe import Move, Recipe, Stage
     from lisatools.globalfit.stock import erebor
 
+    # GB_MODE=search arms the SEARCH-stage GB moves (leaf caps from 1,
+    # birth phase-max, flip fraction 1.0). GB_PE_MOVES_STRICT keeps that
+    # scoped: the pe-NAMED move instances (rj_prior / rj_fstat_mcmc /
+    # rj_refit, used by the full_pe stage) stay strictly PE-configured
+    # regardless of GB_MODE, so search knobs never leak into the PE stage.
+    os.environ.setdefault("GB_MODE", "search")
+    os.environ.setdefault("GB_PE_MOVES_STRICT", "1")
+
     nwalkers = int(os.environ.get("NWALKERS", "16"))
     fit = erebor.all_sources(nwalkers=nwalkers)
 
