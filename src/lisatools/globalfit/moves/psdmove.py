@@ -136,7 +136,9 @@ class PSDMove(GlobalFitMove, StretchMove):
         psd_transform_fn: TransformContainer = None,
         galfor_transform_fn: TransformContainer = None,
         sgwb_transform_fn: TransformContainer = None,
-        permute_every: int = 20,
+        # 10 (user ruling 2026-08-12): fancy (walker-permuting, re-scored)
+        # swap cadence; identity naive swaps fire every repeat regardless.
+        permute_every: int = 10,
         tolerance: float = 0.0,
         dcga: DomainComputationGroupArray = None,
         run_async: bool = False,

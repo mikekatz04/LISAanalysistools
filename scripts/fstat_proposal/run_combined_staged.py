@@ -93,7 +93,10 @@ def _apply_smoke_defaults() -> None:
     """
     smoke = {
         # --- shape ---
-        "NITER": "3",
+        # 12, not 3: the chunked noise search (MAXLOGL_ITERS_PER_STEP) now
+        # spends real engine iterations per stage -- NITER is the run-wide
+        # total -- and the budget must reach the GB stages.
+        "NITER": "12",
         "NWALKERS": "8",
         "GB_NTEMPS": "6",
         "VGB_NTEMPS": "4",

@@ -611,7 +611,19 @@ class SearchRecipeStep(BaseRecipeStep):
     """
 
     def stopping_function(self, *args, **kwargs):
-        """Done: the move has already run the search to completion."""
+        """Done when every wrapped move reports its search complete.
+
+        Chunked searches (:class:`MaxLogLCombineMove`) run a bounded number
+        of inner iterations per ``propose`` so the backend checkpoints
+        between chunks; they publish ``maxlogl_plateau_done``. Moves without
+        the attribute keep the legacy semantics -- their criterion ran to
+        completion inside one propose call, so the step is done on its
+        first check.
+        """
+        for combined in self.moves or []:
+            for mv in getattr(combined, "moves", None) or [combined]:
+                if getattr(mv, "maxlogl_plateau_done", True) is False:
+                    return False
         return True
 
 

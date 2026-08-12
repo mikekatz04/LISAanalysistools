@@ -538,12 +538,28 @@ class MaxLogLCombineMove(GFCombineMove):
         self.max_iter = int(os.environ.get("MAXLOGL_MAX_ITER", max_iter))
 
     def _propose_moves(self, model, state):
-        num_so_far = 0
-        max_logl = -np.inf   # true running best (logging only)
-        ref_logl = -np.inf   # baseline at the last counter reset (plateau test)
-        changed_once = False
+        # CHUNKED plateau loop (2026-08-12): at most MAXLOGL_ITERS_PER_STEP
+        # inner iterations per propose() call, with the plateau bookkeeping
+        # persisted on the instance across calls. The engine saves the
+        # backend between propose() calls, so a killed run resumes from the
+        # last chunk's ensemble instead of restarting the whole search --
+        # previously the ENTIRE search ran inside one engine iteration and
+        # a stop during it lost everything. SearchRecipeStep consults
+        # ``maxlogl_plateau_done`` to advance the stage. Inside a non-search
+        # stage (the joint noise move rides along in gb_search), a plateaued
+        # instance keeps taking one inner iteration per call, so the noise
+        # model keeps sampling underneath.
+        max_inner = int(os.environ.get("MAXLOGL_ITERS_PER_STEP", "10"))
+        if not hasattr(self, "_ml_state"):
+            self._ml_state = dict(
+                num_so_far=0,
+                max_logl=-np.inf,   # true running best (logging only)
+                ref_logl=-np.inf,   # baseline at last counter reset
+                changed_once=False,
+                n_iter=0,
+            )
+        ms = self._ml_state
         accepted = None
-        n_iter = 0
         t0 = time.perf_counter()
         stage = getattr(self, "gf_stage_name", "?")
         # Progress EVERY iteration by default. This loop has no natural
@@ -551,39 +567,56 @@ class MaxLogLCombineMove(GFCombineMove):
         # indistinguishable from a hung one -- which is exactly what the
         # first full-band run looked like. MAXLOGL_LOG_EVERY=0 silences it.
         log_every = int(os.environ.get("MAXLOGL_LOG_EVERY", "1"))
-        while num_so_far < self.num_checks:
+        inner = 0
+        while inner < max_inner and (
+            ms["num_so_far"] < self.num_checks or accepted is None
+        ):
             state, accepted = self._propose_moves_once(model, state)
-            n_iter += 1
+            ms["n_iter"] += 1
+            inner += 1
             cur = float(state.log_like[0].max())
-            if cur != ref_logl and not np.isinf(ref_logl):
-                changed_once = True
-            if cur > max_logl:
-                max_logl = cur
-            improved = cur > ref_logl + self.tol or np.isinf(ref_logl)
+            if cur != ms["ref_logl"] and not np.isinf(ms["ref_logl"]):
+                ms["changed_once"] = True
+            if cur > ms["max_logl"]:
+                ms["max_logl"] = cur
+            improved = cur > ms["ref_logl"] + self.tol or np.isinf(ms["ref_logl"])
             if improved:
-                ref_logl = cur
-                num_so_far = 0
-            elif changed_once:
-                num_so_far += 1
-            if log_every and (n_iter % log_every == 0):
+                ms["ref_logl"] = cur
+                ms["num_so_far"] = 0
+            elif ms["changed_once"]:
+                ms["num_so_far"] += 1
+            if log_every and (ms["n_iter"] % log_every == 0):
                 print(
-                    f"[MAXLOGL] stage={stage} iter={n_iter} "
-                    f"logl={cur:.6f} best={max_logl:.6f} "
-                    f"{'IMPROVED' if improved else f'flat {num_so_far}/{self.num_checks}'}"
-                    f" changed_once={changed_once} "
+                    f"[MAXLOGL] stage={stage} iter={ms['n_iter']} "
+                    f"logl={cur:.6f} best={ms['max_logl']:.6f} "
+                    + ("IMPROVED" if improved
+                       else f"flat {ms['num_so_far']}/{self.num_checks}") +
+                    f" changed_once={ms['changed_once']} "
                     f"elapsed_s={time.perf_counter() - t0:.1f}",
                     flush=True,
                 )
-            if self.max_iter and n_iter >= self.max_iter:
+            if self.max_iter and ms["n_iter"] >= self.max_iter:
                 print(
                     f"[MAXLOGL] stage={stage} hit max_iter={self.max_iter} "
-                    f"before plateau (best={max_logl:.6f}); advancing.",
+                    f"before plateau (best={ms['max_logl']:.6f}); advancing.",
                     flush=True,
                 )
                 break
-        print(
-            f"[MAXLOGL] stage={stage} done after {n_iter} iterations "
-            f"(best={max_logl:.6f}, {time.perf_counter() - t0:.1f}s)",
-            flush=True,
+        done = ms["num_so_far"] >= self.num_checks or (
+            self.max_iter and ms["n_iter"] >= self.max_iter
         )
+        first_done = done and not getattr(self, "maxlogl_plateau_done", False)
+        self.maxlogl_plateau_done = bool(done)
+        if first_done:
+            print(
+                f"[MAXLOGL] stage={stage} done after {ms['n_iter']} iterations "
+                f"(best={ms['max_logl']:.6f}, {time.perf_counter() - t0:.1f}s)",
+                flush=True,
+            )
+        elif not done:
+            print(
+                f"[MAXLOGL] stage={stage} chunk break at iter={ms['n_iter']} "
+                f"({inner}/{max_inner} this step; checkpointing).",
+                flush=True,
+            )
         return state, accepted
