@@ -46,6 +46,19 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 
 STORE_DIR=./gf_prod_23mo/
 
+# ---- GPU telemetry ---------------------------------------------------------
+# Background nvidia-smi sampler: one CSV row per GPU every 30 s into the run
+# store (timestamped per job, so resubmits/resumes append new files rather
+# than clobbering). Killed automatically when the job exits. Columns:
+# timestamp, index, name, util.gpu [%], util.mem [%], mem.used [MiB],
+# mem.total [MiB], power [W], temp [C].
+mkdir -p ${STORE_DIR}
+GPU_LOG=${STORE_DIR}/gpu_util_${SLURM_JOB_ID:-manual_$(date +%s)}.csv
+nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu \
+  --format=csv,noheader,nounits -l 30 > "${GPU_LOG}" &
+GPU_SMI_PID=$!
+trap 'kill ${GPU_SMI_PID} 2>/dev/null || true' EXIT
+
 export OMP_NUM_THREADS=1
 
 export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache/data
