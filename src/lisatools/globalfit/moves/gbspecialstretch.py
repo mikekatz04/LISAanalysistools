@@ -1991,7 +1991,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         try:
             return int(np.argmax(_to_numpy(model.analysis_container_arr.likelihood())))
-        except Exception:
+        except Exception as exc:
+            # Never silent: a broken ranking here quietly pins every F-stat
+            # reference to walker 0 for the whole run.
+            logger.warning(
+                "%s: could not rank cold walkers for the F-stat reference "
+                "(%r); falling back to walker 0.", self.name, exc)
             return 0
 
     def run_proposal(self, model, state, band_sorter, band_temps):
@@ -2051,8 +2056,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
             self._debug_cold_chain_residual_loaded(model, remainder)
 
-            apply_inds = not self.is_rj_prop
-            
+            # RJ subsets include the dead (freshly-drawn) slots so births
+            # can be proposed — EXCEPT removal-only, where _run_rj_step
+            # force-rejects every birth: dead slots would only burn pick
+            # rounds and scheduler cell counts on guaranteed -inf rows, so
+            # the subset is alive-only, exactly like an in-model move (and
+            # a cell with no alive sources never enters the scheduler; zero
+            # alive anywhere -> get_subset returns None -> unit skipped).
+            apply_inds = (not self.is_rj_prop) or self.rj_removal_only
+
+
             extra_bool = (
                 (band_sorter.band_inds < self.num_bands - 1) & (band_sorter.band_inds > 0)
             ) if self.num_bands > 1 else None
@@ -5579,13 +5592,24 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         cache_dir = self._epoch_dir(k)
         os.makedirs(cache_dir, exist_ok=True)
         walker_ref = self._fstat_reference_walker(model)
+        # Auditability: the epoch line carries the reference walker's total
+        # lnL (residual+PSD combination) alongside its index, so a run log
+        # shows WHICH state each epoch's grid was fitted against -- "same
+        # peaks after a refit" is only diagnosable with this visible.
+        try:
+            _lls = _to_numpy(model.analysis_container_arr.likelihood())
+            _ll_ref, _ll_spread = (float(_lls[walker_ref]),
+                                   float(_lls.max() - _lls.min()))
+        except Exception:
+            _ll_ref, _ll_spread = float("nan"), float("nan")
         band_edges = _to_numpy(self.band_edges)
         # f0_lims convention (gb.py): the interior span, band_edges[1:-1].
         f0_lims = (float(band_edges[1]), float(band_edges[-2]))
         mc_lims = self.fstat_fit_kwargs.get("mc_lims") or [0.001, 1.0]
         t0 = time.perf_counter()
         logger.info("%s: F-stat grid fit epoch %d starting (walker_ref=%d, "
-                    "cache %s)", self.name, k, walker_ref, cache_dir)
+                    "lnL=%.3f, cold-walker lnL spread=%.3f, cache %s)",
+                    self.name, k, walker_ref, _ll_ref, _ll_spread, cache_dir)
         stacked, n_peaks = run_fstat_grid_fit(
             self._fstat_call(model, walker_ref),
             xp=self.xp,
