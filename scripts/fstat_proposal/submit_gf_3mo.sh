@@ -81,6 +81,13 @@ export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explic
 # Smoke 2 exonerated the slab as the VGB [GB_CELL_LL] growth cause (growth
 # persisted at slab 7).
 export GB_WDM_BAND_SLAB_LAYERS=5
+# 3-D Milky Way (dist, alpha, sin_delta) joint prior (user ruling: the
+# proper density, not the flat placeholder). Chirp-mass basis + the
+# astrophysical f0-Mc GMM prior are already the code defaults. NOTE:
+# this knob was NOT exercised in the smokes (they ran the uniform
+# placeholder); detailed balance holds either way -- births still draw
+# dist from the birth container and the prior enters through logp.
+export GB_USE_GALAXY_PRIOR=1
 
 # ---- VGB: exact chunked-het in-model scorer (sig-het accuracy at the
 #      loudest-VGB SNRs is unverified -- [GB_CELL_LL] growth in smoke 1) ----
