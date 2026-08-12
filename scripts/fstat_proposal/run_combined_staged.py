@@ -70,6 +70,12 @@ import sys
 # rj_fstat_mcmc / rj_refit, the full_pe stage) stay strictly PE regardless.
 os.environ.setdefault("GB_MODE", "search")
 os.environ.setdefault("GB_PE_MOVES_STRICT", "1")
+# The gb_search stage lists Move("rj_prior_removal") -- build_gb_moves only
+# CONSTRUCTS that stock move when gb.search_prior_removal is on (and mode is
+# search), so the knob must default on here or recipe materialization fails
+# with "no stock move under this name". Search-stage-only either way: the
+# move is search-gated and full_pe never references it.
+os.environ.setdefault("GB_SEARCH_PRIOR_REMOVAL", "1")
 
 logger = logging.getLogger("combined_staged")
 
