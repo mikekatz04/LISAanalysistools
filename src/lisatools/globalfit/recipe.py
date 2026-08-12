@@ -790,6 +790,10 @@ class Stage:
             # Tag the runtime move with its declarative name so run-level
             # instrumentation (GF_MOVE_TIMING) can label output per move.
             runtime.gf_move_name = mv.name
+            # ... and with the stage name, so inner-move logging (e.g. the
+            # [MAXLOGL] plateau lines) is stage-labeled instead of "?" --
+            # previously only the stage's outer GFCombineMove was stamped.
+            runtime.gf_stage_name = self.name
             # Move-level debug wins over stage-level; None leaves the move's
             # env-resolved default untouched.
             _dbg = mv.debug if mv.debug is not None else self.debug
