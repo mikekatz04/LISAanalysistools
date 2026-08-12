@@ -5518,11 +5518,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         ``GBSignalHetComputations`` (GB_SIGHET_INMODEL=1 wiring) built with
         ``v4_knots > 0`` and a WDM basis; anything else falls back to the
         chunked path with a warning. Multi-shard holders go through
-        :meth:`_RoutedBandEngine.route_sighet_fstat`: with >= 2 run devices
-        it fans every candidate batch out over ALL of them against
-        per-device reference replicas (``FSTAT_SIGHET_MULTIDEV=0`` restores
-        the old pin of the whole scorer to the reference walker's shard);
-        single-shard holders pass through it unchanged.
+        :meth:`_RoutedBandEngine.route_sighet_fstat`, which pins the whole
+        scorer to the reference walker's shard on a device-local comp
+        replica; ``FSTAT_SIGHET_MULTIDEV=1`` (OPT-IN, default off pending
+        the on-GPU parity gate; ``=check`` adds a pinned shadow compare)
+        fans candidate batches out over ALL run devices instead.
+        Single-shard holders pass through unchanged.
         """
         if os.environ.get("FSTAT_USE_SIGHET", "0") == "1":
             sig_comp = self.gb_wdm_comp
