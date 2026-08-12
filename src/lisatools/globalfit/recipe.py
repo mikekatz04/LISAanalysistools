@@ -2671,6 +2671,15 @@ def build_gb_moves(
     # 2026-08-01). In PE mode phase_maximize is therefore forced off on the
     # birth instance (under GB_MODE=search the seeded GB_RJ_PHASE_MAXIMIZE
     # keeps the search behavior unchanged).
+    # RJ flip fraction mode default: every slot flips in search (fast
+    # dimension exploration); PE settles to a 10% random subset per
+    # proposal (rj_flip_fraction docs in gbspecialstretch). These two
+    # moves ARE the GB_MODE=search birth path when that mode is on, so the
+    # default follows the mode; the search-NAMED moves (rj_prior_search /
+    # rj_fstat_mcmc_search / rj_prior_removal / rj_replace) keep the
+    # implicit 1.0. {BRANCH}_RJ_FLIP_FRACTION / an explicit kwarg override.
+    _rj_flip_default = 1.0 if _gb_mode_search else 0.1
+
     gb_pe_prior_move = _RJBirth(
         *gb_move_args,
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
@@ -2681,18 +2690,19 @@ def build_gb_moves(
         phase_maximize=_rj_phase_max if _gb_mode_search else False,
         run_swaps=True,
         gpus=[],
-        **gb_move_kwargs
+        **{**gb_move_kwargs, "rj_flip_fraction_default": _rj_flip_default}
     )
     gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers))
 
     gb_pe_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
-        *gb_move_args, 
+        *gb_move_args,
         rj_proposal_distribution=None,
         run_swaps=True,
         name="rj_fstat_mcmc",
         phase_maximize=False,
         gpus=[],
-        **{**gb_move_kwargs, "leaf_cap_update": False}
+        **{**gb_move_kwargs, "leaf_cap_update": False,
+           "rj_flip_fraction_default": _rj_flip_default}
     )
     gb_pe_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 

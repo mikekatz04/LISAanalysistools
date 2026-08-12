@@ -92,6 +92,22 @@ class RJFlipFractionTest(unittest.TestCase):
         m._apply_rj_flip_fraction(sorter, _picked(10, 10))
         self.assertEqual(int(sorter._rj_flip_allowed.sum()), 1)
 
+    def test_original_picked_untouched_for_in_model(self):
+        # _run_in_model_repeats receives the CALLER's picked dict and masks
+        # to alive itself -- the flip filter must return a new dict and
+        # never mutate the input, so every inds=True slot still gets its
+        # in-model updates even when it skipped the RJ flip.
+        np.random.seed(11)
+        m = _move(0.2)
+        sorter = SimpleNamespace(num_sources=60)
+        picked = _picked(40, 60)
+        originals = {k: v.copy() for k, v in picked.items()}
+        out = m._apply_rj_flip_fraction(sorter, picked)
+        self.assertIsNot(out, picked)
+        for key, value in picked.items():
+            np.testing.assert_array_equal(value, originals[key])
+        self.assertLess(len(out["ids"]), len(picked["ids"]))
+
 
 class ResolveRJFlipFractionTest(unittest.TestCase):
     def test_kwarg_wins_over_env(self):
@@ -103,6 +119,18 @@ class ResolveRJFlipFractionTest(unittest.TestCase):
 
     def test_default_is_one(self):
         self.assertEqual(_resolve_rj_flip_fraction("gb", None), 1.0)
+
+    def test_mode_default_chain(self):
+        import os
+        # builder default honored when no env / kwarg (the PE-cycle 0.1)
+        self.assertEqual(_resolve_rj_flip_fraction("gb", None, 0.1), 0.1)
+        self.assertEqual(_resolve_rj_flip_fraction("gb", None, 1.0), 1.0)
+        # env beats the builder default
+        os.environ["GB_RJ_FLIP_FRACTION"] = "0.5"
+        self.addCleanup(os.environ.pop, "GB_RJ_FLIP_FRACTION", None)
+        self.assertEqual(_resolve_rj_flip_fraction("gb", None, 0.1), 0.5)
+        # explicit kwarg beats both
+        self.assertEqual(_resolve_rj_flip_fraction("gb", 0.9, 0.1), 0.9)
 
     def test_bounds(self):
         for bad in (0.0, -0.1, 1.5):
