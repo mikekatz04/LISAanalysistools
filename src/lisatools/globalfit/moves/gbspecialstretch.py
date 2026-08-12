@@ -754,6 +754,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # input_basis says, and a reduced basis (e.g. the 5D VGB basis with
         # f0/sky as per-leaf fills) resolves to its own columns / to None.
         self.branch_name = branch_name
+        # Fraction of the RJ-eligible slots that receive a birth/death flip
+        # attempt each proposal. The subset is drawn ONCE per proposal at
+        # random WITHOUT replacement (see _apply_rj_flip_fraction); rows
+        # outside it skip the flip while the in-model repeats still visit
+        # them. 1.0 (default) = every slot, the historical behavior.
+        # Kwarg ``rj_flip_fraction`` wins; env ``{BRANCH}_RJ_FLIP_FRACTION``
+        # seeds the default (knob = capitalized attribute, branch-prefixed).
+        _frac = kwargs.get("rj_flip_fraction", None)
+        if _frac is None:
+            _frac = os.environ.get(
+                f"{str(branch_name).upper()}_RJ_FLIP_FRACTION", "1.0"
+            )
+        self.rj_flip_fraction = float(_frac)
+        if not (0.0 < self.rj_flip_fraction <= 1.0):
+            raise ValueError(
+                f"rj_flip_fraction must be in (0, 1], got {self.rj_flip_fraction}."
+            )
         self.use_info_mat_proposal = bool(use_info_mat_proposal)
         self.swap_on_in_model = bool(swap_on_in_model)
         if self.transform_fn is not None and hasattr(self.transform_fn, "input_basis"):
@@ -2401,6 +2418,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logg = logg - lv  # Jacobian d(ln dist)/d(dist) = 1/dist
         return logg
 
+    def _apply_rj_flip_fraction(self, band_sorter, picked):
+        """Restrict a picked batch to the proposal's RJ flip subset.
+
+        ``rj_flip_fraction`` < 1 draws ``round(fraction * num_sources)``
+        slots at random WITHOUT replacement, ONCE per proposal — the mask is
+        attached to the per-propose ``band_sorter`` (the same lifetime as
+        ``has_run_rj``), so every pick round of the proposal filters against
+        the same draw. Returns the filtered ``picked`` dict, or ``None``
+        when no picked row is in the subset. Fraction 1.0 is a pass-through
+        (bit-identical to the historical behavior).
+        """
+        if self.rj_flip_fraction >= 1.0:
+            return picked
+        xp = self.xp
+        allowed = getattr(band_sorter, "_rj_flip_allowed", None)
+        if allowed is None:
+            n = int(band_sorter.num_sources)
+            n_keep = max(1, int(round(self.rj_flip_fraction * n)))
+            allowed = xp.zeros(n, dtype=bool)
+            allowed[xp.random.permutation(n)[:n_keep]] = True
+            band_sorter._rj_flip_allowed = allowed
+        keep = allowed[picked["ids"]]
+        if not bool(keep.any()):
+            return None
+        if bool(keep.all()):
+            return picked
+        return {key: value[keep] for key, value in picked.items()}
+
     def _run_rj_step(self, model, band_sorter, buffer_obj, band_temps, picked,
                      ll_change_log, prop_counts, acc_counts, round_i, scheduler):
         """Birth/death proposal for each picked source (vectorized over cells).
@@ -2413,7 +2458,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the pre-computed ±logpdf of the RJ proposal distribution. On accept,
         ``inds`` flips and the cell residual is updated through
         ``fill_template`` with the appropriate sign.
+
+        ``rj_flip_fraction`` < 1 gates which picked rows attempt a flip at
+        all (see :meth:`_apply_rj_flip_fraction`); the in-model repeats that
+        follow each pick round are NOT restricted.
         """
+        picked = self._apply_rj_flip_fraction(band_sorter, picked)
+        if picked is None:
+            return
         xp = self.xp
         ids = picked["ids"]
         slots = picked["slot_index"]
