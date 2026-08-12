@@ -379,6 +379,48 @@ class _ShardHolderView:
         return getattr(self._parent, name)
 
 
+class _FStatRefRowHolder:
+    """One-slab wdm_holder replica feeding one device's sig-het F-stat lane.
+
+    ``GBSignalHetComputations.setup_fstat_references`` consumes exactly
+    ``linear_data_arr[0]`` / ``linear_psd_arr[0]`` (full-band slab layouts)
+    picked by SCALAR ``data_index`` / ``noise_index``, and
+    ``get_fstat_ll_wdm`` never touches the holder at all -- so a scoring
+    lane needs only the ONE reference walker's residual + inverse-PSD rows,
+    copied onto its device once at adapter build (host-routed, no P2P) and
+    presented as a single-slab holder scored with ``data_index=0``.
+    Private to :meth:`_RoutedBandEngine._sighet_fstat_multidevice`;
+    ``device`` / ``gpus`` / ``__len__`` mirror :class:`_ShardHolderView` so
+    the router's replica plumbing (``_comp_for``) accepts it as a view.
+    Lives only in the returned ``call_fstat`` closure -- it dies with the
+    fit, and the copies never reach the settings tree.
+    """
+
+    def __init__(self, parent, device, data_row, psd_row):
+        self._parent = parent
+        self.device = None if device is None else int(device)
+        self.gpus = None if self.device is None else [self.device]
+        self.acs_total_entries = 1
+        self.linear_data_arr = [data_row]
+        self.linear_psd_arr = [psd_row]
+
+    @property
+    def xp(self):
+        return self._parent.xp
+
+    def __len__(self) -> int:
+        # The comps read ``len(holder)`` as the slab count (explicit dunder:
+        # len() resolves on the type, bypassing ``__getattr__``).
+        return 1
+
+    def __getattr__(self, name):
+        # Same delegation discipline as _ShardHolderView: guard underscore
+        # probing, delegate the public long tail to the parent ACA.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._parent, name)
+
+
 class _RoutedBandEngine:
     """Multi-shard router in front of a single-shard band likelihood engine.
 
@@ -615,6 +657,42 @@ class _RoutedBandEngine:
             out[pos] = np.asarray(vals)
         return xp.asarray(out)
 
+    @staticmethod
+    def _dispatch_shards(holder, items, worker, state_ids=None):
+        """Run ``worker(*item)`` once per populated-shard work item.
+
+        SERIAL by default: the open 2-GPU incremental-ll-drift
+        investigation's leading hypothesis is a cross-device ordering race,
+        and serial launch-sync-launch dispatch is the de-facto safety net
+        while it is open -- the default flips only after that investigation
+        closes. ``GB_ROUTER_THREADED=1`` opts in to concurrent shards: one
+        host thread per shard with work, each entering its own device
+        context (cupy's current device is thread-local; kernel launches
+        release the GIL), mirroring
+        ``AnalysisContainerArray._run_per_split``. Callers pre-resolve
+        engines/comp replicas and pre-size one result slot per shard BEFORE
+        dispatch, so the threaded path shares no mutable state beyond
+        disjoint slot writes and reassembly stays deterministic (the
+        serial and threaded paths write identical slots).
+
+        ``state_ids``: one hashable per item naming the stateful object the
+        item runs on (engine / comp replica). Items sharing one (missing
+        engine_factory, two shards on one device, CPU fakes) would race
+        that object's output attrs, so any duplicate forces serial.
+        ``holder.thread_pool`` is only touched on the threaded branch (the
+        real ACA property allocates the pool on first access).
+        """
+        if (len(items) > 1
+                and os.environ.get("GB_ROUTER_THREADED", "0") == "1"
+                and (state_ids is None or len(set(state_ids)) == len(items))
+                and getattr(holder, "thread_pool", None) is not None):
+            futures = [holder.thread_pool.submit(worker, *it) for it in items]
+            for f in futures:
+                f.result()  # re-raise worker exceptions in caller
+        else:
+            for it in items:
+                worker(*it)
+
     def _mirror_engine_outputs(self):
         """Refresh routed-output attrs from the wrapped engine after a
         passthrough call so stale routed values never shadow them."""
@@ -640,11 +718,9 @@ class _RoutedBandEngine:
             for k in self._PER_SLOT_KWARGS
             if kwargs.get(k) is not None
         }
-        for view, (pos, intra, _) in zip(views, parts):
-            if pos.shape[0] == 0:
-                continue
+
+        def _shard(view, engine, pos, intra):
             kw_s = dict(kwargs)
-            engine = self._engine_for(holder, view)
             with device_context(xp, view.device):
                 for k, host_vals in slot_kwargs_host.items():
                     kw_s[k] = xp.asarray(host_vals[view.rows])
@@ -652,6 +728,14 @@ class _RoutedBandEngine:
                     view, xp.asarray(params_host[pos]), intra,
                     None if N_host is None else xp.asarray(N_host[pos]),
                     factor=factor, waveform_kwargs=waveform_kwargs, **kw_s)
+
+        items = [
+            (view, self._engine_for(holder, view), pos, intra)
+            for view, (pos, intra, _) in zip(views, parts)
+            if pos.shape[0]
+        ]
+        self._dispatch_shards(holder, items, _shard,
+                              state_ids=[id(it[1]) for it in items])
         # Drift-hunt debug fence (see gbspecialstretch run_proposal): the
         # fills above are enqueued on each shard's own device stream; a
         # caller that immediately reads the filled shard from another
@@ -679,11 +763,19 @@ class _RoutedBandEngine:
         num = int(params_phys.shape[0])
         params_host = asnumpy(params_phys)
         N_host = None if N_vals is None else asnumpy(N_vals)
-        ll_p, dh_p, hh_p, ang_p, kept_p = [], [], [], [], []
-        for view, (pos, intra, intra_noise) in zip(views, parts):
-            if pos.shape[0] == 0:
-                continue
-            engine = self._engine_for(holder, view)
+        items = [
+            (si, view, self._engine_for(holder, view), pos, intra,
+             intra_noise)
+            for si, (view, (pos, intra, intra_noise))
+            in enumerate(zip(views, parts))
+            if pos.shape[0]
+        ]
+        # One pre-sized slot per shard (threaded dispatch writes disjoint
+        # slots; serial dispatch fills the same slots in the same order).
+        slots = {name: [None] * len(views)
+                 for name in ("ll", "dh", "hh", "ang", "kept")}
+
+        def _shard(si, view, engine, pos, intra, intra_noise):
             with device_context(xp, view.device):
                 ll_s = engine.get_ll(
                     view, xp.asarray(params_host[pos]),
@@ -692,13 +784,21 @@ class _RoutedBandEngine:
                     N_vals=None if N_host is None else xp.asarray(N_host[pos]),
                     phase_maximize=phase_maximize,
                     waveform_kwargs=waveform_kwargs, **kwargs)
-                ll_p.append((pos, asnumpy(ll_s)))
-                dh_p.append((pos, asnumpy(engine.d_h_out)))
-                hh_p.append((pos, asnumpy(engine.h_h_out)))
+                slots["ll"][si] = (pos, asnumpy(ll_s))
+                slots["dh"][si] = (pos, asnumpy(engine.d_h_out))
+                slots["hh"][si] = (pos, asnumpy(engine.h_h_out))
                 ang = getattr(engine, "phase_angle", None)
-                ang_p.append((pos, None if ang is None else asnumpy(ang)))
+                slots["ang"][si] = (pos,
+                                    None if ang is None else asnumpy(ang))
                 kept = getattr(engine, "kept_out", None)
-                kept_p.append((pos, None if kept is None else asnumpy(kept)))
+                slots["kept"][si] = (pos,
+                                     None if kept is None else asnumpy(kept))
+
+        self._dispatch_shards(holder, items, _shard,
+                              state_ids=[id(it[2]) for it in items])
+        ll_p, dh_p, hh_p, ang_p, kept_p = (
+            [p for p in slots[name] if p is not None]
+            for name in ("ll", "dh", "hh", "ang", "kept"))
         ll = self._assemble(num, ll_p, -1e300, xp)
         if ll is None:
             ll = xp.full(num, -1e300)
@@ -732,11 +832,17 @@ class _RoutedBandEngine:
         fields = ("ll_diff", "d_h_add", "d_h_remove", "hh_add",
                   "hh_remove", "hh_cross", "opt_snr_add", "phase_angle",
                   "kept")
-        pieces = {f: [] for f in fields}
-        for view, (pos, intra, intra_noise) in zip(views, parts):
-            if pos.shape[0] == 0:
-                continue
-            engine = self._engine_for(holder, view)
+        items = [
+            (si, view, self._engine_for(holder, view), pos, intra,
+             intra_noise)
+            for si, (view, (pos, intra, intra_noise))
+            in enumerate(zip(views, parts))
+            if pos.shape[0]
+        ]
+        # Pre-sized per-shard slots (see get_ll).
+        pieces = {f: [None] * len(views) for f in fields}
+
+        def _shard(si, view, engine, pos, intra, intra_noise):
             with device_context(xp, view.device):
                 res = engine.get_swap_ll(
                     view, xp.asarray(rem_host[pos]), xp.asarray(add_host[pos]),
@@ -747,11 +853,16 @@ class _RoutedBandEngine:
                     waveform_kwargs=waveform_kwargs, **kwargs)
                 for f in fields:
                     v = getattr(res, f)
-                    pieces[f].append((pos, None if v is None else asnumpy(v)))
+                    pieces[f][si] = (pos, None if v is None else asnumpy(v))
+
+        self._dispatch_shards(holder, items, _shard,
+                              state_ids=[id(it[2]) for it in items])
         defaults = dict(ll_diff=-1e300, opt_snr_add=0.0, kept=False)
         out = {}
         for f in fields:
-            out[f] = self._assemble(num, pieces[f], defaults.get(f, 0.0), xp)
+            out[f] = self._assemble(
+                num, [p for p in pieces[f] if p is not None],
+                defaults.get(f, 0.0), xp)
         if out["ll_diff"] is None:
             out["ll_diff"] = xp.full(num, -1e300)
         if out["opt_snr_add"] is None:
@@ -785,16 +896,17 @@ class _RoutedBandEngine:
         params_host = asnumpy(params_phys)
         N_host = None if N_vals is None else asnumpy(N_vals)
         built_on = set()
-        for view, (pos, intra, _) in zip(views, parts):
-            if pos.shape[0] == 0:
-                continue
-            engine = self._engine_for(holder, view)
+
+        def _shard(view, engine, pos, intra):
             with device_context(xp, view.device):
                 ret = engine.setup_in_model(
                     view, xp.asarray(params_host[pos]), intra,
                     N_vals=None if N_host is None else xp.asarray(N_host[pos]))
             if not ret:
-                continue
+                return
+            # Collision only exists when two shards share ONE engine, and
+            # duplicate state_ids force _dispatch_shards serial -- so this
+            # check never races (threaded items all run distinct engines).
             if id(engine) in built_on:
                 self.clear_in_model()
                 raise NotImplementedError(
@@ -807,6 +919,14 @@ class _RoutedBandEngine:
                     "path on a single GPU."
                 )
             built_on.add(id(engine))
+
+        items = [
+            (view, self._engine_for(holder, view), pos, intra)
+            for view, (pos, intra, _) in zip(views, parts)
+            if pos.shape[0]
+        ]
+        self._dispatch_shards(holder, items, _shard,
+                              state_ids=[id(it[1]) for it in items])
         return None
 
     def clear_in_model(self):
@@ -833,11 +953,17 @@ class _RoutedBandEngine:
         num = int(params_phys.shape[0])
         params_host = asnumpy(params_phys)
         N_host = None if N_vals is None else asnumpy(N_vals)
-        pieces = []
-        for view, (pos, intra, intra_noise) in zip(views, parts):
-            if pos.shape[0] == 0:
-                continue
-            method = getattr(self._engine_for(holder, view), method_name)
+        items = [
+            (si, view, self._engine_for(holder, view), pos, intra,
+             intra_noise)
+            for si, (view, (pos, intra, intra_noise))
+            in enumerate(zip(views, parts))
+            if pos.shape[0]
+        ]
+        pieces = [None] * len(views)
+
+        def _shard(si, view, engine, pos, intra, intra_noise):
+            method = getattr(engine, method_name)
             with device_context(xp, view.device):
                 out_s = method(
                     view, xp.asarray(params_host[pos]),
@@ -845,8 +971,12 @@ class _RoutedBandEngine:
                     noise_index=intra if intra_noise is None else intra_noise,
                     N_vals=None if N_host is None else xp.asarray(N_host[pos]),
                     **kwargs)
-                pieces.append((pos, asnumpy(out_s)))
-        return self._assemble(num, pieces, 0.0, xp)
+                pieces[si] = (pos, asnumpy(out_s))
+
+        self._dispatch_shards(holder, items, _shard,
+                              state_ids=[id(it[2]) for it in items])
+        return self._assemble(num, [p for p in pieces if p is not None],
+                              0.0, xp)
 
     def get_ll_grad(self, holder, params_phys, *, data_index, noise_index,
                     N_vals, **kwargs):
@@ -901,11 +1031,16 @@ class _RoutedBandEngine:
         params_host = np.atleast_2d(asnumpy(params_phys))
         di_host = None if data_index is None else np.atleast_1d(asnumpy(data_index))
         num = int(params_host.shape[0])
-        pieces = []
-        for view, (pos, intra, intra_noise) in zip(views, parts):
-            if pos.shape[0] == 0:
-                continue
-            comp_s = cls._comp_for(comp, holder, view)
+        items = [
+            (si, view, cls._comp_for(comp, holder, view), pos, intra,
+             intra_noise)
+            for si, (view, (pos, intra, intra_noise))
+            in enumerate(zip(views, parts))
+            if pos.shape[0]
+        ]
+        pieces = [None] * len(views)
+
+        def _shard(si, view, comp_s, pos, intra, intra_noise):
             with device_context(xp, view.device):
                 _di_s = ({} if di_host is None
                          else {"data_index": xp.asarray(di_host[pos])})
@@ -913,8 +1048,12 @@ class _RoutedBandEngine:
                     xp.asarray(params_host[pos]), view, inds=inds,
                     noise_index=intra if intra_noise is None else intra_noise,
                     **_di_s, **swap_kwargs)
-                pieces.append((pos, asnumpy(out_s)))
-        return cls._assemble(num, pieces, 0.0, xp)
+                pieces[si] = (pos, asnumpy(out_s))
+
+        cls._dispatch_shards(holder, items, _shard,
+                             state_ids=[id(it[2]) for it in items])
+        return cls._assemble(num, [p for p in pieces if p is not None],
+                             0.0, xp)
 
     @classmethod
     def route_fstat_ll(cls, comp, method_name, holder, params_phys, *,
@@ -969,23 +1108,34 @@ class _RoutedBandEngine:
         parts = cls._partition(holder, data_index, noise_index)
         params_host = np.atleast_2d(asnumpy(params_phys))
         num = int(params_host.shape[0])
-        N_pieces, M_pieces = [], []
-        for view, (pos, intra, intra_noise) in zip(views, parts):
-            if pos.shape[0] == 0:
-                continue
-            comp_method = getattr(cls._comp_for(comp, holder, view),
-                                  method_name)
+        items = [
+            (si, view, cls._comp_for(comp, holder, view), pos, intra,
+             intra_noise)
+            for si, (view, (pos, intra, intra_noise))
+            in enumerate(zip(views, parts))
+            if pos.shape[0]
+        ]
+        N_pieces = [None] * len(views)
+        M_pieces = [None] * len(views)
+
+        def _shard(si, view, comp_s, pos, intra, intra_noise):
+            comp_method = getattr(comp_s, method_name)
             with device_context(xp, view.device):
                 N_s, M_s = comp_method(
                     xp.asarray(params_host[pos]), view,
                     data_index=intra,
                     noise_index=intra if intra_noise is None else intra_noise,
                     **kwargs)
-                N_pieces.append((pos, asnumpy(N_s)))
-                M_pieces.append((pos, asnumpy(M_s)))
+                N_pieces[si] = (pos, asnumpy(N_s))
+                M_pieces[si] = (pos, asnumpy(M_s))
+
+        cls._dispatch_shards(holder, items, _shard,
+                             state_ids=[id(it[2]) for it in items])
         return (
-            cls._assemble(num, N_pieces, 0.0, xp),
-            cls._assemble(num, M_pieces, 0.0, xp),
+            cls._assemble(num, [p for p in N_pieces if p is not None],
+                          0.0, xp),
+            cls._assemble(num, [p for p in M_pieces if p is not None],
+                          0.0, xp),
         )
 
     @classmethod
@@ -1013,6 +1163,13 @@ class _RoutedBandEngine:
         host-routed across the shard's ``device_context`` (no P2P), so the
         adapter and the sweeps never see the sharding. Single-shard holders
         pass straight through (no overhead, no wrapper).
+
+        With TWO OR MORE run devices (``holder.gpus``) the scorer instead
+        fans out over ALL of them (:meth:`_sighet_fstat_multidevice`): the
+        F-stat is single-shard by contract, so the pinned form leaves every
+        other GPU idle for the whole comb + stage-B fit. Kill-switch
+        ``FSTAT_SIGHET_MULTIDEV=0`` restores the single-device pin; CPU and
+        single-GPU holders never take the fan-out path at all.
         """
         from ...sampling.fstat_gridfit import build_sighet_call_fstat
 
@@ -1041,6 +1198,13 @@ class _RoutedBandEngine:
             None if noise_index is None else np.atleast_1d(int(noise_index)))
         view, (_pos, intra, intra_noise) = next(
             (v, p) for v, p in zip(views, parts) if p[0].shape[0])
+        gpus = getattr(holder, "gpus", None)
+        if (gpus is not None and len(gpus) >= 2
+                and os.environ.get("FSTAT_SIGHET_MULTIDEV", "1") == "1"):
+            return cls._sighet_fstat_multidevice(
+                comp, holder, view, int(intra[0]),
+                int(intra[0] if intra_noise is None else intra_noise[0]),
+                xp=xp, Tobs=Tobs, f0_lims_hz=f0_lims_hz, **build_kwargs)
         comp_s = cls._comp_for(comp, holder, view)
         inner = build_sighet_call_fstat(
             comp_s, view, xp=xp, Tobs=Tobs, f0_lims_hz=f0_lims_hz,
@@ -1057,6 +1221,104 @@ class _RoutedBandEngine:
             with device_context(holder.xp, view.device):
                 N_s, M_s = inner(xp.asarray(params_host))
                 N_host, M_host = asnumpy(N_s), asnumpy(M_s)
+            return xp.asarray(N_host), xp.asarray(M_host)
+
+        return call_fstat
+
+    @classmethod
+    def _sighet_fstat_multidevice(cls, comp, holder, view, intra_data,
+                                  intra_noise, *, xp, Tobs, f0_lims_hz,
+                                  **build_kwargs):
+        """All-device fan-out for the sig-het F-stat scorer.
+
+        REPLICATE, don't partition, the resident state: every run device
+        gets its own comp replica (module-cached ``_comp_for``) and its own
+        :class:`_FStatRefRowHolder` -- the reference walker's residual +
+        inverse-PSD rows copied onto that device ONCE here (host-routed, no
+        P2P) -- and builds its OWN copy of whichever ~GB reference block its
+        rows need (``build_sighet_call_fstat``'s lazy ``_ensure_block``,
+        whose per-lane state dict is independent). Reference builds are
+        deterministic, so concurrent per-device builds are free
+        parallelization, and copying the rows once at adapter build means
+        every lane's blocks fold the SAME residual snapshot.
+
+        Each ``call_fstat`` batch is row-split into near-equal CONTIGUOUS
+        chunks (the sweeps order rows f0-locally -- node-major comb,
+        f0-sorted stage-B boxes -- so contiguous chunks stay
+        reference-block coherent per lane). Lanes run concurrently on host
+        threads (one per device with rows; cupy's current device is
+        thread-local; kernel launches release the GIL -- the
+        ``_run_per_split`` pattern), each entering its own device context
+        and returning host ``(N, M)``.
+
+        DETERMINISM: results are IDENTICAL to the single-device path --
+        every row is scored by exactly ONE lane whose replica performs the
+        same arithmetic on the same folded inputs as the pinned scorer
+        (replica bit-identity is pinned by
+        ``SigHetFStatRouteRealCompTest``), the per-row |df0| hard-assert
+        runs unchanged inside every lane, and the merge below is a pure
+        permutation into disjoint host row ranges -- no reductions ever
+        cross devices.
+        """
+        from ...sampling.fstat_gridfit import build_sighet_call_fstat
+
+        n_slabs = int(view.acs_total_entries)
+        # Slice the walker's rows ON the owning device, host only the rows
+        # (asnumpy of the whole shard buffer would round-trip every walker).
+        with device_context(holder.xp, view.device):
+            data_row_host = np.ascontiguousarray(asnumpy(
+                xp.asarray(view.linear_data_arr[0]).reshape(
+                    n_slabs, -1)[int(intra_data)]))
+            psd_row_host = np.ascontiguousarray(asnumpy(
+                xp.asarray(view.linear_psd_arr[0]).reshape(
+                    n_slabs, -1)[int(intra_noise)]))
+
+        lanes = []
+        for dev in [int(g) for g in holder.gpus]:
+            with device_context(holder.xp, dev):
+                ref_holder = _FStatRefRowHolder(
+                    holder, dev,
+                    xp.asarray(data_row_host), xp.asarray(psd_row_host))
+            comp_d = cls._comp_for(comp, holder, ref_holder)
+            lanes.append((dev, build_sighet_call_fstat(
+                comp_d, ref_holder, xp=xp, Tobs=Tobs,
+                f0_lims_hz=f0_lims_hz, data_index=0, noise_index=0,
+                **build_kwargs)))
+        logger.info(
+            "[sighet-fstat] multi-device scorer: %d lanes on devices %s "
+            "(FSTAT_SIGHET_MULTIDEV=0 restores the single-device pin)",
+            len(lanes), [dev for dev, _ in lanes])
+
+        def call_fstat(params):
+            params_host = np.atleast_2d(asnumpy(params))
+            n = int(params_host.shape[0])
+            bounds = (n * np.arange(len(lanes) + 1)) // len(lanes)
+            N_host = np.zeros((n, 4), dtype=np.float64)
+            M_host = np.zeros((n, 10), dtype=np.float64)
+
+            def _score(i):
+                s, e = int(bounds[i]), int(bounds[i + 1])
+                dev, inner = lanes[i]
+                with device_context(holder.xp, dev):
+                    N_s, M_s = inner(xp.asarray(params_host[s:e]))
+                    # permutation merge into disjoint row ranges (see the
+                    # determinism note in the method docstring)
+                    N_host[s:e] = asnumpy(N_s)
+                    M_host[s:e] = asnumpy(M_s)
+
+            active = [i for i in range(len(lanes))
+                      if bounds[i + 1] > bounds[i]]
+            # thread_pool only touched with >1 populated lane (the real
+            # ACA property allocates the pool on first access)
+            pool = (getattr(holder, "thread_pool", None)
+                    if len(active) > 1 else None)
+            if pool is not None:
+                futures = [pool.submit(_score, i) for i in active]
+                for f in futures:
+                    f.result()  # re-raise lane exceptions in caller
+            else:
+                for i in active:
+                    _score(i)
             return xp.asarray(N_host), xp.asarray(M_host)
 
         return call_fstat

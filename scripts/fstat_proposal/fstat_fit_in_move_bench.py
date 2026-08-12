@@ -14,9 +14,14 @@ on-hardware questions it cannot:
   candidate against ONE reference walker, so 100% of the rows land on that
   walker's shard through ``_RoutedBandEngine.route_fstat_ll`` -- the exact
   configuration that reads foreign-device comp buffers when something is
-  still shared. Expect *no speedup* from the second GPU (single-shard
-  scoring by design); the multi-GPU leg is a correctness gate, not a
-  performance target.
+  still shared. On the chunked path expect *no speedup* from the second
+  GPU (single-shard scoring by design). On the sig-het path
+  (``FSTAT_USE_SIGHET=1``) the scorer now fans candidate batches out over
+  EVERY run device against per-device reference replicas
+  (``_RoutedBandEngine._sighet_fstat_multidevice``), so the 2-GPU leg's
+  fit wall should drop toward ~1/N_dev of the 1-GPU leg's while the grid
+  parity gate still holds bit-for-bit (``FSTAT_SIGHET_MULTIDEV=0``
+  restores the pinned single-device scorer).
 * **Do all legs fit identical grids?** The comb npz and the stacked stage-B
   npz must match across legs (same synthetic data, same reference walker,
   deterministic sweep). Bit-identical is the expectation; ``--rtol`` is the

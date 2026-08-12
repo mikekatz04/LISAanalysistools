@@ -12,7 +12,10 @@ scorer route (``route_sighet_fstat``), and the single-shard passthrough.
 
 from __future__ import annotations
 
+import os
+import threading
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -57,8 +60,17 @@ class _StubEngine:
         assert len(holder) == holder.acs_total_entries
         intra = np.asarray(data_index)
         dev = holder.gpus[0] if holder.gpus is not None else 0
+        # Concurrency hook (RouterThreadedDispatchTest): with a 2-party
+        # barrier installed, both shards must be inside get_ll at once or
+        # the wait times out -> BrokenBarrierError -> test failure.
+        b = getattr(self, "barrier", None)
+        if b is not None:
+            b.wait()
         self._record("get_ll", holder, intra=intra.copy(),
-                     params=np.asarray(params_phys).copy())
+                     params=np.asarray(params_phys).copy(),
+                     thread=threading.get_ident(),
+                     device=holder.xp.current_device
+                     if hasattr(holder.xp, "current_device") else None)
         n = len(intra)
         self.d_h_out = 1000.0 * dev + intra.astype(float)
         self.h_h_out = 2000.0 * dev + intra.astype(float)
@@ -249,6 +261,11 @@ class _FakeSigHetFStatComp:
         if self._fstat is None:
             raise RuntimeError("no reference stash; call "
                                "setup_fstat_references first.")
+        # Concurrency hook (SigHetFStatMultiDevTest): a 2-party barrier
+        # only passes if both device lanes score simultaneously.
+        b = getattr(self, "barrier", None)
+        if b is not None:
+            b.wait()
         x = np.atleast_2d(np.asarray(params, dtype=float))
         di = (np.zeros(x.shape[0], dtype=int) if data_index is None
               else np.asarray(data_index, dtype=int))
@@ -822,14 +839,20 @@ class ShardRouterTest(unittest.TestCase):
 
 
 class SigHetFStatRouteTest(unittest.TestCase):
-    """``route_sighet_fstat``: the stateful sig-het F-stat scorer route.
+    """``route_sighet_fstat``: the stateful sig-het F-stat scorer route,
+    PINNED single-device form.
 
     Unlike ``route_fstat_ll`` (stateless, one routed call per batch) the
-    sig-het scorer keeps its reference stash ON the comp, so the route must
-    pin the WHOLE scorer -- reference builds and every score -- to the
-    reference walker's shard on ONE stable device-local comp replica.
-    Structural half on the CPU fakes; the numerical half (real CPU comp,
-    bit-identical across holders) is ``SigHetFStatRouteRealCompTest``.
+    sig-het scorer keeps its reference stash ON the comp, so the pinned
+    route keeps the WHOLE scorer -- reference builds and every score -- on
+    the reference walker's shard on ONE stable device-local comp replica.
+    Multi-GPU holders now default to the all-device fan-out
+    (``SigHetFStatMultiDevTest``), so this class runs under the
+    ``FSTAT_SIGHET_MULTIDEV=0`` kill-switch -- it IS the kill-switch
+    coverage: these assertions passing under the knob proves the old
+    pinned path is restored verbatim. Structural half on the CPU fakes;
+    the numerical half (real CPU comp, bit-identical across holders) is
+    ``SigHetFStatRouteRealCompTest``.
     """
 
     PER_BAND = (3, 8)
@@ -857,12 +880,15 @@ class SigHetFStatRouteTest(unittest.TestCase):
 
     def _route(self, comp, holder, walker_ref, **kw):
         # spacing pinned so a stray FSTAT_SIGHET_REF_SPACING_HZ in the test
-        # environment cannot move the bucket layout the assertions rely on.
-        return self.RoutedEngine.route_sighet_fstat(
-            comp, holder, xp=holder.xp, Tobs=self.TOBS,
-            f0_lims_hz=(self.F0_LO, self.F0_LO + 10.0 * self.margin),
-            data_index=walker_ref, noise_index=walker_ref,
-            spacing_hz=self.margin, **kw)
+        # environment cannot move the bucket layout the assertions rely on;
+        # the kill-switch pinned so this class keeps testing the
+        # single-device form (see the class docstring).
+        with mock.patch.dict(os.environ, {"FSTAT_SIGHET_MULTIDEV": "0"}):
+            return self.RoutedEngine.route_sighet_fstat(
+                comp, holder, xp=holder.xp, Tobs=self.TOBS,
+                f0_lims_hz=(self.F0_LO, self.F0_LO + 10.0 * self.margin),
+                data_index=walker_ref, noise_index=walker_ref,
+                spacing_hz=self.margin, **kw)
 
     def _candidates(self, fracs):
         """9-col rows at ``F0_LO + frac * margin`` (all inside the comb)."""
@@ -980,6 +1006,298 @@ class SigHetFStatRouteTest(unittest.TestCase):
                 self._route(self.comp, self.holder, walker_ref=4)
         finally:
             del self.holder.slab_min_f
+
+
+class SigHetFStatMultiDevTest(unittest.TestCase):
+    """``route_sighet_fstat``'s default all-device fan-out.
+
+    With >= 2 run devices every device gets its own lane -- a comp replica
+    plus a private one-row holder carrying a copy of the reference walker's
+    residual/inverse-PSD rows -- and each ``call_fstat`` batch is row-split
+    into near-equal contiguous chunks scored concurrently. Structural +
+    fake-numerical here; the real-comp bit-identity legs live in
+    ``SigHetFStatRouteRealCompTest``.
+    """
+
+    PER_BAND = (3, 8)
+    NUM_ACS = 6
+    TOBS = 7.776e6
+    F0_LO = 1e-3
+
+    def setUp(self):
+        try:
+            from lisatools.globalfit.moves.gbbands import _RoutedBandEngine
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"gbbands router not available: {exc}")
+        from lisatools.sampling.fstat_gridfit import (
+            sighet_fstat_ref_margin_hz)
+
+        self.RoutedEngine = _RoutedBandEngine
+        self.margin = sighet_fstat_ref_margin_hz(128, self.TOBS)
+        # blocked layout: rows 0-2 on shard/device 0, rows 3-5 on 1
+        self.holder = FakeMultiShardACA(
+            self.PER_BAND, self.NUM_ACS, 2, layout="blocked")
+        self.comp = _FakeSigHetFStatComp(
+            FakeDeviceComp(self.holder.xp, tag="sighet-chunked"))
+
+    def _route(self, comp, holder, walker_ref, multidev="1"):
+        with mock.patch.dict(os.environ,
+                             {"FSTAT_SIGHET_MULTIDEV": multidev}):
+            return self.RoutedEngine.route_sighet_fstat(
+                comp, holder, xp=holder.xp, Tobs=self.TOBS,
+                f0_lims_hz=(self.F0_LO, self.F0_LO + 10.0 * self.margin),
+                data_index=walker_ref, noise_index=walker_ref,
+                spacing_hz=self.margin)
+
+    def _candidates(self, fracs):
+        p = np.zeros((len(fracs), 9))
+        p[:, 0] = 1e-22
+        p[:, 1] = self.F0_LO + np.asarray(fracs) * self.margin
+        return p
+
+    def _replica(self, comp, device):
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            _DEVICE_GB_COMP_REPLICAS)
+
+        return _DEVICE_GB_COMP_REPLICAS[(id(comp), int(device))][1]
+
+    def test_rows_split_near_equally_across_device_lanes(self):
+        """5 rows over 2 lanes -> contiguous 2 + 3; lane 0 is the prototype
+        comp (its own device), lane 1 the device-1 replica; every lane runs
+        inside its own device context."""
+        call = self._route(self.comp, self.holder, walker_ref=4)
+        self.holder.xp.device_log.clear()
+        call(self._candidates([0.3, 0.9, 1.4, 2.6, 5.1]))
+
+        proto = [c for c in self.comp.calls if c["kind"] == "fstat"]
+        replica = self._replica(self.comp, 1)
+        rep = [c for c in replica.calls if c["kind"] == "fstat"]
+        self.assertEqual([c["n"] for c in proto], [2])
+        self.assertEqual([c["n"] for c in rep], [3])
+        for c in proto:
+            self.assertEqual(int(c["device"]), 0)
+        for c in rep:
+            self.assertEqual(int(c["device"]), 1)
+        self.assertEqual(set(self.holder.xp.device_log), {0, 1})
+
+    def test_lanes_have_private_one_row_replicas(self):
+        """Each lane builds its OWN reference stash against its OWN one-row
+        holder (the reference walker's copied row, scored as data_index 0)
+        -- no lane touches another device's arrays or the live shard
+        buffer."""
+        call = self._route(self.comp, self.holder, walker_ref=4)
+        call(self._candidates([0.3, 2.6]))
+        replica = self._replica(self.comp, 1)
+        proto_setup = [c for c in self.comp.calls
+                       if c["kind"] == "setup_fstat"]
+        rep_setup = [c for c in replica.calls if c["kind"] == "setup_fstat"]
+        self.assertEqual(len(proto_setup), 1)
+        self.assertEqual(len(rep_setup), 1)
+        # per-lane stash, one per comp replica
+        self.assertIsNotNone(self.comp._fstat)
+        self.assertIsNotNone(replica._fstat)
+        h0, h1 = proto_setup[0]["holder"], rep_setup[0]["holder"]
+        self.assertIsNot(h0, h1)
+        for h, dev, setup in ((h0, 0, proto_setup[0]),
+                              (h1, 1, rep_setup[0])):
+            self.assertEqual(setup["data_index"], 0)
+            self.assertEqual(h.acs_total_entries, 1)
+            self.assertEqual(len(h), 1)
+            self.assertEqual(h.device, dev)
+            self.assertEqual(h.gpus, [dev])
+            # the one row is walker 4's (global seed b + 1 = 5), copied --
+            # never the shard's live multi-row buffer
+            row = np.asarray(h.linear_data_arr[0]).ravel()
+            self.assertEqual(float(np.real(row[0])), 5.0)
+            self.assertIsNot(h.linear_data_arr[0],
+                             self.holder.linear_data_arr[1])
+        # both lanes folded the SAME reference residual value
+        self.assertEqual(self.comp._fstat["data_val"],
+                         replica._fstat["data_val"])
+
+    def test_multidev_bit_identical_to_pinned_and_single(self):
+        """Determinism contract: each row is scored by exactly one lane
+        with the single-device arithmetic and the merge is a permutation --
+        so single-shard, pinned 2-shard and fan-out 2-shard all agree
+        bit-for-bit."""
+        fracs = [0.3, 0.9, 1.4, 2.6, 5.1]
+        outs = {}
+        for label, shards, multidev in (("single", 1, "1"),
+                                        ("pinned", 2, "0"),
+                                        ("multidev", 2, "1")):
+            holder = FakeMultiShardACA(
+                self.PER_BAND, self.NUM_ACS, shards, layout="blocked")
+            comp = _FakeSigHetFStatComp(
+                FakeDeviceComp(holder.xp, tag="sighet-chunked"))
+            call = self._route(comp, holder, walker_ref=4,
+                               multidev=multidev)
+            outs[label] = tuple(np.asarray(a)
+                                for a in call(self._candidates(fracs)))
+        for label in ("pinned", "multidev"):
+            np.testing.assert_array_equal(outs[label][0], outs["single"][0])
+            np.testing.assert_array_equal(outs[label][1], outs["single"][1])
+
+    def test_lanes_run_concurrently(self):
+        """Both lanes must be inside the scoring kernel at once: a 2-party
+        barrier passes only under concurrent dispatch (serial would time
+        out and raise BrokenBarrierError)."""
+        call = self._route(self.comp, self.holder, walker_ref=4)
+        call(self._candidates([0.3, 2.6]))     # materialize both lanes
+        replica = self._replica(self.comp, 1)
+        barrier = threading.Barrier(2, timeout=10)
+        self.comp.barrier = replica.barrier = barrier
+        try:
+            N, _M = call(self._candidates([0.3, 2.6]))
+        finally:
+            self.comp.barrier = replica.barrier = None
+        self.assertEqual(np.asarray(N).shape, (2, 4))
+
+    def test_kill_switch_restores_single_device_pin(self):
+        """FSTAT_SIGHET_MULTIDEV=0: all rows on the reference walker's
+        shard replica, scored against the SHARD VIEW with the intra-shard
+        row -- the prototype never runs."""
+        call = self._route(self.comp, self.holder, walker_ref=4,
+                           multidev="0")
+        call(self._candidates([0.3, 2.6, 5.1]))
+        self.assertEqual(self.comp.calls, [])
+        replica = self._replica(self.comp, 1)
+        self.assertEqual(
+            [c["n"] for c in replica.calls if c["kind"] == "fstat"], [3])
+        setup = [c for c in replica.calls
+                 if c["kind"] == "setup_fstat"][0]
+        self.assertEqual(setup["holder"].acs_total_entries, 3)
+        self.assertEqual(setup["data_index"], 1)
+
+    def test_single_shard_passthrough_verbatim_no_pool(self):
+        """CPU / single-GPU holders keep EXACTLY the current code path: the
+        raw build_sighet_call_fstat closure against the original holder and
+        global index, and no thread pool is ever spun up."""
+        single = FakeMultiShardACA(
+            self.PER_BAND, self.NUM_ACS, 1, layout="blocked")
+        comp = _FakeSigHetFStatComp(
+            FakeDeviceComp(single.xp, tag="sighet-chunked"))
+        call = self._route(comp, single, walker_ref=4)
+        self.assertIn("build_sighet_call_fstat", call.__qualname__)
+        call(self._candidates([0.3, 1.4]))
+        setup = comp.calls[0]
+        self.assertIs(setup["holder"], single)
+        self.assertEqual(setup["data_index"], 4)
+        self.assertIsNone(single._thread_pool)
+
+
+class RouterThreadedDispatchTest(unittest.TestCase):
+    """``GB_ROUTER_THREADED``: opt-in concurrent per-shard dispatch.
+
+    Default OFF -- serial launch-sync-launch is the de-facto safety net
+    while the 2-GPU incremental-ll-drift investigation is open. With the
+    knob on and multiple shards populated, per-shard work runs on host
+    threads, each inside its own device context, writing pre-allocated
+    result slots -- so knob-on results are bit-identical to serial.
+    """
+
+    PER_BAND = (3, 8)
+    NUM_ACS = 6
+
+    def setUp(self):
+        try:
+            from lisatools.globalfit.moves.gbbands import _RoutedBandEngine
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"gbbands router not available: {exc}")
+        self.RoutedEngine = _RoutedBandEngine
+        self.holder = FakeMultiShardACA(
+            self.PER_BAND, self.NUM_ACS, 2, layout="blocked")
+        self.data_index = np.array([4, 0, 5, 2, 1])
+        self.params = np.arange(len(self.data_index) * 9, dtype=float
+                                ).reshape(len(self.data_index), 9)
+
+    def _factory_router(self):
+        """Router whose shards resolve DISTINCT engines (the multi-GPU
+        production shape -- and the precondition for threaded dispatch)."""
+        engines = {}
+
+        def _factory(device, primary):
+            engines[int(device)] = _StubEngine()
+            return engines[int(device)]
+
+        primary = _StubEngine()
+        return self.RoutedEngine(primary, engine_factory=_factory), \
+            primary, engines
+
+    def _get_ll(self, router, threaded):
+        with mock.patch.dict(os.environ,
+                             {"GB_ROUTER_THREADED": threaded}):
+            return np.asarray(router.get_ll(
+                self.holder, self.params,
+                data_index=self.data_index, noise_index=self.data_index,
+                N_vals=None, waveform_kwargs={}))
+
+    def test_knob_on_runs_shards_concurrently_in_own_contexts(self):
+        router, primary, engines = self._factory_router()
+        self._get_ll(router, "0")              # materialize the replica
+        primary.calls.clear()
+        engines[1].calls.clear()
+        barrier = threading.Barrier(2, timeout=10)
+        primary.barrier = engines[1].barrier = barrier
+        try:
+            self._get_ll(router, "1")
+        finally:
+            primary.barrier = engines[1].barrier = None
+        pc = [c for c in primary.calls if c["kind"] == "get_ll"]
+        rc = [c for c in engines[1].calls if c["kind"] == "get_ll"]
+        self.assertEqual((len(pc), len(rc)), (1, 1))
+        # distinct worker threads (guaranteed by the barrier: one thread
+        # cannot be inside both calls at once), each in its own context
+        self.assertNotEqual(pc[0]["thread"], rc[0]["thread"])
+        self.assertEqual(int(pc[0]["device"]), 0)
+        self.assertEqual(int(rc[0]["device"]), 1)
+
+    def test_knob_on_results_bit_identical_to_serial(self):
+        r_off, _, _ = self._factory_router()
+        ll_off = self._get_ll(r_off, "0")
+        d_off = np.asarray(r_off.d_h_out)
+        h_off = np.asarray(r_off.h_h_out)
+        r_on, _, _ = self._factory_router()
+        ll_on = self._get_ll(r_on, "1")
+        np.testing.assert_array_equal(ll_on, ll_off)
+        np.testing.assert_array_equal(np.asarray(r_on.d_h_out), d_off)
+        np.testing.assert_array_equal(np.asarray(r_on.h_h_out), h_off)
+
+    def test_knob_on_classmethod_routes_bit_identical(self):
+        outs = {}
+        for threaded in ("0", "1"):
+            comp = FakeDeviceComp(self.holder.xp, tag="wdm")
+            with mock.patch.dict(os.environ,
+                                 {"GB_ROUTER_THREADED": threaded}):
+                N, M = self.RoutedEngine.route_fstat_ll(
+                    comp, "get_fstat_ll_wdm", self.holder, self.params,
+                    data_index=self.data_index,
+                    noise_index=self.data_index)
+                info = self.RoutedEngine.route_information_matrix(
+                    comp, self.holder, self.params[:, :3], inds=[0, 1, 2],
+                    noise_index=self.data_index)
+            outs[threaded] = tuple(np.asarray(a) for a in (N, M, info))
+        for a, b in zip(outs["0"], outs["1"]):
+            np.testing.assert_array_equal(b, a)
+
+    def test_knob_off_creates_no_thread_pool(self):
+        router, _, _ = self._factory_router()
+        self._get_ll(router, "0")
+        self.assertIsNone(self.holder._thread_pool)
+
+    def test_shared_engine_forces_serial_despite_knob(self):
+        """Shards resolving to ONE engine (no engine_factory) would race
+        its output attrs -- duplicate state ids must force serial, without
+        ever touching the thread pool."""
+        engine = _StubEngine()
+        router = self.RoutedEngine(engine)
+        ll = self._get_ll(router, "1")
+        self.assertIsNone(self.holder._thread_pool)
+        dev = self.holder.gpu_map[self.data_index].astype(float)
+        intra = np.empty(self.NUM_ACS, dtype=int)
+        for rr in self.holder.gpu_splits:
+            intra[rr] = np.arange(len(rr))
+        np.testing.assert_array_equal(
+            ll, 1000.0 * dev + intra[self.data_index].astype(float))
 
 
 def _have_gbgpu_comps() -> bool:
@@ -1153,17 +1471,8 @@ class SigHetFStatRouteRealCompTest(unittest.TestCase):
             for rows in holder.gpu_splits]
         return holder
 
-    def test_two_shard_route_bit_identical_to_single_shard(self):
-        from lisatools.globalfit.moves.gbbands import _RoutedBandEngine
-        from lisatools.sampling.fstat_gridfit import (
-            sighet_fstat_ref_margin_hz)
-
-        g = self.sig._g
-        Tobs = float(g["Tobs"])
-        margin = sighet_fstat_ref_margin_hz(int(g["v4_knots"]), Tobs)
-        f0_lo = (g["ind_min_f"] + g["Nf_active"] // 2 + 0.3) * g["layer_df"]
+    def _candidates(self, f0_lo, margin, n=6):
         rng = np.random.default_rng(5)
-        n = 6
         cands = np.zeros((n, 9))
         cands[:, 0] = 1e-22
         cands[:, 1] = f0_lo + rng.uniform(0.0, 3.0, n) * margin
@@ -1172,21 +1481,71 @@ class SigHetFStatRouteRealCompTest(unittest.TestCase):
         cands[:, 6] = rng.uniform(0, np.pi, n)
         cands[:, 7] = rng.uniform(0, 2 * np.pi, n)
         cands[:, 8] = np.arcsin(rng.uniform(-1.0, 1.0, n))
+        return cands
+
+    def test_two_shard_route_bit_identical_to_single_shard(self):
+        """Three legs on the REAL comp: single-shard passthrough, pinned
+        2-shard (FSTAT_SIGHET_MULTIDEV=0) and the default all-device
+        fan-out -- all must agree bit-for-bit (the fan-out's determinism
+        contract: one lane per row, single-device arithmetic, permutation
+        merge)."""
+        from lisatools.globalfit.moves.gbbands import _RoutedBandEngine
+        from lisatools.sampling.fstat_gridfit import (
+            sighet_fstat_ref_margin_hz)
+
+        g = self.sig._g
+        Tobs = float(g["Tobs"])
+        margin = sighet_fstat_ref_margin_hz(int(g["v4_knots"]), Tobs)
+        f0_lo = (g["ind_min_f"] + g["Nf_active"] // 2 + 0.3) * g["layer_df"]
+        cands = self._candidates(f0_lo, margin)
 
         results = {}
-        for shards in (1, 2):
+        for label, shards, multidev in (("single", 1, "1"),
+                                        ("pinned", 2, "0"),
+                                        ("multidev", 2, "1")):
             self.sig.clear_fstat_references()
-            call = _RoutedBandEngine.route_sighet_fstat(
-                self.sig, self._seeded_holder(shards), xp=np, Tobs=Tobs,
-                f0_lims_hz=(f0_lo, f0_lo + 3.0 * margin),
-                data_index=self.WALKER_REF, noise_index=self.WALKER_REF,
-                spacing_hz=margin)
-            results[shards] = tuple(np.asarray(a) for a in call(cands))
+            with mock.patch.dict(os.environ,
+                                 {"FSTAT_SIGHET_MULTIDEV": multidev}):
+                call = _RoutedBandEngine.route_sighet_fstat(
+                    self.sig, self._seeded_holder(shards), xp=np, Tobs=Tobs,
+                    f0_lims_hz=(f0_lo, f0_lo + 3.0 * margin),
+                    data_index=self.WALKER_REF, noise_index=self.WALKER_REF,
+                    spacing_hz=margin)
+            results[label] = tuple(np.asarray(a) for a in call(cands))
 
-        (N1, M1), (N2, M2) = results[1], results[2]
+        N1, M1 = results["single"]
         self.assertTrue(np.all(np.isfinite(N1)) and np.all(np.isfinite(M1)))
-        np.testing.assert_array_equal(N2, N1)
-        np.testing.assert_array_equal(M2, M1)
+        for label in ("pinned", "multidev"):
+            np.testing.assert_array_equal(results[label][0], N1)
+            np.testing.assert_array_equal(results[label][1], M1)
+
+    def test_router_threaded_chunked_fstat_bit_identical(self):
+        """GB_ROUTER_THREADED on the REAL chunked comp: the routed
+        stateless F-stat (spread across both shards) must be bit-identical
+        knob-on vs knob-off."""
+        from lisatools.globalfit.moves.gbbands import _RoutedBandEngine
+        from lisatools.sampling.fstat_gridfit import (
+            sighet_fstat_ref_margin_hz)
+
+        g = self.sig._g
+        margin = sighet_fstat_ref_margin_hz(int(g["v4_knots"]),
+                                            float(g["Tobs"]))
+        f0_lo = (g["ind_min_f"] + g["Nf_active"] // 2 + 0.3) * g["layer_df"]
+        cands = self._candidates(f0_lo, margin)
+        holder = self._seeded_holder(2)
+        di = np.array([0, 3, 1, 2, 3, 0])  # rows on BOTH shards
+
+        outs = {}
+        for threaded in ("0", "1"):
+            with mock.patch.dict(os.environ,
+                                 {"GB_ROUTER_THREADED": threaded}):
+                N, M = _RoutedBandEngine.route_fstat_ll(
+                    self.sig.chunked, "get_fstat_ll_wdm", holder, cands,
+                    data_index=di, noise_index=di)
+            outs[threaded] = (np.asarray(N).copy(), np.asarray(M).copy())
+        self.assertTrue(np.all(np.isfinite(outs["0"][0])))
+        np.testing.assert_array_equal(outs["1"][0], outs["0"][0])
+        np.testing.assert_array_equal(outs["1"][1], outs["0"][1])
 
 
 if __name__ == "__main__":
