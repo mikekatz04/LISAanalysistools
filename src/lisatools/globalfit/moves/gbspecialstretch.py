@@ -5333,6 +5333,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 "in-model cold %.4f (n=%.0f) all %.4f (n=%.0f)",
                 self.name, rj_c, rj_cn, rj_a, rj_an, im_c, im_cn, im_a, im_an,
             )
+            # PER-WALKER cold in-model decomposition (shard-bug hunt
+            # 2026-08-12): on 2 GPUs the aggregate cold rate halves vs
+            # 1 GPU. (a, a, ~0, ~0) convicts the WALKER-sharded parent
+            # side (shard-1 residual rows); a uniform a/2 convicts the
+            # BAND-sharded cell scoring side (device-1 band cells).
+            with np.errstate(invalid="ignore", divide="ignore"):
+                _im_w = _ac[1][0].sum(axis=-1) / _pc[1][0].sum(axis=-1)
+            logger.info(
+                "[GB_ACCEPT %s] in-model cold PER WALKER: %s",
+                self.name, np.array2string(_im_w, precision=3),
+            )
         except Exception as exc:  # never break a propose for a log line
             logger.debug("[GB_ACCEPT %s] skipped: %r", self.name, exc)
 
