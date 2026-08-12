@@ -1457,47 +1457,56 @@ class PSDMove(GlobalFitMove, StretchMove):
             self._tally_in_model_accepted += acc.sum(axis=-1).astype(int)
             self._tally_in_model_proposed += acc.shape[-1]
 
-        if move_i % self.permute_every == 0:
-            x = new_state.branches_coords
-            logl = new_state.log_like
-            logp = new_state.log_prior
-            branch_supps = new_state.branches_supplemental
-            supps = new_state.supplemental
+        # Tempering, addremove-style two-tier cadence (2026-08-12): a cheap
+        # IDENTITY-paired naive swap fires EVERY repeat -- valid within a
+        # walker because every rung of walker j scores against walker j's own
+        # residual, so the dbeta*dlogl factor is exact and costs no
+        # likelihood evaluations -- and the walker-PERMUTING fancy swap
+        # (re-scores the swapped params against the DESTINATION walkers'
+        # residuals through compute_log_like) fires only every
+        # ``permute_every`` repeats. Previously NO swap ran between fancy
+        # events, so the ladder sat unexchanged for the other repeats.
+        do_fancy = (move_i % self.permute_every == 0)
+        x = new_state.branches_coords
+        logl = new_state.log_like
+        logp = new_state.log_prior
+        branch_supps = new_state.branches_supplemental
+        supps = new_state.supplemental
 
-            logP = self.compute_log_posterior(logl, logp)
-            x, logP, logl, logp, inds, blobs, supps, branch_supps = (
-                self.temperature_control.temperature_swaps(
-                    x,
-                    logP,
-                    logl,
-                    logp,
-                    supps=supps,
-                    branch_supps=branch_supps,
-                    compute_log_like=self.compute_log_like,
-                    compute_log_prior=self.compute_log_prior,
-                    fancy_swap=True,
-                    permute_here=True,
-                )
+        logP = self.compute_log_posterior(logl, logp)
+        x, logP, logl, logp, inds, blobs, supps, branch_supps = (
+            self.temperature_control.temperature_swaps(
+                x,
+                logP,
+                logl,
+                logp,
+                supps=supps,
+                branch_supps=branch_supps,
+                compute_log_like=self.compute_log_like,
+                compute_log_prior=self.compute_log_prior,
+                fancy_swap=do_fancy,
+                permute_here=do_fancy,
             )
+        )
 
-            for name in x:
-                new_state.branches[name].coords[:] = x[name][:]
-                new_state.branches[name].branch_supplemental = branch_supps[name]
+        for name in x:
+            new_state.branches[name].coords[:] = x[name][:]
+            new_state.branches[name].branch_supplemental = branch_supps[name]
 
-            new_state.log_like[:] = logl[:]
-            new_state.log_prior[:] = logp[:]
-            new_state.supplemental = supps
+        new_state.log_like[:] = logl[:]
+        new_state.log_prior[:] = logp[:]
+        new_state.supplemental = supps
 
-            # swap bookkeeping: TemperatureControl refreshes swaps_accepted on
-            # every call and holds swaps_proposed fixed at nwalkers per rung.
-            tc = self.temperature_control
-            if self._tally_swaps_accepted is not None:
-                sa = getattr(tc, "swaps_accepted", None)
-                sp = getattr(tc, "swaps_proposed", None)
-                if sa is not None:
-                    self._tally_swaps_accepted += np.asarray(sa).ravel().astype(int)
-                if sp is not None:
-                    self._tally_swaps_proposed += np.asarray(sp).ravel().astype(int)
+        # swap bookkeeping: TemperatureControl refreshes swaps_accepted on
+        # every call and holds swaps_proposed fixed at nwalkers per rung.
+        tc = self.temperature_control
+        if self._tally_swaps_accepted is not None:
+            sa = getattr(tc, "swaps_accepted", None)
+            sp = getattr(tc, "swaps_proposed", None)
+            if sa is not None:
+                self._tally_swaps_accepted += np.asarray(sa).ravel().astype(int)
+            if sp is not None:
+                self._tally_swaps_proposed += np.asarray(sp).ravel().astype(int)
 
         return new_state, accepted
 
