@@ -1492,6 +1492,99 @@ class GBCompReplicaContractTest(unittest.TestCase):
         # above were allocated on and is what the router keys replicas by.
         self.assertIsNone(comp._build_device)
 
+    def test_wdm_settings_replica_preserves_t0(self):
+        """The 2026-08 multi-GPU VGB scoring bug (regression pin).
+
+        ``WDMSettings.kwargs`` dropped ``t0``, so every
+        ``WDMSettings(*s.args, **s.kwargs)`` reconstruction -- specifically
+        the per-device settings replica inside ``_device_local_gb_comp``,
+        which every NON-PRIMARY shard's engine/comp replica is built from --
+        silently reset the data start time to 0.0. The stock WDM global
+        fits set ``wdm.t0 = data_t0`` before building the chunked-het comp,
+        whose ``t_obs_start`` / ``chunk_t_starts`` inherit it, so shard-1
+        kernels evaluated orbits + source phases at an epoch shifted by
+        ``-data_t0``: in-model acceptance halved and the shard-1 walkers'
+        incremental ll drifted. The CPU phases of the repro never caught it
+        because with plain numpy ``current_device`` is None and the shared
+        settings object is reused -- the RecordingXp below drives the real
+        rebuild branch, exactly like a CUDA device context does.
+        Full repro: ``scripts/gb_chunked_het/gb_shard_inmodel_repro.py``
+        (Phase G).
+        """
+        from gbgpu.gbcomps import GBWDMComputations
+        from lisatools.domains import WDMSettings
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            _device_local_gb_comp)
+
+        try:
+            from tests._multishard import RecordingXp
+        except ImportError:
+            from _multishard import RecordingXp
+
+        T0 = 7776000.0  # a mojito-like nonzero data start (3 months)
+        wdm = WDMSettings(Nf=32, Nt=64, dt=15.0, t0=T0, force_backend="cpu")
+        # settings-level reconstruction (WDMSignal / replica path)
+        rebuilt = WDMSettings(*wdm.args, **wdm.kwargs)
+        self.assertEqual(float(rebuilt.t0), T0)
+
+        comp = GBWDMComputations(
+            wdm, t_ref=T0, Nt_sub=16, n_pad=2, N_sparse=64,
+            tdi_config="1st generation", force_backend="cpu")
+        replica = _device_local_gb_comp(comp, RecordingXp(), 1, 0)
+        self.assertIsNot(replica, comp)
+        self.assertEqual(float(replica.wdm_settings.t0), T0)
+        self.assertEqual(float(replica.t_obs_start),
+                         float(comp.t_obs_start))
+        np.testing.assert_array_equal(np.asarray(replica.chunk_t_starts),
+                                      np.asarray(comp.chunk_t_starts))
+
+    def test_gb_comp_replica_inherits_configured_orbits(self):
+        """The 2026-08-12 multi-GPU shard bug's ORBITS half (regression pin
+        for LAT dev 7d6fd4c).
+
+        ``_build_gb_comp_replica`` used to reconstruct the orbits via
+        ``orbits.__class__(*args, **kwargs)``, which loses post-construction
+        state -- for file-based L1Orbits the loader-installed configured
+        grid -- so the replica comp's setter saw ``configured=False`` and
+        RE-configured the fresh object on a different grid (NaN waveforms on
+        the non-primary shard; in-model acceptance uniformly halved). The
+        fix hands the replica the prototype's CONFIGURED ``_orbits`` object.
+        CPU-testable: configure orbits on a CUSTOM grid the comp setter's
+        default reconfigure could never produce, then assert the replica's
+        orbits carry exactly that grid.
+        """
+        from gbgpu.gbcomps import GBWDMComputations
+        from lisatools.detector import EqualArmlengthOrbits
+        from lisatools.globalfit.stock.erebor.source_runtime import (
+            _device_local_gb_comp)
+
+        try:
+            from tests._multishard import RecordingXp
+        except ImportError:
+            from _multishard import RecordingXp
+
+        # Custom configured grid: dt=500 over ~40 ks -- nothing like the
+        # setter's default full-span reconfigure (dt=15 over Tobs).
+        orb = EqualArmlengthOrbits(force_backend="cpu")
+        custom_t = np.arange(0.0, 4.0e4, 500.0)
+        orb._configure(t_arr=custom_t, dt=500.0)
+        self.assertTrue(orb.configured)
+
+        comp = GBWDMComputations(
+            self.wdm_settings, t_ref=0.0, Nt_sub=16, n_pad=2, N_sparse=64,
+            orbits=orb, tdi_config="1st generation", force_backend="cpu")
+        proto_t = np.asarray(comp._orbits.t)
+        # sanity: the comp setter kept the custom configured grid
+        self.assertEqual(len(proto_t), len(np.asarray(orb.t)))
+
+        replica = _device_local_gb_comp(comp, RecordingXp(), 1, 0)
+        self.assertIsNot(replica, comp)
+        self.assertTrue(replica._orbits.configured)
+        np.testing.assert_array_equal(np.asarray(replica._orbits.t), proto_t)
+        # ... and it is NOT the setter's default full-span reconfigure grid
+        default_t = np.arange(0.0, comp.T + comp.dt, comp.dt) + comp.t_obs_start
+        self.assertNotEqual(len(proto_t), len(default_t))
+
     def test_fd_comp_rebuilds_from_recorded_args(self):
         from gbgpu.gbcomps import GBFDComputations
         from lisatools.domains import FDSettings
