@@ -5,13 +5,20 @@
 #
 # !! PREFLIGHT GATES -- do these BEFORE submitting !!
 #
-# 1. FSTAT KERNEL SHARED-MEMORY CLAMP (blocking). The sig-het F-stat
-#    kernels scale shared memory with N_sparse_t and the device clamp only
-#    covers n_sparse_fd: the SIGHET_NT_LAYER=135 gate died with
-#    "GPUassert: invalid argument gb_tdi_on_the_fly.cu:6747". At the
-#    NT_LAYER below (525) the fstat grid fit WILL hit this unless the clamp
-#    is extended (queued post-3mo item). Gate: one-band fstat fit at
-#    SIGHET_NT_LAYER=525 must complete before this run.
+# 1. FSTAT KERNEL SHARED-MEMORY CLAMP (blocking) -- FIX LANDED 2026-08-12,
+#    GATE STILL REQUIRED. The sig-het shared-memory work on GBGPU dev
+#    (checked opt-in + setup-time clamp for the fstat scorer; global-memory
+#    twiddle fallback for gb_signal_het_make_reference, whose 287 KB
+#    all-shared carve at THIS grid's Nt=16800 was over every device's
+#    limit) must be in the wheel: REBUILD GBGPU from dev on the cluster
+#    (stale .so = the old "GPUassert: invalid argument
+#    gb_tdi_on_the_fly.cu:6747" crash). Then run the one-band gate ON A GPU
+#    NODE in this run's env and require "GATE: PASS":
+#
+#        BACKEND=cuda13x python scripts/gb_chunked_het/gate_sighet_fstat_nt525.py
+#
+#    (exercises the 23-month grid shape at SIGHET_NT_LAYER=525: reference
+#    build + fstat sweep + mode-0/1 parity + 525-vs-420 grid consistency.)
 #
 # 2. MEMORY SHAKEDOWN (strongly recommended). Per-walker WDM residual is
 #    3 x 1440 x 16800 f64 ~ 0.58 GB -- 7.8x the 3-month grid -- plus the
