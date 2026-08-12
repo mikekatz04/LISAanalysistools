@@ -32,7 +32,19 @@ import numpy as np
 
 from ...engine import GeneralSetup, Settings
 from ...recipe import MOJITO_REFERENCE_TIME, gb_catalogue_to_sampling_basis
-from ..base import env_default
+from ..base import env_default, env_is_set, env_resolve
+
+
+def _vgb_sighet_inmodel_default() -> bool:
+    """Per-branch override first (2026-08-12 smoke-2 finding): a set
+    VGB_SIGHET_INMODEL wins; the shared GB_SIGHET_INMODEL (which flips gb
+    and vgb together) is the fallback. Before this, VGB_SIGHET_INMODEL was
+    SILENTLY IGNORED -- the exact rule-0 failure mode -- so the chunked-het
+    vs sig-het VGB discriminator never actually ran. Module-level named
+    function: the pre-build fit must pickle/deepcopy."""
+    if env_is_set("VGB_SIGHET_INMODEL"):
+        return env_resolve("VGB_SIGHET_INMODEL", True, bool)
+    return env_resolve("GB_SIGHET_INMODEL", True, bool)
 from .common import tdi_generation_info
 from .gb import GBSettings, GBSetup
 from .transforms import make_gb_transform_container
@@ -121,9 +133,10 @@ class VGBSettings(GBSettings):
     # apples-to-apples chunked-het vs sig-het comparison: identical sources,
     # moves and iteration count, only the in-model likelihood differs.
     sighet_inmodel: bool = dataclasses.field(
-        # Default ON (2026-08-12 user ruling; mirrors the GB branch — the
-        # shared env name flips both together by design).
-        default_factory=env_default("GB_SIGHET_INMODEL", True, bool)
+        # Default ON (2026-08-12 user ruling; mirrors the GB branch).
+        # Resolution: VGB_SIGHET_INMODEL (per-branch, wins when set) >
+        # GB_SIGHET_INMODEL (shared, flips both branches) > True.
+        default_factory=_vgb_sighet_inmodel_default
     )
     sighet_nt_layer: int = dataclasses.field(
         default_factory=env_default("SIGHET_NT_LAYER", 64, int)
@@ -167,6 +180,13 @@ class VGBSettings(GBSettings):
     # to 1e-11 relative at half-band 16 and banded is never slower.
     sighet_v4_band: int = dataclasses.field(
         default_factory=env_default("SIGHET_V4_BAND", 16, int)
+    )
+    # V5 kernel (scratch-eliminated v4; bit-identical, 5x occupancy).
+    # Default ON per the 1fd83b1 ruling ("both blocks") -- the field was
+    # MISSING here until 2026-08-12 smoke 2 showed the VGB comp silently
+    # building v4-only (scorer line "v5=0"). Shared env, like the GB block.
+    sighet_v5: int = dataclasses.field(
+        default_factory=env_default("SIGHET_V5", 1, int)
     )
     # (nleaves, 3) per-leaf fixed [f0 (mHz), alpha, sin_delta] in SAMPLING
     # units, ordered like VGB_FIXED_BASIS; feeds the per-leaf fill list.

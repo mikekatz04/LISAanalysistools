@@ -275,11 +275,13 @@ def setup_vgb_moves(engine_info, curr, acs, priors, state) -> dict:
                 v3_n_nodes=int(getattr(vgb_info, "sighet_v3_nodes", 0)),
                 v4_knots=int(getattr(vgb_info, "sighet_v4_knots", 0)),
                 v4_band=int(getattr(vgb_info, "sighet_v4_band", 0)),
+                **({"v5": int(getattr(vgb_info, "sighet_v5", 0))}
+                   if int(getattr(vgb_info, "sighet_v5", 0)) else {}),
             )
             logger.info(
                 "VGB in-model likelihood: SIGNAL-HET (nt_layer=%d, "
                 "n_sparse_fd=%d, max_r=%s, n_cp=%d, v3_nodes=%d, "
-                "v4_knots=%d, v4_band=%d; chunked-het delegate for "
+                "v4_knots=%d, v4_band=%d, v5=%d; chunked-het delegate for "
                 "fills / swaps).",
                 int(vgb_info.sighet_nt_layer),
                 int(vgb_info.sighet_n_sparse_fd),
