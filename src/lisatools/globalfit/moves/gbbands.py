@@ -1200,7 +1200,14 @@ class _RoutedBandEngine:
             (v, p) for v, p in zip(views, parts) if p[0].shape[0])
         gpus = getattr(holder, "gpus", None)
         if (gpus is not None and len(gpus) >= 2
-                and os.environ.get("FSTAT_SIGHET_MULTIDEV", "1") == "1"):
+                and os.environ.get("FSTAT_SIGHET_MULTIDEV", "0") == "1"):
+                # DEFAULT OFF (2026-08-12): the first on-GPU run of the
+                # fan-out produced grids that DIFFER from the single-device
+                # path (F_max rel up to 0.81, best-sky sign flips) while the
+                # CPU fake/real-comp bit-identity tests pass -- a
+                # GPU-execution defect (suspect: chunk-merge ordering /
+                # cross-device copy sync). Opt-in until the GPU parity gate
+                # passes; the single-device pin is the validated scorer.
             return cls._sighet_fstat_multidevice(
                 comp, holder, view, int(intra[0]),
                 int(intra[0] if intra_noise is None else intra_noise[0]),
