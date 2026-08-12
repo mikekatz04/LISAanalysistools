@@ -1663,6 +1663,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             rj_seq = dict(
                 idx=idx, slot=slot, temp=int(t_np[idx]),
                 walker=sel_w, band=sel_b,
+                # Identity, not position: _run_rj_step re-subsets the batch
+                # (flip-fraction gate) AFTER this select, so the positional
+                # idx goes stale -- the accept hook looks the source up by
+                # this id in ITS OWN row space.
+                source_id=int(_to_numpy(picked["ids"])[idx]),
                 before=self._debug_slab_snapshot(buffer_obj, slot),
             )
             # _run_rj_step marks rj_seq["accepted"] from the real accept
@@ -3019,7 +3024,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         rj_seq = getattr(self, "_dbg_rj_seq", None)
         if rj_seq is not None:
-            rj_seq["accepted"] = bool(accept[rj_seq["idx"]])
+            # Look the traced source up by ID: the flip-fraction gate at the
+            # top of this method re-subsets ``picked``, so the pick-time
+            # positional index is stale (IndexError in smoke 3, 2026-08-12).
+            # Excluded from the subset -> its proposal never ran -> rejected.
+            _dbg_pos = xp.where(ids == rj_seq["source_id"])[0]
+            rj_seq["accepted"] = (
+                bool(accept[int(_dbg_pos[0])]) if int(_dbg_pos.size) else False
+            )
 
         t_i, w_i, b_i = picked["temp_inds"], picked["walker_inds"], picked["band_inds"]
         prop_counts[0][t_i, w_i, b_i] += 1
