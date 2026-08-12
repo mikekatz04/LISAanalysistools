@@ -2426,20 +2426,27 @@ def build_gb_moves(
         # Per-band progressive leaf cap (search mode). Armed only when
         # GB_LEAF_CAP_START is set (gb_no_foreground sets it under
         # GB_MODE=search): every band starts capped at that many leaves per
-        # (temp, walker) cell; a band's cap increments -- independently of
-        # other bands -- once it has spent GB_LEAF_CAP_MIN_ITERS iterations
-        # at the current cap AND every cold walker's band residual ll is
-        # within GB_LEAF_CAP_LL_NSIGMA * sqrt(N_dof/2) of the running best
-        # (AND, with GB_LEAF_CAP_OCCUPANCY=1, some cold walker actually
-        # holds cap leaves there). See GBSpecialBase._update_band_leaf_caps.
+        # (temp, walker) cell; caps advance independently per band through
+        # the gate selected below (default = the D/2 lnL-improvement gate).
+        # See GBSpecialBase._update_band_leaf_caps.
         leaf_cap_start=(int(os.environ["GB_LEAF_CAP_START"])
                         if os.environ.get("GB_LEAF_CAP_START") else None),
         leaf_cap_min_iters=int(os.environ.get("GB_LEAF_CAP_MIN_ITERS", "50")),
-        # Coarse lnL-improvement cap gate. Wins over GB_LEAF_CAP_ITER_ONLY:
-        # a band holds its cap while the cold chain keeps finding a max ll
-        # better than the stored best by >= GB_LEAF_CAP_NDIM/2, and
-        # increments once it has not for GB_LEAF_CAP_MIN_ITERS iterations.
-        leaf_cap_ll_improve=os.environ.get("GB_LEAF_CAP_LL_IMPROVE", "0") == "1",
+        # Coarse lnL-improvement cap gate -- THE DEFAULT (2026-08-12): a
+        # band holds its cap while the cold chain keeps finding a max ll
+        # better than the stored best by >= GB_LEAF_CAP_NDIM/2 (D/2 = 4.0
+        # for GBs), and increments once it has not for
+        # GB_LEAF_CAP_MIN_ITERS consecutive iterations.
+        # GB_LEAF_CAP_LL_IMPROVE=0 restores the nsigma-spread + occupancy
+        # gate. It wins over the iter-only mode in the move's precedence,
+        # so when ``leaf_cap_iter_only`` is explicitly armed the default
+        # here flips back to 0 -- the fixed schedule keeps working without
+        # also having to set GB_LEAF_CAP_LL_IMPROVE=0 (an explicit env
+        # value still beats both).
+        leaf_cap_ll_improve=os.environ.get(
+            "GB_LEAF_CAP_LL_IMPROVE",
+            "0" if getattr(gb_info, "leaf_cap_iter_only", False) else "1",
+        ) == "1",
         leaf_cap_ndim=float(os.environ.get("GB_LEAF_CAP_NDIM", "8")),
         leaf_cap_ll_nsigma=float(os.environ.get("GB_LEAF_CAP_LL_NSIGMA", "3.0")),
         leaf_cap_require_occupancy=bool(

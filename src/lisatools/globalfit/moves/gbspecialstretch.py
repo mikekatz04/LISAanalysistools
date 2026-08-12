@@ -451,7 +451,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_units=2,
         jump_factor=0.005,
         leaf_cap_start=None,
-        leaf_cap_ll_improve=False,
+        leaf_cap_ll_improve=True,
         leaf_cap_ndim=8.0,
         leaf_cap_min_iters=50,
         leaf_cap_ll_nsigma=3.0,
@@ -564,10 +564,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # ``_update_band_leaf_caps``); ``leaf_cap_update`` marks the single
         # RJ move per iteration that advances the cap state.
         self.leaf_cap_start = leaf_cap_start
-        # lnL-improvement cap gate (takes precedence over
-        # ``leaf_cap_iter_only``): hold a band's cap while its cold
-        # chain keeps finding a max ll better than the stored best by
-        # >= leaf_cap_ndim/2. D = 8 for GBs.
+        # lnL-improvement cap gate -- THE DEFAULT (2026-08-12; takes
+        # precedence over ``leaf_cap_iter_only``, so builders wiring the
+        # fixed schedule must pass ``leaf_cap_ll_improve=False``): hold a
+        # band's cap while its cold chain keeps finding a max ll better
+        # than the stored best by >= leaf_cap_ndim/2 (D/2 = 4.0 for GBs).
+        # ``False`` restores the legacy nsigma-spread + occupancy gate.
         self.leaf_cap_ll_improve = bool(leaf_cap_ll_improve)
         self.leaf_cap_ndim = float(leaf_cap_ndim)
         self._leaf_cap_enabled = leaf_cap_start is not None
@@ -4708,7 +4710,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Runs at the very end of ``propose`` (after the final
         ``check_ll_inject`` rebuild, so the parent residual reflects the
-        accepted state). Per band ``b``, the cap increments when ALL of:
+        accepted state). Bands increment independently; nothing waits on
+        other bands. On increment the iteration counter and running best
+        reset, so the next level must re-converge on its own evidence.
+        Every cold walker's per-band ll is stored in
+        ``band_info['band_cold_ll']`` each step, whichever gate runs, so
+        any criterion can be replayed on the trace post hoc.
+
+        DEFAULT gate (``leaf_cap_ll_improve``, on since 2026-08-12): a
+        band's cap increments once its cold-chain MAX ll has failed to
+        improve on the stored best by ``leaf_cap_ndim / 2`` (D/2 = 4.0
+        for GBs -- the logL a genuinely new D-parameter source has to
+        buy) for ``leaf_cap_min_iters`` CONSECUTIVE iterations; any
+        qualifying improvement zeroes the counter.
+
+        Legacy gate (``leaf_cap_ll_improve=False``): the cap increments
+        when ALL of:
 
         1. ``band_cap_iters[b] >= leaf_cap_min_iters`` at the current cap;
         2. every cold walker's band residual ll sits within
@@ -4719,16 +4736,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         3. (optional, ``leaf_cap_require_occupancy``) at least one cold
            walker actually holds ``cap[b]`` leaves in the band -- an
            exhausted band with free headroom keeps its cap.
-
-        Bands increment independently; nothing waits on other bands. On
-        increment the iteration counter and running best reset, so the next
-        level must re-converge on its own evidence.
-
-        With ``leaf_cap_ll_improve`` the gate is instead: increment once
-        the band's cold-chain MAX ll has failed to improve on its stored
-        best by ``leaf_cap_ndim / 2`` for ``leaf_cap_min_iters``
-        consecutive iterations. Every cold walker's per-band ll is
-        stored in ``band_info['band_cold_ll']`` each step.
 
         With ``leaf_cap_iter_only`` the gate is ONLY test 1 (a fixed
         annealing schedule): the lnL-plateau and occupancy tests are
