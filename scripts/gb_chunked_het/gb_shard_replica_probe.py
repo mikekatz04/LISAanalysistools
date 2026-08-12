@@ -48,6 +48,59 @@ def _host(x):
     return x.get() if hasattr(x, "get") else np.asarray(x)
 
 
+def _nan_drill(np, xp, proto, rep, dh1, n):
+    """Localize where a NaN-producing replica diverges from the prototype.
+
+    Prints, for BOTH engines' comps: the orbit configured flag and t-grid
+    endpoints (fix-active check: replica grid must equal the prototype's),
+    NaN counts + device ids of the comp arrays the kernel consumes, and the
+    device ids / NaN counts of every array in ``pycppdetector_args`` (a
+    device-0 array feeding a device-1 OrbitsWrap is a finding). Ends with
+    the per-slot NaN pattern (all slots vs a subset)."""
+    def _comp_of(e):
+        c = getattr(e, "gb_comps", None)
+        return c if c is not None else getattr(e, "gb_fd_comp", None)
+
+    for label, eng_obj in (("proto", proto), ("replica", rep)):
+        c = _comp_of(eng_obj)
+        if c is None:
+            print(f"[NAN-DRILL] {label}: no comp resolved")
+            continue
+        orb = getattr(c, "_orbits", None)
+        t = getattr(orb, "t", None)
+        t_h = None if t is None else _host(np.asarray(t))
+        t_desc = ("None" if t_h is None
+                  else f"[{t_h[0]:.6g}..{t_h[-1]:.6g}] len={len(t_h)}")
+        print(f"[NAN-DRILL] {label} comp={type(c).__name__} "
+              f"orbits_configured={getattr(orb, 'configured', None)} "
+              f"t={t_desc}")
+        for name in ("wdm_window", "chunk_t_starts", "chunk_keep_lo",
+                     "chunk_keep_hi", "chunk_n_global_offset"):
+            a = getattr(c, name, None)
+            if a is None:
+                continue
+            ah = _host(xp.asarray(a)) if hasattr(a, "__len__") else np.asarray(a)
+            dev = getattr(getattr(a, "device", None), "id", None)
+            nan = (int(np.isnan(ah).sum())
+                   if getattr(ah, "dtype", None) is not None
+                   and ah.dtype.kind == "f" else 0)
+            print(f"[NAN-DRILL]   {label}.{name}: dev={dev} nan={nan} "
+                  f"absmax={float(np.abs(ah).max()):.6g}")
+        pargs = getattr(orb, "pycppdetector_args", None)
+        if pargs is not None:
+            for i, a in enumerate(pargs):
+                if hasattr(a, "shape") and getattr(a, "size", 0) > 1:
+                    dev = getattr(getattr(a, "device", None), "id", None)
+                    ah = _host(a)
+                    nan = (int(np.isnan(ah).sum())
+                           if ah.dtype.kind == "f" else 0)
+                    print(f"[NAN-DRILL]   {label}.orbit_arg[{i}]: dev={dev} "
+                          f"shape={tuple(a.shape)} nan={nan}")
+    bad = np.where(np.isnan(dh1))[0]
+    print(f"[NAN-DRILL] replica NaN d_h slots: {len(bad)}/{n} "
+          f"(first 20: {bad[:20].tolist()})")
+
+
 def main():
     from lisatools.globalfit.stock import erebor
     from lisatools.globalfit.moves.gbspecialstretch import (
@@ -159,6 +212,8 @@ def main():
             # NaN-producing replica print as "EQUIVALENT".
             if not (ddh == 0.0 and dhh == 0.0):
                 any_diff = True
+            if n_nan or not (ddh == 0.0 and dhh == 0.0):
+                _nan_drill(np, xp, proto, rep, dh1, n)
         else:
             print(f"[CHECK B] shard {si} (device {view.device}): replica IS "
                   "the prototype (no factory replica in play)")
