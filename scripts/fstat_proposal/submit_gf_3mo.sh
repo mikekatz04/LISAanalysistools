@@ -62,6 +62,7 @@ export GB_MAX_FREQ=2.2e-2
 export GB_NLEAVES_MAX=10000
 export GB_N_SUBBANDS=2560
 export GB_FSTAT_REFIT_EVERY=100    # production cadence (5 was verify-only)
+export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 
 # ---- VGB: exact chunked-het in-model scorer (sig-het accuracy at the
 #      loudest-VGB SNRs is unverified -- [GB_CELL_LL] growth in smoke 1) ----
