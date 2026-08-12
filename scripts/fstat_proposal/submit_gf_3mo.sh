@@ -1,0 +1,70 @@
+#!/bin/bash
+# ============================================================================
+# PRODUCTION global fit -- 3-month Tobs (gb + vgb + psd + galfor, mojito)
+# Staged recipe: noise_search -> noise_vgb_search -> gb_search -> full_pe
+# via scripts/fstat_proposal/run_combined_staged.py  (LAT dev >= 53dc401)
+#
+# RESUME: re-submitting this script resumes automatically -- the h5 backend
+# restores the last saved iteration and completed stage statuses. Keep the
+# same FILE_STORE_DIR/BASE_FILE_NAME and env between submissions. For a
+# fresh start, move/delete ${STORE_DIR} first.
+# ============================================================================
+
+# ---- fill these in ---------------------------------------------------------
+#SBATCH --job-name=gf3mo          # job name
+#SBATCH --partition=FILLME        # GPU partition
+#SBATCH --gres=gpu:2              # 2 GPUs (GPUS=0,1 below are LOCAL indices)
+#SBATCH --nodes=1                 # single node
+#SBATCH --ntasks=1                # single process (MPI singleton)
+#SBATCH --cpus-per-task=FILLME    # e.g. 8-16 (host-side prep threads)
+#SBATCH --mem=FILLME              # e.g. 64G (smoke peaked ~35 GB host RSS)
+#SBATCH --time=FILLME             # wall limit, e.g. 24:00:00
+#SBATCH --output=gf3mo_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
+# ----------------------------------------------------------------------------
+
+set -euo pipefail
+
+# ---- environment (fill in your activation) ---------------------------------
+# module load FILLME_cuda_module
+# source /shared/home/mlkatz1/envs/gf_env/bin/activate    # or conda activate
+cd /shared/home/mlkatz1/lisa-analysis-tools
+
+STORE_DIR=./gf_prod_3mo/
+
+# ---- threading policy (MPI-only, no OMP) -----------------------------------
+export OMP_NUM_THREADS=1
+
+# ---- run plumbing ----------------------------------------------------------
+export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache/data
+export USE_GPU=1
+export GPU_BACKEND=cuda13x
+export GPUS=0,1
+
+# ---- output ----------------------------------------------------------------
+export FILE_STORE_DIR=${STORE_DIR}
+export BASE_FILE_NAME=gf_prod_3mo
+
+# ---- sampler shape ---------------------------------------------------------
+export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
+export NITER=2000                  # total engine iterations (resume-safe; adjust)
+
+# ---- band + domain ---------------------------------------------------------
+# Tobs: default TOBS_TARGET = 90 d (snaps to Nf=1440 x Nt=2160 x dt=2.5) -- unset.
+export MIN_FREQ=4e-4
+export MAX_FREQ=2.5e-2
+export GB_MIN_FREQ=5.5e-4
+export GB_MAX_FREQ=2.2e-2
+
+# ---- GB knobs (everything else rides the flipped defaults: sig-het in-model,
+#      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,
+#      at-cap RJ skip, cell-lifecycle ll credit, GB_MODE=search +
+#      GB_PE_MOVES_STRICT=1 + GB_SEARCH_PRIOR_REMOVAL=1 seeded by the script) --
+export GB_NLEAVES_MAX=10000
+export GB_N_SUBBANDS=2560
+export GB_FSTAT_REFIT_EVERY=100    # production cadence (5 was verify-only)
+
+# ---- VGB: exact chunked-het in-model scorer (sig-het accuracy at the
+#      loudest-VGB SNRs is unverified -- [GB_CELL_LL] growth in smoke 1) ----
+export VGB_SIGHET_INMODEL=0
+
+python scripts/fstat_proposal/run_combined_staged.py

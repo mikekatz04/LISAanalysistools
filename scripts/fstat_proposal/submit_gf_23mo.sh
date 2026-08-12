@@ -1,0 +1,95 @@
+#!/bin/bash
+# ============================================================================
+# SCALING RUN -- 23-month Tobs (gb + vgb + psd + galfor, mojito)
+# Identical staged recipe to submit_gf_3mo.sh; only the knobs below differ.
+#
+# !! PREFLIGHT GATES -- do these BEFORE submitting !!
+#
+# 1. FSTAT KERNEL SHARED-MEMORY CLAMP (blocking). The sig-het F-stat
+#    kernels scale shared memory with N_sparse_t and the device clamp only
+#    covers n_sparse_fd: the SIGHET_NT_LAYER=135 gate died with
+#    "GPUassert: invalid argument gb_tdi_on_the_fly.cu:6747". At the
+#    NT_LAYER below (525) the fstat grid fit WILL hit this unless the clamp
+#    is extended (queued post-3mo item). Gate: one-band fstat fit at
+#    SIGHET_NT_LAYER=525 must complete before this run.
+#
+# 2. MEMORY SHAKEDOWN (strongly recommended). Per-walker WDM residual is
+#    3 x 1440 x 16800 f64 ~ 0.58 GB -- 7.8x the 3-month grid -- plus the
+#    invC store at the same scaling. Run NITER=2 first and watch the
+#    "GPU pool used" lines; if OOM, reduce NWALKERS or add GPUs.
+#
+# 3. The 3-month run should be green first (same machinery, cheaper).
+#
+# Expected scaling vs 3 mo: sig-het in-model scoring is FLAT in Tobs
+# (v4/v5 bench-off), so per-source proposal cost holds; buffer fills,
+# band likelihoods, and the fstat grid fit scale ~8x (comb nodes ~ Tobs).
+# ============================================================================
+
+# ---- fill these in ---------------------------------------------------------
+#SBATCH --job-name=gf23mo         # job name
+#SBATCH --partition=FILLME        # GPU partition
+#SBATCH --gres=gpu:2              # 2 GPUs; consider 4 if the shakedown is tight
+#SBATCH --nodes=1                 # single node
+#SBATCH --ntasks=1                # single process (MPI singleton)
+#SBATCH --cpus-per-task=FILLME    # e.g. 8-16
+#SBATCH --mem=FILLME              # e.g. 128G+ (host arrays scale ~8x vs 3 mo)
+#SBATCH --time=FILLME             # wall limit -- iterations are ~2-5x slower
+#SBATCH --output=gf23mo_%j.log    # combined stdout+stderr
+# ----------------------------------------------------------------------------
+
+set -euo pipefail
+
+# ---- environment (fill in your activation) ---------------------------------
+# module load FILLME_cuda_module
+# source /shared/home/mlkatz1/envs/gf_env/bin/activate    # or conda activate
+cd /shared/home/mlkatz1/lisa-analysis-tools
+
+STORE_DIR=./gf_prod_23mo/
+
+export OMP_NUM_THREADS=1
+
+export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache/data
+export USE_GPU=1
+export GPU_BACKEND=cuda13x
+export GPUS=0,1
+
+export FILE_STORE_DIR=${STORE_DIR}
+export BASE_FILE_NAME=gf_prod_23mo
+
+export NWALKERS=24
+export NITER=2000
+
+# ---- Tobs: 23 months = 700 d = 6.048e7 s -----------------------------------
+# Snaps exactly to Nf=1440 x Nt=16800 x dt=2.5 with layer_dt=3600 s (same
+# layer_df=1.389e-4 Hz as the 3-mo grid, so band/slab geometry is unchanged).
+# The 731-d mojito files cover 700 d + 2 x 8.33 d preprocessing trim.
+export TOBS_TARGET=60480000
+
+# ---- band (same as 3 mo) ---------------------------------------------------
+export MIN_FREQ=4e-4
+export MAX_FREQ=2.5e-2
+export GB_MIN_FREQ=5.5e-4
+export GB_MAX_FREQ=2.2e-2
+
+# ---- sig-het accuracy at long baselines (the 2026-08-03/04 studies) --------
+# The 2/4-yr accuracy "wall" was the COARSE SPARSE TIME GRID, not the
+# engine: at N_sparse_t ~ 510 the 2-yr battery passes every tier. 525
+# divides Nt=16800 (stride 32 layers = 32 h -- the same temporal density
+# the 3-mo default gives). Runnable ONLY because v5 (default ON) needs
+# ~31 KB scratch at this N; v4's 301 KB cannot launch. n_r=64 fit nodes +
+# K=128 knots (the ruling from the overnight battery) are already the
+# defaults; knots are not a lever.
+export SIGHET_NT_LAYER=525
+
+# ---- GB knobs --------------------------------------------------------------
+export GB_NLEAVES_MAX=25000        # user ruling for the 23-mo run
+export GB_N_SUBBANDS=2560
+# Comb nodes scale ~ Tobs (0.5/Tobs spacing) -> each epoch fit is ~8x the
+# 3-mo cost. 100 keeps the same iteration cadence; raise to 200 if the
+# [GF_TIMING] lines show refits dominating.
+export GB_FSTAT_REFIT_EVERY=100
+
+# ---- VGB: exact chunked-het in-model scorer (see submit_gf_3mo.sh) ---------
+export VGB_SIGHET_INMODEL=0
+
+python scripts/fstat_proposal/run_combined_staged.py
