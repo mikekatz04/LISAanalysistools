@@ -254,7 +254,7 @@ def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
     logger.info(
         "[sighet-fstat] %d references over [%.4e, %.4e] Hz, spacing %.3e Hz "
         "(margin %.3e Hz, K=%d, Tobs=%.3e s), %d block(s) of <= %d",
-        n_nodes, node_f0[0], node_f0[-1], spacing_hz, margin, Tobs,
+        n_nodes, node_f0[0], node_f0[-1], spacing_hz, margin, n_knots, Tobs,
         n_blocks, ref_block)
 
     state = {"block": -1}
@@ -730,9 +730,20 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
         logger.warning("[stageB] every peak box was degenerate; nothing to fit.")
         return None
     peaks = np.asarray(keep)
-    K = len(peaks)
     f0_los = np.asarray(f0_los)
     f0_dxs = np.asarray(f0_dxs)
+    # f0-SORT the boxes: the sweep runs them in array order, and a scorer
+    # with f0-local state (the sig-het shared-reference cache) rebuilds on
+    # every jump -- the F-ordered box list measured 4,600+ block rebuilds
+    # (~350 s) on the first real-data fit. Every per-box output (grids,
+    # weights, band ids, npz fields) is a parallel array, so a consistent
+    # permutation is invisible to consumers. Applied AFTER the
+    # FSTAT_PEAKS_TO_FIT cap, which must keep selecting the top-F peaks.
+    _order = np.argsort(f0_los, kind="stable")
+    peaks = peaks[_order]
+    f0_los = f0_los[_order]
+    f0_dxs = f0_dxs[_order]
+    K = len(peaks)
     band_idx = peaks[:, 3].astype(int)
 
     mc_lims = list(mc_lims or [0.001, 1.0])
