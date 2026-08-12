@@ -2650,6 +2650,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             inds_fill = cp.arange(self.num_bands_now)
         self.psd_buffer[inds_fill] = 0.0
 
+    def reset_template_buffers(self, inds_fill=None):
+        """Zero the template twin for the given slots.
+
+        The twin is filled ADDITIVELY (engine ``fill_template`` with
+        ``factor=+1``), so only a fresh allocation starts it at zero. A
+        cached-buffer REBIND (propose-scoped cache 2bd76df / cross-proposal
+        persist c94d53c) that skips this reset stacks the new cells'
+        templates on top of the previous unit's post-swap contents --
+        the root cause of the after-tempering incremental-ll drift
+        (sign-consistent ~ -<h|h>/2 per affected cold walker) AND of
+        biased tempering swap acceptance (paccept scored against the
+        contaminated lls). ``self.xp``, not module-level ``cp`` (the
+        CPU-run-with-cupy-importable trap).
+        """
+        if inds_fill is None:
+            inds_fill = self.xp.arange(self.num_bands_now)
+        self.template_buffer[inds_fill] = 0.0
+
     def fill_buffer_residual_and_psd_from_acs(
         self, acs: AnalysisContainerArray, inds_fill: Optional[cp.ndarray] = None
     ) -> None:
@@ -3400,6 +3418,11 @@ class BandSorter(LISAToolsParallelModule):
         ].copy()
         inj_args = (coords_to_inject, inject_index, inject_N_vals)
         if buffer_obj.use_template_arr:
+            # The twin fill below is additive: without this reset a cached-
+            # buffer rebind inherits the previous bind's (post-swap)
+            # templates and every ll scored from the twin is contaminated.
+            # No-op cost on a fresh allocation (already zero).
+            buffer_obj.reset_template_buffers(inds_fill=inds_fill)
             buffer_obj.add_sources_to_template_buffer(
                 *inj_args, leaf_inds=inject_leaf_inds
             )

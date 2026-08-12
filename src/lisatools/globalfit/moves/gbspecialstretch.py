@@ -4392,6 +4392,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_swaps_accepted = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
         band_swaps_proposed = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
 
+        # GB_TEMPER_AUDIT=1: reconcile the credited per-cold-walker ll
+        # deltas (what lands in ll_change_log_temp[0] and, from there, in
+        # state.log_like[0]) against the TRUE parent-residual likelihood at
+        # every unit boundary, and print each ACCEPTED cold-pair swap with
+        # its credited diff. Chasing the after-tempering incremental-ll
+        # drift (sign-consistent ~ -<h|h>/2 per walker; reproduces on ONE
+        # GPU, so it is accounting, not a device race). Successor to the
+        # ll_before3/ll_after3 remnants below.
+        _audit = os.environ.get("GB_TEMPER_AUDIT", "0") == "1"
+        if _audit:
+            _audit_true_prev = _to_numpy(model.analysis_container_arr.likelihood())
+            _audit_cred_prev = np.zeros(self.nwalkers)
+
         units = 2
         tmp_start = np.random.randint(units)
         for tmp in range(units):
@@ -4472,6 +4485,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     raccept = cp.log(cp.random.uniform(size=paccept.shape))
                     sel = paccept > raccept
 
+                    # Audit BEFORE current_lls is overwritten: old_lls is a
+                    # VIEW into current_lls, so accepted rows lose their old
+                    # values at the update below. Cold pair only (i2 == 0):
+                    # column 0 of the slice is the cold cell whose diff is
+                    # credited to log_like[0].
+                    if _audit and i2 == 0:
+                        _sel_h = _to_numpy(sel)
+                        if _sel_h.any():
+                            _bh = _to_numpy(band_inds_now[:, 0])
+                            _w0 = _to_numpy(walker_inds_now[:, i2])
+                            _w1 = _to_numpy(walker_inds_now[:, i1])
+                            _oldh = _to_numpy(old_lls)
+                            _newh = _to_numpy(new_lls)
+                            for _r in np.where(_sel_h)[0]:
+                                logger.info(
+                                    "[TEMPER_AUDIT] accepted cold swap band=%d: "
+                                    "(T0,w%d) ll %.3f -> %.3f (credit %+.3f) | "
+                                    "(T1,w%d) ll %.3f -> %.3f",
+                                    int(_bh[_r]), int(_w0[_r]),
+                                    float(_oldh[_r, 0]), float(_newh[_r, 0]),
+                                    float(_newh[_r, 0] - _oldh[_r, 0]),
+                                    int(_w1[_r]),
+                                    float(_oldh[_r, 1]), float(_newh[_r, 1]),
+                                )
+
                     current_lls[sel, i2 : i1 + 1] = new_lls[sel]
 
                     # Reverse the swaps that were not accepted.
@@ -4522,14 +4560,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 ] = diffs.flatten()
                 num_bands_run += num_bands_preload_temp
 
-            # ll_before3 = model.analysis_container_arr.likelihood()
             with _tspan(getattr(self, "_prop_timer", None), "temper_open_close"):
                 self.add_cold_chain_sources_to_residual(
                     model,
                     band_sorter,
                     extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
                 )
-            # ll_after3 = model.analysis_container_arr.likelihood()
+            if _audit:
+                # Per-unit reconcile: with this parity class closed back
+                # into the parent residual, the TRUE cold-walker ll delta
+                # across the unit must equal the credited delta
+                # (ll_change_log_temp[0] growth). A nonzero MISMATCH row
+                # localizes the drift to this unit's bands and walker.
+                _true_now = _to_numpy(model.analysis_container_arr.likelihood())
+                _cred_now = _to_numpy(ll_change_log_temp[0].sum(axis=-1))
+                _dtrue = _true_now - _audit_true_prev
+                _dcred = _cred_now - _audit_cred_prev
+                logger.info(
+                    "[TEMPER_AUDIT] unit %d (bands %%2 == %d): true cold "
+                    "delta %s | credited %s | MISMATCH %s",
+                    tmp, bool_remainder,
+                    np.array2string(_dtrue, precision=3),
+                    np.array2string(_dcred, precision=3),
+                    np.array2string(_dtrue - _dcred, precision=3),
+                )
+                _audit_true_prev = _true_now
+                _audit_cred_prev = _cred_now
 
         self._adapt_band_temps(band_temps, band_swaps_accepted, band_swaps_proposed)
 
