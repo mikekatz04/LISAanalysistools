@@ -262,7 +262,9 @@ class GBNoFgGBSettings(GBSettings):
         default_factory=env_default("GB_SEARCH_IN_MODEL", False, bool)
     )
     fstat_fit_in_move: bool = dataclasses.field(
-        default_factory=env_default("GB_FSTAT_FIT_IN_MOVE", False, bool)
+        # Default ON (2026-08-12 user ruling): the in-move fit against the
+        # live residual is the production birth-grid path.
+        default_factory=env_default("GB_FSTAT_FIT_IN_MOVE", True, bool)
     )
     fstat_refit_every: int = dataclasses.field(
         default_factory=env_default("GB_FSTAT_REFIT_EVERY", 0, int)
@@ -280,7 +282,10 @@ class GBNoFgGBSettings(GBSettings):
     # compression is the point) and fold nt_layer / n_sparse_fd into the
     # validated chunked-het size block above rather than a separate knob group.
     sighet_inmodel: bool = dataclasses.field(
-        default_factory=env_default("GB_SIGHET_INMODEL", False, bool)
+        # Default ON (2026-08-12 user ruling): sig-het v5 is the production
+        # in-model likelihood; the WDMSettings isinstance guard keeps FD
+        # runs on their own path.
+        default_factory=env_default("GB_SIGHET_INMODEL", True, bool)
     )
     sighet_nt_layer: int = dataclasses.field(
         default_factory=env_default("SIGHET_NT_LAYER", 64, int)
@@ -307,7 +312,9 @@ class GBNoFgGBSettings(GBSettings):
     # exact build); >0 = fixed node count; -1 = ADAPTIVE from the batch's
     # predicted displacement (prototype-calibrated policy, clip [8, 64]).
     sighet_v3_nodes: int = dataclasses.field(
-        default_factory=env_default("SIGHET_V3_NODES", 0, int)
+        # 64 = the full-frontier-validated node count (32 blows up at
+        # 6mo/1yr; 128 at 4yr). Default ON with the v5 stack (2026-08-12).
+        default_factory=env_default("SIGHET_V3_NODES", 64, int)
     )
     # Signal-het V4: the fitted ratio is resampled onto ``sighet_v4_knots``
     # FIXED, candidate-independent knots as linear complex values before the
@@ -316,7 +323,8 @@ class GBNoFgGBSettings(GBSettings):
     # value; 64 is lossy, 256 buys nothing.  Requires sighet_v3_nodes > 0
     # (v4 reuses the v3 node fit).
     sighet_v4_knots: int = dataclasses.field(
-        default_factory=env_default("SIGHET_V4_KNOTS", 0, int)
+        # 128 = measured-converged (64 lossy REJECTED, 256 buys nothing).
+        default_factory=env_default("SIGHET_V4_KNOTS", 128, int)
     )
     # V4 evaluation mode: 0 = cooperative fixed-knot spline solve (PCR on
     # GPU); >0 = precomputed cardinal weights with this half-band -- no
@@ -329,10 +337,12 @@ class GBNoFgGBSettings(GBSettings):
     # 1 = phase-aliased shared arena, 2 = flat carve (the occupancy control).
     # Requires sighet_v4_knots > 0. Env: SIGHET_V5.
     sighet_v5: int = dataclasses.field(
-        default_factory=env_default("SIGHET_V5", 0, int)
+        # v5 mode 1 = bit-identical to v4-banded, occupancy win.
+        default_factory=env_default("SIGHET_V5", 1, int)
     )
     sighet_v4_band: int = dataclasses.field(
-        default_factory=env_default("SIGHET_V4_BAND", 0, int)
+        # 16 = banded-gate default (1e-11 vs PCR, never slower).
+        default_factory=env_default("SIGHET_V4_BAND", 16, int)
     )
     # NOTE: no __post_init__ here — Setup.__init__ re-runs this dataclass's
     # __init__ on the (non-dataclass) GBSetup instance, which cannot resolve

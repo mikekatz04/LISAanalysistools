@@ -5657,7 +5657,11 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         fans candidate batches out over ALL run devices instead.
         Single-shard holders pass through unchanged.
         """
-        if os.environ.get("FSTAT_USE_SIGHET", "0") == "1":
+        # Default ON (2026-08-12 user ruling): the sig-het shared-reference
+        # F-stat is the production scorer; FSTAT_USE_SIGHET=0 restores the
+        # chunked path (and non-WDM / non-sig-het comps fall back with a
+        # warning below either way).
+        if os.environ.get("FSTAT_USE_SIGHET", "1") == "1":
             sig_comp = self.gb_wdm_comp
             holder = model.analysis_container_arr
             if not hasattr(sig_comp, "setup_fstat_references"):
