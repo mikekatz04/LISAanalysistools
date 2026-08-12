@@ -275,8 +275,19 @@ def build_fit():
             # Noise stays in SEARCH (joint max-logl) mode through the GB
             # search. Per-stage move-name uniqueness (recipe.py ebd8612) is
             # what lets these recur across stages.
+            # rj_prior_search, NOT rj_fstat_mcmc_search (2026-08-12): the
+            # serial-MCMC move scores gb.get_fstat_ll -- an FD kernel --
+            # against the parent ACA, which is WDM here (wrong domain), and
+            # carries leaf_cap_update=False. rj_prior_search is the
+            # GPU-verified WDM birth engine (sig-het F-stat grids via
+            # route_sighet_fstat, epoch refits, D/2 caps as the DESIGNATED
+            # updater, at-cap skip) with use_prior_removal built in; the
+            # removal-only move follows it per the search-cycle order.
+            # Re-wiring the serial MCMC onto the sig-het scorer is a
+            # post-run item (its batches are not f0-ordered, so the
+            # reference-block stash would thrash every step).
             moves=noise_vgb + [
-                Move("rj_fstat_mcmc_search", branch="gb"),
+                Move("rj_prior_search", branch="gb"),
                 Move("rj_prior_removal", branch="gb"),
             ],
             step_kwargs=dict(
@@ -287,8 +298,10 @@ def build_fit():
         ),
         Stage(
             name="full_pe", kind="pe",
+            # No rj_fstat_mcmc: the pe-named serial MCMC has the same
+            # FD-kernel-on-WDM-data fstat scoring as its search twin.
+            # rj_prior (strict-PE fstat-grid births) is the GB PE move.
             moves=noise_pe + [
-                Move("rj_fstat_mcmc", branch="gb"),
                 Move("rj_prior", branch="gb"),
             ] + vgb,
             # Draw ONE move per step (with replacement) instead of running
