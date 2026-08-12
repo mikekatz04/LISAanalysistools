@@ -87,7 +87,10 @@ __all__ = [
 FSTAT_KNOB_DEFAULTS = {
     "FSTAT_BATCH": 4096,           # kernel rows per get_fstat_ll_wdm call
     "FSTAT_PEAK_MIN_SNR": 5.0,     # selection floor (F = SNR^2 / 2)
-    "FSTAT_PEAKS_PER_BAND": 35,    # per-sub-band peak cap
+    "FSTAT_PEAKS_PER_BAND": 200,   # per-sub-band peak cap (35 -> 200,
+                                   #   2026-08-12: 35 truncated real-data
+                                   #   bands; sig-het comb+stage-B is fast
+                                   #   enough that the cap should not bind)
     "FSTAT_PEAK_HALF_MHZ": 2.5e-3, # peak-box f0 half width [mHz]
     "FSTAT_MC_MIN": 0.01,          # Mc grid-box floor
     "FSTAT_N_MC": 3,               # anisotropic node counts: Mc / sky are
