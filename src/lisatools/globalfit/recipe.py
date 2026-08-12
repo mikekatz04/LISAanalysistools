@@ -2579,11 +2579,16 @@ def build_gb_moves(
     )
     gb_search_prune_move.accepted = np.zeros((ntemps, nwalkers))
     
+    # LEGACY FD-ONLY (2026-08-12 user ruling): the serial-MCMC moves score
+    # through GBGPU's FD get_fstat_ll/get_ll (para_log_like), which
+    # hard-errors on a WDM basis. They are in NO default recipe; the default
+    # GB RJ stack in both modes is the F-stat grid birth move
+    # (rj_prior / rj_prior_search) + prior RJ.
     gb_search_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
-        *gb_move_args, 
+        *gb_move_args,
         rj_proposal_distribution=None,
         is_rj_prop=True,
-        run_swaps=False, 
+        run_swaps=False,
         name="rj_fstat_mcmc_search",
         phase_maximize=True,
         gpus=[],

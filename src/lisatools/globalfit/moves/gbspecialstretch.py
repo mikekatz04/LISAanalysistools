@@ -6021,6 +6021,23 @@ def para_log_like(
     """
     xp = gb.backend.xp
 
+    # 2026-08-12 USER RULING: the legacy GBGPU FD computations
+    # (get_fstat_ll / get_ll) must never score a non-FD residual -- the
+    # default GB RJ stack in BOTH modes is the F-stat grid birth move
+    # (GBSpecialRJFStatGridMove, sig-het scorer) + prior RJ, and the
+    # serial-MCMC / refit moves that route through here are legacy
+    # FD-only surfaces. Fail LOUDLY instead of scoring WDM coefficients
+    # through an FD kernel.
+    _settings = getattr(acs, "settings", None)
+    if _settings is not None and not isinstance(_settings, FDSettings):
+        raise ValueError(
+            "para_log_like routes through the legacy GBGPU FD computations "
+            f"(get_fstat_ll/get_ll), but the run basis is "
+            f"{type(_settings).__name__}. These kernels are FD-only and must "
+            "not appear in WDM runs (2026-08-12 ruling): use the F-stat grid "
+            "birth move (rj_prior / rj_prior_search) + prior RJ instead."
+        )
+
     x_tmp = transform_fn.both_transforms(x, xp=xp)
     # need to get just f, fdot, fddot, alpha, delta
     data_index = xp.full(x.shape[0], walker_max, dtype=xp.int32)
