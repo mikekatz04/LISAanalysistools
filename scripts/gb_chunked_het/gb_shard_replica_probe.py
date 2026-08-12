@@ -68,7 +68,9 @@ def _nan_drill(np, xp, proto, rep, dh1, n):
             continue
         orb = getattr(c, "_orbits", None)
         t = getattr(orb, "t", None)
-        t_h = None if t is None else _host(np.asarray(t))
+        # _host directly: np.asarray on a cupy array raises (implicit
+        # conversion disallowed); _host routes through .get() first.
+        t_h = None if t is None else _host(t)
         t_desc = ("None" if t_h is None
                   else f"[{t_h[0]:.6g}..{t_h[-1]:.6g}] len={len(t_h)}")
         print(f"[NAN-DRILL] {label} comp={type(c).__name__} "
@@ -79,7 +81,7 @@ def _nan_drill(np, xp, proto, rep, dh1, n):
             a = getattr(c, name, None)
             if a is None:
                 continue
-            ah = _host(xp.asarray(a)) if hasattr(a, "__len__") else np.asarray(a)
+            ah = _host(a) if hasattr(a, "__len__") else np.asarray(a)
             dev = getattr(getattr(a, "device", None), "id", None)
             nan = (int(np.isnan(ah).sum())
                    if getattr(ah, "dtype", None) is not None
