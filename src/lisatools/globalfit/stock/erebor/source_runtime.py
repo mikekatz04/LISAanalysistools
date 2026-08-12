@@ -345,7 +345,24 @@ def _build_gb_comp_replica(comp, xp, device, primary_device):
         )
     # ``orbits=None`` is fine: the comp's setter builds EqualArmlengthOrbits
     # and configures it HERE, i.e. on this device.
-    if kw.get("orbits") is not None:
+    #
+    # Orbits: hand the replica the PROTOTYPE'S CONFIGURED orbits object,
+    # never a reconstructed one. Reconstruction
+    # (``orbits.__class__(*args, **kwargs)``) loses post-construction
+    # state -- for file-based ``L1Orbits`` the loader-installed base
+    # tables / configured grid -- so the comp setter saw
+    # ``configured=False`` and RE-configured the fresh object on a
+    # different grid, and the replica produced NaN waveforms (2026-08-12
+    # shard bug: every replica-scored cell's d_h/h_h NaN -> auto-reject ->
+    # in-model acceptance uniformly HALVED on 2 GPUs). Sharing the
+    # configured object is safe and bit-identical: the setter deepcopies
+    # its input, the Python-side orbit tables are host numpy, and the
+    # device-resident piece (``backend.OrbitsWrap``) is rebuilt inside
+    # THIS device's context by the setter itself.
+    _proto_orbits = getattr(comp, "_orbits", None)
+    if _proto_orbits is not None:
+        kw["orbits"] = _proto_orbits
+    elif kw.get("orbits") is not None:
         kw["orbits"] = _device_local_orbits(kw["orbits"], xp, primary_device)
     if kw.get("tdi_config") is not None:
         kw["tdi_config"] = _device_local_tdi_config(

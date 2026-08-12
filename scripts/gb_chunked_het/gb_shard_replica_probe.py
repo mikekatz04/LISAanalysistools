@@ -149,11 +149,15 @@ def main():
             dh1, hh1 = out[names[1]]
             ddh = float(np.abs(dh0 - dh1).max())
             dhh = float(np.abs(hh0 - hh1).max())
+            n_nan = int(np.isnan(dh1).sum() + np.isnan(hh1).sum())
             print(f"[CHECK B] shard {si} (device {view.device}) "
                   f"{names[0]} vs {names[1]}: max|d_h diff| {ddh:.3e}  "
                   f"max|h_h diff| {dhh:.3e}  "
-                  f"(scale h_h ~ {float(np.abs(hh0).max()):.3e})")
-            if ddh > 0 or dhh > 0:
+                  f"(scale h_h ~ {float(np.abs(hh0).max()):.3e}; "
+                  f"{n_nan} NaN in {names[1]} outputs)")
+            # NaN-safe verdict: NaN > 0 is False, which previously let a
+            # NaN-producing replica print as "EQUIVALENT".
+            if not (ddh == 0.0 and dhh == 0.0):
                 any_diff = True
         else:
             print(f"[CHECK B] shard {si} (device {view.device}): replica IS "
