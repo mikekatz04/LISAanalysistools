@@ -2126,6 +2126,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         return ll_change_log, prop_counts, acc_counts
 
+    def _debug_sync_all_devices(self, model):
+        """GB_MULTIGPU_SYNC_DEBUG=1: fence EVERY run device.
+
+        The unit-boundary/fill fences (below and in gbbands) cover the
+        WRITE side; this covers the READ side — called immediately before
+        each tracked-vs-true ll comparison in ``propose``. Discriminator
+        for the shard-1 drift: the parent residual is WALKER-sharded while
+        the buffer is BAND-sharded, so closes issue cross-device writes
+        (commonly device-0 context -> shard-1 walkers' residuals). If
+        ``likelihood()`` reads those rows before the writing device's
+        stream flushes, exactly the shard-1 walkers drift and the state
+        settles by the next start check — the observed signature. Drift
+        gone under this knob = read-side race confirmed (and the knob is
+        the interim mitigation); unchanged = the credit/accounting side.
+        """
+        if os.environ.get("GB_MULTIGPU_SYNC_DEBUG", "0") != "1":
+            return
+        if not self.backend.uses_cupy:
+            return
+        for _dev in (
+            getattr(model.analysis_container_arr, "gpus", None) or []
+        ):
+            with self.xp.cuda.Device(int(_dev)):
+                self.xp.cuda.runtime.deviceSynchronize()
+        self.xp.cuda.runtime.deviceSynchronize()
+
     def _cached_get_buffer(self, sorter, acs, specials, **kwargs):
         """Propose-scoped SubBandBuffer reuse (ONE cached ACA per signature).
 
@@ -5108,6 +5134,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ll_change_sum = ll_change_log.sum(axis=-1)
         new_state.log_like[0] += _to_numpy(ll_change_sum[0])
 
+        self._debug_sync_all_devices(model)
         with tm.span("ll_checks"):
             ll_after = model.analysis_container_arr.likelihood()
         check = ll_after - new_state.log_like[0] - start_diffs
@@ -5158,6 +5185,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             new_state.log_like[0] += _to_numpy(ll_change_sum_temp[0])
 
+            self._debug_sync_all_devices(model)
             with tm.span("ll_checks"):
                 ll_after = model.analysis_container_arr.likelihood()
             check = ll_after - new_state.log_like[0] - start_diffs
