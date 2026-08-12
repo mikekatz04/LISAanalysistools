@@ -61,6 +61,15 @@ __all__ = [
 GRID_BASENAME = "fstat_grid.npz"
 
 
+def _fmt_secs(s: float) -> str:
+    """Compact duration for progress lines: 42s / 7.2m / 1.8h."""
+    if s < 90:
+        return f"{s:.0f}s"
+    if s < 5400:
+        return f"{s / 60:.1f}m"
+    return f"{s / 3600:.1f}h"
+
+
 # The host-transfer helper already exists in fstat_proposal -- import it
 # rather than keeping a second copy.
 from lisatools.sampling.fstat_proposal import _host as _to_host  # noqa: E402
@@ -358,8 +367,13 @@ def chunked_fstat_sweep(call_fstat: Callable, params, *, xp, label: str = "",
             done = e
             if time.time() - last > 30:
                 last = time.time()
-                logger.info("[sweep%s] %d/%d evals (%.0fs)", label, e, n,
-                            time.time() - t0)
+                _el = time.time() - t0
+                _rate = (e - start) / max(_el, 1e-9)
+                logger.info(
+                    "[sweep%s] %d/%d evals (%.1f%%) | %.0f evals/s | "
+                    "ETA %s | elapsed %s", label, e, n, 100.0 * e / n,
+                    _rate, _fmt_secs((n - e) / max(_rate, 1e-9)),
+                    _fmt_secs(_el))
             if ckpt and e < n and time.time() - last_ckpt > ckpt_secs():
                 last_ckpt = time.time()
                 ckpt_save(ckpt, _to_host(F[:e]), e, n, fp)
@@ -510,11 +524,22 @@ def run_comb_scan(call_fstat: Callable, *, xp, Tobs: float, band_edges_hz,
     F_max_host = np.zeros(n_nodes)
     best_al_host = np.zeros(n_nodes)
     best_sd_host = np.zeros(n_nodes)
+    # Per-level eval counts upfront so each level header carries the OVERALL
+    # comb fraction (the per-sweep lines only know their own level).
+    _lv_evals = {int(lv): int(lv) * int((nsky_per_node == lv).sum())
+                 for lv in levels}
+    _grand_total = sum(_lv_evals.values())
     total_evals = 0
-    for lv in levels:
+    for _li, lv in enumerate(levels):
         idx = np.where(nsky_per_node == lv)[0]
         nodes = f0_nodes[idx]
         nn = len(nodes)
+        logger.info(
+            "[comb] level %d/%d (nsky=%d): %d nodes x %d sky = %d evals; "
+            "comb overall %.1f%% done, %.1f%% after this level",
+            _li + 1, len(levels), int(lv), nn, int(lv), _lv_evals[int(lv)],
+            100.0 * total_evals / max(_grand_total, 1),
+            100.0 * (total_evals + _lv_evals[int(lv)]) / max(_grand_total, 1))
         al, sd = _sky_grid(int(lv))
         al = np.asarray(al)
         sd = np.asarray(sd)
@@ -628,8 +653,13 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
             done = e
             if time.time() - last > 30:
                 last = time.time()
-                logger.info("[stageB] %d/%d evals (%.0fs)", e, n_total,
-                            time.time() - t0)
+                _el = time.time() - t0
+                _rate = (e - start) / max(_el, 1e-9)
+                logger.info(
+                    "[stageB] %d/%d evals (%.1f%%) | %.0f evals/s | ETA %s "
+                    "| elapsed %s", e, n_total, 100.0 * e / n_total, _rate,
+                    _fmt_secs((n_total - e) / max(_rate, 1e-9)),
+                    _fmt_secs(_el))
             if ckpt and e < n_total and time.time() - last_ckpt > ckpt_secs():
                 last_ckpt = time.time()
                 ckpt_save(ckpt, _to_host(F_flat[:e]), e, n_total, fp)
