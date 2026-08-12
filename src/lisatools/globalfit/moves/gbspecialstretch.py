@@ -2142,23 +2142,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return buf
 
     def _buffer_cache_teardown(self):
-        """Drop the propose-scoped buffer cache and clear its device memory.
+        """Proposal-exit buffer bookkeeping: sweep pools, maybe drop the cache.
 
-        Proposal-exit contract (memory-lifecycle rule): SubBandBuffer scratch
-        is strictly proposal-scoped — when the proposal returns state, every
-        shard's buffers are dropped and each owning device's pool is swept so
-        the memory is available to the other modules' moves. Main-ACA / DCGA
-        persistent allocations are untouched. Engine bindings and shard
-        views cache on the buffers themselves, so they die here with the
-        cache (a fresh proposal's buffers start with no stale bindings).
+        Under ``GB_BUFFER_PERSIST=1`` (default) the cached buffer ACAs
+        SURVIVE the proposal: the next proposal's same-signature
+        ``_cached_get_buffer`` call takes the full-rebind path (refill in
+        place -- no reconstruction of thousands of per-cell containers),
+        which is where the ~16 s/propose ``buffer_build``/``temper_buffer``
+        cost went. The device pools are still synced and swept (only
+        pool-cached FREE blocks are released; live buffer allocations are
+        held by the cached arrays).
+
+        ``GB_BUFFER_PERSIST=0`` restores the strict proposal-scoped
+        contract (memory-lifecycle rule): buffers dropped and pools swept
+        at every proposal exit so the memory is available to the other
+        modules' moves between GB proposals. Engine bindings and shard
+        views cache on the buffers themselves and follow the cache's
+        lifetime in both modes.
         """
+        persist = os.environ.get("GB_BUFFER_PERSIST", "1") == "1"
         cache = getattr(self, "_prop_buffer_cache", None)
         n_builds = getattr(self, "_prop_buffer_builds", 0)
         devices = set()
         for buf in (cache or {}).values():
             for dev in (getattr(buf, "gpus", None) or []):
                 devices.add(int(dev))
-        self._prop_buffer_cache = None
+        if not persist:
+            self._prop_buffer_cache = None
         self._prop_buffer_builds = 0
         if not self.backend.uses_cupy:
             return
@@ -4818,10 +4828,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.backend.uses_cupy and os.environ.get("GB_PROP_TIMING_SYNC", "0") == "1":
             _tm_sync = self.xp.cuda.runtime.deviceSynchronize
         self._prop_timer = tm = _ProposeTimer(sync_fn=_tm_sync)
-        # Propose-scoped SubBandBuffer cache: one allocation per signature
-        # for the whole proposal (units rebind in place); torn down with a
-        # memory-checker summary right before the final return.
-        self._prop_buffer_cache = {}
+        # SubBandBuffer cache: one allocation per signature, units rebind in
+        # place. GB_BUFFER_PERSIST=1 (default) keeps the cached buffers
+        # ACROSS proposals -- construction (thousands of per-cell container
+        # builds, ~16 s at full band) happens once per signature per RUN and
+        # later proposals only refill/rebind. GB_BUFFER_PERSIST=0 restores
+        # the July proposal-scoped contract (drop + pool sweep at every
+        # proposal exit) for memory-tight multi-branch runs where the other
+        # modules need the buffers' GPU memory between GB proposals.
+        if (os.environ.get("GB_BUFFER_PERSIST", "1") != "1"
+                or getattr(self, "_prop_buffer_cache", None) is None):
+            self._prop_buffer_cache = {}
         self._prop_buffer_builds = 0
 
         pin_main_device(self.xp, model.analysis_container_arr.gpus)
