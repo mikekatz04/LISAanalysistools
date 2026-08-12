@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from lisatools.globalfit.moves.gbspecialstretch import GBSpecialStretchMove
+from lisatools.globalfit.moves.gbspecialstretch import (
+    GBSpecialStretchMove,
+    _resolve_rj_flip_fraction,
+)
 
 
 def _move(fraction):
@@ -88,6 +91,33 @@ class RJFlipFractionTest(unittest.TestCase):
         sorter = SimpleNamespace(num_sources=10)  # round(0.001*10) = 0 -> 1
         m._apply_rj_flip_fraction(sorter, _picked(10, 10))
         self.assertEqual(int(sorter._rj_flip_allowed.sum()), 1)
+
+
+class ResolveRJFlipFractionTest(unittest.TestCase):
+    def test_kwarg_wins_over_env(self):
+        import os
+        os.environ["GB_RJ_FLIP_FRACTION"] = "0.7"
+        self.addCleanup(os.environ.pop, "GB_RJ_FLIP_FRACTION", None)
+        self.assertEqual(_resolve_rj_flip_fraction("gb", 0.4), 0.4)
+        self.assertEqual(_resolve_rj_flip_fraction("gb", None), 0.7)
+
+    def test_default_is_one(self):
+        self.assertEqual(_resolve_rj_flip_fraction("gb", None), 1.0)
+
+    def test_bounds(self):
+        for bad in (0.0, -0.1, 1.5):
+            with self.assertRaises(ValueError):
+                _resolve_rj_flip_fraction("gb", bad)
+
+    def test_vgb_has_no_rj_knob_surface(self):
+        import os
+        # env is IGNORED for the fixed-leaf vgb branch...
+        os.environ["VGB_RJ_FLIP_FRACTION"] = "0.3"
+        self.addCleanup(os.environ.pop, "VGB_RJ_FLIP_FRACTION", None)
+        self.assertEqual(_resolve_rj_flip_fraction("vgb", None), 1.0)
+        # ...and an explicit kwarg is rejected, not silently dropped.
+        with self.assertRaises(ValueError):
+            _resolve_rj_flip_fraction("vgb", 0.5)
 
 
 if __name__ == "__main__":

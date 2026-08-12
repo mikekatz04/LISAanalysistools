@@ -245,6 +245,34 @@ def _tspan(tm, name: str):
     return tm.span(name) if tm is not None else nullcontext()
 
 
+def _resolve_rj_flip_fraction(branch_name, kwarg_value):
+    """Resolve ``rj_flip_fraction`` for a move (kwarg > env > 1.0).
+
+    VGB is fixed-leaf (``nleaves_min == nleaves_max``, no RJ), so it gets
+    NO RJ knob surface: the fraction is pinned to 1.0 and the env is never
+    consulted (an explicit kwarg on a vgb move is rejected rather than
+    silently ignored).
+    """
+    if str(branch_name).lower() == "vgb":
+        if kwarg_value is not None:
+            raise ValueError(
+                "rj_flip_fraction is an RJ knob; the vgb branch is "
+                "fixed-leaf (no RJ) and does not accept it."
+            )
+        return 1.0
+    value = kwarg_value
+    if value is None:
+        value = os.environ.get(
+            f"{str(branch_name).upper()}_RJ_FLIP_FRACTION", "1.0"
+        )
+    value = float(value)
+    if not (0.0 < value <= 1.0):
+        raise ValueError(
+            f"rj_flip_fraction must be in (0, 1], got {value}."
+        )
+    return value
+
+
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
 class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModule):
     """Base class for GB-specific stretch / reversible-jump moves.
@@ -760,17 +788,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # outside it skip the flip while the in-model repeats still visit
         # them. 1.0 (default) = every slot, the historical behavior.
         # Kwarg ``rj_flip_fraction`` wins; env ``{BRANCH}_RJ_FLIP_FRACTION``
-        # seeds the default (knob = capitalized attribute, branch-prefixed).
-        _frac = kwargs.get("rj_flip_fraction", None)
-        if _frac is None:
-            _frac = os.environ.get(
-                f"{str(branch_name).upper()}_RJ_FLIP_FRACTION", "1.0"
-            )
-        self.rj_flip_fraction = float(_frac)
-        if not (0.0 < self.rj_flip_fraction <= 1.0):
-            raise ValueError(
-                f"rj_flip_fraction must be in (0, 1], got {self.rj_flip_fraction}."
-            )
+        # seeds the default. VGB is fixed-leaf (nleaves_min == nleaves_max,
+        # NO RJ), so it gets no RJ knob surface: pinned to 1.0, env ignored.
+        self.rj_flip_fraction = _resolve_rj_flip_fraction(
+            branch_name, kwargs.get("rj_flip_fraction", None)
+        )
         self.use_info_mat_proposal = bool(use_info_mat_proposal)
         self.swap_on_in_model = bool(swap_on_in_model)
         if self.transform_fn is not None and hasattr(self.transform_fn, "input_basis"):
