@@ -76,6 +76,13 @@ os.environ.setdefault("GB_PE_MOVES_STRICT", "1")
 # with "no stock move under this name". Search-stage-only either way: the
 # move is search-gated and full_pe never references it.
 os.environ.setdefault("GB_SEARCH_PRIOR_REMOVAL", "1")
+# NITER is the name this script's docs (and muscle memory) use; the stock
+# field is general.num_iterations -> env NUM_ITERATIONS (rule 0). Map it
+# HERE, before any stock.erebor import snapshots the env -- a bare NITER
+# was silently ignored (the smoke "NITER=12" never applied; runs ended at
+# whatever NUM_ITERATIONS resolved to, looking like silent deaths).
+if os.environ.get("NITER") and not os.environ.get("NUM_ITERATIONS"):
+    os.environ["NUM_ITERATIONS"] = os.environ["NITER"]
 
 logger = logging.getLogger("combined_staged")
 
@@ -94,9 +101,11 @@ def _apply_smoke_defaults() -> None:
     smoke = {
         # --- shape ---
         # 12, not 3: the chunked noise search (MAXLOGL_ITERS_PER_STEP) now
-        # spends real engine iterations per stage -- NITER is the run-wide
-        # total -- and the budget must reach the GB stages.
-        "NITER": "12",
+        # spends real engine iterations per stage -- this is the run-wide
+        # total -- and the budget must reach the GB stages. NUM_ITERATIONS
+        # is the REAL knob (NITER was a dead name; the module-top shim maps
+        # it now).
+        "NUM_ITERATIONS": "12",
         "NWALKERS": "8",
         "GB_NTEMPS": "6",
         "VGB_NTEMPS": "4",
@@ -347,6 +356,14 @@ def main() -> int:
     fit.build()
     print("[combined] running", flush=True)
     fit.run()
+    # LOUD completion marker on stdout: "Residuals saved" goes to the
+    # logger FILE only, so a finished run used to look exactly like a
+    # silent death on the console.
+    print(
+        f"[combined] RUN COMPLETE: num_iterations="
+        f"{fit.general.num_iterations} reached; residuals saved.",
+        flush=True,
+    )
     return 0
 
 

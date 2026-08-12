@@ -59,7 +59,7 @@ export BASE_FILE_NAME=gf_prod_3mo
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
-export NITER=2000                  # total engine iterations (resume-safe; adjust)
+export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER was a dead name)
 
 # ---- band + domain ---------------------------------------------------------
 # Tobs: default TOBS_TARGET = 90 d (snaps to Nf=1440 x Nt=2160 x dt=2.5) -- unset.

@@ -15,7 +15,7 @@
 #
 # 2. MEMORY SHAKEDOWN (strongly recommended). Per-walker WDM residual is
 #    3 x 1440 x 16800 f64 ~ 0.58 GB -- 7.8x the 3-month grid -- plus the
-#    invC store at the same scaling. Run NITER=2 first and watch the
+#    invC store at the same scaling. Run NUM_ITERATIONS=2 first and watch the
 #    "GPU pool used" lines; if OOM, reduce NWALKERS or add GPUs.
 #
 # 3. The 3-month run should be green first (same machinery, cheaper).
@@ -70,7 +70,7 @@ export FILE_STORE_DIR=${STORE_DIR}
 export BASE_FILE_NAME=gf_prod_23mo
 
 export NWALKERS=24
-export NITER=2000
+export NUM_ITERATIONS=2000     # total engine iterations (resume-safe; NITER was a dead name)
 
 # ---- Tobs: 23 months = 700 d = 6.048e7 s -----------------------------------
 # Snaps exactly to Nf=1440 x Nt=16800 x dt=2.5 with layer_dt=3600 s (same
