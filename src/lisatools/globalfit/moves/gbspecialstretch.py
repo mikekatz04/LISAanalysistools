@@ -227,6 +227,7 @@ class _ProposeTimer:
             "sorter_build", "friend_index", "resid_open_close", "ll_checks",
             "run_proposal", "run_tempering", "write_back", "sorter_rebuild",
             "band_info", "ll_inject_final", "ll_inject_drift", "mempool_free",
+            "band_ll_audit",
         )
         items = sorted(self.stages.items(), key=lambda kv: -kv[1])
         tracked = sum(v for k, v in self.stages.items() if k in top)
@@ -2105,6 +2106,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _cap = xp_s.asarray(self._band_leaf_cap)
                 _at_cap = _cell_counts[_flat] >= _cap[band_sorter.band_inds]
                 _rj_ok = band_sorter.inds | ~_at_cap
+                # Verification fingerprint (user request 2026-08-12): only
+                # DEAD slots of at-cap cells leave the pool (birth proposals);
+                # every alive slot in those cells stays proposable (deaths).
+                _dead_excluded = int((~_rj_ok).sum())
+                if _dead_excluded:
+                    _capped_cells = int(xp_s.unique(_flat[_at_cap]).size)
+                    _alive_at_cap = int((band_sorter.inds & _at_cap).sum())
+                    logger.info(
+                        f"{self.name}: rj at-cap skip -- {_dead_excluded} dead"
+                        f" (birth) slots excluded across {_capped_cells} at-cap"
+                        f" cells; {_alive_at_cap} alive slots in those cells"
+                        " stay proposable (deaths)."
+                    )
                 extra_bool = _rj_ok if extra_bool is None else (extra_bool & _rj_ok)
 
             subset = band_sorter.get_subset(
@@ -5153,6 +5167,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # assert np.all(start_diffs < 2.0)
         num_active_leaves = work.inds[0].sum(axis=-1) # cold chain only
         logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
+
+        # Before/after ACA ll accounting (2026-08-12 user design): snapshot
+        # the per-band cold-walker residual lls before the rj+in-model loop;
+        # once the loop has fully restored the residual, the per-band
+        # difference is the EXACT ll change of the whole operation.
+        # GB_ACA_LL_CREDIT=1 (default) credits log_like from that difference
+        # instead of the cumulative accept/reject ledger; either way the
+        # ledger is compared per sub-band every proposal ([GB_BAND_DRIFT])
+        # so a run's log verifies the two agree band by band.
+        _aca_credit = os.environ.get("GB_ACA_LL_CREDIT", "1") == "1"
+        _band_audit = _aca_credit or os.environ.get("GB_BAND_LL_AUDIT", "0") == "1"
+        _band_lls_before = None
+        if _band_audit:
+            with tm.span("band_ll_audit"):
+                _band_lls_before = self._band_residual_lls(
+                    model.analysis_container_arr
+                )
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
         with tm.span("run_proposal"):
@@ -5169,7 +5200,49 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # TODO ask michael about this print("NEED TO FIX ANALYSIS CONTAINER extra factor")
         ll_change_sum = ll_change_log.sum(axis=-1)
-        new_state.log_like[0] += _to_numpy(ll_change_sum[0])
+        _band_actual = None
+        if _band_lls_before is not None:
+            with tm.span("band_ll_audit"):
+                _band_lls_after = self._band_residual_lls(
+                    model.analysis_container_arr
+                )
+            _band_actual = _band_lls_after - _band_lls_before
+            _mm = _band_actual - _to_numpy(ll_change_log[0])
+            if (
+                getattr(self, "_band_drift_cum", None) is None
+                or self._band_drift_cum.shape != _mm.shape
+            ):
+                self._band_drift_cum = np.zeros_like(_mm)
+                self._band_drift_n = 0
+            self._band_drift_cum += _mm
+            self._band_drift_n += 1
+            _pi = np.unravel_index(np.abs(_mm).argmax(), _mm.shape)
+            _ci = np.unravel_index(
+                np.abs(self._band_drift_cum).argmax(),
+                self._band_drift_cum.shape,
+            )
+            logger.info(
+                f"[GB_BAND_DRIFT {self.name}] actual-vs-credited per band:"
+                f" this proposal max |diff| {abs(_mm[_pi]):.3e} (walker"
+                f" {_pi[0]}, band {_pi[1]}); cumulative max |sum|"
+                f" {abs(self._band_drift_cum[_ci]):.3e} (walker {_ci[0]},"
+                f" band {_ci[1]}) over {self._band_drift_n} proposals."
+            )
+            if abs(_mm[_pi]) > 0.05:
+                logger.warning(
+                    f"[GB_BAND_DRIFT {self.name}] per-proposal band drift"
+                    f" {abs(_mm[_pi]):.3e} exceeds 0.05 (walker {_pi[0]},"
+                    f" band {_pi[1]}): accept/reject ledger and residual"
+                    " disagree beyond the scoring floor."
+                )
+        if _aca_credit and _band_actual is not None:
+            # Credit the ACTUAL change: log_like moves exactly with the
+            # residual, so the after-proposal check below only measures
+            # leakage outside the band tiling (the drift rebuild below
+            # stays as the backstop either way).
+            new_state.log_like[0] += _band_actual.sum(axis=-1)
+        else:
+            new_state.log_like[0] += _to_numpy(ll_change_sum[0])
 
         self._debug_sync_all_devices(model)
         with tm.span("ll_checks"):
