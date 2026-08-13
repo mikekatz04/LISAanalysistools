@@ -62,7 +62,10 @@ export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
 export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER was a dead name)
 
 # ---- band + domain ---------------------------------------------------------
-# Tobs: default TOBS_TARGET = 90 d (snaps to Nf=1440 x Nt=2160 x dt=2.5) -- unset.
+# EXPLICIT Tobs (2026-08-13): sbatch propagates the submitting shell's env,
+# and a stale TOBS_TARGET export (a 3-day one was found live in the shell)
+# would silently re-grid this run. Pin the 90-d production value.
+export TOBS_TARGET=7776000
 export MIN_FREQ=4e-4
 export MAX_FREQ=2.5e-2
 export GB_MIN_FREQ=5.5e-4
