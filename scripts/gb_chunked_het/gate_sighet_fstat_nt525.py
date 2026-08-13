@@ -41,7 +41,8 @@ PASS/FAIL is printed as the last line; exit code follows it.
 
 Knobs (env): GATE_NT_LAYER (525), GATE_NT_LAYER_REF (420),
 GATE_NT_LAYER_SMALL (60), GATE_NREFS (9), GATE_NSFD (1024),
-GATE_OUT (./gate_sighet_fstat_out), BACKEND (cuda12x).
+GATE_OUT (./gate_sighet_fstat_out), BACKEND (cuda12x),
+GATE_NT_GRID (16800; set 2160 for the 3-month grid).
 """
 
 import os
@@ -88,7 +89,9 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     # ---- the 23-month production grid SHAPE, narrow band ------------------
-    Nf, Nt, dt = 1440, 16800, 2.5
+    # GATE_NT_GRID: WDM time-layer count of the target grid (16800 = the
+    # 23-month/700-d shape; 2160 = the 3-month/90-d production shape).
+    Nf, Nt, dt = 1440, int(os.environ.get("GATE_NT_GRID", "16800")), 2.5
     Tobs = Nf * Nt * dt                        # 6.048e7 s = 700 d
     layer_df = 1.0 / (2.0 * Nf * dt)
     edge = 20                                  # production 8-wavelet taper -> 20
