@@ -689,7 +689,7 @@ class GBNoForegroundGlobalFit(EreborFit):
                 Stage(
                     name="gb_pe",
                     kind="pe",
-                    moves=[Move("rj_prior", branch="gb")],
+                    moves=[Move("rj_fstat_pe", branch="gb")],
                     combine_kwargs=dict(share_temperature_control=False),
                 )
             ]
@@ -1183,7 +1183,9 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
     # the per-iteration cycle fstat-birth -> fstat-REPLACE -> prior-REMOVAL.
     if getattr(gb_info, "mode", "pe") == "search":
         _names = recipe.move_names()
-        _anchor = "rj_prior" if "rj_prior" in _names else None
+        _anchor = next(
+            (n for n in ("rj_fstat_pe", "rj_prior") if n in _names), None
+        )
         if _anchor is None and (
             getattr(gb_info, "search_rj_replace", False)
             or getattr(gb_info, "search_in_model", False)
@@ -1227,6 +1229,14 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
         pe_move_names=pe_names or None,
     )
     stock_moves = {m.name: m for m in list(gb_search_moves) + list(gb_pe_moves)}
+    # Legacy name aliases (2026-08-12 rename: rj_prior_search ->
+    # rj_fstat_search, rj_prior -> rj_fstat_pe): recipes and runbooks
+    # written before the rename keep resolving; the moves LOG under the
+    # new names either way.
+    for _legacy, _new in (("rj_prior_search", "rj_fstat_search"),
+                          ("rj_prior", "rj_fstat_pe")):
+        if _new in stock_moves and _legacy not in stock_moves:
+            stock_moves[_legacy] = stock_moves[_new]
     return stock_moves
 
 

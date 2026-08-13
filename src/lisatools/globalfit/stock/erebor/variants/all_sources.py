@@ -345,7 +345,7 @@ class AllSourcesGlobalFit(EreborFit):
                         Move("mbh_pe", branch="mbh"),
                         Move("emri_pe", branch="emri"),
                         Move("sobbh_pe", branch="sobbh"),
-                        Move("rj_prior", branch="gb"),
+                        Move("rj_fstat_pe", branch="gb"),
                     ],
                     combine_kwargs=dict(share_temperature_control=False),
                 ),

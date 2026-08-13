@@ -214,12 +214,11 @@ def build_fit():
     for branch in ("mbh", "emri", "sobbh"):
         fit.remove_branch(branch)
 
-    # Registered GB move names (build_gb_moves / setup_gb_moves) differ from
-    # the shorthand the run is discussed in:
-    #   gb_rj_fstat_search  -> rj_fstat_mcmc_search
-    #   gb_rj_prior_removal -> rj_prior_removal
-    #   gb_rj_fstat_pe      -> rj_fstat_mcmc
-    #   gb_rj_prior_pe      -> rj_prior
+    # GB move names (2026-08-12 rename, user ruling):
+    #   rj_fstat_search  = F-stat grid births, search config (cap updater)
+    #   rj_prior_removal = removal-only prior pruning (search cycle)
+    #   rj_fstat_pe      = F-stat grid births, strict-PE config
+    #   rj_prior_pe      = pure prior births, strict-PE config
     noise_search = [Move("psd_search", branch="psd"),
                     Move("galfor_search", branch="galfor")]
     noise_pe = [Move("psd_pe", branch="psd"),
@@ -284,7 +283,7 @@ def build_fit():
             # Noise stays in SEARCH (joint max-logl) mode through the GB
             # search. Per-stage move-name uniqueness (recipe.py ebd8612) is
             # what lets these recur across stages.
-            # rj_prior_search, NOT rj_fstat_mcmc_search (2026-08-12): the
+            # rj_fstat_search (ex rj_prior_search), NOT rj_fstat_mcmc_search (2026-08-12): the
             # serial-MCMC move scores gb.get_fstat_ll -- an FD kernel --
             # against the parent ACA, which is WDM here (wrong domain), and
             # carries leaf_cap_update=False. rj_prior_search is the
@@ -296,7 +295,7 @@ def build_fit():
             # post-run item (its batches are not f0-ordered, so the
             # reference-block stash would thrash every step).
             moves=noise_vgb + [
-                Move("rj_prior_search", branch="gb"),
+                Move("rj_fstat_search", branch="gb"),
                 Move("rj_prior_removal", branch="gb"),
             ],
             step_kwargs=dict(
@@ -309,9 +308,10 @@ def build_fit():
             name="full_pe", kind="pe",
             # No rj_fstat_mcmc: the pe-named serial MCMC has the same
             # FD-kernel-on-WDM-data fstat scoring as its search twin.
-            # rj_prior (strict-PE fstat-grid births) is the GB PE move.
+            # rj_fstat_pe + rj_prior_pe are the GB PE moves.
             moves=noise_pe + [
-                Move("rj_prior", branch="gb"),
+                Move("rj_fstat_pe", branch="gb"),
+                Move("rj_prior_pe", branch="gb"),
             ] + vgb,
             # Draw ONE move per step (with replacement) instead of running
             # all five in a fixed order -- the stock eryn move-selection

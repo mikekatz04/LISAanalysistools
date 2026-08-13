@@ -2534,9 +2534,11 @@ def build_gb_moves(
 
     # In-move F-stat grid fit (GB_FSTAT_FIT_IN_MOVE=1): swap the RJ birth
     # move class so its setup() fits the comb/peak grids against the live
-    # residual instead of consuming a prebuilt offline npz. Move NAMES are
-    # unchanged, so stage lists, pop_move, pe_move_names and the
-    # leaf_cap_update designation all keep working untouched.
+    # residual instead of consuming a prebuilt offline npz. NAMES
+    # (2026-08-12 rename, user ruling): rj_fstat_* = the F-stat grid birth
+    # moves (search / pe); rj_prior_pe = pure prior births;
+    # rj_prior_removal = prior-judged removal. Legacy aliases
+    # rj_prior_search / rj_prior resolve in setup_gb_moves.
     _fit_in_move = bool(getattr(gb_info, "fstat_fit_in_move", False))
     _RJBirth = GBSpecialRJFStatGridMove if _fit_in_move else GBSpecialRJPriorMove
     _fit_kwargs = {}
@@ -2570,7 +2572,7 @@ def build_gb_moves(
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
         **({"is_rj_prop": True} if _fit_in_move else {}),
         **_fit_kwargs,
-        name="rj_prior_search",
+        name="rj_fstat_search",
         use_prior_removal=True,
         phase_maximize=_rj_phase_max,
         run_swaps=True,
@@ -2732,7 +2734,7 @@ def build_gb_moves(
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
         **({"is_rj_prop": True} if _fit_in_move else {}),
         **_fit_kwargs,
-        name="rj_prior",
+        name="rj_fstat_pe",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=(
             _rj_phase_max if (_gb_mode_search and not _pe_strict) else False
@@ -2743,6 +2745,23 @@ def build_gb_moves(
            **_pe_cap_off}
     )
     gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers))
+
+    # PURE prior-birth RJ move for the PE stage (2026-08-12 rename/split):
+    # births drawn from the GLOBAL PRIOR (never the fstat grids), deaths
+    # judged the same way -- the complement to rj_fstat_pe in a PE cycle.
+    # Always strict-PE flavored: no phase-max, no caps beyond enforcement.
+    gb_pe_prior_birth_move = GBSpecialRJPriorMove(
+        *gb_move_args,
+        rj_proposal_distribution=gpu_priors,
+        name="rj_prior_pe",
+        use_prior_removal=False,
+        phase_maximize=False,
+        run_swaps=True,
+        gpus=[],
+        **{**gb_move_kwargs, "leaf_cap_update": False,
+           "rj_flip_fraction_default": _rj_flip_default, **_pe_cap_off}
+    )
+    gb_pe_prior_birth_move.accepted = np.zeros((ntemps, nwalkers))
 
     gb_pe_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
         *gb_move_args,
@@ -2763,7 +2782,8 @@ def build_gb_moves(
     # (single ``rj_prior`` move under GB_MODE=search), and the
     # ``pe_move_names`` filter below keeps exactly the recipe-requested
     # subset either way.
-    gb_pe_moves = [gb_pe_prior_move, gb_pe_fstat_mcmc_move]
+    gb_pe_moves = [gb_pe_prior_move, gb_pe_prior_birth_move,
+                   gb_pe_fstat_mcmc_move]
     if gb_replace_move is not None:
         gb_pe_moves.append(gb_replace_move)
     if gb_in_model_move is not None:
