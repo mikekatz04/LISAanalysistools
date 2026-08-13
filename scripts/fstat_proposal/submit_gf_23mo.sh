@@ -25,12 +25,10 @@
 #    invC store at the same scaling. Run NUM_ITERATIONS=2 first and watch the
 #    "GPU pool used" lines; if OOM, reduce NWALKERS or add GPUs.
 #
-# 3. MULTIDEV PARITY (part of the shakedown): run the shakedown with
-#    FSTAT_SIGHET_MULTIDEV=check (fan-out + pinned shadow compare) on the
-#    production 2-GPU allocation; any mismatch fails loudly. Green ->
-#    the =1 below is validated.
-#
-# 4. The 3-month run should be green first (same machinery, cheaper).
+# 3. SKIPPED BY USER RULING (2026-08-13): the memory shakedown and the
+#    FSTAT_SIGHET_MULTIDEV=check parity gate. The run launches pinned
+#    (=0 below) and checkpoint-resumes through any OOM/bug: if the build
+#    OOMs, reduce NWALKERS or take gpu:4, and resubmit.
 #
 # Expected scaling vs 3 mo: sig-het in-model scoring is FLAT in Tobs
 # (v4/v5 bench-off), so per-source proposal cost holds; buffer fills,
@@ -133,12 +131,12 @@ export VGB_SIGHET_INMODEL=0
 # explicit here for the run record). =0 restores serial dispatch if the
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
 export GB_ROUTER_THREADED=1
-# F-stat scorer fans candidate batches over ALL run devices (the
-# per-shard comp replicas it depends on were GPU-verified bit-identical
-# in the 2026-08-12 drift campaign). PREFLIGHT: the NUM_ITERATIONS=2
-# shakedown must run with FSTAT_SIGHET_MULTIDEV=check first -- it runs
-# the fan-out WITH a pinned shadow compare and fails loudly on any
-# mismatch. =0 restores the single-device pin.
-export FSTAT_SIGHET_MULTIDEV=1
+# PINNED fstat scorer (user ruling 2026-08-13): the =check parity gate
+# for the multi-device fan-out was skipped as not worth the delay --
+# fstat fit speed is far from the bottleneck -- so this run uses the
+# single-device pin, the exact path the 3-month production run
+# validates. Flip to =1 only after a green FSTAT_SIGHET_MULTIDEV=check
+# pass on a 2-GPU allocation.
+export FSTAT_SIGHET_MULTIDEV=0
 
 python scripts/fstat_proposal/run_combined_staged.py
