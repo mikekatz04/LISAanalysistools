@@ -661,11 +661,10 @@ class _RoutedBandEngine:
     def _dispatch_shards(holder, items, worker, state_ids=None):
         """Run ``worker(*item)`` once per populated-shard work item.
 
-        SERIAL by default: the open 2-GPU incremental-ll-drift
-        investigation's leading hypothesis is a cross-device ordering race,
-        and serial launch-sync-launch dispatch is the de-facto safety net
-        while it is open -- the default flips only after that investigation
-        closes. ``GB_ROUTER_THREADED=1`` opts in to concurrent shards: one
+        THREADED by default (2026-08-13, user ruling): the 2-GPU
+        incremental-ll-drift investigation that justified the serial safety
+        net CLOSED 2026-08-12 (three root causes fixed, comp replicas
+        GPU-verified bit-identical), so shards now run concurrently -- one
         host thread per shard with work, each entering its own device
         context (cupy's current device is thread-local; kernel launches
         release the GIL), mirroring
@@ -681,9 +680,12 @@ class _RoutedBandEngine:
         that object's output attrs, so any duplicate forces serial.
         ``holder.thread_pool`` is only touched on the threaded branch (the
         real ACA property allocates the pool on first access).
+        ``GB_ROUTER_THREADED=0`` restores serial launch-sync-launch
+        dispatch (the drift checks / [GB_CELL_LL] reconciles are the
+        regression alarms if concurrency ever misbehaves).
         """
         if (len(items) > 1
-                and os.environ.get("GB_ROUTER_THREADED", "0") == "1"
+                and os.environ.get("GB_ROUTER_THREADED", "1") == "1"
                 and (state_ids is None or len(set(state_ids)) == len(items))
                 and getattr(holder, "thread_pool", None) is not None):
             futures = [holder.thread_pool.submit(worker, *it) for it in items]

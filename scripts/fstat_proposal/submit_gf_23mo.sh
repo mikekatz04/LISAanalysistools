@@ -124,5 +124,9 @@ export GB_USE_GALAXY_PRIOR=1
 
 # ---- VGB: exact chunked-het in-model scorer (see submit_gf_3mo.sh) ---------
 export VGB_SIGHET_INMODEL=0
+# Concurrent per-device shard dispatch (code default since 2026-08-13;
+# explicit here for the run record). =0 restores serial dispatch if the
+# drift/[GB_CELL_LL] checks ever implicate concurrency.
+export GB_ROUTER_THREADED=1
 
 python scripts/fstat_proposal/run_combined_staged.py
