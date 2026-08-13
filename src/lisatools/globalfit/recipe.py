@@ -684,11 +684,14 @@ class RJRecipeStep(BaseRecipeStep):
         assert isinstance(current_iter, (int, np.integer))
 
         stop = False
-        if current_iter > self.convergence_iter:
+        _start = int(getattr(self, "_stage_start_iter", 0))
+        # The old-vs-new window comparison needs at least one full window on
+        # each side WITHIN THIS STAGE.
+        if current_iter - _start > 2 * self.convergence_iter:
             #? Actual convergence should be related to the same number of sources above SNR XX for Y itterations
             nleaves_cc = sampler.backend.get_nleaves(
                 branch_names=[self.plateau_branch], temp_index=0
-            )[self.plateau_branch]
+            )[self.plateau_branch][_start:]
 
             # do not include most recent
             nleaves_cc_max_old = nleaves_cc[:-self.convergence_iter].max()
@@ -698,6 +701,12 @@ class RJRecipeStep(BaseRecipeStep):
                 stop = True
 
             else:
+                stop = False
+
+            # A search that has not found its FIRST source has not
+            # plateaued -- it has not started (deliberate: an RJ search
+            # stage never advances at zero leaves).
+            if nleaves_cc_max_new <= 0:
                 stop = False
 
             
@@ -714,6 +723,13 @@ class RJRecipeStep(BaseRecipeStep):
         sampler: GlobalFitEngine
     ):
         """Configure the sampler for this RJ recipe step (moves, weights, thinning)."""
+        # Stage-scope the plateau window: the backend's nleaves history
+        # spans the WHOLE run, so without this anchor the first check
+        # compares pre-stage iterations (0 leaves during the noise stages)
+        # against the stage's own start and trips 0 >= 0 immediately --
+        # the 3-month run's gb_search advanced after ONE check
+        # (found 2026-08-13).
+        self._stage_start_iter = int(sampler.backend.iteration)
         # TODO: maybe make this the default setup
         sampler.moves = self.moves
         sampler.weights = self.weights

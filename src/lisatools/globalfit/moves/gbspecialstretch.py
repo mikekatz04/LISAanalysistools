@@ -5165,12 +5165,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if not self.is_rj_prop and not np.any(work_in.inds):
             return state, np.zeros((engine_ntemps, nwalkers), dtype=bool)
 
-        # Alive-only RJ variants (replace / prune) are no-ops on an empty
-        # model -- and their keep_all_inds=False BandSorter cannot be built
-        # from zero sources (the logpdf batching indexes an empty split
-        # array), so return before constructing it.
+        # Alive-only RJ variants (replace / removal-only) are no-ops on an
+        # empty model -- their alive-only BandSorter cannot be built from
+        # zero sources -- so return before constructing it. The gate is
+        # rj_removal_only, NOT use_prior_removal: the search BIRTH move
+        # carries use_prior_removal=True (prior-judged deaths) but births
+        # from dead slots, so it MUST run on the zero-leaf search start.
+        # (use_prior_removal in this gate silently no-opped rj_fstat_search
+        # forever on GB_MODE=search -- the 3-month run's gb_search completed
+        # with 0 sources, found 2026-08-13.)
         if (
-            (self.rj_replace or self.use_prior_removal)
+            (self.rj_replace or self.rj_removal_only)
             and not np.any(work_in.inds)
         ):
             return state, np.zeros((engine_ntemps, nwalkers), dtype=bool)
