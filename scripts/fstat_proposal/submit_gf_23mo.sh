@@ -106,7 +106,16 @@ export SIGHET_NT_LAYER=525
 
 # ---- GB knobs --------------------------------------------------------------
 export GB_NLEAVES_MAX=25000        # user ruling for the 23-mo run
-export GB_N_SUBBANDS=2560
+# Grouped RJ->in-model scheduling (2026-08-13, code default; pinned for the
+# run record): RJ rounds accumulate below-cap inds=True picks, then ONE
+# full-width in-model block. =0 restores the per-round interleave.
+export GB_RJ_GROUPED_INMODEL=1
+# Buffer sized for the grouped scheme (user budget: 10-20 GB of GPU memory
+# is fine). Per-slot slab (3, 5, ~Nt_band) scales ~ Tobs: ~255 KB at 3 mo
+# -> ~2.0 MB at 23 mo, so 8192 slots ~= 16 GB and in-model flushes run
+# 8192 cells wide (full unit residency = 44,352 cells ~= 88 GB does NOT
+# fit). Back off to 4096 (~8 GB) or 2560 (~5 GB) if the pool OOMs.
+export GB_N_SUBBANDS=8192
 # Comb nodes scale ~ Tobs (0.5/Tobs spacing) -> each epoch fit is ~8x the
 # 3-mo cost. 100 keeps the same iteration cadence; raise to 200 if the
 # [GF_TIMING] lines show refits dominating.

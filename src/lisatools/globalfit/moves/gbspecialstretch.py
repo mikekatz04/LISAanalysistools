@@ -2088,12 +2088,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # its birth slots (the -inf enforcement in _run_rj_step remains
             # the correctness backstop either way). Counts are taken at
             # unit open, mirroring _run_rj_step's bincount arithmetic.
-            if (
-                self.is_rj_prop
-                and not self.rj_removal_only
-                and self._band_leaf_cap is not None
-                and os.environ.get("GB_RJ_SKIP_CAPPED", "1") == "1"
-            ):
+            self._rj_at_cap_mask = None
+            if self.is_rj_prop and self._band_leaf_cap is not None:
                 xp_s = get_array_module(band_sorter.band_inds)
                 _nb = self.num_bands
                 _flat = (
@@ -2109,21 +2105,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _cell_counts = xp_s.bincount(_alive_cells, minlength=_nbins)
                 _cap = xp_s.asarray(self._band_leaf_cap)
                 _at_cap = _cell_counts[_flat] >= _cap[band_sorter.band_inds]
-                _rj_ok = band_sorter.inds | ~_at_cap
-                # Verification fingerprint (user request 2026-08-12): only
-                # DEAD slots of at-cap cells leave the pool (birth proposals);
-                # every alive slot in those cells stays proposable (deaths).
-                _dead_excluded = int((~_rj_ok).sum())
-                if _dead_excluded:
-                    _capped_cells = int(xp_s.unique(_flat[_at_cap]).size)
-                    _alive_at_cap = int((band_sorter.inds & _at_cap).sum())
-                    logger.info(
-                        f"{self.name}: rj at-cap skip -- {_dead_excluded} dead"
-                        f" (birth) slots excluded across {_capped_cells} at-cap"
-                        f" cells; {_alive_at_cap} alive slots in those cells"
-                        " stay proposable (deaths)."
-                    )
-                extra_bool = _rj_ok if extra_bool is None else (extra_bool & _rj_ok)
+                # Per-source at-cap mask for the grouped in-model pool gate
+                # (user rule 2026-08-13): at-cap cells never FREEZE sources
+                # into the in-model pool — only below-cap cells add (birth)
+                # then pool. Snapshot at unit open, same arithmetic as the
+                # pick skip below.
+                self._rj_at_cap_mask = _at_cap
+                if (
+                    not self.rj_removal_only
+                    and os.environ.get("GB_RJ_SKIP_CAPPED", "1") == "1"
+                ):
+                    _rj_ok = band_sorter.inds | ~_at_cap
+                    # Verification fingerprint (user request 2026-08-12):
+                    # only DEAD slots of at-cap cells leave the pool (birth
+                    # proposals); every alive slot in those cells stays
+                    # proposable (deaths).
+                    _dead_excluded = int((~_rj_ok).sum())
+                    if _dead_excluded:
+                        _capped_cells = int(xp_s.unique(_flat[_at_cap]).size)
+                        _alive_at_cap = int((band_sorter.inds & _at_cap).sum())
+                        logger.info(
+                            f"{self.name}: rj at-cap skip -- {_dead_excluded} dead"
+                            f" (birth) slots excluded across {_capped_cells} at-cap"
+                            f" cells; {_alive_at_cap} alive slots in those cells"
+                            " stay proposable (deaths)."
+                        )
+                    extra_bool = _rj_ok if extra_bool is None else (extra_bool & _rj_ok)
 
             subset = band_sorter.get_subset(
                 units=units,
@@ -2418,45 +2425,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         eligible = self.xp.zeros(band_sorter.num_sources, dtype=bool)
         eligible[subset.inds_main_band_sorter] = True
 
-        round_i = 0
-        while scheduler.any_active():
-            with _tspan(tm, "pick"):
-                picked = self._pick_sources(band_sorter, buffer_obj, scheduler, eligible)
-            if picked is None:
-                break
-            if tm is not None:
-                # Batch size per repeat round: on GPU, small batches mean the
-                # 100-repeat in-model loop is kernel-launch-overhead-bound.
-                tm.count("picked_sources", int(len(picked["specials"])))
-
-            if self.is_rj_prop:
-                # RJ before/after trace of the chosen cell: snapshots
-                # bracket the RJ step; figures save only when the cell's RJ
-                # proposal was ACCEPTED (buffer changed). Chronologically
-                # BEFORE the in-model sequence figures.
-                rj_seq = self._debug_rj_select(buffer_obj, picked)
-                with _tspan(tm, "rj_step"):
-                    if self.rj_replace:
-                        # Fixed-dimension replacement instead of birth/death.
-                        self._run_replace_step(
-                            model, band_sorter, buffer_obj, band_temps,
-                            picked, ll_change_log, prop_counts, acc_counts,
-                            round_i, scheduler,
-                        )
-                    else:
-                        self._run_rj_step(
-                            model, band_sorter, buffer_obj, band_temps, picked,
-                            ll_change_log, prop_counts, acc_counts, round_i, scheduler,
-                        )
-                self._debug_plot_rj_pair(buffer_obj, rj_seq)
-
-            with _tspan(tm, "inmodel_repeats"):
-                self._run_in_model_repeats(
-                    model, band_sorter, buffer_obj, band_temps, picked,
-                    ll_change_log, prop_counts, acc_counts,
-                )
-
-            scheduler.record_picks(picked["specials"])
+        def _advance_and_refill():
+            """Retire finished cells and refill their slots (with the cell-ll
+            credit bracketing the switch-out). Returns the number of slots
+            refilled. Only legal when NO cell holds a pending in-model
+            source: a pending source pins its cell's buffer slot."""
             inds_fill, new_specials = scheduler.advance()
             if len(inds_fill):
                 # Switch-out: credit the outgoing cells from their slab
@@ -2479,7 +2452,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             cell_ll_state, buffer_obj, inds_fill,
                             new_specials, ll_change_log, prop_counts,
                         )
-            round_i += 1
+            return int(len(inds_fill))
+
+        def _free_mempool_each_round():
             # GPU efficiency (parallel-resources plan P1): freeing the WHOLE
             # CuPy pool every pick round forces cudaFree/cudaMalloc churn
             # for every allocation in the next round, so it is now OPT-IN —
@@ -2489,6 +2464,174 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if os.environ.get("GB_MEMPOOL_FREE_EACH_ROUND", "0") == "1":
                 with _tspan(tm, "mempool_free"):
                     self.mempool.free_all_blocks()
+
+        # GROUPED RJ -> in-model scheduling (2026-08-13 user design,
+        # GB_RJ_GROUPED_INMODEL=0 restores the per-round interleave): RJ
+        # rounds (one proposal per cell per round, exactly as before) run
+        # back-to-back, ACCUMULATING every source that ends the round alive
+        # (accepted birth, or survived/skipped death) into a pending pool —
+        # its cell is then FROZEN so the pool never holds two same-cell
+        # sources. When no unfrozen cell has candidates left (the grid is as
+        # full of inds=True picks as this pass can make it), ONE in-model
+        # block evolves the whole pool together, the pool clears, and the
+        # sweep continues over the remaining sources. Same proposals, same
+        # statistics — the in-model repeat loop just always runs at full
+        # batch width instead of on each round's (often tiny) survivor set.
+        # At-cap cells: dead slots were excluded from ``eligible`` up front
+        # (no birth RJ at all); alive slots still get death proposals but
+        # NEVER pool/freeze (user rule 2026-08-13) — only below-cap cells
+        # add sources via RJ and then freeze them for the polish flush.
+        grouped = (
+            self.is_rj_prop
+            and os.environ.get("GB_RJ_GROUPED_INMODEL", "1") == "1"
+        )
+
+        round_i = 0
+        if grouped:
+            pending = []
+            pending_specials = self.xp.zeros(
+                0, dtype=band_sorter.special_band_inds.dtype
+            )
+            n_flushes = 0
+            flush_sum = 0
+            while scheduler.any_active():
+                with _tspan(tm, "pick"):
+                    picked = self._pick_sources(
+                        band_sorter, buffer_obj, scheduler, eligible,
+                        blocked_specials=pending_specials,
+                    )
+                if picked is not None:
+                    if tm is not None:
+                        tm.count("picked_sources", int(len(picked["specials"])))
+                    rj_seq = self._debug_rj_select(buffer_obj, picked)
+                    with _tspan(tm, "rj_step"):
+                        if self.rj_replace:
+                            self._run_replace_step(
+                                model, band_sorter, buffer_obj, band_temps,
+                                picked, ll_change_log, prop_counts,
+                                acc_counts, round_i, scheduler,
+                            )
+                        else:
+                            self._run_rj_step(
+                                model, band_sorter, buffer_obj, band_temps,
+                                picked, ll_change_log, prop_counts,
+                                acc_counts, round_i, scheduler,
+                            )
+                    self._debug_plot_rj_pair(buffer_obj, rj_seq)
+                    scheduler.record_picks(picked["specials"])
+                    # Post-RJ alive sources join the pool; their cells
+                    # freeze until the flush. AT-CAP cells never pool (user
+                    # rule 2026-08-13): only below-cap cells add sources via
+                    # RJ and then freeze them for the in-model flush — an
+                    # at-cap cell keeps proposing deaths round after round
+                    # but its survivors skip the polish block. Newborns
+                    # always pool: a birth requires a below-cap cell at unit
+                    # open (dead slots of at-cap cells never enter the pick
+                    # pool), and the mask is that same unit-open snapshot.
+                    alive_now = band_sorter.inds[picked["ids"]]
+                    _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
+                    if _at_cap_m is not None:
+                        alive_now = alive_now & ~_at_cap_m[picked["ids"]]
+                    if bool(alive_now.any()):
+                        held = {k: v[alive_now] for k, v in picked.items()}
+                        pending.append(held)
+                        pending_specials = self.xp.concatenate(
+                            [pending_specials, held["specials"]]
+                        )
+                    round_i += 1
+                    _free_mempool_each_round()
+                    continue
+
+                # No pickable cell outside the frozen set: flush the pool
+                # through one full-width in-model block, THEN let the
+                # scheduler retire/refill (never earlier — a pending source
+                # pins its cell's slot).
+                n_flushed = 0
+                if pending:
+                    merged = (
+                        pending[0]
+                        if len(pending) == 1
+                        else {
+                            k: self.xp.concatenate([p[k] for p in pending])
+                            for k in pending[0]
+                        }
+                    )
+                    n_flushed = int(len(merged["specials"]))
+                    if int(self.xp.unique(merged["specials"]).size) != n_flushed:
+                        # Serial-within-band invariant: the freeze logic
+                        # guarantees one pooled source per cell.
+                        raise RuntimeError(
+                            f"{self.name}: grouped RJ pool holds duplicate "
+                            "(temp, walker, band) cells — same-band sources "
+                            "must never share an in-model block."
+                        )
+                    with _tspan(tm, "inmodel_repeats"):
+                        self._run_in_model_repeats(
+                            model, band_sorter, buffer_obj, band_temps,
+                            merged, ll_change_log, prop_counts, acc_counts,
+                        )
+                    n_flushes += 1
+                    flush_sum += n_flushed
+                    pending = []
+                    pending_specials = pending_specials[:0]
+                n_refilled = _advance_and_refill()
+                _free_mempool_each_round()
+                if n_flushed == 0 and n_refilled == 0:
+                    # Nothing pooled and nothing new to load: every active
+                    # cell is exhausted (advance() just deactivated them).
+                    break
+            if n_flushes:
+                logger.info(
+                    f"{self.name}: grouped in-model — {n_flushes} flushes, "
+                    f"mean batch {flush_sum / n_flushes:.1f} sources "
+                    f"({scheduler.n_slots} buffer slots)."
+                )
+            if tm is not None:
+                tm.count("inmodel_flushes", n_flushes)
+        else:
+            while scheduler.any_active():
+                with _tspan(tm, "pick"):
+                    picked = self._pick_sources(band_sorter, buffer_obj, scheduler, eligible)
+                if picked is None:
+                    break
+                if tm is not None:
+                    # Batch size per repeat round: on GPU, small batches mean
+                    # the 100-repeat in-model loop is
+                    # kernel-launch-overhead-bound.
+                    tm.count("picked_sources", int(len(picked["specials"])))
+
+                if self.is_rj_prop:
+                    # RJ before/after trace of the chosen cell: snapshots
+                    # bracket the RJ step; figures save only when the cell's
+                    # RJ proposal was ACCEPTED (buffer changed).
+                    # Chronologically BEFORE the in-model sequence figures.
+                    rj_seq = self._debug_rj_select(buffer_obj, picked)
+                    with _tspan(tm, "rj_step"):
+                        if self.rj_replace:
+                            # Fixed-dimension replacement instead of
+                            # birth/death.
+                            self._run_replace_step(
+                                model, band_sorter, buffer_obj, band_temps,
+                                picked, ll_change_log, prop_counts, acc_counts,
+                                round_i, scheduler,
+                            )
+                        else:
+                            self._run_rj_step(
+                                model, band_sorter, buffer_obj, band_temps, picked,
+                                ll_change_log, prop_counts, acc_counts, round_i, scheduler,
+                            )
+                    self._debug_plot_rj_pair(buffer_obj, rj_seq)
+
+                with _tspan(tm, "inmodel_repeats"):
+                    self._run_in_model_repeats(
+                        model, band_sorter, buffer_obj, band_temps, picked,
+                        ll_change_log, prop_counts, acc_counts,
+                    )
+
+                scheduler.record_picks(picked["specials"])
+                _advance_and_refill()
+                round_i += 1
+                _free_mempool_each_round()
         if cell_ll_state is not None:
             # Unit end: cells still resident (active or retired-in-place)
             # never hit a refill -- finalize them against the final slab.
@@ -2510,7 +2653,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             f"({scheduler.n_cells} cells)."
         )
 
-    def _pick_sources(self, band_sorter, buffer_obj, scheduler, eligible):
+    def _pick_sources(self, band_sorter, buffer_obj, scheduler, eligible,
+                      blocked_specials=None):
         """One not-yet-visited source per active cell, without replacement.
 
         Vectorized on ``self.xp``: candidates are gathered through the
@@ -2518,6 +2662,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per cell wins. ``band_sorter.has_run_rj`` marks consumed sources for
         the remainder of this proposal, so every source is visited exactly
         once per pass.
+
+        ``blocked_specials`` (grouped RJ scheduling) removes whole cells from
+        the candidate pool: a cell already holding a pending alive source is
+        frozen until the accumulated in-model flush runs, so the pool can
+        never collect two same-cell sources (serial-within-band rule).
         """
         xp = self.xp
         cand = (
@@ -2527,6 +2676,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 special_band_inds=scheduler.active_slot_specials
             )
         )
+        if blocked_specials is not None and len(blocked_specials):
+            cand = cand & ~xp.isin(
+                band_sorter.special_band_inds, blocked_specials
+            )
         cand_ids = xp.arange(band_sorter.num_sources)[cand]
         if len(cand_ids) == 0:
             return None

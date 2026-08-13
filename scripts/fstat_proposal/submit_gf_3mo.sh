@@ -76,7 +76,18 @@ export GB_MAX_FREQ=2.2e-2
 #      at-cap RJ skip, cell-lifecycle ll credit, GB_MODE=search +
 #      GB_PE_MOVES_STRICT=1 + GB_SEARCH_PRIOR_REMOVAL=1 seeded by the script) --
 export GB_NLEAVES_MAX=10000
-export GB_N_SUBBANDS=2560
+# FULL parity-unit residency (grouped RJ->in-model scheduling, 2026-08-13):
+# one unit = 77 bands x 24 temps x 24 walkers = 44,352 cells; the scheduler
+# clamps n_slots to min(GB_N_SUBBANDS, cells), so 50000 means every cell is
+# resident (zero mid-unit refills) and the grouped in-model flush runs at
+# full grid width. Buffer cost ~255 KB/slot at slab-5 => ~11.3 GB (user
+# budget: 10-20 GB is fine). Back off to 2560 (652 MB) if the pool OOMs.
+export GB_N_SUBBANDS=50000
+# Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
+# (1 proposal per cell per round), then ONE full-width in-model block.
+# Code default since 2026-08-13; pinned for the run record. =0 restores
+# the per-round RJ->in-model interleave.
+export GB_RJ_GROUPED_INMODEL=1
 export GB_FSTAT_REFIT_EVERY=100    # production cadence (5 was verify-only)
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # Slab 5 (user ruling): measured-safe (+-1 layer holds >=1-1e-7 of tone
