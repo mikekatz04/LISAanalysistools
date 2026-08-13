@@ -380,7 +380,7 @@ class GBSetup(Setup, GBSettings):
                     sky_dist = build_gb_galaxy_sky_dist(
                         dist_lims=self.dist_lims
                     )
-                    logger.info(
+                    self.logger.info(
                         "GB sky/distance prior: 3-D Milky Way "
                         "(GB_USE_GALAXY_PRIOR=1), dist_lims=%s kpc.",
                         list(self.dist_lims),
