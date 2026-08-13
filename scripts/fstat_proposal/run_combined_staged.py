@@ -205,6 +205,23 @@ def build_fit():
     nwalkers = int(os.environ.get("NWALKERS", "16"))
     fit = erebor.all_sources(nwalkers=nwalkers)
 
+    # TOBS_TARGET honored (2026-08-13): all_sources pins a FIXED WDM grid
+    # (legacy nf/nt override, mojito-adjusted to 1440x2160 = 90 d) which by
+    # the settings contract BEATS general.tobs_target -- so an explicit
+    # TOBS_TARGET was silently ignored (the 23-mo shakedown ran 90 d). When
+    # the env asks for a Tobs, clear the fixed grid so the build derives
+    # (Nf, Nt) from tobs_target + the wavelet-duration bounds -- the same
+    # machinery that yields 1440x2160 at the 90-d default. Unset env ->
+    # behavior unchanged.
+    if os.environ.get("TOBS_TARGET", "").strip():
+        fit.general.nf = None
+        fit.general.nt = None
+        print(
+            f"[combined] TOBS_TARGET={fit.general.tobs_target:.6g} s: "
+            "cleared the all_sources fixed-grid (nf, nt) override.",
+            flush=True,
+        )
+
     # Every sampled branch needs a stream: NOISE for psd/galfor, GB, VGB.
     src = os.environ.get("SOURCE_TYPES", "NOISE,GB,VGB")
     fit.general.source_types = tuple(
