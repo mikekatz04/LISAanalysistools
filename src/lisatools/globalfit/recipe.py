@@ -2589,7 +2589,14 @@ def build_gb_moves(
         **({"is_rj_prop": True} if _fit_in_move else {}),
         **_fit_kwargs,
         name="rj_fstat_search",
-        use_prior_removal=True,
+        # False (2026-08-13): use_prior_removal=True makes the sorter
+        # ALIVE-ONLY (gbbands keep_all_inds gate) -- no dead-slot birth
+        # candidates, i.e. NOT a birth engine at all (zero-row sorter crash
+        # on the search start once the empty-model guard was fixed). The
+        # search birth engine is fstat births + standard death flips (the
+        # verify-proven config); prior-judged pruning is the separate
+        # rj_prior_removal move in the same stage.
+        use_prior_removal=False,
         phase_maximize=_rj_phase_max,
         run_swaps=True,
         gpus=[],

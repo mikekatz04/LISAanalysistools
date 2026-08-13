@@ -3056,10 +3056,14 @@ class BandSorter(LISAToolsParallelModule):
             proposal_logpdf = self.xp.zeros(self.coords.shape[0])
 
             batch_here = int(1e6)
+            # Batch bounds END at N (eind is exclusive): the old N-1 endpoint
+            # silently left the LAST row's proposal logpdf at 0.0, and the
+            # [-1] indexing crashed outright on an empty coords array
+            # (2026-08-13). np.arange handles N=0 with no special case.
             inds_splitting = np.arange(0, self.coords.shape[0], batch_here)
-            if inds_splitting[-1] != self.coords.shape[0] - 1:
+            if inds_splitting.size == 0 or inds_splitting[-1] != self.coords.shape[0]:
                 inds_splitting = np.concatenate(
-                    [inds_splitting, np.array([self.coords.shape[0] - 1])]
+                    [inds_splitting, np.array([self.coords.shape[0]])]
                 )
 
             for stind, eind in zip(inds_splitting[:-1], inds_splitting[1:]):
