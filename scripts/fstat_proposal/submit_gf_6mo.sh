@@ -24,6 +24,11 @@
 #      closed first (EMRI interpolate.cu hard-exit above all) and the
 #      remove_branch lines in run_combined_staged.py revisited. This
 #      script as written runs the proven 4-branch configuration.
+#   4. Startup-to-target-stage latency (user TODO 2026-08-14): the 3-mo
+#      run spent ~8 min per restart re-walking setup + earlier recipe
+#      stages before reaching gb_search; at 6 mo with more branches this
+#      grows and throttles debugging cadence. Wants stage fast-forward
+#      on resume + lazy per-branch builds before this run ships.
 #
 # RESUME: resubmitting resumes from the h5 (same store dir/base name/env).
 # Fresh start: move/delete ${STORE_DIR} first.
