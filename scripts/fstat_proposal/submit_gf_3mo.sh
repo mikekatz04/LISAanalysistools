@@ -104,6 +104,25 @@ export GB_JUMP_FACTOR=0.4
 # Code default since 2026-08-13; pinned for the run record. =0 restores
 # the per-round RJ->in-model interleave.
 export GB_RJ_GROUPED_INMODEL=1
+# ---- 2026-08-14 rj stack (ALL code defaults; pinned for the run record;
+#      each =0 reverts that piece independently) --------------------------
+export GB_RJ_DIRECT_BATCH=1        # rigid batches -> one end-of-unit in-model
+                                   # phase; =0 restores the staged scheduler
+export GB_RJ_LIVE_CAP_PICK=1       # live at-cap birth gate + same-unit
+                                   # re-entry (freed cells birth again)
+export GB_BUFFER_FIXED_CAPACITY=1  # ONE capacity buffer; smaller units
+                                   # resize-rebind instead of drop+rebuild
+export GB_RJ_FSTAT_CTR_HOIST=1     # F-stat distance centers batched once per
+                                   # unit (was 735 s/propose per-round)
+export GB_FSTAT_CTR_SMEAR=1.5      # sigma widening covering mid-unit
+                                   # residual drift (feeds draw AND densities)
+export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
+# High-f barren-band birth shutoff (search scope): bands above FMIN with
+# AFTER consecutive zero-birth-accept proposes stop proposing births
+# (deaths + in-model continue; [GB_BAND_SHUTOFF] log line per band).
+export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
+export GB_RJ_BAND_SHUTOFF_AFTER=5
+export GB_RJ_BAND_SHUTOFF_SCOPE=search
 export GB_FSTAT_REFIT_EVERY=100    # production cadence (5 was verify-only)
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # Slab 5 (user ruling): measured-safe (+-1 layer holds >=1-1e-7 of tone
