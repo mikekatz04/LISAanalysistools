@@ -2066,6 +2066,41 @@ def _wdm_stationary_psd_column(
     )
 
 
+class _ConstantSequence:
+    """Read-only ``[value] * length`` that never materializes the list.
+
+    ``get_sensitivity``'s per-time-column ``args_list`` / ``kwargs_list``
+    default to one copy of the scalar arguments per WDM time column. On a
+    two-year grid that is ``Nt = 16060`` entries built twice per call, and on
+    the stationary path (the default) only element ``0`` is ever read -- it
+    cost ~0.4 ms of pure list-building per covariance rebuild, which is a
+    third of a coarse-grid noise iteration once the covariance work itself
+    is cheap. Supports exactly what the function needs: ``len``, indexing and
+    iteration.
+    """
+
+    __slots__ = ("_value", "_length")
+
+    def __init__(self, value, length: int):
+        self._value = value
+        self._length = int(length)
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self._value] * len(range(*index.indices(self._length)))
+        if index < 0:
+            index += self._length
+        if not 0 <= index < self._length:
+            raise IndexError(index)
+        return self._value
+
+    def __iter__(self):
+        return iter([self._value] * self._length)
+
+
 def get_sensitivity(
     basis_settings: domains.DomainSettingsBase,
     *args: tuple,
@@ -2164,7 +2199,7 @@ def get_sensitivity(
             else basis_settings
         )
         if kwargs_list is None:
-            kwargs_list = [kwargs for _ in range(basis_settings.Nt)]
+            kwargs_list = _ConstantSequence(kwargs, basis_settings.Nt)
         else:
             assert isinstance(kwargs_list, list)
             valid_lengths = {basis_settings.Nt}
@@ -2182,7 +2217,7 @@ def get_sensitivity(
                     )
 
         if args_list is None:
-            args_list = [args for _ in range(basis_settings.Nt)]
+            args_list = _ConstantSequence(args, basis_settings.Nt)
         else:
             assert isinstance(args_list, list)
             valid_lengths = {basis_settings.Nt}
@@ -4258,6 +4293,20 @@ _UNEQUAL_ARM_ELEMENT_SENS = [
 ]
 
 
+@functools.lru_cache(maxsize=None)
+def _cached_abspath(path: str) -> str:
+    """``os.path.abspath`` memoized on the raw string.
+
+    Noise sampling constructs a fresh instrument component for every proposal
+    row, and each construction normalized the same ``coarse_cache_dir``
+    string -- ~12k identical ``getcwd`` + ``normpath`` round trips per four
+    iterations on the two-year coarse grid. The result depends on the process
+    cwd, which the run does not change after startup; memoizing also makes the
+    resolved cache directory stable if it ever did.
+    """
+    return os.path.abspath(path)
+
+
 class LinkDelayTable:
     """Per-link light travel times tabulated against an absolute clock.
 
@@ -4513,7 +4562,7 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
                 )
         self.ltts = ltts
         self.coarse_cache_dir = (
-            None if coarse_cache_dir is None else os.path.abspath(str(coarse_cache_dir))
+            None if coarse_cache_dir is None else _cached_abspath(str(coarse_cache_dir))
         )
         self.coarse_progress = bool(coarse_progress)
         if wdm_psd_method not in UNEQUAL_ARM_WDM_PSD_METHODS:
@@ -5345,6 +5394,89 @@ class GalacticForeground(SeparableComponent):
             return None
         return np.repeat(col[:, None], settings.basis_shape_active[-1], axis=-1)
 
+    def _fast_hyperbolic_wdm_quadrature_column(
+        self, settings: domains.WDMSettings, Xsens
+    ) -> Optional[np.ndarray]:
+        """One ``layer_calibrated`` WDM column with the node grid cached.
+
+        ``layer_calibrated`` evaluates the spectrum at
+        :data:`STOCHASTIC_WDM_QUADRATURE_NODES` window-weighted nodes per
+        active layer and sums with fixed weights. The nodes, their weights,
+        ``log(f)``, the TDI stochastic response and ``f**(-7/3)`` are all
+        properties of the WDM grid, not of the proposal -- but routing through
+        the generic :func:`get_sensitivity` recomputed every one of them for
+        each of the ~3k proposal rows an iteration builds.
+
+        This is the quadrature-grid twin of :meth:`_fast_hyperbolic_wdm_column`
+        (exact fold) and :meth:`coarse_wdm_profile_estimate` (layer centres),
+        and uses the same ``(f/f_1)**alpha == exp(alpha*(log f - log f_1))``
+        rewrite so ``log(f)`` can ride in the fixed-grid cache. Algebraic
+        rewrite only -- it agrees with the generic path to ~4e-15 relative.
+
+        ``None`` means the caller should use the generic domain path (custom
+        spectra, added stochastic contributions, GPU execution).
+        """
+        if settings.backend.uses_cupy:
+            return None
+        if self.stochastic_fn is not HyperbolicTangentGalacticForeground:
+            return None
+        if self.stochastic_fn.added_stochastic_list:
+            return None
+
+        fold_settings = (
+            settings.fine_settings
+            if isinstance(settings, domains.CoarseWDMSettings)
+            else settings
+        )
+        key = (id(fold_settings), Xsens, "hyperbolic_tangent_quadrature_v1")
+        hit = self._spectral_cache.get(key)
+        if hit is not None and hit[0] is fold_settings:
+            _, f_nodes, log_f, response_f_power, weights = hit
+        else:
+            f_nodes, weights = fold_settings.wdm_layer_quadrature_data(
+                STOCHASTIC_WDM_QUADRATURE_NODES
+            )
+            f_nodes = np.asarray(f_nodes)
+            weights = np.asarray(weights)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                log_f = np.log(f_nodes)
+                response = np.asarray(
+                    Xsens.stochastic_transform(f_nodes, np.ones_like(f_nodes))
+                )
+                response_f_power = response * f_nodes ** (-7.0 / 3.0)
+            self._spectral_cache[key] = (
+                fold_settings,
+                f_nodes,
+                log_f,
+                response_f_power,
+                weights,
+            )
+
+        amp, fk, alpha, f_1, f_2 = self.foreground_params
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            rolloff_power = np.exp(alpha * (log_f - np.log(f_1)))
+            psd_nodes = (
+                amp
+                * np.exp(-rolloff_power)
+                * response_f_power
+                * 0.5
+                * (1.0 + np.tanh(-(f_nodes - fk) / f_2))
+            )
+        col = np.sum(psd_nodes * weights[None, :], axis=-1)
+        # get_sensitivity applies fill_nans to the FINAL column, after the
+        # quadrature sum has propagated any f=0 indeterminacy -- match that.
+        col[np.isnan(col)] = 0.0
+        return col
+
+    def _fast_hyperbolic_wdm_quadrature_magnitude(
+        self, settings: domains.WDMSettings, Xsens
+    ) -> Optional[np.ndarray]:
+        """Cached layer-calibrated column broadcast across the WDM time axis."""
+        col = self._fast_hyperbolic_wdm_quadrature_column(settings, Xsens)
+        if col is None:
+            return None
+        return np.repeat(col[:, None], settings.basis_shape_active[-1], axis=-1)
+
     def coarse_wdm_profile(
         self,
         settings: domains.CoarseWDMSettings,
@@ -5479,11 +5611,11 @@ class GalacticForeground(SeparableComponent):
         # foreground magnitude in the domain basis: stochastic contribution only
         # (no instrument term), folded through the same domain dispatch.
         mag = None
-        if (
-            isinstance(settings, domains.WDMSettings)
-            and self.wdm_psd_method == "fold"
-        ):
-            mag = self._fast_hyperbolic_wdm_magnitude(settings, Xsens)
+        if isinstance(settings, domains.WDMSettings):
+            if self.wdm_psd_method == "fold":
+                mag = self._fast_hyperbolic_wdm_magnitude(settings, Xsens)
+            elif self.wdm_psd_method == "layer_calibrated":
+                mag = self._fast_hyperbolic_wdm_quadrature_magnitude(settings, Xsens)
         if mag is None:
             mag = get_sensitivity(
                 settings,

@@ -483,6 +483,32 @@ class NoiseCovarianceFastPathTest(unittest.TestCase):
             fast = foreground.base_covariance(settings)[0, 0]
             np.testing.assert_allclose(fast, reference, rtol=1e-14, atol=0.0)
 
+    def test_hyperbolic_foreground_calibrated_matches_generic_model(self):
+        """Cached quadrature-node invariants preserve layer_calibrated."""
+        from lisatools.domains import CoarseWDMSettings
+        from lisatools.sensitivity import X2TDISens
+        from lisatools.stochastic import HyperbolicTangentGalacticForeground
+
+        fine = self._wdm()
+        params = (3.26651613e-44, 2.09278117e-3, 1.18300266, 3014.3, 2957.7)
+        foreground = GalacticForeground(
+            params, tdi_generation=2, wdm_psd_method="layer_calibrated"
+        )
+        for settings in (fine, CoarseWDMSettings.from_fine(fine, 7)):
+            reference = get_sensitivity(
+                settings,
+                sens_fn=X2TDISens,
+                stochastic_params=params,
+                stochastic_function=HyperbolicTangentGalacticForeground,
+                include_instrument=False,
+                fill_nans=0.0,
+                wdm_psd_method="layer_calibrated",
+            )
+            fast = foreground.base_covariance(settings)[0, 0]
+            # exp(alpha*(log f - log f_1)) for (f/f_1)**alpha is an algebraic
+            # rewrite, so this is FP-equal rather than bit-equal.
+            np.testing.assert_allclose(fast, reference, rtol=1e-13, atol=0.0)
+
     def test_hyperbolic_foreground_selected_profile_matches_full(self):
         """Selected foreground profiles retain exact full-fold covariance."""
         from lisatools.domains import CoarseWDMSettings
