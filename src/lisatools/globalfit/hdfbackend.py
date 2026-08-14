@@ -569,12 +569,25 @@ class GFHDFBackend(eryn_HDFBackend):
 
         """
 
+        # Timed either way: the sync branch is the full gzip+h5 write on the
+        # sampler process (the cost a dedicated saver rank would remove);
+        # the handoff branch is the blocking pickled send (the cost that
+        # REMAINS on the sampler under mpiexec >= 3) -- both numbers are
+        # needed to judge the trade.
+        t0 = time.perf_counter()
         if self.comm is None or self.comm.Get_size() < 3:
             self.save_step_main(*args, **kwargs)
-
+            mode = "sync write"
         else:
             state = args[0]
             self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank)
+            mode = f"handoff to rank {self.save_plot_rank}"
+        try:
+            mb = os.path.getsize(self.filename) / 1e6
+        except OSError:
+            mb = float("nan")
+        logger.info("[SAVE] save_step %.2f s (%s; h5 now %.1f MB)",
+                    time.perf_counter() - t0, mode, mb)
 
     def get_a_sample(self, it):
         """Access a sample in the chain
