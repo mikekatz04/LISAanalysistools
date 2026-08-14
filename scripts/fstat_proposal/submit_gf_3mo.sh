@@ -97,6 +97,13 @@ export GB_RJ_FLIP_FRACTION=0.2
 # sigma); 0.2 targets healthy mixing. Tune against the [GB_ACCEPT]
 # per-proposal-type line.
 export GB_JUMP_FACTOR=0.2
+# DIAGNOSTIC (2026-08-14) -- REMOVE after one [GB_TIMING rj] readout:
+# sync the device at every timing mark so the rj sub-marks
+# (rj_fstat_centers / rj_birth_prior / rj_getll / rj_score_rest) carry
+# exactly their own kernel time (host-vs-device attribution of the
+# ~1 s/round scoring section). Costs a little wall from the forced
+# syncs; one propose of data is enough.
+export GB_PROP_TIMING_SYNC=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
 # Code default since 2026-08-13; pinned for the run record. =0 restores

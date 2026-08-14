@@ -3140,15 +3140,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if picked is None:
             return
         # Checkpoint timing INSIDE the rj step (the 85%-of-propose black
-        # box): host wall between marks; kernel time lands on the mark that
-        # forces the sync (GB_PROP_TIMING_SYNC=1 for exact attribution).
+        # box): host wall between marks. Launches are async, so by default
+        # device work lands on whichever mark forces the next sync;
+        # GB_PROP_TIMING_SYNC=1 syncs at EVERY mark so each stage carries
+        # exactly its own kernel time (same contract as _ProposeTimer.span).
         _tm_rj = getattr(self, "_prop_timer", None)
+        _rj_sync = getattr(_tm_rj, "_sync", None)
+        if _rj_sync is not None:
+            _rj_sync()
         _t_mark = time.perf_counter()
 
         def _mark(_name):
             nonlocal _t_mark
             if _tm_rj is None:
                 return
+            if _rj_sync is not None:
+                _rj_sync()
             _now = time.perf_counter()
             _tm_rj.add(_name, _now - _t_mark)
             _t_mark = _now
@@ -3329,16 +3336,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     params[birth_k, 3] = phi0_max % (2 * np.pi)
                     _bl = self._slot0_log_proposal(params[birth_k, 0], ln_center, sigma)
                     _fstat_factor_corr[birth_k] = -_bl - _log_range
+                    _mark("rj_fstat_centers")
                     # Re-evaluate the global prior at the drawn distance/angles
                     # (the earlier curr_logp used the placeholder draw); f0,
                     # band and leaf-cap gating are unchanged by this overwrite.
                     curr_logp[birth_k] = cp.asarray(
                         self.gpu_priors[self.branch_name].logpdf(params[birth_k]))
+                    _mark("rj_birth_prior")
                     oob_rows = _eval(birth_k, True)
                     if buffer_obj.phase_angle is not None:
                         params[birth_k, 3] = params[birth_k, 3] - buffer_obj.phase_angle
+                    _mark("rj_getll")
                 if len(death_k):
                     oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
+                    _mark("rj_getll")
                     Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
                         model, params[death_k], walker_ref)
                     ln_center_d, sigma_d = self._dist_center_and_width(
@@ -3346,6 +3357,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _dl = self._slot0_log_proposal(
                         params[death_k, 0], ln_center_d, sigma_d)
                     _fstat_factor_corr[death_k] = _dl + _log_range
+                    _mark("rj_fstat_centers")
             elif self.phase_maximize and len(birth_k):
                 # Maximise the birth phase; deaths keep the true phase.
                 oob_rows = _eval(birth_k, True)
@@ -3353,8 +3365,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     params[birth_k, 3] = params[birth_k, 3] - buffer_obj.phase_angle
                 if len(death_k):
                     oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
+                _mark("rj_getll")
             else:
                 oob_rows = _eval(k_ids, False)
+                _mark("rj_getll")
 
             # Legacy step-1 amplitude pin: scale the drawn amplitude by the
             # empirical residual ratio ``s = d_h/h_h`` (a 1-parameter fit at the
@@ -3416,7 +3430,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 picked, round_i, scheduler,
             )
 
-        _mark("rj_kernel")
+        # Logs before 2026-08-15 report everything since rj_prior_gate as one
+        # ``rj_kernel`` mark; it now splits into rj_fstat_centers +
+        # rj_birth_prior + rj_getll + rj_score_rest (sum the four to compare
+        # against old logs). rj_score_rest = delta-ll assembly, SNR gate and
+        # debug hooks after the scoring calls.
+        _mark("rj_score_rest")
         beta = band_temps[picked["band_inds"], picked["temp_inds"]]
         factors = band_sorter.factors[ids]
         if _fstat_factor_corr is not None:
