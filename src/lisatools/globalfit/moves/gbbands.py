@@ -1270,9 +1270,11 @@ class _RoutedBandEngine:
         f0-sorted stage-B boxes -- so contiguous chunks stay
         reference-block coherent per lane). Lanes run concurrently on host
         threads (one per device with rows; cupy's current device is
-        thread-local; kernel launches release the GIL -- the
-        ``_run_per_split`` pattern), each entering its own device context
-        and returning host ``(N, M)``.
+        thread-local; the fstat scorer + reference-build wraps release the
+        GIL via ``nb::call_guard`` in binding_gbgpu -- a GBGPU wheel built
+        before that guard still works but serializes the lanes' kernel
+        calls), each entering its own device context and returning host
+        ``(N, M)``.
 
         DETERMINISM: results are IDENTICAL to the single-device path --
         every row is scored by exactly ONE lane whose replica performs the
