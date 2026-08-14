@@ -37,13 +37,13 @@
 
 # ---- fill these in ---------------------------------------------------------
 #SBATCH --job-name=gf23mo         # job name
-#SBATCH --partition=FILLME        # GPU partition
+#SBATCH --partition=gpu-80-spot   # GPU partition
 #SBATCH --gres=gpu:2              # 2 GPUs; consider 4 if the shakedown is tight
 #SBATCH --nodes=1                 # single node
 #SBATCH --ntasks=1                # single process (MPI singleton)
-#SBATCH --cpus-per-task=FILLME    # e.g. 8-16
-#SBATCH --mem=FILLME              # e.g. 128G+ (host arrays scale ~8x vs 3 mo)
-#SBATCH --time=FILLME             # wall limit -- iterations are ~2-5x slower
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=0                   # whole-node memory
+#SBATCH --time=24:00:00
 #SBATCH --output=gf23mo_%j.log    # combined stdout+stderr
 # ----------------------------------------------------------------------------
 
@@ -51,7 +51,7 @@ set -euo pipefail
 
 # ---- environment (fill in your activation) ---------------------------------
 # module load FILLME_cuda_module
-# source /shared/home/mlkatz1/envs/gf_env/bin/activate    # or conda activate
+source /shared/home/mlkatz1/envs/gf_env/bin/activate
 cd /shared/home/mlkatz1/lisa-analysis-tools
 
 STORE_DIR=./gf_prod_23mo/
@@ -119,7 +119,12 @@ export GB_N_SUBBANDS=8192   # PER GPU (LAT >= this commit): total = x n_gpus
 # RJ pick thinning (user ruling 2026-08-14): each round proposes to a
 # 0.3 random subset of eligible slots; in-model repeats still cover
 # ALL alive sources (flip gate is rj-only by construction).
-export GB_RJ_FLIP_FRACTION=0.3
+export GB_RJ_FLIP_FRACTION=0.2
+# In-model info-matrix jump scale (user ruling 2026-08-14): the 0.005
+# default measured 95% cold acceptance (steps ~0.5% of a posterior
+# sigma); 0.2 targets healthy mixing. Tune against the [GB_ACCEPT]
+# per-proposal-type line.
+export GB_JUMP_FACTOR=0.2
 # Comb nodes scale ~ Tobs (0.5/Tobs spacing) -> each epoch fit is ~8x the
 # 3-mo cost. 100 keeps the same iteration cadence; raise to 200 if the
 # [GF_TIMING] lines show refits dominating.
