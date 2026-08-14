@@ -780,6 +780,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.band_units = max(1, int(band_units))
         # Info-matrix jump scale (Gaussian draw through the Cholesky factor).
         self.jump_factor = float(jump_factor)
+        # Env override (knob = capitalized field, branch-prefixed). The
+        # measured in-model info-mat acceptance at the 0.005 default was
+        # 0.95 -- steps ~0.5% of a posterior sigma; the optimal Gaussian
+        # jump for a well-scaled Fisher is ~2.38/sqrt(d) with acceptance
+        # ~0.23, so this knob is the direct mixing lever.
+        _jf_env = os.environ.get(
+            getattr(self, "branch_name", "gb").upper() + "_JUMP_FACTOR")
+        if _jf_env:
+            self.jump_factor = float(_jf_env)
         self._fdot_scale = 1e-16
 
         # Parent binding: config-only FD comp + move-level engine. A user-
@@ -2209,6 +2218,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 rj_a, rj_p, rj_a / max(rj_p, 1),
                 im_ac, im_pc, im_ac / max(im_pc, 1),
                 im_a, im_p, im_a / max(im_p, 1))
+            kc = getattr(self, "_im_kind_counts", None)
+            if kc:
+                parts = "; ".join(
+                    f"{k}: cold {r[3]}/{r[2]} ({r[3] / max(r[2], 1):.4f}) "
+                    f"all {r[1]}/{r[0]} ({r[1] / max(r[0], 1):.4f})"
+                    for k, r in sorted(kc.items()))
+                logger.info("[GB_ACCEPT %s] in-model by proposal type -- %s "
+                            "(jump_factor=%.4g)", self.name, parts,
+                            self.jump_factor)
+                self._im_kind_counts = {}
         except Exception:  # diagnostics must never kill a propose
             pass
         # Per-propose F-stat peak census: how many birth draws each peak
@@ -4247,6 +4266,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             and bool(np.random.rand() < self.stretch_probability)
         )
 
+        self._last_im_kind = "stretch" if use_stretch else "infomat"
         if use_stretch:
             # Friends drawn per source; Eryn's GroupStretchMove supplies the
             # stretch math + (ndim-1)*log(zz) factors through find_friends.
@@ -4669,6 +4689,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     accept[bad_accepts] = False
 
                 prop_counts[1][t_i[sl], w_i[sl], b_i[sl]] += 1
+                # Per-proposal-type acceptance (stretch vs info-matrix):
+                # the pooled counter cannot say WHICH proposal is timid.
+                _kind = getattr(self, "_last_im_kind", None)
+                if _kind is not None:
+                    kc = getattr(self, "_im_kind_counts", None)
+                    if kc is None:
+                        kc = self._im_kind_counts = {}
+                    rec = kc.setdefault(_kind, [0, 0, 0, 0])  # p, a, p0, a0
+                    rec[0] += int(t_i[sl].shape[0])
+                    rec[2] += int((t_i[sl] == 0).sum())
                 if bool(accept.any()):
                     # Global positions of the accepted movers: a boolean mask
                     # on the full path, the half's index array otherwise.
@@ -4678,6 +4708,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     curr_prior[gi] = new_logp[accept]
                     ll_change_log[t_i[gi], w_i[gi], b_i[gi]] += delta_ll[accept]
                     acc_counts[1][t_i[gi], w_i[gi], b_i[gi]] += 1
+                    if _kind is not None:
+                        rec[1] += int(accept.sum())
+                        rec[3] += int((t_i[gi] == 0).sum())
                     if (
                         getattr(self, "_sorter_dh", None) is not None
                         and getattr(buffer_obj, "d_h_out", None) is not None
@@ -6010,6 +6043,7 @@ class VGBSpecialStretchMove(GBSpecialBase):
 
     def in_model_proposal(self, coords, chol, band_sorter, source_ids, model):
         """One parity HALF of a Goodman-Weare red-blue sweep, via eryn's stretch.
+        (VGB is pure stretch: fixed-dimensional, no info-matrix branch.)
 
         The base repeat block (``sequential_parity_repeats = True``) calls
         this once per parity half per repeat -- even-parity movers first,
@@ -6028,6 +6062,7 @@ class VGBSpecialStretchMove(GBSpecialBase):
         ``get_proposal``'s internal dispatch on the plain stretch rather
         than GroupMove's friend-table overrides.
         """
+        self._last_im_kind = "stretch"
         xp = self.xp
         nw = self.nwalkers
         assert nw >= 2 and nw % 2 == 0, (
