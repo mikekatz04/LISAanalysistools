@@ -6402,6 +6402,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_swaps_accepted = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
         band_swaps_proposed = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
 
+        # Safety for the temper relocation (user ruling 2026-08-14: swaps
+        # run inside rj_prior_removal, not the fstat-birth move): a move
+        # designated as the swap carrier whose gate can never fire must
+        # SAY so -- a silently frozen temperature ladder is a correctness
+        # bug, not a tuning choice.
+        if (
+            self.run_swaps
+            and (self.temperature_control is None or self.ntemps <= 1)
+            and not getattr(self, "_run_swaps_skip_warned", False)
+        ):
+            self._run_swaps_skip_warned = True
+            logger.warning(
+                "%s: run_swaps=True but tempering cannot run "
+                "(temperature_control=%s, ntemps=%d) -- band-temperature "
+                "swaps are NOT happening through this move.",
+                self.name,
+                "set" if self.temperature_control is not None else "None",
+                self.ntemps,
+            )
         if (
             self.temperature_control is not None
             and self.time % 1 == 0

@@ -2583,6 +2583,21 @@ def build_gb_moves(
             )
 
     #* ============================================= SEARCH MOVES =============================================
+    # GB tempering placement (user ruling 2026-08-14): when the
+    # prior-removal companion is in the search cycle, the band-temperature
+    # swap stage (426 s/propose at 3 mo; temper_buffer 389 s of twin
+    # builds + fills) runs INSIDE ``rj_prior_removal`` -- the LAST RJ
+    # move of the per-iteration cycle, whose alive-only cell set is also
+    # the natural future host for swap-fill reuse -- instead of inside
+    # the long fstat-birth propose. Exactly ONE GB move tempers per
+    # iteration either way: when the removal move is absent (PE mode /
+    # search_prior_removal off) the fstat move keeps the swaps.
+    # GB_TEMPER_ON_REMOVAL=0 restores the old placement.
+    _temper_on_removal = (
+        getattr(gb_info, "mode", "pe") == "search"
+        and getattr(gb_info, "search_prior_removal", False)
+        and os.environ.get("GB_TEMPER_ON_REMOVAL", "1") == "1"
+    )
     gb_search_prune_move = _RJBirth(
         *gb_move_args,
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
@@ -2598,7 +2613,7 @@ def build_gb_moves(
         # rj_prior_removal move in the same stage.
         use_prior_removal=False,
         phase_maximize=_rj_phase_max,
-        run_swaps=True,
+        run_swaps=not _temper_on_removal,
         gpus=[],
         **gb_move_kwargs
     )
@@ -2712,7 +2727,9 @@ def build_gb_moves(
             # fstat-dist-birth ctor defaults off, so death factors are the
             # plain prior logpdf.
             phase_maximize=False,
-            run_swaps=False,
+            # Band-temperature swaps live HERE when _temper_on_removal
+            # (see the placement comment at the search-move block).
+            run_swaps=_temper_on_removal,
             gpus=[],
             **{**gb_move_kwargs, "leaf_cap_update": False},
         )
