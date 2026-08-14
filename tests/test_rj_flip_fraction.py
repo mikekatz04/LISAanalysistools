@@ -183,6 +183,26 @@ class SchedulerFrozenAdvanceTest(unittest.TestCase):
         self.assertEqual(len(inds_fill), 2)
 
 
+class FstatCenterCacheLookupTest(unittest.TestCase):
+    def test_lookup_maps_main_ids_to_cache_rows(self):
+        m = _move(1.0)
+        m.name = "test"
+        ids = np.array([3, 7, 11, 40, 41, 90])  # ascending, as get_subset_inds
+        m._fstat_ctr = {"ids": ids, "ln_center": np.arange(6.0)}
+        pos = m._fstat_ctr_lookup(np.array([11, 3, 90]))
+        np.testing.assert_array_equal(pos, [2, 0, 5])
+        np.testing.assert_array_equal(
+            m._fstat_ctr["ln_center"][pos], [2.0, 0.0, 5.0]
+        )
+
+    def test_lookup_raises_on_foreign_id(self):
+        m = _move(1.0)
+        m.name = "test"
+        m._fstat_ctr = {"ids": np.array([3, 7, 11])}
+        with self.assertRaises(RuntimeError):
+            m._fstat_ctr_lookup(np.array([7, 8]))  # 8 not in the unit
+
+
 class ResolveRJFlipFractionTest(unittest.TestCase):
     def test_kwarg_wins_over_env(self):
         import os

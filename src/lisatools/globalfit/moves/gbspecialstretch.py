@@ -2668,6 +2668,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
         if tm is not None:
             tm.count("cells", int(scheduler.n_cells))
+        # F-stat distance-center HOIST (2026-08-14; job-187 sync autopsy:
+        # the per-round center chain cost 735 s/propose = half the rj
+        # black box). Computed once per unit over all subset rows and
+        # looked up per round; GB_RJ_FSTAT_CTR_HOIST=0 restores the
+        # per-round computation. Reset unconditionally so a unit that
+        # skips the precompute can never see a previous unit's cache.
+        self._fstat_ctr = None
+        if (
+            self.rj_fstat_dist_birth
+            and not self.rj_replace
+            and os.environ.get("GB_RJ_FSTAT_CTR_HOIST", "1") == "1"
+        ):
+            with _tspan(tm, "rj_fstat_centers"):
+                self._fstat_ctr = self._precompute_fstat_centers(
+                    model, band_sorter, subset
+                )
         # Intra-propose memory telemetry: a grouped-RJ propose can run for
         # hours across many units with no lifecycle line until exit, which
         # left the 2026-08-13 OOM (pool 11->40 GB inside one propose)
@@ -3153,6 +3169,78 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logg = logg - lv  # Jacobian d(ln dist)/d(dist) = 1/dist
         return logg
 
+    def _precompute_fstat_centers(self, model, band_sorter, subset):
+        """Unit-open F-stat center cache for the distance-birth proposal.
+
+        The job-187 sync autopsy measured the per-round center chain at
+        735 s/propose — half the rj black box — for math whose inputs are
+        all fixed at unit open: birth coordinates are pre-drawn at sorter
+        build, an alive row's coordinates cannot change before its single
+        RJ pick (``has_run_rj``; in-model updates only touch rows AFTER
+        they pool), and the parent residual is in exactly the state the
+        first pick round would see (the parity class is opened before
+        :meth:`_run_band_unit`). So the (A, phi0, iota, psi, F) maxima and
+        the slot-0 ``(ln_center, sigma)`` are computed ONCE here for every
+        row of the unit, batched through the F-stat comp in
+        ``GB_FSTAT_CTR_BATCH`` chunks (default 4096, the comb sweep's
+        proven batch), and looked up per round. Mid-unit drift of the
+        reference walker's residual (its own accepted flips) is the same
+        order of approximation the per-round path already accepted
+        mid-propose — and the cache is at least internally consistent
+        across the unit where the per-round path drifted.
+        """
+        xp = self.xp
+        ids = subset.inds_main_band_sorter
+        n = int(len(ids))
+        if n == 0:
+            return None
+        walker_ref = getattr(self, "_fstat_walker_ref", 0)
+        params = band_sorter.coords[ids]
+        batch = int(os.environ.get("GB_FSTAT_CTR_BATCH", "4096"))
+        A = xp.zeros(n)
+        phi0 = xp.zeros(n)
+        iota = xp.zeros(n)
+        psi = xp.zeros(n)
+        F = xp.zeros(n)
+        for st in range(0, n, batch):
+            en = min(st + batch, n)
+            (A[st:en], phi0[st:en], iota[st:en], psi[st:en],
+             F[st:en]) = self._fstat_dist_centers(
+                model, params[st:en], walker_ref)
+        ln_center, sigma = self._dist_center_and_width(params, A, F)
+        # Snapshot-drift smear (user ruling 2026-08-14): the cache reads the
+        # live walker-ref residual ONCE at unit open, so the lognormal is
+        # WIDENED by GB_FSTAT_CTR_SMEAR (default 1.5x) to cover mid-unit
+        # residual drift. The smeared sigma feeds BOTH the draw and the
+        # forward/reverse densities, so the proposal remains exactly
+        # detailed-balance-valid -- just broader. (A search-mode variant
+        # that re-centers without paying the density -- deliberately
+        # breaking detailed balance for faster burn-in -- was considered
+        # and PARKED, user 2026-08-14: "maybe not ideal".)
+        sigma = sigma * float(os.environ.get("GB_FSTAT_CTR_SMEAR", "1.5"))
+        return {
+            # ids is ascending by construction (arange[bool] in
+            # get_subset_inds) -- _fstat_ctr_lookup relies on it.
+            "ids": xp.asarray(ids),
+            "phi0": phi0, "iota": iota, "psi": psi,
+            "ln_center": ln_center, "sigma": sigma,
+        }
+
+    def _fstat_ctr_lookup(self, rows_ids):
+        """Cache positions of main-sorter ``rows_ids`` (verified gather)."""
+        xp = self.xp
+        c = self._fstat_ctr
+        pos = xp.searchsorted(c["ids"], rows_ids)
+        # Every picked row belongs to this unit's subset by construction;
+        # a mismatch means the cache is stale/foreign -- fail loudly, the
+        # factors it would produce are silently wrong.
+        if not bool((c["ids"][pos] == rows_ids).all()):
+            raise RuntimeError(
+                f"{self.name}: F-stat center cache does not cover the "
+                "picked rows (stale unit cache?)"
+            )
+        return pos
+
     def _apply_rj_flip_fraction(self, band_sorter, picked):
         """Gate the DEATH attempts of picked ALIVE rows to the flip subset.
 
@@ -3389,11 +3477,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 walker_ref = getattr(self, "_fstat_walker_ref", 0)
                 _fstat_factor_corr = cp.zeros(len(ids))
                 _log_range = self._log_dist_range(band_sorter)
+                # Unit-open center cache (see _precompute_fstat_centers);
+                # None = hoist disabled -> per-round computation below.
+                _ctr = getattr(self, "_fstat_ctr", None)
                 if len(birth_k):
-                    A_max, phi0_max, iota_max, psi_max, F = self._fstat_dist_centers(
-                        model, params[birth_k], walker_ref)
-                    ln_center, sigma = self._dist_center_and_width(
-                        params[birth_k], A_max, F)
+                    if _ctr is not None:
+                        _bpos = self._fstat_ctr_lookup(ids[birth_k])
+                        phi0_max = _ctr["phi0"][_bpos]
+                        iota_max = _ctr["iota"][_bpos]
+                        psi_max = _ctr["psi"][_bpos]
+                        ln_center = _ctr["ln_center"][_bpos]
+                        sigma = _ctr["sigma"][_bpos]
+                    else:
+                        A_max, phi0_max, iota_max, psi_max, F = self._fstat_dist_centers(
+                            model, params[birth_k], walker_ref)
+                        ln_center, sigma = self._dist_center_and_width(
+                            params[birth_k], A_max, F)
                     z = xp.asarray(cp.random.randn(len(birth_k)))
                     ln_draw = ln_center + sigma * z
                     if _gb_use_distance(self):
@@ -3419,10 +3518,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 if len(death_k):
                     oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
                     _mark("rj_getll")
-                    Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
-                        model, params[death_k], walker_ref)
-                    ln_center_d, sigma_d = self._dist_center_and_width(
-                        params[death_k], Ad, Fd)
+                    if _ctr is not None:
+                        _dpos = self._fstat_ctr_lookup(ids[death_k])
+                        ln_center_d = _ctr["ln_center"][_dpos]
+                        sigma_d = _ctr["sigma"][_dpos]
+                    else:
+                        Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
+                            model, params[death_k], walker_ref)
+                        ln_center_d, sigma_d = self._dist_center_and_width(
+                            params[death_k], Ad, Fd)
                     _dl = self._slot0_log_proposal(
                         params[death_k, 0], ln_center_d, sigma_d)
                     _fstat_factor_corr[death_k] = _dl + _log_range
