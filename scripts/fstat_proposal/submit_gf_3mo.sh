@@ -82,7 +82,12 @@ export GB_NLEAVES_MAX=10000
 # resident (zero mid-unit refills) and the grouped in-model flush runs at
 # full grid width. Buffer cost ~255 KB/slot at slab-5 => ~11.3 GB (user
 # budget: 10-20 GB is fine). Back off to 2560 (652 MB) if the pool OOMs.
-export GB_N_SUBBANDS=4096   # staged buffer slots; bounds rj/in-model transients (job-159/177 validated)
+# 16384 (user Q 2026-08-14): slots now amortize ROUNDS, not just memory --
+# rounds/unit ~ waves x per-wave depth, so 4x residency ~ 3-4x fewer
+# 2.4s host round-trips. ~4.2 GB buffer; post-fix profile at 4096 was
+# flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
+# full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
+export GB_N_SUBBANDS=16384
 # RJ pick thinning (user ruling 2026-08-14): each round proposes to a
 # 0.3 random subset of eligible slots; in-model repeats still cover
 # ALL alive sources (flip gate is rj-only by construction).
