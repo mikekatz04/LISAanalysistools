@@ -50,12 +50,39 @@ Key env knobs
     GB_DEBUG_PLOT_BAND   ONE band index -- unset means EVERY band, which at
                          ~1150 cells renders thousands of figures per proposal
     STAGE_SKIP_NOISE=1   start at stage 2 (noise already converged)
+    STAGE_NOISE_ONLY=1   run only the two noise search stages, then stop
+    STAGE_NOISE_VGB_PE=1 searches, then PE-sample psd+galfor+vgb (no GB);
+                         bounded by NUM_ITERATIONS
 """
 from __future__ import annotations
 
 import logging
 import os
 import sys
+
+# GB stage scoping -- MUST be seeded before ANY lisatools.globalfit.stock
+# import: ``erebor``'s module-level default instances snapshot every
+# env-backed field at import time and ``erebor.all_sources(...)`` CLONES
+# that snapshot, so a setdefault placed after the import is invisible.
+# GB_MODE=search arms the SEARCH-stage GB moves (leaf caps from 1, birth
+# phase-max, flip 1.0, zero-leaf start -- injection/SNR seeding skipped);
+# GB_PE_MOVES_STRICT keeps that scoped: the pe-NAMED instances (rj_prior /
+# rj_fstat_mcmc / rj_refit, the full_pe stage) stay strictly PE regardless.
+os.environ.setdefault("GB_MODE", "search")
+os.environ.setdefault("GB_PE_MOVES_STRICT", "1")
+# The gb_search stage lists Move("rj_prior_removal") -- build_gb_moves only
+# CONSTRUCTS that stock move when gb.search_prior_removal is on (and mode is
+# search), so the knob must default on here or recipe materialization fails
+# with "no stock move under this name". Search-stage-only either way: the
+# move is search-gated and full_pe never references it.
+os.environ.setdefault("GB_SEARCH_PRIOR_REMOVAL", "1")
+# NITER is the name this script's docs (and muscle memory) use; the stock
+# field is general.num_iterations -> env NUM_ITERATIONS (rule 0). Map it
+# HERE, before any stock.erebor import snapshots the env -- a bare NITER
+# was silently ignored (the smoke "NITER=12" never applied; runs ended at
+# whatever NUM_ITERATIONS resolved to, looking like silent deaths).
+if os.environ.get("NITER") and not os.environ.get("NUM_ITERATIONS"):
+    os.environ["NUM_ITERATIONS"] = os.environ["NITER"]
 
 logger = logging.getLogger("combined_staged")
 
@@ -73,7 +100,12 @@ def _apply_smoke_defaults() -> None:
     """
     smoke = {
         # --- shape ---
-        "NITER": "3",
+        # 12, not 3: the chunked noise search (MAXLOGL_ITERS_PER_STEP) now
+        # spends real engine iterations per stage -- this is the run-wide
+        # total -- and the budget must reach the GB stages. NUM_ITERATIONS
+        # is the REAL knob (NITER was a dead name; the module-top shim maps
+        # it now).
+        "NUM_ITERATIONS": "12",
         "NWALKERS": "8",
         "GB_NTEMPS": "6",
         "VGB_NTEMPS": "4",
@@ -173,6 +205,23 @@ def build_fit():
     nwalkers = int(os.environ.get("NWALKERS", "16"))
     fit = erebor.all_sources(nwalkers=nwalkers)
 
+    # TOBS_TARGET honored (2026-08-13): all_sources pins a FIXED WDM grid
+    # (legacy nf/nt override, mojito-adjusted to 1440x2160 = 90 d) which by
+    # the settings contract BEATS general.tobs_target -- so an explicit
+    # TOBS_TARGET was silently ignored (the 23-mo shakedown ran 90 d). When
+    # the env asks for a Tobs, clear the fixed grid so the build derives
+    # (Nf, Nt) from tobs_target + the wavelet-duration bounds -- the same
+    # machinery that yields 1440x2160 at the 90-d default. Unset env ->
+    # behavior unchanged.
+    if os.environ.get("TOBS_TARGET", "").strip():
+        fit.general.nf = None
+        fit.general.nt = None
+        print(
+            f"[combined] TOBS_TARGET={fit.general.tobs_target:.6g} s: "
+            "cleared the all_sources fixed-grid (nf, nt) override.",
+            flush=True,
+        )
+
     # Every sampled branch needs a stream: NOISE for psd/galfor, GB, VGB.
     src = os.environ.get("SOURCE_TYPES", "NOISE,GB,VGB")
     fit.general.source_types = tuple(
@@ -182,12 +231,11 @@ def build_fit():
     for branch in ("mbh", "emri", "sobbh"):
         fit.remove_branch(branch)
 
-    # Registered GB move names (build_gb_moves / setup_gb_moves) differ from
-    # the shorthand the run is discussed in:
-    #   gb_rj_fstat_search  -> rj_fstat_mcmc_search
-    #   gb_rj_prior_removal -> rj_prior_removal
-    #   gb_rj_fstat_pe      -> rj_fstat_mcmc
-    #   gb_rj_prior_pe      -> rj_prior
+    # GB move names (2026-08-12 rename, user ruling):
+    #   rj_fstat_search  = F-stat grid births, search config (cap updater)
+    #   rj_prior_removal = removal-only prior pruning (search cycle)
+    #   rj_fstat_pe      = F-stat grid births, strict-PE config
+    #   rj_prior_pe      = pure prior births, strict-PE config
     noise_search = [Move("psd_search", branch="psd"),
                     Move("galfor_search", branch="galfor")]
     noise_pe = [Move("psd_pe", branch="psd"),
@@ -230,14 +278,41 @@ def build_fit():
         fit.recipe = Recipe(stages)
         return fit
 
+    if _env_flag("STAGE_NOISE_VGB_PE"):
+        # Searches, then PE-sample psd+galfor+vgb — the gate between "the
+        # noise search converged" and "turn on the GB machinery": posterior
+        # sampling of every non-GB branch, no F-stat fit, no RJ. PE never
+        # stops on its own, so NUM_ITERATIONS bounds the run.
+        stages.append(Stage(
+            name="noise_vgb_pe", kind="pe",
+            moves=noise_pe + vgb,
+            combine_kwargs=dict(
+                share_temperature_control=False,
+                random_choice=_env_flag("FULL_PE_RANDOM_CHOICE", "1"),
+            ),
+        ))
+        fit.recipe = Recipe(stages)
+        return fit
+
     stages += [
         Stage(
             name="gb_search", kind="rj",
             # Noise stays in SEARCH (joint max-logl) mode through the GB
             # search. Per-stage move-name uniqueness (recipe.py ebd8612) is
             # what lets these recur across stages.
+            # rj_fstat_search (ex rj_prior_search), NOT rj_fstat_mcmc_search (2026-08-12): the
+            # serial-MCMC move scores gb.get_fstat_ll -- an FD kernel --
+            # against the parent ACA, which is WDM here (wrong domain), and
+            # carries leaf_cap_update=False. rj_prior_search is the
+            # GPU-verified WDM birth engine (sig-het F-stat grids via
+            # route_sighet_fstat, epoch refits, D/2 caps as the DESIGNATED
+            # updater, at-cap skip) with use_prior_removal built in; the
+            # removal-only move follows it per the search-cycle order.
+            # Re-wiring the serial MCMC onto the sig-het scorer is a
+            # post-run item (its batches are not f0-ordered, so the
+            # reference-block stash would thrash every step).
             moves=noise_vgb + [
-                Move("rj_fstat_mcmc_search", branch="gb"),
+                Move("rj_fstat_search", branch="gb"),
                 Move("rj_prior_removal", branch="gb"),
             ],
             step_kwargs=dict(
@@ -248,9 +323,12 @@ def build_fit():
         ),
         Stage(
             name="full_pe", kind="pe",
+            # No rj_fstat_mcmc: the pe-named serial MCMC has the same
+            # FD-kernel-on-WDM-data fstat scoring as its search twin.
+            # rj_fstat_pe + rj_prior_pe are the GB PE moves.
             moves=noise_pe + [
-                Move("rj_fstat_mcmc", branch="gb"),
-                Move("rj_prior", branch="gb"),
+                Move("rj_fstat_pe", branch="gb"),
+                Move("rj_prior_pe", branch="gb"),
             ] + vgb,
             # Draw ONE move per step (with replacement) instead of running
             # all five in a fixed order -- the stock eryn move-selection
@@ -295,6 +373,14 @@ def main() -> int:
     fit.build()
     print("[combined] running", flush=True)
     fit.run()
+    # LOUD completion marker on stdout: "Residuals saved" goes to the
+    # logger FILE only, so a finished run used to look exactly like a
+    # silent death on the console.
+    print(
+        f"[combined] RUN COMPLETE: num_iterations="
+        f"{fit.general.num_iterations} reached; residuals saved.",
+        flush=True,
+    )
     return 0
 
 

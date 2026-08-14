@@ -611,7 +611,19 @@ class SearchRecipeStep(BaseRecipeStep):
     """
 
     def stopping_function(self, *args, **kwargs):
-        """Done: the move has already run the search to completion."""
+        """Done when every wrapped move reports its search complete.
+
+        Chunked searches (:class:`MaxLogLCombineMove`) run a bounded number
+        of inner iterations per ``propose`` so the backend checkpoints
+        between chunks; they publish ``maxlogl_plateau_done``. Moves without
+        the attribute keep the legacy semantics -- their criterion ran to
+        completion inside one propose call, so the step is done on its
+        first check.
+        """
+        for combined in self.moves or []:
+            for mv in getattr(combined, "moves", None) or [combined]:
+                if getattr(mv, "maxlogl_plateau_done", True) is False:
+                    return False
         return True
 
 
@@ -672,11 +684,14 @@ class RJRecipeStep(BaseRecipeStep):
         assert isinstance(current_iter, (int, np.integer))
 
         stop = False
-        if current_iter > self.convergence_iter:
+        _start = int(getattr(self, "_stage_start_iter", 0))
+        # The old-vs-new window comparison needs at least one full window on
+        # each side WITHIN THIS STAGE.
+        if current_iter - _start > 2 * self.convergence_iter:
             #? Actual convergence should be related to the same number of sources above SNR XX for Y itterations
             nleaves_cc = sampler.backend.get_nleaves(
                 branch_names=[self.plateau_branch], temp_index=0
-            )[self.plateau_branch]
+            )[self.plateau_branch][_start:]
 
             # do not include most recent
             nleaves_cc_max_old = nleaves_cc[:-self.convergence_iter].max()
@@ -686,6 +701,12 @@ class RJRecipeStep(BaseRecipeStep):
                 stop = True
 
             else:
+                stop = False
+
+            # A search that has not found its FIRST source has not
+            # plateaued -- it has not started (deliberate: an RJ search
+            # stage never advances at zero leaves).
+            if nleaves_cc_max_new <= 0:
                 stop = False
 
             
@@ -702,6 +723,13 @@ class RJRecipeStep(BaseRecipeStep):
         sampler: GlobalFitEngine
     ):
         """Configure the sampler for this RJ recipe step (moves, weights, thinning)."""
+        # Stage-scope the plateau window: the backend's nleaves history
+        # spans the WHOLE run, so without this anchor the first check
+        # compares pre-stage iterations (0 leaves during the noise stages)
+        # against the stage's own start and trips 0 >= 0 immediately --
+        # the 3-month run's gb_search advanced after ONE check
+        # (found 2026-08-13).
+        self._stage_start_iter = int(sampler.backend.iteration)
         # TODO: maybe make this the default setup
         sampler.moves = self.moves
         sampler.weights = self.weights
@@ -790,6 +818,10 @@ class Stage:
             # Tag the runtime move with its declarative name so run-level
             # instrumentation (GF_MOVE_TIMING) can label output per move.
             runtime.gf_move_name = mv.name
+            # ... and with the stage name, so inner-move logging (e.g. the
+            # [MAXLOGL] plateau lines) is stage-labeled instead of "?" --
+            # previously only the stage's outer GFCombineMove was stamped.
+            runtime.gf_stage_name = self.name
             # Move-level debug wins over stage-level; None leaves the move's
             # env-resolved default untouched.
             _dbg = mv.debug if mv.debug is not None else self.debug
@@ -2426,20 +2458,30 @@ def build_gb_moves(
         # Per-band progressive leaf cap (search mode). Armed only when
         # GB_LEAF_CAP_START is set (gb_no_foreground sets it under
         # GB_MODE=search): every band starts capped at that many leaves per
-        # (temp, walker) cell; a band's cap increments -- independently of
-        # other bands -- once it has spent GB_LEAF_CAP_MIN_ITERS iterations
-        # at the current cap AND every cold walker's band residual ll is
-        # within GB_LEAF_CAP_LL_NSIGMA * sqrt(N_dof/2) of the running best
-        # (AND, with GB_LEAF_CAP_OCCUPANCY=1, some cold walker actually
-        # holds cap leaves there). See GBSpecialBase._update_band_leaf_caps.
+        # (temp, walker) cell; caps advance independently per band through
+        # the gate selected below (default = the D/2 lnL-improvement gate).
+        # See GBSpecialBase._update_band_leaf_caps.
         leaf_cap_start=(int(os.environ["GB_LEAF_CAP_START"])
                         if os.environ.get("GB_LEAF_CAP_START") else None),
-        leaf_cap_min_iters=int(os.environ.get("GB_LEAF_CAP_MIN_ITERS", "50")),
-        # Coarse lnL-improvement cap gate. Wins over GB_LEAF_CAP_ITER_ONLY:
-        # a band holds its cap while the cold chain keeps finding a max ll
-        # better than the stored best by >= GB_LEAF_CAP_NDIM/2, and
-        # increments once it has not for GB_LEAF_CAP_MIN_ITERS iterations.
-        leaf_cap_ll_improve=os.environ.get("GB_LEAF_CAP_LL_IMPROVE", "0") == "1",
+        # Default 5 (2026-08-12 user ruling): under the D/2 gate this is a
+        # PATIENCE (consecutive non-improving iterations before a cap
+        # advances); the old 50 froze growth for hours at production pace.
+        leaf_cap_min_iters=int(os.environ.get("GB_LEAF_CAP_MIN_ITERS", "5")),
+        # Coarse lnL-improvement cap gate -- THE DEFAULT (2026-08-12): a
+        # band holds its cap while the cold chain keeps finding a max ll
+        # better than the stored best by >= GB_LEAF_CAP_NDIM/2 (D/2 = 4.0
+        # for GBs), and increments once it has not for
+        # GB_LEAF_CAP_MIN_ITERS consecutive iterations.
+        # GB_LEAF_CAP_LL_IMPROVE=0 restores the nsigma-spread + occupancy
+        # gate. It wins over the iter-only mode in the move's precedence,
+        # so when ``leaf_cap_iter_only`` is explicitly armed the default
+        # here flips back to 0 -- the fixed schedule keeps working without
+        # also having to set GB_LEAF_CAP_LL_IMPROVE=0 (an explicit env
+        # value still beats both).
+        leaf_cap_ll_improve=os.environ.get(
+            "GB_LEAF_CAP_LL_IMPROVE",
+            "0" if getattr(gb_info, "leaf_cap_iter_only", False) else "1",
+        ) == "1",
         leaf_cap_ndim=float(os.environ.get("GB_LEAF_CAP_NDIM", "8")),
         leaf_cap_ll_nsigma=float(os.environ.get("GB_LEAF_CAP_LL_NSIGMA", "3.0")),
         leaf_cap_require_occupancy=bool(
@@ -2508,9 +2550,11 @@ def build_gb_moves(
 
     # In-move F-stat grid fit (GB_FSTAT_FIT_IN_MOVE=1): swap the RJ birth
     # move class so its setup() fits the comb/peak grids against the live
-    # residual instead of consuming a prebuilt offline npz. Move NAMES are
-    # unchanged, so stage lists, pop_move, pe_move_names and the
-    # leaf_cap_update designation all keep working untouched.
+    # residual instead of consuming a prebuilt offline npz. NAMES
+    # (2026-08-12 rename, user ruling): rj_fstat_* = the F-stat grid birth
+    # moves (search / pe); rj_prior_pe = pure prior births;
+    # rj_prior_removal = prior-judged removal. Legacy aliases
+    # rj_prior_search / rj_prior resolve in setup_gb_moves.
     _fit_in_move = bool(getattr(gb_info, "fstat_fit_in_move", False))
     _RJBirth = GBSpecialRJFStatGridMove if _fit_in_move else GBSpecialRJPriorMove
     _fit_kwargs = {}
@@ -2544,8 +2588,15 @@ def build_gb_moves(
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
         **({"is_rj_prop": True} if _fit_in_move else {}),
         **_fit_kwargs,
-        name="rj_prior_search",
-        use_prior_removal=True,
+        name="rj_fstat_search",
+        # False (2026-08-13): use_prior_removal=True makes the sorter
+        # ALIVE-ONLY (gbbands keep_all_inds gate) -- no dead-slot birth
+        # candidates, i.e. NOT a birth engine at all (zero-row sorter crash
+        # on the search start once the empty-model guard was fixed). The
+        # search birth engine is fstat births + standard death flips (the
+        # verify-proven config); prior-judged pruning is the separate
+        # rj_prior_removal move in the same stage.
+        use_prior_removal=False,
         phase_maximize=_rj_phase_max,
         run_swaps=True,
         gpus=[],
@@ -2553,11 +2604,16 @@ def build_gb_moves(
     )
     gb_search_prune_move.accepted = np.zeros((ntemps, nwalkers))
     
+    # LEGACY FD-ONLY (2026-08-12 user ruling): the serial-MCMC moves score
+    # through GBGPU's FD get_fstat_ll/get_ll (para_log_like), which
+    # hard-errors on a WDM basis. They are in NO default recipe; the default
+    # GB RJ stack in both modes is the F-stat grid birth move
+    # (rj_prior / rj_prior_search) + prior RJ.
     gb_search_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
-        *gb_move_args, 
+        *gb_move_args,
         rj_proposal_distribution=None,
         is_rj_prop=True,
-        run_swaps=False, 
+        run_swaps=False,
         name="rj_fstat_mcmc_search",
         phase_maximize=True,
         gpus=[],
@@ -2671,28 +2727,74 @@ def build_gb_moves(
     # 2026-08-01). In PE mode phase_maximize is therefore forced off on the
     # birth instance (under GB_MODE=search the seeded GB_RJ_PHASE_MAXIMIZE
     # keeps the search behavior unchanged).
+    # RJ flip fraction mode default: every slot flips in search (fast
+    # dimension exploration); PE settles to a 10% random subset per
+    # proposal (rj_flip_fraction docs in gbspecialstretch). These two
+    # moves ARE the GB_MODE=search birth path when that mode is on, so the
+    # default follows the mode; the search-NAMED moves (rj_prior_search /
+    # rj_fstat_mcmc_search / rj_prior_removal / rj_replace) keep the
+    # implicit 1.0. {BRANCH}_RJ_FLIP_FRACTION / an explicit kwarg override.
+    _rj_flip_default = 1.0 if _gb_mode_search else 0.1
+
+    # GB_PE_MOVES_STRICT=1 (2026-08-12 user ruling, for STAGED recipes that
+    # carry BOTH search-named and pe-named GB stages in ONE process, e.g.
+    # run_combined_staged.py): the pe-NAMED instances (rj_prior /
+    # rj_fstat_mcmc / rj_refit) are configured strictly for PE -- no leaf
+    # caps, no birth phase-max, flip fraction 0.1 -- regardless of GB_MODE,
+    # so GB_MODE=search arms ONLY the search-named stage's moves. Default
+    # OFF because the single-stage campaigns (gb_no_fg GB_MODE=search) run
+    # the SEARCH through the pe-named stage and rely on the mode-following
+    # behavior below.
+    _pe_strict = os.environ.get("GB_PE_MOVES_STRICT", "0") == "1"
+    _pe_cap_off = (
+        {"leaf_cap_start": None, "leaf_cap_update": False} if _pe_strict else {}
+    )
+    if _pe_strict:
+        _rj_flip_default = 0.1
+
     gb_pe_prior_move = _RJBirth(
         *gb_move_args,
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
         **({"is_rj_prop": True} if _fit_in_move else {}),
         **_fit_kwargs,
-        name="rj_prior",
+        name="rj_fstat_pe",
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
-        phase_maximize=_rj_phase_max if _gb_mode_search else False,
+        phase_maximize=(
+            _rj_phase_max if (_gb_mode_search and not _pe_strict) else False
+        ),
         run_swaps=True,
         gpus=[],
-        **gb_move_kwargs
+        **{**gb_move_kwargs, "rj_flip_fraction_default": _rj_flip_default,
+           **_pe_cap_off}
     )
     gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers))
 
+    # PURE prior-birth RJ move for the PE stage (2026-08-12 rename/split):
+    # births drawn from the GLOBAL PRIOR (never the fstat grids), deaths
+    # judged the same way -- the complement to rj_fstat_pe in a PE cycle.
+    # Always strict-PE flavored: no phase-max, no caps beyond enforcement.
+    gb_pe_prior_birth_move = GBSpecialRJPriorMove(
+        *gb_move_args,
+        rj_proposal_distribution=gpu_priors,
+        name="rj_prior_pe",
+        use_prior_removal=False,
+        phase_maximize=False,
+        run_swaps=True,
+        gpus=[],
+        **{**gb_move_kwargs, "leaf_cap_update": False,
+           "rj_flip_fraction_default": _rj_flip_default, **_pe_cap_off}
+    )
+    gb_pe_prior_birth_move.accepted = np.zeros((ntemps, nwalkers))
+
     gb_pe_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
-        *gb_move_args, 
+        *gb_move_args,
         rj_proposal_distribution=None,
         run_swaps=True,
         name="rj_fstat_mcmc",
         phase_maximize=False,
         gpus=[],
-        **{**gb_move_kwargs, "leaf_cap_update": False}
+        **{**gb_move_kwargs, "leaf_cap_update": False,
+           "rj_flip_fraction_default": _rj_flip_default, **_pe_cap_off}
     )
     gb_pe_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2703,7 +2805,8 @@ def build_gb_moves(
     # (single ``rj_prior`` move under GB_MODE=search), and the
     # ``pe_move_names`` filter below keeps exactly the recipe-requested
     # subset either way.
-    gb_pe_moves = [gb_pe_prior_move, gb_pe_fstat_mcmc_move]
+    gb_pe_moves = [gb_pe_prior_move, gb_pe_prior_birth_move,
+                   gb_pe_fstat_mcmc_move]
     if gb_replace_move is not None:
         gb_pe_moves.append(gb_replace_move)
     if gb_in_model_move is not None:
@@ -2719,7 +2822,7 @@ def build_gb_moves(
             fp=_refit_fp,
             phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],
             gpus=[],
-            **{**gb_move_kwargs, "leaf_cap_update": False}
+            **{**gb_move_kwargs, "leaf_cap_update": False, **_pe_cap_off}
         )
         gb_pe_refit_move.accepted = np.zeros((ntemps, nwalkers))
         gb_pe_moves.insert(1, gb_pe_refit_move)  # [prior, refit, fstat]

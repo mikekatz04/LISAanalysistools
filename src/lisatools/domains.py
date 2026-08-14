@@ -2764,6 +2764,18 @@ class WDMSettings(DomainSettingsBase):
     @property
     def kwargs(self) -> dict:
         return dict(
+            # t0 MUST ride along: every ``WDMSettings(*s.args, **s.kwargs)``
+            # reconstruction (WDMSignal.__init__, the per-device settings
+            # replicas in globalfit/stock/erebor/source_runtime.py) would
+            # otherwise silently reset the data start time to 0.0. The stock
+            # WDM global fits set ``wdm.t0 = data_t0`` before building the
+            # chunked-het comps, whose ``t_obs_start``/``chunk_t_starts``
+            # inherit it -- losing it here made every NON-PRIMARY GPU shard's
+            # comp replica evaluate orbits + source phases at an epoch
+            # shifted by -data_t0 (the 2026-08 multi-GPU VGB scoring bug:
+            # in-model acceptance halved, shard-1 walker ll drift). Repro:
+            # scripts/gb_chunked_het/gb_shard_inmodel_repro.py (Phase G).
+            t0=self.t0,
             oversample=self.oversample,
             window=self.window,
             # norm=self.norm,

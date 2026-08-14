@@ -36,6 +36,15 @@ class GBSettings(Settings):
     f0_lims: typing.List[float] = dataclasses.field(default_factory=list)
     # GB's own tempering ladder size (the engine runs cold-chain only)
     ntemps: int = dataclasses.field(default_factory=env_default("GB_NTEMPS", 24, int))
+    # Ceiling on the DYNAMIC nleaves_max sizing (2x catalogue sources in
+    # band). The fresh-start prior draw allocates
+    # (ntemps, nwalkers, nleaves_max, ndim) float64 several times over, so
+    # an uncapped full-band catalogue count OOMs the host at init (observed:
+    # 83.8 GB peak against an 80 GB allocation on the 3-month combined run).
+    # An explicitly set ``nleaves_max`` bypasses the resolver and this cap.
+    nleaves_max_cap: int = dataclasses.field(
+        default_factory=env_default("GB_NLEAVES_MAX_CAP", 20000, int)
+    )
     m_chirp_lims: typing.List[float] = dataclasses.field(default_factory=list)
     fdot_lims: typing.List[float] = dataclasses.field(default_factory=list)
     phi0_lims: typing.List[float] = dataclasses.field(default_factory=list)
@@ -148,7 +157,10 @@ class GBSettings(Settings):
     # See lisatools.globalfit.priors.galaxy_sky_dist; validate with
     # scripts/gb/check_galaxy_sky_dist.py.
     use_galaxy_prior: bool = dataclasses.field(
-        default_factory=env_default("GB_USE_GALAXY_PRIOR", False, bool)
+        # Default ON (2026-08-12 user ruling): the 3-D Milky Way joint is the
+        # production prior; GB_USE_GALAXY_PRIOR=0 restores the independent
+        # uniforms (dist x sky placeholder).
+        default_factory=env_default("GB_USE_GALAXY_PRIOR", True, bool)
     )
 
     @property
@@ -368,7 +380,7 @@ class GBSetup(Setup, GBSettings):
                     sky_dist = build_gb_galaxy_sky_dist(
                         dist_lims=self.dist_lims
                     )
-                    logger.info(
+                    self.logger.info(
                         "GB sky/distance prior: 3-D Milky Way "
                         "(GB_USE_GALAXY_PRIOR=1), dist_lims=%s kpc.",
                         list(self.dist_lims),

@@ -23,11 +23,15 @@ def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit", log_dir=No
     """
     lisatools_logger = logging.getLogger("lisatools")
     lisatools_logger.setLevel(level)
-    # Propagated lisatools.* records: a named stdout handler when verbose
-    # (installed/removed per call, so the knob can flip within one process);
-    # when quiet they fall through to Python's last-resort stderr handler
-    # (warnings/errors only).
-    _set_console_handler(lisatools_logger, console, level, quiet_stream=None)
+    # Propagated lisatools.* records: a named stdout handler when verbose, a
+    # stderr WARNING handler when quiet (installed/removed per call, so the
+    # knob can flip within one process). propagate=False because the run owns
+    # the lisatools console output: with a root handler also installed (e.g. a
+    # run script's logging.basicConfig), propagation prints every line TWICE
+    # when verbose and leaks the full DEBUG stream when quiet (root handlers
+    # do not re-check ancestor logger levels).
+    lisatools_logger.propagate = False
+    _set_console_handler(lisatools_logger, console, level, quiet_stream=sys.stderr)
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False

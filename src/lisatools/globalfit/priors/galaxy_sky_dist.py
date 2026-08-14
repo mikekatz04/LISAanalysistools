@@ -55,6 +55,21 @@ ICRS_TO_ECLIPTIC = np.array([
 ICRS_TO_GALACTIC = ECLIPTIC_TO_GALACTIC @ ICRS_TO_ECLIPTIC
 
 
+def _to_module(a, use_cupy):
+    """Host result -> the module eryn's container expects.
+
+    The container stamps ``use_cupy`` onto member priors and accumulates
+    ``prior_vals`` on that module; a component returning bare numpy into a
+    cupy accumulation is a TypeError (hit the first time the galaxy prior
+    ran on GPU, 2026-08-13). Compute stays on host -- only the boundary
+    converts."""
+    if use_cupy:
+        import cupy
+
+        return cupy.asarray(a)
+    return a
+
+
 def _to_host(a):
     """cupy -> numpy without importing cupy."""
     return a.get() if hasattr(a, "get") else np.asarray(a)
@@ -138,6 +153,10 @@ class GalaxySkyDistPrior:
 
     def pdf(self, coordinates):
         """``p(dist, alpha, sin_delta)`` -- see the module docstring."""
+        return _to_module(self._pdf_host(coordinates), self.use_cupy)
+
+    def _pdf_host(self, coordinates):
+        """Host-side pdf (always numpy in/out; cupy input accepted)."""
         v = np.atleast_2d(_to_host(coordinates)).astype(float)
         if v.shape[1] != 3:
             raise ValueError(
@@ -157,7 +176,8 @@ class GalaxySkyDistPrior:
 
     def logpdf(self, coordinates):
         with np.errstate(divide="ignore"):
-            return np.log(self.pdf(coordinates))
+            out = np.log(self._pdf_host(coordinates))
+        return _to_module(out, self.use_cupy)
 
     def rvs(self, size=1):
         """Draw ``(dist, alpha, sin_delta)`` inside ``dist_lims``.
@@ -189,7 +209,7 @@ class GalaxySkyDistPrior:
             sin_delta = np.clip(icrs[2], -1.0, 1.0)
             keep = np.vstack([keep, np.column_stack(
                 [dist[m], alpha, sin_delta])])
-        return keep[:n].reshape(shape + (3,))
+        return _to_module(keep[:n].reshape(shape + (3,)), self.use_cupy)
 
 
 def build_gb_galaxy_sky_dist(dist_lims, **params):

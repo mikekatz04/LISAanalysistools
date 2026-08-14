@@ -31,6 +31,11 @@ import tempfile
 CHILD_ENV = dict(
     OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1",
     VECLIB_MAXIMUM_THREADS="1", NUMEXPR_NUM_THREADS="1",
+    # The phase assertions grep lisatools INFO lines, and since loginfo's
+    # propagate=False rework (7d63b95) those reach the console ONLY through
+    # the run's own verbose knob -- a child logging.basicConfig no longer
+    # sees them. PROGRESS=0 keeps bars out of the parsed stream.
+    VERBOSE="1", PROGRESS="0",
     GB_MODE="search", GB_FSTAT_FIT_IN_MOVE="1", DATA_MODE="synthetic",
     GB_NWALKERS="2", GB_NTEMPS="2", GB_CENTER_FREQ="8.5e-3", GB_N_LAYERS="3",
     # tiny grid knobs: the point is the plumbing, not the science
@@ -56,12 +61,20 @@ def _run(tag, fit_dir, store_dir):
     env = {**os.environ, **CHILD_ENV,
            "GB_FSTAT_FIT_DIR": fit_dir, "FILE_STORE_DIR": store_dir}
     os.makedirs(store_dir, exist_ok=True)
-    p = subprocess.run([sys.executable, "-c", CHILD], env=env,
-                       capture_output=True, text=True)
-    out = p.stdout + p.stderr
+    # Stream the child live (progress is minutes-scale on GPU); the phase
+    # assertions below still grep the collected text.
+    print(f"[smoke] phase {tag}: starting", flush=True)
+    p = subprocess.Popen([sys.executable, "-c", CHILD], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, bufsize=1)
+    lines = []
+    for line in p.stdout:
+        sys.stdout.write(line)
+        lines.append(line)
+    p.wait()
+    out = "".join(lines)
     print(f"[smoke] phase {tag}: exit={p.returncode}")
     if p.returncode != 0:
-        print(out[-4000:])
         raise SystemExit(f"[smoke] phase {tag} FAILED")
     return out
 

@@ -50,6 +50,8 @@ __all__ = [
     "run_stacked_stage_b",
     "run_fstat_grid_fit",
     "build_gb_birth_distribution",
+    "sighet_fstat_ref_margin_hz",
+    "build_sighet_call_fstat",
     "GRID_BASENAME",
 ]
 
@@ -57,6 +59,15 @@ __all__ = [
 #: ``<base>_peaks_stacked.npz``; keeping the same suffixes means a prebuilt
 #: offline grid drops straight into an epoch directory.
 GRID_BASENAME = "fstat_grid.npz"
+
+
+def _fmt_secs(s: float) -> str:
+    """Compact duration for progress lines: 42s / 7.2m / 1.8h."""
+    if s < 90:
+        return f"{s:.0f}s"
+    if s < 5400:
+        return f"{s / 60:.1f}m"
+    return f"{s / 3600:.1f}h"
 
 
 # The host-transfer helper already exists in fstat_proposal -- import it
@@ -151,6 +162,184 @@ def ckpt_secs() -> float:
 
 
 # --------------------------------------------------------------------------
+# sig-het call_fstat builder (FSTAT_USE_SIGHET=1)
+# --------------------------------------------------------------------------
+
+def sighet_fstat_ref_margin_hz(n_knots: int, Tobs: float) -> float:
+    """Max safe |f0_candidate - f0_reference| for the sig-het F-stat path.
+
+    The limiter is the knot-Nyquist ceiling of the fixed-knot COMPLEX
+    resample: the residual beat ``e^{2 pi i df0 tau}`` (analytically
+    restored at the knots before the linear-complex spline) must stay
+    resolvable by K uniform knots, so the margin scales as K and 1/Tobs.
+
+    Measured anchors (``gb_sighet_f0_tolerance.py``, K = 128): the v5
+    scorer's tiered-allowance crossing sits between the 57.8-rad last-pass
+    and the 140-rad first-fail sweep points (2026-08-11 rerun; the earlier
+    2.9e-6 Hz @ 90 d anchor = 141.7 rad was the optimistic edge of the same
+    bracket). This returns the LAST-PASS point -- 57.8 rad, i.e. 9.2 beat
+    cycles = (K/2)/7 -- as the margin: 1.18e-6 Hz at Tobs = 7.776e6 s
+    (90 d), scaled by K/128 and 7.776e6/Tobs. The default reference spacing
+    equals this margin, so the worst bucket displacement (spacing/2) keeps
+    a further 2x headroom under the measured last-pass.
+
+    The sweeps also showed the error is VIOLENTLY NON-MONOTONIC past the
+    envelope (a displaced point can look fine and its neighbor be off by
+    thousands), so consumers must HARD-assert every displacement against
+    this margin -- never trust a lucky point.
+    """
+    return 1.18e-6 * (float(n_knots) / 128.0) * (7.776e6 / float(Tobs))
+
+
+def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
+                            f0_lims_hz, data_index: int = 0,
+                            noise_index: Optional[int] = None,
+                            spacing_hz: Optional[float] = None,
+                            ref_block: Optional[int] = None,
+                            fstat_mode: Optional[int] = None):
+    """Reference-bucketing ``call_fstat`` over the sig-het F-stat kernel.
+
+    Returns a ``call_fstat(params_phys_9col) -> (N (n, 4), M_upper (n, 10))``
+    closure that scores through
+    ``GBSignalHetComputations.get_fstat_ll_wdm`` against SHARED heterodyne
+    references instead of the chunked per-candidate heterodyne
+    (``GBWDMComputations.get_fstat_ll_wdm``): drop-in for
+    :func:`chunked_fstat_sweep` / :func:`run_fstat_grid_fit`.
+
+    Reference layout: an f0 comb across ``f0_lims_hz`` at ``spacing_hz``
+    (env ``FSTAT_SIGHET_REF_SPACING_HZ``; default = the measured margin
+    :func:`sighet_fstat_ref_margin_hz`, so the worst bucket displacement
+    spacing/2 sits at HALF the measured envelope -- 2x safety). A spacing
+    wider than twice the margin is REFUSED at build time. References carry
+    fdot = 0 and a fixed canonical sky (the v5 derotation absorbs the
+    candidate's df0/dfdot analytically, and the measured sky arm holds
+    across the full sphere); their extrinsics are forced to the basis frame
+    by ``setup_fstat_references`` (the amplitude-scale rule).
+
+    Memory: the compact per-reference stash is built in CONTIGUOUS BLOCKS
+    of ``ref_block`` references (env ``FSTAT_SIGHET_REF_BLOCK``, default
+    512), one block resident at a time -- each incoming batch is grouped by
+    block, and a block rebuild only happens when the sweep crosses a block
+    boundary (the comb/stage-B sweeps are f0-ordered per segment, so
+    thrash is bounded). Every row is HARD-asserted to sit within the margin
+    of its bucketed reference (the kernel-side assert in
+    ``setup_fstat_references(assert_max_df0=...)``).
+    """
+    n_knots = int(sighet_comp._g.get("v4_knots", 0))
+    if n_knots <= 0:
+        raise ValueError(
+            "build_sighet_call_fstat needs a sig-het comp constructed with "
+            "v4_knots > 0 (the fixed-knot scorer).")
+    margin = sighet_fstat_ref_margin_hz(n_knots, Tobs)
+    env_sp = os.environ.get("FSTAT_SIGHET_REF_SPACING_HZ", "").strip()
+    if spacing_hz is None:
+        spacing_hz = float(env_sp) if env_sp else margin
+    spacing_hz = float(spacing_hz)
+    if spacing_hz > 2.0 * margin:
+        raise ValueError(
+            f"FSTAT_SIGHET_REF_SPACING_HZ={spacing_hz:.3e} puts the worst "
+            f"bucket displacement {0.5 * spacing_hz:.3e} Hz beyond the "
+            f"measured sig-het envelope {margin:.3e} Hz (K={n_knots}, "
+            f"Tobs={Tobs:.3e}); the scorer is non-monotonic past it.")
+    if ref_block is None:
+        ref_block = int(os.environ.get("FSTAT_SIGHET_REF_BLOCK", "512"))
+    ref_block = max(1, int(ref_block))
+
+    f0_lo = float(f0_lims_hz[0])
+    f0_hi = float(f0_lims_hz[-1])
+    node_f0 = np.arange(f0_lo - spacing_hz, f0_hi + 2.0 * spacing_hz,
+                        spacing_hz)
+    n_nodes = len(node_f0)
+    n_blocks = (n_nodes + ref_block - 1) // ref_block
+    logger.info(
+        "[sighet-fstat] %d references over [%.4e, %.4e] Hz, spacing %.3e Hz "
+        "(margin %.3e Hz, K=%d, Tobs=%.3e s), %d block(s) of <= %d",
+        n_nodes, node_f0[0], node_f0[-1], spacing_hz, margin, n_knots, Tobs,
+        n_blocks, ref_block)
+
+    state = {"block": -1, "stash": None}
+
+    def _ensure_block(b: int):
+        # Residency is only valid while the COMP still holds the stash THIS
+        # closure built: the record lives on the closure but the stash lives
+        # on the comp, so a second scorer sharing the comp (the multidev
+        # check mode's pinned shadow; any future concurrent fit) silently
+        # replaces it -- without the identity check this closure would score
+        # against a foreign block's references (the kernel df0 assert turns
+        # that into a hard error; this guard makes it a rebuild instead).
+        if (state["block"] == b
+                and getattr(sighet_comp, "_fstat", None) is not None
+                and sighet_comp._fstat is state["stash"]):
+            return
+        lo = b * ref_block
+        hi = min(lo + ref_block, n_nodes)
+        refs = np.zeros((hi - lo, 9))
+        refs[:, 1] = node_f0[lo:hi]
+        # canonical sky; extrinsics are overridden to the basis frame by
+        # setup_fstat_references itself.
+        refs[:, 7] = 0.0
+        refs[:, 8] = 0.0
+        sighet_comp.setup_fstat_references(
+            refs, wdm_holder, data_index=data_index,
+            noise_index=noise_index,
+            assert_max_df0=0.5 * spacing_hz * (1.0 + 1e-9))
+        state["block"] = b
+        # Strong ref on purpose: while scorers share a comp, each keeps at
+        # most its own last-built block alive alongside the comp's resident
+        # one (a rebuild replaces both refs). Lanes never share in
+        # production, so the extra block only exists in the check mode.
+        state["stash"] = sighet_comp._fstat
+        # ONE block is resident at a time (each is ~GBs), so re-entering an
+        # evicted block REBUILDS it. Track unique builds and rebuilds
+        # separately -- an earlier version summed them into one "built k/N"
+        # counter, which read as 387/36 under cyclic eviction.
+        seen = state.setdefault("seen", set())
+        if b in seen:
+            state["rebuilds"] = state.get("rebuilds", 0) + 1
+            if state["rebuilds"] % 256 == 0:
+                logger.info(
+                    "[sighet-fstat] %d reference-block rebuilds (single-"
+                    "resident cache; heavy rebuilding means the sweep's row "
+                    "order is not f0-local).", state["rebuilds"])
+        else:
+            seen.add(b)
+            step = max(1, n_blocks // 10)
+            if len(seen) % step == 0 or len(seen) == n_blocks:
+                logger.info(
+                    "[sighet-fstat] reference blocks built: %d/%d unique "
+                    "(%d rebuilds)", len(seen), n_blocks,
+                    state.get("rebuilds", 0))
+
+    def call_fstat(params):
+        p = xp.atleast_2d(xp.asarray(params, dtype=xp.float64))
+        f0_h = _to_host(p[:, 1])
+        k = np.clip(np.round((f0_h - node_f0[0]) / spacing_hz).astype(int),
+                    0, n_nodes - 1)
+        worst = np.abs(f0_h - node_f0[k]).max() if len(f0_h) else 0.0
+        if worst > 0.5 * spacing_hz * (1.0 + 1e-9):
+            raise RuntimeError(
+                f"[sighet-fstat] candidate f0 {worst:.3e} Hz from its "
+                f"bucketed reference (> spacing/2 = "
+                f"{0.5 * spacing_hz:.3e}); the reference comb does not "
+                "cover the requested f0 range.")
+        blocks = k // ref_block
+        N_all = xp.zeros((p.shape[0], 4), dtype=xp.float64)
+        M_all = xp.zeros((p.shape[0], 10), dtype=xp.float64)
+        for b in np.unique(blocks):
+            sel = np.where(blocks == b)[0]
+            _ensure_block(int(b))
+            di = xp.asarray((k[sel] - int(b) * ref_block).astype(np.int32))
+            N_b, M_b = sighet_comp.get_fstat_ll_wdm(
+                p[xp.asarray(sel)], None, data_index=di,
+                fstat_mode=fstat_mode)
+            N_all[xp.asarray(sel)] = N_b
+            M_all[xp.asarray(sel)] = M_b
+        return N_all, M_all
+
+    return call_fstat
+
+
+# --------------------------------------------------------------------------
 # sweeps
 # --------------------------------------------------------------------------
 
@@ -192,8 +381,13 @@ def chunked_fstat_sweep(call_fstat: Callable, params, *, xp, label: str = "",
             done = e
             if time.time() - last > 30:
                 last = time.time()
-                logger.info("[sweep%s] %d/%d evals (%.0fs)", label, e, n,
-                            time.time() - t0)
+                _el = time.time() - t0
+                _rate = (e - start) / max(_el, 1e-9)
+                logger.info(
+                    "[sweep%s] %d/%d evals (%.1f%%) | %.0f evals/s | "
+                    "ETA %s | elapsed %s", label, e, n, 100.0 * e / n,
+                    _rate, _fmt_secs((n - e) / max(_rate, 1e-9)),
+                    _fmt_secs(_el))
             if ckpt and e < n and time.time() - last_ckpt > ckpt_secs():
                 last_ckpt = time.time()
                 ckpt_save(ckpt, _to_host(F[:e]), e, n, fp)
@@ -344,30 +538,50 @@ def run_comb_scan(call_fstat: Callable, *, xp, Tobs: float, band_edges_hz,
     F_max_host = np.zeros(n_nodes)
     best_al_host = np.zeros(n_nodes)
     best_sd_host = np.zeros(n_nodes)
+    # Per-level eval counts upfront so each level header carries the OVERALL
+    # comb fraction (the per-sweep lines only know their own level).
+    _lv_evals = {int(lv): int(lv) * int((nsky_per_node == lv).sum())
+                 for lv in levels}
+    _grand_total = sum(_lv_evals.values())
     total_evals = 0
-    for lv in levels:
+    for _li, lv in enumerate(levels):
         idx = np.where(nsky_per_node == lv)[0]
         nodes = f0_nodes[idx]
         nn = len(nodes)
+        logger.info(
+            "[comb] level %d/%d (nsky=%d): %d nodes x %d sky = %d evals; "
+            "comb overall %.1f%% done, %.1f%% after this level",
+            _li + 1, len(levels), int(lv), nn, int(lv), _lv_evals[int(lv)],
+            100.0 * total_evals / max(_grand_total, 1),
+            100.0 * (total_evals + _lv_evals[int(lv)]) / max(_grand_total, 1))
         al, sd = _sky_grid(int(lv))
         al = np.asarray(al)
         sd = np.asarray(sd)
+        # NODE-MAJOR row order (f0 slow, sky fast). Sky-major (f0 fastest)
+        # made every sky point sweep the whole band, so batch-sequential
+        # scorers with f0-local state -- the sig-het shared-reference cache
+        # keeps ONE ~GB block resident -- rebuilt that state once per block
+        # PER SKY POINT (cyclic-eviction worst case: ~nsky x n_blocks
+        # rebuilds per level, measured 387+ on the first full-band run).
+        # Node-major visits each f0 neighborhood exactly once per level.
+        # Ordering changes the checkpoint fingerprint, so pre-existing comb
+        # progress files restart cleanly rather than resuming misordered.
         params = np.zeros((int(lv) * nn, 9))
         params[:, 0] = 1e-22
-        params[:, 1] = np.tile(nodes, int(lv)) * 1e-3
+        params[:, 1] = np.repeat(nodes, int(lv)) * 1e-3
         params[:, 2] = get_fdot(f=params[:, 1],
                                 Mc=np.full(params.shape[0], mc_fix))
         params[:, 5] = 0.5 * np.pi
-        params[:, 7] = np.repeat(al, nn)
-        params[:, 8] = np.arcsin(np.repeat(sd, nn))
+        params[:, 7] = np.tile(al, nn)
+        params[:, 8] = np.arcsin(np.tile(sd, nn))
         Fd = chunked_fstat_sweep(
             call_fstat, params, xp=xp, label=f":comb.nsky{int(lv)}",
             ckpt=(os.path.join(parts_dir, f"comb_nsky{int(lv)}")
                   if parts_dir else None),
             fingerprint_extra=fingerprint_extra,
-        ).reshape(int(lv), nn)
-        _kb = _to_host(Fd.argmax(axis=0)).astype(int)
-        F_max_host[idx] = _to_host(Fd.max(axis=0))
+        ).reshape(nn, int(lv))
+        _kb = _to_host(Fd.argmax(axis=1)).astype(int)
+        F_max_host[idx] = _to_host(Fd.max(axis=1))
         best_al_host[idx] = al[_kb]
         best_sd_host[idx] = sd[_kb]
         total_evals += int(lv) * nn
@@ -453,8 +667,13 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
             done = e
             if time.time() - last > 30:
                 last = time.time()
-                logger.info("[stageB] %d/%d evals (%.0fs)", e, n_total,
-                            time.time() - t0)
+                _el = time.time() - t0
+                _rate = (e - start) / max(_el, 1e-9)
+                logger.info(
+                    "[stageB] %d/%d evals (%.1f%%) | %.0f evals/s | ETA %s "
+                    "| elapsed %s", e, n_total, 100.0 * e / n_total, _rate,
+                    _fmt_secs((n_total - e) / max(_rate, 1e-9)),
+                    _fmt_secs(_el))
             if ckpt and e < n_total and time.time() - last_ckpt > ckpt_secs():
                 last_ckpt = time.time()
                 ckpt_save(ckpt, _to_host(F_flat[:e]), e, n_total, fp)
@@ -525,9 +744,20 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
         logger.warning("[stageB] every peak box was degenerate; nothing to fit.")
         return None
     peaks = np.asarray(keep)
-    K = len(peaks)
     f0_los = np.asarray(f0_los)
     f0_dxs = np.asarray(f0_dxs)
+    # f0-SORT the boxes: the sweep runs them in array order, and a scorer
+    # with f0-local state (the sig-het shared-reference cache) rebuilds on
+    # every jump -- the F-ordered box list measured 4,600+ block rebuilds
+    # (~350 s) on the first real-data fit. Every per-box output (grids,
+    # weights, band ids, npz fields) is a parallel array, so a consistent
+    # permutation is invisible to consumers. Applied AFTER the
+    # FSTAT_PEAKS_TO_FIT cap, which must keep selecting the top-F peaks.
+    _order = np.argsort(f0_los, kind="stable")
+    peaks = peaks[_order]
+    f0_los = f0_los[_order]
+    f0_dxs = f0_dxs[_order]
+    K = len(peaks)
     band_idx = peaks[:, 3].astype(int)
 
     mc_lims = list(mc_lims or [0.001, 1.0])

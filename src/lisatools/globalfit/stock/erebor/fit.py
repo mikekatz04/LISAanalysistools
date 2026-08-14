@@ -107,8 +107,15 @@ class EreborGeneralSettings(GeneralSettings):
     wavelet_duration_max: float = dataclasses.field(
         default_factory=env_default("WAVELET_DURATION_MAX", 4400.0, float)
     )
-    min_freq: float = 1e-4
-    max_freq: float = 2.5e-2
+    # Env-backed per the stock convention (knob = capitalized field name):
+    # these were plain defaults, so MIN_FREQ/MAX_FREQ in the environment
+    # were SILENTLY ignored — the exact failure mode rule 0 warns about.
+    min_freq: float = dataclasses.field(
+        default_factory=env_default("MIN_FREQ", 1e-4, float)
+    )
+    max_freq: float = dataclasses.field(
+        default_factory=env_default("MAX_FREQ", 2.5e-2, float)
+    )
     window_type: str = "tukey"
     window_tukey_alpha: float = dataclasses.field(
         default_factory=env_default("WINDOW_TUKEY_ALPHA", 0.05, float)

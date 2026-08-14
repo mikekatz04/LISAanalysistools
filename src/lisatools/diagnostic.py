@@ -391,6 +391,87 @@ def residual_full_source_and_noise_likelihood(
     return nlt + rslt
 
 
+def batched_residual_full_source_and_noise_likelihoods(
+    res_batch: np.ndarray,
+    sens_mat_batch: np.ndarray,
+    invC_batch: np.ndarray,
+    detC_batch: np.ndarray,
+    settings,
+) -> np.ndarray:
+    """Per-walker full (source + noise) log-likelihoods for a walker batch.
+
+    Batched twin of :func:`residual_full_source_and_noise_likelihood` for a
+    stack of independent walkers sharing one domain: the source term mirrors
+    :func:`inner_product`'s per-channel-pair accumulation
+    (``out += 4 * sum(real(conj(d_i) d_j invC_ij)) * differential_component``
+    over all ``nch x nch`` pairs, then ``-1/2``), and the noise term mirrors
+    :func:`noise_likelihood_term` (the all-or-nothing non-finite covariance
+    guard, the ``detC`` keep mask, and
+    ``-logdet_factor * sum(log|detC|)``) — evaluated for every walker in one
+    array operation instead of a per-walker Python loop. Intended for
+    already-sanitized matrices (non-finite ``invC`` zeroed, non-finite
+    ``detC`` set to 1, as :meth:`SensitivityMatrixBase._setup_det_and_inv`
+    guarantees), so the per-pair NaN ``ind_start`` skip in
+    :func:`inner_product` is a no-op on both routes.
+
+    Args:
+        res_batch: Residuals, shape ``(nw, nch, *basis)``.
+        sens_mat_batch: Covariance stack, shape ``(nch, nch, nw, *basis)``
+            (channel axes leading, matching :func:`_mat3x3_det_inv`'s
+            calling convention with the walker axis folded into
+            ``data_shape``).
+        invC_batch: Inverse covariance, shape ``(nch, nch, nw, *basis)``.
+        detC_batch: Determinant, shape ``(nw, *basis)``.
+        settings: Domain settings providing ``differential_component`` and
+            (optionally) ``logdet_factor``.
+
+    Returns:
+        ``(nw,)`` per-walker log-likelihoods (same array module as the
+        inputs).
+    """
+    xp = get_array_module(detC_batch)
+    nw, nch = res_batch.shape[:2]
+
+    # --- source term: same pair loop / op order as inner_product --------
+    diff = settings.differential_component
+    src_sum = None
+    for i in range(nch):
+        for j in range(nch):
+            y = xp.real(
+                xp.conj(res_batch[:, i]) * res_batch[:, j] * invC_batch[i, j]
+            )
+            contrib = 4 * y.reshape(nw, -1).sum(axis=-1) * diff
+            src_sum = contrib if src_sum is None else src_sum + contrib
+    src = -1 / 2.0 * src_sum
+
+    # --- noise term: same guards as noise_likelihood_term ---------------
+    fix = xp.isnan(sens_mat_batch) | xp.isinf(sens_mat_batch)
+    walker_axis = 2
+    fix_counts = fix.sum(
+        axis=tuple(a for a in range(fix.ndim) if a != walker_axis)
+    )
+    per_mat_shape = sens_mat_batch.shape[:2] + sens_mat_batch.shape[3:]
+    allowed = int(np.prod(per_mat_shape[:-1]))
+    fix_counts = np.asarray(
+        fix_counts.get() if hasattr(fix_counts, "get") else fix_counts
+    )
+    assert np.all(
+        (fix_counts == 0) | (fix_counts == allowed)
+    ), (
+        f"per-walker non-finite counts {fix_counts.tolist()}; "
+        f"matrix shape {per_mat_shape}"
+    )
+
+    keep = (detC_batch != 0.0) & (~xp.isinf(detC_batch)) & (~xp.isnan(detC_batch))
+    factor = getattr(settings, "logdet_factor", 1.0)
+    # masked full-grid sum == the per-walker sum over detC[keep] (dropped
+    # pixels contribute log(1) = 0)
+    safe = xp.where(keep, xp.abs(detC_batch), 1.0)
+    nl = -factor * xp.log(safe).reshape(nw, -1).sum(axis=-1)
+
+    return nl + src
+
+
 def data_signal_source_likelihood_term(
     data_arr: DataResidualArray, sig_arr: DataResidualArray, **kwargs: dict
 ) -> float | complex:

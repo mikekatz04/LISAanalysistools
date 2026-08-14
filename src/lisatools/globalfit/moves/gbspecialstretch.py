@@ -245,6 +245,39 @@ def _tspan(tm, name: str):
     return tm.span(name) if tm is not None else nullcontext()
 
 
+def _resolve_rj_flip_fraction(branch_name, kwarg_value, default=1.0):
+    """Resolve ``rj_flip_fraction`` for a move (kwarg > env > ``default``).
+
+    ``default`` is the stock/mode default the builder chose (the recipe
+    passes 1.0 for search-cycle RJ moves and 0.1 for PE-cycle ones); a
+    user env ``{BRANCH}_RJ_FLIP_FRACTION`` overrides it, an explicit kwarg
+    overrides both. VGB is fixed-leaf (``nleaves_min == nleaves_max``, no
+    RJ), so it gets NO RJ knob surface: the fraction is pinned to 1.0 and
+    the env/default are never consulted (an explicit kwarg on a vgb move
+    is rejected rather than silently ignored).
+    """
+    if str(branch_name).lower() == "vgb":
+        if kwarg_value is not None:
+            raise ValueError(
+                "rj_flip_fraction is an RJ knob; the vgb branch is "
+                "fixed-leaf (no RJ) and does not accept it."
+            )
+        return 1.0
+    value = kwarg_value
+    if value is None:
+        value = os.environ.get(
+            f"{str(branch_name).upper()}_RJ_FLIP_FRACTION", None
+        )
+    if value is None:
+        value = default
+    value = float(value)
+    if not (0.0 < value <= 1.0):
+        raise ValueError(
+            f"rj_flip_fraction must be in (0, 1], got {value}."
+        )
+    return value
+
+
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
 class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModule):
     """Base class for GB-specific stretch / reversible-jump moves.
@@ -418,7 +451,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_units=2,
         jump_factor=0.005,
         leaf_cap_start=None,
-        leaf_cap_ll_improve=False,
+        leaf_cap_ll_improve=True,
         leaf_cap_ndim=8.0,
         leaf_cap_min_iters=50,
         leaf_cap_ll_nsigma=3.0,
@@ -531,10 +564,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # ``_update_band_leaf_caps``); ``leaf_cap_update`` marks the single
         # RJ move per iteration that advances the cap state.
         self.leaf_cap_start = leaf_cap_start
-        # lnL-improvement cap gate (takes precedence over
-        # ``leaf_cap_iter_only``): hold a band's cap while its cold
-        # chain keeps finding a max ll better than the stored best by
-        # >= leaf_cap_ndim/2. D = 8 for GBs.
+        # lnL-improvement cap gate -- THE DEFAULT (2026-08-12; takes
+        # precedence over ``leaf_cap_iter_only``, so builders wiring the
+        # fixed schedule must pass ``leaf_cap_ll_improve=False``): hold a
+        # band's cap while its cold chain keeps finding a max ll better
+        # than the stored best by >= leaf_cap_ndim/2 (D/2 = 4.0 for GBs).
+        # ``False`` restores the legacy nsigma-spread + occupancy gate.
         self.leaf_cap_ll_improve = bool(leaf_cap_ll_improve)
         self.leaf_cap_ndim = float(leaf_cap_ndim)
         self._leaf_cap_enabled = leaf_cap_start is not None
@@ -754,6 +789,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # input_basis says, and a reduced basis (e.g. the 5D VGB basis with
         # f0/sky as per-leaf fills) resolves to its own columns / to None.
         self.branch_name = branch_name
+        # Fraction of the RJ-eligible slots that receive a birth/death flip
+        # attempt each proposal. The subset is drawn ONCE per proposal at
+        # random WITHOUT replacement (see _apply_rj_flip_fraction); rows
+        # outside it skip the flip while the in-model repeats still visit
+        # them. 1.0 (default) = every slot, the historical behavior.
+        # Kwarg ``rj_flip_fraction`` wins; env ``{BRANCH}_RJ_FLIP_FRACTION``
+        # next; then the builder's ``rj_flip_fraction_default`` (the stock
+        # recipe passes 1.0 for search-cycle RJ moves, 0.1 for PE-cycle).
+        # VGB is fixed-leaf (nleaves_min == nleaves_max, NO RJ), so it gets
+        # no RJ knob surface: pinned to 1.0, env/default ignored.
+        self.rj_flip_fraction = _resolve_rj_flip_fraction(
+            branch_name,
+            kwargs.get("rj_flip_fraction", None),
+            kwargs.get("rj_flip_fraction_default", 1.0),
+        )
         self.use_info_mat_proposal = bool(use_info_mat_proposal)
         self.swap_on_in_model = bool(swap_on_in_model)
         if self.transform_fn is not None and hasattr(self.transform_fn, "input_basis"):
@@ -1033,6 +1083,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as e:  # debug-only: never break the sampler
             logger.warning("[GB_DEBUG %s] cold-chain snapshot skipped: %r", self.name, e)
 
+    @staticmethod
+    def _debug_slab_kwargs(buffer_obj):
+        """Slab-layout kwargs for DIRECT engine.fill_template calls in the
+        GB_DEBUG hooks. The production fills go through
+        ``SubBandBuffer._adjust_via_engine`` which forwards these; the debug
+        hooks bypass it and were failing layout inference on narrow slab
+        buffers ("templates flat size ... matches neither dense nor
+        active")."""
+        if getattr(buffer_obj, "band_slab_Nf", None) is not None:
+            return dict(band_slab_Nf=buffer_obj.band_slab_Nf,
+                        slab_min_f=buffer_obj.slab_min_f)
+        return {}
+
     def _debug_verify_rj_step(self, buffer_obj, params, alive, slots, N_vals,
                               delta_ll, keep, picked, round_i, scheduler) -> None:
         """At the RJ scoring site: independently re-verify the birth/death
@@ -1087,7 +1150,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 params_phys = self.transform_fn.both_transforms(params[d], xp=cp)
                 di = slots[d].astype(xp.int32)
                 eng.fill_template(buffer_obj, params_phys, di, N_vals[d],
-                                  factor=+1, waveform_kwargs=self.waveform_kwargs)
+                                  factor=+1, waveform_kwargs=self.waveform_kwargs,
+                                  **self._debug_slab_kwargs(buffer_obj))
                 try:
                     buffer_obj.get_ll(params[d], slots[d], slots[d], N_vals[d])
                     expected = (d_h_1 + h_h_1).real
@@ -1099,7 +1163,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     )
                 finally:
                     eng.fill_template(buffer_obj, params_phys, di, N_vals[d],
-                                      factor=-1, waveform_kwargs=self.waveform_kwargs)
+                                      factor=-1, waveform_kwargs=self.waveform_kwargs,
+                                      **self._debug_slab_kwargs(buffer_obj))
 
             if round_i in (0, 1):
                 map_cpu = (
@@ -1148,7 +1213,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         params_phys = self.transform_fn.both_transforms(params_add, xp=cp)
         di = data_index.astype(xp.int32)
         eng.fill_template(buffer_obj.acs_buffer, params_phys, di, swap_N_vals,
-                          factor=-1, waveform_kwargs=self.waveform_kwargs)
+                          factor=-1, waveform_kwargs=self.waveform_kwargs,
+                          **self._debug_slab_kwargs(buffer_obj))
         try:
             buffer_obj.get_ll(params_add, data_index, data_index, swap_N_vals)
             d_h2 = xp.asarray(buffer_obj.d_h_out).real
@@ -1165,7 +1231,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
         finally:
             eng.fill_template(buffer_obj.acs_buffer, params_phys, di, swap_N_vals,
-                              factor=+1, waveform_kwargs=self.waveform_kwargs)
+                              factor=+1, waveform_kwargs=self.waveform_kwargs,
+                              **self._debug_slab_kwargs(buffer_obj))
 
     def _debug_seq_select(self, buffer_obj, band_sorter, ids, t_i, w_i, b_i,
                           slots, curr):
@@ -1319,6 +1386,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 def __len__(self):
                     return 1
 
+            # The scratch is ONE slot; on the narrow-slab path pass the traced
+            # slot's slab origin so the engine writes the slab layout the
+            # reshape below expects.
+            _slab_kw = {}
+            if getattr(buffer_obj, "band_slab_Nf", None) is not None:
+                _slab_kw = dict(
+                    band_slab_Nf=Nf_a,
+                    slab_min_f=buffer_obj.slab_min_f[[seq["slot"]]],
+                )
             buffer_obj._likelihood_engine.fill_template(
                 _Scratch(), params_phys,
                 cp.zeros(n_src, dtype=cp.int32),
@@ -1326,6 +1402,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     cp.full(n_src, b, dtype=int)
                 ],
                 factor=+1, waveform_kwargs=self.waveform_kwargs,
+                **_slab_kw,
             )
             return _to_numpy(scratch).reshape(nc, Nf_a, Nt_a)
         except Exception as e:  # debug-only: never break the sampler
@@ -1586,6 +1663,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             rj_seq = dict(
                 idx=idx, slot=slot, temp=int(t_np[idx]),
                 walker=sel_w, band=sel_b,
+                # Identity, not position: _run_rj_step re-subsets the batch
+                # (flip-fraction gate) AFTER this select, so the positional
+                # idx goes stale -- the accept hook looks the source up by
+                # this id in ITS OWN row space.
+                source_id=int(_to_numpy(picked["ids"])[idx]),
                 before=self._debug_slab_snapshot(buffer_obj, slot),
             )
             # _run_rj_step marks rj_seq["accepted"] from the real accept
@@ -1914,7 +1996,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         try:
             return int(np.argmax(_to_numpy(model.analysis_container_arr.likelihood())))
-        except Exception:
+        except Exception as exc:
+            # Never silent: a broken ranking here quietly pins every F-stat
+            # reference to walker 0 for the whole run.
+            logger.warning(
+                "%s: could not rank cold walkers for the F-stat reference "
+                "(%r); falling back to walker 0.", self.name, exc)
             return 0
 
     def run_proposal(self, model, state, band_sorter, band_temps):
@@ -1974,11 +2061,76 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
             self._debug_cold_chain_residual_loaded(model, remainder)
 
-            apply_inds = not self.is_rj_prop
-            
+            # RJ subsets include the dead (freshly-drawn) slots so births
+            # can be proposed — EXCEPT removal-only, where _run_rj_step
+            # force-rejects every birth: dead slots would only burn pick
+            # rounds and scheduler cell counts on guaranteed -inf rows, so
+            # the subset is alive-only, exactly like an in-model move (and
+            # a cell with no alive sources never enters the scheduler; zero
+            # alive anywhere -> get_subset returns None -> unit skipped).
+            apply_inds = (not self.is_rj_prop) or self.rj_removal_only
+
+
             extra_bool = (
                 (band_sorter.band_inds < self.num_bands - 1) & (band_sorter.band_inds > 0)
             ) if self.num_bands > 1 else None
+
+            # AT-CAP RJ pick skip (2026-08-12, GB_RJ_SKIP_CAPPED=0 disables):
+            # a birth into a band already holding cap[b] alive sources is
+            # prior-forbidden, and _run_rj_step already keeps it away from
+            # the likelihood kernel -- but the SCHEDULER still picked the
+            # dead slots, burning pick rounds and diluting the acceptance
+            # counters (a cap-saturated verify showed rj cold 0.0000 over
+            # n=2104 all-impossible proposals). Exclude dead slots of
+            # AT-CAP cells from the pick pool up front: deaths (alive
+            # slots) stay proposable, so caps can still shed sources, and
+            # a cell freed by a death mid-unit simply waits one unit for
+            # its birth slots (the -inf enforcement in _run_rj_step remains
+            # the correctness backstop either way). Counts are taken at
+            # unit open, mirroring _run_rj_step's bincount arithmetic.
+            self._rj_at_cap_mask = None
+            if self.is_rj_prop and self._band_leaf_cap is not None:
+                xp_s = get_array_module(band_sorter.band_inds)
+                _nb = self.num_bands
+                _flat = (
+                    (band_sorter.temp_inds.astype(xp_s.int64) * self.nwalkers
+                     + band_sorter.walker_inds) * _nb
+                    + band_sorter.band_inds
+                )
+                _alive_cells = _flat[band_sorter.inds]
+                _nbins = self.ntemps * self.nwalkers * _nb
+                if _alive_cells.shape[0] == 0:
+                    _cell_counts = xp_s.zeros(_nbins, dtype=xp_s.int64)
+                else:
+                    _cell_counts = xp_s.bincount(_alive_cells, minlength=_nbins)
+                _cap = xp_s.asarray(self._band_leaf_cap)
+                _at_cap = _cell_counts[_flat] >= _cap[band_sorter.band_inds]
+                # Per-source at-cap mask for the grouped in-model pool gate
+                # (user rule 2026-08-13): at-cap cells never FREEZE sources
+                # into the in-model pool — only below-cap cells add (birth)
+                # then pool. Snapshot at unit open, same arithmetic as the
+                # pick skip below.
+                self._rj_at_cap_mask = _at_cap
+                if (
+                    not self.rj_removal_only
+                    and os.environ.get("GB_RJ_SKIP_CAPPED", "1") == "1"
+                ):
+                    _rj_ok = band_sorter.inds | ~_at_cap
+                    # Verification fingerprint (user request 2026-08-12):
+                    # only DEAD slots of at-cap cells leave the pool (birth
+                    # proposals); every alive slot in those cells stays
+                    # proposable (deaths).
+                    _dead_excluded = int((~_rj_ok).sum())
+                    if _dead_excluded:
+                        _capped_cells = int(xp_s.unique(_flat[_at_cap]).size)
+                        _alive_at_cap = int((band_sorter.inds & _at_cap).sum())
+                        logger.info(
+                            f"{self.name}: rj at-cap skip -- {_dead_excluded} dead"
+                            f" (birth) slots excluded across {_capped_cells} at-cap"
+                            f" cells; {_alive_at_cap} alive slots in those cells"
+                            " stay proposable (deaths)."
+                        )
+                    extra_bool = _rj_ok if extra_bool is None else (extra_bool & _rj_ok)
 
             subset = band_sorter.get_subset(
                 units=units,
@@ -2016,10 +2168,51 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             with _tspan(getattr(self, "_prop_timer", None), "mempool_free"):
                 if self.backend.uses_cupy:
+                    # Debug knob for the 2-GPU incremental-ll-drift hunt:
+                    # deviceSynchronize() only syncs the CURRENT device, so
+                    # kernels launched inside another shard's device context
+                    # (cold-chain fills, per-shard scoring) may still be in
+                    # flight when a later step reads their output via peer
+                    # access. GB_MULTIGPU_SYNC_DEBUG=1 fences EVERY run
+                    # device at each unit boundary: drift gone under the
+                    # knob = cross-device stream race confirmed.
+                    if os.environ.get("GB_MULTIGPU_SYNC_DEBUG", "0") == "1":
+                        for _dev in (
+                            getattr(model.analysis_container_arr, "gpus", None)
+                            or []
+                        ):
+                            with self.xp.cuda.Device(int(_dev)):
+                                self.xp.cuda.runtime.deviceSynchronize()
                     self.xp.cuda.runtime.deviceSynchronize()
                 self.mempool.free_all_blocks()
 
         return ll_change_log, prop_counts, acc_counts
+
+    def _debug_sync_all_devices(self, model):
+        """GB_MULTIGPU_SYNC_DEBUG=1: fence EVERY run device.
+
+        The unit-boundary/fill fences (below and in gbbands) cover the
+        WRITE side; this covers the READ side — called immediately before
+        each tracked-vs-true ll comparison in ``propose``. Discriminator
+        for the shard-1 drift: the parent residual is WALKER-sharded while
+        the buffer is BAND-sharded, so closes issue cross-device writes
+        (commonly device-0 context -> shard-1 walkers' residuals). If
+        ``likelihood()`` reads those rows before the writing device's
+        stream flushes, exactly the shard-1 walkers drift and the state
+        settles by the next start check — the observed signature. Drift
+        gone under this knob = read-side race confirmed (and the knob is
+        the interim mitigation); unchanged = the credit/accounting side.
+        """
+        if os.environ.get("GB_MULTIGPU_SYNC_DEBUG", "0") != "1":
+            return
+        if not self.backend.uses_cupy:
+            return
+        for _dev in (
+            getattr(model.analysis_container_arr, "gpus", None) or []
+        ):
+            with self.xp.cuda.Device(int(_dev)):
+                self.xp.cuda.runtime.deviceSynchronize()
+        self.xp.cuda.runtime.deviceSynchronize()
 
     def _cached_get_buffer(self, sorter, acs, specials, **kwargs):
         """Propose-scoped SubBandBuffer reuse (ONE cached ACA per signature).
@@ -2052,23 +2245,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return buf
 
     def _buffer_cache_teardown(self):
-        """Drop the propose-scoped buffer cache and clear its device memory.
+        """Proposal-exit buffer bookkeeping: sweep pools, maybe drop the cache.
 
-        Proposal-exit contract (memory-lifecycle rule): SubBandBuffer scratch
-        is strictly proposal-scoped — when the proposal returns state, every
-        shard's buffers are dropped and each owning device's pool is swept so
-        the memory is available to the other modules' moves. Main-ACA / DCGA
-        persistent allocations are untouched. Engine bindings and shard
-        views cache on the buffers themselves, so they die here with the
-        cache (a fresh proposal's buffers start with no stale bindings).
+        Under ``GB_BUFFER_PERSIST=1`` (default) the cached buffer ACAs
+        SURVIVE the proposal: the next proposal's same-signature
+        ``_cached_get_buffer`` call takes the full-rebind path (refill in
+        place -- no reconstruction of thousands of per-cell containers),
+        which is where the ~16 s/propose ``buffer_build``/``temper_buffer``
+        cost went. The device pools are still synced and swept (only
+        pool-cached FREE blocks are released; live buffer allocations are
+        held by the cached arrays).
+
+        ``GB_BUFFER_PERSIST=0`` restores the strict proposal-scoped
+        contract (memory-lifecycle rule): buffers dropped and pools swept
+        at every proposal exit so the memory is available to the other
+        modules' moves between GB proposals. Engine bindings and shard
+        views cache on the buffers themselves and follow the cache's
+        lifetime in both modes.
         """
+        persist = os.environ.get("GB_BUFFER_PERSIST", "1") == "1"
         cache = getattr(self, "_prop_buffer_cache", None)
         n_builds = getattr(self, "_prop_buffer_builds", 0)
         devices = set()
         for buf in (cache or {}).values():
             for dev in (getattr(buf, "gpus", None) or []):
                 devices.add(int(dev))
-        self._prop_buffer_cache = None
+        if not persist:
+            self._prop_buffer_cache = None
         self._prop_buffer_builds = 0
         if not self.backend.uses_cupy:
             return
@@ -2093,6 +2296,94 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         finally:
             self.xp.cuda.runtime.setDevice(main_dev)
 
+    def _cell_ll_state_init(self, scheduler):
+        """Per-unit state for buffer before/after cell ll crediting."""
+        xp = scheduler.xp
+        n = scheduler.n_slots
+        spec = scheduler.slot_specials
+        return {
+            "ll0": xp.zeros(n),
+            "led0": xp.zeros(n),
+            "rep0": xp.zeros(n, dtype=int),
+            "spec": xp.zeros(n, dtype=spec.dtype),
+            "open": xp.zeros(n, dtype=bool),
+            "n_done": 0,
+            "sum_abs_mm": 0.0,
+            "max_mm": 0.0,
+            "max_rate": 0.0,
+            "worst": None,
+        }
+
+    def _cell_ll_open(self, st, buffer_obj, slots, specials,
+                      ll_change_log, prop_counts):
+        """Snapshot slab ll + ledger/repeat baselines for freshly filled slots."""
+        if len(slots) == 0:
+            return
+        lls = buffer_obj.band_likelihoods(source_only=True)
+        t_i, w_i, b_i = unpack_special_index(specials, self.nwalkers)
+        st["ll0"][slots] = lls[slots]
+        st["led0"][slots] = ll_change_log[t_i, w_i, b_i]
+        st["rep0"][slots] = prop_counts[1][t_i, w_i, b_i]
+        st["spec"][slots] = specials
+        st["open"][slots] = True
+
+    def _cell_ll_finalize(self, st, buffer_obj, slots, ll_change_log,
+                          prop_counts):
+        """Credit switched-out cells with the realized slab ll difference.
+
+        The smallest running unit (2026-08-12 user design): a cell's stay in
+        the buffer is fill -> ll -> rj -> in-model repeats -> ll. The
+        before/after slab difference replaces the cell's ACCUMULATED sampled
+        lls in ``ll_change_log``, so the ledger tracks the residual the
+        buffer actually holds; the sampled-vs-realized difference is checked
+        per in-model repeat right here (and only here).
+        """
+        if len(slots) == 0:
+            return
+        xp = get_array_module(st["ll0"])
+        lls = buffer_obj.band_likelihoods(source_only=True)
+        spec = st["spec"][slots]
+        t_i, w_i, b_i = unpack_special_index(spec, self.nwalkers)
+        actual = lls[slots] - st["ll0"][slots]
+        sampled = ll_change_log[t_i, w_i, b_i] - st["led0"][slots]
+        nrep = prop_counts[1][t_i, w_i, b_i] - st["rep0"][slots]
+        mm = actual - sampled
+        ll_change_log[t_i, w_i, b_i] = st["led0"][slots] + actual
+        rate = xp.abs(mm) / xp.maximum(nrep, 1)
+        k = int(rate.argmax())
+        r_k = float(rate[k])
+        if r_k > st["max_rate"]:
+            st["max_rate"] = r_k
+            st["worst"] = (
+                int(t_i[k]), int(w_i[k]), int(b_i[k]), int(nrep[k]),
+                float(mm[k]), r_k,
+            )
+        st["max_mm"] = max(st["max_mm"], float(xp.abs(mm).max()))
+        st["sum_abs_mm"] += float(xp.abs(mm).sum())
+        st["n_done"] += int(len(slots))
+        st["open"][slots] = False
+
+    def _cell_ll_report(self, st):
+        """One line per unit: sampled-vs-realized stats over finished cells."""
+        if st["n_done"] == 0 or st["worst"] is None:
+            return
+        t_i, w_i, b_i, nrep, mm, rate = st["worst"]
+        logger.info(
+            f"[GB_CELL_LL {self.name}] unit: {st['n_done']} cells credited"
+            f" from the buffer before/after ll; |sampled-actual| mean"
+            f" {st['sum_abs_mm'] / st['n_done']:.3e} max {st['max_mm']:.3e};"
+            f" worst per-repeat {rate:.3e}/rep (temp {t_i}, walker {w_i},"
+            f" band {b_i}, {nrep} reps, diff {mm:.3e})."
+        )
+        tol = float(os.environ.get("GB_CELL_LL_REP_TOL", "0.05"))
+        if rate > tol:
+            logger.warning(
+                f"[GB_CELL_LL {self.name}] per-repeat sampled-vs-actual diff"
+                f" {rate:.3e} exceeds {tol} (temp {t_i}, walker {w_i}, band"
+                f" {b_i}, {nrep} repeats): the sampled lls and the realized"
+                " buffer residual disagree beyond the expected floor."
+            )
+
     def _run_band_unit(self, model, band_sorter, subset, band_temps,
                        ll_change_log, prop_counts, acc_counts):
         """Drive one parity unit's cells through the sub-band buffer."""
@@ -2109,60 +2400,61 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             tm.count("cells", int(scheduler.n_cells))
         self._debug_log_band_null(buffer_obj)
 
+        # Buffer before/after cell ll crediting (2026-08-12 user design):
+        # a cell's stay in a buffer slot is the smallest running unit --
+        # fill -> ll -> rj -> in-model repeats -> ll -> diff at switch-out.
+        # The diff replaces the cell's accumulated sampled lls in
+        # ll_change_log (see _cell_ll_finalize). GB_CELL_LL_CREDIT=0
+        # restores the pure sampled-ll ledger.
+        cell_ll_state = None
+        if os.environ.get("GB_CELL_LL_CREDIT", "1") == "1":
+            cell_ll_state = self._cell_ll_state_init(scheduler)
+            _slots0 = scheduler.xp.arange(scheduler.n_slots)[
+                scheduler.slot_active
+            ]
+            with _tspan(tm, "cell_ll"):
+                self._cell_ll_open(
+                    cell_ll_state, buffer_obj, _slots0,
+                    scheduler.slot_specials[_slots0],
+                    ll_change_log, prop_counts,
+                )
+
         # Pick eligibility lives on the MAIN sorter: only sources inside this
         # unit's subset are candidates (for in-model moves the subset already
         # applied ``inds``; for RJ it includes the freshly-drawn dead ones).
         eligible = self.xp.zeros(band_sorter.num_sources, dtype=bool)
         eligible[subset.inds_main_band_sorter] = True
 
-        round_i = 0
-        while scheduler.any_active():
-            with _tspan(tm, "pick"):
-                picked = self._pick_sources(band_sorter, buffer_obj, scheduler, eligible)
-            if picked is None:
-                break
-            if tm is not None:
-                # Batch size per repeat round: on GPU, small batches mean the
-                # 100-repeat in-model loop is kernel-launch-overhead-bound.
-                tm.count("picked_sources", int(len(picked["specials"])))
-
-            if self.is_rj_prop:
-                # RJ before/after trace of the chosen cell: snapshots
-                # bracket the RJ step; figures save only when the cell's RJ
-                # proposal was ACCEPTED (buffer changed). Chronologically
-                # BEFORE the in-model sequence figures.
-                rj_seq = self._debug_rj_select(buffer_obj, picked)
-                with _tspan(tm, "rj_step"):
-                    if self.rj_replace:
-                        # Fixed-dimension replacement instead of birth/death.
-                        self._run_replace_step(
-                            model, band_sorter, buffer_obj, band_temps,
-                            picked, ll_change_log, prop_counts, acc_counts,
-                            round_i, scheduler,
-                        )
-                    else:
-                        self._run_rj_step(
-                            model, band_sorter, buffer_obj, band_temps, picked,
-                            ll_change_log, prop_counts, acc_counts, round_i, scheduler,
-                        )
-                self._debug_plot_rj_pair(buffer_obj, rj_seq)
-
-            with _tspan(tm, "inmodel_repeats"):
-                self._run_in_model_repeats(
-                    model, band_sorter, buffer_obj, band_temps, picked,
-                    ll_change_log, prop_counts, acc_counts,
-                )
-
-            scheduler.record_picks(picked["specials"])
+        def _advance_and_refill():
+            """Retire finished cells and refill their slots (with the cell-ll
+            credit bracketing the switch-out). Returns the number of slots
+            refilled. Only legal when NO cell holds a pending in-model
+            source: a pending source pins its cell's buffer slot."""
             inds_fill, new_specials = scheduler.advance()
             if len(inds_fill):
+                # Switch-out: credit the outgoing cells from their slab
+                # before/after ll BEFORE the refill overwrites the slots.
+                if cell_ll_state is not None:
+                    with _tspan(tm, "cell_ll"):
+                        self._cell_ll_finalize(
+                            cell_ll_state, buffer_obj, inds_fill,
+                            ll_change_log, prop_counts,
+                        )
                 with _tspan(tm, "buffer_build"):
                     subset.get_buffer(
                         model.analysis_container_arr, new_specials,
                         inds_fill=inds_fill, buffer_obj=buffer_obj,
                     )
                 self._debug_log_band_null(buffer_obj)
-            round_i += 1
+                if cell_ll_state is not None:
+                    with _tspan(tm, "cell_ll"):
+                        self._cell_ll_open(
+                            cell_ll_state, buffer_obj, inds_fill,
+                            new_specials, ll_change_log, prop_counts,
+                        )
+            return int(len(inds_fill))
+
+        def _free_mempool_each_round():
             # GPU efficiency (parallel-resources plan P1): freeing the WHOLE
             # CuPy pool every pick round forces cudaFree/cudaMalloc churn
             # for every allocation in the next round, so it is now OPT-IN —
@@ -2172,6 +2464,187 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if os.environ.get("GB_MEMPOOL_FREE_EACH_ROUND", "0") == "1":
                 with _tspan(tm, "mempool_free"):
                     self.mempool.free_all_blocks()
+
+        # GROUPED RJ -> in-model scheduling (2026-08-13 user design,
+        # GB_RJ_GROUPED_INMODEL=0 restores the per-round interleave): RJ
+        # rounds (one proposal per cell per round, exactly as before) run
+        # back-to-back, ACCUMULATING every source that ends the round alive
+        # (accepted birth, or survived/skipped death) into a pending pool —
+        # its cell is then FROZEN so the pool never holds two same-cell
+        # sources. When no unfrozen cell has candidates left (the grid is as
+        # full of inds=True picks as this pass can make it), ONE in-model
+        # block evolves the whole pool together, the pool clears, and the
+        # sweep continues over the remaining sources. Same proposals, same
+        # statistics — the in-model repeat loop just always runs at full
+        # batch width instead of on each round's (often tiny) survivor set.
+        # At-cap cells: dead slots were excluded from ``eligible`` up front
+        # (no birth RJ at all); alive slots still get death proposals but
+        # NEVER pool/freeze (user rule 2026-08-13) — only below-cap cells
+        # add sources via RJ and then freeze them for the polish flush.
+        grouped = (
+            self.is_rj_prop
+            and os.environ.get("GB_RJ_GROUPED_INMODEL", "1") == "1"
+        )
+
+        round_i = 0
+        if grouped:
+            pending = []
+            pending_specials = self.xp.zeros(
+                0, dtype=band_sorter.special_band_inds.dtype
+            )
+            n_flushes = 0
+            flush_sum = 0
+            while scheduler.any_active():
+                with _tspan(tm, "pick"):
+                    picked = self._pick_sources(
+                        band_sorter, buffer_obj, scheduler, eligible,
+                        blocked_specials=pending_specials,
+                    )
+                if picked is not None:
+                    if tm is not None:
+                        tm.count("picked_sources", int(len(picked["specials"])))
+                    rj_seq = self._debug_rj_select(buffer_obj, picked)
+                    with _tspan(tm, "rj_step"):
+                        if self.rj_replace:
+                            self._run_replace_step(
+                                model, band_sorter, buffer_obj, band_temps,
+                                picked, ll_change_log, prop_counts,
+                                acc_counts, round_i, scheduler,
+                            )
+                        else:
+                            self._run_rj_step(
+                                model, band_sorter, buffer_obj, band_temps,
+                                picked, ll_change_log, prop_counts,
+                                acc_counts, round_i, scheduler,
+                            )
+                    self._debug_plot_rj_pair(buffer_obj, rj_seq)
+                    scheduler.record_picks(picked["specials"])
+                    # Post-RJ alive sources join the pool; their cells
+                    # freeze until the flush. AT-CAP cells never pool (user
+                    # rule 2026-08-13): only below-cap cells add sources via
+                    # RJ and then freeze them for the in-model flush — an
+                    # at-cap cell keeps proposing deaths round after round
+                    # but its survivors skip the polish block. Newborns
+                    # always pool: a birth requires a below-cap cell at unit
+                    # open (dead slots of at-cap cells never enter the pick
+                    # pool), and the mask is that same unit-open snapshot.
+                    alive_now = band_sorter.inds[picked["ids"]]
+                    _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
+                    if _at_cap_m is not None:
+                        alive_now = alive_now & ~_at_cap_m[picked["ids"]]
+                    if bool(alive_now.any()):
+                        held = {k: v[alive_now] for k, v in picked.items()}
+                        pending.append(held)
+                        pending_specials = self.xp.concatenate(
+                            [pending_specials, held["specials"]]
+                        )
+                    round_i += 1
+                    _free_mempool_each_round()
+                    continue
+
+                # No pickable cell outside the frozen set: flush the pool
+                # through one full-width in-model block, THEN let the
+                # scheduler retire/refill (never earlier — a pending source
+                # pins its cell's slot).
+                n_flushed = 0
+                if pending:
+                    merged = (
+                        pending[0]
+                        if len(pending) == 1
+                        else {
+                            k: self.xp.concatenate([p[k] for p in pending])
+                            for k in pending[0]
+                        }
+                    )
+                    n_flushed = int(len(merged["specials"]))
+                    if int(self.xp.unique(merged["specials"]).size) != n_flushed:
+                        # Serial-within-band invariant: the freeze logic
+                        # guarantees one pooled source per cell.
+                        raise RuntimeError(
+                            f"{self.name}: grouped RJ pool holds duplicate "
+                            "(temp, walker, band) cells — same-band sources "
+                            "must never share an in-model block."
+                        )
+                    with _tspan(tm, "inmodel_repeats"):
+                        self._run_in_model_repeats(
+                            model, band_sorter, buffer_obj, band_temps,
+                            merged, ll_change_log, prop_counts, acc_counts,
+                        )
+                    n_flushes += 1
+                    flush_sum += n_flushed
+                    pending = []
+                    pending_specials = pending_specials[:0]
+                n_refilled = _advance_and_refill()
+                _free_mempool_each_round()
+                if n_flushed == 0 and n_refilled == 0:
+                    # Nothing pooled and nothing new to load: every active
+                    # cell is exhausted (advance() just deactivated them).
+                    break
+            if n_flushes:
+                logger.info(
+                    f"{self.name}: grouped in-model — {n_flushes} flushes, "
+                    f"mean batch {flush_sum / n_flushes:.1f} sources "
+                    f"({scheduler.n_slots} buffer slots)."
+                )
+            if tm is not None:
+                tm.count("inmodel_flushes", n_flushes)
+        else:
+            while scheduler.any_active():
+                with _tspan(tm, "pick"):
+                    picked = self._pick_sources(band_sorter, buffer_obj, scheduler, eligible)
+                if picked is None:
+                    break
+                if tm is not None:
+                    # Batch size per repeat round: on GPU, small batches mean
+                    # the 100-repeat in-model loop is
+                    # kernel-launch-overhead-bound.
+                    tm.count("picked_sources", int(len(picked["specials"])))
+
+                if self.is_rj_prop:
+                    # RJ before/after trace of the chosen cell: snapshots
+                    # bracket the RJ step; figures save only when the cell's
+                    # RJ proposal was ACCEPTED (buffer changed).
+                    # Chronologically BEFORE the in-model sequence figures.
+                    rj_seq = self._debug_rj_select(buffer_obj, picked)
+                    with _tspan(tm, "rj_step"):
+                        if self.rj_replace:
+                            # Fixed-dimension replacement instead of
+                            # birth/death.
+                            self._run_replace_step(
+                                model, band_sorter, buffer_obj, band_temps,
+                                picked, ll_change_log, prop_counts, acc_counts,
+                                round_i, scheduler,
+                            )
+                        else:
+                            self._run_rj_step(
+                                model, band_sorter, buffer_obj, band_temps, picked,
+                                ll_change_log, prop_counts, acc_counts, round_i, scheduler,
+                            )
+                    self._debug_plot_rj_pair(buffer_obj, rj_seq)
+
+                with _tspan(tm, "inmodel_repeats"):
+                    self._run_in_model_repeats(
+                        model, band_sorter, buffer_obj, band_temps, picked,
+                        ll_change_log, prop_counts, acc_counts,
+                    )
+
+                scheduler.record_picks(picked["specials"])
+                _advance_and_refill()
+                round_i += 1
+                _free_mempool_each_round()
+        if cell_ll_state is not None:
+            # Unit end: cells still resident (active or retired-in-place)
+            # never hit a refill -- finalize them against the final slab.
+            _open_slots = scheduler.xp.arange(scheduler.n_slots)[
+                cell_ll_state["open"]
+            ]
+            with _tspan(tm, "cell_ll"):
+                self._cell_ll_finalize(
+                    cell_ll_state, buffer_obj, _open_slots,
+                    ll_change_log, prop_counts,
+                )
+            self._cell_ll_report(cell_ll_state)
+
         if tm is not None:
             tm.count("pick_rounds", round_i)
 
@@ -2180,7 +2653,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             f"({scheduler.n_cells} cells)."
         )
 
-    def _pick_sources(self, band_sorter, buffer_obj, scheduler, eligible):
+    def _pick_sources(self, band_sorter, buffer_obj, scheduler, eligible,
+                      blocked_specials=None):
         """One not-yet-visited source per active cell, without replacement.
 
         Vectorized on ``self.xp``: candidates are gathered through the
@@ -2188,6 +2662,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per cell wins. ``band_sorter.has_run_rj`` marks consumed sources for
         the remainder of this proposal, so every source is visited exactly
         once per pass.
+
+        ``blocked_specials`` (grouped RJ scheduling) removes whole cells from
+        the candidate pool: a cell already holding a pending alive source is
+        frozen until the accumulated in-model flush runs, so the pool can
+        never collect two same-cell sources (serial-within-band rule).
         """
         xp = self.xp
         cand = (
@@ -2197,6 +2676,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 special_band_inds=scheduler.active_slot_specials
             )
         )
+        if blocked_specials is not None and len(blocked_specials):
+            cand = cand & ~xp.isin(
+                band_sorter.special_band_inds, blocked_specials
+            )
         cand_ids = xp.arange(band_sorter.num_sources)[cand]
         if len(cand_ids) == 0:
             return None
@@ -2359,6 +2842,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logg = logg - lv  # Jacobian d(ln dist)/d(dist) = 1/dist
         return logg
 
+    def _apply_rj_flip_fraction(self, band_sorter, picked):
+        """Restrict a picked batch to the proposal's RJ flip subset.
+
+        ``rj_flip_fraction`` < 1 draws ``round(fraction * num_sources)``
+        slots at random WITHOUT replacement, ONCE per proposal — the mask is
+        attached to the per-propose ``band_sorter`` (the same lifetime as
+        ``has_run_rj``), so every pick round of the proposal filters against
+        the same draw. Returns the filtered ``picked`` dict, or ``None``
+        when no picked row is in the subset. Fraction 1.0 is a pass-through
+        (bit-identical to the historical behavior).
+        """
+        if self.rj_flip_fraction >= 1.0:
+            return picked
+        xp = self.xp
+        allowed = getattr(band_sorter, "_rj_flip_allowed", None)
+        if allowed is None:
+            n = int(band_sorter.num_sources)
+            n_keep = max(1, int(round(self.rj_flip_fraction * n)))
+            allowed = xp.zeros(n, dtype=bool)
+            allowed[xp.random.permutation(n)[:n_keep]] = True
+            band_sorter._rj_flip_allowed = allowed
+        keep = allowed[picked["ids"]]
+        if not bool(keep.any()):
+            return None
+        if bool(keep.all()):
+            return picked
+        return {key: value[keep] for key, value in picked.items()}
+
     def _run_rj_step(self, model, band_sorter, buffer_obj, band_temps, picked,
                      ll_change_log, prop_counts, acc_counts, round_i, scheduler):
         """Birth/death proposal for each picked source (vectorized over cells).
@@ -2371,7 +2882,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the pre-computed ±logpdf of the RJ proposal distribution. On accept,
         ``inds`` flips and the cell residual is updated through
         ``fill_template`` with the appropriate sign.
+
+        ``rj_flip_fraction`` < 1 gates which picked rows attempt a flip at
+        all (see :meth:`_apply_rj_flip_fraction`); the in-model repeats that
+        follow each pick round are NOT restricted.
         """
+        picked = self._apply_rj_flip_fraction(band_sorter, picked)
+        if picked is None:
+            return
         xp = self.xp
         ids = picked["ids"]
         slots = picked["slot_index"]
@@ -2659,7 +3177,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         rj_seq = getattr(self, "_dbg_rj_seq", None)
         if rj_seq is not None:
-            rj_seq["accepted"] = bool(accept[rj_seq["idx"]])
+            # Look the traced source up by ID: the flip-fraction gate at the
+            # top of this method re-subsets ``picked``, so the pick-time
+            # positional index is stale (IndexError in smoke 3, 2026-08-12).
+            # Excluded from the subset -> its proposal never ran -> rejected.
+            _dbg_pos = xp.where(ids == rj_seq["source_id"])[0]
+            rj_seq["accepted"] = (
+                bool(accept[int(_dbg_pos[0])]) if int(_dbg_pos.size) else False
+            )
 
         t_i, w_i, b_i = picked["temp_inds"], picked["walker_inds"], picked["band_inds"]
         prop_counts[0][t_i, w_i, b_i] += 1
@@ -4242,6 +4767,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_swaps_accepted = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
         band_swaps_proposed = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
 
+        # GB_TEMPER_AUDIT=1: reconcile the credited per-cold-walker ll
+        # deltas (what lands in ll_change_log_temp[0] and, from there, in
+        # state.log_like[0]) against the TRUE parent-residual likelihood at
+        # every unit boundary, and print each ACCEPTED cold-pair swap with
+        # its credited diff. Chasing the after-tempering incremental-ll
+        # drift (sign-consistent ~ -<h|h>/2 per walker; reproduces on ONE
+        # GPU, so it is accounting, not a device race). Successor to the
+        # ll_before3/ll_after3 remnants below.
+        _audit = os.environ.get("GB_TEMPER_AUDIT", "0") == "1"
+        if _audit:
+            _audit_true_prev = _to_numpy(model.analysis_container_arr.likelihood())
+            _audit_cred_prev = np.zeros(self.nwalkers)
+
         units = 2
         tmp_start = np.random.randint(units)
         for tmp in range(units):
@@ -4322,6 +4860,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     raccept = cp.log(cp.random.uniform(size=paccept.shape))
                     sel = paccept > raccept
 
+                    # Audit BEFORE current_lls is overwritten: old_lls is a
+                    # VIEW into current_lls, so accepted rows lose their old
+                    # values at the update below. Cold pair only (i2 == 0):
+                    # column 0 of the slice is the cold cell whose diff is
+                    # credited to log_like[0].
+                    if _audit and i2 == 0:
+                        _sel_h = _to_numpy(sel)
+                        if _sel_h.any():
+                            _bh = _to_numpy(band_inds_now[:, 0])
+                            _w0 = _to_numpy(walker_inds_now[:, i2])
+                            _w1 = _to_numpy(walker_inds_now[:, i1])
+                            _oldh = _to_numpy(old_lls)
+                            _newh = _to_numpy(new_lls)
+                            for _r in np.where(_sel_h)[0]:
+                                logger.info(
+                                    "[TEMPER_AUDIT] accepted cold swap band=%d: "
+                                    "(T0,w%d) ll %.3f -> %.3f (credit %+.3f) | "
+                                    "(T1,w%d) ll %.3f -> %.3f",
+                                    int(_bh[_r]), int(_w0[_r]),
+                                    float(_oldh[_r, 0]), float(_newh[_r, 0]),
+                                    float(_newh[_r, 0] - _oldh[_r, 0]),
+                                    int(_w1[_r]),
+                                    float(_oldh[_r, 1]), float(_newh[_r, 1]),
+                                )
+
                     current_lls[sel, i2 : i1 + 1] = new_lls[sel]
 
                     # Reverse the swaps that were not accepted.
@@ -4372,14 +4935,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 ] = diffs.flatten()
                 num_bands_run += num_bands_preload_temp
 
-            # ll_before3 = model.analysis_container_arr.likelihood()
             with _tspan(getattr(self, "_prop_timer", None), "temper_open_close"):
                 self.add_cold_chain_sources_to_residual(
                     model,
                     band_sorter,
                     extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
                 )
-            # ll_after3 = model.analysis_container_arr.likelihood()
+            if _audit:
+                # Per-unit reconcile: with this parity class closed back
+                # into the parent residual, the TRUE cold-walker ll delta
+                # across the unit must equal the credited delta
+                # (ll_change_log_temp[0] growth). A nonzero MISMATCH row
+                # localizes the drift to this unit's bands and walker.
+                _true_now = _to_numpy(model.analysis_container_arr.likelihood())
+                _cred_now = _to_numpy(ll_change_log_temp[0].sum(axis=-1))
+                _dtrue = _true_now - _audit_true_prev
+                _dcred = _cred_now - _audit_cred_prev
+                logger.info(
+                    "[TEMPER_AUDIT] unit %d (bands %%2 == %d): true cold "
+                    "delta %s | credited %s | MISMATCH %s",
+                    tmp, bool_remainder,
+                    np.array2string(_dtrue, precision=3),
+                    np.array2string(_dcred, precision=3),
+                    np.array2string(_dtrue - _dcred, precision=3),
+                )
+                _audit_true_prev = _true_now
+                _audit_cred_prev = _cred_now
 
         self._adapt_band_temps(band_temps, band_swaps_accepted, band_swaps_proposed)
 
@@ -4573,7 +5154,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         Runs at the very end of ``propose`` (after the final
         ``check_ll_inject`` rebuild, so the parent residual reflects the
-        accepted state). Per band ``b``, the cap increments when ALL of:
+        accepted state). Bands increment independently; nothing waits on
+        other bands. On increment the iteration counter and running best
+        reset, so the next level must re-converge on its own evidence.
+        Every cold walker's per-band ll is stored in
+        ``band_info['band_cold_ll']`` each step, whichever gate runs, so
+        any criterion can be replayed on the trace post hoc.
+
+        DEFAULT gate (``leaf_cap_ll_improve``, on since 2026-08-12): a
+        band's cap increments once its cold-chain MAX ll has failed to
+        improve on the stored best by ``leaf_cap_ndim / 2`` (D/2 = 4.0
+        for GBs -- the logL a genuinely new D-parameter source has to
+        buy) for ``leaf_cap_min_iters`` CONSECUTIVE iterations; any
+        qualifying improvement zeroes the counter.
+
+        Legacy gate (``leaf_cap_ll_improve=False``): the cap increments
+        when ALL of:
 
         1. ``band_cap_iters[b] >= leaf_cap_min_iters`` at the current cap;
         2. every cold walker's band residual ll sits within
@@ -4584,16 +5180,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         3. (optional, ``leaf_cap_require_occupancy``) at least one cold
            walker actually holds ``cap[b]`` leaves in the band -- an
            exhausted band with free headroom keeps its cap.
-
-        Bands increment independently; nothing waits on other bands. On
-        increment the iteration counter and running best reset, so the next
-        level must re-converge on its own evidence.
-
-        With ``leaf_cap_ll_improve`` the gate is instead: increment once
-        the band's cold-chain MAX ll has failed to improve on its stored
-        best by ``leaf_cap_ndim / 2`` for ``leaf_cap_min_iters``
-        consecutive iterations. Every cold walker's per-band ll is
-        stored in ``band_info['band_cold_ll']`` each step.
 
         With ``leaf_cap_iter_only`` the gate is ONLY test 1 (a fixed
         annealing schedule): the lnL-plateau and occupancy tests are
@@ -4693,10 +5279,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.backend.uses_cupy and os.environ.get("GB_PROP_TIMING_SYNC", "0") == "1":
             _tm_sync = self.xp.cuda.runtime.deviceSynchronize
         self._prop_timer = tm = _ProposeTimer(sync_fn=_tm_sync)
-        # Propose-scoped SubBandBuffer cache: one allocation per signature
-        # for the whole proposal (units rebind in place); torn down with a
-        # memory-checker summary right before the final return.
-        self._prop_buffer_cache = {}
+        # SubBandBuffer cache: one allocation per signature, units rebind in
+        # place. GB_BUFFER_PERSIST=1 (default) keeps the cached buffers
+        # ACROSS proposals -- construction (thousands of per-cell container
+        # builds, ~16 s at full band) happens once per signature per RUN and
+        # later proposals only refill/rebind. GB_BUFFER_PERSIST=0 restores
+        # the July proposal-scoped contract (drop + pool sweep at every
+        # proposal exit) for memory-tight multi-branch runs where the other
+        # modules need the buffers' GPU memory between GB proposals.
+        if (os.environ.get("GB_BUFFER_PERSIST", "1") != "1"
+                or getattr(self, "_prop_buffer_cache", None) is None):
+            self._prop_buffer_cache = {}
         self._prop_buffer_builds = 0
 
         pin_main_device(self.xp, model.analysis_container_arr.gpus)
@@ -4725,12 +5318,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if not self.is_rj_prop and not np.any(work_in.inds):
             return state, np.zeros((engine_ntemps, nwalkers), dtype=bool)
 
-        # Alive-only RJ variants (replace / prune) are no-ops on an empty
-        # model -- and their keep_all_inds=False BandSorter cannot be built
-        # from zero sources (the logpdf batching indexes an empty split
-        # array), so return before constructing it.
+        # Alive-only RJ variants (replace / removal-only) are no-ops on an
+        # empty model -- their alive-only BandSorter cannot be built from
+        # zero sources -- so return before constructing it. The gate is
+        # rj_removal_only, NOT use_prior_removal: the search BIRTH move
+        # carries use_prior_removal=True (prior-judged deaths) but births
+        # from dead slots, so it MUST run on the zero-leaf search start.
+        # (use_prior_removal in this gate silently no-opped rj_fstat_search
+        # forever on GB_MODE=search -- the 3-month run's gb_search completed
+        # with 0 sources, found 2026-08-13.)
         if (
-            (self.rj_replace or self.use_prior_removal)
+            (self.rj_replace or self.rj_removal_only)
             and not np.any(work_in.inds)
         ):
             return state, np.zeros((engine_ntemps, nwalkers), dtype=bool)
@@ -4890,6 +5488,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ll_change_sum = ll_change_log.sum(axis=-1)
         new_state.log_like[0] += _to_numpy(ll_change_sum[0])
 
+        self._debug_sync_all_devices(model)
         with tm.span("ll_checks"):
             ll_after = model.analysis_container_arr.likelihood()
         check = ll_after - new_state.log_like[0] - start_diffs
@@ -4940,6 +5539,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             new_state.log_like[0] += _to_numpy(ll_change_sum_temp[0])
 
+            self._debug_sync_all_devices(model)
             with tm.span("ll_checks"):
                 ll_after = model.analysis_container_arr.likelihood()
             check = ll_after - new_state.log_like[0] - start_diffs
@@ -5086,6 +5686,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 "[GB_ACCEPT %s] rj cold %.4f (n=%.0f) all %.4f (n=%.0f) | "
                 "in-model cold %.4f (n=%.0f) all %.4f (n=%.0f)",
                 self.name, rj_c, rj_cn, rj_a, rj_an, im_c, im_cn, im_a, im_an,
+            )
+            # PER-WALKER cold in-model decomposition (shard-bug hunt
+            # 2026-08-12): on 2 GPUs the aggregate cold rate halves vs
+            # 1 GPU. (a, a, ~0, ~0) convicts the WALKER-sharded parent
+            # side (shard-1 residual rows); a uniform a/2 convicts the
+            # BAND-sharded cell scoring side (device-1 band cells).
+            with np.errstate(invalid="ignore", divide="ignore"):
+                _im_w = _ac[1][0].sum(axis=-1) / _pc[1][0].sum(axis=-1)
+            logger.info(
+                "[GB_ACCEPT %s] in-model cold PER WALKER: %s",
+                self.name, np.array2string(_im_w, precision=3),
             )
         except Exception as exc:  # never break a propose for a log line
             logger.debug("[GB_ACCEPT %s] skipped: %r", self.name, exc)
@@ -5379,10 +5990,53 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     def _fstat_call(self, model, walker_ref):
         """The injectable kernel entry the library sweeps drive.
 
-        Same routing as :meth:`_fstat_NM` -- the sig-het wrapper unwrap and
-        the multi-shard route are both load-bearing, so this reuses that
-        method rather than re-deriving the comp.
+        Default: same routing as :meth:`_fstat_NM` -- the sig-het wrapper
+        unwrap and the multi-shard route are both load-bearing, so this
+        reuses that method rather than re-deriving the comp.
+
+        ``FSTAT_USE_SIGHET=1`` (opt-in; default stays the chunked path)
+        swaps in the signal-het shared-reference F-stat: the comb/stage-B
+        sweeps score through
+        :func:`lisatools.sampling.fstat_gridfit.build_sighet_call_fstat`,
+        which builds bucketed heterodyne references against the reference
+        walker's residual once and evaluates every candidate through the
+        ``gb_signal_het_fstat_get_ll`` kernel. Requires the GB comp to be a
+        ``GBSignalHetComputations`` (GB_SIGHET_INMODEL=1 wiring) built with
+        ``v4_knots > 0`` and a WDM basis; anything else falls back to the
+        chunked path with a warning. Multi-shard holders go through
+        :meth:`_RoutedBandEngine.route_sighet_fstat`, which pins the whole
+        scorer to the reference walker's shard on a device-local comp
+        replica; ``FSTAT_SIGHET_MULTIDEV=1`` (OPT-IN, default off pending
+        the on-GPU parity gate; ``=check`` adds a pinned shadow compare)
+        fans candidate batches out over ALL run devices instead.
+        Single-shard holders pass through unchanged.
         """
+        # Default ON (2026-08-12 user ruling): the sig-het shared-reference
+        # F-stat is the production scorer; FSTAT_USE_SIGHET=0 restores the
+        # chunked path (and non-WDM / non-sig-het comps fall back with a
+        # warning below either way).
+        if os.environ.get("FSTAT_USE_SIGHET", "1") == "1":
+            sig_comp = self.gb_wdm_comp
+            holder = model.analysis_container_arr
+            if not hasattr(sig_comp, "setup_fstat_references"):
+                logger.warning(
+                    "%s: FSTAT_USE_SIGHET=1 but the GB comp has no sig-het "
+                    "F-stat surface (need GB_SIGHET_INMODEL=1 with "
+                    "v4_knots set); falling back to the chunked F-stat.",
+                    self.name)
+            elif isinstance(self._basis_settings, FDSettings):
+                logger.warning(
+                    "%s: FSTAT_USE_SIGHET=1 is WDM-only; falling back to "
+                    "the chunked F-stat.", self.name)
+            else:
+                band_edges = _to_numpy(self.band_edges)
+                return _RoutedBandEngine.route_sighet_fstat(
+                    sig_comp, holder, xp=self.xp,
+                    Tobs=float(self._basis_settings.Tobs),
+                    f0_lims_hz=(float(band_edges[0]),
+                                float(band_edges[-1])),
+                    data_index=int(walker_ref),
+                    noise_index=int(walker_ref))
         return lambda params: self._fstat_NM(model, params, walker_ref)
 
     def _run_fstat_fit(self, model, k: int):
@@ -5391,13 +6045,24 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         cache_dir = self._epoch_dir(k)
         os.makedirs(cache_dir, exist_ok=True)
         walker_ref = self._fstat_reference_walker(model)
+        # Auditability: the epoch line carries the reference walker's total
+        # lnL (residual+PSD combination) alongside its index, so a run log
+        # shows WHICH state each epoch's grid was fitted against -- "same
+        # peaks after a refit" is only diagnosable with this visible.
+        try:
+            _lls = _to_numpy(model.analysis_container_arr.likelihood())
+            _ll_ref, _ll_spread = (float(_lls[walker_ref]),
+                                   float(_lls.max() - _lls.min()))
+        except Exception:
+            _ll_ref, _ll_spread = float("nan"), float("nan")
         band_edges = _to_numpy(self.band_edges)
         # f0_lims convention (gb.py): the interior span, band_edges[1:-1].
         f0_lims = (float(band_edges[1]), float(band_edges[-2]))
         mc_lims = self.fstat_fit_kwargs.get("mc_lims") or [0.001, 1.0]
         t0 = time.perf_counter()
         logger.info("%s: F-stat grid fit epoch %d starting (walker_ref=%d, "
-                    "cache %s)", self.name, k, walker_ref, cache_dir)
+                    "lnL=%.3f, cold-walker lnL spread=%.3f, cache %s)",
+                    self.name, k, walker_ref, _ll_ref, _ll_spread, cache_dir)
         stacked, n_peaks = run_fstat_grid_fit(
             self._fstat_call(model, walker_ref),
             xp=self.xp,
@@ -5525,6 +6190,23 @@ def para_log_like(
         Per-row log-likelihood (or ``(ll, snr)`` tuple).
     """
     xp = gb.backend.xp
+
+    # 2026-08-12 USER RULING: the legacy GBGPU FD computations
+    # (get_fstat_ll / get_ll) must never score a non-FD residual -- the
+    # default GB RJ stack in BOTH modes is the F-stat grid birth move
+    # (GBSpecialRJFStatGridMove, sig-het scorer) + prior RJ, and the
+    # serial-MCMC / refit moves that route through here are legacy
+    # FD-only surfaces. Fail LOUDLY instead of scoring WDM coefficients
+    # through an FD kernel.
+    _settings = getattr(acs, "settings", None)
+    if _settings is not None and not isinstance(_settings, FDSettings):
+        raise ValueError(
+            "para_log_like routes through the legacy GBGPU FD computations "
+            f"(get_fstat_ll/get_ll), but the run basis is "
+            f"{type(_settings).__name__}. These kernels are FD-only and must "
+            "not appear in WDM runs (2026-08-12 ruling): use the F-stat grid "
+            "birth move (rj_prior / rj_prior_search) + prior RJ instead."
+        )
 
     x_tmp = transform_fn.both_transforms(x, xp=xp)
     # need to get just f, fdot, fddot, alpha, delta

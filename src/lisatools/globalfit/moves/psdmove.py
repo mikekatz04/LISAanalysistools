@@ -15,6 +15,7 @@ single shard. The WDM basis falls back to the ACA route until the WDM
 counterpart kernels land in domains.cu.
 """
 
+import os
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -35,9 +36,26 @@ from eryn.utils.transform import TransformContainer
 from tqdm import tqdm
 
 from ...analysiscontainer import AnalysisContainerArray
+from ...diagnostic import batched_residual_full_source_and_noise_likelihoods
 from ...domaincomputation import DomainComputationGroupArray
-from ...domains import FDSettings, STFTSettings
-from ...sensitivity import XYZSensitivityBackend
+from ...domains import (
+    CoarseWDMSettings,
+    FDSettings,
+    FDSignal,
+    STFTSettings,
+    WDMSettings,
+)
+from ...sensitivity import (
+    _XYZ_ELEMENT_SENS,
+    _mat3x3_det_inv,
+    CompositeSensitivityBackend,
+    GalacticForeground,
+    InstrumentNoise,
+    SGWB,
+    XYZSensitivityBackend,
+)
+from ...stochastic import check_stochastic
+from ...utils.device import device_context
 from ...utils.utility import asnumpy
 from ..state import GFState
 from .globalfitmove import GlobalFitMove
@@ -83,6 +101,21 @@ class PSDMove(GlobalFitMove, StretchMove):
         permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
         tolerance: minimum allowed distance between spline knot positions in the sensitivity model.
         **kwargs: additional keyword arguments for the Move class.
+
+    Env knobs:
+        ``PSD_BATCH`` (seeds :attr:`psd_batch`, default ``1``): on the ACA
+        (composite / WDM) route, score each walker batch through ONE batched
+        covariance build + ONE batched likelihood per shard instead of the
+        per-walker Python loop — same numbers (parity asserted at
+        rtol <= 1e-12 in ``tests/test_psd_move_batched.py``), O(1) kernel
+        launches per scoring batch per device instead of O(nwalkers), and no
+        per-batch sens-mat install/restore or ``linear_psd_arr`` repack.
+        ``PSD_BATCH=0`` restores the historical per-walker path (the
+        ``_force_parent_path``-style escape hatch). The batched route
+        engages only when supported (CompositeSensitivityBackend with the
+        instrument basis cache, a linear-in-noise-levels instrument model,
+        3x3 channel structure, no frequency-layer mask, full-likelihood
+        containers); anything else silently keeps the per-walker path.
     """
 
     # canonical noise-model branch order (psd is mandatory in the model;
@@ -124,7 +157,9 @@ class PSDMove(GlobalFitMove, StretchMove):
         psd_transform_fn: TransformContainer = None,
         galfor_transform_fn: TransformContainer = None,
         sgwb_transform_fn: TransformContainer = None,
-        permute_every: int = 20,
+        # 10 (user ruling 2026-08-12): fancy (walker-permuting, re-scored)
+        # swap cadence; identity naive swaps fire every repeat regardless.
+        permute_every: int = 10,
         tolerance: float = 0.0,
         dcga: DomainComputationGroupArray = None,
         run_async: bool = False,
@@ -146,9 +181,11 @@ class PSDMove(GlobalFitMove, StretchMove):
         # :attr:`build_threads`. Pool is lazy and never pickled.
         self._build_threads = max(1, int(build_threads))
         self._build_pool = None
-        # One-time serial warm of the backend's walker-independent caches
-        # (see the note in :meth:`_build_batch`).
-        self._build_warmed = False
+        # One-time serial warm of the backend's walker-independent caches,
+        # tracked PER DEVICE on multi-GPU ACAs (see the note in
+        # :meth:`_build_batch`). Holds the devices already warmed (``None``
+        # is the CPU / single-device entry).
+        self._build_warmed = set()
         if dcga is not None:
             if acs is None:
                 acs = dcga.acs
@@ -195,6 +232,148 @@ class PSDMove(GlobalFitMove, StretchMove):
         # Debug escape hatch (see the note in the legacy MultiGPUPSDMove):
         # when True, psd_log_like bypasses the DCGA routing entirely.
         self._force_parent_path = False
+
+        # Walker-batched ACA-route scoring (see the class docstring's
+        # PSD_BATCH entry). ``_batch_runtime`` caches the per-device
+        # walker-independent pieces (instrument bases handles, modulation
+        # matrices, extra-component covariances) — built once per device and
+        # persisted for the run (allocate-once rule); dropped from pickles.
+        self.psd_batch = bool(int(os.environ.get("PSD_BATCH", "1")))
+        self._batch_runtime = {}
+        self._batch_route_state = None  # lazily resolved: True/False
+        self._batch_route_reason = None
+        self._batch_mem_logged = set()
+
+        self._setup_debug()
+
+    # Noise-model twin of the per-branch ``{BRANCH}_DEBUG`` plot hooks in
+    # addremovemove/gbspecialstretch. The prefix follows the move's sampled
+    # branch: ``PSD_DEBUG`` on the psd move, ``GALFOR_DEBUG`` (alias
+    # ``FG_DEBUG``) on the galfor move, ``SGWB_DEBUG`` on sgwb. Knobs:
+    #   {P}_DEBUG             "1" arms the plot hook (default off)
+    #   {P}_DEBUG_DIR         output folder (default ./gf_output/{branch}_debug/)
+    #   {P}_DEBUG_PLOT_WALKER walker / analysis container plotted (0)
+    #   {P}_DEBUG_EVERY       plot only every Nth propose (1)
+    def _setup_debug(self) -> None:
+        """Read the ``{PSD,GALFOR/FG,SGWB}_DEBUG`` env options (from __init__)."""
+        sampled = list(self.sampled_branches or self.NOISE_BRANCHES)
+        if sampled == ["galfor"]:
+            prefixes = ("GALFOR", "FG")
+        elif sampled == ["sgwb"]:
+            prefixes = ("SGWB",)
+        else:
+            prefixes = ("PSD",)
+        self._debug_prefix = prefixes[0]
+
+        def _opt(name, default):
+            for p in prefixes:
+                v = os.environ.get(f"{p}_{name}")
+                if v not in (None, ""):
+                    return v
+            return default
+
+        self.debug = bool(int(_opt("DEBUG", "0")))
+        self.debug_plot_dir = _opt("DEBUG_DIR", f"./gf_output/{sampled[0]}_debug/")
+        self.debug_plot_walker = int(_opt("DEBUG_PLOT_WALKER", "0"))
+        self.debug_every = max(1, int(_opt("DEBUG_EVERY", "1")))
+        self._debug_step = 0
+        self._debug_walker_params = None
+        if self.debug:
+            logger.info(
+                "[%s_DEBUG] armed: dir=%s walker=%d every=%d",
+                self._debug_prefix, self.debug_plot_dir,
+                self.debug_plot_walker, self.debug_every,
+            )
+
+    def _debug_plot_psd_vs_residual(self) -> None:
+        """Overlay the walker's current noise model on the residual's
+        per-layer power. For the WDM basis ``E[w_mn^2] == S_wdm[m]`` (the
+        fold validation contract), so on a converged noise fit the two
+        curves sit on top of each other; a mismatch localizes which layers
+        the fit is missing."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            def _h(a):
+                return a.get() if hasattr(a, "get") else np.asarray(a)
+
+            w = self.debug_plot_walker
+            ac = self.acs[w]
+            res = _h(ac.data.arr)
+            S = _h(ac.sens_mat[:])
+
+            nch = res.shape[0]
+            res_pow = np.abs(res) ** 2
+            if res_pow.ndim == 3:
+                res_pow = res_pow.mean(axis=-1)
+            if S.ndim == res.ndim + 1 and S.shape[0] == S.shape[1]:
+                Sd = np.stack([S[i, i] for i in range(nch)])
+            else:
+                Sd = S[:nch]
+            if Sd.ndim == 3:
+                Sd = Sd.mean(axis=-1)
+
+            settings = getattr(ac.sens_mat, "basis_settings", None)
+            f = _h(settings.f_arr) if hasattr(settings, "f_arr") else None
+            n_layer = res_pow.shape[-1]
+            if f is None or len(f) != n_layer:
+                f = np.arange(n_layer, dtype=float)
+            good = f > 0
+
+            # Instrument-only reference (same psd params, foreground/sgwb
+            # zeroed): the gap between this and the total model IS the
+            # fitted foreground contribution per layer — without it a
+            # galfor-absorbed galaxy and no galaxy at all look identical.
+            S_instr = None
+            dbg = self._debug_walker_params
+            if dbg is not None and (dbg[2] is not None or dbg[3] is not None):
+                try:
+                    Si = _h(self._build_sensitivity_for_walker(
+                        dbg[0], dbg[1], None, None)[:])
+                    if Si.ndim == res.ndim + 1 and Si.shape[0] == Si.shape[1]:
+                        S_instr = np.stack([Si[i, i] for i in range(nch)])
+                    else:
+                        S_instr = Si[:nch]
+                    if S_instr.ndim == 3:
+                        S_instr = S_instr.mean(axis=-1)
+                except Exception as e:
+                    logger.warning(
+                        "[%s_DEBUG] instrument-only reference skipped: %r",
+                        self._debug_prefix, e,
+                    )
+
+            os.makedirs(self.debug_plot_dir, exist_ok=True)
+            move = getattr(self, "gf_move_name", self._debug_prefix.lower())
+            labels = ("X", "Y", "Z")
+            fig, axes = plt.subplots(nch, 1, figsize=(8, 2.6 * nch), sharex=True)
+            axes = np.atleast_1d(axes)
+            for i in range(nch):
+                ch = labels[i] if i < len(labels) else str(i)
+                axes[i].loglog(f[good], res_pow[i][good], lw=0.8,
+                               label=f"residual E[w^2] ({ch})")
+                axes[i].loglog(f[good], np.real(Sd[i])[good], "k--", lw=1.0,
+                               label="noise model S (total)")
+                if S_instr is not None:
+                    axes[i].loglog(f[good], np.real(S_instr[i])[good], "r:",
+                                   lw=1.0, label="instrument-only S")
+                axes[i].legend(fontsize=7, loc="upper right")
+                axes[i].set_ylabel("power")
+            axes[-1].set_xlabel("f [Hz]")
+            axes[0].set_title(f"{move}: walker {w}, propose {self._debug_step}")
+            fname = os.path.join(
+                self.debug_plot_dir,
+                f"{move}_psd_vs_res_{self._debug_step:05d}.png",
+            )
+            fig.savefig(fname, dpi=110, bbox_inches="tight")
+            plt.close(fig)
+            logger.info("[%s_DEBUG] wrote %s", self._debug_prefix, fname)
+        except Exception as e:  # debug hooks must never kill a run
+            logger.warning(
+                "[%s_DEBUG] psd-vs-residual plot skipped: %r",
+                self._debug_prefix, e,
+            )
 
     @property
     def dcga(self) -> DomainComputationGroupArray:
@@ -288,6 +467,9 @@ class PSDMove(GlobalFitMove, StretchMove):
         state["_fixed_total_covariances"] = {}
         state["_fixed_total_loglikes"] = None
         state["_fixed_total_loglike_frequency_terms"] = None
+        # runtime device arrays (per-device bases/modulations/extras);
+        # purely derived state, rebuilt on first use in the copy
+        state["_batch_runtime"] = {}
         return state
 
     # ------------------------------------------------------------------
@@ -522,6 +704,54 @@ class PSDMove(GlobalFitMove, StretchMove):
     # dev ACA path + hybrid dispatch
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # multi-GPU walker-shard plumbing (ACA route)
+    # ------------------------------------------------------------------
+    # The ACA shards walkers across devices (``acs.gpu_map`` /
+    # ``acs.gpu_splits``); scoring already runs per shard inside the owning
+    # device context (``AnalysisContainerArray._vectorized_dispatch``). The
+    # helpers below give the per-walker sensitivity BUILDS the same
+    # discipline: each build enters the owning walker's ``device_context``
+    # and evaluates against a per-device domain-settings replica (the
+    # ``source_runtime`` precedent), so nothing reads the primary device's
+    # caches cross-device. CPU / single-GPU paths are byte-identical to the
+    # historical behavior (device ``None`` -> nullcontext + shared objects).
+
+    def _walker_device(self, walker_index: int):
+        """The CUDA device owning walker ``walker_index``'s shard (None on CPU)."""
+        # getattr chain: some unit tests build the move via ``__new__`` with
+        # no ACA at all — treat that like the CPU path.
+        gpus = getattr(getattr(self, "acs", None), "gpus", None)
+        if gpus is None:
+            return None
+        return int(self.acs.gpu_map[int(walker_index)])
+
+    def _backend_settings_for_device(self, device):
+        """Per-device replica of the sensitivity backend's domain settings.
+
+        CPU / single-GPU / the run's primary device return the backend's own
+        (shared) ``basis_settings`` unchanged — zero extra memory, identical
+        objects. A non-primary device returns the cached device-local replica
+        from ``source_runtime._device_local_domain_settings_on`` (built once
+        per (settings, device) and kept for the run), whose WDM window /
+        fold caches live on that device.
+        """
+        backend = self.sensitivity_backend
+        settings = getattr(backend, "basis_settings", None)
+        gpus = getattr(getattr(self, "acs", None), "gpus", None)
+        if settings is None or device is None or gpus is None:
+            return settings
+        primary = int(gpus[0])
+        if int(device) == primary:
+            return settings
+        from ..stock.erebor.source_runtime import (
+            _device_local_domain_settings_on,
+        )
+
+        return _device_local_domain_settings_on(
+            settings, self.acs.xp, int(device), primary
+        )
+
     @staticmethod
     def _to_physical(transform_fn, params):
         """One branch's sampling-basis row -> the physical basis the model wants.
@@ -549,6 +779,11 @@ class PSDMove(GlobalFitMove, StretchMove):
         returned :class:`SensitivityMatrix` is what will be installed on the
         AnalysisContainer for the matching walker when we accept proposals
         (see :meth:`propose`).
+
+        Multi-GPU: the build runs inside the walker's owning
+        ``device_context`` and (composite backend) against a per-device
+        domain-settings replica, so the produced matrix — covariance,
+        ``invC``, ``detC`` — is resident on the walker's shard device.
         """
         # ``sgwb_params`` is only forwarded when present so the legacy
         # XYZSensitivityBackend (whose __call__ has no sgwb kwarg) keeps
@@ -569,12 +804,25 @@ class PSDMove(GlobalFitMove, StretchMove):
             )
 
         extra = {} if sgwb_params is None else dict(sgwb_params=sgwb_params)
-        return self.sensitivity_backend(
-            f"walker_{walker_index}",
-            psd_params,
-            galfor_params=galfor_params,
-            **extra,
-        )
+        dev = self._walker_device(walker_index)
+        settings_here = self._backend_settings_for_device(dev)
+        if settings_here is not None and settings_here is not getattr(
+            self.sensitivity_backend, "basis_settings", None
+        ):
+            # only forwarded when it differs so duck-typed / legacy backends
+            # without the kwarg keep working on the shared-settings path
+            extra["basis_settings"] = settings_here
+        xp = getattr(getattr(self, "acs", None), "xp", np)
+        with device_context(xp, dev):
+            # NB: psd_params / galfor_params were already mapped to physical
+            # units at the top of this method (needed by the frozen-component
+            # route above), so they must NOT be transformed a second time here.
+            return self.sensitivity_backend(
+                f"walker_{walker_index}",
+                psd_params,
+                galfor_params=galfor_params,
+                **extra,
+            )
 
     def _fixed_component_cache_available(self) -> bool:
         """Whether exact additive-component caching is safe on this route."""
@@ -879,12 +1127,14 @@ class PSDMove(GlobalFitMove, StretchMove):
         and the rows are independent. With :attr:`build_threads` > 1 they
         run concurrently in :attr:`build_pool`.
 
-        The first row of the first batch is always built serially: the
+        The first row seen for EACH device is always built serially: the
         sensitivity backend fills walker-independent caches on its first
         call (``CompositeSensitivityBackend._instrument_basis_cache`` -- the
         per-WDM-time-slice fold under ``--unequal-arm`` is minutes of work),
-        and letting N threads race into a cold cache would just do that work
-        N times. Once warm, every later call is a lookup.
+        those caches are per device (each keyed on the device / its settings
+        replica), and letting N threads race into a cold cache would just do
+        that work N times. Once a device is warm, every later call on it is
+        a lookup.
         """
         def _one(row):
             row = int(row)
@@ -895,17 +1145,481 @@ class PSDMove(GlobalFitMove, StretchMove):
                 w, psd_coords[row], galfor_here, sgwb_here
             )
 
-        rows = list(batch)
-        if not self._build_warmed and rows:
-            _one(rows.pop(0))
-            self._build_warmed = True
+        self._run_rows_per_split(_one, list(batch), walker_inds_keep)
 
-        if self._build_threads > 1 and len(rows) > 1:
-            # list() forces consumption so worker exceptions re-raise here.
-            list(self.build_pool.map(_one, rows))
-        else:
-            for row in rows:
-                _one(row)
+    def _run_rows_per_split(self, one_fn, rows, walker_inds_keep):
+        """Run ``one_fn(row)`` for every row, grouped by owning ACA split.
+
+        The first row seen for each not-yet-warm device runs serially first
+        (the per-device cache warm described in :meth:`_build_batch`); the
+        rest dispatch through ``acs._run_per_split`` (the
+        ``addremovemove.compute_acs_like`` / ``_vectorized_dispatch``
+        primitive): serial on CPU / single split, one thread per populated
+        split under ``run_threaded`` (multi-GPU). ``one_fn`` enters its own
+        walker's ``device_context`` (see
+        :meth:`_build_sensitivity_for_walker`), so the workers need no extra
+        device pinning. Within a split, :attr:`build_threads` > 1 keeps the
+        historical intra-split thread spread.
+
+        The move's ``run_threaded`` flag forces threaded dispatch; otherwise
+        the ACA's own ``run_threaded`` default decides (the
+        ``compute_acs_like`` precedent).
+        """
+        pending = []
+        for row in rows:
+            dev = self._walker_device(int(walker_inds_keep[int(row)]))
+            if dev not in self._build_warmed:
+                # serial per-device cache warm
+                self._build_warmed.add(dev)
+                one_fn(row)
+            else:
+                pending.append(row)
+        rows = pending
+        if not len(rows):
+            return
+
+        def _run_group(group_rows):
+            if self._build_threads > 1 and len(group_rows) > 1:
+                # list() forces consumption so worker exceptions re-raise.
+                list(self.build_pool.map(one_fn, group_rows))
+            else:
+                for row in group_rows:
+                    one_fn(row)
+
+        acs = getattr(self, "acs", None)
+        if acs is None or not (
+            hasattr(acs, "_run_per_split") and hasattr(acs, "_split_rows")
+        ):
+            _run_group(list(rows))
+            return
+
+        rows_arr = np.asarray(list(rows), dtype=int)
+        split_to_pos = acs._split_rows(
+            np.asarray(walker_inds_keep, dtype=int)[rows_arr]
+        )
+
+        def _worker(split, positions):
+            _run_group(rows_arr[np.asarray(positions, dtype=int)])
+
+        acs._run_per_split(
+            _worker, split_to_pos,
+            run_threaded=True if self._run_threaded else None,
+        )
+
+    # ------------------------------------------------------------------
+    # walker-batched ACA-route scoring (PSD_BATCH; tier 3)
+    # ------------------------------------------------------------------
+    # The per-walker ACA route builds one CompositeSensitivityMatrix per
+    # proposal row (2 basis multiplies + a WDM stochastic fold + a 3x3
+    # det/inv per walker) and reads one likelihood per container -- O(nb)
+    # Python-orchestrated kernel chains per scoring batch. Everything in
+    # that chain is either LINEAR in per-walker scalars (the instrument
+    # bases), a per-walker 1-D curve feeding a linear fold (the stochastic
+    # components), or elementwise over the basis grid (_mat3x3_det_inv, the
+    # likelihood sums) -- so a walker axis slots straight in and the whole
+    # batch is O(1) kernel launches per device. Parity with the per-walker
+    # route is exact by construction (same operations, same order); tested
+    # at rtol <= 1e-12 in tests/test_psd_move_batched.py.
+
+    def _batched_route_ready(self) -> bool:
+        """Whether the PSD_BATCH walker-batched route scores this move.
+
+        Resolved once (the run's configuration cannot change mid-run) and
+        logged; ``_batch_route_reason`` records why the per-walker path was
+        kept."""
+        if self._batch_route_state is None:
+            self._batch_route_state = ok = self._resolve_batched_route()
+            if ok:
+                logger.info("[PSD_BATCH] walker-batched ACA scoring: ON")
+            else:
+                logger.info(
+                    "[PSD_BATCH] walker-batched ACA scoring: OFF (%s)",
+                    self._batch_route_reason,
+                )
+        return self._batch_route_state
+
+    def _resolve_batched_route(self) -> bool:
+        def _no(reason):
+            self._batch_route_reason = reason
+            return False
+
+        if not self.psd_batch:
+            return _no("PSD_BATCH=0")
+        backend = self.sensitivity_backend
+        if not isinstance(backend, CompositeSensitivityBackend):
+            return _no(
+                f"sensitivity backend is {type(backend).__name__}, "
+                "not CompositeSensitivityBackend"
+            )
+        if backend._instrument_basis_cache is None:
+            return _no("instrument basis cache disabled")
+        if not issubclass(backend.instrument_component_cls, InstrumentNoise):
+            return _no("instrument component is not an InstrumentNoise")
+        if isinstance(backend.basis_settings, CoarseWDMSettings):
+            # The batched scorer gathers the FINE residual buffer and scores
+            # it against ``C`` directly. On a coarse grid the model lives on
+            # (Nf_active, Ncoarse) while the residual is still fine, and the
+            # coarse likelihood is a different quantity anyway (it reads the
+            # precomputed sufficient statistic + frozen WS dof). The coarse
+            # routes in ``compute_log_like`` handle this case and run first;
+            # this is the second guard so the ordering there is not the only
+            # thing standing between a coarse run and a wrong likelihood.
+            return _no("coarse WDM likelihood uses its own batched route")
+        if not isinstance(backend.basis_settings, (FDSettings, WDMSettings)):
+            return _no(
+                f"unsupported domain {type(backend.basis_settings).__name__}"
+            )
+        try:
+            if not self._batch_instrument_probe()._linear_in_noise_levels():
+                return _no("instrument model is not linear in the noise levels")
+        except Exception as exc:  # duck-typed test backends etc.
+            return _no(f"instrument probe failed: {exc!r}")
+        acs = getattr(self, "acs", None)
+        for attr in (
+            "linear_data_arr", "gpu_splits", "split_map", "nchannels",
+            "end_shape", "shape_sens", "_run_per_split", "_split_rows",
+        ):
+            if not hasattr(acs, attr):
+                return _no(f"ACA lacks {attr}")
+        if tuple(acs.shape_sens) != (3, 3):
+            return _no(f"channel structure {tuple(acs.shape_sens)} != (3, 3)")
+        try:
+            settings = acs.settings
+        except Exception:
+            settings = backend.basis_settings
+        if getattr(settings, "frequency_layer_mask", None) is not None:
+            # ``apply_frequency_layer_mask`` is a no-op on active-grid
+            # arrays (``arr.shape[-2] == Nf_active`` — exactly what the
+            # ACA's data / invC slices are); it only compresses FULL-grid
+            # arrays, and the batched route does not reproduce that.
+            if tuple(acs.end_shape) != tuple(settings.basis_shape_active):
+                return _no(
+                    "frequency_layer_mask would compress the data "
+                    f"(end_shape {tuple(acs.end_shape)} != active basis "
+                    f"{tuple(settings.basis_shape_active)})"
+                )
+        try:
+            for w in range(len(acs)):
+                if getattr(acs[w], "likelihood_source_only", False):
+                    return _no("a container is likelihood_source_only")
+        except Exception as exc:
+            return _no(f"container check failed: {exc!r}")
+        return True
+
+    def _batch_instrument_probe(self):
+        """A representative instrument component sharing the backend's cache.
+
+        Built exactly the way :meth:`CompositeSensitivityBackend._build_matrix`
+        builds the per-walker components (same class, same kwargs, same
+        basis-cache dict, a model of the same class), so ``probe._bases``
+        warms/reads the SAME cache entry the per-walker route uses and
+        ``probe._linear_in_noise_levels()`` answers for the real per-walker
+        models."""
+        backend = self.sensitivity_backend
+        model = backend.instrument_model_cls(
+            1.0, 1.0, backend._orbits, f"{backend.model_name}:psd_batch_probe"
+        )
+        component_kwargs = dict(
+            tdi_generation=backend.tdi_generation,
+            model=model,
+            fill_nans=backend.instrument_fill_nans,
+            **backend.instrument_component_kwargs,
+        )
+        component_kwargs["basis_cache"] = backend._instrument_basis_cache
+        return backend.instrument_component_cls(**component_kwargs)
+
+    def _batch_device_runtime(self, device) -> dict:
+        """Per-device walker-independent pieces of the batched build.
+
+        Instrument bases (via the shared basis cache), stochastic model
+        classes + modulation matrices, and the extra components' (fixed)
+        covariances -- built ONCE per device inside its context and kept for
+        the run (allocate-once rule); never pickled."""
+        rt = self._batch_runtime.get(device)
+        if rt is not None:
+            return rt
+        backend = self.sensitivity_backend
+        settings = self._backend_settings_for_device(device)
+        probe = self._batch_instrument_probe()
+        B_oms, B_acc = probe._bases(settings)
+        galfor_probe = GalacticForeground(
+            foreground_params=(0.0,) * 5,
+            modulation=backend.galfor_modulation,
+            tdi_generation=backend.tdi_generation,
+            stochastic_fn=backend.galfor_stochastic_fn,
+        )
+        sgwb_probe = SGWB(
+            sgwb_params=(0.0,),
+            stochastic_fn=backend.sgwb_stochastic_fn,
+            tdi_generation=backend.tdi_generation,
+        )
+        rt = dict(
+            settings=settings,
+            B_oms=B_oms,
+            B_acc=B_acc,
+            Xsens=_XYZ_ELEMENT_SENS[backend.tdi_generation][0],
+            galfor_fn=check_stochastic(backend.galfor_stochastic_fn),
+            galfor_mod=galfor_probe.time_modulation(settings),
+            sgwb_fn=check_stochastic(backend.sgwb_stochastic_fn),
+            sgwb_mod=sgwb_probe.time_modulation(settings),
+            extra_covs=[
+                comp.covariance(settings) for comp in backend.extra_components
+            ],
+        )
+        self._batch_runtime[device] = rt
+        return rt
+
+    def _batched_stochastic_mag(self, settings, param_rows, stoch_fn, Xsens, xp):
+        """Per-walker stochastic-only magnitudes, batched.
+
+        WDM: evaluates each walker's (cheap, 1-D) spectrum on the fold's
+        rFFT bins, then runs ONE batched fold through the existing
+        ``FDSignal.wdmtransform(is_psd=True)`` with the walkers stacked on
+        the channel axis -- the exact per-walker ``_wdm_layer_psd`` math
+        (see :func:`~lisatools.sensitivity.get_sensitivity`), one gather /
+        window-square / sum for the whole batch. Returns ``(nb, Nf_active)``
+        columns (broadcast along time downstream, mirroring the stationary
+        ``repeat``). FD: per-row :func:`get_sensitivity` (1-D, cheap),
+        stacked to ``(nb, Nf)``."""
+        if isinstance(settings, WDMSettings):
+            f_full = xp.fft.rfftfreq(settings.N, settings.data_dt)
+            df = float(f_full[1] - f_full[0])
+            idx = settings.fold_frequency_indices
+            f_idx = f_full[idx]
+            psd_full = None
+            for r in range(len(param_rows)):
+                psd_active = xp.asarray(
+                    Xsens.get_Sn(
+                        f_idx,
+                        stochastic_params=tuple(
+                            np.asarray(param_rows[r], dtype=float)
+                        ),
+                        stochastic_function=stoch_fn,
+                        include_instrument=False,
+                    )
+                )
+                if psd_full is None:
+                    psd_full = xp.zeros(
+                        (len(param_rows), f_full.shape[0]),
+                        dtype=psd_active.dtype,
+                    )
+                psd_full[r, idx] = psd_active
+            psd_fd = FDSignal(
+                psd_full,
+                FDSettings(
+                    f_full.shape[0], df, force_backend=settings.backend
+                ),
+            )
+            folded = xp.real(
+                psd_fd.wdmtransform(settings=settings, is_psd=True)
+            )
+            col = folded[:, :, 0]
+            # get_sensitivity's fill_nans=0.0 on the folded PSD
+            col[xp.isnan(col)] = 0.0
+            return col
+
+        from ...sensitivity import get_sensitivity
+
+        rows = [
+            xp.asarray(
+                get_sensitivity(
+                    settings,
+                    sens_fn=Xsens,
+                    stochastic_params=tuple(np.asarray(p, dtype=float)),
+                    stochastic_function=stoch_fn,
+                    include_instrument=False,
+                    fill_nans=0.0,
+                )
+            )
+            for p in param_rows
+        ]
+        return xp.stack(rows)
+
+    @staticmethod
+    def _add_modulated_mag(C, mag, mod, settings, xp):
+        """Add a stochastic component's ``mag x modulation`` into ``C`` in place.
+
+        The batched twin of :meth:`SeparableComponent.covariance` for the
+        magnitude-on-every-element components (galfor / sgwb): ``C`` is
+        ``(nch, nch, nb, *basis)``; ``mag`` is ``(nb, Nf)`` for the WDM
+        basis (broadcast along the trailing time axis) or ``(nb, *basis)``
+        generally."""
+        from ...sensitivity import _basis_time_axis
+
+        nch = C.shape[0]
+        nbasis = C.ndim - 3
+        if mag.ndim - 1 < nbasis:
+            mag = mag[..., None]  # WDM column -> broadcast over time
+        if mod is None:
+            for i in range(nch):
+                for j in range(nch):
+                    C[i, j] += mag
+            return
+        mod = xp.asarray(mod)
+        if mod.ndim == 2:
+            for i in range(nch):
+                for j in range(nch):
+                    C[i, j] += mag * mod[i, j]
+            return
+        if mod.ndim == 3:
+            time_axis = _basis_time_axis(settings)
+            if time_axis is None:
+                raise ValueError(
+                    "time-varying modulation on a domain with no time axis"
+                )
+            ntime = mod.shape[2]
+            shape = [1] * (1 + nbasis)  # broadcast against (nb, *basis)
+            shape[1 + time_axis] = ntime
+            for i in range(nch):
+                for j in range(nch):
+                    C[i, j] += mag * mod[i, j].reshape(shape)
+            return
+        raise ValueError("modulation must be 2D (nch,nch) or 3D (nch,nch,Ntime).")
+
+    def _score_split_batch(
+        self, split, device, walkers, psd_phys, galfor_phys, sgwb_phys
+    ) -> np.ndarray:
+        """Score one shard's walker batch: batched build + batched likelihood.
+
+        Must be called inside ``device``'s context. ``walkers`` are the
+        (unique) physical walker indices owned by ``split``; params are
+        physical-basis host rows."""
+        acs = self.acs
+        xp = acs.xp
+        rt = self._batch_device_runtime(device)
+        settings = rt["settings"]
+        nb = len(walkers)
+        basis_nd = rt["B_oms"].ndim - 2
+
+        # instrument: C[..] = Soms_d^2 * B_oms + Sa_a^2 * B_acc, walker axis
+        # broadcast (the exact per-walker InstrumentNoise.base_covariance
+        # fast path, LISAModel stores the squared levels)
+        Soms2 = xp.asarray(np.asarray(psd_phys[:, 0], dtype=float) ** 2)
+        Sa2 = xp.asarray(np.asarray(psd_phys[:, 1], dtype=float) ** 2)
+        bshape = (1, 1, nb) + (1,) * basis_nd
+        C = (
+            rt["B_oms"][:, :, None] * Soms2.reshape(bshape)
+            + rt["B_acc"][:, :, None] * Sa2.reshape(bshape)
+        )
+        if galfor_phys is not None:
+            mag = self._batched_stochastic_mag(
+                settings, galfor_phys, rt["galfor_fn"], rt["Xsens"], xp
+            )
+            self._add_modulated_mag(C, mag, rt["galfor_mod"], settings, xp)
+        if sgwb_phys is not None:
+            mag = self._batched_stochastic_mag(
+                settings, sgwb_phys, rt["sgwb_fn"], rt["Xsens"], xp
+            )
+            self._add_modulated_mag(C, mag, rt["sgwb_mod"], settings, xp)
+        for cov in rt["extra_covs"]:
+            C += cov[:, :, None]
+
+        # batched det/inv + the same sanitization as _setup_det_and_inv
+        detC, invC = _mat3x3_det_inv(C, xp)
+        bad = ~xp.isfinite(invC)
+        if bool(xp.any(bad)):
+            invC = xp.where(bad, xp.zeros_like(invC), invC)
+        det_bad = ~xp.isfinite(detC)
+        if bool(xp.any(det_bad)):
+            detC = xp.where(det_bad, xp.ones_like(detC), detC)
+
+        # residual gather straight off the shard's contiguous buffer (the
+        # per-container views are rebinds INTO it, so it is authoritative)
+        split_rows = np.asarray(acs.gpu_splits[split], dtype=int)
+        order = np.argsort(split_rows)
+        intra = order[
+            np.searchsorted(split_rows[order], np.asarray(walkers, dtype=int))
+        ]
+        shaped = acs.linear_data_arr[split].reshape(
+            (len(split_rows), int(acs.nchannels)) + tuple(acs.end_shape)
+        )
+        res_batch = shaped[intra]
+
+        if (device, nb) not in self._batch_mem_logged:
+            self._batch_mem_logged.add((device, nb))
+            logger.info(
+                "[PSD_BATCH] device %s: batched build for %d walkers -- "
+                "C %.1f MB + invC %.1f MB + detC %.1f MB + residual gather "
+                "%.1f MB (total ~%.1f MB)",
+                device, nb, C.nbytes / 1e6, invC.nbytes / 1e6,
+                detC.nbytes / 1e6, res_batch.nbytes / 1e6,
+                (C.nbytes + invC.nbytes + detC.nbytes + res_batch.nbytes) / 1e6,
+            )
+
+        ll = batched_residual_full_source_and_noise_likelihoods(
+            res_batch, C, invC, detC, settings
+        )
+        return asnumpy(ll)
+
+    def _score_walker_batch(
+        self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+    ) -> np.ndarray:
+        """Score one one-row-per-walker batch through the batched route.
+
+        Applies the branch transforms per row on the host (identical to the
+        per-walker :meth:`_build_sensitivity_for_walker` seam), then runs one
+        :meth:`_score_split_batch` per populated shard through the ACA's
+        ``_run_per_split`` (threaded per split on multi-GPU)."""
+        acs = self.acs
+        xp = acs.xp
+        batch = np.asarray(batch, dtype=int)
+        walkers = np.asarray(walker_inds_keep, dtype=int)[batch]
+
+        def _phys(transform_fn, coords):
+            if coords is None:
+                return None
+            return np.stack([
+                np.asarray(
+                    self._to_physical(transform_fn, coords[int(r)]),
+                    dtype=float,
+                )
+                for r in batch
+            ])
+
+        psd_phys = _phys(self.psd_transform_fn, psd_coords)
+        galfor_phys = _phys(self.galfor_transform_fn, galfor_coords)
+        sgwb_phys = _phys(self.sgwb_transform_fn, sgwb_coords)
+
+        out = np.empty(len(batch), dtype=float)
+        split_to_pos = acs._split_rows(walkers)
+
+        def _worker(split, positions):
+            positions = np.asarray(positions, dtype=int)
+            device = None if acs.gpus is None else int(acs.gpus[split])
+            with device_context(xp, device):
+                ll = self._score_split_batch(
+                    split, device, walkers[positions], psd_phys[positions],
+                    None if galfor_phys is None else galfor_phys[positions],
+                    None if sgwb_phys is None else sgwb_phys[positions],
+                )
+            out[positions] = np.asarray(ll, dtype=float)
+
+        acs._run_per_split(
+            _worker, split_to_pos,
+            run_threaded=True if self._run_threaded else None,
+        )
+        return out
+
+    def _compute_log_like_batched(
+        self, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+    ) -> np.ndarray:
+        """Batched scoring of all surviving rows, grouped one-row-per-walker.
+
+        The grouping mirrors the per-walker route's batching loop -- here it
+        bounds the batched build's memory at ``nwalkers`` covariance stacks
+        per group (not ``ntemps * nwalkers``), NOT because anything is
+        installed on the containers (nothing is)."""
+        n = int(np.asarray(walker_inds_keep).shape[0])
+        tmp_logl = np.empty(n, dtype=float)
+        remaining = np.arange(n)
+        while remaining.size:
+            _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+            batch = remaining[np.sort(first)]
+            tmp_logl[batch] = self._score_walker_batch(
+                batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+            )
+            remaining = np.setdiff1d(remaining, batch)
+        return tmp_logl
 
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
         """Compute the PSD/galfor branch log-likelihood.
@@ -973,6 +1687,10 @@ class PSDMove(GlobalFitMove, StretchMove):
             self.prev_logl = logl.copy()
             return logl, None
 
+        # The coarse-WDM routes come FIRST: they score against the coarse
+        # sufficient statistic, which the PSD_BATCH route below knows nothing
+        # about (it gathers the FINE residual buffer). Both are guarded, but
+        # order is the first line of defence.
         if self._galfor_subband_fast_path_available():
             stat = self.acs.flatten()[0].coarse_stats
             tmp_logl = self._compute_galfor_subband_loglike(
@@ -1004,6 +1722,22 @@ class PSDMove(GlobalFitMove, StretchMove):
                 )
                 remaining = np.setdiff1d(remaining, batch)
             logl[logp_keep] = tmp_logl
+            self.prev_logl = logl.copy()
+            return logl, None
+
+        if self._batched_route_ready():
+            # PSD_BATCH walker-batched route (tier 3): one batched covariance
+            # build + one batched likelihood per shard per scoring group.
+            # Nothing is installed on the containers, so there is no
+            # sens-mat snapshot/restore and no linear_psd_arr repack here
+            # (the publish repack in propose() still runs and is what the
+            # rest of the run reads).
+            logl[logp_keep] = self._compute_log_like_batched(
+                walker_inds_keep,
+                psd_coords,
+                galfor_coords if has_galfor else None,
+                sgwb_coords if has_sgwb else None,
+            )
             self.prev_logl = logl.copy()
             return logl, None
 
@@ -1117,47 +1851,56 @@ class PSDMove(GlobalFitMove, StretchMove):
             self._tally_in_model_accepted += acc.sum(axis=-1).astype(int)
             self._tally_in_model_proposed += acc.shape[-1]
 
-        if move_i % self.permute_every == 0:
-            x = new_state.branches_coords
-            logl = new_state.log_like
-            logp = new_state.log_prior
-            branch_supps = new_state.branches_supplemental
-            supps = new_state.supplemental
+        # Tempering, addremove-style two-tier cadence (2026-08-12): a cheap
+        # IDENTITY-paired naive swap fires EVERY repeat -- valid within a
+        # walker because every rung of walker j scores against walker j's own
+        # residual, so the dbeta*dlogl factor is exact and costs no
+        # likelihood evaluations -- and the walker-PERMUTING fancy swap
+        # (re-scores the swapped params against the DESTINATION walkers'
+        # residuals through compute_log_like) fires only every
+        # ``permute_every`` repeats. Previously NO swap ran between fancy
+        # events, so the ladder sat unexchanged for the other repeats.
+        do_fancy = (move_i % self.permute_every == 0)
+        x = new_state.branches_coords
+        logl = new_state.log_like
+        logp = new_state.log_prior
+        branch_supps = new_state.branches_supplemental
+        supps = new_state.supplemental
 
-            logP = self.compute_log_posterior(logl, logp)
-            x, logP, logl, logp, inds, blobs, supps, branch_supps = (
-                self.temperature_control.temperature_swaps(
-                    x,
-                    logP,
-                    logl,
-                    logp,
-                    supps=supps,
-                    branch_supps=branch_supps,
-                    compute_log_like=self.compute_log_like,
-                    compute_log_prior=self.compute_log_prior,
-                    fancy_swap=True,
-                    permute_here=True,
-                )
+        logP = self.compute_log_posterior(logl, logp)
+        x, logP, logl, logp, inds, blobs, supps, branch_supps = (
+            self.temperature_control.temperature_swaps(
+                x,
+                logP,
+                logl,
+                logp,
+                supps=supps,
+                branch_supps=branch_supps,
+                compute_log_like=self.compute_log_like,
+                compute_log_prior=self.compute_log_prior,
+                fancy_swap=do_fancy,
+                permute_here=do_fancy,
             )
+        )
 
-            for name in x:
-                new_state.branches[name].coords[:] = x[name][:]
-                new_state.branches[name].branch_supplemental = branch_supps[name]
+        for name in x:
+            new_state.branches[name].coords[:] = x[name][:]
+            new_state.branches[name].branch_supplemental = branch_supps[name]
 
-            new_state.log_like[:] = logl[:]
-            new_state.log_prior[:] = logp[:]
-            new_state.supplemental = supps
+        new_state.log_like[:] = logl[:]
+        new_state.log_prior[:] = logp[:]
+        new_state.supplemental = supps
 
-            # swap bookkeeping: TemperatureControl refreshes swaps_accepted on
-            # every call and holds swaps_proposed fixed at nwalkers per rung.
-            tc = self.temperature_control
-            if self._tally_swaps_accepted is not None:
-                sa = getattr(tc, "swaps_accepted", None)
-                sp = getattr(tc, "swaps_proposed", None)
-                if sa is not None:
-                    self._tally_swaps_accepted += np.asarray(sa).ravel().astype(int)
-                if sp is not None:
-                    self._tally_swaps_proposed += np.asarray(sp).ravel().astype(int)
+        # swap bookkeeping: TemperatureControl refreshes swaps_accepted on
+        # every call and holds swaps_proposed fixed at nwalkers per rung.
+        tc = self.temperature_control
+        if self._tally_swaps_accepted is not None:
+            sa = getattr(tc, "swaps_accepted", None)
+            sp = getattr(tc, "swaps_proposed", None)
+            if sa is not None:
+                self._tally_swaps_accepted += np.asarray(sa).ravel().astype(int)
+            if sp is not None:
+                self._tally_swaps_proposed += np.asarray(sp).ravel().astype(int)
 
         return new_state, accepted
 
@@ -1325,9 +2068,14 @@ class PSDMove(GlobalFitMove, StretchMove):
         new_state.log_like[0] = tmp_state.log_like[0]
         new_state.log_prior[0] = self._cold_noise_log_prior(new_state)
 
-        # TODO: check speed of this? (needed?)
+        # Publish the accepted (cold-row) noise model onto every walker's
+        # AnalysisContainer. Same per-shard dispatch as the scoring builds:
+        # each walker's build runs on its owning device, split groups run
+        # concurrently under run_threaded (multi-GPU), serially otherwise.
         nwalkers = len(self.acs)
-        for w in range(nwalkers):
+
+        def _publish_one(w):
+            w = int(w)
             psd_params = new_state.branches_coords["psd"][0, w, 0]
             if "galfor" in new_state.branches_coords:
                 galfor_params = new_state.branches_coords["galfor"][0, w, 0]
@@ -1342,6 +2090,16 @@ class PSDMove(GlobalFitMove, StretchMove):
                 w, psd_params, galfor_params, sgwb_params
             )
             self.acs[w].sens_mat = new_sens
+            if self.debug and w == self.debug_plot_walker:
+                # accepted params of the plotted walker, for the
+                # instrument-only reference curve in the debug overlay
+                self._debug_walker_params = (
+                    w, psd_params, galfor_params, sgwb_params
+                )
+
+        self._run_rows_per_split(
+            _publish_one, np.arange(nwalkers), np.arange(nwalkers)
+        )
 
         # NOT gated by _skip_linear_psd_repack, deliberately. This is the one
         # repack that PUBLISHES the accepted noise model to the rest of the
@@ -1352,6 +2110,11 @@ class PSDMove(GlobalFitMove, StretchMove):
         # compute_log_like's scoring loop, where no other move can observe it.
         self.acs.reset_linear_psd_arr()
         after_vals = self.acs.likelihood()
+
+        if self.debug:
+            if self._debug_step % self.debug_every == 0:
+                self._debug_plot_psd_vs_residual()
+            self._debug_step += 1
 
         new_state.log_like[0] = after_vals
         # eryn-facing acceptance uses the engine (cold-chain) shape

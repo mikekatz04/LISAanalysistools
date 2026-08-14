@@ -90,6 +90,14 @@ DONE_PREFIX = "[PARITY] arm_done="
 def run_leg(arm: str, iterations: int) -> int:
     """One leg: build the arm's stock fit under the ambient ``GPUS`` and print
     the initial per-walker likelihood plus ``iterations`` liveness steps."""
+    import logging
+
+    # Without this the leg is SILENT between the initial-lnL print and the
+    # first completed iteration -- at full-band search scale that is tens of
+    # minutes of nothing, indistinguishable from a hang.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(name)s - %(levelname)s - %(message)s")
+
     import numpy as np
 
     from lisatools.globalfit.run import GlobalFit
@@ -149,6 +157,11 @@ def _spawn(arm: str, gpus: str, iterations: int) -> tuple[int, list[str]]:
     env["GPUS"] = gpus
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("MPLBACKEND", "Agg")
+    # Progress visibility: since loginfo's propagate=False rework (7d63b95)
+    # lisatools INFO lines reach the console only via the run's verbose
+    # knob -- the child's logging.basicConfig alone no longer shows them.
+    env.setdefault("VERBOSE", "1")
+    env.setdefault("PROGRESS", "0")
     env["NUM_ITERATIONS"] = str(iterations)
     cmd = [sys.executable, os.path.abspath(__file__), "--child", arm,
            "--iterations", str(iterations)]

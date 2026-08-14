@@ -59,6 +59,10 @@ def _coerce_to_domain_base(obj) -> DomainBase:
 
 logger = logging.getLogger(__name__)
 
+#: One WARNING per process for the multi-GPU split notice (see
+#: AnalysisContainerArray.__init__); repeats demote to DEBUG.
+_MULTI_GPU_SPLIT_WARNED = False
+
 class AnalysisContainer:
     """Combinatorial container that combines sensitivity and data information.
 
@@ -1824,7 +1828,15 @@ class AnalysisContainerArray:
                 if not isinstance(g, (int, np.integer)):
                     raise TypeError(f"gpus entries must be int, got {type(g)}")
             if len(gpus) > 1:
-                logger.warning(
+                # Once per process at WARNING, then DEBUG: subclasses
+                # (SubBandBuffer) are constructed per band-unit/proposal, so
+                # repeating this mid-run reads as a re-split event when the
+                # data plane hasn't moved (same demotion pattern as the
+                # sensitivity invC report).
+                global _MULTI_GPU_SPLIT_WARNED
+                _log = logger.debug if _MULTI_GPU_SPLIT_WARNED else logger.warning
+                _MULTI_GPU_SPLIT_WARNED = True
+                _log(
                     "Multiple GPUs detected. Data and sensitivity information "
                     "will be split across the GPUs as evenly as possible."
                 )
