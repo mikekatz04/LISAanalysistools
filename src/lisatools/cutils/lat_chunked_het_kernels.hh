@@ -2873,13 +2873,22 @@ inline void wdm_het_fill_global_impl(
         wdm_cufftdx_max_scratch();
 
     // Upload host-side wrapper structs (Orbits / TDIConfig / WDMSettings) to
-    // device. Cache the device-side pointers across calls.
-    static Orbits      *orbits_gpu       = nullptr;
-    static TDIConfig   *tdi_config_gpu   = nullptr;
-    static WDMSettings *wdm_settings_gpu = nullptr;
-    if (orbits_gpu       == nullptr) gpuErrchk(cudaMalloc(&orbits_gpu,       sizeof(Orbits)));
-    if (tdi_config_gpu   == nullptr) gpuErrchk(cudaMalloc(&tdi_config_gpu,   sizeof(TDIConfig)));
-    if (wdm_settings_gpu == nullptr) gpuErrchk(cudaMalloc(&wdm_settings_gpu, sizeof(WDMSettings)));
+    // device -- PER CALL, freed after the sync. These were function-local
+    // ``static`` caches, which is a concurrency bug once the nanobind wraps
+    // release the GIL (threaded per-device lanes): (a) two lanes race on the
+    // lazy init and on the memcpy-into-the-shared-buffer window while the
+    // other lane's kernel is still reading it, and (b) the one cached
+    // allocation lives on whichever device called first, silently serving
+    // cross-device pointers to every other lane. Per-call alloc/copy/free
+    // (the same pattern as the gb_fd_* and sig-het wraps) makes each call
+    // self-contained on the caller's current device; the 3 tiny mallocs are
+    // noise next to the kernel runtime.
+    Orbits      *orbits_gpu       = nullptr;
+    TDIConfig   *tdi_config_gpu   = nullptr;
+    WDMSettings *wdm_settings_gpu = nullptr;
+    gpuErrchk(cudaMalloc(&orbits_gpu,       sizeof(Orbits)));
+    gpuErrchk(cudaMalloc(&tdi_config_gpu,   sizeof(TDIConfig)));
+    gpuErrchk(cudaMalloc(&wdm_settings_gpu, sizeof(WDMSettings)));
     gpuErrchk(cudaMemcpy(orbits_gpu,       orbits,       sizeof(Orbits),       cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(tdi_config_gpu,   tdi_config,   sizeof(TDIConfig),    cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(wdm_settings_gpu, wdm_settings, sizeof(WDMSettings), cudaMemcpyHostToDevice));
@@ -2899,6 +2908,9 @@ inline void wdm_het_fill_global_impl(
         Nf_slab, slab_min_f);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaFree(orbits_gpu));
+    gpuErrchk(cudaFree(tdi_config_gpu));
+    gpuErrchk(cudaFree(wdm_settings_gpu));
 #else
     (void) grid_dim;
     wdm_het_fill_global_kernel<SourceT>(
@@ -2967,12 +2979,15 @@ inline void wdm_het_get_ll_impl(
         (size_t) 2 * (size_t) NUM_THREADS_HERE * sizeof(double) +
         wdm_cufftdx_max_scratch();
 
-    static Orbits      *orbits_gpu       = nullptr;
-    static TDIConfig   *tdi_config_gpu   = nullptr;
-    static WDMSettings *wdm_settings_gpu = nullptr;
-    if (orbits_gpu       == nullptr) gpuErrchk(cudaMalloc(&orbits_gpu,       sizeof(Orbits)));
-    if (tdi_config_gpu   == nullptr) gpuErrchk(cudaMalloc(&tdi_config_gpu,   sizeof(TDIConfig)));
-    if (wdm_settings_gpu == nullptr) gpuErrchk(cudaMalloc(&wdm_settings_gpu, sizeof(WDMSettings)));
+    // Per-call upload + free (no ``static`` cache): see the comment in
+    // wdm_het_fill_global_impl -- the static cache races under GIL-released
+    // threaded lanes and pins the buffers to the first caller's device.
+    Orbits      *orbits_gpu       = nullptr;
+    TDIConfig   *tdi_config_gpu   = nullptr;
+    WDMSettings *wdm_settings_gpu = nullptr;
+    gpuErrchk(cudaMalloc(&orbits_gpu,       sizeof(Orbits)));
+    gpuErrchk(cudaMalloc(&tdi_config_gpu,   sizeof(TDIConfig)));
+    gpuErrchk(cudaMalloc(&wdm_settings_gpu, sizeof(WDMSettings)));
     gpuErrchk(cudaMemcpy(orbits_gpu,       orbits,       sizeof(Orbits),       cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(tdi_config_gpu,   tdi_config,   sizeof(TDIConfig),    cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(wdm_settings_gpu, wdm_settings, sizeof(WDMSettings), cudaMemcpyHostToDevice));
@@ -3000,6 +3015,9 @@ inline void wdm_het_get_ll_impl(
         N_cp_orbit, Nf_slab, slab_min_f);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaFree(orbits_gpu));
+    gpuErrchk(cudaFree(tdi_config_gpu));
+    gpuErrchk(cudaFree(wdm_settings_gpu));
 #else
     (void) grid_dim;
     wdm_het_get_ll_kernel<SourceT>(
@@ -3065,12 +3083,15 @@ inline void wdm_het_swap_ll_impl(
         (size_t) 5 * (size_t) NUM_THREADS_HERE * sizeof(double) +
         wdm_cufftdx_max_scratch();
 
-    static Orbits      *orbits_gpu       = nullptr;
-    static TDIConfig   *tdi_config_gpu   = nullptr;
-    static WDMSettings *wdm_settings_gpu = nullptr;
-    if (orbits_gpu       == nullptr) gpuErrchk(cudaMalloc(&orbits_gpu,       sizeof(Orbits)));
-    if (tdi_config_gpu   == nullptr) gpuErrchk(cudaMalloc(&tdi_config_gpu,   sizeof(TDIConfig)));
-    if (wdm_settings_gpu == nullptr) gpuErrchk(cudaMalloc(&wdm_settings_gpu, sizeof(WDMSettings)));
+    // Per-call upload + free (no ``static`` cache): see the comment in
+    // wdm_het_fill_global_impl -- the static cache races under GIL-released
+    // threaded lanes and pins the buffers to the first caller's device.
+    Orbits      *orbits_gpu       = nullptr;
+    TDIConfig   *tdi_config_gpu   = nullptr;
+    WDMSettings *wdm_settings_gpu = nullptr;
+    gpuErrchk(cudaMalloc(&orbits_gpu,       sizeof(Orbits)));
+    gpuErrchk(cudaMalloc(&tdi_config_gpu,   sizeof(TDIConfig)));
+    gpuErrchk(cudaMalloc(&wdm_settings_gpu, sizeof(WDMSettings)));
     gpuErrchk(cudaMemcpy(orbits_gpu,       orbits,       sizeof(Orbits),       cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(tdi_config_gpu,   tdi_config,   sizeof(TDIConfig),    cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(wdm_settings_gpu, wdm_settings, sizeof(WDMSettings), cudaMemcpyHostToDevice));
@@ -3090,6 +3111,9 @@ inline void wdm_het_swap_ll_impl(
         Nf_slab, slab_min_f);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaFree(orbits_gpu));
+    gpuErrchk(cudaFree(tdi_config_gpu));
+    gpuErrchk(cudaFree(wdm_settings_gpu));
 #else
     (void) grid_dim;
     wdm_het_swap_ll_kernel<SourceT>(
@@ -3159,12 +3183,15 @@ inline void wdm_het_get_fstat_ll_impl(
             (int) shared_bytes));
     }
 
-    static Orbits      *orbits_gpu       = nullptr;
-    static TDIConfig   *tdi_config_gpu   = nullptr;
-    static WDMSettings *wdm_settings_gpu = nullptr;
-    if (orbits_gpu       == nullptr) gpuErrchk(cudaMalloc(&orbits_gpu,       sizeof(Orbits)));
-    if (tdi_config_gpu   == nullptr) gpuErrchk(cudaMalloc(&tdi_config_gpu,   sizeof(TDIConfig)));
-    if (wdm_settings_gpu == nullptr) gpuErrchk(cudaMalloc(&wdm_settings_gpu, sizeof(WDMSettings)));
+    // Per-call upload + free (no ``static`` cache): see the comment in
+    // wdm_het_fill_global_impl -- the static cache races under GIL-released
+    // threaded lanes and pins the buffers to the first caller's device.
+    Orbits      *orbits_gpu       = nullptr;
+    TDIConfig   *tdi_config_gpu   = nullptr;
+    WDMSettings *wdm_settings_gpu = nullptr;
+    gpuErrchk(cudaMalloc(&orbits_gpu,       sizeof(Orbits)));
+    gpuErrchk(cudaMalloc(&tdi_config_gpu,   sizeof(TDIConfig)));
+    gpuErrchk(cudaMalloc(&wdm_settings_gpu, sizeof(WDMSettings)));
     gpuErrchk(cudaMemcpy(orbits_gpu,       orbits,       sizeof(Orbits),       cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(tdi_config_gpu,   tdi_config,   sizeof(TDIConfig),    cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(wdm_settings_gpu, wdm_settings, sizeof(WDMSettings), cudaMemcpyHostToDevice));
@@ -3183,6 +3210,9 @@ inline void wdm_het_get_fstat_ll_impl(
         Nf_slab, slab_min_f);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaFree(orbits_gpu));
+    gpuErrchk(cudaFree(tdi_config_gpu));
+    gpuErrchk(cudaFree(wdm_settings_gpu));
 #else
     (void) grid_dim;
     wdm_het_get_fstat_ll_kernel<SourceT>(
