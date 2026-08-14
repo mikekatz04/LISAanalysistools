@@ -2349,7 +2349,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         finally:
             self.xp.cuda.runtime.setDevice(main_dev)
 
-    def _cell_ll_state_init(self, scheduler):
+    def _cell_ll_state_init(self, scheduler, band_temps=None):
         """Per-unit state for buffer before/after cell ll crediting."""
         xp = scheduler.xp
         n = scheduler.n_slots
@@ -2360,10 +2360,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "rep0": xp.zeros(n, dtype=int),
             "spec": xp.zeros(n, dtype=spec.dtype),
             "open": xp.zeros(n, dtype=bool),
+            "band_temps": band_temps,
             "n_done": 0,
             "sum_abs_mm": 0.0,
             "max_mm": 0.0,
-            "max_rate": 0.0,
+            "max_excess": 0.0,
             "worst": None,
         }
 
@@ -2403,13 +2404,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         mm = actual - sampled
         ll_change_log[t_i, w_i, b_i] = st["led0"][slots] + actual
         rate = xp.abs(mm) / xp.maximum(nrep, 1)
-        k = int(rate.argmax())
-        r_k = float(rate[k])
-        if r_k > st["max_rate"]:
-            st["max_rate"] = r_k
+        # Temperature-scaled allowance (the tiered-accuracy ruling): hot
+        # rungs sample displacements where the sig-het error is ALLOWED to
+        # grow -- the trust region is the hard gate out there -- so holding
+        # every rung to the cold-chain floor buries real cold offenders in
+        # hot-rung noise (a 124.5 at temp 23 is expected; the same number
+        # at temp 0 is a bug). allowed ~ tol/beta; beta=1 keeps the floor.
+        # GB_CELL_LL_TEMP_SCALED=0 restores the uniform floor.
+        tol = float(os.environ.get("GB_CELL_LL_REP_TOL", "0.05"))
+        bt = st.get("band_temps")
+        if (bt is not None
+                and os.environ.get("GB_CELL_LL_TEMP_SCALED", "1") == "1"):
+            beta = xp.clip(
+                xp.asarray(bt)[b_i, t_i].astype(float), 1e-8, 1.0)
+            allowed = tol * xp.maximum(1.0, 1.0 / beta)
+        else:
+            allowed = xp.full(rate.shape, tol)
+        excess = rate / allowed
+        k = int(excess.argmax())
+        e_k = float(excess[k])
+        if e_k > st["max_excess"]:
+            st["max_excess"] = e_k
             st["worst"] = (
                 int(t_i[k]), int(w_i[k]), int(b_i[k]), int(nrep[k]),
-                float(mm[k]), r_k,
+                float(mm[k]), float(rate[k]), float(allowed[k]),
             )
         st["max_mm"] = max(st["max_mm"], float(xp.abs(mm).max()))
         st["sum_abs_mm"] += float(xp.abs(mm).sum())
@@ -2420,21 +2438,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """One line per unit: sampled-vs-realized stats over finished cells."""
         if st["n_done"] == 0 or st["worst"] is None:
             return
-        t_i, w_i, b_i, nrep, mm, rate = st["worst"]
+        t_i, w_i, b_i, nrep, mm, rate, allowed = st["worst"]
         logger.info(
             f"[GB_CELL_LL {self.name}] unit: {st['n_done']} cells credited"
             f" from the buffer before/after ll; |sampled-actual| mean"
             f" {st['sum_abs_mm'] / st['n_done']:.3e} max {st['max_mm']:.3e};"
-            f" worst per-repeat {rate:.3e}/rep (temp {t_i}, walker {w_i},"
-            f" band {b_i}, {nrep} reps, diff {mm:.3e})."
+            f" worst per-repeat {rate:.3e}/rep vs allowance {allowed:.3e}"
+            f" (temp {t_i}, walker {w_i}, band {b_i}, {nrep} reps,"
+            f" diff {mm:.3e})."
         )
-        tol = float(os.environ.get("GB_CELL_LL_REP_TOL", "0.05"))
-        if rate > tol:
+        if rate > allowed:
             logger.warning(
                 f"[GB_CELL_LL {self.name}] per-repeat sampled-vs-actual diff"
-                f" {rate:.3e} exceeds {tol} (temp {t_i}, walker {w_i}, band"
-                f" {b_i}, {nrep} repeats): the sampled lls and the realized"
-                " buffer residual disagree beyond the expected floor."
+                f" {rate:.3e} exceeds its temperature-scaled allowance"
+                f" {allowed:.3e} (temp {t_i}, walker {w_i}, band {b_i},"
+                f" {nrep} repeats): the sampled lls and the realized buffer"
+                " residual disagree beyond the expected floor for this rung."
             )
 
     def _run_band_unit(self, model, band_sorter, subset, band_temps,
@@ -2480,7 +2499,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # restores the pure sampled-ll ledger.
         cell_ll_state = None
         if os.environ.get("GB_CELL_LL_CREDIT", "1") == "1":
-            cell_ll_state = self._cell_ll_state_init(scheduler)
+            cell_ll_state = self._cell_ll_state_init(
+                scheduler, band_temps=band_temps)
             _slots0 = scheduler.xp.arange(scheduler.n_slots)[
                 scheduler.slot_active
             ]
