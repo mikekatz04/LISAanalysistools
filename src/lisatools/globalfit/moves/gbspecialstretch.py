@@ -3011,6 +3011,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # returned None": live-cap-filtered rows never pick, a freed
         # cell's rows become pickable in later rounds of the SAME batch
         # (re-entry), and there is no budget bookkeeping to go stale —
+        # TODO (user, 2026-08-14): SCRUTINIZE the never-freed tail — if a
+        # cell stays at cap for the whole batch, its unvisited (invisible,
+        # live-cap-filtered) birth rows are simply never picked and the
+        # batch ends without them. That is the intended semantics (same
+        # net effect as the old unit-open exclusion, minus the one-unit
+        # wait for freed cells), but verify in production that (a) the
+        # batch-end round census confirms those rows never leak into
+        # picks, (b) cells freed in a LATER batch of the same unit do NOT
+        # regain their rows (they were bound in the earlier batch — a
+        # cross-batch re-entry gap the scheduler path did not have
+        # either), and (c) the [GB_ACCEPT rj-split] "capped" class stays
+        # ~0 so no at-cap birth reaches the kernel through this path.
         # no freeze, no advance, no deadlock surface. Survivor slot
         # indices are recomputed at in-model bind time (RJ-time slots are
         # stale after rebinds); ONE pooled survivor per cell (host-side
