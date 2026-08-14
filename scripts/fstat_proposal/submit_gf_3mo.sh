@@ -48,7 +48,7 @@ trap 'kill ${GPU_SMI_PID} 2>/dev/null || true' EXIT
 export OMP_NUM_THREADS=1
 
 # ---- run plumbing ----------------------------------------------------------
-export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache/data
+export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
 export GPUS=0,1
