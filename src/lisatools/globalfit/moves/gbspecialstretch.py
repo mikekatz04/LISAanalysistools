@@ -2215,34 +2215,86 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.xp.cuda.runtime.deviceSynchronize()
 
     def _cached_get_buffer(self, sorter, acs, specials, **kwargs):
-        """Propose-scoped SubBandBuffer reuse (ONE cached ACA per signature).
+        """SubBandBuffer reuse: ONE live buffer per construction signature.
 
-        First call for a given ``(cell count, construction kwargs)``
-        signature allocates through ``get_buffer``; every later same-
-        signature call performs a FULL rebind of that cached ACA (the
-        existing ``inds_fill``/``buffer_obj`` path — construction minus
-        allocation), so the steady state is one allocation per signature
-        per proposal instead of one per parity unit. The template twin
-        rides in the signature: proposal-phase buffers never carry it (its
-        guarded fill paths are tempering-only). The cache lives from
-        ``propose`` start to ``return`` (see the lifecycle block there).
+        A call whose slot count matches the cached buffer performs a FULL
+        rebind (the existing ``inds_fill``/``buffer_obj`` path —
+        construction minus allocation); a size change drops the cached
+        buffer and rebuilds at the new size, so at most one buffer per
+        kwargs signature is ever resident. The template twin rides in the
+        signature: proposal-phase buffers never carry it (its guarded fill
+        paths are tempering-only). Under ``GB_BUFFER_PERSIST=1`` the cache
+        survives across proposals (see ``_buffer_cache_teardown``);
+        ``GB_BUFFER_CACHE_PER_SIZE=1`` restores per-size caching.
         """
         cache = getattr(self, "_prop_buffer_cache", None)
         if cache is None:
             cache = self._prop_buffer_cache = {}
-        key = (int(specials.shape[0]), tuple(sorted(kwargs.items())))
+        k = int(specials.shape[0])
+        sig = tuple(sorted(kwargs.items()))
+        # ONE live buffer per construction signature (user design
+        # 2026-08-13): the allocation follows the current unit's slot count,
+        # so a size change drops the old buffer (the pool reuses its blocks)
+        # and rebuilds -- total buffer memory is bounded by one buffer per
+        # signature. Keying on size instead let one buffer per DISTINCT unit
+        # size accumulate for the life of the run (three 10000-slot buffers
+        # were resident when the 40 GB device OOM'd, 2026-08-13 3-mo run).
+        # GB_BUFFER_CACHE_PER_SIZE=1 restores per-size keys (no rebuild on
+        # size change) LRU-capped at GB_BUFFER_CACHE_MAX, if the rebuild
+        # churn of alternating unit sizes ever costs more than it saves.
+        per_size = os.environ.get("GB_BUFFER_CACHE_PER_SIZE", "0") == "1"
+        key = (k, sig) if per_size else sig
         buf = cache.get(key)
+        if buf is not None and int(buf.num_bands_now) != k:
+            del cache[key]
+            buf = None
         if buf is None:
             buf = sorter.get_buffer(acs, specials, **kwargs)
             cache[key] = buf
             self._prop_buffer_builds = getattr(self, "_prop_buffer_builds", 0) + 1
+            if per_size:
+                max_sigs = int(os.environ.get("GB_BUFFER_CACHE_MAX", "8"))
+                while len(cache) > max_sigs:
+                    cache.pop(next(iter(cache)))
+            if self.backend.uses_cupy:
+                logger.info(
+                    "%s: buffer build (%d slots%s); GPU pool used "
+                    "%.2f / total %.2f GB; %s", self.name, k,
+                    ", " + repr(sig) if sig else "",
+                    self.mempool.used_bytes() / 1e9,
+                    self.mempool.total_bytes() / 1e9,
+                    self._device_mem_summary())
         else:
+            # Re-insert on hit so dict order stays LRU (per-size mode).
+            cache.pop(key)
+            cache[key] = buf
             sorter.get_buffer(
                 acs, specials,
-                inds_fill=self.xp.arange(int(specials.shape[0])),
+                inds_fill=self.xp.arange(k),
                 buffer_obj=buf,
             )
         return buf
+
+    def _device_mem_summary(self) -> str:
+        """Per-device ``used/total GB`` from ``memGetInfo`` (all devices).
+
+        Device-wide truth, unlike the cupy pool stats: includes the other
+        devices' pools, raw C++/CUDA allocations (sig-het stashes, kernel
+        scratch), and other processes on the card.
+        """
+        if not self.backend.uses_cupy:
+            return "cpu"
+        rt = self.xp.cuda.runtime
+        parts = []
+        main_dev = rt.getDevice()
+        try:
+            for d in range(rt.getDeviceCount()):
+                with self.xp.cuda.Device(d):
+                    free, tot = rt.memGetInfo()
+                parts.append(f"dev{d} {(tot - free) / 1e9:.1f}/{tot / 1e9:.1f}")
+        finally:
+            rt.setDevice(main_dev)
+        return "device used/total GB: " + ", ".join(parts)
 
     def _buffer_cache_teardown(self):
         """Proposal-exit buffer bookkeeping: sweep pools, maybe drop the cache.
@@ -2279,8 +2331,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         total = self.mempool.total_bytes() / 1e9
         logger.info(
             "%s: buffer lifecycle -- %d allocation(s) this propose "
-            "(%d cached signature(s)); GPU pool used %.2f / total %.2f GB.",
-            self.name, n_builds, len(cache or {}), used, total,
+            "(%d cached signature(s)); GPU pool used %.2f / total %.2f GB; "
+            "%s.", self.name, n_builds, len(cache or {}), used, total,
+            self._device_mem_summary(),
         )
         self.xp.cuda.runtime.deviceSynchronize()
         if not devices:
@@ -2398,6 +2451,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
         if tm is not None:
             tm.count("cells", int(scheduler.n_cells))
+        # Intra-propose memory telemetry: a grouped-RJ propose can run for
+        # hours across many units with no lifecycle line until exit, which
+        # left the 2026-08-13 OOM (pool 11->40 GB inside one propose)
+        # unattributable. Device-wide numbers too: the pool only sees the
+        # CURRENT device's cupy arrays -- the 96 GB H100 that OOM'd held
+        # ~50 GB the pool stats never showed (other device's pool, raw
+        # C++/CUDA allocations). GB_UNIT_POOL_LOG_EVERY=0 disables.
+        if self.backend.uses_cupy:
+            n_units = self._unit_open_count = getattr(
+                self, "_unit_open_count", 0) + 1
+            _every = int(os.environ.get("GB_UNIT_POOL_LOG_EVERY", "25"))
+            if _every > 0 and n_units % _every == 0:
+                logger.info(
+                    "%s: unit %d open (%d cells): GPU pool used "
+                    "%.2f / total %.2f GB; %s", self.name, n_units,
+                    int(scheduler.n_cells),
+                    self.mempool.used_bytes() / 1e9,
+                    self.mempool.total_bytes() / 1e9,
+                    self._device_mem_summary())
         self._debug_log_band_null(buffer_obj)
 
         # Buffer before/after cell ll crediting (2026-08-12 user design):
