@@ -2610,7 +2610,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 del cache[key]
                 buf = None
         if buf is None:
-            buf = sorter.get_buffer(acs, specials, **build_kwargs)
+            buf = sorter.get_buffer(
+                acs, specials,
+                timer=getattr(self, "_prop_timer", None),
+                **build_kwargs,
+            )
             cache[key] = buf
             self._prop_buffer_builds = getattr(self, "_prop_buffer_builds", 0) + 1
             if per_size:
@@ -2637,6 +2641,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 inds_fill=self.xp.arange(k),
                 buffer_obj=buf,
                 allow_resize=fixed_cap,
+                timer=getattr(self, "_prop_timer", None),
             )
         return buf
 
@@ -2945,6 +2950,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     subset.get_buffer(
                         model.analysis_container_arr, new_specials,
                         inds_fill=inds_fill, buffer_obj=buffer_obj,
+                        timer=tm,
                     )
                 self._debug_log_band_null(buffer_obj)
                 if cell_ll_state is not None:

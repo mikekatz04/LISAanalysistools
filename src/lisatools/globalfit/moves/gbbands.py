@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
+from contextlib import nullcontext
 from copy import deepcopy
 from types import ModuleType
 from typing import Optional, Tuple, Union
@@ -100,6 +101,16 @@ def unpack_special_index(special_band_inds, nwalkers: int) -> tuple:
     walker_inds = temp_walker_inds % nwalkers
     band_inds = (special_band_inds - temp_walker_inds * _SPECIAL_INDEX_BASE).astype(int)
     return (temp_inds, walker_inds, band_inds)
+
+
+def _tspan(tm, name: str):
+    """Timer span or no-op when no timer is supplied.
+
+    ``tm`` is a ``gbspecialstretch._ProposeTimer`` (or anything exposing a
+    ``span(name)`` context manager) — duck-typed here so this module never
+    imports from :mod:`gbspecialstretch` (acyclic import graph).
+    """
+    return tm.span(name) if tm is not None else nullcontext()
 
 
 def return_x(x):
@@ -3592,8 +3603,20 @@ class BandSorter(LISAToolsParallelModule):
 
     def get_buffer(
         self, acs, special_indices_unique, inds_fill=None, buffer_obj=None,
-        allow_resize: bool = False, **kwargs
+        allow_resize: bool = False, timer=None, **kwargs
     ) -> SubBandBuffer:
+        """Build or rebind a :class:`SubBandBuffer` for these cells.
+
+        ``timer``: optional ``_ProposeTimer`` (buffer-work sub-marks,
+        2026-08-14); phases are wrapped in the spans ``bufbuild_alloc``
+        (fresh SubBandBuffer construction) / ``buffill_resid_psd``
+        (residual+PSD fill from the parent ACs) / ``buffill_inject``
+        (source injection into the band buffers) / ``buffill_template``
+        (template-twin reset + template injection). They are reported
+        nested inside the caller's buffer_build / temper_buffer span totals
+        so a production log decomposes alloc vs fill vs injection vs
+        template generation. ``None`` (default) is a no-op.
+        """
 
         num_band_preload = len(special_indices_unique)
 
@@ -3633,42 +3656,44 @@ class BandSorter(LISAToolsParallelModule):
         if inds_fill is None:
             inds_fill = xp.arange(num_band_preload)
             assert buffer_obj is None
-            buffer_obj = SubBandBuffer(
-                self.rj_prop,
-                self.nwalkers,
-                self.gb,
-                self.band_edges,
-                self.band_N_vals,
-                all_unique_band_combos,
-                points_curr_tmp,
-                num_bands_now,
-                acs.nchannels,
-                self.max_data_store_size,
-                special_indices_unique,
-                self.transform_fn,
-                self.waveform_kwargs,
-                # Frequency spacing for the band-index math. FDSettings uses the
-                # FD bin resolution ``.df``; WDMSettings uses ``.layer_df`` so the
-                # ``band_edges / df`` math yields WDM *layer* indices -- the same
-                # quantity the WDM likelihood engine addresses by
-                # (WDMBandLikelihoodEngine uses ``basis_settings.layer_df``).
-                (acs.settings.df if isinstance(acs.settings, FDSettings)
-                 else acs.settings.layer_df),
-                sources_now_map,
-                sources_inject_now_map,
-                self.main_band_sorter.special_band_inds[sources_now_map],
-                basis_settings=acs.settings,
-                gb_wdm_comp=self.gb_wdm_comp,
-                gb_fd_comp=self.gb_fd_comp,
-                force_backend=self.force_backend,
-                wdm_band_slab_layers=self.wdm_band_slab_layers,
-                wdm_slab_guard_layers=self.wdm_slab_guard_layers,
-                opt_snr_rej_samp_limit=getattr(
-                    self, "opt_snr_rej_samp_limit", 5.0),
-                snr_rej_detected=getattr(
-                    self, "snr_rej_detected", False),
-                **kwargs,
-            )
+            with _tspan(timer, "bufbuild_alloc"):
+                buffer_obj = SubBandBuffer(
+                    self.rj_prop,
+                    self.nwalkers,
+                    self.gb,
+                    self.band_edges,
+                    self.band_N_vals,
+                    all_unique_band_combos,
+                    points_curr_tmp,
+                    num_bands_now,
+                    acs.nchannels,
+                    self.max_data_store_size,
+                    special_indices_unique,
+                    self.transform_fn,
+                    self.waveform_kwargs,
+                    # Frequency spacing for the band-index math. FDSettings uses
+                    # the FD bin resolution ``.df``; WDMSettings uses
+                    # ``.layer_df`` so the ``band_edges / df`` math yields WDM
+                    # *layer* indices -- the same quantity the WDM likelihood
+                    # engine addresses by (WDMBandLikelihoodEngine uses
+                    # ``basis_settings.layer_df``).
+                    (acs.settings.df if isinstance(acs.settings, FDSettings)
+                     else acs.settings.layer_df),
+                    sources_now_map,
+                    sources_inject_now_map,
+                    self.main_band_sorter.special_band_inds[sources_now_map],
+                    basis_settings=acs.settings,
+                    gb_wdm_comp=self.gb_wdm_comp,
+                    gb_fd_comp=self.gb_fd_comp,
+                    force_backend=self.force_backend,
+                    wdm_band_slab_layers=self.wdm_band_slab_layers,
+                    wdm_slab_guard_layers=self.wdm_slab_guard_layers,
+                    opt_snr_rej_samp_limit=getattr(
+                        self, "opt_snr_rej_samp_limit", 5.0),
+                    snr_rej_detected=getattr(
+                        self, "snr_rej_detected", False),
+                    **kwargs,
+                )
 
         else:
             assert isinstance(buffer_obj, SubBandBuffer)
@@ -3710,7 +3735,10 @@ class BandSorter(LISAToolsParallelModule):
                 buffer_obj.special_band_inds = curr_special_band_inds
                 buffer_obj.now_index = buffer_obj.get_index(curr_special_band_inds)
 
-        buffer_obj.fill_buffer_residual_and_psd_from_acs(acs, inds_fill=inds_fill)
+        with _tspan(timer, "buffill_resid_psd"):
+            buffer_obj.fill_buffer_residual_and_psd_from_acs(
+                acs, inds_fill=inds_fill
+            )
         buffer_obj.parent_acs = acs
         # includes sources in these sub-bands that are no longer getting proposals
         coords_to_inject = self.main_band_sorter.coords[sources_inject_now_map].copy()
@@ -3732,18 +3760,21 @@ class BandSorter(LISAToolsParallelModule):
         ].copy()
         inj_args = (coords_to_inject, inject_index, inject_N_vals)
         if buffer_obj.use_template_arr:
-            # The twin fill below is additive: without this reset a cached-
-            # buffer rebind inherits the previous bind's (post-swap)
-            # templates and every ll scored from the twin is contaminated.
-            # No-op cost on a fresh allocation (already zero).
-            buffer_obj.reset_template_buffers(inds_fill=inds_fill)
-            buffer_obj.add_sources_to_template_buffer(
-                *inj_args, leaf_inds=inject_leaf_inds
-            )
+            with _tspan(timer, "buffill_template"):
+                # The twin fill below is additive: without this reset a
+                # cached-buffer rebind inherits the previous bind's
+                # (post-swap) templates and every ll scored from the twin is
+                # contaminated. No-op cost on a fresh allocation (already
+                # zero).
+                buffer_obj.reset_template_buffers(inds_fill=inds_fill)
+                buffer_obj.add_sources_to_template_buffer(
+                    *inj_args, leaf_inds=inject_leaf_inds
+                )
         else:
-            buffer_obj.add_sources_to_band_buffer(
-                *inj_args, leaf_inds=inject_leaf_inds
-            )
+            with _tspan(timer, "buffill_inject"):
+                buffer_obj.add_sources_to_band_buffer(
+                    *inj_args, leaf_inds=inject_leaf_inds
+                )
 
         return buffer_obj
 
