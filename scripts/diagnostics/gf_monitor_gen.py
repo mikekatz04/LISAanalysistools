@@ -531,16 +531,21 @@ if RJ_STATS:
 
 alert = """
 <div class="alert">
-<strong>ITERATION 8 STORED &mdash; the GB search is landing sources:</strong> ~85 leaves
-per cold walker, lnL +23.3k over the pre-GB baseline. First full instrumentation harvest
-(job 180): rj cold acceptance 0.16% (19/11,657), <strong>in-model cold acceptance 95%</strong>
-(proposal scale far too timid &mdash; tuning lever), F-stat peak census 3.6M draws over all
-5,056 peaks (median 168 draws/peak/propose &mdash; heavy redundancy, retirement lever now
-quantified). rj_step opened: <strong>90% kernel, launch-width-bound</strong> (~0.8 ms/pick vs
-the scorer's 15 &micro;s) &mdash; flip 0.3 did NOT cut wall (per-round cost unchanged), so the
-levers are wider kernel batches + the now-live 2-GPU lanes. Job 180's OOM (full-buffer
-gather in band_likelihoods, transients ~ total slots x concurrent lanes) is fixed by the
-per-shard chunked reduction (LAT bcab20b); runs restarted on it.
+<strong>JOB 187 SYNC AUTOPSY (14:25 record) &mdash; the rj black box is split, and half of
+it was invisible:</strong> the old 1,461 s "rj_kernel" aggregate decomposes into
+<strong>rj_getll 781 s</strong> (the scoring-call path; true device compute per the bench
+is ~10&ndash;40 s of that, so &gt;90% is host/launch overhead inside get_ll) and
+<strong>rj_fstat_centers 735 s</strong> &mdash; the F-stat distance-center chain for
+births/deaths costs as much as ALL the scoring calls (the hidden hog). The statistics are
+fully exonerated: rj_birth_prior 2.2 s, rj_score_rest 0.5 s, prior gate 6 s, accept 0.8 s.
+Sync tax was only +2.5% wall. Both hogs are per-round costs, so the deployed restructure
+(LAT 1fd9e08: early birth flip &rarr; ~5&times; fewer rounds; full-width in-model flush)
+attacks both directly; a further lever is now visible &mdash; birth coords are pre-drawn at
+sorter build, so the centers chain could be computed ONCE per propose instead of per round.
+Steady elsewhere: [SAVE] 64.4 s again (~2%), info-mat cold 0.59 at jump 0.2 (0.4 next
+restart), rj cold 0.0017, leaves ~88, dev0 4% / dev1 30% during rj. The single sync record
+is clean and decisive &mdash; <strong>restart onto 1fd9e08 now</strong> (script already
+carries jump 0.4 + no SYNC).
 </div>"""
 
 missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
@@ -651,11 +656,10 @@ subtracted until full_pe.</div></div>
 
 <section id="gb"><h2>GB Search</h2>
 <div class="panel">{img("gb_leaves")}
-<div class="caption">Left: cold-chain GB leaf counts in the STORED iterations — still zero
-because the relaunch's first gb_search iteration is one long propose that has not stored
-yet (births are live in-process; the banner's rj-unit numbers are the evidence).
-Right: per-band progressive leaf caps (D/2 gate). Growth appears here on the first
-post-relaunch store.</div></div>
+<div class="caption">Left: cold-chain GB leaf counts in the STORED iterations — iteration 8
+holds ~85 leaves/walker and job 185 resumed exactly there (23.1k at-cap cells in its first
+rj unit = the caps are binding as the model fills). Right: per-band progressive leaf caps
+(D/2 gate). The next stored iteration extends both curves.</div></div>
 </section>
 
 <section id="fstat"><h2>Last F-stat Fit</h2>
@@ -663,7 +667,10 @@ post-relaunch store.</div></div>
 <div class="caption">Comb scan of the maximized F-statistic over the full GB band
 (epoch {fstat_meta.get("epoch","?")}, fit against the live residual, walker_ref lnL in the log).</div></div>
 <div class="panel">{img("fstat_peaks")}
-<div class="caption">Selected peaks = the birth-proposal anchors (cap 200/band).</div></div>
+<div class="caption">Selected peaks = the birth-proposal anchors (cap 200/band). Job 185
+loads this grid from the epoch-0 checkpoint; 9 interior sub-bands (68, 78, 82, 87, 88, 91,
+93, 94, 99) fit ZERO peaks — births there ride the comb/floor components only until the
+first refit against the GB-subtracted residual.</div></div>
 </section>
 
 <section id="vgb"><h2>VGB Posteriors</h2>
@@ -699,24 +706,30 @@ post-relaunch store.</div></div>
 
 <section id="timing"><h2>Timing + Memory</h2>
 {rj_kpis}
-<div class="caption">Grouped RJ&rarr;in-model throughput: one full-band unit sweeps
-43,776 cells through the staged buffer at ~0.08 s/cell (~680 picked sources/s) vs the
-pre-grouped scheduler's ~0.29 s/cell (~124/s) &mdash; roughly 3.5&times; per-cell,
-5.5&times; pick throughput (configs differ, so read as throughput, not a strict A/B).</div>
+<div class="caption">Grouped RJ&rarr;in-model throughput: job 185's first full-band unit
+swept 43,776 cells in 1,238 s = <strong>0.028 s/cell</strong>, vs 0.080 s/cell for the same
+unit pre-fix (job 177) and ~0.29 s/cell pre-grouped &mdash; the 16,384-slot staging
+(8,192/GPU) plus the GIL-released kernels bought ~2.8&times; on top of the grouped-scheduler
+win.</div>
 <div class="panel">{img("rj_breakdown", "rj propose breakdown")}
-<div class="caption">Where the rj propose spends its wall time. rj_step dominance is the
-pick-round machinery; in-model flush kernels are a small slice.</div></div>
+<div class="caption">Where the rj propose spends its wall time (job 187's SYNC-ATTRIBUTED
+record: every mark carries exactly its own kernel time). rj_getll and rj_fstat_centers
+split the old rj_kernel aggregate ~50/50; buffer_build + temper_buffer &asymp; 780 s is
+the churn lever; the statistics marks are negligible.</div></div>
 <div class="panel">{img("mem_telemetry", "device memory telemetry")}
 <div class="caption">Per-device used memory from the in-run memGetInfo telemetry.
 Flat sawtooth = the bounded-buffer behavior; a monotonic ramp here is the leak alarm.</div></div>
 <div class="panel">{img("timing_moves", "per-move timing")}</div>
 <div class="panel">{img("gpu_util", "gpu telemetry")}
-<div class="caption">nvidia-smi utilization + memory, latest three jobs. The rj-phase
-asymmetry (dev0 ~5% / dev1 ~57% mean) is the single-device rj bottleneck &mdash; the
-open ~2&times; efficiency item.</div></div>
+<div class="caption">nvidia-smi utilization + memory, latest three jobs. Job 185's rj phase:
+dev0 6% / dev1 28% mean (peaks 100%) &mdash; the old 5%/57% single-device split is gone but
+duty cycle is now LOW on both: the launch-width-bound kernels finish faster, leaving
+per-lane Python as the residual. Next lever = batching picks into wider launches, not more
+devices.</div></div>
 <div class="missing">Per-iteration wall times ([MAXLOGL]/[BENCH]) go to sbatch stdout,
 which was not in this zip — include <code>gf3mo_&lt;jobid&gt;.log</code> next time. [SAVE]
-per-iteration h5-write timing lands once the cluster tree is pulled to &ge;939cb65.</div>
+question ANSWERED: 65.2 s sync write vs ~56 min iteration = ~2%, below the 5–10% mpiexec
+threshold — single-process stands at 3 months; revisit with the 23-mo store sizes.</div>
 </section>
 
 <section id="next"><h2>For the Next Snapshot</h2>
