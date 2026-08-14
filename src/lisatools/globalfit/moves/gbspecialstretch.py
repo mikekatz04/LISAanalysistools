@@ -394,7 +394,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         phase_maximize: If ``True``, marginalize over phase in the
             likelihood.
         gpus: GPU device list for this move (intra-node knob).
-        num_band_preload: Number of bands preloaded per call.
+        num_band_preload: Staged-buffer slots PER RUN DEVICE
+            (``GB_N_SUBBANDS``; total residency = this x n_gpus).
         run_swaps: Whether to run band-temperature swaps.
         max_data_store_size: Cap on the per-iteration data store size.
         force_backend: Optional backend override.
@@ -2298,6 +2299,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self.xp.cuda.runtime.deviceSynchronize()
         self.xp.cuda.runtime.deviceSynchronize()
 
+    @property
+    def num_band_preload_total(self) -> int:
+        """Total staged-buffer slots: ``GB_N_SUBBANDS`` is PER RUN DEVICE
+        (user ruling 2026-08-14). The buffer is band-sharded across the
+        run devices, so the knob states each GPU's residency/memory
+        budget and total residency scales with the allocation."""
+        gpus = (getattr(self.gb, "gpus", None)
+                if self.backend.uses_cupy else None)
+        return int(self.num_band_preload) * (len(gpus) if gpus else 1)
+
     def _cached_get_buffer(self, sorter, acs, specials, **kwargs):
         """SubBandBuffer reuse: ONE live buffer per construction signature.
 
@@ -2545,7 +2556,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """Drive one parity unit's cells through the sub-band buffer."""
         tm = getattr(self, "_prop_timer", None)
         scheduler = BandScheduler(
-            subset.special_band_inds, self.num_band_preload, xp=self.xp
+            subset.special_band_inds, self.num_band_preload_total, xp=self.xp
         )
         with _tspan(tm, "buffer_build"):
             buffer_obj = self._cached_get_buffer(
