@@ -88,6 +88,21 @@ class PSDMove(GlobalFitMove, StretchMove):
     # canonical noise-model branch order (psd is mandatory in the model;
     # galfor/sgwb optional)
     NOISE_BRANCHES = ("psd", "galfor", "sgwb")
+    # Do not trade runtime for an unbounded second copy of the PSD plane on
+    # uncoarsened two-year WDM runs.  The try5 coarse cache is only ~6.4 MiB;
+    # the equivalent Q=1 cache would approach 1 GiB for 14 walkers.
+    FIXED_COMPONENT_CACHE_MAX_BYTES = 256 * 1024**2
+    # Omitted foreground layers perturb every diagonal covariance by less
+    # than this fraction of the frozen instrument covariance.  At Q=150 the
+    # resulting worst-case accumulated log-likelihood error is O(1e-4), far
+    # below both floating Monte Carlo scatter and proposal-scale delta-log-L,
+    # while the try5 posterior keeps only ~38 of 59 active layers.
+    GALFOR_SUBBAND_REL_TOL = 1e-10
+    # A WDM layer averages a finite frequency window.  The cheap layer-center
+    # support estimate can cross the relative threshold one layer earlier than
+    # that exact average near a sharp foreground cutoff.  Retain two neighbors
+    # on either side before performing the exact selected-layer fold.
+    GALFOR_SUBBAND_GUARD_LAYERS = 2
 
     # per-iteration acceptance deltas; allocated by propose() at the module
     # ladder shape, so run_move() skips the tally when called on its own.
@@ -161,6 +176,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         # cold-row snapshot of the non-sampled noise branches, refreshed at
         # every propose(); empty when this move samples the whole model
         self._fixed_noise_coords = {}
+        # Per-propose, per-walker additive covariances for noise branches that
+        # this Metropolis-within-Gibbs move freezes at their cold rows.  These
+        # arrays are exact and immutable for the whole repeat block.
+        self._fixed_component_covariances = {}
+        self._fixed_total_covariances = {}
+        self._fixed_total_loglikes = None
+        self._fixed_total_loglike_frequency_terms = None
 
         self.sensitivity_backend = sensitivity_backend
         self.psd_transform_fn = psd_transform_fn
@@ -262,6 +284,10 @@ class PSDMove(GlobalFitMove, StretchMove):
         """Drop the thread pool from pickles / deepcopies (sprint pickle rule)."""
         state = dict(self.__dict__)
         state["_build_pool"] = None
+        state["_fixed_component_covariances"] = {}
+        state["_fixed_total_covariances"] = {}
+        state["_fixed_total_loglikes"] = None
+        state["_fixed_total_loglike_frequency_terms"] = None
         return state
 
     # ------------------------------------------------------------------
@@ -527,14 +553,323 @@ class PSDMove(GlobalFitMove, StretchMove):
         # ``sgwb_params`` is only forwarded when present so the legacy
         # XYZSensitivityBackend (whose __call__ has no sgwb kwarg) keeps
         # working for runs without an sgwb branch.
+        psd_params = self._to_physical(self.psd_transform_fn, psd_params)
+        galfor_params = self._to_physical(self.galfor_transform_fn, galfor_params)
         sgwb_params = self._to_physical(self.sgwb_transform_fn, sgwb_params)
+        fixed = getattr(self, "_fixed_component_covariances", {}).get(
+            int(walker_index), {}
+        )
+        if fixed and hasattr(self.sensitivity_backend, "matrix_from_params"):
+            return self.sensitivity_backend.matrix_from_params(
+                f"walker_{walker_index}",
+                None if "psd" in fixed else psd_params,
+                galfor_params=None if "galfor" in fixed else galfor_params,
+                sgwb_params=None if "sgwb" in fixed else sgwb_params,
+                fixed_covariances=fixed,
+            )
+
         extra = {} if sgwb_params is None else dict(sgwb_params=sgwb_params)
         return self.sensitivity_backend(
             f"walker_{walker_index}",
-            self._to_physical(self.psd_transform_fn, psd_params),
-            galfor_params=self._to_physical(self.galfor_transform_fn, galfor_params),
+            psd_params,
+            galfor_params=galfor_params,
             **extra,
         )
+
+    def _fixed_component_cache_available(self) -> bool:
+        """Whether exact additive-component caching is safe on this route."""
+        if self._dcga is not None:
+            return False
+        backend = getattr(self.sensitivity_backend, "backend", None)
+        return (
+            str(getattr(backend, "name", "")).endswith("_cpu")
+            and hasattr(self.sensitivity_backend, "component_covariance")
+        )
+
+    def _prepare_fixed_component_covariances(self) -> None:
+        """Build each frozen branch once per walker for this proposal block."""
+        self._fixed_component_covariances = {}
+        self._fixed_total_covariances = {}
+        self._fixed_total_loglikes = None
+        self._fixed_total_loglike_frequency_terms = None
+        if not self._fixed_noise_coords or not self._fixed_component_cache_available():
+            return
+
+        transforms = {
+            "psd": self.psd_transform_fn,
+            "galfor": self.galfor_transform_fn,
+            "sgwb": self.sgwb_transform_fn,
+        }
+        tasks = [
+            (branch, w, rows[w])
+            for branch, rows in self._fixed_noise_coords.items()
+            for w in range(len(rows))
+        ]
+
+        def _one(task):
+            branch, w, params = task
+            physical = self._to_physical(transforms[branch], params)
+            covariance = self.sensitivity_backend.component_covariance(
+                branch, physical, name=f"fixed_{branch}_{w}"
+            )
+            return branch, int(w), covariance
+
+        # Warm shared basis/spectral caches without a race, then spread the
+        # remaining independent rows exactly like the ordinary build path.
+        results = []
+        task_count = len(tasks)
+        if tasks:
+            first = _one(tasks.pop(0))
+            estimated_bytes = int(getattr(first[2], "nbytes", 0)) * task_count
+            if estimated_bytes > self.FIXED_COMPONENT_CACHE_MAX_BYTES:
+                logger.info(
+                    "skipping frozen noise-component cache: estimated %.1f MiB "
+                    "exceeds %.1f MiB limit",
+                    estimated_bytes / 1024**2,
+                    self.FIXED_COMPONENT_CACHE_MAX_BYTES / 1024**2,
+                )
+                return
+            results.append(first)
+            self._build_warmed = True
+        if self._build_threads > 1 and len(tasks) > 1:
+            results.extend(self.build_pool.map(_one, tasks))
+        else:
+            results.extend(_one(task) for task in tasks)
+        for branch, w, covariance in results:
+            self._fixed_component_covariances.setdefault(w, {})[branch] = covariance
+
+        # A galfor-only split move changes no other model component.  Keep the
+        # exact full-band frozen sum so its likelihood can serve as a baseline;
+        # each proposal then recomputes only the layers where foreground power
+        # measurably changes that sum.  Fixed extras are not represented in the
+        # branch cache, so retain the ordinary full-band path when present.
+        if (
+            self.sampled_branches == ["galfor"]
+            and not getattr(self.sensitivity_backend, "extra_components", ())
+        ):
+            required = set(self._fixed_noise_coords)
+            for w, components in self._fixed_component_covariances.items():
+                if set(components) != required:
+                    self._fixed_total_covariances = {}
+                    break
+                ordered = [
+                    components[key]
+                    for key in self.NOISE_BRANCHES
+                    if key in components
+                ]
+                total = ordered[0]
+                for covariance in ordered[1:]:
+                    total = total + covariance
+                self._fixed_total_covariances[w] = total
+
+    def _coarse_batch_fast_path_available(self) -> bool:
+        """True for the exact CPU coarse-WDM batched reduction."""
+        if not self._fixed_component_cache_available():
+            return False
+        if not hasattr(self.sensitivity_backend, "covariance_from_params"):
+            return False
+        acs = self.acs.flatten()
+        if len(acs) == 0 or getattr(acs[0], "coarse_stats", None) is None:
+            return False
+        stat = acs[0].coarse_stats
+        return all(getattr(ac, "coarse_stats", None) is stat for ac in acs)
+
+    def _galfor_subband_fast_path_available(self) -> bool:
+        """Whether a galfor-only move can score against a frozen baseline."""
+        return (
+            self._coarse_batch_fast_path_available()
+            and self.sampled_branches == ["galfor"]
+            and len(self._fixed_total_covariances) == len(self.acs.flatten())
+            and hasattr(self.sensitivity_backend, "galfor_coarse_profile")
+            and hasattr(
+                self.sensitivity_backend,
+                "galfor_coarse_profile_estimate",
+            )
+            and hasattr(
+                self.sensitivity_backend,
+                "galfor_coarse_covariance_from_profile",
+            )
+        )
+
+    def _galfor_profile_frequency_mask(self, profile, fixed_covariance):
+        """Layers whose foreground diagonal is non-negligible vs ``fixed``."""
+        column, modulation = profile
+        column = np.asarray(column)
+        modulation = np.asarray(modulation)
+        if modulation.ndim == 2:
+            modulation_diagonal = np.diag(modulation)[:, None]
+        else:
+            modulation_diagonal = np.stack(
+                [modulation[channel, channel] for channel in range(3)], axis=0
+            )
+        fixed_diagonal = np.real(
+            np.stack(
+                [fixed_covariance[channel, channel] for channel in range(3)],
+                axis=0,
+            )
+        )
+        numerator = (
+            np.abs(modulation_diagonal)[:, None, :]
+            * np.abs(column)[None, :, None]
+        )
+        denominator = np.abs(fixed_diagonal)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(
+                denominator > 0.0,
+                numerator / denominator,
+                np.where(numerator > 0.0, np.inf, 0.0),
+            )
+        return np.any(
+            ratio > self.GALFOR_SUBBAND_REL_TOL, axis=(0, 2)
+        )
+
+    def _compute_galfor_subband_loglike(
+        self, stat, walker_inds_keep, galfor_coords
+    ):
+        """Full baseline plus band-limited foreground likelihood corrections."""
+        from ...coarsewdm import (
+            coarse_wdm_log_likelihood_batch,
+            coarse_wdm_log_likelihood_batch_frequency_terms,
+        )
+
+        nwalkers = len(self.acs.flatten())
+        if self._fixed_total_loglikes is None:
+            fixed_batch = np.stack(
+                [self._fixed_total_covariances[w] for w in range(nwalkers)],
+                axis=0,
+            )
+            self._fixed_total_loglike_frequency_terms = np.asarray(
+                coarse_wdm_log_likelihood_batch_frequency_terms(
+                    stat, fixed_batch
+                )
+            )
+            self._fixed_total_loglikes = np.sum(
+                self._fixed_total_loglike_frequency_terms, axis=1
+            )
+
+        out = np.empty(walker_inds_keep.shape[0], dtype=float)
+        remaining = np.arange(walker_inds_keep.shape[0])
+        while remaining.size:
+            _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+            batch = remaining[np.sort(first)]
+            physical_params = []
+            masks = []
+            for row in batch:
+                row = int(row)
+                w = int(walker_inds_keep[row])
+                physical = self._to_physical(
+                    self.galfor_transform_fn, galfor_coords[row]
+                )
+                estimate = (
+                    self.sensitivity_backend.galfor_coarse_profile_estimate(
+                        physical
+                    )
+                )
+                if estimate is None:
+                    return None
+                physical_params.append(physical)
+                masks.append(
+                    self._galfor_profile_frequency_mask(
+                        estimate, self._fixed_total_covariances[w]
+                    )
+                )
+
+            support = np.any(masks, axis=0)
+            guard = self.GALFOR_SUBBAND_GUARD_LAYERS
+            if guard and np.any(support):
+                expanded = support.copy()
+                for shift in range(1, guard + 1):
+                    expanded[shift:] |= support[:-shift]
+                    expanded[:-shift] |= support[shift:]
+                support = expanded
+            frequency_indices = np.flatnonzero(support)
+            walkers = np.asarray(walker_inds_keep[batch], dtype=int)
+            if frequency_indices.size == 0:
+                out[batch] = self._fixed_total_loglikes[walkers]
+            else:
+                profiles = [
+                    self.sensitivity_backend.galfor_coarse_profile(
+                        physical,
+                        frequency_indices=frequency_indices,
+                    )
+                    for physical in physical_params
+                ]
+                if any(profile is None for profile in profiles):
+                    return None
+                fixed_subband = np.stack(
+                    [
+                        self._fixed_total_covariances[w][
+                            :, :, frequency_indices, :
+                        ]
+                        for w in walkers
+                    ],
+                    axis=0,
+                )
+                foreground = np.stack(
+                    [
+                        self.sensitivity_backend.galfor_coarse_covariance_from_profile(
+                            profile, frequency_indices
+                        )
+                        for profile in profiles
+                    ],
+                    axis=0,
+                )
+                fixed_subband_logl = np.sum(
+                    self._fixed_total_loglike_frequency_terms[
+                        walkers[:, None], frequency_indices[None, :]
+                    ],
+                    axis=1,
+                )
+                total_subband_logl = coarse_wdm_log_likelihood_batch(
+                    stat,
+                    fixed_subband + foreground,
+                    frequency_indices=frequency_indices,
+                )
+                out[batch] = (
+                    self._fixed_total_loglikes[walkers]
+                    + np.asarray(total_subband_logl)
+                    - np.asarray(fixed_subband_logl)
+                )
+            remaining = np.setdiff1d(remaining, batch)
+        return out
+
+    def _build_covariance_batch(
+        self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+    ):
+        """Build raw covariances for one-walker-per-row coarse batch."""
+        def _one(row):
+            row = int(row)
+            w = int(walker_inds_keep[row])
+            psd_here = self._to_physical(self.psd_transform_fn, psd_coords[row])
+            galfor_here = (
+                None
+                if galfor_coords is None
+                else self._to_physical(self.galfor_transform_fn, galfor_coords[row])
+            )
+            sgwb_here = (
+                None
+                if sgwb_coords is None
+                else self._to_physical(self.sgwb_transform_fn, sgwb_coords[row])
+            )
+            fixed = self._fixed_component_covariances.get(w, {})
+            return self.sensitivity_backend.covariance_from_params(
+                f"walker_{w}",
+                None if "psd" in fixed else psd_here,
+                galfor_params=None if "galfor" in fixed else galfor_here,
+                sgwb_params=None if "sgwb" in fixed else sgwb_here,
+                fixed_covariances=fixed,
+            )
+
+        rows = list(batch)
+        covariances = []
+        if not self._build_warmed and rows:
+            covariances.append(_one(rows.pop(0)))
+            self._build_warmed = True
+        if self._build_threads > 1 and len(rows) > 1:
+            covariances.extend(self.build_pool.map(_one, rows))
+        else:
+            covariances.extend(_one(row) for row in rows)
+        return np.stack(covariances, axis=0)
 
     def _build_batch(self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords):
         """Install the proposed sensitivity matrix for every row in ``batch``.
@@ -635,6 +970,40 @@ class PSDMove(GlobalFitMove, StretchMove):
             supps_keep = supps[logp_keep]
             logl[logp_keep] = self.psd_log_like(input_args, supps=supps_keep, **self.psd_kwargs)
 
+            self.prev_logl = logl.copy()
+            return logl, None
+
+        if self._galfor_subband_fast_path_available():
+            stat = self.acs.flatten()[0].coarse_stats
+            tmp_logl = self._compute_galfor_subband_loglike(
+                stat, walker_inds_keep, galfor_coords
+            )
+            if tmp_logl is not None:
+                logl[logp_keep] = tmp_logl
+                self.prev_logl = logl.copy()
+                return logl, None
+
+        if self._coarse_batch_fast_path_available():
+            from ...coarsewdm import coarse_wdm_log_likelihood_batch
+
+            stat = self.acs.flatten()[0].coarse_stats
+            tmp_logl = np.empty(walker_inds_keep.shape[0], dtype=float)
+            remaining = np.arange(walker_inds_keep.shape[0])
+            while remaining.size:
+                _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+                batch = remaining[np.sort(first)]
+                covariances = self._build_covariance_batch(
+                    batch,
+                    walker_inds_keep,
+                    psd_coords,
+                    galfor_coords if has_galfor else None,
+                    sgwb_coords if has_sgwb else None,
+                )
+                tmp_logl[batch] = np.asarray(
+                    coarse_wdm_log_likelihood_batch(stat, covariances)
+                )
+                remaining = np.setdiff1d(remaining, batch)
+            logl[logp_keep] = tmp_logl
             self.prev_logl = logl.copy()
             return logl, None
 
@@ -856,6 +1225,7 @@ class PSDMove(GlobalFitMove, StretchMove):
             for key in model_branches
             if key not in noise_branches
         }
+        self._prepare_fixed_component_covariances()
 
         # The working ensembles are the SUB-STATES' tempered branches (this
         # move's module ladder); the main state carries only the engine's

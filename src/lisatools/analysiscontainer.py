@@ -108,6 +108,9 @@ class AnalysisContainer:
             explicit ``source_only=`` at a call site always wins.
 
         data_res_arr: Deprecated alias of ``data`` (kept for backward compatibility).
+        coarse_stats: Optional precomputed real-WDM coarse statistic. When set,
+            the sensitivity matrix may use a smaller coarse time geometry than
+            the fine data and likelihood calls use the coarse noise reduction.
 
     """
 
@@ -118,6 +121,7 @@ class AnalysisContainer:
         signal_gen: Optional[SignalGenSpec] = None,
         sens_mat_kwargs: Optional[dict] = None,
         likelihood_source_only: bool = False,
+        coarse_stats=None,
         *,
         data_res_arr: Union[DomainBase, DataResidualArray, None] = None,
     ) -> None:
@@ -160,6 +164,10 @@ class AnalysisContainer:
 
         # 4. run-level likelihood convention (see class docstring).
         self.likelihood_source_only = bool(likelihood_source_only)
+        # Optional data-dependent sufficient statistic for the real-WDM
+        # coarse noise likelihood. Kept generic here to avoid importing the
+        # optional coarse module on every AnalysisContainer construction.
+        self.coarse_stats = coarse_stats
 
     # ------------------------------------------------------------------
     # Data access (new + legacy)
@@ -841,6 +849,19 @@ class AnalysisContainer:
                 "explicitly for the noise term, or don't request the noise "
                 "term on a source-only (fixed-PSD) container."
             )
+
+        if self.coarse_stats is not None:
+            if source_only:
+                raise ValueError(
+                    "source_only likelihood is unavailable with coarse WDM "
+                    "statistics; the statistic is precomputed from unsubtracted data."
+                )
+            from .coarsewdm import coarse_wdm_log_likelihood
+
+            return coarse_wdm_log_likelihood(
+                self.coarse_stats, self.sens_mat, noise_only=noise_only
+            )
+
         elif noise_only:
             return noise_likelihood_term(self.sens_mat)
         elif source_only:
@@ -1724,8 +1745,9 @@ class AnalysisContainerArray:
             sensitivity information. The data and sensitivity information for
             each container will be split across the GPUs as evenly as possible.
             If ``None``, everything is stored on the CPU.
-        complex_psd: If ``True``, allocate a complex-valued PSD buffer (not yet
-            implemented; raises ``NotImplementedError``).
+        complex_psd: If ``True``, allocate a complex-valued PSD buffer. Complex
+            sensitivity matrices also select this automatically, so Hermitian
+            XYZ cross-spectra are not truncated during repacking.
         run_threaded: If ``True``, the array-level analysis ops
             (:meth:`_vectorized_dispatch` consumers — ``likelihood``,
             ``inner_product``, ``calculate_signal_*`` — and the domain-aware
@@ -1813,13 +1835,32 @@ class AnalysisContainerArray:
 
         ac_tmp = acs.flatten()[0]
         self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[: -len(ac_tmp.sens_mat.data_shape)]
+        self.psd_end_shape = tuple(ac_tmp.sens_mat.data_shape)
+        self.psd_data_length = int(np.prod(self.psd_end_shape))
+
+        for ac in acs.flatten()[1:]:
+            if tuple(ac.sens_mat.data_shape) != self.psd_end_shape:
+                raise ValueError(
+                    "All sensitivity matrices in an AnalysisContainerArray must "
+                    "have the same basis shape."
+                )
+            if tuple(
+                ac.sens_mat.shape[: -len(ac.sens_mat.data_shape)]
+            ) != tuple(shape_sens):
+                raise ValueError(
+                    "All sensitivity matrices in an AnalysisContainerArray must "
+                    "have the same channel shape."
+                )
 
         if isinstance(ac_tmp.sens_mat.basis_settings, domains.WDMSettings):
             self.data_dtype = float
         else:
             self.data_dtype = complex
 
-        self.noise_dtype = float if not complex_psd else complex
+        matrix_is_complex = np.issubdtype(
+            np.dtype(ac_tmp.sens_mat.sens_mat.dtype), np.complexfloating
+        )
+        self.noise_dtype = complex if complex_psd or matrix_is_complex else float
             
         assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
         # reset so that all data are linear in memory
@@ -1884,7 +1925,7 @@ class AnalysisContainerArray:
                     )
                     self.linear_psd_arr.append(
                         self.xp.zeros(
-                            self.data_length * np.prod(shape_sens) * len(split),
+                            self.psd_data_length * np.prod(shape_sens) * len(split),
                             dtype=self.noise_dtype,
                         )
                     )
@@ -1898,7 +1939,7 @@ class AnalysisContainerArray:
                 )
                 self.linear_psd_arr.append(
                     self.xp.zeros(
-                        self.data_length * np.prod(shape_sens) * len(split),
+                        self.psd_data_length * np.prod(shape_sens) * len(split),
                         dtype=self.noise_dtype,
                     )
                 )
@@ -2021,8 +2062,12 @@ class AnalysisContainerArray:
 
             # TODO: should I not store this in memory?!?!?
             intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
-            start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
-            end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
+            start_index = intra_split_index * (
+                np.prod(self.shape_sens) * self.psd_data_length
+            )
+            end_index = (intra_split_index + 1) * (
+                np.prod(self.shape_sens) * self.psd_data_length
+            )
             # invC may live on a different GPU (always computed on GPU 0).
             # Route through CPU to avoid broken P2P cross-device copies.
             invC_src = ac.sens_mat.invC
@@ -2032,7 +2077,7 @@ class AnalysisContainerArray:
                 invC_src.flatten()
             )
             ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(
-                self.shape_sens + self.end_shape
+                self.shape_sens + self.psd_end_shape
             )
 
             # TODO: add check to make sure changes are made inline along with protections
@@ -3031,13 +3076,13 @@ class AnalysisContainerArray:
         out = []
         if self.gpus is None:
             for tmp in self.linear_psd_arr:
-                out.append(tmp.reshape((-1,) + self.shape_sens + self.end_shape))
+                out.append(tmp.reshape((-1,) + self.shape_sens + self.psd_end_shape))
             return out
         main_gpu = self.xp.cuda.runtime.getDevice()
         try:
             for i, tmp in enumerate(self.linear_psd_arr):
                 with self.xp.cuda.Device(self.gpus[i]):
-                    out.append(tmp.reshape((-1,) + self.shape_sens + self.end_shape))
+                    out.append(tmp.reshape((-1,) + self.shape_sens + self.psd_end_shape))
         finally:
             self.xp.cuda.runtime.setDevice(main_gpu)
         return out

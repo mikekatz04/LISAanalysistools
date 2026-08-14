@@ -7,9 +7,11 @@ Stas Babak and Antoine Petiteau for the LDC team.
 from __future__ import annotations
 
 import functools
+import hashlib
 import math
 import operator
 import os
+import time
 import warnings
 from abc import ABC
 from copy import deepcopy
@@ -39,6 +41,7 @@ from cudakima import AkimaInterpolant1D
 
 from . import detector as lisa_models
 from . import _unequal_arm_expressions as _ua_expr
+from ._unequal_arm_fused import unequal_arm_tdi2_unit_covariances
 from .detector import L1Orbits, Orbits
 from .domains import DomainSettingsBase
 from .stochastic import (
@@ -2006,6 +2009,63 @@ def randc(shape):
     """Return complex Gaussian noise with the given ``shape`` (real + imaginary unit-variance)."""
     return np.random.randn(*shape) + 1j*np.random.randn(*shape)
 
+
+def _wdm_layer_constant_psd(psd):
+    """Established one-sided DFT PSD -> layer-center WDM normalization."""
+    return 0.5 * psd
+
+
+#: ``wdm_psd_method`` values that evaluate at WDM layer centers instead of
+#: folding the DFT grid, and so share the cheap coarse/center code paths.
+#: ``"layer_calibrated"`` is ``"layer_constant"`` times a once-computed
+#: per-layer correction (see
+#: :meth:`UnequalArmInstrumentNoise._layer_calibration`).
+WDM_LAYER_CENTER_METHODS = ("layer_constant", "layer_calibrated")
+UNEQUAL_ARM_WDM_PSD_METHODS = ("fold",) + WDM_LAYER_CENTER_METHODS
+# Sampled stochastic spectra change shape, so unlike the two fixed instrument
+# basis functions they cannot use one parameter-independent multiplicative
+# calibration.  A 64-node window-weighted quadrature remains >100x smaller
+# than the production Nt=16060 exact fold while tracking the current proposal's
+# curvature.  See ``WDMSettings.wdm_layer_quadrature_data``.
+STOCHASTIC_WDM_QUADRATURE_NODES = 64
+
+
+def _wdm_stationary_psd_column(
+    basis_settings,
+    sensitivity,
+    args,
+    kwargs,
+    wdm_psd_method,
+):
+    """Evaluate one stationary WDM PSD column under the selected policy."""
+    fold_settings = (
+        basis_settings.fine_settings
+        if isinstance(basis_settings, domains.CoarseWDMSettings)
+        else basis_settings
+    )
+    xp = get_array_module(basis_settings.f_arr)
+    if wdm_psd_method == "layer_constant":
+        return _wdm_layer_constant_psd(
+            sensitivity.get_Sn(fold_settings.f_arr, *args, **kwargs)
+        )
+    if wdm_psd_method == "layer_calibrated":
+        f_nodes, weights = fold_settings.wdm_layer_quadrature_data(
+            STOCHASTIC_WDM_QUADRATURE_NODES
+        )
+        values = xp.asarray(sensitivity.get_Sn(f_nodes, *args, **kwargs))
+        return xp.sum(values * weights[None, :], axis=-1)
+    if wdm_psd_method == "fold":
+        f_active = fold_settings.fold_frequency_arr
+        psd_active = xp.asarray(
+            sensitivity.get_Sn(f_active, *args, **kwargs)
+        )
+        return fold_settings.fold_sparse_psd(psd_active)
+    raise ValueError(
+        "wdm_psd_method must be one of "
+        f"{UNEQUAL_ARM_WDM_PSD_METHODS}; got {wdm_psd_method!r}."
+    )
+
+
 def get_sensitivity(
     basis_settings: domains.DomainSettingsBase,
     *args: tuple,
@@ -2041,6 +2101,10 @@ def get_sensitivity(
             transform; ``E[w_mn^2] == S_wdm[m]``). ``"layer_constant"`` is the
             faster approximation that treats the PSD as constant across a
             wavelet layer, ``S_wdm[m] = (1/2) Sn(f_layer_center)``.
+            ``"layer_calibrated"`` uses a compact window-weighted quadrature
+            that follows the current spectrum's curvature without applying the
+            full ``Nt``-sample fold. Specialized components with fixed spectral
+            basis functions may override it with an exact cached calibration.
         stationary: For WDM, whether the noise PSD is the same for every time
             pixel. When ``True`` (default) the Fourier-domain PSD is evaluated
             once and broadcast across all time pixels. When ``False``
@@ -2094,11 +2158,23 @@ def get_sensitivity(
         raise NotImplementedError
         PSD = sensitivity.get_Sn(basis_settings.f_arr, *args, **kwargs)
     elif isinstance(basis_settings, domains.WDMSettings):
+        fold_settings = (
+            basis_settings.fine_settings
+            if isinstance(basis_settings, domains.CoarseWDMSettings)
+            else basis_settings
+        )
         if kwargs_list is None:
             kwargs_list = [kwargs for _ in range(basis_settings.Nt)]
         else:
             assert isinstance(kwargs_list, list)
-            assert len(kwargs_list) == basis_settings.Nt
+            valid_lengths = {basis_settings.Nt}
+            if isinstance(basis_settings, domains.CoarseWDMSettings):
+                valid_lengths.add(basis_settings.Ncoarse)
+            if len(kwargs_list) not in valid_lengths:
+                raise ValueError(
+                    f"kwargs_list has length {len(kwargs_list)}; expected one of "
+                    f"{sorted(valid_lengths)}."
+                )
             for tmp in kwargs_list:
                 if not isinstance(tmp, dict):
                     raise ValueError(
@@ -2109,10 +2185,19 @@ def get_sensitivity(
             args_list = [args for _ in range(basis_settings.Nt)]
         else:
             assert isinstance(args_list, list)
-            assert len(args_list) == basis_settings.Nt
+            valid_lengths = {basis_settings.Nt}
+            if isinstance(basis_settings, domains.CoarseWDMSettings):
+                valid_lengths.add(basis_settings.Ncoarse)
+            if len(args_list) not in valid_lengths:
+                raise ValueError(
+                    f"args_list has length {len(args_list)}; expected one of "
+                    f"{sorted(valid_lengths)}."
+                )
             for tmp in args_list:
                 if not isinstance(tmp, tuple) and not isinstance(tmp, list):
                     raise ValueError("Value in args_list is not a tuple. Must be a tuple.")
+        if len(args_list) != len(kwargs_list):
+            raise ValueError("args_list and kwargs_list must have the same length.")
             
         xp = get_array_module(basis_settings.f_arr)
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
@@ -2133,9 +2218,10 @@ def get_sensitivity(
         # psd_fd = domains.FDSignal(psd, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
         # PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
 
-        if wdm_psd_method not in ("fold", "layer_constant"):
+        if wdm_psd_method not in UNEQUAL_ARM_WDM_PSD_METHODS:
             raise ValueError(
-                f"wdm_psd_method must be 'fold' or 'layer_constant', got {wdm_psd_method!r}."
+                "wdm_psd_method must be one of "
+                f"{UNEQUAL_ARM_WDM_PSD_METHODS}; got {wdm_psd_method!r}."
             )
 
         def _wdm_layer_psd(_args, _kwargs):
@@ -2144,52 +2230,48 @@ def get_sensitivity(
             folded PSD is independent of the wavelet time pixel, so one column
             fully describes it; the non-stationary path calls this once per
             time column with that column's own spectrum."""
-            if wdm_psd_method == "layer_constant":
-                # approximation: PSD constant across each wavelet layer,
-                # evaluated at the layer centre frequencies.
-                f_c = basis_settings.f_arr
-                return 1 / 2 * sensitivity.get_Sn(f_c, *_args, **_kwargs)
-
-            # exact: fold the full-resolution Fourier-domain PSD into the
-            # wavelet basis. Validated so that E[w_mn^2] == S_wdm[m] against the
-            # forward WDM transform (see wdm_noise_validation.py). The fold is
-            # time-column independent, so we keep a single representative column.
-            f_full = xp.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
-            df = float(f_full[1] - f_full[0])
-            # The fold only ever reads the bins in ``fold_frequency_indices``
-            # (a small fraction of the rFFT grid for a narrow active band), and
-            # evaluating the noise model is far more expensive than the gather
-            # itself -- so score just those bins and leave the rest zero. The
-            # folded output is bit-identical to evaluating the full grid.
-            idx = basis_settings.fold_frequency_indices
-            psd_active = xp.asarray(sensitivity.get_Sn(f_full[idx], *_args, **_kwargs))
-            psd_full = xp.zeros(f_full.shape, dtype=psd_active.dtype)
-            psd_full[idx] = psd_active
-            psd_fd = domains.FDSignal(
-                psd_full,
-                domains.FDSettings(
-                    f_full.shape[0], df, force_backend=basis_settings.backend
-                ),
+            return _wdm_stationary_psd_column(
+                basis_settings,
+                sensitivity,
+                _args,
+                _kwargs,
+                wdm_psd_method,
             )
-            folded = xp.real(psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0])
-            return folded[:, 0]
 
         if stationary:
             # STATIONARY: evaluate the Fourier-domain PSD once and broadcast the
             # single folded layer column across every wavelet time pixel.
             col = _wdm_layer_psd(args_list[0], kwargs_list[0])
-            PSD = xp.repeat(col[:, None], basis_settings.Nt_active, axis=-1)
+            PSD = xp.repeat(
+                col[:, None], basis_settings.basis_shape_active[-1], axis=-1
+            )
 
         else:
             # NON-STATIONARY (time-varying): repeat the stationary fold /
             # layer_constant calculation per wavelet time column, each with its
             # own Fourier-domain PSD supplied through args_list / kwargs_list
             # (both length Nt). active_slice_t selects the active columns.
-            cols = [
-                _wdm_layer_psd(args_list[g], kwargs_list[g])
-                for g in range(basis_settings.ind_min_t, basis_settings.ind_max_t + 1)
-            ]
-            PSD = xp.stack(cols, axis=-1)
+            if isinstance(basis_settings, domains.CoarseWDMSettings):
+                if len(args_list) == basis_settings.Nt:
+                    cols = [
+                        _wdm_layer_psd(args_list[g], kwargs_list[g])
+                        for g in range(
+                            basis_settings.ind_min_t, basis_settings.ind_max_t + 1
+                        )
+                    ]
+                    PSD = basis_settings.cell_mean(xp.stack(cols, axis=-1))
+                else:
+                    cols = [
+                        _wdm_layer_psd(args_list[g], kwargs_list[g])
+                        for g in range(basis_settings.Ncoarse)
+                    ]
+                    PSD = xp.stack(cols, axis=-1)
+            else:
+                cols = [
+                    _wdm_layer_psd(args_list[g], kwargs_list[g])
+                    for g in range(basis_settings.ind_min_t, basis_settings.ind_max_t + 1)
+                ]
+                PSD = xp.stack(cols, axis=-1)
 
     else:
         raise ValueError(
@@ -3673,8 +3755,9 @@ class GalForTimeModulation:
 
     Prefer this over the analytic annual model (:func:`annual_modulation_matrix`
     / :class:`AnnualCovarianceModulation`) when a measured/tabulated modulation
-    is available. The file is (re)loaded lazily on each call, so the object holds
-    only its path and pickles cleanly across MPI ranks.
+    is available. The file and each domain-shaped interpolation are loaded
+    lazily and cached at runtime; derived caches are omitted from pickles so the
+    object still moves cleanly across MPI ranks.
 
     Args:
         path: Path to the whitespace-delimited modulation table.
@@ -3689,6 +3772,20 @@ class GalForTimeModulation:
         # that t0 at 0). Pass the first sample time of the data. Default 0.0
         # keeps a table already written relative to the data start unchanged.
         self.t0 = float(t0)
+        # Runtime-only caches.  Noise PE constructs a fresh foreground
+        # component for every proposal row, but all of them share this
+        # modulation provider.  The table and its interpolation onto a given
+        # domain are parameter-independent, so loading/interpolating them for
+        # every row is pure repeated work.  Keep the caches here (on the
+        # shared provider), and drop them from settings-tree copies/pickles.
+        self._table_cache = None
+        self._domain_cache = {}
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state["_table_cache"] = None
+        state["_domain_cache"] = {}
+        return state
 
     def _table(self):
         """``(199, 7)``-style array: time column first, then XX YY ZZ XY XZ YZ.
@@ -3701,6 +3798,9 @@ class GalForTimeModulation:
         still brackets the requested times, so ``interp1d`` interpolated
         nonsense instead of raising.
         """
+        if self._table_cache is not None:
+            return self._table_cache
+
         g = np.loadtxt(self.path)
         if g.ndim != 2:
             raise ValueError(
@@ -3727,7 +3827,30 @@ class GalForTimeModulation:
                 "layout detection -- the table is malformed or the columns are "
                 "not in the order t, XX, YY, ZZ, XY, XZ, YZ."
             )
+        self._table_cache = g
         return g
+
+    def evaluate(self, settings: domains.DomainSettingsBase):
+        """Evaluate once on ``settings`` and reuse the immutable result.
+
+        ``CoarseWDMSettings`` needs the callable on its fine time grid and
+        then cell-averages it.  Caching only :meth:`__call__` would still pay
+        that reduction for every proposal, so cache the final domain-shaped
+        array instead.
+        """
+        key = id(settings)
+        hit = self._domain_cache.get(key)
+        if hit is not None and hit[0] is settings:
+            return hit[1]
+
+        if isinstance(settings, domains.CoarseWDMSettings):
+            values = self(settings.fine_t_arr)
+            values = settings.cell_mean(values)
+        else:
+            values = self(settings.t_arr)
+        values = settings.xp.asarray(values)
+        self._domain_cache[key] = (settings, values)
+        return values
 
     def __call__(self, t_arr):
         glass = self._table()
@@ -3847,6 +3970,7 @@ class InstrumentNoise(SeparableComponent):
         model="sangria",
         fill_nans: float = np.nan,
         basis_cache: Optional[dict] = None,
+        wdm_psd_method: str = "fold",
     ):
         if tdi_generation not in _XYZ_ELEMENT_SENS:
             raise ValueError(f"tdi_generation must be 1 or 2, got {tdi_generation!r}.")
@@ -3855,6 +3979,12 @@ class InstrumentNoise(SeparableComponent):
         self.fill_nans = fill_nans
         self.element_sens_fns = _XYZ_ELEMENT_SENS[tdi_generation]
         self.basis_cache = basis_cache
+        if wdm_psd_method not in UNEQUAL_ARM_WDM_PSD_METHODS:
+            raise ValueError(
+                "wdm_psd_method must be one of "
+                f"{UNEQUAL_ARM_WDM_PSD_METHODS}; got {wdm_psd_method!r}."
+            )
+        self.wdm_psd_method = wdm_psd_method
 
     def _linear_in_noise_levels(self) -> bool:
         """Whether this component's covariance is linear in ``(Soms_d, Sa_a)``.
@@ -3880,7 +4010,13 @@ class InstrumentNoise(SeparableComponent):
         xp = settings.xp
         nch = self.nchannels
         elems = [
-            get_sensitivity(settings, sens_fn=fn, model=model, fill_nans=self.fill_nans)
+            get_sensitivity(
+                settings,
+                sens_fn=fn,
+                model=model,
+                fill_nans=self.fill_nans,
+                wdm_psd_method=self.wdm_psd_method,
+            )
             for fn in self.element_sens_fns
         ]
         C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=elems[0].dtype)
@@ -3910,11 +4046,12 @@ class InstrumentNoise(SeparableComponent):
             self.fill_nans,
             tuple(self.element_sens_fns),
             type(self.model),
+            self.wdm_psd_method,
             self._basis_cache_key_extra(),
         )
         # ``id(settings)`` can be recycled after a settings object is freed, so
         # pin the object in the entry and confirm identity on lookup.
-        hit = self.basis_cache.get(key)
+        hit = None if self.basis_cache is None else self.basis_cache.get(key)
         if hit is not None and hit[0] is settings:
             return hit[1], hit[2]
 
@@ -4311,6 +4448,32 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
         fill_nans: Forwarded to :func:`get_sensitivity` for the ``f=0`` bin.
         basis_cache: Caller-owned dict enabling the two-basis fast path, exactly
             as on :class:`InstrumentNoise`.
+        coarse_cache_dir: Optional directory for persistent exact coarse bases
+            and the fine diagonal unit bases used by channelwise WS weighting.
+            Cache entries are content-addressed by the WDM grid and all six
+            breathing-arm delay series, so restarts and separate fit modes can
+            reuse them safely.
+        coarse_progress: Print coarse-build progress and ETA to stdout in
+            addition to logging it.
+        wdm_psd_method: ``"fold"`` (default) performs the exact DFT-grid to
+            WDM PSD fold. ``"layer_constant"`` uses the existing
+            :func:`get_sensitivity` convention ``S_wdm[m] = 0.5*S(f_m)`` at
+            WDM frequency-layer centers; on a coarse grid, breathing-arm
+            delays are additionally evaluated at coarse time-cell centers.
+            ``"layer_calibrated"`` is ``"layer_constant"`` scaled by a
+            per-layer correction pinned down by a single exact fold, which
+            removes essentially all of the layer-center bias at the cost of
+            one extra column-fold per grid -- see :meth:`_layer_calibration`.
+            Prefer it over ``"layer_constant"``, which under-predicts the
+            covariance by up to ~1% in the lowest active layer and biases a
+            two-year noise fit by ~+0.0015 in ``ln Soms_d``.
+        layer_calibration_tol: Warn when the residual covariance error of the
+            ``"layer_calibrated"`` correction, measured at the most extreme
+            delays in the table, exceeds this (default ``1e-4``). A covariance
+            error ``eps`` moves a fitted level by roughly ``eps/2`` in log
+            amplitude, so ``1e-4`` keeps the induced bias well under the
+            posterior width of even a two-year fit (5.6e-4). The two-year
+            production grid measures 7.8e-7 here. Ignored by the other methods.
     """
 
     name = "instrument_unequal_arm"
@@ -4322,6 +4485,10 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
         model="sangria",
         fill_nans: float = np.nan,
         basis_cache: Optional[dict] = None,
+        coarse_cache_dir: Optional[str] = None,
+        coarse_progress: bool = False,
+        wdm_psd_method: str = "fold",
+        layer_calibration_tol: float = 1e-4,
     ):
         if tdi_generation != 2:
             raise ValueError(
@@ -4330,7 +4497,11 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
                 f"tdi_generation={tdi_generation!r}. Use InstrumentNoise for TDI 1.5."
             )
         super().__init__(
-            tdi_generation=2, model=model, fill_nans=fill_nans, basis_cache=basis_cache
+            tdi_generation=2,
+            model=model,
+            fill_nans=fill_nans,
+            basis_cache=basis_cache,
+            wdm_psd_method=wdm_psd_method,
         )
         if not isinstance(ltts, LinkDelayTable):
             ltts = np.asarray(ltts, dtype=float)
@@ -4341,6 +4512,16 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
                     f"got {ltts.shape}."
                 )
         self.ltts = ltts
+        self.coarse_cache_dir = (
+            None if coarse_cache_dir is None else os.path.abspath(str(coarse_cache_dir))
+        )
+        self.coarse_progress = bool(coarse_progress)
+        if wdm_psd_method not in UNEQUAL_ARM_WDM_PSD_METHODS:
+            raise ValueError(
+                "wdm_psd_method must be one of "
+                f"{UNEQUAL_ARM_WDM_PSD_METHODS}; got {wdm_psd_method!r}."
+            )
+        self.layer_calibration_tol = float(layer_calibration_tol)
         # Replaces the stock equal-arm element classes the parent installed.
         self.element_sens_fns = _UNEQUAL_ARM_ELEMENT_SENS
 
@@ -4468,8 +4649,505 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
     def _basis_cache_key_extra(self) -> tuple:
         """Distinguish cached bases built from different light travel times."""
         if isinstance(self.ltts, LinkDelayTable):
-            return self.ltts.digest
-        return (self.ltts.shape, self.ltts.tobytes())
+            ltt_key = self.ltts.digest
+        else:
+            ltt_key = (self.ltts.shape, self.ltts.tobytes())
+        return (self.wdm_psd_method, ltt_key)
+
+    def _bases(self, settings: domains.DomainSettingsBase):
+        """Return both unit covariances from one shared transfer calculation."""
+        if isinstance(settings, domains.CoarseWDMSettings):
+            bases, _ = self._coarse_basis_data(settings)
+            return bases
+
+        key = (
+            id(settings),
+            self.tdi_generation,
+            self.fill_nans,
+            tuple(self.element_sens_fns),
+            type(self.model),
+            self._basis_cache_key_extra(),
+            "fused_unit_covariances_v1",
+        )
+        hit = self.basis_cache.get(key)
+        if hit is not None and hit[0] is settings:
+            return hit[1], hit[2]
+
+        bases = self._unit_bases(settings)
+        self.basis_cache[key] = (settings, bases[0], bases[1])
+        return bases
+
+    def _folded_unit_column(
+        self,
+        settings: domains.WDMSettings,
+        ltts: np.ndarray,
+        method: Optional[str] = None,
+    ):
+        """Both unit bases for one locally stationary WDM time column.
+
+        ``method`` overrides :attr:`wdm_psd_method` for this call only, which
+        is how :meth:`_layer_calibration` obtains the exact and layer-center
+        columns for the same delays without mutating shared state (relevant
+        under ``--build-threads``).
+        """
+        method = self.wdm_psd_method if method is None else method
+        if method in WDM_LAYER_CENTER_METHODS:
+            bases = unequal_arm_tdi2_unit_covariances(
+                np.asarray(asnumpy(settings.f_arr), dtype=float), ltts
+            )
+            # This is exactly get_sensitivity(...,
+            # wdm_psd_method="layer_constant")'s normalization.  The exact
+            # fold maps a flat one-sided DFT PSD to 0.5 identically.
+            stacked = _wdm_layer_constant_psd(
+                np.real(np.stack(bases, axis=0))
+            )
+            if self.fill_nans is not None:
+                stacked[np.isnan(stacked)] = self.fill_nans
+            if method == "layer_calibrated":
+                stacked = stacked * self._layer_calibration(settings)
+            return stacked
+
+        f_active = np.asarray(asnumpy(settings.fold_frequency_arr), dtype=float)
+        bases = unequal_arm_tdi2_unit_covariances(f_active, ltts)
+        stacked = np.stack(bases, axis=0)
+        if self.fill_nans is not None:
+            stacked[np.isnan(stacked)] = self.fill_nans
+        # Leading (basis, channel, channel) axes are folded together, sharing
+        # the cached gather/window map.  A real WDM pixel retains Re[C_ij].
+        return np.asarray(settings.fold_sparse_psd(stacked))
+
+    def _layer_calibration(self, settings: domains.WDMSettings) -> np.ndarray:
+        """Per-layer ratio ``fold(B) / (0.5 B(f_m))``, from one exact fold.
+
+        ``layer_constant`` samples each unit basis at the layer-center
+        frequency, but the exact value is that basis *averaged over the
+        wavelet's frequency response*.  The two differ by the band curvature,
+        so the layer-center value is systematically low -- ~1% in the lowest
+        active layer of the two-year grid, ~0.03% at the top.
+
+        The correction is a pure constant per ``(basis, channel, channel,
+        layer)`` because both ingredients are parameter-independent:
+        ``fold_sparse_psd`` is a fixed linear map determined by the WDM grid
+        and window alone, and the covariance is
+        ``Soms_d**2 * B_oms + Sa_a**2 * B_acc`` with both unit bases carrying
+        *fixed* frequency shape -- only their amplitudes are sampled.  One
+        exact fold therefore pins the whole error down.
+
+        Measured on the two-year grid (768 x 16060, layers 3..61), calibrating
+        at the run-average delays and testing at six epochs across the run:
+        worst-case basis error falls 9.7e-3 -> 1.2e-6, and the implied ML bias
+        falls from ``+0.00145`` to ``-1e-6`` in ``ln Soms_d`` (posterior width
+        5.6e-4).
+
+        REGIME OF VALIDITY.  The only thing left uncorrected is the *delay*
+        dependence of the ratio, which is second order while the TDI transfer
+        varies slowly across one frequency layer.  That holds comfortably in
+        the LISA analysis band but fails approaching Nyquist, where
+        ``sin^2(2x)`` turns over inside a single layer: on an unrestricted
+        ``Nf=256`` grid the gain over plain ``layer_constant`` collapses from
+        ~3000x to ~1x, with the residual concentrated in the top layers.  So
+        this method does not silently assume it is safe -- it re-derives the
+        ratio at the most extreme epoch in the table and warns if the two
+        disagree, which measures exactly the error being neglected.
+
+        NOTE: this does *not* generalize to the galactic foreground, whose
+        spectral SHAPE is sampled (``alpha, fk, f_1, f_2``); there the fold
+        cannot collapse to a fixed ratio and must be evaluated per proposal.
+        """
+        key = (
+            "layer_calibration_v1",
+            id(settings),
+            self.tdi_generation,
+            self.fill_nans,
+            tuple(self.element_sens_fns),
+            self._basis_cache_key_extra(),
+        )
+        # The component is rebuilt per proposal, so this MUST live in the
+        # shared basis_cache to be paid once rather than once per likelihood.
+        store = self.basis_cache
+        if store is None:
+            store = self.__dict__.setdefault("_layer_calibration_local", {})
+        hit = store.get(key)
+        if hit is not None and hit[0] is settings:
+            return hit[1]
+
+        ltts = np.asarray(self._resolve_ltts(settings), dtype=float)
+        if ltts.ndim == 1:
+            ref, probe = ltts, None
+        else:
+            ref = ltts.mean(axis=0)
+            # The epoch furthest from the reference bounds the one thing the
+            # calibration neglects, so it is the honest place to measure it.
+            probe = ltts[int(np.argmax(np.abs(ltts - ref).max(axis=1)))]
+
+        def _ratio(delays):
+            exact = self._folded_unit_column(settings, delays, method="fold")
+            approx = self._folded_unit_column(
+                settings, delays, method="layer_constant"
+            )
+            # Guard the division per (basis, channel, channel): B_oms and
+            # B_acc differ by orders of magnitude, as do the auto and cross
+            # elements. Where the layer-center value is ~0 no multiplicative
+            # correction exists, so leave those entries alone rather than
+            # inventing one.
+            scale = np.max(np.abs(approx), axis=-1, keepdims=True)
+            usable = (
+                np.isfinite(approx)
+                & np.isfinite(exact)
+                & (np.abs(approx) > 1e-10 * scale)
+            )
+            return np.where(usable, exact / np.where(usable, approx, 1.0), 1.0), usable
+
+        ratio, usable = _ratio(ref)
+        logger.debug(
+            "layer_calibrated: correction in [%.6f, %.6f] over %d/%d entries",
+            float(ratio[usable].min()) if usable.any() else 1.0,
+            float(ratio[usable].max()) if usable.any() else 1.0,
+            int(usable.sum()),
+            int(usable.size),
+        )
+        if probe is not None:
+            # Measure the quantity that matters -- the covariance error left
+            # after applying the reference correction at the extreme epoch --
+            # not the ratio itself. Ratios are unstable near a basis element's
+            # zero crossings, where the entry contributes nothing anyway.
+            exact_p = self._folded_unit_column(settings, probe, method="fold")
+            approx_p = self._folded_unit_column(
+                settings, probe, method="layer_constant"
+            )
+            resid = np.abs(approx_p * ratio - exact_p)
+            scale = np.max(
+                np.abs(exact_p), axis=tuple(range(1, exact_p.ndim)), keepdims=True
+            )
+            drift = float(
+                np.max(np.where(scale > 0.0, resid / np.where(scale > 0.0, scale, 1.0), 0.0))
+            )
+            logger.debug("layer_calibrated: epoch drift %.3e", drift)
+            if drift > self.layer_calibration_tol:
+                warnings.warn(
+                    "wdm_psd_method='layer_calibrated': the layer-center "
+                    f"correction drifts by {drift:.2e} between the mean and "
+                    "the most extreme link delays in this table, above the "
+                    f"{self.layer_calibration_tol:.0e} tolerance. One "
+                    "reference epoch cannot capture that, so this much error "
+                    "remains in the covariance. It usually means the active "
+                    "band reaches frequencies where the TDI transfer turns "
+                    "over inside a single WDM layer; restrict max_freq or use "
+                    "wdm_psd_method='fold'.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        store[key] = (settings, ratio)
+        return ratio
+
+    def _coarse_center_ltts(
+        self, settings: domains.CoarseWDMSettings
+    ) -> np.ndarray:
+        """Directed delays evaluated at coarse WDM time-cell centers."""
+        if isinstance(self.ltts, LinkDelayTable):
+            centers = (
+                np.asarray(asnumpy(settings.t_arr), dtype=float) + self.ltts.data_t0
+            )
+            return np.stack(
+                [
+                    np.interp(centers, self.ltts.t, self.ltts.ltts[:, link])
+                    for link in range(6)
+                ],
+                axis=1,
+            )
+
+        ltts = np.asarray(self.ltts, dtype=float)
+        if ltts.ndim == 1:
+            return np.repeat(ltts[None, :], settings.Ncoarse, axis=0)
+        if ltts.shape[0] != settings.Nt:
+            raise ValueError(
+                f"ltts has {ltts.shape[0]} epochs but the domain has "
+                f"Nt={settings.Nt}."
+            )
+        # Explicit rows represent fine WDM time-cell centers.  Interpolate
+        # between them when an even-sized coarse cell has a half-index center.
+        fine_indices = np.arange(settings.Nt, dtype=float)
+        center_indices = (
+            settings.fine_settings.ind_min_t
+            + settings.cell_starts
+            + 0.5 * (settings.cell_sizes - 1)
+        )
+        return np.stack(
+            [np.interp(center_indices, fine_indices, ltts[:, link]) for link in range(6)],
+            axis=1,
+        )
+
+    def _build_approximate_coarse_basis_data(
+        self, settings: domains.CoarseWDMSettings
+    ):
+        """Layer/time-cell-center approximation, with no DFT-grid folding."""
+        fine = settings.fine_settings
+        center_ltts = self._coarse_center_ltts(settings)
+        coarse = np.empty(
+            (2, 3, 3, fine.Nf_active, settings.Ncoarse), dtype=np.float64
+        )
+        for cell in range(settings.Ncoarse):
+            coarse[..., cell] = self._folded_unit_column(fine, center_ltts[cell])
+
+        fine_diagonals = np.empty(
+            (2, 3, fine.Nf_active, fine.Nt_active), dtype=np.float64
+        )
+        for cell, (start, size) in enumerate(
+            zip(settings.cell_starts, settings.cell_sizes)
+        ):
+            diagonal = np.stack(
+                [coarse[:, channel, channel, :, cell] for channel in range(3)],
+                axis=1,
+            )
+            fine_diagonals[..., int(start) : int(start + size)] = diagonal[..., None]
+        self._coarse_progress_message(
+            "built approximate unequal-arm PSD at WDM frequency/coarse-time "
+            f"cell centers ({settings.Nf_active}x{settings.Ncoarse} evaluations)"
+        )
+        return (coarse[0], coarse[1]), fine_diagonals
+
+    def _unit_bases(self, settings: domains.DomainSettingsBase):
+        """Compute OMS and acceleration bases together on a non-coarse domain."""
+        ltts = self._resolve_ltts(settings)
+        if isinstance(settings, domains.FDSettings):
+            if ltts.ndim != 1:
+                # Preserve the existing explicit error for a time-resolved
+                # table on a domain without a time axis.
+                self._sensitivity_kwargs(settings, self.model)
+            bases = unequal_arm_tdi2_unit_covariances(
+                np.asarray(asnumpy(settings.f_arr), dtype=float), ltts
+            )
+            out = np.stack(bases, axis=0)
+            if self.fill_nans is not None:
+                out[np.isnan(out)] = self.fill_nans
+            return tuple(settings.xp.asarray(out[i]) for i in range(2))
+
+        if not isinstance(settings, domains.WDMSettings):
+            raise NotImplementedError(
+                f"UnequalArmInstrumentNoise does not support {type(settings).__name__}."
+            )
+        if getattr(settings.backend, "uses_cupy", False):
+            raise ValueError(
+                "The fused unequal-arm transfer kernel is CPU-only; single-GPU "
+                "support is planned."
+            )
+
+        if ltts.ndim == 1:
+            column = self._folded_unit_column(settings, ltts)
+            bases = np.repeat(column[..., None], settings.Nt_active, axis=-1)
+        else:
+            if ltts.shape[0] != settings.Nt:
+                self._sensitivity_kwargs(settings, self.model)
+            columns = [
+                self._folded_unit_column(settings, ltts[g])
+                for g in range(settings.ind_min_t, settings.ind_max_t + 1)
+            ]
+            bases = np.stack(columns, axis=-1)
+        return bases[0], bases[1]
+
+    def _persistent_coarse_key(self, settings: domains.CoarseWDMSettings) -> str:
+        """Stable content key for the exact coarse basis and fine diagonals."""
+        fine = settings.fine_settings
+        digest = hashlib.sha256()
+        digest.update(b"unequal-arm-coarse-fused-v2")
+        scalars = np.asarray(
+            [
+                fine.Nf,
+                fine.Nt,
+                fine.data_dt,
+                fine.ind_min_f,
+                fine.ind_max_f,
+                fine.ind_min_t,
+                fine.ind_max_t,
+                settings.coarse_Q,
+            ],
+            dtype=np.float64,
+        )
+        digest.update(scalars.tobytes())
+        for value in (
+            np.asarray(asnumpy(fine.fold_frequency_arr), dtype=np.float64),
+            np.asarray(settings.cell_starts, dtype=np.int64),
+            np.asarray(settings.cell_sizes, dtype=np.int64),
+            np.asarray(self._resolve_ltts(fine), dtype=np.float64),
+        ):
+            digest.update(np.ascontiguousarray(value).tobytes())
+        return digest.hexdigest()[:24]
+
+    def _coarse_progress_message(self, message: str) -> None:
+        logger.info(message)
+        if self.coarse_progress:
+            print(f"[unequal-arm] {message}", flush=True)
+
+    def _build_coarse_basis_data(self, settings: domains.CoarseWDMSettings):
+        """Stream fine columns into coarse bases, retaining only fine diagonals."""
+        fine = settings.fine_settings
+        if getattr(fine.backend, "uses_cupy", False):
+            raise ValueError(
+                "Exact unequal-arm coarse precomputation is CPU-only; "
+                "single-GPU support is planned."
+            )
+        ltts = self._resolve_ltts(fine)
+        shape_coarse = (2, 3, 3, fine.Nf_active, settings.Ncoarse)
+        coarse_sums = np.zeros(shape_coarse, dtype=np.float64)
+        fine_diagonals = np.empty(
+            (2, 3, fine.Nf_active, fine.Nt_active), dtype=np.float64
+        )
+
+        if ltts.ndim == 1:
+            column = self._folded_unit_column(fine, ltts)
+            for cell, size in enumerate(settings.cell_sizes):
+                coarse_sums[..., cell] = column * float(size)
+            fine_diagonals[:] = np.real(
+                np.stack([column[:, a, a] for a in range(3)], axis=1)
+            )[..., None]
+        else:
+            total = fine.Nt_active
+            started = time.monotonic()
+            last_report = started
+            self._coarse_progress_message(
+                f"building exact breathing-arm basis: 0/{total} WDM columns"
+            )
+            for local, global_index in enumerate(
+                range(fine.ind_min_t, fine.ind_max_t + 1)
+            ):
+                column = self._folded_unit_column(fine, ltts[global_index])
+                cell = local // settings.coarse_Q
+                coarse_sums[..., cell] += column
+                fine_diagonals[..., local] = np.real(
+                    np.stack([column[:, a, a] for a in range(3)], axis=1)
+                )
+                now = time.monotonic()
+                done = local + 1
+                if done == total or now - last_report >= 30.0:
+                    elapsed = now - started
+                    eta = elapsed * (total - done) / done
+                    self._coarse_progress_message(
+                        f"building exact breathing-arm basis: {done}/{total} "
+                        f"({100.0 * done / total:.1f}%), elapsed {elapsed / 60:.1f} min, "
+                        f"ETA {eta / 60:.1f} min"
+                    )
+                    last_report = now
+
+        coarse_sums /= np.asarray(settings.cell_sizes, dtype=float)[None, None, None, None, :]
+        return (coarse_sums[0], coarse_sums[1]), fine_diagonals
+
+    def _coarse_basis_data(self, settings: domains.CoarseWDMSettings):
+        """Load or build exact coarse bases plus fine diagonal unit bases."""
+        key = (
+            id(settings),
+            self.tdi_generation,
+            self.fill_nans,
+            type(self.model),
+            self._basis_cache_key_extra(),
+            "coarse_center_approx_v1"
+            if self.wdm_psd_method in WDM_LAYER_CENTER_METHODS
+            else "coarse_fused_stream_v2",
+        )
+        hit = None if self.basis_cache is None else self.basis_cache.get(key)
+        if hit is not None and hit[0] is settings:
+            return (hit[1], hit[2]), hit[3]
+
+        if self.wdm_psd_method in WDM_LAYER_CENTER_METHODS:
+            bases, diagonals = self._build_approximate_coarse_basis_data(settings)
+            if self.basis_cache is not None:
+                self.basis_cache[key] = (settings, bases[0], bases[1], diagonals)
+            return bases, diagonals
+
+        cache_path = None
+        lock_handle = None
+        if self.coarse_cache_dir is not None:
+            os.makedirs(self.coarse_cache_dir, exist_ok=True)
+            persistent_key = self._persistent_coarse_key(settings)
+            cache_path = os.path.join(
+                self.coarse_cache_dir, f"unequal_arm_{persistent_key}.npz"
+            )
+
+            # Serialize competing instrument/foreground processes.  The second
+            # process loads the first process's atomic result instead of paying
+            # for the same breathing-arm transfer build concurrently.
+            import fcntl
+
+            lock_handle = open(cache_path + ".lock", "a+b")
+            self._coarse_progress_message(
+                f"checking shared basis cache {cache_path} "
+                "(waiting if another mode is building it)"
+            )
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+
+        try:
+            if cache_path is not None and os.path.exists(cache_path):
+                self._coarse_progress_message(f"loading cached basis {cache_path}")
+                with np.load(cache_path, allow_pickle=False) as saved:
+                    bases = (np.asarray(saved["B_oms"]), np.asarray(saved["B_acc"]))
+                    diagonals = np.asarray(saved["fine_diagonals"])
+            else:
+                bases, diagonals = self._build_coarse_basis_data(settings)
+                if cache_path is not None:
+                    tmp_path = cache_path + f".{os.getpid()}.tmp.npz"
+                    np.savez(
+                        tmp_path,
+                        B_oms=bases[0],
+                        B_acc=bases[1],
+                        fine_diagonals=diagonals,
+                    )
+                    os.replace(tmp_path, cache_path)
+                    self._coarse_progress_message(f"saved reusable basis {cache_path}")
+        finally:
+            if lock_handle is not None:
+                lock_handle.close()
+
+        if self.basis_cache is not None:
+            self.basis_cache[key] = (settings, bases[0], bases[1], diagonals)
+        return bases, diagonals
+
+    def coarse_qeff(
+        self,
+        settings: domains.CoarseWDMSettings,
+        *,
+        extra_diagonal=None,
+    ):
+        """Channelwise WS dof from the selected fine/center unit diagonals."""
+        _, diagonals = self._coarse_basis_data(settings)
+        diagonal = (
+            float(self.model.Soms_d) * diagonals[0]
+            + float(self.model.Sa_a) * diagonals[1]
+        )
+        if extra_diagonal is not None:
+            extra = np.asarray(asnumpy(extra_diagonal), dtype=float)
+            if extra.shape != diagonal.shape:
+                raise ValueError(
+                    f"extra_diagonal has shape {extra.shape}; expected {diagonal.shape}."
+                )
+            diagonal = diagonal + extra
+
+        per_cell = []
+        for start, size in zip(settings.cell_starts, settings.cell_sizes):
+            block = diagonal[..., int(start) : int(start + size)]
+            s1 = np.sum(block, axis=-1)
+            s2 = np.sum(block * block, axis=-1)
+            valid = np.isfinite(s1) & np.isfinite(s2) & (s2 > 0.0)
+            ratio = np.where(valid, s1 * s1 / np.where(valid, s2, 1.0), 0.0)
+            per_cell.append(np.minimum(ratio, float(size)))
+        channels = np.stack(per_cell, axis=-1)
+        valid = np.all(channels > 0.0, axis=0)
+        qeff = np.where(valid, np.mean(channels, axis=0), 0.0)
+        return settings.xp.asarray(qeff), settings.xp.asarray(channels)
+
+    def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        """Build the unequal-arm covariance using the selected WDM PSD method."""
+        if not isinstance(settings, domains.CoarseWDMSettings):
+            return super().base_covariance(settings)
+        if self.wdm_psd_method in WDM_LAYER_CENTER_METHODS:
+            bases, _ = self._coarse_basis_data(settings)
+            return float(self.model.Soms_d) * bases[0] + float(self.model.Sa_a) * bases[1]
+        if self.basis_cache is not None and self._linear_in_noise_levels():
+            return super().base_covariance(settings)
+
+        # Correct fallback for custom/nonlinear models or disabled caching.
+        # It retains correctness but intentionally gives up the speed benefit.
+        fine = self._direct_base_covariance(settings.fine_settings, self.model)
+        return settings.cell_mean(fine)
 
     def _resolve_ltts(self, settings) -> np.ndarray:
         """The delays this domain actually needs: ``(6,)`` or ``(Nt, 6)``.
@@ -4512,32 +5190,9 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
         )
 
     def _direct_base_covariance(self, settings, model) -> np.ndarray:
-        """Hermitian ``(nch, nch, *basis)`` covariance from the closed forms.
-
-        Differs from the parent in two ways: the per-link delays are threaded
-        through to the element classes, and the lower triangle gets the
-        **conjugate** (the parent mirrors the value, which is only right for the
-        real equal-arm CSDs).
-        """
-        xp = settings.xp
-        nch = self.nchannels
-        kw = self._sensitivity_kwargs(settings, model)
-        elems = [
-            xp.asarray(
-                get_sensitivity(
-                    settings, sens_fn=fn, fill_nans=self.fill_nans, **kw
-                )
-            )
-            for fn in self.element_sens_fns
-        ]
-        # FD keeps the complex cross-spectra; the WDM fold has already taken the
-        # real part, so there the promotion is a no-op.
-        dtype = xp.result_type(*[e.dtype for e in elems])
-        C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=dtype)
-        for (i, j), arr in zip(ELEMENTS, elems):
-            C[i, j] = arr
-            C[j, i] = arr if i == j else xp.conj(arr)
-        return C
+        """Physical covariance from the fused shared unit bases."""
+        B_oms, B_acc = self._unit_bases(settings)
+        return float(model.Soms_d) * B_oms + float(model.Sa_a) * B_acc
 
 
 class GalacticForeground(SeparableComponent):
@@ -4572,6 +5227,8 @@ class GalacticForeground(SeparableComponent):
         modulation: Optional[object] = None,
         tdi_generation: int = 2,
         stochastic_fn=HyperbolicTangentGalacticForeground,
+        spectral_cache: Optional[dict] = None,
+        wdm_psd_method: str = "fold",
     ):
         if tdi_generation not in _XYZ_ELEMENT_SENS:
             raise ValueError(f"tdi_generation must be 1 or 2, got {tdi_generation!r}.")
@@ -4579,6 +5236,241 @@ class GalacticForeground(SeparableComponent):
         self._modulation = modulation
         self.tdi_generation = tdi_generation
         self.stochastic_fn = check_stochastic(stochastic_fn)
+        if wdm_psd_method not in UNEQUAL_ARM_WDM_PSD_METHODS:
+            raise ValueError(
+                "wdm_psd_method must be one of "
+                f"{UNEQUAL_ARM_WDM_PSD_METHODS}; got {wdm_psd_method!r}."
+            )
+        self.wdm_psd_method = wdm_psd_method
+        # The composite backend constructs a fresh foreground component for
+        # every proposal, so it supplies one shared cache.  Standalone,
+        # repeatedly-used components still benefit from their own cache.
+        self._spectral_cache = {} if spectral_cache is None else spectral_cache
+
+    def __getstate__(self):
+        """Drop fixed-grid spectral work from deepcopies and pickles."""
+        state = dict(self.__dict__)
+        state["_spectral_cache"] = {}
+        return state
+
+    def _fast_hyperbolic_wdm_column(
+        self,
+        settings: domains.WDMSettings,
+        Xsens,
+        *,
+        frequency_indices=None,
+    ) -> Optional[np.ndarray]:
+        """One exact CPU WDM column for the five-parameter foreground model.
+
+        The foreground spectrum changes with every proposal, but its sparse
+        WDM frequency grid, TDI stochastic response, ``log(f)``, and
+        ``f**(-7/3)`` factor do not.  Cache those invariants and evaluate/fold
+        only the frequencies the active WDM layers actually read.
+
+        ``None`` means the generic domain path should be used.  In particular,
+        GPU execution deliberately stays on that established path until the
+        compact gather/cache ownership is designed for a single device.
+        """
+        if settings.backend.uses_cupy:
+            return None
+        if self.stochastic_fn is not HyperbolicTangentGalacticForeground:
+            return None
+        if self.stochastic_fn.added_stochastic_list:
+            return None
+
+        fold_settings = (
+            settings.fine_settings
+            if isinstance(settings, domains.CoarseWDMSettings)
+            else settings
+        )
+        key = (id(fold_settings), Xsens, "hyperbolic_tangent_v1")
+        hit = self._spectral_cache.get(key)
+        if hit is not None and hit[0] is fold_settings:
+            _, full_f, full_log_f, full_response_f_power = hit
+        else:
+            full_f = np.asarray(fold_settings.fold_frequency_arr)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                full_log_f = np.log(full_f)
+                response = np.asarray(
+                    Xsens.stochastic_transform(full_f, np.ones_like(full_f))
+                )
+                full_response_f_power = response * full_f ** (-7.0 / 3.0)
+            self._spectral_cache[key] = (
+                fold_settings,
+                full_f,
+                full_log_f,
+                full_response_f_power,
+            )
+
+        if frequency_indices is None:
+            f = full_f
+            log_f = full_log_f
+            response_f_power = full_response_f_power
+        else:
+            _, _, _, global_indices = (
+                fold_settings.sparse_psd_fold_data_for_layers(frequency_indices)
+            )
+            f = full_f[global_indices]
+            log_f = full_log_f[global_indices]
+            response_f_power = full_response_f_power[global_indices]
+
+        amp, fk, alpha, f_1, f_2 = self.foreground_params
+        # (f/f_1)**alpha == exp(alpha*(log(f)-log(f_1))).  The latter lets the
+        # expensive log(f) ride in the fixed-grid cache.  This is an algebraic
+        # rewrite only; the model remains a frequency-dependent separable
+        # spectrum whose time dependence is applied by ``time_modulation``.
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            rolloff_power = np.exp(alpha * (log_f - np.log(f_1)))
+            psd_active = (
+                amp
+                * np.exp(-rolloff_power)
+                * response_f_power
+                * 0.5
+                * (1.0 + np.tanh(-(f - fk) / f_2))
+            )
+        col = fold_settings.fold_sparse_psd(
+            psd_active, frequency_indices=frequency_indices
+        )
+        # Match get_sensitivity(..., fill_nans=0.0): replace NaNs only, not
+        # infinities, after the fold has propagated any f=0 indeterminacy.
+        col[np.isnan(col)] = 0.0
+        return col
+
+    def _fast_hyperbolic_wdm_magnitude(
+        self, settings: domains.WDMSettings, Xsens
+    ) -> Optional[np.ndarray]:
+        """Exact CPU sparse fold broadcast across the WDM time axis."""
+        col = self._fast_hyperbolic_wdm_column(settings, Xsens)
+        if col is None:
+            return None
+        return np.repeat(col[:, None], settings.basis_shape_active[-1], axis=-1)
+
+    def coarse_wdm_profile(
+        self,
+        settings: domains.CoarseWDMSettings,
+        *,
+        frequency_indices=None,
+    ):
+        """Return the separable ``(frequency column, modulation)`` profile.
+
+        This is the allocation-light seam used by a split galactic-foreground
+        move.  The foreground spectrum is folded for every active frequency
+        layer (that one-dimensional operation is cheap), but the much larger
+        ``(3, 3, Nf, Ncoarse)`` covariance is not materialized yet.  A caller
+        can first determine which frequency layers measurably perturb its
+        frozen instrument covariance, then call
+        :meth:`coarse_wdm_covariance_from_profile` for only those layers.
+
+        ``None`` retains the generic full-covariance path for custom
+        foreground spectra and GPU execution.
+        """
+        if not isinstance(settings, domains.CoarseWDMSettings):
+            return None
+        Xsens = _XYZ_ELEMENT_SENS[self.tdi_generation][0]
+        if self.wdm_psd_method == "fold":
+            col = self._fast_hyperbolic_wdm_column(
+                settings, Xsens, frequency_indices=frequency_indices
+            )
+        else:
+            col = np.asarray(
+                _wdm_stationary_psd_column(
+                    settings,
+                    Xsens,
+                    (),
+                    dict(
+                        stochastic_params=self.foreground_params,
+                        stochastic_function=self.stochastic_fn,
+                        include_instrument=False,
+                    ),
+                    self.wdm_psd_method,
+                )
+            )
+            if frequency_indices is not None:
+                col = col[np.asarray(frequency_indices, dtype=np.int64)]
+        if col is None:
+            return None
+        modulation = np.asarray(asnumpy(self.time_modulation(settings)))
+        return np.asarray(col), modulation
+
+    def coarse_wdm_profile_estimate(self, settings: domains.CoarseWDMSettings):
+        """Cheap layer-center foreground profile used only to choose support.
+
+        The selected layers are subsequently evaluated with the exact sparse
+        WDM fold.  This estimate therefore affects neither retained-layer
+        covariance values nor their likelihood terms.
+        """
+        if not isinstance(settings, domains.CoarseWDMSettings):
+            return None
+        if settings.backend.uses_cupy:
+            return None
+        if self.stochastic_fn is not HyperbolicTangentGalacticForeground:
+            return None
+        if self.stochastic_fn.added_stochastic_list:
+            return None
+
+        Xsens = _XYZ_ELEMENT_SENS[self.tdi_generation][0]
+        f = np.asarray(settings.f_arr)
+        key = (id(settings), Xsens, "hyperbolic_tangent_layer_center_v1")
+        hit = self._spectral_cache.get(key)
+        if hit is not None and hit[0] is settings:
+            _, log_f, response_f_power = hit
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                log_f = np.log(f)
+                response = np.asarray(
+                    Xsens.stochastic_transform(f, np.ones_like(f))
+                )
+                response_f_power = 0.5 * response * f ** (-7.0 / 3.0)
+            self._spectral_cache[key] = (settings, log_f, response_f_power)
+
+        amp, fk, alpha, f_1, f_2 = self.foreground_params
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            rolloff_power = np.exp(alpha * (log_f - np.log(f_1)))
+            column = (
+                amp
+                * np.exp(-rolloff_power)
+                * response_f_power
+                * (1.0 + np.tanh(-(f - fk) / f_2))
+            )
+        column[np.isnan(column)] = 0.0
+        modulation = np.asarray(asnumpy(self.time_modulation(settings)))
+        return column, modulation
+
+    @staticmethod
+    def coarse_wdm_covariance_from_profile(
+        settings: domains.CoarseWDMSettings,
+        profile,
+        frequency_indices,
+    ) -> np.ndarray:
+        """Materialize a foreground covariance on selected frequency layers."""
+        if not isinstance(settings, domains.CoarseWDMSettings):
+            raise TypeError("settings must be CoarseWDMSettings.")
+        column, modulation = profile
+        column = np.asarray(column)
+        modulation = np.asarray(modulation)
+        indices = np.asarray(frequency_indices, dtype=np.int64)
+        if column.shape == (settings.Nf_active,):
+            selected_column = column[indices]
+        elif column.shape == (indices.size,):
+            selected_column = column
+        else:
+            raise ValueError(
+                f"foreground column has shape {column.shape}; expected "
+                f"({settings.Nf_active},) or ({indices.size},)."
+            )
+        if modulation.shape == (3, 3):
+            modulation = np.broadcast_to(
+                modulation[..., None], (3, 3, settings.Ncoarse)
+            )
+        if modulation.shape != (3, 3, settings.Ncoarse):
+            raise ValueError(
+                f"foreground modulation has shape {modulation.shape}; expected "
+                f"(3, 3) or (3, 3, {settings.Ncoarse})."
+            )
+        return (
+            modulation[:, :, None, :]
+            * selected_column[None, None, :, None]
+        )
 
     def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
         xp = settings.xp
@@ -4586,14 +5478,22 @@ class GalacticForeground(SeparableComponent):
         Xsens = _XYZ_ELEMENT_SENS[self.tdi_generation][0]
         # foreground magnitude in the domain basis: stochastic contribution only
         # (no instrument term), folded through the same domain dispatch.
-        mag = get_sensitivity(
-            settings,
-            sens_fn=Xsens,
-            stochastic_params=self.foreground_params,
-            stochastic_function=self.stochastic_fn,
-            include_instrument=False,
-            fill_nans=0.0,
-        )
+        mag = None
+        if (
+            isinstance(settings, domains.WDMSettings)
+            and self.wdm_psd_method == "fold"
+        ):
+            mag = self._fast_hyperbolic_wdm_magnitude(settings, Xsens)
+        if mag is None:
+            mag = get_sensitivity(
+                settings,
+                sens_fn=Xsens,
+                stochastic_params=self.foreground_params,
+                stochastic_function=self.stochastic_fn,
+                include_instrument=False,
+                fill_nans=0.0,
+                wdm_psd_method=self.wdm_psd_method,
+            )
         C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=mag.dtype)
         for (i, j) in ELEMENTS:
             C[i, j] = mag
@@ -4611,6 +5511,9 @@ class GalacticForeground(SeparableComponent):
                 M[i, i] = 1.0
             return M
 
+        if hasattr(self._modulation, "evaluate"):
+            return self._modulation.evaluate(settings)
+
         if callable(self._modulation):
             time_axis = _basis_time_axis(settings)
             if time_axis is None:
@@ -4618,9 +5521,9 @@ class GalacticForeground(SeparableComponent):
                     f"{type(settings).__name__} has no time axis; cannot evaluate a "
                     "callable (time-varying) foreground modulation here."
                 )
-            return self._modulation(settings.t_arr)
+            return settings.evaluate_time_modulation(self._modulation)
 
-        return xp.asarray(self._modulation)
+        return settings.evaluate_time_modulation(self._modulation)
 
 
 class SGWB(SeparableComponent):
@@ -4664,6 +5567,7 @@ class SGWB(SeparableComponent):
         stochastic_fn,
         modulation: Optional[object] = None,
         tdi_generation: int = 2,
+        wdm_psd_method: str = "fold",
     ):
         if tdi_generation not in _XYZ_ELEMENT_SENS:
             raise ValueError(f"tdi_generation must be 1 or 2, got {tdi_generation!r}.")
@@ -4671,6 +5575,12 @@ class SGWB(SeparableComponent):
         self._modulation = modulation
         self.tdi_generation = tdi_generation
         self.stochastic_fn = check_stochastic(stochastic_fn)
+        if wdm_psd_method not in UNEQUAL_ARM_WDM_PSD_METHODS:
+            raise ValueError(
+                "wdm_psd_method must be one of "
+                f"{UNEQUAL_ARM_WDM_PSD_METHODS}; got {wdm_psd_method!r}."
+            )
+        self.wdm_psd_method = wdm_psd_method
 
     def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
         xp = settings.xp
@@ -4685,6 +5595,7 @@ class SGWB(SeparableComponent):
             stochastic_function=self.stochastic_fn,
             include_instrument=False,
             fill_nans=0.0,
+            wdm_psd_method=self.wdm_psd_method,
         )
         C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=mag.dtype)
         for (i, j) in ELEMENTS:
@@ -4710,9 +5621,9 @@ class SGWB(SeparableComponent):
                     f"{type(settings).__name__} has no time axis; cannot evaluate a "
                     "callable (time-varying) SGWB modulation here."
                 )
-            return self._modulation(settings.t_arr)
+            return settings.evaluate_time_modulation(self._modulation)
 
-        return xp.asarray(self._modulation)
+        return settings.evaluate_time_modulation(self._modulation)
 
 
 def _interp1d_along_axis(
@@ -5377,6 +6288,7 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         galfor_stochastic_fn=HyperbolicTangentGalacticForeground,
         galfor_modulation: Optional[object] = None,
         sgwb_stochastic_fn="PowerLawSGWB",
+        wdm_psd_method: str = "fold",
         instrument_component_cls=None,
         instrument_model_cls=None,
         instrument_component_kwargs: Optional[dict] = None,
@@ -5396,6 +6308,10 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         # per call; a per-component cache would never be hit. Purely derived
         # state -- dropped on pickle, rebuilt on demand.
         self._instrument_basis_cache = {} if cache_instrument_basis else None
+        # Fixed sparse-WDM frequency factors for the five-parameter foreground.
+        # This also has to be backend-owned because every proposal constructs a
+        # fresh GalacticForeground component.
+        self._galfor_spectral_cache: dict = {}
         # Swappable instrument-noise model (defaults preserve current behavior).
         self.instrument_component_cls = instrument_component_cls or InstrumentNoise
         self.instrument_model_cls = instrument_model_cls or lisa_models.LISAModel
@@ -5405,6 +6321,25 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         # (the LTT array, not the orbits object) so the backend still survives
         # the settings-tree deepcopy / pickle round trip.
         self.instrument_component_kwargs = dict(instrument_component_kwargs or {})
+        legacy_method = self.instrument_component_kwargs.get("wdm_psd_method")
+        if legacy_method is not None:
+            if wdm_psd_method == "fold":
+                # Backward compatibility for callers that placed the method
+                # only in the unequal-arm constructor kwargs: promote it to
+                # the backend-wide component policy.
+                wdm_psd_method = legacy_method
+            elif legacy_method != wdm_psd_method:
+                raise ValueError(
+                    "Conflicting WDM PSD methods: backend "
+                    f"{wdm_psd_method!r}, instrument component "
+                    f"{legacy_method!r}. Use one backend-wide policy."
+                )
+        if wdm_psd_method not in UNEQUAL_ARM_WDM_PSD_METHODS:
+            raise ValueError(
+                "wdm_psd_method must be one of "
+                f"{UNEQUAL_ARM_WDM_PSD_METHODS}; got {wdm_psd_method!r}."
+            )
+        self.wdm_psd_method = wdm_psd_method
         self.galfor_stochastic_fn = galfor_stochastic_fn
         self.galfor_modulation = galfor_modulation
         self.sgwb_stochastic_fn = sgwb_stochastic_fn
@@ -5424,7 +6359,184 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         state = dict(self.__dict__)
         if state.get("_instrument_basis_cache") is not None:
             state["_instrument_basis_cache"] = {}
+        state["_galfor_spectral_cache"] = {}
         return state
+
+    def _make_components(self, name, params, galfor_params=None, sgwb_params=None):
+        """Return ordered ``(branch_key, component)`` pairs for one model.
+
+        Keeping this construction separate from :meth:`_build_matrix` gives
+        the noise move an exact component-level seam: a branch frozen during
+        a Metropolis-within-Gibbs block can build its additive covariance once
+        per walker and reuse it for every temperature/repeat.
+        """
+        components = []
+        if params is not None:
+            Soms_d = float(params[0])
+            Sa_a = float(params[1])
+            model = self.instrument_model_cls(
+                Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
+            )
+            component_kwargs = dict(
+                tdi_generation=self.tdi_generation,
+                model=model,
+                fill_nans=self.instrument_fill_nans,
+                **self.instrument_component_kwargs,
+            )
+            if issubclass(self.instrument_component_cls, InstrumentNoise):
+                component_kwargs["wdm_psd_method"] = self.wdm_psd_method
+            if self._instrument_basis_cache is not None and issubclass(
+                self.instrument_component_cls, InstrumentNoise
+            ):
+                component_kwargs["basis_cache"] = self._instrument_basis_cache
+            components.append(
+                ("psd", self.instrument_component_cls(**component_kwargs))
+            )
+        if galfor_params is not None:
+            components.append(
+                (
+                    "galfor",
+                    GalacticForeground(
+                        foreground_params=np.asarray(galfor_params, dtype=float),
+                        modulation=self.galfor_modulation,
+                        tdi_generation=self.tdi_generation,
+                        stochastic_fn=self.galfor_stochastic_fn,
+                        spectral_cache=self._galfor_spectral_cache,
+                        wdm_psd_method=self.wdm_psd_method,
+                    ),
+                )
+            )
+        if sgwb_params is not None:
+            components.append(
+                (
+                    "sgwb",
+                    SGWB(
+                        sgwb_params=np.asarray(sgwb_params, dtype=float),
+                        stochastic_fn=self.sgwb_stochastic_fn,
+                        tdi_generation=self.tdi_generation,
+                        wdm_psd_method=self.wdm_psd_method,
+                    ),
+                )
+            )
+        components.extend(
+            (f"extra:{i}", component)
+            for i, component in enumerate(self.extra_components)
+        )
+        return components
+
+    def component_covariance(self, branch: str, params, *, name: str = "cached"):
+        """Build exactly one additive branch covariance in physical units."""
+        if branch == "psd":
+            args = dict(params=params)
+        elif branch == "galfor":
+            args = dict(params=None, galfor_params=params)
+        elif branch == "sgwb":
+            args = dict(params=None, sgwb_params=params)
+        else:
+            raise ValueError(f"Unknown noise component branch {branch!r}.")
+        components = self._make_components(name, **args)
+        matches = [component for key, component in components if key == branch]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Expected one {branch!r} component, built {len(matches)}."
+            )
+        return matches[0].covariance(self.basis_settings)
+
+    def galfor_coarse_profile(self, params, *, frequency_indices=None):
+        """Allocation-light foreground profile for a coarse CPU WDM grid.
+
+        Returns ``None`` unless the configured foreground component supports
+        band-limited covariance construction.  Keeping the capability query on
+        the backend lets :class:`PSDMove` fall back cleanly for custom spectra,
+        non-coarse domains, and GPU execution.
+        """
+        components = self._make_components(
+            "galfor_subband", None, galfor_params=params
+        )
+        matches = [component for key, component in components if key == "galfor"]
+        if len(matches) != 1:
+            return None
+        return matches[0].coarse_wdm_profile(
+            self.basis_settings, frequency_indices=frequency_indices
+        )
+
+    def galfor_coarse_profile_estimate(self, params):
+        """Layer-center profile used to select exact foreground support."""
+        components = self._make_components(
+            "galfor_subband_estimate", None, galfor_params=params
+        )
+        matches = [component for key, component in components if key == "galfor"]
+        if len(matches) != 1:
+            return None
+        return matches[0].coarse_wdm_profile_estimate(self.basis_settings)
+
+    def galfor_coarse_covariance_from_profile(self, profile, frequency_indices):
+        """Materialize a coarse foreground covariance on selected layers."""
+        return GalacticForeground.coarse_wdm_covariance_from_profile(
+            self.basis_settings, profile, frequency_indices
+        )
+
+    def covariance_from_params(
+        self,
+        name: str,
+        params,
+        *,
+        galfor_params=None,
+        sgwb_params=None,
+        fixed_covariances=None,
+    ):
+        """Build the summed covariance, optionally reusing frozen components.
+
+        ``fixed_covariances`` maps canonical branch names to arrays previously
+        returned by :meth:`component_covariance`.  Addition stays in the same
+        canonical order as :class:`CompositeSensitivityMatrix`, preserving the
+        floating-point result exactly.
+        """
+        fixed_covariances = fixed_covariances or {}
+        built = {
+            key: component.covariance(self.basis_settings)
+            for key, component in self._make_components(
+                name, params, galfor_params=galfor_params, sgwb_params=sgwb_params
+            )
+            if key not in fixed_covariances
+        }
+        built.update(fixed_covariances)
+        ordered_keys = [
+            key
+            for key in ("psd", "galfor", "sgwb")
+            if key in built
+        ]
+        ordered_keys.extend(
+            f"extra:{i}"
+            for i in range(len(self.extra_components))
+            if f"extra:{i}" in built
+        )
+        if not ordered_keys:
+            raise ValueError("The backend has no covariance component to build.")
+        covariance = built[ordered_keys[0]]
+        for key in ordered_keys[1:]:
+            covariance = covariance + built[key]
+        return covariance
+
+    def matrix_from_params(
+        self,
+        name: str,
+        params,
+        *,
+        galfor_params=None,
+        sgwb_params=None,
+        fixed_covariances=None,
+    ) -> SensitivityMatrixBase:
+        """Matrix wrapper for :meth:`covariance_from_params`."""
+        matrix = SensitivityMatrixBase(self.basis_settings)
+        matrix.sens_mat = self.covariance_from_params(
+            name,
+            params,
+            galfor_params=galfor_params,
+            sgwb_params=sgwb_params,
+            fixed_covariances=fixed_covariances,
+        )
+        return matrix
 
     def _build_matrix(
         self, name: str, params, galfor_params=None, sgwb_params=None
@@ -5450,42 +6562,12 @@ class CompositeSensitivityBackend(SensitivityBackendBase):
         Returns:
             A freshly built :class:`CompositeSensitivityMatrix`.
         """
-        components: list[NoiseComponent] = []
-        if params is not None:
-            Soms_d = float(params[0])
-            Sa_a = float(params[1])
-            model = self.instrument_model_cls(
-                Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
+        components = [
+            component
+            for _, component in self._make_components(
+                name, params, galfor_params=galfor_params, sgwb_params=sgwb_params
             )
-            component_kwargs = dict(
-                tdi_generation=self.tdi_generation,
-                model=model,
-                fill_nans=self.instrument_fill_nans,
-                **self.instrument_component_kwargs,
-            )
-            if self._instrument_basis_cache is not None and issubclass(
-                self.instrument_component_cls, InstrumentNoise
-            ):
-                component_kwargs["basis_cache"] = self._instrument_basis_cache
-            components.append(self.instrument_component_cls(**component_kwargs))
-        if galfor_params is not None:
-            components.append(
-                GalacticForeground(
-                    foreground_params=np.asarray(galfor_params, dtype=float),
-                    modulation=self.galfor_modulation,
-                    tdi_generation=self.tdi_generation,
-                    stochastic_fn=self.galfor_stochastic_fn,
-                )
-            )
-        if sgwb_params is not None:
-            components.append(
-                SGWB(
-                    sgwb_params=np.asarray(sgwb_params, dtype=float),
-                    stochastic_fn=self.sgwb_stochastic_fn,
-                    tdi_generation=self.tdi_generation,
-                )
-            )
-        components.extend(self.extra_components)
+        ]
         if not components:
             raise ValueError(
                 "psd_params=None with no galfor/sgwb params and no "

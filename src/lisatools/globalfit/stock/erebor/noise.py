@@ -579,6 +579,15 @@ def noise_sensitivity_init_kwargs(
             val = getattr(psd, attr, None)
             if val is not None:
                 out[attr] = val
+        # ``wdm_psd_method`` used to live only inside the unequal-arm
+        # instrument constructor kwargs. Promote that legacy spelling to the
+        # backend-wide policy so foreground and SGWB cannot silently remain on
+        # the exact fold while the instrument uses a layer approximation.
+        component_kwargs = getattr(psd, "instrument_component_kwargs", None)
+        if component_kwargs and "wdm_psd_method" in component_kwargs:
+            out.setdefault(
+                "wdm_psd_method", component_kwargs["wdm_psd_method"]
+            )
     if extra:
         out.update(extra)
     return out

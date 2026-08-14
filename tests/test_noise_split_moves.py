@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
@@ -64,6 +65,9 @@ class _FakeSingleShardACS:
     def likelihood(self):
         # distinguishable per-walker values
         return 10.0 * np.arange(len(self._acs), dtype=float)
+
+    def flatten(self):
+        return list(self._acs)
 
 
 class NoiseSplitUnitTest(unittest.TestCase):
@@ -241,6 +245,98 @@ class NoiseSplitUnitTest(unittest.TestCase):
         # original sens restored + linear buffer reset both times
         self.assertTrue(all(ac.sens_mat == "original" for ac in acs._acs))
         self.assertGreaterEqual(acs.reset_calls, 2)
+
+    def test_coarse_batch_route_uses_exact_frozen_component_cache(self):
+        """The full move route caches a frozen branch and preserves lnL."""
+        from eryn.state import BranchSupplemental
+        from lisatools.coarsewdm import (
+            CoarseWDMStatistic,
+            coarse_wdm_log_likelihood,
+        )
+        from lisatools.domains import CoarseWDMSettings, WDMSettings
+        from lisatools.sensitivity import CompositeSensitivityBackend
+
+        fine = WDMSettings(
+            Nf=128,
+            Nt=10,
+            dt=5.0,
+            min_freq=3e-4,
+            max_freq=8e-3,
+            force_backend="cpu",
+        )
+        coarse = CoarseWDMSettings.from_fine(fine, 4)
+        shape = coarse.basis_shape_active
+        P = np.zeros((3, 3) + shape)
+        for channel in range(3):
+            P[channel, channel] = 1e-40
+        stat = CoarseWDMStatistic(
+            P=P,
+            Qeff=np.broadcast_to(coarse.cell_sizes, shape).copy(),
+            settings=coarse,
+        )
+        acs = _FakeSingleShardACS(self.nwalkers)
+        for ac in acs._acs:
+            ac.coarse_stats = stat
+        backend = CompositeSensitivityBackend(
+            coarse, tdi_generation=2, force_backend="cpu"
+        )
+        move = self.PSDMove(
+            acs,
+            self.priors,
+            sampled_branches=["galfor"],
+            sensitivity_backend=backend,
+            name="coarse batch cache test",
+        )
+        cold_psd = np.tile([15e-12, 3e-15], (self.nwalkers, 1))
+        move._fixed_noise_coords = {"psd": cold_psd}
+        move._prepare_fixed_component_covariances()
+        self.assertEqual(len(move._fixed_component_covariances), self.nwalkers)
+
+        gal0 = np.array(
+            [1.17590937048e-44, 2.50409025898e-3, 3.19526170199,
+             2.09718967396e-3, 1.10665414857e-3]
+        )
+        galfor = np.tile(gal0, (2, self.nwalkers, 1, 1))
+        galfor[1, :, 0, 0] *= 1.05
+        supps = BranchSupplemental(
+            {"walker_inds": np.tile(np.arange(self.nwalkers), (2, 1))},
+            base_shape=(2, self.nwalkers),
+            copy=True,
+        )
+        selected_widths = []
+        original_subband = backend.galfor_coarse_covariance_from_profile
+
+        def record_subband(profile, frequency_indices):
+            selected_widths.append(len(frequency_indices))
+            return original_subband(profile, frequency_indices)
+
+        with mock.patch.object(
+            backend,
+            "galfor_coarse_covariance_from_profile",
+            side_effect=record_subband,
+        ):
+            logl, _ = move.compute_log_like(
+                {"galfor": galfor},
+                logp=np.zeros((2, self.nwalkers)),
+                supps=supps,
+            )
+        expected = np.empty_like(logl)
+        for temperature in range(2):
+            for walker in range(self.nwalkers):
+                matrix = backend(
+                    f"fresh_{temperature}_{walker}",
+                    cold_psd[walker],
+                    galfor_params=galfor[temperature, walker, 0],
+                )
+                expected[temperature, walker] = coarse_wdm_log_likelihood(
+                    stat, matrix
+                )
+        np.testing.assert_allclose(logl, expected, rtol=2e-15, atol=0.0)
+        self.assertTrue(selected_widths)
+        self.assertLess(max(selected_widths), fine.Nf_active)
+        # The direct batched route never mutates or repacks the ACA.
+        self.assertTrue(all(ac.sens_mat == "original" for ac in acs._acs))
+        self.assertEqual(acs.reset_calls, 0)
 
     # ------------------------------------------------------------------
     # threaded per-walker builds (build_threads)
