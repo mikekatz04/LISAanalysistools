@@ -461,6 +461,15 @@ m = re.findall(r"grouped in-model \S+ (\d+) flushes, mean batch ([\d.]+) "
 if m:
     RJ_STATS["flushes"], RJ_STATS["batch"], RJ_STATS["slots"] = (
         int(m[-1][0]), float(m[-1][1]), int(m[-1][2]))
+# direct-batch mode (GB_RJ_DIRECT_BATCH, 2026-08-14): rigid rj batches +
+# one end-of-unit in-model phase in capacity chunks
+m = re.findall(r"direct batches \S+ (\d+) rj batch\(es\), (\d+) survivors "
+               r"polished in (\d+) in-model chunk\(s\) \((\d+) buffer slots\)",
+               log_text)
+if m:
+    RJ_STATS["flushes"] = int(m[-1][2])
+    RJ_STATS["batch"] = int(m[-1][1]) / max(int(m[-1][2]), 1)
+    RJ_STATS["slots"] = int(m[-1][3])
 m = re.findall(r"at-cap skip -- (\d+) dead \(birth\) slots excluded across "
                r"(\d+) at-cap cells", log_text)
 if m:

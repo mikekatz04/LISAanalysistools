@@ -2998,7 +2998,178 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
         round_i = 0
-        if grouped:
+        # DIRECT-BATCH RJ -> in-model (user design 2026-08-14,
+        # GB_RJ_DIRECT_BATCH=0 restores the staged-scheduler path): the
+        # dynamic scheduler (per-cell retirement, continuous refill, pool
+        # freezing, finish budgets) is replaced by RIGID BATCHES — bind
+        # the buffer to the next batch of cells, run RJ pick rounds until
+        # they exhaust, pool the survivors, move on; when every batch has
+        # finished its RJ, ONE in-model phase polishes all the unit's
+        # survivors in capacity-width chunks. The fixed, repeating
+        # fill -> rounds -> accept shape per batch is what CUDA graph
+        # capture needs. Batch termination is simply "_pick_sources
+        # returned None": live-cap-filtered rows never pick, a freed
+        # cell's rows become pickable in later rounds of the SAME batch
+        # (re-entry), and there is no budget bookkeeping to go stale —
+        # no freeze, no advance, no deadlock surface. Survivor slot
+        # indices are recomputed at in-model bind time (RJ-time slots are
+        # stale after rebinds); ONE pooled survivor per cell (host-side
+        # dedup) replaces the freeze as the serial-within-band guarantee.
+        direct = grouped and os.environ.get("GB_RJ_DIRECT_BATCH", "1") == "1"
+        if direct:
+            xp = self.xp
+
+            class _BatchView:
+                """Scheduler stand-in: the batch IS the active set.
+
+                No retirement / refill / freezing / finish budgets —
+                ``add_counts`` (the live-cap transition budget) is a no-op
+                because nothing retires by budget here; cap re-entry works
+                through the live pick filter alone.
+                """
+
+                def __init__(self, specials):
+                    self.active_slot_specials = specials
+
+                def add_counts(self, specials, deltas):
+                    return
+
+            pending = []
+            _pooled_host = set()
+            all_cells = scheduler.cell_specials
+            n_slots = int(scheduler.n_slots)
+            n_cells_total = int(scheduler.n_cells)
+            n_batches = max(1, -(-n_cells_total // max(n_slots, 1)))
+
+            def _rebind(specials_new):
+                """Finalize the outgoing binding's cell-ll credit, rebind
+                THE buffer to the new cell set, open credit brackets."""
+                nonlocal buffer_obj
+                if cell_ll_state is not None:
+                    _open_now = scheduler.xp.arange(scheduler.n_slots)[
+                        cell_ll_state["open"]
+                    ]
+                    with _tspan(tm, "cell_ll"):
+                        self._cell_ll_finalize(
+                            cell_ll_state, buffer_obj, _open_now,
+                            ll_change_log, prop_counts,
+                        )
+                with _tspan(tm, "buffer_build"):
+                    buffer_obj = self._cached_get_buffer(
+                        subset, model.analysis_container_arr,
+                        specials_new.copy(),
+                    )
+                if cell_ll_state is not None:
+                    with _tspan(tm, "cell_ll"):
+                        self._cell_ll_open(
+                            cell_ll_state, buffer_obj,
+                            xp.arange(int(len(specials_new))),
+                            specials_new, ll_change_log, prop_counts,
+                        )
+                return buffer_obj
+
+            for _b in range(n_batches):
+                batch_specials = all_cells[_b * n_slots:(_b + 1) * n_slots]
+                if _b > 0:
+                    buffer_obj = _rebind(batch_specials)
+                bview = _BatchView(batch_specials)
+                while True:
+                    with _tspan(tm, "pick"):
+                        picked = self._pick_sources(
+                            band_sorter, buffer_obj, bview, eligible,
+                        )
+                    if picked is None:
+                        break
+                    if tm is not None:
+                        tm.count(
+                            "picked_sources", int(len(picked["specials"])))
+                    rj_seq = self._debug_rj_select(buffer_obj, picked)
+                    with _tspan(tm, "rj_step"):
+                        if self.rj_replace:
+                            self._run_replace_step(
+                                model, band_sorter, buffer_obj, band_temps,
+                                picked, ll_change_log, prop_counts,
+                                acc_counts, round_i, bview,
+                            )
+                        else:
+                            self._run_rj_step(
+                                model, band_sorter, buffer_obj, band_temps,
+                                picked, ll_change_log, prop_counts,
+                                acc_counts, round_i, bview,
+                            )
+                    self._debug_plot_rj_pair(buffer_obj, rj_seq)
+                    # Survivor pooling: PRE-accept cap mask (newborns pool;
+                    # at-cap death-rejected survivors don't — user rules
+                    # 2026-08-13/14), then host-side one-per-cell dedup.
+                    alive_now = band_sorter.inds[picked["ids"]]
+                    _lcs = getattr(self, "_live_cap_state", None)
+                    if _lcs is not None:
+                        _counts_pre, _cap_arr = _lcs
+                        _p_t = picked["temp_inds"].astype(xp.int64)
+                        _p_flat = (
+                            (_p_t * self.nwalkers
+                             + picked["walker_inds"]) * self.num_bands
+                            + picked["band_inds"]
+                        )
+                        alive_now = alive_now & ~(
+                            _counts_pre[_p_flat]
+                            >= _cap_arr[picked["band_inds"]]
+                        )
+                    else:
+                        _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
+                        if _at_cap_m is not None:
+                            alive_now = alive_now & ~_at_cap_m[picked["ids"]]
+                    if bool(alive_now.any()):
+                        held = {k: v[alive_now] for k, v in picked.items()}
+                        _sp_h = np.asarray(_to_numpy(held["specials"]))
+                        _keep = np.fromiter(
+                            (s not in _pooled_host for s in _sp_h.tolist()),
+                            dtype=bool, count=len(_sp_h),
+                        )
+                        if _keep.any():
+                            _pooled_host.update(_sp_h[_keep].tolist())
+                            _km = xp.asarray(_keep)
+                            pending.append(
+                                {k: v[_km] for k, v in held.items()})
+                    round_i += 1
+                    _free_mempool_each_round()
+
+            # IN-MODEL PHASE: every batch's RJ is done — polish ALL the
+            # unit's survivors in capacity-width chunks (the full-width
+            # rule holds by construction: only the final chunk can be
+            # narrower, because fewer survivors remain).
+            n_chunks = 0
+            n_surv = 0
+            if pending:
+                merged = (
+                    pending[0] if len(pending) == 1 else {
+                        k: xp.concatenate([p[k] for p in pending])
+                        for k in pending[0]
+                    }
+                )
+                n_surv = int(len(merged["specials"]))
+                for _st in range(0, n_surv, n_slots):
+                    chunk = {
+                        k: v[_st:_st + n_slots] for k, v in merged.items()
+                    }
+                    buffer_obj = _rebind(chunk["specials"])
+                    # RJ-time slot indices are stale after the rebind.
+                    chunk["slot_index"] = buffer_obj.get_index(
+                        chunk["specials"]).astype(xp.int32)
+                    with _tspan(tm, "inmodel_repeats"):
+                        self._run_in_model_repeats(
+                            model, band_sorter, buffer_obj, band_temps,
+                            chunk, ll_change_log, prop_counts, acc_counts,
+                        )
+                    n_chunks += 1
+            logger.info(
+                f"{self.name}: direct batches — {n_batches} rj batch(es), "
+                f"{n_surv} survivors polished in {n_chunks} in-model "
+                f"chunk(s) ({n_slots} buffer slots)."
+            )
+            if tm is not None:
+                tm.count("inmodel_flushes", n_chunks)
+        elif grouped:
             pending = []
             pending_specials = self.xp.zeros(
                 0, dtype=band_sorter.special_band_inds.dtype
