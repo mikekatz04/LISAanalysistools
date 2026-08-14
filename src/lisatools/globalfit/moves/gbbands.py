@@ -175,6 +175,21 @@ class BandScheduler:
         """Count one consumed source for each cell that got a pick."""
         self.cell_run[self._cells_of(picked_specials)] += 1
 
+    def add_counts(self, specials, deltas) -> None:
+        """Live cap-transition budget adjustment (user design 2026-08-14).
+
+        Invariant: ``cell_counts == rows picked + rows currently pickable``.
+        When an accepted death frees an at-cap cell, its unpicked staged
+        birth rows become pickable and are ADDED to the cell's finish
+        budget; when an accepted birth re-caps a cell, its unpicked birth
+        rows are SUBTRACTED again. Cells therefore finish (and retire)
+        exactly when their live-pickable work is done, through any
+        sequence of free/re-cap transitions -- no deadlock, no slot
+        hogging. ``specials`` must be unique (at most one accept per cell
+        per round guarantees this at the call site).
+        """
+        self.cell_counts[self._cells_of(specials)] += deltas
+
     def advance(self, frozen_specials=None):
         """Retire finished slots and stage pending cells into them.
 
@@ -1518,6 +1533,15 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     def get_index(self, special_inds_test):
         """Map a special-index test value to its position inside the buffer."""
+        # Fixed-capacity resize contract: between ``resize_to(k)`` and the
+        # mandatory FULL ``update_special_indices`` rebind the specials map
+        # holds placeholders — a searchsorted over it would silently return
+        # garbage slots (the stale-specials hazard). Hard error instead.
+        assert not getattr(self, "_specials_placeholder", False), (
+            "SubBandBuffer.get_index called after resize_to() but before the "
+            "mandatory full update_special_indices rebind — the special-"
+            "indices map is invalid (placeholder) in this window."
+        )
         # Array module from the OPERANDS, never the module-level ``cp``: on
         # a CPU-backend run on a machine where cupy imports (cluster), the
         # module-level ``cp`` is cupy while these are numpy --
@@ -1565,6 +1589,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         keep_sens_mat: bool = False,
         wdm_band_slab_layers: Optional[int] = None,
         wdm_slab_guard_layers: int = 1,
+        alloc_capacity: Optional[int] = None,
         *args,
         **kwargs,
     ):
@@ -1595,6 +1620,32 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             nchannels,
             data_length,
         )
+        # Fixed-capacity slot allocation (user ruling 2026-08-14): when
+        # ``alloc_capacity`` covers the current binding, EVERY per-slot
+        # allocation (the ACA linear data/PSD buffers — and the template
+        # twin's — plus the FD per-slot window-start store) is sized at
+        # ``alloc_capacity`` slots and only the first ``num_bands_now`` are
+        # BOUND. :meth:`resize_to` then rebinds a later unit's k <= capacity
+        # cells into the FRONT of the same allocation instead of dropping
+        # and rebuilding a multi-GB buffer per unit. Leading-axis slices of
+        # the C-contiguous slabs are contiguous views sharing memory, so
+        # the nanobind kernels (which receive base pointers per call) and
+        # the cached engine bindings stay valid across resizes.
+        # ``None`` (default) is BIT-IDENTICAL to the pre-capacity behavior.
+        # NOTE ``>= num_bands_now`` (not ``>``): a unit bound at exactly
+        # capacity must still be capacity-active so a later smaller unit
+        # can resize it down instead of rebuilding.
+        if alloc_capacity is not None:
+            alloc_capacity = int(alloc_capacity)
+            if alloc_capacity < int(num_bands_now):
+                raise ValueError(
+                    f"alloc_capacity={alloc_capacity} is smaller than the "
+                    f"initial binding num_bands_now={int(num_bands_now)}."
+                )
+        self.alloc_capacity = alloc_capacity
+        # resize_to leaves placeholder specials until the caller's full
+        # update_special_indices rebind lands (see resize_to's contract).
+        self._specials_placeholder = False
         # FD store length of one cell window; kept distinct from the ACA's
         # ``data_length`` layout attribute (see :attr:`_fd_store_length`).
         self._fd_store_length_value = data_length
@@ -1740,15 +1791,21 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         _invc_mb = (self.nchannels
                     * float(np.prod(self._per_band_data_shape))
                     * np.dtype(self._per_band_data_dtype).itemsize / 1e6)
+        # Memory geometry follows the ALLOCATED slot count (capacity when
+        # fixed-capacity is active), not the bound count.
+        _n_geom = self._n_slots_alloc
         logger.info(
-            "SubBandBuffer: %d cells x %s per-cell (%s) ~ %.0f MB data "
+            "SubBandBuffer: %d cells%s x %s per-cell (%s) ~ %.0f MB data "
             "+ ~%.0f MB invC = ~%.1f GB total%s [band_slab_Nf=%s]%s",
-            self.num_bands_now, tuple(self._per_band_data_shape),
+            _n_geom,
+            ("" if self.alloc_capacity is None
+             else f" ({self.alloc_capacity}-slot alloc, "
+                  f"{self.num_bands_now} bound)"),
+            tuple(self._per_band_data_shape),
             np.dtype(self._per_band_data_dtype).name,
-            _n_copies * self.num_bands_now * _cell_mb,
-            self.num_bands_now * _invc_mb,
-            (_n_copies * self.num_bands_now * _cell_mb
-             + self.num_bands_now * _invc_mb) / 1e3,
+            _n_copies * _n_geom * _cell_mb,
+            _n_geom * _invc_mb,
+            (_n_copies * _n_geom * _cell_mb + _n_geom * _invc_mb) / 1e3,
             " (incl. template twin)" if self.use_template_arr else "",
             self.band_slab_Nf, _pool,
         )
@@ -1763,9 +1820,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # in place on cell swaps -- never rebound (see the
         # special_indices_unique setter).
         if isinstance(self._basis_settings, FDSettings):
-            self._min_freq_inds_store = self.xp.ascontiguousarray(
+            _starts = self.xp.ascontiguousarray(
                 self.xp.asarray(self.start_freq_inds), dtype=self.xp.int32
             ).copy()
+            if self.alloc_capacity is not None:
+                # Fixed capacity: the pointer-stable per-slot window-start
+                # store is allocated at FULL capacity (the FD comps binding
+                # shape-checks it against the ACA's capacity row count and
+                # holds its pointer forever). Only the first
+                # ``num_bands_now`` entries are maintained; tail slots carry
+                # a valid placeholder (the last bound start) and are never
+                # indexed — every kernel ``data_index`` is < num_bands_now.
+                _full = self.xp.empty(self.alloc_capacity, dtype=self.xp.int32)
+                _full[: _starts.shape[0]] = _starts
+                if _starts.shape[0] < self.alloc_capacity:
+                    _full[_starts.shape[0]:] = _starts[-1]
+                self._min_freq_inds_store = _full
+            else:
+                self._min_freq_inds_store = _starts
             if self.use_template_arr:
                 # The template twin shares the buffer's per-slot window
                 # starts (same array object: in-place updates on cell swaps
@@ -1822,11 +1894,39 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     # passes the list-of-shards through ``buffer_aca.linear_data_arr``
     # / ``linear_psd_arr`` directly).
 
+    @property
+    def _n_slots_alloc(self) -> int:
+        """ALLOCATED slot count: ``alloc_capacity`` when fixed-capacity is
+        active, else the bound count (allocation == binding, legacy)."""
+        if getattr(self, "alloc_capacity", None) is not None:
+            return int(self.alloc_capacity)
+        return int(self.num_bands_now)
+
     def _shaped_or_view(self, acs, kind: str):
-        """Return either the single-shard reshape (single-GPU) or a BandView (multi-GPU)."""
+        """Return either the single-shard reshape (single-GPU) or a BandView (multi-GPU).
+
+        Fixed capacity: the underlying ACA holds ``alloc_capacity`` slots
+        but only the first ``num_bands_now`` are bound — expose exactly the
+        bound FRONT (a leading-axis view single-shard; a bounded
+        :class:`BandView` multi-shard). Without capacity this is verbatim
+        the legacy accessor.
+        """
         if len(acs.linear_data_arr) == 1:
-            return acs.data_shaped[0] if kind == "data" else acs.psd_shaped[0]
-        return acs.data_shaped_view() if kind == "data" else acs.psd_shaped_view()
+            arr = acs.data_shaped[0] if kind == "data" else acs.psd_shaped[0]
+            if (
+                self.alloc_capacity is not None
+                and int(arr.shape[0]) != int(self.num_bands_now)
+            ):
+                arr = arr[: int(self.num_bands_now)]
+            return arr
+        n_bands = (
+            int(self.num_bands_now) if self.alloc_capacity is not None else None
+        )
+        return (
+            acs.data_shaped_view(n_bands=n_bands)
+            if kind == "data"
+            else acs.psd_shaped_view(n_bands=n_bands)
+        )
 
     def _flat_or_raise(self, acs, kind: str):
         if len(acs.linear_data_arr) == 1:
@@ -1965,7 +2065,19 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         parent = self._basis_settings
         lo = int(parent.ind_min_f)
         hi = max(lo, int(parent.ind_max_f) + 1 - slab_Nf)
-        return self.xp.clip(origins, lo, hi).astype(self.xp.int32)
+        out = self.xp.clip(origins, lo, hi).astype(self.xp.int32)
+        n_alloc = self._n_slots_alloc
+        if int(out.shape[0]) < n_alloc:
+            # Fixed capacity: pad to the ALLOCATED slot count so per-slot
+            # kernel metadata and the shard views (which row-slice by the
+            # capacity-sized gpu_splits) stay shape-consistent. Tail values
+            # (valid clamp floor) are never consumed — every kernel
+            # data_index is < num_bands_now.
+            out = self.xp.concatenate([
+                out,
+                self.xp.full(n_alloc - int(out.shape[0]), lo, dtype=self.xp.int32),
+            ])
+        return out
 
     @property
     def _per_band_data_shape(self) -> tuple:
@@ -2119,8 +2231,12 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 return cp.zeros(sens_shape, dtype=sens_dtype)
             return cp.broadcast_to(cp.zeros((), dtype=sens_dtype), sens_shape)
 
+        # Fixed capacity: allocate EVERY per-slot container at
+        # ``alloc_capacity`` (the bound count ``num_bands_now`` only limits
+        # the front views); default path allocates exactly the bound count.
+        n_alloc = self._n_slots_alloc
         ac_list = []
-        for _ in range(self.num_bands_now):
+        for _ in range(n_alloc):
             res_data = cp.zeros(data_shape, dtype=data_dtype)
             data_domain = per_band_settings.associated_class(res_data, per_band_settings)
             sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
@@ -2142,11 +2258,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # psd_buffer / template_buffer) automatically fall back to a single
         # ndarray view for single-GPU runs and return a BandView
         # (multi-shard router) otherwise -- see the accessor block above.
+        _group_ids = asnumpy(self.unique_band_combos[:, 2])
+        if len(ac_list) > _group_ids.shape[0]:
+            # Fixed capacity: tail (unbound) slots need group ids too. Give
+            # each its own fresh pseudo-band id so band_gpu_assignment
+            # round-robins them across devices — keeping every shard's
+            # bound-slot count balanced after any resize_to(k). Grouping is
+            # a device-locality optimization only; routing correctness never
+            # depends on it (BandView / _RoutedBandEngine route per split).
+            _group_ids = np.concatenate([
+                np.asarray(_group_ids, dtype=int),
+                int(np.max(_group_ids)) + 1
+                + np.arange(len(ac_list) - _group_ids.shape[0], dtype=int),
+            ])
         gpu_assignment = (
             band_gpu_assignment(
                 len(ac_list),
                 list(gpus_in),
-                group_ids=asnumpy(self.unique_band_combos[:, 2]),
+                group_ids=_group_ids,
             )
             if gpus_in
             else None
@@ -2163,9 +2292,78 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             inds_fill = cp.arange(self.num_bands_now)
 
         assert inds_fill.shape[0] == new_special_indices.shape[0]
+        if getattr(self, "_specials_placeholder", False):
+            # resize_to contract: the first update after a resize MUST be a
+            # FULL rebind (inds_fill covering every bound slot) — a partial
+            # fill would mix the fresh cells with the resize placeholders.
+            assert int(inds_fill.shape[0]) == int(self.num_bands_now), (
+                "SubBandBuffer.update_special_indices after resize_to() must "
+                "be a FULL rebind (inds_fill spanning all num_bands_now "
+                f"slots); got {int(inds_fill.shape[0])} of "
+                f"{int(self.num_bands_now)}."
+            )
+            self._specials_placeholder = False
         _tmp_indices = self.special_indices_unique.copy()
         _tmp_indices[inds_fill] = new_special_indices
+        # The property setter below rebuilds the sort table, band combos,
+        # window starts and frequency limits FROM this (num_bands_now,)-long
+        # array — after a full rebind no capacity-sized or previous-binding
+        # entry survives anywhere ``get_index`` can see.
         self.special_indices_unique = _tmp_indices
+
+    def resize_to(self, k: int) -> None:
+        """Rebind this fixed-capacity buffer to ``k`` slots (front of the alloc).
+
+        Re-slices every bound-count-dependent view to the first ``k`` slots
+        of the capacity allocation and sets ``num_bands_now = k``. NO data
+        is touched: the slot slabs, the PSD slabs, the template twin and the
+        FD window-start store keep their memory (and the engine bindings
+        their pointers) — the follow-up rebind refills them.
+
+        CONTRACT (stale-specials hazard): the special-indices map is FULLY
+        INVALID after this call — the entries are placeholders sized to
+        ``k``, NOT live cells. The caller MUST immediately follow with a
+        FULL rebind: ``update_special_indices(new_specials,
+        inds_fill=xp.arange(k))`` (BandSorter.get_buffer's resize-rebind
+        path does exactly this), whose property setter rebuilds
+        ``special_indices_unique`` / ``special_indices_unique_sort`` /
+        ``unique_band_combos`` / window starts at length ``k`` from the new
+        specials — leaving no stale entry from any previous (possibly
+        larger) binding visible to :meth:`get_index`. Until then
+        :meth:`get_index` hard-errors and partial
+        :meth:`update_special_indices` fills are rejected.
+        """
+        assert self.alloc_capacity is not None, (
+            "resize_to requires a fixed-capacity buffer (alloc_capacity set "
+            "at construction)."
+        )
+        k = int(k)
+        assert 0 < k <= int(self.alloc_capacity), (
+            f"resize_to({k}) outside (0, alloc_capacity="
+            f"{int(self.alloc_capacity)}]."
+        )
+        if k == int(self.num_bands_now):
+            return
+        xp = get_array_module(self._special_indices_unique)
+        old = self._special_indices_unique
+        if int(old.shape[0]) >= k:
+            placeholder = old[:k].copy()
+        else:
+            # Growing: pad with the last live special — VALID values only
+            # (the specials setter unpacks them into band indices), never
+            # consumed (the mandatory full rebind overwrites every entry).
+            placeholder = xp.concatenate(
+                [old, xp.repeat(old[-1:], k - int(old.shape[0]))]
+            )
+        self.num_bands_now = k
+        self.psd_shape = (k,) + self._per_band_sens_shape
+        # Run the FULL property setter on the placeholder so every derived
+        # per-slot array (sort table, band combos, window starts, frequency
+        # limits) is length-k and internally consistent — nothing is left
+        # at the previous binding's length. The arrays still describe
+        # placeholder cells, hence the flag below.
+        self.special_indices_unique = placeholder
+        self._specials_placeholder = True
 
     @property
     def special_indices_unique(self):
@@ -2221,8 +2419,14 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
         self.start_freq_inds = self.xp.asarray(self.buffer_start_index.copy().astype(np.int32))
         if hasattr(self, "_min_freq_inds_store"):
-            # in-place: the FD comps clone holds a pointer to this array
-            self._min_freq_inds_store[:] = self.start_freq_inds
+            # in-place: the FD comps clone holds a pointer to this array.
+            # Front-write only: on a fixed-capacity buffer the store is
+            # capacity-sized while ``start_freq_inds`` covers the bound
+            # slots; without capacity the two lengths are equal (identical
+            # to the old full-slice write).
+            self._min_freq_inds_store[
+                : self.start_freq_inds.shape[0]
+            ] = self.start_freq_inds
 
         lower_f_lim = self.band_edges[
             self.unique_band_combos[:, 2]
@@ -2260,8 +2464,11 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         band swap-outs.
         """
         if isinstance(self._basis_settings, WDMSettings):
+            # ALLOCATED length (== bound length without fixed capacity): the
+            # comps bindings and shard views shape-check / row-slice this
+            # against the ACA's allocated row count.
             return self.xp.full(
-                self.num_bands_now, self._basis_settings.ind_min_f, dtype=self.xp.int32
+                self._n_slots_alloc, self._basis_settings.ind_min_f, dtype=self.xp.int32
             )
         return self._min_freq_inds_store
 
@@ -3384,7 +3591,8 @@ class BandSorter(LISAToolsParallelModule):
         self._main_band_sorter = main_band_sorter
 
     def get_buffer(
-        self, acs, special_indices_unique, inds_fill=None, buffer_obj=None, **kwargs
+        self, acs, special_indices_unique, inds_fill=None, buffer_obj=None,
+        allow_resize: bool = False, **kwargs
     ) -> SubBandBuffer:
 
         num_band_preload = len(special_indices_unique)
@@ -3464,6 +3672,29 @@ class BandSorter(LISAToolsParallelModule):
 
         else:
             assert isinstance(buffer_obj, SubBandBuffer)
+            if (
+                allow_resize
+                and getattr(buffer_obj, "alloc_capacity", None) is not None
+                and int(num_bands_now) != int(buffer_obj.num_bands_now)
+            ):
+                # Resize-rebind (fixed-capacity buffer, user ruling
+                # 2026-08-14): rebind this unit's k cells into the front of
+                # the capacity allocation instead of dropping + rebuilding.
+                # ``allow_resize`` is an EXPLICIT opt-in from
+                # _cached_get_buffer — an in-round partial rotation also has
+                # len(specials) != num_bands_now and must never trigger a
+                # resize. The caller passes inds_fill = arange(k), so the
+                # full-rebind branch below (maps refresh) always runs after
+                # a resize.
+                assert int(num_bands_now) <= int(buffer_obj.alloc_capacity), (
+                    f"resize-rebind of {int(num_bands_now)} cells exceeds "
+                    f"alloc_capacity={int(buffer_obj.alloc_capacity)}"
+                )
+                assert int(inds_fill.shape[0]) == int(num_bands_now), (
+                    "resize-rebind requires inds_fill spanning the full new "
+                    "binding (arange(k))."
+                )
+                buffer_obj.resize_to(int(num_bands_now))
             assert inds_fill.max() <= buffer_obj.num_bands_now
             # THIS NEEDS TO HAPPEN before updating data
             buffer_obj.update_special_indices(special_indices_unique, inds_fill=inds_fill)

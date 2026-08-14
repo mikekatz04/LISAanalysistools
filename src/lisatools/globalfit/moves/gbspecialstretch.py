@@ -283,6 +283,26 @@ def _resolve_rj_flip_fraction(branch_name, kwarg_value, default=1.0):
     return value
 
 
+def _buffer_fixed_capacity_active(sorter, kwargs) -> bool:
+    """Whether ``_cached_get_buffer`` should use a fixed-capacity buffer.
+
+    Fixed-capacity staging (user ruling 2026-08-14) applies to RJ
+    proposal-phase buffers only: the sorter must be an RJ one
+    (``sorter.rj_prop is not None`` — rj_fstat_search / rj_prior_removal /
+    rj_replace / rj_*_pe) and the buffer must NOT carry the template twin
+    (``use_template_arr`` — the tempering path, whose ~1200-cell chunks are
+    far below the preload capacity; a capacity allocation there, doubled by
+    the twin, would be a pure memory regression). Env gate
+    ``GB_BUFFER_FIXED_CAPACITY`` (default "1"); "0" restores the
+    drop+rebuild-on-size-change behavior verbatim.
+    """
+    return (
+        os.environ.get("GB_BUFFER_FIXED_CAPACITY", "1") == "1"
+        and getattr(sorter, "rj_prop", None) is not None
+        and not kwargs.get("use_template_arr", False)
+    )
+
+
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
 class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModule):
     """Base class for GB-specific stretch / reversible-jump moves.
@@ -2126,8 +2146,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # then pool. Snapshot at unit open, same arithmetic as the
                 # pick skip below.
                 self._rj_at_cap_mask = _at_cap
+                # LIVE-cap regime (user design 2026-08-14, default): at-cap
+                # cells' dead rows STAY STAGED so a cell freed by an
+                # accepted death can birth in the SAME unit — the live
+                # per-round gate in _pick_sources throws them away while
+                # the cell is at capacity, and the scheduler's finish
+                # budget excludes them at unit open (countable-row init in
+                # _run_band_unit) with cap-transition adjustments keeping
+                # the budget exact (BandScheduler.add_counts). The
+                # GB_RJ_LIVE_CAP_PICK=0 fallback restores the 2026-08-12
+                # unit-open exclusion (one-unit wait for freed cells).
+                _live_cap_on = (
+                    not self.rj_removal_only
+                    and not self.rj_replace
+                    and os.environ.get("GB_RJ_LIVE_CAP_PICK", "1") == "1"
+                )
                 if (
                     not self.rj_removal_only
+                    and not _live_cap_on
                     and os.environ.get("GB_RJ_SKIP_CAPPED", "1") == "1"
                 ):
                     _rj_ok = band_sorter.inds | ~_at_cap
@@ -2146,6 +2182,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             " stay proposable (deaths)."
                         )
                     extra_bool = _rj_ok if extra_bool is None else (extra_bool & _rj_ok)
+                elif _live_cap_on:
+                    _n_reserve = int((~band_sorter.inds & _at_cap).sum())
+                    if _n_reserve:
+                        logger.info(
+                            f"{self.name}: rj at-cap -- {_n_reserve} dead"
+                            " (birth) slots staged as live-gated re-entry"
+                            " reserve across"
+                            f" {int(xp_s.unique(_flat[_at_cap]).size)} at-cap"
+                            " cells (births open the round a death frees"
+                            " the cell)."
+                        )
+
+            # High-f barren-band shutoff enforcement (user design
+            # 2026-08-14): dead rows of shut-off bands never enter the
+            # subset — no draws consumed, no rounds, no counters. Alive
+            # rows stay (deaths + in-model continue).
+            _shut = getattr(self, "_rj_band_shutoff", None)
+            if (
+                _shut is not None and bool(_shut.any())
+                and self._band_shutoff_enabled()
+            ):
+                xp_s2 = get_array_module(band_sorter.band_inds)
+                _shut_dev = xp_s2.asarray(_shut)
+                _shut_ok = (
+                    band_sorter.inds
+                    | ~_shut_dev[band_sorter.band_inds]
+                )
+                extra_bool = (
+                    _shut_ok if extra_bool is None
+                    else (extra_bool & _shut_ok)
+                )
 
             # EARLY RJ FLIP (user design 2026-08-14): apply the flip
             # fraction where the pre-drawn proposal coordinates/logpdf
@@ -2269,6 +2336,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             "(jump_factor=%.4g)", self.name, parts,
                             self.jump_factor)
                 self._im_kind_counts = {}
+            # Denominator split (user request 2026-08-14): the headline is
+            # MH acceptance among VIABLE births -- rows the sampler
+            # actually compared -- with the auto-reject classes broken
+            # out. With the live cap gate on, "capped" should read ~0.
+            sp = getattr(self, "_rj_split", None)
+            if sp:
+                v, vc = sp.get("viable", 0), sp.get("viable_cold", 0)
+                ba, bac = sp.get("birth_acc", 0), sp.get("birth_acc_cold", 0)
+                logger.info(
+                    "[GB_ACCEPT rj-split %s] births %d: viable %d "
+                    "(acc %d = %.4f; cold %d/%d = %.4f) | gated: prior %d "
+                    "oob %d capped %d | scored-dropped: snr %d kernel %d | "
+                    "deaths %d (acc %d)",
+                    self.name, sp.get("births", 0), v,
+                    ba, ba / max(v, 1), bac, vc, bac / max(vc, 1),
+                    sp.get("prior", 0), sp.get("oob", 0),
+                    sp.get("capped", 0), sp.get("snr", 0),
+                    sp.get("kernel", 0), sp.get("deaths", 0),
+                    sp.get("death_acc", 0))
+                self._rj_split = None
+            # High-f barren-band shutoff bookkeeping (log contract line
+            # emitted inside _update_band_shutoff).
+            pba = getattr(self, "_propose_birth_accepts", None)
+            if pba is not None:
+                self._update_band_shutoff(pba)
+                self._propose_birth_accepts = None
         except Exception:  # diagnostics must never kill a propose
             pass
         # Per-propose F-stat peak census: how many birth draws each peak
@@ -2413,23 +2506,62 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         A call whose slot count matches the cached buffer performs a FULL
         rebind (the existing ``inds_fill``/``buffer_obj`` path —
-        construction minus allocation); a size change drops the cached
-        buffer and rebuilds at the new size, so at most one buffer per
-        kwargs signature is ever resident. The template twin rides in the
-        signature: proposal-phase buffers never carry it (its guarded fill
-        paths are tempering-only). Under ``GB_BUFFER_PERSIST=1`` the cache
-        survives across proposals (see ``_buffer_cache_teardown``);
-        ``GB_BUFFER_CACHE_PER_SIZE=1`` restores per-size caching.
+        construction minus allocation). On a size mismatch there are two
+        regimes:
+
+        * **Fixed-capacity RJ buffers** (``GB_BUFFER_FIXED_CAPACITY=1``,
+          default; user ruling 2026-08-14): proposal-phase buffers of RJ
+          sorters (``sorter.rj_prop is not None``, no template twin) are
+          built ONCE with ``alloc_capacity = num_band_preload_total`` slots
+          and any later unit with ``k <= capacity`` cells is RESIZE-REBOUND
+          into the front of that allocation
+          (``SubBandBuffer.resize_to`` + full rebind) — never dropped. The
+          RJ unit sizes are alive-cells-only and drift every iteration
+          (13,043 / 11,363 / ... never repeating), so the old
+          size-keyed drop+rebuild rebuilt a ~12 GB buffer on EVERY unit
+          (~120 s/propose measured). Only a ``k > capacity`` request (never
+          produced by the scheduler, which caps ``n_slots`` at the preload)
+          drops and rebuilds.
+        * **Everything else** (non-RJ sorters; RJ tempering buffers with the
+          template twin, whose ~1200-cell chunks are far below the preload
+          capacity): today's behavior verbatim — a size change drops the
+          cached buffer and rebuilds at the new size, so at most one buffer
+          per kwargs signature is ever resident.
+
+        The template twin rides in the signature: proposal-phase buffers
+        never carry it (its guarded fill paths are tempering-only). Under
+        ``GB_BUFFER_PERSIST=1`` the cache survives across proposals (see
+        ``_buffer_cache_teardown``); ``GB_BUFFER_CACHE_PER_SIZE=1`` restores
+        per-size caching; ``GB_BUFFER_FIXED_CAPACITY=0`` restores the
+        drop+rebuild-on-any-size-change behavior for RJ buffers too.
         """
         cache = getattr(self, "_prop_buffer_cache", None)
         if cache is None:
             cache = self._prop_buffer_cache = {}
         k = int(specials.shape[0])
+        fixed_cap = _buffer_fixed_capacity_active(sorter, kwargs)
+        build_kwargs = dict(kwargs)
+        if fixed_cap:
+            # Capacity = the staged-slot budget, clamped by the move's STATIC
+            # maximum cell count (every (temp, walker, band) cell) so small
+            # runs (lite gates, CPU tests) never allocate a preload-sized
+            # buffer for a handful of cells. Every scheduler binding has
+            # k <= min(preload_total, n_cells) <= this capacity, so a
+            # resize-rebind always fits and the clamp never reintroduces the
+            # drop+rebuild path. Both terms are run constants -> the cache
+            # signature is stable across units.
+            _max_cells = (
+                int(self.ntemps) * int(self.nwalkers)
+                * (len(self.band_edges) - 1)
+            )
+            build_kwargs["alloc_capacity"] = min(
+                int(self.num_band_preload_total), _max_cells
+            )
         # rj-vs-inmodel buffers differ in edge windows (N/4 widening on RJ
         # sorters), so the sorter's rj flag is part of the entry key even
         # though the cache itself is shared across moves.
         sig = ((bool(getattr(sorter, "rj_prop", False)),)
-               + tuple(sorted(kwargs.items())))
+               + tuple(sorted(build_kwargs.items())))
         # ONE live buffer per construction signature (user design
         # 2026-08-13): the allocation follows the current unit's slot count,
         # so a size change drops the old buffer (the pool reuses its blocks)
@@ -2440,14 +2572,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # GB_BUFFER_CACHE_PER_SIZE=1 restores per-size keys (no rebuild on
         # size change) LRU-capped at GB_BUFFER_CACHE_MAX, if the rebuild
         # churn of alternating unit sizes ever costs more than it saves.
-        per_size = os.environ.get("GB_BUFFER_CACHE_PER_SIZE", "0") == "1"
+        # Never combined with fixed capacity: per-size keys would hold one
+        # CAPACITY-sized allocation per distinct unit size — the exact
+        # accumulation the one-live-buffer policy exists to prevent (and
+        # resize-rebind already removes the churn per_size was for).
+        per_size = (
+            os.environ.get("GB_BUFFER_CACHE_PER_SIZE", "0") == "1"
+            and not fixed_cap
+        )
         key = (k, sig) if per_size else sig
         buf = cache.get(key)
         if buf is not None and int(buf.num_bands_now) != k:
-            del cache[key]
-            buf = None
+            _cap = getattr(buf, "alloc_capacity", None)
+            if fixed_cap and _cap is not None and int(_cap) >= k:
+                # Fixed-capacity hit at a different size: keep the buffer —
+                # the rebind below resize-rebinds it (allow_resize=True).
+                pass
+            else:
+                # Capacity insufficient (or capacity mode off): drop and
+                # rebuild at the new size — today's behavior.
+                del cache[key]
+                buf = None
         if buf is None:
-            buf = sorter.get_buffer(acs, specials, **kwargs)
+            buf = sorter.get_buffer(acs, specials, **build_kwargs)
             cache[key] = buf
             self._prop_buffer_builds = getattr(self, "_prop_buffer_builds", 0) + 1
             if per_size:
@@ -2455,9 +2602,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 while len(cache) > max_sigs:
                     cache.pop(next(iter(cache)))
             if self.backend.uses_cupy:
+                _cap = getattr(buf, "alloc_capacity", None)
                 logger.info(
-                    "%s: buffer build (%d slots%s); GPU pool used "
-                    "%.2f / total %.2f GB; %s", self.name, k,
+                    "%s: buffer build (%s%s); GPU pool used "
+                    "%.2f / total %.2f GB; %s", self.name,
+                    (f"{int(_cap)}-slot alloc, {k} bound" if _cap is not None
+                     else f"{k} slots"),
                     ", " + repr(sig) if sig else "",
                     self.mempool.used_bytes() / 1e9,
                     self.mempool.total_bytes() / 1e9,
@@ -2470,6 +2620,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 acs, specials,
                 inds_fill=self.xp.arange(k),
                 buffer_obj=buf,
+                allow_resize=fixed_cap,
             )
         return buf
 
@@ -2658,8 +2809,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                        ll_change_log, prop_counts, acc_counts):
         """Drive one parity unit's cells through the sub-band buffer."""
         tm = getattr(self, "_prop_timer", None)
+        _sched_specials = subset.special_band_inds
+        _cap_m = getattr(self, "_rj_at_cap_mask", None)
+        if (
+            _cap_m is not None
+            and self.is_rj_prop
+            and not self.rj_removal_only
+            and not self.rj_replace
+            and os.environ.get("GB_RJ_LIVE_CAP_PICK", "1") == "1"
+        ):
+            # Countable-row scheduler init (cap-transition invariant,
+            # user design 2026-08-14): the finish budget counts alive rows
+            # plus dead rows of cells BELOW cap at unit open. At-cap
+            # cells' staged birth reserve is excluded here and
+            # promoted/demoted by BandScheduler.add_counts at live cap
+            # transitions (see _run_rj_step), so every cell finishes —
+            # and retires — exactly when its live-pickable work is done.
+            # Every staged cell keeps >= 1 countable row (at-cap cells
+            # hold >= cap alive rows), so the cell set is unchanged.
+            _countable = subset.inds | ~_cap_m[subset.inds_main_band_sorter]
+            _sched_specials = subset.special_band_inds[_countable]
         scheduler = BandScheduler(
-            subset.special_band_inds, self.num_band_preload_total, xp=self.xp
+            _sched_specials, self.num_band_preload_total, xp=self.xp
         )
         with _tspan(tm, "buffer_build"):
             buffer_obj = self._cached_get_buffer(
@@ -2730,6 +2901,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # applied ``inds``; for RJ it includes the freshly-drawn dead ones).
         eligible = self.xp.zeros(band_sorter.num_sources, dtype=bool)
         eligible[subset.inds_main_band_sorter] = True
+        # Unit-scoped eligibility, consumed by _run_rj_step's cap-transition
+        # budget adjustment (counting a freed/re-capped cell's UNPICKED
+        # staged birth rows requires knowing which main-sorter rows belong
+        # to this unit).
+        self._unit_eligible = eligible
 
         def _advance_and_refill(frozen_specials=None):
             """Retire finished cells and refill their slots (with the cell-ll
@@ -2842,9 +3018,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # open (dead slots of at-cap cells never enter the pick
                     # pool), and the mask is that same unit-open snapshot.
                     alive_now = band_sorter.inds[picked["ids"]]
-                    _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
-                    if _at_cap_m is not None:
-                        alive_now = alive_now & ~_at_cap_m[picked["ids"]]
+                    # Pool gate on the PRE-accept mask (user ruling
+                    # 2026-08-14): "at-cap cells never pool" is judged at
+                    # the cell state WHEN THE ROW WAS PROPOSED — a newborn
+                    # (its cell was below cap at proposal) pools for its
+                    # in-model repeats even though the accept just put the
+                    # cell at cap; a death-rejected survivor of an at-cap
+                    # cell does not. Post-accept evaluation would block
+                    # every newborn in cap-1 bands and gut the grouped
+                    # in-model. Live state comes from the round's
+                    # _pick_sources stash; fallback = unit-open snapshot.
+                    _lcs = getattr(self, "_live_cap_state", None)
+                    if _lcs is not None:
+                        _counts_pre, _cap_arr = _lcs
+                        _p_t = picked["temp_inds"].astype(self.xp.int64)
+                        _p_flat = (
+                            (_p_t * self.nwalkers + picked["walker_inds"])
+                            * self.num_bands + picked["band_inds"]
+                        )
+                        _pre_cap_row = (
+                            _counts_pre[_p_flat]
+                            >= _cap_arr[picked["band_inds"]]
+                        )
+                        alive_now = alive_now & ~_pre_cap_row
+                    else:
+                        _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
+                        if _at_cap_m is not None:
+                            alive_now = alive_now & ~_at_cap_m[picked["ids"]]
                     if bool(alive_now.any()):
                         held = {k: v[alive_now] for k, v in picked.items()}
                         pending.append(held)
@@ -2994,6 +3194,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the candidate pool: a cell already holding a pending alive source is
         frozen until the accumulated in-model flush runs, so the pool can
         never collect two same-cell sources (serial-within-band rule).
+
+        LIVE at-cap birth gate (user decision table 2026-08-14,
+        ``GB_RJ_LIVE_CAP_PICK=0`` disables): as a row comes up —
+        ``inds=False`` and its cell at capacity RIGHT NOW → thrown away
+        (never a candidate: no round budget, no counters); ``inds=False``
+        below capacity → birth attempt; ``inds=True`` → death attempt
+        always. Recomputed from live ``band_sorter.inds`` every round, so
+        a cell freed by an accepted death regains its births the next
+        round and loses them again if re-capped — any number of
+        transitions. The pre-accept per-cell counts are stashed on
+        ``self._live_cap_state`` for the same round's transition budget
+        adjustment and the in-model pool gate (BOTH must see the
+        pre-accept state).
         """
         xp = self.xp
         cand = (
@@ -3007,6 +3220,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             cand = cand & ~xp.isin(
                 band_sorter.special_band_inds, blocked_specials
             )
+        self._live_cap_state = None
+        if (
+            self.is_rj_prop
+            and not self.rj_removal_only
+            and not self.rj_replace
+            and self._band_leaf_cap is not None
+            and os.environ.get("GB_RJ_LIVE_CAP_PICK", "1") == "1"
+        ):
+            num_bands = self.num_bands
+            flat_all = (
+                (band_sorter.temp_inds.astype(xp.int64) * self.nwalkers
+                 + band_sorter.walker_inds) * num_bands
+                + band_sorter.band_inds
+            )
+            _alive_cells = flat_all[band_sorter.inds]
+            _nbins = self.ntemps * self.nwalkers * num_bands
+            if _alive_cells.shape[0] == 0:
+                _counts = xp.zeros(_nbins, dtype=xp.int64)
+            else:
+                _counts = xp.bincount(_alive_cells, minlength=_nbins)
+            _cap = xp.asarray(self._band_leaf_cap)
+            self._live_cap_state = (_counts, _cap)
+            _at_cap_row = (
+                _counts[flat_all] >= _cap[band_sorter.band_inds]
+            )
+            cand = cand & (band_sorter.inds | ~_at_cap_row)
         cand_ids = xp.arange(band_sorter.num_sources)[cand]
         if len(cand_ids) == 0:
             return None
@@ -3168,6 +3407,63 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if _gb_use_distance(self):
             logg = logg - lv  # Jacobian d(ln dist)/d(dist) = 1/dist
         return logg
+
+    def _band_shutoff_enabled(self) -> bool:
+        """High-frequency barren-band birth shutoff: is it on for this move?
+
+        User design 2026-08-14: bands whose LOWER edge is above
+        ``GB_RJ_BAND_SHUTOFF_FMIN_MHZ`` (default 10 mHz — no confusion
+        noise up there, so a real source shows full SNR from the first
+        iteration) stop receiving BIRTH proposals after
+        ``GB_RJ_BAND_SHUTOFF_AFTER`` (default 5) consecutive proposes
+        with zero accepted births at ANY temperature; any accepted birth
+        resets the band's counter. Deaths and in-model repeats continue.
+        ``GB_RJ_BAND_SHUTOFF_SCOPE``: "search" (default) = only moves
+        with "search" in their name; "all" = every fstat birth move;
+        "off" = disabled. 6-mo TODO: reassess search+pe vs search-only
+        (a pe shutoff truncates the trans-D posterior in those bands).
+        Counters are in-memory per move instance — a restart resets them
+        and bands re-earn their shutoff (errs conservative).
+        """
+        if (not self.is_rj_prop or self.rj_removal_only or self.rj_replace
+                or not getattr(self, "rj_fstat_dist_birth", False)):
+            return False
+        scope = os.environ.get("GB_RJ_BAND_SHUTOFF_SCOPE", "search")
+        if scope == "off":
+            return False
+        if scope == "search" and "search" not in self.name:
+            return False
+        return True
+
+    def _update_band_shutoff(self, birth_accepts) -> None:
+        """Propose-end barren-counter update + shutoff transitions.
+
+        ``birth_accepts``: host int array (num_bands,) of accepted births
+        this propose (all temperatures). Emits the LOG CONTRACT line the
+        monitor's cap-plot overlay parses:
+        ``[GB_BAND_SHUTOFF <move>] band <b> (<flo>-<fhi> mHz) births OFF
+        after <n> barren proposes (<total> bands off)``.
+        """
+        if not hasattr(self, "_band_barren_counts"):
+            self._band_barren_counts = np.zeros(self.num_bands, dtype=np.int64)
+            self._rj_band_shutoff = np.zeros(self.num_bands, dtype=bool)
+        fmin_mhz = float(os.environ.get("GB_RJ_BAND_SHUTOFF_FMIN_MHZ", "10.0"))
+        after = int(os.environ.get("GB_RJ_BAND_SHUTOFF_AFTER", "5"))
+        barren = np.asarray(birth_accepts) == 0
+        self._band_barren_counts[barren] += 1
+        self._band_barren_counts[~barren] = 0
+        edges = _to_numpy(self.band_edges)
+        hi_f = edges[:-1] * 1e3 >= fmin_mhz
+        new_off = hi_f & ~self._rj_band_shutoff & (
+            self._band_barren_counts >= after)
+        for b in np.where(new_off)[0]:
+            self._rj_band_shutoff[b] = True
+            logger.info(
+                "[GB_BAND_SHUTOFF %s] band %d (%.3f-%.3f mHz) births OFF "
+                "after %d barren proposes (%d bands off)",
+                self.name, int(b), edges[b] * 1e3, edges[b + 1] * 1e3,
+                int(self._band_barren_counts[b]),
+                int(self._rj_band_shutoff.sum()))
 
     def _precompute_fstat_centers(self, model, band_sorter, subset):
         """Unit-open F-stat center cache for the distance-birth proposal.
@@ -3349,6 +3645,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             | (f_hz > buffer_obj.frequency_lims[1][slots])
         )
         curr_logp[(~alive) & out_of_band] = -np.inf
+        # [GB_ACCEPT rj-split] class stashes (denominator split, user
+        # request 2026-08-14): which gate killed each birth before/at
+        # scoring. Populated below; consumed just before the accept mark.
+        _split_over_cap = None
+        _split_snr = None
+        _split_kernel_rows = None
 
         # Per-band progressive leaf cap (search mode): a birth into a band
         # already holding ``cap[b]`` alive sources is prior-forbidden --
@@ -3383,6 +3685,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             over_cap = (
                 cell_counts[cell_flat] >= cap_xp[picked["band_inds"]]
             )
+            _split_over_cap = (~alive) & over_cap
             curr_logp[(~alive) & over_cap] = -np.inf
 
         _mark("rj_prior_gate")
@@ -3581,6 +3884,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _bad_snr = _bad_snr | (det_snr < _lim)
             reject = (~alive) & keep & _bad_snr
             delta_ll[reject] = -1e300
+            _split_snr = reject
+            _split_kernel_rows = oob_rows
 
             if os.environ.get("GB_RJ_BIRTH_DEBUG"):
                 kb = (~alive) & keep
@@ -3675,6 +3980,55 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     float(curr_logp[_k]), float(prev_logp[_k]), int(_acc),
                 )
 
+        # [GB_ACCEPT rj-split] accumulation (one batched host transfer per
+        # round): every post-flip picked row lands in exactly one class.
+        # Deaths are always MH-compared; births are gated (prior / oob /
+        # capped, priority in that order), scored-but-dropped (SNR clamp,
+        # kernel kept_out), or VIABLE = actually MH-compared. The headline
+        # "MH acceptance among viable births" is printed at propose end.
+        _sp = getattr(self, "_rj_split", None)
+        if _sp is not None:
+            _births = ~alive
+            _cold_m = t_i == 0
+            _b_prior = _births & xp.isinf(logp)
+            _b_oob = _births & out_of_band & ~_b_prior
+            if _split_over_cap is not None:
+                _b_cap = _split_over_cap & ~_b_prior & ~_b_oob
+            else:
+                _b_cap = xp.zeros_like(_births)
+            if _split_kernel_rows is not None and len(_split_kernel_rows):
+                _kr = xp.zeros(len(ids), dtype=bool)
+                _kr[_split_kernel_rows] = True
+                _b_kernel = _births & keep & _kr
+            else:
+                _b_kernel = xp.zeros_like(_births)
+            _b_snr = (_split_snr if _split_snr is not None
+                      else xp.zeros_like(_births))
+            _b_viable = _births & keep & ~_b_kernel & ~_b_snr
+            _b_acc = accept & _births
+            _d_acc = accept & alive
+            _vals = _to_numpy(xp.stack([
+                _births.sum(), _b_prior.sum(), _b_oob.sum(),
+                _b_cap.sum(), _b_snr.sum(), _b_kernel.sum(),
+                _b_viable.sum(), (_b_viable & _cold_m).sum(),
+                _b_acc.sum(), (_b_acc & _cold_m).sum(),
+                alive.sum(), _d_acc.sum(),
+            ]))
+            for _kname, _v in zip(
+                ("births", "prior", "oob", "capped", "snr", "kernel",
+                 "viable", "viable_cold", "birth_acc", "birth_acc_cold",
+                 "deaths", "death_acc"), _vals,
+            ):
+                _sp[_kname] = _sp.get(_kname, 0) + int(_v)
+
+        # Per-band birth-accept tally for the high-f barren-band shutoff
+        # (host array; the accept path below syncs anyway).
+        _pba = getattr(self, "_propose_birth_accepts", None)
+        if _pba is not None:
+            _ba_m = accept & (~alive)
+            if bool(_ba_m.any()):
+                np.add.at(_pba, _to_numpy(b_i[_ba_m]), 1)
+
         _mark("rj_accept")
         if bool(accept.any()):
             acc_ids = ids[accept]
@@ -3689,6 +4043,53 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             birth_acc = accept & (~alive)
             death_acc = accept & alive
+
+            # Live cap-transition budget adjustment (user design
+            # 2026-08-14; invariant: cell_counts == picked + currently
+            # pickable). Uses the PRE-accept per-cell alive counts stashed
+            # at pick time: an accepted death at pre-count == cap FREES
+            # the cell (its unpicked staged birth rows join the finish
+            # budget and become pickable next round); an accepted birth
+            # at pre-count == cap-1 re-CAPS it (they leave the budget
+            # again). Runs synchronously with the accept — before any
+            # scheduler.advance() can see a stale "finished" state.
+            _lcs = getattr(self, "_live_cap_state", None)
+            _uel = getattr(self, "_unit_eligible", None)
+            if _lcs is not None and _uel is not None and scheduler is not None:
+                _counts_pre, _cap_arr = _lcs
+                _acc_t = t_i[accept].astype(xp.int64)
+                _flat_acc = (
+                    (_acc_t * self.nwalkers + w_i[accept]) * self.num_bands
+                    + b_i[accept]
+                )
+                _pre = _counts_pre[_flat_acc]
+                _cap_acc = _cap_arr[b_i[accept]]
+                _alive_acc = alive[accept]
+                _freed = _alive_acc & (_pre == _cap_acc)
+                _capped = (~_alive_acc) & (_pre + 1 >= _cap_acc)
+                if bool(_freed.any()) or bool(_capped.any()):
+                    _tr_specials = picked["specials"][accept]
+                    _avail = (
+                        _uel & ~band_sorter.has_run_rj & ~band_sorter.inds
+                    )
+                    _sb = band_sorter.special_band_inds
+                    for _sp_arr, _sign in (
+                        (_tr_specials[_freed], 1),
+                        (_tr_specials[_capped], -1),
+                    ):
+                        if int(len(_sp_arr)) == 0:
+                            continue
+                        _m = _avail & xp.isin(_sb, _sp_arr)
+                        _sp_sorted = xp.sort(_sp_arr)
+                        if bool(_m.any()):
+                            _pos = xp.searchsorted(_sp_sorted, _sb[_m])
+                            _cnts = xp.bincount(
+                                _pos, minlength=len(_sp_sorted))
+                        else:
+                            _cnts = xp.zeros(
+                                len(_sp_sorted), dtype=xp.int64)
+                        scheduler.add_counts(_sp_sorted, _sign * _cnts)
+
             if bool(birth_acc.any()):
                 buffer_obj.add_sources_to_band_buffer(
                     band_sorter.coords[ids[birth_acc]],
@@ -5752,6 +6153,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.backend.uses_cupy and os.environ.get("GB_PROP_TIMING_SYNC", "0") == "1":
             _tm_sync = self.xp.cuda.runtime.deviceSynchronize
         self._prop_timer = tm = _ProposeTimer(sync_fn=_tm_sync)
+        # [GB_ACCEPT rj-split] per-propose class counters + the per-band
+        # birth-accept tally feeding the high-f barren-band shutoff
+        # (user requests 2026-08-14). Both consumed in the propose-end
+        # summary block.
+        self._rj_split = {} if self.is_rj_prop else None
+        self._propose_birth_accepts = (
+            np.zeros(self.num_bands, dtype=np.int64)
+            if self._band_shutoff_enabled() else None)
         # SubBandBuffer cache: one allocation per signature, units rebind in
         # place. GB_BUFFER_PERSIST=1 (default) keeps the cached buffers
         # ACROSS proposals -- construction (thousands of per-cell container

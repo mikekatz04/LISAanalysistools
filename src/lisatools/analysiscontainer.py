@@ -1257,31 +1257,78 @@ class BandView:
     the full band range) to materialise a single ndarray first.
     """
 
-    def __init__(self, aca: "AnalysisContainerArray", kind: str = "data"):
+    def __init__(
+        self,
+        aca: "AnalysisContainerArray",
+        kind: str = "data",
+        n_bands: Optional[int] = None,
+    ):
         if kind not in ("data", "psd"):
             raise ValueError(f"kind must be 'data' or 'psd'; got {kind!r}")
         self._aca = aca
         self._kind = kind
+        # Fixed-capacity front view (GB RJ SubBandBuffer, user ruling
+        # 2026-08-14): when the backing ACA is allocated at capacity but only
+        # the first ``n_bands`` slots are BOUND, the view exposes exactly
+        # those slots — ``shape``/``len`` report ``n_bands`` and each shard
+        # is front-sliced to its bound rows. ``gpu_splits`` entries are
+        # sorted ascending, so a shard's bound rows (global ids < n_bands)
+        # occupy exactly its leading intra-shard positions — a leading-axis
+        # slice per shard. ``None`` (default) keeps today's full-ACA
+        # behavior verbatim.
+        if n_bands is not None:
+            n_bands = int(n_bands)
+            if not (0 < n_bands <= int(aca.acs_total_entries)):
+                raise ValueError(
+                    f"BandView n_bands={n_bands} outside (0, "
+                    f"{int(aca.acs_total_entries)}]"
+                )
+        self._n_bands = n_bands
+
+    @property
+    def _num_bands_bound(self) -> int:
+        """Bound band count: the front-view limit, or every ACA slot."""
+        if self._n_bands is not None:
+            return self._n_bands
+        return int(self._aca.acs_total_entries)
 
     @property
     def _shards(self):
-        return self._aca.data_shaped if self._kind == "data" else self._aca.psd_shaped
+        shards = (
+            self._aca.data_shaped if self._kind == "data" else self._aca.psd_shaped
+        )
+        if self._n_bands is None:
+            return shards
+        # Front-slice each shard to its bound rows (gpu_splits sorted =>
+        # global ids < n_bands sit at intra positions 0..n_s-1).
+        out = []
+        for s, sh in enumerate(shards):
+            split = np.asarray(asnumpy(self._aca.gpu_splits[s]))
+            n_s = int(np.searchsorted(split, self._n_bands))
+            out.append(sh[:n_s])
+        return out
 
     @property
     def shape(self) -> tuple:
-        per_band = tuple(self._shards[0].shape[1:])
-        return (int(self._aca.acs_total_entries),) + per_band
+        shards = (
+            self._aca.data_shaped if self._kind == "data" else self._aca.psd_shaped
+        )
+        per_band = tuple(shards[0].shape[1:])
+        return (self._num_bands_bound,) + per_band
 
     @property
     def dtype(self):
-        return self._shards[0].dtype
+        shards = (
+            self._aca.data_shaped if self._kind == "data" else self._aca.psd_shaped
+        )
+        return shards[0].dtype
 
     @property
     def ndim(self) -> int:
         return len(self.shape)
 
     def __len__(self) -> int:
-        return int(self._aca.acs_total_entries)
+        return self._num_bands_bound
 
     def _resolve_scalar(self, band: int) -> tuple:
         """``(shard_id, intra_shard_index)`` for a single band id."""
@@ -3003,22 +3050,25 @@ class AnalysisContainerArray:
             return self.psd_shaped[0]
         return self.psd_shaped_view().gather()
 
-    def data_shaped_view(self) -> "BandView":
+    def data_shaped_view(self, n_bands: Optional[int] = None) -> "BandView":
         """Return a :class:`BandView` over the residual buffer.
 
         Indexable by global band id (``view[band_inds] = value`` /
         ``view[band_inds]``). Works for single-GPU and multi-GPU runs
         uniformly; on single-GPU the underlying shard is touched directly.
-        See :class:`BandView` for the full op contract.
+        ``n_bands`` limits the view to the first ``n_bands`` bound slots of
+        a fixed-capacity allocation (GB RJ SubBandBuffer); ``None`` keeps
+        the full-ACA behavior. See :class:`BandView` for the full op
+        contract.
         """
-        return BandView(self, kind="data")
+        return BandView(self, kind="data", n_bands=n_bands)
 
-    def psd_shaped_view(self) -> "BandView":
+    def psd_shaped_view(self, n_bands: Optional[int] = None) -> "BandView":
         """Return a :class:`BandView` over the inverse-PSD buffer.
 
         Companion to :meth:`data_shaped_view`. Same semantics.
         """
-        return BandView(self, kind="psd")
+        return BandView(self, kind="psd", n_bands=n_bands)
 
     @property
     def data_shaped(self):

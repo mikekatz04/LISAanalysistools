@@ -195,6 +195,19 @@ im = ax[1].imshow(caps.T, aspect="auto", origin="lower", cmap="viridis",
                   extent=[0, NIT, 0, caps.shape[1]])
 ax[1].set_title("per-band leaf cap"); ax[1].set_xlabel("iteration"); ax[1].set_ylabel("band")
 fig.colorbar(im, ax=ax[1], shrink=0.85)
+# High-f barren-band birth shutoff (GB_RJ_BAND_SHUTOFF_*): each shutoff
+# emits "[GB_BAND_SHUTOFF <move>] band <b> ... births OFF ..." -- mark
+# those band rows in red on the cap plot (marker at the right edge +
+# translucent row line; the log carries the when, the plot the which).
+shutoff_bands = sorted({int(b) for b in re.findall(
+    r"\[GB_BAND_SHUTOFF[^\]]*\] band (\d+)", log_text)})
+for b in shutoff_bands:
+    ax[1].axhline(b + 0.5, color=RED, lw=1.0, alpha=0.55)
+    ax[1].plot([NIT * 0.99], [b + 0.5], marker="<", color=RED, ms=6,
+               clip_on=False)
+if shutoff_bands:
+    ax[1].set_title(
+        f"per-band leaf cap ({len(shutoff_bands)} bands birth-OFF, red)")
 fig_b64(fig, "gb_leaves")
 
 # ---- 6. f-stat fit ----
@@ -656,10 +669,11 @@ subtracted until full_pe.</div></div>
 
 <section id="gb"><h2>GB Search</h2>
 <div class="panel">{img("gb_leaves")}
-<div class="caption">Left: cold-chain GB leaf counts in the STORED iterations — iteration 8
-holds ~85 leaves/walker and job 185 resumed exactly there (23.1k at-cap cells in its first
-rj unit = the caps are binding as the model fills). Right: per-band progressive leaf caps
-(D/2 gate). The next stored iteration extends both curves.</div></div>
+<div class="caption">Left: cold-chain GB leaf counts in the STORED iterations. Right:
+per-band progressive leaf caps (D/2 gate); bands marked RED have had their RJ births shut
+off by the high-frequency barren-band rule (GB_RJ_BAND_SHUTOFF_*: &gt;10 mHz default, 5
+consecutive proposes with zero accepted births — deaths and in-model continue; each
+shutoff is also an INFO line in the log).</div></div>
 </section>
 
 <section id="fstat"><h2>Last F-stat Fit</h2>

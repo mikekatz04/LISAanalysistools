@@ -203,6 +203,78 @@ class FstatCenterCacheLookupTest(unittest.TestCase):
             m._fstat_ctr_lookup(np.array([7, 8]))  # 8 not in the unit
 
 
+class SchedulerAddCountsTest(unittest.TestCase):
+    def test_free_then_recap_budget_exact(self):
+        from lisatools.globalfit.moves.gbbands import BandScheduler
+        specials = np.repeat(np.array([10, 20]), 2)  # 2 cells x 2 countable
+        sched = BandScheduler(specials, 2, xp=np)
+        # cell 10 frees: +3 staged birth rows join its budget
+        sched.add_counts(np.array([10]), np.array([3]))
+        pos = sched._cells_of(np.array([10]))[0]
+        self.assertEqual(int(sched.cell_counts[pos]), 5)
+        # re-cap: 2 of them were picked meanwhile -> only 1 leaves
+        sched.add_counts(np.array([10]), np.array([-1]))
+        self.assertEqual(int(sched.cell_counts[pos]), 4)
+        # other cell untouched
+        pos20 = sched._cells_of(np.array([20]))[0]
+        self.assertEqual(int(sched.cell_counts[pos20]), 2)
+
+
+class BandShutoffTest(unittest.TestCase):
+    def _move(self, name="rj_fstat_search", nbands=4):
+        m = GBSpecialStretchMove.__new__(GBSpecialStretchMove)
+        m.name = name
+        m.num_bands = nbands
+        m.is_rj_prop = True
+        m.rj_removal_only = False
+        m.rj_replace = False
+        m.rj_fstat_dist_birth = True
+        # band lower edges (Hz): 2 below 10 mHz, 2 above
+        m.band_edges = np.array([5e-3, 8e-3, 11e-3, 14e-3, 17e-3])
+        return m
+
+    def test_scope_gating(self):
+        import os
+        m = self._move("rj_fstat_search")
+        self.assertTrue(m._band_shutoff_enabled())
+        self.assertFalse(self._move("rj_fstat_pe")._band_shutoff_enabled())
+        os.environ["GB_RJ_BAND_SHUTOFF_SCOPE"] = "all"
+        self.addCleanup(os.environ.pop, "GB_RJ_BAND_SHUTOFF_SCOPE", None)
+        self.assertTrue(self._move("rj_fstat_pe")._band_shutoff_enabled())
+        os.environ["GB_RJ_BAND_SHUTOFF_SCOPE"] = "off"
+        self.assertFalse(m._band_shutoff_enabled())
+
+    def test_counter_shutoff_and_reset(self):
+        import os
+        os.environ["GB_RJ_BAND_SHUTOFF_AFTER"] = "5"
+        self.addCleanup(os.environ.pop, "GB_RJ_BAND_SHUTOFF_AFTER", None)
+        m = self._move()
+        acc = np.zeros(4, dtype=int)
+        for _ in range(4):
+            m._update_band_shutoff(acc)
+        self.assertFalse(m._rj_band_shutoff.any())
+        # band 2 gets an accept on propose 5 -> its counter resets;
+        # band 3 stays barren -> shuts off (band 0/1 below 10 mHz: never)
+        acc5 = np.array([0, 0, 1, 0])
+        m._update_band_shutoff(acc5)
+        np.testing.assert_array_equal(
+            m._rj_band_shutoff, [False, False, False, True])
+        self.assertEqual(int(m._band_barren_counts[2]), 0)
+        # the reset band needs 5 fresh barren proposes to shut off
+        for _ in range(4):
+            m._update_band_shutoff(np.zeros(4, dtype=int))
+        self.assertFalse(bool(m._rj_band_shutoff[2]))
+        m._update_band_shutoff(np.zeros(4, dtype=int))
+        self.assertTrue(bool(m._rj_band_shutoff[2]))
+
+    def test_low_bands_never_shut(self):
+        m = self._move()
+        for _ in range(50):
+            m._update_band_shutoff(np.zeros(4, dtype=int))
+        self.assertFalse(bool(m._rj_band_shutoff[0]))
+        self.assertFalse(bool(m._rj_band_shutoff[1]))
+
+
 class ResolveRJFlipFractionTest(unittest.TestCase):
     def test_kwarg_wins_over_env(self):
         import os

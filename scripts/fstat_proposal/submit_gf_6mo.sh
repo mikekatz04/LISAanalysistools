@@ -29,6 +29,14 @@
 #      stages before reaching gb_search; at 6 mo with more branches this
 #      grows and throttles debugging cadence. Wants stage fast-forward
 #      on resume + lazy per-branch builds before this run ships.
+#   5. High-f barren-band RJ shutoff scope (user TODO 2026-08-14):
+#      bands above GB_RJ_BAND_SHUTOFF_FMIN_MHZ (default 10) stop
+#      proposing BIRTHS after GB_RJ_BAND_SHUTOFF_AFTER consecutive
+#      barren proposes (no confusion noise up there -> full SNR from
+#      the start -> prolonged barrenness means empty). Currently
+#      search-stage moves only (GB_RJ_BAND_SHUTOFF_SCOPE=search);
+#      REASSESS for 6 mo whether pe/full_pe should shut off too or
+#      keep full trans-D leaf sampling in those bands.
 #
 # RESUME: resubmitting resumes from the h5 (same store dir/base name/env).
 # Fresh start: move/delete ${STORE_DIR} first.
