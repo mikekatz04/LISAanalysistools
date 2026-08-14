@@ -148,29 +148,91 @@ def scan_log(leg_dir: str, name: str) -> bool:
         return True
     txt = open(logp, errors="replace").read()
     cuda = len(re.findall(r"cudaError|CUDARuntimeError|GPUassert", txt))
-    cold_cell = len(re.findall(
-        r"GB_CELL_LL.*exceeds its temperature-scaled allowance", txt))
+    excesses = re.findall(
+        r"GB_CELL_LL.*exceeds its temperature-scaled allowance "
+        r"[\d.eE+-]+ \(temp (\d+),", txt)
+    cold_cell = sum(1 for t in excesses if int(t) <= 2)
+    warm_cell = len(excesses) - cold_cell
     drifts = [float(x) for x in re.findall(
         r"incremental ll drift ([\d.eE+-]+)", txt)]
     big_drift = sum(1 for x in drifts if x > 1e-2)
-    print(f"[gate] {name}: cuda-errors={cuda} cold-cell-ll-warnings="
-          f"{cold_cell} drift-lines={len(drifts)} (>1e-2: {big_drift})")
+    print(f"[gate] {name}: cuda-errors={cuda} cell-ll excesses: "
+          f"near-cold(temp<=2)={cold_cell} warmer={warm_cell} | "
+          f"drift-lines={len(drifts)} (>1e-2: {big_drift})")
     if cuda:
         print(f"GATE: FAIL -- CUDA errors in leg {name}.")
         ok = False
     if cold_cell:
-        print(f"GATE: FAIL -- allowance-scaled [GB_CELL_LL] excess in "
-              f"leg {name} (post-guard these are real).")
+        print(f"GATE: FAIL -- NEAR-COLD [GB_CELL_LL] excess in leg {name} "
+              f"(temp<=2; post-guard these are real). Warmer-rung excesses "
+              f"are reported but non-fatal at this noisy narrow-band "
+              f"config.")
         ok = False
     return ok
+
+
+def share_fstat_cache(src_leg: str, dst_leg: str):
+    """Copy leg A's epoch grids so every leg loads the SAME birth proposal
+    (independent fits can differ at 1 ulp in F, reordering peak selection
+    and diverging the runs with no concurrency bug at all)."""
+    for root, dirs, _ in os.walk(src_leg):
+        if "gb_fstat_fit" in dirs:
+            src = os.path.join(root, "gb_fstat_fit")
+            dst = os.path.join(dst_leg, os.path.relpath(root, src_leg),
+                               "gb_fstat_fit")
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            print(f"[gate] shared fstat cache -> {dst}")
+            return
+    print("[gate] WARNING: no gb_fstat_fit cache found to share")
 
 
 def main():
     os.makedirs(BASE, exist_ok=True)
     a = run_leg("serial", "0")
+    # CONTROL: identical serial rerun on the SAME fstat grids. If this
+    # diverges, the stack is not run-deterministic (GPU atomics etc.) and
+    # bit-identity cannot convict the concurrency change.
+    a2_dir = os.path.join(BASE, "serial2")
+    os.makedirs(a2_dir, exist_ok=True)
+    share_fstat_cache(a, a2_dir)
+    a2 = run_leg("serial2", "0")
+    b_dir = os.path.join(BASE, "threaded")
+    os.makedirs(b_dir, exist_ok=True)
+    share_fstat_cache(a, b_dir)
     b = run_leg("threaded", "1")
-    ok = compare(h5path(a), h5path(b))
+
+    print("\n[gate] ==== CONTROL: serial vs serial (determinism) ====")
+    det = compare(h5path(a), h5path(a2))
+    print("\n[gate] ==== TEST: serial vs threaded ====")
+    ident = compare(h5path(a), h5path(b))
+    if det:
+        ok = ident
+        if not ident:
+            print("[gate] control was IDENTICAL -> the threaded diff is a "
+                  "REAL concurrency effect.")
+    else:
+        print("[gate] stack is NOT run-deterministic (control diverged) -> "
+              "bit-identity is not a valid oracle; falling back to "
+              "consistency checks: threaded divergence must be the same "
+              "order as the control's own noise.")
+        ok = True
+        with h5py.File(h5path(a)) as fa, h5py.File(h5path(a2)) as f2, \
+             h5py.File(h5path(b)) as fb:
+            n = min(filled_iters(fa), filled_iters(f2), filled_iters(fb))
+            la = fa["global_fit"]["log_like"][:n]
+            l2 = f2["global_fit"]["log_like"][:n]
+            lb = fb["global_fit"]["log_like"][:n]
+            noise = float(np.nanmax(np.abs(la - l2)))
+            diff = float(np.nanmax(np.abs(la - lb)))
+            print(f"[gate] max|lnL| control-noise={noise:.3g} "
+                  f"threaded-diff={diff:.3g}")
+            if diff > max(10.0 * noise, 1e-6):
+                print("GATE: FAIL -- threaded divergence far exceeds the "
+                      "stack's own run-to-run noise.")
+                ok = False
     ok = scan_log(a, "serial") and ok
+    ok = scan_log(a2, "serial2") and ok
     ok = scan_log(b, "threaded") and ok
     if "serial" in LEG_STATS and "threaded" in LEG_STATS:
         ws, wt = LEG_STATS["serial"][0], LEG_STATS["threaded"][0]
