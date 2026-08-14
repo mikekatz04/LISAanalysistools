@@ -219,6 +219,11 @@ class _ProposeTimer:
     def count(self, name: str, n: int = 1) -> None:
         self.counts[name] = self.counts.get(name, 0) + int(n)
 
+    def add(self, name: str, dt: float) -> None:
+        """Checkpoint-style accumulation (span-free callers, e.g. the
+        ``_mark`` boundaries inside ``_run_rj_step``)."""
+        self.stages[name] = self.stages.get(name, 0.0) + float(dt)
+
     def report(self, total: float) -> str:
         # Top-level stages only: nested spans (buffer_build inside
         # run_proposal, ...) are reported but excluded from the
@@ -2186,7 +2191,86 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     self.xp.cuda.runtime.deviceSynchronize()
                 self.mempool.free_all_blocks()
 
+        # Per-propose acceptance summary (rj = counters[0], in-model =
+        # counters[1]; cold = temp index 0) -- the metric the in-model A/Bs
+        # and flip-fraction tuning were blocked on.
+        try:
+            def _sum(a):
+                return int(_to_numpy(a).sum())
+            rj_p, rj_a = _sum(prop_counts[0]), _sum(acc_counts[0])
+            im_p, im_a = _sum(prop_counts[1]), _sum(acc_counts[1])
+            rj_pc, rj_ac = _sum(prop_counts[0][0]), _sum(acc_counts[0][0])
+            im_pc, im_ac = _sum(prop_counts[1][0]), _sum(acc_counts[1][0])
+            logger.info(
+                "[GB_ACCEPT %s] rj cold %d/%d (%.4f) all %d/%d (%.4f) | "
+                "in-model cold %d/%d (%.4f) all %d/%d (%.4f)",
+                self.name, rj_ac, rj_pc, rj_ac / max(rj_pc, 1),
+                rj_a, rj_p, rj_a / max(rj_p, 1),
+                im_ac, im_pc, im_ac / max(im_pc, 1),
+                im_a, im_p, im_a / max(im_p, 1))
+        except Exception:  # diagnostics must never kill a propose
+            pass
+        # Per-propose F-stat peak census: how many birth draws each peak
+        # received (settings lever: if peaks are drawn many times with no
+        # acceptance, futility-based retirement / flip fraction can shrink
+        # rj_step without losing coverage).
+        try:
+            census = self._stacked_for_census()
+            if census is not None:
+                c = census.pop_draw_counts()
+                tot = int(c.sum())
+                if tot:
+                    logger.info(
+                        "[FSTAT_PEAKS %s] %d draws over %d/%d peaks; "
+                        "per-peak mean %.1f median %d max %d (peak #%d); "
+                        "never-drawn %d",
+                        self.name, tot, int((c > 0).sum()), len(c),
+                        tot / max(len(c), 1), int(np.median(c)),
+                        int(c.max()), int(c.argmax()), int((c == 0).sum()))
+        except Exception:
+            pass
+
         return ll_change_log, prop_counts, acc_counts
+
+    def _stacked_for_census(self):
+        """Find the StackedFStatProposal4D inside the rj birth container.
+
+        Cached per install (``_install`` resets it); returns None when the
+        births come from the prior (no census surface).
+        """
+        obj = getattr(self, "_stacked_census_obj", "unset")
+        if obj != "unset":
+            return obj
+        found = None
+        seen = set()
+
+        def walk(o, depth=0):
+            nonlocal found
+            if o is None or depth > 5 or id(o) in seen or found is not None:
+                return
+            seen.add(id(o))
+            if hasattr(o, "pop_draw_counts"):
+                found = o
+                return
+            for a in ("priors_in", "priors", "components", "base", "dist",
+                      "distribution"):
+                v = getattr(o, a, None)
+                if isinstance(v, dict):
+                    for vv in v.values():
+                        walk(vv, depth + 1)
+                elif isinstance(v, (list, tuple)):
+                    for vv in v:
+                        walk(vv[-1] if isinstance(vv, tuple) else vv,
+                             depth + 1)
+                elif v is not None:
+                    walk(v, depth + 1)
+
+        cont = self.rj_proposal_distribution
+        if isinstance(cont, dict):
+            cont = cont.get(self.branch_name)
+        walk(cont)
+        self._stacked_census_obj = found
+        return found
 
     def _debug_sync_all_devices(self, model):
         """GB_MULTIGPU_SYNC_DEBUG=1: fence EVERY run device.
@@ -2982,6 +3066,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         picked = self._apply_rj_flip_fraction(band_sorter, picked)
         if picked is None:
             return
+        # Checkpoint timing INSIDE the rj step (the 85%-of-propose black
+        # box): host wall between marks; kernel time lands on the mark that
+        # forces the sync (GB_PROP_TIMING_SYNC=1 for exact attribution).
+        _tm_rj = getattr(self, "_prop_timer", None)
+        _t_mark = time.perf_counter()
+
+        def _mark(_name):
+            nonlocal _t_mark
+            if _tm_rj is None:
+                return
+            _now = time.perf_counter()
+            _tm_rj.add(_name, _now - _t_mark)
+            _t_mark = _now
+
         xp = self.xp
         ids = picked["ids"]
         slots = picked["slot_index"]
@@ -3050,6 +3148,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             curr_logp[(~alive) & over_cap] = -np.inf
 
+        _mark("rj_prior_gate")
         delta_ll = cp.full_like(logp, -1e300)
         d_h = cp.zeros_like(logp)
         h_h = cp.zeros_like(logp)
@@ -3244,6 +3343,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 picked, round_i, scheduler,
             )
 
+        _mark("rj_kernel")
         beta = band_temps[picked["band_inds"], picked["temp_inds"]]
         factors = band_sorter.factors[ids]
         if _fstat_factor_corr is not None:
@@ -3310,6 +3410,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     float(curr_logp[_k]), float(prev_logp[_k]), int(_acc),
                 )
 
+        _mark("rj_accept")
         if bool(accept.any()):
             acc_ids = ids[accept]
             band_sorter.inds[acc_ids] = ~band_sorter.inds[acc_ids]
@@ -3335,6 +3436,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     slots[death_acc], N_vals[death_acc],
                     leaf_inds=band_sorter.leaf_inds[ids[death_acc]],
                 )
+        _mark("rj_fill")
 
     def _run_replace_step(self, model, band_sorter, buffer_obj, band_temps,
                           picked, ll_change_log, prop_counts, acc_counts,
@@ -6179,6 +6281,9 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
 
     def _install(self, k: int, stacked=None, n_peaks=None):
         from lisatools.sampling.fstat_gridfit import build_gb_birth_distribution
+
+        # New epoch container -> re-discover the census surface.
+        self._stacked_census_obj = "unset"
 
         kw = self.fstat_fit_kwargs
         container = build_gb_birth_distribution(

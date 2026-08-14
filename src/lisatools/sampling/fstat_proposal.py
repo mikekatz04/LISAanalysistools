@@ -634,6 +634,8 @@ class StackedFStatProposal4D:
         self._ncells = int(np.prod(self._cell_shape))
         self.K = K
         self._rng = np.random.default_rng(seed)
+        # per-peak draw census (host, always on -- one bincount per rvs)
+        self._draw_counts = np.zeros(K, dtype=np.int64)
 
         # host metadata (small)
         self._f0_lo = np.asarray(_host(f0_los), dtype=float).ravel()
@@ -794,12 +796,20 @@ class StackedFStatProposal4D:
             k_local = flat // self._ncells
             cell = flat - k_local * self._ncells
             kk = k_local + ch["k0"]
+            _kkh = kk.get() if hasattr(kk, "get") else np.asarray(kk)
+            np.add.at(self._draw_counts, _kkh.astype(np.int64), 1)
             corners, f0_dx = self._corners_from_cells(kk, cell, xp)
             j = xp.asarray(jit[m])
             corners[:, 0] += j[:, 0] * f0_dx
             corners[:, 1:] += j[:, 1:] * xp.asarray(self._dx3)[None, :]
             out[xp.asarray(np.where(m)[0])] = corners
         return out.reshape(size + (4,))
+
+    def pop_draw_counts(self):
+        """Per-peak ``rvs`` draw counts since the last call (length K)."""
+        c = self._draw_counts
+        self._draw_counts = np.zeros_like(c)
+        return c
 
     def rvs_per_box(self, n_per_box: int):
         """``(K, n, 4)`` draws, ``n`` from EACH box's own grid density

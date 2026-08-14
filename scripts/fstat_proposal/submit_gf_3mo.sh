@@ -82,7 +82,11 @@ export GB_NLEAVES_MAX=10000
 # resident (zero mid-unit refills) and the grouped in-model flush runs at
 # full grid width. Buffer cost ~255 KB/slot at slab-5 => ~11.3 GB (user
 # budget: 10-20 GB is fine). Back off to 2560 (652 MB) if the pool OOMs.
-export GB_N_SUBBANDS=50000
+export GB_N_SUBBANDS=4096   # staged buffer slots; bounds rj/in-model transients (job-159/177 validated)
+# RJ pick thinning (user ruling 2026-08-14): each round proposes to a
+# 0.3 random subset of eligible slots; in-model repeats still cover
+# ALL alive sources (flip gate is rj-only by construction).
+export GB_RJ_FLIP_FRACTION=0.3
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
 # Code default since 2026-08-13; pinned for the run record. =0 restores
