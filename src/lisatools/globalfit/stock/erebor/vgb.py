@@ -67,10 +67,47 @@ VGB_FIXED_BASIS = ["f0", "alpha", "sin_delta"]
 VGB_SAMPLED_BASIS_DIST = ["dist", "phi0", "cos_iota", "psi", "fdot_astro_ratio"]
 VGB_FIXED_BASIS_DIST = ["f0", "alpha", "sin_delta", "Mc"]
 
+#: OPT-IN chirp-mass distance basis (``VGBSettings.chirp_mass_basis``;
+#: 2026-08-14 ruling, planned for the 6-month run ONLY): Mc moves from the
+#: per-leaf fills to the SAMPLED side. The nonzero catalogue Mc truth gives
+#: the multiplicative walker init real spread, which the pure-stretch move
+#: needs on every dimension; the still-exactly-zero ratio truth gets the
+#: additive init exception (see ``VGBSettings.ratio_init_width``).
+VGB_SAMPLED_BASIS_CHIRP = ["dist", "phi0", "cos_iota", "psi", "Mc", "fdot_astro_ratio"]
+VGB_FIXED_BASIS_CHIRP = ["f0", "alpha", "sin_delta"]
+
+
+def vgb_sampled_basis(settings) -> list:
+    """The active VGB sampled-parameter names (single source of the choice)."""
+    if not getattr(settings, "sample_distance", False):
+        return list(VGB_SAMPLED_BASIS)
+    if getattr(settings, "chirp_mass_basis", False):
+        return list(VGB_SAMPLED_BASIS_CHIRP)
+    return list(VGB_SAMPLED_BASIS_DIST)
+
+
+def vgb_fixed_basis(settings) -> list:
+    """The active VGB per-leaf fixed-parameter names."""
+    if not getattr(settings, "sample_distance", False):
+        return list(VGB_FIXED_BASIS)
+    if getattr(settings, "chirp_mass_basis", False):
+        return list(VGB_FIXED_BASIS_CHIRP)
+    return list(VGB_FIXED_BASIS_DIST)
+
+
+def _vgb_ndim_default() -> int:
+    """5 for the legacy bases, 6 under VGB_CHIRP_MASS_BASIS=1 (module-level
+    named function: the pre-build fit must pickle/deepcopy)."""
+    return (
+        len(VGB_SAMPLED_BASIS_CHIRP)
+        if env_resolve("VGB_CHIRP_MASS_BASIS", False, bool)
+        else len(VGB_SAMPLED_BASIS_DIST)
+    )
+
 
 @dataclasses.dataclass
 class VGBSettings(GBSettings):
-    """Settings for the VGB branch: 5 sampled params, fixed f0/sky per leaf.
+    """Settings for the VGB branch: fixed f0/sky per leaf, the rest sampled.
 
     Inherits the GB knobs (band structure, chunked-het kernel sizes flow in
     through the variant); the sampling-facing fields below override the GB
@@ -78,7 +115,10 @@ class VGBSettings(GBSettings):
     from the mojito VGB catalogue in :func:`prepare_vgb_branch`.
     """
 
-    ndim: int = 5
+    # 5 for both legacy bases; 6 when chirp_mass_basis is on. The default
+    # tracks the env knob so a pre-build settings object is self-consistent;
+    # prepare_vgb_branch re-resolves it from the active basis either way.
+    ndim: int = dataclasses.field(default_factory=_vgb_ndim_default)
     # VGB's own tempering ladder size (overrides the GB default)
     ntemps: int = dataclasses.field(default_factory=env_default("VGB_NTEMPS", 12, int))
     # resolved to the catalogue source count at prepare time
@@ -98,6 +138,37 @@ class VGBSettings(GBSettings):
     sample_distance: bool = dataclasses.field(
         default_factory=env_default("VGB_SAMPLE_DISTANCE", True, bool)
     )
+    # OPT-IN 6-dim chirp-mass basis (VGB_SAMPLED_BASIS_CHIRP; 2026-08-14
+    # ruling, planned for the 6-MONTH run only): Mc moves from the per-leaf
+    # fills to the sampled side, fdot stays DERIVED as
+    # ``fdot_gr(f0, Mc) * (1 + r)`` exactly like the GB 9-column basis.
+    # Default False keeps the legacy 5-dim distance basis BIT-UNCHANGED so
+    # the live 3-mo/23-mo production runs resume their existing stores;
+    # resuming a store written with the other basis fails loudly (ndim
+    # guard in run.py) and points at
+    # scripts/fstat_proposal/migrate_vgb_chirp_basis.py. Requires
+    # sample_distance.
+    chirp_mass_basis: bool = dataclasses.field(
+        default_factory=env_default("VGB_CHIRP_MASS_BASIS", False, bool)
+    )
+    # Chirp-basis only: fdot_astro_ratio walker-init width as a FRACTION of
+    # the ratio prior half-width (fdot_astro_ratio_max). The catalogue ratio
+    # truth is exactly 0, so the sprint-wide MULTIPLICATIVE start scatter
+    # would give the column zero ensemble spread -- and the affine-invariant
+    # stretch move can never create spread it does not have (verified in
+    # production: walker std 4.4e-19). The ratio column therefore gets
+    # ADDITIVE jitter ``ratio_0 = VGB_START_FACTOR * ratio_init_width *
+    # fdot_astro_ratio_max * randn`` (documented exception to the
+    # multiplicative ruling for exactly-zero truths; START_FACTOR=0 still
+    # gives the exact truth-null start).
+    ratio_init_width: float = dataclasses.field(
+        default_factory=env_default("VGB_RATIO_INIT_WIDTH", 0.02, float)
+    )
+    # {sampled-column index: additive width} consumed by run.py's generic
+    # injection seeding (``x = truth + factor * width * randn`` for these
+    # columns instead of the multiplicative form); resolved from
+    # ratio_init_width in prepare_vgb_branch (chirp basis only).
+    additive_start_widths: typing.Optional[typing.Dict[int, float]] = None
     # Red-blue stretch sweeps per iteration. VGBSpecialStretchMove runs each
     # repeat as eryn's sequential red-blue split (even-parity walkers move
     # against the current odd half, then odd against the UPDATED even half,
@@ -188,10 +259,11 @@ class VGBSettings(GBSettings):
     sighet_v5: int = dataclasses.field(
         default_factory=env_default("SIGHET_V5", 1, int)
     )
-    # (nleaves, 3) per-leaf fixed [f0 (mHz), alpha, sin_delta] in SAMPLING
-    # units, ordered like VGB_FIXED_BASIS; feeds the per-leaf fill list.
+    # (nleaves, len(fixed basis)) per-leaf fixed values in SAMPLING units
+    # (f0 in mHz), ordered like the active fixed basis (vgb_fixed_basis);
+    # feeds the per-leaf fill list.
     fixed_params: typing.Optional[typing.Any] = None
-    # (nleaves, 5) sampling-basis truth rows (seeds the fixed-leaf start).
+    # (nleaves, ndim) sampling-basis truth rows (seeds the fixed-leaf start).
     injection: typing.Optional[typing.Any] = None
     # VGB band separations DEFAULT to the same per-WDM-layer edges as the GB
     # branch (GBSetup.init_band_structure) for ease; this knob coarsens them
@@ -252,11 +324,14 @@ class VGBSetup(GBSetup):
             )
         fixed = np.asarray(self.fixed_params, dtype=float)
         n_leaves = fixed.shape[0]
-        _fixed_basis = (VGB_FIXED_BASIS_DIST if self.sample_distance
-                        else VGB_FIXED_BASIS)
-        _sampled_basis = (VGB_SAMPLED_BASIS_DIST if self.sample_distance
-                          else VGB_SAMPLED_BASIS)
+        _fixed_basis = vgb_fixed_basis(self)
+        _sampled_basis = vgb_sampled_basis(self)
         assert fixed.shape == (n_leaves, len(_fixed_basis))
+        assert int(self.ndim) == len(_sampled_basis), (
+            f"VGB ndim ({self.ndim}) != sampled basis width "
+            f"({len(_sampled_basis)}: {_sampled_basis}); ndim is 6 only "
+            "with VGB_CHIRP_MASS_BASIS=1 (prepare_vgb_branch resolves it)."
+        )
         if self.nleaves_max is not None:
             assert int(self.nleaves_max) == n_leaves, (
                 f"fixed_params rows ({n_leaves}) != nleaves_max "
@@ -280,14 +355,22 @@ class VGBSetup(GBSetup):
                 for leaf in range(n_leaves)
             ]
             if self.sample_distance:
-                _mc = fixed[:, _fixed_basis.index("Mc")]
+                if self.chirp_mass_basis:
+                    # Mc is SAMPLED: same mc box convention as GBSetup
+                    # (transform inverse clip + the uniform Mc prior below):
+                    # m_chirp_lims when set, else (0.001, 1.0).
+                    _mc_lims = (tuple(self.m_chirp_lims) if self.m_chirp_lims
+                                else (0.001, 1.0))
+                else:
+                    _mc = fixed[:, _fixed_basis.index("Mc")]
+                    _mc_lims = (0.5 * float(_mc.min()), 2.0 * float(_mc.max()))
                 self.transform = make_gb_transform_container(
                     use_chirp_mass=True,
                     use_fdot_astro=True,
                     use_distance=True,
                     input_basis=list(_sampled_basis),
                     fill_dict=fill_list,
-                    mc_lims=(0.5 * float(_mc.min()), 2.0 * float(_mc.max())),
+                    mc_lims=_mc_lims,
                 )
             else:
                 self.transform = make_gb_transform_container(
@@ -303,15 +386,21 @@ class VGBSetup(GBSetup):
             from eryn.prior import ProbDistContainer, uniform_dist
 
             if self.sample_distance:
-                # Global uniforms over [dist, phi0, cos_iota, psi, r]. The
-                # r box must cover every catalogue ratio (r_cat = 0 exactly
-                # for GW-driven catalogues) and the dist box every
-                # catalogue distance.
+                # Global uniforms over [dist, phi0, cos_iota, psi, (Mc,) r].
+                # The r box must cover every catalogue ratio (r_cat = 0
+                # exactly for GW-driven catalogues), the dist box every
+                # catalogue distance, and (chirp basis) the Mc box every
+                # catalogue chirp mass.
                 _rmax = float(self.fdot_astro_ratio_max)
+                # Mirrors the GB chirp-mass slot (gb.py use_chirp_mass
+                # branch): uniform over m_chirp_lims, defaulted to the same
+                # (0.001, 1.0) box the GB transform factory uses.
+                _mc_box = (tuple(self.m_chirp_lims) if self.m_chirp_lims
+                           else (0.001, 1.0))
                 if self.injection is not None:
                     inj = np.asarray(self.injection, dtype=float)
-                    _d = inj[:, VGB_SAMPLED_BASIS_DIST.index("dist")]
-                    _r = inj[:, VGB_SAMPLED_BASIS_DIST.index(
+                    _d = inj[:, _sampled_basis.index("dist")]
+                    _r = inj[:, _sampled_basis.index(
                         "fdot_astro_ratio")]
                     if not ((_d > self.dist_lims[0]).all()
                             and (_d < self.dist_lims[1]).all()):
@@ -327,6 +416,16 @@ class VGBSetup(GBSetup):
                             f"[{_r.min():.3f}, {_r.max():.3f}]; raise "
                             "VGBSettings.fdot_astro_ratio_max."
                         )
+                    if self.chirp_mass_basis:
+                        _mc = inj[:, _sampled_basis.index("Mc")]
+                        if not ((_mc > _mc_box[0]).all()
+                                and (_mc < _mc_box[1]).all()):
+                            raise ValueError(
+                                f"VGB Mc prior {list(_mc_box)} Msol does "
+                                "not cover the catalogue chirp masses "
+                                f"[{_mc.min():.3f}, {_mc.max():.3f}]; set "
+                                "VGBSettings.m_chirp_lims."
+                            )
                 # Distance prior MATCHES the GB distance-basis setup
                 # (gb.py, use_distance branch): the placeholder there is a
                 # 3-D (dist, alpha, sin_delta) joint of independent
@@ -353,11 +452,17 @@ class VGBSetup(GBSetup):
                     # cos is DECREASING on [0, pi]: sort defensively.
                     2: uniform_dist(*np.sort(np.cos(self.iota_lims))),
                     3: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
-                    # r ~ U[-M, M] in the SAMPLING basis (no in-sampler
-                    # Jacobian): induced physical prior at fixed (f0, Mc)
-                    # is uniform in fdot — same convention as GB.
-                    4: uniform_dist(-_rmax, _rmax),
                 }
+                if self.chirp_mass_basis:
+                    # Mc ~ U(m_chirp_lims | (0.001, 1.0)) — same form/box
+                    # as the GB chirp-mass slot (gb.py use_chirp_mass).
+                    priors_vgb[4] = uniform_dist(_mc_box[0], _mc_box[1])
+                # r ~ U[-M, M] in the SAMPLING basis (no in-sampler
+                # Jacobian): induced physical prior at fixed (f0, Mc)
+                # is uniform in fdot — same convention as GB.
+                priors_vgb[_sampled_basis.index("fdot_astro_ratio")] = (
+                    uniform_dist(-_rmax, _rmax)
+                )
             else:
                 # Global uniforms over the 5 sampled params. fdot_lims must
                 # cover every catalogue fdot (checked below with margin).
@@ -424,10 +529,12 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
 
     Builds the sampling-basis rows through the single GB factory convention
     (``gb_catalogue_to_sampling_basis`` -> container inverse) and splits
-    them BY NAME into the 5 sampled columns (``injection``) and the 3 fixed
-    per-leaf columns (``fixed_params``); sets the fixed-dimensional leaf
-    count and the band structure bounds (one guard band each side — the
-    band machinery never proposes in the first/last band).
+    them BY NAME into the sampled columns (``injection``) and the fixed
+    per-leaf columns (``fixed_params``) of the active basis
+    (:func:`vgb_sampled_basis` / :func:`vgb_fixed_basis`; ``ndim`` is
+    re-resolved to match); sets the fixed-dimensional leaf count and the
+    band structure bounds (one guard band each side — the band machinery
+    never proposes in the first/last band).
 
     ``data_mode="synthetic"``: the catalogue is read straight from the
     (small) catalogue file — no L1 data needed — and the phase/frequency
@@ -438,6 +545,13 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
         raise ValueError(
             "The VGB branch needs the mojito VGB catalogue "
             f"(data_mode='mojito' or 'synthetic'); got data_mode={data_mode!r}."
+        )
+    if vgb.chirp_mass_basis and not vgb.sample_distance:
+        # never silently ignore the knob (rule-0 failure mode)
+        raise ValueError(
+            "VGB_CHIRP_MASS_BASIS=1 requires the distance basis "
+            "(VGB_SAMPLE_DISTANCE=1); the legacy (lnA, fdot) basis has no "
+            "chirp-mass variant."
         )
     catalogue = (getattr(general_setup, "catalogue", None) or {}).get("VGB", {})
     if not catalogue and data_mode == "synthetic":
@@ -472,7 +586,9 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
         # (same sorted-key concatenation order as ``rows``), the ratio from
         # the catalogue fdot vs the GW-driven fdot_gr(f0, Mc), and
         # phi0/cos_iota/psi from the standard sampling rows (the phi0 sign
-        # convention stays routed through the container).
+        # convention stays routed through the container). With
+        # ``chirp_mass_basis`` Mc lands on the SAMPLED side instead of the
+        # per-leaf fills.
         from .transforms import McDistFdotAstroQuad, gb_amp_from_dist
 
         def _cat_col(name):
@@ -502,17 +618,32 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
                 f"catalogue Amplitude (max rel {rel.max():.3e}); check the "
                 "LuminosityDistance units / amplitude convention."
             )
-        inj = np.empty((n, len(VGB_SAMPLED_BASIS_DIST)))
-        inj[:, VGB_SAMPLED_BASIS_DIST.index("dist")] = d_kpc
+        _sampled_basis = vgb_sampled_basis(vgb)
+        inj = np.empty((n, len(_sampled_basis)))
+        inj[:, _sampled_basis.index("dist")] = d_kpc
         for name in ("phi0", "cos_iota", "psi"):
-            inj[:, VGB_SAMPLED_BASIS_DIST.index(name)] = (
+            inj[:, _sampled_basis.index(name)] = (
                 rows[:, full_basis.index(name)])
-        inj[:, VGB_SAMPLED_BASIS_DIST.index("fdot_astro_ratio")] = ratio
+        inj[:, _sampled_basis.index("fdot_astro_ratio")] = ratio
+        if vgb.chirp_mass_basis:
+            inj[:, _sampled_basis.index("Mc")] = mc
+            vgb.fixed_params = rows[:, fixed_idx]
+            # Zero-truth ratio + multiplicative init + pure stretch =
+            # collapsed dimension (zero spread the stretch can never grow).
+            # Additive-jitter exception: width = ratio_init_width fraction
+            # of the prior half-width, still scaled by VGB_START_FACTOR so
+            # 0 keeps the exact truth-null start.
+            vgb.additive_start_widths = {
+                _sampled_basis.index("fdot_astro_ratio"):
+                    float(vgb.ratio_init_width) * float(vgb.fdot_astro_ratio_max)
+            }
+        else:
+            vgb.fixed_params = np.column_stack([rows[:, fixed_idx], mc])
         vgb.injection = inj
-        vgb.fixed_params = np.column_stack([rows[:, fixed_idx], mc])
     else:
         vgb.injection = rows[:, sampled_idx]
         vgb.fixed_params = rows[:, fixed_idx]
+    vgb.ndim = len(vgb_sampled_basis(vgb))
     vgb.nleaves_min = vgb.nleaves_max = n
 
     if vgb.t0 in (None, 0.0):

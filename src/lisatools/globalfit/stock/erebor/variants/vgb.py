@@ -1,8 +1,9 @@
 """Stock variant ``vgb``: verification-galactic-binary-only global fit.
 
-Fits the mojito L1 VGB brick with the fixed-dimensional 5D VGB branch
-(``[lnA, fdot, phi0, cos_iota, psi]`` sampled; f0/sky fixed per leaf from
-the catalogue — see :mod:`..vgb`):
+Fits the mojito L1 VGB brick with the fixed-dimensional VGB branch
+(default distance basis ``[dist, phi0, cos_iota, psi, fdot_astro_ratio]``
+with f0/sky/Mc fixed per leaf from the catalogue; ``VGB_CHIRP_MASS_BASIS=1``
+opts into the 6-dim chirp-mass basis with Mc sampled — see :mod:`..vgb`):
 
 * **All catalogue VGBs** (55 in mojito lite) as fixed leaves — leaf i is
   the same physical source at every walker/temperature; NO RJ.
@@ -75,13 +76,14 @@ class VGBGeneralSettings(EreborGeneralSettings):
 
 
 class VGBGlobalFit(EreborFit):
-    """VGB-only global fit: 55 known binaries, 5D fixed-dimensional PE."""
+    """VGB-only global fit: 55 known binaries, fixed-dimensional PE."""
 
     option_name = "vgb"
     description = (
         "Verification-GB fit on the mojito L1 VGB brick: fixed-dimensional "
-        "5D branch (f0/sky fixed per leaf), same-leaf stretch move, fixed "
-        "PSD."
+        "branch (f0/sky fixed per leaf; 5-dim distance basis, or the 6-dim "
+        "chirp-mass basis with VGB_CHIRP_MASS_BASIS=1), same-leaf stretch "
+        "move, fixed PSD."
     )
     general_settings_class = VGBGeneralSettings
     setup_classes = {"vgb": VGBSetup}

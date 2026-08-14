@@ -69,6 +69,52 @@ logger = getLogger(__name__)
 #: Branches with hand-written initialization in :meth:`GlobalFit.load_info`.
 #: Anything else is seeded by the metadata-driven generic path there.
 _LOAD_INFO_NAMED_BRANCHES = ("psd", "galfor", "sgwb", "mbh", "emri", "sobbh", "gb")
+
+
+def seed_injection_coords(
+    inj, factor, ntemps, nwalkers, additive_start_widths=None
+):
+    """Injection-seeded start coords for one branch, START_FACTOR convention.
+
+    MULTIPLICATIVE scatter ``x * (1 + factor * randn)``: each parameter is
+    perturbed by a FRACTION of its own value, so dimensions of wildly
+    different magnitude (e.g. GB/VGB fdot ~1e-16 alongside a ln-amplitude
+    ~-50) all scatter sensibly off the injection without a per-dimension
+    covariance/width scale. ``factor = 0`` -> exact injection (truth-null
+    checks).
+
+    ``additive_start_widths`` (``{column index: width}``, branch settings
+    metadata) marks columns whose truth is exactly 0: there the
+    multiplicative form gives zero ensemble spread, and an affine-invariant
+    stretch move can never create spread it does not have. Those columns get
+    ``truth + factor * width * randn`` instead — the documented exception to
+    the multiplicative ruling for exactly-zero truths (``factor = 0`` still
+    reproduces the exact injection).
+
+    Args:
+        inj: ``(nleaves, ndim)`` injection rows.
+        factor: The branch's ``<BRANCH>_START_FACTOR`` value.
+        ntemps: Leading temperature-axis size of the returned block.
+        nwalkers: Walker-axis size.
+        additive_start_widths: Optional ``{column: additive width}``.
+
+    Returns:
+        ``(ntemps, nwalkers, nleaves, ndim)`` start coordinates.
+    """
+    inj = np.asarray(inj, dtype=float)
+    nleaves, ndim = inj.shape
+    coords = inj[None, None] * (
+        1.0 + factor * np.random.randn(ntemps, nwalkers, nleaves, ndim)
+    )
+    for col, width in (additive_start_widths or {}).items():
+        coords[..., int(col)] = inj[None, None, :, int(col)] + (
+            factor
+            * float(width)
+            * np.random.randn(ntemps, nwalkers, nleaves)
+        )
+    return coords
+
+
 class GlobalFitSetup:
     """The built configuration + live state of a global fit (the "Setup").
 
@@ -485,6 +531,20 @@ class GlobalFit:
                 for _name, _nd in self.curr.ndims.items():
                     _coords = getattr(state, "branches_coords", {}).get(_name)
                     if _coords is not None and _coords.shape[-1] != _nd:
+                        if _name == "vgb":
+                            raise ValueError(
+                                f"Cannot resume {backend_path!r}: branch "
+                                f"'vgb' stored with ndim "
+                                f"{_coords.shape[-1]} but the run config "
+                                f"expects {_nd}. The VGB basis flag "
+                                f"(VGB_CHIRP_MASS_BASIS: 5-dim legacy vs "
+                                f"6-dim chirp-mass) differs from the stored "
+                                f"run. Either set VGB_CHIRP_MASS_BASIS to "
+                                f"match the store, or migrate the file to "
+                                f"the 6-dim basis with scripts/"
+                                f"fstat_proposal/migrate_vgb_chirp_basis.py "
+                                f"(never reshape silently)."
+                            )
                         raise ValueError(
                             f"Cannot resume {backend_path!r}: branch {_name!r} "
                             f"stored with ndim {_coords.shape[-1]} but the run "
@@ -739,18 +799,16 @@ class GlobalFit:
                     f"(nleaves_max={nleaves_max_key}, ndim={ndim_key})."
                 )
                 self.logger.debug(f"override {key} starting coords to be close to the injection")
-                # MULTIPLICATIVE scatter ``x * (1 + factor * randn)``: each
-                # parameter is perturbed by a FRACTION of its own value, so
-                # dimensions of wildly different magnitude (e.g. GB/VGB fdot
-                # ~1e-16 alongside a ln-amplitude ~-50) all scatter sensibly
-                # off the injection without a per-dimension covariance/width
-                # scale. ``factor = 0`` -> exact injection (truth-null checks).
-                coords[key] = inj[None, None] * (
-                    1.0
-                    + factor
-                    * np.random.randn(
-                        nt_draw, self.nwalkers, nleaves_max_key, ndim_key
-                    )
+                coords[key] = seed_injection_coords(
+                    inj,
+                    factor,
+                    nt_draw,
+                    self.nwalkers,
+                    additive_start_widths=getattr(
+                        self.curr.source_info.get(key),
+                        "additive_start_widths",
+                        None,
+                    ),
                 )
 
             # the main state keeps only the engine's ladder (cold chain for

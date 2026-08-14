@@ -2905,7 +2905,9 @@ def build_vgb_moves(
     # VGB coords are seeded by the generic fixed-leaf path in run.py
     # (multiplicative ``x*(1 + VGB_START_FACTOR*randn)`` scatter around the
     # injection — magnitude-robust, so fdot ~1e-16 and amp scatter sensibly
-    # without a per-dimension prior-width scale; 0 -> exact truth). The
+    # without a per-dimension prior-width scale; 0 -> exact truth; the
+    # chirp basis' zero-truth fdot_astro_ratio column gets ADDITIVE jitter
+    # via additive_start_widths — see seed_injection_coords). The
     # periodic wrap + prior-bounds check happen in the subtraction block
     # below.
 

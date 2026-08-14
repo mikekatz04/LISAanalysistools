@@ -144,7 +144,7 @@ FULL_YEAR_COMBINED_LITE_ENV = {
     "general.tobs_target": "TOBS_TARGET",
 }
 
-# vgb: fixed 5-D leaves need no RJ machinery — the lite twin just shortens
+# vgb: fixed-dimensional leaves need no RJ machinery — the lite twin just shortens
 # the span (matching gb_no_fg_lite) on top of the common smoke shape.
 VGB_LITE = {
     **_COMMON_LITE,
