@@ -30,10 +30,20 @@ def _picked(n, num_sources):
     }
 
 
+def _sorter(num_sources, inds=None):
+    # The 2026-08-14 deaths-only gate reads ``band_sorter.inds``: births are
+    # thinned EARLY (unit-open subset exclusion), so the in-step filter only
+    # gates alive rows. All-alive is the death-gating worst case the legacy
+    # assertions exercise.
+    if inds is None:
+        inds = np.ones(num_sources, dtype=bool)
+    return SimpleNamespace(num_sources=num_sources, inds=inds)
+
+
 class RJFlipFractionTest(unittest.TestCase):
     def test_fraction_one_is_passthrough(self):
         m = _move(1.0)
-        sorter = SimpleNamespace(num_sources=100)
+        sorter = _sorter(100)
         picked = _picked(30, 100)
         out = m._apply_rj_flip_fraction(sorter, picked)
         self.assertIs(out, picked)
@@ -41,7 +51,7 @@ class RJFlipFractionTest(unittest.TestCase):
 
     def test_subset_size_and_without_replacement(self):
         m = _move(0.3)
-        sorter = SimpleNamespace(num_sources=100)
+        sorter = _sorter(100)
         m._apply_rj_flip_fraction(sorter, _picked(30, 100))
         allowed = sorter._rj_flip_allowed
         self.assertEqual(allowed.dtype, np.bool_)
@@ -49,20 +59,20 @@ class RJFlipFractionTest(unittest.TestCase):
 
     def test_mask_drawn_once_per_sorter(self):
         m = _move(0.5)
-        sorter = SimpleNamespace(num_sources=200)
+        sorter = _sorter(200)
         m._apply_rj_flip_fraction(sorter, _picked(10, 200))
         mask_first = sorter._rj_flip_allowed
         m._apply_rj_flip_fraction(sorter, _picked(10, 200))
         self.assertIs(sorter._rj_flip_allowed, mask_first)
         # a NEW sorter (new proposal) gets its own draw
-        sorter2 = SimpleNamespace(num_sources=200)
+        sorter2 = _sorter(200)
         m._apply_rj_flip_fraction(sorter2, _picked(10, 200))
         self.assertIsNot(sorter2._rj_flip_allowed, mask_first)
 
     def test_filter_consistent_across_keys(self):
         np.random.seed(3)
         m = _move(0.4)
-        sorter = SimpleNamespace(num_sources=50)
+        sorter = _sorter(50)
         picked = _picked(50, 50)  # every source picked -> keep == allowed
         out = m._apply_rj_flip_fraction(sorter, picked)
         self.assertIsNotNone(out)
@@ -77,7 +87,7 @@ class RJFlipFractionTest(unittest.TestCase):
 
     def test_empty_batch_returns_none(self):
         m = _move(0.02)  # keeps max(1, round(0.02*100)) = 2 of 100
-        sorter = SimpleNamespace(num_sources=100)
+        sorter = _sorter(100)
         m._apply_rj_flip_fraction(sorter, _picked(5, 100))
         allowed = sorter._rj_flip_allowed
         blocked = np.where(~allowed)[0][:5]
@@ -88,7 +98,7 @@ class RJFlipFractionTest(unittest.TestCase):
 
     def test_minimum_one_slot(self):
         m = _move(0.001)
-        sorter = SimpleNamespace(num_sources=10)  # round(0.001*10) = 0 -> 1
+        sorter = _sorter(10)  # round(0.001*10) = 0 -> 1
         m._apply_rj_flip_fraction(sorter, _picked(10, 10))
         self.assertEqual(int(sorter._rj_flip_allowed.sum()), 1)
 
@@ -99,7 +109,7 @@ class RJFlipFractionTest(unittest.TestCase):
         # in-model updates even when it skipped the RJ flip.
         np.random.seed(11)
         m = _move(0.2)
-        sorter = SimpleNamespace(num_sources=60)
+        sorter = _sorter(60)
         picked = _picked(40, 60)
         originals = {k: v.copy() for k, v in picked.items()}
         out = m._apply_rj_flip_fraction(sorter, picked)
@@ -107,6 +117,70 @@ class RJFlipFractionTest(unittest.TestCase):
         for key, value in picked.items():
             np.testing.assert_array_equal(value, originals[key])
         self.assertLess(len(out["ids"]), len(picked["ids"]))
+
+
+class DeathsOnlyGateTest(unittest.TestCase):
+    def test_births_pass_unconditionally(self):
+        # Births are thinned EARLY (unit-open subset exclusion): every dead
+        # row reaching a pick is already in the flip subset, so the in-step
+        # gate must not re-thin it (that would square the fraction).
+        np.random.seed(7)
+        m = _move(0.2)
+        inds = np.zeros(50, dtype=bool)  # all rows dead = all picks births
+        sorter = _sorter(50, inds=inds)
+        picked = _picked(50, 50)
+        out = m._apply_rj_flip_fraction(sorter, picked)
+        self.assertEqual(len(out["ids"]), 50)
+
+    def test_deaths_gated_births_kept_mixed(self):
+        np.random.seed(13)
+        m = _move(0.2)
+        inds = np.zeros(100, dtype=bool)
+        inds[:40] = True  # rows 0-39 alive (deaths), 40-99 dead (births)
+        sorter = _sorter(100, inds=inds)
+        picked = _picked(100, 100)
+        out = m._apply_rj_flip_fraction(sorter, picked)
+        allowed = sorter._rj_flip_allowed
+        out_alive = out["ids"][inds[out["ids"]]]
+        out_dead = out["ids"][~inds[out["ids"]]]
+        # every dead pick survives; alive picks survive iff in the subset
+        self.assertEqual(len(out_dead), 60)
+        self.assertTrue(np.all(allowed[out_alive]))
+        dropped = picked["ids"][inds[picked["ids"]] & ~allowed[picked["ids"]]]
+        self.assertFalse(np.isin(out["ids"], dropped).any())
+
+
+class SchedulerFrozenAdvanceTest(unittest.TestCase):
+    def _scheduler(self):
+        from lisatools.globalfit.moves.gbbands import BandScheduler
+        # 4 cells x 2 sources each, 2 slots staged
+        specials = np.repeat(np.array([10, 20, 30, 40]), 2)
+        return BandScheduler(specials, 2, xp=np)
+
+    def test_frozen_cell_never_retired(self):
+        sched = self._scheduler()
+        staged = np.asarray(sched.slot_specials).copy()
+        # finish both staged cells (one pick per cell per round, as in
+        # production -- fancy-index += dedupes repeated specials in one call)
+        sched.record_picks(staged)
+        sched.record_picks(staged)
+        frozen = staged[:1]
+        inds_fill, new_specials = sched.advance(frozen_specials=frozen)
+        # only the unfrozen finished slot retires/refills
+        self.assertEqual(len(inds_fill), 1)
+        self.assertTrue(np.all(np.asarray(sched.slot_specials)[inds_fill] != frozen[0]))
+        self.assertIn(int(frozen[0]), np.asarray(sched.slot_specials).tolist())
+        # after the flush the frozen cell retires normally
+        inds_fill2, _ = sched.advance()
+        self.assertEqual(len(inds_fill2), 1)
+
+    def test_advance_without_frozen_matches_legacy(self):
+        sched = self._scheduler()
+        staged = np.asarray(sched.slot_specials).copy()
+        sched.record_picks(staged)
+        sched.record_picks(staged)
+        inds_fill, new_specials = sched.advance()
+        self.assertEqual(len(inds_fill), 2)
 
 
 class ResolveRJFlipFractionTest(unittest.TestCase):

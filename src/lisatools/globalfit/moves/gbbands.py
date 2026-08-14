@@ -175,16 +175,25 @@ class BandScheduler:
         """Count one consumed source for each cell that got a pick."""
         self.cell_run[self._cells_of(picked_specials)] += 1
 
-    def advance(self):
+    def advance(self, frozen_specials=None):
         """Retire finished slots and stage pending cells into them.
 
         Returns ``(inds_fill, new_specials)``: the buffer slot positions to
         repack and the special indices of the cells to load there. Slots
         with no pending replacement are deactivated.
+
+        ``frozen_specials`` (grouped RJ scheduling, 2026-08-14): cells
+        holding a pending in-model source are never retired even when all
+        their sources are consumed — a pending source pins its cell's
+        buffer slot until the flush runs. Passing the frozen set lets the
+        caller stage new cells into the OTHER finished slots so the pool
+        keeps accumulating toward a full-width in-model block.
         """
         finished = self.slot_active & (
             self.cell_run[self.slot_cell] >= self.cell_counts[self.slot_cell]
         )
+        if frozen_specials is not None and len(frozen_specials):
+            finished &= ~self.xp.isin(self.slot_specials, frozen_specials)
         n_finished = int(finished.sum())
         if n_finished == 0:
             return self.xp.zeros(0, dtype=int), self.xp.zeros(0, dtype=int)

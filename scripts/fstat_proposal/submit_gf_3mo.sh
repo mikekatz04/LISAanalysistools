@@ -92,18 +92,13 @@ export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @
 # 0.3 random subset of eligible slots; in-model repeats still cover
 # ALL alive sources (flip gate is rj-only by construction).
 export GB_RJ_FLIP_FRACTION=0.2
-# In-model info-matrix jump scale (user ruling 2026-08-14): the 0.005
-# default measured 95% cold acceptance (steps ~0.5% of a posterior
-# sigma); 0.2 targets healthy mixing. Tune against the [GB_ACCEPT]
-# per-proposal-type line.
-export GB_JUMP_FACTOR=0.2
-# DIAGNOSTIC (2026-08-14) -- REMOVE after one [GB_TIMING rj] readout:
-# sync the device at every timing mark so the rj sub-marks
-# (rj_fstat_centers / rj_birth_prior / rj_getll / rj_score_rest) carry
-# exactly their own kernel time (host-vs-device attribution of the
-# ~1 s/round scoring section). Costs a little wall from the forced
-# syncs; one propose of data is enough.
-export GB_PROP_TIMING_SYNC=1
+# In-model info-matrix jump scale: 0.005 default measured 95% cold
+# acceptance; 0.2 measured 0.61 (job 185, n=800) -- still above the
+# 0.15-0.4 target, so 0.4 is the next notch. Tune against the
+# [GB_ACCEPT] per-proposal-type line.
+export GB_JUMP_FACTOR=0.4
+# (GB_PROP_TIMING_SYNC=1 diagnostic REMOVED 2026-08-14 after the sync
+# window -- re-add only for a fresh mark-attribution readout.)
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
 # Code default since 2026-08-13; pinned for the run record. =0 restores

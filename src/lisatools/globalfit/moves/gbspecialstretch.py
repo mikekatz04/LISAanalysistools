@@ -2147,6 +2147,47 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         )
                     extra_bool = _rj_ok if extra_bool is None else (extra_bool & _rj_ok)
 
+            # EARLY RJ FLIP (user design 2026-08-14): apply the flip
+            # fraction where the pre-drawn proposal coordinates/logpdf
+            # already live — BEFORE the scheduler is built — by excluding
+            # the gated DEAD (birth) slots from the pick pool entirely,
+            # exactly like the at-cap skip above. The old in-step gate
+            # spent a full pick round + scheduler cell count on every row
+            # it then discarded, which is why flip < 1 never saved wall
+            # (identical pick census at flip 0.2 and 0.3 in production).
+            # Excluded here, gated rows cost nothing: rounds shrink by
+            # ~the flip fraction and every birth reaching the kernel is a
+            # real proposal. ALIVE slots are NOT gated here — a picked
+            # alive source must still pool for its in-model repeats even
+            # when its death attempt is flip-gated (user rule 2026-08-12);
+            # the death gate stays in _run_rj_step.
+            if (
+                self.is_rj_prop
+                and not self.rj_replace
+                and not self.rj_removal_only
+                and self.rj_flip_fraction < 1.0
+            ):
+                xp_s = get_array_module(band_sorter.band_inds)
+                dead_ids = xp_s.arange(band_sorter.num_sources)[
+                    ~band_sorter.inds
+                ]
+                n_dead = int(len(dead_ids))
+                if n_dead:
+                    n_keep = max(
+                        1, int(round(self.rj_flip_fraction * n_dead))
+                    )
+                    birth_ok = xp_s.zeros(
+                        band_sorter.num_sources, dtype=bool
+                    )
+                    birth_ok[
+                        dead_ids[xp_s.random.permutation(n_dead)[:n_keep]]
+                    ] = True
+                    _flip_ok = band_sorter.inds | birth_ok
+                    extra_bool = (
+                        _flip_ok if extra_bool is None
+                        else (extra_bool & _flip_ok)
+                    )
+
             subset = band_sorter.get_subset(
                 units=units,
                 remainder=remainder,
@@ -2674,12 +2715,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         eligible = self.xp.zeros(band_sorter.num_sources, dtype=bool)
         eligible[subset.inds_main_band_sorter] = True
 
-        def _advance_and_refill():
+        def _advance_and_refill(frozen_specials=None):
             """Retire finished cells and refill their slots (with the cell-ll
             credit bracketing the switch-out). Returns the number of slots
-            refilled. Only legal when NO cell holds a pending in-model
-            source: a pending source pins its cell's buffer slot."""
-            inds_fill, new_specials = scheduler.advance()
+            refilled. Cells named in ``frozen_specials`` (grouped RJ pool)
+            are never retired: a pending source pins its cell's buffer slot
+            until the in-model flush runs."""
+            inds_fill, new_specials = scheduler.advance(
+                frozen_specials=frozen_specials
+            )
             if len(inds_fill):
                 # Switch-out: credit the outgoing cells from their slab
                 # before/after ll BEFORE the refill overwrites the slots.
@@ -2720,9 +2764,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # back-to-back, ACCUMULATING every source that ends the round alive
         # (accepted birth, or survived/skipped death) into a pending pool —
         # its cell is then FROZEN so the pool never holds two same-cell
-        # sources. When no unfrozen cell has candidates left (the grid is as
-        # full of inds=True picks as this pass can make it), ONE in-model
-        # block evolves the whole pool together, the pool clears, and the
+        # sources. When no unfrozen cell has candidates left, the scheduler
+        # first STAGES NEW CELLS into every non-frozen finished slot and the
+        # RJ sweep continues (full-width flush rule, 2026-08-14): the pool
+        # keeps growing across staging cohorts until nothing more can load,
+        # and only then does ONE in-model block — as close to buffer-width
+        # as the unit's survivor count allows — evolve the whole pool
+        # together; the pool clears, and the
         # sweep continues over the remaining sources. Same proposals, same
         # statistics — the in-model repeat loop just always runs at full
         # batch width instead of on each round's (often tiny) survivor set.
@@ -2791,10 +2839,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _free_mempool_each_round()
                     continue
 
-                # No pickable cell outside the frozen set: flush the pool
-                # through one full-width in-model block, THEN let the
-                # scheduler retire/refill (never earlier — a pending source
-                # pins its cell's slot).
+                # No pickable cell outside the frozen set. FULL-WIDTH FLUSH
+                # RULE (user design 2026-08-14): the in-model block must not
+                # run below the buffer width unless fewer sources remain, so
+                # FIRST try to stage more cells — frozen cells' slots stay
+                # pinned (advance skips them), every other finished slot
+                # refills, and the RJ sweep continues pooling into the new
+                # cohort. Only when nothing more can stage does the pool
+                # flush through ONE in-model block; a narrower-than-buffer
+                # flush therefore only happens when the unit genuinely has
+                # fewer poolable survivors than slots.
+                n_refilled = _advance_and_refill(
+                    frozen_specials=(
+                        pending_specials if len(pending_specials) else None
+                    )
+                )
+                if n_refilled:
+                    _free_mempool_each_round()
+                    continue
                 n_flushed = 0
                 if pending:
                     merged = (
@@ -3092,15 +3154,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return logg
 
     def _apply_rj_flip_fraction(self, band_sorter, picked):
-        """Restrict a picked batch to the proposal's RJ flip subset.
+        """Gate the DEATH attempts of picked ALIVE rows to the flip subset.
 
-        ``rj_flip_fraction`` < 1 draws ``round(fraction * num_sources)``
-        slots at random WITHOUT replacement, ONCE per proposal — the mask is
-        attached to the per-propose ``band_sorter`` (the same lifetime as
-        ``has_run_rj``), so every pick round of the proposal filters against
-        the same draw. Returns the filtered ``picked`` dict, or ``None``
-        when no picked row is in the subset. Fraction 1.0 is a pass-through
-        (bit-identical to the historical behavior).
+        Births are thinned EARLY (unit-open subset exclusion, 2026-08-14
+        user design): every dead row that reaches a pick already belongs to
+        the flip subset, so re-gating it here would square the fraction —
+        births therefore pass unconditionally. Alive rows are always
+        pickable (they must pool for their in-model repeats regardless of
+        the flip; user rule 2026-08-12), so their death attempt is thinned
+        HERE instead: a gated alive row drops out of the RJ step while the
+        caller's pre-gate ``picked`` dict still pools it. The mask is drawn
+        ONCE per proposal (attached to the per-propose ``band_sorter``,
+        same lifetime as ``has_run_rj``). Returns the filtered ``picked``
+        dict, or ``None`` when nothing survives. Fraction 1.0 is a
+        pass-through (bit-identical to the historical behavior).
         """
         if self.rj_flip_fraction >= 1.0:
             return picked
@@ -3112,7 +3179,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             allowed = xp.zeros(n, dtype=bool)
             allowed[xp.random.permutation(n)[:n_keep]] = True
             band_sorter._rj_flip_allowed = allowed
-        keep = allowed[picked["ids"]]
+        keep = allowed[picked["ids"]] | ~band_sorter.inds[picked["ids"]]
         if not bool(keep.any()):
             return None
         if bool(keep.all()):
@@ -3132,9 +3199,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``inds`` flips and the cell residual is updated through
         ``fill_template`` with the appropriate sign.
 
-        ``rj_flip_fraction`` < 1 gates which picked rows attempt a flip at
-        all (see :meth:`_apply_rj_flip_fraction`); the in-model repeats that
-        follow each pick round are NOT restricted.
+        ``rj_flip_fraction`` < 1: births are thinned EARLY (unit-open
+        subset exclusion — gated dead rows never enter the pick pool), so
+        only the DEATH attempts of picked alive rows are gated here (see
+        :meth:`_apply_rj_flip_fraction`); the in-model repeats that follow
+        are NOT restricted (gated alive rows still pool).
         """
         picked = self._apply_rj_flip_fraction(band_sorter, picked)
         if picked is None:
