@@ -1725,12 +1725,21 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         _rss_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
         _rss_gb = _rss_kb / (1e9 if _sys.platform == "darwin" else 1e6)
         _pool += f"  [host maxRSS {_rss_gb:.1f} GB]"
+        # HONEST total: the data slab alone under-reports by ~4x for XYZ
+        # (invC is (nc, nc, slab) per slot -- the term that actually sized
+        # the job-183 OOM).
+        _invc_mb = (self.nchannels
+                    * float(np.prod(self._per_band_data_shape))
+                    * np.dtype(self._per_band_data_dtype).itemsize / 1e6)
         logger.info(
-            "SubBandBuffer: %d cells x %s per-cell (%s) ~ %.0f MB%s "
-            "[band_slab_Nf=%s]%s",
+            "SubBandBuffer: %d cells x %s per-cell (%s) ~ %.0f MB data "
+            "+ ~%.0f MB invC = ~%.1f GB total%s [band_slab_Nf=%s]%s",
             self.num_bands_now, tuple(self._per_band_data_shape),
             np.dtype(self._per_band_data_dtype).name,
             _n_copies * self.num_bands_now * _cell_mb,
+            self.num_bands_now * _invc_mb,
+            (_n_copies * self.num_bands_now * _cell_mb
+             + self.num_bands_now * _invc_mb) / 1e3,
             " (incl. template twin)" if self.use_template_arr else "",
             self.band_slab_Nf, _pool,
         )
@@ -2720,6 +2729,20 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     def fill_buffer_residual_and_psd_from_acs(
         self, acs: AnalysisContainerArray, inds_fill: Optional[cp.ndarray] = None
     ) -> None:
+        # CHUNKED (2026-08-14): each tuple-fancy gather below materialises a
+        # rows x slab temporary -- for the XYZ invC that is ~763 KB/slot, so
+        # a 16,384-row gather is 12.5 GB in ONE allocation (job-183 OOM on a
+        # device already holding the persistent buffers). Bound the
+        # transient at GB_FILL_CHUNK slots per pass.
+        if inds_fill is None:
+            inds_fill = self.xp.arange(self.num_bands_now)
+        _chunk = max(1, int(os.environ.get("GB_FILL_CHUNK", "2048")))
+        n_fill = int(inds_fill.shape[0])
+        if n_fill > _chunk:
+            for c0 in range(0, n_fill, _chunk):
+                self.fill_buffer_residual_and_psd_from_acs(
+                    acs, inds_fill=inds_fill[c0:min(c0 + _chunk, n_fill)])
+            return
         # The outer ``acs`` is accessed via tuple-fancy indexing
         # ``data_shaped[0][inds1, inds2, inds3]`` (3-tuple for AET, 5-tuple
         # for XYZ CSD). BandView routes the tuple-fancy index through the
@@ -2729,8 +2752,6 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # NOTE self.xp, never the module-level ``cp``: on a CPU-backend run
         # on a machine where cupy imports, cp is cupy while the buffer /
         # sorter arrays are numpy (same trap as get_index / the sorter xp).
-        if inds_fill is None:
-            inds_fill = self.xp.arange(self.num_bands_now)
 
         outer_data_view = acs.data_shaped_view()
         outer_psd_view = acs.psd_shaped_view()

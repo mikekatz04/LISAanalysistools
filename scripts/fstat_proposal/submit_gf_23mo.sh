@@ -115,7 +115,7 @@ export GB_RJ_GROUPED_INMODEL=1
 # -> ~2.0 MB at 23 mo, so 8192 slots ~= 16 GB and in-model flushes run
 # 8192 cells wide (full unit residency = 44,352 cells ~= 88 GB does NOT
 # fit). Back off to 4096 (~8 GB) or 2560 (~5 GB) if the pool OOMs.
-export GB_N_SUBBANDS=8192   # PER GPU (LAT >= this commit): total = x n_gpus
+export GB_N_SUBBANDS=2048  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
 # RJ pick thinning (user ruling 2026-08-14): each round proposes to a
 # 0.3 random subset of eligible slots; in-model repeats still cover
 # ALL alive sources (flip gate is rj-only by construction).

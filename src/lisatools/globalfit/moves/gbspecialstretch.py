@@ -2318,6 +2318,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self.xp.cuda.runtime.deviceSynchronize()
         self.xp.cuda.runtime.deviceSynchronize()
 
+    # ============================================================
+    # ONE SubBandBuffer cache PER COMP GROUP, shared by EVERY GB move
+    # (user ruling 2026-08-14). WHY SHARED: rj_fstat_search,
+    # rj_prior_removal, rj_fstat_pe/rj_prior_pe and the in-model moves all
+    # build INTERCHANGEABLE buffers -- same computation objects, same slab
+    # geometry; the only real construction differences (template twin for
+    # tempering, rj-vs-inmodel edge windows) ride in the cache ENTRY key.
+    # Per-move caches meant every move held its own multi-GB allocation
+    # simultaneously: in job 183 rj_fstat_search's 32k-slot buffer AND
+    # rj_prior_removal's 11.5k-slot buffer were both resident (~45 GB of
+    # duplicated slabs) when the fill OOM'd. Moves propose SEQUENTIALLY, so
+    # sharing is race-free; when consecutive moves need different sizes the
+    # single-buffer policy drops+rebuilds (~1-2 s per alternation) instead
+    # of holding both. Scope key = id(comp group): VGB moves carry their
+    # own comps and therefore their own scope automatically -- GB and VGB
+    # never share a buffer.
+    # ============================================================
+    _shared_buffer_caches: dict = {}
+
+    @property
+    def _buffer_cache_scope(self):
+        comp = (self.gb_wdm_comp if getattr(self, "gb_wdm_comp", None)
+                is not None else getattr(self, "gb_fd_comp", None))
+        return id(comp)
+
+    @property
+    def _prop_buffer_cache(self):
+        return GBSpecialBase._shared_buffer_caches.get(
+            self._buffer_cache_scope)
+
+    @_prop_buffer_cache.setter
+    def _prop_buffer_cache(self, value):
+        if value is None:
+            GBSpecialBase._shared_buffer_caches.pop(
+                self._buffer_cache_scope, None)
+        else:
+            GBSpecialBase._shared_buffer_caches[
+                self._buffer_cache_scope] = value
+
     @property
     def num_band_preload_total(self) -> int:
         """Total staged-buffer slots: ``GB_N_SUBBANDS`` is PER RUN DEVICE
@@ -2345,7 +2384,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if cache is None:
             cache = self._prop_buffer_cache = {}
         k = int(specials.shape[0])
-        sig = tuple(sorted(kwargs.items()))
+        # rj-vs-inmodel buffers differ in edge windows (N/4 widening on RJ
+        # sorters), so the sorter's rj flag is part of the entry key even
+        # though the cache itself is shared across moves.
+        sig = ((bool(getattr(sorter, "rj_prop", False)),)
+               + tuple(sorted(kwargs.items())))
         # ONE live buffer per construction signature (user design
         # 2026-08-13): the allocation follows the current unit's slot count,
         # so a size change drops the old buffer (the pool reuses its blocks)
