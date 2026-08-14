@@ -25,8 +25,10 @@ Exit 0 + "GATE: PASS" = restart production on the new wheels.
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 
 import h5py
 import numpy as np
@@ -40,8 +42,12 @@ COMPARE_SUB = ("gb/chain", "gb/inds", "gb/band_cold_ll", "gb/band_temps",
                "gb/band_leaf_cap", "gb/d_h", "gb/h_h")
 
 
+LEG_STATS = {}
+
+
 def run_leg(name: str, threaded: str) -> str:
     out = os.path.join(BASE, name)
+    os.makedirs(out, exist_ok=True)
     env = dict(os.environ)
     env.update({
         "GB_ROUTER_THREADED": threaded,
@@ -53,7 +59,33 @@ def run_leg(name: str, threaded: str) -> str:
         # gated bit-identical, so leave whatever the env pins.
     })
     print(f"[gate] leg {name}: GB_ROUTER_THREADED={threaded} -> {out}")
-    r = subprocess.run([sys.executable, RUNNER], env=env)
+    # Built-in nvidia-smi sampler (5 s cadence) so utilization evidence is
+    # automatic -- no one has to remember to watch a terminal.
+    smi = None
+    csv_path = os.path.join(out, "gpu_util_gate.csv")
+    if shutil.which("nvidia-smi"):
+        smi = subprocess.Popen(
+            ["nvidia-smi",
+             "--query-gpu=timestamp,index,utilization.gpu,memory.used",
+             "--format=csv,noheader,nounits", "-l", "5"],
+            stdout=open(csv_path, "w"), stderr=subprocess.DEVNULL)
+    t0 = time.perf_counter()
+    try:
+        r = subprocess.run([sys.executable, RUNNER], env=env)
+    finally:
+        if smi is not None:
+            smi.terminate()
+    wall = time.perf_counter() - t0
+    util = {}
+    if os.path.exists(csv_path):
+        for line in open(csv_path):
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 3 and parts[1].isdigit():
+                util.setdefault(int(parts[1]), []).append(float(parts[2]))
+    LEG_STATS[name] = (wall, {d: float(np.mean(u)) for d, u in util.items()})
+    us = "  ".join(f"dev{d} mean {m:.0f}%"
+                   for d, m in sorted(LEG_STATS[name][1].items()))
+    print(f"[gate] leg {name}: wall {wall:.0f} s  {us or '(no smi data)'}")
     if r.returncode != 0:
         print(f"GATE: FAIL -- leg {name} exited {r.returncode}")
         sys.exit(1)
@@ -140,6 +172,11 @@ def main():
     ok = compare(h5path(a), h5path(b))
     ok = scan_log(a, "serial") and ok
     ok = scan_log(b, "threaded") and ok
+    if "serial" in LEG_STATS and "threaded" in LEG_STATS:
+        ws, wt = LEG_STATS["serial"][0], LEG_STATS["threaded"][0]
+        print(f"[gate] speedup (whole leg incl. fit/build): "
+              f"{ws / max(wt, 1e-9):.2f}x  (serial {ws:.0f} s -> "
+              f"threaded {wt:.0f} s)")
     print("GATE: PASS" if ok else "GATE: FAIL")
     sys.exit(0 if ok else 1)
 
