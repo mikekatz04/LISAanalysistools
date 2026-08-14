@@ -2762,6 +2762,15 @@ def build_gb_moves(
     # OFF because the single-stage campaigns (gb_no_fg GB_MODE=search) run
     # the SEARCH through the pe-named stage and rely on the mode-following
     # behavior below.
+    # PE tempering cadence (user ruling 2026-08-14): the PE stack carries
+    # SEVERAL swap-enabled GB moves (rj_fstat_pe / rj_prior_pe /
+    # rj_fstat_mcmc / rj_refit), which historically meant multiple band
+    # swap stages per iteration. The cadence makes tempering a per-branch
+    # budget: at most once per GB_TEMPER_EVERY_PROPOSES (default 3) TOTAL
+    # GBSpecial* propose() calls, whichever swap-enabled move crosses the
+    # budget first. Search-named moves keep cadence 1 (temper each
+    # iteration, inside rj_prior_removal per GB_TEMPER_ON_REMOVAL).
+    _pe_temper_every = int(os.environ.get("GB_TEMPER_EVERY_PROPOSES", "3"))
     _pe_strict = os.environ.get("GB_PE_MOVES_STRICT", "0") == "1"
     _pe_cap_off = (
         {"leaf_cap_start": None, "leaf_cap_update": False} if _pe_strict else {}
@@ -2780,6 +2789,7 @@ def build_gb_moves(
             _rj_phase_max if (_gb_mode_search and not _pe_strict) else False
         ),
         run_swaps=True,
+        temper_every_proposes=_pe_temper_every,
         gpus=[],
         **{**gb_move_kwargs, "rj_flip_fraction_default": _rj_flip_default,
            **_pe_cap_off}
@@ -2797,6 +2807,7 @@ def build_gb_moves(
         use_prior_removal=False,
         phase_maximize=False,
         run_swaps=True,
+        temper_every_proposes=_pe_temper_every,
         gpus=[],
         **{**gb_move_kwargs, "leaf_cap_update": False,
            "rj_flip_fraction_default": _rj_flip_default, **_pe_cap_off}
@@ -2807,6 +2818,7 @@ def build_gb_moves(
         *gb_move_args,
         rj_proposal_distribution=None,
         run_swaps=True,
+        temper_every_proposes=_pe_temper_every,
         name="rj_fstat_mcmc",
         phase_maximize=False,
         gpus=[],
@@ -2835,6 +2847,7 @@ def build_gb_moves(
             *gb_move_args,
             rj_proposal_distribution=None,
             run_swaps=True,
+            temper_every_proposes=_pe_temper_every,
             name="rj_refit",
             fp=_refit_fp,
             phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],

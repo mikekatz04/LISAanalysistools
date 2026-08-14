@@ -465,6 +465,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         wdm_band_slab_layers=None,
         wdm_slab_guard_layers=1,
         run_swaps=True,
+        temper_every_proposes=1,
         max_data_store_size=6000,
         force_backend=None,
         gb_wdm_comp=None,
@@ -696,6 +697,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.gb_wdm_comp = gb_wdm_comp
         self.stop_here = True
         self.run_swaps = run_swaps
+        # Tempering cadence (user design 2026-08-14): a swap-enabled move
+        # runs the band-swap stage only when at least this many TOTAL
+        # branch proposes (every GBSpecial* propose() in the process,
+        # shared census) have elapsed since the branch last tempered.
+        # 1 = every eligible propose (legacy). Wired per-move by the
+        # recipe: PE stacks carry several swap-enabled moves, so the
+        # cadence turns tempering into a per-branch budget (e.g. every 3
+        # gb proposes) instead of a per-move duty.
+        self.temper_every_proposes = max(1, int(temper_every_proposes))
 
         if self.backend.uses_cupy:
             self.mempool = self.xp.get_default_memory_pool()
@@ -2470,6 +2480,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # never share a buffer.
     # ============================================================
     _shared_buffer_caches: dict = {}
+    # Shared per-branch propose census + last-temper marker for the
+    # tempering cadence (user design 2026-08-14). Class-level ON PURPOSE:
+    # "every N proposes" counts ALL GBSpecial* propose() calls of the
+    # branch across every move instance in the process.
+    _branch_propose_counts: dict = {}
+    _branch_last_temper: dict = {}
 
     @property
     def _buffer_cache_scope(self):
@@ -3407,6 +3423,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if _gb_use_distance(self):
             logg = logg - lv  # Jacobian d(ln dist)/d(dist) = 1/dist
         return logg
+
+    def _temper_cadence_fire(self) -> bool:
+        """Tempering cadence gate (user design 2026-08-14).
+
+        Fires when at least ``temper_every_proposes`` TOTAL branch
+        proposes (shared census across every move instance) have elapsed
+        since the branch last tempered, and records the firing. Called
+        LAST in the swap-stage condition chain so it only consumes the
+        budget when every other gate already passed. n <= 1 is the
+        legacy every-eligible-propose behavior. On a fresh process the
+        first eligible propose always fires (ladder adaptation starts
+        immediately after any restart).
+        """
+        n = getattr(self, "temper_every_proposes", 1)
+        if n <= 1:
+            return True
+        cnt = GBSpecialBase._branch_propose_counts.get(self.branch_name, 0)
+        last = GBSpecialBase._branch_last_temper.get(self.branch_name)
+        if last is not None and (cnt - last) < n:
+            return False
+        GBSpecialBase._branch_last_temper[self.branch_name] = cnt
+        return True
 
     def _band_shutoff_enabled(self) -> bool:
         """High-frequency barren-band birth shutoff: is it on for this move?
@@ -6153,6 +6191,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.backend.uses_cupy and os.environ.get("GB_PROP_TIMING_SYNC", "0") == "1":
             _tm_sync = self.xp.cuda.runtime.deviceSynchronize
         self._prop_timer = tm = _ProposeTimer(sync_fn=_tm_sync)
+        # Tempering-cadence census: every propose of this branch ticks the
+        # shared counter (see _temper_cadence_fire).
+        GBSpecialBase._branch_propose_counts[self.branch_name] = (
+            GBSpecialBase._branch_propose_counts.get(self.branch_name, 0) + 1
+        )
         # [GB_ACCEPT rj-split] per-propose class counters + the per-band
         # birth-accept tally feeding the high-f barren-band shutoff
         # (user requests 2026-08-14). Both consumed in the propose-end
@@ -6427,7 +6470,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             and self.ntemps > 1
             and (self.is_rj_prop or self.swap_on_in_model)
             and self.run_swaps
-            # and False
+            # cadence LAST: only consumes the per-branch budget when every
+            # other gate already passed (see _temper_cadence_fire).
+            and self._temper_cadence_fire()
         ):
             st_temp = time.perf_counter()
             with tm.span("ll_checks"):

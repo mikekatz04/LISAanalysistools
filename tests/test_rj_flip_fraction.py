@@ -275,6 +275,53 @@ class BandShutoffTest(unittest.TestCase):
         self.assertFalse(bool(m._rj_band_shutoff[1]))
 
 
+class TemperCadenceTest(unittest.TestCase):
+    def _move(self, branch, n):
+        m = GBSpecialStretchMove.__new__(GBSpecialStretchMove)
+        m.branch_name = branch
+        m.temper_every_proposes = n
+        return m
+
+    def setUp(self):
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialBase
+        self._base = GBSpecialBase
+        self._base._branch_propose_counts = {}
+        self._base._branch_last_temper = {}
+
+    def _tick(self, branch):
+        self._base._branch_propose_counts[branch] = (
+            self._base._branch_propose_counts.get(branch, 0) + 1)
+
+    def test_every_n_total_proposes_shared_across_moves(self):
+        # two swap-enabled moves + one non-swap move all tick the census;
+        # tempering fires once per 3 TOTAL proposes on whichever
+        # swap-enabled move crosses the budget first.
+        a, b = self._move("gb", 3), self._move("gb", 3)
+        fires = []
+        for i in range(9):
+            self._tick("gb")
+            mover = (a, b)[i % 2]
+            if mover._temper_cadence_fire():
+                fires.append(i + 1)
+        # first eligible propose fires (fresh process), then every 3rd tick
+        self.assertEqual(fires, [1, 4, 7])
+
+    def test_n_one_is_legacy_passthrough(self):
+        m = self._move("gb", 1)
+        for _ in range(5):
+            self._tick("gb")
+            self.assertTrue(m._temper_cadence_fire())
+
+    def test_branches_independent(self):
+        g, v = self._move("gb", 3), self._move("vgb", 1)
+        self._tick("gb"); self._tick("vgb")
+        self.assertTrue(g._temper_cadence_fire())
+        self.assertTrue(v._temper_cadence_fire())
+        self._tick("gb"); self._tick("vgb")
+        self.assertFalse(g._temper_cadence_fire())  # gb budget not reached
+        self.assertTrue(v._temper_cadence_fire())   # vgb cadence 1
+
+
 class ResolveRJFlipFractionTest(unittest.TestCase):
     def test_kwarg_wins_over_env(self):
         import os
