@@ -141,11 +141,12 @@ export VGB_SIGHET_INMODEL=0
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
 export GB_ROUTER_THREADED=1
 # PINNED fstat scorer (user ruling 2026-08-13): the =check parity gate
-# for the multi-device fan-out was skipped as not worth the delay --
-# fstat fit speed is far from the bottleneck -- so this run uses the
-# single-device pin, the exact path the 3-month production run
-# validates. Flip to =1 only after a green FSTAT_SIGHET_MULTIDEV=check
-# pass on a 2-GPU allocation.
-export FSTAT_SIGHET_MULTIDEV=0
+# GATE PASSED 2026-08-14 05:58 (run_fstat_rj_search 7.0-7.8 mHz,
+# 2 H100s, FSTAT_SIGHET_MULTIDEV=check): full comb+stageB fit,
+# every batch bit-identical between the 2-lane fan-out and the
+# pinned single-device scorer. Lanes only overlap on a GBGPU wheel
+# built from >= 4381300 (GIL release); older wheels are correct but
+# serialize. =0 restores the single-device pin.
+export FSTAT_SIGHET_MULTIDEV=1
 
 python scripts/fstat_proposal/run_combined_staged.py
