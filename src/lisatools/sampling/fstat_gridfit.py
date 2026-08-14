@@ -357,7 +357,12 @@ def chunked_fstat_sweep(call_fstat: Callable, params, *, xp, label: str = "",
 
     fp = (ckpt_fingerprint(params, extra=label + fingerprint_extra)
           if ckpt else "")
-    params = xp.asarray(params)
+    # Never upload the full set: the comb reaches ~1.2e9 rows at 23-mo
+    # density (~85 GB, more than any device), so rows stay where the caller
+    # assembled them (host, for the comb) and every call_fstat implementation
+    # converts its own FSTAT_BATCH-slice input.
+    if not hasattr(params, "shape"):
+        params = np.asarray(params)
     n = params.shape[0]
     batch = fstat_knob("FSTAT_BATCH", int)
     F = xp.empty(n, dtype=xp.float64)
