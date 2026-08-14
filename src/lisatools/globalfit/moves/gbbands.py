@@ -2277,55 +2277,100 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # band_buffer / template_buffer / psd_buffer are either ndarrays
         # (single-GPU; in-place mutation rolls back into the underlying
         # buffer) or BandView (multi-GPU; mutating after materialisation
-        # has no effect on the shards). Either way numerator_in needs the
-        # explicit ``.copy()`` so the in-place ``-= self.template_buffer``
-        # below doesn't corrupt the residual buffer.
-        numerator_in = self._materialize(self.band_buffer).copy()
-        if self.use_template_arr:
-            numerator_in -= self._materialize(self.template_buffer)
-        psd_buffer = self._materialize(self.psd_buffer)
+        # PER-SHARD, CHUNKED reduction (2026-08-14). The previous pipeline
+        # gathered the FULL band-sharded buffer to gpus[0], copied it for
+        # the template subtraction, and let einsum transpose-copy it again:
+        # transients scaling with TOTAL slots (~50 GB at 32,768 slots, all
+        # on one device) that OOM'd job 180 the moment concurrent lanes
+        # made them coexist. Each shard now reduces on its OWNING device in
+        # GB_BAND_LL_CHUNK-slot chunks; only the per-band scalars move.
+        # Domain-generic inner product: <a|b> = 4 sum(a* invC b) * dc (dc =
+        # basis measure; FD df, WDM pixel measure), trailing axes flattened
+        # -- identical arithmetic per band, chunking only batches it.
+        if noise_only and self.tdi_channel_setup == "XYZ":
+            raise NotImplementedError(
+                "Noise-only likelihood requires log-determinant over "
+                "frequency for XYZ CSD.")
 
-        # Domain-generic inner product: <a|b> = 4 sum(a* invC b) * dc where
-        # dc is the basis measure (FD: df; WDM: the pixel measure) -- the
-        # same convention as lisatools.diagnostic.inner_product. Trailing
-        # basis axes (FD: k; WDM: (Nf, Nt)) are flattened.
-        nb = numerator_in.shape[0]
         nc = self.nchannels
-        num_flat = numerator_in.reshape(nb, nc, -1)
         dc = float(self.settings.differential_component)
+        chunk = max(1, int(os.environ.get("GB_BAND_LL_CHUNK", "1024")))
+        xyz = self.tdi_channel_setup == "XYZ"
 
-        if self.tdi_channel_setup == "XYZ":
-            psd_flat = psd_buffer.reshape(nb, nc, nc, -1)
-            # b=bands, i/j=channels, k=flattened basis
-            source_term = (
-                - (1.0 / 2.0) * 4.0 * dc
-                * cp.einsum(
-                    "bik,bijk,bjk->b", num_flat.conj(), psd_flat, num_flat
-                ).real
-            )
+        def _reduce(num, psd):
+            k = num.shape[0]
+            nf = num.reshape(k, nc, -1)
+            if xyz:
+                pf = psd.reshape(k, nc, nc, -1)
+                return (-(1.0 / 2.0) * 4.0 * dc * cp.einsum(
+                    "bik,bijk,bjk->b", nf.conj(), pf, nf).real)
+            pf = psd.reshape(k, nc, -1)
+            return (-(1.0 / 2.0) * 4.0 * dc
+                    * cp.sum((nf.conj() * nf) * pf, axis=(1, 2)).real)
 
+        band = self.band_buffer
+        psd_b = self.psd_buffer
+        tmpl = self.template_buffer if self.use_template_arr else None
+
+        if isinstance(band, BandView):
+            aca = band._aca
+            nb_tot = int(band.shape[0])
+            out_host = np.empty(nb_tot, dtype=np.float64)
+            psd_log_acc = 0.0
+            uses_dev = getattr(aca, "gpus", None) is not None
+            main_dev = cp.cuda.runtime.getDevice() if uses_dev else None
+            try:
+                for s in range(len(band._shards)):
+                    ids = np.asarray(asnumpy(aca.gpu_splits[s]), dtype=int)
+                    if uses_dev:
+                        cp.cuda.runtime.setDevice(int(aca.gpus[s]))
+                    d_sh = band._shards[s]
+                    p_sh = psd_b._shards[s]
+                    t_sh = tmpl._shards[s] if tmpl is not None else None
+                    for c0 in range(0, d_sh.shape[0], chunk):
+                        c1 = min(c0 + chunk, d_sh.shape[0])
+                        num = (d_sh[c0:c1] - t_sh[c0:c1]
+                               if t_sh is not None else d_sh[c0:c1])
+                        if not noise_only:
+                            out_host[ids[c0:c1]] = asnumpy(
+                                _reduce(num, p_sh[c0:c1]))
+                        if noise_only or not source_only:
+                            pc = p_sh[c0:c1]
+                            nz = pc[pc != 0.0]
+                            psd_log_acc += float(asnumpy(-cp.sum(cp.log(
+                                cp.abs(1 / nz if noise_only else nz)))))
+            finally:
+                if uses_dev:
+                    cp.cuda.runtime.setDevice(main_dev)
             if noise_only:
-                raise NotImplementedError("Noise-only likelihood requires log=determinant over frequency for XYZ CSD.")
-
+                return psd_log_acc
+            source_term = cp.asarray(out_host)
         else:
-            psd_flat = psd_buffer.reshape(nb, nc, -1)
-            source_term = (
-                - (1.0 / 2.0) * 4.0 * dc
-                * cp.sum((num_flat.conj() * num_flat) * psd_flat, axis=(1, 2)).real
-            )
-
+            nb_tot = int(band.shape[0])
+            source_term = cp.empty(nb_tot, dtype=cp.float64)
+            psd_log_acc = 0.0
+            for c0 in range(0, nb_tot, chunk):
+                c1 = min(c0 + chunk, nb_tot)
+                num = (band[c0:c1] - tmpl[c0:c1]
+                       if tmpl is not None else band[c0:c1])
+                if not noise_only:
+                    source_term[c0:c1] = _reduce(num, psd_b[c0:c1])
+                if noise_only or not source_only:
+                    pc = psd_b[c0:c1]
+                    nz = pc[pc != 0.0]
+                    psd_log_acc += float(asnumpy(-cp.sum(cp.log(
+                        cp.abs(1 / nz if noise_only else nz)))))
             if noise_only:
-                return -cp.sum(cp.log(cp.abs(1 / psd_buffer[psd_buffer != 0.0])))
+                return psd_log_acc
 
         if source_only:
             return source_term
 
         # Diagonal noise_term fall_back # TODO check if this is sufficient not used currently anyway
-        psd_term = -cp.sum(cp.log(cp.abs(psd_buffer[psd_buffer != 0.0])))
         if self.tdi_channel_setup == "XYZ":
             warnings.warn("The current psd ll calculation is not correct for XYZ CSD channel setup.")
 
-        return source_term + psd_term
+        return source_term + psd_log_acc
 
     # Explicit alias while callers migrate off the ``likelihood`` name (which
     # shadows the inherited per-AC ACA dispatch).
