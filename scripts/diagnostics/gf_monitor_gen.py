@@ -69,7 +69,23 @@ vgb_hh = sub["vgb/h_h"][:NIT]                       # (it, 24, 55)
 gb_inds = g["inds/gb"][:NIT, 0, 0]                  # (it, 24, 10000)
 gb_chain_cold = g["chain/gb"][NIT-1, 0, 0]          # (24, 10000, 9) last iter
 gb_alive_last = g["inds/gb"][NIT-1, 0, 0]           # (24, 10000)
-caps = sub["gb/band_leaf_cap"][:NIT]                # (it, 154)
+# TORN-SNAPSHOT TOLERANCE (2026-08-15): a store copied while the run is
+# mid-[SAVE] can carry truncated gzip chunks -- the dataset OPENS fine and
+# only fails when READ ("filter returned failure during read"). That is a
+# snapshot artifact, not a run fault, and it must not cost the whole page:
+# on the v2 zip the tear was confined to sub_backend/gb/* while chain,
+# inds and log_like -- i.e. every science panel -- were perfectly readable.
+# Degrade per-dataset instead of dying.
+def _safe(node, key, default=None, label=None):
+    try:
+        return node[key][:NIT] if NIT else node[key][()]
+    except Exception as e:
+        MISSING.append(
+            f"{label or key}: unreadable in this snapshot "
+            f"(likely copied mid-save) -- {type(e).__name__}")
+        return default
+
+caps = _safe(sub, "gb/band_leaf_cap", None, "per-band leaf caps")  # (it, 154)
 band_edges = sub["gb/band_edges"][:]
 psd_sw_a = sub["psd/swaps_accepted"][:NIT]; psd_sw_p = sub["psd/swaps_proposed"][:NIT]
 gal_sw_a = sub["galfor/swaps_accepted"][:NIT]; gal_sw_p = sub["galfor/swaps_proposed"][:NIT]
@@ -191,10 +207,17 @@ for w in range(nwalk):
 ax[0].plot(it, gb_counts.max(axis=1), color=GREEN, lw=1.8)
 ax[0].set_title("GB leaf count (cold walkers)"); ax[0].set_xlabel("iteration")
 ax[0].set_ylim(bottom=-0.5)
-im = ax[1].imshow(caps.T, aspect="auto", origin="lower", cmap="viridis",
-                  extent=[0, NIT, 0, caps.shape[1]])
-ax[1].set_title("per-band leaf cap"); ax[1].set_xlabel("iteration"); ax[1].set_ylabel("band")
-fig.colorbar(im, ax=ax[1], shrink=0.85)
+if caps is not None:
+    im = ax[1].imshow(caps.T, aspect="auto", origin="lower", cmap="viridis",
+                      extent=[0, NIT, 0, caps.shape[1]])
+    ax[1].set_title("per-band leaf cap"); ax[1].set_xlabel("iteration")
+    ax[1].set_ylabel("band")
+    fig.colorbar(im, ax=ax[1], shrink=0.85)
+else:
+    ax[1].text(0.5, 0.5, "leaf caps unreadable\n(snapshot copied mid-save)",
+               ha="center", va="center", transform=ax[1].transAxes,
+               color=DIM, fontsize=9)
+    ax[1].set_xticks([]); ax[1].set_yticks([])
 # High-f barren-band birth shutoff (GB_RJ_BAND_SHUTOFF_*): each shutoff
 # emits "[GB_BAND_SHUTOFF <move>] band <b> ... births OFF ..." -- mark
 # those band rows in red on the cap plot (marker at the right edge +
