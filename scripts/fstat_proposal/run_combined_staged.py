@@ -376,11 +376,35 @@ def main() -> int:
     # LOUD completion marker on stdout: "Residuals saved" goes to the
     # logger FILE only, so a finished run used to look exactly like a
     # silent death on the console.
-    print(
-        f"[combined] RUN COMPLETE: num_iterations="
-        f"{fit.general.num_iterations} reached; residuals saved.",
-        flush=True,
-    )
+    #
+    # RANK-GUARDED (2026-08-15): under `mpiexec -n 3` (dedicated saver
+    # rank) ONLY the main rank runs the MCMC -- run_global_fit gates it on
+    # `rank == main_rank` and the spare/saver ranks return immediately.
+    # Printed unconditionally, those ranks announced "RUN COMPLETE:
+    # num_iterations=2000 reached" seconds after launch, while the real
+    # run was still starting its first stage. Alarming and completely
+    # false, so say which rank is talking and only claim completion from
+    # the rank that actually sampled.
+    _rank, _main = 0, 0
+    try:
+        from mpi4py import MPI
+
+        _rank = MPI.COMM_WORLD.Get_rank()
+        _main = int(getattr(fit.settings_dict.rank_info, "main_rank", 0))
+    except Exception:
+        pass
+    if _rank == _main:
+        print(
+            f"[combined] RUN COMPLETE: num_iterations="
+            f"{fit.general.num_iterations} reached; residuals saved.",
+            flush=True,
+        )
+    else:
+        print(
+            f"[combined] rank {_rank} (non-sampling helper) exiting; "
+            f"the run continues on rank {_main}.",
+            flush=True,
+        )
     return 0
 
 
