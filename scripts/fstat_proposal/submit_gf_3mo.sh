@@ -15,8 +15,8 @@
 #SBATCH --partition=gpu-80-spot   # GPU partition
 #SBATCH --gres=gpu:2              # 2 GPUs (GPUS=0,1 below are LOCAL indices)
 #SBATCH --nodes=1                 # single node
-#SBATCH --ntasks=1                # single process (MPI singleton)
-#SBATCH --cpus-per-task=4
+#SBATCH --ntasks=3                # main + stopped spare + SAVER rank (mpiexec -n 3)
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
 #SBATCH --output=gf3mo_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
@@ -181,4 +181,14 @@ export VGB_SIGHET_INMODEL=0
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
 export GB_ROUTER_THREADED=1
 
-python scripts/fstat_proposal/run_combined_staged.py
+# DEDICATED SAVER RANK (armed 2026-08-15, user directive -- the [SAVE]
+# math flipped: the ~60 s sync write was 2% of a 55-min iteration but
+# is 6-10% of the post-mega-batch 10-17 min iterations). np>=3: rank 0
+# samples, the HIGHEST rank becomes the async results/saver rank, the
+# middle spare is stopped at startup (run.py GlobalFit role logic).
+# FIRST-LAUNCH CHECK (known caveat): run_combined_staged.py builds on
+# EVERY rank before roles resolve -- watch nvidia-smi for saver/spare
+# device allocations; if the extra ranks hold GPU memory, drop back to
+# the plain single-process line below until the rank-gated build lands.
+mpiexec -n 3 python scripts/fstat_proposal/run_combined_staged.py
+# python scripts/fstat_proposal/run_combined_staged.py   # single-process fallback
