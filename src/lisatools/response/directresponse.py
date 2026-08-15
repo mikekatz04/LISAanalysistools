@@ -517,6 +517,25 @@ class pyResponseTDI(LISAToolsParallelModule):
         # when it is uniform and refuse when it is not, rather than silently
         # broadcasting a 2-D eval grid into code that indexes ``t_arr[0]``.
         _shift = np.atleast_1d(np.asarray(asnumpy(t0_shift_to_data), dtype=np.float64))
+        # This refusal is the reason an MCMC-shaped batch cannot be launched:
+        # t_merger varies continuously per walker, so every walker needs a
+        # different sub-sample alignment and the batch is rejected. That costs
+        # sampling the entire batched speedup, so the obvious shortcut was
+        # tried and REFUTED -- do not retry it.
+        #
+        # MEASURED (8 sampler-shaped points, short config, SNR 3103): forcing
+        # one shared shift (the batch mean) launches fine and gives
+        # max |dlogL| = 3.6e+05 against the per-source serial answer, i.e.
+        # 3.8e-2 of SNR^2. The observed shift spread was 9.62 s against
+        # dt = 10 s -- the full (-dt/2, dt/2] range, because the offset is a
+        # continuous function of t_merger. Bucketing walkers by shift is
+        # equally useless for the same reason: one walker per bucket.
+        #
+        # The two options that survive both live upstream of here: generate
+        # each waveform on a grid-ALIGNED time array so every shift is zero
+        # (waveform stage), or split ``t0_arr`` into an evaluation offset and a
+        # waveform-index offset in the kernel (LISAResponse.cu:557 and :606 are
+        # the two use sites) so a per-source shift becomes expressible.
         if _shift.size > 1 and not np.allclose(_shift, _shift[0], rtol=0.0, atol=1e-12):
             raise ValueError(
                 "pyResponseTDI batched projections need one shared sub-sample "
@@ -632,7 +651,22 @@ class pyResponseTDI(LISAToolsParallelModule):
         self.nlinks = 6
         input_flat = input_in.reshape(-1)  # (batch_size * num_inputs_per_source,)
 
-        y_gw = self.xp.zeros(batch_size * self.nlinks * self.num_pts, dtype=self.xp.float64)
+        # Size y_gw by what the KERNEL indexes, not by self.num_pts. The kernel
+        # is handed num_inputs_per_source as its num_delays (below) and writes
+        # y_gw[batch_ind * NLINKS * num_delays + link_i * num_delays + i]
+        # (LISAResponse.cu). The assert above only requires
+        # num_inputs_per_source >= self.num_pts, so any config where they
+        # differ overruns the buffer by 6 * batch_size * (difference) doubles --
+        # linear in batch size, and silent on GPU, where
+        # return_pointer_and_check_length skips its length check entirely under
+        # __CUDA_COMPILATION__ (binding_flr.hpp).
+        #
+        # Measured equal in every config exercised here (stock 1 yr, 0.25 yr,
+        # 0.125 yr: 264485/264485, 264485/264485, 238618/238618), so this is
+        # byte-identical today and a guard against the case that is not.
+        y_gw = self.xp.zeros(
+            batch_size * self.nlinks * num_inputs_per_source, dtype=self.xp.float64
+        )
         self.response_gen(
             y_gw,
             t_arr,
