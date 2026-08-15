@@ -176,6 +176,24 @@ export GB_USE_GALAXY_PRIOR=1
 # ---- VGB: exact chunked-het in-model scorer (sig-het accuracy at the
 #      loudest-VGB SNRs is unverified -- [GB_CELL_LL] growth in smoke 1) ----
 export VGB_SIGHET_INMODEL=0
+# VGB RELAUNCH BLOCK (2026-08-15, user rulings). The VGB likelihood was
+# OFF all run (betas=[1e-4] bug) and 36/55 leaves were frozen by the GB
+# SNR gate -- both fixed in code (76cd3237); pre-fix VGB samples are
+# prior-only. BEFORE resubmitting, run BOTH migrations on the store:
+#   python scripts/fstat_proposal/migrate_vgb_chirp_basis.py \
+#       ${STORE_DIR}/gf_prod_3mo_testing.h5 <catalogue_dir>   # 5->6 cols
+#   python scripts/fstat_proposal/fix_vgb_band_temps.py \
+#       ${STORE_DIR}/gf_prod_3mo_testing.h5                   # betas heal
+# Chirp-mass basis (user: "Yes on VGBs -> CHIRP_MASS_BASIS"): samples
+# [dist, phi0, cos_iota, psi, Mc, fdot_astro_ratio] -- un-collapses the
+# ratio dimension (additive VGB_RATIO_INIT_WIDTH init).
+export VGB_CHIRP_MASS_BASIS=1
+# Single-rung ladder for THIS store: the stored band_temps are (45, 1)
+# and resume restores them from the h5 -- the betas fix would otherwise
+# build a 12-rung config against 1-rung state. VGBs are unimodal at
+# truth; 1 rung is fine at 3 months. Fresh 6-mo runs drop this line and
+# get the full ladder.
+export VGB_NTEMPS=1
 # Concurrent per-device shard dispatch (code default since 2026-08-13;
 # explicit here for the run record). =0 restores serial dispatch if the
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
