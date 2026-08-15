@@ -636,6 +636,14 @@ canvas {{ background:var(--panel); border:1px solid var(--line); border-radius:4
 button {{ background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:3px;
   padding:4px 10px; font:12px ui-monospace,monospace; cursor:pointer; }}
 button:hover, button:focus {{ border-color:var(--cyan); color:var(--cyan); outline:none; }}
+button.armed {{ border-color:var(--amber); color:var(--amber); }}
+.viewctl {{ flex-wrap:wrap; align-items:center; gap:6px 12px; }}
+.viewctl label {{ color:var(--dim); font-size:11px; display:inline-flex; align-items:center; gap:4px;
+  text-transform:uppercase; letter-spacing:.04em; }}
+.viewctl input[type=text] {{ background:var(--bg); color:var(--fg); border:1px solid var(--line);
+  border-radius:3px; font:11px ui-monospace,monospace; padding:2px 4px; width:86px; }}
+.viewctl input[type=text]:focus {{ border-color:var(--cyan); outline:none; }}
+.viewctl input[type=range] {{ width:110px; accent-color:var(--cyan); }}
 ul {{ color:var(--dim); font-size:13px; }}
 </style>
 <header>
@@ -722,6 +730,13 @@ first refit against the GB-subtracted residual.</div></div>
   sample (last iters &times; 24 walkers per leaf) &middot; drag = pan &middot;
   wheel/pinch = zoom</span>
 </div>
+<div class="btnrow viewctl">
+  <button id="vgbpost_pick" title="arm, then click the plot to set the view center">set center by click</button>
+  <label>cx <input id="vgbpost_cx" type="text"></label>
+  <label>cy <input id="vgbpost_cy" type="text"></label>
+  <label>width <input id="vgbpost_wsl" type="range" min="0" max="1000" step="1"><input id="vgbpost_w" type="text"></label>
+  <label>height <input id="vgbpost_hsl" type="range" min="0" max="1000" step="1"><input id="vgbpost_h" type="text"></label>
+</div>
 <canvas id="vgbpost" style="height:340px"></canvas>
 </div>
 <div class="panel">{img("vgb_snr")}</div>
@@ -738,6 +753,13 @@ first refit against the GB-subtracted residual.</div></div>
   <button id="btn_top3">3 highest-frequency sources</button>
   <button id="btn_reset">reset zoom</button>
   <span class="caption" style="align-self:center">drag = pan &middot; wheel/pinch = zoom</span>
+</div>
+<div class="btnrow viewctl">
+  <button id="expl_pick" title="arm, then click the plot to set the view center">set center by click</button>
+  <label>cx <input id="expl_cx" type="text"></label>
+  <label>cy <input id="expl_cy" type="text"></label>
+  <label>width <input id="expl_wsl" type="range" min="0" max="1000" step="1"><input id="expl_w" type="text"></label>
+  <label>height <input id="expl_hsl" type="range" min="0" max="1000" step="1"><input id="expl_h" type="text"></label>
 </div>
 <canvas id="expl"></canvas>
 <div class="caption" id="expl_cap"></div>
@@ -781,6 +803,81 @@ threshold — single-process stands at 3 months; revisit with the 23-mo store si
 <script>
 const DATA = {EXPL_JSON};
 const VPOST = {VGB_POST_JSON};
+// Shared view controls: numeric center (cx, cy) + log-scale width/height
+// sliders, all around a FIXED center -- plus a click-to-set-center mode.
+// api: get() -> [X0,X1,Y0,Y1]; set(x0,x1,y0,y1) (must redraw); fullW/fullH
+// = the reset-view spans (slider range = [full/2000, full*1.2], log-mapped).
+function viewCtl(px, cv, api) {{
+  const el = id => document.getElementById(px + "_" + id);
+  const cxI = el("cx"), cyI = el("cy"), wI = el("w"), hI = el("h"),
+        wS = el("wsl"), hS = el("hsl"), pk = el("pick");
+  if (!cxI) return {{ sync: () => {{}} }};
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const s2span = (s, full) => {{
+    const mn = Math.log(full / 2000), mx = Math.log(full * 1.2);
+    return Math.exp(mn + (mx - mn) * s / 1000);
+  }};
+  const span2s = (W, full) => {{
+    const mn = Math.log(full / 2000), mx = Math.log(full * 1.2);
+    return clamp(Math.round(1000 * (Math.log(W) - mn) / (mx - mn)), 0, 1000);
+  }};
+  let busy = false;
+  function sync() {{
+    if (busy) return;
+    const [X0, X1, Y0, Y1] = api.get();
+    cxI.value = ((X0 + X1) / 2).toPrecision(7);
+    cyI.value = ((Y0 + Y1) / 2).toPrecision(7);
+    wI.value = (X1 - X0).toPrecision(5);
+    hI.value = (Y1 - Y0).toPrecision(5);
+    wS.value = span2s(X1 - X0, api.fullW);
+    hS.value = span2s(Y1 - Y0, api.fullH);
+  }}
+  function applyTyped() {{
+    const [X0, X1, Y0, Y1] = api.get();
+    let cx = parseFloat(cxI.value), cy = parseFloat(cyI.value);
+    let W = parseFloat(wI.value), H = parseFloat(hI.value);
+    if (!isFinite(cx)) cx = (X0 + X1) / 2;
+    if (!isFinite(cy)) cy = (Y0 + Y1) / 2;
+    if (!isFinite(W) || W <= 0) W = X1 - X0;
+    if (!isFinite(H) || H <= 0) H = Y1 - Y0;
+    busy = true;
+    api.set(cx - W / 2, cx + W / 2, cy - H / 2, cy + H / 2);
+    busy = false; sync();
+  }}
+  cxI.onchange = cyI.onchange = wI.onchange = hI.onchange = applyTyped;
+  wS.oninput = () => {{
+    const [X0, X1, Y0, Y1] = api.get();
+    const cx = (X0 + X1) / 2, W = s2span(+wS.value, api.fullW);
+    busy = true; api.set(cx - W / 2, cx + W / 2, Y0, Y1); busy = false;
+    wI.value = W.toPrecision(5);
+  }};
+  hS.oninput = () => {{
+    const [X0, X1, Y0, Y1] = api.get();
+    const cy = (Y0 + Y1) / 2, H = s2span(+hS.value, api.fullH);
+    busy = true; api.set(X0, X1, cy - H / 2, cy + H / 2); busy = false;
+    hI.value = H.toPrecision(5);
+  }};
+  let picking = false;
+  pk.onclick = () => {{ picking = !picking; pk.classList.toggle("armed", picking);
+                        cv.style.cursor = picking ? "crosshair" : "grab"; }};
+  // Capture-phase so an armed pick swallows the click before the pan handler.
+  cv.addEventListener("pointerdown", e => {{
+    if (!picking) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const w = cv.clientWidth, h = cv.clientHeight;
+    const ml = 56, mb = 30, mt = 8, mr = 10;
+    const [X0, X1, Y0, Y1] = api.get();
+    const cx = X0 + ((e.clientX - r.left) - ml) / (w - ml - mr) * (X1 - X0);
+    const cy = Y0 + ((h - mb) - (e.clientY - r.top)) / (h - mb - mt) * (Y1 - Y0);
+    const W = X1 - X0, H = Y1 - Y0;
+    api.set(cx - W / 2, cx + W / 2, cy - H / 2, cy + H / 2);
+    picking = false; pk.classList.remove("armed"); cv.style.cursor = "grab";
+    sync();
+  }}, {{ capture: true }});
+  sync();
+  return {{ sync }};
+}}
 (() => {{
   const cv = document.getElementById("vgbpost");
   if (!cv) return;
@@ -795,6 +892,8 @@ const VPOST = {VGB_POST_JSON};
     [Y0, Y1] = pad(0, Math.max(...ys));
   }};
   full();
+  const FW = X1 - X0, FH = Y1 - Y0;
+  let syncCtl = () => {{}};
   const dpr = window.devicePixelRatio || 1;
   function draw() {{
     const w = cv.clientWidth, h = cv.clientHeight;
@@ -823,6 +922,7 @@ const VPOST = {VGB_POST_JSON};
       g.beginPath(); g.arc(x, y, 1.4, 0, 6.29); g.fill();
     }}
     g.globalAlpha = 1;
+    syncCtl();
   }}
   let drag = null;
   cv.addEventListener("pointerdown", e => {{ drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); }});
@@ -842,6 +942,11 @@ const VPOST = {VGB_POST_JSON};
     Y0 = cyy + (Y0 - cyy) * s; Y1 = cyy + (Y1 - cyy) * s; draw();
   }}, {{ passive: false }});
   document.getElementById("vgbpost_reset").onclick = () => {{ full(); draw(); }};
+  syncCtl = viewCtl("vgbpost", cv, {{
+    get: () => [X0, X1, Y0, Y1],
+    set: (a, b, c, d) => {{ X0 = a; X1 = b; Y0 = c; Y1 = d; draw(); }},
+    fullW: FW, fullH: FH,
+  }}).sync;
   new ResizeObserver(draw).observe(cv);
   draw();
 }})();
@@ -864,6 +969,8 @@ const VPOST = {VGB_POST_JSON};
     [Y0, Y1] = hasGB ? pad(Math.min(...ys), Math.max(...ys)) : pad(0, Math.max(...ys));
   }};
   full();
+  const FW = X1 - X0, FH = Y1 - Y0;
+  let syncCtl = () => {{}};
   const dpr = window.devicePixelRatio || 1;
   function draw() {{
     const w = cv.clientWidth, h = cv.clientHeight;
@@ -893,6 +1000,7 @@ const VPOST = {VGB_POST_JSON};
       g.beginPath(); g.arc(x, y, 2.2, 0, 6.29); g.fill();
     }}
     g.globalAlpha = 1;
+    syncCtl();
   }}
   // pan/zoom
   let drag = null;
@@ -922,6 +1030,11 @@ const VPOST = {VGB_POST_JSON};
     [Y0, Y1] = hasGB ? pad(Math.min(...ty), Math.max(...ty)) : pad(0, Math.max(...ty) || 1);
     draw();
   }};
+  syncCtl = viewCtl("expl", cv, {{
+    get: () => [X0, X1, Y0, Y1],
+    set: (a, b, c, d) => {{ X0 = a; X1 = b; Y0 = c; Y1 = d; draw(); }},
+    fullW: FW, fullH: FH,
+  }}).sync;
   new ResizeObserver(draw).observe(cv);
   draw();
 }})();
