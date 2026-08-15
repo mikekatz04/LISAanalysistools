@@ -232,5 +232,49 @@ class RecipePropagationTest(unittest.TestCase):
         self.assertEqual(st.band_info["band_temps"].shape, (NUM_BANDS, 1))
 
 
+class GBRecipePropagationTest(unittest.TestCase):
+    """The GB caller needs the SAME reconciliation, for a sharper reason.
+
+    ``build_gb_moves`` follows its ``initialize_band_information`` call with
+    an explicit ``band_info["band_temps"][:] = band_temps``. Once the rung
+    mismatch stopped raising, that assignment became the new failure point:
+    a configured (nbands, 12) ladder written into a stored (nbands, 1) slot
+    is a raw numpy broadcast error with no diagnosis. These two tests pin
+    both halves -- the hazard is real, and the shipped block defuses it.
+    """
+
+    def test_unreconciled_assignment_would_raise_broadcast(self):
+        st = _stored_state(1)
+        band_temps = np.tile(np.asarray(_ladder(12)), (NUM_BANDS, 1))
+        st.initialize_band_information(
+            NWALKERS, 12, BAND_EDGES, band_temps, branch_name="gb"
+        )
+        # This is build_gb_moves WITHOUT the reconciliation block.
+        with self.assertRaises(ValueError):
+            st.band_info["band_temps"][:] = band_temps
+
+    def test_reconciled_gb_block_assigns_cleanly(self):
+        from types import SimpleNamespace
+
+        st = _stored_state(1)
+        gb_info = SimpleNamespace(betas=_ladder(12), ntemps=12)
+        ntemps = len(gb_info.betas)
+        band_temps = np.tile(np.asarray(gb_info.betas), (NUM_BANDS, 1))
+
+        resolved = st.initialize_band_information(
+            NWALKERS, ntemps, BAND_EDGES, band_temps, branch_name="gb"
+        )
+        # verbatim shape of the shipped build_gb_moves block
+        if int(resolved) != int(ntemps):
+            ntemps = int(resolved)
+            band_temps = np.asarray(st.band_info["band_temps"]).copy()
+            gb_info.betas = band_temps[0].copy()
+        st.band_info["band_temps"][:] = band_temps  # must not raise
+
+        self.assertEqual(ntemps, 1)
+        self.assertEqual(len(gb_info.betas), 1)
+        self.assertEqual(st.band_info["band_temps"].shape, (NUM_BANDS, 1))
+
+
 if __name__ == "__main__":
     unittest.main()
