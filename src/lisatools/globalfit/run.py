@@ -71,10 +71,17 @@ def _branch_cap_edges(branch_info):
     """Leaf-cap CELL edges for a banded branch (user design 2026-08-15).
 
     A refinement of the branch's ``band_edges`` by its ``cap_divisor``
-    (``GBSettings.cap_divisor`` / ``GB_CAP_DIVISOR``; branches without the
-    field -- VGB -- stay on the band grid at divisor 1). MUST agree with
-    what the move is built with and with what the store holds: the state's
+    (``GBSettings.cap_divisor`` / ``GB_CAP_DIVISOR``). MUST agree with what
+    the move is built with and with what the store holds: the state's
     resume guard and the move's arm-time check both compare against it.
+
+    NOTE: do NOT assume "branches that are not GB lack the field" --
+    ``VGBSettings`` SUBCLASSES ``GBSettings``, so it inherits
+    ``cap_divisor`` and would silently pick up ``GB_CAP_DIVISOR``. VGB
+    pins its own ``cap_divisor = 1`` (it is fixed-dimensional: no RJ, no
+    leaf caps) precisely so this function and ``recipe.build_vgb_moves``
+    -- which initializes on the plain band grid -- agree. Any future
+    banded branch must make the same choice explicitly.
     """
     return make_cap_edges(
         branch_info.band_edges,

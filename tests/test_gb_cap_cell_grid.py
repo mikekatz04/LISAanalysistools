@@ -500,3 +500,41 @@ class CapLLCheckTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VGBCapDivisorTest(unittest.TestCase):
+    """VGB must stay on the plain band grid (fixed-dimensional: no leaf caps).
+
+    Regression for a FRESH-run crash: ``VGBSettings`` subclasses
+    ``GBSettings``, so it inherited ``cap_divisor`` (env ``GB_CAP_DIVISOR``,
+    default 8). ``run.py::_branch_cap_edges`` read that 8 and built
+    45*8 = 360 cap cells into the VGB state, while
+    ``recipe.build_vgb_moves`` initializes on the 45-band grid -- the state
+    guard then refused with "leaf-cap grid mismatch ... stores 360 ...
+    config builds 45". The two call sites MUST agree.
+    """
+
+    def test_vgb_settings_pin_divisor_one_even_when_gb_env_is_set(self):
+        import os
+        from unittest import mock
+        from lisatools.globalfit.stock.erebor.vgb import VGBSettings
+
+        with mock.patch.dict(os.environ, {"GB_CAP_DIVISOR": "8"}):
+            self.assertEqual(VGBSettings().cap_divisor, 1)
+
+    def test_branch_cap_edges_agrees_with_the_band_grid_for_vgb(self):
+        import os
+        from types import SimpleNamespace
+        from unittest import mock
+        from lisatools.globalfit.run import _branch_cap_edges
+        from lisatools.globalfit.stock.erebor.vgb import VGBSettings
+
+        edges = np.linspace(1e-3, 5e-3, 46)  # 45 VGB bands
+        with mock.patch.dict(os.environ, {"GB_CAP_DIVISOR": "8"}):
+            info = SimpleNamespace(
+                band_edges=edges, cap_divisor=VGBSettings().cap_divisor
+            )
+            cap_edges = _branch_cap_edges(info)
+        # identical to the band grid -> what build_vgb_moves initializes with
+        np.testing.assert_allclose(cap_edges, edges)
+        self.assertEqual(len(cap_edges) - 1, len(edges) - 1)

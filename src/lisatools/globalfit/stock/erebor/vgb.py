@@ -121,6 +121,18 @@ class VGBSettings(GBSettings):
     ndim: int = dataclasses.field(default_factory=_vgb_ndim_default)
     # VGB's own tempering ladder size (overrides the GB default)
     ntemps: int = dataclasses.field(default_factory=env_default("VGB_NTEMPS", 12, int))
+    # LEAF-CAP CELL GRID: ALWAYS 1 for VGB, never the inherited GB value.
+    # The cap grid subdivides bands so RJ births cannot stack sources inside
+    # one posterior-width cell -- but this branch is FIXED-DIMENSIONAL
+    # (nleaves_min == nleaves_max, no RJ, no births, no leaf caps), so the
+    # refinement is meaningless here. It is not merely useless: inheriting
+    # GBSettings.cap_divisor (env GB_CAP_DIVISOR, default 8) made the two
+    # call sites disagree -- run.py::_branch_cap_edges read the inherited 8
+    # and built 45*8=360 cap cells into the VGB state, while
+    # recipe.build_vgb_moves initializes on the plain band grid (45) --
+    # which tripped the resume guard with a leaf-cap grid mismatch on a
+    # FRESH run. Pinning 1 here keeps both sites on the band grid.
+    cap_divisor: int = 1
     # resolved to the catalogue source count at prepare time
     nleaves_min: typing.Optional[int] = None
     nleaves_max: typing.Optional[int] = None
