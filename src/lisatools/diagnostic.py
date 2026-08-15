@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import Any, List, Optional, Tuple
 
@@ -391,9 +392,21 @@ def residual_full_source_and_noise_likelihood(
     return nlt + rslt
 
 
+def psd_debug_checks_enabled() -> bool:
+    """Whether the batched-noise-likelihood debug validation is switched on.
+
+    Controlled by the ``PSD_DEBUG_CHECKS`` environment variable, default
+    ``"0"`` (off). Set ``PSD_DEBUG_CHECKS=1`` to restore the all-or-nothing
+    non-finite-covariance validation in
+    :func:`batched_residual_full_source_and_noise_likelihoods` (see there for
+    why it is off by default). Read per call so it can be flipped at runtime.
+    """
+    return bool(int(os.environ.get("PSD_DEBUG_CHECKS", "0")))
+
+
 def batched_residual_full_source_and_noise_likelihoods(
     res_batch: np.ndarray,
-    sens_mat_batch: np.ndarray,
+    sens_mat_batch: np.ndarray | None,
     invC_batch: np.ndarray,
     detC_batch: np.ndarray,
     settings,
@@ -406,7 +419,8 @@ def batched_residual_full_source_and_noise_likelihoods(
     (``out += 4 * sum(real(conj(d_i) d_j invC_ij)) * differential_component``
     over all ``nch x nch`` pairs, then ``-1/2``), and the noise term mirrors
     :func:`noise_likelihood_term` (the all-or-nothing non-finite covariance
-    guard, the ``detC`` keep mask, and
+    guard -- a debug check, gated behind ``PSD_DEBUG_CHECKS`` and skipped by
+    default, see below -- the ``detC`` keep mask, and
     ``-logdet_factor * sum(log|detC|)``) — evaluated for every walker in one
     array operation instead of a per-walker Python loop. Intended for
     already-sanitized matrices (non-finite ``invC`` zeroed, non-finite
@@ -419,7 +433,9 @@ def batched_residual_full_source_and_noise_likelihoods(
         sens_mat_batch: Covariance stack, shape ``(nch, nch, nw, *basis)``
             (channel axes leading, matching :func:`_mat3x3_det_inv`'s
             calling convention with the walker axis folded into
-            ``data_shape``).
+            ``data_shape``). Used **only** by the ``PSD_DEBUG_CHECKS``
+            validation; pass ``None`` when the checks are off so the caller
+            can release the covariance stack before this call.
         invC_batch: Inverse covariance, shape ``(nch, nch, nw, *basis)``.
         detC_batch: Determinant, shape ``(nw, *basis)``.
         settings: Domain settings providing ``differential_component`` and
@@ -445,22 +461,31 @@ def batched_residual_full_source_and_noise_likelihoods(
     src = -1 / 2.0 * src_sum
 
     # --- noise term: same guards as noise_likelihood_term ---------------
-    fix = xp.isnan(sens_mat_batch) | xp.isinf(sens_mat_batch)
-    walker_axis = 2
-    fix_counts = fix.sum(
-        axis=tuple(a for a in range(fix.ndim) if a != walker_axis)
-    )
-    per_mat_shape = sens_mat_batch.shape[:2] + sens_mat_batch.shape[3:]
-    allowed = int(np.prod(per_mat_shape[:-1]))
-    fix_counts = np.asarray(
-        fix_counts.get() if hasattr(fix_counts, "get") else fix_counts
-    )
-    assert np.all(
-        (fix_counts == 0) | (fix_counts == allowed)
-    ), (
-        f"per-walker non-finite counts {fix_counts.tolist()}; "
-        f"matrix shape {per_mat_shape}"
-    )
+    # The all-or-nothing non-finite covariance validation is a DEBUG check:
+    # two full passes over the (nch, nch, nw, *basis) covariance stack plus a
+    # device->host pull of the per-walker counts, i.e. a hard sync, on every
+    # scoring call (~1300 per sampler iteration on the stock noise ladder --
+    # which also serialises the threaded multi-GPU splits). It validates an
+    # invariant the producer (`SensitivityMatrixBase._setup_det_and_inv` /
+    # `_mat3x3_det_inv`) already guarantees, so it is off by default; set
+    # PSD_DEBUG_CHECKS=1 to restore it.
+    if sens_mat_batch is not None and psd_debug_checks_enabled():
+        fix = xp.isnan(sens_mat_batch) | xp.isinf(sens_mat_batch)
+        walker_axis = 2
+        fix_counts = fix.sum(
+            axis=tuple(a for a in range(fix.ndim) if a != walker_axis)
+        )
+        per_mat_shape = sens_mat_batch.shape[:2] + sens_mat_batch.shape[3:]
+        allowed = int(np.prod(per_mat_shape[:-1]))
+        fix_counts = np.asarray(
+            fix_counts.get() if hasattr(fix_counts, "get") else fix_counts
+        )
+        assert np.all(
+            (fix_counts == 0) | (fix_counts == allowed)
+        ), (
+            f"per-walker non-finite counts {fix_counts.tolist()}; "
+            f"matrix shape {per_mat_shape}"
+        )
 
     keep = (detC_batch != 0.0) & (~xp.isinf(detC_batch)) & (~xp.isnan(detC_batch))
     factor = getattr(settings, "logdet_factor", 1.0)

@@ -472,5 +472,195 @@ class BatchedMoveStockParityTest(unittest.TestCase):
         np.testing.assert_allclose(b["logl"], p["logl"], rtol=1e-10)
 
 
+class PSDDebugChecksGateTest(unittest.TestCase):
+    """``PSD_DEBUG_CHECKS`` gates the batched likelihood's non-finite
+    covariance validation: on = validates (raises on a violating stack),
+    off (default) = skipped, and the returned values never depend on it."""
+
+    def _inputs(self):
+        try:
+            from lisatools.domains import WDMSettings
+            from lisatools.sensitivity import _mat3x3_det_inv
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"lisatools not available: {exc}")
+        settings = WDMSettings(8, 8, 5.0)
+        basis = tuple(settings.basis_shape_active)
+        nw, nch = 3, 3
+        rng = np.random.default_rng(11)
+        A = rng.normal(size=(nw, nch, nch) + basis)
+        C = np.einsum("wik...,wjk...->wij...", A, A)
+        for i in range(nch):
+            C[:, i, i] += 3.0
+        res = rng.normal(size=(nw, nch) + basis)
+        Cb = np.moveaxis(C, 0, 2)  # (nch, nch, nw, *basis)
+        detC, invC = _mat3x3_det_inv(Cb, np)
+        # a stack that VIOLATES the all-or-nothing invariant: a single
+        # non-finite entry for walker 0 only. invC / detC stay finite, so the
+        # returned likelihoods are unaffected either way.
+        bad = Cb.copy()
+        bad[(0, 0, 0) + (0,) * (bad.ndim - 3)] = np.nan
+        return settings, res, Cb, bad, invC, detC
+
+    def _run(self, sens, res, invC, detC, settings, flag):
+        import os
+
+        from lisatools.diagnostic import (
+            batched_residual_full_source_and_noise_likelihoods,
+        )
+
+        old = os.environ.get("PSD_DEBUG_CHECKS")
+        if flag is None:
+            os.environ.pop("PSD_DEBUG_CHECKS", None)
+        else:
+            os.environ["PSD_DEBUG_CHECKS"] = flag
+        try:
+            return batched_residual_full_source_and_noise_likelihoods(
+                res, sens, invC, detC, settings
+            )
+        finally:
+            if old is None:
+                os.environ.pop("PSD_DEBUG_CHECKS", None)
+            else:
+                os.environ["PSD_DEBUG_CHECKS"] = old
+
+    def test_on_validates(self):
+        settings, res, good, bad, invC, detC = self._inputs()
+        # clean stack passes
+        self._run(good, res, invC, detC, settings, "1")
+        with self.assertRaises(AssertionError):
+            self._run(bad, res, invC, detC, settings, "1")
+
+    def test_off_skips(self):
+        settings, res, good, bad, invC, detC = self._inputs()
+        ref = np.asarray(
+            self._run(good, res, invC, detC, settings, "1"), dtype=float
+        )
+        for sens, flag in (
+            (bad, "0"),      # explicit off
+            (bad, None),     # unset -> default off
+            (None, None),    # caller released the covariance stack
+        ):
+            out = np.asarray(
+                self._run(sens, res, invC, detC, settings, flag), dtype=float
+            )
+            np.testing.assert_array_equal(out, ref)
+
+    def test_helper_reads_env(self):
+        import os
+
+        from lisatools.diagnostic import psd_debug_checks_enabled
+
+        old = os.environ.get("PSD_DEBUG_CHECKS")
+        try:
+            os.environ.pop("PSD_DEBUG_CHECKS", None)
+            self.assertFalse(psd_debug_checks_enabled())
+            os.environ["PSD_DEBUG_CHECKS"] = "1"
+            self.assertTrue(psd_debug_checks_enabled())
+            os.environ["PSD_DEBUG_CHECKS"] = "0"
+            self.assertFalse(psd_debug_checks_enabled())
+        finally:
+            if old is None:
+                os.environ.pop("PSD_DEBUG_CHECKS", None)
+            else:
+                os.environ["PSD_DEBUG_CHECKS"] = old
+
+
+class _StubSensMat:
+    def __init__(self, invC):
+        self.invC = invC
+
+
+class _StubDataResArr:
+    """Duck-types the ``ac.data_res_arr`` surface the data repack touches."""
+
+    def __init__(self, arr):
+        self.data_res_arr = self
+        self._arr = arr
+
+    def flatten(self):
+        return self._arr[:].flatten()
+
+
+class _StubAC:
+    def __init__(self, invC, data):
+        self.sens_mat = _StubSensMat(invC)
+        self.data_res_arr = _StubDataResArr(data)
+
+
+class _RepackStub:
+    """Minimal stand-in exposing exactly the attributes the two repack loops
+    read, so ``reset_linear_*_arr`` can be driven unbound on NumPy arrays."""
+
+    def __init__(self, nch=3, nsens=(3, 3), nfreq=7, nwalkers=4):
+        self.xp = np
+        self.gpus = None
+        self.nchannels = nch
+        self.shape_sens = tuple(nsens)
+        self.end_shape = (nfreq,)
+        self.data_length = nfreq
+        rng = np.random.default_rng(5)
+        acs = []
+        for _ in range(nwalkers):
+            invC = rng.normal(size=self.shape_sens + self.end_shape)
+            data = rng.normal(size=(nch, nfreq))
+            acs.append(_StubAC(invC, data))
+        self.acs = np.array(acs, dtype=object)
+        self.gpu_map = {i: 0 for i in range(nwalkers)}
+        self.split_map = {i: 0 for i in range(nwalkers)}
+        self.gpu_splits = [np.arange(nwalkers)]
+        self.linear_psd_arr = [
+            np.zeros(nwalkers * int(np.prod(self.shape_sens)) * nfreq)
+        ]
+        self.linear_data_arr = [np.zeros(nwalkers * nch * nfreq)]
+
+
+class RepackSameDeviceFastPathTest(unittest.TestCase):
+    """The same-device fast path (device-resident reshape/assign) is
+    byte-identical to the historical host round trip."""
+
+    def _drive(self, method, buf_attr, same_device):
+        import lisatools.analysiscontainer as ac_mod
+
+        stub = _RepackStub()
+        orig = ac_mod._same_device
+        ac_mod._same_device = lambda src, dst: same_device
+        try:
+            getattr(ac_mod.AnalysisContainerArray, method)(stub)
+        finally:
+            ac_mod._same_device = orig
+        return stub, np.asarray(getattr(stub, buf_attr)[0]).copy()
+
+    def test_psd_repack_identical(self):
+        try:
+            import lisatools.analysiscontainer  # noqa: F401
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"lisatools not available: {exc}")
+        stub_fast, fast = self._drive(
+            "reset_linear_psd_arr", "linear_psd_arr", True
+        )
+        _, slow = self._drive("reset_linear_psd_arr", "linear_psd_arr", False)
+        self.assertTrue(np.any(fast != 0.0))
+        np.testing.assert_array_equal(fast, slow)
+        self.assertEqual(fast.tobytes(), slow.tobytes())
+        # invC is rebound INTO the contiguous buffer, not left a copy
+        first = stub_fast.acs.flatten()[0].sens_mat.invC
+        self.assertTrue(np.shares_memory(first, stub_fast.linear_psd_arr[0]))
+
+    def test_data_repack_identical(self):
+        try:
+            import lisatools.analysiscontainer  # noqa: F401
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"lisatools not available: {exc}")
+        stub_fast, fast = self._drive(
+            "reset_linear_data_arr", "linear_data_arr", True
+        )
+        _, slow = self._drive("reset_linear_data_arr", "linear_data_arr", False)
+        self.assertTrue(np.any(fast != 0.0))
+        np.testing.assert_array_equal(fast, slow)
+        self.assertEqual(fast.tobytes(), slow.tobytes())
+        first = stub_fast.acs.flatten()[0].data_res_arr.data_res_arr._arr
+        self.assertTrue(np.shares_memory(first, stub_fast.linear_data_arr[0]))
+
+
 if __name__ == "__main__":
     unittest.main()

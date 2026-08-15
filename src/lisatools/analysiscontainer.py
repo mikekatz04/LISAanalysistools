@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import warnings
 from abc import ABC
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,26 @@ def _coerce_to_domain_base(obj) -> DomainBase:
         f"Expected a DomainBase child (FDSignal, WDMSignal, TDSignal, STFTSignal) "
         f"or a DataResidualArray; got {type(obj).__name__}."
     )
+
+def _same_device(src, dst) -> bool:
+    """Whether ``src`` and ``dst`` are arrays sitting on the same device.
+
+    Used by the repack paths (:meth:`AnalysisContainerArray.reset_linear_data_arr`
+    / :meth:`~AnalysisContainerArray.reset_linear_psd_arr`) to tell a genuinely
+    cross-device source -- which must round-trip through the host, because P2P
+    copies are broken here -- from the common same-device case, which can stay
+    resident. Returns ``False`` whenever either side lacks a ``device``
+    attribute (e.g. NumPy < 2), which simply keeps the conservative host route.
+    """
+    src_dev = getattr(src, "device", None)
+    dst_dev = getattr(dst, "device", None)
+    if src_dev is None or dst_dev is None:
+        return False
+    try:
+        return bool(src_dev == dst_dev)
+    except Exception:  # pragma: no cover - exotic device objects
+        return False
+
 
 logger = logging.getLogger(__name__)
 
@@ -2253,6 +2274,25 @@ class AnalysisContainerArray:
         finally:
             self.xp.cuda.runtime.setDevice(main_gpu)
 
+    def _free_pool_blocks_per_device(self):
+        """Release the CuPy pool's free blocks once per device.
+
+        ``MemoryPool.free_all_blocks()`` acts on the *current* device only, so
+        the repack loops used to call it once per container (with that
+        container's device selected). That wiped the pool ``nwalkers`` times
+        per repack, pushing every subsequent large allocation back onto a
+        synchronising ``cudaMalloc``; one sweep per device at the end gives the
+        same release with a single call per arena. Set
+        ``ACA_REPACK_FREE_BLOCKS=0`` to skip the sweep entirely.
+        """
+        if self.gpus is None:
+            return
+        if not bool(int(os.environ.get("ACA_REPACK_FREE_BLOCKS", "1"))):
+            return
+        for gpu in self.gpus:
+            with self.xp.cuda.Device(int(gpu)):
+                self.xp.get_default_memory_pool().free_all_blocks()
+
     def reset_linear_data_arr(self):
         """Repack each container's data residual into the contiguous per-GPU data buffer."""
         if self.gpus is not None:
@@ -2273,20 +2313,23 @@ class AnalysisContainerArray:
             end_index = (intra_split_index + 1) * (self.nchannels * self.data_length)
 
             flat_data_res_here = ac.data_res_arr.flatten()
-            if hasattr(flat_data_res_here, "get"):
-                flat_data_res_here = flat_data_res_here.get()
-            self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(
-                flat_data_res_here
-            )
+            dst = self.linear_data_arr[split][start_index:end_index]
+            if _same_device(flat_data_res_here, dst):
+                # source already lives on the target device: stay resident.
+                dst[:] = flat_data_res_here
+            else:
+                # cross-device source: route through the host (broken P2P).
+                if hasattr(flat_data_res_here, "get"):
+                    flat_data_res_here = flat_data_res_here.get()
+                dst[:] = self.xp.asarray(flat_data_res_here)
             # ac.data_res_arr._data_res_arr = signal_class(arr=self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, *self.data_shape), settings=settings)     #as todo check: are those 2 lines the same?
             ac.data_res_arr.data_res_arr._arr = self.linear_data_arr[split][
                 start_index:end_index
             ].reshape((self.nchannels,) + self.end_shape)
             # TODO: add check to make sure changes are made inline along with protections
-            if self.gpus is not None:
-                self.xp.get_default_memory_pool().free_all_blocks()
 
         if self.gpus is not None:
+            self._free_pool_blocks_per_device()
             self.xp.cuda.runtime.setDevice(main_gpu)
 
     def reset_linear_psd_arr(self):
@@ -2305,22 +2348,26 @@ class AnalysisContainerArray:
             start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
             end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
             # invC may live on a different GPU (always computed on GPU 0).
-            # Route through CPU to avoid broken P2P cross-device copies.
+            # Route through CPU to avoid broken P2P cross-device copies --
+            # but only when the source really is on another device; the
+            # same-device case stays resident (the D2H+H2D round trip was
+            # pure overhead there).
             invC_src = ac.sens_mat.invC
-            if hasattr(invC_src, 'get'):
-                invC_src = invC_src.get()
-            self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(
-                invC_src.flatten()
-            )
+            dst = self.linear_psd_arr[split][start_index:end_index]
+            if _same_device(invC_src, dst):
+                dst[:] = invC_src.reshape(-1)
+            else:
+                if hasattr(invC_src, 'get'):
+                    invC_src = invC_src.get()
+                dst[:] = self.xp.asarray(invC_src.flatten())
             ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(
                 self.shape_sens + self.end_shape
             )
 
             # TODO: add check to make sure changes are made inline along with protections
-            if self.gpus is not None:
-                self.xp.get_default_memory_pool().free_all_blocks()
 
         if self.gpus is not None:
+            self._free_pool_blocks_per_device()
             self.xp.cuda.runtime.setDevice(main_gpu)
 
     @property

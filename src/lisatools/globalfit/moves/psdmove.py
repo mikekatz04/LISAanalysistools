@@ -36,7 +36,10 @@ from eryn.utils.transform import TransformContainer
 from tqdm import tqdm
 
 from ...analysiscontainer import AnalysisContainerArray
-from ...diagnostic import batched_residual_full_source_and_noise_likelihoods
+from ...diagnostic import (
+    batched_residual_full_source_and_noise_likelihoods,
+    psd_debug_checks_enabled,
+)
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import FDSettings, FDSignal, STFTSettings, WDMSettings
 from ...sensitivity import (
@@ -1162,12 +1165,20 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         # batched det/inv + the same sanitization as _setup_det_and_inv
         detC, invC = _mat3x3_det_inv(C, xp)
-        bad = ~xp.isfinite(invC)
-        if bool(xp.any(bad)):
-            invC = xp.where(bad, xp.zeros_like(invC), invC)
-        det_bad = ~xp.isfinite(detC)
-        if bool(xp.any(det_bad)):
-            detC = xp.where(det_bad, xp.ones_like(detC), detC)
+        C_nbytes = C.nbytes
+        # C is only consumed by the PSD_DEBUG_CHECKS validation; with the
+        # checks off, drop our reference here so the allocator can reuse the
+        # covariance stack for the (temporary-heavy) sanitization + likelihood.
+        sens_for_check = C if psd_debug_checks_enabled() else None
+        del C
+
+        # Unconditional in-place masked writes: the `if bool(xp.any(...))`
+        # probes these replaced were a full-array reduction AND a
+        # device->host sync per scoring call, to save a single extra pass we
+        # pay anyway. Same values either way (non-finite invC -> 0, non-finite
+        # detC -> 1); ``copyto`` keeps it allocation-free.
+        xp.copyto(invC, 0.0, where=~xp.isfinite(invC))
+        xp.copyto(detC, 1.0, where=~xp.isfinite(detC))
 
         # residual gather straight off the shard's contiguous buffer (the
         # per-container views are rebinds INTO it, so it is authoritative)
@@ -1179,7 +1190,14 @@ class PSDMove(GlobalFitMove, StretchMove):
         shaped = acs.linear_data_arr[split].reshape(
             (len(split_rows), int(acs.nchannels)) + tuple(acs.end_shape)
         )
-        res_batch = shaped[intra]
+        # `intra` is the identity whenever the batch is the whole shard (the
+        # common case): take a view instead of copying the full residual.
+        if intra.shape[0] == shaped.shape[0] and np.array_equal(
+            intra, np.arange(shaped.shape[0])
+        ):
+            res_batch = shaped
+        else:
+            res_batch = shaped[intra]
 
         if (device, nb) not in self._batch_mem_logged:
             self._batch_mem_logged.add((device, nb))
@@ -1187,13 +1205,13 @@ class PSDMove(GlobalFitMove, StretchMove):
                 "[PSD_BATCH] device %s: batched build for %d walkers -- "
                 "C %.1f MB + invC %.1f MB + detC %.1f MB + residual gather "
                 "%.1f MB (total ~%.1f MB)",
-                device, nb, C.nbytes / 1e6, invC.nbytes / 1e6,
+                device, nb, C_nbytes / 1e6, invC.nbytes / 1e6,
                 detC.nbytes / 1e6, res_batch.nbytes / 1e6,
-                (C.nbytes + invC.nbytes + detC.nbytes + res_batch.nbytes) / 1e6,
+                (C_nbytes + invC.nbytes + detC.nbytes + res_batch.nbytes) / 1e6,
             )
 
         ll = batched_residual_full_source_and_noise_likelihoods(
-            res_batch, C, invC, detC, settings
+            res_batch, sens_for_check, invC, detC, settings
         )
         return asnumpy(ll)
 
