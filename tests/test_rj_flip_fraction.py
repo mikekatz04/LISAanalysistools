@@ -221,16 +221,19 @@ class SchedulerAddCountsTest(unittest.TestCase):
 
 
 class BandShutoffTest(unittest.TestCase):
-    def _move(self, name="rj_fstat_search", nbands=4):
+    # OCCUPANCY-based rules (user key change 2026-08-15): see
+    # _update_band_shutoff. Bands: edges 5/8/11/14/17 mHz -> bands 0-1
+    # below the 10 mHz floor, bands 2-3 eligible.
+    def _move(self, name="rj_fstat_search", cap=None):
         m = GBSpecialStretchMove.__new__(GBSpecialStretchMove)
         m.name = name
-        m.num_bands = nbands
+        m.num_bands = 4
         m.is_rj_prop = True
         m.rj_removal_only = False
         m.rj_replace = False
         m.rj_fstat_dist_birth = True
-        # band lower edges (Hz): 2 below 10 mHz, 2 above
         m.band_edges = np.array([5e-3, 8e-3, 11e-3, 14e-3, 17e-3])
+        m._band_leaf_cap = cap
         return m
 
     def test_scope_gating(self):
@@ -244,35 +247,71 @@ class BandShutoffTest(unittest.TestCase):
         os.environ["GB_RJ_BAND_SHUTOFF_SCOPE"] = "off"
         self.assertFalse(m._band_shutoff_enabled())
 
-    def test_counter_shutoff_and_reset(self):
-        import os
-        os.environ["GB_RJ_BAND_SHUTOFF_AFTER"] = "5"
-        self.addCleanup(os.environ.pop, "GB_RJ_BAND_SHUTOFF_AFTER", None)
-        m = self._move()
-        acc = np.zeros(4, dtype=int)
+    def test_zero_occupancy_shutoff_after_5(self):
+        m = self._move(cap=np.array([2, 2, 2, 2]))
         for _ in range(4):
-            m._update_band_shutoff(acc)
+            m._update_band_shutoff(np.array([0, 0, 0, 0]))
         self.assertFalse(m._rj_band_shutoff.any())
-        # band 2 gets an accept on propose 5 -> its counter resets;
-        # band 3 stays barren -> shuts off (band 0/1 below 10 mHz: never)
-        acc5 = np.array([0, 0, 1, 0])
-        m._update_band_shutoff(acc5)
+        m._update_band_shutoff(np.array([0, 0, 0, 0]))
+        # low bands never; high bands off at the 5th zero iteration
         np.testing.assert_array_equal(
-            m._rj_band_shutoff, [False, False, False, True])
-        self.assertEqual(int(m._band_barren_counts[2]), 0)
-        # the reset band needs 5 fresh barren proposes to shut off
+            m._rj_band_shutoff, [False, False, True, True])
+
+    def test_one_source_needs_cap_above_one(self):
+        # cap == 1: the one-source streak can NEVER count
+        m = self._move(cap=np.array([1, 1, 1, 1]))
+        for _ in range(10):
+            m._update_band_shutoff(np.array([1, 1, 1, 1]))
+        self.assertFalse(m._rj_band_shutoff.any())
+        # cap == 2: off after 5 one-source iterations
+        m2 = self._move(cap=np.array([2, 2, 2, 2]))
+        for _ in range(5):
+            m2._update_band_shutoff(np.array([1, 1, 1, 1]))
+        np.testing.assert_array_equal(
+            m2._rj_band_shutoff, [False, False, True, True])
+
+    def test_occupancy_change_resets_streak(self):
+        m = self._move(cap=np.array([2, 2, 2, 2]))
         for _ in range(4):
-            m._update_band_shutoff(np.zeros(4, dtype=int))
+            m._update_band_shutoff(np.array([0, 0, 0, 0]))
+        # band 2 gains its first source -> its zero-streak resets; the
+        # one-source clock starts fresh and needs 5 of its own
+        for _ in range(4):
+            m._update_band_shutoff(np.array([0, 0, 1, 0]))
         self.assertFalse(bool(m._rj_band_shutoff[2]))
-        m._update_band_shutoff(np.zeros(4, dtype=int))
+        self.assertTrue(bool(m._rj_band_shutoff[3]))  # stayed 0 -> off
+        m._update_band_shutoff(np.array([0, 0, 1, 0]))
         self.assertTrue(bool(m._rj_band_shutoff[2]))
 
-    def test_low_bands_never_shut(self):
-        m = self._move()
-        for _ in range(50):
-            m._update_band_shutoff(np.zeros(4, dtype=int))
-        self.assertFalse(bool(m._rj_band_shutoff[0]))
-        self.assertFalse(bool(m._rj_band_shutoff[1]))
+    def test_two_or_more_never_counts(self):
+        m = self._move(cap=np.array([3, 3, 3, 3]))
+        for _ in range(10):
+            m._update_band_shutoff(np.array([2, 2, 2, 2]))
+        self.assertFalse(m._rj_band_shutoff.any())
+
+    def test_cap_none_means_second_always_allowed(self):
+        m = self._move(cap=None)
+        for _ in range(5):
+            m._update_band_shutoff(np.array([1, 1, 1, 1]))
+        np.testing.assert_array_equal(
+            m._rj_band_shutoff, [False, False, True, True])
+
+
+class SchedulerAddCountsTest(unittest.TestCase):
+    def test_free_then_recap_budget_exact(self):
+        from lisatools.globalfit.moves.gbbands import BandScheduler
+        specials = np.repeat(np.array([10, 20]), 2)  # 2 cells x 2 countable
+        sched = BandScheduler(specials, 2, xp=np)
+        # cell 10 frees: +3 staged birth rows join its budget
+        sched.add_counts(np.array([10]), np.array([3]))
+        pos = sched._cells_of(np.array([10]))[0]
+        self.assertEqual(int(sched.cell_counts[pos]), 5)
+        # re-cap: 2 of them were picked meanwhile -> only 1 leaves
+        sched.add_counts(np.array([10]), np.array([-1]))
+        self.assertEqual(int(sched.cell_counts[pos]), 4)
+        # other cell untouched
+        pos20 = sched._cells_of(np.array([20]))[0]
+        self.assertEqual(int(sched.cell_counts[pos20]), 2)
 
 
 class TemperCadenceTest(unittest.TestCase):

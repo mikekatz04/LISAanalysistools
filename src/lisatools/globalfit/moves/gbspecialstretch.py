@@ -2366,12 +2366,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     sp.get("kernel", 0), sp.get("deaths", 0),
                     sp.get("death_acc", 0))
                 self._rj_split = None
-            # High-f barren-band shutoff bookkeeping (log contract line
-            # emitted inside _update_band_shutoff).
-            pba = getattr(self, "_propose_birth_accepts", None)
-            if pba is not None:
-                self._update_band_shutoff(pba)
-                self._propose_birth_accepts = None
+            # High-f band shutoff bookkeeping — OCCUPANCY-based (user key
+            # change 2026-08-15): cold-chain per-band occupancy, max over
+            # walkers, once per iteration on the designated move (log
+            # contract line emitted inside _update_band_shutoff).
+            if self._band_shutoff_enabled():
+                self._update_band_shutoff(
+                    self._band_occupancy_cold_max(new_state))
         except Exception:  # diagnostics must never kill a propose
             pass
         # Per-propose F-stat peak census: how many birth draws each peak
@@ -3649,21 +3650,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return True
 
     def _band_shutoff_enabled(self) -> bool:
-        """High-frequency barren-band birth shutoff: is it on for this move?
+        """High-frequency band birth shutoff: is it on for this move?
 
-        User design 2026-08-14: bands whose LOWER edge is above
-        ``GB_RJ_BAND_SHUTOFF_FMIN_MHZ`` (default 10 mHz — no confusion
-        noise up there, so a real source shows full SNR from the first
-        iteration) stop receiving BIRTH proposals after
-        ``GB_RJ_BAND_SHUTOFF_AFTER`` (default 5) consecutive proposes
-        with zero accepted births at ANY temperature; any accepted birth
-        resets the band's counter. Deaths and in-model repeats continue.
-        ``GB_RJ_BAND_SHUTOFF_SCOPE``: "search" (default) = only moves
-        with "search" in their name; "all" = every fstat birth move;
-        "off" = disabled. 6-mo TODO: reassess search+pe vs search-only
-        (a pe shutoff truncates the trans-D posterior in those bands).
-        Counters are in-memory per move instance — a restart resets them
-        and bands re-earn their shutoff (errs conservative).
+        USER KEY CHANGE 2026-08-15: the criterion is OCCUPANCY, not
+        acceptance (the acceptance version never fired — hot-chain churn
+        kept every band's accept tally nonzero). See
+        :meth:`_update_band_shutoff` for the occupancy rules. Bands with
+        LOWER edge above ``GB_RJ_BAND_SHUTOFF_FMIN_MHZ`` (default 10 mHz
+        — no confusion noise up there, so a real source shows full SNR
+        from the first iteration) are eligible. RJ BIRTHS ONLY are shut
+        off: deaths and in-model repeats continue for any resident
+        source. ``GB_RJ_BAND_SHUTOFF_SCOPE``: "search" (default) = only
+        moves with "search" in their name; "all" = every fstat birth
+        move; "off" = disabled. Exactly ONE enabled move should exist
+        per stage (the fstat birth move) — a second would double-count
+        iterations. 6-mo TODO: reassess search+pe vs search-only.
+        Counters are in-memory per move instance — a restart resets
+        them and bands re-earn their shutoff (errs conservative).
         """
         if (not self.is_rj_prop or self.rj_removal_only or self.rj_replace
                 or not getattr(self, "rj_fstat_dist_birth", False)):
@@ -3675,35 +3678,82 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return False
         return True
 
-    def _update_band_shutoff(self, birth_accepts) -> None:
-        """Propose-end barren-counter update + shutoff transitions.
+    def _update_band_shutoff(self, occ_max) -> None:
+        """Occupancy-based shutoff update (USER KEY CHANGE 2026-08-15).
 
-        ``birth_accepts``: host int array (num_bands,) of accepted births
-        this propose (all temperatures). Emits the LOG CONTRACT line the
-        monitor's cap-plot overlay parses:
-        ``[GB_BAND_SHUTOFF <move>] band <b> (<flo>-<fhi> mHz) births OFF
-        after <n> barren proposes (<total> bands off)``.
+        ``occ_max``: host int array (num_bands,) — COLD-CHAIN occupancy
+        per band, MAX over walkers, measured once per iteration at
+        propose end of the (single) designated move. Rules, exactly as
+        ruled:
+
+        - occupancy == 0 for ``GB_RJ_BAND_SHUTOFF_AFTER`` (default 5)
+          consecutive iterations -> births OFF (nothing ever sticks).
+        - occupancy == 1 for AFTER consecutive iterations, where the
+          band's leaf cap was > 1 THROUGHOUT the streak -> births OFF
+          (a second source was ALLOWED the whole time and never
+          arrived). Iterations at cap <= 1 RESET the streak rather
+          than pause it — the band never had the chance to add a
+          second, so they cannot count (conservative).
+        - occupancy >= 2, or ANY occupancy change, resets the streak
+          (a fresh first source restarts the one-source clock; a
+          death 2 -> 1 starts a fresh one-source streak).
+
+        Shutoff is permanent for the process (restart re-earns;
+        revival semantics deliberately not implemented — an OFF band
+        whose source later dies stays OFF). Emits the LOG CONTRACT
+        prefix the monitor's cap-plot overlay parses
+        (``[GB_BAND_SHUTOFF <move>] band <b> ...``).
         """
-        if not hasattr(self, "_band_barren_counts"):
-            self._band_barren_counts = np.zeros(self.num_bands, dtype=np.int64)
+        occ_max = np.asarray(occ_max)
+        if not hasattr(self, "_band_occ_streak"):
+            self._band_occ_streak = np.zeros(self.num_bands, dtype=np.int64)
+            self._band_occ_last = np.full(self.num_bands, -1, dtype=np.int64)
             self._rj_band_shutoff = np.zeros(self.num_bands, dtype=bool)
         fmin_mhz = float(os.environ.get("GB_RJ_BAND_SHUTOFF_FMIN_MHZ", "10.0"))
         after = int(os.environ.get("GB_RJ_BAND_SHUTOFF_AFTER", "5"))
-        barren = np.asarray(birth_accepts) == 0
-        self._band_barren_counts[barren] += 1
-        self._band_barren_counts[~barren] = 0
+        cap = getattr(self, "_band_leaf_cap", None)
+        if cap is None:
+            # No cap machinery -> a second source is always allowed.
+            cap_h = np.full(self.num_bands, np.iinfo(np.int64).max)
+        else:
+            cap_h = np.asarray(_to_numpy(cap))
+        qualifying = (occ_max == 0) | ((occ_max == 1) & (cap_h > 1))
+        unchanged = occ_max == self._band_occ_last
+        self._band_occ_streak = np.where(
+            qualifying & unchanged, self._band_occ_streak + 1,
+            np.where(qualifying, 1, 0),
+        )
+        self._band_occ_last = occ_max.copy()
         edges = _to_numpy(self.band_edges)
         hi_f = edges[:-1] * 1e3 >= fmin_mhz
         new_off = hi_f & ~self._rj_band_shutoff & (
-            self._band_barren_counts >= after)
+            self._band_occ_streak >= after)
         for b in np.where(new_off)[0]:
             self._rj_band_shutoff[b] = True
             logger.info(
                 "[GB_BAND_SHUTOFF %s] band %d (%.3f-%.3f mHz) births OFF "
-                "after %d barren proposes (%d bands off)",
+                "after %d iterations at occupancy %d (%d bands off)",
                 self.name, int(b), edges[b] * 1e3, edges[b + 1] * 1e3,
-                int(self._band_barren_counts[b]),
+                int(self._band_occ_streak[b]), int(occ_max[b]),
                 int(self._rj_band_shutoff.sum()))
+
+    def _band_occupancy_cold_max(self, state) -> np.ndarray:
+        """Cold-chain per-band occupancy, MAX over walkers (host array).
+
+        Leaves are binned by their OWN f0 (searchsorted on band_edges,
+        same convention as the BandSorter); alive leaves outside the
+        band range are ignored.
+        """
+        work_b = self._work_branch(state)
+        inds0 = np.asarray(_to_numpy(work_b.inds[0]), dtype=bool)
+        f0_hz = np.asarray(_to_numpy(work_b.coords[0, :, :, 1])) / 1e3
+        edges = _to_numpy(self.band_edges)
+        b = np.searchsorted(edges, f0_hz) - 1
+        valid = inds0 & (b >= 0) & (b < self.num_bands)
+        occ = np.zeros((self.nwalkers, self.num_bands), dtype=np.int64)
+        w_idx, l_idx = np.nonzero(valid)
+        np.add.at(occ, (w_idx, b[valid]), 1)
+        return occ.max(axis=0)
 
     def _precompute_fstat_centers(self, model, band_sorter, subset):
         """Unit-open F-stat center cache for the distance-birth proposal.
@@ -4260,14 +4310,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                  "deaths", "death_acc"), _vals,
             ):
                 _sp[_kname] = _sp.get(_kname, 0) + int(_v)
-
-        # Per-band birth-accept tally for the high-f barren-band shutoff
-        # (host array; the accept path below syncs anyway).
-        _pba = getattr(self, "_propose_birth_accepts", None)
-        if _pba is not None:
-            _ba_m = accept & (~alive)
-            if bool(_ba_m.any()):
-                np.add.at(_pba, _to_numpy(b_i[_ba_m]), 1)
 
         _mark("rj_accept")
         if bool(accept.any()):
@@ -6403,9 +6445,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # (user requests 2026-08-14). Both consumed in the propose-end
         # summary block.
         self._rj_split = {} if self.is_rj_prop else None
-        self._propose_birth_accepts = (
-            np.zeros(self.num_bands, dtype=np.int64)
-            if self._band_shutoff_enabled() else None)
+        # (Band-shutoff bookkeeping is occupancy-based as of 2026-08-15 —
+        # measured at propose end from the cold-chain state; no per-round
+        # accumulator needed.)
         # SubBandBuffer cache: one allocation per signature, units rebind in
         # place. GB_BUFFER_PERSIST=1 (default) keeps the cached buffers
         # ACROSS proposals -- construction (thousands of per-cell container
