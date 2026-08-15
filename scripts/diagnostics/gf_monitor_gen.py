@@ -93,14 +93,27 @@ def _last_written(a):
             return i + 1
     return 0
 
-VGB_NIT = min(_last_written(vgb_hh), _last_written(vgb_c))
-if VGB_NIT < NIT:
+psd_sw_a = sub["psd/swaps_accepted"][:NIT]; psd_sw_p = sub["psd/swaps_proposed"][:NIT]
+gal_sw_a = sub["galfor/swaps_accepted"][:NIT]; gal_sw_p = sub["galfor/swaps_proposed"][:NIT]
+# EVERY sub-backend shares the flush, so one trailing row can be missing
+# from all of them at once -- it is not a VGB quirk. Trim each branch to its
+# own last written row (they can differ) and report it.
+SUB_NIT = min(_last_written(vgb_hh), _last_written(vgb_c),
+              _last_written(psd_c), _last_written(gal_c))
+if SUB_NIT < NIT:
     MISSING.append(
-        f"VGB sub-backend written through iteration {VGB_NIT - 1} while the "
-        f"main backend reached {NIT - 1} (snapshot caught mid-flush); VGB "
-        f"panels use the last COMPLETE row.")
-    vgb_c = vgb_c[:VGB_NIT]
-    vgb_hh = vgb_hh[:VGB_NIT]
+        f"sub-backends (psd / galfor / vgb) written through iteration "
+        f"{SUB_NIT - 1} while the main backend reached {NIT - 1} (snapshot "
+        f"caught mid-flush); those panels use the last COMPLETE row. Taken "
+        f"raw, the unwritten row reads as zero noise parameters and zero VGB "
+        f"amplitudes.")
+    vgb_c = vgb_c[:SUB_NIT]
+    vgb_hh = vgb_hh[:SUB_NIT]
+    psd_c = psd_c[:SUB_NIT]
+    gal_c = gal_c[:SUB_NIT]
+    psd_sw_a = psd_sw_a[:SUB_NIT]; psd_sw_p = psd_sw_p[:SUB_NIT]
+    gal_sw_a = gal_sw_a[:SUB_NIT]; gal_sw_p = gal_sw_p[:SUB_NIT]
+VGB_NIT = SUB_NIT
 gb_inds = g["inds/gb"][:NIT, 0, 0]                  # (it, 24, 10000)
 gb_chain_cold = g["chain/gb"][NIT-1, 0, 0]          # (24, 10000, 9) last iter
 gb_alive_last = g["inds/gb"][NIT-1, 0, 0]           # (24, 10000)
@@ -122,8 +135,7 @@ def _safe(node, key, default=None, label=None):
 
 caps = _safe(sub, "gb/band_leaf_cap", None, "per-band leaf caps")  # (it, 154)
 band_edges = sub["gb/band_edges"][:]
-psd_sw_a = sub["psd/swaps_accepted"][:NIT]; psd_sw_p = sub["psd/swaps_proposed"][:NIT]
-gal_sw_a = sub["galfor/swaps_accepted"][:NIT]; gal_sw_p = sub["galfor/swaps_proposed"][:NIT]
+
 
 logpath = None
 for root, _, fns in os.walk(RUN_DIR):
@@ -151,14 +163,14 @@ SOMS_INJ, SA_INJ = 1.496182e-11, 2.982412e-15
 fig, ax = plt.subplots(1, 2, figsize=(11, 3.2))
 for j, (name, inj) in enumerate([("Soms_d", SOMS_INJ), ("Sa_a", SA_INJ)]):
     for w in range(nwalk):
-        ax[j].plot(it, psd_cold[:, w, j], color=CYAN, alpha=0.3, lw=0.8)
+        ax[j].plot(np.arange(SUB_NIT), psd_cold[:, w, j], color=CYAN, alpha=0.3, lw=0.8)
     ax[j].axhline(inj, color=RED, lw=1.4, ls=":", label="injected")
     ax[j].set_title(f"psd: {name}"); ax[j].set_xlabel("iteration"); ax[j].legend()
 fig_b64(fig, "psd_trace")
 
 fig, ax = plt.subplots(1, 2, figsize=(11, 2.9))
 for j, (name, inj) in enumerate([("Soms_d", SOMS_INJ), ("Sa_a", SA_INJ)]):
-    v = psd_cold[-min(3, NIT):, :, j].ravel()
+    v = psd_cold[-min(3, SUB_NIT):, :, j].ravel()
     ax[j].hist(v, bins=24, color=CYAN, alpha=0.85)
     ax[j].axvline(inj, color=RED, lw=1.4, ls=":")
     ax[j].set_title(f"{name} posterior (last {min(3,NIT)} iters x 24 walkers)")
@@ -170,12 +182,12 @@ GAL_NAMES = ["log10 amp", "p1", "log10 fknee", "p2", "slope"]
 fig, ax = plt.subplots(1, 5, figsize=(14, 2.7))
 for j in range(5):
     for w in range(nwalk):
-        ax[j].plot(it, gal_cold[:, w, j], color=AMBER, alpha=0.3, lw=0.8)
+        ax[j].plot(np.arange(SUB_NIT), gal_cold[:, w, j], color=AMBER, alpha=0.3, lw=0.8)
     ax[j].set_title(GAL_NAMES[j], fontsize=9); ax[j].set_xlabel("iter")
 fig_b64(fig, "gal_trace")
 fig, ax = plt.subplots(1, 5, figsize=(14, 2.5))
 for j in range(5):
-    ax[j].hist(gal_cold[-min(3, NIT):, :, j].ravel(), bins=20, color=AMBER, alpha=0.85)
+    ax[j].hist(gal_cold[-min(3, SUB_NIT):, :, j].ravel(), bins=20, color=AMBER, alpha=0.85)
     ax[j].set_title(GAL_NAMES[j], fontsize=9)
 fig_b64(fig, "gal_hist")
 
@@ -220,12 +232,12 @@ try:
     fig, ax = plt.subplots(figsize=(11, 4.2))
     ax.plot(fr, sens_curves(*pm), color=CYAN, lw=1.4,
             label="instrument PSD (latest)")
-    for k in range(NIT):
+    for k in range(SUB_NIT):
         pk_ = np.median(psd_cold[k], axis=0)
         gk = np.median(gal_cold[k], axis=0)
         ax.plot(fr, sens_curves(pk_[0], pk_[1], gk),
-                color=ramp(k / max(NIT - 1, 1)), lw=1.1,
-                label=f"iter {k}" if k in (0, NIT - 1) else None)
+                color=ramp(k / max(SUB_NIT - 1, 1)), lw=1.1,
+                label=f"iter {k}" if k in (0, SUB_NIT - 1) else None)
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("f [Hz]"); ax.set_ylabel("Sn(f) [LISASens]")
     ax.legend(); ax.set_title(
