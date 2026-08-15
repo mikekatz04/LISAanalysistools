@@ -1,11 +1,14 @@
 """Per-branch sampler-state subclasses used by the global fit."""
 
+import logging
 from copy import deepcopy
 from dataclasses import dataclass
 
 import numpy as np
 from eryn.state import Branch as eryn_Branch
 from eryn.state import State as eryn_State
+
+logger = logging.getLogger(__name__)
 
 
 def return_x(x):
@@ -532,7 +535,8 @@ class GBState(ModuleSubState):
         self._band_info["initialized"] = True
 
     def initialize_band_information(
-        self, nwalkers, ntemps, band_edges, band_temps, cap_edges=None
+        self, nwalkers, ntemps, band_edges, band_temps, cap_edges=None,
+        branch_name=None,
     ):
         """Allocate the band-info dict with zeroed counters.
 
@@ -545,6 +549,17 @@ class GBState(ModuleSubState):
                 of ``band_edges`` (see :func:`make_cap_edges`). ``None``
                 (default) means the cap grid IS the band grid, i.e. divisor 1
                 and the pre-2026-08-15 behaviour.
+            branch_name: Optional branch label (``"gb"`` / ``"vgb"``) used
+                only to make the resume-time messages nameable.
+
+        Returns:
+            int: the rung count that is ACTUALLY in effect after this call.
+            On a fresh start that is ``ntemps``; on a RESUME it is the rung
+            count carried by the stored ladder, which wins (see the resume
+            branch below). Callers that size anything off the ladder
+            (``TemperatureControl``, per-move ``accepted`` arrays, the
+            branch's ``betas``) must use this return value rather than the
+            ``ntemps`` they passed in.
         """
         if cap_edges is None:
             cap_edges = np.asarray(band_edges, dtype=float).copy()
@@ -593,6 +608,7 @@ class GBState(ModuleSubState):
             ensure_cap_cell_fields(band_info, band_info["num_cap_cells"])
             band_info["initialized"] = True
             self.band_info = band_info
+            return int(band_info["ntemps"])
 
         else:
             # already initialized: validate the geometry is unchanged.
@@ -629,8 +645,83 @@ class GBState(ModuleSubState):
             bi.setdefault("nwalkers", int(bi["band_num_binaries"].shape[-2]))
             ensure_leaf_cap_fields(bi, bi["num_bands"])
             ensure_cap_cell_fields(bi, bi["num_cap_cells"])
-            assert nwalkers == bi["nwalkers"]
-            assert ntemps == bi["ntemps"]
+            _label = f"branch {branch_name!r}" if branch_name else "banded branch"
+            _stored_nt = int(bi["ntemps"])
+            _stored_nw = int(bi["nwalkers"])
+            _stored_nb = int(bi["num_bands"])
+
+            # ---- 1. is the STORED band_info self-consistent? ------------
+            # Every rung-dimensioned array must agree with the rung count
+            # the ladder itself declares, and every band-dimensioned array
+            # with the stored band grid. A disagreement here is genuine
+            # corruption (a half-migrated store, an interrupted re-rung),
+            # not a config change -- refuse with a message that names the
+            # offending array, never a bare assert.
+            _expected_shapes = {
+                "band_temps": (_stored_nb, _stored_nt),
+                "band_num_proposed": (_stored_nb, _stored_nt),
+                "band_num_accepted": (_stored_nb, _stored_nt),
+                "band_num_proposed_rj": (_stored_nb, _stored_nt),
+                "band_num_accepted_rj": (_stored_nb, _stored_nt),
+                "band_swaps_proposed": (_stored_nb, max(_stored_nt - 1, 0)),
+                "band_swaps_accepted": (_stored_nb, max(_stored_nt - 1, 0)),
+                "band_num_binaries": (_stored_nt, _stored_nw, _stored_nb),
+            }
+            for _key, _want in _expected_shapes.items():
+                _arr = bi.get(_key)
+                if _arr is None:
+                    continue
+                _got = tuple(np.shape(_arr))
+                if _got != _want:
+                    raise ValueError(
+                        f"corrupted band information for {_label}: stored "
+                        f"{_key!r} has shape {_got} but the stored ladder "
+                        f"declares ntemps={_stored_nt}, nwalkers="
+                        f"{_stored_nw}, num_bands={_stored_nb}, i.e. shape "
+                        f"{_want}. The store's own per-band arrays disagree "
+                        f"with each other (half-written / half-migrated "
+                        f"file). Restore the .bak written by scripts/"
+                        f"fstat_proposal/fix_vgb_band_temps.py or "
+                        f"migrate_gb_band_edges.py, or start a fresh "
+                        f"backend -- do NOT resume this file."
+                    )
+
+            # ---- 2. walker count: a config change we cannot reconcile ----
+            if int(nwalkers) != _stored_nw:
+                raise ValueError(
+                    f"walker-count mismatch for {_label}: the state stores "
+                    f"nwalkers={_stored_nw} but the run config builds "
+                    f"nwalkers={int(nwalkers)}. The per-band arrays are "
+                    f"sized by the walker count, so the resume cannot be "
+                    f"reconciled: restore the original nwalkers (NWALKERS) "
+                    f"or start a fresh backend."
+                )
+
+            # ---- 3. rung count: the STORED ladder WINS on resume --------
+            # (2026-08-15) A resumed store carries its own rung count in
+            # band_temps; the branch's configured ladder (e.g. VGB_NTEMPS,
+            # default 12) may differ -- typically because the store was
+            # written by an older/buggier config. Re-rungging live per-band
+            # temperatures + counters is a MIGRATION, not something to do
+            # silently mid-resume, so the stored ladder is authoritative and
+            # the configured one is reported. The return value carries the
+            # resolution to the caller, which must size the move's
+            # betas/temperature machinery off it.
+            if int(ntemps) != _stored_nt:
+                logger.warning(
+                    "band-temperature ladder mismatch on resume for %s: the "
+                    "state stores %d rung(s) but the run config builds %d "
+                    "(GB_NTEMPS / VGB_NTEMPS or an explicit per-branch "
+                    "`betas`). THE STORED %d-RUNG LADDER WINS -- this run "
+                    "continues at ntemps=%d and the configured %d-rung "
+                    "ladder is ignored. To actually run at %d rungs, re-rung "
+                    "the store first with "
+                    "scripts/fstat_proposal/fix_vgb_band_temps.py "
+                    "<store.h5> %d (it recreates every rung-dimensioned "
+                    "dataset and writes a .bak), or start a fresh backend.",
+                    _label, _stored_nt, int(ntemps), _stored_nt, _stored_nt,
+                    int(ntemps), int(ntemps), int(ntemps),
+                )
             # Band-grid geometry check. Explicit (the old bare
             # ``assert np.all(==)`` compared unequal-length arrays to a
             # scalar False with a DeprecationWarning) and tolerant to float
@@ -672,6 +763,8 @@ class GBState(ModuleSubState):
                     f"(which splits each band's stored cap state into its "
                     f"children, inheriting cap + min-iters counters)."
                 )
+
+            return _stored_nt
 
     def update_band_information(
         self,

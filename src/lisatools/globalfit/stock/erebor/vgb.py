@@ -735,6 +735,13 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
         # the VGB likelihood OFF (every "posterior" was the SNR-gated
         # prior). Mirror gb.py: resolve from the branch's own ntemps and
         # never clobber a single-rung ladder.
+        #
+        # NOTE (resume): this ladder is the CONFIGURED one. A resumed store
+        # carries its own rung count in sub_backend/vgb/band_temps and that
+        # one WINS -- build_vgb_moves reconciles (warning names both counts)
+        # and overwrites ``vgb.betas`` with the stored ladder. To actually
+        # change the rung count of a live store, re-rung it first with
+        # scripts/fstat_proposal/fix_vgb_band_temps.py <store.h5> <k>.
         _nt = int(getattr(vgb, "ntemps", None) or general_setup.ntemps)
         betas = 1.0 / 1.2 ** np.arange(_nt)
         if _nt > 1:

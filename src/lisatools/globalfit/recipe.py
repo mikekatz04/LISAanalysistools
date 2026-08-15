@@ -2382,9 +2382,29 @@ def build_gb_moves(
     _cap_edges = make_cap_edges(
         band_edges, int(getattr(gb_info, "cap_divisor", 1) or 1)
     )
-    state.sub_states["gb"].initialize_band_information(
-        nwalkers, ntemps, band_edges, band_temps, cap_edges=_cap_edges
+    _resolved_ntemps = state.sub_states["gb"].initialize_band_information(
+        nwalkers, ntemps, band_edges, band_temps, cap_edges=_cap_edges,
+        branch_name="gb",
     )
+    # RUNG RECONCILIATION (2026-08-15, mirrors build_vgb_moves): a resumed
+    # store's ladder WINS over the configured one (initialize_band_information
+    # warns and returns the stored count). Without this, the explicit
+    # assignment below would blow up with a raw numpy broadcast error
+    # instead of the graceful path -- re-read the stored ladder and carry
+    # the resolved rung count into everything sized by it.
+    if int(_resolved_ntemps) != int(ntemps):
+        logger.warning(
+            "build_gb_moves: using the STORED %d-rung gb ladder over the "
+            "configured %d (GB_NTEMPS / explicit betas). Re-rung the store "
+            "with scripts/fstat_proposal/fix_vgb_band_temps.py <store.h5> "
+            "%d if the configured ladder is what you want.",
+            int(_resolved_ntemps), int(ntemps), int(ntemps),
+        )
+        ntemps = int(_resolved_ntemps)
+        band_temps = np.asarray(
+            state.sub_states["gb"].band_info["band_temps"]
+        ).copy()
+        gb_info.betas = band_temps[0].copy()
     # initialize_band_information is idempotent (it used to silently
     # re-initialize on every call due to a broken initialized check, which
     # this assignment relied on): the state may arrive here with band_temps
@@ -3059,10 +3079,38 @@ def build_vgb_moves(
 
     # ---- per-band temperature ladders on the vgb sub-state ----
     band_temps = np.tile(np.asarray(vgb_info.betas), (len(band_edges) - 1, 1))
-    state.sub_states["vgb"].initialize_band_information(
-        nwalkers, ntemps, band_edges, band_temps
+    # ``initialize_band_information`` returns the rung count ACTUALLY in
+    # effect: on a resume the STORED ladder wins (it warns and names both
+    # counts), because re-rungging live per-band temps + counters is a
+    # migration, not a mid-resume side effect. Everything below that is
+    # sized by the ladder must therefore use ``resolved_ntemps``, or the
+    # move would carry e.g. a 12-rung TemperatureControl against a 1-rung
+    # state.
+    resolved_ntemps = state.sub_states["vgb"].initialize_band_information(
+        nwalkers, ntemps, band_edges, band_temps, branch_name="vgb"
     )
-    state.sub_states["vgb"].band_info["band_temps"][:] = band_temps
+    if resolved_ntemps == ntemps:
+        # unchanged behaviour: the configured flat ladder is (re)written
+        # onto every band.
+        state.sub_states["vgb"].band_info["band_temps"][:] = band_temps
+    else:
+        # Adopt the stored ladder end to end: the branch's ``betas`` is
+        # what run.py's ``_branch_ntemps`` and any later consumer read, so
+        # reconcile it too rather than leaving a stale 12-rung config on
+        # ``curr.source_info["vgb"]``. The stored per-band temps are left
+        # exactly as loaded; band 0's ladder is the representative one.
+        configured_ntemps, ntemps = ntemps, resolved_ntemps
+        band_temps = np.asarray(
+            state.sub_states["vgb"].band_info["band_temps"], dtype=float
+        )
+        vgb_info.betas = band_temps[0].copy()
+        logger.warning(
+            "VGB branch resumed at the STORED %d-rung ladder %s (the "
+            "configured %d-rung ladder was discarded); the vgb move's "
+            "TemperatureControl, betas and accepted array follow the store.",
+            ntemps, np.array2string(vgb_info.betas, precision=4),
+            configured_ntemps,
+        )
 
     effective_ndim = engine_info.ndims["vgb"]
     temperature_control = TemperatureControl(
