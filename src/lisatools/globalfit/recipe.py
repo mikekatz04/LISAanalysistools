@@ -3067,6 +3067,15 @@ def build_vgb_moves(
         name="vgb_pe",
         waveform_kwargs=vgb_info.waveform_kwargs,
         parameter_transforms=tc,
+        # BUGFIX (2026-08-15): without this kwarg the VGB move inherited
+        # the GB SEARCH default opt_snr_rej_samp_limit=5.0 -- a birth
+        # prior for unresolvable-source RJ that is wrong by construction
+        # for KNOWN fixed-dimension sources. It froze the 36/55 VGBs with
+        # optimal SNR < 5 at their init coords (every proposal force-
+        # rejected) and truncated the low-amplitude side of the movers.
+        # 0.0 disables; VGB_OPT_SNR_LIMIT overrides if ever needed.
+        opt_snr_rej_samp_limit=float(
+            os.environ.get("VGB_OPT_SNR_LIMIT", "0.0")),
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
         random_seed=general_info.random_seed,

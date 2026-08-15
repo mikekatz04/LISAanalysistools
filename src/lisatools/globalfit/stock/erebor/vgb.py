@@ -728,8 +728,17 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
     vgb.use_tdi2 = tdi_generation_info(general_setup.tdi_chan)[0] == 2
     vgb.initialize_kwargs = dict(force_backend=general_setup.force_backend)
     if vgb.betas is None:
-        betas = 1.0 / 1.2 ** np.arange(general_setup.ntemps)
-        betas[-1] = 1e-4
+        # BUGFIX (2026-08-15, root-caused from the frozen-VGB monitor
+        # panel): this used general_setup.ntemps (1 in cold-chain-only
+        # runs) instead of the branch's own ladder, and unconditionally
+        # clobbered the last rung -- betas collapsed to [1e-4], turning
+        # the VGB likelihood OFF (every "posterior" was the SNR-gated
+        # prior). Mirror gb.py: resolve from the branch's own ntemps and
+        # never clobber a single-rung ladder.
+        _nt = int(getattr(vgb, "ntemps", None) or general_setup.ntemps)
+        betas = 1.0 / 1.2 ** np.arange(_nt)
+        if _nt > 1:
+            betas[-1] = 1e-4
         vgb.betas = betas
     vgb.gb_wdm_comp = None
 
