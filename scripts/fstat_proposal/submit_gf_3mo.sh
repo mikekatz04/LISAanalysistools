@@ -125,6 +125,12 @@ export GB_INFOMAT_PER_BLOCK=1
 # Countable-only F-stat center precompute + lookup-miss fallback rides
 # the pull (no knob beyond the existing GB_RJ_FSTAT_CTR_HOIST=1); the
 # new [FSTAT_CTR] census line diagnoses the job-195 5x centers blowup.
+# Bilinearity bookkeeping monitor (code default ON, user ruling: ~1.5 s
+# per propose = negligible): per-unit [GB_ORTHO_LL] line compares the
+# realized cold parent-residual delta against the summed per-buffer
+# deltas; WARNs above GB_ORTHO_LL_TOL (0.05). The [GB_ORTHO] premise
+# check (GB_ORTHO_CHECK) stays OFF until the sub-band shakedown.
+export GB_ORTHO_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
 # Code default since 2026-08-13; pinned for the run record. =0 restores

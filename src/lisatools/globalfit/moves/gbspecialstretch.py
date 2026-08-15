@@ -2346,15 +2346,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         start_unit = model.random.randint(units)
 
         # [GB_ORTHO_LL] bilinearity bookkeeping check (default OFF,
-        # GB_ORTHO_LL_CHECK=1): per concurrent group (one unit's
-        # simultaneously-scored cells), compare the sum of per-buffer lnL
-        # deltas (the cold rows of ``ll_change_log``, realized per-slab
-        # under the default GB_CELL_LL_CREDIT crediting) against the
-        # realized delta on the OVERALL parent residual across the unit's
-        # open -> proposals -> close. Orthogonality is what makes the two
-        # agree (see _ortho_ll_summary); this is the accuracy monitor for
-        # the concurrent sub-band scheduling.
-        _ortho_ll_on = os.environ.get("GB_ORTHO_LL_CHECK", "0") == "1"
+        # GB_ORTHO_LL_CHECK (default ON, user ruling 2026-08-15 -- the
+        # cost is two extra parent-residual likelihood() evals per unit,
+        # ~1.5 s/propose, negligible; =0 disables): per concurrent group
+        # (one unit's simultaneously-scored cells), compare the sum of
+        # per-buffer lnL deltas (the cold rows of ``ll_change_log``,
+        # realized per-slab under the default GB_CELL_LL_CREDIT
+        # crediting) against the realized delta on the OVERALL parent
+        # residual across the unit's open -> proposals -> close.
+        # Orthogonality is what makes the two agree (see
+        # _ortho_ll_summary); this is the accuracy monitor for the
+        # concurrent sub-band scheduling.
+        _ortho_ll_on = os.environ.get("GB_ORTHO_LL_CHECK", "1") == "1"
 
         for unit_i in range(units):
             remainder = (start_unit + unit_i) % units
