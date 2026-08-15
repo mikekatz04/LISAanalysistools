@@ -210,6 +210,75 @@ if shutoff_bands:
         f"per-band leaf cap ({len(shutoff_bands)} bands birth-OFF, red)")
 fig_b64(fig, "gb_leaves")
 
+# ---- 5b. GB BIRTH FATE (from [GB_ACCEPT rj-split]) ----
+# Every RJ propose reports where its birth proposals died. Nothing plotted
+# this before, and on the v2 run it is the clearest single view of what the
+# new machinery is doing: the SNR-truncated distance proposal should keep
+# "snr-clamped" small (it was 59% of scored births before that lever), and
+# the cap-cell grid shows up as "capped" (0 before the grid existed).
+# Fates are DISJOINT and sum to the reported birth count:
+#   capped / oob / prior  -> gated before scoring (cheap)
+#   snr / kernel          -> scored, then dropped
+#   viable-rejected       -> scored, offered to MH, rejected
+#   accepted              -> became a source
+RJ_SPLIT_RE = re.compile(
+    r"\[GB_ACCEPT rj-split (\w+)\] births (\d+): viable (\d+) "
+    r"\(acc (\d+)[^|]*\| gated: prior (\d+) oob (\d+) capped (\d+) "
+    r"\| scored-dropped: snr (\d+) kernel (\d+)")
+_splits = {}
+for m in RJ_SPLIT_RE.finditer(log_text):
+    mv = m.group(1)
+    births, viable, acc, prior, oob, capped, snr, kern = (
+        int(m.group(i)) for i in range(2, 10))
+    if births == 0:
+        continue  # removal-only moves propose no births
+    _splits.setdefault(mv, []).append(
+        dict(births=births, accepted=acc, gated=prior + oob + capped,
+             capped=capped, snr=snr, kernel=kern,
+             viable_rej=max(viable - acc, 0)))
+if _splits:
+    mv = max(_splits, key=lambda k: len(_splits[k]))
+    rows = _splits[mv]
+    x = np.arange(len(rows))
+    order = [("gated (cap/oob/prior)", "gated", AMBER),
+             ("scored, SNR-clamped", "snr", RED),
+             ("scored, MH-rejected", "viable_rej", DIM),
+             ("ACCEPTED", "accepted", GREEN)]
+    fig, ax = plt.subplots(1, 2, figsize=(11.5, 3.4))
+    # left: absolute counts, stacked
+    bot = np.zeros(len(rows))
+    for lab, key, col in order:
+        v = np.array([r[key] for r in rows], dtype=float)
+        ax[0].bar(x, v, bottom=bot, color=col, label=lab, width=0.85)
+        bot += v
+    ax[0].set_title(f"{mv}: birth proposals by fate")
+    ax[0].set_xlabel("rj propose"); ax[0].set_ylabel("proposals")
+    ax[0].legend(fontsize=7, loc="upper left")
+    # right: fractions, so the trend is readable as the model fills
+    tot = np.array([max(r["births"], 1) for r in rows], dtype=float)
+    bot = np.zeros(len(rows))
+    for lab, key, col in order:
+        v = np.array([r[key] for r in rows], dtype=float) / tot * 100.0
+        ax[1].bar(x, v, bottom=bot, color=col, width=0.85)
+        bot += v
+    ax[1].set_ylim(0, 100); ax[1].set_ylabel("% of births")
+    ax[1].set_xlabel("rj propose")
+    _last = rows[-1]
+    ax[1].set_title(
+        f"fate share (last: capped {_last['capped']/tot[-1]*100:.0f}%, "
+        f"snr {_last['snr']/tot[-1]*100:.1f}%)")
+    fig_b64(fig, "gb_birth_fate")
+    GB_FATE_TXT = (
+        f"Latest {mv} propose: {_last['births']:,} birth proposals -> "
+        f"{_last['gated']:,} gated before scoring "
+        f"({_last['capped']:,} by the cap-cell grid), "
+        f"{_last['snr']:,} scored-then-SNR-clamped "
+        f"({_last['snr']/tot[-1]*100:.1f}%), "
+        f"{_last['viable_rej']:,} scored and MH-rejected, "
+        f"{_last['accepted']:,} accepted.")
+else:
+    GB_FATE_TXT = ""
+
 # ---- 6. f-stat fit ----
 fdir = os.path.join(RUN_DIR, "gb_fstat_fit", "shared")
 epochs = sorted([d for d in os.listdir(fdir)] if os.path.isdir(fdir) else [])
@@ -1540,9 +1609,25 @@ subtracted until full_pe.</div></div>
 </section>
 
 <section id="gb"><h2>GB Search</h2>
+<div class="panel">{img("gb_birth_fate", "birth-fate breakdown")}
+<div class="caption">Where every RJ birth proposal ends up &mdash; the clearest single view
+of the new machinery, and nothing plotted it before. The fates are disjoint and sum to the
+proposed count. <strong>AMBER</strong> = gated before scoring (cap-cell grid, out-of-band,
+prior): cheap rejections that never touch a likelihood kernel, and dominated by the new
+band/8 cap grid, which blocks a birth whose own cell is already full &mdash; this was
+exactly 0 before the grid existed, so a large amber band is the anti-stacking rule
+working, not a fault. <strong>RED</strong> = scored, then dropped at the optimal-SNR
+clamp; the SNR-truncated distance proposal exists to shrink this, and it fell from 59% of
+scored births to a few percent. <strong>GREY</strong> = scored, offered to
+Metropolis&ndash;Hastings, rejected. <strong>GREEN</strong> = accepted, i.e. a new source.
+Left is absolute counts, right the same data as percentages so the trend stays readable as
+the model fills. {GB_FATE_TXT}</div></div>
 <div class="panel">{img("gb_leaves")}
 <div class="caption">Left: cold-chain GB leaf counts in the STORED iterations. Right:
-per-band progressive leaf caps (D/2 gate); bands marked RED have had their RJ births shut
+per-band progressive leaf caps (D/2 gate). NOTE (2026-08-15): leaf caps now live on a
+FINER grid than this panel shows &mdash; each band is split into GB_CAP_DIVISOR (8) cap
+cells at the confusion scale, so a band's displayed cap is the MAX over its cells and the
+band can hold up to 8x that in total. Bands marked RED have had their RJ births shut
 off by the high-frequency barren-band rule (GB_RJ_BAND_SHUTOFF_*: &gt;10 mHz default, 5
 consecutive proposes with zero accepted births — deaths and in-model continue; each
 shutoff is also an INFO line in the log).</div></div>
