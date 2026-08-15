@@ -68,7 +68,12 @@ from eryn.utils.utility import groups_from_inds
 from ...diagnostic import inner_product
 from ...sampling.prior import FullGaussianMixtureModel, GBPriorWrap
 from ...utils.utility import get_array_module, get_groups_from_band_structure, searchsorted2d_vec
-from ..state import GFState, ensure_leaf_cap_fields
+from ..state import (
+    GFState,
+    ensure_cap_cell_fields,
+    ensure_leaf_cap_fields,
+    make_cap_edges,
+)
 
 __all__ = ["GBSpecialStretchMove"]
 
@@ -248,6 +253,30 @@ class _ProposeTimer:
 def _tspan(tm, name: str):
     """Timer span or no-op when the propose-level timer is absent."""
     return tm.span(name) if tm is not None else nullcontext()
+
+
+def _compact_index_ranges(indices, max_groups: int = 12) -> str:
+    """``[0-3, 17, 40-44, ...]`` -- collapse an index list into runs.
+
+    The leaf-cap log used to print every incremented band; on the cap-cell
+    grid that is ``K`` times as many numbers (hundreds to thousands per
+    line). Runs stay readable and still identify exactly what moved.
+    """
+    idx = np.asarray(indices, dtype=np.int64)
+    if idx.size == 0:
+        return "[]"
+    idx = np.sort(idx)
+    breaks = np.where(np.diff(idx) != 1)[0]
+    starts = np.concatenate([[0], breaks + 1])
+    ends = np.concatenate([breaks, [idx.size - 1]])
+    groups = [
+        f"{idx[s]}" if idx[s] == idx[e] else f"{idx[s]}-{idx[e]}"
+        for s, e in zip(starts, ends)
+    ]
+    if len(groups) > max_groups:
+        shown = ", ".join(groups[:max_groups])
+        return f"[{shown}, ... +{len(groups) - max_groups} more runs]"
+    return "[" + ", ".join(groups) + "]"
 
 
 def _resolve_rj_flip_fraction(branch_name, kwarg_value, default=1.0):
@@ -679,6 +708,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_cap_require_occupancy=True,
         leaf_cap_iter_only=False,
         leaf_cap_update=True,
+        cap_divisor=None,
         sighet_refresh_every=0,
         sighet_refresh_dphase=0.5,
         sighet_refresh_min_beta=0.1,
@@ -977,6 +1007,40 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             name, self.opt_snr_rej_samp_limit,
             "ON" if self.snr_rej_detected else "OFF",
         )
+
+        # ------------------------------------------------------------------
+        # LEAF-CAP CELL GRID (user design 2026-08-15)
+        # ------------------------------------------------------------------
+        # Sub-band widths are set by what the likelihood engine can run
+        # CONCURRENTLY, which is far wider than the scale at which two GB
+        # sources actually get confused (the posterior width). So the leaf
+        # caps move off the band grid onto a finer "cap cell" grid: each
+        # sub-band is split into ``cap_divisor`` equal pieces and the caps
+        # are enforced per piece. NOTHING ELSE MOVES -- scheduling, units,
+        # buffers, tempering, band shutoff and the cell-ll credit all stay
+        # on the band grid; every cap cell is contained in exactly one band,
+        # which is what keeps that separation cheap.
+        #
+        # ``cap_divisor == 1`` reproduces the pre-2026-08-15 per-band caps
+        # BIT-IDENTICALLY (the cap grid IS the band grid and every helper
+        # below short-circuits to the band arrays).
+        # The knob lives on GBSettings (``gb.cap_divisor`` / GB_CAP_DIVISOR,
+        # default 8) and is passed down by the recipe; the move's own
+        # default is 1 so any other banded branch (VGB, tests, scripts)
+        # keeps the per-band behaviour unless it opts in explicitly.
+        self.cap_divisor = max(1, int(cap_divisor or 1))
+        _be_host = _to_numpy(self.band_edges)
+        self.cap_edges = self.xp.asarray(
+            make_cap_edges(_be_host, self.cap_divisor)
+        )
+        self.num_cap_cells = self.num_bands * self.cap_divisor
+        # per-band lower edge + cap-cell width, for the cell lookup
+        self._cap_band_lo = self.xp.asarray(_be_host[:-1])
+        self._cap_band_step = self.xp.asarray(
+            (_be_host[1:] - _be_host[:-1]) / self.cap_divisor
+        )
+        #: live reference into ``band_info`` (per CAP CELL); see ``propose``
+        self._cap_leaf_cap = None
 
         self.band_edges = self.xp.asarray(self.band_edges)
 
@@ -2436,22 +2500,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # the correctness backstop either way). Counts are taken at
             # unit open, mirroring _run_rj_step's bincount arithmetic.
             self._rj_at_cap_mask = None
-            if self.is_rj_prop and self._band_leaf_cap is not None:
+            if self.is_rj_prop and self._cap_leaf_cap is not None:
                 xp_s = get_array_module(band_sorter.band_inds)
-                _nb = self.num_bands
-                _flat = (
-                    (band_sorter.temp_inds.astype(xp_s.int64) * self.nwalkers
-                     + band_sorter.walker_inds) * _nb
-                    + band_sorter.band_inds
+                # CAP-CELL occupancy (user design 2026-08-15): the census
+                # and the caps live on the cap grid; scheduling below still
+                # runs entirely on the band grid.
+                _cap_inds = self._sorter_cap_cells(band_sorter)
+                _flat, _cell_counts = self._cap_cell_counts(
+                    band_sorter, _cap_inds
                 )
-                _alive_cells = _flat[band_sorter.inds]
-                _nbins = self.ntemps * self.nwalkers * _nb
-                if _alive_cells.shape[0] == 0:
-                    _cell_counts = xp_s.zeros(_nbins, dtype=xp_s.int64)
-                else:
-                    _cell_counts = xp_s.bincount(_alive_cells, minlength=_nbins)
-                _cap = xp_s.asarray(self._band_leaf_cap)
-                _at_cap = _cell_counts[_flat] >= _cap[band_sorter.band_inds]
+                _cap = xp_s.asarray(self._cap_leaf_cap)
+                _at_cap = self._cap_at_cap_mask(
+                    band_sorter, _cell_counts, _cap, _flat, _cap_inds
+                )
                 # Per-source at-cap mask for the grouped in-model pool gate
                 # (user rule 2026-08-13): at-cap cells never FREEZE sources
                 # into the in-model pool — only below-cap cells add (birth)
@@ -2485,13 +2546,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # proposable (deaths).
                     _dead_excluded = int((~_rj_ok).sum())
                     if _dead_excluded:
-                        _capped_cells = int(xp_s.unique(_flat[_at_cap]).size)
+                        _capped_cells = int(xp_s.unique(
+                            _flat[_at_cap & band_sorter.inds]).size)
                         _alive_at_cap = int((band_sorter.inds & _at_cap).sum())
                         logger.info(
                             f"{self.name}: rj at-cap skip -- {_dead_excluded} dead"
-                            f" (birth) slots excluded across {_capped_cells} at-cap"
-                            f" cells; {_alive_at_cap} alive slots in those cells"
-                            " stay proposable (deaths)."
+                            " (birth) slots excluded (their sub-band is"
+                            " saturated across all"
+                            f" {self.cap_divisor} cap cells); {_capped_cells}"
+                            f" at-cap cap cells hold {_alive_at_cap} alive"
+                            " slots that stay proposable (deaths)."
                         )
                     extra_bool = _rj_ok if extra_bool is None else (extra_bool & _rj_ok)
                 elif _live_cap_on:
@@ -2501,9 +2565,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             f"{self.name}: rj at-cap -- {_n_reserve} dead"
                             " (birth) slots staged as live-gated re-entry"
                             " reserve across"
-                            f" {int(xp_s.unique(_flat[_at_cap]).size)} at-cap"
-                            " cells (births open the round a death frees"
-                            " the cell)."
+                            f" {int(xp_s.unique(_flat[_at_cap & band_sorter.inds]).size)}"
+                            " at-cap cap cells (births open the round a death"
+                            " frees a cell in the sub-band)."
                         )
 
             # High-f barren-band shutoff enforcement (user design
@@ -3569,15 +3633,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _lcs = getattr(self, "_live_cap_state", None)
                     if _lcs is not None:
                         _counts_pre, _cap_arr = _lcs
-                        _p_t = picked["temp_inds"].astype(xp.int64)
-                        _p_flat = (
-                            (_p_t * self.nwalkers
-                             + picked["walker_inds"]) * self.num_bands
-                            + picked["band_inds"]
+                        # Pool gate on the CAP-CELL grid (2026-08-15): an
+                        # at-cap CELL never freezes its sources into the
+                        # in-model pool.
+                        _p_flat = self._cap_flat_index(
+                            picked["temp_inds"], picked["walker_inds"],
+                            picked["cap_inds"],
                         )
                         alive_now = alive_now & ~(
                             _counts_pre[_p_flat]
-                            >= _cap_arr[picked["band_inds"]]
+                            >= _cap_arr[picked["cap_inds"]]
                         )
                     else:
                         _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
@@ -3726,14 +3791,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _lcs = getattr(self, "_live_cap_state", None)
                     if _lcs is not None:
                         _counts_pre, _cap_arr = _lcs
-                        _p_t = picked["temp_inds"].astype(self.xp.int64)
-                        _p_flat = (
-                            (_p_t * self.nwalkers + picked["walker_inds"])
-                            * self.num_bands + picked["band_inds"]
+                        _p_flat = self._cap_flat_index(
+                            picked["temp_inds"], picked["walker_inds"],
+                            picked["cap_inds"],
                         )
                         _pre_cap_row = (
                             _counts_pre[_p_flat]
-                            >= _cap_arr[picked["band_inds"]]
+                            >= _cap_arr[picked["cap_inds"]]
                         )
                         alive_now = alive_now & ~_pre_cap_row
                     else:
@@ -3933,25 +3997,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.is_rj_prop
             and not self.rj_removal_only
             and not self.rj_replace
-            and self._band_leaf_cap is not None
+            and self._cap_leaf_cap is not None
             and os.environ.get("GB_RJ_LIVE_CAP_PICK", "1") == "1"
         ):
-            num_bands = self.num_bands
-            flat_all = (
-                (band_sorter.temp_inds.astype(xp.int64) * self.nwalkers
-                 + band_sorter.walker_inds) * num_bands
-                + band_sorter.band_inds
+            # Live census on the CAP-CELL grid (2026-08-15). Dead rows are
+            # gated on whether their whole SUB-BAND is saturated (a birth
+            # can land in any of its cells); alive rows on their own cell.
+            _cap_inds_all = self._sorter_cap_cells(band_sorter)
+            flat_all, _counts = self._cap_cell_counts(
+                band_sorter, _cap_inds_all
             )
-            _alive_cells = flat_all[band_sorter.inds]
-            _nbins = self.ntemps * self.nwalkers * num_bands
-            if _alive_cells.shape[0] == 0:
-                _counts = xp.zeros(_nbins, dtype=xp.int64)
-            else:
-                _counts = xp.bincount(_alive_cells, minlength=_nbins)
-            _cap = xp.asarray(self._band_leaf_cap)
+            _cap = xp.asarray(self._cap_leaf_cap)
             self._live_cap_state = (_counts, _cap)
-            _at_cap_row = (
-                _counts[flat_all] >= _cap[band_sorter.band_inds]
+            _at_cap_row = self._cap_at_cap_mask(
+                band_sorter, _counts, _cap, flat_all, _cap_inds_all
             )
             cand = cand & (band_sorter.inds | ~_at_cap_row)
         cand_ids = xp.arange(band_sorter.num_sources)[cand]
@@ -3979,6 +4038,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "temp_inds": band_sorter.temp_inds[ids],
             "walker_inds": band_sorter.walker_inds[ids],
             "band_inds": band_inds,
+            # Cap cell of the row AS IT STANDS. Meaningful for alive rows
+            # (deaths / in-model); a BIRTH's cell is recomputed from the
+            # drawn frequency at the prior gate in _run_rj_step.
+            "cap_inds": self._cap_cell_index(
+                band_inds, band_sorter.freqs[ids]
+            ),
             "N_vals": band_sorter.band_N_vals[band_inds].copy(),
         }
 
@@ -4288,6 +4353,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._rj_band_shutoff = np.zeros(self.num_bands, dtype=bool)
         fmin_mhz = float(os.environ.get("GB_RJ_BAND_SHUTOFF_FMIN_MHZ", "10.0"))
         after = int(os.environ.get("GB_RJ_BAND_SHUTOFF_AFTER", "5"))
+        # Band SHUTOFF stays a per-BAND rule (user design 2026-08-15: only
+        # the caps move to the cell grid). It asks "could this band hold a
+        # second source anywhere", so the per-band allowance is the MAX over
+        # the band's cap cells -- which is exactly what
+        # ``_mirror_band_leaf_cap`` keeps ``band_leaf_cap`` equal to.
         cap = getattr(self, "_band_leaf_cap", None)
         if cap is None:
             # No cap machinery -> a second source is always allowed.
@@ -4654,6 +4724,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _split_over_cap = None
         _split_snr = None
         _split_kernel_rows = None
+        # Cap cells of the picked rows AT THE PRIOR GATE (drawn frequency
+        # for births); reused by the accept block's cap-transition budget.
+        _gate_cap_cells = None
 
         # Per-band progressive leaf cap (search mode): a birth into a band
         # already holding ``cap[b]`` alive sources is prior-forbidden --
@@ -4663,8 +4736,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # support. Setting -inf here routes the birth through the existing
         # ``keep`` machinery: it never reaches the likelihood kernel and the
         # bad-accept guard force-rejects it at beta > 0.
-        if self._band_leaf_cap is not None:
-            num_bands = self.num_bands
+        if self._cap_leaf_cap is not None:
             # Reuse THIS round's live-cap census when _pick_sources built
             # one (GB_RJ_LIVE_CAP_PICK path): ``band_sorter.inds`` cannot
             # change between the pick and this gate (only the accept block
@@ -4677,32 +4749,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if _lcs_gate is not None:
                 cell_counts, cap_xp = _lcs_gate
             else:
-                cap_xp = xp.asarray(self._band_leaf_cap)
-                flat_all = (
-                    (band_sorter.temp_inds.astype(xp.int64) * self.nwalkers
-                     + band_sorter.walker_inds) * num_bands
-                    + band_sorter.band_inds
+                cap_xp = xp.asarray(self._cap_leaf_cap)
+                _, cell_counts = self._cap_cell_counts(band_sorter)
+            # THE EXACT PER-CELL ENFORCEMENT POINT (2026-08-15). A birth's
+            # cap cell is set by its DRAWN frequency, not by the dead
+            # slot's stale coords -- the draw covers the whole sub-band, so
+            # any of its cells is reachable. The pick-side gates upstream
+            # are throughput heuristics on band saturation; THIS is the
+            # correctness backstop, and it is per cell.
+            _f0_prop = band_sorter.coords_freqs_hz(params)
+            if _f0_prop is None:
+                cap_cells_gate = picked["cap_inds"]
+            else:
+                cap_cells_gate = self._cap_cell_index(
+                    picked["band_inds"], _f0_prop
                 )
-                # Guard empty input: numpy.bincount([]) returns zeros, but
-                # CuPy's bincount computes max(x) first and raises on a
-                # zero-size array (the zero-leaf search start hits this on
-                # GPU).
-                _alive_cells = flat_all[band_sorter.inds]
-                _nbins = self.ntemps * self.nwalkers * num_bands
-                if _alive_cells.shape[0] == 0:
-                    cell_counts = xp.zeros(_nbins, dtype=xp.int64)
-                else:
-                    cell_counts = xp.bincount(_alive_cells, minlength=_nbins)
-            cell_flat = (
-                (picked["temp_inds"].astype(xp.int64) * self.nwalkers
-                 + picked["walker_inds"]) * num_bands
-                + picked["band_inds"]
+            cell_flat = self._cap_flat_index(
+                picked["temp_inds"], picked["walker_inds"], cap_cells_gate
             )
             over_cap = (
-                cell_counts[cell_flat] >= cap_xp[picked["band_inds"]]
+                cell_counts[cell_flat] >= cap_xp[cap_cells_gate]
             )
             _split_over_cap = (~alive) & over_cap
             curr_logp[(~alive) & over_cap] = -np.inf
+            # The accept block's cap-transition budget needs the SAME cells.
+            _gate_cap_cells = cap_cells_gate
 
         _mark("rj_prior_gate")
         delta_ll = cp.full_like(logp, -1e300)
@@ -5108,16 +5179,43 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _uel = getattr(self, "_unit_eligible", None)
             if _lcs is not None and _uel is not None and scheduler is not None:
                 _counts_pre, _cap_arr = _lcs
-                _acc_t = t_i[accept].astype(xp.int64)
-                _flat_acc = (
-                    (_acc_t * self.nwalkers + w_i[accept]) * self.num_bands
-                    + b_i[accept]
+                _cells_acc = (
+                    picked["cap_inds"] if _gate_cap_cells is None
+                    else _gate_cap_cells
+                )[accept]
+                _flat_acc = self._cap_flat_index(
+                    t_i[accept], w_i[accept], _cells_acc
                 )
                 _pre = _counts_pre[_flat_acc]
-                _cap_acc = _cap_arr[b_i[accept]]
+                _cap_acc = _cap_arr[_cells_acc]
                 _alive_acc = alive[accept]
-                _freed = _alive_acc & (_pre == _cap_acc)
-                _capped = (~_alive_acc) & (_pre + 1 >= _cap_acc)
+                if self.cap_divisor == 1:
+                    _freed = _alive_acc & (_pre == _cap_acc)
+                    _capped = (~_alive_acc) & (_pre + 1 >= _cap_acc)
+                else:
+                    # The scheduler's finish budget is per BAND cell and a
+                    # dead row is pickable while ANY cap cell of its band
+                    # still has headroom, so the budget transitions are
+                    # band SATURATION transitions: a death frees the band
+                    # only if the band was fully saturated before it, and a
+                    # birth re-caps it only if it fills the last cell with
+                    # headroom. (At divisor 1 this is exactly the branch
+                    # above -- kept separate so that path stays untouched.)
+                    _delta = xp.where(_alive_acc, -1, 1)
+                    _counts_post = _counts_pre.copy()
+                    # serial-within-band scheduling gives at most one
+                    # accept per (temp, walker, band) per round, so a
+                    # scatter-add is unambiguous
+                    _counts_post[_flat_acc] += _delta
+                    _bflat_acc = self._band_flat_index(
+                        t_i[accept], w_i[accept], b_i[accept]
+                    )
+                    _sat_pre = self._band_saturated_flat(
+                        _counts_pre, _cap_arr)[_bflat_acc]
+                    _sat_post = self._band_saturated_flat(
+                        _counts_post, _cap_arr)[_bflat_acc]
+                    _freed = _alive_acc & _sat_pre & ~_sat_post
+                    _capped = (~_alive_acc) & ~_sat_pre & _sat_post
                 if bool(_freed.any()) or bool(_capped.any()):
                     _tr_specials = picked["specials"][accept]
                     _avail = (
@@ -7136,18 +7234,39 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _band_residual_lls(self, acs):
         """Per-band cold-walker residual ll ``-1/2 <r|r>`` from the parent ACA.
 
-        Returns a host ``(nwalkers, num_bands)`` array. The parent ACA holds
-        one AC per COLD-chain walker, so this is exactly the per-band null
-        the leaf-cap convergence test needs. Shard-aware: each per-GPU (or
-        per-CPU-split) slab is reduced on its owning device via a per-bin ll
-        followed by a cumulative-sum band reduction (no per-band kernel
-        loop). Also stores ``self._band_dof`` -- the real-dof count per band
-        used to scale the convergence tolerance.
+        Thin wrapper over :meth:`_window_residual_lls` on the BAND grid;
+        also stores ``self._band_dof`` (per-band real dof, used to scale the
+        legacy nsigma convergence tolerance).
+        """
+        lls, dof = self._window_residual_lls(acs, self.band_edges)
+        self._band_dof = dof
+        return lls
+
+    def _window_residual_lls(self, acs, edges):
+        """Cold-walker residual ll ``-1/2 <r|r>`` per frequency window.
+
+        Returns ``(lls, dof)`` with ``lls`` a host
+        ``(nwalkers, len(edges) - 1)`` array and ``dof`` the real-dof count
+        per window. The parent ACA holds one AC per COLD-chain walker, so
+        this is exactly the per-window null the leaf-cap convergence test
+        needs. Shard-aware: each per-GPU (or per-CPU-split) slab is reduced
+        on its owning device via a per-bin ll followed by a cumulative-sum
+        window reduction (no per-window kernel loop).
+
+        THE WINDOW GRID IS A PARAMETER (2026-08-15). It is called on the
+        band grid for the legacy per-band diagnostics AND on the cap-cell
+        grid when the cap cells are wide enough to resolve
+        (:meth:`_cap_cells_resolvable`). NOTE the domain's frequency
+        resolution is the hard floor: in WDM the smallest resolvable window
+        is one ``layer_df`` wide, so sub-layer cap cells come back with
+        EMPTY (``k1 == k0``) windows and zero dof -- which is precisely what
+        :meth:`_cap_cells_resolvable` detects and what pushes the cap gate
+        onto the source-attributed statistic instead.
         """
         xp = self.xp
         bs = self._basis_settings
-        be = _to_numpy(self.band_edges)
-        num_bands = self.num_bands
+        be = _to_numpy(edges)
+        num_bands = len(be) - 1
         norm = 4.0 * float(bs.differential_component)
         is_wdm = isinstance(bs, WDMSettings)
         nchannels = int(acs.nchannels)
@@ -7178,7 +7297,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # complex FD bins: 2 real dof per (channel, bin)
             dof_per_bin = 2 * nchannels
         k1 = np.maximum(k1, k0)
-        self._band_dof = (k1 - k0) * dof_per_bin
+        window_dof = (k1 - k0) * dof_per_bin
 
         def _shard_band_lls(r, ic):
             # r: (nw, nc, Nf[, Nt]); ic: (nw, nc[, nc], Nf[, Nt]) -> (nw, Nf)
@@ -7211,10 +7330,337 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 out[np.asarray(split)] = _to_numpy(
                     _shard_band_lls(data_shaped[i], psd_shaped[i])
                 )
+        return out, window_dof
+
+    # ------------------------------------------------------------------
+    # Leaf-cap CELL grid helpers (user design 2026-08-15)
+    # ------------------------------------------------------------------
+    # Every helper here short-circuits at ``cap_divisor == 1`` so the whole
+    # cap machinery collapses back onto the band grid bit-identically.
+
+    def _cap_cell_index(self, band_inds, freqs_hz):
+        """Cap-cell index of sources at ``freqs_hz`` inside ``band_inds``.
+
+        Containment (cell ``c`` belongs to band ``c // K``) makes this a
+        pure per-source arithmetic lookup -- no searchsorted over a second
+        edge array, and correct under BOTH band-edge modes.
+        """
+        if self.cap_divisor == 1 or freqs_hz is None:
+            return band_inds
+        xp = get_array_module(band_inds)
+        sub = xp.floor(
+            (freqs_hz - self._cap_band_lo[band_inds])
+            / self._cap_band_step[band_inds]
+        )
+        sub = xp.clip(sub, 0, self.cap_divisor - 1).astype(band_inds.dtype)
+        return band_inds * self.cap_divisor + sub
+
+    def _sorter_cap_cells(self, band_sorter):
+        """Per-source cap-cell index for every row of ``band_sorter``.
+
+        ALIVE rows are what this is meaningful for: a dead row's stored
+        ``freqs`` are stale, and the cell an RJ birth lands in is set by the
+        DRAWN frequency (see :meth:`_run_rj_step`'s prior gate), not by this.
+        Dead rows are handled through band SATURATION instead
+        (:meth:`_band_saturated_flat`).
+        """
+        if self.cap_divisor == 1:
+            return band_sorter.band_inds
+        return self._cap_cell_index(band_sorter.band_inds, band_sorter.freqs)
+
+    def _cap_flat_index(self, temp_inds, walker_inds, cap_inds):
+        """Flat ``(temp, walker, cap cell)`` index (the occupancy bincount key)."""
+        xp = get_array_module(cap_inds)
+        return (
+            (temp_inds.astype(xp.int64) * self.nwalkers + walker_inds)
+            * self.num_cap_cells
+            + cap_inds
+        )
+
+    def _cap_cell_counts(self, band_sorter, cap_inds=None):
+        """``(ntemps*nwalkers*num_cap_cells,)`` alive-source occupancy census."""
+        xp = get_array_module(band_sorter.band_inds)
+        if cap_inds is None:
+            cap_inds = self._sorter_cap_cells(band_sorter)
+        flat = self._cap_flat_index(
+            band_sorter.temp_inds, band_sorter.walker_inds, cap_inds
+        )
+        alive_cells = flat[band_sorter.inds]
+        nbins = self.ntemps * self.nwalkers * self.num_cap_cells
+        # cupy.bincount computes max(x) first and raises on a zero-size
+        # array (the zero-leaf search start hits this on GPU).
+        if alive_cells.shape[0] == 0:
+            return flat, xp.zeros(nbins, dtype=xp.int64)
+        return flat, xp.bincount(alive_cells, minlength=nbins)
+
+    def _band_saturated_flat(self, counts, cap):
+        """``(ntemps*nwalkers*num_bands,)`` bool: EVERY cap cell of the band full.
+
+        The at-cap test for a DEAD row. A dead slot is tied to a band, not
+        to a cap cell -- its birth draw covers the whole band -- so a birth
+        is impossible only when every one of the band's cells is at
+        capacity. At ``cap_divisor == 1`` this is exactly the old per-band
+        ``counts >= cap``.
+        """
+        if self.cap_divisor == 1:
+            return counts >= cap
+        k = self.cap_divisor
+        nb = self.num_bands
+        return (
+            counts.reshape(-1, nb, k) >= cap.reshape(1, nb, k)
+        ).all(axis=2).reshape(-1)
+
+    def _band_flat_index(self, temp_inds, walker_inds, band_inds):
+        """Flat ``(temp, walker, band)`` index (matches ``_band_saturated_flat``)."""
+        xp = get_array_module(band_inds)
+        return (
+            (temp_inds.astype(xp.int64) * self.nwalkers + walker_inds)
+            * self.num_bands
+            + band_inds
+        )
+
+    def _cap_at_cap_mask(self, band_sorter, counts, cap, flat, cap_inds):
+        """Per-row at-cap mask, alive rows by CELL and dead rows by BAND.
+
+        - alive row: is MY cap cell at capacity (drives the in-model pool
+          gate -- an at-cap cell never freezes sources into the pool);
+        - dead row: is EVERY cap cell of my band at capacity (drives the
+          birth pick skip / staged reserve -- a birth anywhere in the band
+          is impossible only then).
+
+        At ``cap_divisor == 1`` both branches are the same expression the
+        pre-2026-08-15 code used, so the mask is bit-identical.
+        """
+        own = counts[flat] >= cap[cap_inds]
+        if self.cap_divisor == 1:
+            return own
+        sat = self._band_saturated_flat(counts, cap)
+        band_flat = self._band_flat_index(
+            band_sorter.temp_inds, band_sorter.walker_inds,
+            band_sorter.band_inds,
+        )
+        xp = get_array_module(own)
+        return xp.where(band_sorter.inds, own, sat[band_flat])
+
+    def _cap_cells_of_band(self, band_index: int):
+        """``(lo, hi)`` cap-cell index range owned by sub-band ``band_index``."""
+        k = self.cap_divisor
+        return band_index * k, (band_index + 1) * k
+
+    def _mirror_band_leaf_cap(self, bi) -> None:
+        """Refresh the legacy per-band ``band_leaf_cap`` from the cell caps.
+
+        The band arrays stay written so the monitor / diag scripts keep
+        working unchanged. The band value is the MAX over the band's cells
+        -- the answer to "how many leaves may a single spot in this band
+        hold", which is what the cap plot and the band-shutoff rule both
+        ask. (SUM would report the band-total allowance, which is not what
+        any existing consumer means by ``band_leaf_cap``.)
+        """
+        if self.cap_divisor == 1:
+            return
+        cell_cap = bi.get("cap_cell_leaf_cap")
+        if cell_cap is None:
+            return
+        bi["band_leaf_cap"][:] = np.asarray(cell_cap).reshape(
+            self.num_bands, self.cap_divisor
+        ).max(axis=1)
+
+    def _cap_state_arrays(self, bi):
+        """``(cap, iters, best)`` for whichever grid drives the caps.
+
+        At ``cap_divisor == 1`` these ARE the band arrays -- no cap-cell
+        arrays are allocated at all, so a store written before the cap grid
+        existed resumes untouched and the whole gate is bit-identical.
+        """
+        if self.cap_divisor == 1:
+            return (
+                bi["band_leaf_cap"], bi["band_cap_iters"], bi["band_best_ll"],
+            )
+        ensure_cap_cell_fields(bi, self.num_cap_cells)
+        return (
+            bi["cap_cell_leaf_cap"], bi["cap_cell_iters"],
+            bi["cap_cell_best_ll"],
+        )
+
+    def _cap_cells_resolvable(self, acs) -> bool:
+        """Can the RESIDUAL resolve one cap cell from the next?
+
+        The cap-gate statistic is the residual ll per cap cell when the
+        domain can actually separate the cells, and a source-attributed
+        statistic when it cannot. The floor is the domain's frequency
+        resolution: FD bins are ``1/Tobs`` wide (a band/8 cell at the
+        production 3-month config is ~135 bins, comfortably resolved),
+        but WDM's is one ``layer_df``, and the production band grid is
+        ONE LAYER PER BAND -- so every K > 1 cap cell there is SUB-LAYER
+        and its residual window comes back empty. This detects that from
+        the window bin ranges themselves rather than assuming a domain.
+
+        ``GB_CAP_LL_SOURCE=residual|source`` forces either branch.
+        """
+        forced = os.environ.get("GB_CAP_LL_SOURCE", "auto").lower()
+        if forced == "residual":
+            return True
+        if forced == "source":
+            return False
+        cached = getattr(self, "_cap_resolvable_cache", None)
+        if cached is not None:
+            return cached
+        _, dof = self._window_residual_lls(acs, self.cap_edges)
+        ok = bool(np.all(np.asarray(dof) > 0))
+        self._cap_resolvable_cache = ok
+        logger.info(
+            "%s: cap-cell ll source = %s (divisor %d; %d/%d cap cells have a "
+            "non-empty residual window).",
+            self.name, "residual" if ok else "source-attributed",
+            self.cap_divisor, int(np.sum(np.asarray(dof) > 0)),
+            int(np.size(dof)),
+        )
+        return ok
+
+    def _cap_cell_lls(self, model, new_state, band_lls):
+        """``(lls, dof)`` cold-walker cap-cell statistic for the cap gate.
+
+        Two sources, picked by :meth:`_cap_cells_resolvable`:
+
+        **residual** -- ``-1/2<r|r>`` over the cell's own frequency window,
+        the EXACT quantity the per-band gate uses, just on a finer grid. No
+        new kernel: the per-band reduction was already a per-bin ll plus a
+        cumulative-sum window difference, so the window grid is a parameter
+        (:meth:`_window_residual_lls`).
+
+        **source-attributed** -- the sum over the cell's ALIVE COLD sources
+        of their own likelihood contribution ``d_h - h_h/2``, which the GB
+        kernels already produce per source (``self._sorter_dh`` / ``_hh``,
+        mirrored into the sub-state's ``d_h`` / ``h_h``). Used when the cap
+        cells are narrower than the domain can resolve (WDM sub-layer
+        cells), where NO residual-based per-cell absolute ll exists at all.
+
+        WHY THE ATTRIBUTION IS VALID (the project's verified orthogonality
+        ruling, same bilinearity argument as the ``[GB_ORTHO_LL]`` monitor):
+        two sources separated by ``|df| * Tobs >> 1`` have ``<h_i|h_j> ~ 0``,
+        so likelihood contributions add. Cap cells are tens of microHz =
+        hundreds of FD bins apart, so a cell's realized ll change is the sum
+        of its own sources' contributions to within cross-terms that are
+        ~0. Sources INSIDE one cell are exactly the ones the cap is
+        throttling and their (possibly non-orthogonal) joint contribution is
+        attributed to that one cell -- which is the intended behaviour, not
+        an approximation.
+
+        LIMITATION (documented, not silent): the source statistic sees only
+        sources; a cell whose improvement comes from a tempering swap
+        importing a better hot-rung configuration registers that change only
+        through the resulting cold-chain sources, which is the same thing
+        the band gate would see one iteration later.
+        """
+        if self._cap_cells_resolvable(model.analysis_container_arr):
+            lls, dof = self._window_residual_lls(
+                model.analysis_container_arr, self.cap_edges
+            )
+            self._cap_ll_check(lls, band_lls)
+            return lls, dof
+        return self._cap_cell_source_lls(new_state), np.zeros(
+            self.num_cap_cells
+        )
+
+    def _cap_cell_source_lls(self, new_state):
+        """``(nwalkers, num_cap_cells)`` sum of ``d_h - h_h/2`` per cap cell."""
+        sub = new_state.sub_states[self.branch_name]
+        branch = self._work_branch(new_state)
+        # cold row of the module ladder = the joint solution
+        coords = _to_numpy(branch.coords[0])           # (nw, nleaves, ndim)
+        inds = _to_numpy(branch.inds[0]).astype(bool)  # (nw, nleaves)
+        d_h = _to_numpy(getattr(sub, "d_h", None))
+        h_h = _to_numpy(getattr(sub, "h_h", None))
+        out = np.zeros((coords.shape[0], self.num_cap_cells))
+        if d_h is None or h_h is None:
+            return out
+        contrib = np.nan_to_num(d_h - 0.5 * h_h, nan=0.0,
+                                posinf=0.0, neginf=0.0)
+        f0_hz = coords[..., 1] / 1e3
+        be = _to_numpy(self.band_edges)
+        band = np.clip(np.searchsorted(be, f0_hz, side="right") - 1,
+                       0, self.num_bands - 1)
+        step = (be[1:] - be[:-1]) / self.cap_divisor
+        sub_i = np.clip(
+            np.floor((f0_hz - be[:-1][band]) / step[band]).astype(int),
+            0, self.cap_divisor - 1,
+        )
+        cell = band * self.cap_divisor + sub_i
+        for w in range(coords.shape[0]):
+            m = inds[w]
+            if not m.any():
+                continue
+            np.add.at(out[w], cell[w][m], contrib[w][m])
         return out
 
+    def _cold_occupancy(self, band_counts, new_state):
+        """Cold-chain per-unit occupancy for the ``require_occupancy`` test."""
+        if self.cap_divisor == 1:
+            return _to_numpy(band_counts[0])  # (nwalkers, num_bands)
+        branch = self._work_branch(new_state)
+        coords = _to_numpy(branch.coords[0])
+        inds = _to_numpy(branch.inds[0]).astype(bool)
+        be = _to_numpy(self.band_edges)
+        f0_hz = coords[..., 1] / 1e3
+        band = np.clip(np.searchsorted(be, f0_hz, side="right") - 1,
+                       0, self.num_bands - 1)
+        step = (be[1:] - be[:-1]) / self.cap_divisor
+        sub_i = np.clip(
+            np.floor((f0_hz - be[:-1][band]) / step[band]).astype(int),
+            0, self.cap_divisor - 1,
+        )
+        cell = band * self.cap_divisor + sub_i
+        out = np.zeros((coords.shape[0], self.num_cap_cells), dtype=int)
+        for w in range(coords.shape[0]):
+            m = inds[w]
+            if m.any():
+                np.add.at(out[w], cell[w][m], 1)
+        return out
+
+    def _cap_ll_check(self, cell_lls, band_lls) -> None:
+        """[GB_CAP_LL_CHECK] does the cap grid partition the band ll? (default OFF)
+
+        The user's "check the LL diff in those new sub-band widths" made
+        concrete and free of new kernels: sum each band's cap-cell residual
+        lls and compare against the band's own residual ll. A faithful
+        refinement telescopes exactly (the per-bin cumulative sum is the
+        same, only the difference points move); a discrepancy means the cap
+        windows do not tile their band -- e.g. the WDM boundary layer that
+        adjacent windows SHARE by construction, which this reports rather
+        than hides. ``GB_CAP_LL_CHECK_TOL`` sets the warning threshold.
+        """
+        if os.environ.get("GB_CAP_LL_CHECK", "0") != "1":
+            return
+        summed = cell_lls.reshape(
+            cell_lls.shape[0], self.num_bands, self.cap_divisor
+        ).sum(axis=2)
+        diff = np.abs(summed - band_lls)
+        tol = float(os.environ.get("GB_CAP_LL_CHECK_TOL", "1e-6"))
+        scale = np.maximum(np.abs(band_lls), 1.0)
+        rel = diff / scale
+        k = int(np.argmax(rel))
+        w, b = np.unravel_index(k, rel.shape)
+        logger.info(
+            "[GB_CAP_LL_CHECK %s] sum over %d cap cells vs band ll: max abs "
+            "diff %.3e (rel %.3e) at walker %d band %d (cells %d-%d); mean "
+            "abs %.3e.",
+            self.name, self.cap_divisor, float(diff.max()), float(rel[w, b]),
+            int(w), int(b), *self._cap_cells_of_band(int(b)),
+            float(diff.mean()),
+        )
+        if float(rel[w, b]) > tol:
+            logger.warning(
+                "[GB_CAP_LL_CHECK %s] the cap-cell windows do not tile band "
+                "%d: sum of cells %.6e vs band %.6e (rel %.3e > tol %.3e). "
+                "The per-cell cap gate is reading a different likelihood "
+                "than the per-band one.",
+                self.name, int(b), float(summed[w, b]), float(band_lls[w, b]),
+                float(rel[w, b]), tol,
+            )
+
     def _update_band_leaf_caps(self, model, new_state, band_counts) -> None:
-        """Advance the per-band progressive leaf caps (once per iteration).
+        """Advance the progressive leaf caps (once per iteration).
 
         Runs at the very end of ``propose`` (after the final
         ``check_ll_inject`` rebuild, so the parent residual reflects the
@@ -7251,17 +7697,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         are unchanged.
         """
         bi = new_state.sub_states[self.branch_name].band_info
-        cap = bi["band_leaf_cap"]
-        iters = bi["band_cap_iters"]
-        best = bi["band_best_ll"]
+        cap, iters, best = self._cap_state_arrays(bi)
+        is_cells = self.cap_divisor > 1
 
-        lls = self._band_residual_lls(model.analysis_container_arr)
+        # The per-band residual lls are computed and stored EVERY step
+        # regardless of which grid drives the caps: they are the monitor's
+        # series and the auditable trace, and the legacy nsigma gate's
+        # tolerance is scaled by ``self._band_dof`` which this sets.
+        band_lls = self._band_residual_lls(model.analysis_container_arr)
+        if ("band_cold_ll" in bi
+                and bi["band_cold_ll"].shape == band_lls.shape):
+            bi["band_cold_ll"][:] = band_lls
+
+        if is_cells:
+            lls, dof = self._cap_cell_lls(model, new_state, band_lls)
+            if ("cap_cell_cold_ll" in bi
+                    and bi["cap_cell_cold_ll"].shape == lls.shape):
+                bi["cap_cell_cold_ll"][:] = lls
+        else:
+            lls, dof = band_lls, self._band_dof
         cur_max = lls.max(axis=0)
-        # Store every cold walker's per-band ll, every step, so the cap
-        # decision is auditable after the run (and so a post-hoc study can
-        # try a different criterion on the same trace).
-        if "band_cold_ll" in bi and bi["band_cold_ll"].shape == lls.shape:
-            bi["band_cold_ll"][:] = lls
 
         if self.leaf_cap_ll_improve:
             # Coarse likelihood-based gate: a band's cap holds while the
@@ -7297,28 +7752,41 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         else:
             best[:] = np.maximum(best, cur_max)
             iters += 1
-            tol = self.leaf_cap_ll_nsigma * np.sqrt(self._band_dof / 2.0)
+            tol = self.leaf_cap_ll_nsigma * np.sqrt(np.maximum(dof, 0) / 2.0)
             converged = (iters >= self.leaf_cap_min_iters) & (
                 (best - lls.min(axis=0)) <= tol
             )
             if self.leaf_cap_require_occupancy:
-                cold_counts = _to_numpy(band_counts[0])  # (nwalkers, num_bands)
+                cold_counts = self._cold_occupancy(band_counts, new_state)
                 converged &= cold_counts.max(axis=0) >= cap
+        # THE PER-CELL CEILING IS THE FULL BRANCH ``nleaves_max``, NOT
+        # ``nleaves_max / K`` (user intent 2026-08-15: caps SMALLER locally,
+        # but the band-level TOTAL allowance never TIGHTER than today). A
+        # band's total allowance therefore GROWS from ``cap`` to ``K * cap``
+        # once its cells are all at the same level -- removing the
+        # band-total throttle, which is the first-run watch (leaf growth /
+        # memory), not a regression. Dividing the ceiling down would cap a
+        # band below what it can hold today and is explicitly not what was
+        # asked for.
         nleaves_max = self._work_branch(new_state).shape[2]
         converged &= cap < nleaves_max
 
+        _unit = "cap cells" if self.cap_divisor > 1 else "bands"
         if np.any(converged):
-            inc_bands = np.where(converged)[0]
+            inc = np.where(converged)[0]
             cap[converged] += 1
             iters[converged] = 0
             best[converged] = -np.inf
             logger.info(
-                f"{self.name}: leaf cap incremented for bands "
-                f"{inc_bands.tolist()} -> {cap[inc_bands].tolist()}."
+                f"{self.name}: leaf cap incremented for {len(inc)} {_unit} "
+                f"{_compact_index_ranges(inc)} -> caps "
+                f"{int(cap[inc].min())}-{int(cap[inc].max())}."
             )
+        self._mirror_band_leaf_cap(bi)
         logger.info(
-            f"{self.name}: leaf caps min/max = {int(cap.min())}/{int(cap.max())}; "
-            f"bands at min-iters gate: {int((iters < self.leaf_cap_min_iters).sum())}."
+            f"{self.name}: leaf caps min/max = {int(cap.min())}/{int(cap.max())}"
+            f" over {len(cap)} {_unit}; at min-iters gate: "
+            f"{int((iters < self.leaf_cap_min_iters).sum())}."
         )
 
     def propose(self, model, state):
@@ -7424,16 +7892,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # in ``_run_rj_step`` reads it and ``_update_band_leaf_caps``
         # mutates it in place.
         self._band_leaf_cap = None
+        self._cap_leaf_cap = None
         if self._leaf_cap_enabled and self.is_rj_prop:
             bi = state.sub_states[self.branch_name].band_info
-            ensure_leaf_cap_fields(bi, self.num_bands)
-            if np.all(bi["band_leaf_cap"] < 0):
-                bi["band_leaf_cap"][:] = int(self.leaf_cap_start)
-                logger.info(
-                    f"{self.name}: armed per-band leaf cap at "
-                    f"{int(self.leaf_cap_start)} for {self.num_bands} bands."
+            # The state's cap grid and the move's divisor must agree, or the
+            # per-cell arrays and the per-cell indices mean different things.
+            # (The resume guard in GBState catches a MISMATCHED STORE; this
+            # catches a mis-wired move against a correct state.)
+            _stored_cells = len(np.asarray(bi["cap_edges"])) - 1 if (
+                "cap_edges" in bi) else self.num_bands
+            if int(_stored_cells) != int(self.num_cap_cells):
+                raise ValueError(
+                    f"{self.name}: cap grid mismatch -- the move is built "
+                    f"with cap_divisor={self.cap_divisor} "
+                    f"({self.num_cap_cells} cap cells over "
+                    f"{self.num_bands} sub-bands) but the state carries "
+                    f"{_stored_cells} cap cells. Pass the SAME "
+                    f"GBSettings.cap_divisor to the move builder and to "
+                    f"GBState.initialize_band_information(cap_edges=...)."
                 )
+            ensure_leaf_cap_fields(bi, self.num_bands)
+            ensure_cap_cell_fields(bi, self.num_cap_cells)
+            cap_arr = self._cap_state_arrays(bi)[0]
+            if np.all(cap_arr < 0):
+                cap_arr[:] = int(self.leaf_cap_start)
+                if self.cap_divisor > 1:
+                    bi["band_leaf_cap"][:] = int(self.leaf_cap_start)
+                logger.info(
+                    f"{self.name}: armed leaf cap at "
+                    f"{int(self.leaf_cap_start)} for {len(cap_arr)} "
+                    + ("cap cells " if self.cap_divisor > 1 else "bands ")
+                    + f"(divisor {self.cap_divisor} over "
+                    f"{self.num_bands} sub-bands)."
+                )
+            self._cap_leaf_cap = cap_arr
+            # ``_band_leaf_cap`` stays the ARMED flag + the band-resolution
+            # mirror the shutoff rule and the monitor read; every cap
+            # decision reads ``_cap_leaf_cap``.
             self._band_leaf_cap = bi["band_leaf_cap"]
+            self._mirror_band_leaf_cap(bi)
 
         # Run any move-specific setup.
         self.setup(model, state.branches)

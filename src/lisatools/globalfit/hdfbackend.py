@@ -756,10 +756,16 @@ class ModuleSubBackend(eryn_HDFBackend):
         out = {}
         with self.open() as f:
             grp = self._group(f)
+            # Attrs/statics added after a file was written (e.g. the
+            # 2026-08-15 ``cap_edges`` / ``num_cap_cells`` leaf-cap grid) are
+            # simply absent on older stores: skip them so the sub-state's own
+            # defaults apply, rather than failing the resume.
             for name in self.state_class.dim_attr_names:
-                out[name] = grp.attrs[name]
+                if name in grp.attrs:
+                    out[name] = grp.attrs[name]
             for name in self.state_class.static_names:
-                out[name] = grp[name][:]
+                if name in grp:
+                    out[name] = grp[name][:]
         return out
 
     def grow(self, ngrow, *args):
@@ -847,7 +853,9 @@ class ModuleSubBackend(eryn_HDFBackend):
             grp = self._group(f)
             static = set(self.state_class.static_names)
             arrays = {key: grp[key][slice_vals] for key in grp if key not in static}
-            statics = {key: grp[key][:] for key in static}
+            # ``static`` may name datasets a pre-existing file never wrote
+            # (cap_edges, 2026-08-15) -- from_stored fills those in.
+            statics = {key: grp[key][:] for key in static if key in grp}
             attrs = dict(grp.attrs)
 
         return self.state_class.from_stored(arrays, statics=statics, attrs=attrs)

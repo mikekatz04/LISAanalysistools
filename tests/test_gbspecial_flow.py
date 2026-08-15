@@ -361,6 +361,77 @@ class ProposeFlowTest(unittest.TestCase):
         # so picked sources stay alive and enter the repeat block)
         self.assertGreater(int(band_info["band_num_proposed"].sum()), 0)
 
+    def test_rj_propose_cap_cell_grid(self):
+        """The same RJ flow with the leaf caps on the CAP-CELL grid.
+
+        Divisor 4 (user design 2026-08-15): caps enforced per quarter-band
+        cell instead of per sub-band. Exercises the cap-cell occupancy
+        census, the per-cell prior gate, the live-cap pick filter, the
+        band-saturation budget transitions and the per-cell increment gate
+        in one pass.
+        """
+        import numpy as np
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialRJPriorMove
+        from lisatools.globalfit.state import make_cap_edges
+
+        K = 4
+        fx = self._fixture()
+        state = fx["state"]
+        bi = state.sub_states["gb"].band_info
+        band_edges = np.asarray(bi["band_edges"], dtype=float)
+        bi["cap_edges"] = make_cap_edges(band_edges, K)
+        bi["num_cap_cells"] = len(bi["cap_edges"]) - 1
+
+        move = GBSpecialRJPriorMove(
+            *fx["move_args"], is_rj_prop=True, name="rj_cap_cells",
+            **{**fx["move_kwargs"],
+               "rj_proposal_distribution": fx["priors"],
+               "cap_divisor": K,
+               "leaf_cap_start": 1,
+               "leaf_cap_min_iters": 1},
+        )
+        move.temperature_control = fx["temperature_control"]
+        move.time = 0
+
+        new_state, accepted = move.propose(fx["model"], state)
+
+        self.assertTrue(np.all(np.isfinite(new_state.log_like)))
+        self._assert_basis(new_state)
+        nbi = new_state.sub_states["gb"].band_info
+        num_bands = len(band_edges) - 1
+        cell_cap = np.asarray(nbi["cap_cell_leaf_cap"])
+        self.assertEqual(cell_cap.shape, (num_bands * K,))
+        # armed at leaf_cap_start (possibly already incremented once)
+        self.assertTrue(np.all(cell_cap >= 1))
+        # the legacy per-band array stays written as the max over its cells
+        np.testing.assert_array_equal(
+            np.asarray(nbi["band_leaf_cap"]),
+            cell_cap.reshape(num_bands, K).max(axis=1),
+        )
+        # the per-cell audit trace is populated
+        self.assertEqual(
+            np.asarray(nbi["cap_cell_cold_ll"]).shape[-1], num_bands * K
+        )
+        self.assertGreater(int(nbi["band_num_proposed_rj"].sum()), 0)
+
+    def test_cap_grid_mismatch_raises(self):
+        import numpy as np
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialRJPriorMove
+
+        fx = self._fixture()
+        move = GBSpecialRJPriorMove(
+            *fx["move_args"], is_rj_prop=True, name="rj_cap_mismatch",
+            **{**fx["move_kwargs"],
+               "rj_proposal_distribution": fx["priors"],
+               "cap_divisor": 4, "leaf_cap_start": 1},
+        )
+        move.temperature_control = fx["temperature_control"]
+        move.time = 0
+        # the fixture state was built on the divisor-1 cap grid
+        with self.assertRaises(ValueError) as ctx:
+            move.propose(fx["model"], fx["state"])
+        self.assertIn("cap grid mismatch", str(ctx.exception))
+
     def test_in_model_propose_two_passes(self):
         from lisatools.globalfit.moves.gbspecialstretch import GBSpecialStretchMove
 

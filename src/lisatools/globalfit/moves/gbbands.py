@@ -4149,6 +4149,24 @@ class BandSorter(LISAToolsParallelModule):
         ]
         return f0_fill_mhz[self.leaf_inds] / 1e3
 
+    def coords_freqs_hz(self, coords):
+        """f0 in Hz for an arbitrary block of SAMPLING-basis ``coords``.
+
+        The row-wise twin of :meth:`_source_freqs_hz`, for proposed (not yet
+        accepted) parameters -- the leaf-cap cell of an RJ birth is set by
+        the DRAWN frequency, not by the dead slot's stale coords. Returns
+        ``None`` when f0 is not a sampled column (per-leaf fill branches such
+        as VGB): those sources cannot change frequency, so the caller keeps
+        the row's stored :attr:`freqs`.
+        """
+        tf = self.transform_fn
+        input_basis = list(getattr(tf, "input_basis", []) or [])
+        if "f0" in input_basis:
+            return coords[:, input_basis.index("f0")] / 1e3
+        if tf is None or getattr(tf, "n_leaf_fills", None) is None:
+            return coords[:, 1] / 1e3
+        return None
+
     def set_main_band_sorter_info(self, main_band_sorter, inds_main_band_sorter):
         if main_band_sorter is None:
             self.inds_main_band_sorter = self.xp.arange(self.num_sources)

@@ -60,11 +60,26 @@ from .loginfo import dump_settings, init_logger, setup_root_file_handler
 from .moves import GFCombineMove, GlobalFitMove, MoveBuildContext
 from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter, save_residuals
 from .recipe import Recipe
-from .state import GFState
+from .state import GFState, make_cap_edges
 from .utils import BasicResidualacsLikelihood
 
 
 logger = getLogger(__name__)
+
+
+def _branch_cap_edges(branch_info):
+    """Leaf-cap CELL edges for a banded branch (user design 2026-08-15).
+
+    A refinement of the branch's ``band_edges`` by its ``cap_divisor``
+    (``GBSettings.cap_divisor`` / ``GB_CAP_DIVISOR``; branches without the
+    field -- VGB -- stay on the band grid at divisor 1). MUST agree with
+    what the move is built with and with what the store holds: the state's
+    resume guard and the move's arm-time check both compare against it.
+    """
+    return make_cap_edges(
+        branch_info.band_edges,
+        int(getattr(branch_info, "cap_divisor", 1) or 1),
+    )
 
 #: Branches with hand-written initialization in :meth:`GlobalFit.load_info`.
 #: Anything else is seeded by the metadata-driven generic path there.
@@ -623,6 +638,7 @@ class GlobalFit:
                 _nt_gb,
                 self.curr.source_info["gb"].band_edges,
                 band_temps,
+                cap_edges=_branch_cap_edges(self.curr.source_info["gb"]),
             )
 
         if state is None:
@@ -906,6 +922,9 @@ class GlobalFit:
                     _nt_banded,
                     self.curr.source_info[_banded].band_edges,
                     band_temps,
+                    cap_edges=_branch_cap_edges(
+                        self.curr.source_info[_banded]
+                    ),
                 )
 
             state.log_like = np.zeros((self.ntemps, self.nwalkers))

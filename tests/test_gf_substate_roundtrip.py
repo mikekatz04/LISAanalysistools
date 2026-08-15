@@ -106,6 +106,11 @@ def _tempered_schema(branch):
 EXPECTED_SUB_SCHEMA = {
     "gb": {
         "band_edges": (NUM_BANDS + 1,),
+        # leaf-cap CELL grid (2026-08-15). At the default cap_divisor of 1
+        # the cap grid IS the band grid, so cap_edges == band_edges and NO
+        # cap_cell_* arrays are allocated (that short circuit is what keeps
+        # divisor 1 bit-identical and pre-cap-grid stores resumable).
+        "cap_edges": (NUM_BANDS + 1,),
         "band_temps": (NUM_BANDS, NTEMPS),
         "band_swaps_proposed": (NUM_BANDS, NTEMPS - 1),
         "band_swaps_accepted": (NUM_BANDS, NTEMPS - 1),
@@ -136,9 +141,9 @@ EXPECTED_SUB_SCHEMA = {
     "psd": _tempered_schema("psd"),
 }
 
-# band_edges is written once with the data (no step axis); everything else
-# is a growable per-iteration dataset.
-STATIC_DATASETS = {"gb": {"band_edges"}}
+# band_edges / cap_edges are written once with the data (no step axis);
+# everything else is a growable per-iteration dataset.
+STATIC_DATASETS = {"gb": {"band_edges", "cap_edges"}}
 
 
 def make_state(rng):

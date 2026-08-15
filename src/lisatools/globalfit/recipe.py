@@ -2373,7 +2373,18 @@ def build_gb_moves(
         #    del state.band_info
 
     band_temps = np.tile(np.asarray(gb_betas), (len(band_edges) - 1, 1))
-    state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+    # Leaf-cap cell grid (user design 2026-08-15): a refinement of the band
+    # grid by GBSettings.cap_divisor. Stored alongside band_edges so the
+    # resume guard can verify it and the migration script can split the
+    # per-band cap state into its children.
+    from .state import make_cap_edges
+
+    _cap_edges = make_cap_edges(
+        band_edges, int(getattr(gb_info, "cap_divisor", 1) or 1)
+    )
+    state.sub_states["gb"].initialize_band_information(
+        nwalkers, ntemps, band_edges, band_temps, cap_edges=_cap_edges
+    )
     # initialize_band_information is idempotent (it used to silently
     # re-initialize on every call due to a broken initialized check, which
     # this assignment relied on): the state may arrive here with band_temps
@@ -2492,6 +2503,10 @@ def build_gb_moves(
         # iters >= leaf_cap_min_iters (lnL-plateau + occupancy skipped).
         leaf_cap_iter_only=bool(getattr(gb_info, "leaf_cap_iter_only", False)),
         leaf_cap_update=True,
+        # Leaf-cap CELL grid (GBSettings.cap_divisor / GB_CAP_DIVISOR):
+        # caps are enforced per 1/K-of-a-sub-band cell, not per sub-band.
+        # 1 -> the pre-2026-08-15 per-band behaviour, bit-identically.
+        cap_divisor=int(getattr(gb_info, "cap_divisor", 1) or 1),
         # Sig-het reference policy: built once per repeat block and FIXED
         # (default 0 = no mid-block refresh). GB_SIGHET_REFRESH_EVERY=N>0
         # re-enables the legacy per-source drift refresh (diagnostic);

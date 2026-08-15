@@ -489,6 +489,35 @@ class GBSettings(Settings):
     leaf_cap_iter_only: bool = dataclasses.field(
         default_factory=env_default("GB_LEAF_CAP_ITER_ONLY", False, bool)
     )
+    # cap_divisor: the LEAF-CAP CELL grid (user design 2026-08-15). Each
+    # sub-band is split into this many equal pieces and the per-cell leaf
+    # caps are enforced on THOSE, not on the sub-band. Sub-band widths are
+    # set by what the likelihood engine can run concurrently; the scale at
+    # which two GB sources actually get confused is the posterior width,
+    # which is much narrower. NOTHING ELSE MOVES -- scheduling, units,
+    # buffers, tempering, band shutoff and the cell-ll credit all stay on
+    # the band grid, and every cap cell is contained in exactly one band.
+    #
+    # DEFAULT 8, from the snap11 3-month store (154 uniform 138.9 uHz bands
+    # = 1080 FD bins each; 1147 coexisting same-band cold pairs): the pair
+    # separation distribution is bimodal -- ~10% of pairs sit within 8 FD
+    # bins (genuinely degenerate, no subdivision separates them) and the
+    # rest spread near-uniformly across the band. Directly assigning cells,
+    # the fraction of pairs SHARING a cap cell is 100% at K=1, 48.9% at
+    # K=2, 23.1% at K=4, 16.5% at K=8 and 12.8% at K=16: 4 -> 8 removes 76
+    # shared cells, 8 -> 16 only another 42 for double the bookkeeping. A
+    # K=8 cell is 17.4 uHz / 135 FD bins, still far wider than a source's
+    # own 3-month frequency extent (~+-2 uHz of Doppler sidebands), so cell
+    # membership stays stable under in-model f0 moves; K=16 starts to
+    # approach that scale. 8 is the knee.
+    #
+    # ``GB_CAP_DIVISOR=1`` reproduces the pre-2026-08-15 per-band caps
+    # BIT-IDENTICALLY (the cap grid IS the band grid). Changing this on an
+    # existing run requires scripts/fstat_proposal/migrate_gb_cap_grid.py --
+    # the resume guard refuses a mismatched store. Env: GB_CAP_DIVISOR.
+    cap_divisor: int = dataclasses.field(
+        default_factory=env_default("GB_CAP_DIVISOR", 8, int)
+    )
     # Task-b: narrow per-band WDM slabs. Each per-band sub-band-buffer slab
     # spans a few WDM layers centered on the band instead of the full analysis
     # band ``Nf_active``, cutting the dominant buffer memory term by

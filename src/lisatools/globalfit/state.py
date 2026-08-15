@@ -44,6 +44,89 @@ def branch_nleaves_max(possible_state, name: str) -> int:
     return int(possible_state[name].shape[-2])
 
 
+def make_cap_edges(band_edges, divisor: int):
+    """Subdivide every sub-band into ``divisor`` equal-width CAP CELLS.
+
+    The leaf-cap grid (user design 2026-08-15). Sub-band widths are set by
+    what the likelihood engine can run concurrently; the scale at which
+    sources actually get confused is the POSTERIOR width, which is much
+    narrower. So the caps move off the band grid onto a finer one, while
+    scheduling / units / buffers / tempering / band shutoff all stay on the
+    band grid.
+
+    Every cap cell is CONTAINED in exactly one sub-band (band ``b`` owns
+    cells ``b*K ... b*K + K - 1``). That containment is what keeps the
+    bookkeeping and the HDF5 storage simple and makes the construction work
+    unchanged under both band-edge modes (``uniform`` and the free-floating
+    ``get_n`` grid).
+
+    ``divisor == 1`` returns a copy of ``band_edges`` itself, so the cap
+    grid IS the band grid and every downstream cap computation reduces
+    bit-identically to the pre-2026-08-15 per-band behaviour.
+
+    Args:
+        band_edges: 1D ascending array of sub-band edges (Hz).
+        divisor: Number of cap cells per sub-band (``K >= 1``).
+
+    Returns:
+        ``np.ndarray`` of length ``K * num_bands + 1``.
+    """
+    be = np.asarray(band_edges, dtype=float)
+    k = max(1, int(divisor))
+    if k == 1:
+        return be.copy()
+    lo = be[:-1]
+    step = (be[1:] - be[:-1]) / k
+    inner = lo[:, None] + np.arange(k)[None, :] * step[:, None]
+    return np.concatenate([inner.ravel(), be[-1:]])
+
+
+def cap_divisor_from_edges(band_edges, cap_edges) -> int:
+    """Infer the cap divisor ``K`` from a stored (band_edges, cap_edges) pair."""
+    nb = len(np.asarray(band_edges)) - 1
+    nc = len(np.asarray(cap_edges)) - 1
+    if nb <= 0 or nc <= 0 or nc % nb != 0:
+        raise ValueError(
+            f"cap grid ({nc} cells) is not an integer refinement of the band "
+            f"grid ({nb} bands)."
+        )
+    return nc // nb
+
+
+def ensure_cap_cell_fields(band_info: dict, num_cells: int) -> None:
+    """Backfill the per-CAP-CELL progressive leaf-cap arrays on ``band_info``.
+
+    The cap-cell twins of the ``band_*`` cap arrays (see
+    :func:`ensure_leaf_cap_fields`). These are the ARRAYS THE CAP MACHINERY
+    ACTUALLY READS as of 2026-08-15; the ``band_leaf_cap`` family stays
+    written (as the per-band max over its cells) purely so the monitor and
+    the existing diagnostics keep working.
+
+    - ``cap_cell_leaf_cap``: max alive leaves allowed per cap cell at EVERY
+      temperature. ``-1`` = disarmed sentinel.
+    - ``cap_cell_iters``: RJ iterations spent at the current cell cap.
+    - ``cap_cell_best_ll``: running max of the per-cell cold-walker
+      likelihood statistic at the current cap (reset on each increment).
+    - ``cap_cell_cold_ll``: ``(nwalkers, num_cells)`` per-cold-walker
+      statistic, refreshed every step so the decision is auditable.
+
+    DIVISOR-1 SHORT CIRCUIT: when the cap grid is the band grid there is
+    nothing to allocate -- the move reads the ``band_*`` arrays directly, so
+    divisor 1 is bit-identical to the pre-2026-08-15 code AND keeps
+    resuming stores written before the cap grid existed.
+    """
+    if int(num_cells) == int(band_info.get("num_bands", num_cells)):
+        return
+    band_info.setdefault("cap_cell_leaf_cap", np.full(num_cells, -1, dtype=int))
+    band_info.setdefault("cap_cell_iters", np.zeros(num_cells, dtype=int))
+    band_info.setdefault("cap_cell_best_ll", np.full(num_cells, -np.inf))
+    _nw = int(band_info.get("nwalkers", 0) or 0)
+    if _nw:
+        band_info.setdefault(
+            "cap_cell_cold_ll", np.full((_nw, num_cells), -np.inf)
+        )
+
+
 def ensure_leaf_cap_fields(band_info: dict, num_bands: int) -> None:
     """Backfill the per-band progressive leaf-cap arrays on ``band_info``.
 
@@ -448,7 +531,9 @@ class GBState(ModuleSubState):
         self._band_info = band_info
         self._band_info["initialized"] = True
 
-    def initialize_band_information(self, nwalkers, ntemps, band_edges, band_temps):
+    def initialize_band_information(
+        self, nwalkers, ntemps, band_edges, band_temps, cap_edges=None
+    ):
         """Allocate the band-info dict with zeroed counters.
 
         Args:
@@ -456,7 +541,13 @@ class GBState(ModuleSubState):
             ntemps: Number of temperatures in the ladder.
             band_edges: 1D array of frequency-band edges.
             band_temps: ``(num_bands, ntemps)`` array of inverse temperatures.
+            cap_edges: Optional 1D array of LEAF-CAP cell edges, a refinement
+                of ``band_edges`` (see :func:`make_cap_edges`). ``None``
+                (default) means the cap grid IS the band grid, i.e. divisor 1
+                and the pre-2026-08-15 behaviour.
         """
+        if cap_edges is None:
+            cap_edges = np.asarray(band_edges, dtype=float).copy()
 
         if not self.band_initialized:
             band_info = {}
@@ -465,8 +556,10 @@ class GBState(ModuleSubState):
                 ntemps,
                 band_edges,
             )
+            band_info["cap_edges"] = np.asarray(cap_edges, dtype=float)
 
             band_info["num_bands"] = len(band_info["band_edges"]) - 1
+            band_info["num_cap_cells"] = len(band_info["cap_edges"]) - 1
 
             assert band_temps.shape == (band_info["num_bands"], band_info["ntemps"])
             band_info["band_temps"] = band_temps
@@ -497,6 +590,7 @@ class GBState(ModuleSubState):
                 dtype=int,
             )
             ensure_leaf_cap_fields(band_info, band_info["num_bands"])
+            ensure_cap_cell_fields(band_info, band_info["num_cap_cells"])
             band_info["initialized"] = True
             self.band_info = band_info
 
@@ -518,15 +612,23 @@ class GBState(ModuleSubState):
                 "band_num_binaries": 3, "band_leaf_cap": 1,
                 "band_cap_iters": 1, "band_best_ll": 1,
                 "band_cold_ll": 2,
+                "cap_cell_leaf_cap": 1, "cap_cell_iters": 1,
+                "cap_cell_best_ll": 1, "cap_cell_cold_ll": 2,
             }
             for _key, _nd in _bare_ndim.items():
                 _arr = bi.get(_key)
                 if isinstance(_arr, np.ndarray) and _arr.ndim == _nd + 1:
                     bi[_key] = _arr[-1]
             bi.setdefault("num_bands", len(bi["band_edges"]) - 1)
+            # Stores written before the cap grid existed carry no
+            # ``cap_edges``: their cap grid IS the band grid (divisor 1),
+            # which is exactly what the guard below then compares against.
+            bi.setdefault("cap_edges", np.asarray(bi["band_edges"], dtype=float).copy())
+            bi["num_cap_cells"] = len(bi["cap_edges"]) - 1
             bi.setdefault("ntemps", int(bi["band_temps"].shape[-1]))
             bi.setdefault("nwalkers", int(bi["band_num_binaries"].shape[-2]))
             ensure_leaf_cap_fields(bi, bi["num_bands"])
+            ensure_cap_cell_fields(bi, bi["num_cap_cells"])
             assert nwalkers == bi["nwalkers"]
             assert ntemps == bi["ntemps"]
             # Band-grid geometry check. Explicit (the old bare
@@ -547,6 +649,28 @@ class GBState(ModuleSubState):
                     f"GB_BAND_MIN_LAYERS / GB_SUBBAND_DIVISOR) changed, or "
                     f"the store needs scripts/fstat_proposal/"
                     f"migrate_gb_band_edges.py."
+                )
+            # Leaf-CAP grid check (user design 2026-08-15). The cap grid is
+            # a refinement of the band grid by GB_CAP_DIVISOR; a store whose
+            # cap grid disagrees with the configured divisor must refuse
+            # loudly rather than silently resume a run whose per-cell cap
+            # state means something else.
+            _cfg_cap = np.asarray(cap_edges, dtype=float)
+            _stored_cap = np.asarray(bi["cap_edges"], dtype=float)
+            if _cfg_cap.shape != _stored_cap.shape or not np.allclose(
+                _cfg_cap, _stored_cap, rtol=1e-9, atol=0.0
+            ):
+                _k_cfg = (len(_cfg_cap) - 1) / max(len(_cfg_edges) - 1, 1)
+                _k_store = (len(_stored_cap) - 1) / max(len(_stored_edges) - 1, 1)
+                raise ValueError(
+                    f"leaf-cap grid mismatch: the state stores "
+                    f"{len(_stored_cap) - 1} cap cells (divisor ~{_k_store:g}) "
+                    f"but the run config builds {len(_cfg_cap) - 1} "
+                    f"(GB_CAP_DIVISOR ~{_k_cfg:g}). Either restore the old "
+                    f"GB_CAP_DIVISOR / GBSettings.cap_divisor, or migrate the "
+                    f"store with scripts/fstat_proposal/migrate_gb_cap_grid.py "
+                    f"(which splits each band's stored cap state into its "
+                    f"children, inheriting cap + min-iters counters)."
                 )
 
     def update_band_information(
@@ -612,8 +736,10 @@ class GBState(ModuleSubState):
     # ModuleSubState storage contract
     # ------------------------------------------------------------------
 
-    static_names = ("band_edges",)
-    dim_attr_names = ("num_bands", "ntemps", "nwalkers", "nleaves_max", "ndim")
+    static_names = ("band_edges", "cap_edges")
+    dim_attr_names = (
+        "num_bands", "num_cap_cells", "ntemps", "nwalkers", "nleaves_max", "ndim",
+    )
     # GB's ladder is per band (band_info["band_temps"]); no flat betas
     betas_attr_name = "band_temps"
     #: all band arrays keep the backend float dtype (pre-rework layout)
@@ -631,7 +757,16 @@ class GBState(ModuleSubState):
         "band_cap_iters",
         "band_best_ll",
         "band_cold_ll",
+        "cap_edges",
+        "cap_cell_leaf_cap",
+        "cap_cell_iters",
+        "cap_cell_best_ll",
+        "cap_cell_cold_ll",
     )
+
+    #: band_info entries that are STATIC (written once at backend reset),
+    #: not per-iteration storage arrays
+    _static_band_info_names = ("band_edges", "cap_edges")
 
     def storage_arrays(self):
         """Every per-band array plus the tempered ``chain``/``inds``.
@@ -643,7 +778,8 @@ class GBState(ModuleSubState):
         out = {
             name: dat
             for name, dat in self.band_info.items()
-            if isinstance(dat, np.ndarray) and name != "band_edges"
+            if isinstance(dat, np.ndarray)
+            and name not in self._static_band_info_names
         }
         if self.tempered_initialized:
             out["chain"] = self.coords
@@ -654,11 +790,17 @@ class GBState(ModuleSubState):
         return out
 
     def static_arrays(self):
-        return {"band_edges": self.band_info["band_edges"]}
+        return {
+            "band_edges": self.band_info["band_edges"],
+            "cap_edges": self.band_info.get(
+                "cap_edges", self.band_info["band_edges"]
+            ),
+        }
 
     def storage_attrs(self):
         out = dict(super().storage_attrs())
         out["num_bands"] = len(self.band_info["band_edges"]) - 1
+        out["num_cap_cells"] = len(self.static_arrays()["cap_edges"]) - 1
         return out
 
     @classmethod
@@ -668,6 +810,8 @@ class GBState(ModuleSubState):
         ntemps,
         num_bands=None,
         band_edges=None,
+        cap_edges=None,
+        num_cap_cells=None,
         nleaves_max=None,
         ndim=None,
         **kwargs,
@@ -676,7 +820,8 @@ class GBState(ModuleSubState):
             raise ValueError("Must provide num_bands and band_edges kwargs.")
         template = cls(None)
         template.initialize_band_information(
-            nwalkers, ntemps, band_edges, np.zeros((num_bands, ntemps))
+            nwalkers, ntemps, band_edges, np.zeros((num_bands, ntemps)),
+            cap_edges=cap_edges,
         )
         if _scalar_or_none(nleaves_max) is not None and _scalar_or_none(ndim) is not None:
             template.initialize_tempered(ntemps, nwalkers, nleaves_max, ndim)
@@ -687,9 +832,14 @@ class GBState(ModuleSubState):
         # The stored band arrays keep their leading step axis; GBState's
         # initialize_band_information strips it rank-based on reload.
         band_info = {
-            name: value for name, value in arrays.items() if name.startswith("band_")
+            name: value
+            for name, value in arrays.items()
+            if name.startswith("band_") or name.startswith("cap_cell_")
         }
         band_info["band_edges"] = statics["band_edges"]
+        # Files written before the cap grid existed have no ``cap_edges``
+        # static: divisor 1, cap grid == band grid.
+        band_info["cap_edges"] = statics.get("cap_edges", statics["band_edges"])
         band_info["initialized"] = True
         instance = cls(None, band_info=band_info)
         instance._load_tempered_from_stored(arrays)
