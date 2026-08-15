@@ -93,17 +93,38 @@ export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @
 # ALL alive sources (flip gate is rj-only by construction).
 export GB_RJ_FLIP_FRACTION=0.2
 # In-model info-matrix jump scale: 0.005 default measured 95% cold
-# acceptance; 0.2 measured 0.61 (job 185, n=800) -- still above the
-# 0.15-0.4 target, so 0.4 is the next notch. Tune against the
-# [GB_ACCEPT] per-proposal-type line.
-export GB_JUMP_FACTOR=0.4
-# SPEED-DIAGNOSIS WINDOW #2 (2026-08-15, user directive: production is
-# 20-100x slower than the kernel benches -- get to the bottom of it).
-# The deep spans (gll_* / route_* / fill_* inside get_ll, the shard
-# router, and the fills) ride this pull; SYNC=1 makes every mark carry
-# exactly its own kernel time. REMOVE after one full [GB_TIMING rj]
-# readout -- costs a little wall.
-export GB_PROP_TIMING_SYNC=1
+# acceptance; 0.2 measured 0.61; 0.4 measured 0.60 (job 196, n=27,400)
+# -- still above the 0.15-0.4 target, so 0.6 is the next notch. Tune
+# against the [GB_ACCEPT] per-proposal-type line.
+export GB_JUMP_FACTOR=0.6
+# SPEED-DIAGNOSIS WINDOW #2: CLOSED 2026-08-15 (job-196 05:49 record
+# captured the full SYNC-attributed rj readout; export removed -- the
+# next [GB_TIMING rj] lines are honest baselines again).
+# ---- 2026-08-15 perf batch (ALL code defaults; pinned for the run
+#      record; each knob independently revertible) ---------------------
+# De-synced in-model repeat loop (device-resident accept chain) rides
+# the pull with no knob (bit-identical decisions, tested).
+export GB_ROUTER_DEVICE_RESIDENT=1 # params/outputs never host-stage in the
+                                   # shard router; =0 restores host staging
+export GB_RJ_SNR_TRUNC_DIST=1      # birth distance draw truncated at the
+                                   # analytic SNR-5 boundary; truncated
+                                   # density in the factors (DB-exact);
+                                   # =0 restores the plain lognormal
+# Per-class in-model repeats (search mode): newborns polish hard,
+# survivors lightly. PE resolves to GB stock num_repeat_proposals.
+export GB_INMODEL_REPEATS_NEWBORN=200
+export GB_INMODEL_REPEATS_SURVIVOR=25
+# Per-block EXACT info matrices through the sig-het fast route
+# (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
+# multi-GPU slots now route by the BUFFER's slot shards. First
+# shakedown: set SIGHET_INFOMAT_VALIDATE=1 for one propose to log the
+# fast-vs-chunked reldiff (expect ~1e-4 near-peak, larger off-peak =
+# observed-vs-Fisher, fine for a proposal), then remove.
+export SIGHET_INFOMAT=1
+export GB_INFOMAT_PER_BLOCK=1
+# Countable-only F-stat center precompute + lookup-miss fallback rides
+# the pull (no knob beyond the existing GB_RJ_FSTAT_CTR_HOIST=1); the
+# new [FSTAT_CTR] census line diagnoses the job-195 5x centers blowup.
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
 # Code default since 2026-08-13; pinned for the run record. =0 restores

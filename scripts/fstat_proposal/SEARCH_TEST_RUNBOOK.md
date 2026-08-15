@@ -398,7 +398,10 @@ Changed from the overnight_v5 command (2026-08-09/10):
   max lnL fails to improve by D/2 over `N_CAP_ITERATIONS`. overnight_v5 ran
   with the cap effectively OFF (27 arming lines in overnight_2, zero in v5),
   which is why it started at 89.2 leaves instead of 11.0.
-* `SIGHET_INFOMAT` still UNSET — see the note above; it is misindexed.
+* `SIGHET_INFOMAT=1` is now SAFE on SINGLE-GPU shakedowns (2026-08-14 fix
+  round; see the note below) — add it next to `GB_INFOMAT_PER_BLOCK=1` and
+  validate with `SIGHET_INFOMAT_VALIDATE=1` on the first shakedown. Leave it
+  UNSET on multi-GPU runs until the router patch lands (below).
 * `GB_SUBBAND_DIVISOR` still UNSET (default 1). The WDM leakage study cleared
   sub-division physically (2-layer separation has 5 orders of headroom), but
   the knob has ZERO tests and has never been exercised. Do not take the
@@ -410,36 +413,64 @@ Knob notes:
   (WDM layers 44..57) — the overnight_2 band.
 * The four sig-het knobs must all be present: v5 is gated on `v4_knots`, and
   `v5=1`'s arena on `v4_band`. A guard raises rather than silently running v3.
-* **DO NOT SET `SIGHET_INFOMAT` — it is reachable now but MISINDEXED.**
-  Two separate facts, do not conflate them:
-  1. *Reachability (fixed).* The 2026-08-04 audit was right at the time: the
-     proposal Cholesky ran BEFORE `setup_in_model_likelihood`, so `_in_model`
-     was `None` and `information_matrix` fell through to the chunked delegate
-     (~46 ms/source vs ~2.4). That is why `inmodel_cholesky` was 84% of the
-     overnight_v5 iteration AND why that run saw no v5 gain — the dominant
-     cost never reached sig-het. The blocks were swapped 2026-08-09 so
+* **`SIGHET_INFOMAT=1`: FIXED for single-GPU (2026-08-14); multi-GPU still
+  gated.** History + current state, in order:
+  1. *Reachability (fixed 2026-08-09).* The proposal Cholesky used to run
+     BEFORE `setup_in_model_likelihood`, so `_in_model` was `None` and
+     `information_matrix` fell through to the chunked delegate (~46 ms/source
+     vs ~2.4). That is why `inmodel_cholesky` was 84% of the overnight_v5
+     iteration and why that run saw no v5 gain. The blocks were swapped so
      `inmodel_sighet_setup` now precedes `inmodel_cholesky`.
-  2. *Correctness (NOT fixed).* With `_in_model` live, `get_ll_wdm` IGNORES
-     the holder and reads `data_index` as a **buffer-slot** index
-     (`_slot_to_ref_xp[data_index]`, built by `setup_in_model` as
-     `slot_map[slots] = arange(n)`). But `_compute_proposal_cholesky` passes
-     `noise_index=walker_inds` — **walker** indices — and the sig-het
-     `information_matrix` falls back to it (`di = data_index or noise_index`).
-     Walker indices are in range, so nothing raises: it silently builds the
-     proposal covariance from the WRONG sources' references.
+  2. *Misindex (fixed).* The old fallback `di = data_index or noise_index`
+     would reinterpret walker indices as buffer slots. Now:
+     `_compute_proposal_cholesky` passes `data_index=slots` (sig-het wrapper
+     only, detected via `.chunked`); `gbsignalhetcomputations.
+     information_matrix` takes the CHUNKED branch whenever `data_index is
+     None` (never falls back to `noise_index`), and raises on a wrong-length
+     slot array or on any slot with no live reference in its
+     `_slot_to_ref` map (fail-fast, before any scoring).
+  3. *2026-08-14 fix round (GBGPU + `info_matrix_ll`), all covered by
+     `GBGPU/tests/test_sighet_infomat.py` (CPU):*
+     - **eps table**: the fast route probed a nonexistent
+       `default_param_eps` attr and silently used a UNIFORM 1e-7 step —
+       ~1e15x too big for amp, ~5e6x for f0. It now uses the chunked
+       delegate's `_info_matrix_param_eps` table (amp 1e-25, f0 2e-14, ...),
+       scaled by `SIGHET_INFOMAT_EPS_SCALE`.
+     - **batch alignment**: `information_matrix_from_ll` now rounds its
+       batch (`SIGHET_INFOMAT_BATCH`, default 4096) down to a multiple of
+       the source count, so the per-source `data_index` tiling in the
+       scorer can never misalign (misaligned chunks previously fed the
+       kernel a short slot array → OOB read).
+     - **no premature PSD projection**: the fast route returns the RAW
+       observed information (`psd_project=False`), like the chunked route.
+       Projecting in physical units (eigen-spread ~40 decades: amp
+       ~h_h/amp^2 vs angles ~h_h) flattened the f0/fdot curvature into the
+       relative eigen-floor; `_compute_proposal_cholesky` handles
+       indefiniteness itself (abs(evals) + floor) after the Jacobian
+       rescale.
+  4. *Multi-GPU: STILL GATED — leave `SIGHET_INFOMAT` unset on multi-GPU
+     runs.* Slot spaces disagree on multi-shard runs: `setup_in_model` is
+     routed per BUFFER shard (bands round-robin by parity) and each
+     per-device comp's `_slot_to_ref` is keyed by INTRA-shard rows, while
+     `route_information_matrix` partitions by the WALKER's parent-ACA shard
+     and forwards GLOBAL slot ids. Wrong replica + wrong slot space; the
+     new GBGPU guards make this die loudly instead of silently, but the fix
+     is router-side (drop/convert `data_index` in
+     `gbbands.route_information_matrix` on multi-shard holders — see
+     `agentC_external_patches.md` from the 2026-08-14 session). With the
+     knob unset, multi-GPU takes the validated chunked branch — same as
+     overnight_v5.
 
-  The swap is SAFE with the knob unset (default): `information_matrix` takes
-  its chunked branch, exactly as in overnight_v5. So run with it unset until
-  `data_index=slots` is threaded through
-  `_proposal_cholesky` -> `_compute_proposal_cholesky` ->
-  `route_information_matrix`. Then validate with `SIGHET_INFOMAT_VALIDATE=1`
-  on a shakedown before trusting it.
-
-  When it is fixed, note the fast route returns the OBSERVED information
-  (`-d_i d_j lnL`), not Fisher; the two differ by `<r|d_i d_j h>` away from
-  the peak. That is fine for a proposal — `_compute_proposal_cholesky`
-  already takes `abs(evals)` and clamps to a relative floor — but it is why
-  the validate reldiff will not be ~0.
+  Validation: run one shakedown with `SIGHET_INFOMAT=1
+  SIGHET_INFOMAT_VALIDATE=1` and check the `[SIGHET_INFOMAT_VALIDATE]` log
+  lines. The fast route returns the OBSERVED information (`-d_i d_j lnL`),
+  not Fisher; the two differ by `<r|d_i d_j h>` away from the peak, so the
+  reldiff will NOT be ~0 mid-run — expect tight agreement only for
+  well-converged (near-peak) sources. That is fine for a proposal shape
+  (M-H corrects; the Cholesky uses abs(evals) + a relative floor). The
+  at-the-peak agreement is pinned by
+  `test_sighet_infomat.test_fast_route_matches_chunked_at_reference`
+  (normalized mismatch ~1e-4).
 
 **Pass:**
 - `GB_FSTAT_FIT_IN_MOVE=1: ... skipping the offline grid load.`

@@ -566,22 +566,25 @@ if RJ_STATS:
 
 alert = """
 <div class="alert">
-<strong>JOB 195 &mdash; the OOM fix held and the search is RIPPING:</strong> job 194 died
-exactly where forensics predicted (entering the 7,532-source in-model block); job 195 on
-the chunk cap (GB_RJ_INMODEL_CHUNK=4096) runs clean &mdash; pools of 7,000&ndash;10,684
-survivors now split into &le;4,096-source chunks, device peaks 84/74 GB (tight but held).
-<strong>Cold viable birth acceptance jumped to 13.5%</strong> (750/5,544; was 0.34%) as the
-leaf caps opened to 2 &mdash; ~750 cold births landing per propose, h5 at iteration 14.
-Proposes grew with the model (search 2,014 s: fills 460 + getll 621 + centers 372 +
-in-model 371; removal 843 incl. tempering 424): every queued shave lever gained value
-&mdash; per-class repeats (~400 s), SNR-truncated distance proposal (54% still clamped,
-~300 s), vectorized fills (~1,000 s/iter category), countable-centers (~290 s), per-block
-info matrices (139 s of table builds now, BOTH moves). WATCH #1: removal-move in-model
-cell-ll at HOT rungs blew up (1.2e4/rep at temp 9) &mdash; cold rungs quiet; investigate
-before trusting hot-chain bookkeeping. WATCH #2: band shutoff never fired &mdash; the
-any-temperature reset means hot-chain churn keeps every band alive; needs a cold-only
-counter to match intent. In-model per-type: infomat cold 0.55 at jump 0.4 (next notch up),
-stretch 0.10. [SAVE] steady ~63 s.
+<strong>JOB 196 &mdash; the de-sync batch DELIVERED; one hog left standing.</strong>
+The 05:49 record (first propose on the new code, SYNC-attributed) collapses everything the
+de-sync fixes targeted: <strong>rj_getll 560&rarr;35 s (16&times;), rj_step 702&rarr;45 s,
+in-model get_add_ll 192&rarr;7.6 s (25&times;), rj_fill 139&rarr;6 s</strong> &mdash; the
+propose <em>excluding centers</em> went ~1,450&rarr;537 s (2.7&times;, with SYNC=1 overhead
+still on). The remaining hog: <strong>rj_fstat_centers 1,951 s = 78% of the propose</strong>
+&mdash; and it jumped 374&rarr;1,953 s BETWEEN two proposes on identical code (job 195,
+caps/cells/rounds all flat), a data-dependent 5&times; growth running single-device (dev1
+79% / dev0 3% through that phase, memory only 50 GB). The countable-only center rewrite +
+per-unit [FSTAT_CTR] diagnostics (in flight) target exactly this. New fill sub-spans:
+gathers = 347 of 419 s buffer fill (fill_gather_psd 264 + data 83) &mdash; the device-side
+gather rewrite (in flight) attacks it. WATCH #1: cell-ll credit excess touched COLD (60/rep
+temp 0 band 13 vs 0.05 allowance; predates the restart &mdash; job 195 had 9&ndash;11/rep
+cold hits &mdash; a growing state-driven trend, not a new-code regression, but now the top
+correctness watch). WATCH #2: in-model infomat cold acceptance 0.60 at jump 0.4 &mdash;
+still above the 0.15&ndash;0.4 target; notch GB_JUMP_FACTOR to 0.6&ndash;0.8 next restart.
+Occupancy band-shutoff lines: none yet (counters need ~5 proposes post-restart; expected
+~4-5 h in). [SAVE] steady ~62 s. REMINDER: this record was the SYNC=1 readout &mdash;
+remove the GB_PROP_TIMING_SYNC export at the next restart.
 </div>"""
 
 missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
@@ -743,26 +746,27 @@ first refit against the GB-subtracted residual.</div></div>
 
 <section id="timing"><h2>Timing + Memory</h2>
 {rj_kpis}
-<div class="caption">Grouped RJ&rarr;in-model throughput: job 185's first full-band unit
-swept 43,776 cells in 1,238 s = <strong>0.028 s/cell</strong>, vs 0.080 s/cell for the same
-unit pre-fix (job 177) and ~0.29 s/cell pre-grouped &mdash; the 16,384-slot staging
-(8,192/GPU) plus the GIL-released kernels bought ~2.8&times; on top of the grouped-scheduler
-win.</div>
+<div class="caption">Direct-batch RJ&rarr;in-model throughput, job 196 (first record on
+the de-sync code, SYNC-attributed): 86,974 cells, 3 rj batches, 4,517 survivors polished
+in 2 chunks at 16,384 buffer slots. The de-sync batch collapsed the dispatch taxes
+(rj_getll 16&times;, get_add_ll 25&times;, rj_fill 23&times;); the propose is now
+<strong>78% rj_fstat_centers</strong> (1,951 s, single-device) + fills (420 s, 83%
+gathers) &mdash; both have fixes in flight.</div>
 <div class="panel">{img("rj_breakdown", "rj propose breakdown")}
-<div class="caption">Where the rj propose spends its wall time (job 187's SYNC-ATTRIBUTED
-record: every mark carries exactly its own kernel time). rj_getll and rj_fstat_centers
-split the old rj_kernel aggregate ~50/50; buffer_build + temper_buffer &asymp; 780 s is
-the churn lever; the statistics marks are negligible.</div></div>
+<div class="caption">Where the rj propose spends its wall time (latest SYNC-ATTRIBUTED
+record: every mark carries exactly its own kernel time). Post de-sync, rj_fstat_centers
+dominates outright; buffer fills (gather-bound) are second; the old rj_getll/rj_step
+dispatch taxes are gone; statistics marks negligible.</div></div>
 <div class="panel">{img("mem_telemetry", "device memory telemetry")}
 <div class="caption">Per-device used memory from the in-run memGetInfo telemetry.
 Flat sawtooth = the bounded-buffer behavior; a monotonic ramp here is the leak alarm.</div></div>
 <div class="panel">{img("timing_moves", "per-move timing")}</div>
 <div class="panel">{img("gpu_util", "gpu telemetry")}
-<div class="caption">nvidia-smi utilization + memory, latest three jobs. Job 185's rj phase:
-dev0 6% / dev1 28% mean (peaks 100%) &mdash; the old 5%/57% single-device split is gone but
-duty cycle is now LOW on both: the launch-width-bound kernels finish faster, leaving
-per-lane Python as the residual. Next lever = batching picks into wider launches, not more
-devices.</div></div>
+<div class="caption">nvidia-smi utilization + memory, latest three jobs. Job 196's first
+propose: dev1 79% mean / dev0 3% &mdash; a NEW single-device signature, but this one is the
+F-stat center precompute phase (78% of the propose) pinning dev1 with real work while dev0
+idles. Once the countable-only center rewrite lands, re-read this panel; the de-synced
+remainder of the propose should show a much more balanced, higher-duty profile.</div></div>
 <div class="missing">Per-iteration wall times ([MAXLOGL]/[BENCH]) go to sbatch stdout,
 which was not in this zip — include <code>gf3mo_&lt;jobid&gt;.log</code> next time. [SAVE]
 question ANSWERED: 65.2 s sync write vs ~56 min iteration = ~2%, below the 5–10% mpiexec
