@@ -246,6 +246,67 @@ export VGB_NTEMPS=8
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
 export GB_ROUTER_THREADED=1
 
+# ============================================================================
+# ONE-TIME RELAUNCH PREP (2026-08-15). Guarded by a marker file, so ordinary
+# resubmits/resumes skip it entirely and a mid-fit death resumes normally.
+# To RE-ARM (e.g. after restoring a .bak): rm ${STORE_DIR}/.relaunch_prep_*
+# Runs BEFORE the sampler, uses the knobs exported above so the store and the
+# config can never disagree, and fails the job fast (set -e) if a step errors
+# rather than launching onto a half-migrated store.
+# ============================================================================
+PREP_MARK=${STORE_DIR}/.relaunch_prep_2026_08_15
+H5=${STORE_DIR}/${BASE_FILE_NAME}_testing.h5
+if [ ! -f "${PREP_MARK}" ]; then
+  echo "[PREP] one-time relaunch preparation on ${H5}"
+
+  # 1. VGB beta ladder: heal the betas=[1e-4] bug and re-rung to VGB_NTEMPS.
+  #    (Recreates every rung-dimensioned vgb dataset; writes its own .bak.)
+  python scripts/fstat_proposal/fix_vgb_band_temps.py "${H5}" "${VGB_NTEMPS}"
+
+  # 2. GB leaf caps onto the band/GB_CAP_DIVISOR cap-cell grid. Each band
+  #    hands its current cap + min-iters counters to all its cells (inherit,
+  #    never tighten). Refuses if its .bak already exists.
+  python scripts/fstat_proposal/migrate_gb_cap_grid.py "${H5}" \
+      --cap-divisor "${GB_CAP_DIVISOR}"
+
+  # 3. RETIRE THE STALE F-STAT EPOCH so the fit-in-move rebuilds the grid
+  #    against the CURRENT residual. Two independent reasons this grid is
+  #    stale: (a) it was fitted at epoch 0 (2026-08-13, ~iteration 8) and the
+  #    model has since absorbed ~140 GB sources/walker that are now
+  #    SUBTRACTED out of the residual it was fitted against; (b) the VGB
+  #    likelihood was OFF for the whole run (betas=[1e-4]), so VGBs were
+  #    never actually fitted -- with that repaired they now move and subtract
+  #    properly, changing the residual again. Archiving (not deleting) the
+  #    epoch dirs makes _latest_epoch() return None -> a fresh "fit" at the
+  #    first rj_fstat_search setup(); the archive keeps the old grid for
+  #    comparison. The epoch table of F-stat CENTERS is rebuilt in the same
+  #    sweep (GB_FSTAT_CTR_MODE=epoch), so centers follow the new residual
+  #    automatically.
+  FSTAT_SHARED=${STORE_DIR}/gb_fstat_fit/shared
+  if [ -d "${FSTAT_SHARED}" ] && compgen -G "${FSTAT_SHARED}/epoch_*" > /dev/null; then
+    ARCH=${STORE_DIR}/gb_fstat_fit/stale_epochs_$(date +%Y%m%d_%H%M%S)
+    mkdir -p "${ARCH}"
+    mv "${FSTAT_SHARED}"/epoch_* "${ARCH}/"
+    echo "[PREP] archived stale F-stat epoch(s) -> ${ARCH} (fresh fit will run)"
+  else
+    echo "[PREP] no F-stat epochs found -- the first fit will build epoch_0000"
+  fi
+
+  touch "${PREP_MARK}"
+  echo "[PREP] complete; marker ${PREP_MARK}"
+else
+  echo "[PREP] already applied (${PREP_MARK}) -- skipping; normal resume."
+fi
+
+# LATER REFITS: GB_FSTAT_REFIT_EVERY=100 proposal-hits (~8 h at the new
+# iteration cadence, ~3.5% overhead at a 17.7-min fit). To force an extra
+# refit mid-run WITHOUT restarting from a stale grid, stop the job and
+# archive the epoch dir again:
+#   mv ./gf_prod_3mo/gb_fstat_fit/shared/epoch_* /tmp/  &&  sbatch ...
+# Worth doing once the VGBs have visibly converged, since this first fresh
+# fit happens after only ONE VGB move (noise_vgb_joint_search runs before
+# rj_fstat_search within the gb_search stage, so it is one move, not zero).
+
 # DEDICATED SAVER RANK (armed 2026-08-15, user directive -- the [SAVE]
 # math flipped: the ~60 s sync write was 2% of a 55-min iteration but
 # is 6-10% of the post-mega-batch 10-17 min iterations). np>=3: rank 0
