@@ -1222,6 +1222,44 @@ class AnalysisContainer:
         return jax.vmap(_ll_single)(x_jnp)
 
 
+def shard_lookup_maps(aca) -> tuple:
+    """Cached ``(split_map_host, global_to_intra)`` lookup for a sharded ACA.
+
+    Both arrays are host (numpy) int arrays of length ``acs_total_entries``:
+    ``split_map_host[row]`` is the owning split and
+    ``global_to_intra[row]`` the row's intra-shard position (the ``i`` such
+    that ``gpu_splits[split][i] == row``). They are pure functions of the
+    STATIC shard layout (``gpu_splits`` / ``split_map`` are assigned once in
+    ``AnalysisContainerArray.__init__`` and never rebound — fixed-capacity
+    ``resize_to`` re-binds cells, not shards), so they are computed once and
+    cached on the ACA (``_shard_lookup_cache``). Rebuilding them per call
+    was an O(capacity) host loop on EVERY routed engine call / BandView
+    fancy index (production profiling, 2026-08). The cache key
+    ``(n_rows, n_splits)`` guards the only ways the layout could legally
+    look different (a different/duck-typed holder object reusing the
+    attribute is keyed out by living on the instance itself).
+
+    Works on any holder exposing ``acs_total_entries`` / ``split_map`` /
+    ``gpu_splits`` (the multi-shard test fakes included). Callers must not
+    mutate the returned arrays.
+    """
+    n = int(aca.acs_total_entries)
+    n_splits = len(aca.gpu_splits)
+    cache = getattr(aca, "_shard_lookup_cache", None)
+    if cache is not None and cache[0] == n and cache[1] == n_splits:
+        return cache[2], cache[3]
+    split_map_host = np.asarray(asnumpy(aca.split_map), dtype=int)
+    global_to_intra = np.empty(n, dtype=int)
+    for rows in aca.gpu_splits:
+        rr = np.asarray(asnumpy(rows), dtype=int)
+        global_to_intra[rr] = np.arange(rr.shape[0])
+    try:
+        aca._shard_lookup_cache = (n, n_splits, split_map_host, global_to_intra)
+    except AttributeError:
+        pass  # slots/immutable holders just skip the cache
+    return split_map_host, global_to_intra
+
+
 class BandView:
     """Multi-shard view of a per-band buffer indexed by global band id.
 
@@ -1300,13 +1338,37 @@ class BandView:
         if self._n_bands is None:
             return shards
         # Front-slice each shard to its bound rows (gpu_splits sorted =>
-        # global ids < n_bands sit at intra positions 0..n_s-1).
-        out = []
-        for s, sh in enumerate(shards):
-            split = np.asarray(asnumpy(self._aca.gpu_splits[s]))
-            n_s = int(np.searchsorted(split, self._n_bands))
-            out.append(sh[:n_s])
-        return out
+        # global ids < n_bands sit at intra positions 0..n_s-1). The
+        # counts are cached on the ACA per n_bands (gpu_splits is static;
+        # views are transient, so a view-local cache would never hit) —
+        # this property is evaluated inside hot fill loops.
+        counts = self._bound_shard_counts()
+        return [sh[:n_s] for sh, n_s in zip(shards, counts)]
+
+    def _bound_shard_counts(self) -> tuple:
+        """Per-shard bound-row counts for the fixed-capacity front view.
+
+        Cached on the ACA keyed by ``n_bands`` (``gpu_splits`` is assigned
+        once at ACA construction and never rebound; ``resize_to`` changes
+        the BOUND count — a new key — not the shard layout)."""
+        aca = self._aca
+        nb = int(self._n_bands)
+        cache = getattr(aca, "_bandview_bound_counts", None)
+        if cache is None:
+            cache = {}
+            try:
+                aca._bandview_bound_counts = cache
+            except AttributeError:
+                cache = None
+        if cache is not None and nb in cache:
+            return cache[nb]
+        counts = tuple(
+            int(np.searchsorted(np.asarray(asnumpy(split)), nb))
+            for split in aca.gpu_splits
+        )
+        if cache is not None:
+            cache[nb] = counts
+        return counts
 
     @property
     def shape(self) -> tuple:
@@ -1339,20 +1401,12 @@ class BandView:
     def _resolve_array(self, band_inds) -> tuple:
         """Per-row ``(shard_ids, intra_indices)`` arrays for a 1-D band index."""
         band_inds = np.asarray(asnumpy(band_inds), dtype=int)
-        shard_ids = self._aca.split_map[band_inds]
-        # Intra-shard position: for each shard, the index of the band
-        # within that shard's gpu_splits entry.
-        intra = np.empty(band_inds.shape[0], dtype=int)
-        for s in np.unique(shard_ids):
-            rows = np.where(shard_ids == s)[0]
-            bands_here = band_inds[rows]
-            # gpu_splits[s] is sorted (it comes from np.arange + reorder
-            # under gpu_assignment); use searchsorted-equivalent lookup.
-            order = np.argsort(self._aca.gpu_splits[s])
-            ranks = np.searchsorted(
-                self._aca.gpu_splits[s][order], bands_here
-            )
-            intra[rows] = order[ranks]
+        # Cached static lookup (perf, 2026-08): the per-call
+        # argsort/searchsorted of the static gpu_splits is replaced by two
+        # O(1) table gathers (see shard_lookup_maps).
+        split_map_host, global_to_intra = shard_lookup_maps(self._aca)
+        shard_ids = split_map_host[band_inds]
+        intra = global_to_intra[band_inds]
         return shard_ids, intra, band_inds
 
     def __getitem__(self, idx):
@@ -1432,21 +1486,138 @@ class BandView:
         callers that previously had to ``gather_*_shaped()`` the whole
         outer ACA before fancy-indexing it.
         """
-        broadcast_arrays, target_shape = self._broadcast_fancy(band_idx, intra_axes)
-        band_b = broadcast_arrays[0]
-        intra_b = broadcast_arrays[1:]
-        return self._fancy_dispatch(
-            band_b, intra_b, target_shape, mode="get", val=None
-        )
+        return self._fancy_dispatch(band_idx, intra_axes, mode="get", val=None)
 
     def _fancy_set(self, band_idx, intra_axes: tuple, val) -> None:
         """Tuple-fancy ``view[band_idx, intra1, ...] = val`` write."""
-        broadcast_arrays, target_shape = self._broadcast_fancy(band_idx, intra_axes)
-        band_b = broadcast_arrays[0]
-        intra_b = broadcast_arrays[1:]
-        self._fancy_dispatch(
-            band_b, intra_b, target_shape, mode="set", val=val
+        self._fancy_dispatch(band_idx, intra_axes, mode="set", val=val)
+
+    def _fancy_dispatch(self, band_idx, intra_axes: tuple, mode: str, val):
+        """Shared entry for tuple-fancy read (mode='get') / write (mode='set').
+
+        Fast row-wise path (perf rework, 2026-08): when the band index
+        varies only along axis 0 of the broadcast result (the shape every
+        Buffer fill call site produces — ``band[:, None, ...]`` against
+        open per-axis ramps), the flat rows partition by band, so each
+        shard is fancy-indexed DEVICE-SIDE with the original (un-broadcast)
+        index arrays and broadcasting left to the backend. The previous
+        implementation ``asnumpy``'d every index array and broadcast it to
+        the FULL target shape then ``reshape(-1)`` — hundreds of MB of host
+        int64 per fill chunk, the fills' whole measured cost. Exotic
+        patterns (band varying along a non-leading axis, scalar band)
+        fall back to the bit-equivalent legacy broadcast path.
+        """
+        shapes = [np.shape(band_idx)] + [np.shape(a) for a in intra_axes]
+        target_shape = np.broadcast_shapes(*shapes)
+        band_shape = shapes[0]
+        fast_ok = (
+            len(target_shape) > 0
+            and len(band_shape) == len(target_shape)
+            and all(s == 1 for s in band_shape[1:])
         )
+        if fast_ok:
+            return self._fancy_rowwise(
+                band_idx, intra_axes, target_shape, mode, val
+            )
+        return self._fancy_broadcast(band_idx, intra_axes, target_shape, mode, val)
+
+    def _slice_axis0_on_device(self, arr, rows: np.ndarray):
+        """``arr[rows]`` executed under ``arr``'s own device (numpy: plain)."""
+        dev = getattr(getattr(arr, "device", None), "id", None)
+        if dev is None:
+            return arr[rows]
+        with self._aca.xp.cuda.Device(int(dev)):
+            return arr[rows]
+
+    def _fancy_rowwise(self, band_idx, intra_axes, target_shape, mode, val):
+        """Row-partitioned fancy dispatch (see :meth:`_fancy_dispatch`).
+
+        Per shard: slice each index array along axis 0 only where it
+        actually varies there, move the (small) slices onto the owning
+        device, and let the backend's fancy indexing do the broadcasting
+        on device. Bit-identical to the broadcast path — the same
+        (band, *intra) coordinate reads/writes the same shard element.
+        """
+        xp = self._aca.xp
+        nd = len(target_shape)
+        n = int(target_shape[0])
+        # Band ids per output row (host; n entries — small by construction).
+        bands = np.asarray(asnumpy(band_idx)).reshape(-1).astype(int)
+        if bands.shape[0] == 1 and n > 1:
+            bands = np.broadcast_to(bands, (n,))
+        split_map_host, global_to_intra = shard_lookup_maps(self._aca)
+        shard_ids = split_map_host[bands]
+        intra_all = global_to_intra[bands]
+        shards = self._shards
+
+        is_scalar_val = mode == "set" and (
+            np.isscalar(val) or (hasattr(val, "ndim") and val.ndim == 0)
+        )
+        if mode == "set" and not is_scalar_val and not hasattr(val, "ndim"):
+            val = np.asarray(val)  # list/tuple payloads slice like arrays
+        val_shape = None if (mode != "set" or is_scalar_val) else np.shape(val)
+
+        def _axis0_varies(shape) -> bool:
+            return len(shape) == nd and shape[0] == n and n > 1
+
+        out = None
+        if mode == "get":
+            if self._aca.gpus is None:
+                out = np.zeros(target_shape, dtype=self.dtype)
+            else:
+                with self._aca.xp.cuda.Device(int(self._aca.gpus[0])):
+                    out = xp.zeros(target_shape, dtype=self.dtype)
+
+        main = (
+            xp.cuda.runtime.getDevice() if self._aca.gpus is not None else None
+        )
+        try:
+            for s in np.unique(shard_ids):
+                rows = np.where(shard_ids == s)[0]
+                idx0 = intra_all[rows].reshape((len(rows),) + (1,) * (nd - 1))
+                # Slice axis-0-varying index arrays on their OWN device
+                # before entering the shard context (cross-device slicing
+                # is not legal cupy); broadcast-only arrays pass through.
+                parts = [
+                    self._slice_axis0_on_device(a, rows)
+                    if _axis0_varies(np.shape(a)) else a
+                    for a in intra_axes
+                ]
+                if mode == "set" and not is_scalar_val:
+                    v_part = (
+                        self._slice_axis0_on_device(val, rows)
+                        if _axis0_varies(val_shape) else val
+                    )
+                if self._aca.gpus is None:
+                    # asnumpy: tolerate device index/payload arrays handed
+                    # to a CPU view (the legacy broadcast path did too).
+                    shard_idx = tuple(
+                        [idx0] + [np.asarray(asnumpy(p)) for p in parts]
+                    )
+                    if mode == "get":
+                        out[rows] = shards[s][shard_idx]
+                    elif is_scalar_val:
+                        shards[s][shard_idx] = val
+                    else:
+                        shards[s][shard_idx] = np.asarray(asnumpy(v_part))
+                else:
+                    with xp.cuda.Device(int(self._aca.gpus[s])):
+                        shard_idx = tuple(
+                            [xp.asarray(idx0)] + [xp.asarray(p) for p in parts]
+                        )
+                        if mode == "get":
+                            vals = shards[s][shard_idx]
+                        elif is_scalar_val:
+                            shards[s][shard_idx] = val
+                        else:
+                            shards[s][shard_idx] = xp.asarray(v_part)
+                    if mode == "get":
+                        with xp.cuda.Device(int(self._aca.gpus[0])):
+                            out[rows] = xp.asarray(vals)
+        finally:
+            if self._aca.gpus is not None:
+                xp.cuda.runtime.setDevice(main)
+        return out if mode == "get" else None
 
     @staticmethod
     def _broadcast_fancy(band_idx, intra_axes):
@@ -1457,18 +1628,17 @@ class BandView:
         target_shape = np.broadcast_shapes(*[a.shape for a in arrs])
         return [np.broadcast_to(a, target_shape) for a in arrs], target_shape
 
-    def _fancy_dispatch(
-        self,
-        band_broadcast: np.ndarray,
-        intra_broadcast: list,
-        target_shape: tuple,
-        mode: str,
-        val,
-    ):
-        """Shared kernel for tuple-fancy read (mode='get') and write (mode='set')."""
+    def _fancy_broadcast(self, band_idx, intra_axes, target_shape, mode, val):
+        """Legacy full-broadcast fancy kernel (fallback for exotic index
+        patterns the row-wise path does not cover)."""
+        broadcast_arrays, target_shape = self._broadcast_fancy(band_idx, intra_axes)
+        band_broadcast = broadcast_arrays[0]
+        intra_broadcast = broadcast_arrays[1:]
         band_flat = band_broadcast.reshape(-1).astype(int)
         intra_flat = [a.reshape(-1) for a in intra_broadcast]
-        shard_ids = self._aca.split_map[band_flat]
+        split_map_host, global_to_intra = shard_lookup_maps(self._aca)
+        shard_ids = split_map_host[band_flat]
+        shards = self._shards
 
         is_scalar_val = mode == "set" and (
             np.isscalar(val) or (hasattr(val, "ndim") and val.ndim == 0)
@@ -1495,35 +1665,30 @@ class BandView:
         try:
             for s in np.unique(shard_ids):
                 rows = np.where(shard_ids == s)[0]
-                bands_here = band_flat[rows]
-                order = np.argsort(self._aca.gpu_splits[s])
-                ranks = np.searchsorted(
-                    self._aca.gpu_splits[s][order], bands_here
-                )
-                intra_band = order[ranks]
+                intra_band = global_to_intra[band_flat[rows]]
                 shard_idx = tuple(
                     [intra_band] + [arr[rows] for arr in intra_flat]
                 )
                 if self._aca.gpus is None:
                     if mode == "get":
-                        out_flat[rows] = self._shards[s][shard_idx]
+                        out_flat[rows] = shards[s][shard_idx]
                     else:
                         if is_scalar_val:
-                            self._shards[s][shard_idx] = val
+                            shards[s][shard_idx] = val
                         else:
-                            self._shards[s][shard_idx] = val_broadcast[rows]
+                            shards[s][shard_idx] = val_broadcast[rows]
                 else:
                     if mode == "get":
                         with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
-                            vals = self._shards[s][shard_idx]
+                            vals = shards[s][shard_idx]
                         with self._aca.xp.cuda.Device(int(self._aca.gpus[0])):
                             out_flat[rows] = self._aca.xp.asarray(vals)
                     else:
                         with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
                             if is_scalar_val:
-                                self._shards[s][shard_idx] = val
+                                shards[s][shard_idx] = val
                             else:
-                                self._shards[s][shard_idx] = self._aca.xp.asarray(
+                                shards[s][shard_idx] = self._aca.xp.asarray(
                                     val_broadcast[rows]
                                 )
         finally:
@@ -1583,9 +1748,10 @@ class BandView:
             )
 
         xp_mod = self._aca.xp
+        shards = self._shards
         for s in np.unique(sh_a[same]):
             sel = same & (sh_a == s)
-            shard = self._shards[s]
+            shard = shards[s]
             if self._aca.gpus is None:
                 ia, ib = in_a[sel], in_b[sel]
                 tmp = shard[ia].copy()
@@ -1619,14 +1785,15 @@ class BandView:
         ``xp.asarray`` inside the target device context.
         """
         shard_ids, intra, _ = self._resolve_array(band_inds)
-        per_band_shape = tuple(self._shards[0].shape[1:])
+        shards = self._shards
+        per_band_shape = tuple(shards[0].shape[1:])
         out_shape = (len(band_inds),) + per_band_shape
 
         if self._aca.gpus is None:
             out = np.zeros(out_shape, dtype=self.dtype)
             for s in np.unique(shard_ids):
                 rows = np.where(shard_ids == s)[0]
-                out[rows] = self._shards[s][intra[rows]]
+                out[rows] = shards[s][intra[rows]]
             return out
 
         target = self._aca.gpus[0]
@@ -1637,7 +1804,7 @@ class BandView:
             for s in np.unique(shard_ids):
                 rows = np.where(shard_ids == s)[0]
                 with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
-                    src = self._shards[s][intra[rows]]
+                    src = shards[s][intra[rows]]
                 with self._aca.xp.cuda.Device(int(target)):
                     out[rows] = self._aca.xp.asarray(src)
             return out
@@ -1646,6 +1813,7 @@ class BandView:
 
     def _scatter(self, band_inds: np.ndarray, val) -> None:
         shard_ids, intra, _ = self._resolve_array(band_inds)
+        shards = self._shards
         # Scalar broadcast vs per-row payload
         is_scalar = (
             np.isscalar(val)
@@ -1656,9 +1824,9 @@ class BandView:
             for s in np.unique(shard_ids):
                 rows = np.where(shard_ids == s)[0]
                 if is_scalar:
-                    self._shards[s][intra[rows]] = val
+                    shards[s][intra[rows]] = val
                 else:
-                    self._shards[s][intra[rows]] = val[rows]
+                    shards[s][intra[rows]] = val[rows]
             return
 
         main = self._aca.xp.cuda.runtime.getDevice()
@@ -1667,10 +1835,64 @@ class BandView:
                 rows = np.where(shard_ids == s)[0]
                 with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
                     if is_scalar:
-                        self._shards[s][intra[rows]] = val
+                        shards[s][intra[rows]] = val
                     else:
                         sub = val[rows] if hasattr(val, "__getitem__") else val
-                        self._shards[s][intra[rows]] = self._aca.xp.asarray(sub)
+                        shards[s][intra[rows]] = self._aca.xp.asarray(sub)
+        finally:
+            self._aca.xp.cuda.runtime.setDevice(main)
+
+    def accumulate(self, idx, val) -> None:
+        """In-place ``view[idx] += val`` with per-shard on-device adds.
+
+        The generic ``view[idx] += val`` desugars to gather (all rows onto
+        ``gpus[0]``), host-side add, scatter — the target bytes cross
+        devices TWICE. This routes each row's add to its OWNING shard:
+        only the matching rows of ``val`` move (once), and the ``+=`` runs
+        in place on the shard buffer. Row semantics match ``__setitem__``
+        with a per-row payload: ``idx`` is a 1-D global band index (bool
+        masks accepted), ``val`` a scalar or an array whose leading axis
+        matches ``idx``. Duplicate ids in ``idx`` collapse like fancy
+        assignment (no double-accumulate), same as the gather/scatter
+        path it replaces.
+        """
+        band_inds = np.atleast_1d(np.asarray(asnumpy(idx)))
+        if band_inds.dtype == bool:
+            if band_inds.shape[0] != self.shape[0]:
+                raise IndexError(
+                    f"boolean index shape {band_inds.shape} mismatches "
+                    f"num_bands={self.shape[0]}"
+                )
+            band_inds = np.where(band_inds)[0]
+        shard_ids, intra, _ = self._resolve_array(band_inds)
+        shards = self._shards
+        is_scalar = (
+            np.isscalar(val)
+            or (hasattr(val, "ndim") and val.ndim == 0)
+        )
+
+        if self._aca.gpus is None:
+            for s in np.unique(shard_ids):
+                rows = np.where(shard_ids == s)[0]
+                if is_scalar:
+                    shards[s][intra[rows]] += val
+                else:
+                    shards[s][intra[rows]] += val[rows]
+            return
+
+        main = self._aca.xp.cuda.runtime.getDevice()
+        try:
+            for s in np.unique(shard_ids):
+                rows = np.where(shard_ids == s)[0]
+                if is_scalar:
+                    with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
+                        shards[s][intra[rows]] += val
+                    continue
+                # Slice the payload on ITS device, add on the owning shard
+                # (xp.asarray crosses devices directly, no host hop).
+                sub = self._slice_axis0_on_device(val, rows)
+                with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
+                    shards[s][intra[rows]] += self._aca.xp.asarray(sub)
         finally:
             self._aca.xp.cuda.runtime.setDevice(main)
 

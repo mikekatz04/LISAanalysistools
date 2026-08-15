@@ -135,6 +135,15 @@ def information_matrix_from_ll(
 
     if batch is None:
         batch = int(infomat_knob("SIGHET_INFOMAT_BATCH", 4096))
+    # Align batch boundaries to WHOLE n-row corner blocks. The assembled rows
+    # are [block 0 | block 1 | ...] with the same n sources repeating in the
+    # same order inside every block, and callers' ``call_ll`` may map
+    # per-source metadata onto the rows by tiling (the sig-het scorer tiles
+    # its per-source buffer-slot ``data_index``). A chunk boundary that cuts
+    # through a block would misalign every row after it -- silently scoring
+    # candidates against the WRONG sources' references -- so round the batch
+    # down to a multiple of n (and never below one full block).
+    batch = max(n, (int(batch) // n) * n)
 
     # ---- assemble every corner ONCE (the batching invariant) -------------
     # rows: [central] + [per-i +/-] + [per-pair (+,+),(+,-),(-,+),(-,-)]
