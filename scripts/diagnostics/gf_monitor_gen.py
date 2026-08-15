@@ -343,11 +343,23 @@ fig_b64(fig, "vgb_hists")
 expl = {"gb": [], "vgb": []}
 nz = np.nonzero(gb_alive_last.sum(axis=0))[0]
 if nz.size:
+    # f0-AMPLITUDE (user request 2026-08-15): amplitude derived from the
+    # sampled (dist, f0, Mc) via the stock transform; plotted as log10(A).
+    try:
+        from lisatools.globalfit.stock.erebor.transforms import gb_amp_from_dist
+    except Exception:
+        gb_amp_from_dist = None
     for w in range(nwalk):
         al = np.nonzero(gb_alive_last[w])[0]
         for i_ in al:
             row = gb_chain_cold[w, i_]
-            expl["gb"].append([float(row[1]), float(1.0 / max(row[0], 1e-6)), int(w)])
+            if gb_amp_from_dist is not None:
+                _amp = float(gb_amp_from_dist(
+                    row[1] * 1e-3, row[2], max(row[0], 1e-6)))
+                _y = float(np.log10(max(_amp, 1e-30)))
+            else:
+                _y = float(1.0 / max(row[0], 1e-6))
+            expl["gb"].append([float(row[1]), _y, int(w)])
 S = vgb_c[-1]                                        # (24, 55, 5)
 for w in range(nwalk):
     for leaf in range(55):
@@ -716,7 +728,7 @@ first refit against the GB-subtracted residual.</div></div>
 <div class="caption">Pooled posteriors of the remaining sampled parameters.</div></div>
 </section>
 
-<section id="explorer"><h2>1/Distance vs Frequency Explorer</h2>
+<section id="explorer"><h2>Amplitude vs Frequency Explorer (log10 A from sampled dist, f0, Mc)</h2>
 <div class="panel">
 <div class="btnrow">
   <button id="btn_all">full band</button>
@@ -838,14 +850,14 @@ const VPOST = {VGB_POST_JSON};
   const pts = hasGB ? DATA.gb : DATA.vgb;
   const xlab = hasGB ? "f0 [mHz]" : (DATA.vgb_axis || "VGB leaf index");
   cap.textContent = (hasGB
-    ? `GB samples: ${{DATA.gb.length}} alive-source rows (last iteration, all cold walkers). Truth overlay pending catalogue in a future snapshot.`
+    ? `GB samples: ${{DATA.gb.length}} alive-source rows (last iteration, all cold walkers; y = log10 amplitude from (dist, f0, Mc)). Truth overlay pending catalogue in a future snapshot.`
     : `No GB sources alive yet - showing the 55 VGBs (24 walker samples each) as 1/dist vs leaf index. GB samples take over automatically once births land.`);
   let X0, X1, Y0, Y1;
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
   const pad = (a, b) => [(a - (b - a) * 0.05) , (b + (b - a) * 0.05)];
   const full = () => {{
     [X0, X1] = pad(Math.min(...xs), Math.max(...xs));
-    [Y0, Y1] = pad(0, Math.max(...ys));
+    [Y0, Y1] = hasGB ? pad(Math.min(...ys), Math.max(...ys)) : pad(0, Math.max(...ys));
   }};
   full();
   const dpr = window.devicePixelRatio || 1;
@@ -868,7 +880,7 @@ const VPOST = {VGB_POST_JSON};
     g.fillStyle = C("--dim");
     g.fillText(xlab, w / 2 - 40, h - 2);
     g.save(); g.translate(10, h / 2); g.rotate(-Math.PI / 2);
-    g.fillText("1 / dist [1/kpc]", -30, 0); g.restore();
+    g.fillText(hasGB ? "log10 A" : "1 / dist [1/kpc]", -30, 0); g.restore();
     const col = hasGB ? C("--green") : C("--violet");
     for (const p of pts) {{
       const x = sx(p[0]), y = sy(p[1]);
@@ -903,7 +915,7 @@ const VPOST = {VGB_POST_JSON};
     const top = srt.slice(0, Math.min(3 * 24, srt.length));
     const tx = top.map(p => p[0]), ty = top.map(p => p[1]);
     [X0, X1] = pad(Math.min(...tx), Math.max(...tx) || 1);
-    [Y0, Y1] = pad(0, Math.max(...ty) || 1);
+    [Y0, Y1] = hasGB ? pad(Math.min(...ty), Math.max(...ty)) : pad(0, Math.max(...ty) || 1);
     draw();
   }};
   new ResizeObserver(draw).observe(cv);
