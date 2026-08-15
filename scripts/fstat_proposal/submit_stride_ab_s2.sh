@@ -56,18 +56,37 @@ if [ ! -f "${STORE_DIR}/.ab_copy_done" ]; then
   echo "[AB] copying ${SRC_STORE} -> ${STORE_DIR}"
   mkdir -p "${STORE_DIR}"
   cp -a "${SRC_STORE}/." "${STORE_DIR}/"
-  # Validate the h5 (the live run may have been mid-[SAVE]); fall back to .bak.
-  if ! python - <<EOF
+  # DEEP-validate the h5: a copy taken mid-[SAVE] can carry a truncated
+  # gzip chunk that opens fine (attrs OK) but fails only when the torn
+  # dataset is READ (job-198 lesson: "filter returned failure during
+  # read" at resume). Read EVERY dataset fully; fall back to .bak (also
+  # deep-validated); abort if both are torn.
+  _deep_check() {
+    python - "$1" <<'EOF'
 import h5py, sys
+def walk(g):
+    for k in g:
+        o = g[k]
+        if isinstance(o, h5py.Group):
+            walk(o)
+        else:
+            o[()]  # full read -> decompresses every chunk
 try:
-    with h5py.File("${STORE_DIR}/${BASE}_testing.h5", "r") as f:
-        int(f["global_fit"].attrs["iteration"])
+    with h5py.File(sys.argv[1], "r") as f:
+        walk(f)
 except Exception as e:
+    print(f"[AB] deep check FAILED for {sys.argv[1]}: {e!r}")
     sys.exit(1)
 EOF
-  then
-    echo "[AB] main h5 failed to open (torn copy?) -- using .bak"
+  }
+  if ! _deep_check "${STORE_DIR}/${BASE}_testing.h5"; then
+    echo "[AB] main h5 torn (copy raced a [SAVE]) -- trying .bak"
     cp -a "${STORE_DIR}/${BASE}_testing.h5.bak" "${STORE_DIR}/${BASE}_testing.h5"
+    if ! _deep_check "${STORE_DIR}/${BASE}_testing.h5"; then
+      echo "[AB] .bak torn too -- delete ${STORE_DIR} and re-copy right"
+      echo "     after the live log shows a completed [SAVE]."
+      exit 1
+    fi
   fi
   # Rotate inherited logs so this arm's log contains ONLY A/B iterations.
   for lg in globalfit_run.log global_fit.log; do
