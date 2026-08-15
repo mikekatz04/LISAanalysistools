@@ -1244,14 +1244,31 @@ chips = "".join(
 rj_kpis = ""
 if RJ_STATS:
     c_ = RJ_STATS
+
+    def _kpi(key, dec=0):
+        """Thousands-separated KPI, or an em dash when the log lacks it.
+
+        A missing key used to reach an f-string ``{...:,}`` as the string
+        "?", which raises ValueError ("Cannot specify ',' with 's'") and
+        killed the whole page. Snapshots legitimately miss KPIs -- an early
+        fresh run has no completed RJ unit yet -- so degrade, never crash.
+        """
+        v = c_.get(key)
+        if v is None:
+            return "&mdash;"
+        try:
+            return f"{float(v):,.{dec}f}"
+        except (TypeError, ValueError):
+            return str(v)
+
     rj_kpis = f"""
 <div class="kpi">
-  <div><b>{c_.get('cells','?'):,}</b><span>cells / rj unit</span></div>
-  <div><b>{c_.get('slots','?'):,}</b><span>buffer slots (staged)</span></div>
-  <div><b>{c_.get('rounds','?'):,}</b><span>pick rounds / unit</span></div>
-  <div><b>{c_.get('flushes','?')}</b><span>in-model flushes</span></div>
-  <div><b>{c_.get('batch',0):,.0f}</b><span>mean flush batch [sources]</span></div>
-  <div><b>{c_.get('atcap_cells',0):,}</b><span>at-cap cells skipped</span></div>
+  <div><b>{_kpi('cells')}</b><span>cells / rj unit</span></div>
+  <div><b>{_kpi('slots')}</b><span>buffer slots (staged)</span></div>
+  <div><b>{_kpi('rounds')}</b><span>pick rounds / unit</span></div>
+  <div><b>{_kpi('flushes')}</b><span>in-model flushes</span></div>
+  <div><b>{_kpi('batch')}</b><span>mean flush batch [sources]</span></div>
+  <div><b>{_kpi('atcap_cells')}</b><span>at-cap cells skipped</span></div>
 </div>"""
 
 # one-line-per-move readout under the breakdown panel (built from the SAME
@@ -1270,49 +1287,54 @@ if RJ_BREAK:
 
 alert = """
 <div class="alert">
-<strong>JOB 197 &mdash; the perf mega-batch landed: order-of-magnitude collapses across the
-board, centers is the last lever.</strong>
-The 07:14 restart put the whole batch in flight at once and every targeted span fell by an
-order of magnitude: <strong>removal propose 658&ndash;843 &rarr; 75 s total</strong>;
-<strong>search propose EXCLUDING centers 537 &rarr; 88 s</strong>; <strong>buffer fills
-430 &rarr; 11.6 s</strong> (buffill_resid_psd 419 &rarr; 1.2 s &mdash; device-resident
-router + device-side gathers); <strong>temper_buffer 388 &rarr; 8.6 s (45&times;)</strong>;
-proposal tables / infomat_kernel 42&ndash;78 &rarr; 9.3 s (the exact per-block SIGHET
-info-matrix route is live). Net: the gb iteration wall goes from 53&ndash;77 min to
-<strong>~10&ndash;17 min</strong> depending on which centers state rules &mdash; a ~4&ndash;5&times;
-iteration-level speedup.
+<strong>FRESH RUN (gf_prod_3mo_v2) &mdash; the rebuilt stack, measured from iteration 0.</strong>
+Everything below is a NEW baseline: new store, all state built from config, F-stat grid and
+epoch center table fitted against this run&rsquo;s own residual, and the VGB likelihood
+working for the first time. Headline: <strong>the iteration wall fell from 53&ndash;77 min
+to ~11 min while carrying MORE signal</strong> (160 GB leaves/cold walker at iteration 9 vs
+~140 at iteration 19 of the old run), and cold lnL reached <strong>52,586,123 by iteration
+9</strong> &mdash; past where the previous run sat at iteration 19.
 <br><br>
-<strong>CENTERS &mdash; hypothesis confirmed, one mystery left, now cleanly measured.</strong>
-The new [FSTAT_CTR] census proved the reserve-row hypothesis: of 636,697 unit rows,
-<strong>351,545 (55%) were at-cap reserve</strong>, now excluded by the countable-only
-precompute (285k rows actually computed). The lookup-miss fallback fired for 19,506 rows in
-one propose with zero errors &mdash; the same-commit fallback constraint proved necessary
-immediately. The remaining mystery: per-row cost has <strong>TWO STATES</strong> &mdash;
-468.7 s for 285k rows (1.64 ms/row) in the first propose vs 109.2 s for 346k rows
-(0.31 ms/row) in the second. That is the same ~5&times; oscillation seen as 374 vs 1,953 s in
-jobs 195/196. Centers is 92% of the propose in the slow state and ~2&times; everything else
-in the fast state.
+<strong>What each change actually bought.</strong> (1) EPOCH CENTERS: the 953 s/propose
+F-stat centre chain &mdash; 92% of the old search propose &mdash; is now a
+<strong>529,641-node table built once per epoch in 0.5 s</strong>, with ZERO lookup
+fallbacks; <code>rj_fstat_centers</code> has vanished from the breakdown entirely and
+<code>rj_fstat_search</code> is <strong>137&ndash;151 s (was 1,041 s)</strong>. (2) SAVER
+RANK: <code>[SAVE]</code> 60 s &rarr; <strong>4 s</strong> (&ldquo;handoff to rank 2&rdquo;)
+&mdash; the dedicated mpiexec saver works. (3) JUMP 1.2: in-model cold acceptance
+<strong>0.349</strong>, squarely in the 0.15&ndash;0.4 target (it was 0.71&ndash;0.80 at
+0.6). (4) SNR-TRUNCATED BIRTHS: only <strong>6.2%</strong> of births now die at the SNR
+clamp, against 59% before the lever. (5) GPU BALANCE: dev0 19% / dev1 18% mean, versus the
+3%/79% single-device signature that dominated the old run.
 <br><br>
-<strong>SNR-truncated births work:</strong> clamp-killed scored births 59% &rarr;
-<strong>2.9%</strong> (14,852 of 506,510), viable 97%; death flow stays healthy (removal
-deaths acc 16&ndash;20%, fstat-move deaths 17% &mdash; no starvation from the
-truncation-support rule). Absolute cold accepted births are ~unchanged at 76/propose: the
-lever removed wasted kernel work, not acceptance. <strong>Per-class repeats are live</strong>
-(search log: <code>newborn 3145@200 / mature 4409@25</code>; removal pools 100% mature @25
-as designed).
+<strong>Correctness &mdash; the top watch is resolved.</strong> Cold-rung
+<code>[GB_CELL_LL]</code> credit discrepancies are now ~1e-4/rep against allowances of
+5e-2&ndash;1e-1; the old run was running 20&ndash;60/rep at temp 0. The new
+<code>[GB_ORTHO_LL]</code> bilinearity monitor sits at <strong>1e-6&ndash;2e-5</strong>
+across every unit, confirming that per-buffer likelihood deltas sum to the realized
+residual change. Hot rungs (temp 4&ndash;10) still show excesses, which remains parked.
 <br><br>
-<strong>SURPRISE &mdash; infomat cold acceptance ROSE at a BIGGER jump:</strong> 0.71&ndash;0.80
-cold (0.83&ndash;0.92 all-T) at jump_factor 0.6, vs 0.60 at 0.4. Read that as the per-block
-EXACT information matrices (misindex fixed) massively improving proposal adaptation.
-Recommendation: notch <code>GB_JUMP_FACTOR</code> to <strong>~1.0&ndash;1.5</strong> next
-restart, target 0.15&ndash;0.4. GPU balance improved with the batch: job-197 means dev0 26% /
-dev1 62% (was 3% / 79%), peaks 69/43 GB of 96.
+<strong>THE NEW BOTTLENECK IS vgb_pe.</strong> One iteration is ~673 s and breaks down as
+<code>rj_fstat_search</code> ~151 s + <code>rj_prior_removal</code> ~127 s + a noise+VGB
+block of ~542 s made of <strong>18 rounds &times; ~30 s</strong>. Within each round
+<code>vgb_pe</code> is ~19 s, so <strong>VGB sampling alone is ~340 s &mdash; about half the
+iteration</strong>, and psd+galfor together are only ~11 s/round. The cause is structural,
+not a bug: <code>VGB_NTEMPS=8</code> replaced what was effectively a 1-rung ladder, so the
+VGB buffer is 8&times; larger (2,304 slots) and rebuilt every round &mdash; inside
+<code>vgb_pe</code> the top spans are <code>run_tempering</code> 8.7 s,
+<code>bufbuild_alloc</code> 7.0 s and <code>temper_buffer</code> 6.3 s. This is the correct
+sampling we previously were not doing at all; the question is now whether 8 rungs and 18
+rounds per iteration are both needed for 55 KNOWN, unimodal sources.
 <br><br>
-<strong>WATCHES.</strong> Cold cell-ll credit excess is still present but smaller (worst
-temp-0: 20.1/rep on band 18 at 25 reps, vs 60/rep pre-batch); hot-rung excesses persist
-(parked per user). Band-shutoff lines: none yet &mdash; the in-memory counters reset at the
-restart. Cold lnL max 52.583M and climbing, walker spread ~39.7k still wide (the cap-opening
-surge), h5 iteration 19, [SAVE] steady ~60 s.
+<strong>Open items.</strong> The cap-cell grid is actively gating &mdash; 353k of 1.15M
+births blocked as <code>capped</code> (it was 0 before), which is the intended
+anti-stacking behaviour but deserves a look at whether it is too aggressive.
+<code>[GB_CAP_LL]</code> emitted ZERO lines despite being armed, so that monitor needs
+debugging. Per-process GPU telemetry answers an old question: <strong>all three MPI ranks
+hold ~2.3 GB each</strong>, so the saver/spare ranks really do allocate GPU memory and the
+rank-gated build is worth building. Finally, <code>GF_MOVE_TIMING</code> writes to sbatch
+stdout rather than the run log, so <code>gf3mo_&lt;jobid&gt;.log</code> is needed to split
+psd_pe from galfor_pe directly.
 </div>"""
 
 # ---- data/template/residual captions (numbers come from the arrays) -------
