@@ -2644,6 +2644,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 allow_resize=fixed_cap,
                 timer=getattr(self, "_prop_timer", None),
             )
+        # Speed-diagnosis plumbing (user directive 2026-08-15): the buffer
+        # carries the CURRENT propose's timer so its hot methods (get_ll /
+        # fills) and the shard router can attribute their internals
+        # (gll_* / route_* / fill_* spans). Refreshed every bind — a
+        # persistent cached buffer must never hold a previous propose's
+        # timer.
+        buf._prop_timer = getattr(self, "_prop_timer", None)
         return buf
 
     def _device_mem_summary(self) -> str:

@@ -787,19 +787,34 @@ class _RoutedBandEngine:
     def get_ll(self, holder, params_phys, *, data_index, noise_index,
                N_vals, phase_maximize=False, waveform_kwargs, **kwargs):
         if not self._is_multi(holder):
-            out = self._engine.get_ll(
-                holder, params_phys, data_index=data_index,
-                noise_index=noise_index, N_vals=N_vals,
-                phase_maximize=phase_maximize,
-                waveform_kwargs=waveform_kwargs, **kwargs)
+            _rtm0 = getattr(holder, "_prop_timer", None)
+            if _rtm0 is not None:
+                _rtm0.count("route_single_calls")
+            with _tspan(_rtm0, "route_single_engine"):
+                out = self._engine.get_ll(
+                    holder, params_phys, data_index=data_index,
+                    noise_index=noise_index, N_vals=N_vals,
+                    phase_maximize=phase_maximize,
+                    waveform_kwargs=waveform_kwargs, **kwargs)
             self._mirror_engine_outputs()
             return out
         xp = holder.xp
-        views = self._shard_views(holder)
-        parts = self._partition(holder, data_index, noise_index)
-        num = int(params_phys.shape[0])
-        params_host = asnumpy(params_phys)
-        N_host = None if N_vals is None else asnumpy(N_vals)
+        # Speed-diagnosis spans (user directive 2026-08-15). PRIME SUSPECT
+        # for the bench-vs-production gap: this multi-shard path host-stages
+        # EVERY call — asnumpy(params) is a full device sync, each shard
+        # re-uploads its slice, and each shard's FIVE outputs come back via
+        # asnumpy (more syncs) before _assemble re-uploads. The benches are
+        # single-device and never pay any of it. route_host_stage /
+        # route_dispatch / route_assemble attribute the three phases.
+        _rtm = getattr(holder, "_prop_timer", None)
+        if _rtm is not None:
+            _rtm.count("route_multi_calls")
+        with _tspan(_rtm, "route_host_stage"):
+            views = self._shard_views(holder)
+            parts = self._partition(holder, data_index, noise_index)
+            num = int(params_phys.shape[0])
+            params_host = asnumpy(params_phys)
+            N_host = None if N_vals is None else asnumpy(N_vals)
         items = [
             (si, view, self._engine_for(holder, view), pos, intra,
              intra_noise)
@@ -831,21 +846,23 @@ class _RoutedBandEngine:
                 slots["kept"][si] = (pos,
                                      None if kept is None else asnumpy(kept))
 
-        self._dispatch_shards(holder, items, _shard,
-                              state_ids=[id(it[2]) for it in items])
-        ll_p, dh_p, hh_p, ang_p, kept_p = (
-            [p for p in slots[name] if p is not None]
-            for name in ("ll", "dh", "hh", "ang", "kept"))
-        ll = self._assemble(num, ll_p, -1e300, xp)
-        if ll is None:
-            ll = xp.full(num, -1e300)
-        self.d_h_out = self._assemble(num, dh_p, 0.0, xp)
-        self.h_h_out = self._assemble(num, hh_p, 0.0, xp)
-        self.phase_angle = self._assemble(num, ang_p, 0.0, xp)
-        kept_arr = self._assemble(num, kept_p, False, xp)
-        self.kept_out = (
-            xp.ones(num, dtype=bool) if kept_arr is None else kept_arr
-        )
+        with _tspan(_rtm, "route_dispatch"):
+            self._dispatch_shards(holder, items, _shard,
+                                  state_ids=[id(it[2]) for it in items])
+        with _tspan(_rtm, "route_assemble"):
+            ll_p, dh_p, hh_p, ang_p, kept_p = (
+                [p for p in slots[name] if p is not None]
+                for name in ("ll", "dh", "hh", "ang", "kept"))
+            ll = self._assemble(num, ll_p, -1e300, xp)
+            if ll is None:
+                ll = xp.full(num, -1e300)
+            self.d_h_out = self._assemble(num, dh_p, 0.0, xp)
+            self.h_h_out = self._assemble(num, hh_p, 0.0, xp)
+            self.phase_angle = self._assemble(num, ang_p, 0.0, xp)
+            kept_arr = self._assemble(num, kept_p, False, xp)
+            self.kept_out = (
+                xp.ones(num, dtype=bool) if kept_arr is None else kept_arr
+            )
         return ll
 
     def get_swap_ll(self, holder, params_remove_phys, params_add_phys, *,
@@ -2688,16 +2705,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         :attr:`d_h_out` / :attr:`h_h_out`, and :attr:`phase_angle` carries
         the maximising rotation when ``phase_maximize=True``.
         """
-        params_phys = self._to_phys(params, leaf_inds=leaf_inds)
-        ll = self._likelihood_engine.get_ll(
-            self,
-            params_phys,
-            data_index=data_index,
-            noise_index=noise_index,
-            N_vals=N_vals,
-            phase_maximize=phase_maximize,
-            waveform_kwargs=self.waveform_kwargs,
-        )
+        # Speed-diagnosis spans (user directive 2026-08-15: production runs
+        # 20-100x slower than the kernel benches; decompose every hot call).
+        _dtm = getattr(self, "_prop_timer", None)
+        if _dtm is not None:
+            _dtm.count("gll_calls")
+            _dtm.count("gll_rows", int(params.shape[0]))
+        with _tspan(_dtm, "gll_to_phys"):
+            params_phys = self._to_phys(params, leaf_inds=leaf_inds)
+        with _tspan(_dtm, "gll_engine"):
+            ll = self._likelihood_engine.get_ll(
+                self,
+                params_phys,
+                data_index=data_index,
+                noise_index=noise_index,
+                N_vals=N_vals,
+                phase_maximize=phase_maximize,
+                waveform_kwargs=self.waveform_kwargs,
+            )
         self.d_h_out = self._likelihood_engine.d_h_out
         self.h_h_out = self._likelihood_engine.h_h_out
         self.phase_angle = self._likelihood_engine.phase_angle
@@ -2980,22 +3005,34 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # on a machine where cupy imports, cp is cupy while the buffer /
         # sorter arrays are numpy (same trap as get_index / the sorter xp).
 
+        # Speed-diagnosis spans (user directive 2026-08-15): fills measured
+        # ~8 ms/slot vs ~us of bytes -> decompose index-map construction vs
+        # the routed gathers themselves (BandView tuple-fancy indexing may
+        # host-stage per shard, same suspect as the get_ll router).
+        _ftm = getattr(self, "_prop_timer", None)
+        if _ftm is not None:
+            _ftm.count("fill_chunks")
+            _ftm.count("fill_slots", int(inds_fill.shape[0]))
         outer_data_view = acs.data_shaped_view()
         outer_psd_view = acs.psd_shaped_view()
 
-        inds_get_data = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=False)
+        with _tspan(_ftm, "fill_indmap_data"):
+            inds_get_data = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=False)
 
         # load rest of data into buffer (has current sources removed)
-        self.reset_residual_buffers(inds_fill=inds_fill)
+        with _tspan(_ftm, "fill_gather_data"):
+            self.reset_residual_buffers(inds_fill=inds_fill)
 
-        # By removing `.flatten()` during indexing, broadcasting gives us the exact shape natively.
-        self.band_buffer[inds_fill] += outer_data_view[inds_get_data]
+            # By removing `.flatten()` during indexing, broadcasting gives us the exact shape natively.
+            self.band_buffer[inds_fill] += outer_data_view[inds_get_data]
         del inds_get_data
 
-        inds_get_psd = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=True)
-        self.reset_psd_buffers(inds_fill=inds_fill)
+        with _tspan(_ftm, "fill_indmap_psd"):
+            inds_get_psd = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=True)
+        with _tspan(_ftm, "fill_gather_psd"):
+            self.reset_psd_buffers(inds_fill=inds_fill)
 
-        psd_vals = outer_psd_view[inds_get_psd]
+            psd_vals = outer_psd_view[inds_get_psd]
         if self.xp.iscomplexobj(psd_vals) and not self.xp.iscomplexobj(
             self.psd_buffer if not isinstance(self.psd_buffer, BandView) else psd_vals
         ):

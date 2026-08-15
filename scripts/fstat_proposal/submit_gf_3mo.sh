@@ -97,8 +97,13 @@ export GB_RJ_FLIP_FRACTION=0.2
 # 0.15-0.4 target, so 0.4 is the next notch. Tune against the
 # [GB_ACCEPT] per-proposal-type line.
 export GB_JUMP_FACTOR=0.4
-# (GB_PROP_TIMING_SYNC=1 diagnostic REMOVED 2026-08-14 after the sync
-# window -- re-add only for a fresh mark-attribution readout.)
+# SPEED-DIAGNOSIS WINDOW #2 (2026-08-15, user directive: production is
+# 20-100x slower than the kernel benches -- get to the bottom of it).
+# The deep spans (gll_* / route_* / fill_* inside get_ll, the shard
+# router, and the fills) ride this pull; SYNC=1 makes every mark carry
+# exactly its own kernel time. REMOVE after one full [GB_TIMING rj]
+# readout -- costs a little wall.
+export GB_PROP_TIMING_SYNC=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
 # Code default since 2026-08-13; pinned for the run record. =0 restores
