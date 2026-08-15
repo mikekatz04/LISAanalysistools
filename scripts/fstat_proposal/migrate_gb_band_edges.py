@@ -199,6 +199,12 @@ def main():
     parser.add_argument("--divisor", type=int,
                         default=int(os.environ.get("GB_SUBBAND_DIVISOR", "1")),
                         help="subband divisor (default from GB_SUBBAND_DIVISOR)")
+    parser.add_argument("--unit-stride", type=int,
+                        default=int(os.environ.get("GB_BAND_UNIT_STRIDE", "2")),
+                        help="band-unit stride the run will use (default from "
+                             "GB_BAND_UNIT_STRIDE); sub-layer --min-layers "
+                             "require (stride-1)*min_width_layers >= 1 "
+                             "(1/div-layer bands -> stride >= div+1)")
     parser.add_argument("--oversample", type=int, default=4)
     parser.add_argument("--extra-buffer", type=int, default=5)
     parser.add_argument("--fstat-fit-dir", default=None,
@@ -241,6 +247,7 @@ def main():
             extra_buffer=args.extra_buffer,
             target_count=args.target_count,
             min_band_layers=args.min_layers,
+            unit_stride=args.unit_stride,
         )
 
     nb_new = len(new_edges) - 1

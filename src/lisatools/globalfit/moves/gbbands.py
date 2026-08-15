@@ -83,6 +83,84 @@ _SPECIAL_INDEX_BASE = int(1e6)
 _WDM_SLAB_LEAKAGE_LAYERS = 2
 
 
+def check_band_stride_separation(
+    band_edges,
+    layer_df: float,
+    stride: int,
+    *,
+    min_layers_required: float = 1.0,
+    context: str = "",
+) -> float:
+    """Validate the band-unit stride against the band grid's minimum width.
+
+    PHYSICS RULING (user, verified premise): an FD inner product of ~0
+    implies a WDM inner product of ~0, EVEN within one wavelet layer.
+    The concurrency constraint for GB sub-bands is therefore
+    ORTHOGONALITY (frequency separation), NOT disjoint wavelet-pixel
+    support: two sources separated by ``|df| * Tobs >> 1`` have
+    ``<h_i|h_j> ~ 0``, so by bilinearity their likelihood deltas add
+    (``dll(h_i + h_j) ~ dll_i + dll_j``) and their evaluations may run
+    CONCURRENTLY in independent buffer components with no sequential
+    conditioning. The one place orthogonality weakens is BOUNDARY PAIRS
+    (sources near a shared band edge, small ``df``) -- which is exactly
+    what the stride guard protects: with stride-``k`` unit scheduling
+    (unit = ``band_index % k``), the closest same-unit bands have
+    ``k - 1`` closed bands between them, so the same-unit frequency
+    separation floor is ``(k - 1) * min_band_width``.
+
+    ENFORCED RULE: ``(stride - 1) * min_band_width_layers >=
+    min_layers_required`` (with a 1e-9 relative tolerance). At the
+    default ``min_layers_required = 1.0`` this keeps same-unit
+    likelihood windows (``m_band_half_width = 1`` layer each side)
+    sharing at most 1 layer -- today's measured-safe stride-2 /
+    1-layer-band configuration (~3e-5 lnL bias, 5 orders of headroom).
+    For sub-layer bands of minimum width ``1/div`` layers this resolves
+    to ``stride >= div + 1``.
+
+    Args:
+        band_edges: Ascending band-edge frequencies (Hz); any array-like
+            (cupy accepted).
+        layer_df: WDM layer width (Hz).
+        stride: Band-unit stride (``band_units`` on the move /
+            ``GB_BAND_UNIT_STRIDE``).
+        min_layers_required: Required same-unit separation in full WDM
+            layers (default 1.0, the measured-safe floor).
+        context: Optional label prepended to the error message.
+
+    Returns:
+        The minimum band width in layers (diagnostic convenience).
+
+    Raises:
+        ValueError: When the separation floor is not met.
+    """
+    edges = np.asarray(asnumpy(band_edges), dtype=float)
+    if edges.size < 3:
+        # 0 or 1 band: no two bands are ever concurrent.
+        return float("inf")
+    stride = int(stride)
+    min_width_layers = float(np.min(np.diff(edges)) / float(layer_df))
+    tol = 1e-9
+    if (stride - 1) * min_width_layers < min_layers_required * (1.0 - tol):
+        required = 1 + int(np.ceil(
+            min_layers_required / min_width_layers * (1.0 - tol)
+        ))
+        raise ValueError(
+            f"{context + ': ' if context else ''}band-unit stride {stride} is "
+            f"unsafe for this band grid: the narrowest band spans "
+            f"{min_width_layers:.4g} WDM layers, so same-unit bands are only "
+            f"(stride-1) * {min_width_layers:.4g} = "
+            f"{(stride - 1) * min_width_layers:.4g} layers apart, below the "
+            f"{min_layers_required:.4g}-layer orthogonality floor "
+            f"(same-unit likelihood windows spread m_band_half_width=1 layer "
+            f"each side and must not overlap beyond the tested 1-shared-layer "
+            f"configuration). Use GB_BAND_UNIT_STRIDE >= {required} (rule: "
+            f"(stride - 1) * min_band_width_layers >= "
+            f"{min_layers_required:.4g}; for 1/div-layer minimum bands this "
+            f"is stride >= div + 1)."
+        )
+    return min_width_layers
+
+
 def pack_special_index(temp_inds, walker_inds, band_inds, nwalkers: int):
     """Pack ``(temp, walker, band)`` triplets into scalar special indices.
 

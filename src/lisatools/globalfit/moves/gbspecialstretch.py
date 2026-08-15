@@ -283,6 +283,111 @@ def _resolve_rj_flip_fraction(branch_name, kwarg_value, default=1.0):
     return value
 
 
+def _resolve_band_unit_stride(branch_name, ctor_value):
+    """Resolve the band-unit stride ``band_units`` (env > ctor > default 2).
+
+    A move built with an explicit ``band_units`` kwarg keeps it unless the
+    env knob ``{BRANCH}_BAND_UNIT_STRIDE`` is set, which wins (the same
+    env-wins convention as ``{BRANCH}_JUMP_FACTOR``). Stride ``k``
+    partitions the bands into ``k`` units by ``band_index % k``; unit
+    members are scheduled CONCURRENTLY, so same-unit bands always have
+    ``k - 1`` closed bands between them. ``2`` (the default) is the
+    legacy odd/even parity scheduling, bit-identical to the historical
+    behavior. Values ``< 1`` are rejected.
+    """
+    env_val = os.environ.get(
+        f"{str(branch_name).upper()}_BAND_UNIT_STRIDE", None
+    )
+    value = int(env_val) if env_val is not None else int(ctor_value)
+    if value < 1:
+        raise ValueError(f"band-unit stride must be >= 1, got {value}.")
+    return value
+
+
+def _tempering_open_remainder(start: int, units: int) -> int:
+    """Band-index remainder class opened for tempering unit ``start``.
+
+    The tempering grid selects interior bands ``arange(1, nb - 1)
+    [start::units]``; those are exactly the bands with ``band % units ==
+    (start + 1) % units`` (tempering begins at band 1). The residual
+    open/close for the unit must expose the SAME class, so this mapping
+    is the single source of truth. At ``units == 2`` it reproduces the
+    legacy ``bool_remainder = 1 if start == 0 else 0``.
+    """
+    return (int(start) + 1) % int(units)
+
+
+def _ortho_ll_summary(direct, credited, tol):
+    """Per-unit bilinearity discrepancy summary for [GB_ORTHO_LL].
+
+    PHYSICS PREMISE (user ruling, verified): FD inner product ~0 implies
+    WDM inner product ~0, even within one wavelet layer, so same-unit
+    cells scored concurrently in independent buffer components satisfy
+    ``dll(h_i + h_j) = dll_i + dll_j - <h_i|h_j> ~ dll_i + dll_j``.
+    ``direct`` is the realized per-cold-walker lnL delta on the overall
+    parent residual across one unit (open -> proposals -> close);
+    ``credited`` is the sum of the per-buffer (per-cell) lnL deltas the
+    ledger accumulated for the same unit. Bilinearity/orthogonality
+    failing (concurrent cells' windows interfering) makes them disagree.
+
+    Returns ``dict(mean_abs=..., max_abs=..., worst_walker=...,
+    flagged=bool)`` with ``flagged = max_abs > tol``.
+    """
+    direct = np.asarray(direct, dtype=float)
+    credited = np.asarray(credited, dtype=float)
+    disc = direct - credited
+    abs_disc = np.abs(disc)
+    k = int(abs_disc.argmax()) if abs_disc.size else 0
+    max_abs = float(abs_disc[k]) if abs_disc.size else 0.0
+    return {
+        "mean_abs": float(abs_disc.mean()) if abs_disc.size else 0.0,
+        "max_abs": max_abs,
+        "worst_walker": k,
+        "flagged": bool(max_abs > float(tol)),
+    }
+
+
+def _ortho_boundary_pairs(
+    f0, walker_inds, band_inds, eligible, units, remainder, max_pairs=8
+):
+    """Closest-frequency same-unit cross-band source pairs (per walker).
+
+    Boundary pairs are where the orthogonality premise (see
+    :func:`lisatools.globalfit.moves.gbbands.check_band_stride_separation`)
+    is weakest: sources in DIFFERENT bands of the SAME concurrency unit
+    (``band % units == remainder``) that are close in frequency. Within
+    each walker's ``eligible`` sources (callers pass cold-chain alive),
+    sort by ``f0`` and take every consecutive pair that crosses a band
+    boundary; return the ``max_pairs`` smallest-``|df|`` pairs overall.
+
+    All inputs are host numpy arrays. Returns ``(i_idx, j_idx)`` int
+    arrays of row indices into the input arrays (empty when no
+    cross-band pair exists).
+    """
+    f0 = np.asarray(f0, dtype=float)
+    walker_inds = np.asarray(walker_inds)
+    band_inds = np.asarray(band_inds)
+    eligible = np.asarray(eligible, dtype=bool)
+    sel = np.where(eligible & (band_inds % int(units) == int(remainder)))[0]
+    pairs_i, pairs_j, pair_df = [], [], []
+    for wv in np.unique(walker_inds[sel]):
+        rows = sel[walker_inds[sel] == wv]
+        if rows.size < 2:
+            continue
+        order = rows[np.argsort(f0[rows], kind="stable")]
+        cross = np.where(np.diff(band_inds[order]) != 0)[0]
+        pairs_i.append(order[cross])
+        pairs_j.append(order[cross + 1])
+        pair_df.append(f0[order[cross + 1]] - f0[order[cross]])
+    if not pairs_i:
+        return np.empty(0, dtype=int), np.empty(0, dtype=int)
+    i_all = np.concatenate(pairs_i)
+    j_all = np.concatenate(pairs_j)
+    df_all = np.concatenate(pair_df)
+    keep = np.argsort(df_all, kind="stable")[: max(0, int(max_pairs))]
+    return i_all[keep], j_all[keep]
+
+
 def _resolve_inmodel_repeats(branch_name, class_name, kwarg_value, default):
     """Resolve a per-provenance-class in-model repeat count.
 
@@ -484,6 +589,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         phase_maximize: If ``True``, marginalize over phase in the
             likelihood.
         gpus: GPU device list for this move (intra-node knob).
+        band_units: Band-unit stride for the concurrent sub-band
+            scheduling (env ``{BRANCH}_BAND_UNIT_STRIDE`` wins). Stride k
+            partitions bands into k units by ``band_index % k``; a unit's
+            bands are opened/scored CONCURRENTLY, so same-unit bands keep
+            ``k - 1`` closed bands between them. Default 2 = the legacy
+            odd/even parity, bit-identical. Honored by run_proposal AND
+            run_tempering. PHYSICS RULING (user, verified premise): FD
+            inner product ~0 implies WDM inner product ~0 even within one
+            wavelet layer, so the concurrency constraint is ORTHOGONALITY
+            (frequency separation) -- the ctor enforces
+            ``(stride - 1) * min_band_width_layers >= 1`` on WDM grids
+            (see ``check_band_stride_separation``).
         num_band_preload: Staged-buffer slots PER RUN DEVICE
             (``GB_N_SUBBANDS``; total residency = this x n_gpus).
         run_swaps: Whether to run band-temperature swaps.
@@ -875,9 +992,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # The default in_model_proposal() is the overridable hook consuming
         # this; subclass it for other proposal components.
         self.stretch_probability = float(stretch_probability)
-        # Band parity stride: 2 = odds/evens (minimum separation); larger
-        # values give wider separation between simultaneously-updated bands.
-        self.band_units = max(1, int(band_units))
+        # Band-unit stride (``{BRANCH}_BAND_UNIT_STRIDE`` env wins over the
+        # ctor kwarg): stride k partitions bands into k units by
+        # ``band_index % k``; same-unit bands run CONCURRENTLY with k - 1
+        # closed bands between them. 2 (default) = the legacy odd/even
+        # parity scheduling, bit-identical. Honored by BOTH the proposal
+        # unit loop (run_proposal) and the tempering unit loop
+        # (run_tempering).
+        self.band_units = _resolve_band_unit_stride(branch_name, band_units)
+        # ORTHOGONALITY concurrency guard (physics ruling -- see
+        # check_band_stride_separation): same-unit bands must keep >= 1
+        # full WDM layer of separation, i.e. (stride - 1) *
+        # min_band_width_layers >= 1. Whole-layer bands at stride 2 (the
+        # legacy default) pass exactly; sub-layer band grids need the
+        # matching stride bump (min width 1/div layers -> stride >= div+1)
+        # and are refused loudly otherwise. WDM basis only (FD bands are
+        # get_N-wide, far beyond any window spread).
+        if isinstance(self._basis_settings, WDMSettings):
+            from .gbbands import check_band_stride_separation
+
+            check_band_stride_separation(
+                band_edges,
+                float(self._basis_settings.layer_df),
+                self.band_units,
+                context=f"{name or type(self).__name__} (branch {branch_name})",
+            )
         # Info-matrix jump scale (Gaussian draw through the Cholesky factor).
         self.jump_factor = float(jump_factor)
         # Env override (knob = capitalized field, branch-prefixed). The
@@ -2157,6 +2296,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def run_proposal(self, model, state, band_sorter, band_temps):
         """One full pass of per-band proposals.
 
+        Bands are partitioned into ``self.band_units`` units by
+        ``band_index % band_units`` (stride-k generalization of the
+        historical odd/even parity; ``GB_BAND_UNIT_STRIDE``, default 2 =
+        bit-identical legacy). A unit's bands run CONCURRENTLY in
+        independent buffer cells -- valid because same-unit bands keep
+        ``band_units - 1`` closed bands (>= 1 full WDM layer, ctor
+        guard) of separation, so cross-cell template overlaps
+        ``<h_i|h_j>`` are ~0 and likelihood deltas add by bilinearity
+        (the orthogonality physics ruling; monitors: GB_ORTHO_CHECK /
+        GB_ORTHO_LL_CHECK).
+
         For each band-parity unit: *open* the parity class (cold-chain
         templates restored into the parent residual so every central-band
         window holds coordinate-independent raw data), load the
@@ -2195,8 +2345,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         units = self.band_units if self.num_bands > 1 else 1
         start_unit = model.random.randint(units)
 
+        # [GB_ORTHO_LL] bilinearity bookkeeping check (default OFF,
+        # GB_ORTHO_LL_CHECK=1): per concurrent group (one unit's
+        # simultaneously-scored cells), compare the sum of per-buffer lnL
+        # deltas (the cold rows of ``ll_change_log``, realized per-slab
+        # under the default GB_CELL_LL_CREDIT crediting) against the
+        # realized delta on the OVERALL parent residual across the unit's
+        # open -> proposals -> close. Orthogonality is what makes the two
+        # agree (see _ortho_ll_summary); this is the accuracy monitor for
+        # the concurrent sub-band scheduling.
+        _ortho_ll_on = os.environ.get("GB_ORTHO_LL_CHECK", "0") == "1"
+
         for unit_i in range(units):
             remainder = (start_unit + unit_i) % units
+
+            if _ortho_ll_on:
+                _oll_direct0 = _to_numpy(
+                    model.analysis_container_arr.likelihood()
+                ).copy()
+                _oll_credit0 = _to_numpy(ll_change_log[0].sum(axis=-1)).copy()
 
             if self.debug:
                 _dbg_ll_unit_start = _to_numpy(
@@ -2381,12 +2548,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     model, band_sorter, subset, band_temps,
                     ll_change_log, prop_counts, acc_counts,
                 )
+                # [GB_ORTHO] premise check (default OFF, GB_ORTHO_CHECK=1):
+                # sample this unit's closest-frequency cross-band boundary
+                # pairs and measure their normalized template overlaps
+                # through the installed swap-ll kernels.
+                self._run_ortho_premise_check(
+                    model, band_sorter, units, remainder
+                )
 
             # Close: re-subtract with (possibly updated) cold-chain coords.
             with _tspan(getattr(self, "_prop_timer", None), "unit_open_close"):
                 self.add_cold_chain_sources_to_residual(
                     model, band_sorter, units=units, remainder=remainder
                 )
+
+            if _ortho_ll_on:
+                _oll = _ortho_ll_summary(
+                    _to_numpy(model.analysis_container_arr.likelihood())
+                    - _oll_direct0,
+                    _to_numpy(ll_change_log[0].sum(axis=-1)) - _oll_credit0,
+                    float(os.environ.get("GB_ORTHO_LL_TOL", "0.05")),
+                )
+                logger.info(
+                    "[GB_ORTHO_LL %s] unit %d (bands %% %d == %d): "
+                    "|direct - credited| cold-walker lnL discrepancy mean "
+                    "%.3e max %.3e (walker %d).",
+                    self.name, unit_i, units, remainder,
+                    _oll["mean_abs"], _oll["max_abs"], _oll["worst_walker"],
+                )
+                if _oll["flagged"]:
+                    logger.warning(
+                        "[GB_ORTHO_LL %s] unit %d: max per-walker "
+                        "discrepancy %.3e exceeds GB_ORTHO_LL_TOL=%s -- the "
+                        "sum of concurrent per-cell lnL deltas and the "
+                        "realized parent-residual delta disagree beyond the "
+                        "bilinearity/orthogonality allowance (concurrent "
+                        "same-unit windows may be interfering).",
+                        self.name, unit_i, _oll["max_abs"],
+                        os.environ.get("GB_ORTHO_LL_TOL", "0.05"),
+                    )
 
             if self.debug:
                 _dbg_ll_unit_end = _to_numpy(
@@ -2937,6 +3137,104 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f" {allowed:.3e} (temp {t_i}, walker {w_i}, band {b_i},"
                 f" {nrep} repeats): the sampled lls and the realized buffer"
                 " residual disagree beyond the expected floor for this rung."
+            )
+
+    def _run_ortho_premise_check(self, model, band_sorter, units, remainder):
+        """[GB_ORTHO] orthogonality premise check (default OFF).
+
+        PHYSICS RULING (user, verified premise): FD inner product ~0
+        implies WDM inner product ~0, EVEN within one wavelet layer, so
+        the concurrency constraint for GB sub-bands is ORTHOGONALITY
+        (frequency separation), not disjoint wavelet-pixel support. Two
+        sources with ``|df| * Tobs >> 1`` have ``<h_i|h_j> ~ 0`` and, by
+        bilinearity, additive likelihood deltas -- which is what lets
+        same-unit cells run concurrently. Boundary pairs (sources near a
+        shared sub-band edge, small ``df``) are the one place the premise
+        weakens, so this check MEASURES them: at unit close it samples the
+        unit's closest-frequency cross-band cold-chain pairs
+        (:func:`_ortho_boundary_pairs`) and evaluates each pair's
+        normalized overlap ``|<h_i|h_j>| / sqrt(<h_i|h_i> <h_j|h_j>)``
+        through the INSTALLED swap-likelihood kernels
+        (``BandLikelihoodEngine.get_swap_ll`` -> ``hh_cross`` /
+        ``hh_add`` / ``hh_remove``; the same inner products production
+        scoring uses -- never hand-rolled).
+
+        Knobs: ``GB_ORTHO_CHECK=1`` enables; ``GB_ORTHO_TOL`` (default
+        1e-3) is the WARN threshold on the max overlap;
+        ``GB_ORTHO_MAX_PAIRS`` (default 8) caps the pairs per unit.
+        Diagnostic only -- never mutates state, and any internal failure
+        logs a warning instead of breaking the sampler.
+        """
+        if os.environ.get("GB_ORTHO_CHECK", "0") != "1":
+            return
+        try:
+            alive = _to_numpy(band_sorter.inds).astype(bool)
+            t_i = _to_numpy(band_sorter.temp_inds)
+            w_i = _to_numpy(band_sorter.walker_inds)
+            b_i = _to_numpy(band_sorter.band_inds)
+            f0 = _to_numpy(band_sorter.coords_in[:, 1])  # physical f0 (Hz)
+            max_pairs = int(os.environ.get("GB_ORTHO_MAX_PAIRS", "8"))
+            i_idx, j_idx = _ortho_boundary_pairs(
+                f0, w_i, b_i, alive & (t_i == 0), units, remainder,
+                max_pairs=max_pairs,
+            )
+            if i_idx.size == 0:
+                logger.info(
+                    "[GB_ORTHO %s] unit (bands %% %d == %d): no cold-chain "
+                    "cross-band boundary pairs to check.",
+                    self.name, units, remainder,
+                )
+                return
+            xp = self.xp
+            rows_i = xp.asarray(i_idx)
+            rows_j = xp.asarray(j_idx)
+            params_i = band_sorter.coords_in[rows_i]
+            params_j = band_sorter.coords_in[rows_j]
+            data_index = xp.asarray(w_i[i_idx]).astype(xp.int32)
+            N_vals = xp.maximum(
+                band_sorter.N_vals[rows_i], band_sorter.N_vals[rows_j]
+            )
+            res = self._likelihood_engine.get_swap_ll(
+                model.analysis_container_arr,
+                params_j,
+                params_i,
+                data_index=data_index,
+                noise_index=data_index,
+                N_vals=N_vals,
+                phase_maximize=False,
+                waveform_kwargs=self.waveform_kwargs,
+            )
+            hh_i = np.abs(_to_numpy(res.hh_add))
+            hh_j = np.abs(_to_numpy(res.hh_remove))
+            hh_x = np.abs(_to_numpy(res.hh_cross))
+            norm = np.sqrt(np.maximum(hh_i * hh_j, 1e-300))
+            overlap = hh_x / norm
+            k = int(overlap.argmax())
+            df_pairs = f0[j_idx] - f0[i_idx]
+            tol = float(os.environ.get("GB_ORTHO_TOL", "1e-3"))
+            logger.info(
+                "[GB_ORTHO %s] unit (bands %% %d == %d): %d boundary pairs; "
+                "normalized overlap |<h_i|h_j>|/sqrt(<h_i|h_i><h_j|h_j>) "
+                "mean %.3e max %.3e (walker %d, bands %d/%d, df %.3e Hz).",
+                self.name, units, remainder, int(overlap.size),
+                float(overlap.mean()), float(overlap[k]),
+                int(w_i[i_idx[k]]), int(b_i[i_idx[k]]), int(b_i[j_idx[k]]),
+                float(df_pairs[k]),
+            )
+            if float(overlap[k]) > tol:
+                logger.warning(
+                    "[GB_ORTHO %s] max boundary-pair overlap %.3e exceeds "
+                    "GB_ORTHO_TOL=%.1e (walker %d, bands %d/%d, df %.3e "
+                    "Hz): the orthogonality premise is weak for this pair "
+                    "-- consider a larger GB_BAND_UNIT_STRIDE or wider "
+                    "minimum bands.",
+                    self.name, float(overlap[k]), tol,
+                    int(w_i[i_idx[k]]), int(b_i[i_idx[k]]),
+                    int(b_i[j_idx[k]]), float(df_pairs[k]),
+                )
+        except Exception as exc:  # diagnostic only: never break the sampler
+            logger.warning(
+                "[GB_ORTHO %s] premise check skipped: %r", self.name, exc
             )
 
     def _run_band_unit(self, model, band_sorter, subset, band_temps,
@@ -6379,18 +6677,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             out[g_dev] = g_dev[cp.random.permutation(len(g))]
         return out
 
-    def _tempering_swap_grid(self, band_sorter, start):
-        """Permuted (band, walker, temp) cell grid for one tempering parity.
+    def _tempering_swap_grid(self, band_sorter, start, units=2):
+        """Permuted (band, walker, temp) cell grid for one tempering unit.
 
         Interior bands only (the edge bands host no swaps), every
         temperature, and an independent random walker permutation per
         (band, temp) -- adjacent temperature columns of a grid row are the
-        cells whose templates may exchange. Only the ``start``-parity
-        interior bands are kept.
+        cells whose templates may exchange. Only the ``start``-unit
+        interior bands (``arange(1, nb - 1)[start::units]``) are kept;
+        ``units = 2`` (the default) is the legacy parity behavior,
+        bit-identical. Swaps exchange templates BETWEEN TEMPERATURES of
+        one band -- never across bands -- so a unit's concurrently-open
+        bands only need the same orthogonality separation the proposal
+        units use (stride guard in the ctor).
 
         Returns ``(band_index, temp_index, walkers_permuted, special_index,
         num_bands_unit)``; the first four are shaped
-        ``(bands_this_parity, nwalkers, ntemps)``.
+        ``(bands_this_unit, nwalkers, ntemps)``.
         """
         if self.num_bands == 1:
             num_bands_tempered = 1
@@ -6399,7 +6702,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             num_bands_tempered = self.num_bands - 2
             band_index_arr = cp.arange(1, self.num_bands - 1)
 
-        num_bands_unit = np.arange(num_bands_tempered)[start::2].shape[0]
+        num_bands_unit = np.arange(num_bands_tempered)[start::units].shape[0]
 
         walkers_permuted = (
             cp.asarray(
@@ -6409,17 +6712,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 ]
             )
             .reshape(num_bands_tempered, self.ntemps, self.nwalkers)
-            .transpose(0, 2, 1)[start::2]
+            .transpose(0, 2, 1)[start::units]
         )
         temp_index = (
             cp.repeat(cp.arange(self.ntemps), num_bands_tempered * self.nwalkers)
             .reshape(self.ntemps, num_bands_tempered, self.nwalkers)
-            .transpose(1, 2, 0)[start::2]
+            .transpose(1, 2, 0)[start::units]
         )
         band_index = (
             cp.repeat(band_index_arr, self.ntemps * self.nwalkers)
             .reshape(num_bands_tempered, self.ntemps, self.nwalkers)
-            .transpose(0, 2, 1)[start::2]
+            .transpose(0, 2, 1)[start::units]
         )
         special_index = band_sorter.get_special_band_index(
             temp_index, walkers_permuted, band_index
@@ -6498,24 +6801,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _audit_true_prev = _to_numpy(model.analysis_container_arr.likelihood())
             _audit_cred_prev = np.zeros(self.nwalkers)
 
-        units = 2
+        # Band-unit stride (GB_BAND_UNIT_STRIDE / band_units ctor kwarg):
+        # generalizes the historical hard-coded parity 2. Same stride as
+        # the proposal units in run_proposal, so the concurrently-open
+        # band separation guarantee -- (stride - 1) bands >= 1 WDM layer
+        # (orthogonality floor; see check_band_stride_separation) -- holds
+        # here too. Swaps only exchange templates between temperatures
+        # WITHIN a band, so every band still receives its swaps across
+        # the ``units`` sequential passes. num_bands == 1 keeps the
+        # legacy 2-pass loop verbatim (degenerate single-band case).
+        units = self.band_units if self.num_bands > 1 else 2
         tmp_start = np.random.randint(units)
         for tmp in range(units):
             remainder = (tmp_start + tmp) % units
             start = remainder
-            # start == 0 pairs with bool_remainder 1 because tempering
-            # begins at band 1 (the interior bands).
-            bool_remainder = 1 if start == 0 else 0
+            # Open exactly the band class the grid below selects:
+            # interior bands arange(1, nb-1)[start::units] have
+            # band % units == (start + 1) % units (tempering begins at
+            # band 1). At units == 2 this is the legacy
+            # ``bool_remainder = 1 if start == 0 else 0``.
+            bool_remainder = _tempering_open_remainder(start, units)
 
             with _tspan(getattr(self, "_prop_timer", None), "temper_open_close"):
                 self.remove_cold_chain_sources_from_residual(
                     model,
                     band_sorter,
-                    extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
+                    extra_bool=(band_sorter.band_inds % units == bool_remainder),
                 )
 
             (band_index, temp_index, walkers_permuted, special_index,
-             num_bands_unit) = self._tempering_swap_grid(band_sorter, start)
+             num_bands_unit) = self._tempering_swap_grid(
+                 band_sorter, start, units=units)
 
             # Tempering chunk size as a CELL budget (rows x ntemps), not a
             # row count: the historic hardcoded 200 rows meant 200*ntemps
@@ -6657,7 +6973,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self.add_cold_chain_sources_to_residual(
                     model,
                     band_sorter,
-                    extra_bool=(band_sorter.band_inds % 2 == bool_remainder),
+                    extra_bool=(band_sorter.band_inds % units == bool_remainder),
                 )
             if _audit:
                 # Per-unit reconcile: with this parity class closed back
@@ -6670,9 +6986,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _dtrue = _true_now - _audit_true_prev
                 _dcred = _cred_now - _audit_cred_prev
                 logger.info(
-                    "[TEMPER_AUDIT] unit %d (bands %%2 == %d): true cold "
+                    "[TEMPER_AUDIT] unit %d (bands %% %d == %d): true cold "
                     "delta %s | credited %s | MISMATCH %s",
-                    tmp, bool_remainder,
+                    tmp, units, bool_remainder,
                     np.array2string(_dtrue, precision=3),
                     np.array2string(_dcred, precision=3),
                     np.array2string(_dtrue - _dcred, precision=3),

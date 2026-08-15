@@ -36,6 +36,7 @@ def get_n_based_band_edges(
     extra_buffer: int = 5,
     target_count: int = 0,
     min_band_layers: float = 1.0,
+    unit_stride: int = 2,
     amp: float = 1e-30,
 ) -> np.ndarray:
     """Variable-width GB band edges on the WDM layer grid, sized by ``get_N``.
@@ -50,9 +51,19 @@ def get_n_based_band_edges(
     the edges are QUANTIZED to the WDM band grid: every edge lands on a
     ``k * layer_df / subband_divisor`` boundary (the same grid the
     ``"uniform"`` mode uses), each band spans an integer number of grid
-    units, and no band is narrower than ``min_band_layers`` full WDM layers
-    (>= 1 REQUIRED -- the parity-safety floor for the stride-2 band
-    scheduling; see ``GBSettings.band_min_layers``). The outermost edges are the same
+    units, and no band is narrower than ``min_band_layers`` WDM layers
+    (see ``GBSettings.band_min_layers``). SUB-LAYER minimum widths
+    (``min_band_layers < 1``, e.g. 0.5 with ``subband_divisor=2``) are a
+    SCHEDULING-ONLY division (user architecture ruling): the WDM buffer
+    slabs keep whole layers regardless -- the finer bands only decide
+    which sources may be in flight concurrently. They are allowed only
+    when ``unit_stride`` (the band-unit stride the move will run,
+    ``GB_BAND_UNIT_STRIDE``) keeps same-unit bands >= 1 full layer apart:
+    ``(unit_stride - 1) * min_band_width_layers >= 1``, i.e. minimum
+    width ``1/div`` layers requires ``unit_stride >= div + 1``; the
+    builder raises loudly otherwise (orthogonality floor -- see
+    :func:`lisatools.globalfit.moves.gbbands.check_band_stride_separation`
+    for the physics ruling). The outermost edges are the same
     full-layer boundaries the uniform mode produces
     (``ceil(start_freq/layer_df)`` / ``floor(end_freq/layer_df)``).
 
@@ -74,26 +85,39 @@ def get_n_based_band_edges(
         np.ndarray: ascending band edges (Hz), ``len(edges) - 1`` bands.
     """
     div = max(1, int(subband_divisor))
-    if float(min_band_layers) < 1.0:
-        # Parity-safety floor (2026-08-15 slab/parity analysis): the GB
-        # move schedules same-parity bands concurrently with the hard-coded
-        # stride 2 (``band_units=2`` ctor default AND ``units = 2`` inside
-        # run_tempering), and each source's likelihood window spreads
-        # m_band_half_width=1 layer each side. With every band >= 1 full
-        # layer, same-parity windows share at most 1 layer -- today's
-        # measured-safe configuration (~3e-5 lnL bias, 5 orders of
-        # headroom). Sub-layer minimum widths overlap same-parity windows
-        # further and would need a parity-stride bump that is NOT wired
-        # (run_tempering ignores band_units), so they are refused rather
-        # than silently unsafe.
+    if float(min_band_layers) <= 0.0:
         raise ValueError(
-            f"min_band_layers={min_band_layers} < 1: sub-layer minimum band "
-            "widths are unsafe under the stride-2 band-parity scheduling "
-            "(adjacent same-parity likelihood windows would overlap beyond "
-            "the tested 1-shared-layer configuration). Keep "
-            "GB_BAND_MIN_LAYERS >= 1."
+            f"min_band_layers={min_band_layers} must be > 0."
         )
     min_units = max(1, int(round(float(min_band_layers) * div)))
+    # ORTHOGONALITY stride guard (physics ruling; the sub-band concurrency
+    # constraint is frequency separation, not wavelet-pixel support): the
+    # move schedules same-unit bands (``band_index % unit_stride``)
+    # concurrently, and each source's likelihood window spreads
+    # m_band_half_width=1 layer each side, so same-unit bands must stay
+    # >= 1 full WDM layer apart -- the measured-safe 1-shared-layer
+    # configuration (~3e-5 lnL bias, 5 orders of headroom). The minimum
+    # QUANTIZED band width is ``min_units / div`` layers and same-unit
+    # bands have ``unit_stride - 1`` bands between them, hence:
+    #     (unit_stride - 1) * (min_units / div) >= 1
+    # (=> stride >= div + 1 for 1/div-layer minimum bands). Whole-layer
+    # minima at the stride-2 default pass exactly (legacy behavior);
+    # sub-layer minima without the stride bump are refused loudly rather
+    # than silently unsafe.
+    _min_width_layers = min_units / div
+    if (int(unit_stride) - 1) * _min_width_layers < 1.0 - 1e-9:
+        _required = 1 + int(np.ceil((1.0 - 1e-9) / _min_width_layers))
+        raise ValueError(
+            f"min_band_layers={min_band_layers} (quantized minimum band "
+            f"width {_min_width_layers:.4g} layers) is unsafe under "
+            f"band-unit stride {int(unit_stride)}: same-unit bands would "
+            f"be only {(int(unit_stride) - 1) * _min_width_layers:.4g} "
+            "layers apart, below the 1-layer orthogonality floor "
+            "(adjacent same-unit likelihood windows would overlap beyond "
+            "the tested 1-shared-layer configuration). Set "
+            f"GB_BAND_UNIT_STRIDE >= {_required} (rule: (stride - 1) * "
+            "min_band_width_layers >= 1) or keep GB_BAND_MIN_LAYERS >= 1."
+        )
     unit = float(layer_df) / div
     # Same outer boundaries as the uniform mode: full-layer aligned. The
     # 1e-8 epsilon keeps a start/end that ALREADY sits on the layer grid
@@ -190,6 +214,11 @@ class GBSettings(Settings):
     band_edges_override: typing.Optional[typing.Any] = None
     # Subdivide each WDM layer into ``subband_divisor`` sub-bands when deriving
     # band_edges (2 -> half-layer_df edges). Ignored if band_edges_override set.
+    # NOTE: sub-layer bands are SCHEDULING-ONLY (buffer slabs keep whole
+    # layers) and require the matching ``band_unit_stride`` bump --
+    # ``init_band_structure`` enforces the orthogonality rule
+    # ``(stride - 1) * min_band_width_layers >= 1`` on the actual edges
+    # (div-layer bands at the legacy stride 2 are refused loudly).
     subband_divisor: int = dataclasses.field(
         default_factory=env_default("GB_SUBBAND_DIVISOR", 1, int)
     )
@@ -218,18 +247,37 @@ class GBSettings(Settings):
         default_factory=env_default("GB_BAND_TARGET_COUNT", 0, int)
     )
     # Minimum band width for ``band_edges_mode="get_n"``, in WDM layers
-    # (float, MUST be >= 1.0 -- the builder refuses sub-layer minima).
-    # Default 1.0: every band spans at least one full layer_df, the same
-    # minimum today's uniform per-layer construction has. This is the
-    # parity-safety floor: the move schedules same-parity bands (hard-coded
-    # stride 2, in both the ctor default ``band_units=2`` and the
-    # ``units = 2`` inside run_tempering) concurrently, and each source's
-    # likelihood window spreads m_band_half_width=1 layer per side -- with
-    # >= 1-layer bands, same-parity windows share at most 1 layer (today's
-    # measured-safe configuration). Raise it (e.g. 2.0) for extra
-    # separation. Env: ``GB_BAND_MIN_LAYERS``.
+    # (float). Default 1.0: every band spans at least one full layer_df,
+    # the same minimum today's uniform per-layer construction has --
+    # exactly safe under the stride-2 default (same-unit likelihood
+    # windows, m_band_half_width=1 layer per side, share at most 1 layer:
+    # the measured-safe configuration). SUB-LAYER values (< 1, e.g. 0.5
+    # with ``subband_divisor=2``) are a SCHEDULING-ONLY division (user
+    # ruling: buffer slabs keep whole layers) and REQUIRE the matching
+    # ``band_unit_stride`` bump -- the orthogonality rule
+    # ``(stride - 1) * min_band_width_layers >= 1`` (so 1/div-layer bands
+    # need stride >= div + 1); both the edge builder and
+    # ``init_band_structure`` raise loudly otherwise. Raise it (e.g. 2.0)
+    # for extra separation. Env: ``GB_BAND_MIN_LAYERS``.
     band_min_layers: float = dataclasses.field(
         default_factory=env_default("GB_BAND_MIN_LAYERS", 1.0, float)
+    )
+    # Band-unit stride for the GB move's concurrent sub-band scheduling
+    # (flows to the moves as ``band_units`` via ``group_proposal_kwargs``).
+    # Stride k partitions bands into k units by ``band_index % k``; each
+    # unit's bands are opened/scored CONCURRENTLY (independent buffer
+    # cells), so same-unit bands always have k - 1 closed bands between
+    # them. Default 2 = the legacy odd/even parity scheduling,
+    # bit-identical to historical behavior. Honored by BOTH the proposal
+    # unit loop and run_tempering. The orthogonality physics ruling
+    # (FD inner product ~0 => WDM inner product ~0, even within one
+    # wavelet layer) makes frequency separation -- not wavelet-pixel
+    # support -- the concurrency constraint, so the guard is
+    # ``(stride - 1) * min_band_width_layers >= 1``. Use 3-4 with
+    # sub-layer bands (``band_min_layers < 1``). Env:
+    # ``GB_BAND_UNIT_STRIDE``.
+    band_unit_stride: int = dataclasses.field(
+        default_factory=env_default("GB_BAND_UNIT_STRIDE", 2, int)
     )
     oversample: int = 4. # FD
     extra_buffer: int = 5
@@ -672,6 +720,12 @@ class GBSetup(Setup, GBSettings):
         self.group_proposal_kwargs.setdefault(
             "wdm_slab_guard_layers", self.wdm_slab_guard_layers
         )
+        # Band-unit stride for the concurrent sub-band scheduling
+        # (GB_BAND_UNIT_STRIDE; default 2 = legacy parity, bit-identical).
+        # Flows to every GBSpecial* move as the ``band_units`` ctor kwarg.
+        self.group_proposal_kwargs.setdefault(
+            "band_units", int(getattr(self, "band_unit_stride", 2))
+        )
 
         if self.search_kwargs is None:
             # Configuration for the stft_tof per-band serial GB search
@@ -793,6 +847,7 @@ class GBSetup(Setup, GBSettings):
                     extra_buffer=int(self.extra_buffer),
                     target_count=int(getattr(self, "band_target_count", 0)),
                     min_band_layers=float(getattr(self, "band_min_layers", 1.0)),
+                    unit_stride=int(getattr(self, "band_unit_stride", 2)),
                 )
             elif _mode != "uniform":
                 raise ValueError(
@@ -822,6 +877,26 @@ class GBSetup(Setup, GBSettings):
                     get_N(1e-30, edge, self.Tobs, oversample=self.oversample).item()
                     for edge in self.band_edges[:-1]
                 ]
+            )
+            # ORTHOGONALITY stride guard on the ACTUAL edges (covers every
+            # WDM construction: uniform with a sub-layer subband_divisor,
+            # get_n sub-layer minima, and explicit overrides). Same-unit
+            # bands under stride k have k - 1 bands between them, so the
+            # rule is (stride - 1) * min_band_width_layers >= 1 full WDM
+            # layer -- the measured-safe 1-shared-layer window
+            # configuration. Whole-layer grids at the stride-2 default
+            # pass exactly (legacy no-op); unsafe combinations raise
+            # loudly here rather than sampling with interfering
+            # concurrent windows. See
+            # lisatools.globalfit.moves.gbbands.check_band_stride_separation
+            # (also enforced by the move ctor as defense in depth).
+            from ...moves.gbbands import check_band_stride_separation
+
+            check_band_stride_separation(
+                self.band_edges,
+                layer_df,
+                int(getattr(self, "band_unit_stride", 2)),
+                context="GBSetup.init_band_structure",
             )
         else:
             # FD path: bands sized in multiples of ``df = 1/Tobs`` using the
