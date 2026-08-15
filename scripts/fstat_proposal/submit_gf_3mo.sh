@@ -85,6 +85,23 @@ trap 'kill ${GPU_SMI_PID} ${GPU_PROC_PID} 2>/dev/null || true' EXIT
 # ---- threading policy (MPI-only, no OMP) -----------------------------------
 export OMP_NUM_THREADS=1
 
+# ---- console verbosity ------------------------------------------------------
+# WHERE THE DETAIL ALREADY LIVES: the file handler is pinned at DEBUG
+# UNCONDITIONALLY, so every per-iteration line ("Number of active leaves
+# before proposal", "Current number of active sources in cold chain",
+# the [GB_TIMING]/[GB_ACCEPT]/[FSTAT_CTR] records, ...) is ALWAYS written to
+#   ${STORE_DIR}/${BASE_FILE_NAME}_artifacts/globalfit_run.log
+# regardless of this knob. VERBOSE only MIRRORS them to stdout (the sbatch
+# .log). Setting it in the submitting shell is unreliable (it depends on
+# sbatch --export propagation), so pin it here.
+# Costs no compute: the messages are formatted either way; this only adds a
+# second handler writing the same text.
+export VERBOSE=1
+# PROGRESS defaults to "follow VERBOSE", which would start a tqdm bar. In a
+# non-tty sbatch log tqdm emits a line per update and buries the real
+# output, so pin it off; VERBOSE stays purely about the log lines.
+export PROGRESS=0
+
 # ---- run plumbing ----------------------------------------------------------
 export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
 export USE_GPU=1
