@@ -124,10 +124,52 @@ gb_alive_last = g["inds/gb"][NIT-1, 0, 0]           # (24, 10000)
 # on the v2 zip the tear was confined to sub_backend/gb/* while chain,
 # inds and log_like -- i.e. every science panel -- were perfectly readable.
 # Degrade per-dataset instead of dying.
+_BACKUP_G = None  # lazily-opened *_running_backup_copy.h5 root group
+
+
+def _backup_group():
+    """The run's own backup copy, opened on demand.
+
+    The engine keeps ``*_running_backup_copy.h5`` alongside the live store
+    precisely so a torn live copy is recoverable. It lags the main file (it
+    is written between saves), so it is a FALLBACK, never the default.
+    """
+    global _BACKUP_G
+    if _BACKUP_G is None:
+        _BACKUP_G = False
+        for fn in os.listdir(RUN_DIR):
+            if fn.endswith("_running_backup_copy.h5"):
+                try:
+                    _BACKUP_G = h5py.File(
+                        os.path.join(RUN_DIR, fn), "r")["global_fit"]
+                except Exception:
+                    _BACKUP_G = False
+                break
+    return _BACKUP_G or None
+
+
 def _safe(node, key, default=None, label=None):
     try:
         return node[key][:NIT] if NIT else node[key][()]
     except Exception as e:
+        # Torn in the live copy -> try the run's backup before giving up.
+        bg = _backup_group()
+        if bg is not None:
+            try:
+                sub_key = key if node is g else "sub_backend/" + key
+                # The backup is PREALLOCATED to the full run length, so slice
+                # to the iterations it has actually written -- otherwise a
+                # 5-row store returns 2000 rows of zeros and every plot built
+                # on it is mostly empty padding.
+                _bn = int(bg.attrs.get("iteration", 0))
+                arr = bg[sub_key][:_bn] if _bn else bg[sub_key][()]
+                MISSING.append(
+                    f"{label or key}: torn in the live store, recovered from "
+                    f"the run's backup copy, which holds {arr.shape[0]} "
+                    f"iteration(s) vs {NIT} in the main file.")
+                return arr
+            except Exception:
+                pass
         MISSING.append(
             f"{label or key}: unreadable in this snapshot "
             f"(likely copied mid-save) -- {type(e).__name__}")
@@ -254,11 +296,16 @@ for w in range(nwalk):
 ax[0].plot(it, gb_counts.max(axis=1), color=GREEN, lw=1.8)
 ax[0].set_title("GB leaf count (cold walkers)"); ax[0].set_xlabel("iteration")
 ax[0].set_ylim(bottom=-0.5)
-if caps is not None:
+if caps is not None and caps.size:
+    _cn = caps.shape[0]                      # may lag NIT (backup fallback)
     im = ax[1].imshow(caps.T, aspect="auto", origin="lower", cmap="viridis",
-                      extent=[0, NIT, 0, caps.shape[1]])
-    ax[1].set_title("per-band leaf cap"); ax[1].set_xlabel("iteration")
-    ax[1].set_ylabel("band")
+                      extent=[0, _cn, 0, caps.shape[1]])
+    _u = np.unique(caps[-1])
+    _lab = ("cap cell" if caps.shape[1] > 200 else "band")
+    ax[1].set_title(
+        f"leaf cap per {_lab}"
+        + (f" (ALL at {_u[0]:.0f})" if _u.size == 1 else ""))
+    ax[1].set_xlabel("iteration"); ax[1].set_ylabel(_lab)
     fig.colorbar(im, ax=ax[1], shrink=0.85)
 else:
     ax[1].text(0.5, 0.5, "leaf caps unreadable\n(snapshot copied mid-save)",
