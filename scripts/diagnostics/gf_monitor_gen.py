@@ -305,11 +305,12 @@ if VGB_F0 is not None:
 else:
     _of = np.arange(55)
     _xs = np.arange(55)
+# markers only (user request 2026-08-15): connecting lines between
+# unrelated VGBs on a frequency axis implied a spectrum that isn't there
 for k in range(NIT):
-    ax.plot(_xs, snr_it[k][_of], color=_vramp(k / max(NIT - 1, 1)),
-            lw=1.0, alpha=0.9,
+    ax.plot(_xs, snr_it[k][_of], "o", ms=3.0, ls="none",
+            color=_vramp(k / max(NIT - 1, 1)), alpha=0.85,
             label=(f"iter {k}" if k in (0, NIT - 1) else None))
-ax.plot(_xs, snr_it[-1][_of], "o", ms=3.5, color="#4A2FA8")
 if VGB_F0 is not None:
     for kk in order[:3]:
         ax.annotate(VGB_IDS[kk], (VGB_F0[kk], snr[kk]), fontsize=7,
@@ -553,22 +554,22 @@ if RJ_STATS:
 
 alert = """
 <div class="alert">
-<strong>JOB 194 &mdash; the 2026-08-14 rj stack is live and 1.9&times; faster, with one
-fix shipped from this snapshot's forensics:</strong> best search propose <strong>1,505 s</strong>
-(was 2,850): direct batches (3 rj batches, ~1,700 survivors, one in-model chunk), 218-round
-units (was 1,000+), centers hoisted, capacity buffer rebinding ("16384-slot alloc" lines).
-The buffer sub-marks answered the tempering question &mdash; <strong>fills dominate</strong>
-(buffill_resid_psd 392 s of buffer_build 397; removal move: 502 s of fills incl. tempering's
-388) &mdash; template generation is cheap, so the next lever is fill reuse/speed, not
-template caching. First [GB_ACCEPT rj-split]: <strong>62% of scored births die at the
-SNR&lt;5 clamp</strong>; viable acceptance 1.87% all-T / 0.34% cold; capped = 0 (live gate
-verified). THE ERROR: leaf caps rose 1&rarr;2, unlocking the removal move's first big
-survivor pool &mdash; a single 7,532-source in-model block whose sig-het reference pushed
-dev1 to ~84% of 96 GB (the restart-era OOM signature). FIX PUSHED (e6b549a4):
-GB_RJ_INMODEL_CHUNK=4096 bounds the block width regardless of cap growth &mdash; pull +
-resubmit. WATCH: cell-ll means up (removal 69.8/stay; hot-rung worsts 19&ndash;474/rep vs
-scaled allowances) &mdash; the big new in-model blocks are the likely driver; re-read after
-the chunk cap lands. [SAVE] steady at ~64 s.
+<strong>JOB 195 &mdash; the OOM fix held and the search is RIPPING:</strong> job 194 died
+exactly where forensics predicted (entering the 7,532-source in-model block); job 195 on
+the chunk cap (GB_RJ_INMODEL_CHUNK=4096) runs clean &mdash; pools of 7,000&ndash;10,684
+survivors now split into &le;4,096-source chunks, device peaks 84/74 GB (tight but held).
+<strong>Cold viable birth acceptance jumped to 13.5%</strong> (750/5,544; was 0.34%) as the
+leaf caps opened to 2 &mdash; ~750 cold births landing per propose, h5 at iteration 14.
+Proposes grew with the model (search 2,014 s: fills 460 + getll 621 + centers 372 +
+in-model 371; removal 843 incl. tempering 424): every queued shave lever gained value
+&mdash; per-class repeats (~400 s), SNR-truncated distance proposal (54% still clamped,
+~300 s), vectorized fills (~1,000 s/iter category), countable-centers (~290 s), per-block
+info matrices (139 s of table builds now, BOTH moves). WATCH #1: removal-move in-model
+cell-ll at HOT rungs blew up (1.2e4/rep at temp 9) &mdash; cold rungs quiet; investigate
+before trusting hot-chain bookkeeping. WATCH #2: band shutoff never fired &mdash; the
+any-temperature reset means hot-chain churn keeps every band alive; needs a cold-only
+counter to match intent. In-model per-type: infomat cold 0.55 at jump 0.4 (next notch up),
+stretch 0.10. [SAVE] steady ~63 s.
 </div>"""
 
 missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
