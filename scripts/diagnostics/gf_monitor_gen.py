@@ -551,18 +551,101 @@ def src_blob(label, sub, samples, truth, names, note="", note_bad=False):
     }
 
 
-# Task 2: every VGB, SNR-descending in the selector.
-VGB1 = {"params": VGB_NAMES, "src": []}
-for leaf in order:
-    nm = VGB_IDS[leaf] if VGB_IDS else f"leaf {leaf}"
-    _f0 = VGB_F0[leaf] if VGB_F0 is not None else float("nan")
-    VGB1["src"].append(src_blob(
-        f"{nm} - {_f0:.4f} mHz - SNR~{snr[leaf]:.0f}",
-        f"leaf {leaf} - {vgb_last.shape[0]} samples (last "
-        f"{min(3, NIT)} stored iterations x {nwalk} walkers)",
-        vgb_last[:, leaf, :],
-        None if VGB_TRUTH is None else VGB_TRUTH[leaf], VGB_NAMES))
-VGB1_JSON = json.dumps(VGB1)
+# Task 2: every VGB, SNR-descending in the selector -- rendered as
+# ChainConsumer CORNER plots (2026-08-15, user request), one PNG per leaf,
+# base64'd into the page. The selector swaps the src of a single <img>, so
+# only the selected corner is ever in the DOM's visible flow; the JS
+# histogram panel (srcPanel) now serves the GB panel only.
+#
+# Samples: the last min(10, NIT) stored iterations x every cold walker
+# (~240 rows), wider than the 3-iteration window the marginal panels use --
+# a corner needs the extra rows for its 2-D contours to mean anything.
+CORNER_ITS = min(10, NIT)
+CORNER_DPI, CORNER_IN = 68, 7.0        # size-budget tuned (see below)
+vgb_corner = vgb_c[-CORNER_ITS:].reshape(-1, 55, 5)      # (S, 55, 5)
+VGB_CORNER = {"src": [], "nsamp": int(vgb_corner.shape[0]),
+              "nits": int(CORNER_ITS), "nwalk": int(nwalk)}
+CORNER_BYTES = []
+try:
+    import logging
+    import warnings as _warnings
+
+    import pandas as pd
+    from chainconsumer import Chain, ChainConsumer, PlotConfig, Truth
+
+    # chainconsumer logs "Parameter <p> in chain ... is not constrained"
+    # once per unconstrained column per leaf (hundreds of lines here, and
+    # informational -- an unconstrained VGB angle is a RESULT, not a fault).
+    logging.getLogger("chainconsumer").setLevel(logging.ERROR)
+
+    def vgb_corner_png(leaf, title):
+        """One leaf -> a base64 PNG of its 5x5 ChainConsumer corner.
+
+        Extents are widened to contain the catalogue truth so a truth line
+        that falls OUTSIDE the posterior is still visible (the same rule
+        the JS histogram panel used); without it a badly-recovered leaf
+        would silently show no truth at all.
+        """
+        Sm = np.asarray(vgb_corner[:, leaf, :], dtype=float)
+        truth = None if VGB_TRUTH is None else VGB_TRUTH[leaf]
+        ext = {}
+        for j, nm_ in enumerate(VGB_NAMES):
+            lo, hi = float(np.min(Sm[:, j])), float(np.max(Sm[:, j]))
+            if truth is not None and np.isfinite(truth[j]):
+                lo = min(lo, float(truth[j])); hi = max(hi, float(truth[j]))
+            if not hi > lo:
+                hi = lo + max(abs(lo) * 1e-6, 1e-12)
+            pd_ = (hi - lo) * 0.06
+            ext[nm_] = (lo - pd_, hi + pd_)
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            cc = ChainConsumer()
+            cc.add_chain(Chain(
+                samples=pd.DataFrame(Sm, columns=VGB_NAMES), name="posterior",
+                color=VIOLET, shade=True, shade_alpha=0.35, bar_shade=True,
+                plot_point=False, smooth=1, bins=18,
+                show_label_in_legend=False))
+            if truth is not None:
+                cc.add_truth(Truth(
+                    location={nm_: float(truth[j])
+                              for j, nm_ in enumerate(VGB_NAMES)},
+                    color=RED, line_style=":", line_width=1.4))
+            # diagonal_tick_labels defaults ON and is unreadable at this
+            # dpi; 3 upright ticks per axis is what survives the size budget.
+            cc.set_plot_config(PlotConfig(
+                labels={nm_: nm_ for nm_ in VGB_NAMES}, extents=ext,
+                label_font_size=8, tick_font_size=7, max_ticks=3,
+                diagonal_tick_labels=False,
+                show_legend=False, summarise=False, dpi=CORNER_DPI))
+            fig_ = cc.plotter.plot(figsize=(CORNER_IN, CORNER_IN))
+        fig_.suptitle(title, fontsize=9, color=FG)
+        buf = io.BytesIO()
+        fig_.savefig(buf, format="png", dpi=CORNER_DPI, bbox_inches="tight")
+        plt.close(fig_)
+        raw = buf.getvalue()
+        CORNER_BYTES.append(len(raw))
+        return base64.b64encode(raw).decode()
+
+    for leaf in order:
+        nm = VGB_IDS[leaf] if VGB_IDS else f"leaf {leaf}"
+        _f0 = VGB_F0[leaf] if VGB_F0 is not None else float("nan")
+        _lab = f"{nm} - {_f0:.4f} mHz - SNR~{snr[leaf]:.0f}"
+        VGB_CORNER["src"].append({
+            "label": _lab,
+            "sub": (f"leaf {int(leaf)} - {vgb_corner.shape[0]} samples "
+                    f"(last {CORNER_ITS} stored iterations x {nwalk} cold "
+                    f"walkers) - dotted red = catalogue truth"),
+            "png": vgb_corner_png(int(leaf), _lab),
+        })
+    print(f"[corner] {len(CORNER_BYTES)} VGB corners, "
+          f"png min/med/max = {min(CORNER_BYTES)/1024:.1f} / "
+          f"{np.median(CORNER_BYTES)/1024:.1f} / {max(CORNER_BYTES)/1024:.1f} KB, "
+          f"total png {sum(CORNER_BYTES)/1024**2:.2f} MB "
+          f"(base64 {sum(CORNER_BYTES)*4/3/1024**2:.2f} MB) "
+          f"@ dpi={CORNER_DPI}, figsize={CORNER_IN}")
+except Exception as e:
+    MISSING.append(f"VGB ChainConsumer corner plots unavailable: {e!r}")
+VGB_CORNER_JSON = json.dumps(VGB_CORNER)
 
 # Task 4: the 3 highest-frequency RECOVERED GBs.
 # Tobs from the stored domain settings (WDMSettings args = Nt, Nf, dt) ->
@@ -753,25 +836,59 @@ m = re.findall(r"at-cap skip -- (\d+) dead \(birth\) slots excluded across "
 if m:
     RJ_STATS["atcap_cells"] = int(m[-1][1])
 
-# last full rj GB_TIMING record -> breakdown bar
-tm_rj = re.findall(r"\[GB_TIMING (rj_\w+)\] (total=[^|]+)\|([^|]+)\|(.*)", log_text)
-if tm_rj:
-    name, head, body, tail = tm_rj[-1]
-    parts = dict(re.findall(r"(\w+)=([\d.]+)s", head + body))
-    tot = float(parts.pop("total", 0)); parts.pop("tracked", None)
-    parts.pop("untracked", None)
-    top = sorted(parts.items(), key=lambda kv: -float(kv[1]))[:9]
-    fig, ax = plt.subplots(figsize=(11, 3.2))
-    labels = [k for k, _ in top][::-1]
-    vals = [float(v) for _, v in top][::-1]
-    ax.barh(labels, vals, color=GREEN, alpha=0.9, height=0.6)
-    for y_, v in enumerate(vals):
-        ax.text(v, y_, f" {v:,.0f}s ({100*v/max(tot,1e-9):.0f}%)",
-                va="center", fontsize=8, color=FG)
-    ax.set_xlabel("seconds"); ax.set_title(
-        f"{name} propose breakdown (total {tot:,.0f}s; last full record)")
-    counters = dict(re.findall(r"(\w+)=(\d+)\b", tail))
-    RJ_STATS["gbt_counters"] = counters
+# last full rj GB_TIMING record PER MOVE -> one breakdown bar panel each.
+# Before 2026-08-15 this took tm_rj[-1] only, so whichever rj move happened
+# to log LAST (rj_prior_removal, 75 s) was the only breakdown on the page
+# and rj_fstat_search (1,041 s, the actual hog) never appeared. Every rj
+# move now gets its OWN panel, so the moves are never lumped or shadowed.
+tm_rj = re.findall(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ .*?\[GB_TIMING (rj_\w+)\] "
+    r"(total=[^|]+)\|([^|]+)\|(.*)$", log_text, re.M)
+RJ_LAST = {}                       # move -> (stamp, head, body, tail)
+for stamp, name, head, body, tail in tm_rj:
+    RJ_LAST[name] = (stamp, head, body, tail)
+# rj_fstat_search (the F-stat birth proposal) leads, then rj_prior_removal;
+# any other rj move follows in first-seen order.
+RJ_ORDER = [n for n in ("rj_fstat_search", "rj_prior_removal") if n in RJ_LAST]
+RJ_ORDER += [n for n in RJ_LAST if n not in RJ_ORDER]
+RJ_MOVE_COLOR = {"rj_fstat_search": GREEN, "rj_fstat_pe": GREEN,
+                 "rj_prior_removal": AMBER}
+# run_proposal / run_tempering are ENCLOSING phase marks -- they contain the
+# leaf spans, so leaving them in the bars just reprints the total (1,037 of
+# 1,041 s for rj_fstat_search) and buries the actual hog. They are quoted in
+# each panel's title instead; the bars are leaf spans only.
+RJ_WRAPPERS = ("run_proposal", "run_tempering")
+RJ_BREAK = {}                      # move -> (stamp, total, [(span, s), ...])
+if RJ_ORDER:
+    NTOP = 9
+    fig, axs = plt.subplots(1, len(RJ_ORDER), figsize=(6.0 * len(RJ_ORDER), 3.6))
+    axs = np.atleast_1d(axs)
+    for a_, name in zip(axs, RJ_ORDER):
+        stamp, head, body, tail = RJ_LAST[name]
+        parts = dict(re.findall(r"(\w+)=([\d.]+)s", head + body))
+        tot = float(parts.pop("total", 0)); parts.pop("tracked", None)
+        parts.pop("untracked", None)
+        wrap = {w: float(parts.pop(w)) for w in RJ_WRAPPERS if w in parts}
+        top = sorted(parts.items(), key=lambda kv: -float(kv[1]))[:NTOP]
+        RJ_BREAK[name] = (stamp, tot, [(k, float(v)) for k, v in top])
+        labels = [k for k, _ in top][::-1]
+        vals = [float(v) for _, v in top][::-1]
+        a_.barh(labels, vals, color=RJ_MOVE_COLOR.get(name, CYAN), alpha=0.9,
+                height=0.6)
+        for y_, v in enumerate(vals):
+            a_.text(v, y_, f"  {v:,.1f}s ({100 * v / max(tot, 1e-9):.0f}%)",
+                    va="center", fontsize=8, color=FG)
+        a_.set_xlim(0, max(vals + [1.0]) * 1.34)
+        a_.tick_params(axis="y", labelsize=8)
+        a_.set_xlabel("seconds", fontsize=9)
+        _wtxt = ", ".join(f"{w} {v:,.1f}s" for w, v in wrap.items())
+        a_.set_title(f"{name}: total {tot:,.1f}s (last full record, "
+                     f"{stamp[5:]})\nleaf spans only; enclosing: "
+                     f"{_wtxt or 'none'}", fontsize=9)
+    fig.tight_layout()
+    # counters of the last record overall (unchanged behavior)
+    RJ_STATS["gbt_counters"] = dict(
+        re.findall(r"(\w+)=(\d+)\b", tm_rj[-1][4]))
     fig_b64(fig, "rj_breakdown")
 
 # device-memory telemetry series (buffer build / lifecycle / unit-open lines)
@@ -828,6 +945,20 @@ if RJ_STATS:
   <div><b>{c_.get('batch',0):,.0f}</b><span>mean flush batch [sources]</span></div>
   <div><b>{c_.get('atcap_cells',0):,}</b><span>at-cap cells skipped</span></div>
 </div>"""
+
+# one-line-per-move readout under the breakdown panel (built from the SAME
+# records the figure is built from -- never hand-typed numbers)
+rj_break_txt = ""
+rj_break_stamps = ""
+if RJ_BREAK:
+    _st = sorted({v[0] for v in RJ_BREAK.values()})
+    rj_break_stamps = f" ({_st[0]} &ndash; {_st[-1]})" if _st else ""
+    rj_break_txt = "<br>" + "<br>".join(
+        f"<code>{n}</code>: total <strong>{RJ_BREAK[n][1]:,.1f} s</strong>, "
+        f"top span <code>{RJ_BREAK[n][2][0][0]}</code> "
+        f"{RJ_BREAK[n][2][0][1]:,.1f} s "
+        f"({100 * RJ_BREAK[n][2][0][1] / max(RJ_BREAK[n][1], 1e-9):.0f}%)"
+        for n in RJ_ORDER) + "<br>"
 
 alert = """
 <div class="alert">
@@ -1072,10 +1203,17 @@ relative.</div></div>
 <div class="panel">
 <div class="btnrow viewctl">
   <label>vgb <select id="vgb1_sel"></select></label>
-  <span class="caption" style="align-self:center">single-VGB posterior, SNR-ordered</span>
+  <span class="caption" style="align-self:center">single-VGB corner posterior
+  (ChainConsumer), SNR-ordered</span>
 </div>
-<canvas id="vgb1" style="height:260px"></canvas>
+<img id="vgb1_img" alt="single-VGB corner posterior">
 <div class="caption" id="vgb1_cap"></div>
+<div class="caption">Full 5-parameter corner per leaf, pre-rendered with
+ChainConsumer over the last {CORNER_ITS} stored iterations &times; {nwalk} cold walkers
+({vgb_corner.shape[0]} samples); violet = posterior (1/2&sigma; contours + shaded
+marginals), dotted red = the catalogue truth in the same sampled basis as every other
+truth overlay on this page. Axis extents are widened to CONTAIN the truth, so a truth
+line sitting outside the posterior is visible rather than clipped away.</div>
 </div>
 </section>
 
@@ -1113,12 +1251,19 @@ proposal tables/infomat_kernel 42&ndash;78&rarr;9.3 s. What is left is
 oscillates between two states (1.64 ms/row for 285k rows vs 0.31 ms/row for 346k rows) &mdash;
 the last big lever.</div>
 <div class="panel">{img("rj_breakdown", "rj propose breakdown")}
-<div class="caption">Where the rj propose spends its wall time (SYNC-ATTRIBUTED record:
-every mark carries exactly its own kernel time). Post mega-batch there is one bar left
-standing: <strong>rj_fstat_centers</strong> &mdash; 92% of the propose in its slow state,
-still ~2&times; everything else combined in its fast state. Fills, temper_buffer, the
-proposal tables and the old rj_getll/rj_step dispatch taxes have all collapsed into the
-noise floor of this chart.</div></div>
+<div class="caption">Where each rj move spends its wall time &mdash; <strong>one panel per
+move, never lumped</strong> (SYNC-ATTRIBUTED records: every mark carries exactly its own
+kernel time). Bars are LEAF spans, largest first; the enclosing phase marks
+<code>run_proposal</code> / <code>run_tempering</code> wrap them and are quoted in each
+panel title instead of competing for a bar. These are the FIRST post-mega-batch
+records{rj_break_stamps}.
+{rj_break_txt}
+<strong>rj_fstat_search</strong> is the F-stat birth proposal and it is now the whole story:
+<code>rj_fstat_centers</code> alone is 92% of it, while every other span &mdash; rj_step,
+route_dispatch, gll_engine, rj_getll, the buffer fills, the proposal tables &mdash; sits in
+the tens of seconds. <strong>rj_prior_removal</strong> collapsed from 658&ndash;843 s to
+75 s and its own profile is now tempering-dominated (run_tempering / temper_swap_score /
+sorter_build), i.e. no kernel hog left. Centers is the last lever on the page.</div></div>
 <div class="panel">{img("mem_telemetry", "device memory telemetry")}
 <div class="caption">Per-device used memory from the in-run memGetInfo telemetry.
 Flat sawtooth = the bounded-buffer behavior; a monotonic ramp here is the leak alarm.</div></div>
@@ -1143,14 +1288,42 @@ threshold — single-process stands at 3 months; revisit with the 23-mo store si
 <script>
 const DATA = {EXPL_JSON};
 const VPOST = {VGB_POST_JSON};
-const VGB1 = {VGB1_JSON};
+const VGBC = {VGB_CORNER_JSON};
 const GB1 = {GB1_JSON};
+// Single-VGB corner panel: the <select> swaps the src of ONE <img> between
+// 55 pre-rendered ChainConsumer PNGs (base64 data URIs held in JS, so only
+// the selected corner is ever in the document's visible flow).
+function cornerPanel(px, blob) {{
+  const im = document.getElementById(px + "_img"),
+        sel = document.getElementById(px + "_sel"),
+        cap = document.getElementById(px + "_cap");
+  if (!im || !sel) return;
+  if (!blob.src || !blob.src.length) {{
+    im.remove();
+    if (cap) cap.textContent = "no corner plots available in this snapshot";
+    return;
+  }}
+  blob.src.forEach((s, i) => {{
+    const o = document.createElement("option");
+    o.value = i; o.textContent = s.label; sel.appendChild(o);
+  }});
+  function show() {{
+    const S = blob.src[+sel.value || 0];
+    im.src = "data:image/png;base64," + S.png;
+    im.alt = S.label;
+    cap.textContent = S.sub;
+  }}
+  sel.onchange = show;
+  show();
+}}
+cornerPanel("vgb1", VGBC);
 // Shared single-source posterior panel: a <select> of sources driving a
 // canvas of one histogram per sampled parameter, each with the catalogue
 // truth as a dotted RED vertical line (the file-wide truth convention).
-// Used by the VGB panel (5 params) and the GB panel (9); every color is
-// read from the CSS custom properties AT DRAW TIME, so the panel follows a
-// light/dark theme switch without regenerating anything.
+// Used by the GB panel (9 params; the VGB panel moved to corner plots
+// 2026-08-15); every color is read from the CSS custom properties AT DRAW
+// TIME, so the panel follows a light/dark theme switch without
+// regenerating anything.
 function srcPanel(px, blob) {{
   const cv = document.getElementById(px), sel = document.getElementById(px + "_sel"),
         cap = document.getElementById(px + "_cap");
@@ -1227,7 +1400,6 @@ function srcPanel(px, blob) {{
   new ResizeObserver(draw).observe(cv);
   draw();
 }}
-srcPanel("vgb1", VGB1);
 srcPanel("gb1", GB1);
 // Shared view controls: numeric center (cx, cy) + log-scale width/height
 // sliders, all around a FIXED center -- plus a click-to-set-center mode.
@@ -1499,4 +1671,6 @@ function viewCtl(px, cv, api) {{
 </script>
 """
 open(OUT, "w").write(html)
-print(f"wrote {OUT}: {len(html)//1024} KB, {len(IMGS)} plots, missing={len(MISSING)}")
+print(f"wrote {OUT}: {len(html)//1024} KB ({len(html)/1024**2:.2f} MB), "
+      f"{len(IMGS)} plots + {len(VGB_CORNER['src'])} VGB corners, "
+      f"missing={len(MISSING)}")
