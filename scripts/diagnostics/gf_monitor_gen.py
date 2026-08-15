@@ -553,21 +553,22 @@ if RJ_STATS:
 
 alert = """
 <div class="alert">
-<strong>JOB 187 SYNC AUTOPSY (14:25 record) &mdash; the rj black box is split, and half of
-it was invisible:</strong> the old 1,461 s "rj_kernel" aggregate decomposes into
-<strong>rj_getll 781 s</strong> (the scoring-call path; true device compute per the bench
-is ~10&ndash;40 s of that, so &gt;90% is host/launch overhead inside get_ll) and
-<strong>rj_fstat_centers 735 s</strong> &mdash; the F-stat distance-center chain for
-births/deaths costs as much as ALL the scoring calls (the hidden hog). The statistics are
-fully exonerated: rj_birth_prior 2.2 s, rj_score_rest 0.5 s, prior gate 6 s, accept 0.8 s.
-Sync tax was only +2.5% wall. Both hogs are per-round costs, so the deployed restructure
-(LAT 1fd9e08: early birth flip &rarr; ~5&times; fewer rounds; full-width in-model flush)
-attacks both directly; a further lever is now visible &mdash; birth coords are pre-drawn at
-sorter build, so the centers chain could be computed ONCE per propose instead of per round.
-Steady elsewhere: [SAVE] 64.4 s again (~2%), info-mat cold 0.59 at jump 0.2 (0.4 next
-restart), rj cold 0.0017, leaves ~88, dev0 4% / dev1 30% during rj. The single sync record
-is clean and decisive &mdash; <strong>restart onto 1fd9e08 now</strong> (script already
-carries jump 0.4 + no SYNC).
+<strong>JOB 194 &mdash; the 2026-08-14 rj stack is live and 1.9&times; faster, with one
+fix shipped from this snapshot's forensics:</strong> best search propose <strong>1,505 s</strong>
+(was 2,850): direct batches (3 rj batches, ~1,700 survivors, one in-model chunk), 218-round
+units (was 1,000+), centers hoisted, capacity buffer rebinding ("16384-slot alloc" lines).
+The buffer sub-marks answered the tempering question &mdash; <strong>fills dominate</strong>
+(buffill_resid_psd 392 s of buffer_build 397; removal move: 502 s of fills incl. tempering's
+388) &mdash; template generation is cheap, so the next lever is fill reuse/speed, not
+template caching. First [GB_ACCEPT rj-split]: <strong>62% of scored births die at the
+SNR&lt;5 clamp</strong>; viable acceptance 1.87% all-T / 0.34% cold; capped = 0 (live gate
+verified). THE ERROR: leaf caps rose 1&rarr;2, unlocking the removal move's first big
+survivor pool &mdash; a single 7,532-source in-model block whose sig-het reference pushed
+dev1 to ~84% of 96 GB (the restart-era OOM signature). FIX PUSHED (e6b549a4):
+GB_RJ_INMODEL_CHUNK=4096 bounds the block width regardless of cap growth &mdash; pull +
+resubmit. WATCH: cell-ll means up (removal 69.8/stay; hot-rung worsts 19&ndash;474/rep vs
+scaled allowances) &mdash; the big new in-model blocks are the likely driver; re-read after
+the chunk cap lands. [SAVE] steady at ~64 s.
 </div>"""
 
 missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
