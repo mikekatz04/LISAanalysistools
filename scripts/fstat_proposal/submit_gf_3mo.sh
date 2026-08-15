@@ -134,6 +134,15 @@ export GB_INFOMAT_PER_BLOCK=1
 # deltas; WARNs above GB_ORTHO_LL_TOL (0.05). The [GB_ORTHO] premise
 # check (GB_ORTHO_CHECK) stays OFF until the sub-band shakedown.
 export GB_ORTHO_LL_CHECK=1
+# Cap-cell grid (user design 2026-08-15): leaf caps on a band/8 grid at
+# the confusion scale; scheduling unchanged. RESUME REQUIRES the cap
+# migration (add to the pre-submit checklist above):
+#   python scripts/fstat_proposal/migrate_gb_cap_grid.py \
+#       ${STORE_DIR}/gf_prod_3mo_testing.h5 8
+# WATCH first propose: leaf growth + memory (band-total throttle is
+# gone -- bands can reach K*cap); GB_CAP_DIVISOR=1 reverts instantly.
+export GB_CAP_DIVISOR=8
+export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
 # Code default since 2026-08-13; pinned for the run record. =0 restores
