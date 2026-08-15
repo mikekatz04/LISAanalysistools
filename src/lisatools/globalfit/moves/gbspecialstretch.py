@@ -7507,7 +7507,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
     def _cap_cell_counts(self, band_sorter, cap_inds=None):
-        """``(ntemps*nwalkers*num_cap_cells,)`` alive-source occupancy census."""
+        """``(ntemps*nwalkers*num_cap_cells,)`` alive-source occupancy census.
+
+        TODO(USER, 2026-08-15, HIGH-PRIORITY CHECK): IN-MODEL DRIFT ACROSS A
+        CAP-CELL BOUNDARY WITHIN A BAND IS NOT POLICED. Occupancy is
+        censused here at unit open / per pick round from each source's
+        CURRENT f0, but an in-model repeat block can move a source's f0
+        across a cell boundary mid-unit without any cap re-check -- two
+        sources can end up sharing a cell that the cap machinery believes
+        holds one, and the drift is only re-censused at the NEXT
+        propose. At K=8 on the uniform grid a cell is ~135 FD bins vs
+        ~+-16 bins of typical source support, so this should be rare --
+        but under the get_n free-frequency bands (NO LONGER one layer
+        per band; widths follow 2*get_N and cells shrink accordingly)
+        the margin narrows. CHECK: log a per-propose count of sources
+        whose cell changed between unit open and unit close, and decide
+        whether the in-model accept path needs a cell-cap veto (or
+        whether post-hoc re-census suffices).
+        """
         xp = get_array_module(band_sorter.band_inds)
         if cap_inds is None:
             cap_inds = self._sorter_cap_cells(band_sorter)
