@@ -24,6 +24,136 @@ from ...priors.gbpriors import get_fdot_mojito
 from ...state import GBState
 from .transforms import make_gb_transform_container
 
+
+def get_n_based_band_edges(
+    start_freq: float,
+    end_freq: float,
+    Tobs: float,
+    layer_df: float,
+    *,
+    subband_divisor: int = 1,
+    oversample: int = 4,
+    extra_buffer: int = 5,
+    target_count: int = 0,
+    min_band_layers: float = 1.0,
+    amp: float = 1e-30,
+) -> np.ndarray:
+    """Variable-width GB band edges on the WDM layer grid, sized by ``get_N``.
+
+    Modeled on the legacy FD band construction (the ``init_band_structure``
+    FD path): the natural band width at frequency ``f`` is the legacy step
+
+    ``w_nat(f) = (2 * get_N(amp, f, Tobs, oversample) + extra_buffer) / Tobs``
+
+    so low-frequency bands (small ``get_N``) come out narrow and
+    high-frequency bands (large ``get_N``) wide. Unlike the legacy FD rule
+    the edges are QUANTIZED to the WDM band grid: every edge lands on a
+    ``k * layer_df / subband_divisor`` boundary (the same grid the
+    ``"uniform"`` mode uses), each band spans an integer number of grid
+    units, and no band is narrower than ``min_band_layers`` full WDM layers
+    (>= 1 REQUIRED -- the parity-safety floor for the stride-2 band
+    scheduling; see ``GBSettings.band_min_layers``). The outermost edges are the same
+    full-layer boundaries the uniform mode produces
+    (``ceil(start_freq/layer_df)`` / ``floor(end_freq/layer_df)``).
+
+    ``target_count`` semantics (the ``GB_BAND_TARGET_COUNT`` knob):
+
+    * ``0`` (default) -- "whatever get_N implies": widths are the natural
+      legacy widths (scale factor 1), floored at the minimum width.
+    * ``> 0`` -- a single multiplicative scale on ``w_nat`` is found by
+      bisection so the produced band count lands as close to
+      ``target_count`` as the integer/min-width quantization allows. The
+      count saturates at ``total_units / min_units`` (every band at the
+      minimum width) for large targets.
+
+    The walk runs upward from the low edge; the last band is clamped to the
+    top boundary and merged into its neighbor if the remainder is narrower
+    than the minimum width, so all bands respect the floor.
+
+    Returns:
+        np.ndarray: ascending band edges (Hz), ``len(edges) - 1`` bands.
+    """
+    div = max(1, int(subband_divisor))
+    if float(min_band_layers) < 1.0:
+        # Parity-safety floor (2026-08-15 slab/parity analysis): the GB
+        # move schedules same-parity bands concurrently with the hard-coded
+        # stride 2 (``band_units=2`` ctor default AND ``units = 2`` inside
+        # run_tempering), and each source's likelihood window spreads
+        # m_band_half_width=1 layer each side. With every band >= 1 full
+        # layer, same-parity windows share at most 1 layer -- today's
+        # measured-safe configuration (~3e-5 lnL bias, 5 orders of
+        # headroom). Sub-layer minimum widths overlap same-parity windows
+        # further and would need a parity-stride bump that is NOT wired
+        # (run_tempering ignores band_units), so they are refused rather
+        # than silently unsafe.
+        raise ValueError(
+            f"min_band_layers={min_band_layers} < 1: sub-layer minimum band "
+            "widths are unsafe under the stride-2 band-parity scheduling "
+            "(adjacent same-parity likelihood windows would overlap beyond "
+            "the tested 1-shared-layer configuration). Keep "
+            "GB_BAND_MIN_LAYERS >= 1."
+        )
+    min_units = max(1, int(round(float(min_band_layers) * div)))
+    unit = float(layer_df) / div
+    # Same outer boundaries as the uniform mode: full-layer aligned. The
+    # 1e-8 epsilon keeps a start/end that ALREADY sits on the layer grid
+    # (e.g. the migration script feeding back stored edges with a
+    # reconstructed layer_df) from bumping to the next layer on float noise.
+    k_lo = int(np.ceil(start_freq / float(layer_df) - 1e-8)) * div
+    k_hi = int(np.floor(end_freq / float(layer_df) + 1e-8)) * div
+    if k_hi - k_lo < min_units:
+        raise ValueError(
+            "GB frequency range [{:.4e}, {:.4e}] spans fewer than one "
+            "minimum-width band ({} x layer_df/div = {:.4e}).".format(
+                start_freq, end_freq, min_units, min_units * unit
+            )
+        )
+    df = 1.0 / float(Tobs)
+
+    def _width_units(k: int, scale: float) -> int:
+        f = k * unit
+        n_samp = get_N(amp, f, Tobs, oversample=oversample).item()
+        w_nat = (2.0 * n_samp + extra_buffer) * df
+        return max(min_units, int(round(scale * w_nat / unit)))
+
+    def _build(scale: float) -> list:
+        ks = [k_lo]
+        k = k_lo
+        while k < k_hi:
+            k = min(k + _width_units(k, scale), k_hi)
+            ks.append(k)
+        # merge an under-width final remainder into the previous band
+        if len(ks) >= 3 and ks[-1] - ks[-2] < min_units:
+            del ks[-2]
+        return ks
+
+    scale = 1.0
+    if int(target_count) > 0:
+        target = int(target_count)
+        # count(scale) is non-increasing in scale; bisect on it. Bracket
+        # generously -- quantization makes count a step function, so keep
+        # the closest-count candidate seen.
+        lo, hi = 1e-4, 1e4
+        best = (abs(len(_build(1.0)) - 1 - target), 1.0)
+        for _ in range(80):
+            mid = np.sqrt(lo * hi)  # geometric bisection (scale is a ratio)
+            cnt = len(_build(mid)) - 1
+            best = min(best, (abs(cnt - target), mid))
+            if cnt > target:
+                lo = mid
+            elif cnt < target:
+                hi = mid
+            else:
+                break
+        else:
+            mid = best[1]
+        scale = mid
+
+    edges = np.asarray(_build(scale), dtype=float) * unit
+    assert np.all(np.diff(edges) > 0)
+    return edges
+
+
 @dataclasses.dataclass
 class GBSettings(Settings):
     """Settings dataclass describing the GB branch in an Erebor-style recipe.
@@ -62,6 +192,44 @@ class GBSettings(Settings):
     # band_edges (2 -> half-layer_df edges). Ignored if band_edges_override set.
     subband_divisor: int = dataclasses.field(
         default_factory=env_default("GB_SUBBAND_DIVISOR", 1, int)
+    )
+    # WDM band-edge construction mode (ignored if ``band_edges_override`` set):
+    #   "uniform" [default] -> today's per-layer edges (one band per
+    #           layer_df/subband_divisor step), bit-for-bit unchanged.
+    #   "get_n" -> VARIABLE-WIDTH bands modeled on the legacy FD get_N rule
+    #           (:func:`get_n_based_band_edges`): band width proportional to
+    #           ``(2*get_N(1e-30, f, Tobs, oversample) + extra_buffer)/Tobs``,
+    #           quantized to an integer number of layer-grid units
+    #           (layer_df/subband_divisor), minimum ``band_min_layers`` full
+    #           WDM layers. Low-f bands (small N) come out narrow, high-f
+    #           bands (large N) wide -> more parallel (temp, walker, band)
+    #           cells where sources are dense. Env: ``GB_BAND_EDGES_MODE``.
+    band_edges_mode: str = dataclasses.field(
+        default_factory=env_default("GB_BAND_EDGES_MODE", "uniform", str)
+    )
+    # Approximate TOTAL band count target for ``band_edges_mode="get_n"``.
+    # 0 [default] -> "whatever get_N implies": the natural legacy widths
+    # (scale factor 1). >0 -> the get_N-proportional widths are rescaled by a
+    # single factor (bisection) so the produced band count lands as close as
+    # the integer/min-width quantization allows to this target; the count
+    # saturates at total_grid_units/min_units for very large targets. Env:
+    # ``GB_BAND_TARGET_COUNT``.
+    band_target_count: int = dataclasses.field(
+        default_factory=env_default("GB_BAND_TARGET_COUNT", 0, int)
+    )
+    # Minimum band width for ``band_edges_mode="get_n"``, in WDM layers
+    # (float, MUST be >= 1.0 -- the builder refuses sub-layer minima).
+    # Default 1.0: every band spans at least one full layer_df, the same
+    # minimum today's uniform per-layer construction has. This is the
+    # parity-safety floor: the move schedules same-parity bands (hard-coded
+    # stride 2, in both the ctor default ``band_units=2`` and the
+    # ``units = 2`` inside run_tempering) concurrently, and each source's
+    # likelihood window spreads m_band_half_width=1 layer per side -- with
+    # >= 1-layer bands, same-parity windows share at most 1 layer (today's
+    # measured-safe configuration). Raise it (e.g. 2.0) for extra
+    # separation. Env: ``GB_BAND_MIN_LAYERS``.
+    band_min_layers: float = dataclasses.field(
+        default_factory=env_default("GB_BAND_MIN_LAYERS", 1.0, float)
     )
     oversample: int = 4. # FD
     extra_buffer: int = 5
@@ -605,26 +773,50 @@ class GBSetup(Setup, GBSettings):
                 ]
             )
         elif isinstance(self.domain_settings, WDMSettings):
-            # WDM path: one band per WDM frequency layer, or per
-            # 1/``subband_divisor`` layer (GB_SUBBAND_DIVISOR=2 -> half-layer
-            # edges). Edges land on ``k * layer_df / div`` boundaries so the
-            # band grid aligns with the WDM grid; ``band_N_vals`` is unused by
-            # the WDM likelihood engine but is preserved for shape parity.
             wdm = self.domain_settings
             layer_df = float(wdm.layer_df)
             div = max(1, int(getattr(self, "subband_divisor", 1)))
-            k_lo = int(np.ceil(self.start_freq / layer_df)) * div
-            k_hi = int(np.floor(self.end_freq / layer_df)) * div
-            if k_hi <= k_lo:
-                raise ValueError(
-                    "GB frequency range [{:.4e}, {:.4e}] spans fewer than "
-                    "one WDM sub-band (layer_df/div={:.4e}).".format(
-                        self.start_freq, self.end_freq, layer_df / div
-                    )
+            _mode = str(getattr(self, "band_edges_mode", "uniform")).lower()
+            if _mode == "get_n":
+                # Variable-width bands modeled on the legacy FD get_N rule
+                # (GB_BAND_EDGES_MODE=get_n): width proportional to get_N at
+                # the band's frequency, layer-grid aligned, min
+                # ``band_min_layers`` full layers per band. See
+                # :func:`get_n_based_band_edges` for the knob semantics.
+                self.band_edges = get_n_based_band_edges(
+                    self.start_freq,
+                    self.end_freq,
+                    self.Tobs,
+                    layer_df,
+                    subband_divisor=div,
+                    oversample=int(self.oversample),
+                    extra_buffer=int(self.extra_buffer),
+                    target_count=int(getattr(self, "band_target_count", 0)),
+                    min_band_layers=float(getattr(self, "band_min_layers", 1.0)),
                 )
-            self.band_edges = np.asarray(
-                [k * layer_df / div for k in range(k_lo, k_hi + 1)]
-            )
+            elif _mode != "uniform":
+                raise ValueError(
+                    "GB_BAND_EDGES_MODE / GBSettings.band_edges_mode must be "
+                    f"'uniform' or 'get_n', got {_mode!r}."
+                )
+            else:
+                # WDM path (default): one band per WDM frequency layer, or per
+                # 1/``subband_divisor`` layer (GB_SUBBAND_DIVISOR=2 -> half-layer
+                # edges). Edges land on ``k * layer_df / div`` boundaries so the
+                # band grid aligns with the WDM grid; ``band_N_vals`` is unused by
+                # the WDM likelihood engine but is preserved for shape parity.
+                k_lo = int(np.ceil(self.start_freq / layer_df)) * div
+                k_hi = int(np.floor(self.end_freq / layer_df)) * div
+                if k_hi <= k_lo:
+                    raise ValueError(
+                        "GB frequency range [{:.4e}, {:.4e}] spans fewer than "
+                        "one WDM sub-band (layer_df/div={:.4e}).".format(
+                            self.start_freq, self.end_freq, layer_df / div
+                        )
+                    )
+                self.band_edges = np.asarray(
+                    [k * layer_df / div for k in range(k_lo, k_hi + 1)]
+                )
             self.band_N_vals = np.asarray(
                 [
                     get_N(1e-30, edge, self.Tobs, oversample=self.oversample).item()

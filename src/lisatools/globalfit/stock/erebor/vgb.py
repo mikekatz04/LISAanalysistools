@@ -272,6 +272,21 @@ class VGBSettings(GBSettings):
     band_layers: int = dataclasses.field(
         default_factory=env_default("VGB_BAND_LAYERS", 1, int)
     )
+    # Band-edge mode overrides: VGB reads its OWN env knobs (VGB_BAND_*)
+    # so flipping the GB branch to variable-width bands
+    # (GB_BAND_EDGES_MODE=get_n) does NOT silently move the VGB band grid
+    # (which has no RJ surface and whose stored per-band arrays would
+    # otherwise also need migrating on resume). Set VGB_BAND_EDGES_MODE
+    # explicitly to opt VGB in.
+    band_edges_mode: str = dataclasses.field(
+        default_factory=env_default("VGB_BAND_EDGES_MODE", "uniform", str)
+    )
+    band_target_count: int = dataclasses.field(
+        default_factory=env_default("VGB_BAND_TARGET_COUNT", 0, int)
+    )
+    band_min_layers: float = dataclasses.field(
+        default_factory=env_default("VGB_BAND_MIN_LAYERS", 1.0, float)
+    )
 
 
 class VGBSetup(GBSetup):

@@ -5651,10 +5651,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             buffer_obj.h_h_out
                         ).real[_acc_kept]
 
-            self._debug_verify_in_model(
-                buffer_obj, curr[sl], new, slots_s, N_s, delta_ll, keep,
-                (asnumpy(t_i[sl]), asnumpy(w_i[sl]), asnumpy(b_i[sl])), move_i,
-            )
+            # Guard at the CALL SITE (perf, 2026-08): the callee also checks
+            # ``self.debug``, but its arguments — three ``asnumpy`` device
+            # pulls — were evaluated unconditionally on EVERY in-model
+            # repeat, each a D2H sync even with debug off.
+            if self.debug:
+                self._debug_verify_in_model(
+                    buffer_obj, curr[sl], new, slots_s, N_s, delta_ll, keep,
+                    (asnumpy(t_i[sl]), asnumpy(w_i[sl]), asnumpy(b_i[sl])), move_i,
+                )
 
             # Sig-het drift refresh: every ``sighet_refresh_every``
             # repeats, re-anchor the references of the sources that
@@ -7161,6 +7166,28 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                     if n.startswith("epoch_") and n[6:].isdigit())
         return ks[-1] if ks else None
 
+    def _epoch_band_grid_stale(self, d: str) -> bool:
+        """True when epoch dir ``d`` holds grids fitted on DIFFERENT band edges.
+
+        The stage-B / comb npz caches store the ``band_edges`` the fit ran
+        against; per-peak ``band_idx`` labels are indices into that grid, so
+        any band-edge change (GB_BAND_EDGES_MODE / GB_BAND_TARGET_COUNT /
+        GB_SUBBAND_DIVISOR) invalidates the whole epoch. A cache with no
+        band metadata at all also counts as stale (unverifiable). Missing
+        caches (e.g. a DONE.json-only zero-peak epoch) are NOT stale -- they
+        carry no band-indexed state.
+        """
+        from lisatools.sampling.fstat_gridfit import check_cached_band_grid
+
+        try:
+            check_cached_band_grid(d, _to_numpy(self.band_edges))
+        except ValueError as exc:
+            logger.warning(
+                "%s: F-stat epoch cache %s is STALE under the current band "
+                "grid (%s); forcing a fresh-epoch refit.", self.name, d, exc)
+            return True
+        return False
+
     def _fstat_fit_decision(self):
         """Pure decision helper -> ``(action, epoch)``.
 
@@ -7179,6 +7206,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         k_latest = self._latest_epoch()
         if k_latest is None:
             return "fit", 0
+        if self._epoch_band_grid_stale(self._epoch_dir(k_latest)):
+            # Fitted against a different band grid (band-edge knobs changed
+            # across a resume): NEVER load it, and do NOT resume its sweep
+            # checkpoints either (their fingerprint does not cover the band
+            # grid) -- start a fresh epoch directory.
+            return "fit", k_latest + 1
         if self._epoch_complete(self._epoch_dir(k_latest)):
             return "load", k_latest
         # Mid-fit death: resume the SAME epoch (its checkpoints are live).
@@ -7299,6 +7332,9 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             fdot_astro_ratio_max=kw.get("fdot_astro_ratio_max"),
             use_cupy=self.backend.uses_cupy,
             stacked_live=stacked,
+            # loud last-line refusal of grids fitted on a different band
+            # grid (band_idx labels would silently re-label otherwise)
+            expected_band_edges=_to_numpy(self.band_edges),
         )
         if container is None:
             # Zero peaks (or a stage that produced nothing): fall back to the

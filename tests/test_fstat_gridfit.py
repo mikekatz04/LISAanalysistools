@@ -213,6 +213,10 @@ class FitDecisionTest(unittest.TestCase):
         num_proposals = 0
         _fstat_epoch = None
         _fstat_last_fit_hit = -1
+        name = "stub"
+        # the band grid the run is configured with (the staleness check
+        # compares epoch caches against it)
+        band_edges = np.linspace(1e-3, 2e-3, 6)
 
         # bind the real implementations
         from lisatools.globalfit.moves.gbspecialstretch import (
@@ -222,6 +226,7 @@ class FitDecisionTest(unittest.TestCase):
         _latest_epoch = _M._latest_epoch
         _epoch_dir = _M._epoch_dir
         _epoch_complete = staticmethod(_M._epoch_complete)
+        _epoch_band_grid_stale = _M._epoch_band_grid_stale
 
         @property
         def _fstat_root(self):
@@ -264,6 +269,36 @@ class FitDecisionTest(unittest.TestCase):
     def test_resume_incomplete_epoch(self):
         os.makedirs(os.path.join(self.d, "epoch_0000"))  # no DONE.json
         self.assertEqual(self.s._fstat_fit_decision(), ("fit", 0))
+
+    def _write_stacked(self, d, band_edges):
+        from lisatools.sampling.fstat_gridfit import GRID_BASENAME
+
+        np.savez(
+            os.path.join(
+                d, GRID_BASENAME.replace(".npz", "_peaks_stacked.npz")
+            ),
+            peak_f0_mHz=np.array([1.5]),
+            band_idx=np.array([1]),
+            band_edges=np.asarray(band_edges),
+        )
+
+    def test_matching_band_grid_loads(self):
+        d0 = os.path.join(self.d, "epoch_0000")
+        os.makedirs(d0)
+        self._write_stacked(d0, self.s.band_edges)
+        self.assertEqual(self.s._fstat_fit_decision(), ("load", 0))
+
+    def test_stale_band_grid_forces_fresh_epoch(self):
+        """A complete epoch fitted on DIFFERENT band edges must never load.
+
+        The per-peak band_idx labels are indices into the old grid and the
+        sweep checkpoints don't fingerprint the band grid, so the decision
+        is a fit in a FRESH epoch dir (k_latest + 1), not a resume.
+        """
+        d0 = os.path.join(self.d, "epoch_0000")
+        os.makedirs(d0)
+        self._write_stacked(d0, np.linspace(1e-3, 2e-3, 9))  # different grid
+        self.assertEqual(self.s._fstat_fit_decision(), ("fit", 1))
 
     def test_zero_peak_epoch_is_complete(self):
         """A fit that legitimately found no peaks must not refit forever."""

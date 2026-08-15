@@ -529,7 +529,25 @@ class GBState(ModuleSubState):
             ensure_leaf_cap_fields(bi, bi["num_bands"])
             assert nwalkers == bi["nwalkers"]
             assert ntemps == bi["ntemps"]
-            assert np.all(band_edges == bi["band_edges"])
+            # Band-grid geometry check. Explicit (the old bare
+            # ``assert np.all(==)`` compared unequal-length arrays to a
+            # scalar False with a DeprecationWarning) and tolerant to float
+            # round-off (a migrated store's edges may differ by ~1 ulp from
+            # the settings-derived ones when layer_df was reconstructed).
+            _cfg_edges = np.asarray(band_edges, dtype=float)
+            _stored_edges = np.asarray(bi["band_edges"], dtype=float)
+            if _cfg_edges.shape != _stored_edges.shape or not np.allclose(
+                _cfg_edges, _stored_edges, rtol=1e-9, atol=0.0
+            ):
+                raise ValueError(
+                    f"band grid mismatch: state stores "
+                    f"{len(_stored_edges) - 1} sub-bands but the run config "
+                    f"builds {len(_cfg_edges) - 1}. The band-edge knobs "
+                    f"(GB_BAND_EDGES_MODE / GB_BAND_TARGET_COUNT / "
+                    f"GB_BAND_MIN_LAYERS / GB_SUBBAND_DIVISOR) changed, or "
+                    f"the store needs scripts/fstat_proposal/"
+                    f"migrate_gb_band_edges.py."
+                )
 
     def update_band_information(
         self,

@@ -297,17 +297,29 @@ def compute_layer_groups(params_array, layer_df, f0_param_index=1,
     # ``group_band_layers=5``, ``half=2`` -> band ``[m-2, m+3)``), matching
     # the WDM transform's slightly-asymmetric spectral spread.
     half = int(group_band_layers) // 2
+    # Host-side boundary scan (perf, 2026-08): every condition below reads a
+    # 0-d element, and on CuPy each ``bool()``/``int()`` of a 0-d device
+    # array is one device synchronization — O(num_bin) syncs per call. Pull
+    # the two small int arrays to HOST once (a single D2H copy) and run the
+    # IDENTICAL loop on numpy (zero syncs). The group arrays are uploaded
+    # via ``xp.asarray`` below exactly as before, so outputs are unchanged.
+    if xp is np:
+        sorted_m_host = sorted_m
+        sorted_data_idx_host = sorted_data_idx
+    else:
+        sorted_m_host = np.asarray(sorted_m.get())
+        sorted_data_idx_host = np.asarray(sorted_data_idx.get())
     starts, ends, m_los, m_his, di = [], [], [], [], []
     i = 0
     while i < num_bin:
-        m0 = sorted_m[i]
-        d0 = sorted_data_idx[i]
+        m0 = sorted_m_host[i]
+        d0 = sorted_data_idx_host[i]
         j = i
-        while j < num_bin and sorted_data_idx[j] == d0 and (
-                sorted_m[j] - m0) < group_band_layers:
+        while j < num_bin and sorted_data_idx_host[j] == d0 and (
+                sorted_m_host[j] - m0) < group_band_layers:
             j += 1
         m_lo = int(m0 - half - margin_layers)
-        m_hi = int(sorted_m[j - 1] + (group_band_layers - half) + margin_layers)
+        m_hi = int(sorted_m_host[j - 1] + (group_band_layers - half) + margin_layers)
         starts.append(int(i))
         ends.append(int(j))
         m_los.append(m_lo)

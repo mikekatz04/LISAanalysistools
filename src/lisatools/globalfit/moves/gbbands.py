@@ -353,6 +353,7 @@ class _ShardHolderView:
         starts = getattr(self._parent, "min_freq_inds", None)
         if starts is None:
             self._min_freq_inds_view = None
+            vals_host = None
         else:
             vals_host = np.ascontiguousarray(
                 np.asarray(asnumpy(starts))[self._rows].astype(np.int32)
@@ -367,12 +368,27 @@ class _ShardHolderView:
                     self._min_freq_inds_view = xp.ascontiguousarray(
                         xp.asarray(vals_host)
                     )
-        sfi = getattr(self._parent, "start_freq_ind", None)
-        if sfi is None:
-            self._start_freq_ind_view = None
+        # ``start_freq_ind`` view (perf, 2026-08): on a SubBandBuffer parent
+        # the generic read below resolves to AnalysisContainerArray's
+        # ``start_freq_ind`` property — a per-slot Python dispatch LOOP over
+        # every allocated container, run on every engine call via
+        # ``_shard_views``. A SubBandBuffer already stores its per-slot
+        # window starts (``start_freq_inds`` -> the capacity-sized
+        # ``min_freq_inds`` store, sliced to this shard's rows in
+        # ``vals_host`` above), so reuse that and skip the ACA loop. The
+        # only consumer of this view (``GBFDComputations._holder_starts``)
+        # prefers ``min_freq_inds`` whenever it is present — as it always is
+        # on a SubBandBuffer — so this fallback is never read on that path.
+        if vals_host is not None and getattr(
+                self._parent, "start_freq_inds", None) is not None:
+            self._start_freq_ind_view = vals_host
         else:
-            arr = np.asarray(asnumpy(sfi))
-            self._start_freq_ind_view = arr[self._rows] if arr.ndim else arr
+            sfi = getattr(self._parent, "start_freq_ind", None)
+            if sfi is None:
+                self._start_freq_ind_view = None
+            else:
+                arr = np.asarray(asnumpy(sfi))
+                self._start_freq_ind_view = arr[self._rows] if arr.ndim else arr
         # Narrow per-band slab origins: one value PER BUFFER SLOT, so the
         # shard's view must carry its own rows' values in intra-shard order
         # (see the ``slab_min_f`` property). Refreshed in place like
@@ -2017,6 +2033,24 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         """Parent basis-domain settings driving per-band buffer geometry."""
         return self._basis_settings
 
+    # -- Slab-metadata cache (perf, 2026-08) ---------------------------
+    # ``band_slab_Nf`` and ``slab_min_f`` are pure functions of the band
+    # grid (``band_edges``, bind-constant), the parent basis settings, the
+    # ``wdm_band_slab_layers`` knob (bind-constant) and the live per-slot
+    # band binding (``unique_band_combos`` / ``num_bands_now``). They used
+    # to be recomputed — with device syncs — on EVERY engine call (via
+    # ``_slab_kernel_args`` / ``_adjust_via_engine`` /
+    # ``refresh_row_metadata``). INVALIDATION CONTRACT: the binding only
+    # changes through the ``special_indices_unique`` property setter and
+    # ``resize_to`` — both call ``_invalidate_slab_metadata_cache`` — so the
+    # cached values are computed once per bind and returned verbatim until
+    # the next rebind. (Cache presence is tracked by attribute existence in
+    # ``__dict__`` — no sentinel objects, so deepcopy/pickle stay safe.)
+
+    def _invalidate_slab_metadata_cache(self) -> None:
+        self.__dict__.pop("_band_slab_Nf_cached", None)
+        self.__dict__.pop("_slab_min_f_cached", None)
+
     @property
     def band_slab_Nf(self) -> Optional[int]:
         """WDM-layer extent of a narrow per-band slab (task-b), or ``None``.
@@ -2026,13 +2060,55 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         ``band_span + 2*(leakage + guard)``; ``N>0`` uses exactly ``N``. All
         slabs share this constant extent; each has its own origin in
         :attr:`slab_min_f`. Clamped to the parent active band.
+
+        Cached per bind (see ``_invalidate_slab_metadata_cache``).
         """
+        if "_band_slab_Nf_cached" in self.__dict__:
+            return self._band_slab_Nf_cached
+        # Dispatch through the class (not ``self``) so the property keeps
+        # working on duck-typed stubs that borrow the raw ``fget``.
+        out = SubBandBuffer._compute_band_slab_Nf(self)
+        self._band_slab_Nf_cached = out
+        return out
+
+    def _compute_band_slab_Nf(self) -> Optional[int]:
         if self._wdm_band_slab_layers is None:
             return None
         if not isinstance(self._basis_settings, WDMSettings):
             return None
         if self._wdm_band_slab_layers > 0:
             slab_Nf = int(self._wdm_band_slab_layers)
+            # Enforce the (previously comment-only, see ``slab_min_f``)
+            # sizing contract ``slab_Nf >= max_band_span + 2*hw``: the
+            # chunked-het kernels CLIP each source's per-layer window
+            # ``m_floor +- m_band_half_width`` to the slab
+            # (lat_chunked_het_kernels.hh, wdm_het_get_ll_impl) -- a slab
+            # narrower than the widest band + the window spread silently
+            # annihilates edge sources (d_h = h_h = 0, nothing subtracted).
+            # This matters for variable-width band grids
+            # (GB_BAND_EDGES_MODE=get_n), where a fixed
+            # GB_WDM_BAND_SLAB_LAYERS tuned for 1-layer bands is too small
+            # for the wide high-frequency bands. hw = 1 is the kernel-family
+            # default (never overridden by gb_likelihood).
+            _ldf = float(self.df) if not hasattr(self.df, "item") else self.df.item()
+            _edges = self.xp.asarray(self.band_edges)
+            # np.rint (not astype(int)) so exactly-layer-aligned edges do
+            # not truncate a layer low and overstate the span
+            _lo = self.xp.rint(_edges[:-1] / _ldf).astype(int)
+            _hi = self.xp.rint(_edges[1:] / _ldf).astype(int)
+            _max_span = max(1, int(self.xp.max(_hi - _lo)))
+            _hw = 1
+            if slab_Nf < _max_span + 2 * _hw:
+                raise ValueError(
+                    f"GB_WDM_BAND_SLAB_LAYERS={slab_Nf} is too small for "
+                    f"this band grid: the widest band spans {_max_span} WDM "
+                    f"layers and the per-source likelihood window adds "
+                    f"m_band_half_width={_hw} on each side, so the slab "
+                    f"must span >= {_max_span + 2 * _hw} layers (or use "
+                    f"GB_WDM_BAND_SLAB_LAYERS=0 for auto-sizing). A "
+                    f"too-small slab silently clips edge sources out of "
+                    f"the likelihood."
+                )
         else:
             # Auto: cover the widest band + leakage + guard on each side.
             slab_Nf = self.recommend_band_slab_layers(
@@ -2072,12 +2148,25 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
         Each slot's slab spans ``[slab_min_f[slot], slab_min_f[slot] +
         band_slab_Nf)`` WDM layers, centered on the slot's band and clamped
-        into the parent active band ``[ind_min_f, ind_max_f]``. Recomputed
+        into the parent active band ``[ind_min_f, ind_max_f]``. Computed
         from the live per-slot band assignment (``unique_band_combos[:, 2]``)
         so it tracks cell swap-outs. Read by the chunked-het kernels (via
         ``fill_global_wdm`` / ``_slab_kernel_args``) as the per-slab layer
         origin. ``None`` when narrow slabs are off.
+
+        Cached per bind: the band assignment only changes through the
+        ``special_indices_unique`` setter / ``resize_to``, which invalidate
+        the cache (see ``_invalidate_slab_metadata_cache``).
         """
+        if "_slab_min_f_cached" in self.__dict__:
+            return self._slab_min_f_cached
+        # Dispatch through the class (not ``self``) so the property keeps
+        # working on duck-typed stubs that borrow the raw ``fget``.
+        out = SubBandBuffer._compute_slab_min_f(self)
+        self._slab_min_f_cached = out
+        return out
+
+    def _compute_slab_min_f(self):
         slab_Nf = self.band_slab_Nf
         if slab_Nf is None:
             return None
@@ -2372,6 +2461,9 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         )
         if k == int(self.num_bands_now):
             return
+        # The bound-slot count changes below (before the placeholder rebind
+        # runs the specials setter): drop the cached slab metadata now.
+        self._invalidate_slab_metadata_cache()
         xp = get_array_module(self._special_indices_unique)
         old = self._special_indices_unique
         if int(old.shape[0]) >= k:
@@ -2399,6 +2491,10 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
 
     @special_indices_unique.setter
     def special_indices_unique(self, special_indices_unique):
+        # Rebind: the per-slot band assignment changes here, so the cached
+        # slab metadata (band_slab_Nf / slab_min_f) must be recomputed on
+        # next read (see _invalidate_slab_metadata_cache).
+        self._invalidate_slab_metadata_cache()
         self._special_indices_unique_sort = self.xp.argsort(special_indices_unique)
         self._special_indices_unique = special_indices_unique
 

@@ -871,12 +871,56 @@ def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
 # birth container
 # --------------------------------------------------------------------------
 
+def check_cached_band_grid(cache_dir: str, expected_band_edges) -> None:
+    """Refuse a cached F-stat grid fitted against a DIFFERENT band grid.
+
+    The stage-B cache stores per-peak ``band_idx`` (an index into the band
+    grid the fit ran against) and the ``band_edges`` themselves; the comb
+    cache stores ``band_edges`` too. If the run's band edges change (e.g.
+    GB_BAND_EDGES_MODE / GB_BAND_TARGET_COUNT / GB_SUBBAND_DIVISOR), every
+    stored ``band_idx`` silently re-labels and the interior-band selection
+    mask shifts -- the ONLY correct behavior is a refit. Raises
+    :class:`ValueError` loudly when the cached edges differ from
+    ``expected_band_edges`` (shape or values), or when a cache exists but
+    carries no band metadata at all (unverifiable legacy cache). A missing
+    cache passes (nothing to be stale).
+    """
+    expected = np.asarray(expected_band_edges, dtype=float)
+    cache_path = os.path.join(cache_dir, GRID_BASENAME)
+    for path in (cache_path.replace(".npz", "_peaks_stacked.npz"),
+                 cache_path.replace(".npz", "_comb.npz")):
+        if not os.path.exists(path):
+            continue
+        d = np.load(path, allow_pickle=False)
+        if "band_edges" not in d:
+            raise ValueError(
+                f"F-stat grid cache {path!r} carries no band_edges metadata; "
+                f"cannot verify it against the run's "
+                f"{len(expected) - 1}-band grid. Refusing the stale/legacy "
+                f"cache -- delete the epoch directory (or point "
+                f"GB_FSTAT_FIT_DIR elsewhere) to force a refit."
+            )
+        stored = np.asarray(d["band_edges"], dtype=float)
+        if stored.shape != expected.shape or not np.allclose(stored, expected):
+            raise ValueError(
+                f"F-stat grid cache {path!r} was fitted against "
+                f"{len(stored) - 1} sub-bands but the run now has "
+                f"{len(expected) - 1} (band edges differ). Per-peak "
+                f"band_idx labels are stale; a refit is required. Delete "
+                f"the epoch directory or start a new epoch -- never reuse "
+                f"a grid across a band-edge change (see scripts/"
+                f"fstat_proposal/migrate_gb_band_edges.py)."
+            )
+    return None
+
+
 def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
                                 dist_lims=None, fdot_astro_ratio_max=None,
                                 use_cupy: bool = False, gpu: Optional[int] = None,
                                 floor_eps: Optional[float] = None,
                                 comb_weight: Optional[float] = None,
-                                stacked_live=None):
+                                stacked_live=None,
+                                expected_band_edges=None):
     """Stacked grids (+ optional comb) -> floor -> RJ birth container.
 
     ``stacked_live`` short-circuits the npz reload when the caller just built
@@ -884,6 +928,12 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
     :class:`CombIntrinsicProposal` with linear-in-F weighting -- proportional
     mass on EVERY comb peak, which is what successive births need after the
     loudest source is born and subtracted.
+
+    ``expected_band_edges`` (optional, Hz): when given and the grids come
+    from the npz caches (not ``stacked_live``), the cached band grid is
+    validated via :func:`check_cached_band_grid` -- a cache fitted against a
+    different band count/edges raises instead of silently mis-labeling
+    ``band_idx``.
 
     Returns ``None`` when no grid source is available.
     """
@@ -904,6 +954,12 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
         floor_eps = fstat_knob("FSTAT_FLOOR_EPS", float)
     if comb_weight is None:
         comb_weight = fstat_knob("FSTAT_COMB_WEIGHT", float)
+
+    # Band-grid staleness gate: an npz reload against a changed band grid is
+    # never valid (band_idx labels shift). The live in-process fit is exempt
+    # (it was just run against the current edges).
+    if expected_band_edges is not None and stacked_live is None:
+        check_cached_band_grid(cache_dir, expected_band_edges)
 
     cache = None
     if os.path.exists(stacked_cache):

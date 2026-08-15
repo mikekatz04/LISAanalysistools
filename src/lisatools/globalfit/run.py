@@ -555,6 +555,50 @@ class GlobalFit:
                             f"fresh backend or match the original config."
                         )
 
+                # Guard against resuming a backend whose banded-branch band
+                # grid no longer matches the run config (e.g.
+                # GB_BAND_EDGES_MODE / GB_BAND_TARGET_COUNT /
+                # GB_SUBBAND_DIVISOR changed between runs). The stored
+                # band_* arrays (band_temps, band_leaf_cap, swap/proposal
+                # counters, band_num_binaries) are sized (num_bands, ...) —
+                # without this gate the mismatch surfaces as a bare
+                # AssertionError in GBState.initialize_band_information or a
+                # silent mis-addressed flat cell index in the GB move.
+                _sub_states = getattr(state, "sub_states", {}) or {}
+                for _banded in ("gb", "vgb"):
+                    _sub = _sub_states.get(_banded)
+                    _bi = getattr(_sub, "band_info", None) if _sub is not None else None
+                    if not _bi or "band_edges" not in _bi:
+                        continue
+                    try:
+                        _cfg_edges = np.asarray(
+                            self.curr.source_info[_banded].band_edges
+                        )
+                    except (KeyError, AttributeError, TypeError):
+                        continue
+                    _stored_edges = np.asarray(_bi["band_edges"])
+                    if _stored_edges.shape != _cfg_edges.shape or not np.allclose(
+                        _stored_edges, _cfg_edges
+                    ):
+                        raise ValueError(
+                            f"Cannot resume {backend_path!r}: branch "
+                            f"{_banded!r} stored with "
+                            f"{_stored_edges.shape[0] - 1} sub-bands but the "
+                            f"run config builds {_cfg_edges.shape[0] - 1} "
+                            f"(band edges differ). The band-edge knobs "
+                            f"(GB_BAND_EDGES_MODE / GB_BAND_TARGET_COUNT / "
+                            f"GB_BAND_MIN_LAYERS / GB_SUBBAND_DIVISOR) differ "
+                            f"from the stored run. Either restore the "
+                            f"original knobs, or migrate the file's per-band "
+                            f"arrays onto the new band grid with scripts/"
+                            f"fstat_proposal/migrate_gb_band_edges.py (band "
+                            f"temperatures are interpolated; leaf caps and "
+                            f"swap counters reset and re-earn; never reshape "
+                            f"silently). Any in-move F-stat fit epoch cache "
+                            f"is keyed by band index and must be refit — the "
+                            f"loader refuses stale grids."
+                        )
+
         if state is None and self.curr.general_info.past_file_for_start is not None:
             # THIS DOES A DIRECT RESTART FROM AN OLD FILE, NO STATISTICAL GENERATION
             if not os.path.exists((file_for_restart := self.curr.general_info.past_file_for_start)):

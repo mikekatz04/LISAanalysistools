@@ -27,6 +27,7 @@ BBHx. See the ``GBWDMComputations`` and ``SOBBHWDMComputations`` thin
 sub-classes in their respective packages for the per-source-class
 constants.
 """
+import os
 from copy import deepcopy
 from typing import Optional
 
@@ -45,6 +46,11 @@ from .wdm_het import (
     compute_wdm_window,
     resolve_tukey_alpha,
 )
+
+# Index-bound sanity asserts (debugging aids): each ``int(arr.max())`` is a
+# full device sync per engine call on CuPy. Default OFF in production;
+# opt back in with GB_INDEX_ASSERTS=1. Checked ONCE at import.
+_GB_INDEX_ASSERTS = os.environ.get("GB_INDEX_ASSERTS", "0") == "1"
 
 
 class WDMComputationsBase(LISAToolsParallelModule):
@@ -436,8 +442,9 @@ class WDMComputationsBase(LISAToolsParallelModule):
             noise_index = self.xp.zeros(num_bin, dtype=self.xp.int32)
         else:
             noise_index = self.xp.asarray(noise_index).astype(self.xp.int32)
-        assert int(data_index.max()) < num_data
-        assert int(noise_index.max()) < num_noise
+        if _GB_INDEX_ASSERTS:
+            assert int(data_index.max()) < num_data
+            assert int(noise_index.max()) < num_noise
         return data_index, noise_index
 
     def _as_wdm_holder(self, wdm_holder):
@@ -1056,7 +1063,8 @@ class WDMComputationsBase(LISAToolsParallelModule):
             data_index = self.xp.zeros(num_bin, dtype=self.xp.int32)
         else:
             data_index = self.xp.asarray(data_index).astype(self.xp.int32)
-        assert int(data_index.max()) < num_templates
+        if _GB_INDEX_ASSERTS:
+            assert int(data_index.max()) < num_templates
 
         # factor +1 (add) / -1 (remove). Mirrors
         # gbgpu.generate_global_template's factors API.
