@@ -10,26 +10,27 @@
 # fresh start, move/delete ${STORE_DIR} first.
 #
 # ############################################################################
-# ## PRE-SUBMIT MIGRATION CHECKLIST (2026-08-15 relaunch) -- RUN ALL THREE  ##
-# ## ONCE, IN ORDER, ON A STOPPED RUN, BEFORE THE FIRST sbatch. Each writes ##
-# ## its own .bak. Resume guards REFUSE loudly if a store is un-migrated,   ##
-# ## so a missed step fails fast rather than corrupting -- but it wastes a  ##
-# ## queue slot. Verify with --dry-run where offered.                       ##
+# ## PRE-SUBMIT MIGRATION CHECKLIST (2026-08-15 relaunch) -- RUN BOTH ONCE, ##
+# ## ON A STOPPED RUN, BEFORE THE FIRST sbatch. Each writes its own .bak.   ##
+# ## Resume guards REFUSE loudly if a store is un-migrated, so a missed     ##
+# ## step fails fast rather than corrupting -- but it wastes a queue slot.  ##
 # ##                                                                        ##
 # ##  H5=./gf_prod_3mo/gf_prod_3mo_testing.h5                               ##
-# ##  CAT=/shared/home/mlkatz1/mojito_cache/brickmarket/mojito_light_v1_0_0 ##
 # ##                                                                        ##
-# ##  # 1. VGB 5 -> 6 sampled columns (VGB_CHIRP_MASS_BASIS=1 below)        ##
-# ##  python scripts/fstat_proposal/migrate_vgb_chirp_basis.py "$H5" "$CAT" ##
-# ##                                                                        ##
-# ##  # 2. VGB beta ladder: heal the betas=[1e-4] bug + go to 8 rungs       ##
+# ##  # 1. VGB beta ladder: heal the betas=[1e-4] bug + go to 8 rungs       ##
 # ##  #    (must match VGB_NTEMPS=8 below)                                  ##
 # ##  python scripts/fstat_proposal/fix_vgb_band_temps.py "$H5" 8           ##
 # ##                                                                        ##
-# ##  # 3. GB leaf caps onto the band/8 cap-cell grid (GB_CAP_DIVISOR=8)    ##
+# ##  # 2. GB leaf caps onto the band/8 cap-cell grid (GB_CAP_DIVISOR=8)    ##
 # ##  #    NOTE: --cap-divisor is a FLAG, not a positional argument.        ##
 # ##  python scripts/fstat_proposal/migrate_gb_cap_grid.py "$H5" \          ##
 # ##      --cap-divisor 8                                                   ##
+# ##                                                                        ##
+# ##  NOT NEEDED (2026-08-15): migrate_vgb_chirp_basis.py -- the VGB branch ##
+# ##  stays on its ESTABLISHED 5-dim distance basis (VGB_CHIRP_MASS_BASIS=0 ##
+# ##  below), so the store's sampled columns do not change. If you ALREADY  ##
+# ##  ran that migration, restore its .bak before submitting -- a 6-column  ##
+# ##  store against the 5-column config trips the ndim resume guard.        ##
 # ############################################################################
 # ============================================================================
 
@@ -218,12 +219,23 @@ export VGB_SIGHET_INMODEL=0
 # VGB RELAUNCH BLOCK (2026-08-15, user rulings). The VGB likelihood was
 # OFF all run (betas=[1e-4] bug) and 36/55 leaves were frozen by the GB
 # SNR gate -- both fixed in code (76cd3237); pre-fix VGB samples are
-# prior-only. Migrations 1 + 2 in the header checklist are REQUIRED for
-# the two knobs below.
-# Chirp-mass basis (user: "Yes on VGBs -> CHIRP_MASS_BASIS"): samples
-# [dist, phi0, cos_iota, psi, Mc, fdot_astro_ratio] -- un-collapses the
-# ratio dimension (additive VGB_RATIO_INIT_WIDTH init).
-export VGB_CHIRP_MASS_BASIS=1
+# prior-only. Migration 1 in the header checklist is REQUIRED for the
+# VGB_NTEMPS=8 ladder below.
+# PARAMETERIZATION: the ESTABLISHED 5-dim DISTANCE basis
+# [dist, phi0, cos_iota, psi, fdot_astro_ratio] -- what this store has
+# been sampling all along. (User ruling 2026-08-15, superseding the
+# earlier chirp-basis arming: "revert to the old VGB parameterization
+# ... the old regular parameterization we had before" for these runs.)
+# Keeping it means NO chirp migration and NO ndim 5->6 change on a live
+# store -- one less thing moving while we validate the likelihood fix.
+# The 6-dim chirp basis (Mc sampled, un-collapses fdot_astro_ratio)
+# stays built and tested for the 6-month run: set 1 there and run
+# migrate_vgb_chirp_basis.py first.
+# NOTE: fdot_astro_ratio stays a COLLAPSED dimension in this basis
+# (truth exactly 0 x multiplicative init = zero spread, and the
+# affine-invariant stretch cannot create spread it never had). That is
+# the known, accepted cost of staying on the old parameterization.
+export VGB_CHIRP_MASS_BASIS=0
 # 8-rung ladder (user ruling 2026-08-15). Resume derives the rung count
 # from the STORED band_temps shape, so the migration above MUST be run
 # with the matching "8" argument (it recreates every rung-dimensioned
