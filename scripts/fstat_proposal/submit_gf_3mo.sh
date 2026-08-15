@@ -8,6 +8,29 @@
 # restores the last saved iteration and completed stage statuses. Keep the
 # same FILE_STORE_DIR/BASE_FILE_NAME and env between submissions. For a
 # fresh start, move/delete ${STORE_DIR} first.
+#
+# ############################################################################
+# ## PRE-SUBMIT MIGRATION CHECKLIST (2026-08-15 relaunch) -- RUN ALL THREE  ##
+# ## ONCE, IN ORDER, ON A STOPPED RUN, BEFORE THE FIRST sbatch. Each writes ##
+# ## its own .bak. Resume guards REFUSE loudly if a store is un-migrated,   ##
+# ## so a missed step fails fast rather than corrupting -- but it wastes a  ##
+# ## queue slot. Verify with --dry-run where offered.                       ##
+# ##                                                                        ##
+# ##  H5=./gf_prod_3mo/gf_prod_3mo_testing.h5                               ##
+# ##  CAT=/shared/home/mlkatz1/mojito_cache/brickmarket/mojito_light_v1_0_0 ##
+# ##                                                                        ##
+# ##  # 1. VGB 5 -> 6 sampled columns (VGB_CHIRP_MASS_BASIS=1 below)        ##
+# ##  python scripts/fstat_proposal/migrate_vgb_chirp_basis.py "$H5" "$CAT" ##
+# ##                                                                        ##
+# ##  # 2. VGB beta ladder: heal the betas=[1e-4] bug + go to 8 rungs       ##
+# ##  #    (must match VGB_NTEMPS=8 below)                                  ##
+# ##  python scripts/fstat_proposal/fix_vgb_band_temps.py "$H5" 8           ##
+# ##                                                                        ##
+# ##  # 3. GB leaf caps onto the band/8 cap-cell grid (GB_CAP_DIVISOR=8)    ##
+# ##  #    NOTE: --cap-divisor is a FLAG, not a positional argument.        ##
+# ##  python scripts/fstat_proposal/migrate_gb_cap_grid.py "$H5" \          ##
+# ##      --cap-divisor 8                                                   ##
+# ############################################################################
 # ============================================================================
 
 # ---- fill these in ---------------------------------------------------------
@@ -135,12 +158,10 @@ export GB_INFOMAT_PER_BLOCK=1
 # check (GB_ORTHO_CHECK) stays OFF until the sub-band shakedown.
 export GB_ORTHO_LL_CHECK=1
 # Cap-cell grid (user design 2026-08-15): leaf caps on a band/8 grid at
-# the confusion scale; scheduling unchanged. RESUME REQUIRES the cap
-# migration (add to the pre-submit checklist above):
-#   python scripts/fstat_proposal/migrate_gb_cap_grid.py \
-#       ${STORE_DIR}/gf_prod_3mo_testing.h5 8
-# WATCH first propose: leaf growth + memory (band-total throttle is
-# gone -- bands can reach K*cap); GB_CAP_DIVISOR=1 reverts instantly.
+# the confusion scale; scheduling unchanged. RESUME REQUIRES migration
+# step 3 in the header checklist. WATCH first propose: leaf growth +
+# memory (the band-total throttle is gone -- a band can now reach
+# K*cap); GB_CAP_DIVISOR=1 reverts instantly.
 export GB_CAP_DIVISOR=8
 export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
@@ -165,9 +186,10 @@ export GB_RJ_FSTAT_CTR_HOIST=1     # F-stat distance centers batched once per
 # 109-953 s -> ~0). Smear defaults 2.0 in epoch mode (covers <=100-
 # propose staleness + node mismatch); =unit restores the per-unit hoist.
 export GB_FSTAT_CTR_MODE=epoch
-# (GB_FSTAT_CTR_SMEAR unset on purpose -- a 1.5 pin would override the
-# epoch-mode 2.0 default.)  # sigma widening covering mid-unit
-                                   # residual drift (feeds draw AND densities)
+# (GB_FSTAT_CTR_SMEAR is unset ON PURPOSE: a 1.5 pin would override the
+# epoch-mode 2.0 default, which is what covers the <=100-propose table
+# staleness. The smeared sigma feeds BOTH the draw and the densities,
+# so detailed balance is exact at any smear.)
 export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # High-f barren-band birth shutoff (search scope): bands above FMIN with
 # AFTER consecutive zero-birth-accept proposes stop proposing births
@@ -196,11 +218,8 @@ export VGB_SIGHET_INMODEL=0
 # VGB RELAUNCH BLOCK (2026-08-15, user rulings). The VGB likelihood was
 # OFF all run (betas=[1e-4] bug) and 36/55 leaves were frozen by the GB
 # SNR gate -- both fixed in code (76cd3237); pre-fix VGB samples are
-# prior-only. BEFORE resubmitting, run BOTH migrations on the store:
-#   python scripts/fstat_proposal/migrate_vgb_chirp_basis.py \
-#       ${STORE_DIR}/gf_prod_3mo_testing.h5 <catalogue_dir>   # 5->6 cols
-#   python scripts/fstat_proposal/fix_vgb_band_temps.py \
-#       ${STORE_DIR}/gf_prod_3mo_testing.h5 8   # betas heal + 8-rung ladder
+# prior-only. Migrations 1 + 2 in the header checklist are REQUIRED for
+# the two knobs below.
 # Chirp-mass basis (user: "Yes on VGBs -> CHIRP_MASS_BASIS"): samples
 # [dist, phi0, cos_iota, psi, Mc, fdot_astro_ratio] -- un-collapses the
 # ratio dimension (additive VGB_RATIO_INIT_WIDTH init).
