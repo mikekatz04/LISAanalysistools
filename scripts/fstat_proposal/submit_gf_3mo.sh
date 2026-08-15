@@ -50,17 +50,37 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 STORE_DIR=./gf_prod_3mo_v2/
 
 # ---- GPU telemetry ---------------------------------------------------------
-# Background nvidia-smi sampler: one CSV row per GPU every 30 s into the run
-# store (timestamped per job, so resubmits/resumes append new files rather
-# than clobbering). Killed automatically when the job exits. Columns:
+# Background nvidia-smi sampler: one CSV row per GPU into the run store
+# (timestamped per job, so resubmits/resumes add new files rather than
+# clobbering). Killed automatically when the job exits. Columns:
 # timestamp, index, name, util.gpu [%], util.mem [%], mem.used [MiB],
 # mem.total [MiB], power [W], temp [C].
+#
+# INTERVAL 30 -> 5 s (2026-08-15): 30 s was tuned for 55-minute iterations.
+# Post-speedup an iteration is ~5 min and individual moves take SECONDS, so
+# 30 s gave ~10 samples/iteration -- far too coarse to attribute utilization
+# to a move. At 5 s a 5-min iteration yields ~60 samples/GPU. Cost is
+# negligible (a few hundred KB/hour; nvidia-smi polling is cheap) and the
+# monitor's gpu_util panel reads it unchanged.
 mkdir -p ${STORE_DIR}
+GPU_SAMPLE_SEC=${GPU_SAMPLE_SEC:-5}
 GPU_LOG=${STORE_DIR}/gpu_util_${SLURM_JOB_ID:-manual_$(date +%s)}.csv
 nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu \
-  --format=csv,noheader,nounits -l 30 > "${GPU_LOG}" &
+  --format=csv,noheader,nounits -l ${GPU_SAMPLE_SEC} > "${GPU_LOG}" &
 GPU_SMI_PID=$!
-trap 'kill ${GPU_SMI_PID} 2>/dev/null || true' EXIT
+# PER-PROCESS GPU memory sampler. --query-gpu reports only DEVICE totals, so
+# it cannot say WHICH process holds the memory. Under `mpiexec -n 3` that is
+# exactly the open question: run_combined_staged.py builds on EVERY rank
+# before roles resolve, so the saver/spare ranks may be holding GPU
+# allocations they never use. Columns: timestamp, gpu_uuid, pid,
+# process_name, used_memory [MiB] -- one row per process per GPU. Sampled
+# 6x slower than the utilization stream (this changes only when a process
+# allocates).
+GPU_PROC_LOG=${STORE_DIR}/gpu_procs_${SLURM_JOB_ID:-manual_$(date +%s)}.csv
+nvidia-smi --query-compute-apps=timestamp,gpu_uuid,pid,process_name,used_memory \
+  --format=csv,noheader,nounits -l $((GPU_SAMPLE_SEC * 6)) > "${GPU_PROC_LOG}" &
+GPU_PROC_PID=$!
+trap 'kill ${GPU_SMI_PID} ${GPU_PROC_PID} 2>/dev/null || true' EXIT
 
 # ---- threading policy (MPI-only, no OMP) -----------------------------------
 export OMP_NUM_THREADS=1
