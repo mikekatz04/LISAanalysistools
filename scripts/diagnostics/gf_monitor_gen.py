@@ -258,14 +258,60 @@ VGB_NAMES = ["dist [kpc]", "phi0", "cos_iota", "psi", "fdot_astro_ratio"]
 # catalogue row i, fixed-leaf branch).
 VGB_F0 = None
 VGB_IDS = None
+
+MOJITO_CAT_DIR = os.path.expanduser(
+    "~/.mojito_cache/brickmarket/mojito_light_v1_0_0")
+
+
+def cat_to_sampled9(entry):
+    """Catalogue columns -> the run's 9-column GB sampling basis + an
+    amplitude self-check.
+
+    Conventions are NEVER re-derived here. The physical->sampling map is
+    ``recipe.gb_catalogue_to_sampling_basis`` (the single source of the
+    phi0 SIGN -- sampling phi0 = -TrueAnomaly mod 2pi -- the ICRS
+    ``alpha``/``sin_delta`` sky frame and the psi mod-pi wrap), and the
+    ``(dist, Mc, fdot_astro_ratio)`` split follows the run's own catalogue
+    path in ``stock/erebor/vgb.py``: ``dist = LuminosityDistance`` (Mpc ->
+    kpc), ``Mc = ChirpMassSSBFrame``, ``r = fdot_cat / fdot_gr(f0, Mc) - 1``.
+    That split reproduces the catalogue Amplitude and fdot EXACTLY (the
+    returned ``rel`` is the amplitude residual, asserted small by the run's
+    own VGB path).
+
+    Returns ``(rows9, rel_max)`` with rows9 columns
+    ``[dist kpc, f0 mHz, Mc, phi0, cos_iota, psi, alpha, sin_delta, ratio]``
+    -- the run's ``key_order`` for the gb branch.
+    """
+    from lisatools.globalfit.recipe import gb_catalogue_to_sampling_basis
+    from lisatools.globalfit.stock.erebor.transforms import (
+        McDistFdotAstroQuad, gb_amp_from_dist)
+    rows = np.atleast_2d(gb_catalogue_to_sampling_basis(entry))
+    d_kpc = np.asarray(entry["LuminosityDistance"], dtype=float).ravel() * 1e3
+    mc = np.asarray(entry["ChirpMassSSBFrame"], dtype=float).ravel()
+    f0_hz = rows[:, 1] * 1e-3
+    _, _, fdot_gr, _ = McDistFdotAstroQuad()(
+        d_kpc, f0_hz, mc, np.zeros_like(d_kpc))
+    ratio = rows[:, 2] / fdot_gr - 1.0
+    rel = float(np.abs(
+        gb_amp_from_dist(f0_hz, mc, d_kpc) / np.exp(rows[:, 0]) - 1.0).max())
+    return np.column_stack([d_kpc, rows[:, 1], mc, rows[:, 3], rows[:, 4],
+                            rows[:, 5], rows[:, 6], rows[:, 7], ratio]), rel
+
+
+VGB_TRUTH = None        # (55, 5) in the VGB sampled basis
+VGB_TRUTH_REL = None
 try:
     from lisatools.globalfit.stock.erebor.vgb import load_vgb_catalogue_file
-    _cat = load_vgb_catalogue_file(os.path.expanduser(
-        "~/.mojito_cache/brickmarket/mojito_light_v1_0_0"))
+    _cat = load_vgb_catalogue_file(MOJITO_CAT_DIR)
     _v = np.asarray(_cat["vgb"]).item()
     VGB_F0 = np.asarray(_v["GW22FrequencySSBFrame"]) * 1e3   # mHz
     VGB_IDS = [i.decode() if isinstance(i, bytes) else str(i)
                for i in _v["ID"]]
+    # VGB sampled basis = ["dist", "phi0", "cos_iota", "psi",
+    # "fdot_astro_ratio"] (VGB_SAMPLED_BASIS_DIST) = columns 0, 3, 4, 5, 8
+    # of the 9-column GB basis.
+    _r9, VGB_TRUTH_REL = cat_to_sampled9(_v)
+    VGB_TRUTH = _r9[:, [0, 3, 4, 5, 8]]
 except Exception as e:
     MISSING.append(f"VGB catalogue f0 axis unavailable locally: {e!r}")
 
@@ -281,6 +327,10 @@ else:
 fig, ax = plt.subplots(figsize=(12, 3.6))
 ax.errorbar(xs, med, yerr=[med - lo, hi - med],
             fmt="o", ms=3, color=VIOLET, ecolor=VIOLET, alpha=0.9, capsize=2)
+if VGB_TRUTH is not None:
+    ax.plot(xs, VGB_TRUTH[:, 0], "_", ms=9, mew=1.4, color=RED, ls="none",
+            label="catalogue truth")
+    ax.legend(fontsize=8)
 if VGB_F0 is not None:
     ax.set_xscale("log")
     for k in order[:3]:
@@ -328,15 +378,37 @@ for k in range(3):
     nm = VGB_IDS[leaf] if VGB_IDS else f"leaf {leaf}"
     for w in range(nwalk):
         ax[k].plot(it, vgb_c[:, w, leaf, 0], color=VIOLET, alpha=0.35, lw=0.8)
+    if VGB_TRUTH is not None:
+        ax[k].axhline(VGB_TRUTH[leaf, 0], color=RED, lw=1.4, ls=":",
+                      label="catalogue truth")
+        ax[k].legend(fontsize=7)
     _f0txt = f", f0={VGB_F0[leaf]:.3f} mHz" if VGB_F0 is not None else ""
     ax[k].set_title(f"{nm} (SNR~{snr[leaf]:.0f}{_f0txt}) dist", fontsize=9)
     ax[k].set_xlabel("iter")
 fig_b64(fig, "vgb_traces")
 
+# Pooled over all 55 leaves, so the truth is a DISTRIBUTION, not a line: a
+# red step histogram of the 55 catalogue values on the same axis (scaled to
+# the posterior's peak). fdot_astro_ratio is the exception -- every truth is
+# identically 0 (GR-chirp binaries), so a single dotted line is the honest
+# overlay there.
 fig, ax = plt.subplots(1, 4, figsize=(13, 2.8))
 for j in range(1, 5):
-    ax[j-1].hist(vgb_last[:, :, j].ravel(), bins=30, color=VIOLET, alpha=0.85)
-    ax[j-1].set_title(VGB_NAMES[j], fontsize=9)
+    a = ax[j-1]
+    n_, edges_, _ = a.hist(vgb_last[:, :, j].ravel(), bins=30, color=VIOLET,
+                           alpha=0.85)
+    if VGB_TRUTH is not None:
+        tv = VGB_TRUTH[:, j]
+        if VGB_NAMES[j] == "fdot_astro_ratio":
+            a.axvline(0.0, color=RED, lw=1.4, ls=":", label="truth = 0 (GR)")
+        else:
+            tn, te = np.histogram(tv, bins=edges_)
+            a.step(te[:-1], tn * (n_.max() / max(tn.max(), 1)), where="post",
+                   color=RED, lw=1.2, ls=":", label="catalogue truths (55)")
+            a.plot(tv, np.full(tv.shape, -0.03 * n_.max()), "|", ms=6,
+                   color=RED, alpha=0.8, clip_on=False)
+        a.legend(fontsize=7)
+    a.set_title(VGB_NAMES[j], fontsize=9)
 fig_b64(fig, "vgb_hists")
 
 # GB/VGB explorer data (interactive)
@@ -367,6 +439,67 @@ for w in range(nwalk):
         expl["vgb"].append([_x, float(1.0 / max(S[w, leaf, 0], 1e-6)),
                             float(snr[leaf])])
 expl["vgb_axis"] = "f0 [mHz] (catalogue)" if VGB_F0 is not None else "VGB leaf index"
+
+# ---- GB catalogue truth cloud for the explorer (Task 3) -------------------
+# The key science overlay: recovered (f0, log10 A) cloud vs the injected
+# catalogue in the SAME plane reads completeness / faint tail directly.
+# The 2.3 GB wdwd catalogue is opened lazily -- only the two columns needed
+# for the cloud are ever pulled into memory in full.
+# The band is the RUN's own gb band structure (sub_backend/gb/band_edges),
+# never a hard-coded pair.
+WDWD_PATH = os.path.join(MOJITO_CAT_DIR, "catalogues",
+                         "wdwd_cat_mojito_lite_processed.hdf5")
+TRUTH_CAP = 30000
+gb_truth_pts, gb_truth_meta = [], {}
+cf = f0_band = cat_gidx = None
+try:
+    _wd = h5py.File(WDWD_PATH, "r")
+    cf = _wd["Binaries"]
+    _f0_all = cf["GW22FrequencySSBFrame"][:]
+    cat_gidx = np.nonzero(
+        (_f0_all >= band_edges[0]) & (_f0_all <= band_edges[-1]))[0]
+    f0_band = _f0_all[cat_gidx] * 1e3            # mHz, in-band catalogue
+    del _f0_all
+    la_band = np.log10(np.maximum(cf["Amplitude"][:][cat_gidx], 1e-30))
+    gb_truth_meta["in_band"] = int(cat_gidx.size)
+    if expl["gb"]:
+        _rec_lo = float(min(p[1] for p in expl["gb"]))
+        cut = _rec_lo - 0.5      # 0.5 dex below the faintest recovered source
+        keep = np.nonzero(la_band >= cut)[0]
+        gb_truth_meta.update(cut=cut, rec_lo=_rec_lo, above_cut=int(keep.size))
+        if keep.size > TRUTH_CAP:
+            # tiered decimation: keep EVERY truth in the bright half (where
+            # the completeness statement lives), uniformly subsample the
+            # faint remainder so the tail's SHAPE survives at a known,
+            # quoted density.
+            o = keep[np.argsort(la_band[keep])[::-1]]
+            bright, rest = o[:TRUTH_CAP // 2], o[TRUTH_CAP // 2:]
+            sub = np.random.default_rng(0).choice(
+                rest, size=TRUTH_CAP - bright.size, replace=False)
+            sel = np.concatenate([bright, sub])
+            gb_truth_meta["bright_cut"] = float(la_band[bright].min())
+            gb_truth_meta["faint_frac"] = float(sub.size / max(rest.size, 1))
+        else:
+            sel = keep
+        gb_truth_pts = [[float(f"{f0_band[i]:.7g}"), round(float(la_band[i]), 4)]
+                        for i in sel]
+        gb_truth_meta["shown"] = len(gb_truth_pts)
+        _tm = gb_truth_meta
+        expl["truth_cap"] = (
+            f"Catalogue truths (red): {_tm['shown']:,} points shown of "
+            f"{_tm['above_cut']:,} passing the cut log10 A >= {_tm['cut']:.2f} "
+            f"(0.5 dex below the faintest recovered source, {_tm['rec_lo']:.2f}); "
+            f"{_tm['in_band']:,} catalogue sources lie in the GB band in total. "
+            + (f"Every truth brighter than log10 A = {_tm['bright_cut']:.2f} is "
+               f"kept; the fainter remainder is a uniform "
+               f"{100 * _tm['faint_frac']:.1f}% random subsample -- the faint "
+               f"tail's DENSITY is diluted by that factor, its shape is not."
+               if "bright_cut" in _tm else "No decimation was needed."))
+except Exception as e:
+    MISSING.append(f"GB injection catalogue truth overlay unavailable: {e!r}")
+
+expl["truth"] = gb_truth_pts
+expl["truth_meta"] = gb_truth_meta
 EXPL_JSON = json.dumps(expl)
 
 # zoomable dist-f0 posterior cloud: every sample (last iters x walkers x leaf)
@@ -375,8 +508,140 @@ vgb_post = [[float(_xs_axis[leaf]), float(v)]
             for leaf in range(55) for v in vgb_last[:, leaf, 0]]
 VGB_POST_JSON = json.dumps({
     "pts": vgb_post,
+    "truth": ([[float(_xs_axis[leaf]), float(VGB_TRUTH[leaf, 0])]
+               for leaf in range(55)] if VGB_TRUTH is not None else []),
     "xlab": "catalogue f0 [mHz]" if VGB_F0 is not None else "VGB leaf index",
 })
+
+
+# ---- per-source posterior panels (Tasks 2 + 4) ---------------------------
+def col_decimals(v):
+    """Decimals giving ~5 significant digits OF THE COLUMN'S OWN SPREAD.
+
+    A flat 5-significant-digit round on the absolute value would quantize a
+    narrow posterior out of existence -- the highest-f GB sits at 20.3812
+    mHz with a 0.002 mHz spread, which 5 significant digits collapses into
+    two spikes. Precision therefore tracks the spread, not the magnitude.
+    """
+    a = np.asarray(v, dtype=float)
+    a = a[np.isfinite(a)]
+    if not a.size:
+        return 5
+    span = float(a.max() - a.min())
+    if span <= 0:
+        span = float(np.abs(a).max()) or 1.0
+    return int(np.clip(np.ceil(-np.log10(span)) + 4, 0, 12))
+
+
+def jnum(x, d):
+    """JSON-safe rounded float (NaN/inf -> None)."""
+    v = float(x)
+    return None if not np.isfinite(v) else round(v, d)
+
+
+def src_blob(label, sub, samples, truth, names, note="", note_bad=False):
+    """One entry of the shared small-multiple-histogram blob."""
+    dec = [col_decimals(samples[:, j]) for j in range(samples.shape[1])]
+    return {
+        "label": label, "sub": sub, "note": note, "bad": bool(note_bad),
+        "samples": [[jnum(v, dec[j]) for v in samples[:, j]]
+                    for j in range(samples.shape[1])],
+        "truth": [None if truth is None else jnum(truth[j], dec[j])
+                  for j in range(len(names))],
+    }
+
+
+# Task 2: every VGB, SNR-descending in the selector.
+VGB1 = {"params": VGB_NAMES, "src": []}
+for leaf in order:
+    nm = VGB_IDS[leaf] if VGB_IDS else f"leaf {leaf}"
+    _f0 = VGB_F0[leaf] if VGB_F0 is not None else float("nan")
+    VGB1["src"].append(src_blob(
+        f"{nm} - {_f0:.4f} mHz - SNR~{snr[leaf]:.0f}",
+        f"leaf {leaf} - {vgb_last.shape[0]} samples (last "
+        f"{min(3, NIT)} stored iterations x {nwalk} walkers)",
+        vgb_last[:, leaf, :],
+        None if VGB_TRUTH is None else VGB_TRUTH[leaf], VGB_NAMES))
+VGB1_JSON = json.dumps(VGB1)
+
+# Task 4: the 3 highest-frequency RECOVERED GBs.
+# Tobs from the stored domain settings (WDMSettings args = Nt, Nf, dt) ->
+# the FD bin width that sets both the cluster window and the Delta-f0 unit.
+TOBS = 3 * 30 * 86400.0
+try:
+    _a = dict(f["global_fit/domain_settings/args"].attrs)
+    TOBS = float(_a["0"]) * float(_a["1"]) * float(_a["2"])
+except Exception as e:
+    MISSING.append(f"Tobs not readable from domain_settings ({e!r}); "
+                   "using 90 d for the f0 bin width.")
+DF_MHZ = 1e3 / TOBS                       # one FD bin, in mHz
+CLUSTER_BINS, MATCH_BINS = 20.0, 100.0
+GB_NAMES = ["dist [kpc]", "f0 [mHz]", "Mc [Msol]", "phi0", "cos_iota",
+            "psi", "alpha", "sin_delta", "fdot_astro_ratio"]
+GB1 = {"params": GB_NAMES, "src": []}
+gb1_meta = {}
+_rows = sorted(((float(gb_chain_cold[w, i, 1]), w, i) for w in range(nwalk)
+                for i in np.nonzero(gb_alive_last[w])[0]), key=lambda r: -r[0])
+if _rows:
+    clusters, cur = [], [_rows[0]]
+    for r in _rows[1:]:
+        if cur[-1][0] - r[0] <= CLUSTER_BINS * DF_MHZ:
+            cur.append(r)
+        else:
+            clusters.append(cur); cur = [r]
+    clusters.append(cur)
+    # A "recovered source" must live in at least 3 of the 24 cold walkers;
+    # 1-2-walker clusters at the top of the band are transient births, not
+    # sources (their count is quoted in the caption -- it is itself a
+    # readout of high-f birth churn).
+    solid = [c for c in clusters if len({x[1] for x in c}) >= 3]
+    gb1_meta["n_clusters"] = len(clusters)
+    gb1_meta["n_solid"] = len(solid)
+    gb1_meta["transient_above"] = (
+        len([c for c in clusters
+             if c[0][0] > solid[0][0][0] and len({x[1] for x in c}) < 3])
+        if solid else len(clusters))
+    for c in solid[:3]:
+        P = np.array([gb_chain_cold[w, i] for _, w, i in c])
+        f0_med = float(np.median(P[:, 1]))
+        truth, note, bad = None, "", False
+        if f0_band is not None and f0_band.size:
+            j = int(np.argmin(np.abs(f0_band - f0_med)))
+            d_bins = (f0_med - f0_band[j]) / DF_MHZ
+            if abs(d_bins) <= MATCH_BINS:
+                gidx = int(cat_gidx[j])   # row in the full 15.5M catalogue
+                entry = {k: np.atleast_1d(float(cf[k][gidx]))
+                         for k in ("Amplitude", "GW22FrequencySSBFrame",
+                                   "GW22FrequencyDerivativeSourceFrame",
+                                   "TrueAnomaly", "InclinationAngle",
+                                   "PolarisationAngle", "RightAscension",
+                                   "Declination", "LuminosityDistance",
+                                   "ChirpMassSSBFrame")}
+                truth = cat_to_sampled9(entry)[0][0]
+                from lisatools.globalfit.stock.erebor.transforms import (
+                    gb_amp_from_dist as _amp)
+                a_rec = float(np.median(_amp(P[:, 1] * 1e-3, P[:, 2],
+                                            np.maximum(P[:, 0], 1e-6))))
+                a_cat = float(entry["Amplitude"][0])
+                n_near = int(np.sum(np.abs(f0_band - f0_med)
+                                    <= MATCH_BINS * DF_MHZ))
+                note = (f"catalogue match ID {int(cf['ID'][gidx])}: "
+                        f"df0 = {d_bins:+.1f} bins ({(f0_med - f0_band[j])*1e3:+.3f} "
+                        f"uHz), A_rec/A_cat = {a_rec / a_cat:.2f}, "
+                        f"{n_near} catalogue source(s) within "
+                        f"{MATCH_BINS:.0f} bins")
+            else:
+                note = (f"NO catalogue match within {MATCH_BINS:.0f} bins "
+                        f"(nearest is {d_bins:+.0f} bins away) - this "
+                        f"recovery has no injected counterpart")
+                bad = True
+        GB1["src"].append(src_blob(
+            f"GB @ {f0_med:.5f} mHz (n={len(c)} samples, "
+            f"{len({x[1] for x in c})} walkers)",
+            f"cold-chain iteration {NIT - 1}; cluster window "
+            f"{CLUSTER_BINS:.0f} FD bins = {CLUSTER_BINS * DF_MHZ * 1e3:.2f} uHz",
+            P, truth, GB_NAMES, note, bad))
+GB1_JSON = json.dumps(GB1)
 
 # ---- 8. efficiency: proposals/s + wall per propose (GB_TIMING records) ----
 TIM_RE = re.compile(
@@ -566,34 +831,58 @@ if RJ_STATS:
 
 alert = """
 <div class="alert">
-<strong>JOB 196 &mdash; the de-sync batch DELIVERED; one hog left standing.</strong>
-The 05:49 record (first propose on the new code, SYNC-attributed) collapses everything the
-de-sync fixes targeted: <strong>rj_getll 560&rarr;35 s (16&times;), rj_step 702&rarr;45 s,
-in-model get_add_ll 192&rarr;7.6 s (25&times;), rj_fill 139&rarr;6 s</strong> &mdash; the
-propose <em>excluding centers</em> went ~1,450&rarr;537 s (2.7&times;, with SYNC=1 overhead
-still on). The remaining hog: <strong>rj_fstat_centers 1,951 s = 78% of the propose</strong>
-&mdash; and it jumped 374&rarr;1,953 s BETWEEN two proposes on identical code (job 195,
-caps/cells/rounds all flat), a data-dependent 5&times; growth running single-device (dev1
-79% / dev0 3% through that phase, memory only 50 GB). The countable-only center rewrite +
-per-unit [FSTAT_CTR] diagnostics (in flight) target exactly this. New fill sub-spans:
-gathers = 347 of 419 s buffer fill (fill_gather_psd 264 + data 83) &mdash; the device-side
-gather rewrite (in flight) attacks it. WATCH #1: cell-ll credit excess touched COLD (60/rep
-temp 0 band 13 vs 0.05 allowance; predates the restart &mdash; job 195 had 9&ndash;11/rep
-cold hits &mdash; a growing state-driven trend, not a new-code regression, but now the top
-correctness watch). WATCH #2: in-model infomat cold acceptance 0.60 at jump 0.4 &mdash;
-still above the 0.15&ndash;0.4 target; notch GB_JUMP_FACTOR to 0.6&ndash;0.8 next restart.
-Occupancy band-shutoff lines: none yet (counters need ~5 proposes post-restart; expected
-~4-5 h in). [SAVE] steady ~62 s. REMINDER: this record was the SYNC=1 readout &mdash;
-remove the GB_PROP_TIMING_SYNC export at the next restart.
+<strong>JOB 197 &mdash; the perf mega-batch landed: order-of-magnitude collapses across the
+board, centers is the last lever.</strong>
+The 07:14 restart put the whole batch in flight at once and every targeted span fell by an
+order of magnitude: <strong>removal propose 658&ndash;843 &rarr; 75 s total</strong>;
+<strong>search propose EXCLUDING centers 537 &rarr; 88 s</strong>; <strong>buffer fills
+430 &rarr; 11.6 s</strong> (buffill_resid_psd 419 &rarr; 1.2 s &mdash; device-resident
+router + device-side gathers); <strong>temper_buffer 388 &rarr; 8.6 s (45&times;)</strong>;
+proposal tables / infomat_kernel 42&ndash;78 &rarr; 9.3 s (the exact per-block SIGHET
+info-matrix route is live). Net: the gb iteration wall goes from 53&ndash;77 min to
+<strong>~10&ndash;17 min</strong> depending on which centers state rules &mdash; a ~4&ndash;5&times;
+iteration-level speedup.
+<br><br>
+<strong>CENTERS &mdash; hypothesis confirmed, one mystery left, now cleanly measured.</strong>
+The new [FSTAT_CTR] census proved the reserve-row hypothesis: of 636,697 unit rows,
+<strong>351,545 (55%) were at-cap reserve</strong>, now excluded by the countable-only
+precompute (285k rows actually computed). The lookup-miss fallback fired for 19,506 rows in
+one propose with zero errors &mdash; the same-commit fallback constraint proved necessary
+immediately. The remaining mystery: per-row cost has <strong>TWO STATES</strong> &mdash;
+468.7 s for 285k rows (1.64 ms/row) in the first propose vs 109.2 s for 346k rows
+(0.31 ms/row) in the second. That is the same ~5&times; oscillation seen as 374 vs 1,953 s in
+jobs 195/196. Centers is 92% of the propose in the slow state and ~2&times; everything else
+in the fast state.
+<br><br>
+<strong>SNR-truncated births work:</strong> clamp-killed scored births 59% &rarr;
+<strong>2.9%</strong> (14,852 of 506,510), viable 97%; death flow stays healthy (removal
+deaths acc 16&ndash;20%, fstat-move deaths 17% &mdash; no starvation from the
+truncation-support rule). Absolute cold accepted births are ~unchanged at 76/propose: the
+lever removed wasted kernel work, not acceptance. <strong>Per-class repeats are live</strong>
+(search log: <code>newborn 3145@200 / mature 4409@25</code>; removal pools 100% mature @25
+as designed).
+<br><br>
+<strong>SURPRISE &mdash; infomat cold acceptance ROSE at a BIGGER jump:</strong> 0.71&ndash;0.80
+cold (0.83&ndash;0.92 all-T) at jump_factor 0.6, vs 0.60 at 0.4. Read that as the per-block
+EXACT information matrices (misindex fixed) massively improving proposal adaptation.
+Recommendation: notch <code>GB_JUMP_FACTOR</code> to <strong>~1.0&ndash;1.5</strong> next
+restart, target 0.15&ndash;0.4. GPU balance improved with the batch: job-197 means dev0 26% /
+dev1 62% (was 3% / 79%), peaks 69/43 GB of 96.
+<br><br>
+<strong>WATCHES.</strong> Cold cell-ll credit excess is still present but smaller (worst
+temp-0: 20.1/rep on band 18 at 25 reps, vs 60/rep pre-batch); hot-rung excesses persist
+(parked per user). Band-shutoff lines: none yet &mdash; the in-memory counters reset at the
+restart. Cold lnL max 52.583M and climbing, walker spread ~39.7k still wide (the cap-opening
+surge), h5 iteration 19, [SAVE] steady ~60 s.
 </div>"""
 
 missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
 wanted_next = """
 <li>The sbatch stdout log (<code>gf3mo_&lt;jobid&gt;.log</code>) — carries the
 <code>[MAXLOGL]</code> / <code>[BENCH]</code> / stage-banner lines (per-iteration wall).</li>
-<li>VGB fixed params (f0, sky) or the catalogue slice — unlocks the true frequency axis
-+ truth overlays in the explorer below.</li>
-<li>GB injection catalogue (f0, dist) for the truth overlay once GB births land.</li>"""
+<li>Per-iteration <code>[FSTAT_CTR]</code> census lines across a longer stretch — the
+two-state per-row center cost (1.64 vs 0.31 ms/row) needs several proposes to correlate
+against cell counts / caps.</li>"""
 
 html = f"""<title>GF 3-Month Run Monitor</title>
 <style>
@@ -644,6 +933,10 @@ button.armed {{ border-color:var(--amber); color:var(--amber); }}
   border-radius:3px; font:11px ui-monospace,monospace; padding:2px 4px; width:86px; }}
 .viewctl input[type=text]:focus {{ border-color:var(--cyan); outline:none; }}
 .viewctl input[type=range] {{ width:110px; accent-color:var(--cyan); }}
+.viewctl select {{ background:var(--bg); color:var(--fg); border:1px solid var(--line);
+  border-radius:3px; font:11px ui-monospace,monospace; padding:2px 4px; max-width:520px; }}
+.viewctl select:focus {{ border-color:var(--cyan); outline:none; }}
+button.armed.truth {{ border-color:var(--red); color:var(--red); }}
 ul {{ color:var(--dim); font-size:13px; }}
 </style>
 <header>
@@ -708,6 +1001,28 @@ per-band progressive leaf caps (D/2 gate); bands marked RED have had their RJ bi
 off by the high-frequency barren-band rule (GB_RJ_BAND_SHUTOFF_*: &gt;10 mHz default, 5
 consecutive proposes with zero accepted births — deaths and in-model continue; each
 shutoff is also an INFO line in the log).</div></div>
+<div class="panel">
+<div class="btnrow viewctl">
+  <label>source <select id="gb1_sel"></select></label>
+  <span class="caption" style="align-self:center">posteriors of the 3 highest-frequency
+  recovered GBs</span>
+</div>
+<canvas id="gb1" style="height:330px"></canvas>
+<div class="caption" id="gb1_cap"></div>
+<div class="caption">Sources are clustered out of the last stored cold-chain iteration by
+f0 ({CLUSTER_BINS:.0f} FD bins = {CLUSTER_BINS * DF_MHZ * 1e3:.2f} &micro;Hz link window,
+1/T<sub>obs</sub> = {DF_MHZ * 1e3:.3f} &micro;Hz); a cluster counts as a SOURCE only if it
+appears in &ge;3 of the {nwalk} cold walkers. {gb1_meta.get("n_solid", 0)} of
+{gb1_meta.get("n_clusters", 0)} clusters clear that bar, and
+{gb1_meta.get("transient_above", 0)} single-/two-walker clusters sit ABOVE the highest
+one shown &mdash; transient high-f births, not recoveries. Truth = the nearest catalogue
+source in f0 within {MATCH_BINS:.0f} bins, mapped through the same
+<code>gb_catalogue_to_sampling_basis</code> route as the VGBs. CAVEAT on
+(dist, Mc, fdot_astro_ratio): the likelihood constrains only the combinations
+<code>A(dist, Mc, f0)</code> and <code>fdot_gr(f0, Mc)&middot;(1+r)</code>, so the truth
+shown is the catalogue's own physical split &mdash; a posterior displaced ALONG that
+degeneracy is not an error.</div>
+</div>
 </section>
 
 <section id="fstat"><h2>Last F-stat Fit</h2>
@@ -743,7 +1058,25 @@ first refit against the GB-subtracted residual.</div></div>
 <div class="panel">{img("vgb_traces")}
 <div class="caption">Distance traces for the three loudest VGBs, all 24 walkers.</div></div>
 <div class="panel">{img("vgb_hists")}
-<div class="caption">Pooled posteriors of the remaining sampled parameters.</div></div>
+<div class="caption">Pooled posteriors of the remaining sampled parameters, all 55 leaves
+together &mdash; so the truth overlay is a DISTRIBUTION, not a line: the dotted red step
+(plus the rug under the axis) is the histogram of the 55 catalogue truths on the same bins,
+rescaled to the posterior peak. <code>fdot_astro_ratio</code> is the exception: every
+catalogue VGB is a pure GR chirper, so its truth is the single dotted line at exactly 0.
+Conventions come from the run's own code &mdash;
+<code>recipe.gb_catalogue_to_sampling_basis</code> (sampling
+<code>phi0 = -TrueAnomaly mod 2&pi;</code>, <code>psi mod &pi;</code>) plus the distance-basis
+split in <code>stock/erebor/vgb.py</code>; the (f0, Mc, dist) &rarr; A round trip reproduces
+the catalogue Amplitude to {("%.1e" % VGB_TRUTH_REL) if VGB_TRUTH_REL is not None else "n/a"}
+relative.</div></div>
+<div class="panel">
+<div class="btnrow viewctl">
+  <label>vgb <select id="vgb1_sel"></select></label>
+  <span class="caption" style="align-self:center">single-VGB posterior, SNR-ordered</span>
+</div>
+<canvas id="vgb1" style="height:260px"></canvas>
+<div class="caption" id="vgb1_cap"></div>
+</div>
 </section>
 
 <section id="explorer"><h2>Amplitude vs Frequency Explorer (log10 A from sampled dist, f0, Mc)</h2>
@@ -751,6 +1084,7 @@ first refit against the GB-subtracted residual.</div></div>
 <div class="btnrow">
   <button id="btn_all">full band</button>
   <button id="btn_top3">3 highest-frequency sources</button>
+  <button id="btn_truth">show catalogue truths</button>
   <button id="btn_reset">reset zoom</button>
   <span class="caption" style="align-self:center">drag = pan &middot; wheel/pinch = zoom</span>
 </div>
@@ -768,27 +1102,33 @@ first refit against the GB-subtracted residual.</div></div>
 
 <section id="timing"><h2>Timing + Memory</h2>
 {rj_kpis}
-<div class="caption">Direct-batch RJ&rarr;in-model throughput, job 196 (first record on
-the de-sync code, SYNC-attributed): 86,974 cells, 3 rj batches, 4,517 survivors polished
-in 2 chunks at 16,384 buffer slots. The de-sync batch collapsed the dispatch taxes
-(rj_getll 16&times;, get_add_ll 25&times;, rj_fill 23&times;); the propose is now
-<strong>78% rj_fstat_centers</strong> (1,951 s, single-device) + fills (420 s, 83%
-gathers) &mdash; both have fixes in flight.</div>
+<div class="caption">Direct-batch RJ&rarr;in-model throughput, job 197 (the 07:14 restart on
+the full perf mega-batch; its records start after line 12405 of globalfit_run.log, job 196
+is everything before). The batch collapsed every remaining dispatch/fill tax: removal
+propose 658&ndash;843&rarr;75 s, search propose excluding centers 537&rarr;88 s, buffer fills
+430&rarr;11.6 s (buffill_resid_psd 419&rarr;1.2 s), temper_buffer 388&rarr;8.6 s (45&times;),
+proposal tables/infomat_kernel 42&ndash;78&rarr;9.3 s. What is left is
+<strong>rj_fstat_centers</strong>, now instrumented by the [FSTAT_CTR] census: 55% of the
+636,697 unit rows were at-cap reserve and are no longer computed, but the per-row cost
+oscillates between two states (1.64 ms/row for 285k rows vs 0.31 ms/row for 346k rows) &mdash;
+the last big lever.</div>
 <div class="panel">{img("rj_breakdown", "rj propose breakdown")}
-<div class="caption">Where the rj propose spends its wall time (latest SYNC-ATTRIBUTED
-record: every mark carries exactly its own kernel time). Post de-sync, rj_fstat_centers
-dominates outright; buffer fills (gather-bound) are second; the old rj_getll/rj_step
-dispatch taxes are gone; statistics marks negligible.</div></div>
+<div class="caption">Where the rj propose spends its wall time (SYNC-ATTRIBUTED record:
+every mark carries exactly its own kernel time). Post mega-batch there is one bar left
+standing: <strong>rj_fstat_centers</strong> &mdash; 92% of the propose in its slow state,
+still ~2&times; everything else combined in its fast state. Fills, temper_buffer, the
+proposal tables and the old rj_getll/rj_step dispatch taxes have all collapsed into the
+noise floor of this chart.</div></div>
 <div class="panel">{img("mem_telemetry", "device memory telemetry")}
 <div class="caption">Per-device used memory from the in-run memGetInfo telemetry.
 Flat sawtooth = the bounded-buffer behavior; a monotonic ramp here is the leak alarm.</div></div>
 <div class="panel">{img("timing_moves", "per-move timing")}</div>
 <div class="panel">{img("gpu_util", "gpu telemetry")}
-<div class="caption">nvidia-smi utilization + memory, latest three jobs. Job 196's first
-propose: dev1 79% mean / dev0 3% &mdash; a NEW single-device signature, but this one is the
-F-stat center precompute phase (78% of the propose) pinning dev1 with real work while dev0
-idles. Once the countable-only center rewrite lands, re-read this panel; the de-synced
-remainder of the propose should show a much more balanced, higher-duty profile.</div></div>
+<div class="caption">nvidia-smi utilization + memory, latest three jobs &mdash; the solid
+traces are now job 197, the post-mega-batch run. The single-device signature is GONE:
+job-197 means are <strong>dev0 26% / dev1 62%</strong> (job 196 read 3% / 79%), with peaks
+of 69 and 43 GB out of 96. The residual imbalance is the F-stat center precompute, the one
+phase the batch did not de-serialize.</div></div>
 <div class="missing">Per-iteration wall times ([MAXLOGL]/[BENCH]) go to sbatch stdout,
 which was not in this zip — include <code>gf3mo_&lt;jobid&gt;.log</code> next time. [SAVE]
 question ANSWERED: 65.2 s sync write vs ~56 min iteration = ~2%, below the 5–10% mpiexec
@@ -803,6 +1143,92 @@ threshold — single-process stands at 3 months; revisit with the 23-mo store si
 <script>
 const DATA = {EXPL_JSON};
 const VPOST = {VGB_POST_JSON};
+const VGB1 = {VGB1_JSON};
+const GB1 = {GB1_JSON};
+// Shared single-source posterior panel: a <select> of sources driving a
+// canvas of one histogram per sampled parameter, each with the catalogue
+// truth as a dotted RED vertical line (the file-wide truth convention).
+// Used by the VGB panel (5 params) and the GB panel (9); every color is
+// read from the CSS custom properties AT DRAW TIME, so the panel follows a
+// light/dark theme switch without regenerating anything.
+function srcPanel(px, blob) {{
+  const cv = document.getElementById(px), sel = document.getElementById(px + "_sel"),
+        cap = document.getElementById(px + "_cap");
+  if (!cv || !sel) return;
+  if (!blob.src.length) {{
+    cap.textContent = "no sources available in this snapshot"; return;
+  }}
+  blob.src.forEach((s, i) => {{
+    const o = document.createElement("option");
+    o.value = i; o.textContent = s.label; sel.appendChild(o);
+  }});
+  const NB = 24, dpr = window.devicePixelRatio || 1;
+  const fmt = v => (Math.abs(v) >= 1e4 || (v !== 0 && Math.abs(v) < 1e-3))
+    ? v.toExponential(1) : (+v).toPrecision(4);
+  function draw() {{
+    const S = blob.src[+sel.value || 0];
+    const w = cv.clientWidth, h = cv.clientHeight;
+    cv.width = w * dpr; cv.height = h * dpr;
+    const g = cv.getContext("2d"); g.scale(dpr, dpr);
+    const css = getComputedStyle(document.documentElement);
+    const C = n => css.getPropertyValue(n).trim();
+    g.fillStyle = C("--panel"); g.fillRect(0, 0, w, h);
+    g.font = "10px ui-monospace,monospace";
+    const n = blob.params.length;
+    const cols = Math.min(5, n), rows = Math.ceil(n / cols);
+    const cw = w / cols, chh = h / rows;
+    for (let k = 0; k < n; k++) {{
+      const gx = (k % cols) * cw, gy = Math.floor(k / cols) * chh;
+      const x0 = gx + 8, x1 = gx + cw - 8, y0 = gy + 17, y1 = gy + chh - 24;
+      const v = S.samples[k].filter(a => a !== null);
+      if (!v.length) continue;
+      let lo = Math.min(...v), hi = Math.max(...v);
+      const t = S.truth[k];
+      const hasT = (t !== null && isFinite(t));
+      if (hasT) {{ lo = Math.min(lo, t); hi = Math.max(hi, t); }}
+      if (!(hi > lo)) hi = lo + Math.max(Math.abs(lo) * 1e-6, 1e-12);
+      const pd = (hi - lo) * 0.06; lo -= pd; hi += pd;
+      const cnt = new Array(NB).fill(0);
+      for (const a of v)
+        cnt[Math.min(NB - 1, Math.floor((a - lo) / (hi - lo) * NB))]++;
+      const mx = Math.max(...cnt, 1);
+      g.fillStyle = C("--violet");
+      for (let b = 0; b < NB; b++) {{
+        if (!cnt[b]) continue;
+        const bw = (x1 - x0) / NB, bh = (y1 - y0) * cnt[b] / mx;
+        g.fillRect(x0 + bw * b, y1 - bh, Math.max(bw - 0.6, 0.6), bh);
+      }}
+      g.strokeStyle = C("--line"); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x0, y1); g.lineTo(x1, y1); g.stroke();
+      if (hasT) {{
+        const tx = x0 + (x1 - x0) * (t - lo) / (hi - lo);
+        g.strokeStyle = C("--red"); g.lineWidth = 1.5; g.setLineDash([3, 2]);
+        g.beginPath(); g.moveTo(tx, y0 - 3); g.lineTo(tx, y1); g.stroke();
+        g.setLineDash([]); g.lineWidth = 1;
+      }}
+      g.fillStyle = C("--fg"); g.fillText(blob.params[k], gx + 8, gy + 11);
+      g.fillStyle = C("--dim");
+      g.fillText(fmt(lo), x0, y1 + 11);
+      const rt = fmt(hi);
+      g.fillText(rt, Math.max(x0, x1 - g.measureText(rt).width), y1 + 11);
+      if (hasT) {{
+        g.fillStyle = C("--red");
+        const tt = "truth " + fmt(t);
+        g.fillText(tt, x0 + Math.max(0, (x1 - x0 - g.measureText(tt).width) / 2),
+                   y1 + 21);
+      }}
+    }}
+    const note = S.note
+      ? ` &middot; <span style="color:var(${{S.bad ? "--red" : "--fg"}})">${{S.note}}</span>`
+      : "";
+    cap.innerHTML = S.sub + note;
+  }}
+  sel.onchange = draw;
+  new ResizeObserver(draw).observe(cv);
+  draw();
+}}
+srcPanel("vgb1", VGB1);
+srcPanel("gb1", GB1);
 // Shared view controls: numeric center (cx, cy) + log-scale width/height
 // sliders, all around a FIXED center -- plus a click-to-set-center mode.
 // api: get() -> [X0,X1,Y0,Y1]; set(x0,x1,y0,y1) (must redraw); fullW/fullH
@@ -921,6 +1347,13 @@ function viewCtl(px, cv, api) {{
       g.globalAlpha = 0.45;
       g.beginPath(); g.arc(x, y, 1.4, 0, 6.29); g.fill();
     }}
+    // catalogue truth distance per leaf (red, the file-wide truth color)
+    g.globalAlpha = 1; g.fillStyle = C("--red");
+    for (const p of (VPOST.truth || [])) {{
+      const x = sx(p[0]), y = sy(p[1]);
+      if (x < ml || x > w - mr || y < mt || y > h - mb) continue;
+      g.beginPath(); g.arc(x, y, 2.6, 0, 6.29); g.fill();
+    }}
     g.globalAlpha = 1;
     syncCtl();
   }}
@@ -958,9 +1391,16 @@ function viewCtl(px, cv, api) {{
   // points: [x, y(=1/d), tag]
   const pts = hasGB ? DATA.gb : DATA.vgb;
   const xlab = hasGB ? "f0 [mHz]" : (DATA.vgb_axis || "VGB leaf index");
-  cap.textContent = (hasGB
-    ? `GB samples: ${{DATA.gb.length}} alive-source rows (last iteration, all cold walkers; y = log10 amplitude from (dist, f0, Mc)). Truth overlay pending catalogue in a future snapshot.`
+  const TRUTH = DATA.truth || [];
+  let showT = false;
+  const baseCap = (hasGB
+    ? `GB samples: ${{DATA.gb.length}} alive-source rows (last iteration, all cold walkers; y = log10 amplitude from (dist, f0, Mc)).`
     : `No GB sources alive yet - showing the 55 VGBs (24 walker samples each) as 1/dist vs leaf index. GB samples take over automatically once births land.`);
+  const setCap = () => {{
+    cap.textContent = baseCap + (TRUTH.length
+      ? (showT ? " " + (DATA.truth_cap || "") : ` ${{TRUTH.length}} catalogue truth points available - press "show catalogue truths".`)
+      : " No catalogue truth overlay in this snapshot.");
+  }};
   let X0, X1, Y0, Y1;
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
   const pad = (a, b) => [(a - (b - a) * 0.05) , (b + (b - a) * 0.05)];
@@ -992,6 +1432,15 @@ function viewCtl(px, cv, api) {{
     g.fillText(xlab, w / 2 - 40, h - 2);
     g.save(); g.translate(10, h / 2); g.rotate(-Math.PI / 2);
     g.fillText(hasGB ? "log10 A" : "1 / dist [1/kpc]", -30, 0); g.restore();
+    // truths UNDER the recovered cloud so the recoveries stay readable
+    if (showT) {{
+      g.fillStyle = C("--red"); g.globalAlpha = 0.5;
+      for (const p of TRUTH) {{
+        const x = sx(p[0]), y = sy(p[1]);
+        if (x < ml || x > w - mr || y < mt || y > h - mb) continue;
+        g.fillRect(x - 0.7, y - 0.7, 1.4, 1.4);
+      }}
+    }}
     const col = hasGB ? C("--green") : C("--violet");
     for (const p of pts) {{
       const x = sx(p[0]), y = sy(p[1]);
@@ -1022,6 +1471,15 @@ function viewCtl(px, cv, api) {{
   }}, {{ passive: false }});
   document.getElementById("btn_all").onclick = () => {{ full(); draw(); }};
   document.getElementById("btn_reset").onclick = () => {{ full(); draw(); }};
+  const bt = document.getElementById("btn_truth");
+  if (!TRUTH.length) bt.disabled = true;
+  bt.onclick = () => {{
+    showT = !showT;
+    bt.classList.toggle("armed", showT); bt.classList.toggle("truth", showT);
+    bt.textContent = showT ? "hide catalogue truths" : "show catalogue truths";
+    setCap(); draw();
+  }};
+  setCap();
   document.getElementById("btn_top3").onclick = () => {{
     const srt = [...pts].sort((a, b) => b[0] - a[0]);
     const top = srt.slice(0, Math.min(3 * 24, srt.length));
