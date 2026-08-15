@@ -3160,9 +3160,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     }
                 )
                 n_surv = int(len(merged["specials"]))
-                for _st in range(0, n_surv, n_slots):
+                # In-model chunk width cap (2026-08-14, job-194 forensics):
+                # a progressive leaf-cap rise (1 -> 2) unlocked the removal
+                # move's first big survivor pool and the single 7,532-source
+                # in-model block that followed built a sig-het in-model
+                # reference large enough to push a 96 GB device to ~84%
+                # (the sig-het stash is single-device) -- the restart-era
+                # OOM signature. Healthy history is blocks <= ~2,300
+                # sources; cap the chunk width independently of the buffer
+                # capacity so reference size stays bounded as caps rise.
+                _im_w = min(
+                    n_slots,
+                    max(1, int(os.environ.get("GB_RJ_INMODEL_CHUNK", "4096"))),
+                )
+                for _st in range(0, n_surv, _im_w):
                     chunk = {
-                        k: v[_st:_st + n_slots] for k, v in merged.items()
+                        k: v[_st:_st + _im_w] for k, v in merged.items()
                     }
                     buffer_obj = _rebind(chunk["specials"])
                     # RJ-time slot indices are stale after the rebind.
