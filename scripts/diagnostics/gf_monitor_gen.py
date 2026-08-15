@@ -66,6 +66,30 @@ psd_c = sub["psd/chain"][:NIT]                      # (it, 12, 24, 1, 2)
 gal_c = sub["galfor/chain"][:NIT]                   # (it, 12, 24, 1, 5)
 vgb_c = sub["vgb/chain"][:NIT, 0]                   # (it, 24, 55, 5)
 vgb_hh = sub["vgb/h_h"][:NIT]                       # (it, 24, 55)
+# TRAILING INCOMPLETE SUB-BACKEND ROWS (2026-08-15). The main backend and a
+# sub-backend are not flushed atomically: a snapshot can hold a row where
+# log_like / inds / chain are written but sub_backend/vgb/* is still all
+# zeros. Taken at face value that row makes EVERY VGB look like it has zero
+# amplitude -- it is what made HM Cnc, the loudest VGB in the catalogue,
+# render with SNR 0. Trim the VGB arrays to their last row that carries
+# actual signal; GB panels keep the full NIT because their datasets are
+# complete. (Leading rows are legitimately NaN -- the VGB branch only starts
+# sampling at stage 2 -- so test for "has any nonzero finite value".)
+def _last_written(a):
+    for i in range(a.shape[0] - 1, -1, -1):
+        v = a[i]
+        if np.isfinite(v).any() and np.abs(np.nan_to_num(v)).sum() > 0:
+            return i + 1
+    return 0
+
+VGB_NIT = min(_last_written(vgb_hh), _last_written(vgb_c))
+if VGB_NIT < NIT:
+    MISSING.append(
+        f"VGB sub-backend written through iteration {VGB_NIT - 1} while the "
+        f"main backend reached {NIT - 1} (snapshot caught mid-flush); VGB "
+        f"panels use the last COMPLETE row.")
+    vgb_c = vgb_c[:VGB_NIT]
+    vgb_hh = vgb_hh[:VGB_NIT]
 gb_inds = g["inds/gb"][:NIT, 0, 0]                  # (it, 24, 10000)
 gb_chain_cold = g["chain/gb"][NIT-1, 0, 0]          # (24, 10000, 9) last iter
 gb_alive_last = g["inds/gb"][NIT-1, 0, 0]           # (24, 10000)
@@ -715,7 +739,7 @@ except Exception as e:
     MISSING.append(
         f"data/template/residual panels unavailable: {type(e).__name__}: {e}")
 
-vgb_last = vgb_c[-min(3, NIT):].reshape(-1, 55, 5)   # (S, 55, 5)
+vgb_last = vgb_c[-min(3, VGB_NIT):].reshape(-1, 55, 5)   # (S, 55, 5)
 snr = np.sqrt(np.clip(np.nanmean(vgb_hh[-1], axis=0), 0, None))  # (55,)
 order = np.argsort(snr)[::-1]
 med = np.median(vgb_last[:, :, 0], axis=0); lo = np.percentile(vgb_last[:, :, 0], 16, axis=0)
@@ -743,7 +767,7 @@ fig_b64(fig, "vgb_dist")
 # SNR evolution over iterations: noise-weighted sqrt(<h|h>) rises as the
 # galactic foreground is fit/subtracted down -- the source-side twin of
 # the PSD decline-watch panel.
-snr_it = np.sqrt(np.clip(np.nanmean(vgb_hh[:NIT], axis=1), 0, None))  # (it, 55)
+snr_it = np.sqrt(np.clip(np.nanmean(vgb_hh[:VGB_NIT], axis=1), 0, None))  # (it, 55)
 import matplotlib.colors as _mc
 _vramp = _mc.LinearSegmentedColormap.from_list(
     "violet", ["#E3D9FF", "#9B7BFF", "#4A2FA8"])
@@ -757,10 +781,10 @@ else:
     _xs = np.arange(55)
 # markers only (user request 2026-08-15): connecting lines between
 # unrelated VGBs on a frequency axis implied a spectrum that isn't there
-for k in range(NIT):
+for k in range(VGB_NIT):
     ax.plot(_xs, snr_it[k][_of], "o", ms=3.0, ls="none",
-            color=_vramp(k / max(NIT - 1, 1)), alpha=0.85,
-            label=(f"iter {k}" if k in (0, NIT - 1) else None))
+            color=_vramp(k / max(VGB_NIT - 1, 1)), alpha=0.85,
+            label=(f"iter {k}" if k in (0, VGB_NIT - 1) else None))
 if VGB_F0 is not None:
     for kk in order[:3]:
         ax.annotate(VGB_IDS[kk], (VGB_F0[kk], snr[kk]), fontsize=7,
@@ -777,7 +801,8 @@ for k in range(3):
     leaf = order[k]
     nm = VGB_IDS[leaf] if VGB_IDS else f"leaf {leaf}"
     for w in range(nwalk):
-        ax[k].plot(it, vgb_c[:, w, leaf, 0], color=VIOLET, alpha=0.35, lw=0.8)
+        ax[k].plot(np.arange(VGB_NIT), vgb_c[:, w, leaf, 0],
+                   color=VIOLET, alpha=0.35, lw=0.8)
     if VGB_TRUTH is not None:
         ax[k].axhline(VGB_TRUTH[leaf, 0], color=RED, lw=1.4, ls=":",
                       label="catalogue truth")
@@ -960,7 +985,7 @@ def src_blob(label, sub, samples, truth, names, note="", note_bad=False):
 # Samples: the last min(10, NIT) stored iterations x every cold walker
 # (~240 rows), wider than the 3-iteration window the marginal panels use --
 # a corner needs the extra rows for its 2-D contours to mean anything.
-CORNER_ITS = min(10, NIT)
+CORNER_ITS = min(10, VGB_NIT)
 CORNER_DPI, CORNER_IN = 68, 7.0        # size-budget tuned (see below)
 vgb_corner = vgb_c[-CORNER_ITS:].reshape(-1, 55, 5)      # (S, 55, 5)
 VGB_CORNER = {"src": [], "nsamp": int(vgb_corner.shape[0]),
@@ -1386,6 +1411,19 @@ working for the first time. Headline: <strong>the iteration wall fell from 53&nd
 to ~11 min while carrying MORE signal</strong> (160 GB leaves/cold walker at iteration 9 vs
 ~140 at iteration 19 of the old run), and cold lnL reached <strong>52,586,123 by iteration
 9</strong> &mdash; past where the previous run sat at iteration 19.
+<br><br>
+<strong>Why the leaf count climbs so fast now: the cap-cell grid removed a ceiling the old
+run was pressed against.</strong> Leaf caps used to be applied per SUB-BAND, a width chosen
+for COMPUTE, not for how close two sources can sit before they are confused. With 154 bands
+at a mean cap of 1.47, the old run's whole-model ceiling was <strong>227 leaves per
+walker</strong> &mdash; and it was sitting at 137, i.e. 60% of the way into it, with more
+room only arriving as the slow per-band cap increments fired. Caps now live on an
+INDEPENDENT band/8 grid at the confusion scale (1,232 cells), so a band holds up to 8&times;
+what it did and the model is free to populate at the rate the data actually supports:
+0 &rarr; 86 &rarr; 121 &rarr; 144 &rarr; 160 leaves/walker over iterations 4&ndash;8. The
+growth is the throttle coming off, not a birth pathology &mdash; and the per-cell cap still
+does the job the band cap was standing in for, visible as the amber band in the birth-fate
+panel below.
 <br><br>
 <strong>What each change actually bought.</strong> (1) EPOCH CENTERS: the 953 s/propose
 F-stat centre chain &mdash; 92% of the old search propose &mdash; is now a
