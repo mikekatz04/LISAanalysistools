@@ -29,24 +29,48 @@ import h5py
 import numpy as np
 
 
-def main(path):
+def main(path, nrungs_target=None):
     bak = path + ".bak_vgbtemps"
     shutil.copy2(path, bak)
     print(f"backup: {bak}")
     with h5py.File(path, "r+") as f:
-        bt = f["global_fit"]["sub_backend"]["vgb"]["band_temps"]
-        nit, nbands, nrungs = bt.shape
-        ladder = 1.0 / 1.2 ** np.arange(nrungs)
-        if nrungs > 1:
+        vg = f["global_fit"]["sub_backend"]["vgb"]
+        nit, nbands, nrungs = vg["band_temps"].shape
+        k = int(nrungs_target or nrungs)
+        ladder = 1.0 / 1.2 ** np.arange(k)
+        if k > 1:
             ladder[-1] = 1e-4
-        before = np.array(bt[-1, :, :])
-        bt[...] = np.broadcast_to(ladder, (nit, nbands, nrungs))
-        print(f"band_temps {bt.shape}: rung ladder set to {ladder} "
-              f"(was e.g. {before[0]} on the last stored row)")
+        before = np.array(vg["band_temps"][-1, 0, :])
+        if k == nrungs:
+            vg["band_temps"][...] = np.broadcast_to(
+                ladder, (nit, nbands, k))
+        else:
+            # RUNG-COUNT CHANGE (e.g. 1 -> 8, VGB_NTEMPS=8 user ruling):
+            # the loader derives the branch's ntemps from the STORED
+            # band_temps shape (state.py setdefault from shape[-1]), so
+            # every rung-dimensioned dataset must be recreated. Counters
+            # restart at zero (they are diagnostics); swap arrays carry
+            # k-1 adjacent pairs.
+            def _recreate(name, shape, fill):
+                if name not in vg:
+                    return
+                del vg[name]
+                vg.create_dataset(name, data=np.broadcast_to(
+                    fill, shape).copy())
+                print(f"  {name} -> {shape}")
+            _recreate("band_temps", (nit, nbands, k), ladder)
+            for name in ("band_num_accepted", "band_num_proposed",
+                         "band_num_accepted_rj", "band_num_proposed_rj"):
+                _recreate(name, (nit, nbands, k), 0.0)
+            for name in ("band_swaps_accepted", "band_swaps_proposed"):
+                _recreate(name, (nit, nbands, max(k - 1, 0)), 0.0)
+        print(f"band_temps rungs {nrungs} -> {k}: ladder {ladder} "
+              f"(last stored row was {before})")
     print("done -- resubmit the run; VGB likelihood is live again.")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
-    main(sys.argv[1])
+    if len(sys.argv) not in (2, 3):
+        sys.exit(__doc__ + "\nOptional 2nd arg: target rung count "
+                 "(e.g. 8 -- must match VGB_NTEMPS in the submit script).")
+    main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) == 3 else None)

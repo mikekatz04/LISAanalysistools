@@ -183,17 +183,16 @@ export VGB_SIGHET_INMODEL=0
 #   python scripts/fstat_proposal/migrate_vgb_chirp_basis.py \
 #       ${STORE_DIR}/gf_prod_3mo_testing.h5 <catalogue_dir>   # 5->6 cols
 #   python scripts/fstat_proposal/fix_vgb_band_temps.py \
-#       ${STORE_DIR}/gf_prod_3mo_testing.h5                   # betas heal
+#       ${STORE_DIR}/gf_prod_3mo_testing.h5 8   # betas heal + 8-rung ladder
 # Chirp-mass basis (user: "Yes on VGBs -> CHIRP_MASS_BASIS"): samples
 # [dist, phi0, cos_iota, psi, Mc, fdot_astro_ratio] -- un-collapses the
 # ratio dimension (additive VGB_RATIO_INIT_WIDTH init).
 export VGB_CHIRP_MASS_BASIS=1
-# Single-rung ladder for THIS store: the stored band_temps are (45, 1)
-# and resume restores them from the h5 -- the betas fix would otherwise
-# build a 12-rung config against 1-rung state. VGBs are unimodal at
-# truth; 1 rung is fine at 3 months. Fresh 6-mo runs drop this line and
-# get the full ladder.
-export VGB_NTEMPS=1
+# 8-rung ladder (user ruling 2026-08-15). Resume derives the rung count
+# from the STORED band_temps shape, so the migration above MUST be run
+# with the matching "8" argument (it recreates every rung-dimensioned
+# vgb dataset: temps ladder, counters zeroed, 7 swap pairs).
+export VGB_NTEMPS=8
 # Concurrent per-device shard dispatch (code default since 2026-08-13;
 # explicit here for the run record). =0 restores serial dispatch if the
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
