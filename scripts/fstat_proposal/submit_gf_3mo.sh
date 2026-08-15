@@ -266,6 +266,23 @@ export GB_WDM_BAND_SLAB_LAYERS=5
 # dist from the birth container and the prior enters through logp.
 export GB_USE_GALAXY_PRIOR=1
 
+# ---- NOISE (psd + galfor) internal repeats: 50 -> 10 (user ruling
+#      2026-08-15) ---------------------------------------------------------
+# Each PSDMove.propose runs num_prop_repeats internal MCMC repeats, and each
+# repeat scores the whole (ntemps x nwalkers) ladder -- one batched build per
+# distinct walker. At 50 repeats that is ~660 batched covariance
+# build+score calls per move propose, ~1320 per iteration across psd_pe +
+# galfor_pe, which is what made the noise block ~43-44 s/iteration. The
+# noise model is only 4 (psd) + 5 (galfor) parameters and it converges long
+# before 50 repeats, so 10 buys back ~5x of that block for very little
+# mixing. WATCH on the first snapshot: the psd/galfor acceptance +
+# parameter traces (artifact panels) and whether the noise still tracks the
+# injection -- if the chains look under-mixed, 20 is the next notch.
+# Combines with today's de-sync work (gated debug guard, sync-free
+# sanitization, same-device repack), which cuts the cost of EACH call.
+export PSD_NUM_PROP_REPEATS=10
+export GALFOR_NUM_PROP_REPEATS=10
+
 # ---- VGB: exact chunked-het in-model scorer (sig-het accuracy at the
 #      loudest-VGB SNRs is unverified -- [GB_CELL_LL] growth in smoke 1) ----
 export VGB_SIGHET_INMODEL=0
