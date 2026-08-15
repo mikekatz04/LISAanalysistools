@@ -61,6 +61,17 @@ if rg is not None:
         recipe[k] = (int(rg[k].attrs.get("order num", 0)), bool(rg[k].attrs.get("status", False)))
 nwalk = ll.shape[1]
 
+# RUN IDENTITY (2026-08-15): one generator now serves several runs (3-mo
+# production, 23-mo scaling). Derive the label from the store rather than
+# hard-coding it, so a 23-mo page can never be mislabelled as the 3-mo one.
+_base = os.path.basename(os.path.normpath(RUN_DIR))
+if "23mo" in _base:
+    RUN_LABEL, RUN_KIND = "23-Month", "23mo"
+elif "6mo" in _base:
+    RUN_LABEL, RUN_KIND = "6-Month", "6mo"
+else:
+    RUN_LABEL, RUN_KIND = "3-Month", "3mo"
+
 sub = g["sub_backend"]
 psd_c = sub["psd/chain"][:NIT]                      # (it, 12, 24, 1, 2)
 gal_c = sub["galfor/chain"][:NIT]                   # (it, 12, 24, 1, 5)
@@ -329,6 +340,14 @@ else:
 # ---- 6. f-stat fit ----
 fdir = os.path.join(RUN_DIR, "gb_fstat_fit", "shared")
 epochs = sorted([d for d in os.listdir(fdir)] if os.path.isdir(fdir) else [])
+# COMPLETE epochs only (2026-08-15): an epoch directory exists as soon as the
+# fit STARTS, and the 23-mo comb alone is a 1.19-billion-evaluation sweep, so
+# a snapshot very often catches a half-written epoch. Requiring both cache
+# files keeps a mid-fit run from killing the whole page.
+epochs = [d for d in epochs
+          if os.path.exists(os.path.join(fdir, d, "fstat_grid_comb.npz"))
+          and os.path.exists(
+              os.path.join(fdir, d, "fstat_grid_peaks_stacked.npz"))]
 fstat_meta = {}
 if epochs:
     ed = os.path.join(fdir, epochs[-1])
@@ -366,7 +385,10 @@ if epochs:
         ax[1].set_xlabel("f0 [mHz]"); ax[1].set_title("peak density vs frequency")
         fig_b64(fig, "fstat_peaks")
 else:
-    MISSING.append("No fstat epoch caches found under gb_fstat_fit/shared.")
+    MISSING.append(
+        "No COMPLETE fstat epoch cache under gb_fstat_fit/shared -- the grid "
+        "fit is still running (its epoch dir appears at fit start, the "
+        "comb/peaks caches only when it finishes).")
 
 # ---- 7. VGB ----
 VGB_NAMES = ["dist [kpc]", "phi0", "cos_iota", "psi", "fdot_astro_ratio"]
@@ -1402,7 +1424,7 @@ if RJ_BREAK:
         f"({100 * RJ_BREAK[n][2][0][1] / max(RJ_BREAK[n][1], 1e-9):.0f}%)"
         for n in RJ_ORDER) + "<br>"
 
-alert = """
+_alert_3mo = """
 <div class="alert">
 <strong>FRESH RUN (gf_prod_3mo_v2) &mdash; the rebuilt stack, measured from iteration 0.</strong>
 Everything below is a NEW baseline: new store, all state built from config, F-stat grid and
@@ -1466,6 +1488,36 @@ rank-gated build is worth building. Finally, <code>GF_MOVE_TIMING</code> writes 
 stdout rather than the run log, so <code>gf3mo_&lt;jobid&gt;.log</code> is needed to split
 psd_pe from galfor_pe directly.
 </div>"""
+
+_alert_23mo = f"""
+<div class="alert">
+<strong>23-MONTH SCALING RUN &mdash; the same stack, 7.8&times; the grid.</strong> This page
+is the exact 3-month monitor pointed at <code>gf_prod_23mo</code>; read it as a SCALING
+readout, not a science posterior. Tobs = 6.048e7 s (Nf 1440 &times; Nt 16800), so the WDM
+residual is ~0.58 GB per walker against ~0.075 GB at 3 months, and the run carries the
+23-mo sizing (<code>GB_N_SUBBANDS</code> 2048/GPU, <code>GB_NLEAVES_MAX</code> 25000,
+<code>FSTAT_PEAKS_PER_BAND</code> 500, <code>SIGHET_NT_LAYER</code> 525) with every
+Tobs-independent improvement from the 3-mo work.
+<br><br>
+<strong>Where it is.</strong> {NIT} stored iteration(s); cold lnL {ll[NIT-1].max():,.0f}.
+The GB panels are EMPTY BY CONSTRUCTION so far &mdash; the staged recipe runs
+noise_search &rarr; noise_vgb_search &rarr; gb_search, and this run is still in the noise +
+VGB stages while the F-stat grid is fitted. That fit is the headline scaling number: the
+comb is a <strong>1.19-billion-evaluation</strong> level-5 sweep here (2.3M nodes &times;
+512 sky) against 38.7M at 3 months, which is the ~8&times; Tobs scaling the design
+predicted, landing on top of an already-8&times; per-evaluation grid.
+<br><br>
+<strong>What to compare against the 3-month page.</strong> Per-source sig-het scoring is
+FLAT in Tobs by design (the v4/v5 bench-off), so the GB propose spans should NOT scale with
+Tobs once gb_search opens &mdash; buffer fills, band likelihoods and the F-stat fit are the
+terms that do. The VGB branch is a clean early check: 55 fixed sources at 8 ladder rungs,
+identical to the 3-mo configuration, so any <code>vgb_pe</code> cost difference is pure
+Tobs scaling of the fills. Watch device memory against the 96 GB cards: the 23-mo per-slot
+slab is ~8&times; the 3-mo one, which is exactly why the buffer is sized at 2048/GPU here
+instead of 8192.
+</div>"""
+
+alert = _alert_23mo if RUN_KIND == "23mo" else _alert_3mo
 
 # ---- data/template/residual captions (numbers come from the arrays) -------
 if DTR:
@@ -1550,7 +1602,7 @@ wanted_next = """
 two-state per-row center cost (1.64 vs 0.31 ms/row) needs several proposes to correlate
 against cell counts / caps.</li>"""
 
-html = f"""<title>GF 3-Month Run Monitor</title>
+html = f"""<title>GF {RUN_LABEL} Run Monitor</title>
 <style>
 :root {{
   --bg:#0A0E14; --panel:#10161F; --line:#223041; --fg:#B8C6D4; --dim:#67788A;
@@ -1606,7 +1658,7 @@ button.armed.truth {{ border-color:var(--red); color:var(--red); }}
 ul {{ color:var(--dim); font-size:13px; }}
 </style>
 <header>
-  <h1>GF 3-Month Run Monitor</h1>
+  <h1>GF {RUN_LABEL} Run Monitor</h1>
   <span class="stamp">snapshot: {os.path.basename(RUN_DIR)} &middot; generated {datetime.now():%Y-%m-%d %H:%M}</span>
   <span>{chips}</span>
 </header>
