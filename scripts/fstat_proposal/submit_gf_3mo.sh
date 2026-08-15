@@ -93,10 +93,13 @@ export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @
 # ALL alive sources (flip gate is rj-only by construction).
 export GB_RJ_FLIP_FRACTION=0.2
 # In-model info-matrix jump scale: 0.005 default measured 95% cold
-# acceptance; 0.2 measured 0.61; 0.4 measured 0.60 (job 196, n=27,400)
-# -- still above the 0.15-0.4 target, so 0.6 is the next notch. Tune
-# against the [GB_ACCEPT] per-proposal-type line.
-export GB_JUMP_FACTOR=0.6
+# acceptance; 0.2 -> 0.61; 0.4 -> 0.60 (job 196). Job 197 flipped the
+# story: with the EXACT per-block SIGHET info matrices live, cold
+# acceptance at 0.6 ROSE to 0.71-0.80 (all-T 0.83-0.92, n=27k) -- the
+# better-adapted covariance makes the old scale far too timid. 1.2 is
+# the next notch (recommended range 1.0-1.5); tune against the
+# [GB_ACCEPT] per-proposal-type line toward the 0.15-0.4 target.
+export GB_JUMP_FACTOR=1.2
 # SPEED-DIAGNOSIS WINDOW #2: CLOSED 2026-08-15 (job-196 05:49 record
 # captured the full SYNC-attributed rj readout; export removed -- the
 # next [GB_TIMING rj] lines are honest baselines again).
