@@ -159,6 +159,10 @@ export GB_INMODEL_REPEATS_SURVIVOR=25
 export SIGHET_INFOMAT=1
 export GB_INFOMAT_PER_BLOCK=1
 export GB_ORTHO_LL_CHECK=1
+# VGB ladder pin: the betas bugfix builds vgb.ntemps rungs, but this
+# COPIED store carries 1-rung band_temps and the A/B runs NO VGB
+# migrations -- pin 1 rung so resume matches (the A/B is stride-only).
+export VGB_NTEMPS=1
 
 # ---- THE A/B variable ------------------------------------------------------
 export GB_BAND_UNIT_STRIDE=${AB_STRIDE}

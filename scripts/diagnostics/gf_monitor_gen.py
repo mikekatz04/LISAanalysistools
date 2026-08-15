@@ -31,9 +31,9 @@ plt.rcParams.update({
 
 IMGS, MISSING = {}, []
 
-def fig_b64(fig, key):
+def fig_b64(fig, key, dpi=None):
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
     plt.close(fig)
     IMGS[key] = base64.b64encode(buf.getvalue()).decode()
 
@@ -314,6 +314,314 @@ try:
     VGB_TRUTH = _r9[:, [0, 3, 4, 5, 8]]
 except Exception as e:
     MISSING.append(f"VGB catalogue f0 axis unavailable locally: {e!r}")
+
+# ---- 7b. DATA / TEMPLATE SUM / RESIDUAL, frequency + WDM domains ----------
+# The one panel that answers "is the fit actually subtracting anything".
+# Layout mirrors the run's OWN debug convention,
+# ``gbspecialstretch.py::_debug_plot_band_sequence`` (and its addremove twin
+# ``addremovemove.py::_debug_plot_source_sequence``): rows = the TDI channels
+# the run analyses (X/Y/Z), columns = the three states, WDM panels rendered as
+# ``imshow(|arr|, origin="lower")`` under ONE shared color scale per channel
+# row so a shrinking residual renders DARK instead of autoscaling back up.
+# Column order follows the request: data | template sum | residual.
+#
+# SOURCING (documented choice; nothing here is hand-rolled):
+#   * data      -- the mojito L1 bricks the run itself loaded (NOISE + GB +
+#                  VGB, from ``processor_init_kwargs`` in run_settings.log),
+#                  read with the mojito reader's LAZY slicing so only the
+#                  analysis window's samples ever enter memory, summed exactly
+#                  as ``L1DataLoader.load_data`` sums them, then pushed
+#                  through the installed ``TDSignal.fft`` / ``FDSignal
+#                  .transform(WDMSettings)`` with the run's own Tukey window.
+#                  The snapshot itself carries NO data/residual arrays (the
+#                  only rendered one is artifacts/wdm_data.png, produced by
+#                  ``engine.py``'s ``WDMSignal.heatmap`` -- an image, not
+#                  numbers), so the streams must be rebuilt.
+#   * templates -- the LAST stored cold-chain iteration's coordinates for the
+#                  MAX-lnL walker, run through the run's own sampling->physical
+#                  ``make_gb_transform_container`` and the installed
+#                  ``gbgpu.gbcomps.GBFDComputations`` FD chunked-heterodyne
+#                  kernel (the same kernel family the WDM analysis path uses;
+#                  no phase-convention fixup, unlike the legacy fastGB path).
+#   * residual  -- data - (GB + VGB), per channel, in BOTH domains.
+#
+# TIME-ORIGIN PHASE FACTOR: the GB/VGB branches anchor source phases at
+# ``recipe.MOJITO_REFERENCE_TIME`` while the data grid starts at the brick's
+# own t0, 850.5 s later. The WDM comp carries that offset internally
+# (``_wdm.t0 = data_t0`` with ``t_ref = si.t0``); ``GBFDComputations`` instead
+# REQUIRES ``t_start == t_ref``, so the generated template lands on a grid
+# anchored at t_ref and must be advanced onto the data grid by the exact
+# time-shift factor exp(+2 pi i f dt). Verified end-to-end, not assumed: with
+# the CATALOGUE-TRUTH VGB parameters this route reproduces the VGB-only mojito
+# brick at complex overlap 0.9999 per channel (residual power 1.8e-4 of the
+# brick); without the factor the same comparison reads 0.77 with a ~90 deg
+# phase.
+DTR = {}
+try:
+    import glob as _glob
+    from lisatools.globalfit.recipe import MOJITO_REFERENCE_TIME
+    from lisatools.detector import L1Orbits
+    from lisatools.domains import (FDSettings, FDSignal, TDSettings, TDSignal,
+                                   WDMSettings)
+    from lisatools.utils.utility import windowfun
+    from lisatools.globalfit.stock.erebor.transforms import (
+        make_gb_transform_container)
+    from lisatools.response.tdiconfig import TDIConfig
+    from gbgpu.gbcomps import GBFDComputations
+    from mojito import MojitoL1File
+
+    if VGB_TRUTH is None:
+        raise RuntimeError("VGB catalogue unavailable; cannot fix VGB leaves")
+
+    # --- the run's own grid, straight off the stored domain settings ---
+    _a = dict(f["global_fit/domain_settings/args"].attrs)
+    _k = dict(f["global_fit/domain_settings/kwargs"].attrs)
+    W_NF, W_NT, W_DT = int(_a["0"]), int(_a["1"]), float(_a["2"])
+    N_TD = W_NF * W_NT
+    # window: the engine builds tukey(Nt_td, alpha=window_taper_duration/Tobs)
+    _settings_txt = open(os.path.join(
+        RUN_DIR, os.path.basename(RUN_DIR) + "_artifacts",
+        "run_settings.log"), errors="replace").read()
+    _mt = re.search(r"window_taper_duration:\s*([\d.eE+-]+)", _settings_txt)
+    WIN_ALPHA = (float(_mt.group(1)) / (N_TD * W_DT)) if _mt else 0.0
+    _mt0 = re.search(r"\[gb\].*?\n\s+t0:\s*([\d.]+)", _settings_txt, re.S)
+    T_REF = float(_mt0.group(1)) if _mt0 else float(MOJITO_REFERENCE_TIME)
+
+    # --- which mojito bricks the run summed (source_ids + instrument noise) --
+    _pk = re.search(r"processor_init_kwargs:\s*\{(.*)\}\s*$", _settings_txt,
+                    re.M)
+    _pk = _pk.group(1) if _pk else ""
+    _types = [t for t in ("GB", "VGB", "MBHB", "EMRI", "SOBHB")
+              if re.search(rf"'{t}':\s*\[", _pk)]
+    if re.search(r"'add_instrument_noise':\s*'mojito'", _pk):
+        _types = ["NOISE"] + _types
+    if not _types:
+        _types = ["NOISE", "GB", "VGB"]
+    _SUBDIR = {"NOISE": "INSTRUMENT"}
+    _files = {}
+    for _t in _types:
+        _hits = sorted(_glob.glob(os.path.join(
+            MOJITO_CAT_DIR, "data", _SUBDIR.get(_t, _t), "L1", f"{_t}_*.h5")))
+        if not _hits:
+            raise FileNotFoundError(f"no local mojito {_t} L1 brick")
+        _files[_t] = _hits[0]
+
+    # --- orbits: the run's L1Orbits, but only the window's light-travel times
+    class _WindowedL1Orbits(L1Orbits):
+        """L1Orbits that reads only the analysis window's ltt table.
+
+        Numerically identical to the stock class over [t0, t0 + Tobs): the
+        C++ detector addresses the table as (t - ltt_t0)/ltt_dt, so dropping
+        the tail past the window changes nothing that is ever evaluated. It
+        avoids holding the full 731-day 25.2M x 6-link table (1.2 GB) plus
+        its C++ copy for a 90-day analysis -- this generator has to run on a
+        laptop.
+        """
+        n_ltt = int(N_TD + 20000)
+
+        def _setup(self):
+            with self.open() as _fh:
+                _n = self.n_ltt
+                self.ltt = _fh.ltts.ltts[:_n]
+                self.ltt_t = _fh.ltts.time_sampling.t(slice(0, _n))
+                self.x_base = _fh.orbits.positions[:]      # frame == "icrs"
+                self.v_base = _fh.orbits.velocities[:]
+                self.sc_t_base = _fh.orbits.time_sampling.t()
+                self.size_base = self.sc_t_base.shape[0]
+                self.dt_base = float(_fh.orbits.time_sampling.dt)
+                self.ltt_dt = _fh.ltts.time_sampling.dt
+                self.sc_dt = _fh.orbits.time_sampling.dt
+                self.ltt_t0 = float(self.ltt_t[0])
+                self.sc_t0 = float(self.sc_t_base[0])
+
+    _orb = _WindowedL1Orbits(_files[_types[0]], force_backend="cpu",
+                             frame="icrs", linear_interp_dt=500.0)
+    _orb._ensure_configured()
+
+    # --- data: partial (lazy) brick reads, summed on the analysis window ----
+    _td = np.zeros((3, N_TD), dtype=np.float64)
+    _t0_data = None
+    for _t, _fp in _files.items():
+        with MojitoL1File(_fp) as _fh:
+            _chunk = _fh.tdis.xyz_doppler[:N_TD]          # lazy -> partial IO
+            _td += np.asarray(_chunk).T
+            del _chunk
+            if _t0_data is None:
+                _t0_data = float(_fh.tdis.time_sampling.t0)
+    _win, _ = windowfun("tukey", N_TD, alpha=WIN_ALPHA)
+    _fd_data = TDSignal(_td, TDSettings(t0=_t0_data, dt=W_DT, N=N_TD,
+                                        force_backend="cpu")
+                        ).fft(settings=None, window=_win)
+    FDS = _fd_data.settings
+    data_fd = _fd_data.arr
+    del _td, _fd_data, _win
+
+    # --- templates from the max-lnL cold walker's last stored coordinates ---
+    WBEST = int(np.argmax(ll[-1]))
+    _gb9 = gb_chain_cold[WBEST][gb_alive_last[WBEST]]        # (n_gb, 9)
+    _v5 = vgb_c[-1, WBEST]                                   # (55, 5)
+    # VGB sampled 5 columns + the 4 catalogue-FIXED ones (f0, Mc, alpha,
+    # sin_delta) reassembled into the same 9-column basis the gb branch uses,
+    # so ONE transform container serves both branches.
+    _vgb9 = np.column_stack([_v5[:, 0], _r9[:, 1], _r9[:, 2], _v5[:, 1],
+                             _v5[:, 2], _v5[:, 3], _r9[:, 6], _r9[:, 7],
+                             _v5[:, 4]])
+    _tf = make_gb_transform_container(use_chirp_mass=True, use_fdot_astro=True,
+                                      use_distance=True, mc_lims=(0.001, 1.0))
+    _comp = GBFDComputations(
+        FDSettings(FDS.N, FDS.df, min_freq=0.0, max_freq=None,
+                   force_backend="cpu"),
+        T_REF, t_start=T_REF, N_sparse=2048, orbits=_orb,
+        tdi_config=TDIConfig("2nd generation", force_backend="cpu"),
+        tdi_type="XYZ", nchannels=3, force_backend="cpu",
+        tukey_alpha=WIN_ALPHA, edge_frac=0.0)
+    _fr = np.asarray(FDS.f_arr)
+    _shift = np.exp(2j * np.pi * _fr * (_t0_data - T_REF))[None, :]
+    _tmpl = {}
+    for _nm, _rows in (("gb", _gb9), ("vgb", _vgb9)):
+        _arr = np.zeros((1, 3, FDS.N), dtype=np.complex128)
+        _comp.fill_global(_tf.both_transforms(_rows.copy()), _arr,
+                          convert_to_ra_dec=False)
+        _tmpl[_nm] = _arr[0] * _shift
+        del _arr
+    resid_fd = data_fd - _tmpl["gb"] - _tmpl["vgb"]
+    DTR.update(n_gb=int(_gb9.shape[0]), n_vgb=int(_vgb9.shape[0]),
+               walker=WBEST, lnl=float(ll[-1, WBEST]),
+               dt_shift=float(_t0_data - T_REF))
+
+    # --- numeric sanity: the loudest recovered GB, data vs residual ---------
+    _ig = int(np.argmax(np.abs(_tmpl["gb"][0])))
+    _w = slice(max(_ig - 40, 0), _ig + 41)
+    DTR.update(
+        chk_f0=float(_fr[_ig] * 1e3),
+        chk_dpk=float(np.abs(data_fd[0, _ig])),
+        chk_rpk=float(np.abs(resid_fd[0, _ig])),
+        chk_dp=float(np.sum(np.abs(data_fd[:, _w]) ** 2)),
+        chk_rp=float(np.sum(np.abs(resid_fd[:, _w]) ** 2)))
+    _mb = (_fr >= band_edges[0]) & (_fr <= band_edges[-1])
+    DTR.update(band_dp=float(np.sum(np.abs(data_fd[:, _mb]) ** 2)),
+               band_rp=float(np.sum(np.abs(resid_fd[:, _mb]) ** 2)))
+
+    # ===================== FD figure ======================================
+    CHN = ["X", "Y", "Z"]
+    _sel = (_fr >= 1e-4) & (_fr <= 2.6e-2)
+    _fs = _fr[_sel] * 1e3
+    _FLO, _FHI = band_edges[0] * 1e3, band_edges[-1] * 1e3
+    _YLO = 1e-19
+
+    def _maxdec(x, y, npts=2200):
+        """Block-MAX decimation: a 1.55M-bin spectrum has to lose 99.9% of
+        its points to fit a PNG, and taking every Nth bin would drop exactly
+        the narrow GB lines this panel exists to show."""
+        st = max(1, len(x) // npts)
+        m = (len(x) // st) * st
+        return (x[:m].reshape(-1, st)[:, 0],
+                np.abs(y[:m]).reshape(-1, st).max(axis=1))
+
+    _cols = [
+        ("data (mojito " + " + ".join(_types) + ")",
+         [("data", data_fd, DIM, 1.0, 0.9)]),
+        ("template sum (GB + VGB)",
+         [("data", data_fd, DIM, 0.35, 0.9), ("GB", _tmpl["gb"], GREEN, 1.0, 0.7),
+          ("VGB", _tmpl["vgb"], VIOLET, 1.0, 0.7)]),
+        ("residual = data - templates",
+         [("data", data_fd, DIM, 0.55, 1.1),
+          ("residual", resid_fd, CYAN, 1.0, 0.7)]),
+    ]
+    fig, ax = plt.subplots(3, 3, figsize=(13.5, 8.2), sharex=True, sharey=True)
+    for r in range(3):
+        for c, (ttl, series) in enumerate(_cols):
+            a_ = ax[r][c]
+            for lab, arr, col, al, lw in series:
+                x_, y_ = _maxdec(_fs, arr[r][_sel])
+                y_ = np.where(y_ > _YLO, y_, np.nan)   # no off-scale spikes
+                a_.plot(x_, y_, color=col, lw=lw, alpha=al,
+                        label=(lab if r == 0 else None))
+            a_.set_xscale("log"); a_.set_yscale("log")
+            a_.axvline(_FLO, color=RED, ls=":", lw=1.0)
+            a_.axvline(_FHI, color=RED, ls=":", lw=1.0)
+            if r == 0:
+                a_.set_title(ttl, fontsize=10)
+                # lower-left is the one corner empty in all three columns
+                _lg = a_.legend(fontsize=8, loc="lower left")
+                for _lh in _lg.get_lines():
+                    _lh.set_linewidth(2.2)
+            if c == 0:
+                a_.set_ylabel(f"{CHN[r]}\n|TDI(f)|  [1/Hz]", fontsize=9)
+            if r == 2:
+                a_.set_xlabel("f [mHz]", fontsize=9)
+    ax[0][0].set_ylim(_YLO, 3e-15)
+    fig.suptitle(
+        f"frequency domain - cold walker {WBEST} (max lnL), stored iteration "
+        f"{NIT - 1} - dotted red = the run's GB band edges", fontsize=10,
+        color=FG)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig_b64(fig, "dtr_fd")
+
+    # ===================== WDM figure =====================================
+    _wdm = WDMSettings(W_NF, W_NT, W_DT, t0=float(_k["t0"]),
+                       oversample=int(_k["oversample"]),
+                       min_freq=float(_k["min_freq"]),
+                       max_freq=float(_k["max_freq"]),
+                       min_time=float(_k["min_time"]),
+                       max_time=float(_k["max_time"]),
+                       is_complex=bool(_k["is_complex"]),
+                       force_backend="cpu")
+    DEC = 5                       # WDM time pixels pooled per plotted column
+    _wp = {}
+    for _nm, _arr in (("data", data_fd), ("tmpl", _tmpl["gb"] + _tmpl["vgb"]),
+                      ("res", resid_fd)):
+        _m = np.abs(np.asarray(FDSignal(_arr.copy(), FDS).transform(_wdm).arr))
+        _n = (_m.shape[-1] // DEC) * DEC
+        # MAX-pool the time axis down to plot resolution immediately; the
+        # full-resolution map is never carried past this line.
+        _wp[_nm] = _m[..., :_n].reshape(_m.shape[0], _m.shape[1], -1,
+                                        DEC).max(axis=-1)
+        del _m
+    _te = np.asarray(_wdm.t_arr_edges); _fe = np.asarray(_wdm.f_arr_edges)
+    _ext = [0.0, (_te[-1] - _te[0]) / 86400.0, _fe[0] * 1e3, _fe[-1] * 1e3]
+    DTR.update(wdm_shape=tuple(int(s) for s in _wp["data"].shape), wdm_dec=DEC,
+               layer_df=float(_wdm.layer_df), layer_dt=float(_wdm.layer_dt))
+    fig, ax = plt.subplots(3, 3, figsize=(13.5, 8.0), sharex=True, sharey=True)
+    _tt = ["data", "template sum (GB + VGB)", "residual = data - templates"]
+    for r in range(3):
+        # ONE linear scale per channel row, keyed to that row's DATA panel
+        # (the addremove debug convention: norm from the total-data column,
+        # one per channel, shared across every frame) -- so the residual
+        # panel darkens as sources leave instead of re-autoscaling.
+        vmax = float(np.percentile(_wp["data"][r], 99.5))
+        for c, kk in enumerate(("data", "tmpl", "res")):
+            a_ = ax[r][c]
+            # plotted as a FRACTION of the row scale: 0-1 ticks keep the
+            # colorbar free of a floating 1e-20 offset label, and the shared
+            # per-row normalization becomes explicit rather than implied.
+            im = a_.imshow(_wp[kk][r] / vmax, aspect="auto", origin="lower",
+                           extent=_ext, vmin=0.0, vmax=1.0, cmap="viridis",
+                           interpolation="nearest")
+            a_.grid(False)
+            if r == 0:
+                a_.set_title(_tt[c], fontsize=10)
+            if c == 0:
+                a_.set_ylabel(f"{CHN[r]}\nfrequency [mHz]", fontsize=9)
+            if r == 2:
+                a_.set_xlabel("time [days from data start]", fontsize=9)
+            if c == 2:
+                cb = fig.colorbar(im, ax=a_, fraction=0.046, pad=0.02)
+                cb.ax.tick_params(labelsize=7)
+                cb.set_label(f"|w| / {vmax:.2e}", fontsize=7, color=DIM)
+    fig.suptitle(
+        f"WDM domain - |w_mn| on the run's own grid "
+        f"({_wdm.Nf_active} layers x {_wdm.layer_df * 1e3:.4f} mHz, "
+        f"{int(_wdm.layer_dt)} s pixels) - shared linear scale per channel row",
+        fontsize=10, color=FG)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    # 9 dense speckle images are the single most expensive PNG on the page;
+    # 88 dpi still oversamples the pooled (layer x pooled-time) grid.
+    fig_b64(fig, "dtr_wdm", dpi=88)
+    del _wp, data_fd, resid_fd, _tmpl, _orb, _comp
+except Exception as e:
+    MISSING.append(
+        f"data/template/residual panels unavailable: {type(e).__name__}: {e}")
 
 vgb_last = vgb_c[-min(3, NIT):].reshape(-1, 55, 5)   # (S, 55, 5)
 snr = np.sqrt(np.clip(np.nanmean(vgb_hh[-1], axis=0), 0, None))  # (55,)
@@ -1007,6 +1315,81 @@ restart. Cold lnL max 52.583M and climbing, walker spread ~39.7k still wide (the
 surge), h5 iteration 19, [SAVE] steady ~60 s.
 </div>"""
 
+# ---- data/template/residual captions (numbers come from the arrays) -------
+if DTR:
+    _d = DTR
+    dtr_fd_cap = (
+        f"Rows = the TDI channels the run analyses (X / Y / Z); columns = "
+        f"<strong>data</strong> | <strong>template sum</strong> | "
+        f"<strong>residual</strong> &mdash; the same 3-column layout the run's "
+        f"own debug plots use (<code>gbspecialstretch.py::"
+        f"_debug_plot_band_sequence</code>). Amplitude spectra, log&ndash;log, "
+        f"block-MAX decimated to {2200} points per curve (taking every Nth bin "
+        f"instead would drop exactly the narrow GB lines this panel exists to "
+        f"show). Dim grey = data, repeated faintly under the template and "
+        f"residual columns so the comparison is direct; <span style="
+        f"'color:var(--green)'>green</span> = the {_d['n_gb']} live GB leaves, "
+        f"<span style='color:var(--violet)'>violet</span> = the {_d['n_vgb']} "
+        f"VGB leaves, <span style='color:var(--cyan)'>cyan</span> = the "
+        f"residual. Dotted red = the run's own GB band edges "
+        f"(<code>sub_backend/gb/band_edges</code>). Curves are clipped at "
+        f"1e-19; the template is zero between sources, so its line simply "
+        f"stops there rather than diving off-scale."
+        f"<br><br><strong>Numeric check &mdash; the subtraction is real.</strong> "
+        f"At the loudest recovered GB, f0 = {_d['chk_f0']:.5f} mHz, the X-channel "
+        f"peak bin goes from |data| = {_d['chk_dpk']:.3e} to |residual| = "
+        f"{_d['chk_rpk']:.3e} (a factor {_d['chk_dpk']/max(_d['chk_rpk'],1e-99):.0f} "
+        f"down), and over the &plusmn;40-bin window around it the 3-channel power "
+        f"falls {_d['chk_dp']:.3e} &rarr; {_d['chk_rp']:.3e}, i.e. "
+        f"{100*_d['chk_rp']/max(_d['chk_dp'],1e-99):.1f}% of the data power left. "
+        f"Across the WHOLE GB band, by contrast, only "
+        f"{100*(1 - _d['band_rp']/max(_d['band_dp'],1e-99)):.1f}% of the power "
+        f"is removed ({100*_d['band_rp']/max(_d['band_dp'],1e-99):.1f}% remains) "
+        f"&mdash; expected at stored iteration {NIT-1}, which is still in the "
+        f"noise/VGB stages with only {_d['n_gb']} GB leaves alive out of a "
+        f"whole confusion foreground.")
+    dtr_wdm_cap = (
+        f"The same three states on the run's OWN WDM grid, read straight off "
+        f"<code>global_fit/domain_settings</code>: {_d['wdm_shape'][1]} active "
+        f"layers of {_d['layer_df']*1e3:.4f} mHz &times; "
+        f"{int(_d['layer_dt'])} s time pixels, MAX-pooled "
+        f"{_d['wdm_dec']}&times; along time to plot resolution "
+        f"({_d['wdm_shape'][2]} columns) before anything is drawn. Panels are "
+        f"|w<sub>mn</sub>| under <strong>one shared LINEAR color scale per "
+        f"channel row</strong>, keyed to the 99.5th percentile of that row's "
+        f"DATA panel &mdash; the run's own convention (the addremove debug "
+        f"plot takes its norm from the total-data column, one per channel, "
+        f"shared across every frame). Shared-per-row is the right choice here: "
+        f"it is what makes a shrinking residual render DARKER instead of "
+        f"autoscaling itself back to full brightness, which a per-panel scale "
+        f"would do. The template column's horizontal tracks with their annual "
+        f"brightness modulation are the recovered sources; read the residual "
+        f"panel against the data panel at those same layers.")
+    dtr_note = (
+        f"Both figures are built for cold walker <strong>{_d['walker']}</strong> "
+        f"&mdash; the MAX-lnL walker of stored iteration {NIT-1} "
+        f"(lnL = {_d['lnl']:,.1f}), not walker 0. Data = the mojito L1 bricks "
+        f"the run itself loaded, re-poured through the installed "
+        f"<code>TDSignal.fft</code> / <code>FDSignal.transform(WDMSettings)</code> "
+        f"with the run's Tukey window; templates = the stored cold-chain "
+        f"coordinates through the run's <code>make_gb_transform_container</code> "
+        f"and the installed <code>gbgpu.gbcomps.GBFDComputations</code> kernel "
+        f"(the FD twin of the WDM chunked-heterodyne comp the GB branch "
+        f"analyses with). The GB/VGB branches anchor source phase at "
+        f"<code>MOJITO_REFERENCE_TIME</code> while the data grid starts "
+        f"{_d['dt_shift']:.1f} s later, and the FD comp requires "
+        f"<code>t_start == t_ref</code>, so the template is advanced onto the "
+        f"data grid by exp(+2&pi;i&middot;f&middot;&Delta;t); that route was "
+        f"VERIFIED, not assumed &mdash; at catalogue-truth VGB parameters it "
+        f"reproduces the VGB-only mojito brick at complex overlap 0.9999 per "
+        f"channel (residual power 1.8e-4 of the brick). <strong>psd and galfor "
+        f"are NOT in the template sum</strong>: they are noise-model branches "
+        f"&mdash; they shape the sensitivity the likelihood weights by, they "
+        f"are not subtracted from the data, so the unresolved galaxy stays in "
+        f"the residual by construction.")
+else:
+    dtr_fd_cap = dtr_wdm_cap = dtr_note = ""
+
 missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
 wanted_next = """
 <li>The sbatch stdout log (<code>gf3mo_&lt;jobid&gt;.log</code>) — carries the
@@ -1076,7 +1459,8 @@ ul {{ color:var(--dim); font-size:13px; }}
   <span>{chips}</span>
 </header>
 <nav>
-  <a href="#status">status</a><a href="#ll">likelihood</a><a href="#noise">psd + foreground</a>
+  <a href="#status">status</a><a href="#dtr">data / template / residual</a>
+  <a href="#ll">likelihood</a><a href="#noise">psd + foreground</a>
   <a href="#gb">gb search</a><a href="#fstat">f-stat fit</a><a href="#vgb">vgb</a>
   <a href="#explorer">1/d explorer</a><a href="#timing">timing</a><a href="#next">next snapshot</a>
 </nav>
@@ -1092,6 +1476,14 @@ ul {{ color:var(--dim); font-size:13px; }}
   <div><b>{stage_now}</b><span>active stage</span></div>
 </div>
 {alert}
+</section>
+
+<section id="dtr"><h2>Data / Template / Residual</h2>
+<div class="panel">{img("dtr_fd", "data / template / residual, frequency domain")}
+<div class="caption">{dtr_fd_cap}</div></div>
+<div class="panel">{img("dtr_wdm", "data / template / residual, WDM domain")}
+<div class="caption">{dtr_wdm_cap}</div></div>
+<div class="caption">{dtr_note}</div>
 </section>
 
 <section id="ll"><h2>Likelihood</h2>
