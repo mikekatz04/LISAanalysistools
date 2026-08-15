@@ -52,13 +52,22 @@ __all__ = [
     "build_gb_birth_distribution",
     "sighet_fstat_ref_margin_hz",
     "build_sighet_call_fstat",
+    "enumerate_center_nodes",
+    "run_center_sweep",
+    "build_fstat_center_table",
     "GRID_BASENAME",
+    "CENTER_TABLE_BASENAME",
 ]
 
 #: Cache basename. The offline prep writes ``<base>_comb.npz`` /
 #: ``<base>_peaks_stacked.npz``; keeping the same suffixes means a prebuilt
 #: offline grid drops straight into an epoch directory.
 GRID_BASENAME = "fstat_grid.npz"
+
+#: Per-epoch F-stat CENTER table (the RJ distance-birth proposal's
+#: ``(phi0, iota, psi, ln A_max, sigma, ln SNR)`` vs f0), written next to the
+#: grids in the epoch cache dir and checkpoint-loaded exactly like them.
+CENTER_TABLE_BASENAME = "fstat_centers.npz"
 
 
 def _fmt_secs(s: float) -> str:
@@ -1035,3 +1044,224 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
         mix, A_lims, use_cupy=use_cupy,
         fdot_astro_ratio_max=fdot_astro_ratio_max, dist_lims=dist_lims,
     )
+
+
+# --------------------------------------------------------------------------
+# per-epoch F-stat CENTER table (the RJ distance-birth proposal's centers)
+# --------------------------------------------------------------------------
+
+def enumerate_center_nodes(cache_dir: str, *, mc_lims=None,
+                           max_nodes: Optional[int] = None) -> dict:
+    """The birth proposal's DRAWABLE f0 support, as a node list.
+
+    The RJ birth container built by :func:`build_gb_birth_distribution` is
+    ``UniformFloorMixture(MixtureProposal([stacked peaks, comb]), box)``, so
+    the f0 a birth can carry comes from exactly three places:
+
+    * **peak boxes** -- :class:`StackedFStatProposal4D` draws a cell of box
+      ``k`` and jitters inside it, i.e. anywhere in ``[f0_los[k],
+      f0_los[k] + (n_f0 - 1) * f0_dxs[k]]``. Its NODE grid is the finest
+      structure the density has, so every node of every box is a table node.
+      The other three axes are represented by the box's own F-stat argmax at
+      that f0 node (``logp_grids[k, i].argmax()`` over Mc x alpha x
+      sin_delta) -- the maximum the birth is aimed at.
+    * **comb cells** -- :class:`CombIntrinsicProposal` draws a comb cell and
+      jitters inside it, so its nodes (spacing ``~1/(2 Tobs)``) are table
+      nodes too; sky comes from the comb scan's per-node best sky
+      (``best_alpha`` / ``best_sin_delta``) and Mc from the comb's fixed
+      ``FSTAT_COMB_MC``.
+    * **uniform floor** -- f0 anywhere in the interior band span. No extra
+      nodes: the comb covers that span at ``1/(2 Tobs)`` already, which is
+      finer than anything a floor birth resolves.
+
+    Returns a host dict with the sorted-by-f0 arrays ``f0_mHz``, ``mc``,
+    ``alpha``, ``sin_delta`` (plus ``n_peak_nodes`` / ``n_comb_nodes``
+    provenance counts). ``max_nodes`` (when the union exceeds it) thins the
+    COMB nodes by a uniform stride and keeps every peak node -- peak nodes
+    are where the birth mass actually is.
+    """
+    cache_path = os.path.join(cache_dir, GRID_BASENAME)
+    stacked_cache = cache_path.replace(".npz", "_peaks_stacked.npz")
+    comb_cache = cache_path.replace(".npz", "_comb.npz")
+
+    f0_parts, mc_parts, al_parts, sd_parts = [], [], [], []
+    n_peak = n_comb = 0
+
+    if os.path.exists(stacked_cache):
+        d = np.load(stacked_cache, allow_pickle=False)
+        grids = np.asarray(d["logp_grids"], dtype=float)
+        f0_los = np.asarray(d["f0_los"], dtype=float)
+        f0_dxs = np.asarray(d["f0_dxs"], dtype=float)
+        mc_ax = np.asarray(d["mc_ax"], dtype=float)
+        al_ax = np.asarray(d["alpha_ax"], dtype=float)
+        sd_ax = np.asarray(d["sin_delta_ax"], dtype=float)
+        K, n_f0 = grids.shape[0], grids.shape[1]
+        # argmax over the (Mc, alpha, sin_delta) block at each (box, f0 node)
+        flat = grids.reshape(K, n_f0, -1).argmax(axis=2)
+        i_mc, i_al, i_sd = np.unravel_index(
+            flat, (len(mc_ax), len(al_ax), len(sd_ax)))
+        f0 = f0_los[:, None] + np.arange(n_f0)[None, :] * f0_dxs[:, None]
+        f0_parts.append(f0.ravel())
+        mc_parts.append(mc_ax[i_mc].ravel())
+        al_parts.append(al_ax[i_al].ravel())
+        sd_parts.append(sd_ax[i_sd].ravel())
+        n_peak = int(f0.size)
+
+    if os.path.exists(comb_cache):
+        c = np.load(comb_cache, allow_pickle=False)
+        f0c = np.asarray(c["f0_nodes_mHz"], dtype=float)
+        mc_lims = list(mc_lims or [0.001, 1.0])
+        mc_fix = float(os.environ.get(
+            "FSTAT_COMB_MC", 0.5 * (float(mc_lims[0]) + float(mc_lims[-1]))))
+        if "best_alpha" in c and "best_sin_delta" in c:
+            alc = np.asarray(c["best_alpha"], dtype=float)
+            sdc = np.asarray(c["best_sin_delta"], dtype=float)
+        else:
+            # Legacy comb cache with no per-node best sky: the F-stat maximum
+            # would be evaluated at an arbitrary sky point, so say so loudly
+            # rather than pretend the centers are on-peak.
+            logger.warning(
+                "[centers] comb cache %s has no best_alpha/best_sin_delta; "
+                "comb nodes fall back to (alpha, sin_delta) = (0, 0).",
+                comb_cache)
+            alc = np.zeros_like(f0c)
+            sdc = np.zeros_like(f0c)
+        keep = np.ones(len(f0c), dtype=bool)
+        if max_nodes and n_peak + len(f0c) > int(max_nodes):
+            room = max(1, int(max_nodes) - n_peak)
+            stride = int(np.ceil(len(f0c) / room))
+            keep[:] = False
+            keep[::stride] = True
+            logger.warning(
+                "[centers] %d peak + %d comb nodes exceed max_nodes=%d; "
+                "comb thinned by stride %d (-> %d nodes).", n_peak, len(f0c),
+                int(max_nodes), stride, int(keep.sum()))
+        f0_parts.append(f0c[keep])
+        mc_parts.append(np.full(int(keep.sum()), mc_fix))
+        al_parts.append(alc[keep])
+        sd_parts.append(sdc[keep])
+        n_comb = int(keep.sum())
+
+    if not f0_parts:
+        return dict(f0_mHz=np.empty(0), mc=np.empty(0), alpha=np.empty(0),
+                    sin_delta=np.empty(0), n_peak_nodes=0, n_comb_nodes=0)
+
+    f0 = np.concatenate(f0_parts)
+    order = np.argsort(f0, kind="stable")
+    return dict(
+        f0_mHz=f0[order],
+        mc=np.concatenate(mc_parts)[order],
+        alpha=np.concatenate(al_parts)[order],
+        sin_delta=np.concatenate(sd_parts)[order],
+        n_peak_nodes=n_peak,
+        n_comb_nodes=n_comb,
+    )
+
+
+def run_center_sweep(call_fstat: Callable, nodes: dict, *, xp,
+                     batch: Optional[int] = None) -> dict:
+    """ONE batched F-stat sweep over the center nodes -> maximized extrinsics.
+
+    Same row convention as :func:`run_comb_scan` / :func:`run_stacked_peak_sweep`
+    (physical 9-column ``[A, f0, fdot, fddot, phi0, iota, psi, alpha, delta]``
+    with a placeholder amplitude; the F-stat maximizes over amplitude/phase/
+    iota/psi so those input columns are ignored), and the SAME
+    Jaranowski-Krol inversion the per-row propose-time path uses
+    (:func:`lisatools.sampling.fstat_proposal.fstat_maximized_extrinsics`).
+
+    Returns host arrays ``ln_A_max``, ``phi0``, ``iota``, ``psi``,
+    ``ln_snr`` and ``sigma_base`` (``= 1/SNR``, the UNSMEARED proposal
+    width), one entry per node.
+    """
+    from gbgpu.utils.utility import get_fdot
+
+    from lisatools.sampling.fstat_proposal import (
+        fstat_knob,
+        fstat_maximized_extrinsics,
+    )
+
+    f0 = np.asarray(nodes["f0_mHz"], dtype=float)
+    n = int(f0.size)
+    out = {k: np.zeros(n) for k in
+           ("ln_A_max", "phi0", "iota", "psi", "ln_snr", "sigma_base")}
+    if n == 0:
+        return out
+    batch = int(batch or fstat_knob("FSTAT_BATCH", int))
+    mc = np.asarray(nodes["mc"], dtype=float)
+    al = np.asarray(nodes["alpha"], dtype=float)
+    sd = np.asarray(nodes["sin_delta"], dtype=float)
+    t0 = time.time()
+    for s in range(0, n, batch):
+        e = min(s + batch, n)
+        pr = xp.zeros((e - s, 9), dtype=xp.float64)
+        pr[:, 0] = 1e-22
+        pr[:, 1] = xp.asarray(f0[s:e] * 1e-3)
+        pr[:, 2] = xp.asarray(get_fdot(f=f0[s:e] * 1e-3, Mc=mc[s:e]))
+        pr[:, 5] = 0.5 * np.pi
+        pr[:, 7] = xp.asarray(al[s:e])
+        pr[:, 8] = xp.asarray(np.arcsin(np.clip(sd[s:e], -1.0, 1.0)))
+        N_arr, M_up = call_fstat(pr)
+        A, phi0, iota, psi, F = fstat_maximized_extrinsics(
+            xp.asarray(N_arr), xp.asarray(M_up))
+        ln_snr = 0.5 * np.log(np.clip(2.0 * _to_host(F), 1.0, None))
+        out["ln_A_max"][s:e] = np.log(np.clip(_to_host(A), 1e-300, None))
+        out["phi0"][s:e] = _to_host(phi0)
+        out["iota"][s:e] = _to_host(iota)
+        out["psi"][s:e] = _to_host(psi)
+        out["ln_snr"][s:e] = ln_snr
+        out["sigma_base"][s:e] = np.exp(-ln_snr)
+    logger.info("[centers] %d node F-stat evals in one batched sweep "
+                "(batch=%d) in %s", n, batch, _fmt_secs(time.time() - t0))
+    return out
+
+
+def build_fstat_center_table(call_fstat: Optional[Callable], *, cache_dir: str,
+                             xp, mc_lims=None, max_nodes: Optional[int] = None,
+                             rebuild: bool = False) -> Optional[dict]:
+    """Load (or build + persist) an epoch's F-stat center table.
+
+    ``<cache_dir>/fstat_centers.npz`` is the epoch artifact, written next to
+    the grids and reloaded the same way -- a restart that loads a complete
+    epoch loads its centers too, in milliseconds. It is MISSING for any epoch
+    fitted before this table existed (and for an offline grid dropped into
+    ``epoch_0000``), so an absent file simply rebuilds it against
+    ``call_fstat`` and writes it out.
+
+    Returns the host table dict (keys ``f0_mHz``, ``mc``, ``alpha``,
+    ``sin_delta``, ``ln_A_max``, ``phi0``, ``iota``, ``psi``, ``ln_snr``,
+    ``sigma_base``), or ``None`` when the epoch has no drawable support at
+    all (no grids and no comb -> the birth container fell back to the prior)
+    or when a rebuild is needed but no ``call_fstat`` was supplied.
+    """
+    path = os.path.join(cache_dir, CENTER_TABLE_BASENAME)
+    if os.path.exists(path) and not rebuild:
+        d = np.load(path, allow_pickle=False)
+        tbl = {k: np.asarray(d[k], dtype=float) for k in d.files}
+        logger.info("[centers] loaded %d-node center table from %s",
+                    len(tbl["f0_mHz"]), path)
+        return tbl
+
+    nodes = enumerate_center_nodes(cache_dir, mc_lims=mc_lims,
+                                   max_nodes=max_nodes)
+    if int(nodes["f0_mHz"].size) == 0:
+        logger.warning("[centers] epoch %s has no drawable f0 support "
+                       "(no peak grids, no comb); no center table.", cache_dir)
+        return None
+    if call_fstat is None:
+        return None
+    logger.info("[centers] building the center table for %s: %d nodes "
+                "(%d peak-box + %d comb)", cache_dir,
+                int(nodes["f0_mHz"].size), int(nodes["n_peak_nodes"]),
+                int(nodes["n_comb_nodes"]))
+    swept = run_center_sweep(call_fstat, nodes, xp=xp)
+    tbl = dict(
+        f0_mHz=nodes["f0_mHz"], mc=nodes["mc"], alpha=nodes["alpha"],
+        sin_delta=nodes["sin_delta"], **swept,
+    )
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        np.savez(path, **tbl)
+        logger.info("[cache] wrote %s", path)
+    except OSError as exc:  # the table is a cache, never fatal
+        logger.warning("[centers] could not write %s (%r)", path, exc)
+    return tbl

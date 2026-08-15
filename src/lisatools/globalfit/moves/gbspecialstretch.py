@@ -3374,11 +3374,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # GB_RJ_FSTAT_CTR_HOIST=0 restores the per-round computation.
         # Reset unconditionally so a unit that skips the precompute can
         # never see a previous unit's cache.
+        #
+        # SUPERSEDED BY DEFAULT (GB_FSTAT_CTR_MODE=epoch, user ruling
+        # 2026-08-15): with a live epoch center table the unit precompute is
+        # skipped entirely -- rows look the centers up by f0 from the table
+        # built once at fit time (_fstat_ctr_table_lookup). This branch is
+        # the "unit" escape hatch (and the automatic fallback for a move
+        # with no table).
         self._fstat_ctr = None
         if (
             self.rj_fstat_dist_birth
             and not self.rj_replace
             and os.environ.get("GB_RJ_FSTAT_CTR_HOIST", "1") == "1"
+            and self._fstat_ctr_table_active() is None
         ):
             with _tspan(tm, "rj_fstat_centers"):
                 self._fstat_ctr = self._precompute_fstat_centers(
@@ -4407,6 +4415,112 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # to every one of these in lockstep with "ids").
     _FSTAT_CTR_FIELDS = ("phi0", "iota", "psi", "ln_center", "sigma", "ln_snr")
 
+    @staticmethod
+    def _fstat_ctr_mode() -> str:
+        """Which F-stat center machinery runs: ``"epoch"`` (default) or
+        ``"unit"``.
+
+        USER RULING 2026-08-15: *"just compute the center distributions 1
+        time when we build the fstat distribution in the first place (inside
+        setup()). Compute them once, smear them out for inaccuracy issues
+        and call it a day."*
+
+        * ``epoch`` -- ONE batched sweep over the birth proposal's drawable
+          f0 support at fit time (:meth:`GBSpecialRJFStatGridMove._install`),
+          persisted in the epoch cache dir and looked up per row by f0
+          (:meth:`_fstat_ctr_table_lookup`). No per-unit precompute, no
+          lookup-miss fallback, NO per-row F-stat evaluation at propose time
+          — the 109-953 s/propose center chain becomes a searchsorted.
+        * ``unit`` -- the escape hatch: the per-unit countable-row hoist
+          (:meth:`_precompute_fstat_centers`) exactly as before, bit-identical
+          when selected.
+
+        ``epoch`` silently degrades to ``unit`` for any move that has no
+        table (an RJ fstat-birth move that never fits a grid, or an epoch
+        whose support was empty) — see :meth:`_fstat_ctr_table_active`.
+        """
+        mode = os.environ.get("GB_FSTAT_CTR_MODE", "epoch").strip().lower()
+        if mode not in ("epoch", "unit"):
+            raise ValueError(
+                f"GB_FSTAT_CTR_MODE must be 'epoch' or 'unit', got {mode!r}")
+        return mode
+
+    def _fstat_ctr_smear(self) -> float:
+        """Multiplicative widening of the center lognormal's ``sigma``.
+
+        ``GB_FSTAT_CTR_SMEAR`` always wins. Otherwise the default is
+        MODE-DEPENDENT, because the two modes carry different staleness:
+
+        * ``unit`` -> 1.5: the cache reads the walker-ref residual once per
+          parity unit, so it covers mid-unit residual drift only.
+        * ``epoch`` -> 2.0: the table is built once per fit epoch, so it
+          covers up to ``GB_FSTAT_REFIT_EVERY`` proposes of residual drift
+          PLUS the node-vs-row f0/Mc/sky mismatch of the nearest-node lookup.
+
+        The smeared sigma feeds the draw AND both density sides identically
+        (:meth:`_slot0_log_proposal`), so the proposal stays an exactly
+        normalized (truncated) lognormal — just broader — and detailed
+        balance is untouched.
+        """
+        raw = os.environ.get("GB_FSTAT_CTR_SMEAR", "").strip()
+        if raw:
+            return float(raw)
+        return 2.0 if self._fstat_ctr_mode() == "epoch" else 1.5
+
+    def _fstat_ctr_table_active(self):
+        """The live epoch center table, or ``None`` when it must not be used.
+
+        ``None`` means "fall back to the unit hoist / per-round compute":
+        either the mode knob selects ``unit``, or this move has no table
+        (it never fitted a grid, or the epoch had no drawable f0 support).
+        """
+        if self._fstat_ctr_mode() != "epoch":
+            return None
+        return getattr(self, "_fstat_ctr_table", None)
+
+    def _fstat_ctr_table_lookup(self, rows_params):
+        """Per-row centers from the epoch table — NEAREST node in f0.
+
+        ``rows_params`` are sampling-basis rows (column 1 = f0 [mHz],
+        column 2 = Mc), the SAME array the per-round F-stat path would have
+        been handed; births look up at their drawn f0 and deaths at the
+        leaf's current f0, so the pair is symmetric by construction.
+
+        NEAREST, not interpolated. The stored tuple ``(phi0, iota, psi,
+        A_max, F)`` is one joint F-stat maximum: adjacent nodes can sit on
+        DIFFERENT sources (node spacing is ~the matched-filter peak width),
+        and phi0/iota/psi are angles, so component-wise linear interpolation
+        would blend incompatible maxima and wrap-average angles. Nearest
+        keeps every row on a physically realizable maximum and pushes the
+        node-vs-row mismatch entirely into the smear.
+
+        Only the F-stat MAXIMUM comes from the table. ``(ln_center, sigma)``
+        are re-derived per row through the shared
+        :meth:`_dist_center_and_width` with the row's OWN ``(f0, Mc)``, so
+        the distance basis' ``ln dist* = ln(amp_from_dist(f0, Mc, 1)/A_max)``
+        keeps its exact per-row ``Mc**(5/3)`` scaling (that term spans ~11
+        e-folds across the Mc prior — far beyond anything a smear could
+        cover). Returns the ``_FSTAT_CTR_FIELDS`` 6-tuple.
+        """
+        xp = self.xp
+        t = self._fstat_ctr_table
+        f0_nodes = t["f0_mHz"]
+        f0 = xp.asarray(rows_params[:, 1], dtype=xp.float64)
+        n = int(f0_nodes.shape[0])
+        hi = xp.clip(xp.searchsorted(f0_nodes, f0), 0, n - 1)
+        lo = xp.clip(hi - 1, 0, n - 1)
+        take_lo = xp.abs(f0 - f0_nodes[lo]) <= xp.abs(f0_nodes[hi] - f0)
+        pos = xp.where(take_lo, lo, hi)
+        ln_snr = t["ln_snr"][pos]
+        A_max = xp.exp(t["ln_A_max"][pos])
+        # clip(2F, 1) == exp(2 ln_snr) by construction, and only the clipped
+        # combination enters _dist_center_and_width -> sigma == sigma_base.
+        F = 0.5 * xp.exp(2.0 * ln_snr)
+        ln_center, sigma = self._dist_center_and_width(rows_params, A_max, F)
+        sigma = sigma * self._fstat_ctr_smear()
+        return (t["phi0"][pos], t["iota"][pos], t["psi"][pos],
+                ln_center, sigma, ln_snr)
+
     def _fstat_ctr_compute(self, model, params):
         """Batched F-stat center computation for a set of rows.
 
@@ -4446,14 +4560,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ln_center, sigma = self._dist_center_and_width(params, A, F)
         # Snapshot-drift smear (user ruling 2026-08-14): the cache reads the
         # live walker-ref residual ONCE at unit open, so the lognormal is
-        # WIDENED by GB_FSTAT_CTR_SMEAR (default 1.5x) to cover mid-unit
+        # WIDENED by _fstat_ctr_smear (unit-mode default 1.5x) to cover mid-unit
         # residual drift. The smeared sigma feeds BOTH the draw and the
         # forward/reverse densities, so the proposal remains exactly
         # detailed-balance-valid -- just broader. (A search-mode variant
         # that re-centers without paying the density -- deliberately
         # breaking detailed balance for faster burn-in -- was considered
         # and PARKED, user 2026-08-14: "maybe not ideal".)
-        sigma = sigma * float(os.environ.get("GB_FSTAT_CTR_SMEAR", "1.5"))
+        sigma = sigma * self._fstat_ctr_smear()
         ln_snr = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
         return phi0, iota, psi, ln_center, sigma, ln_snr
 
@@ -4872,6 +4986,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # Countable-only cache: the lookup carries the inline
                 # reserve-row fallback, so it needs model/band_sorter.
                 _ctr = getattr(self, "_fstat_ctr", None)
+                # Epoch center TABLE (default; user ruling 2026-08-15): built
+                # once per fit epoch over the proposal's drawable f0 support
+                # and looked up by f0 -- no per-unit precompute, no fallback
+                # machinery, no per-row F-stat eval on either side. Deaths
+                # read the SAME table at their current f0, so the forward and
+                # reverse densities stay exactly symmetric.
+                _tbl = self._fstat_ctr_table_active()
                 # SNR-truncated distance proposal (2026-08-15, user-ruled
                 # lever; GB_RJ_SNR_TRUNC_DIST=0 restores the untruncated
                 # lognormal draw bit-identically): [GB_ACCEPT rj-split]
@@ -4890,7 +5011,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     and _snr_lim > 0.0
                 )
                 if len(birth_k):
-                    if _ctr is not None:
+                    if _tbl is not None:
+                        (phi0_max, iota_max, psi_max, ln_center, sigma,
+                         ln_snr_b) = self._fstat_ctr_table_lookup(
+                            params[birth_k])
+                    elif _ctr is not None:
                         _bpos = self._fstat_ctr_lookup(
                             ids[birth_k], model=model,
                             band_sorter=band_sorter)
@@ -4938,7 +5063,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 if len(death_k):
                     oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
                     _mark("rj_getll")
-                    if _ctr is not None:
+                    if _tbl is not None:
+                        (_, _, _, ln_center_d, sigma_d,
+                         ln_snr_d) = self._fstat_ctr_table_lookup(
+                            params[death_k])
+                    elif _ctr is not None:
                         _dpos = self._fstat_ctr_lookup(
                             ids[death_k], model=model,
                             band_sorter=band_sorter)
@@ -8305,9 +8434,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # per-propose sum for the job-195 rj_fstat_centers growth hunt).
         if (self.is_rj_prop and getattr(self, "rj_fstat_dist_birth", False)
                 and not self.rj_replace):
+            _tbl = self._fstat_ctr_table_active()
             logger.info(
-                "[FSTAT_CTR %s] propose total: fallback-computed rows %d",
-                self.name, int(getattr(self, "_fstat_ctr_fallback_rows", 0)),
+                "[FSTAT_CTR %s] propose total: mode=%s (%s), "
+                "fallback-computed rows %d", self.name,
+                self._fstat_ctr_mode(),
+                f"{int(_tbl['f0_mHz'].shape[0])}-node table"
+                if _tbl is not None else "per-unit hoist",
+                int(getattr(self, "_fstat_ctr_fallback_rows", 0)),
             )
 
         # Stage-timing breakdown for this propose (see _ProposeTimer).
@@ -8484,6 +8618,13 @@ class GBSpecialRJPriorMove(GBSpecialBase):
 #: cross-process equivalent.
 _FSTAT_GRID_REGISTRY: dict = {}
 
+#: Process-local cache of epoch F-stat CENTER tables, keyed by epoch cache
+#: directory -> the device-resident table dict (or ``None`` when that epoch
+#: has no drawable f0 support). Same sharing contract as
+#: :data:`_FSTAT_GRID_REGISTRY`: whichever move installs the epoch first pays
+#: the sweep, the rest take the identical table.
+_FSTAT_CTR_TABLE_REGISTRY: dict = {}
+
 
 class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     """RJ birth move that FITS its own F-stat grid inside ``setup()``.
@@ -8525,6 +8666,9 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         self.fstat_fit_kwargs = dict(fstat_fit_kwargs or {})
         self._fstat_epoch = None
         self._fstat_last_fit_hit = -1
+        # Epoch F-stat center table (GB_FSTAT_CTR_MODE=epoch); installed
+        # alongside the birth grids, see _install_ctr_table.
+        self._fstat_ctr_table = None
 
     # ---- epoch bookkeeping -------------------------------------------------
 
@@ -8724,6 +8868,77 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             logger.warning("%s: could not write DONE.json (%r)", self.name, exc)
         return stacked, n_peaks
 
+    # Fields the propose-time lookup reads; the rest of the npz (node Mc /
+    # sky provenance) stays on disk rather than eating device memory.
+    _CTR_TABLE_DEVICE_FIELDS = (
+        "f0_mHz", "phi0", "iota", "psi", "ln_A_max", "sigma_base", "ln_snr")
+
+    def _install_ctr_table(self, k: int, model=None):
+        """Load or build epoch ``k``'s F-stat center table and install it.
+
+        The USER RULING's "compute them once" step: ONE batched sweep over
+        the birth proposal's drawable f0 support
+        (:func:`lisatools.sampling.fstat_gridfit.enumerate_center_nodes` --
+        every peak-box f0 node at its own F-stat argmax in (Mc, sky), plus
+        the comb nodes at their scan-best sky), scored through the SAME
+        ``call_fstat`` the grids were fitted with, against the SAME reference
+        walker's residual snapshot. Persisted as ``fstat_centers.npz`` in the
+        epoch dir, so a restart that loads a complete epoch loads the centers
+        with it (in milliseconds, and WITHOUT building an F-stat scorer); an
+        epoch that predates the table (or an offline grid dropped into
+        ``epoch_0000``) rebuilds it here, against the residual as it stands
+        at that moment.
+
+        No-ops under ``GB_FSTAT_CTR_MODE=unit``. Leaves ``_fstat_ctr_table``
+        ``None`` when the epoch has no drawable support at all — the move
+        then falls back to the per-unit hoist.
+        """
+        if self._fstat_ctr_mode() != "epoch":
+            self._fstat_ctr_table = None
+            return
+        key = self._epoch_dir(k)
+        if key in _FSTAT_CTR_TABLE_REGISTRY:
+            self._fstat_ctr_table = _FSTAT_CTR_TABLE_REGISTRY[key]
+            return
+
+        from lisatools.sampling.fstat_gridfit import (
+            CENTER_TABLE_BASENAME,
+            build_fstat_center_table,
+        )
+
+        # Only build the scorer when a sweep is actually needed: under
+        # FSTAT_USE_SIGHET the call is a bucketed shared-reference build, far
+        # too expensive to pay on the checkpoint-load path.
+        need_sweep = not os.path.exists(
+            os.path.join(key, CENTER_TABLE_BASENAME))
+        call = (self._fstat_call(model, self._fstat_reference_walker(model))
+                if (need_sweep and model is not None) else None)
+        t0 = time.perf_counter()
+        host = build_fstat_center_table(
+            call, cache_dir=key, xp=self.xp,
+            mc_lims=self.fstat_fit_kwargs.get("mc_lims") or [0.001, 1.0],
+            max_nodes=int(os.environ.get("GB_FSTAT_CTR_MAX_NODES", "1000000")),
+        )
+        table = None
+        if host is not None:
+            # Device residency: setup() runs inside the move's own propose,
+            # so self.xp lands these on the run's current device (same
+            # contract the buffers rely on).
+            table = {name: self.xp.asarray(host[name])
+                     for name in self._CTR_TABLE_DEVICE_FIELDS}
+            logger.info(
+                "[FSTAT_CTR %s] epoch %d center table: %d nodes, f0 "
+                "%.5f-%.5f mHz, smear %.2f, ready in %.1fs", self.name, k,
+                int(host["f0_mHz"].size), float(host["f0_mHz"][0]),
+                float(host["f0_mHz"][-1]), self._fstat_ctr_smear(),
+                time.perf_counter() - t0)
+        else:
+            logger.warning(
+                "%s: epoch %d has no F-stat center table; the RJ distance "
+                "birth falls back to the per-unit hoist.", self.name, k)
+        self._fstat_ctr_table = table
+        _FSTAT_CTR_TABLE_REGISTRY[key] = table
+
     def _install(self, k: int, stacked=None, n_peaks=None):
         from lisatools.sampling.fstat_gridfit import build_gb_birth_distribution
 
@@ -8792,15 +9007,18 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                 self.rj_proposal_distribution = container
                 self._fstat_epoch = epoch
                 self._fstat_last_fit_hit = int(self.num_proposals)
+                self._install_ctr_table(epoch, model=model)
                 return
 
         if action == "load":
             logger.info("%s: loading complete F-stat grid epoch %d from %s",
                         self.name, k, self._epoch_dir(k))
             self._install(k)
+            self._install_ctr_table(k, model=model)
             return
         stacked, n_peaks = self._run_fstat_fit(model, k)
         self._install(k, stacked=stacked, n_peaks=n_peaks)
+        self._install_ctr_table(k, model=model)
 
 
 def para_log_like(

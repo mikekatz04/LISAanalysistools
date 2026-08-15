@@ -158,7 +158,15 @@ export GB_BUFFER_FIXED_CAPACITY=1  # ONE capacity buffer; smaller units
                                    # resize-rebind instead of drop+rebuild
 export GB_RJ_FSTAT_CTR_HOIST=1     # F-stat distance centers batched once per
                                    # unit (was 735 s/propose per-round)
-export GB_FSTAT_CTR_SMEAR=1.5      # sigma widening covering mid-unit
+# EPOCH CENTERS (user ruling 2026-08-15: compute the center
+# distributions ONCE when the fstat distribution is built in setup(),
+# smear for inaccuracy, done): per-epoch table over the proposal's
+# drawable support; propose-time = nearest-node lookup (centers chain
+# 109-953 s -> ~0). Smear defaults 2.0 in epoch mode (covers <=100-
+# propose staleness + node mismatch); =unit restores the per-unit hoist.
+export GB_FSTAT_CTR_MODE=epoch
+# (GB_FSTAT_CTR_SMEAR unset on purpose -- a 1.5 pin would override the
+# epoch-mode 2.0 default.)  # sigma widening covering mid-unit
                                    # residual drift (feeds draw AND densities)
 export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # High-f barren-band birth shutoff (search scope): bands above FMIN with
