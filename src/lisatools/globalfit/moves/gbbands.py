@@ -83,82 +83,170 @@ _SPECIAL_INDEX_BASE = int(1e6)
 _WDM_SLAB_LEAKAGE_LAYERS = 2
 
 
-def check_band_stride_separation(
+def band_support_halfwidths(
+    band_edges, Tobs: float, *, oversample: int = 4, amp: float = 1e-30
+) -> np.ndarray:
+    """Edge-source half-supports ``s(f_hi_b) = get_N(f_hi_b) / Tobs`` (Hz).
+
+    A single GB chunked-heterodyne source generates an initial
+    FREQUENCY-DOMAIN heterodyned waveform whose size is set by the
+    installed :func:`gbgpu.utils.utility.get_N` (the same function the
+    production FD/chunked-het paths use to size per-source windows --
+    never reimplemented here). A source at frequency ``f`` can therefore
+    carry FD support reaching ``get_N(f) * df`` (``df = 1/Tobs``) beyond
+    ``f`` on each side; a source at a band's TOP edge is the worst case
+    for that band, so per band the half-support (overhang) is evaluated
+    at ``f_hi_b``. This array is the single source of truth for the
+    leakage bookkeeping checks (separation guard + slab coverage).
+    """
+    from gbgpu.utils.utility import get_N
+
+    edges = np.asarray(asnumpy(band_edges), dtype=float)
+    df = 1.0 / float(Tobs)
+    return np.asarray([
+        float(get_N(amp, f, Tobs, oversample=oversample).item()) * df
+        for f in edges[1:]
+    ])
+
+
+def check_band_support_separation(
     band_edges,
-    layer_df: float,
+    Tobs: float,
     stride: int,
     *,
-    min_layers_required: float = 1.0,
+    sep_factor: Optional[float] = None,
+    oversample: int = 4,
+    amp: float = 1e-30,
     context: str = "",
-) -> float:
-    """Validate the band-unit stride against the band grid's minimum width.
+    enforce: bool = True,
+) -> dict:
+    """SUPPORT-based same-unit separation check for the GB band scheduling.
 
     PHYSICS RULING (user, verified premise): an FD inner product of ~0
     implies a WDM inner product of ~0, EVEN within one wavelet layer.
     The concurrency constraint for GB sub-bands is therefore
     ORTHOGONALITY (frequency separation), NOT disjoint wavelet-pixel
     support: two sources separated by ``|df| * Tobs >> 1`` have
-    ``<h_i|h_j> ~ 0``, so by bilinearity their likelihood deltas add
-    (``dll(h_i + h_j) ~ dll_i + dll_j``) and their evaluations may run
-    CONCURRENTLY in independent buffer components with no sequential
-    conditioning. The one place orthogonality weakens is BOUNDARY PAIRS
-    (sources near a shared band edge, small ``df``) -- which is exactly
-    what the stride guard protects: with stride-``k`` unit scheduling
-    (unit = ``band_index % k``), the closest same-unit bands have
-    ``k - 1`` closed bands between them, so the same-unit frequency
-    separation floor is ``(k - 1) * min_band_width``.
+    ``<h_i|h_j> ~ 0``, so by bilinearity their likelihood deltas add and
+    their evaluations may run CONCURRENTLY in independent buffer
+    components. Boundary pairs (sources near a shared band edge) are the
+    one place orthogonality weakens.
 
-    ENFORCED RULE: ``(stride - 1) * min_band_width_layers >=
-    min_layers_required`` (with a 1e-9 relative tolerance). At the
-    default ``min_layers_required = 1.0`` this keeps same-unit
-    likelihood windows (``m_band_half_width = 1`` layer each side)
-    sharing at most 1 layer -- today's measured-safe stride-2 /
-    1-layer-band configuration (~3e-5 lnL bias, 5 orders of headroom).
-    For sub-layer bands of minimum width ``1/div`` layers this resolves
-    to ``stride >= div + 1``.
+    THE RULE (2026-08-15 user width ruling; supersedes both the earlier
+    ``div + 1`` and layer-width-inequality formulas): separation is
+    measured in units of the sources' own FD SUPPORT. A source at
+    frequency ``f`` has edge half-support ``s(f) = get_N(f) / Tobs`` Hz
+    (see :func:`band_support_halfwidths`). For every same-unit band pair
+    ``(b, b + stride)`` -- the closest concurrent bands, with
+    ``stride - 1`` closed bands between them -- the enforced inequality
+    is::
+
+        gap = edges[b + stride] - edges[b + 1]
+            >= sep_factor * (s(edges[b + 1]) + s(edges[b + stride]))
+
+    with ``sep_factor`` = ``GB_ORTHO_SEP_FACTOR`` (default 1.0 =
+    edge-source supports may just touch but never overlap; 1e-9 relative
+    tolerance for the exact-equality case).
+
+    DERIVED MINIMUM STRIDE under the ``get_n`` width rule (band width =
+    its own minimum ``w_b = 2 * get_N(f_hi_b) / Tobs``, maximal
+    packing): for ``stride = 2`` the gap is one band,
+    ``gap = w_{b+1} = 2 * s(f_hi_{b+1})``, while the overhang sum is
+    ``s(f_hi_b) + s(f_hi_{b+1}) <= 2 * s(f_hi_{b+1})`` because ``get_N``
+    is non-decreasing in ``f`` -- so **stride 2 always satisfies factor
+    1.0** (equality exactly when ``get_N`` is flat across the middle
+    band). ``stride = 3`` adds a full band of clearance
+    (``gap >= overhang sum + one band width``), covering factors up to
+    ~2. Grids NOT built by the width rule (legacy uniform layers,
+    explicit overrides) can genuinely fail at stride 2 -- that is what
+    ``min_safe_stride`` in the returned summary reports.
 
     Args:
-        band_edges: Ascending band-edge frequencies (Hz); any array-like
-            (cupy accepted).
-        layer_df: WDM layer width (Hz).
-        stride: Band-unit stride (``band_units`` on the move /
+        band_edges: Ascending band-edge frequencies (Hz), free-floating
+            (any array-like; cupy accepted).
+        Tobs: Observation time (s); ``df = 1/Tobs``.
+        stride: Band-unit stride to validate (``band_units`` /
             ``GB_BAND_UNIT_STRIDE``).
-        min_layers_required: Required same-unit separation in full WDM
-            layers (default 1.0, the measured-safe floor).
-        context: Optional label prepended to the error message.
+        sep_factor: Safety factor on the overhang sum. ``None`` resolves
+            from ``GB_ORTHO_SEP_FACTOR`` (default 1.0).
+        oversample / amp: Forwarded to ``get_N`` (the production sizing
+            call convention).
+        context: Label prepended to the error message.
+        enforce: ``True`` -> raise ``ValueError`` on failure; ``False``
+            -> only report (diagnostic mode).
 
     Returns:
-        The minimum band width in layers (diagnostic convenience).
+        dict with ``passes`` (bool at ``stride``), ``min_safe_stride``
+        (smallest stride in [2, 16] passing, or ``None``), ``worst``
+        ``(b, gap_hz, need_hz)`` for the tightest pair at ``stride``,
+        and ``support_hz`` (the per-band edge half-supports).
 
     Raises:
-        ValueError: When the separation floor is not met.
+        ValueError: When ``enforce`` and any same-unit pair violates the
+            inequality at ``stride``.
     """
     edges = np.asarray(asnumpy(band_edges), dtype=float)
+    if sep_factor is None:
+        sep_factor = float(os.environ.get("GB_ORTHO_SEP_FACTOR", "1.0"))
+    sep_factor = float(sep_factor)
+    stride = int(stride)
+    out = {
+        "passes": True,
+        "min_safe_stride": 2 if edges.size >= 3 else None,
+        "worst": None,
+        "support_hz": np.zeros(max(0, edges.size - 1)),
+        "sep_factor": sep_factor,
+    }
     if edges.size < 3:
         # 0 or 1 band: no two bands are ever concurrent.
-        return float("inf")
-    stride = int(stride)
-    min_width_layers = float(np.min(np.diff(edges)) / float(layer_df))
+        return out
+    s = band_support_halfwidths(edges, Tobs, oversample=oversample, amp=amp)
+    out["support_hz"] = s
+    nb = edges.size - 1
     tol = 1e-9
-    if (stride - 1) * min_width_layers < min_layers_required * (1.0 - tol):
-        required = 1 + int(np.ceil(
-            min_layers_required / min_width_layers * (1.0 - tol)
-        ))
-        raise ValueError(
-            f"{context + ': ' if context else ''}band-unit stride {stride} is "
-            f"unsafe for this band grid: the narrowest band spans "
-            f"{min_width_layers:.4g} WDM layers, so same-unit bands are only "
-            f"(stride-1) * {min_width_layers:.4g} = "
-            f"{(stride - 1) * min_width_layers:.4g} layers apart, below the "
-            f"{min_layers_required:.4g}-layer orthogonality floor "
-            f"(same-unit likelihood windows spread m_band_half_width=1 layer "
-            f"each side and must not overlap beyond the tested 1-shared-layer "
-            f"configuration). Use GB_BAND_UNIT_STRIDE >= {required} (rule: "
-            f"(stride - 1) * min_band_width_layers >= "
-            f"{min_layers_required:.4g}; for 1/div-layer minimum bands this "
-            f"is stride >= div + 1)."
+
+    def _eval(k: int):
+        """(passes, worst_pair) over same-unit adjacent pairs at stride k."""
+        if nb <= k:
+            return True, None
+        b = np.arange(nb - k)
+        # band b's top edge is edges[b+1] (half-support s[b]); band
+        # (b+k)'s low edge is edges[b+k] (half-support s[b+k-1], the
+        # get_N at that edge = the (b+k-1) band's top-edge value).
+        gap = edges[b + k] - edges[b + 1]
+        need = sep_factor * (s[b] + s[b + k - 1])
+        margin = gap - need * (1.0 - tol)
+        j = int(np.argmin(margin))
+        return bool(np.all(margin >= 0.0)), (
+            int(b[j]), float(gap[j]), float(need[j])
         )
-    return min_width_layers
+
+    passes, worst = _eval(stride)
+    out["passes"] = passes
+    out["worst"] = worst
+    min_safe = None
+    for k in range(2, min(17, nb + 1)):
+        ok, _ = _eval(k)
+        if ok:
+            min_safe = k
+            break
+    out["min_safe_stride"] = min_safe
+    if enforce and not passes:
+        b, gap_hz, need_hz = worst
+        raise ValueError(
+            f"{context + ': ' if context else ''}band-unit stride {stride} "
+            f"is unsafe for this band grid: same-unit bands {b} and "
+            f"{b + stride} are separated by {gap_hz:.4e} Hz but their "
+            f"edge-source FD supports reach "
+            f"{need_hz:.4e} Hz into the gap (sep_factor {sep_factor:.3g} x "
+            f"(get_N(f_hi_low_band) + get_N(f_lo_high_band)) / Tobs). "
+            f"Concurrently scheduled sources near those edges would have "
+            f"overlapping supports (<h_i|h_j> not ~ 0). Minimum safe "
+            f"stride for this grid: {min_safe} (rule: gap >= "
+            f"GB_ORTHO_SEP_FACTOR * sum of edge half-supports; the "
+            f"2*get_N width rule guarantees stride 2 at factor 1.0)."
+        )
+    return out
 
 
 def pack_special_index(temp_inds, walker_inds, band_inds, nwalkers: int):
@@ -2458,10 +2546,15 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             # default (never overridden by gb_likelihood).
             _ldf = float(self.df) if not hasattr(self.df, "item") else self.df.item()
             _edges = self.xp.asarray(self.band_edges)
-            # np.rint (not astype(int)) so exactly-layer-aligned edges do
-            # not truncate a layer low and overstate the span
-            _lo = self.xp.rint(_edges[:-1] / _ldf).astype(int)
-            _hi = self.xp.rint(_edges[1:] / _ldf).astype(int)
+            # TOUCHED-LAYER span (band edges are free-floating frequencies,
+            # 2026-08-15 user ruling -- never assume layer alignment): the
+            # layers a band [lo, hi) touches are floor(lo/ldf) ..
+            # ceil(hi/ldf) - 1, so a band straddling a layer boundary
+            # counts BOTH layers. The 1e-6-layer epsilon keeps exactly
+            # aligned edges (the uniform mode) from gaining a layer on
+            # float noise -- bit-identical spans there.
+            _lo = self.xp.floor(_edges[:-1] / _ldf + 1e-6).astype(int)
+            _hi = self.xp.ceil(_edges[1:] / _ldf - 1e-6).astype(int)
             _max_span = max(1, int(self.xp.max(_hi - _lo)))
             _hw = 1
             if slab_Nf < _max_span + 2 * _hw:
@@ -2475,38 +2568,107 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                     f"too-small slab silently clips edge sources out of "
                     f"the likelihood."
                 )
+            # FD-support coverage check (2026-08-15 "strong checks" user
+            # ruling): each band's slab must cover the maximum
+            # single-source support of any source the band can hold,
+            # i.e. [f_lo - get_N(f_hi)*df, f_hi + get_N(f_hi)*df]. With
+            # the centered whole-layer origins below that means
+            # slab_Nf >= touched_span + 2*ceil(support/layer_df). An
+            # explicit slab below this floor raises loudly;
+            # GB_SLAB_SUPPORT_CHECK=0 downgrades to a warning (escape
+            # hatch for legacy grids where the +-1-layer WDM window
+            # analysis, not the FD support envelope, is the operative
+            # bound).
+            _Tobs = float(getattr(self._basis_settings, "Tobs"))
+            _support = band_support_halfwidths(
+                np.asarray(asnumpy(self.band_edges), dtype=float), _Tobs
+            )
+            _sup_layers = np.ceil(_support / _ldf - 1e-6).astype(int)
+            _spans = np.maximum(1, asnumpy(_hi) - asnumpy(_lo))
+            _required = int(np.max(_spans + 2 * _sup_layers))
+            if slab_Nf < min(_required, int(self._basis_settings.Nf_active)):
+                _msg = (
+                    f"GB_WDM_BAND_SLAB_LAYERS={slab_Nf} does not cover the "
+                    f"worst-case single-source FD support of this band "
+                    f"grid: a source at a band's top edge reaches "
+                    f"get_N(f_hi)/Tobs = {float(_support.max()):.4e} Hz "
+                    f"(= {int(_sup_layers.max())} layers) beyond the "
+                    f"band, so the slab must span >= {_required} layers "
+                    f"(touched span + 2*ceil(support/layer_df)). Use "
+                    f"GB_WDM_BAND_SLAB_LAYERS=0 for auto-sizing, or set "
+                    f"GB_SLAB_SUPPORT_CHECK=0 to accept the +-1-layer "
+                    f"WDM-window bound instead."
+                )
+                if os.environ.get("GB_SLAB_SUPPORT_CHECK", "1") == "1":
+                    raise ValueError(_msg)
+                logger.warning(_msg)
         else:
-            # Auto: cover the widest band + leakage + guard on each side.
-            slab_Nf = self.recommend_band_slab_layers(
+            # Auto: cover the widest band + max(leakage, FD support) +
+            # guard on each side (support-aware sizing, 2026-08-15
+            # ruling; Tobs threads through so the slab always covers
+            # [f_lo - get_N(f_hi)*df, f_hi + get_N(f_hi)*df]).
+            # Class-qualified call (staticmethod): keeps the duck-typed
+            # stub dispatch working (see the band_slab_Nf docstring).
+            slab_Nf = SubBandBuffer.recommend_band_slab_layers(
                 self.band_edges,
                 float(self.df) if not hasattr(self.df, "item") else self.df.item(),
                 leakage=_WDM_SLAB_LEAKAGE_LAYERS,
                 guard=self._wdm_slab_guard_layers,
                 xp=self.xp,
+                Tobs=float(getattr(self._basis_settings, "Tobs")),
             )
-        # Never exceed the parent active band.
+        # Never exceed the parent active band. (If the support-aware
+        # requirement exceeds Nf_active, the full active band is the
+        # best possible coverage -- the legacy full-band semantics.)
         return int(min(slab_Nf, self._basis_settings.Nf_active))
 
     @staticmethod
     def recommend_band_slab_layers(band_edges, layer_df, leakage=_WDM_SLAB_LEAKAGE_LAYERS,
-                                   guard=1, xp=np) -> int:
+                                   guard=1, xp=np, Tobs=None, oversample=4,
+                                   amp=1e-30) -> int:
         """Recommended per-band slab extent (WDM layers) for task-b.
 
-        ``max_band_span + 2*(leakage + guard)``: the widest band's layer span
-        plus enough neighbor layers on each side to cover the chunked-het
-        template spread (``leakage``, ~2 for the recommended Tukey window)
-        and a safety ``guard``. This is what ``wdm_band_slab_layers=0``
-        (auto) resolves to; ``check_wdm_band_slab.py`` prints it alongside a
-        measured leakage estimate.
+        Band edges are FREE-FLOATING frequencies (2026-08-15 user ruling
+        -- the scheduling division is independent of the WDM
+        pixelization); only the STORAGE slabs are layer-derived, so each
+        band's actual frequency range is floored/ceiled to whole layers
+        here: the layers a band ``[lo, hi)`` TOUCHES are
+        ``floor(lo/ldf) .. ceil(hi/ldf) - 1`` (a band straddling a layer
+        boundary counts both layers; a 1e-6-layer epsilon keeps exactly
+        aligned uniform-mode edges from gaining a layer on float noise,
+        bit-identical there).
+
+        Sizing = ``max over bands of (touched_span_b + 2 * (margin_b +
+        guard))`` where ``margin_b = max(leakage,
+        ceil(support_b / layer_df))``:
+
+        * ``leakage`` (~2 layers for the recommended Tukey window)
+          covers the WDM template spread beyond the carrier layers;
+        * when ``Tobs`` is given, ``support_b = get_N(f_hi_b)/Tobs`` is
+          the band's worst-case single-source FD half-support (leakage
+          bookkeeping, 2026-08-15 "strong checks" ruling: the slab must
+          cover ``[f_lo - get_N(f_hi)*df, f_hi + get_N(f_hi)*df]``).
+          ``Tobs=None`` keeps the legacy leakage-only margins
+          (back-compat for diagnostic scripts).
+
+        This is what ``wdm_band_slab_layers=0`` (auto) resolves to;
+        ``check_wdm_band_slab.py`` prints it alongside a measured
+        leakage estimate.
         """
-        edges = xp.asarray(band_edges)
-        lo = (edges[:-1] / layer_df).astype(int)
-        hi = (edges[1:] / layer_df).astype(int)
-        # Layer count of the widest band. Edges are layer-aligned frequency
-        # boundaries, so ``hi - lo`` is the exclusive layer span (1 for a
-        # 1-layer band); floor to >= 1 for sub-layer bands.
-        max_span = max(1, int(xp.max(hi - lo)))
-        return int(max_span + 2 * (int(leakage) + int(guard)))
+        edges = np.asarray(asnumpy(band_edges), dtype=float)
+        ldf = float(layer_df)
+        lo = np.floor(edges[:-1] / ldf + 1e-6).astype(int)
+        hi = np.ceil(edges[1:] / ldf - 1e-6).astype(int)
+        spans = np.maximum(1, hi - lo)
+        margin = np.full(spans.shape, int(leakage))
+        if Tobs is not None:
+            support = band_support_halfwidths(
+                edges, float(Tobs), oversample=oversample, amp=amp
+            )
+            margin = np.maximum(
+                margin, np.ceil(support / ldf - 1e-6).astype(int)
+            )
+        return int(np.max(spans + 2 * (margin + int(guard))))
 
     @property
     def slab_min_f(self):
@@ -2538,12 +2700,22 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             return None
         ldf = float(self.df) if not hasattr(self.df, "item") else self.df.item()
         band_inds = self.unique_band_combos[:, 2]
-        # Center the slab on the band (its [lo, hi] layer span), so the
-        # m_band_half_width spread on either side of any source in the band
-        # stays inside the slab as long as slab_Nf >= band_span + 2*hw.
-        lo_layer = (self.band_edges[band_inds] / ldf).astype(self.xp.int32)
-        hi_layer = (self.band_edges[band_inds + 1] / ldf).astype(self.xp.int32)
-        center = (lo_layer + hi_layer) // 2
+        # Center the slab on the band's TOUCHED whole-layer range (band
+        # edges are free-floating frequencies, 2026-08-15 user ruling --
+        # never assume layer alignment): the layers a band [lo, hi)
+        # touches are floor(lo/ldf) .. ceil(hi/ldf) - 1, so a band
+        # straddling a layer boundary is centered over BOTH layers. The
+        # 1e-6-layer epsilon keeps exactly aligned uniform-mode edges
+        # bit-identical (center formula reduces to the legacy
+        # (lo + hi) // 2 there). Coverage: slab_Nf (support-aware, see
+        # _compute_band_slab_Nf) >= touched_span + margins each side.
+        lo_layer = self.xp.floor(
+            self.band_edges[band_inds] / ldf + 1e-6
+        ).astype(self.xp.int32)
+        hi_layer_excl = self.xp.ceil(
+            self.band_edges[band_inds + 1] / ldf - 1e-6
+        ).astype(self.xp.int32)
+        center = (lo_layer + hi_layer_excl - 1) // 2
         origins = center - slab_Nf // 2
         parent = self._basis_settings
         lo = int(parent.ind_min_f)

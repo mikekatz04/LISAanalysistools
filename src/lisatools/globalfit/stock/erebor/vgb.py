@@ -284,6 +284,10 @@ class VGBSettings(GBSettings):
     band_target_count: int = dataclasses.field(
         default_factory=env_default("VGB_BAND_TARGET_COUNT", 0, int)
     )
+    # DEPRECATED like the GB field (2026-08-15 width ruling: get_n bands
+    # are sized by 2*get_N(f_max_band)/Tobs); 1.0 = the legacy default,
+    # ignored without a warning; any other value is warned about and
+    # ignored by the builder.
     band_min_layers: float = dataclasses.field(
         default_factory=env_default("VGB_BAND_MIN_LAYERS", 1.0, float)
     )

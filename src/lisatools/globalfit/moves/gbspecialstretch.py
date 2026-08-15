@@ -353,9 +353,13 @@ def _ortho_boundary_pairs(
     """Closest-frequency same-unit cross-band source pairs (per walker).
 
     Boundary pairs are where the orthogonality premise (see
-    :func:`lisatools.globalfit.moves.gbbands.check_band_stride_separation`)
+    :func:`lisatools.globalfit.moves.gbbands.check_band_support_separation`)
     is weakest: sources in DIFFERENT bands of the SAME concurrency unit
-    (``band % units == remainder``) that are close in frequency. Within
+    (``band % units == remainder``) that are close in frequency --
+    exactly the edge-source pairs whose FD supports
+    (``get_N(f)/Tobs`` per side, the 2*get_N width rule's overhang
+    analysis) can reach across the closed band(s) between them. Ranking
+    by smallest ``|df|`` selects the worst such pairs. Within
     each walker's ``eligible`` sources (callers pass cold-chain alive),
     sort by ``f0`` and take every consecutive pair that crosses a band
     boundary; return the ``max_pairs`` smallest-``|df|`` pairs overall.
@@ -598,9 +602,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             run_tempering. PHYSICS RULING (user, verified premise): FD
             inner product ~0 implies WDM inner product ~0 even within one
             wavelet layer, so the concurrency constraint is ORTHOGONALITY
-            (frequency separation) -- the ctor enforces
-            ``(stride - 1) * min_band_width_layers >= 1`` on WDM grids
-            (see ``check_band_stride_separation``).
+            (frequency separation), measured in FD-SUPPORT terms: the
+            gap between same-unit bands vs the edge-source half-supports
+            ``get_N(f_edge)/Tobs`` (``check_band_support_separation``).
+            Hard enforcement lives at band-grid build time (the get_n
+            builder, whose 2*get_N width rule guarantees stride 2); the
+            ctor logs the verdict + minimum safe stride on WDM grids.
         num_band_preload: Staged-buffer slots PER RUN DEVICE
             (``GB_N_SUBBANDS``; total residency = this x n_gpus).
         run_swaps: Whether to run band-temperature swaps.
@@ -1000,23 +1007,42 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # unit loop (run_proposal) and the tempering unit loop
         # (run_tempering).
         self.band_units = _resolve_band_unit_stride(branch_name, band_units)
-        # ORTHOGONALITY concurrency guard (physics ruling -- see
-        # check_band_stride_separation): same-unit bands must keep >= 1
-        # full WDM layer of separation, i.e. (stride - 1) *
-        # min_band_width_layers >= 1. Whole-layer bands at stride 2 (the
-        # legacy default) pass exactly; sub-layer band grids need the
-        # matching stride bump (min width 1/div layers -> stride >= div+1)
-        # and are refused loudly otherwise. WDM basis only (FD bands are
-        # get_N-wide, far beyond any window spread).
+        # ORTHOGONALITY concurrency diagnostic (physics ruling; 2026-08-15
+        # support-based form -- see check_band_support_separation): the
+        # gap between same-unit bands is compared against the sum of the
+        # edge-source FD half-supports get_N(f_edge)/Tobs. HARD
+        # enforcement lives at band-grid BUILD time (the get_n builder
+        # raises; the width rule guarantees stride 2 there); here the
+        # ctor only LOGS the verdict + minimum safe stride -- the legacy
+        # uniform grids fail this conservative envelope at high f by
+        # design (their +-1-layer WDM windows, not the FD support, are
+        # the operative bound; measured-safe) and must never be refused.
+        # The [GB_ORTHO_LL] runtime monitor (default ON) is the
+        # accuracy backstop for every grid. WDM basis only.
         if isinstance(self._basis_settings, WDMSettings):
-            from .gbbands import check_band_stride_separation
+            from .gbbands import check_band_support_separation
 
-            check_band_stride_separation(
-                band_edges,
-                float(self._basis_settings.layer_df),
-                self.band_units,
-                context=f"{name or type(self).__name__} (branch {branch_name})",
-            )
+            try:
+                _sep = check_band_support_separation(
+                    band_edges,
+                    float(self._basis_settings.Tobs),
+                    self.band_units,
+                    enforce=False,
+                    context=f"{name or type(self).__name__} "
+                            f"(branch {branch_name})",
+                )
+                logger.info(
+                    "%s: support-based same-unit separation at stride %d: "
+                    "passes=%s, min safe stride %s (sep_factor %.3g).",
+                    name or type(self).__name__, self.band_units,
+                    _sep["passes"], str(_sep["min_safe_stride"]),
+                    float(_sep["sep_factor"]),
+                )
+            except Exception as exc:  # diagnostic only -- never block a move
+                logger.warning(
+                    "%s: support-separation diagnostic skipped: %r",
+                    name or type(self).__name__, exc,
+                )
         # Info-matrix jump scale (Gaussian draw through the Cholesky factor).
         self.jump_factor = float(jump_factor)
         # Env override (knob = capitalized field, branch-prefixed). The
@@ -2301,11 +2327,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         historical odd/even parity; ``GB_BAND_UNIT_STRIDE``, default 2 =
         bit-identical legacy). A unit's bands run CONCURRENTLY in
         independent buffer cells -- valid because same-unit bands keep
-        ``band_units - 1`` closed bands (>= 1 full WDM layer, ctor
-        guard) of separation, so cross-cell template overlaps
-        ``<h_i|h_j>`` are ~0 and likelihood deltas add by bilinearity
-        (the orthogonality physics ruling; monitors: GB_ORTHO_CHECK /
-        GB_ORTHO_LL_CHECK).
+        ``band_units - 1`` closed bands of separation, sized against the
+        edge-source FD supports (``check_band_support_separation``; the
+        get_n 2*get_N width rule guarantees stride 2), so cross-cell
+        template overlaps ``<h_i|h_j>`` are ~0 and likelihood deltas add
+        by bilinearity (the orthogonality physics ruling; monitors:
+        GB_ORTHO_CHECK / GB_ORTHO_LL_CHECK).
 
         For each band-parity unit: *open* the parity class (cold-chain
         templates restored into the parent residual so every central-band
@@ -6808,7 +6835,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # generalizes the historical hard-coded parity 2. Same stride as
         # the proposal units in run_proposal, so the concurrently-open
         # band separation guarantee -- (stride - 1) bands >= 1 WDM layer
-        # (orthogonality floor; see check_band_stride_separation) -- holds
+        # (orthogonality; see check_band_support_separation) -- holds
         # here too. Swaps only exchange templates between temperatures
         # WITHIN a band, so every band still receives its swaps across
         # the ``units`` sequential passes. num_bands == 1 keeps the

@@ -190,21 +190,31 @@ def main():
                              "default from GB_BAND_EDGES_MODE)")
     parser.add_argument("--target-count", type=int,
                         default=int(os.environ.get("GB_BAND_TARGET_COUNT", "0")),
-                        help="approximate band-count target (0 = natural "
-                             "get_N widths; default from GB_BAND_TARGET_COUNT)")
+                        help="optional coarsening: merge adjacent "
+                             "minimum-width (2*get_N) bands down to ~this "
+                             "many (0 = maximal packing at the floor, the "
+                             "default; default from GB_BAND_TARGET_COUNT)")
     parser.add_argument("--min-layers", type=float,
-                        default=float(os.environ.get("GB_BAND_MIN_LAYERS", "1.0")),
-                        help="minimum band width in WDM layers (default "
-                             "from GB_BAND_MIN_LAYERS)")
+                        default=(float(os.environ["GB_BAND_MIN_LAYERS"])
+                                 if os.environ.get("GB_BAND_MIN_LAYERS")
+                                 else None),
+                        help="DEPRECATED: the get_n construction sizes bands "
+                             "by 2*get_N(f_max_band)/Tobs (2026-08-15 user "
+                             "ruling); a non-default value is warned about "
+                             "and ignored")
     parser.add_argument("--divisor", type=int,
                         default=int(os.environ.get("GB_SUBBAND_DIVISOR", "1")),
-                        help="subband divisor (default from GB_SUBBAND_DIVISOR)")
+                        help="DEPRECATED for get_n (free-floating edges, no "
+                             "snap grid; warned and ignored); only the legacy "
+                             "uniform mode uses it")
     parser.add_argument("--unit-stride", type=int,
                         default=int(os.environ.get("GB_BAND_UNIT_STRIDE", "2")),
                         help="band-unit stride the run will use (default from "
-                             "GB_BAND_UNIT_STRIDE); sub-layer --min-layers "
-                             "require (stride-1)*min_width_layers >= 1 "
-                             "(1/div-layer bands -> stride >= div+1)")
+                             "GB_BAND_UNIT_STRIDE); the builder enforces the "
+                             "support-based separation rule (gap between "
+                             "same-unit bands >= GB_ORTHO_SEP_FACTOR * sum of "
+                             "edge half-supports get_N(f)/Tobs); the 2*get_N "
+                             "width rule guarantees stride 2 at factor 1.0")
     parser.add_argument("--oversample", type=int, default=4)
     parser.add_argument("--extra-buffer", type=int, default=5)
     parser.add_argument("--fstat-fit-dir", default=None,

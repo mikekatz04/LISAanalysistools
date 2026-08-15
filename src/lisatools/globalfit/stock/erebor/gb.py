@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import typing
+import warnings
 from typing import Any, Optional
 
 import numpy as np
@@ -35,146 +37,194 @@ def get_n_based_band_edges(
     oversample: int = 4,
     extra_buffer: int = 5,
     target_count: int = 0,
-    min_band_layers: float = 1.0,
+    min_band_layers: typing.Optional[float] = None,
     unit_stride: int = 2,
+    sep_factor: typing.Optional[float] = None,
     amp: float = 1e-30,
 ) -> np.ndarray:
-    """Variable-width GB band edges on the WDM layer grid, sized by ``get_N``.
+    """FREE-FLOATING GB band edges at the ``2 * get_N`` minimum width.
 
-    Modeled on the legacy FD band construction (the ``init_band_structure``
-    FD path): the natural band width at frequency ``f`` is the legacy step
+    THE WIDTH RULE (user ruling, 2026-08-15): each sub-band's width is
+    the MINIMUM the chunked-heterodyne bookkeeping allows,
 
-    ``w_nat(f) = (2 * get_N(amp, f, Tobs, oversample) + extra_buffer) / Tobs``
+        ``w_band = 2 * get_N(f_max_band) / Tobs``  (Hz),
 
-    so low-frequency bands (small ``get_N``) come out narrow and
-    high-frequency bands (large ``get_N``) wide. Unlike the legacy FD rule
-    the edges are QUANTIZED to the WDM band grid: every edge lands on a
-    ``k * layer_df / subband_divisor`` boundary (the same grid the
-    ``"uniform"`` mode uses), each band spans an integer number of grid
-    units, and no band is narrower than ``min_band_layers`` WDM layers
-    (see ``GBSettings.band_min_layers``). SUB-LAYER minimum widths
-    (``min_band_layers < 1``, e.g. 0.5 with ``subband_divisor=2``) are a
-    SCHEDULING-ONLY division (user architecture ruling): the WDM buffer
-    slabs keep whole layers regardless -- the finer bands only decide
-    which sources may be in flight concurrently. They are allowed only
-    when ``unit_stride`` (the band-unit stride the move will run,
-    ``GB_BAND_UNIT_STRIDE``) keeps same-unit bands >= 1 full layer apart:
-    ``(unit_stride - 1) * min_band_width_layers >= 1``, i.e. minimum
-    width ``1/div`` layers requires ``unit_stride >= div + 1``; the
-    builder raises loudly otherwise (orthogonality floor -- see
-    :func:`lisatools.globalfit.moves.gbbands.check_band_stride_separation`
-    for the physics ruling). The outermost edges are the same
-    full-layer boundaries the uniform mode produces
-    (``ceil(start_freq/layer_df)`` / ``floor(end_freq/layer_df)``).
+    where :func:`gbgpu.utils.utility.get_N` is the installed production
+    function that sizes the initial frequency-domain heterodyned
+    waveform of a single GB chunked-het source (the same call the
+    FD/chunked-het paths use for per-source windows -- reused, never
+    reimplemented), evaluated at the maximum frequency IN the band. The
+    builder MAXIMIZES the number of sub-bands: it packs minimum-width
+    bands left-to-right across ``[start_freq, end_freq]`` and never
+    widens a band beyond its own floor, with exactly two documented
+    exceptions:
 
-    ``target_count`` semantics (the ``GB_BAND_TARGET_COUNT`` knob):
+    * the FINAL band is clamped to ``end_freq`` and absorbs the
+      remainder (merged into its neighbor when the remainder is below
+      the top band's floor), and
+    * the fixed-point resolution of the self-consistent width (below).
 
-    * ``0`` (default) -- "whatever get_N implies": widths are the natural
-      legacy widths (scale factor 1), floored at the minimum width.
-    * ``> 0`` -- a single multiplicative scale on ``w_nat`` is found by
-      bisection so the produced band count lands as close to
-      ``target_count`` as the integer/min-width quantization allows. The
-      count saturates at ``total_units / min_units`` (every band at the
-      minimum width) for large targets.
+    Self-consistency: the width depends on the band's own upper edge,
+    ``w = 2 * get_N(f_lo + w) / Tobs``. ``get_N`` is monotone
+    non-decreasing in ``f`` and returns discrete values, so iterating
+    ``w_{n+1} = 2 * get_N(f_lo + w_n) / Tobs`` from
+    ``w_0 = 2 * get_N(f_lo) / Tobs`` is a monotone non-decreasing
+    sequence over a finite value set: it converges EXACTLY to the least
+    fixed point in a few steps (typically 1-2; hard-capped with a loud
+    RuntimeError -- never a silent approximation).
 
-    The walk runs upward from the low edge; the last band is clamped to the
-    top boundary and merged into its neighbor if the remainder is narrower
-    than the minimum width, so all bands respect the floor.
+    FREE-FLOATING EDGES (2026-08-15 user ruling): edges are NOT snapped
+    to WDM layer (or fractional-layer) boundaries -- the frequency-based
+    parallel scheduling is fully independent of the WDM pixelization.
+    The outermost edges are ``start_freq`` / ``end_freq`` verbatim
+    (callers clamp those to the WDM active band first). Only the STORAGE
+    slabs are layer-derived (see ``SubBandBuffer.recommend_band_slab_layers``
+    / ``_compute_slab_min_f``: whole-layer origins/spans covering each
+    band's touched range plus max(leakage, FD-support) margins).
+    ``layer_df`` is used here only for the summary log's
+    layers-equivalent numbers.
+
+    LEAKAGE / SEPARATION GUARD ("strong checks" ruling): a source at a
+    band's top edge has FD support reaching ``get_N(f_hi)/Tobs`` Hz past
+    the edge, so same-unit concurrency is guarded in SUPPORT terms by
+    :func:`lisatools.globalfit.moves.gbbands.check_band_support_separation`
+    (gap between same-unit bands >= ``GB_ORTHO_SEP_FACTOR`` x the sum of
+    edge half-supports; the width rule guarantees stride 2 passes at
+    factor 1.0, stride 3 adds a full band of clearance -- see that
+    docstring for the derivation). The builder runs it on the final
+    edges and raises loudly on failure, then logs a one-line summary
+    (band count, width stats in FD bins and layer-widths, worst
+    overhang, minimum safe stride).
+
+    Knob semantics in this mode:
+
+    * ``target_count`` (``GB_BAND_TARGET_COUNT``) > 0 -- optional
+      COARSENING: adjacent minimum-width bands are merged (evenly
+      spread) down to ~``target_count`` bands. Merged bands are wider
+      than each member's floor, so the width rule's guarantees are
+      preserved. The count saturates at the maximal packing (a target
+      above it is a no-op); the default 0 IS the maximal packing.
+    * ``min_band_layers`` (``GB_BAND_MIN_LAYERS``) has NO role here (the
+      2*get_N rule is the authority) -- warned and ignored when set;
+      it belongs to the legacy uniform mode's era only.
+    * ``subband_divisor`` (``GB_SUBBAND_DIVISOR``) -- warned and
+      ignored; it only defines the snap grid of the legacy ``uniform``
+      mode.
+    * ``extra_buffer`` -- unused by this rule (the legacy FD walk keeps
+      it); accepted for signature compatibility.
 
     Returns:
         np.ndarray: ascending band edges (Hz), ``len(edges) - 1`` bands.
     """
-    div = max(1, int(subband_divisor))
-    if float(min_band_layers) <= 0.0:
-        raise ValueError(
-            f"min_band_layers={min_band_layers} must be > 0."
+    if int(subband_divisor) not in (0, 1):
+        warnings.warn(
+            "subband_divisor is ignored by the get_n band construction "
+            "(free-floating edges, 2026-08-15 user ruling: scheduling is "
+            "independent of the WDM pixelization); it only defines the "
+            "snap grid of the legacy 'uniform' mode.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-    min_units = max(1, int(round(float(min_band_layers) * div)))
-    # ORTHOGONALITY stride guard (physics ruling; the sub-band concurrency
-    # constraint is frequency separation, not wavelet-pixel support): the
-    # move schedules same-unit bands (``band_index % unit_stride``)
-    # concurrently, and each source's likelihood window spreads
-    # m_band_half_width=1 layer each side, so same-unit bands must stay
-    # >= 1 full WDM layer apart -- the measured-safe 1-shared-layer
-    # configuration (~3e-5 lnL bias, 5 orders of headroom). The minimum
-    # QUANTIZED band width is ``min_units / div`` layers and same-unit
-    # bands have ``unit_stride - 1`` bands between them, hence:
-    #     (unit_stride - 1) * (min_units / div) >= 1
-    # (=> stride >= div + 1 for 1/div-layer minimum bands). Whole-layer
-    # minima at the stride-2 default pass exactly (legacy behavior);
-    # sub-layer minima without the stride bump are refused loudly rather
-    # than silently unsafe.
-    _min_width_layers = min_units / div
-    if (int(unit_stride) - 1) * _min_width_layers < 1.0 - 1e-9:
-        _required = 1 + int(np.ceil((1.0 - 1e-9) / _min_width_layers))
-        raise ValueError(
-            f"min_band_layers={min_band_layers} (quantized minimum band "
-            f"width {_min_width_layers:.4g} layers) is unsafe under "
-            f"band-unit stride {int(unit_stride)}: same-unit bands would "
-            f"be only {(int(unit_stride) - 1) * _min_width_layers:.4g} "
-            "layers apart, below the 1-layer orthogonality floor "
-            "(adjacent same-unit likelihood windows would overlap beyond "
-            "the tested 1-shared-layer configuration). Set "
-            f"GB_BAND_UNIT_STRIDE >= {_required} (rule: (stride - 1) * "
-            "min_band_width_layers >= 1) or keep GB_BAND_MIN_LAYERS >= 1."
+    if min_band_layers is not None and float(min_band_layers) != 1.0:
+        warnings.warn(
+            "min_band_layers has no role in the get_n band construction "
+            "(2026-08-15 user ruling: band widths are set by "
+            "2*get_N(f_max_band)/Tobs, the minimum the chunked-het "
+            "bookkeeping allows); the value is ignored.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-    unit = float(layer_df) / div
-    # Same outer boundaries as the uniform mode: full-layer aligned. The
-    # 1e-8 epsilon keeps a start/end that ALREADY sits on the layer grid
-    # (e.g. the migration script feeding back stored edges with a
-    # reconstructed layer_df) from bumping to the next layer on float noise.
-    k_lo = int(np.ceil(start_freq / float(layer_df) - 1e-8)) * div
-    k_hi = int(np.floor(end_freq / float(layer_df) + 1e-8)) * div
-    if k_hi - k_lo < min_units:
+    start_freq = float(start_freq)
+    end_freq = float(end_freq)
+    if end_freq <= start_freq:
         raise ValueError(
-            "GB frequency range [{:.4e}, {:.4e}] spans fewer than one "
-            "minimum-width band ({} x layer_df/div = {:.4e}).".format(
-                start_freq, end_freq, min_units, min_units * unit
-            )
+            f"empty GB frequency range [{start_freq:.4e}, {end_freq:.4e}]."
         )
     df = 1.0 / float(Tobs)
 
-    def _width_units(k: int, scale: float) -> int:
-        f = k * unit
-        n_samp = get_N(amp, f, Tobs, oversample=oversample).item()
-        w_nat = (2.0 * n_samp + extra_buffer) * df
-        return max(min_units, int(round(scale * w_nat / unit)))
+    def _n_at(f: float) -> float:
+        return float(get_N(amp, f, Tobs, oversample=oversample).item())
 
-    def _build(scale: float) -> list:
-        ks = [k_lo]
-        k = k_lo
-        while k < k_hi:
-            k = min(k + _width_units(k, scale), k_hi)
-            ks.append(k)
-        # merge an under-width final remainder into the previous band
-        if len(ks) >= 3 and ks[-1] - ks[-2] < min_units:
-            del ks[-2]
-        return ks
+    def _min_width(f_lo: float) -> float:
+        # Least fixed point of w = 2 * get_N(f_lo + w) * df, iterated
+        # from below (monotone: get_N non-decreasing => the sequence is
+        # non-decreasing over get_N's finite value set => exact
+        # convergence). Cap + loud failure rather than silent drift.
+        w = 2.0 * _n_at(f_lo) * df
+        for _ in range(32):
+            w_next = 2.0 * _n_at(f_lo + w) * df
+            if w_next == w:
+                return w
+            if w_next < w:  # get_N must be non-decreasing; never trust silently
+                raise RuntimeError(
+                    f"get_N not monotone at f={f_lo:.6e} Hz "
+                    f"(w {w:.6e} -> {w_next:.6e}); cannot size bands."
+                )
+            w = w_next
+        raise RuntimeError(
+            f"band-width fixed point did not converge at f={f_lo:.6e} Hz "
+            f"(last w={w:.6e} Hz); get_N is expected to be a step "
+            "function with a handful of levels across one band."
+        )
 
-    scale = 1.0
-    if int(target_count) > 0:
-        target = int(target_count)
-        # count(scale) is non-increasing in scale; bisect on it. Bracket
-        # generously -- quantization makes count a step function, so keep
-        # the closest-count candidate seen.
-        lo, hi = 1e-4, 1e4
-        best = (abs(len(_build(1.0)) - 1 - target), 1.0)
-        for _ in range(80):
-            mid = np.sqrt(lo * hi)  # geometric bisection (scale is a ratio)
-            cnt = len(_build(mid)) - 1
-            best = min(best, (abs(cnt - target), mid))
-            if cnt > target:
-                lo = mid
-            elif cnt < target:
-                hi = mid
-            else:
-                break
-        else:
-            mid = best[1]
-        scale = mid
+    # Maximal packing at the floor: every band exactly its own minimum
+    # width, left-to-right.
+    fs = [start_freq]
+    f = start_freq
+    while f < end_freq:
+        f = min(f + _min_width(f), end_freq)
+        fs.append(f)
+    # The final band absorbs the remainder at the top edge: if the
+    # clamped last band is below ITS OWN floor (2*get_N(end_freq)*df),
+    # merge it into its neighbor (the one documented widening).
+    if len(fs) >= 3 and fs[-1] - fs[-2] < 2.0 * _n_at(end_freq) * df:
+        del fs[-2]
+    edges = np.asarray(fs, dtype=float)
 
-    edges = np.asarray(_build(scale), dtype=float) * unit
+    if int(target_count) > 0 and int(target_count) < len(edges) - 1:
+        # Optional coarsening: MERGE adjacent minimum-width bands, evenly
+        # spread, down to ~target_count. Keeps the outer edges and the
+        # relative get_N profile; merged widths exceed each member's
+        # floor, so every guarantee of the width rule still holds.
+        n = len(edges) - 1
+        keep = np.unique(np.round(
+            np.linspace(0, n, int(target_count) + 1)
+        ).astype(int))
+        edges = edges[keep]
+
     assert np.all(np.diff(edges) > 0)
+
+    # SUPPORT-based separation guard on the final edges (raises loudly)
+    # + the one-line bookkeeping summary (user "strong checks" ruling).
+    from ...moves.gbbands import (
+        band_support_halfwidths,
+        check_band_support_separation,
+    )
+
+    sep = check_band_support_separation(
+        edges, Tobs, int(unit_stride),
+        sep_factor=sep_factor, oversample=oversample, amp=amp,
+        context="get_n_based_band_edges", enforce=True,
+    )
+    widths = np.diff(edges)
+    support = band_support_halfwidths(
+        edges, Tobs, oversample=oversample, amp=amp)
+    ldf = float(layer_df)
+    logging.getLogger(__name__).info(
+        "[GB_BAND_EDGES get_n] %d bands over [%.4e, %.4e] Hz; widths "
+        "min/median/max = %.0f/%.0f/%.0f FD bins (%.3g/%.3g/%.3g "
+        "layer-widths); worst edge-source overhang %.3g layer-widths "
+        "(vs default slab margin max(leakage=2, support)+guard); "
+        "min safe stride %s at sep_factor %.3g (running stride %d).",
+        len(edges) - 1, edges[0], edges[-1],
+        float(np.min(widths) / df), float(np.median(widths) / df),
+        float(np.max(widths) / df),
+        float(np.min(widths) / ldf), float(np.median(widths) / ldf),
+        float(np.max(widths) / ldf),
+        float(np.max(support) / ldf),
+        str(sep["min_safe_stride"]), float(sep["sep_factor"]),
+        int(unit_stride),
+    )
     return edges
 
 
@@ -213,54 +263,48 @@ class GBSettings(Settings):
     # it REPLACES the per-WDM-layer edges derived in ``compute_band_edges``.
     band_edges_override: typing.Optional[typing.Any] = None
     # Subdivide each WDM layer into ``subband_divisor`` sub-bands when deriving
-    # band_edges (2 -> half-layer_df edges). Ignored if band_edges_override set.
-    # NOTE: sub-layer bands are SCHEDULING-ONLY (buffer slabs keep whole
-    # layers) and require the matching ``band_unit_stride`` bump --
-    # ``init_band_structure`` enforces the orthogonality rule
-    # ``(stride - 1) * min_band_width_layers >= 1`` on the actual edges
-    # (div-layer bands at the legacy stride 2 are refused loudly).
+    # band_edges in the legacy ``uniform`` mode ONLY (2 -> half-layer_df
+    # edges). Ignored if ``band_edges_override`` is set, and IGNORED (with a
+    # DeprecationWarning) by the ``get_n`` mode -- free-floating edges have
+    # no snap grid (2026-08-15 user ruling: the scheduling division is
+    # independent of the WDM pixelization).
     subband_divisor: int = dataclasses.field(
         default_factory=env_default("GB_SUBBAND_DIVISOR", 1, int)
     )
     # WDM band-edge construction mode (ignored if ``band_edges_override`` set):
     #   "uniform" [default] -> today's per-layer edges (one band per
     #           layer_df/subband_divisor step), bit-for-bit unchanged.
-    #   "get_n" -> VARIABLE-WIDTH bands modeled on the legacy FD get_N rule
-    #           (:func:`get_n_based_band_edges`): band width proportional to
-    #           ``(2*get_N(1e-30, f, Tobs, oversample) + extra_buffer)/Tobs``,
-    #           quantized to an integer number of layer-grid units
-    #           (layer_df/subband_divisor), minimum ``band_min_layers`` full
-    #           WDM layers. Low-f bands (small N) come out narrow, high-f
-    #           bands (large N) wide -> more parallel (temp, walker, band)
-    #           cells where sources are dense. Env: ``GB_BAND_EDGES_MODE``.
+    #   "get_n" -> FREE-FLOATING bands at the 2*get_N minimum width
+    #           (:func:`get_n_based_band_edges`; 2026-08-15 user rulings):
+    #           each band's width is its own MINIMUM
+    #           ``2 * get_N(f_max_band) / Tobs`` (the installed chunked-het
+    #           FD sizing function, self-consistent in the band's upper
+    #           edge), packed left-to-right for the MAXIMAL band count; no
+    #           snapping to layer boundaries -- scheduling is independent
+    #           of the WDM pixelization (storage slabs stay layer-derived).
+    #           Low-f bands (small N) come out narrow, high-f bands (large
+    #           N) wide -> more parallel (temp, walker, band) cells where
+    #           sources are dense. Env: ``GB_BAND_EDGES_MODE``.
     band_edges_mode: str = dataclasses.field(
         default_factory=env_default("GB_BAND_EDGES_MODE", "uniform", str)
     )
-    # Approximate TOTAL band count target for ``band_edges_mode="get_n"``.
-    # 0 [default] -> "whatever get_N implies": the natural legacy widths
-    # (scale factor 1). >0 -> the get_N-proportional widths are rescaled by a
-    # single factor (bisection) so the produced band count lands as close as
-    # the integer/min-width quantization allows to this target; the count
-    # saturates at total_grid_units/min_units for very large targets. Env:
-    # ``GB_BAND_TARGET_COUNT``.
+    # OPTIONAL COARSENING for ``band_edges_mode="get_n"``. 0 [default] ->
+    # maximal packing at the 2*get_N floor (the authority; most bands, each
+    # at its own minimum width). >0 -> adjacent minimum-width bands are
+    # MERGED (evenly spread) down to ~this many bands -- merged bands are
+    # wider than each member's floor, so the width rule's separation
+    # guarantees are preserved. Saturates at the maximal packing (a target
+    # above it is a no-op). Env: ``GB_BAND_TARGET_COUNT``.
     band_target_count: int = dataclasses.field(
         default_factory=env_default("GB_BAND_TARGET_COUNT", 0, int)
     )
-    # Minimum band width for ``band_edges_mode="get_n"``, in WDM layers
-    # (float). Default 1.0: every band spans at least one full layer_df,
-    # the same minimum today's uniform per-layer construction has --
-    # exactly safe under the stride-2 default (same-unit likelihood
-    # windows, m_band_half_width=1 layer per side, share at most 1 layer:
-    # the measured-safe configuration). SUB-LAYER values (< 1, e.g. 0.5
-    # with ``subband_divisor=2``) are a SCHEDULING-ONLY division (user
-    # ruling: buffer slabs keep whole layers) and REQUIRE the matching
-    # ``band_unit_stride`` bump -- the orthogonality rule
-    # ``(stride - 1) * min_band_width_layers >= 1`` (so 1/div-layer bands
-    # need stride >= div + 1); both the edge builder and
-    # ``init_band_structure`` raise loudly otherwise. Raise it (e.g. 2.0)
-    # for extra separation. Env: ``GB_BAND_MIN_LAYERS``.
-    band_min_layers: float = dataclasses.field(
-        default_factory=env_default("GB_BAND_MIN_LAYERS", 1.0, float)
+    # DEPRECATED (2026-08-15 user ruling): band widths in ``get_n`` mode
+    # are set by ``2 * get_N(f_max_band)/Tobs`` -- the minimum the
+    # chunked-het bookkeeping allows -- so a layer-based minimum width has
+    # NO role; a non-default value is warned about and ignored. The knob
+    # never affected the ``uniform`` mode. Env: ``GB_BAND_MIN_LAYERS``.
+    band_min_layers: typing.Optional[float] = dataclasses.field(
+        default_factory=env_default("GB_BAND_MIN_LAYERS", None, float)
     )
     # Band-unit stride for the GB move's concurrent sub-band scheduling
     # (flows to the moves as ``band_units`` via ``group_proposal_kwargs``).
@@ -272,10 +316,12 @@ class GBSettings(Settings):
     # unit loop and run_tempering. The orthogonality physics ruling
     # (FD inner product ~0 => WDM inner product ~0, even within one
     # wavelet layer) makes frequency separation -- not wavelet-pixel
-    # support -- the concurrency constraint, so the guard is
-    # ``(stride - 1) * min_band_width_layers >= 1``. Use 3-4 with
-    # sub-layer bands (``band_min_layers < 1``). Env:
-    # ``GB_BAND_UNIT_STRIDE``.
+    # support -- the concurrency constraint; the guard is SUPPORT-based
+    # (gap between same-unit bands >= GB_ORTHO_SEP_FACTOR x the sum of
+    # edge-source half-supports get_N(f_edge)/Tobs -- see
+    # ``check_band_support_separation``). Under the 2*get_N width rule
+    # stride 2 always passes at factor 1.0; stride 3 adds a full band of
+    # clearance. Env: ``GB_BAND_UNIT_STRIDE``.
     band_unit_stride: int = dataclasses.field(
         default_factory=env_default("GB_BAND_UNIT_STRIDE", 2, int)
     )
@@ -832,11 +878,15 @@ class GBSetup(Setup, GBSettings):
             div = max(1, int(getattr(self, "subband_divisor", 1)))
             _mode = str(getattr(self, "band_edges_mode", "uniform")).lower()
             if _mode == "get_n":
-                # Variable-width bands modeled on the legacy FD get_N rule
-                # (GB_BAND_EDGES_MODE=get_n): width proportional to get_N at
-                # the band's frequency, layer-grid aligned, min
-                # ``band_min_layers`` full layers per band. See
+                # FREE-FLOATING bands at the 2*get_N minimum width
+                # (GB_BAND_EDGES_MODE=get_n; 2026-08-15 user rulings): each
+                # band's width is 2*get_N(f_max_band)/Tobs, maximal
+                # packing, no layer snapping. See
                 # :func:`get_n_based_band_edges` for the knob semantics.
+                # subband_divisor / band_min_layers are passed only so the
+                # builder can warn-and-ignore when a user set them: they
+                # have no role in the 2*get_N width rule (min_band_layers)
+                # or the free-floating construction (subband_divisor).
                 self.band_edges = get_n_based_band_edges(
                     self.start_freq,
                     self.end_freq,
@@ -844,9 +894,8 @@ class GBSetup(Setup, GBSettings):
                     layer_df,
                     subband_divisor=div,
                     oversample=int(self.oversample),
-                    extra_buffer=int(self.extra_buffer),
                     target_count=int(getattr(self, "band_target_count", 0)),
-                    min_band_layers=float(getattr(self, "band_min_layers", 1.0)),
+                    min_band_layers=getattr(self, "band_min_layers", None),
                     unit_stride=int(getattr(self, "band_unit_stride", 2)),
                 )
             elif _mode != "uniform":
@@ -878,26 +927,38 @@ class GBSetup(Setup, GBSettings):
                     for edge in self.band_edges[:-1]
                 ]
             )
-            # ORTHOGONALITY stride guard on the ACTUAL edges (covers every
-            # WDM construction: uniform with a sub-layer subband_divisor,
-            # get_n sub-layer minima, and explicit overrides). Same-unit
-            # bands under stride k have k - 1 bands between them, so the
-            # rule is (stride - 1) * min_band_width_layers >= 1 full WDM
-            # layer -- the measured-safe 1-shared-layer window
-            # configuration. Whole-layer grids at the stride-2 default
-            # pass exactly (legacy no-op); unsafe combinations raise
-            # loudly here rather than sampling with interfering
-            # concurrent windows. See
-            # lisatools.globalfit.moves.gbbands.check_band_stride_separation
-            # (also enforced by the move ctor as defense in depth).
-            from ...moves.gbbands import check_band_stride_separation
+            # SUPPORT-based separation diagnostic on the ACTUAL edges
+            # (2026-08-15 rulings: the guard is expressed in FD-SUPPORT
+            # terms -- gap between same-unit bands vs the sum of the
+            # edge-source half-supports get_N(f_edge)/Tobs -- replacing
+            # the earlier layer-width formulas). For get_n grids the
+            # BUILDER already enforced it (raise); the legacy uniform /
+            # override grids are NOT refused (uniform stride-2 is the
+            # measured-safe production default even though high-f
+            # edge-source FD supports overlap by this conservative
+            # envelope -- the WDM likelihood windows there are +-1 layer
+            # and the [GB_ORTHO_LL] runtime monitor, default ON, is the
+            # operative accuracy check), so the diagnostic only LOGS the
+            # minimum safe stride for them.
+            if _mode != "get_n":
+                from ...moves.gbbands import check_band_support_separation
 
-            check_band_stride_separation(
-                self.band_edges,
-                layer_df,
-                int(getattr(self, "band_unit_stride", 2)),
-                context="GBSetup.init_band_structure",
-            )
+                _sep = check_band_support_separation(
+                    self.band_edges,
+                    self.Tobs,
+                    int(getattr(self, "band_unit_stride", 2)),
+                    oversample=int(self.oversample),
+                    context="GBSetup.init_band_structure",
+                    enforce=False,
+                )
+                self.logger.info(
+                    "GB band grid (mode=%s): support-based same-unit "
+                    "separation at stride %d passes=%s; min safe stride "
+                    "%s at sep_factor %.3g.",
+                    _mode, int(getattr(self, "band_unit_stride", 2)),
+                    _sep["passes"], str(_sep["min_safe_stride"]),
+                    float(_sep["sep_factor"]),
+                )
         else:
             # FD path: bands sized in multiples of ``df = 1/Tobs`` using the
             # FD-oversampled per-band N. Walks down from ``end_freq``

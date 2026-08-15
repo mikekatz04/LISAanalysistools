@@ -1,13 +1,17 @@
-"""Tests for the get_N-based variable-width GB band-edge builder.
+"""Tests for the get_N-based GB band-edge builder (free-floating widths).
 
-Covers :func:`lisatools.globalfit.stock.erebor.gb.get_n_based_band_edges`:
-layer-grid alignment, monotonicity, get_N-proportional widths, the
-minimum-width floor, the target-count normalization, and the guarantee that
-``GB_BAND_EDGES_MODE=uniform`` (the default) reproduces today's per-layer
-construction bit-for-bit.
+Covers :func:`lisatools.globalfit.stock.erebor.gb.get_n_based_band_edges`
+under the 2026-08-15 user rulings: band width = the MINIMUM
+``2 * get_N(f_max_band) / Tobs`` (self-consistent in the band's own upper
+edge), maximal packing, NO snapping to WDM layer boundaries (scheduling
+is independent of the pixelization), optional target-count coarsening by
+merging, support-based separation guard -- plus the guarantee that
+``GB_BAND_EDGES_MODE=uniform`` (the default) reproduces today's
+per-layer construction bit-for-bit.
 """
 
 import unittest
+import warnings
 
 import numpy as np
 from gbgpu.utils.utility import get_N
@@ -20,6 +24,7 @@ TOBS = YRSID_SI / 4.0
 LAYER_DF = 1.393e-4
 F_LO = 5.5e-4
 F_HI = 2.2e-2
+DF = 1.0 / TOBS
 
 
 def uniform_edges(start, end, layer_df, div=1):
@@ -29,84 +34,90 @@ def uniform_edges(start, end, layer_df, div=1):
     return np.asarray([k * layer_df / div for k in range(k_lo, k_hi + 1)])
 
 
+def band_floor(f_hi):
+    """A band's own minimum width 2*get_N(f_max_band)/Tobs (Hz)."""
+    return 2.0 * float(get_N(1e-30, f_hi, TOBS, oversample=4).item()) * DF
+
+
 class GetNBandEdgesTest(unittest.TestCase):
-    def test_monotonic_and_layer_aligned(self):
+    def test_monotonic_free_floating_outer_edges_verbatim(self):
         edges = get_n_based_band_edges(F_LO, F_HI, TOBS, LAYER_DF)
         self.assertTrue(np.all(np.diff(edges) > 0))
-        # every edge on the k * layer_df grid (div=1)
-        k = edges / LAYER_DF
-        np.testing.assert_allclose(k, np.round(k), atol=1e-9)
-        # integer number of layers per band, min 1
-        widths = np.diff(edges) / LAYER_DF
-        np.testing.assert_allclose(widths, np.round(widths), atol=1e-9)
-        self.assertGreaterEqual(widths.min(), 1.0 - 1e-9)
+        # NO snapping (user ruling): outer edges are the inputs verbatim
+        # -- F_LO/F_HI are deliberately not layer-aligned.
+        self.assertEqual(edges[0], F_LO)
+        self.assertEqual(edges[-1], F_HI)
+        self.assertNotAlmostEqual((F_LO / LAYER_DF) % 1.0, 0.0)
 
-    def test_outer_boundaries_match_uniform(self):
+    def test_interior_widths_at_their_own_2getn_floor(self):
+        # THE width rule + maximal packing: every interior band's width
+        # equals its own minimum 2*get_N(f_max_band)*df to within one
+        # fixed-point tolerance -> the band count is maximal for the rule.
         edges = get_n_based_band_edges(F_LO, F_HI, TOBS, LAYER_DF)
-        uni = uniform_edges(F_LO, F_HI, LAYER_DF)
-        self.assertAlmostEqual(edges[0], uni[0])
-        self.assertAlmostEqual(edges[-1], uni[-1])
+        widths = np.diff(edges)
+        for i in range(len(widths) - 1):  # final band absorbs the remainder
+            self.assertLess(
+                abs(widths[i] - band_floor(edges[i + 1])), 1e-3 * DF,
+                f"band {i} widened beyond its 2*get_N floor",
+            )
+
+    def test_width_fixed_point_self_consistency(self):
+        # w solves w = 2*get_N(f_lo + w)*df exactly: evaluating the floor
+        # at the produced upper edge reproduces the width (the monotone
+        # fixed-point iteration converged, not merely approximated).
+        edges = get_n_based_band_edges(F_LO, F_HI, TOBS, LAYER_DF)
+        for lo, hi in zip(edges[:-2], edges[1:-1]):
+            self.assertAlmostEqual(
+                (hi - lo) / DF, band_floor(hi) / DF, places=6
+            )
 
     def test_widths_track_get_n(self):
-        # widths must be non-decreasing with frequency (get_N is a step
-        # function increasing in f0) and strictly wider at the top of the
-        # band than at the bottom for a 3-month-like configuration.
+        # get_N is non-decreasing in f -> widths non-decreasing, and
+        # strictly wider at the top than at the bottom at this scale.
         edges = get_n_based_band_edges(F_LO, F_HI, TOBS, LAYER_DF)
         widths = np.diff(edges)
         self.assertGreater(widths[-2], widths[0])
-        # proportionality: the natural (unquantized) width is
-        # (2 N + extra_buffer) / Tobs; each produced band's width must be
-        # within one grid unit of it (or at the floor).
-        for lo, w in zip(edges[:-1], widths):
-            n_samp = get_N(1e-30, lo, TOBS, oversample=4).item()
-            w_nat = (2.0 * n_samp + 5) / TOBS
-            expect = max(LAYER_DF, round(w_nat / LAYER_DF) * LAYER_DF)
-            # last band can be clamped/merged; allow one extra unit there
-            self.assertLessEqual(abs(w - expect), LAYER_DF + 1e-12)
+        self.assertTrue(np.all(np.diff(widths[:-1]) >= -1e-15))
 
-    def test_target_count_normalization(self):
-        natural = get_n_based_band_edges(F_LO, F_HI, TOBS, LAYER_DF)
-        n_nat = len(natural) - 1
-        # ask for fewer bands -> wider bands, count near target
-        target = max(2, n_nat // 2)
-        edges = get_n_based_band_edges(
+    def test_no_layer_snapping_anywhere(self):
+        edges = get_n_based_band_edges(F_LO, F_HI, TOBS, LAYER_DF)
+        # interior edges land wherever the walk puts them: generically
+        # OFF the layer grid (assert the vast majority are unaligned).
+        frac = (edges / LAYER_DF) % 1.0
+        off_grid = np.minimum(frac, 1.0 - frac) > 1e-6
+        self.assertGreater(np.mean(off_grid), 0.9)
+
+    def test_target_count_coarsens_by_merging(self):
+        base = get_n_based_band_edges(F_LO, F_HI, TOBS, LAYER_DF)
+        n = len(base) - 1
+        target = max(2, n // 2)
+        merged = get_n_based_band_edges(
             F_LO, F_HI, TOBS, LAYER_DF, target_count=target
         )
-        self.assertLessEqual(abs((len(edges) - 1) - target), max(2, target // 10))
-        # count saturates at the uniform count for huge targets (min 1 layer)
-        uni_count = len(uniform_edges(F_LO, F_HI, LAYER_DF)) - 1
-        edges_hi = get_n_based_band_edges(
-            F_LO, F_HI, TOBS, LAYER_DF, target_count=10 * uni_count
-        )
-        self.assertEqual(len(edges_hi) - 1, uni_count)
-
-    def test_subband_divisor_grid(self):
-        div = 2
-        edges = get_n_based_band_edges(
-            F_LO, F_HI, TOBS, LAYER_DF, subband_divisor=div, target_count=120,
-        )
-        unit = LAYER_DF / div
-        k = edges / unit
-        np.testing.assert_allclose(k, np.round(k), atol=1e-9)
-        # the parity-safety floor is 1 FULL layer even on the finer grid
-        widths = np.diff(edges)
-        self.assertGreaterEqual(widths.min(), LAYER_DF - 1e-12)
-
-    def test_min_band_layers_floor(self):
-        edges = get_n_based_band_edges(
-            F_LO, F_HI, TOBS, LAYER_DF, min_band_layers=2.0
-        )
-        widths = np.diff(edges) / LAYER_DF
-        self.assertGreaterEqual(widths.min(), 2.0 - 1e-9)
-
-    def test_sublayer_min_refused(self):
-        # sub-layer minimum widths are unsafe under the stride-2 band
-        # parity scheduling and must be refused loudly
-        with self.assertRaises(ValueError):
+        self.assertEqual(len(merged) - 1, target)
+        # merging only: merged edges are a subset of the maximal packing
+        self.assertTrue(np.all(np.isin(merged, base)))
+        # a target above the maximal packing saturates (no-op)
+        np.testing.assert_array_equal(
             get_n_based_band_edges(
-                F_LO, F_HI, TOBS, LAYER_DF, subband_divisor=2,
-                min_band_layers=0.5,
+                F_LO, F_HI, TOBS, LAYER_DF, target_count=10 * n
+            ),
+            base,
+        )
+
+    def test_deprecated_knobs_warn_and_do_not_change_edges(self):
+        base = get_n_based_band_edges(F_LO, F_HI, TOBS, LAYER_DF)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            got = get_n_based_band_edges(
+                F_LO, F_HI, TOBS, LAYER_DF,
+                subband_divisor=2, min_band_layers=0.5,
             )
+        cats = [str(r.message) for r in rec
+                if issubclass(r.category, DeprecationWarning)]
+        self.assertTrue(any("subband_divisor" in m for m in cats))
+        self.assertTrue(any("min_band_layers" in m for m in cats))
+        np.testing.assert_array_equal(got, base)
 
 
 class UniformModeBitIdentityTest(unittest.TestCase):
@@ -134,11 +145,15 @@ class UniformModeBitIdentityTest(unittest.TestCase):
 
 
 class ExplicitSlabContractTest(unittest.TestCase):
-    """band_slab_Nf refuses an explicit slab smaller than max_span + 2*hw.
+    """band_slab_Nf refuses explicit slabs below the coverage floors.
 
-    The chunked-het kernels clip each source's per-layer window to the
-    slab; a too-small explicit GB_WDM_BAND_SLAB_LAYERS silently annihilates
-    edge sources of wide bands, so the property must raise instead.
+    Two floors (both computed from the band grid): the WDM-window floor
+    ``max_span + 2*m_band_half_width`` (a smaller slab silently
+    annihilates edge sources), and the FD-SUPPORT floor
+    ``max(span_b + 2*ceil(get_N(f_hi_b)/Tobs/layer_df))`` (2026-08-15
+    "strong checks" ruling: the slab must cover
+    ``[f_lo - get_N(f_hi)*df, f_hi + get_N(f_hi)*df]``;
+    ``GB_SLAB_SUPPORT_CHECK=0`` downgrades that one to a warning).
     """
 
     def _stub(self, slab_layers, edges, layer_df):
@@ -156,20 +171,60 @@ class ExplicitSlabContractTest(unittest.TestCase):
             band_edges=np.asarray(edges),
         )
 
+    @staticmethod
+    def _support_floor(edges, ldf, Tobs):
+        edges = np.asarray(edges, dtype=float)
+        lo = np.floor(edges[:-1] / ldf + 1e-6).astype(int)
+        hi = np.ceil(edges[1:] / ldf - 1e-6).astype(int)
+        spans = np.maximum(1, hi - lo)
+        sup = np.array([
+            float(get_N(1e-30, f, Tobs, oversample=4).item()) / Tobs
+            for f in edges[1:]
+        ])
+        return int(np.max(spans + 2 * np.ceil(sup / ldf - 1e-6).astype(int)))
+
     def test_contract(self):
+        import os
+
         from lisatools.globalfit.moves.gbbands import SubBandBuffer
 
         ldf = 0.000390625  # the stub WDMSettings layer_df (Nf=256, dt=5)
+        Tobs = self._stub(0, [0.0, ldf], ldf)._basis_settings.Tobs
         # variable-width grid: widest band 4 layers
         edges = ldf * np.array([10, 11, 12, 16, 20], dtype=float)
+        window_floor = 4 + 2 * 1
+        support_floor = self._support_floor(edges, ldf, Tobs)
+        self.assertGreaterEqual(support_floor, window_floor)
         prop = SubBandBuffer.band_slab_Nf.fget
-        # 4 + 2*1 = 6 is the floor: 6 passes, 5 raises
-        self.assertEqual(prop(self._stub(6, edges, ldf)), 6)
+        # at/above the support floor: passes
+        self.assertEqual(prop(self._stub(support_floor, edges, ldf)),
+                         support_floor)
+        # below the WDM-window floor: the original "too small" raise
         with self.assertRaisesRegex(ValueError, "too small"):
-            prop(self._stub(5, edges, ldf))
-        # 1-layer uniform grid: today's explicit 5-layer slab stays legal
-        uni = ldf * np.arange(10, 20, dtype=float)
-        self.assertEqual(prop(self._stub(5, uni, ldf)), 5)
+            prop(self._stub(window_floor - 1, edges, ldf))
+        if support_floor > window_floor:
+            # between the floors: the FD-support raise ...
+            with self.assertRaisesRegex(ValueError, "does not cover"):
+                prop(self._stub(window_floor, edges, ldf))
+            # ... which GB_SLAB_SUPPORT_CHECK=0 downgrades to a warning
+            os.environ["GB_SLAB_SUPPORT_CHECK"] = "0"
+            try:
+                self.assertEqual(
+                    prop(self._stub(window_floor, edges, ldf)), window_floor
+                )
+            finally:
+                os.environ.pop("GB_SLAB_SUPPORT_CHECK", None)
+
+    def test_auto_sizing_covers_support(self):
+        from lisatools.globalfit.moves.gbbands import SubBandBuffer
+
+        ldf = 0.000390625
+        edges = ldf * np.array([10, 11, 12, 16, 20], dtype=float)
+        stub = self._stub(0, edges, ldf)  # 0 = AUTO
+        Tobs = stub._basis_settings.Tobs
+        auto = SubBandBuffer.band_slab_Nf.fget(stub)
+        # auto slab >= the FD-support floor (guard adds headroom)
+        self.assertGreaterEqual(auto, self._support_floor(edges, ldf, Tobs))
 
 
 class FStatCacheBandGridGuardTest(unittest.TestCase):
