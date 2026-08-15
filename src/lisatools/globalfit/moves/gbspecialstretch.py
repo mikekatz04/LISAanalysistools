@@ -283,6 +283,76 @@ def _resolve_rj_flip_fraction(branch_name, kwarg_value, default=1.0):
     return value
 
 
+def _resolve_inmodel_repeats(branch_name, class_name, kwarg_value, default):
+    """Resolve a per-provenance-class in-model repeat count.
+
+    Mirrors :func:`_resolve_rj_flip_fraction` (kwarg > env > ``default``):
+    ``default`` is the mode default the caller chose (user ruling
+    2026-08-15 — search: newborn 200 / survivor 25; PE: the move's
+    ``num_repeat_proposals``, stock 100, for BOTH classes); a user env
+    ``{BRANCH}_INMODEL_REPEATS_{CLASS}`` overrides it, an explicit kwarg
+    (``inmodel_repeats_newborn`` / ``inmodel_repeats_survivor``)
+    overrides both. Budgets are FIXED — never adaptive or early-exit —
+    so the per-class chunk sequences keep the rigid shapes CUDA-graph
+    capture needs.
+    """
+    value = kwarg_value
+    if value is None:
+        value = os.environ.get(
+            f"{str(branch_name).upper()}_INMODEL_REPEATS_"
+            f"{str(class_name).upper()}",
+            None,
+        )
+    if value is None:
+        value = default
+    value = int(value)
+    if value < 1:
+        raise ValueError(
+            f"inmodel_repeats_{class_name} must be >= 1, got {value}."
+        )
+    return value
+
+
+def _inmodel_repeats_mode_defaults(branch_name, num_repeat_proposals):
+    """``(newborn, survivor)`` mode defaults for the per-class budgets.
+
+    USER RULING 2026-08-15: search mode polishes newborns hard and mature
+    survivors lightly (200 / 25); PE uses the move's plain
+    ``num_repeat_proposals`` (stock 100) for BOTH classes -- which also
+    keeps lite presets (``num_repeat_proposals=2``) cheap. The mode is
+    read from ``{BRANCH}_MODE`` (the same env that seeds the stock
+    ``gb.mode`` field; default ``"pe"``); a builder that sets the mode
+    programmatically should pass ``inmodel_repeats_*_default`` kwargs
+    instead (see the ctor resolution).
+    """
+    if os.environ.get(f"{str(branch_name).upper()}_MODE", "pe") == "search":
+        return 200, 25
+    n = int(num_repeat_proposals)
+    return n, n
+
+
+def _split_by_newborn(merged, xp):
+    """Partition a pooled-survivor dict by pick-time provenance.
+
+    ``merged`` must carry a boolean ``"newborn"`` entry (True = the row
+    was DEAD at pick time, i.e. an accepted birth; False = mature /
+    death-rejected survivor). Returns ``[(class_name, class_dict), ...]``
+    for the non-empty classes, newborns first, with the ``"newborn"`` key
+    stripped from the class dicts and row order preserved within each
+    class. Compression is one ``xp.where`` per class (a single device
+    sync each on CuPy) followed by integer gathers.
+    """
+    nb_mask = merged["newborn"]
+    rest = {k: v for k, v in merged.items() if k != "newborn"}
+    out = []
+    for cls_name, cls_mask in (("newborn", nb_mask), ("mature", ~nb_mask)):
+        idx = xp.where(cls_mask)[0]
+        if int(idx.size) == 0:
+            continue
+        out.append((cls_name, {k: v[idx] for k, v in rest.items()}))
+    return out
+
+
 def _buffer_fixed_capacity_active(sorter, kwargs) -> bool:
     """Whether ``_cached_get_buffer`` should use a fixed-capacity buffer.
 
@@ -848,6 +918,41 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             branch_name,
             kwargs.get("rj_flip_fraction", None),
             kwargs.get("rj_flip_fraction_default", 1.0),
+        )
+        # Per-class in-model repeat budgets (USER RULING 2026-08-15).
+        # Survivors pooled for the end-of-unit in-model phase carry their
+        # PICK-TIME provenance: "newborn" = the row was DEAD when picked
+        # (an accepted birth); "mature" = it was ALIVE (a death-rejected
+        # survivor; removal/replace pools are 100% mature by construction).
+        # Search-mode defaults polish newborns hard (200) and survivors
+        # lightly (25); PE uses the move's plain ``num_repeat_proposals``
+        # budget (stock 100) for BOTH classes, which also keeps lite
+        # presets (num_repeat_proposals=2) cheap. Resolution mirrors
+        # ``rj_flip_fraction``: explicit kwarg > env
+        # ``{BRANCH}_INMODEL_REPEATS_{NEWBORN,SURVIVOR}`` > the builder's
+        # ``inmodel_repeats_{newborn,survivor}_default`` kwarg > the mode
+        # default, with the mode read from ``{BRANCH}_MODE`` (the same env
+        # that seeds the stock ``gb.mode`` field; default "pe"). Budgets
+        # are FIXED, never adaptive/early-exit (fixed batch shapes are
+        # what makes CUDA-graph capture possible later). Consumed by the
+        # RJ round machinery only (see run_proposal / the direct-batch
+        # in-model phase); pure in-model moves (``is_rj_prop=False``,
+        # e.g. the search "in_model" move and VGB) keep
+        # ``num_repeat_proposals`` untouched.
+        _nb_mode_default, _surv_mode_default = _inmodel_repeats_mode_defaults(
+            branch_name, self.num_repeat_proposals
+        )
+        self.inmodel_repeats_newborn = _resolve_inmodel_repeats(
+            branch_name, "newborn",
+            kwargs.get("inmodel_repeats_newborn", None),
+            kwargs.get("inmodel_repeats_newborn_default", _nb_mode_default),
+        )
+        self.inmodel_repeats_survivor = _resolve_inmodel_repeats(
+            branch_name, "survivor",
+            kwargs.get("inmodel_repeats_survivor", None),
+            kwargs.get(
+                "inmodel_repeats_survivor_default", _surv_mode_default
+            ),
         )
         self.use_info_mat_proposal = bool(use_info_mat_proposal)
         self.swap_on_in_model = bool(swap_on_in_model)
@@ -2870,10 +2975,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             tm.count("cells", int(scheduler.n_cells))
         # F-stat distance-center HOIST (2026-08-14; job-187 sync autopsy:
         # the per-round center chain cost 735 s/propose = half the rj
-        # black box). Computed once per unit over all subset rows and
-        # looked up per round; GB_RJ_FSTAT_CTR_HOIST=0 restores the
-        # per-round computation. Reset unconditionally so a unit that
-        # skips the precompute can never see a previous unit's cache.
+        # black box). Computed once per unit over the unit's COUNTABLE
+        # rows (2026-08-15: alive + below-cap dead; the at-cap birth
+        # reserve is left to the lookup's inline fallback — see
+        # _precompute_fstat_centers) and looked up per round;
+        # GB_RJ_FSTAT_CTR_HOIST=0 restores the per-round computation.
+        # Reset unconditionally so a unit that skips the precompute can
+        # never see a previous unit's cache.
         self._fstat_ctr = None
         if (
             self.rj_fstat_dist_birth
@@ -3103,6 +3211,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     if tm is not None:
                         tm.count(
                             "picked_sources", int(len(picked["specials"])))
+                    # Pick-time provenance for the per-class in-model
+                    # budgets (user ruling 2026-08-15): a row DEAD here
+                    # that is alive after the RJ step is an accepted birth
+                    # ("newborn"); a row ALIVE here is a mature survivor.
+                    # Captured on the CALLER's pre-flip-gate dict (the RJ
+                    # step's own flip-fraction subset never re-aligns with
+                    # it). Device-resident -- no host sync.
+                    alive_at_pick = band_sorter.inds[picked["ids"]].copy()
                     rj_seq = self._debug_rj_select(buffer_obj, picked)
                     with _tspan(tm, "rj_step"):
                         if self.rj_replace:
@@ -3141,6 +3257,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             alive_now = alive_now & ~_at_cap_m[picked["ids"]]
                     if bool(alive_now.any()):
                         held = {k: v[alive_now] for k, v in picked.items()}
+                        # Provenance rides with the pooled rows: True =
+                        # accepted birth (dead at pick), False = mature.
+                        # Removal-only / replace steps never revive a dead
+                        # row, so their pools are 100% mature here by
+                        # construction.
+                        held["newborn"] = (~alive_at_pick)[alive_now]
                         _sp_h = np.asarray(_to_numpy(held["specials"]))
                         _keep = np.fromiter(
                             (s not in _pooled_host for s in _sp_h.tolist()),
@@ -3160,6 +3282,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # narrower, because fewer survivors remain).
             n_chunks = 0
             n_surv = 0
+            _cls_census = {"newborn": 0, "mature": 0}
+            _cls_reps = {
+                "newborn": self.inmodel_repeats_newborn,
+                "mature": self.inmodel_repeats_survivor,
+            }
             if pending:
                 merged = (
                     pending[0] if len(pending) == 1 else {
@@ -3181,24 +3308,38 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     n_slots,
                     max(1, int(os.environ.get("GB_RJ_INMODEL_CHUNK", "4096"))),
                 )
-                for _st in range(0, n_surv, _im_w):
-                    chunk = {
-                        k: v[_st:_st + _im_w] for k, v in merged.items()
-                    }
-                    buffer_obj = _rebind(chunk["specials"])
-                    # RJ-time slot indices are stale after the rebind.
-                    chunk["slot_index"] = buffer_obj.get_index(
-                        chunk["specials"]).astype(xp.int32)
-                    with _tspan(tm, "inmodel_repeats"):
-                        self._run_in_model_repeats(
-                            model, band_sorter, buffer_obj, band_temps,
-                            chunk, ll_change_log, prop_counts, acc_counts,
-                        )
-                    n_chunks += 1
+                # PER-CLASS chunk sequences (user ruling 2026-08-15):
+                # newborns and mature survivors run separate fixed repeat
+                # budgets (search 200 / 25, PE 100 / 100 stock), so the
+                # pool splits by pick-time provenance first and each class
+                # then chunks under the same width cap. The full-width rule
+                # relaxes to per-class: only each class's FINAL chunk can
+                # be narrower than the cap. Cell disjointness holds across
+                # classes (the host-side dedup above is class-blind).
+                for _cls_name, _cls in _split_by_newborn(merged, xp):
+                    _cls_census[_cls_name] = int(len(_cls["specials"]))
+                    for _st in range(0, _cls_census[_cls_name], _im_w):
+                        chunk = {
+                            k: v[_st:_st + _im_w] for k, v in _cls.items()
+                        }
+                        buffer_obj = _rebind(chunk["specials"])
+                        # RJ-time slot indices are stale after the rebind.
+                        chunk["slot_index"] = buffer_obj.get_index(
+                            chunk["specials"]).astype(xp.int32)
+                        with _tspan(tm, "inmodel_repeats"):
+                            self._run_in_model_repeats(
+                                model, band_sorter, buffer_obj, band_temps,
+                                chunk, ll_change_log, prop_counts,
+                                acc_counts,
+                                num_repeats=_cls_reps[_cls_name],
+                            )
+                        n_chunks += 1
             logger.info(
                 f"{self.name}: direct batches — {n_batches} rj batch(es), "
                 f"{n_surv} survivors polished in {n_chunks} in-model "
-                f"chunk(s) ({n_slots} buffer slots)."
+                f"chunk(s) ({n_slots} buffer slots; "
+                f"newborn {_cls_census['newborn']}@{_cls_reps['newborn']} "
+                f"/ mature {_cls_census['mature']}@{_cls_reps['mature']})."
             )
             if tm is not None:
                 tm.count("inmodel_flushes", n_chunks)
@@ -3319,9 +3460,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             "must never share an in-model block."
                         )
                     with _tspan(tm, "inmodel_repeats"):
+                        # Scheduler (non-direct) grouped path: ONE repeat
+                        # count for the whole pool = the survivor/mature
+                        # budget (per-class partitioning lives on the
+                        # direct-batch path only; noted user trade-off).
                         self._run_in_model_repeats(
                             model, band_sorter, buffer_obj, band_temps,
                             merged, ll_change_log, prop_counts, acc_counts,
+                            num_repeats=self.inmodel_repeats_survivor,
                         )
                     n_flushes += 1
                     flush_sum += n_flushed
@@ -3376,9 +3522,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     self._debug_plot_rj_pair(buffer_obj, rj_seq)
 
                 with _tspan(tm, "inmodel_repeats"):
+                    # Non-grouped per-round interleave: RJ moves use the
+                    # single survivor/mature budget; pure in-model moves
+                    # (is_rj_prop=False -- the search "in_model" move,
+                    # VGB) keep the plain ``num_repeat_proposals``.
                     self._run_in_model_repeats(
                         model, band_sorter, buffer_obj, band_temps, picked,
                         ll_change_log, prop_counts, acc_counts,
+                        num_repeats=(
+                            self.inmodel_repeats_survivor
+                            if self.is_rj_prop else None
+                        ),
                     )
 
                 scheduler.record_picks(picked["specials"])
@@ -3615,7 +3769,74 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             ln_center = xp.log(A_max)
         return ln_center, sigma
 
-    def _slot0_log_proposal(self, slot0_vals, ln_center, sigma):
+    # SNR-truncation boundary floor in standardized units: when the analytic
+    # boundary would leave essentially no lognormal mass (ln_dist_max <=
+    # ln_center - 6*sigma), alpha clamps here so Phi(alpha) >= ~1e-9 and the
+    # -log Phi(alpha) normalization stays finite (~ +20.7). The CLAMPED alpha
+    # feeds the draw AND both density sides identically, so the proposal is
+    # still an exactly-normalized truncated lognormal — its boundary is just
+    # held at the -6 sigma tail — and detailed balance is unaffected. Births
+    # from such degenerate rows land in the deepest allowed tail and die at
+    # the actual opt_snr clamp exactly as before.
+    _SNR_TRUNC_ALPHA_FLOOR = -6.0
+
+    def _snr_trunc_alpha(self, ln_snr, sigma, snr_limit):
+        """Standardized SNR-truncation boundary ``alpha``, floored.
+
+        ``alpha = ln(snr_center / snr_limit) / sigma``: since opt SNR
+        scales as ``1/dist`` at fixed intrinsics and the center amplitude's
+        F-stat SNR is ``exp(ln_snr)``, the ``opt_snr >= snr_limit`` region
+        is ``ln dist <= ln_center + sigma * alpha`` (distance basis) /
+        ``lnA >= ln_center - sigma * alpha`` (amplitude basis). ``sigma``
+        is the SMEARED proposal width actually used for the draw, so alpha
+        is exact in the standardized draw coordinate.
+        """
+        xp = self.xp
+        alpha = (ln_snr - float(np.log(snr_limit))) / sigma
+        return xp.clip(alpha, self._SNR_TRUNC_ALPHA_FLOOR, None)
+
+    def _std_norm_cdf(self, x):
+        """Standard normal CDF ``Phi`` on ``self.xp`` arrays."""
+        xp = self.xp
+        if xp is np:
+            from scipy.special import erf
+        else:
+            from cupyx.scipy.special import erf
+        return 0.5 * (1.0 + erf(xp.asarray(x) / np.sqrt(2.0)))
+
+    def _std_norm_ppf(self, p):
+        """Standard normal inverse CDF ``Phi^-1`` on ``self.xp`` arrays."""
+        xp = self.xp
+        if xp is np:
+            from scipy.special import erfinv
+        else:
+            from cupyx.scipy.special import erfinv
+        return np.sqrt(2.0) * erfinv(2.0 * xp.asarray(p) - 1.0)
+
+    def _truncnorm_std_draw(self, n, alpha):
+        """SNR-truncated standardized draw — ONE uniform per row.
+
+        Inverse-CDF sampling: ``z = Phi^-1(U * Phi(alpha))`` is a standard
+        normal truncated ABOVE at ``alpha``. The distance basis uses it
+        directly (large z = large dist = small SNR); the amplitude basis
+        negates it (lower truncation at ``-alpha``: small lnA = small SNR).
+        RNG consumption is one generator call of ``n`` values per round —
+        the same shape as the untruncated ``cp.random.randn(n)`` it
+        replaces (the raw stream VALUES differ, so runs with the knob
+        flipped are not draw-for-draw comparable;
+        ``GB_RJ_SNR_TRUNC_DIST=0`` restores the randn path bit-identically).
+        For ``alpha >> 1``, ``Phi(alpha) == 1.0`` in double precision and
+        the draw reduces to plain inverse-CDF standard-normal sampling.
+        """
+        xp = self.xp
+        u = xp.asarray(cp.random.rand(n))
+        p = u * self._std_norm_cdf(alpha)
+        # U in [0, 1) can hit 0 exactly; keep the ppf argument inside (0, 1).
+        p = xp.clip(p, 1e-15, 1.0 - 1e-16)
+        z = self._std_norm_ppf(p)
+        return z if _gb_use_distance(self) else -z
+
+    def _slot0_log_proposal(self, slot0_vals, ln_center, sigma, alpha=None):
         """``log g`` of the slot-0 value under the F-stat lognormal proposal.
 
         The proposal is Gaussian in the LOG of slot 0 (log-distance or lnA),
@@ -3623,6 +3844,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``g(v) = N(ln v; ln_center, sigma) / v`` (the ``1/v`` is the
         ``ln v -> v`` Jacobian). For the amplitude basis slot 0 is ALREADY lnA
         (sampled in log space), so there is no Jacobian term there.
+
+        ``alpha`` (optional): standardized SNR-truncation boundary from
+        :meth:`_snr_trunc_alpha` (already floored). When given, the density
+        is the TRUNCATED lognormal — ``-log Phi(alpha)`` renormalizes it
+        (per row, since alpha varies per row), and values outside the
+        support (beyond the max-distance / min-amplitude boundary, with a
+        1e-10-standardized slack absorbing the exp/log FP round trip of
+        stored draws) get log-density -1e300. Death-side calls pass the
+        SAME per-row alpha as the birth side, so detailed balance is
+        exact; the consequence is that a death whose slot-0 value lies
+        outside the support is force-rejected HERE (the truncated birth
+        proposal could never have produced that value — the prior-RJ death
+        path remains the removal route for such rows). For ``alpha >> 1``
+        ``Phi(alpha) == 1.0`` in double precision and the support test
+        never fires, so the truncated density equals the untruncated one
+        exactly.
         """
         xp = self.xp
         lv = xp.log(xp.clip(slot0_vals, 1e-300, None)) if _gb_use_distance(self) else slot0_vals
@@ -3632,6 +3869,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
         if _gb_use_distance(self):
             logg = logg - lv  # Jacobian d(ln dist)/d(dist) = 1/dist
+        if alpha is not None:
+            logg = logg - xp.log(self._std_norm_cdf(alpha))
+            u = (lv - ln_center) / sigma
+            side = u if _gb_use_distance(self) else -u
+            logg = xp.where(side > alpha + 1e-10, -1e300, logg)
         return logg
 
     def _temper_cadence_fire(self) -> bool:
@@ -3762,33 +4004,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         np.add.at(occ, (w_idx, b[valid]), 1)
         return occ.max(axis=0)
 
-    def _precompute_fstat_centers(self, model, band_sorter, subset):
-        """Unit-open F-stat center cache for the distance-birth proposal.
+    # Field names of the per-row F-stat center cache, in the order
+    # _fstat_ctr_compute returns them (the lookup-miss fallback appends
+    # to every one of these in lockstep with "ids").
+    _FSTAT_CTR_FIELDS = ("phi0", "iota", "psi", "ln_center", "sigma", "ln_snr")
 
-        The job-187 sync autopsy measured the per-round center chain at
-        735 s/propose — half the rj black box — for math whose inputs are
-        all fixed at unit open: birth coordinates are pre-drawn at sorter
-        build, an alive row's coordinates cannot change before its single
-        RJ pick (``has_run_rj``; in-model updates only touch rows AFTER
-        they pool), and the parent residual is in exactly the state the
-        first pick round would see (the parity class is opened before
-        :meth:`_run_band_unit`). So the (A, phi0, iota, psi, F) maxima and
-        the slot-0 ``(ln_center, sigma)`` are computed ONCE here for every
-        row of the unit, batched through the F-stat comp in
-        ``GB_FSTAT_CTR_BATCH`` chunks (default 4096, the comb sweep's
-        proven batch), and looked up per round. Mid-unit drift of the
-        reference walker's residual (its own accepted flips) is the same
-        order of approximation the per-round path already accepted
-        mid-propose — and the cache is at least internally consistent
-        across the unit where the per-round path drifted.
+    def _fstat_ctr_compute(self, model, params):
+        """Batched F-stat center computation for a set of rows.
+
+        The shared low-level path for the unit-open precompute
+        (:meth:`_precompute_fstat_centers`) AND the per-round lookup-miss
+        fallback (:meth:`_fstat_ctr_lookup`) — both MUST produce identical
+        numbers for the same rows, so the ``GB_FSTAT_CTR_BATCH`` batching
+        (default 4096, the comb sweep's proven batch), the Jaranowski-Krol
+        inversion, the ``(ln_center, sigma)`` mapping and the
+        ``GB_FSTAT_CTR_SMEAR`` widening all live here.
+
+        Returns ``(phi0, iota, psi, ln_center, sigma, ln_snr)`` on
+        ``self.xp``. ``ln_snr = ln sqrt(max(2F, 1))`` is the F-stat SNR at
+        the center amplitude ``A_max`` (the same clipped ``2F`` that sets
+        the pre-smear ``sigma = 1/snr`` in :meth:`_dist_center_and_width`;
+        cached explicitly because the smear makes ``sigma`` unusable for
+        recovering it). It is the quantity the SNR-truncated distance
+        proposal turns into its analytic boundary: opt SNR scales as
+        ``1/dist`` at fixed intrinsics, so ``SNR >= limit`` <=>
+        ``ln dist <= ln_center + ln(snr_center/limit)`` (amplitude basis:
+        ``lnA >= ln_center - ln(snr_center/limit)``).
         """
         xp = self.xp
-        ids = subset.inds_main_band_sorter
-        n = int(len(ids))
-        if n == 0:
-            return None
+        n = int(params.shape[0])
         walker_ref = getattr(self, "_fstat_walker_ref", 0)
-        params = band_sorter.coords[ids]
         batch = int(os.environ.get("GB_FSTAT_CTR_BATCH", "4096"))
         A = xp.zeros(n)
         phi0 = xp.zeros(n)
@@ -3811,28 +4056,161 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # breaking detailed balance for faster burn-in -- was considered
         # and PARKED, user 2026-08-14: "maybe not ideal".)
         sigma = sigma * float(os.environ.get("GB_FSTAT_CTR_SMEAR", "1.5"))
+        ln_snr = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
+        return phi0, iota, psi, ln_center, sigma, ln_snr
+
+    def _precompute_fstat_centers(self, model, band_sorter, subset):
+        """Unit-open F-stat center cache for the distance-birth proposal.
+
+        The job-187 sync autopsy measured the per-round center chain at
+        735 s/propose — half the rj black box — for math whose inputs are
+        all fixed at unit open: birth coordinates are pre-drawn at sorter
+        build, an alive row's coordinates cannot change before its single
+        RJ pick (``has_run_rj``; in-model updates only touch rows AFTER
+        they pool), and the parent residual is in exactly the state the
+        first pick round would see (the parity class is opened before
+        :meth:`_run_band_unit`). So the (A, phi0, iota, psi, F) maxima and
+        the slot-0 ``(ln_center, sigma)`` are computed ONCE here, batched
+        through the F-stat comp (:meth:`_fstat_ctr_compute`), and looked up
+        per round. Mid-unit drift of the reference walker's residual (its
+        own accepted flips) is the same order of approximation the
+        per-round path already accepted mid-propose — and the cache is at
+        least internally consistent across the unit where the per-round
+        path drifted.
+
+        COUNTABLE-ONLY precompute (2026-08-15; job-195 measured
+        rj_fstat_centers at ~372 s/propose with ~80% of the hoist spent on
+        AT-CAP birth RESERVE rows at cap 1-2): only rows that can actually
+        consume a center this unit are precomputed —
+
+        - ALIVE rows. NOT skippable: every death pick evaluates the
+          REVERSE-proposal density at its own center
+          (``_run_rj_step``'s death block), so alive rows consume centers.
+        - DEAD rows of cells BELOW cap at unit open (pickable births).
+          Dead rows of AT-CAP cells never reach a center lookup while the
+          cell stays capped: under live-cap gating they are never picked,
+          and under the ``GB_RJ_LIVE_CAP_PICK=0`` regimes they are either
+          excluded from the subset (``GB_RJ_SKIP_CAPPED=1``) or -inf'ed at
+          the prior gate before ``birth_k`` is formed.
+
+        THE TRAP this pairs with (same-commit user constraint): under
+        ``GB_RJ_LIVE_CAP_PICK=1`` leaf caps change MID-propose — a cell
+        freed by an accepted death exposes its reserve rows to the pick
+        pool, and the cache lacks them. :meth:`_fstat_ctr_lookup` therefore
+        carries an inline per-round fallback: a miss on a row that belongs
+        to this unit (``unit_ids``) computes the missing centers through
+        the SAME :meth:`_fstat_ctr_compute` path (batched over that round's
+        misses) and appends them, so a row misses at most once; the
+        snapshot smear covers the mid-unit residual skew exactly as it does
+        for the precomputed rows. A miss on a row OUTSIDE the unit is still
+        the loud stale-cache RuntimeError.
+        """
+        xp = self.xp
+        ids = subset.inds_main_band_sorter
+        if int(len(ids)) == 0:
+            return None
+        # Full unit membership (ascending), kept for the lookup fallback's
+        # reserve-row vs foreign-id distinction.
+        unit_ids = xp.asarray(ids)
+        cap_m = getattr(self, "_rj_at_cap_mask", None)
+        if cap_m is not None:
+            # subset.inds is the per-row alive bool aligned with
+            # inds_main_band_sorter — same countable arithmetic as
+            # _run_band_unit's scheduler-budget init.
+            countable = subset.inds | ~cap_m[ids]
+            ids = ids[countable]
+        params = band_sorter.coords[ids]
+        _t0 = time.perf_counter()
+        phi0, iota, psi, ln_center, sigma, ln_snr = self._fstat_ctr_compute(
+            model, params)
+        # Per-unit precompute census (2026-08-15, job-195 diagnostic: the
+        # production rj_fstat_centers stage jumped 374 -> 1953 s/propose on
+        # identical code with caps/cells/rounds flat -- this line pins
+        # whether the ROW POPULATION or the PER-ROW F-stat cost grew).
+        _n_unit = int(len(unit_ids))
+        _n_rows = int(len(ids))
+        _n_alive = int(subset.inds.sum()) if _n_unit else 0
+        logger.info(
+            "[FSTAT_CTR %s] unit precompute: %d rows (%d alive / %d "
+            "countable-birth; %d at-cap excluded of %d unit rows) in %.2fs; "
+            "propose fallback rows so far %d",
+            self.name, _n_rows, _n_alive, _n_rows - _n_alive,
+            _n_unit - _n_rows, _n_unit, time.perf_counter() - _t0,
+            int(getattr(self, "_fstat_ctr_fallback_rows", 0)),
+        )
         return {
             # ids is ascending by construction (arange[bool] in
-            # get_subset_inds) -- _fstat_ctr_lookup relies on it.
+            # get_subset_inds; the countable mask preserves that order) --
+            # _fstat_ctr_lookup relies on it.
             "ids": xp.asarray(ids),
+            "unit_ids": unit_ids,
             "phi0": phi0, "iota": iota, "psi": psi,
-            "ln_center": ln_center, "sigma": sigma,
+            "ln_center": ln_center, "sigma": sigma, "ln_snr": ln_snr,
+            "n_miss": 0,
         }
 
-    def _fstat_ctr_lookup(self, rows_ids):
-        """Cache positions of main-sorter ``rows_ids`` (verified gather)."""
+    def _fstat_ctr_lookup(self, rows_ids, model=None, band_sorter=None):
+        """Cache positions of main-sorter ``rows_ids`` (verified gather).
+
+        Countable-only cache (see :meth:`_precompute_fstat_centers`): a
+        miss on a row that belongs to this unit (``unit_ids``) is a
+        live-cap reserve row exposed mid-unit — its centers are computed
+        inline through the SAME :meth:`_fstat_ctr_compute` path (batched
+        over the round's misses) and APPENDED to the cache, so each row
+        misses at most once. A miss on a row outside the unit means the
+        cache is stale/foreign — fail loudly, the factors it would produce
+        are silently wrong.
+        """
         xp = self.xp
         c = self._fstat_ctr
+        rows_ids = xp.asarray(rows_ids)
+        n_cache = int(c["ids"].shape[0])
         pos = xp.searchsorted(c["ids"], rows_ids)
-        # Every picked row belongs to this unit's subset by construction;
-        # a mismatch means the cache is stale/foreign -- fail loudly, the
-        # factors it would produce are silently wrong.
-        if not bool((c["ids"][pos] == rows_ids).all()):
+        if n_cache:
+            # Clip the gather: searchsorted returns n_cache for ids beyond
+            # the last cached id (a miss, not an index error).
+            hit = c["ids"][xp.minimum(pos, n_cache - 1)] == rows_ids
+        else:
+            hit = xp.zeros(rows_ids.shape, dtype=bool)
+        if bool(hit.all()):
+            return pos
+        miss_ids = xp.unique(rows_ids[~hit])
+        unit_ids = c.get("unit_ids")
+        in_unit = xp.zeros(miss_ids.shape, dtype=bool)
+        if unit_ids is not None and int(unit_ids.shape[0]):
+            upos = xp.minimum(
+                xp.searchsorted(unit_ids, miss_ids),
+                int(unit_ids.shape[0]) - 1,
+            )
+            in_unit = unit_ids[upos] == miss_ids
+        if not bool(in_unit.all()):
             raise RuntimeError(
                 f"{self.name}: F-stat center cache does not cover the "
-                "picked rows (stale unit cache?)"
+                "picked rows and they are outside the unit's subset "
+                "(stale unit cache?)"
             )
-        return pos
+        if model is None or band_sorter is None:
+            raise RuntimeError(
+                f"{self.name}: F-stat center cache miss on in-unit reserve "
+                "rows but the caller supplied no model/band_sorter for the "
+                "inline fallback"
+            )
+        new_vals = self._fstat_ctr_compute(model, band_sorter.coords[miss_ids])
+        new_ids = xp.concatenate([c["ids"], miss_ids])
+        order = xp.argsort(new_ids)
+        c["ids"] = new_ids[order]
+        for name, vals in zip(self._FSTAT_CTR_FIELDS, new_vals):
+            c[name] = xp.concatenate([c[name], vals])[order]
+        c["n_miss"] = int(c.get("n_miss", 0)) + int(miss_ids.shape[0])
+        self._fstat_ctr_fallback_rows = (
+            int(getattr(self, "_fstat_ctr_fallback_rows", 0))
+            + int(miss_ids.shape[0])
+        )
+        logger.debug(
+            "%s: F-stat center cache fallback computed %d reserve rows "
+            "(unit total misses %d)", self.name, int(miss_ids.shape[0]),
+            c["n_miss"])
+        return xp.searchsorted(c["ids"], rows_ids)
 
     def _apply_rj_flip_fraction(self, band_sorter, picked):
         """Gate the DEATH attempts of picked ALIVE rows to the flip subset.
@@ -3959,21 +4337,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # bad-accept guard force-rejects it at beta > 0.
         if self._band_leaf_cap is not None:
             num_bands = self.num_bands
-            cap_xp = xp.asarray(self._band_leaf_cap)
-            flat_all = (
-                (band_sorter.temp_inds.astype(xp.int64) * self.nwalkers
-                 + band_sorter.walker_inds) * num_bands
-                + band_sorter.band_inds
-            )
-            # Guard empty input: numpy.bincount([]) returns zeros, but
-            # CuPy's bincount computes max(x) first and raises on a
-            # zero-size array (the zero-leaf search start hits this on GPU).
-            _alive_cells = flat_all[band_sorter.inds]
-            _nbins = self.ntemps * self.nwalkers * num_bands
-            if _alive_cells.shape[0] == 0:
-                cell_counts = xp.zeros(_nbins, dtype=xp.int64)
+            # Reuse THIS round's live-cap census when _pick_sources built
+            # one (GB_RJ_LIVE_CAP_PICK path): ``band_sorter.inds`` cannot
+            # change between the pick and this gate (only the accept block
+            # below flips it), so the (counts, cap) pair is IDENTICAL to
+            # the recompute it replaces -- one full-sorter flat-index build
+            # + bincount saved per pick round. ``_live_cap_state`` is reset
+            # at the top of every _pick_sources call, so it can never be
+            # stale across rounds.
+            _lcs_gate = getattr(self, "_live_cap_state", None)
+            if _lcs_gate is not None:
+                cell_counts, cap_xp = _lcs_gate
             else:
-                cell_counts = xp.bincount(_alive_cells, minlength=_nbins)
+                cap_xp = xp.asarray(self._band_leaf_cap)
+                flat_all = (
+                    (band_sorter.temp_inds.astype(xp.int64) * self.nwalkers
+                     + band_sorter.walker_inds) * num_bands
+                    + band_sorter.band_inds
+                )
+                # Guard empty input: numpy.bincount([]) returns zeros, but
+                # CuPy's bincount computes max(x) first and raises on a
+                # zero-size array (the zero-leaf search start hits this on
+                # GPU).
+                _alive_cells = flat_all[band_sorter.inds]
+                _nbins = self.ntemps * self.nwalkers * num_bands
+                if _alive_cells.shape[0] == 0:
+                    cell_counts = xp.zeros(_nbins, dtype=xp.int64)
+                else:
+                    cell_counts = xp.bincount(_alive_cells, minlength=_nbins)
             cell_flat = (
                 (picked["temp_inds"].astype(xp.int64) * self.nwalkers
                  + picked["walker_inds"]) * num_bands
@@ -4079,21 +4470,50 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _log_range = self._log_dist_range(band_sorter)
                 # Unit-open center cache (see _precompute_fstat_centers);
                 # None = hoist disabled -> per-round computation below.
+                # Countable-only cache: the lookup carries the inline
+                # reserve-row fallback, so it needs model/band_sorter.
                 _ctr = getattr(self, "_fstat_ctr", None)
+                # SNR-truncated distance proposal (2026-08-15, user-ruled
+                # lever; GB_RJ_SNR_TRUNC_DIST=0 restores the untruncated
+                # lognormal draw bit-identically): [GB_ACCEPT rj-split]
+                # showed 54-62% of scored births dying at the
+                # opt_snr < limit clamp. The center's F-stat SNR (ln_snr,
+                # from the same cache/fallback interface as the centers)
+                # makes the clamp boundary analytic in the draw coordinate
+                # -- alpha = ln(snr_center/limit)/sigma -- so the draw is
+                # truncated there and the truncated density (including its
+                # per-row -log Phi(alpha) normalization) replaces the
+                # untruncated one on BOTH the birth and the death side of
+                # the RJ factors: detailed balance stays exact.
+                _snr_lim = float(buffer_obj.opt_snr_rej_samp_limit)
+                _snr_trunc = (
+                    os.environ.get("GB_RJ_SNR_TRUNC_DIST", "1") == "1"
+                    and _snr_lim > 0.0
+                )
                 if len(birth_k):
                     if _ctr is not None:
-                        _bpos = self._fstat_ctr_lookup(ids[birth_k])
+                        _bpos = self._fstat_ctr_lookup(
+                            ids[birth_k], model=model,
+                            band_sorter=band_sorter)
                         phi0_max = _ctr["phi0"][_bpos]
                         iota_max = _ctr["iota"][_bpos]
                         psi_max = _ctr["psi"][_bpos]
                         ln_center = _ctr["ln_center"][_bpos]
                         sigma = _ctr["sigma"][_bpos]
+                        ln_snr_b = _ctr["ln_snr"][_bpos]
                     else:
                         A_max, phi0_max, iota_max, psi_max, F = self._fstat_dist_centers(
                             model, params[birth_k], walker_ref)
                         ln_center, sigma = self._dist_center_and_width(
                             params[birth_k], A_max, F)
-                    z = xp.asarray(cp.random.randn(len(birth_k)))
+                        ln_snr_b = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
+                    if _snr_trunc:
+                        alpha_b = self._snr_trunc_alpha(
+                            ln_snr_b, sigma, _snr_lim)
+                        z = self._truncnorm_std_draw(len(birth_k), alpha_b)
+                    else:
+                        alpha_b = None
+                        z = xp.asarray(cp.random.randn(len(birth_k)))
                     ln_draw = ln_center + sigma * z
                     if _gb_use_distance(self):
                         params[birth_k, 0] = xp.exp(ln_draw)
@@ -4102,7 +4522,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     params[birth_k, 4] = xp.cos(iota_max % np.pi)
                     params[birth_k, 5] = psi_max % np.pi
                     params[birth_k, 3] = phi0_max % (2 * np.pi)
-                    _bl = self._slot0_log_proposal(params[birth_k, 0], ln_center, sigma)
+                    _bl = self._slot0_log_proposal(
+                        params[birth_k, 0], ln_center, sigma, alpha=alpha_b)
                     _fstat_factor_corr[birth_k] = -_bl - _log_range
                     _mark("rj_fstat_centers")
                     # Re-evaluate the global prior at the drawn distance/angles
@@ -4119,16 +4540,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
                     _mark("rj_getll")
                     if _ctr is not None:
-                        _dpos = self._fstat_ctr_lookup(ids[death_k])
+                        _dpos = self._fstat_ctr_lookup(
+                            ids[death_k], model=model,
+                            band_sorter=band_sorter)
                         ln_center_d = _ctr["ln_center"][_dpos]
                         sigma_d = _ctr["sigma"][_dpos]
+                        ln_snr_d = _ctr["ln_snr"][_dpos]
                     else:
                         Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
                             model, params[death_k], walker_ref)
                         ln_center_d, sigma_d = self._dist_center_and_width(
                             params[death_k], Ad, Fd)
+                        ln_snr_d = 0.5 * xp.log(xp.clip(2.0 * Fd, 1.0, None))
+                    # Reverse (birth-direction) density at the removed
+                    # source's own center: the SAME per-row truncation
+                    # boundary as the birth side, so the pair is exactly
+                    # detailed-balance-symmetric.
+                    alpha_d = (
+                        self._snr_trunc_alpha(ln_snr_d, sigma_d, _snr_lim)
+                        if _snr_trunc else None
+                    )
                     _dl = self._slot0_log_proposal(
-                        params[death_k, 0], ln_center_d, sigma_d)
+                        params[death_k, 0], ln_center_d, sigma_d,
+                        alpha=alpha_d)
                     _fstat_factor_corr[death_k] = _dl + _log_range
                     _mark("rj_fstat_centers")
             elif self.phase_maximize and len(birth_k):
@@ -5026,7 +5460,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
         return True
 
-    def _proposal_cholesky(self, model, band_sorter, ids, slots=None):
+    def _proposal_cholesky(self, model, band_sorter, ids, slots=None,
+                           buffer_obj=None):
         """Proposal Cholesky factors for ``ids``: table lookup, else direct.
 
         Falls back to the direct per-block computation whenever the table is
@@ -5037,11 +5472,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``ids`` (both are ``picked[...][alive]``). They are what the sig-het
         fast info-matrix route needs; ``None`` (the shared-table path, which
         spans the whole cold chain and has no single block's slots) keeps the
-        validated chunked route.
+        validated chunked route. ``buffer_obj`` (the bound SubBandBuffer) is
+        forwarded as the router's ``slot_holder`` so multi-shard runs
+        partition ``slots`` by the BUFFER's slot shards -- the shard layout
+        ``setup_in_model`` actually stashed references under.
         """
         if getattr(band_sorter, "infomat_take_inds", None) is None:
             return self._compute_proposal_cholesky(
-                model, band_sorter, ids, slots=slots)
+                model, band_sorter, ids, slots=slots, buffer_obj=buffer_obj)
         # The direct path sets these as a side effect; the table path must
         # set them too (in_model_proposal maps the drawn jump back with them).
         s = self.xp.ones(band_sorter.coords.shape[1])
@@ -5050,7 +5488,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._proposal_param_scales = s
         return band_sorter.draw_infomat(ids)
 
-    def _compute_proposal_cholesky(self, model, band_sorter, ids, slots=None):
+    def _compute_proposal_cholesky(self, model, band_sorter, ids, slots=None,
+                                   buffer_obj=None):
         """Batched Cholesky of the inverse information matrix for ``ids``.
 
         Domain-symmetric through the fast computation objects:
@@ -5098,6 +5537,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _di = {}
         if slots is not None and hasattr(_info_comp, "chunked"):
             _di["data_index"] = xp.asarray(slots, dtype=xp.int32)
+            if buffer_obj is not None:
+                # Slot-space routing (sig-het fast leg): the reference
+                # stash lives on the BUFFER's per-device comp replicas,
+                # keyed intra-shard -- the router needs the buffer to
+                # partition slots coherently on multi-shard runs.
+                # Ignored by the router on single-shard buffers.
+                _di["slot_holder"] = buffer_obj
 
         _tm = getattr(self, "_prop_timer", None)
         with _tspan(_tm, "infomat_kernel"):
@@ -5145,7 +5591,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         info_y = info_phys * J[:, :, None] * J[:, None, :]
 
-        self.mempool.free_all_blocks()
+        # Opt-in only (perf, 2026-08-15): this sat INSIDE the per-block
+        # info-matrix path, so every in-model block paid a full CuPy pool
+        # release -- cudaFree/cudaMalloc churn for every allocation that
+        # follows (same rationale as GB_MEMPOOL_FREE_EACH_ROUND). The
+        # per-unit / per-proposal frees remain unconditional.
+        if os.environ.get("GB_INFOMAT_MEMPOOL_FREE", "0") == "1":
+            self.mempool.free_all_blocks()
         # Robust inverse-information-matrix factor: near-zero-SNR (prior-drawn) sources
         # give (numerically) singular information matrices. Eigendecompose and clamp the
         # spectrum to a relative floor; B = V diag(lambda^-1/2) satisfies
@@ -5264,8 +5716,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return cp.abs(pr[:, 0]), pr[:, 1].copy(), pr[:, 2].copy()
 
     def _run_in_model_repeats(self, model, band_sorter, buffer_obj, band_temps,
-                              picked, ll_change_log, prop_counts, acc_counts):
-        """``num_repeat_proposals`` in-model rounds on the picked live sources.
+                              picked, ll_change_log, prop_counts, acc_counts,
+                              num_repeats=None):
+        """``num_repeats`` in-model rounds on the picked live sources.
 
         The picked source is first taken OUT of its cell residual, so every
         repeat scores through a plain ``get_add_ll`` against the
@@ -5273,8 +5726,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         only the tracked coordinates and counters move). After the repeats,
         the final coordinates are written back into the residual and into
         the BandSorter.
+
+        ``num_repeats`` (None = ``self.num_repeat_proposals``) is the FIXED
+        repeat budget for this block -- the RJ round machinery passes the
+        per-provenance-class budgets here (newborn vs mature, user ruling
+        2026-08-15) while pure in-model moves keep the plain knob.
+
+        De-synced accept chain (perf, 2026-08-15): on CuPy every
+        ``bool(...)`` / ``int(...)`` on a device scalar and every
+        boolean-mask getitem is a forced device sync, and this loop paid
+        ~14-16 of them PER REPEAT. The loop now keeps the accept masks and
+        per-kind counters ON DEVICE across repeats -- ONE data-dependent
+        sync per repeat remains (the ``xp.where(keep)`` compression that
+        sizes the scoring kernel's row set) and the counter host-pulls
+        aggregate once per block (``imr_accept_flush``). Accept/reject
+        DECISIONS are bit-identical to the straight-line form: the RNG
+        draw count/order/shape and the MH-ratio arithmetic are untouched;
+        gated host branches became unconditional masked device ops with
+        identical results.
         """
         xp = self.xp
+        n_rep = (
+            int(num_repeats) if num_repeats is not None
+            else int(self.num_repeat_proposals)
+        )
         # Cold-chain proposal tables (friends + info-matrix Cholesky) are
         # built HERE, on the first in-model block of the proposal: that point
         # is after this iteration's first RJ step, so the tables describe the
@@ -5386,7 +5861,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # dimensional VGB move) never build the info-matrix Cholesky.
         with _tspan(tm, "inmodel_cholesky"):
             chol = (
-                self._proposal_cholesky(model, band_sorter, ids, slots=slots)
+                self._proposal_cholesky(model, band_sorter, ids, slots=slots,
+                                        buffer_obj=buffer_obj)
                 if self.use_info_mat_proposal
                 else None
             )
@@ -5486,14 +5962,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         else:
             halves = [None]
 
-        for move_i in range(self.num_repeat_proposals):
-          for sub in halves:
-            if sub is None:
-                sl = slice(None)          # full batch (original behavior)
-                n_sub = len(ids)
-            else:
-                sl = sub
-                n_sub = int(sub.size)
+        # Per-half repeat-INVARIANT gathers, hoisted out of the repeat loop
+        # (they were re-gathered every repeat). Integer/slice indexing only
+        # -- no data-dependent host syncs -- and each ``_n_cold`` is the
+        # block's ONLY host pull for the proposed-cold counter (it was an
+        # ``int((t_i[sl] == 0).sum())`` device pull per repeat).
+        _half_pre = []
+        for _sub in halves:
+            _sl = slice(None) if _sub is None else _sub
+            _t_s = t_i[_sl]
+            _cold_s = _t_s == 0
+            _half_pre.append((
+                _sub, _sl,
+                len(ids) if _sub is None else int(_sub.size),
+                ids[_sl], slots[_sl], N_vals[_sl], l_i[_sl],
+                _t_s, w_i[_sl], b_i[_sl], beta[_sl],
+                n4[_sl], lo_bin[_sl], hi_bin[_sl],
+                _cold_s, int(_cold_s.sum()),
+            ))
+
+        # Device-resident accept-chain state (flushed ONCE per block in
+        # ``imr_accept_flush`` below): per-proposal-kind counters
+        # [proposed, accepted(dev), cold-proposed, cold-accepted(dev)] and
+        # the out-of-prior bad-accept census (warning deferred to block
+        # end; it was a bool() sync PAIR per repeat).
+        _kind_acc = {}
+        _warn_dev = xp.zeros((), dtype=xp.int64)
+
+        for move_i in range(n_rep):
+          for (sub, sl, n_sub, ids_s, slots_s, N_s, l_s, t_s, w_s, b_s,
+               beta_s, n4_s, lo_s, hi_s, cold_s, n_cold_s) in _half_pre:
+            if sub is not None:
                 # Complement <- current state (including the other half's
                 # accepted moves) for this half's proposal.
                 band_sorter.coords[ids] = curr
@@ -5511,7 +6010,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # a per-leaf fill (not sampled): the proposal cannot move it.
                 if self._f0_col is not None:
                     _fc = self._f0_col
-                    n4_s, lo_s, hi_s = n4[sl], lo_bin[sl], hi_bin[sl]
                     new_bin = cp.abs(new[:, _fc] / 1e3 / self.df).astype(int)
                     new_logp[
                         (cp.abs(new[:, _fc] / 1e3 - curr[sl][:, _fc] / 1e3) / self.df).astype(int) > n4_s
@@ -5525,9 +6023,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # comment for thresholds + MH-validity). Gated rows drop
                 # out of ``keep`` below, so they also skip the ll kernel.
                 if anchor_phys is not None:
+                    # NOTE(trust-gate hoisting): the anchor side of this
+                    # gate is already hoisted to block scope (anchor_phys /
+                    # trust_dlna above); the candidates change EVERY repeat
+                    # so their transform is inherently per-repeat.
                     _pc = self.transform_fn.both_transforms(
                         new, xp=cp,
-                        leaf_inds=l_i[sl] if self._per_leaf_fill else None,
+                        leaf_inds=l_s if self._per_leaf_fill else None,
                     )
                     _damp_n = cp.abs(cp.log(
                         cp.abs(_pc[:, 0]) / anchor_phys[0][sl]))
@@ -5543,25 +6045,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     ] = -np.inf
 
                 keep = ~cp.isinf(new_logp)
+                # THE one data-dependent host sync this repeat needs on
+                # CuPy: compress ``keep`` ONCE and integer-gather through
+                # it everywhere below. Each boolean-mask getitem it
+                # replaces (5-6 per repeat) re-ran nonzero + a D2H size
+                # pull; ``keep_idx`` yields the same rows in the same
+                # (ascending) order, so every downstream value is
+                # bit-identical.
+                keep_idx = xp.where(keep)[0]
+                keep_any = int(keep_idx.size) > 0
             new_ll = cp.full(n_sub, -1e300)
-            slots_s, N_s, l_s = slots[sl], N_vals[sl], l_i[sl]
             # THE per-repeat scoring call: the sig-het fused in-kernel
             # likelihood when a reference is active, the chunked-het/FD
             # engine otherwise. This span is the headline number for the
             # in-model GB/GB speedup work.
             with _tspan(tm, "inmodel_get_add_ll"):
-                if bool(keep.any()):
-                    new_ll[keep] = buffer_obj.get_add_ll(
-                        new[keep], slots_s[keep], slots_s[keep], N_s[keep],
+                if keep_any:
+                    new_ll[keep_idx] = buffer_obj.get_add_ll(
+                        new[keep_idx], slots_s[keep_idx], slots_s[keep_idx],
+                        N_s[keep_idx],
                         phase_maximize=self.phase_maximize,
-                        leaf_inds=l_s[keep],
+                        leaf_inds=l_s[keep_idx],
                     )
                     if self.phase_maximize and buffer_obj.phase_angle is not None:
-                        new[keep, self._phi0_col] = (
-                            new[keep, self._phi0_col] - buffer_obj.phase_angle
+                        new[keep_idx, self._phi0_col] = (
+                            new[keep_idx, self._phi0_col]
+                            - buffer_obj.phase_angle
                         )
-                        new[keep] = self.periodic.wrap(
-                            {self.branch_name: new[keep][:, None, :]}, xp=xp
+                        new[keep_idx] = self.periodic.wrap(
+                            {self.branch_name: new[keep_idx][:, None, :]},
+                            xp=xp,
                         )[self.branch_name][:, 0]
             if tm is not None:
                 tm.count("inmodel_repeat_calls")
@@ -5576,12 +6089,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # it can never move further in or laterally within it.
             # d_h_out/h_h_out are the per-repeat get_add_ll outputs for the
             # ``keep`` subset (the same arrays the sorter stash consumes).
-            # ``keep.any()`` is REQUIRED here, not just defensive: get_add_ll
+            # ``keep_any`` is REQUIRED here, not just defensive: get_add_ll
             # above runs only under that same condition, so a repeat whose
             # candidates are all prior/trust-rejected leaves d_h_out/h_h_out
             # holding the PREVIOUS call's rows. Without this guard the clamp
-            # indexes ``where(keep)[0]`` (length 0) with a stale-length mask.
-            if getattr(buffer_obj, "d_h_out", None) is not None and bool(keep.any()):
+            # would scatter a stale-length mask through ``keep_idx``.
+            if getattr(buffer_obj, "d_h_out", None) is not None and keep_any:
                 _hh_im = cp.asarray(buffer_obj.h_h_out).real
                 _opt_im = cp.sqrt(cp.maximum(_hh_im, 0.0))
                 _lim_im = buffer_obj.opt_snr_rej_samp_limit
@@ -5590,66 +6103,80 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _dh_im = cp.asarray(buffer_obj.d_h_out).real
                     _det_im = _dh_im / cp.maximum(_opt_im, 1e-300)
                     _viol_im = _viol_im | (_det_im < _lim_im)
-                if bool(_viol_im.any()):
-                    _rows_im = cp.where(cp.asarray(keep))[0][_viol_im]
-                    new_ll[_rows_im] = -1e300
-                    delta_ll = new_ll - ll_ref[sl]
+                # Unconditional masked write (was a bool(any) host gate +
+                # a boolean-index scatter): the violating rows are exactly
+                # ``keep_idx[_viol_im]``; non-violating rows are rewritten
+                # with their own value, and the delta recompute repeats the
+                # identical subtraction -- bit-identical either way.
+                new_ll[keep_idx] = cp.where(_viol_im, -1e300, new_ll[keep_idx])
+                delta_ll = new_ll - ll_ref[sl]
 
-            # Host-side MH bookkeeping. On CuPy every ``bool(...any())`` here
-            # is a device sync, so this span is the launch-overhead signal:
-            # if it rivals inmodel_get_add_ll the block is host-bound (too
-            # few sources per launch), not kernel-bound.
+            # Device-resident MH bookkeeping (2026-08-15). This span used to
+            # be the launch-overhead signal because every ``bool(...any())``
+            # / ``int(...)`` in it was a device sync; the whole chain now
+            # stays on device -- unconditional masked ops with results
+            # identical to the gated branches they replace -- and the
+            # counters flush once per block (``imr_accept_flush``).
             with _tspan(tm, "inmodel_accept"):
-                lnpdiff = beta[sl] * delta_ll + (new_logp - curr_prior[sl]) + factors
+                lnpdiff = beta_s * delta_ll + (new_logp - curr_prior[sl]) + factors
                 accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
 
                 bad_mask = (new_ll <= -1e299) | (new_logp <= -1e229)
-                bad_accepts = accept & bad_mask
-                if bool(xp.any(bad_accepts)):
-                    if bool(xp.any(beta[sl][bad_accepts] != 0.0)):
-                        logger.warning(
-                            f"{self.name}: accepted an out-of-prior in-model "
-                            "coordinate at beta > 0."
-                        )
-                    accept[bad_accepts] = False
+                # ``accept[bad_accepts] = False`` == ``accept & ~bad_mask``;
+                # the out-of-prior warning census accumulates on device and
+                # logs ONCE at block end instead of per repeat.
+                _warn_dev = _warn_dev + (
+                    (accept & bad_mask) & (beta_s != 0.0)
+                ).sum()
+                accept = accept & ~bad_mask
 
-                prop_counts[1][t_i[sl], w_i[sl], b_i[sl]] += 1
+                prop_counts[1][t_s, w_s, b_s] += 1
                 # Per-proposal-type acceptance (stretch vs info-matrix):
                 # the pooled counter cannot say WHICH proposal is timid.
+                # Proposed tallies are host ints (shapes hoisted above);
+                # accepted tallies stay 0-d device scalars until the flush.
                 _kind = getattr(self, "_last_im_kind", None)
                 if _kind is not None:
-                    kc = getattr(self, "_im_kind_counts", None)
-                    if kc is None:
-                        kc = self._im_kind_counts = {}
-                    rec = kc.setdefault(_kind, [0, 0, 0, 0])  # p, a, p0, a0
-                    rec[0] += int(t_i[sl].shape[0])
-                    rec[2] += int((t_i[sl] == 0).sum())
-                if bool(accept.any()):
-                    # Global positions of the accepted movers: a boolean mask
-                    # on the full path, the half's index array otherwise.
-                    gi = accept if sub is None else sub[accept]
-                    curr[gi] = new[accept]
-                    ll_ref[gi] = new_ll[accept]
-                    curr_prior[gi] = new_logp[accept]
-                    ll_change_log[t_i[gi], w_i[gi], b_i[gi]] += delta_ll[accept]
-                    acc_counts[1][t_i[gi], w_i[gi], b_i[gi]] += 1
-                    if _kind is not None:
-                        rec[1] += int(accept.sum())
-                        rec[3] += int((t_i[gi] == 0).sum())
-                    if (
-                        getattr(self, "_sorter_dh", None) is not None
-                        and getattr(buffer_obj, "d_h_out", None) is not None
-                    ):
-                        # d_h_out/h_h_out hold the per-repeat get_add_ll
-                        # outputs for the ``keep`` subset; select the
-                        # accepted rows within it
-                        _acc_kept = accept[keep]
-                        self._sorter_dh[ids[gi]] = cp.asarray(
-                            buffer_obj.d_h_out
-                        ).real[_acc_kept]
-                        self._sorter_hh[ids[gi]] = cp.asarray(
-                            buffer_obj.h_h_out
-                        ).real[_acc_kept]
+                    rec = _kind_acc.setdefault(_kind, [0, 0, 0, 0])
+                    rec[0] += n_sub
+                    rec[2] += n_cold_s
+                    rec[1] = rec[1] + accept.sum()
+                    rec[3] = rec[3] + (accept & cold_s).sum()
+
+                # Unconditional masked accept application: ``cp.where``
+                # copies the accepted values verbatim (rejected rows keep
+                # their own), so the tracked state is bit-identical to the
+                # boolean-scatter form it replaces.
+                _tgt = slice(None) if sub is None else sub
+                curr[_tgt] = cp.where(accept[:, None], new, curr[_tgt])
+                ll_ref[_tgt] = cp.where(accept, new_ll, ll_ref[_tgt])
+                curr_prior[_tgt] = cp.where(accept, new_logp, curr_prior[_tgt])
+                # One pooled survivor per cell (serial-within-band), so the
+                # fancy-index += is elementwise; rejected rows add an exact
+                # 0.0 / False.
+                ll_change_log[t_s, w_s, b_s] += cp.where(accept, delta_ll, 0.0)
+                acc_counts[1][t_s, w_s, b_s] += accept
+                if (
+                    getattr(self, "_sorter_dh", None) is not None
+                    and getattr(buffer_obj, "d_h_out", None) is not None
+                    and keep_any
+                ):
+                    # d_h_out/h_h_out hold the per-repeat get_add_ll
+                    # outputs for the ``keep_idx`` rows; scatter them to
+                    # full width, then masked-write the accepted rows.
+                    # ``accept`` implies keep (bad_mask filtering above),
+                    # so the uninitialized non-keep lanes are never
+                    # selected.
+                    _dh_full = cp.empty(n_sub)
+                    _hh_full = cp.empty(n_sub)
+                    _dh_full[keep_idx] = cp.asarray(buffer_obj.d_h_out).real
+                    _hh_full[keep_idx] = cp.asarray(buffer_obj.h_h_out).real
+                    self._sorter_dh[ids_s] = cp.where(
+                        accept, _dh_full, self._sorter_dh[ids_s]
+                    )
+                    self._sorter_hh[ids_s] = cp.where(
+                        accept, _hh_full, self._sorter_hh[ids_s]
+                    )
 
             # Guard at the CALL SITE (perf, 2026-08): the callee also checks
             # ``self.debug``, but its arguments — three ``asnumpy`` device
@@ -5658,7 +6185,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if self.debug:
                 self._debug_verify_in_model(
                     buffer_obj, curr[sl], new, slots_s, N_s, delta_ll, keep,
-                    (asnumpy(t_i[sl]), asnumpy(w_i[sl]), asnumpy(b_i[sl])), move_i,
+                    (asnumpy(t_s), asnumpy(w_s), asnumpy(b_s)), move_i,
                 )
 
             # Sig-het drift refresh: every ``sighet_refresh_every``
@@ -5678,7 +6205,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 and sub is halves[-1]
                 and self.sighet_refresh_every > 0
                 and (move_i + 1) % self.sighet_refresh_every == 0
-                and move_i + 1 < self.num_repeat_proposals
+                and move_i + 1 < n_rep
             ):
                 drift, damp = self._sighet_drift_metrics(curr, ref_track, l_i)
                 far = (drift > self.sighet_refresh_dphase) | (damp > np.log(2.0))
@@ -5712,6 +6239,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         f"{move_i + 1}."
                     )
 
+        # ONE host pull per BLOCK for the accept-chain bookkeeping the loop
+        # kept on device: fold the per-kind device tallies into the
+        # per-propose ``_im_kind_counts`` dict and emit the deferred
+        # out-of-prior warning (per-repeat before 2026-08-15; the block
+        # total replaces up to ``n_rep`` identical lines).
+        with _tspan(tm, "imr_accept_flush"):
+            if _kind_acc:
+                kc = getattr(self, "_im_kind_counts", None)
+                if kc is None:
+                    kc = self._im_kind_counts = {}
+                for _k, _r in _kind_acc.items():
+                    rec = kc.setdefault(_k, [0, 0, 0, 0])  # p, a, p0, a0
+                    rec[0] += int(_r[0])
+                    rec[1] += int(_r[1])
+                    rec[2] += int(_r[2])
+                    rec[3] += int(_r[3])
+            _n_warn = int(_warn_dev)
+            if _n_warn > 0:
+                logger.warning(
+                    f"{self.name}: accepted {_n_warn} out-of-prior in-model "
+                    "coordinate(s) at beta > 0 in this repeat block."
+                )
+
         # End-of-block drift AUDIT (sighet_drift_check / GB_SIGHET_DRIFT_CHECK):
         # with the fixed-reference policy (sighet_refresh_every=0) this logs
         # how far each source walked from its heterodyne expansion point over
@@ -5727,7 +6277,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             logger.info(
                 f"{self.name}: sig-het end-of-block drift ({len(ids)} sources, "
-                f"{self.num_repeat_proposals} repeats): phase max="
+                f"{n_rep} repeats): phase max="
                 f"{float(drift.max()):.3e} median={float(cp.median(drift)):.3e} rad, "
                 f"{n_over} over dphase={self.sighet_refresh_dphase}; "
                 f"|dlnA| max={float(damp.max()):.3e}.{_gate}"
@@ -6457,6 +7007,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # (user requests 2026-08-14). Both consumed in the propose-end
         # summary block.
         self._rj_split = {} if self.is_rj_prop else None
+        # [FSTAT_CTR] per-propose census of lookup-miss fallback rows (the
+        # live-cap reserve rows computed per round instead of at unit open);
+        # bumped in _fstat_ctr_lookup, reported in the propose-end summary.
+        self._fstat_ctr_fallback_rows = 0
         # (Band-shutoff bookkeeping is occupancy-based as of 2026-08-15 —
         # measured at propose end from the cold-chain state; no per-round
         # accumulator needed.)
@@ -6902,6 +7456,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
         except Exception as exc:  # never break a propose for a log line
             logger.debug("[GB_ACCEPT %s] skipped: %r", self.name, exc)
+
+        # [FSTAT_CTR] propose-end total of lookup-miss fallback rows (the
+        # per-unit precompute lines carry the running count; this is the
+        # per-propose sum for the job-195 rj_fstat_centers growth hunt).
+        if (self.is_rj_prop and getattr(self, "rj_fstat_dist_birth", False)
+                and not self.rj_replace):
+            logger.info(
+                "[FSTAT_CTR %s] propose total: fallback-computed rows %d",
+                self.name, int(getattr(self, "_fstat_ctr_fallback_rows", 0)),
+            )
 
         # Stage-timing breakdown for this propose (see _ProposeTimer).
         logger.info(

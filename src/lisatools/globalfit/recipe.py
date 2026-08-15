@@ -2598,6 +2598,20 @@ def build_gb_moves(
         and getattr(gb_info, "search_prior_removal", False)
         and os.environ.get("GB_TEMPER_ON_REMOVAL", "1") == "1"
     )
+    # Per-class in-model repeat defaults (user ruling 2026-08-15): the
+    # recipe's OWN mode flag is authoritative over the {BRANCH}_MODE env
+    # fallback inside the move (resolution: explicit kwarg > env knob >
+    # *_default kwarg here > env-mode fallback). SEARCH moves polish
+    # newborns hard and survivors lightly (200/25); PE keeps the stock
+    # num_repeat_proposals for both classes (so lite presets stay cheap).
+    # Search-NAMED moves get the search dict unconditionally (they only
+    # run in search recipes); the pe-named moves resolve by mode below.
+    _imr_search = {"inmodel_repeats_newborn_default": 200,
+                   "inmodel_repeats_survivor_default": 25}
+    _imr_pe = {
+        "inmodel_repeats_newborn_default": gb_info.num_repeat_proposals,
+        "inmodel_repeats_survivor_default": gb_info.num_repeat_proposals,
+    }
     gb_search_prune_move = _RJBirth(
         *gb_move_args,
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
@@ -2615,7 +2629,7 @@ def build_gb_moves(
         phase_maximize=_rj_phase_max,
         run_swaps=not _temper_on_removal,
         gpus=[],
-        **gb_move_kwargs
+        **{**gb_move_kwargs, **_imr_search}
     )
     gb_search_prune_move.accepted = np.zeros((ntemps, nwalkers))
     
@@ -2634,7 +2648,7 @@ def build_gb_moves(
         gpus=[],
         # Leaf-cap counters advance once per iteration: the prior RJ move is
         # the designated updater; the other RJ moves only enforce the gate.
-        **{**gb_move_kwargs, "leaf_cap_update": False}
+        **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search}
     )
     gb_search_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2689,7 +2703,7 @@ def build_gb_moves(
             phase_maximize=_rj_phase_max,
             run_swaps=False,
             gpus=[],
-            **{**gb_move_kwargs, "leaf_cap_update": False},
+            **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
         )
         gb_replace_move.accepted = np.zeros((ntemps, nwalkers))
     # Pure IN-MODEL move (2026-08-04): no RJ step at all -- ``is_rj_prop=False``
@@ -2731,7 +2745,9 @@ def build_gb_moves(
             # (see the placement comment at the search-move block).
             run_swaps=_temper_on_removal,
             gpus=[],
-            **{**gb_move_kwargs, "leaf_cap_update": False},
+            # Removal pools are 100% mature -- the survivor budget (25)
+            # is the one that binds here.
+            **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
         )
         gb_prior_removal_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2752,6 +2768,10 @@ def build_gb_moves(
     # rj_fstat_mcmc_search / rj_prior_removal / rj_replace) keep the
     # implicit 1.0. {BRANCH}_RJ_FLIP_FRACTION / an explicit kwarg override.
     _rj_flip_default = 1.0 if _gb_mode_search else 0.1
+    # Per-class repeat defaults for the pe-NAMED moves follow the mode the
+    # same way the flip fraction does (search campaigns that run through
+    # the pe-named stage get 200/25; true PE gets num_repeat_proposals).
+    _imr_defaults = _imr_search if _gb_mode_search else _imr_pe
 
     # GB_PE_MOVES_STRICT=1 (2026-08-12 user ruling, for STAGED recipes that
     # carry BOTH search-named and pe-named GB stages in ONE process, e.g.
@@ -2777,6 +2797,7 @@ def build_gb_moves(
     )
     if _pe_strict:
         _rj_flip_default = 0.1
+        _imr_defaults = dict(_imr_pe)
 
     gb_pe_prior_move = _RJBirth(
         *gb_move_args,
@@ -2792,7 +2813,7 @@ def build_gb_moves(
         temper_every_proposes=_pe_temper_every,
         gpus=[],
         **{**gb_move_kwargs, "rj_flip_fraction_default": _rj_flip_default,
-           **_pe_cap_off}
+           **_imr_defaults, **_pe_cap_off}
     )
     gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2810,7 +2831,8 @@ def build_gb_moves(
         temper_every_proposes=_pe_temper_every,
         gpus=[],
         **{**gb_move_kwargs, "leaf_cap_update": False,
-           "rj_flip_fraction_default": _rj_flip_default, **_pe_cap_off}
+           "rj_flip_fraction_default": _rj_flip_default,
+           **_imr_defaults, **_pe_cap_off}
     )
     gb_pe_prior_birth_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2823,7 +2845,8 @@ def build_gb_moves(
         phase_maximize=False,
         gpus=[],
         **{**gb_move_kwargs, "leaf_cap_update": False,
-           "rj_flip_fraction_default": _rj_flip_default, **_pe_cap_off}
+           "rj_flip_fraction_default": _rj_flip_default,
+           **_imr_defaults, **_pe_cap_off}
     )
     gb_pe_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
