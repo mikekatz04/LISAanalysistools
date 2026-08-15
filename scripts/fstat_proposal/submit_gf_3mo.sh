@@ -10,27 +10,16 @@
 # fresh start, move/delete ${STORE_DIR} first.
 #
 # ############################################################################
-# ## PRE-SUBMIT MIGRATION CHECKLIST (2026-08-15 relaunch) -- RUN BOTH ONCE, ##
-# ## ON A STOPPED RUN, BEFORE THE FIRST sbatch. Each writes its own .bak.   ##
-# ## Resume guards REFUSE loudly if a store is un-migrated, so a missed     ##
-# ## step fails fast rather than corrupting -- but it wastes a queue slot.  ##
+# ## FRESH RUN -- NO MIGRATIONS NEEDED (2026-08-15).                        ##
+# ## This starts a new store (STORE_DIR below), so every piece of state is  ##
+# ## built from the config in this file: the VGB beta ladder at VGB_NTEMPS, ##
+# ## the GB cap-cell grid at GB_CAP_DIVISOR, the band grid, and a fresh     ##
+# ## F-stat fit + epoch center table against this run's own residual.       ##
+# ## The migration scripts (fix_vgb_band_temps / migrate_gb_cap_grid /      ##
+# ## migrate_vgb_chirp_basis) exist ONLY to carry an EXISTING store across  ##
+# ## these changes -- do not run them here.                                 ##
 # ##                                                                        ##
-# ##  H5=./gf_prod_3mo/gf_prod_3mo_testing.h5                               ##
-# ##                                                                        ##
-# ##  # 1. VGB beta ladder: heal the betas=[1e-4] bug + go to 8 rungs       ##
-# ##  #    (must match VGB_NTEMPS=8 below)                                  ##
-# ##  python scripts/fstat_proposal/fix_vgb_band_temps.py "$H5" 8           ##
-# ##                                                                        ##
-# ##  # 2. GB leaf caps onto the band/8 cap-cell grid (GB_CAP_DIVISOR=8)    ##
-# ##  #    NOTE: --cap-divisor is a FLAG, not a positional argument.        ##
-# ##  python scripts/fstat_proposal/migrate_gb_cap_grid.py "$H5" \          ##
-# ##      --cap-divisor 8                                                   ##
-# ##                                                                        ##
-# ##  NOT NEEDED (2026-08-15): migrate_vgb_chirp_basis.py -- the VGB branch ##
-# ##  stays on its ESTABLISHED 5-dim distance basis (VGB_CHIRP_MASS_BASIS=0 ##
-# ##  below), so the store's sampled columns do not change. If you ALREADY  ##
-# ##  ran that migration, restore its .bak before submitting -- a 6-column  ##
-# ##  store against the 5-column config trips the ndim resume guard.        ##
+# ## Deploy:  git pull && sbatch scripts/fstat_proposal/submit_gf_3mo.sh    ##
 # ############################################################################
 # ============================================================================
 
@@ -53,7 +42,12 @@ set -euo pipefail
 source /shared/home/mlkatz1/envs/gf_env/bin/activate
 cd /shared/home/mlkatz1/lisa-analysis-tools
 
-STORE_DIR=./gf_prod_3mo/
+# FRESH RUN (2026-08-15, user ruling: "we want to totally restart. This is a
+# fresh run now."). A NEW store dir so the previous run's h5/logs/fstat cache
+# stay intact for comparison and nothing can silently resume. BASE_FILE_NAME
+# stays gf_prod_3mo so every analysis tool (monitor generator, digests) works
+# unchanged -- they take the DIRECTORY as their argument.
+STORE_DIR=./gf_prod_3mo_v2/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU every 30 s into the run
@@ -124,9 +118,31 @@ export GB_RJ_FLIP_FRACTION=0.2
 # the next notch (recommended range 1.0-1.5); tune against the
 # [GB_ACCEPT] per-proposal-type line toward the 0.15-0.4 target.
 export GB_JUMP_FACTOR=1.2
-# SPEED-DIAGNOSIS WINDOW #2: CLOSED 2026-08-15 (job-196 05:49 record
-# captured the full SYNC-attributed rj readout; export removed -- the
-# next [GB_TIMING rj] lines are honest baselines again).
+# ---- TIMERS: ALL ARMED (user directive 2026-08-15, fresh run: "make sure
+#      all the timers are armed so we can study the differences in detail")
+# Always-on, FREE (no knob, no sync): the [GB_TIMING <move>] per-propose
+# span breakdown, the [FSTAT_CTR] center census, [GB_ACCEPT] +
+# [GB_ACCEPT rj-split] per-proposal-type rates, [GB_CELL_LL] credit
+# checks, [SAVE] write times, the buffer-lifecycle lines, and the
+# nvidia-smi CSV sampler above.
+#
+# GF_MOVE_TIMING: per-move wall_s + host RSS + GPU-pool MB for EVERY move
+# in the stage. This is the one that finally makes psd_pe / galfor_pe
+# visible -- they emit no [GB_TIMING] of their own, which is why the
+# ~43 s/iteration noise block was untimed "dark matter" until now. Cheap:
+# one timestamp + two memory reads per move.
+export GF_MOVE_TIMING=1
+# GF_MOVE_TIMING_SYNC / GB_PROP_TIMING_SYNC: make every mark carry EXACTLY
+# its own kernel time instead of leaking into the next mark (cupy is async,
+# so unsynced spans attribute launch time, not execution time). This is
+# what makes a detailed before/after comparison trustworthy.
+# COST: ~8-10 extra device syncs per get_ll; measured +2.5% wall on the
+# GB propose, and it serializes some concurrent shard work.
+# >>> RECOMMENDED: keep BOTH for the first ~2-3 stored iterations to get
+# >>> the detailed attribution, then comment them out and resubmit so the
+# >>> steady-state numbers are honest baselines. The run resumes cleanly.
+export GF_MOVE_TIMING_SYNC=1
+export GB_PROP_TIMING_SYNC=1
 # ---- 2026-08-15 perf batch (ALL code defaults; pinned for the run
 #      record; each knob independently revertible) ---------------------
 # De-synced in-model repeat loop (device-resident accept chain) rides
@@ -247,65 +263,31 @@ export VGB_NTEMPS=8
 export GB_ROUTER_THREADED=1
 
 # ============================================================================
-# ONE-TIME RELAUNCH PREP (2026-08-15). Guarded by a marker file, so ordinary
-# resubmits/resumes skip it entirely and a mid-fit death resumes normally.
-# To RE-ARM (e.g. after restoring a .bak): rm ${STORE_DIR}/.relaunch_prep_*
-# Runs BEFORE the sampler, uses the knobs exported above so the store and the
-# config can never disagree, and fails the job fast (set -e) if a step errors
-# rather than launching onto a half-migrated store.
+# FRESH-RUN GUARD (2026-08-15). This submission starts a NEW run in a NEW
+# store dir: every piece of state -- the VGB beta ladder, the GB cap-cell
+# grid, the band grid, the F-stat epoch cache -- is built from the config
+# above, so NO migration scripts apply (they operate on an existing h5 and
+# would fail the job here). Resubmitting this same script later RESUMES this
+# new store normally; only the very first submission is a fresh start.
+# Refuse to start fresh on top of an existing store rather than silently
+# resuming one and reporting it as a fresh run.
 # ============================================================================
-PREP_MARK=${STORE_DIR}/.relaunch_prep_2026_08_15
-H5=${STORE_DIR}/${BASE_FILE_NAME}_testing.h5
-if [ ! -f "${PREP_MARK}" ]; then
-  echo "[PREP] one-time relaunch preparation on ${H5}"
-
-  # 1. VGB beta ladder: heal the betas=[1e-4] bug and re-rung to VGB_NTEMPS.
-  #    (Recreates every rung-dimensioned vgb dataset; writes its own .bak.)
-  python scripts/fstat_proposal/fix_vgb_band_temps.py "${H5}" "${VGB_NTEMPS}"
-
-  # 2. GB leaf caps onto the band/GB_CAP_DIVISOR cap-cell grid. Each band
-  #    hands its current cap + min-iters counters to all its cells (inherit,
-  #    never tighten). Refuses if its .bak already exists.
-  python scripts/fstat_proposal/migrate_gb_cap_grid.py "${H5}" \
-      --cap-divisor "${GB_CAP_DIVISOR}"
-
-  # 3. RETIRE THE STALE F-STAT EPOCH so the fit-in-move rebuilds the grid
-  #    against the CURRENT residual. Two independent reasons this grid is
-  #    stale: (a) it was fitted at epoch 0 (2026-08-13, ~iteration 8) and the
-  #    model has since absorbed ~140 GB sources/walker that are now
-  #    SUBTRACTED out of the residual it was fitted against; (b) the VGB
-  #    likelihood was OFF for the whole run (betas=[1e-4]), so VGBs were
-  #    never actually fitted -- with that repaired they now move and subtract
-  #    properly, changing the residual again. Archiving (not deleting) the
-  #    epoch dirs makes _latest_epoch() return None -> a fresh "fit" at the
-  #    first rj_fstat_search setup(); the archive keeps the old grid for
-  #    comparison. The epoch table of F-stat CENTERS is rebuilt in the same
-  #    sweep (GB_FSTAT_CTR_MODE=epoch), so centers follow the new residual
-  #    automatically.
-  FSTAT_SHARED=${STORE_DIR}/gb_fstat_fit/shared
-  if [ -d "${FSTAT_SHARED}" ] && compgen -G "${FSTAT_SHARED}/epoch_*" > /dev/null; then
-    ARCH=${STORE_DIR}/gb_fstat_fit/stale_epochs_$(date +%Y%m%d_%H%M%S)
-    mkdir -p "${ARCH}"
-    mv "${FSTAT_SHARED}"/epoch_* "${ARCH}/"
-    echo "[PREP] archived stale F-stat epoch(s) -> ${ARCH} (fresh fit will run)"
-  else
-    echo "[PREP] no F-stat epochs found -- the first fit will build epoch_0000"
-  fi
-
-  touch "${PREP_MARK}"
-  echo "[PREP] complete; marker ${PREP_MARK}"
+if [ -e "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" ]; then
+  echo "[FRESH] ${STORE_DIR} already holds a run -- RESUMING it."
+  echo "[FRESH] For a genuinely fresh start, point STORE_DIR at a new dir"
+  echo "        or move this one aside first."
 else
-  echo "[PREP] already applied (${PREP_MARK}) -- skipping; normal resume."
+  echo "[FRESH] no store at ${STORE_DIR} -- starting a NEW run from scratch."
+  echo "[FRESH] stages run from the top (noise_search -> noise_vgb_search ->"
+  echo "        gb_search -> full_pe); the F-stat grid + epoch center table"
+  echo "        are fitted fresh against this run's own residual."
 fi
 
 # LATER REFITS: GB_FSTAT_REFIT_EVERY=100 proposal-hits (~8 h at the new
 # iteration cadence, ~3.5% overhead at a 17.7-min fit). To force an extra
-# refit mid-run WITHOUT restarting from a stale grid, stop the job and
-# archive the epoch dir again:
-#   mv ./gf_prod_3mo/gb_fstat_fit/shared/epoch_* /tmp/  &&  sbatch ...
-# Worth doing once the VGBs have visibly converged, since this first fresh
-# fit happens after only ONE VGB move (noise_vgb_joint_search runs before
-# rj_fstat_search within the gb_search stage, so it is one move, not zero).
+# refit mid-run, stop the job and archive the epoch dir, then resubmit:
+#   mv ${STORE_DIR}/gb_fstat_fit/shared/epoch_* /tmp/  &&  sbatch ...
+# (_latest_epoch() then returns None and the fit-in-move rebuilds.)
 
 # DEDICATED SAVER RANK (armed 2026-08-15, user directive -- the [SAVE]
 # math flipped: the ~60 s sync write was 2% of a 55-min iteration but
