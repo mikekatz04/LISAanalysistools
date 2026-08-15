@@ -3,7 +3,31 @@
 # SCALING RUN -- 23-month Tobs (gb + vgb + psd + galfor, mojito)
 # Identical staged recipe to submit_gf_3mo.sh; only the knobs below differ.
 #
+# 2026-08-15 SYNC WITH THE 3-MONTH SCRIPT. The perf/correctness/diagnostic
+# work from that day was copied here; the 23-mo SIZING was deliberately NOT
+# touched. Kept 23-mo-specific (do not "fix" these to match 3 mo):
+#   TOBS_TARGET=6.048e7 | SIGHET_NT_LAYER=525 | GB_NLEAVES_MAX=25000
+#   GB_N_SUBBANDS=2048/GPU (per-slot slab ~8x the 3-mo cost)
+#   FSTAT_PEAKS_PER_BAND=500 (~8x finer comb) | FSTAT_SIGHET_MULTIDEV=1
+#   STORE_DIR / BASE_FILE_NAME / job name
+#
 # !! PREFLIGHT GATES -- do these BEFORE submitting !!
+#
+# 0. RESUMING AN EXISTING gf_prod_23mo STORE? Two migrations are REQUIRED,
+#    because this script now turns on the cap-cell grid and the repaired VGB
+#    beta ladder, and the resume guards compare the store against the config:
+#
+#      H5=./gf_prod_23mo/gf_prod_23mo_testing.h5
+#      python scripts/fstat_proposal/fix_vgb_band_temps.py "$H5" 8
+#      python scripts/fstat_proposal/migrate_gb_cap_grid.py "$H5" --cap-divisor 8
+#
+#    The FIRST is not optional for correctness: the VGB likelihood was OFF
+#    for every run before 2026-08-15 (betas collapsed to [1e-4]). The code
+#    fix alone does NOT heal a store -- resume restores band_temps from the
+#    h5, and the reconciliation deliberately lets the STORED ladder win, so
+#    an un-migrated store keeps sampling VGBs with the likelihood off.
+#    STARTING FRESH (new/empty STORE_DIR) needs NEITHER migration: every
+#    grid and ladder is built from the config below.
 #
 # 1. FSTAT KERNEL SHARED-MEMORY CLAMP (blocking) -- FIX LANDED 2026-08-12,
 #    GATE STILL REQUIRED. The sig-het shared-memory work on GBGPU dev
@@ -40,8 +64,8 @@
 #SBATCH --partition=gpu-80-spot   # GPU partition
 #SBATCH --gres=gpu:2              # 2 GPUs; consider 4 if the shakedown is tight
 #SBATCH --nodes=1                 # single node
-#SBATCH --ntasks=1                # single process (MPI singleton)
-#SBATCH --cpus-per-task=4
+#SBATCH --ntasks=3                # main + stopped spare + SAVER rank (mpiexec -n 3)
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
 #SBATCH --output=gf23mo_%j.log    # combined stdout+stderr
@@ -57,19 +81,38 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 STORE_DIR=./gf_prod_23mo/
 
 # ---- GPU telemetry ---------------------------------------------------------
-# Background nvidia-smi sampler: one CSV row per GPU every 30 s into the run
-# store (timestamped per job, so resubmits/resumes append new files rather
-# than clobbering). Killed automatically when the job exits. Columns:
+# Background nvidia-smi sampler: one CSV row per GPU into the run store
+# (timestamped per job, so resubmits/resumes add new files rather than
+# clobbering). Killed automatically when the job exits. Columns:
 # timestamp, index, name, util.gpu [%], util.mem [%], mem.used [MiB],
 # mem.total [MiB], power [W], temp [C].
+# INTERVAL 30 -> 5 s (2026-08-15): fine enough to attribute utilization to a
+# move rather than to a whole iteration. Negligible cost.
 mkdir -p ${STORE_DIR}
+GPU_SAMPLE_SEC=${GPU_SAMPLE_SEC:-5}
 GPU_LOG=${STORE_DIR}/gpu_util_${SLURM_JOB_ID:-manual_$(date +%s)}.csv
 nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu \
-  --format=csv,noheader,nounits -l 30 > "${GPU_LOG}" &
+  --format=csv,noheader,nounits -l ${GPU_SAMPLE_SEC} > "${GPU_LOG}" &
 GPU_SMI_PID=$!
-trap 'kill ${GPU_SMI_PID} 2>/dev/null || true' EXIT
+# PER-PROCESS GPU memory: --query-gpu reports DEVICE totals only, so it
+# cannot say which process holds memory. Under `mpiexec -n 3` that is the
+# open question (the staged runner builds on every rank before roles
+# resolve). Sampled 6x slower -- it only changes on allocation.
+GPU_PROC_LOG=${STORE_DIR}/gpu_procs_${SLURM_JOB_ID:-manual_$(date +%s)}.csv
+nvidia-smi --query-compute-apps=timestamp,gpu_uuid,pid,process_name,used_memory \
+  --format=csv,noheader,nounits -l $((GPU_SAMPLE_SEC * 6)) > "${GPU_PROC_LOG}" &
+GPU_PROC_PID=$!
+trap 'kill ${GPU_SMI_PID} ${GPU_PROC_PID} 2>/dev/null || true' EXIT
 
 export OMP_NUM_THREADS=1
+
+# ---- console verbosity ------------------------------------------------------
+# The file handler is pinned at DEBUG unconditionally, so every per-iteration
+# line always lands in ${STORE_DIR}/${BASE_FILE_NAME}_artifacts/globalfit_run.log
+# regardless of this knob. VERBOSE only MIRRORS them to stdout; PROGRESS off
+# so tqdm does not bury the output in a non-tty sbatch log. No compute cost.
+export VERBOSE=1
+export PROGRESS=0
 
 export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
 export USE_GPU=1
@@ -120,11 +163,14 @@ export GB_N_SUBBANDS=2048  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @
 # 0.3 random subset of eligible slots; in-model repeats still cover
 # ALL alive sources (flip gate is rj-only by construction).
 export GB_RJ_FLIP_FRACTION=0.2
-# In-model info-matrix jump scale (user ruling 2026-08-14): the 0.005
-# default measured 95% cold acceptance (steps ~0.5% of a posterior
-# sigma); 0.2 targets healthy mixing. Tune against the [GB_ACCEPT]
-# per-proposal-type line.
-export GB_JUMP_FACTOR=0.2
+# In-model info-matrix jump scale. COPIED FROM THE 3-MO MEASUREMENT, not
+# re-derived: with the EXACT per-block SIGHET info matrices live (below),
+# the 3-mo run measured cold acceptance RISING to 0.71-0.80 at 0.6 -- the
+# better-adapted covariance makes the old 0.2 far too timid. The jump is
+# expressed in units of the proposal covariance, so the reasoning is
+# Tobs-independent; the VALUE still needs grading here against the
+# [GB_ACCEPT] per-proposal-type line (target 0.15-0.4).
+export GB_JUMP_FACTOR=1.2
 # Comb nodes scale ~ Tobs (0.5/Tobs spacing) -> each epoch fit is ~8x the
 # 3-mo cost. 100 keeps the same iteration cadence; raise to 200 if the
 # [GF_TIMING] lines show refits dominating.
@@ -143,8 +189,90 @@ export GB_WDM_BAND_SLAB_LAYERS=5
 # dist from the birth container and the prior enters through logp.
 export GB_USE_GALAXY_PRIOR=1
 
+# ---- 2026-08-15 perf batch (copied from submit_gf_3mo.sh; all are code
+#      defaults pinned for the run record, and all are Tobs-INDEPENDENT --
+#      they remove host/sync overhead, they do not resize anything) --------
+export GB_RJ_DIRECT_BATCH=1        # rigid batches -> one end-of-unit in-model
+export GB_RJ_LIVE_CAP_PICK=1       # live at-cap birth gate + same-unit re-entry
+export GB_BUFFER_FIXED_CAPACITY=1  # ONE capacity buffer; resize-rebind
+export GB_RJ_FSTAT_CTR_HOIST=1     # centers batched per unit (fallback path)
+export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
+export GB_ROUTER_DEVICE_RESIDENT=1 # shard router never host-stages; =0 reverts
+export GB_RJ_SNR_TRUNC_DIST=1      # birth distance truncated at the analytic
+                                   # SNR limit; truncated density in the
+                                   # factors (DB-exact). At 23 mo the SNR of a
+                                   # given source is ~sqrt(8)x the 3-mo value,
+                                   # so FEWER births are clamped -- the lever
+                                   # is smaller here, and still free.
+# Per-class in-model repeats: newborns polish hard, survivors lightly.
+export GB_INMODEL_REPEATS_NEWBORN=200
+export GB_INMODEL_REPEATS_SURVIVOR=25
+# EPOCH F-STAT CENTERS: the center distributions are built ONCE per epoch,
+# inside the fit that already sweeps this grid, and looked up per row at
+# propose time. This matters MORE at 23 mo than at 3 mo: the per-row F-stat
+# evaluation it replaces scales with Tobs, and it rides a fit that is
+# already ~8x. =unit restores the per-unit hoist.
+export GB_FSTAT_CTR_MODE=epoch
+# Per-block EXACT info matrices through the sig-het fast route. The
+# data_index misindex is FIXED and multi-GPU slots route by the BUFFER's
+# slot shards. First shakedown: SIGHET_INFOMAT_VALIDATE=1 for one propose.
+export SIGHET_INFOMAT=1
+export GB_INFOMAT_PER_BLOCK=1
+# High-f barren-band birth shutoff (search scope).
+export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
+export GB_RJ_BAND_SHUTOFF_AFTER=5
+export GB_RJ_BAND_SHUTOFF_SCOPE=search
+# Leaf caps on a band/8 cap-cell grid (confusion scale, not the computing
+# scale of the sub-bands). The band grid is IDENTICAL to the 3-mo one (same
+# layer_df), so this is 154 bands -> 1232 cells here too. Note the physics
+# is if anything MORE favourable at 23 mo: a source's posterior is ~8x
+# narrower in frequency, so a cell of the same width in Hz is ~8x wider in
+# units of the posterior -- 8 stays conservative. RESUME REQUIRES the cap
+# migration (gate 0 above). GB_CAP_DIVISOR=1 reverts.
+export GB_CAP_DIVISOR=8
+export GB_CAP_LL_CHECK=1
+# Bilinearity bookkeeping monitor (per-unit [GB_ORTHO_LL]); ~1.5 s/propose.
+export GB_ORTHO_LL_CHECK=1
+
+# ---- NOISE (psd + galfor) internal repeats: 50 -> 10 (user ruling
+#      2026-08-15) ---------------------------------------------------------
+# Each PSDMove.propose runs num_prop_repeats internal MCMC repeats, each
+# scoring the whole (ntemps x nwalkers) ladder. The noise model is 4 (psd)
+# + 5 (galfor) parameters and converges long before 50 repeats. Tobs
+# affects the COST of each scoring call (the WDM grid is ~8x), not the
+# number of repeats needed -- so this cut is worth MORE here than at 3 mo.
+export PSD_NUM_PROP_REPEATS=10
+export GALFOR_NUM_PROP_REPEATS=10
+
+# ---- TIMERS: ALL ARMED (so the scaling readout is attributable) ------------
+# Always-on and free: [GB_TIMING] spans, [FSTAT_CTR], [GB_ACCEPT] (+rj-split),
+# [GB_CELL_LL], [SAVE], buffer lifecycle, the nvidia-smi CSVs above.
+# GF_MOVE_TIMING: per-move wall + RSS + GPU-pool for EVERY move -- the only
+# way psd_pe/galfor_pe become visible (they emit no [GB_TIMING] of their own).
+export GF_MOVE_TIMING=1
+# The SYNC pair makes each mark carry exactly its own kernel time instead of
+# leaking into the next (cupy is async). COST ~2.5% wall. For a SCALING run
+# this attribution is the entire point, so keep them; drop both if you ever
+# want raw end-to-end wall numbers.
+export GF_MOVE_TIMING_SYNC=1
+export GB_PROP_TIMING_SYNC=1
+
 # ---- VGB: exact chunked-het in-model scorer (see submit_gf_3mo.sh) ---------
 export VGB_SIGHET_INMODEL=0
+# VGB parameterization: the ESTABLISHED 5-dim distance basis, matching the
+# 3-mo run (user ruling 2026-08-15). NOTE for the SCIENCE case here: at 23
+# months fdot IS measurable, which is exactly what the 6-dim chirp basis
+# (VGB_CHIRP_MASS_BASIS=1, Mc sampled) was built for -- in this basis
+# fdot_astro_ratio stays a COLLAPSED dimension (truth 0 x multiplicative
+# init = no spread, and pure stretch cannot create spread it never had).
+# Left at 0 because this run is a SCALING readout, not a science posterior;
+# flipping it on a FRESH store costs nothing, on an existing store it needs
+# migrate_vgb_chirp_basis.py.
+export VGB_CHIRP_MASS_BASIS=0
+# 8-rung VGB ladder. On a RESUME this only takes effect after
+# fix_vgb_band_temps.py (gate 0): the reconciliation deliberately lets the
+# STORED ladder win, so an un-migrated store keeps its old (broken) one.
+export VGB_NTEMPS=8
 # Concurrent per-device shard dispatch (code default since 2026-08-13;
 # explicit here for the run record). =0 restores serial dispatch if the
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
@@ -158,4 +286,14 @@ export GB_ROUTER_THREADED=1
 # serialize. =0 restores the single-device pin.
 export FSTAT_SIGHET_MULTIDEV=1
 
-python scripts/fstat_proposal/run_combined_staged.py
+# DEDICATED SAVER RANK. The [SAVE] case is STRONGER here than at 3 mo: the
+# store writes ~25000-leaf arrays (~1 GB/iteration raw), so the synchronous
+# write is a larger slice of the iteration. np>=3: rank 0 samples, the
+# HIGHEST rank saves asynchronously, the middle spare stops at startup.
+# FIRST-LAUNCH CHECK: run_combined_staged.py builds on EVERY rank before
+# roles resolve -- watch gpu_procs_*.csv (above) for saver/spare
+# allocations. At 23-mo grid sizes an extra full build would be ~0.6 GB of
+# residual per walker, so if the helpers hold memory, fall back to the
+# single-process line below until the rank-gated build lands.
+mpiexec -n 3 python scripts/fstat_proposal/run_combined_staged.py
+# python scripts/fstat_proposal/run_combined_staged.py   # single-process fallback
