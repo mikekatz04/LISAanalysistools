@@ -41,6 +41,7 @@ __all__ = [
     "ckpt_fingerprint",
     "ckpt_load",
     "ckpt_save",
+    "ckpt_resume",
     "ckpt_clear",
     "ckpt_secs",
     "chunked_fstat_sweep",
@@ -111,21 +112,55 @@ def ckpt_fingerprint(*arrays, extra: str = "") -> str:
     resume without being an array -- the sweep label, and (for the in-move
     fit) the refit epoch, so a later epoch can never resume another epoch's
     rows.
+
+    A row provider that never materializes its block (:class:`_CombRows`)
+    exposes ``_ckpt_flat_sample()`` returning ``(shape, the same subsampled
+    flat values)``, so a lazy provider hashes BIT-IDENTICALLY to the dense
+    array it replaces -- an in-flight sweep's progress file stays valid
+    across the lazy switch.
     """
     h = hashlib.md5(extra.encode())
     for a in arrays:
-        a = np.ascontiguousarray(_to_host(a))
-        step = max(1, a.size // 257)
-        h.update(str(a.shape).encode())
-        h.update(a.reshape(-1)[::step].tobytes())
+        sampler = getattr(a, "_ckpt_flat_sample", None)
+        if sampler is not None:
+            shape, sample = sampler()
+        else:
+            a = np.ascontiguousarray(_to_host(a))
+            shape = a.shape
+            sample = a.reshape(-1)[::max(1, a.size // 257)]
+        h.update(str(shape).encode())
+        h.update(np.asarray(sample).tobytes())
     return h.hexdigest()
 
 
+#: Raw float64 payload written alongside the ``.progress.npz`` header. The
+#: header used to carry the F rows themselves, which made every cadence save
+#: rewrite the WHOLE completed prefix -- O(n^2) bytes over a sweep (at 23-mo
+#: comb density, ~250 GB of writes + the matching device->host copies for one
+#: level). The payload file is append-only, so a save costs only the rows
+#: produced since the previous one.
+_CKPT_PAYLOAD_SUFFIX = ".progress.dat"
+_CKPT_HEADER_SUFFIX = ".progress.npz"
+
+
+def _ckpt_payload_rows(path: str) -> int:
+    try:
+        return os.path.getsize(path) // 8
+    except OSError:
+        return -1
+
+
 def ckpt_load(ckpt: Optional[str], n: int, fingerprint: str):
-    """Returns ``(host F array or None, completed row count)``."""
+    """Returns ``(host F array or None, completed row count)``.
+
+    Reads either payload layout: the append-only ``.progress.dat`` written
+    by :func:`ckpt_save`, or a legacy header that still carries ``F`` inline
+    (a progress file written before the incremental payload landed -- an
+    in-flight sweep must keep resuming).
+    """
     if not ckpt:
         return None, 0
-    path = ckpt + ".progress.npz"
+    path = ckpt + _CKPT_HEADER_SUFFIX
     if not os.path.exists(path):
         return None, 0
     try:
@@ -135,31 +170,91 @@ def ckpt_load(ckpt: Optional[str], n: int, fingerprint: str):
                         os.path.basename(path))
             return None, 0
         done = int(d["done"])
+        if "F" in d.files:                       # legacy inline payload
+            F = np.array(d["F"])
+        else:
+            dat = ckpt + _CKPT_PAYLOAD_SUFFIX
+            have = _ckpt_payload_rows(dat)
+            if have < done:
+                logger.info("[ckpt] %s: payload holds %d of %d rows -> "
+                            "restarting this sweep", os.path.basename(dat),
+                            max(have, 0), done)
+                return None, 0
+            F = np.fromfile(dat, dtype=np.float64, count=done)
+        if F.size < done:
+            logger.info("[ckpt] %s: payload short (%d < %d) -> restarting "
+                        "this sweep", os.path.basename(path), F.size, done)
+            return None, 0
         logger.info("[ckpt] resuming %s at %d/%d rows",
                     os.path.basename(ckpt), done, n)
-        return np.array(d["F"]), done
+        return F, done
     except Exception as exc:  # unreadable/partial file -> recompute
         logger.info("[ckpt] %s: unreadable (%r) -> restarting this sweep",
                     os.path.basename(path), exc)
         return None, 0
 
 
-def ckpt_save(ckpt: Optional[str], F_host, done: int, n: int,
-              fingerprint: str) -> None:
+def ckpt_save(ckpt: Optional[str], F_rows, done: int, n: int,
+              fingerprint: str, start: Optional[int] = None) -> None:
+    """Append ``F_rows`` -- the rows ``[start, done)`` -- and stamp the header.
+
+    ``start=None`` means ``F_rows`` is the whole completed prefix
+    ``[0, done)`` (the plain "write everything I have" call; also how a
+    resumed legacy payload is normalized into the new layout). Otherwise the
+    payload file must already hold exactly ``start`` rows -- a longer file
+    (rows appended by a run that died before its header landed) is truncated
+    back to the header's cursor first, so the payload never disagrees with
+    the count the header advertises.
+
+    The header is written to a temp file and ``os.replace``d, so the cursor
+    only ever advances after the rows behind it are on disk.
+    """
     if not ckpt:
         return
-    path = ckpt + ".progress.npz"
+    path = ckpt + _CKPT_HEADER_SUFFIX
+    dat = ckpt + _CKPT_PAYLOAD_SUFFIX
     tmp = ckpt + ".progress.tmp.npz"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez(tmp, F=F_host, done=done, n=n, fingerprint=fingerprint)
+    rows = np.ascontiguousarray(np.asarray(F_rows, dtype=np.float64).ravel())
+    s = int(done) - int(rows.size) if start is None else int(start)
+    if s <= 0:
+        with open(dat, "wb") as f:
+            rows.tofile(f)
+    else:
+        have = _ckpt_payload_rows(dat)
+        if have > s:
+            os.truncate(dat, s * 8)
+        elif have < s:
+            raise ValueError(
+                f"F-stat checkpoint payload {dat!r} holds {max(have, 0)} "
+                f"rows but the append starts at {s}; refusing to write a "
+                f"payload with a hole.")
+        with open(dat, "ab") as f:
+            rows.tofile(f)
+    np.savez(tmp, done=done, n=n, fingerprint=fingerprint)
     os.replace(tmp, path)
+
+
+def ckpt_resume(ckpt: Optional[str], n: int, fingerprint: str):
+    """:func:`ckpt_load` + payload normalization.
+
+    Converts a legacy inline-``F`` progress file into the append-only
+    payload layout on the spot, so the sweep that resumes it can append from
+    its cursor like any other.
+    """
+    F_prev, start = ckpt_load(ckpt, n, fingerprint)
+    if (ckpt and F_prev is not None and start > 0
+            and _ckpt_payload_rows(ckpt + _CKPT_PAYLOAD_SUFFIX) < start):
+        ckpt_save(ckpt, F_prev[:start], start, n, fingerprint, start=0)
+    return F_prev, start
 
 
 def ckpt_clear(parts_dir: Optional[str], prefix: str) -> None:
     if not parts_dir or not os.path.isdir(parts_dir):
         return
+    suffixes = (_CKPT_HEADER_SUFFIX, _CKPT_PAYLOAD_SUFFIX, ".progress.tmp.npz")
     for fn in os.listdir(parts_dir):
-        if fn.startswith(prefix) and fn.endswith(".progress.npz"):
+        if fn.startswith(prefix) and fn.endswith(suffixes):
             try:
                 os.remove(os.path.join(parts_dir, fn))
             except OSError:
@@ -320,29 +415,59 @@ def build_sighet_call_fstat(sighet_comp, wdm_holder, *, xp, Tobs: float,
                     state.get("rebuilds", 0))
 
     def call_fstat(params):
-        p = xp.atleast_2d(xp.asarray(params, dtype=xp.float64))
-        f0_h = _to_host(p[:, 1])
+        # Bucket on the HOST copy of the f0 column. The comb / center sweeps
+        # assemble their rows on the host, so reading f0 off an uploaded
+        # device copy meant an H2D followed immediately by a synchronizing
+        # D2H of the same column -- one hard device sync per batch, for
+        # numbers the caller already had.
+        p_in = params if hasattr(params, "shape") else np.asarray(params)
+        if getattr(p_in, "ndim", 2) == 1:
+            p_in = p_in[None, :]
+        f0_h = _to_host(p_in[:, 1])
+        n_rows = int(f0_h.shape[0])
         k = np.clip(np.round((f0_h - node_f0[0]) / spacing_hz).astype(int),
                     0, n_nodes - 1)
-        worst = np.abs(f0_h - node_f0[k]).max() if len(f0_h) else 0.0
+        worst = np.abs(f0_h - node_f0[k]).max() if n_rows else 0.0
         if worst > 0.5 * spacing_hz * (1.0 + 1e-9):
             raise RuntimeError(
                 f"[sighet-fstat] candidate f0 {worst:.3e} Hz from its "
                 f"bucketed reference (> spacing/2 = "
                 f"{0.5 * spacing_hz:.3e}); the reference comb does not "
                 "cover the requested f0 range.")
+        if n_rows == 0:
+            return (xp.zeros((0, 4), dtype=xp.float64),
+                    xp.zeros((0, 10), dtype=xp.float64))
+        p = xp.asarray(p_in, dtype=xp.float64)
         blocks = k // ref_block
-        N_all = xp.zeros((p.shape[0], 4), dtype=xp.float64)
-        M_all = xp.zeros((p.shape[0], 10), dtype=xp.float64)
+        if int(blocks.min()) == int(blocks.max()):
+            # SINGLE-BLOCK FAST PATH -- the production case. Both sweeps
+            # order rows f0-locally (node-major comb, f0-sorted stage-B
+            # boxes) and a block spans ``ref_block`` references, so a batch
+            # almost always sits inside one block. Scoring it whole skips
+            # the (n, 4) / (n, 10) scratch pair, three uploads of the row
+            # index, a device gather of the rows and two scatters back --
+            # all of which reduce to the identity when there is one group.
+            # ``xp.asarray(..., float64)`` keeps the dtype contract the
+            # scratch buffers used to impose (a no-op view when the kernel
+            # already returns float64).
+            b0 = int(blocks[0])
+            _ensure_block(b0)
+            di = xp.asarray((k - b0 * ref_block).astype(np.int32))
+            N_b, M_b = sighet_comp.get_fstat_ll_wdm(
+                p, None, data_index=di, fstat_mode=fstat_mode)
+            return (xp.asarray(N_b, dtype=xp.float64),
+                    xp.asarray(M_b, dtype=xp.float64))
+        N_all = xp.zeros((n_rows, 4), dtype=xp.float64)
+        M_all = xp.zeros((n_rows, 10), dtype=xp.float64)
         for b in np.unique(blocks):
             sel = np.where(blocks == b)[0]
             _ensure_block(int(b))
+            sel_d = xp.asarray(sel)
             di = xp.asarray((k[sel] - int(b) * ref_block).astype(np.int32))
             N_b, M_b = sighet_comp.get_fstat_ll_wdm(
-                p[xp.asarray(sel)], None, data_index=di,
-                fstat_mode=fstat_mode)
-            N_all[xp.asarray(sel)] = N_b
-            M_all[xp.asarray(sel)] = M_b
+                p[sel_d], None, data_index=di, fstat_mode=fstat_mode)
+            N_all[sel_d] = N_b
+            M_all[sel_d] = M_b
         return N_all, M_all
 
     return call_fstat
@@ -375,16 +500,22 @@ def chunked_fstat_sweep(call_fstat: Callable, params, *, xp, label: str = "",
     n = params.shape[0]
     batch = fstat_knob("FSTAT_BATCH", int)
     F = xp.empty(n, dtype=xp.float64)
-    F_prev, start = ckpt_load(ckpt, n, fp)
+    F_prev, start = ckpt_resume(ckpt, n, fp)
     if F_prev is not None and start > 0:
         F[:start] = xp.asarray(F_prev[:start])
+    # Cadence + flush cursor. Only the rows produced since the last save are
+    # copied back and written (the payload file is append-only), so both the
+    # device->host traffic and the disk traffic over a sweep are O(n), not
+    # O(n^2 / 2) as they were when every save rewrote the whole prefix.
+    ckpt_every = ckpt_secs()
+    flushed = start
     if ckpt and start == 0:
         # Write the progress file up front (done=0): its presence confirms
         # checkpointing is armed and where the parts live -- and a very early
         # death still leaves a valid (empty) resume point.
-        ckpt_save(ckpt, np.empty(0), 0, n, fp)
+        ckpt_save(ckpt, np.empty(0), 0, n, fp, start=0)
         logger.info("[ckpt] progress file: %s.progress.npz (every %.0fs "
-                    "+ on interrupt)", ckpt, ckpt_secs())
+                    "+ on interrupt)", ckpt, ckpt_every)
     t0 = last = last_ckpt = time.time()
     done = start
     try:
@@ -402,19 +533,23 @@ def chunked_fstat_sweep(call_fstat: Callable, params, *, xp, label: str = "",
                     "ETA %s | elapsed %s", label, e, n, 100.0 * e / n,
                     _rate, _fmt_secs((n - e) / max(_rate, 1e-9)),
                     _fmt_secs(_el))
-            if ckpt and e < n and time.time() - last_ckpt > ckpt_secs():
+            if ckpt and e < n and time.time() - last_ckpt > ckpt_every:
                 last_ckpt = time.time()
-                ckpt_save(ckpt, _to_host(F[:e]), e, n, fp)
+                ckpt_save(ckpt, _to_host(F[flushed:e]), e, n, fp,
+                          start=flushed)
+                flushed = e
                 logger.info("[ckpt] saved %d/%d rows", e, n)
     except BaseException:
         # Ctrl-C / SIGTERM / OOM between cadence saves: keep every completed
         # row (SIGKILL is the only death the cadence alone must cover).
-        if ckpt and done > start:
-            ckpt_save(ckpt, _to_host(F[:done]), done, n, fp)
+        if ckpt and done > flushed:
+            ckpt_save(ckpt, _to_host(F[flushed:done]), done, n, fp,
+                      start=flushed)
+            flushed = done
             logger.info("[ckpt] interrupt: saved %d/%d rows", done, n)
         raise
     if ckpt and start < n:
-        ckpt_save(ckpt, _to_host(F), n, n, fp)
+        ckpt_save(ckpt, _to_host(F[flushed:n]), n, n, fp, start=flushed)
     logger.info("[sweep%s] %d evals in one chunked stream (batch=%d, %.0fs%s)",
                 label, n, batch, time.time() - t0,
                 f", resumed at {start}" if start else "")
@@ -498,6 +633,74 @@ def _sky_grid(n):
             -1.0 + 2.0 * (ks + 0.5) / n)
 
 
+class _CombRows:
+    """One comb sky level's ``(n_nodes * n_sky, 9)`` rows, never materialized.
+
+    :func:`chunked_fstat_sweep` only ever touches a level's parameter block
+    through ``.shape`` and a row slice, so the block does not have to exist:
+    this builds each ``FSTAT_BATCH`` slice from index arithmetic instead.
+    The dense array it replaces is 1.6 GB for the 3-month comb's largest sky
+    level and ~81 GB for the 23-month one (~1.1e9 rows x 9 float64) -- host
+    memory that has to be reserved for the whole level even though the sweep
+    consumes it 4096 rows at a time.
+
+    Row order is unchanged (NODE-MAJOR: f0 slow, sky fast), and every column
+    is produced by the same elementwise expression as the dense assembly, so
+    slices are bit-identical to the array's:
+
+    * ``repeat(nodes, lv) * 1e-3`` -> ``(nodes * 1e-3)[row // lv]``
+    * ``tile(alpha, nn)``          -> ``alpha[row % lv]``
+    * ``arcsin(tile(sd, nn))``     -> ``arcsin(sd)[row % lv]``
+    * ``get_fdot`` is elementwise in ``(f, Mc)``.
+
+    ``_ckpt_flat_sample`` reproduces exactly the subsample
+    :func:`ckpt_fingerprint` would have taken of the dense array, so an
+    in-flight comb progress file keeps resuming across this change.
+    """
+
+    __slots__ = ("_f0_hz", "_alpha", "_sd_asin", "_mc", "_lv", "shape", "ndim")
+
+    def __init__(self, nodes_mHz, alpha, sin_delta, mc_fix):
+        alpha = np.asarray(alpha, dtype=float)
+        self._f0_hz = np.asarray(nodes_mHz, dtype=float) * 1e-3
+        self._alpha = alpha
+        self._sd_asin = np.arcsin(np.asarray(sin_delta, dtype=float))
+        self._mc = float(mc_fix)
+        self._lv = int(alpha.shape[0])
+        self.shape = (int(self._f0_hz.shape[0]) * self._lv, 9)
+        self.ndim = 2
+
+    def __len__(self):
+        return self.shape[0]
+
+    def _rows(self, idx):
+        from gbgpu.utils.utility import get_fdot
+
+        idx = np.asarray(idx)
+        out = np.zeros((idx.size, 9))
+        f0 = self._f0_hz[idx // self._lv]
+        j = idx % self._lv
+        out[:, 0] = 1e-22
+        out[:, 1] = f0
+        out[:, 2] = get_fdot(f=f0, Mc=np.full(idx.size, self._mc))
+        out[:, 5] = 0.5 * np.pi
+        out[:, 7] = self._alpha[j]
+        out[:, 8] = self._sd_asin[j]
+        return out
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return self._rows(np.arange(*key.indices(self.shape[0])))
+        return self._rows(np.asarray(key))
+
+    def _ckpt_flat_sample(self):
+        size = self.shape[0] * self.shape[1]
+        flat = np.arange(0, size, max(1, size // 257))
+        rows, cols = np.divmod(flat, self.shape[1])
+        uniq, inv = np.unique(rows, return_inverse=True)
+        return self.shape, self._rows(uniq)[np.ravel(inv), cols]
+
+
 def run_comb_scan(call_fstat: Callable, *, xp, Tobs: float, band_edges_hz,
                   f0_lims_hz, mc_lims, cache_path: Optional[str] = None,
                   fingerprint_extra: str = ""):
@@ -513,8 +716,6 @@ def run_comb_scan(call_fstat: Callable, *, xp, Tobs: float, band_edges_hz,
 
     Returns ``(f0_nodes_mHz, F_max, peaks, extras)``.
     """
-    from gbgpu.utils.utility import get_fdot
-
     f0_lo = float(f0_lims_hz[0]) * 1e3
     f0_hi = float(f0_lims_hz[-1]) * 1e3
     spacing = float(os.environ.get("FSTAT_F0_SPACING_MHZ", 0.5 / Tobs * 1e3))
@@ -580,14 +781,10 @@ def run_comb_scan(call_fstat: Callable, *, xp, Tobs: float, band_edges_hz,
         # Node-major visits each f0 neighborhood exactly once per level.
         # Ordering changes the checkpoint fingerprint, so pre-existing comb
         # progress files restart cleanly rather than resuming misordered.
-        params = np.zeros((int(lv) * nn, 9))
-        params[:, 0] = 1e-22
-        params[:, 1] = np.repeat(nodes, int(lv)) * 1e-3
-        params[:, 2] = get_fdot(f=params[:, 1],
-                                Mc=np.full(params.shape[0], mc_fix))
-        params[:, 5] = 0.5 * np.pi
-        params[:, 7] = np.tile(al, nn)
-        params[:, 8] = np.arcsin(np.tile(sd, nn))
+        # The block is generated per batch (:class:`_CombRows`), not held:
+        # the dense array is 1.6 GB at 3-mo / ~81 GB at 23-mo density for
+        # nothing but to be read 4096 rows at a time.
+        params = _CombRows(nodes, al, sd, mc_fix)
         Fd = chunked_fstat_sweep(
             call_fstat, params, xp=xp, label=f":comb.nsky{int(lv)}",
             ckpt=(os.path.join(parts_dir, f"comb_nsky{int(lv)}")
@@ -656,13 +853,15 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
     al_d = xp.asarray(alpha_ax)
     sd_d = xp.asarray(sd_ax)
     F_flat = xp.empty(n_total, dtype=xp.float64)
-    F_prev, start = ckpt_load(ckpt, n_total, fp)
+    F_prev, start = ckpt_resume(ckpt, n_total, fp)
     if F_prev is not None and start > 0:
         F_flat[:start] = xp.asarray(F_prev[:start])
+    ckpt_every = ckpt_secs()
+    flushed = start
     if ckpt and start == 0:
-        ckpt_save(ckpt, np.empty(0), 0, n_total, fp)
+        ckpt_save(ckpt, np.empty(0), 0, n_total, fp, start=0)
         logger.info("[ckpt] progress file: %s.progress.npz (every %.0fs "
-                    "+ on interrupt)", ckpt, ckpt_secs())
+                    "+ on interrupt)", ckpt, ckpt_every)
     t0 = last = last_ckpt = time.time()
     done = start
     try:
@@ -688,17 +887,22 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
                     "| elapsed %s", e, n_total, 100.0 * e / n_total, _rate,
                     _fmt_secs((n_total - e) / max(_rate, 1e-9)),
                     _fmt_secs(_el))
-            if ckpt and e < n_total and time.time() - last_ckpt > ckpt_secs():
+            if ckpt and e < n_total and time.time() - last_ckpt > ckpt_every:
                 last_ckpt = time.time()
-                ckpt_save(ckpt, _to_host(F_flat[:e]), e, n_total, fp)
+                ckpt_save(ckpt, _to_host(F_flat[flushed:e]), e, n_total, fp,
+                          start=flushed)
+                flushed = e
                 logger.info("[ckpt] saved %d/%d rows", e, n_total)
     except BaseException:
-        if ckpt and done > start:
-            ckpt_save(ckpt, _to_host(F_flat[:done]), done, n_total, fp)
+        if ckpt and done > flushed:
+            ckpt_save(ckpt, _to_host(F_flat[flushed:done]), done, n_total, fp,
+                      start=flushed)
+            flushed = done
             logger.info("[ckpt] interrupt: saved %d/%d rows", done, n_total)
         raise
     if ckpt and start < n_total:
-        ckpt_save(ckpt, _to_host(F_flat), n_total, n_total, fp)
+        ckpt_save(ckpt, _to_host(F_flat[flushed:n_total]), n_total, n_total,
+                  fp, start=flushed)
     logger.info("[stageB] %d evals in one chunked stream (batch=%d, %.0fs%s)",
                 n_total, batch, time.time() - t0,
                 f", resumed at {start}" if start else "")
@@ -980,9 +1184,52 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
     if stacked_live is not None:
         peak_component = stacked_live
     else:
+        # PEAK-BOX MIXTURE WEIGHT: w ~ F**alpha.
+        #
+        # WHY alpha EXISTS (measured on the 3-month run, 2026-08-16). The
+        # F-statistic goes like SNR^2, so the historical w ~ F allocates
+        # birth draws in proportion to SNR^2 -- an SNR-10 source gets 9x
+        # FEWER attempts than an SNR-30 one, which is backwards: the faint
+        # source is the one that needs more. On that run 80.3% of the birth
+        # mass landed on cap cells whose source had ALREADY been found
+        # (median peak F 125.5) against 7.8% on cells holding a detectable
+        # source that had not (median peak F 26.6), and 146 of 332 cells
+        # holding a detectable source were still empty at iteration 15.
+        # Worse, the over-served cells are exactly the ones sitting at cap,
+        # so much of that 80% was drawn only to be rejected by the cap gate.
+        #
+        # ``equal`` was the only escape hatch and it overcorrects: there are
+        # ~5,000 peaks against a few hundred detectable sources, so flat
+        # weighting hands noise peaks the same share as real ones. alpha
+        # interpolates -- alpha=0.5 makes draws ~ SNR rather than SNR^2,
+        # still preferring real signal without starving the faint tail by
+        # the square.
+        #
+        # alpha=1 reproduces the historical ``fstat`` behaviour EXACTLY and
+        # is the default, so this is inert until someone sets it; alpha=0
+        # is ``equal`` (F**0 == 1 for every box, including F == 0).
+        # ``FSTAT_PEAK_WEIGHTING=equal`` still short-circuits, and wins.
         weighting = os.environ.get("FSTAT_PEAK_WEIGHTING", "fstat").strip().lower()
         peak_F = np.clip(np.asarray(cache["peak_F"], dtype=float), 0.0, None)
-        box_weights = None if weighting == "equal" else peak_F
+        alpha = float(os.environ.get("FSTAT_PEAK_WEIGHT_ALPHA", "1.0"))
+        if weighting == "equal" or alpha == 0.0:
+            box_weights = None
+        elif alpha == 1.0:
+            box_weights = peak_F
+        else:
+            box_weights = np.power(peak_F, alpha)
+        if box_weights is not None and not np.any(box_weights > 0):
+            # Every box would have zero mass -- StackedFStatProposal4D
+            # normalizes by the sum, so this would be a divide-by-zero that
+            # silently produces a NaN proposal. Fall back to flat.
+            logger.warning("[birth] peak weights are all zero at alpha=%.3g; "
+                           "falling back to equal weighting.", alpha)
+            box_weights = None
+        logger.info("[birth] peak-box weighting: %s (alpha=%.3g)%s",
+                    "equal" if box_weights is None else "w ~ F**alpha", alpha,
+                    "" if box_weights is None else
+                    f"; weight max/median = "
+                    f"{box_weights.max() / max(np.median(box_weights), 1e-300):.1f}x")
         mem_mb = os.environ.get("FSTAT_GRID_MEM_MB", "").strip()
         peak_component = StackedFStatProposal4D.from_cache(
             cache, weights=box_weights,
@@ -1193,21 +1440,30 @@ def run_center_sweep(call_fstat: Callable, nodes: dict, *, xp,
     t0 = time.time()
     for s in range(0, n, batch):
         e = min(s + batch, n)
-        pr = xp.zeros((e - s, 9), dtype=xp.float64)
+        # Rows are assembled on the HOST -- the same convention
+        # :func:`run_comb_scan` uses. Every input column is host data
+        # already, so building the block on the device only forced the
+        # scorer to read it back (the sig-het scorer downloads the f0
+        # column; the shard-routed scorer downloads the whole block).
+        pr = np.zeros((e - s, 9))
         pr[:, 0] = 1e-22
-        pr[:, 1] = xp.asarray(f0[s:e] * 1e-3)
-        pr[:, 2] = xp.asarray(get_fdot(f=f0[s:e] * 1e-3, Mc=mc[s:e]))
+        pr[:, 1] = f0[s:e] * 1e-3
+        pr[:, 2] = get_fdot(f=pr[:, 1], Mc=mc[s:e])
         pr[:, 5] = 0.5 * np.pi
-        pr[:, 7] = xp.asarray(al[s:e])
-        pr[:, 8] = xp.asarray(np.arcsin(np.clip(sd[s:e], -1.0, 1.0)))
+        pr[:, 7] = al[s:e]
+        pr[:, 8] = np.arcsin(np.clip(sd[s:e], -1.0, 1.0))
         N_arr, M_up = call_fstat(pr)
         A, phi0, iota, psi, F = fstat_maximized_extrinsics(
             xp.asarray(N_arr), xp.asarray(M_up))
-        ln_snr = 0.5 * np.log(np.clip(2.0 * _to_host(F), 1.0, None))
-        out["ln_A_max"][s:e] = np.log(np.clip(_to_host(A), 1e-300, None))
-        out["phi0"][s:e] = _to_host(phi0)
-        out["iota"][s:e] = _to_host(iota)
-        out["psi"][s:e] = _to_host(psi)
+        # ONE device->host transfer for the batch: five separate ``_host``
+        # calls are five hard syncs, and the five outputs are all (m,)
+        # float64 rows of the same block.
+        blk = _to_host(xp.stack([A, phi0, iota, psi, F]))
+        ln_snr = 0.5 * np.log(np.clip(2.0 * blk[4], 1.0, None))
+        out["ln_A_max"][s:e] = np.log(np.clip(blk[0], 1e-300, None))
+        out["phi0"][s:e] = blk[1]
+        out["iota"][s:e] = blk[2]
+        out["psi"][s:e] = blk[3]
         out["ln_snr"][s:e] = ln_snr
         out["sigma_base"][s:e] = np.exp(-ln_snr)
     logger.info("[centers] %d node F-stat evals in one batched sweep "

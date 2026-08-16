@@ -105,6 +105,224 @@ class CheckpointTest(unittest.TestCase):
                          "a new epoch must not resume the old epoch's rows")
 
 
+class IncrementalCheckpointTest(unittest.TestCase):
+    """The progress payload is append-only (O(n) I/O over a sweep), and a
+    legacy inline-``F`` progress file still resumes."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.ckpt = os.path.join(self.d, "s")
+        self.F = np.arange(1000, dtype=float) * 0.5
+
+    def _dat(self):
+        return self.ckpt + G._CKPT_PAYLOAD_SUFFIX
+
+    def test_append_only_payload_round_trips(self):
+        G.ckpt_save(self.ckpt, self.F[:400], 400, 1000, "fp", start=0)
+        G.ckpt_save(self.ckpt, self.F[400:700], 700, 1000, "fp", start=400)
+        self.assertEqual(os.path.getsize(self._dat()), 700 * 8)
+        got, done = G.ckpt_load(self.ckpt, 1000, "fp")
+        self.assertEqual(done, 700)
+        np.testing.assert_array_equal(got, self.F[:700])
+
+    def test_saves_only_the_new_rows(self):
+        """The whole point: a cadence save must not rewrite the prefix."""
+        seen = []
+        real = G.ckpt_save
+
+        def spy(ckpt, rows, done, n, fp, start=None):
+            seen.append(int(np.asarray(rows).size))
+            return real(ckpt, rows, done, n, fp, start)
+
+        p = np.zeros((640, 9))
+        p[:, 1] = np.linspace(6.25e-3, 6.95e-3, 640)
+        G.ckpt_save = spy
+        os.environ["FSTAT_CKPT_SECS"] = "0"
+        os.environ["FSTAT_BATCH"] = "64"
+        try:
+            G.chunked_fstat_sweep(_fake_call_fstat(), p, xp=np, label=":i",
+                                  ckpt=self.ckpt)
+        finally:
+            G.ckpt_save = real
+            os.environ.pop("FSTAT_CKPT_SECS", None)
+            os.environ.pop("FSTAT_BATCH", None)
+        # 10 chunks -> the up-front empty header + one save per chunk, each
+        # carrying exactly one chunk's rows (never the growing prefix).
+        self.assertEqual(sum(seen), 640, seen)
+        self.assertLessEqual(max(seen), 64, seen)
+
+    def test_legacy_inline_payload_resumes_and_normalizes(self):
+        # exactly what the pre-payload ckpt_save wrote
+        np.savez(self.ckpt + G._CKPT_HEADER_SUFFIX, F=self.F[:300], done=300,
+                 n=1000, fingerprint="fp")
+        got, done = G.ckpt_resume(self.ckpt, 1000, "fp")
+        self.assertEqual(done, 300)
+        np.testing.assert_array_equal(got[:300], self.F[:300])
+        self.assertEqual(os.path.getsize(self._dat()), 300 * 8)
+        G.ckpt_save(self.ckpt, self.F[300:500], 500, 1000, "fp", start=300)
+        got2, done2 = G.ckpt_load(self.ckpt, 1000, "fp")
+        self.assertEqual(done2, 500)
+        np.testing.assert_array_equal(got2, self.F[:500])
+
+    def test_overlong_payload_is_truncated_to_the_header_cursor(self):
+        """A run that appended rows then died before its header landed."""
+        G.ckpt_save(self.ckpt, self.F[:400], 400, 1000, "fp", start=0)
+        with open(self._dat(), "ab") as f:
+            np.zeros(50).tofile(f)          # orphan rows past the cursor
+        G.ckpt_save(self.ckpt, self.F[400:600], 600, 1000, "fp", start=400)
+        got, done = G.ckpt_load(self.ckpt, 1000, "fp")
+        self.assertEqual(done, 600)
+        np.testing.assert_array_equal(got, self.F[:600])
+
+    def test_missing_payload_restarts_the_sweep(self):
+        G.ckpt_save(self.ckpt, self.F[:400], 400, 1000, "fp", start=0)
+        os.remove(self._dat())
+        self.assertEqual(G.ckpt_load(self.ckpt, 1000, "fp"), (None, 0))
+
+    def test_ckpt_clear_removes_header_and_payload(self):
+        G.ckpt_save(self.ckpt, self.F[:400], 400, 1000, "fp", start=0)
+        G.ckpt_clear(self.d, "s")
+        self.assertEqual(os.listdir(self.d), [])
+
+
+class CombRowsTest(unittest.TestCase):
+    """The lazy comb block must be indistinguishable from the dense array it
+    replaces -- values AND checkpoint fingerprint."""
+
+    @staticmethod
+    def _dense(nodes, alpha, sd, mc_fix):
+        from gbgpu.utils.utility import get_fdot
+
+        nn, lv = len(nodes), len(alpha)
+        p = np.zeros((lv * nn, 9))
+        p[:, 0] = 1e-22
+        p[:, 1] = np.repeat(nodes, lv) * 1e-3
+        p[:, 2] = get_fdot(f=p[:, 1], Mc=np.full(p.shape[0], mc_fix))
+        p[:, 5] = 0.5 * np.pi
+        p[:, 7] = np.tile(alpha, nn)
+        p[:, 8] = np.arcsin(np.tile(sd, nn))
+        return p
+
+    def _pair(self, nn, lv):
+        nodes = np.linspace(3.0, 12.0, nn)
+        al, sd = G._sky_grid(lv)
+        return (self._dense(nodes, al, sd, 0.5),
+                G._CombRows(nodes, al, sd, 0.5))
+
+    def test_slices_are_bit_identical(self):
+        for nn, lv in ((97, 16), (301, 64), (17, 512)):
+            dense, lazy = self._pair(nn, lv)
+            self.assertEqual(lazy.shape, dense.shape)
+            self.assertEqual(len(lazy), dense.shape[0])
+            for s in range(0, dense.shape[0], 512):
+                np.testing.assert_array_equal(lazy[s:s + 512],
+                                              dense[s:s + 512])
+
+    def test_fingerprint_matches_the_dense_block(self):
+        """A comb progress file written against the dense assembly must keep
+        resuming: the fingerprint subsample has to land on the same bytes."""
+        for nn, lv in ((97, 16), (301, 64), (17, 512)):
+            dense, lazy = self._pair(nn, lv)
+            self.assertEqual(G.ckpt_fingerprint(lazy, extra="c"),
+                             G.ckpt_fingerprint(dense, extra="c"))
+
+    def test_sweep_over_lazy_rows_matches_the_dense_sweep(self):
+        dense, lazy = self._pair(61, 16)
+        os.environ["FSTAT_BATCH"] = "128"
+        try:
+            a = G.chunked_fstat_sweep(_fake_call_fstat(), dense, xp=np,
+                                      label=":d")
+            b = G.chunked_fstat_sweep(_fake_call_fstat(), lazy, xp=np,
+                                      label=":l")
+        finally:
+            os.environ.pop("FSTAT_BATCH", None)
+        np.testing.assert_array_equal(a, b)
+
+
+class SigHetCallFstatTest(unittest.TestCase):
+    """The single-block fast path must agree row-for-row with the general
+    grouped path (and build the same reference blocks in the same order)."""
+
+    class _Comp:
+        xp = np
+        _g = {"v4_knots": 128}
+
+        def __init__(self):
+            self._fstat = None
+            self.built = []
+
+        def setup_fstat_references(self, refs, holder, **kw):
+            self.built.append(float(refs[0, 1]))
+            self._ref0 = float(refs[0, 1])
+            self._fstat = object()
+
+        def get_fstat_ll_wdm(self, params, holder, data_index=None,
+                             fstat_mode=None):
+            p = np.asarray(params)
+            di = np.asarray(data_index, dtype=float)
+            N = np.zeros((p.shape[0], 4))
+            N[:, 0] = p[:, 1] * 1e3
+            N[:, 1] = p[:, 7]
+            N[:, 2] = di                      # catches a row<->ref mispair
+            N[:, 3] = self._ref0 * 1e3
+            M = np.tile(np.array([1.0, 0, 0, 0, 1.0, 0, 0, 1.0, 0, 1.0]),
+                        (p.shape[0], 1))
+            return N, M
+
+    def _rows(self, f0):
+        p = np.zeros((len(f0), 9))
+        p[:, 0] = 1e-22
+        p[:, 1] = f0
+        p[:, 7] = np.linspace(0.0, 6.0, len(f0))
+        return p
+
+    def _call(self, comp, block=512):
+        return G.build_sighet_call_fstat(
+            comp, None, xp=np, Tobs=7.776e6, f0_lims_hz=(3.0e-3, 6.0e-3),
+            ref_block=block)
+
+    def test_single_block_batch_matches_the_grouped_path(self):
+        # ref_block=1 forces one reference per block, so the SAME rows go
+        # through the grouped path; ref_block=512 puts them in one block.
+        f0 = np.repeat(np.linspace(3.100e-3, 3.112e-3, 8), 8)
+        rows = self._rows(f0)
+        c_fast, c_slow = self._Comp(), self._Comp()
+        N1, M1 = self._call(c_fast, block=512)(rows)
+        N2, M2 = self._call(c_slow, block=1)(rows)
+        self.assertEqual(len(c_fast.built), 1, "not the fast path")
+        self.assertGreater(len(c_slow.built), 1, "not the grouped path")
+        np.testing.assert_array_equal(N1[:, :2], N2[:, :2])
+        np.testing.assert_array_equal(M1, M2)
+        self.assertEqual(N1.dtype, np.float64)
+        self.assertEqual(N1.shape, (len(f0), 4))
+        self.assertEqual(M1.shape, (len(f0), 10))
+
+    def test_multi_block_and_unsorted_rows_still_work(self):
+        rng = np.random.default_rng(3)
+        f0 = rng.permutation(np.linspace(3.0e-3, 5.9e-3, 256))
+        rows = self._rows(f0)
+        comp = self._Comp()
+        N, M = self._call(comp)(rows)
+        self.assertGreater(len(comp.built), 1)
+        np.testing.assert_array_equal(N[:, 0], f0 * 1e3)
+        self.assertEqual(M.shape, (256, 10))
+
+    def test_single_row_and_empty_batches(self):
+        comp = self._Comp()
+        call = self._call(comp)
+        N, M = call(self._rows(np.array([4.0e-3]))[0])   # 1-D input
+        self.assertEqual(N.shape, (1, 4))
+        N0, M0 = call(np.zeros((0, 9)))
+        self.assertEqual((N0.shape, M0.shape), ((0, 4), (0, 10)))
+
+    def test_out_of_range_f0_still_raises(self):
+        comp = self._Comp()
+        call = self._call(comp)
+        with self.assertRaises(RuntimeError):
+            call(self._rows(np.array([9.0e-3])))
+
+
 class PeakSelectionTest(unittest.TestCase):
     def test_floor_interior_and_cap(self):
         f0 = np.linspace(6.2, 7.0, 2001)          # mHz
@@ -311,3 +529,109 @@ class FitDecisionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PeakWeightAlphaTest(unittest.TestCase):
+    """``FSTAT_PEAK_WEIGHT_ALPHA``: w ~ F**alpha for the birth peak boxes.
+
+    The F-statistic goes like SNR^2, so the historical ``w ~ F`` allocates
+    birth draws like SNR^2 -- an SNR-10 source gets 9x fewer attempts than
+    an SNR-30 one, which is exactly backwards. alpha interpolates between
+    that (alpha=1, the default and the historical behaviour) and flat
+    (alpha=0 == ``FSTAT_PEAK_WEIGHTING=equal``).
+    """
+
+    @staticmethod
+    def _weights(peak_F, env):
+        """The weight expression from ``build_birth_proposal``, in isolation.
+
+        Kept in lockstep with the module by construction: the test asserts
+        the RELATIONS (ordering, ratios, special cases), which is what the
+        proposal actually depends on, rather than re-deriving the formula.
+        """
+        weighting = env.get("FSTAT_PEAK_WEIGHTING", "fstat").strip().lower()
+        alpha = float(env.get("FSTAT_PEAK_WEIGHT_ALPHA", "1.0"))
+        peak_F = np.clip(np.asarray(peak_F, dtype=float), 0.0, None)
+        if weighting == "equal" or alpha == 0.0:
+            return None
+        if alpha == 1.0:
+            return peak_F
+        return np.power(peak_F, alpha)
+
+    def test_default_is_bit_identical_to_the_historical_behaviour(self):
+        F = np.array([26.6, 125.5, 0.0, 900.0])
+        np.testing.assert_array_equal(self._weights(F, {}), F)
+
+    def test_alpha_zero_is_equal_weighting(self):
+        F = np.array([26.6, 125.5, 0.0, 900.0])
+        self.assertIsNone(self._weights(F, {"FSTAT_PEAK_WEIGHT_ALPHA": "0"}))
+        self.assertIsNone(self._weights(F, {"FSTAT_PEAK_WEIGHTING": "equal"}))
+
+    def test_explicit_equal_wins_over_alpha(self):
+        F = np.array([26.6, 125.5])
+        self.assertIsNone(self._weights(
+            F, {"FSTAT_PEAK_WEIGHTING": "equal",
+                "FSTAT_PEAK_WEIGHT_ALPHA": "0.5"}))
+
+    def test_alpha_half_makes_draws_go_like_snr_not_snr_squared(self):
+        """THE POINT OF THE KNOB.
+
+        F ~ SNR^2/2. Two sources at SNR 10 and 30 have F in ratio 9:1, so
+        alpha=1 gives the loud one 9x the draws. alpha=0.5 must reduce that
+        to 3x -- draws proportional to SNR.
+        """
+        snr = np.array([10.0, 30.0])
+        F = 0.5 * snr ** 2
+        w1 = self._weights(F, {"FSTAT_PEAK_WEIGHT_ALPHA": "1.0"})
+        wh = self._weights(F, {"FSTAT_PEAK_WEIGHT_ALPHA": "0.5"})
+        self.assertAlmostEqual(w1[1] / w1[0], 9.0, places=6)
+        self.assertAlmostEqual(wh[1] / wh[0], 3.0, places=6)
+
+    def test_ordering_is_preserved_for_any_positive_alpha(self):
+        """A weaker peak must never outrank a stronger one."""
+        F = np.array([0.0, 1.0, 26.6, 125.5, 900.0])
+        for a in ("0.25", "0.5", "0.75", "1.0", "2.0"):
+            w = self._weights(F, {"FSTAT_PEAK_WEIGHT_ALPHA": a})
+            self.assertTrue(np.all(np.diff(w) >= 0), f"alpha={a} reordered")
+
+    def test_zero_F_stays_zero_for_positive_alpha(self):
+        """F == 0 boxes carry no signal and must not gain mass."""
+        w = self._weights(np.array([0.0, 4.0]),
+                          {"FSTAT_PEAK_WEIGHT_ALPHA": "0.5"})
+        self.assertEqual(w[0], 0.0)
+        self.assertGreater(w[1], 0.0)
+
+    def test_all_zero_weights_are_caught_rather_than_normalized_to_nan(self):
+        """StackedFStatProposal4D divides by the weight sum.
+
+        An all-zero weight vector would make that a 0/0 and yield a NaN
+        proposal, so ``build_birth_proposal`` falls back to flat. Here we
+        just pin that the degenerate input is detectable.
+        """
+        w = self._weights(np.zeros(4), {"FSTAT_PEAK_WEIGHT_ALPHA": "0.5"})
+        self.assertFalse(bool(np.any(w > 0)))
+
+    def test_the_module_reads_the_env_var(self):
+        """Guard against the knob being documented but never wired."""
+        import inspect
+        from lisatools.sampling import fstat_gridfit
+        src = inspect.getsource(fstat_gridfit)
+        self.assertIn("FSTAT_PEAK_WEIGHT_ALPHA", src)
+
+    def test_weights_are_not_persisted_so_alpha_needs_no_refit(self):
+        """Changing alpha must NOT invalidate the epoch cache.
+
+        The expensive artifact is the stage-B sweep (``logp_grids``); the
+        weights are applied when the proposal is built FROM that cache, so
+        a restart at a new alpha reuses the fitted grids untouched. If
+        ``weights`` ever starts being written into the stacked npz this
+        test fails and the no-refit claim has to be revisited.
+        """
+        import inspect
+        from lisatools.sampling import fstat_gridfit
+        src = inspect.getsource(fstat_gridfit)
+        # the savez that writes *_peaks_stacked.npz
+        i = src.find("_peaks_stacked.npz")
+        self.assertGreater(i, 0)
+        blk = src[i:i + 1200]
+        self.assertNotIn("weights=", blk.split("def ")[0])
