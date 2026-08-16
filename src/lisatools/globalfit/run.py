@@ -55,7 +55,8 @@ from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from ..utils.device import device_context, pin_main_device
 from ..utils.utility import asnumpy
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings, Setup
-from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
+from .hdfbackend import (GFHDFBackend, promote_backup_if_store_unreadable,
+                         save_to_backend_asynchronously_and_plot)
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
 from .moves import GFCombineMove, GlobalFitMove, MoveBuildContext
 from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter, save_residuals
@@ -524,6 +525,18 @@ class GlobalFit:
         # TODO: update to generalize
         state = None
         backend_path = self.curr.general_info.main_file_path
+        # SELF-HEAL A TORN STORE BEFORE TOUCHING IT (2026-08-16). On the spot
+        # partition a preemption can kill a job mid-write, leaving gzip
+        # chunks that open fine and only fail when read -- so the next job
+        # died at resume with "filter returned failure during read". This
+        # promotes the running backup (validated first, damaged file kept as
+        # *_CORRUPT_<n>.h5) so the run continues instead of needing a manual
+        # swap. No-op when the store is healthy.
+        if os.path.exists(backend_path):
+            try:
+                promote_backup_if_store_unreadable(backend_path)
+            except Exception as _heal_err:      # never block a healthy start
+                logger.warning("store self-heal check failed: %r", _heal_err)
         if os.path.exists(backend_path):
             backend = GFHDFBackend(
                 backend_path,

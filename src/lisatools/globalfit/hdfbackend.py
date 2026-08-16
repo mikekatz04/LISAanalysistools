@@ -174,6 +174,74 @@ def _validate_resume_readable(path: str) -> None:
                     dset[()]
 
 
+def promote_backup_if_store_unreadable(path: str) -> bool:
+    """Self-heal a torn store by promoting the running backup copy.
+
+    WHY THIS EXISTS. The runs live on a SPOT partition, so a job can be
+    preempted at any instant -- including mid-write. Appending into a
+    gzip-compressed HDF5 file that is killed part-way leaves chunks that
+    open fine and only fail when READ, so the NEXT job dies at resume with
+    ``filter returned failure during read``. That happened twice; both
+    times the fix was mechanical (swap in ``*_running_backup_copy.h5``),
+    which is exactly the kind of thing that should not need a human at
+    03:00. With the MPI abort in place the failure is at least fast and
+    loud -- but fast and loud still means the run is stopped.
+
+    So: validate the primary the way a RESUME reads it; if that raises,
+    validate the backup, and only if the backup is sound swap them --
+    preserving the damaged file as ``*_CORRUPT_<n>.h5`` for forensics
+    rather than deleting evidence. The backup lags by at most one save
+    step (``backup_iter=1`` on the dedicated saver rank), so the cost of
+    recovery is bounded and small.
+
+    Returns True if a promotion happened. Raises nothing on the happy
+    path; if BOTH files are unreadable it returns False and lets the
+    caller fail normally -- there is nothing safe left to do, and
+    inventing a state would be worse than stopping.
+    """
+    if not os.path.exists(path):
+        return False
+    try:
+        _validate_resume_readable(path)
+        return False                      # primary is fine, nothing to do
+    except Exception as primary_err:
+        backup = path[:-3] + "_running_backup_copy.h5"
+        logger.error(
+            "STORE UNREADABLE at resume (%s: %s). This is the signature of a "
+            "job killed mid-write -- e.g. a spot preemption.",
+            type(primary_err).__name__, primary_err)
+        if not os.path.exists(backup):
+            logger.error("No running backup copy beside it; cannot self-heal.")
+            return False
+        try:
+            _validate_resume_readable(backup)
+        except Exception as backup_err:
+            logger.error(
+                "The running backup is ALSO unreadable (%s: %s); not "
+                "promoting it. Both copies are damaged.",
+                type(backup_err).__name__, backup_err)
+            return False
+        # Keep the damaged file: it is the only record of the lost
+        # iterations and of how the tear looks.
+        n = 0
+        while os.path.exists(f"{path[:-3]}_CORRUPT_{n}.h5"):
+            n += 1
+        corrupt_name = f"{path[:-3]}_CORRUPT_{n}.h5"
+        os.replace(path, corrupt_name)
+        shutil.copyfile(backup, path)
+        try:
+            with open(path, "rb") as fh:
+                os.fsync(fh.fileno())
+        except Exception:
+            pass
+        logger.error(
+            "SELF-HEALED: promoted %s over the damaged store (kept as %s). "
+            "The run resumes from the backup's last complete iteration, so "
+            "at most the iterations written since the last backup are lost.",
+            os.path.basename(backup), os.path.basename(corrupt_name))
+        return True
+
+
 def _atomic_backup_copy(src: str) -> None:
     """Refresh ``<src>_running_backup_copy.h5`` so it can never be torn.
 
