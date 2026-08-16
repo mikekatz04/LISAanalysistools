@@ -635,3 +635,132 @@ class PeakWeightAlphaTest(unittest.TestCase):
         self.assertGreater(i, 0)
         blk = src[i:i + 1200]
         self.assertNotIn("weights=", blk.split("def ")[0])
+
+
+class PerCellPeakWeightTest(unittest.TestCase):
+    """Uniform-cell x F**alpha birth weighting (user design 2026-08-16).
+
+    Draw a CAP CELL uniformly, then draw within it with w ~ F**alpha. This
+    is expressed as FLAT per-box weights rather than a two-stage sampler,
+    because ``StackedFStatProposal4D`` drives both ``rvs`` (CDF built from
+    ``w_k``) and ``logpdf`` (``+ log(w_k)``) off the same ``self.weights``
+    -- so the sampler and its density stay mutually exact by construction.
+    A hand-rolled two-stage rvs with a separate logpdf would put the RJ
+    acceptance ratio at the mercy of two implementations agreeing, and a
+    silent mismatch there biases the posterior instead of crashing.
+    """
+
+    # 2 sub-bands, K=4 -> 8 cells of 0.25 mHz each over 1-3 mHz
+    BE = np.array([1e-3, 2e-3, 3e-3])
+
+    def _w(self, F, f0_mHz, **kw):
+        from lisatools.sampling.fstat_gridfit import peak_box_weights
+        return peak_box_weights(F, peak_f0_mHz=np.asarray(f0_mHz),
+                                band_edges=self.BE, **kw)
+
+    def test_per_cell_mass_is_equalised(self):
+        # cell 0 gets 3 peaks (one very loud), cell 5 gets 1 quiet peak
+        F = np.array([900.0, 100.0, 4.0, 9.0])
+        f0 = np.array([1.05, 1.10, 1.20, 2.40])          # mHz
+        w = self._w(F, f0, alpha=0.5, cells=4)
+        self.assertAlmostEqual(float(w.sum()), 1.0, places=12)
+        cell = np.array([0, 0, 0, 5])
+        m0 = w[cell == 0].sum(); m5 = w[cell == 5].sum()
+        self.assertAlmostEqual(m0, m5, places=12)
+        self.assertAlmostEqual(m0, 0.5, places=12)       # 2 occupied cells
+
+    def test_within_a_cell_the_ratio_is_F_to_the_alpha(self):
+        F = np.array([900.0, 100.0])
+        f0 = np.array([1.05, 1.10])                      # same cell
+        w = self._w(F, f0, alpha=0.5, cells=4)
+        self.assertAlmostEqual(w[0] / w[1], np.sqrt(900.0 / 100.0), places=10)
+
+    def test_a_loud_peak_no_longer_starves_another_cell(self):
+        """THE POINT: the global mixture gives the loud cell 30x the mass."""
+        F = np.array([900.0, 1.0])
+        f0 = np.array([1.05, 2.40])                      # different cells
+        glob = self._w(F, f0, alpha=0.5, cells=1)
+        glob = glob / glob.sum()
+        self.assertAlmostEqual(glob[0] / glob[1], 30.0, places=6)
+        cellw = self._w(F, f0, alpha=0.5, cells=4)
+        self.assertAlmostEqual(cellw[0] / cellw[1], 1.0, places=10)
+
+    def test_cells_le_1_is_the_historical_global_mixture(self):
+        F = np.array([900.0, 100.0, 4.0])
+        f0 = np.array([1.05, 1.60, 2.40])
+        np.testing.assert_allclose(self._w(F, f0, alpha=1.0, cells=1), F)
+        np.testing.assert_allclose(self._w(F, f0, alpha=1.0, cells=0), F)
+
+    def test_equal_still_wins_over_everything(self):
+        self.assertIsNone(self._w(np.array([9.0, 1.0]), np.array([1.05, 2.4]),
+                                  alpha=0.5, cells=4, equal=True))
+
+    def test_all_zero_F_cell_falls_back_to_uniform_inside_that_cell(self):
+        """A zero-F cell must still get its share, not silently vanish."""
+        F = np.array([0.0, 0.0, 16.0])
+        f0 = np.array([1.05, 1.10, 2.40])
+        w = self._w(F, f0, alpha=0.5, cells=4)
+        self.assertAlmostEqual(w[0], w[1], places=12)
+        self.assertAlmostEqual(w[0] + w[1], w[2], places=12)
+
+    def test_env_default_tracks_GB_CAP_DIVISOR_but_is_overridable(self):
+        from lisatools.sampling.fstat_gridfit import peak_weight_cells_env
+        for k in ("FSTAT_PEAK_WEIGHT_CELLS", "GB_CAP_DIVISOR"):
+            os.environ.pop(k, None)
+            self.addCleanup(os.environ.pop, k, None)
+        self.assertEqual(peak_weight_cells_env(), 1)          # neither set
+        os.environ["GB_CAP_DIVISOR"] = "8"
+        self.assertEqual(peak_weight_cells_env(), 8)          # tracks the cap
+        os.environ["FSTAT_PEAK_WEIGHT_CELLS"] = "1"
+        self.assertEqual(peak_weight_cells_env(), 1)          # explicit OFF
+        os.environ["FSTAT_PEAK_WEIGHT_CELLS"] = "32"
+        self.assertEqual(peak_weight_cells_env(), 32)         # decoupled
+
+    def test_rvs_AND_logpdf_agree_under_the_composite_weights(self):
+        """The one that protects the RJ acceptance ratio.
+
+        Draw from the proposal and compare the EMPIRICAL density of the
+        drawn f0 against ``logpdf`` evaluated at those same points. If
+        ``rvs`` and ``logpdf`` ever disagreed the ratio would be silently
+        wrong, so this checks them against each other rather than against
+        a formula either one could share a bug with.
+        """
+        try:
+            from lisatools.sampling.fstat_proposal import StackedFStatProposal4D
+        except Exception as exc:                                # pragma: no cover
+            self.skipTest(f"fstat_proposal unavailable: {exc}")
+        rng = np.random.default_rng(0)
+        K, n_f0, n3 = 4, 5, 3
+        logp = np.log(rng.uniform(0.5, 1.5, size=(K, n_f0, n3, n3, n3)))
+        f0_los = np.array([1.05, 1.10, 1.60, 2.40])            # mHz
+        f0_dxs = np.full(K, 0.01)
+        mc_ax = np.linspace(0.2, 0.4, n3)
+        al_ax = np.linspace(0.0, 2 * np.pi, n3)
+        sd_ax = np.linspace(-1.0, 1.0, n3)
+        w = self._w(np.array([900.0, 100.0, 4.0, 9.0]), f0_los,
+                    alpha=0.5, cells=4)
+        P = StackedFStatProposal4D(logp, f0_los, f0_dxs, mc_ax, al_ax, sd_ax,
+                                   weights=w, seed=1)
+        x = np.asarray(P.rvs(60000))
+        lp = np.asarray(P.logpdf(x)).ravel()
+        self.assertTrue(np.all(np.isfinite(lp)),
+                        "logpdf must be finite at points rvs produced")
+        # Per-BOX check: the fraction of draws landing in each box must
+        # match the composite weight it was given. Attribute by INTERVAL
+        # membership -- a box spans f0_lo + (n_f0-1)*dx, so nearest-centre
+        # attribution mis-assigns draws near a box's upper edge.
+        span = (n_f0 - 1) * f0_dxs
+        box = np.full(x.shape[0], -1)
+        for k in range(K):
+            inb = (x[:, 0] >= f0_los[k] - 1e-12) & (x[:, 0] <= f0_los[k] + span[k] + 1e-12)
+            box[inb] = k
+        self.assertTrue(np.all(box >= 0), "every draw must fall in some box")
+        frac = np.bincount(box, minlength=K) / x.shape[0]
+        np.testing.assert_allclose(frac, w / w.sum(), atol=0.01)
+        # Importance-sampling identity: E_p[1/p] = volume of the support,
+        # which is a joint statement about rvs AND logpdf being the same
+        # distribution. Compare against the analytic box volume.
+        vol = float(np.sum(span) * (mc_ax[-1] - mc_ax[0])
+                    * (al_ax[-1] - al_ax[0]) * (sd_ax[-1] - sd_ax[0]))
+        est = float(np.mean(np.exp(-lp)))
+        self.assertAlmostEqual(est / vol, 1.0, delta=0.05)

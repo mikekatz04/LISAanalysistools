@@ -997,9 +997,19 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
     )  # beta = 1: logp = F
 
     mem_mb = os.environ.get("FSTAT_GRID_MEM_MB", "").strip()
+    # LIVE path (the fit that just ran). Use the SAME weighting the cache
+    # path applies, so a run that fits in-process and one that reloads the
+    # epoch cache draw from an identical proposal -- otherwise the first
+    # epoch after a fit would silently differ from every resume.
     stacked = StackedFStatProposal4D(
         logp_grids, f0_los, f0_dxs, mc_ax, alpha_ax, sd_ax,
-        weights=np.clip(peaks[:, 1], 0.0, None),  # report-time w ~ F
+        weights=peak_box_weights(
+            np.clip(peaks[:, 1], 0.0, None), peak_f0_mHz=peaks[:, 0],
+            band_edges=band_edges_hz,
+            alpha=float(os.environ.get("FSTAT_PEAK_WEIGHT_ALPHA", "1.0")),
+            cells=peak_weight_cells_env(),
+            equal=(os.environ.get("FSTAT_PEAK_WEIGHTING", "fstat")
+                   .strip().lower() == "equal")),
         mem_budget_mb=float(mem_mb) if mem_mb else None,
     )
 
@@ -1127,6 +1137,110 @@ def check_cached_band_grid(cache_dir: str, expected_band_edges) -> None:
     return None
 
 
+def peak_box_weights(peak_F, peak_f0_mHz=None, band_edges=None,
+                     alpha=1.0, cells=0, equal=False):
+    """Mixture weights for the stacked F-stat peak boxes.
+
+    Two schemes, both returned as FLAT per-box weights:
+
+    * ``cells = K > 1`` -- the HIERARCHICAL scheme and the DEFAULT (user
+      design 2026-08-16): draw a CAP CELL uniformly, then draw within that
+      cell with ``w ~ F**alpha``. Each sub-band is split into ``K`` equal
+      cells (the same construction as the leaf-cap grid, so ``K`` tracks
+      ``GB_CAP_DIVISOR``), and the composite weight of box ``j`` in cell
+      ``c`` is::
+
+          w_j = (1 / N_occupied_cells) * F_j**alpha / sum_{k in c} F_k**alpha
+
+    * ``cells <= 1`` -- the historical GLOBAL mixture, ``w ~ F**alpha``
+      over every box at once. Always reachable as a fallback.
+
+    WHY THIS IS EXPRESSED AS FLAT WEIGHTS rather than a two-stage sampler.
+    ``StackedFStatProposal4D`` drives BOTH ``rvs`` and ``logpdf`` from
+    ``self.weights`` -- ``rvs`` builds its CDF as
+    ``w_k * (cell weight / box total)`` and ``logpdf`` returns
+    ``g + log(w_k) - log_norm_k``. A flat mixture carrying the composite
+    weight above has exactly the distribution of the hierarchical draw, so
+    the sampler and its density stay mutually exact BY CONSTRUCTION. Hand
+    rolling a two-stage ``rvs`` with a matching ``logpdf`` would put the RJ
+    acceptance ratio at the mercy of two implementations agreeing -- and a
+    silent mismatch there biases the posterior rather than crashing.
+
+    WHY IT IS WORTH DOING. The F-statistic goes like SNR^2, so a global
+    ``w ~ F`` mixture concentrates birth draws on whichever peaks are
+    loudest ANYWHERE in the band. Measured on the 3-month epoch-0 fit, the
+    per-cell draw mass spans 21x between the median cell and the busiest
+    one; equalising across cells removes that while keeping the local
+    ``F**alpha`` preference inside each cell intact.
+
+    A cell containing peaks that are ALL F == 0 cannot be normalised by
+    ``F**alpha``; it falls back to uniform inside that cell so the cell
+    still receives its share rather than silently vanishing.
+
+    Returns ``None`` when the weights would be flat anyway, which is what
+    ``StackedFStatProposal4D`` expects for "no weighting".
+    """
+    F = np.clip(np.asarray(peak_F, dtype=float).ravel(), 0.0, None)
+    cells = int(cells or 0)
+    if equal or (alpha == 0.0 and cells <= 1):
+        return None
+    w = F if alpha == 1.0 else np.power(F, alpha)
+    if cells <= 1:
+        return w if np.any(w > 0) else None
+    if peak_f0_mHz is None or band_edges is None:
+        logger.warning("[birth] per-cell peak weighting requested but the "
+                       "cache carries no f0/band_edges; falling back to the "
+                       "global w ~ F**alpha mixture.")
+        return w if np.any(w > 0) else None
+
+    be = np.asarray(band_edges, dtype=float).ravel()
+    nb = be.size - 1
+    ncell = nb * cells
+    edges = np.linspace(be[0], be[-1], ncell + 1)
+    f0 = np.asarray(peak_f0_mHz, dtype=float).ravel() * 1e-3      # mHz -> Hz
+    ci = np.clip(np.searchsorted(edges, f0, side="right") - 1, 0, ncell - 1)
+
+    out = np.zeros_like(w)
+    tot = np.bincount(ci, weights=w, minlength=ncell)
+    cnt = np.bincount(ci, minlength=ncell)
+    occ = np.nonzero(cnt > 0)[0]
+    good = tot[ci] > 0
+    out[good] = w[good] / tot[ci][good]
+    if np.any(~good):
+        out[~good] = 1.0 / cnt[ci][~good]
+    out /= max(occ.size, 1)
+    if not np.any(out > 0):
+        return None
+    logger.info("[birth] per-cell peak weighting: K=%d -> %d cells, %d "
+                "occupied (%.0f%%); alpha=%.3g; per-cell mass equalised "
+                "(was max/median %.1fx under the global mixture).",
+                cells, ncell, occ.size,
+                100.0 * occ.size / max(ncell, 1), alpha,
+                float(np.max(tot[occ]) / max(np.median(tot[occ]), 1e-300))
+                if occ.size else 1.0)
+    return out
+
+
+def peak_weight_cells_env(default_divisor="GB_CAP_DIVISOR"):
+    """Resolve ``FSTAT_PEAK_WEIGHT_CELLS`` -- the cell divisor for the draw.
+
+    DEFAULT ON, tracking ``GB_CAP_DIVISOR`` (user ruling 2026-08-16: the
+    uniform-cell reweighting is the default but must stay optional). Set
+    ``FSTAT_PEAK_WEIGHT_CELLS=1`` (or 0) to fall back to the historical
+    global ``w ~ F**alpha`` mixture; set it to an explicit integer to
+    decouple the draw grid from the cap grid.
+    """
+    raw = os.environ.get("FSTAT_PEAK_WEIGHT_CELLS", "").strip()
+    if not raw:
+        raw = os.environ.get(default_divisor, "1").strip() or "1"
+    try:
+        return max(int(float(raw)), 0)
+    except ValueError:
+        logger.warning("[birth] FSTAT_PEAK_WEIGHT_CELLS=%r is not an "
+                       "integer; using the global mixture.", raw)
+        return 1
+
+
 def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
                                 dist_lims=None, fdot_astro_ratio_max=None,
                                 use_cupy: bool = False, gpu: Optional[int] = None,
@@ -1212,12 +1326,12 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
         weighting = os.environ.get("FSTAT_PEAK_WEIGHTING", "fstat").strip().lower()
         peak_F = np.clip(np.asarray(cache["peak_F"], dtype=float), 0.0, None)
         alpha = float(os.environ.get("FSTAT_PEAK_WEIGHT_ALPHA", "1.0"))
-        if weighting == "equal" or alpha == 0.0:
-            box_weights = None
-        elif alpha == 1.0:
-            box_weights = peak_F
-        else:
-            box_weights = np.power(peak_F, alpha)
+        box_weights = peak_box_weights(
+            peak_F,
+            peak_f0_mHz=cache["peak_f0_mHz"] if "peak_f0_mHz" in cache else None,
+            band_edges=cache["band_edges"] if "band_edges" in cache else None,
+            alpha=alpha, cells=peak_weight_cells_env(),
+            equal=(weighting == "equal"))
         if box_weights is not None and not np.any(box_weights > 0):
             # Every box would have zero mass -- StackedFStatProposal4D
             # normalizes by the sum, so this would be a divide-by-zero that
