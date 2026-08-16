@@ -2494,10 +2494,18 @@ def build_gb_moves(
         # See GBSpecialBase._update_band_leaf_caps.
         leaf_cap_start=(int(os.environ["GB_LEAF_CAP_START"])
                         if os.environ.get("GB_LEAF_CAP_START") else None),
-        # Default 5 (2026-08-12 user ruling): under the D/2 gate this is a
-        # PATIENCE (consecutive non-improving iterations before a cap
-        # advances); the old 50 froze growth for hours at production pace.
-        leaf_cap_min_iters=int(os.environ.get("GB_LEAF_CAP_MIN_ITERS", "5")),
+        # Default 3 (2026-08-16 user ruling; was 5, was 50). Under the D/2
+        # gate this is a PATIENCE: consecutive iterations WITHOUT a
+        # sufficient lnL improvement before a cell's cap advances. The old
+        # 50 froze growth for hours; 5 was set when an iteration cost
+        # ~55 min, so patience was cheap in wall-clock terms and expensive
+        # in nothing. Post-speedup an iteration is ~6 min, and caps now live
+        # on the band/8 CAP-CELL grid -- 1,232 cells that must each climb
+        # from 1 to hold a full galaxy -- so the ramp, not the wall, is the
+        # binding cost. 3 shortens every rung by 40% while still requiring
+        # a genuine multi-iteration plateau, so a single unlucky iteration
+        # cannot promote a cell.
+        leaf_cap_min_iters=int(os.environ.get("GB_LEAF_CAP_MIN_ITERS", "3")),
         # Coarse lnL-improvement cap gate -- THE DEFAULT (2026-08-12): a
         # band holds its cap while the cold chain keeps finding a max ll
         # better than the stored best by >= GB_LEAF_CAP_NDIM/2 (D/2 = 4.0

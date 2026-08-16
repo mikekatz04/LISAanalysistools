@@ -230,6 +230,13 @@ export GB_ORTHO_LL_CHECK=1
 # memory (the band-total throttle is gone -- a band can now reach
 # K*cap); GB_CAP_DIVISOR=1 reverts instantly.
 export GB_CAP_DIVISOR=8
+# Leaf-cap PATIENCE: consecutive iterations without a sufficient (D/2)
+# lnL improvement before a cap CELL advances. Code default is now 3
+# (2026-08-16, was 5): caps live on the band/8 cap-cell grid, so 1,232
+# cells must each climb from 1, and at ~6 min/iteration the ramp -- not
+# the wall -- is what limits how fast the model can fill. Pinned here for
+# the run record; raise it if caps ever outrun the likelihood evidence.
+export GB_LEAF_CAP_MIN_ITERS=3
 export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.

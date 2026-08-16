@@ -243,6 +243,13 @@ export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # units of the posterior -- 8 stays conservative. RESUME REQUIRES the cap
 # migration (gate 0 above). GB_CAP_DIVISOR=1 reverts.
 export GB_CAP_DIVISOR=8
+# Leaf-cap PATIENCE: consecutive iterations without a sufficient (D/2)
+# lnL improvement before a cap CELL advances. Code default is now 3
+# (2026-08-16, was 5): caps live on the band/8 cap-cell grid, so 1,232
+# cells must each climb from 1, and at ~6 min/iteration the ramp -- not
+# the wall -- is what limits how fast the model can fill. Pinned here for
+# the run record; raise it if caps ever outrun the likelihood evidence.
+export GB_LEAF_CAP_MIN_ITERS=3
 export GB_CAP_LL_CHECK=1
 # Bilinearity bookkeeping monitor (per-unit [GB_ORTHO_LL]); ~1.5 s/propose.
 export GB_ORTHO_LL_CHECK=1
