@@ -7882,12 +7882,63 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # from one where a single walker carries the band while the
             # rest are stuck -- the second case is a mixing problem the cap
             # will happily paper over by incrementing on schedule.
+            # GHOST-INCREMENT GUARD (user ruling 2026-08-16): the patience
+            # counter only runs for a cell whose max ll has improved AT
+            # LEAST ONCE, mirroring ``changed_once`` in the PSD max-logL
+            # search (``psdmove.py::run_move_max_likelihood``), which will
+            # not count a plateau iteration until the chain has moved at
+            # all.
+            #
+            # WHY. An EMPTY cell can never improve -- there is no source in
+            # it to find a better fit for -- so under the bare counter it
+            # accrued patience every iteration and promoted itself on a
+            # fixed clock alongside cells doing real work. Measured on the
+            # 3-month run: of ~820 empty cells only 1-16 improved per
+            # iteration (0.1-2%), against 22-26% of OCCUPIED cells, and 920
+            # of 1,232 cells incremented in lockstep at iteration 10. That
+            # made the cap a wall-clock ratchet: protection strongest early
+            # when the model is empty and needs none, weakest late when it
+            # is full and confusion is worst -- backwards. Freezing the
+            # never-improved cells leaves the cap where it belongs until
+            # something is actually found there.
+            #
+            # The flag is deliberately in-memory only (a restart re-earns
+            # it, pausing a cell's ramp until it shows an improvement --
+            # the conservative direction), matching the band-shutoff
+            # streak bookkeeping in ``_update_band_shutoff``.
             thresh = 0.5 * float(self.leaf_cap_ndim)
             improved = cur_max > (best + thresh)
-            best[:] = np.maximum(best, cur_max)
-            iters[improved] = 0
-            iters[~improved] += 1
-            converged = iters >= self.leaf_cap_min_iters
+            # OPT-IN (user ruling 2026-08-16): hold at GB_CAP_DIVISOR=8 with
+            # the guard OFF for now. The guard and a finer cell grid are
+            # COUPLED -- freezing empty cells at cap 1 while the cell is
+            # still 135 FD bins wide would re-impose the 24.5% structural
+            # exclusion the census measured. Default 0 reproduces today's
+            # ratchet exactly; flip to 1 in the same change as K.
+            if os.environ.get("GB_LEAF_CAP_REQUIRE_IMPROVEMENT", "0") != "1":
+                best[:] = np.maximum(best, cur_max)
+                iters[improved] = 0
+                iters[~improved] += 1
+                converged = iters >= self.leaf_cap_min_iters
+                self._cap_ll_improved_once = None
+                _skip_guard = True
+            else:
+                _skip_guard = False
+            _seen = getattr(self, "_cap_ll_improved_once", None)
+            if _seen is None or _seen.shape != improved.shape:
+                _seen = np.zeros(improved.shape, dtype=bool)
+            # The FIRST observation beats ``best = -inf`` trivially and is
+            # not evidence of anything -- the PSD idiom guards the same way
+            # with ``not np.isinf(max_logl)``. ``best`` is also reset to
+            # -inf on every increment, so this re-arms per rung while the
+            # flag itself stays sticky: a cell that has proven itself once
+            # keeps its clock.
+            if not _skip_guard:
+                _seen |= improved & np.isfinite(best)
+                self._cap_ll_improved_once = _seen
+                best[:] = np.maximum(best, cur_max)
+                iters[improved] = 0
+                iters[~improved & _seen] += 1
+                converged = iters >= self.leaf_cap_min_iters
         elif self.leaf_cap_iter_only:
             best[:] = np.maximum(best, cur_max)
             iters += 1
@@ -7929,10 +7980,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"{int(cap[inc].min())}-{int(cap[inc].max())}."
             )
         self._mirror_band_leaf_cap(bi)
+        # The old tail read "at min-iters gate: {(iters < min_iters).sum()}",
+        # which is TAUTOLOGICAL -- it is logged after ``iters[converged] = 0``,
+        # and every non-converged cell is below the gate by definition, so it
+        # printed the cell count every single iteration and carried no
+        # information. Report the split that actually explains the ramp:
+        # how many cells are frozen because they have never improved (the
+        # ghost-increment guard) versus how many are running a live clock.
+        _seen = getattr(self, "_cap_ll_improved_once", None)
+        if _seen is not None and _seen.shape == iters.shape:
+            _frozen = int((~_seen).sum())
+            _running = int(_seen.sum())
+            _tail = (f"; {_frozen} never-improved (clock frozen), "
+                     f"{_running} accruing patience")
+        else:
+            _tail = ""
         logger.info(
             f"{self.name}: leaf caps min/max = {int(cap.min())}/{int(cap.max())}"
-            f" over {len(cap)} {_unit}; at min-iters gate: "
-            f"{int((iters < self.leaf_cap_min_iters).sum())}."
+            f" over {len(cap)} {_unit}{_tail}."
         )
 
     def propose(self, model, state):

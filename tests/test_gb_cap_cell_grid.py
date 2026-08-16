@@ -608,3 +608,135 @@ class OverCapCellTest(unittest.TestCase):
         sat = m._band_saturated_flat(counts, cap)
         self.assertFalse(bool(sat[0]),
                          "a free cell must still admit a birth into the band")
+
+
+class GhostIncrementGuardTest(unittest.TestCase):
+    """The patience clock only runs for cells whose max ll has improved once.
+
+    An EMPTY cap cell has no source to fit better, so its max ll never
+    improves -- and under a bare counter it accrued patience every
+    iteration and promoted itself on a fixed clock. Measured on the
+    3-month production run that made 920 of 1,232 cells increment in
+    LOCKSTEP at iteration 10, turning a progressive cap into a wall-clock
+    ratchet: loosest exactly when the model is fullest.
+
+    The guard mirrors ``changed_once`` in the PSD max-logL search
+    (``psdmove.py::run_move_max_likelihood``), which likewise refuses to
+    count a plateau iteration until the chain has moved at all.
+    """
+
+    def _drive(self, m, bi, ll_series, min_iters=3, guard=True):
+        """Run ``_update_band_leaf_caps`` over a per-iteration ll series.
+
+        ``ll_series[i]`` is the (nwalkers, ncell) cold-chain cell ll at
+        iteration i. Everything the method reads other than the cell lls
+        is stubbed, so this exercises the GATE and nothing else.
+        """
+        os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = "1" if guard else "0"
+        self.addCleanup(os.environ.pop, "GB_LEAF_CAP_REQUIRE_IMPROVEMENT", None)
+        m.leaf_cap_ll_improve = True
+        m.leaf_cap_iter_only = False
+        m.leaf_cap_require_occupancy = False
+        m.leaf_cap_min_iters = min_iters
+        m.leaf_cap_ndim = 8.0
+        m.leaf_cap_ll_nsigma = 3.0
+        m._band_dof = np.full(m.num_bands, 100.0)
+        state = SimpleNamespace(
+            sub_states={m.branch_name: SimpleNamespace(band_info=bi)})
+        m._work_branch = lambda _s: SimpleNamespace(shape=(1, 1, 10000))
+        m._band_residual_lls = lambda _aca: np.zeros(
+            (bi["nwalkers"], m.num_bands))
+        caps = []
+        for lls in ll_series:
+            arr = np.asarray(lls, dtype=float)
+            m._cap_cell_lls = lambda *_a, _v=arr: (
+                _v, np.full(m.num_cap_cells, 100.0))
+            m._update_band_leaf_caps(SimpleNamespace(
+                analysis_container_arr=None), state, None)
+            caps.append(bi["cap_cell_leaf_cap"].copy())
+        return caps
+
+    def _setup(self, cap_divisor=4):
+        m = _move(cap_divisor)
+        m.branch_name = "gb"
+        bi = {"nwalkers": 1, "num_bands": NUM_BANDS}
+        ensure_leaf_cap_fields(bi, NUM_BANDS)
+        m._cap_state_arrays(bi)
+        bi["cap_cell_leaf_cap"][:] = 1
+        bi["cap_cell_iters"][:] = 0
+        bi["cap_cell_best_ll"][:] = -np.inf
+        return m, bi
+
+    def test_a_never_improving_cell_never_increments(self):
+        """The ghost increment: a flat cell keeps its cap forever."""
+        m, bi = self._setup()
+        n = m.num_cap_cells
+        # Ten iterations of a cell ll that only jitters -- far below the
+        # D/2 = 4.0 improvement threshold.
+        rng = np.random.default_rng(0)
+        series = [(-100.0 + 1e-3 * rng.standard_normal(n))[None, :]
+                  for _ in range(10)]
+        caps = self._drive(m, bi, series)
+        self.assertTrue(
+            np.all(caps[-1] == 1),
+            f"flat cells must stay at cap 1, got {np.unique(caps[-1])}")
+
+    def test_an_improving_cell_still_ramps(self):
+        """The guard must not disable the annealing it protects."""
+        m, bi = self._setup()
+        n = m.num_cap_cells
+        series = [np.full((1, n), -100.0)]          # arm best (finite)
+        series.append(np.full((1, n), -50.0))       # a real improvement
+        series += [np.full((1, n), -50.0)] * 8      # then a genuine plateau
+        caps = self._drive(m, bi, series, min_iters=3)
+        self.assertGreater(
+            int(caps[-1].max()), 1,
+            "a cell that improved once must still ramp on its plateau")
+
+    def test_only_the_improving_cell_ramps(self):
+        """Cell 0 improves, the rest are flat: only cell 0 promotes."""
+        m, bi = self._setup()
+        n = m.num_cap_cells
+        base = np.full((1, n), -100.0)
+        series = [base.copy()]
+        step = base.copy(); step[0, 0] = -50.0      # cell 0 alone improves
+        series.append(step)
+        series += [step.copy() for _ in range(8)]
+        caps = self._drive(m, bi, series, min_iters=3)
+        self.assertGreater(int(caps[-1][0]), 1)
+        self.assertTrue(
+            np.all(caps[-1][1:] == 1),
+            "flat neighbours must not ride cell 0's clock")
+
+    def test_first_observation_is_not_an_improvement(self):
+        """best starts at -inf, so iteration 0 beats it trivially.
+
+        Without the ``isfinite(best)`` guard every cell would latch
+        'improved once' on its very first update and the guard would be a
+        no-op -- exactly the bug the PSD idiom avoids with
+        ``not np.isinf(max_logl)``.
+        """
+        m, bi = self._setup()
+        n = m.num_cap_cells
+        series = [np.full((1, n), -100.0)] * 10     # never changes at all
+        self._drive(m, bi, series)
+        self.assertFalse(
+            bool(getattr(m, "_cap_ll_improved_once").any()),
+            "a first observation against -inf is not evidence of improvement")
+
+    def test_guard_is_OFF_by_default_so_the_ratchet_is_unchanged(self):
+        """Default must reproduce the pre-guard behaviour exactly.
+
+        User ruling 2026-08-16: hold at GB_CAP_DIVISOR=8 with no guard.
+        The guard only makes sense shipped WITH a finer cell grid -- alone
+        at K=8 it would re-impose the 24.5% structural exclusion.
+        """
+        m, bi = self._setup()
+        n = m.num_cap_cells
+        rng = np.random.default_rng(0)
+        series = [(-100.0 + 1e-3 * rng.standard_normal(n))[None, :]
+                  for _ in range(10)]
+        caps = self._drive(m, bi, series, min_iters=3, guard=False)
+        self.assertGreater(
+            int(caps[-1].max()), 1,
+            "with the guard OFF, flat cells must still ratchet as before")
