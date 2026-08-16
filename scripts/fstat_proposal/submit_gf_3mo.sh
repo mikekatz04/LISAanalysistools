@@ -269,10 +269,35 @@ export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # AFTER consecutive zero-birth-accept proposes stop proposing births
 # (deaths + in-model continue; [GB_BAND_SHUTOFF] log line per band).
 export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
-export GB_RJ_BAND_SHUTOFF_AFTER=5
+# PATIENCE RAISED 5 -> 50 (user ruling 2026-08-16, after a replay against
+# truth). Running the EXACT rule over iterations 5-60 of this run at
+# AFTER=5 switches off 74 bands above 10 mHz -- and 9 of them contain a
+# detectable catalogue source the run subsequently FOUND: SNR 45.7 (band
+# 142, 20.278-20.417 mHz, silenced at iteration 18), SNR 35.6 (band 90,
+# iter 14), SNR 34.3 (band 72, iter 19), SNR 32.7, 26.9, 24.0, 19.8, 15.0,
+# 12.5. Every one of those 9 bands is occupied today. Observed
+# time-to-first-source in them is 14-21 iterations, so a 5-iteration
+# occupancy clock silences bands the sampler merely has not reached yet --
+# and shutoff is PERMANENT for the process, so there is no recovery.
+export GB_RJ_BAND_SHUTOFF_AFTER=50
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
 export GB_FSTAT_REFIT_EVERY=100    # production cadence (5 was verify-only)
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
+# BIRTH-DRAW ALLOCATION (2026-08-16). Peak boxes are weighted w ~ F**alpha,
+# and the F-statistic goes like SNR^2 -- so the historical alpha=1 hands an
+# SNR-10 source 9x FEWER birth attempts than an SNR-30 one, exactly
+# backwards. Measured at iteration 15: 80.3% of the birth mass landed on cap
+# cells whose source was ALREADY found (median peak F 125.5) against 7.8% on
+# cells holding an unfound detectable source (median F 26.6), while 146 of
+# 332 cells with a detectable source held no leaf at all. alpha=0.5 makes
+# draws ~ SNR instead of SNR^2 -- still preferring real signal, without
+# starving the faint tail by the square. Predicted redistribution: unfound
+# cells 7.8% -> ~20% of the birth mass (2.6x).
+# NO REFIT NEEDED: the weights are applied when the birth proposal is built
+# FROM the cached stage-B grids and are not persisted in them, so a restart
+# picks this up against the existing epoch cache.
+# alpha=1 restores the previous behaviour bit-identically.
+export FSTAT_PEAK_WEIGHT_ALPHA=0.5
 # Slab 5 (user ruling): measured-safe (+-1 layer holds >=1-1e-7 of tone
 # energy; 5 = 2x that need) and ~30%% smaller band buffers than the AUTO 7.
 # Smoke 2 exonerated the slab as the VGB [GB_CELL_LL] growth cause (growth
