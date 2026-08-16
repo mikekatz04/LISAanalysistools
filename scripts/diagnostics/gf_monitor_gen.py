@@ -43,10 +43,24 @@ def img(key, alt=""):
     return f'<img src="data:image/png;base64,{IMGS[key]}" alt="{alt or key}">'
 
 # ============================ LOAD ==========================================
-h5path = None
-for fn in os.listdir(RUN_DIR):
-    if fn.endswith(".h5"):
-        h5path = os.path.join(RUN_DIR, fn)
+# PICK THE LIVE STORE DETERMINISTICALLY (2026-08-16). A recovered run dir
+# holds THREE .h5 files -- the live store, ``*_running_backup_copy.h5`` and
+# one or more ``*_CORRUPT*.h5`` kept for forensics -- and the old
+# "last name os.listdir happens to yield" pick could land on any of them.
+# os.listdir order is filesystem-dependent, so the page could silently
+# render the damaged store (missing iterations) or the lagging backup on one
+# machine and the right file on another, with nothing in the output saying
+# which. Name the live store explicitly and keep the others as fallbacks.
+_h5s = sorted(fn for fn in os.listdir(RUN_DIR) if fn.endswith(".h5"))
+_live = [fn for fn in _h5s
+         if not fn.endswith("_running_backup_copy.h5") and "_CORRUPT" not in fn]
+if not _live:                                   # only a backup survived
+    _live = [fn for fn in _h5s if fn.endswith("_running_backup_copy.h5")]
+    if _live:
+        MISSING.append(
+            "no live store in this snapshot -- rendering the running backup "
+            "copy, which lags the run by up to one save step.")
+h5path = os.path.join(RUN_DIR, (_live or _h5s)[0])
 f = h5py.File(h5path, "r")
 g = f["global_fit"]
 ll_all = g["log_like"][:, 0, 0, :]
@@ -175,8 +189,31 @@ def _safe(node, key, default=None, label=None):
             f"(likely copied mid-save) -- {type(e).__name__}")
         return default
 
-caps = _safe(sub, "gb/band_leaf_cap", None, "per-band leaf caps")  # (it, 154)
+# THE CAP PANEL MUST PLOT THE ENFORCED ARRAY (2026-08-16). This used to
+# read ``gb/band_leaf_cap`` -- the LEGACY MIRROR that
+# ``_mirror_band_leaf_cap`` keeps equal to the MAX over each band's cap
+# cells -- while the births are actually gated per CAP CELL
+# (``gbspecialstretch._run_rj_step``: "THE EXACT PER-CELL ENFORCEMENT
+# POINT ... it is per cell"). On this run the mirror overstates the real
+# cap for 515 of 1,232 cells (42%), by up to 12, because 133 of 154 bands
+# carry a non-zero spread across their own cells. The old label
+# "leaf cap per band" was therefore TRUE of the array being drawn and
+# false about the run -- fixing only the string would have made the plot
+# lie. Prefer the cell array; fall back to the band array only where the
+# cell array does not exist (``cap_divisor == 1`` stores never allocate
+# it), and label from WHICH array was used rather than guessing from the
+# column count.
 band_edges = sub["gb/band_edges"][:]
+try:
+    cap_edges_static = sub["gb/cap_edges"][:]
+except Exception:
+    cap_edges_static = band_edges
+CAP_K = max(int(round((cap_edges_static.size - 1) / max(band_edges.size - 1, 1))), 1)
+caps = _safe(sub, "gb/cap_cell_leaf_cap", None, "per-cell leaf caps")
+CAP_UNIT = "cap cell"
+if caps is None or not getattr(caps, "size", 0):
+    caps = _safe(sub, "gb/band_leaf_cap", None, "per-band leaf caps")
+    CAP_UNIT, CAP_K = "band", 1
 
 
 logpath = None
@@ -288,12 +325,46 @@ try:
 except Exception as e:
     MISSING.append(f"PSD curve render failed: {e!r}")
 
+# ---- detectable-truth set for the overlays (from the census npz) ----------
+# `census.py` computes optimal SNR for every catalogue GB over 3-21 mHz
+# against the run's OWN sampled sensitivity; the detectable (SNR>7) subset
+# is the natural TARGET line for the leaf-count and occupancy panels. It is
+# optional -- without the npz these overlays simply do not draw.
+DET_F0 = None
+for _cp in (os.path.join(RUN_DIR, "gb_hi_f_census.npz"), "gb_hi_f_census.npz"):
+    if os.path.exists(_cp):
+        try:
+            _c = np.load(_cp)
+            if "det_f0" in _c:
+                DET_F0 = np.asarray(_c["det_f0"], dtype=float)
+                DET_LO = float(_c["det_lo"]); DET_HI = float(_c["det_hi"])
+        except Exception:
+            DET_F0 = None
+        break
+
 # ---- 5. GB leaves + caps ----
 gb_counts = gb_inds.sum(axis=-1)                    # (it, 24)
 fig, ax = plt.subplots(1, 2, figsize=(11, 3.4))
 for w in range(nwalk):
     ax[0].plot(it, gb_counts[:, w], color=GREEN, alpha=0.35, lw=0.9)
-ax[0].plot(it, gb_counts.max(axis=1), color=GREEN, lw=1.8)
+ax[0].plot(it, gb_counts.max(axis=1), color=GREEN, lw=1.8, label="all f")
+# TRUTH TARGET. The raw leaf count has no scale -- 577 leaves is only
+# meaningful against how many sources are actually THERE. Overlay the
+# detectable (SNR>7) catalogue count over the range where SNRs exist, and
+# the model's leaf count restricted to that SAME range, so the two lines
+# are comparable rather than merely adjacent.
+if DET_F0 is not None:
+    _f0_it = g["chain/gb"][:NIT, 0, 0][..., 1] * 1e-3     # (it, walker, leaf)
+    _in = (_f0_it >= DET_LO) & (_f0_it <= DET_HI) & gb_inds
+    _cnt = _in.sum(axis=2)                                # (it, walker)
+    ax[0].plot(it, _cnt.max(axis=1), color=CYAN, lw=1.6,
+               label=f"{DET_LO*1e3:.0f}-{DET_HI*1e3:.0f} mHz")
+    ax[0].axhline(DET_F0.size, color=RED, ls=":", lw=1.5)
+    ax[0].text(NIT * 0.98, DET_F0.size,
+               f"{DET_F0.size} detectable (SNR>7), "
+               f"{DET_LO*1e3:.0f}-{DET_HI*1e3:.0f} mHz ", color=RED,
+               fontsize=8, va="bottom", ha="right")
+    ax[0].legend(fontsize=8, loc="lower right")
 ax[0].set_title("GB leaf count (cold walkers)"); ax[0].set_xlabel("iteration")
 ax[0].set_ylim(bottom=-0.5)
 if caps is not None and caps.size:
@@ -301,7 +372,7 @@ if caps is not None and caps.size:
     im = ax[1].imshow(caps.T, aspect="auto", origin="lower", cmap="viridis",
                       extent=[0, _cn, 0, caps.shape[1]])
     _u = np.unique(caps[-1])
-    _lab = ("cap cell" if caps.shape[1] > 200 else "band")
+    _lab = CAP_UNIT
     ax[1].set_title(
         f"leaf cap per {_lab}"
         + (f" (ALL at {_u[0]:.0f})" if _u.size == 1 else ""))
@@ -318,14 +389,287 @@ else:
 # translucent row line; the log carries the when, the plot the which).
 shutoff_bands = sorted({int(b) for b in re.findall(
     r"\[GB_BAND_SHUTOFF[^\]]*\] band (\d+)", log_text)})
+# The SHUTOFF is per BAND by design, but the image is now per CAP CELL --
+# band b spans rows [b*K, (b+1)*K), so an unscaled axhline would land at
+# 1/K of its true height. Also anchor the marker to the image's OWN x
+# extent: caps can come from the backup copy and be LONGER than NIT.
+_cx = caps.shape[0]
 for b in shutoff_bands:
-    ax[1].axhline(b + 0.5, color=RED, lw=1.0, alpha=0.55)
-    ax[1].plot([NIT * 0.99], [b + 0.5], marker="<", color=RED, ms=6,
-               clip_on=False)
+    _y = (b + 0.5) * CAP_K
+    ax[1].axhline(_y, color=RED, lw=1.0, alpha=0.55)
+    ax[1].plot([_cx * 0.99], [_y], marker="<", color=RED, ms=6, clip_on=False)
 if shutoff_bands:
     ax[1].set_title(
-        f"per-band leaf cap ({len(shutoff_bands)} bands birth-OFF, red)")
+        f"leaf cap per {_lab} ({len(shutoff_bands)} bands birth-OFF, red)")
 fig_b64(fig, "gb_leaves")
+
+# ---- 5a. CAP-CELL OCCUPANCY ----------------------------------------------
+# THE QUESTION THIS PANEL EXISTS TO ANSWER (user, 2026-08-16): "how many of
+# the 1232 cap cells have 1 source in them? It should be many more if there
+# are really 1232 sub-bands." The band panel above cannot answer it -- it
+# shows the cap, not the OCCUPANCY, and it shows bands, not cells. Without
+# this the only way to tell whether the cap is binding, and whether the cap
+# grid is being followed at all rather than quietly collapsing back onto the
+# 154-band grid, is to open the store by hand.
+#
+# The three questions, one axes each: what does the occupancy distribution
+# look like against the cap (is the cap binding?); how do occupancy and the
+# at-cap count evolve (is the ramp keeping ahead of the model?); and WHERE in
+# frequency the occupied cells sit (which is why the occupied FRACTION is
+# small even when the packing is working -- the sources are all in the
+# galaxy, not spread over 0.56-21.9 mHz).
+cap_cells = _safe(sub, "gb/cap_cell_leaf_cap", None, "per-cell leaf caps")
+cap_edges_arr = None
+try:
+    cap_edges_arr = sub["gb/cap_edges"][:]
+except Exception:
+    pass
+CAP_TXT = ""
+if cap_cells is not None and cap_cells.size and cap_edges_arr is not None:
+    ncell = cap_edges_arr.size - 1
+    # The cap arrays can lag the main backend by a row (separate flush), and
+    # an unwritten row reads as all-zero -- which would render as "every cell
+    # capped at 0". Use the last row that carries a real cap.
+    _crow = cap_cells.shape[0] - 1
+    while _crow > 0 and not np.any(cap_cells[_crow] > 0):
+        _crow -= 1
+
+    def _cell_counts(iteration):
+        """Sources per cap cell, per cold walker, at one stored iteration."""
+        alive = g["inds/gb"][iteration, 0, 0]                    # (nw, nleaf)
+        f0 = g["chain/gb"][iteration, 0, 0][..., 1] * 1e-3       # mHz -> Hz
+        out = np.zeros((alive.shape[0], ncell), dtype=np.int32)
+        for w in range(alive.shape[0]):
+            fv = f0[w][alive[w]]
+            if not fv.size:
+                continue
+            ci = np.searchsorted(cap_edges_arr, fv, side="right") - 1
+            ci = ci[(ci >= 0) & (ci < ncell)]
+            out[w] = np.bincount(ci, minlength=ncell)
+        return out
+
+    cc_last = _cell_counts(NIT - 1)
+    nw_ = cc_last.shape[0]
+    cap_row = cap_cells[_crow]
+    fig, ax = plt.subplots(1, 3, figsize=(15.0, 3.6),
+                           gridspec_kw=dict(wspace=0.42))
+
+    # (a) occupancy distribution vs the cap. Log-scaled counts, because the
+    # empty bar is ~5000x the tallest occupied one and a linear axis would
+    # render every bar this panel exists to compare as a flat line.
+    # Split each bar by whether those cells are AT their own cap, rather
+    # than colouring a whole occupancy level: cells holding one source are a
+    # mix of cap-1 cells (full) and cap-2 cells (room for one more), and
+    # painting the level uniformly would claim ~190 saturated cells where
+    # there are ~40.
+    _atc = cc_last >= cap_row[None, :]
+    kmax = int(max(cc_last.max(), cap_row.max())) + 1
+    hist = np.array([(cc_last == k).sum() / nw_ for k in range(kmax + 1)])
+    h_at = np.array([((cc_last == k) & _atc).sum() / nw_
+                     for k in range(kmax + 1)])
+    h_ov = np.array([((cc_last == k) & (cc_last > cap_row[None, :])).sum()
+                     / nw_ for k in range(kmax + 1)])
+    _x = np.arange(kmax + 1)
+    # Log-axis floor so a fractional bar (0.08 cells/walker) is still
+    # visible -- but only where the level EXISTS, otherwise an empty level
+    # renders as a red stub reading "over cap" where nothing is.
+    _F = np.where(hist > 0, 1e-2, 0.0)
+    ax[0].bar(_x, np.maximum(hist - h_at, _F), color=CYAN, width=0.72,
+              label="below cap")
+    ax[0].bar(_x, np.maximum(h_at - h_ov, _F), width=0.72, color=AMBER,
+              bottom=np.maximum(hist - h_at, _F), label="at cap")
+    if h_ov.sum():
+        ax[0].bar(_x, np.maximum(h_ov, _F), width=0.72, color=RED,
+                  bottom=np.maximum(hist - h_ov, _F), label="over cap")
+    ax[0].legend(loc="upper right", fontsize=8)
+    for k, v in enumerate(hist):
+        if v <= 0:
+            continue
+        ax[0].text(k, max(v, 1e-2), f"{v:.0f}" if v >= 1 else f"{v:.2f}",
+                   ha="center", va="bottom", color=FG, fontsize=8.5)
+    ax[0].set_yscale("log")
+    ax[0].set_ylim(1e-2, hist.max() * 4)
+    _st = 1 if kmax <= 8 else 2
+    ax[0].set_xticks(np.arange(0, kmax + 1, _st))
+    ax[0].set_xlabel("sources in the cell")
+    ax[0].set_ylabel(f"cap cells (of {ncell})")
+    ax[0].set_title(f"cell occupancy @ iter {NIT-1} (cap {int(cap_row.min())}"
+                    f"-{int(cap_row.max())})")
+
+    # (b) the ramp: occupied and at-cap cells per stored iteration. Caps are
+    # a SENTINEL (-1) until the GB stage arms them, and "count >= -1" is true
+    # of every empty cell -- plotted raw that reads as all 1,232 cells capped
+    # before the search even starts. Only plot iterations with a real cap.
+    _its, _occ, _tot = [], [], []
+    _cap_its, _atcap = [], []
+    for i in range(NIT):
+        cc = _cell_counts(i)
+        capi = cap_cells[min(i, _crow)]
+        _its.append(i)
+        _occ.append((cc > 0).sum() / nw_)
+        _tot.append(cc.sum() / nw_)
+        if np.all(capi >= 1):
+            _cap_its.append(i)
+            _atcap.append((cc >= capi[None, :]).sum() / nw_)
+    ax[1].plot(_its, _occ, color=CYAN, lw=2, label="occupied cells")
+    ax[1].plot(_cap_its, _atcap, color=AMBER, lw=2, label="at/over cap")
+    ax[1].set_xlabel("iteration"); ax[1].set_ylabel("cap cells")
+    ax[1].legend(loc="upper left", fontsize=9)
+    axr = ax[1].twinx()
+    axr.plot(_its, _tot, color=GREEN, lw=1.4, ls="--")
+    axr.set_ylabel("sources / walker", color=GREEN, fontsize=9)
+    axr.tick_params(axis="y", colors=GREEN, labelsize=8); axr.grid(False)
+    ax[1].set_title("occupancy vs the model")
+
+    # (c) where the occupied cells actually are. Plotted per BAND (8 cells)
+    # rather than per cell: 1,232 hairlines across 21 mHz is a moire pattern,
+    # not a distribution, and the question here is only "which part of the
+    # spectrum is populated".
+    K = max(int(round(ncell / max(len(band_edges) - 1, 1))), 1)
+    nblk = ncell // K
+    occ_cell = (cc_last > 0).mean(axis=0)[:nblk * K].reshape(nblk, K).sum(1)
+    fblk = (0.5 * (cap_edges_arr[:-1] + cap_edges_arr[1:])
+            )[:nblk * K].reshape(nblk, K).mean(1) * 1e3
+    ax[2].fill_between(fblk, 0, occ_cell, color=CYAN, alpha=0.9, lw=0,
+                       step="mid", label="model")
+    # TRUTH: how many cap cells per band actually CONTAIN a detectable
+    # source. The gap between the two curves is the remaining search work,
+    # localised in frequency -- which the model curve alone cannot show.
+    if DET_F0 is not None:
+        _dc = np.clip(np.searchsorted(cap_edges_arr, DET_F0, side="right") - 1,
+                      0, ncell - 1)
+        _hasdet = np.zeros(ncell, dtype=bool)
+        _hasdet[_dc] = True
+        _tb = _hasdet[:nblk * K].reshape(nblk, K).sum(1)
+        _rng = (fblk >= DET_LO * 1e3) & (fblk <= DET_HI * 1e3)
+        ax[2].step(fblk[_rng], _tb[_rng], where="mid", color=RED, lw=1.3,
+                   ls=":", label=f"has detectable source "
+                                 f"({DET_LO*1e3:.0f}-{DET_HI*1e3:.0f} mHz)")
+        ax[2].legend(fontsize=8, loc="upper right")
+    ax[2].axhline(K, color=DIM, ls=":", lw=1)
+    ax[2].text(fblk[-1], K, f" all {K} cells", color=DIM, fontsize=8,
+               va="bottom", ha="right")
+    ax[2].set_xlabel("f0 [mHz]")
+    ax[2].set_ylabel(f"occupied cells per band")
+    ax[2].set_title("where the occupied cells are")
+    fig_b64(fig, "gb_cap_cells")
+
+    _occ_last, _atcap_last = _occ[-1], _atcap[-1]
+    _exact1 = float((cc_last == 1).sum() / nw_)
+    CAP_TXT = (
+        f"At iteration {NIT-1} the median cold walker holds "
+        f"<strong>{_tot[-1]:.0f}</strong> GB sources spread over "
+        f"<strong>{_occ_last:.0f} of {ncell}</strong> cap cells "
+        f"({100*_occ_last/ncell:.0f}%): <strong>{_exact1:.0f}</strong> cells "
+        f"hold exactly one source and <strong>{_atcap_last:.0f}</strong> sit "
+        f"at or over their cap.")
+
+# ---- 5a2. HIGH-FREQUENCY RECOVERY CENSUS ----------------------------------
+# Injection-vs-recovery above 5 mHz, the direct test of whether source
+# ADDING is trustworthy. Not computed here: the optimal SNR of every
+# catalogue source against the run's sampled sensitivity needs the 2.3 GB
+# WDWD catalogue plus a GBGPU waveform each, which does not belong in a
+# monitor that has to run in seconds. `census.py` in the scratchpad
+# produces `gb_hi_f_census.npz`; drop it beside the store (or in CWD) and
+# this section appears. Without it the page degrades to a note.
+CENSUS = None
+for _cp in (os.path.join(RUN_DIR, "gb_hi_f_census.npz"),
+            "gb_hi_f_census.npz"):
+    if os.path.exists(_cp):
+        try:
+            CENSUS = np.load(_cp)
+        except Exception:
+            CENSUS = None
+        break
+CENSUS_TXT = ""
+if CENSUS is not None:
+    t_f0 = CENSUS["t_f0"]; t_snr = CENSUS["t_snr"]; found = CENSUS["found"]
+    c_rec = CENSUS["rec_f0"]; c_occ = CENSUS["occ"]; c_cap = CENSUS["cap"]
+    c_ce = CENSUS["cap_edges"]; FCUT = float(CENSUS["FCUT"])
+    nc = c_ce.size - 1
+    fig, ax = plt.subplots(1, 3, figsize=(15.4, 3.9),
+                           gridspec_kw=dict(wspace=0.30))
+
+    # (a) the census itself: every catalogue source, found or not.
+    ax[0].scatter(t_f0[~found] * 1e3, t_snr[~found], s=9, color=RED,
+                  alpha=0.55, lw=0, label=f"missed ({(~found).sum()})")
+    ax[0].scatter(t_f0[found] * 1e3, t_snr[found], s=14, color=GREEN,
+                  alpha=0.95, lw=0, label=f"recovered ({found.sum()})")
+    ax[0].axhline(7, color=DIM, ls=":", lw=1)
+    ax[0].text(t_f0.max() * 1e3, 7, " SNR 7", color=DIM, fontsize=8,
+               ha="right", va="bottom")
+    ax[0].set_yscale("log"); ax[0].set_xlabel("f0 [mHz]", fontsize=9)
+    ax[0].set_ylabel("optimal SNR", fontsize=9)
+    ax[0].legend(fontsize=8, loc="upper right")
+    ax[0].set_title(f"catalogue GBs above {FCUT*1e3:.0f} mHz")
+
+    # (b) recovery rate vs SNR -- the shape that says whether adding is
+    # SNR-ordered (healthy) or arbitrary (not).
+    eds = np.array([3, 5, 7, 10, 15, 25, 40, 1e9])
+    xs, ys, ns = [], [], []
+    for a, b in zip(eds[:-1], eds[1:]):
+        m = (t_snr >= a) & (t_snr < b)
+        if m.sum() >= 4:
+            xs.append(np.sqrt(a * min(b, 60))); ys.append(100 * found[m].mean())
+            ns.append(m.sum())
+    ax[1].plot(xs, ys, "o-", color=CYAN, lw=2, ms=6)
+    for x, y, n in zip(xs, ys, ns):
+        ax[1].text(x, y, f" {n}", color=DIM, fontsize=8, va="bottom")
+    ax[1].set_xscale("log"); ax[1].set_xlabel("optimal SNR", fontsize=9)
+    ax[1].set_ylabel("recovered [%]", fontsize=9); ax[1].set_ylim(0, 100)
+    ax[1].set_title("recovery vs SNR (labels = N in bin)")
+
+    # (c) THE CEILING. Detectable sources per cap cell against the cap the
+    # cell actually carries: everything to the right of the cap line cannot
+    # be represented no matter how well the sampler works.
+    ci = np.clip(np.searchsorted(c_ce, t_f0, side="right") - 1, 0, nc - 1)
+    loud = t_snr > 7
+    nloud = np.bincount(ci[loud], minlength=nc)
+    kmax = int(nloud.max())
+    # k=0 (cells with nothing detectable in them) is ~80% of the grid and
+    # says nothing about the ceiling -- start at 1 so the bars that matter
+    # are not flattened against it.
+    ks = np.arange(1, kmax + 1)
+    hh = np.array([(nloud == k).sum() for k in ks])
+    capmax = int(np.max(c_cap))
+    cols = [AMBER if k > capmax else CYAN for k in ks]
+    ax[2].bar(ks, hh, color=cols, width=0.72)
+    for k, v in zip(ks, hh):
+        ax[2].text(k, v, f"{v}", ha="center", va="bottom", color=FG,
+                   fontsize=8.5)
+    ax[2].axvline(capmax + 0.5, color=RED, lw=1.5, ls="--")
+    ax[2].text(capmax + 0.62, hh.max() * 0.6, f"cap {capmax}", color=RED,
+               fontsize=9)
+    ax[2].set_ylim(0, hh.max() * 1.35)
+    ax[2].set_xticks(ks)
+    ax[2].set_xlabel("detectable sources in the cell", fontsize=9)
+    ax[2].set_ylabel("cap cells", fontsize=9)
+    ax[2].set_title("what the cap can hold vs what is there")
+    fig_b64(fig, "gb_hi_f_census")
+
+    _excl = int(np.clip(nloud - c_cap, 0, None).sum())
+    _nloud = int(loud.sum())
+    CENSUS_TXT = (
+        f"Above {FCUT*1e3:.0f} mHz the catalogue holds <strong>{t_f0.size}</strong> "
+        f"sources, <strong>{_nloud}</strong> of them detectable (SNR&gt;7) against "
+        f"this run's own sampled sensitivity. The max-logL cold walker has recovered "
+        f"<strong>{int(found.sum())}</strong>. Of the {_nloud - int(found[loud].sum())} "
+        f"detectable ones still missing, <strong>{_excl}</strong> "
+        f"({100*_excl/max(_nloud,1):.0f}% of all detectable sources) are excluded BY "
+        f"CONSTRUCTION &mdash; they sit in cap cells that already contain more "
+        f"detectable sources than the cap permits.")
+
+# ---- 5a3. CAP-DIVISOR STUDY (pre-rendered) --------------------------------
+# A STATIC study, not a per-snapshot panel: it asks what the cap grid could
+# represent of the mojito galaxy, independent of how far this run has got.
+# `divisor_study.py` in the scratchpad renders it; drop the PNG beside the
+# store and it appears here.
+for _dp in (os.path.join(RUN_DIR, "gb_cap_divisor_study.png"),
+            "gb_cap_divisor_study.png"):
+    if os.path.exists(_dp):
+        with open(_dp, "rb") as _fh:
+            IMGS["gb_cap_divisor"] = base64.b64encode(_fh.read()).decode()
+        break
 
 # ---- 5b. GB BIRTH FATE (from [GB_ACCEPT rj-split]) ----
 # Every RJ propose reports where its birth proposals died. Nothing plotted
@@ -438,7 +782,7 @@ if epochs:
     if pf0 is not None and pF is not None:
         fig, ax = plt.subplots(1, 2, figsize=(12, 3.4))
         ax[0].scatter(pf0 * (1.0 if PK_MHZ else 1e3), np.clip(pF, 1, None), s=4, color=AMBER, alpha=0.6)
-        ax[0].set_yscale("log"); ax[0].set_xlabel("f0 [mHz]"); ax[0].set_ylabel("F")
+        ax[0].set_yscale("log"); ax[0].set_xlabel("f0 [mHz]", fontsize=9); ax[0].set_ylabel("F")
         ax[0].set_title(f"{len(pf0)} peaks (birth-grid anchors)")
         ax[1].hist(pf0 * (1.0 if PK_MHZ else 1e3), bins=80, color=AMBER, alpha=0.85)
         ax[1].set_xlabel("f0 [mHz]"); ax[1].set_title("peak density vs frequency")
@@ -1485,111 +1829,80 @@ if RJ_BREAK:
 
 _alert_3mo = """
 <div class="alert" style="border-color:var(--green)">
-<strong>RECOVERED &mdash; and ahead of where the corrupt run ever got.</strong> The store was
-restored from <code>*_running_backup_copy.h5</code> (iteration 5) after the primary was left
-with unreadable gzip chunks in <code>sub_backend/gb/*</code> by a job killed mid-write. The
-resumed run is clean: <strong>zero errors, tracebacks or MPI aborts</strong>, iterations
-~6 min apart, and cold lnL <strong>52,587,377 &mdash; already higher than the corrupt run's
-best (52,586,123)</strong> while carrying 142 GB leaves/walker and still filling. Saves are
-also 40&times; cheaper: <strong>4.03 s &rarr; 0.10 s</strong> per handoff to the saver rank.
+<strong>ITERATION 61, AND THE SELF-HEAL FIRED IN PRODUCTION.</strong> The run advanced 17 &rarr;
+61 stored iterations: GB leaves per cold walker <strong>262 &rarr; 591 (2.3&times;)</strong>,
+cold lnL <strong>+25,240</strong> to 52,631,719, VGB holding all 55. At 05:52:04 the store
+raised <code>filter returned failure during read</code> at resume; twenty seconds later the log
+reads <code>SELF-HEALED: promoted gf_prod_3mo_testing_running_backup_copy.h5 over the damaged
+store (kept as gf_prod_3mo_testing_CORRUPT_0.h5)</code> and the run continued unattended. That
+is the failure that previously cost 11 hours and a human at 03:00. It matters that the store has
+torn AGAIN since (this snapshot's <code>sub_backend/gb/*</code> is unreadable from row ~32,
+while the backup is CLEAN and one iteration AHEAD at 61) &mdash; the tear is a recurring
+environmental fact, and the atomic backup is now the thing carrying the run.
 <br><br>
-<strong>GPU: balanced, and the dominant move is genuinely busy.</strong> Measured per move,
-with 5 s sampling aligned to the move windows:
-<code>rj_fstat_search</code> <strong>68% / 64%</strong> (dev0/dev1) &mdash; the move that is
-45% of the iteration is well saturated; <code>vgb_pe</code> 34% / 39%;
-<code>rj_prior_removal</code> 31% / 25%. Whole-window mean is <strong>39% / 38%</strong>,
-i.e. the two devices are BALANCED &mdash; the old 3%/79% single-device signature is gone for
-good. Only 12% of samples have both devices fully idle.
-<br><br>
-<strong>Do NOT raise the buffer knobs right now.</strong> Peak device memory is
-<strong>80.7 GB of 96 on dev0</strong> (50.6 on dev1) &mdash; 84% of the card, and this is a
-run still REFILLING after the restart (142 leaves vs the 160 it had before). Leaves, and the
-memory they carry, are going back up. Raising <code>GB_N_SUBBANDS</code> to chase
-utilisation would spend headroom the model is about to need, and would be tuned against a
-half-filled state that will not resemble the steady one. The right move is to let the leaf
-count recover first, then re-read this panel: utilisation rises on its own as each launch
-carries more sources, so the honest measurement only exists once the model is full.
+<strong>Recovery is climbing fast and staying clean.</strong> Against the mojito catalogue over
+3&ndash;21 mHz, detectable (SNR&gt;7) sources recovered: <strong>38.6% (268 of 694)</strong>,
+and cap cells holding a detectable source but NO leaf fell from <strong>146 (44%) to 66
+(20%)</strong>. Recovery stays sharply SNR-ordered &mdash; 75.3% above SNR 25, 68.6% at
+15&ndash;25, 40.5% at 10&ndash;15, 16.5% at 7&ndash;10 &mdash; so the deficit is still the faint
+tail, exactly where it should be. Leaf QUALITY improved: 75% of leaves sit within 2 FD bins of a
+catalogue source (was 66%), only 10% are unmatched beyond 5 bins (was 17%), and just 7 occupied
+cells contain no detectable source at all.
 </div>
-<div class="alert" style="border-color:var(--red)">
-<strong>&#9888; PREVIOUS ATTEMPT (superseded) &mdash; job 210 was stalled &mdash; job 210 has made NO progress since
-2026-08-15 13:52.</strong> The job is still ALLOCATED (its nvidia-smi sampler kept writing
-through 00:37 the next morning, 11 h later) but it is doing nothing: <strong>0% GPU
-utilisation on both devices for eleven straight hours</strong>, memory pinned flat at
-10 GB. The final log line is the results/saver rank announcing its loop at startup, and the
-MAIN rank never logged a single line afterwards &mdash; not a propose, not a build step. So
-this is a hang during startup, not a crash and not a slow iteration. Job 208 (13:09&ndash;
-13:49) was the last one to do real work, and everything on this page comes from it.
+<div class="alert" style="border-color:var(--amber)">
+<strong>THE CAP IS NOW INERT. The ratchet ran away exactly as predicted, and the problem has
+INVERTED.</strong> Measured per cell from the backup: caps were 1 at iteration 5 and are
+<strong>median 14 (min 2, max 14) at iteration 60</strong>, with 1,126 of 1,232 cells above 10.
+The model holds 591 sources against a permitted 15,619 &mdash; it is using <strong>3.8% of the
+allowance</strong>, and only <strong>1.1 cells per walker (0.3% of occupied cells)</strong> are
+at cap. The leaf cap currently constrains nothing and will constrain nothing for the rest of the
+run.
 <br><br>
-Two circumstantial details worth checking together: job 210 started at 13:52:49 and the
-23-month run started at <strong>13:53:47, 58 seconds later</strong>, and this is the first
-3-month job to run under the dedicated <code>mpiexec -n 3</code> saver rank while a second
-multi-GPU job was launching. Recommended: <code>scancel</code> job 210 and resubmit; if it
-hangs again at startup, drop to the single-process fallback line in the submit script
-(commented directly under the <code>mpiexec</code> call) to isolate whether the saver rank
-is implicated.
+<strong>The mechanism is the ghost increment.</strong> An EMPTY cap cell can never improve its
+max ll by D/2, so it accrued patience on a fixed clock and promoted itself alongside cells doing
+real work &mdash; one step incremented 804 cells at once. The result is the failure mode that
+matters: <strong>the cap was tightest when the model was empty and needed no protection, and is
+absent now that the model is fullest and confusion is worst.</strong>
+<br><br>
+<strong>What it has cost &mdash; real but still modest.</strong> Occupancy reaches 7 leaves in a
+single cell; 7 cells hold 5+ leaves where the catalogue has a median of 2 detectable sources; 96
+of 441 leaves sit in cells holding more leaves than there are detectable sources. Duplication is
+measurable: <strong>18 leaf pairs sit within HALF an FD bin</strong> (4.1%) and 47 within 2 bins
+(10.7%) &mdash; at these SNRs a real pair is resolvable, so sub-half-bin pairs are one source
+fitted twice. Against that, occupancy still tracks truth (1 leaf &rarr; median 1 detectable, 2
+&rarr; 2, 3 &rarr; 3, 4 &rarr; 4), so the bulk of the 2.3&times; growth is legitimate.
+<br><br>
+<strong>THE TWO FIXES ARE COUPLED AND MUST SHIP TOGETHER.</strong> The ghost-increment guard
+(patience only runs once a cell&rsquo;s ll has improved at least once, mirroring
+<code>changed_once</code> in the PSD max-logL search) freezes empty cells at cap 1. Applied
+ALONE at today&rsquo;s <code>GB_CAP_DIVISOR=8</code> it would re-impose the ceiling this page
+measured at iteration 15: <strong>170 of 694 detectable sources (24.5%) structurally
+unrepresentable</strong>, because a 17.36 &micro;Hz cell is 135 FD bins wide and 47 cells hold
+3&ndash;5 separable detectable sources against a cap of 2. Conversely
+<code>GB_CAP_DIVISOR=32</code> alone leaves the ratchet intact and the cap climbs back to
+irrelevance. Together, the cap stays meaningful AND stops excluding: at K=32 exclusion is
+<strong>2.6%</strong> and 456 of 566 occupied cells hold exactly ONE source. K=32 is also the
+last divisor whose cell (4.34 &micro;Hz, 34 FD bins) still spans the run&rsquo;s own observed
+duplicate-parking distance of ~1 Doppler width &mdash; 15.5 bins at 20 mHz; at K=64 the cell is
+1.1 Doppler widths there and parked duplicates begin escaping into the neighbour.
 </div>
-<div class="alert">
-<strong>FRESH RUN (gf_prod_3mo_v2) &mdash; the rebuilt stack, measured from iteration 0.</strong>
-Everything below is a NEW baseline: new store, all state built from config, F-stat grid and
-epoch center table fitted against this run&rsquo;s own residual, and the VGB likelihood
-working for the first time. Headline: <strong>the iteration wall fell from 53&ndash;77 min
-to ~11 min while carrying MORE signal</strong> (160 GB leaves/cold walker at iteration 9 vs
-~140 at iteration 19 of the old run), and cold lnL reached <strong>52,586,123 by iteration
-9</strong> &mdash; past where the previous run sat at iteration 19.
-<br><br>
-<strong>Why the leaf count climbs so fast now: the cap-cell grid removed a ceiling the old
-run was pressed against.</strong> Leaf caps used to be applied per SUB-BAND, a width chosen
-for COMPUTE, not for how close two sources can sit before they are confused. With 154 bands
-at a mean cap of 1.47, the old run's whole-model ceiling was <strong>227 leaves per
-walker</strong> &mdash; and it was sitting at 137, i.e. 60% of the way into it, with more
-room only arriving as the slow per-band cap increments fired. Caps now live on an
-INDEPENDENT band/8 grid at the confusion scale (1,232 cells), so a band holds up to 8&times;
-what it did and the model is free to populate at the rate the data actually supports:
-0 &rarr; 86 &rarr; 121 &rarr; 144 &rarr; 160 leaves/walker over iterations 4&ndash;8. The
-growth is the throttle coming off, not a birth pathology &mdash; and the per-cell cap still
-does the job the band cap was standing in for, visible as the amber band in the birth-fate
-panel below.
-<br><br>
-<strong>What each change actually bought.</strong> (1) EPOCH CENTERS: the 953 s/propose
-F-stat centre chain &mdash; 92% of the old search propose &mdash; is now a
-<strong>529,641-node table built once per epoch in 0.5 s</strong>, with ZERO lookup
-fallbacks; <code>rj_fstat_centers</code> has vanished from the breakdown entirely and
-<code>rj_fstat_search</code> is <strong>137&ndash;151 s (was 1,041 s)</strong>. (2) SAVER
-RANK: <code>[SAVE]</code> 60 s &rarr; <strong>4 s</strong> (&ldquo;handoff to rank 2&rdquo;)
-&mdash; the dedicated mpiexec saver works. (3) JUMP 1.2: in-model cold acceptance
-<strong>0.349</strong>, squarely in the 0.15&ndash;0.4 target (it was 0.71&ndash;0.80 at
-0.6). (4) SNR-TRUNCATED BIRTHS: only <strong>6.2%</strong> of births now die at the SNR
-clamp, against 59% before the lever. (5) GPU BALANCE: dev0 19% / dev1 18% mean, versus the
-3%/79% single-device signature that dominated the old run.
-<br><br>
-<strong>Correctness &mdash; the top watch is resolved.</strong> Cold-rung
-<code>[GB_CELL_LL]</code> credit discrepancies are now ~1e-4/rep against allowances of
-5e-2&ndash;1e-1; the old run was running 20&ndash;60/rep at temp 0. The new
-<code>[GB_ORTHO_LL]</code> bilinearity monitor sits at <strong>1e-6&ndash;2e-5</strong>
-across every unit, confirming that per-buffer likelihood deltas sum to the realized
-residual change. Hot rungs (temp 4&ndash;10) still show excesses, which remains parked.
-<br><br>
-<strong>THE NEW BOTTLENECK IS vgb_pe.</strong> One iteration is ~673 s and breaks down as
-<code>rj_fstat_search</code> ~151 s + <code>rj_prior_removal</code> ~127 s + a noise+VGB
-block of ~542 s made of <strong>18 rounds &times; ~30 s</strong>. Within each round
-<code>vgb_pe</code> is ~19 s, so <strong>VGB sampling alone is ~340 s &mdash; about half the
-iteration</strong>, and psd+galfor together are only ~11 s/round. The cause is structural,
-not a bug: <code>VGB_NTEMPS=8</code> replaced what was effectively a 1-rung ladder, so the
-VGB buffer is 8&times; larger (2,304 slots) and rebuilt every round &mdash; inside
-<code>vgb_pe</code> the top spans are <code>run_tempering</code> 8.7 s,
-<code>bufbuild_alloc</code> 7.0 s and <code>temper_buffer</code> 6.3 s. This is the correct
-sampling we previously were not doing at all; the question is now whether 8 rungs and 18
-rounds per iteration are both needed for 55 KNOWN, unimodal sources.
-<br><br>
-<strong>Open items.</strong> The cap-cell grid is actively gating &mdash; 353k of 1.15M
-births blocked as <code>capped</code> (it was 0 before), which is the intended
-anti-stacking behaviour but deserves a look at whether it is too aggressive.
-<code>[GB_CAP_LL]</code> emitted ZERO lines despite being armed, so that monitor needs
-debugging. Per-process GPU telemetry answers an old question: <strong>all three MPI ranks
-hold ~2.3 GB each</strong>, so the saver/spare ranks really do allocate GPU memory and the
-rank-gated build is worth building. Finally, <code>GF_MOVE_TIMING</code> writes to sbatch
-stdout rather than the run log, so <code>gf3mo_&lt;jobid&gt;.log</code> is needed to split
-psd_pe from galfor_pe directly.
+<div class="alert" style="border-color:var(--violet)">
+<strong>THE BIRTH BUDGET IS STILL ALLOCATED LIKE SNR<sup>2</sup>.</strong> The F-stat birth
+proposal weights each peak box by <code>w &prop; F</code>, and the F-statistic goes like
+SNR<sup>2</sup> &mdash; so an SNR-10 source gets <strong>9&times; fewer</strong> birth attempts
+than an SNR-30 one, when it needs more. At iteration 15, 80.3% of the birth mass landed on cells
+whose source was already found (median peak F 125.5) against 7.8% on cells holding an unfound
+detectable source (median F 26.6). At iteration 60 the misallocation persists in frequency too:
+<strong>47.7% of 6.6&times;10<sup>7</sup> birth proposals go above 10 mHz</strong>, where fewer
+than 50 detectable sources exist, and 13.6% below 5 mHz where the galaxy is.
+<code>FSTAT_PEAK_WEIGHT_ALPHA</code> now interpolates &mdash; &alpha;=1 is today&rsquo;s
+behaviour bit-identically and is the default, &alpha;=0 is flat, &alpha;=0.5 makes draws
+&prop; SNR. It needs NO refit: the weights are applied when the proposal is built from the
+cached grids and are not persisted in them, so a restart picks up a new &alpha; against the
+existing epoch cache. Also still open: <code>GB_BAND_SHUTOFF</code> has emitted
+<strong>zero</strong> lines in 61 iterations despite 45 bands above 10 mHz sitting at occupancy
+0 throughout &mdash; that path is inside a bare <code>except Exception: pass</code>, so a
+silent failure would look exactly like this.
 </div>"""
 
 _alert_23mo = f"""
@@ -1684,7 +1997,87 @@ slab is ~8&times; the 3-mo one, which is exactly why the buffer is sized at 2048
 instead of 8192.
 </div>"""
 
-alert = _alert_23mo if RUN_KIND == "23mo" else _alert_3mo
+_alert_census = """
+<div class="alert" style="border-color:var(--violet)">
+<strong>INJECTION vs RECOVERY ABOVE 5 mHz &mdash; is source ADDING trustworthy?</strong>
+Census against the mojito WDWD catalogue (757 sources above 5 mHz), with optimal SNR computed
+against this run's OWN sampled instrument + foreground, normalisation validated against the
+run's stored VGB <code>h_h</code> at identical parameters (median ratio <strong>0.999</strong>).
+The max-logL cold walker at iteration 15 holds 263 GB leaves, 157 of them above 5 mHz.
+<br><br>
+<strong>The healthy part.</strong> Recovery is cleanly MONOTONIC in SNR &mdash; 0% below SNR
+3, 3% at 5&ndash;7, 8.5% at 7&ndash;10, 15% at 10&ndash;15, 36% at 15&ndash;25,
+<strong>62% above 25</strong> &mdash; and at FIXED SNR it is flat in frequency
+(58/67/50/76% across 5&ndash;6, 6&ndash;8, 8&ndash;10, 10&ndash;15 mHz for SNR&gt;25). The
+apparent "better at high frequency" trend is an SNR selection effect, not a frequency
+pathology. Matching is overwhelmingly real: 103 of 157 land within 2 FD bins of a catalogue
+source against a chance expectation of <strong>4</strong>. And it is still climbing at
+~7 new high-frequency matches per iteration &mdash; this is a search 11 iterations old, NOT a
+converged model.
+<br><br>
+<strong>The structural part &mdash; a ceiling that waiting will NOT fix.</strong> Of the 419
+detectable (SNR&gt;7) sources above 5 mHz, <strong>102 (24%) cannot be represented at the
+current cap at all</strong>: they sit in cap cells that already contain more detectable
+catalogue sources than the cap permits. The cap cell is 17.36 &micro;Hz =
+<strong>135 FD bins</strong>, far wider than the resolution at these frequencies, so
+47 cells hold 3&ndash;5 separable detectable sources against a cap of 2. Crowding is the
+strongest predictor of a miss after SNR: isolated loud sources are recovered
+<strong>47%</strong> of the time, those sharing a cell with 2&ndash;3 others only
+<strong>14%</strong>. Two independent fixes both close it &mdash; raising the cap to 6, or
+taking <code>GB_CAP_DIVISOR</code> from 8 to 32 (cell 4.34 &micro;Hz) &mdash; and the divisor
+is the better lever because it keeps the anti-stacking rule tight where confusion is real.
+<br><br>
+<strong>What is NOT wrong.</strong> The cap is not blocking most misses: 147 of the 316
+missed detectable sources sit in <strong>completely EMPTY</strong> cap cells, and the F-stat
+proposal has density right on them (88% within 2 bins of a peak, 100% within 2 bins of a
+centre node). Those are marginal &mdash; median SNR 9.8, only 2 above SNR 25 &mdash; i.e.
+search-in-progress, not a gate. A reference-epoch/transform bug was tested and
+<strong>rejected</strong>: the catalogue's <code>TimeReferenceSSBFrame</code> equals the run's
+<code>t0</code> exactly, and the f0 residual has zero correlation with fdot (r = &minus;0.01).
+<br><br>
+<strong>The one open oddity.</strong> Matched f0 residuals sit at ~0.5 FD bins and do NOT
+shrink with SNR (0.58 bins at SNR 7&ndash;10, 0.75 at SNR&gt;50, against a statistical
+expectation that falls from 0.06 to 0.008 bins). Tracking individual loud sources explains
+most of it: f0 stays FROZEN for several iterations then jumps discretely
+(&minus;1.77, &minus;1.12, &minus;1.12, &minus;1.12, &minus;0.06, ... &rarr; &minus;0.37),
+so refinement happens through RJ re-birth rather than smooth in-model diffusion, and the
+population median stays flat only because newly-added unrefined sources keep replacing the
+ones that have converged. The residual distribution is close to uniform over &plusmn;1 bin,
+which is exactly the <strong>2-FD-bin F-stat peak grid</strong> the births are drawn on.
+Worth watching as the search converges; not evidence of a transform error.
+<br><br>
+<strong>THE 26 UNMATCHED LEAVES ARE REAL SOURCES PARKED ONE DOPPLER WIDTH HIGH.</strong>
+A full 9-parameter audit against the catalogue (independent investigation) clears every
+coordinate map: sky is recovered to a median 11.5&deg; (6.8&deg; for the loud third, against
+0.76% by chance), <code>cos_iota</code> shows no sign flip (closer to &minus;truth for only
+16.8%, chance 50%), <code>psi</code> resolves to 0.146 rad modulo &pi;/2 &mdash; the standard
+(&psi;&rarr;&psi;+&pi;/2, &phi;<sub>0</sub>&rarr;&phi;<sub>0</sub>+&pi;) GB degeneracy &mdash;
+and amplitude and fdot both match while (dist, Mc, ratio) scatter along their exactly
+unconstrained direction. <code>phi0</code> is simply NOT YET CONSTRAINED by the run itself
+(across-walker concentration R&#772; = 0.33 for &phi;<sub>0</sub> against 0.99 for the sky);
+where it HAS converged it agrees with truth. Template overlap against truth is 0.874 for
+loud, f0-tight sources once the overall phase is maximised, and 0.988 in magnitude when only
+(&phi;<sub>0</sub>, &psi;, cos&nbsp;&iota;) are swapped in.
+<br><br>
+But the 26 unmatched leaves are NOT noise-fitters: median amplitude 6.9e-23 against a
+catalogue median of 2.9e-23 (~85th percentile), each sits 5&ndash;16 bins from a catalogue
+source that no other leaf claims, and A<sub>rec</sub>/A<sub>cat</sub> has median
+<strong>1.07</strong> &mdash; they ARE those sources. <strong>25 of 26 sit ABOVE their
+catalogue source (binomial p = 8&times;10<sup>&minus;7</sup>)</strong>, and the offset scales
+with the Doppler width: gap/(f<sub>0</sub>&middot;v/c) = <strong>1.12</strong>, 16/84%
+[0.83, 1.35]. An fdot epoch error (~36&times; too small), a common-epoch frame error (scanning
+a shared t* makes it worse), and a skewed F-stat birth grid (1.4&sigma;) were each tested and
+rejected; the 101 genuine detections are recovered to 8% of a Doppler width, so there is no
+global frame problem. These read as leaves parked on the upper edge of the Doppler-swept band
+of an UNSUBTRACTED source, one-sided because the bulge sources share a sky region and
+therefore a common sign of line-of-sight velocity over this particular 3-month window. That
+is a convergence/proposal issue rather than a coordinate map &mdash; but 25 leaves holding
+real amplitude at the wrong frequency will actively fight the true births, so it is the
+highest-value thing on this page to fix.
+</div>"""
+
+alert = ((_alert_23mo if RUN_KIND == "23mo" else _alert_3mo)
+         + (_alert_census if CENSUS is not None else ""))
 
 # ---- data/template/residual captions (numbers come from the arrays) -------
 if DTR:
@@ -1763,8 +2156,18 @@ else:
 
 missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
 wanted_next = """
-<li>The sbatch stdout log (<code>gf3mo_&lt;jobid&gt;.log</code>) — carries the
-<code>[MAXLOGL]</code> / <code>[BENCH]</code> / stage-banner lines (per-iteration wall).</li>
+<li>The sbatch stdout log (<code>gf3mo_&lt;jobid&gt;.log</code>) — carries
+<code>GF_MOVE_TIMING</code>, which is the only thing that splits <code>psd_pe</code> from
+<code>galfor_pe</code>. They are jointly the largest line item in the iteration (~30%) and we
+still cannot say which of the two owns it.</li>
+<li>A <code>gpu_util_*.csv</code> that actually covers the productive segment. This snapshot's
+working stretch (02:27–03:14) was a manual relaunch with no sampler attached, so the
+utilisation numbers on this page come from the nearest identical-settings window (job 216).</li>
+<li>Confirmation that the restarted run self-healed — grep the log for
+<code>SELF-HEALED: promoted</code> and for a <code>*_CORRUPT_0.h5</code> appearing beside the
+store. That is the first live exercise of the promotion path.</li>
+<li>The first <code>leaf cap incremented</code> lines under patience 3, to confirm the ramp
+cadence actually shortened (this run demonstrably ran at 5).</li>
 <li>Per-iteration <code>[FSTAT_CTR]</code> census lines across a longer stretch — the
 two-state per-row center cost (1.64 vs 0.31 ms/row) needs several proposes to correlate
 against cell counts / caps.</li>"""
@@ -1911,6 +2314,57 @@ band can hold up to 8x that in total. Bands marked RED have had their RJ births 
 off by the high-frequency barren-band rule (GB_RJ_BAND_SHUTOFF_*: &gt;10 mHz default, 5
 consecutive proposes with zero accepted births — deaths and in-model continue; each
 shutoff is also an INFO line in the log).</div></div>
+<div class="panel">{img("gb_cap_cells", "cap-cell occupancy")}
+<div class="caption">{CAP_TXT} <strong>Left</strong> is the direct test of whether the cap
+grid is being followed: every bar at or above the highest cap is AMBER, and a bar to the
+right of the cap would mean sources are stacking past it. <strong>Middle</strong> is the
+race that matters &mdash; cyan (occupied cells) must stay ahead of amber (cells at their
+cap), or the model is queuing against the ceiling rather than filling. <strong>Right</strong>
+explains why the occupied FRACTION looks small: the cells tile 0.56&ndash;21.9 mHz
+uniformly, but the recovered sources are still concentrated in the galaxy at low frequency,
+so most cells are empty because there is nothing in them yet &mdash; not because the packing
+is failing. The right comparison is sources-to-occupied-cells, not occupied-to-total.</div>
+</div>
+<div class="panel">{img("gb_cap_divisor", "cap-divisor study")}
+<div class="caption">WHY <code>GB_CAP_DIVISOR</code> SHOULD GO 8 &rarr; 32. Over 3&ndash;21 mHz
+the mojito catalogue holds <strong>694</strong> detectable (SNR&gt;7) sources. Summing
+max(N<sub>detectable</sub> &minus; cap, 0) over cells gives the sources the cap can NEVER
+admit, however well the sampler works. At today's K=8 that is <strong>170 sources, 24.5%</strong>;
+at K=32 it is <strong>18, 2.6%</strong>; at K=64, 3. <strong>Middle</strong> shows the
+exclusion is NOT a high-frequency problem &mdash; 161 of the 170 sit below 8 mHz, where the
+galaxy is dense, so this only gets worse as the run works down in frequency.
+<strong>Right</strong> is the mechanism: at K=8, 97 cells hold 3&ndash;5 detectable sources
+against a cap of 2; at K=32 that falls to 17, and 456 of 566 occupied cells hold exactly
+ONE source &mdash; the one-source-per-cell packing the grid was designed for.
+<strong>Left</strong> also shows why the divisor beats simply raising the cap: at K=8 you
+would need cap 6 to reach the same coverage K=32 reaches at cap 2, and a cap of 6 permits
+six sources inside one 135-bin cell, which is exactly the stacking the rule exists to stop.
+COST: 1,232 &rarr; 4,928 cells, and the cap-cell arrays go from 535 MB to 2.1 GB raw over a
+2,010-iteration allocation (gzip keeps the live store far smaller &mdash; 66 MB at iteration
+17 &mdash; but the preallocation is real). Changing K is a state-layout change: migrate an
+existing store with <code>migrate_gb_cap_grid.py &lt;store.h5&gt; --cap-divisor 32</code>,
+or start fresh.</div>
+</div>
+<div class="panel">{img("gb_hi_f_census", "high-frequency recovery census")}
+<div class="caption">{CENSUS_TXT} <strong>Left</strong> is the raw census: every catalogue
+source above the cut, green if the max-logL cold walker holds a leaf within 2 FD bins of it,
+red if not. <strong>Middle</strong> is the health test &mdash; recovery must be MONOTONIC in
+SNR, and it is (0% below SNR 3 rising to ~62% above 25), which says adding is
+signal-ordered rather than arbitrary; the absolute level is low because the search is only
+11 iterations old and still adding ~7 high-frequency sources per iteration.
+<strong>Right</strong> is the ceiling, and the reason the level cannot simply be waited out:
+bars to the RIGHT of the dashed line are cap cells holding more detectable sources than the
+cap allows, so those sources cannot enter the model however long the run goes. The cap cell
+is 17.36 &micro;Hz &mdash; 135 FD bins &mdash; which is far wider than the resolution at
+these frequencies, so several genuinely separable sources routinely share one cell.
+SNRs are optimal <code>sqrt(&lt;h|h&gt;)</code> against the run's OWN sampled instrument +
+foreground parameters, normalisation validated source-by-source against the run's stored
+VGB <code>h_h</code> at identical parameters (median ratio 0.999). CAVEAT on the right-hand
+panel: the per-cell cap array is among the TORN datasets in this snapshot, so the cap line
+shown is the last readable one. The run log reports caps have since run to
+<strong>min/max 2/13</strong> &mdash; i.e. the ceiling this panel measures has been dissolved
+by the ghost-increment ratchet rather than by any deliberate change.</div>
+</div>
 <div class="panel">
 <div class="btnrow viewctl">
   <label>source <select id="gb1_sel"></select></label>
@@ -2343,7 +2797,10 @@ function viewCtl(px, cv, api) {{
   const pts = hasGB ? DATA.gb : DATA.vgb;
   const xlab = hasGB ? "f0 [mHz]" : (DATA.vgb_axis || "VGB leaf index");
   const TRUTH = DATA.truth || [];
-  let showT = false;
+  // DEFAULT ON (2026-08-16). The catalogue overlay is the point of this
+  // panel -- the recovered cloud alone cannot show completeness or the
+  // faint tail -- and defaulting it to hidden meant it went unnoticed.
+  let showT = TRUTH.length > 0;
   const baseCap = (hasGB
     ? `GB samples: ${{DATA.gb.length}} alive-source rows (last iteration, all cold walkers; y = log10 amplitude from (dist, f0, Mc)).`
     : `No GB sources alive yet - showing the 55 VGBs (24 walker samples each) as 1/dist vs leaf index. GB samples take over automatically once births land.`);
@@ -2385,12 +2842,23 @@ function viewCtl(px, cv, api) {{
     g.fillText(hasGB ? "log10 A" : "1 / dist [1/kpc]", -30, 0); g.restore();
     // truths UNDER the recovered cloud so the recoveries stay readable
     if (showT) {{
-      g.fillStyle = C("--red"); g.globalAlpha = 0.5;
+      // Drawn as CROSSES, not 1.4px dots (user request 2026-08-16): the
+      // dots were the same visual weight as a rendering artefact, so the
+      // injected population read as background noise rather than as the
+      // thing the recovered cloud is being judged against. An open glyph
+      // also stays legible UNDER the filled recovery circles, which a
+      // solid marker of this size would not.
+      g.strokeStyle = C("--red"); g.globalAlpha = 0.55;
+      g.lineWidth = 1.3; g.lineCap = "round";
+      const r = 3.4;
+      g.beginPath();
       for (const p of TRUTH) {{
         const x = sx(p[0]), y = sy(p[1]);
         if (x < ml || x > w - mr || y < mt || y > h - mb) continue;
-        g.fillRect(x - 0.7, y - 0.7, 1.4, 1.4);
+        g.moveTo(x - r, y - r); g.lineTo(x + r, y + r);
+        g.moveTo(x - r, y + r); g.lineTo(x + r, y - r);
       }}
+      g.stroke();
     }}
     const col = hasGB ? C("--green") : C("--violet");
     for (const p of pts) {{
@@ -2424,6 +2892,9 @@ function viewCtl(px, cv, api) {{
   document.getElementById("btn_reset").onclick = () => {{ full(); draw(); }};
   const bt = document.getElementById("btn_truth");
   if (!TRUTH.length) bt.disabled = true;
+  // reflect the ON default in the control the moment the page loads
+  bt.classList.toggle("armed", showT); bt.classList.toggle("truth", showT);
+  bt.textContent = showT ? "hide catalogue truths" : "show catalogue truths";
   bt.onclick = () => {{
     showT = !showT;
     bt.classList.toggle("armed", showT); bt.classList.toggle("truth", showT);
