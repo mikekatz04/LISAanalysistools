@@ -106,6 +106,19 @@ trap 'kill ${GPU_SMI_PID} ${GPU_PROC_PID} 2>/dev/null || true' EXIT
 
 export OMP_NUM_THREADS=1
 
+# ---- HDF5 FILE LOCKING (2026-08-15 hang forensics) --------------------------
+# Job 210 hung at STARTUP for 11 h: allocation alive, CUDA contexts created
+# (10 GB held), 0% GPU on both devices, and the MAIN rank never logged a
+# single line -- while a healthy start logs within ~37 s. The first thing the
+# main rank does after build() is load_info() -> backend.get_last_sample(),
+# i.e. OPEN AND READ the store h5. The previous job had been writing that same
+# file 3.5 min earlier, and h5py BLOCKS INDEFINITELY (it does not error) when
+# it cannot take the lock -- which is the classic failure on NFS/Lustre, and
+# is made likelier here by the saver rank holding the file from a second
+# process. Disabling HDF5's own locking is the standard remedy for shared
+# filesystems; this run is the only writer, so the lock buys nothing.
+export HDF5_USE_FILE_LOCKING=FALSE
+
 # ---- console verbosity ------------------------------------------------------
 # The file handler is pinned at DEBUG unconditionally, so every per-iteration
 # line always lands in ${STORE_DIR}/${BASE_FILE_NAME}_artifacts/globalfit_run.log
