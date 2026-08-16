@@ -1484,6 +1484,50 @@ if RJ_BREAK:
         for n in RJ_ORDER) + "<br>"
 
 _alert_3mo = """
+<div class="alert" style="border-color:var(--green)">
+<strong>RECOVERED &mdash; and ahead of where the corrupt run ever got.</strong> The store was
+restored from <code>*_running_backup_copy.h5</code> (iteration 5) after the primary was left
+with unreadable gzip chunks in <code>sub_backend/gb/*</code> by a job killed mid-write. The
+resumed run is clean: <strong>zero errors, tracebacks or MPI aborts</strong>, iterations
+~6 min apart, and cold lnL <strong>52,587,377 &mdash; already higher than the corrupt run's
+best (52,586,123)</strong> while carrying 142 GB leaves/walker and still filling. Saves are
+also 40&times; cheaper: <strong>4.03 s &rarr; 0.10 s</strong> per handoff to the saver rank.
+<br><br>
+<strong>GPU: balanced, and the dominant move is genuinely busy.</strong> Measured per move,
+with 5 s sampling aligned to the move windows:
+<code>rj_fstat_search</code> <strong>68% / 64%</strong> (dev0/dev1) &mdash; the move that is
+45% of the iteration is well saturated; <code>vgb_pe</code> 34% / 39%;
+<code>rj_prior_removal</code> 31% / 25%. Whole-window mean is <strong>39% / 38%</strong>,
+i.e. the two devices are BALANCED &mdash; the old 3%/79% single-device signature is gone for
+good. Only 12% of samples have both devices fully idle.
+<br><br>
+<strong>Do NOT raise the buffer knobs right now.</strong> Peak device memory is
+<strong>80.7 GB of 96 on dev0</strong> (50.6 on dev1) &mdash; 84% of the card, and this is a
+run still REFILLING after the restart (142 leaves vs the 160 it had before). Leaves, and the
+memory they carry, are going back up. Raising <code>GB_N_SUBBANDS</code> to chase
+utilisation would spend headroom the model is about to need, and would be tuned against a
+half-filled state that will not resemble the steady one. The right move is to let the leaf
+count recover first, then re-read this panel: utilisation rises on its own as each launch
+carries more sources, so the honest measurement only exists once the model is full.
+</div>
+<div class="alert" style="border-color:var(--red)">
+<strong>&#9888; PREVIOUS ATTEMPT (superseded) &mdash; job 210 was stalled &mdash; job 210 has made NO progress since
+2026-08-15 13:52.</strong> The job is still ALLOCATED (its nvidia-smi sampler kept writing
+through 00:37 the next morning, 11 h later) but it is doing nothing: <strong>0% GPU
+utilisation on both devices for eleven straight hours</strong>, memory pinned flat at
+10 GB. The final log line is the results/saver rank announcing its loop at startup, and the
+MAIN rank never logged a single line afterwards &mdash; not a propose, not a build step. So
+this is a hang during startup, not a crash and not a slow iteration. Job 208 (13:09&ndash;
+13:49) was the last one to do real work, and everything on this page comes from it.
+<br><br>
+Two circumstantial details worth checking together: job 210 started at 13:52:49 and the
+23-month run started at <strong>13:53:47, 58 seconds later</strong>, and this is the first
+3-month job to run under the dedicated <code>mpiexec -n 3</code> saver rank while a second
+multi-GPU job was launching. Recommended: <code>scancel</code> job 210 and resubmit; if it
+hangs again at startup, drop to the single-process fallback line in the submit script
+(commented directly under the <code>mpiexec</code> call) to isolate whether the saver rank
+is implicated.
+</div>
 <div class="alert">
 <strong>FRESH RUN (gf_prod_3mo_v2) &mdash; the rebuilt stack, measured from iteration 0.</strong>
 Everything below is a NEW baseline: new store, all state built from config, F-stat grid and
@@ -1565,6 +1609,70 @@ VGB stages while the F-stat grid is fitted. That fit is the headline scaling num
 comb is a <strong>1.19-billion-evaluation</strong> level-5 sweep here (2.3M nodes &times;
 512 sky) against 38.7M at 3 months, which is the ~8&times; Tobs scaling the design
 predicted, landing on top of an already-8&times; per-evaluation grid.
+<br><br>
+<strong>MEASURED SCALING, 3-mo &rarr; 23-mo (Tobs &times;7.78).</strong> The two runs use
+the same code, so these are clean ratios.
+<em>Per-source scoring holds up:</em> <code>vgb_pe</code> costs 18.7 s at 3 months and
+41.0 s here &mdash; <strong>2.2&times; for 7.78&times; Tobs</strong>, i.e. strongly
+sublinear (~Tobs^0.4), which is the sig-het design claim (flat per-source scoring; only
+fills and band likelihoods scale) surviving contact with a 7.8&times; grid.
+<em>The F-stat fit is where the cost really lives.</em> The comb's early levels are
+IDENTICAL between the runs (level 4 is 93,726 nodes &times; 256 sky in both), but the final
+full-sky refinement explodes: 19,120 nodes at 3 months vs <strong>2,317,600 here, 121&times;
+more</strong>, i.e. 9.8M evals (129 s) against <strong>1.19 BILLION evals (4.8 h)</strong>.
+Only ~8&times; of that is the finer frequency grid; the rest is more candidates surviving to
+the last level, which is expected physics &mdash; every source gains ~&radic;8 in SNR over
+this baseline, so far more clear the threshold.
+<em>Stage B:</em> 38.7M evals in 522 s at 3 months against 766M evals here, running at
+<strong>32,863 evals/s vs 74,219</strong> &mdash; 19.8&times; the work at 2.26&times; the
+per-evaluation cost, so ~45&times; the wall (~6.5 h total).
+<br><br>
+<strong>An actionable inefficiency the 23-mo run exposed.</strong> The sweep logs
+<code>[sighet-fstat] 3328 reference-block rebuilds (single-resident cache; heavy rebuilding
+means the sweep's row order is not f0-local)</code>. That is a THRASHING cache, not a
+physics cost: the sig-het reference is rebuilt whenever consecutive rows jump in frequency,
+and at 3 months the smaller sweep hid it. Sorting the sweep's rows by f0 (or giving the
+cache more than one resident block) should recover a real fraction of the 2.26&times;
+per-eval penalty &mdash; the single most promising F-stat optimisation this run has
+surfaced, and it matters most exactly where it hurts most.
+<br><br>
+<strong>Memory is the other 23-mo constraint.</strong> Peak device use is 84.9 GB of 99.9
+on dev0 (58.3 on dev1) against ~43/18 GB at 3 months &mdash; 85% of the card. That is why
+the buffer is sized at <code>GB_N_SUBBANDS</code> 2048/GPU here rather than 8192, and it is
+the number to watch first when <code>gb_search</code> finally opens and the GB buffers join
+the VGB ones.
+<br><br>
+<strong>MEASURED SCALING, 3-mo &rarr; 23-mo (Tobs &times;7.78).</strong> Same code both
+runs, so these are clean ratios.
+<em>Per-source scoring holds up:</em> <code>vgb_pe</code> costs 18.7 s at 3 months and
+41.0 s here &mdash; <strong>2.2&times; for 7.78&times; Tobs</strong>, strongly sublinear
+(~Tobs^0.4). That is the sig-het design claim (flat per-source scoring; only fills and band
+likelihoods scale) surviving contact with a 7.8&times; grid.
+<em>The F-stat fit is where the cost really lives.</em> The comb's early levels are
+IDENTICAL between runs (level 4 is 93,726 nodes &times; 256 sky in both), but the final
+full-sky refinement explodes: 19,120 nodes at 3 months vs <strong>2,317,600 here,
+121&times; more</strong> &mdash; 9.8M evals (129 s) against <strong>1.19 BILLION evals
+(4.8 h)</strong>. Only ~8&times; of that is the finer frequency grid; the rest is more
+candidates surviving to the last level, which is expected physics, since every source gains
+~&radic;8 in SNR over this baseline and far more clear the threshold.
+<em>Stage B:</em> 38.7M evals in 522 s at 3 months against 766M evals here at
+<strong>32,863 evals/s vs 74,219</strong> &mdash; 19.8&times; the work at 2.26&times; the
+per-evaluation cost, so ~45&times; the wall (~6.5 h).
+<br><br>
+<strong>An actionable inefficiency this run exposed.</strong> The sweep logs
+<code>[sighet-fstat] 3328 reference-block rebuilds (single-resident cache; heavy rebuilding
+means the sweep's row order is not f0-local)</code>. That is a THRASHING cache, not a
+physics cost: the sig-het reference is rebuilt whenever consecutive rows jump in frequency,
+and the smaller 3-month sweep hid it. Sorting the sweep's rows by f0, or letting the cache
+hold more than one resident block, should recover a real share of that 2.26&times; per-eval
+penalty &mdash; the most promising F-stat optimisation surfaced so far, and it bites hardest
+exactly where it costs most.
+<br><br>
+<strong>Memory is the other 23-mo constraint.</strong> Peak device use is 84.9 GB of 99.9 on
+dev0 (58.3 on dev1) against ~43/18 GB at 3 months &mdash; 85% of the card, before
+<code>gb_search</code> has added a single GB buffer. That is why the buffer is sized at
+<code>GB_N_SUBBANDS</code> 2048/GPU here rather than 8192, and it is the first number to
+watch when the GB stage opens.
 <br><br>
 <strong>What to compare against the 3-month page.</strong> Per-source sig-het scoring is
 FLAT in Tobs by design (the v4/v5 bench-off), so the GB propose spans should NOT scale with
