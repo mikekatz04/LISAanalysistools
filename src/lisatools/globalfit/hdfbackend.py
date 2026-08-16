@@ -235,7 +235,7 @@ def save_to_backend_asynchronously_and_plot(
     main_rank,
     plot_container=None,
     plot_iter=100,
-    backup_iter=5,
+    backup_iter=1,
     coalesce_threshold=3,
 ):
     """Async writer loop: receive states from ``main_rank`` and persist to HDF5.
@@ -267,7 +267,16 @@ def save_to_backend_asynchronously_and_plot(
             loop writes. ``None`` disables plotting.
         plot_iter: Save-step cadence for plot regeneration.
         backup_iter: Save-step cadence at which the HDF file is copied to a
-            ``*_running_backup_copy.h5``.
+            ``*_running_backup_copy.h5``. DEFAULT 1 -- EVERY save step.
+            This loop only ever runs on the DEDICATED saver rank (see
+            ``run.py``'s ``elif self.rank == self.results_rank``), so the
+            copy is already off the sampler's critical path: the main rank
+            hands off and returns to proposing while this happens. The old
+            cadence of 5 was sized for a saver sharing the sampler's
+            process, where every copy stole wall time from the science; here
+            it only widened the recovery gap. Since a torn primary is
+            recovered from this file, "every iteration" means losing at most
+            ONE iteration instead of up to five. ``None`` is treated as 1.
         coalesce_threshold: Queue depth above which intermediate states are
             dropped in favour of the newest.
     """
@@ -306,7 +315,11 @@ def save_to_backend_asynchronously_and_plot(
             )
             logger.debug("save step took %.3f s", time.perf_counter() - st)
             i += 1
-            if (i % backup_iter) == 0:
+            # None -> every step: general_info.backup_iter defaults to None
+            # in the engine settings, and `i % None` is a TypeError, so a
+            # run that never set it would have crashed the saver here.
+            _every = int(backup_iter) if backup_iter else 1
+            if (i % _every) == 0:
                 _atomic_backup_copy(gb_reader.filename)
 
         if finish:

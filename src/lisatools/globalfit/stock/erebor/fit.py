@@ -65,7 +65,7 @@ class EreborGeneralSettings(GeneralSettings):
     # a real engine ladder for simple-API branches.
     ntemps: int = dataclasses.field(default_factory=engine_ntemps_default())
     random_seed: int = 103209
-    backup_iter: int = 5
+    backup_iter: int = 1
     main_file_key: str = "testing"
     # Diagnostic plotting during the run. MAKE_DIAGNOSTIC_PLOTS=0 disables the eryn
     # diagnostic plots entirely (fastest, and dodges plot-only crashes);
