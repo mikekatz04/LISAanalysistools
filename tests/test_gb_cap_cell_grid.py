@@ -538,3 +538,73 @@ class VGBCapDivisorTest(unittest.TestCase):
         # identical to the band grid -> what build_vgb_moves initializes with
         np.testing.assert_allclose(cap_edges, edges)
         self.assertEqual(len(cap_edges) - 1, len(edges) - 1)
+
+
+class OverCapCellTest(unittest.TestCase):
+    """USER RULING 2026-08-16: a cell OVER its cap behaves exactly like one AT it.
+
+    In-model moves can walk a source's f0 across a cap-cell boundary
+    mid-unit -- occupancy is censused at pick time and not re-checked when
+    a proposal shifts frequency -- so a cell can legitimately end up holding
+    MORE than its cap. (Measured in production: 6 such cell-walker instances
+    out of 29,568, i.e. 0.02%.) The ruling is to treat that identically:
+    the gate is ``count >= cap``, never ``== cap``.
+
+    This is not cosmetic. Under an ``== cap`` test an over-full cell would
+    read as NOT capped and would happily accept further births, so the one
+    cell that had already over-filled is exactly the cell that would keep
+    growing -- the opposite of what the cap is for. These tests pin the
+    ``>=`` semantics at every gate.
+    """
+
+    def _census(self, m, s, cap):
+        cap_inds = m._sorter_cap_cells(s)
+        flat, counts = m._cap_cell_counts(s, cap_inds)
+        return cap_inds, flat, counts, np.asarray(cap)
+
+    def test_over_full_cell_still_blocks_like_a_full_one(self):
+        m = _move(4)
+        # THREE alive sources in ONE cell of band 0 at cap 1 -> count 3 > cap
+        f0 = np.array([5.02e-3, 5.03e-3, 5.04e-3])
+        s = _sorter(f0, [True, True, True])
+        cap_inds, flat, counts, cap = self._census(
+            m, s, np.ones(m.num_cap_cells, dtype=int))
+        self.assertEqual(int(counts[flat[0]]), 3)          # genuinely over cap
+        self.assertTrue(np.array_equal(cap_inds[:1], cap_inds[1:2]))
+        at_cap = m._cap_at_cap_mask(s, counts, cap, flat, cap_inds)
+        self.assertTrue(bool(at_cap.all()),
+                        "an over-full cell must read as at-cap, not as free")
+
+    def test_over_full_matches_exactly_full(self):
+        """count == cap and count > cap must produce the SAME gate result."""
+        m = _move(4)
+        cap = np.ones(m.num_cap_cells, dtype=int)
+        exactly = _sorter(np.array([5.02e-3]), [True])
+        over = _sorter(np.array([5.02e-3, 5.03e-3, 5.04e-3]), [True] * 3)
+        outs = []
+        for s in (exactly, over):
+            ci, fl, ct, c = self._census(m, s, cap)
+            outs.append(bool(m._cap_at_cap_mask(s, ct, c, fl, ci)[0]))
+        self.assertEqual(outs[0], outs[1], "== cap and > cap must agree")
+        self.assertTrue(outs[0])
+
+    def test_band_saturation_counts_an_over_full_cell_as_full(self):
+        """A band whose cells are over-full is saturated, so dead rows block."""
+        m = _move(4)
+        nb, k = m.num_bands, m.cap_divisor
+        cap = np.ones(nb * k, dtype=int)
+        counts = np.zeros(nb * k, dtype=int)
+        counts[: k] = np.array([1, 2, 5, 1])      # band 0: one at cap, others OVER
+        sat = m._band_saturated_flat(counts, cap)
+        self.assertTrue(bool(sat[0]),
+                        "every cell at-or-over cap => band saturated")
+
+    def test_one_free_cell_keeps_the_band_unsaturated_even_beside_an_over_full_one(self):
+        m = _move(4)
+        nb, k = m.num_bands, m.cap_divisor
+        cap = np.ones(nb * k, dtype=int)
+        counts = np.zeros(nb * k, dtype=int)
+        counts[: k] = np.array([9, 9, 9, 0])      # three over-full, one EMPTY
+        sat = m._band_saturated_flat(counts, cap)
+        self.assertFalse(bool(sat[0]),
+                         "a free cell must still admit a birth into the band")
