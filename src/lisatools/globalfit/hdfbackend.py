@@ -149,6 +149,86 @@ def _read_domain_settings(
 
 
 
+def _validate_resume_readable(path: str) -> None:
+    """Read what a resume reads; raise if the file cannot serve one.
+
+    Deliberately narrow: ``get_last_sample`` pulls the LAST stored row of
+    every sub-backend dataset, and that is the read that raises
+    ``OSError: filter returned failure during read`` on a torn gzip chunk.
+    Checking one row per dataset costs milliseconds even on the 23-month
+    store, whereas decompressing everything would cost more than the copy.
+    """
+    with h5py.File(path, "r") as f:
+        root = f["global_fit"] if "global_fit" in f else f
+        it = int(root.attrs.get("iteration", 0))
+        row = max(it - 1, 0)
+        if "sub_backend" not in root:
+            return
+        for branch in root["sub_backend"]:
+            grp = root["sub_backend"][branch]
+            for key in grp:
+                dset = grp[key]
+                if getattr(dset, "ndim", 0) and dset.shape[0] > row:
+                    dset[row]          # decompresses that row's chunks
+                else:
+                    dset[()]
+
+
+def _atomic_backup_copy(src: str) -> None:
+    """Refresh ``<src>_running_backup_copy.h5`` so it can never be torn.
+
+    WHY (2026-08-15 forensics): a job killed while writing the live store
+    leaves permanently unreadable gzip chunks -- that is what stranded the
+    3-month run, whose primary raised ``filter returned failure during read``
+    on ``sub_backend/gb/*`` while this backup stayed intact and became the
+    only way back. The backup is therefore the last line of defence, and the
+    previous implementation copied STRAIGHT ONTO it: a kill during that copy
+    (a many-second window on a multi-GB store) would have corrupted the
+    fallback too, leaving nothing.
+
+    Write to a sibling temp file, flush it to disk, then ``os.replace`` it
+    into position. ``replace`` is atomic on POSIX, so a reader -- or a kill
+    at ANY instant -- sees either the previous complete backup or the new
+    complete one, never a half-written file. The temp lives in the same
+    directory so the rename stays within one filesystem (across mounts it
+    would silently degrade to a copy, reintroducing the very window this
+    closes).
+
+    Never raises: a failed backup must not kill a healthy run. The stale
+    backup simply survives, which is strictly better than dying here.
+    """
+    dst = src[:-3] + "_running_backup_copy.h5"
+    tmp = dst + ".tmp"
+    try:
+        shutil.copyfile(src, tmp)
+        # VALIDATE BEFORE REPLACING. copyfile is a BYTE copy -- it neither
+        # knows nor cares whether the source is a sound HDF5 file -- so a
+        # primary that has already torn would be faithfully copied over the
+        # one good fallback, and both generations would be lost. Read exactly
+        # what a RESUME reads (the last stored row of every sub-backend):
+        # that is the code path that actually failed, it is one row rather
+        # than a multi-GB sweep, and a failure here is an EARLY WARNING that
+        # the live store is damaged while the previous backup is still good.
+        _validate_resume_readable(tmp)
+        # copyfile returns once the data is in the page cache; force it to
+        # the device before the rename, so a machine-level crash cannot
+        # leave the new name pointing at unwritten blocks.
+        with open(tmp, "rb") as fh:
+            os.fsync(fh.fileno())
+        os.replace(tmp, dst)          # atomic swap
+    except Exception as e:            # noqa: BLE001 -- see docstring
+        logger.warning(
+            "running backup copy NOT refreshed (%s: %s). The previous backup "
+            "is untouched and still usable. NOTE: if this is an OSError about "
+            "reading data, the LIVE STORE is already damaged -- that backup "
+            "is now your recovery point.", type(e).__name__, e)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
 def save_to_backend_asynchronously_and_plot(
     gb_reader,
     comm,
@@ -227,10 +307,7 @@ def save_to_backend_asynchronously_and_plot(
             logger.debug("save step took %.3f s", time.perf_counter() - st)
             i += 1
             if (i % backup_iter) == 0:
-                shutil.copy(
-                    gb_reader.filename,
-                    gb_reader.filename[:-3] + "_running_backup_copy.h5",
-                )
+                _atomic_backup_copy(gb_reader.filename)
 
         if finish:
             run = False
