@@ -3212,6 +3212,95 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "call silently takes the chunked path.",
             self.name, ms, nrows, hasattr(comp, "chunked"), fast_wired)
 
+    # ---- GB_INMODEL_TRACE ------------------------------------------------
+    # Step-by-step trace of ONE source through its in-model repeats: every
+    # term that enters the MH ratio, printed per repeat, plus an explicit
+    # detailed-balance check. Aggregates cannot show what this shows -- a
+    # healthy acceptance rate is consistent with a chain that is being
+    # scored against the wrong surface, or one whose forward and reverse
+    # proposal densities do not match.
+    #
+    # GB_INMODEL_TRACE=N traces the first N repeats of the loudest COLD row.
+    # Cost when unset: one getattr.
+
+    def _inmodel_trace(self, rep, kind, curr, new, chol, factors, beta,
+                       ll_ref, new_ll, delta_ll, curr_prior, new_logp,
+                       lnpdiff, accept, t_i, w_i, b_i, keep_idx, buf):
+        n_max = int(os.environ.get("GB_INMODEL_TRACE", "0"))
+        if n_max <= 0 or rep >= n_max:
+            return
+        xp = self.xp
+        hh = getattr(buf, "h_h_out", None)
+        # pick the loudest COLD row so the trace follows a real source
+        cold = (_to_numpy(beta) >= 1.0)
+        if not cold.any():
+            return
+        if hh is not None and keep_idx is not None and int(keep_idx.shape[0]):
+            _h = np.zeros(curr.shape[0])
+            _h[_to_numpy(keep_idx)] = _to_numpy(xp.asarray(hh).real).ravel()[
+                :int(keep_idx.shape[0])]
+            r = int(np.argmax(np.where(cold, _h, -np.inf)))
+        else:
+            r = int(np.flatnonzero(cold)[0])
+
+        g = lambda a: (None if a is None
+                       else np.atleast_1d(_to_numpy(a)).ravel())
+        c, nw_ = g(curr)[r * 9:(r + 1) * 9], g(new)[r * 9:(r + 1) * 9]
+        NM = ["dist", "f0[mHz]", "Mc", "phi0", "cos_i", "psi", "alpha",
+              "sin_d", "fdotr"]
+        df0_bins = (nw_[1] - c[1]) * 1e-3 / self.df
+
+        # DETAILED BALANCE, infomat branch: the jump is
+        #   y = x + jump_factor * L @ z ,  z ~ N(0, I)
+        # with L FIXED for the whole block, so q(x->y) == q(y->x) by
+        # construction and ``factors`` MUST be 0. Verify numerically rather
+        # than assume: form the whitened displacement both ways and compare.
+        db = "n/a (stretch: factor from eryn's z-draw)"
+        if kind == "infomat" and chol is not None:
+            L = _to_numpy(chol)[r] if _to_numpy(chol).ndim == 3 else None
+            if L is not None:
+                d = (nw_ - c) / self.jump_factor
+                sc = _to_numpy(self._proposal_param_scales).ravel()
+                try:
+                    zf = np.linalg.solve(L, d / sc)      # forward whitened
+                    zr = np.linalg.solve(L, -d / sc)     # reverse whitened
+                    lq_f = -0.5 * float(zf @ zf)
+                    lq_r = -0.5 * float(zr @ zr)
+                    db = (f"log q(x->y)={lq_f:+.6e} log q(y->x)={lq_r:+.6e} "
+                          f"ratio={lq_r - lq_f:+.3e} (MUST be 0; "
+                          f"factors={float(g(factors)[r]):+.3e})")
+                except np.linalg.LinAlgError as e:
+                    db = f"chol solve failed: {e!r}"
+
+        sig = None
+        if chol is not None and _to_numpy(chol).ndim == 3:
+            L = _to_numpy(chol)[r]
+            sc = _to_numpy(self._proposal_param_scales).ravel()
+            sig = self.jump_factor * np.sqrt(np.diag(L @ L.T)) * sc
+
+        logger.info(
+            "[GB_INMODEL_TRACE %s] rep %d  kind=%s  (T%d,w%d,b%d) beta=%.4g\n"
+            "    curr : %s\n    new  : %s\n    delta: %s\n"
+            "    df0 = %+.5f bins%s\n"
+            "    ll_ref=%.6f  new_ll=%.6f  delta_ll=%+.6e\n"
+            "    prior: curr=%.4f new=%.4f   factors=%+.4e\n"
+            "    lnpdiff = beta*dll + dprior + factors = %+.6e  -> %s\n"
+            "    DB: %s",
+            self.name, rep, kind, int(g(t_i)[r]), int(g(w_i)[r]),
+            int(g(b_i)[r]), float(g(beta)[r]),
+            " ".join(f"{n}={v:.6g}" for n, v in zip(NM, c)),
+            " ".join(f"{n}={v:.6g}" for n, v in zip(NM, nw_)),
+            " ".join(f"{n}={v:+.3g}" for n, v in zip(NM, nw_ - c)),
+            df0_bins,
+            ("" if sig is None else
+             "   [proposal 1-sigma: "
+             + " ".join(f"{n}={v:.3g}" for n, v in zip(NM, sig))
+             + f"; f0 sigma = {sig[1]*1e-3/self.df:.4f} bins]"),
+            float(g(ll_ref)[r]), float(g(new_ll)[r]), float(g(delta_ll)[r]),
+            float(g(curr_prior)[r]), float(g(new_logp)[r]),
+            float(g(factors)[r]), float(g(lnpdiff)[r]),
+            "ACCEPT" if bool(g(accept)[r]) else "reject", db)
+
     def _jump_trace_new(self, nt):
         xp = self.xp
         z = lambda k: xp.zeros(k, dtype=xp.float64)
@@ -6831,6 +6920,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self._jump_trace_accum(
                     new, curr[sl], accept, t_i[sl], keep_idx,
                     getattr(buffer_obj, "h_h_out", None))
+                self._inmodel_trace(
+                    move_i, getattr(self, "_last_im_kind", "?"), curr[sl],
+                    new, None if chol is None else chol[sl], factors, beta_s,
+                    ll_ref[sl], new_ll, delta_ll, curr_prior[sl], new_logp,
+                    lnpdiff, accept, t_i[sl], w_i[sl], b_i[sl], keep_idx,
+                    buffer_obj)
 
                 bad_mask = (new_ll <= -1e299) | (new_logp <= -1e229)
                 # ``accept[bad_accepts] = False`` == ``accept & ~bad_mask``;
