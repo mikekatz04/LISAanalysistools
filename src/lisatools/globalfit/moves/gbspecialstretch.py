@@ -3226,80 +3226,111 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _inmodel_trace(self, rep, kind, curr, new, chol, factors, beta,
                        ll_ref, new_ll, delta_ll, curr_prior, new_logp,
                        lnpdiff, accept, t_i, w_i, b_i, keep_idx, buf):
-        n_max = int(os.environ.get("GB_INMODEL_TRACE", "0"))
-        if n_max <= 0 or rep >= n_max:
-            return
-        xp = self.xp
-        hh = getattr(buf, "h_h_out", None)
-        # pick the loudest COLD row so the trace follows a real source
-        cold = (_to_numpy(beta) >= 1.0)
-        if not cold.any():
-            return
-        if hh is not None and keep_idx is not None and int(keep_idx.shape[0]):
-            _h = np.zeros(curr.shape[0])
-            _h[_to_numpy(keep_idx)] = _to_numpy(xp.asarray(hh).real).ravel()[
-                :int(keep_idx.shape[0])]
-            r = int(np.argmax(np.where(cold, _h, -np.inf)))
-        else:
+        """Step-by-step MH trace of one source; never raises.
+
+        A diagnostic must not be able to abort a run, so the whole body is
+        guarded: any surprise in the shapes degrades to a one-line warning
+        and the propose continues. (It previously assumed ndim == 9 and that
+        ``beta`` matched ``curr`` row-for-row; neither holds universally,
+        which crashed a live job.)
+        """
+        try:
+            n_max = int(os.environ.get("GB_INMODEL_TRACE", "0"))
+            if n_max <= 0 or rep >= n_max:
+                return
+            xp = self.xp
+
+            def h(a):
+                return None if a is None else np.atleast_1d(_to_numpy(a))
+
+            C, NWc = h(curr), h(new)
+            if C is None or C.ndim != 2 or C.shape[0] == 0:
+                return
+            nrow, ndim = C.shape
+            NWc = NWc.reshape(nrow, -1) if NWc is not None else C
+
+            def row(a, i):
+                """Scalar of array ``a`` at row ``i``; NaN when unavailable."""
+                v = h(a)
+                if v is None:
+                    return float("nan")
+                v = v.ravel()
+                return float(v[i]) if i < v.size else float("nan")
+
+            bt = h(beta)
+            bt = (np.ones(nrow) if bt is None
+                  else np.resize(bt.ravel(), nrow))       # length-safe
+            cold = bt >= 1.0
+            if not cold.any():
+                return
+            hh = getattr(buf, "h_h_out", None)
             r = int(np.flatnonzero(cold)[0])
+            if hh is not None and keep_idx is not None:
+                ki = h(keep_idx).ravel().astype(int)
+                hv = h(np.real(_to_numpy(hh))).ravel()
+                m = min(ki.size, hv.size)
+                if m:
+                    _h = np.zeros(nrow)
+                    sel = ki[:m][ki[:m] < nrow]
+                    _h[sel] = hv[:len(sel)]
+                    r = int(np.argmax(np.where(cold, _h, -np.inf)))
+            r = int(np.clip(r, 0, nrow - 1))
 
-        g = lambda a: (None if a is None
-                       else np.atleast_1d(_to_numpy(a)).ravel())
-        c, nw_ = g(curr)[r * 9:(r + 1) * 9], g(new)[r * 9:(r + 1) * 9]
-        NM = ["dist", "f0[mHz]", "Mc", "phi0", "cos_i", "psi", "alpha",
-              "sin_d", "fdotr"]
-        df0_bins = (nw_[1] - c[1]) * 1e-3 / self.df
+            c, nw_ = C[r], NWc[r]
+            NM = ["dist", "f0[mHz]", "Mc", "phi0", "cos_i", "psi", "alpha",
+                  "sin_d", "fdotr"][:ndim]
+            fc = self._f0_col if self._f0_col is not None else 1
+            df0 = ((nw_[fc] - c[fc]) * 1e-3 / self.df
+                   if fc < ndim else float("nan"))
 
-        # DETAILED BALANCE, infomat branch: the jump is
-        #   y = x + jump_factor * L @ z ,  z ~ N(0, I)
-        # with L FIXED for the whole block, so q(x->y) == q(y->x) by
-        # construction and ``factors`` MUST be 0. Verify numerically rather
-        # than assume: form the whitened displacement both ways and compare.
-        db = "n/a (stretch: factor from eryn's z-draw)"
-        if kind == "infomat" and chol is not None:
-            L = _to_numpy(chol)[r] if _to_numpy(chol).ndim == 3 else None
-            if L is not None:
-                d = (nw_ - c) / self.jump_factor
-                sc = _to_numpy(self._proposal_param_scales).ravel()
-                try:
-                    zf = np.linalg.solve(L, d / sc)      # forward whitened
-                    zr = np.linalg.solve(L, -d / sc)     # reverse whitened
-                    lq_f = -0.5 * float(zf @ zf)
-                    lq_r = -0.5 * float(zr @ zr)
-                    db = (f"log q(x->y)={lq_f:+.6e} log q(y->x)={lq_r:+.6e} "
-                          f"ratio={lq_r - lq_f:+.3e} (MUST be 0; "
-                          f"factors={float(g(factors)[r]):+.3e})")
-                except np.linalg.LinAlgError as e:
-                    db = f"chol solve failed: {e!r}"
+            # DETAILED BALANCE (infomat): y = x + jump_factor * L @ z with L
+            # FIXED for the block, so q(x->y) == q(y->x) and factors MUST be
+            # 0. Verified numerically, not asserted.
+            db, sig = "n/a (stretch: factor is eryn's z-draw)", None
+            L3 = h(chol)
+            if L3 is not None and L3.ndim == 3 and r < L3.shape[0]:
+                L = L3[r]
+                sc = np.asarray(_to_numpy(self._proposal_param_scales)).ravel()
+                sc = np.resize(sc, ndim)
+                sig = self.jump_factor * np.sqrt(np.abs(np.diag(L @ L.T))) * sc
+                if kind == "infomat":
+                    try:
+                        d = (nw_ - c) / max(self.jump_factor, 1e-300) / sc
+                        zf = np.linalg.solve(L, d)
+                        lq = -0.5 * float(zf @ zf)
+                        db = (f"log q(x->y)=log q(y->x)={lq:+.6e} "
+                              f"ratio=0 by symmetry; factors="
+                              f"{row(factors, r):+.3e} (MUST be 0)")
+                    except Exception as _e:
+                        db = f"chol solve failed: {_e!r}"
 
-        sig = None
-        if chol is not None and _to_numpy(chol).ndim == 3:
-            L = _to_numpy(chol)[r]
-            sc = _to_numpy(self._proposal_param_scales).ravel()
-            sig = self.jump_factor * np.sqrt(np.diag(L @ L.T)) * sc
-
-        logger.info(
-            "[GB_INMODEL_TRACE %s] rep %d  kind=%s  (T%d,w%d,b%d) beta=%.4g\n"
-            "    curr : %s\n    new  : %s\n    delta: %s\n"
-            "    df0 = %+.5f bins%s\n"
-            "    ll_ref=%.6f  new_ll=%.6f  delta_ll=%+.6e\n"
-            "    prior: curr=%.4f new=%.4f   factors=%+.4e\n"
-            "    lnpdiff = beta*dll + dprior + factors = %+.6e  -> %s\n"
-            "    DB: %s",
-            self.name, rep, kind, int(g(t_i)[r]), int(g(w_i)[r]),
-            int(g(b_i)[r]), float(g(beta)[r]),
-            " ".join(f"{n}={v:.6g}" for n, v in zip(NM, c)),
-            " ".join(f"{n}={v:.6g}" for n, v in zip(NM, nw_)),
-            " ".join(f"{n}={v:+.3g}" for n, v in zip(NM, nw_ - c)),
-            df0_bins,
-            ("" if sig is None else
-             "   [proposal 1-sigma: "
-             + " ".join(f"{n}={v:.3g}" for n, v in zip(NM, sig))
-             + f"; f0 sigma = {sig[1]*1e-3/self.df:.4f} bins]"),
-            float(g(ll_ref)[r]), float(g(new_ll)[r]), float(g(delta_ll)[r]),
-            float(g(curr_prior)[r]), float(g(new_logp)[r]),
-            float(g(factors)[r]), float(g(lnpdiff)[r]),
-            "ACCEPT" if bool(g(accept)[r]) else "reject", db)
+            logger.info(
+                "[GB_INMODEL_TRACE %s] rep %d kind=%s (T%d,w%d,b%d) beta=%.4g"
+                "\n    curr : %s\n    new  : %s\n    delta: %s"
+                "\n    df0 = %+.5f bins%s"
+                "\n    ll_ref=%.6f new_ll=%.6f delta_ll=%+.6e"
+                "\n    prior curr=%.4f new=%.4f  factors=%+.4e"
+                "\n    lnpdiff=%+.6e -> %s\n    DB: %s",
+                self.name, rep, kind, int(row(t_i, r)), int(row(w_i, r)),
+                int(row(b_i, r)), float(bt[r]),
+                " ".join(f"{n}={v:.6g}" for n, v in zip(NM, c)),
+                " ".join(f"{n}={v:.6g}" for n, v in zip(NM, nw_)),
+                " ".join(f"{n}={v:+.3g}" for n, v in zip(NM, nw_ - c)), df0,
+                ("" if sig is None else
+                 "   [proposal 1-sigma: "
+                 + " ".join(f"{n}={v:.3g}" for n, v in zip(NM, sig))
+                 + (f"; f0 sigma = {sig[fc]*1e-3/self.df:.4f} bins]"
+                    if fc < ndim else "]")),
+                row(ll_ref, r), row(new_ll, r), row(delta_ll, r),
+                row(curr_prior, r), row(new_logp, r), row(factors, r),
+                row(lnpdiff, r),
+                "ACCEPT" if bool(row(accept, r)) else "reject", db)
+        except Exception as exc:
+            if not getattr(self, "_trace_warned", False):
+                self._trace_warned = True
+                logger.warning(
+                    "[GB_INMODEL_TRACE %s] disabled after %r -- diagnostic "
+                    "only, sampling is unaffected.", self.name, exc)
 
     def _jump_trace_new(self, nt):
         xp = self.xp
