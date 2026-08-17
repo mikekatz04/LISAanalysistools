@@ -500,7 +500,16 @@ export GB_MAX_FREQ=6.736111e-03     # 48.5 layers -> snaps to 48
 # proposed |df0| in Fourier bins split by accepted/rejected -- the one thing
 # no existing log line reports and the whole reason for this run.
 export GB_JUMP_TRACE=1
-export GB_DEBUG=1
+# NOT GB_DEBUG=1. That knob is not instrumentation -- it fires
+# apply_debug_preset(), a laptop-smoke preset, and EVERY knob the script does
+# not set explicitly then falls back to a smoke default: gb.ntemps 2 (not 24),
+# CHUNKED_N_SPARSE 64 (not 256), NT_SUB 64, N_PAD 8, N_CP_* 16. The first run
+# of this probe silently used a 2-rung ladder and a 4x-truncated sparse
+# window, which invalidates any statement about the info-matrix proposal --
+# the info matrix is second differences of that same likelihood. Production
+# (submit_gf_3mo_v3.sh) never sets it. The GB special-move band plots it also
+# arms are not worth that price; GB_JUMP_TRACE gives what this probe needs.
+export GB_NTEMPS=24                 # explicit: match production, never inherit
 export GB_SIGHET_DRIFT_CHECK=1      # end-of-block drift vs the trust gate
 export GB_SIGHET_ANCHOR_CHECK=1     # sig-het expansion error at the anchor
 
