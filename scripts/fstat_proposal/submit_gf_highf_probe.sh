@@ -500,6 +500,9 @@ export GB_MAX_FREQ=2.076406e-2      # 149.5 layers -> snaps to 149
 # proposed |df0| in Fourier bins split by accepted/rejected -- the one thing
 # no existing log line reports and the whole reason for this run.
 export GB_JUMP_TRACE=1
+# Step-by-step MH trace of ONE source (the loudest cold row): every term
+# in the ratio per repeat, plus a numeric detailed-balance check.
+export GB_INMODEL_TRACE=20
 # NOT GB_DEBUG=1. That knob is not instrumentation -- it fires
 # apply_debug_preset(), a laptop-smoke preset, and EVERY knob the script does
 # not set explicitly then falls back to a smoke default: gb.ntemps 2 (not 24),
