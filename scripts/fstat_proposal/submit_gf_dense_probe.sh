@@ -499,6 +499,8 @@ export GB_MAX_FREQ=6.736111e-03     # 48.5 layers -> snaps to 48
 # Trackers. GB_JUMP_TRACE logs, per propose and per temperature rung, the
 # proposed |df0| in Fourier bins split by accepted/rejected -- the one thing
 # no existing log line reports and the whole reason for this run.
+# F-stat peak floor is now the stock default (SNR 8) -- see
+# FSTAT_KNOB_DEFAULTS in sampling/fstat_proposal.py for why.
 export GB_JUMP_TRACE=1
 # Step-by-step MH trace of ONE source (the loudest cold row): every term
 # in the ratio per repeat, plus a numeric detailed-balance check.

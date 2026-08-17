@@ -86,7 +86,22 @@ __all__ = [
 # ======================================================================
 FSTAT_KNOB_DEFAULTS = {
     "FSTAT_BATCH": 4096,           # kernel rows per get_fstat_ll_wdm call
-    "FSTAT_PEAK_MIN_SNR": 5.0,     # selection floor (F = SNR^2 / 2)
+    # SELECTION FLOOR, F = SNR^2 / 2. Raised 5.0 -> 8.0 (user ruling
+    # 2026-08-17) because 5.0 is a PER-TRIAL cut with no look-elsewhere
+    # correction. Under the null 2F ~ chi2_4, so F >= 12.5 has p = 5.0e-5 per
+    # evaluation -- and a comb is millions of evaluations. Measured on the
+    # high-f probe: 4,321 f0 nodes x 256 sky = 1,106,176 evaluations predicts
+    # 56 false peaks; the fit returned 81, of which 58 sat >50 bins from the
+    # ONLY real source in the window. The birth proposal was drawing from a
+    # peak list that was ~98% noise, which is what populated 2-7 leaves
+    # against one source. At SNR 8 (F = 32) the expected false count is
+    # 5e-7 on that comb and 4e-5 on a full-band production comb -- i.e. zero
+    # at any size we run, and the threshold no longer needs to scale with the
+    # window. COST: peak boxes are no longer fitted for injections whose
+    # node F-stat SNR is below 8; the 0.3-weight comb component still
+    # proposes births there, so those sources are reachable, just not via a
+    # refined peak box.
+    "FSTAT_PEAK_MIN_SNR": 8.0,
     "FSTAT_PEAKS_PER_BAND": 200,   # per-sub-band peak cap (35 -> 200,
                                    #   2026-08-12: 35 truncated real-data
                                    #   bands; sig-het comb+stage-B is fast
@@ -127,7 +142,7 @@ def fstat_peak_min_F() -> float:
 
     Precedence: explicit ``FSTAT_PEAK_MIN_SNR`` > explicit
     ``FSTAT_PEAK_MIN_F`` > the default SNR
-    (``FSTAT_KNOB_DEFAULTS['FSTAT_PEAK_MIN_SNR']`` = 5, i.e. F = 12.5).
+    (``FSTAT_KNOB_DEFAULTS['FSTAT_PEAK_MIN_SNR']`` = 8, i.e. F = 32).
     """
     snr = os.environ.get("FSTAT_PEAK_MIN_SNR", "").strip()
     if snr:
