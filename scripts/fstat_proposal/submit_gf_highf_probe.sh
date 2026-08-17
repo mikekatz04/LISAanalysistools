@@ -462,8 +462,15 @@ fi
 # ## noise stages. Everything else -- moves, caps, F-stat, tempering,       ##
 # ## repeats, sig-het -- is unchanged from v3.                              ##
 # ############################################################################
+# FOUR layers, not three. Band shards are assigned by band COUNT, so three
+# bands split 2/1 across the two GPUs -- the target band lands on one device
+# and the other carries a single near-empty band, which exercises the
+# multi-shard router only asymmetrically. Four splits 2/2, keeps the target
+# band (146) interior for the F-stat fit (band_edges[1:-1]), and puts real
+# work on both devices, so the per-device comp replicas, the sig-het
+# reference stash and the cross-device reduction are all covered.
 export GB_MIN_FREQ=2.013889e-2      # layer 145 lower edge
-export GB_MAX_FREQ=2.055556e-2      # layer 148 lower edge -> bands 145,146,147
+export GB_MAX_FREQ=2.069444e-2      # layer 149 lower edge -> bands 145-148
 # NOTE: the F-stat fit range follows band_edges[1:-1], so restricting the
 # band window above ALREADY confines the fit to sub-band 142 (1080 bins /
 # 32 cap cells). Narrowing further to cells 4566-4568 has no env knob:
