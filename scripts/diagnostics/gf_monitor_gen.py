@@ -1,11 +1,38 @@
 #!/usr/bin/env python
-"""GF run monitor generator: <run_dir> -> self-contained monitor.html.
+"""GF run status page: <run_dir> -> one self-contained HTML file.
 
 Reusable: point RUN_DIR at any unzipped gf_prod_* snapshot and rerun; the
 artifact redeploys to the same URL. Sections degrade to labeled
 placeholders when a snapshot lacks their inputs.
+
+The page is a STATUS OBJECT for collaborators, not an engineering worklog.
+Its spine is one frozen denominator -- the 812 catalogue galactic binaries
+detectable (optimal SNR > 7) over 3-21.94 mHz under this run's own fitted
+noise -- against which completeness, purity and per-source recovery are all
+quoted. Run-mechanics forensics live in the collapsed appendix, never in the
+body.
+
+Optional inputs, read from the run directory or the working directory:
+  gb_truth_3to21.npz  the frozen detectability set + full catalogue
+                      parameters (built once by build_truth.py)
+  kappa_grid.npz      SNR/amplitude ceiling per frequency, for the
+                      sensitivity curve on the population panels
+  gf_arm_<tag>.npz    written by THIS script on every run; holds one arm's
+                      per-iteration recovery series so the v2/v3 comparison
+                      panels can draw both arms.
+Without them the recovery section degrades to a note; every other section
+still builds.
+
+COLOUR CONVENTION, one meaning per hue (the previous page used red for five
+different things):
+  cyan   injected data / the injected catalogue / arm v2
+  amber  noise + foreground / arm v3
+  green  recovered AND matched to an injection
+  violet recovered with NO matching injection
+  red    detectable but NOT recovered  (and nothing else)
+  white  reference lines: noise model, y = x, sensitivity
 """
-import base64, io, json, os, re, sys
+import base64, glob, io, json, os, re, sys
 from datetime import datetime
 
 import numpy as np
@@ -83,6 +110,11 @@ if "23mo" in _base:
     RUN_LABEL, RUN_KIND = "23-Month", "23mo"
 elif "6mo" in _base:
     RUN_LABEL, RUN_KIND = "6-Month", "6mo"
+elif _base.endswith("_v3") or "3mo_v3" in _base:
+    # The v3 A/B carries the same Tobs as v2, so the label has to come from
+    # the VARIANT or the two pages are indistinguishable in a browser tab --
+    # which is the whole point of running them side by side.
+    RUN_LABEL, RUN_KIND = "3-Month v3", "3mo_v3"
 else:
     RUN_LABEL, RUN_KIND = "3-Month", "3mo"
 
@@ -223,6 +255,36 @@ for root, _, fns in os.walk(RUN_DIR):
             logpath = os.path.join(root, fn)
 log_text = open(logpath, errors="replace").read() if logpath else ""
 
+# ---- the artifacts directory, found rather than guessed --------------------
+# This used to be built as ``basename(RUN_DIR) + "_artifacts"``, which is only
+# right when the run directory happens to be named after the store. It is not:
+# both production arms live in ``gf_prod_3mo_v2`` / ``gf_prod_3mo_v3`` while
+# the artifacts directory inside each is ``gf_prod_3mo_artifacts`` -- named for
+# the STORE. The guess therefore missed on every run, run_settings.log was
+# never read, and the whole data/template/residual section rendered as "plot
+# unavailable" with no indication that a path was at fault. Glob for it.
+ART_DIR = None
+_cands = sorted(glob.glob(os.path.join(RUN_DIR, "*_artifacts")))
+_cands += [os.path.join(RUN_DIR, os.path.basename(os.path.normpath(RUN_DIR))
+                        + "_artifacts")]
+for _c in _cands:
+    if os.path.exists(os.path.join(_c, "run_settings.log")):
+        ART_DIR = _c
+        break
+SETTINGS_TXT = ""
+if ART_DIR:
+    SETTINGS_TXT = open(os.path.join(ART_DIR, "run_settings.log"),
+                        errors="replace").read()
+else:
+    MISSING.append("no *_artifacts/run_settings.log under the run directory; "
+                   "the residual spectrum cannot be rebuilt.")
+
+# The GB branch anchors source phase at this epoch; the data grid starts a
+# little later, and the offset is a real phase factor, so it is read from the
+# run rather than defaulted.
+_m0 = re.search(r"\[gb\].*?\n\s+t0:\s*([\d.]+)", SETTINGS_TXT, re.S)
+T_REF_SCI = float(_m0.group(1)) if _m0 else 97729089.327664
+
 # ============================ PLOTS =========================================
 # ---- 1. likelihood ----
 fig, ax = plt.subplots(1, 2, figsize=(11, 3.4))
@@ -236,9 +298,76 @@ ax[1].plot(it, ll.max(axis=1) - ll.min(axis=1), color=VIOLET, lw=1.5)
 ax[1].set_xlabel("iteration"); ax[1].set_title("walker lnL spread (max - min)")
 fig_b64(fig, "ll")
 
-# ---- 2. PSD params ----
+# ---- F11: the noise model, in two panels ----------------------------------
+# The page used to carry six: two instrument traces, two instrument
+# histograms, five foreground traces and five foreground histograms, none of
+# which said whether the noise model is RIGHT. What matters is (a) do the two
+# instrument parameters recover their injected values, and (b) is the
+# foreground coming down as sources leave the residual. Two panels, both
+# answerable at a glance.
 psd_cold = psd_c[:, 0, :, 0, :]                     # (it, 24, 2)
+gal_cold = gal_c[:, 0, :, 0, :]                     # (it, 24, 5)
 SOMS_INJ, SA_INJ = 1.496182e-11, 2.982412e-15
+GAL_NAMES = ["log10 amp", "p1", "log10 fknee", "p2", "slope"]
+
+_nsh = min(3, SUB_NIT)
+fig, ax = plt.subplots(1, 2, figsize=(11, 3.0))
+for j, (name, inj, unit) in enumerate(
+        [("Soms_d", SOMS_INJ, "m"), ("Sa_a", SA_INJ, "m/s$^2$")]):
+    v = psd_cold[-_nsh:, :, j].ravel()
+    ax[j].hist(v, bins=26, color=VIOLET, alpha=0.85)
+    ax[j].axvline(inj, color=CYAN, lw=1.6, ls="--", label="injected")
+    ax[j].set_title(f"{name}  [{unit}]", fontsize=10)
+    ax[j].legend(fontsize=8)
+    ax[j].ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
+NOISE_BIAS = [float(np.median(psd_cold[-_nsh:, :, j]) / inj - 1.0)
+              for j, inj in enumerate((SOMS_INJ, SA_INJ))]
+fig.suptitle(f"instrument-noise posteriors, last {_nsh} stored iterations "
+             f"x {nwalk} cold walkers", fontsize=10, color=FG)
+fig.tight_layout(rect=[0, 0, 1, 0.93])
+fig_b64(fig, "f11_psd")
+
+try:
+    from lisatools.sensitivity import get_sensitivity, A2TDISens
+    from lisatools import detector as lisa_models
+    from lisatools.stochastic import (
+        HyperbolicTangentGalacticForeground as HTGF)
+    import matplotlib.colors as mcolors
+
+    fr = np.logspace(np.log10(3e-4), np.log10(2.5e-2), 400)
+
+    def sens_curves(soms, sa, galp=None):
+        model = lisa_models.LISAModel(soms ** 2, sa ** 2,
+                                      lisa_models.DefaultOrbits(), "sampled")
+        if galp is None:
+            return get_sensitivity(fr, sens_fn=A2TDISens, model=model,
+                                   stochastic_params=())
+        return get_sensitivity(fr, sens_fn=A2TDISens, model=model,
+                               stochastic_params=tuple(galp),
+                               stochastic_function=HTGF)
+
+    ramp = mcolors.LinearSegmentedColormap.from_list(
+        "amber", ["#FBE3B5", "#F5A623", "#8C5A00"])
+    pm = np.median(psd_cold[-1], axis=0)
+    fig, ax = plt.subplots(figsize=(11, 4.0))
+    for k in range(SUB_NIT):
+        pk_ = np.median(psd_cold[k], axis=0)
+        gk = np.median(gal_cold[k], axis=0)
+        ax.plot(fr, sens_curves(pk_[0], pk_[1], gk),
+                color=ramp(k / max(SUB_NIT - 1, 1)), lw=1.1,
+                label=(f"iteration {k}" if k in (0, SUB_NIT - 1) else None))
+    ax.plot(fr, sens_curves(*pm), color=FG, lw=1.4, ls=":",
+            label="instrument only (latest)")
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("Frequency [Hz]")
+    ax.set_ylabel("PSD, TDI A channel  [1/Hz]")
+    ax.legend(fontsize=8, loc="upper left")
+    fig_b64(fig, "f11_fg")
+except Exception as e:
+    MISSING.append(f"foreground curve render failed: {e!r}")
+
+
+# ---- RESTORED: per-parameter noise traces and histograms -------------
 fig, ax = plt.subplots(1, 2, figsize=(11, 3.2))
 for j, (name, inj) in enumerate([("Soms_d", SOMS_INJ), ("Sa_a", SA_INJ)]):
     for w in range(nwalk):
@@ -255,9 +384,6 @@ for j, (name, inj) in enumerate([("Soms_d", SOMS_INJ), ("Sa_a", SA_INJ)]):
     ax[j].set_title(f"{name} posterior (last {min(3,NIT)} iters x 24 walkers)")
 fig_b64(fig, "psd_hist")
 
-# ---- 3. galfor params ----
-gal_cold = gal_c[:, 0, :, 0, :]                     # (it, 24, 5)
-GAL_NAMES = ["log10 amp", "p1", "log10 fknee", "p2", "slope"]
 fig, ax = plt.subplots(1, 5, figsize=(14, 2.7))
 for j in range(5):
     for w in range(nwalk):
@@ -270,16 +396,21 @@ for j in range(5):
     ax[j].set_title(GAL_NAMES[j], fontsize=9)
 fig_b64(fig, "gal_hist")
 
-# ---- 4. PSD curves: lisatools LISASens + HyperbolicTangent foreground ----
+# ---- RESTORED: LISASens curve pair (instrument vs instrument+foreground) ---
+# Kept alongside F11 rather than folded into it: F11 plots the A-channel PSD
+# the likelihood is weighted by, this pair plots the LISASens sky-averaged
+# sensitivity the mission documents quote, and the injected instrument curve
+# only exists on this one.
 try:
     from lisatools.sensitivity import get_sensitivity, LISASens
     from lisatools import detector as lisa_models
     from lisatools.stochastic import (
         HyperbolicTangentGalacticForeground as HTGF)
+    import matplotlib.colors as mcolors
 
     fr = np.logspace(np.log10(2e-4), np.log10(2.6e-2), 500)
 
-    def sens_curves(soms, sa, galp=None):
+    def sens_lisasens(soms, sa, galp=None):
         model = lisa_models.LISAModel(soms**2, sa**2,
                                       lisa_models.DefaultOrbits(), "mon")
         if galp is None:
@@ -289,14 +420,13 @@ try:
                                stochastic_params=tuple(galp),
                                stochastic_function=HTGF)
 
-    # panel 1: latest iteration, PSD-only vs PSD+foreground vs injected
     pm = np.median(psd_cold[-1], axis=0)
     gm = np.median(gal_cold[-1], axis=0)
     fig, ax = plt.subplots(figsize=(11, 4.2))
-    ax.plot(fr, sens_curves(*pm), color=CYAN, lw=1.6, label="instrument PSD")
-    ax.plot(fr, sens_curves(pm[0], pm[1], gm), color=AMBER, lw=1.6,
+    ax.plot(fr, sens_lisasens(*pm), color=CYAN, lw=1.6, label="instrument PSD")
+    ax.plot(fr, sens_lisasens(pm[0], pm[1], gm), color=AMBER, lw=1.6,
             label="PSD + galactic foreground")
-    ax.plot(fr, sens_curves(SOMS_INJ, SA_INJ), color=RED, ls=":", lw=1.3,
+    ax.plot(fr, sens_lisasens(SOMS_INJ, SA_INJ), color=RED, ls=":", lw=1.3,
             label="injected instrument")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("f [Hz]"); ax.set_ylabel("Sn(f) [LISASens]")
@@ -304,18 +434,16 @@ try:
         "sensitivity, cold-chain walker-median, latest stored iteration")
     fig_b64(fig, "psd_curves")
 
-    # panel 2: foreground evolution over stored iterations (decline watch)
-    import matplotlib.colors as mcolors
-    ramp = mcolors.LinearSegmentedColormap.from_list(
+    ramp2 = mcolors.LinearSegmentedColormap.from_list(
         "amber", ["#FBE3B5", "#F5A623", "#8C5A00"])
     fig, ax = plt.subplots(figsize=(11, 4.2))
-    ax.plot(fr, sens_curves(*pm), color=CYAN, lw=1.4,
+    ax.plot(fr, sens_lisasens(*pm), color=CYAN, lw=1.4,
             label="instrument PSD (latest)")
     for k in range(SUB_NIT):
         pk_ = np.median(psd_cold[k], axis=0)
         gk = np.median(gal_cold[k], axis=0)
-        ax.plot(fr, sens_curves(pk_[0], pk_[1], gk),
-                color=ramp(k / max(SUB_NIT - 1, 1)), lw=1.1,
+        ax.plot(fr, sens_lisasens(pk_[0], pk_[1], gk),
+                color=ramp2(k / max(SUB_NIT - 1, 1)), lw=1.1,
                 label=f"iter {k}" if k in (0, SUB_NIT - 1) else None)
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("f [Hz]"); ax.set_ylabel("Sn(f) [LISASens]")
@@ -323,7 +451,11 @@ try:
         "PSD + foreground per stored iteration (light -> dark = later)")
     fig_b64(fig, "psd_evolution")
 except Exception as e:
-    MISSING.append(f"PSD curve render failed: {e!r}")
+    MISSING.append(f"LISASens curve render failed: {e!r}")
+
+# ---- GB leaf count (the raw model size; the recovery section below is
+# where it is given a denominator) ----------------------------------------
+gb_counts = gb_inds.sum(axis=-1)                    # (it, 24)
 
 # ---- detectable-truth set for the overlays (from the census npz) ----------
 # `census.py` computes optimal SNR for every catalogue GB over 3-21 mHz
@@ -342,8 +474,6 @@ for _cp in (os.path.join(RUN_DIR, "gb_hi_f_census.npz"), "gb_hi_f_census.npz"):
             DET_F0 = None
         break
 
-# ---- 5. GB leaves + caps ----
-gb_counts = gb_inds.sum(axis=-1)                    # (it, 24)
 fig, ax = plt.subplots(1, 2, figsize=(11, 3.4))
 for w in range(nwalk):
     ax[0].plot(it, gb_counts[:, w], color=GREEN, alpha=0.35, lw=0.9)
@@ -920,9 +1050,9 @@ try:
     W_NF, W_NT, W_DT = int(_a["0"]), int(_a["1"]), float(_a["2"])
     N_TD = W_NF * W_NT
     # window: the engine builds tukey(Nt_td, alpha=window_taper_duration/Tobs)
-    _settings_txt = open(os.path.join(
-        RUN_DIR, os.path.basename(RUN_DIR) + "_artifacts",
-        "run_settings.log"), errors="replace").read()
+    _settings_txt = SETTINGS_TXT
+    if not _settings_txt:
+        raise FileNotFoundError("run_settings.log not found beside the store")
     _mt = re.search(r"window_taper_duration:\s*([\d.eE+-]+)", _settings_txt)
     WIN_ALPHA = (float(_mt.group(1)) / (N_TD * W_DT)) if _mt else 0.0
     _mt0 = re.search(r"\[gb\].*?\n\s+t0:\s*([\d.]+)", _settings_txt, re.S)
@@ -995,6 +1125,7 @@ try:
                         ).fft(settings=None, window=_win)
     FDS = _fd_data.settings
     data_fd = _fd_data.arr
+    _win_keep = _win
     del _td, _fd_data, _win
 
     # --- templates from the max-lnL cold walker's last stored coordinates ---
@@ -1159,16 +1290,794 @@ try:
     # 9 dense speckle images are the single most expensive PNG on the page;
     # 88 dpi still oversamples the pooled (layer x pooled-time) grid.
     fig_b64(fig, "dtr_wdm", dpi=88)
-    del _wp, data_fd, resid_fd, _tmpl, _orb, _comp
+
+    # ================= F1: the residual spectrum ==========================
+    # The field's canonical "is the fit subtracting anything" figure (Katz+
+    # 2405.04690 Fig 5): log-log power spectral density against frequency in
+    # Hz, with the injected data, the template sum and the residual on one
+    # axes, and the noise decomposition of ESA Red Book Fig 2.2 underneath --
+    # instrument noise alone, the unresolved galactic foreground alone, and
+    # their sum. The GAP between the instrument curve and the sum IS the
+    # galactic confusion, so the residual's position relative to those two
+    # lines reads directly as "how much of the galaxy is still unmodelled".
+    #
+    # ORDINATE, stated because the field is not consistent about it: this is
+    # the PSD of the TDI *A* channel in 1/Hz. It is not a strain amplitude and
+    # it is not an ASD. The run analyses X/Y/Z; A = (Z-X)/sqrt(2) is formed
+    # here purely so the data can be compared against lisatools' A2TDISens
+    # noise model, which is what the likelihood is weighted by.
+    def _AE(x):
+        return ((x[2] - x[0]) / np.sqrt(2.0),
+                (x[0] - 2 * x[1] + x[2]) / np.sqrt(6.0))
+
+    _W2 = float(np.mean(_win_keep ** 2))
+
+    def _PSD(x):
+        return 2.0 * np.abs(x) ** 2 / (N_TD * W_DT * _W2)
+
+    _dA, _ = _AE(data_fd)
+    _tA, _ = _AE(_tmpl["gb"] + _tmpl["vgb"])
+    _rA, _ = _AE(resid_fd)
+
+    from lisatools.sensitivity import get_sensitivity, A2TDISens
+    from lisatools import detector as lisa_models
+    from lisatools.stochastic import (
+        HyperbolicTangentGalacticForeground as _HTGF)
+    _pm = np.median(psd_cold[-1], axis=0)
+    _gm = np.median(gal_cold[-1], axis=0)
+    _lmod = lisa_models.LISAModel(_pm[0] ** 2, _pm[1] ** 2,
+                                  lisa_models.DefaultOrbits(), "sampled")
+    _fpos = np.maximum(_fr, FDS.df)
+    _Sinst = np.asarray(get_sensitivity(_fpos, sens_fn=A2TDISens,
+                                        model=_lmod, stochastic_params=()),
+                        float)
+    _Ssum = np.asarray(get_sensitivity(_fpos, sens_fn=A2TDISens, model=_lmod,
+                                       stochastic_params=tuple(_gm),
+                                       stochastic_function=_HTGF), float)
+    _Sgal = np.maximum(_Ssum - _Sinst, 1e-60)
+
+    # log-f binning. A PSD is an AVERAGE of periodogram bins, so the reduction
+    # is a mean per log-frequency bin -- not the block-MAX a line spectrum
+    # wants, and not a median, which would read the template (exactly zero
+    # between sources) as identically zero everywhere.
+    # Below the run's own GB band the windowed data is dominated by
+    # spectral leakage from the enormous sub-mHz TDI content -- a sinc
+    # pattern that is real but is not analysed and reads as structure.
+    _sel = (_fr >= max(float(band_edges[0]), 3e-4)) & (_fr <= 2.5e-2)
+    _fs = _fr[_sel]
+    _NB = 300
+    _ed = np.logspace(np.log10(_fs[0]), np.log10(_fs[-1]), _NB + 1)
+    _bi = np.clip(np.searchsorted(_ed, _fs, side="right") - 1, 0, _NB - 1)
+    _cnt = np.bincount(_bi, minlength=_NB).astype(float)
+    _fcb = np.sqrt(_ed[:-1] * _ed[1:])
+    _ok = _cnt > 0
+
+    def _bmean(v):
+        out = np.full(_NB, np.nan)
+        out[_ok] = np.bincount(_bi, weights=v, minlength=_NB)[_ok] / _cnt[_ok]
+        return out
+
+    _Pd, _Pt = _bmean(_PSD(_dA[_sel])), _bmean(_PSD(_tA[_sel]))
+    _Pr = _bmean(_PSD(_rA[_sel]))
+    _Ni = _bmean(_Sinst[_sel]); _Ng = _bmean(_Sgal[_sel]); _Ns = _bmean(_Ssum[_sel])
+
+    # whitened residual: real and imaginary parts are each N(0,1) when the
+    # noise model is right, so the ratio below sits at 1 and the
+    # Anderson-Darling test on them has nothing to reject.
+    _zA = _rA[_sel] / np.sqrt(np.maximum(_Ssum[_sel], 1e-60)
+                              * N_TD * W_DT * _W2 / 4.0)
+    _rat = _bmean(np.abs(_zA) ** 2 / 2.0)
+
+    # Rosati & Littenberg (2410.17180) Fig 4: colour the residual trace by the
+    # Anderson-Darling Gaussianity p-value of the whitened residual, so the
+    # confusion region identifies ITSELF as the non-Gaussian zone instead of
+    # being annotated by hand. The test is run on a fixed 600-sample draw per
+    # bin: with 10^4 samples it rejects on effect sizes far too small to care
+    # about, and the bins would no longer be comparable to each other.
+    _adp = np.full(_NB, np.nan)
+    try:
+        from scipy.stats import anderson as _anderson
+        _rng = np.random.default_rng(0)
+        _ord = np.argsort(_bi, kind="stable")
+        _zs = _zA[_ord]
+        _bnd = np.searchsorted(_bi[_ord], np.arange(_NB + 1))
+        for _b in range(_NB):
+            _v = _zs[_bnd[_b]:_bnd[_b + 1]]
+            if _v.size < 40:
+                continue
+            _v = np.concatenate([_v.real, _v.imag])
+            if _v.size > 600:
+                _v = _rng.choice(_v, 600, replace=False)
+            _A2 = float(_anderson(_v, dist="norm").statistic)
+            _n = _v.size
+            _As = _A2 * (1 + 0.75 / _n + 2.25 / _n ** 2)
+            if _As < 0.2:
+                _p = 1 - np.exp(-13.436 + 101.14 * _As - 223.73 * _As ** 2)
+            elif _As < 0.34:
+                _p = 1 - np.exp(-8.318 + 42.796 * _As - 59.938 * _As ** 2)
+            elif _As < 0.6:
+                _p = np.exp(0.9177 - 4.279 * _As - 1.38 * _As ** 2)
+            else:
+                _p = np.exp(1.2937 - 5.709 * _As + 0.0186 * _As ** 2)
+            _adp[_b] = np.log10(float(np.clip(_p, 1e-12, 1.0)))
+    except Exception as _e:
+        MISSING.append(f"residual Gaussianity test unavailable: {_e!r}")
+
+    fig, ax = plt.subplots(2, 1, figsize=(11.6, 6.8), sharex=True,
+                           gridspec_kw=dict(height_ratios=[2.5, 1],
+                                            hspace=0.07))
+    ax[0].plot(_fcb, _Pd, color=CYAN, lw=1.6, label="injected data")
+    ax[0].plot(_fcb, _Pt, color=GREEN, lw=1.2, label="template sum (GB + VGB)")
+    ax[0].plot(_fcb, _Pr, color=VIOLET, lw=1.4, label="residual")
+    ax[0].plot(_fcb, _Ni, color=FG, lw=1.2, ls=":", label="instrument noise")
+    ax[0].plot(_fcb, _Ng, color=AMBER, lw=1.2, ls=":",
+               label="galactic foreground")
+    ax[0].plot(_fcb, _Ns, color=FG, lw=1.3, ls="--", label="their sum")
+    ax[0].set_xscale("log"); ax[0].set_yscale("log")
+    ax[0].set_ylabel("PSD, TDI A channel  [1/Hz]")
+    ax[0].set_ylim(1e-45, 2e-37)
+    ax[0].legend(fontsize=8, loc="upper left", ncols=2)
+    _sc = ax[1].scatter(_fcb, _rat, c=_adp, cmap="magma", s=11, vmin=-8,
+                        vmax=0, lw=0)
+    ax[1].axhline(1.0, color=FG, ls="--", lw=1.0)
+    ax[1].set_xscale("log"); ax[1].set_yscale("log")
+    ax[1].set_ylim(0.25, 40)
+    ax[1].set_xlabel("Frequency [Hz]")
+    ax[1].set_ylabel("residual PSD\n/ (noise + foreground)", fontsize=9)
+    _cb = fig.colorbar(_sc, ax=ax[1], pad=0.012)
+    _cb.set_label("log$_{10}$ p, Anderson-Darling", fontsize=8)
+    _cb.ax.tick_params(labelsize=7)
+    fig_b64(fig, "f1_resid")
+
+    _gb_band = (_fcb >= 3e-3) & (_fcb <= 1e-2)
+    _cr = _Ns / np.maximum(_Ni, 1e-60)
+    _ci = int(np.nanargmax(np.where(_ok, _cr, np.nan)))
+    DTR.update(
+        rat_gal=float(np.nanmedian(_rat[_gb_band])),
+        conf_ratio=float(_cr[_ci]), conf_f=float(_fcb[_ci]),
+        undersub=int(np.nansum(_Pr[_ok] < _Ni[_ok])),
+        # WHERE those bins are decides whether they mean anything. Below the
+        # analysed band the windowed data is dominated by leakage from the
+        # enormous sub-mHz TDI content -- a sinc pattern whose nulls dip under
+        # any smooth noise curve while carrying no model at all. A bin under
+        # the instrument curve THERE is a window artefact; one inside the
+        # band, where templates are actually subtracted, would be real
+        # over-subtraction. Report the split rather than asserting either.
+        undersub_hi=float(np.nanmax(np.where(
+            _ok & (_Pr < _Ni), _fcb, np.nan))) if np.any(
+                _ok & (_Pr < _Ni)) else float("nan"),
+        undersub_lo=float(np.nanmin(np.where(
+            _ok & (_Pr < _Ni), _fcb, np.nan))) if np.any(
+                _ok & (_Pr < _Ni)) else float("nan"),
+        undersub_inband=int(np.nansum(
+            _ok & (_Pr < _Ni) & (_fcb >= 3e-3))),
+        # The deepest shortfall, as a RATIO. A residual that is 3% under a
+        # noise curve carrying a 3.6% parameter bias is explained; one that
+        # is 2x under it is not, and the two must not read the same.
+        undersub_worst=float(np.nanmin(np.where(
+            _ok & (_Pr < _Ni), _Pr / np.maximum(_Ni, 1e-60), np.nan)))
+        if np.any(_ok & (_Pr < _Ni)) else float("nan"),
+        nbins=int(_ok.sum()),
+        adp_bad=float(np.nanmean(_adp[np.isfinite(_adp)] < -3.0))
+        if np.isfinite(_adp).any() else float("nan"))
+    del data_fd, resid_fd, _tmpl, _orb, _comp
 except Exception as e:
     MISSING.append(
         f"data/template/residual panels unavailable: {type(e).__name__}: {e}")
 
+# ======================= GB RECOVERY (the science block) ====================
+# ONE FROZEN DENOMINATOR. ``gb_truth_3to21.npz`` holds every catalogue GB that
+# survives the kappa_max amplitude prefilter, with its exact optimal SNR under
+# the run's own fitted noise at iteration 78 and its full parameter vector in
+# both the run's 9-column sampling basis and GBGPU's physical basis. The
+# detectable (SNR>7) subset over 3-21.94 mHz is 812 sources, and that number is
+# used as the denominator of EVERY recovery statement on this page. It is
+# deliberately frozen: "detectable" moves as the foreground estimate drops, and
+# a denominator that moves with the numerator cannot measure progress.
+#
+# Everything downstream is recomputed HERE, at the last stored iteration --
+# none of it is read from the iteration-15 caches the earlier page was built
+# on, which were three times smaller in model size.
+SCI = {}
+TRU = None
+for _tp in (os.path.join(RUN_DIR, "gb_truth_3to21.npz"), "gb_truth_3to21.npz"):
+    if os.path.exists(_tp):
+        try:
+            TRU = np.load(_tp)
+        except Exception:
+            TRU = None
+        break
+
+SCI_TOBS = 7776000.0
+try:
+    _a = dict(f["global_fit/domain_settings/args"].attrs)
+    SCI_TOBS = float(_a["0"]) * float(_a["1"]) * float(_a["2"])
+except Exception:
+    pass
+SCI_DF = 1.0 / SCI_TOBS
+FLO, FHI = 3e-3, 21.94e-3          # the band the frozen denominator covers
+TOL_BINS = 2.0
+NBAND = (FHI - FLO) / SCI_DF       # FD bins in the band
+
+# The truth set is tied to this run's Tobs (SNRs, and the FD bin the match
+# tolerance is quoted in). Refuse it on a different observation time rather
+# than silently comparing a 23-month model against 3-month detectability.
+if TRU is not None and abs(SCI_TOBS - 7776000.0) > 1.0:
+    MISSING.append(
+        "recovery panels skipped: the frozen detectability set is built for a "
+        "3-month observation and this run is not one.")
+    TRU = None
+
+
+def _match_pairs(rf, tf, tol):
+    """Globally-greedy ONE-TO-ONE nearest match in f0 within ``tol`` (Hz).
+
+    Greedy on |df| ascending, so the result is independent of input order. A
+    per-source nearest-neighbour match is not: it lets two model leaves claim
+    the same injection, which inflates completeness by exactly the duplicate
+    rate this page is trying to measure.
+    """
+    if rf.size == 0 or tf.size == 0:
+        return np.zeros(0, int), np.zeros(0, int), np.zeros(0)
+    o = np.argsort(tf)
+    tfs = tf[o]
+    lo = np.searchsorted(tfs, rf - tol)
+    hi = np.searchsorted(tfs, rf + tol)
+    ri, ti = [], []
+    for i in range(rf.size):
+        for j in o[lo[i]:hi[i]]:
+            ri.append(i); ti.append(j)
+    if not ri:
+        return np.zeros(0, int), np.zeros(0, int), np.zeros(0)
+    ri = np.asarray(ri); ti = np.asarray(ti)
+    d = rf[ri] - tf[ti]
+    ur = np.zeros(rf.size, bool); ut = np.zeros(tf.size, bool)
+    out = []
+    for m in np.argsort(np.abs(d)):
+        a_, b_ = ri[m], ti[m]
+        if ur[a_] or ut[b_]:
+            continue
+        ur[a_] = ut[b_] = True
+        out.append((a_, b_, d[m]))
+    out.sort()
+    return (np.array([p[0] for p in out], int),
+            np.array([p[1] for p in out], int),
+            np.array([p[2] for p in out], float))
+
+
+def _wilson(k, n, z=1.0):
+    """Wilson score interval (z=1 -> 68%); correct at k=0 and k=n, unlike the
+    normal approximation, which is what a 0%-recovery bin needs."""
+    k = np.asarray(k, float); n = np.maximum(np.asarray(n, float), 1e-9)
+    p = k / n
+    den = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / den
+    h = z * np.sqrt(np.maximum(p * (1 - p) / n + z * z / (4 * n * n), 0)) / den
+    return c - h, c + h
+
+
+def _survival(x):
+    """UN-NORMALISED survival count: (sorted x, number of sources at or above).
+
+    Unnormalised is the field convention (Littenberg Fig 13, Katz Fig 8): the
+    y-intercept then reads directly as the size of the set.
+    """
+    s = np.sort(np.asarray(x, float))
+    return s, np.arange(s.size, 0, -1)
+
+
+def _nn_bins(fv):
+    """Nearest-neighbour |Delta f0| in FD bins within one frequency set."""
+    if fv.size < 2:
+        return np.zeros(0)
+    s = np.sort(fv)
+    d = np.diff(s)
+    return np.minimum(np.r_[d, np.inf], np.r_[np.inf, d]) / SCI_DF
+
+
+def _leaf_f0(it_, w):
+    """Alive-leaf f0 [Hz] for one cold walker at one stored iteration.
+
+    Sliced column-wise: the chain is chunked (..., 1) on the parameter axis,
+    so pulling only f0 reads ~1/9 of the bytes a full-row read would.
+    """
+    al = g["inds/gb"][it_, 0, 0, w]
+    return (g["chain/gb"][it_, 0, 0, w, :, 1] * 1e-3)[al]
+
+
+if TRU is not None:
+    _sel = (TRU["det"] & (TRU["f0"] >= FLO) & (TRU["f0"] <= FHI))
+    T_F0 = TRU["f0"][_sel]
+    T_SNR = TRU["snr"][_sel]
+    T_AMP = TRU["amp"][_sel]
+    T_PHYS = TRU["phys"][_sel]
+    NDET = int(_sel.sum())
+    # Chance rate: the fraction of the band covered by the +-2-bin acceptance
+    # windows of the truth set. Any purity number is only meaningful against
+    # it, and it is the first thing a reviewer asks for.
+    CHANCE = NDET * (2 * TOL_BINS * SCI_DF) / (FHI - FLO)
+    _tol = TOL_BINS * SCI_DF
+
+    # ---- per-iteration progress (the max-lnL cold walker OF EACH ITERATION) -
+    _wb = np.argmax(ll[:NIT], axis=1).astype(int)
+    n_all = np.zeros(NIT, int); n_band = np.zeros(NIT, int)
+    n_match = np.zeros(NIT, int)
+    for _i in range(NIT):
+        _fv = _leaf_f0(_i, int(_wb[_i]))
+        n_all[_i] = _fv.size
+        _fv = _fv[(_fv >= FLO) & (_fv <= FHI)]
+        n_band[_i] = _fv.size
+        n_match[_i] = _match_pairs(_fv, T_F0, _tol)[0].size
+    _nz = np.nonzero(n_all > 0)[0]
+    IT0 = int(_nz[0]) if _nz.size else 0          # the GB-search origin
+    NGBIT = NIT - 1 - IT0
+
+    # ---- the last stored iteration, in full ------------------------------
+    WB = int(_wb[-1])
+    _alive = g["inds/gb"][NIT - 1, 0, 0, WB]
+    REC9 = g["chain/gb"][NIT - 1, 0, 0, WB][_alive]
+    _inb = (REC9[:, 1] * 1e-3 >= FLO) & (REC9[:, 1] * 1e-3 <= FHI)
+    REC9 = REC9[_inb]
+    MI, TI, DFH = _match_pairs(REC9[:, 1] * 1e-3, T_F0, _tol)
+    MATCHED = np.zeros(REC9.shape[0], bool); MATCHED[MI] = True
+    FOUND = np.zeros(NDET, bool); FOUND[TI] = True
+
+    SCI.update(ndet=NDET, chance=CHANCE, it0=IT0, ngbit=NGBIT, walker=WB,
+               n_all=int(n_all[-1]), n_band=int(REC9.shape[0]),
+               n_match=int(MI.size),
+               completeness=MI.size / NDET,
+               purity=MI.size / max(REC9.shape[0], 1))
+
+    # ---- waveform-level quantities ---------------------------------------
+    # Optimal SNRs and template overlaps come from GBGPU's OWN run_wave and a
+    # noise-weighted inner product against lisatools A2TDISens/E2TDISens fed
+    # this run's sampled instrument + foreground -- the same route the run's
+    # own likelihood uses. Nothing about the waveform or the noise is
+    # re-derived here.
+    RPHYS = None
+    try:
+        from gbgpu.gbgpu import GBGPU
+        from lisatools import detector as lisa_models
+        from lisatools.sensitivity import (get_sensitivity, A2TDISens,
+                                           E2TDISens)
+        from lisatools.stochastic import (
+            HyperbolicTangentGalacticForeground as HTGF)
+        from lisatools.globalfit.stock.erebor.transforms import (
+            make_gb_transform_container)
+
+        _psd_p = np.median(psd_cold[-1], axis=0)
+        _gal_p = np.median(gal_cold[-1], axis=0)
+        _lm = lisa_models.LISAModel(_psd_p[0] ** 2, _psd_p[1] ** 2,
+                                    lisa_models.DefaultOrbits(), "sampled")
+        _nk = dict(model=_lm, stochastic_params=tuple(_gal_p),
+                   stochastic_function=HTGF)
+        # The noise is a pure function of the FD bin index, so evaluate it
+        # ONCE on the whole grid: per-source calls would rebuild the model
+        # 3,000 times for numbers that never change.
+        _ng = int(2.35e-2 / SCI_DF) + 2
+        _fg = np.maximum(np.arange(_ng) * SCI_DF, SCI_DF)
+        SA_G = np.asarray(get_sensitivity(_fg, sens_fn=A2TDISens, **_nk), float)
+        SE_G = np.asarray(get_sensitivity(_fg, sens_fn=E2TDISens, **_nk), float)
+
+        _orb = lisa_models.DefaultOrbits(force_backend="cpu", frame="icrs")
+        _gbw = GBGPU(force_backend="cpu", orbits=_orb, t0=float(T_REF_SCI))
+        _tc = make_gb_transform_container(
+            use_chirp_mass=True, use_fdot_astro=True, use_distance=True,
+            mc_lims=(0.001, 1.0))
+        RPHYS = _tc.both_transforms(np.asarray(REC9, float).copy())
+
+        NW_ = 1024
+
+        def _ae(phys):
+            _gbw.run_wave(*[np.ascontiguousarray(phys[:, k]) for k in range(9)],
+                          N=NW_, T=SCI_TOBS, dt=2.5, tdi2=True,
+                          tdi_channel_setup="AE")
+            return (np.asarray(_gbw.A), np.asarray(_gbw.E),
+                    np.asarray(_gbw.start_inds).astype(int))
+
+        _A, _E, _s = _ae(RPHYS)
+        REC_SNR = np.zeros(RPHYS.shape[0])
+        for _i in range(RPHYS.shape[0]):
+            if _s[_i] < 0 or _s[_i] + NW_ > SA_G.size:
+                continue
+            _sa = SA_G[_s[_i]:_s[_i] + NW_]; _se = SE_G[_s[_i]:_s[_i] + NW_]
+            REC_SNR[_i] = np.sqrt(max(4.0 * SCI_DF * float(np.sum(
+                np.abs(_A[_i]) ** 2 / _sa + np.abs(_E[_i]) ** 2 / _se)), 0.0))
+
+        # phase-maximised, noise-weighted overlap: |<a|b>| / sqrt(<a|a><b|b>).
+        # The modulus IS the maximum over an overall phase, so no phase grid
+        # is needed.
+        _Ar, _Er, _sr = _ae(RPHYS[MI])
+        _At, _Et, _st = _ae(T_PHYS[TI])
+        MM = np.zeros(MI.size)
+        for _i in range(MI.size):
+            _o = min(_sr[_i], _st[_i])
+            _sp = max(_sr[_i], _st[_i]) + NW_ - _o
+            if _o < 0 or _o + _sp > SA_G.size:
+                continue
+            _sa = SA_G[_o:_o + _sp]; _se = SE_G[_o:_o + _sp]
+            _a1 = np.zeros(_sp, complex); _e1 = np.zeros(_sp, complex)
+            _a2 = np.zeros(_sp, complex); _e2 = np.zeros(_sp, complex)
+            _k = _sr[_i] - _o; _a1[_k:_k + NW_] = _Ar[_i]; _e1[_k:_k + NW_] = _Er[_i]
+            _k = _st[_i] - _o; _a2[_k:_k + NW_] = _At[_i]; _e2[_k:_k + NW_] = _Et[_i]
+            _n = (np.sum(np.conj(_a1) * _a2 / _sa)
+                  + np.sum(np.conj(_e1) * _e2 / _se))
+            _n1 = (np.sum(np.abs(_a1) ** 2 / _sa)
+                   + np.sum(np.abs(_e1) ** 2 / _se))
+            _n2 = (np.sum(np.abs(_a2) ** 2 / _sa)
+                   + np.sum(np.abs(_e2) ** 2 / _se))
+            MM[_i] = float(np.abs(_n) / np.sqrt(max(_n1 * _n2, 1e-300)))
+        MM = np.clip(MM, 0.0, 1.0)
+        SCI.update(mm_med=float(np.median(MM)) if MM.size else float("nan"),
+                   mm_hi=float(np.mean(MM > 0.9)) if MM.size else 0.0,
+                   snr_med=float(np.median(REC_SNR)))
+    except Exception as e:
+        MISSING.append(f"waveform-level recovery statistics unavailable: "
+                       f"{type(e).__name__}: {e}")
+        RPHYS, REC_SNR, MM = None, None, np.zeros(0)
+
+    # ---- cross-arm cache -------------------------------------------------
+    # The v2/v3 comparison must be made on GB-SEARCH iterations, not absolute
+    # ones (v2's first GB leaf lands at iteration 5, v3's at 16), so each arm
+    # publishes its own series keyed by that origin and every comparison panel
+    # subtracts it.
+    ARM_TAG = "v3" if RUN_KIND == "3mo_v3" else "v2"
+    try:
+        np.savez(f"gf_arm_{ARM_TAG}.npz", n_all=n_all, n_band=n_band,
+                 n_match=n_match, it0=IT0, ti=TI, mm=MM,
+                 rec_f0=REC9[:, 1] * 1e-3, ndet=NDET)
+    except Exception:
+        pass
+    ARMS = {}
+    for _fn in sorted(glob.glob("gf_arm_*.npz")):
+        _tag = os.path.basename(_fn)[7:-4]
+        try:
+            ARMS[_tag] = np.load(_fn)
+        except Exception:
+            pass
+    ARM_COL = {"v2": CYAN, "v3": AMBER}
+
+    # ================= FIGURES ==========================================
+    import matplotlib.colors as _mcol
+
+    # ---- F2: completeness AND purity vs GB-search iteration -------------
+    fig, ax = plt.subplots(figsize=(11, 3.8))
+    axr = ax.twinx(); axr.grid(False)
+    for _tag in sorted(ARMS):
+        _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
+        _x = np.arange(_D["n_match"].size) - int(_D["it0"])
+        _k = _x >= 0
+        ax.plot(_x[_k], 100 * _D["n_match"][_k] / NDET, color=_c, lw=2.0,
+                label=f"{_tag} completeness")
+        axr.plot(_x[_k], 100 * _D["n_match"][_k]
+                 / np.maximum(_D["n_band"][_k], 1), color=_c, lw=1.2, ls="--")
+    axr.axhline(100 * CHANCE, color=RED, ls=":", lw=1.2)
+    axr.text(1, 100 * CHANCE, f" {100*CHANCE:.1f}% by chance", color=RED,
+             fontsize=8, va="bottom")
+    ax.set_xlabel("iterations since the first galactic-binary leaf")
+    ax.set_ylabel(f"completeness  [% of {NDET}]")
+    axr.set_ylabel("purity  [% of leaves]  (dashed)", color=DIM, fontsize=9)
+    axr.tick_params(axis="y", colors=DIM, labelsize=8)
+    ax.set_ylim(0, 60); axr.set_ylim(0, 100)
+    ax.legend(fontsize=8, loc="lower right")
+    fig_b64(fig, "f2_progress")
+
+    # ---- F3: match CDF + survival COUNT ---------------------------------
+    fig, ax = plt.subplots(2, 1, figsize=(9.6, 6.0), sharex=True,
+                           gridspec_kw=dict(hspace=0.08))
+    for _tag in sorted(ARMS):
+        _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
+        _m = np.sort(np.asarray(_D["mm"], float))
+        if not _m.size:
+            continue
+        ax[0].plot(_m, np.arange(1, _m.size + 1) / _m.size, color=_c, lw=1.8,
+                   label=f"{_tag}  ({_m.size} matched)")
+        _s, _n = _survival(_m)
+        ax[1].plot(_s, _n, color=_c, lw=1.8)
+    ax[0].set_ylabel("cumulative fraction"); ax[0].set_ylim(0, 1)
+    ax[0].legend(fontsize=8, loc="upper left")
+    ax[1].axhline(NDET, color=FG, ls="--", lw=1.0)
+    ax[1].text(0.02, NDET, f" {NDET} detectable injections", color=FG,
+               fontsize=8, va="bottom")
+    ax[1].set_yscale("log"); ax[1].set_ylim(1, 2500); ax[1].set_xlim(0, 1)
+    ax[1].set_xlabel("phase-maximised overlap with the matched injection")
+    ax[1].set_ylabel("sources at or above")
+    fig_b64(fig, "f3_match")
+
+    if RPHYS is not None:
+        _rf = RPHYS[:, 1]; _ra_ = RPHYS[:, 0]
+        _fgr = np.logspace(np.log10(FLO), np.log10(FHI), 220)
+        _athr = None
+        for _kp in (os.path.join(RUN_DIR, "kappa_grid.npz"), "kappa_grid.npz"):
+            if os.path.exists(_kp):
+                _kg = np.load(_kp)
+                _athr = 7.0 / np.interp(_fgr, _kg["fgrid"], _kg["fit"])
+                break
+
+        # ---- F4: amplitude vs frequency + the three-way recovery scatter --
+        fig, ax = plt.subplots(1, 2, figsize=(13.6, 4.5))
+        a_ = ax[0]
+        a_.scatter(T_F0, T_AMP, s=5, color=DIM, alpha=0.35, lw=0,
+                   label="detectable injections")
+        _sc = a_.scatter(_rf, _ra_, c=np.clip(REC_SNR, 4, None), s=14,
+                         marker=".", cmap="cool", lw=0,
+                         norm=_mcol.LogNorm(vmin=4, vmax=200),
+                         label="resolved GBs")
+        if _athr is not None:
+            a_.plot(_fgr, _athr, color=FG, lw=1.5,
+                    label="instrument sensitivity (SNR = 7)")
+        a_.set_xscale("log"); a_.set_yscale("log")
+        a_.set_xlabel("Frequency [Hz]"); a_.set_ylabel("Strain amplitude")
+        a_.legend(fontsize=8, loc="lower left")
+        _cb = fig.colorbar(_sc, ax=a_, pad=0.015); _cb.set_label("SNR", fontsize=8)
+        _cb.ax.tick_params(labelsize=7)
+        b_ = ax[1]
+        b_.scatter(T_F0[~FOUND], T_AMP[~FOUND], s=17, marker="x", color=RED,
+                   lw=0.8, alpha=0.7,
+                   label=f"detectable, not recovered ({int((~FOUND).sum())})")
+        b_.scatter(_rf[~MATCHED], _ra_[~MATCHED], s=22, facecolors="none",
+                   edgecolors=VIOLET, lw=0.8, alpha=0.85,
+                   label=f"recovered, no match ({int((~MATCHED).sum())})")
+        b_.scatter(_rf[MATCHED], _ra_[MATCHED], s=12, color=GREEN, lw=0,
+                   alpha=0.95, label=f"recovered and matched ({int(MATCHED.sum())})")
+        if _athr is not None:
+            b_.plot(_fgr, _athr, color=FG, lw=1.5)
+        b_.set_xscale("log"); b_.set_yscale("log")
+        b_.set_xlabel("Frequency [Hz]"); b_.set_ylim(*a_.get_ylim())
+        b_.legend(fontsize=8, loc="lower left")
+        fig_b64(fig, "f4_pop")
+
+        # ---- F8: sky map ---------------------------------------------------
+        fig, ax = plt.subplots(figsize=(11.5, 4.4))
+        ax.scatter(np.mod(T_PHYS[:, 7], 2 * np.pi), T_PHYS[:, 8], s=4,
+                   color=DIM, alpha=0.35, lw=0, label="detectable injections")
+        _sc = ax.scatter(np.mod(RPHYS[:, 7], 2 * np.pi), RPHYS[:, 8],
+                         c=np.clip(REC_SNR, 4, None), s=13, cmap="cool", lw=0,
+                         norm=_mcol.LogNorm(vmin=4, vmax=200))
+        ax.set_xlabel("right ascension [rad]")
+        ax.set_ylabel("declination [rad]")
+        ax.set_xlim(0, 2 * np.pi); ax.set_ylim(-1.6, 1.6)
+        _cb = fig.colorbar(_sc, ax=ax, pad=0.012); _cb.set_label("SNR", fontsize=8)
+        _cb.ax.tick_params(labelsize=7)
+        ax.legend(fontsize=8, loc="upper left")
+        fig_b64(fig, "f8_sky")
+
+        # ---- F7: recovered vs injected parameters --------------------------
+        _R = RPHYS[MI]; _T = T_PHYS[TI]
+        _db = DFH / SCI_DF
+        _lnA = np.log(np.maximum(_R[:, 0], 1e-40) / np.maximum(_T[:, 0], 1e-40))
+        _cc = (np.sin(_R[:, 8]) * np.sin(_T[:, 8])
+               + np.cos(_R[:, 8]) * np.cos(_T[:, 8])
+               * np.cos(_R[:, 7] - _T[:, 7]))
+        _sep = np.degrees(np.arccos(np.clip(_cc, -1, 1)))
+        fig, ax = plt.subplots(2, 3, figsize=(13.6, 6.0))
+        ax[0][0].hist(np.clip(_db, -2, 2), bins=40, color=GREEN, alpha=0.9)
+        ax[0][0].axvline(0, color=FG, ls="--", lw=1)
+        ax[0][0].set_xlabel(r"$\Delta f_0$  [FD bins]")
+        ax[0][1].hist(np.clip(_lnA, -2, 2), bins=40, color=GREEN, alpha=0.9)
+        ax[0][1].axvline(0, color=FG, ls="--", lw=1)
+        ax[0][1].set_xlabel(r"$\ln(A_{\rm rec}/A_{\rm cat})$")
+        ax[0][2].hist(_sep, bins=40, color=GREEN, alpha=0.9)
+        ax[0][2].set_xlabel("sky separation [deg]")
+        for _k in range(3):
+            ax[0][_k].set_ylabel("matched sources", fontsize=9)
+        # BOTTOM ROW: error histograms centred on zero, NOT a
+        # recovered-vs-injected scatter with a y = x diagonal -- that idiom
+        # does not appear anywhere in this literature. Zero-centred residual
+        # histograms are what Littenberg 2011 Fig 6 / Strub 2403.15318 Fig 5
+        # use, and they put the bias and the spread on the same axis.
+        _dpsi = (_R[:, 6] - _T[:, 6] + np.pi / 4) % (np.pi / 2) - np.pi / 4
+        _panels = [
+            (np.cos(_R[:, 5]) - np.cos(_T[:, 5]), r"$\Delta$ cos $\iota$", 2.0),
+            (_dpsi, r"$\Delta\psi$ wrapped to $\pi/2$  [rad]", np.pi / 4),
+            ((_R[:, 2] - _T[:, 2]) * 1e16,
+             r"$\Delta\dot f_0$  [$10^{-16}$ Hz/s]", None)]
+        for _ax, (_dv, _lb, _cl) in zip(ax[1], _panels):
+            if _cl is None:
+                _cl = float(np.percentile(np.abs(_dv), 90)) or 1.0
+            _ax.hist(np.clip(_dv, -_cl, _cl), bins=40, color=GREEN, alpha=0.9)
+            _ax.axvline(0, color=FG, ls="--", lw=1)
+            _ax.set_xlabel(_lb)
+            _ax.set_ylabel("matched sources", fontsize=9)
+        fig.tight_layout()
+        fig_b64(fig, "f7_params")
+        # A SECOND encoding of the same matched set, kept deliberately even
+        # though this idiom does not appear in the LISA galactic-binary
+        # literature (which uses zero-centred error histograms, above). It
+        # answers a different question: the histogram shows the size of the
+        # error, the diagonal shows whether the parameter is being RECOVERED
+        # at all, i.e. whether the points know about the injected value or
+        # merely scatter over the prior. For cos iota at these signal
+        # strengths those are visibly different statements.
+        fig, ax2 = plt.subplots(1, 3, figsize=(13.6, 3.5))
+        _sc_panels = [
+            (np.cos(_R[:, 5]), np.cos(_T[:, 5]), r"cos $\iota$", None),
+            (_R[:, 6] % (np.pi / 2), _T[:, 6] % (np.pi / 2),
+             r"$\psi$ mod $\pi/2$  [rad]", None),
+            (_R[:, 2] * 1e16, _T[:, 2] * 1e16,
+             r"$\dot f_0$  [$10^{-16}$ Hz/s]", 98.0)]
+        for _ax, (_rv, _tv, _lb, _q) in zip(ax2, _sc_panels):
+            _ax.scatter(_tv, _rv, s=10, color=GREEN, alpha=0.6, lw=0)
+            if _q is None:
+                _l2 = min(np.min(_tv), np.min(_rv))
+                _h2 = max(np.max(_tv), np.max(_rv))
+            else:
+                _l2, _h2 = np.percentile(_tv, [100 - _q, _q])
+                _pd2 = 0.8 * (_h2 - _l2); _l2 -= _pd2; _h2 += _pd2
+            _ax.plot([_l2, _h2], [_l2, _h2], color=FG, ls="--", lw=1.1)
+            _ax.set_xlim(_l2, _h2); _ax.set_ylim(_l2, _h2)
+            _ax.set_xlabel("injected  " + _lb)
+            _ax.set_ylabel("recovered", fontsize=9)
+        fig.tight_layout()
+        fig_b64(fig, "f7_scatter")
+        SCI["ci_corr"] = float(np.corrcoef(np.cos(_R[:, 5]),
+                                           np.cos(_T[:, 5]))[0, 1])
+        SCI.update(df_tight=float(np.mean(np.abs(_db) < 0.5)),
+                   lnA_med=float(np.median(np.abs(_lnA))),
+                   sep_med=float(np.median(_sep)),
+                   sep_tight=float(np.mean(_sep < 10.0)))
+
+    # ---- F5: source counts vs frequency --------------------------------
+    _f0_cat = None
+    try:
+        with h5py.File(os.path.join(
+                MOJITO_CAT_DIR, "catalogues",
+                "wdwd_cat_mojito_lite_processed.hdf5"), "r") as _wf:
+            _f0_cat = _wf["Binaries"]["GW22FrequencySSBFrame"][:]
+    except Exception:
+        _f0_cat = None
+    _eds = np.logspace(np.log10(FLO), np.log10(FHI), 26)
+    _hdet, _ = np.histogram(T_F0, bins=_eds)
+    _hrec, _ = np.histogram(T_F0[FOUND], bins=_eds)
+    _fc = np.sqrt(_eds[:-1] * _eds[1:])
+    fig, ax = plt.subplots(2, 1, figsize=(10.6, 5.3), sharex=True,
+                           gridspec_kw=dict(height_ratios=[2, 1], hspace=0.08))
+    if _f0_cat is not None:
+        _m = (_f0_cat >= FLO) & (_f0_cat <= FHI)
+        _hall, _ = np.histogram(_f0_cat[_m], bins=_eds)
+        ax[0].stairs(_hall, _eds, color=DIM, fill=True, alpha=0.4,
+                     label=f"all catalogue ({int(_m.sum()):,})")
+        SCI["n_cat_band"] = int(_m.sum())
+    ax[0].stairs(_hdet, _eds, color=CYAN, lw=1.7, label=f"detectable ({NDET})")
+    ax[0].stairs(_hrec, _eds, color=GREEN, fill=True, alpha=0.9,
+                 label=f"recovered ({int(FOUND.sum())})")
+    ax[0].set_yscale("log"); ax[0].set_ylim(0.5, None)
+    ax[0].set_ylabel("sources per bin"); ax[0].legend(fontsize=8)
+    _lo, _hi = _wilson(_hrec, _hdet)
+    _fr = np.where(_hdet > 0, _hrec / np.maximum(_hdet, 1), np.nan)
+    ax[1].errorbar(_fc, 100 * _fr,
+                   yerr=[100 * (_fr - _lo), 100 * (_hi - _fr)], fmt="o",
+                   ms=3.5, color=GREEN, ecolor=GREEN, alpha=0.9, capsize=2)
+    ax[1].set_xscale("log"); ax[1].set_ylim(0, 100)
+    ax[1].set_xlabel("Frequency [Hz]"); ax[1].set_ylabel("recovered [%]")
+    fig_b64(fig, "f5_counts")
+
+    # ---- F6: completeness vs SNR, with Wilson intervals ------------------
+    _seds = np.array([7, 10, 15, 25, 1e9])
+    _lab = ["7-10", "10-15", "15-25", "25+"]
+    fig, ax = plt.subplots(figsize=(9.0, 3.7))
+    _tags = sorted(ARMS)
+    for _q, _tag in enumerate(_tags):
+        _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
+        _fnd = np.zeros(NDET, bool); _fnd[np.asarray(_D["ti"], int)] = True
+        _x, _y, _el, _eh = [], [], [], []
+        for _j, (_a2, _b2) in enumerate(zip(_seds[:-1], _seds[1:])):
+            _m = (T_SNR >= _a2) & (T_SNR < _b2)
+            if not _m.sum():
+                continue
+            _p = _fnd[_m].mean()
+            _l, _h = _wilson(_fnd[_m].sum(), _m.sum())
+            _x.append(_j + (_q - (len(_tags) - 1) / 2) * 0.10)
+            _y.append(100 * _p); _el.append(100 * (_p - _l))
+            _eh.append(100 * (_h - _p))
+        _n = int(_D["n_match"][-1])
+        _g = int(_D["n_match"].size) - 1 - int(_D["it0"])
+        ax.errorbar(_x, _y, yerr=[_el, _eh], fmt="o-", ms=5, color=_c, lw=1.6,
+                    capsize=3, label=f"{_tag}, {_g} GB-search iterations")
+    for _j, (_a2, _b2) in enumerate(zip(_seds[:-1], _seds[1:])):
+        _m = (T_SNR >= _a2) & (T_SNR < _b2)
+        ax.text(_j, 3, f"n={int(_m.sum())}", ha="center", color=DIM, fontsize=8)
+    ax.set_xticks(range(len(_lab))); ax.set_xticklabels(_lab)
+    ax.set_xlabel("optimal SNR of the injection")
+    ax.set_ylabel("recovered [%]"); ax.set_ylim(0, 100)
+    ax.legend(fontsize=8, loc="upper left")
+    fig_b64(fig, "f6_snr")
+
+    # ---- F10: nearest-neighbour separation survival ----------------------
+    fig, ax = plt.subplots(figsize=(9.8, 4.0))
+    for _tag in sorted(ARMS):
+        _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
+        _s, _n = _survival(_nn_bins(np.asarray(_D["rec_f0"], float)))
+        ax.plot(np.maximum(_s, 1e-2), _n, color=_c, lw=1.8,
+                label=f"{_tag} model leaves")
+    _s, _n = _survival(_nn_bins(T_F0))
+    ax.plot(np.maximum(_s, 1e-2), _n, color=FG, lw=1.4, ls="--",
+            label=f"detectable injections ({NDET})")
+    ax.axvline(TOL_BINS, color=RED, ls=":", lw=1.2)
+    ax.text(TOL_BINS * 1.1, 1.5, " match tolerance", color=RED, fontsize=8)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlim(1e-2, 1e4); ax.set_ylim(1, 2000)
+    ax.set_xlabel(r"nearest-neighbour $|\Delta f_0|$  [FD bins]")
+    ax.set_ylabel("sources at or above")
+    ax.legend(fontsize=8, loc="lower left")
+    fig_b64(fig, "f10_nn")
+    _nn = _nn_bins(REC9[:, 1] * 1e-3)
+    SCI.update(nn_half=float(np.mean(_nn < 0.5)) if _nn.size else 0.0,
+               nn_tol=float(np.mean(_nn < TOL_BINS)) if _nn.size else 0.0,
+               nn_half_t=float(np.mean(_nn_bins(T_F0) < 0.5)))
+    # unmatched leaves sitting on an injection another leaf already claimed --
+    # the "two templates, one source" blending mode, counted rather than
+    # inferred from a duplicate percentage.
+    if TI.size and int((~MATCHED).sum()):
+        _d = np.abs((REC9[~MATCHED, 1] * 1e-3)[:, None]
+                    - T_F0[TI][None, :]).min(axis=1) / SCI_DF
+        SCI["blend_b"] = int((_d <= TOL_BINS).sum())
+        SCI["n_unmatched"] = int((~MATCHED).sum())
+
+
+# ---- F9: verification binaries, restricted to the ones that are there -----
+# At three months only ELEVEN of the 55 catalogue verification binaries clear
+# SNR 7; the median VGB optimal SNR is 1.6. Showing all 55 posteriors, as the
+# page used to, showed 44 prior-dominated distributions next to 11 real ones
+# with nothing distinguishing them -- a reader inevitably read the flat ones
+# as failures of the fit rather than as an absence of signal. The headline
+# panel is therefore the detectable subset; the rest are stated, not plotted.
 vgb_last = vgb_c[-min(3, VGB_NIT):].reshape(-1, 55, 5)   # (S, 55, 5)
 snr = np.sqrt(np.clip(np.nanmean(vgb_hh[-1], axis=0), 0, None))  # (55,)
 order = np.argsort(snr)[::-1]
-med = np.median(vgb_last[:, :, 0], axis=0); lo = np.percentile(vgb_last[:, :, 0], 16, axis=0)
+VGB_DET = np.nonzero(snr > 7.0)[0]
+VGB_DET = VGB_DET[np.argsort(snr[VGB_DET])[::-1]]
+VGB_N_DET = int(VGB_DET.size)
+med = np.median(vgb_last[:, :, 0], axis=0)
+lo = np.percentile(vgb_last[:, :, 0], 16, axis=0)
 hi = np.percentile(vgb_last[:, :, 0], 84, axis=0)
+
+_lab = [(VGB_IDS[k] if VGB_IDS else f"leaf {k}") for k in VGB_DET]
+_y = np.arange(VGB_N_DET)[::-1]
+fig, ax = plt.subplots(1, 2, figsize=(12.4, 0.34 * max(VGB_N_DET, 8) + 1.6),
+                       sharey=True, gridspec_kw=dict(width_ratios=[2.2, 1]))
+ax[0].errorbar(med[VGB_DET], _y,
+               xerr=[med[VGB_DET] - lo[VGB_DET], hi[VGB_DET] - med[VGB_DET]],
+               fmt="o", ms=4, color=GREEN, ecolor=GREEN, capsize=2, lw=1.2)
+if VGB_TRUTH is not None:
+    ax[0].plot(VGB_TRUTH[VGB_DET, 0], _y, "|", ms=13, mew=1.8, color=CYAN,
+               ls="none", label="catalogue distance")
+    ax[0].legend(fontsize=8, loc="lower right")
+ax[0].set_yticks(_y); ax[0].set_yticklabels(_lab, fontsize=8)
+ax[0].set_xlabel("distance [kpc]")
+ax[0].set_title(f"the {VGB_N_DET} verification binaries with SNR > 7  "
+                f"(median +/- 1 sigma)", fontsize=10)
+ax[1].barh(_y, snr[VGB_DET], color=VIOLET, alpha=0.9, height=0.55)
+ax[1].axvline(7, color=RED, ls=":", lw=1.2)
+ax[1].set_xscale("log"); ax[1].set_xlabel("optimal SNR")
+ax[1].set_title("SNR against the fitted noise", fontsize=10)
+if VGB_F0 is not None:
+    for _i, _k in enumerate(VGB_DET):
+        ax[1].text(snr[_k] * 1.06, _y[_i], f" {VGB_F0[_k]:.2f} mHz",
+                   fontsize=7, color=DIM, va="center")
+fig.tight_layout()
+fig_b64(fig, "f9_vgb")
+
+# SNR against frequency for ALL 55, with the detection threshold, so the
+# "44 are prior-dominated" statement is visible rather than asserted.
+fig, ax = plt.subplots(figsize=(11, 3.2))
+_x = VGB_F0 if VGB_F0 is not None else np.arange(55).astype(float)
+ax.plot(_x[snr <= 7], snr[snr <= 7], "o", ms=4, color=DIM, alpha=0.75,
+        label=f"prior-dominated ({55 - VGB_N_DET})")
+ax.plot(_x[snr > 7], snr[snr > 7], "o", ms=6, color=GREEN,
+        label=f"SNR > 7 ({VGB_N_DET})")
+ax.axhline(7, color=RED, ls=":", lw=1.2)
+if VGB_F0 is not None:
+    ax.set_xscale("log")
+    ax.set_xlabel("catalogue f0 [mHz]")
+else:
+    ax.set_xlabel("VGB leaf index")
+ax.set_yscale("log"); ax.set_ylabel("optimal SNR")
+ax.legend(fontsize=8, loc="upper left")
+fig_b64(fig, "f9_vgb_snr")
+VGB_SNR_MED = float(np.median(snr))
+
+# ---- RESTORED: the full 55-leaf VGB panels ---------------------------
 if VGB_F0 is not None:
     xs, xlab_vgb = VGB_F0, "catalogue f0 [mHz]"
 else:
@@ -1476,7 +2385,11 @@ try:
         CORNER_BYTES.append(len(raw))
         return base64.b64encode(raw).decode()
 
-    for leaf in order:
+    # ALL 55 leaves (2026-08-16): the redesign cut this to the 11
+    # detectable ones. Detectable first so the picker still opens on a
+    # real posterior, then the rest in descending SNR.
+    _corner_order = list(VGB_DET) + [k for k in order if k not in set(VGB_DET)]
+    for leaf in _corner_order:
         nm = VGB_IDS[leaf] if VGB_IDS else f"leaf {leaf}"
         _f0 = VGB_F0[leaf] if VGB_F0 is not None else float("nan")
         _lab = f"{nm} - {_f0:.4f} mHz - SNR~{snr[leaf]:.0f}"
@@ -1576,6 +2489,9 @@ if _rows:
             P, truth, GB_NAMES, note, bad))
 GB1_JSON = json.dumps(GB1)
 
+# ---- RESTORED: run mechanics. Engineering instrumentation, so it lives
+# in the collapsed appendix rather than the body -- but it is the only
+# view of where the wall time goes and what the devices are holding.
 # ---- 8. efficiency: proposals/s + wall per propose (GB_TIMING records) ----
 TIM_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ .*?\[GB_TIMING (\w+)\] "
@@ -1772,17 +2688,6 @@ if mem_pts:
     ax.legend(); ax.set_title(
         "device-wide memory from the in-run telemetry lines (memGetInfo)")
     fig_b64(fig, "mem_telemetry")
-
-# ============================ HTML ==========================================
-stage_now = "?"
-for k, (o, s_) in sorted(recipe.items(), key=lambda kv: kv[1][0]):
-    if not s_:
-        stage_now = k; break
-chips = "".join(
-    f'<span class="chip {"done" if s_ else ("now" if k == stage_now else "")}">'
-    f'{o}. {k}{" &#10003;" if s_ else ""}</span>'
-    for k, (o, s_) in sorted(recipe.items(), key=lambda kv: kv[1][0]))
-
 rj_kpis = ""
 if RJ_STATS:
     c_ = RJ_STATS
@@ -1826,360 +2731,209 @@ if RJ_BREAK:
         f"{RJ_BREAK[n][2][0][1]:,.1f} s "
         f"({100 * RJ_BREAK[n][2][0][1] / max(RJ_BREAK[n][1], 1e-9):.0f}%)"
         for n in RJ_ORDER) + "<br>"
+# ============================ HTML ==========================================
+stage_now = "?"
+for k, (o, s_) in sorted(recipe.items(), key=lambda kv: kv[1][0]):
+    if not s_:
+        stage_now = k; break
+chips = "".join(
+    f'<span class="chip {"done" if s_ else ("now" if k == stage_now else "")}">'
+    f'{o}. {k}{" &#10003;" if s_ else ""}</span>'
+    for k, (o, s_) in sorted(recipe.items(), key=lambda kv: kv[1][0]))
 
-_alert_3mo = """
-<div class="alert" style="border-color:var(--green)">
-<strong>ITERATION 61, AND THE SELF-HEAL FIRED IN PRODUCTION.</strong> The run advanced 17 &rarr;
-61 stored iterations: GB leaves per cold walker <strong>262 &rarr; 591 (2.3&times;)</strong>,
-cold lnL <strong>+25,240</strong> to 52,631,719, VGB holding all 55. At 05:52:04 the store
-raised <code>filter returned failure during read</code> at resume; twenty seconds later the log
-reads <code>SELF-HEALED: promoted gf_prod_3mo_testing_running_backup_copy.h5 over the damaged
-store (kept as gf_prod_3mo_testing_CORRUPT_0.h5)</code> and the run continued unattended. That
-is the failure that previously cost 11 hours and a human at 03:00. It matters that the store has
-torn AGAIN since (this snapshot's <code>sub_backend/gb/*</code> is unreadable from row ~32,
-while the backup is CLEAN and one iteration AHEAD at 61) &mdash; the tear is a recurring
-environmental fact, and the atomic backup is now the thing carrying the run.
-<br><br>
-<strong>Recovery is climbing fast and staying clean.</strong> Against the mojito catalogue over
-3&ndash;21 mHz, detectable (SNR&gt;7) sources recovered: <strong>38.6% (268 of 694)</strong>,
-and cap cells holding a detectable source but NO leaf fell from <strong>146 (44%) to 66
-(20%)</strong>. Recovery stays sharply SNR-ordered &mdash; 75.3% above SNR 25, 68.6% at
-15&ndash;25, 40.5% at 10&ndash;15, 16.5% at 7&ndash;10 &mdash; so the deficit is still the faint
-tail, exactly where it should be. Leaf QUALITY improved: 75% of leaves sit within 2 FD bins of a
-catalogue source (was 66%), only 10% are unmatched beyond 5 bins (was 17%), and just 7 occupied
-cells contain no detectable source at all.
-</div>
-<div class="alert" style="border-color:var(--amber)">
-<strong>THE CAP IS NOW INERT. The ratchet ran away exactly as predicted, and the problem has
-INVERTED.</strong> Measured per cell from the backup: caps were 1 at iteration 5 and are
-<strong>median 14 (min 2, max 14) at iteration 60</strong>, with 1,126 of 1,232 cells above 10.
-The model holds 591 sources against a permitted 15,619 &mdash; it is using <strong>3.8% of the
-allowance</strong>, and only <strong>1.1 cells per walker (0.3% of occupied cells)</strong> are
-at cap. The leaf cap currently constrains nothing and will constrain nothing for the rest of the
-run.
-<br><br>
-<strong>The mechanism is the ghost increment.</strong> An EMPTY cap cell can never improve its
-max ll by D/2, so it accrued patience on a fixed clock and promoted itself alongside cells doing
-real work &mdash; one step incremented 804 cells at once. The result is the failure mode that
-matters: <strong>the cap was tightest when the model was empty and needed no protection, and is
-absent now that the model is fullest and confusion is worst.</strong>
-<br><br>
-<strong>What it has cost &mdash; real but still modest.</strong> Occupancy reaches 7 leaves in a
-single cell; 7 cells hold 5+ leaves where the catalogue has a median of 2 detectable sources; 96
-of 441 leaves sit in cells holding more leaves than there are detectable sources. Duplication is
-measurable: <strong>18 leaf pairs sit within HALF an FD bin</strong> (4.1%) and 47 within 2 bins
-(10.7%) &mdash; at these SNRs a real pair is resolvable, so sub-half-bin pairs are one source
-fitted twice. Against that, occupancy still tracks truth (1 leaf &rarr; median 1 detectable, 2
-&rarr; 2, 3 &rarr; 3, 4 &rarr; 4), so the bulk of the 2.3&times; growth is legitimate.
-<br><br>
-<strong>THE TWO FIXES ARE COUPLED AND MUST SHIP TOGETHER.</strong> The ghost-increment guard
-(patience only runs once a cell&rsquo;s ll has improved at least once, mirroring
-<code>changed_once</code> in the PSD max-logL search) freezes empty cells at cap 1. Applied
-ALONE at today&rsquo;s <code>GB_CAP_DIVISOR=8</code> it would re-impose the ceiling this page
-measured at iteration 15: <strong>170 of 694 detectable sources (24.5%) structurally
-unrepresentable</strong>, because a 17.36 &micro;Hz cell is 135 FD bins wide and 47 cells hold
-3&ndash;5 separable detectable sources against a cap of 2. Conversely
-<code>GB_CAP_DIVISOR=32</code> alone leaves the ratchet intact and the cap climbs back to
-irrelevance. Together, the cap stays meaningful AND stops excluding: at K=32 exclusion is
-<strong>2.6%</strong> and 456 of 566 occupied cells hold exactly ONE source. K=32 is also the
-last divisor whose cell (4.34 &micro;Hz, 34 FD bins) still spans the run&rsquo;s own observed
-duplicate-parking distance of ~1 Doppler width &mdash; 15.5 bins at 20 mHz; at K=64 the cell is
-1.1 Doppler widths there and parked duplicates begin escaping into the neighbour.
-</div>
-<div class="alert" style="border-color:var(--violet)">
-<strong>THE BIRTH BUDGET IS STILL ALLOCATED LIKE SNR<sup>2</sup>.</strong> The F-stat birth
-proposal weights each peak box by <code>w &prop; F</code>, and the F-statistic goes like
-SNR<sup>2</sup> &mdash; so an SNR-10 source gets <strong>9&times; fewer</strong> birth attempts
-than an SNR-30 one, when it needs more. At iteration 15, 80.3% of the birth mass landed on cells
-whose source was already found (median peak F 125.5) against 7.8% on cells holding an unfound
-detectable source (median F 26.6). At iteration 60 the misallocation persists in frequency too:
-<strong>47.7% of 6.6&times;10<sup>7</sup> birth proposals go above 10 mHz</strong>, where fewer
-than 50 detectable sources exist, and 13.6% below 5 mHz where the galaxy is.
-<code>FSTAT_PEAK_WEIGHT_ALPHA</code> now interpolates &mdash; &alpha;=1 is today&rsquo;s
-behaviour bit-identically and is the default, &alpha;=0 is flat, &alpha;=0.5 makes draws
-&prop; SNR. It needs NO refit: the weights are applied when the proposal is built from the
-cached grids and are not persisted in them, so a restart picks up a new &alpha; against the
-existing epoch cache. Also still open: <code>GB_BAND_SHUTOFF</code> has emitted
-<strong>zero</strong> lines in 61 iterations despite 45 bands above 10 mHz sitting at occupancy
-0 throughout &mdash; that path is inside a bare <code>except Exception: pass</code>, so a
-silent failure would look exactly like this.
-</div>"""
 
-_alert_23mo = f"""
-<div class="alert">
-<strong>23-MONTH SCALING RUN &mdash; the same stack, 7.8&times; the grid.</strong> This page
-is the exact 3-month monitor pointed at <code>gf_prod_23mo</code>; read it as a SCALING
-readout, not a science posterior. Tobs = 6.048e7 s (Nf 1440 &times; Nt 16800), so the WDM
-residual is ~0.58 GB per walker against ~0.075 GB at 3 months, and the run carries the
-23-mo sizing (<code>GB_N_SUBBANDS</code> 2048/GPU, <code>GB_NLEAVES_MAX</code> 25000,
-<code>FSTAT_PEAKS_PER_BAND</code> 500, <code>SIGHET_NT_LAYER</code> 525) with every
-Tobs-independent improvement from the 3-mo work.
-<br><br>
-<strong>Where it is.</strong> {NIT} stored iteration(s); cold lnL {ll[NIT-1].max():,.0f}.
-The GB panels are EMPTY BY CONSTRUCTION so far &mdash; the staged recipe runs
-noise_search &rarr; noise_vgb_search &rarr; gb_search, and this run is still in the noise +
-VGB stages while the F-stat grid is fitted. That fit is the headline scaling number: the
-comb is a <strong>1.19-billion-evaluation</strong> level-5 sweep here (2.3M nodes &times;
-512 sky) against 38.7M at 3 months, which is the ~8&times; Tobs scaling the design
-predicted, landing on top of an already-8&times; per-evaluation grid.
-<br><br>
-<strong>MEASURED SCALING, 3-mo &rarr; 23-mo (Tobs &times;7.78).</strong> The two runs use
-the same code, so these are clean ratios.
-<em>Per-source scoring holds up:</em> <code>vgb_pe</code> costs 18.7 s at 3 months and
-41.0 s here &mdash; <strong>2.2&times; for 7.78&times; Tobs</strong>, i.e. strongly
-sublinear (~Tobs^0.4), which is the sig-het design claim (flat per-source scoring; only
-fills and band likelihoods scale) surviving contact with a 7.8&times; grid.
-<em>The F-stat fit is where the cost really lives.</em> The comb's early levels are
-IDENTICAL between the runs (level 4 is 93,726 nodes &times; 256 sky in both), but the final
-full-sky refinement explodes: 19,120 nodes at 3 months vs <strong>2,317,600 here, 121&times;
-more</strong>, i.e. 9.8M evals (129 s) against <strong>1.19 BILLION evals (4.8 h)</strong>.
-Only ~8&times; of that is the finer frequency grid; the rest is more candidates surviving to
-the last level, which is expected physics &mdash; every source gains ~&radic;8 in SNR over
-this baseline, so far more clear the threshold.
-<em>Stage B:</em> 38.7M evals in 522 s at 3 months against 766M evals here, running at
-<strong>32,863 evals/s vs 74,219</strong> &mdash; 19.8&times; the work at 2.26&times; the
-per-evaluation cost, so ~45&times; the wall (~6.5 h total).
-<br><br>
-<strong>An actionable inefficiency the 23-mo run exposed.</strong> The sweep logs
-<code>[sighet-fstat] 3328 reference-block rebuilds (single-resident cache; heavy rebuilding
-means the sweep's row order is not f0-local)</code>. That is a THRASHING cache, not a
-physics cost: the sig-het reference is rebuilt whenever consecutive rows jump in frequency,
-and at 3 months the smaller sweep hid it. Sorting the sweep's rows by f0 (or giving the
-cache more than one resident block) should recover a real fraction of the 2.26&times;
-per-eval penalty &mdash; the single most promising F-stat optimisation this run has
-surfaced, and it matters most exactly where it hurts most.
-<br><br>
-<strong>Memory is the other 23-mo constraint.</strong> Peak device use is 84.9 GB of 99.9
-on dev0 (58.3 on dev1) against ~43/18 GB at 3 months &mdash; 85% of the card. That is why
-the buffer is sized at <code>GB_N_SUBBANDS</code> 2048/GPU here rather than 8192, and it is
-the number to watch first when <code>gb_search</code> finally opens and the GB buffers join
-the VGB ones.
-<br><br>
-<strong>MEASURED SCALING, 3-mo &rarr; 23-mo (Tobs &times;7.78).</strong> Same code both
-runs, so these are clean ratios.
-<em>Per-source scoring holds up:</em> <code>vgb_pe</code> costs 18.7 s at 3 months and
-41.0 s here &mdash; <strong>2.2&times; for 7.78&times; Tobs</strong>, strongly sublinear
-(~Tobs^0.4). That is the sig-het design claim (flat per-source scoring; only fills and band
-likelihoods scale) surviving contact with a 7.8&times; grid.
-<em>The F-stat fit is where the cost really lives.</em> The comb's early levels are
-IDENTICAL between runs (level 4 is 93,726 nodes &times; 256 sky in both), but the final
-full-sky refinement explodes: 19,120 nodes at 3 months vs <strong>2,317,600 here,
-121&times; more</strong> &mdash; 9.8M evals (129 s) against <strong>1.19 BILLION evals
-(4.8 h)</strong>. Only ~8&times; of that is the finer frequency grid; the rest is more
-candidates surviving to the last level, which is expected physics, since every source gains
-~&radic;8 in SNR over this baseline and far more clear the threshold.
-<em>Stage B:</em> 38.7M evals in 522 s at 3 months against 766M evals here at
-<strong>32,863 evals/s vs 74,219</strong> &mdash; 19.8&times; the work at 2.26&times; the
-per-evaluation cost, so ~45&times; the wall (~6.5 h).
-<br><br>
-<strong>An actionable inefficiency this run exposed.</strong> The sweep logs
-<code>[sighet-fstat] 3328 reference-block rebuilds (single-resident cache; heavy rebuilding
-means the sweep's row order is not f0-local)</code>. That is a THRASHING cache, not a
-physics cost: the sig-het reference is rebuilt whenever consecutive rows jump in frequency,
-and the smaller 3-month sweep hid it. Sorting the sweep's rows by f0, or letting the cache
-hold more than one resident block, should recover a real share of that 2.26&times; per-eval
-penalty &mdash; the most promising F-stat optimisation surfaced so far, and it bites hardest
-exactly where it costs most.
-<br><br>
-<strong>Memory is the other 23-mo constraint.</strong> Peak device use is 84.9 GB of 99.9 on
-dev0 (58.3 on dev1) against ~43/18 GB at 3 months &mdash; 85% of the card, before
-<code>gb_search</code> has added a single GB buffer. That is why the buffer is sized at
-<code>GB_N_SUBBANDS</code> 2048/GPU here rather than 8192, and it is the first number to
-watch when the GB stage opens.
-<br><br>
-<strong>What to compare against the 3-month page.</strong> Per-source sig-het scoring is
-FLAT in Tobs by design (the v4/v5 bench-off), so the GB propose spans should NOT scale with
-Tobs once gb_search opens &mdash; buffer fills, band likelihoods and the F-stat fit are the
-terms that do. The VGB branch is a clean early check: 55 fixed sources at 8 ladder rungs,
-identical to the 3-mo configuration, so any <code>vgb_pe</code> cost difference is pure
-Tobs scaling of the fills. Watch device memory against the 96 GB cards: the 23-mo per-slot
-slab is ~8&times; the 3-mo one, which is exactly why the buffer is sized at 2048/GPU here
-instead of 8192.
-</div>"""
+def pct(x, d=1):
+    return f"{100 * x:.{d}f}%"
 
-_alert_census = """
-<div class="alert" style="border-color:var(--violet)">
-<strong>INJECTION vs RECOVERY ABOVE 5 mHz &mdash; is source ADDING trustworthy?</strong>
-Census against the mojito WDWD catalogue (757 sources above 5 mHz), with optimal SNR computed
-against this run's OWN sampled instrument + foreground, normalisation validated against the
-run's stored VGB <code>h_h</code> at identical parameters (median ratio <strong>0.999</strong>).
-The max-logL cold walker at iteration 15 holds 263 GB leaves, 157 of them above 5 mHz.
-<br><br>
-<strong>The healthy part.</strong> Recovery is cleanly MONOTONIC in SNR &mdash; 0% below SNR
-3, 3% at 5&ndash;7, 8.5% at 7&ndash;10, 15% at 10&ndash;15, 36% at 15&ndash;25,
-<strong>62% above 25</strong> &mdash; and at FIXED SNR it is flat in frequency
-(58/67/50/76% across 5&ndash;6, 6&ndash;8, 8&ndash;10, 10&ndash;15 mHz for SNR&gt;25). The
-apparent "better at high frequency" trend is an SNR selection effect, not a frequency
-pathology. Matching is overwhelmingly real: 103 of 157 land within 2 FD bins of a catalogue
-source against a chance expectation of <strong>4</strong>. And it is still climbing at
-~7 new high-frequency matches per iteration &mdash; this is a search 11 iterations old, NOT a
-converged model.
-<br><br>
-<strong>The structural part &mdash; a ceiling that waiting will NOT fix.</strong> Of the 419
-detectable (SNR&gt;7) sources above 5 mHz, <strong>102 (24%) cannot be represented at the
-current cap at all</strong>: they sit in cap cells that already contain more detectable
-catalogue sources than the cap permits. The cap cell is 17.36 &micro;Hz =
-<strong>135 FD bins</strong>, far wider than the resolution at these frequencies, so
-47 cells hold 3&ndash;5 separable detectable sources against a cap of 2. Crowding is the
-strongest predictor of a miss after SNR: isolated loud sources are recovered
-<strong>47%</strong> of the time, those sharing a cell with 2&ndash;3 others only
-<strong>14%</strong>. Two independent fixes both close it &mdash; raising the cap to 6, or
-taking <code>GB_CAP_DIVISOR</code> from 8 to 32 (cell 4.34 &micro;Hz) &mdash; and the divisor
-is the better lever because it keeps the anti-stacking rule tight where confusion is real.
-<br><br>
-<strong>What is NOT wrong.</strong> The cap is not blocking most misses: 147 of the 316
-missed detectable sources sit in <strong>completely EMPTY</strong> cap cells, and the F-stat
-proposal has density right on them (88% within 2 bins of a peak, 100% within 2 bins of a
-centre node). Those are marginal &mdash; median SNR 9.8, only 2 above SNR 25 &mdash; i.e.
-search-in-progress, not a gate. A reference-epoch/transform bug was tested and
-<strong>rejected</strong>: the catalogue's <code>TimeReferenceSSBFrame</code> equals the run's
-<code>t0</code> exactly, and the f0 residual has zero correlation with fdot (r = &minus;0.01).
-<br><br>
-<strong>The one open oddity.</strong> Matched f0 residuals sit at ~0.5 FD bins and do NOT
-shrink with SNR (0.58 bins at SNR 7&ndash;10, 0.75 at SNR&gt;50, against a statistical
-expectation that falls from 0.06 to 0.008 bins). Tracking individual loud sources explains
-most of it: f0 stays FROZEN for several iterations then jumps discretely
-(&minus;1.77, &minus;1.12, &minus;1.12, &minus;1.12, &minus;0.06, ... &rarr; &minus;0.37),
-so refinement happens through RJ re-birth rather than smooth in-model diffusion, and the
-population median stays flat only because newly-added unrefined sources keep replacing the
-ones that have converged. The residual distribution is close to uniform over &plusmn;1 bin,
-which is exactly the <strong>2-FD-bin F-stat peak grid</strong> the births are drawn on.
-Worth watching as the search converges; not evidence of a transform error.
-<br><br>
-<strong>THE 26 UNMATCHED LEAVES ARE REAL SOURCES PARKED ONE DOPPLER WIDTH HIGH.</strong>
-A full 9-parameter audit against the catalogue (independent investigation) clears every
-coordinate map: sky is recovered to a median 11.5&deg; (6.8&deg; for the loud third, against
-0.76% by chance), <code>cos_iota</code> shows no sign flip (closer to &minus;truth for only
-16.8%, chance 50%), <code>psi</code> resolves to 0.146 rad modulo &pi;/2 &mdash; the standard
-(&psi;&rarr;&psi;+&pi;/2, &phi;<sub>0</sub>&rarr;&phi;<sub>0</sub>+&pi;) GB degeneracy &mdash;
-and amplitude and fdot both match while (dist, Mc, ratio) scatter along their exactly
-unconstrained direction. <code>phi0</code> is simply NOT YET CONSTRAINED by the run itself
-(across-walker concentration R&#772; = 0.33 for &phi;<sub>0</sub> against 0.99 for the sky);
-where it HAS converged it agrees with truth. Template overlap against truth is 0.874 for
-loud, f0-tight sources once the overall phase is maximised, and 0.988 in magnitude when only
-(&phi;<sub>0</sub>, &psi;, cos&nbsp;&iota;) are swapped in.
-<br><br>
-But the 26 unmatched leaves are NOT noise-fitters: median amplitude 6.9e-23 against a
-catalogue median of 2.9e-23 (~85th percentile), each sits 5&ndash;16 bins from a catalogue
-source that no other leaf claims, and A<sub>rec</sub>/A<sub>cat</sub> has median
-<strong>1.07</strong> &mdash; they ARE those sources. <strong>25 of 26 sit ABOVE their
-catalogue source (binomial p = 8&times;10<sup>&minus;7</sup>)</strong>, and the offset scales
-with the Doppler width: gap/(f<sub>0</sub>&middot;v/c) = <strong>1.12</strong>, 16/84%
-[0.83, 1.35]. An fdot epoch error (~36&times; too small), a common-epoch frame error (scanning
-a shared t* makes it worse), and a skewed F-stat birth grid (1.4&sigma;) were each tested and
-rejected; the 101 genuine detections are recovered to 8% of a Doppler width, so there is no
-global frame problem. These read as leaves parked on the upper edge of the Doppler-swept band
-of an UNSUBTRACTED source, one-sided because the bulge sources share a sky region and
-therefore a common sign of line-of-sight velocity over this particular 3-month window. That
-is a convergence/proposal issue rather than a coordinate map &mdash; but 25 leaves holding
-real amplitude at the wrong frequency will actively fight the true births, so it is the
-highest-value thing on this page to fix.
-</div>"""
 
-alert = ((_alert_23mo if RUN_KIND == "23mo" else _alert_3mo)
-         + (_alert_census if CENSUS is not None else ""))
+# ---- the like-for-like arm table ------------------------------------------
+# The two arms started their galactic-binary search at DIFFERENT absolute
+# iterations (v2's first GB leaf lands at iteration 5, v3's at 16), so any
+# comparison at a shared absolute iteration silently gives v2 eleven extra
+# search steps. Everything below is indexed on iterations SINCE the first GB
+# leaf, and the table is cut at the shorter arm's length.
+ARM_TABLE = ""
+if len(ARMS) >= 2 and SCI:
+    _K = min(int(D["n_match"].size) - 1 - int(D["it0"]) for D in ARMS.values())
+    _rows = []
+    for _t in sorted(ARMS):
+        _D = ARMS[_t]
+        _i = int(_D["it0"]) + _K
+        _rows.append((_t, int(_D["n_all"][_i]), int(_D["n_match"][_i]),
+                      int(_D["n_match"][_i]) / SCI["ndet"],
+                      int(_D["n_match"][_i]) / max(int(_D["n_band"][_i]), 1),
+                      int(_D["n_match"].size) - 1 - int(_D["it0"])))
+    _hdr = "".join(f'<th style="text-align:right;padding:4px 0 4px 20px">{r[0]}'
+                   f'</th>' for r in _rows)
+    def _row(lbl, fn):
+        return ("<tr><td style='padding:3px 0'>" + lbl + "</td>"
+                + "".join("<td style='text-align:right;padding:3px 0 3px 20px'>"
+                          + fn(r) + "</td>" for r in _rows) + "</tr>")
+    ARM_TABLE = f"""
+<table style="border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;margin-top:10px">
+<tr style="border-bottom:1px solid var(--line)"><th style="text-align:left;padding:4px 0">
+at {_K} galactic-binary search iterations</th>{_hdr}</tr>
+{_row("model sources", lambda r: f"{r[1]:,}")}
+{_row("matched to a detectable injection", lambda r: f"{r[2]:,}")}
+{_row("completeness", lambda r: pct(r[3]))}
+{_row("purity", lambda r: pct(r[4]))}
+{_row("search iterations completed in total", lambda r: f"{r[5]}")}
+</table>"""
 
-# ---- data/template/residual captions (numbers come from the arrays) -------
+# ---- captions, every number read off the arrays that made the figure ------
+if SCI:
+    cap_f2 = (
+        f"Completeness (solid, left axis) is the share of the {SCI['ndet']} "
+        f"detectable injections matched by a model source within "
+        f"{TOL_BINS:.0f} frequency bins; purity (dashed, right axis) is the "
+        f"share of model sources that so match. Now "
+        f"{pct(SCI['completeness'])} and {pct(SCI['purity'])}.")
+    cap_f3 = (
+        f"Noise-weighted overlap between each matched pair, maximised over an "
+        f"overall phase. Read the lower panel's height at any overlap as the "
+        f"NUMBER of sources recovered that well. Median "
+        f"{SCI.get('mm_med', float('nan')):.2f}; "
+        f"{pct(SCI.get('mm_hi', 0))} exceed 0.9.")
+    cap_f4 = (
+        f"Left: every model source in the amplitude-frequency plane, coloured "
+        f"by optimal SNR. Right: the same plane split three ways. Recovery "
+        f"tracks amplitude, and the misses concentrate along the faint edge "
+        f"rather than anywhere structural.")
+    cap_f5 = (
+        f"Where the sources are and where they are being found. The lower "
+        f"panel is the per-bin recovery fraction with 68% Wilson intervals. "
+        f"Recovery climbs steeply above 8 mHz, which is the galaxy thinning "
+        f"out rather than the search improving there.")
+    cap_f6 = (
+        f"Recovery against injected SNR, with 68% Wilson intervals, both arms "
+        f"on equal footing. The monotone rise is the health check: a search "
+        f"that adds sources arbitrarily would be flat here. This axis is "
+        f"ours, not a field convention.")
+    cap_f7 = (
+        f"Recovered minus injected for the matched pairs. Frequency is in "
+        f"bins, amplitude is a log ratio, angles are raw. "
+        f"{pct(SCI.get('df_tight', 0), 0)} of matches sit within half a "
+        f"frequency bin; the median sky offset is "
+        f"{SCI.get('sep_med', float('nan')):.0f} degrees.")
+    cap_f8 = (
+        f"Recovered sources over the injected population, coloured by SNR. "
+        f"The bulge dominates both. Sky is the weakest-constrained "
+        f"coordinate at these signal strengths, so scatter here is expected "
+        f"and is quantified in the parameter panel.")
+    cap_f10 = (
+        f"How close model sources sit to each other in frequency. Below the "
+        f"match tolerance the model is denser than the injections, which is "
+        f"two templates sharing one source; "
+        f"{pct(SCI.get('nn_half', 0), 1)} of leaves have a neighbour within "
+        f"half a bin against {pct(SCI.get('nn_half_t', 0), 1)} of injections.")
+else:
+    cap_f2 = cap_f3 = cap_f4 = cap_f5 = cap_f6 = cap_f7 = cap_f8 = cap_f10 = ""
+
+if DTR:
+    _d = DTR
+    cap_f1 = (
+        f"Power spectral density of the TDI A channel &mdash; not a strain "
+        f"amplitude, and not an ASD. The gap between the instrument curve and "
+        f"their sum is the galactic confusion, at most a factor "
+        f"{_d.get('conf_ratio', float('nan')):.2f} in power, near "
+        f"{_d.get('conf_f', float('nan')) * 1e3:.1f} mHz. {_d['n_gb']} "
+        f"galactic-binary and {_d['n_vgb']} verification-binary templates are "
+        f"subtracted here.")
+    cap_f1b = (
+        f"Lower panel: residual power over the fitted noise-plus-foreground "
+        f"model, coloured by the Anderson&ndash;Darling Gaussianity p-value of "
+        f"the whitened residual &mdash; dark bins are where the model is still "
+        f"incomplete. The residual stays above the instrument-only curve in "
+        f"{_d['nbins'] - _d['undersub']} of {_d['nbins']} bins; "
+        f"{_d['undersub']} dip below it, spanning "
+        f"{_d.get('undersub_lo', float('nan')) * 1e3:.1f}&ndash;"
+        f"{_d.get('undersub_hi', float('nan')) * 1e3:.1f} mHz, and the "
+        f"deepest is {100 * (1 - _d.get('undersub_worst', 1)):.0f}% under. "
+        f"Read that against the instrument model itself: the fitted "
+        f"Soms sits {100 * NOISE_BIAS[0]:+.1f}% from injection, which is "
+        f"{100 * ((1 + NOISE_BIAS[0]) ** 2 - 1):+.1f}% in power, so a curve "
+        f"drawn a few percent high will sit above a correct residual over "
+        f"exactly the band where that parameter dominates. Shortfalls of "
+        f"that size are the noise model, not over-subtraction; a bin far "
+        f"under would be a different statement.")
+else:
+    cap_f1 = cap_f1b = ""
+
+# ---- captions for the restored data/template/residual panels --------------
+# Condensed from the pre-redesign page: same numbers, read off the same
+# arrays, without the method narrative that now lives in the appendix.
 if DTR:
     _d = DTR
     dtr_fd_cap = (
-        f"Rows = the TDI channels the run analyses (X / Y / Z); columns = "
-        f"<strong>data</strong> | <strong>template sum</strong> | "
-        f"<strong>residual</strong> &mdash; the same 3-column layout the run's "
-        f"own debug plots use (<code>gbspecialstretch.py::"
-        f"_debug_plot_band_sequence</code>). Amplitude spectra, log&ndash;log, "
-        f"block-MAX decimated to {2200} points per curve (taking every Nth bin "
-        f"instead would drop exactly the narrow GB lines this panel exists to "
-        f"show). Dim grey = data, repeated faintly under the template and "
-        f"residual columns so the comparison is direct; <span style="
-        f"'color:var(--green)'>green</span> = the {_d['n_gb']} live GB leaves, "
-        f"<span style='color:var(--violet)'>violet</span> = the {_d['n_vgb']} "
-        f"VGB leaves, <span style='color:var(--cyan)'>cyan</span> = the "
-        f"residual. Dotted red = the run's own GB band edges "
-        f"(<code>sub_backend/gb/band_edges</code>). Curves are clipped at "
-        f"1e-19; the template is zero between sources, so its line simply "
-        f"stops there rather than diving off-scale."
-        f"<br><br><strong>Numeric check &mdash; the subtraction is real.</strong> "
-        f"At the loudest recovered GB, f0 = {_d['chk_f0']:.5f} mHz, the X-channel "
-        f"peak bin goes from |data| = {_d['chk_dpk']:.3e} to |residual| = "
-        f"{_d['chk_rpk']:.3e} (a factor {_d['chk_dpk']/max(_d['chk_rpk'],1e-99):.0f} "
-        f"down), and over the &plusmn;40-bin window around it the 3-channel power "
-        f"falls {_d['chk_dp']:.3e} &rarr; {_d['chk_rp']:.3e}, i.e. "
-        f"{100*_d['chk_rp']/max(_d['chk_dp'],1e-99):.1f}% of the data power left. "
-        f"Across the WHOLE GB band, by contrast, only "
-        f"{100*(1 - _d['band_rp']/max(_d['band_dp'],1e-99)):.1f}% of the power "
-        f"is removed ({100*_d['band_rp']/max(_d['band_dp'],1e-99):.1f}% remains) "
-        f"&mdash; expected at stored iteration {NIT-1}, which is still in the "
-        f"noise/VGB stages with only {_d['n_gb']} GB leaves alive out of a "
-        f"whole confusion foreground.")
+        f"Rows are the TDI channels the run analyses; columns are data, "
+        f"template sum and residual. Grey is the data, repeated faintly under "
+        f"the other two columns so the comparison is direct; green is the "
+        f"{_d['n_gb']} galactic-binary templates, violet the {_d['n_vgb']} "
+        f"verification binaries, cyan the residual. Dotted red marks the "
+        f"run's own band edges. At the loudest recovered source, "
+        f"{_d['chk_f0']:.5f} mHz, the peak bin falls by a factor "
+        f"{_d['chk_dpk'] / max(_d['chk_rpk'], 1e-99):.0f} and the power in the "
+        f"surrounding 81 bins drops to "
+        f"{100 * _d['chk_rp'] / max(_d['chk_dp'], 1e-99):.1f}% of the data. "
+        f"Across the whole band only "
+        f"{100 * (1 - _d['band_rp'] / max(_d['band_dp'], 1e-99)):.1f}% of the "
+        f"power has been removed &mdash; the unresolved galaxy is still there.")
     dtr_wdm_cap = (
-        f"The same three states on the run's OWN WDM grid, read straight off "
-        f"<code>global_fit/domain_settings</code>: {_d['wdm_shape'][1]} active "
-        f"layers of {_d['layer_df']*1e3:.4f} mHz &times; "
-        f"{int(_d['layer_dt'])} s time pixels, MAX-pooled "
-        f"{_d['wdm_dec']}&times; along time to plot resolution "
-        f"({_d['wdm_shape'][2]} columns) before anything is drawn. Panels are "
-        f"|w<sub>mn</sub>| under <strong>one shared LINEAR color scale per "
-        f"channel row</strong>, keyed to the 99.5th percentile of that row's "
-        f"DATA panel &mdash; the run's own convention (the addremove debug "
-        f"plot takes its norm from the total-data column, one per channel, "
-        f"shared across every frame). Shared-per-row is the right choice here: "
-        f"it is what makes a shrinking residual render DARKER instead of "
-        f"autoscaling itself back to full brightness, which a per-panel scale "
-        f"would do. The template column's horizontal tracks with their annual "
-        f"brightness modulation are the recovered sources; read the residual "
-        f"panel against the data panel at those same layers.")
+        f"The same three states on the run's own time-frequency grid: "
+        f"{_d['wdm_shape'][1]} layers of {_d['layer_df'] * 1e3:.4f} mHz by "
+        f"{int(_d['layer_dt'])} s, max-pooled {_d['wdm_dec']}&times; in time. "
+        f"One shared linear scale per channel row, keyed to that row's data "
+        f"panel, so a shrinking residual renders darker instead of "
+        f"rescaling itself back to full brightness. The horizontal tracks with "
+        f"annual brightness modulation are the recovered sources.")
     dtr_note = (
-        f"Both figures are built for cold walker <strong>{_d['walker']}</strong> "
-        f"&mdash; the MAX-lnL walker of stored iteration {NIT-1} "
-        f"(lnL = {_d['lnl']:,.1f}), not walker 0. Data = the mojito L1 bricks "
-        f"the run itself loaded, re-poured through the installed "
-        f"<code>TDSignal.fft</code> / <code>FDSignal.transform(WDMSettings)</code> "
-        f"with the run's Tukey window; templates = the stored cold-chain "
-        f"coordinates through the run's <code>make_gb_transform_container</code> "
-        f"and the installed <code>gbgpu.gbcomps.GBFDComputations</code> kernel "
-        f"(the FD twin of the WDM chunked-heterodyne comp the GB branch "
-        f"analyses with). The GB/VGB branches anchor source phase at "
-        f"<code>MOJITO_REFERENCE_TIME</code> while the data grid starts "
-        f"{_d['dt_shift']:.1f} s later, and the FD comp requires "
-        f"<code>t_start == t_ref</code>, so the template is advanced onto the "
-        f"data grid by exp(+2&pi;i&middot;f&middot;&Delta;t); that route was "
-        f"VERIFIED, not assumed &mdash; at catalogue-truth VGB parameters it "
-        f"reproduces the VGB-only mojito brick at complex overlap 0.9999 per "
-        f"channel (residual power 1.8e-4 of the brick). <strong>psd and galfor "
-        f"are NOT in the template sum</strong>: they are noise-model branches "
-        f"&mdash; they shape the sensitivity the likelihood weights by, they "
-        f"are not subtracted from the data, so the unresolved galaxy stays in "
-        f"the residual by construction.")
+        f"Both are built for cold walker {_d['walker']}, the maximum-likelihood "
+        f"walker of the last stored iteration. Noise and foreground are not in "
+        f"the template sum &mdash; they shape the sensitivity the likelihood "
+        f"weights by, they are not subtracted, so the unresolved galaxy stays "
+        f"in the residual by construction.")
 else:
     dtr_fd_cap = dtr_wdm_cap = dtr_note = ""
 
-missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
-wanted_next = """
-<li>The sbatch stdout log (<code>gf3mo_&lt;jobid&gt;.log</code>) — carries
-<code>GF_MOVE_TIMING</code>, which is the only thing that splits <code>psd_pe</code> from
-<code>galfor_pe</code>. They are jointly the largest line item in the iteration (~30%) and we
-still cannot say which of the two owns it.</li>
-<li>A <code>gpu_util_*.csv</code> that actually covers the productive segment. This snapshot's
-working stretch (02:27–03:14) was a manual relaunch with no sampler attached, so the
-utilisation numbers on this page come from the nearest identical-settings window (job 216).</li>
-<li>Confirmation that the restarted run self-healed — grep the log for
-<code>SELF-HEALED: promoted</code> and for a <code>*_CORRUPT_0.h5</code> appearing beside the
-store. That is the first live exercise of the promotion path.</li>
-<li>The first <code>leaf cap incremented</code> lines under patience 3, to confirm the ramp
-cadence actually shortened (this run demonstrably ran at 5).</li>
-<li>Per-iteration <code>[FSTAT_CTR]</code> census lines across a longer stretch — the
-two-state per-row center cost (1.64 vs 0.31 ms/row) needs several proposes to correlate
-against cell counts / caps.</li>"""
+NOISE_TXT = " and ".join(f"{100 * b:+.1f}%" for b in NOISE_BIAS)
 
-html = f"""<title>GF {RUN_LABEL} Run Monitor</title>
+# ---- ONE run-health line, in place of ~1,900 words of failure forensics ----
+# The OOM, cap-ramp, ghost-guard and Doppler-offset investigations that used to
+# open this page are engineering history: they belong in the run log and in the
+# tracker, not in the first thing a collaborator reads. What a reader needs
+# from the top of a status page is how far each arm got and whether to trust it
+# as converged.
+_arm_bits = []
+for _t in sorted(ARMS):
+    _D = ARMS[_t]
+    _arm_bits.append(f"{_t} has completed "
+                     f"{int(_D['n_match'].size) - 1 - int(_D['it0'])} "
+                     f"galactic-binary search iterations")
+_ended = ("ended at iteration 80 on a GPU memory limit"
+          if RUN_KIND == "3mo" and NIT >= 80 else
+          f"has stored {NIT} iterations")
+RUN_HEALTH = (
+    f"<strong>Run health.</strong> This arm {_ended}. "
+    + ("; ".join(_arm_bits) + ". " if _arm_bits else "")
+    + "Neither arm has converged, so every number here is a progress readout "
+      "rather than a result.")
+
+missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
+
+
+html = f"""<title>LISA Global Fit {RUN_LABEL}</title>
 <style>
 :root {{
   --bg:#0A0E14; --panel:#10161F; --line:#223041; --fg:#B8C6D4; --dim:#67788A;
   --cyan:#4FD8EB; --amber:#F5A623; --green:#58C48A; --red:#E5484D; --violet:#9B7BFF;
+  /* Catalogue-truth marks only. Deeper and more saturated than --red so
+     30k crosses read as a deliberate overlay rather than a pink haze, and
+     so they stay distinct from the green recovery circles they sit under. */
+  --truthred:#C41220;
 }}
 :root[data-theme="light"] {{
   --bg:#EEF1F5; --panel:#FFFFFF; --line:#D4DBE3; --fg:#25313D; --dim:#5D6B7A;
+  --truthred:#A50F1B;
 }}
 * {{ box-sizing:border-box; }}
 body {{ background:var(--bg); color:var(--fg); font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; margin:0; }}
@@ -2224,240 +2978,255 @@ button.armed {{ border-color:var(--amber); color:var(--amber); }}
 .viewctl select {{ background:var(--bg); color:var(--fg); border:1px solid var(--line);
   border-radius:3px; font:11px ui-monospace,monospace; padding:2px 4px; max-width:520px; }}
 .viewctl select:focus {{ border-color:var(--cyan); outline:none; }}
-button.armed.truth {{ border-color:var(--red); color:var(--red); }}
+button.armed.truth {{ border-color:var(--dim); color:var(--dim); }}
 ul {{ color:var(--dim); font-size:13px; }}
 </style>
 <header>
-  <h1>GF {RUN_LABEL} Run Monitor</h1>
-  <span class="stamp">snapshot: {os.path.basename(RUN_DIR)} &middot; generated {datetime.now():%Y-%m-%d %H:%M}</span>
+  <h1>LISA Global Fit &middot; {RUN_LABEL} Status</h1>
+  <span class="stamp">{os.path.basename(RUN_DIR)} &middot; {datetime.now():%Y-%m-%d}</span>
   <span>{chips}</span>
 </header>
 <nav>
-  <a href="#status">status</a><a href="#dtr">data / template / residual</a>
-  <a href="#ll">likelihood</a><a href="#noise">psd + foreground</a>
-  <a href="#gb">gb search</a><a href="#fstat">f-stat fit</a><a href="#vgb">vgb</a>
-  <a href="#explorer">1/d explorer</a><a href="#timing">timing</a><a href="#next">next snapshot</a>
+  <a href="#status">status</a><a href="#resid">residual</a>
+  <a href="#recovery">recovery</a><a href="#population">population</a>
+  <a href="#params">parameters</a><a href="#search">search &amp; cap cells</a>
+  <a href="#fstat">f-stat</a><a href="#noise">noise</a>
+  <a href="#vgb">verification binaries</a><a href="#detect">detectability</a>
+  <a href="#appendix">appendix</a>
 </nav>
 <main>
 
 <section id="status"><h2>Status</h2>
 <div class="kpi">
-  <div><b>{NIT}</b><span>iterations stored</span></div>
-  <div><b>{ll[-1].max():,.1f}</b><span>max cold lnL</span></div>
-  <div><b>{ll[-1].max()-ll[-1].min():.2f}</b><span>walker spread</span></div>
-  <div><b>{int(gb_counts[-1].max())}</b><span>GB sources (max walker)</span></div>
-  <div><b>55</b><span>VGB leaves</span></div>
-  <div><b>{stage_now}</b><span>active stage</span></div>
+  <div><b>{SCI.get("ngbit", 0)}</b><span>GB search iterations</span></div>
+  <div><b>{SCI.get("n_all", int(gb_counts[-1].max())):,}</b><span>model sources</span></div>
+  <div><b>{SCI.get("n_match", 0):,}</b><span>matched to an injection</span></div>
+  <div><b>{pct(SCI["completeness"]) if SCI else "&mdash;"}</b><span>completeness</span></div>
+  <div><b>{pct(SCI["purity"]) if SCI else "&mdash;"}</b><span>purity</span></div>
+  <div><b>{VGB_N_DET}</b><span>verification binaries above SNR 7</span></div>
 </div>
-{alert}
+<p style="font-size:13px">{RUN_HEALTH}</p>
+<p style="font-size:13px"><strong>The denominator, stated once.</strong> Every
+recovery number on this page is against <strong>{SCI.get("ndet", 812)} galactic
+binaries</strong> &mdash; those in the injected catalogue with optimal
+signal-to-noise above 7 over 3&ndash;21.94 mHz, evaluated under this run&rsquo;s own
+fitted noise. A model source counts as a recovery when it lies within
+{TOL_BINS:.0f} frequency bins ({TOL_BINS / SCI_TOBS * 1e6:.3f} &micro;Hz) of one,
+one-to-one. Those windows cover {pct(SCI["chance"], 1) if SCI else "2.2%"} of the
+band, so that is the rate at which an arbitrary source would match by accident.</p>
+{ARM_TABLE}
 </section>
 
-<section id="dtr"><h2>Data / Template / Residual</h2>
+<section id="resid"><h2>Residual Spectrum</h2>
+<div class="panel">{img("f1_resid", "residual spectrum")}
+<div class="caption">{cap_f1}<br>{cap_f1b}</div></div>
 <div class="panel">{img("dtr_fd", "data / template / residual, frequency domain")}
 <div class="caption">{dtr_fd_cap}</div></div>
-<div class="panel">{img("dtr_wdm", "data / template / residual, WDM domain")}
+<div class="panel">{img("dtr_wdm", "data / template / residual, time-frequency")}
 <div class="caption">{dtr_wdm_cap}</div></div>
 <div class="caption">{dtr_note}</div>
+<div class="caption">Data are the mojito Level-1 products the run itself loaded,
+re-transformed with the run&rsquo;s own window; templates are the last stored
+cold-chain coordinates of the highest-likelihood walker through the run&rsquo;s own
+transform and waveform generator. The noise branches shape the sensitivity the
+likelihood weights by and are never subtracted, so the unresolved galaxy stays in
+the residual by construction.</div>
 </section>
 
-<section id="ll"><h2>Likelihood</h2>
-<div class="panel">{img("ll")}
-<div class="caption">Cold-chain total lnL. The spread panel is the tempering health check:
-at equilibrium it sits at a few units.</div></div>
+<section id="recovery"><h2>Recovery</h2>
+<div class="panel">{img("f2_progress", "completeness and purity vs GB-search iteration")}
+<div class="caption">{cap_f2}</div></div>
+<div class="panel">{img("f3_match", "overlap CDF and survival count")}
+<div class="caption">{cap_f3}</div></div>
+<div class="panel">{img("f6_snr", "completeness vs SNR")}
+<div class="caption">{cap_f6}</div></div>
+<div class="panel">{img("f5_counts", "source counts vs frequency")}
+<div class="caption">{cap_f5}</div></div>
 </section>
 
-<section id="noise"><h2>PSD + Galactic Foreground</h2>
-<div class="panel">{img("psd_curves", "PSD + foreground curves")}
-<div class="caption">Instrument-only vs instrument+foreground sensitivity
-(lisatools LISASens + the sampled 5-parameter hyperbolic-tangent foreground),
-cold-chain walker medians, latest stored iteration.</div></div>
-<div class="panel">{img("psd_evolution", "foreground evolution")}
-<div class="caption">The decline watch: PSD+foreground per stored iteration
-(light&rarr;dark amber = later). All stored iterations predate GB subtraction, so
-this is the baseline &mdash; once gb_search iterations store, the high-frequency
-shoulder of the foreground should walk DOWN as detectable sources leave the
-residual.</div></div>
-<div class="panel">{img("psd_trace")}<div class="caption">PSD parameter traces
-(dotted red = mojito injection values).</div></div>
-<div class="panel">{img("psd_hist")}</div>
-<div class="panel">{img("gal_trace")}<div class="caption">Galactic-foreground parameters
-(5-parameter hyperbolic-tangent model; labels are positional).</div></div>
-<div class="panel">{img("gal_hist")}</div>
-<div class="panel">{img("swaps")}<div class="caption">Noise-branch tempering swap acceptance
-(identity naive + fancy every 10, tallied together). NOTE: the final stored iteration
-recorded ZERO psd proposals (swaps and in-model) while galfor sampled fully &mdash; the
-panel therefore shows each branch's last ACTIVE iteration. Whether psd stays frozen
-through gb_search is an open check; if so the PSD cannot re-equilibrate as GBs are
-subtracted until full_pe.</div></div>
+<section id="population"><h2>Recovered Population</h2>
+<div class="panel">{img("f4_pop", "amplitude vs frequency, and the three-way recovery split")}
+<div class="caption">{cap_f4}</div></div>
+<div class="panel">{img("f8_sky", "sky distribution")}
+<div class="caption">{cap_f8}</div></div>
+<div class="panel">{img("f10_nn", "nearest-neighbour separation")}
+<div class="caption">{cap_f10}<br><em>Two blending modes sit at the two ends: below
+the tolerance, several templates share one injection; far above it, one template can
+still straddle a pair of injections that the catalogue resolves.</em></div></div>
 </section>
 
-<section id="gb"><h2>GB Search</h2>
+<section id="params"><h2>Parameter Recovery</h2>
+<div class="panel">{img("f7_params", "recovered minus injected parameters")}
+<div class="caption">{cap_f7}<br><em>Distance, chirp mass and the frequency-derivative
+ratio are not shown: the likelihood constrains only their combinations, so scatter
+along that direction is degeneracy, not error.</em></div></div>
+<div class="panel">{img("f7_scatter", "recovered vs injected")}
+<div class="caption">The same matched sources as recovered against injected, with the
+diagonal. The histograms above size the error; this asks whether the parameter is
+constrained at all. Inclination correlates at {SCI.get("ci_corr", float("nan")):.2f}.
+<em>Our encoding, not a field convention.</em></div></div>
+</section>
+
+<section id="search"><h2>Search &amp; Cap Cells</h2>
 <div class="panel">{img("gb_birth_fate", "birth-fate breakdown")}
-<div class="caption">Where every RJ birth proposal ends up &mdash; the clearest single view
-of the new machinery, and nothing plotted it before. The fates are disjoint and sum to the
-proposed count. <strong>AMBER</strong> = gated before scoring (cap-cell grid, out-of-band,
-prior): cheap rejections that never touch a likelihood kernel, and dominated by the new
-band/8 cap grid, which blocks a birth whose own cell is already full &mdash; this was
-exactly 0 before the grid existed, so a large amber band is the anti-stacking rule
-working, not a fault. <strong>RED</strong> = scored, then dropped at the optimal-SNR
-clamp; the SNR-truncated distance proposal exists to shrink this, and it fell from 59% of
-scored births to a few percent. <strong>GREY</strong> = scored, offered to
-Metropolis&ndash;Hastings, rejected. <strong>GREEN</strong> = accepted, i.e. a new source.
-Left is absolute counts, right the same data as percentages so the trend stays readable as
-the model fills. {GB_FATE_TXT}</div></div>
+<div class="caption">Where every trans-dimensional birth proposal ends up. The fates are
+disjoint and sum to the proposed count. <span style="color:var(--amber)">Amber</span> is
+gated before scoring &mdash; the cell already holds its allowance, or the draw is out of
+band or out of prior &mdash; cheap rejections that never touch a likelihood kernel.
+<span style="color:var(--red)">Red</span> is scored and then dropped at the optimal-SNR
+clamp. Grey is scored, offered to Metropolis&ndash;Hastings and rejected.
+<span style="color:var(--green)">Green</span> is accepted, i.e. a new source. Left is
+absolute counts, right the same data as percentages so the trend stays readable as the
+model fills. {GB_FATE_TXT}</div></div>
 <div class="panel">{img("gb_leaves")}
-<div class="caption">Left: cold-chain GB leaf counts in the STORED iterations. Right:
-per-band progressive leaf caps (D/2 gate). NOTE (2026-08-15): leaf caps now live on a
-FINER grid than this panel shows &mdash; each band is split into GB_CAP_DIVISOR (8) cap
-cells at the confusion scale, so a band's displayed cap is the MAX over its cells and the
-band can hold up to 8x that in total. Bands marked RED have had their RJ births shut
-off by the high-frequency barren-band rule (GB_RJ_BAND_SHUTOFF_*: &gt;10 mHz default, 5
-consecutive proposes with zero accepted births — deaths and in-model continue; each
-shutoff is also an INFO line in the log).</div></div>
+<div class="caption">Left: galactic-binary leaf count per cold walker across the stored
+iterations, against the detectable-injection target. Right: the enforced per-cell leaf
+cap over time. Rows marked in red have had their births shut off by the barren-band rule
+&mdash; deaths and in-model moves continue there.</div></div>
 <div class="panel">{img("gb_cap_cells", "cap-cell occupancy")}
-<div class="caption">{CAP_TXT} <strong>Left</strong> is the direct test of whether the cap
-grid is being followed: every bar at or above the highest cap is AMBER, and a bar to the
-right of the cap would mean sources are stacking past it. <strong>Middle</strong> is the
-race that matters &mdash; cyan (occupied cells) must stay ahead of amber (cells at their
-cap), or the model is queuing against the ceiling rather than filling. <strong>Right</strong>
-explains why the occupied FRACTION looks small: the cells tile 0.56&ndash;21.9 mHz
-uniformly, but the recovered sources are still concentrated in the galaxy at low frequency,
-so most cells are empty because there is nothing in them yet &mdash; not because the packing
-is failing. The right comparison is sources-to-occupied-cells, not occupied-to-total.</div>
-</div>
+<div class="caption">{CAP_TXT} Left is the direct test of whether the cap is being
+respected: bars at or above the cap are amber, and a bar past it would mean sources are
+stacking. Middle is the race that matters &mdash; occupied cells must stay ahead of cells
+at their cap, or the model is queuing against the ceiling rather than filling. Right
+explains why the occupied fraction looks small: the cells tile the whole band uniformly
+while the sources are concentrated in the galaxy, so most cells are empty because there is
+nothing in them yet.</div></div>
 <div class="panel">{img("gb_cap_divisor", "cap-divisor study")}
-<div class="caption">WHY <code>GB_CAP_DIVISOR</code> SHOULD GO 8 &rarr; 32. Over 3&ndash;21 mHz
-the mojito catalogue holds <strong>694</strong> detectable (SNR&gt;7) sources. Summing
-max(N<sub>detectable</sub> &minus; cap, 0) over cells gives the sources the cap can NEVER
-admit, however well the sampler works. At today's K=8 that is <strong>170 sources, 24.5%</strong>;
-at K=32 it is <strong>18, 2.6%</strong>; at K=64, 3. <strong>Middle</strong> shows the
-exclusion is NOT a high-frequency problem &mdash; 161 of the 170 sit below 8 mHz, where the
-galaxy is dense, so this only gets worse as the run works down in frequency.
-<strong>Right</strong> is the mechanism: at K=8, 97 cells hold 3&ndash;5 detectable sources
-against a cap of 2; at K=32 that falls to 17, and 456 of 566 occupied cells hold exactly
-ONE source &mdash; the one-source-per-cell packing the grid was designed for.
-<strong>Left</strong> also shows why the divisor beats simply raising the cap: at K=8 you
-would need cap 6 to reach the same coverage K=32 reaches at cap 2, and a cap of 6 permits
-six sources inside one 135-bin cell, which is exactly the stacking the rule exists to stop.
-COST: 1,232 &rarr; 4,928 cells, and the cap-cell arrays go from 535 MB to 2.1 GB raw over a
-2,010-iteration allocation (gzip keeps the live store far smaller &mdash; 66 MB at iteration
-17 &mdash; but the preallocation is real). Changing K is a state-layout change: migrate an
-existing store with <code>migrate_gb_cap_grid.py &lt;store.h5&gt; --cap-divisor 32</code>,
-or start fresh.</div>
-</div>
+<div class="caption">What the cap grid can represent, independent of how far this run has
+got: summing the detectable sources a cell cannot admit gives the ceiling the sampler can
+never beat. A finer grid beats simply raising the cap, because a higher cap permits several
+sources inside one cell, which is the stacking the rule exists to stop.</div></div>
 <div class="panel">{img("gb_hi_f_census", "high-frequency recovery census")}
-<div class="caption">{CENSUS_TXT} <strong>Left</strong> is the raw census: every catalogue
-source above the cut, green if the max-logL cold walker holds a leaf within 2 FD bins of it,
-red if not. <strong>Middle</strong> is the health test &mdash; recovery must be MONOTONIC in
-SNR, and it is (0% below SNR 3 rising to ~62% above 25), which says adding is
-signal-ordered rather than arbitrary; the absolute level is low because the search is only
-11 iterations old and still adding ~7 high-frequency sources per iteration.
-<strong>Right</strong> is the ceiling, and the reason the level cannot simply be waited out:
-bars to the RIGHT of the dashed line are cap cells holding more detectable sources than the
-cap allows, so those sources cannot enter the model however long the run goes. The cap cell
-is 17.36 &micro;Hz &mdash; 135 FD bins &mdash; which is far wider than the resolution at
-these frequencies, so several genuinely separable sources routinely share one cell.
-SNRs are optimal <code>sqrt(&lt;h|h&gt;)</code> against the run's OWN sampled instrument +
-foreground parameters, normalisation validated source-by-source against the run's stored
-VGB <code>h_h</code> at identical parameters (median ratio 0.999). CAVEAT on the right-hand
-panel: the per-cell cap array is among the TORN datasets in this snapshot, so the cap line
-shown is the last readable one. The run log reports caps have since run to
-<strong>min/max 2/13</strong> &mdash; i.e. the ceiling this panel measures has been dissolved
-by the ghost-increment ratchet rather than by any deliberate change.</div>
-</div>
-<div class="panel">
-<div class="btnrow viewctl">
-  <label>source <select id="gb1_sel"></select></label>
-  <span class="caption" style="align-self:center">posteriors of the 3 highest-frequency
-  recovered GBs</span>
-</div>
-<canvas id="gb1" style="height:330px"></canvas>
-<div class="caption" id="gb1_cap"></div>
-<div class="caption">Sources are clustered out of the last stored cold-chain iteration by
-f0 ({CLUSTER_BINS:.0f} FD bins = {CLUSTER_BINS * DF_MHZ * 1e3:.2f} &micro;Hz link window,
-1/T<sub>obs</sub> = {DF_MHZ * 1e3:.3f} &micro;Hz); a cluster counts as a SOURCE only if it
-appears in &ge;3 of the {nwalk} cold walkers. {gb1_meta.get("n_solid", 0)} of
-{gb1_meta.get("n_clusters", 0)} clusters clear that bar, and
-{gb1_meta.get("transient_above", 0)} single-/two-walker clusters sit ABOVE the highest
-one shown &mdash; transient high-f births, not recoveries. Truth = the nearest catalogue
-source in f0 within {MATCH_BINS:.0f} bins, mapped through the same
-<code>gb_catalogue_to_sampling_basis</code> route as the VGBs. CAVEAT on
-(dist, Mc, fdot_astro_ratio): the likelihood constrains only the combinations
-<code>A(dist, Mc, f0)</code> and <code>fdot_gr(f0, Mc)&middot;(1+r)</code>, so the truth
-shown is the catalogue's own physical split &mdash; a posterior displaced ALONG that
-degeneracy is not an error.</div>
-</div>
+<div class="caption">{CENSUS_TXT} Left is the raw census: every catalogue source above the
+cut, green where the maximum-likelihood walker holds a leaf on it. Middle is the health
+test &mdash; recovery must be monotonic in signal-to-noise, and it is, which says adding is
+signal-ordered rather than arbitrary. Right is the ceiling: bars to the right of the dashed
+line are cells holding more detectable sources than the cap allows.</div></div>
 </section>
 
-<section id="fstat"><h2>Last F-stat Fit</h2>
+<section id="fstat"><h2>F-statistic Fit</h2>
 <div class="panel">{img("fstat_comb")}
-<div class="caption">Comb scan of the maximized F-statistic over the full GB band
-(epoch {fstat_meta.get("epoch","?")}, fit against the live residual, walker_ref lnL in the log).</div></div>
+<div class="caption">Comb scan of the maximised F-statistic across the band
+(epoch {fstat_meta.get("epoch", "?")}), fitted against the live residual. This is what the
+birth proposal draws from.</div></div>
 <div class="panel">{img("fstat_peaks")}
-<div class="caption">Selected peaks = the birth-proposal anchors (cap 200/band). Job 185
-loads this grid from the epoch-0 checkpoint; 9 interior sub-bands (68, 78, 82, 87, 88, 91,
-93, 94, 99) fit ZERO peaks — births there ride the comb/floor components only until the
-first refit against the GB-subtracted residual.</div></div>
+<div class="caption">The selected peaks are the birth-proposal anchors. Left is where they
+sit in the plane; right is their density against frequency &mdash; the shape that decides
+where the search spends its proposals.</div></div>
 </section>
 
-<section id="vgb"><h2>VGB Posteriors</h2>
-<div class="panel">{img("vgb_dist")}</div>
-<div class="panel">
-<div class="btnrow">
-  <button id="vgbpost_reset">reset zoom</button>
-  <span class="caption" style="align-self:center">distance-f0 posterior cloud: every
-  sample (last iters &times; 24 walkers per leaf) &middot; drag = pan &middot;
-  wheel/pinch = zoom</span>
-</div>
-<div class="btnrow viewctl">
-  <button id="vgbpost_pick" title="arm, then click the plot to set the view center">set center by click</button>
-  <label>cx <input id="vgbpost_cx" type="text"></label>
-  <label>cy <input id="vgbpost_cy" type="text"></label>
-  <label>width <input id="vgbpost_wsl" type="range" min="0" max="1000" step="1"><input id="vgbpost_w" type="text"></label>
-  <label>height <input id="vgbpost_hsl" type="range" min="0" max="1000" step="1"><input id="vgbpost_h" type="text"></label>
-</div>
-<canvas id="vgbpost" style="height:340px"></canvas>
-</div>
-<div class="panel">{img("vgb_snr")}</div>
+<section id="noise"><h2>Noise Model</h2>
+<div class="panel">{img("f11_psd", "instrument noise posteriors")}
+<div class="caption">The two instrument-noise parameters against their injected
+values. Medians sit {NOISE_TXT} from injection. These are the only noise parameters
+with a truth to compare against.</div></div>
+<div class="panel">{img("f11_fg", "foreground evolution")}
+<div class="caption">The fitted noise-plus-foreground curve at every stored
+iteration, light to dark with time, over the instrument-only curve. The galactic
+shoulder should walk down as resolved sources leave the residual.</div></div>
+<div class="panel">{img("psd_curves", "sensitivity curves")}
+<div class="caption">The same model as the sky-averaged sensitivity the mission documents
+quote: instrument only, instrument plus the fitted foreground, and the injected instrument
+curve. This is the only panel carrying the injected curve.</div></div>
+<div class="panel">{img("psd_evolution", "sensitivity evolution")}
+<div class="caption">The decline watch on the same axes, one curve per stored iteration,
+light to dark with time.</div></div>
+<div class="panel">{img("psd_trace")}
+<div class="caption">Instrument-parameter traces per cold walker; dotted red is the
+injected value.</div></div>
+<div class="panel">{img("psd_hist")}</div>
+<div class="panel">{img("gal_trace")}
+<div class="caption">The five foreground parameters. There is no truth line: the injection
+is a source population, not a hyperbolic-tangent model, so these are checked through the
+curve above and through the residual, never against a number.</div></div>
+<div class="panel">{img("gal_hist")}</div>
+</section>
+
+<section id="vgb"><h2>Verification Binaries</h2>
+<div class="panel">{img("f9_vgb", "detectable verification binaries")}
+<div class="caption">The {VGB_N_DET} of 55 catalogue verification binaries that clear
+SNR 7 at three months, with their distance posteriors against the catalogue value.
+The other {55 - VGB_N_DET} are prior-dominated &mdash; the median verification-binary
+SNR is {VGB_SNR_MED:.1f}.</div></div>
+<div class="panel">{img("f9_vgb_snr", "verification binary SNRs")}
+<div class="caption">Why: optimal SNR of all 55 against the fitted noise. Three
+months is simply not long enough for most of this set, and their flat posteriors are
+an absence of signal, not a failure of the fit.</div></div>
+<div class="panel">{img("vgb_dist")}
+<div class="caption">Distance posteriors for all 55 leaves against catalogue truth, median
+and 1&sigma;. The 44 prior-dominated ones are the flat error bars.</div></div>
+<div class="panel">{img("vgb_snr")}
+<div class="caption">Optimal signal-to-noise per stored iteration, light to dark with time.
+These should <em>rise</em> as the galactic foreground is fitted down &mdash; the source-side
+twin of the sensitivity decline watch.</div></div>
 <div class="panel">{img("vgb_traces")}
-<div class="caption">Distance traces for the three loudest VGBs, all 24 walkers.</div></div>
+<div class="caption">Distance traces for the three loudest verification binaries, all cold
+walkers, against catalogue truth.</div></div>
 <div class="panel">{img("vgb_hists")}
-<div class="caption">Pooled posteriors of the remaining sampled parameters, all 55 leaves
-together &mdash; so the truth overlay is a DISTRIBUTION, not a line: the dotted red step
-(plus the rug under the axis) is the histogram of the 55 catalogue truths on the same bins,
-rescaled to the posterior peak. <code>fdot_astro_ratio</code> is the exception: every
-catalogue VGB is a pure GR chirper, so its truth is the single dotted line at exactly 0.
-Conventions come from the run's own code &mdash;
-<code>recipe.gb_catalogue_to_sampling_basis</code> (sampling
-<code>phi0 = -TrueAnomaly mod 2&pi;</code>, <code>psi mod &pi;</code>) plus the distance-basis
-split in <code>stock/erebor/vgb.py</code>; the (f0, Mc, dist) &rarr; A round trip reproduces
-the catalogue Amplitude to {("%.1e" % VGB_TRUTH_REL) if VGB_TRUTH_REL is not None else "n/a"}
-relative.</div></div>
+<div class="caption">The four remaining sampled parameters pooled over all 55 leaves, so
+the truth is a distribution rather than a line. The frequency-derivative ratio is the
+exception: every catalogue value is identically zero.</div></div>
 <div class="panel">
 <div class="btnrow viewctl">
-  <label>vgb <select id="vgb1_sel"></select></label>
-  <span class="caption" style="align-self:center">single-VGB corner posterior
-  (ChainConsumer), SNR-ordered</span>
+  <label>source <select id="vgb1_sel"></select></label>
+  <span class="caption" style="align-self:center">full posterior, one verification
+  binary at a time &mdash; all 55, detectable first</span>
 </div>
-<img id="vgb1_img" alt="single-VGB corner posterior">
+<img id="vgb1_img" alt="verification binary corner posterior">
 <div class="caption" id="vgb1_cap"></div>
-<div class="caption">Full 5-parameter corner per leaf, pre-rendered with
-ChainConsumer over the last {CORNER_ITS} stored iterations &times; {nwalk} cold walkers
-({vgb_corner.shape[0]} samples); violet = posterior (1/2&sigma; contours + shaded
-marginals), dotted red = the catalogue truth in the same sampled basis as every other
-truth overlay on this page. Axis extents are widened to CONTAIN the truth, so a truth
-line sitting outside the posterior is visible rather than clipped away.</div>
+<div class="caption">Existence proof that the machinery produces real posteriors:
+five sampled parameters over the last {CORNER_ITS} stored iterations &times; {nwalk}
+cold walkers, with the catalogue value in cyan. Axis ranges are widened to contain
+the truth, so a truth line outside the posterior stays visible.</div>
 </div>
 </section>
 
-<section id="explorer"><h2>Amplitude vs Frequency Explorer (log10 A from sampled dist, f0, Mc)</h2>
+<section id="detect"><h2>How Many Are Detectable At All</h2>
+<div class="panel">
+<div class="caption" style="margin:0 0 10px 0">Optimal SNR of the whole injected
+catalogue at this observation time, under two noise models: the run&rsquo;s own fitted
+instrument and foreground, and the injected instrument noise with the legacy fitted
+foreground. Full band, so these are larger than the 3&ndash;21.94 mHz denominator
+above.</div>
+<table style="border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums">
+<tr style="border-bottom:1px solid var(--line)">
+  <th style="text-align:left;padding:4px 18px 4px 0">SNR &gt;</th>
+  <th style="text-align:right;padding:4px 18px 4px 0">fitted noise</th>
+  <th style="text-align:right;padding:4px 0">injected + legacy foreground</th></tr>
+<tr><td style="padding:3px 18px 3px 0">5</td><td style="text-align:right;padding:3px 18px 3px 0">1,661</td><td style="text-align:right">1,749</td></tr>
+<tr><td style="padding:3px 18px 3px 0"><strong>7</strong></td><td style="text-align:right;padding:3px 18px 3px 0"><strong>1,001</strong></td><td style="text-align:right"><strong>1,103</strong></td></tr>
+<tr><td style="padding:3px 18px 3px 0">10</td><td style="text-align:right;padding:3px 18px 3px 0">560</td><td style="text-align:right">647</td></tr>
+<tr><td style="padding:3px 18px 3px 0">15</td><td style="text-align:right;padding:3px 18px 3px 0">259</td><td style="text-align:right">297</td></tr>
+</table>
+<div class="caption" style="margin-top:12px">Detectability dies below about 1 mHz,
+where the foreground swamps everything: eight detectable sources across the whole
+0.1&ndash;1 mHz decade, out of roughly 13 million catalogue entries there. The two
+models disagree by 10% overall and, more usefully, in opposite directions either side
+of the galactic peak &mdash; treat the second column as a reference point, not truth.
+<br><br>
+Detectability is also a moving target: the same calculation gives
+<strong>{SCI.get("ndet", 812)}</strong> over 3&ndash;21.94 mHz at this run&rsquo;s
+late-iteration noise against 694 at iteration 15, because the foreground estimate
+dropped as sources left the residual. That is exactly why the denominator on this
+page is frozen at one iteration and stated.</div>
+</div>
+</section>
+
+<section id="appendix"><h2>Appendix</h2>
+<details><summary style="cursor:pointer;color:var(--dim);font-size:13px">
+method, sampler health, interactive views and run mechanics</summary>
+
+<div class="panel">{img("ll")}
+<div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
+the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
+
 <div class="panel">
 <div class="btnrow">
   <button id="btn_all">full band</button>
-  <button id="btn_top3">3 highest-frequency sources</button>
-  <button id="btn_truth">show catalogue truths</button>
+  <button id="btn_top3">highest-frequency sources</button>
+  <button id="btn_truth">show catalogue</button>
   <button id="btn_reset">reset zoom</button>
-  <span class="caption" style="align-self:center">drag = pan &middot; wheel/pinch = zoom</span>
+  <span class="caption" style="align-self:center">drag to pan &middot; wheel to zoom</span>
 </div>
 <div class="btnrow viewctl">
   <button id="expl_pick" title="arm, then click the plot to set the view center">set center by click</button>
@@ -2468,53 +3237,68 @@ line sitting outside the posterior is visible rather than clipped away.</div>
 </div>
 <canvas id="expl"></canvas>
 <div class="caption" id="expl_cap"></div>
+<div class="caption">Zoomable version of the amplitude-frequency plane: green =
+model sources, grey crosses = the injected catalogue.</div>
 </div>
-</section>
 
-<section id="timing"><h2>Timing + Memory</h2>
+<div class="panel">
+<div class="btnrow viewctl">
+  <label>source <select id="gb1_sel"></select></label>
+  <span class="caption" style="align-self:center">posteriors of the highest-frequency
+  recovered galactic binaries</span>
+</div>
+<canvas id="gb1" style="height:330px"></canvas>
+<div class="caption" id="gb1_cap"></div>
+<div class="caption">Sources are clustered out of the last stored iteration by
+frequency ({CLUSTER_BINS:.0f} bins) and counted only if they appear in at least three
+of the {nwalk} cold walkers; {gb1_meta.get("n_solid", 0)} of
+{gb1_meta.get("n_clusters", 0)} clusters clear that bar. Catalogue values are shown
+where a source lies within {MATCH_BINS:.0f} bins.</div>
+</div>
+
+<div class="caption"><strong>How the numbers are produced.</strong> Optimal SNRs and
+template overlaps use the injected catalogue&rsquo;s own parameters through the
+run&rsquo;s catalogue-to-sampling map, the same waveform generator the run samples
+with, and a noise-weighted inner product against the run&rsquo;s own fitted
+instrument and foreground. Catalogue detectability is computed by bounding
+signal-to-noise per unit amplitude over orientation, which can only over-include, then
+evaluating exact SNRs for the survivors; an audit of 400 rejected sources weighted
+toward the cut found a loudest SNR of 4.36 and none above 7. Overlaps and parameter
+comparisons on this page are recomputed at the last stored iteration, not carried over
+from earlier snapshots.
+<br><br>
+<strong>Open items.</strong> Purity is {pct(SCI["purity"]) if SCI else "&mdash;"}
+against a {pct(SCI["chance"], 1) if SCI else "2.2%"} chance rate, so the matches are
+real, but {SCI.get("n_unmatched", 0)} model sources have no detectable counterpart and
+{SCI.get("blend_b", 0)} of those sit on an injection another source already claims.
+Neither arm has converged.</div>
+
+<div class="caption" style="margin-top:22px"><strong>Run mechanics.</strong> Engineering
+instrumentation &mdash; where the wall time goes, what the devices are holding, and whether
+the tempering ladder is exchanging. None of it is a science result; all of it is the first
+thing to look at when a run stalls.</div>
 {rj_kpis}
-<div class="caption">Direct-batch RJ&rarr;in-model throughput, job 197 (the 07:14 restart on
-the full perf mega-batch; its records start after line 12405 of globalfit_run.log, job 196
-is everything before). The batch collapsed every remaining dispatch/fill tax: removal
-propose 658&ndash;843&rarr;75 s, search propose excluding centers 537&rarr;88 s, buffer fills
-430&rarr;11.6 s (buffill_resid_psd 419&rarr;1.2 s), temper_buffer 388&rarr;8.6 s (45&times;),
-proposal tables/infomat_kernel 42&ndash;78&rarr;9.3 s. What is left is
-<strong>rj_fstat_centers</strong>, now instrumented by the [FSTAT_CTR] census: 55% of the
-636,697 unit rows were at-cap reserve and are no longer computed, but the per-row cost
-oscillates between two states (1.64 ms/row for 285k rows vs 0.31 ms/row for 346k rows) &mdash;
-the last big lever.</div>
-<div class="panel">{img("rj_breakdown", "rj propose breakdown")}
-<div class="caption">Where each rj move spends its wall time &mdash; <strong>one panel per
-move, never lumped</strong> (SYNC-ATTRIBUTED records: every mark carries exactly its own
-kernel time). Bars are LEAF spans, largest first; the enclosing phase marks
-<code>run_proposal</code> / <code>run_tempering</code> wrap them and are quoted in each
-panel title instead of competing for a bar. These are the FIRST post-mega-batch
-records{rj_break_stamps}.
-{rj_break_txt}
-<strong>rj_fstat_search</strong> is the F-stat birth proposal and it is now the whole story:
-<code>rj_fstat_centers</code> alone is 92% of it, while every other span &mdash; rj_step,
-route_dispatch, gll_engine, rj_getll, the buffer fills, the proposal tables &mdash; sits in
-the tens of seconds. <strong>rj_prior_removal</strong> collapsed from 658&ndash;843 s to
-75 s and its own profile is now tempering-dominated (run_tempering / temper_swap_score /
-sorter_build), i.e. no kernel hog left. Centers is the last lever on the page.</div></div>
-<div class="panel">{img("mem_telemetry", "device memory telemetry")}
-<div class="caption">Per-device used memory from the in-run memGetInfo telemetry.
-Flat sawtooth = the bounded-buffer behavior; a monotonic ramp here is the leak alarm.</div></div>
-<div class="panel">{img("timing_moves", "per-move timing")}</div>
+<div class="panel">{img("swaps")}
+<div class="caption">Tempering swap acceptance per rung for the two noise branches, at each
+branch&rsquo;s last active iteration &mdash; a stored iteration can record zero proposals
+for one branch at a stage handoff.</div></div>
+<div class="panel">{img("rj_breakdown", "trans-dimensional move breakdown")}
+<div class="caption">Wall-time breakdown of the last complete record of each
+trans-dimensional move, leaf spans only; the enclosing phase marks are quoted in each
+title instead of drawn, since they merely reprint the total.{rj_break_txt}</div></div>
+<div class="panel">{img("timing_moves", "per-move throughput")}
+<div class="caption">Proposal throughput and wall time per propose, per move, against
+elapsed run time.</div></div>
+<div class="panel">{img("mem_telemetry", "device memory")}
+<div class="caption">Device-wide memory from the in-run telemetry, with breaks across
+restart gaps so an attempt boundary does not draw a false ramp.</div></div>
 <div class="panel">{img("gpu_util", "gpu telemetry")}
-<div class="caption">nvidia-smi utilization + memory, latest three jobs &mdash; the solid
-traces are now job 197, the post-mega-batch run. The single-device signature is GONE:
-job-197 means are <strong>dev0 26% / dev1 62%</strong> (job 196 read 3% / 79%), with peaks
-of 69 and 43 GB out of 96. The residual imbalance is the F-stat center precompute, the one
-phase the batch did not de-serialize.</div></div>
-<div class="missing">Per-iteration wall times ([MAXLOGL]/[BENCH]) go to sbatch stdout,
-which was not in this zip — include <code>gf3mo_&lt;jobid&gt;.log</code> next time. [SAVE]
-question ANSWERED: 65.2 s sync write vs ~56 min iteration = ~2%, below the 5–10% mpiexec
-threshold — single-process stands at 3 months; revisit with the 23-mo store sizes.</div>
-</section>
+<div class="caption">Utilisation and memory sampled by nvidia-smi; dotted traces are
+earlier jobs.</div></div>
 
-<section id="next"><h2>For the Next Snapshot</h2>
-<ul>{missing_html}{wanted_next}</ul>
+<div class="caption"><strong>Not reproduced in this snapshot:</strong></div>
+<ul>{missing_html}</ul>
+</details>
 </section>
 </main>
 
@@ -2848,8 +3632,8 @@ function viewCtl(px, cv, api) {{
       // thing the recovered cloud is being judged against. An open glyph
       // also stays legible UNDER the filled recovery circles, which a
       // solid marker of this size would not.
-      g.strokeStyle = C("--red"); g.globalAlpha = 0.55;
-      g.lineWidth = 1.3; g.lineCap = "round";
+      g.strokeStyle = C("--dim"); g.globalAlpha = 0.85;
+      g.lineWidth = 1.5; g.lineCap = "round";
       const r = 3.4;
       g.beginPath();
       for (const p of TRUTH) {{
