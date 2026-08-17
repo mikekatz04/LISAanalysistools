@@ -3155,6 +3155,26 @@ an absence of signal, not a failure of the fit.</div></div>
 <div class="panel">{img("vgb_dist")}
 <div class="caption">Distance posteriors for all 55 leaves against catalogue truth, median
 and 1&sigma;. The 44 prior-dominated ones are the flat error bars.</div></div>
+<div class="panel">
+<div class="btnrow">
+  <button id="vgbpost_reset">reset zoom</button>
+  <span class="caption" style="align-self:center">distance&ndash;f0 posterior cloud:
+  EVERY sample (last stored iterations &times; {nwalk} walkers per leaf), catalogue truth
+  in red &middot; drag = pan &middot; wheel/pinch = zoom</span>
+</div>
+<div class="btnrow viewctl">
+  <button id="vgbpost_pick" title="arm, then click the plot to set the view center">set center by click</button>
+  <label>cx <input id="vgbpost_cx" type="text"></label>
+  <label>cy <input id="vgbpost_cy" type="text"></label>
+  <label>width <input id="vgbpost_wsl" type="range" min="0" max="1000" step="1"><input id="vgbpost_w" type="text"></label>
+  <label>height <input id="vgbpost_hsl" type="range" min="0" max="1000" step="1"><input id="vgbpost_h" type="text"></label>
+</div>
+<canvas id="vgbpost" style="height:340px"></canvas>
+<div class="caption">The zoom is the point: at full extent the 55 posteriors overlap into a
+band, and only zoomed in can an individual leaf be read against its red truth mark. The
+JS for this canvas survived the redesign but its markup did not, so the handler was
+dereferencing a null and killing every later script block on the page.</div>
+</div>
 <div class="panel">{img("vgb_snr")}
 <div class="caption">Optimal signal-to-noise per stored iteration, light to dark with time.
 These should <em>rise</em> as the galactic foreground is fitted down &mdash; the source-side
