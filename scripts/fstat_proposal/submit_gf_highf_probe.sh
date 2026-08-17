@@ -469,8 +469,14 @@ fi
 # band (146) interior for the F-stat fit (band_edges[1:-1]), and puts real
 # work on both devices, so the per-device comp replicas, the sig-het
 # reference stash and the cross-device reduction are all covered.
-export GB_MIN_FREQ=2.013889e-2      # layer 145 lower edge
-export GB_MAX_FREQ=2.069444e-2      # layer 149 lower edge -> bands 145-148
+# HALF-LAYER MARGINS, not exact boundaries. _band_klohi snaps the window
+# INWARD to whole WDM layers, so a value a hair below a boundary loses that
+# layer: 2.013889e-2 and 2.069444e-2 sat just under layers 145 and 149 and
+# snapped to 146..148, spanning 2 layers where >=3 are required (an interior
+# sampled span must exist). Sitting mid-layer makes the snap unambiguous.
+export GB_MIN_FREQ=2.006958e-2      # 144.5 layers -> snaps to 145
+export GB_MAX_FREQ=2.076406e-2      # 149.5 layers -> snaps to 149
+                                    # -> whole layers 145,146,147,148 = 4
 # NOTE: the F-stat fit range follows band_edges[1:-1], so restricting the
 # band window above ALREADY confines the fit to sub-band 142 (1080 bins /
 # 32 cap cells). Narrowing further to cells 4566-4568 has no env knob:
