@@ -2988,7 +2988,7 @@ ul {{ color:var(--dim); font-size:13px; }}
 </header>
 <nav>
   <a href="#status">status</a><a href="#resid">residual</a>
-  <a href="#recovery">recovery</a><a href="#population">population</a>
+  <a href="#recovery">recovery</a><a href="#population">population</a><a href="#vgb">vgb zoom</a>
   <a href="#params">parameters</a><a href="#search">search &amp; cap cells</a>
   <a href="#fstat">f-stat</a><a href="#noise">noise</a>
   <a href="#vgb">verification binaries</a><a href="#detect">detectability</a>
@@ -3053,6 +3053,44 @@ the residual by construction.</div>
 <div class="caption">{cap_f10}<br><em>Two blending modes sit at the two ends: below
 the tolerance, several templates share one injection; far above it, one template can
 still straddle a pair of injections that the catalogue resolves.</em></div></div>
+
+<div class="caption" style="margin-top:18px"><strong>Zoom in.</strong> The static panels above are the whole band at once; these two are pannable and zoomable, which is the only way to read an individual galactic binary against its injected counterpart.</div>
+<div class="panel">
+<div class="btnrow">
+  <button id="btn_all">full band</button>
+  <button id="btn_top3">highest-frequency sources</button>
+  <button id="btn_truth">show catalogue</button>
+  <button id="btn_reset">reset zoom</button>
+  <span class="caption" style="align-self:center">drag to pan &middot; wheel to zoom</span>
+</div>
+<div class="btnrow viewctl">
+  <button id="expl_pick" title="arm, then click the plot to set the view center">set center by click</button>
+  <label>cx <input id="expl_cx" type="text"></label>
+  <label>cy <input id="expl_cy" type="text"></label>
+  <label>width <input id="expl_wsl" type="range" min="0" max="1000" step="1"><input id="expl_w" type="text"></label>
+  <label>height <input id="expl_hsl" type="range" min="0" max="1000" step="1"><input id="expl_h" type="text"></label>
+</div>
+<canvas id="expl"></canvas>
+<div class="caption" id="expl_cap"></div>
+<div class="caption">Zoomable version of the amplitude-frequency plane: green =
+model sources, grey crosses = the injected catalogue.</div>
+</div>
+
+<div class="panel">
+<div class="btnrow viewctl">
+  <label>source <select id="gb1_sel"></select></label>
+  <span class="caption" style="align-self:center">posteriors of the highest-frequency
+  recovered galactic binaries</span>
+</div>
+<canvas id="gb1" style="height:330px"></canvas>
+<div class="caption" id="gb1_cap"></div>
+<div class="caption">Sources are clustered out of the last stored iteration by
+frequency ({CLUSTER_BINS:.0f} bins) and counted only if they appear in at least three
+of the {nwalk} cold walkers; {gb1_meta.get("n_solid", 0)} of
+{gb1_meta.get("n_clusters", 0)} clusters clear that bar. Catalogue values are shown
+where a source lies within {MATCH_BINS:.0f} bins.</div>
+</div>
+
 </section>
 
 <section id="params"><h2>Parameter Recovery</h2>
@@ -3239,42 +3277,6 @@ method, sampler health, interactive views and run mechanics</summary>
 <div class="panel">{img("ll")}
 <div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
 the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
-
-<div class="panel">
-<div class="btnrow">
-  <button id="btn_all">full band</button>
-  <button id="btn_top3">highest-frequency sources</button>
-  <button id="btn_truth">show catalogue</button>
-  <button id="btn_reset">reset zoom</button>
-  <span class="caption" style="align-self:center">drag to pan &middot; wheel to zoom</span>
-</div>
-<div class="btnrow viewctl">
-  <button id="expl_pick" title="arm, then click the plot to set the view center">set center by click</button>
-  <label>cx <input id="expl_cx" type="text"></label>
-  <label>cy <input id="expl_cy" type="text"></label>
-  <label>width <input id="expl_wsl" type="range" min="0" max="1000" step="1"><input id="expl_w" type="text"></label>
-  <label>height <input id="expl_hsl" type="range" min="0" max="1000" step="1"><input id="expl_h" type="text"></label>
-</div>
-<canvas id="expl"></canvas>
-<div class="caption" id="expl_cap"></div>
-<div class="caption">Zoomable version of the amplitude-frequency plane: green =
-model sources, grey crosses = the injected catalogue.</div>
-</div>
-
-<div class="panel">
-<div class="btnrow viewctl">
-  <label>source <select id="gb1_sel"></select></label>
-  <span class="caption" style="align-self:center">posteriors of the highest-frequency
-  recovered galactic binaries</span>
-</div>
-<canvas id="gb1" style="height:330px"></canvas>
-<div class="caption" id="gb1_cap"></div>
-<div class="caption">Sources are clustered out of the last stored iteration by
-frequency ({CLUSTER_BINS:.0f} bins) and counted only if they appear in at least three
-of the {nwalk} cold walkers; {gb1_meta.get("n_solid", 0)} of
-{gb1_meta.get("n_clusters", 0)} clusters clear that bar. Catalogue values are shown
-where a source lies within {MATCH_BINS:.0f} bins.</div>
-</div>
 
 <div class="caption"><strong>How the numbers are produced.</strong> Optimal SNRs and
 template overlaps use the injected catalogue&rsquo;s own parameters through the
