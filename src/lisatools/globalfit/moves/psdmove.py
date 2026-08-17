@@ -28,6 +28,13 @@ try:
 except (ModuleNotFoundError, ImportError):
     import numpy as cp
 from eryn.model import Model
+
+# Propose-level stage timers, same machinery and same reporting format the GB
+# moves use (_ProposeTimer / _tspan in gbspecialstretch). psd + galfor were
+# the only uninstrumented branches: with GB at 47.7% of a 1,018 s iteration
+# and VGB at 14.4%, the remaining ~38% could only be inferred as a residual.
+# gbspecialstretch does not import this module, so there is no cycle.
+from .gbspecialstretch import _ProposeTimer, _tspan
 from eryn.moves import RedBlueMove, StretchMove
 from eryn.state import BranchSupplemental
 from eryn.state import State as eryn_State
@@ -1578,6 +1585,19 @@ class PSDMove(GlobalFitMove, StretchMove):
         Returns:
             Tuple ``(new_state, accepted)``.
         """
+        _t_prop0 = time.perf_counter()
+        # GB_PROP_TIMING_SYNC=1 attributes device time to the span that
+        # launched it rather than the one that forces the sync (same
+        # semantics as the GB moves). Resolved defensively: PSDMove has no
+        # guaranteed ``xp``/``backend``, and a timer must never be able to
+        # take down a propose.
+        _sync = None
+        if os.environ.get("GB_PROP_TIMING_SYNC", "0") == "1":
+            _xp = getattr(self, "xp", None)
+            if getattr(getattr(self, "backend", None), "uses_cupy", False) and _xp is not None:
+                _sync = _xp.cuda.runtime.deviceSynchronize
+        self._prop_timer = _tm = _ProposeTimer(sync_fn=_sync)
+
         model_branches = self._noise_model_branches(state)
         noise_branches = self._resolve_sampled(state)
 
@@ -1653,11 +1673,12 @@ class PSDMove(GlobalFitMove, StretchMove):
             model.random,
         )
 
-        if self.max_logl_mode:
-            tmp_state, accepted = self.run_move_max_likelihood(tmp_model, tmp_state)
+        with _tspan(_tm, "sample"):
+            if self.max_logl_mode:
+                tmp_state, accepted = self.run_move_max_likelihood(tmp_model, tmp_state)
 
-        else:
-            tmp_state, accepted = self.run_move_for_loop(tmp_model, tmp_state, self.num_repeats)
+            else:
+                tmp_state, accepted = self.run_move_for_loop(tmp_model, tmp_state, self.num_repeats)
 
         # CHECK THIS STATE SETUP
         new_state = GFState(state, copy=True)
@@ -1711,9 +1732,10 @@ class PSDMove(GlobalFitMove, StretchMove):
             else:
                 sgwb_params = None
 
-            new_sens = self._build_sensitivity_for_walker(
-                w, psd_params, galfor_params, sgwb_params
-            )
+            with _tspan(_tm, "sens_refresh"):
+                new_sens = self._build_sensitivity_for_walker(
+                    w, psd_params, galfor_params, sgwb_params
+                )
             self.acs[w].sens_mat = new_sens
             if self.debug and w == self.debug_plot_walker:
                 # accepted params of the plotted walker, for the
@@ -1743,6 +1765,12 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         new_state.log_like[0] = after_vals
         # eryn-facing acceptance uses the engine (cold-chain) shape
+        _tm.count("walkers", len(self.acs))
+        _tm.count("branches", len(noise_branches))
+        logger.info("[PSD_TIMING %s] %s", getattr(self, "name", "psd"),
+                    _tm.report(time.perf_counter() - _t_prop0,
+                               top=("sample", "sens_refresh", "rows_per_split")))
+        self._prop_timer = None
         return new_state, np.asarray(accepted)[:engine_ntemps]
 
 

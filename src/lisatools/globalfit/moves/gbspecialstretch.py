@@ -229,11 +229,11 @@ class _ProposeTimer:
         ``_mark`` boundaries inside ``_run_rj_step``)."""
         self.stages[name] = self.stages.get(name, 0.0) + float(dt)
 
-    def report(self, total: float) -> str:
+    def report(self, total: float, top=None) -> str:
         # Top-level stages only: nested spans (buffer_build inside
         # run_proposal, ...) are reported but excluded from the
         # tracked/untracked accounting via the ``_TOP`` list.
-        top = (
+        top = top or (
             "sorter_build", "friend_index", "resid_open_close", "ll_checks",
             "run_proposal", "run_tempering", "write_back", "sorter_rebuild",
             "band_info", "ll_inject_final", "ll_inject_drift", "mempool_free",
