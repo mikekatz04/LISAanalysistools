@@ -2757,6 +2757,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # GB_JUMP_TRACE: emitted next to [GB_ACCEPT] so the rate and the
             # displacement that produced it are read together.
             self._jump_trace_report()
+            self._infomat_warned = False        # re-arm the route indicator
             # Denominator split (user request 2026-08-14): the headline is
             # MH acceptance among VIABLE births -- rows the sampler
             # actually compared -- with the auto-reject classes broken
@@ -3179,6 +3180,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # sig-het trust gate (dphase/2pi = 0.0796 bins) are both naturally
     # expressed, so the report puts all three on one scale.
     _JT_NSNR, _JT_SNR_W = 12, 10.0        # SNR bins of width 10, 0..120
+
+    #: Per-source ``information_matrix`` cost above which the call is
+    #: assumed to have fallen through to the chunked delegate. Sits between
+    #: the two measured rates (~2.4 ms sig-het, ~46 ms chunked) with an
+    #: order of magnitude of headroom either side, so it does not fire on
+    #: ordinary slow blocks.
+    _INFOMAT_SLOW_MS = 15.0
+
+    def _infomat_route_check(self, dt, nrows, *, fast_wired, comp):
+        """Warn ONCE per propose if the info matrix missed the sig-het route.
+
+        ``fast_wired`` records whether the caller supplied the slot-space
+        routing the fast leg needs; a sig-het comp with the reference NOT
+        live still answers, just via its chunked delegate, which is exactly
+        the silent case this exists to surface.
+        """
+        if nrows <= 0 or getattr(self, "_infomat_warned", False):
+            return
+        ms = 1e3 * dt / nrows
+        if ms < self._INFOMAT_SLOW_MS:
+            return
+        self._infomat_warned = True
+        logger.warning(
+            "[GB_INFOMAT %s] information_matrix cost %.1f ms/source over %d "
+            "rows -- the sig-het route is ~2.4 ms/source and the chunked "
+            "delegate ~46, so this looks like a FALL-THROUGH (sig-het comp: "
+            "%s; slot routing wired: %s). Check that "
+            "setup_in_model_likelihood ran BEFORE the proposal Cholesky; "
+            "built the other way round the reference is not live and the "
+            "call silently takes the chunked path.",
+            self.name, ms, nrows, hasattr(comp, "chunked"), fast_wired)
 
     def _jump_trace_new(self, nt):
         xp = self.xp
@@ -6207,11 +6239,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _di["slot_holder"] = buffer_obj
 
         _tm = getattr(self, "_prop_timer", None)
+        _t_im0 = time.perf_counter()
         with _tspan(_tm, "infomat_kernel"):
             info_phys = _RoutedBandEngine.route_information_matrix(
                 _info_comp, model.analysis_container_arr, params_phys,
                 inds=_test_inds, noise_index=walker_inds, **_di,
             )
+        # ROUTE INDICATOR. The fall-through to the chunked delegate is
+        # SILENT -- unlike the F-stat route, nothing warns -- and it costs
+        # ~46 ms/source against ~2.4 ms on the sig-het route (faster still
+        # under v5). That invisibility is what burned the overnight_v5 run:
+        # it asked for v5, ``inmodel_cholesky`` was 84% of the iteration,
+        # and no log line could show whether sig-het was ever reached. The
+        # per-source cost is the only available detector, so make it one.
+        self._infomat_route_check(
+            time.perf_counter() - _t_im0, int(params_phys.shape[0]),
+            fast_wired=bool(_di), comp=_info_comp)
 
         # Conditioning scales for the sampling basis (fdot spans ~1e-13 in
         # sampled units; without the rescale the information matrix inversion is
