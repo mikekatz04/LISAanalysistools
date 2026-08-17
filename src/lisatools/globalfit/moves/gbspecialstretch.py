@@ -783,6 +783,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # operation sites in ``run_proposal``. Off by default -> the hooks
         # early-return, so the production path is untouched.
         self.debug = bool(debug)
+        # GB_JUMP_TRACE=1: per-propose census of the in-model f0 JUMP SIZE
+        # against acceptance. Nothing else logs this. [GB_ACCEPT] gives the
+        # acceptance rate but not the displacement behind it, and the two
+        # only mean something together: 0.38 acceptance is produced both by
+        # well-scaled steps that explore and by microscopic steps that are
+        # accepted precisely because they change nothing. Accumulated
+        # entirely on device (bincounts keyed on the temperature rung) and
+        # pulled to host ONCE per propose, so it costs no per-repeat sync.
+        self._jt = None
         self.debug_plot_dir = debug_plot_dir
         # Plot selection: only the chosen (walker, band) cell is plotted --
         # ONE figure per plotted step with a panel per temperature -- instead
@@ -2745,6 +2754,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             "(jump_factor=%.4g)", self.name, parts,
                             self.jump_factor)
                 self._im_kind_counts = {}
+            # GB_JUMP_TRACE: emitted next to [GB_ACCEPT] so the rate and the
+            # displacement that produced it are read together.
+            self._jump_trace_report()
             # Denominator split (user request 2026-08-14): the headline is
             # MH acceptance among VIABLE births -- rows the sampler
             # actually compared -- with the auto-reject classes broken
@@ -3157,6 +3169,100 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         st["rep0"][slots] = prop_counts[1][t_i, w_i, b_i]
         st["spec"][slots] = specials
         st["open"][slots] = True
+
+    # ---- GB_JUMP_TRACE ---------------------------------------------------
+    # Jump size vs acceptance, the pairing no existing log line reports.
+    # [GB_ACCEPT] gives the rate; the rate alone is ambiguous, because 0.38
+    # is produced both by well-scaled steps that explore and by microscopic
+    # steps accepted precisely because they change nothing. |df0| is carried
+    # in FOURIER BINS, the unit in which the Fisher width (0.551/SNR) and the
+    # sig-het trust gate (dphase/2pi = 0.0796 bins) are both naturally
+    # expressed, so the report puts all three on one scale.
+    _JT_NSNR, _JT_SNR_W = 12, 10.0        # SNR bins of width 10, 0..120
+
+    def _jump_trace_new(self, nt):
+        xp = self.xp
+        z = lambda k: xp.zeros(k, dtype=xp.float64)
+        return dict(nt=nt, n=z(nt), n_acc=z(nt), s_d=z(nt), s_d_acc=z(nt),
+                    s_d2=z(nt), snr_n=z(self._JT_NSNR),
+                    snr_acc=z(self._JT_NSNR), snr_d=z(self._JT_NSNR))
+
+    def _jump_trace_accum(self, new, cur, accept, t_idx, keep_idx, h_h):
+        """One repeat's (|df0|, accepted) into the census; device-only.
+
+        Five bincounts keyed on the temperature rung, three on an SNR bin.
+        No host sync here -- the pull happens once per propose in
+        :meth:`_jump_trace_report`.
+        """
+        if os.environ.get("GB_JUMP_TRACE", "0") != "1":
+            return
+        fc = self._f0_col
+        if fc is None or new.shape[0] == 0:
+            return          # cupy.bincount raises on zero-size input
+        xp = self.xp
+        ti = xp.asarray(t_idx).astype(xp.int32)
+        nt = int(getattr(self, "ntemps", 0)) or (int(ti.max()) + 1)
+        if self._jt is None or self._jt["nt"] != nt:
+            self._jt = self._jump_trace_new(nt)
+        S = self._jt
+        d = xp.abs(new[:, fc] - cur[:, fc]) * 1e-3 / self.df       # bins
+        ac = accept.astype(d.dtype)
+        S["n"] += xp.bincount(ti, minlength=nt).astype(d.dtype)
+        S["n_acc"] += xp.bincount(ti, weights=ac, minlength=nt)
+        S["s_d"] += xp.bincount(ti, weights=d, minlength=nt)
+        S["s_d_acc"] += xp.bincount(ti, weights=d * ac, minlength=nt)
+        S["s_d2"] += xp.bincount(ti, weights=d * d, minlength=nt)
+        # Per-source SNR split: the loud end is exactly where production
+        # freezes (within-walker scatter 0.0000 bins at SNR > 40), so an
+        # aggregate rate would hide the thing this probe exists to see.
+        if h_h is None or keep_idx is None or int(keep_idx.shape[0]) == 0:
+            return
+        snr = xp.sqrt(xp.clip(xp.asarray(h_h).real, 0.0, None)).ravel()
+        dk, ak = d[keep_idx], ac[keep_idx]
+        k = min(int(snr.shape[0]), int(dk.shape[0]))
+        if k == 0:
+            return
+        b = xp.clip((snr[:k] / self._JT_SNR_W).astype(xp.int32),
+                    0, self._JT_NSNR - 1)
+        S["snr_n"] += xp.bincount(b, minlength=self._JT_NSNR).astype(d.dtype)
+        S["snr_acc"] += xp.bincount(b, weights=ak[:k], minlength=self._JT_NSNR)
+        S["snr_d"] += xp.bincount(b, weights=dk[:k], minlength=self._JT_NSNR)
+
+    def _jump_trace_report(self):
+        """Pull the census to host, log it, and clear. Once per propose."""
+        S = self._jt
+        if S is None:
+            return
+        self._jt = None
+        n = _to_numpy(S["n"])
+        if n.sum() <= 0:
+            return
+        na, sd = _to_numpy(S["n_acc"]), _to_numpy(S["s_d"])
+        sda, sd2 = _to_numpy(S["s_d_acc"]), _to_numpy(S["s_d2"])
+        den = np.maximum(n, 1.0)
+        acc, mean_d = na / den, sd / den
+        rms_d = np.sqrt(sd2 / den)
+        mean_da = sda / np.maximum(na, 1.0)
+        gate = float(self.sighet_trust_dphase) / (2.0 * np.pi)
+        logger.info(
+            "[GB_JUMP %s] in-model |df0| in FOURIER BINS (trust gate %.4f, "
+            "jump_factor %.3g) -- rung: n acc mean rms mean_accepted | %s",
+            self.name, gate, self.jump_factor,
+            "; ".join(f"T{i}: {int(n[i])} {acc[i]:.3f} {mean_d[i]:.4f} "
+                      f"{rms_d[i]:.4f} {mean_da[i]:.4f}"
+                      for i in np.nonzero(n > 0)[0]))
+        sn, sa = _to_numpy(S["snr_n"]), _to_numpy(S["snr_acc"])
+        sdd = _to_numpy(S["snr_d"])
+        if (sn > 0).any():
+            logger.info(
+                "[GB_JUMP %s] by source SNR -- %s", self.name,
+                "; ".join(
+                    f"{int(i * self._JT_SNR_W)}-"
+                    f"{int((i + 1) * self._JT_SNR_W)}: n {int(sn[i])} "
+                    f"acc {sa[i] / max(sn[i], 1.0):.3f} "
+                    f"mean|df0| {sdd[i] / max(sn[i], 1.0):.4f} "
+                    f"(Fisher {0.551 / ((i + 0.5) * self._JT_SNR_W):.4f})"
+                    for i in np.nonzero(sn > 0)[0]))
 
     def _cell_ll_finalize(self, st, buffer_obj, slots, ll_change_log,
                           prop_counts):
@@ -6675,6 +6781,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             with _tspan(tm, "inmodel_accept"):
                 lnpdiff = beta_s * delta_ll + (new_logp - curr_prior[sl]) + factors
                 accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
+
+                # GB_JUMP_TRACE: the ONE site where the proposed coordinates,
+                # the current ones, the accept mask and the per-row rung all
+                # coexist. Device-only; no-op unless the knob is set.
+                self._jump_trace_accum(
+                    new, curr[sl], accept, t_i[sl], keep_idx,
+                    getattr(buffer_obj, "h_h_out", None))
 
                 bad_mask = (new_ll <= -1e299) | (new_logp <= -1e229)
                 # ``accept[bad_accepts] = False`` == ``accept & ~bad_mask``;
