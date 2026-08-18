@@ -54,6 +54,19 @@ DEBUG_MODE = False
 
 class AETTDIWaveform(ABC):
     """Base class for an AET TDI Waveform."""
+    #: Whether this generator can evaluate a BATCH of independent parameter
+    #: sets in one call, returning one result per set.
+    #:
+    #: Default ``False``, and deliberately so: batching is opt-in. The read
+    #: site uses ``getattr(gen, "supports_batch", False)``, so a generator
+    #: that never declares this -- including one with no common base class --
+    #: is excluded automatically. Declaring it here is for discoverability,
+    #: NOT as the safety mechanism.
+    #:
+    #: A subclass sets this True only if every row of a batch is guaranteed
+    #: to share the sub-sample alignment ``pyResponseTDI`` requires; see
+    #: :class:`~lisatools.sources.bbh.waveform.GridAlignedPhenomTHMTDIWaveform`.
+    supports_batch: bool = False
 
     @property
     def dt(self) -> float:
@@ -115,6 +128,19 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         STFT targets continue to be configured via ``stft_dt`` / the frequency
         bounds until the domain plumbing is unified.
     """
+    #: Whether this generator can evaluate a BATCH of independent parameter
+    #: sets in one call, returning one result per set.
+    #:
+    #: Default ``False``, and deliberately so: batching is opt-in. The read
+    #: site uses ``getattr(gen, "supports_batch", False)``, so a generator
+    #: that never declares this -- including one with no common base class --
+    #: is excluded automatically. Declaring it here is for discoverability,
+    #: NOT as the safety mechanism.
+    #:
+    #: A subclass sets this True only if every row of a batch is guaranteed
+    #: to share the sub-sample alignment ``pyResponseTDI`` requires; see
+    #: :class:`~lisatools.sources.bbh.waveform.GridAlignedPhenomTHMTDIWaveform`.
+    supports_batch: bool = False
 
     def __init__(
         self,
