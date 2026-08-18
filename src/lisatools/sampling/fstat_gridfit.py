@@ -912,7 +912,7 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
 def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
                         band_edges_hz, mc_lims,
                         cache_path: Optional[str] = None,
-                        fingerprint_extra: str = ""):
+                        fingerprint_extra: str = "", epoch=None):
     """Stage B: clamped boxes -> ONE batched sweep -> stacked grids.
 
     Assemble (host, cheap): every selected peak's 4-D box with its f0 range
@@ -1105,7 +1105,7 @@ def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
     stacked = run_stacked_stage_b(
         call_fstat, peaks, xp=xp, Tobs=Tobs, band_edges_hz=band_edges_hz,
         mc_lims=mc_lims, cache_path=cache_path,
-        fingerprint_extra=fingerprint_extra,
+        fingerprint_extra=fingerprint_extra, epoch=epoch,
     )
     return stacked, int(len(peaks))
 
