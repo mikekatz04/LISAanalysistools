@@ -98,11 +98,8 @@ def main(argv=None):
     if k < 1:
         ap.error("rungs must be >= 1")
 
-    if args.apply:
-        bak = f"{args.store}.bak_rerunge_{args.branch}"
-        shutil.copy2(args.store, bak)
-        print(f"backup: {bak}")
-
+    # NB: the backup is taken further down, only once every validation has
+    # passed -- an early copy left a stray .bak behind on every refusal.
     with h5py.File(args.store, "a" if args.apply else "r") as f:
         g = f[args.group]
         sub = g.get("sub_backend", {})
@@ -121,15 +118,27 @@ def main(argv=None):
         print(f"{args.store}\n  branch={args.branch} iteration={nit} "
               f"stored rungs={nr} -> target {k}  (nwalkers={nw} nbands={nb})")
 
+        # ALREADY DONE short-circuits everything below, including the
+        # ambiguity guard: re-running the prep for a second arm is the normal
+        # case, and a store that is already at the target needs no probe at
+        # all. (Ordering bug 2026-08-18: this used to sit AFTER the guard, so
+        # re-prepping an already-24-rung store with nwalkers=24 errored out
+        # instead of reporting success.)
+        if nr == k:
+            print(f"  already at {k} rungs; nothing to do.")
+            return 0
         # The shape probe is only unambiguous while the rung count differs
-        # from the other axis lengths it could be confused with.
+        # from the other axis lengths it could be confused with: with
+        # nr == nwalkers, band_cold_ll (nit, nwalkers, nbands) is
+        # indistinguishable from a rung-on-axis-1 dataset like chain
+        # (nit, nrungs, nwalkers, nleaves, ndim).
         if nr in (nw, nb):
             ap.error(f"stored rung count {nr} collides with nwalkers={nw} / "
                      f"num_bands={nb}; the shape probe cannot identify the "
-                     "rung axis unambiguously. Migrate by hand.")
-        if nr == k:
-            print("  already at the target rung count; nothing to do.")
-            return 0
+                     "rung axis unambiguously, so a dataset that is merely "
+                     "walker- or band-dimensioned could be reshaped by "
+                     "mistake. Migrate by hand, or re-prep from a store whose "
+                     "rung count differs from both.")
 
         # Well-definedness gate: see the module docstring.
         if f"{args.branch}" in g.get("inds", {}):
@@ -167,6 +176,11 @@ def main(argv=None):
         if not args.apply:
             print("\n  DRY RUN -- re-run with --apply to write.")
             return 0
+
+        f.flush()
+        bak = f"{args.store}.bak_rerunge_{args.branch}"
+        shutil.copy2(args.store, bak)
+        print(f"\n  backup: {bak}")
 
         lad = ladder_for(k)
         for name, _old, new, ax, pairs, dt, comp, copts in todo:
