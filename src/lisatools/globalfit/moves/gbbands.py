@@ -1810,22 +1810,32 @@ class _RoutedBandEngine:
         gpus = getattr(holder, "gpus", None)
         mode = os.environ.get("FSTAT_SIGHET_MULTIDEV", "0")
         if gpus is not None and len(gpus) >= 2 and mode in ("1", "check"):
-            # DEFAULT OFF (2026-08-12): the first on-GPU run of the
-            # fan-out produced grids that DIFFER from the single-device
-            # path (F_max rel up to 0.81, best-sky sign flips) while the
-            # CPU fake/real-comp bit-identity tests pass. The 2026-08-11
-            # code audit EXCLUDED the merge bookkeeping (disjoint host row
-            # ranges), the transfer ordering (every lane D2H is a blocking
-            # .get() behind the wraps' own cudaDeviceSynchronize) and the
-            # holder row layouts (both ACA buffers carry exactly len(split)
-            # rows; the slices mirror setup_fstat_references' own
-            # reshapes); the kernel wraps hold the GIL, so lanes cannot
-            # race in C++ either. What CPU cannot reach is the on-GPU
-            # scoring of the non-primary lane's comp replica -- mode
-            # "check" shadows every batch with the pinned scorer and fails
-            # loudly on the first diverging row, localizing it to a lane.
-            # Opt-in until that gate passes; the single-device pin is the
-            # validated scorer.
+            # GATE PASSED 2026-08-13 (LAT a86c52af). `=check` on a 2xH100
+            # allocation (7.0-7.8 mHz) engaged the fan-out and ran a full
+            # comb+stageB fit in 122.3 s / 224 peaks with ZERO diverging
+            # batches against the pinned scorer. The fan-out is VALIDATED and
+            # the 23-month script has run on it since; `=1` is a supported
+            # production setting, not an experiment.
+            #
+            # History, kept because it explains why this is opt-in rather
+            # than the default: the first on-GPU run (2026-08-12) produced
+            # grids that DIFFERED from the single-device path (F_max rel up
+            # to 0.81, best-sky sign flips) while the CPU fake/real-comp
+            # bit-identity tests passed. The 2026-08-11 code audit excluded
+            # the merge bookkeeping (disjoint host row ranges), the transfer
+            # ordering (every lane D2H is a blocking .get() behind the wraps'
+            # own cudaDeviceSynchronize) and the holder row layouts; the
+            # kernel wraps hold the GIL, so lanes cannot race in C++ either.
+            # What CPU could not reach was the on-GPU scoring of the
+            # non-primary lane's comp replica -- and that divergence was
+            # closed by the drift-campaign replica fixes (template twin
+            # 5d01095, orbits replica 7d6fd4c, WDMSettings t0 319782c),
+            # which is what the =check gate then confirmed.
+            #
+            # `=check` remains available: it shadows every batch with the
+            # pinned scorer and fails loudly on the first diverging row,
+            # localizing it to a lane. Re-run it after any change to the
+            # sharding, the replica construction, or the merge.
             return cls._sighet_fstat_multidevice(
                 comp, holder, view, int(intra[0]),
                 int(intra[0] if intra_noise is None else intra_noise[0]),

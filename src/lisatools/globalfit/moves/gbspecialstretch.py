@@ -10012,6 +10012,17 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         # The sweep scores through ``self._fstat_call``, which reads the LIVE
         # residual -- so the GB-free window has to wrap the call, not just
         # the setup.
+        #
+        # THE FLAG IS PART OF THE FINGERPRINT. ``GB_FSTAT_GB_FREE`` changes the
+        # RESIDUAL the sweep runs against but nothing else about the sweep's
+        # inputs, so without this the two modes produce different grids under
+        # the SAME cache key: flip the flag, refit at the same epoch, and the
+        # checkpoint layer hands back the other mode's grid with no error and
+        # no warning. Inert at epoch 0 (nothing to restore when the reference
+        # walker holds no GBs) and therefore invisible until the first real
+        # refit -- exactly the silent-cache-reuse case the fingerprint exists
+        # to prevent.
+        _gb_free = os.environ.get("GB_FSTAT_GB_FREE", "1") == "1"
         with self._gb_free_residual(model, branches, walker_ref):
             stacked, n_peaks = run_fstat_grid_fit(
                 self._fstat_call(model, walker_ref),
@@ -10021,7 +10032,7 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                 f0_lims_hz=f0_lims,
                 mc_lims=mc_lims,
                 cache_dir=cache_dir,
-                fingerprint_extra=f"|epoch={k}",
+                fingerprint_extra=f"|epoch={k}|gbfree={int(_gb_free)}",
                 epoch=k,
             )
         wall = time.perf_counter() - t0

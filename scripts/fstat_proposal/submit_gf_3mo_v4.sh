@@ -37,8 +37,10 @@
 # ##     dead. Every diagnostic below exists because of this fix.           ##
 # ##   * GB group stretch OFF (c3725f7d): measured cold 2/472 = 0.0042 on   ##
 # ##     v3 while the VGB stretch scored 0.4485 on the same run.            ##
-# ##   * SIGHET_NT_LAYER=270 (below) -- 8 h sparse spacing, NOT the 36 h    ##
-# ##     the 3/6/23-month scripts have all been running.                    ##
+# ##   * SIGHET_NT_LAYER stays at the v3 default (36 h). 270 was tried and  ##
+# ##     REVERTED: it OOMs (the sig-het stash goes as cells x N_sparse_t)   ##
+# ##     and the accuracy gain did not reproduce once the config echo made  ##
+# ##     the measurement attributable. See the block at SIGHET_NT_LAYER.    ##
 # ##   * F-stat peak weighting flattens to w ~ sqrt(SNR) after the first    ##
 # ##     refit (62cd814e), plus a fix for alpha being silently dropped on   ##
 # ##     the stage-B reload path.                                          ##
@@ -262,7 +264,44 @@ export GB_INMODEL_REPEATS_SURVIVOR=25
 # cleanly instead of snapping. If it exceeds the device shared budget the
 # fstat scorer FAILS AT SETUP naming the largest value that fits (~2 min,
 # not a wasted run) -- it is never silently coarsened.
-export SIGHET_NT_LAYER=270
+#
+# ---- REVERTED 2026-08-18: 270 OOMs, and the accuracy case did not hold ----
+# MEMORY. The sig-het stash is (n, nch, nch, Nf_active, N_sparse_t)
+# complex128 in _expand_B -- 4x _expand_B + 4x _expand_A per setup -- so it
+# goes as CELLS x N_sparse_t and the two knobs MULTIPLY. 270 raised
+# N_sparse_t 60 -> 265 while GB_N_SUBBANDS stayed at the 3-month 8192:
+#   3-mo default  60 x 8192 = 4.9e5  OK (= v3)   |  6-mo  118 x 4096 = 4.8e5 OK
+#   23-mo        525 x 2048 = 1.1e6  OK          |  v4@270 265 x 8192 = 2.2e6 OOM
+# It died on a 14.4 GB request at 91.5 GB allocated on a 99.9 GB card --
+# 2x the 23-month run's product on the SHORTEST baseline. The confined
+# probes could not surface this: n scales with cells and they ran 128
+# against production's 16384.
+#
+# ACCURACY. The 0.131@36h vs 0.072@8h A/B above predates GBGPU b412089, so
+# NEITHER run logged its resolved config -- and 0.131 is also the nodes=64
+# value from the separate 32/64/128 sweep (0.103/0.131/0.093), i.e. the two
+# arms are not a clean pair. With the echo finally live, four temper arms
+# CONFIRMED at nt_layer=270 measured eps/T 0.087-0.102 at small
+# displacement -- squarely inside that 0.093-0.131 spread, not 0.072. The
+# gain did not reproduce.
+#
+# And it should not have been expected to. project_sighet_v4_plan.md,
+# A100 bench-off 2026-08-03: at 3 months a CPU run at STRIDE 1 (maximum
+# possible resolution) still gave 2.90 at T=100 vs 3.70 at the 16 h grid --
+# "that tail is resolution-independent ... the known deep-null fit tail
+# (remedy = SNR-aware / null-densified nodes)". Same note, longer
+# baselines: "a 1.6x finer sparse grid changes NOTHING, and where it
+# changes anything it is worse." The real lever is NODE PLACEMENT.
+#
+# The "production default is TOO COARSE" line in that note (which motivated
+# 270) argues for matching the BENCHMARK's 16 h configuration; it was
+# written against a SHARED-memory ceiling and never costed the global-memory
+# stash above. It is not a measured 3-month accuracy deficit.
+#
+# TO RE-TEST: 270 needs GB_N_SUBBANDS=2048 to fit (265 x 2048 = 5.4e5), at
+# a throughput cost -- fewer resident cells means more sequential passes.
+# export SIGHET_NT_LAYER=270
+#
 # Confirm from the log, do not assume -- nothing else echoes these:
 #   grep "sig-het engine resolved" <store>/gf_prod_3mo_artifacts/globalfit_run.log
 # want: nt_layer=270 (stride 8) ... sparse spacing 8.0 h   (GBGPU b412089)
