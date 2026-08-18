@@ -1051,9 +1051,46 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                 **({"v5": int(getattr(gb_info, "sighet_v5", 0))}
                    if int(getattr(gb_info, "sighet_v5", 0)) else {}),
             )
+            # RESOLVED-CONFIG ECHO -- emitted HERE, not from GBGPU. The
+            # equivalent gbgpu-side logger.info (GBGPU b412089) is INVISIBLE:
+            # this pipeline attaches handlers to the ``lisatools`` logger tree
+            # only, and a 74k-line production log contains ZERO ``gbgpu.*``
+            # records. Every GBGPU log message is silently discarded --
+            # including _resolve_nt_layer's "nt_layer does not divide Nt;
+            # snapping to N" WARNING, whose absence we spent four runs
+            # misreading as evidence the knob had applied.
+            #
+            # Why it has to exist at all: nothing else reports what the
+            # sig-het engine actually resolved to. Every field below is the
+            # END of a chain of env reads, dataclass defaults, divisor
+            # snapping and device clamps, and run_settings.log records none
+            # of them -- so an accuracy A/B on SIGHET_NT_LAYER /
+            # SIGHET_V3_NODES / SIGHET_V4_KNOTS had no way to confirm the
+            # knob took. The obvious proxy fails too: kernel wall time is
+            # launch-bound at production batch sizes (24-48 sources, against
+            # the ~256 where the node stage starts to show), so a 32-vs-128
+            # node A/B moved inmodel_repeats by 2%.
+            #
+            # Sparse spacing is reported in HOURS because the accuracy
+            # prescription is stated that way (~35 h constant density) while
+            # the knob is a layer count; the mapping runs through Nf, dt and
+            # Nt and is not something to do in your head at 3am.
+            _g = getattr(gb_info.gb_wdm_comp, "_g", {}) or {}
+            _nf, _dt = _g.get("Nf", 0), _g.get("dt", 0.0)
+            _stride = _g.get("stride", 0)
             logger.info(
                 "GB in-model likelihood: SIGNAL-HET "
-                "(chunked-het delegate for RJ / fills / swaps)."
+                "(chunked-het delegate for RJ / fills / swaps). "
+                "RESOLVED: v3_n_nodes=%s v4_knots=%s v4_band=%s v5=%s | "
+                "nt_layer=%s (stride %s) N_sparse_t=%s n_sparse_fd=%s "
+                "n_cp_build=%s m_half=%s max_r=%s | Nf=%s Nt=%s "
+                "Nt_active=%s Tobs=%.6gs -> sparse spacing %.1f h",
+                _g.get("v3_n_nodes"), _g.get("v4_knots"), _g.get("v4_band"),
+                _g.get("v5"), _g.get("nt_layer"), _stride,
+                _g.get("N_sparse_t"), _g.get("n_sparse_fd"),
+                _g.get("n_cp_build"), _g.get("m_half"), _g.get("max_r"),
+                _nf, _g.get("Nt"), _g.get("Nt_active"), _g.get("Tobs", 0.0),
+                (_stride * _nf * _dt / 3600.0) if _nf and _dt else float("nan"),
             )
 
     # FD-domain mirror: the GB move auto-builds a config-only
