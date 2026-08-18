@@ -194,6 +194,50 @@ echo "[ARM] ${ARM}: GB_TEMPER_VERTICAL=${TEMPER_VERTICAL} GB_TEMPER_CELL_ORDER=$
 echo "[WINDOW] ${WINDOW}: GB_MIN_FREQ=${WIN_MIN} GB_MAX_FREQ=${WIN_MAX}"
 STORE_DIR=./gf_temper_probe_${WINDOW}_${ARM}/
 
+# ---- STORE PREP: the four-arm matrix ------------------------------------
+# Run all four; ARM x WINDOW is the whole design.
+#
+#   WINDOW=dense ARM=vertical   does vertical tempering help, in the
+#                               confusion regime where swaps trade genuinely
+#                               competing models
+#   WINDOW=dense ARM=baseline   the control that makes that difference
+#                               attributable
+#   WINDOW=highf ARM=baseline   v4 at 24 rungs on ONE isolated source: the
+#                               clean read on the hot-rung DELTA-vs-DELTA
+#                               risk and per-source eps/T, uncontaminated by
+#                               new tempering code. This is the arm that
+#                               answers the last open question in v4.
+#   WINDOW=highf ARM=vertical   vertical tempering where most cells are
+#                               EMPTY -- a swap between two empty cells has
+#                               L2-L1 == 0 and so "accepts" while moving
+#                               nothing, which is the hardest case for the
+#                               empty-pair handling to get right.
+#
+# A FRESH store costs ~1h33m to the first GB propose (measured), so inherit
+# the noise / VGB / F-stat work from the matching existing probe store
+# instead -- matching because the BAND GRID must agree (a 154-band production
+# store cannot seed a 4-band window; that is the "stored with 154 sub-bands
+# but the run config builds 4" error).
+#
+#   BASE=gf_dense_probe          # or gf_highf_probe for the highf arms
+#   for ARM in vertical baseline; do
+#     DST=gf_temper_probe_dense_${ARM}
+#     cp -r ${BASE} ${DST}
+#     python scripts/fstat_proposal/reset_recipe_stage.py \
+#         ${DST}/gf_prod_3mo_testing.h5 gb_search --rewind-to-empty gb --apply
+#     python scripts/fstat_proposal/rerunge_gb_ladder.py \
+#         ${DST}/gf_prod_3mo_testing.h5 gb 24 --apply
+#   done
+#
+# The rewind is REQUIRED before the re-rung (with leaves present there is no
+# correct rung to assign each existing source to) and is what you want anyway
+# -- the arms should start from zero GB leaves so the search is the thing
+# being compared. Both arms of a window then share identical noise, VGB state
+# and F-stat cache, so the vertical-vs-baseline difference is attributable
+# rather than confounded by two independent noise fits.
+#
+# The LADDER PREFLIGHT below refuses to start if the re-rung was missed.
+
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
 # (timestamped per job, so resubmits/resumes add new files rather than
@@ -574,6 +618,42 @@ else
   echo "[FRESH] stages run from the top (noise_search -> noise_vgb_search ->"
   echo "        gb_search -> full_pe); the F-stat grid + epoch center table"
   echo "        are fitted fresh against this run's own residual."
+  echo "[FRESH] MEASURED cost of a fresh windowed store: ~1h33m to the first"
+  echo "        GB propose (recipe setup -> first GB leaves; the noise/VGB"
+  echo "        stages average ~5 min/iteration). See the STORE PREP block in"
+  echo "        the header to inherit that work from an existing probe store."
+fi
+
+# ============================================================================
+# LADDER PREFLIGHT. Resume derives the GB rung count from the STORED
+# band_temps shape, NOT from GB_NTEMPS -- so a prepped store that was never
+# re-runged runs a 2-rung ladder while this script says 24, and every
+# tempering measurement in the run is meaningless. That failure is SILENT
+# (the only hint is one build_gb_moves warning buried in a 74k-line log), and
+# it is exactly how both confined probes ran a degenerate [1.0, 1e-4] ladder
+# for days. Refuse to start instead.
+# ============================================================================
+if [ -e "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" ]; then
+  python - "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" "${GB_NTEMPS}" <<'PYEOF' || exit 2
+import sys, h5py
+store, want = sys.argv[1], int(sys.argv[2])
+with h5py.File(store, "r") as f:
+    bt = f["global_fit"]["sub_backend"]["gb"].get("band_temps")
+    if bt is None:
+        print("[LADDER] no gb band_temps; nothing to check.")
+        raise SystemExit(0)
+    have = int(bt.shape[-1])
+print(f"[LADDER] stored gb rungs = {have}, GB_NTEMPS = {want}")
+if have != want:
+    print(f"[LADDER] REFUSING TO START: the store would run {have} rungs, not "
+          f"{want}. Resume takes the STORED count. Re-rung it first:\n"
+          f"  python scripts/fstat_proposal/reset_recipe_stage.py {store} "
+          f"gb_search --rewind-to-empty gb --apply\n"
+          f"  python scripts/fstat_proposal/rerunge_gb_ladder.py {store} gb "
+          f"{want} --apply")
+    raise SystemExit(2)
+print("[LADDER] OK.")
+PYEOF
 fi
 
 # LATER REFITS: GB_FSTAT_REFIT_EVERY=100 proposal-hits (~8 h at the new
