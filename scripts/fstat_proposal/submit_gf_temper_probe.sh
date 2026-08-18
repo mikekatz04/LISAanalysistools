@@ -624,38 +624,6 @@ else
   echo "        the header to inherit that work from an existing probe store."
 fi
 
-# ============================================================================
-# LADDER PREFLIGHT. Resume derives the GB rung count from the STORED
-# band_temps shape, NOT from GB_NTEMPS -- so a prepped store that was never
-# re-runged runs a 2-rung ladder while this script says 24, and every
-# tempering measurement in the run is meaningless. That failure is SILENT
-# (the only hint is one build_gb_moves warning buried in a 74k-line log), and
-# it is exactly how both confined probes ran a degenerate [1.0, 1e-4] ladder
-# for days. Refuse to start instead.
-# ============================================================================
-if [ -e "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" ]; then
-  python - "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" "${GB_NTEMPS}" <<'PYEOF' || exit 2
-import sys, h5py
-store, want = sys.argv[1], int(sys.argv[2])
-with h5py.File(store, "r") as f:
-    bt = f["global_fit"]["sub_backend"]["gb"].get("band_temps")
-    if bt is None:
-        print("[LADDER] no gb band_temps; nothing to check.")
-        raise SystemExit(0)
-    have = int(bt.shape[-1])
-print(f"[LADDER] stored gb rungs = {have}, GB_NTEMPS = {want}")
-if have != want:
-    print(f"[LADDER] REFUSING TO START: the store would run {have} rungs, not "
-          f"{want}. Resume takes the STORED count. Re-rung it first:\n"
-          f"  python scripts/fstat_proposal/reset_recipe_stage.py {store} "
-          f"gb_search --rewind-to-empty gb --apply\n"
-          f"  python scripts/fstat_proposal/rerunge_gb_ladder.py {store} gb "
-          f"{want} --apply")
-    raise SystemExit(2)
-print("[LADDER] OK.")
-PYEOF
-fi
-
 # LATER REFITS: GB_FSTAT_REFIT_EVERY=100 proposal-hits (~8 h at the new
 # iteration cadence, ~3.5% overhead at a 17.7-min fit). To force an extra
 # refit mid-run, stop the job and archive the epoch dir, then resubmit:
@@ -791,6 +759,42 @@ export GB_TEMPER_AUDIT=1
 # concluding anything about the swaps themselves.
 export GB_N_SUBBANDS=64
 export NUM_ITERATIONS=300
+# NB: this sits HERE, not up by the FRESH guard, because the script runs
+# under `set -u` and GB_NTEMPS is not exported until the GB knob block
+# below -- referencing it earlier aborted the job with 'GB_NTEMPS:
+# unbound variable' (2026-08-18). Every export has happened by this point.
+# ============================================================================
+# LADDER PREFLIGHT. Resume derives the GB rung count from the STORED
+# band_temps shape, NOT from GB_NTEMPS -- so a prepped store that was never
+# re-runged runs a 2-rung ladder while this script says 24, and every
+# tempering measurement in the run is meaningless. That failure is SILENT
+# (the only hint is one build_gb_moves warning buried in a 74k-line log), and
+# it is exactly how both confined probes ran a degenerate [1.0, 1e-4] ladder
+# for days. Refuse to start instead.
+# ============================================================================
+if [ -e "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" ]; then
+  python - "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" "${GB_NTEMPS}" <<'PYEOF' || exit 2
+import sys, h5py
+store, want = sys.argv[1], int(sys.argv[2])
+with h5py.File(store, "r") as f:
+    bt = f["global_fit"]["sub_backend"]["gb"].get("band_temps")
+    if bt is None:
+        print("[LADDER] no gb band_temps; nothing to check.")
+        raise SystemExit(0)
+    have = int(bt.shape[-1])
+print(f"[LADDER] stored gb rungs = {have}, GB_NTEMPS = {want}")
+if have != want:
+    print(f"[LADDER] REFUSING TO START: the store would run {have} rungs, not "
+          f"{want}. Resume takes the STORED count. Re-rung it first:\n"
+          f"  python scripts/fstat_proposal/reset_recipe_stage.py {store} "
+          f"gb_search --rewind-to-empty gb --apply\n"
+          f"  python scripts/fstat_proposal/rerunge_gb_ladder.py {store} gb "
+          f"{want} --apply")
+    raise SystemExit(2)
+print("[LADDER] OK.")
+PYEOF
+fi
+
 
 mpiexec -n 3 python scripts/fstat_proposal/run_combined_staged.py
 # python scripts/fstat_proposal/run_combined_staged.py   # single-process fallback
