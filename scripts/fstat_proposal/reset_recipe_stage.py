@@ -190,8 +190,10 @@ def main(argv=None):
             if bt is not None and bt.ndim == 3:
                 print(f"  NOTE: stored GB ladder is {bt.shape[-1]}-rung "
                       f"({bt.shape[1]} bands). Resume takes the STORED rung "
-                      "count over GB_NTEMPS; run fix_vgb_band_temps.py if "
-                      "that is not what you want.")
+                      "count over GB_NTEMPS. To change it, run "
+                      "rerunge_gb_ladder.py AFTER this rewind (it requires "
+                      "zero live leaves). fix_vgb_band_temps.py is hardcoded "
+                      "to the vgb branch and will NOT touch gb.")
     return 0
 
 
