@@ -186,6 +186,22 @@ class AnalysisContainer:
         # 4. run-level likelihood convention (see class docstring).
         self.likelihood_source_only = bool(likelihood_source_only)
 
+        # 5. batched evaluation (see :meth:`eryn_likelihood_wrap`).
+        #: Try to evaluate a 2D parameter block in ONE generator call rather
+        #: than looping. Only ever engaged when the installed generator
+        #: advertises ``supports_batch``, so this default is inert for every
+        #: generator that does not opt in.
+        self.batch_evaluation: bool = True
+        #: Split a batch into chunks of at most this many rows (``None`` = one
+        #: launch). Bounds peak memory, which grows linearly in the batch.
+        self.batch_max_size: Optional[int] = None
+        #: How many times a batched launch was refused/failed and fell back to
+        #: the serial loop. A silent fallback is indistinguishable from a
+        #: batched path that never ran, so this is counted and warned about.
+        self.n_batch_fallbacks: int = 0
+        #: The exception from the most recent fallback, for diagnosis.
+        self.last_batch_error: Optional[BaseException] = None
+
     # ------------------------------------------------------------------
     # Data access (new + legacy)
     # ------------------------------------------------------------------
@@ -356,6 +372,31 @@ class AnalysisContainer:
             else:
                 accum.add_signal(row_dom, sign=+1)
         return accum
+
+    def _build_batched_template(self, params, waveform_kwargs: dict):
+        """Build a template stack with a leading SOURCE axis, without summing.
+
+        This is deliberately NOT :meth:`_call_single_model`. That method also
+        accepts a 2D ``params``, but it means something different: it iterates
+        the rows and SUMS them into one combined template, which is the right
+        answer for "several sources present in the data at once" and the wrong
+        one for "several independent parameter proposals". Here every row must
+        survive as its own template so the inner products can return one value
+        per row.
+
+        The generator is handed one ARRAY per parameter (a column of
+        ``params``) rather than being called once per row; a generator that
+        advertises ``supports_batch`` is one that accepts that.
+        """
+        arr = np.asarray(params)
+        if arr.ndim != 2:
+            raise ValueError(
+                f"batched template build needs 2D params; got ndim={arr.ndim}."
+            )
+        cols = tuple(arr[:, k] for k in range(arr.shape[1]))
+        return self._to_data_domain(
+            self._signal_gen(*cols, **waveform_kwargs), self._signal_gen
+        )
 
     def build_template(
         self,
@@ -1134,6 +1175,46 @@ class AnalysisContainer:
         else:
             raise ValueError("x must be a 1D or 2D array.")
 
+    def _batched_likelihood(self, x, *, source_only: bool = False, **kwargs):
+        """One generator launch for a whole 2D parameter block.
+
+        Returns one log-likelihood per ROW. The per-row split is not done
+        here: :func:`~lisatools.diagnostic.inner_product` keeps a leading
+        source axis and reduces only the basis axes, so a batched template
+        against the unbatched data yields a vector of inner products, and
+        :meth:`template_likelihood` composes exactly those.
+
+        ``batch_max_size`` chunks the launch. Memory grows linearly in the
+        batch, so a walker cloud large enough to be worth batching is also
+        large enough to run a device out of memory in one go.
+        """
+        arr = np.asarray(x)
+        n = arr.shape[0]
+        step = int(self.batch_max_size or n)
+        if step < 1:
+            raise ValueError(f"batch_max_size must be >= 1; got {self.batch_max_size!r}")
+
+        waveform_kwargs = kwargs.pop("waveform_kwargs", None) or {}
+        pieces = []
+        for lo in range(0, n, step):
+            template = self._build_batched_template(arr[lo:lo + step], waveform_kwargs)
+            vals = self.template_likelihood(
+                template, source_only=source_only, **kwargs
+            )
+            pieces.append(np.atleast_1d(asnumpy(vals)).astype(float).ravel())
+
+        out = np.concatenate(pieces) if len(pieces) > 1 else pieces[0]
+        if out.shape != (n,):
+            # The generator accepted the batch but did not give one value per
+            # row. Returning this would silently misalign likelihoods with
+            # walkers, so refuse and let the caller fall back to the loop.
+            raise ValueError(
+                f"batched likelihood returned shape {out.shape}, expected "
+                f"({n},). The generator declares supports_batch but did not "
+                f"preserve one template per parameter row."
+            )
+        return out
+
     def eryn_likelihood_wrap(
         self,
         x: np.ndarray | list | tuple,
@@ -1196,7 +1277,7 @@ class AnalysisContainer:
         if x.ndim != 2:
             raise ValueError("x must be a 1D or 2D array.")
 
-        if not use_vmap:
+        def _serial_loop():
             out = np.zeros(x.shape[0])
             for i in range(x.shape[0]):
                 input_vals = tuple(x[i]) + tuple(args)
@@ -1204,6 +1285,51 @@ class AnalysisContainer:
                     *input_vals, source_only=source_only, **kwargs
                 )
             return out
+
+        if not use_vmap:
+            # RESPONSE-LEVEL BATCH. Opt-in and default-deny: a generator that
+            # does not declare ``supports_batch`` -- including one with no
+            # common base class, which several sources here have -- is
+            # excluded automatically and takes the loop below, byte for byte
+            # as before.
+            can_batch = (
+                self.batch_evaluation
+                and bool(getattr(self._signal_gen, "supports_batch", False))
+                and not self.is_multi_model
+                and x.shape[0] > 1
+                and not args
+            )
+            if can_batch:
+                try:
+                    return self._batched_likelihood(
+                        x, source_only=source_only, **kwargs
+                    )
+                except Exception as exc:
+                    # A REFUSAL IS NOT AN ERROR. A generator that reports
+                    # "this batch cannot be launched as one" (merger times
+                    # spread wider than the shared evaluation window, ragged
+                    # node counts) is exercising designed control flow, and
+                    # the serial loop is the correct answer.
+                    #
+                    # LOUD on purpose. A silent fallback is indistinguishable
+                    # from a working batch that happens to be slow -- which is
+                    # exactly how a broken batched path can look "identical to
+                    # serial" while never having run at all.
+                    self.n_batch_fallbacks += 1
+                    self.last_batch_error = exc
+                    warnings.warn(
+                        f"batched likelihood failed and fell back to the "
+                        f"serial loop ({type(exc).__name__}: {exc}). Results "
+                        f"are still correct. Watch n_batch_fallbacks: if it "
+                        f"keeps rising once the chain has settled, the batch "
+                        f"geometry never becomes launchable and "
+                        f"batch_evaluation is costing you the failed attempt "
+                        f"each time; set batch_evaluation=False to stop "
+                        f"trying.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+            return _serial_loop()
 
         # vmap path -- pull jax lazily so the import isn't required
         # when use_vmap=False.
