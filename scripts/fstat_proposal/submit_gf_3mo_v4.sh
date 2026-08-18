@@ -305,13 +305,22 @@ export FSTAT_SIGHET_MULTIDEV=1
 # SPENDING accuracy. Same reason GB_SIGHET_TRUST_PHASE_C stays at 0 here.
 export GB_SIGHET_REFRESH_EVERY=25
 export GB_SIGHET_REFRESH_DPHASE=0
-# GB_SIGHET_REFRESH_MIN_BETA defaults to 0.1, so the coldest rungs refresh
-# and the hot ones keep a stale reference (beta-suppressed error, and each
-# refresh is a full setup). NOT lowered here on purpose: the 1e3-1e4 error
-# tail the probes saw off the cold chain sits near beta ~ 0.01-0.1, so if the
-# armed audits show the "all" median climbing with rung count, dropping this
-# to 0.01 is the first thing to try -- but it roughly doubles the refresh
-# cost and would be a second unattributed change right now.
+# ALL RUNGS REFRESH (user ruling 2026-08-18). The default 0.1 keeps a stale
+# reference on everything hotter, justified in the code as "the ll error is
+# beta-suppressed". That reasoning covers the WITHIN-rung accept test, where
+# the error enters as beta*eps -- but NOT the tempering swap, where it enters
+# as (beta_i - beta_j)*eps. On a geometric ladder from 1.0 to 1e-4 over 24
+# rungs the adjacent ratio is 0.687, so beta_i - beta_j = 0.313*beta_i, and a
+# stale-reference error of 1e3 lnL (the tail the probes measured off the cold
+# chain) contributes ~31 at beta=0.1 and ~3 at beta=0.01. Swaps at those
+# rungs would be decided by reference staleness rather than by the data.
+# Only around beta ~ 1e-4 does it genuinely vanish (~0.03).
+#
+# Cost: this refreshes every rung instead of the ~top third, so roughly 3x
+# the measured refresh time -- ~0.9% of a propose typically, ~17% in the
+# heaviest propose observed. Against rj_step at 87% of the propose that is
+# ~12% wall clock worst case, and it buys swap ratios that mean something.
+export GB_SIGHET_REFRESH_MIN_BETA=0
 #
 # RUNG-COVERAGE AUDIT -- ARMED FOR THE FIRST FEW ITERATIONS, THEN REMOVE.
 # Every probe today ran the degenerate 2-rung ladder, so we have NO data on
