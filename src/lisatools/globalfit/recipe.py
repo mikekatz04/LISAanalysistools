@@ -2556,6 +2556,15 @@ def build_gb_moves(
             os.environ.get("GB_SIGHET_TRUST_SNR_C", "30")),
         sighet_trust_dlna_min=float(
             os.environ.get("GB_SIGHET_TRUST_DLNA_MIN", "0.3")),
+        # SNR scaling of the PHASE gate, same shape as the amplitude one.
+        # C_phase = 3.456*sqrt(2*T_gate) places the gate at a constant TRUE
+        # lnL displacement T (49 -> T=100, 155 -> T=1000) instead of at a
+        # constant parameter offset; C=0 (default) keeps the uniform gate.
+        # Calibrate with GB_SIGHET_TIER_SCAN before arming.
+        sighet_trust_phase_c=float(
+            os.environ.get("GB_SIGHET_TRUST_PHASE_C", "0")),
+        sighet_trust_dphase_max=float(
+            os.environ.get("GB_SIGHET_TRUST_DPHASE_MAX", "20")),
         sighet_anchor_check=os.environ.get(
             "GB_SIGHET_ANCHOR_CHECK", "0") == "1",
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",
@@ -3180,6 +3189,15 @@ def build_vgb_moves(
             os.environ.get("GB_SIGHET_TRUST_SNR_C", "30")),
         sighet_trust_dlna_min=float(
             os.environ.get("GB_SIGHET_TRUST_DLNA_MIN", "0.3")),
+        # SNR scaling of the PHASE gate, same shape as the amplitude one.
+        # C_phase = 3.456*sqrt(2*T_gate) places the gate at a constant TRUE
+        # lnL displacement T (49 -> T=100, 155 -> T=1000) instead of at a
+        # constant parameter offset; C=0 (default) keeps the uniform gate.
+        # Calibrate with GB_SIGHET_TIER_SCAN before arming.
+        sighet_trust_phase_c=float(
+            os.environ.get("GB_SIGHET_TRUST_PHASE_C", "0")),
+        sighet_trust_dphase_max=float(
+            os.environ.get("GB_SIGHET_TRUST_DPHASE_MAX", "20")),
         sighet_anchor_check=os.environ.get(
             "GB_SIGHET_ANCHOR_CHECK", "0") == "1",
         sighet_drift_check=os.environ.get("GB_SIGHET_DRIFT_CHECK", "0") == "1",

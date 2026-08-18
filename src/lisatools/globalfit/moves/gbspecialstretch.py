@@ -716,6 +716,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sighet_trust_dphase=0.5,
         sighet_trust_snr_c=30.0,
         sighet_trust_dlna_min=0.3,
+        sighet_trust_phase_c=0.0,
+        sighet_trust_dphase_max=20.0,
         sighet_anchor_check=False,
         sighet_drift_check=False,
         debug_seq_pick="first",
@@ -908,6 +910,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # the reference.
         self.sighet_trust_snr_c = float(sighet_trust_snr_c)
         self.sighet_trust_dlna_min = float(sighet_trust_dlna_min)
+        # SNR scaling of the PHASE gate, mirroring the amplitude one above.
+        # ``C = 0`` (default) keeps the uniform ``sighet_trust_dphase``, i.e.
+        # exactly today's behaviour.
+        #
+        # Why a uniform phase gate is the wrong shape. The tiered-accuracy
+        # spec places gates at a constant TRUE-lnL displacement T, not at a
+        # constant parameter offset. For a GB the posterior width in f0 obeys
+        # ``sigma_bins * SNR = 0.55`` (measured, flat across every SNR bin of
+        # the [GB_JUMP] census), so the posterior width in carrier phase is
+        # ``2*pi*0.55/SNR = 3.456/SNR`` rad and the displacement reaching a
+        # given T is ``dphase_T = 3.456*sqrt(2T)/SNR``. A FIXED gate therefore
+        # sits at ``T = 0.5*(dphase*SNR/3.456)**2`` -- which for the 0.5 rad
+        # default is T ~ 0.7 at SNR 8, 21 at SNR 45 and 138 at SNR 115. The
+        # spec says accuracy is not required until T ~ 1000, so a uniform
+        # gate is ~3 decades too tight for faint sources while being merely
+        # tight for loud ones, and it strangles exactly the population whose
+        # recovery is in question.
+        #
+        # ``C_phase = 3.456 * sqrt(2 * T_gate)``: 49 for T=100, 155 for
+        # T=1000. Clipped BELOW by ``sighet_trust_dphase`` so arming this can
+        # never make the gate tighter than it is today, and above by
+        # ``sighet_trust_dphase_max``. Calibrate with GB_SIGHET_TIER_SCAN
+        # (see _sighet_tier_scan) rather than by guessing.
+        self.sighet_trust_phase_c = float(sighet_trust_phase_c)
+        self.sighet_trust_dphase_max = float(sighet_trust_dphase_max)
         # ANCHOR CHECK (debug, GB_SIGHET_ANCHOR_CHECK=1): at block start,
         # after the reference build and ll_ref evaluation, score the SAME
         # anchor coordinates through the exact engine and compare. At the
@@ -6580,6 +6607,117 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         damp = cp.abs(cp.log(cp.abs(pc[:, 0]) / cp.abs(pr[:, 0])))
         return drift, damp
 
+    def _sighet_trust_dphase_vec(self, buffer_obj, n):
+        """Per-source phase gate ``clip(C_phase/snr_ref, dphase, dphase_max)``.
+
+        Exact counterpart of :meth:`_sighet_trust_dlna_vec`, reading the same
+        reference template power ``h_h_out`` the block's ``ll_ref`` call
+        stashed. ``C_phase = 0`` (the default) returns the uniform gate, so
+        this is inert until armed. See the ctor comment for why a constant
+        phase offset is the wrong gate shape and how to pick ``C_phase``.
+        """
+        if self.sighet_trust_phase_c <= 0.0:
+            return cp.full(n, self.sighet_trust_dphase)
+        hh = cp.asarray(buffer_obj.h_h_out).real
+        snr_ref = cp.sqrt(cp.clip(hh, 0.0, None))
+        return cp.clip(
+            self.sighet_trust_phase_c / cp.maximum(snr_ref, 1e-30),
+            self.sighet_trust_dphase, self.sighet_trust_dphase_max,
+        )
+
+    def _sighet_tier_scan(self, buffer_obj, curr, slots, N_vals, l_i,
+                          ll_ref, beta, tm):
+        """Displacement-resolved sig-het accuracy, in the SAMPLING-RELEVANT lens.
+
+        ``GB_SIGHET_TIER_SCAN`` = comma-separated carrier-phase displacements
+        in rad (e.g. ``0.5,1,2,4,8,16``). Off by default.
+
+        **Why this exists, and why the anchor check and the ll AUDIT cannot
+        replace it.** Both of those report ``|ll_sighet - ll_exact|`` -- an
+        ABSOLUTE error. The sampler never sees an absolute likelihood:
+
+            delta_ll = new_ll - ll_ref        # BOTH sig-het, same reference
+            lnpdiff  = beta * delta_ll + (new_logp - curr_prior) + factors
+
+        so a sig-het error that is constant over the candidate neighbourhood
+        cancels EXACTLY in every acceptance ratio, and again in
+        ``ll_change_log += delta_ll`` (a sum of differences). What survives is
+        only how the error VARIES with displacement:
+
+            eps_delta = [sighet(cand) - sighet(anchor)]
+                      - [exact(cand)  - exact(anchor)]
+
+        That is the delta-vs-delta quantity the tiered-accuracy spec calls
+        for, and neither existing diagnostic measures it -- a large anchor or
+        AUDIT number may be entirely harmless offset, and they cannot tell
+        the difference.
+
+        **Why the displacements must be DELIBERATE.** The trust gate confines
+        the chain inside its own radius, so the chain's own history can never
+        say whether a wider radius would be safe -- the evidence is exactly
+        what the gate prevents from existing. This scan steps past the gate
+        on purpose, scores each displacement both ways, and reports
+        ``eps_delta`` against the true lnL drop ``T = |exact(cand) -
+        exact(anchor)|``. The spec's allowance is ``max(0.1, T/100)``, so the
+        gate belongs at the largest displacement that still passes.
+
+        Cost: one batched sig-het call per tier (cheap, reference live) plus
+        one exact call per tier inside a single clear/rebuild of the
+        reference -- the same toggle the anchor check already performs.
+        """
+        raw = os.environ.get("GB_SIGHET_TIER_SCAN", "").strip()
+        if not raw or self._f0_col is None:
+            return
+        try:
+            tiers = [float(x) for x in raw.split(",") if x.strip()]
+        except ValueError:
+            logger.warning("%s: GB_SIGHET_TIER_SCAN=%r is not a "
+                           "comma-separated list of radians; skipping.",
+                           self.name, raw)
+            return
+        tobs = float(self._basis_settings.Tobs)
+        n_src = int(curr.shape[0])
+        # dphase = 2*pi*|df0|*Tobs, and f0 is sampled in mHz. Alternate the
+        # sign per source so one batch per tier covers both directions.
+        sgn = cp.where(cp.arange(n_src) % 2 == 0, 1.0, -1.0)
+        cands = []
+        for d in tiers:
+            c = curr.copy()
+            c[:, self._f0_col] += sgn * (1e3 * d / (2.0 * np.pi * tobs))
+            cands.append(c)
+
+        with _tspan(tm, "inmodel_tier_scan"):
+            het = [buffer_obj.get_add_ll(c, slots, slots, N_vals,
+                                         leaf_inds=l_i) for c in cands]
+            buffer_obj.clear_in_model_likelihood()
+            ex0 = buffer_obj.get_add_ll(curr, slots, slots, N_vals,
+                                        leaf_inds=l_i)
+            exa = [buffer_obj.get_add_ll(c, slots, slots, N_vals,
+                                         leaf_inds=l_i) for c in cands]
+            buffer_obj.setup_in_model_likelihood(curr, slots, N_vals,
+                                                 leaf_inds=l_i)
+
+        cold = beta > 0.999
+        n_c = int(cold.sum())
+        if not n_c:
+            return
+        logger.info(
+            "%s: [GB_TIER] sig-het delta-vs-delta accuracy, COLD chain "
+            "(%d/%d sources, gate now %.3g rad):",
+            self.name, n_c, n_src, self.sighet_trust_dphase)
+        for d, hh, ee in zip(tiers, het, exa):
+            eps = ((hh - ll_ref) - (ee - ex0))[cold]
+            t_true = cp.abs(ee - ex0)[cold]
+            t_med = float(cp.median(t_true))
+            e_med = float(cp.median(cp.abs(eps)))
+            e_max = float(cp.abs(eps).max())
+            allowed = max(0.1, t_med / 100.0)
+            logger.info(
+                "%s: [GB_TIER] dphase=%6.3f rad (%.4f bins): true T median "
+                "%9.3g | eps_delta median %9.3g max %9.3g | allowed %8.3g "
+                "-> %s", self.name, d, d / (2.0 * np.pi), t_med, e_med,
+                e_max, allowed, "PASS" if e_max <= allowed else "over")
+
     def _sighet_trust_dlna_vec(self, buffer_obj, n):
         """Per-source amplitude gate ``clip(C/snr_ref, dlna_min, dlna_cap)``.
 
@@ -6797,9 +6935,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # snr_ref = sqrt(h_h) at the anchor, stashed by the ll_ref
         # evaluation just above. Vectorized once per block; the repeat
         # loop compares candidates against ``trust_dlna[sl]``.
-        trust_dlna = None
+        trust_dlna = trust_dphase = None
         if anchor_phys is not None:
             trust_dlna = self._sighet_trust_dlna_vec(buffer_obj, len(ids))
+            trust_dphase = self._sighet_trust_dphase_vec(buffer_obj, len(ids))
         # Trust-gate census. The gate writes -inf into ``new_logp``, which is
         # indistinguishable downstream from an ordinary prior rejection -- so
         # a run whose in-model moves are being throttled by the gate looks
@@ -6813,6 +6952,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Anchor check (debug knob; see ctor comment): sig-het vs exact at
         # the block anchor itself, where the ratio is exactly 1. Rebuilds
         # the reference afterwards (fresh == patched is bit-exact).
+        _anchor_err = None
         if sighet_active and self.sighet_anchor_check:
             with _tspan(tm, "inmodel_anchor_check"):
                 buffer_obj.clear_in_model_likelihood()
@@ -6820,7 +6960,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     curr, slots, slots, N_vals, leaf_inds=l_i)
                 buffer_obj.setup_in_model_likelihood(
                     curr, slots, N_vals, leaf_inds=l_i)
-            _e0 = cp.abs(ll_ref - _ll_ex0)
+            # SIGNED, and stashed: the absolute error at the anchor is the
+            # pure reference-point offset (displacement is zero here), and
+            # that offset CANCELS in every acceptance ratio because
+            # ``delta_ll = new_ll - ll_ref`` differences two sig-het values
+            # against the same reference. What the sampler feels is
+            # ``eps(cand) - eps(anchor)``, so the AUDIT below subtracts this
+            # to report that instead of another absolute number.
+            _anchor_err = ll_ref - _ll_ex0
+            _e0 = cp.abs(_anchor_err)
             _i0 = int(cp.argmax(_e0))
             _f0_0 = float(_to_numpy(self.transform_fn.both_transforms(
                 curr[_i0:_i0 + 1], xp=cp,
@@ -6836,6 +6984,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"ll_het={float(ll_ref[_i0]):.3e} "
                 f"ll_exact={float(_ll_ex0[_i0]):.3e}"
             )
+        # Displacement-resolved accuracy scan (opt-in, GB_SIGHET_TIER_SCAN).
+        # Runs here -- after ll_ref exists and before the chain moves -- so
+        # every tier is measured from the SAME anchor the trust gate is
+        # defined against.
+        if sighet_active:
+            self._sighet_tier_scan(buffer_obj, curr, slots, N_vals, l_i,
+                                   ll_ref, beta, tm)
+
         if tm is not None:
             # Per-block scale, so a wall time can be read as a per-source /
             # per-repeat cost without cross-referencing the run config.
@@ -6941,7 +7097,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         * trust_Tobs**2
                     )
                     _rej_a = _damp_n > trust_dlna[sl]
-                    _rej_p = _drift_n > self.sighet_trust_dphase
+                    _rej_p = _drift_n > trust_dphase[sl]
                     new_logp[_rej_a | _rej_p] = -np.inf
                     _trust_n[0] += _rej_a.sum()
                     _trust_n[1] += _rej_p.sum()
@@ -7192,7 +7348,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"candidates rejected by the sig-het trust gate over "
                 f"{n_rep} repeats x {len(ids)} sources "
                 f"(dlnA {int(_tn[0])}, dphase {int(_tn[1])}; "
-                f"dphase gate={self.sighet_trust_dphase} rad)"
+                f"dphase gate=[{float(trust_dphase.min()):.3g}.."
+                f"{float(trust_dphase.max()):.3g}] rad, "
+                f"C_phase={self.sighet_trust_phase_c:g})"
             )
 
         # End-of-block drift AUDIT (sighet_drift_check / GB_SIGHET_DRIFT_CHECK):
@@ -7250,6 +7408,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"median={float(cp.median(_err)):.3e}; COLD ({_n_c}): "
                 f"max={_cmax:.3e} median={_cmed:.3e}."
             )
+            # THE SAMPLING-RELEVANT NUMBER. The line above is an ABSOLUTE
+            # error, and the acceptance ratio never sees one: ``delta_ll =
+            # new_ll - ll_ref`` differences two sig-het values against the
+            # same reference, so any error constant over the neighbourhood
+            # cancels exactly (and again in ``ll_change_log += delta_ll``,
+            # a sum of differences). Subtracting the anchor error leaves
+            # ``eps(final) - eps(anchor)``, which is what actually biases
+            # the chain. Needs the anchor check armed as well; when it is
+            # not, the absolute line above is all that can be said -- and it
+            # is an UPPER bound on the harm, not a measurement of it.
+            if _anchor_err is not None:
+                _epsd = cp.abs((_ll_het_final - _ll_exact) - _anchor_err)
+                logger.info(
+                    f"{self.name}: sig-het DELTA-vs-DELTA error "
+                    f"(eps_final - eps_anchor -- the term the MH ratio "
+                    f"actually sees): all max={float(_epsd.max()):.3e} "
+                    f"median={float(cp.median(_epsd)):.3e}; COLD ({_n_c}): "
+                    f"max={float(_epsd[_cold].max()) if _n_c else float('nan'):.3e} "
+                    f"median={float(cp.median(_epsd[_cold])) if _n_c else float('nan'):.3e}."
+                )
             # Name the worst COLD offender when it exceeds O(1) in lnL:
             # which source/walker still breaks the fixed-reference
             # expansion, and how far it walked from its anchor. ``drift``
@@ -9315,6 +9493,7 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             mc_lims=mc_lims,
             cache_dir=cache_dir,
             fingerprint_extra=f"|epoch={k}",
+            epoch=k,
         )
         wall = time.perf_counter() - t0
         logger.info("%s: F-stat grid fit epoch %d done in %.1fs (%d peaks)",
@@ -9417,6 +9596,11 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             # loud last-line refusal of grids fitted on a different band
             # grid (band_idx labels would silently re-label otherwise)
             expected_band_edges=_to_numpy(self.band_edges),
+            # Epoch 0 fits a residual with nothing subtracted, so the loud
+            # end is where the birth mass belongs; later epochs fit a
+            # residual whose found sources are already gone, so the tilt
+            # flattens (see peak_weight_alpha_env).
+            epoch=k,
         )
         if container is None:
             # Zero peaks (or a stage that produced nothing): fall back to the
