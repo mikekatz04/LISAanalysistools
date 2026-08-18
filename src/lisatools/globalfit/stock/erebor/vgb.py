@@ -29,6 +29,7 @@ import os
 import typing
 
 import numpy as np
+from eryn.moves.tempering import make_ladder
 
 from ...engine import GeneralSetup, Settings
 from ...recipe import MOJITO_REFERENCE_TIME, gb_catalogue_to_sampling_basis
@@ -754,11 +755,23 @@ def prepare_vgb_branch(vgb: VGBSettings, general_setup: GeneralSetup, *,
         # and overwrites ``vgb.betas`` with the stored ladder. To actually
         # change the rung count of a live store, re-rung it first with
         # scripts/fstat_proposal/fix_vgb_band_temps.py <store.h5> <k>.
+        #
+        # LADDER SOURCE (user ruling 2026-08-18): eryn's ``make_ladder``, not
+        # a hand-rolled 1/1.2**i. That geometric-with-a-clobbered-last-rung
+        # form was never derived from anything -- it is the shape the bug
+        # above happened to leave behind. ``make_ladder(ndim, ntemps=k)``
+        # returns the spacing for which a Gaussian posterior gets a 25%
+        # temperature-swap acceptance, which is the property actually wanted,
+        # and it scales with the branch's DIMENSION rather than ignoring it.
+        # MBH / EMRI / SOBBH already resolve their ladders this way
+        # (recipe.py "make_ladder -> betas_all"), so this also stops VGB
+        # being the one branch with a bespoke rule.
+        #
+        # GB is deliberately NOT changed (user ruling): its ladder is
+        # per-BAND and adapted live by _adapt_band_temps, so regenerating it
+        # from make_ladder at each build would discard that adaptation.
         _nt = int(getattr(vgb, "ntemps", None) or general_setup.ntemps)
-        betas = 1.0 / 1.2 ** np.arange(_nt)
-        if _nt > 1:
-            betas[-1] = 1e-4
-        vgb.betas = betas
+        vgb.betas = make_ladder(int(vgb.ndim), ntemps=_nt)
     vgb.gb_wdm_comp = None
 
     logger.info(
