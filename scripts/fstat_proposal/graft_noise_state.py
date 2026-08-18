@@ -106,6 +106,79 @@ DEFAULT_BRANCHES = ("psd", "galfor", "vgb")
 ROW_DATASETS = ("log_like", "log_prior", "betas", "samplers_running")
 
 
+# ------------------------------------------------------- degenerate ladders --
+# A sub-backend's datasets are created from a ZEROED template by
+# ``ModuleSubBackend.reset``; real values only arrive when ``save_step`` writes
+# them. ``noise_search`` runs psd_pe + galfor_pe ONLY, so a store killed during
+# that stage has never run vgb_pe and its ``sub_backend/vgb/band_temps`` is
+# still all zeros.
+#
+# That is not benign. The resume reconciliation in ``state.py`` validates the
+# rung COUNT and every array SHAPE but never the ladder VALUES, so an all-zero
+# ladder passes every guard, and ``build_vgb_moves`` then overwrites the
+# configured ``betas`` with the stored one -- beta = 0 on every rung, i.e. the
+# branch's likelihood switched off entirely and every "posterior" is the prior.
+# That is exactly the 2026-08-15 VGB bug, which cost a run before it was
+# spotted, so this repairs it rather than resuming into it.
+
+
+def ladder_for(branch, ndim, k):
+    """The ladder a branch SHOULD carry at ``k`` rungs.
+
+    vgb: eryn's ``make_ladder`` (user ruling 2026-08-18) -- the spacing that
+    gives a Gaussian posterior a 25% swap acceptance, scaled by the branch's
+    dimension. This mirrors ``stock/erebor/vgb.py``; ``fix_vgb_band_temps.py``
+    predates the ruling and still writes the old hand-rolled form, so it is
+    NOT the right tool here.
+
+    gb: deliberately left on ``1/1.2**i`` with the coldest rung pinned to 1e-4
+    -- GB's ladder is per-band and adapted live by ``_adapt_band_temps``, so
+    regenerating it from make_ladder would discard that adaptation.
+    """
+    if branch == "vgb":
+        from eryn.moves.tempering import make_ladder
+        return np.asarray(make_ladder(int(ndim), ntemps=int(k)), dtype=float)
+    out = 1.0 / 1.2 ** np.arange(int(k), dtype=float)
+    if k > 1:
+        out[-1] = 1e-4
+    return out
+
+
+def repair_ladders(g, apply_it):
+    """Rewrite any ALL-ZERO ``band_temps`` row with the branch's proper ladder.
+
+    Only degenerate rows are touched: a row carrying real numbers may be a
+    live adapted ladder and must not be clobbered.
+    """
+    if "sub_backend" not in g:
+        return 0
+    total = 0
+    for branch in sorted(g["sub_backend"]):
+        bt = g["sub_backend"][branch].get("band_temps")
+        if bt is None or bt.shape[0] < 1:
+            continue
+        k = int(bt.shape[-1])
+        bad = [r for r in range(bt.shape[0])
+               if not np.asarray(bt[r]).any()]
+        if not bad:
+            print(f"    {branch:6s}: {bt.shape[0]} row(s), none degenerate -- OK")
+            continue
+        ndim = (g["chain"][branch].shape[-1]
+                if branch in g["chain"] else k)
+        lad = ladder_for(branch, ndim, k)
+        print(f"    {branch:6s}: {len(bad)}/{bt.shape[0]} row(s) ALL-ZERO "
+              f"(rows {bad[0]}..{bad[-1]}) -> ladder "
+              f"{np.array2string(lad, precision=5, threshold=10)}")
+        if apply_it:
+            shp = [1] * (bt.ndim - 1)
+            shp[-1] = k
+            row = np.broadcast_to(lad.reshape(shp), bt.shape[1:])
+            for r in bad:
+                bt[r] = row
+        total += len(bad)
+    return total
+
+
 # ---------------------------------------------------------------- inventory --
 
 
@@ -196,6 +269,15 @@ def main(argv=None):
     ap.add_argument("--group", default="global_fit")
     ap.add_argument("--list", action="store_true",
                     help="just print an inventory of SRC (and DST if given)")
+    ap.add_argument("--repair-ladders", action="store_true",
+                    help="STANDALONE: treat SRC as the store to fix, rewriting "
+                         "any all-zero band_temps row with the branch's proper "
+                         "ladder (vgb -> make_ladder, gb -> 1/1.2**i). Use on a "
+                         "store already grafted. Runs automatically at the end "
+                         "of a graft too.")
+    ap.add_argument("--no-repair-ladders", action="store_true",
+                    help="skip the automatic post-graft ladder repair "
+                         "(you will resume with beta=0 on any zeroed branch)")
     ap.add_argument("--src-row", type=int, default=None,
                     help="source row to graft; default is the auto-detected "
                          "last noise_search row")
@@ -220,6 +302,22 @@ def main(argv=None):
         if args.dst:
             print()
             inventory(args.dst, args.group)
+        return 0
+
+    if args.repair_ladders:
+        # Standalone repair on SRC. Separate from the graft so a store that was
+        # already grafted (before this check existed) can be fixed in place.
+        with h5py.File(args.src, "a" if args.apply else "r") as f:
+            g = f[args.group]
+            print(f"{args.src}\n  ladder check:")
+            n = repair_ladders(g, args.apply)
+            if not n:
+                print("\n  nothing degenerate -- no repair needed.")
+            elif args.apply:
+                print(f"\n  WROTE: {n} row(s) repaired. Resubmit.")
+            else:
+                print(f"\n  DRY RUN -- would repair {n} row(s). "
+                      "Re-run with --apply.")
         return 0
     if not args.dst:
         ap.error("DST is required unless --list is given")
@@ -389,14 +487,16 @@ def main(argv=None):
               + (f"; {args.completed!r} marked complete, later stages open."
                  if args.completed else "."))
 
-        # Show the ladder that survived -- the whole reason for grafting
-        # forward instead of rewinding.
-        if "sub_backend" in gd and "vgb" in gd["sub_backend"]:
-            bt = gd["sub_backend"]["vgb"].get("band_temps")
-            if bt is not None and bt.shape[0] >= 1:
-                lad = np.asarray(bt[0]).reshape(-1, bt.shape[-1])[0]
-                print(f"  DST vgb ladder ({bt.shape[-1]} rungs, untouched): "
-                      + np.array2string(lad, precision=5, threshold=12))
+        # Ladder check. A store killed during noise_search has never run
+        # vgb_pe, so its vgb band_temps is still the zeroed reset() template
+        # -- which the resume would happily adopt as beta=0 on every rung.
+        print("\n  ladder check (DST):")
+        if args.no_repair_ladders:
+            repair_ladders(gd, False)
+            print("  --no-repair-ladders given: NOT repaired.")
+        elif repair_ladders(gd, True):
+            print("  repaired the degenerate row(s) above.")
+
         print("  resubmit v4; it resumes from row 0 into noise_vgb_search.")
     return 0
 
