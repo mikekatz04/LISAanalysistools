@@ -464,8 +464,10 @@ class ProposeFlowTest(unittest.TestCase):
 class ProposeFlowFdotAstroTest(ProposeFlowTest):
     """The same propose flow on the 9-column fdot_astro ratio basis.
 
-    Exercises the info-matrix Cholesky (with the ratio row zeroed) and the
-    RJ birth/death with fdot<0 (interacting) templates from ratio < -1.
+    Exercises the info-matrix Cholesky (the ratio column carries real
+    curvature under the full-Jacobian congruence -- see
+    ``tests/test_gb_infomat_basis.py``) and the RJ birth/death with fdot<0
+    (interacting) templates from ratio < -1.
     """
 
     USE_FDOT_ASTRO = True

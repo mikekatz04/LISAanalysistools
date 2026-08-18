@@ -697,7 +697,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         tdi_config=None,
         t_ref=0.0,
         search_kwargs=None,
-        stretch_probability=0.5,
+        stretch_probability=0.2,
         band_units=2,
         jump_factor=0.005,
         leaf_cap_start=None,
@@ -1071,7 +1071,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # stretch instead of the info-matrix Cholesky jump per repeat round.
         # The default in_model_proposal() is the overridable hook consuming
         # this; subclass it for other proposal components.
+        #
+        # Env override (knob = capitalized field, branch-prefixed), same
+        # idiom as {BRANCH}_JUMP_FACTOR below. The GB default is 1-in-5
+        # (user ruling 2026-08-17, was 1-in-2): the group stretch only moves
+        # a source usefully when its partner sits at a comparable occupancy
+        # fraction, whereas the info-matrix jump is now scaled by that
+        # source's OWN corrected Fisher -- so the mix should favour the
+        # branch that adapts per source. VGB overrides to 1.0 in its own
+        # ctor (it runs pure stretch, use_info_mat_proposal=False).
         self.stretch_probability = float(stretch_probability)
+        _sp_env = os.environ.get(
+            getattr(self, "branch_name", "gb").upper() + "_STRETCH_PROBABILITY")
+        if _sp_env:
+            self.stretch_probability = float(_sp_env)
         # Band-unit stride (``{BRANCH}_BAND_UNIT_STRIDE`` env wins over the
         # ctor kwarg): stride k partitions bands into k units by
         # ``band_index % k``; same-unit bands run CONCURRENTLY with k - 1
@@ -1198,9 +1211,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _ib = list(self.transform_fn.input_basis)
             self._f0_col = _ib.index("f0") if "f0" in _ib else None
             self._phi0_col = _ib.index("phi0") if "phi0" in _ib else None
-            self._fdot_col = next(
-                (_ib.index(_k) for _k in ("fdot", "Mc") if _k in _ib), None
-            )
+            # CONDITIONING column only -- the proposal draws in y = x / s and
+            # maps back with * s, so ``s`` cancels analytically and matters
+            # ONLY through the eigen-floor in _compute_proposal_cholesky. It
+            # exists because a SAMPLED fdot is ~1e-16 in its own units, which
+            # alone puts its eigenvalue ~1e32 below the rest of the spectrum.
+            # It must therefore match a literal ``fdot`` column and nothing
+            # else. Matching ``Mc`` (2026-08-17) applied s = 1e-16 to a
+            # column whose natural scale is O(0.1-1): that drove the Mc
+            # eigenvalue under the 1e-10 relative floor, so the Mc proposal
+            # width came out as 1e-16 / sqrt(1e-10 * lambda_max) -- a number
+            # set by the floor, not by curvature. Measured against a direct
+            # sampling-basis second-difference matrix, the resulting Mc step
+            # was 1.1e-15 x the true posterior width (see
+            # tests/test_gb_infomat_basis.py), i.e. Mc never moved.
+            self._fdot_col = _ib.index("fdot") if "fdot" in _ib else None
             # 9th column of the fdot_astro ratio basis (None otherwise).
             self._fdot_astro_col = (
                 _ib.index("fdot_astro_ratio") if "fdot_astro_ratio" in _ib
@@ -6301,6 +6326,60 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._proposal_param_scales = s
         return band_sorter.draw_infomat(ids)
 
+    def _infomat_jacobian(self, coords, test_inds, s):
+        """FULL Jacobian ``J[n, a, i] = d(phys[test_inds[a]]) / d(y_i)``.
+
+        ``y = x / s`` are the conditioned sampling coordinates, so the
+        ``* s[i]`` below is the chain rule for that rescale. The information
+        matrix is mapped with the exact congruence ``Gamma_y = J^T Gamma_x J``
+        (a rank-2 tensor transforms on both indices), which is what
+        :meth:`_compute_proposal_cholesky` does with the return value.
+
+        Kept as its own method so the basis map is testable without a live
+        likelihood engine: it needs only ``self.transform_fn`` and
+        ``self.xp`` (see ``tests/test_gb_infomat_basis.py``).
+
+        This used to keep only the DIAGONAL (``a == i``), which is correct
+        only when the transform is separable column-for-column. It is not. On
+        the 9-column distance/chirp-mass basis ``test_inds`` maps Mc -> fdot
+        and fdot_astro_ratio -> the dead fddot slot, while the actual map is
+
+            A    = A(f0, Mc, dist)
+            fdot = fdot_gr(f0, Mc) * (1 + r)
+
+        so the diagonal form (i) scored Mc using ONLY ``d(fdot)/d(Mc)``,
+        discarding ``d(A)/d(Mc)`` entirely, and (ii) handed fdot_astro_ratio
+        exactly zero curvature, because its physical target column is
+        identically zero. Both are repaired by keeping every column of the
+        perturbed transform instead of one; those columns are already
+        computed here, so the congruence costs nothing extra.
+
+        NOTE(infomat-jacobian-batching): this runs ``2 * ndim`` separate
+        ``both_transforms`` calls (18 on the 9-column basis) on the full
+        ``(n_src, ndim)`` block, which looks like an obvious batching target
+        -- stack every perturbed copy into one ``(2 * ndim * n_src, ndim)``
+        call. An attempt at that did NOT reproduce this loop (two columns off
+        by ~4e-2, far too large for roundoff, cause not isolated), so it is
+        deliberately left alone: this feeds the proposal covariance and a
+        silently-wrong Jacobian would bias every in-model jump. The
+        ``infomat_jacobian`` span measures whether it is worth revisiting.
+        """
+        xp = self.xp
+        n_src, ndim = coords.shape
+        J = xp.zeros((n_src, ndim, ndim))
+        for i in range(ndim):
+            h = 1e-6 * xp.maximum(xp.abs(coords[:, i]), 1e-3)
+            up = coords.copy()
+            dn = coords.copy()
+            up[:, i] += h
+            dn[:, i] -= h
+            dphys = (
+                self.transform_fn.both_transforms(up, xp=cp)
+                - self.transform_fn.both_transforms(dn, xp=cp)
+            )[:, test_inds]
+            J[:, :, i] = dphys / (2.0 * h)[:, None] * s[i]
+        return J
+
     def _compute_proposal_cholesky(self, model, band_sorter, ids, slots=None,
                                    buffer_obj=None):
         """Batched Cholesky of the inverse information matrix for ``ids``.
@@ -6311,10 +6390,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         parent inverse-covariance rows keyed by walker; the legacy
         SharedMemory ``gb.information_matrix`` path is retired).
 
-        The information matrix comes back in PHYSICAL parameter space; it is mapped to
-        the sampling basis with the (numerical, per-source diagonal)
-        Jacobian of the transform container, conditioned by the fdot
-        rescale, inverted, and factorized.
+        The information matrix comes back in PHYSICAL parameter space; it is
+        mapped to the SAMPLING basis by the exact congruence
+        ``Gamma_y = J^T Gamma_x J`` with the numerical, per-source FULL
+        Jacobian ``J[a, i] = d x[test_inds[a]] / d y_i`` of the transform
+        container, then inverted and factorized. The result is the
+        information matrix the sampler actually needs -- curvature with
+        respect to the sampled coordinates -- and it is what a direct
+        second-difference of ``lnL(x(y))`` in ``y`` returns, to the accuracy
+        of the physical kernel itself.
 
         Not used by pure-stretch moves (``use_info_mat_proposal=False``,
         e.g. the VGB move); the fdot conditioning column is resolved from
@@ -6385,35 +6469,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             s[self._fdot_col] = self._fdot_scale
         self._proposal_param_scales = s
 
-        # Numerical diagonal Jacobian d(phys[test_inds[i]]) / d(y_i) through
-        # the transform container -- generic in the container's transforms.
-        # Numerical diagonal Jacobian d(phys[test_inds[i]]) / d(y_i) through
-        # the transform container -- generic in the container's transforms.
-        #
-        # NOTE(infomat-jacobian-batching): this runs 2*ndim separate
-        # ``both_transforms`` calls (18 on the 9-column basis) on the full
-        # (n_src, ndim) block, which looks like an obvious batching target
-        # -- stack every perturbed copy into one (2*ndim*n_src, ndim) call.
-        # An attempt at that did NOT reproduce this loop (two columns off by
-        # ~4e-2, far too large for roundoff, cause not isolated), so it is
-        # deliberately left alone: this feeds the proposal covariance and a
-        # silently-wrong Jacobian would bias every in-model jump. The
-        # ``infomat_jacobian`` span measures whether it is worth revisiting.
         with _tspan(_tm, "infomat_jacobian"):
-            J = xp.zeros((n_src, ndim))
-            for i in range(ndim):
-                h = 1e-6 * xp.maximum(xp.abs(coords[:, i]), 1e-3)
-                up = coords.copy()
-                dn = coords.copy()
-                up[:, i] += h
-                dn[:, i] -= h
-                dphys = (
-                    self.transform_fn.both_transforms(up, xp=cp)[:, _test_inds[i]]
-                    - self.transform_fn.both_transforms(dn, xp=cp)[:, _test_inds[i]]
-                )
-                J[:, i] = dphys / (2.0 * h) * s[i]
+            J = self._infomat_jacobian(coords, _test_inds, s)
 
-        info_y = info_phys * J[:, :, None] * J[:, None, :]
+        info_y = xp.einsum("nai,nab,nbj->nij", J, info_phys, J)
 
         # Opt-in only (perf, 2026-08-15): this sat INSIDE the per-block
         # info-matrix path, so every in-model block paid a full CuPy pool
@@ -6434,17 +6493,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             evals = xp.maximum(xp.abs(evals), floor)
             chol = evecs / xp.sqrt(evals)[:, None, :]
-        if self._fdot_astro_col is not None:
-            # fdot_astro_ratio is likelihood-degenerate with Mc (both enter
-            # only through the product fdot_gr(Mc)*(1+r)) and its test_inds
-            # target is the dead fddot slot, so the diagonal-Jacobian
-            # information matrix carries NO real curvature for it -- the
-            # eigen-floor would otherwise hand it an arbitrary huge jump.
-            # Zero its proposal row so the info-matrix Gaussian leaves it
-            # fixed; the in-model group-stretch component (symmetric, all
-            # ndim columns) explores the (Mc, r) ridge. A tailored on-ridge
-            # proposal is a documented follow-up.
-            chol[:, self._fdot_astro_col, :] = 0.0
+        # NOTE(2026-08-17): fdot_astro_ratio used to be zeroed out here --
+        # ``chol[:, self._fdot_astro_col, :] = 0.0`` -- on the reasoning that
+        # it is likelihood-degenerate with Mc. It is not: Mc drives the
+        # AMPLITUDE as well as fdot, so only the DIAGONAL Jacobian above made
+        # r look flat (its test_inds target is the dead fddot slot, hence
+        # identically zero curvature, hence an eigen-floored garbage jump
+        # that had to be suppressed). Under the full congruence r recovers
+        # its true curvature exactly -- verified against a direct
+        # sampling-basis second-difference matrix in
+        # tests/test_gb_infomat_basis.py -- so the freeze is retired and r is
+        # proposed like every other column.
+        #
+        # The 9-column basis is still over-parameterized: (dist, Mc, r) enter
+        # the waveform only through (A, fdot), so ONE direction is exactly
+        # flat and the eigen-floor above sets the step along it. That step is
+        # 1e5 * (the tightest posterior width), which for GBs is set by f0 --
+        # ~0.1 in sampled units at SNR 20 over 3 months, and smaller as SNR
+        # or Tobs grow. It is only large for near-zero-SNR prior draws, where
+        # the jump is rejected anyway.
         return chol
 
     def in_model_proposal(self, coords, chol, band_sorter, source_ids, model):
@@ -6733,6 +6800,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         trust_dlna = None
         if anchor_phys is not None:
             trust_dlna = self._sighet_trust_dlna_vec(buffer_obj, len(ids))
+        # Trust-gate census. The gate writes -inf into ``new_logp``, which is
+        # indistinguishable downstream from an ordinary prior rejection -- so
+        # a run whose in-model moves are being throttled by the gate looks
+        # EXACTLY like a run whose proposal is bad. Accumulate the counts
+        # ON DEVICE across the repeats (the repeat loop is deliberately
+        # sync-free apart from one ``keep_idx`` compress) and emit once per
+        # block. Kept unconditional and knob-free: three device adds per
+        # repeat against ~1e2 kernel launches.
+        _trust_n = cp.zeros(3, dtype=cp.int64) if anchor_phys is not None else None
+        _trust_seen = 0
         # Anchor check (debug knob; see ctor comment): sig-het vs exact at
         # the block anchor itself, where the ratio is exactly 1. Rebuilds
         # the reference afterwards (fresh == patched is bit-exact).
@@ -6863,10 +6940,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         + np.pi * cp.abs(_pc[:, 2] - anchor_phys[2][sl])
                         * trust_Tobs**2
                     )
-                    new_logp[
-                        (_damp_n > trust_dlna[sl])
-                        | (_drift_n > self.sighet_trust_dphase)
-                    ] = -np.inf
+                    _rej_a = _damp_n > trust_dlna[sl]
+                    _rej_p = _drift_n > self.sighet_trust_dphase
+                    new_logp[_rej_a | _rej_p] = -np.inf
+                    _trust_n[0] += _rej_a.sum()
+                    _trust_n[1] += _rej_p.sum()
+                    _trust_n[2] += (_rej_a | _rej_p).sum()
+                    _trust_seen += int(_damp_n.shape[0])
 
                 keep = ~cp.isinf(new_logp)
                 # THE one data-dependent host sync this repeat needs on
@@ -7098,6 +7178,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"{self.name}: accepted {_n_warn} out-of-prior in-model "
                     "coordinate(s) at beta > 0 in this repeat block."
                 )
+
+        # Trust-gate census for the block (see the accumulator above). ONE
+        # host sync, after every repeat has run. Unconditional because the
+        # alternative is a silent throttle: these rejections are written as
+        # -inf priors, so without this line a gate-limited run and a broken
+        # proposal are indistinguishable in the log.
+        if _trust_n is not None and _trust_seen:
+            _tn = _to_numpy(_trust_n)
+            logger.info(
+                f"{self.name}: [GB_TRUST] {int(_tn[2])}/{_trust_seen} "
+                f"({100.0 * int(_tn[2]) / _trust_seen:.1f}%) in-model "
+                f"candidates rejected by the sig-het trust gate over "
+                f"{n_rep} repeats x {len(ids)} sources "
+                f"(dlnA {int(_tn[0])}, dphase {int(_tn[1])}; "
+                f"dphase gate={self.sighet_trust_dphase} rad)"
+            )
 
         # End-of-block drift AUDIT (sighet_drift_check / GB_SIGHET_DRIFT_CHECK):
         # with the fixed-reference policy (sighet_refresh_every=0) this logs
