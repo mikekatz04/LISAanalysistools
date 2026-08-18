@@ -147,10 +147,23 @@ def ladder_for(branch, ndim, k):
 def repair_ladders(g, apply_it):
     """Rewrite any ALL-ZERO ``band_temps`` row with the branch's proper ladder.
 
-    Only degenerate rows are touched: a row carrying real numbers may be a
-    live adapted ladder and must not be clobbered.
+    Two bounds, both deliberate:
+
+    * Only rows BELOW ``iteration`` are considered. A dataset is allocated
+      ahead of the sample counter, so rows at/after ``iteration`` are unwritten
+      allocation that the next ``grow()`` truncates -- and writing them would
+      materialise HDF5 chunks that are currently lazy, which is the very thing
+      ``rerunge_gb_ladder.py`` avoids to keep a 24-rung GB chain off disk.
+      They must stay zero.
+    * Only ALL-ZERO rows are touched: a row carrying real numbers may be a live
+      adapted ladder (GB's is adapted per band by ``_adapt_band_temps``) and
+      must never be clobbered.
     """
     if "sub_backend" not in g:
+        return 0
+    nit = int(g.attrs["iteration"])
+    if nit < 1:
+        print(f"    iteration={nit}: no live rows to repair.")
         return 0
     total = 0
     for branch in sorted(g["sub_backend"]):
@@ -158,16 +171,17 @@ def repair_ladders(g, apply_it):
         if bt is None or bt.shape[0] < 1:
             continue
         k = int(bt.shape[-1])
-        bad = [r for r in range(bt.shape[0])
-               if not np.asarray(bt[r]).any()]
+        live = min(nit, bt.shape[0])
+        bad = [r for r in range(live) if not np.asarray(bt[r]).any()]
         if not bad:
-            print(f"    {branch:6s}: {bt.shape[0]} row(s), none degenerate -- OK")
+            print(f"    {branch:6s}: {live} live row(s), none degenerate -- OK")
             continue
         ndim = (g["chain"][branch].shape[-1]
                 if branch in g["chain"] else k)
         lad = ladder_for(branch, ndim, k)
-        print(f"    {branch:6s}: {len(bad)}/{bt.shape[0]} row(s) ALL-ZERO "
-              f"(rows {bad[0]}..{bad[-1]}) -> ladder "
+        print(f"    {branch:6s}: {len(bad)}/{live} live row(s) ALL-ZERO "
+              f"(rows {bad[0]}..{bad[-1]}; {bt.shape[0] - live} allocated "
+              f"row(s) at/after iteration={nit} left zero) -> ladder "
               f"{np.array2string(lad, precision=5, threshold=10)}")
         if apply_it:
             shp = [1] * (bt.ndim - 1)
