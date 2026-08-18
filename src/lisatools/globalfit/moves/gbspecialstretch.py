@@ -9498,7 +9498,72 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                     noise_index=int(walker_ref))
         return lambda params: self._fstat_NM(model, params, walker_ref)
 
-    def _run_fstat_fit(self, model, k: int):
+    @contextmanager
+    def _gb_free_residual(self, model, branches, walker_ref: int):
+        """Put the reference walker's cold GB signals BACK into the residual.
+
+        ``GB_FSTAT_GB_FREE=1`` (default ON). For the duration of the block the
+        F-stat sweep sees a residual with everything else subtracted -- MBH,
+        VGB, the fitted noise and foreground -- but **no GBs**, so the peaks
+        it finds are the full galactic population rather than whatever this
+        one walker has not yet found.
+
+        **Why.** The fit is scored against ONE reference walker (the
+        max-likelihood one, :meth:`_fstat_reference_walker`), and its GBs are
+        subtracted out. A peak another walker still needs therefore vanishes
+        from the shared grid the moment the reference walker happens to find
+        it -- and the walkers genuinely disagree: measured on v3 at iteration
+        82, only 6 of 121 OCCUPIED bands had all 24 cold walkers agreeing on
+        their leaf count (per-band spread mean(max-min) = 4.01 on a mean
+        count of 6.63). Fitting the GB-free residual makes the peak list
+        walker-INDEPENDENT by construction, which is the actual answer to
+        that problem; the loud peaks stay available to every walker and every
+        temperature and are DOWNWEIGHTED instead
+        (``FSTAT_PEAK_WEIGHT_ALPHA_LATE``, w ~ sqrt(SNR) from epoch 1) rather
+        than deleted.
+
+        Costs one add + one remove of a single walker's cold sources through
+        ``fill_template`` on the MAIN residual -- no sub-band buffer is
+        involved. ``try/finally`` because a sweep that raises must not leave
+        the residual holding signals the rest of the run assumes are gone.
+
+        The confusing name is the existing one:
+        ``remove_sources_from_residual`` REMOVES the sources from the MODEL,
+        i.e. restores their signal TO the residual (``factor=+1``,
+        "restoring them to the residual" in
+        :meth:`adjust_sources_in_residual_buffer`).
+        """
+        if (os.environ.get("GB_FSTAT_GB_FREE", "1") != "1"
+                or branches is None or self.branch_name not in branches):
+            yield
+            return
+        sorter = BandSorter(
+            branches[self.branch_name], self.band_edges, self.band_N_vals,
+            force_backend=self.force_backend,
+            transform_fn=self.parameter_transforms,
+            max_data_store_size=self.max_data_store_size,
+            gb=self.gb, gb_wdm_comp=self.gb_wdm_comp,
+            gb_fd_comp=self.gb_fd_comp,
+            wdm_band_slab_layers=self.wdm_band_slab_layers,
+            wdm_slab_guard_layers=self.wdm_slab_guard_layers,
+            waveform_kwargs=self.waveform_kwargs,
+            rj_prop=False, keep_all_inds=False,
+        )
+        sel = dict(temp=0, walker=int(walker_ref), apply_inds=True)
+        n_live = int(sorter.get_subset_bool(**sel).sum())
+        logger.info(
+            "%s: F-stat GB-FREE residual: restoring %d cold GB signal(s) "
+            "from walker %d for the sweep (GB_FSTAT_GB_FREE=0 disables).",
+            self.name, n_live, int(walker_ref))
+        self.remove_sources_from_residual(model, sorter, **sel)
+        try:
+            yield
+        finally:
+            self.add_sources_to_residual(model, sorter, **sel)
+            logger.info("%s: F-stat GB-FREE residual: %d signal(s) removed "
+                        "again; residual restored.", self.name, n_live)
+
+    def _run_fstat_fit(self, model, k: int, branches=None):
         from lisatools.sampling.fstat_gridfit import run_fstat_grid_fit
 
         cache_dir = self._epoch_dir(k)
@@ -9522,17 +9587,21 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         logger.info("%s: F-stat grid fit epoch %d starting (walker_ref=%d, "
                     "lnL=%.3f, cold-walker lnL spread=%.3f, cache %s)",
                     self.name, k, walker_ref, _ll_ref, _ll_spread, cache_dir)
-        stacked, n_peaks = run_fstat_grid_fit(
-            self._fstat_call(model, walker_ref),
-            xp=self.xp,
-            Tobs=float(self._basis_settings.Tobs),
-            band_edges_hz=band_edges,
-            f0_lims_hz=f0_lims,
-            mc_lims=mc_lims,
-            cache_dir=cache_dir,
-            fingerprint_extra=f"|epoch={k}",
-            epoch=k,
-        )
+        # The sweep scores through ``self._fstat_call``, which reads the LIVE
+        # residual -- so the GB-free window has to wrap the call, not just
+        # the setup.
+        with self._gb_free_residual(model, branches, walker_ref):
+            stacked, n_peaks = run_fstat_grid_fit(
+                self._fstat_call(model, walker_ref),
+                xp=self.xp,
+                Tobs=float(self._basis_settings.Tobs),
+                band_edges_hz=band_edges,
+                f0_lims_hz=f0_lims,
+                mc_lims=mc_lims,
+                cache_dir=cache_dir,
+                fingerprint_extra=f"|epoch={k}",
+                epoch=k,
+            )
         wall = time.perf_counter() - t0
         logger.info("%s: F-stat grid fit epoch %d done in %.1fs (%d peaks)",
                     self.name, k, wall, n_peaks)
@@ -9698,7 +9767,7 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             self._install(k)
             self._install_ctr_table(k, model=model)
             return
-        stacked, n_peaks = self._run_fstat_fit(model, k)
+        stacked, n_peaks = self._run_fstat_fit(model, k, branches=branches)
         self._install(k, stacked=stacked, n_peaks=n_peaks)
         self._install_ctr_table(k, model=model)
 
