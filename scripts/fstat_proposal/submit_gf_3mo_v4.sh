@@ -322,6 +322,34 @@ export GB_SIGHET_REFRESH_DPHASE=0
 # ~12% wall clock worst case, and it buys swap ratios that mean something.
 export GB_SIGHET_REFRESH_MIN_BETA=0
 #
+# SNR-SCALED TRUST GATE (measured 2026-08-18, high-f probe A/B). The uniform
+# 0.5 rad gate is the wrong SHAPE: the tiered spec places gates at a constant
+# TRUE-lnL displacement T, but a fixed phase offset sits at
+# T = 0.5*(dphase*SNR/3.456)**2 -- T~0.7 at SNR 8 against a design point of
+# T~1000, while being ~9 sigma for a loud source. It strangled exactly the
+# faint population the completeness deficit lives in.
+# C_phase = 3.456*sqrt(2*T_gate); 49 -> T=100. Clipped BELOW by
+# sighet_trust_dphase, so this can never tighten the gate for anyone.
+#
+# A/B result, same nt_layer, only the gate differing:
+#   C_phase=0   gate=[0.5..0.5] rad    -> [GB_TRUST] 13.8-23.8% rejected,
+#                                          infomat cold acceptance 0.323
+#   C_phase=49  gate=[0.81..9.81] rad  -> [GB_TRUST] 2.7-3.6% rejected,
+#                                          infomat cold acceptance 0.404
+# The gate stops being an active constraint (5-6x fewer kills) and becomes
+# the rare safety net it was meant to be, and the per-walker acceptance line
+# goes from many nan walkers (no in-model proposals reaching them at all) to
+# full coverage. Cost: the chain travels further from its reference, so the
+# end-of-block DELTA-vs-DELTA on the loud block ran 8.46 against 3.65-7.06
+# elsewhere -- ~+20%, at the high end of the observed range but inside it.
+# Worth it: the accumulated error affects bookkeeping and swaps; the
+# rejection rate affects whether the chain moves at all.
+#
+# Also re-couples the refresh: with the gate up to ~10 rad, drift CAN now
+# exceed the stock refresh trigger, so the two knobs stop being mutually
+# exclusive (moot here -- REFRESH_DPHASE=0 above -- but it matters elsewhere).
+export GB_SIGHET_TRUST_PHASE_C=49
+#
 # RUNG-COVERAGE AUDIT -- ARMED FOR THE FIRST FEW ITERATIONS, THEN REMOVE.
 # Every probe today ran the degenerate 2-rung ladder, so we have NO data on
 # 22 of this run's 24 rungs. The probes' delta-vs-delta line showed a tail of
