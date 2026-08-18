@@ -697,7 +697,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         tdi_config=None,
         t_ref=0.0,
         search_kwargs=None,
-        stretch_probability=0.2,
+        stretch_probability=0.0,
         band_units=2,
         jump_factor=0.005,
         leaf_cap_start=None,
@@ -1100,13 +1100,51 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # this; subclass it for other proposal components.
         #
         # Env override (knob = capitalized field, branch-prefixed), same
-        # idiom as {BRANCH}_JUMP_FACTOR below. The GB default is 1-in-5
-        # (user ruling 2026-08-17, was 1-in-2): the group stretch only moves
-        # a source usefully when its partner sits at a comparable occupancy
-        # fraction, whereas the info-matrix jump is now scaled by that
-        # source's OWN corrected Fisher -- so the mix should favour the
-        # branch that adapts per source. VGB overrides to 1.0 in its own
-        # ctor (it runs pure stretch, use_info_mat_proposal=False).
+        # idiom as {BRANCH}_JUMP_FACTOR below.
+        #
+        # ############################################################
+        # # TODO -- RE-EXAMINE THE GB GROUP STRETCH'S EFFICACY.       #
+        # ############################################################
+        # The GB default is 0.0 as of 2026-08-18 (user ruling), i.e. the
+        # group stretch is OFF and every in-model repeat draws the
+        # info-matrix Cholesky jump. It went 0.5 -> 0.2 -> 0 over two days
+        # on measurement, not preference:
+        #
+        #     [GB_ACCEPT rj_fstat_search] in-model by proposal type --
+        #       infomat: cold 600/1928 (0.3112)
+        #       stretch: cold   2/472  (0.0042)
+        #
+        # TWO accepts out of 472 cold attempts. On the SAME run the VGB
+        # move's stretch scored 0.4485, so this is the GB *group* stretch
+        # specifically -- not stretch as a proposal, and not a broken
+        # accept test. Both numbers were taken AFTER the information-matrix
+        # basis fix, so the info-matrix branch it is being compared against
+        # is the correct one.
+        #
+        # WHY THIS IS A TODO AND NOT A DELETION. The group stretch is the
+        # only in-model component that can move a source a LONG way in one
+        # step (it draws a partner from the frequency-window friend table),
+        # so it is the natural escape from a local mode -- exactly what the
+        # info-matrix Gaussian, which is local by construction, cannot do.
+        # Losing it may cost multimodal exploration in a way the acceptance
+        # rate does not show. Hypotheses worth testing before writing it
+        # off for good:
+        #   * the friend table is cold-chain ONLY (build_friend_table masks
+        #     ``inds & temp_inds == 0``), so a hot-rung source stretches
+        #     toward a COLD partner -- a mismatch that grows with beta;
+        #   * partners are drawn by frequency proximity, and a partner at a
+        #     very different occupancy fraction / SNR gives a badly-sized
+        #     step regardless of where it sits in f0;
+        #   * the stretch scale factor is not temperature-aware either.
+        # Re-arm with GB_STRETCH_PROBABILITY and read the per-type
+        # [GB_ACCEPT] line; anything above ~0.05 cold is worth keeping.
+        #
+        # Side effects of 0.0, both intended: ``_ensure_proposal_tables``
+        # skips the friend-table build entirely, and ``in_model_proposal``
+        # never takes its stretch branch.
+        #
+        # VGB is UNAFFECTED -- it sets stretch_probability=1.0 in its own
+        # ctor and runs pure stretch (use_info_mat_proposal=False).
         self.stretch_probability = float(stretch_probability)
         _sp_env = os.environ.get(
             getattr(self, "branch_name", "gb").upper() + "_STRETCH_PROBABILITY")
