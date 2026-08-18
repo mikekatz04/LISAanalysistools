@@ -1006,7 +1006,7 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
         weights=peak_box_weights(
             np.clip(peaks[:, 1], 0.0, None), peak_f0_mHz=peaks[:, 0],
             band_edges=band_edges_hz,
-            alpha=float(os.environ.get("FSTAT_PEAK_WEIGHT_ALPHA", "1.0")),
+            alpha=peak_weight_alpha_env(epoch),
             cells=peak_weight_cells_env(),
             equal=(os.environ.get("FSTAT_PEAK_WEIGHTING", "fstat")
                    .strip().lower() == "equal")),
@@ -1036,8 +1036,12 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
 
 def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
                        band_edges_hz, f0_lims_hz, mc_lims, cache_dir: str,
-                       fingerprint_extra: str = ""):
+                       fingerprint_extra: str = "", epoch=None):
     """Full fit with resume: comb scan -> peak select -> stage B.
+
+    ``epoch`` selects the peak-box weighting tilt only (see
+    :func:`peak_weight_alpha_env`); it does not change what is computed or
+    cached, so the npz caches stay interchangeable across epochs.
 
     Cache reuse IS the mid-fit resume, and it is always on:
 
@@ -1060,8 +1064,24 @@ def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
         d = np.load(stacked_cache, allow_pickle=False)
         logger.info("[fit] stage B already complete: %s", stacked_cache)
         mem_mb = os.environ.get("FSTAT_GRID_MEM_MB", "").strip()
+        # Weight exactly as the other two paths do. This used to pass RAW
+        # peak_F, i.e. alpha=1 with no cell equalisation -- and because the
+        # caller forwards this object as ``stacked_live``, which
+        # short-circuits build_gb_birth_distribution's npz reload, both
+        # FSTAT_PEAK_WEIGHT_ALPHA and FSTAT_PEAK_WEIGHT_CELLS were silently
+        # dropped whenever this branch was taken (a refit that finds stage B
+        # already written -- a resume after a mid-fit death, and every epoch
+        # whose grids were prebuilt offline).
         stacked = StackedFStatProposal4D.from_cache(
-            d, weights=np.clip(np.asarray(d["peak_F"], dtype=float), 0.0, None),
+            d,
+            weights=peak_box_weights(
+                np.clip(np.asarray(d["peak_F"], dtype=float), 0.0, None),
+                peak_f0_mHz=d["peak_f0_mHz"] if "peak_f0_mHz" in d else None,
+                band_edges=d["band_edges"] if "band_edges" in d else None,
+                alpha=peak_weight_alpha_env(epoch),
+                cells=peak_weight_cells_env(),
+                equal=(os.environ.get("FSTAT_PEAK_WEIGHTING", "fstat")
+                       .strip().lower() == "equal")),
             mem_budget_mb=float(mem_mb) if mem_mb else None,
             use_cupy=(xp.__name__ != "numpy"),
         )
@@ -1241,13 +1261,53 @@ def peak_weight_cells_env(default_divisor="GB_CAP_DIVISOR"):
         return 1
 
 
+def peak_weight_alpha_env(epoch=None):
+    """The ``w ~ F**alpha`` exponent, flattened after the warm-up epoch.
+
+    ``F = SNR**2 / 2``, so alpha reads directly as a power of SNR:
+    ``alpha=1 -> w ~ SNR**2`` (historical), ``0.5 -> ~SNR``,
+    ``0.25 -> ~sqrt(SNR)``, ``0 -> flat``.
+
+    Why two values. Epoch 0 fits against a residual with NOTHING subtracted,
+    so peak strength tracks true source strength and preferring the loud end
+    is right -- those sources have to come out first for the confusion
+    residual to drop at all. Every later epoch fits against a residual whose
+    found sources are already GONE, so what survives is the faint tail plus
+    whatever the updated foreground/PSD estimate has revealed. Holding the
+    epoch-0 tilt there keeps spending birth attempts on the brightest
+    survivors, which are the ones least in need of help.
+
+    ``FSTAT_PEAK_WEIGHT_ALPHA_LATE`` applies from epoch
+    ``FSTAT_PEAK_WEIGHT_ALPHA_AFTER_EPOCH`` (default 1, i.e. the first
+    refit) onward. It is INERT for a run that never refits
+    (``GB_FSTAT_REFIT_EVERY<=0`` fits epoch 0 and stops), and inert for any
+    caller that does not pass an epoch.
+
+    Not lower than 0.25 by default: the SNR-8 selection floor makes pure
+    noise peaks rare but the peak list still runs to thousands against a few
+    hundred detectable sources, so flat weighting hands a marginal peak the
+    same share as a real one. The heavy lifting is done by the refit itself
+    -- a found source is subtracted, so its peak collapses -- and this is a
+    second-order tilt on top of that.
+    """
+    early = float(os.environ.get("FSTAT_PEAK_WEIGHT_ALPHA", "1.0"))
+    if epoch is None:
+        return early
+    raw = os.environ.get("FSTAT_PEAK_WEIGHT_ALPHA_LATE", "0.25").strip()
+    if not raw:
+        return early
+    after = int(float(os.environ.get(
+        "FSTAT_PEAK_WEIGHT_ALPHA_AFTER_EPOCH", "1")))
+    return float(raw) if int(epoch) >= after else early
+
+
 def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
                                 dist_lims=None, fdot_astro_ratio_max=None,
                                 use_cupy: bool = False, gpu: Optional[int] = None,
                                 floor_eps: Optional[float] = None,
                                 comb_weight: Optional[float] = None,
                                 stacked_live=None,
-                                expected_band_edges=None):
+                                expected_band_edges=None, epoch=None):
     """Stacked grids (+ optional comb) -> floor -> RJ birth container.
 
     ``stacked_live`` short-circuits the npz reload when the caller just built
@@ -1325,7 +1385,7 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
         # ``FSTAT_PEAK_WEIGHTING=equal`` still short-circuits, and wins.
         weighting = os.environ.get("FSTAT_PEAK_WEIGHTING", "fstat").strip().lower()
         peak_F = np.clip(np.asarray(cache["peak_F"], dtype=float), 0.0, None)
-        alpha = float(os.environ.get("FSTAT_PEAK_WEIGHT_ALPHA", "1.0"))
+        alpha = peak_weight_alpha_env(epoch)
         box_weights = peak_box_weights(
             peak_F,
             peak_f0_mHz=cache["peak_f0_mHz"] if "peak_f0_mHz" in cache else None,
@@ -1339,8 +1399,10 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
             logger.warning("[birth] peak weights are all zero at alpha=%.3g; "
                            "falling back to equal weighting.", alpha)
             box_weights = None
-        logger.info("[birth] peak-box weighting: %s (alpha=%.3g)%s",
+        logger.info("[birth] peak-box weighting: %s (alpha=%.3g ~ SNR**%.3g, "
+                    "epoch=%s)%s",
                     "equal" if box_weights is None else "w ~ F**alpha", alpha,
+                    2.0 * alpha, epoch,
                     "" if box_weights is None else
                     f"; weight max/median = "
                     f"{box_weights.max() / max(np.median(box_weights), 1e-300):.1f}x")
