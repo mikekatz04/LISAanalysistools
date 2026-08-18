@@ -1,5 +1,107 @@
 #!/bin/bash
 # ============================================================================
+# VERTICAL-TEMPERING PROBE (2026-08-18)
+#
+# Derived from submit_gf_highf_probe.sh -- IDENTICAL physics, sampler shape
+# and knob stack. The ONLY differences are the two new knobs below and the
+# per-arm store dir. Everything else is inherited deliberately so any
+# difference between arms is attributable to the change under test.
+#
+# WHAT IS UNDER TEST
+#   GB_TEMPER_CELL_ORDER=band   scheduler orders cells (band, walker, temp)
+#                               so a vertical partner pair -- (t,w,b) and
+#                               (t-1,w,b) -- lands in ADJACENT buffer slots.
+#   GB_TEMPER_VERTICAL=1        per-repeat vertical band-temperature swaps
+#                               inside the in-model loop: same walker, so
+#                               the two cells share a bit-identical data
+#                               slab, the post-swap likelihoods are the
+#                               pre-swap ones exchanged, and the acceptance
+#                               ratio is closed form:
+#                                   paccept = (b_cold - b_hot)(L_hot - L_cold)
+#                               No likelihood call. No buffer touch. Pure
+#                               relabel via exchange_cell_labels.
+#
+#   run_tempering (the permuted "fancy" swaps) is UNCHANGED and still runs
+#   once per propose. Vertical swaps are ADDITIVE, and they never adapt the
+#   ladder -- _adapt_band_temps stays exclusive to run_tempering.
+#
+# RUN THE MATRIX (separate stores, safe to run in parallel):
+#   for W in dense highf; do
+#     for A in baseline order vertical; do
+#       WINDOW=$W ARM=$A sbatch scripts/fstat_proposal/submit_gf_temper_probe.sh
+#     done
+#   done
+#
+# WINDOW=dense is the PRIMARY test (confusion-limited: swaps trade real
+# competing models). WINDOW=highf is the CONTROL (one source in the whole
+# sub-band: mostly empty cells, so it stresses empty-pair handling and
+# shows the machinery stays correct where there is little to trade).
+# Store dirs are ./gf_temper_probe_<window>_<arm>/.
+#
+#   baseline  vertical OFF, order=count  -- today's behaviour, the control
+#   order     vertical OFF, order=band   -- ISOLATES the scheduling change
+#   vertical  vertical ON,  order=band   -- the full feature
+#
+#   Run `order` even though it changes no sampling: it is the only way to
+#   attribute a cost/mixing change to the scheduler rather than the swaps.
+#
+# ============================================================================
+# HOW TO READ THE OUTPUT  (grep these four tags)
+# ============================================================================
+# [GB_VERT ...] pair AVAILABILITY  -- THE headline for the `order` change.
+#     Fraction of in-model rows that HAD a vertical partner co-resident.
+#     Simulated prediction at this probe's GB_N_SUBBANDS=64 (4 bands, 24x24
+#     cells): count-order ~0%, band-order ~89%. At production sizing
+#     (77 bands, 8192 slots) it is 17.7% -> 95.5%.
+#     PASS: band-order availability is high (>50%). If it is near zero the
+#     ordering is not delivering and every other vertical number below is
+#     measured on a sample too small to mean anything -- stop there.
+#
+# [GB_VERT ...] proposed/accepted + per-rung  -- the swaps themselves.
+#     A healthy ladder trades at every rung pair. All-accept or all-reject
+#     at a rung means the betas there are not separating the models.
+#
+# [GB_TEMPER_EMPTY ...]  -- run_tempering's own cost audit, NEW here.
+#     Fraction of permuted swap pairs where BOTH cells are empty. Such a
+#     pair has L2-L1 == 0, so paccept == 0, which beats log(u)
+#     unconditionally: it is COUNTED as an accepted swap and moves nothing,
+#     while still paying the buffer chunk build and the per-cell
+#     likelihood. Measured 100% on the CPU fixture. If it is large here,
+#     a large share of run_tempering's 80.3 s/propose buys no mixing at
+#     all, and simply skipping empty-empty pairs is a smaller and possibly
+#     bigger win than this whole scheme.
+#
+# [GB_CELL_LL ...]  -- the CORRECTNESS gate, and it already exists.
+#     Per-cell sampled-vs-realized ll reconciliation against a
+#     temperature-scaled allowance. The vertical ratio reads ll_ref (the
+#     sampled cell ll), so if relabelling corrupted any ledger this is
+#     where it shows. WATCH the `vertical` arm for growth relative to
+#     `baseline`. (Do NOT try to audit ll_ref against band_likelihoods
+#     mid-block yourself -- that measures the slab with the picked source
+#     REMOVED and produces a spurious ~1e7 'error'. [GB_CELL_LL] is the
+#     right instrument.)
+#
+# SIG-HET REFRESH INTERACTION (v4). The refresh re-bases `ll_ref` for the
+# drifted subset of rows, and the vertical sweep runs AFTER it in the repeat
+# body, so it always reads re-based values. A pair whose two rows were
+# refreshed against different expansion points is still sound -- `ll_ref`
+# estimates the same physical cell ll either way -- but it is the one place
+# the two features touch, so watch [GB_CELL_LL] on the `vertical` arm.
+#
+# Also: [GB_TIMING] gains an `inmodel_vertical_swap` span (should be ~0 --
+# it is a relabel), and `pick`/`advance` carry the scheduler cost of the
+# ordering change. Simulation says the ordering costs nothing (rounds
+# 43->39, slot utilisation 67.7%->74.7% at production sizing), but that
+# models occupancy, not kernel cost -- confirm it here.
+#
+# A vertical swap that leaves the sorter inconsistent RAISES immediately
+# (block-boundary barrier on special_index_check), so a silent corruption
+# cannot reach the ledger.
+# ============================================================================
+#
+# ---------------------------------------------------------------------------
+# INHERITED PROBE HEADER (submit_gf_highf_probe.sh) follows unchanged.
+# ---------------------------------------------------------------------------
 # PRODUCTION global fit -- 3-month Tobs (gb + vgb + psd + galfor, mojito)
 # Staged recipe: noise_search -> noise_vgb_search -> gb_search -> full_pe
 # via scripts/fstat_proposal/run_combined_staged.py  (LAT dev >= 53dc401)
@@ -31,7 +133,7 @@
 # ============================================================================
 
 # ---- fill these in ---------------------------------------------------------
-#SBATCH --job-name=gf_dense_probe          # job name
+#SBATCH --job-name=gf_temper_probe         # job name
 #SBATCH --partition=gpu-80-spot   # GPU partition
 #SBATCH --gres=gpu:2              # 2 GPUs (GPUS=0,1 below are LOCAL indices)
 #SBATCH --nodes=1                 # single node
@@ -39,7 +141,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=gf3mo_v3_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
+#SBATCH --output=gf_temper_%j.log    # combined stdout+stderr ([GB_VERT]/[GB_TEMPER_EMPTY])
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -54,7 +156,43 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # stay intact for comparison and nothing can silently resume. BASE_FILE_NAME
 # stays gf_prod_3mo so every analysis tool (monitor generator, digests) works
 # unchanged -- they take the DIRECTORY as their argument.
-STORE_DIR=./gf_dense_probe/
+# ---- ARM SELECTION (the only thing that differs between runs) ------------
+# Each arm gets its OWN store so they never resume each other and can run
+# concurrently. Default `vertical` = the full feature.
+ARM=${ARM:-vertical}
+case "${ARM}" in
+  baseline) TEMPER_VERTICAL=0; TEMPER_CELL_ORDER=count ;;
+  order)    TEMPER_VERTICAL=0; TEMPER_CELL_ORDER=band  ;;
+  vertical) TEMPER_VERTICAL=1; TEMPER_CELL_ORDER=band  ;;
+  *) echo "ARM must be baseline|order|vertical, got '${ARM}'" >&2; exit 2 ;;
+esac
+# ---- WINDOW SELECTION ----------------------------------------------------
+# WHICH BAND WINDOW decides whether this probe can answer the question at
+# all. A vertical swap between two EMPTY cells has L2-L1 == 0, so
+# paccept == 0, which passes the Metropolis test unconditionally and moves
+# NOTHING. In a sparse window most cells are empty, so most swaps are
+# vacuous and the acceptance statistics say little about mixing.
+#
+#   dense  6.04-6.74 mHz (layers 44-48)   -- confusion-limited. MANY sources
+#          per cell, so swaps trade genuinely competing models. This is the
+#          window that answers "does vertical tempering help?".
+#   highf  20.07-20.76 mHz (layers 145-149) -- ONE catalogue source in the
+#          whole sub-band (SNR 45.7 at 20.38038 mHz). Sparse by design, so
+#          it is the CONTROL: it exercises empty-pair handling hardest and
+#          shows whether the machinery stays correct where there is little
+#          to trade.
+# Both windows snap to whole WDM layers with half-layer margins (see the
+# inherited notes below) and keep the target band INTERIOR so the F-stat
+# fit, which uses band_edges[1:-1], does not exclude it.
+WINDOW=${WINDOW:-dense}
+case "${WINDOW}" in
+  dense) WIN_MIN=6.041667e-03; WIN_MAX=6.736111e-03 ;;   # layers 44 -> 48
+  highf) WIN_MIN=2.006958e-2;  WIN_MAX=2.076406e-2  ;;   # layers 145 -> 149
+  *) echo "WINDOW must be dense|highf, got '${WINDOW}'" >&2; exit 2 ;;
+esac
+echo "[ARM] ${ARM}: GB_TEMPER_VERTICAL=${TEMPER_VERTICAL} GB_TEMPER_CELL_ORDER=${TEMPER_CELL_ORDER}"
+echo "[WINDOW] ${WINDOW}: GB_MIN_FREQ=${WIN_MIN} GB_MAX_FREQ=${WIN_MAX}"
+STORE_DIR=./gf_temper_probe_${WINDOW}_${ARM}/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -309,7 +447,8 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # and shutoff is PERMANENT for the process, so there is no recovery.
 export GB_RJ_BAND_SHUTOFF_AFTER=50
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
-export GB_FSTAT_REFIT_EVERY=50     # v4 production cadence (was 100)
+export GB_FSTAT_REFIT_EVERY=50     # v4 production cadence (was 100 in the
+                                   # older probe this derives from)
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # BIRTH-DRAW ALLOCATION (2026-08-16). Peak boxes are weighted w ~ F**alpha,
 # and the F-statistic goes like SNR^2 -- so the historical alpha=1 hands an
@@ -402,20 +541,6 @@ export VGB_NTEMPS=8
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
 export GB_ROUTER_THREADED=1
 
-# ---- v4 SIG-HET STACK (2026-08-18) ---------------------------------------
-# This probe predates submit_gf_3mo_v4.sh and did not carry the knobs v4
-# arms. A probe that does not mirror production's likelihood settings is
-# not measuring production. Values copied verbatim from
-# submit_gf_3mo_v4.sh -- change them only in lockstep with that script.
-export GB_SIGHET_REFRESH_EVERY=25      # re-anchor drifted references
-export GB_SIGHET_REFRESH_DPHASE=0      # ... on the drift test alone
-export GB_SIGHET_REFRESH_MIN_BETA=0    # ... on ALL rungs, not just cold
-export GB_SIGHET_TRUST_PHASE_C=49      # SNR-scaled carrier-phase gate
-export SIGHET_NT_LAYER=270             # sparse-grid resolution
-export FSTAT_SIGHET_MULTIDEV=1         # multi-device F-stat fan-out
-# Diagnostic ladder, first iterations only (~0.32 s/propose).
-export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
-
 # ============================================================================
 # FRESH-RUN GUARD (2026-08-15). This submission starts a NEW run in a NEW
 # store dir: every piece of state -- the VGB beta ladder, the GB cap-cell
@@ -459,12 +584,12 @@ fi
 # ## the jump/acceptance relationship is observable in minutes rather than  ##
 # ## hours.                                                                 ##
 # ##                                                                        ##
-# ## TARGET: sub-band 41 = [6.25000, 6.38889] mHz -- the DENSE counterpart ##
-# ## to the high-f probe: 20 DETECTABLE of 24 catalogue sources in one     ##
-# ## band (SNRs 46, 26, 17, 16, 15, 15, 14, 14, ...), i.e. the confusion   ##
-# ## regime where blending and the serial-within-band rule actually bite.  ##
-# ## Band 41 == WDM layer 45; window layers 44-47 keeps it INTERIOR, which  ##
-# ## the F-stat fit requires (it uses band_edges[1:-1]).                    ##
+# ## TARGET: f0 = 20.38038 mHz, SNR 45.7 -- the highest-frequency detectable##
+# ## injection, and the ONLY catalogue source in its whole sub-band (142).  ##
+# ##   sub-band 142 = [20.27778, 20.41667] mHz  (1080 Fourier bins)         ##
+# ##   cap cell 4567 = [20.37760, 20.38194] mHz (34 bins, K=32)             ##
+# ##   cells 4566-4568 span [20.37326, 20.38628] mHz                        ##
+# ##                                                                        ##
 # ## BAND WINDOW: three uniform WDM layers (145,146,147) so the target band ##
 # ## is INTERIOR -- the F-stat fit uses band_edges[1:-1], so the target band ##
 # ## must not be an edge band or it is excluded from the fit entirely.      ##
@@ -488,9 +613,8 @@ fi
 # layer: 2.013889e-2 and 2.069444e-2 sat just under layers 145 and 149 and
 # snapped to 146..148, spanning 2 layers where >=3 are required (an interior
 # sampled span must exist). Sitting mid-layer makes the snap unambiguous.
-export GB_MIN_FREQ=6.041667e-03     # 43.5 layers -> snaps to 44
-export GB_MAX_FREQ=6.736111e-03     # 48.5 layers -> snaps to 48
-                                    # -> whole layers 44,45,46,47 = 4
+export GB_MIN_FREQ=${WIN_MIN}       # set by WINDOW above
+export GB_MAX_FREQ=${WIN_MAX}       # -> 4 whole WDM layers either way
 # NOTE: the F-stat fit range follows band_edges[1:-1], so restricting the
 # band window above ALREADY confines the fit to sub-band 142 (1080 bins /
 # 32 cap cells). Narrowing further to cells 4566-4568 has no env knob:
@@ -533,8 +657,60 @@ export GB_SIGHET_DRIFT_CHECK=1      # end-of-block drift vs the trust gate
 export GB_SIGHET_ANCHOR_CHECK=1     # sig-het expansion error at the anchor
 
 # Small + fast: one band unit, so iterations are seconds not minutes.
+# ---- v4 PRODUCTION PARITY (2026-08-18) ------------------------------------
+# This probe was derived from submit_gf_highf_probe.sh, which predates the
+# v4 sig-het stack. Production (submit_gf_3mo_v4.sh) now arms the knobs
+# below, and FOUR of them act inside the very in-model repeat loop the
+# vertical swap lives in -- the reference refresh re-bases ``ll_ref``, and
+# ``ll_ref`` is exactly what the closed-form swap ratio reads. Running the
+# arms without these would not be apples-to-apples with production, and
+# would leave the refresh/swap interaction untested.
+# Values copied verbatim from submit_gf_3mo_v4.sh; change them only in
+# lockstep with that script.
+export GB_SIGHET_REFRESH_EVERY=25      # re-anchor drifted references
+export GB_SIGHET_REFRESH_DPHASE=0      # ... on the drift test alone
+export GB_SIGHET_REFRESH_MIN_BETA=0    # ... on ALL rungs, not just cold
+export GB_SIGHET_TRUST_PHASE_C=49      # SNR-scaled carrier-phase gate
+export SIGHET_NT_LAYER=270             # sparse-grid resolution
+export FSTAT_SIGHET_MULTIDEV=1         # multi-device F-stat fan-out
+# Diagnostic ladders, first iterations only (~0.32 s/propose). Kept so the
+# accuracy record matches production's.
+export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
+
+# ---- THE CHANGE UNDER TEST ------------------------------------------------
+# Set from ARM above; both default to today's behaviour when unset in code
+# (vertical 0, order count), so `baseline` is a true control.
+export GB_TEMPER_VERTICAL=${TEMPER_VERTICAL}
+export GB_TEMPER_CELL_ORDER=${TEMPER_CELL_ORDER}
+# Permuted-swap ledger reconciliation per unit. Cheap, and it is the
+# independent check that vertical relabelling did not corrupt the
+# incremental ll accounting that run_tempering also writes.
+export GB_TEMPER_AUDIT=1
+
+# Small + fast: one band unit, so iterations are seconds not minutes.
+# NOTE ON SIZING: 4 bands x 24 temps x 24 walkers = 2304 cells against 64
+# slots (2.8% residency). That is a HARSHER co-residency test than
+# production (8192 slots), and deliberately so -- it is where the two
+# orderings separate most (simulated ~0% vs ~89% partner availability).
+# If [GB_VERT] shows availability near zero on the `vertical` arm, raise
+# this to 1152 so a full 576-cell band column fits and re-check before
+# concluding anything about the swaps themselves.
 export GB_N_SUBBANDS=64
 export NUM_ITERATIONS=300
 
 mpiexec -n 3 python scripts/fstat_proposal/run_combined_staged.py
 # python scripts/fstat_proposal/run_combined_staged.py   # single-process fallback
+
+# ============================================================================
+# POST-RUN TRIAGE (run against the combined log)
+# ============================================================================
+#   grep -h "GB_VERT"          gf_temper_*.log | tail -20
+#   grep -h "GB_TEMPER_EMPTY"  gf_temper_*.log | tail -20
+#   grep -h "GB_CELL_LL"       gf_temper_*.log | tail -20
+#   grep -hE "\[GB_TIMING .*(inmodel_vertical_swap|pick|advance|run_tempering)" \
+#        gf_temper_*.log | tail -40
+#
+# Compare arms on: pair availability (order vs baseline), [GB_CELL_LL]
+# worst-per-repeat (vertical vs baseline -- must not grow), iteration wall
+# time, and cold-chain max logL trajectory.
+# ============================================================================

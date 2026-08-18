@@ -451,6 +451,63 @@ def _resolve_inmodel_repeats(branch_name, class_name, kwarg_value, default):
     return value
 
 
+def _resolve_temper_vertical(branch_name, kwarg_value, default=False):
+    """Resolve ``temper_vertical`` for a move (kwarg > env > ``default``).
+
+    Mirrors :func:`_resolve_rj_flip_fraction`. ``{BRANCH}_TEMPER_VERTICAL``
+    turns on the per-repeat VERTICAL band-temperature swap inside the
+    in-model repeat loop (same walker, adjacent temperatures). Default
+    ``False`` reproduces today's behavior exactly.
+
+    Vertical swaps are ADDITIVE to -- never a replacement for -- the
+    permuted ("fancy") swaps in :meth:`run_tempering`, and they never
+    touch the temperature ladder: ``_adapt_band_temps`` stays driven by
+    the permuted swap counters alone (user ruling 2026-08-18).
+    """
+    value = kwarg_value
+    if value is None:
+        value = os.environ.get(
+            f"{str(branch_name).upper()}_TEMPER_VERTICAL", None
+        )
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        if value.strip().lower() not in ("0", "1", "true", "false"):
+            raise ValueError(
+                f"temper_vertical must be 0/1, got {value!r}."
+            )
+        return value.strip().lower() in ("1", "true")
+    return bool(value)
+
+
+def _resolve_temper_cell_order(branch_name, kwarg_value, default="count"):
+    """Resolve ``temper_cell_order`` for a move (kwarg > env > ``default``).
+
+    ``{BRANCH}_TEMPER_CELL_ORDER`` selects how :class:`BandScheduler` orders
+    cells into buffer slots: ``"count"`` (today, best packing) or ``"band"``
+    (sub-band columns contiguous). See the ``BandScheduler`` docstring for
+    the measured effect on vertical-swap partner availability.
+
+    Deliberately SEPARATE from ``temper_vertical`` so the ordering change
+    can be A/B'd on its own: it alters scheduling for every GB proposal,
+    vertical swaps or not, and its packing cost must be attributable.
+    """
+    value = kwarg_value
+    if value is None:
+        value = os.environ.get(
+            f"{str(branch_name).upper()}_TEMPER_CELL_ORDER", None
+        )
+    if value is None:
+        value = default
+    value = str(value).strip().lower()
+    if value not in BandScheduler.CELL_ORDERS:
+        raise ValueError(
+            f"temper_cell_order must be one of "
+            f"{BandScheduler.CELL_ORDERS}, got {value!r}."
+        )
+    return value
+
+
 def _inmodel_repeats_mode_defaults(branch_name, num_repeat_proposals):
     """``(newborn, survivor)`` mode defaults for the per-class budgets.
 
@@ -1269,6 +1326,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             kwargs.get(
                 "inmodel_repeats_survivor_default", _surv_mode_default
             ),
+        )
+        # Per-repeat VERTICAL band-temperature swaps inside the in-model
+        # loop (default OFF = today's behavior). Additive to -- never a
+        # replacement for -- the permuted swaps in ``run_tempering``, which
+        # remain the ONLY thing that adapts the ladder.
+        self.temper_vertical = _resolve_temper_vertical(
+            branch_name, kwargs.get("temper_vertical", None)
+        )
+        self._temper_rng = None
+        # Cell -> slot ordering. "band" makes sub-band columns contiguous so
+        # vertical swap partners are co-resident; separate knob from
+        # ``temper_vertical`` so its packing cost is measurable alone.
+        self.temper_cell_order = _resolve_temper_cell_order(
+            branch_name, kwargs.get("temper_cell_order", None)
         )
         self.use_info_mat_proposal = bool(use_info_mat_proposal)
         self.swap_on_in_model = bool(swap_on_in_model)
@@ -3704,7 +3775,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _countable = subset.inds | ~_cap_m[subset.inds_main_band_sorter]
             _sched_specials = subset.special_band_inds[_countable]
         scheduler = BandScheduler(
-            _sched_specials, self.num_band_preload_total, xp=self.xp
+            _sched_specials, self.num_band_preload_total, xp=self.xp,
+            cell_order=getattr(self, "temper_cell_order", "count"),
+            nwalkers=self.nwalkers,
         )
         with _tspan(tm, "buffer_build"):
             buffer_obj = self._cached_get_buffer(
@@ -4081,6 +4154,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 chunk, ll_change_log, prop_counts,
                                 acc_counts,
                                 num_repeats=_cls_reps[_cls_name],
+                                cell_ll_state=cell_ll_state,
                             )
                         n_chunks += 1
             logger.info(
@@ -4216,6 +4290,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             model, band_sorter, buffer_obj, band_temps,
                             merged, ll_change_log, prop_counts, acc_counts,
                             num_repeats=self.inmodel_repeats_survivor,
+                            cell_ll_state=cell_ll_state,
                         )
                     n_flushes += 1
                     flush_sum += n_flushed
@@ -4281,6 +4356,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             self.inmodel_repeats_survivor
                             if self.is_rj_prop else None
                         ),
+                        cell_ll_state=cell_ll_state,
                     )
 
                 scheduler.record_picks(picked["specials"])
@@ -6782,9 +6858,163 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         pr = self.transform_fn.both_transforms(ref_track, xp=cp, leaf_inds=li)
         return cp.abs(pr[:, 0]), pr[:, 1].copy(), pr[:, 2].copy()
 
+    def _vertical_pairs(self, t_i, w_i, b_i):
+        """Row-index pairs ``(hot, cold)`` sharing (walker, band), t_hot = t_cold + 1.
+
+        A VERTICAL swap partner pair: same walker, same sub-band, adjacent
+        temperatures. Same walker is what makes the swap free -- every
+        buffer fill index map addresses the parent ACA by WALKER, never by
+        temperature (``gbbands.py:3756/3765/3808/3818``), so the two cells
+        read a bit-identical data slab and the post-swap likelihoods are
+        the pre-swap ones exchanged.
+
+        Serial-within-band guarantees at most one picked row per cell, so a
+        given (t, w, b) appears at most once and each row joins at most one
+        pair per parity class. Pairs are emitted for ONE parity of
+        ``t_cold`` at a time by the caller so no row is in two pairs.
+        """
+        xp = self.xp
+        key = (w_i.astype(xp.int64) * self.num_bands + b_i) * self.ntemps
+        # rows sorted by (walker, band, temp): adjacent entries of the same
+        # (w, b) with consecutive temps are exactly the candidate pairs.
+        order = xp.argsort(key + t_i)
+        ko, to = (key + t_i)[order], t_i[order]
+        same = (ko[1:] - ko[:-1]) == (to[1:] - to[:-1])
+        adj = same & ((to[1:] - to[:-1]) == 1)
+        idx = xp.where(adj)[0]
+        return order[idx + 1], order[idx]      # (hot row, cold row)
+
+    @staticmethod
+    def _vertical_census_new(ntemps):
+        """Per-block vertical-swap census (host ints; one log line per block).
+
+        ``rows`` / ``paired`` are what the ``GB_TEMPER_CELL_ORDER`` knob
+        moves: a vertical pair needs both cells resident SIMULTANEOUSLY, so
+        ``paired/rows`` is the availability the band ordering exists to
+        raise (simulated 18.5% -> 94.0% at production scale). Measuring it
+        on the real run is the only way to confirm that carries over.
+        """
+        return {
+            "sweeps": 0, "rows": 0, "paired": 0,
+            "proposed": 0, "accepted": 0,
+            "acc_by_rung": np.zeros(max(int(ntemps) - 1, 1), dtype=np.int64),
+            "prop_by_rung": np.zeros(max(int(ntemps) - 1, 1), dtype=np.int64),
+        }
+
+    def _vertical_swap_sweep(self, band_sorter, band_temps, t_i, w_i, b_i,
+                             slots, beta, ll_ref, ll_change_log, prop_counts,
+                             acc_counts, cell_ll_state, parity, census=None):
+        """ONE vertical swap sweep. Returns the number of accepted swaps.
+
+        Pure RELABEL: no buffer is touched and no likelihood is evaluated.
+        ``swap_template_slots`` is deliberately NOT used -- in
+        ``run_tempering`` it is a SCORING device (permuted walkers sit on
+        different slabs, so the swapped ll must be measured), and the
+        in-model buffer has no template twin at all (``use_template_arr``
+        is True at exactly one call site, inside ``run_tempering``).
+
+        The acceptance ratio is the closed form the permuted path computes
+        numerically::
+
+            paccept = b1*(L1' - L1) + b2*(L2' - L2)
+                    = (b1 - b2) * (L2 - L1)          [L1' = L2, L2' = L1]
+
+        ``ll_ref`` is the per-row cell likelihood (``get_add_ll`` of the
+        cell's picked source against the source-free cell residual, i.e.
+        the cell's ll WITH its model in), maintained by the repeat loop.
+
+        On acceptance the two rows exchange their (temperature) labels and
+        every per-cell ledger keyed by that label follows the MODEL, so the
+        slot contents stay valid where they are.
+        """
+        xp = self.xp
+        hot, cold = self._vertical_pairs(t_i, w_i, b_i)
+        if census is not None:
+            census["sweeps"] += 1
+            census["rows"] += int(t_i.shape[0])
+            # every pair covers TWO rows; this is the co-residency fraction
+            census["paired"] += 2 * int(hot.shape[0])
+        if int(hot.shape[0]) == 0:
+            return 0
+        # One parity of the cold rung per sweep: adjacent pairs overlap
+        # (t=1 pairs with both 0 and 2), so alternating parities keeps every
+        # row in at most one pair and still visits the whole ladder.
+        sel_p = (t_i[cold] % 2) == parity
+        hot, cold = hot[sel_p], cold[sel_p]
+        if int(hot.shape[0]) == 0:
+            return 0
+
+        b_hot = band_temps[b_i[hot], t_i[hot]]
+        b_cold = band_temps[b_i[cold], t_i[cold]]
+        paccept = (b_cold - b_hot) * (ll_ref[hot] - ll_ref[cold])
+        if census is not None:
+            census["proposed"] += int(paccept.shape[0])
+            _pr = np.bincount(
+                _to_numpy(t_i[cold]).astype(int),
+                minlength=len(census["prop_by_rung"]),
+            )[: len(census["prop_by_rung"])]
+            census["prop_by_rung"] += _pr
+        # Swap RNG lives on its own stream: the in-model repeat loop's draw
+        # count/order must not change, or the bit-exact accept-chain
+        # reference test breaks for a reason unrelated to correctness.
+        u = self._temper_rng.random(int(paccept.shape[0]))
+        acc = paccept >= xp.log(xp.asarray(u))
+        n_acc = int(acc.sum())
+        if n_acc == 0:
+            return 0
+
+        h, c = hot[acc], cold[acc]
+        t_h, t_c = t_i[h].copy(), t_i[c].copy()
+        w_hc, b_hc = w_i[h], b_i[h]
+        if census is not None:
+            census["accepted"] += n_acc
+            _ar = np.bincount(
+                _to_numpy(t_c).astype(int),
+                minlength=len(census["acc_by_rung"]),
+            )[: len(census["acc_by_rung"])]
+            census["acc_by_rung"] += _ar
+
+        # --- sorter: every source of both cells trades its temperature ---
+        spec_h = band_sorter.get_special_band_index(t_h, w_hc, b_hc)
+        spec_c = band_sorter.get_special_band_index(t_c, w_hc, b_hc)
+        for k in range(int(t_h.shape[0])):
+            band_sorter.exchange_cell_labels(
+                spec_h[k:k + 1], int(t_h[k]), w_hc[k:k + 1],
+                spec_c[k:k + 1], int(t_c[k]), w_hc[k:k + 1],
+                bands=b_hc[k:k + 1],
+            )
+
+        # --- per-cell ledgers follow the MODEL, so they trade too ---
+        for arr in (ll_change_log,):
+            tmp = arr[t_h, w_hc, b_hc].copy()
+            arr[t_h, w_hc, b_hc] = arr[t_c, w_hc, b_hc]
+            arr[t_c, w_hc, b_hc] = tmp
+        for arr in (prop_counts[1], acc_counts[1]):
+            tmp = arr[t_h, w_hc, b_hc].copy()
+            arr[t_h, w_hc, b_hc] = arr[t_c, w_hc, b_hc]
+            arr[t_c, w_hc, b_hc] = tmp
+
+        # --- cell-ll bookkeeping: slot -> cell label follows the model ---
+        if cell_ll_state is not None:
+            st = cell_ll_state
+            s_h, s_c = slots[h], slots[c]
+            for key in ("spec", "ll0", "led0", "rep0"):
+                a = st.get(key)
+                if a is None:
+                    continue
+                tmp = a[s_h].copy()
+                a[s_h] = a[s_c]
+                a[s_c] = tmp
+
+        # --- block-row labels + the beta they imply ---
+        t_i[h], t_i[c] = t_c, t_h
+        beta[h] = band_temps[b_i[h], t_i[h]]
+        beta[c] = band_temps[b_i[c], t_i[c]]
+        return n_acc
+
     def _run_in_model_repeats(self, model, band_sorter, buffer_obj, band_temps,
                               picked, ll_change_log, prop_counts, acc_counts,
-                              num_repeats=None):
+                              num_repeats=None, cell_ll_state=None):
         """``num_repeats`` in-model rounds on the picked live sources.
 
         The picked source is first taken OUT of its cell residual, so every
@@ -7062,19 +7292,49 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # -- no data-dependent host syncs -- and each ``_n_cold`` is the
         # block's ONLY host pull for the proposed-cold counter (it was an
         # ``int((t_i[sl] == 0).sum())`` device pull per repeat).
-        _half_pre = []
-        for _sub in halves:
-            _sl = slice(None) if _sub is None else _sub
-            _t_s = t_i[_sl]
-            _cold_s = _t_s == 0
-            _half_pre.append((
-                _sub, _sl,
-                len(ids) if _sub is None else int(_sub.size),
-                ids[_sl], slots[_sl], N_vals[_sl], l_i[_sl],
-                _t_s, w_i[_sl], b_i[_sl], beta[_sl],
-                n4[_sl], lo_bin[_sl], hi_bin[_sl],
-                _cold_s, int(_cold_s.sum()),
-            ))
+        # NOTE(vertical-swap staleness): these gathers are COPIES, so an
+        # accepted vertical swap -- which rewrites ``t_i`` and ``beta`` --
+        # invalidates every ``_t_s`` / ``beta_s`` / ``cold_s`` below. The
+        # build is therefore a closure the sweep can re-run; left stale, the
+        # next repeat would score at the wrong temperature SILENTLY.
+        def _build_half_pre():
+            out = []
+            for _sub in halves:
+                _sl = slice(None) if _sub is None else _sub
+                _t_s = t_i[_sl]
+                _cold_s = _t_s == 0
+                out.append((
+                    _sub, _sl,
+                    len(ids) if _sub is None else int(_sub.size),
+                    ids[_sl], slots[_sl], N_vals[_sl], l_i[_sl],
+                    _t_s, w_i[_sl], b_i[_sl], beta[_sl],
+                    n4[_sl], lo_bin[_sl], hi_bin[_sl],
+                    _cold_s, int(_cold_s.sum()),
+                ))
+            return out
+
+        _half_pre = _build_half_pre()
+
+        # Per-repeat VERTICAL band-temperature swaps (GB_TEMPER_VERTICAL).
+        # Free: same walker => identical data slab => the swapped lls are
+        # the current ones exchanged, so the ratio is closed form and no
+        # buffer is touched. OFF by default. The ladder is NOT adapted here
+        # -- ``_adapt_band_temps`` stays exclusive to ``run_tempering``.
+        _vert_on = bool(getattr(self, "temper_vertical", False)) and self.ntemps > 1
+        _vert_acc = 0
+        _vert_census = self._vertical_census_new(self.ntemps) if _vert_on else None
+        # NOTE(vertical ll audit): the ratio reads ``ll_ref`` -- the cell
+        # ll WITH its picked source in. Do NOT audit that against
+        # ``band_likelihoods`` mid-block: that measures the slab with the
+        # picked source REMOVED, so the two are taken at different points of
+        # the cell lifecycle and their difference is dominated by the
+        # source's own contribution, not by sampling error (measured: an
+        # apparent 1.9e7 'error' against a 9.5e6 signal, entirely spurious).
+        # The correct instrument already exists and runs per cell at close:
+        # ``_cell_ll_finalize``'s sampled-vs-realized reconciliation,
+        # reported as [GB_CELL_LL] against a temperature-scaled allowance.
+        if _vert_on and getattr(self, "_temper_rng", None) is None:
+            self._temper_rng = np.random.default_rng()
 
         # Device-resident accept-chain state (flushed ONCE per block in
         # ``imr_accept_flush`` below): per-proposal-kind counters
@@ -7350,6 +7610,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         f"{move_i + 1}."
                     )
 
+          # ---- VERTICAL band-temperature swaps, once per repeat ----
+          # ORDER MATTERS, and more so since v4 armed the refresh on ALL
+          # rungs: the sig-het reference refresh above re-bases ``ll_ref``
+          # for the drifted subset, so the sweep must run AFTER it to read
+          # re-based values. Placed here it does. A pair whose two rows were
+          # refreshed against DIFFERENT expansion points is still fine --
+          # ll_ref estimates the same physical cell ll either way, so the
+          # difference carries the ordinary sig-het approximation error the
+          # MH acceptance already carries, not a systematic offset.
+          # Runs at REPEAT scope (after every parity half has moved), so
+          # each row has an up-to-date ``ll_ref`` -- the cell likelihood the
+          # closed-form ratio needs. Alternating parity of the cold rung
+          # keeps every row in at most one pair per sweep while still
+          # visiting the whole ladder.
+          if _vert_on:
+              with _tspan(tm, "inmodel_vertical_swap"):
+                  _n = self._vertical_swap_sweep(
+                      band_sorter, band_temps, t_i, w_i, b_i, slots, beta,
+                      ll_ref, ll_change_log, prop_counts, acc_counts,
+                      cell_ll_state, move_i % 2, census=_vert_census,
+                  )
+              if _n:
+                  _vert_acc += _n
+                  # t_i / beta changed -> the hoisted per-half gathers are
+                  # stale. Rebuild rather than patch: cheap, and a missed
+                  # field here scores the next repeat at the wrong beta.
+                  _half_pre = _build_half_pre()
+
         # ONE host pull per BLOCK for the accept-chain bookkeeping the loop
         # kept on device: fold the per-kind device tallies into the
         # per-propose ``_im_kind_counts`` dict and emit the deferred
@@ -7372,6 +7660,49 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"{self.name}: accepted {_n_warn} out-of-prior in-model "
                     "coordinate(s) at beta > 0 in this repeat block."
                 )
+
+        # ---- BLOCK BOUNDARY BARRIER (user ruling 2026-08-18) ----
+        # Every vertical swap must be fully settled before the NEXT set of
+        # in-model repeats begins: no pending, deferred or half-applied swap
+        # state may cross a block boundary. The sweep applies each accepted
+        # swap eagerly (sorter labels, per-cell ledgers, cell-ll slot state
+        # and the block's own t_i/beta all move together), so nothing is
+        # outstanding here -- this asserts that rather than assuming it.
+        # ``special_index_check`` recomputes the packed (t, w, b) key from
+        # the components and compares: a half-applied relabel cannot survive
+        # it. Silent in production otherwise, surfacing much later as ledger
+        # drift in an unrelated band.
+        if _vert_on:
+            if _vert_acc and not bool(band_sorter.special_index_check):
+                raise AssertionError(
+                    f"{self.name}: vertical swap left band_sorter "
+                    f"inconsistent -- special_band_inds disagrees with "
+                    f"(temp_inds, walker_inds, band_inds) after "
+                    f"{_vert_acc} accepted swap(s) in this repeat block."
+                )
+            _cn = _vert_census
+            _avail = _cn["paired"] / max(_cn["rows"], 1)
+            _rate = _cn["accepted"] / max(_cn["proposed"], 1)
+            # PAIR AVAILABILITY is the headline: a vertical swap needs both
+            # cells co-resident, which is what GB_TEMPER_CELL_ORDER buys.
+            # Low availability here means the ordering is not delivering and
+            # the acceptance rate below is measured on a tiny sample.
+            _rungs = "; ".join(
+                f"T{i}-T{i+1}: {int(a)}/{int(p)}"
+                for i, (a, p) in enumerate(
+                    zip(_cn["acc_by_rung"], _cn["prop_by_rung"]))
+                if p > 0
+            )
+            logger.info(
+                f"[GB_VERT {self.name}] order={getattr(self, 'temper_cell_order', '?')} "
+                f"pair AVAILABILITY {100.0 * _avail:.1f}% "
+                f"({_cn['paired']}/{_cn['rows']} rows had a partner over "
+                f"{_cn['sweeps']} sweeps) | proposed {_cn['proposed']} "
+                f"accepted {_cn['accepted']} ({100.0 * _rate:.1f}%) over "
+                f"{n_rep} repeats x {len(ids)} sources | per rung pair -- "
+                f"{_rungs or 'none'}"
+            )
+
 
         # Trust-gate census for the block (see the accumulator above). ONE
         # host sync, after every repeat has run. Unconditional because the
@@ -7639,6 +7970,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_swaps_accepted = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
         band_swaps_proposed = cp.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
 
+        # EMPTY-PAIR CENSUS (2026-08-18). A swap between two EMPTY cells has
+        # L2 - L1 == 0, so paccept == 0, which beats log(u) unconditionally:
+        # it is recorded as an accepted swap and moves nothing, while still
+        # paying the buffer chunk build and the per-cell likelihood. This
+        # counts how much of run_tempering's cost buys vacuous swaps.
+        _empty_census = {"pairs": 0, "both_empty": 0, "acc": 0,
+                         "acc_both_empty": 0}
+
         # GB_TEMPER_AUDIT=1: reconcile the credited per-cold-walker ll
         # deltas (what lands in ll_change_log_temp[0] and, from there, in
         # state.log_like[0]) against the TRUE parent-residual likelihood at
@@ -7703,6 +8042,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 ].copy()
                 special_inds_now = special_index.reshape(-1, self.ntemps)[start_ind:end_ind].copy()
                 special_inds_now_flat = special_inds_now.flatten()
+                # per-cell ALIVE source counts for this chunk (empty-pair
+                # census below); one sorted lookup, no kernel.
+                _alive_sp = band_sorter.special_band_inds[band_sorter.inds]
+                _u_sp, _u_ct = cp.unique(_alive_sp, return_counts=True)
+                _pos = cp.searchsorted(_u_sp, special_inds_now)
+                _pos = cp.clip(_pos, 0, max(int(_u_sp.shape[0]) - 1, 0))
+                _occ_now = cp.where(
+                    _u_sp[_pos] == special_inds_now, _u_ct[_pos], 0
+                ) if int(_u_sp.shape[0]) > 0 else cp.zeros_like(special_inds_now)
 
                 with _tspan(getattr(self, "_prop_timer", None), "temper_buffer"):
                     buffer_obj = self._cached_get_buffer(
@@ -7744,6 +8092,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                     raccept = cp.log(cp.random.uniform(size=paccept.shape))
                     sel = paccept > raccept
+
+                    _be = (_occ_now[:, i1] == 0) & (_occ_now[:, i2] == 0)
+                    _empty_census["pairs"] += int(sel.shape[0])
+                    _empty_census["both_empty"] += int(_be.sum())
+                    _empty_census["acc"] += int(sel.sum())
+                    _empty_census["acc_both_empty"] += int((sel & _be).sum())
 
                     # Audit BEFORE current_lls is overwritten: old_lls is a
                     # VIEW into current_lls, so accepted rows lose their old
@@ -7846,6 +8200,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
                 _audit_true_prev = _true_now
                 _audit_cred_prev = _cred_now
+
+        _ec = _empty_census
+        if _ec["pairs"]:
+            logger.info(
+                f"[GB_TEMPER_EMPTY {self.name}] permuted swap pairs "
+                f"{_ec['pairs']}: BOTH CELLS EMPTY "
+                f"{_ec['both_empty']} ({100.0 * _ec['both_empty'] / _ec['pairs']:.1f}%); "
+                f"accepted {_ec['acc']} of which "
+                f"{_ec['acc_both_empty']} "
+                f"({100.0 * _ec['acc_both_empty'] / max(_ec['acc'], 1):.1f}%) "
+                f"were empty-vs-empty and moved NOTHING (paccept==0 always "
+                f"passes). This is the share of run_tempering's cost that "
+                f"buys no mixing."
+            )
 
         self._adapt_band_temps(band_temps, band_swaps_accepted, band_swaps_proposed)
 

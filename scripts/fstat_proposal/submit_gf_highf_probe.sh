@@ -309,7 +309,7 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # and shutoff is PERMANENT for the process, so there is no recovery.
 export GB_RJ_BAND_SHUTOFF_AFTER=50
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
-export GB_FSTAT_REFIT_EVERY=100    # production cadence (5 was verify-only)
+export GB_FSTAT_REFIT_EVERY=50     # v4 production cadence (was 100)
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # BIRTH-DRAW ALLOCATION (2026-08-16). Peak boxes are weighted w ~ F**alpha,
 # and the F-statistic goes like SNR^2 -- so the historical alpha=1 hands an
@@ -401,6 +401,20 @@ export VGB_NTEMPS=8
 # explicit here for the run record). =0 restores serial dispatch if the
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
 export GB_ROUTER_THREADED=1
+
+# ---- v4 SIG-HET STACK (2026-08-18) ---------------------------------------
+# This probe predates submit_gf_3mo_v4.sh and did not carry the knobs v4
+# arms. A probe that does not mirror production's likelihood settings is
+# not measuring production. Values copied verbatim from
+# submit_gf_3mo_v4.sh -- change them only in lockstep with that script.
+export GB_SIGHET_REFRESH_EVERY=25      # re-anchor drifted references
+export GB_SIGHET_REFRESH_DPHASE=0      # ... on the drift test alone
+export GB_SIGHET_REFRESH_MIN_BETA=0    # ... on ALL rungs, not just cold
+export GB_SIGHET_TRUST_PHASE_C=49      # SNR-scaled carrier-phase gate
+export SIGHET_NT_LAYER=270             # sparse-grid resolution
+export FSTAT_SIGHET_MULTIDEV=1         # multi-device F-stat fan-out
+# Diagnostic ladder, first iterations only (~0.32 s/propose).
+export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
 
 # ============================================================================
 # FRESH-RUN GUARD (2026-08-15). This submission starts a NEW run in a NEW
