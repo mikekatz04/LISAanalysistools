@@ -276,6 +276,43 @@ export SIGHET_NT_LAYER=270
 # wheels stay CORRECT but serialized, so this is safe either way.
 export FSTAT_SIGHET_MULTIDEV=1
 #
+# SIG-HET REFERENCE REFRESH (user ruling 2026-08-18). The trust gate measures
+# drift from ``ref_track`` -- the parameters the sig-het reference was built
+# at -- so REFRESHING THE REFERENCE RESETS THE BUDGET. With no refresh a
+# source spends all 200 repeats accumulating against one fixed expansion
+# point, which is exactly why the drift audit pinned at max 0.47-0.50 of a
+# 0.5 budget in EVERY block of every probe.
+#
+# BOTH knobs are required. ``REFRESH_EVERY`` is only the cadence at which
+# FARNESS IS CHECKED; the refresh fires only for sources with
+# ``drift > sighet_refresh_dphase``, which defaults to 0.5 -- the trust gate
+# itself. The gate stops the drift one step before the refresh would notice,
+# so the phase arm can NEVER trigger at the defaults: two knobs that must
+# differ ship equal. DPHASE=0 makes it "refresh anything that moved" (a
+# source that never accepted a move still has an exact reference).
+#
+# The counter is REPEATS, not iterations: newborn blocks (200) get 8
+# refreshes, survivor blocks (25) get none -- the `move_i + 1 < n_rep` guard
+# -- which is right, they barely drift.
+#
+# Cost, measured on the high-f probe with this exact configuration:
+# inmodel_sighet_refresh 0.25 s typical / 6.26 s worst against
+# inmodel_repeats 5.2-15.1 s and an 85-98 s propose = 0.3% typical, 6.4%
+# worst. In-model is only ~5% of a propose (rj_step is 87%).
+#
+# WHY THIS RATHER THAN WIDENING THE GATE: refreshing re-linearizes, so it
+# buys mixing while PRESERVING accuracy; widening buys the same mixing by
+# SPENDING accuracy. Same reason GB_SIGHET_TRUST_PHASE_C stays at 0 here.
+export GB_SIGHET_REFRESH_EVERY=25
+export GB_SIGHET_REFRESH_DPHASE=0
+# GB_SIGHET_REFRESH_MIN_BETA defaults to 0.1, so the coldest rungs refresh
+# and the hot ones keep a stale reference (beta-suppressed error, and each
+# refresh is a full setup). NOT lowered here on purpose: the 1e3-1e4 error
+# tail the probes saw off the cold chain sits near beta ~ 0.01-0.1, so if the
+# armed audits show the "all" median climbing with rung count, dropping this
+# to 0.01 is the first thing to try -- but it roughly doubles the refresh
+# cost and would be a second unattributed change right now.
+#
 # RUNG-COVERAGE AUDIT -- ARMED FOR THE FIRST FEW ITERATIONS, THEN REMOVE.
 # Every probe today ran the degenerate 2-rung ladder, so we have NO data on
 # 22 of this run's 24 rungs. The probes' delta-vs-delta line showed a tail of
