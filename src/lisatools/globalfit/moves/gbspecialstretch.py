@@ -6740,7 +6740,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
     def _sighet_tier_scan(self, buffer_obj, curr, slots, N_vals, l_i,
-                          ll_ref, beta, tm):
+                          ll_ref, beta, tm, t_i=None, w_i=None):
         """Displacement-resolved sig-het accuracy, in the SAMPLING-RELEVANT lens.
 
         ``GB_SIGHET_TIER_SCAN`` = comma-separated carrier-phase displacements
@@ -6791,6 +6791,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return
         tobs = float(self._basis_settings.Tobs)
         n_src = int(curr.shape[0])
+        # h_h_out currently holds the BLOCK's ll_ref evaluation; the scan's
+        # own get_add_ll calls below overwrite it, so snapshot the per-source
+        # reference SNR now for the worst-offender report.
+        _hh0 = getattr(buffer_obj, "h_h_out", None)
+        snr_ref = (cp.sqrt(cp.clip(cp.asarray(_hh0).real, 0.0, None))
+                   if _hh0 is not None else None)
         # dphase = 2*pi*|df0|*Tobs, and f0 is sampled in mHz. Alternate the
         # sign per source so one batch per tier covers both directions.
         sgn = cp.where(cp.arange(n_src) % 2 == 0, 1.0, -1.0)
@@ -6819,18 +6825,66 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "%s: [GB_TIER] sig-het delta-vs-delta accuracy, COLD chain "
             "(%d/%d sources, gate now %.3g rad):",
             self.name, n_c, n_src, self.sighet_trust_dphase)
+        # PER-SOURCE, not per-block. Measured 2026-08-18: eps/T varies by an
+        # ORDER OF MAGNITUDE between sources inside a single block (one block
+        # ran ~0.006-0.013 while another in the SAME run and settings ran
+        # ~0.09), so a block median describes no source in particular and
+        # hides which ones are actually bad. Four knob A/Bs came back
+        # unattributable partly because that per-source spread is wider than
+        # the effect being chased.
+        #
+        # Two statistics changes follow from that:
+        #   * report median/p90/max of the per-source RATIO eps_i/T_i, not
+        #     median(eps)/median(T) -- a ratio of medians is not the median
+        #     of ratios and the two differ exactly when the spread is wide;
+        #   * apply the tiered spec PER SOURCE (allowed_i = max(0.1,
+        #     T_i/100)) and report the PASS FRACTION, instead of failing a
+        #     whole tier on its single worst source.
+        cold_idx = cp.where(cold)[0]
+        worst_ratio = cp.zeros(int(cold_idx.size))
         for d, hh, ee in zip(tiers, het, exa):
-            eps = ((hh - ll_ref) - (ee - ex0))[cold]
+            eps = cp.abs((hh - ll_ref) - (ee - ex0))[cold]
             t_true = cp.abs(ee - ex0)[cold]
-            t_med = float(cp.median(t_true))
-            e_med = float(cp.median(cp.abs(eps)))
-            e_max = float(cp.abs(eps).max())
-            allowed = max(0.1, t_med / 100.0)
+            ratio = eps / cp.maximum(t_true, 1e-300)
+            worst_ratio = cp.maximum(worst_ratio, ratio)
+            allowed_i = cp.maximum(0.1, t_true / 100.0)
+            n_pass = int((eps <= allowed_i).sum())
+            _r = _to_numpy(ratio)
             logger.info(
                 "%s: [GB_TIER] dphase=%6.3f rad (%.4f bins): true T median "
-                "%9.3g | eps_delta median %9.3g max %9.3g | allowed %8.3g "
-                "-> %s", self.name, d, d / (2.0 * np.pi), t_med, e_med,
-                e_max, allowed, "PASS" if e_max <= allowed else "over")
+                "%9.3g | eps_delta median %9.3g max %9.3g | eps/T med %7.3g "
+                "p90 %7.3g max %7.3g | spec pass %d/%d",
+                self.name, d, d / (2.0 * np.pi), float(cp.median(t_true)),
+                float(cp.median(eps)), float(eps.max()),
+                float(np.median(_r)), float(np.percentile(_r, 90)),
+                float(_r.max()), n_pass, n_c)
+
+        # Name the worst sources so the bad tail can be CHARACTERISED rather
+        # than averaged over -- if eps/T tracks SNR, or sky position, or a
+        # deep null in the reference envelope, that is visible here and
+        # nowhere else. snr_ref comes from the block's ll_ref evaluation,
+        # captured before this scan's own get_add_ll calls overwrote h_h_out.
+        try:
+            order = _to_numpy(cp.argsort(worst_ratio))[::-1][:3]
+            wr = _to_numpy(worst_ratio)
+            ci = _to_numpy(cold_idx)
+            for rank, j in enumerate(order):
+                src = int(ci[int(j)])
+                f0 = float(_to_numpy(self.transform_fn.both_transforms(
+                    curr[src:src + 1], xp=cp,
+                    leaf_inds=(l_i[src:src + 1] if self._per_leaf_fill
+                               else None))[0, 1]))
+                logger.info(
+                    "%s: [GB_TIER] worst #%d: eps/T max %.3g over the ladder "
+                    "| f0=%.6e Hz snr_ref=%s temp=%s walker=%s",
+                    self.name, rank + 1, float(wr[int(j)]), f0,
+                    ("%.1f" % float(snr_ref[src])) if snr_ref is not None
+                    else "n/a",
+                    "?" if t_i is None else int(_to_numpy(t_i[src])),
+                    "?" if w_i is None else int(_to_numpy(w_i[src])))
+        except Exception as exc:  # diagnostics must never kill a block
+            logger.debug("%s: [GB_TIER] worst-source report skipped: %r",
+                         self.name, exc)
 
     def _sighet_trust_dlna_vec(self, buffer_obj, n):
         """Per-source amplitude gate ``clip(C/snr_ref, dlna_min, dlna_cap)``.
@@ -7258,7 +7312,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # defined against.
         if sighet_active:
             self._sighet_tier_scan(buffer_obj, curr, slots, N_vals, l_i,
-                                   ll_ref, beta, tm)
+                                   ll_ref, beta, tm, t_i=t_i, w_i=w_i)
 
         if tm is not None:
             # Per-block scale, so a wall time can be read as a per-source /
