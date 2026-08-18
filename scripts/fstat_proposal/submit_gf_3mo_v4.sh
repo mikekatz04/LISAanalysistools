@@ -555,6 +555,15 @@ export VGB_CHIRP_MASS_BASIS=0
 # with the matching "8" argument (it recreates every rung-dimensioned
 # vgb dataset: temps ladder, counters zeroed, 7 swap pairs).
 export VGB_NTEMPS=8
+# GB rung count. 24 is already the code default (stock/erebor/gb.py
+# env_default("GB_NTEMPS", 24)) -- pinned here anyway because the rung count
+# is the one knob whose failure mode is completely silent: resume derives it
+# from the STORED band_temps shape, so a store built at the wrong count runs
+# the wrong ladder forever while the script still says 24, and the only hint
+# is a single build_gb_moves warning buried in a 200k-line log. Both confined
+# probes ran a degenerate [1.0, 1e-4] ladder for days on exactly that. The
+# LADDER PREFLIGHT below turns the silent case into a refusal to start.
+export GB_NTEMPS=24
 # Concurrent per-device shard dispatch (code default since 2026-08-13;
 # explicit here for the run record). =0 restores serial dispatch if the
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
@@ -581,6 +590,39 @@ else
   echo "        are fitted fresh against this run's own residual."
 fi
 
+# ============================================================================
+# OPTIONAL LAUNCH SHORTCUT: graft v3's finished noise_search (2026-08-18)
+# ============================================================================
+# v4 changes NOTHING on the noise side -- the whole config diff against v3 is
+# GB / sig-het / F-stat knobs -- so refitting the PSD and galactic foreground
+# from scratch just reproduces a result v3 already has, at ~1.5 h.
+#
+# But noise_vgb_search MUST re-run: the VGB ladder moved to eryn's
+# make_ladder, and a resumed store's stored ladder WINS over the configured
+# one. (Measured on the temper probes: arms prepped from an older base kept
+# the old 1/1.2**i ladder, while freshly-built arms got make_ladder.)
+#
+# So: let v4 author its own store -- every grid, shape and ladder correct by
+# construction -- and move only the fitted numbers in.
+#
+#   1. sbatch this script against the fresh STORE_DIR. Let it reach
+#      noise_search and SAVE ONE iteration, then scancel. That iteration is
+#      throwaway; it exists so the datasets are allocated with >= 1 row.
+#   2. python scripts/fstat_proposal/graft_noise_state.py \
+#          <v3_store>/gf_prod_3mo_testing.h5 \
+#          ${STORE_DIR}/${BASE_FILE_NAME}_testing.h5          # dry run
+#      ... then the same command with --apply.
+#   3. sbatch this script again. It resumes from the grafted row, sees
+#      noise_search complete, and starts noise_vgb_search on the NEW ladder.
+#
+# The graft tool finds v3's handover row itself (VGB is frozen for the whole
+# of noise_search and starts moving on the first noise_vgb iteration), gates
+# on both stores having zero GB leaves, and refuses to touch sub_backend/vgb
+# -- which is where the ladder lives, and the entire point of the exercise.
+# Do NOT rewind a COPY of the v3 store instead: that carries v3's grids and
+# rung counts into v4 and needs a migration per array, which is how the three
+# earlier band-grid migrations failed.
+
 # LATER REFITS: GB_FSTAT_REFIT_EVERY=100 proposal-hits (~8 h at the new
 # iteration cadence, ~3.5% overhead at a 17.7-min fit). To force an extra
 # refit mid-run, stop the job and archive the epoch dir, then resubmit:
@@ -596,5 +638,34 @@ fi
 # EVERY rank before roles resolve -- watch nvidia-smi for saver/spare
 # device allocations; if the extra ranks hold GPU memory, drop back to
 # the plain single-process line below until the rank-gated build lands.
+# ============================================================================
+# LADDER PREFLIGHT. Only fires on a RESUME (a fresh submission has no store
+# yet and skips it). Resume derives the GB rung count from the stored
+# band_temps shape, NOT from GB_NTEMPS above -- refuse to start rather than
+# run a silently-wrong ladder for days.
+# ============================================================================
+if [ -e "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" ]; then
+  python - "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" "${GB_NTEMPS}" <<'PYEOF' || exit 2
+import sys, h5py
+store, want = sys.argv[1], int(sys.argv[2])
+with h5py.File(store, "r") as f:
+    bt = f["global_fit"]["sub_backend"]["gb"].get("band_temps")
+    if bt is None:
+        print("[LADDER] no gb band_temps; nothing to check.")
+        raise SystemExit(0)
+    have = int(bt.shape[-1])
+print(f"[LADDER] stored gb rungs = {have}, GB_NTEMPS = {want}")
+if have != want:
+    print(f"[LADDER] REFUSING TO START: the store would run {have} rungs, not "
+          f"{want}. Resume takes the STORED count. Re-rung it first:\n"
+          f"  python scripts/fstat_proposal/reset_recipe_stage.py {store} "
+          f"gb_search --rewind-to-empty gb --apply\n"
+          f"  python scripts/fstat_proposal/rerunge_gb_ladder.py {store} gb "
+          f"{want} --apply")
+    raise SystemExit(2)
+print("[LADDER] OK.")
+PYEOF
+fi
+
 mpiexec -n 3 python scripts/fstat_proposal/run_combined_staged.py
 # python scripts/fstat_proposal/run_combined_staged.py   # single-process fallback
