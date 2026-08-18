@@ -447,8 +447,22 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # and shutoff is PERMANENT for the process, so there is no recovery.
 export GB_RJ_BAND_SHUTOFF_AFTER=50
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
-export GB_FSTAT_REFIT_EVERY=50     # v4 production cadence (was 100 in the
-                                   # older probe this derives from)
+# REFIT EVERY 5, NOT 50 -- deliberately far below the v4 production cadence,
+# because two code paths have NEVER EXECUTED anywhere and both are gated
+# behind a refit (epoch >= 1):
+#   * the GB-FREE residual window (GB_FSTAT_GB_FREE, default on) -- restores
+#     the reference walker's cold GB signals before the sweep so the peak
+#     list is walker-INDEPENDENT;
+#   * the late peak weighting FSTAT_PEAK_WEIGHT_ALPHA_LATE (w ~ sqrt(SNR)
+#     from epoch 1, against w ~ SNR at epoch 0).
+# Every probe so far loaded epoch_0000 from cache and stopped well short of a
+# refit, so both would otherwise first run inside the production job. At 5 the
+# first refit lands within minutes and the log carries "F-stat GB-FREE
+# residual: restoring N cold GB signal(s)" and a "[birth] peak-box weighting:
+# ... alpha=0.25 ~ SNR**0.5, epoch=1" line to confirm each.
+# THIS CADENCE IS A TEST SETTING. The fit is cheap on a 4-band window (stage B
+# measured at ~7 s) but is NOT cheap at production band counts -- v4 uses 50.
+export GB_FSTAT_REFIT_EVERY=5      # TEST cadence; production v4 uses 50
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # BIRTH-DRAW ALLOCATION (2026-08-16). Peak boxes are weighted w ~ F**alpha,
 # and the F-statistic goes like SNR^2 -- so the historical alpha=1 hands an
