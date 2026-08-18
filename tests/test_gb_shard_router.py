@@ -559,10 +559,11 @@ class ShardRouterTest(unittest.TestCase):
                 self.holder, self.params, self.data_index)
 
     def test_noop_in_model_routes_multi_shard(self):
+        """Engines that build nothing must report FALSE, not truthy."""
         self.engine.return_truthy = False
         ret = self.router.setup_in_model(
             self.holder, self.params, self.data_index)
-        self.assertIsNone(ret)
+        self.assertFalse(ret)
         n_setup = sum(
             1 for c in self.engine.calls if c["kind"] == "setup_in_model")
         self.assertEqual(
@@ -807,7 +808,18 @@ class ShardRouterTest(unittest.TestCase):
         router, primary, made = self._sighet_router()
         data_index = np.arange(6)              # rows 0-2 shard 0, 3-5 shard 1
         params = np.arange(6 * 9, dtype=float).reshape(6, 9)
-        router.setup_in_model(holder, params, data_index)
+        built = router.setup_in_model(holder, params, data_index)
+
+        # The router used to ``return None`` here regardless of what the
+        # shards did, so the caller's ``sighet_active`` was ALWAYS False on
+        # >= 2 GPUs -- silently disabling the anchor check, the end-of-block
+        # exact-vs-sig-het likelihood audit, the mid-block reference refresh
+        # and the sig-het trust-region gate, on exactly the configuration
+        # production runs on.
+        self.assertTrue(
+            built,
+            "multi-shard setup_in_model must report that references were "
+            "built; a falsy return disables every sig-het in-model guard")
 
         self.assertEqual(sorted(made), [1])    # only device 1 needed a replica
         replica = made[1]

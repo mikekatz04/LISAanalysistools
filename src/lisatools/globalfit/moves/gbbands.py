@@ -1302,7 +1302,17 @@ class _RoutedBandEngine:
         with _tspan(_rtm, "route_dispatch"):
             self._dispatch_shards(holder, items, _shard,
                                   state_ids=[id(it[1]) for it in items])
-        return None
+        # ``built_on`` is populated by _shard, and _dispatch_shards has joined
+        # every worker by the time it returns, so this read is not racing.
+        #
+        # This used to ``return None``, which swallowed every shard's truthy
+        # return: on >= 2 GPUs the caller's ``sighet_active`` was ALWAYS
+        # False, silently disabling the anchor check, the end-of-block
+        # exact-vs-sig-het likelihood audit, the mid-block reference refresh
+        # and the sig-het trust-region gate -- i.e. every diagnostic that
+        # would have measured whether the in-model references were sound, on
+        # exactly the multi-GPU configuration production runs on.
+        return bool(built_on)
 
     def clear_in_model(self):
         """Clear the in-model reference on EVERY per-device engine.
