@@ -663,13 +663,20 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
     how the A/B comparison is taken); the class is otherwise interchangeable.
     """
 
-    #: This class can guarantee a shared (exactly zero) alignment, so it is
-    #: one of the few generators that may opt in. See
-    #: :attr:`lisatools.sources.waveformbase.TDWaveformBase.supports_batch`.
-    supports_batch: bool = True
-
     #: Per-instance escape hatch; see the class docstring.
     grid_align: bool = True
+
+    @property
+    def supports_batch(self) -> bool:
+        """True only while alignment is actually ON.
+
+        ONE decision in ONE place. A class-level ``supports_batch = True``
+        beside a separate ``grid_align`` flag lets the two disagree: with
+        ``grid_align = False`` the generator would still advertise batching,
+        the container would still try, and ``pyResponseTDI`` would refuse --
+        a guaranteed failed launch per call, reported as a fallback warning.
+        """
+        return bool(self.grid_align)
 
     # -- preconditions -----------------------------------------------------
     def _check_alignable(self) -> None:

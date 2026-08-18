@@ -1198,8 +1198,16 @@ class AnalysisContainer:
         pieces = []
         for lo in range(0, n, step):
             template = self._build_batched_template(arr[lo:lo + step], waveform_kwargs)
+            # MIRROR THE SERIAL ROUTE EXACTLY. ``template_likelihood`` has no
+            # ``source_only`` parameter -- it takes ``include_psd_info``, and
+            # forwards anything else straight to ``inner_product``, whose
+            # keyword list is explicit. Passing ``source_only`` here raised
+            # TypeError inside inner_product on EVERY call, which the
+            # fallback below then swallowed, so the batched path silently
+            # never ran. See _calculate_signal_operation, which derives the
+            # flag the same way.
             vals = self.template_likelihood(
-                template, source_only=source_only, **kwargs
+                template, include_psd_info=not source_only, **kwargs
             )
             pieces.append(np.atleast_1d(asnumpy(vals)).astype(float).ravel())
 
@@ -1304,6 +1312,17 @@ class AnalysisContainer:
                     return self._batched_likelihood(
                         x, source_only=source_only, **kwargs
                     )
+                except (TypeError, AttributeError, KeyError) as exc:
+                    # Not a refusal -- these come from THIS call site being
+                    # wrong (bad kwarg, wrong template type). Swallowing them
+                    # is what let a permanently-broken batched path look like
+                    # a working one, so they surface.
+                    raise RuntimeError(
+                        f"batched likelihood is mis-wired, not refused: "
+                        f"{type(exc).__name__}: {exc}. This is a bug in "
+                        f"AnalysisContainer._batched_likelihood, not a "
+                        f"property of the generator or the proposal."
+                    ) from exc
                 except Exception as exc:
                     # A REFUSAL IS NOT AN ERROR. A generator that reports
                     # "this batch cannot be launched as one" (merger times
