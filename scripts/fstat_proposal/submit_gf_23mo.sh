@@ -159,6 +159,16 @@ export GB_MAX_FREQ=2.2e-2
 # K=128 knots (the ruling from the overnight battery) are already the
 # defaults; knots are not a lever.
 export SIGHET_NT_LAYER=525
+# UNIFORM EDGE EXCLUSION (user ruling 2026-08-19): the WDM time crop is set
+# by EDGE PHYSICS (taper ramps, wavelet filter width, reconstruction
+# transients) -- a CONSTANT number of layers (1 layer = 1 h on this grid),
+# NOT a fraction of Tobs. Be conservative: 60 layers = 2.5 days per side
+# covers the old 54-layer taper region where the 3-mo dissect localized the
+# sig-het edge error. Relative cost shrinks with Tobs: 5.6% @ 3 mo, 2.8% @
+# 6 mo, 0.7% @ 23 mo. Every likelihood-facing WDMSettings inherits this one
+# domain crop (min/max_freq still vary per source).
+export EDGE_CROP_WAVELETS=60
+
 
 # ---- GB knobs --------------------------------------------------------------
 export GB_NLEAVES_MAX=25000        # user ruling for the 23-mo run
