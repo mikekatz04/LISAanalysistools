@@ -3259,11 +3259,19 @@ clamp. Grey is scored, offered to Metropolis&ndash;Hastings and rejected.
 <span style="color:var(--green)">Green</span> is accepted, i.e. a new source. Left is
 absolute counts, right the same data as percentages so the trend stays readable as the
 model fills. {GB_FATE_TXT}</div></div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
 <div class="panel">{img("gb_leaves")}
 <div class="caption">Left: galactic-binary leaf count per cold walker across the stored
 iterations, against the detectable-injection target. Right: the enforced per-cell leaf
 cap over time. Rows marked in red have had their births shut off by the barren-band rule
 &mdash; deaths and in-model moves continue there.</div></div>
+<div class="panel">{img("ll")}
+<div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
+the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
+</div>
+<div class="panel">{img("timing_moves", "per-move throughput")}
+<div class="caption">Proposal throughput and wall time per propose, per move, against
+elapsed run time.</div></div>
 <div class="panel">{img("gb_cap_cells", "cap-cell occupancy")}
 <div class="caption">{CAP_TXT} Left is the direct test of whether the cap is being
 respected: bars at or above the cap are amber, and a bar past it would mean sources are
@@ -3412,10 +3420,6 @@ page is frozen at one iteration and stated.</div>
 <details><summary style="cursor:pointer;color:var(--dim);font-size:13px">
 method, sampler health, interactive views and run mechanics</summary>
 
-<div class="panel">{img("ll")}
-<div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
-the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
-
 <div class="caption"><strong>How the numbers are produced.</strong> Optimal SNRs and
 template overlaps use the injected catalogue&rsquo;s own parameters through the
 run&rsquo;s catalogue-to-sampling map, the same waveform generator the run samples
@@ -3442,9 +3446,6 @@ for one branch at a stage handoff.</div></div>
 <div class="caption">Wall-time breakdown of the last complete record of each
 trans-dimensional move, leaf spans only; the enclosing phase marks are quoted in each
 title instead of drawn, since they merely reprint the total.{rj_break_txt}</div></div>
-<div class="panel">{img("timing_moves", "per-move throughput")}
-<div class="caption">Proposal throughput and wall time per propose, per move, against
-elapsed run time.</div></div>
 <div class="panel">{img("mem_telemetry", "device memory")}
 <div class="caption">Device-wide memory from the in-run telemetry, with breaks across
 restart gaps so an attempt boundary does not draw a false ramp.</div></div>
