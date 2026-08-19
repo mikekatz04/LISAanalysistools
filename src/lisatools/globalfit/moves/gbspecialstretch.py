@@ -6806,16 +6806,43 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             c[:, self._f0_col] += sgn * (1e3 * d / (2.0 * np.pi * tobs))
             cands.append(c)
 
+        _dissect = os.environ.get("GB_SIGHET_DISSECT", "").strip()
         with _tspan(tm, "inmodel_tier_scan"):
+            # DISSECT anchor pass (sig-het at curr, i.e. AT the expansion
+            # point where r(t) = 1): scored FIRST so its d_h/h_h stash can be
+            # snapshotted before the tier candidates overwrite it. Together
+            # with the same snapshot after the exact ex0 call below, this
+            # splits any anchor error into its data-side (d_h) and
+            # template-side (h_h) parts -- the two live in different code
+            # (A-moment fold vs B-moment fold / residual slab vs reference
+            # build), so the split IS the attribution.
+            _dh_het0 = _hh_het0 = _dh_ex0 = _hh_ex0 = _het0 = None
+            if _dissect:
+                _het0 = buffer_obj.get_add_ll(curr, slots, slots, N_vals,
+                                              leaf_inds=l_i)
+                _dh_het0 = cp.asarray(buffer_obj.d_h_out).real.copy()
+                _hh_het0 = cp.asarray(buffer_obj.h_h_out).real.copy()
             het = [buffer_obj.get_add_ll(c, slots, slots, N_vals,
                                          leaf_inds=l_i) for c in cands]
             buffer_obj.clear_in_model_likelihood()
             ex0 = buffer_obj.get_add_ll(curr, slots, slots, N_vals,
                                         leaf_inds=l_i)
+            if _dissect:
+                _dh_ex0 = cp.asarray(buffer_obj.d_h_out).real.copy()
+                _hh_ex0 = cp.asarray(buffer_obj.h_h_out).real.copy()
             exa = [buffer_obj.get_add_ll(c, slots, slots, N_vals,
                                          leaf_inds=l_i) for c in cands]
             buffer_obj.setup_in_model_likelihood(curr, slots, N_vals,
                                                  leaf_inds=l_i)
+        if _dissect:
+            try:
+                self._sighet_dissect_dump(
+                    _dissect, buffer_obj, curr, slots, l_i, tiers,
+                    ll_ref, ex0, het, exa, _het0, _dh_het0, _hh_het0,
+                    _dh_ex0, _hh_ex0, snr_ref, beta, t_i, w_i)
+            except Exception as exc:  # diagnostics must never kill a block
+                logger.warning("%s: [GB_DISSECT] dump failed: %r",
+                               self.name, exc)
 
         cold = beta > 0.999
         n_c = int(cold.sum())
@@ -6885,6 +6912,171 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         except Exception as exc:  # diagnostics must never kill a block
             logger.debug("%s: [GB_TIER] worst-source report skipped: %r",
                          self.name, exc)
+
+    def _sighet_dissect_dump(self, out_dir, buffer_obj, curr, slots, l_i,
+                             tiers, ll_ref, ex0, het, exa, het0,
+                             dh_het0, hh_het0, dh_ex0, hh_ex0,
+                             snr_ref, beta, t_i, w_i):
+        """``GB_SIGHET_DISSECT=<dir>``: per-source sig-het dissection dump.
+
+        One npz per in-model block, written at BLOCK START on the frozen
+        residual -- the state where sig-het at the anchor should equal exact
+        almost identically (r(t) = 1; no displacement, resolution or drift
+        involved). Everything here rides the production tier scan: same
+        engine, same buffer, same residual, same reference build the chain
+        itself uses. Requires ``GB_SIGHET_TIER_SCAN`` to be set (the scan is
+        the host).
+
+        WHY (2026-08-19): the v4 anchor checks found ll_het ~ -8e3 against
+        ll_exact ~ +3e2 at the expansion point itself, recurring at the SAME
+        frequencies (1.9727 / 2.9603 / 1.3181 mHz) across blocks, temps and
+        walkers -- corrupted references for specific sources, not random
+        accuracy noise. The aggregate log lines cannot attribute that; this
+        dump can, three ways:
+
+        * ``dh_het0/hh_het0`` vs ``dh_ex0/hh_ex0`` -- the SAME anchor scored
+          through both engines, split into the data-side (d_h) and
+          template-side (h_h) inner products. h_h wrong => the reference /
+          B-moment build; d_h wrong => the residual slab or A-moment fold;
+          both right but ll wrong => the composition (phase max, kept mask).
+        * ``null_depth`` / ``frac_masked`` from the engine's own c0 stash --
+          tests the deep-null-fit-tail hypothesis directly.
+        * full per-source identity (f0, band, temp, walker, slot, leaf) --
+          so the bad population can be characterised, not averaged over.
+
+        Analyzer: ``scripts/gb_chunked_het/gb_sighet_dissect_report.py``.
+        ``GB_SIGHET_DISSECT_MAX`` (default 32) caps the number of dumps.
+        """
+        n_max = int(os.environ.get("GB_SIGHET_DISSECT_MAX", "32"))
+        k = getattr(self, "_dissect_count", 0)
+        if k >= n_max:
+            return
+        self._dissect_count = k + 1
+        os.makedirs(out_dir, exist_ok=True)
+
+        n_src = int(curr.shape[0])
+        # Physical f0 for identity (Hz). Column 1 of the physical basis.
+        phys = self.transform_fn.both_transforms(
+            curr, xp=cp, leaf_inds=(l_i if self._per_leaf_fill else None))
+        f0_hz = _to_numpy(phys[:, 1])
+        band_i = np.searchsorted(
+            _to_numpy(cp.asarray(self.band_edges)), f0_hz) - 1
+
+        # ---- null statistics from the engine's own c0 stash --------------
+        # c0_sparse_all is (n_ref, 3, Nf_active, N_sparse_t); the windowed
+        # build leaves rows outside the carrier window identically zero, so
+        # "supported" rows (row_max > 0) are the reference's actual extent.
+        # null_depth = min/max supported row power; frac_masked = fraction
+        # of supported-row pixels under the v4/v5 row floor (1e-12 * row
+        # max) -- the scorer's own mask, see _c0_row_mask_bits.
+        null_depth = np.full(n_src, np.nan)
+        frac_masked = np.full(n_src, np.nan)
+        n_rows_sup = np.full(n_src, -1, dtype=int)
+        slots_h = np.asarray(_to_numpy(slots), dtype=int)
+        for comp in self._dissect_comps(buffer_obj):
+            try:
+                s2r = getattr(comp, "_slot_to_ref", None)
+                c0 = getattr(comp, "c0_sparse_all", None)
+                if s2r is None or c0 is None:
+                    continue
+                s2r = np.asarray(s2r)
+                ok = (slots_h < len(s2r))
+                ridx = np.where(ok, s2r[np.clip(slots_h, 0, len(s2r) - 1)],
+                                -1)
+                sel = np.where(ridx >= 0)[0]
+                if not sel.size:
+                    continue
+                xp_ = comp.xp
+                c0d = xp_.asarray(c0)[xp_.asarray(ridx[sel])]
+                mag = xp_.abs(c0d)                        # (m, 3, Nf, Nt)
+                row_max = mag.max(axis=-1)                # (m, 3, Nf)
+                sup = row_max > 0.0
+                big = row_max.reshape(len(sel), -1).max(axis=-1)
+                small = xp_.where(sup, row_max, xp_.inf).reshape(
+                    len(sel), -1).min(axis=-1)
+                nd = _to_numpy(small / xp_.maximum(big, 1e-300))
+                masked = (mag <= 1e-12 * row_max[..., None]) & sup[..., None]
+                fm = _to_numpy(
+                    masked.reshape(len(sel), -1).sum(axis=-1)
+                    / xp_.maximum(
+                        (sup.reshape(len(sel), -1).sum(axis=-1)
+                         * mag.shape[-1]), 1))
+                ns = _to_numpy(sup.reshape(len(sel), -1).sum(axis=-1))
+                null_depth[sel] = nd
+                frac_masked[sel] = fm
+                n_rows_sup[sel] = ns
+            except Exception as exc:
+                logger.debug("%s: [GB_DISSECT] c0 stats skipped on one "
+                             "shard: %r", self.name, exc)
+
+        # ---- resolved engine config, for cross-run attribution -----------
+        cfg = ""
+        for comp in self._dissect_comps(buffer_obj):
+            g = getattr(comp, "_g", None)
+            if isinstance(g, dict) and g:
+                cfg = " ".join(f"{kk}={g[kk]}" for kk in sorted(g)
+                               if np.isscalar(g.get(kk)))
+                break
+
+        path = os.path.join(
+            out_dir, f"dissect_{self.name}_{k:04d}.npz")
+        np.savez_compressed(
+            path,
+            tiers=np.asarray(tiers, dtype=float),
+            config=np.array(cfg),
+            move=np.array(self.name),
+            f0_hz=f0_hz, band=band_i, slots=slots_h,
+            beta=_to_numpy(beta),
+            temp=(_to_numpy(t_i) if t_i is not None
+                  else np.full(n_src, -1)),
+            walker=(_to_numpy(w_i) if w_i is not None
+                    else np.full(n_src, -1)),
+            snr_ref=(_to_numpy(snr_ref) if snr_ref is not None
+                     else np.full(n_src, np.nan)),
+            ll_ref=_to_numpy(ll_ref), ex0=_to_numpy(ex0),
+            het0=(_to_numpy(het0) if het0 is not None
+                  else np.full(n_src, np.nan)),
+            dh_het0=(_to_numpy(dh_het0) if dh_het0 is not None
+                     else np.full(n_src, np.nan)),
+            hh_het0=(_to_numpy(hh_het0) if hh_het0 is not None
+                     else np.full(n_src, np.nan)),
+            dh_ex0=(_to_numpy(dh_ex0) if dh_ex0 is not None
+                    else np.full(n_src, np.nan)),
+            hh_ex0=(_to_numpy(hh_ex0) if hh_ex0 is not None
+                    else np.full(n_src, np.nan)),
+            het=np.stack([_to_numpy(h) for h in het]),
+            exa=np.stack([_to_numpy(e) for e in exa]),
+            null_depth=null_depth, frac_masked=frac_masked,
+            n_rows_sup=n_rows_sup,
+        )
+        logger.info("%s: [GB_DISSECT] wrote %s (%d sources, %d tiers)",
+                    self.name, path, n_src, len(tiers))
+
+    @staticmethod
+    def _dissect_comps(buffer_obj):
+        """Every reachable sig-het computation object behind a buffer.
+
+        The engine may be a single ``make_band_likelihood_engine`` product
+        (``.gb_comps``) or the multi-shard router wrapping one per device;
+        probe the known container names defensively -- the dump degrades to
+        NaN null stats rather than failing when the layout changes."""
+        eng = getattr(buffer_obj, "_likelihood_engine", None)
+        if eng is None:
+            return
+        seen = set()
+        # _RoutedBandEngine holds the prototype in ``_engine`` and lazy
+        # per-device replicas in ``_engine_by_device``; its __getattr__ also
+        # delegates unknown names to the prototype, so probing ``eng``
+        # itself covers the single-shard case.
+        cands = [eng, getattr(eng, "_engine", None)]
+        v = getattr(eng, "_engine_by_device", None)
+        if isinstance(v, dict):
+            cands += list(v.values())
+        for e in cands:
+            comp = getattr(e, "gb_comps", None) if e is not None else None
+            if comp is not None and id(comp) not in seen:
+                seen.add(id(comp))
+                yield comp
 
     def _sighet_trust_dlna_vec(self, buffer_obj, n):
         """Per-source amplitude gate ``clip(C/snr_ref, dlna_min, dlna_cap)``.
