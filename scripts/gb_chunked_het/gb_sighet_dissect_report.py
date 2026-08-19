@@ -65,6 +65,10 @@ def load_dir(d):
         blocks += 1
     if not blocks:
         raise SystemExit(f"no readable dissect npz under {d}")
+    # per-block (non-concatenated) views for the block-scoped tests ([1b])
+    per_block = {k: list(out[k]) for k in
+                 ("hh_het0", "hh_ex0", "het0", "ex0", "temp", "walker")
+                 if k in out}
     # per-source arrays concatenate; per-block scalars keep the first
     cat = {}
     for k, v in out.items():
@@ -77,6 +81,7 @@ def load_dir(d):
         else:
             cat[k] = np.concatenate(v)
     cat["_blocks"] = blocks
+    cat["_per_block"] = per_block
     return cat
 
 
@@ -86,6 +91,7 @@ def pct(a, q):
 
 
 def report_one(d, c):
+    per_block = c.get("_per_block", {})
     n = c["f0_hz"].size
     tiers = np.asarray(c["tiers"], dtype=float)
     print(f"\n{'='*76}\n{d}\n  blocks={c['_blocks']}  sources={n}  "
@@ -145,6 +151,56 @@ def report_one(d, c):
     else:
         print("      c0 stats unavailable (engine layout not probed); "
               "re-run with a single-shard engine or extend _dissect_comps.")
+
+    # ---- 1b. SHARD-MAPPING SWAP TEST (2026-08-19) -------------------------
+    # After BOTH the CPU and CUDA probes exonerated every engine ingredient
+    # (kernels exact to 1.0000 on real data at the offender band), the one
+    # production ingredient never probed is the MULTI-GPU sharded router.
+    # A slot scored against ANOTHER source's reference stash leaves a
+    # fingerprint: the broken source's hh_het0 equals some OTHER source's
+    # hh_ex0 almost exactly. Search per BLOCK (per npz -- references only
+    # exist within a block) among same-chain sources.
+    if "hh_het0" in per_block and len(per_block["hh_het0"]):
+        n_bad = n_hit = 0
+        hit_ratio = []
+        for blk in range(len(per_block["hh_het0"])):
+            hh_h = per_block["hh_het0"][blk]
+            hh_e = per_block["hh_ex0"][blk]
+            he0 = per_block["het0"][blk]; ee0 = per_block["ex0"][blk]
+            tw_b = (per_block["temp"][blk].astype(np.int64) * 1000
+                    + per_block["walker"][blk].astype(np.int64))
+            e0b = np.abs(he0 - ee0)
+            bad_i = np.where(np.isfinite(e0b) & (e0b > EPS0_BAD)
+                             & np.isfinite(hh_h))[0]
+            for i in bad_i[:4000]:
+                same = np.where((tw_b == tw_b[i])
+                                & np.isfinite(hh_e))[0]
+                same = same[same != i]
+                if not same.size:
+                    continue
+                n_bad += 1
+                rel = np.abs(hh_h[i] - hh_e[same]) / np.maximum(
+                    np.abs(hh_e[same]), 1e-300)
+                j = rel.argmin()
+                hit_ratio.append(float(rel[j]))
+                if rel[j] < 0.02:
+                    n_hit += 1
+        if n_bad:
+            hr = np.asarray(hit_ratio)
+            base = float(np.median(np.abs(
+                c["hh_het0"] / np.maximum(c["hh_ex0"], 1e-300) - 1.0)
+                [np.isfinite(c["hh_het0"])]))
+            print(f"\n  [1b] SHARD-MAPPING SWAP TEST "
+                  f"(hh_het0[i] ~ hh_ex0[j!=i], same chain, per block)")
+            print(f"      broken sources tested: {n_bad}  |  matched "
+                  f"ANOTHER source's exact power within 2%: {n_hit} "
+                  f"({100*n_hit/n_bad:.1f}%)")
+            print(f"      best-match rel err: med {np.median(hr):.3g}  "
+                  f"p10 {np.percentile(hr,10):.3g}")
+            print(f"      (chance floor ~ how often powers coincide anyway; "
+                  f"population |hh ratio - 1| med = {base:.3g}. A high hit "
+                  f"rate with tiny rel err = slots scored against the WRONG "
+                  f"reference -> the multi-GPU shard/_slot_to_ref mapping.)")
 
     # ---- 2b. crowding -----------------------------------------------------
     # The 2026-08-19 production dissect showed the anchor corruption is
