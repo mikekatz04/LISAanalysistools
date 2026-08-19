@@ -30,6 +30,27 @@ class MissingDependency(LISAToolsException):
     pass
 
 
+class BatchNotLaunchable(LISAToolsException):
+    """Raised when a batch of sources cannot be evaluated as ONE launch.
+
+    A REFUSAL IS NOT AN ERROR. It means the geometry of this particular batch
+    is not expressible in one call -- sub-sample alignments that differ across
+    sources, merger times spread wider than a shared evaluation window --
+    and the caller should evaluate the rows separately instead. That is
+    designed control flow, and it is expected wherever a walker cloud is wide
+    (burn-in especially).
+
+    It exists so sampling machinery can catch refusals NARROWLY. Catching
+    bare ``Exception`` around a batched launch conflates "this batch is an
+    awkward shape" with "this code is wrong", and the second one then hides
+    inside the first: a mis-wired call site raising ``TypeError`` looks
+    exactly like a refusal, falls back to the serial loop, returns correct
+    numbers, and the batched path is never exercised again.
+
+    Mirrors :class:`WaveformDomainError`'s purpose for the same reason.
+    """
+
+
 class InvalidInputFile(LISAToolsException):
     """Exception raised when the content of an input file does not match expectations."""
 

@@ -38,6 +38,7 @@ C_inv = 3.3356409519815204e-09
 
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+from ..utils.exceptions import BatchNotLaunchable
 
 # ...existing code...
 def ecliptic_to_icrs(lambda_ecl, beta_ecl):
@@ -537,7 +538,11 @@ class pyResponseTDI(LISAToolsParallelModule):
         # waveform-index offset in the kernel (LISAResponse.cu:557 and :606 are
         # the two use sites) so a per-source shift becomes expressible.
         if _shift.size > 1 and not np.allclose(_shift, _shift[0], rtol=0.0, atol=1e-12):
-            raise ValueError(
+            # BatchNotLaunchable, not ValueError: this is a statement about
+            # THIS batch's geometry, not about the arguments being wrong, and
+            # callers need to distinguish it from a genuine failure so they can
+            # fall back to per-source evaluation without masking real bugs.
+            raise BatchNotLaunchable(
                 "pyResponseTDI batched projections need one shared sub-sample "
                 "alignment: t0_shift_to_data must be identical across the "
                 f"batch, got spread {float(_shift.max() - _shift.min()):.6e} s "

@@ -15,3 +15,4 @@ from .waveform import (  # noqa: F401
     PhenomTHMTDIOnFlyWaveform,
     PhenomTHMTDIWaveform,
 )
+from .gridaligned import GridAlignedPhenomTHMTDIWaveform  # noqa: F401
