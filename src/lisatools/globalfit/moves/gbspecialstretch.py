@@ -7151,21 +7151,67 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             v5=int(g0["v5"]),
         )
 
-        # ---- subset: worst anchor offenders + random fill ------------------
+        # ---- known-offender targeting (GB_SIGHET_SWEEP_F0) -----------------
+        # Comma list of frequencies in Hz. When set, a block only SPENDS one
+        # of its GB_SIGHET_SWEEP_BLOCKS budget if it actually CONTAINS a
+        # source within GB_SIGHET_SWEEP_F0_TOL_HZ of a target -- the sweep
+        # exists to interrogate the known corrupted-reference population
+        # (band 10 @ 1.9727 mHz et al.), and blocks are per-unit, so the
+        # first blocks to run may not cover those bands at all. Matched
+        # sources are FORCED into the subset ahead of the worst-offender
+        # ranking.
         n_src = int(curr.shape[0])
+        f0_all = _to_numpy(self.transform_fn.both_transforms(
+            curr, xp=cp,
+            leaf_inds=(l_i if self._per_leaf_fill else None))[:, 1])
+        t_idx = np.array([], dtype=int)
+        targ = os.environ.get("GB_SIGHET_SWEEP_F0", "").strip()
+        if targ:
+            try:
+                t_f0 = np.asarray(
+                    [float(x) for x in targ.split(",") if x.strip()])
+            except ValueError:
+                logger.warning("%s: [GB_SWEEP] GB_SIGHET_SWEEP_F0=%r is not "
+                               "a comma list of Hz; ignoring.",
+                               self.name, targ)
+                t_f0 = np.array([])
+            if t_f0.size:
+                tol = float(os.environ.get(
+                    "GB_SIGHET_SWEEP_F0_TOL_HZ", "2e-6"))
+                t_idx = np.where(np.abs(
+                    f0_all[:, None] - t_f0[None, :]).min(axis=1) <= tol)[0]
+                if not t_idx.size:
+                    # Refund the block budget: wait for a block that holds a
+                    # target instead of burning the sweep on bystanders.
+                    self._sweep_count = kblk
+                    logger.info("%s: [GB_SWEEP] no GB_SIGHET_SWEEP_F0 target "
+                                "in this block; deferring.", self.name)
+                    return
+                logger.info("%s: [GB_SWEEP] %d target source(s) in block "
+                            "(f0: %s)", self.name, t_idx.size,
+                            np.array2string(f0_all[t_idx], precision=6,
+                                            threshold=8))
+
+        # ---- subset: forced targets + worst anchor offenders + random ------
         n_max = int(os.environ.get("GB_SIGHET_SWEEP_MAX_SRC", "512"))
         eps0 = cp.abs(het0_base - ex0) if het0_base is not None else None
         if n_src <= n_max:
             sub = np.arange(n_src)
-        elif eps0 is None:
-            sub = np.sort(np.random.default_rng(0).choice(
-                n_src, size=n_max, replace=False))
         else:
-            worst = _to_numpy(cp.argsort(eps0))[::-1][:n_max // 2]
-            rng = np.random.default_rng(0)
-            rest = np.setdiff1d(np.arange(n_src), worst)
-            fill = rng.choice(rest, size=n_max - worst.size, replace=False)
-            sub = np.sort(np.concatenate([worst, fill]))
+            order = [t_idx]
+            if eps0 is not None:
+                order.append(_to_numpy(cp.argsort(eps0))[::-1])
+            order.append(np.random.default_rng(0).permutation(n_src))
+            ranked = np.concatenate(order)
+            _seen = np.zeros(n_src, dtype=bool)
+            sub = []
+            for i in ranked:
+                if not _seen[i]:
+                    _seen[i] = True
+                    sub.append(i)
+                if len(sub) >= n_max:
+                    break
+            sub = np.sort(np.asarray(sub, dtype=int))
         sub_d = cp.asarray(sub)
         curr_s = curr[sub_d]
         slots_s = slots[sub_d]

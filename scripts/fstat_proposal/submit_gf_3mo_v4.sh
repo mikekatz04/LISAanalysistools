@@ -409,6 +409,54 @@ export GB_SIGHET_DRIFT_CHECK=1
 # accuracy?" question is answerable without re-running. ~0.32 s/propose.
 export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
 
+# ============================================================================
+# SIG-HET DISSECTION + IN-RUN ENGINE SWEEP (2026-08-19, LAT 749af2e1).
+# Motivated by the 13 anchor checks in this run's own log: ll_het ~ -8e3 vs
+# ll_exact ~ +3e2 AT THE EXPANSION POINT (r=1, frozen residual) for the SAME
+# recurring sources (band 10 @ 1.9727 mHz x6, band 17 @ 2.9603 x3, band 5 @
+# 1.3181 x2) -- corrupted references, not accuracy noise, and nothing a
+# resolution knob can touch. Both riders live inside the tier scan above.
+#
+# DISSECT: one npz per in-model block (first 32) -- the anchor through BOTH
+# engines with the d_h/h_h split (data-side vs template-side attribution),
+# null-depth/masked-row stats from the engine's own c0 stash, and full
+# per-source identity. ~1 extra batched call per block.
+#
+# SWEEP: at the first 2 blocks, every arm below is rebuilt around the SAME
+# underlying chunked comp, re-anchored on the SAME frozen residual and
+# scored on the SAME 512-source subset (worst anchor offenders + random
+# fill -- the band-10 population is guaranteed in-sample) against ONE shared
+# exact side. Arms differ by exactly one thing: the engine config. Base
+# (production) config is auto-prepended as the control. A failed arm logs
+# and the loop continues; the production engine is restored no matter what,
+# and the run then continues normally. Budget: ~10 arms x (make_reference
+# on 512 refs + 7 batched scores) -- minutes, twice.
+#
+# Read the verdict locally once "[GB_SWEEP] wrote" appears (the dumps ride
+# home in the store-dir zip):
+#   python scripts/gb_chunked_het/gb_sighet_dissect_report.py \
+#       <unzipped>/gf_prod_3mo_v4/dissect
+# Anchor |dll| CANNOT move under a resolution-only knob: flat across the nt
+# arms + moving under node arms = deep-null node fit; flat across ALL arms
+# = the reference build itself (then the dissect d_h/h_h split names which
+# half). v5=0 differing from base = v5-specific; v5=2 is the flat-carve
+# control arm.
+export GB_SIGHET_DISSECT=${STORE_DIR}/dissect
+export GB_SIGHET_SWEEP="nt_layer=270;nt_layer=135;v3_n_nodes=32;v3_n_nodes=128;v4_knots=64;v4_knots=256;v5=0;v5=2;m_half=4;n_sparse_fd=2048"
+# THE KNOWN BAD SOURCES, targeted BY FREQUENCY: a block only spends sweep
+# budget if it contains one of these (matched sources are forced into the
+# subset), so the corrupted-reference population is interrogated directly
+# rather than only if it happens to land in the first blocks. The list =
+# this run's own recurring anchor/AUDIT offenders plus the two flagged
+# high-f tier offenders (12.27 mHz, and the 20.38 mHz flagship).
+export GB_SIGHET_SWEEP_F0="1.9727e-3,2.9603e-3,1.3181e-3,1.6357e-3,2.2107e-3,4.2389e-3,5.1677e-3,1.2269e-2,2.0381e-2"
+# 4 qualifying blocks: the low-f targets cluster in nearby bands (one or
+# two units) while the high-f pair lives in different units entirely.
+export GB_SIGHET_SWEEP_BLOCKS=4
+# defaults, pinned for the run record:
+export GB_SIGHET_DISSECT_MAX=32
+export GB_SIGHET_SWEEP_MAX_SRC=512
+
 export SIGHET_INFOMAT=1
 export GB_INFOMAT_PER_BLOCK=1
 # Countable-only F-stat center precompute + lookup-miss fallback rides
