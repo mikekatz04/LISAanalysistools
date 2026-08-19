@@ -74,6 +74,10 @@ GAL_P = (3.74443460e-44, 5.29868210e-02, 9.26921788e-01, 2.75873152e-03,
          5.70634746e+03)
 
 
+def _to_np(a):
+    return np.asarray(a.get() if hasattr(a, "get") else a)
+
+
 class Holder:
     """Duck-typed buffer: exactly what setup_in_model reads.
 
@@ -87,7 +91,8 @@ class Holder:
             xp.asarray(data, dtype=xp.float64)).ravel()]
         self.linear_psd_arr = [xp.ascontiguousarray(
             xp.asarray(invc, dtype=xp.float64)).ravel()]
-        self._n = int(np.asarray(data).shape[0])
+        # .shape via the array itself -- np.asarray on a cupy array raises
+        self._n = int(xp.asarray(data).shape[0])
         if band_slab_Nf is not None:
             self.band_slab_Nf = int(band_slab_Nf)
             self.slab_min_f = xp.asarray(np.asarray(slab_min_f, dtype=np.int32))
@@ -224,14 +229,10 @@ def probe_one(cfg, f0_hz, backend="cpu"):
     eng.get_ll(holder, params.reshape(1, 9),
                data_index=np.array([0]), noise_index=np.array([0]),
                N_vals=np.array([1024]), waveform_kwargs={})
-    hh_sig = float(np.asarray(eng.h_h_out).real.ravel()[0])
-    dh_sig = float(np.asarray(eng.d_h_out).real.ravel()[0])
+    hh_sig = float(_to_np(eng.h_h_out).real.ravel()[0])
+    dh_sig = float(_to_np(eng.d_h_out).real.ravel()[0])
     eng.clear_in_model()
     return hh_sig, hh_direct, dh_sig
-
-
-def _to_np(a):
-    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 def probe_slab(cfg, f0_hz, pair=False):

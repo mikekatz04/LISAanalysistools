@@ -64,7 +64,13 @@ YR = 31558149.763545603
 
 
 def load_real_wdm(backend="cpu"):
-    """First 3 months of the real GB galaxy stream, on the production grid."""
+    """First 3 months of the real GB galaxy stream, on the production grid.
+
+    The TD->WDM transform always runs on a CPU twin of the settings (the TD
+    stream is a host numpy array; mixing it into a CUDA-backend domain
+    raises inside the fft). The returned WDMSettings is on the REQUESTED
+    backend for the comp/engine construction -- identical grid, different
+    residency."""
     Nf, Nt, dt = 1440, 2160, 2.5
     N = Nf * Nt
     fp = sorted(glob.glob(f"{MOJ}/data/GB/L1/*.h5"))[0]
@@ -73,14 +79,16 @@ def load_real_wdm(backend="cpu"):
         td = np.stack([np.asarray(f["tdis"][k][:N], dtype=float)
                        for k in ("X2", "Y2", "Z2")])
     wavelet_duration = Nf * dt
-    wdm = WDMSettings(Nf, Nt, dt, t0=t0,
-                      min_freq=1e-4, max_freq=2.5e-2,
-                      min_time=20 * wavelet_duration,
-                      max_time=(Nt - 20) * wavelet_duration,
-                      force_backend=backend)
-    td_set = TDSettings(N, dt, force_backend=backend)
-    sig = TDSignal(td, settings=td_set).transform(wdm, window=None)
-    arr = np.asarray(sig.data_arr if hasattr(sig, "data_arr") else sig[:])
+    kw = dict(t0=t0, min_freq=1e-4, max_freq=2.5e-2,
+              min_time=20 * wavelet_duration,
+              max_time=(Nt - 20) * wavelet_duration)
+    wdm_cpu = WDMSettings(Nf, Nt, dt, force_backend="cpu", **kw)
+    td_set = TDSettings(N, dt, force_backend="cpu")
+    sig = TDSignal(td, settings=td_set).transform(wdm_cpu, window=None)
+    _a = sig.data_arr if hasattr(sig, "data_arr") else sig[:]
+    arr = np.asarray(_a.get() if hasattr(_a, "get") else _a)
+    wdm = (wdm_cpu if backend == "cpu"
+           else WDMSettings(Nf, Nt, dt, force_backend=backend, **kw))
     return wdm, arr, t0
 
 
