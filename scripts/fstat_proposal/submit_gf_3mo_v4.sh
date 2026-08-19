@@ -455,6 +455,22 @@ export GB_SIGHET_TIER_SCAN=""
 #   grep "sig-het engine resolved" ...  (tukey_alpha=0.01)
 # and the anchor/AUDIT high-f values should move 0.984 -> ~1.000.
 export SIGHET_TUKEY_ALPHA=0.01
+# THE LOW-F h_h CORRUPTION FIX (2026-08-19, root-caused on the laptop from
+# this run's own dissect captures). Mechanism: the make_reference spline
+# reconstruction (n_cp_build control points) matches each channel to ~0.1%
+# but its per-channel errors are INCOHERENT across X/Y/Z, so the GW
+# template's X+Y+Z null cancellation (true null power ~1e-10 of total) is
+# broken at ~1e-5 -- and the near-singular low-f XYZ invC amplifies
+# exactly that direction (null eigenvalue 54-7500x the differential ones).
+# Result: anchor h_h inflated up to 27x (d_h CLEAN -- the measured v4
+# signature), worst for edge-on sources at low f. The AUTO n_cp law
+# (4-day spacing -> 32 nodes at 3 months) was set by a phase criterion
+# that never saw the null direction. Verified on the production grid
+# (gb_sighet_bfold_gpu_probe.py): 32 -> 256 nodes takes the scored anchor
+# from max |log hh ratio| 0.31 to 1.5e-4 at +2.6% setup cost. 256 = the
+# shared-arena ceiling; pinned explicitly (the GBGPU AUTO default now
+# also resolves here, this is the belt to that suspenders).
+export SIGHET_N_CP=256
 # UNIFORM EDGE EXCLUSION (user ruling 2026-08-19): bringing the domain
 # [min_time, max_time] in removes edge-created error in EVERY likelihood
 # at once (all WDMSettings inherit the one domain; min/max_freq still vary

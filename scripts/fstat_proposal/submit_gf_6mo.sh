@@ -103,6 +103,16 @@ export GB_MAX_FREQ=2.2e-2
 # as the validated 3-mo production grid (nt_layer 60 @ Nt 2160). -1 = AUTO
 # (~35 h prescription) is the alternative if this ever snaps.
 export SIGHET_NT_LAYER=120
+# SIG-HET NULL-COHERENCE FIX (2026-08-19, see submit_gf_3mo_v4.sh for the
+# full story): the reference reconstruction's per-channel spline errors
+# break the X+Y+Z null cancellation and the near-singular low-f invC
+# amplifies it into the measured anchor h_h inflation. 256 nodes = the
+# shared-arena ceiling; at THIS Tobs that is a COARSER effective spacing
+# than the 0.35-day criterion verified at 3 months, so re-verify with
+# gb_sighet_bfold_gpu_probe.py on this grid before trusting low-f h_h --
+# the durable fix for long Tobs is the amp/phase redesign
+# (project_signal_het_amp_phase_redesign).
+export SIGHET_N_CP=256
 # UNIFORM EDGE EXCLUSION (user ruling 2026-08-19): the WDM time crop is set
 # by EDGE PHYSICS (taper ramps, wavelet filter width, reconstruction
 # transients) -- a CONSTANT number of layers (1 layer = 1 h on this grid),

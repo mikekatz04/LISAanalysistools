@@ -309,6 +309,15 @@ _SIGHET_REPLICA_KNOBS = {
     "v4_knots": "v4_knots",
     "v4_band": "v4_band",
     "v5": "v5",
+    # tukey_alpha was MISSING here until 2026-08-19: the replica rebuild
+    # then fell to for_band_engine's None default = legacy inheritance from
+    # the chunked delegate's resolved per-chunk alpha (0.05), which the
+    # EC>=taper guard clamps to 2*ind_min_t/Nt -- so the NON-PRIMARY
+    # device's engine scored with a ~2x wider reference taper than the
+    # primary's pinned SIGHET_TUKEY_ALPHA. A per-device likelihood config
+    # divergence, and a direct violation of the Tukey equivalence policy
+    # (equal alphas everywhere, never knob-resolved).
+    "tukey_alpha": "tukey_alpha",
 }
 
 
