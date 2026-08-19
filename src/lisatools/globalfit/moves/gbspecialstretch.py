@@ -10557,7 +10557,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             wdm_band_slab_layers=self.wdm_band_slab_layers,
             wdm_slab_guard_layers=self.wdm_slab_guard_layers,
             waveform_kwargs=self.waveform_kwargs,
-            rj_prop=False, keep_all_inds=False,
+            # None = no rj proposal (the BandSorter sentinel; its guard is
+            # ``rj_prop is not None``, so False would be TREATED AS a
+            # proposal object and crash at rj_prop.logpdf -- which it did,
+            # first time this path ever executed: every launch since the
+            # GB-free redesign (85b59671) hit the epoch-0 grid cache).
+            rj_prop=None, keep_all_inds=False,
         )
         sel = dict(temp=0, walker=int(walker_ref), apply_inds=True)
         n_live = int(sorter.get_subset_bool(**sel).sum())
