@@ -441,26 +441,29 @@ export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
 # = the reference build itself (then the dissect d_h/h_h split names which
 # half). v5=0 differing from base = v5-specific; v5=2 is the flat-carve
 # control arm.
+# Sig-het reference-build taper, PINNED (2026-08-19 Tukey rulings: equal
+# alphas across chunked/sig-het/TD->FD; error-created edges REMOVED by the
+# [min_time, max_time] crop). 0.01 -> taper 11 layers + 8 margin = 19 <=
+# crop 20: the build-time edge-exclusion guard passes with ONE layer to
+# spare. The old inherited 0.05 tapered 54 layers against the 20-layer
+# crop -- the flat ~1% h_h bias that was the dissect's high-f 0.984,
+# fixed in GBGPU 88b278d / LAT 7e9c4c65+454d04bd. Verify on resume:
+#   grep "sig-het engine resolved" ...  (tukey_alpha=0.01)
+# and the anchor/AUDIT high-f values should move 0.984 -> ~1.000.
+export SIGHET_TUKEY_ALPHA=0.01
+
 export GB_SIGHET_DISSECT=${STORE_DIR}/dissect
-# SWEEP v2 (2026-08-19, after the first dissect verdict). The first sweep
-# settled the CANDIDATE side: anchor error IDENTICAL across nt_layer
-# 60/135/270, nodes 32/64/128, knots 64/128/256, v4/v5/v5-control -- and
-# the dissect attributed it 92% h_h-dominated (template/reference side),
-# null-INDEPENDENT. The reference build runs through the CHUNKED-HET
-# DELEGATE (user ruling: interrogate ITS settings), which every first-sweep
-# arm shared -- so these arms now rebuild the delegate itself (c_<CtorKwarg>
-# overrides: production Nt_sub=256 N_sparse=256 N_cp_sig=48 N_cp_orbit=32)
-# plus the two reference-side engine knobs whose arms OOM'd on the leak
-# (fixed in a096d149): n_sparse_fd (build FD density, prod 1024) and m_half
-# (m-layer coverage, prod 2). nt_layer=270 and v5=0 stay as vs-base
-# sentinels for the report's scoring-path check.
-export GB_SIGHET_SWEEP="nt_layer=270;v5=0;n_sparse_fd=512;n_sparse_fd=2048;m_half=1;m_half=4;c_N_sparse=512;c_N_sparse=128;c_Nt_sub=512;c_N_cp_sig=96"
-# THE KNOWN BAD SOURCES, targeted BY FREQUENCY: a block only spends sweep
-# budget if it contains one of these (matched sources are forced into the
-# subset), so the corrupted-reference population is interrogated directly
-# rather than only if it happens to land in the first blocks. The list =
-# this run's own recurring anchor/AUDIT offenders plus the two flagged
-# high-f tier offenders (12.27 mHz, and the 20.38 mHz flagship).
+# SWEEP RETIRED (2026-08-19, after 8 swept blocks): every arm answered.
+# nt_layer=270 differs by 6e-8 (round-off -- resolution DEAD); m_half by
+# 1e-4/1e-10 (m-window irrelevant); v5=0/v5=2 bitwise (the v4/v5
+# bit-identity holding); c_Nt_sub/c_N_cp_sig bitwise (never enter the
+# reference build); n_sparse_fd=2048 device-clamped; n_sparse_fd=512
+# negligible; c_N_sparse=512 anomalous (uniform 2x -- suspected
+# delegate-rebuild side effect in the sweep harness, NOT an engine
+# result). The flat ~1% component was root-caused OFF-engine (tukey
+# semantics, fixed); the remaining low-f inflation is being chased by the
+# CUDA probes + the dissect below, which stays ON.
+export GB_SIGHET_SWEEP=""
 export GB_SIGHET_SWEEP_F0="1.9727e-3,2.9603e-3,1.3181e-3,1.6357e-3,2.2107e-3,4.2389e-3,5.1677e-3,1.2269e-2,2.0381e-2"
 # 4 qualifying blocks: the low-f targets cluster in nearby bands (one or
 # two units) while the high-f pair lives in different units entirely.
