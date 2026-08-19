@@ -58,7 +58,8 @@ import numpy as np
 from lisatools.detector import ESAOrbits, DefaultOrbits
 from lisatools.utils.constants import YRSID_SI
 from lisatools import detector as lisa_models
-from lisatools.sensitivity import get_sensitivity, A2TDISens
+from lisatools.sensitivity import (get_sensitivity, A2TDISens, X2TDISens,
+                                   XY2TDISens)
 from lisatools.stochastic import HyperbolicTangentGalacticForeground as HTGF
 from lisatools.domains import WDMSettings
 
@@ -76,17 +77,19 @@ GAL_P = (3.74443460e-44, 5.29868210e-02, 9.26921788e-01, 2.75873152e-03,
 class Holder:
     """Duck-typed full-band buffer: exactly what setup_in_model reads."""
 
-    def __init__(self, data, invc):
+    def __init__(self, data, invc, xp=np):
         # data (1, 3, F, T) float; invc (1, 3, 3, F, T) float
-        self.linear_data_arr = [np.ascontiguousarray(data, dtype=float).ravel()]
-        self.linear_psd_arr = [np.ascontiguousarray(invc, dtype=float).ravel()]
+        self.linear_data_arr = [xp.ascontiguousarray(
+            xp.asarray(data, dtype=xp.float64)).ravel()]
+        self.linear_psd_arr = [xp.ascontiguousarray(
+            xp.asarray(invc, dtype=xp.float64)).ravel()]
 
     def __len__(self):
         return 1
 
 
 def build_config(tag, *, prod_grid, prod_epoch, prod_caches, prod_npad,
-                 fg_invc, backend="cpu"):
+                 fg_invc, xyz_csd=False, backend="cpu"):
     if prod_grid:
         Nf, Nt, dt = 1440, 2160, 2.5
         min_freq, max_freq = 1e-4, 2.5e-2
@@ -136,10 +139,34 @@ def build_config(tag, *, prod_grid, prod_epoch, prod_caches, prod_npad,
     kw = dict(model=model)
     if fg_invc:
         kw.update(stochastic_params=tuple(GAL_P), stochastic_function=HTGF)
-    Sn = np.asarray(get_sensitivity(f_rows, sens_fn=A2TDISens, **kw), float)
     invc = np.zeros((1, 3, 3, F, T))
-    for c in range(3):
-        invc[0, c, c] = (1.0 / Sn)[:, None]
+    if xyz_csd:
+        # THE PRODUCTION NOISE STRUCTURE: full XYZ cross-channel covariance.
+        # At low f the XYZ channels are strongly correlated (the X+Y+Z null
+        # combination), C(f) is near-singular, and invC's OFF-DIAGONALS blow
+        # up toward the band floor -- the same smooth shape as the measured
+        # h_h inflation. A fold that mishandles the c1 != c2 terms errs in
+        # proportion to |invC_offdiag / invC_diag|, i.e. exactly this curve.
+        Cxx = np.asarray(get_sensitivity(f_rows, sens_fn=X2TDISens, **kw),
+                         float)
+        Cxy = np.asarray(get_sensitivity(f_rows, sens_fn=XY2TDISens, **kw),
+                         float)
+        C = np.empty((F, 3, 3))
+        for a in range(3):
+            for b in range(3):
+                C[:, a, b] = Cxx if a == b else Cxy
+        invC_rows = np.linalg.inv(C)                      # (F, 3, 3)
+        odf = np.abs(invC_rows[:, 0, 1]) / np.abs(invC_rows[:, 0, 0])
+        print(f"      [{tag}] |invC_xy/invC_xx| at row 0/mid/last: "
+              f"{odf[0]:.3f} / {odf[F//2]:.3f} / {odf[-1]:.3f}")
+        for a in range(3):
+            for b in range(3):
+                invc[0, a, b] = invC_rows[:, a, b][:, None]
+    else:
+        Sn = np.asarray(get_sensitivity(f_rows, sens_fn=A2TDISens, **kw),
+                        float)
+        for c in range(3):
+            invc[0, c, c] = (1.0 / Sn)[:, None]
 
     return dict(tag=tag, wdm=wdm_set, chunked=chunked, invc=invc,
                 nt_layer=nt_layer, F=F, T=T)
@@ -147,21 +174,26 @@ def build_config(tag, *, prod_grid, prod_epoch, prod_caches, prod_npad,
 
 def probe_one(cfg, f0_hz, backend="cpu"):
     wdm, chunked = cfg["wdm"], cfg["chunked"]
+    # GPU axis: production ran the compiled CUDA v5 kernel; the CPU probe
+    # exercises the CPU build. PROBE_BACKEND=cuda12x/cuda13x runs the SAME
+    # ladder through the compiled GPU kernels -- the axis a laptop cannot
+    # reach, and (after every CPU config came back clean) a prime suspect.
+    xp = chunked.xp
     params = np.array([1e-22, f0_hz, 1e-16, 0.0, 1.0, 0.7, 0.5, 1.2, 0.3])
 
     # 1. the validated template on the full grid, cropped active
-    full = np.zeros((3, wdm.Nf, wdm.Nt), dtype=float)
+    full = xp.zeros((3, wdm.Nf, wdm.Nt), dtype=xp.float64)
     chunked.fill_global_wdm(params.reshape(1, 9), full,
                             convert_to_ra_dec=False, factors=None)
     h = full[:, wdm.ind_min_f: wdm.ind_max_f + 1,
              wdm.ind_min_t: wdm.ind_max_t + 1]
     assert h.shape == (3, cfg["F"], cfg["T"]), (h.shape, cfg["F"], cfg["T"])
 
-    invc = cfg["invc"]
-    holder = Holder(h[None], invc)
+    invc = xp.asarray(cfg["invc"])
+    holder = Holder(h[None], invc, xp)
 
     # 2. the untainted reference: direct pixel sum with the SAME invC
-    hh_direct = float(np.einsum("cft,dft,cdft->", h, h, invc[0]))
+    hh_direct = float(xp.einsum("cft,dft,cdft->", h, h, invc[0]))
 
     # 3. sig-het at the anchor through the production entry points
     sig = GBSignalHetComputations.for_band_engine(
@@ -200,6 +232,8 @@ def main():
                          prod_npad=True, fg_invc=False)),
         ("5 +FGINVC", dict(prod_grid=True, prod_epoch=True, prod_caches=True,
                            prod_npad=True, fg_invc=True)),
+        ("6 +XYZCSD", dict(prod_grid=True, prod_epoch=True, prod_caches=True,
+                           prod_npad=True, fg_invc=True, xyz_csd=True)),
     ]
 
     print(f"{'config':>10} " + "".join(f"{f*1e3:>9.2f}m" for f in f0_list)
