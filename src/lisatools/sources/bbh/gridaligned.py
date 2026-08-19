@@ -13,6 +13,7 @@ import numpy as np
 
 from ...utils.constants import *
 from .waveform import PhenomTHMTDIWaveform, jax, jnp
+from ...utils.exceptions import BatchNotLaunchable
 
 __all__ = ["GridAlignedPhenomTHMTDIWaveform"]
 
@@ -201,7 +202,11 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
 
         if not onset_ramp:
             if int(xp.max(num_pad)) > 0:
-                raise ValueError(
+                # A geometry refusal, not bad arguments: this batch's rows
+                # produced unequal valid lengths. Typed so the container can
+                # fall back to per-row evaluation instead of dying -- the
+                # serial loop handles this case fine.
+                raise BatchNotLaunchable(
                     "onset_ramp=False requires every source in the batch to "
                     "produce the same number of valid samples (num_pad == 0 "
                     f"for all); got max num_pad = {int(xp.max(num_pad))}. "

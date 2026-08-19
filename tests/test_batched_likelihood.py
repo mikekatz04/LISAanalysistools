@@ -142,6 +142,51 @@ class BatchedEquivalenceTest(unittest.TestCase):
         self._assert_batched_actually_ran()
         np.testing.assert_allclose(chunked, whole, rtol=0, atol=0)
 
+    def test_chunk_remainder_of_one_row(self):
+        """A one-row remainder must not crash. It is the default case.
+
+        Generators commonly squeeze a length-1 batch axis -- pyResponseTDI
+        does (``return raw[0] if self.batch_size == 1 else raw``) while the
+        time grid keeps its leading axis, so a one-row chunk arrives with
+        times (1, N) and channels (nchannels, N). Iterating the CHANNEL axis
+        then indexed times[1]: IndexError, which is not a BatchNotLaunchable
+        and so was not caught by the fallback -- it killed the call.
+
+        Any batch_max_size that does not divide the walker count produces
+        exactly this chunk. The earlier chunking test used 8 rows with
+        batch_max_size=3 (3+3+2) and never left a remainder of one, which is
+        why it missed this.
+        """
+        for n, step in ((3, 2), (7, 3), (7, 2), (5, 4), (4, 1), (1, 1)):
+            with self.subTest(n=n, step=step):
+                aca, _ = _make()
+                x = _params(n)
+                aca.batch_evaluation = False
+                serial = aca.eryn_likelihood_wrap(x) if n > 1 else np.atleast_1d(
+                    aca.eryn_likelihood_wrap(x[0])
+                )
+                aca.batch_evaluation = True
+                aca.batch_max_size = step
+                batched = np.atleast_1d(aca.batched_signal_likelihood(x))
+                self.assertEqual(aca.n_batch_fallbacks, 0)
+                self.assertEqual(batched.shape, (n,))
+                np.testing.assert_allclose(batched, serial, rtol=0, atol=1e-9)
+
+    def test_include_psd_info_kwarg_is_accepted(self):
+        """The serial route accepts it; the batched route must not collide."""
+        x = _params(4)
+        out = self.aca.batched_signal_likelihood(
+            x, source_only=False, include_psd_info=True
+        )
+        self._assert_batched_actually_ran()
+        self.assertEqual(out.shape, (4,))
+
+    def test_include_psd_info_contradiction_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.aca.batched_signal_likelihood(
+                _params(4), source_only=True, include_psd_info=True
+            )
+
     def test_batch_max_size_is_a_constructor_kwarg(self):
         aca, _ = _make(batch_max_size=2, batch_evaluation=True)
         self.assertEqual(aca.batch_max_size, 2)

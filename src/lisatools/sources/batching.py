@@ -72,12 +72,34 @@ class BatchedDomainSignalGen:
                 times_in=times, signal_in=channels
             )
 
+        # THE SOURCE COUNT COMES FROM ``times``, NOT FROM ``channels``.
+        # pyResponseTDI squeezes its batch axis when batch_size == 1
+        # (``return raw[0] if self.batch_size == 1 else raw``), while
+        # _apply_response keeps a (1, N) time grid because its
+        # ``single_source = isinstance(ra, float)`` test is False for a
+        # length-1 ARRAY. So a one-row batch arrives as
+        # times (1, N) + channels (nchannels, N) -- the two disagree about
+        # whether a leading axis exists.
+        #
+        # Looping ``range(channels.shape[0])`` therefore ran nchannels times
+        # for a single source and indexed times[1]: IndexError, which is not
+        # a BatchNotLaunchable and so was NOT caught by the container's
+        # fallback -- it killed the sampler call outright. A one-row chunk is
+        # not exotic: any ``batch_max_size`` that does not divide the walker
+        # count produces one as the remainder.
+        n_src = int(times.shape[0])
+        squeezed = channels.ndim == times.ndim
+
         doms = [
             self.wave_gen._td_to_output_domain(
-                times_in=times[i], signal_in=channels[i]
+                times_in=times[i],
+                signal_in=channels if squeezed else channels[i],
             )
-            for i in range(channels.shape[0])
+            for i in range(n_src)
         ]
+        # _stack even for n_src == 1: the caller asked for a batch and the
+        # leading axis is what makes the inner products return a vector of
+        # one rather than a scalar.
         return self._stack(doms)
 
     @staticmethod

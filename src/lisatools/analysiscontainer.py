@@ -412,9 +412,24 @@ class AnalysisContainer:
                 f"batched template build needs 2D params; got ndim={arr.ndim}."
             )
         cols = tuple(arr[:, k] for k in range(arr.shape[1]))
-        return self._to_data_domain(
+        out = self._to_data_domain(
             self._signal_gen(*cols, **waveform_kwargs), self._signal_gen
         )
+
+        # A ONE-ROW CHUNK IS NOT A SCALAR CALL. Generators commonly squeeze a
+        # length-1 batch axis (pyResponseTDI does), so a single-row chunk
+        # comes back unbatched. Restore the leading axis rather than let the
+        # batched guard reject it: any ``batch_max_size`` that does not divide
+        # the walker count produces exactly this chunk as its remainder, and
+        # rejecting it turned a memory knob into a crash.
+        if arr.shape[0] == 1 and not bool(getattr(out, "is_batched", False)):
+            raw = getattr(out, "arr", None)
+            if raw is not None:
+                xp = get_array_module(raw)
+                out = out.settings.associated_class(
+                    xp.expand_dims(raw, 0), out.settings
+                )
+        return out
 
     def build_template(
         self,
@@ -1247,6 +1262,18 @@ class AnalysisContainer:
             raise ValueError(
                 f"batch_max_size must be >= 1; got {self.batch_max_size!r}"
             )
+
+        # Consume include_psd_info the way _calculate_signal_operation does,
+        # instead of colliding with the explicit one below. The serial route
+        # accepts this kwarg; without this the batched route raised
+        # "got multiple values for keyword argument".
+        if "include_psd_info" in kwargs:
+            supplied = kwargs.pop("include_psd_info")
+            if bool(supplied) != (not source_only):
+                raise ValueError(
+                    f"include_psd_info={supplied!r} contradicts "
+                    f"source_only={source_only!r}; they are the same switch."
+                )
 
         waveform_kwargs = waveform_kwargs or {}
         pieces = []

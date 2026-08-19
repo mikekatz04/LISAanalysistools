@@ -16,6 +16,7 @@ from ...domains import DomainSettingsBase
 from ...utils.constants import *
 from ...jax.jaxbase import JaxBase
 from ..waveformbase import SNRWaveform, TDPyResponseWaveformBase, TDTDIOnFlyWaveformBase
+from ...utils.exceptions import BatchNotLaunchable
 
 try:
     import jax
@@ -605,7 +606,11 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             # source needs padding. Refuse rather than silently splice
             # unmasked waveform into the template.
             if int(self.xp.max(num_pad)) > 0:
-                raise ValueError(
+                # A geometry refusal, not bad arguments: this batch's rows
+                # produced unequal valid lengths. Typed so the container can
+                # fall back to per-row evaluation instead of dying -- the
+                # serial loop handles this case fine.
+                raise BatchNotLaunchable(
                     "onset_ramp=False requires every source in the batch to "
                     "produce the same number of valid samples (num_pad == 0 "
                     f"for all); got max num_pad = {int(self.xp.max(num_pad))}. "
