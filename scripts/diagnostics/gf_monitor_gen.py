@@ -370,7 +370,10 @@ fig.tight_layout(rect=[0, 0, 1, 0.93])
 fig_b64(fig, "f11_psd")
 
 try:
-    from lisatools.sensitivity import get_sensitivity, A2TDISens
+    # XYZ EVERYWHERE (user ruling 2026-08-19): the run analyses X/Y/Z, so
+    # every channel-PSD display uses the X channel and X2TDISens -- no AET
+    # projections anywhere on this page.
+    from lisatools.sensitivity import get_sensitivity, X2TDISens
     from lisatools import detector as lisa_models
     from lisatools.stochastic import (
         HyperbolicTangentGalacticForeground as HTGF)
@@ -382,9 +385,9 @@ try:
         model = lisa_models.LISAModel(soms ** 2, sa ** 2,
                                       lisa_models.DefaultOrbits(), "sampled")
         if galp is None:
-            return get_sensitivity(fr, sens_fn=A2TDISens, model=model,
+            return get_sensitivity(fr, sens_fn=X2TDISens, model=model,
                                    stochastic_params=())
-        return get_sensitivity(fr, sens_fn=A2TDISens, model=model,
+        return get_sensitivity(fr, sens_fn=X2TDISens, model=model,
                                stochastic_params=tuple(galp),
                                stochastic_function=HTGF)
 
@@ -402,7 +405,7 @@ try:
             label="instrument only (latest)")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("Frequency [Hz]")
-    ax.set_ylabel("PSD, TDI A channel  [1/Hz]")
+    ax.set_ylabel("PSD, TDI X channel  [1/Hz]")
     ax.legend(fontsize=8, loc="upper left")
     fig_b64(fig, "f11_fg")
 except Exception as e:
@@ -1348,13 +1351,12 @@ try:
     # lines reads directly as "how much of the galaxy is still unmodelled".
     #
     # ORDINATE, stated because the field is not consistent about it: this is
-    # the PSD of the TDI *A* channel in 1/Hz. It is not a strain amplitude and
-    # it is not an ASD. The run analyses X/Y/Z; A = (Z-X)/sqrt(2) is formed
-    # here purely so the data can be compared against lisatools' A2TDISens
-    # noise model, which is what the likelihood is weighted by.
+    # the PSD of the TDI *X* channel in 1/Hz. It is not a strain amplitude and
+    # it is not an ASD. XYZ everywhere (user ruling 2026-08-19): the run
+    # analyses X/Y/Z, so the display stays in X against the X2TDISens noise
+    # model -- no AET projection is formed anywhere on this page.
     def _AE(x):
-        return ((x[2] - x[0]) / np.sqrt(2.0),
-                (x[0] - 2 * x[1] + x[2]) / np.sqrt(6.0))
+        return (x[0], None)
 
     _W2 = float(np.mean(_win_keep ** 2))
 
@@ -1365,7 +1367,7 @@ try:
     _tA, _ = _AE(_tmpl["gb"] + _tmpl["vgb"])
     _rA, _ = _AE(resid_fd)
 
-    from lisatools.sensitivity import get_sensitivity, A2TDISens
+    from lisatools.sensitivity import get_sensitivity, X2TDISens
     from lisatools import detector as lisa_models
     from lisatools.stochastic import (
         HyperbolicTangentGalacticForeground as _HTGF)
@@ -1374,10 +1376,10 @@ try:
     _lmod = lisa_models.LISAModel(_pm[0] ** 2, _pm[1] ** 2,
                                   lisa_models.DefaultOrbits(), "sampled")
     _fpos = np.maximum(_fr, FDS.df)
-    _Sinst = np.asarray(get_sensitivity(_fpos, sens_fn=A2TDISens,
+    _Sinst = np.asarray(get_sensitivity(_fpos, sens_fn=X2TDISens,
                                         model=_lmod, stochastic_params=()),
                         float)
-    _Ssum = np.asarray(get_sensitivity(_fpos, sens_fn=A2TDISens, model=_lmod,
+    _Ssum = np.asarray(get_sensitivity(_fpos, sens_fn=X2TDISens, model=_lmod,
                                        stochastic_params=tuple(_gm),
                                        stochastic_function=_HTGF), float)
     _Sgal = np.maximum(_Ssum - _Sinst, 1e-60)
@@ -1460,7 +1462,7 @@ try:
                label="galactic foreground")
     ax[0].plot(_fcb, _Ns, color=FG, lw=1.3, ls="--", label="their sum")
     ax[0].set_xscale("log"); ax[0].set_yscale("log")
-    ax[0].set_ylabel("PSD, TDI A channel  [1/Hz]")
+    ax[0].set_ylabel("PSD, TDI X channel  [1/Hz]")
     ax[0].set_ylim(1e-45, 2e-37)
     ax[0].legend(fontsize=8, loc="upper left", ncols=2)
     _sc = ax[1].scatter(_fcb, _rat, c=_adp, cmap="magma", s=11, vmin=-8,
@@ -2940,7 +2942,7 @@ if SCI and not SHOW_MATCH_STATS:
 if DTR:
     _d = DTR
     cap_f1 = (
-        f"Power spectral density of the TDI A channel &mdash; not a strain "
+        f"Power spectral density of the TDI X channel &mdash; not a strain "
         f"amplitude, and not an ASD. The gap between the instrument curve and "
         f"their sum is the galactic confusion, at most a factor "
         f"{_d.get('conf_ratio', float('nan')):.2f} in power, near "
