@@ -144,6 +144,12 @@ def report_one(d, c):
     # neighbors (same temp AND walker -- different walkers' copies of one
     # source are not neighbors of each other) within one WDM layer, and
     # correlate with eps0.
+    # NOTE (2026-08-19): this section is STRUCTURALLY BLIND on production
+    # dumps -- the serial-within-band rule schedules at most ONE source per
+    # band per chain into a block, so same-chain block neighbors cannot
+    # exist and "0 neighbors everywhere" measures the scheduler, not the
+    # galaxy. Kept for non-production dumps; crowding against the FULL model
+    # needs a move-side count. See [2c] for what the npz CAN answer.
     if "temp" in c and "walker" in c:
         f0 = c["f0_hz"]; tw = c["temp"].astype(np.int64) * 1000 + \
             c["walker"].astype(np.int64)
@@ -169,9 +175,64 @@ def report_one(d, c):
             print(f"      {lab:18s} n={m.sum():5d}  eps0 med "
                   f"{pct(eps0[m],50):9.3g}  p90 {pct(eps0[m],90):9.3g}  "
                   f"broken {100*br:5.1f}%")
-        r = np.corrcoef(nnb[ok], np.log10(np.maximum(eps0[ok], 1e-30)))[0, 1]
-        print(f"      corr[n_neighbors, log eps0] = {r:+.3f} "
-              f"(positive = more crowded, bigger error)")
+        if nnb[ok].std() > 0:
+            r = np.corrcoef(nnb[ok],
+                            np.log10(np.maximum(eps0[ok], 1e-30)))[0, 1]
+            print(f"      corr[n_neighbors, log eps0] = {r:+.3f} "
+                  f"(positive = more crowded, bigger error)")
+        else:
+            print("      all sources have 0 block neighbors -- as the "
+                  "serial-within-band schedule REQUIRES; this section "
+                  "cannot see model crowding on a production dump.")
+
+    # ---- 2c. h_h INFLATION vs frequency / layer position ------------------
+    # The 2026-08-19 dump showed hh_het/hh_ex falling monotonically with
+    # frequency across the worst groups (6x @ 2 mHz -> 1.05x @ 5.3 mHz) --
+    # the signature of the reference fold reading invC / window ROWS
+    # MISALIGNED vs the exact path: h_h = sum |c0|^2 invC is strictly
+    # positive, so a row offset inflates it by the local PSD gradient (steep
+    # at low f, flat above ~5 mHz), while the oscillating d_h terms
+    # partially cancel -- exactly the h_h-dominated / d_h-clean attribution.
+    # Two discriminators, both npz-only:
+    #   * inflation vs f0: monotone fall = PSD-slope coupling (alignment);
+    #   * inflation vs the carrier's position WITHIN its WDM layer
+    #     (frac = f0/layer_df mod 1): structure here = the misalignment
+    #     depends on where the carrier sits in the layer, localizing the
+    #     bug to the window/slab row arithmetic.
+    hhr = c["hh_het0"] / np.maximum(c["hh_ex0"], 1e-300)
+    okr = np.isfinite(hhr) & np.isfinite(c["hh_ex0"]) & (c["hh_ex0"] > 0)
+    if okr.sum() > 50:
+        print(f"\n  [2c] h_h INFLATION (hh_het/hh_ex on {okr.sum()} sources)")
+        f0m = c["f0_hz"][okr] * 1e3
+        infl = hhr[okr]
+        print("      by frequency:")
+        eds = [0.5, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.0, 10.0, 22.0]
+        for lo, hi in zip(eds[:-1], eds[1:]):
+            m = (f0m >= lo) & (f0m < hi)
+            if m.sum() < 10:
+                continue
+            print(f"        {lo:5.1f}-{hi:5.1f} mHz  n={m.sum():5d}  "
+                  f"med {np.median(infl[m]):7.3f}  "
+                  f"p90 {np.percentile(infl[m], 90):7.3f}")
+        layer_df = 1.388889e-4
+        frac = np.mod(c["f0_hz"][okr] / layer_df, 1.0)
+        print("      by position within the WDM layer "
+              "(0/1 = layer edge, 0.5 = center):")
+        for lo, hi in ((0.0, .125), (.125, .375), (.375, .625),
+                       (.625, .875), (.875, 1.0)):
+            m = (frac >= lo) & (frac < hi)
+            if m.sum() < 10:
+                continue
+            print(f"        frac {lo:5.3f}-{hi:5.3f}  n={m.sum():5d}  "
+                  f"med {np.median(infl[m]):7.3f}  "
+                  f"p90 {np.percentile(infl[m], 90):7.3f}")
+        lo_f = f0m < 3.0
+        if lo_f.sum() > 20 and (~lo_f).sum() > 20:
+            print(f"      low-f (<3 mHz) med inflation "
+                  f"{np.median(infl[lo_f]):.3f} vs high-f "
+                  f"{np.median(infl[~lo_f]):.3f}  "
+                  "(both ~1 kills the alignment hypothesis; "
+                  "low>>high supports it)")
 
     # ---- 3. displacement ladder -------------------------------------------
     print(f"\n  [3] DISPLACEMENT (delta-vs-delta, per source; cold only)")
