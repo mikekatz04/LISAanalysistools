@@ -362,14 +362,31 @@ void TDI_delay(double *delayed_links, double *input_links, int num_inputs, int n
                     // up front: this needs no knowledge of the link
                     // enumeration, so it cannot fall out of step with
                     // ``Orbits::get_link_ind``.
+                    // BOUND-CHECK BEFORE INDEXING. get_link_ind returns -1 for
+                    // an unrecognised link, and under __CUDACC__ its throw is
+                    // compiled out (Detector.cu), so on GPU a bad link would
+                    // index ltt_cache[-1] -- out of bounds on a thread-local
+                    // array, silently corrupting the frame. Before this cache
+                    // existed the return value was computed and never read, so
+                    // the same bad link was harmless; caching it is what made
+                    // the index live. Fall back to the uncached call, which
+                    // preserves the previous behaviour exactly (CPU still
+                    // throws inside get_link_ind).
                     int link_ind = orbits.get_link_ind(combination_link);
-                    if (!ltt_cached[link_ind])
+                    if (link_ind < 0 || link_ind >= NLINKS)
                     {
-                        ltt_cache[link_ind] =
-                            orbits.get_light_travel_time(t, combination_link);
-                        ltt_cached[link_ind] = true;
+                        delay -= orbits.get_light_travel_time(t, combination_link);
                     }
-                    delay -= ltt_cache[link_ind];
+                    else
+                    {
+                        if (!ltt_cached[link_ind])
+                        {
+                            ltt_cache[link_ind] =
+                                orbits.get_light_travel_time(t, combination_link);
+                            ltt_cached[link_ind] = true;
+                        }
+                        delay -= ltt_cache[link_ind];
+                    }
                 }
             }
 

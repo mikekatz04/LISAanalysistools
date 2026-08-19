@@ -84,6 +84,14 @@ logger = logging.getLogger(__name__)
 #: AnalysisContainerArray.__init__); repeats demote to DEBUG.
 _MULTI_GPU_SPLIT_WARNED = False
 
+#: Keywords handled by :meth:`AnalysisContainer._calculate_signal_operation`
+#: rather than forwarded to ``inner_product``. The batched likelihood path
+#: cannot express these, so it declines any call carrying one.
+_CONTAINER_LEVEL_KWARGS = frozenset(
+    {"transform_fn", "apply_transform", "signal_gen", "per_model_per_signal"}
+)
+
+
 class AnalysisContainer:
     """Combinatorial container that combines sensitivity and data information.
 
@@ -1301,22 +1309,38 @@ class AnalysisContainer:
             # excluded automatically and takes the loop below, byte for byte
             # as before.
             can_batch = (
-                self.batch_evaluation
+                getattr(self, "batch_evaluation", False)
                 and bool(getattr(self._signal_gen, "supports_batch", False))
                 and not self.is_multi_model
                 and x.shape[0] > 1
                 and not args
+                # Container-level keywords are consumed by
+                # ``_calculate_signal_operation`` on the serial route, NOT by
+                # ``template_likelihood``. The batched builder cannot express
+                # them: ``transform_fn`` must be applied before generation,
+                # ``apply_transform`` injected into the generator's kwargs,
+                # and ``signal_gen`` installed via ``_swapped_signal_gen`` --
+                # which _build_batched_template does not enter, so the gate
+                # would also be reading a DIFFERENT generator from the one
+                # building the template. Decline the batch and let the serial
+                # route handle them correctly rather than half-honouring them.
+                and not (_CONTAINER_LEVEL_KWARGS & kwargs.keys())
             )
             if can_batch:
                 try:
                     return self._batched_likelihood(
                         x, source_only=source_only, **kwargs
                     )
-                except (TypeError, AttributeError, KeyError) as exc:
-                    # Not a refusal -- these come from THIS call site being
-                    # wrong (bad kwarg, wrong template type). Swallowing them
-                    # is what let a permanently-broken batched path look like
-                    # a working one, so they surface.
+                except TypeError as exc:
+                    # A refusal is never a TypeError; this means THIS call
+                    # site is wrong (a keyword the callee does not take), and
+                    # swallowing it is what let a permanently-broken batched
+                    # path look like a working one.
+                    #
+                    # Deliberately NOT AttributeError: a generator whose
+                    # __call__ returns something the container cannot consume
+                    # raises that, and falling back is the right answer there
+                    # rather than killing the sampler.
                     raise RuntimeError(
                         f"batched likelihood is mis-wired, not refused: "
                         f"{type(exc).__name__}: {exc}. This is a bug in "

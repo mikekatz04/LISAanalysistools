@@ -138,12 +138,24 @@ def test_unknown_generator_defaults_to_serial():
     )
 
 
-def test_batched_branch_not_taken_for_non_batching_generator(monkeypatch):
-    """A 2D block against a non-batching generator must take the loop.
+class _Tripwire(BaseException):
+    """Deliberately NOT an Exception.
 
-    The batched worker is replaced with a tripwire, so this fails loudly if
-    the gate is ever loosened rather than silently producing (possibly
-    correct) numbers by a route that was not supposed to run.
+    The production fallback in ``eryn_likelihood_wrap`` catches ``Exception``,
+    so a tripwire raised as ``AssertionError`` is swallowed, converted into a
+    serial result, and the test passes whether or not the gate works. That was
+    measured: deleting the gate entirely left this test green. Inheriting from
+    ``BaseException`` puts the tripwire outside what the fallback can catch.
+    """
+
+
+def test_batched_branch_not_taken_for_non_batching_generator(monkeypatch):
+    """A 2D block against a non-batching generator must take the serial loop.
+
+    Asserts three independent things, because any one alone can pass
+    vacuously: the batched worker never ran, nothing was recorded as a
+    fallback (which would mean it ran and failed), and the generator really
+    was called once per row.
     """
     gen = _PlainGen()
     try:
@@ -152,20 +164,27 @@ def test_batched_branch_not_taken_for_non_batching_generator(monkeypatch):
         pytest.skip(f"container unavailable: {exc}")
 
     def _tripwire(*a, **k):
-        raise AssertionError(
+        raise _Tripwire(
             "the batched path ran for a generator that never declared "
             "supports_batch"
         )
 
     monkeypatch.setattr(aca, "_batched_likelihood", _tripwire)
     x = np.zeros((4, 2))
-    try:
-        aca.eryn_likelihood_wrap(x)
-    except AssertionError:
-        raise
-    except Exception:
-        # Any other failure is this stub generator's problem, not the gate's.
-        pass
+
+    # _Tripwire is a BaseException, so it propagates out of the production
+    # `except Exception` and fails this test loudly if the gate is loosened.
+    aca.eryn_likelihood_wrap(x)
+
+    assert aca.n_batch_fallbacks == 0, (
+        "a non-batching generator must not even attempt a batched launch; "
+        f"n_batch_fallbacks = {aca.n_batch_fallbacks}, "
+        f"last error {aca.last_batch_error!r}"
+    )
+    assert len(gen.calls) == 4, (
+        f"expected one generator call per row from the serial loop; got "
+        f"{len(gen.calls)}"
+    )
 
 
 def test_shape_mismatch_is_refused_not_returned():
@@ -183,3 +202,58 @@ def test_shape_mismatch_is_refused_not_returned():
 
     with pytest.raises(ValueError, match="expected"):
         aca._batched_likelihood(np.zeros((4, 2)))
+
+
+# --------------------------------------------------------------------------
+# grid-aligned generation must not diverge from the stock path except in
+# the grid it evaluates on
+# --------------------------------------------------------------------------
+def test_grid_aligned_forwards_reference_quantities_whole():
+    """``t_min`` must reach phentax, not be replaced by NaN.
+
+    ``get_reference_quantities`` adds ``t_min = -T`` whenever
+    ``time_bounded_start`` is set, which is the DEFAULT, and phentax derives
+    the waveform start from ``f_min`` ONLY when ``t_min`` is NaN. An earlier
+    version of ``_aligned_polarizations`` filled ``initial_processing``'s
+    positionals by hand and passed NaN there, which un-bounded the template in
+    time: 57,789 valid samples against the stock 525,970 at m1 = 1e7,
+    m2 = 8e6 Msun. That is a physics divergence wearing grid-alignment's
+    clothes, so it is pinned at the call boundary.
+    """
+    import inspect
+
+    src = inspect.getsource(_aligned_polarizations_source())
+    assert "**ref_kw" in src, (
+        "reference quantities must be forwarded WHOLE to initial_processing; "
+        "naming individual keys silently drops t_min"
+    )
+    assert "jnp.nan" not in src, (
+        "initial_processing's t_min positional must not be hardcoded to NaN"
+    )
+
+
+def _aligned_polarizations_source():
+    from lisatools.sources.bbh.waveform import GridAlignedPhenomTHMTDIWaveform
+
+    return GridAlignedPhenomTHMTDIWaveform._aligned_polarizations
+
+
+def test_grid_aligned_supports_batch_tracks_alignment():
+    """One decision in one place: the flag must follow ``grid_align``."""
+    from lisatools.sources.bbh.waveform import GridAlignedPhenomTHMTDIWaveform
+
+    assert isinstance(
+        GridAlignedPhenomTHMTDIWaveform.__dict__["supports_batch"], property
+    ), "supports_batch must be a property, not a class-level constant that can disagree with grid_align"
+
+    class _Stub:
+        grid_align = True
+        supports_batch = GridAlignedPhenomTHMTDIWaveform.supports_batch
+
+    s = _Stub()
+    assert s.supports_batch is True
+    s.grid_align = False
+    assert s.supports_batch is False, (
+        "with alignment off the generator must stop advertising batching; "
+        "otherwise every launch is refused by pyResponseTDI"
+    )

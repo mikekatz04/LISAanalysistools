@@ -736,9 +736,6 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
 
         ref_kw = self.get_reference_quantities(
             merger_time=merger_time, start_freq=start_freq, ref_freq=ref_freq)
-        t_ref = ref_kw.get("t_ref", jnp.nan)
-        f_min = ref_kw.get("f_min")
-        f_ref = ref_kw.get("f_ref", f_min)
 
         args = [self._to_jax(np.atleast_1d(np.asarray(v, dtype=np.float64)))
                 for v in (m1, m2, s1z, s2z, distance, phi_ref,
@@ -746,9 +743,26 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
 
         # 1. Everything phentax needs, on ITS grid. This is the public entry
         #    point and exactly what compute_polarizations_at_once calls first.
+        #
+        #    ``**ref_kw`` IS FORWARDED WHOLE, BY KEYWORD, exactly as the stock
+        #    ``wave_gen_batch`` does. Unpacking only the keys this method
+        #    happens to name and filling ``initial_processing``'s positionals
+        #    by hand silently dropped ``t_min``.
+        #
+        #    ``get_reference_quantities`` adds ``t_min = -T`` whenever
+        #    ``time_bounded_start`` is set -- which is the DEFAULT -- and
+        #    phentax derives the start from ``f_min`` only when ``t_min`` is
+        #    NaN. Hardcoding NaN therefore un-bounded the template in time and
+        #    shortened it badly at high total mass: measured 57,789 valid
+        #    samples against the stock 525,970 at m1 = 1e7, m2 = 8e6 Msun, i.e.
+        #    11% of the analysis window, for a reason that has nothing to do
+        #    with grid alignment. A walker proposing high mT would have taken
+        #    a likelihood hit attributable to this alone.
         wf_params, times_mass, mask, amp22, ph22 = wf.initial_processing(
-            *args, dt, jnp.nan, t_ref, f_min, f_ref,
-            T if T is not None else wf.T,
+            *args,
+            delta_t=dt,
+            T=T if T is not None else wf.T,
+            **ref_kw,
         )
 
         M_sec = np.asarray(wf_params.total_mass) * MTSUN_SI          # (B,)
