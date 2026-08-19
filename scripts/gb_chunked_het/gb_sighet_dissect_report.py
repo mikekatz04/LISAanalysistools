@@ -48,11 +48,23 @@ def load_dir(d):
     if not files:
         raise SystemExit(f"no dissect_*.npz under {d}")
     out = {}
+    blocks = 0
     for f in files:
-        z = np.load(f, allow_pickle=False)
-        for k in z.files:
-            out.setdefault(k, []).append(z[k])
-    blocks = len(files)
+        # The move writes npz files directly (no atomic rename), so a report
+        # run against a LIVE job can catch one mid-write. Skip it -- the
+        # next report run picks it up complete.
+        try:
+            z = np.load(f, allow_pickle=False)
+            payload = {k: z[k] for k in z.files}
+        except Exception as exc:
+            print(f"  (skipping unreadable {os.path.basename(f)}: {exc} -- "
+                  "likely mid-write on a live run)")
+            continue
+        for k, v in payload.items():
+            out.setdefault(k, []).append(v)
+        blocks += 1
+    if not blocks:
+        raise SystemExit(f"no readable dissect npz under {d}")
     # per-source arrays concatenate; per-block scalars keep the first
     cat = {}
     for k, v in out.items():
