@@ -110,6 +110,8 @@ if "23mo" in _base:
     RUN_LABEL, RUN_KIND = "23-Month", "23mo"
 elif "6mo" in _base:
     RUN_LABEL, RUN_KIND = "6-Month", "6mo"
+elif _base.endswith("_v4") or "3mo_v4" in _base:
+    RUN_LABEL, RUN_KIND = "3-Month v4", "3mo_v4"
 elif _base.endswith("_v3") or "3mo_v3" in _base:
     # The v3 A/B carries the same Tobs as v2, so the label has to come from
     # the VARIANT or the two pages are indistinguishable in a browser tab --
@@ -1725,7 +1727,7 @@ if TRU is not None:
     # ones (v2's first GB leaf lands at iteration 5, v3's at 16), so each arm
     # publishes its own series keyed by that origin and every comparison panel
     # subtracts it.
-    ARM_TAG = "v3" if RUN_KIND == "3mo_v3" else "v2"
+    ARM_TAG = {"3mo_v3": "v3", "3mo_v4": "v4"}.get(RUN_KIND, "v2")
     try:
         np.savez(f"gf_arm_{ARM_TAG}.npz", n_all=n_all, n_band=n_band,
                  n_match=n_match, it0=IT0, ti=TI, mm=MM,
@@ -1736,10 +1738,24 @@ if TRU is not None:
     for _fn in sorted(glob.glob("gf_arm_*.npz")):
         _tag = os.path.basename(_fn)[7:-4]
         try:
-            ARMS[_tag] = np.load(_fn)
+            _z = np.load(_fn)
+            # An arm cache stores TRUTH-SET INDICES (`ti`), so it is only
+            # meaningful against the truth set it was matched to. A cache
+            # built against a different denominator (e.g. the original
+            # 812-source set vs a rebuilt one) would overlay silently WRONG
+            # per-source recovery -- and index out of bounds when the sets
+            # differ in size. `ndet` stamped in the cache is the guard.
+            if "ndet" in _z and int(_z["ndet"]) != NDET:
+                MISSING.append(
+                    f"arm cache {_fn} skipped: built against a "
+                    f"{int(_z['ndet'])}-source truth set, this page uses "
+                    f"{NDET}. Regenerate it by rerunning this script on "
+                    "that arm's run dir with the current truth npz.")
+                continue
+            ARMS[_tag] = _z
         except Exception:
             pass
-    ARM_COL = {"v2": CYAN, "v3": AMBER}
+    ARM_COL = {"v2": CYAN, "v3": AMBER, "v4": GREEN}
 
     # ================= FIGURES ==========================================
     import matplotlib.colors as _mcol

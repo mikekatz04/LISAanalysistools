@@ -174,7 +174,8 @@ def main(argv=None):
         kap = np.maximum(kap, opt_snr(proto, sa, se, gbw, df) / A0)
     keep = phys[:, 0] * np.interp(phys[:, 1], fgrid, kap) > 0.5 * SNR_DET
     print(f"kappa prefilter keeps {keep.sum()} / {len(phys)}")
-    np.savez(a.kappa_out, f=fgrid, kappa=kap)
+    # keys are the monitor's contract: kappa_grid.npz carries fgrid/fit.
+    np.savez(a.kappa_out, fgrid=fgrid, fit=kap)
 
     snr = np.zeros(len(phys))
     snr[keep] = opt_snr(phys[keep], sa, se, gbw, df)
