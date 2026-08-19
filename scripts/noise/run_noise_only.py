@@ -254,6 +254,19 @@ def check_resume(fit, branches):
         # the conditioning changes (the edge trim shortens the record), which
         # is exactly the silent case. The stored ``omega`` is one entry per
         # WDM time column, so its length is the stored Nt.
+        kwargs_grp = grp.get("domain_settings/kwargs")
+        if kwargs_grp is not None:
+            for name, want in (
+                ("min_freq", fit.general.min_freq),
+                ("max_freq", fit.general.max_freq),
+            ):
+                stored = kwargs_grp.attrs.get(name)
+                if stored is None or want is None:
+                    continue
+                if not np.isclose(float(stored), float(want)):
+                    diffs.append(
+                        f"{name}: stored {float(stored):g}, config {float(want):g}"
+                    )
         omega = grp.get("domain_settings/kwargs/omega")
         if omega is not None and getattr(fit.general, "nt", None) is not None:
             stored_nt = int(omega.shape[0])
@@ -351,6 +364,8 @@ def build_fit(mode, args):
         ("num_iterations", args.iterations),
         ("gpus", args.gpus),
         ("psd_build_threads", args.build_threads),
+        ("min_freq", args.min_freq),
+        ("max_freq", args.max_freq),
     ):
         if value is not None:
             knobs[key] = value
@@ -422,6 +437,21 @@ def build_fit(mode, args):
             f"Tobs={tobs / 86400.0:.6f} d (highpass 2e-5 Hz, "
             f"{TRIM_DURATION / 3600:g} h trimmed from each end, {dropped} "
             "trailing downsampled samples outside the final complete WDM block)",
+            flush=True,
+        )
+
+    # The active band is a likelihood-content choice, not a grid detail, so it
+    # goes in the banner next to the grid whenever it is not the default.
+    if args.min_freq is not None or args.max_freq is not None:
+        layer_df = 1.0 / (2.0 * gs.nf * gs.dt)
+        ind_min = int(np.ceil(gs.min_freq / layer_df))
+        ind_max = min(int(gs.max_freq / layer_df), gs.nf - 1)
+        print(
+            f"[band] active WDM layers {ind_min}-{ind_max} "
+            f"({ind_min * layer_df * 1e3:.3f}-{ind_max * layer_df * 1e3:.3f} mHz, "
+            f"{ind_max - ind_min + 1} of {gs.nf} layers; "
+            f"layer_df={layer_df * 1e3:.4f} mHz) "
+            f"from min_freq={gs.min_freq:g}, max_freq={gs.max_freq:g}",
             flush=True,
         )
 
@@ -547,6 +577,24 @@ def parse_args(argv=None):
     p.add_argument("--noise-file", default=NOISE_FILE)
     p.add_argument("--galfor-file", default=GALFOR_FILE)
     p.add_argument("--full", action="store_true", help="drop the lite laptop-smoke preset")
+    p.add_argument(
+        "--min-freq",
+        type=float,
+        default=None,
+        help="lower edge of the active WDM band in Hz (default 3e-4). The "
+        "band is CONTIGUOUS -- WDMSettings resolves it to layers "
+        "[ceil(min_freq/layer_df), floor(max_freq/layer_df)] and there is no "
+        "way to punch a hole in the middle. Cropping trades likelihood "
+        "leverage for freedom from a region the model cannot describe",
+    )
+    p.add_argument(
+        "--max-freq",
+        type=float,
+        default=None,
+        help="upper edge of the active WDM band in Hz (default 8e-3). NOTE "
+        "the 4-8 mHz layers are what anchor Soms_d -- the foreground is "
+        "negligible there -- so lowering this loosens Soms_d markedly",
+    )
     p.add_argument(
         "--two-years",
         action="store_true",

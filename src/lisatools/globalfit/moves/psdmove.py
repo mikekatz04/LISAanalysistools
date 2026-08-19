@@ -878,7 +878,9 @@ class PSDMove(GlobalFitMove, StretchMove):
                 )
                 return
             results.append(first)
-            self._build_warmed = True
+            # per-device warm bookkeeping (see :meth:`_build_batch`); this
+            # route is CPU-only, so the one task warms the whole set.
+            self._build_warmed.add(self._walker_device(first[1]))
         if self._build_threads > 1 and len(tasks) > 1:
             results.extend(self.build_pool.map(_one, tasks))
         else:
@@ -1110,9 +1112,13 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         rows = list(batch)
         covariances = []
-        if not self._build_warmed and rows:
-            covariances.append(_one(rows.pop(0)))
-            self._build_warmed = True
+        if rows:
+            # serial per-device cache warm (see :meth:`_build_batch`); this
+            # route is CPU-only, so the first row warms every later one.
+            dev = self._walker_device(int(walker_inds_keep[int(rows[0])]))
+            if dev not in self._build_warmed:
+                self._build_warmed.add(dev)
+                covariances.append(_one(rows.pop(0)))
         if self._build_threads > 1 and len(rows) > 1:
             covariances.extend(self.build_pool.map(_one, rows))
         else:
