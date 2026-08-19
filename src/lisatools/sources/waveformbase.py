@@ -39,6 +39,7 @@ from ..domains import (
 from ..utils.parallelbase import LISAToolsParallelModule
 from ..utils.typing import NDArrayLike, ArrayModule
 from ..utils.utility import tukey
+from ..utils.exceptions import BatchNotLaunchable
 
 if TYPE_CHECKING:
     try:
@@ -1070,6 +1071,37 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         start_inds = self.xp.maximum(
             0, self.xp.rint((self.data_t0 - shifted_t_arr[:, 0]) / self.dt).astype(int)
         )
+        # THE BATCH MUST SHARE A WINDOW START, NOT JUST AN ALIGNMENT.
+        #
+        # Everything below applies ONE crop to every row. Rows whose valid
+        # data begins at different samples are then cropped at the wrong
+        # place, and the resulting likelihood is silently wrong -- finite,
+        # plausible, and dependent on WHICH OTHER ROWS share the batch, which
+        # is fatal for detailed balance in a sampler.
+        #
+        # The alignment check in pyResponseTDI does NOT cover this axis: it
+        # compares ``t0_shift_to_data``, which grid-aligned generation drives
+        # to exactly zero BY CONSTRUCTION, so it is inert for exactly the
+        # generator that can batch. Measured on a 4-walker block: max
+        # |dlogL| 7.6e5 nats against per-row evaluation, no warning, and the
+        # error grows with the width of the walker cloud -- accurate once a
+        # chain has converged and wrong through burn-in, which is the worst
+        # possible failure shape.
+        #
+        # Refusing is the correct answer rather than a limitation: the caller
+        # falls back to per-row evaluation, which is already verified. Making
+        # the crop per-row is the real fix and is a separate change; this
+        # guard is what makes the wrongness unreachable in the meantime.
+        if start_inds.size > 1 and int(start_inds.max()) != int(start_inds.min()):
+            raise BatchNotLaunchable(
+                f"batched response needs every source to share a window "
+                f"start: start_inds span "
+                f"[{int(start_inds.min())}, {int(start_inds.max())}] samples "
+                f"across {int(start_inds.size)} sources. One shared crop is "
+                f"applied to the whole batch, so rows starting elsewhere "
+                f"would be cropped at the wrong sample. Evaluate these "
+                f"sources in separate calls."
+            )
         start_ind = int(start_inds.max())
 
         # Non-finite response output is zeroed (ResponseWrapper

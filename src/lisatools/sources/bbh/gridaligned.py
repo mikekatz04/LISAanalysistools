@@ -70,6 +70,12 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
 
     # -- preconditions -----------------------------------------------------
     def _check_alignable(self) -> None:
+        if jax is None:  # pragma: no cover - exercised only without jax
+            raise ImportError(
+                "grid-aligned generation needs jax (and phentax); this class "
+                "imports cleanly without them so that lisatools.sources.bbh "
+                "stays importable, but it cannot generate."
+            )
         """Refuse to claim an alignment we cannot actually deliver.
 
         Both of these are silent-wrongness risks rather than crashes, so they

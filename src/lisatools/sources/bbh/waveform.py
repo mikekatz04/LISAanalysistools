@@ -27,6 +27,12 @@ try:
 except (ImportError, ModuleNotFoundError):
     phentax_available = False
     jnp = np  # type: ignore
+    # Bind the name even when the import failed. ``gridaligned`` imports
+    # ``jax`` from here, and ``sources/bbh/__init__.py`` imports that module
+    # unconditionally, so leaving it unbound turned an OPTIONAL dependency
+    # into a hard one: without jax, importing lisatools.sources.bbh at all
+    # failed, locking out users who only want the pure-bbhx BBHSNRWaveform.
+    jax = None  # type: ignore
 
 if TYPE_CHECKING:
     try:

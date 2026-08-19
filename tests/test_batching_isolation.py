@@ -183,3 +183,80 @@ class ContainerGateTest(unittest.TestCase):
         self.assertIn("apply_transform", _CONTAINER_LEVEL_KWARGS)
         self.assertIn("transform_fn", _CONTAINER_LEVEL_KWARGS)
         self.assertIn("signal_gen", _CONTAINER_LEVEL_KWARGS)
+
+
+class SharedWindowGuardTest(unittest.TestCase):
+    """The batched response must refuse rows that do not share a window start.
+
+    ``_apply_response`` applies ONE crop (``start_ind = start_inds.max()``)
+    and one fixed leading-buffer zeroing to every row of a batch. Rows whose
+    valid data begins elsewhere are cropped at the wrong sample, and the
+    likelihood comes out finite, plausible and WRONG -- measured at 7.6e5 nats
+    on a 4-walker block, with the error growing as the walker cloud widens.
+    Worse, a row's value then depends on which other rows shared its batch,
+    which breaks detailed balance.
+
+    The pre-existing alignment check does not cover this: it compares
+    ``t0_shift_to_data``, which grid-aligned generation drives to exactly zero
+    BY CONSTRUCTION, so it is inert for the one generator that can batch.
+
+    Both the crop and the zeroing are pre-existing on dev; this branch is what
+    makes them reachable for heterogeneous walkers, so the guard belongs here.
+    """
+
+    def test_guard_is_present_and_typed(self):
+        import inspect
+
+        from lisatools.sources.waveformbase import TDPyResponseWaveformBase
+
+        # The guard lives on the pyResponseTDI subclass -- the legacy response
+        # path, which is the one MBHB batching actually uses.
+        src = inspect.getsource(TDPyResponseWaveformBase._apply_response)
+        self.assertIn(
+            "BatchNotLaunchable", src,
+            "the shared-window guard must raise BatchNotLaunchable so callers "
+            "fall back to per-row evaluation instead of dying",
+        )
+        self.assertIn(
+            "start_inds.min()", src,
+            "the guard must compare the SPREAD of start_inds; comparing only "
+            "the max cannot detect rows that start elsewhere",
+        )
+
+    def test_refusal_type_is_catchable_as_a_refusal(self):
+        from lisatools.utils.exceptions import (
+            BatchNotLaunchable,
+            LISAToolsException,
+        )
+
+        self.assertTrue(issubclass(BatchNotLaunchable, LISAToolsException))
+        self.assertFalse(
+            issubclass(BatchNotLaunchable, (TypeError, AttributeError)),
+            "a refusal must be distinguishable from a wiring bug",
+        )
+
+
+class OptionalDependencyTest(unittest.TestCase):
+    """Importing lisatools.sources.bbh must not require jax.
+
+    ``gridaligned`` imports ``jax`` from ``waveform``, and
+    ``sources/bbh/__init__.py`` imports ``gridaligned`` unconditionally, so
+    leaving the name unbound when the optional import fails turned jax into a
+    HARD dependency of the whole bbh package -- locking out anyone who only
+    wants the pure-bbhx ``BBHSNRWaveform``.
+    """
+
+    def test_jax_name_is_always_bound(self):
+        from lisatools.sources.bbh import waveform as wf
+
+        self.assertTrue(
+            hasattr(wf, "jax"),
+            "waveform.py must bind `jax` on both branches of its try/except",
+        )
+
+    def test_bbh_package_exports_survive(self):
+        from lisatools.sources.bbh import (  # noqa: F401
+            BBHSNRWaveform,
+            GridAlignedPhenomTHMTDIWaveform,
+            PhenomTHMTDIWaveform,
+        )
