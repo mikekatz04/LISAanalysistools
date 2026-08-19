@@ -1052,6 +1052,29 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                         "for the control explicitly with SIGHET_V5=2."
                     )
 
+            # THE EDGE-EXCLUSION INVARIANT (user ruling 2026-08-19): any
+            # region where taper error is created must be REMOVED by the WDM
+            # [min_time, max_time] crop -- the crop serves the taper, never
+            # the taper shrunk to fit the crop. Enforced HERE, at build time,
+            # where both knobs are on the table: either raise
+            # EDGE_CROP_WAVELETS or lower SIGHET_TUKEY_ALPHA. (The engine
+            # also carries a last-resort clamp for non-erebor callers, but
+            # this refusal is the real guard.)
+            _alpha_sh = float(getattr(gb_info, "sighet_tukey_alpha", 0.01))
+            _wdm_dom = getattr(gb_info.gb_wdm_comp, "wdm_settings", None)
+            _Nt_dom = int(getattr(_wdm_dom, "Nt", 0) or 0)
+            _crop = int(getattr(_wdm_dom, "ind_min_t", 0) or 0)
+            if _Nt_dom:
+                _taper = int(np.ceil(0.5 * _alpha_sh * _Nt_dom))
+                if _taper + 8 > _crop:
+                    raise ValueError(
+                        f"sig-het reference taper (SIGHET_TUKEY_ALPHA="
+                        f"{_alpha_sh} -> {_taper} WDM layers/side + 8 margin)"
+                        f" is not excluded by the time crop (ind_min_t="
+                        f"{_crop}). Error-created edges must be REMOVED by "
+                        f"[min_time, max_time]: raise EDGE_CROP_WAVELETS to "
+                        f">= {_taper + 8} or lower SIGHET_TUKEY_ALPHA to <= "
+                        f"{max(0.0, 2.0 * (_crop - 8) / _Nt_dom):.4f}.")
             gb_info.gb_wdm_comp = GBSignalHetComputations.for_band_engine(
                 gb_info.gb_wdm_comp,
                 tukey_alpha=float(getattr(gb_info, "sighet_tukey_alpha",
