@@ -326,6 +326,19 @@ class GBNoFgGBSettings(GBSettings):
         # 128 = measured-converged (64 lossy REJECTED, 256 buys nothing).
         default_factory=env_default("SIGHET_V4_KNOTS", 128, int)
     )
+    # Sig-het REFERENCE-BUILD Tukey alpha, pinned EXPLICITLY (user ruling
+    # 2026-08-19: equivalent tukey alphas across chunked-het / sig-het /
+    # TD->FD; never inherit a knob-resolved value). The engine kernels apply
+    # this as a fraction of the WHOLE OBSERVATION, unlike the chunked
+    # delegate's per-chunk stitching alpha -- inheriting the delegate's 0.05
+    # tapered 54 layers against the 20-layer time crop and suppressed the
+    # reference inside the active region (the flat ~1% h_h bias = the
+    # dissect's high-f 0.984). 0.01 = the recommended HET_WIDE value: taper
+    # 11 layers, fully subsumed by the crop (EC >= taper); measured EXACT
+    # (hh ratio 1.0000) in gb_sighet_invitro_probe.py.
+    sighet_tukey_alpha: float = dataclasses.field(
+        default_factory=env_default("SIGHET_TUKEY_ALPHA", 0.01, float)
+    )
     # V4 evaluation mode: 0 = cooperative fixed-knot spline solve (PCR on
     # GPU); >0 = precomputed cardinal weights with this half-band -- no
     # solve, no block syncs, ~18 KB less shared memory.  Banded and PCR agree
@@ -1041,6 +1054,8 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
 
             gb_info.gb_wdm_comp = GBSignalHetComputations.for_band_engine(
                 gb_info.gb_wdm_comp,
+                tukey_alpha=float(getattr(gb_info, "sighet_tukey_alpha",
+                                          0.01)),
                 nt_layer=int(gb_info.sighet_nt_layer),
                 n_sparse_fd=int(gb_info.sighet_n_sparse_fd),
                 max_r=float(getattr(gb_info, "sighet_max_r", 0.0)),
