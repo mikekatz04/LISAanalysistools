@@ -7221,12 +7221,49 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         gb_wdm_comp0 = buffer_obj.gb_wdm_comp
         results = []
         from gbgpu.gbsignalhetcomputations import GBSignalHetComputations
+
+        # ---- MEMORY LIFECYCLE (root-caused from the 2026-08-19 OOM run) ----
+        # Two leaks sank the first sweep at 91.5 GB allocated:
+        # * _DEVICE_GB_COMP_REPLICAS (source_runtime) is a module-level cache
+        #   "kept for the whole run" holding a STRONG ref to (comp, replica)
+        #   per device -- so `del comp_a` freed nothing: every arm's comp AND
+        #   its device-1 replica (each with a full reference stash) persisted.
+        #   Snapshot the cache keys, purge everything the sweep added.
+        # * free_all_blocks() only frees the CURRENT device's pool; the arm
+        #   stashes live on every shard device. Free them all.
+        try:
+            from ..stock.erebor.source_runtime import (
+                _DEVICE_GB_COMP_REPLICAS as _replica_cache)
+        except Exception:
+            _replica_cache = None
+        _replica_keys0 = (set(_replica_cache) if _replica_cache is not None
+                          else set())
+
+        def _purge_and_free():
+            if _replica_cache is not None:
+                for k in list(_replica_cache):
+                    if k not in _replica_keys0:
+                        _replica_cache.pop(k, None)
+            if cp is np:
+                return
+            try:
+                ndev = cp.cuda.runtime.getDeviceCount()
+            except Exception:
+                return
+            for d in range(ndev):
+                try:
+                    with cp.cuda.Device(d):
+                        cp.get_default_memory_pool().free_all_blocks()
+                except Exception:
+                    pass
+
         try:
             # The block's live reference is about to be replaced per arm.
             buffer_obj.clear_in_model_likelihood()
             for name, kw in arms:
                 akw = {**base_kw, **kw}
                 t0 = time.perf_counter()
+                comp_a = None
                 try:
                     comp_a = GBSignalHetComputations.for_band_engine(
                         chunked, **akw)
@@ -7241,7 +7278,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     ht = [_to_numpy(buffer_obj.get_add_ll(
                         c, slots_s, slots_s, N_vals, leaf_inds=l_s))
                         for c in cands_s]
-                    buffer_obj.clear_in_model_likelihood()
                     results.append(dict(
                         arm=name, kw=akw, het0=h0, dh0=dh0, hh0=hh0,
                         het=np.stack(ht),
@@ -7261,21 +7297,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                         wall=time.perf_counter() - t0,
                                         error=repr(exc)))
                 finally:
+                    # Drop the arm's stash even when the arm died mid-setup:
+                    # a failed setup can leave a partial reference active on
+                    # the arm engine, and that stash is the leak.
+                    try:
+                        buffer_obj.clear_in_model_likelihood()
+                    except Exception:
+                        pass
                     buffer_obj.gb_wdm_comp = gb_wdm_comp0
-                    if "comp_a" in dict(locals()):
+                    if comp_a is not None:
                         del comp_a
-                    if cp is not np:
-                        try:
-                            cp.get_default_memory_pool().free_all_blocks()
-                        except Exception:
-                            pass
+                    _purge_and_free()
         finally:
             # Whatever happened, hand the block back exactly as we found it:
             # production comp, production engine, full-block reference live.
+            # Free everything the sweep touched FIRST -- the first sweep run
+            # died HERE, restoring a 3386-source reference into a pool the
+            # leaked arms had filled.
             buffer_obj.gb_wdm_comp = gb_wdm_comp0
+            _purge_and_free()
             buffer_obj.rebuild_likelihood_engine()
-            buffer_obj.setup_in_model_likelihood(curr, slots, N_vals,
-                                                 leaf_inds=l_i)
+            try:
+                buffer_obj.setup_in_model_likelihood(curr, slots, N_vals,
+                                                     leaf_inds=l_i)
+            except Exception:
+                # One retry after a hard purge: the restore must not be the
+                # thing that kills a production block.
+                _purge_and_free()
+                buffer_obj.setup_in_model_likelihood(curr, slots, N_vals,
+                                                     leaf_inds=l_i)
 
         # ---- dump ----------------------------------------------------------
         try:

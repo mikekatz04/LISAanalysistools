@@ -170,7 +170,7 @@ def report_sweeps(d):
               f"({z['sub'].size} sources, {cold.sum()} cold, "
               f"arms: {list(z['arms'])})")
         hdr = (f"      {'arm':24s} {'wall':>6s} {'anchor med':>10s} "
-               f"{'anchor max':>10s}"
+               f"{'anchor max':>10s} {'vs base':>9s}"
                + "".join(f" {'d=%g' % t:>9s}" for t in tiers))
         print(hdr + "   (anchor=|dll| vs exact; tiers=eps/T med, cold)")
         base0 = z.get("a00_het0")
@@ -181,14 +181,25 @@ def report_sweeps(d):
                 continue
             h0 = z[f"{a}_het0"]; ht = z[f"{a}_het"]
             e0 = np.abs(h0 - ex0)
+            # THE SCORING-PATH SENTINEL. max |het0_arm - het0_base|: a real
+            # engine change must differ from base at least in round-off on
+            # SOME source. Exactly 0.0 on every source means the arm scored
+            # through the base engine (a sweep wiring bug), and its row
+            # proves nothing. Small-but-nonzero + identical anchor columns
+            # is the meaningful verdict: corruption upstream of the knob.
+            vsb = (float(np.nanmax(np.abs(h0 - base0)))
+                   if (i > 0 and base0 is not None) else 0.0)
+            flag = "  <-- BITWISE base; arm did NOT rescore!" \
+                if (i > 0 and vsb == 0.0) else ""
             cells = []
             for j in range(len(tiers)):
                 eps = np.abs((ht[j] - h0) - (exa[j] - ex0))[cold]
                 T = np.abs(exa[j] - ex0)[cold]
                 cells.append(f"{np.nanmedian(eps/np.maximum(T,1e-300)):9.3g}")
             print(f"      {str(arm):24s} {z['arm_wall'][i]:5.0f}s "
-                  f"{np.nanmedian(e0):10.3g} {np.nanmax(e0):10.3g}"
-                  + " ".join([""] + cells))
+                  f"{np.nanmedian(e0):10.3g} {np.nanmax(e0):10.3g} "
+                  f"{vsb:9.3g}"
+                  + " ".join([""] + cells) + flag)
         if base0 is not None:
             print("      (arm rows share sources/residual/exact side; only "
                   "the engine differs)")

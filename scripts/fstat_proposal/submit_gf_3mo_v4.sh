@@ -442,7 +442,11 @@ export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
 # half). v5=0 differing from base = v5-specific; v5=2 is the flat-carve
 # control arm.
 export GB_SIGHET_DISSECT=${STORE_DIR}/dissect
-export GB_SIGHET_SWEEP="nt_layer=270;nt_layer=135;v3_n_nodes=32;v3_n_nodes=128;v4_knots=64;v4_knots=256;v5=0;v5=2;m_half=4;n_sparse_fd=2048"
+# m_half=4 and n_sparse_fd=2048 DROPPED (2026-08-19): both OOM'd on the
+# first sweep run at ~91.5 GB -- they multiply the per-source stash on top
+# of a block that already holds the production reference. Secondary
+# hypotheses anyway; re-add individually once the primary verdict is in.
+export GB_SIGHET_SWEEP="nt_layer=270;nt_layer=135;v3_n_nodes=32;v3_n_nodes=128;v4_knots=64;v4_knots=256;v5=0;v5=2"
 # THE KNOWN BAD SOURCES, targeted BY FREQUENCY: a block only spends sweep
 # budget if it contains one of these (matched sources are forced into the
 # subset), so the corrupted-reference population is interrogated directly
