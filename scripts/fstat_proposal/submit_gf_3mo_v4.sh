@@ -464,6 +464,13 @@ export SIGHET_TUKEY_ALPHA=0.01
 # export EDGE_CROP_WAVELETS=60
 
 export GB_SIGHET_DISSECT=${STORE_DIR}/dissect
+# RAW OFFENDER CAPTURE (2026-08-19): each dissect npz also carries the
+# top-3 anchor offenders' ACTUAL data slab + invC slab + physical params +
+# slab origin (~3 MB/block) -- reconstruction of the low-f h_h inflation
+# is exhausted (CPU+CUDA probes all exact), so the next step is REPLAYING
+# the real production inputs through the probe Holder on a laptop. Pull
+# any one dissect_*.npz once "[GB_DISSECT] wrote" appears.
+export GB_SIGHET_DISSECT_RAW=1
 # SWEEP RETIRED (2026-08-19, after 8 swept blocks): every arm answered.
 # nt_layer=270 differs by 6e-8 (round-off -- resolution DEAD); m_half by
 # 1e-4/1e-10 (m-window irrelevant); v5=0/v5=2 bitwise (the v4/v5
