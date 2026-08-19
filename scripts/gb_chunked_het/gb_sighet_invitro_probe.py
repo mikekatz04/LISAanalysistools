@@ -128,6 +128,14 @@ def build_config(tag, *, prod_grid, prod_epoch, prod_caches, prod_npad,
                           min_time=min_time, max_time=max_time,
                           force_backend=backend)
 
+    # TUKEY env: ""=comp default (production resolved 0.05); "0" disables --
+    # the VALIDATED 1e-11 sig-het tests ran tukey=0 (gb_sighet_floor_deepdive
+    # docstring), and the chunk-stitching taper is the known chunked-vs-raw
+    # mismatch (project-gb-wdm-sighet-gotchas).
+    _tk = os.environ.get("TUKEY", "").strip()
+    _tkw = {}
+    if _tk != "":
+        _tkw = dict(tukey_alpha=float(_tk), use_tukey=float(_tk) > 0)
     chunked = GBWDMComputations(
         wdm_set, t_ref=t_ref,
         Nt_sub=256,
@@ -136,7 +144,7 @@ def build_config(tag, *, prod_grid, prod_epoch, prod_caches, prod_npad,
         N_cp_sig=(48 if prod_caches else 0),
         N_cp_orbit=(32 if prod_caches else 0),
         orbits=orbits, tdi_config="2nd generation",
-        force_backend=backend, d_d=0.0, tdi_type="XYZ",
+        force_backend=backend, d_d=0.0, tdi_type="XYZ", **_tkw,
     )
 
     # invC on the ACTIVE grid, XYZ (3,3,F,T) layout, off-diagonals zero.
