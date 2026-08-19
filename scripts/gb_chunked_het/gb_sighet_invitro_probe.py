@@ -75,17 +75,27 @@ GAL_P = (3.74443460e-44, 5.29868210e-02, 9.26921788e-01, 2.75873152e-03,
 
 
 class Holder:
-    """Duck-typed full-band buffer: exactly what setup_in_model reads."""
+    """Duck-typed buffer: exactly what setup_in_model reads.
 
-    def __init__(self, data, invc, xp=np):
-        # data (1, 3, F, T) float; invc (1, 3, 3, F, T) float
+    Full-band by default; pass ``slab_min_f`` (absolute layer origin per
+    slot) + ``band_slab_Nf`` for the production narrow-slab path.
+    """
+
+    def __init__(self, data, invc, xp=np, slab_min_f=None, band_slab_Nf=None):
+        # data (n, 3, F, T) float; invc (n, 3, 3, F, T) float
         self.linear_data_arr = [xp.ascontiguousarray(
             xp.asarray(data, dtype=xp.float64)).ravel()]
         self.linear_psd_arr = [xp.ascontiguousarray(
             xp.asarray(invc, dtype=xp.float64)).ravel()]
+        self._n = int(np.asarray(data).shape[0])
+        if band_slab_Nf is not None:
+            self.band_slab_Nf = int(band_slab_Nf)
+            self.slab_min_f = xp.asarray(np.asarray(slab_min_f, dtype=np.int32))
+            # the chunked task-b scorer's per-slot window starts
+            self.min_freq_inds = self.slab_min_f
 
     def __len__(self):
-        return 1
+        return self._n
 
 
 def build_config(tag, *, prod_grid, prod_epoch, prod_caches, prod_npad,
@@ -212,12 +222,106 @@ def probe_one(cfg, f0_hz, backend="cpu"):
     return hh_sig, hh_direct, dh_sig
 
 
+def _to_np(a):
+    return np.asarray(a.get() if hasattr(a, "get") else a)
+
+
+def probe_slab(cfg, f0_hz, pair=False):
+    """The two axes the full-band ladder cannot reach.
+
+    SLAB: the production narrow-slab path (band_slab_Nf=5, per-slot
+    ``slab_min_f`` origin) -- the branch every production block runs.
+    Scores THREE ways so the biased side is named, not assumed:
+      sig-het (setup_in_model + get_ll on the slab holder),
+      chunked task-b (the production EXACT side, same holder),
+      direct pixel sum (the untainted reference).
+
+    PAIR: two sources in adjacent layers, batched into ONE setup call with
+    overlapping windows -- the crowding axis ([2b]: broken 14.2% isolated
+    -> 37.7% at 4+ same-chain neighbors). Each source's h_h is compared
+    against ITS OWN direct sum; contamination shows as per-source inflation
+    that the single-source configs did not have.
+    """
+    wdm, chunked = cfg["wdm"], cfg["chunked"]
+    xp = chunked.xp
+    W = 5
+    layer_df = wdm.layer_df
+
+    f0s = [f0_hz] + ([f0_hz + layer_df] if pair else [])
+    n = len(f0s)
+    params = np.stack([
+        np.array([1e-22, f, 1e-16, 0.0, 1.0 + 0.5 * i, 0.7, 0.5, 1.2, 0.3])
+        for i, f in enumerate(f0s)])
+
+    # per-slot slab: rows [m-2 .. m+2] of the ACTIVE grid around each carrier
+    T = cfg["T"]
+    data = np.zeros((n, 3, W, T))
+    invc = np.zeros((n, 3, 3, W, T))
+    slab_lo_abs = np.zeros(n, dtype=np.int32)
+    h_slabs = []
+    for i in range(n):
+        full = xp.zeros((3, wdm.Nf, wdm.Nt), dtype=xp.float64)
+        chunked.fill_global_wdm(params[i].reshape(1, 9), full,
+                                convert_to_ra_dec=False, factors=None)
+        act = _to_np(full[:, wdm.ind_min_f: wdm.ind_max_f + 1,
+                          wdm.ind_min_t: wdm.ind_max_t + 1])
+        m_loc = int(np.floor(f0s[i] / layer_df)) - wdm.ind_min_f
+        lo = max(0, min(m_loc - W // 2, cfg["F"] - W))
+        h_i = act[:, lo: lo + W, :]
+        h_slabs.append(h_i)
+        slab_lo_abs[i] = lo + wdm.ind_min_f
+        # PAIR: each slab contains BOTH sources' signal, as the production
+        # residual does (the neighbor is unmodeled/other-leaf power).
+        data[i] = h_i
+        invc[i] = _to_np(cfg["invc"])[0, :, :, lo: lo + W, :]
+    if pair:
+        # add each source's wing into the OTHER source's slab (overlap)
+        for i in range(n):
+            j = 1 - i
+            full_j = xp.zeros((3, wdm.Nf, wdm.Nt), dtype=xp.float64)
+            chunked.fill_global_wdm(params[j].reshape(1, 9), full_j,
+                                    convert_to_ra_dec=False, factors=None)
+            act_j = _to_np(full_j[:, wdm.ind_min_f: wdm.ind_max_f + 1,
+                                  wdm.ind_min_t: wdm.ind_max_t + 1])
+            lo = slab_lo_abs[i] - wdm.ind_min_f
+            data[i] += act_j[:, lo: lo + W, :]
+
+    holder = Holder(data, invc, xp, slab_min_f=slab_lo_abs, band_slab_Nf=W)
+    hh_direct = np.array([
+        float(np.einsum("cft,dft,cdft->", h_slabs[i], h_slabs[i], invc[i]))
+        for i in range(n)])
+
+    sig = GBSignalHetComputations.for_band_engine(
+        chunked, nt_layer=cfg["nt_layer"], n_sparse_fd=1024,
+        m_active_half_width=2, max_r=0.0, n_cp_build=32,
+        v3_n_nodes=64, v4_knots=128, v4_band=16, v5=1)
+    eng = make_band_likelihood_engine(
+        wdm, gb_wdm_comp=sig, nchannels=3, tdi_channel_setup="XYZ")
+    idx = np.arange(n)
+    eng.setup_in_model(holder, params, idx)
+    eng.get_ll(holder, params, data_index=idx, noise_index=idx,
+               N_vals=np.full(n, 1024), waveform_kwargs={})
+    hh_sig = _to_np(eng.h_h_out).real.ravel()[:n].copy()
+    eng.clear_in_model()
+
+    # third opinion: the production EXACT side (chunked task-b on the slab)
+    try:
+        eng.get_ll(holder, params, data_index=idx, noise_index=idx,
+                   N_vals=np.full(n, 1024), waveform_kwargs={})
+        hh_chk = _to_np(eng.h_h_out).real.ravel()[:n].copy()
+    except Exception as exc:
+        print(f"      (chunked-exact slab scoring failed: {exc!r})")
+        hh_chk = np.full(n, np.nan)
+    return hh_sig, hh_chk, hh_direct
+
+
 def main():
     backend = os.environ.get("PROBE_BACKEND", "cpu")
     f0_list = [float(x) * 1e-3 for x in
                os.environ.get("F0_LIST", "1.0,2.25,4.5,10,16").split(",")]
     which = [int(x) for x in
-             os.environ.get("CONFIGS", "0,1,2,3,4,5").split(",")]
+             os.environ.get("CONFIGS", "0,1,2,3,4,5").split(",")
+             if x.strip()]
 
     ladder = [
         ("0 TEST", dict(prod_grid=False, prod_epoch=False, prod_caches=False,
@@ -235,6 +339,7 @@ def main():
         ("6 +XYZCSD", dict(prod_grid=True, prod_epoch=True, prod_caches=True,
                            prod_npad=True, fg_invc=True, xyz_csd=True)),
     ]
+    slab_modes = os.environ.get("SLAB", "")   # e.g. SLAB=solo,pair
 
     print(f"{'config':>10} " + "".join(f"{f*1e3:>9.2f}m" for f in f0_list)
           + "   (hh_sighet / hh_direct; d_h/h_h consistency in parens)")
@@ -251,6 +356,21 @@ def main():
         print(f"{tag:>10} " + "".join(f"{r:>10.4f}" for r in row)
               + "   (" + " ".join(f"{c:.3f}" for c in chk) + ")"
               + f"  [{time.perf_counter()-t0:.0f}s]", flush=True)
+    if slab_modes:
+        cfg = build_config("slab", backend=backend, prod_grid=True,
+                           prod_epoch=True, prod_caches=True, prod_npad=True,
+                           fg_invc=True)
+        for mode in slab_modes.split(","):
+            pair = mode.strip() == "pair"
+            print(f"\n  SLAB path ({'PAIR/overlap' if pair else 'solo'}), "
+                  "per-source hh_sig/hh_direct  [hh_chunkedexact/hh_direct]:")
+            for f0 in f0_list:
+                hh_s, hh_c, hh_d = probe_slab(cfg, f0, pair=pair)
+                cells = "  ".join(
+                    f"{hh_s[i]/hh_d[i]:.4f} [{hh_c[i]/hh_d[i]:.4f}]"
+                    for i in range(len(hh_d)))
+                print(f"    f0={f0*1e3:6.2f} mHz: {cells}", flush=True)
+
     print("\nread: config 0 must be ~1.0000 everywhere (probe validity); the "
           "first config whose row bends into the production curve "
           "(~6 @ 1 mHz -> ~0.98 @ 16 mHz) names the axis. d_h/h_h should "
