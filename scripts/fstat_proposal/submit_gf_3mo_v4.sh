@@ -403,11 +403,15 @@ export GB_SIGHET_TRUST_PHASE_C=49
 # against inmodel_repeats ~4-5 s).
 export GB_SIGHET_ANCHOR_CHECK=1
 export GB_SIGHET_DRIFT_CHECK=1
-# Displacement-resolved accuracy ladder (rad of carrier phase). Also
-# first-few-iterations only -- it puts eps/T on the record at the settings
-# this run actually shipped, so a later "is GB limited by likelihood
-# accuracy?" question is answerable without re-running. ~0.32 s/propose.
-export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
+# TIER SCAN RETIRED FOR THE CLEAN RESTART (2026-08-19). It has NO iteration
+# cap (the "first-few-iterations" note above it was wrong): it ran 13 extra
+# scoring passes -- half of them chunked-exact -- on EVERY in-model block,
+# ~0.32 s/propose, for the whole run. Its 72-block dissect record is
+# captured and analyzed (see GB_SIGHET_DISSECT below); the clean production
+# reading must not carry its overhead. The anchor check above stays: one
+# cheap exact call per block, logging |dll@anchor| -- the corrupted-refs
+# rate stays on the record for the post-fix comparison.
+export GB_SIGHET_TIER_SCAN=""
 
 # ============================================================================
 # SIG-HET DISSECTION + IN-RUN ENGINE SWEEP (2026-08-19, LAT 749af2e1).
@@ -454,23 +458,35 @@ export SIGHET_TUKEY_ALPHA=0.01
 # UNIFORM EDGE EXCLUSION (user ruling 2026-08-19): bringing the domain
 # [min_time, max_time] in removes edge-created error in EVERY likelihood
 # at once (all WDMSettings inherit the one domain; min/max_freq still vary
-# per source). The post-fix dissect localized the remaining sig-het h_h
-# inflation to the TIME EDGES (taper 54->11 layers DOUBLED it), so
-# EDGE_CROP_WAVELETS=60 (covering the old taper region, 2x60/2160 = 5.6%
-# of the data) is the candidate cure -- ARMED ON THE NEXT FRESH START
-# ONLY: changing the crop changes Nt_active (2121 -> 2001) and resume
-# compatibility across a domain-shape change is UNVERIFIED. Do not flip
-# mid-store without checking, or start a new STORE_DIR.
+# per source). NOTE (capture-replay verdict, same day): the crop is NOT
+# the cure for the low-f h_h inflation -- the fresh reference build is
+# EXACT on this very crop-20 domain; the inflation is live-stash
+# corruption (see the dissect block below). The crop remains the POLICY
+# knob (taper must be subsumed; constant-layers scaling, pinned in the
+# 6-mo/23-mo scripts) -- flip on a FRESH STORE_DIR only: changing the
+# crop changes Nt_active (2121 -> 2001) and resume/rewind compatibility
+# across a domain-shape change is UNVERIFIED.
 # export EDGE_CROP_WAVELETS=60
 
-export GB_SIGHET_DISSECT=${STORE_DIR}/dissect
-# RAW OFFENDER CAPTURE (2026-08-19): each dissect npz also carries the
-# top-3 anchor offenders' ACTUAL data slab + invC slab + physical params +
-# slab origin (~3 MB/block) -- reconstruction of the low-f h_h inflation
-# is exhausted (CPU+CUDA probes all exact), so the next step is REPLAYING
-# the real production inputs through the probe Holder on a laptop. Pull
-# any one dissect_*.npz once "[GB_DISSECT] wrote" appears.
-export GB_SIGHET_DISSECT_RAW=1
+# DISSECT + RAW CAPTURE RETIRED (2026-08-19, mission accomplished). The
+# 72-block dissect + 25 raw-slab captures were pulled and replayed locally:
+# a FRESH setup_in_model from the captured params/slabs scores EXACT
+# (sig-het == direct pixel sum == production's exact side), while the LIVE
+# in-run stash scored the same sources 10-35x inflated in h_h with
+# wrong-signed d_h. Verdict: the reference BUILD and both engines are
+# exonerated; the corruption is in the LIVE slot->reference stash lifecycle
+# (prime suspect: multi-GPU router/replica sync -- the [1b] shard-swap
+# anomaly), amplified at low f by the near-singular XYZ invC (null-space
+# eigenvalue 54x the differential ones). Anchor errors reach the cold chain
+# (median |dll| 5.5, low-f 23) but sampler-facing DELTAS track exact
+# proportionally (multiplicative distortion): clean sources in spec,
+# ~6% corrupted-anchor sources 0.3-2 lnL at 1-2 rad displacement. Same
+# condition v3 sampled under -- newly measured, not newly introduced.
+# Re-arm all three (TIER_SCAN hosts them) only to re-verify after the
+# stash-lifecycle fix lands. Analysis: scratchpad replay_raw.py + the
+# dissect report; capture data archived off-cluster.
+export GB_SIGHET_DISSECT=""
+export GB_SIGHET_DISSECT_RAW=0
 # SWEEP RETIRED (2026-08-19, after 8 swept blocks): every arm answered.
 # nt_layer=270 differs by 6e-8 (round-off -- resolution DEAD); m_half by
 # 1e-4/1e-10 (m-window irrelevant); v5=0/v5=2 bitwise (the v4/v5
