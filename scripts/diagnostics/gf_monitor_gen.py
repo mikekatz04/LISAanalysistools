@@ -58,6 +58,15 @@ plt.rcParams.update({
 
 IMGS, MISSING = {}, []
 
+# MATCH-CRITERION CONTENT GATE (user ruling 2026-08-19). The page's
+# completeness / purity / matched-pair numbers all come from the 2-bin f0
+# PROXY match, not the real phase-maximised overlap statistic (too heavy to
+# compute at page-build time). Ruling: catalogue TRUTHS stay on every visual
+# overlay, but nothing derived from the page's own match criterion is shown
+# -- no completeness/purity, no matched counts, no matched-pair deltas, no
+# recovery split/census. GF_MONITOR_MATCH_STATS=1 restores those panels.
+SHOW_MATCH_STATS = os.environ.get("GF_MONITOR_MATCH_STATS", "0") == "1"
+
 def fig_b64(fig, key, dpi=None):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
@@ -93,6 +102,20 @@ g = f["global_fit"]
 ll_all = g["log_like"][:, 0, 0, :]
 filled = np.where(np.any(ll_all != 0.0, axis=1))[0]
 NIT = int(filled.max()) + 1 if filled.size else 0
+# REWIND-AWARE (2026-08-19): the live row count is the store's ``iteration``
+# attr, NOT the filled-row extent. reset_recipe_stage rewinds by moving that
+# one attr back; the rows beyond it keep their old (dead) contents until the
+# run's next grow() truncates them. Rendering by filled rows alone mixed the
+# discarded pre-rewind trajectory into every panel of a freshly rewound
+# store (leaves climbing to the old values, x-axes past the live range).
+_it_attr = g.attrs.get("iteration")
+REWOUND = _it_attr is not None and 0 < int(_it_attr) < NIT
+if REWOUND:
+    MISSING.append(
+        f"store rewound: iteration attr {int(_it_attr)} < filled rows {NIT}; "
+        f"rendering the live {int(_it_attr)} rows only (the rest is the "
+        "discarded pre-rewind trajectory awaiting truncation).")
+    NIT = int(_it_attr)
 it = np.arange(NIT)
 ll = ll_all[:NIT]                                   # (it, 24)
 recipe = {}
@@ -256,6 +279,23 @@ for root, _, fns in os.walk(RUN_DIR):
         if fn == "globalfit_run.log":
             logpath = os.path.join(root, fn)
 log_text = open(logpath, errors="replace").read() if logpath else ""
+# REWIND-AWARE (2026-08-19): the run log is CUMULATIVE across launches. On a
+# rewound store the segments before the final relaunch describe the DISCARDED
+# trajectory, and every log-parsed panel (band shutoffs, RJ split, acceptance,
+# timing) would mix it into the live run's series. Cut at the last resume
+# marker; non-rewound stores keep the full log (normal resumes continue the
+# same trajectory, so their history is valid).
+if REWOUND and log_text:
+    # Per-launch marker actually present in THIS file: the results rank
+    # prints it once at every process start ("RESUMING from existing
+    # backend" goes to the slurm stdout, not here).
+    _pos = log_text.rfind("starting async save/plot loop")
+    if _pos > 0:
+        _pos = log_text.rfind("\n", 0, _pos) + 1
+        MISSING.append(
+            "log-parsed panels cut to the final launch segment (pre-rewind "
+            f"log history discarded, {_pos/1e6:.1f} MB skipped).")
+        log_text = log_text[_pos:]
 
 # ---- the artifacts directory, found rather than guessed --------------------
 # This used to be built as ``basename(RUN_DIR) + "_artifacts"``, which is only
@@ -1760,49 +1800,50 @@ if TRU is not None:
     # ================= FIGURES ==========================================
     import matplotlib.colors as _mcol
 
-    # ---- F2: completeness AND purity vs GB-search iteration -------------
-    fig, ax = plt.subplots(figsize=(11, 3.8))
-    axr = ax.twinx(); axr.grid(False)
-    for _tag in sorted(ARMS):
-        _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
-        _x = np.arange(_D["n_match"].size) - int(_D["it0"])
-        _k = _x >= 0
-        ax.plot(_x[_k], 100 * _D["n_match"][_k] / NDET, color=_c, lw=2.0,
-                label=f"{_tag} completeness")
-        axr.plot(_x[_k], 100 * _D["n_match"][_k]
-                 / np.maximum(_D["n_band"][_k], 1), color=_c, lw=1.2, ls="--")
-    axr.axhline(100 * CHANCE, color=RED, ls=":", lw=1.2)
-    axr.text(1, 100 * CHANCE, f" {100*CHANCE:.1f}% by chance", color=RED,
-             fontsize=8, va="bottom")
-    ax.set_xlabel("iterations since the first galactic-binary leaf")
-    ax.set_ylabel(f"completeness  [% of {NDET}]")
-    axr.set_ylabel("purity  [% of leaves]  (dashed)", color=DIM, fontsize=9)
-    axr.tick_params(axis="y", colors=DIM, labelsize=8)
-    ax.set_ylim(0, 60); axr.set_ylim(0, 100)
-    ax.legend(fontsize=8, loc="lower right")
-    fig_b64(fig, "f2_progress")
+    if SHOW_MATCH_STATS:
+        # ---- F2: completeness AND purity vs GB-search iteration -------------
+        fig, ax = plt.subplots(figsize=(11, 3.8))
+        axr = ax.twinx(); axr.grid(False)
+        for _tag in sorted(ARMS):
+            _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
+            _x = np.arange(_D["n_match"].size) - int(_D["it0"])
+            _k = _x >= 0
+            ax.plot(_x[_k], 100 * _D["n_match"][_k] / NDET, color=_c, lw=2.0,
+                    label=f"{_tag} completeness")
+            axr.plot(_x[_k], 100 * _D["n_match"][_k]
+                     / np.maximum(_D["n_band"][_k], 1), color=_c, lw=1.2, ls="--")
+        axr.axhline(100 * CHANCE, color=RED, ls=":", lw=1.2)
+        axr.text(1, 100 * CHANCE, f" {100*CHANCE:.1f}% by chance", color=RED,
+                 fontsize=8, va="bottom")
+        ax.set_xlabel("iterations since the first galactic-binary leaf")
+        ax.set_ylabel(f"completeness  [% of {NDET}]")
+        axr.set_ylabel("purity  [% of leaves]  (dashed)", color=DIM, fontsize=9)
+        axr.tick_params(axis="y", colors=DIM, labelsize=8)
+        ax.set_ylim(0, 60); axr.set_ylim(0, 100)
+        ax.legend(fontsize=8, loc="lower right")
+        fig_b64(fig, "f2_progress")
 
-    # ---- F3: match CDF + survival COUNT ---------------------------------
-    fig, ax = plt.subplots(2, 1, figsize=(9.6, 6.0), sharex=True,
-                           gridspec_kw=dict(hspace=0.08))
-    for _tag in sorted(ARMS):
-        _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
-        _m = np.sort(np.asarray(_D["mm"], float))
-        if not _m.size:
-            continue
-        ax[0].plot(_m, np.arange(1, _m.size + 1) / _m.size, color=_c, lw=1.8,
-                   label=f"{_tag}  ({_m.size} matched)")
-        _s, _n = _survival(_m)
-        ax[1].plot(_s, _n, color=_c, lw=1.8)
-    ax[0].set_ylabel("cumulative fraction"); ax[0].set_ylim(0, 1)
-    ax[0].legend(fontsize=8, loc="upper left")
-    ax[1].axhline(NDET, color=FG, ls="--", lw=1.0)
-    ax[1].text(0.02, NDET, f" {NDET} detectable injections", color=FG,
-               fontsize=8, va="bottom")
-    ax[1].set_yscale("log"); ax[1].set_ylim(1, 2500); ax[1].set_xlim(0, 1)
-    ax[1].set_xlabel("phase-maximised overlap with the matched injection")
-    ax[1].set_ylabel("sources at or above")
-    fig_b64(fig, "f3_match")
+        # ---- F3: match CDF + survival COUNT ---------------------------------
+        fig, ax = plt.subplots(2, 1, figsize=(9.6, 6.0), sharex=True,
+                               gridspec_kw=dict(hspace=0.08))
+        for _tag in sorted(ARMS):
+            _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
+            _m = np.sort(np.asarray(_D["mm"], float))
+            if not _m.size:
+                continue
+            ax[0].plot(_m, np.arange(1, _m.size + 1) / _m.size, color=_c, lw=1.8,
+                       label=f"{_tag}  ({_m.size} matched)")
+            _s, _n = _survival(_m)
+            ax[1].plot(_s, _n, color=_c, lw=1.8)
+        ax[0].set_ylabel("cumulative fraction"); ax[0].set_ylim(0, 1)
+        ax[0].legend(fontsize=8, loc="upper left")
+        ax[1].axhline(NDET, color=FG, ls="--", lw=1.0)
+        ax[1].text(0.02, NDET, f" {NDET} detectable injections", color=FG,
+                   fontsize=8, va="bottom")
+        ax[1].set_yscale("log"); ax[1].set_ylim(1, 2500); ax[1].set_xlim(0, 1)
+        ax[1].set_xlabel("phase-maximised overlap with the matched injection")
+        ax[1].set_ylabel("sources at or above")
+        fig_b64(fig, "f3_match")
 
     if RPHYS is not None:
         _rf = RPHYS[:, 1]; _ra_ = RPHYS[:, 0]
@@ -1832,14 +1873,22 @@ if TRU is not None:
         _cb = fig.colorbar(_sc, ax=a_, pad=0.015); _cb.set_label("SNR", fontsize=8)
         _cb.ax.tick_params(labelsize=7)
         b_ = ax[1]
-        b_.scatter(T_F0[~FOUND], T_AMP[~FOUND], s=17, marker="x", color=RED,
-                   lw=0.8, alpha=0.7,
-                   label=f"detectable, not recovered ({int((~FOUND).sum())})")
-        b_.scatter(_rf[~MATCHED], _ra_[~MATCHED], s=22, facecolors="none",
-                   edgecolors=VIOLET, lw=0.8, alpha=0.85,
-                   label=f"recovered, no match ({int((~MATCHED).sum())})")
-        b_.scatter(_rf[MATCHED], _ra_[MATCHED], s=12, color=GREEN, lw=0,
-                   alpha=0.95, label=f"recovered and matched ({int(MATCHED.sum())})")
+        if SHOW_MATCH_STATS:
+            b_.scatter(T_F0[~FOUND], T_AMP[~FOUND], s=17, marker="x", color=RED,
+                       lw=0.8, alpha=0.7,
+                       label=f"detectable, not recovered ({int((~FOUND).sum())})")
+            b_.scatter(_rf[~MATCHED], _ra_[~MATCHED], s=22, facecolors="none",
+                       edgecolors=VIOLET, lw=0.8, alpha=0.85,
+                       label=f"recovered, no match ({int((~MATCHED).sum())})")
+            b_.scatter(_rf[MATCHED], _ra_[MATCHED], s=12, color=GREEN, lw=0,
+                       alpha=0.95, label=f"recovered and matched ({int(MATCHED.sum())})")
+        else:
+            # Neutral overlay -- injections and model in one plane, the eye
+            # does the comparison; no proxy-match classification.
+            b_.scatter(T_F0, T_AMP, s=17, marker="x", color=DIM, lw=0.8,
+                       alpha=0.6, label=f"detectable injections ({NDET})")
+            b_.scatter(_rf, _ra_, s=12, color=GREEN, lw=0, alpha=0.9,
+                       label=f"model sources ({_rf.size})")
         if _athr is not None:
             b_.plot(_fgr, _athr, color=FG, lw=1.5)
         b_.set_xscale("log"); b_.set_yscale("log")
@@ -1862,80 +1911,81 @@ if TRU is not None:
         ax.legend(fontsize=8, loc="upper left")
         fig_b64(fig, "f8_sky")
 
-        # ---- F7: recovered vs injected parameters --------------------------
-        _R = RPHYS[MI]; _T = T_PHYS[TI]
-        _db = DFH / SCI_DF
-        _lnA = np.log(np.maximum(_R[:, 0], 1e-40) / np.maximum(_T[:, 0], 1e-40))
-        _cc = (np.sin(_R[:, 8]) * np.sin(_T[:, 8])
-               + np.cos(_R[:, 8]) * np.cos(_T[:, 8])
-               * np.cos(_R[:, 7] - _T[:, 7]))
-        _sep = np.degrees(np.arccos(np.clip(_cc, -1, 1)))
-        fig, ax = plt.subplots(2, 3, figsize=(13.6, 6.0))
-        ax[0][0].hist(np.clip(_db, -2, 2), bins=40, color=GREEN, alpha=0.9)
-        ax[0][0].axvline(0, color=FG, ls="--", lw=1)
-        ax[0][0].set_xlabel(r"$\Delta f_0$  [FD bins]")
-        ax[0][1].hist(np.clip(_lnA, -2, 2), bins=40, color=GREEN, alpha=0.9)
-        ax[0][1].axvline(0, color=FG, ls="--", lw=1)
-        ax[0][1].set_xlabel(r"$\ln(A_{\rm rec}/A_{\rm cat})$")
-        ax[0][2].hist(_sep, bins=40, color=GREEN, alpha=0.9)
-        ax[0][2].set_xlabel("sky separation [deg]")
-        for _k in range(3):
-            ax[0][_k].set_ylabel("matched sources", fontsize=9)
-        # BOTTOM ROW: error histograms centred on zero, NOT a
-        # recovered-vs-injected scatter with a y = x diagonal -- that idiom
-        # does not appear anywhere in this literature. Zero-centred residual
-        # histograms are what Littenberg 2011 Fig 6 / Strub 2403.15318 Fig 5
-        # use, and they put the bias and the spread on the same axis.
-        _dpsi = (_R[:, 6] - _T[:, 6] + np.pi / 4) % (np.pi / 2) - np.pi / 4
-        _panels = [
-            (np.cos(_R[:, 5]) - np.cos(_T[:, 5]), r"$\Delta$ cos $\iota$", 2.0),
-            (_dpsi, r"$\Delta\psi$ wrapped to $\pi/2$  [rad]", np.pi / 4),
-            ((_R[:, 2] - _T[:, 2]) * 1e16,
-             r"$\Delta\dot f_0$  [$10^{-16}$ Hz/s]", None)]
-        for _ax, (_dv, _lb, _cl) in zip(ax[1], _panels):
-            if _cl is None:
-                _cl = float(np.percentile(np.abs(_dv), 90)) or 1.0
-            _ax.hist(np.clip(_dv, -_cl, _cl), bins=40, color=GREEN, alpha=0.9)
-            _ax.axvline(0, color=FG, ls="--", lw=1)
-            _ax.set_xlabel(_lb)
-            _ax.set_ylabel("matched sources", fontsize=9)
-        fig.tight_layout()
-        fig_b64(fig, "f7_params")
-        # A SECOND encoding of the same matched set, kept deliberately even
-        # though this idiom does not appear in the LISA galactic-binary
-        # literature (which uses zero-centred error histograms, above). It
-        # answers a different question: the histogram shows the size of the
-        # error, the diagonal shows whether the parameter is being RECOVERED
-        # at all, i.e. whether the points know about the injected value or
-        # merely scatter over the prior. For cos iota at these signal
-        # strengths those are visibly different statements.
-        fig, ax2 = plt.subplots(1, 3, figsize=(13.6, 3.5))
-        _sc_panels = [
-            (np.cos(_R[:, 5]), np.cos(_T[:, 5]), r"cos $\iota$", None),
-            (_R[:, 6] % (np.pi / 2), _T[:, 6] % (np.pi / 2),
-             r"$\psi$ mod $\pi/2$  [rad]", None),
-            (_R[:, 2] * 1e16, _T[:, 2] * 1e16,
-             r"$\dot f_0$  [$10^{-16}$ Hz/s]", 98.0)]
-        for _ax, (_rv, _tv, _lb, _q) in zip(ax2, _sc_panels):
-            _ax.scatter(_tv, _rv, s=10, color=GREEN, alpha=0.6, lw=0)
-            if _q is None:
-                _l2 = min(np.min(_tv), np.min(_rv))
-                _h2 = max(np.max(_tv), np.max(_rv))
-            else:
-                _l2, _h2 = np.percentile(_tv, [100 - _q, _q])
-                _pd2 = 0.8 * (_h2 - _l2); _l2 -= _pd2; _h2 += _pd2
-            _ax.plot([_l2, _h2], [_l2, _h2], color=FG, ls="--", lw=1.1)
-            _ax.set_xlim(_l2, _h2); _ax.set_ylim(_l2, _h2)
-            _ax.set_xlabel("injected  " + _lb)
-            _ax.set_ylabel("recovered", fontsize=9)
-        fig.tight_layout()
-        fig_b64(fig, "f7_scatter")
-        SCI["ci_corr"] = float(np.corrcoef(np.cos(_R[:, 5]),
-                                           np.cos(_T[:, 5]))[0, 1])
-        SCI.update(df_tight=float(np.mean(np.abs(_db) < 0.5)),
-                   lnA_med=float(np.median(np.abs(_lnA))),
-                   sep_med=float(np.median(_sep)),
-                   sep_tight=float(np.mean(_sep < 10.0)))
+        if SHOW_MATCH_STATS:
+            # ---- F7: recovered vs injected parameters --------------------------
+            _R = RPHYS[MI]; _T = T_PHYS[TI]
+            _db = DFH / SCI_DF
+            _lnA = np.log(np.maximum(_R[:, 0], 1e-40) / np.maximum(_T[:, 0], 1e-40))
+            _cc = (np.sin(_R[:, 8]) * np.sin(_T[:, 8])
+                   + np.cos(_R[:, 8]) * np.cos(_T[:, 8])
+                   * np.cos(_R[:, 7] - _T[:, 7]))
+            _sep = np.degrees(np.arccos(np.clip(_cc, -1, 1)))
+            fig, ax = plt.subplots(2, 3, figsize=(13.6, 6.0))
+            ax[0][0].hist(np.clip(_db, -2, 2), bins=40, color=GREEN, alpha=0.9)
+            ax[0][0].axvline(0, color=FG, ls="--", lw=1)
+            ax[0][0].set_xlabel(r"$\Delta f_0$  [FD bins]")
+            ax[0][1].hist(np.clip(_lnA, -2, 2), bins=40, color=GREEN, alpha=0.9)
+            ax[0][1].axvline(0, color=FG, ls="--", lw=1)
+            ax[0][1].set_xlabel(r"$\ln(A_{\rm rec}/A_{\rm cat})$")
+            ax[0][2].hist(_sep, bins=40, color=GREEN, alpha=0.9)
+            ax[0][2].set_xlabel("sky separation [deg]")
+            for _k in range(3):
+                ax[0][_k].set_ylabel("matched sources", fontsize=9)
+            # BOTTOM ROW: error histograms centred on zero, NOT a
+            # recovered-vs-injected scatter with a y = x diagonal -- that idiom
+            # does not appear anywhere in this literature. Zero-centred residual
+            # histograms are what Littenberg 2011 Fig 6 / Strub 2403.15318 Fig 5
+            # use, and they put the bias and the spread on the same axis.
+            _dpsi = (_R[:, 6] - _T[:, 6] + np.pi / 4) % (np.pi / 2) - np.pi / 4
+            _panels = [
+                (np.cos(_R[:, 5]) - np.cos(_T[:, 5]), r"$\Delta$ cos $\iota$", 2.0),
+                (_dpsi, r"$\Delta\psi$ wrapped to $\pi/2$  [rad]", np.pi / 4),
+                ((_R[:, 2] - _T[:, 2]) * 1e16,
+                 r"$\Delta\dot f_0$  [$10^{-16}$ Hz/s]", None)]
+            for _ax, (_dv, _lb, _cl) in zip(ax[1], _panels):
+                if _cl is None:
+                    _cl = float(np.percentile(np.abs(_dv), 90)) or 1.0
+                _ax.hist(np.clip(_dv, -_cl, _cl), bins=40, color=GREEN, alpha=0.9)
+                _ax.axvline(0, color=FG, ls="--", lw=1)
+                _ax.set_xlabel(_lb)
+                _ax.set_ylabel("matched sources", fontsize=9)
+            fig.tight_layout()
+            fig_b64(fig, "f7_params")
+            # A SECOND encoding of the same matched set, kept deliberately even
+            # though this idiom does not appear in the LISA galactic-binary
+            # literature (which uses zero-centred error histograms, above). It
+            # answers a different question: the histogram shows the size of the
+            # error, the diagonal shows whether the parameter is being RECOVERED
+            # at all, i.e. whether the points know about the injected value or
+            # merely scatter over the prior. For cos iota at these signal
+            # strengths those are visibly different statements.
+            fig, ax2 = plt.subplots(1, 3, figsize=(13.6, 3.5))
+            _sc_panels = [
+                (np.cos(_R[:, 5]), np.cos(_T[:, 5]), r"cos $\iota$", None),
+                (_R[:, 6] % (np.pi / 2), _T[:, 6] % (np.pi / 2),
+                 r"$\psi$ mod $\pi/2$  [rad]", None),
+                (_R[:, 2] * 1e16, _T[:, 2] * 1e16,
+                 r"$\dot f_0$  [$10^{-16}$ Hz/s]", 98.0)]
+            for _ax, (_rv, _tv, _lb, _q) in zip(ax2, _sc_panels):
+                _ax.scatter(_tv, _rv, s=10, color=GREEN, alpha=0.6, lw=0)
+                if _q is None:
+                    _l2 = min(np.min(_tv), np.min(_rv))
+                    _h2 = max(np.max(_tv), np.max(_rv))
+                else:
+                    _l2, _h2 = np.percentile(_tv, [100 - _q, _q])
+                    _pd2 = 0.8 * (_h2 - _l2); _l2 -= _pd2; _h2 += _pd2
+                _ax.plot([_l2, _h2], [_l2, _h2], color=FG, ls="--", lw=1.1)
+                _ax.set_xlim(_l2, _h2); _ax.set_ylim(_l2, _h2)
+                _ax.set_xlabel("injected  " + _lb)
+                _ax.set_ylabel("recovered", fontsize=9)
+            fig.tight_layout()
+            fig_b64(fig, "f7_scatter")
+            SCI["ci_corr"] = float(np.corrcoef(np.cos(_R[:, 5]),
+                                               np.cos(_T[:, 5]))[0, 1])
+            SCI.update(df_tight=float(np.mean(np.abs(_db) < 0.5)),
+                       lnA_med=float(np.median(np.abs(_lnA))),
+                       sep_med=float(np.median(_sep)),
+                       sep_tight=float(np.mean(_sep < 10.0)))
 
     # ---- F5: source counts vs frequency --------------------------------
     _f0_cat = None
@@ -1950,58 +2000,75 @@ if TRU is not None:
     _hdet, _ = np.histogram(T_F0, bins=_eds)
     _hrec, _ = np.histogram(T_F0[FOUND], bins=_eds)
     _fc = np.sqrt(_eds[:-1] * _eds[1:])
-    fig, ax = plt.subplots(2, 1, figsize=(10.6, 5.3), sharex=True,
-                           gridspec_kw=dict(height_ratios=[2, 1], hspace=0.08))
+    if SHOW_MATCH_STATS:
+        fig, ax = plt.subplots(2, 1, figsize=(10.6, 5.3), sharex=True,
+                               gridspec_kw=dict(height_ratios=[2, 1],
+                                                hspace=0.08))
+        ax0, ax1 = ax[0], ax[1]
+    else:
+        # Match-free variant: density comparison only (model leaves vs the
+        # truth populations), no recovered-fraction panel.
+        fig, ax0 = plt.subplots(figsize=(10.6, 3.9))
+        ax1 = None
     if _f0_cat is not None:
         _m = (_f0_cat >= FLO) & (_f0_cat <= FHI)
         _hall, _ = np.histogram(_f0_cat[_m], bins=_eds)
-        ax[0].stairs(_hall, _eds, color=DIM, fill=True, alpha=0.4,
-                     label=f"all catalogue ({int(_m.sum()):,})")
+        ax0.stairs(_hall, _eds, color=DIM, fill=True, alpha=0.4,
+                   label=f"all catalogue ({int(_m.sum()):,})")
         SCI["n_cat_band"] = int(_m.sum())
-    ax[0].stairs(_hdet, _eds, color=CYAN, lw=1.7, label=f"detectable ({NDET})")
-    ax[0].stairs(_hrec, _eds, color=GREEN, fill=True, alpha=0.9,
-                 label=f"recovered ({int(FOUND.sum())})")
-    ax[0].set_yscale("log"); ax[0].set_ylim(0.5, None)
-    ax[0].set_ylabel("sources per bin"); ax[0].legend(fontsize=8)
-    _lo, _hi = _wilson(_hrec, _hdet)
-    _fr = np.where(_hdet > 0, _hrec / np.maximum(_hdet, 1), np.nan)
-    ax[1].errorbar(_fc, 100 * _fr,
-                   yerr=[100 * (_fr - _lo), 100 * (_hi - _fr)], fmt="o",
-                   ms=3.5, color=GREEN, ecolor=GREEN, alpha=0.9, capsize=2)
-    ax[1].set_xscale("log"); ax[1].set_ylim(0, 100)
-    ax[1].set_xlabel("Frequency [Hz]"); ax[1].set_ylabel("recovered [%]")
+    ax0.stairs(_hdet, _eds, color=CYAN, lw=1.7, label=f"detectable ({NDET})")
+    if SHOW_MATCH_STATS:
+        ax0.stairs(_hrec, _eds, color=GREEN, fill=True, alpha=0.9,
+                   label=f"recovered ({int(FOUND.sum())})")
+    else:
+        _hmod, _ = np.histogram(_rf, bins=_eds)
+        ax0.stairs(_hmod, _eds, color=GREEN, fill=True, alpha=0.9,
+                   label=f"model sources ({int(_rf.size)})")
+    ax0.set_yscale("log"); ax0.set_ylim(0.5, None)
+    ax0.set_ylabel("sources per bin"); ax0.legend(fontsize=8)
+    if ax1 is not None:
+        _lo, _hi = _wilson(_hrec, _hdet)
+        _fr = np.where(_hdet > 0, _hrec / np.maximum(_hdet, 1), np.nan)
+        ax1.errorbar(_fc, 100 * _fr,
+                     yerr=[100 * (_fr - _lo), 100 * (_hi - _fr)], fmt="o",
+                     ms=3.5, color=GREEN, ecolor=GREEN, alpha=0.9, capsize=2)
+        ax1.set_xscale("log"); ax1.set_ylim(0, 100)
+        ax1.set_xlabel("Frequency [Hz]"); ax1.set_ylabel("recovered [%]")
+    else:
+        ax0.set_xscale("log"); ax0.set_xlabel("Frequency [Hz]")
     fig_b64(fig, "f5_counts")
 
-    # ---- F6: completeness vs SNR, with Wilson intervals ------------------
-    _seds = np.array([7, 10, 15, 25, 1e9])
-    _lab = ["7-10", "10-15", "15-25", "25+"]
-    fig, ax = plt.subplots(figsize=(9.0, 3.7))
-    _tags = sorted(ARMS)
-    for _q, _tag in enumerate(_tags):
-        _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
-        _fnd = np.zeros(NDET, bool); _fnd[np.asarray(_D["ti"], int)] = True
-        _x, _y, _el, _eh = [], [], [], []
+    if SHOW_MATCH_STATS:
+        # ---- F6: completeness vs SNR, with Wilson intervals ------------------
+        _seds = np.array([7, 10, 15, 25, 1e9])
+        _lab = ["7-10", "10-15", "15-25", "25+"]
+        fig, ax = plt.subplots(figsize=(9.0, 3.7))
+        _tags = sorted(ARMS)
+        for _q, _tag in enumerate(_tags):
+            _D = ARMS[_tag]; _c = ARM_COL.get(_tag, GREEN)
+            _fnd = np.zeros(NDET, bool); _fnd[np.asarray(_D["ti"], int)] = True
+            _x, _y, _el, _eh = [], [], [], []
+            for _j, (_a2, _b2) in enumerate(zip(_seds[:-1], _seds[1:])):
+                _m = (T_SNR >= _a2) & (T_SNR < _b2)
+                if not _m.sum():
+                    continue
+                _p = _fnd[_m].mean()
+                _l, _h = _wilson(_fnd[_m].sum(), _m.sum())
+                _x.append(_j + (_q - (len(_tags) - 1) / 2) * 0.10)
+                _y.append(100 * _p); _el.append(100 * (_p - _l))
+                _eh.append(100 * (_h - _p))
+            _n = int(_D["n_match"][-1])
+            _g = int(_D["n_match"].size) - 1 - int(_D["it0"])
+            ax.errorbar(_x, _y, yerr=[_el, _eh], fmt="o-", ms=5, color=_c, lw=1.6,
+                        capsize=3, label=f"{_tag}, {_g} GB-search iterations")
         for _j, (_a2, _b2) in enumerate(zip(_seds[:-1], _seds[1:])):
             _m = (T_SNR >= _a2) & (T_SNR < _b2)
-            if not _m.sum():
-                continue
-            _p = _fnd[_m].mean()
-            _l, _h = _wilson(_fnd[_m].sum(), _m.sum())
-            _x.append(_j + (_q - (len(_tags) - 1) / 2) * 0.10)
-            _y.append(100 * _p); _el.append(100 * (_p - _l))
-            _eh.append(100 * (_h - _p))
-        _n = int(_D["n_match"][-1])
-        _g = int(_D["n_match"].size) - 1 - int(_D["it0"])
-        ax.errorbar(_x, _y, yerr=[_el, _eh], fmt="o-", ms=5, color=_c, lw=1.6,
-                    capsize=3, label=f"{_tag}, {_g} GB-search iterations")
-    for _j, (_a2, _b2) in enumerate(zip(_seds[:-1], _seds[1:])):
-        _m = (T_SNR >= _a2) & (T_SNR < _b2)
-        ax.text(_j, 3, f"n={int(_m.sum())}", ha="center", color=DIM, fontsize=8)
-    ax.set_xticks(range(len(_lab))); ax.set_xticklabels(_lab)
-    ax.set_xlabel("optimal SNR of the injection")
-    ax.set_ylabel("recovered [%]"); ax.set_ylim(0, 100)
-    ax.legend(fontsize=8, loc="upper left")
-    fig_b64(fig, "f6_snr")
+            ax.text(_j, 3, f"n={int(_m.sum())}", ha="center", color=DIM, fontsize=8)
+        ax.set_xticks(range(len(_lab))); ax.set_xticklabels(_lab)
+        ax.set_xlabel("optimal SNR of the injection")
+        ax.set_ylabel("recovered [%]"); ax.set_ylim(0, 100)
+        ax.legend(fontsize=8, loc="upper left")
+        fig_b64(fig, "f6_snr")
 
     # ---- F10: nearest-neighbour separation survival ----------------------
     fig, ax = plt.subplots(figsize=(9.8, 4.0))
@@ -2773,7 +2840,10 @@ def pct(x, d=1):
 # search steps. Everything below is indexed on iterations SINCE the first GB
 # leaf, and the table is cut at the shorter arm's length.
 ARM_TABLE = ""
-if len(ARMS) >= 2 and SCI:
+# ARMS is built inside the GB-analysis section, which a very young store
+# (too few GB iterations for the match machinery) skips entirely -- the
+# cross-arm table then simply has no data to show.
+if len(globals().get("ARMS", {})) >= 2 and SCI and SHOW_MATCH_STATS:
     _K = min(int(D["n_match"].size) - 1 - int(D["it0"]) for D in ARMS.values())
     _rows = []
     for _t in sorted(ARMS):
@@ -2848,6 +2918,24 @@ if SCI:
         f"half a bin against {pct(SCI.get('nn_half_t', 0), 1)} of injections.")
 else:
     cap_f2 = cap_f3 = cap_f4 = cap_f5 = cap_f6 = cap_f7 = cap_f8 = cap_f10 = ""
+if SCI and not SHOW_MATCH_STATS:
+    # Match-criterion content is gated off this page (user ruling
+    # 2026-08-19): truths stay in every overlay, but nothing is classified
+    # or counted by the page's own 2-bin proxy match.
+    cap_f4 = (
+        "Left: every model source in the amplitude-frequency plane, "
+        "coloured by optimal SNR, over the detectable injections (grey). "
+        "Right: injections and model overlaid in the same plane. The "
+        "comparison is visual; no match criterion is applied on this page.")
+    cap_f5 = (
+        "Source density per frequency bin: the full catalogue, its "
+        "detectable subset, and the model population. The gap between the "
+        "green and cyan curves is read by eye; no per-source matching is "
+        "applied.")
+    cap_f10 = (
+        "How close model sources sit to each other in frequency, against "
+        "the same distribution for the injections. Sub-bin spacing in the "
+        "model relative to the injections indicates template sharing.")
 
 if DTR:
     _d = DTR
@@ -2924,7 +3012,7 @@ NOISE_TXT = " and ".join(f"{100 * b:+.1f}%" for b in NOISE_BIAS)
 # from the top of a status page is how far each arm got and whether to trust it
 # as converged.
 _arm_bits = []
-for _t in sorted(ARMS):
+for _t in sorted(globals().get("ARMS", {})):
     _D = ARMS[_t]
     _arm_bits.append(f"{_t} has completed "
                      f"{int(_D['n_match'].size) - 1 - int(_D['it0'])} "
@@ -2941,19 +3029,70 @@ RUN_HEALTH = (
 missing_html = "".join(f"<li>{m}</li>" for m in MISSING)
 
 
+# ---- match-criterion fragments (SHOW_MATCH_STATS gate) --------------------
+if SHOW_MATCH_STATS:
+    KPI_MATCH = f"""  <div><b>{SCI.get("n_match", 0):,}</b><span>matched to an injection</span></div>
+  <div><b>{pct(SCI["completeness"]) if SCI else "&mdash;"}</b><span>completeness</span></div>
+  <div><b>{pct(SCI["purity"]) if SCI else "&mdash;"}</b><span>purity</span></div>"""
+    REC_MATCH_PANELS = f"""<div class="panel">{img("f2_progress", "completeness and purity vs GB-search iteration")}
+<div class="caption">{cap_f2}</div></div>
+<div class="panel">{img("f3_match", "overlap CDF and survival count")}
+<div class="caption">{cap_f3}</div></div>
+<div class="panel">{img("f6_snr", "completeness vs SNR")}
+<div class="caption">{cap_f6}</div></div>"""
+    PARAMS_SECTION = f"""<section id="params"><h2>Parameter Recovery</h2>
+<div class="panel">{img("f7_params", "recovered minus injected parameters")}
+<div class="caption">{cap_f7}<br><em>Distance, chirp mass and the frequency-derivative
+ratio are not shown: the likelihood constrains only their combinations, so scatter
+along that direction is degeneracy, not error.</em></div></div>
+<div class="panel">{img("f7_scatter", "recovered vs injected")}
+<div class="caption">The same matched sources as recovered against injected, with the
+diagonal. The histograms above size the error; this asks whether the parameter is
+constrained at all. Inclination correlates at {SCI.get("ci_corr", float("nan")):.2f}.
+<em>Our encoding, not a field convention.</em></div></div>
+</section>"""
+    CENSUS_PANEL = f"""<div class="panel">{img("gb_hi_f_census", "high-frequency recovery census")}
+<div class="caption">{CENSUS_TXT} Left is the raw census: every catalogue source above the
+cut, green where the maximum-likelihood walker holds a leaf on it. Middle is the health
+test &mdash; recovery must be monotonic in signal-to-noise, and it is, which says adding is
+signal-ordered rather than arbitrary. Right is the ceiling: bars to the right of the dashed
+line are cells holding more detectable sources than the cap allows.</div></div>"""
+    F10_BLEND_NOTE = ("<br><em>Two blending modes sit at the two ends: below "
+                      "the tolerance, several templates share one injection; "
+                      "far above it, one template can still straddle a pair "
+                      "of injections that the catalogue resolves.</em>")
+    NAV_PARAMS = '<a href="#params">parameters</a>'
+    OPEN_ITEMS = f"""<strong>Open items.</strong> Purity is {pct(SCI["purity"]) if SCI else "&mdash;"}
+against a {pct(SCI["chance"], 1) if SCI else "2.2%"} chance rate, so the matches are
+real, but {SCI.get("n_unmatched", 0)} model sources have no detectable counterpart and
+{SCI.get("blend_b", 0)} of those sit on an injection another source already claims.
+Neither arm has converged."""
+else:
+    KPI_MATCH = REC_MATCH_PANELS = PARAMS_SECTION = CENSUS_PANEL = ""
+    F10_BLEND_NOTE = NAV_PARAMS = ""
+    OPEN_ITEMS = (
+        "<strong>Open items.</strong> Quantitative match-vs-catalogue "
+        "statistics are intentionally absent from this page: the physical "
+        "phase-maximised overlap match is computed offline, and the page's "
+        "own 2-bin frequency proxy is not quoted as a number. The catalogue "
+        "truths appear in the visual overlays only. The run has not "
+        "converged.")
+
 html = f"""<title>LISA Global Fit {RUN_LABEL}</title>
 <style>
 :root {{
   --bg:#0A0E14; --panel:#10161F; --line:#223041; --fg:#B8C6D4; --dim:#67788A;
   --cyan:#4FD8EB; --amber:#F5A623; --green:#58C48A; --red:#E5484D; --violet:#9B7BFF;
-  /* Catalogue-truth marks only. Deeper and more saturated than --red so
-     30k crosses read as a deliberate overlay rather than a pink haze, and
-     so they stay distinct from the green recovery circles they sit under. */
-  --truthred:#C41220;
+  /* Catalogue-truth marks only. BRIGHT, not deep (2026-08-19): the earlier
+     #C41220 was chosen to keep 30k crosses from reading as a pink haze, but
+     on the #0A0E14 panel it went muddy and the crosses were unreadable
+     against the green recovery circles. Legibility of the overlay wins --
+     the haze worry is handled by the per-cross alpha instead. */
+  --truthred:#FF2E3E;
 }}
 :root[data-theme="light"] {{
   --bg:#EEF1F5; --panel:#FFFFFF; --line:#D4DBE3; --fg:#25313D; --dim:#5D6B7A;
-  --truthred:#A50F1B;
+  --truthred:#E00016;
 }}
 * {{ box-sizing:border-box; }}
 body {{ background:var(--bg); color:var(--fg); font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; margin:0; }}
@@ -3009,7 +3148,7 @@ ul {{ color:var(--dim); font-size:13px; }}
 <nav>
   <a href="#status">status</a><a href="#resid">residual</a>
   <a href="#recovery">recovery</a><a href="#population">population</a><a href="#vgb">vgb zoom</a>
-  <a href="#params">parameters</a><a href="#search">search &amp; cap cells</a>
+  {NAV_PARAMS}<a href="#search">search &amp; cap cells</a>
   <a href="#fstat">f-stat</a><a href="#noise">noise</a>
   <a href="#vgb">verification binaries</a><a href="#detect">detectability</a>
   <a href="#appendix">appendix</a>
@@ -3020,9 +3159,7 @@ ul {{ color:var(--dim); font-size:13px; }}
 <div class="kpi">
   <div><b>{SCI.get("ngbit", 0)}</b><span>GB search iterations</span></div>
   <div><b>{SCI.get("n_all", int(gb_counts[-1].max())):,}</b><span>model sources</span></div>
-  <div><b>{SCI.get("n_match", 0):,}</b><span>matched to an injection</span></div>
-  <div><b>{pct(SCI["completeness"]) if SCI else "&mdash;"}</b><span>completeness</span></div>
-  <div><b>{pct(SCI["purity"]) if SCI else "&mdash;"}</b><span>purity</span></div>
+{KPI_MATCH}
   <div><b>{VGB_N_DET}</b><span>verification binaries above SNR 7</span></div>
 </div>
 <p style="font-size:13px">{RUN_HEALTH}</p>
@@ -3054,12 +3191,7 @@ the residual by construction.</div>
 </section>
 
 <section id="recovery"><h2>Recovery</h2>
-<div class="panel">{img("f2_progress", "completeness and purity vs GB-search iteration")}
-<div class="caption">{cap_f2}</div></div>
-<div class="panel">{img("f3_match", "overlap CDF and survival count")}
-<div class="caption">{cap_f3}</div></div>
-<div class="panel">{img("f6_snr", "completeness vs SNR")}
-<div class="caption">{cap_f6}</div></div>
+{REC_MATCH_PANELS}
 <div class="panel">{img("f5_counts", "source counts vs frequency")}
 <div class="caption">{cap_f5}</div></div>
 </section>
@@ -3070,9 +3202,7 @@ the residual by construction.</div>
 <div class="panel">{img("f8_sky", "sky distribution")}
 <div class="caption">{cap_f8}</div></div>
 <div class="panel">{img("f10_nn", "nearest-neighbour separation")}
-<div class="caption">{cap_f10}<br><em>Two blending modes sit at the two ends: below
-the tolerance, several templates share one injection; far above it, one template can
-still straddle a pair of injections that the catalogue resolves.</em></div></div>
+<div class="caption">{cap_f10}{F10_BLEND_NOTE}</div></div>
 
 <div class="caption" style="margin-top:18px"><strong>Zoom in.</strong> The static panels above are the whole band at once; these two are pannable and zoomable, which is the only way to read an individual galactic binary against its injected counterpart.</div>
 <div class="panel">
@@ -3093,7 +3223,10 @@ still straddle a pair of injections that the catalogue resolves.</em></div></div
 <canvas id="expl"></canvas>
 <div class="caption" id="expl_cap"></div>
 <div class="caption">Zoomable version of the amplitude-frequency plane: green =
-model sources, grey crosses = the injected catalogue.</div>
+model sources, red crosses = the injected catalogue. Drag to pan and use the
+wheel to zoom, or set the view numerically with the centre and width/height
+controls above &mdash; those hold the window size fixed and slide it across
+the band, which is the steadier way to walk through frequency.</div>
 </div>
 
 <div class="panel">
@@ -3113,17 +3246,7 @@ where a source lies within {MATCH_BINS:.0f} bins.</div>
 
 </section>
 
-<section id="params"><h2>Parameter Recovery</h2>
-<div class="panel">{img("f7_params", "recovered minus injected parameters")}
-<div class="caption">{cap_f7}<br><em>Distance, chirp mass and the frequency-derivative
-ratio are not shown: the likelihood constrains only their combinations, so scatter
-along that direction is degeneracy, not error.</em></div></div>
-<div class="panel">{img("f7_scatter", "recovered vs injected")}
-<div class="caption">The same matched sources as recovered against injected, with the
-diagonal. The histograms above size the error; this asks whether the parameter is
-constrained at all. Inclination correlates at {SCI.get("ci_corr", float("nan")):.2f}.
-<em>Our encoding, not a field convention.</em></div></div>
-</section>
+{PARAMS_SECTION}
 
 <section id="search"><h2>Search &amp; Cap Cells</h2>
 <div class="panel">{img("gb_birth_fate", "birth-fate breakdown")}
@@ -3154,12 +3277,7 @@ nothing in them yet.</div></div>
 got: summing the detectable sources a cell cannot admit gives the ceiling the sampler can
 never beat. A finer grid beats simply raising the cap, because a higher cap permits several
 sources inside one cell, which is the stacking the rule exists to stop.</div></div>
-<div class="panel">{img("gb_hi_f_census", "high-frequency recovery census")}
-<div class="caption">{CENSUS_TXT} Left is the raw census: every catalogue source above the
-cut, green where the maximum-likelihood walker holds a leaf on it. Middle is the health
-test &mdash; recovery must be monotonic in signal-to-noise, and it is, which says adding is
-signal-ordered rather than arbitrary. Right is the ceiling: bars to the right of the dashed
-line are cells holding more detectable sources than the cap allows.</div></div>
+{CENSUS_PANEL}
 </section>
 
 <section id="fstat"><h2>F-statistic Fit</h2>
@@ -3309,11 +3427,7 @@ toward the cut found a loudest SNR of 4.36 and none above 7. Overlaps and parame
 comparisons on this page are recomputed at the last stored iteration, not carried over
 from earlier snapshots.
 <br><br>
-<strong>Open items.</strong> Purity is {pct(SCI["purity"]) if SCI else "&mdash;"}
-against a {pct(SCI["chance"], 1) if SCI else "2.2%"} chance rate, so the matches are
-real, but {SCI.get("n_unmatched", 0)} model sources have no detectable counterpart and
-{SCI.get("blend_b", 0)} of those sit on an injection another source already claims.
-Neither arm has converged.</div>
+{OPEN_ITEMS}</div>
 
 <div class="caption" style="margin-top:22px"><strong>Run mechanics.</strong> Engineering
 instrumentation &mdash; where the wall time goes, what the devices are holding, and whether
@@ -3554,8 +3668,17 @@ function viewCtl(px, cv, api) {{
   const dpr = window.devicePixelRatio || 1;
   function draw() {{
     const w = cv.clientWidth, h = cv.clientHeight;
-    cv.width = w * dpr; cv.height = h * dpr;
-    const g = cv.getContext("2d"); g.scale(dpr, dpr);
+    // RESIZE ONLY WHEN THE SIZE ACTUALLY CHANGES (2026-08-19). Assigning to
+    // cv.width reallocates the backing store and resets all context state.
+    // Doing it every frame -- while panning, at pointer-event rate -- was
+    // the biggest cost in these canvases: a multi-megabyte buffer thrown
+    // away and rebuilt per pointermove.
+    const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (cv.width !== bw || cv.height !== bh) {{ cv.width = bw; cv.height = bh; }}
+    const g = cv.getContext("2d");
+    // setTransform, not scale: scale() would compound now that the buffer
+    // (and with it the identity transform) survives between frames.
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = C("--panel"); g.fillRect(0, 0, w, h);
     const ml = 56, mb = 30, mt = 8, mr = 10;
     const sx = x => ml + (x - X0) / (X1 - X0) * (w - ml - mr);
@@ -3588,6 +3711,13 @@ function viewCtl(px, cv, api) {{
     g.globalAlpha = 1;
     syncCtl();
   }}
+  // See the explorer canvas below for why pan/zoom redraws are coalesced
+  // into animation frames rather than run per pointer event.
+  let raf = 0;
+  const redraw = () => {{
+    if (raf) return;
+    raf = requestAnimationFrame(() => {{ raf = 0; draw(); }});
+  }};
   let drag = null;
   cv.addEventListener("pointerdown", e => {{ drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); }});
   cv.addEventListener("pointermove", e => {{
@@ -3595,15 +3725,28 @@ function viewCtl(px, cv, api) {{
     const w = cv.clientWidth, h = cv.clientHeight;
     const dx = (e.clientX - drag[0]) / (w - 66) * (X1 - X0);
     const dy = (e.clientY - drag[1]) / (h - 38) * (Y1 - Y0);
-    X0 -= dx; X1 -= dx; Y0 += dy; Y1 += dy; drag = [e.clientX, e.clientY]; draw();
+    X0 -= dx; X1 -= dx; Y0 += dy; Y1 += dy; drag = [e.clientX, e.clientY]; redraw();
   }});
   cv.addEventListener("pointerup", () => drag = null);
+  // ZOOM ABOUT THE CURSOR, NOT THE VIEW CENTRE (2026-08-19). Centre-anchored
+  // zoom is what made this canvas hard to drive: the source you were aiming
+  // at slid out of frame as you zoomed, so reaching one binary meant
+  // alternating zoom and pan several times. Anchoring on the pointer holds
+  // whatever is under the cursor still, the way every map-style UI behaves.
   cv.addEventListener("wheel", e => {{
     e.preventDefault();
     const s = e.deltaY > 0 ? 1.15 : 0.87;
-    const cx = (X0 + X1) / 2, cyy = (Y0 + Y1) / 2;
-    X0 = cx + (X0 - cx) * s; X1 = cx + (X1 - cx) * s;
-    Y0 = cyy + (Y0 - cyy) * s; Y1 = cyy + (Y1 - cyy) * s; draw();
+    const r = cv.getBoundingClientRect();
+    const w = cv.clientWidth, h = cv.clientHeight;
+    const ml = 56, mb = 30, mt = 8, mr = 10;
+    const cl = v => Math.max(0, Math.min(1, v));
+    // fraction across the plot box; clamped so a cursor sitting in the axis
+    // margins anchors at the edge instead of flinging the view sideways
+    const fx = cl((e.clientX - r.left - ml) / (w - ml - mr));
+    const fy = cl((h - mb - (e.clientY - r.top)) / (h - mb - mt));
+    const ax = X0 + fx * (X1 - X0), ay = Y0 + fy * (Y1 - Y0);
+    X0 = ax + (X0 - ax) * s; X1 = ax + (X1 - ax) * s;
+    Y0 = ay + (Y0 - ay) * s; Y1 = ay + (Y1 - ay) * s; redraw();
   }}, {{ passive: false }});
   document.getElementById("vgbpost_reset").onclick = () => {{ full(); draw(); }};
   syncCtl = viewCtl("vgbpost", cv, {{
@@ -3611,7 +3754,7 @@ function viewCtl(px, cv, api) {{
     set: (a, b, c, d) => {{ X0 = a; X1 = b; Y0 = c; Y1 = d; draw(); }},
     fullW: FW, fullH: FH,
   }}).sync;
-  new ResizeObserver(draw).observe(cv);
+  new ResizeObserver(redraw).observe(cv);
   draw();
 }})();
 (() => {{
@@ -3648,8 +3791,17 @@ function viewCtl(px, cv, api) {{
   const dpr = window.devicePixelRatio || 1;
   function draw() {{
     const w = cv.clientWidth, h = cv.clientHeight;
-    cv.width = w * dpr; cv.height = h * dpr;
-    const g = cv.getContext("2d"); g.scale(dpr, dpr);
+    // RESIZE ONLY WHEN THE SIZE ACTUALLY CHANGES (2026-08-19). Assigning to
+    // cv.width reallocates the backing store and resets all context state.
+    // Doing it every frame -- while panning, at pointer-event rate -- was
+    // the biggest cost in these canvases: a multi-megabyte buffer thrown
+    // away and rebuilt per pointermove.
+    const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (cv.width !== bw || cv.height !== bh) {{ cv.width = bw; cv.height = bh; }}
+    const g = cv.getContext("2d");
+    // setTransform, not scale: scale() would compound now that the buffer
+    // (and with it the identity transform) survives between frames.
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.fillStyle = C("--panel"); g.fillRect(0, 0, w, h);
     const ml = 56, mb = 30, mt = 8, mr = 10;
     const sx = x => ml + (x - X0) / (X1 - X0) * (w - ml - mr);
@@ -3674,7 +3826,10 @@ function viewCtl(px, cv, api) {{
       // thing the recovered cloud is being judged against. An open glyph
       // also stays legible UNDER the filled recovery circles, which a
       // solid marker of this size would not.
-      g.strokeStyle = C("--dim"); g.globalAlpha = 0.85;
+      // --truthred, NOT --dim (2026-08-19). The colour was defined for
+      // exactly these marks and never wired up, so the crosses rendered
+      // grey and the caption's "Catalogue truths (red)" was a lie.
+      g.strokeStyle = C("--truthred"); g.globalAlpha = 0.9;
       g.lineWidth = 1.5; g.lineCap = "round";
       const r = 3.4;
       g.beginPath();
@@ -3686,16 +3841,34 @@ function viewCtl(px, cv, api) {{
       }}
       g.stroke();
     }}
-    const col = hasGB ? C("--green") : C("--violet");
+    // ONE PATH, ONE FILL (2026-08-19). This used to open a path and issue a
+    // separate fill() per point -- 5k+ draw calls per frame. Batching every
+    // dot into a single path costs one fill. The moveTo before each arc is
+    // required: without it consecutive arcs are joined by a straight line.
+    g.globalAlpha = 0.55;
+    g.fillStyle = hasGB ? C("--green") : C("--violet");
+    g.beginPath();
     for (const p of pts) {{
       const x = sx(p[0]), y = sy(p[1]);
       if (x < ml || x > w - mr || y < mt || y > h - mb) continue;
-      g.globalAlpha = 0.55; g.fillStyle = col;
-      g.beginPath(); g.arc(x, y, 2.2, 0, 6.29); g.fill();
+      g.moveTo(x + 2.2, y); g.arc(x, y, 2.2, 0, 6.29);
     }}
+    g.fill();
     g.globalAlpha = 1;
     syncCtl();
   }}
+  // COALESCE REDRAWS TO ANIMATION FRAMES (2026-08-19). pointermove fires at
+  // up to the pointer's sample rate (120 Hz+ on a trackpad) and each event
+  // used to force a full synchronous redraw of 30k truth crosses plus the
+  // recovery cloud. Collapsing every burst of events into at most one draw
+  // per frame is what makes dragging track the cursor instead of lagging
+  // behind it. Slider/typed input still calls draw() directly -- viewCtl's
+  // `busy` guard depends on sync() running inside its own call.
+  let raf = 0;
+  const redraw = () => {{
+    if (raf) return;
+    raf = requestAnimationFrame(() => {{ raf = 0; draw(); }});
+  }};
   // pan/zoom
   let drag = null;
   cv.addEventListener("pointerdown", e => {{ drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); }});
@@ -3704,15 +3877,28 @@ function viewCtl(px, cv, api) {{
     const w = cv.clientWidth, h = cv.clientHeight;
     const dx = (e.clientX - drag[0]) / (w - 66) * (X1 - X0);
     const dy = (e.clientY - drag[1]) / (h - 38) * (Y1 - Y0);
-    X0 -= dx; X1 -= dx; Y0 += dy; Y1 += dy; drag = [e.clientX, e.clientY]; draw();
+    X0 -= dx; X1 -= dx; Y0 += dy; Y1 += dy; drag = [e.clientX, e.clientY]; redraw();
   }});
   cv.addEventListener("pointerup", () => drag = null);
+  // ZOOM ABOUT THE CURSOR, NOT THE VIEW CENTRE (2026-08-19). Centre-anchored
+  // zoom is what made this canvas hard to drive: the source you were aiming
+  // at slid out of frame as you zoomed, so reaching one binary meant
+  // alternating zoom and pan several times. Anchoring on the pointer holds
+  // whatever is under the cursor still, the way every map-style UI behaves.
   cv.addEventListener("wheel", e => {{
     e.preventDefault();
     const s = e.deltaY > 0 ? 1.15 : 0.87;
-    const cx = (X0 + X1) / 2, cyy = (Y0 + Y1) / 2;
-    X0 = cx + (X0 - cx) * s; X1 = cx + (X1 - cx) * s;
-    Y0 = cyy + (Y0 - cyy) * s; Y1 = cyy + (Y1 - cyy) * s; draw();
+    const r = cv.getBoundingClientRect();
+    const w = cv.clientWidth, h = cv.clientHeight;
+    const ml = 56, mb = 30, mt = 8, mr = 10;
+    const cl = v => Math.max(0, Math.min(1, v));
+    // fraction across the plot box; clamped so a cursor sitting in the axis
+    // margins anchors at the edge instead of flinging the view sideways
+    const fx = cl((e.clientX - r.left - ml) / (w - ml - mr));
+    const fy = cl((h - mb - (e.clientY - r.top)) / (h - mb - mt));
+    const ax = X0 + fx * (X1 - X0), ay = Y0 + fy * (Y1 - Y0);
+    X0 = ax + (X0 - ax) * s; X1 = ax + (X1 - ax) * s;
+    Y0 = ay + (Y0 - ay) * s; Y1 = ay + (Y1 - ay) * s; redraw();
   }}, {{ passive: false }});
   document.getElementById("btn_all").onclick = () => {{ full(); draw(); }};
   document.getElementById("btn_reset").onclick = () => {{ full(); draw(); }};
@@ -3741,7 +3927,7 @@ function viewCtl(px, cv, api) {{
     set: (a, b, c, d) => {{ X0 = a; X1 = b; Y0 = c; Y1 = d; draw(); }},
     fullW: FW, fullH: FH,
   }}).sync;
-  new ResizeObserver(draw).observe(cv);
+  new ResizeObserver(redraw).observe(cv);
   draw();
 }})();
 </script>
