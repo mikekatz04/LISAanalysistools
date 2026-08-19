@@ -151,11 +151,55 @@ def report_one(d, c):
     return dict(eps0=eps0, rows=rows, cold=cold)
 
 
+def report_sweeps(d):
+    """The in-run sweep (GB_SIGHET_SWEEP): per-arm anchor + tier table.
+
+    Every arm scored the SAME sources on the SAME frozen residual against
+    the SAME shared exact side -- so a column that moves is caused by that
+    arm's configuration and nothing else. Two rows carry the verdict:
+    anchor |dll| (a knob that only changes RESOLUTION cannot move it) and
+    the per-tier eps/T (where resolution legitimately acts)."""
+    files = sorted(glob.glob(os.path.join(d, "sweep_*.npz")))
+    if not files:
+        return
+    for f in files:
+        z = np.load(f, allow_pickle=False)
+        tiers = z["tiers"]; ex0 = z["ex0"]; exa = z["exa"]
+        cold = z["beta"] > COLD_BETA
+        print(f"\n  [SWEEP] {os.path.basename(f)}  "
+              f"({z['sub'].size} sources, {cold.sum()} cold, "
+              f"arms: {list(z['arms'])})")
+        hdr = (f"      {'arm':24s} {'wall':>6s} {'anchor med':>10s} "
+               f"{'anchor max':>10s}"
+               + "".join(f" {'d=%g' % t:>9s}" for t in tiers))
+        print(hdr + "   (anchor=|dll| vs exact; tiers=eps/T med, cold)")
+        base0 = z.get("a00_het0")
+        for i, arm in enumerate(z["arms"]):
+            a = f"a{i:02d}"
+            if str(z["arm_error"][i]):
+                print(f"      {str(arm):24s} FAILED: {z['arm_error'][i]}")
+                continue
+            h0 = z[f"{a}_het0"]; ht = z[f"{a}_het"]
+            e0 = np.abs(h0 - ex0)
+            cells = []
+            for j in range(len(tiers)):
+                eps = np.abs((ht[j] - h0) - (exa[j] - ex0))[cold]
+                T = np.abs(exa[j] - ex0)[cold]
+                cells.append(f"{np.nanmedian(eps/np.maximum(T,1e-300)):9.3g}")
+            print(f"      {str(arm):24s} {z['arm_wall'][i]:5.0f}s "
+                  f"{np.nanmedian(e0):10.3g} {np.nanmax(e0):10.3g}"
+                  + " ".join([""] + cells))
+        if base0 is not None:
+            print("      (arm rows share sources/residual/exact side; only "
+                  "the engine differs)")
+
+
 def main(argv):
     dirs = argv or ["."]
     results = {}
     for d in dirs:
         results[d] = report_one(d, load_dir(d))
+        report_sweeps(d)
     if len(dirs) > 1:
         print(f"\n{'='*76}\nCROSS-CONFIG  (eps/T median per tier; a knob that "
               "matters moves its column)")

@@ -6843,6 +6843,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             except Exception as exc:  # diagnostics must never kill a block
                 logger.warning("%s: [GB_DISSECT] dump failed: %r",
                                self.name, exc)
+            if os.environ.get("GB_SIGHET_SWEEP", "").strip():
+                self._sighet_sweep(
+                    _dissect, buffer_obj, curr, slots, N_vals, l_i, tiers,
+                    cands, ex0, exa, _het0, beta, t_i, w_i)
 
         cold = beta > 0.999
         n_c = int(cold.sum())
@@ -7051,6 +7055,221 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
         logger.info("%s: [GB_DISSECT] wrote %s (%d sources, %d tiers)",
                     self.name, path, n_src, len(tiers))
+
+    #: GB_SIGHET_SWEEP spec aliases -> for_band_engine kwarg names.
+    _SWEEP_KEYS = {
+        "nt": "nt_layer", "nt_layer": "nt_layer",
+        "v3": "v3_n_nodes", "v3_n_nodes": "v3_n_nodes",
+        "v4": "v4_knots", "v4_knots": "v4_knots",
+        "band": "v4_band", "v4_band": "v4_band",
+        "v5": "v5",
+        "mhalf": "m_active_half_width", "m_half": "m_active_half_width",
+        "nspfd": "n_sparse_fd", "n_sparse_fd": "n_sparse_fd",
+        "ncp": "n_cp_build", "n_cp_build": "n_cp_build",
+        "maxr": "max_r", "max_r": "max_r",
+    }
+
+    def _sighet_sweep(self, out_dir, buffer_obj, curr, slots, N_vals, l_i,
+                      tiers, cands, ex0, exa, het0_base, beta, t_i, w_i):
+        """In-run engine sweep on ONE frozen block (``GB_SIGHET_SWEEP``).
+
+        The direct answer to "sweep the settings inside the real
+        infrastructure": for each configuration arm, a fresh sig-het engine
+        is built around the SAME underlying chunked comp the production
+        engine wraps (``comp.chunked``), installed on the buffer through the
+        buffer's own ``rebuild_likelihood_engine`` (the production wiring),
+        anchored on the SAME frozen residual with the SAME reference
+        parameters, and scored at the anchor plus every tier displacement.
+        The exact side is shared across arms (it has no sig-het config), so
+        every arm differs by ONE thing only: the engine configuration.
+        This is what the five unattributable knob A/Bs never had.
+
+        ``GB_SIGHET_SWEEP`` = semicolon-separated arms of comma ``k=v``
+        overrides on the PRODUCTION config (read from the live engine's
+        resolved ``_g``), e.g.::
+
+            GB_SIGHET_SWEEP="nt_layer=270;v3_n_nodes=32;v3_n_nodes=128;v5=0;v4_knots=64;m_half=4"
+
+        Keys (aliases in ``_SWEEP_KEYS``): nt_layer, v3_n_nodes, v4_knots,
+        v4_band, v5, m_half, n_sparse_fd, n_cp_build, max_r. An empty arm
+        ("base") re-scores the production config as a self-consistency
+        control; it is always prepended.
+
+        Cost/OOM control: the sweep runs on a SUBSET of the block --
+        ``GB_SIGHET_SWEEP_MAX_SRC`` (default 512) sources, chosen as the
+        worst anchor offenders (|het0-ex0| desc) plus a random fill, so the
+        bad population is guaranteed in-sample and a big-``N_sparse_t`` arm
+        (nt_layer=270: ~3.4 MB/source/config at 3 mo) cannot OOM the way the
+        full-block stash did. Each arm's comp is freed before the next.
+        ``GB_SIGHET_SWEEP_BLOCKS`` (default 2) caps how many blocks sweep.
+        Requires GB_SIGHET_DISSECT (the output dir) + GB_SIGHET_TIER_SCAN.
+        """
+        n_blk = int(os.environ.get("GB_SIGHET_SWEEP_BLOCKS", "2"))
+        kblk = getattr(self, "_sweep_count", 0)
+        if kblk >= n_blk:
+            return
+        self._sweep_count = kblk + 1
+
+        # ---- parse arms ---------------------------------------------------
+        arms = [("base", {})]
+        for arm in os.environ["GB_SIGHET_SWEEP"].split(";"):
+            arm = arm.strip()
+            if not arm:
+                continue
+            kw = {}
+            try:
+                for tok in arm.split(","):
+                    k, v = tok.split("=")
+                    kk = self._SWEEP_KEYS[k.strip().lower()]
+                    kw[kk] = (float(v) if kk == "max_r" else int(v))
+            except Exception:
+                logger.warning("%s: [GB_SWEEP] bad arm %r skipped (keys: "
+                               "%s)", self.name, arm,
+                               sorted(set(self._SWEEP_KEYS)))
+                continue
+            arms.append((arm, kw))
+        if len(arms) < 2:
+            return
+
+        # ---- the production comp + its resolved base config ---------------
+        comp0 = next(self._dissect_comps(buffer_obj), None)
+        chunked = getattr(comp0, "chunked", None)
+        g0 = dict(getattr(comp0, "_g", {}) or {})
+        if comp0 is None or chunked is None or not g0:
+            logger.warning("%s: [GB_SWEEP] cannot reach the engine's chunked "
+                           "comp / resolved config; sweep skipped.", self.name)
+            return
+        base_kw = dict(
+            nt_layer=int(g0["nt_layer"]),
+            n_sparse_fd=int(g0["n_sparse_fd"]),
+            m_active_half_width=int(g0["m_half"]),
+            max_r=float(g0["max_r"]),
+            n_cp_build=int(g0["n_cp_build"]),
+            v3_n_nodes=int(g0["v3_n_nodes"]),
+            v4_knots=int(g0["v4_knots"]),
+            v4_band=int(g0["v4_band"]),
+            v5=int(g0["v5"]),
+        )
+
+        # ---- subset: worst anchor offenders + random fill ------------------
+        n_src = int(curr.shape[0])
+        n_max = int(os.environ.get("GB_SIGHET_SWEEP_MAX_SRC", "512"))
+        eps0 = cp.abs(het0_base - ex0) if het0_base is not None else None
+        if n_src <= n_max:
+            sub = np.arange(n_src)
+        elif eps0 is None:
+            sub = np.sort(np.random.default_rng(0).choice(
+                n_src, size=n_max, replace=False))
+        else:
+            worst = _to_numpy(cp.argsort(eps0))[::-1][:n_max // 2]
+            rng = np.random.default_rng(0)
+            rest = np.setdiff1d(np.arange(n_src), worst)
+            fill = rng.choice(rest, size=n_max - worst.size, replace=False)
+            sub = np.sort(np.concatenate([worst, fill]))
+        sub_d = cp.asarray(sub)
+        curr_s = curr[sub_d]
+        slots_s = slots[sub_d]
+        l_s = l_i[sub_d] if l_i is not None else None
+        cands_s = [c[sub_d] for c in cands]
+
+        gb_wdm_comp0 = buffer_obj.gb_wdm_comp
+        results = []
+        from gbgpu.gbsignalhetcomputations import GBSignalHetComputations
+        try:
+            # The block's live reference is about to be replaced per arm.
+            buffer_obj.clear_in_model_likelihood()
+            for name, kw in arms:
+                akw = {**base_kw, **kw}
+                t0 = time.perf_counter()
+                try:
+                    comp_a = GBSignalHetComputations.for_band_engine(
+                        chunked, **akw)
+                    buffer_obj.gb_wdm_comp = comp_a
+                    buffer_obj.rebuild_likelihood_engine()
+                    buffer_obj.setup_in_model_likelihood(
+                        curr_s, slots_s, N_vals, leaf_inds=l_s)
+                    h0 = _to_numpy(buffer_obj.get_add_ll(
+                        curr_s, slots_s, slots_s, N_vals, leaf_inds=l_s))
+                    dh0 = _to_numpy(cp.asarray(buffer_obj.d_h_out).real)
+                    hh0 = _to_numpy(cp.asarray(buffer_obj.h_h_out).real)
+                    ht = [_to_numpy(buffer_obj.get_add_ll(
+                        c, slots_s, slots_s, N_vals, leaf_inds=l_s))
+                        for c in cands_s]
+                    buffer_obj.clear_in_model_likelihood()
+                    results.append(dict(
+                        arm=name, kw=akw, het0=h0, dh0=dh0, hh0=hh0,
+                        het=np.stack(ht),
+                        wall=time.perf_counter() - t0, error=""))
+                    logger.info(
+                        "%s: [GB_SWEEP] arm %r done in %.1fs "
+                        "(anchor |dll| max=%.3e med=%.3e on %d sources)",
+                        self.name, name, results[-1]["wall"],
+                        float(np.abs(h0 - _to_numpy(ex0)[sub]).max()),
+                        float(np.median(np.abs(h0 - _to_numpy(ex0)[sub]))),
+                        sub.size)
+                except Exception as exc:
+                    logger.warning("%s: [GB_SWEEP] arm %r FAILED: %r",
+                                   self.name, name, exc)
+                    results.append(dict(arm=name, kw=akw, het0=None,
+                                        dh0=None, hh0=None, het=None,
+                                        wall=time.perf_counter() - t0,
+                                        error=repr(exc)))
+                finally:
+                    buffer_obj.gb_wdm_comp = gb_wdm_comp0
+                    if "comp_a" in dict(locals()):
+                        del comp_a
+                    if cp is not np:
+                        try:
+                            cp.get_default_memory_pool().free_all_blocks()
+                        except Exception:
+                            pass
+        finally:
+            # Whatever happened, hand the block back exactly as we found it:
+            # production comp, production engine, full-block reference live.
+            buffer_obj.gb_wdm_comp = gb_wdm_comp0
+            buffer_obj.rebuild_likelihood_engine()
+            buffer_obj.setup_in_model_likelihood(curr, slots, N_vals,
+                                                 leaf_inds=l_i)
+
+        # ---- dump ----------------------------------------------------------
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, f"sweep_{self.name}_{kblk:04d}.npz")
+            payload = dict(
+                tiers=np.asarray(tiers, float), sub=sub,
+                ex0=_to_numpy(ex0)[sub],
+                exa=np.stack([_to_numpy(e)[sub] for e in exa]),
+                beta=_to_numpy(beta)[sub],
+                temp=(_to_numpy(t_i)[sub] if t_i is not None
+                      else np.full(sub.size, -1)),
+                walker=(_to_numpy(w_i)[sub] if w_i is not None
+                        else np.full(sub.size, -1)),
+                arms=np.array([r["arm"] for r in results]),
+                arm_kw=np.array([repr(r["kw"]) for r in results]),
+                arm_wall=np.array([r["wall"] for r in results]),
+                arm_error=np.array([r["error"] for r in results]),
+            )
+            f0s = self.transform_fn.both_transforms(
+                curr_s, xp=cp,
+                leaf_inds=(l_s if self._per_leaf_fill else None))[:, 1]
+            payload["f0_hz"] = _to_numpy(f0s)
+            nan1 = np.full(sub.size, np.nan)
+            nanT = np.full((len(tiers), sub.size), np.nan)
+            for i, r in enumerate(results):
+                a = f"a{i:02d}"
+                payload[f"{a}_het0"] = (r["het0"] if r["het0"] is not None
+                                        else nan1)
+                payload[f"{a}_dh0"] = (r["dh0"] if r["dh0"] is not None
+                                       else nan1)
+                payload[f"{a}_hh0"] = (r["hh0"] if r["hh0"] is not None
+                                       else nan1)
+                payload[f"{a}_het"] = (r["het"] if r["het"] is not None
+                                       else nanT)
+            np.savez_compressed(path, **payload)
+            logger.info("%s: [GB_SWEEP] wrote %s (%d arms x %d sources)",
+                        self.name, path, len(results), sub.size)
+        except Exception as exc:
+            logger.warning("%s: [GB_SWEEP] dump failed: %r", self.name, exc)
 
     @staticmethod
     def _dissect_comps(buffer_obj):

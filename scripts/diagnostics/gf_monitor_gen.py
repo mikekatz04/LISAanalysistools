@@ -684,7 +684,11 @@ if cap_cells is not None and cap_cells.size and cap_edges_arr is not None:
     ax[2].set_title("where the occupied cells are")
     fig_b64(fig, "gb_cap_cells")
 
-    _occ_last, _atcap_last = _occ[-1], _atcap[-1]
+    # A young run may have NO iteration with an armed cap yet (_atcap empty:
+    # the caps stay at the -1 sentinel until the GB stage arms them) -- report
+    # zero at-cap rather than crashing on the empty list.
+    _occ_last = _occ[-1] if _occ else 0.0
+    _atcap_last = _atcap[-1] if _atcap else 0.0
     _exact1 = float((cc_last == 1).sum() / nw_)
     CAP_TXT = (
         f"At iteration {NIT-1} the median cold walker holds "

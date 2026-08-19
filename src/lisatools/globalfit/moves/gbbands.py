@@ -2436,6 +2436,22 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         # Routed: multi-shard buffers partition every engine call by owning
         # GPU split (and give each non-prototype device its own comp replica);
         # single-shard buffers pass straight through.
+        self.rebuild_likelihood_engine()
+
+        # TODO: fix this 4????
+        self.special_band_inds = special_band_inds
+        assert special_band_inds.shape[0] == self.params_interest.shape[0]
+        self.now_index = self.get_index(special_band_inds)
+
+    def rebuild_likelihood_engine(self):
+        """(Re)build the routed band likelihood engine from CURRENT comps.
+
+        Factored out of buffer construction so the in-run sig-het sweep
+        (``GB_SIGHET_SWEEP``, gbspecialstretch) can swap ``gb_wdm_comp`` for
+        a differently-configured engine instance and rebuild THIS -- the
+        production wiring, byte-for-byte -- around it, then restore. Any
+        cached per-device replicas die with the old router.
+        """
         self._likelihood_engine = make_routed_band_engine(
             self._basis_settings,
             xp=self.xp,
@@ -2450,11 +2466,6 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             opt_snr_rej_samp_limit=self.opt_snr_rej_samp_limit,
             snr_rej_detected=self.snr_rej_detected,
         )
-
-        # TODO: fix this 4????
-        self.special_band_inds = special_band_inds
-        assert special_band_inds.shape[0] == self.params_interest.shape[0]
-        self.now_index = self.get_index(special_band_inds)
 
     # ------------------------------------------------------------------
     # Views into the AnalysisContainerArray-backed scratch buffers
