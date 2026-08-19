@@ -7022,6 +7022,53 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                if np.isscalar(g.get(kk)))
                 break
 
+        # RAW OFFENDER CAPTURE (GB_SIGHET_DISSECT_RAW=1): the top-3 anchor
+        # offenders' ACTUAL inputs -- data slab, invC slab, reference params,
+        # slab origin -- so the discrepancy can be REPLAYED locally through
+        # the in-vitro probe Holder. Added 2026-08-19 after reconstruction
+        # was exhausted: every probe (CPU+CUDA, synthetic+real-mojito,
+        # slab/pair/batch, CSD/t-mod/edge-boost invC) scores exact, while
+        # production still measures the low-f inflation, and its taper-count
+        # sensitivity localizes the spurious power to the TIME EDGES. The
+        # production slab/invC content is the one thing not reproduced.
+        raw = {}
+        if os.environ.get("GB_SIGHET_DISSECT_RAW", "0") == "1":
+            try:
+                _eps = cp.abs((het0 if het0 is not None else ll_ref) - ex0)
+                top = _to_numpy(cp.argsort(_eps))[::-1][:3].astype(int)
+                for comp in self._dissect_comps(buffer_obj):
+                    g = getattr(comp, "_g", None) or {}
+                    _sn = getattr(buffer_obj, "band_slab_Nf", None)
+                    if _sn is None or not g:
+                        break
+                    Wd = int(_sn)
+                    Ta = int(g["Nt_active"])
+                    dat = cp.asarray(
+                        buffer_obj.linear_data_arr[0]).reshape(
+                        -1, 3, Wd, Ta)
+                    ivc = cp.asarray(
+                        buffer_obj.linear_psd_arr[0]).reshape(
+                        -1, 3, 3, Wd, Ta)
+                    sl = _to_numpy(slots).astype(int)
+                    phys_top = _to_numpy(self.transform_fn.both_transforms(
+                        curr[cp.asarray(top)], xp=cp,
+                        leaf_inds=(l_i[cp.asarray(top)]
+                                   if self._per_leaf_fill else None)))
+                    _slo = getattr(buffer_obj, "slab_min_f", None)
+                    raw = dict(
+                        raw_idx=top,
+                        raw_params_phys=phys_top,
+                        raw_slab_data=_to_numpy(dat[sl[top]]),
+                        raw_slab_invc=_to_numpy(ivc[sl[top]]),
+                        raw_slab_min_f=(_to_numpy(cp.asarray(_slo))[sl[top]]
+                                        if _slo is not None else
+                                        np.full(len(top), -1)),
+                    )
+                    break
+            except Exception as exc:
+                logger.debug("%s: [GB_DISSECT] raw capture skipped: %r",
+                             self.name, exc)
+
         path = os.path.join(
             out_dir, f"dissect_{self.name}_{k:04d}.npz")
         np.savez_compressed(
@@ -7052,6 +7099,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             exa=np.stack([_to_numpy(e) for e in exa]),
             null_depth=null_depth, frac_masked=frac_masked,
             n_rows_sup=n_rows_sup,
+            **raw,
         )
         logger.info("%s: [GB_DISSECT] wrote %s (%d sources, %d tiers)",
                     self.name, path, n_src, len(tiers))

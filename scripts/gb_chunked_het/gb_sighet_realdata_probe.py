@@ -98,6 +98,17 @@ def main():
     nref = int(os.environ.get("NREF", "16"))
     mode = os.environ.get("MODE", "catalogue")
     tmod = os.environ.get("TMOD", "0") == "1"
+    # EDGEINVC=<boost>: multiply invC by <boost> over the outer EDGE_LAYERS
+    # (default 34 -- the layers the OLD 54-layer reference taper damped and
+    # the new 11-layer taper does not). The 2026-08-19 production dissect
+    # showed the low-f h_h inflation nearly DOUBLED (6.5 -> 11.7) when the
+    # reference taper narrowed 54 -> 11 layers: the spurious reference
+    # power is TIME-EDGE-LOCALIZED, and the production invC's real edge
+    # structure (never reproduced by the probes' smooth constant-t invC) is
+    # the suspected amplifier. If inflation appears here in proportion to
+    # the boost, the mechanism is caged in vitro.
+    edge_boost = float(os.environ.get("EDGEINVC", "0") or 0)
+    edge_layers = int(os.environ.get("EDGE_LAYERS", "34"))
     batch = os.environ.get("BATCH", "1") == "1"
     synth = os.environ.get("SYNTH", "0") == "1"
 
@@ -178,6 +189,9 @@ def main():
                          float)
         for c in range(3):
             invc[i, c, c] = (1.0 / Sfg)[:, None]
+        if edge_boost > 0:
+            invc[i, :, :, :, :edge_layers] *= edge_boost
+            invc[i, :, :, :, -edge_layers:] *= edge_boost
         if tmod:
             # cyclostationary foreground: modulate the FOREGROUND SHARE of
             # the noise over the year (2 cycles/yr, galactic-plane sweep)
