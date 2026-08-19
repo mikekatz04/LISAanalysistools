@@ -451,6 +451,17 @@ export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
 #   grep "sig-het engine resolved" ...  (tukey_alpha=0.01)
 # and the anchor/AUDIT high-f values should move 0.984 -> ~1.000.
 export SIGHET_TUKEY_ALPHA=0.01
+# UNIFORM EDGE EXCLUSION (user ruling 2026-08-19): bringing the domain
+# [min_time, max_time] in removes edge-created error in EVERY likelihood
+# at once (all WDMSettings inherit the one domain; min/max_freq still vary
+# per source). The post-fix dissect localized the remaining sig-het h_h
+# inflation to the TIME EDGES (taper 54->11 layers DOUBLED it), so
+# EDGE_CROP_WAVELETS=60 (covering the old taper region, 2x60/2160 = 5.6%
+# of the data) is the candidate cure -- ARMED ON THE NEXT FRESH START
+# ONLY: changing the crop changes Nt_active (2121 -> 2001) and resume
+# compatibility across a domain-shape change is UNVERIFIED. Do not flip
+# mid-store without checking, or start a new STORE_DIR.
+# export EDGE_CROP_WAVELETS=60
 
 export GB_SIGHET_DISSECT=${STORE_DIR}/dissect
 # SWEEP RETIRED (2026-08-19, after 8 swept blocks): every arm answered.

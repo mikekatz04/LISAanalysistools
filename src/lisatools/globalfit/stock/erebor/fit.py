@@ -120,7 +120,17 @@ class EreborGeneralSettings(GeneralSettings):
     window_tukey_alpha: float = dataclasses.field(
         default_factory=env_default("WINDOW_TUKEY_ALPHA", 0.05, float)
     )
-    edge_crop_wavelets: typing.Optional[int] = None  # None -> auto from alpha
+    # None -> auto from the data-taper alpha. EDGE_CROP_WAVELETS is THE
+    # uniform edge-exclusion knob (user ruling 2026-08-19): it sets the ONE
+    # domain [min_time, max_time] every likelihood-facing WDMSettings
+    # inherits (chunked comp, sig-het engine, buffers, invC) -- bringing the
+    # edges in here removes edge-created error EVERYWHERE at once, with
+    # min/max_freq still free to vary per source. Candidate for the
+    # edge-localized sig-het h_h inflation: 60 (covers the old 54-layer
+    # taper region; costs 2x60/Nt of the data).
+    edge_crop_wavelets: typing.Optional[int] = dataclasses.field(
+        default_factory=env_default("EDGE_CROP_WAVELETS", None, int)
+    )
     # Deterministic taper width in WDM wavelets (each Nf*dt seconds). When
     # > 0 this OVERRIDES window_tukey_alpha with 2*K/Nt: the taper is a
     # fixed ABSOLUTE duration set by the wavelet grid, not a fraction of
