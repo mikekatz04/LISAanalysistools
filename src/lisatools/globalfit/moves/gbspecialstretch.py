@@ -7111,23 +7111,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._sweep_count = kblk + 1
 
         # ---- parse arms ---------------------------------------------------
-        arms = [("base", {})]
+        # Two override namespaces per arm:
+        #   plain keys -> for_band_engine (the sig-het CANDIDATE side);
+        #   c_<Name>   -> the CHUNKED-HET DELEGATE's ctor kwarg <Name>
+        #                 (e.g. c_N_sparse=512, c_Nt_sub=512, c_N_cp_sig=96).
+        # The chunked delegate is what make_reference and the whole
+        # reference build run through -- the 2026-08-19 dissect showed the
+        # anchor corruption is h_h-dominated (template side) and IDENTICAL
+        # across every candidate-side arm, so THESE are the arms that can
+        # move it. The delegate is rebuilt from its own recorded
+        # args/kwargs, the same way the multi-device replica path does.
+        arms = [("base", {}, {})]
         for arm in os.environ["GB_SIGHET_SWEEP"].split(";"):
             arm = arm.strip()
             if not arm:
                 continue
-            kw = {}
+            kw, ckw = {}, {}
             try:
                 for tok in arm.split(","):
                     k, v = tok.split("=")
-                    kk = self._SWEEP_KEYS[k.strip().lower()]
-                    kw[kk] = (float(v) if kk == "max_r" else int(v))
+                    k = k.strip()
+                    if k.lower().startswith("c_"):
+                        ckw[k[2:]] = int(v)
+                    else:
+                        kk = self._SWEEP_KEYS[k.lower()]
+                        kw[kk] = (float(v) if kk == "max_r" else int(v))
             except Exception:
                 logger.warning("%s: [GB_SWEEP] bad arm %r skipped (keys: "
-                               "%s)", self.name, arm,
-                               sorted(set(self._SWEEP_KEYS)))
+                               "%s, or c_<ChunkedCtorKwarg>)", self.name,
+                               arm, sorted(set(self._SWEEP_KEYS)))
                 continue
-            arms.append((arm, kw))
+            arms.append((arm, kw, ckw))
         if len(arms) < 2:
             return
 
@@ -7260,13 +7274,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         try:
             # The block's live reference is about to be replaced per arm.
             buffer_obj.clear_in_model_likelihood()
-            for name, kw in arms:
+            for name, kw, ckw in arms:
                 akw = {**base_kw, **kw}
                 t0 = time.perf_counter()
                 comp_a = None
+                chunked_a = None
                 try:
+                    ch = chunked
+                    if ckw:
+                        if not (hasattr(chunked, "args")
+                                and hasattr(chunked, "kwargs")):
+                            raise RuntimeError(
+                                "chunked delegate does not record its ctor "
+                                "args/kwargs; c_* arms unavailable")
+                        ckw_full = dict(chunked.kwargs)
+                        for k in ckw:
+                            if k not in ckw_full:
+                                raise RuntimeError(
+                                    f"chunked ctor has no kwarg {k!r}; it "
+                                    f"has {sorted(ckw_full)}")
+                        ckw_full.update(ckw)
+                        chunked_a = type(chunked)(*chunked.args, **ckw_full)
+                        ch = chunked_a
                     comp_a = GBSignalHetComputations.for_band_engine(
-                        chunked, **akw)
+                        ch, **akw)
                     buffer_obj.gb_wdm_comp = comp_a
                     buffer_obj.rebuild_likelihood_engine()
                     buffer_obj.setup_in_model_likelihood(
@@ -7279,7 +7310,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         c, slots_s, slots_s, N_vals, leaf_inds=l_s))
                         for c in cands_s]
                     results.append(dict(
-                        arm=name, kw=akw, het0=h0, dh0=dh0, hh0=hh0,
+                        arm=name, kw={**akw, **{f'c_{k}': v for k, v in ckw.items()}}, het0=h0, dh0=dh0, hh0=hh0,
                         het=np.stack(ht),
                         wall=time.perf_counter() - t0, error=""))
                     logger.info(
@@ -7292,7 +7323,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 except Exception as exc:
                     logger.warning("%s: [GB_SWEEP] arm %r FAILED: %r",
                                    self.name, name, exc)
-                    results.append(dict(arm=name, kw=akw, het0=None,
+                    results.append(dict(arm=name, kw={**akw, **{f'c_{k}': v for k, v in ckw.items()}}, het0=None,
                                         dh0=None, hh0=None, het=None,
                                         wall=time.perf_counter() - t0,
                                         error=repr(exc)))
@@ -7307,6 +7338,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     buffer_obj.gb_wdm_comp = gb_wdm_comp0
                     if comp_a is not None:
                         del comp_a
+                    if chunked_a is not None:
+                        del chunked_a
                     _purge_and_free()
         finally:
             # Whatever happened, hand the block back exactly as we found it:

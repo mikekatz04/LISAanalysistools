@@ -442,11 +442,19 @@ export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
 # half). v5=0 differing from base = v5-specific; v5=2 is the flat-carve
 # control arm.
 export GB_SIGHET_DISSECT=${STORE_DIR}/dissect
-# m_half=4 and n_sparse_fd=2048 DROPPED (2026-08-19): both OOM'd on the
-# first sweep run at ~91.5 GB -- they multiply the per-source stash on top
-# of a block that already holds the production reference. Secondary
-# hypotheses anyway; re-add individually once the primary verdict is in.
-export GB_SIGHET_SWEEP="nt_layer=270;nt_layer=135;v3_n_nodes=32;v3_n_nodes=128;v4_knots=64;v4_knots=256;v5=0;v5=2"
+# SWEEP v2 (2026-08-19, after the first dissect verdict). The first sweep
+# settled the CANDIDATE side: anchor error IDENTICAL across nt_layer
+# 60/135/270, nodes 32/64/128, knots 64/128/256, v4/v5/v5-control -- and
+# the dissect attributed it 92% h_h-dominated (template/reference side),
+# null-INDEPENDENT. The reference build runs through the CHUNKED-HET
+# DELEGATE (user ruling: interrogate ITS settings), which every first-sweep
+# arm shared -- so these arms now rebuild the delegate itself (c_<CtorKwarg>
+# overrides: production Nt_sub=256 N_sparse=256 N_cp_sig=48 N_cp_orbit=32)
+# plus the two reference-side engine knobs whose arms OOM'd on the leak
+# (fixed in a096d149): n_sparse_fd (build FD density, prod 1024) and m_half
+# (m-layer coverage, prod 2). nt_layer=270 and v5=0 stay as vs-base
+# sentinels for the report's scoring-path check.
+export GB_SIGHET_SWEEP="nt_layer=270;v5=0;n_sparse_fd=512;n_sparse_fd=2048;m_half=1;m_half=4;c_N_sparse=512;c_N_sparse=128;c_Nt_sub=512;c_N_cp_sig=96"
 # THE KNOWN BAD SOURCES, targeted BY FREQUENCY: a block only spends sweep
 # budget if it contains one of these (matched sources are forced into the
 # subset), so the corrupted-reference population is interrogated directly

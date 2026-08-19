@@ -134,6 +134,45 @@ def report_one(d, c):
         print("      c0 stats unavailable (engine layout not probed); "
               "re-run with a single-shard engine or extend _dissect_comps.")
 
+    # ---- 2b. crowding -----------------------------------------------------
+    # The 2026-08-19 production dissect showed the anchor corruption is
+    # h_h-DOMINATED (92%), null-INDEPENDENT and engine-config-independent,
+    # concentrated in dense bands with hh_het/hh_ex inflation 1-6x. That is
+    # the signature of NEIGHBOR CONTAMINATION: something in the windowed
+    # reference build folding power that belongs to a nearby source into
+    # this source's template moments. Test: per source, count same-chain
+    # neighbors (same temp AND walker -- different walkers' copies of one
+    # source are not neighbors of each other) within one WDM layer, and
+    # correlate with eps0.
+    if "temp" in c and "walker" in c:
+        f0 = c["f0_hz"]; tw = c["temp"].astype(np.int64) * 1000 + \
+            c["walker"].astype(np.int64)
+        layer_df = 1.388889e-4
+        nnb = np.zeros(n, dtype=int)
+        order = np.lexsort((f0, tw))
+        f0o, two = f0[order], tw[order]
+        for i in range(n):
+            j = i - 1
+            while j >= 0 and two[j] == two[i] and f0o[i] - f0o[j] < layer_df:
+                nnb[order[i]] += 1; j -= 1
+            j = i + 1
+            while j < n and two[j] == two[i] and f0o[j] - f0o[i] < layer_df:
+                nnb[order[i]] += 1; j += 1
+        ok = np.isfinite(eps0)
+        print(f"\n  [2b] CROWDING (same-chain neighbors within 1 WDM layer)")
+        for lo, hi, lab in ((0, 1, "isolated (0 nbr)"), (1, 2, "1 neighbor"),
+                            (2, 4, "2-3 neighbors"), (4, 999, "4+ neighbors")):
+            m = ok & (nnb >= lo) & (nnb < hi)
+            if m.sum() < 5:
+                continue
+            br = float((eps0[m] > EPS0_BAD).mean())
+            print(f"      {lab:18s} n={m.sum():5d}  eps0 med "
+                  f"{pct(eps0[m],50):9.3g}  p90 {pct(eps0[m],90):9.3g}  "
+                  f"broken {100*br:5.1f}%")
+        r = np.corrcoef(nnb[ok], np.log10(np.maximum(eps0[ok], 1e-30)))[0, 1]
+        print(f"      corr[n_neighbors, log eps0] = {r:+.3f} "
+              f"(positive = more crowded, bigger error)")
+
     # ---- 3. displacement ladder -------------------------------------------
     print(f"\n  [3] DISPLACEMENT (delta-vs-delta, per source; cold only)")
     cold = c["beta"] > COLD_BETA
