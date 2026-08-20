@@ -47,7 +47,7 @@ def branch_nleaves_max(possible_state, name: str) -> int:
     return int(possible_state[name].shape[-2])
 
 
-def make_cap_edges(band_edges, divisor: int):
+def make_cap_edges(band_edges, divisor: int, stagger: bool = False):
     """Subdivide every sub-band into ``divisor`` equal-width CAP CELLS.
 
     The leaf-cap grid (user design 2026-08-15). Sub-band widths are set by
@@ -57,22 +57,39 @@ def make_cap_edges(band_edges, divisor: int):
     scheduling / units / buffers / tempering / band shutoff all stay on the
     band grid.
 
-    Every cap cell is CONTAINED in exactly one sub-band (band ``b`` owns
-    cells ``b*K ... b*K + K - 1``). That containment is what keeps the
-    bookkeeping and the HDF5 storage simple and makes the construction work
-    unchanged under both band-edge modes (``uniform`` and the free-floating
-    ``get_n`` grid).
+    Default (``stagger=False``): every cap cell is CONTAINED in exactly one
+    sub-band (band ``b`` owns cells ``b*K ... b*K + K - 1``). That
+    containment is what keeps the bookkeeping and the HDF5 storage simple
+    and makes the construction work unchanged under both band-edge modes
+    (``uniform`` and the free-floating ``get_n`` grid).
 
-    ``divisor == 1`` returns a copy of ``band_edges`` itself, so the cap
-    grid IS the band grid and every downstream cap computation reduces
-    bit-identically to the pre-2026-08-15 per-band behaviour.
+    ``stagger=True`` (user design 2026-08-20, the v5 grid): every interior
+    cap edge is shifted by HALF a cell width, so no cap edge coincides with
+    a band edge -- the two grids share no equivalent boundaries and no
+    source can sit on a band seam and a cap seam simultaneously. Band ``b``
+    still OWNS cells ``b*K ... b*K + K - 1`` (index arithmetic, reshapes
+    and array sizes are all unchanged), but the cell at index ``b*K``
+    (``b > 0``) physically STRADDLES the band-``(b-1)``/``b`` boundary:
+    it spans the top half-cell of band ``b-1`` plus the bottom half-cell
+    of band ``b``. The first cell of the grid is a half-width cell and the
+    last is 1.5 cells wide (its would-be top edge is dropped so the edge
+    and cell counts match the nested grid exactly). Cell membership of a
+    frequency in band ``b`` is ``b*K + floor((f - lo_b)/step_b + 1/2)``,
+    clipped to the global cell range -- see the move's ``_cap_cell_index``.
+
+    ``divisor == 1`` returns a copy of ``band_edges`` itself (``stagger``
+    is ignored: with one cell per band the cap grid IS the band grid), so
+    every downstream cap computation reduces bit-identically to the
+    pre-2026-08-15 per-band behaviour.
 
     Args:
         band_edges: 1D ascending array of sub-band edges (Hz).
         divisor: Number of cap cells per sub-band (``K >= 1``).
+        stagger: Shift interior cap edges by half a cell so no cap edge
+            equals a band edge (requires ``K >= 2``; ignored at ``K == 1``).
 
     Returns:
-        ``np.ndarray`` of length ``K * num_bands + 1``.
+        ``np.ndarray`` of length ``K * num_bands + 1`` in both modes.
     """
     be = np.asarray(band_edges, dtype=float)
     k = max(1, int(divisor))
@@ -80,6 +97,9 @@ def make_cap_edges(band_edges, divisor: int):
         return be.copy()
     lo = be[:-1]
     step = (be[1:] - be[:-1]) / k
+    if stagger:
+        inner = lo[:, None] + (np.arange(k)[None, :] + 0.5) * step[:, None]
+        return np.concatenate([be[:1], inner.ravel()[:-1], be[-1:]])
     inner = lo[:, None] + np.arange(k)[None, :] * step[:, None]
     return np.concatenate([inner.ravel(), be[-1:]])
 
@@ -757,7 +777,10 @@ class GBState(ModuleSubState):
                     f"leaf-cap grid mismatch: the state stores "
                     f"{len(_stored_cap) - 1} cap cells (divisor ~{_k_store:g}) "
                     f"but the run config builds {len(_cfg_cap) - 1} "
-                    f"(GB_CAP_DIVISOR ~{_k_cfg:g}). Either restore the old "
+                    f"(GB_CAP_DIVISOR ~{_k_cfg:g}). NOTE: identical cell "
+                    f"counts with differing edge VALUES means the STAGGER "
+                    f"flag flipped (GB_CAP_STAGGER / GBSettings.cap_stagger "
+                    f"-- fresh store only). Either restore the old "
                     f"GB_CAP_DIVISOR / GBSettings.cap_divisor, or migrate the "
                     f"store with scripts/fstat_proposal/migrate_gb_cap_grid.py "
                     f"(which splits each band's stored cap state into its "

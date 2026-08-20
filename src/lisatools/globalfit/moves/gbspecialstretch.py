@@ -766,6 +766,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_cap_iter_only=False,
         leaf_cap_update=True,
         cap_divisor=None,
+        cap_stagger=None,
         sighet_refresh_every=0,
         sighet_refresh_dphase=0.5,
         sighet_refresh_min_beta=0.1,
@@ -1122,9 +1123,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # default is 1 so any other banded branch (VGB, tests, scripts)
         # keeps the per-band behaviour unless it opts in explicitly.
         self.cap_divisor = max(1, int(cap_divisor or 1))
+        # Staggered cap grid (user design 2026-08-20, GB_CAP_STAGGER / the
+        # v5 grid): interior cap edges shifted half a cell so NO cap edge
+        # coincides with a band edge. Band b still OWNS cells b*K..b*K+K-1
+        # (all index arithmetic / reshapes / array sizes unchanged), but
+        # cell b*K physically straddles the band-(b-1)/b seam. Meaningless
+        # at K == 1 (the cap grid IS the band grid), so it is forced off
+        # there and VGB/tests keep the per-band behaviour.
+        self.cap_stagger = bool(cap_stagger) and self.cap_divisor > 1
         _be_host = _to_numpy(self.band_edges)
         self.cap_edges = self.xp.asarray(
-            make_cap_edges(_be_host, self.cap_divisor)
+            make_cap_edges(_be_host, self.cap_divisor,
+                           stagger=self.cap_stagger)
         )
         self.num_cap_cells = self.num_bands * self.cap_divisor
         # per-band lower edge + cap-cell width, for the cell lookup
@@ -9074,9 +9084,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def _cap_cell_index(self, band_inds, freqs_hz):
         """Cap-cell index of sources at ``freqs_hz`` inside ``band_inds``.
 
-        Containment (cell ``c`` belongs to band ``c // K``) makes this a
-        pure per-source arithmetic lookup -- no searchsorted over a second
-        edge array, and correct under BOTH band-edge modes.
+        Nested grid: containment (cell ``c`` belongs to band ``c // K``)
+        makes this a pure per-source arithmetic lookup -- no searchsorted
+        over a second edge array, and correct under BOTH band-edge modes.
+
+        Staggered grid (``cap_stagger``): same arithmetic with a half-cell
+        offset and NO per-band clip -- a source in the top half-cell of
+        band ``b`` gets ``sub == K`` and lands in cell ``(b+1)*K``, the
+        cell that physically straddles the seam. Only the global cell
+        range is clipped (the very top half-cell of the last band folds
+        into its 1.5-wide final cell, matching the stored edge array).
+        Both branches agree exactly with ``searchsorted(cap_edges, f)-1``
+        over the stored edges.
         """
         if self.cap_divisor == 1 or freqs_hz is None:
             return band_inds
@@ -9084,9 +9103,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sub = xp.floor(
             (freqs_hz - self._cap_band_lo[band_inds])
             / self._cap_band_step[band_inds]
+            + (0.5 if self.cap_stagger else 0.0)
         )
+        if self.cap_stagger:
+            cell = band_inds * self.cap_divisor + sub.astype(band_inds.dtype)
+            return xp.clip(cell, 0, self.num_cap_cells - 1)
         sub = xp.clip(sub, 0, self.cap_divisor - 1).astype(band_inds.dtype)
         return band_inds * self.cap_divisor + sub
+
+    def _np_cap_cells(self, f0_hz, band, be):
+        """Numpy twin of :meth:`_cap_cell_index` for host-side diagnostics.
+
+        Same nested/staggered arithmetic, taking the band edges as a host
+        array (callers already have them) and band indices from a prior
+        searchsorted. MUST stay in lockstep with ``_cap_cell_index``.
+        """
+        step = (be[1:] - be[:-1]) / self.cap_divisor
+        sub_i = np.floor(
+            (f0_hz - be[:-1][band]) / step[band]
+            + (0.5 if self.cap_stagger else 0.0)
+        ).astype(int)
+        if self.cap_stagger:
+            return np.clip(
+                band * self.cap_divisor + sub_i, 0, self.num_cap_cells - 1
+            )
+        sub_i = np.clip(sub_i, 0, self.cap_divisor - 1)
+        return band * self.cap_divisor + sub_i
 
     def _sorter_cap_cells(self, band_sorter):
         """Per-source cap-cell index for every row of ``band_sorter``.
@@ -9151,14 +9193,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         is impossible only when every one of the band's cells is at
         capacity. At ``cap_divisor == 1`` this is exactly the old per-band
         ``counts >= cap``.
+
+        Staggered grid: band ``b``'s frequency range [lo_b, hi_b) is
+        covered by its K owned cells PLUS cell ``(b+1)*K`` (the straddling
+        cell owned by the next band, which holds the top half-cell of
+        ``b``) -- a birth into that top half-cell is possible while that
+        cell has room, so it joins the all-full test. The last band has no
+        upper neighbour (its top half-cell folds into its own final cell).
         """
         if self.cap_divisor == 1:
             return counts >= cap
         k = self.cap_divisor
         nb = self.num_bands
-        return (
-            counts.reshape(-1, nb, k) >= cap.reshape(1, nb, k)
-        ).all(axis=2).reshape(-1)
+        full = counts.reshape(-1, nb, k) >= cap.reshape(1, nb, k)
+        sat = full.all(axis=2)
+        if self.cap_stagger and nb > 1:
+            xp = get_array_module(counts)
+            full_flat = (counts.reshape(-1, nb * k)
+                         >= cap.reshape(1, nb * k))
+            # boundary cell (b+1)*K for bands b = 0 .. nb-2
+            sat = xp.concatenate(
+                [sat[:, :-1] & full_flat[:, k::k], sat[:, -1:]], axis=1
+            )
+        return sat.reshape(-1)
 
     def _band_flat_index(self, temp_inds, walker_inds, band_inds):
         """Flat ``(temp, walker, band)`` index (matches ``_band_saturated_flat``)."""
@@ -9331,12 +9388,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         be = _to_numpy(self.band_edges)
         band = np.clip(np.searchsorted(be, f0_hz, side="right") - 1,
                        0, self.num_bands - 1)
-        step = (be[1:] - be[:-1]) / self.cap_divisor
-        sub_i = np.clip(
-            np.floor((f0_hz - be[:-1][band]) / step[band]).astype(int),
-            0, self.cap_divisor - 1,
-        )
-        cell = band * self.cap_divisor + sub_i
+        cell = self._np_cap_cells(f0_hz, band, be)
         for w in range(coords.shape[0]):
             m = inds[w]
             if not m.any():
@@ -9355,12 +9407,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         f0_hz = coords[..., 1] / 1e3
         band = np.clip(np.searchsorted(be, f0_hz, side="right") - 1,
                        0, self.num_bands - 1)
-        step = (be[1:] - be[:-1]) / self.cap_divisor
-        sub_i = np.clip(
-            np.floor((f0_hz - be[:-1][band]) / step[band]).astype(int),
-            0, self.cap_divisor - 1,
-        )
-        cell = band * self.cap_divisor + sub_i
+        cell = self._np_cap_cells(f0_hz, band, be)
         out = np.zeros((coords.shape[0], self.num_cap_cells), dtype=int)
         for w in range(coords.shape[0]):
             m = inds[w]
@@ -9381,6 +9428,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         than hides. ``GB_CAP_LL_CHECK_TOL`` sets the warning threshold.
         """
         if os.environ.get("GB_CAP_LL_CHECK", "0") != "1":
+            return
+        if self.cap_stagger:
+            # Staggered cells straddle band seams by design, so the owned-K
+            # sum is NOT expected to tile the band ll -- the check would
+            # fire on every boundary cell with cross-band occupants.
+            logger.info(
+                "[GB_CAP_LL_CHECK %s] skipped: cap grid is STAGGERED "
+                "(cells straddle band seams; the per-band tiling identity "
+                "does not hold).", self.name,
+            )
             return
         summed = cell_lls.reshape(
             cell_lls.shape[0], self.num_bands, self.cap_divisor
@@ -9726,6 +9783,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"GBSettings.cap_divisor to the move builder and to "
                     f"GBState.initialize_band_information(cap_edges=...)."
                 )
+            # Same COUNT does not mean same GRID: a nested and a staggered
+            # grid at the same divisor have identical lengths but shifted
+            # edge values (GB_CAP_STAGGER). Compare values, not just size.
+            if "cap_edges" in bi and not np.allclose(
+                np.asarray(bi["cap_edges"], dtype=float),
+                _to_numpy(self.cap_edges), rtol=0.0, atol=1e-12,
+            ):
+                raise ValueError(
+                    f"{self.name}: cap grid mismatch -- the move's cap "
+                    f"edges (cap_stagger={self.cap_stagger}) differ in "
+                    f"VALUE from the state's stored cap_edges at the same "
+                    f"cell count. Pass the SAME GBSettings.cap_stagger "
+                    f"(GB_CAP_STAGGER) to the move builder and to the "
+                    f"state initialization; changing it on an existing "
+                    f"store requires a fresh store."
+                )
             ensure_leaf_cap_fields(bi, self.num_bands)
             ensure_cap_cell_fields(bi, self.num_cap_cells)
             cap_arr = self._cap_state_arrays(bi)[0]
@@ -9738,7 +9811,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"{int(self.leaf_cap_start)} for {len(cap_arr)} "
                     + ("cap cells " if self.cap_divisor > 1 else "bands ")
                     + f"(divisor {self.cap_divisor} over "
-                    f"{self.num_bands} sub-bands)."
+                    f"{self.num_bands} sub-bands"
+                    + (", STAGGERED grid" if self.cap_stagger else "")
+                    + ")."
                 )
             self._cap_leaf_cap = cap_arr
             # ``_band_leaf_cap`` stays the ARMED flag + the band-resolution

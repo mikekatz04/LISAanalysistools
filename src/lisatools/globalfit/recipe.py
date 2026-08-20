@@ -2380,7 +2380,8 @@ def build_gb_moves(
     from .state import make_cap_edges
 
     _cap_edges = make_cap_edges(
-        band_edges, int(getattr(gb_info, "cap_divisor", 1) or 1)
+        band_edges, int(getattr(gb_info, "cap_divisor", 1) or 1),
+        stagger=bool(getattr(gb_info, "cap_stagger", False)),
     )
     _resolved_ntemps = state.sub_states["gb"].initialize_band_information(
         nwalkers, ntemps, band_edges, band_temps, cap_edges=_cap_edges,
@@ -2535,6 +2536,9 @@ def build_gb_moves(
         # caps are enforced per 1/K-of-a-sub-band cell, not per sub-band.
         # 1 -> the pre-2026-08-15 per-band behaviour, bit-identically.
         cap_divisor=int(getattr(gb_info, "cap_divisor", 1) or 1),
+        # Staggered cap grid (GBSettings.cap_stagger / GB_CAP_STAGGER):
+        # cap edges shifted half a cell so no cap edge equals a band edge.
+        cap_stagger=bool(getattr(gb_info, "cap_stagger", False)),
         # Sig-het reference policy: built once per repeat block and FIXED
         # (default 0 = no mid-block refresh). GB_SIGHET_REFRESH_EVERY=N>0
         # re-enables the legacy per-source drift refresh (diagnostic);

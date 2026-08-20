@@ -134,6 +134,10 @@ class VGBSettings(GBSettings):
     # which tripped the resume guard with a leaf-cap grid mismatch on a
     # FRESH run. Pinning 1 here keeps both sites on the band grid.
     cap_divisor: int = 1
+    # Same story for the staggered cap grid (GB_CAP_STAGGER): meaningless
+    # at divisor 1 (both make_cap_edges and the move force it off there),
+    # but pin it so no future inherited-env surprise re-runs this movie.
+    cap_stagger: bool = False
     # resolved to the catalogue source count at prepare time
     nleaves_min: typing.Optional[int] = None
     nleaves_max: typing.Optional[int] = None

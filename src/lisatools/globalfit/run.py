@@ -87,6 +87,7 @@ def _branch_cap_edges(branch_info):
     return make_cap_edges(
         branch_info.band_edges,
         int(getattr(branch_info, "cap_divisor", 1) or 1),
+        stagger=bool(getattr(branch_info, "cap_stagger", False)),
     )
 
 #: Branches with hand-written initialization in :meth:`GlobalFit.load_info`.

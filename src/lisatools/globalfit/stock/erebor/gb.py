@@ -518,6 +518,19 @@ class GBSettings(Settings):
     cap_divisor: int = dataclasses.field(
         default_factory=env_default("GB_CAP_DIVISOR", 8, int)
     )
+    # cap_stagger: STAGGER the cap-cell grid against the sub-band grid
+    # (user design 2026-08-20, the v5 grid). Interior cap edges shift by
+    # half a cell width so NO cap edge coincides with a band edge -- the
+    # leaf-cap seams and the band seams (scheduling / serial-within-band /
+    # F-stat fit interior) decouple, and no source can sit on both at
+    # once. Band b still owns cells b*K..b*K+K-1 (sizes, reshapes and
+    # storage unchanged); the cell at each band seam physically straddles
+    # it. Requires cap_divisor >= 2 (ignored at 1). Changing it on an
+    # existing store is refused by the resume guard -- fresh store only.
+    # Env: GB_CAP_STAGGER.
+    cap_stagger: bool = dataclasses.field(
+        default_factory=env_default("GB_CAP_STAGGER", False, bool)
+    )
     # Task-b: narrow per-band WDM slabs. Each per-band sub-band-buffer slab
     # spans a few WDM layers centered on the band instead of the full analysis
     # band ``Nf_active``, cutting the dominant buffer memory term by
