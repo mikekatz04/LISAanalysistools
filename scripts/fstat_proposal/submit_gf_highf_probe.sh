@@ -10,27 +10,82 @@
 # fresh start, move/delete ${STORE_DIR} first.
 #
 # ############################################################################
-# ## V3 (2026-08-16) -- A/B AGAINST THE LIVE v2 RUN. Three coupled       ##
-# ## changes, run in PARALLEL with gf_prod_3mo_v2 so the difference is   ##
-# ## attributable: GB_CAP_DIVISOR 8 -> 32, the ghost-increment guard ON, ##
-# ## and the hierarchical uniform-cell x F**0.5 birth draw. The cap      ##
-# ## changes are COUPLED -- the guard alone at K=8 re-imposes a 24.5%    ##
-# ## structural exclusion, and K=32 alone leaves the ratchet to climb    ##
-# ## back to irrelevance -- so they ship together or not at all.         ##
-# ## FRESH STORE: this is a new run dir, so no migration is needed.      ##
-# ## This starts a new store (STORE_DIR below), so every piece of state is  ##
-# ## built from the config in this file: the VGB beta ladder at VGB_NTEMPS, ##
-# ## the GB cap-cell grid at GB_CAP_DIVISOR, the band grid, and a fresh     ##
-# ## F-stat fit + epoch center table against this run's own residual.       ##
-# ## The migration scripts (fix_vgb_band_temps / migrate_gb_cap_grid /      ##
-# ## migrate_vgb_chirp_basis) exist ONLY to carry an EXISTING store across  ##
-# ## these changes -- do not run them here.                                 ##
+# ## V4 (2026-08-18) -- THE IN-MODEL CORRECTNESS RUN.                       ##
 # ##                                                                        ##
-# ## Deploy:  git pull && sbatch scripts/fstat_proposal/submit_gf_3mo.sh    ##
+# ## v3 could not refine f0: the GB ensemble's between-walker scatter was   ##
+# ## 0.798 Fourier bins against 0.051 within-walker. Root-caused to the     ##
+# ## in-model proposal covariance, broken two independent ways, both        ##
+# ## silent (LAT 09687e4b):                                                 ##
+# ##   * the fdot CONDITIONING scale 1e-16 was resolved by matching         ##
+# ##     ("fdot","Mc"), so on the distance/chirp-mass basis it landed on    ##
+# ##     the Mc column (natural scale O(0.1-1)). That drove the Mc          ##
+# ##     eigenvalue under the eigen-floor and the Mc step came out at       ##
+# ##     1.27e-15 x the true posterior width. Mc never moved.               ##
+# ##   * the physical->sampling Jacobian was DIAGONAL on a map that is not  ##
+# ##     separable, so Mc lost its amplitude term and fdot_astro_ratio got  ##
+# ##     EXACTLY zero curvature (which is why its proposal row had to be    ##
+# ##     zeroed). Now the exact congruence J^T Gamma J.                     ##
+# ## Verified against the real GB likelihood: all 9 columns 1.000 (was      ##
+# ## 8.5e-40 for Mc, 0 for the ratio). CONFIRMED IN PRODUCTION: in-model    ##
+# ## infomat cold acceptance 0.31-0.38 at GB_JUMP_FACTOR=1.2, against 0.95  ##
+# ## under the broken covariance. Do NOT retune the jump factor.            ##
+# ##                                                                        ##
+# ## Also in v4:                                                            ##
+# ##   * LAT 71c0bbd1 -- the multi-shard router returned None, so on >= 2   ##
+# ##     GPUs sighet_active was ALWAYS False and the anchor check, the ll   ##
+# ##     audit, the reference refresh and the trust gate were all silently  ##
+# ##     dead. Every diagnostic below exists because of this fix.           ##
+# ##   * GB group stretch OFF (c3725f7d): measured cold 2/472 = 0.0042 on   ##
+# ##     v3 while the VGB stretch scored 0.4485 on the same run.            ##
+# ##   * SIGHET_NT_LAYER stays at the v3 default (36 h). 270 was tried and  ##
+# ##     REVERTED: it OOMs (the sig-het stash goes as cells x N_sparse_t)   ##
+# ##     and the accuracy gain did not reproduce once the config echo made  ##
+# ##     the measurement attributable. See the block at SIGHET_NT_LAYER.    ##
+# ##   * F-stat peak weighting flattens to w ~ sqrt(SNR) after the first    ##
+# ##     refit (62cd814e), plus a fix for alpha being silently dropped on   ##
+# ##     the stage-B reload path.                                          ##
+# ##                                                                        ##
+# ## START: this expects a COPY of the v3 store rewound to zero GB leaves,  ##
+# ## so the fitted noise, the VGB ladder and the F-stat epoch cache are     ##
+# ## inherited and only the GB search re-runs:                              ##
+# ##   cp -r gf_prod_3mo_v3 gf_prod_3mo_v4                                  ##
+# ##   python scripts/fstat_proposal/reset_recipe_stage.py \                ##
+# ##       gf_prod_3mo_v4/gf_prod_3mo_testing.h5 gb_search \                ##
+# ##       --rewind-to-empty gb --apply                                     ##
+# ## For a genuinely fresh start instead, just point STORE_DIR at an empty  ##
+# ## dir -- every piece of state then rebuilds from this file.              ##
+# ##                                                                        ##
+# ## Deploy:  git pull && sbatch scripts/fstat_proposal/submit_gf_3mo_v4.sh ##
 # ############################################################################
 # ============================================================================
 
 # ---- fill these in ---------------------------------------------------------
+# ============================================================================
+# HIGH-F ISOLATED-SOURCE PROBE (regenerated 2026-08-20 from submit_gf_3mo_v4
+# -- the production base with EVERY finding of 2026-08-19/20 live):
+#   * SIGHET_TUKEY_ALPHA=0.01 + edge-exclusion guard   (taper semantics fix)
+#   * SIGHET_N_CP=256                                  (null-coherence fix)
+#   * tight fdot_astro_ratio birth proposal            (LAT 1274a66c, code default)
+#   * instruments retired; anchor+drift checks on
+# GB band CONFINED to 4 layers around the 20.380377 mHz source (catalogue
+# fdot 1.02e-13; SNR ~46): the isolated-source lab for the fragmentation /
+# fdot-at-birth findings.
+#
+# RUN FRESH (band-grid change => never rewind/migrate a full-band store):
+#   rm -rf gf_highf_probe
+#   sbatch scripts/fstat_proposal/submit_gf_highf_probe.sh
+# Noise stages refit in minutes; first GB propose within ~15 min.
+#
+# PRE-REGISTERED VERDICT vs the pre-fix production baseline (band 142 of the
+# full run, iteration ~59): 4/24 walkers near-single, ONE with fdot right
+# (the ~1%-per-birth lottery), mean +16.6-bin offset cluster, cap ratcheted
+# 1->9. Post-fix expectation: majority of walkers near-single with fdot ~
+# +1.0e-13 within ~10-20 GB iterations; band cold-lnL spread collapsing
+# from ~350 to ~tens; no cap ratchet past ~2-3.
+# In-run confirmation the birth fix is live: "[birth] fdot_astro_ratio
+# proposal TIGHTENED" at the epoch-0 grid build.
+# Ship back: gf_store_extract.py the store (+ logs/gb_fstat_fit as usual).
+# ============================================================================
 #SBATCH --job-name=gf_highf_probe          # job name
 #SBATCH --partition=gpu-80-spot   # GPU partition
 #SBATCH --gres=gpu:2              # 2 GPUs (GPUS=0,1 below are LOCAL indices)
@@ -39,7 +94,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=gf3mo_v3_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
+#SBATCH --output=gf_highf_probe_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -134,7 +189,7 @@ export BASE_FILE_NAME=gf_prod_3mo
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
-export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER was a dead name)
+export NUM_ITERATIONS=100         # total engine iterations (resume-safe; NITER was a dead name)
 
 # ---- band + domain ---------------------------------------------------------
 # EXPLICIT Tobs (2026-08-13): sbatch propagates the submitting shell's env,
@@ -143,8 +198,12 @@ export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER
 export TOBS_TARGET=7776000
 export MIN_FREQ=4e-4
 export MAX_FREQ=2.5e-2
-export GB_MIN_FREQ=5.5e-4
-export GB_MAX_FREQ=2.2e-2
+# CONFINED WINDOW (noble-mixing-taco interior rule): 4 whole WDM layers
+# 145..148, the 20.380377 mHz flagship source in layer 146, INTERIOR (the
+# F-stat fit uses band_edges[1:-1]; half-layer margins because the snap is
+# inward). 4 bands -> 2/2 shard split on 2 GPUs.
+export GB_MIN_FREQ=2.006944e-02    # 144.5 layers -> snaps to 145
+export GB_MAX_FREQ=2.076389e-02    # 149.5 layers -> snaps to 149
 
 # ---- GB knobs (everything else rides the flipped defaults: sig-het in-model,
 #      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,
@@ -220,6 +279,279 @@ export GB_INMODEL_REPEATS_SURVIVOR=25
 # shakedown: set SIGHET_INFOMAT_VALIDATE=1 for one propose to log the
 # fast-vs-chunked reldiff (expect ~1e-4 near-peak, larger off-peak =
 # observed-vs-Fisher, fine for a proposal), then remove.
+# ---- V4 sig-het block (2026-08-18) ------------------------------------
+# SPARSE TIME GRID. Every production script has been running ~35 h sparse
+# spacing -- 3-mo default 64 (snaps to 60, stride 36), 6-mo 120 (stride 36),
+# 23-mo 525 (stride 32) -- the "constant temporal density" prescription from
+# the accuracy studies. Measured on the high-f probe 2026-08-18, the compiled
+# BANDED v5 kernel wants finer than that: the delta-vs-delta likelihood error
+# eps/T on the loud block ran 0.131 at 36 h against 0.072 at 8 h, and the
+# trust-gate rejection fell from ~15% to 9.0%. The prescription was
+# calibrated with gb_sighet_tier_assess.py, which builds its engine with NO
+# v3_n_nodes / v4_knots / v4_band / v5 (i.e. the v2 path) and never calls a
+# compiled v3/v4/v5 kernel at all -- so it cannot speak to this engine.
+# 270 is an EXACT divisor of Nt=2160 (stride 8 -> 8.0 h), so it lands
+# cleanly instead of snapping. If it exceeds the device shared budget the
+# fstat scorer FAILS AT SETUP naming the largest value that fits (~2 min,
+# not a wasted run) -- it is never silently coarsened.
+#
+# ---- REVERTED 2026-08-18: 270 OOMs, and the accuracy case did not hold ----
+# MEMORY. The sig-het stash is (n, nch, nch, Nf_active, N_sparse_t)
+# complex128 in _expand_B -- 4x _expand_B + 4x _expand_A per setup -- so it
+# goes as CELLS x N_sparse_t and the two knobs MULTIPLY. 270 raised
+# N_sparse_t 60 -> 265 while GB_N_SUBBANDS stayed at the 3-month 8192:
+#   3-mo default  60 x 8192 = 4.9e5  OK (= v3)   |  6-mo  118 x 4096 = 4.8e5 OK
+#   23-mo        525 x 2048 = 1.1e6  OK          |  v4@270 265 x 8192 = 2.2e6 OOM
+# It died on a 14.4 GB request at 91.5 GB allocated on a 99.9 GB card --
+# 2x the 23-month run's product on the SHORTEST baseline. The confined
+# probes could not surface this: n scales with cells and they ran 128
+# against production's 16384.
+#
+# ACCURACY. The 0.131@36h vs 0.072@8h A/B above predates GBGPU b412089, so
+# NEITHER run logged its resolved config -- and 0.131 is also the nodes=64
+# value from the separate 32/64/128 sweep (0.103/0.131/0.093), i.e. the two
+# arms are not a clean pair. With the echo finally live, four temper arms
+# CONFIRMED at nt_layer=270 measured eps/T 0.087-0.102 at small
+# displacement -- squarely inside that 0.093-0.131 spread, not 0.072. The
+# gain did not reproduce.
+#
+# And it should not have been expected to. project_sighet_v4_plan.md,
+# A100 bench-off 2026-08-03: at 3 months a CPU run at STRIDE 1 (maximum
+# possible resolution) still gave 2.90 at T=100 vs 3.70 at the 16 h grid --
+# "that tail is resolution-independent ... the known deep-null fit tail
+# (remedy = SNR-aware / null-densified nodes)". Same note, longer
+# baselines: "a 1.6x finer sparse grid changes NOTHING, and where it
+# changes anything it is worse." The real lever is NODE PLACEMENT.
+#
+# The "production default is TOO COARSE" line in that note (which motivated
+# 270) argues for matching the BENCHMARK's 16 h configuration; it was
+# written against a SHARED-memory ceiling and never costed the global-memory
+# stash above. It is not a measured 3-month accuracy deficit.
+#
+# TO RE-TEST: 270 needs GB_N_SUBBANDS=2048 to fit (265 x 2048 = 5.4e5), at
+# a throughput cost -- fewer resident cells means more sequential passes.
+# export SIGHET_NT_LAYER=270
+#
+# Confirm from the log, do not assume -- nothing else echoes these:
+#   grep "sig-het engine resolved" <store>/gf_prod_3mo_artifacts/globalfit_run.log
+# want: nt_layer=270 (stride 8) ... sparse spacing 8.0 h   (GBGPU b412089)
+#
+# MULTI-DEVICE F-STAT FAN-OUT. Validated 2026-08-13 (a86c52af): the =check
+# gate ran on 2xH100, full comb+stageB in 122.3 s / 224 peaks with ZERO
+# diverging batches vs the pinned scorer; the 2026-08-12 divergence was
+# closed by the drift-campaign replica fixes. The 23-month script has used
+# it since. Without it every refit runs the serialized pinned scorer. Real
+# lane overlap needs a GBGPU wheel at/after 4381300 (GIL release); older
+# wheels stay CORRECT but serialized, so this is safe either way.
+export FSTAT_SIGHET_MULTIDEV=1
+#
+# SIG-HET REFERENCE REFRESH (user ruling 2026-08-18). The trust gate measures
+# drift from ``ref_track`` -- the parameters the sig-het reference was built
+# at -- so REFRESHING THE REFERENCE RESETS THE BUDGET. With no refresh a
+# source spends all 200 repeats accumulating against one fixed expansion
+# point, which is exactly why the drift audit pinned at max 0.47-0.50 of a
+# 0.5 budget in EVERY block of every probe.
+#
+# BOTH knobs are required. ``REFRESH_EVERY`` is only the cadence at which
+# FARNESS IS CHECKED; the refresh fires only for sources with
+# ``drift > sighet_refresh_dphase``, which defaults to 0.5 -- the trust gate
+# itself. The gate stops the drift one step before the refresh would notice,
+# so the phase arm can NEVER trigger at the defaults: two knobs that must
+# differ ship equal. DPHASE=0 makes it "refresh anything that moved" (a
+# source that never accepted a move still has an exact reference).
+#
+# The counter is REPEATS, not iterations: newborn blocks (200) get 8
+# refreshes, survivor blocks (25) get none -- the `move_i + 1 < n_rep` guard
+# -- which is right, they barely drift.
+#
+# Cost, measured on the high-f probe with this exact configuration:
+# inmodel_sighet_refresh 0.25 s typical / 6.26 s worst against
+# inmodel_repeats 5.2-15.1 s and an 85-98 s propose = 0.3% typical, 6.4%
+# worst. In-model is only ~5% of a propose (rj_step is 87%).
+#
+# WHY THIS RATHER THAN WIDENING THE GATE: refreshing re-linearizes, so it
+# buys mixing while PRESERVING accuracy; widening buys the same mixing by
+# SPENDING accuracy. Same reason GB_SIGHET_TRUST_PHASE_C stays at 0 here.
+export GB_SIGHET_REFRESH_EVERY=25
+export GB_SIGHET_REFRESH_DPHASE=0
+# ALL RUNGS REFRESH (user ruling 2026-08-18). The default 0.1 keeps a stale
+# reference on everything hotter, justified in the code as "the ll error is
+# beta-suppressed". That reasoning covers the WITHIN-rung accept test, where
+# the error enters as beta*eps -- but NOT the tempering swap, where it enters
+# as (beta_i - beta_j)*eps. On a geometric ladder from 1.0 to 1e-4 over 24
+# rungs the adjacent ratio is 0.687, so beta_i - beta_j = 0.313*beta_i, and a
+# stale-reference error of 1e3 lnL (the tail the probes measured off the cold
+# chain) contributes ~31 at beta=0.1 and ~3 at beta=0.01. Swaps at those
+# rungs would be decided by reference staleness rather than by the data.
+# Only around beta ~ 1e-4 does it genuinely vanish (~0.03).
+#
+# Cost: this refreshes every rung instead of the ~top third, so roughly 3x
+# the measured refresh time -- ~0.9% of a propose typically, ~17% in the
+# heaviest propose observed. Against rj_step at 87% of the propose that is
+# ~12% wall clock worst case, and it buys swap ratios that mean something.
+export GB_SIGHET_REFRESH_MIN_BETA=0
+#
+# SNR-SCALED TRUST GATE (measured 2026-08-18, high-f probe A/B). The uniform
+# 0.5 rad gate is the wrong SHAPE: the tiered spec places gates at a constant
+# TRUE-lnL displacement T, but a fixed phase offset sits at
+# T = 0.5*(dphase*SNR/3.456)**2 -- T~0.7 at SNR 8 against a design point of
+# T~1000, while being ~9 sigma for a loud source. It strangled exactly the
+# faint population the completeness deficit lives in.
+# C_phase = 3.456*sqrt(2*T_gate); 49 -> T=100. Clipped BELOW by
+# sighet_trust_dphase, so this can never tighten the gate for anyone.
+#
+# A/B result, same nt_layer, only the gate differing:
+#   C_phase=0   gate=[0.5..0.5] rad    -> [GB_TRUST] 13.8-23.8% rejected,
+#                                          infomat cold acceptance 0.323
+#   C_phase=49  gate=[0.81..9.81] rad  -> [GB_TRUST] 2.7-3.6% rejected,
+#                                          infomat cold acceptance 0.404
+# The gate stops being an active constraint (5-6x fewer kills) and becomes
+# the rare safety net it was meant to be, and the per-walker acceptance line
+# goes from many nan walkers (no in-model proposals reaching them at all) to
+# full coverage. Cost: the chain travels further from its reference, so the
+# end-of-block DELTA-vs-DELTA on the loud block ran 8.46 against 3.65-7.06
+# elsewhere -- ~+20%, at the high end of the observed range but inside it.
+# Worth it: the accumulated error affects bookkeeping and swaps; the
+# rejection rate affects whether the chain moves at all.
+#
+# Also re-couples the refresh: with the gate up to ~10 rad, drift CAN now
+# exceed the stock refresh trigger, so the two knobs stop being mutually
+# exclusive (moot here -- REFRESH_DPHASE=0 above -- but it matters elsewhere).
+export GB_SIGHET_TRUST_PHASE_C=49
+#
+# RUNG-COVERAGE AUDIT -- ARMED FOR THE FIRST FEW ITERATIONS, THEN REMOVE.
+# Every probe today ran the degenerate 2-rung ladder, so we have NO data on
+# 22 of this run's 24 rungs. The probes' delta-vs-delta line showed a tail of
+# 1e3-1e4 lnL error OFF the cold chain (cold maxima stayed ~1-17). At
+# beta=1e-4 that is suppressed; on this run's geometric ladder the middle
+# rungs sit at beta ~ 0.01-0.1, where 1e3 becomes beta*eps ~ 10-100 and would
+# corrupt the tempering swap ratio (beta_i - beta_j)(L_i - L_j).
+# These two make DELTA-vs-DELTA report across ALL 24 rungs. Watch the "all"
+# median: if it stays ~1 with isolated maxima, unset both and carry on; if it
+# climbs with rung count, stop and investigate before spending days on it.
+# Cost: one extra exact batched call per in-model block (measured 0.053 s
+# against inmodel_repeats ~4-5 s).
+export GB_SIGHET_ANCHOR_CHECK=1
+export GB_SIGHET_DRIFT_CHECK=1
+# TIER SCAN RETIRED FOR THE CLEAN RESTART (2026-08-19). It has NO iteration
+# cap (the "first-few-iterations" note above it was wrong): it ran 13 extra
+# scoring passes -- half of them chunked-exact -- on EVERY in-model block,
+# ~0.32 s/propose, for the whole run. Its 72-block dissect record is
+# captured and analyzed (see GB_SIGHET_DISSECT below); the clean production
+# reading must not carry its overhead. The anchor check above stays: one
+# cheap exact call per block, logging |dll@anchor| -- the corrupted-refs
+# rate stays on the record for the post-fix comparison.
+export GB_SIGHET_TIER_SCAN=""
+
+# ============================================================================
+# SIG-HET DISSECTION + IN-RUN ENGINE SWEEP (2026-08-19, LAT 749af2e1).
+# Motivated by the 13 anchor checks in this run's own log: ll_het ~ -8e3 vs
+# ll_exact ~ +3e2 AT THE EXPANSION POINT (r=1, frozen residual) for the SAME
+# recurring sources (band 10 @ 1.9727 mHz x6, band 17 @ 2.9603 x3, band 5 @
+# 1.3181 x2) -- corrupted references, not accuracy noise, and nothing a
+# resolution knob can touch. Both riders live inside the tier scan above.
+#
+# DISSECT: one npz per in-model block (first 32) -- the anchor through BOTH
+# engines with the d_h/h_h split (data-side vs template-side attribution),
+# null-depth/masked-row stats from the engine's own c0 stash, and full
+# per-source identity. ~1 extra batched call per block.
+#
+# SWEEP: at the first 2 blocks, every arm below is rebuilt around the SAME
+# underlying chunked comp, re-anchored on the SAME frozen residual and
+# scored on the SAME 512-source subset (worst anchor offenders + random
+# fill -- the band-10 population is guaranteed in-sample) against ONE shared
+# exact side. Arms differ by exactly one thing: the engine config. Base
+# (production) config is auto-prepended as the control. A failed arm logs
+# and the loop continues; the production engine is restored no matter what,
+# and the run then continues normally. Budget: ~10 arms x (make_reference
+# on 512 refs + 7 batched scores) -- minutes, twice.
+#
+# Read the verdict locally once "[GB_SWEEP] wrote" appears (the dumps ride
+# home in the store-dir zip):
+#   python scripts/gb_chunked_het/gb_sighet_dissect_report.py \
+#       <unzipped>/gf_prod_3mo_v4/dissect
+# Anchor |dll| CANNOT move under a resolution-only knob: flat across the nt
+# arms + moving under node arms = deep-null node fit; flat across ALL arms
+# = the reference build itself (then the dissect d_h/h_h split names which
+# half). v5=0 differing from base = v5-specific; v5=2 is the flat-carve
+# control arm.
+# Sig-het reference-build taper, PINNED (2026-08-19 Tukey rulings: equal
+# alphas across chunked/sig-het/TD->FD; error-created edges REMOVED by the
+# [min_time, max_time] crop). 0.01 -> taper 11 layers + 8 margin = 19 <=
+# crop 20: the build-time edge-exclusion guard passes with ONE layer to
+# spare. The old inherited 0.05 tapered 54 layers against the 20-layer
+# crop -- the flat ~1% h_h bias that was the dissect's high-f 0.984,
+# fixed in GBGPU 88b278d / LAT 7e9c4c65+454d04bd. Verify on resume:
+#   grep "sig-het engine resolved" ...  (tukey_alpha=0.01)
+# and the anchor/AUDIT high-f values should move 0.984 -> ~1.000.
+export SIGHET_TUKEY_ALPHA=0.01
+# THE LOW-F h_h CORRUPTION FIX (2026-08-19, root-caused on the laptop from
+# this run's own dissect captures). Mechanism: the make_reference spline
+# reconstruction (n_cp_build control points) matches each channel to ~0.1%
+# but its per-channel errors are INCOHERENT across X/Y/Z, so the GW
+# template's X+Y+Z null cancellation (true null power ~1e-10 of total) is
+# broken at ~1e-5 -- and the near-singular low-f XYZ invC amplifies
+# exactly that direction (null eigenvalue 54-7500x the differential ones).
+# Result: anchor h_h inflated up to 27x (d_h CLEAN -- the measured v4
+# signature), worst for edge-on sources at low f. The AUTO n_cp law
+# (4-day spacing -> 32 nodes at 3 months) was set by a phase criterion
+# that never saw the null direction. Verified on the production grid
+# (gb_sighet_bfold_gpu_probe.py): 32 -> 256 nodes takes the scored anchor
+# from max |log hh ratio| 0.31 to 1.5e-4 at +2.6% setup cost. 256 = the
+# shared-arena ceiling; pinned explicitly (the GBGPU AUTO default now
+# also resolves here, this is the belt to that suspenders).
+export SIGHET_N_CP=256
+# UNIFORM EDGE EXCLUSION (user ruling 2026-08-19): bringing the domain
+# [min_time, max_time] in removes edge-created error in EVERY likelihood
+# at once (all WDMSettings inherit the one domain; min/max_freq still vary
+# per source). NOTE (capture-replay verdict, same day): the crop is NOT
+# the cure for the low-f h_h inflation -- the fresh reference build is
+# EXACT on this very crop-20 domain; the inflation is live-stash
+# corruption (see the dissect block below). The crop remains the POLICY
+# knob (taper must be subsumed; constant-layers scaling, pinned in the
+# 6-mo/23-mo scripts) -- flip on a FRESH STORE_DIR only: changing the
+# crop changes Nt_active (2121 -> 2001) and resume/rewind compatibility
+# across a domain-shape change is UNVERIFIED.
+# export EDGE_CROP_WAVELETS=60
+
+# DISSECT + RAW CAPTURE RETIRED (2026-08-19, mission accomplished). The
+# 72-block dissect + 25 raw-slab captures were pulled and replayed locally:
+# a FRESH setup_in_model from the captured params/slabs scores EXACT
+# (sig-het == direct pixel sum == production's exact side), while the LIVE
+# in-run stash scored the same sources 10-35x inflated in h_h with
+# wrong-signed d_h. Verdict: the reference BUILD and both engines are
+# exonerated; the corruption is in the LIVE slot->reference stash lifecycle
+# (prime suspect: multi-GPU router/replica sync -- the [1b] shard-swap
+# anomaly), amplified at low f by the near-singular XYZ invC (null-space
+# eigenvalue 54x the differential ones). Anchor errors reach the cold chain
+# (median |dll| 5.5, low-f 23) but sampler-facing DELTAS track exact
+# proportionally (multiplicative distortion): clean sources in spec,
+# ~6% corrupted-anchor sources 0.3-2 lnL at 1-2 rad displacement. Same
+# condition v3 sampled under -- newly measured, not newly introduced.
+# Re-arm all three (TIER_SCAN hosts them) only to re-verify after the
+# stash-lifecycle fix lands. Analysis: scratchpad replay_raw.py + the
+# dissect report; capture data archived off-cluster.
+export GB_SIGHET_DISSECT=""
+export GB_SIGHET_DISSECT_RAW=0
+# SWEEP RETIRED (2026-08-19, after 8 swept blocks): every arm answered.
+# nt_layer=270 differs by 6e-8 (round-off -- resolution DEAD); m_half by
+# 1e-4/1e-10 (m-window irrelevant); v5=0/v5=2 bitwise (the v4/v5
+# bit-identity holding); c_Nt_sub/c_N_cp_sig bitwise (never enter the
+# reference build); n_sparse_fd=2048 device-clamped; n_sparse_fd=512
+# negligible; c_N_sparse=512 anomalous (uniform 2x -- suspected
+# delegate-rebuild side effect in the sweep harness, NOT an engine
+# result). The flat ~1% component was root-caused OFF-engine (tukey
+# semantics, fixed); the remaining low-f inflation is being chased by the
+# CUDA probes + the dissect below, which stays ON.
+export GB_SIGHET_SWEEP=""
+export GB_SIGHET_SWEEP_F0="1.9727e-3,2.9603e-3,1.3181e-3,1.6357e-3,2.2107e-3,4.2389e-3,5.1677e-3,1.2269e-2,2.0381e-2"
+# 4 qualifying blocks: the low-f targets cluster in nearby bands (one or
+# two units) while the high-f pair lives in different units entirely.
+export GB_SIGHET_SWEEP_BLOCKS=4
+# defaults, pinned for the run record:
+export GB_SIGHET_DISSECT_MAX=32
+export GB_SIGHET_SWEEP_MAX_SRC=512
+
 export SIGHET_INFOMAT=1
 export GB_INFOMAT_PER_BLOCK=1
 # Countable-only F-stat center precompute + lookup-miss fallback rides
@@ -309,7 +641,15 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # and shutoff is PERMANENT for the process, so there is no recovery.
 export GB_RJ_BAND_SHUTOFF_AFTER=50
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
-export GB_FSTAT_REFIT_EVERY=50     # v4 production cadence (was 100)
+# 100 -> 50 (2026-08-18): the refit re-derives the peaks against the LIVE
+# residual and the UPDATED foreground/PSD, which is the whole point of
+# refitting -- and the foreground converges well inside 20 iterations, so a
+# 100-propose cadence spends most of the run on a grid fitted to a
+# foreground that no longer exists. ~6% overhead at a 17.7-min fit.
+# The peak weighting also flattens to w ~ sqrt(SNR) from epoch 1 onward
+# (FSTAT_PEAK_WEIGHT_ALPHA_LATE, default 0.25), so this cadence is also
+# when that takes effect.
+export GB_FSTAT_REFIT_EVERY=50     # production cadence (5 was verify-only)
 export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
 # BIRTH-DRAW ALLOCATION (2026-08-16). Peak boxes are weighted w ~ F**alpha,
 # and the F-statistic goes like SNR^2 -- so the historical alpha=1 hands an
@@ -397,24 +737,19 @@ export VGB_CHIRP_MASS_BASIS=0
 # with the matching "8" argument (it recreates every rung-dimensioned
 # vgb dataset: temps ladder, counters zeroed, 7 swap pairs).
 export VGB_NTEMPS=8
+# GB rung count. 24 is already the code default (stock/erebor/gb.py
+# env_default("GB_NTEMPS", 24)) -- pinned here anyway because the rung count
+# is the one knob whose failure mode is completely silent: resume derives it
+# from the STORED band_temps shape, so a store built at the wrong count runs
+# the wrong ladder forever while the script still says 24, and the only hint
+# is a single build_gb_moves warning buried in a 200k-line log. Both confined
+# probes ran a degenerate [1.0, 1e-4] ladder for days on exactly that. The
+# LADDER PREFLIGHT below turns the silent case into a refusal to start.
+export GB_NTEMPS=24
 # Concurrent per-device shard dispatch (code default since 2026-08-13;
 # explicit here for the run record). =0 restores serial dispatch if the
 # drift/[GB_CELL_LL] checks ever implicate concurrency.
 export GB_ROUTER_THREADED=1
-
-# ---- v4 SIG-HET STACK (2026-08-18) ---------------------------------------
-# This probe predates submit_gf_3mo_v4.sh and did not carry the knobs v4
-# arms. A probe that does not mirror production's likelihood settings is
-# not measuring production. Values copied verbatim from
-# submit_gf_3mo_v4.sh -- change them only in lockstep with that script.
-export GB_SIGHET_REFRESH_EVERY=25      # re-anchor drifted references
-export GB_SIGHET_REFRESH_DPHASE=0      # ... on the drift test alone
-export GB_SIGHET_REFRESH_MIN_BETA=0    # ... on ALL rungs, not just cold
-export GB_SIGHET_TRUST_PHASE_C=49      # SNR-scaled carrier-phase gate
-export SIGHET_NT_LAYER=270             # sparse-grid resolution
-export FSTAT_SIGHET_MULTIDEV=1         # multi-device F-stat fan-out
-# Diagnostic ladder, first iterations only (~0.32 s/propose).
-export GB_SIGHET_TIER_SCAN=0.05,0.1,0.25,0.5,1,2
 
 # ============================================================================
 # FRESH-RUN GUARD (2026-08-15). This submission starts a NEW run in a NEW
@@ -437,6 +772,39 @@ else
   echo "        are fitted fresh against this run's own residual."
 fi
 
+# ============================================================================
+# OPTIONAL LAUNCH SHORTCUT: graft v3's finished noise_search (2026-08-18)
+# ============================================================================
+# v4 changes NOTHING on the noise side -- the whole config diff against v3 is
+# GB / sig-het / F-stat knobs -- so refitting the PSD and galactic foreground
+# from scratch just reproduces a result v3 already has, at ~1.5 h.
+#
+# But noise_vgb_search MUST re-run: the VGB ladder moved to eryn's
+# make_ladder, and a resumed store's stored ladder WINS over the configured
+# one. (Measured on the temper probes: arms prepped from an older base kept
+# the old 1/1.2**i ladder, while freshly-built arms got make_ladder.)
+#
+# So: let v4 author its own store -- every grid, shape and ladder correct by
+# construction -- and move only the fitted numbers in.
+#
+#   1. sbatch this script against the fresh STORE_DIR. Let it reach
+#      noise_search and SAVE ONE iteration, then scancel. That iteration is
+#      throwaway; it exists so the datasets are allocated with >= 1 row.
+#   2. python scripts/fstat_proposal/graft_noise_state.py \
+#          <v3_store>/gf_prod_3mo_testing.h5 \
+#          ${STORE_DIR}/${BASE_FILE_NAME}_testing.h5          # dry run
+#      ... then the same command with --apply.
+#   3. sbatch this script again. It resumes from the grafted row, sees
+#      noise_search complete, and starts noise_vgb_search on the NEW ladder.
+#
+# The graft tool finds v3's handover row itself (VGB is frozen for the whole
+# of noise_search and starts moving on the first noise_vgb iteration), gates
+# on both stores having zero GB leaves, and refuses to touch sub_backend/vgb
+# -- which is where the ladder lives, and the entire point of the exercise.
+# Do NOT rewind a COPY of the v3 store instead: that carries v3's grids and
+# rung counts into v4 and needs a migration per array, which is how the three
+# earlier band-grid migrations failed.
+
 # LATER REFITS: GB_FSTAT_REFIT_EVERY=100 proposal-hits (~8 h at the new
 # iteration cadence, ~3.5% overhead at a 17.7-min fit). To force an extra
 # refit mid-run, stop the job and archive the epoch dir, then resubmit:
@@ -452,89 +820,34 @@ fi
 # EVERY rank before roles resolve -- watch nvidia-smi for saver/spare
 # device allocations; if the extra ranks hold GPU memory, drop back to
 # the plain single-process line below until the rank-gated build lands.
-# ############################################################################
-# ## HIGH-f CONFINED PROBE (2026-08-17). IDENTICAL to submit_gf_3mo_v3.sh   ##
-# ## except for the block below. Purpose: watch the RJ + in-model machinery ##
-# ## around ONE isolated source, with every temperature and walker live, so ##
-# ## the jump/acceptance relationship is observable in minutes rather than  ##
-# ## hours.                                                                 ##
-# ##                                                                        ##
-# ## TARGET: f0 = 20.38038 mHz, SNR 45.7 -- the highest-frequency detectable##
-# ## injection, and the ONLY catalogue source in its whole sub-band (142).  ##
-# ##   sub-band 142 = [20.27778, 20.41667] mHz  (1080 Fourier bins)         ##
-# ##   cap cell 4567 = [20.37760, 20.38194] mHz (34 bins, K=32)             ##
-# ##   cells 4566-4568 span [20.37326, 20.38628] mHz                        ##
-# ##                                                                        ##
-# ## BAND WINDOW: three uniform WDM layers (145,146,147) so the target band ##
-# ## is INTERIOR -- the F-stat fit uses band_edges[1:-1], so the target band ##
-# ## must not be an edge band or it is excluded from the fit entirely.      ##
-# ##                                                                        ##
-# ## NOISE IS PINNED, NOT FITTED. A three-sub-band slice contains no galaxy,##
-# ## so a foreground fit there is meaningless. The psd/galfor values below  ##
-# ## are v3's OWN converged numbers at iteration 82 (walker-median), so the ##
-# ## GB machinery sees production-realistic noise without paying for the    ##
-# ## noise stages. Everything else -- moves, caps, F-stat, tempering,       ##
-# ## repeats, sig-het -- is unchanged from v3.                              ##
-# ############################################################################
-# FOUR layers, not three. Band shards are assigned by band COUNT, so three
-# bands split 2/1 across the two GPUs -- the target band lands on one device
-# and the other carries a single near-empty band, which exercises the
-# multi-shard router only asymmetrically. Four splits 2/2, keeps the target
-# band (146) interior for the F-stat fit (band_edges[1:-1]), and puts real
-# work on both devices, so the per-device comp replicas, the sig-het
-# reference stash and the cross-device reduction are all covered.
-# HALF-LAYER MARGINS, not exact boundaries. _band_klohi snaps the window
-# INWARD to whole WDM layers, so a value a hair below a boundary loses that
-# layer: 2.013889e-2 and 2.069444e-2 sat just under layers 145 and 149 and
-# snapped to 146..148, spanning 2 layers where >=3 are required (an interior
-# sampled span must exist). Sitting mid-layer makes the snap unambiguous.
-export GB_MIN_FREQ=2.006958e-2      # 144.5 layers -> snaps to 145
-export GB_MAX_FREQ=2.076406e-2      # 149.5 layers -> snaps to 149
-                                    # -> whole layers 145,146,147,148 = 4
-# NOTE: the F-stat fit range follows band_edges[1:-1], so restricting the
-# band window above ALREADY confines the fit to sub-band 142 (1080 bins /
-# 32 cap cells). Narrowing further to cells 4566-4568 has no env knob:
-# FSTAT_PEAK_MIN_F is a minimum F-STATISTIC, not a frequency, and there is
-# no MAX counterpart. Two honest options -- (a) accept the whole target
-# band, which still costs ~150x less comb than production and contains
-# exactly ONE catalogue source, or (b) add an f0-window knob to
-# select_comb_peaks. (a) is what this script does; (b) is TODO-2 below.
-
-# NOISE IS PINNED VIA PYTHON, NOT ENV. ``general.fixed_psd_params`` is a
-# dataclass field with no env default, so run_combined_staged.py must set:
-#     fit.general.fixed_psd_params = [1.522086581e-11, 2.727869920e-15]
-#     fit.general.fixed_psd_kwargs = dict(
-#         psd_params=[1.522086581e-11, 2.727869920e-15],
-#         galfor_params=[3.767774829e-44, 5.107561738e-02,
-#                        9.377231534e-01, 2.722106290e-03, 4.449185606e+03])
-#     fit.remove_branch("psd"); fit.remove_branch("galfor")
-# (v3's OWN converged values at iteration 82, walker-median -- not truth.)
-
-# Trackers. GB_JUMP_TRACE logs, per propose and per temperature rung, the
-# proposed |df0| in Fourier bins split by accepted/rejected -- the one thing
-# no existing log line reports and the whole reason for this run.
-# F-stat peak floor is now the stock default (SNR 8) -- see
-# FSTAT_KNOB_DEFAULTS in sampling/fstat_proposal.py for why.
-export GB_JUMP_TRACE=1
-# Step-by-step MH trace of ONE source (the loudest cold row): every term
-# in the ratio per repeat, plus a numeric detailed-balance check.
-export GB_INMODEL_TRACE=20
-# NOT GB_DEBUG=1. That knob is not instrumentation -- it fires
-# apply_debug_preset(), a laptop-smoke preset, and EVERY knob the script does
-# not set explicitly then falls back to a smoke default: gb.ntemps 2 (not 24),
-# CHUNKED_N_SPARSE 64 (not 256), NT_SUB 64, N_PAD 8, N_CP_* 16. The first run
-# of this probe silently used a 2-rung ladder and a 4x-truncated sparse
-# window, which invalidates any statement about the info-matrix proposal --
-# the info matrix is second differences of that same likelihood. Production
-# (submit_gf_3mo_v3.sh) never sets it. The GB special-move band plots it also
-# arms are not worth that price; GB_JUMP_TRACE gives what this probe needs.
-export GB_NTEMPS=24                 # explicit: match production, never inherit
-export GB_SIGHET_DRIFT_CHECK=1      # end-of-block drift vs the trust gate
-export GB_SIGHET_ANCHOR_CHECK=1     # sig-het expansion error at the anchor
-
-# Small + fast: one band unit, so iterations are seconds not minutes.
-export GB_N_SUBBANDS=64
-export NUM_ITERATIONS=300
+# ============================================================================
+# LADDER PREFLIGHT. Only fires on a RESUME (a fresh submission has no store
+# yet and skips it). Resume derives the GB rung count from the stored
+# band_temps shape, NOT from GB_NTEMPS above -- refuse to start rather than
+# run a silently-wrong ladder for days.
+# ============================================================================
+if [ -e "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" ]; then
+  python - "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" "${GB_NTEMPS}" <<'PYEOF' || exit 2
+import sys, h5py
+store, want = sys.argv[1], int(sys.argv[2])
+with h5py.File(store, "r") as f:
+    bt = f["global_fit"]["sub_backend"]["gb"].get("band_temps")
+    if bt is None:
+        print("[LADDER] no gb band_temps; nothing to check.")
+        raise SystemExit(0)
+    have = int(bt.shape[-1])
+print(f"[LADDER] stored gb rungs = {have}, GB_NTEMPS = {want}")
+if have != want:
+    print(f"[LADDER] REFUSING TO START: the store would run {have} rungs, not "
+          f"{want}. Resume takes the STORED count. Re-rung it first:\n"
+          f"  python scripts/fstat_proposal/reset_recipe_stage.py {store} "
+          f"gb_search --rewind-to-empty gb --apply\n"
+          f"  python scripts/fstat_proposal/rerunge_gb_ladder.py {store} gb "
+          f"{want} --apply")
+    raise SystemExit(2)
+print("[LADDER] OK.")
+PYEOF
+fi
 
 mpiexec -n 3 python scripts/fstat_proposal/run_combined_staged.py
 # python scripts/fstat_proposal/run_combined_staged.py   # single-process fallback
