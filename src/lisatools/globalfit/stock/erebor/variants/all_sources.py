@@ -139,7 +139,15 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     min_freq: float = 1e-4
     max_freq: float = 2.5e-2
     window_tukey_alpha: float = 0.0  # rectangular window
-    edge_crop_wavelets: typing.Optional[int] = 20
+    # env-wired (2026-08-19, second shadow of the same bug fixed in
+    # full_year_combined 7d537d32): a plain ``= 20`` here shadowed the base
+    # EDGE_CROP_WAVELETS env factory, so the submit-script pins were ignored
+    # on THIS path too -- and run_combined_staged builds through
+    # AllSourcesGeneralSettings, so the 1-yr launch hit the sig-het
+    # edge-exclusion guard twice.
+    edge_crop_wavelets: typing.Optional[int] = dataclasses.field(
+        default_factory=env_default("EDGE_CROP_WAVELETS", 20, int)
+    )
     file_store_dir: str = dataclasses.field(
         default_factory=env_default("FILE_STORE_DIR", "./gf_output/")
     )

@@ -73,7 +73,12 @@ class MojitoNoiseGeneralSettings(NoiseGeneralSettings):
     # mojito settings in ``all_sources`` (the synthetic noise fits crop nothing
     # because their draw fills the full active grid exactly).
     window_tukey_alpha: float = 0.0
-    edge_crop_wavelets: typing.Optional[int] = 20
+    # env-wired (2026-08-19): same EDGE_CROP_WAVELETS shadowing bug as
+    # full_year_combined/all_sources -- a noise-only run must be able to
+    # match a GB run's domain crop.
+    edge_crop_wavelets: typing.Optional[int] = dataclasses.field(
+        default_factory=env_default("EDGE_CROP_WAVELETS", 20, int)
+    )
 
     # Load ONLY the instrument-noise stream (data/INSTRUMENT/L1). Adding "GB"
     # here would fold in the whole WDWD galaxy — a different experiment, and one
