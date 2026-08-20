@@ -10724,6 +10724,24 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             A_lims=kw.get("A_lims"),
             dist_lims=kw.get("dist_lims"),
             fdot_astro_ratio_max=kw.get("fdot_astro_ratio_max"),
+            # TIGHT fdot_astro_ratio birth proposal (user ruling 2026-08-20,
+            # prior unchanged): the independent U[-M, M] ratio draw scattered
+            # the born fdot by +-M x fdot_gr, defeating the Mc information
+            # the grids were added to carry -- <1% of 20 mHz births landed
+            # within 3 sigma of a usable fdot. GB_FSTAT_BIRTH_RATIO_TIGHT=0
+            # reverts; PHASE (rad of carrier-phase drift error, default one
+            # cycle) sets the width, EPS the full-prior floor share.
+            ratio_tight=(dict(
+                tobs=float(getattr(self._basis_settings, "Tobs", 0.0)),
+                phase_rad=float(os.environ.get(
+                    "GB_FSTAT_BIRTH_RATIO_PHASE", 2.0 * np.pi)),
+                eps=float(os.environ.get("GB_FSTAT_BIRTH_RATIO_EPS", "0.1")),
+                w_min=float(os.environ.get(
+                    "GB_FSTAT_BIRTH_RATIO_WMIN", "0.05")),
+            ) if (kw.get("fdot_astro_ratio_max") is not None
+                  and float(getattr(self._basis_settings, "Tobs", 0.0)) > 0
+                  and os.environ.get("GB_FSTAT_BIRTH_RATIO_TIGHT", "1") == "1")
+                else None),
             use_cupy=self.backend.uses_cupy,
             stacked_live=stacked,
             # loud last-line refusal of grids fitted on a different band

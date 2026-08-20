@@ -965,7 +965,8 @@ class UniformFloorMixture:
 
 
 def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False,
-                               fdot_astro_ratio_max=None, dist_lims=None):
+                               fdot_astro_ratio_max=None, dist_lims=None,
+                               ratio_tight=None):
     """Wrap a 4-D intrinsic proposal into the 8/9-column GB RJ birth container.
 
     Mirrors the stock GMM birth container
@@ -1020,7 +1021,104 @@ def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False,
     # reset_key_order re-maps rvs/logpdf columns to the sampler layout
     # (a bare ``key_order = [...]`` assignment would NOT re-map).
     dist.reset_key_order(key_order)
+    if fdot_astro_ratio_max is not None and ratio_tight is not None:
+        return RatioTightenedBirth(dist, float(fdot_astro_ratio_max),
+                                   use_cupy=use_cupy, **ratio_tight)
     return dist
+
+
+# GR chirp constant: fdot_gr = _FDOT_K * Mc[Msun]^{5/3} * f[Hz]^{11/3}
+# (96/5) * pi^{8/3} * (G*MSUN/c^3)^{5/3}; matches gbgpu.utils.utility.get_fdot.
+_G_SI, _C_SI, _MSUN_SI = 6.674080e-11, 299792458.0, 1.988546954961461e30
+_FDOT_K = (96.0 / 5.0) * np.pi ** (8.0 / 3.0) * (
+    _G_SI * _MSUN_SI / _C_SI ** 3) ** (5.0 / 3.0)
+
+
+class RatioTightenedBirth:
+    """Birth container whose ``fdot_astro_ratio`` PROPOSAL is tightened.
+
+    THE PRIOR IS UNCHANGED (user ruling 2026-08-20): the run still samples
+    ``r ~ U[-M, M]``. Only the RJ-birth proposal changes: the wrapped
+    9-column container's independent ``r ~ U[-M, M]`` draw scattered the
+    physical ``fdot = fdot_gr(f0, Mc) * (1 + r)`` over ``[-(M-1), M+1] x
+    fdot_gr`` -- at 20 mHz that is +-5e-13 against a Fisher width of
+    ~2e-15, so <1% of births carried a usable fdot even when the F-stat
+    grid supplied the right (f0, Mc). Low f never noticed (fdot_gr tiny).
+
+    New draw, CONDITIONAL on the candidate's own (f0, Mc):
+
+        r | f0, Mc ~ (1 - eps) * U[-w, +w]  +  eps * U[-M, +M]
+        w = clip( phase_rad / (pi * Tobs^2 * fdot_gr(f0, Mc)), w_min, M )
+
+    i.e. tight around r = 0 -- which IS the grid-informed value: the
+    F-stat kernel scores its templates at exactly ``fdot = fdot_gr(f0,
+    Mc_node)`` (r = 0), so the tight component proposes what the grid
+    actually measured. ``phase_rad`` is the allowed carrier-phase drift
+    error over the window (default one cycle); at 20 mHz w ~ 0.27, below
+    ~5 mHz the clip at M makes the draw identical to the old one. The
+    ``eps`` floor keeps FULL support over the prior box: BandSorter
+    evaluates ``logpdf`` at EXISTING sources for RJ death factors, and a
+    hard-truncated proposal would assign them -inf (deaths unproposable).
+
+    ``rvs``/``logpdf`` are exactly consistent (the same mixture), so the
+    RJ Metropolis-Hastings factors remain correct; ndim and the prior are
+    untouched, so stores resume cleanly and the change is proposal-only.
+    """
+
+    ndim = 9
+
+    def __init__(self, base, ratio_max, *, tobs, phase_rad=2.0 * np.pi,
+                 eps=0.1, w_min=0.05, f0_col=1, mc_col=2, r_col=8,
+                 use_cupy=False, seed=None):
+        self.base = base
+        self.M = float(ratio_max)
+        self.tobs = float(tobs)
+        self.phase_rad = float(phase_rad)
+        self.eps = float(eps)
+        self.w_min = float(w_min)
+        self.f0_col, self.mc_col, self.r_col = int(f0_col), int(mc_col), int(r_col)
+        self.use_cupy = bool(use_cupy)
+        self._rng = np.random.default_rng(seed)
+
+    def _xp(self, x=None):
+        if x is not None:
+            from ..utils.utility import get_array_module
+            return get_array_module(x)
+        if self.use_cupy:
+            import cupy as cp
+            return cp
+        return np
+
+    def _width(self, f0_mHz, mc, xp):
+        fdot_gr = _FDOT_K * xp.maximum(mc, 1e-6) ** (5.0 / 3.0) * \
+            xp.maximum(f0_mHz * 1e-3, 1e-6) ** (11.0 / 3.0)
+        dfdot = self.phase_rad / (np.pi * self.tobs ** 2)
+        return xp.clip(dfdot / fdot_gr, self.w_min, self.M)
+
+    def rvs(self, size=1):
+        n = int(np.prod(size)) if not isinstance(size, int) else int(size)
+        x = self.base.rvs(size=n)
+        xp = self._xp(x)
+        x = xp.atleast_2d(x)
+        w = self._width(x[:, self.f0_col], x[:, self.mc_col], xp)
+        u = xp.asarray(self._rng.random(n))
+        wide = u < self.eps
+        draw = xp.asarray(self._rng.uniform(-1.0, 1.0, n))
+        x[:, self.r_col] = xp.where(wide, draw * self.M, draw * w)
+        return x
+
+    def logpdf(self, x):
+        xp = self._xp(x)
+        x = xp.atleast_2d(xp.asarray(x))
+        lp = xp.asarray(self.base.logpdf(x))
+        r = x[:, self.r_col]
+        w = self._width(x[:, self.f0_col], x[:, self.mc_col], xp)
+        q = ((1.0 - self.eps) * (xp.abs(r) <= w) / (2.0 * w)
+             + self.eps * (xp.abs(r) <= self.M) / (2.0 * self.M))
+        # replace the base's independent U[-M, M] term with the mixture
+        with np.errstate(divide="ignore"):
+            lp = lp + np.log(2.0 * self.M) + xp.log(q)
+        return xp.where(xp.isnan(lp), -xp.inf, lp)
 
 
 class MixtureProposal:

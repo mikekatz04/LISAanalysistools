@@ -1307,7 +1307,8 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
                                 floor_eps: Optional[float] = None,
                                 comb_weight: Optional[float] = None,
                                 stacked_live=None,
-                                expected_band_edges=None, epoch=None):
+                                expected_band_edges=None, epoch=None,
+                                ratio_tight=None):
     """Stacked grids (+ optional comb) -> floor -> RJ birth container.
 
     ``stacked_live`` short-circuits the npz reload when the caller just built
@@ -1463,9 +1464,16 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
     if dist_lims is not None:
         logger.info("[birth] slot 0 = dist ~ U[%s, %s] kpc (distance basis)",
                     dist_lims[0], dist_lims[1])
+    if ratio_tight is not None:
+        logger.info("[birth] fdot_astro_ratio proposal TIGHTENED: "
+                    "w = clip(%.3g/(pi*T^2*fdot_gr), %.3g, M), eps=%.3g "
+                    "(prior unchanged)", ratio_tight.get("phase_rad", 6.283),
+                    ratio_tight.get("w_min", 0.05),
+                    ratio_tight.get("eps", 0.1))
     return make_gb_rj_birth_container(
         mix, A_lims, use_cupy=use_cupy,
         fdot_astro_ratio_max=fdot_astro_ratio_max, dist_lims=dist_lims,
+        ratio_tight=ratio_tight,
     )
 
 
