@@ -42,10 +42,23 @@ are untouched: cap cells are derived from ``f0`` at propose time.
 ``K = 1`` is a no-op grid (cap cells == sub-bands); the script still writes
 ``cap_edges`` so an older store gains the dataset the resume guard reads.
 
+STAGGERED GRID (``--stagger``, user design 2026-08-20 / GB_CAP_STAGGER, the
+v5 grid): writes the half-cell-shifted edges instead -- no cap edge
+coincides with a band edge; cell counts and every array shape are identical
+to the nested grid. Inheritance still broadcasts from each cell's OWNING
+band (cell ``c`` -> band ``c // K``), which is exact for the interior cells
+and conservative for the one straddling cell per seam. INTENDED FOR A
+REWOUND-TO-EMPTY GB BRANCH (the v5-from-rewound-v4 flow: rewind first with
+``reset_recipe_stage.py --rewind-to-empty gb``, then run this): with zero
+alive leaves there is no occupancy to reattribute and the migration is
+exactly "replace the edge values, re-broadcast the rewound cap state". On a
+store with live GB leaves it still runs, but sources within half a cell of
+a band seam silently change cells -- do that knowingly or not at all.
+
 Usage::
 
     python scripts/fstat_proposal/migrate_gb_cap_grid.py <file.h5> \
-        --cap-divisor 8 [--branch gb] [--dry-run]
+        --cap-divisor 8 [--stagger] [--branch gb] [--dry-run]
 
 Nothing else in the file is touched.
 """
@@ -89,7 +102,8 @@ def split_to_cells(band_arr, axis, k):
     return np.repeat(np.asarray(band_arr), k, axis=axis)
 
 
-def migrate(path, branch="gb", cap_divisor=8, dry_run=False, backup=True):
+def migrate(path, branch="gb", cap_divisor=8, stagger=False, dry_run=False,
+            backup=True):
     grp_path = f"global_fit/sub_backend/{branch}"
     k = max(1, int(cap_divisor))
 
@@ -117,7 +131,7 @@ def migrate(path, branch="gb", cap_divisor=8, dry_run=False, backup=True):
         it_attr = int(f["global_fit"].attrs.get("iteration", nsteps))
         live_row = max(0, min(nsteps - 1, it_attr - 1))
 
-    cap_edges = make_cap_edges(band_edges, k)
+    cap_edges = make_cap_edges(band_edges, k, stagger=stagger)
     nc = len(cap_edges) - 1
 
     print(f"file:            {path}")
@@ -129,7 +143,9 @@ def migrate(path, branch="gb", cap_divisor=8, dry_run=False, backup=True):
               f"(divisor {(len(stored_cap_edges) - 1) / nb:g})")
     else:
         print("stored cap grid: NONE (pre-cap-grid store -> divisor 1)")
-    print(f"new cap grid:    {nc} cells (divisor {k})")
+    print(f"new cap grid:    {nc} cells (divisor {k}"
+          + (", STAGGERED half-cell against the band grid" if stagger else "")
+          + ")")
     print(f"stored steps:    {nsteps}; walkers: {nw}")
     if existing_cells:
         print(f"existing cap-cell datasets (will be replaced): {existing_cells}")
@@ -189,7 +205,10 @@ def migrate(path, branch="gb", cap_divisor=8, dry_run=False, backup=True):
 
     print(
         "\nDone. Resume with GB_CAP_DIVISOR / GBSettings.cap_divisor = "
-        f"{k}; the resume guard compares the stored cap_edges against the "
+        f"{k}"
+        + (" and GB_CAP_STAGGER=1 / GBSettings.cap_stagger" if stagger
+           else "")
+        + "; the resume guard compares the stored cap_edges against the "
         "config-built ones and refuses any mismatch."
     )
 
@@ -201,6 +220,10 @@ def main():
                     help="branch sub-backend group name (default: gb)")
     ap.add_argument("--cap-divisor", type=int, default=8,
                     help="cap cells per sub-band K (default: 8)")
+    ap.add_argument("--stagger", action="store_true",
+                    help="write the half-cell STAGGERED grid "
+                         "(GB_CAP_STAGGER / the v5 grid); intended for a "
+                         "rewound-to-empty GB branch")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would change and exit")
     ap.add_argument("--no-backup", action="store_true",
@@ -208,7 +231,8 @@ def main():
     args = ap.parse_args()
     migrate(
         args.path, branch=args.branch, cap_divisor=args.cap_divisor,
-        dry_run=args.dry_run, backup=not args.no_backup,
+        stagger=args.stagger, dry_run=args.dry_run,
+        backup=not args.no_backup,
     )
 
 

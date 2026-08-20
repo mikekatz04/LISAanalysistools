@@ -10,51 +10,24 @@
 # fresh start, move/delete ${STORE_DIR} first.
 #
 # ############################################################################
-# ## V5 (2026-08-20) -- THE STAGGERED-GRID RUN.                             ##
+# ## V5, 1-YEAR Tobs (2026-08-20) -- THE STAGGERED-GRID RUN AT 1 YEAR.      ##
 # ##                                                                        ##
-# ## One structural change on top of everything v4 learned:                 ##
+# ## Identical to the 1-year v4 script (which carries the 2-YEAR settings   ##
+# ## per the user's ruling: SIGHET_NT_LAYER=270, GB_NLEAVES_MAX=25000,      ##
+# ## GB_N_SUBBANDS=2048, FSTAT_PEAKS_PER_BAND=500, EDGE_CROP_WAVELETS=60)   ##
+# ## plus the v5 deltas -- see submit_gf_3mo_v5.sh for the full story:      ##
 # ##                                                                        ##
-# ## * STAGGERED CAP-CELL GRID (GB_CAP_STAGGER=1, user design 2026-08-20).  ##
-# ##   Every interior cap edge shifts by half a cell, so NO cap edge        ##
-# ##   coincides with a sub-band edge: the leaf-cap seams and the band      ##
-# ##   seams (serial-within-band scheduling, F-stat fit interior, band      ##
-# ##   shutoff) share no equivalent boundary, and no source can sit on      ##
-# ##   both at once. Cells at band seams straddle them; storage sizes,      ##
-# ##   index arithmetic and the monitor are unchanged (LAT tests           ##
-# ##   tests/test_cap_stagger.py pin arithmetic == searchsorted exactly).   ##
+# ## * STAGGERED CAP-CELL GRID (GB_CAP_STAGGER=1): interior cap edges       ##
+# ##   shift half a cell so no cap edge coincides with a sub-band edge --   ##
+# ##   leaf-cap seams decouple from band seams; storage/indexing unchanged. ##
+# ## * BIRTH FIX pinned (1274a66c): births draw fdot_astro_ratio tight      ##
+# ##   around the F-stat grid fdot, not U[-5,5].                            ##
+# ## * RIDGE-GIBBS pinned (8d926f27 / Eryn 6ed5a8b): zero-likelihood        ##
+# ##   resample along the exact Mc^(5/3)(1+r)=const ridge.                  ##
 # ##                                                                        ##
-# ## Also explicitly pinned (both are code defaults since 8d926f27, run    ##
-# ## here for the first time in a full 3-month production):                 ##
-# ##   * BIRTH FIX (1274a66c): RJ births draw fdot_astro_ratio | (f0, Mc)  ##
-# ##     tight around the F-stat grid fdot instead of U[-5,5] -- the       ##
-# ##     high-f mosaic root cause.                                          ##
-# ##   * RIDGE-GIBBS (8d926f27 / Eryn 6ed5a8b): zero-likelihood resample   ##
-# ##     along the exact Mc^(5/3)(1+r)=const ridge -- unfreezes the        ##
-# ##     (Mc, r, dist) marginals.                                           ##
-# ##                                                                        ##
-# ## START (user ruling 2026-08-20): REWOUND v4 COPY + CAP-GRID MIGRATION. ##
-# ## The staggered edges differ from the v4 store's, and the resume guard  ##
-# ## refuses a mismatched cap_edges array -- so after the rewind, rewrite  ##
-# ## the (empty-GB) cap grid in place with the migrate script:             ##
-# ##                                                                        ##
-# ##   git pull                                                             ##
-# ##   cp -r gf_prod_3mo_v4 gf_prod_3mo_v5                                  ##
-# ##   python scripts/fstat_proposal/reset_recipe_stage.py \                ##
-# ##       gf_prod_3mo_v5/gf_prod_3mo_testing.h5 gb_search \                ##
-# ##       --rewind-to-empty gb --apply                                     ##
-# ##   python scripts/fstat_proposal/migrate_gb_cap_grid.py \               ##
-# ##       gf_prod_3mo_v5/gf_prod_3mo_testing.h5 \                          ##
-# ##       --cap-divisor 32 --stagger                                       ##
-# ##   # verify readable, then STAMP THE BACKUP so self-heal can never      ##
-# ##   # resurrect the pre-rewind, pre-migration state:                     ##
-# ##   python -c "import h5py; h5py.File(                                   ##
-# ##       'gf_prod_3mo_v5/gf_prod_3mo_testing.h5','r').close()"            ##
-# ##   cp gf_prod_3mo_v5/gf_prod_3mo_testing.h5 \                           ##
-# ##      gf_prod_3mo_v5/gf_prod_3mo_testing_running_backup_copy.h5         ##
-# ##   sbatch scripts/fstat_proposal/submit_gf_3mo_v5.sh                    ##
-# ##                                                                        ##
-# ## (A genuinely fresh STORE_DIR also works -- the noise stages then       ##
-# ## rebuild from scratch and no migration is needed.)                      ##
+# ## START: FRESH STORE (there is no 1-year predecessor to rewind):         ##
+# ##   rm -rf gf_prod_1yr_v5                                                ##
+# ##   git pull && sbatch scripts/fstat_proposal/submit_gf_1yr_v5.sh        ##
 # ############################################################################
 # ############################################################################
 # ## V4 (2026-08-18) -- THE IN-MODEL CORRECTNESS RUN.                       ##
@@ -107,7 +80,7 @@
 # ============================================================================
 
 # ---- fill these in ---------------------------------------------------------
-#SBATCH --job-name=gf3mo_v5          # job name
+#SBATCH --job-name=gf1yr_v5          # job name
 #SBATCH --partition=gpu-80-spot   # GPU partition
 #SBATCH --gres=gpu:2              # 2 GPUs (GPUS=0,1 below are LOCAL indices)
 #SBATCH --nodes=1                 # single node
@@ -115,7 +88,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=gf3mo_v4_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
+#SBATCH --output=gf1yr_v4_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -130,7 +103,7 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # stay intact for comparison and nothing can silently resume. BASE_FILE_NAME
 # stays gf_prod_3mo so every analysis tool (monitor generator, digests) works
 # unchanged -- they take the DIRECTORY as their argument.
-STORE_DIR=./gf_prod_3mo_v5/
+STORE_DIR=./gf_prod_1yr_v5/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -206,7 +179,7 @@ export GPUS=0,1
 
 # ---- output ----------------------------------------------------------------
 export FILE_STORE_DIR=${STORE_DIR}
-export BASE_FILE_NAME=gf_prod_3mo
+export BASE_FILE_NAME=gf_prod_1yr
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
@@ -216,7 +189,7 @@ export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER
 # EXPLICIT Tobs (2026-08-13): sbatch propagates the submitting shell's env,
 # and a stale TOBS_TARGET export (a 3-day one was found live in the shell)
 # would silently re-grid this run. Pin the 90-d production value.
-export TOBS_TARGET=7776000
+export TOBS_TARGET=31104000
 export MIN_FREQ=4e-4
 export MAX_FREQ=2.5e-2
 export GB_MIN_FREQ=5.5e-4
@@ -226,7 +199,7 @@ export GB_MAX_FREQ=2.2e-2
 #      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,
 #      at-cap RJ skip, cell-lifecycle ll credit, GB_MODE=search +
 #      GB_PE_MOVES_STRICT=1 + GB_SEARCH_PRIOR_REMOVAL=1 seeded by the script) --
-export GB_NLEAVES_MAX=10000
+export GB_NLEAVES_MAX=25000  # 2-year settings (user ruling)
 # FULL parity-unit residency (grouped RJ->in-model scheduling, 2026-08-13):
 # one unit = 77 bands x 24 temps x 24 walkers = 44,352 cells; the scheduler
 # clamps n_slots to min(GB_N_SUBBANDS, cells), so 50000 means every cell is
@@ -238,7 +211,7 @@ export GB_NLEAVES_MAX=10000
 # 2.4s host round-trips. ~4.2 GB buffer; post-fix profile at 4096 was
 # flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
 # full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
-export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
+export GB_N_SUBBANDS=2048  # 1-yr: per-slot slab ~4 MB (4x the 3-mo 1 MB), 2048 holds the same ~8 GB budget 8192 held at 3 mo  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
 # RJ pick thinning (user ruling 2026-08-14): each round proposes to a
 # 0.3 random subset of eligible slots; in-model repeats still cover
 # ALL alive sources (flip gate is rj-only by construction).
@@ -348,6 +321,11 @@ export GB_INMODEL_REPEATS_SURVIVOR=25
 # TO RE-TEST: 270 needs GB_N_SUBBANDS=2048 to fit (265 x 2048 = 5.4e5), at
 # a throughput cost -- fewer resident cells means more sequential passes.
 # export SIGHET_NT_LAYER=270
+# 1-YR PIN, 23-MONTH SETTINGS (user ruling 2026-08-19: "use the 2-year
+# settings for 1 year"): the 23-mo run validated nt_layer 525 @ Nt 16800 =
+# stride 32 layers (32 h) with the v5 kernel; the same stride on Nt=8640 is
+# nt_layer 270 (8640/270 = 32). v5 (default ON) carries the scratch load.
+export SIGHET_NT_LAYER=270
 #
 # Confirm from the log, do not assume -- nothing else echoes these:
 #   grep "sig-het engine resolved" <store>/gf_prod_3mo_artifacts/globalfit_run.log
@@ -518,6 +496,13 @@ export SIGHET_TUKEY_ALPHA=0.01
 # shared-arena ceiling; pinned explicitly (the GBGPU AUTO default now
 # also resolves here, this is the belt to that suspenders).
 export SIGHET_N_CP=256
+# 1-YR CAVEAT: 256 = the shared-arena ceiling; effective node spacing at
+# 360 d is 1.4 d, COARSER than the 0.35-d null-coherence criterion verified
+# at 3 mo. Before trusting low-f h_h, run the probe on THIS grid:
+#   N_CP_BUILD=256 python scripts/gb_chunked_het/gb_sighet_bfold_gpu_probe.py
+# (with the grid constants switched to Nt=8640) and watch the in-run
+# GB_SIGHET_ANCHOR_CHECK medians -- if the low-f anchors sit >>0.1, the
+# durable fix (amp/phase redesign or arena raise) moves up the queue.
 # UNIFORM EDGE EXCLUSION (user ruling 2026-08-19): bringing the domain
 # [min_time, max_time] in removes edge-created error in EVERY likelihood
 # at once (all WDMSettings inherit the one domain; min/max_freq still vary
@@ -529,7 +514,9 @@ export SIGHET_N_CP=256
 # 6-mo/23-mo scripts) -- flip on a FRESH STORE_DIR only: changing the
 # crop changes Nt_active (2121 -> 2001) and resume/rewind compatibility
 # across a domain-shape change is UNVERIFIED.
-# export EDGE_CROP_WAVELETS=60
+# FRESH 1-yr store: the crop is LIVE (constant-layers rule; 60 layers/side
+# costs 2x60/8640 = 1.4% at 1 yr).
+export EDGE_CROP_WAVELETS=60
 
 # DISSECT + RAW CAPTURE RETIRED (2026-08-19, mission accomplished). The
 # 72-block dissect + 25 raw-slab captures were pulled and replayed locally:
@@ -596,20 +583,14 @@ export GB_ORTHO_LL_CHECK=1
 # there and parked duplicates escape into the neighbouring cell.
 export GB_CAP_DIVISOR=32
 # V5: STAGGER the cap grid against the band grid (user design 2026-08-20).
-# Interior cap edges shift half a cell (2.17 uHz / ~17 FD bins at K=32) so
-# no cap edge coincides with a band edge; the cell at each band seam
-# straddles it (owned by the upper band). First grid cell is half-width,
-# last is 1.5 -- everything else identical widths, counts and storage.
-# REQUIRES a fresh store (the resume guard refuses the changed edges).
-# GB_CAP_STAGGER=0 reverts to the v4 nested grid instantly.
+# Interior cap edges shift half a cell so no cap edge coincides with a
+# band edge; the cell at each band seam straddles it. Same counts, sizes
+# and storage as the nested grid; fresh store only (the resume guard
+# refuses changed edges). GB_CAP_STAGGER=0 reverts to the nested grid.
 export GB_CAP_STAGGER=1
 # ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
 #      so the store's provenance is unambiguous) ----
-# Birth fix (1274a66c): births draw fdot_astro_ratio | (f0, Mc) from the
-# tight mixture around the F-stat grid fdot instead of U[-5, 5].
 export GB_FSTAT_BIRTH_RATIO_TIGHT=1
-# Ridge-Gibbs (8d926f27 / Eryn 6ed5a8b): zero-likelihood-call resample
-# along the exact Mc^(5/3)(1+r)=const ridge; unfreezes (Mc, r, dist).
 export GB_RIDGE_GIBBS=1
 # Leaf-cap PATIENCE: consecutive iterations without a sufficient (D/2)
 # lnL improvement before a cap CELL advances. Code default is now 3
@@ -683,7 +664,7 @@ export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # (FSTAT_PEAK_WEIGHT_ALPHA_LATE, default 0.25), so this cadence is also
 # when that takes effect.
 export GB_FSTAT_REFIT_EVERY=50     # production cadence (5 was verify-only)
-export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
+export FSTAT_PEAKS_PER_BAND=500    # 2-year settings (23-mo value; was 200 at 3 mo)
 # BIRTH-DRAW ALLOCATION (2026-08-16). Peak boxes are weighted w ~ F**alpha,
 # and the F-statistic goes like SNR^2 -- so the historical alpha=1 hands an
 # SNR-10 source 9x FEWER birth attempts than an SNR-30 one, exactly
