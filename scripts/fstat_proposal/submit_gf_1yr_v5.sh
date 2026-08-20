@@ -592,6 +592,10 @@ export GB_CAP_STAGGER=1
 #      so the store's provenance is unambiguous) ----
 export GB_FSTAT_BIRTH_RATIO_TIGHT=1
 export GB_RIDGE_GIBBS=1
+# CAP DRIFT GATE (2026-08-20; see submit_gf_3mo_v5.sh for the story):
+# in-model proposals into a foreign at-cap cell are vetoed, closing the
+# cell-boundary drift hole that let leaves pile past their cell caps.
+export GB_CAP_DRIFT_GATE=1
 # Leaf-cap PATIENCE: consecutive iterations without a sufficient (D/2)
 # lnL improvement before a cap CELL advances. Code default is now 3
 # (2026-08-16, was 5): caps live on the band/8 cap-cell grid, so 1,232

@@ -230,6 +230,12 @@ export GB_FSTAT_BIRTH_RATIO_TIGHT=1
 # Ridge fix (LAT 8d926f27 / Eryn 6ed5a8b): zero-likelihood Gibbs resample
 # along the exact Mc^(5/3)(1+r)=const ridge, unfreezing (Mc, r, dist).
 export GB_RIDGE_GIBBS=1
+# CAP DRIFT GATE (2026-08-20, root-caused on THIS probe's pre-fix pass:
+# births respected the cap but in-model repeats walked 29 leaves into a
+# cap-1 cell). In-model proposals into a foreign at-cap cell are vetoed;
+# piles drain. Without it the confined window floods and the single-ness
+# criteria are unscoreable. Watch [GB_CAPGATE] lines.
+export GB_CAP_DRIFT_GATE=1
 
 # ---- GB knobs (everything else rides the flipped defaults: sig-het in-model,
 #      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,

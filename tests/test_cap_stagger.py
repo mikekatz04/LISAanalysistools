@@ -151,5 +151,77 @@ class BandSaturationTest(unittest.TestCase):
         self.assertFalse(bool(sat[0, 1]))
 
 
+class CapDriftGateTest(unittest.TestCase):
+    """Setup/veto logic of the in-model CAP DRIFT GATE (2026-08-20)."""
+
+    def _gate_shim(self, k=4, stagger=False, ntemps=2, nwalkers=3):
+        import types
+        be = UNIFORM
+        mv = _shim(be, k, stagger)
+        mv.cap_drift_gate = True
+        mv._f0_col = 1
+        mv.ntemps, mv.nwalkers = ntemps, nwalkers
+        nb = mv.num_bands
+        # 4 alive sources for walker 0, temp 0: three in cell 0, one in cell 5
+        f_cell0 = be[0] + 1e-7
+        f_cell5 = be[0] + (5.25 if not stagger else 5.75) * (be[1] - be[0]) / k
+        n = 4
+        sorter = types.SimpleNamespace(
+            band_inds=np.array([0, 0, 0, 1]),
+            temp_inds=np.zeros(n, dtype=int),
+            walker_inds=np.zeros(n, dtype=int),
+            freqs=np.array([f_cell0, f_cell0, f_cell0, f_cell5]),
+            inds=np.ones(n, dtype=bool),
+        )
+        caps = np.full(mv.num_cap_cells, 1.0)
+        mv._cap_leaf_cap = caps
+        return mv, sorter, caps
+
+    def test_setup_off_switch(self):
+        mv, sorter, caps = self._gate_shim()
+        mv.cap_drift_gate = False
+        self.assertIsNone(mv._cap_drift_gate_setup(sorter))
+        mv.cap_drift_gate = True
+        mv._cap_leaf_cap = None
+        self.assertIsNone(mv._cap_drift_gate_setup(sorter))
+        mv._cap_leaf_cap = np.full(len(caps), -1.0)  # all disarmed
+        self.assertIsNone(mv._cap_drift_gate_setup(sorter))
+
+    def test_setup_census(self):
+        mv, sorter, _ = self._gate_shim()
+        counts, cap_dev = mv._cap_drift_gate_setup(sorter)
+        occ = counts.reshape(mv.ntemps, mv.nwalkers, mv.num_cap_cells)
+        self.assertEqual(int(occ[0, 0, 0]), 3)
+        self.assertEqual(int(occ[0, 0, 5]), 1)
+        self.assertEqual(int(counts.sum()), 4)
+        self.assertEqual(len(cap_dev), mv.num_cap_cells)
+
+    def test_veto_semantics(self):
+        mv, sorter, _ = self._gate_shim()
+        counts, cap = mv._cap_drift_gate_setup(sorter)
+        t = np.zeros(3, dtype=int); w = np.zeros(3, dtype=int)
+        cell_c = np.array([5, 0, 0])   # current cells
+        cell_n = np.array([0, 0, 6])   # -> into full cell 0; stay; into empty 6
+        cross = cell_n != cell_c
+        flat_n = mv._cap_flat_index(t, w, cell_n)
+        veto = cross & (cap[cell_n] >= 0) & (counts[flat_n] >= cap[cell_n])
+        # into over-full cell 0: vetoed; within-cell: never; into empty: allowed
+        self.assertTrue(bool(veto[0]))
+        self.assertFalse(bool(veto[1]))
+        self.assertFalse(bool(veto[2]))
+        # DRAIN property: a source leaving over-full cell 0 for empty cell 2
+        veto_out = (np.array([True]) & (cap[[2]] >= 0)
+                    & (counts[mv._cap_flat_index(t[:1], w[:1], np.array([2]))]
+                       >= cap[[2]]))
+        self.assertFalse(bool(veto_out[0]))
+
+    def test_scatter_add_duplicates(self):
+        counts = np.zeros(8, dtype=np.int64)
+        GBSpecialBase._cap_gate_scatter_add(
+            counts, np.array([3, 3, 5]), np.array([1, 1, -1], dtype=np.int64))
+        self.assertEqual(int(counts[3]), 2)
+        self.assertEqual(int(counts[5]), -1)
+
+
 if __name__ == "__main__":
     unittest.main()

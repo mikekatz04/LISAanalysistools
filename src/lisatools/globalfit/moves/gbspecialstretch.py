@@ -1131,6 +1131,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # at K == 1 (the cap grid IS the band grid), so it is forced off
         # there and VGB/tests keep the per-band behaviour.
         self.cap_stagger = bool(cap_stagger) and self.cap_divisor > 1
+        # IN-MODEL CAP DRIFT GATE (user design 2026-08-20). Root-caused on
+        # the confined high-f probe: births respect the per-cell cap gate,
+        # but in-model repeats walked leaves ACROSS cell boundaries with no
+        # cap re-check (the marked 2026-08-15 TODO), piling 29 leaves into
+        # a cap-1 cell. The gate closes the hole: a repeat proposal whose
+        # f0 lands in a FOREIGN at-cap cell is vetoed (allowed state space
+        # = occupancy <= cap, exactly the birth gate's constraint);
+        # within-cell moves and moves that DRAIN over-full cells stay
+        # allowed, so legacy piles empty rather than freeze.
+        # GB_CAP_DRIFT_GATE=0 disables.
+        self.cap_drift_gate = (
+            os.environ.get("GB_CAP_DRIFT_GATE", "1") == "1"
+        )
         _be_host = _to_numpy(self.band_edges)
         self.cap_edges = self.xp.asarray(
             make_cap_edges(_be_host, self.cap_divisor,
@@ -7995,6 +8008,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # end; it was a bool() sync PAIR per repeat).
         _kind_acc = {}
         _warn_dev = xp.zeros((), dtype=xp.int64)
+        # IN-MODEL CAP DRIFT GATE state (see the ctor comment): block-start
+        # occupancy census + live cap snapshot, updated ON ACCEPT of every
+        # cell-crossing move so later repeats/sources see it. None = off.
+        _dg = self._cap_drift_gate_setup(band_sorter)
+        _dg_n = xp.zeros((), dtype=xp.int64)
 
         for move_i in range(n_rep):
           for (sub, sl, n_sub, ids_s, slots_s, N_s, l_s, t_s, w_s, b_s,
@@ -8053,6 +8071,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _trust_n[1] += _rej_p.sum()
                     _trust_n[2] += (_rej_a | _rej_p).sum()
                     _trust_seen += int(_damp_n.shape[0])
+
+                # CAP DRIFT GATE veto: a proposal whose f0 lands in a
+                # FOREIGN at-cap cell is rejected here, BEFORE the ll
+                # kernel (vetoed rows drop out of ``keep`` like any prior
+                # rejection). Within-cell moves and moves out of over-full
+                # cells always pass; disarmed cells (cap < 0) never veto.
+                # Device-only per repeat; census flushed once per block.
+                if _dg is not None:
+                    _dg_counts, _dg_cap = _dg
+                    _fc_dg = self._f0_col
+                    _dg_cell_c = self._cap_cell_index(
+                        b_s, curr[sl][:, _fc_dg] / 1e3)
+                    _dg_cell_n = self._cap_cell_index(
+                        b_s, new[:, _fc_dg] / 1e3)
+                    _dg_cross = _dg_cell_n != _dg_cell_c
+                    _dg_flat_n = self._cap_flat_index(t_s, w_s, _dg_cell_n)
+                    _dg_veto = (
+                        _dg_cross
+                        & (_dg_cap[_dg_cell_n] >= 0)
+                        & (_dg_counts[_dg_flat_n] >= _dg_cap[_dg_cell_n])
+                    )
+                    new_logp[_dg_veto] = -np.inf
+                    _dg_n = _dg_n + _dg_veto.sum()
 
                 keep = ~cp.isinf(new_logp)
                 # THE one data-dependent host sync this repeat needs on
@@ -8174,6 +8215,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 curr[_tgt] = cp.where(accept[:, None], new, curr[_tgt])
                 ll_ref[_tgt] = cp.where(accept, new_ll, ll_ref[_tgt])
                 curr_prior[_tgt] = cp.where(accept, new_logp, curr_prior[_tgt])
+                # CAP DRIFT GATE occupancy update: accepted cell crossings
+                # move their count old->new so later repeats and later
+                # sources in the block see the true occupancy. Sync-free
+                # (weights are 0 for rejected/non-crossing rows) and
+                # duplicate-safe (scatter-add; staggered seam cells can be
+                # targeted from both adjacent bands in one batch).
+                if _dg is not None:
+                    _dg_w = (accept & _dg_cross).astype(xp.int64)
+                    self._cap_gate_scatter_add(_dg[0], _dg_flat_n, _dg_w)
+                    self._cap_gate_scatter_add(
+                        _dg[0],
+                        self._cap_flat_index(t_s, w_s, _dg_cell_c),
+                        -_dg_w,
+                    )
                 # One pooled survivor per cell (serial-within-band), so the
                 # fancy-index += is elementwise; rejected rows add an exact
                 # 0.0 / False.
@@ -8312,6 +8367,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"{self.name}: accepted {_n_warn} out-of-prior in-model "
                     "coordinate(s) at beta > 0 in this repeat block."
                 )
+            if _dg is not None:
+                _n_dg = int(_dg_n)
+                if _n_dg > 0:
+                    logger.info(
+                        f"[GB_CAPGATE {self.name}] vetoed {_n_dg} "
+                        f"cross-cell in-model proposal(s) into at-cap "
+                        f"cells this repeat block ({len(ids)} sources x "
+                        f"{n_rep} repeats)."
+                    )
 
         # ---- BLOCK BOUNDARY BARRIER (user ruling 2026-08-18) ----
         # Every vertical swap must be fully settled before the NEXT set of
@@ -9130,6 +9194,44 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sub_i = np.clip(sub_i, 0, self.cap_divisor - 1)
         return band * self.cap_divisor + sub_i
 
+    def _cap_drift_gate_setup(self, band_sorter):
+        """``(occupancy, cap_dev)`` for the in-model CAP DRIFT GATE, or None.
+
+        Occupancy is the full alive census over (temp, walker, cap cell)
+        at BLOCK START (the same bincount the birth gate reads); ``cap_dev``
+        is the live per-cell cap snapshot on device. Returns None whenever
+        there is nothing to police: gate disabled, no armed caps, one cell
+        per band (cell identity cannot change with f0), or f0 not sampled.
+
+        KNOWN APPROXIMATION: a mid-block VERTICAL temperature swap
+        (GB_TEMPER_VERTICAL, default off) exchanges two rungs' occupancy
+        without updating this census; the error is confined to the swapped
+        rung pair and self-corrects at the next block.
+        """
+        if not getattr(self, "cap_drift_gate", False):
+            return None
+        if self.cap_divisor == 1 or self._f0_col is None:
+            return None
+        cap_host = getattr(self, "_cap_leaf_cap", None)
+        if cap_host is None:
+            return None
+        cap_np = np.asarray(_to_numpy(cap_host))
+        if not bool((cap_np >= 0).any()):
+            return None  # every cell disarmed -- nothing to enforce
+        _, counts = self._cap_cell_counts(band_sorter)
+        return counts, get_array_module(counts).asarray(
+            cap_np.astype(np.int64))
+
+    @staticmethod
+    def _cap_gate_scatter_add(counts, flat, weights):
+        """Sync-free ``counts[flat] += weights`` with duplicate-safe adds."""
+        if get_array_module(counts) is np:
+            np.add.at(counts, flat, weights)
+        else:
+            import cupyx
+
+            cupyx.scatter_add(counts, flat, weights)
+
     def _sorter_cap_cells(self, band_sorter):
         """Per-source cap-cell index for every row of ``band_sorter``.
 
@@ -9821,6 +9923,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # decision reads ``_cap_leaf_cap``.
             self._band_leaf_cap = bi["band_leaf_cap"]
             self._mirror_band_leaf_cap(bi)
+        elif self._leaf_cap_enabled and self.cap_divisor > 1:
+            # READ-ONLY cap reference for non-RJ moves: they never arm or
+            # advance caps (the RJ branch above owns that), but their
+            # in-model repeats move f0 and must respect the same occupancy
+            # constraint through the CAP DRIFT GATE. Reference only -- no
+            # arming, no mirroring, no counter updates here.
+            bi = state.sub_states[self.branch_name].band_info
+            if bi.get("cap_cell_leaf_cap") is not None:
+                self._cap_leaf_cap = bi["cap_cell_leaf_cap"]
 
         # Run any move-specific setup.
         self.setup(model, state.branches)

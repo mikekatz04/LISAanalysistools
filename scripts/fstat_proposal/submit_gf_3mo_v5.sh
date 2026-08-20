@@ -611,6 +611,14 @@ export GB_FSTAT_BIRTH_RATIO_TIGHT=1
 # Ridge-Gibbs (8d926f27 / Eryn 6ed5a8b): zero-likelihood-call resample
 # along the exact Mc^(5/3)(1+r)=const ridge; unfreezes (Mc, r, dist).
 export GB_RIDGE_GIBBS=1
+# CAP DRIFT GATE (2026-08-20, root-caused on the high-f probe: births
+# respect the per-cell cap but in-model repeats walked 29 leaves into a
+# cap-1 cell -- the 2026-08-15 TODO made real). In-model proposals whose
+# f0 lands in a FOREIGN at-cap cell are vetoed; within-cell moves and
+# drains of over-full cells stay allowed. This is the same mechanism
+# that let production mosaics stack leaves past their cell caps. Watch
+# [GB_CAPGATE] veto counts; GB_CAP_DRIFT_GATE=0 reverts.
+export GB_CAP_DRIFT_GATE=1
 # Leaf-cap PATIENCE: consecutive iterations without a sufficient (D/2)
 # lnL improvement before a cap CELL advances. Code default is now 3
 # (2026-08-16, was 5): caps live on the band/8 cap-cell grid, so 1,232
