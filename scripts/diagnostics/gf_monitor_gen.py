@@ -1157,6 +1157,11 @@ try:
     _orb = _WindowedL1Orbits(_files[_types[0]], force_backend="cpu",
                              frame="icrs", linear_interp_dt=500.0)
     _orb._ensure_configured()
+    # stash for the SNR machinery below: the analytic DefaultOrbits ephemeris
+    # differs from the mojito L1 orbits by the FULL annual-Doppler phase at
+    # the run epoch (+-16 FD bins at 20 mHz) -- high-f SNRs/overlaps computed
+    # on DefaultOrbits are wrong (2026-08-19 finding).
+    _L1_ORB_CPU = _orb
 
     # --- data: partial (lazy) brick reads, summed on the analysis window ----
     _td = np.zeros((3, N_TD), dtype=np.float64)
@@ -1707,7 +1712,15 @@ if TRU is not None:
         SA_G = np.asarray(get_sensitivity(_fg, sens_fn=A2TDISens, **_nk), float)
         SE_G = np.asarray(get_sensitivity(_fg, sens_fn=E2TDISens, **_nk), float)
 
-        _orb = lisa_models.DefaultOrbits(force_backend="cpu", frame="icrs")
+        # L1 orbits when available (mandatory for high-f accuracy); the
+        # analytic fallback is fine below a few mHz only.
+        _orb = globals().get("_L1_ORB_CPU")
+        if _orb is None:
+            MISSING.append(
+                "SNR machinery fell back to DefaultOrbits (no mojito L1 "
+                "orbit file reachable): SNRs/overlaps above ~5 mHz carry an "
+                "annual-Doppler phase error.")
+            _orb = lisa_models.DefaultOrbits(force_backend="cpu", frame="icrs")
         _gbw = GBGPU(force_backend="cpu", orbits=_orb, t0=float(T_REF_SCI))
         _tc = make_gb_transform_container(
             use_chirp_mass=True, use_fdot_astro=True, use_distance=True,
