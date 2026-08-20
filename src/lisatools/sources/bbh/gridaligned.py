@@ -113,6 +113,42 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
         m_grid = np.rint(mt / self.dt) * self.dt
         return m_grid, mt - m_grid
 
+    def _common_grid_spec(self, T):
+        """``(k0, n_grid)`` for the shared absolute lattice.
+
+        PARAMETER-INDEPENDENT BY CONSTRUCTION -- a function of ``data_t0``,
+        ``dt``, ``tdi_buffer_time`` and ``T`` only, never of the batch. That is
+        the whole point, for three measured reasons:
+
+        * ``phentax._compute_strain_single`` is ``@jax.jit``. A batch-derived
+          length recompiles XLA on every likelihood call: 3.2 s against 0.040 s
+          cached, an 80x tax that would silently eat the batching win.
+        * If the span depended on the batch, a row's column offset would depend
+          on WHICH OTHER ROWS shared its call, and a walker's likelihood would
+          change with batch membership -- fatal for detailed balance. On a fixed
+          lattice each row's columns are a function of its own parameters alone,
+          so composition invariance is structural rather than hoped for.
+        * A union-of-rows span grows with the walker cloud (+43% samples for a
+          one-day merger-time spread) and would need its own refusal path. This
+          one never grows and never refuses.
+
+        ``n_lead * dt >= tdi_buffer_time`` is required: it places the ``_lead``
+        crop point (``data_t0 - tdi_buffer_time``) strictly inside the grid, so
+        the crop lands at the same absolute time it does on the serial path and
+        the leading zeroed region is identical.
+
+        The span is the ANALYSIS window, ``domain_settings.N`` -- NOT phentax's
+        generation window ``T``. The two differ, and sizing on ``T`` produces a
+        grid longer than the data grid, which the FD transform rejects outright
+        (``Signal length (262985) != target FFT length (197238)``). Sizing on
+        the analysis window also makes ``_apply_response``'s ``start_ind`` crop
+        remove exactly the lead margin and leave precisely the data grid.
+        """
+        dt = float(self.dt)
+        n_lead = int(np.ceil(self.tdi_buffer_time / dt)) + 1
+        k_data = int(np.rint((self.data_t0 - self.waveform_t0) / dt))
+        return k_data - n_lead, n_lead + int(self.domain_settings.N)
+
     def _aligned_polarizations(
         self, m1, m2, s1z, s2z, distance, phi_ref, inclination, psi,
         merger_time, start_freq=None, ref_freq=None, T=None,
@@ -162,32 +198,48 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
         )
 
         M_sec = np.asarray(wf_params.total_mass) * MTSUN_SI          # (B,)
-        n_times = int(times_mass.shape[-1])
 
-        # 2. The lattice we want. ``times_mass`` is in geometric units and
-        #    anchored at Mt_end, so its LAST sample sits t_last_sec after the
-        #    peak -- that anchor, not t_arr[0], is what sets the alignment.
+        # ``mask`` is used ONLY for its per-row VALID COUNT. It must not be
+        # reused, padded or broadcast onto the shared lattice: where it is
+        # False, ``times_mass`` holds the constant ``Mt_min`` repeated rather
+        # than real earlier times, and outside a row's own range the model
+        # returns a smooth FULL-AMPLITUDE inspiral -- no NaN, no decay, no
+        # self-limiting (measured at 26% of in-band peak across 466,627
+        # samples). Under lisatools' default ``time_bounded_start=True`` the
+        # returned mask is entirely True, so reusing it looks perfectly correct
+        # in the default configuration and is silently wrong the moment a
+        # high-mass or f_min-started row appears. It is rebuilt below.
+        n_valid = np.asarray(mask.sum(axis=1)).astype(np.int64)      # (B,)
         t_last_sec = np.asarray(times_mass[:, -1]) * M_sec           # (B,)
+
         m_grid, m_frac = self._split_merger_time(merger_time)
         if m_grid.size == 1 and M_sec.size > 1:
             m_grid = np.repeat(m_grid, M_sec.size)
             m_frac = np.repeat(m_frac, M_sec.size)
 
-        # t_arr[j] is an integer multiple of dt, so t_arr + m_grid +
-        # waveform_t0 lands on the data lattice; the waveform is EVALUATED at
-        # t_arr[j] - m_frac so the merger still sits at the requested time.
-        # Built from integers rather than by adding a float offset, so
-        # "integer multiple of dt" is exact and not merely close.
-        n_last = np.rint((t_last_sec + m_frac) / dt)                 # (B,)
-        j = np.arange(n_times, dtype=np.float64)
-        n_grid = n_last[:, None] - (n_times - 1.0 - j[None, :])
-        t_arr_sec = n_grid * dt
-        eval_sec = t_arr_sec - m_frac[:, None]
+        k0, n_grid = self._common_grid_spec(T if T is not None else wf.T)
+        k_merge = np.rint(m_grid / dt).astype(np.int64)              # exact: m_grid is n*dt
 
-        # 3. Exact re-evaluation of the model at those times.
-        times_new = self._to_jax(eval_sec / M_sec[:, None])
+        # Per-row window as INTEGER COLUMN INDICES on the shared lattice.
+        e_idx = np.rint((t_last_sec + m_frac) / dt).astype(np.int64) + k_merge
+        j_end = e_idx - k0
+        j_start = j_end - (n_valid - 1)      # may be < 0: inspiral opening before
+                                             # the grid is intended, not an error
+
+        # Evaluation times, by INTEGER arithmetic. Inside a row's own window the
+        # columns therefore carry bit-identical values to the per-row grid this
+        # replaces -- the equivalence was checked directly (max|diff| = 0.0).
+        jj = jnp.arange(n_grid, dtype=jnp.int64)
+        n_col = (k0 + jj)[None, :] - jnp.asarray(k_merge)[:, None]
+        eval_sec = n_col.astype(jnp.float64) * dt - jnp.asarray(m_frac)[:, None]
+        times_new = eval_sec / jnp.asarray(M_sec)[:, None]
+
+        mask_new = (jj[None, :] >= jnp.asarray(j_start)[:, None]) & (
+            jj[None, :] <= jnp.asarray(j_end)[:, None]
+        )
+
         strain = jax.vmap(wf._compute_strain_single)(
-            times_new, mask, wf_params, amp22, ph22,
+            times_new, mask_new, wf_params, amp22, ph22,
             wf_params.inclination, wf_params.phi_ref,
         )
         h_plus = jnp.real(strain)
@@ -197,38 +249,35 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
 
         h_plus = self._from_jax(h_plus, do_synchronize=synchronize)
         h_cross = self._from_jax(h_cross, do_synchronize=synchronize)
-        mask_x = self._from_jax(mask, do_synchronize=synchronize)
-        times_x = xp.asarray(t_arr_sec)
 
-        # 4. The stock trim / onset-ramp tail, verbatim, so the two paths
-        #    differ ONLY in the grid.
-        times_out = self.trim_and_shift_times(times_x, mask_x, xp=xp, dt=dt)
-        num_keep = times_out.shape[-1]
-        num_pad = num_keep - mask_x.sum(axis=1).astype(int)
+        # ONE array of times, shared by every row. ``trim_and_shift_times`` is
+        # deliberately NOT called: its premise is that a row's valid samples are
+        # a right-aligned SUFFIX, which this grid breaks by design -- each row's
+        # block ends at its own merger and is interior. Measured on a 4-walker
+        # cloud, ``times[:, -max_valid:]`` silently drops 1557-1599 valid
+        # leading samples from 3 of 4 rows. The exact n*dt lattice supplies the
+        # one guarantee that method actually provided downstream: strictly
+        # increasing, exactly dt-spaced times.
+        times_1d = xp.arange(n_grid, dtype=xp.float64) * dt + (k0 * dt)
+        times_out = xp.broadcast_to(times_1d[None, :], (M_sec.size, n_grid))
 
-        if not onset_ramp:
-            if int(xp.max(num_pad)) > 0:
-                # A geometry refusal, not bad arguments: this batch's rows
-                # produced unequal valid lengths. Typed so the container can
-                # fall back to per-row evaluation instead of dying -- the
-                # serial loop handles this case fine.
-                raise BatchNotLaunchable(
-                    "onset_ramp=False requires every source in the batch to "
-                    "produce the same number of valid samples (num_pad == 0 "
-                    f"for all); got max num_pad = {int(xp.max(num_pad))}. "
-                    "This is NOT a grid-alignment failure -- it is the same "
-                    "equal-length requirement the stock batched path has, and "
-                    "it depends on the f_min-determined inspiral length "
-                    "versus the window."
-                )
-            return times_out, h_plus[:, -num_keep:], h_cross[:, -num_keep:], m_grid
+        if onset_ramp:
+            # ``num_pad`` is each row's OWN onset column, so the taper is
+            # anchored where that row actually begins rather than at the array
+            # start. That is what makes the ramp correct on a shared grid.
+            ramp = self._leading_onset_ramp(
+                num_points=n_grid,
+                num_pad=np.maximum(j_start, 0),
+                taper_length=int(self.tdi_buffer_time * 5 / dt),
+                xp=xp,
+            )
+            h_plus = h_plus * ramp
+            h_cross = h_cross * ramp
 
-        taper_length = int(self.tdi_buffer_time * 5 / dt)
-        ramp = self._leading_onset_ramp(
-            num_points=num_keep, num_pad=num_pad,
-            taper_length=taper_length, xp=xp)
-        return (times_out, h_plus[:, -num_keep:] * ramp,
-                h_cross[:, -num_keep:] * ramp, m_grid)
+        # The merger lattice offset is already INSIDE the grid, so
+        # ``_apply_response`` must shift by zero. It uses merger_time only for
+        # shifted_t_arr; every other reference is logging.
+        return times_out, h_plus, h_cross, np.zeros_like(m_grid)
 
     # -- dispatch ----------------------------------------------------------
     # These exist so the SPLIT merger time reaches ``_apply_response``.
@@ -247,9 +296,9 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
             return super()._call_single(
                 *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
         kwargs.pop("ref_freq", None)
-        # B == 1 => num_pad == 0 by construction, so this reproduces the stock
-        # mask-and-drop path rather than the ramp.
-        kwargs.setdefault("onset_ramp", False)
+        # SAME ramp setting as _call_batched. These disagreed before -- single
+        # used onset_ramp=False, batched used True -- which is a ~3000 s taper
+        # of difference between serial and batched for the identical row.
         t, hp, hc, m_grid = self._aligned_polarizations(
             *args, merger_time=merger_time, **kwargs)
         return self._apply_response(

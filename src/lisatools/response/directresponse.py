@@ -467,11 +467,23 @@ class pyResponseTDI(LISAToolsParallelModule):
                 "Input waveform is longer than available orbital information. Trimming to fit orbital information."
             )
 
-            max_ind = int(
-                self.xp.where(
-                    (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
-                )[1][-1]
-            )
+            # WORST CASE ACROSS THE BATCH, not "last True in row-major order".
+            #
+            # ``where`` on a 2-D array returns (rows, cols) in row-major order,
+            # so ``[1][-1]`` was the last valid column of the LAST ROW that had
+            # any -- which depends on how the rows happen to be ORDERED, not on
+            # which row is most constrained. Two batches with the same members
+            # in a different order trimmed to different lengths, and a walker's
+            # likelihood then depended on its position in the batch: measured as
+            # a 1.5625e-02 nat shift that appeared when a batch was reordered.
+            # For a sampler that is fatal -- detailed balance requires a
+            # proposal to score the same however it was grouped.
+            #
+            # ``t_data`` is increasing, so the condition is a prefix per row and
+            # the row-wise count IS that row's valid length. The batch must fit
+            # every row, hence the minimum.
+            _fits = (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
+            max_ind = int(_fits.sum(axis=-1).min())
 
             t_data = t_data[:max_ind]
             input_in = input_in[:, :max_ind]
