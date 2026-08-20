@@ -78,6 +78,10 @@ os.environ.setdefault("GB_PE_MOVES_STRICT", "1")
 # with "no stock move under this name". Search-stage-only either way: the
 # move is search-gated and full_pe never references it.
 os.environ.setdefault("GB_SEARCH_PRIOR_REMOVAL", "1")
+# GB_RIDGE_GIBBS (default 1): zero-likelihood fiber resample of the exact
+# Mc-ratio-distance degeneracy after the RJ cycle in both GB stages -- the
+# (Mc, r, dist) marginals are frozen along the curved ridge without it
+# (measured 2026-08-20). Registered by build_gb_moves; =0 removes it.
 # NITER is the name this script's docs (and muscle memory) use; the stock
 # field is general.num_iterations -> env NUM_ITERATIONS (rule 0). Map it
 # HERE, before any stock.erebor import snapshots the env -- a bare NITER
@@ -316,7 +320,8 @@ def build_fit():
             moves=noise_vgb + [
                 Move("rj_fstat_search", branch="gb"),
                 Move("rj_prior_removal", branch="gb"),
-            ],
+            ] + ([Move("gb_ridge_gibbs", branch="gb")]
+                 if os.environ.get("GB_RIDGE_GIBBS", "1") == "1" else []),
             step_kwargs=dict(
                 plateau_branch="gb",
                 convergence_iter=int(os.environ.get("GB_PLATEAU_ITERS", "5")),
@@ -331,7 +336,8 @@ def build_fit():
             moves=noise_pe + [
                 Move("rj_fstat_pe", branch="gb"),
                 Move("rj_prior_pe", branch="gb"),
-            ] + vgb,
+            ] + ([Move("gb_ridge_gibbs", branch="gb")]
+                 if os.environ.get("GB_RIDGE_GIBBS", "1") == "1" else []) + vgb,
             # Draw ONE move per step (with replacement) instead of running
             # all five in a fixed order -- the stock eryn move-selection
             # semantics. Needs GFCombineMove(random_choice=True).

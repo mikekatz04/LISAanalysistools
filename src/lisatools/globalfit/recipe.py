@@ -2938,6 +2938,37 @@ def build_gb_moves(
     if pe_move_names is not None:
         gb_pe_moves = [m for m in gb_pe_moves if m.name in pe_move_names]
 
+    # RIDGE-GIBBS fiber move (2026-08-20, user-ruled): resamples the exact
+    # Mc^{5/3}(1+r) = const / A = const likelihood degeneracy of the 9-column
+    # basis with ZERO likelihood calls (prior x fiber-measure MH only) --
+    # without it the (Mc, r, dist) marginals freeze along the curved ridge at
+    # high f (~2e5 accepted info-matrix jumps to traverse; measured). Cold
+    # chain only (the engine state; hot rungs live inside the band moves and
+    # do not need mixed nuisance marginals). Registered for BOTH cycles; the
+    # stage lists decide where it actually runs. GB_RIDGE_GIBBS=0 disables.
+    if (os.environ.get("GB_RIDGE_GIBBS", "1") == "1"
+            and getattr(gb_info, "fdot_astro_ratio_max", None) is not None
+            and "fdot_astro_ratio" in list(
+                getattr(gb_info.transform, "input_basis", []) or [])):
+        from ..sampling.ridge_fiber import make_gb_ridge_gibbs_move
+
+        _ridge = make_gb_ridge_gibbs_move(
+            priors["gb"], gb_info.transform,
+            mc_lims=gb_info.m_chirp_lims,
+            dist_lims=gb_info.dist_lims,
+            ratio_max=float(gb_info.fdot_astro_ratio_max),
+            leaf_fraction=float(
+                os.environ.get("GB_RIDGE_GIBBS_LEAF_FRACTION", "1.0")),
+        )
+        _ridge.name = "gb_ridge_gibbs"
+        _ridge.accepted = np.zeros((1, nwalkers))
+        gb_search_moves = list(gb_search_moves) + [_ridge]
+        gb_pe_moves = list(gb_pe_moves) + [_ridge]
+        logger.info("build_gb_moves: gb_ridge_gibbs registered (leaf_fraction "
+                    "%s; zero-likelihood fiber move on the Mc-ratio-distance "
+                    "degeneracy).", _ridge.leaf_fraction
+                    if hasattr(_ridge, "leaf_fraction") else "1.0")
+
     return gb_search_moves, gb_pe_moves
 
 def build_vgb_moves(

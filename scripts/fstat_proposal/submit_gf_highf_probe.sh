@@ -76,15 +76,32 @@
 #   sbatch scripts/fstat_proposal/submit_gf_highf_probe.sh
 # Noise stages refit in minutes; first GB propose within ~15 min.
 #
-# PRE-REGISTERED VERDICT vs the pre-fix production baseline (band 142 of the
-# full run, iteration ~59): 4/24 walkers near-single, ONE with fdot right
-# (the ~1%-per-birth lottery), mean +16.6-bin offset cluster, cap ratcheted
-# 1->9. Post-fix expectation: majority of walkers near-single with fdot ~
-# +1.0e-13 within ~10-20 GB iterations; band cold-lnL spread collapsing
-# from ~350 to ~tens; no cap ratchet past ~2-3.
+# PRE-REGISTERED VERDICT, recalibrated 2026-08-20 against (a) the snapshot-6
+# extended pre-fix baseline (375 iterations: mean 3.6 leaves/walker in the
+# +-30-bin window, brightest-leaf median offset +2.5 bins, only 2/24
+# walkers ever reached the clean single-template profile
+# [n=1, |off| <~ 1 bin, amp ~1.1x, fdot ~1.0x truth] -- the ~0.2-0.4%
+# cold-birth lottery) and (b) the confined sig-het PE posterior (the
+# reference: walkers ON the source spread f0 sigma ~3.7 bins along the
+# sky-Doppler ridge). Post-fix expectations:
+#   1. SINGLE-NESS: majority of walkers at n=1-2 leaves in the window
+#      within ~10-20 GB iterations (vs 2/24 after 375 pre-fix);
+#   2. per-walker brightest-leaf (f0, fdot) scatter consistent with the
+#      PE ridge posterior, NOT the +-5 x fdot_gr birth scatter;
+#   3. truth-cell caps stay <= 2-3 (pre-fix ratcheted the +1 cell to 11);
+#   4. low-f-equivalence not applicable here (confined band).
 # In-run confirmation the birth fix is live: "[birth] fdot_astro_ratio
-# proposal TIGHTENED" at the epoch-0 grid build.
-# Ship back: gf_store_extract.py the store (+ logs/gb_fstat_fit as usual).
+# proposal TIGHTENED" at the epoch-0 grid build; the ridge-Gibbs move
+# logs "gb_ridge_gibbs registered" (GB_RIDGE_GIBBS=0 ablates it).
+#
+# VARIANT B (user 2026-08-20, one extra submission): info-matrix proposal
+# fraction ZERO with the machinery kept armed -- in-model goes pure
+# stretch. Submit with:
+#   sbatch --export=ALL,GB_STRETCH_PROBABILITY=1.0 \
+#       scripts/fstat_proposal/submit_gf_highf_probe.sh
+# (use a different STORE_DIR via FILE_STORE_DIR to keep runs separate).
+# Ship back: gf_store_extract.py the store (+ logs/gb_fstat_fit as usual);
+# NOTE extract the *_running_backup_copy.h5 (quiescent), not the live h5.
 # ============================================================================
 #SBATCH --job-name=gf_highf_probe          # job name
 #SBATCH --partition=gpu-80-spot   # GPU partition
