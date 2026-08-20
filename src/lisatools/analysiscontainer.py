@@ -88,9 +88,15 @@ _MULTI_GPU_SPLIT_WARNED = False
 #: Keywords handled by :meth:`AnalysisContainer._calculate_signal_operation`
 #: rather than forwarded to ``inner_product``. The batched likelihood path
 #: cannot express these, so it declines any call carrying one.
-_CONTAINER_LEVEL_KWARGS = frozenset(
-    {"transform_fn", "apply_transform", "signal_gen", "per_model_per_signal"}
-)
+_CONTAINER_LEVEL_KWARGS = frozenset({"per_model_per_signal"})
+#: ``transform_fn`` and ``signal_gen`` are HANDLED by the batched path (see
+#: :meth:`AnalysisContainer.batched_signal_likelihood`) rather than declined:
+#: a parameter transform applies to the whole block at once, and a per-call
+#: generator just needs installing before the capability is read. Declining
+#: them sent every such call silently to the serial loop, which is the common
+#: case for a sampler whose basis is not the raw waveform parameters.
+#: ``apply_transform`` is forwarded to the generator, which ignores it.
+#: ``per_model_per_signal`` genuinely cannot be expressed here.
 
 
 class AnalysisContainer:
@@ -1247,6 +1253,30 @@ class AnalysisContainer:
         if source_only is None:
             source_only = getattr(self, "likelihood_source_only", False)
 
+        # A per-call generator must be INSTALLED, not merely read: the gate
+        # checks supports_batch on the installed one, and _build_batched_template
+        # builds from it too. Reading one and building from another is how a
+        # non-batching generator could have been driven through this path.
+        gen_override = kwargs.pop("signal_gen", None)
+        if gen_override is not None:
+            with self._swapped_signal_gen(gen_override):
+                return self.batched_signal_likelihood(
+                    x, source_only=source_only,
+                    waveform_kwargs=waveform_kwargs, **kwargs
+                )
+
+        # A parameter transform is applied to the WHOLE BLOCK before generation,
+        # exactly as _calculate_signal_operation applies it per row. Batching it
+        # is trivial and is what lets a sampler whose basis is not the raw
+        # waveform parameters use this path at all.
+        transform_fn = kwargs.pop("transform_fn", None)
+
+        # ``apply_transform`` belongs to the GENERATOR, not to
+        # ``template_likelihood`` -- everything left in **kwargs is forwarded
+        # there and thence to ``inner_product``, whose keyword list is
+        # explicit. Route it to the generator the way _build_template does.
+        _apply_transform = kwargs.pop("apply_transform", None)
+
         # asnumpy first: a CuPy block would make np.asarray raise, and a
         # device array is a perfectly reasonable thing for a sampler to hand
         # us. Only the PARAMETERS come to host here; templates stay on device.
@@ -1275,7 +1305,17 @@ class AnalysisContainer:
                     f"source_only={source_only!r}; they are the same switch."
                 )
 
-        waveform_kwargs = waveform_kwargs or {}
+        if transform_fn is not None:
+            arr = np.asarray(asnumpy(transform_fn.both_transforms(arr)))
+            if arr.ndim != 2 or arr.shape[0] != n:
+                raise ValueError(
+                    f"transform_fn changed the row count: {n} in, "
+                    f"{getattr(arr, 'shape', None)} out."
+                )
+
+        waveform_kwargs = dict(waveform_kwargs or {})
+        if _apply_transform is not None:
+            waveform_kwargs["apply_transform"] = _apply_transform
         pieces = []
         for lo in range(0, n, step):
             rows = arr[lo:lo + step]

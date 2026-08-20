@@ -282,11 +282,30 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
     # -- dispatch ----------------------------------------------------------
     # These exist so the SPLIT merger time reaches ``_apply_response``.
     # Nothing in waveformbase changes.
+    #: Container-level flags that :class:`~lisatools.analysiscontainer.AnalysisContainer`
+    #: injects into a generator's kwargs. They are NOT waveform parameters, and
+    #: ``_aligned_polarizations`` has a strict signature, so they are dropped
+    #: here rather than forwarded. The stock ``wave_gen_batch`` tolerates them
+    #: only because it happens to carry ``**kwargs``; being explicit says which
+    #: names are deliberately ignored instead of swallowing every typo.
+    #:
+    #: ``apply_transform`` asks a generator to apply its own internal
+    #: parameter transform. These take waveform parameters directly and have
+    #: none, so the flag is a no-op -- but raising TypeError on it made the
+    #: class unusable from the standard container path.
+    _CONTAINER_FLAGS = ("apply_transform", "per_model_per_signal")
+
+    def _drop_container_flags(self, kwargs):
+        for _f in self._CONTAINER_FLAGS:
+            kwargs.pop(_f, None)
+        return kwargs
+
     def _call_batched(self, *args, ra, dec, merger_time, **kwargs):
         if not self.grid_align:
             return super()._call_batched(
                 *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
         kwargs.pop("ref_freq", None)
+        self._drop_container_flags(kwargs)
         t, hp, hc, m_grid = self._aligned_polarizations(
             *args, merger_time=merger_time, **kwargs)
         return self._apply_response(t, hp, hc, ra, dec, m_grid)
@@ -296,6 +315,7 @@ class GridAlignedPhenomTHMTDIWaveform(PhenomTHMTDIWaveform):
             return super()._call_single(
                 *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
         kwargs.pop("ref_freq", None)
+        self._drop_container_flags(kwargs)
         # SAME ramp setting as _call_batched. These disagreed before -- single
         # used onset_ramp=False, batched used True -- which is a ~3000 s taper
         # of difference between serial and batched for the identical row.

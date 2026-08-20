@@ -176,13 +176,44 @@ class ContainerGateTest(unittest.TestCase):
             "expected one generator call per row from the serial loop",
         )
 
-    def test_container_level_kwargs_decline_the_batch(self):
-        """Kwargs the batched builder cannot express must fall to serial."""
+    def test_only_inexpressible_kwargs_decline_the_batch(self):
+        """Decline ONLY what the batched path genuinely cannot express.
+
+        ``transform_fn`` and ``signal_gen`` used to be declined too, which sent
+        every such call silently to the serial loop -- and that is the common
+        case for a sampler whose basis is not the raw waveform parameters, so
+        batching would never have engaged for a realistic run. They are handled
+        now: a transform applies to the whole block at once, and a per-call
+        generator just needs installing before the capability is read.
+        ``apply_transform`` is forwarded to the generator, which ignores it.
+        """
         from lisatools.analysiscontainer import _CONTAINER_LEVEL_KWARGS
 
-        self.assertIn("apply_transform", _CONTAINER_LEVEL_KWARGS)
-        self.assertIn("transform_fn", _CONTAINER_LEVEL_KWARGS)
-        self.assertIn("signal_gen", _CONTAINER_LEVEL_KWARGS)
+        self.assertIn("per_model_per_signal", _CONTAINER_LEVEL_KWARGS)
+        for handled in ("transform_fn", "signal_gen", "apply_transform"):
+            self.assertNotIn(
+                handled, _CONTAINER_LEVEL_KWARGS,
+                f"{handled} is handled by the batched path; declining it "
+                f"silently disables batching for callers that use it",
+            )
+
+    def test_apply_transform_does_not_reach_inner_product(self):
+        """It belongs to the generator, not to template_likelihood.
+
+        Everything left in **kwargs is forwarded to ``template_likelihood`` and
+        thence to ``inner_product``, whose keyword list is explicit -- so a
+        stray container flag raised TypeError there instead of batching.
+        """
+        import inspect
+
+        from lisatools.analysiscontainer import AnalysisContainer
+
+        src = inspect.getsource(AnalysisContainer.batched_signal_likelihood)
+        self.assertIn(
+            'kwargs.pop("apply_transform"', src,
+            "apply_transform must be popped out of the kwargs that reach "
+            "template_likelihood",
+        )
 
 
 class SharedWindowGuardTest(unittest.TestCase):
