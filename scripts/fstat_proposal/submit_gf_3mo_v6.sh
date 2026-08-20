@@ -33,28 +33,29 @@
 # ##     (Mc, r, dist) marginals.                                           ##
 # ##                                                                        ##
 # ############################################################################
-# ## V6 (2026-08-20) -- THE NARROW-BAND RUN (get_n sub-band shrinkage).     ##
+# ## V6 (2026-08-20) -- THE SUB-BAND SHRINKAGE RUN.                         ##
 # ##                                                                        ##
-# ## Everything in v5 (staggered cap grid, birth fix, ridge-Gibbs, cap     ##
-# ## drift gate) PLUS free-floating minimum-width sub-bands:                ##
+# ## ONE variable against v5 (user ruling): the SUB-BAND size. Everything  ##
+# ## else -- staggered cap grid, birth fix, ridge-Gibbs, cap drift gate,   ##
+# ## every other knob -- is byte-identical to submit_gf_3mo_v5.sh.         ##
 # ##                                                                        ##
-# ## * GB_BAND_EDGES_MODE=get_n (2026-08-15 machinery, first production    ##
-# ##   run): band width = 2*get_N(f_hi)/Tobs, the chunked-het floor --     ##
-# ##   MEASURED on this range: 194 bands (vs 154), widths 256/512/3213     ##
-# ##   bins min/median/max. Low-f bands ~4x narrower => the 30-40-source   ##
-# ##   serial chains become ~8-10 sources/band, and per-band tempering     ##
-# ##   ladders multiply where sources are dense. High-f bands come out     ##
-# ##   WIDER than one layer (sparse there; fine).                          ##
-# ## * GB_BAND_UNIT_STRIDE=2: the width rule guarantees the odds/evens     ##
-# ##   parity STILL passes the support-separation guard at sep_factor 1.0  ##
-# ##   (verified with the installed check_band_support_separation; the     ##
-# ##   builder re-verifies at startup and raises loudly on failure).       ##
-# ## * GB_CAP_DIVISOR=8 (v5: 32): cells scale with the bands -- K=8 on    ##
-# ##   the 256-bin low-f bands keeps ~32-bin cells, the same physical      ##
-# ##   confusion scale v5's 32-on-1080-bins targets. K=32 here would give  ##
-# ##   8-bin cells, below the posterior width.                             ##
-# ## * GB_CAP_STAGGER=1 kept (user ruling; construction + lookup are       ##
-# ##   tested on ragged band grids).                                       ##
+# ## * GB_SUBBAND_DIVISOR=8: uniform bands of layer/8 = 135 FD bins        ##
+# ##   (1232 bands vs v5's 154). The band is a SCHEDULING unit, not a      ##
+# ##   containment unit (user ruling: waveforms already extend past band   ##
+# ##   edges; the slabs carry max(leakage, FD-support) margins) -- the     ##
+# ##   dense-band 30-40-source serial chains become ~4-5 sources/band,    ##
+# ##   and per-band tempering ladders live at 1/8-layer granularity.       ##
+# ## * GB_BAND_UNIT_STRIDE=9: same-unit gap = 8 x layer/8 = exactly ONE    ##
+# ##   LAYER -- the separation production's stride-2-on-1-layer grid has   ##
+# ##   always run with (the conservative FD-support envelope was already   ##
+# ##   violated there by design; [GB_ORTHO_LL], default ON, remains the    ##
+# ##   operative independence monitor). 1232/9 ~ 137 concurrent bands per  ##
+# ##   unit, MORE than v5's 77 -- concurrency is preserved, the serial     ##
+# ##   chains shrink 8x, the pass runs 9 units instead of 2.               ##
+# ## * GB_CAP_DIVISOR=4 (v5: 32): K scales so the CAP-CELL GRID IS         ##
+# ##   BIT-IDENTICAL to v5's -- (layer/8)/4 = layer/32 cells, and the      ##
+# ##   staggered edge set lands on the same layer*(n+0.5)/32 points. The   ##
+# ##   cap variable is fully controlled; only the band grid moves.         ##
 # ##                                                                        ##
 # ## START: FRESH STORE ONLY -- the BAND grid changes, which no rewind or  ##
 # ## migration handles (three migration attempts failed on band-grid       ##
@@ -624,21 +625,20 @@ export GB_ORTHO_LL_CHECK=1
 # spans this run's own observed duplicate-parking distance of ~1 Doppler
 # width (15.5 FD bins at 20 mHz); at K=64 the cell is 1.1 Doppler widths
 # there and parked duplicates escape into the neighbouring cell.
-# V6: NARROW BANDS (get_n sub-band shrinkage; see the V6 header block).
-# Free-floating minimum-width bands at 2*get_N(f_hi)/Tobs; 194 bands on
-# this range, low-f 4x narrower than the uniform 1-layer grid. The
-# builder runs the support-separation guard at startup and raises
-# loudly if the stride is unsafe. GB_BAND_EDGES_MODE=uniform reverts.
-export GB_BAND_EDGES_MODE=get_n
-# Explicit: the historical odds/evens. The 2*get_N width rule
-# guarantees stride 2 passes at sep_factor 1.0 (measured + re-verified
-# at startup); GB_BAND_UNIT_STRIDE=3 adds a full band of clearance.
-export GB_BAND_UNIT_STRIDE=2
-# V6: K=8, NOT v5's 32 -- cells scale with the bands. K=8 keeps ~32-bin
-# cells on the 256-bin low-f bands (the same physical confusion scale as
-# v5's K=32 on 1080-bin layers); K=32 here would make 8-bin cells,
-# below a source's own posterior width.
-export GB_CAP_DIVISOR=8
+# V6: SUB-BAND SHRINKAGE (the run's ONE variable; see the V6 header).
+# Uniform layer/8 bands: 135 FD bins each, 1232 bands. The startup
+# separation diagnostic logs the conservative-envelope verdict; the
+# operative independence monitor is [GB_ORTHO_LL] (default ON) exactly
+# as on the production 1-layer grid. GB_SUBBAND_DIVISOR=1 reverts.
+export GB_SUBBAND_DIVISOR=8
+# Stride 9 = same-unit gap of exactly ONE LAYER, mimicking production's
+# stride-2-on-1-layer separation. ~137 concurrent bands/unit (v5: 77);
+# 9 units per pass instead of 2.
+export GB_BAND_UNIT_STRIDE=9
+# K=4, NOT v5's 32: (layer/8)/4 = layer/32 cells -- the staggered
+# cap-cell grid comes out BIT-IDENTICAL to v5's, so the cap machinery
+# is a controlled variable in this comparison.
+export GB_CAP_DIVISOR=4
 # V5: STAGGER the cap grid against the band grid (user design 2026-08-20).
 # Interior cap edges shift half a cell (2.17 uHz / ~17 FD bins at K=32) so
 # no cap edge coincides with a band edge; the cell at each band seam
