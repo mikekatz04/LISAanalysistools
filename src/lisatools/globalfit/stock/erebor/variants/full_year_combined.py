@@ -95,7 +95,14 @@ class FullYearGeneralSettings(EreborGeneralSettings):
     min_freq: float = 1e-4
     max_freq: float = 2.5e-2
     window_tukey_alpha: float = 0.0  # rectangular window
-    edge_crop_wavelets: typing.Optional[int] = 20
+    # env-wired (2026-08-19): this variant's plain ``= 20`` default SHADOWED
+    # the base class's EDGE_CROP_WAVELETS env factory, so the knob was
+    # silently ignored on the combined/staged path -- caught by the sig-het
+    # edge-exclusion guard the first time a run needed a bigger crop (the
+    # 1-yr launch: alpha 0.01 on Nt=8640 tapers 44 layers, needs crop >= 52).
+    edge_crop_wavelets: typing.Optional[int] = dataclasses.field(
+        default_factory=env_default("EDGE_CROP_WAVELETS", 20, int)
+    )
     nwalkers: int = dataclasses.field(default_factory=env_default("NWALKERS", 6, int))
     # engine ntemps inherited from EreborGeneralSettings: retired to 1
     # (branches temper internally; see the per-branch <BRANCH>_NTEMPS knobs)
