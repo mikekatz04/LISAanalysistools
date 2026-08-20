@@ -75,6 +75,22 @@ def ten_to_the_x(x):
     return 10.0 ** x
 
 MOJITO_REFERENCE_TIME = 97729089.327664
+MOJITO_AVERAGE_ARMLENGTH = 2493162305.42235
+
+#########################
+
+### POPULATION INPUTS ###
+
+#########################
+
+# NAME = "strong_int_long"
+# RESOLVED_START = "/sps/lisaf/crondeel/pop_inf/data/iteratively_resolved_gbs_0.75yrs_snr7_estnoise_strong_int.npy" 
+# DATA_INPUT_NAME = "catalogue_dwds_with_strong_interaction_gbgpu.npy"
+
+# for running jobs
+NAME = str(os.environ.get("POPULATION_NAME"))
+RESOLVED_START = str(os.environ.get("RESOLVED_START")) 
+DATA_INPUT_NAME = str(os.environ.get("DATA_INPUT_NAME"))
 
 #####################
 
@@ -100,7 +116,7 @@ def setup_recipe(
 #* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
     spread_gb = np.array([1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30])
-    iteratively_resolved_population_path = "/sps/lisaf/crondeel/pop_inf/data/iteratively_resolved_gbs_0.75yrs_snr7_estnoise_strong_int.npy"
+    iteratively_resolved_population_path = RESOLVED_START
     iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
 
     frequencies = iteratively_resolved_population["Frequency"]
@@ -114,7 +130,7 @@ def setup_recipe(
         - {curr.source_info['gb'].new_f0_lims[1]}"
     )
     iteratively_resolved_population = iteratively_resolved_population[in_band]
-    subset_inds = np.array([int(name.split('_')[1]) for name in iteratively_resolved_population["Name"]])
+    subset_inds = np.array(iteratively_resolved_population["CatalogueIndex"])
     logger.info(f"Injecting {len(subset_inds)} GB sources from iteratively resolved population.")
     # subset_inds = None
     
@@ -158,15 +174,15 @@ def setup_recipe(
 ##### SETTINGS ########
 #######################
 
-LOG10_TM_ASD_RANGE = (-16.0, -13.0)
-LOG10_OMS_ASD_RANGE = (-12.0, -10.0)
+# LOG10_TM_ASD_RANGE = (-16.0, -13.0)
+# LOG10_OMS_ASD_RANGE = (-12.0, -10.0)
 
-# Galactic foreground prior ranges
-LOG10_AMP_RANGE = (-46.0, -43.0)
-ALPHA_RANGE = (1.0, 8.0)
-LOG10_FREQ1_RANGE = (np.log10(1e-3), np.log10(1e-2))
-LOG10_FREQ2_RANGE = (np.log10(1e-4), np.log10(1e-2))
-LOG10_FKNEE_RANGE = (np.log10(1e-3), np.log10(1e-1))
+# # Galactic foreground prior ranges
+# LOG10_AMP_RANGE = (-46.0, -43.0)
+# ALPHA_RANGE = (1.0, 8.0)
+# LOG10_FREQ1_RANGE = (np.log10(1e-3), np.log10(1e-2))
+# LOG10_FREQ2_RANGE = (np.log10(1e-4), np.log10(1e-2))
+# LOG10_FKNEE_RANGE = (np.log10(1e-3), np.log10(1e-1))
 
 
 def get_psd_erebor_settings(general_set: GeneralSetup) -> tuple[PSDSetup, StochasticMetadata]:
@@ -192,7 +208,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> tuple[PSDSetup, Stocha
         ndim=2,
         injection=injection,
         log_dir=general_set.file_store_dir,
-        num_prop_repeats=50,
+        num_prop_repeats=200,
     )
     prior_model_config = {
         r"$S_{\rm oms}$": (-12.0, -10.0),
@@ -228,7 +244,7 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> tuple[GalForSetup, 
     )
     prior_model_config = {
         r'$\log_{10} A_{\rm gal}$': (-46.0, -43.0),
-        r'$\alpha_{\rm gal}$': (1.0, 60.0),
+        r'$\alpha_{\rm gal}$': (0.5, 60.0),
         r'$\log_{10} f_1$': (np.log10(1e-4), np.log10(1e-1)),
         r'$\log_{10} f_{\rm knee}$': (np.log10(1e-4), np.log10(1e-2)),
         r'$\log_{10} f_2$': (np.log10(1e-4), np.log10(1e-1)),
@@ -312,7 +328,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
         waveform_kwargs=waveform_kwargs,
-        nleaves_max=6000,
+        nleaves_max=5000,
         nleaves_min=0,
         ndim=8,
         betas=betas,
@@ -369,7 +385,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     submission_folder = None # "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    num_iterations = 1000
+    num_iterations = 2000
 
     # source_ids = [18, 5, 16]
     start_freq = 9e-5
@@ -387,7 +403,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/sps/lisaf/crondeel/pop_inf/_runs/"
     data_input_path = "/sps/lisaf/crondeel/pop_inf/data/"
     base_file_name = global_fit_version
-    file_store_dir = head_dir + "galfor_estimation_strong_int_long/"
+    file_store_dir = head_dir + f"galfor_estimation_{NAME}/"
     # head_dir = "/data/asantini/packages/LISAanalysistools/"
     # data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
     # base_file_name = global_fit_version #"test_mbh_18_with_covariance"
@@ -401,7 +417,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda13x" if gpus is not None else "cpu"
-    nwalkers = 32
+    nwalkers = 64
     ntemps = 16
 
 
@@ -415,7 +431,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         filename=orbit_file,
         force_backend=backend, 
         frame="icrs", 
-        armlength=2493162305.42235
+        armlength=MOJITO_AVERAGE_ARMLENGTH
     )
     
     gbgbpu_initialize_kwargs = dict(
@@ -427,8 +443,9 @@ def get_general_erebor_settings() -> GeneralSetup:
     gb = GBGPU(**gbgbpu_initialize_kwargs)
     
     start_freq_ind = int(domain_settings.f_arr.min() * Tobs)
-    injection_data = np.load(data_input_path+"catalogue_dwds_with_strong_interaction_gbgpu.npy")
-    
+    injection_data = np.load(data_input_path+DATA_INPUT_NAME)
+    assert injection_data[:,1].max() < end_freq, "injection data contains frequencies above the end frequency"
+
     gb.gpus = gpus
     processor_init_kwargs = dict(
         injection_parameters = injection_data,
@@ -469,11 +486,13 @@ def get_general_erebor_settings() -> GeneralSetup:
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
+        save_every=200,
+        plot_every=200,
         start_freq=start_freq,
         end_freq=end_freq,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
-        random_seed=1434768955,
+        random_seed=14093445,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,

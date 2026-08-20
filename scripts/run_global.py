@@ -1,15 +1,28 @@
-import importlib.util
-import sys
+"""Run the LISA Global Fit with LISA Analysis Tools.
+
+Memory instrumentation notes
+----------------------------
+There are two entirely separate failure modes, and they need separate handling:
+
+1. HOST memory exhaustion. The Slurm cgroup OOM killer sends SIGKILL, which
+   Python cannot catch -- no exception, no traceback, no atexit, no flush. The
+   only defence is to observe the footprint *before* the limit is hit, which is
+   what the background watchdog thread does.
+
+2. DEVICE memory exhaustion. This raises cupy.cuda.memory.OutOfMemoryError and
+   is catchable, so the handler at the bottom is reachable. It emits at WARNING
+   level -- at DEBUG with no logging configuration, the records are discarded
+   and the handler appears to do nothing.
+
+``host_mem_watchdog.py`` must sit next to this file (Python puts the script's
+own directory on sys.path).
+"""
+
 import argparse
-
-import numpy as np
-from mpi4py import MPI
-import os
-import warnings
-from copy import deepcopy
-
 import ast
 import ctypes
+import importlib.util
+import os
 import sys
 
 
@@ -47,96 +60,124 @@ def _pre_init_cuda() -> None:
                                 pass
 
 
-_pre_init_cuda() # avoid allocating GPU memory on unrequested devices.
+_pre_init_cuda()  # avoid allocating GPU memory on unrequested devices.
 
-from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
+# Everything below may pull in cupy transitively, so it must come after the
+# cudaSetDevice call above. memory_monitoring imports cupy lazily inside its
+# functions, so it is safe to import here either way.
+import logging  # noqa: E402
+
+from mpi4py import MPI  # noqa: E402
+
+from memory_monitoring import (  # noqa: E402
+    setup_logging,
+    start_watchdog,
+    log_mem,
+    dump_gpu_arrays,
+    mem_summary,
+)
+
+from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit  # noqa: E402
 
 
-if __name__ == "__main__":
-
-    import argparse
-    parser = argparse.ArgumentParser(description="Run the LISA Global Fit with LISA Analysis Tools.")
-
-    parser.add_argument("-sfp", "--settings_file_path", required=True, help="The settings file.") # Positional
-    parser.add_argument("-sff", "--settings_function", default="get_global_fit_settings", help="The function in the settings file that will import the settings information.") # Optional flag
-    
-    args = parser.parse_args()
-
-    # Define the module name and the full path to the Python file
-    file_path = args.settings_file_path
-    if file_path[-3:] != ".py":
+def load_settings(file_path: str, function_name: str):
+    """Import the settings module by path and call the settings function."""
+    if os.path.splitext(file_path)[1] != ".py":
         raise ValueError("Imported settings file must be a python file (.py).")
 
-    module_name = file_path.split("/")[-1].split(".py")[0]
-    '/path/to/my_module.py' # Replace with the actual path to your .py file
+    module_name = os.path.splitext(os.path.basename(file_path))[0]
 
-    # Create a module specification from the file location
     spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load a module spec from {file_path!r}")
 
-    # Create a new module object from the specification
-    my_module = importlib.util.module_from_spec(spec)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
 
-    # Add the module to sys.modules (optional, but good practice for caching)
-    sys.modules[module_name] = my_module
+    try:
+        settings_function = getattr(module, function_name)
+    except AttributeError:
+        raise AttributeError(
+            f"{file_path!r} has no function named {function_name!r}"
+        ) from None
 
-    # Execute the module's code
-    spec.loader.exec_module(my_module)
+    return settings_function()
 
-    # Now you can access functions, classes, or variables from the imported module
-    # For example, if my_module.py contains a function called 'my_function':
-    settings_function = getattr(my_module, args.settings_function)
-    
-    curr_info = settings_function()
 
-    gf = GlobalFit(curr_info, MPI.COMM_WORLD)
-    
-    # Setup checker when running out of memory on GPU. This will dump all live GPU arrays and their names to stdout.
-    import gc
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run the LISA Global Fit with LISA Analysis Tools."
+    )
+    parser.add_argument(
+        "-sfp", "--settings_file_path", required=True,
+        help="The settings file.",
+    )
+    parser.add_argument(
+        "-sff", "--settings_function", default="get_global_fit_settings",
+        help="The function in the settings file that supplies the settings.",
+    )
+    parser.add_argument(
+        "--mem-interval", type=float, default=60.0,
+        help="Seconds between host-memory samples. 0 disables the watchdog.",
+    )
+    parser.add_argument(
+        "--mem-trace", action="store_true",
+        help="Enable tracemalloc. Only for leak hunting -- it costs CPU and "
+             "memory, and cannot see cupy pinned or C-extension allocations.",
+    )
+    parser.add_argument(
+        "--mem-abort-frac", type=float, default=None,
+        help="Fraction of the cgroup limit at which to SIGINT ourselves to "
+             "obtain a traceback. Leave unset unless you are debugging a host "
+             "OOM: an interrupt mid-write can corrupt an HDF5 checkpoint.",
+    )
+    args = parser.parse_args()
+
+    comm = MPI.COMM_WORLD
+    setup_logging(level=logging.INFO, rank=comm.Get_rank())
+    logger = logging.getLogger("run_global")
+
+    logger.info("startup: %s", mem_summary("startup"))
+
+    if args.mem_interval > 0:
+        start_watchdog(
+            interval=args.mem_interval,
+            warn_frac=0.75,
+            dump_frac=0.85,
+            abort_frac=args.mem_abort_frac,
+            trace=args.mem_trace,
+        )
+
+    curr_info = load_settings(args.settings_file_path, args.settings_function)
+    log_mem("after settings load")
+
+    gf = GlobalFit(curr_info, comm)
+    log_mem("after GlobalFit construction")
+
+    # Imported late so that a missing cupy does not break a CPU-only run.
     import cupy as cp
-
-    def find_names_for_array(arr, max_depth=3):
-        """Best-effort: find variable names referencing this array."""
-        names = []
-        seen = set()
-
-        def search(obj, depth, path):
-            if depth > max_depth or id(obj) in seen:
-                return
-            seen.add(id(obj))
-            for ref in gc.get_referrers(obj):
-                if isinstance(ref, dict):
-                    for k, v in ref.items():
-                        if v is obj:
-                            # is this dict a frame's locals/globals, or an instance __dict__?
-                            for ref2 in gc.get_referrers(ref):
-                                if hasattr(ref2, 'f_locals') and ref2.f_locals is ref:
-                                    names.append(f"local '{k}' in {ref2.f_code.co_name}() line {ref2.f_lineno}")
-                                elif hasattr(ref2, '__dict__') and ref2.__dict__ is ref:
-                                    names.append(f"attribute '{k}' of {type(ref2).__name__} instance")
-                elif isinstance(ref, (list, tuple)):
-                    search(ref, depth + 1, path)
-
-        search(arr, 0, [])
-        return names
-
-    def dump_gpu_arrays_with_names(min_size_mb=10):
-        arrays = []
-        for obj in gc.get_objects():
-            if isinstance(obj, cp.ndarray) and obj.nbytes / 1024**2 >= min_size_mb:
-                names = find_names_for_array(obj)
-                arrays.append((obj.nbytes / 1024**2, obj.shape, obj.dtype, names))
-        arrays.sort(reverse=True, key=lambda x: x[0])
-        for size_mb, shape, dtype, names in arrays:
-            print(f"{size_mb:>10.1f} MB  {str(shape):<25} {dtype}  -> {names or 'no named ref found'}")
 
     try:
         gf.run_global_fit()
     except cp.cuda.memory.OutOfMemoryError:
-        print("=== OOM — dumping live GPU arrays ===")
-        dump_gpu_arrays_with_names(min_size_mb=5)
+        # Reachable only for DEVICE OOM. A host OOM arrives as SIGKILL and
+        # never gets here -- that is what the watchdog above is for.
+        logger.warning("=== device OOM -- dumping live GPU arrays ===")
+        logger.warning(mem_summary("device OOM"))
+        dump_gpu_arrays(min_size_mb=5.0, names=True)
         pool = cp.get_default_memory_pool()
-        print(f"Pool used:  {pool.used_bytes()/1024**2:.1f} MB")
-        print(f"Pool total: {pool.total_bytes()/1024**2:.1f} MB")
+        logger.warning("pool used:  %.1f MB", pool.used_bytes() / 1024 ** 2)
+        logger.warning("pool total: %.1f MB", pool.total_bytes() / 1024 ** 2)
         raise
-        
-    #breakpoint()
+    except KeyboardInterrupt:
+        # Also the landing point for the watchdog's SIGINT, if enabled.
+        logger.warning("interrupted: %s", mem_summary("interrupt"))
+        raise
+
+    logger.info("run_global_fit completed: %s", mem_summary("done"))
+    
+
+
+if __name__ == "__main__":
+    main()

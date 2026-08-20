@@ -28,13 +28,14 @@ from ..engine import Settings, Setup, GeneralSetup
 from ..loginfo import init_logger
 
 from ..priors import (
-    GBConfig, 
-    MBHConfig, 
-    PSDAnalyticalConfig, 
+    GBConfig,
+    MBHConfig,
+    PSDAnalyticalConfig,
     GalForConfig,
     EMRIConfig,
     HyperConfig
 )
+from ..priors.tempering import population_tempering_from_settings
 
 
 #* ==============================================================================
@@ -673,8 +674,20 @@ class HyperSettings(Settings):
     nleaves_min: int = 1
     Nmodels: int = 2
     betas: Optional[np.ndarray] = None
-    
-    
+    #: Whether the model-dependent population prior is tempered along ``betas`` above.
+    #: ``False`` is the untempered pipeline, bit for bit; ``True`` selects the geometric
+    #: bridge towards a model-independent reference density. The scheme names
+    #: ``"off"``/``"flat"``/``"geometric"`` may be given instead, ``"flat"`` being the
+    #: conventional power prior kept as the control. Without this, the model index is the
+    #: only quantity in the target that no temperature of the ladder is ever hot in, and
+    #: its acceptance ratio is identical at every temperature. See ``_dev/prior_tempering.md``.
+    population_tempering: bool | str = False
+    #: Proceed when the competing densities' training boxes do not overlap at all, in
+    #: which case the geometric annealing is inert wherever the models disagree. See
+    #: section 4.5 of ``_dev/prior_tempering.md``.
+    population_tempering_allow_partial_support: bool = False
+
+
 class HyperSetup(Setup, HyperSettings):
     def __init__(self, hyper_settings: HyperSettings):
         # had a better way to do this but it stopped allowing for pickle
@@ -725,6 +738,12 @@ class HyperSetup(Setup, HyperSettings):
             betas = 1 / 1.2 ** np.arange(self.ntemps)
             betas[-1] = 0.0001
             self.betas = betas
+
+        self.population_tempering_control = population_tempering_from_settings(
+            self.population_tempering,
+            self.betas,
+            allow_partial_support=self.population_tempering_allow_partial_support,
+        )
 
         if self.other_tempering_kwargs is None:
             self.other_tempering_kwargs = dict(adaptation_time=2, permute=True)

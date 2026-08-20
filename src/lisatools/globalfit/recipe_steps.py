@@ -1,8 +1,10 @@
+import os
 import time
 import logging
 import typing
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import cupy as cp
@@ -875,8 +877,12 @@ def build_gb_moves(
         from .priors.network import HyperGalaxyPrior
         from .priors.base import UniformDistribution
         from .priors.analytical import CosineUniform, DeltaFunction
-        proposal_config_file_1 = r"/sps/lisaf/crondeel/population_fit/data/weak_int_resolved_fdot_rescale/configs/prior_density_galaxy.yaml"
-        proposal_config_file_2 = r"/sps/lisaf/crondeel/population_fit/data/strong_int_resolved_fdot_rescale/configs/prior_density_galaxy.yaml"
+        import os
+        PROJECT_ROOT = "/sps/lisaf/crondeel/pop_inf/data"
+        NAME_0 = str(os.environ.get("POPULATION_NAME_0"))
+        NAME_1 = str(os.environ.get("POPULATION_NAME_1"))
+        proposal_config_file_1 = f"{PROJECT_ROOT}/{NAME_0}/proposal_fit_config.yaml"
+        proposal_config_file_2 = f"{PROJECT_ROOT}/{NAME_1}/proposal_fit_config.yaml"
         proposal_configs = [proposal_config_file_1, proposal_config_file_2]
         gb_flow_proposal = HyperGalaxyPrior(proposal_configs, use_cupy=True, return_gpu=True)
         
@@ -982,7 +988,7 @@ def build_gb_moves(
     return gb_search_moves, gb_pe_moves
 
 
-from .moves.hypermove import HyperMove
+from .moves.hypermove import HyperMove, TemperatureLikelihood
 from .stock.erebor import HyperSetup
 from eryn.state import BranchSupplemental
 
@@ -1006,9 +1012,19 @@ def build_hyper_moves(
     nwalkers: int = curr.general_info.nwalkers
     ntemps: int = curr.general_info.ntemps
     
+    # every proposal appends the full decomposition of ell_m to this file (D1)
+    diagnostics_file = Path(curr.general_info.file_store_dir) / (
+        curr.general_info.base_file_name + "_hyper_move_diagnostics.h5"
+    )
+
+    # The beta-weighting of the model-dependent population prior, built once in the
+    # settings and handed here by reference so that the run has exactly one ladder.
+    # Defaults to off, in which case the move is bit-identical to the untempered one.
+    tempering = getattr(hyper_settings, "population_tempering_control", None)
+
     # setup move
     hyper_move = HyperMove(
-        acs, 
+        acs,
         wave_gen,
         resolved_info.waveform_kwargs,
         dict(
@@ -1017,10 +1033,28 @@ def build_hyper_moves(
         ),
         branch_name_map,
         hyper_settings.catalogues,
-        snr_threshold=hyper_settings.resolvability_threshold
+        snr_threshold=hyper_settings.resolvability_threshold,
+        diagnostics_file=str(diagnostics_file),
+        tempering=tempering,
     )
     hyper_move.accepted = np.zeros((ntemps, nwalkers))
-    
+
+    # Swaps between temperatures need a likelihood at combinations of parameters drawn
+    # from different temperatures, which no other move requires and the engine does not
+    # provide. It is built here rather than in the shared containers so that nothing
+    # outside this move changes; see section 7 of _dev/prior_tempering.md.
+    if tempering is not None and tempering.enabled:
+        psd_info = curr.source_info["psd"]
+        hyper_move.temperature_likelihood = TemperatureLikelihood(
+            acs,
+            wave_gen,
+            resolved_info.waveform_kwargs,
+            resolved_transform=resolved_info.transform,
+            sensitivity_backend=curr.general_info.sensitivity_backend,
+            psd_transform=psd_info.transform,
+            galfor_transform=stochastic_info.transform,
+        )
+
     return hyper_move
     
     

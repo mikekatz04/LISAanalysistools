@@ -192,6 +192,11 @@ report.omit = [
   "*/lisatools_backend_*/git_version.py",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+  "slow: needs a checkpoint, a run or a GPU; skipped by default with -m 'not slow'",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

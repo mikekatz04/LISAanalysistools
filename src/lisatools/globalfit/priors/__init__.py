@@ -1,3 +1,4 @@
+from .tempering import *
 from .analytical import *
 from .base import *
 from .joint import *

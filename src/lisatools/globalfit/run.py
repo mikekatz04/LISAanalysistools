@@ -593,6 +593,7 @@ class GlobalFit:
                 save_plot_rank=self.results_rank,
                 sub_backend=self.engine_info.branch_backends,
                 sub_state_bases=self.engine_info.branch_states,
+                buffer_size=general_info.save_every
             )
 
             extra_reset_kwargs = {}
@@ -680,9 +681,12 @@ class GlobalFit:
                                 "gpus": move.gpus,
                             }
 
-            # stop unneeded processes
+            # stop unneeded processes. Every rank that is neither this one nor
+            # the results rank is blocked in the `else` branch below waiting on
+            # a message from us, so each one must get either its instructions or
+            # a "stop" -- otherwise it never reaches the closing barrier.
             for rank in self.all_ranks:
-                if rank in self.used_ranks:
+                if rank in (self.main_rank, self.results_rank) or rank in rank_instructions:
                     continue
                 self.comm.send("stop", dest=rank)
 
@@ -696,7 +700,11 @@ class GlobalFit:
 
             truths = self.curr.get_truths_dict()
 
-            exclude_from_plot = ["hyper"] if "hyper" in state.branch_names else []  # TODO: make this more general
+            # "gb" holds nleaves_max x ndim per walker per temperature; pulling its
+            # full chain out of the backend for diagnostics costs O(100 GB) and is
+            # what OOM-kills the run once the chain is long enough. "hyper" is not
+            # a source branch and has nothing useful to plot.
+            exclude_from_plot = [name for name in ("gb", "hyper") if name in state.branch_names]
             truths_plot = {key: val for key, val in truths.items() if key not in exclude_from_plot}
             branches_plot = [name for name in branch_names if name not in exclude_from_plot]
 
@@ -728,7 +736,7 @@ class GlobalFit:
                 branch_names=branch_names,
                 # update_fn=update_fn,
                 plot_generator=plot_container,
-                plot_iterations=10,
+                plot_iterations=general_info.plot_every,
                 # update_iterations=1,
                 # update_fn=recipe,  # stop_converge_mix,
                 # update_iterations=1,  # TODO: change this?
@@ -755,6 +763,8 @@ class GlobalFit:
 
             sampler_mix.run_mcmc(state, self.curr.general_info.num_iterations, thin_by=1, progress=True, store=True)
 
+            sampler_mix.backend.flush()
+            
             if self.curr.general_info.submission_parent_folder is not None:
                 self.logger.debug(f"saving submission to {self.curr.general_info.submission_parent_folder}")
                 submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
@@ -762,7 +772,14 @@ class GlobalFit:
 
             logger.info("Residuals saved.")
 
-            self.comm.send({"finish_run": True}, dest=self.results_rank)
+            # When there are too few ranks for a dedicated results rank, this
+            # rank *is* the results rank: there is no asynchronous saver to shut
+            # down, and a blocking send to ourselves would deadlock.
+            if self.results_rank != self.main_rank:
+                self.comm.send({"finish_run": True}, dest=self.results_rank)
+
+                # WAIT for results_rank to confirm it finished saving and plotting
+                self.comm.recv(source=self.results_rank, tag=999)
 
         elif self.rank == self.results_rank:
             save_to_backend_asynchronously_and_plot(
@@ -774,6 +791,9 @@ class GlobalFit:
                 self.curr.general_info.backup_iter,
             )  # 1 is plot_iter
 
+            # AFTER saving/plotting completes, notify main_rank
+            self.comm.send(True, dest=self.main_rank, tag=999) 
+            
         else:
             info = self.comm.recv(source=self.main_rank)
             if isinstance(info, dict):
@@ -789,6 +809,8 @@ class GlobalFit:
                 )
 
             print(f"Process {self.rank} finished.")
+        
+        self.comm.Barrier()
 
 
 class GlobalFitSegment(ABC):

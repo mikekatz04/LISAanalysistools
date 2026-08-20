@@ -7,6 +7,7 @@ from lisatools.domains import FDSettings
 import numpy as np
 import shutil
 import logging
+import os
 
 try:
     import cupy as cp
@@ -18,6 +19,12 @@ except (ModuleNotFoundError, ImportError) as e:
     gpu_available = False
 
 from typing import TYPE_CHECKING
+
+# for running jobs
+PROJECT_ROOT = "/sps/lisaf/crondeel/pop_inf/data"
+NAME_INJ = str(os.environ.get("POPULATION_NAME_INJ"))
+NAME_0 = str(os.environ.get("POPULATION_NAME_0"))
+NAME_1 = str(os.environ.get("POPULATION_NAME_1"))
 
 from lisatools.detector import L1Orbits
 from lisatools.domaincomputation import DomainComputationGroupArray
@@ -69,6 +76,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+def catalogue_size(path: str) -> int:
+    """Number of sources in a catalogue, read from the ``.npy`` header alone."""
+    return int(np.load(path, mmap_mode="r").shape[0])
+
 def f_ms_to_s(x):
     return x * 1e-3
 
@@ -76,6 +87,34 @@ def ten_to_the_x(x):
     return 10.0 ** x
 
 MOJITO_REFERENCE_TIME = 97729089.327664
+MOJITO_AVERAGE_ARMLENGTH = 2493162305.42235
+
+#########################
+
+### POPULATION INPUTS ###
+
+#########################
+
+# injection data and starting from truths
+RESOLVED_START = f"{PROJECT_ROOT}/{NAME_INJ}/iteratively_resolved_gbs_0.75yrs_snr7.0_named.npy"
+INJECTION_CATALOG = f"{PROJECT_ROOT}/{NAME_INJ}/catalogue_dwds_with_{NAME_INJ}eraction_gbgpu.npy"
+
+# population 0
+NF_GALFOR_PRIOR_CONFIG_0 = f"{PROJECT_ROOT}/{NAME_0}/prior_density_galfor.yaml"
+NF_GB_PRIOR_CONFIG_0 = f"{PROJECT_ROOT}/{NAME_0}/prior_fit_config.yaml"
+CATALOG_0 = f"{PROJECT_ROOT}/{NAME_0}/catalogue_dwds_with_{NAME_0}eraction_gbgpu.npy"
+
+# population 1
+NF_GALFOR_PRIOR_CONFIG_1 = f"{PROJECT_ROOT}/{NAME_1}/prior_density_galfor.yaml"
+NF_GB_PRIOR_CONFIG_1 = f"{PROJECT_ROOT}/{NAME_1}/prior_fit_config.yaml"
+CATALOG_1 = f"{PROJECT_ROOT}/{NAME_1}/catalogue_dwds_with_{NAME_1}eraction_gbgpu.npy"
+
+# This changes the target distribution, so it is a modelling decision and belongs in
+# the formalism note, not only here. Measure its effect first with
+#   uv run python _testing/diagnose_population_overlap.py --support-floor 1e-6
+SUPPORT_FLOOR_GALFOR: float | None = None
+SUPPORT_FLOOR_GB: float | None = None
+
 
 #####################
 
@@ -101,7 +140,7 @@ def setup_recipe(
     #* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
     spread_gb = np.array([1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30, 1e-30])
-    iteratively_resolved_population_path = "/sps/lisaf/crondeel/pop_inf/data/iteratively_resolved_gbs_0.75yrs_snr7_estnoise_weak_int.npy"
+    iteratively_resolved_population_path = RESOLVED_START
     iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
 
     frequencies = iteratively_resolved_population["Frequency"]
@@ -115,7 +154,7 @@ def setup_recipe(
         - {curr.source_info['gb'].new_f0_lims[1]}"
     )
     iteratively_resolved_population = iteratively_resolved_population[in_band]
-    subset_inds = np.array([int(name.split('_')[1]) for name in iteratively_resolved_population["Name"]])
+    subset_inds = np.array(iteratively_resolved_population["CatalogueIndex"])
     logger.info(f"Injecting {len(subset_inds)} GB sources from iteratively resolved population.")
     # subset_inds = None
     
@@ -265,12 +304,12 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> tuple[GalForSetup, 
 
     if True:
         from lisatools.globalfit.priors.sourceconfigs import HyperGalForConfig
-        config_file_weak =   "/sps/lisaf/crondeel/population_fit/data/weak_int_galfor/configs/prior_density_galfor.yaml"
-        config_file_strong = "/sps/lisaf/crondeel/population_fit/data/strong_int_galfor/configs/prior_density_galfor.yaml"
+
         galfor_config = HyperGalForConfig(
-            [config_file_weak, config_file_strong],
+            [NF_GALFOR_PRIOR_CONFIG_0, NF_GALFOR_PRIOR_CONFIG_1],
             use_cupy=True,
-            return_gpu=False
+            return_gpu=False,
+            support_floor=SUPPORT_FLOOR_GALFOR,
         )
     galfor_setup = GalForSetup(galfor_settings, source_config=galfor_config)
     return galfor_setup, galfor_metadata
@@ -283,7 +322,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
     
     #? Will be changed to relative path in the future
-    prior_file_gb = "//sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/mojito_priors/galactic_binary_mojito.prior"
+    prior_file_gb = "/sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/mojito_priors/galactic_binary_mojito.prior"
     
     input_data_arr: DataResidualArray = general_set.input_data_residual_array
     start_freq = float(input_data_arr.settings.f_arr[0])
@@ -354,15 +393,15 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     )
 
     from lisatools.globalfit.priors.sourceconfigs import HyperGBConfig
-    config_file_weak =   "/sps/lisaf/crondeel/population_fit/data/weak_int_fdot_rescale/configs/prior_density_galaxy.yaml"
-    config_file_strong = "/sps/lisaf/crondeel/population_fit/data/strong_int_fdot_rescale/configs/prior_density_galaxy.yaml"
+
     gb_config = HyperGBConfig(
-        [config_file_weak, config_file_strong],
-        [15539324, 43280272], 
+        [NF_GB_PRIOR_CONFIG_0, NF_GB_PRIOR_CONFIG_1],
+        [catalogue_size(CATALOG_0), catalogue_size(CATALOG_1)],
         rho_threshold=7.0,
         sigma_resolv=2.21,
         use_cupy=True,
-        return_gpu=False
+        return_gpu=False,
+        support_floor=SUPPORT_FLOOR_GB,
     )
     # gb_config=None
     
@@ -393,13 +432,13 @@ def get_hyper_erebor_settings(general_set: GeneralSetup) -> HyperSetup:
     
     prior_file = "/sps/lisaf/crondeel/pop_inf/lisa-analysis-tools/src/lisatools/globalfit/prior_files/population_priors/model.prior"
     
-    catalog_weak_int = np.load("/sps/lisaf/crondeel/pop_inf/data/catalogue_dwds_with_weak_interaction_gbgpu.npy")
-    catalog_strong_int = np.load("/sps/lisaf/crondeel/pop_inf/data/catalogue_dwds_with_strong_interaction_gbgpu.npy")
+    catalog_weak_int = np.load(CATALOG_0)
+    catalog_strong_int = np.load(CATALOG_1)
     catalogues = [catalog_weak_int, catalog_strong_int]
     
     betas = 1 / 1.2 ** np.arange(general_set.ntemps)
     betas[-1] = 0.0001
-    
+
     hyper_settings = HyperSettings(
         Tobs=general_set.Tobs,
         dt=general_set.dt,
@@ -410,7 +449,8 @@ def get_hyper_erebor_settings(general_set: GeneralSetup) -> HyperSetup:
         catalogues=catalogues,
         resolvability_threshold=7.0,
         Nmodels=2,
-        betas=betas
+        betas=betas,
+        population_tempering=False,
     )
     
     return HyperSetup(hyper_settings)
@@ -448,7 +488,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/sps/lisaf/crondeel/pop_inf/_runs/"
     data_input_path = "/sps/lisaf/crondeel/pop_inf/data/"
     base_file_name = global_fit_version
-    file_store_dir = head_dir + "pop_inf_run_1/"
+    file_store_dir = head_dir + f"pop_inf_run_{NAME_0}_vs_{NAME_1}/"
     # head_dir = "/data/asantini/packages/LISAanalysistools/"
     # data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
     # base_file_name = global_fit_version #"test_mbh_18_with_covariance"
@@ -476,7 +516,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         filename=orbit_file,
         force_backend=backend, 
         frame="icrs", 
-        armlength=2493162305.42235
+        armlength=MOJITO_AVERAGE_ARMLENGTH
     )
     
     gbgbpu_initialize_kwargs = dict(
@@ -488,7 +528,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     gb = GBGPU(**gbgbpu_initialize_kwargs)
     
     start_freq_ind = int(domain_settings.f_arr.min() * Tobs)
-    injection_data = np.load(data_input_path+"catalogue_dwds_with_weak_interaction_gbgpu.npy")
+    injection_data = np.load(INJECTION_CATALOG)
     
     gb.gpus = gpus
     processor_init_kwargs = dict(

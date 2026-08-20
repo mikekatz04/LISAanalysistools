@@ -1,5 +1,5 @@
 """
-The base Prior infrastructure for LISA analysis tools.
+The base Prior Class.
 
 Provides a functional, stateless base Prior class supporting GPU acceleration,
 automatic conditional dependency tracking via method signatures, and 

@@ -110,6 +110,8 @@ class GeneralSettings(Settings):
     file_store_dir: str | None = None
     base_file_name: str | None = None
     main_file_key: Optional[str] = "parameter_estimation_main"
+    save_every: Optional[int] = 10
+    plot_every: Optional[int] = 10
     past_file_for_start: Optional[str] = None
     orbits: Orbits | None = None
     gpu_orbits: Orbits | None = None

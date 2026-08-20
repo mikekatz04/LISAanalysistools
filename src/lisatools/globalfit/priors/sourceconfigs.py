@@ -453,21 +453,31 @@ class HyperGBConfig(BaseSourceConfig):
         nf_config_files: list[str],
         poisson_lams: list[float],
         rho_threshold: float = 7.0,
-        sigma_resolv: float = 1.0, 
+        sigma_resolv: float = 1.0,
         use_cupy: bool = False,
         return_gpu: bool = False,
+        support_floor: float | None = None,
     ):
+        """
+        Args:
+            support_floor: Mixture weight of R5 method 2, or ``None`` (the default) to
+                leave the flows exactly as they were trained. See
+                :class:`lisatools.globalfit.priors.network.SupportFloor`: switching it
+                on changes the target distribution, so it is a modelling decision.
+        """
         if len(nf_config_files) != len(poisson_lams):
             raise ValueError("The number of NF config files must match the number of Poisson lambdas.")
-            
+
         self.use_cupy = use_cupy
         self.return_gpu = return_gpu
+        self.support_floor = support_floor
 
         self.gb_priors = LISAPriorDict({
             ("logA", "f0_mHz", "fdot", "ra", "sin_dec"): HyperGalaxyPrior(
                 config_files=nf_config_files,
                 use_cupy=use_cupy,
-                return_gpu=return_gpu
+                return_gpu=return_gpu,
+                support_floor=support_floor,
             ),
             "phi0": UniformDistribution(minimum=0.0, maximum=2*np.pi, name="phi0", boundary="periodic"),
             "cos_inc": CosineUniform(name="cos_inc", name_phys="inc"),
@@ -528,16 +538,28 @@ class HyperGalForConfig(BaseSourceConfig):
         nf_config_files: list[str],
         use_cupy: bool = False,
         return_gpu: bool = False,
+        support_floor: float | None = None,
     ):
+        """
+        Args:
+            support_floor: Mixture weight of R5 method 2, or ``None`` (the default) to
+                leave the flows exactly as they were trained. This is the density
+                defect B9 lives in: without a floor the two models' foreground fits
+                assign each other's states zero density, so the model move can never
+                accept. See
+                :class:`lisatools.globalfit.priors.network.SupportFloor`.
+        """
         self.use_cupy = use_cupy
         self.return_gpu = return_gpu
+        self.support_floor = support_floor
 
         # Initialize the Prior dictionary. All 5 parameters are handled by the HyperPrior.
         self.galfor_priors = LISAPriorDict({
             ("log10_Amp", "alpha", "log10_f1", "log10_fknee", "log10_f2"): HyperGalForPrior(
                 config_files=nf_config_files,
                 use_cupy=use_cupy,
-                return_gpu=return_gpu
+                return_gpu=return_gpu,
+                support_floor=support_floor,
             )
         })
 
