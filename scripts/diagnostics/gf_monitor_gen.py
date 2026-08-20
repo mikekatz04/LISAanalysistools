@@ -2376,47 +2376,12 @@ VGB_POST_JSON = json.dumps({
 
 
 # ---- per-source posterior panels (Tasks 2 + 4) ---------------------------
-def col_decimals(v):
-    """Decimals giving ~5 significant digits OF THE COLUMN'S OWN SPREAD.
-
-    A flat 5-significant-digit round on the absolute value would quantize a
-    narrow posterior out of existence -- the highest-f GB sits at 20.3812
-    mHz with a 0.002 mHz spread, which 5 significant digits collapses into
-    two spikes. Precision therefore tracks the spread, not the magnitude.
-    """
-    a = np.asarray(v, dtype=float)
-    a = a[np.isfinite(a)]
-    if not a.size:
-        return 5
-    span = float(a.max() - a.min())
-    if span <= 0:
-        span = float(np.abs(a).max()) or 1.0
-    return int(np.clip(np.ceil(-np.log10(span)) + 4, 0, 12))
-
-
-def jnum(x, d):
-    """JSON-safe rounded float (NaN/inf -> None)."""
-    v = float(x)
-    return None if not np.isfinite(v) else round(v, d)
-
-
-def src_blob(label, sub, samples, truth, names, note="", note_bad=False):
-    """One entry of the shared small-multiple-histogram blob."""
-    dec = [col_decimals(samples[:, j]) for j in range(samples.shape[1])]
-    return {
-        "label": label, "sub": sub, "note": note, "bad": bool(note_bad),
-        "samples": [[jnum(v, dec[j]) for v in samples[:, j]]
-                    for j in range(samples.shape[1])],
-        "truth": [None if truth is None else jnum(truth[j], dec[j])
-                  for j in range(len(names))],
-    }
-
-
 # Task 2: every VGB, SNR-descending in the selector -- rendered as
 # ChainConsumer CORNER plots (2026-08-15, user request), one PNG per leaf,
 # base64'd into the page. The selector swaps the src of a single <img>, so
 # only the selected corner is ever in the DOM's visible flow; the JS
-# histogram panel (srcPanel) now serves the GB panel only.
+# histogram panel it replaced is gone; the GB panel moved to corner
+# plots too (2026-08-20), so both selectors are now image swaps.
 #
 # Samples: the last min(10, NIT) stored iterations x every cold walker
 # (~240 rows), wider than the 3-iteration window the marginal panels use --
@@ -2439,18 +2404,34 @@ try:
     # informational -- an unconstrained VGB angle is a RESULT, not a fault).
     logging.getLogger("chainconsumer").setLevel(logging.ERROR)
 
-    def vgb_corner_png(leaf, title):
-        """One leaf -> a base64 PNG of its 5x5 ChainConsumer corner.
+    def corner_png(Sm, names, truth, title, size_in=None, tally=None,
+                   dpi=None, label_fs=8, tick_fs=7, smooth=None, bins=None):
+        """Samples -> a base64 PNG of their ChainConsumer corner.
+
+        Shared by the VGB leaf panel and the GB per-source panel; the only
+        thing that differs between them is the parameter list, the figure
+        size, and how the samples were gathered.
 
         Extents are widened to contain the catalogue truth so a truth line
-        that falls OUTSIDE the posterior is still visible (the same rule
-        the JS histogram panel used); without it a badly-recovered leaf
-        would silently show no truth at all.
+        that falls OUTSIDE the posterior is still visible; without it a
+        badly-recovered source would silently show no truth at all.
+
+        SMOOTHING TRACKS SAMPLE COUNT. chainconsumer's default smooth=1 on a
+        few dozen rows does not produce a posterior, it produces a field of
+        spurious closed rings that read as multimodality. Below ~200 rows
+        the kernel is widened and the binning coarsened so the contours
+        cannot claim structure the sample count does not support.
         """
-        Sm = np.asarray(vgb_corner[:, leaf, :], dtype=float)
-        truth = None if VGB_TRUTH is None else VGB_TRUTH[leaf]
+        Sm = np.asarray(Sm, dtype=float)
+        n = int(Sm.shape[0])
+        smooth_, bins_ = (3, 12) if n < 200 else (1, 18)
+        if smooth is not None:
+            smooth_ = smooth
+        if bins is not None:
+            bins_ = bins
+        _dpi = dpi or CORNER_DPI
         ext = {}
-        for j, nm_ in enumerate(VGB_NAMES):
+        for j, nm_ in enumerate(names):
             lo, hi = float(np.min(Sm[:, j])), float(np.max(Sm[:, j]))
             if truth is not None and np.isfinite(truth[j]):
                 lo = min(lo, float(truth[j])); hi = max(hi, float(truth[j]))
@@ -2462,30 +2443,37 @@ try:
             _warnings.simplefilter("ignore")
             cc = ChainConsumer()
             cc.add_chain(Chain(
-                samples=pd.DataFrame(Sm, columns=VGB_NAMES), name="posterior",
+                samples=pd.DataFrame(Sm, columns=names), name="posterior",
                 color=VIOLET, shade=True, shade_alpha=0.35, bar_shade=True,
-                plot_point=False, smooth=1, bins=18,
+                plot_point=False, smooth=smooth_, bins=bins_,
                 show_label_in_legend=False))
             if truth is not None:
                 cc.add_truth(Truth(
                     location={nm_: float(truth[j])
-                              for j, nm_ in enumerate(VGB_NAMES)},
+                              for j, nm_ in enumerate(names)},
                     color=RED, line_style=":", line_width=1.4))
             # diagonal_tick_labels defaults ON and is unreadable at this
             # dpi; 3 upright ticks per axis is what survives the size budget.
             cc.set_plot_config(PlotConfig(
-                labels={nm_: nm_ for nm_ in VGB_NAMES}, extents=ext,
-                label_font_size=8, tick_font_size=7, max_ticks=3,
+                labels={nm_: nm_ for nm_ in names}, extents=ext,
+                label_font_size=label_fs, tick_font_size=tick_fs, max_ticks=3,
                 diagonal_tick_labels=False,
-                show_legend=False, summarise=False, dpi=CORNER_DPI))
-            fig_ = cc.plotter.plot(figsize=(CORNER_IN, CORNER_IN))
-        fig_.suptitle(title, fontsize=9, color=FG)
+                show_legend=False, summarise=False, dpi=_dpi))
+            _sz = size_in or CORNER_IN
+            fig_ = cc.plotter.plot(figsize=(_sz, _sz))
+        fig_.suptitle(title, fontsize=9 if _dpi <= 80 else 11, color=FG)
         buf = io.BytesIO()
-        fig_.savefig(buf, format="png", dpi=CORNER_DPI, bbox_inches="tight")
+        fig_.savefig(buf, format="png", dpi=_dpi, bbox_inches="tight")
         plt.close(fig_)
         raw = buf.getvalue()
-        CORNER_BYTES.append(len(raw))
+        (CORNER_BYTES if tally is None else tally).append(len(raw))
         return base64.b64encode(raw).decode()
+
+    def vgb_corner_png(leaf, title):
+        """One leaf -> a base64 PNG of its 5x5 ChainConsumer corner."""
+        return corner_png(vgb_corner[:, leaf, :], VGB_NAMES,
+                          None if VGB_TRUTH is None else VGB_TRUTH[leaf],
+                          title)
 
     # ALL 55 leaves (2026-08-16): the redesign cut this to the 11
     # detectable ones. Detectable first so the picker still opens on a
@@ -2549,9 +2537,59 @@ if _rows:
         len([c for c in clusters
              if c[0][0] > solid[0][0][0] and len({x[1] for x in c}) < 3])
         if solid else len(clusters))
-    for c in solid[:3]:
-        P = np.array([gb_chain_cold[w, i] for _, w, i in c])
-        f0_med = float(np.median(P[:, 1]))
+    # POOL SAMPLES ACROSS ITERATIONS (2026-08-20). The marginal-histogram
+    # panel this replaced drew a single stored iteration -- ~33 rows, which
+    # is enough for a 1-D bar chart and nowhere near enough for a 2-D
+    # contour. The GB branch is trans-dimensional, so leaf index i is NOT
+    # the same source from one iteration to the next; rows are associated by
+    # f0 proximity instead, at most one per (iteration, walker) cell, taking
+    # the alive leaf nearest the cluster centre. Same widened window the VGB
+    # corners already use, and the same reason for it.
+    GB_CORNER_ITS = min(10, NIT)
+    # 9 params need far more canvas than the VGB panel's 5. At the VGB's
+    # 7in/68dpi the axis labels of a 9x9 collide into an unreadable smear.
+    GB_CORNER_IN, GB_CORNER_DPI = 13.0, 96
+    # SHORT AXIS LABELS, UNITS IN THE CAPTION. "dist [kpc]" / "Mc [Msol]" /
+    # "fdot_astro_ratio" overrun their panels at 9 across.
+    GB_CORNER_LABELS = ["dist", "d_f0 [uHz]", "Mc", "phi0", "cos_iota",
+                        "psi", "alpha", "sin_delta", "fdot_ratio"]
+    # f0 is plotted as an OFFSET from the cluster centre. Absolute f0 has a
+    # ~0.002 mHz spread on a ~20 mHz value, so matplotlib renders it with an
+    # "[1e-3+2.038e1]" offset tag glued to the axis label -- the single worst
+    # contributor to the collisions. The centre is in the panel title, and
+    # the offset is the same Delta-f0 the catalogue-match note quotes.
+    GB_CORNER_BYTES = []
+    _gb_win = CLUSTER_BINS * DF_MHZ
+    _centers = [float(np.median([gb_chain_cold[w, i, 1] for _, w, i in c]))
+                for c in solid[:3]]
+    _pool = [[] for _ in _centers]
+    _pool_its = [0 for _ in _centers]
+    for _it in range(max(0, NIT - GB_CORNER_ITS), NIT):
+        _al = gb_inds[_it]
+        if not _al.any():
+            continue
+        _ch = g["chain/gb"][_it, 0, 0]                 # (nwalk, nleaf, 9)
+        for _k, _c0 in enumerate(_centers):
+            _got = 0
+            for _w in range(nwalk):
+                _idx = np.nonzero(_al[_w])[0]
+                if not _idx.size:
+                    continue
+                _d = np.abs(_ch[_w, _idx, 1] - _c0)
+                _j = int(np.argmin(_d))
+                if _d[_j] <= _gb_win:
+                    _pool[_k].append(np.array(_ch[_w, _idx[_j]], dtype=float))
+                    _got += 1
+            _pool_its[_k] += 1 if _got else 0
+        del _ch
+    gb1_meta["corner_its"] = int(GB_CORNER_ITS)
+
+    for _k, c in enumerate(solid[:3]):
+        # pooled rows if the association found any, else the single-iteration
+        # cluster (so the panel still renders on a one-iteration snapshot)
+        P = (np.array(_pool[_k]) if _pool[_k]
+             else np.array([gb_chain_cold[w, i] for _, w, i in c]))
+        f0_med = float(np.median([gb_chain_cold[w, i, 1] for _, w, i in c]))
         truth, note, bad = None, "", False
         if f0_band is not None and f0_band.size:
             j = int(np.argmin(np.abs(f0_band - f0_med)))
@@ -2583,12 +2621,41 @@ if _rows:
                         f"(nearest is {d_bins:+.0f} bins away) - this "
                         f"recovery has no injected counterpart")
                 bad = True
-        GB1["src"].append(src_blob(
-            f"GB @ {f0_med:.5f} mHz (n={len(c)} samples, "
-            f"{len({x[1] for x in c})} walkers)",
-            f"cold-chain iteration {NIT - 1}; cluster window "
-            f"{CLUSTER_BINS:.0f} FD bins = {CLUSTER_BINS * DF_MHZ * 1e3:.2f} uHz",
-            P, truth, GB_NAMES, note, bad))
+        _lab = (f"GB @ {f0_med:.5f} mHz ({len(P)} samples, "
+                f"{len({x[1] for x in c})} walkers)")
+        # centre the f0 column (and its truth) on the cluster, in uHz
+        _Pc = np.array(P, dtype=float, copy=True)
+        _Pc[:, 1] = (_Pc[:, 1] - f0_med) * 1e3
+        _tc = None
+        if truth is not None:
+            _tc = np.array(truth, dtype=float, copy=True)
+            _tc[1] = (_tc[1] - f0_med) * 1e3
+        try:
+            _png = corner_png(_Pc, GB_CORNER_LABELS, _tc, _lab,
+                              size_in=GB_CORNER_IN, dpi=GB_CORNER_DPI,
+                              label_fs=11, tick_fs=9, smooth=3, bins=14,
+                              tally=GB_CORNER_BYTES)
+        except Exception as _e:
+            MISSING.append(f"GB corner plot for {_lab} unavailable: {_e!r}")
+            continue
+        GB1["src"].append({
+            "label": _lab,
+            "sub": (f"{len(P)} samples pooled over the last "
+                    f"{_pool_its[_k]} GB-active stored iterations x {nwalk} "
+                    f"cold walkers, associated by f0 within the "
+                    f"{CLUSTER_BINS:.0f}-bin cluster window "
+                    f"({CLUSTER_BINS * DF_MHZ * 1e3:.2f} uHz); "
+                    f"dotted red = catalogue truth. Axes: dist [kpc], "
+                    f"d_f0 = f0 - {f0_med:.5f} mHz [uHz], Mc [Msol], "
+                    f"phi0, cos_iota, psi, alpha, sin_delta, "
+                    f"fdot_astro_ratio"),
+            "note": note, "bad": bad, "png": _png,
+        })
+    if GB_CORNER_BYTES:
+        print(f"[corner] {len(GB_CORNER_BYTES)} GB corners, png "
+              f"min/max = {min(GB_CORNER_BYTES)/1024:.1f} / "
+              f"{max(GB_CORNER_BYTES)/1024:.1f} KB, total "
+              f"{sum(GB_CORNER_BYTES)/1024**2:.2f} MB")
 GB1_JSON = json.dumps(GB1)
 
 # ---- RESTORED: run mechanics. Engineering instrumentation, so it lives
@@ -3250,13 +3317,19 @@ the band, which is the steadier way to walk through frequency.</div>
   <span class="caption" style="align-self:center">posteriors of the highest-frequency
   recovered galactic binaries</span>
 </div>
-<canvas id="gb1" style="height:330px"></canvas>
+<img id="gb1_img" alt="galactic binary corner posterior">
 <div class="caption" id="gb1_cap"></div>
 <div class="caption">Sources are clustered out of the last stored iteration by
 frequency ({CLUSTER_BINS:.0f} bins) and counted only if they appear in at least three
 of the {nwalk} cold walkers; {gb1_meta.get("n_solid", 0)} of
 {gb1_meta.get("n_clusters", 0)} clusters clear that bar. Catalogue values are shown
-where a source lies within {MATCH_BINS:.0f} bins.</div>
+where a source lies within {MATCH_BINS:.0f} bins. The corner itself is built from a
+wider window than that clustering step &mdash; up to the last
+{gb1_meta.get("corner_its", 0)} stored iterations, pooled by frequency association
+because the GB branch is trans-dimensional and a leaf index does not track one
+source across iterations. Contours are 1, 2 and 3 sigma; below 200 pooled rows the
+kernel is widened deliberately, so read these as where the walkers currently sit
+rather than as credible intervals.</div>
 </div>
 
 </section>
@@ -3500,96 +3573,18 @@ function cornerPanel(px, blob) {{
     const S = blob.src[+sel.value || 0];
     im.src = "data:image/png;base64," + S.png;
     im.alt = S.label;
-    cap.textContent = S.sub;
-  }}
-  sel.onchange = show;
-  show();
-}}
-cornerPanel("vgb1", VGBC);
-// Shared single-source posterior panel: a <select> of sources driving a
-// canvas of one histogram per sampled parameter, each with the catalogue
-// truth as a dotted RED vertical line (the file-wide truth convention).
-// Used by the GB panel (9 params; the VGB panel moved to corner plots
-// 2026-08-15); every color is read from the CSS custom properties AT DRAW
-// TIME, so the panel follows a light/dark theme switch without
-// regenerating anything.
-function srcPanel(px, blob) {{
-  const cv = document.getElementById(px), sel = document.getElementById(px + "_sel"),
-        cap = document.getElementById(px + "_cap");
-  if (!cv || !sel) return;
-  if (!blob.src.length) {{
-    cap.textContent = "no sources available in this snapshot"; return;
-  }}
-  blob.src.forEach((s, i) => {{
-    const o = document.createElement("option");
-    o.value = i; o.textContent = s.label; sel.appendChild(o);
-  }});
-  const NB = 24, dpr = window.devicePixelRatio || 1;
-  const fmt = v => (Math.abs(v) >= 1e4 || (v !== 0 && Math.abs(v) < 1e-3))
-    ? v.toExponential(1) : (+v).toPrecision(4);
-  function draw() {{
-    const S = blob.src[+sel.value || 0];
-    const w = cv.clientWidth, h = cv.clientHeight;
-    cv.width = w * dpr; cv.height = h * dpr;
-    const g = cv.getContext("2d"); g.scale(dpr, dpr);
-    const css = getComputedStyle(document.documentElement);
-    const C = n => css.getPropertyValue(n).trim();
-    g.fillStyle = C("--panel"); g.fillRect(0, 0, w, h);
-    g.font = "10px ui-monospace,monospace";
-    const n = blob.params.length;
-    const cols = Math.min(5, n), rows = Math.ceil(n / cols);
-    const cw = w / cols, chh = h / rows;
-    for (let k = 0; k < n; k++) {{
-      const gx = (k % cols) * cw, gy = Math.floor(k / cols) * chh;
-      const x0 = gx + 8, x1 = gx + cw - 8, y0 = gy + 17, y1 = gy + chh - 24;
-      const v = S.samples[k].filter(a => a !== null);
-      if (!v.length) continue;
-      let lo = Math.min(...v), hi = Math.max(...v);
-      const t = S.truth[k];
-      const hasT = (t !== null && isFinite(t));
-      if (hasT) {{ lo = Math.min(lo, t); hi = Math.max(hi, t); }}
-      if (!(hi > lo)) hi = lo + Math.max(Math.abs(lo) * 1e-6, 1e-12);
-      const pd = (hi - lo) * 0.06; lo -= pd; hi += pd;
-      const cnt = new Array(NB).fill(0);
-      for (const a of v)
-        cnt[Math.min(NB - 1, Math.floor((a - lo) / (hi - lo) * NB))]++;
-      const mx = Math.max(...cnt, 1);
-      g.fillStyle = C("--violet");
-      for (let b = 0; b < NB; b++) {{
-        if (!cnt[b]) continue;
-        const bw = (x1 - x0) / NB, bh = (y1 - y0) * cnt[b] / mx;
-        g.fillRect(x0 + bw * b, y1 - bh, Math.max(bw - 0.6, 0.6), bh);
-      }}
-      g.strokeStyle = C("--line"); g.lineWidth = 1;
-      g.beginPath(); g.moveTo(x0, y1); g.lineTo(x1, y1); g.stroke();
-      if (hasT) {{
-        const tx = x0 + (x1 - x0) * (t - lo) / (hi - lo);
-        g.strokeStyle = C("--red"); g.lineWidth = 1.5; g.setLineDash([3, 2]);
-        g.beginPath(); g.moveTo(tx, y0 - 3); g.lineTo(tx, y1); g.stroke();
-        g.setLineDash([]); g.lineWidth = 1;
-      }}
-      g.fillStyle = C("--fg"); g.fillText(blob.params[k], gx + 8, gy + 11);
-      g.fillStyle = C("--dim");
-      g.fillText(fmt(lo), x0, y1 + 11);
-      const rt = fmt(hi);
-      g.fillText(rt, Math.max(x0, x1 - g.measureText(rt).width), y1 + 11);
-      if (hasT) {{
-        g.fillStyle = C("--red");
-        const tt = "truth " + fmt(t);
-        g.fillText(tt, x0 + Math.max(0, (x1 - x0 - g.measureText(tt).width) / 2),
-                   y1 + 21);
-      }}
-    }}
+    // the GB panel carries a catalogue-match note (red when the source has
+    // no injected counterpart); the VGB panel leaves it empty
     const note = S.note
       ? ` &middot; <span style="color:var(${{S.bad ? "--red" : "--fg"}})">${{S.note}}</span>`
       : "";
     cap.innerHTML = S.sub + note;
   }}
-  sel.onchange = draw;
-  new ResizeObserver(draw).observe(cv);
-  draw();
+  sel.onchange = show;
+  show();
 }}
-srcPanel("gb1", GB1);
+cornerPanel("vgb1", VGBC);
+cornerPanel("gb1", GB1);
 // Shared view controls: numeric center (cx, cy) + log-scale width/height
 // sliders, all around a FIXED center -- plus a click-to-set-center mode.
 // api: get() -> [X0,X1,Y0,Y1]; set(x0,x1,y0,y1) (must redraw); fullW/fullH
