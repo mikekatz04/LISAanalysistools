@@ -331,6 +331,23 @@ export SIGHET_NT_LAYER=270
 #   grep "sig-het engine resolved" <store>/gf_prod_3mo_artifacts/globalfit_run.log
 # want: nt_layer=270 (stride 8) ... sparse spacing 8.0 h   (GBGPU b412089)
 #
+# STAGING BATCH CAP (2026-08-21, first-launch OOM autopsy; user directive:
+# nt_layer and the buffer settings stay -- "make it batching"). The sig-het
+# in-model stash is ~5 x (n_refs, 3, 3, Nf_active, N_sparse_t) complex128
+# and n_refs was bounded only by the BUFFER CAPACITY: the grouped polish
+# flush and the per-round interleave hand _run_in_model_repeats the
+# full-width picked pool (only the RJ direct path pre-chunks, at
+# GB_RJ_INMODEL_CHUNK). At 1 yr that is n x Nf_active ~ 3.6e5 per shard x
+# 270 nodes => ~71 GB/device stash + ~61 GB baseline = OOM in _expand_B at
+# gb_search it=1 (14.1 GB request at 89 GB allocated). The cap splits every
+# in-model repeat block into sequential sub-blocks of <= this many picked
+# sources -- EXACT (per-slot slabs + the serial-within-band invariant;
+# statistically identical, not bit-identical: the accept-draw stream
+# re-shapes) -- so stash residency scales with the CAP, not the buffer:
+#   512 => ~9 GB/device at 270 nodes (linear in the cap).
+# Grep "[GB_INMODEL_BATCH]" in the log to confirm it fires.
+export GB_INMODEL_SETUP_BATCH=512
+#
 # MULTI-DEVICE F-STAT FAN-OUT. Validated 2026-08-13 (a86c52af): the =check
 # gate ran on 2xH100, full comb+stageB in 122.3 s / 224 peaks with ZERO
 # diverging batches vs the pinned scorer; the 2026-08-12 divergence was

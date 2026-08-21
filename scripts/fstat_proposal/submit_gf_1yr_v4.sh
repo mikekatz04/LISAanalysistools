@@ -311,6 +311,12 @@ export SIGHET_NT_LAYER=270
 #   grep "sig-het engine resolved" <store>/gf_prod_3mo_artifacts/globalfit_run.log
 # want: nt_layer=270 (stride 8) ... sparse spacing 8.0 h   (GBGPU b412089)
 #
+# STAGING BATCH CAP (2026-08-21): the 1-yr first launch OOM'd because the
+# in-model sig-het stash residency was bounded only by the buffer capacity
+# (full-width picked pools). See the full autopsy in submit_gf_1yr_v5.sh;
+# same cap here so this script is launch-safe too.
+export GB_INMODEL_SETUP_BATCH=512
+#
 # MULTI-DEVICE F-STAT FAN-OUT. Validated 2026-08-13 (a86c52af): the =check
 # gate ran on 2xH100, full comb+stageB in 122.3 s / 224 peaks with ZERO
 # diverging batches vs the pinned scorer; the 2026-08-12 divergence was
