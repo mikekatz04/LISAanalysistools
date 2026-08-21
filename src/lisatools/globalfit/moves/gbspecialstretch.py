@@ -548,6 +548,33 @@ def _split_by_newborn(merged, xp):
     return out
 
 
+def _picked_batches(picked, cap):
+    """Split a picked pool into sequential sub-blocks of at most ``cap`` rows.
+
+    The STAGING batch cap (``GB_INMODEL_SETUP_BATCH``, 2026-08-21, user
+    directive after the 1-yr OOM): the sig-het in-model reference stash is
+    resident for every picked source of a repeat block SIMULTANEOUSLY and
+    scales linearly with the picked count, so without a cap the stash
+    residency is bounded only by the buffer capacity (``GB_N_SUBBANDS``) --
+    at 1-yr Tobs that is ~71 GB and OOMs the device. Splitting the pool is
+    EXACT: slabs are per-slot and same-band sources are never co-picked
+    (serial-within-band invariant), so each sub-block's removal / setup /
+    repeats / write-back touches only its own slots. Statistically
+    identical, NOT bit-identical to the unbatched run (the accept-draw
+    stream re-shapes per batch).
+
+    ``cap <= 0`` or a pool already within the cap yields the ORIGINAL dict
+    (identity -- the unbatched path is untouched); otherwise yields
+    contiguous slices of every parallel array, order preserved.
+    """
+    n = int(picked["ids"].shape[0])
+    if cap <= 0 or n <= cap:
+        yield picked
+        return
+    for start in range(0, n, cap):
+        yield {k: v[start:start + cap] for k, v in picked.items()}
+
+
 def _buffer_fixed_capacity_active(sorter, kwargs) -> bool:
     """Whether ``_cached_get_buffer`` should use a fixed-capacity buffer.
 
@@ -7708,6 +7735,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         identical results.
         """
         xp = self.xp
+        # STAGING BATCH CAP (GB_INMODEL_SETUP_BATCH, 2026-08-21): bound the
+        # sig-het reference-stash residency by splitting the picked pool
+        # into sequential sub-blocks HERE, so every call site shares the one
+        # bound -- the RJ direct path pre-chunks at GB_RJ_INMODEL_CHUNK, but
+        # the grouped polish flush and the per-round interleave hand over
+        # the full-width pool. Exact (per-slot slabs + serial-within-band);
+        # see _picked_batches for the memory law and the RNG caveat.
+        # 0 (default) = off: the unbatched path is byte-for-byte untouched.
+        _batch_cap = int(os.environ.get("GB_INMODEL_SETUP_BATCH", "0") or 0)
+        if _batch_cap > 0 and int(picked["ids"].shape[0]) > _batch_cap:
+            _n_picked = int(picked["ids"].shape[0])
+            logger.info(
+                "%s: [GB_INMODEL_BATCH] staging %d picked sources in %d "
+                "sub-blocks of <= %d (GB_INMODEL_SETUP_BATCH).",
+                self.name, _n_picked,
+                -(-_n_picked // _batch_cap), _batch_cap,
+            )
+            for _sub in _picked_batches(picked, _batch_cap):
+                self._run_in_model_repeats(
+                    model, band_sorter, buffer_obj, band_temps, _sub,
+                    ll_change_log, prop_counts, acc_counts,
+                    num_repeats=num_repeats, cell_ll_state=cell_ll_state,
+                )
+            return
         n_rep = (
             int(num_repeats) if num_repeats is not None
             else int(self.num_repeat_proposals)

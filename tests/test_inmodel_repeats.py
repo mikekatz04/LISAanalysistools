@@ -21,6 +21,7 @@ import numpy as np
 from lisatools.globalfit.moves.gbspecialstretch import (
     GBSpecialStretchMove,
     _inmodel_repeats_mode_defaults,
+    _picked_batches,
     _resolve_inmodel_repeats,
     _split_by_newborn,
 )
@@ -122,6 +123,40 @@ class SurvivorPartitionTest(unittest.TestCase):
         merged["newborn"][:] = True
         out = _split_by_newborn(merged, np)
         self.assertEqual([name for name, _ in out], ["newborn"])
+
+
+class PickedBatchesTest(unittest.TestCase):
+    """The staging batch cap (GB_INMODEL_SETUP_BATCH, 2026-08-21): the
+    picked pool splits into sequential sub-blocks so the sig-het reference
+    stash residency is bounded by the cap instead of the buffer capacity."""
+
+    def _pool(self, n):
+        return {
+            "ids": np.arange(n) + 100,
+            "specials": np.arange(n) * 7,
+            "slot_index": np.arange(n)[::-1].copy(),
+            "N_vals": np.full(n, 128),
+        }
+
+    def test_no_cap_passes_the_pool_through_unsliced(self):
+        pool = self._pool(5)
+        for cap in (0, 5, 9):
+            out = list(_picked_batches(pool, cap))
+            self.assertEqual(len(out), 1)
+            # identity, not a sliced copy -- the unbatched path is untouched
+            self.assertIs(out[0], pool)
+
+    def test_batches_cover_the_pool_in_order(self):
+        pool = self._pool(10)
+        out = list(_picked_batches(pool, 4))
+        self.assertEqual([len(b["ids"]) for b in out], [4, 4, 2])
+        for key, full in pool.items():
+            np.testing.assert_array_equal(
+                np.concatenate([b[key] for b in out]), full
+            )
+            # every batch carries every key (parallel-array contract)
+            for b in out:
+                self.assertIn(key, b)
 
 
 # --------------------------------------------------------------------------
