@@ -30,7 +30,10 @@
 # ##     high-f mosaic root cause.                                          ##
 # ##   * RIDGE-GIBBS (8d926f27 / Eryn 6ed5a8b): zero-likelihood resample   ##
 # ##     along the exact Mc^(5/3)(1+r)=const ridge -- unfreezes the        ##
-# ##     (Mc, r, dist) marginals.                                           ##
+# ##     (Mc, r, dist) marginals. REQUIRES the GFRidgeGibbsMove sub-state   ##
+# ##     cold-row write-back (2026-08-21 fix): the plain eryn move updated  ##
+# ##     ONLY the main engine state, so the first-launch runs MPI-aborted   ##
+# ##     at gb_search it=2 on the coords-mismatch consistency check.        ##
 # ##                                                                        ##
 # ## START (user ruling 2026-08-20): REWOUND v4 COPY + CAP-GRID MIGRATION. ##
 # ## The staggered edges differ from the v4 store's, and the resume guard  ##

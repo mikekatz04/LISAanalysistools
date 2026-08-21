@@ -35,7 +35,7 @@ import numpy as np
 
 from eryn.moves import RidgeGibbsMove
 
-__all__ = ["McRatioDistFiber", "make_gb_ridge_gibbs_move"]
+__all__ = ["McRatioDistFiber", "GFRidgeGibbsMove", "make_gb_ridge_gibbs_move"]
 
 # tiny positive floor on u = Mc^{5/3} (Mc, d must be > 0; a run box floor
 # like Mc >= 1e-3 sits ~10 orders above this)
@@ -204,6 +204,32 @@ class McRatioDistFiber:
         return -0.4 * np.log(np.asarray(u, dtype=np.float64))
 
 
+class GFRidgeGibbsMove(RidgeGibbsMove):
+    """:class:`RidgeGibbsMove` + global-fit sub-state cold-row write-back.
+
+    In the global fit the module's tempered ensemble lives on a
+    ``ModuleSubState`` (``state.sub_states[branch]``) and the main state
+    carries only the engine's cold chain; the band moves sample the
+    sub-state and mirror row 0 into the main state (``sync_cold_row``).
+    This move samples the MAIN state directly, so after a propose the
+    updated cold row must be mirrored the OTHER way (``pull_cold_row``) —
+    without it the next global-fit move's ``_check_substate_consistency``
+    MPI-aborts the run (the 2026-08-20 v5/v6 gb_search it=1 failure), and
+    the accepted fiber jumps would be silently overwritten by the next
+    band move's sync anyway. The fiber leaves the waveform — ``(A, f0,
+    fdot)`` and all extrinsics — exactly invariant, so no residual or
+    likelihood bookkeeping moves: coords/inds only. Outside the global fit
+    (no ``sub_states`` on the state) it degrades to the plain eryn move.
+    """
+
+    def propose(self, model, state):
+        state, accepted = super().propose(model, state)
+        sub = (getattr(state, "sub_states", None) or {}).get(self.branch_name)
+        if sub is not None and getattr(sub, "tempered_initialized", False):
+            sub.pull_cold_row(state, self.branch_name)
+        return state, accepted
+
+
 def make_gb_ridge_gibbs_move(
     priors_container,
     transform_container,
@@ -235,10 +261,10 @@ def make_gb_ridge_gibbs_move(
             (and through it to :class:`eryn.moves.Move`).
 
     Returns:
-        :class:`eryn.moves.RidgeGibbsMove`: The configured move.
+        :class:`GFRidgeGibbsMove`: The configured move (sub-state-aware).
     """
     fiber_map = McRatioDistFiber(transform_container, mc_lims, dist_lims, ratio_max)
-    return RidgeGibbsMove(
+    return GFRidgeGibbsMove(
         branch_name=branch_name,
         fiber_map=fiber_map,
         per_leaf_log_prior=priors_container.logpdf,

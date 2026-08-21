@@ -270,6 +270,68 @@ def _mock_model(priors, random_state):
     )
 
 
+def test_gf_substate_cold_row_sync():
+    """Global-fit wiring: the move samples the MAIN (engine) state while the
+    band moves' working ensemble lives on a tempered ``ModuleSubState``.
+    After every propose the sub-state's cold row must match the main state
+    (``check_cold_row`` is the production invariant that MPI-aborted the
+    2026-08-20 v5/v6 runs at gb_search it=1) and the hot rungs must be
+    untouched -- the fiber move runs on the cold chain only."""
+    from lisatools.globalfit.state import GFState, ModuleSubState
+
+    ntemps_sub, nwalkers, nleaves = 3, 4, 3
+    priors = _priors()
+    model = _mock_model(priors, np.random.RandomState(43))
+
+    # main engine state: cold chain only (ntemps = 1), one dead leaf
+    coords = np.asarray(priors.rvs(size=(1, nwalkers, nleaves)))
+    inds = np.ones((1, nwalkers, nleaves), dtype=bool)
+    inds[0, 0, 2] = False
+    state = GFState(
+        {"gb": coords.copy()},
+        inds={"gb": inds.copy()},
+        log_like=np.zeros((1, nwalkers)),
+        log_prior=model.compute_log_prior_fn({"gb": coords}, inds={"gb": inds}),
+        is_eryn_state_input=True,
+        sub_state_bases={"gb": ModuleSubState},
+    )
+
+    # the module's tempered ladder: row 0 mirrors the main state's cold row
+    ladder = np.asarray(priors.rvs(size=(ntemps_sub, nwalkers, nleaves)))
+    ladder[0] = coords[0]
+    ladder_inds = np.broadcast_to(inds[0], (ntemps_sub, nwalkers, nleaves))
+    sub = state.sub_states["gb"]
+    sub.initialize_tempered(
+        ntemps_sub, nwalkers, nleaves, NDIM, coords=ladder, inds=ladder_inds
+    )
+    hot_before = sub.coords[1:].copy()
+
+    move = make_gb_ridge_gibbs_move(
+        priors, _transform_container(), MC_LIMS, DIST_LIMS, RATIO_MAX
+    )
+
+    any_accepted = False
+    for _ in range(30):
+        state, accepted = move.propose(model, state)
+        any_accepted |= bool(accepted.any())
+
+        # the state copy must stay a GFState with a live sub-state
+        sub = state.sub_states["gb"]
+        assert sub is not None and sub.tempered_initialized
+
+        # the production consistency invariant (raises on mismatch)
+        sub.check_cold_row(state, "gb")
+
+        # cold-chain-only: hot rungs never move
+        np.testing.assert_array_equal(sub.coords[1:], hot_before)
+
+    assert any_accepted  # the move must actually mix
+    # accepted fiber jumps must have REACHED the sub-state (not just main)
+    assert not np.array_equal(
+        sub.coords[0][ladder_inds[0]], coords[0][inds[0]]
+    )
+
+
 def test_eryn_integration_smoke():
     """2 temps x 4 walkers x 3 leaves, 50 propose calls: log_like never
     changes, log_prior stays consistent with a from-scratch recomputation,

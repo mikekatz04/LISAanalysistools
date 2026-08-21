@@ -353,6 +353,18 @@ class ModuleSubState(eryn_State):
         main_branch.coords[0] = self.coords[0]
         main_branch.inds[0] = self.inds[0]
 
+    def pull_cold_row(self, main_state, branch_name: str):
+        """Write the main state's cold row (temp 0) into this sub-state's row 0.
+
+        Inverse of :meth:`sync_cold_row` — for moves that sample the main
+        (engine) state directly (e.g. the ridge-Gibbs fiber move) and must
+        hand the result back to the module's tempered ladder, which the
+        band moves treat as authoritative.
+        """
+        main_branch = main_state.branches[branch_name]
+        self.coords[0] = main_branch.coords[0]
+        self.inds[0] = main_branch.inds[0]
+
     def check_cold_row(self, main_state, branch_name: str):
         """Verify the main state's cold row matches this sub-state's row 0.
 
