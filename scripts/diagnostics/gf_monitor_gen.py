@@ -140,6 +140,15 @@ elif _base.endswith("_v3") or "3mo_v3" in _base:
     # the VARIANT or the two pages are indistinguishable in a browser tab --
     # which is the whole point of running them side by side.
     RUN_LABEL, RUN_KIND = "3-Month v3", "3mo_v3"
+elif "1yr" in _base:
+    # 2026-08-22: without this branch the 1-yr page fell through to the
+    # 3-Month banner AND (worse) the v2 ARM_TAG, clobbering the shared
+    # gf_arm_v2.npz cache with 1-yr data.
+    RUN_LABEL, RUN_KIND = "1-Year v5", "1yr_v5"
+elif _base.endswith("_v5") or "3mo_v5" in _base:
+    RUN_LABEL, RUN_KIND = "3-Month v5", "3mo_v5"
+elif _base.endswith("_v6") or "3mo_v6" in _base:
+    RUN_LABEL, RUN_KIND = "3-Month v6", "3mo_v6"
 else:
     RUN_LABEL, RUN_KIND = "3-Month", "3mo"
 
@@ -519,6 +528,52 @@ for _cp in (os.path.join(RUN_DIR, "gb_hi_f_census.npz"), "gb_hi_f_census.npz"):
             DET_F0 = None
         break
 
+# FALLBACK to the frozen truth npz (2026-08-22). `gb_hi_f_census.npz` is
+# written by a `census.py` that lives in a SCRATCH directory, so it does not
+# survive a session -- and without it BOTH of the red detectability overlays
+# below (the "N detectable (SNR>7)" target line on the leaf-count panel and
+# the "has detectable source" curve on the occupancy panel) vanish with no
+# entry in MISSING. `gb_truth_3to21.npz` carries the same column: `det` is
+# SNR > 7 against the run's own sampled sensitivity over the band stamped in
+# `band`, which is exactly what `det_f0` was. Same Tobs guard as the recovery
+# section further down -- an unstamped (legacy) npz is treated as 3-month.
+if DET_F0 is None:
+    _run_tobs = 7776000.0
+    try:
+        _a0 = dict(f["global_fit/domain_settings/args"].attrs)
+        _run_tobs = float(_a0["0"]) * float(_a0["1"]) * float(_a0["2"])
+    except Exception:
+        pass
+    for _tp in (os.path.join(RUN_DIR, "gb_truth_3to21.npz"),
+                "gb_truth_3to21.npz"):
+        if os.path.exists(_tp):
+            try:
+                _t = np.load(_tp)
+                _t_tobs = (float(np.asarray(_t["tobs"]).reshape(-1)[0])
+                           if "tobs" in _t.files else 7776000.0)
+                if abs(_t_tobs - _run_tobs) > 1.0:
+                    MISSING.append(
+                        "detectability overlays skipped: no gb_hi_f_census.npz "
+                        f"and the truth set is built for a "
+                        f"{_t_tobs / 86400.0:.4g}-day observation while this "
+                        f"run is {_run_tobs / 86400.0:.4g} days.")
+                elif "det" in _t.files and "f0" in _t.files:
+                    _d = np.asarray(_t["det"], dtype=bool)
+                    DET_F0 = np.asarray(_t["f0"], dtype=float)[_d]
+                    _b = np.asarray(_t["band"], dtype=float).reshape(-1)
+                    DET_LO, DET_HI = float(_b[0]), float(_b[1])
+            except Exception as _e:
+                DET_F0 = None
+                MISSING.append(
+                    f"detectability overlays unavailable: {_e!r}")
+            break
+    else:
+        MISSING.append(
+            "detectability overlays skipped: neither gb_hi_f_census.npz nor "
+            "gb_truth_3to21.npz is beside the store or in the CWD, so the "
+            "leaf-count and occupancy panels carry no detectable-source "
+            "target line.")
+
 fig, ax = plt.subplots(1, 2, figsize=(11, 3.4))
 for w in range(nwalk):
     ax[0].plot(it, gb_counts[:, w], color=GREEN, alpha=0.35, lw=0.9)
@@ -760,6 +815,19 @@ for _cp in (os.path.join(RUN_DIR, "gb_hi_f_census.npz"),
         except Exception:
             CENSUS = None
         break
+if CENSUS is None:
+    # SAY SO (2026-08-22). This used to degrade to a bare "plot unavailable"
+    # placeholder with nothing in MISSING, so the page gave no reason why the
+    # one panel whose RED layer means "detectable but NOT recovered" had
+    # disappeared. The npz is written by census.py into a scratch directory
+    # that does not survive a session, so its absence is the normal case.
+    MISSING.append(
+        "high-frequency recovery census skipped: no gb_hi_f_census.npz "
+        "beside the store or in the CWD. It is produced by census.py (a "
+        "scratch-directory script), not by this generator, so a fresh "
+        "scratchpad loses it. The red 'missed' scatter, the red 'N "
+        "detectable' line and the red 'has detectable source' curve all "
+        "come from that file.")
 CENSUS_TXT = ""
 if CENSUS is not None:
     t_f0 = CENSUS["t_f0"]; t_snr = CENSUS["t_snr"]; found = CENSUS["found"]
@@ -1792,7 +1860,11 @@ if TRU is not None:
     # ones (v2's first GB leaf lands at iteration 5, v3's at 16), so each arm
     # publishes its own series keyed by that origin and every comparison panel
     # subtracts it.
-    ARM_TAG = {"3mo_v3": "v3", "3mo_v4": "v4"}.get(RUN_KIND, "v2")
+    # Every run kind gets its OWN arm cache (2026-08-22): the old
+    # {v3, v4}-else-v2 map sent v5, v6 AND the 1-yr run all to
+    # gf_arm_v2.npz, silently clobbering the shared v2 arm.
+    ARM_TAG = {"3mo_v3": "v3", "3mo_v4": "v4", "3mo": "v2"}.get(
+        RUN_KIND, RUN_KIND)
     try:
         np.savez(f"gf_arm_{ARM_TAG}.npz", n_all=n_all, n_band=n_band,
                  n_match=n_match, it0=IT0, ti=TI, mm=MM,
