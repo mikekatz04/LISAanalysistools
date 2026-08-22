@@ -347,6 +347,16 @@ export SIGHET_NT_LAYER=270
 #   512 => ~9 GB/device at 270 nodes (linear in the cap).
 # Grep "[GB_INMODEL_BATCH]" in the log to confirm it fires.
 export GB_INMODEL_SETUP_BATCH=512
+# POOL-vs-cudaMalloc STARVATION (2026-08-22, gb_search it~31 autopsy): the
+# run died on a ~25 MB raw C++ cudaMalloc (make_reference transients,
+# gb_tdi_on_the_fly.cu:3351) while the CuPy pool held 66.6 GB against
+# 51.8 GB actually used -- ~15 GB of cached free blocks (left by the
+# preceding noise_vgb_joint move) that raw C-side allocations cannot see.
+# Two defenses: the in-model staging loop trims the pool at entry and
+# between sub-blocks (GB_INMODEL_BATCH_MEMPOOL_FREE, default on, LAT >=
+# the 2026-08-22 fix), and this opt-in frees the pool in the per-block
+# info-matrix path as well:
+export GB_INFOMAT_MEMPOOL_FREE=1
 #
 # MULTI-DEVICE F-STAT FAN-OUT. Validated 2026-08-13 (a86c52af): the =check
 # gate ran on 2xH100, full comb+stageB in 122.3 s / 224 peaks with ZERO

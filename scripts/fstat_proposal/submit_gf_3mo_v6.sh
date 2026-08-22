@@ -638,6 +638,15 @@ export GB_SUBBAND_DIVISOR=8
 # stride-2-on-1-layer separation. ~137 concurrent bands/unit (v5: 77);
 # 9 units per pass instead of 2.
 export GB_BAND_UNIT_STRIDE=9
+# VGB DE-COUPLED from the fine grid (2026-08-22 timing autopsy): the VGB
+# branch inherits GB_SUBBAND_DIVISOR through GBSetup.init_band_structure,
+# so v6 silently ran the ~30-source VGB move on 1232 narrow bands --
+# vgb_pe 34 s/propose vs v5's 8.5 (run_tempering 25 s; fill_slots 55,920
+# vs 4,800). VGB_BAND_LAYERS=8 merges 8 fine bands back to the 1-layer
+# separations, restoring v5's VGB geometry (VGB has no RJ surface; its
+# per-band arrays migrate on the resume that picks this up). Recovers
+# ~4.3 min of the 18.3-min iteration.
+export VGB_BAND_LAYERS=8
 # K=4, NOT v5's 32: (layer/8)/4 = layer/32 cells -- the staggered
 # cap-cell grid comes out BIT-IDENTICAL to v5's, so the cap machinery
 # is a controlled variable in this comparison.
