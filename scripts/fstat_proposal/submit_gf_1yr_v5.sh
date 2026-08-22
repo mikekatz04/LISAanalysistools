@@ -211,7 +211,7 @@ export GB_NLEAVES_MAX=25000  # 2-year settings (user ruling)
 # 2.4s host round-trips. ~4.2 GB buffer; post-fix profile at 4096 was
 # flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
 # full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
-export GB_N_SUBBANDS=2048  # 1-yr: per-slot slab ~4 MB (4x the 3-mo 1 MB), 2048 holds the same ~8 GB budget 8192 held at 3 mo  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
+export GB_N_SUBBANDS=2048  # OVERRIDDEN to 1024 in the memory block below (2026-08-22) -- kept here so the original job-183 sizing note survives: per-slot slab ~4 MB at 1 yr x 2 move caches, PER GPU, total = x n_gpus
 # RJ pick thinning (user ruling 2026-08-14): each round proposes to a
 # 0.3 random subset of eligible slots; in-model repeats still cover
 # ALL alive sources (flip gate is rj-only by construction).
@@ -346,7 +346,30 @@ export SIGHET_NT_LAYER=270
 # re-shapes) -- so stash residency scales with the CAP, not the buffer:
 #   512 => ~9 GB/device at 270 nodes (linear in the cap).
 # Grep "[GB_INMODEL_BATCH]" in the log to confirm it fires.
-export GB_INMODEL_SETUP_BATCH=512
+# 512 -> 256 (2026-08-22 second autopsy): with the pool sweep + temper skip
+# LIVE, GPU0 still reached 95.2-95.3 of 95.8 GB in two crash windows (5
+# silent deaths, 2-4 iterations each; one death right at the 4096-source
+# staging + infomat site). The resident 1-yr set leaves so little headroom
+# that the per-sub-block transients (stash + cholesky + infomat, all
+# linear in the cap) must shrink further.
+export GB_INMODEL_SETUP_BATCH=256
+# Companion transient shave: the RJ direct path pre-chunks picked pools at
+# GB_RJ_INMODEL_CHUNK (default 4096) ABOVE the staging cap -- the removal/
+# fill/writeback bookkeeping of a chunk scales with its width, and one of
+# the crash sites was immediately after a 4096-wide chunk staged. Halve it.
+export GB_RJ_INMODEL_CHUNK=2048
+# Per-pick-round CuPy pool release -- the code's own opt-in for genuinely
+# memory-bound runs (churn cost is measured by the mempool_free span; at
+# ~27-min iterations it is noise). Keeps the pool cache from ratcheting
+# between the staging-loop sweeps.
+export GB_MEMPOOL_FREE_EACH_ROUND=1
+# RESIDENT-set lever (2026-08-22, revises one pin of the original "2-year
+# settings" ruling -- flagged to the user): the two crash windows died at
+# 95.2-95.3 of 95.8 GB with all transient mitigations LIVE, so ~8 GB of
+# standing residency must come out. Per-slot slab ~4 MB at 1 yr x 2 move
+# caches: 2048 -> 1024 slots/GPU frees ~8 GB/device at the cost of more
+# sequential buffer passes (fewer resident cells per unit).
+export GB_N_SUBBANDS=1024
 # POOL-vs-cudaMalloc STARVATION (2026-08-22, gb_search it~31 autopsy): the
 # run died on a ~25 MB raw C++ cudaMalloc (make_reference transients,
 # gb_tdi_on_the_fly.cu:3351) while the CuPy pool held 66.6 GB against
