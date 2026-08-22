@@ -441,5 +441,189 @@ class AcceptChainEquivalenceTest(unittest.TestCase):
         self.assertEqual(int(prop[1].sum()), 4 * len(picked["ids"]))
 
 
+# --------------------------------------------------------------------------
+# staging-path CuPy pool sweep (GB_INMODEL_BATCH_MEMPOOL_FREE)
+# --------------------------------------------------------------------------
+
+
+class _FakePool:
+    """CuPy MemoryPool stand-in with per-device cached bytes.
+
+    ``total_bytes()`` / ``free_all_blocks()`` act on the CURRENT device,
+    which is the property the multi-GPU sweep depends on.
+    """
+
+    def __init__(self, per_device):
+        self.per_device = dict(per_device)
+        self.freed = []          # device ids, in call order
+        self.dev = 0
+
+    def total_bytes(self):
+        return self.per_device.get(self.dev, 0)
+
+    def free_all_blocks(self):
+        self.freed.append(self.dev)
+        self.per_device[self.dev] = 0
+
+
+class _FakeXp:
+    """``self.xp`` stand-in exposing just the cuda device plumbing."""
+
+    def __init__(self, pool):
+        self._pool = pool
+        outer = self
+
+        class _Runtime:
+            @staticmethod
+            def getDevice():
+                return outer._pool.dev
+
+            @staticmethod
+            def setDevice(d):
+                outer._pool.dev = int(d)
+
+        class _Device:
+            def __init__(self, d):
+                self.d = int(d)
+
+            def __enter__(self_inner):
+                self_inner.prev = outer._pool.dev
+                outer._pool.dev = self_inner.d
+                return None
+
+            def __exit__(self_inner, *exc):
+                outer._pool.dev = self_inner.prev
+                return False
+
+        class _Cuda:
+            runtime = _Runtime()
+            Device = _Device
+
+        self.cuda = _Cuda()
+
+
+class _PoolMove(GBSpecialStretchMove):
+    """Move whose backend / xp / mempool are injected (no GPU needed)."""
+
+    def __init__(self):
+        pass
+
+    @property
+    def backend(self):
+        return self._fake_backend
+
+    @property
+    def xp(self):
+        return self._fake_xp
+
+
+def _pool_move(uses_cupy=True, per_device=None):
+    m = _PoolMove()
+    m.name = "fake_pool"
+    pool = _FakePool(per_device or {0: 5_000_000_000})
+    m.mempool = pool
+    m._fake_backend = SimpleNamespace(uses_cupy=uses_cupy)
+    m._fake_xp = _FakeXp(pool)
+    return m, pool
+
+
+def _model_with_gpus(gpus):
+    return SimpleNamespace(
+        analysis_container_arr=SimpleNamespace(gpus=gpus)
+    )
+
+
+class StagingPoolFreeTest(unittest.TestCase):
+    """The 1-yr-run OOM fix: raw C-side ``make_reference`` cudaMallocs
+    cannot use CuPy's cached blocks, so the staging path returns the cache
+    to the driver before each sub-block."""
+
+    def test_cpu_backend_is_a_noop(self):
+        m, pool = _pool_move(uses_cupy=False)
+        m._free_inmodel_batch_pools(_model_with_gpus([0, 1]), "entry")
+        self.assertEqual(pool.freed, [])
+
+    def test_frees_every_aca_device_and_restores_current(self):
+        m, pool = _pool_move(per_device={0: 8e9, 1: 7e9})
+        pool.dev = 1
+        m._free_inmodel_batch_pools(_model_with_gpus([0, 1]), "entry")
+        self.assertEqual(pool.freed, [0, 1])
+        self.assertEqual(pool.per_device[0], 0)
+        self.assertEqual(pool.per_device[1], 0)
+        # the sweep must leave the caller's device selected
+        self.assertEqual(pool.dev, 1)
+
+    def test_single_device_when_no_gpu_list(self):
+        m, pool = _pool_move(per_device={0: 3e9})
+        m._free_inmodel_batch_pools(_model_with_gpus(None), "entry")
+        self.assertEqual(pool.freed, [0])
+
+    def test_tolerates_model_without_aca(self):
+        m, pool = _pool_move()
+        m._free_inmodel_batch_pools(None, "entry")
+        self.assertEqual(pool.freed, [0])
+
+    def test_knob_off_disables_the_sweep(self):
+        m, pool = _pool_move(per_device={0: 8e9, 1: 7e9})
+        with mock.patch.dict(
+            os.environ, {"GB_INMODEL_BATCH_MEMPOOL_FREE": "0"}
+        ):
+            m._free_inmodel_batch_pools(_model_with_gpus([0, 1]), "entry")
+        self.assertEqual(pool.freed, [])
+
+    def test_a_failing_pool_never_propagates(self):
+        m, pool = _pool_move()
+
+        def _boom():
+            raise RuntimeError("pool exploded")
+
+        pool.free_all_blocks = _boom
+        m._free_inmodel_batch_pools(_model_with_gpus(None), "entry")
+
+    def test_staging_loop_sweeps_at_entry_and_between_sub_blocks(self):
+        """Wiring: 6 picked rows at cap 2 -> 3 sub-blocks -> 3 sweeps."""
+        picked, band_sorter, band_temps, ntemps, nwalkers, n = _build_problem()
+        move = _make_move(3)
+        buf = _FakeBuffer(n)
+        calls = []
+        move._free_inmodel_batch_pools = (
+            lambda model, where: calls.append(where)
+        )
+        ll_change = np.zeros((ntemps, nwalkers, n))
+        prop = np.zeros((2, ntemps, nwalkers, n), dtype=int)
+        acc = np.zeros_like(prop)
+        np.random.seed(3)
+        with mock.patch.dict(os.environ, {"GB_INMODEL_SETUP_BATCH": "2"}):
+            move._run_in_model_repeats(
+                None, band_sorter, buf, band_temps, picked,
+                ll_change, prop, acc,
+            )
+        self.assertEqual(len(picked["ids"]), 6)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0], "staging entry")
+        self.assertTrue(all("sub-block" in c for c in calls[1:]))
+        # the staged run still did its in-model work
+        self.assertGreater(int(prop[1].sum()), 0)
+
+    def test_no_sweep_when_staging_is_off(self):
+        picked, band_sorter, band_temps, ntemps, nwalkers, n = _build_problem()
+        move = _make_move(3)
+        buf = _FakeBuffer(n)
+        calls = []
+        move._free_inmodel_batch_pools = (
+            lambda model, where: calls.append(where)
+        )
+        ll_change = np.zeros((ntemps, nwalkers, n))
+        prop = np.zeros((2, ntemps, nwalkers, n), dtype=int)
+        acc = np.zeros_like(prop)
+        np.random.seed(3)
+        with mock.patch.dict(os.environ, {"GB_INMODEL_SETUP_BATCH": "0"}):
+            move._run_in_model_repeats(
+                None, band_sorter, buf, band_temps, picked,
+                ll_change, prop, acc,
+            )
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

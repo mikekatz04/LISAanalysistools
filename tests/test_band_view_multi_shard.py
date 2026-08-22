@@ -213,5 +213,74 @@ class MultiShardRoutingTest(unittest.TestCase):
         np.testing.assert_array_equal(self.view.gather(), self.expected)
 
 
+class MultiShardSlotSubsetTest(unittest.TestCase):
+    """``SubBandBuffer._likelihood_slots`` routing across shards.
+
+    The tempering empty-cell skip (``GB_TEMPER_SKIP_EMPTY``) scores a SLOT
+    SUBSET instead of the whole buffer, which means the per-slot reduction
+    has to find each requested slot on its owning shard and return the
+    values in the REQUESTED order. That routing is what is checked here.
+
+    The reduction passed in is a marker, not a likelihood: the fake ACA
+    seeds band ``b`` with the constant ``b + 1``, so a reduction that reads
+    one element per row reports which band each reduced row came from.
+    The assertion is therefore purely about slot -> shard -> row bookkeeping
+    (``gpu_splits`` / ``split_map``), with no numerics duplicated from the
+    likelihood path.
+    """
+
+    PER_BAND = (3, 8)
+    NUM_ACS = 6
+    NUM_SHARDS = 2
+
+    def setUp(self):
+        try:
+            from lisatools.analysiscontainer import BandView
+            from lisatools.globalfit.moves.gbbands import SubBandBuffer
+        except (ImportError, ModuleNotFoundError) as exc:
+            self.skipTest(f"lisatools BandView not available: {exc}")
+        self.SubBandBuffer = SubBandBuffer
+        self.aca = _FakeMultiShardACA(self.PER_BAND, self.NUM_ACS, self.NUM_SHARDS)
+        # CPU host: no device contexts (the shard routing itself is
+        # unchanged by that -- see this module's docstring).
+        self.aca.gpus = None
+        self.view = BandView(self.aca, kind="data")
+
+    @staticmethod
+    def _marker(num, psd):
+        k = num.shape[0]
+        return num.reshape(k, -1)[:, 0].real
+
+    def _slots(self, slots, chunk):
+        from types import SimpleNamespace
+
+        return np.asarray(
+            self.SubBandBuffer._likelihood_slots(
+                SimpleNamespace(xp=np),
+                np.asarray(slots, dtype=int),
+                self.view, self.view, None, self._marker, chunk,
+            )
+        )
+
+    def test_subset_rows_and_order(self):
+        for slots in ([0], [5], [1, 3, 5], [5, 0, 3], [0, 1, 2, 3, 4, 5],
+                      [4, 4, 1]):
+            for chunk in (1, 2, 64):
+                got = self._slots(slots, chunk)
+                np.testing.assert_array_equal(
+                    got, np.asarray(slots, dtype=float) + 1.0,
+                    err_msg=f"slots={slots} chunk={chunk}",
+                )
+
+    def test_empty_subset(self):
+        self.assertEqual(self._slots([], 4).shape, (0,))
+
+    def test_subset_matches_full_pass(self):
+        """A subset carries the same per-row values a full pass would."""
+        full = self._slots(list(range(self.NUM_ACS)), 64)
+        sub = [4, 0, 3]
+        np.testing.assert_array_equal(self._slots(sub, 2), full[sub])
+
+
 if __name__ == "__main__":
     unittest.main()

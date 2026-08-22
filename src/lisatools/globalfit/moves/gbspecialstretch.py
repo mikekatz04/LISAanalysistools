@@ -3141,7 +3141,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 if self.backend.uses_cupy else None)
         return int(self.num_band_preload) * (len(gpus) if gpus else 1)
 
-    def _cached_get_buffer(self, sorter, acs, specials, **kwargs):
+    def _cached_get_buffer(self, sorter, acs, specials, fill_slots=None, **kwargs):
         """SubBandBuffer reuse: ONE live buffer per construction signature.
 
         A call whose slot count matches the cached buffer performs a FULL
@@ -3174,6 +3174,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``_buffer_cache_teardown``); ``GB_BUFFER_CACHE_PER_SIZE=1`` restores
         per-size caching; ``GB_BUFFER_FIXED_CAPACITY=0`` restores the
         drop+rebuild-on-any-size-change behavior for RJ buffers too.
+
+        ``fill_slots`` (optional) forwards a slot SUBSET to
+        :meth:`BandSorter.get_buffer`: only those slots receive the residual
+        / PSD copy and the template-twin reset. It is deliberately NOT part
+        of the cache signature -- neither the allocation nor the binding
+        depends on it, only the per-slot slab traffic does.
         """
         cache = getattr(self, "_prop_buffer_cache", None)
         if cache is None:
@@ -3237,6 +3243,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             buf = sorter.get_buffer(
                 acs, specials,
                 timer=getattr(self, "_prop_timer", None),
+                fill_slots=fill_slots,
                 **build_kwargs,
             )
             cache[key] = buf
@@ -3266,6 +3273,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 buffer_obj=buf,
                 allow_resize=fixed_cap,
                 timer=getattr(self, "_prop_timer", None),
+                fill_slots=fill_slots,
             )
         # Speed-diagnosis plumbing (user directive 2026-08-15): the buffer
         # carries the CURRENT propose's timer so its hot methods (get_ll /
@@ -7704,6 +7712,64 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         beta[c] = band_temps[b_i[c], t_i[c]]
         return n_acc
 
+    def _free_inmodel_batch_pools(self, model, where: str) -> None:
+        """Return CuPy's cached free blocks to the driver between sub-blocks.
+
+        WHY (production OOM, 1-yr run 2026-08-22): the sig-het
+        ``make_reference`` setup issues RAW C-side ``cudaMalloc``s
+        (``gb_tdi_on_the_fly.cu`` 3341-3355, ~25 MB of transients) which
+        CANNOT draw on the CuPy pool. The ``[GF_TIMING]`` snapshot taken
+        just before the failure showed ``gpu_used=51.8 GB`` against
+        ``gpu_pool=66.6 GB`` -- ~15 GB of the card sat in the pool as CACHED
+        FREE BLOCKS inherited from the preceding ``noise_vgb_joint_search``
+        move, so a 25 MB raw allocation still hit ``GPUassert: out of
+        memory`` on the FIRST staging sub-block's ``setup_in_model``.
+        Sweeping the cache before each sub-block is what makes those raw
+        allocations satisfiable. Cost is at most one free per sub-block
+        (the pool re-acquires on demand) -- negligible against the run
+        dying.
+
+        Multi-GPU: ``free_all_blocks()`` releases only the CURRENT device's
+        pool, so every device in the ACA's ``gpus`` list is visited (same
+        pattern as ``_purge_and_free`` around the sig-het arm sweep).
+        ``GB_INMODEL_BATCH_MEMPOOL_FREE=0`` restores the previous behavior.
+        """
+        if not self.backend.uses_cupy:
+            return
+        if os.environ.get("GB_INMODEL_BATCH_MEMPOOL_FREE", "1") != "1":
+            return
+        devs = list(
+            getattr(getattr(model, "analysis_container_arr", None), "gpus", None)
+            or []
+        )
+        freed = 0
+        try:
+            if not devs:
+                _before = int(self.mempool.total_bytes())
+                self.mempool.free_all_blocks()
+                freed = _before - int(self.mempool.total_bytes())
+            else:
+                main_dev = self.xp.cuda.runtime.getDevice()
+                try:
+                    for d in devs:
+                        with self.xp.cuda.Device(int(d)):
+                            _before = int(self.mempool.total_bytes())
+                            self.mempool.free_all_blocks()
+                            freed += _before - int(self.mempool.total_bytes())
+                finally:
+                    self.xp.cuda.runtime.setDevice(main_dev)
+        except Exception as exc:
+            # A cache sweep must never be what kills a proposal.
+            logger.debug("%s: [GB_INMODEL_BATCH] pool free failed (%s).",
+                         self.name, exc)
+            return
+        logger.debug(
+            "%s: [GB_INMODEL_BATCH] %s: freed %.2f GB of cached pool blocks "
+            "across %d device(s) -- headroom for the raw C-side "
+            "make_reference cudaMallocs.",
+            self.name, where, freed / 1e9, max(len(devs), 1),
+        )
+
     def _run_in_model_repeats(self, model, band_sorter, buffer_obj, band_temps,
                               picked, ll_change_log, prop_counts, acc_counts,
                               num_repeats=None, cell_ll_state=None):
@@ -7752,7 +7818,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self.name, _n_picked,
                 -(-_n_picked // _batch_cap), _batch_cap,
             )
-            for _sub in _picked_batches(picked, _batch_cap):
+            # Cached-pool sweep before the FIRST sub-block and between the
+            # sub-blocks: this staging path exists to bound sig-het
+            # residency, but the setup it drives allocates through RAW
+            # cudaMalloc, which cannot reuse CuPy's cached blocks -- see
+            # _free_inmodel_batch_pools for the OOM this prevents.
+            self._free_inmodel_batch_pools(model, "staging entry")
+            for _i_sub, _sub in enumerate(_picked_batches(picked, _batch_cap)):
+                if _i_sub:
+                    self._free_inmodel_batch_pools(
+                        model, f"before sub-block {_i_sub}")
                 self._run_in_model_repeats(
                     model, band_sorter, buffer_obj, band_temps, _sub,
                     ll_change_log, prop_counts, acc_counts,
@@ -8745,6 +8820,40 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _empty_census = {"pairs": 0, "both_empty": 0, "acc": 0,
                          "acc_both_empty": 0}
 
+        # EMPTY-CELL SKIP (GB_TEMPER_SKIP_EMPTY, default ON; user ruling
+        # 2026-08-22). The census above measured 10.4% of (band, temp,
+        # walker) cells holding a source on the 1232-sub-band production
+        # grid, yet the stage built twin slabs and scored likelihoods for
+        # ALL of them -- the cost tracked the TOTAL band count, not the
+        # occupancy. Two exact skips, no approximation:
+        #
+        #   FILLS -- a grid ROW is one (band, walker-permutation) column of
+        #   the ladder, and ``swap_template_slots`` only ever exchanges two
+        #   TEMPERATURES OF THE SAME ROW (slots ``r*ntemps + t`` and
+        #   ``r*ntemps + t-1``). A row whose every temperature is sourceless
+        #   therefore can never acquire a template, so its cells need no
+        #   residual/PSD slab and no template reset. This subsumes the
+        #   "entire sub-band empty" case (every row of an empty band is an
+        #   empty row) and extends it to the empty rows of occupied bands.
+        #
+        #   SCORING -- a pair whose two cells are BOTH sourceless AT THE
+        #   TIME IT IS PROPOSED trades zero templates: both cells' lls are
+        #   unchanged by the exchange, so ``paccept`` is exactly 0.0, which
+        #   is what the skip substitutes (new_lls := old_lls) without
+        #   touching the likelihood engine. Occupancy is tracked DYNAMICALLY
+        #   (``_occ_dyn`` below) because an accepted swap carries a template
+        #   into a statically-empty cell, and the descending pair loop can
+        #   walk it all the way down the ladder.
+        #
+        # Everything else is untouched: the swap grid, the walker
+        # permutations, the RNG draw count and order, the MH arithmetic for
+        # pairs with any occupancy, the accepted/proposed counters, the
+        # label exchange and the [GB_TEMPER_EMPTY] census (which keeps its
+        # STATIC-occupancy definition of "both empty").
+        _skip_empty = os.environ.get("GB_TEMPER_SKIP_EMPTY", "1") == "1"
+        _skip_census = {"cells": 0, "occ_cells": 0, "filled": 0,
+                        "pairs": 0, "pairs_scored": 0}
+
         # GB_TEMPER_AUDIT=1: reconcile the credited per-cold-walker ll
         # deltas (what lands in ll_change_log_temp[0] and, from there, in
         # state.log_like[0]) against the TRUE parent-residual likelihood at
@@ -8810,8 +8919,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 special_inds_now = special_index.reshape(-1, self.ntemps)[start_ind:end_ind].copy()
                 special_inds_now_flat = special_inds_now.flatten()
                 # per-cell ALIVE source counts for this chunk (empty-pair
-                # census below); one sorted lookup, no kernel.
-                _alive_sp = band_sorter.special_band_inds[band_sorter.inds]
+                # census below); one sorted lookup, no kernel. The count is
+                # taken on the MAIN sorter -- the same set ``get_buffer``
+                # injects into the twin (``main_band_sorter.inds``), so a
+                # zero here means the slot's template slab is provably
+                # untouched.
+                _main_bs = band_sorter.main_band_sorter
+                _alive_sp = _main_bs.special_band_inds[_main_bs.inds]
                 _u_sp, _u_ct = cp.unique(_alive_sp, return_counts=True)
                 _pos = cp.searchsorted(_u_sp, special_inds_now)
                 _pos = cp.clip(_pos, 0, max(int(_u_sp.shape[0]) - 1, 0))
@@ -8819,16 +8933,64 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _u_sp[_pos] == special_inds_now, _u_ct[_pos], 0
                 ) if int(_u_sp.shape[0]) > 0 else cp.zeros_like(special_inds_now)
 
+                _n_rows = int(special_inds_now.shape[0])
+                _skip_census["cells"] += _n_rows * self.ntemps
+                _skip_census["occ_cells"] += int((_occ_now > 0).sum())
+
+                # Rows with no source at ANY temperature: no slabs, no
+                # scoring, ever (see the skip note above).
+                _rows_active = (
+                    (_occ_now.sum(axis=1) > 0) if _skip_empty
+                    else cp.ones(_n_rows, dtype=bool)
+                )
+                _all_rows_active = bool(_rows_active.all())
+                _fill_slots = None
+                if not _all_rows_active:
+                    _fill_slots = (
+                        cp.where(_rows_active)[0][:, None] * self.ntemps
+                        + cp.arange(self.ntemps)[None, :]
+                    ).flatten()
+                _skip_census["filled"] += (
+                    _n_rows * self.ntemps if _fill_slots is None
+                    else int(_fill_slots.shape[0])
+                )
+                if getattr(self, "_prop_timer", None) is not None:
+                    self._prop_timer.count("temper_cells", _n_rows * self.ntemps)
+                    self._prop_timer.count(
+                        "temper_cells_filled",
+                        _n_rows * self.ntemps if _fill_slots is None
+                        else int(_fill_slots.shape[0]),
+                    )
+
                 with _tspan(getattr(self, "_prop_timer", None), "temper_buffer"):
                     buffer_obj = self._cached_get_buffer(
                         band_sorter, model.analysis_container_arr,
                         special_inds_now_flat,
+                        fill_slots=_fill_slots,
                         use_template_arr=True,
                     )
 
                 with _tspan(getattr(self, "_prop_timer", None), "temper_swap_score"):
-                    current_lls = buffer_obj.band_likelihoods(source_only=True).reshape(-1, self.ntemps)
+                    if _fill_slots is None:
+                        current_lls = buffer_obj.band_likelihoods(
+                            source_only=True).reshape(-1, self.ntemps)
+                    else:
+                        # Unfilled rows never hold a template and never
+                        # enter a scored pair; their ll is a constant that
+                        # cancels in every diff, so a placeholder 0 keeps
+                        # ``diffs`` exactly zero for them (a stale slab must
+                        # never reach the reduction -- it could be inf/NaN).
+                        current_lls = cp.zeros(
+                            (_n_rows, self.ntemps), dtype=cp.float64)
+                        if int(_fill_slots.shape[0]) > 0:
+                            current_lls[_rows_active] = (
+                                buffer_obj.band_likelihoods(
+                                    source_only=True, slots=_fill_slots
+                                ).reshape(-1, self.ntemps)
+                            )
                 current_lls_orig = current_lls.copy()
+                # Dynamic per-cell occupancy: templates ride accepted swaps.
+                _occ_dyn = _occ_now.copy() if _skip_empty else None
                 for t in range(self.ntemps)[1:][::-1]:
                     i1 = t
                     i2 = t - 1
@@ -8838,16 +9000,62 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     buffer_i1 = cp.arange(buffer_obj.num_bands_now)[i1 :: self.ntemps]
                     buffer_i2 = cp.arange(buffer_obj.num_bands_now)[i2 :: self.ntemps]
 
-                    buffer_obj.swap_template_slots(buffer_i1, buffer_i2)
+                    # Pairs with at least one occupied cell RIGHT NOW (a
+                    # template may have ridden an accepted swap down the
+                    # ladder into a statically-empty cell).
+                    _pair_live = (
+                        ((_occ_dyn[:, i1] > 0) | (_occ_dyn[:, i2] > 0))
+                        if _skip_empty else None
+                    )
+                    _all_live = _pair_live is None or bool(_pair_live.all())
+                    _n_live = (
+                        int(buffer_i1.shape[0]) if _all_live
+                        else int(_pair_live.sum())
+                    )
+                    _skip_census["pairs"] += int(buffer_i1.shape[0])
+                    _skip_census["pairs_scored"] += _n_live
+                    if getattr(self, "_prop_timer", None) is not None:
+                        self._prop_timer.count(
+                            "temper_pairs", int(buffer_i1.shape[0]))
+                        self._prop_timer.count("temper_pairs_scored", _n_live)
 
-                    # TODO: add indices because not every likelihood is needed
+                    if _all_live:
+                        buffer_obj.swap_template_slots(buffer_i1, buffer_i2)
+                    else:
+                        # Sourceless pairs exchange two zero templates: a
+                        # no-op on the slabs, so it is simply not done.
+                        buffer_obj.swap_template_slots(
+                            buffer_i1[_pair_live], buffer_i2[_pair_live])
+
                     # TODO: C-side vectorized temperature-pair swap kernel
                     # (batch the template exchange + per-cell likelihoods).
-                    with _tspan(getattr(self, "_prop_timer", None), "temper_swap_score"):
-                        new_lls = buffer_obj.band_likelihoods(source_only=True).reshape(-1, self.ntemps)[
-                            :, i2 : i1 + 1
-                        ]
                     old_lls = current_lls[:, i2 : i1 + 1]
+                    with _tspan(getattr(self, "_prop_timer", None), "temper_swap_score"):
+                        if _skip_empty:
+                            # Only the pair's TWO columns are ever read, and
+                            # only for live pairs. Skipped rows keep their
+                            # current values, which is exactly what a
+                            # zero-vs-zero exchange would have returned ->
+                            # paccept == 0.0, bit-identical to the full path.
+                            new_lls = old_lls.copy()
+                            _rows_live = (
+                                cp.arange(buffer_i1.shape[0]) if _all_live
+                                else cp.where(_pair_live)[0]
+                            )
+                            if int(_rows_live.shape[0]) > 0:
+                                _pair_slots = (
+                                    _rows_live[:, None] * self.ntemps
+                                    + cp.asarray([i2, i1])[None, :]
+                                ).flatten()
+                                new_lls[_rows_live] = (
+                                    buffer_obj.band_likelihoods(
+                                        source_only=True, slots=_pair_slots
+                                    ).reshape(-1, 2)
+                                )
+                        else:
+                            new_lls = buffer_obj.band_likelihoods(source_only=True).reshape(-1, self.ntemps)[
+                                :, i2 : i1 + 1
+                            ]
 
                     beta1 = band_temps[(band_inds_now[:, 0], i1)]
                     beta2 = band_temps[(band_inds_now[:, 0], i2)]
@@ -8893,8 +9101,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                     current_lls[sel, i2 : i1 + 1] = new_lls[sel]
 
-                    # Reverse the swaps that were not accepted.
-                    buffer_obj.swap_template_slots(buffer_i1[~sel], buffer_i2[~sel])
+                    # Reverse the swaps that were not accepted. A skipped
+                    # (sourceless) pair has paccept == 0.0 > log(u), i.e. it
+                    # is always "accepted", so ``~sel`` is already a subset
+                    # of the live pairs -- the mask below is a guard, not a
+                    # behavior change (reverting an un-done zero exchange
+                    # would be a no-op anyway).
+                    _rej = ~sel if _all_live else ((~sel) & _pair_live)
+                    buffer_obj.swap_template_slots(buffer_i1[_rej], buffer_i2[_rej])
+
+                    if _skip_empty:
+                        # Accepted swaps move the templates, so the cells'
+                        # occupancy moves with them (this is what makes the
+                        # pair-level skip exact further down the ladder).
+                        _o1 = _occ_dyn[:, i1].copy()
+                        _occ_dyn[sel, i1] = _occ_dyn[sel, i2]
+                        _occ_dyn[sel, i2] = _o1[sel]
 
                     # bincount accumulation: several grid rows share a band
                     # (one per walker), and fancy-index ``+=`` collapses
@@ -8980,6 +9202,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"were empty-vs-empty and moved NOTHING (paccept==0 always "
                 f"passes). This is the share of run_tempering's cost that "
                 f"buys no mixing."
+            )
+
+        _sc = _skip_census
+        if _sc["cells"]:
+            _skipped = _sc["cells"] - _sc["filled"]
+            _mb = band_sorter.main_band_sorter
+            _bands_occ = int(cp.unique(_mb.band_inds[_mb.inds]).shape[0]) if int(
+                _mb.inds.sum()) else 0
+            logger.info(
+                f"[GB_TEMPER_SKIP {self.name}] empty-cell skip "
+                f"{'ON' if _skip_empty else 'OFF'}: cells {_sc['cells']} "
+                f"(occupied {_sc['occ_cells']}, "
+                f"{100.0 * _sc['occ_cells'] / _sc['cells']:.1f}%), "
+                f"slabs filled {_sc['filled']}, skipped {_skipped} "
+                f"({100.0 * _skipped / _sc['cells']:.1f}%); swap pairs "
+                f"{_sc['pairs']}, scored {_sc['pairs_scored']} "
+                f"({100.0 * _sc['pairs_scored'] / max(_sc['pairs'], 1):.1f}%); "
+                f"sub-bands with any source {_bands_occ} of "
+                f"{len(self.band_edges) - 1}."
             )
 
         self._adapt_band_temps(band_temps, band_swaps_accepted, band_swaps_proposed)

@@ -3270,14 +3270,33 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             return buf.gather()
         return buf
 
-    def likelihood(self, source_only: bool = False, noise_only: bool = False) -> float:
+    def likelihood(
+        self, source_only: bool = False, noise_only: bool = False, slots=None
+    ) -> float:
         """Band-level log-likelihood over all cells in the buffer.
 
         Overrides the inherited per-AC ``AnalysisContainerArray.likelihood``
         dispatch: the buffer computes its cell likelihoods directly from the
         shaped residual / PSD views (vectorized over cells).
+
+        ``slots`` (optional, ``source_only`` ONLY): score just these slot
+        indices and return the per-slot values IN THE GIVEN ORDER (length
+        ``len(slots)``), instead of the whole buffer. Every cell's value is
+        an independent per-row reduction of its own slab
+        (``_reduce`` contracts each row separately), so a subset carries
+        exactly the numbers the full call would place at those positions --
+        the subset only removes work. Used by the tempering stage, which
+        needs two columns of a temperature pair, not the whole ladder
+        (``run_tempering``'s "add indices because not every likelihood is
+        needed" TODO), and skips cells that hold no sources at all.
         """
         assert not (source_only and noise_only)
+        if slots is not None and not source_only:
+            raise ValueError(
+                "SubBandBuffer.likelihood(slots=...) requires source_only=True: "
+                "the PSD log-determinant term is a whole-buffer sum and has no "
+                "per-slot restriction."
+            )
 
         # band_buffer / template_buffer / psd_buffer are either ndarrays
         # (single-GPU; in-place mutation rolls back into the underlying
@@ -3316,6 +3335,9 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         band = self.band_buffer
         psd_b = self.psd_buffer
         tmpl = self.template_buffer if self.use_template_arr else None
+
+        if slots is not None:
+            return self._likelihood_slots(slots, band, psd_b, tmpl, _reduce, chunk)
 
         if isinstance(band, BandView):
             aca = band._aca
@@ -3382,6 +3404,69 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             warnings.warn("The current psd ll calculation is not correct for XYZ CSD channel setup.")
 
         return source_term + psd_log_acc
+
+    def _likelihood_slots(self, slots, band, psd_b, tmpl, _reduce, chunk):
+        """``likelihood(source_only=True, slots=...)`` -- the subset path.
+
+        Gathers only the requested slot rows (bounded at ``chunk`` rows per
+        pass, same transient budget as the full path) and reduces them with
+        the SAME per-row ``_reduce`` kernel, so each returned value is
+        bit-for-bit what the whole-buffer call produces for that slot.
+        Multi-GPU: slots are routed to their owning shard through
+        ``gpu_splits`` and reduced on that shard's device -- no extra cross
+        device traffic, and the shard/split bookkeeping is read-only here.
+        """
+        n_sl = int(slots.shape[0])
+        if n_sl == 0:
+            return self.xp.zeros(0, dtype=cp.float64)
+
+        if isinstance(band, BandView):
+            aca = band._aca
+            nb_tot = int(band.shape[0])
+            sl_h = np.asarray(asnumpy(slots), dtype=np.int64)
+            out_host = np.empty(n_sl, dtype=np.float64)
+            uses_dev = getattr(aca, "gpus", None) is not None
+            main_dev = cp.cuda.runtime.getDevice() if uses_dev else None
+            band_shards = band._shards
+            psd_shards = psd_b._shards
+            tmpl_shards = tmpl._shards if tmpl is not None else None
+            # global slot -> (owning shard, row inside that shard)
+            owner = np.empty(nb_tot, dtype=np.int64)
+            local = np.empty(nb_tot, dtype=np.int64)
+            for s in range(len(band_shards)):
+                ids = np.asarray(asnumpy(aca.gpu_splits[s]), dtype=np.int64)
+                owner[ids] = s
+                local[ids] = np.arange(ids.shape[0], dtype=np.int64)
+            owner_of = owner[sl_h]
+            try:
+                for s in range(len(band_shards)):
+                    pos = np.where(owner_of == s)[0]
+                    if pos.shape[0] == 0:
+                        continue
+                    if uses_dev:
+                        cp.cuda.runtime.setDevice(int(aca.gpus[s]))
+                    rows = cp.asarray(local[sl_h[pos]])
+                    d_sh = band_shards[s]
+                    p_sh = psd_shards[s]
+                    t_sh = tmpl_shards[s] if tmpl_shards is not None else None
+                    for c0 in range(0, pos.shape[0], chunk):
+                        c1 = min(c0 + chunk, pos.shape[0])
+                        r = rows[c0:c1]
+                        num = (d_sh[r] - t_sh[r]) if t_sh is not None else d_sh[r]
+                        out_host[pos[c0:c1]] = asnumpy(_reduce(num, p_sh[r]))
+            finally:
+                if uses_dev:
+                    cp.cuda.runtime.setDevice(main_dev)
+            return cp.asarray(out_host)
+
+        sl = self.xp.asarray(slots)
+        source_term = self.xp.empty(n_sl, dtype=cp.float64)
+        for c0 in range(0, n_sl, chunk):
+            c1 = min(c0 + chunk, n_sl)
+            idx = sl[c0:c1]
+            num = (band[idx] - tmpl[idx]) if tmpl is not None else band[idx]
+            source_term[c0:c1] = _reduce(num, psd_b[idx])
+        return source_term
 
     # Explicit alias while callers migrate off the ``likelihood`` name (which
     # shadows the inherited per-AC ACA dispatch).
@@ -4435,7 +4520,7 @@ class BandSorter(LISAToolsParallelModule):
 
     def get_buffer(
         self, acs, special_indices_unique, inds_fill=None, buffer_obj=None,
-        allow_resize: bool = False, timer=None, **kwargs
+        allow_resize: bool = False, timer=None, fill_slots=None, **kwargs
     ) -> SubBandBuffer:
         """Build or rebind a :class:`SubBandBuffer` for these cells.
 
@@ -4448,6 +4533,16 @@ class BandSorter(LISAToolsParallelModule):
         nested inside the caller's buffer_build / temper_buffer span totals
         so a production log decomposes alloc vs fill vs injection vs
         template generation. ``None`` (default) is a no-op.
+
+        ``fill_slots``: optional SUBSET of ``inds_fill`` (slot indices) that
+        actually receives the residual/PSD copy and the template-twin reset.
+        The binding itself (specials map, source maps, band combos) is still
+        built over the FULL ``inds_fill`` -- only the per-slot slab traffic
+        is restricted. The slots left out keep whatever their slabs held
+        before, so a caller may pass this ONLY for cells it will never score
+        and never inject into (the tempering stage's sourceless rows; see
+        ``GBSpecialBase.run_tempering`` / ``GB_TEMPER_SKIP_EMPTY``).
+        ``None`` (default) fills every bound slot -- today's behavior.
         """
 
         num_band_preload = len(special_indices_unique)
@@ -4567,10 +4662,24 @@ class BandSorter(LISAToolsParallelModule):
                 buffer_obj.special_band_inds = curr_special_band_inds
                 buffer_obj.now_index = buffer_obj.get_index(curr_special_band_inds)
 
-        with _tspan(timer, "buffill_resid_psd"):
-            buffer_obj.fill_buffer_residual_and_psd_from_acs(
-                acs, inds_fill=inds_fill
+        # Slab-traffic slots: the full binding unless the caller restricted
+        # it (empty-cell skip). Everything above this point -- allocation,
+        # specials/source maps, band combos -- always covers all of
+        # ``inds_fill``, so the buffer stays fully addressable either way.
+        slab_fill = inds_fill if fill_slots is None else fill_slots
+        if fill_slots is not None and _index_asserts():
+            assert bool(xp.all(xp.isin(fill_slots, inds_fill))), (
+                "get_buffer(fill_slots=...) must be a subset of inds_fill."
             )
+
+        with _tspan(timer, "buffill_resid_psd"):
+            # A fully-skipped binding (every bound cell sourceless) copies
+            # nothing at all -- the empty index arrays would otherwise walk
+            # the tuple-fancy shard router for zero bytes.
+            if int(slab_fill.shape[0]) > 0:
+                buffer_obj.fill_buffer_residual_and_psd_from_acs(
+                    acs, inds_fill=slab_fill
+                )
         buffer_obj.parent_acs = acs
         # includes sources in these sub-bands that are no longer getting proposals
         coords_to_inject = self.main_band_sorter.coords[sources_inject_now_map].copy()
@@ -4598,7 +4707,8 @@ class BandSorter(LISAToolsParallelModule):
                 # (post-swap) templates and every ll scored from the twin is
                 # contaminated. No-op cost on a fresh allocation (already
                 # zero).
-                buffer_obj.reset_template_buffers(inds_fill=inds_fill)
+                if int(slab_fill.shape[0]) > 0:
+                    buffer_obj.reset_template_buffers(inds_fill=slab_fill)
                 buffer_obj.add_sources_to_template_buffer(
                     *inj_args, leaf_inds=inject_leaf_inds
                 )
