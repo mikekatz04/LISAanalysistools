@@ -568,7 +568,7 @@ class GBState(ModuleSubState):
 
     def initialize_band_information(
         self, nwalkers, ntemps, band_edges, band_temps, cap_edges=None,
-        branch_name=None,
+        branch_name=None, leaf_caps=True,
     ):
         """Allocate the band-info dict with zeroed counters.
 
@@ -583,6 +583,17 @@ class GBState(ModuleSubState):
                 and the pre-2026-08-15 behaviour.
             branch_name: Optional branch label (``"gb"`` / ``"vgb"``) used
                 only to make the resume-time messages nameable.
+            leaf_caps: ``False`` = this branch carries NO leaf-cap CELL state
+                at all (user ruling 2026-08-22: caps gate RJ births and the
+                VGB branch has no RJ surface, so it must not allocate, check,
+                or persist a cap grid). Fresh stores get no ``cap_edges`` /
+                ``num_cap_cells`` keys; on RESUME the cap-grid consistency
+                check is skipped and any stored cap keys are dropped from the
+                loaded band info, so a store whose (inert) cap datasets
+                predate a band-grid migration resumes cleanly without a cap
+                migration. The band-level ``band_leaf_cap`` family stays (the
+                monitor reads it; it is sentinel/-1 and never consulted
+                without RJ).
 
         Returns:
             int: the rung count that is ACTUALLY in effect after this call.
@@ -603,10 +614,10 @@ class GBState(ModuleSubState):
                 ntemps,
                 band_edges,
             )
-            band_info["cap_edges"] = np.asarray(cap_edges, dtype=float)
-
             band_info["num_bands"] = len(band_info["band_edges"]) - 1
-            band_info["num_cap_cells"] = len(band_info["cap_edges"]) - 1
+            if leaf_caps:
+                band_info["cap_edges"] = np.asarray(cap_edges, dtype=float)
+                band_info["num_cap_cells"] = len(band_info["cap_edges"]) - 1
 
             assert band_temps.shape == (band_info["num_bands"], band_info["ntemps"])
             band_info["band_temps"] = band_temps
@@ -637,7 +648,8 @@ class GBState(ModuleSubState):
                 dtype=int,
             )
             ensure_leaf_cap_fields(band_info, band_info["num_bands"])
-            ensure_cap_cell_fields(band_info, band_info["num_cap_cells"])
+            if leaf_caps:
+                ensure_cap_cell_fields(band_info, band_info["num_cap_cells"])
             band_info["initialized"] = True
             self.band_info = band_info
             return int(band_info["ntemps"])
@@ -773,6 +785,20 @@ class GBState(ModuleSubState):
                     f"the store needs scripts/fstat_proposal/"
                     f"migrate_gb_band_edges.py."
                 )
+            # Cap-free branch (leaf_caps=False, e.g. VGB): no cap grid to
+            # check, and any cap keys a stored band_info carries (written
+            # before the branch went cap-free, or stranded by a band-grid
+            # migration that reshaped the bands but not the cap cells) are
+            # DROPPED here so the backend stops persisting them and no
+            # consumer can read a stale grid.
+            if not leaf_caps:
+                for _cap_key in (
+                    "cap_edges", "num_cap_cells", "cap_cell_leaf_cap",
+                    "cap_cell_iters", "cap_cell_best_ll", "cap_cell_cold_ll",
+                ):
+                    bi.pop(_cap_key, None)
+                return _stored_nt
+
             # Leaf-CAP grid check (user design 2026-08-15). The cap grid is
             # a refinement of the band grid by GB_CAP_DIVISOR; a store whose
             # cap grid disagrees with the configured divisor must refuse

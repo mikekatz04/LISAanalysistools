@@ -47,6 +47,9 @@ def _move(cap_divisor, ntemps=1, nwalkers=1, num_bands=NUM_BANDS,
     m.ntemps = ntemps
     m.nwalkers = nwalkers
     m.cap_divisor = max(1, int(cap_divisor))
+    # the fake predates the staggered grid (642ee91f); the cell lookup reads
+    # this unconditionally, so an unstaggered fake must set it explicitly
+    m.cap_stagger = False
     m.num_cap_cells = num_bands * m.cap_divisor
     m.cap_edges = np.asarray(make_cap_edges(band_edges, m.cap_divisor))
     m._cap_band_lo = m.band_edges[:-1]

@@ -3138,8 +3138,13 @@ def build_vgb_moves(
     # sized by the ladder must therefore use ``resolved_ntemps``, or the
     # move would carry e.g. a 12-rung TemperatureControl against a 1-rung
     # state.
+    # leaf_caps=False (user ruling 2026-08-22): leaf caps gate RJ births and
+    # VGB has no RJ surface -- the branch carries NO cap-cell state, checks
+    # no cap grid on resume, and drops any stored cap keys (so a band-grid
+    # migration never needs a cap-grid companion for vgb).
     resolved_ntemps = state.sub_states["vgb"].initialize_band_information(
-        nwalkers, ntemps, band_edges, band_temps, branch_name="vgb"
+        nwalkers, ntemps, band_edges, band_temps, branch_name="vgb",
+        leaf_caps=False,
     )
     if resolved_ntemps == ntemps:
         # unchanged behaviour: the configured flat ladder is (re)written
