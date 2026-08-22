@@ -1700,11 +1700,16 @@ class GlobalFit:
             # Dedicated saver rank (np >= 3): async HDF5 writes + the
             # diagnostic plots, both off the sampler's critical path
             # (saves always take priority; see the loop's docstring).
+            # Plot container FIRST (it reads self.curr), then release this
+            # rank's build-time GPU pool cache -- the saver never touches
+            # the device again.
+            plot_container = self.make_plot_container()
+            self._release_helper_gpu_pool()
             save_to_backend_asynchronously_and_plot(
                 backend,
                 self.comm,
                 self.main_rank,
-                plot_container=self.make_plot_container(),
+                plot_container=plot_container,
                 plot_iter=self._plot_iterations,
                 backup_iter=self.curr.general_info.backup_iter,
             )
@@ -1713,8 +1718,46 @@ class GlobalFit:
             # Spare rank: wait for the startup "stop" and exit. (The
             # instruction-dict dispatch that ran move workers here was
             # removed with the move->rank machinery; plan P3.)
+            self._release_helper_gpu_pool()
             info = self.comm.recv(source=self.main_rank)
             logger.info(f"Process {self.rank} finished ({info!r}).")
+
+    def _release_helper_gpu_pool(self):
+        """Release this NON-SAMPLING rank's build-time GPU memory cache.
+
+        Under ``mpiexec -n 3`` every rank runs the full ``build()`` (data
+        load, WDM transforms, F-stat staging) before the roles resolve, so
+        the saver and spare ranks each sit on device memory they will never
+        use again -- measured via the gpu_procs telemetry on the 2026-08-22
+        production jobs: 3.4 GB/rank at 3 months, 4.6 GB/rank at 1 year,
+        parked on ONE device. Both v5 crashes that night were allocation
+        failures on that same device at ~97-99% -- the helpers' cache was
+        the missing margin. Frees CACHED pool blocks on every visible
+        device after a ``gc.collect()`` (live arrays are untouched, so this
+        is behavior-neutral); a CPU run is a no-op.
+        """
+        import gc
+
+        gc.collect()
+        try:
+            import cupy as cp
+
+            ndev = cp.cuda.runtime.getDeviceCount()
+        except Exception:
+            return
+        freed = 0
+        for dev in range(ndev):
+            try:
+                with cp.cuda.Device(dev):
+                    pool = cp.get_default_memory_pool()
+                    freed += pool.total_bytes() - pool.used_bytes()
+                    pool.free_all_blocks()
+            except Exception:
+                continue
+        self.logger.info(
+            "helper rank %d released ~%.2f GB of cached GPU pool blocks "
+            "across %d device(s).", self.rank, freed / 1e9, ndev,
+        )
 
     def sample(
         self,

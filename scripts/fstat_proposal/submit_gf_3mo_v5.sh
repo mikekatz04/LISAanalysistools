@@ -242,6 +242,15 @@ export GB_NLEAVES_MAX=10000
 # flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
 # full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
 export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
+# STAGING BATCH CAP (2026-08-22, job-309 autopsy): GPU 0 died at 93.4 of
+# 95.8 GB at gb_search it~21 -- transient spikes (in-model chunk staging +
+# the ~354k-row info-matrix batch of a 4096-wide picked chunk) on a ~60 GB
+# base, plus 3.4 GB x 2 parked on the same device by the saver/spare ranks
+# (freed by the run.py helper-release fix in the same commit). The cap
+# splits every in-model repeat block into <=1024-source sub-blocks (stash,
+# cholesky and infomat all scale with it); exact, statistically identical,
+# see the gbspecialstretch _picked_batches docstring.
+export GB_INMODEL_SETUP_BATCH=1024
 # RJ pick thinning (user ruling 2026-08-14): each round proposes to a
 # 0.3 random subset of eligible slots; in-model repeats still cover
 # ALL alive sources (flip gate is rj-only by construction).
