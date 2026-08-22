@@ -616,6 +616,19 @@ class GlobalFit:
                     if _stored_edges.shape != _cfg_edges.shape or not np.allclose(
                         _stored_edges, _cfg_edges
                     ):
+                        # Drop the CONFIG-built edges next to the store so the
+                        # migration consumes exactly what this guard compared
+                        # against (2026-08-22: deriving them offline risks a
+                        # second refusal on any rounding difference — the
+                        # VGB_BAND_LAYERS coarsening showed exactly that).
+                        _edges_out = os.path.join(
+                            os.path.dirname(os.path.abspath(backend_path)),
+                            f"{_banded}_config_band_edges.npy",
+                        )
+                        try:
+                            np.save(_edges_out, _cfg_edges)
+                        except OSError:
+                            _edges_out = "<could not write config edges>"
                         raise ValueError(
                             f"Cannot resume {backend_path!r}: branch "
                             f"{_banded!r} stored with "
@@ -623,16 +636,20 @@ class GlobalFit:
                             f"run config builds {_cfg_edges.shape[0] - 1} "
                             f"(band edges differ). The band-edge knobs "
                             f"(GB_BAND_EDGES_MODE / GB_BAND_TARGET_COUNT / "
-                            f"GB_BAND_MIN_LAYERS / GB_SUBBAND_DIVISOR) differ "
-                            f"from the stored run. Either restore the "
+                            f"GB_BAND_MIN_LAYERS / GB_SUBBAND_DIVISOR"
+                            f"{' / VGB_BAND_LAYERS' if _banded == 'vgb' else ''}) "
+                            f"differ from the stored run. Either restore the "
                             f"original knobs, or migrate the file's per-band "
                             f"arrays onto the new band grid with scripts/"
-                            f"fstat_proposal/migrate_gb_band_edges.py (band "
-                            f"temperatures are interpolated; leaf caps and "
-                            f"swap counters reset and re-earn; never reshape "
-                            f"silently). Any in-move F-stat fit epoch cache "
-                            f"is keyed by band index and must be refit — the "
-                            f"loader refuses stale grids."
+                            f"fstat_proposal/migrate_gb_band_edges.py "
+                            f"--branch {_banded} --edges-npy {_edges_out} "
+                            f"(the config-built edges were just written "
+                            f"there; band temperatures are interpolated; "
+                            f"leaf caps and swap counters reset and "
+                            f"re-earn; never reshape silently). Any in-move "
+                            f"F-stat fit epoch cache is keyed by band index "
+                            f"and must be refit — the loader refuses stale "
+                            f"grids."
                         )
 
         if state is None and self.curr.general_info.past_file_for_start is not None:
