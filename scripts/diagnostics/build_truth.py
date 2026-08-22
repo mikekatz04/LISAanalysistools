@@ -7,6 +7,16 @@ fitted noise at iteration 78. The original build script lived in a session
 scratchpad and was lost -- which is why this one is IN the repo. Committed
 2026-08-19; validated by reproducing the original count (812 detectable).
 
+DETECTABILITY IS PER-TOBS. The observation time sets the FD bin width, the
+waveform duration and hence the optimal SNR itself, so a truth set is only
+valid for the run it was built against: at 1 year the same catalogue source
+integrates 4x longer and the detectable count grows. ``Tobs`` is therefore
+read from the STORE's own domain settings (``global_fit/domain_settings/args``
+-> ``attrs["0"] * attrs["1"] * attrs["2"]``, the same expression the monitor
+uses), with the 3-month value as the fallback and ``--tobs`` as an explicit
+override, and the value used is stamped into both output npz files. The
+monitor refuses a truth set whose stamped ``tobs`` does not match the run.
+
 Nothing here is re-derived: the noise, waveform and SNR route are copied from
 the monitor's own recovery section (GBGPU ``run_wave`` on CPU, lisatools
 ``A2TDISens``/``E2TDISens`` fed the run's sampled instrument + foreground) --
@@ -30,7 +40,7 @@ waveform set to the plausibly-detectable tail; the same curve is written to
 Usage::
 
     OMP_NUM_THREADS=1 python scripts/diagnostics/build_truth.py \
-        <store.h5> [--iteration 78] [--out gb_truth_3to21.npz]
+        STORE.h5 [--iteration 78] [--out gb_truth_3to21.npz] [--tobs SEC]
 
 Runs on CPU in a few minutes. Keep the thread pins: laptop policy.
 """
@@ -46,13 +56,47 @@ import h5py
 
 FLO, FHI = 3e-3, 21.94e-3
 SNR_DET = 7.0
-TOBS = 7776000.0
+TOBS_3MO = 7776000.0   # the original 3-month set; also the fallback Tobs
 DT = 2.5
-NW = 128          # FD points per waveform, the monitor's own NW_
+NW_3MO = 128      # FD points per waveform at 3 months (the monitor's own NW_)
 
 MOJITO_CAT = os.path.expanduser(
     "~/.mojito_cache/brickmarket/mojito_light_v1_0_0/catalogues/"
     "wdwd_cat_mojito_lite_processed.hdf5")
+
+
+def store_tobs(store, fallback=TOBS_3MO):
+    """Observation time of the run, from the store's own domain settings.
+
+    ``global_fit/domain_settings/args`` carries the WDM/FD grid arguments as
+    attrs "0"/"1"/"2" = (Nt, Nf, dt) -- their product is Tobs. This is exactly
+    how ``gf_monitor_gen.py`` derives ``SCI_TOBS``, so a truth set built here
+    and a page rendered there agree by construction. Falls back to the 3-month
+    value when the store predates the group.
+    """
+    try:
+        with h5py.File(store, "r") as f:
+            a = dict(f["global_fit/domain_settings/args"].attrs)
+        return float(a["0"]) * float(a["1"]) * float(a["2"])
+    except Exception as e:
+        print(f"WARNING: no domain settings in {store} ({type(e).__name__}); "
+              f"falling back to Tobs = {fallback}")
+        return float(fallback)
+
+
+def nw_for(tobs):
+    """FD points per waveform at this Tobs.
+
+    ``N`` has to span the Doppler-modulated bandwidth of the source, which is
+    a fixed number of HERTZ (a few tens of 1/yr sidebands); the FD bin is
+    1/Tobs, so the bandwidth in BINS grows in proportion to Tobs. Hold the
+    3-month value at exactly 128 (reproducing the frozen 812-source set) and
+    scale up in powers of two from there -- 512 at one year. Over-sizing N is
+    safe (the extra bins are ~zero and the slow part is merely sampled more
+    finely); under-sizing truncates the waveform and silently loses SNR.
+    """
+    n = NW_3MO * max(float(tobs) / TOBS_3MO, 1.0)
+    return int(min(2 ** int(np.ceil(np.log2(n))), 2048))
 
 
 def fitted_noise(store, it):
@@ -113,20 +157,26 @@ def catalogue_phys(t_ref):
     return phys
 
 
-def opt_snr(phys, sa, se, gbw, df):
-    """Optimal SNR of each row: 4 df sum(|A|^2/SA + |E|^2/SE), sqrt."""
+def opt_snr(phys, sa, se, gbw, df, tobs, nw):
+    """Optimal SNR of each row: 4 df sum(|A|^2/SA + |E|^2/SE), sqrt.
+
+    ``tobs`` is the run's observation time -- it enters BOTH the waveform
+    (``T=`` in ``run_wave``, which sets how long the source integrates) and
+    the inner-product measure ``df = 1/tobs``; ``sa``/``se`` must already be
+    sampled on that same ``df`` grid.
+    """
     out = np.zeros(len(phys))
     B = 20000
     for lo in range(0, len(phys), B):
         p = phys[lo:lo + B]
         gbw.run_wave(*[np.ascontiguousarray(p[:, k]) for k in range(9)],
-                     N=NW, T=TOBS, dt=DT, tdi2=True, tdi_channel_setup="AE")
+                     N=nw, T=tobs, dt=DT, tdi2=True, tdi_channel_setup="AE")
         A = np.asarray(gbw.A); E = np.asarray(gbw.E)
         s = np.asarray(gbw.start_inds).astype(int)
         for i in range(len(p)):
-            if s[i] < 0 or s[i] + NW > sa.size:
+            if s[i] < 0 or s[i] + nw > sa.size:
                 continue
-            _sa = sa[s[i]:s[i] + NW]; _se = se[s[i]:s[i] + NW]
+            _sa = sa[s[i]:s[i] + nw]; _se = se[s[i]:s[i] + nw]
             out[lo + i] = np.sqrt(
                 4 * df * (np.abs(A[i]) ** 2 / _sa
                           + np.abs(E[i]) ** 2 / _se).real.sum())
@@ -140,9 +190,19 @@ def main(argv=None):
     ap.add_argument("--iteration", type=int, default=78)
     ap.add_argument("--out", default="gb_truth_3to21.npz")
     ap.add_argument("--kappa-out", default="kappa_grid.npz")
+    ap.add_argument("--tobs", type=float, default=None,
+                    help="observation time [s]; default: read from the "
+                         "store's global_fit/domain_settings/args")
+    ap.add_argument("--nw", type=int, default=None,
+                    help="FD points per waveform; default: 128 scaled by "
+                         "Tobs/3 months, rounded up to a power of two")
     a = ap.parse_args(argv)
 
-    df = 1.0 / TOBS
+    tobs = float(a.tobs) if a.tobs else store_tobs(a.store)
+    nw = int(a.nw) if a.nw else nw_for(tobs)
+    df = 1.0 / tobs
+    print(f"Tobs = {tobs:.1f} s ({tobs / 86400.0:.1f} d), df = {df:.4g} Hz, "
+          f"N per waveform = {nw}")
     psd_p, gal_p = fitted_noise(a.store, a.iteration)
     print(f"noise @ it {a.iteration}: psd={psd_p} galfor={gal_p}")
     sa, se = sens_grids(psd_p, gal_p, df)
@@ -171,14 +231,15 @@ def main(argv=None):
             np.zeros(fgrid.size), np.zeros(fgrid.size),
             np.zeros(fgrid.size), np.zeros(fgrid.size),
             np.full(fgrid.size, lam), np.full(fgrid.size, beta)])
-        kap = np.maximum(kap, opt_snr(proto, sa, se, gbw, df) / A0)
+        kap = np.maximum(kap, opt_snr(proto, sa, se, gbw, df, tobs, nw) / A0)
     keep = phys[:, 0] * np.interp(phys[:, 1], fgrid, kap) > 0.5 * SNR_DET
     print(f"kappa prefilter keeps {keep.sum()} / {len(phys)}")
-    # keys are the monitor's contract: kappa_grid.npz carries fgrid/fit.
-    np.savez(a.kappa_out, fgrid=fgrid, fit=kap)
+    # keys are the monitor's contract: kappa_grid.npz carries fgrid/fit. The
+    # curve is a unit-SNR ceiling under THIS Tobs, so stamp it too.
+    np.savez(a.kappa_out, fgrid=fgrid, fit=kap, tobs=np.array(tobs))
 
     snr = np.zeros(len(phys))
-    snr[keep] = opt_snr(phys[keep], sa, se, gbw, df)
+    snr[keep] = opt_snr(phys[keep], sa, se, gbw, df, tobs, nw)
     det = snr > SNR_DET
     print(f"DETECTABLE (SNR > {SNR_DET}): {det.sum()}")
 
@@ -186,7 +247,7 @@ def main(argv=None):
         a.out, f0=phys[:, 1], amp=phys[:, 0], snr=snr, det=det, phys=phys,
         store=np.array(a.store), iteration=np.array(a.iteration),
         psd_params=psd_p, galfor_params=gal_p,
-        band=np.array([FLO, FHI]), tobs=np.array(TOBS))
+        band=np.array([FLO, FHI]), tobs=np.array(tobs), nw=np.array(nw))
     print(f"wrote {a.out}")
     return 0
 

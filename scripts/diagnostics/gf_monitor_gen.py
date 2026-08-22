@@ -1552,13 +1552,23 @@ FLO, FHI = 3e-3, 21.94e-3          # the band the frozen denominator covers
 TOL_BINS = 2.0
 NBAND = (FHI - FLO) / SCI_DF       # FD bins in the band
 
-# The truth set is tied to this run's Tobs (SNRs, and the FD bin the match
-# tolerance is quoted in). Refuse it on a different observation time rather
-# than silently comparing a 23-month model against 3-month detectability.
-if TRU is not None and abs(SCI_TOBS - 7776000.0) > 1.0:
+# The truth set is tied to A Tobs (SNRs, and the FD bin the match tolerance is
+# quoted in) -- not to THE 3-month one: ``build_truth.py`` now stamps the
+# observation time it was built at into the npz. Compare against that stamp,
+# defaulting to the 3-month value for the pre-stamp npz files, so a 1-year set
+# passes on a 1-year run while a 3-month set on a 1-year run still refuses
+# rather than silently comparing a 1-year model against 3-month detectability.
+TRU_TOBS = 7776000.0
+if TRU is not None and "tobs" in getattr(TRU, "files", []):
+    try:
+        TRU_TOBS = float(np.asarray(TRU["tobs"]).reshape(-1)[0])
+    except Exception:
+        TRU_TOBS = 7776000.0
+if TRU is not None and abs(SCI_TOBS - TRU_TOBS) > 1.0:
     MISSING.append(
         "recovery panels skipped: the frozen detectability set is built for a "
-        "3-month observation and this run is not one.")
+        f"{TRU_TOBS / 86400.0:.4g}-day observation and this run is "
+        f"{SCI_TOBS / 86400.0:.4g} days.")
     TRU = None
 
 
