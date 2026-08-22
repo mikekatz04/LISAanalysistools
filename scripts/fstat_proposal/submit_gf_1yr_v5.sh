@@ -358,11 +358,13 @@ export GB_INMODEL_SETUP_BATCH=256
 # fill/writeback bookkeeping of a chunk scales with its width, and one of
 # the crash sites was immediately after a 4096-wide chunk staged. Halve it.
 export GB_RJ_INMODEL_CHUNK=2048
-# Per-pick-round CuPy pool release -- the code's own opt-in for genuinely
-# memory-bound runs (churn cost is measured by the mempool_free span; at
-# ~27-min iterations it is noise). Keeps the pool cache from ratcheting
-# between the staging-loop sweeps.
-export GB_MEMPOOL_FREE_EACH_ROUND=1
+# GB_MEMPOOL_FREE_EACH_ROUND deliberately NOT set (user call 2026-08-22):
+# per-ROUND frees would make every next-round allocation pay cudaMalloc
+# instead of a pool hit, ~470 rounds per unit -- the finest-cadence churn
+# for the least gain. The coarser frees already bound the hoard: the
+# staging-loop sweeps (GB_INMODEL_BATCH_MEMPOOL_FREE, default on; measured
+# reclaiming 14-30 GB when there was hoard), the unconditional per-unit
+# frees, and GB_INFOMAT_MEMPOOL_FREE=1 above.
 # RESIDENT-set lever (2026-08-22, revises one pin of the original "2-year
 # settings" ruling -- flagged to the user): the two crash windows died at
 # 95.2-95.3 of 95.8 GB with all transient mitigations LIVE, so ~8 GB of
