@@ -1892,7 +1892,22 @@ if TRU is not None:
             ARMS[_tag] = _z
         except Exception:
             pass
-    ARM_COL = {"v2": CYAN, "v3": AMBER, "v4": GREEN}
+    # Every arm needs its OWN hue (2026-08-22): the per-run arm tags
+    # (gf_arm_3mo_v5 / _3mo_v6 / _1yr_v5) all fell through to the GREEN
+    # default, drawing indistinguishable comparison lines. Known tags get
+    # fixed hues; anything new draws from a deterministic cycle keyed by
+    # sorted position so two unknown arms can never share a colour.
+    ARM_COL = {
+        "v2": CYAN, "v3": AMBER, "v4": GREEN,
+        "3mo_v5": "#FF7BAC",   # pink
+        "3mo_v6": VIOLET,
+        "1yr_v5": "#F2E14C",   # yellow
+    }
+    _ARM_CYCLE = [c for c in ("#FF7BAC", VIOLET, "#F2E14C", "#7BE0FF",
+                              "#C08B5C", "#8FE388", "#B0B7C3")
+                  if c not in {ARM_COL[t] for t in ARMS if t in ARM_COL}]
+    for _i, _tag in enumerate(sorted(t for t in ARMS if t not in ARM_COL)):
+        ARM_COL[_tag] = _ARM_CYCLE[_i % max(len(_ARM_CYCLE), 1)]
 
     # ================= FIGURES ==========================================
     import matplotlib.colors as _mcol
