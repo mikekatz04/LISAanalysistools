@@ -14,6 +14,8 @@
 #   <run_dir>_snapshot.tar.gz   (extract locally with: tar -xzf <file>)
 #
 # Knobs: PYTHON  interpreter for the extract (default: python);
+#        INCLUDE_FSTAT=1  keep the fstat epoch caches (default: only
+#              DONE.json; the payload npzs are 100s of MB-GBs);
 #        KEEP  iterations of the big chains kept in the reduced store
 #              (default 5); N_JOB_LOGS  newest *.log files from the repo
 #              root to include (default 8).
@@ -49,11 +51,24 @@ for d in "${DIRS[@]}"; do
     continue
   fi
 
-  # file list: everything in the dir EXCEPT h5 files (the *_extract.h5
-  # reduced store stays in) and the fstat grid parts
+  # file list: everything in the dir EXCEPT
+  #  * h5 files (the *_extract.h5 reduced store stays in),
+  #  * migration/backup copies (*.bak -- a FULL store copy that silently
+  #    dodged the h5 rule via its extension; 2026-08-22 1.5 GB tars),
+  #  * dissect diagnostic dumps,
+  #  * the fstat epoch caches (peaks_stacked/centers/comb are the other
+  #    heavy family; DONE.json survives so epoch status stays readable.
+  #    INCLUDE_FSTAT=1 keeps them, minus grid parts as always).
   list=$(mktemp)
+  FSTAT_PRUNE=()
+  if [ "${INCLUDE_FSTAT:-0}" != "1" ]; then
+    FSTAT_PRUNE=(-not \( -path "*/gb_fstat_fit/*" -a ! -name "DONE.json" \))
+  fi
   find "$d" -type f \
        ! -path "*fstat_grid_parts*" \
+       ! -path "*/dissect/*" \
+       ! -name "*.bak" ! -name "*.h5.bak*" \
+       "${FSTAT_PRUNE[@]}" \
        \( ! -name "*.h5" -o -name "*_extract.h5" \) \
        > "$list"
   # newest slurm job logs from the repo root, if any
