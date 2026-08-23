@@ -3358,6 +3358,19 @@ fitted noise. A model source counts as a recovery when it lies within
 one-to-one. Those windows cover {pct(SCI["chance"], 1) if SCI else "2.2%"} of the
 band, so that is the rate at which an arbitrary source would match by accident.</p>
 {ARM_TABLE}
+<!-- TRACKERS_TOP: the two headline per-iteration trackers live here, first
+     thing after the KPIs (moved from Search & Cap Cells, user request
+     2026-08-22 x2 -- they were invisible deep in a 12 MB page). -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
+<div class="panel">{img("gb_leaves")}
+<div class="caption">Left: galactic-binary leaf count per cold walker across the stored
+iterations, against the detectable-injection target. Right: the enforced per-cell leaf
+cap over time. Rows marked in red have had their births shut off by the barren-band rule
+&mdash; deaths and in-model moves continue there.</div></div>
+<div class="panel">{img("ll")}
+<div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
+the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
+</div>
 </section>
 
 <section id="resid"><h2>Residual Spectrum</h2>
@@ -3451,16 +3464,9 @@ clamp. Grey is scored, offered to Metropolis&ndash;Hastings and rejected.
 <span style="color:var(--green)">Green</span> is accepted, i.e. a new source. Left is
 absolute counts, right the same data as percentages so the trend stays readable as the
 model fills. {GB_FATE_TXT}</div></div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
-<div class="panel">{img("gb_leaves")}
-<div class="caption">Left: galactic-binary leaf count per cold walker across the stored
-iterations, against the detectable-injection target. Right: the enforced per-cell leaf
-cap over time. Rows marked in red have had their births shut off by the barren-band rule
-&mdash; deaths and in-model moves continue there.</div></div>
-<div class="panel">{img("ll")}
-<div class="caption">Cold-chain total log-likelihood across the {nwalk} walkers, and
-the max-minus-min spread. At equilibrium the spread sits at a few units.</div></div>
-</div>
+<!-- gb_leaves + ll grid MOVED to the top of the page (user request
+     2026-08-22, twice: on a 12 MB page these two headline trackers were
+     effectively invisible this deep in the scroll). See TRACKERS_TOP. -->
 <div class="panel">{img("timing_moves", "per-move throughput")}
 <div class="caption">Proposal throughput and wall time per propose, per move, against
 elapsed run time.</div></div>
