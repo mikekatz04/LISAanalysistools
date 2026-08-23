@@ -69,7 +69,7 @@ for d in "${DIRS[@]}"; do
        ! -path "*fstat_grid_parts*" \
        ! -path "*/dissect/*" \
        ! -path "*_artifacts/diagnostics/*" \
-       ! -name "*.bak" ! -name "*.h5.bak*" \
+       ! -name "*.bak" ! -name "*.h5.bak*" ! -name "*.tmp" \
        ! -name "*.tar.gz" ! -name "*.zip" \
        "${FSTAT_PRUNE[@]}" \
        \( ! -name "*.h5" -o -name "*_extract.h5" \) \
