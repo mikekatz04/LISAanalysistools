@@ -232,6 +232,13 @@ th {{ color:var(--dim); font-weight:600; }}
 button {{ background:var(--panel); color:var(--fg); border:1px solid var(--line);
         border-radius:4px; padding:4px 12px; font-size:12px; cursor:pointer; }}
 button:focus-visible {{ outline:2px solid var(--dim); }}
+button.armed {{ outline:2px solid var(--truthred); }}
+.bar label {{ color:var(--dim); font-size:12px; display:flex; gap:4px;
+        align-items:center; }}
+.bar input[type=text] {{ width:86px; background:var(--panel); color:var(--fg);
+        border:1px solid var(--line); border-radius:3px; padding:2px 5px;
+        font:12px monospace; }}
+.bar input[type=range] {{ width:110px; }}
 </style>
 <main>
 <h1>LISA Global Fit Compare</h1>
@@ -263,6 +270,11 @@ threshold. Cloud: last-iteration cold-chain leaves, all walkers.</p>
 <div class="bar">
   <button id="reset">reset view</button>
   <button id="truthbtn">toggle catalogue truths</button>
+  <button id="cmp_pick" title="arm, then click any panel to set the view center">set center by click</button>
+  <label>cx <input id="cmp_cx" type="text"></label>
+  <label>cy <input id="cmp_cy" type="text"></label>
+  <label>width <input id="cmp_wsl" type="range" min="0" max="1000" step="1"><input id="cmp_w" type="text"></label>
+  <label>height <input id="cmp_hsl" type="range" min="0" max="1000" step="1"><input id="cmp_h" type="text"></label>
   <span class="note" id="viewcap"></span>
 </div>
 <div id="stack"></div>
@@ -343,7 +355,7 @@ function draw() {{
 }}
 let raf = 0;
 const redraw = () => {{ if (raf) return;
-  raf = requestAnimationFrame(() => {{ raf = 0; draw(); }}); }};
+  raf = requestAnimationFrame(() => {{ raf = 0; draw(); syncCtl(); }}); }};
 for (const cv of cvs) {{
   let drag = null;
   cv.addEventListener("pointerdown", e => {{
@@ -371,8 +383,75 @@ for (const cv of cvs) {{
 }}
 document.getElementById("reset").onclick = () => {{ full(); draw(); }};
 document.getElementById("truthbtn").onclick = () => {{ showT = !showT; draw(); }};
+// ---- slider / typed / click-to-center view controls (ported from the
+// monitor's viewCtl; one control strip drives the SHARED view-state) ----
+const FW0 = X1 - X0, FH0 = Y1 - Y0;
+const $ = id => document.getElementById("cmp_" + id);
+const cxI = $("cx"), cyI = $("cy"), wI = $("w"), hI = $("h"),
+      wS = $("wsl"), hS = $("hsl"), pk = $("pick");
+const clampv = (v, a, b) => Math.max(a, Math.min(b, v));
+const s2span = (sv, fullv) => {{
+  const mn = Math.log(fullv / 2000), mx = Math.log(fullv * 1.2);
+  return Math.exp(mn + (mx - mn) * sv / 1000);
+}};
+const span2s = (W, fullv) => {{
+  const mn = Math.log(fullv / 2000), mx = Math.log(fullv * 1.2);
+  return clampv(Math.round(1000 * (Math.log(W) - mn) / (mx - mn)), 0, 1000);
+}};
+let busy = false;
+function syncCtl() {{
+  if (busy) return;
+  cxI.value = ((X0 + X1) / 2).toPrecision(7);
+  cyI.value = ((Y0 + Y1) / 2).toPrecision(7);
+  wI.value = (X1 - X0).toPrecision(5);
+  hI.value = (Y1 - Y0).toPrecision(5);
+  wS.value = span2s(X1 - X0, FW0);
+  hS.value = span2s(Y1 - Y0, FH0);
+}}
+function applyTyped() {{
+  let cx = parseFloat(cxI.value), cy = parseFloat(cyI.value);
+  let W = parseFloat(wI.value), H = parseFloat(hI.value);
+  if (!isFinite(cx)) cx = (X0 + X1) / 2;
+  if (!isFinite(cy)) cy = (Y0 + Y1) / 2;
+  if (!isFinite(W) || W <= 0) W = X1 - X0;
+  if (!isFinite(H) || H <= 0) H = Y1 - Y0;
+  busy = true;
+  X0 = cx - W / 2; X1 = cx + W / 2; Y0 = cy - H / 2; Y1 = cy + H / 2;
+  draw(); busy = false; syncCtl();
+}}
+cxI.onchange = cyI.onchange = wI.onchange = hI.onchange = applyTyped;
+wS.oninput = () => {{
+  const cx = (X0 + X1) / 2, W = s2span(+wS.value, FW0);
+  busy = true; X0 = cx - W / 2; X1 = cx + W / 2; draw(); busy = false;
+  wI.value = W.toPrecision(5);
+}};
+hS.oninput = () => {{
+  const cy = (Y0 + Y1) / 2, H = s2span(+hS.value, FH0);
+  busy = true; Y0 = cy - H / 2; Y1 = cy + H / 2; draw(); busy = false;
+  hI.value = H.toPrecision(5);
+}};
+let picking = false;
+pk.onclick = () => {{ picking = !picking; pk.classList.toggle("armed", picking);
+  for (const cv of cvs) cv.style.cursor = picking ? "crosshair" : "grab"; }};
+cvs.forEach((cv, i) => {{
+  cv.addEventListener("pointerdown", e => {{
+    if (!picking) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const w = cv.clientWidth, h = cv.clientHeight;
+    const mb = (i === cvs.length - 1) ? MB : 6;
+    const cx = X0 + ((e.clientX - r.left) - ML) / (w - ML - MR) * (X1 - X0);
+    const cy = Y0 + ((h - mb) - (e.clientY - r.top)) / (h - mb - MT) * (Y1 - Y0);
+    const W = X1 - X0, H = Y1 - Y0;
+    X0 = cx - W / 2; X1 = cx + W / 2; Y0 = cy - H / 2; Y1 = cy + H / 2;
+    picking = false; pk.classList.remove("armed");
+    for (const c of cvs) c.style.cursor = "grab";
+    draw(); syncCtl();
+  }}, {{ capture: true }});
+}});
 new ResizeObserver(redraw).observe(stack);
 draw();
+syncCtl();
 </script>
 """
 HTML_TMPL = HTML_TMPL.replace("{BG}", BG).replace("{PANEL}", PANEL) \
