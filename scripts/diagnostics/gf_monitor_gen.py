@@ -87,7 +87,14 @@ def img(key, alt=""):
 # render the damaged store (missing iterations) or the lagging backup on one
 # machine and the right file on another, with nothing in the output saying
 # which. Name the live store explicitly and keep the others as fallbacks.
-_h5s = sorted(fn for fn in os.listdir(RUN_DIR) if fn.endswith(".h5"))
+# NEWEST mtime wins, not alphabetical (2026-08-22): a make_snapshots.sh
+# tar refreshes the *_extract.h5 but cannot delete a previous format's
+# full store left in the dir, and "testing.h5" sorts before
+# "testing_extract.h5" -- the first tar-format page silently rendered a
+# 384-iteration-stale store. Freshness is the only defensible tiebreak.
+_h5s = sorted((fn for fn in os.listdir(RUN_DIR) if fn.endswith(".h5")),
+              key=lambda fn: os.path.getmtime(os.path.join(RUN_DIR, fn)),
+              reverse=True)
 _live = [fn for fn in _h5s
          if not fn.endswith("_running_backup_copy.h5") and "_CORRUPT" not in fn]
 if not _live:                                   # only a backup survived
