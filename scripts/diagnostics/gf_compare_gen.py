@@ -36,6 +36,8 @@ RUN_META = [
     ("v4", "#58C48A"),
     ("v5", "#FF7BAC"),
     ("v6", "#9B7BFF"),
+    ("1yr", "#F2E14C"),   # optional 4th run; different Tobs -- shown for
+                          # contrast, excluded from matched-iteration deltas
 ]
 BG, PANEL, LINE, FG, DIM = "#0A0E14", "#10161F", "#223041", "#B8C6D4", "#67788A"
 TRUTHRED = "#FF2E3E"
@@ -114,11 +116,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("v4"); ap.add_argument("v5"); ap.add_argument("v6")
     ap.add_argument("out")
+    ap.add_argument("--yr1", default=None,
+                    help="optional 1-yr run dir/h5 -- adds a 4th panel/line")
     ap.add_argument("--truth", default="gb_truth_3to21.npz")
     a = ap.parse_args(argv)
 
     runs = {}
-    for (tag, col), src in zip(RUN_META, (a.v4, a.v5, a.v6)):
+    srcs = [a.v4, a.v5, a.v6] + ([a.yr1] if a.yr1 else [])
+    for (tag, col), src in zip(RUN_META, srcs):
         p = live_h5(src)
         print(f"[{tag}] {p}")
         runs[tag] = load_run(p)
@@ -196,7 +201,7 @@ def main(argv=None):
     print(f"wrote {a.out}: {os.path.getsize(a.out)/1e6:.1f} MB")
 
 
-HTML_TMPL = """<title>LISA Global Fit v4 v5 v6</title>
+HTML_TMPL = """<title>LISA Global Fit Compare</title>
 <style>
 :root {{ --bg:{BG}; --panel:{PANEL}; --line:{LINE}; --fg:{FG}; --dim:{DIM};
         --truthred:{TRUTHRED}; }}
@@ -229,12 +234,15 @@ button {{ background:var(--panel); color:var(--fg); border:1px solid var(--line)
 button:focus-visible {{ outline:2px solid var(--dim); }}
 </style>
 <main>
-<h1>LISA Global Fit v4 v5 v6</h1>
-<p class="note">Three-run comparison on shared axes. Same colour per run
+<h1>LISA Global Fit Compare</h1>
+<p class="note">Run comparison on shared axes. Same colour per run
 everywhere: <span class="chip" style="background:#58C48A"></span>v4
 <span class="chip" style="background:#FF7BAC"></span>v5
-<span class="chip" style="background:#9B7BFF"></span>v6; red is reserved
-for catalogue truths.</p>
+<span class="chip" style="background:#9B7BFF"></span>v6
+<span class="chip" style="background:#F2E14C"></span>1yr (different Tobs
+-- shown for contrast, not matched-iteration comparison); red is reserved
+for catalogue truths. Truth crosses are the 3-month detectability set;
+the 1-yr run's own detectable set is larger.</p>
 <table><tr><th>run</th><th>store</th><th>iterations</th>
 <th>leaves/walker</th><th>cold logL max</th><th>leaves &gt; 10 mHz</th>
 <th>fdot &lt; 0 above 10 mHz</th></tr>{rows}</table>
