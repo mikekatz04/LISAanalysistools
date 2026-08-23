@@ -56,15 +56,41 @@ def _wanted_rows(ds, keep, it):
     return lo, hi
 
 
-def extract(src_path, dst_path, keep):
+def extract(src_path, dst_path, keep, fallback_path=None):
     src = h5py.File(src_path, "r")
+    # A LIVE store is being written while we read: gzip'd chunks caught
+    # mid-write fail with "filter returned failure during read"
+    # (2026-08-22, cluster). Fall back per read to the run's own
+    # _running_backup_copy.h5 (one save behind, stable), and as a last
+    # resort skip the row/dataset loudly (reads back as zeros).
+    if fallback_path is None:
+        cand = src_path.replace(".h5", "_running_backup_copy.h5")
+        fallback_path = cand if os.path.exists(cand) else None
+    fb = h5py.File(fallback_path, "r") if fallback_path else None
+    torn = []
+
+    def _read(name, sel):
+        try:
+            return src[name][sel]
+        except OSError:
+            if fb is not None and name in fb:
+                try:
+                    val = fb[name][sel]
+                    torn.append(f"{name}[{sel}] <- backup")
+                    return val
+                except OSError:
+                    pass
+            torn.append(f"{name}[{sel}] SKIPPED (zeros)")
+            return None
+
     it = None
     try:
         it = int(src["global_fit"].attrs.get("iteration"))
     except Exception:
         pass
     print(f"[extract] {src_path} -> {dst_path}  (iteration attr: {it}, "
-          f"keep last {keep} rows of the big iteration-axis datasets)")
+          f"keep last {keep} rows of the big iteration-axis datasets"
+          + (f"; torn-read fallback: {fallback_path}" if fb else "") + ")")
     dst = h5py.File(dst_path, "w")
     stats = {"full": 0, "partial": 0, "bytes_in": 0}
 
@@ -85,9 +111,13 @@ def extract(src_path, dst_path, keep):
                   f"({raw/1e9:.2f} GB) -> last-{keep} rows only")
             partial = True
         if obj.shape == ():  # scalar
-            d = dst.create_dataset(name, data=obj[()])
+            val = _read(name, ())
+            d = dst.create_dataset(name, data=val if val is not None else 0)
         elif not partial:
-            d = dst.create_dataset(name, data=obj[...],
+            val = _read(name, Ellipsis)
+            if val is None:
+                val = np.zeros(obj.shape, dtype=obj.dtype)
+            d = dst.create_dataset(name, data=val,
                                    compression="gzip", compression_opts=4)
             stats["full"] += 1
         else:
@@ -100,7 +130,9 @@ def extract(src_path, dst_path, keep):
                                    compression_opts=4, fillvalue=0)
             lo, hi = _wanted_rows(obj, keep, it)
             for r in range(lo, hi):
-                d[r] = obj[r]
+                val = _read(name, r)
+                if val is not None:
+                    d[r] = val
             stats["partial"] += 1
             print(f"  [last-{hi-lo}] {name} {obj.shape}")
         for k, v in obj.attrs.items():
@@ -109,7 +141,19 @@ def extract(src_path, dst_path, keep):
     for k, v in src.attrs.items():
         dst.attrs[k] = v
     src.visititems(visit)
+    if torn:
+        # record the torn reads IN the extract so the analysis side can see
+        # exactly what came from the backup or was zeroed
+        dst.attrs["extract_torn_reads"] = "\n".join(torn)[:60000]
+        print(f"  [warn] {len(torn)} torn read(s); recorded in the "
+              f"'extract_torn_reads' root attr:")
+        for t in torn[:10]:
+            print(f"     {t}")
+        if len(torn) > 10:
+            print(f"     ... and {len(torn) - 10} more")
     dst.close()
+    if fb is not None:
+        fb.close()
     out = os.path.getsize(dst_path)
     print(f"[extract] done: {stats['full']} full + {stats['partial']} "
           f"partial datasets; {stats['bytes_in']/1e9:.2f} GB raw -> "
