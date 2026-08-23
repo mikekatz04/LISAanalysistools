@@ -647,6 +647,15 @@ export GB_BAND_UNIT_STRIDE=9
 # per-band arrays migrate on the resume that picks this up). Recovers
 # ~4.3 min of the 18.3-min iteration.
 export VGB_BAND_LAYERS=8
+# STAGING BATCH CAP (2026-08-23, full_pe OOM autopsy): v6 died at it=173
+# on a cupy OOM (3.09 GB _expand_B request, gpu0 93.06/93.6 GB) during
+# rj_prior_pe's sig-het setup -- this script never carried the cap the
+# v5/1-yr scripts got, and full_pe's picked pools (779 leaves/walker,
+# 1230/1232 bands occupied) finally outgrew the card. Same knobs as the
+# 3-mo v5 script; the in-model staging loop also pool-sweeps between
+# sub-blocks (GB_INMODEL_BATCH_MEMPOOL_FREE default on).
+export GB_INMODEL_SETUP_BATCH=1024
+export GB_INFOMAT_MEMPOOL_FREE=1
 # K=4, NOT v5's 32: (layer/8)/4 = layer/32 cells -- the staggered
 # cap-cell grid comes out BIT-IDENTICAL to v5's, so the cap machinery
 # is a controlled variable in this comparison.
