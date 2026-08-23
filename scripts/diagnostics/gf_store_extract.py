@@ -35,17 +35,35 @@ import numpy as np
 # suffix. Everything else is copied whole.
 LAST_K_ONLY = (
     "chain/gb",            # main cold chain (it, 1, 1, nw, nleaves, 9)
-    "inds/gb",             # kept in full if small enough; see SIZE_CAP
     "sub_backend/gb/chain",        # all-rung GB chain (it, nt, nw, nleaves, 9)
     "sub_backend/gb/inds",
     "sub_backend/gb/d_h",
     "sub_backend/gb/h_h",
     "sub_backend/gb/band_num_binaries",
+    # the (it, nbands, ntemps)-shaped counter/ladder family: harmless at
+    # 154 bands (~60 MB each) but ~480 MB each on the 1232-band v6 grid --
+    # SIX of them made the v6 extract (and its snapshot tar) >1 GB
+    # (2026-08-22). Only band_leaf_cap / band_best_ll history feeds the
+    # monitor's cap tracker; these are last-K.
+    "sub_backend/gb/band_temps",
+    "sub_backend/gb/band_num_proposed",
+    "sub_backend/gb/band_num_accepted",
+    "sub_backend/gb/band_swaps_proposed",
+    "sub_backend/gb/band_swaps_accepted",
+    "sub_backend/gb/band_cold_ll",
     "chain/vgb",
     "sub_backend/vgb/chain",       # kept whole if under SIZE_CAP
 )
 # Anything (matched or not) whose raw size is below this is copied whole.
 SIZE_CAP = 600 * 1024 * 1024
+# Listed LAST_K_ONLY datasets go partial above this much smaller cap (the
+# 1232-band counter family sat at ~480 MB each, under the big cap).
+LISTED_CAP = 64 * 1024 * 1024
+# Alive masks are kept in FULL regardless of size: bool arrays gzip to
+# ~nothing and the per-iteration leaf-count history (the monitor's
+# headline tracker) lives in them -- the 1-yr extract silently lost it
+# when inds/gb crossed SIZE_CAP (2026-08-22).
+FULL_ALWAYS = ("inds/gb", "inds/vgb")
 
 
 def _wanted_rows(ds, keep, it):
@@ -102,9 +120,12 @@ def extract(src_path, dst_path, keep, fallback_path=None):
             return
         raw = int(np.prod(obj.shape)) * obj.dtype.itemsize if obj.shape else 0
         stats["bytes_in"] += raw
-        partial = raw > SIZE_CAP and any(name.endswith(s) or s in name
-                                         for s in LAST_K_ONLY)
-        if not partial and raw > SIZE_CAP:
+        full_always = any(name.endswith(s) for s in FULL_ALWAYS)
+        partial = (not full_always
+                   and raw > LISTED_CAP
+                   and any(name.endswith(s) or s in name
+                           for s in LAST_K_ONLY))
+        if not partial and not full_always and raw > SIZE_CAP:
             # Unlisted-but-huge: keep last rows anyway rather than blow up
             # the extract; loudly, so a new consumer knows to look here.
             print(f"  [warn] unlisted large dataset {name} "
