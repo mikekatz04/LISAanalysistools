@@ -22,6 +22,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."   # repo root (script lives in scripts/fstat_proposal)
+echo "make_snapshots @ $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 KEEP=${KEEP:-5}
 PYTHON=${PYTHON:-python}
 N_JOB_LOGS=${N_JOB_LOGS:-8}
@@ -67,7 +68,9 @@ for d in "${DIRS[@]}"; do
   find "$d" -type f \
        ! -path "*fstat_grid_parts*" \
        ! -path "*/dissect/*" \
+       ! -path "*_artifacts/diagnostics/*" \
        ! -name "*.bak" ! -name "*.h5.bak*" \
+       ! -name "*.tar.gz" ! -name "*.zip" \
        "${FSTAT_PRUNE[@]}" \
        \( ! -name "*.h5" -o -name "*_extract.h5" \) \
        > "$list"
@@ -77,5 +80,6 @@ for d in "${DIRS[@]}"; do
   out=${d}_snapshot.tar.gz
   tar -czf "$out" -T "$list"
   rm -f "$list"
-  echo "== wrote $out ($(du -h "$out" | cut -f1))"
+  echo "== wrote $out ($(du -h "$out" | cut -f1)); largest members:"
+  tar -tvzf "$out" | sort -rk3 -n | head -8 | awk '{printf "     %6.1f MB  %s\n", $3/1048576, $NF}'
 done
