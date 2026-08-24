@@ -251,7 +251,7 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # stage-groups, branch set and gb nleaves shapes all mismatch. BASE_FILE_NAME
 # stays gf_prod_3mo so every analysis tool (monitor generator, digests)
 # works unchanged -- they take the DIRECTORY as their argument.
-STORE_DIR=./gf_prod_3mo_highf/
+STORE_DIR=./gf_prod_3mo_highf_2/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -769,7 +769,15 @@ export GB_INFOMAT_MEMPOOL_FREE=1
 # K=4, NOT v5's 32: (layer/8)/4 = layer/32 cells -- the staggered
 # cap-cell grid comes out BIT-IDENTICAL to v5's, so the cap machinery
 # is a controlled variable in this comparison.
-export GB_CAP_DIVISOR=4
+# 2 (user geometry rule, 2026-08-24): the CORE (exclusive middle) must be
+# the widest part of the cell and must contain a source's feasible fragment
+# stretch (~31.6 bins Doppler envelope at 20.4 mHz, 3-mo bins). Doubling
+# the stride (divisor 4 -> 2; 67.5-bin stride, 2 cells/sub-band, stagger
+# preserved) with the 1/4-1/2-1/4 overlap shape below gives
+# 22.5 shared | 45 core | 22.5 shared: a mid-core source cannot fragment
+# outside its own cell; the 22.5-bin seams cover the observed 5-25-bin
+# splits (worst-case seam channel is handled by rj_replace).
+export GB_CAP_DIVISOR=2
 # V5: STAGGER the cap grid against the band grid (user design 2026-08-20).
 # Interior cap edges shift half a cell (2.17 uHz / ~17 FD bins at K=32) so
 # no cap edge coincides with a band edge; the cell at each band seam
@@ -793,7 +801,8 @@ export GB_CAP_STAGGER=1
 # 20.38 mHz double-count straddled the cell 4567/4568 edge). Resume-safe
 # over a rewound v6 copy: edges compare equal, no migration.
 # GB_CAP_OVERLAP_FRAC=0 reverts to the exact v6 partition bit-identically.
-# 0.48 (user sizing rule, 2026-08-24): the overlap must be wide enough that
+# 0.25 on the DOUBLED stride (user geometry rule, 2026-08-24 -- see the
+# GB_CAP_DIVISOR block): the overlap must be wide enough that
 # no single source's feasible search stretch can place two fragments with NO
 # shared covering cell. The unprotected channel is two leaves in adjacent
 # exclusive cores, so the guarantee is overlap_width >= max feasible
@@ -805,7 +814,7 @@ export GB_CAP_STAGGER=1
 # catalogue), so wide exclusion suppresses nothing here; the rj_replace
 # move (5845073f) handles any first-birth lockout inside the wide span.
 # Full-band runs later want the frequency-scaled per-edge extension instead.
-export GB_CAP_OVERLAP_FRAC=0.48
+export GB_CAP_OVERLAP_FRAC=0.25
 # ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
 #      so the store's provenance is unambiguous) ----
 # Birth fix (1274a66c): births draw fdot_astro_ratio | (f0, Mc) from the
