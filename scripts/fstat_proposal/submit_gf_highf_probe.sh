@@ -354,8 +354,14 @@ export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER
 export TOBS_TARGET=7776000
 export MIN_FREQ=4e-4
 export MAX_FREQ=2.5e-2
-export GB_MIN_FREQ=5.5e-4
-export GB_MAX_FREQ=2.2e-2
+# CONFINED BAND (user, 2026-08-24: "only supposed to be surrounding the
+# highest frequency source" -- a FOCUSED cap-cell-overlap test). These are
+# the original high-f probe's layer-snapped edges: 4 WDM layers around the
+# 20.380377 mHz flagship. The 20-leaf budget now lives entirely here.
+# Geometry per band is unchanged (divisor 8 / stride 9 / cap divisor 4,
+# staggered, overlap 0.25) -- just ~32 sub-bands instead of 1232.
+export GB_MIN_FREQ=2.006944e-02    # 144.5 layers -> snaps to 145
+export GB_MAX_FREQ=2.076389e-02    # 149.5 layers -> snaps to 149
 
 # ---- GB knobs (everything else rides the flipped defaults: sig-het in-model,
 #      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,
