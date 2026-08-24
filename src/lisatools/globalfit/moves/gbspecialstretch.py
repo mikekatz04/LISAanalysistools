@@ -72,6 +72,7 @@ from ..state import (
     GFState,
     ensure_cap_cell_fields,
     ensure_leaf_cap_fields,
+    make_cap_edge_extensions,
     make_cap_edges,
 )
 
@@ -734,6 +735,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # See the class docstring; True only on VGBSpecialStretchMove.
     sequential_parity_repeats = False
 
+    # OVERLAPPING CAP CELLS (user design 2026-08-23). Class-level defaults so
+    # test shims built via ``__new__`` (and any pre-overlap pickled move)
+    # keep the exact partition semantics without setting these; the ctor
+    # overrides per instance. ``cap_overlap_frac`` = the fraction of a cap
+    # cell's own WIDTH shared with EACH neighbour (0 = today's exact
+    # partition, bit-identically; 0.25 = the 1/4-overlap / 1/2-alone / 1/4-
+    # overlap layout). ``_cap_edge_ext`` is the per-EDGE half-extension
+    # array (length ``num_cap_cells + 1``; 0 at both ends), built in the
+    # ctor when the fraction is non-zero.
+    cap_overlap_frac = 0.0
+    _cap_edge_ext = None
+
     @property
     def xp(self) -> Union[ModuleType, numpy , cupy]:
         """Active array module (NumPy or CuPy) for this move."""
@@ -794,6 +807,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         leaf_cap_update=True,
         cap_divisor=None,
         cap_stagger=None,
+        cap_overlap_frac=None,
         sighet_refresh_every=0,
         sighet_refresh_dphase=0.5,
         sighet_refresh_min_beta=0.1,
@@ -1172,16 +1186,63 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             os.environ.get("GB_CAP_DRIFT_GATE", "1") == "1"
         )
         _be_host = _to_numpy(self.band_edges)
-        self.cap_edges = self.xp.asarray(
-            make_cap_edges(_be_host, self.cap_divisor,
-                           stagger=self.cap_stagger)
-        )
+        _cap_edges_host = make_cap_edges(_be_host, self.cap_divisor,
+                                         stagger=self.cap_stagger)
+        self.cap_edges = self.xp.asarray(_cap_edges_host)
         self.num_cap_cells = self.num_bands * self.cap_divisor
         # per-band lower edge + cap-cell width, for the cell lookup
         self._cap_band_lo = self.xp.asarray(_be_host[:-1])
         self._cap_band_step = self.xp.asarray(
             (_be_host[1:] - _be_host[:-1]) / self.cap_divisor
         )
+        # OVERLAPPING CAP CELLS (user design 2026-08-23,
+        # GBSettings.cap_overlap_frac / GB_CAP_OVERLAP_FRAC). The stored
+        # edge grid NEVER changes -- same edge array, same count, same
+        # stride, same stagger, so resume guards and every stored cap
+        # array keep their shapes bit-identically. What changes is each
+        # cell's SPAN: cell i widens symmetrically to
+        # [e_i - x_i, e_{i+1} + x_{i+1}] so that adjacent cells SHARE a
+        # fraction ``p = cap_overlap_frac`` of the cell's own width w with
+        # each neighbour (p = 0.25 -> the 1/4-overlap / 1/2-alone /
+        # 1/4-overlap layout). With stride s (= band_width / K):
+        #     w = s / (1 - p),      x = (w - s) / 2 = s * p / (2 * (1 - p))
+        # (p = 0.25: w = 4s/3, x = s/6; shared zone 2x = w/4; exclusive
+        # core s - 2x = w/2). A leaf is a MEMBER of every widened span
+        # containing its f0: exactly 1 in a core, exactly 2 in an overlap
+        # zone (p < 0.5 keeps the zones disjoint, enforced below). Every
+        # cap census / gate then counts multi-membership and treats a
+        # location as AT CAP when ANY covering cell is at its cap
+        # (AND-headroom for births and entries).
+        #
+        # WHY: prevents FORMATION of split sources at cap-cell edges (the
+        # flagship 20.38 mHz double-count straddled the cell 4567/4568
+        # edge -- each fragment lived under its own cell's cap while the
+        # pair shared one posterior mode). Caps only run while armed
+        # (search stages; full_pe disarms), so this acts in search only.
+        #
+        # p = 0 (default) is BIT-IDENTICAL to the exact partition: every
+        # overlap branch below is guarded by ``cap_overlap_frac > 0``.
+        _p_overlap = float(cap_overlap_frac or 0.0)
+        if not (0.0 <= _p_overlap < 0.5):
+            raise ValueError(
+                f"{name}: cap_overlap_frac (GB_CAP_OVERLAP_FRAC) must be in "
+                f"[0, 0.5) -- at 0.5 the exclusive core vanishes and a leaf "
+                f"could cover 3+ cells; got {_p_overlap}."
+            )
+        # Meaningless at K == 1 (the cap grid IS the band grid), forced off
+        # there exactly like cap_stagger.
+        self.cap_overlap_frac = _p_overlap if self.cap_divisor > 1 else 0.0
+        self._cap_edge_ext = None
+        if self.cap_overlap_frac > 0.0:
+            # Per-EDGE half-extension x_i (see make_cap_edge_extensions:
+            # derived from the cap-cell step of the band containing edge i;
+            # end edges 0 so membership indices stay in range).
+            self._cap_edge_ext = self.xp.asarray(
+                make_cap_edge_extensions(
+                    _be_host, _cap_edges_host, self.cap_divisor,
+                    self.cap_overlap_frac,
+                )
+            )
         #: live reference into ``band_info`` (per CAP CELL); see ``propose``
         self._cap_leaf_cap = None
 
@@ -2724,14 +2785,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 xp_s = get_array_module(band_sorter.band_inds)
                 # CAP-CELL occupancy (user design 2026-08-15): the census
                 # and the caps live on the cap grid; scheduling below still
-                # runs entirely on the band grid.
-                _cap_inds = self._sorter_cap_cells(band_sorter)
+                # runs entirely on the band grid. Overlap mode (2026-08-23):
+                # multi-membership census + any-covering-cell at-cap test.
+                _cap_inds, _cap_nb, _cap_hn = self._sorter_cap_members(
+                    band_sorter
+                )
                 _flat, _cell_counts = self._cap_cell_counts(
-                    band_sorter, _cap_inds
+                    band_sorter, _cap_inds, _cap_nb, _cap_hn
                 )
                 _cap = xp_s.asarray(self._cap_leaf_cap)
                 _at_cap = self._cap_at_cap_mask(
-                    band_sorter, _cell_counts, _cap, _flat, _cap_inds
+                    band_sorter, _cell_counts, _cap, _flat, _cap_inds,
+                    _cap_nb, _cap_hn,
                 )
                 # Per-source at-cap mask for the grouped in-model pool gate
                 # (user rule 2026-08-13): at-cap cells never FREEZE sources
@@ -4122,14 +4187,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         _counts_pre, _cap_arr = _lcs
                         # Pool gate on the CAP-CELL grid (2026-08-15): an
                         # at-cap CELL never freezes its sources into the
-                        # in-model pool.
-                        _p_flat = self._cap_flat_index(
+                        # in-model pool. Overlap mode: any covering cell.
+                        alive_now = alive_now & ~self._row_at_cap(
+                            _counts_pre, _cap_arr,
                             picked["temp_inds"], picked["walker_inds"],
                             picked["cap_inds"],
-                        )
-                        alive_now = alive_now & ~(
-                            _counts_pre[_p_flat]
-                            >= _cap_arr[picked["cap_inds"]]
+                            picked.get("cap_nb_inds"),
+                            picked.get("cap_has_nb"),
                         )
                     else:
                         _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
@@ -4279,13 +4343,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _lcs = getattr(self, "_live_cap_state", None)
                     if _lcs is not None:
                         _counts_pre, _cap_arr = _lcs
-                        _p_flat = self._cap_flat_index(
+                        # Overlap mode: at-cap = ANY covering cell at cap.
+                        _pre_cap_row = self._row_at_cap(
+                            _counts_pre, _cap_arr,
                             picked["temp_inds"], picked["walker_inds"],
                             picked["cap_inds"],
-                        )
-                        _pre_cap_row = (
-                            _counts_pre[_p_flat]
-                            >= _cap_arr[picked["cap_inds"]]
+                            picked.get("cap_nb_inds"),
+                            picked.get("cap_has_nb"),
                         )
                         alive_now = alive_now & ~_pre_cap_row
                     else:
@@ -4492,15 +4556,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ):
             # Live census on the CAP-CELL grid (2026-08-15). Dead rows are
             # gated on whether their whole SUB-BAND is saturated (a birth
-            # can land in any of its cells); alive rows on their own cell.
-            _cap_inds_all = self._sorter_cap_cells(band_sorter)
+            # can land in any of its cells); alive rows on their own cell
+            # -- in overlap mode, on EVERY covering cell (2026-08-23).
+            _cap_inds_all, _nb_all, _hn_all = self._sorter_cap_members(
+                band_sorter
+            )
             flat_all, _counts = self._cap_cell_counts(
-                band_sorter, _cap_inds_all
+                band_sorter, _cap_inds_all, _nb_all, _hn_all
             )
             _cap = xp.asarray(self._cap_leaf_cap)
             self._live_cap_state = (_counts, _cap)
             _at_cap_row = self._cap_at_cap_mask(
-                band_sorter, _counts, _cap, flat_all, _cap_inds_all
+                band_sorter, _counts, _cap, flat_all, _cap_inds_all,
+                _nb_all, _hn_all,
             )
             cand = cand & (band_sorter.inds | ~_at_cap_row)
         cand_ids = xp.arange(band_sorter.num_sources)[cand]
@@ -4521,21 +4589,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         specials_picked = band_sorter.special_band_inds[ids]
         band_inds = band_sorter.band_inds[ids]
-        return {
+        # Cap cell(s) of the row AS IT STANDS. Meaningful for alive rows
+        # (deaths / in-model); a BIRTH's cell is recomputed from the
+        # drawn frequency at the prior gate in _run_rj_step. Overlap mode
+        # also stashes the second covering cell so every downstream at-cap
+        # test can run the any-covering-cell semantics.
+        _pk_cells, _pk_nb, _pk_hn = self._cap_cell_members(
+            band_inds, band_sorter.freqs[ids]
+        )
+        out = {
             "ids": ids,
             "specials": specials_picked,
             "slot_index": buffer_obj.get_index(specials_picked).astype(xp.int32),
             "temp_inds": band_sorter.temp_inds[ids],
             "walker_inds": band_sorter.walker_inds[ids],
             "band_inds": band_inds,
-            # Cap cell of the row AS IT STANDS. Meaningful for alive rows
-            # (deaths / in-model); a BIRTH's cell is recomputed from the
-            # drawn frequency at the prior gate in _run_rj_step.
-            "cap_inds": self._cap_cell_index(
-                band_inds, band_sorter.freqs[ids]
-            ),
+            "cap_inds": _pk_cells,
             "N_vals": band_sorter.band_N_vals[band_inds].copy(),
         }
+        if _pk_nb is not None:
+            # keys present ONLY in overlap mode, so the dict-comprehension
+            # subsetting in the pool paths stays shape-consistent
+            out["cap_nb_inds"] = _pk_nb
+            out["cap_has_nb"] = _pk_hn
+        return out
 
     def _log_dist_range(self, band_sorter):
         """``log(width)`` of the birth container's uniform distance (slot 0).
@@ -5322,7 +5399,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _split_kernel_rows = None
         # Cap cells of the picked rows AT THE PRIOR GATE (drawn frequency
         # for births); reused by the accept block's cap-transition budget.
+        # Overlap mode also carries the second covering cell + membership.
         _gate_cap_cells = None
+        _gate_cap_nb = None
+        _gate_cap_hn = None
 
         # Per-band progressive leaf cap (search mode): a birth into a band
         # already holding ``cap[b]`` alive sources is prior-forbidden --
@@ -5356,20 +5436,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _f0_prop = band_sorter.coords_freqs_hz(params)
             if _f0_prop is None:
                 cap_cells_gate = picked["cap_inds"]
+                gate_nb = picked.get("cap_nb_inds")
+                gate_hn = picked.get("cap_has_nb")
             else:
-                cap_cells_gate = self._cap_cell_index(
+                # Overlap mode (2026-08-23): a birth needs headroom in
+                # EVERY cell whose widened span covers the drawn f0
+                # (AND-headroom) -- one cell in a core, two in an overlap
+                # zone. At overlap 0 members reduce to the single primary
+                # cell and this is the historical gate bit-identically.
+                cap_cells_gate, gate_nb, gate_hn = self._cap_cell_members(
                     picked["band_inds"], _f0_prop
                 )
-            cell_flat = self._cap_flat_index(
-                picked["temp_inds"], picked["walker_inds"], cap_cells_gate
-            )
-            over_cap = (
-                cell_counts[cell_flat] >= cap_xp[cap_cells_gate]
+            over_cap = self._row_at_cap(
+                cell_counts, cap_xp,
+                picked["temp_inds"], picked["walker_inds"],
+                cap_cells_gate, gate_nb, gate_hn,
             )
             _split_over_cap = (~alive) & over_cap
             curr_logp[(~alive) & over_cap] = -np.inf
             # The accept block's cap-transition budget needs the SAME cells.
             _gate_cap_cells = cap_cells_gate
+            _gate_cap_nb = gate_nb
+            _gate_cap_hn = gate_hn
 
         _mark("rj_prior_gate")
         delta_ll = cp.full_like(logp, -1e300)
@@ -5814,10 +5902,38 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # above -- kept separate so that path stays untouched.)
                     _delta = xp.where(_alive_acc, -1, 1)
                     _counts_post = _counts_pre.copy()
-                    # serial-within-band scheduling gives at most one
-                    # accept per (temp, walker, band) per round, so a
-                    # scatter-add is unambiguous
-                    _counts_post[_flat_acc] += _delta
+                    if self.cap_overlap_frac > 0.0:
+                        # Overlap mode: an accepted birth/death changes the
+                        # occupancy of EVERY covering cell (multi-membership
+                        # census). Duplicate-safe scatter -- two accepts in
+                        # adjacent bands of one walker can hit the same
+                        # straddling/overlap cell in one round.
+                        self._cap_gate_scatter_add(
+                            _counts_post, _flat_acc, _delta
+                        )
+                        _nb_acc_src = (
+                            picked.get("cap_nb_inds")
+                            if _gate_cap_nb is None else _gate_cap_nb
+                        )
+                        _hn_acc_src = (
+                            picked.get("cap_has_nb")
+                            if _gate_cap_hn is None else _gate_cap_hn
+                        )
+                        if _nb_acc_src is not None:
+                            _nb_acc = _nb_acc_src[accept]
+                            _hn_acc = _hn_acc_src[accept]
+                            _flat_nb_acc = self._cap_flat_index(
+                                t_i[accept], w_i[accept], _nb_acc
+                            )
+                            self._cap_gate_scatter_add(
+                                _counts_post, _flat_nb_acc,
+                                _delta * _hn_acc.astype(_delta.dtype),
+                            )
+                    else:
+                        # serial-within-band scheduling gives at most one
+                        # accept per (temp, walker, band) per round, so a
+                        # scatter-add is unambiguous
+                        _counts_post[_flat_acc] += _delta
                     _bflat_acc = self._band_flat_index(
                         t_i[accept], w_i[accept], b_i[accept]
                     )
@@ -8207,17 +8323,44 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 if _dg is not None:
                     _dg_counts, _dg_cap = _dg
                     _fc_dg = self._f0_col
-                    _dg_cell_c = self._cap_cell_index(
-                        b_s, curr[sl][:, _fc_dg] / 1e3)
-                    _dg_cell_n = self._cap_cell_index(
-                        b_s, new[:, _fc_dg] / 1e3)
-                    _dg_cross = _dg_cell_n != _dg_cell_c
-                    _dg_flat_n = self._cap_flat_index(t_s, w_s, _dg_cell_n)
-                    _dg_veto = (
-                        _dg_cross
-                        & (_dg_cap[_dg_cell_n] >= 0)
-                        & (_dg_counts[_dg_flat_n] >= _dg_cap[_dg_cell_n])
-                    )
+                    if self.cap_overlap_frac > 0.0:
+                        # Overlap mode (2026-08-23): membership is a SET of
+                        # covering cells. A proposal is vetoed when any cell
+                        # it NEWLY enters (a covering cell of the new f0
+                        # that does not cover the current f0) is armed and
+                        # at cap. Cells the source already covers never
+                        # veto (within-span moves and drains stay allowed).
+                        _c_p, _c_nb, _c_hn = self._cap_cell_members(
+                            b_s, curr[sl][:, _fc_dg] / 1e3)
+                        _n_p, _n_nb, _n_hn = self._cap_cell_members(
+                            b_s, new[:, _fc_dg] / 1e3)
+                        _dg_veto = cp.zeros(_n_p.shape, dtype=bool)
+                        _ones = cp.ones(_n_p.shape, dtype=bool)
+                        for _cell, _memb in ((_n_p, _ones), (_n_nb, _n_hn)):
+                            _foreign = (
+                                _memb
+                                & (_cell != _c_p)
+                                & (~_c_hn | (_cell != _c_nb))
+                            )
+                            _flat_m = self._cap_flat_index(t_s, w_s, _cell)
+                            _dg_veto = _dg_veto | (
+                                _foreign
+                                & (_dg_cap[_cell] >= 0)
+                                & (_dg_counts[_flat_m] >= _dg_cap[_cell])
+                            )
+                    else:
+                        _dg_cell_c = self._cap_cell_index(
+                            b_s, curr[sl][:, _fc_dg] / 1e3)
+                        _dg_cell_n = self._cap_cell_index(
+                            b_s, new[:, _fc_dg] / 1e3)
+                        _dg_cross = _dg_cell_n != _dg_cell_c
+                        _dg_flat_n = self._cap_flat_index(
+                            t_s, w_s, _dg_cell_n)
+                        _dg_veto = (
+                            _dg_cross
+                            & (_dg_cap[_dg_cell_n] >= 0)
+                            & (_dg_counts[_dg_flat_n] >= _dg_cap[_dg_cell_n])
+                        )
                     new_logp[_dg_veto] = -np.inf
                     _dg_n = _dg_n + _dg_veto.sum()
 
@@ -9486,6 +9629,85 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sub_i = np.clip(sub_i, 0, self.cap_divisor - 1)
         return band * self.cap_divisor + sub_i
 
+    # ------------------------------------------------------------------
+    # OVERLAPPING CAP CELLS (user design 2026-08-23): membership helpers.
+    # ------------------------------------------------------------------
+    # With cap_overlap_frac = p > 0 every cell's span widens by x on each
+    # side (see the ctor block), so a leaf in an overlap zone is a MEMBER
+    # of TWO cells. Membership is always (primary, at most one neighbour):
+    # primary j = the base-partition cell (unchanged arithmetic), neighbour
+    # j-1 if f0 < e_j + x_j, neighbour j+1 if f0 > e_{j+1} - x_{j+1}.
+    # p < 0.5 (enforced) keeps the two zones of one cell disjoint, so the
+    # two conditions are mutually exclusive. At p == 0 every helper
+    # returns (primary, None, None) and all downstream code reduces to the
+    # exact-partition expressions bit-identically.
+
+    def _cap_cell_members(self, band_inds, freqs_hz):
+        """``(primary, neighbour, has_neighbour)`` cap-cell membership.
+
+        ``primary`` is exactly :meth:`_cap_cell_index`. ``neighbour`` /
+        ``has_neighbour`` are ``None`` when overlap is off (or f0 is not
+        sampled); otherwise ``neighbour[i]`` is the second covering cell
+        for rows with ``has_neighbour[i]`` (and equals ``primary[i]``,
+        harmlessly, elsewhere). End-edge extensions are 0 (ctor), so the
+        neighbour index can never leave ``[0, num_cap_cells - 1]`` where
+        ``has_neighbour`` is True.
+        """
+        primary = self._cap_cell_index(band_inds, freqs_hz)
+        if (
+            self.cap_overlap_frac <= 0.0
+            or self.cap_divisor == 1
+            or freqs_hz is None
+        ):
+            return primary, None, None
+        xp = get_array_module(primary)
+        e_lo = self.cap_edges[primary]
+        e_hi = self.cap_edges[primary + 1]
+        x_lo = self._cap_edge_ext[primary]
+        x_hi = self._cap_edge_ext[primary + 1]
+        low = freqs_hz < (e_lo + x_lo)
+        high = freqs_hz > (e_hi - x_hi)
+        has_nb = low | high
+        neighbour = xp.where(
+            low, primary - 1, xp.where(high, primary + 1, primary)
+        )
+        return primary, neighbour, has_nb
+
+    def _np_cap_members(self, f0_hz, band, be):
+        """Numpy twin of :meth:`_cap_cell_members` for host-side censuses.
+
+        MUST stay in lockstep with the device version (same edge/extension
+        arrays, same strict/non-strict comparisons).
+        """
+        primary = self._np_cap_cells(f0_hz, band, be)
+        if self.cap_overlap_frac <= 0.0 or self.cap_divisor == 1:
+            return primary, None, None
+        ce = _to_numpy(self.cap_edges)
+        ext = _to_numpy(self._cap_edge_ext)
+        low = f0_hz < (ce[primary] + ext[primary])
+        high = f0_hz > (ce[primary + 1] - ext[primary + 1])
+        has_nb = low | high
+        neighbour = np.where(low, primary - 1,
+                             np.where(high, primary + 1, primary))
+        return primary, neighbour, has_nb
+
+    def _row_at_cap(self, counts, cap, temp_inds, walker_inds, cells,
+                    nb_cells=None, has_nb=None):
+        """Per-row "AT CAP" test under multi-membership.
+
+        A location is at cap when ANY covering cell is at its cap
+        (AND-headroom: a birth/entry needs headroom in EVERY covering
+        cell). With ``nb_cells is None`` (overlap off, or rows known to be
+        single-membership) this is exactly the historical single-cell
+        expression, bit-identically.
+        """
+        flat = self._cap_flat_index(temp_inds, walker_inds, cells)
+        at = counts[flat] >= cap[cells]
+        if nb_cells is not None:
+            flat_nb = self._cap_flat_index(temp_inds, walker_inds, nb_cells)
+            at = at | (has_nb & (counts[flat_nb] >= cap[nb_cells]))
+        return at
+
     def _cap_drift_gate_setup(self, band_sorter):
         """``(occupancy, cap_dev)`` for the in-model CAP DRIFT GATE, or None.
 
@@ -9537,6 +9759,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return band_sorter.band_inds
         return self._cap_cell_index(band_sorter.band_inds, band_sorter.freqs)
 
+    def _sorter_cap_members(self, band_sorter):
+        """``(primary, neighbour, has_neighbour)`` for every sorter row.
+
+        The multi-membership twin of :meth:`_sorter_cap_cells` (same ALIVE
+        caveat). ``(cells, None, None)`` when overlap is off.
+        """
+        if self.cap_divisor == 1:
+            return band_sorter.band_inds, None, None
+        return self._cap_cell_members(band_sorter.band_inds,
+                                      band_sorter.freqs)
+
     def _cap_flat_index(self, temp_inds, walker_inds, cap_inds):
         """Flat ``(temp, walker, cap cell)`` index (the occupancy bincount key)."""
         xp = get_array_module(cap_inds)
@@ -9546,8 +9779,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             + cap_inds
         )
 
-    def _cap_cell_counts(self, band_sorter, cap_inds=None):
+    def _cap_cell_counts(self, band_sorter, cap_inds=None, nb_inds=None,
+                         has_nb=None):
         """``(ntemps*nwalkers*num_cap_cells,)`` alive-source occupancy census.
+
+        OVERLAP MODE (cap_overlap_frac > 0): the census counts every alive
+        leaf into EVERY covering cell -- primary always, plus the
+        neighbour where the leaf sits in an overlap zone -- so a cell's
+        count is the occupancy of its full widened span. Pass the member
+        arrays from :meth:`_sorter_cap_members` to reuse them; otherwise
+        they are computed here. At overlap 0 this is the historical
+        primary-only bincount bit-identically.
 
         TODO(USER, 2026-08-15, HIGH-PRIORITY CHECK): IN-MODEL DRIFT ACROSS A
         CAP-CELL BOUNDARY WITHIN A BAND IS NOT POLICED. Occupancy is
@@ -9567,7 +9809,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         xp = get_array_module(band_sorter.band_inds)
         if cap_inds is None:
-            cap_inds = self._sorter_cap_cells(band_sorter)
+            cap_inds, nb_inds, has_nb = self._sorter_cap_members(band_sorter)
+        elif nb_inds is None and self.cap_overlap_frac > 0.0:
+            # caller had only the primary cells: recover the neighbours
+            _, nb_inds, has_nb = self._sorter_cap_members(band_sorter)
         flat = self._cap_flat_index(
             band_sorter.temp_inds, band_sorter.walker_inds, cap_inds
         )
@@ -9576,8 +9821,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # cupy.bincount computes max(x) first and raises on a zero-size
         # array (the zero-leaf search start hits this on GPU).
         if alive_cells.shape[0] == 0:
-            return flat, xp.zeros(nbins, dtype=xp.int64)
-        return flat, xp.bincount(alive_cells, minlength=nbins)
+            counts = xp.zeros(nbins, dtype=xp.int64)
+        else:
+            counts = xp.bincount(alive_cells, minlength=nbins)
+        if nb_inds is not None:
+            # second membership pass: alive leaves in an overlap zone also
+            # count into their neighbour cell
+            flat_nb = self._cap_flat_index(
+                band_sorter.temp_inds, band_sorter.walker_inds, nb_inds
+            )
+            alive_nb = flat_nb[band_sorter.inds & has_nb]
+            if alive_nb.shape[0] > 0:
+                counts = counts + xp.bincount(alive_nb, minlength=nbins)
+        return flat, counts
 
     def _band_saturated_flat(self, counts, cap):
         """``(ntemps*nwalkers*num_bands,)`` bool: EVERY cap cell of the band full.
@@ -9620,7 +9876,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             + band_inds
         )
 
-    def _cap_at_cap_mask(self, band_sorter, counts, cap, flat, cap_inds):
+    def _cap_at_cap_mask(self, band_sorter, counts, cap, flat, cap_inds,
+                         nb_inds=None, has_nb=None):
         """Per-row at-cap mask, alive rows by CELL and dead rows by BAND.
 
         - alive row: is MY cap cell at capacity (drives the in-model pool
@@ -9631,10 +9888,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         At ``cap_divisor == 1`` both branches are the same expression the
         pre-2026-08-15 code used, so the mask is bit-identical.
+
+        OVERLAP MODE: an alive row is at cap when ANY of its covering
+        cells is at cap (pass ``nb_inds``/``has_nb`` from
+        :meth:`_sorter_cap_members`). The dead-row band-saturation test is
+        UNCHANGED and stays exact: every point's covering cells include
+        its primary (one of the band's cells), so all-cells-full still
+        blocks every draw; and a below-cap cell always keeps a non-empty
+        exclusive CORE inside the band (p < 0.5), so some draw remains
+        possible whenever a cell has headroom.
         """
         own = counts[flat] >= cap[cap_inds]
         if self.cap_divisor == 1:
             return own
+        if nb_inds is not None:
+            flat_nb = self._cap_flat_index(
+                band_sorter.temp_inds, band_sorter.walker_inds, nb_inds
+            )
+            own = own | (has_nb & (counts[flat_nb] >= cap[nb_inds]))
         sat = self._band_saturated_flat(counts, cap)
         band_flat = self._band_flat_index(
             band_sorter.temp_inds, band_sorter.walker_inds,
@@ -9782,12 +10053,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         be = _to_numpy(self.band_edges)
         band = np.clip(np.searchsorted(be, f0_hz, side="right") - 1,
                        0, self.num_bands - 1)
-        cell = self._np_cap_cells(f0_hz, band, be)
+        # Overlap mode: a source in an overlap zone is attributed to BOTH
+        # covering cells -- the same multi-membership convention as the
+        # occupancy census, so the cap-increment demand signal sees every
+        # source the cell actually polices. (Documented choice: the
+        # residual-window branch of _cap_cell_lls deliberately keeps the
+        # PARTITION windows -- widened windows would double-count residual
+        # bins and break the per-band tiling identity.)
+        cell, nb, has_nb = self._np_cap_members(f0_hz, band, be)
         for w in range(coords.shape[0]):
             m = inds[w]
             if not m.any():
                 continue
             np.add.at(out[w], cell[w][m], contrib[w][m])
+            if nb is not None:
+                m2 = m & has_nb[w]
+                if m2.any():
+                    np.add.at(out[w], nb[w][m2], contrib[w][m2])
         return out
 
     def _cold_occupancy(self, band_counts, new_state):
@@ -9801,12 +10083,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         f0_hz = coords[..., 1] / 1e3
         band = np.clip(np.searchsorted(be, f0_hz, side="right") - 1,
                        0, self.num_bands - 1)
-        cell = self._np_cap_cells(f0_hz, band, be)
+        # Overlap mode: multi-membership occupancy, matching the census the
+        # cap gates enforce with.
+        cell, nb, has_nb = self._np_cap_members(f0_hz, band, be)
         out = np.zeros((coords.shape[0], self.num_cap_cells), dtype=int)
         for w in range(coords.shape[0]):
             m = inds[w]
             if m.any():
                 np.add.at(out[w], cell[w][m], 1)
+                if nb is not None:
+                    m2 = m & has_nb[w]
+                    if m2.any():
+                        np.add.at(out[w], nb[w][m2], 1)
         return out
 
     def _cap_ll_check(self, cell_lls, band_lls) -> None:
@@ -9896,6 +10184,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         annealing schedule): the lnL-plateau and occupancy tests are
         skipped; the ``cap < nleaves_max`` guard and the log-line format
         are unchanged.
+
+        OVERLAP MODE (cap_overlap_frac > 0) -- the minimal consistent
+        treatment, documented choice 2026-08-23: the per-cell increment
+        machinery itself is UNCHANGED (same counters, same gates, one cap
+        per stored cell). What changes is only what already changed
+        elsewhere: the demand signals. The source-attributed cell ll and
+        the ``require_occupancy`` census both run on MULTI-MEMBERSHIP
+        (a source in an overlap zone feeds both covering cells' signals,
+        because both cells police it), while the residual-window cell ll
+        keeps the PARTITION windows (widened windows would double-count
+        residual bins and break the band-tiling identity the
+        [GB_CAP_LL_CHECK] audit relies on).
         """
         bi = new_state.sub_states[self.branch_name].band_info
         cap, iters, best = self._cap_state_arrays(bi)
@@ -10180,6 +10480,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # Same COUNT does not mean same GRID: a nested and a staggered
             # grid at the same divisor have identical lengths but shifted
             # edge values (GB_CAP_STAGGER). Compare values, not just size.
+            # NOTE (overlap, 2026-08-23): cap_overlap_frac widens cell
+            # SPANS only -- the stored edge array is identical at any
+            # overlap, so resumes across an overlap change pass BY DESIGN
+            # (that is the intended rewind workflow), and neither the
+            # store nor band_info records a cell width or overlap value
+            # that could mismatch. Enforcement semantics change from the
+            # next propose on; the stored cap/iters/best arrays keep their
+            # per-cell meaning unchanged.
             if "cap_edges" in bi and not np.allclose(
                 np.asarray(bi["cap_edges"], dtype=float),
                 _to_numpy(self.cap_edges), rtol=0.0, atol=1e-12,
@@ -10200,6 +10508,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 cap_arr[:] = int(self.leaf_cap_start)
                 if self.cap_divisor > 1:
                     bi["band_leaf_cap"][:] = int(self.leaf_cap_start)
+                # Overlap echo: geometry in FD bins (w = s/(1-p), core =
+                # s - 2x; s = the median cap-cell stride -- uniform grids
+                # have one stride, get_n grids vary per band).
+                _ov_txt = ""
+                if self.cap_overlap_frac > 0.0:
+                    _p = self.cap_overlap_frac
+                    _s_bins = float(np.median(
+                        _to_numpy(self._cap_band_step))) / float(self.df)
+                    _w_bins = _s_bins / (1.0 - _p)
+                    _core_bins = 2.0 * _s_bins - _w_bins
+                    _ov_txt = (
+                        f", overlap {_p:g}: width {_w_bins:g} bins, "
+                        f"core {_core_bins:g}"
+                    )
                 logger.info(
                     f"{self.name}: armed leaf cap at "
                     f"{int(self.leaf_cap_start)} for {len(cap_arr)} "
@@ -10207,6 +10529,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     + f"(divisor {self.cap_divisor} over "
                     f"{self.num_bands} sub-bands"
                     + (", STAGGERED grid" if self.cap_stagger else "")
+                    + _ov_txt
                     + ")."
                 )
             self._cap_leaf_cap = cap_arr

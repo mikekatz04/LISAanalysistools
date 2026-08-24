@@ -531,6 +531,27 @@ class GBSettings(Settings):
     cap_stagger: bool = dataclasses.field(
         default_factory=env_default("GB_CAP_STAGGER", False, bool)
     )
+    # cap_overlap_frac: OVERLAP the leaf-cap cells (user design 2026-08-23).
+    # Each cap cell's enforcement SPAN widens symmetrically so it shares
+    # this fraction of its own width with EACH neighbour: 0.25 gives the
+    # 1/4-overlap / 1/2-alone / 1/4-overlap layout (cell width w = s/(1-p)
+    # for stride s; extension x = (w-s)/2 = s/6 at p=0.25). The stored EDGE
+    # grid never changes -- same count, same stride, same stagger -- so
+    # resume guards and every stored cap array keep their shapes, and a
+    # rewound store picks the new semantics up with no migration. A leaf in
+    # an overlap zone is a member of BOTH covering cells: the occupancy
+    # census counts it in both, and a location is AT CAP when ANY covering
+    # cell is at its cap (AND-headroom for births / cap-drift entries).
+    # Purpose: prevents FORMATION of split sources at cap-cell edges (the
+    # flagship 20.38 mHz double-count straddled a cell edge -- each
+    # fragment lived under its own cell's cap while the pair shared one
+    # posterior mode). Only acts while caps are armed (search stages).
+    # Valid range [0, 0.5); 0 (default) is bit-identical to the exact
+    # partition. Meaningless at cap_divisor == 1 (forced off there).
+    # Env: GB_CAP_OVERLAP_FRAC.
+    cap_overlap_frac: float = dataclasses.field(
+        default_factory=env_default("GB_CAP_OVERLAP_FRAC", 0.0, float)
+    )
     # Task-b: narrow per-band WDM slabs. Each per-band sub-band-buffer slab
     # spans a few WDM layers centered on the band instead of the full analysis
     # band ``Nf_active``, cutting the dominant buffer memory term by

@@ -104,6 +104,59 @@ def make_cap_edges(band_edges, divisor: int, stagger: bool = False):
     return np.concatenate([inner.ravel(), be[-1:]])
 
 
+def make_cap_edge_extensions(band_edges, cap_edges, divisor, overlap_frac):
+    """Per-EDGE half-extensions for OVERLAPPING cap cells (design 2026-08-23).
+
+    Overlap mode widens every cap cell's enforcement SPAN symmetrically --
+    cell ``i`` covers ``[e_i - x_i, e_{i+1} + x_{i+1}]`` -- while the stored
+    edge array itself NEVER changes (same count, stride and stagger, so
+    resume guards and stored cap arrays keep their shapes). The extension is
+    set so adjacent cells share a fraction ``p = overlap_frac`` of the
+    cell's own width ``w`` with each neighbour::
+
+        w = s / (1 - p)          # s = cap-cell stride (band width / K)
+        x = (w - s) / 2 = s * p / (2 * (1 - p))
+
+    ``p = 0.25`` gives the 1/4-overlap / 1/2-alone / 1/4-overlap layout
+    (``w = 4s/3``, ``x = s/6``; shared zone ``2x = w/4``; exclusive core
+    ``s - 2x = w/2``). ``p < 0.5`` is REQUIRED: at 0.5 the exclusive core
+    vanishes and a frequency could cover 3+ cells.
+
+    Each interior edge's ``x`` uses the stride of the band CONTAINING that
+    edge (bands may have unequal widths on the get_n grid; uniform grids get
+    one value everywhere). The two END edges get ``x = 0``: the analysis
+    window never widens, so neighbour indices stay in range by construction.
+
+    Args:
+        band_edges: 1D ascending sub-band edges (Hz).
+        cap_edges: the cap-cell edge array from :func:`make_cap_edges`
+            (nested or staggered) built over the same ``band_edges``.
+        divisor: cap cells per sub-band (``K``).
+        overlap_frac: ``p`` in ``[0, 0.5)``.
+
+    Returns:
+        ``np.ndarray`` of length ``len(cap_edges)`` -- one half-extension
+        per cap edge, zeros at both ends.
+    """
+    p = float(overlap_frac)
+    if not (0.0 <= p < 0.5):
+        raise ValueError(
+            f"cap overlap fraction (GB_CAP_OVERLAP_FRAC) must be in "
+            f"[0, 0.5) -- at 0.5 the exclusive core vanishes and a leaf "
+            f"could cover 3+ cells; got {p}."
+        )
+    be = np.asarray(band_edges, dtype=float)
+    ce = np.asarray(cap_edges, dtype=float)
+    step = (be[1:] - be[:-1]) / max(1, int(divisor))
+    edge_band = np.clip(
+        np.searchsorted(be, ce, side="right") - 1, 0, len(be) - 2
+    )
+    x = (p / (2.0 * (1.0 - p))) * step[edge_band]
+    x[0] = 0.0
+    x[-1] = 0.0
+    return x
+
+
 def cap_divisor_from_edges(band_edges, cap_edges) -> int:
     """Infer the cap divisor ``K`` from a stored (band_edges, cap_edges) pair."""
     nb = len(np.asarray(band_edges)) - 1

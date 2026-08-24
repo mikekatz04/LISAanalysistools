@@ -1,14 +1,177 @@
 #!/bin/bash
 # ============================================================================
-# PRODUCTION global fit -- 3-month Tobs (gb + vgb + psd + galfor, mojito)
-# Staged recipe: noise_search -> noise_vgb_search -> gb_search -> full_pe
-# via scripts/fstat_proposal/run_combined_staged.py  (LAT dev >= 53dc401)
+# HIGHF probe -- 3-month Tobs, GB-ONLY (erebor.gb_no_fg composition, mojito)
+# Staged recipe: gb_search -> full_pe   (NO noise / vgb stages)
+# via scripts/fstat_proposal/run_combined_staged.py GB_ONLY=1 (LAT dev)
 #
 # RESUME: re-submitting this script resumes automatically -- the h5 backend
 # restores the last saved iteration and completed stage statuses. Keep the
-# same FILE_STORE_DIR/BASE_FILE_NAME and env between submissions. For a
-# fresh start, move/delete ${STORE_DIR} first.
+# same FILE_STORE_DIR/BASE_FILE_NAME and env between submissions.
 #
+# ############################################################################
+# ## HIGHF (2026-08-24) -- GB-ONLY, INJECTION PSD, NO NOISE WAIT,          ##
+# ## OVERLAP CAP CELLS, 20-LEAF BUDGET, 1 GPU. FRESH STORE START ONLY.     ##
+# ##                                                                        ##
+# ## User ruling 2026-08-24: "just do GBs, no PSD/foreground, or VGB       ##
+# ## modules (still use the same injection data with all of them in it).   ##
+# ## And use the injection psd for mojito. I do not want to wait for the   ##
+# ## psd." Plus: keep the v6 cap-cell / sub-band setup + the overlap.      ##
+# ##                                                                        ##
+# ## COMPOSITION (GB_ONLY=1 -> erebor.gb_no_fg, the stock variant DESIGNED ##
+# ## for GB-only running):                                                  ##
+# ##   * SAMPLED branches: gb ONLY. No psd, galfor, or vgb branch, none    ##
+# ##     of their moves, no noise_search / noise_vgb_search stages. The    ##
+# ##     run starts at gb_search on iteration 1.                           ##
+# ##   * DATA: unchanged -- SOURCE_TYPES=NOISE,GB,VGB keeps the full       ##
+# ##     mojito injection (NOISE brick + GB galaxy + VGBs) in the data.    ##
+# ##     Unmodeled content (VGB power, and the confusion foreground,      ##
+# ##     which the fixed PSD does NOT whiten -- no galaxy term) just sits  ##
+# ##     in the residual. Accepted trade for zero noise-stage wait; VGBs   ##
+# ##     live at 0.009-6.3 mHz, mostly below the high-f focus anyway.      ##
+# ##   * SENSITIVITY: the INJECTION instrument PSD, fixed for the whole    ##
+# ##     run, live from iteration 1: PSD_FROM_NOISE_FILE=1 fits the       ##
+# ##     analytic [Soms_d, Sa_a] instrument model to the mojito NOISE     ##
+# ##     brick's tabulated estimates (resolve_noise_file_psd_params) ->   ##
+# ##     fixed_psd_kwargs -> setup_acs's no-psd-branch path builds every  ##
+# ##     walker AC from it. The ACA's linear_psd_arr (each AC's invC) is  ##
+# ##     the ONLY sensitivity the GB band engine, sig-het scorer, in-move ##
+# ##     F-stat fit and SNR gates read -- one path, fixed everywhere.     ##
+# ##   * lnL is SOURCE-ONLY (-1/2 <r|r>; gb_no_fg default): values are    ##
+# ##     NOT comparable to the v4/v5/v6 production lnL (noise term        ##
+# ##     dropped + different residual content).                           ##
+# ##                                                                        ##
+# ## OVERLAPPING CAP CELLS (GB_CAP_OVERLAP_FRAC=0.25, user design          ##
+# ## 2026-08-23), the experiment's subject: every cap cell's ENFORCEMENT   ##
+# ## SPAN widens so adjacent cells share a quarter of the cell's own       ##
+# ## width -- 1/4-overlap / 1/2-alone / 1/4-overlap. On the v6 grid        ##
+# ## (stride s = 33.75 FD bins): width 45 bins, extension 5.625/side,      ##
+# ## shared zone 11.25, exclusive core 22.5. EDGE grid unchanged (same     ##
+# ## 4928 cells / stride / stagger); only the SEMANTICS change: a leaf in  ##
+# ## an overlap zone belongs to BOTH covering cells (census counts both)   ##
+# ## and births / cap-drift entries need headroom in EVERY covering cell.  ##
+# ## WHY: stops split-source FORMATION at cap edges (the flagship          ##
+# ## 20.38 mHz double-count straddled the cell 4567/4568 edge).            ##
+# ##                                                                        ##
+# ## GB GEOMETRY = V6, UNCHANGED (user requirement 2026-08-24): same       ##
+# ## GB_SUBBAND_DIVISOR=8 / GB_BAND_UNIT_STRIDE=9 / GB_CAP_DIVISOR=4 /     ##
+# ## GB_CAP_STAGGER=1 and the same GB band (5.5556e-4 - 2.1944e-2 Hz,      ##
+# ## 154 layers -> 1232 sub-bands, 4928 cap cells). This holds under      ##
+# ## gb_no_fg BY CONSTRUCTION: all_sources' GB branch IS the gb_no_fg     ##
+# ## stack (AllSourcesGBSettings subclasses GBNoFgGBSettings;             ##
+# ## prepare_gb_branch / setup_gb_moves / GBSetup shared), so every GB     ##
+# ## env knob below resolves identically. Verify from the arm line:       ##
+# ##   "armed leaf cap at 1 for 4928 cap cells (divisor 4 over 1232        ##
+# ##    sub-bands, STAGGERED grid, overlap 0.25: width 45 bins, core       ##
+# ##    22.5)."                                                             ##
+# ## and the fixed-PSD line: "Using fixed PSD kwargs: {'psd_params':       ##
+# ## [<brick-fit values>], 'galfor_params': None}" -- if it reads          ##
+# ## [1.5e-11, 3e-15] the NOISE brick was NOT found (PSD_FROM_NOISE_FILE=1 ##
+# ## should have refused instead; investigate before trusting the run).    ##
+# ##                                                                        ##
+# ## DELIBERATE DELTAS vs the v6 production mirror:                        ##
+# ##   1. GB_CAP_OVERLAP_FRAC=0.25   (the experiment)                      ##
+# ##   2. GB_NLEAVES_MAX=20          (small leaf budget, user 2026-08-24)  ##
+# ##   3. 1 GPU (gres=gpu:1, GPUS=0)                                       ##
+# ##   4. GB-only + fixed injection PSD (GB_ONLY=1, this header)           ##
+# ##                                                                        ##
+# ## START: FRESH STORE DIR ONLY. Do NOT copy/rewind the v6 store: its     ##
+# ## recipe holds noise_search/noise_vgb_search stage groups the GB-only   ##
+# ## recipe lacks (hdfbackend add_recipe asserts name-for-name), its       ##
+# ## branch set includes psd/galfor/vgb, and its gb arrays are shaped      ##
+# ## nleaves_max=10000 vs 20 -- three independent hard mismatches.         ##
+# ##                                                                        ##
+# ##   git pull                                                             ##
+# ##   rm -rf gf_prod_3mo_highf   # or move aside                           ##
+# ##   sbatch scripts/fstat_proposal/submit_gf_highf_probe.sh               ##
+# ##                                                                        ##
+# ## There is no noise stage to rebuild, so the fresh start costs only     ##
+# ## the F-stat epoch fit (~20 min) before gb_search begins sampling.      ##
+# ##                                                                        ##
+# ## NOTE: this file previously held (a) the CONFINED high-f probe          ##
+# ## (4 layers around 20.380377 mHz) and (b) the 2026-08-23 full-band      ##
+# ## v6-mirror WITH noise/vgb stages (copy-and-rewind START). Both are     ##
+# ## SUPERSEDED by this GB-only config; recover them from git history.     ##
+# ############################################################################
+# ## V5 (2026-08-20) -- THE STAGGERED-GRID RUN.                             ##
+# ##                                                                        ##
+# ## One structural change on top of everything v4 learned:                 ##
+# ##                                                                        ##
+# ## * STAGGERED CAP-CELL GRID (GB_CAP_STAGGER=1, user design 2026-08-20).  ##
+# ##   Every interior cap edge shifts by half a cell, so NO cap edge        ##
+# ##   coincides with a sub-band edge: the leaf-cap seams and the band      ##
+# ##   seams (serial-within-band scheduling, F-stat fit interior, band      ##
+# ##   shutoff) share no equivalent boundary, and no source can sit on      ##
+# ##   both at once. Cells at band seams straddle them; storage sizes,      ##
+# ##   index arithmetic and the monitor are unchanged (LAT tests           ##
+# ##   tests/test_cap_stagger.py pin arithmetic == searchsorted exactly).   ##
+# ##                                                                        ##
+# ## Also explicitly pinned (both are code defaults since 8d926f27, run    ##
+# ## here for the first time in a full 3-month production):                 ##
+# ##   * BIRTH FIX (1274a66c): RJ births draw fdot_astro_ratio | (f0, Mc)  ##
+# ##     tight around the F-stat grid fdot instead of U[-5,5] -- the       ##
+# ##     high-f mosaic root cause.                                          ##
+# ##   * RIDGE-GIBBS (8d926f27 / Eryn 6ed5a8b): zero-likelihood resample   ##
+# ##     along the exact Mc^(5/3)(1+r)=const ridge -- unfreezes the        ##
+# ##     (Mc, r, dist) marginals. REQUIRES the GFRidgeGibbsMove sub-state   ##
+# ##     cold-row write-back (2026-08-21 fix): the plain eryn move updated  ##
+# ##     ONLY the main engine state, so the first-launch runs MPI-aborted   ##
+# ##     at gb_search it=2 on the coords-mismatch consistency check.        ##
+# ##                                                                        ##
+# ############################################################################
+# ## V6 (2026-08-20) -- THE SUB-BAND SHRINKAGE RUN.                         ##
+# ##                                                                        ##
+# ## ONE variable against v5 (user ruling): the SUB-BAND size. Everything  ##
+# ## else -- staggered cap grid, birth fix, ridge-Gibbs, cap drift gate,   ##
+# ## every other knob -- is byte-identical to submit_gf_3mo_v5.sh.         ##
+# ##                                                                        ##
+# ## * GB_SUBBAND_DIVISOR=8: uniform bands of layer/8 = 135 FD bins        ##
+# ##   (1232 bands vs v5's 154). The band is a SCHEDULING unit, not a      ##
+# ##   containment unit (user ruling: waveforms already extend past band   ##
+# ##   edges; the slabs carry max(leakage, FD-support) margins) -- the     ##
+# ##   dense-band 30-40-source serial chains become ~4-5 sources/band,    ##
+# ##   and per-band tempering ladders live at 1/8-layer granularity.       ##
+# ## * GB_BAND_UNIT_STRIDE=9: same-unit gap = 8 x layer/8 = exactly ONE    ##
+# ##   LAYER -- the separation production's stride-2-on-1-layer grid has   ##
+# ##   always run with (the conservative FD-support envelope was already   ##
+# ##   violated there by design; [GB_ORTHO_LL], default ON, remains the    ##
+# ##   operative independence monitor). 1232/9 ~ 137 concurrent bands per  ##
+# ##   unit, MORE than v5's 77 -- concurrency is preserved, the serial     ##
+# ##   chains shrink 8x, the pass runs 9 units instead of 2.               ##
+# ## * GB_CAP_DIVISOR=4 (v5: 32): K scales so the CAP-CELL GRID IS         ##
+# ##   BIT-IDENTICAL to v5's -- (layer/8)/4 = layer/32 cells, and the      ##
+# ##   staggered edge set lands on the same layer*(n+0.5)/32 points. The   ##
+# ##   cap variable is fully controlled; only the band grid moves.         ##
+# ##                                                                        ##
+# ## START: FRESH STORE ONLY -- the BAND grid changes, which no rewind or  ##
+# ## migration handles (three migration attempts failed on band-grid       ##
+# ## cascades; the resume guard refuses). Noise stages rebuild (~1-2 h):   ##
+# ##   rm -rf gf_prod_3mo_v6                                                ##
+# ##   git pull && sbatch scripts/fstat_proposal/submit_gf_3mo_v6.sh        ##
+# ############################################################################
+# ## START (user ruling 2026-08-20): REWOUND v4 COPY + CAP-GRID MIGRATION. ##
+# ## The staggered edges differ from the v4 store's, and the resume guard  ##
+# ## refuses a mismatched cap_edges array -- so after the rewind, rewrite  ##
+# ## the (empty-GB) cap grid in place with the migrate script:             ##
+# ##                                                                        ##
+# ##   git pull                                                             ##
+# ##   cp -r gf_prod_3mo_v4 gf_prod_3mo_v5                                  ##
+# ##   python scripts/fstat_proposal/reset_recipe_stage.py \                ##
+# ##       gf_prod_3mo_v5/gf_prod_3mo_testing.h5 gb_search \                ##
+# ##       --rewind-to-empty gb --apply                                     ##
+# ##   python scripts/fstat_proposal/migrate_gb_cap_grid.py \               ##
+# ##       gf_prod_3mo_v5/gf_prod_3mo_testing.h5 \                          ##
+# ##       --cap-divisor 32 --stagger                                       ##
+# ##   # verify readable, then STAMP THE BACKUP so self-heal can never      ##
+# ##   # resurrect the pre-rewind, pre-migration state:                     ##
+# ##   python -c "import h5py; h5py.File(                                   ##
+# ##       'gf_prod_3mo_v5/gf_prod_3mo_testing.h5','r').close()"            ##
+# ##   cp gf_prod_3mo_v5/gf_prod_3mo_testing.h5 \                           ##
+# ##      gf_prod_3mo_v5/gf_prod_3mo_testing_running_backup_copy.h5         ##
+# ##   sbatch scripts/fstat_proposal/submit_gf_3mo_v5.sh                    ##
+# ##                                                                        ##
+# ## (A genuinely fresh STORE_DIR also works -- the noise stages then       ##
+# ## rebuild from scratch and no migration is needed.)                      ##
+# ############################################################################
 # ############################################################################
 # ## V4 (2026-08-18) -- THE IN-MODEL CORRECTNESS RUN.                       ##
 # ##                                                                        ##
@@ -60,58 +223,15 @@
 # ============================================================================
 
 # ---- fill these in ---------------------------------------------------------
-# ============================================================================
-# HIGH-F ISOLATED-SOURCE PROBE (regenerated 2026-08-20 from submit_gf_3mo_v4
-# -- the production base with EVERY finding of 2026-08-19/20 live):
-#   * SIGHET_TUKEY_ALPHA=0.01 + edge-exclusion guard   (taper semantics fix)
-#   * SIGHET_N_CP=256                                  (null-coherence fix)
-#   * tight fdot_astro_ratio birth proposal            (LAT 1274a66c, code default)
-#   * instruments retired; anchor+drift checks on
-# GB band CONFINED to 4 layers around the 20.380377 mHz source (catalogue
-# fdot 1.02e-13; SNR ~46): the isolated-source lab for the fragmentation /
-# fdot-at-birth findings.
-#
-# RUN FRESH (band-grid change => never rewind/migrate a full-band store):
-#   rm -rf gf_highf_probe
-#   sbatch scripts/fstat_proposal/submit_gf_highf_probe.sh
-# Noise stages refit in minutes; first GB propose within ~15 min.
-#
-# PRE-REGISTERED VERDICT, recalibrated 2026-08-20 against (a) the snapshot-6
-# extended pre-fix baseline (375 iterations: mean 3.6 leaves/walker in the
-# +-30-bin window, brightest-leaf median offset +2.5 bins, only 2/24
-# walkers ever reached the clean single-template profile
-# [n=1, |off| <~ 1 bin, amp ~1.1x, fdot ~1.0x truth] -- the ~0.2-0.4%
-# cold-birth lottery) and (b) the confined sig-het PE posterior (the
-# reference: walkers ON the source spread f0 sigma ~3.7 bins along the
-# sky-Doppler ridge). Post-fix expectations:
-#   1. SINGLE-NESS: majority of walkers at n=1-2 leaves in the window
-#      within ~10-20 GB iterations (vs 2/24 after 375 pre-fix);
-#   2. per-walker brightest-leaf (f0, fdot) scatter consistent with the
-#      PE ridge posterior, NOT the +-5 x fdot_gr birth scatter;
-#   3. truth-cell caps stay <= 2-3 (pre-fix ratcheted the +1 cell to 11);
-#   4. low-f-equivalence not applicable here (confined band).
-# In-run confirmation the birth fix is live: "[birth] fdot_astro_ratio
-# proposal TIGHTENED" at the epoch-0 grid build; the ridge-Gibbs move
-# logs "gb_ridge_gibbs registered" (GB_RIDGE_GIBBS=0 ablates it).
-#
-# VARIANT B (user 2026-08-20, one extra submission): info-matrix proposal
-# fraction ZERO with the machinery kept armed -- in-model goes pure
-# stretch. Submit with:
-#   sbatch --export=ALL,GB_STRETCH_PROBABILITY=1.0 \
-#       scripts/fstat_proposal/submit_gf_highf_probe.sh
-# (use a different STORE_DIR via FILE_STORE_DIR to keep runs separate).
-# Ship back: gf_store_extract.py the store (+ logs/gb_fstat_fit as usual);
-# NOTE extract the *_running_backup_copy.h5 (quiescent), not the live h5.
-# ============================================================================
-#SBATCH --job-name=gf_highf_probe          # job name
+#SBATCH --job-name=gf3mo_highf       # job name
 #SBATCH --partition=gpu-80-spot   # GPU partition
-#SBATCH --gres=gpu:2              # 2 GPUs (GPUS=0,1 below are LOCAL indices)
+#SBATCH --gres=gpu:1              # 1 GPU (user, 2026-08-24: overlap test runs single-GPU)
 #SBATCH --nodes=1                 # single node
 #SBATCH --ntasks=3                # main + stopped spare + SAVER rank (mpiexec -n 3)
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=gf_highf_probe_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
+#SBATCH --output=gf3mo_highf_%j.log  # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -126,7 +246,12 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # stay intact for comparison and nothing can silently resume. BASE_FILE_NAME
 # stays gf_prod_3mo so every analysis tool (monitor generator, digests) works
 # unchanged -- they take the DIRECTORY as their argument.
-STORE_DIR=./gf_highf_probe/
+# HIGHF: own store dir -- cannot collide with the running v6 store. FRESH
+# start ONLY (header START block): never seed from a v6 copy -- recipe
+# stage-groups, branch set and gb nleaves shapes all mismatch. BASE_FILE_NAME
+# stays gf_prod_3mo so every analysis tool (monitor generator, digests)
+# works unchanged -- they take the DIRECTORY as their argument.
+STORE_DIR=./gf_prod_3mo_highf/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -198,7 +323,21 @@ export PROGRESS=0
 export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
-export GPUS=0,1
+export GPUS=0
+
+# ---- GB-ONLY composition (user ruling 2026-08-24; see header) --------------
+# erebor.gb_no_fg: gb is the ONLY sampled branch; stages gb_search -> full_pe.
+export GB_ONLY=1
+# The DATA keeps the FULL injection: NOISE brick + GB galaxy + VGBs summed
+# into the streams exactly as in the production runs. Only sampling shrinks.
+# (Runner default is the same; pinned so the composition is explicit.)
+export SOURCE_TYPES=NOISE,GB,VGB
+# INJECTION PSD, made a hard requirement: fit [Soms_d, Sa_a] to the mojito
+# NOISE brick's tabulated estimates. =1 (not the auto default) so a missing
+# brick REFUSES to start instead of silently falling back to the stock
+# analytic levels [1.5e-11, 3e-15]. Knob = the attribute name
+# (general.psd_from_noise_file).
+export PSD_FROM_NOISE_FILE=1
 
 # ---- output ----------------------------------------------------------------
 export FILE_STORE_DIR=${STORE_DIR}
@@ -206,7 +345,7 @@ export BASE_FILE_NAME=gf_prod_3mo
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
-export NUM_ITERATIONS=100         # total engine iterations (resume-safe; NITER was a dead name)
+export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER was a dead name)
 
 # ---- band + domain ---------------------------------------------------------
 # EXPLICIT Tobs (2026-08-13): sbatch propagates the submitting shell's env,
@@ -215,33 +354,17 @@ export NUM_ITERATIONS=100         # total engine iterations (resume-safe; NITER 
 export TOBS_TARGET=7776000
 export MIN_FREQ=4e-4
 export MAX_FREQ=2.5e-2
-# CONFINED WINDOW (noble-mixing-taco interior rule): 4 whole WDM layers
-# 145..148, the 20.380377 mHz flagship source in layer 146, INTERIOR (the
-# F-stat fit uses band_edges[1:-1]; half-layer margins because the snap is
-# inward). 4 bands -> 2/2 shard split on 2 GPUs.
-export GB_MIN_FREQ=2.006944e-02    # 144.5 layers -> snaps to 145
-export GB_MAX_FREQ=2.076389e-02    # 149.5 layers -> snaps to 149
-
-# ---- THE TWO FIXES UNDER TEST (both are the code defaults on >= 8d926f27;
-#      pinned explicitly so the store's provenance is unambiguous) ----
-# Birth fix (LAT 1274a66c): RJ births draw fdot_astro_ratio | (f0, Mc) from
-# the tight mixture around the F-stat grid's fdot instead of U[-5, 5].
-export GB_FSTAT_BIRTH_RATIO_TIGHT=1
-# Ridge fix (LAT 8d926f27 / Eryn 6ed5a8b): zero-likelihood Gibbs resample
-# along the exact Mc^(5/3)(1+r)=const ridge, unfreezing (Mc, r, dist).
-export GB_RIDGE_GIBBS=1
-# CAP DRIFT GATE (2026-08-20, root-caused on THIS probe's pre-fix pass:
-# births respected the cap but in-model repeats walked 29 leaves into a
-# cap-1 cell). In-model proposals into a foreign at-cap cell are vetoed;
-# piles drain. Without it the confined window floods and the single-ness
-# criteria are unscoreable. Watch [GB_CAPGATE] lines.
-export GB_CAP_DRIFT_GATE=1
+export GB_MIN_FREQ=5.5e-4
+export GB_MAX_FREQ=2.2e-2
 
 # ---- GB knobs (everything else rides the flipped defaults: sig-het in-model,
 #      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,
 #      at-cap RJ skip, cell-lifecycle ll credit, GB_MODE=search +
 #      GB_PE_MOVES_STRICT=1 + GB_SEARCH_PRIOR_REMOVAL=1 seeded by the script) --
-export GB_NLEAVES_MAX=10000
+# 20 (user, 2026-08-24): the overlap test runs with a SMALL leaf budget --
+# deliberately not the v6 production value (10000). Intentional delta #2 of
+# the four listed in the header (overlap frac, leaf budget, 1 GPU, GB-only).
+export GB_NLEAVES_MAX=20
 # FULL parity-unit residency (grouped RJ->in-model scheduling, 2026-08-13):
 # one unit = 77 bands x 24 temps x 24 walkers = 44,352 cells; the scheduler
 # clamps n_slots to min(GB_N_SUBBANDS, cells), so 50000 means every cell is
@@ -609,7 +732,78 @@ export GB_ORTHO_LL_CHECK=1
 # spans this run's own observed duplicate-parking distance of ~1 Doppler
 # width (15.5 FD bins at 20 mHz); at K=64 the cell is 1.1 Doppler widths
 # there and parked duplicates escape into the neighbouring cell.
-export GB_CAP_DIVISOR=32
+# V6: SUB-BAND SHRINKAGE (the run's ONE variable; see the V6 header).
+# Uniform layer/8 bands: 135 FD bins each, 1232 bands. The startup
+# separation diagnostic logs the conservative-envelope verdict; the
+# operative independence monitor is [GB_ORTHO_LL] (default ON) exactly
+# as on the production 1-layer grid. GB_SUBBAND_DIVISOR=1 reverts.
+export GB_SUBBAND_DIVISOR=8
+# Stride 9 = same-unit gap of exactly ONE LAYER, mimicking production's
+# stride-2-on-1-layer separation. ~137 concurrent bands/unit (v5: 77);
+# 9 units per pass instead of 2.
+export GB_BAND_UNIT_STRIDE=9
+# VGB DE-COUPLED from the fine grid (2026-08-22 timing autopsy): the VGB
+# branch inherits GB_SUBBAND_DIVISOR through GBSetup.init_band_structure,
+# so v6 silently ran the ~30-source VGB move on 1232 narrow bands --
+# vgb_pe 34 s/propose vs v5's 8.5 (run_tempering 25 s; fill_slots 55,920
+# vs 4,800). VGB_BAND_LAYERS=8 merges 8 fine bands back to the 1-layer
+# separations, restoring v5's VGB geometry (VGB has no RJ surface; its
+# per-band arrays migrate on the resume that picks this up). Recovers
+# ~4.3 min of the 18.3-min iteration.
+export VGB_BAND_LAYERS=8
+# STAGING BATCH CAP (2026-08-23, full_pe OOM autopsy): v6 died at it=173
+# on a cupy OOM (3.09 GB _expand_B request, gpu0 93.06/93.6 GB) during
+# rj_prior_pe's sig-het setup -- this script never carried the cap the
+# v5/1-yr scripts got, and full_pe's picked pools (779 leaves/walker,
+# 1230/1232 bands occupied) finally outgrew the card. Same knobs as the
+# 3-mo v5 script; the in-model staging loop also pool-sweeps between
+# sub-blocks (GB_INMODEL_BATCH_MEMPOOL_FREE default on).
+export GB_INMODEL_SETUP_BATCH=1024
+export GB_INFOMAT_MEMPOOL_FREE=1
+# K=4, NOT v5's 32: (layer/8)/4 = layer/32 cells -- the staggered
+# cap-cell grid comes out BIT-IDENTICAL to v5's, so the cap machinery
+# is a controlled variable in this comparison.
+export GB_CAP_DIVISOR=4
+# V5: STAGGER the cap grid against the band grid (user design 2026-08-20).
+# Interior cap edges shift half a cell (2.17 uHz / ~17 FD bins at K=32) so
+# no cap edge coincides with a band edge; the cell at each band seam
+# straddles it (owned by the upper band). First grid cell is half-width,
+# last is 1.5 -- everything else identical widths, counts and storage.
+# REQUIRES a fresh store (the resume guard refuses the changed edges).
+# GB_CAP_STAGGER=0 reverts to the v4 nested grid instantly.
+export GB_CAP_STAGGER=1
+# ---- THE HIGHF RUN'S ONE FUNCTIONAL CHANGE AGAINST V6 ----------------------
+# OVERLAPPING CAP CELLS (user design 2026-08-23). Each cap cell's
+# enforcement SPAN widens so it shares a quarter of its own width with each
+# neighbour: 1/4-overlap / 1/2-alone / 1/4-overlap. On this grid (stride
+# s = 33.75 FD bins): width 45 bins, extension 5.625 bins per side, shared
+# zone 11.25 bins, exclusive core 22.5 bins. The EDGE grid is unchanged
+# (same 4928 cells / stride / stagger -- a band edge still sits 11.25 bins
+# inside the straddling cell's CORE, so the cap/band seam decoupling
+# survives). SEMANTICS: a leaf in an overlap zone is a member of BOTH
+# covering cells; the occupancy census counts it in both, and births /
+# cap-drift entries need headroom in EVERY covering cell (AND-headroom).
+# Purpose: stop split-source FORMATION at cap edges (the flagship
+# 20.38 mHz double-count straddled the cell 4567/4568 edge). Resume-safe
+# over a rewound v6 copy: edges compare equal, no migration.
+# GB_CAP_OVERLAP_FRAC=0 reverts to the exact v6 partition bit-identically.
+export GB_CAP_OVERLAP_FRAC=0.25
+# ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
+#      so the store's provenance is unambiguous) ----
+# Birth fix (1274a66c): births draw fdot_astro_ratio | (f0, Mc) from the
+# tight mixture around the F-stat grid fdot instead of U[-5, 5].
+export GB_FSTAT_BIRTH_RATIO_TIGHT=1
+# Ridge-Gibbs (8d926f27 / Eryn 6ed5a8b): zero-likelihood-call resample
+# along the exact Mc^(5/3)(1+r)=const ridge; unfreezes (Mc, r, dist).
+export GB_RIDGE_GIBBS=1
+# CAP DRIFT GATE (2026-08-20, root-caused on the high-f probe: births
+# respect the per-cell cap but in-model repeats walked 29 leaves into a
+# cap-1 cell -- the 2026-08-15 TODO made real). In-model proposals whose
+# f0 lands in a FOREIGN at-cap cell are vetoed; within-cell moves and
+# drains of over-full cells stay allowed. This is the same mechanism
+# that let production mosaics stack leaves past their cell caps. Watch
+# [GB_CAPGATE] veto counts; GB_CAP_DRIFT_GATE=0 reverts.
+export GB_CAP_DRIFT_GATE=1
 # Leaf-cap PATIENCE: consecutive iterations without a sufficient (D/2)
 # lnL improvement before a cap CELL advances. Code default is now 3
 # (2026-08-16, was 5): caps live on the band/8 cap-cell grid, so 1,232
@@ -726,6 +920,8 @@ export GB_USE_GALAXY_PRIOR=1
 
 # ---- NOISE (psd + galfor) internal repeats: 50 -> 10 (user ruling
 #      2026-08-15) ---------------------------------------------------------
+# >>> INERT under GB_ONLY=1 (no psd/galfor branch exists, so these moves are
+# >>> never built). Kept for provenance / easy revert to the full composition.
 # Each PSDMove.propose runs num_prop_repeats internal MCMC repeats, and each
 # repeat scores the whole (ntemps x nwalkers) ladder -- one batched build per
 # distinct walker. At 50 repeats that is ~660 batched covariance
@@ -743,6 +939,8 @@ export GALFOR_NUM_PROP_REPEATS=10
 
 # ---- VGB: exact chunked-het in-model scorer (sig-het accuracy at the
 #      loudest-VGB SNRs is unverified -- [GB_CELL_LL] growth in smoke 1) ----
+# >>> INERT under GB_ONLY=1 (no vgb branch; VGB power stays in the data as
+# >>> residual). VGB_BAND_LAYERS above is inert too. Kept for provenance.
 export VGB_SIGHET_INMODEL=0
 # VGB RELAUNCH BLOCK (2026-08-15, user rulings). The VGB likelihood was
 # OFF all run (betas=[1e-4] bug) and 36/55 leaves were frozen by the GB
@@ -799,43 +997,19 @@ if [ -e "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" ]; then
   echo "        or move this one aside first."
 else
   echo "[FRESH] no store at ${STORE_DIR} -- starting a NEW run from scratch."
-  echo "[FRESH] stages run from the top (noise_search -> noise_vgb_search ->"
-  echo "        gb_search -> full_pe); the F-stat grid + epoch center table"
-  echo "        are fitted fresh against this run's own residual."
+  echo "[FRESH] GB-only: stages run gb_search -> full_pe directly (no noise"
+  echo "        stages exist); the F-stat grid + epoch center table are"
+  echo "        fitted fresh against this run's own residual under the"
+  echo "        fixed injection PSD."
 fi
 
 # ============================================================================
-# OPTIONAL LAUNCH SHORTCUT: graft v3's finished noise_search (2026-08-18)
-# ============================================================================
-# v4 changes NOTHING on the noise side -- the whole config diff against v3 is
-# GB / sig-het / F-stat knobs -- so refitting the PSD and galactic foreground
-# from scratch just reproduces a result v3 already has, at ~1.5 h.
-#
-# But noise_vgb_search MUST re-run: the VGB ladder moved to eryn's
-# make_ladder, and a resumed store's stored ladder WINS over the configured
-# one. (Measured on the temper probes: arms prepped from an older base kept
-# the old 1/1.2**i ladder, while freshly-built arms got make_ladder.)
-#
-# So: let v4 author its own store -- every grid, shape and ladder correct by
-# construction -- and move only the fitted numbers in.
-#
-#   1. sbatch this script against the fresh STORE_DIR. Let it reach
-#      noise_search and SAVE ONE iteration, then scancel. That iteration is
-#      throwaway; it exists so the datasets are allocated with >= 1 row.
-#   2. python scripts/fstat_proposal/graft_noise_state.py \
-#          <v3_store>/gf_prod_3mo_testing.h5 \
-#          ${STORE_DIR}/${BASE_FILE_NAME}_testing.h5          # dry run
-#      ... then the same command with --apply.
-#   3. sbatch this script again. It resumes from the grafted row, sees
-#      noise_search complete, and starts noise_vgb_search on the NEW ladder.
-#
-# The graft tool finds v3's handover row itself (VGB is frozen for the whole
-# of noise_search and starts moving on the first noise_vgb iteration), gates
-# on both stores having zero GB leaves, and refuses to touch sub_backend/vgb
-# -- which is where the ladder lives, and the entire point of the exercise.
-# Do NOT rewind a COPY of the v3 store instead: that carries v3's grids and
-# rung counts into v4 and needs a migration per array, which is how the three
-# earlier band-grid migrations failed.
+# NO NOISE GRAFT (2026-08-24). Earlier versions of this file documented the
+# graft_noise_state.py shortcut for importing a finished noise_search. With
+# GB_ONLY=1 there is NO noise stage and NO psd/galfor/vgb dataset in the
+# store -- nothing to graft, nothing to wait for. The sensitivity is the
+# fixed injection PSD from the NOISE brick (PSD_FROM_NOISE_FILE=1 above),
+# resolved at build time before iteration 1.
 
 # LATER REFITS: GB_FSTAT_REFIT_EVERY=100 proposal-hits (~8 h at the new
 # iteration cadence, ~3.5% overhead at a 17.7-min fit). To force an extra

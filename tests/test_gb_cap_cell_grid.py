@@ -27,6 +27,7 @@ from lisatools.globalfit.state import (
     cap_divisor_from_edges,
     ensure_cap_cell_fields,
     ensure_leaf_cap_fields,
+    make_cap_edge_extensions,
     make_cap_edges,
 )
 
@@ -743,3 +744,380 @@ class GhostIncrementGuardTest(unittest.TestCase):
         self.assertGreater(
             int(caps[-1].max()), 1,
             "with the guard OFF, flat cells must still ratchet as before")
+
+
+# ============================================================================
+# OVERLAPPING CAP CELLS (user design 2026-08-23, GB_CAP_OVERLAP_FRAC).
+# ============================================================================
+# The edge grid never changes; each cell's enforcement SPAN widens so
+# adjacent cells share a fraction p of the cell's own width w with each
+# neighbour (p = 0.25 -> 1/4-overlap / 1/2-alone / 1/4-overlap; w = s/(1-p),
+# x = (w-s)/2 = s/6). A leaf in an overlap zone is a member of BOTH covering
+# cells: the census counts it into both, and a location is AT CAP when ANY
+# covering cell is at its cap (AND-headroom for births / entries).
+
+
+def _move_overlap(cap_divisor, overlap, stagger=False, ntemps=1, nwalkers=1,
+                  band_edges=BAND_EDGES):
+    """A fake GB move carrying the overlap-mode cap-grid attributes."""
+    be = np.asarray(band_edges, dtype=float)
+    m = _move(cap_divisor, ntemps=ntemps, nwalkers=nwalkers,
+              num_bands=len(be) - 1, band_edges=be)
+    m.cap_stagger = bool(stagger) and m.cap_divisor > 1
+    m.cap_edges = np.asarray(
+        make_cap_edges(be, m.cap_divisor, stagger=m.cap_stagger)
+    )
+    m.cap_overlap_frac = float(overlap) if m.cap_divisor > 1 else 0.0
+    m._cap_edge_ext = None
+    if m.cap_overlap_frac > 0.0:
+        m._cap_edge_ext = make_cap_edge_extensions(
+            be, m.cap_edges, m.cap_divisor, m.cap_overlap_frac
+        )
+    return m
+
+
+class OverlapGeometryTest(unittest.TestCase):
+    """The 1/4-1/2-1/4 layout numbers, through the installed constructor."""
+
+    def test_production_v6_numbers_in_bins(self):
+        # v6 fine grid analog with df = 1 "Hz" per bin: 135-bin sub-bands,
+        # K = 4 -> stride s = 33.75 bins. p = 0.25 must give x = 5.625,
+        # width 45, core 22.5, shared zone 11.25 -- the arm-log numbers.
+        be = np.arange(0.0, 135.0 * 5 + 1, 135.0)
+        ce = make_cap_edges(be, 4, stagger=True)
+        x = make_cap_edge_extensions(be, ce, 4, 0.25)
+        s = 33.75
+        np.testing.assert_allclose(x[1:-1], s / 6.0, rtol=1e-12)
+        self.assertAlmostEqual(float(x[1]), 5.625)
+        w = s / (1 - 0.25)
+        self.assertAlmostEqual(w, 45.0)                    # widened width
+        self.assertAlmostEqual(s - 2 * float(x[1]), 22.5)  # exclusive core
+        self.assertAlmostEqual(2 * float(x[1]), 11.25)     # shared zone
+        # shared zone = w/4, core = w/2: the user's exact layout
+        self.assertAlmostEqual(2 * float(x[1]), w / 4.0)
+        self.assertAlmostEqual(s - 2 * float(x[1]), w / 2.0)
+
+    def test_end_edges_never_extend(self):
+        ce = make_cap_edges(BAND_EDGES, 4, stagger=True)
+        x = make_cap_edge_extensions(BAND_EDGES, ce, 4, 0.25)
+        self.assertEqual(float(x[0]), 0.0)
+        self.assertEqual(float(x[-1]), 0.0)
+        self.assertTrue(np.all(x[1:-1] > 0))
+
+    def test_zero_overlap_is_all_zeros(self):
+        ce = make_cap_edges(BAND_EDGES, 4)
+        x = make_cap_edge_extensions(BAND_EDGES, ce, 4, 0.0)
+        np.testing.assert_array_equal(x, np.zeros(len(ce)))
+
+    def test_invalid_fractions_refuse(self):
+        ce = make_cap_edges(BAND_EDGES, 4)
+        for bad in (-0.1, 0.5, 0.75, 1.0):
+            with self.assertRaises(ValueError):
+                make_cap_edge_extensions(BAND_EDGES, ce, 4, bad)
+
+    def test_non_uniform_bands_use_the_containing_band_stride(self):
+        be = np.array([1e-3, 1.5e-3, 4.0e-3, 4.2e-3])
+        ce = make_cap_edges(be, 4)
+        x = make_cap_edge_extensions(be, ce, 4, 0.25)
+        steps = (be[1:] - be[:-1]) / 4
+        # an interior edge inside band 1 gets band 1's stride
+        j = 6  # edge between cells 5 and 6, strictly inside band 1
+        self.assertAlmostEqual(float(x[j]), steps[1] / 6.0)
+
+
+class OverlapMembershipTest(unittest.TestCase):
+    """core -> 1 cell, overlap zone -> 2 cells, exact boundary values.
+
+    Runs on an exactly-representable binary grid (band width 1.0, stride
+    0.25) so the "exactly ON the edge / exactly AT the core boundary"
+    assertions test the SEMANTICS (strict vs non-strict comparisons), not
+    float round-off; ``x`` is read from the move's own extension array for
+    the same reason.
+    """
+
+    BE = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+
+    def setUp(self):
+        self.m = _move_overlap(4, 0.25, band_edges=self.BE)
+        self.s = (self.BE[1] - self.BE[0]) / 4  # cap stride = 0.25, exact
+        self.x = float(self.m._cap_edge_ext[2])  # the move's own x
+
+    def _members(self, f):
+        f = np.atleast_1d(np.asarray(f, dtype=float))
+        band = np.clip(
+            np.searchsorted(self.BE, f, side="right") - 1,
+            0, len(self.BE) - 2,
+        ).astype(np.int64)
+        return self.m._cap_cell_members(band, f)
+
+    def test_core_point_is_single_membership(self):
+        # dead center of cell 1
+        f = self.BE[0] + 1.5 * self.s
+        p, nb, hn = self._members(f)
+        self.assertEqual(int(p[0]), 1)
+        self.assertFalse(bool(hn[0]))
+
+    def test_lower_overlap_zone_adds_the_lower_neighbour(self):
+        # just above the cell 1/2 edge: covered by cells 2 (primary) and 1
+        f = self.BE[0] + 2 * self.s + 0.5 * self.x
+        p, nb, hn = self._members(f)
+        self.assertEqual(int(p[0]), 2)
+        self.assertTrue(bool(hn[0]))
+        self.assertEqual(int(nb[0]), 1)
+
+    def test_upper_overlap_zone_adds_the_upper_neighbour(self):
+        f = self.BE[0] + 2 * self.s - 0.5 * self.x
+        p, nb, hn = self._members(f)
+        self.assertEqual(int(p[0]), 1)
+        self.assertTrue(bool(hn[0]))
+        self.assertEqual(int(nb[0]), 2)
+
+    def test_boundary_values(self):
+        e = self.BE[0] + 2 * self.s   # the original cell 1/2 edge
+        # ON the shared edge: primary 2, also member of 1 (strict <)
+        p, nb, hn = self._members(e)
+        self.assertEqual(int(p[0]), 2)
+        self.assertTrue(bool(hn[0]))
+        self.assertEqual(int(nb[0]), 1)
+        # EXACTLY at the core boundary e + x: core point, single membership
+        p, nb, hn = self._members(e + self.x)
+        self.assertEqual(int(p[0]), 2)
+        self.assertFalse(bool(hn[0]))
+        # EXACTLY at e - x (upper core boundary of cell 1): single
+        p, nb, hn = self._members(e - self.x)
+        self.assertEqual(int(p[0]), 1)
+        self.assertFalse(bool(hn[0]))
+
+    def test_global_ends_have_no_phantom_neighbours(self):
+        eps = 1e-9 * self.s
+        p, nb, hn = self._members(self.BE[0] + eps)
+        self.assertEqual(int(p[0]), 0)
+        self.assertFalse(bool(hn[0]))  # x[0] = 0: nothing below cell 0
+        p, nb, hn = self._members(self.BE[-1] - eps)
+        self.assertEqual(int(p[0]), self.m.num_cap_cells - 1)
+        self.assertFalse(bool(hn[0]))  # x[-1] = 0: nothing above the last
+
+    def test_membership_indices_always_in_range(self):
+        rng = np.random.default_rng(3)
+        f = rng.uniform(self.BE[0], self.BE[-1] * (1 - 1e-12), 5000)
+        p, nb, hn = self._members(f)
+        for arr in (p, nb):
+            self.assertTrue(int(arr.min()) >= 0)
+            self.assertTrue(int(arr.max()) <= self.m.num_cap_cells - 1)
+        # p < 0.5: a neighbour is never 2+ cells away
+        np.testing.assert_array_less(np.abs(nb - p), 2)
+
+    def test_numpy_twin_agrees(self):
+        rng = np.random.default_rng(4)
+        f = rng.uniform(self.BE[0], self.BE[-1] * (1 - 1e-12), 5000)
+        band = np.clip(
+            np.searchsorted(self.BE, f, side="right") - 1, 0, NUM_BANDS - 1
+        ).astype(np.int64)
+        p_d, nb_d, hn_d = self.m._cap_cell_members(band, f)
+        p_h, nb_h, hn_h = self.m._np_cap_members(f, band, self.BE)
+        np.testing.assert_array_equal(p_d, p_h)
+        np.testing.assert_array_equal(hn_d, hn_h)
+        np.testing.assert_array_equal(nb_d[hn_d], nb_h[hn_h])
+
+    def test_staggered_overlap_membership(self):
+        m = _move_overlap(4, 0.25, stagger=True, band_edges=self.BE)
+        s = (self.BE[1] - self.BE[0]) / 4
+        x = s / 6.0
+        # first interior staggered edge sits at lo + s/2 (cells 0|1)
+        e = self.BE[0] + 0.5 * s
+        f = np.array([e + 0.5 * x])
+        band = np.zeros(1, dtype=np.int64)
+        p, nb, hn = m._cap_cell_members(band, f)
+        self.assertEqual(int(p[0]), 1)
+        self.assertTrue(bool(hn[0]))
+        self.assertEqual(int(nb[0]), 0)
+
+
+class OverlapCensusTest(unittest.TestCase):
+    """Multi-membership census + default-0 bit-identity."""
+
+    def test_overlap_zone_leaf_counts_in_both_cells(self):
+        m = _move_overlap(4, 0.25)
+        s = (BAND_EDGES[1] - BAND_EDGES[0]) / 4
+        x = s / 6.0
+        # one alive leaf in the cells 1|2 overlap zone, one in cell 0's core
+        f0 = np.array([BAND_EDGES[0] + 2 * s + 0.4 * x,
+                       BAND_EDGES[0] + 0.5 * s])
+        sorter = _sorter(f0, [True, True])
+        _, counts = m._cap_cell_counts(sorter)
+        self.assertEqual(int(counts[0]), 1)
+        self.assertEqual(int(counts[1]), 1)  # zone leaf counts here...
+        self.assertEqual(int(counts[2]), 1)  # ...and here
+        self.assertEqual(int(counts.sum()), 3)  # 2 leaves, 3 memberships
+
+    def test_default_zero_census_is_bit_identical_to_the_partition(self):
+        rng = np.random.default_rng(11)
+        n = 400
+        f0 = rng.uniform(BAND_EDGES[0], BAND_EDGES[-1] * (1 - 1e-12), n)
+        alive = rng.random(n) < 0.6
+        t = rng.integers(0, 3, n)
+        w = rng.integers(0, 2, n)
+        m_part = _move(4, ntemps=3, nwalkers=2)
+        m_zero = _move_overlap(4, 0.0, ntemps=3, nwalkers=2)
+        s = _sorter(f0, alive, t, w)
+        flat_a, counts_a = m_part._cap_cell_counts(s)
+        flat_b, counts_b = m_zero._cap_cell_counts(s)
+        np.testing.assert_array_equal(flat_a, flat_b)
+        np.testing.assert_array_equal(counts_a, counts_b)
+        cap = rng.integers(1, 3, m_part.num_cap_cells)
+        mem_a = m_part._sorter_cap_members(s)
+        mem_b = m_zero._sorter_cap_members(s)
+        self.assertIsNone(mem_a[1])
+        self.assertIsNone(mem_b[1])
+        np.testing.assert_array_equal(
+            m_part._cap_at_cap_mask(s, counts_a, cap, flat_a, mem_a[0]),
+            m_zero._cap_at_cap_mask(s, counts_b, cap, flat_b, mem_b[0],
+                                    mem_b[1], mem_b[2]),
+        )
+
+    def test_default_zero_staggered_census_matches_searchsorted_oracle(self):
+        """Overlap 0 on the STAGGERED grid = the plain primary-cell census."""
+        rng = np.random.default_rng(12)
+        n = 400
+        f0 = rng.uniform(BAND_EDGES[0], BAND_EDGES[-1] * (1 - 1e-12), n)
+        alive = rng.random(n) < 0.6
+        m = _move_overlap(4, 0.0, stagger=True)
+        s = _sorter(f0, alive)
+        _, counts = m._cap_cell_counts(s)
+        oracle_cells = np.clip(
+            np.searchsorted(m.cap_edges, f0, side="right") - 1,
+            0, m.num_cap_cells - 1,
+        )
+        oracle = np.bincount(oracle_cells[np.asarray(alive, bool)],
+                             minlength=m.num_cap_cells)
+        np.testing.assert_array_equal(counts, oracle)
+
+
+class OverlapANDHeadroomTest(unittest.TestCase):
+    """AND-headroom: a birth needs headroom in EVERY covering cell."""
+
+    def _setup(self):
+        m = _move_overlap(4, 0.25)
+        s = (BAND_EDGES[1] - BAND_EDGES[0]) / 4
+        x = s / 6.0
+        return m, s, x
+
+    def _birth_blocked(self, m, counts, cap, f_draw):
+        """The prior-gate expression on a drawn birth frequency."""
+        f = np.atleast_1d(f_draw)
+        band = np.clip(
+            np.searchsorted(BAND_EDGES, f, side="right") - 1, 0, NUM_BANDS - 1
+        ).astype(np.int64)
+        cells, nb, hn = m._cap_cell_members(band, f)
+        t = np.zeros(1, dtype=np.int64)
+        w = np.zeros(1, dtype=np.int64)
+        return bool(m._row_at_cap(counts, cap, t, w, cells, nb, hn)[0])
+
+    def test_birth_blocked_when_the_neighbour_cell_is_at_cap(self):
+        m, s, x = self._setup()
+        cap = np.ones(m.num_cap_cells, dtype=int)
+        # cell 1 full (core leaf); cell 2 empty
+        occ = _sorter(np.array([BAND_EDGES[0] + 1.5 * s]), [True])
+        _, counts = m._cap_cell_counts(occ)
+        # draw in the 1|2 overlap zone, PRIMARY cell 2 (which has headroom):
+        # blocked anyway -- covering cell 1 is at cap
+        f_draw = BAND_EDGES[0] + 2 * s + 0.4 * x
+        self.assertTrue(self._birth_blocked(m, counts, cap, f_draw))
+        # draw in cell 2's CORE: allowed (only cell 2 covers it)
+        f_core = BAND_EDGES[0] + 2.5 * s
+        self.assertFalse(self._birth_blocked(m, counts, cap, f_core))
+
+    def test_birth_blocked_when_the_primary_cell_is_at_cap(self):
+        m, s, x = self._setup()
+        cap = np.ones(m.num_cap_cells, dtype=int)
+        occ = _sorter(np.array([BAND_EDGES[0] + 1.5 * s]), [True])  # cell 1
+        _, counts = m._cap_cell_counts(occ)
+        # draw in the 1|2 zone with PRIMARY 1 (below the edge): blocked
+        f_draw = BAND_EDGES[0] + 2 * s - 0.4 * x
+        self.assertTrue(self._birth_blocked(m, counts, cap, f_draw))
+
+    def test_birth_allowed_when_both_covering_cells_have_headroom(self):
+        m, s, x = self._setup()
+        cap = np.ones(m.num_cap_cells, dtype=int)
+        occ = _sorter(np.array([BAND_EDGES[0] + 0.5 * s]), [True])  # cell 0
+        _, counts = m._cap_cell_counts(occ)
+        # draw in the 2|3 overlap zone: both empty -> allowed
+        f_draw = BAND_EDGES[0] + 3 * s + 0.4 * x
+        self.assertFalse(self._birth_blocked(m, counts, cap, f_draw))
+
+    def test_alive_row_at_cap_when_any_covering_cell_full(self):
+        m, s, x = self._setup()
+        cap = np.ones(m.num_cap_cells, dtype=int)
+        # leaf A in cell 1's core; leaf B in the 1|2 overlap zone.
+        # Multi-census: cell 1 holds 2 (over cap), cell 2 holds 1 (at cap).
+        f0 = np.array([BAND_EDGES[0] + 1.5 * s,
+                       BAND_EDGES[0] + 2 * s + 0.4 * x])
+        sorter = _sorter(f0, [True, True])
+        cells, nb, hn = m._sorter_cap_members(sorter)
+        flat, counts = m._cap_cell_counts(sorter, cells, nb, hn)
+        at_cap = m._cap_at_cap_mask(sorter, counts, cap, flat, cells, nb, hn)
+        self.assertTrue(bool(at_cap[0]))
+        self.assertTrue(bool(at_cap[1]))
+        # raise cell 2's cap: leaf B is still at cap through covering cell 1
+        cap2 = cap.copy()
+        cap2[2] = 5
+        at_cap2 = m._cap_at_cap_mask(sorter, counts, cap2, flat, cells,
+                                     nb, hn)
+        self.assertTrue(bool(at_cap2[1]),
+                        "any-covering-cell semantics: cell 1 still caps B")
+
+
+class OverlapStaggerInvariantTest(unittest.TestCase):
+    """Band edges must remain strictly inside cell CORES under overlap.
+
+    The staggered grid bisects a cell with every band edge; widening by
+    x = s/6 (p = 0.25) leaves the band edge s/2 - x = s/3 from the nearest
+    core boundary -- so no widened-span (or core) endpoint approaches a
+    band seam and the cap/band seam decoupling survives the overlap.
+    """
+
+    def _check(self, band_edges, k, p):
+        be = np.asarray(band_edges, dtype=float)
+        m = _move_overlap(k, p, stagger=True, band_edges=be)
+        ce = np.asarray(m.cap_edges)
+        x = np.asarray(m._cap_edge_ext)
+        for e in be[1:-1]:  # interior band edges
+            j = int(np.searchsorted(ce, e, side="right") - 1)
+            core_lo = ce[j] + x[j]
+            core_hi = ce[j + 1] - x[j + 1]
+            self.assertLess(core_lo, e,
+                            msg=f"band edge {e} at/below core floor")
+            self.assertGreater(core_hi, e,
+                               msg=f"band edge {e} at/above core ceiling")
+            # margin: the smaller adjacent stride bounds s/2 - x from below
+            s_loc = min((be[1:] - be[:-1]) / k)
+            margin = s_loc / 2 - s_loc * p / (2 * (1 - p))
+            self.assertGreaterEqual(
+                min(e - core_lo, core_hi - e), margin * (1 - 1e-9)
+            )
+            # and the band edge is therefore SINGLE membership
+            band = np.clip(np.searchsorted(be, e, side="right") - 1,
+                           0, len(be) - 2)
+            _, _, hn = m._cap_cell_members(
+                np.array([band], dtype=np.int64), np.array([e])
+            )
+            self.assertFalse(bool(hn[0]))
+
+    def test_uniform_grid(self):
+        self._check(BAND_EDGES, 4, 0.25)
+
+    def test_v6_analog_grid(self):
+        # 135-bin uniform sub-bands, K = 4: the production geometry
+        self._check(np.arange(0.0, 135.0 * 12 + 1, 135.0), 4, 0.25)
+
+    def test_margin_in_bins_matches_the_spec(self):
+        # s = 33.75 bins, x = 5.625: a band edge sits 11.25 bins inside
+        # the straddling cell's core on each side
+        be = np.arange(0.0, 135.0 * 3 + 1, 135.0)
+        m = _move_overlap(4, 0.25, stagger=True, band_edges=be)
+        ce = np.asarray(m.cap_edges)
+        x = np.asarray(m._cap_edge_ext)
+        e = be[1]
+        j = int(np.searchsorted(ce, e, side="right") - 1)
+        self.assertAlmostEqual(e - (ce[j] + x[j]), 11.25)
+        self.assertAlmostEqual((ce[j + 1] - x[j + 1]) - e, 11.25)

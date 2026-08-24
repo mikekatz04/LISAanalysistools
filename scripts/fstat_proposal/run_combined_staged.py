@@ -25,11 +25,35 @@ Composition is ``all_sources`` MINUS mbh/emri/sobbh -- it already carries vgb,
 and ``remove_branch`` drops the moves that sample a removed branch (stock
 ``bd02f94``), so nothing dangles.
 
-WHY NOT gb_no_fg: it loads ``source_types = ("GB",)`` with a FIXED PSD, i.e.
-there is no instrument-noise realization in the data at all. Sampling a PSD
-against it would be fitting noise that is not there. This script defaults
-``source_types`` to NOISE + GB + VGB so every sampled branch has something to
-fit.
+WHY NOT gb_no_fg (default composition): it loads ``source_types = ("GB",)``
+with a FIXED PSD, i.e. there is no instrument-noise realization in the data at
+all. Sampling a PSD against it would be fitting noise that is not there. This
+script defaults ``source_types`` to NOISE + GB + VGB so every sampled branch
+has something to fit.
+
+GB_ONLY=1 (2026-08-24, user ruling: "just do GBs, no PSD/foreground, or VGB
+modules ... use the injection psd") flips that reasoning around ON PURPOSE:
+the fit becomes ``erebor.gb_no_fg`` -- the stock variant DESIGNED for
+GB-only running -- but with ``source_types`` kept at NOISE+GB+VGB, so the
+DATA is the same full mojito injection (noise brick + GB galaxy + VGBs)
+while only the gb branch is SAMPLED. The likelihood sensitivity is
+gb_no_fg's fixed-PSD path: ``adjust_general`` fits the analytic 2-parameter
+instrument model [Soms_d, Sa_a] to the mojito NOISE brick's tabulated
+estimates (``resolve_noise_file_psd_params``; pin PSD_FROM_NOISE_FILE=1 to
+make a missing brick a hard error instead of a silent fallback to the stock
+levels) -> ``fixed_psd_kwargs`` -> run.py setup_acs's no-psd-branch path
+builds every walker AC from it, and the ACA's ``linear_psd_arr`` (built from
+each AC's invC) is the ONLY sensitivity the GB band engine, the sig-het
+in-model scorer, the in-move F-stat grid fit, and the SNR rejection gates
+read. Consequences, accepted by the ruling: the unmodeled confusion
+foreground and the VGBs simply sit in the residual (unwhitened -- the fixed
+PSD carries no galaxy term), and the reported lnL is source-only
+(-1/2 <r|r>, gb_no_fg's ``likelihood_source_only=True``). Stages become
+gb_search -> full_pe directly: no noise/vgb stages, no waiting on a PSD fit.
+The GB machinery is bit-identical to the all_sources composition --
+all_sources' GB branch IS the gb_no_fg stack (``AllSourcesGBSettings``
+subclasses ``GBNoFgGBSettings``; ``prepare_gb_branch``/``setup_gb_moves``
+shared) -- so every band/cap/sig-het/F-stat env knob applies unchanged.
 
 Run (one GPU)::
 
@@ -43,6 +67,11 @@ verifications on -- see the knob table at the bottom of this docstring.
 Key env knobs
 -------------
     COMBINED_SMOKE=1     small band / few iterations / debug on
+    GB_ONLY=1            erebor.gb_no_fg composition: gb is the ONLY sampled
+                         branch (fixed injection PSD, source-only lnL); the
+                         data still carries SOURCE_TYPES in full. Stages:
+                         gb_search -> full_pe. Incompatible with the
+                         STAGE_NOISE_* flags below.
     SOURCE_TYPES         comma list (default "NOISE,GB,VGB")
     NITER, NWALKERS      sampler shape
     GB_NTEMPS, VGB_NTEMPS, PSD_NTEMPS     per-branch ladders
@@ -209,7 +238,15 @@ def build_fit():
     from lisatools.globalfit.stock import erebor
 
     nwalkers = int(os.environ.get("NWALKERS", "16"))
-    fit = erebor.all_sources(nwalkers=nwalkers)
+    gb_only = _env_flag("GB_ONLY")
+    # GB_ONLY: the gb_no_fg stock variant IS the GB-only design (no psd /
+    # galfor / vgb branch anywhere in it; fixed injection PSD via its
+    # adjust_general -> fixed_psd_kwargs -> setup_acs no-psd-branch path).
+    # all_sources minus psd would NOT be equivalent: it never fills
+    # fixed_psd_params, so the engine would silently fall back to the
+    # hardcoded stock levels (engine.py fixed_psd_kwargs default).
+    fit = erebor.gb_no_fg(nwalkers=nwalkers) if gb_only \
+        else erebor.all_sources(nwalkers=nwalkers)
 
     # TOBS_TARGET honored (2026-08-13): all_sources pins a FIXED WDM grid
     # (legacy nf/nt override, mojito-adjusted to 1440x2160 = 90 d) which by
@@ -224,18 +261,76 @@ def build_fit():
         fit.general.nt = None
         print(
             f"[combined] TOBS_TARGET={fit.general.tobs_target:.6g} s: "
-            "cleared the all_sources fixed-grid (nf, nt) override.",
+            "cleared any fixed-grid (nf, nt) override (all_sources pins "
+            "one; gb_no_fg's is already None -- no-op there).",
             flush=True,
         )
 
     # Every sampled branch needs a stream: NOISE for psd/galfor, GB, VGB.
+    # GB_ONLY keeps the same default DELIBERATELY: the data is the SAME full
+    # injection (noise + GB galaxy + VGBs) as the production runs -- only the
+    # SAMPLED branch set shrinks to gb. Unmodeled content stays in the
+    # residual; that is the accepted trade for not waiting on a noise fit.
     src = os.environ.get("SOURCE_TYPES", "NOISE,GB,VGB")
     fit.general.source_types = tuple(
         s.strip().upper() for s in src.split(",") if s.strip()
     )
 
+    # gb_no_fg carries ONLY the gb branch; remove_branch raises on absent
+    # names, so guard (all_sources still drops its three heavy branches).
     for branch in ("mbh", "emri", "sobbh"):
-        fit.remove_branch(branch)
+        if branch in fit.branches:
+            fit.remove_branch(branch)
+
+    if gb_only:
+        # Branch-set sanity: gb only, or the composition is not what the
+        # header promises (and setup_acs would sample a PSD we said is fixed).
+        _extra = [b for b in fit.branches if b != "gb"]
+        if _extra:
+            raise ValueError(
+                f"GB_ONLY=1 but the fit carries extra branches {_extra}."
+            )
+        if _env_flag("STAGE_NOISE_ONLY") or _env_flag("STAGE_NOISE_VGB_PE"):
+            raise ValueError(
+                "GB_ONLY=1 has no noise/vgb stages; STAGE_NOISE_ONLY / "
+                "STAGE_NOISE_VGB_PE make no sense here."
+            )
+        # Same stage names / kinds / GB move stacks as the full composition
+        # below (monitor + digests + resume statuses stay compatible), minus
+        # every psd/galfor/vgb move. Fresh store starts directly at
+        # gb_search; nothing in the package gates on the noise stage names.
+        def ridge():
+            # Fresh Move descriptor per stage (never share one instance).
+            return ([Move("gb_ridge_gibbs", branch="gb")]
+                    if os.environ.get("GB_RIDGE_GIBBS", "1") == "1" else [])
+        fit.recipe = Recipe([
+            Stage(
+                name="gb_search", kind="rj",
+                moves=[
+                    Move("rj_fstat_search", branch="gb"),
+                    Move("rj_prior_removal", branch="gb"),
+                ] + ridge(),
+                step_kwargs=dict(
+                    plateau_branch="gb",
+                    convergence_iter=int(
+                        os.environ.get("GB_PLATEAU_ITERS", "5")
+                    ),
+                ),
+                combine_kwargs=dict(share_temperature_control=False),
+            ),
+            Stage(
+                name="full_pe", kind="pe",
+                moves=[
+                    Move("rj_fstat_pe", branch="gb"),
+                    Move("rj_prior_pe", branch="gb"),
+                ] + ridge(),
+                combine_kwargs=dict(
+                    share_temperature_control=False,
+                    random_choice=_env_flag("FULL_PE_RANDOM_CHOICE", "1"),
+                ),
+            ),
+        ])
+        return fit
 
     # GB move names (2026-08-12 rename, user ruling):
     #   rj_fstat_search  = F-stat grid births, search config (cap updater)

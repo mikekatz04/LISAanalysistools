@@ -2539,6 +2539,14 @@ def build_gb_moves(
         # Staggered cap grid (GBSettings.cap_stagger / GB_CAP_STAGGER):
         # cap edges shifted half a cell so no cap edge equals a band edge.
         cap_stagger=bool(getattr(gb_info, "cap_stagger", False)),
+        # Overlapping cap cells (GBSettings.cap_overlap_frac /
+        # GB_CAP_OVERLAP_FRAC, 2026-08-23): each cell's enforcement span
+        # shares this fraction of its width with each neighbour; caps
+        # enforce AND-headroom over all covering cells. Edges unchanged;
+        # 0 = today's exact partition bit-identically.
+        cap_overlap_frac=float(
+            getattr(gb_info, "cap_overlap_frac", 0.0) or 0.0
+        ),
         # Sig-het reference policy: built once per repeat block and FIXED
         # (default 0 = no mid-block refresh). GB_SIGHET_REFRESH_EVERY=N>0
         # re-enables the legacy per-source drift refresh (diagnostic);
