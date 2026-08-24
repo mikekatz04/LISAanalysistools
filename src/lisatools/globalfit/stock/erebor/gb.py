@@ -459,6 +459,29 @@ class GBSettings(Settings):
     # FStatProposal4D-backed containers do. None (default) keeps the
     # stock global-prior births.
     rj_birth_distribution: typing.Optional[typing.Any] = None
+    # Warm-start components npz path (workstream B, user ruling 2026-08-24):
+    # the clustered previous-run posterior components file produced by
+    # scripts/gb/warmstart_fit_from_store.py. Non-empty -> build_gb_moves
+    # constructs the ``rj_warm_search`` RJ birth move (the prior-RJ move
+    # class drawing full 9-column births from
+    # ``lisatools.sampling.warmstart_proposal.WarmStartComponents``: mixture
+    # weights ~ inclusion probability p, f0 windows re-derived against the
+    # NEW run's 1/Tobs, no phase maximization); the staged search recipes
+    # order it IMMEDIATELY BEFORE ``rj_fstat_search``. Empty/unset (default)
+    # -> the feature is entirely absent and runs are bit-identical. A plain
+    # path string -> deepcopy/pickle safe. Env: GB_WARM_START_COMPONENTS.
+    warm_start_components: str = dataclasses.field(
+        default_factory=env_default("GB_WARM_START_COMPONENTS", "", str)
+    )
+    # RESERVED (v1 parse-only; documented in submit_gf_6mo_v1.sh's staged
+    # warm-start block): the future MIXTURE WEIGHT of the warm-start
+    # component against the F-stat proposal once both feed ONE birth move
+    # (v2). v1 runs them as separate sequential moves (rj_warm_search then
+    # rj_fstat_search), so this parses but is unused. Env:
+    # GB_WARM_START_WEIGHT.
+    warm_start_weight: typing.Optional[float] = dataclasses.field(
+        default_factory=env_default("GB_WARM_START_WEIGHT", None, float)
+    )
     # -- search RJ cycle knobs (2026-08-01; search mode ONLY, i.e.
     # GB_MODE=search) -- when on, the variant's recipe setup inserts the
     # matching stock move(s) right after the fstat-birth prior move
@@ -469,11 +492,17 @@ class GBSettings(Settings):
     # safe.
     #
     # search_rj_replace: build + install the fixed-dimension REPLACEMENT
-    # move ``rj_replace`` (GBSpecialRJPriorMove(rj_replace=True) drawing
-    # from the rj/fstat birth container; see
-    # GBSpecialBase._run_replace_step). Env: GB_SEARCH_RJ_REPLACE.
+    # move ``rj_replace`` directly AFTER the fstat-birth move in the
+    # gb_search cycle (2026-08-24 exact-MH reinstatement, USER directive):
+    # full 9-column candidates from the F-stat grid container + epoch
+    # center table (stored maximizing extrinsics), scored at their EXACT
+    # likelihood -- never phase-maximized -- so a higher-SNR table draw
+    # can replace a mis-seated leaf in one accepted move. See
+    # GBSpecialBase._run_replace_step for the acceptance derivation.
+    # Default ON (search recipes only; full_pe is untouched -- PE
+    # installation is future work). Env: GB_SEARCH_RJ_REPLACE.
     search_rj_replace: bool = dataclasses.field(
-        default_factory=env_default("GB_SEARCH_RJ_REPLACE", False, bool)
+        default_factory=env_default("GB_SEARCH_RJ_REPLACE", True, bool)
     )
     # search_prior_removal: build + install the removal-only pruning move
     # ``rj_prior_removal`` (GBSpecialRJPriorMove with the PRIOR container +

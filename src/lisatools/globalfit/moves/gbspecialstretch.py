@@ -692,18 +692,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             valid MH move on its own -- the USER has explicitly waived
             detailed-balance concerns for search mode. Pair it with a
             birth-capable RJ move in the same stage cycle; never use in PE.
-        rj_replace: Search-mode REPLACEMENT proposal (2026-08-01). The
+        rj_replace: Fixed-dimension REPLACEMENT proposal (2026-08-24
+            exact-MH redesign; the 2026-08-01 phase-max heuristic was
+            root-caused as the rj_replace ll-drift source -- the
+            maximized value is not attainable at any actual phi0). The
             dimension NEVER changes: each picked ALIVE leaf gets a fresh
-            draw from ``rj_proposal_distribution`` and the move scores
-            ``add(new) - add(old)`` against the old-source-exposed cell
-            residual through :meth:`SubBandBuffer.get_replace_ll`
-            (phase-maximized in search); on accept the standard swap
-            (subtract old's template, add new's) is applied and ``inds``
-            is untouched. Dead slots are never drawn for. Acceptance uses
-            the phase-maximized ``add(old)`` as a comparison value only
-            (a surviving source keeps its ORIGINAL parameters exactly),
-            so this is a search heuristic, not exact MH (USER ruling).
-            Mutually exclusive with ``rj_removal_only``.
+            CONCRETE draw -- intrinsics from ``rj_proposal_distribution``
+            (the F-stat grid container in search), extrinsics recentered
+            on the F-stat CENTER TABLE at the drawn f0 (stored phi0 /
+            iota / psi maxima + the truncated-lognormal slot-0 draw, the
+            RJ birth code path) -- and the move scores the EXACT
+            ``add(new) - add(old)`` of those parameters against the
+            old-source-exposed cell residual through
+            :meth:`SubBandBuffer.get_replace_ll` (never
+            phase-maximized). MH factors carry the forward and reverse
+            proposal densities from the SAME container + table, so this
+            is exact detailed-balance MH (see
+            :meth:`GBSpecialBase._run_replace_step` for the derivation).
+            On accept the standard swap (subtract old's template, add
+            new's) is applied and ``inds`` is untouched; dead slots are
+            never drawn for. Mutually exclusive with
+            ``rj_removal_only``.
         phase_maximize: If ``True``, marginalize over phase in the
             likelihood.
         gpus: GPU device list for this move (intra-node knob).
@@ -3987,6 +3996,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # staged birth rows requires knowing which main-sorter rows belong
         # to this unit).
         self._unit_eligible = eligible
+        # Replace-move cap census (see _replace_cap_state): built lazily at
+        # the unit's first replace round from the sorter's unit-open freqs
+        # (exact there), then maintained on accepted swaps via the
+        # covering-set transition scatter -- reset here so no census ever
+        # outlives its unit.
+        self._replace_cap_census = None
 
         def _advance_and_refill(frozen_specials=None):
             """Retire finished cells and refill their slots (with the cell-ll
@@ -5985,34 +6000,68 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                           round_i, scheduler):
         """Fixed-dimension REPLACEMENT proposal on the picked ALIVE sources.
 
-        Search heuristic (USER ruling, 2026-08-01; detailed balance waived
-        for search): the dimension never changes and ``inds`` is untouched.
-        Each picked alive leaf gets a fresh draw from the RJ proposal
-        container (intrinsics from the fstat/rj container; dead slots are
-        never drawn for), scored by
-        :meth:`SubBandBuffer.get_replace_ll` -- a self-contained
-        expose(old) -> score(both, phase-maximized) -> restore(bit-exact)
-        wrapper -- and accepted on
+        2026-08-24 EXACT-MH REDESIGN (supersedes the 2026-08-01 phase-max
+        heuristic, root-caused as the rj_replace propose-level ll drift:
+        the phase-maximized value is not attainable at any actual phi0).
+        The dimension never changes and ``inds`` is untouched; dead slots
+        are never drawn for (the sorter is alive-only, and the pick
+        machinery keeps replacement candidates serial-within-band -- one
+        per sub-band cell per round).
 
-            ln alpha = beta * [add(new) - add(old)]
-                       + ln p_prior(new) - ln p_prior(old)
-                       + proposal factors (container logpdf bookkeeping,
-                         same convention as birth/death),
+        PROPOSAL ``q`` (per picked alive leaf):
 
-        where add(old) is the PHASE-MAXIMIZED comparison value only: on
-        reject the old source keeps its ORIGINAL parameters exactly, and
-        on accept the standard path applies the swap (subtract old's
-        template, add new's) with the maximizing phase written back into
-        new's phi0. ``ll_change_log`` records the EXACT residual-ll change
-        (phase-maxed add(new) minus ACTUAL-phase add(old)).
+        * intrinsics -- f0, Mc, sky, and fdot_astro_ratio through the
+          container's tightened-width ratio component -- drawn from the
+          RJ birth container (``band_sorter.rj_prop``; the F-stat grid
+          mixture in search), exactly like a birth;
+        * extrinsics recentered on the F-stat CENTER TABLE at the drawn
+          f0 (:meth:`_fstat_ctr_table_lookup`; per-row F-stat computation
+          when no table is installed): phi0/iota/psi pinned to the stored
+          maximizing values, slot 0 (distance / lnA) drawn from the
+          (SNR-truncated) lognormal about the table center with the
+          smeared width -- the RJ birth code path, reused verbatim.
 
-        With ``rj_fstat_dist_birth`` the new draw's distance/phi0/iota/psi
-        are recentered on the F-stat 4-parameter maximum computed on the
-        EXPOSED residual: the parity class is open here, so the reference
-        walker's parent residual holds the raw data in this band -- the
-        Jaranowski-Krolak inversion sees the old source's full power. The
-        old side evaluates the reverse density at its own recentered
-        center (death convention).
+        SCORING is EXACT: :meth:`SubBandBuffer.get_replace_ll` with
+        ``phase_maximize=False`` scores BOTH parameter sets as concrete
+        add-deltas ``<r'|h> - 0.5<h|h>`` against the old-source-exposed
+        residual ``r' = r + h_old``, through the RJ chunked-het / full
+        engine. No sig-het in-model reference is armed during the RJ
+        phase (references are built and torn down inside
+        ``_run_in_model_repeats``), so the sig-het trust region never
+        sees -- and can never silently veto or mis-score -- these
+        many-bin candidate jumps.
+
+        ACCEPTANCE (detailed balance). For the swap old -> new,
+
+            ln alpha = beta * [add(new) - add(old)]        (both EXACT)
+                     + ln p(new) - ln p(old)               (global prior)
+                     + ln q(old) - ln q(new)               (reverse/forward)
+
+        with both proposal densities evaluated from the SAME container +
+        center table: ``factors = band_sorter.factors[ids]`` (=
+        ``+cont.logpdf(old)``, the death-side convention) minus
+        ``cont.logpdf(new)``, plus the slot-0 swap corrections
+        ``(-log g(new) - log_range)`` and ``(+log g(old) + log_range)``
+        where ``g`` is the (truncated) lognormal about each side's OWN
+        table center -- exactly the birth/death factor pair of
+        :meth:`_run_rj_step` applied to one row. The pinned phi0/iota/psi
+        keep the container's uniform constants on BOTH sides (the
+        established birth/death bookkeeping convention), so those
+        constants cancel in the difference.
+
+        CAP CELLS: a replacement is zero-sum in source count but can
+        change the leaf's covering set. Newly-entered cells are gated on
+        headroom BEFORE scoring (:meth:`_cap_new_entry_veto`: cells the
+        leaf already covers never veto, so moves within its own span --
+        or into cells occupied only by itself -- stay legal, at
+        GB_CAP_OVERLAP_FRAC=0 and >0 alike); accepted swaps update the
+        per-unit census through the covering-set transition scatter
+        (:meth:`_cap_covering_transition_scatter`, the 04c78c56
+        accounting), keeping the gate exact across rounds even though the
+        sorter's stored ``freqs`` snapshot goes stale after a swap. The
+        scheduler's finish budget needs no adjustment: this move's subset
+        is alive-only, so it stages no birth rows for the budget to
+        count.
 
         Cross-band replacements follow the RJ-birth convention: a new draw
         outside this cell's frequency window (band edges widened by N/4 on
@@ -6064,51 +6113,114 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # Proposal factors, existing-machinery convention: death side for
         # the replaced source is the sorter's precomputed +logpdf
         # (band_sorter.factors); birth side for the fresh draw is -logpdf.
+        # The slot-0 uniform is swapped for the table lognormal below; the
+        # remaining extrinsic uniform constants appear identically in both
+        # logpdf terms and cancel (the pinned-angle convention).
         factors = band_sorter.factors[ids] - cp.asarray(cont.logpdf(params_new))
 
         keep = ~cp.isinf(curr_logp)
         delta_old = cp.full(n_prop, -1e300)
         delta_new = cp.full(n_prop, -1e300)
-        delta_old_actual = cp.full(n_prop, -1e300)
         h_h_new = cp.zeros(n_prop)
 
         if self.rj_fstat_dist_birth and bool(keep.any()):
-            # F-stat recentering-after-expose (preferred path): reuse the
-            # birth machinery's helpers against the OPEN parent residual
-            # (raw data in this parity's bands -> the old source's power is
-            # exposed to the F-stat).
+            # F-stat CENTER-TABLE extrinsics: _run_rj_step's birth cascade,
+            # table first (epoch mode default), per-row F-stat computation
+            # against the OPEN parent residual as the fallback (the unit
+            # hoist is never precomputed for replace instances -- its cache
+            # is keyed to the rows' PRE-DRAWN coords, not fresh draws).
             walker_ref = getattr(self, "_fstat_walker_ref", 0)
             k_idx = xp.arange(n_prop)[keep]
             _log_range = self._log_dist_range(band_sorter)
-            A_max, phi0_max, iota_max, psi_max, F = self._fstat_dist_centers(
-                model, params_new[k_idx], walker_ref)
-            ln_center, sigma = self._dist_center_and_width(
-                params_new[k_idx], A_max, F)
-            z = xp.asarray(cp.random.randn(len(k_idx)))
+            _tbl = self._fstat_ctr_table_active()
+            # SNR-truncated slot-0 draw, same knob + rule as births
+            # (GB_RJ_SNR_TRUNC_DIST): the truncation boundary and its
+            # -log Phi(alpha) normalization enter BOTH density sides, so
+            # detailed balance stays exact.
+            _snr_lim = float(buffer_obj.opt_snr_rej_samp_limit)
+            _snr_trunc = (
+                os.environ.get("GB_RJ_SNR_TRUNC_DIST", "1") == "1"
+                and _snr_lim > 0.0
+            )
+            if _tbl is not None:
+                (phi0_max, iota_max, psi_max, ln_center, sigma,
+                 ln_snr_b) = self._fstat_ctr_table_lookup(params_new[k_idx])
+            else:
+                A_max, phi0_max, iota_max, psi_max, F = self._fstat_dist_centers(
+                    model, params_new[k_idx], walker_ref)
+                ln_center, sigma = self._dist_center_and_width(
+                    params_new[k_idx], A_max, F)
+                ln_snr_b = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
+            if _snr_trunc:
+                alpha_b = self._snr_trunc_alpha(ln_snr_b, sigma, _snr_lim)
+                z = self._truncnorm_std_draw(len(k_idx), alpha_b)
+            else:
+                alpha_b = None
+                z = xp.asarray(cp.random.randn(len(k_idx)))
             ln_draw = ln_center + sigma * z
             if _gb_use_distance(self):
                 params_new[k_idx, 0] = xp.exp(ln_draw)
             else:
                 params_new[k_idx, 0] = ln_draw  # slot 0 is lnA already
+            # CONCRETE extrinsics from the stored maxima: the candidate is
+            # fully specified here and is scored EXACTLY below -- a table
+            # phi0 that is off its optimum only lowers acceptance, it can
+            # never bias the chain (no phase-max credit anywhere).
             params_new[k_idx, 4] = xp.cos(iota_max % np.pi)
             params_new[k_idx, 5] = psi_max % np.pi
             params_new[k_idx, 3] = phi0_max % (2 * np.pi)
-            _bl = self._slot0_log_proposal(params_new[k_idx, 0], ln_center, sigma)
-            # Reverse side: old's slot-0 density about its OWN recentered
-            # center (death convention). The +/- log_range pair cancels but
-            # is kept for symmetry with the birth/death bookkeeping.
-            Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
-                model, params_old[k_idx], walker_ref)
-            ln_center_d, sigma_d = self._dist_center_and_width(
-                params_old[k_idx], Ad, Fd)
+            _bl = self._slot0_log_proposal(
+                params_new[k_idx, 0], ln_center, sigma, alpha=alpha_b)
+            # Reverse side: old's slot-0 density about its OWN table center
+            # (death convention; SAME table, SAME truncation rule). The
+            # +/- log_range pair cancels but is kept for symmetry with the
+            # birth/death bookkeeping.
+            if _tbl is not None:
+                (_, _, _, ln_center_d, sigma_d,
+                 ln_snr_d) = self._fstat_ctr_table_lookup(params_old[k_idx])
+            else:
+                Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
+                    model, params_old[k_idx], walker_ref)
+                ln_center_d, sigma_d = self._dist_center_and_width(
+                    params_old[k_idx], Ad, Fd)
+                ln_snr_d = 0.5 * xp.log(xp.clip(2.0 * Fd, 1.0, None))
+            alpha_d = (
+                self._snr_trunc_alpha(ln_snr_d, sigma_d, _snr_lim)
+                if _snr_trunc else None
+            )
             _dl = self._slot0_log_proposal(
-                params_old[k_idx, 0], ln_center_d, sigma_d)
+                params_old[k_idx, 0], ln_center_d, sigma_d, alpha=alpha_d)
             factors[k_idx] = factors[k_idx] + (-_bl - _log_range) + (_dl + _log_range)
             # Re-evaluate the global prior at the recentered draw (f0 and
             # the band gate are unchanged by the overwrite).
             curr_logp[k_idx] = cp.asarray(
                 self.gpu_priors[self.branch_name].logpdf(params_new[k_idx]))
             keep = ~cp.isinf(curr_logp)
+
+        # CAP-CELL destination-headroom gate (see the docstring): veto any
+        # candidate whose NEWLY-entered covering cell is armed and at cap.
+        # Cells the leaf already covers never veto, so its own (about to be
+        # vacated) cells are always legal destinations. State is the
+        # per-unit census (built at the unit's first replace round,
+        # maintained on accept below).
+        _rc_state = None
+        _rc_cur = _rc_new = None
+        if (
+            self._cap_leaf_cap is not None
+            and self.cap_divisor > 1
+            and self._f0_col is not None
+        ):
+            f_cur_hz = band_sorter.coords_freqs_hz(params_old)
+            f_new_hz = band_sorter.coords_freqs_hz(params_new)
+            if f_cur_hz is not None and f_new_hz is not None:
+                _rc_state = self._replace_cap_state(band_sorter)
+                _rc_cur = self._cap_cell_members(b_i, f_cur_hz)
+                _rc_new = self._cap_cell_members(b_i, f_new_hz)
+                _rc_veto = self._cap_new_entry_veto(
+                    _rc_state[0], _rc_state[1], t_i, w_i, _rc_cur, _rc_new,
+                )
+                curr_logp[_rc_veto] = -np.inf
+                keep = ~cp.isinf(curr_logp)
 
         if bool(keep.any()):
             k_idx = xp.arange(n_prop)[keep]
@@ -6120,10 +6232,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if _replace_debug:
                 _rt_rows = xp.unique(slots[k_idx].astype(xp.int64))
                 _rt_snap = buffer_obj.band_buffer[_rt_rows].copy()
-            d_old, d_new, phase_new, d_old_act = buffer_obj.get_replace_ll(
+            # EXACT scoring, ALWAYS: phase_maximize is hard-coded False
+            # here regardless of the instance flag -- the phase-maximized
+            # acceptance was the root-caused rj_replace ll-drift flaw (the
+            # maximized value is not attainable at any actual phi0), so
+            # this move scores the concrete parameters and nothing else.
+            d_old, d_new, _phase_unused, d_old_act = buffer_obj.get_replace_ll(
                 params_old[k_idx], params_new[k_idx], slots[k_idx],
                 slots[k_idx], N_vals[k_idx],
-                phase_maximize=self.phase_maximize, leaf_inds=l_i[k_idx],
+                phase_maximize=False, leaf_inds=l_i[k_idx],
             )
             if _replace_debug:
                 _rt_after = buffer_obj.band_buffer[_rt_rows]
@@ -6136,22 +6253,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     "bit-identical on %d cell rows.",
                     self.name, int(_rt_rows.shape[0]),
                 )
-            delta_old[k_idx] = d_old
+            # Without phase maximization d_old IS the actual-phase delta
+            # (get_replace_ll contract); keep the explicit actual-phase
+            # return anyway so a future flag flip cannot silently
+            # reintroduce maximized credit.
+            delta_old[k_idx] = d_old_act
             delta_new[k_idx] = d_new
-            delta_old_actual[k_idx] = d_old_act
             h_h_new[k_idx] = buffer_obj.replace_h_h_new
-            # GB_DEBUG: keep the EXACT rows that were scored, before the
-            # phi0 write-back mutates them, so the verifier can separate
-            # "the write-back changed the answer" from "the scored value is
-            # not reproducible at all".
+            # GB_DEBUG: the scored rows ARE the final rows now (no phi0
+            # write-back exists in the exact design); the verifier stash
+            # keeps its name for the plotting hooks that read it.
             if self.debug:
                 self._dbg_params_new_prewb = params_new.copy()
-            if self.phase_maximize and phase_new is not None:
-                # Maximizing phase into NEW's phi0 (the accepted parameters
-                # carry it; a rejected old source is never re-phased).
-                params_new[k_idx, self._phi0_col] = (
-                    params_new[k_idx, self._phi0_col] - phase_new
-                )
 
         # Independently re-verify the scored deltas through get_add_ll, the
         # same way _run_rj_step does via _debug_verify_rj_step. Replace was
@@ -6161,7 +6274,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # propose-level drift.
         self._debug_verify_replace_step(
             buffer_obj, params_old, params_new, slots, N_vals, l_i,
-            delta_old_actual, delta_new, keep,
+            delta_old, delta_new, keep,
         )
 
         delta_ll = cp.full(n_prop, -1e300)
@@ -6245,10 +6358,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     None if l_i is None else l_i[accept][:1],
                 )
 
-            # Exact tracked ll change: phase-maxed add(new) minus the old
-            # source's ACTUAL-phase add-delta (what the swap really removed).
-            tracked = delta_new - delta_old_actual
-            ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += tracked[accept]
+            # Covering-set occupancy transition (04c78c56 accounting): +1
+            # every cell an accepted swap newly covers, -1 every cell it no
+            # longer covers, into the per-unit census the headroom gate
+            # reads -- so later rounds of this unit see true occupancy
+            # (the sorter's freqs snapshot cannot).
+            if _rc_state is not None:
+                self._cap_covering_transition_scatter(
+                    _rc_state[0], t_i, w_i, _rc_cur, _rc_new, accept,
+                )
+
+            # Tracked ll change is exactly the MH-scored delta (both sides
+            # actual-phase, actual-parameters): the ledger and the accept
+            # probability can no longer disagree.
+            ll_change_log[t_i[accept], w_i[accept], b_i[accept]] += delta_ll[accept]
             acc_counts[0][t_i[accept], w_i[accept], b_i[accept]] += 1
 
     def _debug_verify_replace_step(self, buffer_obj, params_old, params_new,
@@ -8499,29 +8622,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         # accepted in-model block of any armed overlap run.
                         # The correct occupancy transition is per-SIDE set
                         # difference: +1 every cell the accepted move NEWLY
-                        # covers, -1 every cell it no longer covers.
-                        # Non-crossing rows and rejected rows carry weight
-                        # 0; scatter-add keeps seam duplicates safe.
-                        def _in_cur(_c):
-                            return (_c == _c_p) | (_c_hn & (_c == _c_nb))
-
-                        def _in_new(_c):
-                            return (_c == _n_p) | (_n_hn & (_c == _n_nb))
-
-                        for _cell, _memb, _sign, _covered in (
-                            (_n_p, None, 1, _in_cur),
-                            (_n_nb, _n_hn, 1, _in_cur),
-                            (_c_p, None, -1, _in_new),
-                            (_c_nb, _c_hn, -1, _in_new),
-                        ):
-                            _w = accept & ~_covered(_cell)
-                            if _memb is not None:
-                                _w = _w & _memb
-                            self._cap_gate_scatter_add(
-                                _dg[0],
-                                self._cap_flat_index(t_s, w_s, _cell),
-                                _sign * _w.astype(xp.int64),
-                            )
+                        # covers, -1 every cell it no longer covers --
+                        # factored into _cap_covering_transition_scatter
+                        # (2026-08-24) so the replacement move's accept
+                        # path shares the identical accounting.
+                        self._cap_covering_transition_scatter(
+                            _dg[0], t_s, w_s,
+                            (_c_p, _c_nb, _c_hn), (_n_p, _n_nb, _n_hn),
+                            accept,
+                        )
                     else:
                         _dg_w = (accept & _dg_cross).astype(xp.int64)
                         self._cap_gate_scatter_add(_dg[0], _dg_flat_n, _dg_w)
@@ -9777,6 +9886,112 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             import cupyx
 
             cupyx.scatter_add(counts, flat, weights)
+
+    def _cap_covering_transition_scatter(self, counts, temp_inds, walker_inds,
+                                         cur_memb, new_memb, weight):
+        """Accept-time covering-set occupancy transition (04c78c56 logic).
+
+        Per-SIDE set difference between a row's covering-cell sets: +1 into
+        every cell the move NEWLY covers (a covering cell of the new f0
+        that does not cover the current f0), -1 out of every cell it no
+        longer covers. Rows with ``weight`` False (rejected) and
+        non-crossing rows contribute exactly 0; the scatter-add keeps seam
+        duplicates safe (staggered/overlap cells can be targeted from two
+        adjacent bands in one batch). ``cur_memb`` / ``new_memb`` are
+        :meth:`_cap_cell_members` tuples; with single membership
+        (overlap 0 -- neighbour ``None``) the set difference reduces
+        exactly to the partition rule: +1 destination / -1 source on
+        crossing rows only.
+
+        Factored out of the ``_run_in_model_repeats`` accept block (fix
+        04c78c56) so the replacement move's accept path runs the SAME
+        accounting rather than a duplicate.
+        """
+        xp = get_array_module(counts)
+        c_p, c_nb, c_hn = cur_memb
+        n_p, n_nb, n_hn = new_memb
+        if c_nb is None:
+            c_nb = c_p
+            c_hn = xp.zeros(c_p.shape, dtype=bool)
+        if n_nb is None:
+            n_nb = n_p
+            n_hn = xp.zeros(n_p.shape, dtype=bool)
+        ones = xp.ones(n_p.shape, dtype=bool)
+
+        def _in_cur(_c):
+            return (_c == c_p) | (c_hn & (_c == c_nb))
+
+        def _in_new(_c):
+            return (_c == n_p) | (n_hn & (_c == n_nb))
+
+        for _cell, _memb, _sign, _covered in (
+            (n_p, ones, 1, _in_cur),
+            (n_nb, n_hn, 1, _in_cur),
+            (c_p, ones, -1, _in_new),
+            (c_nb, c_hn, -1, _in_new),
+        ):
+            _w = weight & _memb & ~_covered(_cell)
+            self._cap_gate_scatter_add(
+                counts,
+                self._cap_flat_index(temp_inds, walker_inds, _cell),
+                _sign * _w.astype(xp.int64),
+            )
+
+    def _cap_new_entry_veto(self, counts, cap, temp_inds, walker_inds,
+                            cur_memb, new_memb):
+        """Destination-headroom veto for a fixed-dimension f0 move.
+
+        A row is vetoed when ANY covering cell of its NEW position that
+        does NOT cover its CURRENT position (a newly-entered cell) is
+        armed (``cap >= 0``) and at cap. Cells the row already covers
+        never veto: the mover's own -- about to be vacated -- cells are
+        legal destinations, so a replacement into cells occupied only by
+        the leaf being replaced passes, and drains out of over-full cells
+        stay allowed. The in-model CAP DRIFT GATE semantics
+        (``_run_in_model_repeats``), shared by the replacement move; at
+        overlap 0 memberships are primary-only and this is exactly the
+        partition rule (veto iff crossing into an armed at-cap cell).
+        """
+        xp = get_array_module(counts)
+        c_p, c_nb, c_hn = cur_memb
+        n_p, n_nb, n_hn = new_memb
+        if c_nb is None:
+            c_nb = c_p
+            c_hn = xp.zeros(c_p.shape, dtype=bool)
+        ones = xp.ones(n_p.shape, dtype=bool)
+        pairs = ((n_p, ones),) if n_nb is None else ((n_p, ones), (n_nb, n_hn))
+        veto = xp.zeros(n_p.shape, dtype=bool)
+        for _cell, _memb in pairs:
+            _foreign = (
+                _memb & (_cell != c_p) & (~c_hn | (_cell != c_nb))
+            )
+            _flat = self._cap_flat_index(temp_inds, walker_inds, _cell)
+            veto = veto | (
+                _foreign & (cap[_cell] >= 0) & (counts[_flat] >= cap[_cell])
+            )
+        return veto
+
+    def _replace_cap_state(self, band_sorter):
+        """``(counts, cap)`` census for the replacement headroom gate.
+
+        Built lazily ONCE per unit (reset where ``_unit_eligible`` is
+        stashed) from the sorter's unit-open alive census -- exact there,
+        because the sorter's stored ``freqs`` are fresh at unit open --
+        and then maintained on accepted swaps via
+        :meth:`_cap_covering_transition_scatter`. A per-round recompute
+        would NOT work: ``band_sorter.freqs`` is a construction-time
+        snapshot, so accepted swaps would be invisible to it for the rest
+        of the unit.
+        """
+        st = getattr(self, "_replace_cap_census", None)
+        if st is None:
+            _, counts = self._cap_cell_counts(band_sorter)
+            st = (
+                counts,
+                get_array_module(counts).asarray(self._cap_leaf_cap),
+            )
+            self._replace_cap_census = st
+        return st
 
     def _sorter_cap_cells(self, band_sorter):
         """Per-source cap-cell index for every row of ``band_sorter``.

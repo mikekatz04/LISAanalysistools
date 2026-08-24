@@ -2745,29 +2745,50 @@ def build_gb_moves(
     )
 
     #* ===================== SEARCH RJ CYCLE (GB_MODE=search only) =====================
-    # Optional companions to the fstat-birth ``rj_prior`` move (2026-08-01):
-    # a fixed-dimension REPLACEMENT move and a removal-only pruning move.
-    # The variant's recipe setup inserts them right after ``rj_prior`` in
-    # its stage, so the stage's GFCombineMove runs the per-iteration cycle
-    # fstat-birth -> fstat-REPLACE -> prior-REMOVAL in list order (eryn
-    # CombineMove.propose is sequential). Search heuristics by USER ruling
-    # (phase-max comparison scoring / death-only kernels are not exact MH);
-    # never installed in PE. ``leaf_cap_update`` stays designated on
-    # ``rj_prior`` alone (the first move of the cycle) so the cap counters
-    # advance exactly once per iteration; the companions only enforce the
-    # gate.
+    # Companions to the fstat-birth move in the gb_search cycle: the
+    # fixed-dimension REPLACEMENT move (exact MH, 2026-08-24 redesign) and
+    # the removal-only pruning move. The variant's recipe setup inserts
+    # them right after the fstat-birth move in its stage, so the stage's
+    # GFCombineMove runs the per-iteration cycle fstat-birth ->
+    # fstat-REPLACE -> prior-REMOVAL in list order (eryn CombineMove.propose
+    # is sequential). ``leaf_cap_update`` stays designated on the birth
+    # move alone (the first move of the cycle) so the cap counters advance
+    # exactly once per iteration; the companions only enforce the gate.
+    #
+    # rj_replace (reinstated 2026-08-24, USER directive): draws full
+    # 9-column candidates from the F-stat machinery -- intrinsics from the
+    # same fitted grid container as rj_fstat_search, extrinsics from the
+    # epoch CENTER TABLE (stored phi0/iota/psi maxima + truncated-lognormal
+    # slot 0) -- and scores the EXACT likelihood of those concrete
+    # parameters (never phase-maximized; the old phase-max acceptance was
+    # the root-caused rj_replace ll-drift flaw, so ``phase_maximize`` is
+    # forced False here AND hard-coded off at the scoring site). Under
+    # fstat_fit_in_move it is a grid move sharing the birth move's fit dir:
+    # the _FSTAT_GRID_REGISTRY / epoch caches hand it the identical
+    # container + center table with no second fit.
     _gb_mode_search = getattr(gb_info, "mode", "pe") == "search"
     gb_replace_move = None
     if _gb_mode_search and getattr(gb_info, "search_rj_replace", False):
-        gb_replace_move = GBSpecialRJPriorMove(
+        gb_replace_move = _RJBirth(
             *gb_move_args,
-            rj_proposal_distribution=_rj_birth_prop,  # intrinsics: rj/fstat container
+            rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
+            **({"is_rj_prop": True} if _fit_in_move else {}),
+            **_fit_kwargs,
             name="rj_replace",
             rj_replace=True,
-            phase_maximize=_rj_phase_max,
+            phase_maximize=False,
             run_swaps=False,
             gpus=[],
             **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
+        )
+        # The center-table recentering IS this move's proposal, so it must
+        # not depend on the phase-max chain the ctor default follows
+        # (phase_maximize=False -> rj_amp_maximize False -> the F-stat
+        # distance path off, leaving uniform prior extrinsics). The env
+        # knob GB_RJ_FSTAT_DIST_BIRTH still wins when set explicitly.
+        _fdb_env = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
+        gb_replace_move.rj_fstat_dist_birth = (
+            bool(int(_fdb_env)) if _fdb_env is not None else True
         )
         gb_replace_move.accepted = np.zeros((ntemps, nwalkers))
     # Pure IN-MODEL move (2026-08-04): no RJ step at all -- ``is_rj_prop=False``
@@ -2814,6 +2835,98 @@ def build_gb_moves(
             **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
         )
         gb_prior_removal_move.accepted = np.zeros((ntemps, nwalkers))
+
+    #* ===================== WARM-START RJ BIRTH MOVE (rj_warm_search) =====================
+    # Workstream B (user ruling 2026-08-24: "add this proposal in GB search
+    # ... BEFORE the fstat proposal"). GB_WARM_START_COMPONENTS (or
+    # ``GBSettings.warm_start_components``) points at the clustered
+    # previous-run posterior components npz produced OFFLINE by
+    # scripts/gb/warmstart_fit_from_store.py; when set (and a search recipe
+    # is being built) this constructs ``rj_warm_search`` -- the EXISTING
+    # prior-RJ move class with its birth distribution swapped for the
+    # warm-start f0-windowed Gaussian mixture
+    # (lisatools.sampling.warmstart_proposal.WarmStartComponents):
+    #
+    #   * births draw FULL 9-column GB parameters -- the warm draws carry
+    #     their own phases/amplitudes from the previous posterior, so
+    #     phase_maximize stays OFF;
+    #   * mixture weights ~ inclusion probability p (mult IGNORED --
+    #     PROVISIONAL v1 policy); cross-Tobs v1 = stored widths, f0 windows
+    #     re-derived against the NEW run's 1/Tobs (no Fisher rescale);
+    #   * a uniform floor over the 9-col prior box keeps logpdf finite at
+    #     every alive leaf (BandSorter death factors -- the same reason
+    #     UniformFloorMixture is mandatory for the F-stat container);
+    #   * search config mirrors rj_fstat_search's cap/flip settings, but the
+    #     cap counters stay designated on rj_fstat_search
+    #     (leaf_cap_update=False here) and exactly ONE GB move tempers per
+    #     iteration (run_swaps=False here).
+    #
+    # The staged search recipes insert Move("rj_warm_search") IMMEDIATELY
+    # BEFORE Move("rj_fstat_search") in the gb_search stage
+    # (run_combined_staged.py). Unset knob -> no move object exists and the
+    # run is bit-identical. GB_WARM_START_WEIGHT is RESERVED (parsed on
+    # GBSettings, unused in v1 -- the future in-move mixture weight vs the
+    # F-stat proposal; v1 runs them as separate sequential moves).
+    gb_warm_move = None
+    _warm_path = str(
+        getattr(gb_info, "warm_start_components", "")
+        or os.environ.get("GB_WARM_START_COMPONENTS", "")
+        or ""
+    ).strip()
+    if include_search and _warm_path:
+        from ..sampling.warmstart_proposal import WarmStartComponents
+
+        if int(engine_info.ndims["gb"]) != 9:
+            raise ValueError(
+                "GB_WARM_START_COMPONENTS requires the 9-column sampled GB "
+                "basis (distance + fdot_astro_ratio; "
+                "GB_USE_ASTROPHYSICAL_F0_MC_PRIOR / GB_USE_CHIRP_MASS on) -- "
+                f"this run samples ndim={engine_info.ndims['gb']}."
+            )
+        # 9-D floor box = the run's prior box: f0 over the INTERIOR band
+        # (buffer bands excluded, mirroring the F-stat container's floor),
+        # full prior ranges elsewhere.
+        _mc_lims = list(getattr(gb_info, "m_chirp_lims", None) or [0.001, 1.0])
+        _dist_lims = list(getattr(gb_info, "dist_lims", None) or [0.001, 40.0])
+        _ratio_max = float(getattr(gb_info, "fdot_astro_ratio_max", None) or 1.0)
+        _f0_lo_i, _f0_hi_i = (1, -2) if len(band_edges) >= 4 else (0, -1)
+        _warm_floor_lo = [
+            _dist_lims[0], float(band_edges[_f0_lo_i]) * 1e3, _mc_lims[0],
+            0.0, -1.0, 0.0, 0.0, -1.0, -_ratio_max,
+        ]
+        _warm_floor_hi = [
+            _dist_lims[-1], float(band_edges[_f0_hi_i]) * 1e3, _mc_lims[-1],
+            2.0 * np.pi, 1.0, np.pi, 2.0 * np.pi, 1.0, _ratio_max,
+        ]
+        _warm_container = WarmStartComponents.from_npz(
+            _warm_path,
+            new_tobs=float(general_info.Tobs),
+            use_cupy=use_gpu_priors,
+            floor_box=(_warm_floor_lo, _warm_floor_hi),
+            floor_eps=float(os.environ.get("GB_WARM_START_FLOOR_EPS", "0.05")),
+            p_floor=float(os.environ.get("GB_WARM_START_P_FLOOR", "0")),
+            seed=general_info.random_seed,
+        )
+        gb_warm_move = GBSpecialRJPriorMove(
+            *gb_move_args,
+            rj_proposal_distribution={"gb": _warm_container},
+            name="rj_warm_search",
+            use_prior_removal=False,
+            # NO phase maximization: warm draws carry their own
+            # phases/amplitudes from the previous posterior.
+            phase_maximize=False,
+            run_swaps=False,
+            gpus=[],
+            **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
+        )
+        gb_warm_move.accepted = np.zeros((ntemps, nwalkers))
+        gb_search_moves = list(gb_search_moves) + [gb_warm_move]
+        logger.info(
+            "build_gb_moves: rj_warm_search armed from %s (%d components; "
+            "weights ~ p, floor_eps=%s).",
+            _warm_path, _warm_container.n_components,
+            os.environ.get("GB_WARM_START_FLOOR_EPS", "0.05"),
+        )
 
     #* ============================================= PARAMETER ESTIMATION MOVES =============================================
     # PE births draw the EXTRINSICS (distance/amplitude, phi0, cos-iota,

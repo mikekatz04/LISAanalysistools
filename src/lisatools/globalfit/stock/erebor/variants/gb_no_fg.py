@@ -1251,15 +1251,22 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
     recipe: Recipe = curr.source_metadata["recipe"]
 
     # Search RJ cycle wiring (2026-08-01; GB_MODE=search only): insert the
-    # replace / prior-removal moves right AFTER the fstat-birth prior move
-    # (``rj_prior``) in its stage. The stage's moves are wrapped in ONE
-    # GFCombineMove, and eryn's CombineMove.propose runs them sequentially
-    # in list order every iteration -- that is the ordering guarantee for
-    # the per-iteration cycle fstat-birth -> fstat-REPLACE -> prior-REMOVAL.
+    # replace / prior-removal moves right AFTER the fstat-birth move in its
+    # stage. The stage's moves are wrapped in ONE GFCombineMove, and eryn's
+    # CombineMove.propose runs them sequentially in list order every
+    # iteration -- that is the ordering guarantee for the per-iteration
+    # cycle fstat-birth -> fstat-REPLACE -> prior-REMOVAL. Anchor priority
+    # (2026-08-24, USER directive "immediately after the RJ move" in
+    # gb_search): ``rj_fstat_search`` first, so STAGED recipes carrying
+    # both a gb_search and a full_pe stage get the cycle in the SEARCH
+    # stage and full_pe stays untouched (PE installation is future work);
+    # the pe-named anchors remain for the legacy single-stage search
+    # campaigns that run their search through the pe-named moves.
     if getattr(gb_info, "mode", "pe") == "search":
         _names = recipe.move_names()
         _anchor = next(
-            (n for n in ("rj_fstat_pe", "rj_prior") if n in _names), None
+            (n for n in ("rj_fstat_search", "rj_fstat_pe", "rj_prior")
+             if n in _names), None
         )
         if _anchor is None and (
             getattr(gb_info, "search_rj_replace", False)

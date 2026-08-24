@@ -78,6 +78,23 @@ Key env knobs
     GB_DEBUG=1, VGB_DEBUG=1               residual round-trip verification
     GB_DEBUG_PLOT_BAND   ONE band index -- unset means EVERY band, which at
                          ~1150 cells renders thousands of figures per proposal
+    GB_WARM_START_COMPONENTS  warm-start components npz (workstream B):
+                         when set, the gb_search stage runs the
+                         ``rj_warm_search`` birth move IMMEDIATELY BEFORE
+                         ``rj_fstat_search`` (user ruling 2026-08-24);
+                         unset = stage lists unchanged, bit-identical run.
+                         full_pe is NOT touched (the ruling names search;
+                         the warm move is search-configured).
+    GB_SEARCH_RJ_REPLACE gb_search F-stat REPLACEMENT move (default 1,
+                         2026-08-24 exact-MH reinstatement): ``rj_replace``
+                         runs IMMEDIATELY AFTER ``rj_fstat_search`` in the
+                         gb_search cycle -- full 9-column candidates from
+                         the fitted F-stat grids + epoch center table,
+                         scored at their EXACT likelihood (never
+                         phase-maximized), so a higher-SNR table draw can
+                         relocate a mis-seated leaf in one accepted move.
+                         =0 removes it (stage lists bit-identical to the
+                         pre-replace runs). full_pe is NOT touched.
     STAGE_SKIP_NOISE=1   start at stage 2 (noise already converged)
     STAGE_NOISE_ONLY=1   run only the two noise search stages, then stop
     STAGE_NOISE_VGB_PE=1 searches, then PE-sample psd+galfor+vgb (no GB);
@@ -248,6 +265,32 @@ def build_fit():
     fit = erebor.gb_no_fg(nwalkers=nwalkers) if gb_only \
         else erebor.all_sources(nwalkers=nwalkers)
 
+    def warm():
+        # rj_warm_search (workstream B; user ruling 2026-08-24: "BEFORE the
+        # fstat proposal"): warm-start births from the previous run's
+        # clustered posterior components (GB_WARM_START_COMPONENTS npz;
+        # build_gb_moves constructs the stock move only when the knob is
+        # set, so the descriptor must be knob-conditional too). Fresh Move
+        # descriptor per call (never share one instance across stages).
+        return ([Move("rj_warm_search", branch="gb")]
+                if os.environ.get("GB_WARM_START_COMPONENTS", "").strip()
+                else [])
+
+    def replace():
+        # rj_replace (2026-08-24 exact-MH reinstatement, user directive
+        # "after the rj move"): the F-stat REPLACEMENT move IMMEDIATELY
+        # AFTER rj_fstat_search in the gb_search cycle. Knob-conditional
+        # like warm()/ridge() -- build_gb_moves only constructs the stock
+        # move when gb.search_rj_replace is on (same env, same default 1),
+        # and a listed-but-unbuilt move fails recipe materialization.
+        # Listing it here (rather than relying on the setup_gb_moves
+        # auto-insertion, which would add it anyway) keeps the composed
+        # stage printout truthful. Fresh Move descriptor per call.
+        return ([Move("rj_replace", branch="gb")]
+                if os.environ.get("GB_SEARCH_RJ_REPLACE", "1").strip()
+                in ("1", "true", "True", "yes", "on")
+                else [])
+
     # TOBS_TARGET honored (2026-08-13): all_sources pins a FIXED WDM grid
     # (legacy nf/nt override, mojito-adjusted to 1440x2160 = 90 d) which by
     # the settings contract BEATS general.tobs_target -- so an explicit
@@ -306,8 +349,14 @@ def build_fit():
         fit.recipe = Recipe([
             Stage(
                 name="gb_search", kind="rj",
-                moves=[
+                # rj_warm_search (when armed) runs IMMEDIATELY BEFORE
+                # rj_fstat_search -- warm-start births first, then the
+                # F-stat grid births (user ruling 2026-08-24); rj_replace
+                # (default on) IMMEDIATELY AFTER them -- the exact-MH
+                # F-stat replacement pass before the removal judge.
+                moves=warm() + [
                     Move("rj_fstat_search", branch="gb"),
+                ] + replace() + [
                     Move("rj_prior_removal", branch="gb"),
                 ] + ridge(),
                 step_kwargs=dict(
@@ -412,8 +461,14 @@ def build_fit():
             # Re-wiring the serial MCMC onto the sig-het scorer is a
             # post-run item (its batches are not f0-ordered, so the
             # reference-block stash would thrash every step).
-            moves=noise_vgb + [
+            # rj_warm_search (when armed) runs IMMEDIATELY BEFORE
+            # rj_fstat_search -- warm-start births first, then the F-stat
+            # grid births (user ruling 2026-08-24); rj_replace (default
+            # on) IMMEDIATELY AFTER them -- the exact-MH F-stat
+            # replacement pass before the removal judge.
+            moves=noise_vgb + warm() + [
                 Move("rj_fstat_search", branch="gb"),
+            ] + replace() + [
                 Move("rj_prior_removal", branch="gb"),
             ] + ([Move("gb_ridge_gibbs", branch="gb")]
                  if os.environ.get("GB_RIDGE_GIBBS", "1") == "1" else []),
