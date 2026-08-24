@@ -89,7 +89,14 @@ export GPU_BACKEND=cuda13x
 export GPUS=0,1                    # 2 devices -- the multi-GPU gate
 export DATA_MODE=mojito
 
-# ---- CONFUSION FOREGROUND DATA (user request 2026-08-24) --------------------
+# ---- CONFUSION FOREGROUND DATA (user request 2026-08-24; then DISABLED
+#      same day: "Turn that off for now in our 6 month test" -- the GALFOR
+#      output file is not on the laptop and its presence in the cluster
+#      cache is unconfirmed; Robbie's generator subtract_resolvable_tdi.py
+#      + inputs ARE in the galaxy-noise worktree, so it can be produced
+#      when wanted). ADD_CONFUSION_FG=1 re-arms the whole block. ----------
+ADD_CONFUSION_FG=${ADD_CONFUSION_FG:-0}
+if [ "${ADD_CONFUSION_FG}" = "1" ]; then
 # Add the SELF-GENERATED confusion-foreground mojito file to the data: the
 # GB L1 brick with all resolvable binaries regenerated (GBGPU, on the file's
 # own orbits) and subtracted -- sample-accurate, format-preserving, TDI-2
@@ -138,6 +145,11 @@ done
 ln -s "${GALFOR_FILE}" "${SHADOW}/data/GB/L1/GB_731d_2.5s_L1_source0_0_confusion_foreground.h5"
 echo "[GALFOR] shadow mojito folder built at ${SHADOW} (GB brick = confusion only)"
 export MOJITO_DATA_PATH=${SHADOW}
+export PROBE_GB_CONFUSION_STREAM=1   # tells the driver to add the GB stream
+else
+  export MOJITO_DATA_PATH=${REAL_MOJITO}
+  echo "[GALFOR] confusion foreground OFF (ADD_CONFUSION_FG=0) -- data = MBH+EMRI+SOBHB only"
+fi
 
 # ---- output -----------------------------------------------------------------
 export FILE_STORE_DIR=${STORE_DIR}
@@ -185,11 +197,12 @@ from lisatools.globalfit.stock import erebor
 
 fit = erebor.full_year_combined()
 gs = fit.general
-# The shadow cache's GB brick IS the confusion-foreground file; ids gate
-# nothing for GB (the loader always takes the one GB_*source0_* file and
-# sums its TDI into the data). No gb branch exists in this variant, so the
-# stream is data-only.
-gs.mojito_source_ids["GB"] = [0]
+if os.environ.get("PROBE_GB_CONFUSION_STREAM") == "1":
+    # The shadow cache's GB brick IS the confusion-foreground file; ids
+    # gate nothing for GB (the loader always takes the one GB_*source0_*
+    # file and sums its TDI into the data). No gb branch exists in this
+    # variant, so the stream is data-only. Armed via ADD_CONFUSION_FG=1.
+    gs.mojito_source_ids["GB"] = [0]
 print(f"[driver] tobs_target={gs.tobs_target:.6g} s  "
       f"ids={gs.mojito_source_ids}  gpus={gs.gpus}  "
       f"edge_crop={gs.edge_crop_wavelets}  data={gs.mojito_data_path}",
