@@ -8491,13 +8491,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # duplicate-safe (scatter-add; staggered seam cells can be
                 # targeted from both adjacent bands in one batch).
                 if _dg is not None:
-                    _dg_w = (accept & _dg_cross).astype(xp.int64)
-                    self._cap_gate_scatter_add(_dg[0], _dg_flat_n, _dg_w)
-                    self._cap_gate_scatter_add(
-                        _dg[0],
-                        self._cap_flat_index(t_s, w_s, _dg_cell_c),
-                        -_dg_w,
-                    )
+                    if self.cap_overlap_frac > 0.0:
+                        # Overlap mode (fix 2026-08-24): the veto branch
+                        # above works on membership SETS and never defines
+                        # ``_dg_cross``/``_dg_flat_n`` -- referencing them
+                        # here was an UnboundLocalError on the first
+                        # accepted in-model block of any armed overlap run.
+                        # The correct occupancy transition is per-SIDE set
+                        # difference: +1 every cell the accepted move NEWLY
+                        # covers, -1 every cell it no longer covers.
+                        # Non-crossing rows and rejected rows carry weight
+                        # 0; scatter-add keeps seam duplicates safe.
+                        def _in_cur(_c):
+                            return (_c == _c_p) | (_c_hn & (_c == _c_nb))
+
+                        def _in_new(_c):
+                            return (_c == _n_p) | (_n_hn & (_c == _n_nb))
+
+                        for _cell, _memb, _sign, _covered in (
+                            (_n_p, None, 1, _in_cur),
+                            (_n_nb, _n_hn, 1, _in_cur),
+                            (_c_p, None, -1, _in_new),
+                            (_c_nb, _c_hn, -1, _in_new),
+                        ):
+                            _w = accept & ~_covered(_cell)
+                            if _memb is not None:
+                                _w = _w & _memb
+                            self._cap_gate_scatter_add(
+                                _dg[0],
+                                self._cap_flat_index(t_s, w_s, _cell),
+                                _sign * _w.astype(xp.int64),
+                            )
+                    else:
+                        _dg_w = (accept & _dg_cross).astype(xp.int64)
+                        self._cap_gate_scatter_add(_dg[0], _dg_flat_n, _dg_w)
+                        self._cap_gate_scatter_add(
+                            _dg[0],
+                            self._cap_flat_index(t_s, w_s, _dg_cell_c),
+                            -_dg_w,
+                        )
                 # One pooled survivor per cell (serial-within-band), so the
                 # fancy-index += is elementwise; rejected rows add an exact
                 # 0.0 / False.
@@ -11130,8 +11162,20 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     decision logic below is what keeps the expensive path off every hit:
 
     * ``fstat_refit_every <= 0`` (default): fit exactly once, ever.
-    * otherwise: refit when ``num_proposals`` has advanced that many hits
-      since the last fit.
+    * otherwise: refit when the REFIT CLOCK has advanced that many ticks
+      since the last fit. The clock (:meth:`_fstat_clock`, 2026-08-24
+      redesign) is the shared per-branch propose census
+      (:attr:`GBSpecialBase._branch_propose_counts` — ticked by EVERY
+      GBSpecial move of the branch, so the search and pe instances pool
+      their hits), journaled to ``<fstat_root>/clock.json`` so it
+      SURVIVES RESTARTS; the last-fit tick rides in the epoch's
+      ``DONE.json``. The per-instance ``num_proposals`` counter it
+      replaced starved structurally: full_pe's random_choice hands each
+      move ~1/6 of iterations, gb_search hands its move ~11 per launch,
+      and nothing persisted across launches — production never refit.
+      At the production ``GB_FSTAT_REFIT_EVERY=50`` the shared clock
+      refits roughly every ~20 gb_search iterations (2-3 branch
+      proposes/iteration) and every ~150 randomized full_pe iterations.
 
     Each fit gets its own ``epoch_<k>`` cache directory, and the sweep
     checkpoints are salted with the epoch, so a mid-fit death resumes
@@ -11181,6 +11225,73 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
 
     def _epoch_dir(self, k: int) -> str:
         return os.path.join(self._fstat_root, f"epoch_{k:04d}")
+
+    # ---- the refit clock (2026-08-24) --------------------------------------
+    # One journal file per fit root; seeded/written registries are
+    # class-level so the search and pe instances (which share the root)
+    # seed once and journal without fighting.
+    _FSTAT_CLOCK_BASENAME = "clock.json"
+    _FSTAT_CLOCK_WRITE_EVERY = 10
+    _fstat_clock_seeded: set = set()
+    _fstat_clock_written: dict = {}
+
+    def _fstat_clock(self) -> int:
+        """The refit clock: total branch proposes, restart-persistent.
+
+        Reads the shared census every GBSpecial move of this branch ticks
+        (:attr:`GBSpecialBase._branch_propose_counts` — the same clock the
+        tempering cadence uses), and makes it survive restarts by (a)
+        seeding the census from ``<fstat_root>/clock.json`` on this
+        process's first read and (b) journaling the census back to that
+        file every :attr:`_FSTAT_CLOCK_WRITE_EVERY` ticks. Proposes made
+        between the last journal write and a crash are lost — the budget
+        stretches by at most the journal granularity, never resets.
+
+        Only the sampling rank proposes, so the journal has a single
+        writer; both grid moves journaling the same monotone value is
+        benign either way.
+        """
+        branch = getattr(self, "branch_name", "gb")
+        counts = GBSpecialBase._branch_propose_counts
+        root = self._fstat_root
+        path = os.path.join(root, self._FSTAT_CLOCK_BASENAME)
+        if root not in GBSpecialRJFStatGridMove._fstat_clock_seeded:
+            GBSpecialRJFStatGridMove._fstat_clock_seeded.add(root)
+            stored = 0
+            try:
+                with open(path) as f:
+                    stored = int(json.load(f).get("clock", 0))
+            except (OSError, ValueError, TypeError):
+                pass
+            if stored > counts.get(branch, 0):
+                counts[branch] = stored
+        clock = int(counts.get(branch, 0))
+        last_written = GBSpecialRJFStatGridMove._fstat_clock_written.get(
+            root, -self._FSTAT_CLOCK_WRITE_EVERY)
+        if clock - last_written >= self._FSTAT_CLOCK_WRITE_EVERY:
+            GBSpecialRJFStatGridMove._fstat_clock_written[root] = clock
+            try:
+                os.makedirs(root, exist_ok=True)
+                with open(path, "w") as f:
+                    json.dump(dict(clock=clock), f)
+            except OSError as exc:  # journal is bookkeeping, never fatal
+                logger.warning("%s: could not journal the refit clock (%r)",
+                               self.name, exc)
+        return clock
+
+    def _epoch_fit_clock(self, k: int) -> int:
+        """The refit-clock value epoch ``k`` was fitted at (its DONE.json).
+
+        Missing manifest / pre-clock manifest (no ``"clock"`` key) -> 0:
+        an epoch of unknown age has no budget left, so the first
+        ``fstat_refit_every`` ticks of sampling on top of it trigger the
+        refit — exactly right for stores fitted before this clock existed.
+        """
+        try:
+            with open(os.path.join(self._epoch_dir(k), "DONE.json")) as f:
+                return int(json.load(f).get("clock", 0))
+        except (OSError, ValueError, TypeError):
+            return 0
 
     @staticmethod
     def _epoch_complete(d: str) -> bool:
@@ -11237,7 +11348,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         if self.rj_proposal_distribution is not None:
             if self.fstat_refit_every <= 0:
                 return "skip", self._fstat_epoch
-            if (self.num_proposals - self._fstat_last_fit_hit
+            # Cadence on the SHARED, restart-persistent refit clock (see
+            # _fstat_clock) -- the per-instance num_proposals counter never
+            # reached the cadence in production (starved by full_pe
+            # random_choice, the short gb_search stage, and per-launch
+            # resets).
+            if (self._fstat_clock() - self._fstat_last_fit_hit
                     < self.fstat_refit_every):
                 return "skip", self._fstat_epoch
             return "fit", (self._fstat_epoch or 0) + 1
@@ -11436,7 +11552,11 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             with open(os.path.join(cache_dir, "DONE.json"), "w") as f:
                 json.dump(dict(epoch=k, walker_ref=int(walker_ref),
                                n_peaks=int(n_peaks), wall_seconds=wall,
-                               num_proposals=int(self.num_proposals)), f)
+                               num_proposals=int(self.num_proposals),
+                               # the refit clock at fit time -- read back by
+                               # _epoch_fit_clock so the cadence budget
+                               # survives restarts (2026-08-24)
+                               clock=int(self._fstat_clock())), f)
         except OSError as exc:  # manifest is bookkeeping, never fatal
             logger.warning("%s: could not write DONE.json (%r)", self.name, exc)
         return stacked, n_peaks
@@ -11446,7 +11566,7 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
     _CTR_TABLE_DEVICE_FIELDS = (
         "f0_mHz", "phi0", "iota", "psi", "ln_A_max", "sigma_base", "ln_snr")
 
-    def _install_ctr_table(self, k: int, model=None):
+    def _install_ctr_table(self, k: int, model=None, branches=None):
         """Load or build epoch ``k``'s F-stat center table and install it.
 
         The USER RULING's "compute them once" step: ONE batched sweep over
@@ -11484,14 +11604,29 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         # too expensive to pay on the checkpoint-load path.
         need_sweep = not os.path.exists(
             os.path.join(key, CENTER_TABLE_BASENAME))
-        call = (self._fstat_call(model, self._fstat_reference_walker(model))
-                if (need_sweep and model is not None) else None)
         t0 = time.perf_counter()
-        host = build_fstat_center_table(
-            call, cache_dir=key, xp=self.xp,
+        _table_kwargs = dict(
+            cache_dir=key, xp=self.xp,
             mc_lims=self.fstat_fit_kwargs.get("mc_lims") or [0.001, 1.0],
             max_nodes=int(os.environ.get("GB_FSTAT_CTR_MAX_NODES", "1000000")),
         )
+        if need_sweep and model is not None:
+            # The center sweep MUST see the SAME residual the epoch's peak
+            # grids were fitted against -- the GB-FREE one (2026-08-24 fix:
+            # this sweep used to run AFTER the fit's GB-free window closed,
+            # so at any real refit the amplitude/SNR centers for exactly the
+            # loud already-recovered peaks would have been fitted against
+            # noise). The scorer is built INSIDE the window too: under
+            # FSTAT_USE_SIGHET its heterodyne references snapshot the
+            # residual at build time. Costs one extra add/remove round trip
+            # when this follows a fit (the fit's own window already closed)
+            # -- two fill_template passes, negligible against the sweep.
+            walker_ref = self._fstat_reference_walker(model)
+            with self._gb_free_residual(model, branches, walker_ref):
+                call = self._fstat_call(model, walker_ref)
+                host = build_fstat_center_table(call, **_table_kwargs)
+        else:
+            host = build_fstat_center_table(None, **_table_kwargs)
         table = None
         if host is not None:
             # Device residency: setup() runs inside the move's own propose,
@@ -11573,7 +11708,14 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         else:
             self.rj_proposal_distribution = {self.branch_name: container}
         self._fstat_epoch = k
-        self._fstat_last_fit_hit = int(self.num_proposals)
+        # Last-fit mark on the refit clock. After a real fit DONE.json holds
+        # the clock this process just journaled; on a LOAD of an existing
+        # epoch it holds the clock the epoch was actually fitted at (0 for
+        # pre-clock epochs -> their budget is treated as spent and the next
+        # cadence window refits). Reading it back instead of re-syncing to
+        # the fresh in-process counter is what lets the budget carry across
+        # restarts.
+        self._fstat_last_fit_hit = self._epoch_fit_clock(k)
         # Publish for the other moves sharing this fit dir (see
         # :data:`_FSTAT_GRID_REGISTRY`). Store the assembled
         # rj_proposal_distribution, so the prior-fallback case is shared too
@@ -11602,19 +11744,23 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                 )
                 self.rj_proposal_distribution = container
                 self._fstat_epoch = epoch
-                self._fstat_last_fit_hit = int(self.num_proposals)
-                self._install_ctr_table(epoch, model=model)
+                self._fstat_last_fit_hit = self._epoch_fit_clock(epoch)
+                self._install_ctr_table(epoch, model=model, branches=branches)
                 return
 
         if action == "load":
             logger.info("%s: loading complete F-stat grid epoch %d from %s",
                         self.name, k, self._epoch_dir(k))
             self._install(k)
-            self._install_ctr_table(k, model=model)
+            self._install_ctr_table(k, model=model, branches=branches)
             return
         stacked, n_peaks = self._run_fstat_fit(model, k, branches=branches)
         self._install(k, stacked=stacked, n_peaks=n_peaks)
-        self._install_ctr_table(k, model=model)
+        # Belt for a failed DONE.json write (then _epoch_fit_clock read 0 in
+        # _install, which would refit again next window): the fit happened
+        # NOW on this process's clock, so mark it from memory.
+        self._fstat_last_fit_hit = self._fstat_clock()
+        self._install_ctr_table(k, model=model, branches=branches)
 
 
 def para_log_like(
