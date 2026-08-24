@@ -793,7 +793,19 @@ export GB_CAP_STAGGER=1
 # 20.38 mHz double-count straddled the cell 4567/4568 edge). Resume-safe
 # over a rewound v6 copy: edges compare equal, no migration.
 # GB_CAP_OVERLAP_FRAC=0 reverts to the exact v6 partition bit-identically.
-export GB_CAP_OVERLAP_FRAC=0.25
+# 0.48 (user sizing rule, 2026-08-24): the overlap must be wide enough that
+# no single source's feasible search stretch can place two fragments with NO
+# shared covering cell. The unprotected channel is two leaves in adjacent
+# exclusive cores, so the guarantee is overlap_width >= max feasible
+# same-source separation. Empirically the fragments park inside the orbital
+# Doppler/sideband envelope (observed splits 5-25 bins; envelope ~31.6 bins
+# at 20.4 mHz, 3-mo bins), so overlap 0.48 x 65-bin cells = ~31.6 bins
+# covers it -- just inside the p<0.5 two-covering-cell implementation limit.
+# The probe window holds exactly ONE real source (verified against the
+# catalogue), so wide exclusion suppresses nothing here; the rj_replace
+# move (5845073f) handles any first-birth lockout inside the wide span.
+# Full-band runs later want the frequency-scaled per-edge extension instead.
+export GB_CAP_OVERLAP_FRAC=0.48
 # ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
 #      so the store's provenance is unambiguous) ----
 # Birth fix (1274a66c): births draw fdot_astro_ratio | (f0, Mc) from the
