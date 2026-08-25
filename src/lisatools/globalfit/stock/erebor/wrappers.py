@@ -267,12 +267,14 @@ class MBHTDIonFlyWaveWrap:
         # directly; drop the legacy ResponseWrapper kwarg if present.
         call_kwargs.pop("convert_to_ra_dec", None)
         m1, m2, s1z, s2z, dist, phi_ref, inc, psi, ra, dec, t_plunge = params
-        arr = np.asarray(
-            self.wave_gen(
-                m1, m2, s1z, s2z, dist, phi_ref, inc, ra, dec, psi, t_plunge,
-                upsample_t_arr=self.t_arr, combine=True, **call_kwargs,
-            )
+        raw = self.wave_gen(
+            m1, m2, s1z, s2z, dist, phi_ref, inc, ra, dec, psi, t_plunge,
+            upsample_t_arr=self.t_arr, combine=True, **call_kwargs,
         )
+        # Keep GPU-backend waveforms on-device.  CuPy deliberately rejects
+        # implicit conversion through np.asarray().
+        xp = get_array_module(raw[0] if isinstance(raw, (list, tuple)) else raw)
+        arr = xp.asarray(raw)
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
         return arr
@@ -366,12 +368,12 @@ class SOBBHTDIonFlyWaveWrap:
         call_kwargs.update(kwargs)
         call_kwargs.pop("convert_to_ra_dec", None)
         m1, m2, s1, s2, dist, inc, f_low, ra, dec, psi, phi0 = params
-        arr = np.asarray(
-            self.wave_gen(
-                m1, m2, s1, s2, dist, f_low, phi0, inc, ra, dec, psi,
-                upsample_t_arr=self.t_arr, combine=True, **call_kwargs,
-            )
+        raw = self.wave_gen(
+            m1, m2, s1, s2, dist, f_low, phi0, inc, ra, dec, psi,
+            upsample_t_arr=self.t_arr, combine=True, **call_kwargs,
         )
+        xp = get_array_module(raw[0] if isinstance(raw, (list, tuple)) else raw)
+        arr = xp.asarray(raw)
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
         return arr
