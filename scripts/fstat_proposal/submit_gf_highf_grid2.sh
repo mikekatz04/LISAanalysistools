@@ -253,6 +253,15 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # works unchanged -- they take the DIRECTORY as their argument.
 STORE_DIR=/shared/data/global_fit_output/gf_prod_3mo_highf_grid2/
 
+# F-STAT GRID CACHE OUTSIDE THE STORE (2026-08-26, testing convenience):
+# fresh starts (rm -rf $STORE_DIR) keep the ~155 s epoch-0 grid fit.
+# Every load is FINGERPRINT-GUARDED (epoch, gbfree flag, node shape,
+# band inputs) so a config change still refits; delete this dir to
+# force one. NOTE the refit clock (clock.json) lives here too and is
+# restart-persistent by design -- wipe the dir if you want the refit
+# cadence to start from zero as well.
+export GB_FSTAT_FIT_DIR=/shared/data/global_fit_output/fstat_cache_3mo_highf_grid2
+
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
 # (timestamped per job, so resubmits/resumes add new files rather than
