@@ -23,7 +23,7 @@ from lisatools.response.directresponse import ResponseWrapper
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.sources.sobbh import SOBBHWaveform
 from lisatools.utils.constants import YRSID_SI
-from lisatools.utils.utility import get_array_module
+from lisatools.utils.utility import asnumpy, get_array_module
 
 # Canonical EMRI response-wrapper machinery lives in the installed
 # ``lisatools.sources.emri`` package (2026-07-01 carve-out); re-exported here
@@ -267,7 +267,10 @@ class MBHTDIonFlyWaveWrap:
         # directly; drop the legacy ResponseWrapper kwarg if present.
         call_kwargs.pop("convert_to_ra_dec", None)
         m1, m2, s1z, s2z, dist, phi_ref, inc, psi, ra, dec, t_plunge = params
-        arr = np.asarray(
+        # asnumpy, not np.asarray: with a GPU-backed generator
+        # (SYNTHETIC_INJECTION_BACKEND=auto) the output is cupy, and
+        # np.asarray on cupy RAISES (no implicit host conversion).
+        arr = asnumpy(
             self.wave_gen(
                 m1, m2, s1z, s2z, dist, phi_ref, inc, ra, dec, psi, t_plunge,
                 upsample_t_arr=self.t_arr, combine=True, **call_kwargs,
@@ -366,7 +369,10 @@ class SOBBHTDIonFlyWaveWrap:
         call_kwargs.update(kwargs)
         call_kwargs.pop("convert_to_ra_dec", None)
         m1, m2, s1, s2, dist, inc, f_low, ra, dec, psi, phi0 = params
-        arr = np.asarray(
+        # asnumpy, not np.asarray: with a GPU-backed generator
+        # (SYNTHETIC_INJECTION_BACKEND=auto) the output is cupy, and
+        # np.asarray on cupy RAISES (no implicit host conversion).
+        arr = asnumpy(
             self.wave_gen(
                 m1, m2, s1, s2, dist, f_low, phi0, inc, ra, dec, psi,
                 upsample_t_arr=self.t_arr, combine=True, **call_kwargs,
