@@ -35,11 +35,20 @@ guard instead of killing the process. This is the one hard blocker for
 any long run containing EMRIs — if S1 dies with a bare exit(-1) in an
 EMRI likelihood, that is THIS gate failing, by design.
 
-**S3 — SOBBH path decision [decision + smoke]**
-The chunked moving-window chirp build is still open. Decide: ship 6-mo
-SOBBH on the validated TDI-on-the-fly path (defer the moving window) or
-land the window first. PASS: decision recorded here + one SOBBH-only
-lite smoke on the chosen path at 6 mo.
+**S3 — SOBBH chunked likelihood at 6 mo — GREEN 2026-08-25 (evidence in)**
+Measured by the removal-null run (`scripts/sobbh/sobbh_removal_null_6mo.py`,
+pushed d33bb888): removal via the production chunked fill is **GO** —
+residual 5.5–6.7e-4 of ⟨h|h⟩ per source at the 32/8 defaults, truth
+null −3.9e-4, and the Nt_sub curve is U-shaped with its optimum exactly
+at the default (κ*≈3.5 layers/chunk; tolerance ~7 with fill ≥ 4;
+collapse ~14; Nt_sub=8 pays 13× stitch overhead). Scoring: **m=1 is
+NO-GO on the full_year grid** (11.1-h layers — sheds 15% of ⟨h|h⟩, bias
+0.076·SNR²; m=2 recovers 99.9%) and expected GO on the production 1-h
+grid. Shipped: chirp-safe auto-sizer + criterion warnings
+(`SOBBH_NT_SUB=0`, `SOBBH_SWEEP_MAX_LAYERS=3.5`), the prepared-settings
+cfg fix, `SOBBH_M_BAND_HALF_WIDTH=3` in the probe (user ruling: converged width — not a bottleneck). The sig-het
+moving-window build stays DEFERRED (not needed for 6 mo). Residual
+follow-up: watch the `[sobbh_chunked]` resolver line in the S1 log.
 
 **S4 — detectability census readout [laptop, after S1]**
 From S1's store: per-source posterior width vs prior for all 8 EMRIs and
