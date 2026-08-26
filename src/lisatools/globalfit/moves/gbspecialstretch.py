@@ -4232,27 +4232,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 acc_counts, round_i, bview,
                             )
                     self._debug_plot_rj_pair(buffer_obj, rj_seq)
-                    # Survivor pooling: PRE-accept cap mask (newborns pool;
-                    # at-cap death-rejected survivors don't — user rules
-                    # 2026-08-13/14), then host-side one-per-cell dedup.
-                    alive_now = band_sorter.inds[picked["ids"]]
-                    _lcs = getattr(self, "_live_cap_state", None)
-                    if _lcs is not None:
-                        _counts_pre, _cap_arr = _lcs
-                        # Pool gate on the CAP-CELL grid (2026-08-15): an
-                        # at-cap CELL never freezes its sources into the
-                        # in-model pool. Overlap mode: any covering cell.
-                        alive_now = alive_now & ~self._row_at_cap(
-                            _counts_pre, _cap_arr,
-                            picked["temp_inds"], picked["walker_inds"],
-                            picked["cap_inds"],
-                            picked.get("cap_nb_inds"),
-                            picked.get("cap_has_nb"),
-                        )
-                    else:
-                        _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
-                        if _at_cap_m is not None:
-                            alive_now = alive_now & ~_at_cap_m[picked["ids"]]
+                    # Survivor pooling (then host-side one-per-cell dedup):
+                    # ALIVE sources pool regardless of cap state —
+                    # :meth:`_survivor_pool_mask` (user ruling 2026-08-26,
+                    # reversing 2026-08-13's at-cap exclusion).
+                    alive_now = self._survivor_pool_mask(
+                        band_sorter.inds[picked["ids"]], picked
+                    )
                     if bool(alive_now.any()):
                         held = {k: v[alive_now] for k, v in picked.items()}
                         # Provenance rides with the pooled rows: True =
@@ -4394,22 +4380,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # every newborn in cap-1 bands and gut the grouped
                     # in-model. Live state comes from the round's
                     # _pick_sources stash; fallback = unit-open snapshot.
-                    _lcs = getattr(self, "_live_cap_state", None)
-                    if _lcs is not None:
-                        _counts_pre, _cap_arr = _lcs
-                        # Overlap mode: at-cap = ANY covering cell at cap.
-                        _pre_cap_row = self._row_at_cap(
-                            _counts_pre, _cap_arr,
-                            picked["temp_inds"], picked["walker_inds"],
-                            picked["cap_inds"],
-                            picked.get("cap_nb_inds"),
-                            picked.get("cap_has_nb"),
-                        )
-                        alive_now = alive_now & ~_pre_cap_row
-                    else:
-                        _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
-                        if _at_cap_m is not None:
-                            alive_now = alive_now & ~_at_cap_m[picked["ids"]]
+                    alive_now = self._survivor_pool_mask(alive_now, picked)
                     if bool(alive_now.any()):
                         held = {k: v[alive_now] for k, v in picked.items()}
                         pending.append(held)
@@ -6000,6 +5971,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             else:
                 oob_rows = _eval(k_ids, False)
                 _mark("rj_getll")
+
+            # Death-side capture harvest (see _harvest_death_capture):
+            # every kept death row was just scored at its own params with
+            # phase_maximize=False; fold those numbers into the sorter
+            # capture (exposed-residual convention) so un-pooled leaves
+            # still carry fresh cap-gate evidence. oob rows excluded —
+            # their kernel evaluation was rejected.
+            if len(death_k):
+                _dk = death_k
+                if len(oob_rows):
+                    _dk = _dk[~xp.isin(_dk, oob_rows)]
+                if len(_dk):
+                    self._harvest_death_capture(
+                        ids[_dk], d_h[_dk], h_h[_dk],
+                        band_sorter.inds.shape[0],
+                    )
 
             # Legacy step-1 amplitude pin: scale the drawn amplitude by the
             # empirical residual ratio ``s = d_h/h_h`` (a 1-parameter fit at the
@@ -9924,7 +9911,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             work.coords[inds_new] = _to_numpy(band_sorter.coords[alive])
             work.inds[:] = False
             work.inds[inds_new] = True
-            self._scatter_leaf_products(new_state, alive, inds_new)
+            # identity preserved: old positions == new positions
+            self._scatter_leaf_products(new_state, alive, inds_new, inds_new)
             self._sync_cold_row(new_state)
             return
         special_indices_finish = (
@@ -9963,16 +9951,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # turn on all the ones that are there
         work.inds[inds_new] = True
         # work.branch_supplemental[inds_new] = state.branches[self.branch_name].branch_supplemental[inds_old]
-        self._scatter_leaf_products(new_state, alive, inds_new)
+        self._scatter_leaf_products(new_state, alive, inds_new, inds_old)
         self._sync_cold_row(new_state)
 
-    def _scatter_leaf_products(self, new_state, alive, inds_new) -> None:
+    def _scatter_leaf_products(self, new_state, alive, inds_new,
+                               inds_old=None) -> None:
         """Write the captured cold-chain per-leaf ``<d|h>``/``<h|h>`` into the sub-state.
 
         The capture lives on the sorter's flat source storage
         (``self._sorter_dh``/``_hh``, filled in ``_run_in_model_repeats``);
         here — after the leaf repack — the alive sources' values land at
         their FINAL (walker, leaf) positions, cold chain only.
+
+        AT-CAP PERSISTENCE (2026-08-26 cap-freeze root-cause fix): a cold
+        source with NO fresh capture this iteration (it never entered the
+        in-model pool) keeps its PREVIOUS per-leaf values, gathered from
+        its OLD position (``inds_old``) before the wipe — instead of being
+        NaN-wiped, which starved the cap gate's source-attributed
+        statistic to zero for exactly the at-cap cells it exists to
+        judge. The carried value is the source's last scoring (its params
+        cannot have moved without a capture); the surrounding residual
+        may have shifted, so it is "last known", which is what a gate
+        heuristic needs. Without ``inds_old`` the old wipe semantics are
+        kept.
         """
         sub_states = getattr(new_state, "sub_states", None) or {}
         sub = sub_states.get(self.branch_name)
@@ -9986,10 +9987,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         cold = t_new == 0
         dh_alive = _to_numpy(self._sorter_dh[alive])
         hh_alive = _to_numpy(self._sorter_hh[alive])
+        dh_c = dh_alive[cold]
+        hh_c = hh_alive[cold]
+        if inds_old is not None:
+            _, w_old, leaf_old = inds_old
+            _prev_dh = np.array(sub.d_h[w_old[cold], leaf_old[cold]])
+            _prev_hh = np.array(sub.h_h[w_old[cold], leaf_old[cold]])
+            dh_c = np.where(np.isnan(dh_c), _prev_dh, dh_c)
+            hh_c = np.where(np.isnan(hh_c), _prev_hh, hh_c)
         sub.d_h[:] = np.nan
         sub.h_h[:] = np.nan
-        sub.d_h[w_new[cold], leaf_new[cold]] = dh_alive[cold]
-        sub.h_h[w_new[cold], leaf_new[cold]] = hh_alive[cold]
+        sub.d_h[w_new[cold], leaf_new[cold]] = dh_c
+        sub.h_h[w_new[cold], leaf_new[cold]] = hh_c
 
     def _band_residual_lls(self, acs):
         """Per-band cold-walker residual ll ``-1/2 <r|r>`` from the parent ACA.
@@ -10734,6 +10743,65 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         np.add.at(out[w], nb[w][m2], 1)
         return out
 
+    def _harvest_death_capture(self, ids_death, d_h_raw, h_h_raw,
+                               n_src) -> None:
+        """Fold the death-side RJ scoring into the sorter d_h/h_h capture.
+
+        USER-APPROVED 2026-08-26 ("harvest them for free"): every RJ
+        round scores each picked ALIVE leaf at its OWN params with
+        ``phase_maximize=False`` (the death proposal's reference
+        evaluation) — the same numbers the in-model capture stores, up
+        to the exposed-residual convention: the death kernel returns
+        ``d_h_raw = <r|h>`` with the leaf still subtracted from ``r``,
+        while the capture convention is ``<r + h|h> = d_h_raw + h_h``.
+        Harvesting keeps the cap gate's source-attributed statistic
+        FRESH for every picked leaf even when it misses the in-model
+        pool; the repack persistence in
+        :meth:`_scatter_leaf_products` then only covers leaves that
+        were never picked this iteration. The in-model capture runs
+        AFTER the RJ rounds in a unit, so pooled leaves still end with
+        their post-polish values (later write wins).
+        """
+        if getattr(self, "_sorter_dh", None) is None:
+            self._sorter_dh = cp.full(int(n_src), np.nan)
+            self._sorter_hh = cp.full(int(n_src), np.nan)
+        self._sorter_dh[ids_death] = cp.asarray(d_h_raw) + cp.asarray(h_h_raw)
+        self._sorter_hh[ids_death] = cp.asarray(h_h_raw)
+
+    def _survivor_pool_mask(self, alive_now, picked):
+        """Which picked rows may enter the end-of-unit in-model pool.
+
+        USER RULING 2026-08-26 (reverses the 2026-08-13 at-cap exclusion):
+        alive GBs in the sampler get their in-model moves every round —
+        an at-cap cell is exactly where a mis-seated source needs polish,
+        and the cap gate's source-attributed statistic reads the d_h/h_h
+        that only this polish captures. Excluding at-cap cells starved
+        that statistic to zero and froze the cap ramp (the highf-grid
+        probe deadlock: at-cap → no pool → no capture → statistic 0 → no
+        evidence → cap never increments → still at-cap).
+
+        ``GB_INMODEL_POOL_AT_CAP=0`` restores the 2026-08-13 exclusion
+        (only below-cap cells' survivors pool), with the live-state /
+        unit-open-snapshot precedence unchanged.
+        """
+        if os.environ.get("GB_INMODEL_POOL_AT_CAP", "1") == "1":
+            return alive_now
+        _lcs = getattr(self, "_live_cap_state", None)
+        if _lcs is not None:
+            _counts_pre, _cap_arr = _lcs
+            # Overlap mode: at-cap = ANY covering cell at cap.
+            return alive_now & ~self._row_at_cap(
+                _counts_pre, _cap_arr,
+                picked["temp_inds"], picked["walker_inds"],
+                picked["cap_inds"],
+                picked.get("cap_nb_inds"),
+                picked.get("cap_has_nb"),
+            )
+        _at_cap_m = getattr(self, "_rj_at_cap_mask", None)
+        if _at_cap_m is not None:
+            return alive_now & ~_at_cap_m[picked["ids"]]
+        return alive_now
+
     def _cap_ll_check(self, cell_lls, band_lls) -> None:
         """[GB_CAP_LL_CHECK] does the cap grid partition the band ll? (default OFF)
 
@@ -10918,18 +10986,50 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _seen = getattr(self, "_cap_ll_improved_once", None)
             if _seen is None or _seen.shape != improved.shape:
                 _seen = np.zeros(improved.shape, dtype=bool)
-            # The FIRST observation beats ``best = -inf`` trivially and is
-            # not evidence of anything -- the PSD idiom guards the same way
-            # with ``not np.isinf(max_logl)``. ``best`` is also reset to
-            # -inf on every increment, so this re-arms per rung while the
-            # flag itself stays sticky: a cell that has proven itself once
-            # keeps its clock.
+            # ENGAGEMENT (user spec 2026-08-26, supersedes the D/2
+            # first-improvement guard): a ONE-SHOT latch per cell. The
+            # >GB_LEAF_CAP_ENGAGE_TOL (default 0.1) change test exists
+            # only to detect the very BEGINNING of a cell's activity — a
+            # source landing there — and a source already present at the
+            # first update counts ("if a source is added that counts",
+            # from the very start). Once the latch is set it is sticky:
+            # later >tol changes do NOTHING (no re-engage, no reset —
+            # the `_seen |= changed` below is a no-op for engaged
+            # cells), only the D/2 HOLD test drives the clock from then
+            # on (improvement >= D/2 resets patience: cap held; a full
+            # patience window without one: increment). The latch also
+            # survives cap increments — a cell never re-earns
+            # engagement. An EMPTY cell's flat statistic never engages,
+            # preserving the ghost-increment guard's purpose without
+            # demanding the D/2 jump that a cell seated near-converged
+            # at birth can never post (the frozen highf-grid probe).
+            # Latch and baseline stay in-memory only (a restart
+            # re-baselines; an occupied cell re-engages on the first
+            # post-restart update).
             if not _skip_guard:
-                _seen |= improved & np.isfinite(best)
+                _tol = float(os.environ.get("GB_LEAF_CAP_ENGAGE_TOL", "0.1"))
+                _occ_any = _to_numpy(
+                    self._cold_occupancy(band_counts, new_state)
+                ).max(axis=0) > 0
+                _prev = getattr(self, "_cap_ll_prev_stat", None)
+                if _prev is None or _prev.shape != cur_max.shape:
+                    changed = _occ_any.copy()
+                else:
+                    _both = np.isfinite(_prev) & np.isfinite(cur_max)
+                    changed = np.where(
+                        _both, np.abs(cur_max - _prev) > _tol,
+                        np.isfinite(cur_max) != np.isfinite(_prev),
+                    )
+                self._cap_ll_prev_stat = np.array(cur_max, copy=True)
+                _seen |= changed
                 self._cap_ll_improved_once = _seen
                 best[:] = np.maximum(best, cur_max)
                 iters[improved] = 0
-                iters[~improved & _seen] += 1
+                # Patience accrues only while the cell is OCCUPIED on the
+                # cold chain: a cell whose occupants died goes quiet
+                # (clock holds) instead of ratcheting its cap on a
+                # schedule.
+                iters[~improved & _seen & _occ_any] += 1
                 converged = iters >= self.leaf_cap_min_iters
         elif self.leaf_cap_iter_only:
             best[:] = np.maximum(best, cur_max)
@@ -10983,7 +11083,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if _seen is not None and _seen.shape == iters.shape:
             _frozen = int((~_seen).sum())
             _running = int(_seen.sum())
-            _tail = (f"; {_frozen} never-improved (clock frozen), "
+            _tail = (f"; {_frozen} never-engaged (clock frozen), "
                      f"{_running} accruing patience")
         else:
             _tail = ""

@@ -615,26 +615,28 @@ class OverCapCellTest(unittest.TestCase):
 
 
 class GhostIncrementGuardTest(unittest.TestCase):
-    """The patience clock only runs for cells whose max ll has improved once.
+    """The patience clock only runs for ENGAGED, OCCUPIED cells.
 
-    An EMPTY cap cell has no source to fit better, so its max ll never
-    improves -- and under a bare counter it accrued patience every
+    An EMPTY cap cell has no source to fit better, so its statistic never
+    changes -- and under a bare counter it accrued patience every
     iteration and promoted itself on a fixed clock. Measured on the
     3-month production run that made 920 of 1,232 cells increment in
     LOCKSTEP at iteration 10, turning a progressive cap into a wall-clock
     ratchet: loosest exactly when the model is fullest.
 
-    The guard mirrors ``changed_once`` in the PSD max-logL search
-    (``psdmove.py::run_move_max_likelihood``), which likewise refuses to
-    count a plateau iteration until the chain has moved at all.
+    User spec 2026-08-26: engagement = any statistic change > 0.1, and a
+    source already present at first sight counts (an OCCUPIED cell
+    engages immediately); D/2 stays the HOLD test. Empty cells never
+    engage, which is what this guard has always been for.
     """
 
-    def _drive(self, m, bi, ll_series, min_iters=3, guard=True):
+    def _drive(self, m, bi, ll_series, min_iters=3, guard=True, occ=None):
         """Run ``_update_band_leaf_caps`` over a per-iteration ll series.
 
         ``ll_series[i]`` is the (nwalkers, ncell) cold-chain cell ll at
-        iteration i. Everything the method reads other than the cell lls
-        is stubbed, so this exercises the GATE and nothing else.
+        iteration i. ``occ`` is the scripted cold occupancy per cell
+        (default: all EMPTY). Everything else the method reads is
+        stubbed, so this exercises the GATE and nothing else.
         """
         os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = "1" if guard else "0"
         self.addCleanup(os.environ.pop, "GB_LEAF_CAP_REQUIRE_IMPROVEMENT", None)
@@ -650,6 +652,9 @@ class GhostIncrementGuardTest(unittest.TestCase):
         m._work_branch = lambda _s: SimpleNamespace(shape=(1, 1, 10000))
         m._band_residual_lls = lambda _aca: np.zeros(
             (bi["nwalkers"], m.num_bands))
+        _occ = (np.zeros((1, m.num_cap_cells), dtype=int) if occ is None
+                else np.atleast_2d(np.asarray(occ, dtype=int)))
+        m._cold_occupancy = lambda *_a: _occ
         caps = []
         for lls in ll_series:
             arr = np.asarray(lls, dtype=float)
@@ -671,34 +676,40 @@ class GhostIncrementGuardTest(unittest.TestCase):
         bi["cap_cell_best_ll"][:] = -np.inf
         return m, bi
 
-    def test_a_never_improving_cell_never_increments(self):
-        """The ghost increment: a flat cell keeps its cap forever."""
+    def test_a_never_improving_empty_cell_never_increments(self):
+        """The ghost increment: a flat EMPTY cell keeps its cap forever.
+
+        (An OCCUPIED flat cell now legitimately ramps -- user spec
+        2026-08-26, ``test_born_converged_cell_still_ramps``.)
+        """
         m, bi = self._setup()
         n = m.num_cap_cells
-        # Ten iterations of a cell ll that only jitters -- far below the
-        # D/2 = 4.0 improvement threshold.
+        # Ten iterations of a cell ll that only jitters -- below the 0.1
+        # engagement tolerance, with every cell empty.
         rng = np.random.default_rng(0)
         series = [(-100.0 + 1e-3 * rng.standard_normal(n))[None, :]
                   for _ in range(10)]
         caps = self._drive(m, bi, series)
         self.assertTrue(
             np.all(caps[-1] == 1),
-            f"flat cells must stay at cap 1, got {np.unique(caps[-1])}")
+            f"flat empty cells must stay at cap 1, got {np.unique(caps[-1])}")
 
     def test_an_improving_cell_still_ramps(self):
         """The guard must not disable the annealing it protects."""
         m, bi = self._setup()
         n = m.num_cap_cells
-        series = [np.full((1, n), -100.0)]          # arm best (finite)
+        series = [np.full((1, n), -100.0)]          # first sight (occupied)
         series.append(np.full((1, n), -50.0))       # a real improvement
         series += [np.full((1, n), -50.0)] * 8      # then a genuine plateau
-        caps = self._drive(m, bi, series, min_iters=3)
+        caps = self._drive(m, bi, series, min_iters=3,
+                           occ=np.ones((1, n), dtype=int))
         self.assertGreater(
             int(caps[-1].max()), 1,
             "a cell that improved once must still ramp on its plateau")
 
-    def test_only_the_improving_cell_ramps(self):
-        """Cell 0 improves, the rest are flat: only cell 0 promotes."""
+    def test_only_the_occupied_cell_ramps(self):
+        """Cell 0 is occupied and improving; its EMPTY flat neighbours
+        must not ride its clock."""
         m, bi = self._setup()
         n = m.num_cap_cells
         base = np.full((1, n), -100.0)
@@ -706,19 +717,20 @@ class GhostIncrementGuardTest(unittest.TestCase):
         step = base.copy(); step[0, 0] = -50.0      # cell 0 alone improves
         series.append(step)
         series += [step.copy() for _ in range(8)]
-        caps = self._drive(m, bi, series, min_iters=3)
+        occ = np.zeros((1, n), dtype=int); occ[0, 0] = 1
+        caps = self._drive(m, bi, series, min_iters=3, occ=occ)
         self.assertGreater(int(caps[-1][0]), 1)
         self.assertTrue(
             np.all(caps[-1][1:] == 1),
-            "flat neighbours must not ride cell 0's clock")
+            "empty flat neighbours must not ride cell 0's clock")
 
-    def test_first_observation_is_not_an_improvement(self):
+    def test_first_observation_of_an_empty_grid_never_engages(self):
         """best starts at -inf, so iteration 0 beats it trivially.
 
-        Without the ``isfinite(best)`` guard every cell would latch
-        'improved once' on its very first update and the guard would be a
-        no-op -- exactly the bug the PSD idiom avoids with
-        ``not np.isinf(max_logl)``.
+        The trivial beat must not engage an EMPTY grid's clocks (the
+        pre-2026-08-26 guard used ``isfinite(best)`` for this; the
+        engagement rule now gets it from occupancy: only a cell with a
+        source at first sight — or a later >0.1 change — engages).
         """
         m, bi = self._setup()
         n = m.num_cap_cells
@@ -726,7 +738,7 @@ class GhostIncrementGuardTest(unittest.TestCase):
         self._drive(m, bi, series)
         self.assertFalse(
             bool(getattr(m, "_cap_ll_improved_once").any()),
-            "a first observation against -inf is not evidence of improvement")
+            "an empty grid's first observation must not engage any clock")
 
     def test_guard_is_OFF_by_default_so_the_ratchet_is_unchanged(self):
         """Default must reproduce the pre-guard behaviour exactly.
@@ -1121,3 +1133,306 @@ class OverlapStaggerInvariantTest(unittest.TestCase):
         j = int(np.searchsorted(ce, e, side="right") - 1)
         self.assertAlmostEqual(e - (ce[j] + x[j]), 11.25)
         self.assertAlmostEqual((ce[j + 1] - x[j + 1]) - e, 11.25)
+
+
+class SurvivorPoolAtCapTest(unittest.TestCase):
+    """User ruling 2026-08-26 (REVERSES the 2026-08-13 exclusion): sources
+    in at-cap cap cells still get their in-model moves — the survivor pool
+    keeps them. GB_INMODEL_POOL_AT_CAP=0 restores the old exclusion."""
+
+    def setUp(self):
+        self._old = os.environ.pop("GB_INMODEL_POOL_AT_CAP", None)
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("GB_INMODEL_POOL_AT_CAP", None)
+        else:
+            os.environ["GB_INMODEL_POOL_AT_CAP"] = self._old
+
+    def _picked(self):
+        return {
+            "ids": np.array([0, 1, 2]),
+            "temp_inds": np.zeros(3, dtype=np.int64),
+            "walker_inds": np.zeros(3, dtype=np.int64),
+            "cap_inds": np.zeros(3, dtype=np.int64),
+        }
+
+    def test_default_keeps_at_cap_rows_in_the_pool(self):
+        m = _move(2)
+        m._live_cap_state = ("counts", "caps")
+        m._row_at_cap = lambda *a, **k: np.array([True, True, False])
+        alive = np.array([True, True, True])
+        out = m._survivor_pool_mask(alive, self._picked())
+        np.testing.assert_array_equal(out, alive)
+
+    def test_knob_zero_restores_live_state_exclusion(self):
+        os.environ["GB_INMODEL_POOL_AT_CAP"] = "0"
+        m = _move(2)
+        m._live_cap_state = ("counts", "caps")
+        m._row_at_cap = lambda *a, **k: np.array([True, True, False])
+        out = m._survivor_pool_mask(np.array([True, True, True]), self._picked())
+        np.testing.assert_array_equal(out, [False, False, True])
+
+    def test_knob_zero_restores_snapshot_exclusion(self):
+        os.environ["GB_INMODEL_POOL_AT_CAP"] = "0"
+        m = _move(2)
+        m._live_cap_state = None
+        m._rj_at_cap_mask = np.array([False, True, False, True])
+        out = m._survivor_pool_mask(np.array([True, True, True]), self._picked())
+        np.testing.assert_array_equal(out, [True, False, True])
+
+
+def _gate_move(cap_divisor=2, min_iters=3, nwalkers=1):
+    """A fake move with just what ``_update_band_leaf_caps`` reads."""
+    m = _move(cap_divisor, nwalkers=nwalkers)
+    m.branch_name = "gb"
+    m.leaf_cap_ll_improve = True
+    m.leaf_cap_iter_only = False
+    m.leaf_cap_ll_nsigma = 3.0
+    m.leaf_cap_require_occupancy = False
+    m.leaf_cap_min_iters = min_iters
+    m.leaf_cap_ndim = 8  # hold threshold D/2 = 4.0
+    m._work_branch = lambda ns: SimpleNamespace(shape=(1, nwalkers, 10))
+    m._band_residual_lls = lambda acs: np.zeros((nwalkers, NUM_BANDS))
+    return m
+
+
+def _gate_state(m):
+    bi = {"num_bands": m.num_bands}
+    ensure_leaf_cap_fields(bi, m.num_bands)
+    ensure_cap_cell_fields(bi, m.num_cap_cells)
+    bi["band_leaf_cap"][:] = 1
+    bi["cap_cell_leaf_cap"][:] = 1
+    bi["cap_cell_iters"][:] = 0
+    bi["cap_cell_best_ll"][:] = -np.inf
+    state = SimpleNamespace(sub_states={"gb": SimpleNamespace(band_info=bi)})
+    return state, bi
+
+
+def _gate_step(m, state, stats, occ=None):
+    """One updater call with scripted cold cell stats (nwalkers, ncells)."""
+    stats = np.atleast_2d(np.asarray(stats, dtype=float))
+    if occ is None:
+        occ = (stats != 0).astype(int)
+    else:
+        occ = np.atleast_2d(np.asarray(occ, dtype=int))
+    m._cap_cell_lls = lambda model, ns, band_lls: (
+        stats, np.zeros(m.num_cap_cells)
+    )
+    m._cold_occupancy = lambda bc, ns: occ
+    m._update_band_leaf_caps(
+        SimpleNamespace(analysis_container_arr=None), state, None
+    )
+
+
+class CapGateEngagementTest(unittest.TestCase):
+    """User spec 2026-08-26: the clock ENGAGES on any cell-ll change > 0.1
+    (a first source landing counts); D/2 is the HOLD test — a cell still
+    improving by >= D/2 keeps its cap, a stagnant engaged cell increments
+    after ``leaf_cap_min_iters``."""
+
+    CELL = 5
+
+    def setUp(self):
+        self._old = os.environ.get("GB_LEAF_CAP_REQUIRE_IMPROVEMENT")
+        os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = "1"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("GB_LEAF_CAP_REQUIRE_IMPROVEMENT", None)
+        else:
+            os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = self._old
+
+    def _stats(self, value):
+        s = np.zeros(NUM_BANDS * 2)
+        s[self.CELL] = value
+        return s
+
+    def test_first_source_engages_and_stagnation_increments(self):
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        _gate_step(m, state, self._stats(0.0))      # baseline, empty
+        _gate_step(m, state, self._stats(100.0))    # birth -> engaged
+        for _ in range(2):
+            _gate_step(m, state, self._stats(100.0))
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 1)
+        _gate_step(m, state, self._stats(100.0))    # 3rd flat -> increment
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+        self.assertEqual(int(bi["cap_cell_iters"][self.CELL]), 0)
+        self.assertEqual(bi["cap_cell_best_ll"][self.CELL], -np.inf)
+
+    def test_starved_statistic_still_increments(self):
+        # The frozen highf-grid probe: the cell is BORN in the very first
+        # update (never observed empty), then the statistic starves to 0
+        # while the cell stays occupied. The cap must still ramp.
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        occ = np.ones(NUM_BANDS * 2)
+        _gate_step(m, state, self._stats(1131.0), occ)
+        _gate_step(m, state, self._stats(663.0), occ)
+        _gate_step(m, state, self._stats(0.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 1)
+        _gate_step(m, state, self._stats(0.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+
+    def test_born_converged_cell_still_ramps(self):
+        # Minimal frozen-probe repro: a source seats essentially converged
+        # in the first update and the statistic never moves again. "A
+        # source added counts" (user spec) -- occupied at first sight
+        # engages; no D/2 improvement for min_iters -> increment.
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        occ = np.ones(NUM_BANDS * 2)
+        for _ in range(3):
+            _gate_step(m, state, self._stats(2000.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 1)
+        _gate_step(m, state, self._stats(2000.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+        self.assertEqual(bi["cap_cell_best_ll"][self.CELL], -np.inf)
+
+    def test_d_over_2_improvement_holds_the_cap(self):
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        _gate_step(m, state, self._stats(0.0))
+        for v in (100.0, 110.0, 120.0, 130.0, 140.0, 150.0):
+            _gate_step(m, state, self._stats(v))
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 1)
+        self.assertEqual(int(bi["cap_cell_iters"][self.CELL]), 0)
+
+    def test_sub_threshold_creep_engages_but_does_not_hold(self):
+        # +1/iter is a >0.1 change (engaged) but < D/2 (no hold).
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        _gate_step(m, state, self._stats(0.0))
+        _gate_step(m, state, self._stats(100.0))
+        for v in (101.0, 102.0):
+            _gate_step(m, state, self._stats(v))
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 1)
+        _gate_step(m, state, self._stats(103.0))
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+
+    def test_empty_cell_never_engages(self):
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        for _ in range(6):
+            _gate_step(m, state, np.zeros(NUM_BANDS * 2))
+        np.testing.assert_array_equal(
+            bi["cap_cell_leaf_cap"], np.ones(NUM_BANDS * 2)
+        )
+        np.testing.assert_array_equal(
+            bi["cap_cell_iters"], np.zeros(NUM_BANDS * 2)
+        )
+
+    def test_emptied_cell_clock_freezes(self):
+        # Occupant dies: the drop engages/keeps the flag, but patience only
+        # accrues while the cell is OCCUPIED -- no ratchet on a corpse.
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        _gate_step(m, state, self._stats(0.0))
+        _gate_step(m, state, self._stats(100.0))            # occupied
+        for _ in range(6):                                   # death: empty
+            _gate_step(m, state, self._stats(0.0),
+                       occ=np.zeros(NUM_BANDS * 2))
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 1)
+
+
+class ScatterLeafProductsPersistenceTest(unittest.TestCase):
+    """At-cap d_h/h_h persistence (2026-08-26 root-cause fix): a cold leaf
+    with no fresh in-model capture keeps its previous per-leaf values
+    through the repack instead of being NaN-wiped."""
+
+    def _move(self):
+        m = _move(1)
+        m.branch_name = "gb"
+        return m
+
+    def test_uncaptured_cold_leaf_keeps_value_through_repack(self):
+        m = self._move()
+        # A (row 0): no fresh capture, moves leaf 2 -> 0. B (row 1): fresh
+        # capture 7.0, stays at leaf 1.
+        m._sorter_dh = np.array([np.nan, 7.0])
+        m._sorter_hh = np.array([np.nan, 49.0])
+        d_h = np.full((1, 3), np.nan)
+        h_h = np.full((1, 3), np.nan)
+        d_h[0, 2], h_h[0, 2] = 5.0, 25.0
+        d_h[0, 1], h_h[0, 1] = 6.0, 36.0
+        sub = SimpleNamespace(d_h=d_h, h_h=h_h)
+        ns = SimpleNamespace(sub_states={"gb": sub})
+        alive = np.array([True, True])
+        z = np.zeros(2, dtype=np.int64)
+        inds_new = (z, z, np.array([0, 1]))
+        inds_old = (z, z, np.array([2, 1]))
+        m._scatter_leaf_products(ns, alive, inds_new, inds_old)
+        self.assertEqual(d_h[0, 0], 5.0)
+        self.assertEqual(h_h[0, 0], 25.0)
+        self.assertEqual(d_h[0, 1], 7.0)
+        self.assertEqual(h_h[0, 1], 49.0)
+        self.assertTrue(np.isnan(d_h[0, 2]))
+
+    def test_without_inds_old_uncaptured_is_wiped(self):
+        m = self._move()
+        m._sorter_dh = np.array([np.nan])
+        m._sorter_hh = np.array([np.nan])
+        d_h = np.full((1, 2), np.nan)
+        h_h = np.full((1, 2), np.nan)
+        d_h[0, 1], h_h[0, 1] = 5.0, 25.0
+        sub = SimpleNamespace(d_h=d_h, h_h=h_h)
+        ns = SimpleNamespace(sub_states={"gb": sub})
+        z = np.zeros(1, dtype=np.int64)
+        m._scatter_leaf_products(
+            ns, np.array([True]), (z, z, np.array([0]))
+        )
+        self.assertTrue(np.isnan(d_h[0, 0]))
+        self.assertTrue(np.isnan(d_h[0, 1]))
+
+    def test_hot_rows_are_ignored(self):
+        m = self._move()
+        m._sorter_dh = np.array([np.nan, 3.0])
+        m._sorter_hh = np.array([np.nan, 9.0])
+        d_h = np.full((1, 2), np.nan)
+        h_h = np.full((1, 2), np.nan)
+        d_h[0, 0], h_h[0, 0] = 5.0, 25.0
+        sub = SimpleNamespace(d_h=d_h, h_h=h_h)
+        ns = SimpleNamespace(sub_states={"gb": sub})
+        # row 0 cold uncaptured (persists); row 1 HOT (never scattered)
+        t = np.array([0, 1], dtype=np.int64)
+        w = np.zeros(2, dtype=np.int64)
+        inds_new = (t, w, np.array([0, 1]))
+        inds_old = (t, w, np.array([0, 1]))
+        m._scatter_leaf_products(ns, np.array([True, True]), inds_new, inds_old)
+        self.assertEqual(d_h[0, 0], 5.0)
+        self.assertTrue(np.isnan(d_h[0, 1]))
+
+
+class DeathCaptureHarvestTest(unittest.TestCase):
+    """RJ death-side scoring harvested into the sorter capture (user-approved
+    2026-08-26): every picked alive leaf is scored at its own params with
+    phase_maximize=False each round — the same numbers the in-model capture
+    stores, up to the exposed-residual convention d_h_cap = d_h_raw + h_h."""
+
+    def test_harvest_applies_exposed_convention(self):
+        m = _move(1)
+        m.branch_name = "gb"
+        m._sorter_dh = None
+        m._sorter_hh = None
+        m._harvest_death_capture(
+            np.array([2, 4]), np.array([1.5, -0.5]),
+            np.array([100.0, 64.0]), 6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(m._sorter_dh)[[2, 4]], [101.5, 63.5])
+        np.testing.assert_allclose(
+            np.asarray(m._sorter_hh)[[2, 4]], [100.0, 64.0])
+        self.assertTrue(np.isnan(np.asarray(m._sorter_dh)[[0, 1, 3, 5]]).all())
+
+    def test_harvest_preserves_other_captures(self):
+        m = _move(1)
+        m.branch_name = "gb"
+        m._sorter_dh = np.full(4, np.nan)
+        m._sorter_hh = np.full(4, np.nan)
+        m._sorter_dh[1], m._sorter_hh[1] = 7.0, 49.0
+        m._harvest_death_capture(
+            np.array([2]), np.array([1.0]), np.array([9.0]), 4)
+        self.assertEqual(m._sorter_dh[1], 7.0)
+        np.testing.assert_allclose(m._sorter_dh[2], 10.0)
+        np.testing.assert_allclose(m._sorter_hh[2], 9.0)
