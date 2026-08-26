@@ -643,9 +643,17 @@ class AllSourcesGlobalFit(EreborFit):
         if not source_branches:
             return
         gs: AllSourcesGeneralSettings = self.general
-        mbh = self.mbh if "mbh" in self.branches else AllSourcesMBHSettings()
-        sobbh = self.sobbh if "sobbh" in self.branches else AllSourcesSOBBHSettings()
-        emri = self.emri if "emri" in self.branches else AllSourcesEMRISettings()
+        # PREPARED settings, not the fit-level blocks (see the full_year
+        # twin): preparation-computed values (the SOBBH chirp bound) live
+        # only on source_info[...].settings.
+        def _prep(name, fallback):
+            if name in self.branches and name in self.source_info:
+                return self.source_info[name].settings
+            return getattr(self, name) if name in self.branches else fallback
+
+        mbh = _prep("mbh", AllSourcesMBHSettings())
+        sobbh = _prep("sobbh", AllSourcesSOBBHSettings())
+        emri = _prep("emri", AllSourcesEMRISettings())
         cfg = source_signal_cfg(gs, mbh, sobbh, emri)
         for branch in source_branches:
             info = self.source_info[branch]

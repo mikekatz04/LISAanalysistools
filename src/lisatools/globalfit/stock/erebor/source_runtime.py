@@ -33,7 +33,7 @@ import numpy as np
 
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.sources.emri import emri_catalogue_to_waveform_basis
-from lisatools.utils.constants import YRSID_SI
+from lisatools.utils.constants import MTSUN_SI, YRSID_SI
 from lisatools.utils.device import (
     current_device,
     device_context,
@@ -528,9 +528,35 @@ class SourceSOBBHSettings(SOBBHSettings):
     # on full_year-lite: Nt_sub=256 -> 2 chunks -> template plateaus at the
     # chunk carriers). SOBBH scoring is cheap, so safety wins over the
     # per-chunk FFT amortization.
+    # 0 = AUTO (2026-08-25): size from the branch's own injected sources --
+    # the largest divisor-of-Nt chunk whose worst-case intra-chunk sweep
+    # (leading-order fdot at WINDOW END, band-capped for sources chirping
+    # out of band) stays below ``sweep_frac`` of a WDM layer. An EXPLICIT
+    # value is honored but checked against the same criterion at comp
+    # build, with a loud warning naming the safe value (the collapse is
+    # otherwise SILENT -- the template just parks on per-chunk plateaus).
+    # At 6 mo the worst catalogue chirper (id 0, 15.27 mHz, 1.6 yr from
+    # merger) allows nt_sub <= ~49 -> the 32 default is safe; at 1 yr the
+    # same source needs <= ~21 -> 32 is NOT, which is why auto exists.
     nt_sub: int = dataclasses.field(
         default_factory=env_default("SOBBH_NT_SUB", 32, int)
     )
+    # AUTO/check criterion: target intra-chunk carrier sweep in WDM
+    # LAYERS per chunk. MEASURED (6-mo removal-null sweep, 2026-08-25,
+    # scripts/sobbh/sobbh_removal_null_6mo.py): the removal-residual
+    # curve vs Nt_sub is U-SHAPED -- short chunks pay stitch/edge
+    # overhead (13x worse at Nt_sub=8 than 16), long chunks shed chirped
+    # power -- with its minimum at sweep ~3.5 layers/chunk (residual
+    # fraction 5.6e-4), tolerable to ~7 with fill half-width >= 4
+    # (<=2e-3), hard collapse by ~14 at any fill width. 3.5 targets the
+    # measured optimum.
+    sweep_max_layers: float = dataclasses.field(
+        default_factory=env_default("SOBBH_SWEEP_MAX_LAYERS", 3.5, float)
+    )
+    # Worst-case leading-order fdot [Hz/s] at the end of the observation
+    # window over the branch's injected sources; COMPUTED by
+    # prepare_sobbh_branch (never an env knob). None -> auto/check skipped.
+    chirp_fdot_max: typing.Optional[float] = None
     n_sparse: int = dataclasses.field(
         default_factory=env_default("SOBBH_N_SPARSE", 256, int)
     )
@@ -547,6 +573,128 @@ class SourceSOBBHSettings(SOBBHSettings):
     fill_m_band_half_width: int = dataclasses.field(
         default_factory=env_default("SOBBH_FILL_M_BAND_HALF_WIDTH", 8, int)
     )
+
+
+# ============================================================
+# SOBBH chunk sizing (leading-order chirp vs the WDM layer)
+# ============================================================
+def sobbh_leading_order_fdot(m1_msun, m2_msun, f_hz):
+    """Leading-order (0PN) GW-frequency derivative [Hz/s].
+
+    Sizing/diagnostic helper ONLY -- the likelihood's frequency evolution
+    stays with the waveform classes. fdot = (96/5) pi^{8/3} (G Mc/c^3)^{5/3}
+    f^{11/3}; conservative-enough for a chunk-size bound (spin corrections
+    are percent-level at these frequencies and clamped anyway).
+    """
+    m1 = np.asarray(m1_msun, dtype=float)
+    m2 = np.asarray(m2_msun, dtype=float)
+    f = np.asarray(f_hz, dtype=float)
+    mc_s = (m1 * m2) ** 0.6 / (m1 + m2) ** 0.2 * MTSUN_SI  # seconds
+    return (96.0 / 5.0) * np.pi ** (8.0 / 3.0) * mc_s ** (5.0 / 3.0) \
+        * f ** (11.0 / 3.0)
+
+
+def sobbh_fdot_max_at_window_end(full_basis, tobs, f_cap=None):
+    """Worst leading-order fdot [Hz/s] over sources at the END of the window.
+
+    ``full_basis`` rows are the 11-param SOBBH waveform basis
+    (m1, m2, s1, s2, dist, f_low, phi_c, inc, psi, lam, beta) with f_low
+    quoted at the window start. Each source is evolved to t = tobs via the
+    0PN time-to-coalescence relation; a source that would merge in-window
+    or chirp past ``f_cap`` (the run's max_freq) is capped at ``f_cap`` --
+    the sweep bound then reflects the fastest chirp the band can hold.
+    Returns 0.0 for an empty basis (auto/check become no-ops).
+    """
+    rows = np.atleast_2d(np.asarray(full_basis, dtype=float))
+    if rows.size == 0:
+        return 0.0
+    m1, m2, f0 = rows[:, 0], rows[:, 1], rows[:, 5]
+    mc_s = (m1 * m2) ** 0.6 / (m1 + m2) ** 0.2 * MTSUN_SI
+    # 0PN: tau(f) = (5/256) pi^{-8/3} Mc^{-5/3} f^{-8/3}
+    tau0 = (5.0 / 256.0) * np.pi ** (-8.0 / 3.0) * mc_s ** (-5.0 / 3.0) \
+        * f0 ** (-8.0 / 3.0)
+    tau_end = tau0 - float(tobs)
+    f_end = np.where(tau_end > 0.0,
+                     f0 * (tau0 / np.maximum(tau_end, 1e-30)) ** 0.375,
+                     np.inf)
+    if f_cap is not None:
+        f_end = np.minimum(f_end, float(f_cap))
+    return float(np.max(sobbh_leading_order_fdot(m1, m2, f_end)))
+
+
+# Measured regime boundaries (6-mo removal-null sweep, 2026-08-25):
+# residual fraction <= 2e-3 holds to ~7 layers/chunk with fill >= 4;
+# hard collapse (residual ~ 1) by ~14. Small chunks pay stitch/edge
+# overhead, so auto never goes below 16 (Nt_sub=8 measured 13x worse
+# than 16).
+SOBBH_SWEEP_WARN_LAYERS = 7.0
+SOBBH_NT_SUB_AUTO_MIN = 16
+
+
+def resolve_sobbh_nt_sub(nt_sub, fdot_max, Nt, layer_dt, layer_df,
+                         sweep_max_layers, log_name="sobbh"):
+    """Resolve/validate the chunked-het chunk length against the chirp.
+
+    The intra-chunk carrier sweep ``fdot_max * nt_sub * layer_dt`` (in
+    units of a WDM layer ``layer_df``) controls how much chirped power
+    the per-chunk heterodyne sheds -- SILENTLY (template parks on
+    per-chunk carrier plateaus). MEASURED at 6 mo (removal-null sweep):
+    optimum ~3.5 layers/chunk, tolerable to ~7 with a fill half-width
+    >= 4, collapse by ~14; chunks shorter than 16 layers lose to
+    stitch/edge overhead instead.
+
+    ``nt_sub == 0`` -> AUTO: the largest divisor of ``Nt`` with sweep
+    <= ``sweep_max_layers``, clamped to [16, 256]; when even 16 exceeds
+    the collapse threshold a WARNING says no chirp-safe chunk exists on
+    this grid (widen bands / reconsider the grid -- quadratic in
+    layer_dt, so this is a coarse-layer-grid disease). An explicit
+    value is returned unchanged but warned about above the collapse
+    threshold. ``fdot_max`` None/0 -> nothing to size against: auto
+    falls back to 32, explicit values pass silently.
+    """
+    nt_sub = int(nt_sub)
+    if not fdot_max:
+        if nt_sub == 0:
+            logger.info("%s: SOBBH_NT_SUB=0 (auto) with no chirp bound "
+                        "available; falling back to 32.", log_name)
+            return 32
+        return nt_sub
+    sweep_per_layer_chunk = fdot_max * layer_dt / layer_df  # layers per
+    #                                            one-layer-long chunk
+    if nt_sub > 0:
+        kappa = sweep_per_layer_chunk * nt_sub
+        if kappa > SOBBH_SWEEP_WARN_LAYERS:
+            bound = sweep_max_layers / sweep_per_layer_chunk
+            safe = max((d for d in range(SOBBH_NT_SUB_AUTO_MIN,
+                                         min(int(bound), 256) + 1)
+                        if Nt % d == 0), default=SOBBH_NT_SUB_AUTO_MIN)
+            logger.warning(
+                "%s: SOBBH_NT_SUB=%d puts the intra-chunk sweep at %.1f "
+                "layers/chunk (worst fdot %.3e Hz/s) -- beyond the "
+                "measured %.0f-layer tolerance band; the per-chunk "
+                "heterodyne sheds chirped power SILENTLY. Use "
+                "SOBBH_NT_SUB=0 (auto) or ~%d.", log_name, nt_sub, kappa,
+                fdot_max, SOBBH_SWEEP_WARN_LAYERS, safe)
+        return nt_sub
+    bound = sweep_max_layers / sweep_per_layer_chunk
+    auto = max((d for d in range(SOBBH_NT_SUB_AUTO_MIN,
+                                 min(int(bound), 256) + 1)
+                if Nt % d == 0), default=SOBBH_NT_SUB_AUTO_MIN)
+    kappa = sweep_per_layer_chunk * auto
+    if kappa > SOBBH_SWEEP_WARN_LAYERS:
+        logger.warning(
+            "%s: no chirp-safe chunk exists on this grid -- even "
+            "Nt_sub=%d sweeps %.1f layers/chunk (> %.0f). This is the "
+            "coarse-layer-grid regime (sweep is QUADRATIC in layer_dt); "
+            "widen SOBBH_FILL_M_BAND_HALF_WIDTH/SOBBH_M_BAND_HALF_WIDTH "
+            "or use a finer-layer grid.", log_name, auto, kappa,
+            SOBBH_SWEEP_WARN_LAYERS)
+    else:
+        logger.info(
+            "%s: SOBBH_NT_SUB auto -> %d (Nt=%d, worst fdot %.3e Hz/s, "
+            "sweep/chunk %.2f layers <= target %.2f).", log_name, auto,
+            Nt, fdot_max, kappa, sweep_max_layers)
+    return auto
 
 
 # ============================================================
@@ -669,6 +817,14 @@ def prepare_sobbh_branch(sobbh, general_setup: GeneralSetup, gs):
         tc = make_sobbh_transform_container()
         sobbh.injection = np.stack(
             [tc.both_inverse_transforms(row) for row in full_basis], axis=0
+        )
+    # Worst end-of-window chirp over THIS branch's sources -- feeds the
+    # chunked-het Nt_sub auto/criterion at comp build (band-capped so a
+    # source chirping out of band bounds at the run's max_freq).
+    if sobbh.chirp_fdot_max is None:
+        sobbh.chirp_fdot_max = sobbh_fdot_max_at_window_end(
+            full_basis, general_setup.Tobs,
+            f_cap=getattr(gs, "max_freq", None),
         )
     if getattr(sobbh, "fill_values", None) is None:
         sobbh.fill_values = np.array([])
@@ -814,6 +970,13 @@ def source_signal_cfg(gs, mbh, sobbh, emri) -> dict:
         sobbh_buffer_time=sobbh.buffer_time,
         sobbh_likelihood=sobbh.likelihood,
         sobbh_nt_sub=sobbh.nt_sub,
+        sobbh_sweep_max_layers=sobbh.sweep_max_layers,
+        # NB: chirp_fdot_max is COMPUTED by prepare_sobbh_branch on the
+        # PREPARED settings copy -- callers must pass that copy
+        # (source_info["sobbh"].settings), not the fit-level block, or
+        # this reads None and the criterion silently disengages (found
+        # by the 6-mo removal-null run).
+        sobbh_chirp_fdot_max=sobbh.chirp_fdot_max,
         sobbh_n_sparse=sobbh.n_sparse,
         sobbh_n_pad=sobbh.n_pad,
         sobbh_m_band_half_width=sobbh.m_band_half_width,
@@ -1168,11 +1331,45 @@ def get_sobbh_chunked_comp(general_info, cfg):
     t_ref = cfg["sobbh_reference_time"]
     if t_ref is None:
         t_ref = general_info.data_t0
+    # Chirp-safe chunk length (2026-08-25): auto-size (SOBBH_NT_SUB=0) or
+    # criterion-check an explicit value against the branch's worst
+    # end-of-window fdot -- the collapse beyond the bound is silent.
+    # WDMSettings carries layer_dt/layer_df directly (the sample step is
+    # ``data_dt``, there is no ``dt`` attribute).
+    nt_sub = resolve_sobbh_nt_sub(
+        cfg["sobbh_nt_sub"], cfg.get("sobbh_chirp_fdot_max"),
+        int(domain_settings.Nt), float(domain_settings.layer_dt),
+        float(domain_settings.layer_df),
+        float(cfg.get("sobbh_sweep_max_layers", 3.5)),
+        log_name="sobbh_chunked",
+    )
+    # Band-width advisories against the resolved sweep (measured 6-mo
+    # removal-null): fill half-width < 4 collapses one Nt_sub step early
+    # (fill=2 at ~7 layers/chunk -> residual 0.21); the m=1 SCORING band
+    # sheds ~15% of <h|h> already at ~3.5 layers/chunk (bias
+    # ~0.076*SNR^2) while m=2 recovers 99.9%.
+    fd = cfg.get("sobbh_chirp_fdot_max")
+    if fd:
+        kappa = fd * nt_sub * float(domain_settings.layer_dt) \
+            / float(domain_settings.layer_df)
+        if kappa > 3.5 and int(cfg.get("sobbh_fill_m_band_half_width", 8)) < 4:
+            logger.warning(
+                "sobbh_chunked: fill band half-width %d < 4 with a %.1f-"
+                "layer intra-chunk sweep -- the removal fill will leave "
+                "chirped power in the SHARED residual; raise "
+                "SOBBH_FILL_M_BAND_HALF_WIDTH to >= 4.",
+                int(cfg.get("sobbh_fill_m_band_half_width", 8)), kappa)
+        if kappa > 1.0 and int(cfg.get("sobbh_m_band_half_width", 1)) < 2:
+            logger.warning(
+                "sobbh_chunked: scoring band half-width %d with a %.1f-"
+                "layer intra-chunk sweep biases lnL by ~0.08*SNR^2 "
+                "(measured); set SOBBH_M_BAND_HALF_WIDTH=2.",
+                int(cfg.get("sobbh_m_band_half_width", 1)), kappa)
     with device_context(xp, dev):
         comp = SOBBHWDMComputations(
             domain_settings,
             t_ref=float(t_ref),
-            Nt_sub=cfg["sobbh_nt_sub"],
+            Nt_sub=nt_sub,
             n_pad=cfg["sobbh_n_pad"],
             N_sparse=cfg["sobbh_n_sparse"],
             orbits=orbits,

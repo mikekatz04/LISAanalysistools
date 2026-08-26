@@ -178,6 +178,17 @@ export MBHB_IDS=2,5,16,18          # ONLY the 4 that merge inside 6 months
 export EMRI_IDS=0,1,2,3,4,5,6,7    # all 8 -- detectability census
 export SOBHB_IDS=0,1,2,3,4,5       # all 6 -- expected mostly sub-threshold
 
+# ---- SOBBH chunked accuracy on THIS grid (measured 2026-08-25) --------------
+# full_year_combined runs 11.1-h WDM layers (wavelet 40-48 ks) -- the
+# STRESS regime for the chunked SOBBH path (intra-chunk sweep is quadratic
+# in layer duration; ~3.5 layers/chunk at the Nt_sub=32 default, which the
+# removal-null sweep measured as the OPTIMUM on this grid: removal residual
+# 6e-4 of <h|h>). But the m=1 SCORING band sheds ~15% of <h|h> here
+# (lnL bias ~0.076*SNR^2, trips SOBBH_CHECK_LL_TOL at SNR>~2.6); m=2
+# recovers 99.9%. The production all_sources grid (1-h layers) does not
+# need this.
+export SOBBH_M_BAND_HALF_WIDTH=2
+
 # ---- timing instrumentation -------------------------------------------------
 # [GF_MOVE_TIMING] per-move wall + host RSS + GPU pool for every move; SYNC
 # makes each mark carry exactly its own kernel time (cupy is async). Keep

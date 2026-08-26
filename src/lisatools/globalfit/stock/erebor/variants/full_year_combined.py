@@ -439,9 +439,19 @@ class FullYearCombinedGlobalFit(EreborFit):
     def attach_runtime_objects(self) -> None:
         """Register per-branch ``signal_gen`` adapters on the runtime Setups."""
         gs: FullYearGeneralSettings = self.general
-        mbh = self.mbh if "mbh" in self.branches else FullYearMBHSettings()
-        sobbh = self.sobbh if "sobbh" in self.branches else FullYearSOBBHSettings()
-        emri = self.emri if "emri" in self.branches else FullYearEMRISettings()
+        # PREPARED settings, not the fit-level blocks: prepare_branch_settings
+        # deepcopies, so values COMPUTED during preparation (e.g. the SOBBH
+        # chirp bound feeding the chunked Nt_sub criterion) live only on
+        # source_info[...].settings -- reading self.<branch> here fed the
+        # cfg a None chirp bound and silently disengaged the criterion.
+        def _prep(name, fallback):
+            if name in self.branches and name in self.source_info:
+                return self.source_info[name].settings
+            return getattr(self, name) if name in self.branches else fallback
+
+        mbh = _prep("mbh", FullYearMBHSettings())
+        sobbh = _prep("sobbh", FullYearSOBBHSettings())
+        emri = _prep("emri", FullYearEMRISettings())
         cfg = source_signal_cfg(gs, mbh, sobbh, emri)
         for branch in self.branch_names:
             info = self.source_info[branch]
