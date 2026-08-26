@@ -482,6 +482,31 @@ class GBSettings(Settings):
     warm_start_weight: typing.Optional[float] = dataclasses.field(
         default_factory=env_default("GB_WARM_START_WEIGHT", None, float)
     )
+    # PE-stage extrinsic DRAW (user design ruling 2026-08-25). STAGE
+    # SPLIT: the SEARCH RJ stages (rj_fstat_search / rj_prior_removal /
+    # rj_replace) PIN phi0/cos_iota/psi deterministically at the F-stat
+    # maximizers and charge them as uniform constants — unchanged,
+    # bit-identical. The PE stages (rj_fstat_pe / rj_prior_pe, when their
+    # F-stat distance-birth path is active) instead DRAW each extrinsic
+    # from a genuine distribution centered on its maximizer — von Mises
+    # for phi0 (period 2 pi), von Mises on the DOUBLED angle for psi
+    # (period pi), truncated Gaussian on [-1, 1] for cos iota — each
+    # eps-floor-mixed with the uniform law on its domain, and charge the
+    # real forward AND reverse densities in the RJ factors (exact
+    # detailed balance; deaths evaluate the reverse density around the
+    # dead row's OWN maximizers). Widths sigma = geom/SNR from the F-stat
+    # curvature; the (phi0 + pi, psi + pi/2) F-stat identity is handled
+    # by summing the density over both representatives. See
+    # ``lisatools.sampling.fstat_proposal.pe_extrinsic_rvs`` /
+    # ``pe_extrinsic_logpdf`` and ``GBSpecialBase._pe_or_pin_extrinsics``.
+    # Default ON; =0 restores today's PE pin + uniform-wash behavior
+    # bit-identically. Companion env-only knobs:
+    # GB_PE_EXTRINSIC_FLOOR_EPS (default 0.05) and
+    # GB_PE_EXTRINSIC_SIGMA_GEOM (default 2.0).
+    # Env: GB_PE_EXTRINSIC_DRAW.
+    pe_extrinsic_draw: bool = dataclasses.field(
+        default_factory=env_default("GB_PE_EXTRINSIC_DRAW", True, bool)
+    )
     # -- search RJ cycle knobs (2026-08-01; search mode ONLY, i.e.
     # GB_MODE=search) -- when on, the variant's recipe setup inserts the
     # matching stock move(s) right after the fstat-birth prior move

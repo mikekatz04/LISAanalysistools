@@ -715,6 +715,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             ``rj_removal_only``.
         phase_maximize: If ``True``, marginalize over phase in the
             likelihood.
+        pe_extrinsic_draw: PE-mode extrinsic DRAW (user design ruling
+            2026-08-25). STAGE SPLIT of the F-stat distance-birth path's
+            extrinsic handling: SEARCH stages (rj_fstat_search /
+            rj_prior_removal / rj_replace, and pe-named moves running a
+            GB_MODE=search campaign) keep this ``False`` — phi0 /
+            cos_iota / psi PINNED at the F-stat maximizers and charged
+            as uniform constants, bit-identically to the historical
+            convention. The strict-PE flavored moves (rj_fstat_pe /
+            rj_prior_pe) receive ``GBSettings.pe_extrinsic_draw``
+            (GB_PE_EXTRINSIC_DRAW, default ON): births DRAW each
+            extrinsic from a genuine distribution centered on its
+            maximizer (von Mises phi0 / doubled-angle von Mises psi /
+            truncated-Gaussian cos iota, eps-floor-mixed, the
+            (phi0 + pi, psi + pi/2) identity summed over) and charge the
+            real forward density in the RJ factors; deaths charge the
+            mirror reverse density about the dead row's OWN maximizers —
+            exact detailed balance. PE-drawn births are scored at the
+            CONCRETE drawn phi0 (no phase-max, no write-back). See
+            :meth:`_pe_or_pin_extrinsics` / :meth:`_pe_death_extr_corr`
+            and ``lisatools.sampling.fstat_proposal.pe_extrinsic_rvs``.
         gpus: GPU device list for this move (intra-node knob).
         band_units: Band-unit stride for the concurrent sub-band
             scheduling (env ``{BRANCH}_BAND_UNIT_STRIDE`` wins). Stride k
@@ -789,6 +809,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         rj_removal_only=False,
         rj_replace=False,
         phase_maximize=False,
+        pe_extrinsic_draw=False,
         gpus=[],
         num_band_preload=20000,
         wdm_band_slab_layers=None,
@@ -1137,6 +1158,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             else bool(self.rj_amp_maximize)
         )
         self._log_dist_range_cache = None
+
+        # PE-mode extrinsic DRAW (user design ruling 2026-08-25). STAGE
+        # SPLIT: search RJ stages PIN phi0/cos_iota/psi at the F-stat
+        # maximizers and charge them as uniform constants (the historical
+        # convention, kept bit-identically — this flag defaults False and
+        # the recipe never sets it on a search-named move); the PE stages
+        # (rj_fstat_pe / rj_prior_pe) set it from ``GBSettings.
+        # pe_extrinsic_draw`` (env GB_PE_EXTRINSIC_DRAW, default ON) so
+        # their F-stat distance-birth path DRAWS each extrinsic from a
+        # genuine distribution centered on its maximizer — von Mises for
+        # phi0, von Mises on the doubled angle for psi, truncated Gaussian
+        # in cos iota, each eps-floor-mixed with its uniform law — and
+        # charges the real forward/reverse densities in the RJ factors
+        # (exact detailed balance). See ``lisatools.sampling.
+        # fstat_proposal.pe_extrinsic_rvs`` / ``pe_extrinsic_logpdf`` and
+        # :meth:`_pe_extr_active`. False restores the pin + uniform-wash
+        # behavior bit-identically.
+        self.pe_extrinsic_draw = bool(pe_extrinsic_draw)
 
         self.snr_lim = snr_lim
         self.opt_snr_rej_samp_limit = float(opt_snr_rej_samp_limit)
@@ -4924,6 +4963,135 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         out = m_safe + xp.log(xp.exp(a - m_safe) + xp.exp(b - m_safe))
         return xp.where(xp.isfinite(m), out, -1e300)
 
+    # ------------------------------------------------------------------
+    # PE-mode extrinsic draw (user design ruling 2026-08-25)
+    # ------------------------------------------------------------------
+    # Log volume of the birth container's uniform extrinsic block:
+    # phi0 ~ U[0, 2 pi) x cos_iota ~ U[-1, 1] x psi ~ U[0, pi) (both the
+    # F-stat birth container and the global prior use exactly these; see
+    # make_gb_rj_birth_container). The container's log density for the
+    # three columns is the constant -_LOG_EXTR_UNIFORM_VOL, so swapping
+    # it for the real proposal density in the RJ factors mirrors the
+    # slot-0 +/- _log_range bookkeeping exactly.
+    _LOG_EXTR_UNIFORM_VOL = float(
+        np.log(2.0 * np.pi) + np.log(2.0) + np.log(np.pi))
+
+    def _pe_extr_active(self) -> bool:
+        """True when THIS move draws the birth extrinsics in PE mode.
+
+        STAGE SPLIT (user design ruling 2026-08-25): search RJ stages
+        (rj_fstat_search / rj_prior_removal / rj_replace) keep the pin +
+        uniform-wash convention bit-identically — the recipe only seeds
+        :attr:`pe_extrinsic_draw` on the pe-named moves (rj_fstat_pe /
+        rj_prior_pe) from ``GBSettings.pe_extrinsic_draw``
+        (GB_PE_EXTRINSIC_DRAW, default ON), and only in their strict-PE
+        flavor. Everything the flag changes routes through this single
+        gate, so False (the constructor default) is bit-identical to the
+        pre-flag code path.
+        """
+        return bool(getattr(self, "pe_extrinsic_draw", False))
+
+    def _pe_extr_floor_eps(self) -> float:
+        """Uniform-floor mixture weight of the PE extrinsic proposal.
+
+        Same eps device as the intrinsic ``UniformFloorMixture`` and the
+        replace move's slot-0 floor: ``g_mix = (1 - eps) * concentrated +
+        eps * U(domain)`` per component, on BOTH density sides, so a
+        polished/drifted leaf pays a bounded (~log eps) reverse bill,
+        never -inf. One shared knob for the three components:
+        ``GB_PE_EXTRINSIC_FLOOR_EPS`` (default 0.05).
+        """
+        return float(os.environ.get("GB_PE_EXTRINSIC_FLOOR_EPS", "0.05"))
+
+    def _pe_extr_sigma_geom(self) -> float:
+        """O(1) geometric factor of the extrinsic proposal widths.
+
+        ``sigma = geom / snr`` per angle coordinate (see
+        ``lisatools.sampling.fstat_proposal.pe_extrinsic_sigma`` for the
+        derivation and the weak-F broad floor).
+        ``GB_PE_EXTRINSIC_SIGMA_GEOM`` (default 2.0). The epoch-table
+        center smear (``_fstat_ctr_smear``) is deliberately NOT applied
+        on top: forward and reverse evaluate the same law, so detailed
+        balance never needs it, and the default geom is already the
+        conservative choice.
+        """
+        return float(os.environ.get("GB_PE_EXTRINSIC_SIGMA_GEOM", "2.0"))
+
+    def _pe_extr_draw(self, phi0_c, iota_c, psi_c, ln_snr):
+        """Draw ``(phi0, cos_iota, psi)`` about the per-row maximizers."""
+        from ...sampling.fstat_proposal import pe_extrinsic_rvs
+
+        xp = self.xp
+
+        def _rand(m):
+            return xp.asarray(cp.random.rand(m))
+
+        return pe_extrinsic_rvs(
+            phi0_c, iota_c, psi_c, ln_snr,
+            eps=self._pe_extr_floor_eps(), geom=self._pe_extr_sigma_geom(),
+            rand=_rand)
+
+    def _pe_extr_logg(self, phi0, cos_iota, psi, phi0_c, iota_c, psi_c,
+                      ln_snr):
+        """Log density of the PE extrinsic proposal (forward or reverse)."""
+        from ...sampling.fstat_proposal import pe_extrinsic_logpdf
+
+        return pe_extrinsic_logpdf(
+            phi0, cos_iota, psi, phi0_c, iota_c, psi_c, ln_snr,
+            eps=self._pe_extr_floor_eps(), geom=self._pe_extr_sigma_geom())
+
+    def _pe_or_pin_extrinsics(self, params, rows, phi0_max, iota_max,
+                              psi_max, ln_snr):
+        """Write the birth extrinsics for ``rows`` in place; return the RJ
+        factor-correction contribution.
+
+        Knob OFF (:meth:`_pe_extr_active` False — every search move, and
+        PE with GB_PE_EXTRINSIC_DRAW=0): the historical PIN — extrinsics
+        set to the maximizers, contribution exactly ``0.0`` (the
+        container's uniform-wash constants stay in the sorter factors),
+        bit-identical to the pre-flag code.
+
+        Knob ON: draw from the maximizer-centered proposal and return
+        ``-(log g_mix + log V_extr)`` — replacing the container's
+        ``+log V_extr`` uniform-wash term in the birth factors with the
+        real ``-log g_mix(drawn | centers)``, the mirror of the slot-0
+        ``-_bl - _log_range`` swap.
+        """
+        xp = self.xp
+        if self._pe_extr_active():
+            p0, ci, ps = self._pe_extr_draw(phi0_max, iota_max, psi_max,
+                                            ln_snr)
+            params[rows, 3] = p0
+            params[rows, 4] = ci
+            params[rows, 5] = ps
+            lg = self._pe_extr_logg(p0, ci, ps, phi0_max, iota_max,
+                                    psi_max, ln_snr)
+            return -(lg + self._LOG_EXTR_UNIFORM_VOL)
+        params[rows, 4] = xp.cos(iota_max % np.pi)
+        params[rows, 5] = psi_max % np.pi
+        params[rows, 3] = phi0_max % (2 * np.pi)
+        return 0.0
+
+    def _pe_death_extr_corr(self, params, rows, phi0_max, iota_max,
+                            psi_max, ln_snr):
+        """Death-side mirror of :meth:`_pe_or_pin_extrinsics`.
+
+        Knob OFF: ``0.0`` (uniform-wash constants stay), bit-identical.
+        Knob ON: ``+(log g_mix(dead row's extrinsics | its OWN centers) +
+        log V_extr)`` — the reverse (re-birth) density of the removed
+        row's phi0/cos_iota/psi around the maximizers of ITS intrinsics,
+        from the same center machinery the birth side uses (epoch table /
+        unit cache / per-row solve), so the pair is exactly symmetric.
+        The eps floor bounds the bill for rows whose extrinsics have
+        drifted far from their maximizers.
+        """
+        if not self._pe_extr_active():
+            return 0.0
+        lg = self._pe_extr_logg(
+            params[rows, 3], params[rows, 4], params[rows, 5],
+            phi0_max, iota_max, psi_max, ln_snr)
+        return lg + self._LOG_EXTR_UNIFORM_VOL
+
     @staticmethod
     def _replace_ctr_mode() -> str:
         """Extrinsic-center machinery for the REPLACE move: ``"perrow"``
@@ -5753,12 +5921,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         params[birth_k, 0] = xp.exp(ln_draw)
                     else:
                         params[birth_k, 0] = ln_draw  # slot 0 is lnA already
-                    params[birth_k, 4] = xp.cos(iota_max % np.pi)
-                    params[birth_k, 5] = psi_max % np.pi
-                    params[birth_k, 3] = phi0_max % (2 * np.pi)
+                    # Extrinsics: PIN at the maximizers (search convention,
+                    # correction 0) or PE-mode DRAW about them with the real
+                    # density charged (see _pe_or_pin_extrinsics).
+                    _extr_corr_b = self._pe_or_pin_extrinsics(
+                        params, birth_k, phi0_max, iota_max, psi_max,
+                        ln_snr_b)
                     _bl = self._slot0_log_proposal(
                         params[birth_k, 0], ln_center, sigma, alpha=alpha_b)
-                    _fstat_factor_corr[birth_k] = -_bl - _log_range
+                    _fstat_factor_corr[birth_k] = -_bl - _log_range + _extr_corr_b
                     _mark("rj_fstat_centers")
                     # Re-evaluate the global prior at the drawn distance/angles
                     # (the earlier curr_logp used the placeholder draw); f0,
@@ -5766,26 +5937,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     curr_logp[birth_k] = cp.asarray(
                         self.gpu_priors[self.branch_name].logpdf(params[birth_k]))
                     _mark("rj_birth_prior")
-                    oob_rows = _eval(birth_k, True)
-                    if buffer_obj.phase_angle is not None:
+                    # PE-mode draws score the CONCRETE drawn phi0 (no
+                    # phase-max, no write-back: a deterministic re-map of
+                    # the drawn angle would break the charged density).
+                    # Pin mode keeps the historical phase-max refinement.
+                    _pin_mode = not self._pe_extr_active()
+                    oob_rows = _eval(birth_k, _pin_mode)
+                    if _pin_mode and buffer_obj.phase_angle is not None:
                         params[birth_k, 3] = params[birth_k, 3] - buffer_obj.phase_angle
                     _mark("rj_getll")
                 if len(death_k):
                     oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
                     _mark("rj_getll")
                     if _tbl is not None:
-                        (_, _, _, ln_center_d, sigma_d,
+                        (phi0_d, iota_d, psi_d, ln_center_d, sigma_d,
                          ln_snr_d) = self._fstat_ctr_table_lookup(
                             params[death_k])
                     elif _ctr is not None:
                         _dpos = self._fstat_ctr_lookup(
                             ids[death_k], model=model,
                             band_sorter=band_sorter)
+                        phi0_d = _ctr["phi0"][_dpos]
+                        iota_d = _ctr["iota"][_dpos]
+                        psi_d = _ctr["psi"][_dpos]
                         ln_center_d = _ctr["ln_center"][_dpos]
                         sigma_d = _ctr["sigma"][_dpos]
                         ln_snr_d = _ctr["ln_snr"][_dpos]
                     else:
-                        Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
+                        Ad, phi0_d, iota_d, psi_d, Fd = self._fstat_dist_centers(
                             model, params[death_k], walker_ref)
                         ln_center_d, sigma_d = self._dist_center_and_width(
                             params[death_k], Ad, Fd)
@@ -5801,7 +5980,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _dl = self._slot0_log_proposal(
                         params[death_k, 0], ln_center_d, sigma_d,
                         alpha=alpha_d)
-                    _fstat_factor_corr[death_k] = _dl + _log_range
+                    # PE-mode mirror: + the reverse extrinsic density of the
+                    # dead row about ITS OWN maximizers (0 in pin mode; see
+                    # _pe_death_extr_corr).
+                    _fstat_factor_corr[death_k] = (
+                        _dl + _log_range
+                        + self._pe_death_extr_corr(
+                            params, death_k, phi0_d, iota_d, psi_d,
+                            ln_snr_d))
                     _mark("rj_fstat_centers")
             elif self.phase_maximize and len(birth_k):
                 # Maximise the birth phase; deaths keep the true phase.

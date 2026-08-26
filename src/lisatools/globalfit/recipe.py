@@ -2976,6 +2976,18 @@ def build_gb_moves(
         _rj_flip_default = 0.1
         _imr_defaults = dict(_imr_pe)
 
+    # PE extrinsic DRAW (user design ruling 2026-08-25): in the strict-PE
+    # flavor the pe-named RJ moves draw phi0/cos_iota/psi from genuine
+    # maximizer-centered distributions and charge the real forward/reverse
+    # densities in the RJ factors (GBSettings.pe_extrinsic_draw /
+    # GB_PE_EXTRINSIC_DRAW, default ON; =0 restores the pin + uniform-wash
+    # PE behavior bit-identically). SEARCH stages never see the flag: the
+    # search-named moves are not seeded, and rj_fstat_pe under a
+    # GB_MODE=search campaign (which runs the search THROUGH the pe-named
+    # stage) is gated to the exact same strict-PE condition as its
+    # phase_maximize, so search campaigns keep the pin convention.
+    _pe_extr_draw = bool(getattr(gb_info, "pe_extrinsic_draw", True))
+
     gb_pe_prior_move = _RJBirth(
         *gb_move_args,
         rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
@@ -2985,6 +2997,9 @@ def build_gb_moves(
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=(
             _rj_phase_max if (_gb_mode_search and not _pe_strict) else False
+        ),
+        pe_extrinsic_draw=(
+            _pe_extr_draw and not (_gb_mode_search and not _pe_strict)
         ),
         run_swaps=True,
         temper_every_proposes=_pe_temper_every,
@@ -3004,6 +3019,10 @@ def build_gb_moves(
         name="rj_prior_pe",
         use_prior_removal=False,
         phase_maximize=False,
+        # Always strict-PE flavored, so the extrinsic-draw knob applies
+        # directly (only bites when its F-stat distance-birth path is
+        # active, i.e. GB_RJ_FSTAT_DIST_BIRTH=1 for this prior-birth move).
+        pe_extrinsic_draw=_pe_extr_draw,
         run_swaps=True,
         temper_every_proposes=_pe_temper_every,
         gpus=[],

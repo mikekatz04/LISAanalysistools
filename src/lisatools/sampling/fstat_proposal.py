@@ -69,6 +69,9 @@ __all__ = [
     "ColumnPermutedProposal",
     "compute_fstat",
     "fstat_maximized_extrinsics",
+    "pe_extrinsic_sigma",
+    "pe_extrinsic_logpdf",
+    "pe_extrinsic_rvs",
     "make_gb_rj_birth_container",
     "fit_gmm_to_stacked",
     "pack_gmm_components",
@@ -332,6 +335,293 @@ def fstat_maximized_extrinsics(N_arr, M_upper, ridge: float = 1e-12):
     A_max = xp.where(xp.isfinite(A_max), A_max, 0.0)
     F = xp.where(xp.isfinite(F), F, -xp.inf)
     return A_max, phi0_max, iota_max, psi_max, F
+
+
+# ======================================================================
+# PE-mode extrinsic proposal (user design ruling 2026-08-25)
+# ======================================================================
+#
+# The GB RJ F-stat distance-birth path historically PINNED (phi0,
+# cos_iota, psi) at the F-stat maximizers and charged them as uniform
+# constants ("uniform wash"). The SEARCH stages (rj_fstat_search /
+# rj_prior_removal / rj_replace) keep that convention bit-identically.
+# The PE stages (rj_fstat_pe / rj_prior_pe, when the F-stat distance-
+# birth path is active there) instead DRAW each extrinsic from a genuine
+# distribution centered on its maximizer and charge the real forward AND
+# reverse densities in the RJ factors, so the pair is directly reversible
+# (exact detailed balance):
+#
+#   phi0     ~ von Mises on the circle (period 2 pi), center phi0_max;
+#   psi      ~ von Mises on the DOUBLED angle (the von Mises lives on
+#              2 psi, so the period-pi wrap is correct), center psi_max;
+#   cos_iota ~ truncated Gaussian on [-1, 1], center cos(iota_max).
+#
+# WIDTHS come from the F-stat curvature through the same 1/SNR scaling
+# the slot-0 lognormal uses: ``sigma = geom / snr`` with ``snr =
+# exp(ln_snr) = sqrt(max(2 F, 1))`` — the ``max(., 1)`` clip is the floor
+# that keeps weak-F rows on a BROAD (sigma = geom rad), never degenerate,
+# proposal (the ``_dist_center_and_width`` pattern). ``geom`` is ONE
+# shared O(1) geometric factor, default 2.0: the diagonal Fisher widths
+# of a quasi-monochromatic GB are ~1/snr in the carrier phase and the
+# doubled polarization angle and ~2/snr in cos iota, and near face-on
+# the phi0/psi degeneracy widens the marginals well past the
+# conditionals — one conservative 2x inflation on all three coordinates
+# covers that without a per-coordinate table (a genuinely per-row 3x3
+# curvature projection of the Gram matrix through the Jaranowski-Krol
+# Jacobian was considered and NOT done: the default epoch center table
+# stores only ``ln_snr``, not ``M``, so the closed form could not feed
+# the production death side). ``sigma`` is clipped below at 1e-3 rad as
+# a pure numerical guard on the von Mises concentration
+# ``kappa = 1/sigma^2 <= 1e6``.
+#
+# MEASURED (2026-08-25, flagship 20.38 mHz truth band, SNR 63.9,
+# noise-free e2e, 200 draws): at geom = 1 the concentrated draws lose a
+# median 1.20 in delta vs the pinned maximizers — exactly the
+# ideal-matched-proposal bound (median of 0.5 chi^2_3 = 1.18), i.e. the
+# local curvature per coordinate IS 1/snr there; at geom = 2 the median
+# loss is 4.85 (the predicted 4x). The default stays at the conservative
+# 2.0 because the production birth centers come from the epoch table's
+# nearest-f0-node lookup (extrinsics can sit off the row's own maximum),
+# where the extra width buys coverage; with exact per-row centers,
+# GB_PE_EXTRINSIC_SIGMA_GEOM=1 is the efficiency-optimal setting.
+#
+# EPS-MIXTURE: each component is ``(1 - eps) * concentrated + eps *
+# Uniform(domain)`` (the ``UniformFloorMixture`` device), so a polished
+# or drifted leaf pays a BOUNDED reverse bill (~ ``log eps - log
+# domain``), never ``-inf``.
+#
+# THE (phi0 + pi, psi + pi/2) IDENTITY: the F-stat maximum is defined
+# only up to this joint shift, so a density treating phi0 and psi as
+# independent circles would not be well-defined on the identified space.
+# The (phi0, psi) proposal therefore SUMS its mixture over the two
+# representatives:
+#
+#   g(phi0, psi | c) = 1/2 * sum_{b in {0, 1}}
+#       g_phi(phi0 | c_phi + b pi) * g_psi(psi | c_psi + b pi/2)
+#
+# which is invariant under the identity applied to EITHER the evaluated
+# point or the center (the von Mises branch terms swap; the uniform
+# floor terms are shift-invariant). ``pe_extrinsic_rvs`` draws the
+# branch b with probability 1/2 and then draws each component from its
+# in-branch eps-mixture — exactly this density. cos_iota does not
+# participate in the identity and factors out.
+
+
+def _pe_std_norm_cdf(x, xp):
+    """Standard normal CDF on ``xp`` arrays (scipy/cupyx erf)."""
+    if xp is np:
+        from scipy.special import erf
+    else:
+        from cupyx.scipy.special import erf
+    return 0.5 * (1.0 + erf(xp.asarray(x) / np.sqrt(2.0)))
+
+
+def _pe_std_norm_ppf(p, xp):
+    """Standard normal inverse CDF on ``xp`` arrays (scipy/cupyx erfinv)."""
+    if xp is np:
+        from scipy.special import erfinv
+    else:
+        from cupyx.scipy.special import erfinv
+    return np.sqrt(2.0) * erfinv(2.0 * xp.asarray(p) - 1.0)
+
+
+def _pe_log_i0(x, xp):
+    """``log I0(x)`` through the exponentially scaled Bessel ``i0e``
+    (``I0(x) = exp(|x|) i0e(x)``), stable at the large concentrations a
+    loud source's ``kappa = 1/sigma^2`` reaches."""
+    if xp is np:
+        from scipy.special import i0e
+    else:
+        from cupyx.scipy.special import i0e
+    x = xp.asarray(x)
+    return xp.log(i0e(x)) + xp.abs(x)
+
+
+def pe_extrinsic_sigma(ln_snr, geom: float = 2.0):
+    """Angle-coordinate proposal width from the F-stat curvature.
+
+    ``sigma = geom / snr`` with ``snr = exp(ln_snr) = sqrt(max(2 F, 1))``
+    (see the section comment above for the geometric factor and the
+    weak-F broad floor; the 1e-3 rad lower clip is a numerical guard on
+    ``kappa = 1/sigma^2``). Applied identically to the phi0 circle, the
+    DOUBLED psi angle, and the cos-iota coordinate.
+    """
+    from ..utils.utility import get_array_module
+
+    xp = get_array_module(ln_snr)
+    return xp.clip(float(geom) * xp.exp(-xp.asarray(ln_snr)), 1e-3, None)
+
+
+def _pe_logaddexp(a, b, xp):
+    """Row-wise ``log(exp(a) + exp(b))`` with ``-inf`` propagation."""
+    m = xp.maximum(a, b)
+    m_safe = xp.where(xp.isfinite(m), m, 0.0)
+    out = m_safe + xp.log(xp.exp(a - m_safe) + xp.exp(b - m_safe))
+    return xp.where(xp.isfinite(m), out, -xp.inf)
+
+
+def pe_extrinsic_logpdf(phi0, cos_iota, psi, phi0_c, iota_c, psi_c, ln_snr,
+                        eps: float = 0.05, geom: float = 2.0):
+    """Joint log density of the PE-mode extrinsic proposal.
+
+    Exactly the density :func:`pe_extrinsic_rvs` draws from — the
+    identity-summed (phi0, psi) mixture times the eps-floored truncated
+    Gaussian in cos iota (see the section comment). Evaluates the
+    forward side on drawn births and the reverse side on death rows
+    (each around that row's OWN maximizers). All inputs are per-row
+    arrays on one module; ``iota_c`` is the maximizer ANGLE (the center
+    used is ``cos(iota_c % pi)``, mirroring the pin convention).
+    Returns ``(n,)`` log densities.
+    """
+    from ..utils.utility import get_array_module
+
+    xp = get_array_module(phi0)
+    phi0 = xp.asarray(phi0, dtype=xp.float64)
+    cos_iota = xp.asarray(cos_iota, dtype=xp.float64)
+    psi = xp.asarray(psi, dtype=xp.float64)
+    phi0_c = xp.asarray(phi0_c, dtype=xp.float64)
+    psi_c = xp.asarray(psi_c, dtype=xp.float64)
+    ci_c = xp.cos(xp.asarray(iota_c, dtype=xp.float64) % np.pi)
+    sigma = pe_extrinsic_sigma(ln_snr, geom=geom)
+    kappa = 1.0 / sigma**2
+    log_i0 = _pe_log_i0(kappa, xp)
+    eps = float(eps)
+    log_eps = float(np.log(eps)) if eps > 0.0 else -np.inf
+    log_1meps = float(np.log1p(-eps)) if eps < 1.0 else -np.inf
+
+    # branch-b component log densities; the kappa*(cos - 1) + kappa form
+    # keeps huge concentrations finite (kappa - log I0 ~ 0.5 log(2 pi
+    # kappa) asymptotically).
+    def _lg_phi(b):
+        lv = (kappa * (xp.cos(phi0 - (phi0_c + b * np.pi)) - 1.0)
+              + kappa - log_i0 - np.log(2.0 * np.pi))
+        return _pe_logaddexp(
+            log_1meps + lv,
+            xp.full_like(lv, log_eps - np.log(2.0 * np.pi)), xp)
+
+    def _lg_psi(b):
+        # p(psi) = 2 * vonMises(2 psi; 2 (psi_c + b pi/2), kappa): the
+        # factor 2 is the doubled-angle Jacobian, so the density
+        # integrates to 1 over one period [0, pi).
+        lv = (np.log(2.0)
+              + kappa * (xp.cos(2.0 * psi - 2.0 * (psi_c + b * np.pi / 2.0))
+                         - 1.0)
+              + kappa - log_i0 - np.log(2.0 * np.pi))
+        return _pe_logaddexp(
+            log_1meps + lv, xp.full_like(lv, log_eps - np.log(np.pi)), xp)
+
+    lg_joint = _pe_logaddexp(
+        _lg_phi(0.0) + _lg_psi(0.0), _lg_phi(1.0) + _lg_psi(1.0), xp
+    ) - np.log(2.0)
+
+    # cos iota: eps-floored truncated Gaussian on [-1, 1]
+    a_std = (-1.0 - ci_c) / sigma
+    b_std = (1.0 - ci_c) / sigma
+    logZ = xp.log(xp.clip(
+        _pe_std_norm_cdf(b_std, xp) - _pe_std_norm_cdf(a_std, xp),
+        1e-300, None))
+    inside = (cos_iota >= -1.0) & (cos_iota <= 1.0)
+    lg_tn = (-0.5 * ((cos_iota - ci_c) / sigma) ** 2 - xp.log(sigma)
+             - 0.5 * np.log(2.0 * np.pi) - logZ)
+    lg_tn = xp.where(inside, lg_tn, -xp.inf)
+    lg_ci = _pe_logaddexp(
+        log_1meps + lg_tn,
+        xp.where(inside, log_eps - np.log(2.0), -xp.inf), xp)
+    return lg_joint + lg_ci
+
+
+def _pe_vonmises_rvs(kappa, rand, xp):
+    """Zero-centered von Mises deviates (Best & Fisher 1979 rejection).
+
+    ``rand(m)`` supplies uniforms on the same module (the caller owns the
+    RNG stream). Acceptance is bounded below (~66% at worst), so the
+    rejection loop finishes in a handful of rounds; a 512-round cap turns
+    a theoretically-impossible stall into a loud error instead of a hang.
+    ``kappa < 1e-8`` rows fall back to the uniform circle.
+    """
+    kappa = xp.asarray(kappa, dtype=xp.float64)
+    n = int(kappa.shape[0])
+    tiny = kappa < 1e-8
+    k_safe = xp.maximum(kappa, 1e-8)
+    tau = 1.0 + xp.sqrt(1.0 + 4.0 * k_safe**2)
+    rho = (tau - xp.sqrt(2.0 * tau)) / (2.0 * k_safe)
+    r = (1.0 + rho**2) / (2.0 * xp.maximum(rho, 1e-300))
+    f_out = xp.zeros(n)
+    todo = ~tiny
+    rounds = 0
+    while bool(todo.any()):
+        rounds += 1
+        if rounds > 512:
+            raise RuntimeError(
+                "pe_extrinsic_rvs: von Mises rejection sampler stalled")
+        idx = xp.where(todo)[0]
+        m = int(idx.shape[0])
+        u1 = rand(m)
+        u2 = xp.clip(rand(m), 1e-300, None)
+        z = xp.cos(np.pi * u1)
+        rr = r[idx]
+        f = (1.0 + rr * z) / xp.maximum(rr + z, 1e-300)
+        c = xp.clip(kappa[idx] * (rr - f), 1e-300, None)
+        acc = (c * (2.0 - c) - u2 > 0.0) | (xp.log(c / u2) + 1.0 - c >= 0.0)
+        keep = idx[acc]
+        f_out[keep] = f[acc]
+        todo[keep] = False
+    u3 = rand(n)
+    theta = xp.sign(u3 - 0.5) * xp.arccos(xp.clip(f_out, -1.0, 1.0))
+    return xp.where(tiny, 2.0 * np.pi * rand(n) - np.pi, theta)
+
+
+def pe_extrinsic_rvs(phi0_c, iota_c, psi_c, ln_snr, eps: float = 0.05,
+                     geom: float = 2.0, rand=None):
+    """Draw ``(phi0, cos_iota, psi)`` from the PE-mode extrinsic proposal.
+
+    Samples exactly the density :func:`pe_extrinsic_logpdf` evaluates:
+    one shared identity branch ``b ~ Bernoulli(1/2)`` shifts the
+    (phi0, psi) centers jointly by ``(pi, pi/2)``, then each component is
+    drawn from its in-branch eps-mixture (uniform floor with probability
+    ``eps``, else the concentrated law). ``rand(m) -> (m,)`` uniforms on
+    the target module is the caller-owned RNG stream (defaults to a fresh
+    numpy generator). Outputs are wrapped/clipped into the sampling
+    domains ``[0, 2 pi) x [-1, 1] x [0, pi)``.
+    """
+    from ..utils.utility import get_array_module
+
+    xp = get_array_module(phi0_c)
+    phi0_c = xp.asarray(phi0_c, dtype=xp.float64)
+    psi_c = xp.asarray(psi_c, dtype=xp.float64)
+    ci_c = xp.cos(xp.asarray(iota_c, dtype=xp.float64) % np.pi)
+    n = int(phi0_c.shape[0])
+    if rand is None:
+        _rng = np.random.default_rng()
+
+        def rand(m):
+            return xp.asarray(_rng.random(m))
+
+    sigma = pe_extrinsic_sigma(ln_snr, geom=geom)
+    kappa = 1.0 / sigma**2
+    eps = float(eps)
+
+    b = rand(n) < 0.5
+    c_phi = phi0_c + xp.where(b, np.pi, 0.0)
+    c_psi = psi_c + xp.where(b, np.pi / 2.0, 0.0)
+
+    v_phi = c_phi + _pe_vonmises_rvs(kappa, rand, xp)
+    u_phi = 2.0 * np.pi * rand(n)
+    phi0 = xp.where(rand(n) < eps, u_phi, v_phi) % (2.0 * np.pi)
+
+    v_psi = c_psi + 0.5 * _pe_vonmises_rvs(kappa, rand, xp)
+    u_psi = np.pi * rand(n)
+    psi = xp.where(rand(n) < eps, u_psi, v_psi) % np.pi
+
+    a_std = (-1.0 - ci_c) / sigma
+    b_std = (1.0 - ci_c) / sigma
+    Fa = _pe_std_norm_cdf(a_std, xp)
+    Fb = _pe_std_norm_cdf(b_std, xp)
+    p = xp.clip(Fa + rand(n) * (Fb - Fa), 1e-15, 1.0 - 1e-16)
+    tn = xp.clip(ci_c + sigma * _pe_std_norm_ppf(p, xp), -1.0, 1.0)
+    u_ci = 2.0 * rand(n) - 1.0
+    cos_iota = xp.where(rand(n) < eps, u_ci, tn)
+    return phi0, cos_iota, psi
 
 
 @dataclasses.dataclass
