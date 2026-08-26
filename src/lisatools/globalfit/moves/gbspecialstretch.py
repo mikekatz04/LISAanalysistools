@@ -9009,7 +9009,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             accept,
                         )
                     else:
-                        _dg_w = (accept & _dg_cross).astype(xp.int64)
+                        _dg_w = (accept & _dg_cross).astype(xp.int32)
                         self._cap_gate_scatter_add(_dg[0], _dg_flat_n, _dg_w)
                         self._cap_gate_scatter_add(
                             _dg[0],
@@ -10252,11 +10252,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return None  # every cell disarmed -- nothing to enforce
         _, counts = self._cap_cell_counts(band_sorter)
         return counts, get_array_module(counts).asarray(
-            cap_np.astype(np.int64))
+            cap_np.astype(np.int32))
 
     @staticmethod
     def _cap_gate_scatter_add(counts, flat, weights):
         """Sync-free ``counts[flat] += weights`` with duplicate-safe adds."""
+        # Newer cupy restricts add.at/scatter_add data dtypes to
+        # {int32, float16/32/64, uint32/64} -- int64 raises TypeError. The
+        # census family is int32 end-to-end; this coercion is the belt for
+        # any stray weight dtype (indices may stay int64 -- only the DATA
+        # dtype is restricted).
+        if weights.dtype != counts.dtype:
+            weights = weights.astype(counts.dtype)
         if get_array_module(counts) is np:
             np.add.at(counts, flat, weights)
         else:
@@ -10311,7 +10318,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._cap_gate_scatter_add(
                 counts,
                 self._cap_flat_index(temp_inds, walker_inds, _cell),
-                _sign * _w.astype(xp.int64),
+                _sign * _w.astype(xp.int32),
             )
 
     def _cap_new_entry_veto(self, counts, cap, temp_inds, walker_inds,
@@ -10445,9 +10452,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # cupy.bincount computes max(x) first and raises on a zero-size
         # array (the zero-leaf search start hits this on GPU).
         if alive_cells.shape[0] == 0:
-            counts = xp.zeros(nbins, dtype=xp.int64)
+            # int32, NOT int64: newer cupy dropped int64 from the
+            # cupy.add.at / cupyx.scatter_add supported dtypes (observed on
+            # the A100 interactive env, 2026-08-25) -- and these are
+            # per-(temp,walker,cell) leaf COUNTS, so int32 is ample.
+            counts = xp.zeros(nbins, dtype=xp.int32)
         else:
-            counts = xp.bincount(alive_cells, minlength=nbins)
+            counts = xp.bincount(
+                alive_cells, minlength=nbins).astype(xp.int32)
         if nb_inds is not None:
             # second membership pass: alive leaves in an overlap zone also
             # count into their neighbour cell
@@ -10456,7 +10468,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             alive_nb = flat_nb[band_sorter.inds & has_nb]
             if alive_nb.shape[0] > 0:
-                counts = counts + xp.bincount(alive_nb, minlength=nbins)
+                counts = counts + xp.bincount(
+                    alive_nb, minlength=nbins).astype(xp.int32)
         return flat, counts
 
     def _band_saturated_flat(self, counts, cap):
