@@ -432,6 +432,7 @@ class FitDecisionTest(unittest.TestCase):
         _fstat_epoch = None
         _fstat_last_fit_hit = -1
         name = "stub"
+        branch_name = "gb"
         # the band grid the run is configured with (the staleness check
         # compares epoch caches against it)
         band_edges = np.linspace(1e-3, 2e-3, 6)
@@ -445,18 +446,45 @@ class FitDecisionTest(unittest.TestCase):
         _epoch_dir = _M._epoch_dir
         _epoch_complete = staticmethod(_M._epoch_complete)
         _epoch_band_grid_stale = _M._epoch_band_grid_stale
+        _fstat_clock = _M._fstat_clock
+        _epoch_fit_clock = _M._epoch_fit_clock
+        _FSTAT_CLOCK_BASENAME = _M._FSTAT_CLOCK_BASENAME
+        _FSTAT_CLOCK_WRITE_EVERY = _M._FSTAT_CLOCK_WRITE_EVERY
 
         @property
         def _fstat_root(self):
             return self._fstat_root_dir
 
+    @staticmethod
+    def _reset_clock_state():
+        """The refit clock is class-level shared state; isolate every test."""
+        from lisatools.globalfit.moves.gbspecialstretch import (
+            GBSpecialBase,
+            GBSpecialRJFStatGridMove,
+        )
+
+        GBSpecialBase._branch_propose_counts.pop("gb", None)
+        GBSpecialRJFStatGridMove._fstat_clock_seeded.clear()
+        GBSpecialRJFStatGridMove._fstat_clock_written.clear()
+
+    @staticmethod
+    def _tick(n):
+        """Advance the shared branch census, as any GBSpecial propose does."""
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialBase
+
+        GBSpecialBase._branch_propose_counts["gb"] = (
+            GBSpecialBase._branch_propose_counts.get("gb", 0) + n
+        )
+
     def setUp(self):
         self.d = tempfile.mkdtemp()
         self.s = self._Stub()
         self.s._fstat_root_dir = self.d
+        self._reset_clock_state()
 
     def tearDown(self):
         shutil.rmtree(self.d, ignore_errors=True)
+        self._reset_clock_state()
 
     def test_first_ever_fit(self):
         self.assertEqual(self.s._fstat_fit_decision(), ("fit", 0))
@@ -468,13 +496,22 @@ class FitDecisionTest(unittest.TestCase):
         self.assertEqual(self.s._fstat_fit_decision(), ("skip", 0))
 
     def test_cadence_refit(self):
+        """Cadence runs on the SHARED branch census, not num_proposals.
+
+        2026-08-24 redesign: the per-instance counter starved in
+        production (full_pe random_choice, short gb_search stages,
+        per-launch resets) so the grid never refit. The clock is now the
+        class-level per-branch propose census, which every GBSpecial move
+        of the branch ticks.
+        """
         self.s.rj_proposal_distribution = {"gb": object()}
         self.s._fstat_epoch = 0
         self.s.fstat_refit_every = 10
         self.s._fstat_last_fit_hit = 0
-        self.s.num_proposals = 9
+        self.s.num_proposals = 0        # the instance counter is IGNORED now
+        self._tick(9)
         self.assertEqual(self.s._fstat_fit_decision(), ("skip", 0))
-        self.s.num_proposals = 10
+        self._tick(1)
         self.assertEqual(self.s._fstat_fit_decision(), ("fit", 1))
 
     def test_load_complete_epoch(self):
@@ -764,3 +801,198 @@ class PerCellPeakWeightTest(unittest.TestCase):
                     * (al_ax[-1] - al_ax[0]) * (sd_ax[-1] - sd_ax[0]))
         est = float(np.mean(np.exp(-lp)))
         self.assertAlmostEqual(est / vol, 1.0, delta=0.05)
+
+
+class FitClockTest(unittest.TestCase):
+    """The restart-persistent refit clock (2026-08-24 redesign).
+
+    Production never refit because the cadence counted per-instance,
+    in-process proposes. These pin the three fixed failure modes: hits
+    pooled across move instances, the budget surviving a process restart
+    (the clock journal + the DONE.json last-fit mark), and pre-clock
+    epochs being treated as out of budget.
+    """
+
+    _Stub = FitDecisionTest._Stub
+    _reset_clock_state = staticmethod(FitDecisionTest._reset_clock_state)
+    _tick = staticmethod(FitDecisionTest._tick)
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.s = self._Stub()
+        self.s._fstat_root_dir = self.d
+        self._reset_clock_state()
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+        self._reset_clock_state()
+
+    def _make_epoch(self, k=0, clock=None):
+        d0 = os.path.join(self.d, f"epoch_{k:04d}")
+        os.makedirs(d0, exist_ok=True)
+        manifest = {"epoch": k, "n_peaks": 3}
+        if clock is not None:
+            manifest["clock"] = clock
+        with open(os.path.join(d0, "DONE.json"), "w") as f:
+            json.dump(manifest, f)
+        return d0
+
+    def test_hits_pool_across_instances(self):
+        """A second grid move of the same branch sees the same clock."""
+        other = self._Stub()
+        other._fstat_root_dir = self.d
+        other.rj_proposal_distribution = {"gb": object()}
+        other._fstat_epoch = 0
+        other.fstat_refit_every = 10
+        other._fstat_last_fit_hit = 0
+        other.num_proposals = 0
+        # ticks contributed by ANY moves of the branch (e.g. the search
+        # instance + prior moves), none by `other` itself:
+        self._tick(10)
+        self.assertEqual(other._fstat_fit_decision(), ("fit", 1))
+
+    def test_budget_survives_restart(self):
+        """The production failure: short launches must still accumulate.
+
+        Process 1 samples 55 proposes past a fit made at clock 5 and dies.
+        Process 2 (fresh counters) must refit IMMEDIATELY on the carried
+        budget rather than starting a new 50-propose wait.
+        """
+        self._make_epoch(0, clock=5)
+        self.s.rj_proposal_distribution = {"gb": object()}
+        self.s._fstat_epoch = 0
+        self.s.fstat_refit_every = 50
+        self.s._fstat_last_fit_hit = self.s._epoch_fit_clock(0)
+        self.assertEqual(self.s._fstat_last_fit_hit, 5)
+        # process 1: 55 proposes, journal written en route
+        self._tick(55)
+        self.assertEqual(self.s._fstat_clock(), 55)
+        # process death: in-memory counters gone
+        self._reset_clock_state()
+        s2 = self._Stub()
+        s2._fstat_root_dir = self.d
+        s2.rj_proposal_distribution = {"gb": object()}
+        s2._fstat_epoch = 0
+        s2.fstat_refit_every = 50
+        s2._fstat_last_fit_hit = s2._epoch_fit_clock(0)
+        # zero proposes in THIS process; elapsed = 55 - 5 >= 50 -> refit
+        self.assertEqual(s2._fstat_fit_decision(), ("fit", 1))
+
+    def test_epoch_fit_clock_manifest(self):
+        self._make_epoch(0, clock=37)
+        self.assertEqual(self.s._epoch_fit_clock(0), 37)
+
+    def test_epoch_fit_clock_legacy_manifest_is_out_of_budget(self):
+        """Pre-clock DONE.json (the running production stores) -> 0."""
+        self._make_epoch(0, clock=None)
+        self.assertEqual(self.s._epoch_fit_clock(0), 0)
+        self.assertEqual(self.s._epoch_fit_clock(3), 0)  # missing entirely
+
+    def test_journal_throttle(self):
+        path = os.path.join(self.d, self.s._FSTAT_CLOCK_BASENAME)
+        self._tick(3)
+        self.assertEqual(self.s._fstat_clock(), 3)   # first read journals
+        with open(path) as f:
+            self.assertEqual(json.load(f)["clock"], 3)
+        self._tick(6)
+        self.assertEqual(self.s._fstat_clock(), 9)   # < WRITE_EVERY: no write
+        with open(path) as f:
+            self.assertEqual(json.load(f)["clock"], 3)
+        self._tick(4)
+        self.assertEqual(self.s._fstat_clock(), 13)  # >= WRITE_EVERY: rewrite
+        with open(path) as f:
+            self.assertEqual(json.load(f)["clock"], 13)
+
+
+class CtrTableGBFreeTest(unittest.TestCase):
+    """The epoch center-table sweep must run INSIDE the GB-free window.
+
+    2026-08-24 fix: the sweep used to run after the fit's GB-free context
+    closed, so at any real refit the amplitude/SNR centers for exactly the
+    loud already-recovered peaks would have been fitted against a residual
+    with those peaks subtracted.
+    """
+
+    class _Stub:
+        from lisatools.globalfit.moves.gbspecialstretch import (
+            GBSpecialRJFStatGridMove as _M,
+        )
+
+        _install_ctr_table = _M._install_ctr_table
+        _epoch_dir = _M._epoch_dir
+        _CTR_TABLE_DEVICE_FIELDS = _M._CTR_TABLE_DEVICE_FIELDS
+
+        name = "stub"
+        branch_name = "gb"
+        xp = np
+        fstat_fit_kwargs = {}
+        _fstat_root_dir = None
+        events = None  # set per test
+
+        @property
+        def _fstat_root(self):
+            return self._fstat_root_dir
+
+        def _fstat_ctr_mode(self):
+            return "epoch"
+
+        def _fstat_ctr_smear(self):
+            return 2.0
+
+        def _fstat_reference_walker(self, model):
+            self.events.append("walker_ref")
+            return 0
+
+        def _fstat_call(self, model, walker_ref):
+            self.events.append("call_built")
+            return lambda params: None
+
+        def _gb_free_residual(self, model, branches, walker_ref):
+            import contextlib
+
+            events = self.events
+
+            @contextlib.contextmanager
+            def _cm():
+                events.append("gbfree_enter")
+                try:
+                    yield
+                finally:
+                    events.append("gbfree_exit")
+
+            return _cm()
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.s = self._Stub()
+        self.s._fstat_root_dir = self.d
+        self.s.events = []
+        import lisatools.sampling.fstat_gridfit as _G
+
+        self._G = _G
+        self._orig_build = _G.build_fstat_center_table
+        events = self.s.events
+
+        def _fake_build(call, **kwargs):
+            events.append("sweep" if call is not None else "load")
+            return None
+
+        _G.build_fstat_center_table = _fake_build
+
+    def tearDown(self):
+        self._G.build_fstat_center_table = self._orig_build
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_sweep_runs_inside_gb_free_window(self):
+        self.s._install_ctr_table(0, model=object(), branches={"gb": object()})
+        # scorer built AND sweep executed strictly inside the window
+        self.assertEqual(
+            self.s.events,
+            ["walker_ref", "gbfree_enter", "call_built", "sweep",
+             "gbfree_exit"],
+        )
+
+    def test_load_path_never_touches_the_residual(self):
+        """No model (checkpoint-load path) -> no window, call=None."""
+        self.s._install_ctr_table(1, model=None, branches=None)
+        self.assertEqual(self.s.events, ["load"])
