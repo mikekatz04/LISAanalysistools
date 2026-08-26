@@ -2168,7 +2168,7 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         sources_now_map,
         sources_inject_now_map,
         special_band_inds,
-        opt_snr_rej_samp_limit=5.0,
+        opt_snr_rej_samp_limit=None,
         snr_rej_detected=False,
         force_backend="gpu",
         use_template_arr=False,
@@ -2281,6 +2281,16 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
         self._phi0_col = _ib.index("phi0") if "phi0" in _ib else 3
         self._per_leaf_fill = getattr(transform_fn, "n_leaf_fills", None) is not None
         self.waveform_kwargs = waveform_kwargs
+        # None (the GB default path — VGB passes an explicit float and is
+        # unaffected) resolves via GB_OPT_SNR_LIMIT, default 5.0. The
+        # 2026-08-26 highf forensics measured the SNR-5 floor feeding a
+        # hot-ladder noise balloon (83->186 leaves, 19/32 bands occupied
+        # at T1-T10) whose at-cap cells then blockaded cold births; the
+        # standing F-stat peak-floor ruling ("SNR 5 = noise, keep 8")
+        # has this birth-floor counterpart. Probe scripts pin 8.
+        if opt_snr_rej_samp_limit is None:
+            opt_snr_rej_samp_limit = float(
+                os.environ.get("GB_OPT_SNR_LIMIT", "5.0"))
         self.opt_snr_rej_samp_limit = opt_snr_rej_samp_limit
         self.snr_rej_detected = bool(snr_rej_detected)
         self.use_template_arr = use_template_arr

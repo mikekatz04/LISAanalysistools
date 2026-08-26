@@ -1771,7 +1771,18 @@ class CtrGbFreeWindowTest(unittest.TestCase):
             get_subset_bool=lambda **sel: np.ones(n_ref, dtype=bool))
         return m, sorter
 
-    def test_window_exposes_and_restores_for_search(self):
+    def test_default_is_disabled(self):
+        # 2026-08-26 forensics: inside an open unit the residual is
+        # ALREADY GB-free (unit-open restoration); the window
+        # double-added templates (~2x amplitude centers, cold births
+        # -> exactly 0 from it 2). Default MUST be off.
+        m, sorter = self._move_with_recorder()
+        with m._ctr_gbfree_window(None, sorter, 0):
+            pass
+        self.assertEqual(m.calls, [])
+
+    def test_window_exposes_and_restores_when_opted_in(self):
+        os.environ["GB_RJ_CTR_GBFREE"] = "1"
         m, sorter = self._move_with_recorder()
         with m._ctr_gbfree_window(None, sorter, 0):
             self.assertEqual(m.calls, [("expose", dict(
@@ -1779,20 +1790,15 @@ class CtrGbFreeWindowTest(unittest.TestCase):
         self.assertEqual(m.calls[-1][0], "restore")
 
     def test_restore_runs_on_exception(self):
+        os.environ["GB_RJ_CTR_GBFREE"] = "1"
         m, sorter = self._move_with_recorder()
         with self.assertRaises(RuntimeError):
             with m._ctr_gbfree_window(None, sorter, 0):
                 raise RuntimeError("boom")
         self.assertEqual([c[0] for c in m.calls], ["expose", "restore"])
 
-    def test_knob_zero_disables(self):
-        os.environ["GB_RJ_CTR_GBFREE"] = "0"
-        m, sorter = self._move_with_recorder()
-        with m._ctr_gbfree_window(None, sorter, 0):
-            pass
-        self.assertEqual(m.calls, [])
-
     def test_empty_reference_walker_is_a_noop(self):
+        os.environ["GB_RJ_CTR_GBFREE"] = "1"
         m, sorter = self._move_with_recorder(n_ref=0)
         sorter.get_subset_bool = lambda **sel: np.zeros(0, dtype=bool)
         with m._ctr_gbfree_window(None, sorter, 0):

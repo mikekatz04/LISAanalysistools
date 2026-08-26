@@ -10795,9 +10795,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         step) and the same fill machinery as the epoch window — the
         MAIN residual only, no sub-band buffer is touched, so the
         buffer snapshots the RJ scoring reads stay consistent.
-        ``GB_RJ_CTR_GBFREE=0`` reverts to live-residual centers.
+        **DEFAULT OFF (2026-08-26 forensics — the window is WRONG inside
+        an open unit).** ``_run_band_unit`` opens every unit by RESTORING
+        the parity class's cold templates into the main residual
+        (``remove_cold_chain_sources_from_residual`` at unit open,
+        re-subtracted at unit close) — so inside the unit, where every
+        candidate lives, the residual is ALREADY GB-free. This window
+        then DOUBLE-ADDED walker_ref's templates (data + template ~ 2x
+        signal), inflating A_max ~2x and halving the distance centers:
+        every birth drew ~2x too bright and exact scoring rejected it —
+        measured as cold RJ acceptance exactly 0 from iteration 2 onward
+        (iteration 1 escaped via the empty-model guard below).
+        Live-residual per-row centers ARE the correct conditioning
+        in-unit. If closed-band restoration is ever wanted, the correct
+        form is a PARITY-SCOPED selection (restore only sources whose
+        band is NOT in the open class), not this unrestricted one.
+        ``GB_RJ_CTR_GBFREE=1`` re-enables for study only.
         """
-        if os.environ.get("GB_RJ_CTR_GBFREE", "1") != "1":
+        if os.environ.get("GB_RJ_CTR_GBFREE", "0") != "1":
             yield
             return
         sel = dict(temp=0, walker=int(walker_ref), apply_inds=True)
@@ -11818,10 +11833,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if (self.is_rj_prop and getattr(self, "rj_fstat_dist_birth", False)
                 and not self.rj_replace):
             _tbl = self._fstat_ctr_table_active()
+            # Report the PER-ROW bypass when active (2026-08-26): this
+            # line previously printed the table's mere existence and
+            # actively misled a forensics pass into thinking per-row
+            # centers never engaged.
             logger.info(
                 "[FSTAT_CTR %s] propose total: mode=%s (%s), "
                 "fallback-computed rows %d", self.name,
-                self._fstat_ctr_mode(),
+                ("perrow (table bypassed)" if self._rj_birth_perrow()
+                 else self._fstat_ctr_mode()),
                 f"{int(_tbl['f0_mHz'].shape[0])}-node table"
                 if _tbl is not None else "per-unit hoist",
                 int(getattr(self, "_fstat_ctr_fallback_rows", 0)),

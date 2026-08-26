@@ -459,6 +459,19 @@ export GB_TEMPER_VERTICAL=1
 # per-repeat during polish -- the full transport stack. Probe cost
 # ~+40 s/it (tempering block x3); production ~+3%. =3 reverts.
 export GB_TEMPER_EVERY_PROPOSES=1
+
+# BIRTH SNR FLOOR 5 -> 8 (2026-08-26 forensics: the SNR-5 floor fed a
+# hot-ladder noise balloon, 83->186 leaves in 19/32 noise-only bands,
+# whose at-cap cells blockaded cold births; peak-floor ruling has said
+# "SNR 5 = noise, keep 8" since 08-17).
+export GB_OPT_SNR_LIMIT=8
+# SIG-HET IN-MODEL OFF FOR THIS PROBE (2026-08-26 forensics: 28
+# GB_CELL_LL warnings + cold ll-audit |dll| up to 17.7 at the flagship
+# + 16 INFOMAT fall-throughs = in-model accept/reject at the seam
+# running on numbers off by tens of logL; at 2-active-band scale the
+# EXACT chunked-het scoring is affordable). Production keeps sig-het;
+# its accuracy tune-up is a separate investigation.
+export GB_SIGHET_INMODEL=0
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First
