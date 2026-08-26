@@ -183,6 +183,21 @@ fi
 export FILE_STORE_DIR=${STORE_DIR}
 export BASE_FILE_NAME=gf_prod_6mo_sources
 
+# ---- start scatter (user ruling 2026-08-26) ---------------------------------
+# The default 1e-5 multiplicative truth scatter produced wildly spread
+# initial lnL across walkers (-5.6e6 .. -2.2e7) -- at 6-mo source SNRs
+# even 1e-5 relative offsets carry ~1e7 of lnL. 1e-8 puts every walker at
+# ~the truth null (offsets scale as factor^2 -> ~1e-6 of the above), so
+# the initial lnL line should read ~identical values ~0 across all 24.
+# Convention: x * (1 + factor * randn); 0 = exact injection. NB the
+# scatter is MULTIPLICATIVE, so any exactly-zero injected parameter has
+# zero ensemble spread at ANY factor (the stretch move cannot create
+# spread it never had -- the known VGB ratio lesson); per-branch
+# additive_start_widths is the remedy if a dimension needs unfreezing.
+export MBH_START_FACTOR=1e-8
+export EMRI_START_FACTOR=1e-8
+export SOBBH_START_FACTOR=1e-8
+
 # ---- shape ------------------------------------------------------------------
 # 24 walkers = the production 6mo_v1 shape, so the timing transfers to the
 # eventual all_sources run (full_year's historical default was 6; drop back
