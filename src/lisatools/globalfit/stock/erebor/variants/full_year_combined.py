@@ -125,6 +125,17 @@ class FullYearGeneralSettings(EreborGeneralSettings):
     chop_window: bool = dataclasses.field(
         default_factory=env_default("CHOP_WINDOW", False, bool)
     )
+    # Backend for the SYNTHETIC injection build (build_synthetic_source_
+    # streams -- the exact TD generation of the injected sources at
+    # fit.build()). "cpu" (default) = the validated path; "auto" (or
+    # "gpu") = ride the run's GPU backend when gpus are configured (the
+    # stream builder is GPU-safe by construction: every generator output
+    # passes through asnumpy() before host accumulation); an explicit
+    # backend string is passed through verbatim. Sampling backends are
+    # untouched either way.
+    synthetic_injection_backend: str = dataclasses.field(
+        default_factory=env_default("SYNTHETIC_INJECTION_BACKEND", "cpu", str)
+    )
     merger_frac: float = 0.72
     # synthetic_t_start inherits the Erebor default (10,000 s: keeps the
     # TDI2 warm-up look-back inside the orbit span).
@@ -327,6 +338,9 @@ class FullYearCombinedGlobalFit(EreborFit):
             # Same (mode, seed) as the branch prep -> identical tables.
             inj_mode = gs.synthetic_injections or "stock"
             inj_seed = gs.synthetic_injection_seed
+            inj_backend = gs.synthetic_injection_backend
+            if inj_backend in ("auto", "gpu"):
+                inj_backend = force_backend  # gpu_backend when gpus set
             gs.data_processor_class = SyntheticDataProcessor
             gs.processor_init_kwargs = dict(
                 Tobs=tobs,
@@ -343,7 +357,7 @@ class FullYearCombinedGlobalFit(EreborFit):
                 ),
                 source_ids={k: list(v) for k, v in gs.mojito_source_ids.items()},
                 nchannels=gs.nchannels,
-                force_backend="cpu",
+                force_backend=inj_backend,
                 verbose=gs.verbose,
                 do_plots=False,
                 tdi_chan=gs.tdi_chan,

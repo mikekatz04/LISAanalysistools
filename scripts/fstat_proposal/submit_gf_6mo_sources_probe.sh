@@ -44,7 +44,8 @@
 
 #SBATCH --job-name=gf6mo_src         # job name
 #SBATCH --partition=gpu-80-spot   # GPU partition
-#SBATCH --gres=gpu:2              # 2 GPUs -- the multi-GPU check IS the point
+#SBATCH --gres=gpu:1              # ONE GPU (default GPUS=0); the 2-GPU parity
+                                  # leg: sbatch --gres=gpu:2 with GPUS=0,1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1                # single process (MPI singleton)
 #SBATCH --cpus-per-task=4
@@ -86,7 +87,15 @@ export PROGRESS=0
 REAL_MOJITO=/shared/home/mlkatz1/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
-export GPUS=0,1                    # 2 devices -- the multi-GPU gate
+# ONE GPU by default (user request 2026-08-26); the 2-GPU parity leg of
+# gate S5 is the env override:  GPUS=0,1 sbatch <this script>
+export GPUS=${GPUS:-0}
+# Run the synthetic injection build on the GPU too (user request): the
+# stream builder is GPU-safe (asnumpy() at every host accumulation) but
+# this is the FIRST GPU exercise of that path -- a failure shows up
+# loudly in the first minutes of fit.build(); SYNTHETIC_INJECTION_BACKEND
+# =cpu restores the validated CPU injections.
+export SYNTHETIC_INJECTION_BACKEND=auto
 
 # ---- DATA MODE: TEMPORARILY SYNTHETIC (user request 2026-08-26) -------------
 # "synthetic" builds every stream in-process -- no mojito folder needed.
