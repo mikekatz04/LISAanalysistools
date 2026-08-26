@@ -795,7 +795,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         waveform_kwargs={},
         parameter_transforms: Optional[TransformContainer] = None,
         snr_lim=1e-10,
-        opt_snr_rej_samp_limit=5.0,
+        opt_snr_rej_samp_limit=None,
         snr_rej_detected=None,
         rj_proposal_distribution=None,
         is_rj_prop=False,
@@ -1178,6 +1178,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.pe_extrinsic_draw = bool(pe_extrinsic_draw)
 
         self.snr_lim = snr_lim
+        # None (the default) resolves via GB_OPT_SNR_LIMIT (default 5.0).
+        # This ctor is the TRUE source of the floor — it hands the value
+        # explicitly to every sorter/buffer, so an env sentinel placed
+        # only in gbbands never fires (2026-08-26: the probe pin at 8 was
+        # silently inert, log still read 5.00). Explicit kwarg (e.g. the
+        # VGB move's 0.0) still wins over the env.
+        if opt_snr_rej_samp_limit is None:
+            opt_snr_rej_samp_limit = float(
+                os.environ.get("GB_OPT_SNR_LIMIT", "5.0"))
         self.opt_snr_rej_samp_limit = float(opt_snr_rej_samp_limit)
         if snr_rej_detected is None:
             snr_rej_detected = (
