@@ -338,10 +338,13 @@ export GB_RJ_SNR_TRUNC_DIST=1      # birth distance draw truncated at the
                                    # analytic SNR-5 boundary; truncated
                                    # density in the factors (DB-exact);
                                    # =0 restores the plain lognormal
-# Per-class in-model repeats (search mode): newborns polish hard,
-# survivors lightly. PE resolves to GB stock num_repeat_proposals.
+# Per-class in-model repeats: newborns polish hard, survivors get real
+# polish too (2026-08-26 user ruling, rides the at-cap pool reversal
+# c251b267: ALL alive GBs pool every round, so the survivor budget is
+# THE polish budget for seated sources; was 25). NOTE these env pins
+# beat the PE mode default as well — both phases run 200/100 here.
 export GB_INMODEL_REPEATS_NEWBORN=200
-export GB_INMODEL_REPEATS_SURVIVOR=25
+export GB_INMODEL_REPEATS_SURVIVOR=100
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First
