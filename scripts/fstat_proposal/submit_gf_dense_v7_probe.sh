@@ -271,17 +271,19 @@ export MAX_FREQ=2.5e-2
 # ## layer boundary LOSE that layer -- these sit at 43.5/48.5 layers and  ##
 # ## snap OUTWARD-safe to 44..48.                                         ##
 # ############################################################################
-export GB_MIN_FREQ=6.041667e-03     # 43.5 layers -> snaps to 44
-export GB_MAX_FREQ=6.736111e-03     # 48.5 layers -> snaps to 48
+export GB_MIN_FREQ=7.361111e-03     # layer 53 lower edge (7.3611 mHz)
+export GB_MAX_FREQ=7.777778e-03     # layer 55 upper edge (7.7778 mHz)
 
 # ---- GB knobs (everything else rides the flipped defaults: sig-het in-model,
 #      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,
 #      at-cap RJ skip, cell-lifecycle ll credit, GB_MODE=search +
 #      GB_PE_MOVES_STRICT=1 + GB_SEARCH_PRIOR_REMOVAL=1 seeded by the script) --
-# 30 leaves per sub-band x 40 sub-bands (layers 44-48 x divisor 8) --
-# user spec 2026-08-26 (was 10000 = effectively unlimited; leaner slot
-# tail, same per-band allowance the caps actually govern).
-export GB_NLEAVES_MAX=1200
+# THE HISTORICAL DENSE BAND (user ruling 2026-08-26: "around 7.5 mHz,
+# small number of sub-bands" = the band75/m55 campaign window): layers
+# 53-55 = [7.3611, 7.7778] mHz, 3 layers x divisor 8 = 24 sub-bands;
+# band75 (layer 54) holds 15 catalogue sources, m55 (layer 55) 17.
+# 30 leaves per sub-band x 24 sub-bands:
+export GB_NLEAVES_MAX=720
 # FULL parity-unit residency (grouped RJ->in-model scheduling, 2026-08-13):
 # one unit = 77 bands x 24 temps x 24 walkers = 44,352 cells; the scheduler
 # clamps n_slots to min(GB_N_SUBBANDS, cells), so 50000 means every cell is
