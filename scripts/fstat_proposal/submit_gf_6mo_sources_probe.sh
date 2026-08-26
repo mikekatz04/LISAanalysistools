@@ -87,7 +87,21 @@ REAL_MOJITO=/shared/home/mlkatz1/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
 export GPUS=0,1                    # 2 devices -- the multi-GPU gate
-export DATA_MODE=mojito
+
+# ---- DATA MODE: TEMPORARILY SYNTHETIC (user request 2026-08-26) -------------
+# "synthetic" builds every stream in-process -- no mojito folder needed.
+# What changes vs mojito: injections come from the STOCK SYNTHETIC tables
+# (make_*_injections), so the id lists below contribute only their COUNTS
+# (4 MBHBs / 8 EMRIs / 6 SOBHBs), not specific catalogue rows; synthetic
+# MBH merger times are spread across the interior (0.25-0.85) of the
+# window BY CONSTRUCTION, so the merge-in-window ruling holds
+# automatically; the fixed sensitivity falls back to the stock analytic
+# levels (15e-12 / 3e-15 -- no NOISE brick fit); no instrument noise is
+# added to the data (source-only likelihood, exact nulls). TIMING and
+# MULTI-GPU evidence (gates S1/S5) remains fully valid; the DETECTABILITY
+# CENSUS (gate S4) is catalogue physics and needs the mojito rerun --
+# flip back with DATA_MODE=mojito once the cache/bricks are settled.
+export DATA_MODE=${DATA_MODE:-synthetic}
 
 # ---- CONFUSION FOREGROUND DATA (user request 2026-08-24; then DISABLED
 #      same day: "Turn that off for now in our 6 month test" -- the GALFOR
@@ -96,6 +110,11 @@ export DATA_MODE=mojito
 #      + inputs ARE in the galaxy-noise worktree, so it can be produced
 #      when wanted). ADD_CONFUSION_FG=1 re-arms the whole block. ----------
 ADD_CONFUSION_FG=${ADD_CONFUSION_FG:-0}
+if [ "${ADD_CONFUSION_FG}" = "1" ] && [ "${DATA_MODE}" != "mojito" ]; then
+  echo "[GALFOR] ADD_CONFUSION_FG=1 ignored: the confusion brick is mojito"
+  echo "         L1 data and DATA_MODE=${DATA_MODE}. Set DATA_MODE=mojito."
+  ADD_CONFUSION_FG=0
+fi
 if [ "${ADD_CONFUSION_FG}" = "1" ]; then
 # Add the SELF-GENERATED confusion-foreground mojito file to the data: the
 # GB L1 brick with all resolvable binaries regenerated (GBGPU, on the file's
@@ -174,8 +193,11 @@ export TOBS_TARGET=15552000
 export EDGE_CROP_WAVELETS=60
 
 # ---- source selection (see header for the derivation) -----------------------
-export MBHB_IDS=2,5,16,18          # ONLY the 4 that merge inside 6 months
-export EMRI_IDS=0,1,2,3,4,5,6,7    # all 8 -- detectability census
+# NB in DATA_MODE=synthetic these lists contribute only their COUNTS to
+# the stock synthetic injection tables; the specific catalogue ids apply
+# when DATA_MODE=mojito.
+export MBHB_IDS=2,5,16,18          # mojito: ONLY the 4 that merge inside 6 months
+export EMRI_IDS=0,1,2,3,4,5,6,7    # all 8 -- detectability census (mojito)
 export SOBHB_IDS=0,1,2,3,4,5       # all 6 -- expected mostly sub-threshold
 
 # ---- SOBBH chunked accuracy on THIS grid (measured 2026-08-25) --------------
