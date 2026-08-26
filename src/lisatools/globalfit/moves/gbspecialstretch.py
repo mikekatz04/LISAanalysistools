@@ -4851,6 +4851,131 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logg = xp.where(side > alpha + 1e-10, -1e300, logg)
         return logg
 
+    def _replace_slot0_floor_eps(self) -> float:
+        """Uniform-floor mixture weight for the REPLACE move's slot-0 proposal.
+
+        2026-08-24 candidate-quality root cause (c): the swap's reverse
+        density evaluates the incumbent's slot 0 under the (truncated)
+        lognormal about the incumbent's OWN F-stat center at ``sigma ~
+        smear/SNR``. A polished incumbent sits a median ~6.6 sigma from
+        that center, so even a GOOD swap paid a median ~-22 / p10 ~-125
+        reverse bill (and 6+-sigma rows hit the truncation's -1e300).
+        Mixing a small uniform floor over the container's slot-0 range into
+        BOTH density sides — exactly the ``UniformFloorMixture`` eps device
+        the intrinsics already use — bounds that bill at ``~log(eps)``
+        (~-3 at the default 0.05) while leaving near-center densities
+        essentially unchanged. ``GB_REPLACE_SLOT0_FLOOR_EPS`` (default
+        0.05); 0 disables the floor (bit-identical legacy behavior).
+        """
+        return float(os.environ.get("GB_REPLACE_SLOT0_FLOOR_EPS", "0.05"))
+
+    def _slot0_range(self, band_sorter):
+        """``(lo, hi)`` support of the birth container's uniform slot-0 prior.
+
+        The same prior :meth:`_log_dist_range` reads the width of — this
+        returns its actual bounds (needed to DRAW from the uniform floor,
+        not just to normalize by it). Cached after first lookup; the
+        fallback mirrors ``_log_dist_range``'s distance-basis default.
+        """
+        cached = getattr(self, "_slot0_range_cache", None)
+        if cached is not None:
+            return cached
+        cont = getattr(band_sorter, "rj_prop", None)
+        if isinstance(cont, dict):
+            cont = cont.get(self.branch_name)
+        val = (0.001, 40.0) if _gb_use_distance(self) else (
+            float(np.log(7e-26)), float(np.log(1e-19)))
+        try:
+            for inds, dist in cont.priors:
+                if 0 in list(inds) and hasattr(dist, "minimum"):
+                    val = (float(dist.minimum), float(dist.maximum))
+                    break
+        except Exception:
+            pass
+        self._slot0_range_cache = val
+        return val
+
+    def _slot0_log_proposal_floored(self, slot0_vals, ln_center, sigma,
+                                    alpha, band_sorter, eps):
+        """``log g`` of slot 0 under the FLOOR-MIXED (truncated) lognormal.
+
+        ``g_mix = (1 - eps) * g_lognormal + eps * U[slot0 range]`` — the
+        REPLACE move's slot-0 density (see
+        :meth:`_replace_slot0_floor_eps`). The SAME function evaluates the
+        forward (new draw about its own center) and reverse (incumbent
+        about its own center) sides with the SAME eps and range constants,
+        and the draw samples exactly this mixture, so detailed balance is
+        exact. ``eps <= 0`` returns the plain truncated-lognormal density
+        unchanged. Out-of-truncation values pick up the floor component
+        instead of the -1e300 force-reject — the bounded reverse bill.
+        """
+        logg = self._slot0_log_proposal(slot0_vals, ln_center, sigma,
+                                        alpha=alpha)
+        if eps <= 0.0:
+            return logg
+        xp = self.xp
+        lo0, hi0 = self._slot0_range(band_sorter)
+        log_range = self._log_dist_range(band_sorter)
+        inside = (slot0_vals >= lo0) & (slot0_vals <= hi0)
+        a = float(np.log1p(-eps)) + xp.clip(logg, -1e300, None)
+        b = xp.where(inside, float(np.log(eps)) - log_range, -np.inf)
+        m = xp.maximum(a, b)
+        m_safe = xp.where(xp.isfinite(m), m, 0.0)
+        out = m_safe + xp.log(xp.exp(a - m_safe) + xp.exp(b - m_safe))
+        return xp.where(xp.isfinite(m), out, -1e300)
+
+    @staticmethod
+    def _replace_ctr_mode() -> str:
+        """Extrinsic-center machinery for the REPLACE move: ``"perrow"``
+        (default) or ``"table"``.
+
+        2026-08-24 candidate-quality root cause (a): the epoch center table
+        pins phi0/iota/psi/ln_A_max by the NEAREST NODE IN F0 ONLY, so the
+        pinned extrinsics belong to that node's own (Mc, sky) argmax — not
+        the drawn (Mc, sky). At the flagship 20.38 mHz band the stored
+        argmax sat at the Mc grid edge with a wrong-hemisphere sky (F 400
+        vs the true 2044), and candidates scored a median match ~0.001.
+
+        ``perrow`` computes the F-stat at the EXACT drawn intrinsics (the
+        :meth:`_fstat_dist_centers` path that was already the no-table
+        fallback), giving the amplitude-maximizing extrinsics for the
+        candidate that is actually scored — the F-stat proposal with
+        phase maximization SHAPING the candidate while the acceptance
+        stays exact-ll of the concrete parameters. The per-round cost is
+        one batched F-stat evaluation per replace round (rows are few:
+        one per sub-band cell). ``GB_REPLACE_CTR_MODE=table`` restores the
+        table pin. Births/deaths are untouched — this knob is read ONLY by
+        :meth:`_run_replace_step`.
+        """
+        mode = os.environ.get("GB_REPLACE_CTR_MODE", "perrow").strip().lower()
+        if mode not in ("perrow", "table"):
+            raise ValueError(
+                f"GB_REPLACE_CTR_MODE must be 'perrow' or 'table', got {mode!r}")
+        return mode
+
+    @staticmethod
+    def _replace_incell_mode() -> str:
+        """Within-cell law of the REPLACE move's intrinsic grid draw:
+        ``"trilinear"`` (default) or ``"uniform"``.
+
+        2026-08-24 candidate-quality root cause (b): the stacked-peak
+        grid's Mc axis has 3 nodes over [0.01, 1.0], so a cell spans ~0.5
+        in Mc and uniform in-cell jitter almost never lands on the thin
+        fdot/sky ridge. ``trilinear`` concentrates the within-cell draw
+        toward the high-F corners of the SAME grid (see
+        ``StackedFStatProposal4D.in_cell``) with the forward and reverse
+        densities evaluated from the same law inside one mode block —
+        detailed balance stays exact. ``GB_REPLACE_INCELL=uniform``
+        restores the historical draw. Read ONLY by
+        :meth:`_run_replace_step`; births/deaths always keep uniform.
+        """
+        mode = os.environ.get("GB_REPLACE_INCELL", "trilinear").strip().lower()
+        if mode not in ("trilinear", "uniform"):
+            raise ValueError(
+                f"GB_REPLACE_INCELL must be 'trilinear' or 'uniform', "
+                f"got {mode!r}")
+        return mode
+
     def _temper_cadence_fire(self) -> bool:
         """Tempering cadence gate (user design 2026-08-14).
 
@@ -6013,13 +6138,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         * intrinsics -- f0, Mc, sky, and fdot_astro_ratio through the
           container's tightened-width ratio component -- drawn from the
           RJ birth container (``band_sorter.rj_prop``; the F-stat grid
-          mixture in search), exactly like a birth;
-        * extrinsics recentered on the F-stat CENTER TABLE at the drawn
-          f0 (:meth:`_fstat_ctr_table_lookup`; per-row F-stat computation
-          when no table is installed): phi0/iota/psi pinned to the stored
-          maximizing values, slot 0 (distance / lnA) drawn from the
-          (SNR-truncated) lognormal about the table center with the
-          smeared width -- the RJ birth code path, reused verbatim.
+          mixture in search), like a birth but with the stacked
+          component's within-cell law switched to TRILINEAR for the
+          duration of this step (:meth:`_replace_incell_mode`,
+          ``GB_REPLACE_INCELL=trilinear`` default) so draws concentrate
+          on the grid's own high-F corners instead of uniform in-cell
+          jitter;
+        * extrinsics from a PER-ROW F-stat at the exact drawn intrinsics
+          (:meth:`_fstat_dist_centers`; the default,
+          ``GB_REPLACE_CTR_MODE=perrow`` — 2026-08-24 candidate-quality
+          fix, see :meth:`_replace_ctr_mode`): phi0/iota/psi pinned to the
+          amplitude-maximizing values FOR THE DRAWN (f0, Mc, sky), slot 0
+          (distance / lnA) drawn from the (SNR-truncated) lognormal about
+          the per-row center, floor-mixed with a small uniform over the
+          container's slot-0 range (:meth:`_replace_slot0_floor_eps`).
+          ``GB_REPLACE_CTR_MODE=table`` restores the epoch center-table
+          pin (:meth:`_fstat_ctr_table_lookup`, nearest node in f0).
 
         SCORING is EXACT: :meth:`SubBandBuffer.get_replace_ll` with
         ``phase_maximize=False`` scores BOTH parameter sets as concrete
@@ -6042,12 +6176,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``+cont.logpdf(old)``, the death-side convention) minus
         ``cont.logpdf(new)``, plus the slot-0 swap corrections
         ``(-log g(new) - log_range)`` and ``(+log g(old) + log_range)``
-        where ``g`` is the (truncated) lognormal about each side's OWN
-        table center -- exactly the birth/death factor pair of
-        :meth:`_run_rj_step` applied to one row. The pinned phi0/iota/psi
-        keep the container's uniform constants on BOTH sides (the
-        established birth/death bookkeeping convention), so those
-        constants cancel in the difference.
+        where ``g`` is the FLOOR-MIXED (truncated) lognormal about each
+        side's OWN per-row center
+        (:meth:`_slot0_log_proposal_floored`) -- the birth/death factor
+        pair of :meth:`_run_rj_step` applied to one row, with the same
+        uniform-floor eps on both sides so the mixture stays exactly the
+        density that was drawn from. The pinned phi0/iota/psi are a
+        deterministic function of each side's intrinsics and keep the
+        container's uniform constants on BOTH sides (the established
+        birth/death bookkeeping convention), so those constants cancel in
+        the difference.
 
         CAP CELLS: a replacement is zero-sum in source count but can
         change the leaf's covering set. Newly-entered cells are gated on
@@ -6089,34 +6227,61 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # Fresh replacement draw (NaN-repair loop mirrors the BandSorter
         # birth pre-draw). ``rj_prop`` is the resolved per-branch container.
+        #
+        # RIDGE-AWARE intrinsics (2026-08-24 root cause (b)): the stacked
+        # peak grid's Mc axis has 3 nodes over the prior box, so uniform
+        # in-cell jitter almost never lands on the thin fdot/sky ridge.
+        # Under GB_REPLACE_INCELL=trilinear (the default) the stacked
+        # component's WITHIN-CELL law switches to the multilinear
+        # interpolant of its own node weights for the duration of this
+        # step -- draw AND both density sides inside the ONE `with` block,
+        # so forward/reverse are evaluated from exactly the density that
+        # was sampled. Cell selection and the per-box normalizers are
+        # unchanged (the multilinear integral over a cell IS the
+        # corner-averaged cell weight), and births/deaths outside this
+        # block keep the uniform in-cell law bit-identically.
         cont = band_sorter.rj_prop
-        params_new = xp.full_like(params_old, np.nan)
-        fix = xp.full(n_prop, True)
-        while bool(xp.any(fix)):
-            params_new[fix] = xp.asarray(cont.rvs(size=int(fix.sum().item())))
-            fix = xp.any(xp.isnan(params_new), axis=-1)
-        params_new[:] = self.periodic.wrap(
-            {self.branch_name: params_new[:, None, :]}, xp=xp
-        )[self.branch_name][:, 0]
+        from ...sampling.fstat_proposal import stacked_in_cell_mode
+        with stacked_in_cell_mode(cont, self._replace_incell_mode()) as _tri:
+            params_new = xp.full_like(params_old, np.nan)
+            fix = xp.full(n_prop, True)
+            while bool(xp.any(fix)):
+                params_new[fix] = xp.asarray(cont.rvs(size=int(fix.sum().item())))
+                fix = xp.any(xp.isnan(params_new), axis=-1)
+            params_new[:] = self.periodic.wrap(
+                {self.branch_name: params_new[:, None, :]}, xp=xp
+            )[self.branch_name][:, 0]
 
-        prev_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(params_old))
-        curr_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(params_new))
+            prev_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(params_old))
+            curr_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(params_new))
 
-        # Cross-band gate (RJ-birth convention; see docstring).
-        f_hz = params_new[:, 1] / 1e3
-        out_of_band = (
-            (f_hz < buffer_obj.frequency_lims[0][slots])
-            | (f_hz > buffer_obj.frequency_lims[1][slots])
-        )
-        curr_logp[out_of_band] = -np.inf
+            # Cross-band gate (RJ-birth convention; see docstring).
+            f_hz = params_new[:, 1] / 1e3
+            out_of_band = (
+                (f_hz < buffer_obj.frequency_lims[0][slots])
+                | (f_hz > buffer_obj.frequency_lims[1][slots])
+            )
+            curr_logp[out_of_band] = -np.inf
 
-        # Proposal factors, existing-machinery convention: death side for
-        # the replaced source is the sorter's precomputed +logpdf
-        # (band_sorter.factors); birth side for the fresh draw is -logpdf.
-        # The slot-0 uniform is swapped for the table lognormal below; the
-        # remaining extrinsic uniform constants appear identically in both
-        # logpdf terms and cancel (the pinned-angle convention).
-        factors = band_sorter.factors[ids] - cp.asarray(cont.logpdf(params_new))
+            # Proposal factors, existing-machinery convention: death side
+            # for the replaced source is +logpdf(old); birth side for the
+            # fresh draw is -logpdf(new). In trilinear mode BOTH sides are
+            # evaluated fresh inside the mode block (the sorter's
+            # precomputed ``factors`` were evaluated under the uniform
+            # in-cell law and would break detailed balance here); in
+            # uniform mode the precomputed death-side value is used
+            # bit-identically as before. The slot-0 uniform is swapped for
+            # the center lognormal below; the remaining extrinsic uniform
+            # constants appear identically in both logpdf terms and cancel
+            # (the pinned-angle convention).
+            if _tri:
+                factors = (
+                    cp.asarray(cont.logpdf(params_old))
+                    - cp.asarray(cont.logpdf(params_new))
+                )
+            else:
+                factors = band_sorter.factors[ids] - cp.asarray(
+                    cont.logpdf(params_new))
 
         keep = ~cp.isinf(curr_logp)
         delta_old = cp.full(n_prop, -1e300)
@@ -6124,15 +6289,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         h_h_new = cp.zeros(n_prop)
 
         if self.rj_fstat_dist_birth and bool(keep.any()):
-            # F-stat CENTER-TABLE extrinsics: _run_rj_step's birth cascade,
-            # table first (epoch mode default), per-row F-stat computation
-            # against the OPEN parent residual as the fallback (the unit
-            # hoist is never precomputed for replace instances -- its cache
-            # is keyed to the rows' PRE-DRAWN coords, not fresh draws).
+            # SELF-CONSISTENT extrinsics (2026-08-24 root cause (a), see
+            # :meth:`_replace_ctr_mode`): the DEFAULT is the per-row F-stat
+            # computation at the exact drawn (f0, Mc, sky) — the pinned
+            # phi0/iota/psi/amplitude-center then maximize the amplitude of
+            # THIS candidate, not of the nearest table node's own argmax.
+            # The epoch table remains available behind
+            # GB_REPLACE_CTR_MODE=table. Detailed balance: the pinned
+            # extrinsics are a DETERMINISTIC function of each side's
+            # intrinsics (and the shared walker-ref residual), evaluated
+            # through the same code path forward and reverse, and the
+            # container's uniform extrinsic constants appear identically in
+            # both logpdf terms of ``factors`` (the established pinned-angle
+            # convention) — so they cancel exactly.
             walker_ref = getattr(self, "_fstat_walker_ref", 0)
             k_idx = xp.arange(n_prop)[keep]
             _log_range = self._log_dist_range(band_sorter)
-            _tbl = self._fstat_ctr_table_active()
+            _tbl = (self._fstat_ctr_table_active()
+                    if self._replace_ctr_mode() == "table" else None)
             # SNR-truncated slot-0 draw, same knob + rule as births
             # (GB_RJ_SNR_TRUNC_DIST): the truncation boundary and its
             # -log Phi(alpha) normalization enter BOTH density sides, so
@@ -6162,6 +6336,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 params_new[k_idx, 0] = xp.exp(ln_draw)
             else:
                 params_new[k_idx, 0] = ln_draw  # slot 0 is lnA already
+            # Slot-0 uniform FLOOR component (root cause (c), see
+            # _replace_slot0_floor_eps): with prob eps the draw comes from
+            # the container's uniform slot-0 range instead of the
+            # lognormal; BOTH density sides below use the same mixture, so
+            # a polished incumbent 6+ sigma off its center pays a bounded
+            # (~log eps) reverse bill instead of -125 / -1e300.
+            _floor_eps = self._replace_slot0_floor_eps()
+            if _floor_eps > 0.0:
+                _lo0, _hi0 = self._slot0_range(band_sorter)
+                _take_floor = (
+                    xp.asarray(cp.random.rand(len(k_idx))) < _floor_eps)
+                _unif = _lo0 + (_hi0 - _lo0) * xp.asarray(
+                    cp.random.rand(len(k_idx)))
+                params_new[k_idx, 0] = xp.where(
+                    _take_floor, _unif, params_new[k_idx, 0])
             # CONCRETE extrinsics from the stored maxima: the candidate is
             # fully specified here and is scored EXACTLY below -- a table
             # phi0 that is off its optimum only lowers acceptance, it can
@@ -6169,8 +6358,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             params_new[k_idx, 4] = xp.cos(iota_max % np.pi)
             params_new[k_idx, 5] = psi_max % np.pi
             params_new[k_idx, 3] = phi0_max % (2 * np.pi)
-            _bl = self._slot0_log_proposal(
-                params_new[k_idx, 0], ln_center, sigma, alpha=alpha_b)
+            _bl = self._slot0_log_proposal_floored(
+                params_new[k_idx, 0], ln_center, sigma, alpha_b,
+                band_sorter, _floor_eps)
             # Reverse side: old's slot-0 density about its OWN table center
             # (death convention; SAME table, SAME truncation rule). The
             # +/- log_range pair cancels but is kept for symmetry with the
@@ -6188,8 +6378,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self._snr_trunc_alpha(ln_snr_d, sigma_d, _snr_lim)
                 if _snr_trunc else None
             )
-            _dl = self._slot0_log_proposal(
-                params_old[k_idx, 0], ln_center_d, sigma_d, alpha=alpha_d)
+            _dl = self._slot0_log_proposal_floored(
+                params_old[k_idx, 0], ln_center_d, sigma_d, alpha_d,
+                band_sorter, _floor_eps)
             factors[k_idx] = factors[k_idx] + (-_bl - _log_range) + (_dl + _log_range)
             # Re-evaluate the global prior at the recentered draw (f0 and
             # the band gate are unchanged by the overwrite).

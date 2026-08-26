@@ -1,6 +1,6 @@
 """GB F-stat REPLACEMENT move (2026-08-24 exact-MH reinstatement).
 
-Covers the three testable-without-a-sampler pieces of
+Covers the testable-without-a-sampler pieces of
 ``GBSpecialBase._run_replace_step``:
 
 * the accept-time covering-set occupancy transition
@@ -15,12 +15,38 @@ Covers the three testable-without-a-sampler pieces of
   the (truncated) density integrates to 1 -- i.e. the density matches the
   draw.
 
+2026-08-24 candidate-quality fixes (root causes a/b/c of the 0/~500
+acceptance forensics):
+
+* knob defaults: replace ships with per-row F-stat extrinsics
+  (``GB_REPLACE_CTR_MODE=perrow``), trilinear in-cell intrinsic draws
+  (``GB_REPLACE_INCELL=trilinear``) and the slot-0 uniform floor
+  (``GB_REPLACE_SLOT0_FLOOR_EPS=0.05``);
+* the FLOOR-MIXED slot-0 density (``_slot0_log_proposal_floored``):
+  normalization, forward/reverse antisymmetry, the bounded (~log eps)
+  reverse bill for a far-off-center incumbent, and eps=0 equivalence
+  with the unfloored density;
+* the TRILINEAR in-cell mode of ``StackedFStatProposal4D``:
+  normalization of ``logpdf`` in both modes, ``rvs``/``logpdf``
+  consistency on a single-cell toy grid (per-axis marginal CDF/mean of
+  the multilinear law), pointwise ``logpdf`` against a brute-force
+  interpolant, and the ``stacked_in_cell_mode`` context (finds the
+  stacked component through the production wrapper chain, restores the
+  mode on exit);
+* the ``fstat_maximized_extrinsics`` psi/phi0 CONVENTION fix: an exact
+  round trip through the calibrated GBGPU forward amplitude map (build
+  ``a`` from known (A, iota, psi, phi0), invert, recover the angles up
+  to the physical (phi0 + pi, psi + pi/2) identity, with A/iota/F
+  exact).
+
 Light fakes in the ``test_gb_cap_cell_grid.py`` style (imported from
 there): everything under test is pure array arithmetic, no built move,
 ACA, or backend needed.
 """
 
+import os
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -284,6 +310,401 @@ class SlotZeroDensityTest(unittest.TestCase):
         pa[:, 0] = -80.0  # far below any center/support
         fwd = self._corr(m, pa, pb, lim=8.0)
         self.assertTrue(np.all(fwd <= -1e299))
+
+
+class _EnvPatch:
+    """Set/unset env vars for one test, restoring on exit."""
+
+    def __init__(self, **kv):
+        self.kv = kv
+
+    def __enter__(self):
+        self.old = {k: os.environ.get(k) for k in self.kv}
+        for k, v in self.kv.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+class ReplaceKnobDefaultsTest(unittest.TestCase):
+    """The 2026-08-24 candidate-quality fixes ship ON by default."""
+
+    def test_ctr_mode_default_is_perrow(self):
+        m = _move(4)
+        with _EnvPatch(GB_REPLACE_CTR_MODE=None):
+            self.assertEqual(m._replace_ctr_mode(), "perrow")
+        with _EnvPatch(GB_REPLACE_CTR_MODE="table"):
+            self.assertEqual(m._replace_ctr_mode(), "table")
+        with _EnvPatch(GB_REPLACE_CTR_MODE="bogus"):
+            with self.assertRaises(ValueError):
+                m._replace_ctr_mode()
+
+    def test_perrow_default_never_consults_the_table(self):
+        # the replace step's table handle is None unless the knob says
+        # "table" -- mirror the exact gating expression it uses.
+        m = _move(4)
+        m._fstat_ctr_table = {"f0_mHz": np.array([5.0])}  # a table EXISTS
+        with _EnvPatch(GB_REPLACE_CTR_MODE=None, GB_FSTAT_CTR_MODE=None):
+            tbl = (m._fstat_ctr_table_active()
+                   if m._replace_ctr_mode() == "table" else None)
+            self.assertIsNone(tbl)
+        with _EnvPatch(GB_REPLACE_CTR_MODE="table", GB_FSTAT_CTR_MODE=None):
+            tbl = (m._fstat_ctr_table_active()
+                   if m._replace_ctr_mode() == "table" else None)
+            self.assertIsNotNone(tbl)
+
+    def test_incell_mode_default_is_trilinear(self):
+        m = _move(4)
+        with _EnvPatch(GB_REPLACE_INCELL=None):
+            self.assertEqual(m._replace_incell_mode(), "trilinear")
+        with _EnvPatch(GB_REPLACE_INCELL="uniform"):
+            self.assertEqual(m._replace_incell_mode(), "uniform")
+        with _EnvPatch(GB_REPLACE_INCELL="bogus"):
+            with self.assertRaises(ValueError):
+                m._replace_incell_mode()
+
+    def test_slot0_floor_eps_default(self):
+        m = _move(4)
+        with _EnvPatch(GB_REPLACE_SLOT0_FLOOR_EPS=None):
+            self.assertAlmostEqual(m._replace_slot0_floor_eps(), 0.05)
+        with _EnvPatch(GB_REPLACE_SLOT0_FLOOR_EPS="0"):
+            self.assertEqual(m._replace_slot0_floor_eps(), 0.0)
+
+
+class SlotZeroFloorMixtureTest(unittest.TestCase):
+    """Fix 3: the floor-mixed slot-0 density (root cause (c)).
+
+    Amp basis (shim has no transform container): slot 0 is lnA, the
+    container's slot-0 prior is U[lo, hi] in lnA. The fake sorter carries
+    that prior so ``_slot0_range`` and ``_log_dist_range`` extract
+    CONSISTENT bounds/width — as they do from the real birth container.
+    """
+
+    LO, HI = -52.0, -40.0
+
+    def _shim(self):
+        m = _move(4)
+        m._log_dist_range_cache = None
+        prior = SimpleNamespace(minimum=self.LO, maximum=self.HI,
+                                width=self.HI - self.LO)
+        sorter = SimpleNamespace(rj_prop=SimpleNamespace(
+            priors=[((0,), prior)]))
+        return m, sorter
+
+    def test_floored_density_normalizes(self):
+        m, sorter = self._shim()
+        lc, sg, eps = -46.0, 0.5, 0.05
+        grid = np.linspace(self.LO - 1.0, self.HI + 1.0, 400001)
+        ones = np.ones_like(grid)
+        for alpha in (0.7, 3.0, 40.0):
+            logg = m._slot0_log_proposal_floored(
+                grid, lc * ones, sg * ones, alpha * ones, sorter, eps)
+            integral = np.trapezoid(np.exp(np.clip(logg, -1e290, None)), grid)
+            self.assertAlmostEqual(float(integral), 1.0, places=3)
+
+    def test_eps_zero_is_the_unfloored_density(self):
+        m, sorter = self._shim()
+        rng = np.random.default_rng(5)
+        v = rng.uniform(self.LO, self.HI, 64)
+        lc = np.full(64, -46.0)
+        sg = np.full(64, 0.5)
+        al = np.full(64, 3.0)
+        a = m._slot0_log_proposal_floored(v, lc, sg, al, sorter, 0.0)
+        b = m._slot0_log_proposal(v, lc, sg, alpha=al)
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_bounded_reverse_bill(self):
+        # a polished incumbent 8 sigma BELOW its center (outside the
+        # truncated support in the amp basis) pays ~log(eps/width), not
+        # -1e300: the p10 ~ -125 / truncation force-reject tax is gone.
+        m, sorter = self._shim()
+        lc, sg, al, eps = np.array([-46.0]), np.array([0.5]), np.array([3.0]), 0.05
+        v = lc - 8.0 * sg  # -50, inside [LO, HI]
+        bare = m._slot0_log_proposal(v, lc, sg, alpha=al)
+        floored = m._slot0_log_proposal_floored(v, lc, sg, al, sorter, eps)
+        self.assertLessEqual(float(bare[0]), -1e299)  # old: force-reject
+        expected_floor = np.log(eps) - np.log(self.HI - self.LO)
+        self.assertAlmostEqual(float(floored[0]), float(expected_floor),
+                               places=6)
+        self.assertGreater(float(floored[0]), -6.0)  # bounded (~-5.5)
+
+    def test_forward_reverse_antisymmetry(self):
+        m, sorter = self._shim()
+        rng = np.random.default_rng(23)
+        n = 64
+        lc_a = rng.uniform(-49.0, -43.0, n)
+        lc_b = rng.uniform(-49.0, -43.0, n)
+        sg = np.full(n, 0.4)
+        al = np.full(n, 5.0)
+        va = lc_a + 0.5 * rng.standard_normal(n)
+        vb = lc_b + 0.5 * rng.standard_normal(n)
+        # swap correction a -> b: (+g(a)) + (-g(b)); reverse negates it
+        ga = m._slot0_log_proposal_floored(va, lc_a, sg, al, sorter, 0.05)
+        gb = m._slot0_log_proposal_floored(vb, lc_b, sg, al, sorter, 0.05)
+        fwd = ga - gb
+        rev = gb - ga
+        self.assertTrue(np.all(np.isfinite(fwd)))
+        np.testing.assert_allclose(fwd + rev, 0.0, atol=1e-12)
+
+
+class TrilinearStackedProposalTest(unittest.TestCase):
+    """Fix 2 (option ii): the trilinear in-cell mode of the stacked grid."""
+
+    @staticmethod
+    def _toy(K=2, seed=0, node_shape=(4, 3, 3, 3)):
+        from lisatools.sampling.fstat_proposal import StackedFStatProposal4D
+
+        rng = np.random.default_rng(seed)
+        grids = rng.normal(0.0, 2.0, (K,) + node_shape)
+        f0_los = 5.0 + np.arange(K) * 1.0          # disjoint f0 boxes
+        f0_dxs = np.full(K, 0.5 / (node_shape[0] - 1))
+        mc_ax = np.linspace(0.1, 1.0, node_shape[1])
+        alpha_ax = np.linspace(0.0, 2.0, node_shape[2])
+        sd_ax = np.linspace(-1.0, 1.0, node_shape[3])
+        return StackedFStatProposal4D(
+            grids, f0_los, f0_dxs, mc_ax, alpha_ax, sd_ax, seed=seed + 1)
+
+    def _mesh_mass(self, dist, n0=30, n3=24):
+        """Midpoint-rule integral of exp(logpdf) over every box."""
+        total = 0.0
+        ax3 = [np.linspace(lo, hi, n3 + 1) for lo, hi in
+               zip(dist._lo3, dist._hi3)]
+        mid3 = [0.5 * (a[:-1] + a[1:]) for a in ax3]
+        d3 = [a[1] - a[0] for a in ax3]
+        for k in range(dist.K):
+            f0e = np.linspace(dist._f0_lo[k], dist._f0_hi[k], n0 + 1)
+            f0m = 0.5 * (f0e[:-1] + f0e[1:])
+            g = np.meshgrid(f0m, *mid3, indexing="ij")
+            pts = np.stack([x.ravel() for x in g], axis=1)
+            lp = np.asarray(dist.logpdf(pts))
+            vol = (f0e[1] - f0e[0]) * np.prod(d3)
+            total += float(np.sum(np.exp(lp)) * vol)
+        return total
+
+    def test_logpdf_normalizes_in_both_modes(self):
+        dist = self._toy()
+        self.assertEqual(dist.in_cell, "uniform")
+        m_uni = self._mesh_mass(dist)
+        dist.in_cell = "trilinear"
+        m_tri = self._mesh_mass(dist)
+        dist.in_cell = "uniform"
+        self.assertAlmostEqual(m_uni, 1.0, delta=0.02)
+        self.assertAlmostEqual(m_tri, 1.0, delta=0.02)
+
+    def test_pointwise_logpdf_matches_bruteforce_interpolant(self):
+        dist = self._toy(K=1, seed=3)
+        dist.in_cell = "trilinear"
+        rng = np.random.default_rng(7)
+        n = 256
+        pts = np.stack([
+            rng.uniform(dist._f0_lo[0], dist._f0_hi[0], n),
+            rng.uniform(dist._lo3[0], dist._hi3[0], n),
+            rng.uniform(dist._lo3[1], dist._hi3[1], n),
+            rng.uniform(dist._lo3[2], dist._hi3[2], n),
+        ], axis=1)
+        lp = np.asarray(dist.logpdf(pts))
+        # brute force: multilinear interp of exp(node grid) / Z
+        g = np.exp(dist._chunks[0]["log_node"][0])
+        lo = np.array([dist._f0_lo[0], *dist._lo3])
+        dx = np.array([dist._f0_dx[0], *dist._dx3])
+        expect = np.empty(n)
+        for r in range(n):
+            u = (pts[r] - lo) / dx
+            i = np.minimum(u.astype(int), np.array(g.shape) - 2)
+            t = u - i
+            val = 0.0
+            for c in range(16):
+                bits = [(c >> b) & 1 for b in range(4)]
+                w = np.prod([t[b] if bits[b] else 1 - t[b] for b in range(4)])
+                val += w * g[i[0] + bits[0], i[1] + bits[1],
+                             i[2] + bits[2], i[3] + bits[3]]
+            expect[r] = np.log(val) - dist._log_norm[0]
+        np.testing.assert_allclose(lp, expect, atol=1e-10)
+        dist.in_cell = "uniform"
+
+    def test_rvs_matches_the_multilinear_law_single_cell(self):
+        # one box, one cell: the in-cell draw IS the multilinear density;
+        # check the per-axis marginal mean and CDF(1/2) against the
+        # analytic linear-marginal values (endpoints = face means).
+        from lisatools.sampling.fstat_proposal import StackedFStatProposal4D
+
+        rng = np.random.default_rng(11)
+        grids = rng.uniform(-1.0, 2.5, (1, 2, 2, 2, 2))
+        dist = StackedFStatProposal4D(
+            grids, [5.0], [1.0], [0.0, 1.0], [0.0, 1.0], [0.0, 1.0], seed=13)
+        dist.in_cell = "trilinear"
+        draws = np.asarray(dist.rvs(size=40000))
+        t = draws.copy()
+        t[:, 0] -= 5.0  # unit cell in every axis
+        w = np.exp(grids[0])
+        for ax in range(4):
+            a = w.mean(axis=tuple(i for i in range(4) if i != ax))
+            lo_face, hi_face = a[0], a[1]
+            mean_th = (lo_face + 2 * hi_face) / (3.0 * (lo_face + hi_face))
+            cdf_half_th = (0.75 * lo_face + 0.25 * hi_face) / (lo_face + hi_face)
+            self.assertAlmostEqual(float(t[:, ax].mean()), mean_th, delta=0.01)
+            self.assertAlmostEqual(float((t[:, ax] < 0.5).mean()),
+                                   cdf_half_th, delta=0.01)
+        dist.in_cell = "uniform"
+
+    def test_uniform_mode_untouched_and_context_restores(self):
+        from lisatools.sampling.fstat_proposal import (
+            iter_stacked_components,
+            stacked_in_cell_mode,
+        )
+
+        dist = self._toy(seed=17)
+        rng = np.random.default_rng(19)
+        pts = np.stack([
+            rng.uniform(dist._f0_lo[0], dist._f0_hi[0], 32),
+            rng.uniform(dist._lo3[0], dist._hi3[0], 32),
+            rng.uniform(dist._lo3[1], dist._hi3[1], 32),
+            rng.uniform(dist._lo3[2], dist._hi3[2], 32),
+        ], axis=1)
+        before = np.asarray(dist.logpdf(pts))
+        with stacked_in_cell_mode(dist, "trilinear") as active:
+            self.assertTrue(active)
+            self.assertEqual(dist.in_cell, "trilinear")
+            inside = np.asarray(dist.logpdf(pts))
+        self.assertEqual(dist.in_cell, "uniform")
+        after = np.asarray(dist.logpdf(pts))
+        np.testing.assert_array_equal(before, after)
+        self.assertTrue(np.any(np.abs(inside - before) > 1e-6))
+        # uniform mode is a no-op context
+        with stacked_in_cell_mode(dist, "uniform") as active:
+            self.assertFalse(active)
+        self.assertEqual(list(iter_stacked_components(dist)), [dist])
+
+    def test_walker_finds_stacked_through_production_chain(self):
+        from lisatools.sampling.fstat_proposal import (
+            UniformFloorMixture,
+            iter_stacked_components,
+            make_gb_rj_birth_container,
+            stacked_in_cell_mode,
+        )
+
+        stacked = self._toy(seed=23)
+        mix = UniformFloorMixture(
+            stacked, [5.0, 0.1, 0.0, -1.0], [6.5, 1.0, 2.0, 1.0], eps=0.05)
+        cont = make_gb_rj_birth_container(
+            mix, A_lims=[7e-26, 1e-19], use_cupy=False,
+            fdot_astro_ratio_max=5.0, dist_lims=[0.001, 40.0],
+            ratio_tight=dict(tobs=7776000.0),
+        )
+        found = list(iter_stacked_components(cont))
+        self.assertEqual(found, [stacked])
+        with stacked_in_cell_mode(cont, "trilinear") as active:
+            self.assertTrue(active)
+            self.assertEqual(stacked.in_cell, "trilinear")
+        self.assertEqual(stacked.in_cell, "uniform")
+
+
+class FstatExtrinsicsConventionTest(unittest.TestCase):
+    """The psi/phi0 convention fix in ``fstat_maximized_extrinsics``.
+
+    Forward map (calibrated 2026-08-24 against GBGPU CPU waveforms on a
+    noise-free truth residual — the harness recovered the FULL truth
+    delta, match 1.0000, only with this map): with ``phi = -phi0`` and
+    ``A+ = A (1 + cos^2 iota)/2``, ``Ax = A cos iota``,
+
+        t1 =  A+ c2psi cphi - Ax s2psi sphi
+        t2 =  A+ s2psi cphi + Ax c2psi sphi
+        t3 = -A+ c2psi sphi - Ax s2psi cphi
+        t4 = -A+ s2psi sphi + Ax c2psi cphi
+        a  = (t1, -t2, t3, -t4)
+
+    The inversion must recover (A, iota, psi, phi0) from ``a`` up to the
+    physical (phi0 + pi, psi + pi/2) identity, with F = a.N/2 exact.
+    """
+
+    @staticmethod
+    def _forward(A, iota, psi, phi0):
+        c = np.cos(iota)
+        Ap = A * (1.0 + c * c) / 2.0
+        Ax = A * c
+        phi = -phi0
+        c2, s2 = np.cos(2 * psi), np.sin(2 * psi)
+        cf, sf = np.cos(phi), np.sin(phi)
+        t1 = Ap * cf * c2 - Ax * sf * s2
+        t2 = Ap * cf * s2 + Ax * sf * c2
+        t3 = -Ap * sf * c2 - Ax * cf * s2
+        t4 = -Ap * sf * s2 + Ax * cf * c2
+        return np.stack([t1, -t2, t3, -t4], axis=-1)
+
+    def test_roundtrip_recovers_the_angles(self):
+        from lisatools.sampling.fstat_proposal import (
+            _TRIU_COLS,
+            _TRIU_ROWS,
+            fstat_maximized_extrinsics,
+        )
+
+        rng = np.random.default_rng(29)
+        n = 256
+        A = rng.uniform(0.5, 2.0, n)
+        iota = np.arccos(rng.uniform(-0.95, 0.95, n))
+        psi = rng.uniform(0.0, np.pi, n)
+        phi0 = rng.uniform(0.0, 2.0 * np.pi, n)
+        a = self._forward(A, iota, psi, phi0)          # (n, 4)
+        # well-conditioned SPD M per row
+        Q = rng.normal(0.0, 0.3, (n, 4, 4))
+        M4 = 3.0 * np.eye(4)[None] + Q @ np.swapaxes(Q, 1, 2)
+        N_arr = np.einsum("nij,nj->ni", M4, a)
+        M_up = np.stack([M4[:, i, j] for i, j in zip(_TRIU_ROWS, _TRIU_COLS)],
+                        axis=1)
+        A_r, phi0_r, iota_r, psi_r, F_r = fstat_maximized_extrinsics(
+            N_arr, M_up)
+        np.testing.assert_allclose(F_r, 0.5 * np.sum(a * N_arr, axis=1),
+                                   rtol=1e-8)
+        np.testing.assert_allclose(A_r, A, rtol=1e-6)
+        np.testing.assert_allclose(np.cos(iota_r), np.cos(iota), atol=1e-6)
+        # angles up to the physical (phi0 + pi, psi + pi/2) identity
+        dpsi = (np.asarray(psi_r) - psi) % np.pi
+        half_flip = np.abs(dpsi - np.pi / 2) < 1e-6
+        same_psi = np.minimum(dpsi, np.pi - dpsi) < 1e-6
+        self.assertTrue(np.all(half_flip | same_psi))
+        dphi = (np.asarray(phi0_r) - phi0) % (2.0 * np.pi)
+        dphi = np.minimum(dphi, 2.0 * np.pi - dphi)   # distance to 0
+        is_pi = np.abs(dphi - np.pi) < 1e-6
+        is_same = dphi < 1e-6
+        # psi half-flip must pair with the phi0 + pi shift; unflipped psi
+        # must pair with unshifted phi0
+        self.assertTrue(np.all(np.where(half_flip, is_pi, is_same)))
+
+    def test_concrete_template_projection_is_lossless(self):
+        # d_h of the reconstructed concrete parameters at the OPTIMAL
+        # amplitude equals 2F exactly: b(A_r, iota_r, psi_r, phi0_r) == a,
+        # so the pinned extrinsics reproduce the ML template bit-for-bit
+        # (the property the replace candidates rely on).
+        rng = np.random.default_rng(31)
+        n = 128
+        A = rng.uniform(0.5, 2.0, n)
+        iota = np.arccos(rng.uniform(-0.95, 0.95, n))
+        psi = rng.uniform(0.0, np.pi, n)
+        phi0 = rng.uniform(0.0, 2.0 * np.pi, n)
+        a = self._forward(A, iota, psi, phi0)
+        from lisatools.sampling.fstat_proposal import (
+            _TRIU_COLS,
+            _TRIU_ROWS,
+            fstat_maximized_extrinsics,
+        )
+        Q = rng.normal(0.0, 0.3, (n, 4, 4))
+        M4 = 3.0 * np.eye(4)[None] + Q @ np.swapaxes(Q, 1, 2)
+        N_arr = np.einsum("nij,nj->ni", M4, a)
+        M_up = np.stack([M4[:, i, j] for i, j in zip(_TRIU_ROWS, _TRIU_COLS)],
+                        axis=1)
+        A_r, phi0_r, iota_r, psi_r, _ = fstat_maximized_extrinsics(N_arr, M_up)
+        b = self._forward(np.asarray(A_r), np.asarray(iota_r),
+                          np.asarray(psi_r), np.asarray(phi0_r))
+        np.testing.assert_allclose(b, a, atol=1e-8)
 
 
 if __name__ == "__main__":

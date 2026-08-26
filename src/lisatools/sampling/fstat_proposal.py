@@ -50,6 +50,7 @@ deepcopy/pickle rule no array module is stored as an attribute.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 from typing import Optional, Tuple
@@ -60,6 +61,8 @@ __all__ = [
     "GridSpec",
     "FStatProposal4D",
     "StackedFStatProposal4D",
+    "iter_stacked_components",
+    "stacked_in_cell_mode",
     "UniformFloorMixture",
     "MixtureProposal",
     "CombIntrinsicProposal",
@@ -257,13 +260,11 @@ def fstat_maximized_extrinsics(N_arr, M_upper, ridge: float = 1e-12):
     ``arccos``) so near-singular / off-peak births return finite maxima instead
     of NaN. Same array module as the inputs.
 
-    TODO (known F-stat adjustment): the F-stat computation needs a slight
-    adjustment (a normalization/scale correction we already know about) before
-    ``A_max`` here is exactly the physical maximized amplitude. It is not yet
-    applied; add it in this one place once finalized so both the FD and WDM
-    paths (which share this routine) inherit it. Until then treat ``A_max`` /
-    ``dist*`` as approximate -- fine as a proposal center, but verify the
-    absolute distance scale after the adjustment lands.
+    2026-08-24: ``A_max`` verified EXACT (ratio 1.000 to the injected
+    amplitude on a noise-free truth residual through the GBGPU CPU basis
+    filters), retiring the old "known adjustment" TODO here; the actual
+    long-standing defect was the psi/phi0 angle convention, fixed below
+    (see the inline calibration note).
     """
     from ..utils.utility import get_array_module
 
@@ -285,21 +286,48 @@ def fstat_maximized_extrinsics(N_arr, M_upper, ridge: float = 1e-12):
     F = 0.5 * xp.sum(N_arr * a, axis=-1)
     a1, a2, a3, a4 = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
 
-    r1 = xp.sqrt((a1 + a4) ** 2 + (a2 - a3) ** 2)
-    r2 = xp.sqrt((a1 - a4) ** 2 + (a2 + a3) ** 2)
-    A_plus = r1 + r2
-    A_cross = r1 - r2
+    # 2026-08-24 psi/phi0 CONVENTION FIX (rj_replace candidate-quality
+    # forensics). Calibrated against the actual GBGPU basis filters on a
+    # noise-free truth residual: the ML amplitude vector ``a`` relates to
+    # the textbook JKS map through ``a = 2 * (t1, -t2, t3, -t4)`` — the
+    # two psi = pi/4 filters carry the OPPOSITE sign to what the legacy
+    # angle formulas assumed. Working the textbook identities through
+    # that basis:
+    #
+    #   r1 = A+ + Ax  = sqrt((a1 - a4)^2 + (a2 + a3)^2)
+    #   r2 = A+ - Ax  = sqrt((a1 + a4)^2 + (a2 - a3)^2)
+    #   alpha = atan2(-(a2 + a3), a1 - a4)
+    #   beta  = atan2(  a2 - a3,  a1 + a4)
+    #
+    # with the GBGPU carrier-sign convention giving
+    # phi0 = -(alpha + beta) / 2 and psi = (alpha - beta) / 4 (the sign
+    # calibrated by concrete-template score: -(...)/2 recovers the FULL
+    # truth delta bit-exactly, +(...)/2 leaves an O(0.6 rad) carrier
+    # error). The branch pair is automatically consistent through the
+    # physical (phi0 + pi, psi + pi/2) identity, and psi may be reduced
+    # mod pi independently (2 psi + 2 pi is the same polarization). ``A_max``,
+    # ``iota_max`` and ``F`` are BIT-IDENTICAL to the legacy formulas
+    # (r1 + r2 and the arccos argument are invariant under the basis
+    # sign; the legacy A_max/iota always verified against truth) — only
+    # psi_max/phi0_max change. The legacy formulas returned a
+    # concrete-template carrier phase off by an O(1)-rad,
+    # source-dependent angle, which cost ``cos(err)`` of every pinned
+    # candidate's <r|h> (root cause of rj_replace's delta shortfall even
+    # at exact intrinsics; verified: corrected pins recover the full
+    # truth delta, match 1.0000).
+    r1 = xp.sqrt((a1 - a4) ** 2 + (a2 + a3) ** 2)
+    r2 = xp.sqrt((a1 + a4) ** 2 + (a2 - a3) ** 2)
+    A_plus = r1 + r2       # = 2 A+  (legacy scale convention retained)
+    A_cross = r1 - r2      # = 2 Ax
     disc = xp.sqrt(xp.clip(A_plus ** 2 - A_cross ** 2, 0.0, None))
 
     A_max = (A_plus + disc) / 2.0
-    psi_max = (0.5 * xp.arctan2(
-        A_plus * a4 - A_cross * a1, -(A_cross * a2 + A_plus * a3))) % np.pi
     iota_max = xp.arccos(
-        xp.clip(-A_cross / xp.clip(A_plus + disc, 1e-300, None), -1.0, 1.0)) % np.pi
-    c = xp.sign(xp.sin(2.0 * psi_max))
-    phi0_max = xp.arctan2(
-        c * (A_plus * a4 - A_cross * a1),
-        -c * (A_cross * a2 + A_plus * a3)) % (2.0 * np.pi)
+        xp.clip(A_cross / xp.clip(A_plus + disc, 1e-300, None), -1.0, 1.0)) % np.pi
+    alpha = xp.arctan2(-(a2 + a3), a1 - a4)
+    beta = xp.arctan2(a2 - a3, a1 + a4)
+    phi0_max = (-(alpha + beta) / 2.0) % (2.0 * np.pi)
+    psi_max = ((alpha - beta) / 4.0) % np.pi
 
     A_max = xp.where(xp.isfinite(A_max), A_max, 0.0)
     F = xp.where(xp.isfinite(F), F, -xp.inf)
@@ -634,9 +662,29 @@ class StackedFStatProposal4D:
     param_names = ("f0", "Mc", "alpha", "sin_delta")
     ndim = 4
 
+    #: In-cell density mode. ``"uniform"`` (default) is the historical
+    #: piecewise-constant density: cells are drawn by corner-averaged
+    #: weight, the position within a cell is uniform. ``"trilinear"``
+    #: keeps the cell selection and per-box normalizer BIT-IDENTICAL and
+    #: replaces only the within-cell law with the multilinear (4-D
+    #: "trilinear") interpolant of the node weights: since the integral
+    #: of a multilinear function over a cell equals the average of its
+    #: 2^4 corner values times the cell volume — exactly the
+    #: corner-averaged cell weight the CDF and ``_log_norm`` already use
+    #: — ``rvs`` and ``logpdf`` remain mutually exact in both modes.
+    #: Motivation (2026-08-24 rj_replace candidate quality, root cause
+    #: (b)): with 3 Mc nodes over the prior box a cell spans ~0.5 in Mc,
+    #: and uniform in-cell jitter almost never lands on the thin
+    #: fdot/sky ridge; the trilinear law concentrates draws toward the
+    #: high-F corner (up to 2x per axis). Flip via
+    #: :func:`stacked_in_cell_mode`, which restores the previous mode on
+    #: exit — the RJ birth machinery keeps the uniform default.
+    in_cell = "uniform"
+
     def __init__(self, logp_grids, f0_los, f0_dxs, mc_ax, alpha_ax,
                  sin_delta_ax, weights=None, seed: Optional[int] = None,
-                 mem_budget_mb: Optional[float] = None):
+                 mem_budget_mb: Optional[float] = None,
+                 keep_nodes: bool = True):
         from ..utils.utility import get_array_module
 
         xp = get_array_module(logp_grids)
@@ -706,7 +754,16 @@ class StackedFStatProposal4D:
             mass = (p.reshape(p.shape[0], -1) * scale[:, None]).ravel()
             cdf = xp.cumsum(mass) + running_mass
             running_mass = float(_host(cdf[-1]))
-            self._chunks.append(dict(k0=k0, k1=k1, log_wcell=log_wcell, cdf=cdf))
+            # ``log_node`` retains the raw node grids for the trilinear
+            # in-cell mode. On numpy/cupy alike the slice-asarray above is
+            # a view into the caller's stack, so keeping it costs no new
+            # allocation — it only pins the stack alive for the container's
+            # lifetime (``keep_nodes=False`` drops it; trilinear then
+            # raises).
+            self._chunks.append(dict(
+                k0=k0, k1=k1, log_wcell=log_wcell, cdf=cdf,
+                log_node=(g if keep_nodes else None),
+            ))
         if not np.isfinite(running_mass) or running_mass <= 0.0:
             raise ValueError(
                 "StackedFStatProposal4D: zero/non-finite total mixture mass "
@@ -789,9 +846,96 @@ class StackedFStatProposal4D:
             out[:, j + 1] = lo3[j] + multi[j + 1] * dx3[j]
         return out, f0_dx
 
+    @staticmethod
+    def _lin_inv_cdf(u, a, b, xp):
+        """Inverse CDF of the linear density ``f(t) ~ a*(1-t) + b*t`` on
+        [0, 1] (endpoint values ``a``, ``b`` >= 0). Degenerate rows
+        (``a + b == 0`` or ``a == b``) reduce to the uniform ``t = u``."""
+        s = a + b
+        d = b - a
+        degen = (s <= 0.0) | (xp.abs(d) <= 1e-12 * xp.maximum(s, 1e-300))
+        disc = xp.clip(a * a + d * s * u, 0.0, None)
+        t = (xp.sqrt(disc) - a) / xp.where(degen, 1.0, d)
+        t = xp.where(degen, u, t)
+        return xp.clip(t, 0.0, 1.0)
+
+    def _corner_cube(self, ch, k_local, multi, xp):
+        """Gather the 2^4 corner node log-weights of the given cells:
+        ``(m,)`` chunk-local box indices + 4-tuple of ``(m,)`` cell
+        multi-indices -> ``(m, 2, 2, 2, 2)``."""
+        g = ch.get("log_node")
+        if g is None:
+            raise RuntimeError(
+                "StackedFStatProposal4D: trilinear in-cell mode requires "
+                "keep_nodes=True (node grids were dropped at construction)."
+            )
+        di = xp.arange(2)
+        m0 = int(k_local.shape[0])
+        idx = [k_local.reshape(m0, 1, 1, 1, 1)]
+        for ax in range(4):
+            sh = [1, 1, 1, 1, 1]
+            sh[ax + 1] = 2
+            idx.append(multi[ax].reshape(m0, 1, 1, 1, 1) + di.reshape(sh))
+        return g[tuple(idx)]
+
+    @staticmethod
+    def _interp_log_cube(cube, tt, xp):
+        """``log`` of the multilinear interpolant of ``exp(cube)`` at the
+        fractional in-cell position ``tt`` (4-tuple of ``(m,)`` in
+        [0, 1]). The interpolation weights are the multilinear basis
+        functions ``prod_ax((1-t_ax) or t_ax)``; rows whose contributing
+        corners are all ``-inf`` return ``-inf``."""
+        m0 = cube.shape[0]
+        logw = xp.zeros_like(cube)
+        with np.errstate(divide="ignore"):
+            for ax, t in enumerate(tt):
+                sh = [m0, 1, 1, 1, 1]
+                sh[ax + 1] = 2
+                logw = logw + xp.log(xp.stack([1.0 - t, t], axis=1).reshape(sh))
+        flat = (cube + logw).reshape(m0, -1)
+        mx = flat.max(axis=1)
+        mx_safe = xp.where(xp.isfinite(mx), mx, 0.0)
+        with np.errstate(invalid="ignore"):
+            out = xp.log(xp.sum(xp.exp(flat - mx_safe[:, None]), axis=1)) + mx_safe
+        return xp.where(xp.isfinite(mx), out, -xp.inf)
+
+    def _in_cell_offsets(self, ch, k_local, cell, u4, xp):
+        """Fractional in-cell positions for :meth:`rvs`.
+
+        Uniform mode passes the 4 uniforms straight through (the
+        historical jitter). Trilinear mode inverse-CDF samples the
+        multilinear in-cell density one axis at a time: the marginal of a
+        multilinear function along an axis is LINEAR (endpoints = the
+        means of the corner values on each face), so each conditional is
+        an exact linear-density inverse CDF; after each axis the cube is
+        collapsed at the drawn ``t``. Exactly the same 4 uniforms per row
+        are consumed as in uniform mode. Rows with no finite corner fall
+        back to uniform."""
+        if self.in_cell != "trilinear":
+            return u4
+        multi = xp.unravel_index(cell, self._cell_shape)
+        cube = self._corner_cube(ch, k_local, multi, xp)
+        m0 = cube.shape[0]
+        mx = cube.reshape(m0, -1).max(axis=1)
+        ok = xp.isfinite(mx)
+        w = xp.exp(cube - xp.where(ok, mx, 0.0).reshape(m0, 1, 1, 1, 1))
+        out = xp.empty_like(u4)
+        cur = w
+        for ax in range(4):
+            a = cur[:, 0].reshape(m0, -1).mean(axis=1)
+            b = cur[:, 1].reshape(m0, -1).mean(axis=1)
+            t = self._lin_inv_cdf(u4[:, ax], a, b, xp)
+            out[:, ax] = t
+            if ax < 3:
+                sh = (m0,) + (1,) * (cur.ndim - 2)
+                cur = cur[:, 0] * (1.0 - t).reshape(sh) + cur[:, 1] * t.reshape(sh)
+        return xp.where(ok[:, None], out, u4)
+
     def rvs(self, size=1):
-        """Exact draws from the stacked piecewise-constant mixture; returns
-        ``size + (4,)`` in ``(f0 [mHz], Mc, alpha, sin_delta)``."""
+        """Exact draws from the stacked mixture; returns ``size + (4,)`` in
+        ``(f0 [mHz], Mc, alpha, sin_delta)``. Cell selection is always by
+        the corner-averaged cell weights; the within-cell law follows
+        ``self.in_cell`` (see the class attribute)."""
         xp = self.xp
         if isinstance(size, int):
             size = (size,)
@@ -814,7 +958,7 @@ class StackedFStatProposal4D:
             _kkh = kk.get() if hasattr(kk, "get") else np.asarray(kk)
             np.add.at(self._draw_counts, _kkh.astype(np.int64), 1)
             corners, f0_dx = self._corners_from_cells(kk, cell, xp)
-            j = xp.asarray(jit[m])
+            j = self._in_cell_offsets(ch, k_local, cell, xp.asarray(jit[m]), xp)
             corners[:, 0] += j[:, 0] * f0_dx
             corners[:, 1:] += j[:, 1:] * xp.asarray(self._dx3)[None, :]
             out[xp.asarray(np.where(m)[0])] = corners
@@ -867,6 +1011,9 @@ class StackedFStatProposal4D:
         idx3 = xp.floor((x[:, 1:] - lo3[None, :]) / dx3[None, :]).astype(xp.int64)
         idx3 = xp.clip(idx3, 0, xp.asarray(
             np.array(self._cell_shape[1:]) - 1)[None, :])
+        # fractional in-cell positions (trilinear mode; exact 1.0 at the
+        # top edge where the index clip pinned the cell)
+        t3 = xp.clip((x[:, 1:] - lo3[None, :]) / dx3[None, :] - idx3, 0.0, 1.0)
 
         D = self._overlap_depth
         j = xp.searchsorted(xp.asarray(self._lo_sorted), f0, side="right")
@@ -880,6 +1027,9 @@ class StackedFStatProposal4D:
         i0 = xp.floor((f0[:, None] - f0_lo_k)
                       / xp.asarray(self._f0_dx)[kk]).astype(xp.int64)
         i0 = xp.clip(i0, 0, self._cell_shape[0] - 1)
+        t0 = xp.clip(
+            (f0[:, None] - f0_lo_k) / xp.asarray(self._f0_dx)[kk] - i0,
+            0.0, 1.0)
 
         lp = xp.full((n, D), -xp.inf, dtype=xp.float64)
         log_w = xp.asarray(np.log(np.clip(self.weights, 1e-300, None)))
@@ -890,10 +1040,20 @@ class StackedFStatProposal4D:
                 continue
             rows, cols = xp.where(sel)
             k_sel = kk[rows, cols]
-            g = ch["log_wcell"][
-                k_sel - ch["k0"], i0[rows, cols],
-                idx3[rows, 0], idx3[rows, 1], idx3[rows, 2],
-            ]
+            if self.in_cell == "trilinear":
+                cube = self._corner_cube(
+                    ch, k_sel - ch["k0"],
+                    (i0[rows, cols], idx3[rows, 0], idx3[rows, 1],
+                     idx3[rows, 2]), xp)
+                g = self._interp_log_cube(
+                    cube,
+                    (t0[rows, cols], t3[rows, 0], t3[rows, 1], t3[rows, 2]),
+                    xp)
+            else:
+                g = ch["log_wcell"][
+                    k_sel - ch["k0"], i0[rows, cols],
+                    idx3[rows, 0], idx3[rows, 1], idx3[rows, 2],
+                ]
             lp[rows, cols] = g + log_w[k_sel] - log_norm[k_sel]
 
         m = xp.max(lp, axis=1)
@@ -902,6 +1062,68 @@ class StackedFStatProposal4D:
             out = xp.log(xp.sum(xp.exp(lp - m_safe[:, None]), axis=1)) + m_safe
         out = xp.where(xp.isfinite(m), out, -xp.inf)
         return xp.where(inside3, out, -xp.inf)
+
+
+def iter_stacked_components(dist, _seen=None):
+    """Yield every :class:`StackedFStatProposal4D` reachable inside a
+    proposal wrapper chain.
+
+    Walks the containers the RJ birth assembly actually builds
+    (:func:`make_gb_rj_birth_container` /
+    ``fstat_gridfit.build_gb_birth_distribution``):
+    ``RatioTightenedBirth.base`` -> eryn ``ProbDistContainer.priors_in``
+    values -> ``UniformFloorMixture.base`` ->
+    ``MixtureProposal.components`` -> stacked. Purely attribute-duck-typed
+    (``base`` / ``components`` / ``priors_in`` / ``priors``), cycle-safe.
+    """
+    if _seen is None:
+        _seen = set()
+    if dist is None or id(dist) in _seen:
+        return
+    _seen.add(id(dist))
+    if isinstance(dist, StackedFStatProposal4D):
+        yield dist
+        return
+    for child in getattr(dist, "components", None) or []:
+        yield from iter_stacked_components(child, _seen)
+    base = getattr(dist, "base", None)
+    if base is not None:
+        yield from iter_stacked_components(base, _seen)
+    priors_in = getattr(dist, "priors_in", None)
+    if isinstance(priors_in, dict):
+        for child in priors_in.values():
+            yield from iter_stacked_components(child, _seen)
+    priors = getattr(dist, "priors", None)
+    if isinstance(priors, (list, tuple)):
+        for item in priors:
+            child = item[1] if isinstance(item, (list, tuple)) and len(item) == 2 else item
+            yield from iter_stacked_components(child, _seen)
+
+
+@contextlib.contextmanager
+def stacked_in_cell_mode(dist, mode: str):
+    """Temporarily set the in-cell density mode of every stacked component
+    inside ``dist``; restores the previous modes on exit (exception-safe).
+
+    Yields ``True`` when ``mode == "trilinear"`` AND at least one stacked
+    component was found — i.e. the trilinear density is actually in force
+    for both ``rvs`` and ``logpdf`` — so the caller can keep its
+    forward/reverse density bookkeeping consistent with what was drawn
+    (the rj_replace usage: draw AND both logpdf sides inside ONE ``with``
+    block). ``mode == "uniform"`` is a no-op that yields ``False``.
+    """
+    if mode not in ("uniform", "trilinear"):
+        raise ValueError(
+            f"in_cell mode must be 'uniform' or 'trilinear', got {mode!r}")
+    stacked = list(iter_stacked_components(dist)) if mode == "trilinear" else []
+    old = [s.in_cell for s in stacked]
+    try:
+        for s in stacked:
+            s.in_cell = mode
+        yield bool(stacked)
+    finally:
+        for s, o in zip(stacked, old):
+            s.in_cell = o
 
 
 class UniformFloorMixture:
