@@ -989,7 +989,13 @@ export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explic
 # FROM the cached stage-B grids and are not persisted in them, so a restart
 # picks this up against the existing epoch cache.
 # alpha=1 restores the previous behaviour bit-identically.
-export FSTAT_PEAK_WEIGHT_ALPHA=0.5
+# 2026-08-26 USER REVERT (single-source probe): back to the code default
+# alpha=1 (w ~ SNR^2). The faint-tail starvation measured above is a
+# FULL-BAND phenomenon -- this probe has ONE detectable source, and the
+# square tilt just concentrates draws on the truth-side boxes (F~2000)
+# over the ridge boxes (F~1122), which is what we want here. The 0.5
+# finding STANDS for full-band runs (v7/dense keep it).
+export FSTAT_PEAK_WEIGHT_ALPHA=1.0
 # HIERARCHICAL BIRTH DRAW (v3): pick a CAP CELL uniformly, then draw within
 # it with w ~ F**alpha. Unset, this tracks GB_CAP_DIVISOR; pinned here so
 # the draw grid is explicit and can be decoupled from the cap grid later.
