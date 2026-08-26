@@ -881,7 +881,11 @@ export GB_WDM_BAND_SLAB_LAYERS=5
 # this knob was NOT exercised in the smokes (they ran the uniform
 # placeholder); detailed balance holds either way -- births still draw
 # dist from the birth container and the prior enters through logp.
-export GB_USE_GALAXY_PRIOR=1
+# OFF for now (user, 2026-08-24): the Robbie-derived 3-D galaxy prior is
+# disabled for the 6-month test -- uniform placeholder prior instead.
+# (The galfor TIME MODULATION from the same work is separately off:
+# GALFOR_MODULATION_PATH is unset, which is the stationary default.)
+export GB_USE_GALAXY_PRIOR=0
 
 # ---- NOISE (psd + galfor) internal repeats: 50 -> 10 (user ruling
 #      2026-08-15) ---------------------------------------------------------

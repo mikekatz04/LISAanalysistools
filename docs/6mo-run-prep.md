@@ -130,6 +130,18 @@ cadence. (Also: the n_live>0 restore/re-subtract round-trip has never
 run at production scale.)
 Trade-off accepted: the grid keeps peaks for already-recovered loud GBs
 (births there are MH-rejected / at-cap).
+**BOTH FIXED 2026-08-24 (implemented, UNCOMMITTED — user examining
+later):** cadence now runs on the shared per-branch propose census
+(search+pe pool hits) journaled to `<fstat_root>/clock.json` every 10
+ticks, last-fit mark carried in the epoch DONE.json `clock` key
+(pre-clock manifests read 0 → existing stores refit within one window
+of deploying); the center-table sweep + its scorer build now run INSIDE
+the GB-free window, load path untouched. At `GB_FSTAT_REFIT_EVERY=50`:
+refit ~every 20 gb_search its / ~150 randomized full_pe its. Tests:
+`tests/test_fstat_gridfit.py` 51/51 (8 new: budget-survives-restart,
+hit pooling, journal throttle, legacy manifest, sweep-inside-window,
+load-path-clean); move-level `test_rj_flip_fraction` 28/28. All Python,
+no rebuild.
 
 ### A3 [B] Branch scope — RULED 2026-08-24: sources go IN
 MBHB/SOBHB/EMRI are in scope for the 6-mo run, gated on the source-merge
@@ -208,23 +220,44 @@ Prototype: 10/10 synthetic sources incl. p=0.10 and a 2.5/Tobs blend;
 
 ### B-TODOs (build order)
 
-1. **[B] Real-data extractor**: previous-run h5 → the (rows × 9,
-   sample_id) leaf table (cold chain, last-K iteration window, all
-   walkers). Read `global_fit/chain/gb` + `inds` directly (h5py or
-   `GFHDFBackend`); no waveforms, no curr_info needed. Input
-   availability resolved below (B-data): unzip the local full stores.
-2. **[B] v1 refinements** flagged in the design note: satellite-fragment
-   merge pass, circular phi0/psi in the fitted component, covariance
-   eigenvalue floors.
-3. **[B] Components → proposal object**: npz schema (means, covs, p,
-   mult, n) + an f0-windowed Gaussian-mixture proposal with exact
-   rvs/logpdf (same plumbing shape as `StackedFStatProposal4D`;
-   `fit_gb_gmm_rj_container`/`FullGaussianMixtureModel` are the
-   ready-made container layer — reuse, don't rewrite), wired via the
-   `rj_birth_distribution` hook; mixture weight vs the F-stat proposal
-   (`GB_WARM_START_COMPONENTS` / `GB_WARM_START_WEIGHT` — the commented
-   block already sits in the 6-mo script). Clustering stage stays a
-   swappable strategy (user ruling).
+1. **[B] Real-data extractor — DONE 2026-08-24** (with item 2's
+   refinements): `scripts/gb/warmstart_fit_from_store.py` (untracked),
+   first real-data pass on the v5 store: 266,781 rows / 480 samples →
+   2790 components in ~19 s at 0.26 GB RSS, p-accounting closes
+   (Σ p·mult ≈ leaves/walker), flagship = one p=1.00 component, v5-vs-v6
+   mult structure matches the runs' known leaf behavior. TRAPS learned:
+   local zips are the Aug-22 snapshots (v5 store holds only 50 its —
+   refit on the FINAL stores before launch); **last-K windowing is
+   essential** (full-window growth phase dilutes p to zero >0.9);
+   chain is 6-D cold-only `[it,1,1,24,10000,9]`, f0 column in mHz;
+   cov floors fire on the frozen-transient tail by design.
+2. **[B] v1 refinements — DONE 2026-08-24** (inside the extractor):
+   satellite-fragment merge (whitened union-find), circular
+   phi0/psi/alpha (wrapped means; logpdf consumer must wrap too),
+   covariance diag + eigenvalue floors.
+   Open B3 policy rulings for the user: (a) **mult policy** — a high-p
+   component with mult≈1.5–2 means the posterior holds ~2 leaves there
+   (propose 2 births, or split upstream?); (b) cross-Tobs f0-window
+   recheck against the new 1/Tobs (v1 proposes at stored widths).
+3. **[B] Components → proposal object — DONE 2026-08-24** (user ruling:
+   the warm-start proposal is its own RJ birth move in the gb_search
+   cycle, ordered BEFORE the F-stat move).
+   `sampling/warmstart_proposal.py` (`WarmStartComponents.from_npz`,
+   453 lines): f0-windowed Gaussian mixture, weights ∝ p, exact
+   rvs/logpdf (windowing is a search structure — ≡ full mixture to
+   machine precision), circular wrap, uniform floor (the BandSorter
+   death-factor NaN guard), cross-Tobs window re-derivation, pickle
+   safe. Wiring: stock move **`rj_warm_search`** = existing
+   `GBSpecialRJPriorMove` with the container (no phase-max, no swaps,
+   caps stay on rj_fstat_search), built in `recipe.build_gb_moves` when
+   `GB_WARM_START_COMPONENTS` is set, inserted immediately before
+   `rj_fstat_search` in both gb_search compositions of
+   `run_combined_staged.py`; knob unset → bit-identical runs. full_pe
+   deliberately left out (ruling names search). Tests:
+   `tests/test_warmstart_proposal.py` 16/16 + regressions
+   (fstat_gridfit 51/51, fstat_proposal 25/25, stock_globalfit 90/90).
+   PROVISIONAL: mult ignored for weighting (diagnostic only) —
+   pending the mult-policy ruling. UNCOMMITTED.
 4. **[B] Cross-Tobs policy** (design note): propose at previous-run
    widths (wider = safer for MH), f0 windows re-checked against the new
    1/Tobs. No Fisher re-scaling in v1.
