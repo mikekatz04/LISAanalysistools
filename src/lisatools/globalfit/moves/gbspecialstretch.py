@@ -1277,9 +1277,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"[0, 0.5) -- at 0.5 the exclusive core vanishes and a leaf "
                 f"could cover 3+ cells; got {_p_overlap}."
             )
-        # Meaningless at K == 1 (the cap grid IS the band grid), forced off
-        # there exactly like cap_stagger.
-        self.cap_overlap_frac = _p_overlap if self.cap_divisor > 1 else 0.0
+        # Overlap is meaningful at K == 1 too (user config 2026-08-26:
+        # cap cells LINED UP with the sub-bands, spans widened by p across
+        # the seams) -- the cap grid IS the band grid but every cell
+        # polices p into each neighbour, so seam formation control and the
+        # drift gate stay active. Only cap_stagger is K>1-only.
+        self.cap_overlap_frac = _p_overlap
         self._cap_edge_ext = None
         if self.cap_overlap_frac > 0.0:
             # Per-EDGE half-extension x_i (see make_cap_edge_extensions:
@@ -10181,11 +10184,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``has_neighbour`` is True.
         """
         primary = self._cap_cell_index(band_inds, freqs_hz)
-        if (
-            self.cap_overlap_frac <= 0.0
-            or self.cap_divisor == 1
-            or freqs_hz is None
-        ):
+        # NOTE divisor 1 is a live overlap configuration since 2026-08-26
+        # (cells = bands, widened spans): only overlap-off or missing f0
+        # short-circuits here.
+        if self.cap_overlap_frac <= 0.0 or freqs_hz is None:
             return primary, None, None
         xp = get_array_module(primary)
         e_lo = self.cap_edges[primary]
@@ -10207,7 +10209,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         arrays, same strict/non-strict comparisons).
         """
         primary = self._np_cap_cells(f0_hz, band, be)
-        if self.cap_overlap_frac <= 0.0 or self.cap_divisor == 1:
+        if self.cap_overlap_frac <= 0.0:
             return primary, None, None
         ce = _to_numpy(self.cap_edges)
         ext = _to_numpy(self._cap_edge_ext)
@@ -10251,7 +10253,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         if not getattr(self, "cap_drift_gate", False):
             return None
-        if self.cap_divisor == 1 or self._f0_col is None:
+        # At divisor 1 WITHOUT overlap cell identity cannot change with f0
+        # (cells = bands, in-model stays in its band window) -- nothing to
+        # police. WITH overlap (2026-08-26 config) covering sets DO change
+        # across the widened seams, so the gate stays armed.
+        if (
+            (self.cap_divisor == 1
+             and float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) <= 0.0)
+            or self._f0_col is None
+        ):
             return None
         cap_host = getattr(self, "_cap_leaf_cap", None)
         if cap_host is None:
@@ -10354,13 +10364,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ones = xp.ones(n_p.shape, dtype=bool)
         pairs = ((n_p, ones),) if n_nb is None else ((n_p, ones), (n_nb, n_hn))
         veto = xp.zeros(n_p.shape, dtype=bool)
+        # IN-MODEL HEADROOM (user ruling 2026-08-26): fixed-dimension f0
+        # moves (in-model repeats + the replacement move -- the two callers
+        # of this veto) may enter a foreign cell up to
+        # GB_CAP_INMODEL_HEADROOM (default 2) leaves OVER its cap, so
+        # sources can relocate across the cap barrier even at the highest
+        # cap; the surplus occupants count in every census and RJ birth
+        # gates stay strict (they use the at-cap masks, not this veto).
+        # Effective in-model cap = rj cap + headroom. =0 restores the
+        # strict destination gate.
+        _h = int(os.environ.get("GB_CAP_INMODEL_HEADROOM", "2") or 0)
         for _cell, _memb in pairs:
             _foreign = (
                 _memb & (_cell != c_p) & (~c_hn | (_cell != c_nb))
             )
             _flat = self._cap_flat_index(temp_inds, walker_inds, _cell)
             veto = veto | (
-                _foreign & (cap[_cell] >= 0) & (counts[_flat] >= cap[_cell])
+                _foreign & (cap[_cell] >= 0)
+                & (counts[_flat] >= cap[_cell] + _h)
             )
         return veto
 
@@ -10904,7 +10925,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         bi = new_state.sub_states[self.branch_name].band_info
         cap, iters, best = self._cap_state_arrays(bi)
-        is_cells = self.cap_divisor > 1
+        # The CELL statistic drives the gate whenever the cap-cell
+        # machinery is live: divisor > 1, OR divisor 1 with overlap
+        # (2026-08-26 aligned-cells config -- there the band residual
+        # windows can be empty on sub-layer band grids while the
+        # source-attributed cell statistic stays defined).
+        is_cells = (
+            self.cap_divisor > 1
+            or float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) > 0.0
+        )
 
         # The per-band residual lls are computed and stored EVERY step
         # regardless of which grid drives the caps: they are the monitor's
@@ -10920,9 +10949,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if ("cap_cell_cold_ll" in bi
                     and bi["cap_cell_cold_ll"].shape == lls.shape):
                 bi["cap_cell_cold_ll"][:] = lls
+            if (self.cap_divisor == 1 and "band_cold_ll" in bi
+                    and bi["band_cold_ll"].shape == lls.shape):
+                # divisor 1: cells == bands and there is no cap_cell_cold_ll
+                # storage -- record WHAT THE GATE READ in band_cold_ll
+                # (overwriting the residual-window series written above,
+                # which is empty/degenerate on sub-layer band grids).
+                bi["band_cold_ll"][:] = lls
         else:
             lls, dof = band_lls, self._band_dof
         cur_max = lls.max(axis=0)
+        _occ_max = None
 
         if self.leaf_cap_ll_improve:
             # Coarse likelihood-based gate: a band's cap holds while the
@@ -11008,9 +11045,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # post-restart update).
             if not _skip_guard:
                 _tol = float(os.environ.get("GB_LEAF_CAP_ENGAGE_TOL", "0.1"))
-                _occ_any = _to_numpy(
+                _occ_max = _to_numpy(
                     self._cold_occupancy(band_counts, new_state)
-                ).max(axis=0) > 0
+                ).max(axis=0)
+                _occ_any = _occ_max > 0
                 _prev = getattr(self, "_cap_ll_prev_stat", None)
                 if _prev is None or _prev.shape != cur_max.shape:
                     changed = _occ_any.copy()
@@ -11031,6 +11069,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # schedule.
                 iters[~improved & _seen & _occ_any] += 1
                 converged = iters >= self.leaf_cap_min_iters
+                # OCCUPANCY-AT-CAP increment condition (user-approved
+                # 2026-08-26): a cap only rises when its allowance is
+                # actually USED -- some cold walker holds >= cap leaves in
+                # the cell. Without this, any engaged converged cell
+                # ratchets +1 every min_iters forever (the late-run
+                # runaway: in production, cells whose source converged
+                # early would reach nleaves_max long before the run ends).
+                # Armed cells only (cap >= 1; -1 = disarmed sentinel).
+                converged &= (cap >= 1) & (_occ_max >= cap)
         elif self.leaf_cap_iter_only:
             best[:] = np.maximum(best, cur_max)
             iters += 1
@@ -11058,7 +11105,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # band below what it can hold today and is explicitly not what was
         # asked for.
         nleaves_max = self._work_branch(new_state).shape[2]
-        converged &= cap < nleaves_max
+        # Per-cell ceiling: nleaves_max by default; GB_CAP_CELL_MAX (>0)
+        # lowers it -- belt against any residual ratchet (no physical cap
+        # cell needs anywhere near the branch-wide leaf budget).
+        _cell_max = int(os.environ.get("GB_CAP_CELL_MAX", "0") or 0)
+        _ceiling = nleaves_max if _cell_max <= 0 else min(
+            nleaves_max, _cell_max)
+        converged &= cap < _ceiling
 
         _unit = "cap cells" if self.cap_divisor > 1 else "bands"
         if np.any(converged):
@@ -11072,6 +11125,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"{int(cap[inc].min())}-{int(cap[inc].max())}."
             )
         self._mirror_band_leaf_cap(bi)
+        # Publish the RAMP-PENDING count for the search-stage convergence
+        # veto (recipe.RJRecipeStep.stopping_function reads it off the
+        # move): cells actively counting toward a REAL increment -- armed,
+        # mid patience window, allowance in use, below ceiling. Evaluated
+        # on the POST-increment state, so a cell that just incremented
+        # (iters reset to 0) is not pending.
+        if _occ_max is not None:
+            self._cap_ramp_pending = int(np.sum(
+                (cap >= 1) & (iters > 0) & (_occ_max >= cap)
+                & (cap < _ceiling)
+            ))
+        else:
+            self._cap_ramp_pending = 0
         # The old tail read "at min-iters gate: {(iters < min_iters).sum()}",
         # which is TAUTOLOGICAL -- it is logged after ``iters[converged] = 0``,
         # and every non-converged cell is below the gate by definition, so it
@@ -11275,14 +11341,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # decision reads ``_cap_leaf_cap``.
             self._band_leaf_cap = bi["band_leaf_cap"]
             self._mirror_band_leaf_cap(bi)
-        elif self._leaf_cap_enabled and self.cap_divisor > 1:
+        elif self._leaf_cap_enabled and (
+            self.cap_divisor > 1
+            or float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) > 0.0
+        ):
             # READ-ONLY cap reference for non-RJ moves: they never arm or
             # advance caps (the RJ branch above owns that), but their
             # in-model repeats move f0 and must respect the same occupancy
             # constraint through the CAP DRIFT GATE. Reference only -- no
-            # arming, no mirroring, no counter updates here.
+            # arming, no mirroring, no counter updates here. At divisor 1
+            # (+overlap) the band arrays ARE the cell arrays.
             bi = state.sub_states[self.branch_name].band_info
-            if bi.get("cap_cell_leaf_cap") is not None:
+            if self.cap_divisor == 1:
+                if bi.get("band_leaf_cap") is not None:
+                    self._cap_leaf_cap = bi["band_leaf_cap"]
+            elif bi.get("cap_cell_leaf_cap") is not None:
                 self._cap_leaf_cap = bi["cap_cell_leaf_cap"]
 
         # Run any move-specific setup.

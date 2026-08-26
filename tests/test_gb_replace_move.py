@@ -140,7 +140,24 @@ class CoveringTransitionScatterTest(unittest.TestCase):
 
 
 class NewEntryVetoTest(unittest.TestCase):
-    """Destination headroom: foreign at-cap cells veto; own cells never."""
+    """Destination headroom: foreign at-cap cells veto; own cells never.
+
+    These tests exercise the STRICT (headroom 0) destination gate. Since
+    2026-08-26 the DEFAULT is GB_CAP_INMODEL_HEADROOM=2 (in-model/replace
+    moves may enter a foreign cell up to cap+2 — user ruling; see
+    EntryVetoHeadroomTest in test_gb_cap_cell_grid.py), so the strict
+    semantics are pinned via the knob here.
+    """
+
+    def setUp(self):
+        self._old_headroom = os.environ.get("GB_CAP_INMODEL_HEADROOM")
+        os.environ["GB_CAP_INMODEL_HEADROOM"] = "0"
+
+    def tearDown(self):
+        if self._old_headroom is None:
+            os.environ.pop("GB_CAP_INMODEL_HEADROOM", None)
+        else:
+            os.environ["GB_CAP_INMODEL_HEADROOM"] = self._old_headroom
 
     def _veto(self, m, counts, cap, band, f_cur, f_new):
         band = np.asarray(band, dtype=np.int64)

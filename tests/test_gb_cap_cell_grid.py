@@ -779,7 +779,10 @@ def _move_overlap(cap_divisor, overlap, stagger=False, ntemps=1, nwalkers=1,
     m.cap_edges = np.asarray(
         make_cap_edges(be, m.cap_divisor, stagger=m.cap_stagger)
     )
-    m.cap_overlap_frac = float(overlap) if m.cap_divisor > 1 else 0.0
+    # 2026-08-26 user config: overlap is meaningful at divisor 1 too (cap
+    # cells = sub-bands, spans widened across the seams), mirroring the
+    # ctor rule.
+    m.cap_overlap_frac = float(overlap)
     m._cap_edge_ext = None
     if m.cap_overlap_frac > 0.0:
         m._cap_edge_ext = make_cap_edge_extensions(
@@ -1436,3 +1439,236 @@ class DeathCaptureHarvestTest(unittest.TestCase):
         self.assertEqual(m._sorter_dh[1], 7.0)
         np.testing.assert_allclose(m._sorter_dh[2], 10.0)
         np.testing.assert_allclose(m._sorter_hh[2], 9.0)
+
+
+class Divisor1OverlapTest(unittest.TestCase):
+    """User config 2026-08-26: cap cells LINED UP with the sub-bands
+    (divisor 1) but with 1/4 overlap — spans widen across the band seams,
+    multi-membership and the drift gate stay active."""
+
+    def test_extensions_at_divisor_one(self):
+        ce = make_cap_edges(BAND_EDGES, 1)
+        x = make_cap_edge_extensions(BAND_EDGES, ce, 1, 0.25)
+        width = BAND_EDGES[1] - BAND_EDGES[0]
+        np.testing.assert_allclose(x[1:-1], width / 6.0, rtol=1e-12)
+        self.assertEqual(float(x[0]), 0.0)
+        self.assertEqual(float(x[-1]), 0.0)
+
+    def test_members_cross_band_seam(self):
+        m = _move_overlap(1, 0.25)
+        width = BAND_EDGES[1] - BAND_EDGES[0]
+        x = width / 6.0
+        # one leaf just above the band-0/1 seam (inside cell 0's upper
+        # overlap zone), one in band 1's core
+        f0 = np.array([BAND_EDGES[1] + 0.5 * x, BAND_EDGES[1] + 0.5 * width])
+        band = np.array([1, 1])
+        p, nb, has = m._cap_cell_members(band, f0)
+        np.testing.assert_array_equal(p, [1, 1])
+        self.assertIsNotNone(nb)
+        self.assertTrue(bool(has[0]))
+        self.assertEqual(int(nb[0]), 0)
+        self.assertFalse(bool(has[1]))
+        # numpy twin agrees
+        p2, nb2, has2 = m._np_cap_members(f0, band, BAND_EDGES)
+        np.testing.assert_array_equal(p, p2)
+        np.testing.assert_array_equal(has, has2)
+        np.testing.assert_array_equal(nb, nb2)
+
+    def test_drift_gate_setup_active(self):
+        m = _move_overlap(1, 0.25)
+        m.cap_drift_gate = True
+        m._f0_col = 1
+        m._cap_leaf_cap = np.ones(m.num_cap_cells, dtype=int)
+        m._cap_cell_counts = lambda bs, *a, **k: (
+            None, np.zeros(m.ntemps * m.nwalkers * m.num_cap_cells,
+                           dtype=np.int32))
+        out = m._cap_drift_gate_setup(SimpleNamespace())
+        self.assertIsNotNone(out)
+
+    def test_no_overlap_divisor_one_stays_off(self):
+        m = _move_overlap(1, 0.0)
+        p, nb, has = m._cap_cell_members(
+            np.array([1]), np.array([BAND_EDGES[1] + 1e-6]))
+        self.assertIsNone(nb)
+        m.cap_drift_gate = True
+        m._f0_col = 1
+        m._cap_leaf_cap = np.ones(m.num_cap_cells, dtype=int)
+        self.assertIsNone(m._cap_drift_gate_setup(SimpleNamespace()))
+
+
+class EntryVetoHeadroomTest(unittest.TestCase):
+    """User ruling 2026-08-26: in-model / replace f0 moves may enter a
+    foreign cell up to GB_CAP_INMODEL_HEADROOM (default 2) OVER its cap;
+    RJ birth gates stay strict (they do not use this veto)."""
+
+    def setUp(self):
+        self._old = os.environ.pop("GB_CAP_INMODEL_HEADROOM", None)
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("GB_CAP_INMODEL_HEADROOM", None)
+        else:
+            os.environ["GB_CAP_INMODEL_HEADROOM"] = self._old
+
+    def _veto(self, dest_count, cap_val=1):
+        m = _move(1)
+        cap = np.full(m.num_cap_cells, cap_val, dtype=int)
+        counts = np.zeros(m.ntemps * m.nwalkers * m.num_cap_cells,
+                          dtype=np.int32)
+        counts[1] = dest_count            # destination cell 1, (t0, w0)
+        t = np.zeros(1, dtype=np.int64)
+        w = np.zeros(1, dtype=np.int64)
+        cur = (np.array([0]), None, None)  # moving from cell 0
+        new = (np.array([1]), None, None)  # into cell 1
+        return bool(m._cap_new_entry_veto(counts, cap, t, w, cur, new)[0])
+
+    def test_default_headroom_two_admits_at_cap(self):
+        self.assertFalse(self._veto(dest_count=1))   # at cap: allowed
+        self.assertFalse(self._veto(dest_count=2))   # cap+1: allowed
+
+    def test_default_headroom_two_blocks_at_cap_plus_two(self):
+        self.assertTrue(self._veto(dest_count=3))    # cap+2 occupants: full
+
+    def test_headroom_zero_restores_strict(self):
+        os.environ["GB_CAP_INMODEL_HEADROOM"] = "0"
+        self.assertTrue(self._veto(dest_count=1))
+
+
+class CapGateOccupancyTest(unittest.TestCase):
+    """User-approved fix 2: a cap only increments when its allowance is
+    actually USED (some cold walker holds cap leaves in the cell), and
+    never past GB_CAP_CELL_MAX."""
+
+    CELL = 5
+
+    def setUp(self):
+        os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = "1"
+        self._max = os.environ.pop("GB_CAP_CELL_MAX", None)
+
+    def tearDown(self):
+        os.environ.pop("GB_LEAF_CAP_REQUIRE_IMPROVEMENT", None)
+        if self._max is None:
+            os.environ.pop("GB_CAP_CELL_MAX", None)
+        else:
+            os.environ["GB_CAP_CELL_MAX"] = self._max
+
+    def _stats(self, value):
+        s = np.zeros(NUM_BANDS * 2)
+        s[self.CELL] = value
+        return s
+
+    def test_below_cap_stagnant_cell_holds(self):
+        # cap 2, but every walker holds only 1 leaf: the allowance is not
+        # used, so stagnation must NOT buy a third slot.
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        bi["cap_cell_leaf_cap"][self.CELL] = 2
+        occ = np.zeros((1, NUM_BANDS * 2)); occ[0, self.CELL] = 1
+        for _ in range(8):
+            _gate_step(m, state, self._stats(2000.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+
+    def test_at_cap_stagnant_cell_increments(self):
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        occ = np.zeros((1, NUM_BANDS * 2)); occ[0, self.CELL] = 1
+        for _ in range(6):
+            _gate_step(m, state, self._stats(2000.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+
+    def test_cell_max_ceiling(self):
+        os.environ["GB_CAP_CELL_MAX"] = "2"
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        bi["cap_cell_leaf_cap"][self.CELL] = 2
+        occ = np.zeros((1, NUM_BANDS * 2)); occ[0, self.CELL] = 2
+        for _ in range(8):
+            _gate_step(m, state, self._stats(2000.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+
+    def test_ramp_pending_published(self):
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        occ = np.zeros((1, NUM_BANDS * 2)); occ[0, self.CELL] = 1
+        _gate_step(m, state, self._stats(2000.0), occ)   # engage, iters 0
+        _gate_step(m, state, self._stats(2000.0), occ)   # iters 1
+        self.assertEqual(int(m._cap_ramp_pending), 1)
+        for _ in range(4):                                # ... increment
+            _gate_step(m, state, self._stats(2000.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+        # post-increment: occupancy (1) < new cap (2) -> nothing pending
+        self.assertEqual(int(m._cap_ramp_pending), 0)
+
+
+class Divisor1GateRoutingTest(unittest.TestCase):
+    """At divisor 1 WITH overlap the gate must read the cap-cell statistic
+    (source-attributed on sub-layer grids), not the band residual windows,
+    and store what it read in band_cold_ll."""
+
+    def setUp(self):
+        os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("GB_LEAF_CAP_REQUIRE_IMPROVEMENT", None)
+
+    def test_divisor1_overlap_routes_the_cell_statistic(self):
+        m = _gate_move(cap_divisor=1)
+        m.cap_overlap_frac = 0.25
+        m._cap_edge_ext = make_cap_edge_extensions(
+            BAND_EDGES, m.cap_edges, 1, 0.25)
+        bi = {"num_bands": m.num_bands}
+        ensure_leaf_cap_fields(bi, m.num_bands)
+        bi["band_leaf_cap"][:] = 1
+        bi["band_cold_ll"] = np.zeros((1, m.num_bands))
+        state = SimpleNamespace(
+            sub_states={"gb": SimpleNamespace(band_info=bi)})
+        occ = np.zeros((1, m.num_bands)); occ[0, 2] = 1
+        stats = None
+        for v in (100.0, 110.0, 120.0, 130.0, 140.0, 150.0):
+            stats = np.zeros((1, m.num_bands)); stats[0, 2] = v
+            _gate_step(m, state, stats, occ)
+        # improving cell: the D/2 hold must keep the cap at 1 (the band
+        # residual stub is flat zeros, which would increment instead)
+        np.testing.assert_array_equal(
+            bi["band_leaf_cap"], np.ones(m.num_bands))
+        # and the gate must have stored WHAT IT READ
+        np.testing.assert_allclose(bi["band_cold_ll"], stats)
+
+
+class StageCapQuiescenceTest(unittest.TestCase):
+    """User-approved fix 1: the search-stage nleaves plateau must not
+    declare convergence while a cap increment is pending (an engaged,
+    occupied-at-cap cell mid patience window)."""
+
+    def _step_obj(self):
+        from lisatools.globalfit.recipe import RJRecipeStep
+        s = RJRecipeStep.__new__(RJRecipeStep)
+        s.convergence_fn = None
+        s.convergence_iter = 2
+        s.plateau_branch = "gb"
+        s._stage_start_iter = 0
+        return s
+
+    def _sampler(self, moves):
+        nl = np.array([0, 1, 2, 2, 2, 2, 2, 2, 2, 2])
+        backend = SimpleNamespace(
+            iteration=10,
+            get_nleaves=lambda branch_names, temp_index: {"gb": nl},
+        )
+        return SimpleNamespace(backend=backend, moves=moves)
+
+    def test_plateau_stops_when_ramp_quiet(self):
+        s = self._step_obj()
+        sampler = self._sampler([SimpleNamespace(_cap_ramp_pending=0)])
+        self.assertTrue(s.stopping_function(0, None, sampler))
+
+    def test_pending_ramp_vetoes_the_stop(self):
+        s = self._step_obj()
+        sampler = self._sampler([SimpleNamespace(_cap_ramp_pending=2)])
+        self.assertFalse(s.stopping_function(0, None, sampler))
+
+    def test_nested_moves_are_scanned(self):
+        s = self._step_obj()
+        inner = SimpleNamespace(_cap_ramp_pending=1)
+        sampler = self._sampler([SimpleNamespace(moves=[inner])])
+        self.assertFalse(s.stopping_function(0, None, sampler))

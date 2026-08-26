@@ -635,6 +635,23 @@ class PERecipeStep(BaseRecipeStep):
         return False
 
 
+def _cap_ramp_pending_total(moves) -> int:
+    """Sum of ``_cap_ramp_pending`` over a move tree (GFCombineMove nests).
+
+    GB moves publish the count of cap cells actively counting toward an
+    increment (armed, mid patience window, occupied at cap, below ceiling)
+    at the end of every cap update; anything without the attribute
+    contributes 0. Weighted ``(move, weight)`` entries are unwrapped.
+    """
+    total = 0
+    for m in list(moves or []):
+        if isinstance(m, (tuple, list)) and m:
+            m = m[0]
+        total += int(getattr(m, "_cap_ramp_pending", 0) or 0)
+        total += _cap_ramp_pending_total(getattr(m, "moves", None))
+    return total
+
+
 class RJRecipeStep(BaseRecipeStep):
     """Reversible-jump recipe step that stops once GB leaf count plateaus.
 
@@ -713,6 +730,26 @@ class RJRecipeStep(BaseRecipeStep):
             dur = (time.perf_counter() - self.st) / 3600.0  # hours
             logger.info(f"Previous nleaves: {nleaves_cc_max_old} --> new nleaves: {nleaves_cc_max_new}")
             logger.info(f"TIME SINCE START: {dur} hours")
+
+        # CAP-QUIESCENCE veto (user-approved 2026-08-26): under a cap
+        # blockade the cold leaf count plateaus BY CONSTRUCTION, so the
+        # plateau alone cannot distinguish "converged" from "cap-starved"
+        # (the highf-grid probe's search ended at iteration 11 with the
+        # flagship cell 3/5 through its patience window -- the increment
+        # that would have unblocked truth-side births never got to fire).
+        # While any move reports cap cells mid patience window, the stage
+        # holds open: the coming increment can re-open growth and break
+        # the plateau honestly. GB_SEARCH_CAP_QUIESCENT=0 restores the
+        # bare plateau rule.
+        if stop and os.environ.get("GB_SEARCH_CAP_QUIESCENT", "1") == "1":
+            _pending = _cap_ramp_pending_total(getattr(sampler, "moves", None))
+            if _pending:
+                logger.info(
+                    "nleaves plateau reached but %d cap cell(s) are mid "
+                    "patience window -- holding the stage open for the cap "
+                    "ramp.", _pending,
+                )
+                stop = False
 
         return stop
         
