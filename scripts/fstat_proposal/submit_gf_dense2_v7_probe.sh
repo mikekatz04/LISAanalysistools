@@ -367,6 +367,15 @@ export GB_INMODEL_REPEATS_SURVIVOR=100
 # vertical swap exchanges occupancy without updating the drift-gate
 # census (self-corrects next block). =0 reverts.
 export GB_TEMPER_VERTICAL=1
+
+# PERMUTED-SWAP CADENCE 3 -> 1 (user ruling 2026-08-26): fire the
+# permuted band swaps after EVERY GB propose -- 3x/iteration in search
+# (was once, on the third move), and every PE iteration (was every ~2-3:
+# the measured PE transport drought). Pairs with vertical: permuted
+# swaps move whole band contents between rungs, vertical pumps
+# per-repeat during polish -- the full transport stack. Probe cost
+# ~+40 s/it (tempering block x3); production ~+3%. =3 reverts.
+export GB_TEMPER_EVERY_PROPOSES=1
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First

@@ -450,6 +450,15 @@ export GB_INMODEL_REPEATS_SURVIVOR=100
 # vertical swap exchanges occupancy without updating the drift-gate
 # census (self-corrects next block). =0 reverts.
 export GB_TEMPER_VERTICAL=1
+
+# PERMUTED-SWAP CADENCE 3 -> 1 (user ruling 2026-08-26): fire the
+# permuted band swaps after EVERY GB propose -- 3x/iteration in search
+# (was once, on the third move), and every PE iteration (was every ~2-3:
+# the measured PE transport drought). Pairs with vertical: permuted
+# swaps move whole band contents between rungs, vertical pumps
+# per-repeat during polish -- the full transport stack. Probe cost
+# ~+40 s/it (tempering block x3); production ~+3%. =3 reverts.
+export GB_TEMPER_EVERY_PROPOSES=1
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First
@@ -1002,13 +1011,14 @@ export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explic
 # FROM the cached stage-B grids and are not persisted in them, so a restart
 # picks this up against the existing epoch cache.
 # alpha=1 restores the previous behaviour bit-identically.
-# 2026-08-26 USER REVERT (single-source probe): back to the code default
-# alpha=1 (w ~ SNR^2). The faint-tail starvation measured above is a
-# FULL-BAND phenomenon -- this probe has ONE detectable source, and the
-# square tilt just concentrates draws on the truth-side boxes (F~2000)
-# over the ridge boxes (F~1122), which is what we want here. The 0.5
-# finding STANDS for full-band runs (v7/dense keep it).
-export FSTAT_PEAK_WEIGHT_ALPHA=1.0
+# 2026-08-26 SECOND RULING: back to alpha=0.5 (w ~ SNR). The alpha=1
+# interlude measured a ~7.7x per-draw birth-acceptance drop (77->10 at
+# it0): the untempered -ln q factor means hot-rung acceptance ~ p/q,
+# and the sharper 71-node grid + square tilt cut hot birth flux -- the
+# raw material the (now 3x + vertical) tempering stack transports to
+# cold. Flux > per-box tilt here; the auto-Mc grid does the quality
+# work. alpha=1 restores the square tilt.
+export FSTAT_PEAK_WEIGHT_ALPHA=0.5
 # HIERARCHICAL BIRTH DRAW (v3): pick a CAP CELL uniformly, then draw within
 # it with w ~ F**alpha. Unset, this tracks GB_CAP_DIVISOR; pinned here so
 # the draw grid is explicit and can be decoupled from the cap grid later.
