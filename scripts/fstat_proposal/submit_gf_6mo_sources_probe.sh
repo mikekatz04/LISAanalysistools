@@ -185,9 +185,11 @@ export SOBHB_IDS=0,1,2,3,4,5       # all 6 -- expected mostly sub-threshold
 # removal-null sweep measured as the OPTIMUM on this grid: removal residual
 # 6e-4 of <h|h>). But the m=1 SCORING band sheds ~15% of <h|h> here
 # (lnL bias ~0.076*SNR^2, trips SOBBH_CHECK_LL_TOL at SNR>~2.6); m=2
-# recovers 99.9%. The production all_sources grid (1-h layers) does not
-# need this.
-export SOBBH_M_BAND_HALF_WIDTH=2
+# recovers 99.9% and m=3 is fully converged (== m=6, residual floor
+# 1.6e-4). 3, not 2 (user ruling 2026-08-26): scoring width is nowhere
+# near a bottleneck, so take the converged value for safety. The
+# production all_sources grid (1-h layers) does not need this.
+export SOBBH_M_BAND_HALF_WIDTH=3
 
 # ---- timing instrumentation -------------------------------------------------
 # [GF_MOVE_TIMING] per-move wall + host RSS + GPU pool for every move; SYNC
