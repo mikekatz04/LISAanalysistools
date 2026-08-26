@@ -2699,6 +2699,18 @@ def build_gb_moves(
         and getattr(gb_info, "search_prior_removal", False)
         and os.environ.get("GB_TEMPER_ON_REMOVAL", "1") == "1"
     )
+    # USER RULING 2026-08-26 (supersedes the 2026-08-14 single-carrier
+    # rule): in SEARCH, band-temperature swaps run in ALL THREE cycle
+    # moves (fstat birth, replace, prior removal), not one designated
+    # carrier — with GB_TEMPER_EVERY_PROPOSES=1 that is 3 swap passes
+    # per iteration, interleaved BETWEEN the moves so each move acts on
+    # post-transport state. The shared cadence census still throttles
+    # globally (cadence 3 + all-moves = once per iteration, any
+    # carrier). GB_TEMPER_ALL_MOVES=0 restores the single-carrier rule.
+    _temper_all_moves = (
+        getattr(gb_info, "mode", "pe") == "search"
+        and os.environ.get("GB_TEMPER_ALL_MOVES", "1") == "1"
+    )
     # Per-class in-model repeat defaults (user ruling 2026-08-15): the
     # recipe's OWN mode flag is authoritative over the {BRANCH}_MODE env
     # fallback inside the move (resolution: explicit kwarg > env knob >
@@ -2728,7 +2740,7 @@ def build_gb_moves(
         # rj_prior_removal move in the same stage.
         use_prior_removal=False,
         phase_maximize=_rj_phase_max,
-        run_swaps=not _temper_on_removal,
+        run_swaps=_temper_all_moves or not _temper_on_removal,
         gpus=[],
         **{**gb_move_kwargs, **_imr_search}
     )
@@ -2814,7 +2826,7 @@ def build_gb_moves(
             name="rj_replace",
             rj_replace=True,
             phase_maximize=False,
-            run_swaps=False,
+            run_swaps=_temper_all_moves,
             gpus=[],
             **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
         )
@@ -2865,7 +2877,7 @@ def build_gb_moves(
             phase_maximize=False,
             # Band-temperature swaps live HERE when _temper_on_removal
             # (see the placement comment at the search-move block).
-            run_swaps=_temper_on_removal,
+            run_swaps=_temper_all_moves or _temper_on_removal,
             gpus=[],
             # Removal pools are 100% mature -- the survivor budget (25)
             # is the one that binds here.
