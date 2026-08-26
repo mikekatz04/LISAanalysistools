@@ -345,6 +345,19 @@ export GB_RJ_SNR_TRUNC_DIST=1      # birth distance draw truncated at the
 # beat the PE mode default as well — both phases run 200/100 here.
 export GB_INMODEL_REPEATS_NEWBORN=200
 export GB_INMODEL_REPEATS_SURVIVOR=100
+
+# VERTICAL TEMPERING ON (2026-08-26 user ruling: "this is crucial").
+# Per-repeat vertical band-temperature swaps inside the in-model loop
+# (same walker, adjacent rungs) -- built+tested 2026-08-18 (e6ed71e2,
+# 30 tests) but never promoted: the flag sat default-off through the
+# v6/overlap/replace campaigns. It is ADDITIVE to the permuted swaps
+# and never drives ladder adaptation. Directly attacks the measured
+# transport bottleneck (correct fdot living at rung 4 while cold holds
+# the mosaic): exchange cadence per in-model REPEAT (~100x/block) vs
+# once-per-iteration permuted swaps. Known approximation: a mid-block
+# vertical swap exchanges occupancy without updating the drift-gate
+# census (self-corrects next block). =0 reverts.
+export GB_TEMPER_VERTICAL=1
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First
