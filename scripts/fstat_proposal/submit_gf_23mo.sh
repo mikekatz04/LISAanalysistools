@@ -68,7 +68,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=gf23mo_%j.log    # combined stdout+stderr
+#SBATCH --output=/shared/data/global_fit_output/gf23mo_%j.log    # combined stdout+stderr
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -78,7 +78,7 @@ set -euo pipefail
 source /shared/home/mlkatz1/envs/gf_env/bin/activate
 cd /shared/home/mlkatz1/lisa-analysis-tools
 
-STORE_DIR=./gf_prod_23mo/
+STORE_DIR=/shared/data/global_fit_output/gf_prod_23mo/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -127,7 +127,7 @@ export HDF5_USE_FILE_LOCKING=FALSE
 export VERBOSE=1
 export PROGRESS=0
 
-export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
+export MOJITO_DATA_PATH=/shared/data/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
 export GPUS=0,1

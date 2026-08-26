@@ -201,7 +201,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=gf6mo_v1_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
+#SBATCH --output=/shared/data/global_fit_output/gf6mo_v1_%j.log     # combined stdout+stderr (captures [MAXLOGL]/[BENCH])
                                   # (fixed: v5/v6 scripts still wrote *v4*.log -- legacy job-name)
 # ----------------------------------------------------------------------------
 
@@ -216,7 +216,7 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # which no rewind or migration handles. A NEW store dir; BASE_FILE_NAME is
 # gf_prod_6mo so analysis tools (monitor generator, digests) work unchanged --
 # they take the DIRECTORY as their argument.
-STORE_DIR=./gf_prod_6mo_v1/
+STORE_DIR=/shared/data/global_fit_output/gf_prod_6mo_v1/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -289,7 +289,7 @@ export VERBOSE=1
 export PROGRESS=0
 
 # ---- run plumbing ----------------------------------------------------------
-export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
+export MOJITO_DATA_PATH=/shared/data/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
 export GPUS=0,1

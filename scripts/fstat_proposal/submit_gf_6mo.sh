@@ -50,7 +50,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=gf6mo_%j.log     # combined stdout+stderr ([MAXLOGL]/[GB_ACCEPT]/...)
+#SBATCH --output=/shared/data/global_fit_output/gf6mo_%j.log     # combined stdout+stderr ([MAXLOGL]/[GB_ACCEPT]/...)
 
 set -euo pipefail
 
@@ -58,7 +58,7 @@ set -euo pipefail
 source /shared/home/mlkatz1/envs/gf_env/bin/activate
 cd /shared/home/mlkatz1/lisa-analysis-tools
 
-STORE_DIR=./gf_prod_6mo/
+STORE_DIR=/shared/data/global_fit_output/gf_prod_6mo/
 
 # ---- GPU telemetry (30 s nvidia-smi sampler; per-job CSV in the store) ------
 mkdir -p ${STORE_DIR}
@@ -72,7 +72,7 @@ trap 'kill ${GPU_SMI_PID} 2>/dev/null || true' EXIT
 export OMP_NUM_THREADS=1
 
 # ---- run plumbing -----------------------------------------------------------
-export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
+export MOJITO_DATA_PATH=/shared/data/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
 export GPUS=0,1

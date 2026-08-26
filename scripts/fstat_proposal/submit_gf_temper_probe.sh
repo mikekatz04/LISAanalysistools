@@ -141,7 +141,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0                   # whole-node memory
 #SBATCH --time=24:00:00
-#SBATCH --output=gf_temper_%j.log    # combined stdout+stderr ([GB_VERT]/[GB_TEMPER_EMPTY])
+#SBATCH --output=/shared/data/global_fit_output/gf_temper_%j.log    # combined stdout+stderr ([GB_VERT]/[GB_TEMPER_EMPTY])
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -192,7 +192,7 @@ case "${WINDOW}" in
 esac
 echo "[ARM] ${ARM}: GB_TEMPER_VERTICAL=${TEMPER_VERTICAL} GB_TEMPER_CELL_ORDER=${TEMPER_CELL_ORDER}"
 echo "[WINDOW] ${WINDOW}: GB_MIN_FREQ=${WIN_MIN} GB_MAX_FREQ=${WIN_MAX}"
-STORE_DIR=./gf_temper_probe_${WINDOW}_${ARM}/
+STORE_DIR=/shared/data/global_fit_output/gf_temper_probe_${WINDOW}_${ARM}/
 
 # ---- STORE PREP: the four-arm matrix ------------------------------------
 # Run all four; ARM x WINDOW is the whole design.
@@ -305,7 +305,7 @@ export VERBOSE=1
 export PROGRESS=0
 
 # ---- run plumbing ----------------------------------------------------------
-export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
+export MOJITO_DATA_PATH=/shared/data/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
 export GPUS=0,1

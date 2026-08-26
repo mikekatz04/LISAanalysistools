@@ -38,7 +38,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=0
 #SBATCH --time=12:00:00
-#SBATCH --output=strideAB2_%j.log  # ---- A/B ARM ----
+#SBATCH --output=/shared/data/global_fit_output/strideAB2_%j.log  # ---- A/B ARM ----
 
 set -euo pipefail
 
@@ -46,7 +46,7 @@ source /shared/home/mlkatz1/envs/gf_env/bin/activate
 cd /shared/home/mlkatz1/lisa-analysis-tools
 
 SRC_STORE=${SRC_STORE:-./gf_prod_3mo}
-STORE_DIR=./gf_prod_3mo_stride2/   # ---- A/B ARM ----
+STORE_DIR=/shared/data/global_fit_output/gf_prod_3mo_stride2/   # ---- A/B ARM ----
 AB_STRIDE=2                        # ---- A/B ARM ----
 AB_NEW_ITERS=${AB_NEW_ITERS:-6}
 BASE=gf_prod_3mo
@@ -116,7 +116,7 @@ trap 'kill ${GPU_SMI_PID} 2>/dev/null || true' EXIT
 export OMP_NUM_THREADS=1
 
 # ---- EXACT production env (mirror submit_gf_3mo.sh @ ff0d747f) -------------
-export MOJITO_DATA_PATH=/shared/home/mlkatz1/mojito_cache
+export MOJITO_DATA_PATH=/shared/data/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
 export GPUS=0,1

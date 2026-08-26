@@ -51,7 +51,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=0
 #SBATCH --time=12:00:00
-#SBATCH --output=gf6mo_src_%j.log
+#SBATCH --output=/shared/data/global_fit_output/gf6mo_src_%j.log
 
 set -euo pipefail
 
@@ -59,7 +59,7 @@ set -euo pipefail
 source /shared/home/mlkatz1/envs/gf_env/bin/activate
 cd /shared/home/mlkatz1/lisa-analysis-tools
 
-STORE_DIR=./gf_prod_6mo_sources_probe/
+STORE_DIR=/shared/data/global_fit_output/gf_prod_6mo_sources_probe/
 
 # ---- GPU telemetry (5 s device sampler + 30 s per-process sampler) ----------
 # FIRST-LAUNCH CHECK (2026-08-23): current cluster launches have been writing
@@ -84,7 +84,7 @@ export VERBOSE=1
 export PROGRESS=0
 
 # ---- run plumbing -----------------------------------------------------------
-REAL_MOJITO=/shared/home/mlkatz1/mojito_cache
+REAL_MOJITO=/shared/data/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
 # ONE GPU by default (user request 2026-08-26); the 2-GPU parity leg of
