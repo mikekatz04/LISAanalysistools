@@ -278,7 +278,10 @@ export GB_MAX_FREQ=6.736111e-03     # 48.5 layers -> snaps to 48
 #      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,
 #      at-cap RJ skip, cell-lifecycle ll credit, GB_MODE=search +
 #      GB_PE_MOVES_STRICT=1 + GB_SEARCH_PRIOR_REMOVAL=1 seeded by the script) --
-export GB_NLEAVES_MAX=10000
+# 30 leaves per sub-band x 40 sub-bands (layers 44-48 x divisor 8) --
+# user spec 2026-08-26 (was 10000 = effectively unlimited; leaner slot
+# tail, same per-band allowance the caps actually govern).
+export GB_NLEAVES_MAX=1200
 # FULL parity-unit residency (grouped RJ->in-model scheduling, 2026-08-13):
 # one unit = 77 bands x 24 temps x 24 walkers = 44,352 cells; the scheduler
 # clamps n_slots to min(GB_N_SUBBANDS, cells), so 50000 means every cell is
@@ -367,6 +370,11 @@ export GB_TEMPER_VERTICAL=1
 # per-repeat during polish -- the full transport stack. Probe cost
 # ~+40 s/it (tempering block x3); production ~+3%. =3 reverts.
 export GB_TEMPER_EVERY_PROPOSES=1
+
+# BIRTH SNR FLOOR 8 (matches the highf run intent; the floor-5 default
+# fed a hot-ladder noise balloon there. NOTE: requires 489ad3ff+ -- the
+# env resolves at the MOVE ctor).
+export GB_OPT_SNR_LIMIT=8
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First
@@ -702,7 +710,7 @@ export GB_INFOMAT_MEMPOOL_FREE=1
 # K=4, NOT v5's 32: (layer/8)/4 = layer/32 cells -- the staggered
 # cap-cell grid comes out BIT-IDENTICAL to v5's, so the cap machinery
 # is a controlled variable in this comparison.
-export GB_CAP_DIVISOR=4
+export GB_CAP_DIVISOR=1
 # ############################################################################
 # ## V7 (2026-08-24) = V6 + OVERLAPPING CAP CELLS, nothing else.            ##
 # ## GB_CAP_OVERLAP_FRAC=0.25 widens each cap cell's enforcement span on   ##
@@ -727,6 +735,18 @@ export GB_CAP_DIVISOR=4
 # ## search reruns under overlap enforcement). Fresh dir works too.        ##
 # ############################################################################
 export GB_CAP_OVERLAP_FRAC=0.25
+
+# ALIGNED-CELLS CONFIG (2026-08-26): exact same mechanism set as the
+# validated highf grid2 run (increment+veto+drain chain confirmed
+# end-to-end there) -- cap cells LINED UP with the sub-bands, 1/4
+# overlap, transferred to the dense band.
+export GB_CAP_INMODEL_HEADROOM=2   # in-model/replace f0 moves may enter a
+                                   # foreign cell up to cap+2 (RJ births
+                                   # stay strict); =0 restores strict
+export GB_CAP_CELL_MAX=5           # per-cell cap ceiling (belt vs the
+                                   # late-run ratchet); 0 = nleaves_max
+export GB_SEARCH_CAP_QUIESCENT=1   # nleaves plateau cannot end gb_search
+                                   # while a cap increment is pending
 export GB_SEARCH_RJ_REPLACE=1
 # V5: STAGGER the cap grid against the band grid (user design 2026-08-20).
 # Interior cap edges shift half a cell (2.17 uHz / ~17 FD bins at K=32) so
@@ -735,7 +755,7 @@ export GB_SEARCH_RJ_REPLACE=1
 # last is 1.5 -- everything else identical widths, counts and storage.
 # REQUIRES a fresh store (the resume guard refuses the changed edges).
 # GB_CAP_STAGGER=0 reverts to the v4 nested grid instantly.
-export GB_CAP_STAGGER=1
+export GB_CAP_STAGGER=0
 # ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
 #      so the store's provenance is unambiguous) ----
 # Birth fix (1274a66c): births draw fdot_astro_ratio | (f0, Mc) from the
@@ -770,7 +790,7 @@ export GB_CAP_DRIFT_GATE=1
 # max-logL search. It must NOT ship at K=8: freezing empty cells at cap 1
 # with a 135-bin cell re-imposes the 24.5% exclusion above.
 export GB_LEAF_CAP_REQUIRE_IMPROVEMENT=1
-export GB_LEAF_CAP_MIN_ITERS=3
+export GB_LEAF_CAP_MIN_ITERS=5
 export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
