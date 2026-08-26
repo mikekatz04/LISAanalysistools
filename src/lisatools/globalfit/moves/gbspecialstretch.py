@@ -5885,11 +5885,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         sigma = _ctr["sigma"][_bpos]
                         ln_snr_b = _ctr["ln_snr"][_bpos]
                     else:
-                        with self._ctr_gbfree_window(
-                                model, band_sorter, walker_ref):
-                            (A_max, phi0_max, iota_max, psi_max,
-                             F) = self._fstat_dist_centers(
-                                model, params[birth_k], walker_ref)
+                        # Scores walker_ref's row of the MAIN residual,
+                        # which the unit open has ALREADY restored to the
+                        # correct per-walker GB-free view for the open
+                        # bands (one source, once, at true amplitude) —
+                        # a since-removed extra restore window here
+                        # double-counted the signal (2026-08-26
+                        # forensics: A_max ~2x, cold births -> 0).
+                        (A_max, phi0_max, iota_max, psi_max,
+                         F) = self._fstat_dist_centers(
+                            model, params[birth_k], walker_ref)
                         ln_center, sigma = self._dist_center_and_width(
                             params[birth_k], A_max, F)
                         ln_snr_b = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
@@ -5948,11 +5953,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         sigma_d = _ctr["sigma"][_dpos]
                         ln_snr_d = _ctr["ln_snr"][_dpos]
                     else:
-                        with self._ctr_gbfree_window(
-                                model, band_sorter, walker_ref):
-                            (Ad, phi0_d, iota_d, psi_d,
-                             Fd) = self._fstat_dist_centers(
-                                model, params[death_k], walker_ref)
+                        (Ad, phi0_d, iota_d, psi_d,
+                         Fd) = self._fstat_dist_centers(
+                            model, params[death_k], walker_ref)
                         ln_center_d, sigma_d = self._dist_center_and_width(
                             params[death_k], Ad, Fd)
                         ln_snr_d = 0.5 * xp.log(xp.clip(2.0 * Fd, 1.0, None))
@@ -10776,54 +10779,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     if m2.any():
                         np.add.at(out[w], nb[w][m2], 1)
         return out
-
-    @contextmanager
-    def _ctr_gbfree_window(self, model, band_sorter, walker_ref):
-        """GB-free exposure around a PER-ROW center batch.
-
-        USER RULING 2026-08-26: the per-row F-stat centers must see the
-        SAME GB-free residual the epoch grid fit sees
-        (:meth:`_gb_free_residual` — all of the reference walker's cold
-        GB signals restored). Scored against the LIVE residual instead,
-        the amplitude centers COLLAPSE at every spot the reference
-        walker has already found — and the peak list's whole design is
-        walker-INDEPENDENT proposals ("found" for one walker is not
-        found for the ensemble; measured v3 it82: 6 of 121 occupied
-        bands had all 24 walkers agreeing). Reuses the RJ step's own
-        ``band_sorter`` (same object for remove and add, so the
-        round-trip is bit-exact regardless of state drift within the
-        step) and the same fill machinery as the epoch window — the
-        MAIN residual only, no sub-band buffer is touched, so the
-        buffer snapshots the RJ scoring reads stay consistent.
-        **DEFAULT OFF (2026-08-26 forensics — the window is WRONG inside
-        an open unit).** ``_run_band_unit`` opens every unit by RESTORING
-        the parity class's cold templates into the main residual
-        (``remove_cold_chain_sources_from_residual`` at unit open,
-        re-subtracted at unit close) — so inside the unit, where every
-        candidate lives, the residual is ALREADY GB-free. This window
-        then DOUBLE-ADDED walker_ref's templates (data + template ~ 2x
-        signal), inflating A_max ~2x and halving the distance centers:
-        every birth drew ~2x too bright and exact scoring rejected it —
-        measured as cold RJ acceptance exactly 0 from iteration 2 onward
-        (iteration 1 escaped via the empty-model guard below).
-        Live-residual per-row centers ARE the correct conditioning
-        in-unit. If closed-band restoration is ever wanted, the correct
-        form is a PARITY-SCOPED selection (restore only sources whose
-        band is NOT in the open class), not this unrestricted one.
-        ``GB_RJ_CTR_GBFREE=1`` re-enables for study only.
-        """
-        if os.environ.get("GB_RJ_CTR_GBFREE", "0") != "1":
-            yield
-            return
-        sel = dict(temp=0, walker=int(walker_ref), apply_inds=True)
-        if int(band_sorter.get_subset_bool(**sel).sum()) == 0:
-            yield
-            return
-        self.remove_sources_from_residual(model, band_sorter, **sel)
-        try:
-            yield
-        finally:
-            self.add_sources_to_residual(model, band_sorter, **sel)
 
     def _rj_birth_perrow(self) -> bool:
         """Per-row F-stat centers for this move's fstat births/deaths?
