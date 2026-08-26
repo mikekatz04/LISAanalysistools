@@ -1672,3 +1672,40 @@ class StageCapQuiescenceTest(unittest.TestCase):
         inner = SimpleNamespace(_cap_ramp_pending=1)
         sampler = self._sampler([SimpleNamespace(moves=[inner])])
         self.assertFalse(s.stopping_function(0, None, sampler))
+
+
+class RampPendingEngagedTest(unittest.TestCase):
+    """Regression for the aligned-probe handoff bug (2026-08-26): a cell
+    that keeps IMPROVING resets its clock, but it is the LEAST converged
+    cell of all — pending must mean engaged & occupied-at-cap & below
+    ceiling, regardless of the patience counter."""
+
+    CELL = 5
+
+    def setUp(self):
+        os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("GB_LEAF_CAP_REQUIRE_IMPROVEMENT", None)
+
+    def _stats(self, value):
+        s = np.zeros(NUM_BANDS * 2)
+        s[self.CELL] = value
+        return s
+
+    def test_improving_at_cap_cell_is_pending(self):
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        occ = np.zeros((1, NUM_BANDS * 2)); occ[0, self.CELL] = 1
+        for v in (2000.0, 2010.0, 2020.0):   # > D/2 every step: clock resets
+            _gate_step(m, state, self._stats(v), occ)
+            self.assertEqual(int(m._cap_ramp_pending), 1)
+
+    def test_pending_clears_after_increment(self):
+        m = _gate_move()
+        state, bi = _gate_state(m)
+        occ = np.zeros((1, NUM_BANDS * 2)); occ[0, self.CELL] = 1
+        for _ in range(6):
+            _gate_step(m, state, self._stats(2000.0), occ)
+        self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
+        self.assertEqual(int(m._cap_ramp_pending), 0)

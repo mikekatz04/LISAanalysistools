@@ -928,6 +928,7 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
         fstat_knob,
         fstat_n_axis,
         fstat_n_f0,
+        fstat_n_mc,
     )
 
     if len(peaks) == 0:
@@ -936,7 +937,6 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
 
     half_f0 = fstat_knob("FSTAT_PEAK_HALF_MHZ", float)
     n_f0 = fstat_n_f0(2.0 * half_f0, float(Tobs))
-    n_Mc = fstat_n_axis("FSTAT_N_MC")
     n_alpha = fstat_n_axis("FSTAT_N_ALPHA")
     n_sd = fstat_n_axis("FSTAT_N_SINDELTA")
     n_fit_env = os.environ.get("FSTAT_PEAKS_TO_FIT", "").strip()
@@ -981,6 +981,13 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
     mc_lims = list(mc_lims or [0.001, 1.0])
     mc_range = (max(float(mc_lims[0]), fstat_knob("FSTAT_MC_MIN", float)),
                 float(mc_lims[-1]))
+    # AUTO Mc density (fstat_n_mc): the stack is rectangular, so ONE
+    # grid-wide count from the MAX peak f0 (the fdot span scales as
+    # f0^{11/3}; the highest band sets the requirement, lower bands are
+    # merely over-resolved). Explicit FSTAT_N_MC still wins inside.
+    n_Mc = fstat_n_mc(
+        float(np.max(peaks[:, 0])), mc_range[0], mc_range[1], float(Tobs)
+    )
     mc_ax = np.linspace(mc_range[0], mc_range[1], n_Mc)
     alpha_ax = np.linspace(0.0, 2 * np.pi, n_alpha)
     sd_ax = np.linspace(-1.0, 1.0, n_sd)

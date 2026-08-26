@@ -915,7 +915,11 @@ export GB_LEAF_CAP_MIN_ITERS=5
 # ## already lands ~2-3 rad near the real Mc range; log spacing mainly      ##
 # ## buys the near-zero-fdot tail. Follow-up.                               ##
 # ############################################################################
-export FSTAT_N_MC=24
+# FSTAT_N_MC UNPINNED (2026-08-26): AUTO Mc density now rules (fstat_n_mc
+# -- one node per fdot-coherence width 1/(pi Tobs^2) across the GR-fdot
+# span at the max peak f0; ~70 nodes for this band at 3 mo, clamp 96).
+# Re-export FSTAT_N_MC to pin explicitly.
+# export FSTAT_N_MC=24
 export FSTAT_PEAKS_TO_FIT=300
 export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds

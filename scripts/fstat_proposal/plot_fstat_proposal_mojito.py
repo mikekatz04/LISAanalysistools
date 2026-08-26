@@ -855,6 +855,7 @@ def run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks, src,
         fstat_knob,
         fstat_n_axis,
         fstat_n_f0,
+        fstat_n_mc,
         pack_gmm_components,
     )
 
@@ -864,7 +865,6 @@ def run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks, src,
 
     half_f0 = fstat_knob("FSTAT_PEAK_HALF_MHZ", float)
     n_f0 = fstat_n_f0(2.0 * half_f0, float(curr.general_info.Tobs))
-    n_Mc = fstat_n_axis("FSTAT_N_MC")
     n_alpha = fstat_n_axis("FSTAT_N_ALPHA")
     n_sd = fstat_n_axis("FSTAT_N_SINDELTA")
     n_fit_env = os.environ.get("FSTAT_PEAKS_TO_FIT", "").strip()
@@ -894,6 +894,12 @@ def run_stacked_stage_b(gb_wdm_comp, wdm_holder, curr, gb_info, peaks, src,
     band_idx = peaks[:, 3].astype(int)
 
     mc_range = _mc_grid_range(gb_info)
+    # AUTO Mc density from the MAX peak f0 (rectangular stack; see
+    # fstat_n_mc — explicit FSTAT_N_MC still wins inside).
+    n_Mc = fstat_n_mc(
+        float(np.max(peaks[:, 0])), mc_range[0], mc_range[1],
+        float(curr.general_info.Tobs),
+    )
     mc_ax = np.linspace(mc_range[0], mc_range[1], n_Mc)
     alpha_ax = np.linspace(0.0, 2 * np.pi, n_alpha)
     sd_ax = np.linspace(-1.0, 1.0, n_sd)

@@ -9,6 +9,7 @@ any WDM data.
 
 import copy
 import pickle
+import os
 import unittest
 
 import numpy as np
@@ -364,3 +365,56 @@ class MixtureProposalTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoMcDensityTest(unittest.TestCase):
+    """AUTO Mc node density (user rule 2026-08-26): one node per
+    FSTAT_MC_ETA fdot-coherence widths (1/(pi*Tobs^2)) across the box's
+    GR-fdot span at the box's f0 — the same criterion that justified 3
+    nodes at 7.5 mHz (band75) and demands tens at the 20.4 mHz flagship
+    (span scales as f0^{11/3})."""
+
+    T3MO = 7776000.0
+    T1YR = 31536000.0
+
+    def setUp(self):
+        self._saved = {}
+        for k in ("FSTAT_N_MC", "FSTAT_N_PER_AXIS", "FSTAT_MC_ETA"):
+            self._saved[k] = os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_flagship_band_needs_tens_of_nodes(self):
+        from lisatools.sampling.fstat_proposal import fstat_n_mc
+        n = fstat_n_mc(20.380377, 0.01, 1.0, self.T3MO)
+        self.assertGreaterEqual(n, 40)
+        self.assertLessEqual(n, 96)
+
+    def test_low_frequency_band_stays_coarse(self):
+        # the band75 regime: GR-fdot span ~2 coherence widths -> ~3 nodes
+        from lisatools.sampling.fstat_proposal import fstat_n_mc
+        n = fstat_n_mc(7.5803, 0.01, 1.0, self.T3MO)
+        self.assertLessEqual(n, 6)
+        self.assertGreaterEqual(n, 3)
+
+    def test_one_year_clamps_at_the_ceiling(self):
+        from lisatools.sampling.fstat_proposal import fstat_n_mc
+        self.assertEqual(fstat_n_mc(20.380377, 0.01, 1.0, self.T1YR), 96)
+
+    def test_explicit_env_wins(self):
+        from lisatools.sampling.fstat_proposal import fstat_n_mc
+        os.environ["FSTAT_N_MC"] = "24"
+        self.assertEqual(fstat_n_mc(20.380377, 0.01, 1.0, self.T3MO), 24)
+
+    def test_eta_loosens_the_grid(self):
+        from lisatools.sampling.fstat_proposal import fstat_n_mc
+        n1 = fstat_n_mc(20.380377, 0.01, 1.0, self.T3MO)
+        os.environ["FSTAT_MC_ETA"] = "2.0"
+        n2 = fstat_n_mc(20.380377, 0.01, 1.0, self.T3MO)
+        self.assertLess(n2, n1)
+        self.assertAlmostEqual(n2, (n1 + 1) / 2, delta=2)

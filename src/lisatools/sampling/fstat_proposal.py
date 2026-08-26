@@ -81,6 +81,7 @@ __all__ = [
     "fstat_knob",
     "fstat_peak_min_F",
     "fstat_n_f0",
+    "fstat_n_mc",
     "fstat_n_axis",
 ]
 
@@ -126,6 +127,9 @@ FSTAT_KNOB_DEFAULTS = {
                                    #   linear-in-F comb concentrates on the
                                    #   same loud sources); off-source waste
                                    #   flat ~5.5% (floor-only) at any w.
+    "FSTAT_MC_ETA": 1.0,           # AUTO Mc density: node spacing in
+                                   #   fdot-coherence widths 1/(pi Tobs^2)
+                                   #   (see fstat_n_mc)
     "FSTAT_PEAK_SAMPLING": "grid", # production draw layer (gmm = option)
     "FSTAT_FIT_GMM": 0,            # prep-time GMM fit is OPT-IN
     "FSTAT_GMM_SAMPLES": 4096,     # GMM fit: draws per box
@@ -178,11 +182,61 @@ def fstat_n_f0(box_width_mHz: float, Tobs_s: float) -> int:
     return int(np.clip(cells + 1, 12, 96))
 
 
+_MSUN_S = 4.925490947641267e-6  # GM_sun / c^3 [s]
+
+
+def _fdot_gr(mc, f0_hz):
+    """GR chirp fdot [Hz/s] at chirp mass ``mc`` [Msun], ``f0_hz`` [Hz]."""
+    return (
+        (96.0 / 5.0) * np.pi ** (8.0 / 3.0)
+        * (_MSUN_S * float(mc)) ** (5.0 / 3.0)
+        * float(f0_hz) ** (11.0 / 3.0)
+    )
+
+
+def fstat_n_mc(f0_mHz: float, mc_lo: float, mc_hi: float,
+               Tobs_s: float) -> int:
+    """AUTO Mc node count for a peak box (user rule 2026-08-26).
+
+    Precedence: explicit ``FSTAT_N_MC`` > explicit ``FSTAT_N_PER_AXIS`` >
+    AUTO -- one node per ``FSTAT_MC_ETA`` (default 1.0) fdot-coherence
+    widths ``1/(pi * Tobs^2)`` across the box's GR-fdot span at the box's
+    f0, clamped to ``[3, 96]``::
+
+        n = span / (eta / (pi Tobs^2)) + 1,
+        span = fdot_gr(mc_hi, f0) - fdot_gr(mc_lo, f0)
+
+    The span scales as ``f0**(11/3)``, which is why the band75 study's 3
+    nodes (7.5 mHz, 90 d: span ~2 widths -- fdot per-band unmeasurable)
+    and the 20.4 mHz flagship's ~70 (span ~69 widths) are the SAME
+    criterion evaluated at different frequencies; the old fixed default
+    of 3 under-resolved high f, capping replace/birth candidate match at
+    ~0.6 against the flagship's 0.87-match ridge mode. Cost is linear in
+    n (stage B only); the 1-yr clamp at 96 is a documented limitation --
+    the comb's Mc-fixed detection stage decoheres there anyway and needs
+    its own design (fdot-resolved or warm-started comb) first.
+    """
+    raw = os.environ.get("FSTAT_N_MC", "").strip()
+    if raw:
+        return int(raw)
+    per = os.environ.get("FSTAT_N_PER_AXIS", "").strip()
+    if per:
+        return int(per)
+    eta = fstat_knob("FSTAT_MC_ETA", float)
+    f0_hz = float(f0_mHz) * 1e-3
+    span = _fdot_gr(mc_hi, f0_hz) - _fdot_gr(mc_lo, f0_hz)
+    width = eta / (np.pi * float(Tobs_s) ** 2)
+    return int(np.clip(round(span / width) + 1, 3, 96))
+
+
 def fstat_n_axis(name: str) -> int:
     """Node count for the Mc / alpha / sin_delta axes.
 
     Precedence: explicit ``FSTAT_N_MC``/``_ALPHA``/``_SINDELTA`` > explicit
     ``FSTAT_N_PER_AXIS`` > the anisotropic defaults (3 / 8 / 8).
+    (For the Mc axis prefer :func:`fstat_n_mc`, which is AUTO by default;
+    this fixed-default path remains for alpha / sin_delta and legacy
+    callers.)
     """
     raw = os.environ.get(name, "").strip()
     if raw:

@@ -11131,9 +11131,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # mid patience window, allowance in use, below ceiling. Evaluated
         # on the POST-increment state, so a cell that just incremented
         # (iters reset to 0) is not pending.
-        if _occ_max is not None:
+        # PENDING = engaged & occupied-at-cap & below ceiling — NOT
+        # "iters > 0" (2026-08-26 aligned-probe regression: a cell whose
+        # clock keeps RESETTING on genuine improvements is the LEAST
+        # converged cell of all, yet its iters read 0 at the stage check
+        # and the quiescence veto waved the handoff through). An engaged
+        # at-cap cell is mid-ramp whether it is improving (clock resets)
+        # or stagnating (counting to increment); it stops pending when an
+        # increment leaves it below-cap or it hits the ceiling.
+        _seen_pub = getattr(self, "_cap_ll_improved_once", None)
+        if (
+            _occ_max is not None
+            and _seen_pub is not None
+            and _seen_pub.shape == np.shape(cap)
+        ):
             self._cap_ramp_pending = int(np.sum(
-                (cap >= 1) & (iters > 0) & (_occ_max >= cap)
+                (cap >= 1) & _seen_pub & (_occ_max >= cap)
                 & (cap < _ceiling)
             ))
         else:
