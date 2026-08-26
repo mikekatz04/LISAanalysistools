@@ -5845,6 +5845,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # read the SAME table at their current f0, so the forward and
                 # reverse densities stay exactly symmetric.
                 _tbl = self._fstat_ctr_table_active()
+                # Per-row centers for SEARCH births/deaths (user ruling
+                # 2026-08-26): bypass the epoch table AND the unit-open
+                # cache so both sides fall through to the exact
+                # _fstat_dist_centers path (see _rj_birth_perrow).
+                if _tbl is not None and self._rj_birth_perrow():
+                    _tbl = None
+                    _ctr = None
                 # SNR-truncated distance proposal (2026-08-15, user-ruled
                 # lever; GB_RJ_SNR_TRUNC_DIST=0 restores the untruncated
                 # lognormal draw bit-identically): [GB_ACCEPT rj-split]
@@ -10763,6 +10770,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     if m2.any():
                         np.add.at(out[w], nb[w][m2], 1)
         return out
+
+    def _rj_birth_perrow(self) -> bool:
+        """Per-row F-stat centers for this move's fstat births/deaths?
+
+        USER RULING 2026-08-26 (completes the replace-move candidate-
+        quality fix 323ebf4b): SEARCH-cycle fstat RJ moves evaluate the
+        exact JKS maximizers (phi0/iota/psi + A_max distance center) at
+        each row's DRAWN (f0, Mc, sky) at proposal time — the f0-only
+        epoch table hands out the NODE-argmax extrinsics, which can be
+        badly inconsistent with the drawn intrinsics (the replace
+        forensics' match-0.001 root cause). Death rows inside the same
+        move take the same branch, so the forward/reverse densities stay
+        exactly symmetric; ``rj_prior_removal`` is untouched (prior
+        reverse density, no fstat centers). Cost: one batched F-stat
+        solve over the birth/death rows per RJ step (~0.1 s at probe
+        scale).
+
+        ``GB_RJ_BIRTH_CTR_MODE``: ``auto`` (default) = per-row for moves
+        with "search" in the name (the band-shutoff scoping idiom),
+        table for PE moves; ``perrow`` / ``table`` force either way.
+        """
+        mode = os.environ.get("GB_RJ_BIRTH_CTR_MODE", "auto").strip().lower()
+        if mode == "perrow":
+            return True
+        if mode == "table":
+            return False
+        return "search" in str(getattr(self, "name", "")).lower()
 
     def _harvest_death_capture(self, ids_death, d_h_raw, h_h_raw,
                                n_src) -> None:

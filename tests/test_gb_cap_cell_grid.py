@@ -1709,3 +1709,37 @@ class RampPendingEngagedTest(unittest.TestCase):
             _gate_step(m, state, self._stats(2000.0), occ)
         self.assertEqual(int(bi["cap_cell_leaf_cap"][self.CELL]), 2)
         self.assertEqual(int(m._cap_ramp_pending), 0)
+
+
+class RjBirthCtrModeTest(unittest.TestCase):
+    """User ruling 2026-08-26: SEARCH-cycle fstat births/deaths use PER-ROW
+    F-stat centers at proposal time (the replace-move fix, completed);
+    PE moves keep the epoch table. GB_RJ_BIRTH_CTR_MODE forces either."""
+
+    def setUp(self):
+        self._old = os.environ.pop("GB_RJ_BIRTH_CTR_MODE", None)
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("GB_RJ_BIRTH_CTR_MODE", None)
+        else:
+            os.environ["GB_RJ_BIRTH_CTR_MODE"] = self._old
+
+    def _named(self, name):
+        m = _move(1)
+        m.name = name
+        return m
+
+    def test_auto_search_moves_go_perrow(self):
+        self.assertTrue(self._named("rj_fstat_search")._rj_birth_perrow())
+
+    def test_auto_pe_moves_keep_the_table(self):
+        self.assertFalse(self._named("rj_fstat_pe")._rj_birth_perrow())
+
+    def test_env_forces_perrow_everywhere(self):
+        os.environ["GB_RJ_BIRTH_CTR_MODE"] = "perrow"
+        self.assertTrue(self._named("rj_fstat_pe")._rj_birth_perrow())
+
+    def test_env_forces_table_everywhere(self):
+        os.environ["GB_RJ_BIRTH_CTR_MODE"] = "table"
+        self.assertFalse(self._named("rj_fstat_search")._rj_birth_perrow())
