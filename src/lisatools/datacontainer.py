@@ -95,7 +95,10 @@ class DataResidualArray:
             if signal_domain is None:
                 if isinstance(input_signal_domain, domains.TDSettings):
                     # default for TD for now is in FD
-                    Nf = np.fft.rfft(np.ones(input_signal_domain.N)).shape[0]
+                    # The rfft of a real length-N signal has N // 2 + 1 bins.
+                    # This used to allocate a length-N ones array and run a
+                    # full FFT on it just to read that number off the shape.
+                    Nf = input_signal_domain.N // 2 + 1
                     df = 1. / (input_signal_domain.N * input_signal_domain.dt)
                     signal_domain = domains.FDSettings(Nf, df, force_backend=input_signal_domain.force_backend)
 

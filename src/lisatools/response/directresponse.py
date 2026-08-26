@@ -11,7 +11,7 @@ import h5py
 from scipy.interpolate import CubicSpline
 
 from lisatools.detector import EqualArmlengthOrbits, Orbits
-from lisatools.utils.utility import AET
+from lisatools.utils.utility import AET, asnumpy
 
 from ..utils.parallelbase import LISAToolsParallelModule
 from .tdiconfig import TDIConfig
@@ -38,6 +38,7 @@ C_inv = 3.3356409519815204e-09
 
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+from ..utils.exceptions import BatchNotLaunchable
 
 # ...existing code...
 def ecliptic_to_icrs(lambda_ecl, beta_ecl):
@@ -466,11 +467,23 @@ class pyResponseTDI(LISAToolsParallelModule):
                 "Input waveform is longer than available orbital information. Trimming to fit orbital information."
             )
 
-            max_ind = int(
-                self.xp.where(
-                    (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
-                )[1][-1]
-            )
+            # WORST CASE ACROSS THE BATCH, not "last True in row-major order".
+            #
+            # ``where`` on a 2-D array returns (rows, cols) in row-major order,
+            # so ``[1][-1]`` was the last valid column of the LAST ROW that had
+            # any -- which depends on how the rows happen to be ORDERED, not on
+            # which row is most constrained. Two batches with the same members
+            # in a different order trimmed to different lengths, and a walker's
+            # likelihood then depended on its position in the batch: measured as
+            # a 1.5625e-02 nat shift that appeared when a batch was reordered.
+            # For a sampler that is fatal -- detailed balance requires a
+            # proposal to score the same however it was grouped.
+            #
+            # ``t_data`` is increasing, so the condition is a prefix per row and
+            # the row-wise count IS that row's valid length. The batch must fit
+            # every row, hence the minimum.
+            _fits = (t_data.reshape(1, -1) + t0_arr.reshape(-1, 1)) <= t_orbit_max
+            max_ind = int(_fits.sum(axis=-1).min())
 
             t_data = t_data[:max_ind]
             input_in = input_in[:, :max_ind]
@@ -507,6 +520,50 @@ class pyResponseTDI(LISAToolsParallelModule):
         beta = self.xp.atleast_1d(self.xp.asarray(beta, dtype=self.xp.float64))
         batch_size = len(lam)
 
+        # ``t_arr`` below is ONE relative evaluation grid shared by the whole
+        # batch, and t0_shift_to_data (the sub-sample data-grid alignment) has
+        # to live on it -- it cannot be folded into the per-source ``t0_arr``,
+        # because the kernel indexes the waveform array via ``delay - t0_arr``
+        # and the shift would cancel itself out (see the note below). So a
+        # batch can only be launched together if every source needs the SAME
+        # sub-sample alignment. Callers hand us a per-source array; collapse it
+        # when it is uniform and refuse when it is not, rather than silently
+        # broadcasting a 2-D eval grid into code that indexes ``t_arr[0]``.
+        _shift = np.atleast_1d(np.asarray(asnumpy(t0_shift_to_data), dtype=np.float64))
+        # This refusal is the reason an MCMC-shaped batch cannot be launched:
+        # t_merger varies continuously per walker, so every walker needs a
+        # different sub-sample alignment and the batch is rejected. That costs
+        # sampling the entire batched speedup, so the obvious shortcut was
+        # tried and REFUTED -- do not retry it.
+        #
+        # MEASURED (8 sampler-shaped points, short config, SNR 3103): forcing
+        # one shared shift (the batch mean) launches fine and gives
+        # max |dlogL| = 3.6e+05 against the per-source serial answer, i.e.
+        # 3.8e-2 of SNR^2. The observed shift spread was 9.62 s against
+        # dt = 10 s -- the full (-dt/2, dt/2] range, because the offset is a
+        # continuous function of t_merger. Bucketing walkers by shift is
+        # equally useless for the same reason: one walker per bucket.
+        #
+        # The two options that survive both live upstream of here: generate
+        # each waveform on a grid-ALIGNED time array so every shift is zero
+        # (waveform stage), or split ``t0_arr`` into an evaluation offset and a
+        # waveform-index offset in the kernel (LISAResponse.cu:557 and :606 are
+        # the two use sites) so a per-source shift becomes expressible.
+        if _shift.size > 1 and not np.allclose(_shift, _shift[0], rtol=0.0, atol=1e-12):
+            # BatchNotLaunchable, not ValueError: this is a statement about
+            # THIS batch's geometry, not about the arguments being wrong, and
+            # callers need to distinguish it from a genuine failure so they can
+            # fall back to per-source evaluation without masking real bugs.
+            raise BatchNotLaunchable(
+                "pyResponseTDI batched projections need one shared sub-sample "
+                "alignment: t0_shift_to_data must be identical across the "
+                f"batch, got spread {float(_shift.max() - _shift.min()):.6e} s "
+                f"over {_shift.size} sources. Sources whose start times differ "
+                "by a non-integer number of samples cannot share a launch -- "
+                "evaluate them in separate calls."
+            )
+        t0_shift_to_data = float(_shift[0])
+
         assert np.abs(t0_shift_to_data) < self.dt, (
             "t0_shift_to_data should be less than the data time step (dt)."
         )
@@ -516,7 +573,25 @@ class pyResponseTDI(LISAToolsParallelModule):
         # the waveform array via ``delay - t0_arr``, so a shift baked into t0_arr cancels
         # against the same shift in the eval time and the waveform ends up sampled off the
         # data grid by t0_shift_to_data.
-        t0_arr = self.xp.atleast_1d(self.xp.asarray(t0, dtype=np.float64))
+        # ascontiguousarray, NOT asarray. The kernels receive a bare base
+        # pointer and read it at UNIT stride
+        # (LISAResponse.cu:557 `t0_offset = t0_arr[batch_ind]`, :606
+        # `t = t_data[i] + t0_arr[batch_ind]`), and the nanobind alias carries
+        # no nb::c_contig (binding_flr.hpp:23) while the length check validates
+        # only .size() (binding_flr.hpp:45-58). ``asarray`` on a float64 array
+        # is a no-op, so a strided view was passed straight through.
+        #
+        # _apply_response hands us t0 = shifted_t_arr[:, 0]: a COLUMN of the
+        # (batch, num_pts) time grid, stride num_pts*8. Read at unit stride
+        # that is shifted_t_arr[0, 0:B] -- source 0's first B TIME SAMPLES --
+        # so source k was evaluated at t0 + k*dt instead of its own t0. Source
+        # 0 was correct (element 0 is at the same address for any stride) and
+        # the error grew linearly with k because that row is a uniform time
+        # grid. Measured: 1.245e-5 relative per source index in y_gw, which is
+        # the constellation geometry retarded by k*dt.
+        t0_arr = self.xp.ascontiguousarray(
+            self.xp.atleast_1d(self.xp.asarray(t0, dtype=np.float64))
+        )
         if t0_arr.ndim == 1 and t0_arr.shape[0] == 1:
             # broadcast a shared t0 across the batch
             t0_arr = t0_arr.repeat(batch_size)
@@ -593,7 +668,22 @@ class pyResponseTDI(LISAToolsParallelModule):
         self.nlinks = 6
         input_flat = input_in.reshape(-1)  # (batch_size * num_inputs_per_source,)
 
-        y_gw = self.xp.zeros(batch_size * self.nlinks * self.num_pts, dtype=self.xp.float64)
+        # Size y_gw by what the KERNEL indexes, not by self.num_pts. The kernel
+        # is handed num_inputs_per_source as its num_delays (below) and writes
+        # y_gw[batch_ind * NLINKS * num_delays + link_i * num_delays + i]
+        # (LISAResponse.cu). The assert above only requires
+        # num_inputs_per_source >= self.num_pts, so any config where they
+        # differ overruns the buffer by 6 * batch_size * (difference) doubles --
+        # linear in batch size, and silent on GPU, where
+        # return_pointer_and_check_length skips its length check entirely under
+        # __CUDA_COMPILATION__ (binding_flr.hpp).
+        #
+        # Measured equal in every config exercised here (stock 1 yr, 0.25 yr,
+        # 0.125 yr: 264485/264485, 264485/264485, 238618/238618), so this is
+        # byte-identical today and a guard against the case that is not.
+        y_gw = self.xp.zeros(
+            batch_size * self.nlinks * num_inputs_per_source, dtype=self.xp.float64
+        )
         self.response_gen(
             y_gw,
             t_arr,

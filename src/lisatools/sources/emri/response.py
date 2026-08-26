@@ -64,7 +64,21 @@ class _EMRISpecialFrameWrap:
             warnings.simplefilter("ignore", DeprecationWarning)
             return self._wave_gen(*params, **kwargs)
 
+    #: Attributes this wrapper must NEVER forward from the wrapped generator.
+    #: ``supports_batch`` is a capability whose entire contract is
+    #: default-deny: the batched likelihood path reads it with
+    #: ``getattr(gen, "supports_batch", False)``, so blanket forwarding would
+    #: let a flag set anywhere below -- on ``ResponseWrapper``, say -- opt
+    #: every EMRI generator in silently, past a gate that is supposed to
+    #: require a deliberate declaration.
+    _NO_FORWARD = frozenset({"supports_batch"})
+
     def __getattr__(self, name):
+        if name in self._NO_FORWARD:
+            raise AttributeError(
+                f"{type(self).__name__} deliberately does not forward "
+                f"{name!r} from the wrapped generator; see _NO_FORWARD."
+            )
         return getattr(self._wave_gen, name)
 
 

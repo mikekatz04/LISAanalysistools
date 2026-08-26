@@ -16,8 +16,10 @@ from ...domains import DomainSettingsBase
 from ...utils.constants import *
 from ...jax.jaxbase import JaxBase
 from ..waveformbase import SNRWaveform, TDPyResponseWaveformBase, TDTDIOnFlyWaveformBase
+from ...utils.exceptions import BatchNotLaunchable
 
 try:
+    import jax
     import jax.numpy as jnp
     import phentax
 
@@ -25,6 +27,12 @@ try:
 except (ImportError, ModuleNotFoundError):
     phentax_available = False
     jnp = np  # type: ignore
+    # Bind the name even when the import failed. ``gridaligned`` imports
+    # ``jax`` from here, and ``sources/bbh/__init__.py`` imports that module
+    # unconditionally, so leaving it unbound turned an OPTIONAL dependency
+    # into a hard one: without jax, importing lisatools.sources.bbh at all
+    # failed, locking out users who only want the pure-bbhx BBHSNRWaveform.
+    jax = None  # type: ignore
 
 if TYPE_CHECKING:
     try:
@@ -537,6 +545,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         ref_freq: float | np.ndarray | cp.ndarray = None,
         start_freq: float | np.ndarray | cp.ndarray = None,
         synchronize: bool = False,
+        onset_ramp: bool = True,
         **kwargs,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Generate polarizations for a batch of sources using phentax's vectorised path.
@@ -594,6 +603,30 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         num_keep = times_out.shape[-1]
 
         num_pad = num_keep - mask.sum(axis=1).astype(int)  # (Nbatch,)
+
+        if not onset_ramp:
+            # Bit-identical-to-``wave_gen`` mode. The batch is rectangular, so
+            # a source with fewer valid samples than the longest one carries
+            # ``num_pad`` leading samples from OUTSIDE its own mask -- the ramp
+            # is what suppresses those, so dropping it is only sound when no
+            # source needs padding. Refuse rather than silently splice
+            # unmasked waveform into the template.
+            if int(self.xp.max(num_pad)) > 0:
+                # A geometry refusal, not bad arguments: this batch's rows
+                # produced unequal valid lengths. Typed so the container can
+                # fall back to per-row evaluation instead of dying -- the
+                # serial loop handles this case fine.
+                raise BatchNotLaunchable(
+                    "onset_ramp=False requires every source in the batch to "
+                    "produce the same number of valid samples (num_pad == 0 "
+                    f"for all); got max num_pad = {int(self.xp.max(num_pad))}. "
+                    "Sources of differing length need the onset ramp to mask "
+                    "their leading pad -- either batch equal-length sources, "
+                    "or leave onset_ramp=True and rebuild any injection with "
+                    "the same setting so both sides of the likelihood match."
+                )
+            return (times_out, hplus[:, -num_keep:], hcross[:, -num_keep:])
+
         taper_length = int(self.tdi_buffer_time * 5 / self.dt)
         ramp = self._leading_onset_ramp(num_points=num_keep, num_pad=num_pad, taper_length=taper_length, xp=self.xp)  # (Nbatch, num_keep)
 
@@ -602,6 +635,8 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             hplus[:, -num_keep:] * ramp,  # apply ramp to h_plus to avoid sharp jump at the beginning of the waveform, which can cause issues with the TDI response
             hcross[:, -num_keep:] * ramp,  # apply ramp to h_cross to avoid sharp jump at the beginning of the waveform, which can cause issues with the TDI response
         )
+
+
 
 
 class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
@@ -653,7 +688,39 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             **phenom_kwargs,
             **wrapper_kwargs,
         }
-        
+
+    def get_evaluation_times(
+        self,
+        input_times: NDArrayLike,
+    ) -> NDArrayLike:
+        """Return every adaptive Phentax node above the leading TDI buffer.
+
+        The generic on-the-fly wrapper retains only its final ``max_length``
+        nodes.  Long MBHB waveforms can contain more than 2,000 post-merger
+        nodes, so that policy can discard the merger and the complete
+        inspiral.  Phentax's coarse-grained grid is already the intended
+        sparse response grid; retain it in full above the leading buffer.
+
+        No TRAILING buffer is removed.  Its purpose is to keep the retarded
+        reads the assembly makes above each evaluation time inside the
+        amplitude/phase spline, and :meth:`pad` already provides exactly that
+        -- it extends the spline ``ceil(tdi_buffer_time / right_dt)`` nodes
+        past the last one, i.e. at least ``tdi_buffer_time`` = 600 s, while
+        the largest such read is |k.x|/c <= 499 s.  Trimming here as well only
+        discarded live ringdown: ``right_dt`` is the FINE post-merger spacing
+        (0.39 s on mojito MBHB 0), so ``end_buffer`` ran to 1521 nodes and cut
+        the grid 600 s below the last node, at merger+798.9 s where the
+        ringdown is still 6.5e-5 of peak.  That truncation alone cost a
+        full-band mismatch of 1.65e-05.  BBHx's MBHTDIonFly keeps its
+        equivalent trim to a fixed 400 samples (~158 s at the same spacing)
+        and hands the spline a zero tail instead.
+        """
+
+        delta_t = self.xp.diff(input_times, axis=-1)
+        start_buffer, _, _, _ = self.get_tdi_buffers(delta_t)
+        return input_times[:, start_buffer:]
+
+
     def get_amp_phase(
         self,
         m1: np.ndarray | cp.ndarray,
@@ -697,7 +764,13 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             times, mode amplitudes and mode phases
         """
         
-        reference_kwargs = self.get_reference_quantities(merger_time=merger_time, start_freq=start_freq, ref_freq=ref_freq)
+        reference_kwargs = self.get_reference_quantities(
+            merger_time=merger_time,
+            start_freq=start_freq,
+            ref_freq=ref_freq,
+        )
+        waveform_delta_t = kwargs.pop("delta_t", self.dt)
+        reference_kwargs.update(kwargs)
 
         times, mask, amplitude, phase = self.waveform.compute_strain_components_amp_phase(
             self._to_jax(m1),
@@ -708,8 +781,8 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             self._to_jax(phi_ref),
             self._to_jax(inclination),
             self._to_jax(psi),
-            delta_t=self.dt,
-            **reference_kwargs
+            delta_t=waveform_delta_t,
+            **reference_kwargs,
         )
         #amplitude.block_until_ready()  # ensure all outputs are ready before moving to self.xp
 
@@ -718,15 +791,23 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         amplitude = self._from_jax(amplitude, do_synchronize=synchronize)
         phase = self._from_jax(phase, do_synchronize=synchronize)
 
-        times_out = self.trim_and_shift_times(times, mask, xp=self.xp, dt=self.dt)
+        times_out = self.trim_and_shift_times(
+            times,
+            mask,
+            xp=self.xp,
+            dt=waveform_delta_t,
+        )
 
         num_keep = times_out.shape[-1]
 
-        num_pad = num_keep - mask.sum(axis=1).astype(int)  # (Nbatch,)
-        taper_length = int(self.tdi_buffer_time * 5 / self.dt)
-        ramp = self._leading_onset_ramp(num_points=num_keep, num_pad=num_pad, taper_length=taper_length, xp=self.xp)  # (Nbatch, num_keep)
-
-        return times_out, amplitude[..., -num_keep:] * ramp, phase[..., -num_keep:] * ramp # should we also apply the ramp to the phase? 
+        # Do not taper an adaptive grid by node index.  A fixed number of
+        # sparse inspiral nodes can span days, and multiplying phase by an
+        # onset ramp changes the waveform rather than merely windowing it.
+        return (
+            times_out,
+            amplitude[..., -num_keep:],
+            phase[..., -num_keep:],
+        )
 
     def process_amp_phase(
         self, amp: np.ndarray | cp.ndarray, phase: np.ndarray | cp.ndarray
