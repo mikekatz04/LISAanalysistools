@@ -1743,3 +1743,58 @@ class RjBirthCtrModeTest(unittest.TestCase):
     def test_env_forces_table_everywhere(self):
         os.environ["GB_RJ_BIRTH_CTR_MODE"] = "table"
         self.assertFalse(self._named("rj_fstat_search")._rj_birth_perrow())
+
+
+class CtrGbFreeWindowTest(unittest.TestCase):
+    """User ruling 2026-08-26: per-row F-stat centers must see the SAME
+    GB-free residual the epoch fit sees (all reference-walker GBs restored)
+    — otherwise centers collapse at spots the reference walker has found,
+    choking the other walkers' births."""
+
+    def setUp(self):
+        for k in ("GB_RJ_CTR_GBFREE", "GB_RJ_BIRTH_CTR_MODE"):
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k in ("GB_RJ_CTR_GBFREE", "GB_RJ_BIRTH_CTR_MODE"):
+            os.environ.pop(k, None)
+
+    def _move_with_recorder(self, name="rj_fstat_search", n_ref=3):
+        m = _move(1)
+        m.name = name
+        m.calls = []
+        m.remove_sources_from_residual = (
+            lambda model, sorter, **sel: m.calls.append(("expose", dict(sel))))
+        m.add_sources_to_residual = (
+            lambda model, sorter, **sel: m.calls.append(("restore", dict(sel))))
+        sorter = SimpleNamespace(
+            get_subset_bool=lambda **sel: np.ones(n_ref, dtype=bool))
+        return m, sorter
+
+    def test_window_exposes_and_restores_for_search(self):
+        m, sorter = self._move_with_recorder()
+        with m._ctr_gbfree_window(None, sorter, 0):
+            self.assertEqual(m.calls, [("expose", dict(
+                temp=0, walker=0, apply_inds=True))])
+        self.assertEqual(m.calls[-1][0], "restore")
+
+    def test_restore_runs_on_exception(self):
+        m, sorter = self._move_with_recorder()
+        with self.assertRaises(RuntimeError):
+            with m._ctr_gbfree_window(None, sorter, 0):
+                raise RuntimeError("boom")
+        self.assertEqual([c[0] for c in m.calls], ["expose", "restore"])
+
+    def test_knob_zero_disables(self):
+        os.environ["GB_RJ_CTR_GBFREE"] = "0"
+        m, sorter = self._move_with_recorder()
+        with m._ctr_gbfree_window(None, sorter, 0):
+            pass
+        self.assertEqual(m.calls, [])
+
+    def test_empty_reference_walker_is_a_noop(self):
+        m, sorter = self._move_with_recorder(n_ref=0)
+        sorter.get_subset_bool = lambda **sel: np.zeros(0, dtype=bool)
+        with m._ctr_gbfree_window(None, sorter, 0):
+            pass
+        self.assertEqual(m.calls, [])
