@@ -811,8 +811,17 @@ export GB_RJ_GROUPED_INMODEL=1
 #      each =0 reverts that piece independently) --------------------------
 export GB_RJ_DIRECT_BATCH=1        # rigid batches -> one end-of-unit in-model
                                    # phase; =0 restores the staged scheduler
-export GB_RJ_LIVE_CAP_PICK=1       # live at-cap birth gate + same-unit
-                                   # re-entry (freed cells birth again)
+# LIVE-CAP PICK OFF (user ruling 2026-08-27, snapshot-2 timing autopsy):
+# under the ALIGNED divisor-1 grid, "saturated across all K cap cells"
+# is "all 1" -- every occupied band trips it at cap 1, so the live-cap
+# regime staged 879,846 dead at-cap birth slots (all temps) through the
+# sig-het in-model staging at ~2.3 s per 1024-slot sub-block ~= 220 s
+# per band unit -- THE 14x rj_fstat_search blowup vs v6 (whose
+# divisor-4 grid needed all 4 cells saturated, i.e. almost never).
+# =0 restores the 2026-08-12 unit-open exclusion: at-cap cells' dead
+# slots never stage; a cell freed by a death births next UNIT instead
+# of same-unit (immaterial at our removal acceptance).
+export GB_RJ_LIVE_CAP_PICK=0
 export GB_BUFFER_FIXED_CAPACITY=1  # ONE capacity buffer; smaller units
                                    # resize-rebind instead of drop+rebuild
 export GB_RJ_FSTAT_CTR_HOIST=1     # F-stat distance centers batched once per
