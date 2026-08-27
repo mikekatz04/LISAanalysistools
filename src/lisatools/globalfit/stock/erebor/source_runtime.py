@@ -597,9 +597,13 @@ def sobbh_leading_order_fdot(m1_msun, m2_msun, f_hz):
 def sobbh_fdot_max_at_window_end(full_basis, tobs, f_cap=None):
     """Worst leading-order fdot [Hz/s] over sources at the END of the window.
 
-    ``full_basis`` rows are the 11-param SOBBH waveform basis
-    (m1, m2, s1, s2, dist, f_low, phi_c, inc, psi, lam, beta) with f_low
-    quoted at the window start. Each source is evolved to t = tobs via the
+    ``full_basis`` rows are the 11-param SOBBH INJECTION basis
+    (m1, m2, s1, s2, dist, inc, f_low, ra, dec, psi, phi0 -- the order
+    ``SOBBHTDIonFlyWaveWrap.raw_td`` unpacks; f_low is COLUMN 6, in Hz,
+    quoted at the window start). NB the signal-het comp vector uses a
+    DIFFERENT order with f0 at index 5 -- reading column 5 here returns
+    the inclination and produced a 6.5x-overstated chirp bound (false
+    kappa=23 collapse warning, caught in production 2026-08-27). Each source is evolved to t = tobs via the
     0PN time-to-coalescence relation; a source that would merge in-window
     or chirp past ``f_cap`` (the run's max_freq) is capped at ``f_cap`` --
     the sweep bound then reflects the fastest chirp the band can hold.
@@ -608,7 +612,7 @@ def sobbh_fdot_max_at_window_end(full_basis, tobs, f_cap=None):
     rows = np.atleast_2d(np.asarray(full_basis, dtype=float))
     if rows.size == 0:
         return 0.0
-    m1, m2, f0 = rows[:, 0], rows[:, 1], rows[:, 5]
+    m1, m2, f0 = rows[:, 0], rows[:, 1], rows[:, 6]
     mc_s = (m1 * m2) ** 0.6 / (m1 + m2) ** 0.2 * MTSUN_SI
     # 0PN: tau(f) = (5/256) pi^{-8/3} Mc^{-5/3} f^{-8/3}
     tau0 = (5.0 / 256.0) * np.pi ** (-8.0 / 3.0) * mc_s ** (-5.0 / 3.0) \

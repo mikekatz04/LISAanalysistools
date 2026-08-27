@@ -47,8 +47,11 @@ class LeadingOrderFdotTest(unittest.TestCase):
 
 class FdotMaxAtWindowEndTest(unittest.TestCase):
     def _basis(self, f0=F0, m1=M1, m2=M2):
+        # injection-basis order: f_low at COLUMN 6 (column 5 is the
+        # inclination -- the exact column confusion the helper shipped
+        # with; pinned here so it cannot regress)
         row = np.zeros(11)
-        row[0], row[1], row[5] = m1, m2, f0
+        row[0], row[1], row[6] = m1, m2, f0
         return row[None, :]
 
     def test_grows_with_tobs(self):
