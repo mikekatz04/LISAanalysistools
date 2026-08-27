@@ -8412,11 +8412,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # reference test breaks for a reason unrelated to correctness.
         u = self._temper_rng.random(int(paccept.shape[0]))
         acc = paccept >= xp.log(xp.asarray(u))
-        n_acc = int(acc.sum())
+        # ONE data-dependent sync for the accept set; integer gathers after
+        # (the boolean getitems each re-synced). Orchestration audit
+        # 2026-08-27: this sweep was ~51 of the 70 ms/repeat-step.
+        acc_idx = xp.where(acc)[0]
+        n_acc = int(acc_idx.shape[0])
         if n_acc == 0:
             return 0
 
-        h, c = hot[acc], cold[acc]
+        h, c = hot[acc_idx], cold[acc_idx]
         t_h, t_c = t_i[h].copy(), t_i[c].copy()
         w_hc, b_hc = w_i[h], b_i[h]
         if census is not None:
@@ -8428,14 +8432,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             census["acc_by_rung"] += _ar
 
         # --- sorter: every source of both cells trades its temperature ---
+        # BATCHED relabel (orchestration audit 2026-08-27): the per-pair
+        # loop paid 2 full-table isin + 2 int() syncs + 2 assert syncs
+        # PER ACCEPTED SWAP. Parity selection guarantees the 2K cells are
+        # pairwise disjoint, which is the batch primitive's contract.
         spec_h = band_sorter.get_special_band_index(t_h, w_hc, b_hc)
         spec_c = band_sorter.get_special_band_index(t_c, w_hc, b_hc)
-        for k in range(int(t_h.shape[0])):
-            band_sorter.exchange_cell_labels(
-                spec_h[k:k + 1], int(t_h[k]), w_hc[k:k + 1],
-                spec_c[k:k + 1], int(t_c[k]), w_hc[k:k + 1],
-                bands=b_hc[k:k + 1],
-            )
+        band_sorter.exchange_cell_labels_batch(
+            spec_h, t_h, w_hc, spec_c, t_c, w_hc, bands=b_hc)
 
         # --- per-cell ledgers follow the MODEL, so they trade too ---
         for arr in (ll_change_log,):

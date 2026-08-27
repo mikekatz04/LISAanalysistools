@@ -4565,6 +4565,52 @@ class BandSorter(LISAToolsParallelModule):
         self.temp_inds[keep_b] = temp_a
         self.walker_inds[keep_b] = walkers_a[take_b]
 
+    def exchange_cell_labels_batch(self, specials_a, temps_a, walkers_a,
+                                   specials_b, temps_b, walkers_b,
+                                   bands=None) -> None:
+        """Vectorized pairwise exchange for K DISJOINT cell pairs.
+
+        Semantically identical to K sequential
+        :meth:`exchange_cell_labels` calls with single-cell sets --
+        ``specials_a[k]``'s sources take labels ``(temps_b[k],
+        walkers_b[k], specials_b[k])`` and vice versa -- PROVIDED the 2K
+        cells are pairwise disjoint (each cell in at most one pair). The
+        vertical sweep's cold-rung parity selection and the tempering
+        chunk grid both guarantee that.
+
+        WHY (orchestration audit 2026-08-27): the per-pair loop cost 2
+        full-table ``isin`` + 2 ``int()`` syncs + 2 assert syncs PER
+        ACCEPTED SWAP (~51 of the 70 ms/repeat-step). This does ONE
+        membership pass for all pairs. The per-call band assert is gated
+        behind ``GB_INDEX_ASSERTS`` -- the block-end
+        ``special_index_check`` remains the standing regression alarm.
+        """
+        xp = self.xp
+        src = xp.concatenate(
+            [xp.asarray(specials_a).flatten(),
+             xp.asarray(specials_b).flatten()])
+        if int(src.shape[0]) == 0:
+            return
+        dst_spec = xp.concatenate(
+            [xp.asarray(specials_b).flatten(),
+             xp.asarray(specials_a).flatten()])
+        dst_temp = xp.concatenate(
+            [xp.asarray(temps_b).flatten(), xp.asarray(temps_a).flatten()])
+        dst_walk = xp.concatenate(
+            [xp.asarray(walkers_b).flatten(),
+             xp.asarray(walkers_a).flatten()])
+        order = xp.argsort(src)
+        keep = xp.isin(self.special_band_inds, src)
+        take = order[xp.searchsorted(
+            src[order], self.special_band_inds[keep], side="left")]
+        if bands is not None and _index_asserts():
+            bb = xp.concatenate(
+                [xp.asarray(bands).flatten(), xp.asarray(bands).flatten()])
+            assert xp.all(self.band_inds[keep] == bb[take])
+        self.special_band_inds[keep] = dst_spec[take]
+        self.temp_inds[keep] = dst_temp[take]
+        self.walker_inds[keep] = dst_walk[take]
+
     @property
     def N_vals(self) -> np.ndarray:
         return self.band_N_vals[self.band_inds]

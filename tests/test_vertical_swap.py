@@ -80,6 +80,21 @@ class _FakeSorter:
         self.special_band_inds[keep_b] = np.atleast_1d(sa)[0]
         self.temp_inds[keep_b] = ta
 
+    def exchange_cell_labels_batch(self, sa, ta, wa, sb, tb, wb,
+                                   bands=None):
+        """Batch = pairwise loop over this fake's own exchange (the real
+        primitive's equivalence is pinned by
+        BatchExchangeEquivalenceTest against the REAL BandSorter)."""
+        sa, sb = np.atleast_1d(sa), np.atleast_1d(sb)
+        ta, tb = np.atleast_1d(ta), np.atleast_1d(tb)
+        wa, wb = np.atleast_1d(wa), np.atleast_1d(wb)
+        for k in range(sa.size):
+            self.exchange_cell_labels(
+                sa[k:k + 1], int(ta[k]), wa[k:k + 1],
+                sb[k:k + 1], int(tb[k]), wb[k:k + 1],
+                bands=None if bands is None
+                else np.atleast_1d(bands)[k:k + 1])
+
     # a vertical swap must never reach for the template twin: the in-model
     # buffer has none (use_template_arr is True only inside run_tempering)
     def swap_template_slots(self, *a, **k):  # pragma: no cover - must not run
@@ -550,6 +565,85 @@ class VerticalWiringTest(unittest.TestCase):
     def test_ladder_untouched_by_the_in_model_loop(self):
         _, _, band_temps, _ = self._problem(6, vertical=True)
         np.testing.assert_array_equal(band_temps, _ladder())
+
+
+class _RealMethodSorter:
+    """Duck-typed state carrying ONLY what the real BandSorter label
+    methods touch, so the real (unbound) exchange methods can run against
+    it on CPU: xp, special_band_inds, temp_inds, walker_inds, band_inds."""
+
+    xp = np
+
+    def __init__(self, t, w, b, nwalkers):
+        self.temp_inds = np.asarray(t).copy()
+        self.walker_inds = np.asarray(w).copy()
+        self.band_inds = np.asarray(b).copy()
+        self.nwalkers = nwalkers
+        self.special_band_inds = pack_special_index(
+            self.temp_inds, self.walker_inds, self.band_inds, nwalkers)
+
+
+class BatchExchangeEquivalenceTest(unittest.TestCase):
+    """exchange_cell_labels_batch == K sequential pairwise calls.
+
+    The orchestration audit (2026-08-27): the vertical sweep called
+    exchange_cell_labels once PER ACCEPTED SWAP -- 2 full-table isin + 2
+    int() syncs + 2 assert syncs each, ~51 ms/step of the 70 ms repeat
+    cost. The batch primitive does ONE membership pass for all K disjoint
+    pairs. Equivalence requires the 2K cells to be pairwise disjoint,
+    which the sweep's parity selection guarantees.
+    """
+
+    def _states(self):
+        # 3 pairs across distinct (temp, walker) cells of band 1, walkers
+        # 0/1, temps 0..3; several sources per cell + bystander rows.
+        t = np.array([0, 0, 1, 1, 2, 2, 3, 3, 0, 1, 2])
+        w = np.array([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1])
+        b = np.array([1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2])
+        return (_RealMethodSorter(t, w, b, NWALKERS),
+                _RealMethodSorter(t, w, b, NWALKERS))
+
+    def test_batch_matches_sequential(self):
+        from lisatools.globalfit.moves.gbbands import BandSorter
+
+        s_seq, s_bat = self._states()
+        # pairs: (t=0,w=0,b=1)<->(t=1,w=0,b=1), (t=2,w=0,b=1)<->(t=3,w=0,b=1),
+        #        (t=0,w=1,b=2)<->(t=2,w=1,b=2)  -- disjoint cells
+        t_h = np.array([1, 3, 2])
+        t_c = np.array([0, 2, 0])
+        w_p = np.array([0, 0, 1])
+        b_p = np.array([1, 1, 2])
+        sp_h = pack_special_index(t_h, w_p, b_p, NWALKERS)
+        sp_c = pack_special_index(t_c, w_p, b_p, NWALKERS)
+
+        for k in range(3):
+            BandSorter.exchange_cell_labels(
+                s_seq, sp_h[k:k + 1], int(t_h[k]), w_p[k:k + 1],
+                sp_c[k:k + 1], int(t_c[k]), w_p[k:k + 1],
+                bands=b_p[k:k + 1])
+        BandSorter.exchange_cell_labels_batch(
+            s_bat, sp_h, t_h, w_p, sp_c, t_c, w_p, bands=b_p)
+
+        np.testing.assert_array_equal(
+            s_seq.special_band_inds, s_bat.special_band_inds)
+        np.testing.assert_array_equal(s_seq.temp_inds, s_bat.temp_inds)
+        np.testing.assert_array_equal(s_seq.walker_inds, s_bat.walker_inds)
+        np.testing.assert_array_equal(s_seq.band_inds, s_bat.band_inds)
+        # sanity: something actually moved, and bystanders did not
+        self.assertFalse(np.array_equal(
+            s_bat.temp_inds, self._states()[0].temp_inds))
+        self.assertEqual(int(s_bat.temp_inds[9]), 1)  # untouched bystander
+
+    def test_batch_empty_is_noop(self):
+        from lisatools.globalfit.moves.gbbands import BandSorter
+
+        s, ref = self._states()
+        e = np.array([], dtype=np.int64)
+        BandSorter.exchange_cell_labels_batch(
+            s, e, e, e, e, e, e, bands=None)
+        np.testing.assert_array_equal(s.temp_inds, ref.temp_inds)
+        np.testing.assert_array_equal(
+            s.special_band_inds, ref.special_band_inds)
 
 
 if __name__ == "__main__":
