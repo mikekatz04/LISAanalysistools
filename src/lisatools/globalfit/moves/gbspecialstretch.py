@@ -3114,6 +3114,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     sp.get("kernel", 0), sp.get("deaths", 0),
                     sp.get("death_acc", 0))
                 self._rj_split = None
+            # rj_replace's own swap census (populated only by
+            # _run_replace_step; no-op for every other move).
+            self._replace_census_report()
             # High-f band shutoff bookkeeping — OCCUPANCY-based (user key
             # change 2026-08-15): cold-chain per-band occupancy, max over
             # walkers, once per iteration on the designated move (log
@@ -6364,6 +6367,56 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 )
         _mark("rj_fill")
 
+    def _replace_census_add(self, t_i, accept, delta_ll, n_snr_gated,
+                            n_nonfinite):
+        """Accumulate the per-propose rj_replace acceptance census.
+
+        The ``[GB_ACCEPT rj-split]`` census covers only the birth/death
+        path, so replace's own swap acceptance was invisible in
+        production (user request 2026-08-27 -- the probe verdicts, cold
+        ~0.2%, could never be checked at full band). Device arrays in,
+        small host scalars stored; printed + reset by
+        :meth:`_replace_census_report` at propose end.
+        """
+        t_h = np.asarray(asnumpy(t_i))
+        a_h = np.asarray(asnumpy(accept), dtype=bool)
+        d_h = np.asarray(asnumpy(delta_ll), dtype=float)
+        cold = t_h == 0
+        sp = getattr(self, "_replace_split", None)
+        if sp is None:
+            sp = self._replace_split = dict(
+                proposals=0, proposals_cold=0, acc=0, acc_cold=0, snr=0,
+                nonfinite=0, dll_cold_sum=0.0, dll_cold_max=float("-inf"))
+        sp["proposals"] += int(a_h.size)
+        sp["proposals_cold"] += int(cold.sum())
+        sp["acc"] += int(a_h.sum())
+        sp["acc_cold"] += int((a_h & cold).sum())
+        sp["snr"] += int(n_snr_gated)
+        sp["nonfinite"] += int(n_nonfinite)
+        d_acc_cold = d_h[a_h & cold]
+        if d_acc_cold.size:
+            sp["dll_cold_sum"] += float(d_acc_cold.sum())
+            sp["dll_cold_max"] = max(
+                sp["dll_cold_max"], float(d_acc_cold.max()))
+
+    def _replace_census_report(self):
+        """Print + reset the replace census (one line per propose)."""
+        sp = getattr(self, "_replace_split", None)
+        if not sp:
+            return
+        n, nc = sp["proposals"], sp["proposals_cold"]
+        a, ac = sp["acc"], sp["acc_cold"]
+        mean_dll = sp["dll_cold_sum"] / max(ac, 1)
+        max_dll = sp["dll_cold_max"] if ac else float("nan")
+        logger.info(
+            f"[GB_ACCEPT replace-split {self.name}] proposals {n}"
+            f" (cold {nc}): accepted {a} = {a / max(n, 1):.4f}"
+            f" (cold {ac}/{nc} = {ac / max(nc, 1):.4f}) |"
+            f" gated: snr {sp['snr']} nonfinite {sp['nonfinite']} |"
+            f" cold-accepted dll mean {mean_dll:.1f} max {max_dll:.1f}"
+        )
+        self._replace_split = None
+
     def _run_replace_step(self, model, band_sorter, buffer_obj, band_temps,
                           picked, ll_change_log, prop_counts, acc_counts,
                           round_i, scheduler):
@@ -6725,6 +6778,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # exposed residual). Skipped under the debug force-accept knob
         # (smoke-only residual-identity exercise).
         _force_accept = os.environ.get("GB_REPLACE_FORCE_ACCEPT", "0") == "1"
+        _n_snr_gated = 0
         if not _force_accept:
             opt_snr_new = xp.sqrt(xp.maximum(h_h_new, 0.0))
             _lim = buffer_obj.opt_snr_rej_samp_limit
@@ -6733,6 +6787,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 det_snr_new = ((delta_new + 0.5 * h_h_new)
                                / xp.maximum(opt_snr_new, 1e-300))
                 _bad_new = _bad_new | (det_snr_new < _lim)
+            _n_snr_gated = int(np.asarray(asnumpy(ok & _bad_new)).sum())
             delta_ll[ok & _bad_new] = -1e300
 
         beta = band_temps[b_i, t_i]
@@ -6757,6 +6812,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # identity can be asserted deterministically. NEVER for real
             # sampling.
             accept = ~bad_mask & (prev_logp > -1e229)
+
+        try:
+            # replace acceptance census (printed at propose end);
+            # diagnostics must never kill a propose.
+            self._replace_census_add(
+                t_i, accept, delta_ll, _n_snr_gated,
+                int(np.asarray(asnumpy(bad_mask)).sum()))
+        except Exception:
+            pass
 
         prop_counts[0][t_i, w_i, b_i] += 1
 
