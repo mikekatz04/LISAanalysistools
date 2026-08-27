@@ -320,13 +320,21 @@ export GB_RJ_SNR_TRUNC_DIST=1      # birth distance draw truncated at the
                                    # analytic SNR-5 boundary; truncated
                                    # density in the factors (DB-exact);
                                    # =0 restores the plain lognormal
-# Per-class in-model repeats: newborns polish hard, survivors get real
-# polish too (2026-08-26 user ruling, rides the at-cap pool reversal
-# c251b267: ALL alive GBs pool every round, so the survivor budget is
-# THE polish budget for seated sources; was 25). NOTE these env pins
-# beat the PE mode default as well — both phases run 200/100 here.
-export GB_INMODEL_REPEATS_NEWBORN=200
-export GB_INMODEL_REPEATS_SURVIVOR=100
+# Per-class in-model repeats (user ruling 2026-08-27, snapshot-4
+# timing): concentrate the polish budget AT BIRTH and let iteration
+# RATE do the rest. Newborns 250 (was 200): a birth lands at grid
+# resolution and must climb its peak before removal judges it — this
+# is where repeats pay. Survivors 25 (was 100, the v6 production
+# value): the highf endgame showed survivor polish saturates (100/rnd
+# for ~150 rounds never moved a stuck walker — transport does that),
+# while survivor cost scales with alive count x 3 RJ moves and was
+# heading to dominance at 15-20k leaves. Faster rows also tick the
+# iteration-clocked cap patience faster and buy more band/vertical
+# swap rounds per hour ("more rapid finishing and ensemble
+# tempering"). NOTE these env pins beat the PE mode default as well —
+# both phases run 250/25.
+export GB_INMODEL_REPEATS_NEWBORN=250
+export GB_INMODEL_REPEATS_SURVIVOR=25
 
 # VERTICAL TEMPERING ON (2026-08-26 user ruling: "this is crucial").
 # Per-repeat vertical band-temperature swaps inside the in-model loop
