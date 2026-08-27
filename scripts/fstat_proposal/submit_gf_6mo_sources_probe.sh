@@ -186,17 +186,19 @@ fi
 export FILE_STORE_DIR=${STORE_DIR}
 export BASE_FILE_NAME=gf_prod_6mo_sources
 
-# ---- per-branch tempering (user ruling 2026-08-26): 6 rungs everywhere ------
-# Source branches temper internally (engine ntemps is retired to 1);
-# defaults were 4. Ladder cost scales linearly in rungs per branch move.
-export MBH_NTEMPS=6
-export EMRI_NTEMPS=6
-export SOBBH_NTEMPS=6
+# ---- per-branch tempering (user ruling 2026-08-27): 4 rungs everywhere ------
+# Source branches temper internally (engine ntemps is retired to 1).
+# 6 rungs measured too costly on this box (mbh leaf ~24 min); back to 4
+# (the historical per-branch default -- ladder cost is linear in rungs).
+export MBH_NTEMPS=4
+export EMRI_NTEMPS=4
+export SOBBH_NTEMPS=4
 # Fancy (walker-permuting) temperature swap every 10 iterations (user
 # ruling 2026-08-27): the measured cost was ~17 min of an ~18.5-min MBH
 # leaf visit — ~5x the in-model work — when it fired every propose.
-# permute_every is a cadence in proposes again (first propose after a
-# restart always fires; <=0 disables).
+# permute_every is a cadence in proposes again; the FIRST propose after
+# a (re)start never fires (iteration 1 = build/JIT transients) -- swaps
+# land on iterations 10, 20, ... (<=0 disables).
 export MBH_PERMUTE_EVERY=10
 export EMRI_PERMUTE_EVERY=10
 export SOBBH_PERMUTE_EVERY=10

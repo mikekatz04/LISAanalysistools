@@ -101,7 +101,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         inner_moves: list of moves and their corresponding weights to be used for proposing new sources for the leaf.
         Tmax: maximum temperature for the temperature control.
         betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
-        permute_every: cadence (in proposes / engine iterations) for the walker-permuting (fancy) temperature swap: it fires at most once per leaf visit, on the final in-model repeat, on every ``permute_every``-th propose (1 = every propose; the first propose after a restart always fires); <= 0 disables it entirely (``{BRANCH}_PERMUTE_EVERY`` env override).
+        permute_every: cadence (in proposes / engine iterations) for the walker-permuting (fancy) temperature swap: it fires at most once per leaf visit, on the final in-model repeat, on proposes ``permute_every, 2*permute_every, ...`` (1 = every propose; the first propose after a restart never fires for cadence > 1); <= 0 disables it entirely (``{BRANCH}_PERMUTE_EVERY`` env override).
         pad_out_of_prior: whether to pad proposed sources that are out of the prior bounds to avoid JIT compilation issues. If True, proposed sources that are out of the prior bounds will be replaced with the first in-prior point. 
         **kwargs: additional keyword arguments for the Move class.
     """
@@ -1198,8 +1198,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.setup(model, state)
         tic = time.time()
         # Fancy-swap cadence clock: one tick per propose (engine
-        # iteration). In-memory, so the first propose after any restart
-        # fires (same convention as the GB temper cadence).
+        # iteration). In-memory; firings land on proposes N, 2N, ...
+        # (user ruling 2026-08-27: iteration 1 -- the build/JIT-transient
+        # iteration -- must NOT pay the swap).
         self._fancy_swap_clock = getattr(self, "_fancy_swap_clock", 0) + 1
 
         # cold-row agreement between the main state and this branch's
@@ -1529,13 +1530,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # leaf visit at 6 rungs, ~5x the in-model work; a
                 # per-iteration permute is unaffordable). permute_every
                 # is a CADENCE in proposes again: 1 = every propose (the
-                # previous behavior), N = every Nth (first propose after
-                # a restart always fires), <= 0 disables entirely
-                # ({BRANCH}_PERMUTE_EVERY env override).
+                # previous behavior), N = every Nth. The FIRST propose
+                # after a (re)start never fires (user ruling 2026-08-27):
+                # firings land on proposes N, 2N, 3N, ... <= 0 disables
+                # entirely ({BRANCH}_PERMUTE_EVERY env override).
                 fancy_swap = (
                     self.permute_every > 0
                     and repeat == self.num_repeats - 1
-                    and (self._fancy_swap_clock - 1) % self.permute_every == 0
+                    and self._fancy_swap_clock % self.permute_every == 0
                 )
                 if fancy_swap:
                     logger.debug(
