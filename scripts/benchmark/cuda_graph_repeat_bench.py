@@ -60,8 +60,15 @@ def build_step(cp, width, nvals, ndim):
     def step(state, rand_r):
         coords, chol, work, ll, partner = state
         u, jit = rand_r
-        # 1. proposal draw
-        prop = coords + cp.einsum("kij,kj->ki", chol, jit)
+        # 1. proposal draw -- batched (width, ndim) matvec as an explicit
+        # broadcast-multiply-reduce, NOT einsum: cupy raises
+        # NotImplementedError for cuBLAS calls during stream capture
+        # (gemmStridedBatchedEx -> setStream), measured on the production
+        # cluster 2026-08-27. This is also a PHASE-2 DESIGN CONSTRAINT:
+        # a real capture of the repeat step must keep cuBLAS out of the
+        # captured region (make the small proposal matvec an explicit
+        # kernel, or split capture segments around cuBLAS calls).
+        prop = coords + (chol * jit[:, None, :]).sum(axis=-1)
         # 2. waveform-scale work
         acc = work
         for _ in range(E):
