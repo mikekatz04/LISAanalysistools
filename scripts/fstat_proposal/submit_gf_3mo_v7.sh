@@ -681,10 +681,18 @@ export VGB_BAND_LAYERS=8
 # sub-blocks (GB_INMODEL_BATCH_MEMPOOL_FREE default on).
 export GB_INMODEL_SETUP_BATCH=1024
 export GB_INFOMAT_MEMPOOL_FREE=1
-# K=4, NOT v5's 32: (layer/8)/4 = layer/32 cells -- the staggered
-# cap-cell grid comes out BIT-IDENTICAL to v5's, so the cap machinery
-# is a controlled variable in this comparison.
-export GB_CAP_DIVISOR=4
+# ALIGNED CAP CELLS (user ruling 2026-08-26, probe-validated on the
+# highf grid2 + dense v7 probes): cap cells LINE UP with the sub-bands
+# (divisor 1, stagger 0) and the 1/4 overlap below supplies the
+# cross-edge bridging the staggered grid used to -- any two leaves
+# within the shared lip see a common covering cell, and in-model /
+# replace f0 moves may cross a cap edge into a foreign cell up to
+# cap+GB_CAP_INMODEL_HEADROOM. This replaces the v6-lineage staggered
+# K=4 grid (probe endgame: 23/24 walkers -> ONE near-truth leaf, caps
+# ramped 1->3 where the evidence demanded). CAP EDGES CHANGE vs the
+# v6/v7-early stores: start FRESH, or run the header's
+# migrate_gb_cap_grid.py step before resuming a v6-lineage store.
+export GB_CAP_DIVISOR=1
 # ############################################################################
 # ## V7 (2026-08-24) = V6 + OVERLAPPING CAP CELLS, nothing else.            ##
 # ## GB_CAP_OVERLAP_FRAC=0.25 widens each cap cell's enforcement span on   ##
@@ -710,14 +718,25 @@ export GB_CAP_DIVISOR=4
 # ############################################################################
 export GB_CAP_OVERLAP_FRAC=0.25
 export GB_SEARCH_RJ_REPLACE=1
-# V5: STAGGER the cap grid against the band grid (user design 2026-08-20).
-# Interior cap edges shift half a cell (2.17 uHz / ~17 FD bins at K=32) so
-# no cap edge coincides with a band edge; the cell at each band seam
-# straddles it (owned by the upper band). First grid cell is half-width,
-# last is 1.5 -- everything else identical widths, counts and storage.
-# REQUIRES a fresh store (the resume guard refuses the changed edges).
-# GB_CAP_STAGGER=0 reverts to the v4 nested grid instantly.
-export GB_CAP_STAGGER=1
+# Stagger OFF with the aligned-cells grid (2026-08-26): the overlap lip
+# now does the cross-edge work the half-cell shift used to; stagger +
+# divisor 1 would just re-misalign cells against the sub-bands.
+export GB_CAP_STAGGER=0
+# Per-cell cap CEILING + entry headroom + stage hold (probe-validated
+# 2026-08-26 set):
+#   GB_CAP_CELL_MAX=5     -- belt on the cap updater: a cell's cap never
+#                            exceeds 5 even under sustained D/2 evidence.
+#   GB_CAP_INMODEL_HEADROOM=2 -- in-model/replace f0 moves may enter a
+#                            foreign at-cap cell up to cap+2 (peak
+#                            handover across an edge); births still
+#                            respect the hard cap.
+#   GB_SEARCH_CAP_QUIESCENT=1 -- the nleaves plateau cannot end
+#                            gb_search while any engaged cap cell is
+#                            still mid-ramp (occupied at cap, below
+#                            ceiling): the stage holds for the ramp.
+export GB_CAP_CELL_MAX=5
+export GB_CAP_INMODEL_HEADROOM=2
+export GB_SEARCH_CAP_QUIESCENT=1
 # ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
 #      so the store's provenance is unambiguous) ----
 # Birth fix (1274a66c): births draw fdot_astro_ratio | (f0, Mc) from the
@@ -752,7 +771,11 @@ export GB_CAP_DRIFT_GATE=1
 # max-logL search. It must NOT ship at K=8: freezing empty cells at cap 1
 # with a 135-bin cell re-imposes the 24.5% exclusion above.
 export GB_LEAF_CAP_REQUIRE_IMPROVEMENT=1
-export GB_LEAF_CAP_MIN_ITERS=3
+# 5, not 3 (probe-validated 2026-08-26): with the one-shot engagement
+# latch + occupied-only patience (c251b267) the clock only runs where
+# it should, and the probes showed 5 gives the likelihood time to
+# consolidate before a cell promotes.
+export GB_LEAF_CAP_MIN_ITERS=5
 export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
