@@ -2719,11 +2719,24 @@ def build_gb_moves(
     # num_repeat_proposals for both classes (so lite presets stay cheap).
     # Search-NAMED moves get the search dict unconditionally (they only
     # run in search recipes); the pe-named moves resolve by mode below.
+    # GB birth SNR floor (user ruling 2026-08-26): SEARCH-cycle moves 8,
+    # PE-cycle moves 5. Search hunts above the noise ("SNR 5 = noise,
+    # keep 8" — the peak-floor ruling's birth-side counterpart; the
+    # SNR-5 floor measurably ballooned the hot ladder with noise
+    # births); PE refines an assembled model where the faint tail must
+    # stay reachable. GB_OPT_SNR_LIMIT_SEARCH / GB_OPT_SNR_LIMIT_PE
+    # override per stage; generic GB_OPT_SNR_LIMIT overrides both.
+    _snr_search = float(os.environ.get(
+        "GB_OPT_SNR_LIMIT_SEARCH", os.environ.get("GB_OPT_SNR_LIMIT", "8.0")))
+    _snr_pe = float(os.environ.get(
+        "GB_OPT_SNR_LIMIT_PE", os.environ.get("GB_OPT_SNR_LIMIT", "5.0")))
     _imr_search = {"inmodel_repeats_newborn_default": 200,
-                   "inmodel_repeats_survivor_default": 25}
+                   "inmodel_repeats_survivor_default": 25,
+                   "opt_snr_rej_samp_limit": _snr_search}
     _imr_pe = {
         "inmodel_repeats_newborn_default": gb_info.num_repeat_proposals,
         "inmodel_repeats_survivor_default": gb_info.num_repeat_proposals,
+        "opt_snr_rej_samp_limit": _snr_pe,
     }
     gb_search_prune_move = _RJBirth(
         *gb_move_args,
@@ -2997,7 +3010,12 @@ def build_gb_moves(
     # Per-class repeat defaults for the pe-NAMED moves follow the mode the
     # same way the flip fraction does (search campaigns that run through
     # the pe-named stage get 200/25; true PE gets num_repeat_proposals).
-    _imr_defaults = _imr_search if _gb_mode_search else _imr_pe
+    # PE-cycle moves ALWAYS take the PE floor (5 / env), even inside a
+    # search-mode recipe where they inherit the search repeat defaults.
+    _imr_defaults = {
+        **(_imr_search if _gb_mode_search else _imr_pe),
+        "opt_snr_rej_samp_limit": _snr_pe,
+    }
 
     # GB_PE_MOVES_STRICT=1 (2026-08-12 user ruling, for STAGED recipes that
     # carry BOTH search-named and pe-named GB stages in ONE process, e.g.

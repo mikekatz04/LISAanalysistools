@@ -373,10 +373,9 @@ export GB_TEMPER_VERTICAL=1
 # ~+40 s/it (tempering block x3); production ~+3%. =3 reverts.
 export GB_TEMPER_EVERY_PROPOSES=1
 
-# BIRTH SNR FLOOR 8 (matches the highf run intent; the floor-5 default
-# fed a hot-ladder noise balloon there. NOTE: requires 489ad3ff+ -- the
-# env resolves at the MOVE ctor).
-export GB_OPT_SNR_LIMIT=8
+# BIRTH SNR FLOOR: stage-split defaults (user ruling 2026-08-26) --
+# SEARCH moves 8, PE moves 5, resolved in the recipe; no pin needed
+# (a generic GB_OPT_SNR_LIMIT pin would force BOTH stages).
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First

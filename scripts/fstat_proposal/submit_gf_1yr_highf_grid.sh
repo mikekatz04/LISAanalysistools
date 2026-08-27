@@ -461,11 +461,9 @@ export GB_TEMPER_VERTICAL=1
 # ~+40 s/it (tempering block x3); production ~+3%. =3 reverts.
 export GB_TEMPER_EVERY_PROPOSES=1
 
-# BIRTH SNR FLOOR 5 -> 8 (2026-08-26 forensics: the SNR-5 floor fed a
-# hot-ladder noise balloon, 83->186 leaves in 19/32 noise-only bands,
-# whose at-cap cells blockaded cold births; peak-floor ruling has said
-# "SNR 5 = noise, keep 8" since 08-17).
-export GB_OPT_SNR_LIMIT=8
+# BIRTH SNR FLOOR: stage-split defaults (user ruling 2026-08-26) --
+# SEARCH moves 8, PE moves 5, resolved in the recipe; no pin needed
+# (a generic GB_OPT_SNR_LIMIT pin would force BOTH stages).
 # SIG-HET IN-MODEL: ON, settings BIT-IDENTICAL to v6 (user ruling
 # 2026-08-26: the method is validated; a brief =0 pin from the (6)-run
 # forensics was REVERTED once the settings diff showed zero drift vs
