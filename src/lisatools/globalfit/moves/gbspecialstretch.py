@@ -3986,6 +3986,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # the "unit" escape hatch (and the automatic fallback for a move
         # with no table).
         self._fstat_ctr = None
+        # Per-unit F-stat NM lane adapter (2026-08-27 GPU-imbalance fix):
+        # arm the all-device fan-out for this unit's reference walker.
+        # Reset unconditionally (same discipline as _fstat_ctr); rebuilt
+        # per unit because the parent residual changes at unit boundaries
+        # and the adapter snapshots the reference walker's rows.
+        # GB_FSTAT_NM_MULTIDEV=0 keeps the pinned single-device route;
+        # =check adds the pinned shadow compare (on-cluster parity gate).
+        self._fstat_nm_lanes = None
+        _nm_mode = os.environ.get("GB_FSTAT_NM_MULTIDEV", "1").strip().lower()
+        _wref = getattr(self, "_fstat_walker_ref", None)
+        if (
+            _nm_mode != "0"
+            and _wref is not None
+            and self.backend.uses_cupy
+            and getattr(model.analysis_container_arr, "gpus", None)
+            and len(model.analysis_container_arr.gpus) > 1
+        ):
+            try:
+                _comp, _mname = self._fstat_comp_method()
+                _call = _RoutedBandEngine.make_fstat_nm_lanes(
+                    _comp, _mname, model.analysis_container_arr,
+                    int(_wref), check=(_nm_mode == "check"),
+                    convert_to_ra_dec=False)
+                if _call is not None:
+                    self._fstat_nm_lanes = (int(_wref), _call)
+            except Exception:
+                logger.exception(
+                    "[fstat-NM] lane adapter build failed; keeping the "
+                    "pinned single-device route for this unit.")
         if (
             self.rj_fstat_dist_birth
             and not self.rj_replace
@@ -4696,29 +4725,43 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         back on the caller's device.
         """
         xp = self.xp
+        # Multi-device fan-out (2026-08-27, GPU-imbalance autopsy): when the
+        # per-unit lane adapter is armed for THIS reference walker, split the
+        # batch across every run device instead of pinning it to the walker's
+        # shard (route_fstat_ll partitions by walker, and every row here
+        # carries the same one). Falls through to the pinned route whenever
+        # the adapter is absent or armed for a different walker.
+        _lanes = getattr(self, "_fstat_nm_lanes", None)
+        if _lanes is not None and _lanes[0] == int(walker_ref):
+            return _lanes[1](params_phys)
         di = xp.full(params_phys.shape[0], int(walker_ref), dtype=xp.int32)
         holder = model.analysis_container_arr
-        # Under GB_SIGHET_INMODEL=1 ``gb_wdm_comp`` is a
-        # GBSignalHetComputations wrapper, which forwards only the band-engine
-        # surface (fill_global_wdm / get_ll_wdm / get_swap_ll_wdm / grads /
-        # information_matrix) to its chunked delegate -- it has no
-        # __getattr__, so get_fstat_ll_wdm is not reachable through it. Unwrap
-        # to the delegate: the F-stat is scored against the parent ACA residual
-        # passed explicitly below, never against the in-model heterodyne
-        # reference, so the chunked delegate is the correct target whether or
-        # not a sig-het reference is currently active.
+        comp, method_name = self._fstat_comp_method()
+        return _RoutedBandEngine.route_fstat_ll(
+            comp, method_name, holder, params_phys,
+            data_index=di, noise_index=di, convert_to_ra_dec=False)
+
+    def _fstat_comp_method(self):
+        """The (comp OBJECT, entry-point NAME) pair for per-row F-stat.
+
+        Under GB_SIGHET_INMODEL=1 ``gb_wdm_comp`` is a
+        GBSignalHetComputations wrapper, which forwards only the band-engine
+        surface (fill_global_wdm / get_ll_wdm / get_swap_ll_wdm / grads /
+        information_matrix) to its chunked delegate -- it has no
+        __getattr__, so get_fstat_ll_wdm is not reachable through it. Unwrap
+        to the delegate: the F-stat is scored against the parent ACA residual
+        passed explicitly by the caller, never against the in-model
+        heterodyne reference, so the chunked delegate is the correct target
+        whether or not a sig-het reference is currently active. The router
+        takes the comp OBJECT plus the NAME (not a bound method) so it can
+        resolve each shard's device-local replica before binding.
+        """
         wdm_comp = getattr(self.gb_wdm_comp, "chunked", self.gb_wdm_comp)
-        # The router takes the comp OBJECT plus the entry-point NAME (not a
-        # bound method) so it can resolve the shard's device-local replica
-        # before binding.
-        comp, method_name = (
+        return (
             (self.gb_fd_comp, "get_fstat_ll_fd")
             if isinstance(self._basis_settings, FDSettings)
             else (wdm_comp, "get_fstat_ll_wdm")
         )
-        return _RoutedBandEngine.route_fstat_ll(
-            comp, method_name, holder, params_phys,
-            data_index=di, noise_index=di, convert_to_ra_dec=False)
 
     def _fstat_dist_centers(self, model, rows_params, walker_ref):
         """F-stat 4-parameter extrinsic maxima for a set of birth/death rows.
@@ -11819,6 +11862,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
         self._buffer_cache_teardown()
+        # Drop the per-unit F-stat NM lane adapter: its closure pins the
+        # reference walker's rows on EVERY device, and the pool sweep in
+        # the teardown above can only reclaim them once released.
+        self._fstat_nm_lanes = None
 
         return new_state, accepted
 

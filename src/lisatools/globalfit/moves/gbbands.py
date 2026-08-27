@@ -2026,6 +2026,135 @@ class _RoutedBandEngine:
 
         return call_fstat
 
+    @classmethod
+    def make_fstat_nm_lanes(cls, comp, method_name, holder, walker_ref,
+                            *, check=False, **kwargs):
+        """All-device fan-out for the per-row F-stat ``(N, M)`` scorer.
+
+        Production autopsy (v7 snapshot 2, 2026-08-27):
+        :meth:`route_fstat_ll` partitions rows by walker, and the per-row
+        center chain stamps EVERY row with the ONE reference walker -- so
+        the whole leg (documented at ~735 s/propose, "half the rj black
+        box") ran serially on that walker's device while the other GPU
+        idled (43% of gb_search telemetry samples single-GPU).
+
+        Same design as :meth:`_sighet_fstat_multidevice` (REPLICATE, don't
+        partition): the reference walker's residual + inverse-PSD rows are
+        copied onto every run device ONCE here (host-routed, no P2P) as a
+        :class:`_FStatRefRowHolder`, each device gets its own comp replica
+        (:meth:`_comp_for`), and each batch splits into near-equal
+        CONTIGUOUS row lanes scored concurrently (host threads; cupy's
+        current device is thread-local). The merge is a pure permutation
+        into disjoint host row ranges, and every lane's replica performs
+        the same arithmetic on the same snapshot rows as the pinned
+        scorer, so results are identical to the single-device path.
+        This leg is READ-ONLY (it never writes a residual), and the
+        parent residual only changes at unit open/close -- a snapshot
+        taken at unit start equals what the pinned per-round call reads.
+
+        ``check=True`` (``GB_FSTAT_NM_MULTIDEV=check``): every batch is
+        ALSO scored through the exact pinned single-device path (the
+        owning shard's view + intra index) and compared bit-for-bit,
+        with per-lane forensics on the first divergence -- the
+        on-cluster parity gate, mirroring ``FSTAT_SIGHET_MULTIDEV=check``.
+
+        Returns ``call_NM(params_phys) -> (N, M)`` on the caller's array
+        module, or ``None`` for single-shard holders (caller keeps the
+        pinned path).
+        """
+        if not cls._is_multi(holder):
+            return None
+        xp = holder.xp
+        split_map, intra_map = shard_lookup_maps(holder)
+        si = int(split_map[int(walker_ref)])
+        intra = int(intra_map[int(walker_ref)])
+        view = cls._shard_views(holder)[si]
+        n_slabs = int(view.acs_total_entries)
+        with device_context(holder.xp, view.device):
+            data_row_host = np.ascontiguousarray(asnumpy(
+                xp.asarray(view.linear_data_arr[0]).reshape(
+                    n_slabs, -1)[intra]))
+            psd_row_host = np.ascontiguousarray(asnumpy(
+                xp.asarray(view.linear_psd_arr[0]).reshape(
+                    n_slabs, -1)[intra]))
+
+        lanes = []
+        for dev in [int(g) for g in holder.gpus]:
+            with device_context(holder.xp, dev):
+                ref_holder = _FStatRefRowHolder(
+                    holder, dev,
+                    xp.asarray(data_row_host), xp.asarray(psd_row_host))
+            lanes.append((dev, cls._comp_for(comp, holder, ref_holder),
+                          ref_holder))
+        logger.info(
+            "[fstat-NM] multi-device per-row scorer: %d lanes on devices "
+            "%s for walker_ref=%d%s (GB_FSTAT_NM_MULTIDEV=0 restores the "
+            "single-device pin)", len(lanes), [d for d, _, _ in lanes],
+            int(walker_ref), " + pinned shadow CHECK" if check else "")
+
+        comp_pin = cls._comp_for(comp, holder, view) if check else None
+
+        def _pinned(params_host):
+            n = int(params_host.shape[0])
+            with device_context(holder.xp, view.device):
+                idx = xp.full(n, intra, dtype=xp.int32)
+                N_ref, M_ref = getattr(comp_pin, method_name)(
+                    xp.asarray(params_host), view,
+                    data_index=idx, noise_index=idx, **kwargs)
+                return asnumpy(N_ref), asnumpy(M_ref)
+
+        def call_NM(params_phys):
+            params_host = np.atleast_2d(asnumpy(params_phys))
+            n = int(params_host.shape[0])
+            bounds = (n * np.arange(len(lanes) + 1)) // len(lanes)
+            N_host = np.zeros((n, 4), dtype=np.float64)
+            M_host = np.zeros((n, 10), dtype=np.float64)
+
+            def _score(i):
+                s, e = int(bounds[i]), int(bounds[i + 1])
+                dev, comp_d, rh = lanes[i]
+                with device_context(holder.xp, dev):
+                    zeros = xp.zeros(e - s, dtype=xp.int32)
+                    N_s, M_s = getattr(comp_d, method_name)(
+                        xp.asarray(params_host[s:e]), rh,
+                        data_index=zeros, noise_index=zeros, **kwargs)
+                    # permutation merge into disjoint host row ranges
+                    N_host[s:e] = asnumpy(N_s)
+                    M_host[s:e] = asnumpy(M_s)
+
+            active = [i for i in range(len(lanes))
+                      if bounds[i + 1] > bounds[i]]
+            pool = (getattr(holder, "thread_pool", None)
+                    if len(active) > 1 else None)
+            if pool is not None:
+                futures = [pool.submit(_score, i) for i in active]
+                for f in futures:
+                    f.result()  # re-raise lane exceptions in caller
+            else:
+                for i in active:
+                    _score(i)
+            if comp_pin is not None:
+                N_ref, M_ref = _pinned(params_host)
+                if not (np.array_equal(N_host, N_ref)
+                        and np.array_equal(M_host, M_ref)):
+                    bad = (np.any(N_host != N_ref, axis=1)
+                           | np.any(M_host != M_ref, axis=1))
+                    lines = []
+                    for i in range(len(lanes)):
+                        s, e = int(bounds[i]), int(bounds[i + 1])
+                        nb = int(bad[s:e].sum())
+                        lines.append(
+                            f"lane {i} dev {lanes[i][0]} rows [{s}:{e}) "
+                            f"bad {nb}/{e - s}")
+                    msg = ("[fstat-NM] MULTIDEV CHECK FAILED: fan-out != "
+                           f"pinned scorer on {int(bad.sum())}/{n} rows.\n  "
+                           + "\n  ".join(lines))
+                    logger.error(msg)
+                    raise RuntimeError(msg)
+            return xp.asarray(N_host), xp.asarray(M_host)
+
+        return call_NM
+
 
 def make_routed_band_engine(basis_settings, *, xp, gb_wdm_comp=None,
                             gb_fd_comp=None, **engine_kwargs):
