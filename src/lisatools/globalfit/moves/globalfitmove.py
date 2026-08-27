@@ -386,13 +386,54 @@ class GFCombineMove(CombineMove, GlobalFitMove):
     keeps eryn's run-them-all behaviour, so existing stages are untouched.
     Useful for a PE stage where the moves are alternative proposals for the
     same state rather than a pipeline that has to run start to finish.
+
+    ``weighted_cycle=True`` (user ruling 2026-08-26, the GB PE storage
+    fix): keep the SEARCH-style single-propose cycle -- every drawn
+    sub-move executes inside THIS one propose call, so the backend stores
+    ONE row per iteration -- but draw the cycle's composition each
+    iteration: ``len(moves)`` draws WITH replacement from the wrapped
+    moves, weighted by ``move_weights`` (default equal weights). The draw
+    comes from ``model.random`` so a fixed seed reproduces the run. When
+    both flags are set, ``weighted_cycle`` governs. Search stages pass
+    neither flag and keep the fixed sequential order.
     """
 
     update_comm_special = True
 
-    def __init__(self, *args, random_choice: bool = False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        random_choice: bool = False,
+        weighted_cycle: bool = False,
+        move_weights=None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.random_choice = bool(random_choice)
+        self.weighted_cycle = bool(weighted_cycle)
+        self.move_weights = self._validate_move_weights(move_weights)
+
+    def _validate_move_weights(self, move_weights):
+        """Normalize ``move_weights`` to a probability vector (or None).
+
+        None means equal weights (resolved at draw time so the move count
+        is always current). Anything else must match ``len(self.moves)``,
+        be non-negative, and carry positive total mass.
+        """
+        if move_weights is None:
+            return None
+        w = np.asarray(move_weights, dtype=float)
+        if w.shape != (len(self.moves),):
+            raise ValueError(
+                f"move_weights has shape {w.shape}; expected "
+                f"({len(self.moves)},) to match the wrapped moves."
+            )
+        if np.any(w < 0.0) or not np.isfinite(w).all():
+            raise ValueError("move_weights must be finite and non-negative.")
+        total = w.sum()
+        if total <= 0.0:
+            raise ValueError("move_weights must have positive total mass.")
+        return w / total
 
     def propose(self, model, state):
         # Simple-API branches (sub_states all None, e.g. erebor.blank) temper
@@ -424,6 +465,41 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         return GFCombineMove._propose_moves(self, model, state)
 
     def _propose_moves(self, model, state):
+        if getattr(self, "weighted_cycle", False) and len(self.moves) > 1:
+            # GB PE cycle style (user ruling 2026-08-26): one propose runs
+            # a full drawn cycle -- len(moves) sub-moves drawn WITH
+            # replacement by weight -- so the backend stores one row per
+            # iteration instead of one per move (the random_choice mode's
+            # 1-row-per-move storage artifact).
+            # TODO: think about replacement -- a weighted draw WITHOUT
+            # replacement (a weighted permutation) would guarantee every
+            # move runs each iteration while keeping the random order.
+            n = len(self.moves)
+            w = self.move_weights
+            if w is None:
+                w = np.full(n, 1.0 / n)
+            idx = model.random.choice(n, size=n, replace=True, p=w)
+            timing = os.environ.get("GF_MOVE_TIMING", "0") == "1"
+            accepted_out = None
+            for k in idx:
+                move = self.moves[int(k)]
+                if isinstance(move, tuple):  # (move, weight) entry
+                    move = move[0]
+                if timing:
+                    name = getattr(move, "gf_move_name", type(move).__name__)
+                    print(
+                        f"[GF_TIMING] stage="
+                        f"{getattr(self, 'gf_stage_name', '?')} "
+                        f"weighted_cycle -> {name}",
+                        flush=True,
+                    )
+                state, accepted = move.propose(model, state)
+                accepted_out = (
+                    accepted.copy() if accepted_out is None
+                    else accepted_out + accepted
+                )
+            return state, accepted_out
+
         if getattr(self, "random_choice", False) and len(self.moves) > 1:
             # One move per step, drawn from the sampler's RNG so the choice
             # is reproducible under a fixed seed. Sub-state guards in

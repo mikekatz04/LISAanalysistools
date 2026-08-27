@@ -143,6 +143,25 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip() in ("1", "true", "True")
 
 
+def _pe_combine_kwargs() -> dict:
+    """Combine kwargs shared by every PE stage.
+
+    PE cycle style (user ruling 2026-08-26): the SEARCH-style single
+    propose per iteration -- the backend stores ONE row per iteration,
+    fixing the 1-row-per-move PE storage the random_choice mode produced
+    -- but the cycle composition is DRAWN each iteration: ``len(moves)``
+    weighted draws WITH replacement, all proposals equal weight by
+    default. FULL_PE_WEIGHTED_CYCLE=0 + FULL_PE_RANDOM_CHOICE=1 restores
+    the legacy one-move-per-step mode; search stages pass neither flag
+    and are untouched.
+    """
+    return dict(
+        share_temperature_control=False,
+        weighted_cycle=_env_flag("FULL_PE_WEIGHTED_CYCLE", "1"),
+        random_choice=_env_flag("FULL_PE_RANDOM_CHOICE", "0"),
+    )
+
+
 def _apply_smoke_defaults() -> None:
     """Shrink every cost axis and arm the debug verifications.
 
@@ -373,10 +392,7 @@ def build_fit():
                     Move("rj_fstat_pe", branch="gb"),
                     Move("rj_prior_pe", branch="gb"),
                 ] + ridge(),
-                combine_kwargs=dict(
-                    share_temperature_control=False,
-                    random_choice=_env_flag("FULL_PE_RANDOM_CHOICE", "1"),
-                ),
+                combine_kwargs=_pe_combine_kwargs(),
             ),
         ])
         return fit
@@ -436,10 +452,7 @@ def build_fit():
         stages.append(Stage(
             name="noise_vgb_pe", kind="pe",
             moves=noise_pe + vgb,
-            combine_kwargs=dict(
-                share_temperature_control=False,
-                random_choice=_env_flag("FULL_PE_RANDOM_CHOICE", "1"),
-            ),
+            combine_kwargs=_pe_combine_kwargs(),
         ))
         fit.recipe = Recipe(stages)
         return fit
@@ -488,13 +501,7 @@ def build_fit():
                 Move("rj_prior_pe", branch="gb"),
             ] + ([Move("gb_ridge_gibbs", branch="gb")]
                  if os.environ.get("GB_RIDGE_GIBBS", "1") == "1" else []) + vgb,
-            # Draw ONE move per step (with replacement) instead of running
-            # all five in a fixed order -- the stock eryn move-selection
-            # semantics. Needs GFCombineMove(random_choice=True).
-            combine_kwargs=dict(
-                share_temperature_control=False,
-                random_choice=_env_flag("FULL_PE_RANDOM_CHOICE", "1"),
-            ),
+            combine_kwargs=_pe_combine_kwargs(),
         ),
     ]
     fit.recipe = Recipe(stages)
