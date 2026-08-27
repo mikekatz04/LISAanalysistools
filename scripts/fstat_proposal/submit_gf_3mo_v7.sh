@@ -751,7 +751,7 @@ export GB_CAP_STAGGER=0
 #                            gb_search while any engaged cap cell is
 #                            still mid-ramp (occupied at cap, below
 #                            ceiling): the stage holds for the ramp.
-export GB_CAP_CELL_MAX=5
+export GB_CAP_CELL_MAX=20
 export GB_CAP_INMODEL_HEADROOM=2
 export GB_SEARCH_CAP_QUIESCENT=1
 # ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
