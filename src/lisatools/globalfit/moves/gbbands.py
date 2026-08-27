@@ -3569,13 +3569,11 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
             band_shards = band._shards
             psd_shards = psd_b._shards
             tmpl_shards = tmpl._shards if tmpl is not None else None
-            # global slot -> (owning shard, row inside that shard)
-            owner = np.empty(nb_tot, dtype=np.int64)
-            local = np.empty(nb_tot, dtype=np.int64)
-            for s in range(len(band_shards)):
-                ids = np.asarray(asnumpy(aca.gpu_splits[s]), dtype=np.int64)
-                owner[ids] = s
-                local[ids] = np.arange(ids.shape[0], dtype=np.int64)
+            # global slot -> (owning shard, row inside that shard): the
+            # CACHED static-layout maps (2026-08-27 tempering audit -- this
+            # rebuilt the host maps + asnumpy'd every gpu_split on EVERY
+            # per-pair scoring call, ~40k times/iteration).
+            owner, local = shard_lookup_maps(aca)
             owner_of = owner[sl_h]
             try:
                 for s in range(len(band_shards)):
@@ -4553,7 +4551,11 @@ class BandSorter(LISAToolsParallelModule):
         keep_a, take_a = _map(specials_a)   # take_* indexes the OTHER set's rows
         keep_b, take_b = _map(specials_b)
 
-        if bands is not None:
+        # Gated (2026-08-27 tempering audit): these two device-bool asserts
+        # synced the host on EVERY rung-pair step (~40k/iteration). The
+        # once-per-unit special_index_check in run_tempering is the
+        # standing alarm; arm these per-call with GB_INDEX_ASSERTS=1.
+        if bands is not None and _index_asserts():
             assert xp.all(self.band_inds[keep_a] == bands[take_a])
             assert xp.all(self.band_inds[keep_b] == bands[take_b])
 

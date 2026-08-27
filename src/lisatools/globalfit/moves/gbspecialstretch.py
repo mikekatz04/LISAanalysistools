@@ -9804,41 +9804,58 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 current_lls_orig = current_lls.copy()
                 # Dynamic per-cell occupancy: templates ride accepted swaps.
                 _occ_dyn = _occ_now.copy() if _skip_empty else None
+                # PAIR-LOOP DE-SYNC (2026-08-27 tempering audit): the loop
+                # below paid ~10 host syncs per rung pair (~40k pairs per
+                # iteration): boolean-getitem gathers, .all()/.sum() pulls,
+                # asnumpy of device index arrays inside swap_rows, and the
+                # per-pair empty-census int() pulls. Rework: HOST column
+                # index arrays built once per chunk (swap_rows' asnumpy is
+                # then free), ONE host pull of the live set and ONE of the
+                # accept mask per pair (everything host-side derives from
+                # those), and the census accumulates in a device buffer
+                # flushed once per chunk. All values are identical -- index
+                # representation changes only; the RNG stream is untouched.
+                _cols_h = np.arange(int(buffer_obj.num_bands_now))
+                _ec_dev = cp.zeros(2, dtype=cp.int64)  # both_empty, acc_be
                 for t in range(self.ntemps)[1:][::-1]:
                     i1 = t
                     i2 = t - 1
 
                     # Buffer slots interleave temperatures: column t of a
                     # grid row is slot (row * ntemps + t).
-                    buffer_i1 = cp.arange(buffer_obj.num_bands_now)[i1 :: self.ntemps]
-                    buffer_i2 = cp.arange(buffer_obj.num_bands_now)[i2 :: self.ntemps]
+                    buffer_i1_h = _cols_h[i1 :: self.ntemps]
+                    buffer_i2_h = _cols_h[i2 :: self.ntemps]
+                    _n_pairs = int(buffer_i1_h.shape[0])
 
                     # Pairs with at least one occupied cell RIGHT NOW (a
                     # template may have ridden an accepted swap down the
                     # ladder into a statically-empty cell).
-                    _pair_live = (
-                        ((_occ_dyn[:, i1] > 0) | (_occ_dyn[:, i2] > 0))
-                        if _skip_empty else None
-                    )
-                    _all_live = _pair_live is None or bool(_pair_live.all())
-                    _n_live = (
-                        int(buffer_i1.shape[0]) if _all_live
-                        else int(_pair_live.sum())
-                    )
-                    _skip_census["pairs"] += int(buffer_i1.shape[0])
+                    if _skip_empty:
+                        _pair_live = (
+                            (_occ_dyn[:, i1] > 0) | (_occ_dyn[:, i2] > 0)
+                        )
+                        _rows_live = cp.where(_pair_live)[0]
+                        _rows_live_h = _to_numpy(_rows_live)
+                        _n_live = int(_rows_live_h.shape[0])
+                    else:
+                        _pair_live = None
+                        _rows_live = None
+                        _rows_live_h = None
+                        _n_live = _n_pairs
+                    _skip_census["pairs"] += _n_pairs
                     _skip_census["pairs_scored"] += _n_live
                     if getattr(self, "_prop_timer", None) is not None:
-                        self._prop_timer.count(
-                            "temper_pairs", int(buffer_i1.shape[0]))
+                        self._prop_timer.count("temper_pairs", _n_pairs)
                         self._prop_timer.count("temper_pairs_scored", _n_live)
 
-                    if _all_live:
-                        buffer_obj.swap_template_slots(buffer_i1, buffer_i2)
+                    if _pair_live is None:
+                        buffer_obj.swap_template_slots(buffer_i1_h, buffer_i2_h)
                     else:
                         # Sourceless pairs exchange two zero templates: a
                         # no-op on the slabs, so it is simply not done.
                         buffer_obj.swap_template_slots(
-                            buffer_i1[_pair_live], buffer_i2[_pair_live])
+                            buffer_i1_h[_rows_live_h],
+                            buffer_i2_h[_rows_live_h])
 
                     # TODO: C-side vectorized temperature-pair swap kernel
                     # (batch the template exchange + per-cell likelihoods).
@@ -9851,11 +9868,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             # zero-vs-zero exchange would have returned ->
                             # paccept == 0.0, bit-identical to the full path.
                             new_lls = old_lls.copy()
-                            _rows_live = (
-                                cp.arange(buffer_i1.shape[0]) if _all_live
-                                else cp.where(_pair_live)[0]
-                            )
-                            if int(_rows_live.shape[0]) > 0:
+                            if _n_live > 0:
                                 _pair_slots = (
                                     _rows_live[:, None] * self.ntemps
                                     + cp.asarray([i2, i1])[None, :]
@@ -9880,12 +9893,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                     raccept = cp.log(cp.random.uniform(size=paccept.shape))
                     sel = paccept > raccept
+                    # ONE host pull of the accept mask per pair; every
+                    # host-side consumer below derives from it.
+                    _sel_h = _to_numpy(sel)
+                    _sel_idx_h = np.where(_sel_h)[0]
+                    _sel_idx = cp.asarray(_sel_idx_h)
 
                     _be = (_occ_now[:, i1] == 0) & (_occ_now[:, i2] == 0)
-                    _empty_census["pairs"] += int(sel.shape[0])
-                    _empty_census["both_empty"] += int(_be.sum())
-                    _empty_census["acc"] += int(sel.sum())
-                    _empty_census["acc_both_empty"] += int((sel & _be).sum())
+                    _empty_census["pairs"] += _n_pairs
+                    _empty_census["acc"] += int(_sel_idx_h.shape[0])
+                    # both_empty terms accumulate on device; flushed once
+                    # per chunk (was 2 int() syncs per pair).
+                    _ec_dev[0] += _be.sum()
+                    _ec_dev[1] += (sel & _be).sum()
 
                     # Audit BEFORE current_lls is overwritten: old_lls is a
                     # VIEW into current_lls, so accepted rows lose their old
@@ -9893,7 +9913,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # column 0 of the slice is the cold cell whose diff is
                     # credited to log_like[0].
                     if _audit and i2 == 0:
-                        _sel_h = _to_numpy(sel)
                         if _sel_h.any():
                             _bh = _to_numpy(band_inds_now[:, 0])
                             _w0 = _to_numpy(walker_inds_now[:, i2])
@@ -9912,24 +9931,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                     float(_oldh[_r, 1]), float(_newh[_r, 1]),
                                 )
 
-                    current_lls[sel, i2 : i1 + 1] = new_lls[sel]
+                    current_lls[_sel_idx, i2 : i1 + 1] = new_lls[_sel_idx]
 
                     # Reverse the swaps that were not accepted. A skipped
                     # (sourceless) pair has paccept == 0.0 > log(u), i.e. it
                     # is always "accepted", so ``~sel`` is already a subset
                     # of the live pairs -- the mask below is a guard, not a
                     # behavior change (reverting an un-done zero exchange
-                    # would be a no-op anyway).
-                    _rej = ~sel if _all_live else ((~sel) & _pair_live)
-                    buffer_obj.swap_template_slots(buffer_i1[_rej], buffer_i2[_rej])
+                    # would be a no-op anyway). Host mask arithmetic: the
+                    # slab swap wants host indices anyway (swap_rows'
+                    # asnumpy is then free).
+                    _rej_h = ~_sel_h
+                    if _rows_live_h is not None:
+                        _live_mask_h = np.zeros(_n_pairs, dtype=bool)
+                        _live_mask_h[_rows_live_h] = True
+                        _rej_h &= _live_mask_h
+                    buffer_obj.swap_template_slots(
+                        buffer_i1_h[_rej_h], buffer_i2_h[_rej_h])
 
                     if _skip_empty:
                         # Accepted swaps move the templates, so the cells'
                         # occupancy moves with them (this is what makes the
                         # pair-level skip exact further down the ladder).
                         _o1 = _occ_dyn[:, i1].copy()
-                        _occ_dyn[sel, i1] = _occ_dyn[sel, i2]
-                        _occ_dyn[sel, i2] = _o1[sel]
+                        _occ_dyn[_sel_idx, i1] = _occ_dyn[_sel_idx, i2]
+                        _occ_dyn[_sel_idx, i2] = _o1[_sel_idx]
 
                     # bincount accumulation: several grid rows share a band
                     # (one per walker), and fancy-index ``+=`` collapses
@@ -9940,10 +9966,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # raises on a zero-size array (no accepted swaps in a
                     # chunk is the common case).
                     _nb_tot = band_swaps_accepted.shape[0]
-                    _acc_bands = band_inds_now[sel, 0]
-                    if _acc_bands.size:
+                    if _sel_idx_h.size:
                         band_swaps_accepted[:, i2] += cp.bincount(
-                            _acc_bands, minlength=_nb_tot
+                            band_inds_now[_sel_idx, 0], minlength=_nb_tot
                         ).astype(band_swaps_accepted.dtype)
                     if band_inds_now.size:
                         band_swaps_proposed[:, i2] += cp.bincount(
@@ -9952,17 +9977,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                     # Accepted cells trade their (temp, walker) labels in the
                     # sorter so the sources follow their templates.
-                    specials_i1 = band_sorter.get_special_band_index(
-                        i1, walker_inds_now[sel, i1], band_inds_now[sel, i1]
-                    )
-                    specials_i2 = band_sorter.get_special_band_index(
-                        i2, walker_inds_now[sel, i2], band_inds_now[sel, i2]
-                    )
-                    band_sorter.exchange_cell_labels(
-                        specials_i1, i1, walker_inds_now[sel, i1],
-                        specials_i2, i2, walker_inds_now[sel, i2],
-                        bands=band_inds_now[sel, i2],
-                    )
+                    if _sel_idx_h.size:
+                        specials_i1 = band_sorter.get_special_band_index(
+                            i1, walker_inds_now[_sel_idx, i1],
+                            band_inds_now[_sel_idx, i1]
+                        )
+                        specials_i2 = band_sorter.get_special_band_index(
+                            i2, walker_inds_now[_sel_idx, i2],
+                            band_inds_now[_sel_idx, i2]
+                        )
+                        band_sorter.exchange_cell_labels(
+                            specials_i1, i1, walker_inds_now[_sel_idx, i1],
+                            specials_i2, i2, walker_inds_now[_sel_idx, i2],
+                            bands=band_inds_now[_sel_idx, i2],
+                        )
+
+                # Flush the device-accumulated census terms: ONE sync per
+                # chunk instead of two per rung pair.
+                _ec_h = _to_numpy(_ec_dev)
+                _empty_census["both_empty"] += int(_ec_h[0])
+                _empty_census["acc_both_empty"] += int(_ec_h[1])
 
                 diffs = current_lls - current_lls_orig
                 # ``=`` (not ``+=``): each (temp, walker, band) cell is
@@ -9982,6 +10016,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     band_sorter,
                     extra_bool=(band_sorter.band_inds % units == bool_remainder),
                 )
+            # Once-per-unit label-consistency alarm: replaces the per-pair
+            # device asserts inside exchange_cell_labels (now gated behind
+            # GB_INDEX_ASSERTS -- 2026-08-27 pair-loop de-sync). One kernel
+            # + one sync per unit instead of two per rung pair.
+            assert bool(band_sorter.special_index_check), (
+                f"{self.name}: sorter special-index inconsistency after "
+                f"tempering unit {tmp} -- a permuted-swap relabel diverged."
+            )
             if _audit:
                 # Per-unit reconcile: with this parity class closed back
                 # into the parent residual, the TRUE cold-walker ll delta
@@ -10016,6 +10058,33 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"passes). This is the share of run_tempering's cost that "
                 f"buys no mixing."
             )
+            # ALWAYS-ON cross-check (2026-08-27 pair-loop de-sync): the
+            # census 'acc' above is accumulated on the HOST from the
+            # per-pair accept pulls; band_swaps_accepted is accumulated on
+            # the DEVICE by per-pair bincounts over the same accept sets.
+            # Two independent counters of the same events -- if the index
+            # rework ever miscounts or misroutes an accepted swap, they
+            # cannot agree. (The per-unit special_index_check assert and
+            # the after-tempering ledger-vs-residual drift guard cover the
+            # relabel and the credit respectively.)
+            try:
+                _bs_acc = int(_to_numpy(band_swaps_accepted.sum()))
+                _bs_cold = int(_to_numpy(band_swaps_accepted[:, 0].sum()))
+                if _bs_acc == _ec["acc"]:
+                    logger.info(
+                        f"[GB_TEMPER_CHECK {self.name}] census/device accept "
+                        f"counters MATCH: {_ec['acc']} accepted "
+                        f"({_bs_cold} at the cold pair); unit label checks "
+                        f"passed.")
+                else:
+                    logger.warning(
+                        f"[GB_TEMPER_CHECK {self.name}] accept-counter "
+                        f"MISMATCH: host census {_ec['acc']} vs device "
+                        f"band counter {_bs_acc} -- the permuted-swap "
+                        f"index plumbing disagrees with itself; treat this "
+                        f"propose's swaps as suspect and report.")
+            except Exception:
+                pass
 
         _sc = _skip_census
         if _sc["cells"]:
