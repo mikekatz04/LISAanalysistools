@@ -579,21 +579,27 @@ def _picked_batches(picked, cap):
 def _buffer_fixed_capacity_active(sorter, kwargs) -> bool:
     """Whether ``_cached_get_buffer`` should use a fixed-capacity buffer.
 
-    Fixed-capacity staging (user ruling 2026-08-14) applies to RJ
-    proposal-phase buffers only: the sorter must be an RJ one
+    Fixed-capacity staging (user ruling 2026-08-14) applies to RJ sorters
     (``sorter.rj_prop is not None`` — rj_fstat_search / rj_prior_removal /
-    rj_replace / rj_*_pe) and the buffer must NOT carry the template twin
-    (``use_template_arr`` — the tempering path, whose ~1200-cell chunks are
-    far below the preload capacity; a capacity allocation there, doubled by
-    the twin, would be a pure memory regression). Env gate
-    ``GB_BUFFER_FIXED_CAPACITY`` (default "1"); "0" restores the
-    drop+rebuild-on-size-change behavior verbatim.
+    rj_replace / rj_*_pe). Template-twin (tempering) buffers were
+    originally EXCLUDED because a preload-sized capacity doubled by the
+    twin would be a pure memory regression — but the right twin capacity
+    is the TEMPER CHUNK budget (``GB_TEMPER_PRELOAD_CELLS``), identical
+    steady-state memory to the max chunk buffer that existed anyway, and
+    it removes the ~12 unit-tail/head drop+rebuilds per iteration
+    (tempering audit F3, 2026-08-27; ``_cached_get_buffer`` picks the
+    capacity per signature). ``GB_BUFFER_FIXED_CAPACITY_TWIN=0`` restores
+    the twin exclusion alone; ``GB_BUFFER_FIXED_CAPACITY=0`` restores the
+    drop+rebuild-on-size-change behavior for everything.
     """
-    return (
-        os.environ.get("GB_BUFFER_FIXED_CAPACITY", "1") == "1"
-        and getattr(sorter, "rj_prop", None) is not None
-        and not kwargs.get("use_template_arr", False)
-    )
+    if os.environ.get("GB_BUFFER_FIXED_CAPACITY", "1") != "1":
+        return False
+    if getattr(sorter, "rj_prop", None) is None:
+        return False
+    if (kwargs.get("use_template_arr", False)
+            and os.environ.get("GB_BUFFER_FIXED_CAPACITY_TWIN", "1") != "1"):
+        return False
+    return True
 
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
@@ -3328,9 +3334,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 int(self.ntemps) * int(self.nwalkers)
                 * (len(self.band_edges) - 1)
             )
-            build_kwargs["alloc_capacity"] = min(
-                int(self.num_band_preload_total), _max_cells
-            )
+            if kwargs.get("use_template_arr", False):
+                # Twin (tempering) buffers: capacity = the TEMPER CHUNK
+                # budget — the exact slot count run_tempering binds per
+                # chunk (rows = budget // ntemps, slots = rows * ntemps).
+                # Identical steady-state memory to the max chunk buffer
+                # that existed anyway; the unit-tail/head size alternation
+                # now resize-rebinds instead of dropping ~1200 per-cell
+                # containers and reallocating (tempering audit F3).
+                _cell_budget = int(
+                    os.environ.get("GB_TEMPER_PRELOAD_CELLS", "1200"))
+                _twin_cap = max(1, _cell_budget // int(self.ntemps)) * int(
+                    self.ntemps)
+                build_kwargs["alloc_capacity"] = min(_twin_cap, _max_cells)
+            else:
+                build_kwargs["alloc_capacity"] = min(
+                    int(self.num_band_preload_total), _max_cells
+                )
         # rj-vs-inmodel buffers differ in edge windows (N/4 widening on RJ
         # sorters), so the sorter's rj flag is part of the entry key even
         # though the cache itself is shared across moves.
