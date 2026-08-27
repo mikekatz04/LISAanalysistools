@@ -724,8 +724,25 @@ export GB_SEARCH_RJ_REPLACE=1
 export GB_CAP_STAGGER=0
 # Per-cell cap CEILING + entry headroom + stage hold (probe-validated
 # 2026-08-26 set):
-#   GB_CAP_CELL_MAX=5     -- belt on the cap updater: a cell's cap never
-#                            exceeds 5 even under sustained D/2 evidence.
+#   GB_CAP_CELL_MAX=20    -- belt on the cap updater, sized to the
+#                            v6-REALIZED envelope (v6 ran NO ceiling --
+#                            the knob postdates it -- and its log shows
+#                            34-bin cells reaching cap 5; 4 such cells
+#                            per 135-bin sub-band -> up to ~20). The
+#                            probes pinned 5, but that was a
+#                            SINGLE-SOURCE band; a 135-bin confusion
+#                            cell legitimately holds 3-5+ separable
+#                            detectable sources (v3 analysis above) and
+#                            must be able to ramp past 5. NOTE the
+#                            regime tension: the ratchet is
+#                            STALL-driven (patience without D/2
+#                            improvement WHILE occupied at cap
+#                            increments), so loud isolated cells lean
+#                            on the drift gate / entry veto / removal /
+#                            SNR-8 floor rather than this ceiling; if
+#                            flagship-style stacking reappears, a
+#                            frequency-dependent ceiling is the next
+#                            lever, not a global squeeze.
 #   GB_CAP_INMODEL_HEADROOM=2 -- in-model/replace f0 moves may enter a
 #                            foreign at-cap cell up to cap+2 (peak
 #                            handover across an edge); births still
