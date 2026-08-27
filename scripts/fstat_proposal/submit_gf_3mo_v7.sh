@@ -692,7 +692,13 @@ export VGB_BAND_LAYERS=8
 # OOM above happened at full_pe occupancy (1230/1232 bands); on any
 # resume into full_pe set GB_INMODEL_SETUP_BATCH=1024 and both
 # *_MEMPOOL_FREE=1 unless telemetry shows margin. ***
-export GB_INMODEL_SETUP_BATCH=2048
+# 4096 (2026-08-27, batch-width autopsy): the in-model REPEAT TRAINS
+# run at exactly this width (log: "repeats x 1024/2048 sources" tracks
+# the cap), and each step's wall is launch-bound (~dozens of kernel
+# launches over ~14 ms of physics at width 2048) -- doubling the width
+# halves the number of 100/250-step trains and with them the
+# launch-train overhead. Same full_pe revert rule as above.
+export GB_INMODEL_SETUP_BATCH=4096
 export GB_INFOMAT_MEMPOOL_FREE=0
 export GB_INMODEL_BATCH_MEMPOOL_FREE=0
 # ALIGNED CAP CELLS (user ruling 2026-08-26, probe-validated on the
