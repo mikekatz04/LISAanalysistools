@@ -176,8 +176,10 @@ def main():
     stream.synchronize()
     t0 = time.perf_counter()
     for _ in range(args.blocks):
-        refresh_pools()
+        # refresh on the SAME stream the graph replays on: stream-ordered,
+        # no cross-stream race between pool writes and graph reads.
         with stream:
+            refresh_pools()
             graph.launch(stream)
     stream.synchronize()
     t_graph = time.perf_counter() - t0
