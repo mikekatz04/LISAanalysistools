@@ -44,8 +44,9 @@
 
 #SBATCH --job-name=gf6mo_src         # job name
 #SBATCH --partition=gpu-80-spot   # GPU partition
-#SBATCH --gres=gpu:1              # ONE GPU (default GPUS=0); the 2-GPU parity
-                                  # leg: sbatch --gres=gpu:2 with GPUS=0,1
+#SBATCH --gres=gpu:2              # TWO H100s -- the regular production setup
+                                  # (user ruling 2026-08-26); single-GPU leg:
+                                  # GPUS=0 sbatch --gres=gpu:1 <this script>
 #SBATCH --nodes=1
 #SBATCH --ntasks=1                # single process (MPI singleton)
 #SBATCH --cpus-per-task=4
@@ -87,9 +88,10 @@ export PROGRESS=0
 REAL_MOJITO=/shared/data/mojito_cache
 export USE_GPU=1
 export GPU_BACKEND=cuda13x
-# ONE GPU by default (user request 2026-08-26); the 2-GPU parity leg of
-# gate S5 is the env override:  GPUS=0,1 sbatch <this script>
-export GPUS=${GPUS:-0}
+# TWO GPUs -- the regular H100 setup (user ruling 2026-08-26, superseding
+# the brief 1-GPU default). 24 walkers shard 12/12 across devices with
+# threaded per-split overlap; GPUS=0 restores the single-GPU leg.
+export GPUS=${GPUS:-0,1}
 # Run the synthetic injection build on the GPU too (user request): the
 # stream builder is GPU-safe (asnumpy() at every host accumulation) but
 # this is the FIRST GPU exercise of that path -- a failure shows up
@@ -97,20 +99,16 @@ export GPUS=${GPUS:-0}
 # =cpu restores the validated CPU injections.
 export SYNTHETIC_INJECTION_BACKEND=auto
 
-# ---- DATA MODE: TEMPORARILY SYNTHETIC (user request 2026-08-26) -------------
-# "synthetic" builds every stream in-process -- no mojito folder needed.
-# What changes vs mojito: injections come from the STOCK SYNTHETIC tables
-# (make_*_injections), so the id lists below contribute only their COUNTS
-# (4 MBHBs / 8 EMRIs / 6 SOBHBs), not specific catalogue rows; synthetic
-# MBH merger times are spread across the interior (0.25-0.85) of the
-# window BY CONSTRUCTION, so the merge-in-window ruling holds
-# automatically; the fixed sensitivity falls back to the stock analytic
-# levels (15e-12 / 3e-15 -- no NOISE brick fit); no instrument noise is
-# added to the data (source-only likelihood, exact nulls). TIMING and
-# MULTI-GPU evidence (gates S1/S5) remains fully valid; the DETECTABILITY
-# CENSUS (gate S4) is catalogue physics and needs the mojito rerun --
-# flip back with DATA_MODE=mojito once the cache/bricks are settled.
-export DATA_MODE=${DATA_MODE:-synthetic}
+# ---- DATA MODE: BACK TO MOJITO (user ruling 2026-08-26) ---------------------
+# Real L1 data from ${REAL_MOJITO} (/shared/data/mojito_cache): the id
+# lists below select actual catalogue rows again (MBHB 2,5,16,18 = the
+# only in-window mergers), and the fixed sensitivity comes from the LSQ
+# fit to the NOISE brick (= the injection PSD). PRECONDITION: the cache
+# must hold MBHB L1 bricks for ids 2 and 5 (the loader raises loudly
+# naming the missing id if not). DATA_MODE=synthetic remains the
+# self-contained escape hatch (stock tables, id lists become counts,
+# SYNTHETIC_INJECTION_BACKEND applies there only).
+export DATA_MODE=${DATA_MODE:-mojito}
 
 # ---- CONFUSION FOREGROUND DATA (user request 2026-08-24; then DISABLED
 #      same day: "Turn that off for now in our 6 month test" -- the GALFOR
@@ -182,6 +180,13 @@ fi
 # ---- output -----------------------------------------------------------------
 export FILE_STORE_DIR=${STORE_DIR}
 export BASE_FILE_NAME=gf_prod_6mo_sources
+
+# ---- per-branch tempering (user ruling 2026-08-26): 6 rungs everywhere ------
+# Source branches temper internally (engine ntemps is retired to 1);
+# defaults were 4. Ladder cost scales linearly in rungs per branch move.
+export MBH_NTEMPS=6
+export EMRI_NTEMPS=6
+export SOBBH_NTEMPS=6
 
 # ---- start scatter (user ruling 2026-08-26) ---------------------------------
 # The default 1e-5 multiplicative truth scatter produced wildly spread
