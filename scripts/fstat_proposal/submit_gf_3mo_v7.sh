@@ -676,11 +676,19 @@ export VGB_BAND_LAYERS=8
 # on a cupy OOM (3.09 GB _expand_B request, gpu0 93.06/93.6 GB) during
 # rj_prior_pe's sig-het setup -- this script never carried the cap the
 # v5/1-yr scripts got, and full_pe's picked pools (779 leaves/walker,
-# 1230/1232 bands occupied) finally outgrew the card. Same knobs as the
-# 3-mo v5 script; the in-model staging loop also pool-sweeps between
-# sub-blocks (GB_INMODEL_BATCH_MEMPOOL_FREE default on).
-export GB_INMODEL_SETUP_BATCH=1024
-export GB_INFOMAT_MEMPOOL_FREE=1
+# 1230/1232 bands occupied) finally outgrew the card.
+# MEMORY-FOR-SPEED (user ruling 2026-08-27, snapshot-2 telemetry: GPU
+# peaks 45.3/18.2 GB of 99.9 -- 50-68 GB idle in gb_search): batch cap
+# raised 1024->2048 (halves the sig-het staging setups, the ~2.3 s
+# spikes per sub-block) and BOTH mempool sweeps disabled (stop paying
+# free/realloc cycles the headroom does not require).
+# *** REVERT AT FULL_PE HANDOFF if memory approaches the card: the v6
+# OOM above happened at full_pe occupancy (1230/1232 bands); on any
+# resume into full_pe set GB_INMODEL_SETUP_BATCH=1024 and both
+# *_MEMPOOL_FREE=1 unless telemetry shows margin. ***
+export GB_INMODEL_SETUP_BATCH=2048
+export GB_INFOMAT_MEMPOOL_FREE=0
+export GB_INMODEL_BATCH_MEMPOOL_FREE=0
 # ALIGNED CAP CELLS (user ruling 2026-08-26, probe-validated on the
 # highf grid2 + dense v7 probes): cap cells LINE UP with the sub-bands
 # (divisor 1, stagger 0) and the 1/4 overlap below supplies the
