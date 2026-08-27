@@ -1198,7 +1198,14 @@ void wdm_het_get_ll_kernel(
     //   [slab_min_f[s], slab_min_f[s] + Nf_slab); a source's m-layer is written
     // at (m - slab_min_f[s]) and the per-slab stride is nchannels*Nf_slab*Nt.
     int        Nf_slab = 0,
-    const int *slab_min_f = nullptr)
+    const int *slab_min_f = nullptr,
+    // Fused phase-max quadrature <d|h>(phi0 + pi/2) (nullptr -> not stored).
+    // The real parity projection w = psign * (parity_even ? Re z : Im z) is
+    // Re of the complex coefficient W = psign * (parity_even ? z : -i*z),
+    // the unique value whose rotation Re(e^{i delta} W) tracks a carrier
+    // phase shift; its Im is accumulated against the data alongside w.
+    // EXACT algebra, no approximation -- see gbgpu tests/test_phase_max_fused.
+    double    *d_h_im_out = nullptr)
 {
     // One binary per block (grid.X); chunks iterated sequentially inside the
     // block. See the kernel-section header comment above for the full design.
@@ -1249,19 +1256,22 @@ void wdm_het_get_ll_kernel(
     cmplx  *layer_buf       = &fd_chunk_buf[(size_t) nchannels * N_sparse];
     double *partial_dh      = (double *) &layer_buf[(size_t) nchannels * Nt_sub];
     double *partial_hh      = &partial_dh[NUM_THREADS_HERE];
+    double *partial_dh_im   = &partial_hh[NUM_THREADS_HERE];
     // cufftdx scratch (only used by wdm_fft_dispatch when LISA_USE_CUFFTDX
     // is defined; sized as the max across instantiated FFT lengths).
-    char   *fft_scratch     = (char *) &partial_hh[NUM_THREADS_HERE];
+    char   *fft_scratch     = (char *) &partial_dh_im[NUM_THREADS_HERE];
 #else
     // CPU stubs: stack arrays sized at the compile-time maxima.
     cmplx  fd_chunk_buf_cpu [FAST_WDM_NCHANNELS_MAX * FAST_WDM_N_SPARSE_MAX];
     cmplx  layer_buf_cpu    [FAST_WDM_NCHANNELS_MAX * FAST_WDM_NT_SUB_MAX];
     double partial_dh_cpu   [1];
     double partial_hh_cpu   [1];
+    double partial_dh_im_cpu[1];
     cmplx  *fd_chunk_buf    = fd_chunk_buf_cpu;
     cmplx  *layer_buf       = layer_buf_cpu;
     double *partial_dh      = partial_dh_cpu;
     double *partial_hh      = partial_hh_cpu;
+    double *partial_dh_im   = partial_dh_im_cpu;
     char   *fft_scratch     = nullptr;  // unused on CPU
 #endif
 
@@ -1321,6 +1331,7 @@ void wdm_het_get_ll_kernel(
         // Per-binary inner-product accumulators (in registers).
         double tmp_dh = 0.0;
         double tmp_hh = 0.0;
+        double tmp_dh_im = 0.0;   // fused phase-max quadrature (d * Im W)
 
         // Per-chunk carrier + WDM m-band are computed INSIDE the chunk loop
         // below (2026-06-19 chirp fix): a chirping source (SOBBH) sweeps
@@ -1530,12 +1541,21 @@ void wdm_het_get_ll_kernel(
                                               ? 1.0 : -1.0;
                     const double psign     = kappa * sign;
 
-                    double w_arr[FAST_WDM_NCHANNELS_MAX] = {0.};
-                    double d_arr[FAST_WDM_NCHANNELS_MAX] = {0.};
+                    double w_arr [FAST_WDM_NCHANNELS_MAX] = {0.};
+                    double wi_arr[FAST_WDM_NCHANNELS_MAX] = {0.};
+                    double d_arr [FAST_WDM_NCHANNELS_MAX] = {0.};
                     for (int c = 0; c < nchannels; ++c) {
                         const cmplx z = layer_buf[c * Nt_sub + n_loc];
                         const double rp = parity_even ? z.real() : z.imag();
                         w_arr[c] = psign * rp;
+                        // Quadrature coefficient Im(W) for the fused phase
+                        // max, W = psign * (parity_even ? z : -i*z) -- the
+                        // complex value with Re(W) = w whose rotation tracks
+                        // a carrier phase shift exactly (see the signature
+                        // comment). Only the d*w products consume it; h_h
+                        // stays real-projected as before.
+                        const double ip = parity_even ? z.imag() : -z.real();
+                        wi_arr[c] = psign * ip;
                         const size_t g_d = ((size_t) c * slab_Nf + m_act)
                                             * Nt_active + n_act;
                         d_arr[c] = data_d_b[g_d];
@@ -1554,6 +1574,7 @@ void wdm_het_get_ll_kernel(
                             const double inv = invC_b[g_inv];
                             tmp_dh += d_arr[c] * w_arr[c] * inv;
                             tmp_hh += w_arr[c] * w_arr[c] * inv;
+                            tmp_dh_im += d_arr[c] * wi_arr[c] * inv;
                         }
                         for (int c1 = 0; c1 < nchannels - 1; ++c1) {
                             for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
@@ -1564,6 +1585,8 @@ void wdm_het_get_ll_kernel(
                                 tmp_dh += (d_arr[c1] * w_arr[c2]
                                             + d_arr[c2] * w_arr[c1]) * inv;
                                 tmp_hh += 2.0 * w_arr[c1] * w_arr[c2] * inv;
+                                tmp_dh_im += (d_arr[c1] * wi_arr[c2]
+                                               + d_arr[c2] * wi_arr[c1]) * inv;
                             }
                         }
                     } else {
@@ -1574,6 +1597,7 @@ void wdm_het_get_ll_kernel(
                             const double inv = invC_b[g_inv];
                             tmp_dh += d_arr[c] * w_arr[c] * inv;
                             tmp_hh += w_arr[c] * w_arr[c] * inv;
+                            tmp_dh_im += d_arr[c] * wi_arr[c] * inv;
                         }
                     }
                 }
@@ -1584,12 +1608,15 @@ void wdm_het_get_ll_kernel(
         // ---- per-thread -> shared-mem partials, block-wide tree reduction --
         partial_dh[THREAD_START_X] = tmp_dh;
         partial_hh[THREAD_START_X] = tmp_hh;
+        partial_dh_im[THREAD_START_X] = tmp_dh_im;
         CUDA_SYNC_THREADS;
 #ifdef __CUDACC__
         for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
             if (THREAD_START_X < stride) {
                 partial_dh[THREAD_START_X] += partial_dh[THREAD_START_X + stride];
                 partial_hh[THREAD_START_X] += partial_hh[THREAD_START_X + stride];
+                partial_dh_im[THREAD_START_X] +=
+                    partial_dh_im[THREAD_START_X + stride];
             }
             CUDA_SYNC_THREADS;
         }
@@ -1602,6 +1629,7 @@ void wdm_het_get_ll_kernel(
         if (THREAD_START_X == 0) {
             d_h_out[bin_i] = partial_dh[0];
             h_h_out[bin_i] = partial_hh[0];
+            if (d_h_im_out != nullptr) d_h_im_out[bin_i] = partial_dh_im[0];
         }
 #else
         // CPU: blockDim.x == 1 (THREAD_START_X / BLOCK_INCR_X stubs collapse
@@ -1609,6 +1637,7 @@ void wdm_het_get_ll_kernel(
         // full sum for this binary.
         d_h_out[bin_i] = partial_dh[0];
         h_h_out[bin_i] = partial_hh[0];
+        if (d_h_im_out != nullptr) d_h_im_out[bin_i] = partial_dh_im[0];
 #endif
         CUDA_SYNC_THREADS;
     } // end bin_i
@@ -1901,7 +1930,12 @@ void wdm_het_swap_ll_kernel(
     // Task-b per-band slab addressing (default-off = bit-identical); see
     // wdm_het_get_ll_kernel for the contract.
     int        Nf_slab = 0,
-    const int *slab_min_f = nullptr)
+    const int *slab_min_f = nullptr,
+    // Fused phase-max quadratures of the two ADD-linear inner products
+    // (<d|h_add> and <h_add|h_rem>) at add-phi0 + pi/2 (nullptr -> not
+    // stored). Same exact parity-map construction as wdm_het_get_ll_kernel.
+    double    *d_h_add_im_out = nullptr,
+    double    *add_remove_im_out = nullptr)
 {
     // Same per-(chunk, m_layer) flow as get_ll, but with TWO template builds
     // (add + rem) and 5 inner-product partials (<d|h_add>, <d|h_rem>,
@@ -1946,14 +1980,17 @@ void wdm_het_swap_ll_kernel(
     double *partial_aa      = &partial_dh_r[NUM_THREADS_HERE];
     double *partial_rr      = &partial_aa  [NUM_THREADS_HERE];
     double *partial_ar      = &partial_rr  [NUM_THREADS_HERE];
+    double *partial_dh_a_im = &partial_ar  [NUM_THREADS_HERE];
+    double *partial_ar_im   = &partial_dh_a_im[NUM_THREADS_HERE];
     // cufftdx scratch (unused unless LISA_USE_CUFFTDX is defined).
-    char   *fft_scratch     = (char *) &partial_ar[NUM_THREADS_HERE];
+    char   *fft_scratch     = (char *) &partial_ar_im[NUM_THREADS_HERE];
 #else
     cmplx  fd_chunk_buf_a_cpu[FAST_WDM_NCHANNELS_MAX * FAST_WDM_N_SPARSE_MAX];
     cmplx  fd_chunk_buf_r_cpu[FAST_WDM_NCHANNELS_MAX * FAST_WDM_N_SPARSE_MAX];
     cmplx  layer_buf_cpu     [FAST_WDM_NCHANNELS_MAX * FAST_WDM_NT_SUB_MAX];
     double partial_dh_a_cpu[1], partial_dh_r_cpu[1];
     double partial_aa_cpu  [1], partial_rr_cpu  [1], partial_ar_cpu[1];
+    double partial_dh_a_im_cpu[1], partial_ar_im_cpu[1];
     cmplx  *fd_chunk_buf_a  = fd_chunk_buf_a_cpu;
     cmplx  *fd_chunk_buf_r  = fd_chunk_buf_r_cpu;
     cmplx  *layer_buf       = layer_buf_cpu;
@@ -1962,6 +1999,8 @@ void wdm_het_swap_ll_kernel(
     double *partial_aa      = partial_aa_cpu;
     double *partial_rr      = partial_rr_cpu;
     double *partial_ar      = partial_ar_cpu;
+    double *partial_dh_a_im = partial_dh_a_im_cpu;
+    double *partial_ar_im   = partial_ar_im_cpu;
     char   *fft_scratch     = nullptr;
 #endif
 
@@ -1991,6 +2030,8 @@ void wdm_het_swap_ll_kernel(
         // Per-thread accumulators.
         double tmp_dh_a = 0.0, tmp_dh_r = 0.0;
         double tmp_aa   = 0.0, tmp_rr   = 0.0, tmp_ar = 0.0;
+        // Fused phase-max quadratures (ADD-linear terms only).
+        double tmp_dh_a_im = 0.0, tmp_ar_im = 0.0;
 
         // Carrier bins for add and rem (each binary has its own).
         const double f0_a    = p_add[src.f0_index];
@@ -2167,7 +2208,12 @@ void wdm_het_swap_ll_kernel(
                                       Nt_sub, log2_Nt_sub,
                                       /*inverse=*/true, fft_scratch);
                 }
-                double w_add_reg[FAST_WDM_NCHANNELS_MAX * K_MAX_REG];
+                // The quadrature cache doubles the per-thread register block
+                // (24 doubles at GPU defaults). If occupancy ever regresses
+                // here, the documented fallback is a template <bool WANT_IM>
+                // instantiation gated on the im pointers -- same kernel body.
+                double w_add_reg   [FAST_WDM_NCHANNELS_MAX * K_MAX_REG];
+                double w_add_im_reg[FAST_WDM_NCHANNELS_MAX * K_MAX_REG];
                 {
                     int k_idx_reg = 0;
                     for (int n_loc = keep_lo + THREAD_START_X; n_loc < keep_hi;
@@ -2179,6 +2225,10 @@ void wdm_het_swap_ll_kernel(
                             const cmplx z = layer_buf[c * Nt_sub + n_loc];
                             const double rp = parity_even ? z.real() : z.imag();
                             w_add_reg[c * K_MAX_REG + k_idx_reg] = kappa * sign * rp;
+                            // Im(W) of the parity map (see wdm_het_get_ll_kernel).
+                            const double ip = parity_even ? z.imag() : -z.real();
+                            w_add_im_reg[c * K_MAX_REG + k_idx_reg] =
+                                kappa * sign * ip;
                         }
                         ++k_idx_reg;
                     }
@@ -2221,11 +2271,13 @@ void wdm_het_swap_ll_kernel(
                             const bool parity_even = (((m + n_loc) & 1) == 0);
                             const double sign      = ((((m + 1) * n_loc) & 1) == 0)
                                                       ? 1.0 : -1.0;
-                            double w_a_arr[FAST_WDM_NCHANNELS_MAX];
-                            double w_r_arr[FAST_WDM_NCHANNELS_MAX];
-                            double d_arr  [FAST_WDM_NCHANNELS_MAX];
+                            double w_a_arr [FAST_WDM_NCHANNELS_MAX];
+                            double w_ai_arr[FAST_WDM_NCHANNELS_MAX];
+                            double w_r_arr [FAST_WDM_NCHANNELS_MAX];
+                            double d_arr   [FAST_WDM_NCHANNELS_MAX];
                             for (int c = 0; c < nchannels; ++c) {
-                                w_a_arr[c] = w_add_reg[c * K_MAX_REG + k_idx_reg];
+                                w_a_arr[c]  = w_add_reg   [c * K_MAX_REG + k_idx_reg];
+                                w_ai_arr[c] = w_add_im_reg[c * K_MAX_REG + k_idx_reg];
                                 const cmplx z = layer_buf[c * Nt_sub + n_loc];
                                 const double rp = parity_even ? z.real() : z.imag();
                                 w_r_arr[c] = kappa * sign * rp;
@@ -2248,6 +2300,8 @@ void wdm_het_swap_ll_kernel(
                                     tmp_aa   += w_a_arr[c] * w_a_arr[c] * inv;
                                     tmp_rr   += w_r_arr[c] * w_r_arr[c] * inv;
                                     tmp_ar   += w_a_arr[c] * w_r_arr[c] * inv;
+                                    tmp_dh_a_im += d_arr[c]    * w_ai_arr[c] * inv;
+                                    tmp_ar_im   += w_ai_arr[c] * w_r_arr[c]  * inv;
                                 }
                                 for (int c1 = 0; c1 < nchannels - 1; ++c1) {
                                     for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
@@ -2264,6 +2318,10 @@ void wdm_het_swap_ll_kernel(
                                         tmp_rr   += 2.0 * w_r_arr[c1] * w_r_arr[c2] * inv;
                                         tmp_ar   += (w_a_arr[c1] * w_r_arr[c2]
                                                       + w_a_arr[c2] * w_r_arr[c1]) * inv;
+                                        tmp_dh_a_im += (d_arr[c1]    * w_ai_arr[c2]
+                                                         + d_arr[c2]    * w_ai_arr[c1]) * inv;
+                                        tmp_ar_im   += (w_ai_arr[c1] * w_r_arr[c2]
+                                                         + w_ai_arr[c2] * w_r_arr[c1]) * inv;
                                     }
                                 }
                             } else {
@@ -2276,6 +2334,8 @@ void wdm_het_swap_ll_kernel(
                                     tmp_aa   += w_a_arr[c] * w_a_arr[c] * inv;
                                     tmp_rr   += w_r_arr[c] * w_r_arr[c] * inv;
                                     tmp_ar   += w_a_arr[c] * w_r_arr[c] * inv;
+                                    tmp_dh_a_im += d_arr[c]    * w_ai_arr[c] * inv;
+                                    tmp_ar_im   += w_ai_arr[c] * w_r_arr[c]  * inv;
                                 }
                             }
                         }
@@ -2292,6 +2352,8 @@ void wdm_het_swap_ll_kernel(
         partial_aa  [THREAD_START_X] = tmp_aa;
         partial_rr  [THREAD_START_X] = tmp_rr;
         partial_ar  [THREAD_START_X] = tmp_ar;
+        partial_dh_a_im[THREAD_START_X] = tmp_dh_a_im;
+        partial_ar_im  [THREAD_START_X] = tmp_ar_im;
         CUDA_SYNC_THREADS;
 #ifdef __CUDACC__
         for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
@@ -2301,6 +2363,10 @@ void wdm_het_swap_ll_kernel(
                 partial_aa  [THREAD_START_X] += partial_aa  [THREAD_START_X + stride];
                 partial_rr  [THREAD_START_X] += partial_rr  [THREAD_START_X + stride];
                 partial_ar  [THREAD_START_X] += partial_ar  [THREAD_START_X + stride];
+                partial_dh_a_im[THREAD_START_X] +=
+                    partial_dh_a_im[THREAD_START_X + stride];
+                partial_ar_im  [THREAD_START_X] +=
+                    partial_ar_im  [THREAD_START_X + stride];
             }
             CUDA_SYNC_THREADS;
         }
@@ -2314,6 +2380,10 @@ void wdm_het_swap_ll_kernel(
             add_add_out      [bin_i] = partial_aa  [0];
             remove_remove_out[bin_i] = partial_rr  [0];
             add_remove_out   [bin_i] = partial_ar  [0];
+            if (d_h_add_im_out    != nullptr)
+                d_h_add_im_out   [bin_i] = partial_dh_a_im[0];
+            if (add_remove_im_out != nullptr)
+                add_remove_im_out[bin_i] = partial_ar_im  [0];
         }
 #else
         d_h_add_out      [bin_i] = partial_dh_a[0];
@@ -2321,6 +2391,10 @@ void wdm_het_swap_ll_kernel(
         add_add_out      [bin_i] = partial_aa  [0];
         remove_remove_out[bin_i] = partial_rr  [0];
         add_remove_out   [bin_i] = partial_ar  [0];
+        if (d_h_add_im_out    != nullptr)
+            d_h_add_im_out   [bin_i] = partial_dh_a_im[0];
+        if (add_remove_im_out != nullptr)
+            add_remove_im_out[bin_i] = partial_ar_im  [0];
 #endif
         CUDA_SYNC_THREADS;
     } // end bin_i
@@ -2951,7 +3025,9 @@ inline void wdm_het_get_ll_impl(
     int *group_m_lo, int *group_m_hi, int n_groups,
     int m_band_half_width,
     // Task-b per-band slab addressing (default-off = bit-identical).
-    int Nf_slab = 0, const int *slab_min_f = nullptr)
+    int Nf_slab = 0, const int *slab_min_f = nullptr,
+    // Fused phase-max quadrature output (nullptr -> not stored).
+    double *d_h_im_out = nullptr)
 {
     // New kernel does not use group-grouping path: each block handles one
     // binary and determines its own narrow m-band internally. Layer-grouping
@@ -2972,11 +3048,12 @@ inline void wdm_het_get_ll_impl(
     //   layer_buf    [nchannels * Nt_sub]   cmplx  -- per-m_layer scratch
     //   partial_dh   [blockDim.x]           double
     //   partial_hh   [blockDim.x]           double
+    //   partial_dh_im[blockDim.x]           double  -- fused phase-max quadrature
     //   fft_scratch  [wdm_cufftdx_max_scratch()] bytes  -- 0 unless cufftdx is on
     const size_t shared_bytes =
         (size_t) nchannels * (size_t) N_sparse * sizeof(cmplx) +
         (size_t) nchannels * (size_t) Nt_sub   * sizeof(cmplx) +
-        (size_t) 2 * (size_t) NUM_THREADS_HERE * sizeof(double) +
+        (size_t) 3 * (size_t) NUM_THREADS_HERE * sizeof(double) +
         wdm_cufftdx_max_scratch();
 
     // Per-call upload + free (no ``static`` cache): see the comment in
@@ -3012,7 +3089,7 @@ inline void wdm_het_get_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        N_cp_orbit, Nf_slab, slab_min_f);
+        N_cp_orbit, Nf_slab, slab_min_f, d_h_im_out);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
     gpuErrchk(cudaFree(orbits_gpu));
@@ -3029,7 +3106,7 @@ inline void wdm_het_get_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        N_cp_orbit, Nf_slab, slab_min_f);
+        N_cp_orbit, Nf_slab, slab_min_f, d_h_im_out);
 #endif
 }
 
@@ -3059,7 +3136,9 @@ inline void wdm_het_swap_ll_impl(
     int *pair_m_lo_b, int *pair_m_hi_b,
     int m_band_half_width,
     // Task-b per-band slab addressing (default-off = bit-identical).
-    int Nf_slab = 0, const int *slab_min_f = nullptr)
+    int Nf_slab = 0, const int *slab_min_f = nullptr,
+    // Fused phase-max quadratures of the ADD-linear terms (nullptr -> off).
+    double *d_h_add_im_out = nullptr, double *add_remove_im_out = nullptr)
 {
     (void) N_cp_sig; (void) N_cp_orbit;
     (void) binary_perm; (void) group_starts; (void) group_ends;
@@ -3075,12 +3154,14 @@ inline void wdm_het_swap_ll_impl(
     //   fd_chunk_buf_a [nchannels * N_sparse] cmplx  -- add chunk-FD
     //   fd_chunk_buf_r [nchannels * N_sparse] cmplx  -- rem chunk-FD
     //   layer_buf      [nchannels * Nt_sub]   cmplx  -- per-m scratch (reused)
-    //   5 * blockDim.x doubles (dh_a, dh_r, aa, rr, ar partial-sum buffers)
+    //   7 * blockDim.x doubles (dh_a, dh_r, aa, rr, ar, dh_a_im, ar_im
+    //     partial-sum buffers -- the last two are the fused phase-max
+    //     quadratures)
     //   fft_scratch    [wdm_cufftdx_max_scratch()] bytes -- 0 unless cufftdx is on
     const size_t shared_bytes =
         (size_t) 2 * (size_t) nchannels * (size_t) N_sparse * sizeof(cmplx) +
         (size_t) nchannels * (size_t) Nt_sub * sizeof(cmplx) +
-        (size_t) 5 * (size_t) NUM_THREADS_HERE * sizeof(double) +
+        (size_t) 7 * (size_t) NUM_THREADS_HERE * sizeof(double) +
         wdm_cufftdx_max_scratch();
 
     // Per-call upload + free (no ``static`` cache): see the comment in
@@ -3108,7 +3189,7 @@ inline void wdm_het_swap_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        Nf_slab, slab_min_f);
+        Nf_slab, slab_min_f, d_h_add_im_out, add_remove_im_out);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
     gpuErrchk(cudaFree(orbits_gpu));
@@ -3127,7 +3208,7 @@ inline void wdm_het_swap_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        Nf_slab, slab_min_f);
+        Nf_slab, slab_min_f, d_h_add_im_out, add_remove_im_out);
 #endif
 }
 

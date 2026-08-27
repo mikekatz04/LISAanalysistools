@@ -52,6 +52,21 @@ from .wdm_het import (
 # opt back in with GB_INDEX_ASSERTS=1. Checked ONCE at import.
 _GB_INDEX_ASSERTS = os.environ.get("GB_INDEX_ASSERTS", "0") == "1"
 
+# Fused phase-max sign contract: the chunked kernels also accumulate the
+# quadrature of each candidate-linear inner product (Im of the parity-map
+# coefficient W with Re(W) = w, whose rotation tracks a carrier phase shift
+# exactly). These constants normalize the raw kernel outputs to EXACTLY
+# "the same inner product at phi0 + pi/2", the convention
+# ``TwoQuadraturePhaseMaxMixin`` consumes. Pinned EMPIRICALLY by the signed
+# stash-parity asserts in GBGPU tests/test_phase_max_fused.py (|D| is
+# sign-blind; only the signed compare can catch a wrong constant) -- never
+# derive them analytically, flip them only if that test says so. The swap
+# cross term <h_add|h_rem> gets its own constant: its add coefficient sits
+# in a different (real-product) slot than <d|h_add>'s.
+_QUAD_SIGN_CHUNKED = +1.0
+_QUAD_SIGN_CHUNKED_SWAP_ADD = +1.0
+_QUAD_SIGN_CHUNKED_SWAP_CROSS = +1.0
+
 
 class WDMComputationsBase(LISAToolsParallelModule):
     """Source-class-agnostic WDM-domain chunked-heterodyne likelihood base.
@@ -86,6 +101,13 @@ class WDMComputationsBase(LISAToolsParallelModule):
     _METHOD_PREFIX = "gb_wdm_het"
     _NPARAMS = 9
     _F0_PARAM_INDEX = 1   # GBTDIonTheFly: params[1] = f0
+    #: Whether this comp's C++ get_ll/swap_ll BINDINGS accept the trailing
+    #: fused phase-max quadrature array(s). The LAT kernels/impls default
+    #: them off (nullptr), so a source class opts in only after its own
+    #: binding TU grows the parameter -- GBGPU has (GBWDMComputations sets
+    #: True); bbhx/SOBBH has not (stays False; its calls append nothing and
+    #: ``d_h_im_out`` stashes None).
+    _FUSED_QUAD_KERNELS = False
 
     def __init__(self, wdm_settings, t_ref,
                  Nt_sub=256, n_pad=32, N_sparse=256,
@@ -577,13 +599,25 @@ class WDMComputationsBase(LISAToolsParallelModule):
             params_tmp[:, -1] = beta
 
         # JAX backend's wrap mutates host (numpy) buffers since jnp
-        # arrays are immutable.
+        # arrays are immutable. The JAX kernels also keep their original
+        # signature (no fused quadrature output yet -- documented follow-up
+        # under the backend-hierarchy rule), so the quadrature array is
+        # neither allocated nor appended there and ``d_h_im_out`` stashes
+        # ``None`` (the phase-max mixin then falls back to its two-call body).
         if self.backend.name == self._BACKEND_PREFIX + "_jax":
             d_h_out = np.zeros(num_bin)
             h_h_out = np.zeros(num_bin)
+            d_h_im = None
+            quad_args = ()
         else:
             d_h_out = self.xp.zeros(num_bin)
             h_h_out = self.xp.zeros(num_bin)
+            if self._FUSED_QUAD_KERNELS:
+                d_h_im = self.xp.zeros(num_bin)
+                quad_args = (d_h_im,)
+            else:
+                d_h_im = None
+                quad_args = ()
 
         wdm_holder = self._as_wdm_holder(wdm_holder)
         num_data = num_noise = len(wdm_holder)
@@ -627,10 +661,13 @@ class WDMComputationsBase(LISAToolsParallelModule):
             int(groups["n_groups"]),
             int(m_band_half_width),
             *self._slab_kernel_args(wdm_holder),
+            *quad_args,
         )
 
         self.d_h_out = d_h_out
         self.h_h_out = h_h_out
+        self.d_h_im_out = (None if d_h_im is None
+                           else _QUAD_SIGN_CHUNKED * d_h_im)
         return -0.5 * (self.d_d + h_h_out - 2.0 * d_h_out)
 
     def get_swap_ll_wdm(self, params_add, params_remove, wdm_holder,
@@ -676,10 +713,19 @@ class WDMComputationsBase(LISAToolsParallelModule):
             d_h_a = np.zeros(num_bin); d_h_r = np.zeros(num_bin)
             aa    = np.zeros(num_bin); rr    = np.zeros(num_bin)
             ar    = np.zeros(num_bin)
+            d_h_a_im = None; ar_im = None
+            quad_args = ()   # JAX kernels keep their original signature
         else:
             d_h_a = self.xp.zeros(num_bin); d_h_r = self.xp.zeros(num_bin)
             aa    = self.xp.zeros(num_bin); rr    = self.xp.zeros(num_bin)
             ar    = self.xp.zeros(num_bin)
+            if self._FUSED_QUAD_KERNELS:
+                d_h_a_im = self.xp.zeros(num_bin)
+                ar_im    = self.xp.zeros(num_bin)
+                quad_args = (d_h_a_im, ar_im)
+            else:
+                d_h_a_im = None; ar_im = None
+                quad_args = ()
 
         wdm_holder = self._as_wdm_holder(wdm_holder)
         num_data = num_noise = len(wdm_holder)
@@ -728,6 +774,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
             self.xp.asarray(groups["pair_m_hi_b"],  dtype=np.int32),
             int(m_band_half_width),
             *self._slab_kernel_args(wdm_holder),
+            *quad_args,
         )
 
         self.d_h_add_out       = d_h_a
@@ -735,6 +782,13 @@ class WDMComputationsBase(LISAToolsParallelModule):
         self.add_add_out       = aa
         self.remove_remove_out = rr
         self.add_remove_out    = ar
+        # Fused phase-max quadratures of the ADD-linear terms (None on JAX
+        # -> the mixin's two-call fallback), comp-normalized to "value at
+        # add-phi0 + pi/2".
+        self.d_h_add_im_out = (None if d_h_a_im is None
+                               else _QUAD_SIGN_CHUNKED_SWAP_ADD * d_h_a_im)
+        self.add_remove_im_out = (None if ar_im is None
+                                  else _QUAD_SIGN_CHUNKED_SWAP_CROSS * ar_im)
 
         like_add    = -0.5 * (self.d_d + aa - 2.0 * d_h_a)
         like_remove = -0.5 * (self.d_d + rr - 2.0 * d_h_r)
