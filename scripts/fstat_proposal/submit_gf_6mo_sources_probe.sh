@@ -192,6 +192,14 @@ export BASE_FILE_NAME=gf_prod_6mo_sources
 export MBH_NTEMPS=6
 export EMRI_NTEMPS=6
 export SOBBH_NTEMPS=6
+# Fancy (walker-permuting) temperature swap every 10 iterations (user
+# ruling 2026-08-27): the measured cost was ~17 min of an ~18.5-min MBH
+# leaf visit — ~5x the in-model work — when it fired every propose.
+# permute_every is a cadence in proposes again (first propose after a
+# restart always fires; <=0 disables).
+export MBH_PERMUTE_EVERY=10
+export EMRI_PERMUTE_EVERY=10
+export SOBBH_PERMUTE_EVERY=10
 
 # ---- start scatter (user ruling 2026-08-26) ---------------------------------
 # The default 1e-5 multiplicative truth scatter produced wildly spread

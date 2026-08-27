@@ -101,7 +101,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         inner_moves: list of moves and their corresponding weights to be used for proposing new sources for the leaf.
         Tmax: maximum temperature for the temperature control.
         betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
-        permute_every: gate for the walker-permuting (fancy) temperature swap: > 0 enables it — it fires exactly ONCE per leaf visit, on the final in-model repeat — and <= 0 disables it entirely (``{BRANCH}_PERMUTE_EVERY`` env override). The numeric value is no longer a cadence.
+        permute_every: cadence (in proposes / engine iterations) for the walker-permuting (fancy) temperature swap: it fires at most once per leaf visit, on the final in-model repeat, on every ``permute_every``-th propose (1 = every propose; the first propose after a restart always fires); <= 0 disables it entirely (``{BRANCH}_PERMUTE_EVERY`` env override).
         pad_out_of_prior: whether to pad proposed sources that are out of the prior bounds to avoid JIT compilation issues. If True, proposed sources that are out of the prior bounds will be replaced with the first in-prior point. 
         **kwargs: additional keyword arguments for the Move class.
     """
@@ -420,9 +420,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # line per repeat (cold-chain lnL before/after the temperature swap,
         # inner acceptance, per-rung swap counts, fancy flag).
         self.swap_debug = bool(int(os.environ.get(f"{p}_SWAP_DEBUG", "0")))
-        # {BRANCH}_PERMUTE_EVERY overrides the ctor permute_every; <= 0
-        # DISABLES the walker-permuting (fancy) swap entirely — the A/B lever
-        # for isolating fancy-swap pathologies.
+        # {BRANCH}_PERMUTE_EVERY overrides the ctor permute_every (a
+        # CADENCE in proposes since 2026-08-27; 1 = every propose); <= 0
+        # DISABLES the walker-permuting (fancy) swap entirely — the A/B
+        # lever for isolating fancy-swap pathologies.
         _pe_env = os.environ.get(f"{p}_PERMUTE_EVERY") or os.environ.get(
             "ADDREMOVE_PERMUTE_EVERY"
         )
@@ -1196,6 +1197,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         """
         self.setup(model, state)
         tic = time.time()
+        # Fancy-swap cadence clock: one tick per propose (engine
+        # iteration). In-memory, so the first propose after any restart
+        # fires (same convention as the GB temper cadence).
+        self._fancy_swap_clock = getattr(self, "_fancy_swap_clock", 0) + 1
 
         # cold-row agreement between the main state and this branch's
         # sub-state (GF_SUBSTATE_CHECK=0 disables)
@@ -1517,14 +1522,20 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     self.branch_name: work.coords[:, :, leaf].copy()[:, :, None]
                 }
 
-                # Walker-permuting (fancy) swap: exactly ONCE per leaf visit,
-                # on the FINAL in-model repeat — the in-model stretch repeats
-                # run undisturbed, then the ensemble permutes across the
-                # ladder before the updated sources fold back. permute_every
-                # is now a pure gate: > 0 enables, <= 0 disables
+                # Walker-permuting (fancy) swap: at most ONCE per leaf
+                # visit, on the FINAL in-model repeat — and only on every
+                # ``permute_every``-th propose (user ruling 2026-08-27:
+                # the fancy swap measured ~17 min of an ~18.5-min MBH
+                # leaf visit at 6 rungs, ~5x the in-model work; a
+                # per-iteration permute is unaffordable). permute_every
+                # is a CADENCE in proposes again: 1 = every propose (the
+                # previous behavior), N = every Nth (first propose after
+                # a restart always fires), <= 0 disables entirely
                 # ({BRANCH}_PERMUTE_EVERY env override).
                 fancy_swap = (
-                    self.permute_every > 0 and repeat == self.num_repeats - 1
+                    self.permute_every > 0
+                    and repeat == self.num_repeats - 1
+                    and (self._fancy_swap_clock - 1) % self.permute_every == 0
                 )
                 if fancy_swap:
                     logger.debug(
