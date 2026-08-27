@@ -6830,6 +6830,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         if bool(accept.any()):
             acc_ids = ids[accept]
+            _raf = getattr(self, "_replace_accept_forensics", None)
+            if _raf is not None:
+                try:
+                    _raf.append((
+                        np.asarray(asnumpy(t_i[accept])),
+                        np.asarray(asnumpy(w_i[accept])),
+                        np.asarray(asnumpy(b_i[accept])),
+                        np.asarray(asnumpy(delta_ll[accept]), dtype=float),
+                    ))
+                except Exception:
+                    pass
             wrapped_new = self.periodic.wrap(
                 {self.branch_name: params_new[accept][:, None, :]}, xp=xp
             )[self.branch_name][:, 0]
@@ -9438,11 +9449,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     leaf_inds=(l_i[_ic:_ic + 1]
                                if self._per_leaf_fill else None),
                 )[0, 1]))
+                # eps_delta = the term the MH ratio ACTUALLY sees for THIS
+                # offender (absolute |dll| is an upper bound; a large
+                # absolute error with a small eps_delta is the harmless
+                # displacement-law regime, a large eps_delta is real bias
+                # -- 2026-08-27 forensics for the growing audit tail).
+                _eps_ic = (
+                    float(cp.abs((_ll_het_final - _ll_exact)
+                                 - _anchor_err)[_ic])
+                    if _anchor_err is not None else float("nan")
+                )
                 logger.warning(
                     f"{self.name}: ll AUDIT worst cold offender: "
                     f"temp={int(t_i[_ic])} walker={int(w_i[_ic])} "
                     f"band={int(b_i[_ic])} f0={_f0:.6e} Hz "
                     f"|dll|={float(_err[_ic]):.3e} "
+                    f"eps_delta={_eps_ic:.3e} "
                     f"dlnA={float(damp[_ic]):.3e} "
                     f"dphase={float(drift[_ic]):.3e} rad "
                     f"ll_exact={float(_ll_exact[_ic]):.3e}"
@@ -11652,6 +11674,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
+        # Drift forensics (2026-08-27): collect this propose's accepted
+        # replace swaps so a drift rebuild can name the walkers/bands
+        # involved (two rj_replace drifts at 1.5-1.9e3 -- 3 orders above
+        # every other move -- prompted this).
+        self._replace_accept_forensics = []
         with tm.span("run_proposal"):
             ll_change_log, prop_counts, acc_counts = self.run_proposal(
                 model, new_state, band_sorter, band_temps
@@ -11686,6 +11713,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"{self.name}: incremental ll drift {drift:.3e} after "
                 "proposal; rebuilding log_like from the residual."
             )
+            try:
+                # FORENSICS (2026-08-27): name the drifting walkers and,
+                # for rj_replace, cross-reference this propose's accepted
+                # swaps -- the 1.5-1.9e3 replace drifts need attribution
+                # (which walker, which bands, does the drift match the
+                # accepted-swap dll?). Diagnostics never kill a propose.
+                _chk = _to_numpy(check)
+                _off = np.argsort(np.abs(_chk))[::-1][:5]
+                logger.warning(
+                    f"{self.name}: drift by walker (top5): "
+                    + ", ".join(f"w{int(i)}: {float(_chk[int(i)]):+.3e}"
+                                for i in _off))
+                _raf = getattr(self, "_replace_accept_forensics", None)
+                if _raf:
+                    _t = np.concatenate([x[0] for x in _raf])
+                    _w = np.concatenate([x[1] for x in _raf])
+                    _b = np.concatenate([x[2] for x in _raf])
+                    _d = np.concatenate([x[3] for x in _raf])
+                    _c = _t == 0
+                    for i in _off[:3]:
+                        m = _c & (_w == int(i))
+                        logger.warning(
+                            f"{self.name}: drift forensics w{int(i)}: "
+                            f"{int(m.sum())} cold replace accepts this "
+                            f"propose (bands "
+                            f"{sorted(set(_b[m].tolist()))[:8]}), "
+                            f"sum accepted dll {float(_d[m].sum()):+.1f} "
+                            f"vs walker drift {float(_chk[int(i)]):+.3e}")
+            except Exception:
+                pass
             with tm.span("ll_inject_drift"):
                 new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
         # breakpoint()
@@ -11752,6 +11809,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"{self.name}: incremental ll drift {drift:.3e} after "
                     "tempering; rebuilding log_like from the residual."
                 )
+                try:
+                    _chk = _to_numpy(check)
+                    _off = np.argsort(np.abs(_chk))[::-1][:5]
+                    logger.warning(
+                        f"{self.name}: tempering drift by walker (top5): "
+                        + ", ".join(f"w{int(i)}: {float(_chk[int(i)]):+.3e}"
+                                    for i in _off))
+                except Exception:
+                    pass
                 with tm.span("ll_inject_drift"):
                     new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
 
