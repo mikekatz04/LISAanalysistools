@@ -25,7 +25,7 @@ class MBHSettings(Settings):
 
     waveform_kwargs: Optional[dict] = None
     # per-leaf ladder size for the add/remove move (engine is cold-chain only)
-    ntemps: int = dataclasses.field(default_factory=env_default("MBH_NTEMPS", 4, int))
+    ntemps: int = dataclasses.field(default_factory=env_default("MBH_NTEMPS", 24, int))
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
     num_prop_repeats: Optional[int] = 200
@@ -124,7 +124,12 @@ class MBHSetup(Setup):
                     5e2,
                 ]
             )
-            ntemps_pe = 24  # len(snrs_ladder)
+            # self.ntemps, NOT a hardcoded 24 (fixed 2026-08-26): the
+            # MBH_NTEMPS knob (and the _lite presets' ntemps=2!) was
+            # silently ignored -- the observed ladders were always 24
+            # rungs. Field default is now 24 so an UNSET knob keeps the
+            # validated full-year ladder bit-identical.
+            ntemps_pe = int(self.ntemps)
             # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
             betas = 1 / 1.2 ** np.arange(ntemps_pe)
             betas[-1] = 0.0001
