@@ -909,21 +909,51 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
     return F_flat.reshape(node_shape)
 
 
+def mc_ladder_levels(n_req):
+    """Doubling-ladder quantization of per-box Mc-node requirements.
+
+    Levels come from the ladder ``{3, 6, 12, 24, 48, 96}`` (smallest level
+    >= the box's requirement), then a running max keeps them MONOTONE in
+    the f0-sorted box order so the resulting groups are contiguous. The
+    ladder only PARTITIONS boxes into groups: each group's actual axis
+    density is its max RAW requirement, so a single-group fit reproduces
+    the historical single-stack node count exactly, and per-box waste is
+    bounded by the ladder ratio (< 2x) instead of the full-band f0^{11/3}
+    span (~30x at 22 mHz over the low band).
+    """
+    out = np.empty(len(n_req), dtype=int)
+    prev = 0
+    for i, r in enumerate(np.asarray(n_req, dtype=int)):
+        L = 3
+        while L < r:
+            L *= 2
+        prev = max(prev, min(L, 96))
+        out[i] = prev
+    return out
+
+
 def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
                         band_edges_hz, mc_lims,
                         cache_path: Optional[str] = None,
                         fingerprint_extra: str = "", epoch=None):
-    """Stage B: clamped boxes -> ONE batched sweep -> stacked grids.
+    """Stage B: clamped boxes -> batched sweep(s) -> stacked grids.
 
     Assemble (host, cheap): every selected peak's 4-D box with its f0 range
     CLAMPED to its sub-band edges (unclamped boxes would propose f0 the
-    consumer's per-cell gate rejects). Sweep: one chunked kernel stream over
-    all boxes. Build: ONE :class:`StackedFStatProposal4D` -- the grids ARE
-    the production sampling layer.
+    consumer's per-cell gate rejects). Sweep: one chunked kernel stream per
+    Mc GROUP (see :func:`mc_ladder_levels` -- the banded-Mc refactor, user
+    ruling 2026-08-26; a single group is the historical one-stream fit).
+    Build: one :class:`StackedFStatProposal4D` per group -- a single group
+    returns it directly (bit-identical to the historical path, legacy npz
+    format included); several return a
+    :class:`GroupedStackedFStatProposal` (exact mixture equivalence) and
+    the grouped npz format. ``FSTAT_MC_GROUPING=0`` restores the one
+    max-f0-sized stack.
 
-    Returns the live ``StackedFStatProposal4D`` (or ``None`` if no peaks).
+    Returns the live proposal (or ``None`` if no peaks).
     """
     from lisatools.sampling.fstat_proposal import (
+        GroupedStackedFStatProposal,
         StackedFStatProposal4D,
         fstat_knob,
         fstat_n_axis,
@@ -981,58 +1011,126 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
     mc_lims = list(mc_lims or [0.001, 1.0])
     mc_range = (max(float(mc_lims[0]), fstat_knob("FSTAT_MC_MIN", float)),
                 float(mc_lims[-1]))
-    # AUTO Mc density (fstat_n_mc): the stack is rectangular, so ONE
-    # grid-wide count from the MAX peak f0 (the fdot span scales as
-    # f0^{11/3}; the highest band sets the requirement, lower bands are
-    # merely over-resolved). Explicit FSTAT_N_MC still wins inside.
-    n_Mc = fstat_n_mc(
-        float(np.max(peaks[:, 0])), mc_range[0], mc_range[1], float(Tobs)
-    )
-    mc_ax = np.linspace(mc_range[0], mc_range[1], n_Mc)
+    # BANDED Mc density (user ruling 2026-08-26): the auto criterion is
+    # evaluated PER BOX (the fdot span scales as f0^{11/3}), boxes are
+    # grouped on the requirement ladder (contiguous in the f0-sorted
+    # order since the requirement is monotone in f0), and each group
+    # sweeps its own rectangular stack sized by ITS max raw requirement.
+    # One group -- every confined probe, a pinned FSTAT_N_MC, or
+    # FSTAT_MC_GROUPING=0 -- is bit-identical to the historical
+    # single-stack path (n_Mc = the max-f0 requirement, legacy cache).
+    n_req = np.array([
+        fstat_n_mc(float(f0), mc_range[0], mc_range[1], float(Tobs))
+        for f0 in peaks[:, 0]
+    ])
+    if os.environ.get("FSTAT_MC_GROUPING", "1") == "1":
+        levels = mc_ladder_levels(n_req)
+    else:
+        levels = np.full(K, int(n_req.max()))
+    g_edges = np.concatenate(
+        [[0], np.flatnonzero(np.diff(levels)) + 1, [K]]).astype(int)
+    n_groups = len(g_edges) - 1
+
     alpha_ax = np.linspace(0.0, 2 * np.pi, n_alpha)
     sd_ax = np.linspace(-1.0, 1.0, n_sd)
-    node_shape = (K, n_f0, n_Mc, n_alpha, n_sd)
-    logger.info("[stageB] %d peak boxes x %dx%dx%dx%d nodes; Mc box %s; "
-                "f0 boxes clamped to their sub-bands.", K, n_f0, n_Mc,
-                n_alpha, n_sd, mc_range)
-
     _parts = cache_path.replace(".npz", "_parts") if cache_path else None
-    logp_grids = run_stacked_peak_sweep(
-        call_fstat, f0_los, f0_dxs, mc_ax, alpha_ax, sd_ax, node_shape, xp=xp,
-        ckpt=os.path.join(_parts, "stageb") if _parts else None,
-        fingerprint_extra=fingerprint_extra,
-    )  # beta = 1: logp = F
-
     mem_mb = os.environ.get("FSTAT_GRID_MEM_MB", "").strip()
-    # LIVE path (the fit that just ran). Use the SAME weighting the cache
-    # path applies, so a run that fits in-process and one that reloads the
-    # epoch cache draw from an identical proposal -- otherwise the first
-    # epoch after a fit would silently differ from every resume.
-    stacked = StackedFStatProposal4D(
-        logp_grids, f0_los, f0_dxs, mc_ax, alpha_ax, sd_ax,
-        weights=peak_box_weights(
-            np.clip(peaks[:, 1], 0.0, None), peak_f0_mHz=peaks[:, 0],
-            band_edges=band_edges_hz,
-            alpha=peak_weight_alpha_env(epoch),
-            cells=peak_weight_cells_env(),
-            equal=(os.environ.get("FSTAT_PEAK_WEIGHTING", "fstat")
-                   .strip().lower() == "equal")),
-        mem_budget_mb=float(mem_mb) if mem_mb else None,
-    )
+    mem_budget = float(mem_mb) if mem_mb else None
+    # LIVE-path weighting. Use the SAME weighting the cache path applies,
+    # so a run that fits in-process and one that reloads the epoch cache
+    # draw from an identical proposal -- otherwise the first epoch after a
+    # fit would silently differ from every resume.
+    box_w = peak_box_weights(
+        np.clip(peaks[:, 1], 0.0, None), peak_f0_mHz=peaks[:, 0],
+        band_edges=band_edges_hz,
+        alpha=peak_weight_alpha_env(epoch),
+        cells=peak_weight_cells_env(),
+        equal=(os.environ.get("FSTAT_PEAK_WEIGHTING", "fstat")
+               .strip().lower() == "equal"))
+
+    grids_g, mc_ax_g, n_mc_g = [], [], []
+    for gi in range(n_groups):
+        a, b = int(g_edges[gi]), int(g_edges[gi + 1])
+        n_Mc = int(n_req[a:b].max())
+        mc_ax = np.linspace(mc_range[0], mc_range[1], n_Mc)
+        node_shape = (b - a, n_f0, n_Mc, n_alpha, n_sd)
+        logger.info(
+            "[stageB] group %d/%d: %d peak boxes x %dx%dx%dx%d nodes "
+            "(f0 %.4f-%.4f mHz); Mc box %s; f0 boxes clamped to their "
+            "sub-bands.", gi + 1, n_groups, b - a, n_f0, n_Mc, n_alpha,
+            n_sd, float(f0_los[a]), float(f0_los[b - 1]), mc_range)
+        # single group keeps the historical "stageb" checkpoint name so
+        # in-flight fits resume across this code change.
+        _ck = "stageb" if n_groups == 1 else f"stageb_g{gi}"
+        grids_g.append(run_stacked_peak_sweep(
+            call_fstat, f0_los[a:b], f0_dxs[a:b], mc_ax, alpha_ax, sd_ax,
+            node_shape, xp=xp,
+            ckpt=os.path.join(_parts, _ck) if _parts else None,
+            fingerprint_extra=fingerprint_extra,
+        ))  # beta = 1: logp = F
+        mc_ax_g.append(mc_ax)
+        n_mc_g.append(n_Mc)
+
+    if n_groups == 1:
+        stacked = StackedFStatProposal4D(
+            grids_g[0], f0_los, f0_dxs, mc_ax_g[0], alpha_ax, sd_ax,
+            weights=box_w, mem_budget_mb=mem_budget,
+        )
+        if cache_path:
+            stacked_path = cache_path.replace(".npz", "_peaks_stacked.npz")
+            os.makedirs(os.path.dirname(stacked_path), exist_ok=True)
+            np.savez(
+                stacked_path,
+                logp_grids=_to_host(grids_g[0]), f0_los=f0_los,
+                f0_dxs=f0_dxs, mc_ax=mc_ax_g[0], alpha_ax=alpha_ax,
+                sin_delta_ax=sd_ax,
+                peak_f0_mHz=peaks[:, 0], peak_F=peaks[:, 1],
+                band_idx=band_idx,
+                band_f0_lo=band_edges_mHz[band_idx],
+                band_f0_hi=band_edges_mHz[band_idx + 1],
+                band_edges=np.asarray(band_edges_hz, dtype=float),
+            )
+            logger.info("[cache] wrote %s", stacked_path)
+            ckpt_clear(_parts, "stageb")
+        return stacked
+
+    comps = []
+    for gi in range(n_groups):
+        a, b = int(g_edges[gi]), int(g_edges[gi + 1])
+        sub_w = None
+        if box_w is not None:
+            sub_w = np.asarray(box_w, dtype=float)[a:b]
+            if not np.any(sub_w > 0):
+                sub_w = None  # zero-mass group: equal inside, never drawn
+        comps.append(StackedFStatProposal4D(
+            grids_g[gi], f0_los[a:b], f0_dxs[a:b], mc_ax_g[gi], alpha_ax,
+            sd_ax, weights=sub_w, mem_budget_mb=mem_budget))
+    stacked = GroupedStackedFStatProposal(comps, box_weights=box_w)
+    _sizes = np.diff(g_edges).astype(int)
+    logger.info(
+        "[stageB] banded Mc stacks: %d groups, sizes %s, n_Mc %s "
+        "(a single max-f0 stack would carry %d Mc nodes on every box).",
+        n_groups, _sizes.tolist(), n_mc_g, int(n_req.max()))
 
     if cache_path:
         stacked_path = cache_path.replace(".npz", "_peaks_stacked.npz")
         os.makedirs(os.path.dirname(stacked_path), exist_ok=True)
+        group_arrays = {}
+        for gi in range(n_groups):
+            group_arrays[f"logp_grids_g{gi}"] = _to_host(grids_g[gi])
+            group_arrays[f"mc_ax_g{gi}"] = mc_ax_g[gi]
         np.savez(
             stacked_path,
-            logp_grids=_to_host(logp_grids), f0_los=f0_los, f0_dxs=f0_dxs,
-            mc_ax=mc_ax, alpha_ax=alpha_ax, sin_delta_ax=sd_ax,
+            group_sizes=_sizes, f0_los=f0_los, f0_dxs=f0_dxs,
+            alpha_ax=alpha_ax, sin_delta_ax=sd_ax,
             peak_f0_mHz=peaks[:, 0], peak_F=peaks[:, 1], band_idx=band_idx,
             band_f0_lo=band_edges_mHz[band_idx],
             band_f0_hi=band_edges_mHz[band_idx + 1],
             band_edges=np.asarray(band_edges_hz, dtype=float),
+            **group_arrays,
         )
-        logger.info("[cache] wrote %s", stacked_path)
+        logger.info("[cache] wrote %s (%d Mc groups)", stacked_path,
+                    n_groups)
         ckpt_clear(_parts, "stageb")
     return stacked
 
@@ -1060,7 +1158,7 @@ def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
 
     Returns ``(stacked_or_None, n_peaks)``.
     """
-    from lisatools.sampling.fstat_proposal import StackedFStatProposal4D
+    from lisatools.sampling.fstat_proposal import stacked_from_cache
 
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, GRID_BASENAME)
@@ -1079,7 +1177,7 @@ def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
         # dropped whenever this branch was taken (a refit that finds stage B
         # already written -- a resume after a mid-fit death, and every epoch
         # whose grids were prebuilt offline).
-        stacked = StackedFStatProposal4D.from_cache(
+        stacked = stacked_from_cache(
             d,
             weights=peak_box_weights(
                 np.clip(np.asarray(d["peak_F"], dtype=float), 0.0, None),
@@ -1339,6 +1437,7 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
         UniformFloorMixture,
         fstat_knob,
         make_gb_rj_birth_container,
+        stacked_from_cache,
     )
 
     cache_path = os.path.join(cache_dir, GRID_BASENAME)
@@ -1415,7 +1514,7 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
                     f"; weight max/median = "
                     f"{box_weights.max() / max(np.median(box_weights), 1e-300):.1f}x")
         mem_mb = os.environ.get("FSTAT_GRID_MEM_MB", "").strip()
-        peak_component = StackedFStatProposal4D.from_cache(
+        peak_component = stacked_from_cache(
             cache, weights=box_weights,
             mem_budget_mb=float(mem_mb) if mem_mb else None,
             use_cupy=use_cupy,
@@ -1527,23 +1626,38 @@ def enumerate_center_nodes(cache_dir: str, *, mc_lims=None,
 
     if os.path.exists(stacked_cache):
         d = np.load(stacked_cache, allow_pickle=False)
-        grids = np.asarray(d["logp_grids"], dtype=float)
-        f0_los = np.asarray(d["f0_los"], dtype=float)
-        f0_dxs = np.asarray(d["f0_dxs"], dtype=float)
-        mc_ax = np.asarray(d["mc_ax"], dtype=float)
         al_ax = np.asarray(d["alpha_ax"], dtype=float)
         sd_ax = np.asarray(d["sin_delta_ax"], dtype=float)
-        K, n_f0 = grids.shape[0], grids.shape[1]
-        # argmax over the (Mc, alpha, sin_delta) block at each (box, f0 node)
-        flat = grids.reshape(K, n_f0, -1).argmax(axis=2)
-        i_mc, i_al, i_sd = np.unravel_index(
-            flat, (len(mc_ax), len(al_ax), len(sd_ax)))
-        f0 = f0_los[:, None] + np.arange(n_f0)[None, :] * f0_dxs[:, None]
-        f0_parts.append(f0.ravel())
-        mc_parts.append(mc_ax[i_mc].ravel())
-        al_parts.append(al_ax[i_al].ravel())
-        sd_parts.append(sd_ax[i_sd].ravel())
-        n_peak = int(f0.size)
+        f0_los_all = np.asarray(d["f0_los"], dtype=float)
+        f0_dxs_all = np.asarray(d["f0_dxs"], dtype=float)
+        # legacy single-stack npz vs banded-Mc groups (2026-08-26): one
+        # (grids, f0 slice, mc_ax) block per group either way.
+        if "logp_grids" in d.files:
+            blocks = [(np.asarray(d["logp_grids"], dtype=float),
+                       f0_los_all, f0_dxs_all,
+                       np.asarray(d["mc_ax"], dtype=float))]
+        else:
+            sizes = np.asarray(d["group_sizes"], dtype=int)
+            bounds = np.concatenate([[0], np.cumsum(sizes)])
+            blocks = [
+                (np.asarray(d[f"logp_grids_g{gi}"], dtype=float),
+                 f0_los_all[a:b], f0_dxs_all[a:b],
+                 np.asarray(d[f"mc_ax_g{gi}"], dtype=float))
+                for gi, (a, b) in enumerate(zip(bounds[:-1], bounds[1:]))
+            ]
+        for grids, f0_los, f0_dxs, mc_ax in blocks:
+            K, n_f0 = grids.shape[0], grids.shape[1]
+            # argmax over the (Mc, alpha, sin_delta) block at each
+            # (box, f0 node)
+            flat = grids.reshape(K, n_f0, -1).argmax(axis=2)
+            i_mc, i_al, i_sd = np.unravel_index(
+                flat, (len(mc_ax), len(al_ax), len(sd_ax)))
+            f0 = f0_los[:, None] + np.arange(n_f0)[None, :] * f0_dxs[:, None]
+            f0_parts.append(f0.ravel())
+            mc_parts.append(mc_ax[i_mc].ravel())
+            al_parts.append(al_ax[i_al].ravel())
+            sd_parts.append(sd_ax[i_sd].ravel())
+            n_peak += int(f0.size)
 
     if os.path.exists(comb_cache):
         c = np.load(comb_cache, allow_pickle=False)

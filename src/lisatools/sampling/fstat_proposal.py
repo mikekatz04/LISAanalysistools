@@ -61,6 +61,8 @@ __all__ = [
     "GridSpec",
     "FStatProposal4D",
     "StackedFStatProposal4D",
+    "GroupedStackedFStatProposal",
+    "stacked_from_cache",
     "iter_stacked_components",
     "stacked_in_cell_mode",
     "UniformFloorMixture",
@@ -1406,6 +1408,153 @@ class StackedFStatProposal4D:
             out = xp.log(xp.sum(xp.exp(lp - m_safe[:, None]), axis=1)) + m_safe
         out = xp.where(xp.isfinite(m), out, -xp.inf)
         return xp.where(inside3, out, -xp.inf)
+
+
+class GroupedStackedFStatProposal:
+    """Contiguous f0-groups of :class:`StackedFStatProposal4D`, one Mc axis
+    density per group (the banded-Mc stage-B refactor, user ruling
+    2026-08-26).
+
+    At full band the auto Mc density is set by the MAX peak f0, so a single
+    rectangular stack carries the high-frequency node count on every
+    low-frequency box (~30x waste). Stage B instead groups the (f0-sorted)
+    peak boxes by Mc-node requirement and builds one rectangular stack per
+    group; this wrapper recombines them into the EXACT same mixture:
+
+        p(x) = sum_g (W_g / W) * p_g(x),   W_g = sum of group g's box
+                                            weights, p_g the group stack's
+                                            internally-normalized mixture
+
+    which equals ``sum_k (w_k / W) p_k(x)`` -- the single-stack density --
+    identically. Groups are contiguous in the f0-sorted global box order,
+    so per-box arrays (draw counts, ``rvs_per_box``) concatenate in group
+    order to the global order the census expects.
+
+    Duck-typed surfaces kept from the single stack: ``rvs`` / ``logpdf``
+    (birth draws + BandSorter factors), ``pop_draw_counts`` (the census
+    walker matches on this attribute BEFORE descending into components),
+    ``rvs_per_box`` (GMM layer), ``components`` (walked by
+    :func:`iter_stacked_components`, e.g. the trilinear in-cell switch).
+    """
+
+    param_names = ("f0", "Mc", "alpha", "sin_delta")
+    ndim = 4
+
+    def __init__(self, components, box_weights=None, seed: Optional[int] = None):
+        self.components = list(components)
+        if not self.components:
+            raise ValueError("GroupedStackedFStatProposal needs >= 1 group.")
+        sizes = np.array([int(c.K) for c in self.components])
+        self.group_sizes = sizes
+        self.K = int(sizes.sum())
+        self._bounds = np.concatenate([[0], np.cumsum(sizes)])
+        if box_weights is None:
+            w = np.ones(self.K)
+        else:
+            w = np.asarray(_host(box_weights), dtype=float).ravel()
+        if w.shape != (self.K,):
+            raise ValueError(
+                f"box_weights has shape {w.shape}; expected ({self.K},) to "
+                "match the total box count over all groups.")
+        Wg = np.array([w[a:b].sum()
+                       for a, b in zip(self._bounds[:-1], self._bounds[1:])])
+        if not (np.all(Wg >= 0) and Wg.sum() > 0):
+            raise ValueError("box_weights must be non-negative with positive "
+                             "total mass.")
+        self.weights = Wg / Wg.sum()
+        self._rng = np.random.default_rng(seed)
+
+    # global per-box metadata (group order == f0-sorted global order)
+    @property
+    def f0_los(self):
+        return np.concatenate([c._f0_lo for c in self.components])
+
+    @property
+    def f0_dxs(self):
+        return np.concatenate([c._f0_dx for c in self.components])
+
+    def rvs(self, size=1):
+        if isinstance(size, int):
+            size = (size,)
+        n = int(np.prod(size))
+        which = self._rng.choice(len(self.components), size=n, p=self.weights)
+        out = np.empty((n, 4))
+        for g, comp in enumerate(self.components):
+            m = which == g
+            if m.any():
+                out[m] = _host(comp.rvs(size=(int(m.sum()),)))
+        return out.reshape(size + (4,))
+
+    def logpdf(self, x):
+        from ..utils.utility import get_array_module
+
+        xp = get_array_module(x)
+        x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
+        with np.errstate(divide="ignore"):
+            lps = xp.stack(
+                [np.log(max(w, 1e-300)) + xp.asarray(c.logpdf(x))
+                 for c, w in zip(self.components, self.weights)]
+            )
+        m = xp.max(lps, axis=0)
+        m_safe = xp.where(xp.isfinite(m), m, 0.0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out = xp.log(xp.sum(xp.exp(lps - m_safe), axis=0)) + m_safe
+        return xp.where(xp.isfinite(m), out, -xp.inf)
+
+    def pop_draw_counts(self):
+        """Per-peak draw counts in the GLOBAL (f0-sorted) box order."""
+        return np.concatenate(
+            [c.pop_draw_counts() for c in self.components])
+
+    def rvs_per_box(self, n_per_box: int):
+        xp = self.components[0].xp
+        return xp.concatenate(
+            [xp.asarray(c.rvs_per_box(n_per_box)) for c in self.components],
+            axis=0)
+
+
+def stacked_from_cache(d, weights=None, seed: Optional[int] = None,
+                       mem_budget_mb: Optional[float] = None,
+                       use_cupy: bool = False, device: Optional[int] = None):
+    """Rebuild the stage-B peak proposal from a ``*_peaks_stacked.npz``.
+
+    Dispatches on the cache format: the legacy single-stack keys
+    (``logp_grids`` / ``mc_ax``) rebuild a plain
+    :class:`StackedFStatProposal4D` exactly as before; the grouped format
+    (``group_sizes`` + per-group ``logp_grids_g{i}`` / ``mc_ax_g{i}``,
+    with GLOBAL ``f0_los`` / ``f0_dxs`` / ``weights``) rebuilds a
+    :class:`GroupedStackedFStatProposal`. ``weights`` is always the GLOBAL
+    per-box weight vector; each group's stack receives its slice (a
+    zero-mass group falls back to equal weights internally and simply
+    never gets drawn).
+    """
+    keys = getattr(d, "files", None) or list(d)
+    if "logp_grids" in keys:
+        return StackedFStatProposal4D.from_cache(
+            d, weights=weights, seed=seed, mem_budget_mb=mem_budget_mb,
+            use_cupy=use_cupy, device=device)
+    sizes = np.asarray(d["group_sizes"], dtype=int)
+    bounds = np.concatenate([[0], np.cumsum(sizes)])
+    K = int(sizes.sum())
+    w = (None if weights is None
+         else np.asarray(_host(weights), dtype=float).ravel())
+    f0_los = np.asarray(d["f0_los"], dtype=float)
+    f0_dxs = np.asarray(d["f0_dxs"], dtype=float)
+    comps = []
+    for gi, (a, b) in enumerate(zip(bounds[:-1], bounds[1:])):
+        sub_w = None
+        if w is not None:
+            sub_w = w[a:b]
+            if not np.any(sub_w > 0):
+                sub_w = None  # zero-mass group: equal inside, never drawn
+        comps.append(StackedFStatProposal4D.from_cache(
+            dict(logp_grids=d[f"logp_grids_g{gi}"],
+                 f0_los=f0_los[a:b], f0_dxs=f0_dxs[a:b],
+                 mc_ax=d[f"mc_ax_g{gi}"], alpha_ax=d["alpha_ax"],
+                 sin_delta_ax=d["sin_delta_ax"]),
+            weights=sub_w, seed=seed, mem_budget_mb=mem_budget_mb,
+            use_cupy=use_cupy, device=device))
+    return GroupedStackedFStatProposal(comps, box_weights=w, seed=seed)
 
 
 def iter_stacked_components(dist, _seen=None):
