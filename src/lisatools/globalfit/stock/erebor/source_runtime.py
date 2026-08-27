@@ -1297,8 +1297,43 @@ class SourceSignalGen:
 # ============================================================
 # Runtime move builders
 # ============================================================
+class DeviceLocalWaveGen:
+    """Per-call, per-device dispatch for MOVE-side waveform generators.
+
+    The move builders used to CAPTURE one wrap instance at build time.
+    Under multi-GPU threaded dispatch (``_run_per_split``: one thread per
+    device split, each inside its own ``cuda.Device`` context) both
+    threads then drove that single generator: cross-device peer-access
+    traffic, and a DATA RACE on stateful generators — FEW's trajectory
+    integrator lost its spline mid-eval and the 2026-08-27 sources probe
+    died with dopr853 "between t_min (0.0) and t_max (0.0)".
+
+    Resolving through the getter on EVERY call (and attribute access)
+    keys into the device-local ``_WAVE_WRAP_CACHE`` — cupy's current
+    device is thread-local — so each split lazily builds and uses its own
+    replica, exactly like the engine ``signal_gen`` path already does.
+    """
+
+    def __init__(self, getter, general_info, cfg):
+        self._getter = getter
+        self._general_info = general_info
+        self._cfg = cfg
+
+    def _resolve(self):
+        return self._getter(self._general_info, self._cfg)
+
+    def __call__(self, *params, **kwargs):
+        return self._resolve()(*params, **kwargs)
+
+    def __getattr__(self, name):
+        # dunder/underscore guard (deepcopy/pickle probing rule)
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._resolve(), name)
+
+
 def build_emri_move_runtime(curr, acs, priors, state, cfg):
-    wave_gen = get_emri_wave_wrap(curr.general_info, cfg)
+    wave_gen = DeviceLocalWaveGen(get_emri_wave_wrap, curr.general_info, cfg)
     _, moves = EMRIMoveBuilder(wave_gen=wave_gen).build(None, curr, acs, priors, state)
     return moves[0]
 
@@ -1435,7 +1470,7 @@ def get_sobbh_chunked_signal_gen(general_info, cfg):
 
 
 def build_sobbh_move_runtime(curr, acs, priors, state, cfg):
-    wave_gen = get_sobbh_wave_wrap(curr.general_info, cfg)
+    wave_gen = DeviceLocalWaveGen(get_sobbh_wave_wrap, curr.general_info, cfg)
     if cfg.get("sobbh_likelihood", "full") == "chunked":
         comp = get_sobbh_chunked_comp(curr.general_info, cfg)
         _, moves = SOBBHChunkedMoveBuilder(
@@ -1455,12 +1490,13 @@ def build_mbh_move_runtime(curr, acs, priors, state, cfg):
     ``build_mbh_moves_phenom`` builder around the cached phentax generator."""
     mbh_info = curr.source_info["mbh"]
     if not cfg["mbh_use_tdionfly"]:
-        wave_gen = get_mbh_phenom_gen(curr.general_info, cfg)
+        wave_gen = DeviceLocalWaveGen(get_mbh_phenom_gen, curr.general_info, cfg)
         _, move = build_mbh_moves_phenom(
             curr, acs, priors, state, wave_gen=wave_gen, subtract_initial=False
         )
         return move
-    wave_gen = get_mbh_tdionfly_wave_wrap(curr.general_info, cfg)
+    wave_gen = DeviceLocalWaveGen(
+        get_mbh_tdionfly_wave_wrap, curr.general_info, cfg)
     _, moves = MBHMoveBuilder(
         wave_gen=wave_gen, waveform_like_kwargs=mbh_info.waveform_kwargs
     ).build(None, curr, acs, priors, state)
