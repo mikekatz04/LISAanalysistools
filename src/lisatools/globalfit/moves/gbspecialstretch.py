@@ -6815,10 +6815,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         try:
             # replace acceptance census (printed at propose end);
-            # diagnostics must never kill a propose.
+            # diagnostics must never kill a propose. SNR-gated rows are
+            # ALSO in bad_mask (the gate writes delta_ll=-1e300), so
+            # subtract them to keep the two counters disjoint (first
+            # production line double-counted: snr+nonfinite > proposals).
             self._replace_census_add(
                 t_i, accept, delta_ll, _n_snr_gated,
-                int(np.asarray(asnumpy(bad_mask)).sum()))
+                max(int(np.asarray(asnumpy(bad_mask)).sum())
+                    - _n_snr_gated, 0))
         except Exception:
             pass
 
