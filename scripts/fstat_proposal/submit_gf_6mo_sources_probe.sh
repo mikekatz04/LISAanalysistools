@@ -99,16 +99,21 @@ export GPUS=${GPUS:-0,1}
 # =cpu restores the validated CPU injections.
 export SYNTHETIC_INJECTION_BACKEND=auto
 
-# ---- DATA MODE: BACK TO MOJITO (user ruling 2026-08-26) ---------------------
-# Real L1 data from ${REAL_MOJITO} (/shared/data/mojito_cache): the id
-# lists below select actual catalogue rows again (MBHB 2,5,16,18 = the
-# only in-window mergers), and the fixed sensitivity comes from the LSQ
-# fit to the NOISE brick (= the injection PSD). PRECONDITION: the cache
-# must hold MBHB L1 bricks for ids 2 and 5 (the loader raises loudly
-# naming the missing id if not). DATA_MODE=synthetic remains the
-# self-contained escape hatch (stock tables, id lists become counts,
-# SYNTHETIC_INJECTION_BACKEND applies there only).
-export DATA_MODE=${DATA_MODE:-mojito}
+# ---- DATA MODE: synthetic FOR NOW (user 2026-08-26: the mojito data has
+#      not been moved to /shared/data/mojito_cache yet) ----------------------
+# Synthetic = self-contained in-process streams, injections generated ON
+# THE GPUs (SYNTHETIC_INJECTION_BACKEND=auto above); id lists contribute
+# only their COUNTS (4 MBHBs / 8 EMRIs / 6 SOBHBs) from the stock tables;
+# synthetic MBH mergers land in the window interior by construction;
+# fixed analytic PSD; no instrument noise (exact truth nulls -- with the
+# 1e-8 start factors the initial lnL line should be ~identical ~0 across
+# all 24 walkers).
+# ONCE THE DATA IS IN PLACE: DATA_MODE=mojito flips to real L1 data from
+# ${REAL_MOJITO} -- catalogue ids become real rows (MBHB 2,5,16,18 = the
+# in-window mergers), fixed PSD = LSQ fit to the NOISE brick.
+# PRECONDITION there: MBHB L1 bricks for ids 2 and 5 must exist (loader
+# raises loudly naming the missing id).
+export DATA_MODE=${DATA_MODE:-synthetic}
 
 # ---- CONFUSION FOREGROUND DATA (user request 2026-08-24; then DISABLED
 #      same day: "Turn that off for now in our 6 month test" -- the GALFOR
