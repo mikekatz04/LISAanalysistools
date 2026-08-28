@@ -238,6 +238,12 @@ class _ProposeTimer:
             "sorter_build", "friend_index", "resid_open_close", "ll_checks",
             "run_proposal", "run_tempering", "write_back", "sorter_rebuild",
             "band_info", "ll_inject_final", "ll_inject_drift", "mempool_free",
+            # Once-per-epoch F-stat grid refit: real propose time that runs
+            # OUTSIDE run_proposal (_run_fstat_fit). Untracked before
+            # 2026-08-28, where it read as a 651-700 s / 37% accounting hole
+            # on the two proposes that refit -- see
+            # tests/test_fstat_grid_fit_timing.py.
+            "fstat_grid_fit",
         )
         items = sorted(self.stages.items(), key=lambda kv: -kv[1])
         tracked = sum(v for k, v in self.stages.items() if k in top)
@@ -13716,6 +13722,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                 epoch=k,
             )
         wall = time.perf_counter() - t0
+        # Feed the propose timer: this runs outside every other top-level
+        # span, so without it the refit lands in [GB_TIMING]'s untracked
+        # remainder and reads as an unexplained stall.
+        _tm = getattr(self, "_prop_timer", None)
+        if _tm is not None:
+            _tm.add("fstat_grid_fit", wall)
         logger.info("%s: F-stat grid fit epoch %d done in %.1fs (%d peaks)",
                     self.name, k, wall, n_peaks)
         try:
