@@ -2426,7 +2426,12 @@ void wdm_het_get_fstat_ll_kernel(
     // Task-b per-band slab addressing (default-off = bit-identical); see
     // wdm_het_get_ll_kernel for the contract.
     int        Nf_slab = 0,
-    const int *slab_min_f = nullptr)
+    const int *slab_min_f = nullptr,
+    // BASIS-FILTER FOLD (default 0 = OFF = the unfolded 4-generation path,
+    // bit-for-bit the pre-fold behaviour). 1 = fold: generate the two psi
+    // stages only and recover filters 2 and 3 by an exact constant phase
+    // rotation. See the FOLD note in the kernel body.
+    int        fstat_fold = 0)
 {
     // F-stat: build 4 basis waveforms per Cornish & Crowder '05 with fixed
     //   (A, iota, psi, phi0) = (2, pi/2, {0, pi/4, 0, pi/4}, {0, pi, 3pi/2, pi/2})
@@ -2458,6 +2463,46 @@ void wdm_het_get_fstat_ll_kernel(
                                           M_PI / 2.0, M_PI / 2.0};
     const double psi_arr  [N_FILTERS] = {0.0, M_PI / 4.0, 0.0, M_PI / 4.0};
     const double phi0_arr [N_FILTERS] = {0.0, M_PI, 3.0 * M_PI / 2.0, M_PI / 2.0};
+
+    // ---- BASIS-FILTER FOLD (``fstat_fold``; default 0 = OFF) --------------
+    // The four filters are 2 polarization directions x 2 phase quadratures:
+    // (0, 2) share psi = 0 and (1, 3) share psi = pi/4, so each pair differs
+    // ONLY in phi0. The analytic TDI this kernel builds is an EXACT phasor in
+    // phi0, so only TWO waveform generations are needed:
+    //
+    //   get_hp_hc (lat_tdi_on_the_fly.cu:724) forms the complex sample from
+    //   the [phase_change = 0, pi/2] quadrature pair as
+    //       (-cos(Phi) , +sin(Phi))  ->  -e^{-i Phi}
+    //   with Phi = ucb_phase = -phi0 + 2 pi (f0 dt + ...) (LDC convention, the
+    //   leading MINUS on phi0 -- gb_tdi_on_the_fly.cu:186). Hence
+    //       tdi(phi0) = e^{+i phi0} tdi(0)     [exact]
+    //   and step 2 below conjugates before the heterodyne, so the CHUNK-FD
+    //   BUFFER carries the OPPOSITE sign:
+    //       fd_chunk_buf(phi0) = e^{-i phi0} fd_chunk_buf(0).
+    //   (The cos(iota) cross term is a second phasor with the same Phi and a
+    //   constant complex coefficient, so the identity is exact for any iota,
+    //   not only the iota = pi/2 the basis uses.)
+    //
+    // => alpha_i = e^{-i phi0_i} over phi0_arr = {0, pi, 3pi/2, pi/2}, i.e.
+    //    the EXACT constants {+1, -1, +i, -i} applied to stages {0, 1, 0, 1}.
+    //    They are hardcoded below rather than evaluated as cos/sin so the
+    //    rotation is a pure sign flip / real-imag swap and introduces ZERO
+    //    floating-point error of its own. This is the same alpha the sig-het
+    //    F-stat scorer uses (gb_tdi_on_the_fly.cu:6222), pinned here
+    //    independently against this kernel's own unfolded path.
+    //
+    // NOTE for anyone re-deriving the sign: a wrong sign conjugates alpha_2
+    // and alpha_3, which is the similarity N -> D N, M -> D M D with
+    // D = diag(1, 1, -1, -1). F = N^T M^-1 N is INVARIANT under it, so an
+    // end-to-end F / SNR check CANNOT see a sign error -- only the recovered
+    // (phi0_max, psi_max) move. Pin the sign on the raw (N, M), never on F.
+    //
+    // TODO(fstat-fold): the unfolded branch is validation scaffolding. Once
+    // the parity gate is green on the cluster and one production run confirms
+    // the timing, delete it and the ``fstat_fold`` argument; keep the parity
+    // TEST (it can pin the folded kernel against a host-side reference).
+    const bool fold_on = (fstat_fold != 0);
+    const int  n_stages = fold_on ? 2 : N_FILTERS;
 
     // GB param indices (constants for the GB convention; SOBBH would need
     // a trait-based specialization).
@@ -2564,7 +2609,11 @@ void wdm_het_get_fstat_ll_kernel(
             // ============================================================
             const double n_taper = (tukey_alpha > 0.0)
                 ? 0.5 * tukey_alpha * (double) (N_sparse - 1) : 0.0;
-            for (int fi_b = 0; fi_b < N_FILTERS; ++fi_b) {
+            // ``n_stages`` == N_FILTERS unfolded (default), 2 when folded.
+            // psi_arr[0..1] == {0, pi/4} are exactly the two psi stages, so
+            // the same table serves both paths; only phi0 differs (the folded
+            // stages are both generated at phi0 = 0 and rotated afterwards).
+            for (int fi_b = 0; fi_b < n_stages; ++fi_b) {
                 double params_basis[16];   // GB has 9; bound generously
                 for (int k = 0; k < nparams && k < 16; ++k) {
                     params_basis[k] = params[k];
@@ -2572,7 +2621,7 @@ void wdm_het_get_fstat_ll_kernel(
                 params_basis[IDX_A   ] = A_arr   [fi_b];
                 params_basis[IDX_IOTA] = iota_arr[fi_b];
                 params_basis[IDX_PSI ] = psi_arr [fi_b];
-                params_basis[IDX_PHI0] = phi0_arr[fi_b];
+                params_basis[IDX_PHI0] = fold_on ? 0.0 : phi0_arr[fi_b];
 
                 // ---- 1) TD-build into fd_chunk_buf[fi_b] ----
                 {
@@ -2629,6 +2678,24 @@ void wdm_het_get_fstat_ll_kernel(
                                       /*inverse=*/false, fft_scratch);
                 }
             } // end build-FD per filter
+
+            // ---- FOLD: stages {0, 1} -> filters {0, 1, 2, 3} --------------
+            // alpha = {+1, -1, +i, -i} on stages {0, 1, 0, 1}, applied as
+            // exact sign flips / real-imag swaps (no cos/sin, no FP error).
+            // Each thread owns its own ``idx`` in every buffer, so reading
+            // s0/s1 before overwriting buf[1] is race-free.
+            if (fold_on) {
+                for (int idx = THREAD_START_X; idx < nchannels * N_sparse;
+                     idx += BLOCK_INCR_X) {
+                    const cmplx s0 = fd_chunk_buf[0][idx];   // psi = 0
+                    const cmplx s1 = fd_chunk_buf[1][idx];   // psi = pi/4
+                    // fd_chunk_buf[0] *= +1  -> left as generated.
+                    fd_chunk_buf[1][idx] = cmplx(-s1.real(), -s1.imag());
+                    fd_chunk_buf[2][idx] = cmplx(-s0.imag(),  s0.real());
+                    fd_chunk_buf[3][idx] = cmplx( s1.imag(), -s1.real());
+                }
+                CUDA_SYNC_THREADS;
+            }
             // All 4 chunk-FDs now resident in shared mem; reuse across m below.
 
             // ============================================================
@@ -3235,7 +3302,10 @@ inline void wdm_het_get_fstat_ll_impl(
     int grid_dim,
     int m_band_half_width,
     // Task-b per-band slab addressing (default-off = bit-identical).
-    int Nf_slab = 0, const int *slab_min_f = nullptr)
+    int Nf_slab = 0, const int *slab_min_f = nullptr,
+    // Basis-filter fold: 0 = OFF (default, unfolded 4 generations,
+    // bit-for-bit the pre-fold path), 1 = ON. See the kernel's FOLD note.
+    int fstat_fold = 0)
 {
 #ifdef __CUDACC__
     // One binary per block on grid.X (always). The grid_dim arg is
@@ -3288,7 +3358,7 @@ inline void wdm_het_get_fstat_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        Nf_slab, slab_min_f);
+        Nf_slab, slab_min_f, fstat_fold);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
     gpuErrchk(cudaFree(orbits_gpu));
@@ -3306,7 +3376,7 @@ inline void wdm_het_get_fstat_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        Nf_slab, slab_min_f);
+        Nf_slab, slab_min_f, fstat_fold);
 #endif
 }
 
