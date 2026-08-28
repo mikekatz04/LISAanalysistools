@@ -19,9 +19,17 @@ the slow path's numbers on every scoring site (prev_logl, proposal batches,
 fancy tempering swap) and keeps the base ``_verify_entry_vs_acs`` expose
 invariant meaningful, up to chunked-heterodyne truncation error.
 
-Residual expose/fold stays on the exact engine-installed generator
-(residual integrity is bit-identical to the stock move); only scoring is
-approximated. The built-in fast-vs-slow cross-check (``_verify_prev_logl``)
+Residual expose/fold ALSO runs chunked since 2026-08-28
+(:meth:`SOBBHChunkedLikeMove._apply_cold_chain_sources`): one batched
+``fill_global_wdm`` per leaf visit in place of the base's dense
+one-row-at-a-time pass, which cost 24 full TD waveform + TD->WDM builds to
+expose a leaf and 24 more to fold it back (32 s per build on the 6-mo grid
+-- the first leaf never finished inside a preemption window). This DOES put
+chunked truncation into the residual, where the move previously kept the
+residual bit-identical to the stock path and approximated only scoring; the
+trade was measured first (6-mo removal-null: residual 6e-4 of ``<h|h>`` at
+the ``Nt_sub=32`` defaults). ``SOBBH_CHUNKED_FILL=0`` restores the exact
+dense pass. The built-in fast-vs-slow cross-check (``_verify_prev_logl``)
 recomputes through the slow container path at MATCHING convention with a
 tolerance knob ``SOBBH_CHECK_LL_TOL``.
 """
@@ -274,6 +282,88 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         self.compute_like(add_coords_in, walker_idx)
         _sub.d_h[:, leaf] = self._last_d_h[: self.nwalkers]
         _sub.h_h[:, leaf] = self._last_h_h[: self.nwalkers]
+
+    def _apply_cold_chain_sources(self, coords, sign):
+        """Fold the leaf's cold-chain sources in/out through the CHUNKED fill.
+
+        Replaces the base's dense pass -- ``apply_signal_from_params`` ->
+        ``build_template``, "ONE ROW AT A TIME", i.e. a full TD waveform
+        plus a full TD->WDM transform per walker -- with ONE batched
+        ``fill_global_wdm`` call. Measured 2026-08-28 on the 6-mo probe: a
+        dense SOBBH build is 32 s on this grid, so a 24-walker leaf visit
+        paid 24 builds to expose and 24 to fold back; the first leaf never
+        completed inside a 20-25 min preemption window.
+
+        THE SIGN (vocabulary collides -- the numbers do not):
+        ``apply_signal_from_params`` documents "+1 adds to the residual
+        array, -1 subtracts", so the base calls ``sign=+1`` to EXPOSE a
+        source (``r += h``) and ``sign=-1`` to fold it back (``r -= h``).
+        ``fill_global_wdm`` accumulates ``factors * h`` into the same
+        buffer and calls ``-1`` "remove" -- which is the move's *add_back*.
+        Opposite words, identical arithmetic: ``factors = sign``.
+
+        Rows whose template is zero -- non-finite, or ``f_low`` outside the
+        comp's active band -- are dropped, mirroring the dense path's
+        ``domain_error="skip"``. Skipping is deterministic in the coords,
+        so a row skipped on the way out is skipped on the way back.
+
+        ``fill_global_wdm`` is single-shard BY CONTRACT (it raises on a
+        split holder), so a multi-GPU ACA is routed per shard with the same
+        ``_shard_views``/``_partition`` primitives :meth:`_kernel_ll`
+        already uses for scoring -- each view is a single-shard holder.
+
+        ACCURACY: this puts chunked-heterodyne truncation into the RESIDUAL
+        itself, where the stock move kept it bit-identical and approximated
+        only the scoring. That trade was measured before it was taken (the
+        6-mo removal-null sweep: residual 6e-4 of <h|h> at the Nt_sub=32
+        defaults). ``SOBBH_CHUNKED_FILL=0`` restores the exact dense pass.
+        """
+        if os.environ.get("SOBBH_CHUNKED_FILL", "1").strip() != "1":
+            return super()._apply_cold_chain_sources(coords, sign)
+
+        coords_np = np.atleast_2d(np.asarray(asnumpy(coords), dtype=np.float64))
+        params = self.to_chunked_basis(coords_np)
+        f_low = params[:, 5]
+        valid = (
+            np.all(np.isfinite(params), axis=1)
+            & (f_low >= self._f_band_lo)
+            & (f_low < self._f_band_hi)
+        )
+        if not np.any(valid):
+            return
+
+        # GLOBAL walker index per surviving row: the caller passes one row
+        # per walker, so the row position IS the walker's residual slab.
+        idx = np.arange(params.shape[0], dtype=np.int32)[valid]
+        p = params[valid]
+        factors = np.full(p.shape[0], float(sign), dtype=np.float64)
+
+        if len(self.acs.linear_data_arr) == 1:
+            self.comp.fill_global_wdm(
+                p, self.acs,
+                data_index=idx,
+                factors=factors,
+                m_band_half_width=self.m_band_half_width,
+            )
+            return
+
+        from ...utils.device import device_context
+        from .gbbands import _RoutedBandEngine
+
+        holder = self.acs
+        views = _RoutedBandEngine._shard_views(holder)
+        parts = _RoutedBandEngine._partition(holder, idx)
+        xp = holder.xp
+        for view, (pos, intra, _) in zip(views, parts):
+            if pos.shape[0] == 0:
+                continue
+            with device_context(xp, view.device):
+                self.comp.fill_global_wdm(
+                    p[pos], view,
+                    data_index=np.asarray(intra, dtype=np.int32),
+                    factors=factors[pos],
+                    m_band_half_width=self.m_band_half_width,
+                )
 
     def _verify_prev_logl(self, prev_logl, old_coords_in, data_index_in, leaf):
         """Built-in fast-vs-slow A/B at MATCHING convention.
