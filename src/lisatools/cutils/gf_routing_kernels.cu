@@ -36,7 +36,10 @@ static CUDA_CALLABLE_MEMBER int64_t gf_trunc_i64(double v) {
 
 /** ``atomicAdd`` on a 64-bit signed counter; plain add on the CPU build. */
 static CUDA_CALLABLE_MEMBER void gf_atomic_add_i64(int64_t *p, int64_t v) {
-#ifdef __CUDACC__
+#ifdef __CUDA_ARCH__
+  // DEVICE compilation pass only: atomicAdd is __device__, and __CUDACC__
+  // is ALSO defined during nvcc's HOST pass (repo rule, bbhx ddbe414) --
+  // guarding builtins in CUDA_CALLABLE_MEMBER code takes __CUDA_ARCH__.
   atomicAdd(reinterpret_cast<unsigned long long *>(p),
             static_cast<unsigned long long>(v));
 #else
@@ -46,7 +49,7 @@ static CUDA_CALLABLE_MEMBER void gf_atomic_add_i64(int64_t *p, int64_t v) {
 
 /** ``atomicAdd`` on a 32-bit signed counter; plain add on the CPU build. */
 static CUDA_CALLABLE_MEMBER void gf_atomic_add_i32(int32_t *p, int32_t v) {
-#ifdef __CUDACC__
+#ifdef __CUDA_ARCH__  // device pass only (see gf_atomic_add_i64)
   atomicAdd(p, v);
 #else
   *p += v;
@@ -55,7 +58,7 @@ static CUDA_CALLABLE_MEMBER void gf_atomic_add_i32(int32_t *p, int32_t v) {
 
 /** ``atomicAdd`` on a double; plain add on the CPU build. */
 static CUDA_CALLABLE_MEMBER void gf_atomic_add_f64(double *p, double v) {
-#ifdef __CUDACC__
+#ifdef __CUDA_ARCH__  // device pass only (see gf_atomic_add_i64)
   atomicAdd(p, v);
 #else
   *p += v;
