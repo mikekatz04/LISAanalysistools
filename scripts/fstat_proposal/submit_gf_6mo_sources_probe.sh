@@ -256,7 +256,18 @@ export SOBBH_NTEMPS=12
 # where it dominates (mbh/emri).
 export MBH_NUM_PROP_REPEATS=5
 export EMRI_NUM_PROP_REPEATS=5
-export SOBBH_NUM_PROP_REPEATS=25
+# SOBBH 25 -> 10 for THIS measurement run (2026-08-28). The chunked fill
+# removed ~25 min of per-leaf dense bookkeeping (expose measured at 0.31 s,
+# job 372, down from 24 x 32 s), which leaves the repeat loop AS the entire
+# leaf -- and unlike the dense floor it removed, that loop is exactly
+# proportional to repeats. Job 372 ran 8.4 min of scoring without finishing
+# a leaf, against a window of (preemption 20-25 min) - (build 11.5 min) =
+# 8.5-13.5 min: right on the edge, which is why every job misses by a hair.
+# At 10 the leaf is ~3.4 min, so boundaries land every ~3 min and
+# mid-iteration checkpointing can finally bank progress. Cost is LINEAR in
+# repeats, so this measures 25 by multiplication -- put it back up once the
+# run can survive a kill.
+export SOBBH_NUM_PROP_REPEATS=10
 # Fancy (walker-permuting) temperature swap every 10 iterations (user
 # ruling 2026-08-27): the measured cost was ~17 min of an ~18.5-min MBH
 # leaf visit — ~5x the in-model work — when it fired every propose.
@@ -333,6 +344,35 @@ export SOBHB_IDS=0,1,2,3,4,5       # all 6 -- expected mostly sub-threshold
 # near a bottleneck, so take the converged value for safety. The
 # production all_sources grid (1-h layers) does not need this.
 export SOBBH_M_BAND_HALF_WIDTH=3
+# Thin the built-in fast-vs-slow A/B (user ruling 2026-08-27). The SOBBH
+# SCORING path is vectorized -- one chunked-het call for all
+# ntemps*nwalkers rows of a leaf -- but ``_verify_prev_logl`` re-scores
+# those same points through the SLOW per-row container path (one
+# TDI-on-the-fly waveform per row) to measure chunked truncation error,
+# and it defaults to EVERY leaf visit. That is 12*24 = 288 serial
+# waveform generations per leaf, ~1728 per iteration across the 6 SOBHBs,
+# and it scales with ntemps -- so tripling the ladder 4 -> 12 tripled the
+# diagnostic too. At 30 it fires on the 30th propose, leaving the
+# measured SOBBH wall as the vectorized science path.
+# NB with NUM_ITERATIONS=30 that is the FINAL iteration only, so the
+# accuracy check effectively does not run in this probe (and not at all
+# if the job is preempted first). Lower this -- or raise NUM_ITERATIONS
+# -- when the goal is validating chunked-het accuracy at 6 months rather
+# than timing it. SOBBH_CHECK_LL=0 would disable it outright; left at 1
+# so it still fails loudly past SOBBH_CHECK_LL_TOL when it does fire.
+export SOBBH_CHECK_LL_EVERY=30
+# Residual-integrity check for the NEW chunked fill (2026-08-28). Folding
+# the residual through fill_global_wdm puts chunked truncation into the
+# residual itself, where the move previously kept it bit-identical -- and
+# nothing has verified that in production yet. SWAP_DEBUG is the CHEAP way
+# to check: it logs a per-leaf [STAGE] POST-READD line comparing the move's
+# believed cold lnL against the ACS likelihood ("spread ~0 = consistent
+# bookkeeping; large spread = state/residual corruption"), costing a couple
+# of likelihood evaluations per leaf.
+# Do NOT use SOBBH_CHECK_LL_EVERY=1 for this: for SOBBH the "slow" A/B path
+# is the same 32 s/row dense build the fill just eliminated, so it would
+# cost hours per leaf. Turn this back off once the fill is trusted.
+export SOBBH_SWAP_DEBUG=1
 
 # ---- timing instrumentation -------------------------------------------------
 # [GF_MOVE_TIMING] per-move wall + host RSS + GPU pool for every move; SYNC
