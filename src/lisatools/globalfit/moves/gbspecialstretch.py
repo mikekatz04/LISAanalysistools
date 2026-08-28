@@ -5772,6 +5772,107 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ln_snr = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
         return phi0, iota, psi, ln_center, sigma, ln_snr
 
+    @staticmethod
+    def _circ_absdiff(a, b, period, xp):
+        """Shortest-arc |a-b| on a circle of the given period."""
+        d = xp.abs(a - b) % period
+        return xp.minimum(d, period - d)
+
+    @staticmethod
+    def _absdiff_summary(d, xp):
+        """``(median, p90, max)`` of a delta array; NaNs on an empty one."""
+        if int(d.shape[0]) == 0:
+            return float("nan"), float("nan"), float("nan")
+        return (float(xp.median(d)), float(xp.percentile(d, 90)),
+                float(d.max()))
+
+    def _fstat_ctr_audit_rows(self) -> int:
+        """How many rows to audit table-vs-per-row (0 = off, the default).
+
+        ``GB_FSTAT_CTR_AUDIT``: unset/"0" off; "1" = the 4096-row default
+        sample; any other positive integer = that many rows.
+        """
+        v = os.environ.get("GB_FSTAT_CTR_AUDIT", "0").strip()
+        if v in ("", "0", "off", "false"):
+            return 0
+        if v in ("1", "on", "true"):
+            return 4096
+        try:
+            return max(int(v), 0)
+        except ValueError:
+            return 0
+
+    def _fstat_ctr_audit(self, params, phi0, iota, psi, ln_center, ln_snr):
+        """DIAGNOSTIC: how far is the epoch TABLE from the per-row solve?
+
+        The per-row F-stat center solve is the dominant cost of the search
+        move (~725-743 s/propose = ~63% of it, snapshot 12) and the table
+        is the cheap alternative, retired for candidate quality by the
+        2026-08-26 per-row ruling without anyone measuring the gap. This
+        logs that gap on a subsample of rows the precompute has ALREADY
+        solved per-row, so it costs one extra (near-free) table lookup and
+        nothing else.
+
+        NEVER feeds a proposal -- read-only, no sampling or
+        detailed-balance consequence. Off by default
+        (:meth:`_fstat_ctr_audit_rows`).
+
+        Reported per output: phi0 (circular, 2*pi), cos(iota) (the actual
+        sampled column), psi (circular, pi -- psi is degenerate mod pi),
+        ln_center (pure A_max offset: the table lookup re-derives the
+        amp_from_dist(f0, Mc) factor per row, so the row's own Mc**(5/3)
+        scaling cancels out of this delta) and ln_snr (the F offset, which
+        sets the proposal width and the SNR truncation boundary). Also
+        reported: the f0 distance to the matched node and the node's OWN
+        Mc vs the row's -- the mismatch that drives the rest, and the
+        reason a nearest-in-f0 key cannot be extended to more dimensions
+        (the table carries ONE node per f0; its mc/alpha/sin_delta are the
+        grid's argmax AT that f0, not an independent axis to key on).
+        """
+        n_aud = self._fstat_ctr_audit_rows()
+        if n_aud <= 0 or self._fstat_ctr_table_active() is None:
+            return
+        xp = self.xp
+        n = int(params.shape[0])
+        if n == 0:
+            return
+        step = max(n // n_aud, 1)
+        sel = xp.arange(0, n, step)[:n_aud]
+        p = params[sel]
+        try:
+            t_phi0, t_iota, t_psi, t_lnc, _t_sig, t_lnsnr = (
+                self._fstat_ctr_table_lookup(p))
+        except Exception as e:  # pragma: no cover - diagnostic only
+            logger.info("%s [FSTAT_CTR_AUDIT] lookup failed: %r", self.name, e)
+            return
+        d_phi0 = self._circ_absdiff(phi0[sel], t_phi0, 2 * np.pi, xp)
+        d_ciota = xp.abs(xp.cos(iota[sel]) - xp.cos(t_iota))
+        d_psi = self._circ_absdiff(psi[sel], t_psi, np.pi, xp)
+        d_lnc = xp.abs(ln_center[sel] - t_lnc)
+        d_lnsnr = xp.abs(ln_snr[sel] - t_lnsnr)
+        # Node mismatch driving the above (own searchsorted so the
+        # production lookup is untouched).
+        t = self._fstat_ctr_table
+        f0n = t["f0_mHz"]
+        f0 = xp.asarray(p[:, 1], dtype=xp.float64)
+        nn = int(f0n.shape[0])
+        hi = xp.clip(xp.searchsorted(f0n, f0), 0, nn - 1)
+        lo = xp.clip(hi - 1, 0, nn - 1)
+        pos = xp.where(xp.abs(f0 - f0n[lo]) <= xp.abs(f0n[hi] - f0), lo, hi)
+        d_f0 = xp.abs(f0 - f0n[pos])
+        mc_node = t.get("mc")
+        d_mc = (xp.abs(xp.asarray(p[:, 2], dtype=xp.float64) - mc_node[pos])
+                if mc_node is not None else xp.zeros(0))
+        f = lambda d: "%.4g/%.4g/%.4g" % self._absdiff_summary(d, xp)
+        logger.info(
+            "%s [FSTAT_CTR_AUDIT] table-vs-perrow on %d rows "
+            "(med/p90/max): dphi0=%s rad | dcos_iota=%s | dpsi=%s rad | "
+            "dln_center=%s (= |ln A_max| offset) | dln_snr=%s || node gap: "
+            "df0=%s mHz, dMc=%s",
+            self.name, int(sel.shape[0]), f(d_phi0), f(d_ciota), f(d_psi),
+            f(d_lnc), f(d_lnsnr), f(d_f0), f(d_mc),
+        )
+
     def _precompute_fstat_centers(self, model, band_sorter, subset):
         """Unit-open F-stat center cache for the distance-birth proposal.
 
@@ -5851,6 +5952,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _n_unit - _n_rows, _n_unit, time.perf_counter() - _t0,
             int(getattr(self, "_fstat_ctr_fallback_rows", 0)),
         )
+        # DIAGNOSTIC (GB_FSTAT_CTR_AUDIT, default off): measure the epoch
+        # table against the per-row values just solved. Read-only.
+        try:
+            self._fstat_ctr_audit(params, phi0, iota, psi, ln_center, ln_snr)
+        except Exception as e:  # pragma: no cover - never kill a propose
+            logger.info("%s [FSTAT_CTR_AUDIT] skipped: %r", self.name, e)
         return {
             # ids is ascending by construction (arange[bool] in
             # get_subset_inds; the countable mask preserves that order) --
