@@ -1176,10 +1176,48 @@ fi
 # [PROBE-0] GPU-node unit tests: the cupy-gated tests stop skipping here.
 # Fast (<2 min); a failure aborts before any build.
 # ============================================================================
-echo "[PROBE-0] cupy-gated unit tests"
-python -m unittest tests.test_unequal_arm_noise tests.test_coarse_wdm 2>&1 | tail -3
-python -m unittest tests.test_unequal_arm_noise tests.test_coarse_wdm > /dev/null 2>&1 || {
-  echo "[PROBE-0] UNIT TESTS FAILED -- aborting before build"; exit 2; }
+# [PROBE-0a] STALENESS DETECTOR (1 s). The tests/ tree comes from the git
+# pull, but the imported lisatools comes from the INSTALLED package -- a
+# pull without a rebuild makes fresh tests import a stale API and error in
+# bulk. Job 360's 18 errors had this signature. Verify the installed
+# package carries the plan-2 API before spending 30 s on the suite.
+python - <<'PYEOF' || { echo "[PROBE-0a] STALE INSTALL -- run install.sh (or pip reinstall) after the pull, then resubmit."; exit 2; }
+import lisatools
+import lisatools.coarsewdm as coarsewdm
+from lisatools.globalfit.moves.psdmove import PSDMove
+from lisatools.globalfit.moves.globalfitmove import (
+    ensure_fine_noise_covariance_current,
+)
+missing = [
+    name
+    for name, ok in (
+        ("coarsewdm.CoarseWDMRuntime", hasattr(coarsewdm, "CoarseWDMRuntime")),
+        ("coarsewdm.build_coarse_P_batch", hasattr(coarsewdm, "build_coarse_P_batch")),
+        ("PSDMove.compute_coarse_log_like", hasattr(PSDMove, "compute_coarse_log_like")),
+        ("PSDMove._resolve_mode_like_fns", hasattr(PSDMove, "_resolve_mode_like_fns")),
+        ("PSDMove._propose_delayed_acceptance", hasattr(PSDMove, "_propose_delayed_acceptance")),
+    )
+    if not ok
+]
+print(f"[PROBE-0a] installed lisatools: {lisatools.__file__}")
+if missing:
+    print(f"[PROBE-0a] MISSING plan-2 API in the installed package: {missing}")
+    raise SystemExit(1)
+print("[PROBE-0a] installed package carries the v8-noise-merge API")
+PYEOF
+
+echo "[PROBE-0] cupy-gated unit tests (full log -> ${STORE_DIR}/probe0_unittests.log)"
+mkdir -p "${STORE_DIR}"
+if python -m unittest tests.test_unequal_arm_noise tests.test_coarse_wdm \
+    > "${STORE_DIR}/probe0_unittests.log" 2>&1; then
+  tail -3 "${STORE_DIR}/probe0_unittests.log"
+else
+  echo "[PROBE-0] UNIT TESTS FAILED -- first tracebacks follow; full log at"
+  echo "          ${STORE_DIR}/probe0_unittests.log"
+  grep -B1 -A18 -E '^(ERROR|FAIL): ' "${STORE_DIR}/probe0_unittests.log" | head -120
+  tail -3 "${STORE_DIR}/probe0_unittests.log"
+  exit 2
+fi
 
 # ============================================================================
 # [PROBE-1] two-GPU unequal-arm basis smoke + the §3.3 shared-cache
