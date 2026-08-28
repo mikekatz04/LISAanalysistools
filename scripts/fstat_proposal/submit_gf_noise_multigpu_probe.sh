@@ -31,10 +31,14 @@
 #   gpu_util_*.csv                        BOTH devices active during noise
 #   [SMOKE] / [PROBE] lines               preflight verdicts
 #
-# OPTIONAL COARSE LEG -- THE FAST-PSD TEST (fresh store REQUIRED: the stored
-# noise identity refuses a coarse-mode change on resume):
-#   NOISE_PROBE_COARSE=1 sbatch <this script>
-#   -> COARSE_Q=8, COARSE_GPU_MODE=search_approx, COARSE_USE_WS=0.
+# LEGS (each writes its OWN store, so they never collide and the noise-identity
+# resume guard never hard-fails a relaunch):
+#   (default)            coarse ON, mode 'auto' -- the SHIPPING configuration:
+#                        search_approx in noise_search / noise_vgb_search /
+#                        gb_search, delayed_acceptance in the pe stages.
+#   NOISE_PROBE_EXACT=1  coarse OFF -- the exact-fine A/B baseline.
+#   NOISE_PROBE_COARSE=1 force search_approx everywhere + Bartlett weighting
+#                        (the most aggressive leg).
 # The coarse noise likelihood scores PSD/galfor proposals on a Q-fold
 # time-coarsened grid (2121 -> ~265 columns at Q=8), which is where the
 # per-proposal 3x3 inversion + reduction cost lives. search_approx runs the
@@ -263,7 +267,27 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # stay intact for comparison and nothing can silently resume. BASE_FILE_NAME
 # stays gf_prod_3mo so every analysis tool (monitor generator, digests) works
 # unchanged -- they take the DIRECTORY as their argument.
-STORE_DIR=/shared/data/global_fit_output/gf_noise_multigpu_probe/
+# ---- LEG SELECTION (must precede STORE_DIR: each leg gets its OWN store) ---
+# all_sources now ships coarse noise ON BY DEFAULT in mode 'auto'
+# (search_approx while searching, delayed_acceptance in PE), so the DEFAULT
+# leg here is the coarse one. The stored noise identity records the coarse
+# mode/Q, and a resume across a change is REFUSED by design -- hence one
+# store per leg rather than one shared store that would hard-fail.
+#   (default)            -> coarse 'auto', Q=8            store ..._coarse_auto
+#   NOISE_PROBE_EXACT=1  -> COARSE_GPU_MODE=off           store ..._exact
+#   NOISE_PROBE_COARSE=1 -> force search_approx, Bartlett store ..._coarse_search
+if [ "${NOISE_PROBE_EXACT:-0}" = "1" ]; then
+  export COARSE_GPU_MODE=off
+  PROBE_LEG=exact
+elif [ "${NOISE_PROBE_COARSE:-0}" = "1" ]; then
+  export COARSE_Q=${COARSE_Q:-8}
+  export COARSE_GPU_MODE=search_approx
+  export COARSE_USE_WS=${COARSE_USE_WS:-0}
+  PROBE_LEG=coarse_search
+else
+  PROBE_LEG=coarse_auto
+fi
+STORE_DIR=/shared/data/global_fit_output/gf_noise_multigpu_probe_${PROBE_LEG}/
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -351,12 +375,9 @@ echo "[V8-NOISE] UNEQUAL_ARM=${UNEQUAL_ARM} stride=${UNEQUAL_ARM_STRIDE} wdm_psd
 echo "[V8-NOISE] modulation=${GALFOR_MODULATION_PATH} t0=${GALFOR_MODULATION_T0}"
 
 # ---- optional coarse sidecar leg (see banner; default OFF) ------------------
-if [ "${NOISE_PROBE_COARSE:-0}" = "1" ]; then
-  export COARSE_Q=${COARSE_Q:-8}
-  export COARSE_GPU_MODE=${COARSE_GPU_MODE:-search_approx}
-  export COARSE_USE_WS=${COARSE_USE_WS:-0}
-  echo "[NOISE-PROBE] COARSE LEG ON: Q=${COARSE_Q} mode=${COARSE_GPU_MODE} use_ws=${COARSE_USE_WS}"
-fi
+echo "[NOISE-PROBE] leg=${PROBE_LEG} store=${STORE_DIR}"
+echo "[NOISE-PROBE] coarse: mode=${COARSE_GPU_MODE:-<variant default: auto>} \
+Q=${COARSE_Q:-<variant default: 8>} use_ws=${COARSE_USE_WS:-<default: 1>}"
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
