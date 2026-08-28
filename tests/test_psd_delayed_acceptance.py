@@ -190,6 +190,48 @@ class DelayedAcceptanceKernelTest(_Base):
         )
 
 
+class CoarseAuditTest(_Base):
+    """The [COARSE_AUDIT] numbers must actually measure surrogate accuracy.
+
+    The stage-2 exponent is beta * [(Lf(y)-Lc(y)) - (Lf(x)-Lc(x))] -- exactly
+    the coarse-vs-fine Delta-logL error that scripts/noise/coarse_q_scan.py
+    measures offline. So an EXACT surrogate must record |dlogl| == 0 and
+    accept every stage-1 survivor at stage 2, and a WRONG surrogate must
+    record a non-zero spread. That is what makes the line trustworthy as an
+    in-production accuracy readout.
+    """
+
+    def _run_one(self, coarse_fn, fine_fn, seed=31):
+        move, model, _ = self._move(coarse_fn, fine_fn, seed=seed)
+        move._da_audit = []
+        state = self._state(seed=seed + 1)
+        np.random.seed(4242)
+        move._propose_delayed_acceptance(model, state)
+        return move._da_audit
+
+    def test_exact_surrogate_reads_zero_error_and_full_acceptance(self):
+        fine = _make_like_fn()
+        audit = self._run_one(fine, fine)
+        self.assertTrue(audit, "no stage-1 survivors: fixture proves nothing")
+        s1 = sum(a[0] for a in audit)
+        s2 = sum(a[1] for a in audit)
+        dd = np.concatenate([a[3] for a in audit])
+        self.assertEqual(s2, s1)              # every survivor kept
+        self.assertEqual(float(np.max(dd)), 0.0)   # zero measured error
+
+    def test_wrong_surrogate_reads_a_nonzero_error_spread(self):
+        bias = lambda c: 0.8 * np.sin(3.0 * c.sum(axis=-1))  # noqa: E731
+        audit = self._run_one(_make_like_fn(bias), _make_like_fn())
+        self.assertTrue(audit)
+        dd = np.concatenate([a[3] for a in audit])
+        self.assertGreater(float(np.max(dd)), 1e-3)
+        # and the recorded counts stay self-consistent
+        for n_s1, n_s2, n_rows, err in audit:
+            self.assertLessEqual(n_s2, n_s1)
+            self.assertLessEqual(n_s1, n_rows)
+            self.assertEqual(err.size, n_s1)
+
+
 class DelayedAcceptanceTargetsFineTest(_Base):
     NTEMPS = 1
 

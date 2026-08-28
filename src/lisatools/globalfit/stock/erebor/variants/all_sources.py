@@ -229,15 +229,23 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     #     the CPU backend-replacement path), so this must not move on the
     #     shared base.
     #
-    #     Mode is `auto` (user ruling 2026-08-28): STAGE-DEPENDENT --
-    #     `search_approx` in search/rj stages (noise_search,
-    #     noise_vgb_search, gb_search), `delayed_acceptance` in pe stages
-    #     (full_pe, noise_vgb_pe). Searches are maximisations, so optimising
-    #     the cheap surrogate is legitimate there and is the bigger speed
-    #     win; PE keeps the FINE likelihood as the sampled target (stage 1
-    #     screens on the surrogate, stage 2 corrects with the exact
-    #     fine/coarse ratio), so what is SAMPLED never changes. Either mode
-    #     can still be forced explicitly for every stage.
+    #     Mode is `delayed_acceptance` in EVERY stage (user ruling
+    #     2026-08-28, accuracy over speed: "make sure accuracy is right since
+    #     it is really a small part of the time"). DA is EXACT -- stage 1
+    #     screens on the coarse surrogate, stage 2 corrects with the exact
+    #     fine/coarse ratio -- so the sampled target is the fine likelihood
+    #     in every stage, whatever the surrogate's quality. `search_approx`
+    #     (available via COARSE_GPU_MODE, and stage-dependent via `auto`) is
+    #     the ONLY approximate setting here: it optimises the surrogate and
+    #     is faster, but it is not a posterior sampler and, in the job-376
+    #     probe, the search it drove railed galfor against two prior edges.
+    #     Since the noise block is a small share of the wall clock, the
+    #     approximation buys little and is not worth the ambiguity.
+    #     Accuracy is OBSERVABLE in production: DA computes both likelihoods
+    #     for every stage-1 survivor, so each propose logs a [COARSE_AUDIT]
+    #     line whose |dlogl| spread and stage-2 acceptance are exactly the
+    #     coarse-vs-fine Delta-logL error scripts/noise/coarse_q_scan.py
+    #     measures offline. 0 / 100% would mean an exact surrogate.
     #     Every noise move republishes the exact FINE covariance before it
     #     returns, in BOTH modes, so source moves never see coarse state.
     #
@@ -248,7 +256,7 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     #     Off switch: COARSE_GPU_MODE=off (or COARSE_Q=1).
     coarse_Q: int = dataclasses.field(default_factory=env_default("COARSE_Q", 8, int))
     coarse_gpu_mode: str = dataclasses.field(
-        default_factory=env_default("COARSE_GPU_MODE", "auto", str)
+        default_factory=env_default("COARSE_GPU_MODE", "delayed_acceptance", str)
     )
 
     # --- unequal-arm instrument noise (env UNEQUAL_ARM=1) ---

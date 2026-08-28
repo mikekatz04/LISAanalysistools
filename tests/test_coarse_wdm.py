@@ -561,7 +561,9 @@ class CoarseKnobValidationTest(unittest.TestCase):
         from lisatools.globalfit.stock import erebor
 
         a = erebor.all_sources(lite=True)
-        self.assertEqual(a.general.coarse_gpu_mode, "auto")
+        # exact target in EVERY stage (accuracy-first ruling 2026-08-28);
+        # 'auto'/'search_approx' remain available but are opt-in
+        self.assertEqual(a.general.coarse_gpu_mode, "delayed_acceptance")
         self.assertGreater(a.general.coarse_Q, 1)
         for name in ("noise_only_lite", "noise_sgwb_lite"):
             n = erebor.get_stock(name)

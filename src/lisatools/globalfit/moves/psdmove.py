@@ -2125,6 +2125,15 @@ class PSDMove(GlobalFitMove, StretchMove):
         # everything else keeps the pre-proposal fine values.
         new_state.log_like[:] = np.where(keep, fine_y, fine_x)
 
+        # Surrogate-accuracy audit, free of charge: the stage-2 exponent IS
+        # the coarse-vs-fine DELTA-logL error that scripts/noise/coarse_q_scan.py
+        # measures offline -- a perfect surrogate gives 0 and stage 2 always
+        # accepts. Record it per repeat; propose() logs one [COARSE_AUDIT] line.
+        _dd = ((fine_y - coarse_y) - (fine_x - coarse_x))[acc]
+        if getattr(self, "_da_audit", None) is not None and _dd.size:
+            self._da_audit.append(
+                (int(acc.sum()), int(keep.sum()), int(acc.size), np.abs(_dd))
+            )
         self._da_debug_last = {
             "accepted_stage1": acc,
             "keep": keep,
@@ -2342,6 +2351,7 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         # per-iteration acceptance deltas, accumulated across the repeat block
         # by run_move and written into each sampled branch's sub-state below.
+        self._da_audit = []
         self._tally_in_model_proposed = np.zeros(nt_mod, dtype=int)
         self._tally_in_model_accepted = np.zeros(nt_mod, dtype=int)
         self._tally_swaps_proposed = np.zeros(max(nt_mod - 1, 0), dtype=int)
@@ -2488,6 +2498,23 @@ class PSDMove(GlobalFitMove, StretchMove):
         # eryn-facing acceptance uses the engine (cold-chain) shape
         _tm.count("walkers", len(self.acs))
         _tm.count("branches", len(noise_branches))
+        audit = getattr(self, "_da_audit", None)
+        if audit:
+            _s1 = sum(a[0] for a in audit)
+            _s2 = sum(a[1] for a in audit)
+            _n = sum(a[2] for a in audit)
+            _dd = np.concatenate([a[3] for a in audit])
+            logger.info(
+                "[COARSE_AUDIT %s] stage1 %d/%d (%.3f) stage2 %d/%d (%.3f) "
+                "|dlogl| med %.3e p95 %.3e max %.3e  (0 = exact surrogate; "
+                "stage2 acceptance IS the accuracy metric)",
+                getattr(self, "name", "psd"),
+                _s1, _n, _s1 / max(_n, 1),
+                _s2, _s1, _s2 / max(_s1, 1),
+                float(np.median(_dd)),
+                float(np.percentile(_dd, 95)),
+                float(np.max(_dd)),
+            )
         logger.info("[PSD_TIMING %s] %s", getattr(self, "name", "psd"),
                     _tm.report(time.perf_counter() - _t_prop0,
                                top=("sample", "sens_refresh", "rows_per_split")))
