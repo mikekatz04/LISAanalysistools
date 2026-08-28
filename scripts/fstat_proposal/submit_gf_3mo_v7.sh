@@ -1010,18 +1010,20 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # so those 9 bands get repeated chances instead of one. The cost of the
 # short clock is now a DELAY on a genuinely barren-looking band, not a
 # permanent loss. Revivals log as [GB_BAND_REVIVE <move>].
-# ⚠ v7 RUNS THE AGGRESSIVE TEST VALUE 1, NOT THE DEFAULT 5 (user ruling
-# 2026-08-28). v8 keeps 5. Reason: this valve has NEVER FIRED in
-# production -- zero [GB_BAND_SHUTOFF] lines across the whole run, because
-# the old pin was 50 while the run has only reached ~it38, so it could not
-# physically have triggered. At 1 a barren high-f band silences after a
-# single qualifying RJ search propose, which exercises BOTH the shutoff
-# path AND the new revival path (epoch + backstop) within a handful of
-# iterations instead of tens. This is a DIAGNOSTIC setting: it will
-# silence bands that a longer clock would have kept open, so read the
-# [GB_BAND_SHUTOFF] / [GB_BAND_REVIVE] pair as a machinery test, not as a
-# tuned search policy. Put it back to 5 once the machinery is confirmed.
-export GB_RJ_BAND_SHUTOFF_ITERS=1
+# 1 -> 5 (user ruling 2026-08-28, superseding the same-day diagnostic pin):
+# this is now an UNATTENDED long run, so it takes the tuned value rather
+# than the aggressive test value. v7 and v8 therefore agree at 5.
+#
+# The machinery still gets proved. The valve had never fired in production
+# -- zero [GB_BAND_SHUTOFF] lines across the whole run -- but only because
+# the OLD pin was 50 while the run had reached ~it38, so it could not
+# physically have triggered. 5 is well inside reach, so the first
+# [GB_BAND_SHUTOFF] line should still arrive on its own, followed by
+# [GB_BAND_REVIVE] at the next epoch refit. What we give up versus 1 is
+# speed of that confirmation, not the confirmation itself -- and we avoid
+# silencing bands a tuned clock would have kept open, which is the right
+# trade for a run nobody is watching.
+export GB_RJ_BAND_SHUTOFF_ITERS=5
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # Backstop revival (new 2026-08-28): iterations with NO new F-stat epoch
 # after which the shut-off set is cleared anyway; 0 disables the trigger.
