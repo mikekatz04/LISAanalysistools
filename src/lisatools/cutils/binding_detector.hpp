@@ -46,6 +46,56 @@ void compute_logpdf_binding(array_type<double> logpdf_out, array_type<int> compo
                     array_type<double> means, array_type<double> invcovs, array_type<double> dets, array_type<double> log_Js,
                     int num_points, array_type<int> start_index, int num_components, int ndim);
 
+// Global-fit routing kernels (gf_routing_kernels.{cu,hpp}, 2026-08-27): the
+// fused GB in-model pre-score gate/compaction and post-score accept chains.
+// Optional arrays are signalled by passing a ZERO-SIZE array of the right
+// dtype (the binding turns that into a nullptr); see the shim bodies in
+// binding_detector.cxx for the per-argument length contract.
+void gb_inmodel_gate_compact_binding(
+    array_type<double> new_logp, array_type<uint8_t> keep_flag,
+    array_type<int64_t> keep_idx, array_type<int64_t> n_keep_out,
+    array_type<int32_t> cur_cells, array_type<int32_t> new_cells,
+    array_type<int32_t> keep_pos, array_type<int64_t> trust_counts,
+    array_type<int64_t> dg_count,
+    array_type<double> new_coords, array_type<double> curr_coords,
+    array_type<int32_t> row_map, array_type<int32_t> n4,
+    array_type<int32_t> lo_bin, array_type<int32_t> hi_bin,
+    int f0_col, int ndim, double df, int window_on,
+    array_type<double> pc, int pc_ncol,
+    array_type<double> anchor_amp, array_type<double> anchor_f0,
+    array_type<double> anchor_fdot, array_type<double> trust_dlna,
+    array_type<double> trust_dphase, double trust_Tobs,
+    int dg_on, int overlap_on,
+    array_type<int32_t> temp_inds, array_type<int32_t> walker_inds,
+    array_type<int32_t> band_inds,
+    array_type<double> cap_band_lo, array_type<double> cap_band_step,
+    array_type<double> cap_edges, array_type<double> cap_edge_ext,
+    array_type<int32_t> dg_counts, array_type<int32_t> dg_cap,
+    int cap_divisor, int cap_stagger, int num_cap_cells, int nwalkers,
+    int n_sub, int n_block);
+
+void gb_inmodel_accept_apply_binding(
+    array_type<double> new_ll, array_type<double> delta_ll,
+    array_type<double> lnpdiff, array_type<uint8_t> accept_pre,
+    array_type<uint8_t> accept, array_type<double> curr_coords,
+    array_type<double> ll_ref, array_type<double> curr_prior,
+    array_type<double> scored_ll, array_type<int64_t> keep_idx,
+    array_type<int32_t> keep_pos, int n_keep,
+    array_type<double> d_h, array_type<double> h_h,
+    int dh_stride, int hh_stride, double snr_limit, int snr_detected,
+    array_type<double> new_coords, array_type<double> new_logp,
+    array_type<double> factors, array_type<double> beta_s,
+    array_type<double> u, array_type<int32_t> row_map, int ndim,
+    array_type<int32_t> temp_inds, array_type<int32_t> walker_inds,
+    array_type<int32_t> band_inds, array_type<uint8_t> cold_s,
+    array_type<double> ll_change_log, array_type<int64_t> prop_counts1,
+    array_type<int64_t> acc_counts1, int nwalkers, int num_bands,
+    array_type<int64_t> warn_count, array_type<int64_t> kind_acc,
+    array_type<double> sorter_dh, array_type<double> sorter_hh,
+    array_type<int32_t> ids_s, int dg_on, int overlap_on,
+    array_type<int32_t> dg_counts, array_type<int32_t> cur_cells,
+    array_type<int32_t> new_cells, int num_cap_cells, int n_sub, int n_block);
+
 template<typename T>
 T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N, int multiplier)
 {

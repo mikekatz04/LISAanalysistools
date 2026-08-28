@@ -8,6 +8,7 @@
 
 #include "Detector.hpp"
 #include "PSD.hpp"
+#include "gf_routing_kernels.hpp"    // fused global-fit in-model routing kernels
 #include "galactic_response.hpp"
 #include "domains.hpp"               // domain classes + TDI_XYZ / TDI_AET / TDI_AE macros
 #include <string>
@@ -400,6 +401,194 @@ void compute_logpdf_binding(array_type<double> logpdf_out, array_type<int> compo
     );
 }
 
+// ============================================================================
+// Global-fit ROUTING kernels (gf_routing_kernels.cu, 2026-08-27): the fused
+// in-model gate/compact + accept/bookkeeping entry points.
+//
+// These take MANY arrays, most of them optional. Rather than an ndarray of
+// std::optional (which would pull in a new nanobind stl header), an absent
+// argument is signalled by passing a ZERO-SIZE array of the right dtype --
+// python keeps four cached empties around for exactly this. ``gf_opt``
+// translates that to a nullptr; the kernels branch on the nullptr.
+//
+// NOTE the same asymmetry that bit compute_logpdf: the length checks below
+// compile out on the CUDA build and only fire on CPU. They are written from
+// the shapes the call site actually allocates, and the python side asserts
+// contiguity + dtype before calling, so a CPU run is the one that catches a
+// wiring mistake.
+// ============================================================================
+
+// Required array: must be present and exactly ``n`` elements (CPU build).
+template<typename T>
+static T* gf_req(array_type<T> a, const char *name, int64_t n)
+{
+#if !(defined(__CUDA_COMPILATION__) || defined(__CUDACC__))
+    if (n >= 0 && a.size() != static_cast<size_t>(n))
+    {
+        throw std::invalid_argument(
+            std::string(name) + ": expected length " + std::to_string(n) +
+            ", got " + std::to_string(a.size()) + ".");
+    }
+    if (a.size() == 0)
+    {
+        throw std::invalid_argument(
+            std::string(name) + ": required array must not be empty.");
+    }
+#else
+    (void)name; (void)n;
+#endif
+    return a.data();
+}
+
+// Optional array: size 0 means "absent" -> nullptr. Otherwise length-checked
+// when ``n >= 0`` (pass a negative ``n`` for shapes the call site cannot
+// derive from the scalars it already passes, e.g. the per-band cap grids).
+template<typename T>
+static T* gf_opt(array_type<T> a, const char *name, int64_t n)
+{
+    if (a.size() == 0) return nullptr;
+#if !(defined(__CUDA_COMPILATION__) || defined(__CUDACC__))
+    if (n >= 0 && a.size() != static_cast<size_t>(n))
+    {
+        throw std::invalid_argument(
+            std::string(name) + ": expected length " + std::to_string(n) +
+            ", got " + std::to_string(a.size()) + ".");
+    }
+#else
+    (void)name; (void)n;
+#endif
+    return a.data();
+}
+
+void gb_inmodel_gate_compact_binding(
+    array_type<double> new_logp, array_type<uint8_t> keep_flag,
+    array_type<int64_t> keep_idx, array_type<int64_t> n_keep_out,
+    array_type<int32_t> cur_cells, array_type<int32_t> new_cells,
+    array_type<int32_t> keep_pos, array_type<int64_t> trust_counts,
+    array_type<int64_t> dg_count,
+    array_type<double> new_coords, array_type<double> curr_coords,
+    array_type<int32_t> row_map, array_type<int32_t> n4,
+    array_type<int32_t> lo_bin, array_type<int32_t> hi_bin,
+    int f0_col, int ndim, double df, int window_on,
+    array_type<double> pc, int pc_ncol,
+    array_type<double> anchor_amp, array_type<double> anchor_f0,
+    array_type<double> anchor_fdot, array_type<double> trust_dlna,
+    array_type<double> trust_dphase, double trust_Tobs,
+    int dg_on, int overlap_on,
+    array_type<int32_t> temp_inds, array_type<int32_t> walker_inds,
+    array_type<int32_t> band_inds,
+    array_type<double> cap_band_lo, array_type<double> cap_band_step,
+    array_type<double> cap_edges, array_type<double> cap_edge_ext,
+    array_type<int32_t> dg_counts, array_type<int32_t> dg_cap,
+    int cap_divisor, int cap_stagger, int num_cap_cells, int nwalkers,
+    int n_sub, int n_block)
+{
+    const int64_t ns = n_sub;
+    gb_inmodel_gate_compact_wrap(
+        gf_req(new_logp,   "new_logp",   ns),
+        gf_req(keep_flag,  "keep_flag",  ns),
+        gf_req(keep_idx,   "keep_idx",   ns),
+        gf_req(n_keep_out, "n_keep_out", 1),
+        gf_req(cur_cells,  "cur_cells",  3 * ns),
+        gf_req(new_cells,  "new_cells",  3 * ns),
+        gf_opt(trust_counts, "trust_counts", 3),
+        gf_opt(dg_count,     "dg_count",     1),
+        gf_req(new_coords,  "new_coords",  ns * ndim),
+        gf_req(curr_coords, "curr_coords", static_cast<int64_t>(n_block) * ndim),
+        gf_opt(row_map, "row_map", ns),
+        gf_opt(n4,      "n4",      ns),
+        gf_opt(lo_bin,  "lo_bin",  ns),
+        gf_opt(hi_bin,  "hi_bin",  ns),
+        f0_col, ndim, df, window_on,
+        gf_opt(pc, "pc", ns * pc_ncol), pc_ncol,
+        gf_opt(anchor_amp,   "anchor_amp",   n_block),
+        gf_opt(anchor_f0,    "anchor_f0",    n_block),
+        gf_opt(anchor_fdot,  "anchor_fdot",  n_block),
+        gf_opt(trust_dlna,   "trust_dlna",   n_block),
+        gf_opt(trust_dphase, "trust_dphase", n_block),
+        trust_Tobs, dg_on, overlap_on,
+        gf_opt(temp_inds,   "temp_inds",   ns),
+        gf_opt(walker_inds, "walker_inds", ns),
+        gf_opt(band_inds,   "band_inds",   ns),
+        gf_opt(cap_band_lo,   "cap_band_lo",   -1),
+        gf_opt(cap_band_step, "cap_band_step", -1),
+        gf_opt(cap_edges,     "cap_edges",     num_cap_cells + 1),
+        gf_opt(cap_edge_ext,  "cap_edge_ext",  num_cap_cells + 1),
+        gf_opt(dg_counts, "dg_counts", -1),
+        gf_opt(dg_cap,    "dg_cap",    num_cap_cells),
+        cap_divisor, cap_stagger, num_cap_cells, nwalkers, n_sub, n_block,
+        gf_req(keep_pos, "keep_pos", ns)
+    );
+}
+
+void gb_inmodel_accept_apply_binding(
+    array_type<double> new_ll, array_type<double> delta_ll,
+    array_type<double> lnpdiff, array_type<uint8_t> accept_pre,
+    array_type<uint8_t> accept, array_type<double> curr_coords,
+    array_type<double> ll_ref, array_type<double> curr_prior,
+    array_type<double> scored_ll, array_type<int64_t> keep_idx,
+    array_type<int32_t> keep_pos, int n_keep,
+    array_type<double> d_h, array_type<double> h_h,
+    int dh_stride, int hh_stride, double snr_limit, int snr_detected,
+    array_type<double> new_coords, array_type<double> new_logp,
+    array_type<double> factors, array_type<double> beta_s,
+    array_type<double> u, array_type<int32_t> row_map, int ndim,
+    array_type<int32_t> temp_inds, array_type<int32_t> walker_inds,
+    array_type<int32_t> band_inds, array_type<uint8_t> cold_s,
+    array_type<double> ll_change_log, array_type<int64_t> prop_counts1,
+    array_type<int64_t> acc_counts1, int nwalkers, int num_bands,
+    array_type<int64_t> warn_count, array_type<int64_t> kind_acc,
+    array_type<double> sorter_dh, array_type<double> sorter_hh,
+    array_type<int32_t> ids_s, int dg_on, int overlap_on,
+    array_type<int32_t> dg_counts, array_type<int32_t> cur_cells,
+    array_type<int32_t> new_cells, int num_cap_cells, int n_sub, int n_block)
+{
+    const int64_t ns = n_sub;
+    const int64_t nk = n_keep;
+    gb_inmodel_accept_apply_wrap(
+        gf_req(new_ll,     "new_ll",     ns),
+        gf_req(delta_ll,   "delta_ll",   ns),
+        gf_req(lnpdiff,    "lnpdiff",    ns),
+        gf_req(accept_pre, "accept_pre", ns),
+        gf_req(accept,     "accept",     ns),
+        gf_req(curr_coords, "curr_coords", static_cast<int64_t>(n_block) * ndim),
+        gf_req(ll_ref,      "ll_ref",      n_block),
+        gf_req(curr_prior,  "curr_prior",  n_block),
+        gf_opt(scored_ll, "scored_ll", nk),
+        gf_opt(keep_idx,  "keep_idx",  -1),
+        n_keep,
+        gf_opt(d_h, "d_h", nk * dh_stride),
+        gf_opt(h_h, "h_h", nk * hh_stride),
+        dh_stride, hh_stride, snr_limit, snr_detected,
+        gf_req(new_coords, "new_coords", ns * ndim),
+        gf_req(new_logp,   "new_logp",   ns),
+        gf_req(factors,    "factors",    ns),
+        gf_req(beta_s,     "beta_s",     ns),
+        gf_req(u,          "u",          ns),
+        gf_opt(row_map,    "row_map",    ns),
+        ndim,
+        gf_req(temp_inds,   "temp_inds",   ns),
+        gf_req(walker_inds, "walker_inds", ns),
+        gf_req(band_inds,   "band_inds",   ns),
+        gf_opt(cold_s,      "cold_s",      ns),
+        gf_req(ll_change_log, "ll_change_log", -1),
+        gf_req(prop_counts1,  "prop_counts1",  -1),
+        gf_req(acc_counts1,   "acc_counts1",   -1),
+        nwalkers, num_bands,
+        gf_req(warn_count, "warn_count", 1),
+        gf_opt(kind_acc,   "kind_acc",   2),
+        gf_opt(sorter_dh, "sorter_dh", -1),
+        gf_opt(sorter_hh, "sorter_hh", -1),
+        gf_req(ids_s, "ids_s", ns),
+        dg_on, overlap_on,
+        gf_opt(dg_counts, "dg_counts", -1),
+        gf_opt(cur_cells, "cur_cells", 3 * ns),
+        gf_opt(new_cells, "new_cells", 3 * ns),
+        num_cap_cells, n_sub, n_block,
+        gf_req(keep_pos, "keep_pos", ns)
+    );
+}
+
 // Copy a host std::vector<double> into a NumPy-owned array (nanobind port of
 // the pybind11 py::array_t copy-return used by the GalacticGridSetup props).
 static nb::ndarray<nb::numpy, double> vec_to_numpy(const std::vector<double> &v)
@@ -573,6 +762,15 @@ void detector_part(nb::module_ &m) {
           nb::call_guard<nb::gil_scoped_release>(), "PSD likelihood computation");
     m.def("compute_logpdf", &compute_logpdf_binding,
           nb::call_guard<nb::gil_scoped_release>(), "Compute log PDF from GMM");
+    // Global-fit routing kernels (gf_routing_kernels.cu): the fused GB
+    // in-model pre-score gate/compaction and post-score accept/bookkeeping
+    // chains. Absent optional arrays are passed as zero-size arrays.
+    m.def("gb_inmodel_gate_compact", &gb_inmodel_gate_compact_binding,
+          nb::call_guard<nb::gil_scoped_release>(),
+          "Fused GB in-model pre-score gate chain + keep compaction");
+    m.def("gb_inmodel_accept_apply", &gb_inmodel_accept_apply_binding,
+          nb::call_guard<nb::gil_scoped_release>(),
+          "Fused GB in-model post-score MH accept + state bookkeeping");
 }
 
 

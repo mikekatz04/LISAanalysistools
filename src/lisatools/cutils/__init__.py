@@ -54,6 +54,13 @@ class LISAToolsBackendMethods(BackendMethods):
     check_orbits: typing.Callable[(...), None]
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
+    # Global-fit routing kernels (gf_routing_kernels.cu, 2026-08-27): the
+    # fused GB in-model pre-score gate/compaction and post-score
+    # accept/bookkeeping chains. ``None`` on a backend module built before
+    # they landed -- the call site (GB_INMODEL_ACCEPT_KERNEL) checks for that
+    # and refuses rather than letting a stale .so break backend import.
+    gb_inmodel_gate_compact: typing.Callable[(...), None]
+    gb_inmodel_accept_apply: typing.Callable[(...), None]
 
     # Phase 3L.7k (2026-06-04): LISA-response Wraps absorbed from the
     # now-retiring fastlisaresponse backend. Owners of the underlying
@@ -108,6 +115,9 @@ class LISAToolsBackend:
     STFTFresnelWrap: object
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
+    # Global-fit routing kernels (see LISAToolsBackendMethods).
+    gb_inmodel_gate_compact: typing.Callable[(...), None]
+    gb_inmodel_accept_apply: typing.Callable[(...), None]
     # Phase 3L.7k LISA-response Wraps (see LISAToolsBackendMethods).
     TDSplineTDIWaveformWrap: object
     FDSplineTDIWaveformWrap: object
@@ -139,6 +149,9 @@ class LISAToolsBackend:
         self.STFTFresnelWrap = lisatools_backend_methods.STFTFresnelWrap
         self.psd_likelihood = lisatools_backend_methods.psd_likelihood
         self.compute_logpdf = lisatools_backend_methods.compute_logpdf
+        # Global-fit routing kernels (gf_routing_kernels.cu).
+        self.gb_inmodel_gate_compact = lisatools_backend_methods.gb_inmodel_gate_compact
+        self.gb_inmodel_accept_apply = lisatools_backend_methods.gb_inmodel_accept_apply
         # Phase 3L.7k -- LISA-response wraps absorbed from
         # fastlisaresponse cutils backend (which is being retired).
         self.TDSplineTDIWaveformWrap = lisatools_backend_methods.TDSplineTDIWaveformWrap
@@ -196,6 +209,11 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             STFTFresnelWrap=_lat_pd.STFTFresnelWrapCPU,
             psd_likelihood=_lat_pd.psd_likelihood,
             compute_logpdf=_lat_pd.compute_logpdf,
+            # Global-fit routing kernels (2026-08-27). ``getattr`` with a None
+            # fallback so a backend module built before they landed still
+            # imports; the GB_INMODEL_ACCEPT_KERNEL call site checks for None.
+            gb_inmodel_gate_compact=getattr(_lat_pd, "gb_inmodel_gate_compact", None),
+            gb_inmodel_accept_apply=getattr(_lat_pd, "gb_inmodel_accept_apply", None),
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
             TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapCPU,
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapCPU,
@@ -265,6 +283,11 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             STFTFresnelWrap=_lat_pd.STFTFresnelWrapGPU,
             psd_likelihood=_lat_pd.psd_likelihood,
             compute_logpdf=_lat_pd.compute_logpdf,
+            # Global-fit routing kernels (2026-08-27). ``getattr`` with a None
+            # fallback so a backend module built before they landed still
+            # imports; the GB_INMODEL_ACCEPT_KERNEL call site checks for None.
+            gb_inmodel_gate_compact=getattr(_lat_pd, "gb_inmodel_gate_compact", None),
+            gb_inmodel_accept_apply=getattr(_lat_pd, "gb_inmodel_accept_apply", None),
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
             TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
@@ -331,6 +354,11 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             STFTFresnelWrap=_lat_pd.STFTFresnelWrapGPU,
             psd_likelihood=_lat_pd.psd_likelihood,
             compute_logpdf=_lat_pd.compute_logpdf,
+            # Global-fit routing kernels (2026-08-27). ``getattr`` with a None
+            # fallback so a backend module built before they landed still
+            # imports; the GB_INMODEL_ACCEPT_KERNEL call site checks for None.
+            gb_inmodel_gate_compact=getattr(_lat_pd, "gb_inmodel_gate_compact", None),
+            gb_inmodel_accept_apply=getattr(_lat_pd, "gb_inmodel_accept_apply", None),
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
             TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
@@ -398,6 +426,11 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             STFTFresnelWrap=_lat_pd.STFTFresnelWrapGPU,
             psd_likelihood=_lat_pd.psd_likelihood,
             compute_logpdf=_lat_pd.compute_logpdf,
+            # Global-fit routing kernels (2026-08-27). ``getattr`` with a None
+            # fallback so a backend module built before they landed still
+            # imports; the GB_INMODEL_ACCEPT_KERNEL call site checks for None.
+            gb_inmodel_gate_compact=getattr(_lat_pd, "gb_inmodel_gate_compact", None),
+            gb_inmodel_accept_apply=getattr(_lat_pd, "gb_inmodel_accept_apply", None),
             # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
             TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,

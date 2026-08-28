@@ -523,6 +523,40 @@ def _resolve_temper_cell_order(branch_name, kwarg_value, default="count"):
     return value
 
 
+def _inmodel_accept_kernel_on() -> bool:
+    """Whether the fused in-model gate/accept kernels are armed.
+
+    ``GB_INMODEL_ACCEPT_KERNEL`` (default ``"0"`` -- OFF). When off, the
+    in-model repeat loop runs the historical python chain byte-for-byte; when
+    on, the ~110-150 per-repeat array-library launches of the pre-score gate
+    chain and the post-score accept/bookkeeping chain collapse into 3 backend
+    calls (``gb_inmodel_gate_compact`` + ``gb_inmodel_accept_apply``, see
+    ``cutils/gf_routing_kernels.cu``).
+
+    Read per call so tests can flip it; the read is nanoseconds against a
+    block of kernel launches.
+    """
+    return os.environ.get("GB_INMODEL_ACCEPT_KERNEL", "0") == "1"
+
+
+def _inmodel_trace_knobs_active() -> bool:
+    """Whether either per-repeat MH trace is armed (``GB_INMODEL_TRACE`` / ``GB_JUMP_TRACE``).
+
+    The traces read ``curr`` BETWEEN the accept decision and the state
+    writes -- two statements the fused accept kernel merges into one call, so
+    a traced repeat would see post-update coordinates. Rather than snapshot
+    ``curr`` every repeat (which would give back part of what the fusion
+    buys) the kernel path stands down whenever a trace is armed: the traces
+    stay exact, and they are debug knobs that never run in production.
+    """
+    if os.environ.get("GB_JUMP_TRACE", "0") == "1":
+        return True
+    try:
+        return int(os.environ.get("GB_INMODEL_TRACE", "0")) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _inmodel_repeats_mode_defaults(branch_name, num_repeat_proposals):
     """``(newborn, survivor)`` mode defaults for the per-class budgets.
 
@@ -8708,6 +8742,363 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.name, where, freed / 1e9, max(len(devs), 1),
         )
 
+    # ==================================================================
+    # FUSED IN-MODEL GATE / ACCEPT KERNELS (GB_INMODEL_ACCEPT_KERNEL)
+    # ==================================================================
+    # The in-model repeat step is launch-bound, not compute-bound: the
+    # pre-score gate chain and the post-score accept/bookkeeping chain
+    # together pay ~110-150 separate array-library launches per repeat
+    # around ONE real scoring call. At 2e4-7e4 repeat steps per row that is
+    # order 1e2 s/row of pure overhead.
+    #
+    # These helpers marshal that whole chain into the two backend entry
+    # points in ``cutils/gf_routing_kernels.cu``. Everything that is
+    # python-object-shaped or RNG-stream-relevant stays here: the proposal,
+    # the prior logpdf, ``both_transforms``, eryn's ``periodic.wrap``, the
+    # phase-maximization write-back and the uniform draws. The kernels take
+    # those OUTPUTS as inputs.
+    #
+    # LAYOUT CONTRACT. The kernels take raw pointers, so every array must be
+    # C-contiguous and of the documented dtype. Block-invariant arrays are
+    # validated once in :meth:`_imk_block_setup` (a failure falls back to the
+    # python chain with a warning); the per-repeat arrays are validated on
+    # every call and RAISE, because silently copying them would desync the
+    # phase-maximization write-back that mutates ``new`` in place.
+
+    def _imk_warn_once(self, msg):
+        """One WARNING per distinct fallback reason, per move."""
+        if getattr(self, "_imk_warned", None) == msg:
+            return
+        self._imk_warned = msg
+        logger.warning("%s: [GB_INMODEL_ACCEPT_KERNEL] %s", self.name, msg)
+
+    @staticmethod
+    def _imk_layout_problem(pairs):
+        """First ``(name, array, dtype)`` triple that is not kernel-ready, or None."""
+        for name, arr, dt in pairs:
+            if arr is None:
+                return f"{name} is None"
+            if arr.dtype != dt:
+                return f"{name} has dtype {arr.dtype}, expected {dt}"
+            if not arr.flags.c_contiguous:
+                return f"{name} is not C-contiguous"
+        return None
+
+    def _imk_require(self, pairs):
+        """Per-repeat layout check that raises rather than silently copying."""
+        bad = self._imk_layout_problem(pairs)
+        if bad is not None:
+            raise RuntimeError(
+                f"{self.name}: GB_INMODEL_ACCEPT_KERNEL is armed but {bad}. "
+                "The fused in-model kernel takes raw pointers and cannot copy "
+                "this array without desyncing the in-place phase-maximization "
+                "write-back. Unset GB_INMODEL_ACCEPT_KERNEL to fall back to "
+                "the python chain."
+            )
+
+    @staticmethod
+    def _imk_real_1d(xp, a):
+        """``(contiguous float64 array, stride)`` for the real parts of ``a``.
+
+        A real float64 contiguous input passes through with ZERO launches
+        (``.real`` is the array itself and ``ascontiguousarray`` is a no-op);
+        a complex one pays a single compaction copy. The kernels also accept
+        an interleaved complex buffer with stride 2 -- that path is exercised
+        by the unit tests but not taken here, because the strided view is not
+        uniformly available across array-library versions.
+        """
+        arr = xp.asarray(a).ravel()
+        return xp.ascontiguousarray(arr.real, dtype=xp.float64), 1
+
+    def _imk_halves(self, xp, half_pre):
+        """Int32/uint8 casts of the per-half gathers the kernels index with.
+
+        Rebuilt whenever ``_build_half_pre`` is (an accepted vertical swap
+        rewrites ``t_s``), and never inside the repeat loop: the casts are
+        block-scope, so the hot path spends nothing on them.
+        """
+        out = []
+        for (sub, _sl, n_sub, ids_s, _slots, _n_vals, _leaf, t_s, w_s, b_s,
+             beta_s, n4_s, lo_s, hi_s, cold_s, _n_cold) in half_pre:
+            out.append({
+                "n": int(n_sub),
+                "beta": xp.ascontiguousarray(beta_s, dtype=xp.float64),
+                "row_map": (xp.empty(0, dtype=xp.int32) if sub is None
+                            else xp.ascontiguousarray(sub, dtype=xp.int32)),
+                "n4": xp.ascontiguousarray(n4_s, dtype=xp.int32),
+                "lo": xp.ascontiguousarray(lo_s, dtype=xp.int32),
+                "hi": xp.ascontiguousarray(hi_s, dtype=xp.int32),
+                "t": xp.ascontiguousarray(t_s, dtype=xp.int32),
+                "w": xp.ascontiguousarray(w_s, dtype=xp.int32),
+                "b": xp.ascontiguousarray(b_s, dtype=xp.int32),
+                "cold": xp.ascontiguousarray(cold_s, dtype=xp.uint8),
+                "ids": xp.ascontiguousarray(ids_s, dtype=xp.int32),
+            })
+        return out
+
+    def _imk_rebuild_halves(self, acc, half_pre):
+        """Re-cast the per-half index arrays after a vertical swap."""
+        acc["idx"] = self._imk_halves(acc["xp"], half_pre)
+
+    def _imk_block_setup(self, half_pre, curr, ll_ref, curr_prior,
+                         ll_change_log, prop_counts, acc_counts, dg, trust_n):
+        """Block-scope state for the fused kernels, or None to use python.
+
+        Returns None (never raises) whenever the fused path is not available
+        or not appropriate: the knob is off, the backend module predates the
+        kernels, a per-repeat MH trace is armed, or one of the tracked state
+        arrays has a layout the raw-pointer ABI cannot take. Every one of
+        those degrades to the historical chain, which is always correct.
+        """
+        if not _inmodel_accept_kernel_on():
+            return None
+        # Trace knobs win over the accept knob, and are checked FIRST: a
+        # traced run must be exact, whatever else is armed.
+        if _inmodel_trace_knobs_active():
+            self._imk_warn_once(
+                "GB_INMODEL_TRACE / GB_JUMP_TRACE are armed; standing down so "
+                "the per-repeat traces keep seeing pre-update coordinates.")
+            return None
+        try:
+            gate_fn = getattr(self.backend, "gb_inmodel_gate_compact", None)
+            apply_fn = getattr(self.backend, "gb_inmodel_accept_apply", None)
+        except Exception:  # backend not resolvable -- never fatal here
+            gate_fn = apply_fn = None
+        if gate_fn is None or apply_fn is None:
+            self._imk_warn_once(
+                "the active backend exposes no gb_inmodel_* routing kernels "
+                "(rebuild the lisatools backend module); running the python "
+                "chain instead.")
+            return None
+        xp = self.xp
+        bad = self._imk_layout_problem([
+            ("curr", curr, xp.float64),
+            ("ll_ref", ll_ref, xp.float64),
+            ("curr_prior", curr_prior, xp.float64),
+            ("ll_change_log", ll_change_log, xp.float64),
+            ("prop_counts[1]", prop_counts[1], xp.int64),
+            ("acc_counts[1]", acc_counts[1], xp.int64),
+        ])
+        if bad is not None:
+            self._imk_warn_once(
+                f"{bad} -- the fused kernel needs C-contiguous arrays of the "
+                "documented dtypes; running the python chain instead.")
+            return None
+        if curr.ndim != 2 or ll_change_log.ndim != 3:
+            self._imk_warn_once(
+                "unexpected coords/ledger rank; running the python chain.")
+            return None
+        # The accept kernel derives BOTH the per-cell ledger index and the
+        # cap-occupancy index from one ``nwalkers``. They are the same number
+        # by construction (``ll_change_log`` is allocated as
+        # ``(ntemps, nwalkers, num_bands)`` and ``_cap_flat_index`` reads
+        # ``self.nwalkers``) -- this asserts it rather than assuming it,
+        # because a mismatch would silently corrupt the cap census.
+        _nw_self = int(getattr(self, "nwalkers", 0) or 0)
+        if _nw_self and _nw_self != int(ll_change_log.shape[1]):
+            self._imk_warn_once(
+                f"self.nwalkers ({_nw_self}) disagrees with the ledger's "
+                f"walker axis ({int(ll_change_log.shape[1])}); running the "
+                "python chain instead.")
+            return None
+
+        empty = {
+            "f64": xp.empty(0, dtype=xp.float64),
+            "i64": xp.empty(0, dtype=xp.int64),
+            "i32": xp.empty(0, dtype=xp.int32),
+            "u8": xp.empty(0, dtype=xp.uint8),
+        }
+        dg_on = dg is not None
+        overlap_on = (
+            dg_on
+            and float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) > 0.0
+        )
+
+        def _cap_arr(name):
+            a = getattr(self, name, None)
+            if a is None or not dg_on:
+                return empty["f64"]
+            return xp.ascontiguousarray(xp.asarray(a), dtype=xp.float64)
+
+        buffers = []
+        for entry in half_pre:
+            n = int(entry[2])
+            buffers.append({
+                "n": n,
+                "keep_flag": xp.zeros(n, dtype=xp.uint8),
+                "keep_idx": xp.zeros(n, dtype=xp.int64),
+                "keep_pos": xp.full(n, -1, dtype=xp.int32),
+                "n_keep": xp.zeros(1, dtype=xp.int64),
+                "cur_cells": xp.zeros(3 * n, dtype=xp.int32),
+                "new_cells": xp.zeros(3 * n, dtype=xp.int32),
+                "new_ll": xp.full(n, -1e300, dtype=xp.float64),
+                "delta": xp.zeros(n, dtype=xp.float64),
+                "lnp": xp.zeros(n, dtype=xp.float64),
+                "acc_pre": xp.zeros(n, dtype=xp.uint8),
+                "acc": xp.zeros(n, dtype=xp.uint8),
+            })
+
+        return {
+            "xp": xp, "empty": empty, "gate": gate_fn, "apply": apply_fn,
+            "idx": self._imk_halves(xp, half_pre), "buf": buffers,
+            "curr": curr, "ll_ref": ll_ref, "curr_prior": curr_prior,
+            "ll_change_log": ll_change_log,
+            "prop1": prop_counts[1], "acc1": acc_counts[1],
+            "n_block": int(curr.shape[0]), "ndim": int(curr.shape[1]),
+            "nwalkers_led": int(ll_change_log.shape[1]),
+            "num_bands": int(ll_change_log.shape[2]),
+            "f0_col": -1 if self._f0_col is None else int(self._f0_col),
+            "df": float(self.df),
+            "window_on": self._f0_col is not None,
+            "dg_on": dg_on, "overlap_on": overlap_on,
+            "dg_counts": dg[0] if dg_on else empty["i32"],
+            "dg_cap": dg[1] if dg_on else empty["i32"],
+            "cap_band_lo": _cap_arr("_cap_band_lo"),
+            "cap_band_step": _cap_arr("_cap_band_step"),
+            "cap_edges": _cap_arr("cap_edges") if overlap_on else empty["f64"],
+            "cap_edge_ext": (_cap_arr("_cap_edge_ext") if overlap_on
+                             else empty["f64"]),
+            "cap_divisor": int(getattr(self, "cap_divisor", 1) or 1),
+            "cap_stagger": int(bool(getattr(self, "cap_stagger", False))),
+            "num_cap_cells": int(getattr(self, "num_cap_cells", 0) or 0),
+            "cap_nwalkers": int(getattr(self, "nwalkers", 0)
+                                or ll_change_log.shape[1]),
+            "trust_n": trust_n,
+            "warn": xp.zeros(1, dtype=xp.int64),
+            "dg_n": xp.zeros(1, dtype=xp.int64),
+            "kind_dev": {},
+        }
+
+    def _imk_gate(self, acc, h_i, new, new_logp, curr, l_s,
+                  anchor_phys, trust_dlna, trust_dphase, trust_Tobs):
+        """Fused pre-score gate + compaction. Returns ``(keep, keep_idx, keep_any)``.
+
+        ``keep`` is a bool VIEW of the kernel's uint8 flag buffer and
+        ``keep_idx`` a length-``n_keep`` slice of the compacted index buffer,
+        so both are free; ``keep_idx`` holds the same rows in the same
+        ascending order ``xp.where(keep)[0]`` would.
+        """
+        xp = acc["xp"]
+        E = acc["empty"]
+        idx, buf = acc["idx"][h_i], acc["buf"][h_i]
+        n_sub = buf["n"]
+        self._imk_require([("new", new, xp.float64),
+                           ("new_logp", new_logp, xp.float64)])
+
+        pc, pc_ncol = E["f64"], 0
+        if anchor_phys is not None:
+            pc = xp.ascontiguousarray(
+                self.transform_fn.both_transforms(
+                    new, xp=cp,
+                    leaf_inds=l_s if self._per_leaf_fill else None,
+                ),
+                dtype=xp.float64,
+            )
+            pc_ncol = int(pc.shape[1])
+            self._imk_require([
+                ("anchor |A|", anchor_phys[0], xp.float64),
+                ("anchor f0", anchor_phys[1], xp.float64),
+                ("anchor fdot", anchor_phys[2], xp.float64),
+                ("trust_dlna", trust_dlna, xp.float64),
+                ("trust_dphase", trust_dphase, xp.float64),
+            ])
+        trust_on = anchor_phys is not None
+
+        acc["gate"](
+            new_logp, buf["keep_flag"], buf["keep_idx"], buf["n_keep"],
+            buf["cur_cells"], buf["new_cells"], buf["keep_pos"],
+            acc["trust_n"] if (trust_on and acc["trust_n"] is not None)
+            else E["i64"],
+            acc["dg_n"] if acc["dg_on"] else E["i64"],
+            new, curr, idx["row_map"],
+            idx["n4"] if acc["window_on"] else E["i32"],
+            idx["lo"] if acc["window_on"] else E["i32"],
+            idx["hi"] if acc["window_on"] else E["i32"],
+            acc["f0_col"], acc["ndim"], acc["df"], int(acc["window_on"]),
+            pc, pc_ncol,
+            anchor_phys[0] if trust_on else E["f64"],
+            anchor_phys[1] if trust_on else E["f64"],
+            anchor_phys[2] if trust_on else E["f64"],
+            trust_dlna if trust_on else E["f64"],
+            trust_dphase if trust_on else E["f64"],
+            float(trust_Tobs),
+            int(acc["dg_on"]), int(acc["overlap_on"]),
+            idx["t"], idx["w"], idx["b"],
+            acc["cap_band_lo"], acc["cap_band_step"],
+            acc["cap_edges"], acc["cap_edge_ext"],
+            acc["dg_counts"], acc["dg_cap"],
+            acc["cap_divisor"], acc["cap_stagger"], acc["num_cap_cells"],
+            acc["cap_nwalkers"], n_sub, acc["n_block"],
+        )
+        n_keep = int(buf["n_keep"][0])
+        return (buf["keep_flag"].view(bool), buf["keep_idx"][:n_keep],
+                n_keep > 0)
+
+    def _imk_accept(self, acc, h_i, new, new_logp, factors, u, buffer_obj,
+                    scored, keep_idx, keep_any, kind):
+        """Fused post-score MH accept + every masked state write.
+
+        Returns ``(delta_ll, lnpdiff, accept)``. ``accept`` is the FINAL mask
+        (after the out-of-prior filter) as a bool view; the pre-filter mask
+        the python traces read stays in ``acc["buf"][h_i]["acc_pre"]`` for
+        anyone who needs it (the traces themselves keep the kernel path
+        disarmed, see :func:`_inmodel_trace_knobs_active`).
+        """
+        xp = acc["xp"]
+        E = acc["empty"]
+        idx, buf = acc["idx"][h_i], acc["buf"][h_i]
+        n_sub = buf["n"]
+        self._imk_require([("new", new, xp.float64),
+                           ("new_logp", new_logp, xp.float64),
+                           ("factors", factors, xp.float64),
+                           ("u", u, xp.float64)])
+        n_keep = int(keep_idx.shape[0]) if keep_any else 0
+
+        scored_a = E["f64"]
+        if n_keep:
+            _s = xp.asarray(scored)
+            scored_a = xp.ascontiguousarray(_s.ravel().real, dtype=xp.float64)
+
+        # d_h/h_h are the per-repeat get_add_ll outputs for the kept rows.
+        # The python gates the whole SNR clamp on ``d_h_out is not None``
+        # while reading ``h_h_out`` inside it, so both travel together.
+        dh_a = hh_a = E["f64"]
+        dh_st = hh_st = 1
+        _dh_src = getattr(buffer_obj, "d_h_out", None)
+        if _dh_src is not None and n_keep:
+            dh_a, dh_st = self._imk_real_1d(xp, _dh_src)
+            hh_a, hh_st = self._imk_real_1d(xp, buffer_obj.h_h_out)
+
+        sdh = getattr(self, "_sorter_dh", None)
+        shh = getattr(self, "_sorter_hh", None)
+        if sdh is None or shh is None or _dh_src is None:
+            sdh = shh = E["f64"]
+
+        kind_a = E["i64"]
+        if kind is not None:
+            kind_a = acc["kind_dev"].get(kind)
+            if kind_a is None:
+                kind_a = acc["kind_dev"][kind] = xp.zeros(2, dtype=xp.int64)
+
+        acc["apply"](
+            buf["new_ll"], buf["delta"], buf["lnp"], buf["acc_pre"],
+            buf["acc"], acc["curr"], acc["ll_ref"], acc["curr_prior"],
+            scored_a, keep_idx if n_keep else E["i64"], buf["keep_pos"],
+            n_keep, dh_a, hh_a, dh_st, hh_st,
+            float(buffer_obj.opt_snr_rej_samp_limit),
+            int(bool(getattr(buffer_obj, "snr_rej_detected", False))),
+            new, new_logp, factors, idx["beta"],
+            u, idx["row_map"], acc["ndim"],
+            idx["t"], idx["w"], idx["b"], idx["cold"],
+            acc["ll_change_log"], acc["prop1"], acc["acc1"],
+            acc["nwalkers_led"], acc["num_bands"],
+            acc["warn"], kind_a, sdh, shh, idx["ids"],
+            int(acc["dg_on"]), int(acc["overlap_on"]), acc["dg_counts"],
+            buf["cur_cells"], buf["new_cells"], acc["num_cap_cells"],
+            n_sub, acc["n_block"],
+        )
+        return buf["delta"], buf["lnp"], buf["acc"].view(bool)
+
     def _run_in_model_repeats(self, model, band_sorter, buffer_obj, band_temps,
                               picked, ll_change_log, prop_counts, acc_counts,
                               num_repeats=None, cell_ll_state=None):
@@ -9077,6 +9468,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # cell-crossing move so later repeats/sources see it. None = off.
         _dg = self._cap_drift_gate_setup(band_sorter)
         _dg_n = xp.zeros((), dtype=xp.int64)
+        # FUSED GATE/ACCEPT KERNELS (GB_INMODEL_ACCEPT_KERNEL, default OFF).
+        # Block-scope scratch + the casted per-half index arrays, or None to
+        # run the historical python chain. Every device counter the kernel
+        # touches is folded back into the python accumulators just before the
+        # block flush below, so the census/logging is unchanged either way.
+        _acc = self._imk_block_setup(
+            _half_pre, curr, ll_ref, curr_prior, ll_change_log,
+            prop_counts, acc_counts, _dg, _trust_n,
+        )
 
         # ---- DEFERRED CELL RELABELS (orchestration audit 2026-08-27,
         # candidate 2; GB_CELL_LABEL_DEFERRED, default OFF) ----
@@ -9102,8 +9502,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 band_sorter.get_special_band_index(t_i, w_i, b_i))
 
         for move_i in range(n_rep):
-          for (sub, sl, n_sub, ids_s, slots_s, N_s, l_s, t_s, w_s, b_s,
-               beta_s, n4_s, lo_s, hi_s, cold_s, n_cold_s) in _half_pre:
+          for _h_i, (sub, sl, n_sub, ids_s, slots_s, N_s, l_s, t_s, w_s, b_s,
+               beta_s, n4_s, lo_s, hi_s, cold_s, n_cold_s) in enumerate(_half_pre):
             if sub is not None:
                 # Complement <- current state (including the other half's
                 # accepted moves) for this half's proposal.
@@ -9117,121 +9517,144 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             with _tspan(tm, "inmodel_prior"):
                 new_logp = cp.asarray(self.gpu_priors[self.branch_name].logpdf(new))
-                # In-model steps stay within +- N/4 bins of the current source
-                # and inside the band window (widened by N/4). Skipped when f0 is
-                # a per-leaf fill (not sampled): the proposal cannot move it.
-                if self._f0_col is not None:
-                    _fc = self._f0_col
-                    new_bin = cp.abs(new[:, _fc] / 1e3 / self.df).astype(int)
-                    new_logp[
-                        (cp.abs(new[:, _fc] / 1e3 - curr[sl][:, _fc] / 1e3) / self.df).astype(int) > n4_s
-                    ] = -np.inf
-                    new_logp[new_bin < lo_s - n4_s] = -np.inf
-                    new_logp[new_bin > hi_s + n4_s] = -np.inf
-
-                # Sig-het TRUST REGION: reject candidates outside the
-                # expansion's validity region around the block anchor
-                # (physical |dlnA| / carrier-phase gates; see the ctor
-                # comment for thresholds + MH-validity). Gated rows drop
-                # out of ``keep`` below, so they also skip the ll kernel.
-                if anchor_phys is not None:
-                    # NOTE(trust-gate hoisting): the anchor side of this
-                    # gate is already hoisted to block scope (anchor_phys /
-                    # trust_dlna above); the candidates change EVERY repeat
-                    # so their transform is inherently per-repeat.
-                    _pc = self.transform_fn.both_transforms(
-                        new, xp=cp,
-                        leaf_inds=l_s if self._per_leaf_fill else None,
+                # ---- PRE-SCORE GATE CHAIN ------------------------------
+                # Two implementations of ONE chain. ``_acc is None`` (the
+                # default) runs the historical python/CuPy version below;
+                # armed, the f0 window, the sig-het trust region, the
+                # cap-drift-gate veto and the keep compaction are ONE
+                # backend call whose ``n_keep`` read is the loop's single
+                # remaining data-dependent host sync -- exactly the one the
+                # ``xp.where(keep)`` compress already paid.
+                if _acc is not None:
+                    keep, keep_idx, keep_any = self._imk_gate(
+                        _acc, _h_i, new, new_logp, curr, l_s,
+                        anchor_phys, trust_dlna, trust_dphase, trust_Tobs,
                     )
-                    _damp_n = cp.abs(cp.log(
-                        cp.abs(_pc[:, 0]) / anchor_phys[0][sl]))
-                    _drift_n = (
-                        2.0 * np.pi * cp.abs(_pc[:, 1] - anchor_phys[1][sl])
-                        * trust_Tobs
-                        + np.pi * cp.abs(_pc[:, 2] - anchor_phys[2][sl])
-                        * trust_Tobs**2
-                    )
-                    _rej_a = _damp_n > trust_dlna[sl]
-                    _rej_p = _drift_n > trust_dphase[sl]
-                    new_logp[_rej_a | _rej_p] = -np.inf
-                    _trust_n[0] += _rej_a.sum()
-                    _trust_n[1] += _rej_p.sum()
-                    _trust_n[2] += (_rej_a | _rej_p).sum()
-                    _trust_seen += int(_damp_n.shape[0])
+                else:
+                    # In-model steps stay within +- N/4 bins of the current source
+                    # and inside the band window (widened by N/4). Skipped when f0 is
+                    # a per-leaf fill (not sampled): the proposal cannot move it.
+                    if self._f0_col is not None:
+                        _fc = self._f0_col
+                        new_bin = cp.abs(new[:, _fc] / 1e3 / self.df).astype(int)
+                        new_logp[
+                            (cp.abs(new[:, _fc] / 1e3 - curr[sl][:, _fc] / 1e3) / self.df).astype(int) > n4_s
+                        ] = -np.inf
+                        new_logp[new_bin < lo_s - n4_s] = -np.inf
+                        new_logp[new_bin > hi_s + n4_s] = -np.inf
 
-                # CAP DRIFT GATE veto: a proposal whose f0 lands in a
-                # FOREIGN at-cap cell is rejected here, BEFORE the ll
-                # kernel (vetoed rows drop out of ``keep`` like any prior
-                # rejection). Within-cell moves and moves out of over-full
-                # cells always pass; disarmed cells (cap < 0) never veto.
-                # Device-only per repeat; census flushed once per block.
-                if _dg is not None:
-                    _dg_counts, _dg_cap = _dg
-                    _fc_dg = self._f0_col
-                    if self.cap_overlap_frac > 0.0:
-                        # Overlap mode (2026-08-23): membership is a SET of
-                        # covering cells. A proposal is vetoed when any cell
-                        # it NEWLY enters (a covering cell of the new f0
-                        # that does not cover the current f0) is armed and
-                        # at cap. Cells the source already covers never
-                        # veto (within-span moves and drains stay allowed).
-                        _c_p, _c_nb, _c_hn = self._cap_cell_members(
-                            b_s, curr[sl][:, _fc_dg] / 1e3)
-                        _n_p, _n_nb, _n_hn = self._cap_cell_members(
-                            b_s, new[:, _fc_dg] / 1e3)
-                        _dg_veto = cp.zeros(_n_p.shape, dtype=bool)
-                        _ones = cp.ones(_n_p.shape, dtype=bool)
-                        for _cell, _memb in ((_n_p, _ones), (_n_nb, _n_hn)):
-                            _foreign = (
-                                _memb
-                                & (_cell != _c_p)
-                                & (~_c_hn | (_cell != _c_nb))
-                            )
-                            _flat_m = self._cap_flat_index(t_s, w_s, _cell)
-                            _dg_veto = _dg_veto | (
-                                _foreign
-                                & (_dg_cap[_cell] >= 0)
-                                & (_dg_counts[_flat_m] >= _dg_cap[_cell])
-                            )
-                    else:
-                        _dg_cell_c = self._cap_cell_index(
-                            b_s, curr[sl][:, _fc_dg] / 1e3)
-                        _dg_cell_n = self._cap_cell_index(
-                            b_s, new[:, _fc_dg] / 1e3)
-                        _dg_cross = _dg_cell_n != _dg_cell_c
-                        _dg_flat_n = self._cap_flat_index(
-                            t_s, w_s, _dg_cell_n)
-                        _dg_veto = (
-                            _dg_cross
-                            & (_dg_cap[_dg_cell_n] >= 0)
-                            & (_dg_counts[_dg_flat_n] >= _dg_cap[_dg_cell_n])
+                    # Sig-het TRUST REGION: reject candidates outside the
+                    # expansion's validity region around the block anchor
+                    # (physical |dlnA| / carrier-phase gates; see the ctor
+                    # comment for thresholds + MH-validity). Gated rows drop
+                    # out of ``keep`` below, so they also skip the ll kernel.
+                    if anchor_phys is not None:
+                        # NOTE(trust-gate hoisting): the anchor side of this
+                        # gate is already hoisted to block scope (anchor_phys /
+                        # trust_dlna above); the candidates change EVERY repeat
+                        # so their transform is inherently per-repeat.
+                        _pc = self.transform_fn.both_transforms(
+                            new, xp=cp,
+                            leaf_inds=l_s if self._per_leaf_fill else None,
                         )
-                    new_logp[_dg_veto] = -np.inf
-                    _dg_n = _dg_n + _dg_veto.sum()
+                        _damp_n = cp.abs(cp.log(
+                            cp.abs(_pc[:, 0]) / anchor_phys[0][sl]))
+                        _drift_n = (
+                            2.0 * np.pi * cp.abs(_pc[:, 1] - anchor_phys[1][sl])
+                            * trust_Tobs
+                            + np.pi * cp.abs(_pc[:, 2] - anchor_phys[2][sl])
+                            * trust_Tobs**2
+                        )
+                        _rej_a = _damp_n > trust_dlna[sl]
+                        _rej_p = _drift_n > trust_dphase[sl]
+                        new_logp[_rej_a | _rej_p] = -np.inf
+                        _trust_n[0] += _rej_a.sum()
+                        _trust_n[1] += _rej_p.sum()
+                        _trust_n[2] += (_rej_a | _rej_p).sum()
+                        _trust_seen += int(_damp_n.shape[0])
 
-                keep = ~cp.isinf(new_logp)
-                # THE one data-dependent host sync this repeat needs on
-                # CuPy: compress ``keep`` ONCE and integer-gather through
-                # it everywhere below. Each boolean-mask getitem it
-                # replaces (5-6 per repeat) re-ran nonzero + a D2H size
-                # pull; ``keep_idx`` yields the same rows in the same
-                # (ascending) order, so every downstream value is
-                # bit-identical.
-                keep_idx = xp.where(keep)[0]
-                keep_any = int(keep_idx.size) > 0
-            new_ll = cp.full(n_sub, -1e300)
+                    # CAP DRIFT GATE veto: a proposal whose f0 lands in a
+                    # FOREIGN at-cap cell is rejected here, BEFORE the ll
+                    # kernel (vetoed rows drop out of ``keep`` like any prior
+                    # rejection). Within-cell moves and moves out of over-full
+                    # cells always pass; disarmed cells (cap < 0) never veto.
+                    # Device-only per repeat; census flushed once per block.
+                    if _dg is not None:
+                        _dg_counts, _dg_cap = _dg
+                        _fc_dg = self._f0_col
+                        if self.cap_overlap_frac > 0.0:
+                            # Overlap mode (2026-08-23): membership is a SET of
+                            # covering cells. A proposal is vetoed when any cell
+                            # it NEWLY enters (a covering cell of the new f0
+                            # that does not cover the current f0) is armed and
+                            # at cap. Cells the source already covers never
+                            # veto (within-span moves and drains stay allowed).
+                            _c_p, _c_nb, _c_hn = self._cap_cell_members(
+                                b_s, curr[sl][:, _fc_dg] / 1e3)
+                            _n_p, _n_nb, _n_hn = self._cap_cell_members(
+                                b_s, new[:, _fc_dg] / 1e3)
+                            _dg_veto = cp.zeros(_n_p.shape, dtype=bool)
+                            _ones = cp.ones(_n_p.shape, dtype=bool)
+                            for _cell, _memb in ((_n_p, _ones), (_n_nb, _n_hn)):
+                                _foreign = (
+                                    _memb
+                                    & (_cell != _c_p)
+                                    & (~_c_hn | (_cell != _c_nb))
+                                )
+                                _flat_m = self._cap_flat_index(t_s, w_s, _cell)
+                                _dg_veto = _dg_veto | (
+                                    _foreign
+                                    & (_dg_cap[_cell] >= 0)
+                                    & (_dg_counts[_flat_m] >= _dg_cap[_cell])
+                                )
+                        else:
+                            _dg_cell_c = self._cap_cell_index(
+                                b_s, curr[sl][:, _fc_dg] / 1e3)
+                            _dg_cell_n = self._cap_cell_index(
+                                b_s, new[:, _fc_dg] / 1e3)
+                            _dg_cross = _dg_cell_n != _dg_cell_c
+                            _dg_flat_n = self._cap_flat_index(
+                                t_s, w_s, _dg_cell_n)
+                            _dg_veto = (
+                                _dg_cross
+                                & (_dg_cap[_dg_cell_n] >= 0)
+                                & (_dg_counts[_dg_flat_n] >= _dg_cap[_dg_cell_n])
+                            )
+                        new_logp[_dg_veto] = -np.inf
+                        _dg_n = _dg_n + _dg_veto.sum()
+
+                    keep = ~cp.isinf(new_logp)
+                    # THE one data-dependent host sync this repeat needs on
+                    # CuPy: compress ``keep`` ONCE and integer-gather through
+                    # it everywhere below. Each boolean-mask getitem it
+                    # replaces (5-6 per repeat) re-ran nonzero + a D2H size
+                    # pull; ``keep_idx`` yields the same rows in the same
+                    # (ascending) order, so every downstream value is
+                    # bit-identical.
+                    keep_idx = xp.where(keep)[0]
+                    keep_any = int(keep_idx.size) > 0
+            # Under the fused accept kernel the per-repeat ``new_ll`` buffer
+            # is block-scope scratch (the kernel writes the -1e300 floor into
+            # the non-kept lanes itself), so the allocate-and-fill is skipped.
+            new_ll = (
+                cp.full(n_sub, -1e300) if _acc is None
+                else _acc["buf"][_h_i]["new_ll"]
+            )
+            _scored = None
             # THE per-repeat scoring call: the sig-het fused in-kernel
             # likelihood when a reference is active, the chunked-het/FD
             # engine otherwise. This span is the headline number for the
             # in-model GB/GB speedup work.
             with _tspan(tm, "inmodel_get_add_ll"):
                 if keep_any:
-                    new_ll[keep_idx] = buffer_obj.get_add_ll(
+                    _scored = buffer_obj.get_add_ll(
                         new[keep_idx], slots_s[keep_idx], slots_s[keep_idx],
                         N_s[keep_idx],
                         phase_maximize=self.phase_maximize,
                         leaf_inds=l_s[keep_idx],
                     )
+                    if _acc is None:
+                        new_ll[keep_idx] = _scored
                     if self.phase_maximize and buffer_obj.phase_angle is not None:
                         new[keep_idx, self._phi0_col] = (
                             new[keep_idx, self._phi0_col]
@@ -9244,149 +9667,175 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if tm is not None:
                 tm.count("inmodel_repeat_calls")
 
-            delta_ll = new_ll - ll_ref[sl]
-
-            # SNR prior-boundary clamp on IN-MODEL updates (user policy
-            # 2026-08-02: ONE limit, optimal sqrt(h_h) AND detected
-            # d_h/sqrt(h_h), enforced on ALL GB moves as effective prior
-            # support). Applies to the NEW point only, so a source already
-            # below the limit can still move OUT of the violating region;
-            # it can never move further in or laterally within it.
-            # d_h_out/h_h_out are the per-repeat get_add_ll outputs for the
-            # ``keep`` subset (the same arrays the sorter stash consumes).
-            # ``keep_any`` is REQUIRED here, not just defensive: get_add_ll
-            # above runs only under that same condition, so a repeat whose
-            # candidates are all prior/trust-rejected leaves d_h_out/h_h_out
-            # holding the PREVIOUS call's rows. Without this guard the clamp
-            # would scatter a stale-length mask through ``keep_idx``.
-            if getattr(buffer_obj, "d_h_out", None) is not None and keep_any:
-                _hh_im = cp.asarray(buffer_obj.h_h_out).real
-                _opt_im = cp.sqrt(cp.maximum(_hh_im, 0.0))
-                _lim_im = buffer_obj.opt_snr_rej_samp_limit
-                _viol_im = _opt_im < _lim_im
-                if getattr(buffer_obj, "snr_rej_detected", False):
-                    _dh_im = cp.asarray(buffer_obj.d_h_out).real
-                    _det_im = _dh_im / cp.maximum(_opt_im, 1e-300)
-                    _viol_im = _viol_im | (_det_im < _lim_im)
-                # Unconditional masked write (was a bool(any) host gate +
-                # a boolean-index scatter): the violating rows are exactly
-                # ``keep_idx[_viol_im]``; non-violating rows are rewritten
-                # with their own value, and the delta recompute repeats the
-                # identical subtraction -- bit-identical either way.
-                new_ll[keep_idx] = cp.where(_viol_im, -1e300, new_ll[keep_idx])
+            # ---- POST-SCORE CHAIN --------------------------------------
+            # Two implementations of ONE chain. ``_acc is None`` (the
+            # default, GB_INMODEL_ACCEPT_KERNEL=0) runs the historical
+            # python/CuPy version below, untouched. Armed, the whole chain --
+            # ll scatter, SNR clamp, MH ratio, accept, and every masked state
+            # write / scatter-add -- is ONE backend call. The RNG draw is
+            # made HERE either way, with the identical shape and consumption
+            # order, so the two paths take the same stream.
+            if _acc is not None:
+                with _tspan(tm, "inmodel_accept"):
+                    _u = cp.random.rand(n_sub)
+                    delta_ll, lnpdiff, accept = self._imk_accept(
+                        _acc, _h_i, new, new_logp, factors, _u, buffer_obj,
+                        _scored, keep_idx, keep_any,
+                        getattr(self, "_last_im_kind", None),
+                    )
+                    # Host-side halves of the per-kind census (the device
+                    # halves are folded once per block, in the flush).
+                    _kind = getattr(self, "_last_im_kind", None)
+                    if _kind is not None:
+                        rec = _kind_acc.setdefault(_kind, [0, 0, 0, 0])
+                        rec[0] += n_sub
+                        rec[2] += n_cold_s
+                    if anchor_phys is not None:
+                        _trust_seen += n_sub
+            else:
                 delta_ll = new_ll - ll_ref[sl]
 
-            # Device-resident MH bookkeeping (2026-08-15). This span used to
-            # be the launch-overhead signal because every ``bool(...any())``
-            # / ``int(...)`` in it was a device sync; the whole chain now
-            # stays on device -- unconditional masked ops with results
-            # identical to the gated branches they replace -- and the
-            # counters flush once per block (``imr_accept_flush``).
-            with _tspan(tm, "inmodel_accept"):
-                lnpdiff = beta_s * delta_ll + (new_logp - curr_prior[sl]) + factors
-                accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
+                # SNR prior-boundary clamp on IN-MODEL updates (user policy
+                # 2026-08-02: ONE limit, optimal sqrt(h_h) AND detected
+                # d_h/sqrt(h_h), enforced on ALL GB moves as effective prior
+                # support). Applies to the NEW point only, so a source already
+                # below the limit can still move OUT of the violating region;
+                # it can never move further in or laterally within it.
+                # d_h_out/h_h_out are the per-repeat get_add_ll outputs for the
+                # ``keep`` subset (the same arrays the sorter stash consumes).
+                # ``keep_any`` is REQUIRED here, not just defensive: get_add_ll
+                # above runs only under that same condition, so a repeat whose
+                # candidates are all prior/trust-rejected leaves d_h_out/h_h_out
+                # holding the PREVIOUS call's rows. Without this guard the clamp
+                # would scatter a stale-length mask through ``keep_idx``.
+                if getattr(buffer_obj, "d_h_out", None) is not None and keep_any:
+                    _hh_im = cp.asarray(buffer_obj.h_h_out).real
+                    _opt_im = cp.sqrt(cp.maximum(_hh_im, 0.0))
+                    _lim_im = buffer_obj.opt_snr_rej_samp_limit
+                    _viol_im = _opt_im < _lim_im
+                    if getattr(buffer_obj, "snr_rej_detected", False):
+                        _dh_im = cp.asarray(buffer_obj.d_h_out).real
+                        _det_im = _dh_im / cp.maximum(_opt_im, 1e-300)
+                        _viol_im = _viol_im | (_det_im < _lim_im)
+                    # Unconditional masked write (was a bool(any) host gate +
+                    # a boolean-index scatter): the violating rows are exactly
+                    # ``keep_idx[_viol_im]``; non-violating rows are rewritten
+                    # with their own value, and the delta recompute repeats the
+                    # identical subtraction -- bit-identical either way.
+                    new_ll[keep_idx] = cp.where(_viol_im, -1e300, new_ll[keep_idx])
+                    delta_ll = new_ll - ll_ref[sl]
 
-                # GB_JUMP_TRACE: the ONE site where the proposed coordinates,
-                # the current ones, the accept mask and the per-row rung all
-                # coexist. Device-only; no-op unless the knob is set.
-                self._jump_trace_accum(
-                    new, curr[sl], accept, t_i[sl], keep_idx,
-                    getattr(buffer_obj, "h_h_out", None))
-                self._inmodel_trace(
-                    move_i, getattr(self, "_last_im_kind", "?"), curr[sl],
-                    new, None if chol is None else chol[sl], factors, beta_s,
-                    ll_ref[sl], new_ll, delta_ll, curr_prior[sl], new_logp,
-                    lnpdiff, accept, t_i[sl], w_i[sl], b_i[sl], keep_idx,
-                    buffer_obj)
+                # Device-resident MH bookkeeping (2026-08-15). This span used to
+                # be the launch-overhead signal because every ``bool(...any())``
+                # / ``int(...)`` in it was a device sync; the whole chain now
+                # stays on device -- unconditional masked ops with results
+                # identical to the gated branches they replace -- and the
+                # counters flush once per block (``imr_accept_flush``).
+                with _tspan(tm, "inmodel_accept"):
+                    lnpdiff = beta_s * delta_ll + (new_logp - curr_prior[sl]) + factors
+                    accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
 
-                bad_mask = (new_ll <= -1e299) | (new_logp <= -1e229)
-                # ``accept[bad_accepts] = False`` == ``accept & ~bad_mask``;
-                # the out-of-prior warning census accumulates on device and
-                # logs ONCE at block end instead of per repeat.
-                _warn_dev = _warn_dev + (
-                    (accept & bad_mask) & (beta_s != 0.0)
-                ).sum()
-                accept = accept & ~bad_mask
+                    # GB_JUMP_TRACE: the ONE site where the proposed coordinates,
+                    # the current ones, the accept mask and the per-row rung all
+                    # coexist. Device-only; no-op unless the knob is set.
+                    self._jump_trace_accum(
+                        new, curr[sl], accept, t_i[sl], keep_idx,
+                        getattr(buffer_obj, "h_h_out", None))
+                    self._inmodel_trace(
+                        move_i, getattr(self, "_last_im_kind", "?"), curr[sl],
+                        new, None if chol is None else chol[sl], factors, beta_s,
+                        ll_ref[sl], new_ll, delta_ll, curr_prior[sl], new_logp,
+                        lnpdiff, accept, t_i[sl], w_i[sl], b_i[sl], keep_idx,
+                        buffer_obj)
 
-                prop_counts[1][t_s, w_s, b_s] += 1
-                # Per-proposal-type acceptance (stretch vs info-matrix):
-                # the pooled counter cannot say WHICH proposal is timid.
-                # Proposed tallies are host ints (shapes hoisted above);
-                # accepted tallies stay 0-d device scalars until the flush.
-                _kind = getattr(self, "_last_im_kind", None)
-                if _kind is not None:
-                    rec = _kind_acc.setdefault(_kind, [0, 0, 0, 0])
-                    rec[0] += n_sub
-                    rec[2] += n_cold_s
-                    rec[1] = rec[1] + accept.sum()
-                    rec[3] = rec[3] + (accept & cold_s).sum()
+                    bad_mask = (new_ll <= -1e299) | (new_logp <= -1e229)
+                    # ``accept[bad_accepts] = False`` == ``accept & ~bad_mask``;
+                    # the out-of-prior warning census accumulates on device and
+                    # logs ONCE at block end instead of per repeat.
+                    _warn_dev = _warn_dev + (
+                        (accept & bad_mask) & (beta_s != 0.0)
+                    ).sum()
+                    accept = accept & ~bad_mask
 
-                # Unconditional masked accept application: ``cp.where``
-                # copies the accepted values verbatim (rejected rows keep
-                # their own), so the tracked state is bit-identical to the
-                # boolean-scatter form it replaces.
-                _tgt = slice(None) if sub is None else sub
-                curr[_tgt] = cp.where(accept[:, None], new, curr[_tgt])
-                ll_ref[_tgt] = cp.where(accept, new_ll, ll_ref[_tgt])
-                curr_prior[_tgt] = cp.where(accept, new_logp, curr_prior[_tgt])
-                # CAP DRIFT GATE occupancy update: accepted cell crossings
-                # move their count old->new so later repeats and later
-                # sources in the block see the true occupancy. Sync-free
-                # (weights are 0 for rejected/non-crossing rows) and
-                # duplicate-safe (scatter-add; staggered seam cells can be
-                # targeted from both adjacent bands in one batch).
-                if _dg is not None:
-                    if self.cap_overlap_frac > 0.0:
-                        # Overlap mode (fix 2026-08-24): the veto branch
-                        # above works on membership SETS and never defines
-                        # ``_dg_cross``/``_dg_flat_n`` -- referencing them
-                        # here was an UnboundLocalError on the first
-                        # accepted in-model block of any armed overlap run.
-                        # The correct occupancy transition is per-SIDE set
-                        # difference: +1 every cell the accepted move NEWLY
-                        # covers, -1 every cell it no longer covers --
-                        # factored into _cap_covering_transition_scatter
-                        # (2026-08-24) so the replacement move's accept
-                        # path shares the identical accounting.
-                        self._cap_covering_transition_scatter(
-                            _dg[0], t_s, w_s,
-                            (_c_p, _c_nb, _c_hn), (_n_p, _n_nb, _n_hn),
-                            accept,
+                    prop_counts[1][t_s, w_s, b_s] += 1
+                    # Per-proposal-type acceptance (stretch vs info-matrix):
+                    # the pooled counter cannot say WHICH proposal is timid.
+                    # Proposed tallies are host ints (shapes hoisted above);
+                    # accepted tallies stay 0-d device scalars until the flush.
+                    _kind = getattr(self, "_last_im_kind", None)
+                    if _kind is not None:
+                        rec = _kind_acc.setdefault(_kind, [0, 0, 0, 0])
+                        rec[0] += n_sub
+                        rec[2] += n_cold_s
+                        rec[1] = rec[1] + accept.sum()
+                        rec[3] = rec[3] + (accept & cold_s).sum()
+
+                    # Unconditional masked accept application: ``cp.where``
+                    # copies the accepted values verbatim (rejected rows keep
+                    # their own), so the tracked state is bit-identical to the
+                    # boolean-scatter form it replaces.
+                    _tgt = slice(None) if sub is None else sub
+                    curr[_tgt] = cp.where(accept[:, None], new, curr[_tgt])
+                    ll_ref[_tgt] = cp.where(accept, new_ll, ll_ref[_tgt])
+                    curr_prior[_tgt] = cp.where(accept, new_logp, curr_prior[_tgt])
+                    # CAP DRIFT GATE occupancy update: accepted cell crossings
+                    # move their count old->new so later repeats and later
+                    # sources in the block see the true occupancy. Sync-free
+                    # (weights are 0 for rejected/non-crossing rows) and
+                    # duplicate-safe (scatter-add; staggered seam cells can be
+                    # targeted from both adjacent bands in one batch).
+                    if _dg is not None:
+                        if self.cap_overlap_frac > 0.0:
+                            # Overlap mode (fix 2026-08-24): the veto branch
+                            # above works on membership SETS and never defines
+                            # ``_dg_cross``/``_dg_flat_n`` -- referencing them
+                            # here was an UnboundLocalError on the first
+                            # accepted in-model block of any armed overlap run.
+                            # The correct occupancy transition is per-SIDE set
+                            # difference: +1 every cell the accepted move NEWLY
+                            # covers, -1 every cell it no longer covers --
+                            # factored into _cap_covering_transition_scatter
+                            # (2026-08-24) so the replacement move's accept
+                            # path shares the identical accounting.
+                            self._cap_covering_transition_scatter(
+                                _dg[0], t_s, w_s,
+                                (_c_p, _c_nb, _c_hn), (_n_p, _n_nb, _n_hn),
+                                accept,
+                            )
+                        else:
+                            _dg_w = (accept & _dg_cross).astype(xp.int32)
+                            self._cap_gate_scatter_add(_dg[0], _dg_flat_n, _dg_w)
+                            self._cap_gate_scatter_add(
+                                _dg[0],
+                                self._cap_flat_index(t_s, w_s, _dg_cell_c),
+                                -_dg_w,
+                            )
+                    # One pooled survivor per cell (serial-within-band), so the
+                    # fancy-index += is elementwise; rejected rows add an exact
+                    # 0.0 / False.
+                    ll_change_log[t_s, w_s, b_s] += cp.where(accept, delta_ll, 0.0)
+                    acc_counts[1][t_s, w_s, b_s] += accept
+                    if (
+                        getattr(self, "_sorter_dh", None) is not None
+                        and getattr(buffer_obj, "d_h_out", None) is not None
+                        and keep_any
+                    ):
+                        # d_h_out/h_h_out hold the per-repeat get_add_ll
+                        # outputs for the ``keep_idx`` rows; scatter them to
+                        # full width, then masked-write the accepted rows.
+                        # ``accept`` implies keep (bad_mask filtering above),
+                        # so the uninitialized non-keep lanes are never
+                        # selected.
+                        _dh_full = cp.empty(n_sub)
+                        _hh_full = cp.empty(n_sub)
+                        _dh_full[keep_idx] = cp.asarray(buffer_obj.d_h_out).real
+                        _hh_full[keep_idx] = cp.asarray(buffer_obj.h_h_out).real
+                        self._sorter_dh[ids_s] = cp.where(
+                            accept, _dh_full, self._sorter_dh[ids_s]
                         )
-                    else:
-                        _dg_w = (accept & _dg_cross).astype(xp.int32)
-                        self._cap_gate_scatter_add(_dg[0], _dg_flat_n, _dg_w)
-                        self._cap_gate_scatter_add(
-                            _dg[0],
-                            self._cap_flat_index(t_s, w_s, _dg_cell_c),
-                            -_dg_w,
+                        self._sorter_hh[ids_s] = cp.where(
+                            accept, _hh_full, self._sorter_hh[ids_s]
                         )
-                # One pooled survivor per cell (serial-within-band), so the
-                # fancy-index += is elementwise; rejected rows add an exact
-                # 0.0 / False.
-                ll_change_log[t_s, w_s, b_s] += cp.where(accept, delta_ll, 0.0)
-                acc_counts[1][t_s, w_s, b_s] += accept
-                if (
-                    getattr(self, "_sorter_dh", None) is not None
-                    and getattr(buffer_obj, "d_h_out", None) is not None
-                    and keep_any
-                ):
-                    # d_h_out/h_h_out hold the per-repeat get_add_ll
-                    # outputs for the ``keep_idx`` rows; scatter them to
-                    # full width, then masked-write the accepted rows.
-                    # ``accept`` implies keep (bad_mask filtering above),
-                    # so the uninitialized non-keep lanes are never
-                    # selected.
-                    _dh_full = cp.empty(n_sub)
-                    _hh_full = cp.empty(n_sub)
-                    _dh_full[keep_idx] = cp.asarray(buffer_obj.d_h_out).real
-                    _hh_full[keep_idx] = cp.asarray(buffer_obj.h_h_out).real
-                    self._sorter_dh[ids_s] = cp.where(
-                        accept, _dh_full, self._sorter_dh[ids_s]
-                    )
-                    self._sorter_hh[ids_s] = cp.where(
-                        accept, _hh_full, self._sorter_hh[ids_s]
-                    )
 
             # Guard at the CALL SITE (perf, 2026-08): the callee also checks
             # ``self.debug``, but its arguments — three ``asnumpy`` device
@@ -9476,6 +9925,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                   # stale. Rebuild rather than patch: cheap, and a missed
                   # field here scores the next repeat at the wrong beta.
                   _half_pre = _build_half_pre()
+                  # ... and so are the kernel path's int32 casts of those
+                  # same gathers (t_s above all: an accepted swap rewrites
+                  # the rung a row scores at).
+                  if _acc is not None:
+                      self._imk_rebuild_halves(_acc, _half_pre)
+
+        # Fold the fused kernel's device-side censuses back into the python
+        # accumulators BEFORE the flush reads them, so the block-end logging
+        # is byte-identical whichever path ran.
+        if _acc is not None:
+            _warn_dev = _warn_dev + _acc["warn"][0]
+            if _dg is not None:
+                _dg_n = _dg_n + _acc["dg_n"][0]
+            for _k, _dev in _acc["kind_dev"].items():
+                _r = _kind_acc.setdefault(_k, [0, 0, 0, 0])
+                _r[1] = _r[1] + _dev[0]
+                _r[3] = _r[3] + _dev[1]
 
         # BLOCK-BOUNDARY FLUSH + CLOSE (GB_CELL_LABEL_DEFERRED): one
         # full-table relabel for the whole block instead of one per repeat
