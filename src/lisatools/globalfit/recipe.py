@@ -2168,6 +2168,30 @@ class GBWaveformDict(typing.TypedDict):
     window_alpha: float
 
 
+def _fstat_dist_birth_stamp(default: bool = True) -> bool:
+    """Resolve ``GBSpecialBase.rj_fstat_dist_birth`` for an install site.
+
+    The move's own constructor defaults this to ``bool(rj_amp_maximize)``
+    (= ``bool(phase_maximize)``), which is the SEARCH convention: it
+    resolves False on every pe-named move, so a PE birth drew slot 0 and
+    the extrinsic angles at FULL PRIOR WIDTHS even though the epoch
+    F-stat center table was already built and sitting right there.
+
+    Install sites that want the F-stat distance-birth proposal say so
+    explicitly through this helper — epoch-table centers, a truncated +
+    normalized lognormal slot 0 priced on both sides, and (in PE)
+    ``pe_extrinsic_draw`` angles drawn and priced on both sides. USER
+    RULING 2026-08-28: *"rj_fstat_pe get the same stamp? yes mirror them.
+    That would be better than drawing from the full prior widths."*
+
+    ``GB_RJ_FSTAT_DIST_BIRTH`` always wins (the project-wide env-knob
+    convention); ``=0`` restores the prior-width path bit-identically by
+    switching the RJ step's whole F-stat branch off.
+    """
+    env = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
+    return bool(int(env)) if env is not None else bool(default)
+
+
 def build_gb_moves(
     engine_info: Setup,
     curr: CurrentInfoGlobalFit,
@@ -2851,10 +2875,7 @@ def build_gb_moves(
         # (phase_maximize=False -> rj_amp_maximize False -> the F-stat
         # distance path off, leaving uniform prior extrinsics). The env
         # knob GB_RJ_FSTAT_DIST_BIRTH still wins when set explicitly.
-        _fdb_env = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
-        gb_replace_move.rj_fstat_dist_birth = (
-            bool(int(_fdb_env)) if _fdb_env is not None else True
-        )
+        gb_replace_move.rj_fstat_dist_birth = _fstat_dist_birth_stamp()
         # Search-stage stamp (user ruling 2026-08-28): this install site is
         # search-only (_gb_mode_search above), and the move's plain
         # "rj_replace" name carries no stage info -- the stamp is what arms
@@ -3086,6 +3107,30 @@ def build_gb_moves(
     )
     gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers))
 
+    # F-STAT DISTANCE-BIRTH ON THE PE SIDE (USER RULING 2026-08-28:
+    # *"rj_fstat_pe get the same stamp? yes mirror them. That would be
+    # better than drawing from the full prior widths."*). The ctor default
+    # follows rj_amp_maximize -> phase_maximize, which is False on every
+    # pe-named move, so PE births used to draw slot 0 and the extrinsic
+    # angles at full prior widths while the epoch center table -- already
+    # built for this same fit root, already read by rj_replace_pe -- sat
+    # unused. Stamped, a PE birth gets the epoch-table centers, the
+    # truncated + normalized lognormal slot 0, and the pe_extrinsic_draw
+    # angles, each priced on BOTH the birth and the death side (exact
+    # detailed balance; see _run_rj_step's factor assembly and
+    # tests/test_gb_pe_fstat_dist_birth.py).
+    #
+    # Scoped to the PE FLAVOR only -- the same guard the PE replace build
+    # uses -- so a GB_MODE=search campaign that runs its search THROUGH the
+    # pe-named moves keeps resolving the ctor default bit-identically.
+    # NOT stamped, deliberately: rj_prior_pe (the pure-PRIOR complement --
+    # its full-width births are the channel the F-stat grid cannot reach),
+    # rj_fstat_mcmc (its own serial-MCMC proposal), rj_refit (births and
+    # densities come from the GMM refit file) and rj_prior_removal (prior
+    # reverse-density convention, per its docstring).
+    if not _gb_mode_search or _pe_strict:
+        gb_pe_prior_move.rj_fstat_dist_birth = _fstat_dist_birth_stamp()
+
     #* ------------------------- PE REPLACE (rj_replace_pe) -------------------------
     # USER DIRECTIVE 2026-08-28: "we need a PE replace that also uses the
     # same machinery as fstat pe". Same fixed-dimension REPLACEMENT move as
@@ -3155,10 +3200,7 @@ def build_gb_moves(
         # The center pin IS this move's proposal, so it must not depend on
         # the phase-max chain the ctor default follows (identical reasoning
         # to the search install). GB_RJ_FSTAT_DIST_BIRTH still wins.
-        _fdb_env_pe = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
-        gb_pe_replace_move.rj_fstat_dist_birth = (
-            bool(int(_fdb_env_pe)) if _fdb_env_pe is not None else True
-        )
+        gb_pe_replace_move.rj_fstat_dist_birth = _fstat_dist_birth_stamp()
         # PE-stage stamp: "same machinery as fstat pe" == the EPOCH CENTER
         # TABLE for the extrinsic centers (what _rj_birth_perrow hands the
         # pe-named fstat moves). The move's plain name carries no stage
