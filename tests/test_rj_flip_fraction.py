@@ -409,19 +409,29 @@ class ResolveRJFlipFractionTest(unittest.TestCase):
 class ModeDefaultPolicyTest(unittest.TestCase):
     """The per-mode flip-fraction policy (user ruling 2026-08-28).
 
-    Search flips every eligible slot; PE settles to a random subset. These
+    Search and PE each flip a random subset of eligible slots. These
     were bare literals duplicated at two sites in ``recipe.py``, which is
     how they drift apart -- hoisted to named constants so the policy is
     pinned in one place and visible here.
     """
 
-    def test_search_default_is_every_slot(self):
+    def test_search_default_is_twenty_percent(self):
         from lisatools.globalfit.recipe import _SEARCH_RJ_FLIP_DEFAULT
-        self.assertEqual(_SEARCH_RJ_FLIP_DEFAULT, 1.0)
+        self.assertEqual(_SEARCH_RJ_FLIP_DEFAULT, 0.2)
 
-    def test_pe_default_is_thirty_percent(self):
+    def test_pe_default_is_twenty_percent(self):
         from lisatools.globalfit.recipe import _PE_RJ_FLIP_DEFAULT
-        self.assertEqual(_PE_RJ_FLIP_DEFAULT, 0.3)
+        self.assertEqual(_PE_RJ_FLIP_DEFAULT, 0.2)
+
+    def test_matches_the_v6_production_value(self):
+        """v3-v6 exported GB_RJ_FLIP_FRACTION=0.2, and env beats the per-move
+        default, so every RJ move in those runs -- search AND PE -- ran at
+        0.2. These defaults reproduce that with the export removed."""
+        from lisatools.globalfit.recipe import (
+            _PE_RJ_FLIP_DEFAULT, _SEARCH_RJ_FLIP_DEFAULT,
+        )
+        self.assertEqual(_SEARCH_RJ_FLIP_DEFAULT, 0.2)
+        self.assertEqual(_PE_RJ_FLIP_DEFAULT, 0.2)
 
     def test_both_are_legal_fractions(self):
         """Whatever the policy, it has to survive the resolver's bounds."""

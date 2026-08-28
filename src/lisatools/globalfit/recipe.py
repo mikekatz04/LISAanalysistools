@@ -79,19 +79,26 @@ logger = logging.getLogger(__name__)
 
 MOJITO_REFERENCE_TIME = 97729089.327664
 
-#: Per-mode ``rj_flip_fraction`` policy: the share of eligible RJ slots a
-#: single proposal round flips. Search flips EVERY slot (fast dimension
-#: exploration); PE settles to a random subset per proposal.
+#: ``rj_flip_fraction`` policy: the share of eligible RJ slots a single
+#: proposal round flips.
+#:
+#: These are DEFAULTS IN CODE, deliberately, and that is the only way to
+#: hold two different values at once: ``{BRANCH}_RJ_FLIP_FRACTION`` is
+#: GLOBAL across stages, so a single exported value lands on every RJ move
+#: in every stage and collapses the search/PE distinction. Submit scripts
+#: therefore leave the env var unset; an explicit kwarg still overrides
+#: per move.
 #:
 #: Named constants rather than bare literals because the PE value was
-#: duplicated at two sites below and those are exactly the pairs that drift
-#: apart. ``{BRANCH}_RJ_FLIP_FRACTION`` and an explicit kwarg still override
-#: both -- but note the env var is GLOBAL across stages, so exporting it
-#: forces one value onto search AND PE; leaving it unset is what lets these
-#: per-mode defaults apply. Pinned in tests/test_rj_flip_fraction.py.
-_SEARCH_RJ_FLIP_DEFAULT = 1.0
-#: 0.1 -> 0.3 (user ruling 2026-08-28).
-_PE_RJ_FLIP_DEFAULT = 0.3
+#: duplicated at two sites below, and those are exactly the pairs that
+#: drift apart. Pinned in tests/test_rj_flip_fraction.py.
+#: user ruling 2026-08-28: MATCH v6 -- 0.2 everywhere. v3-v6 all exported
+#: GB_RJ_FLIP_FRACTION=0.2, and env beats the per-move default, so every
+#: RJ move in those runs ran at 0.2 in BOTH search and PE. Keeping the
+#: two names distinct (rather than one constant) so the search/PE split
+#: can be reopened without re-deriving which sites feed which stage.
+_SEARCH_RJ_FLIP_DEFAULT = 0.2
+_PE_RJ_FLIP_DEFAULT = 0.2
 
 
 class Recipe:
@@ -2824,7 +2831,8 @@ def build_gb_moves(
         gpus=[],
         # Leaf-cap counters advance once per iteration: the prior RJ move is
         # the designated updater; the other RJ moves only enforce the gate.
-        **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search}
+        **{**gb_move_kwargs, "leaf_cap_update": False,
+           "rj_flip_fraction_default": _SEARCH_RJ_FLIP_DEFAULT, **_imr_search}
     )
     gb_search_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2847,7 +2855,8 @@ def build_gb_moves(
             fp=_refit_fp,
             phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
             gpus=[],
-            **{**gb_move_kwargs, "leaf_cap_update": False}
+            **{**gb_move_kwargs, "leaf_cap_update": False,
+               "rj_flip_fraction_default": _SEARCH_RJ_FLIP_DEFAULT}
         )
         gb_search_refit_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -2891,7 +2900,8 @@ def build_gb_moves(
             phase_maximize=False,
             run_swaps=_temper_all_moves,
             gpus=[],
-            **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
+            **{**gb_move_kwargs, "leaf_cap_update": False,
+               "rj_flip_fraction_default": _SEARCH_RJ_FLIP_DEFAULT, **_imr_search},
         )
         # The center-table recentering IS this move's proposal, so it must
         # not depend on the phase-max chain the ctor default follows
@@ -2948,7 +2958,8 @@ def build_gb_moves(
             gpus=[],
             # Removal pools are 100% mature -- the survivor budget (25)
             # is the one that binds here.
-            **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
+            **{**gb_move_kwargs, "leaf_cap_update": False,
+               "rj_flip_fraction_default": _SEARCH_RJ_FLIP_DEFAULT, **_imr_search},
         )
         gb_prior_removal_move.accepted = np.zeros((ntemps, nwalkers))
 
@@ -3033,7 +3044,8 @@ def build_gb_moves(
             phase_maximize=False,
             run_swaps=False,
             gpus=[],
-            **{**gb_move_kwargs, "leaf_cap_update": False, **_imr_search},
+            **{**gb_move_kwargs, "leaf_cap_update": False,
+               "rj_flip_fraction_default": _SEARCH_RJ_FLIP_DEFAULT, **_imr_search},
         )
         gb_warm_move.accepted = np.zeros((ntemps, nwalkers))
         gb_search_moves = list(gb_search_moves) + [gb_warm_move]
@@ -3053,13 +3065,17 @@ def build_gb_moves(
     # 2026-08-01). In PE mode phase_maximize is therefore forced off on the
     # birth instance (under GB_MODE=search the seeded GB_RJ_PHASE_MAXIMIZE
     # keeps the search behavior unchanged).
-    # RJ flip fraction mode default: every slot flips in search (fast
-    # dimension exploration); PE settles to a 30% random subset per
-    # proposal (rj_flip_fraction docs in gbspecialstretch). These two
-    # moves ARE the GB_MODE=search birth path when that mode is on, so the
-    # default follows the mode; the search-NAMED moves (rj_prior_search /
-    # rj_fstat_mcmc_search / rj_prior_removal / rj_replace) keep the
-    # implicit 1.0. {BRANCH}_RJ_FLIP_FRACTION / an explicit kwarg override.
+    # RJ flip fraction mode default: search thins to _SEARCH_RJ_FLIP_DEFAULT
+    # (0.2), PE to _PE_RJ_FLIP_DEFAULT (0.2) -- constants at module level.
+    # These two moves ARE the GB_MODE=search birth path when that mode is
+    # on, so their default follows the mode. The search-NAMED moves
+    # (rj_fstat_mcmc_search / rj_refit_search / rj_replace /
+    # rj_prior_removal / rj_warm_search) are passed _SEARCH_RJ_FLIP_DEFAULT
+    # EXPLICITLY at their own construction sites above. They used to fall
+    # through to the implicit 1.0 and were only reaching 0.2 because every
+    # submit script exported the global env override; with that export
+    # removed (2026-08-28) this wiring is what holds them at 0.2.
+    # {BRANCH}_RJ_FLIP_FRACTION / an explicit kwarg still override.
     _rj_flip_default = (
         _SEARCH_RJ_FLIP_DEFAULT if _gb_mode_search else _PE_RJ_FLIP_DEFAULT
     )
