@@ -485,6 +485,17 @@ class GeneralSetup(Setup, GeneralSettings):
             "coarse_use_ws": bool(getattr(self, "coarse_use_ws", True)),
         }
         self.logger.info("[noise-model-identity] %s", self.noise_model_identity)
+        # Publish the RESOLVED kwargs as the single source of truth. This
+        # method works on a copy, so without the write-back the attribute
+        # keeps the DEFERRED spec -- ``galfor_modulation_anchor`` plus
+        # ``instrument_component_kwargs{ltts_l1_file, ltts_stride}`` -- and any
+        # SECOND consumer that rebuilds a backend from it gets keys no
+        # constructor accepts. The coarse sidecar in
+        # ``run.py::_prepare_coarse_wdm_runtime`` is exactly such a consumer
+        # (job 372: "CompositeSensitivityBackend.__init__() got an unexpected
+        # keyword argument 'galfor_modulation_anchor'"), and it would have hit
+        # the unresolved ltts spec immediately afterwards.
+        self.sensitivity_init_kwargs = sensitivity_init_kwargs
         return sensitivity_init_kwargs
 
     # NOTE: ``catalogue`` is a plain attribute (a ``GeneralSettings``

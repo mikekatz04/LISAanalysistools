@@ -171,6 +171,43 @@ class UnequalArmKnobWiringTest(unittest.TestCase):
         self.assertTrue(identity["galfor_modulation_digest"])
         self.assertEqual(identity["data_t0"], stub.data_t0)
 
+    def test_resolved_kwargs_are_published_for_second_consumers(self):
+        """The attribute must hold RESOLVED kwargs, not the deferred spec.
+
+        A second consumer rebuilds a backend from
+        ``general_info.sensitivity_init_kwargs`` -- the coarse sidecar in
+        run.py does exactly that. If resolution only mutated a local copy, that
+        consumer would be handed ``galfor_modulation_anchor`` (no constructor
+        takes it) and the unresolved ``ltts_l1_file`` spec. Job 372 died on the
+        first of those.
+        """
+        stub = _engine_stub()
+        mod = GalForTimeModulation(self.modulation)
+        sik = {
+            "instrument_component_cls": UnequalArmInstrumentNoise,
+            "instrument_component_kwargs": {
+                "ltts_l1_file": self.brick,
+                "ltts_stride": 10,
+            },
+            "galfor_modulation": mod,
+            "galfor_modulation_anchor": "data_t0",
+        }
+        GeneralSetup._resolve_deferred_noise_model(stub, sik)
+
+        published = stub.sensitivity_init_kwargs
+        self.assertNotIn("galfor_modulation_anchor", published)
+        comp = published["instrument_component_kwargs"]
+        self.assertNotIn("ltts_l1_file", comp)
+        self.assertNotIn("ltts_stride", comp)
+        self.assertIsInstance(comp["ltts"], LinkDelayTable)
+        # and it is directly usable as **kwargs by a second backend build
+        import inspect
+
+        for key in published:
+            self.assertIsInstance(key, str)
+            self.assertTrue(key.isidentifier(), f"{key!r} is not a valid kwarg")
+        self.assertTrue(inspect.isclass(published["instrument_component_cls"]))
+
     def test_deferred_resolution_identity_is_stable(self):
         def run():
             stub = _engine_stub()
