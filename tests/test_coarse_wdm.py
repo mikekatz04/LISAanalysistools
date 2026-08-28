@@ -782,5 +782,100 @@ class PSDMoveCoarseSidecarTest(unittest.TestCase):
             self.assertEqual(call["fixed"], ["galfor"])
 
 
+class CoarseModeDispatchTest(unittest.TestCase):
+    """PSDMove mode -> (init, stage-1, swap) likelihood-fn mapping (T6)."""
+
+    def _move_with(self, mode):
+        import types
+
+        from lisatools.coarsewdm import CoarseWDMRuntime
+        from lisatools.globalfit.moves.psdmove import PSDMove
+
+        fine = WDMSettings(Nf=8, Nt=10, dt=2.0, force_backend="cpu")
+        stub = types.SimpleNamespace(
+            compute_log_like="FINE",
+            compute_coarse_log_like="COARSE",
+        )
+        if mode is None:
+            stub.coarse_runtime = None
+            stub.coarse_sidecar_active = False
+        else:
+            stub.coarse_runtime = CoarseWDMRuntime(
+                coarse_settings=CoarseWDMSettings.from_fine(fine, 4),
+                use_ws=False,
+                mode=mode,
+            )
+            stub.coarse_sidecar_active = mode != "off"
+        stub._resolve_mode_like_fns = PSDMove._resolve_mode_like_fns.__get__(stub)
+        return stub
+
+    def test_off_and_absent_are_fine_everywhere(self):
+        for stub in (self._move_with(None), self._move_with("off")):
+            self.assertEqual(
+                stub._resolve_mode_like_fns(),
+                ("off", "FINE", "FINE", "FINE"),
+            )
+
+    def test_search_approx_is_coarse_everywhere(self):
+        self.assertEqual(
+            self._move_with("search_approx")._resolve_mode_like_fns(),
+            ("search_approx", "COARSE", "COARSE", "COARSE"),
+        )
+
+    def test_delayed_acceptance_keeps_fine_state_and_swaps(self):
+        self.assertEqual(
+            self._move_with("delayed_acceptance")._resolve_mode_like_fns(),
+            ("delayed_acceptance", "FINE", "COARSE", "FINE"),
+        )
+
+
+class FineHandoffPreconditionTest(unittest.TestCase):
+    """ensure_fine_noise_covariance_current (T6 §6.4)."""
+
+    class _SM:
+        def __init__(self, settings, shape):
+            self.basis_settings = settings
+            self.data_shape = shape
+
+    class _AC:
+        def __init__(self, sm):
+            self.sens_mat = sm
+
+    def setUp(self):
+        from lisatools.coarsewdm import CoarseWDMRuntime
+        from lisatools.globalfit.moves.globalfitmove import (
+            ensure_fine_noise_covariance_current,
+        )
+
+        self.check = ensure_fine_noise_covariance_current
+        self.fine = WDMSettings(Nf=8, Nt=10, dt=2.0, force_backend="cpu")
+        self.coarse = CoarseWDMSettings.from_fine(self.fine, 4)
+        self.rt = CoarseWDMRuntime(
+            coarse_settings=self.coarse, use_ws=False, mode="delayed_acceptance"
+        )
+        import types
+
+        self.gi = types.SimpleNamespace(
+            coarse_wdm_runtime=self.rt,
+            coarse_wdm_settings=self.coarse,
+            domain_settings=self.fine,
+        )
+
+    def _acs(self, settings):
+        shape = (3, 3) + tuple(settings.basis_shape_active)
+        return [self._AC(self._SM(settings, shape)) for _ in range(3)]
+
+    def test_fine_state_passes(self):
+        self.check(self._acs(self.fine), self.gi)
+
+    def test_coarse_state_fails_loudly(self):
+        with self.assertRaisesRegex(AssertionError, "COARSE"):
+            self.check(self._acs(self.coarse), self.gi)
+
+    def test_inactive_runtime_is_a_noop(self):
+        self.gi.coarse_wdm_runtime = None
+        self.check(self._acs(self.coarse), self.gi)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

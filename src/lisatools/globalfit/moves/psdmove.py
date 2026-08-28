@@ -1153,6 +1153,34 @@ class PSDMove(GlobalFitMove, StretchMove):
         rt = self.coarse_runtime
         return rt is not None and getattr(rt, "mode", "off") != "off"
 
+    def _resolve_mode_like_fns(self):
+        """``(mode, init_fn, model_fn, swap_fn)`` for the current coarse mode.
+
+        ``init_fn`` seeds the working state's log-likes (the state invariant),
+        ``model_fn`` scores eryn's stage-1 proposals, ``swap_fn`` feeds the
+        temperature swaps. off: fine everywhere. search_approx: coarse
+        everywhere (an optimizer of the surrogate, not a posterior sampler).
+        delayed_acceptance: FINE state invariant + coarse stage-1 + fine
+        swaps — stage 2 in :meth:`_propose_delayed_acceptance` closes the
+        kernel on the fine target.
+        """
+        mode = self.coarse_runtime.mode if self.coarse_sidecar_active else "off"
+        if mode == "search_approx":
+            return (
+                mode,
+                self.compute_coarse_log_like,
+                self.compute_coarse_log_like,
+                self.compute_coarse_log_like,
+            )
+        if mode == "delayed_acceptance":
+            return (
+                mode,
+                self.compute_log_like,
+                self.compute_coarse_log_like,
+                self.compute_log_like,
+            )
+        return mode, self.compute_log_like, self.compute_log_like, self.compute_log_like
+
     def _prepare_fixed_component_covariances_coarse(self) -> None:
         """Coarse twin of :meth:`_prepare_fixed_component_covariances`.
 
@@ -1990,6 +2018,107 @@ class PSDMove(GlobalFitMove, StretchMove):
             )
         return logp
 
+    def _propose_delayed_acceptance(self, model, state):
+        """One stretch repeat under two-stage (delayed) acceptance.
+
+        Stage 1 reuses eryn's stretch accept VERBATIM as the surrogate
+        screen: the working state's log-likes are swapped to the coarse
+        values (so eryn's ``logP(x)`` is the tempered coarse posterior) and
+        ``model`` carries :meth:`compute_coarse_log_like` (so ``logP(y)`` is
+        too); the prior and the stretch factor therefore enter exactly once,
+        in stage 1. Stage 2 corrects the stage-1 survivors with
+
+            log alpha_2 = beta * [(Lf(y) - Lc(y)) - (Lf(x) - Lc(x))]
+
+        (priors and factors cancel), reverting rejects to their pre-proposal
+        coordinates. The returned state's ``log_like`` is FINE on every row
+        — the invariant the temperature swaps and the sub-state bookkeeping
+        rely on. Fine evaluations are spent only on stage-1 survivors (the
+        prior-mask trick: non-survivor rows enter the fine callback with a
+        ``-inf`` prior and are skipped).
+
+        The independent stage-2 uniforms come from ``model.random`` AFTER
+        eryn's stage-1 draws, so a fixed seed reproduces the full kernel.
+        """
+        # Pre-proposal snapshot: coords + FINE lls + priors. eryn's propose
+        # may mutate ``state`` in place, so this copy is the revert source
+        # and the alpha_2 reference. is_eryn_state_input: the working state
+        # is the module-ladder tmp_state (dict-constructed, no sub-states);
+        # the plain-GFState copy path would trip over its absent
+        # sub_state_bases, and the snapshot needs none of that machinery.
+        state_before = GFState(state, copy=True, is_eryn_state_input=True)
+        fine_x = np.asarray(state_before.log_like)
+
+        coarse_x = self.compute_coarse_log_like(
+            state.branches_coords,
+            logp=state.log_prior,
+            supps=state.supplemental,
+        )[0]
+
+        # Stage 1: eryn stretch accept on the tempered coarse posterior.
+        # The temperature control is DETACHED for this call: eryn's propose
+        # ends with temper_comps (the per-repeat identity swap), which would
+        # permute rungs between the stage-1 accept and the stage-2
+        # correction. The swap is re-applied below, after the fine invariant
+        # is restored — so it swaps on FINE values, as every other swap does.
+        state.log_like[:] = coarse_x
+        _tc = self.temperature_control
+        self.temperature_control = None
+        try:
+            new_state, accepted1 = super(PSDMove, self).propose(model, state)
+        finally:
+            self.temperature_control = _tc
+        acc = np.asarray(accepted1, dtype=bool)
+
+        if not acc.any():
+            new_state.log_like[:] = fine_x
+            self._da_debug_last = None
+            new_state = self.temperature_control.temper_comps(new_state)
+            return new_state, acc
+
+        # Stage 2: fine correction on the survivors only.
+        coarse_y = np.asarray(new_state.log_like).copy()
+        survivor_logp = np.where(acc, np.asarray(new_state.log_prior), -np.inf)
+        fine_y = self.compute_log_like(
+            new_state.branches_coords,
+            logp=survivor_logp,
+            supps=new_state.supplemental,
+        )[0]
+        betas = np.asarray(self.temperature_control.betas)[:, None]
+        log_alpha2 = betas * ((fine_y - coarse_y) - (fine_x - coarse_x))
+        u2 = model.random.uniform(size=acc.shape)
+        with np.errstate(divide="ignore"):
+            keep = acc & (np.log(u2) < log_alpha2)
+        revert = acc & ~keep
+
+        for key in new_state.branches:
+            new_state.branches[key].coords[revert] = state_before.branches[
+                key
+            ].coords[revert]
+        new_state.log_prior[revert] = np.asarray(state_before.log_prior)[revert]
+        # FINE invariant restored: survivors carry their fresh fine values,
+        # everything else keeps the pre-proposal fine values.
+        new_state.log_like[:] = np.where(keep, fine_y, fine_x)
+
+        self._da_debug_last = {
+            "accepted_stage1": acc,
+            "keep": keep,
+            "fine_x": fine_x,
+            "fine_y": fine_y,
+            "coarse_x": coarse_x,
+            "coarse_y": coarse_y,
+            "log_alpha2": log_alpha2,
+            "coords_final_prewap": np.array(
+                new_state.branches["psd"].coords, copy=True
+            )
+            if "psd" in new_state.branches
+            else None,
+        }
+        # The per-repeat identity swap eryn would have run inside propose,
+        # now on the restored FINE values.
+        new_state = self.temperature_control.temper_comps(new_state)
+        return new_state, keep
+
     def run_move(self, move_i, model, state):
         """Run one stretch-move iteration and (optionally) a tempering swap.
 
@@ -2002,7 +2131,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         Returns:
             Tuple ``(new_state, accepted)``.
         """
-        new_state, accepted = super(PSDMove, self).propose(model, state)
+        if (
+            self.coarse_sidecar_active
+            and self.coarse_runtime.mode == "delayed_acceptance"
+        ):
+            new_state, accepted = self._propose_delayed_acceptance(model, state)
+        else:
+            new_state, accepted = super(PSDMove, self).propose(model, state)
 
         # in-model bookkeeping: eryn returns (ntemps, nwalkers) acceptances and
         # every walker is proposed once per call, so the per-temperature deltas
@@ -2039,7 +2174,12 @@ class PSDMove(GlobalFitMove, StretchMove):
                 logp,
                 supps=supps,
                 branch_supps=branch_supps,
-                compute_log_like=self.compute_log_like,
+                # search_approx swaps on the surrogate (it optimizes that
+                # target); off/delayed_acceptance swap on the FINE values —
+                # identity swaps read the fine state.log_like and fancy swaps
+                # re-score through the fine callback (plan-2 §3.2).
+                compute_log_like=getattr(self, "_swap_like_fn", None)
+                or self.compute_log_like,
                 compute_log_prior=self.compute_log_prior,
                 fancy_swap=do_fancy,
                 permute_here=do_fancy,
@@ -2198,15 +2338,31 @@ class PSDMove(GlobalFitMove, StretchMove):
         # ensuring it is up to date. Should not change anything.
         before_vals = model.analysis_container_arr.likelihood().copy()
 
+        # Coarse-sidecar mode dispatch (plan-2 §3.2/§6):
+        #   off               — fine everywhere (the historical path).
+        #   search_approx     — the whole inner loop optimizes the coarse
+        #                       surrogate (proposals, working state, swaps);
+        #                       NOT a posterior sampler. The end-of-propose
+        #                       publication below still recomputes the fine
+        #                       cold state, so the next move sees fine only.
+        #   delayed_acceptance— the working state's log_like invariant stays
+        #                       FINE; eryn scores stage-1 proposals with the
+        #                       coarse callback and _propose_delayed_acceptance
+        #                       applies the stage-2 fine correction. Swaps are
+        #                       fine-valued by construction.
+        _mode, _init_like_fn, _model_like_fn, self._swap_like_fn = (
+            self._resolve_mode_like_fns()
+        )
+
         tmp_state.log_prior = self.compute_log_prior(tmp_branches_coords)
-        tmp_state.log_like = self.compute_log_like(
+        tmp_state.log_like = _init_like_fn(
             tmp_branches_coords, logp=tmp_state.log_prior, supps=tmp_state.supplemental
         )[0]
         self.starting_now = False
 
         tmp_model = Model(
             state,
-            self.compute_log_like,
+            _model_like_fn,
             self.compute_log_prior,
             self.temperature_control,
             model.map_fn,

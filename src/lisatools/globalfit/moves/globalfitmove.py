@@ -20,6 +20,44 @@ from eryn.moves import CombineMove
 from .. import midit_checkpoint
 
 
+def ensure_fine_noise_covariance_current(acs, general_info) -> None:
+    """Assert the canonical fine noise state is what source moves consume.
+
+    Cheap, assertion-only source-move precondition for coarse-sidecar runs
+    (plan-2 §6.4): every container's sensitivity matrix must live on the
+    run's FINE domain settings with the fine active shape. A violation is a
+    programming error in a noise move's publication sequence — fail loudly;
+    source moves never rebuild an unknown state or continue on coarse
+    covariance. No-op unless a coarse sidecar runtime is active.
+    """
+    runtime = getattr(general_info, "coarse_wdm_runtime", None)
+    if runtime is None or getattr(runtime, "mode", "off") == "off":
+        return
+    fine_settings = general_info.domain_settings
+    coarse_settings = getattr(general_info, "coarse_wdm_settings", None)
+    for w in range(len(acs)):
+        sens_mat = acs[w].sens_mat
+        basis = getattr(sens_mat, "basis_settings", None)
+        if coarse_settings is not None and basis == coarse_settings:
+            raise AssertionError(
+                f"walker {w}: COARSE sensitivity matrix visible at a "
+                "source-move boundary — the noise move failed to publish the "
+                "fine state before returning."
+            )
+        if basis != fine_settings:
+            raise AssertionError(
+                f"walker {w}: sens_mat basis settings are not the run's fine "
+                "domain settings (source moves must see only full fine state)."
+            )
+        got = tuple(sens_mat.data_shape)
+        want = tuple(fine_settings.basis_shape_active)
+        if got[-len(want):] != want:
+            raise AssertionError(
+                f"walker {w}: sens_mat data_shape {got} does not end in the "
+                f"fine active shape {want}."
+            )
+
+
 @dataclasses.dataclass
 class MoveBuildContext:
     """Runtime context handed to every ``Move.setup`` at materialization.
