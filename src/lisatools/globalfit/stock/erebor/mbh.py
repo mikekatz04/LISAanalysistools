@@ -132,7 +132,17 @@ class MBHSetup(Setup):
             ntemps_pe = int(self.ntemps)
             # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
             betas = 1 / 1.2 ** np.arange(ntemps_pe)
-            betas[-1] = 0.0001
+            # Pure geometric, matching EMRI and SOBBH (user ruling
+            # 2026-08-27). The old ``betas[-1] = 0.0001`` pinned the last
+            # rung to a near-prior temperature, which is harmless at 24
+            # rungs but DEGENERATE once the ladder is short: at
+            # MBH_NTEMPS=2 it produced ``[1, 1e-4]`` -- cold plus
+            # near-prior with nothing between them, so swaps essentially
+            # never accept and the branch is untempered. Job 353 ran
+            # exactly that. EMRI carries the same line commented out.
+            # A run that wants the old hot rung sets ``mbh.betas``
+            # explicitly (the field is already an override).
+            # betas[-1] = 0.0001
             self.betas = betas
 
         # TODO: maybe combine this into Setup
