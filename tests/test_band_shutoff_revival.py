@@ -278,3 +278,49 @@ class RevivalLogContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KillSwitchTest(unittest.TestCase):
+    """``GB_RJ_BAND_SHUTOFF_AFTER <= 0`` disables the valve entirely.
+
+    The shutoff is otherwise live with no way to turn it off from the
+    environment, and its enforcement is a FULL RJ FREEZE -- so an operator
+    needs a kill-switch that also RELEASES anything already shut off,
+    not merely one that stops new shutoffs.
+    """
+
+    def test_zero_never_shuts_off(self):
+        with _env(GB_RJ_BAND_SHUTOFF_AFTER="0"):
+            m = _MoveStub()
+            _drive(m, 50)
+            self.assertFalse(m._rj_band_shutoff.any())
+
+    def test_minus_one_never_shuts_off(self):
+        with _env(GB_RJ_BAND_SHUTOFF_AFTER="-1"):
+            m = _MoveStub()
+            _drive(m, 50)
+            self.assertFalse(m._rj_band_shutoff.any())
+
+    def test_disabling_mid_run_releases_shut_off_bands(self):
+        """Flipping it off must not strand a frozen band."""
+        with _env(GB_RJ_BAND_SHUTOFF_AFTER="5"):
+            m = _MoveStub()
+            _drive(m, 5)
+            self.assertTrue(m._rj_band_shutoff[3])
+        with _env(GB_RJ_BAND_SHUTOFF_AFTER="0"):
+            _drive(m, 1)
+            self.assertFalse(m._rj_band_shutoff.any())
+            self.assertTrue((m._band_occ_streak == 0).all())
+
+    def test_default_is_five(self):
+        """Unset means 5, not disabled."""
+        env = {k: v for k, v in os.environ.items()
+               if k != "GB_RJ_BAND_SHUTOFF_AFTER"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            os.environ["GB_RJ_BAND_SHUTOFF_FMIN_MHZ"] = "10.0"
+            os.environ["GB_RJ_BAND_SHUTOFF_RESET_ITERS"] = "0"
+            m = _MoveStub()
+            _drive(m, 4)
+            self.assertFalse(m._rj_band_shutoff.any())
+            _drive(m, 1)
+            self.assertTrue(m._rj_band_shutoff[3])

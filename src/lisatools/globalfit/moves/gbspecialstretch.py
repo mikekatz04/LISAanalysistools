@@ -5741,6 +5741,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._band_occ_streak = np.zeros(self.num_bands, dtype=np.int64)
             self._band_occ_last = np.full(self.num_bands, -1, dtype=np.int64)
             self._rj_band_shutoff = np.zeros(self.num_bands, dtype=bool)
+        # ---- KILL-SWITCH (user ruling 2026-08-28) ------------------------
+        # ``GB_RJ_BAND_SHUTOFF_AFTER`` is the iteration clock AND the
+        # on/off knob: <= 0 (use 0 or -1) disables the valve entirely.
+        # Read FIRST, before any streak or revival bookkeeping, so a
+        # disabled valve does nothing at all -- and so flipping it off
+        # MID-RUN releases whatever is currently shut off rather than
+        # stranding it. Without that release, disabling the knob would
+        # leave shut-off bands frozen forever, which is exactly the
+        # trapped-junk failure the revival design exists to prevent
+        # (enforcement is a full RJ freeze, see ``run_proposal``).
+        after = int(os.environ.get("GB_RJ_BAND_SHUTOFF_AFTER", "5"))
+        if after <= 0:
+            if self._rj_band_shutoff.any():
+                self._band_shutoff_revive(
+                    f"GB_RJ_BAND_SHUTOFF_AFTER={after} -- valve disabled")
+            self._band_occ_streak[:] = 0
+            self._band_occ_last[:] = -1
+            return
         # ---- REVIVAL TRIGGERS (user ruling 2026-08-28) -------------------
         # Checked once per iteration BEFORE the streaks are advanced, so a
         # revival always leaves THIS iteration starting a fresh streak at 1
@@ -5761,7 +5779,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"{_d['_band_shutoff_since_revive']} iterations with no "
                 "F-stat update")
         fmin_mhz = float(os.environ.get("GB_RJ_BAND_SHUTOFF_FMIN_MHZ", "10.0"))
-        after = int(os.environ.get("GB_RJ_BAND_SHUTOFF_AFTER", "5"))
         # Band SHUTOFF stays a per-BAND rule (user design 2026-08-15: only
         # the caps move to the cell grid). It asks "could this band hold a
         # second source anywhere", so the per-band allowance is the MAX over
