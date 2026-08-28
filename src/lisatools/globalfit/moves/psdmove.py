@@ -175,6 +175,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         run_async: bool = False,
         run_threaded: bool = False,
         build_threads: int = 1,
+        coarse_runtime=None,
         **kwargs,
     ):
 
@@ -196,6 +197,14 @@ class PSDMove(GlobalFitMove, StretchMove):
         # :meth:`_build_batch`). Holds the devices already warmed (``None``
         # is the CPU / single-device entry).
         self._build_warmed = set()
+        # All-source coarse sidecar (plan-2): a CoarseWDMRuntime owning the
+        # per-walker coarse statistics and the coarse backend. None (default)
+        # leaves every existing route untouched. The runtime is consulted
+        # only by compute_coarse_log_like and the propose-entry refresh; the
+        # fine callback, the containers' sens_mat, and the packed ACA buffer
+        # never see coarse state.
+        self.coarse_runtime = coarse_runtime
+        self._fixed_component_covariances_coarse = {}
         if dcga is not None:
             if acs is None:
                 acs = dcga.acs
@@ -1135,6 +1144,129 @@ class PSDMove(GlobalFitMove, StretchMove):
             covariances.extend(_one(row) for row in rows)
         return np.stack(covariances, axis=0)
 
+    # ------------------------------------------------------------------
+    # All-source coarse sidecar (plan-2): surrogate scoring seam
+    # ------------------------------------------------------------------
+    @property
+    def coarse_sidecar_active(self) -> bool:
+        """True when this move carries a live sidecar runtime (mode != off)."""
+        rt = self.coarse_runtime
+        return rt is not None and getattr(rt, "mode", "off") != "off"
+
+    def _prepare_fixed_component_covariances_coarse(self) -> None:
+        """Coarse twin of :meth:`_prepare_fixed_component_covariances`.
+
+        Frozen-branch covariances on the COARSE grid for the sidecar's
+        candidate assembly. Rebuilt every proposal block (the cold rows a
+        preceding noise move accepted may have moved); coarse arrays are ~Q
+        times smaller than fine, so this is cheap and stays serial.
+        """
+        self._fixed_component_covariances_coarse = {}
+        if not self.coarse_sidecar_active or not self._fixed_noise_coords:
+            return
+        backend = self.coarse_runtime.coarse_backend
+        transforms = {
+            "psd": self.psd_transform_fn,
+            "galfor": self.galfor_transform_fn,
+            "sgwb": self.sgwb_transform_fn,
+        }
+        for branch, rows in self._fixed_noise_coords.items():
+            for w in range(len(rows)):
+                physical = self._to_physical(transforms[branch], rows[w])
+                covariance = backend.component_covariance(
+                    branch, physical, name=f"coarse_fixed_{branch}_{w}"
+                )
+                self._fixed_component_covariances_coarse.setdefault(int(w), {})[
+                    branch
+                ] = covariance
+
+    def _build_coarse_covariance_batch(
+        self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+    ):
+        """Coarse candidate covariances for one one-row-per-walker batch."""
+        runtime = self.coarse_runtime
+        backend = runtime.coarse_backend
+
+        def _one(row):
+            row = int(row)
+            w = int(walker_inds_keep[row])
+            psd_here = self._to_physical(self.psd_transform_fn, psd_coords[row])
+            galfor_here = (
+                None
+                if galfor_coords is None
+                else self._to_physical(self.galfor_transform_fn, galfor_coords[row])
+            )
+            sgwb_here = (
+                None
+                if sgwb_coords is None
+                else self._to_physical(self.sgwb_transform_fn, sgwb_coords[row])
+            )
+            fixed = self._fixed_component_covariances_coarse.get(w, {})
+            return backend.covariance_from_params(
+                f"coarse_walker_{w}",
+                None if "psd" in fixed else psd_here,
+                galfor_params=None if "galfor" in fixed else galfor_here,
+                sgwb_params=None if "sgwb" in fixed else sgwb_here,
+                fixed_covariances=fixed,
+            )
+
+        rows = [_one(row) for row in batch]
+        return runtime.xp.stack([runtime.xp.asarray(r) for r in rows], axis=0)
+
+    def compute_coarse_log_like(
+        self, coords, inds=None, logp=None, supps=None, branch_supps=None
+    ):
+        """Surrogate PSD/GALFOR log-likelihood against the coarse sidecar.
+
+        Same eryn row semantics as :meth:`compute_log_like` (prior mask,
+        ``walker_inds`` row mapping, frozen-branch merge), scored against the
+        sidecar runtime's per-walker coarse statistics. Never touches
+        ``state.log_like``, any container's ``sens_mat``, or the packed ACA
+        buffer — the values live only in move-local arrays.
+        """
+        if not self.coarse_sidecar_active:
+            raise RuntimeError(
+                "compute_coarse_log_like needs a live coarse sidecar runtime "
+                "(coarse_runtime with mode != 'off')."
+            )
+        if logp is None:
+            logp = self.compute_log_prior(
+                coords, inds=inds, supps=supps, branch_supps=branch_supps
+            )
+        logl = np.full_like(logp, -1e300)
+        logp_keep = ~np.isinf(logp)
+        if not np.any(logp_keep):
+            return logl, None
+        if supps is None:
+            raise ValueError("Must provide supps to identify the data streams.")
+
+        walker_inds_all = np.asarray(supps.holder["walker_inds"]).reshape(logp.shape)
+        walker_inds_keep = walker_inds_all[logp_keep].astype(int)
+        merged = self._merged_noise_rows(coords, logp_keep, walker_inds_keep)
+        psd_coords = merged["psd"]
+        galfor_coords = merged.get("galfor")
+        sgwb_coords = merged.get("sgwb")
+
+        tmp_logl = np.empty(walker_inds_keep.shape[0], dtype=float)
+        remaining = np.arange(walker_inds_keep.shape[0])
+        while remaining.size:
+            _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+            batch = remaining[np.sort(first)]
+            covariances = self._build_coarse_covariance_batch(
+                batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+            )
+            tmp_logl[batch] = np.asarray(
+                asnumpy(
+                    self.coarse_runtime.coarse_log_like_batch(
+                        covariances, walker_inds_keep[batch]
+                    )
+                ),
+                dtype=float,
+            )
+            remaining = np.setdiff1d(remaining, batch)
+        logl[logp_keep] = tmp_logl
+        return logl, None
+
     def _build_batch(self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords):
         """Install the proposed sensitivity matrix for every row in ``batch``.
 
@@ -2013,6 +2145,15 @@ class PSDMove(GlobalFitMove, StretchMove):
             if key not in noise_branches
         }
         self._prepare_fixed_component_covariances()
+        if self.coarse_sidecar_active:
+            # Correctness-first lifecycle (plan-2 §4.3): every noise proposal
+            # block re-reads every walker's CURRENT residual — a source move
+            # may have run since the last block. Residual epochs are a
+            # recorded later optimization, deliberately not built yet.
+            self.coarse_runtime.refresh_P(
+                [self.acs[w] for w in range(len(self.acs))]
+            )
+            self._prepare_fixed_component_covariances_coarse()
 
         # The working ensembles are the SUB-STATES' tempered branches (this
         # move's module ladder); the main state carries only the engine's

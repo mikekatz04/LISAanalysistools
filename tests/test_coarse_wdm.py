@@ -623,5 +623,164 @@ class CoarseWDMRuntimeTest(unittest.TestCase):
         self.assertIsNotNone(rt._P)
 
 
+class PSDMoveCoarseSidecarTest(unittest.TestCase):
+    """``compute_coarse_log_like`` plumbing, driven unbound on a stub (T4/T5).
+
+    The coarse math is pinned by :class:`CoarseWDMRuntimeTest` with real
+    arrays; a fake coarse backend here isolates the MOVE plumbing: the prior
+    mask, the ``walker_inds`` row mapping, the frozen-branch merge, and the
+    per-walker statistic routing. (Same unbound-drive pattern as the repack
+    fast-path tests.)
+    """
+
+    NW = 4
+    NT = 3
+
+    class _FakeBackend:
+        def __init__(self, base):
+            self.base = base
+            self.calls = []
+
+        def covariance_from_params(
+            self,
+            name,
+            psd_params,
+            galfor_params=None,
+            sgwb_params=None,
+            fixed_covariances=None,
+        ):
+            self.calls.append(
+                dict(
+                    name=name,
+                    psd=None if psd_params is None else np.asarray(psd_params),
+                    galfor=None
+                    if galfor_params is None
+                    else np.asarray(galfor_params),
+                    fixed=sorted((fixed_covariances or {}).keys()),
+                )
+            )
+            out = (
+                float(psd_params[0]) if psd_params is not None else 1.0
+            ) * self.base
+            if galfor_params is not None:
+                out = out + float(galfor_params[0]) * 0.5 * self.base
+            for cov in (fixed_covariances or {}).values():
+                out = out + cov
+            return out
+
+        def component_covariance(self, branch, params, name="x"):
+            return float(params[0]) * 0.5 * self.base
+
+    def setUp(self):
+        import types as _types
+
+        from lisatools.coarsewdm import CoarseWDMRuntime
+        from lisatools.globalfit.moves.psdmove import PSDMove
+
+        self._types = _types
+        self.PSDMove = PSDMove
+        self.rng = np.random.default_rng(4242)
+        self.fine = WDMSettings(Nf=8, Nt=10, dt=2.0, force_backend="cpu")
+        self.coarse = CoarseWDMSettings.from_fine(self.fine, 4)
+        self.res = self.rng.normal(
+            size=(self.NW, 3) + tuple(self.fine.basis_shape_active)
+        )
+        self.rt = CoarseWDMRuntime(
+            coarse_settings=self.coarse, use_ws=False, mode="delayed_acceptance"
+        )
+        self.rt.refresh_P([self.res[w] for w in range(self.NW)])
+        shape = tuple(self.coarse.basis_shape_active)
+        base = np.zeros((3, 3) + shape)
+        layer = 1.0 + 0.1 * np.arange(shape[0])[:, None]
+        for a in range(3):
+            base[a, a] = layer * (1.0 + 0.05 * a)
+        self.base = base
+        self.backend = self._FakeBackend(base)
+        self.rt.coarse_backend = self.backend
+
+    def _stub(self, fixed_noise_coords=None, logp=None):
+        PSDMove = self.PSDMove
+        stub = self._types.SimpleNamespace(
+            coarse_runtime=self.rt,
+            coarse_sidecar_active=True,
+            psd_transform_fn=None,
+            galfor_transform_fn=None,
+            sgwb_transform_fn=None,
+            NOISE_BRANCHES=PSDMove.NOISE_BRANCHES,
+            _fixed_noise_coords=dict(fixed_noise_coords or {}),
+            _fixed_component_covariances_coarse={},
+        )
+        want_logp = (
+            np.zeros((self.NT, self.NW)) if logp is None else np.asarray(logp)
+        )
+        stub.compute_log_prior = lambda coords, **kw: want_logp
+        for name in (
+            "compute_coarse_log_like",
+            "_build_coarse_covariance_batch",
+            "_merged_noise_rows",
+            "_prepare_fixed_component_covariances_coarse",
+        ):
+            setattr(stub, name, getattr(PSDMove, name).__get__(stub))
+        stub._to_physical = PSDMove._to_physical
+        return stub
+
+    def _supps(self):
+        from eryn.state import BranchSupplemental
+
+        return BranchSupplemental(
+            {"walker_inds": np.tile(np.arange(self.NW), (self.NT, 1))},
+            base_shape=(self.NT, self.NW),
+            copy=True,
+        )
+
+    def _coords(self):
+        vals = 1.0 + self.rng.uniform(size=(self.NT, self.NW, 1, 2))
+        return {"psd": vals}
+
+    def test_scores_match_direct_batch(self):
+        stub = self._stub()
+        coords = self._coords()
+        logl, _ = stub.compute_coarse_log_like(coords, supps=self._supps())
+        self.assertEqual(logl.shape, (self.NT, self.NW))
+        for t in range(self.NT):
+            for w in range(self.NW):
+                cov = self.backend.covariance_from_params(
+                    "direct", coords["psd"][t, w, 0]
+                )
+                want = self.rt.coarse_log_like_batch(cov[None], [w])[0]
+                self.assertAlmostEqual(logl[t, w] / want, 1.0, places=13)
+
+    def test_prior_mask_rows_skipped(self):
+        logp = np.zeros((self.NT, self.NW))
+        logp[1, 2] = -np.inf
+        stub = self._stub(logp=logp)
+        logl, _ = stub.compute_coarse_log_like(
+            self._coords(), supps=self._supps()
+        )
+        self.assertEqual(logl[1, 2], -1e300)
+        self.assertTrue(np.all(logl[logp == 0] > -1e299))
+
+    def test_frozen_branch_coords_merged_per_walker(self):
+        frozen = {"galfor": 2.0 + np.arange(self.NW, dtype=float)[:, None]}
+        stub = self._stub(fixed_noise_coords=frozen)
+        stub.compute_coarse_log_like(self._coords(), supps=self._supps())
+        for call in self.backend.calls:
+            self.assertIsNotNone(call["galfor"])
+            w = int(call["name"].rsplit("_", 1)[1])
+            self.assertEqual(float(call["galfor"][0]), 2.0 + w)
+            self.assertEqual(call["fixed"], [])
+
+    def test_frozen_branch_fixed_covariance_path(self):
+        frozen = {"galfor": 2.0 + np.arange(self.NW, dtype=float)[:, None]}
+        stub = self._stub(fixed_noise_coords=frozen)
+        stub._prepare_fixed_component_covariances_coarse()
+        self.assertEqual(sorted(stub._fixed_component_covariances_coarse), list(range(self.NW)))
+        self.backend.calls.clear()
+        stub.compute_coarse_log_like(self._coords(), supps=self._supps())
+        for call in self.backend.calls:
+            self.assertIsNone(call["galfor"])
+            self.assertEqual(call["fixed"], ["galfor"])
+
+
 if __name__ == "__main__":
     unittest.main()

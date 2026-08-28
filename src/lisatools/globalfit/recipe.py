@@ -2034,6 +2034,9 @@ def build_noise_moves(
         # (see PSDMove.build_threads). getattr: only the noise fits' settings
         # carry the knob; every other fit keeps the serial default.
         build_threads=int(getattr(general_info, "psd_build_threads", 1) or 1),
+        # All-source coarse sidecar (plan-2): present only when the run
+        # opted into COARSE_GPU_MODE; None leaves every route untouched.
+        coarse_runtime=getattr(general_info, "coarse_wdm_runtime", None),
     )
 
     tag = "+".join(sampled_branches)
