@@ -848,7 +848,51 @@ export GB_FSTAT_CTR_MODE=epoch
 # (GB_FSTAT_CTR_SMEAR is unset ON PURPOSE: a 1.5 pin would override the
 # epoch-mode 2.0 default, which is what covers the <=100-propose table
 # staleness. The smeared sigma feeds BOTH the draw and the densities,
-# so detailed balance is exact at any smear.)
+# so detailed balance is exact at any smear. NOTE 2026-08-28: under the
+# per-row+unit-cache path below, the unit cache passes its own explicit
+# 1.5 machinery smear -- this env stays unset either way.)
+# ############################################################################
+# ## 2026-08-28 NIGHT CHANGE-SET -- explicit pins + A/B knobs.              ##
+# ## Everything below is the code default; pinned for the run record and    ##
+# ## so an A/B or rollback is a one-line flip, never a blind edit.          ##
+# ############################################################################
+# FUSED TWO-QUADRATURE PHASE MAX (GBGPU c49fcb1 / LAT 9704c4a8; validated
+# in production on job 352: 0 errors, TEMPER_CHECK 297/0, audit medians
+# at baseline). =0 is the no-rebuild rollback to the legacy two-call
+# evaluation at phi0 + pi/2 (bit-identical old algorithm).
+export GB_PHASE_MAX_FUSED=1
+# REPLACE PHASE-MAX + ROTATION-ON-ACCEPT (LAT 1f15f28d; live since job
+# 352: cold replace acceptance ~3x at Delta-ll up to ~700). =0 restores
+# exact concrete-parameter scoring on both sides bit-identically.
+export GB_REPLACE_PHASE_MAX=1
+# PER-ROW F-STAT CENTERS THROUGH THE UNIT-OPEN CACHE (LAT 86ed9353):
+# exact per-row JKS centers batched ONCE per unit (+ miss fallback)
+# instead of every pick round -- the measured 726 s/row
+# rj_fstat_centers span (job 349). Telltale: [FSTAT_CTR] says
+# "perrow (unit-cache)". Efficiency watch: [GB_ACCEPT rj-split] birth
+# acceptance vs the 0.0055-0.0063 baseline. =0 restores per-round
+# computation bit-for-bit (and the 726 s bill).
+export GB_FSTAT_PERROW_UNIT_CACHE=1
+# DEFERRED CELL-LABEL RELABELS (LAT 9fa32109) -- A/B knob, default OFF.
+# ON: rung-pair/vertical-swap relabels accumulate in a slot table and
+# flush once per tempering chunk / repeat block (kills the full-table
+# isin + forced sync per accepted swap). Bit-identical both states in
+# the suite; sync-free tripwires fail loudly on any missed flush point.
+# Flip to 1 after one clean A/B row (watch special_index_check + the
+# run_tempering/inmodel_vertical_swap [GB_TIMING] spans).
+export GB_CELL_LABEL_DEFERRED=0
+# FUSED IN-MODEL ACCEPT/BOOKKEEPING KERNEL (LAT 0f0fc73a) -- A/B knob,
+# default OFF. Collapses ~160 cupy launches per repeat step to 3
+# (gate + compaction + accept/apply). REQUIRES the full ./install.sh
+# rebuild (new cutils TU): with the knob ON but the binary absent the
+# loaders degrade to the python chain with a one-line warning -- safe,
+# just not faster. A/B procedure: one row =1 vs =0, compare
+# [GB_TIMING] inmodel_repeats / inmodel_accept / inmodel_get_add_ll
+# spans + TEMPER_CHECK/audit lines (kernel path is bit-identical to the
+# python chain by construction; the CPU-side A/B is already pinned in
+# tests/test_gb_inmodel_accept_kernel.py). NOTE: stands down
+# automatically when GB_INMODEL_TRACE / GB_JUMP_TRACE are armed.
+export GB_INMODEL_ACCEPT_KERNEL=0
 export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # High-f barren-band birth shutoff (search scope): bands above FMIN with
 # AFTER consecutive zero-birth-accept proposes stop proposing births
