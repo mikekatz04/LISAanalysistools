@@ -294,6 +294,29 @@ def _index_asserts() -> bool:
     return os.environ.get("GB_INDEX_ASSERTS", "0") == "1"
 
 
+def _cell_label_deferred() -> bool:
+    """Whether cell relabels accumulate instead of hitting the full table.
+
+    ``GB_CELL_LABEL_DEFERRED`` (default ``"0"`` = OFF, today's immediate
+    relabel, byte-identical). ``"1"`` arms the deferred path: swaps inside
+    a window opened by :meth:`BandSorter.begin_cell_label_window` compose
+    into an O(K) permutation over that window's CELLS, and
+    :meth:`BandSorter.flush_cell_labels` applies it to the flat source
+    table in ONE pass.
+
+    WHY (orchestration audit 2026-08-27, candidate 2): the immediate
+    relabel scans the FULL source table (``isin`` over 1e6-1e7 rows, a
+    boolean-mask getitem that forces a device sync, and 3 full-table
+    scatters) once per accepted tempering rung pair (~40k pairs per
+    iteration) and once per vertical sweep (one per in-model repeat step)
+    -- 30-150 s/row.
+
+    Read per call so tests can flip it, exactly like :func:`_index_asserts`;
+    the read is nanoseconds against a full-table pass.
+    """
+    return os.environ.get("GB_CELL_LABEL_DEFERRED", "0") == "1"
+
+
 def _router_device_resident() -> bool:
     """Whether the shard router keeps routed tensors device-resident.
 
@@ -4531,10 +4554,202 @@ class BandSorter(LISAToolsParallelModule):
 
     @property
     def special_index_check(self) -> bool:
+        # The standing alarm must judge FLUSHED state: with relabels still
+        # pending it would be checking the pre-swap table and pass
+        # vacuously, which is the one way this invariant could go quiet.
+        self._assert_cell_labels_flushed("special_index_check")
         return self.xp.all(
             self.special_band_inds
             == self.get_special_band_index(self.temp_inds, self.walker_inds, self.band_inds)
         )
+
+    # ------------------------------------------------------------------
+    # Deferred cell relabels (GB_CELL_LABEL_DEFERRED)
+    # ------------------------------------------------------------------
+    # None whenever no window is open. Class-level default so the copy
+    # constructor's __dict__ loop, unpickled sorters and every duck-typed
+    # test double see the attribute without an __init__ change.
+    _deferred_labels = None
+
+    def begin_cell_label_window(self, cells) -> bool:
+        """Open a deferred-relabel window over the cells in ``cells``.
+
+        Returns True when the window is armed (knob ON), False when the
+        immediate path stays in force -- callers pair it with
+        :meth:`flush_cell_labels` unconditionally, since the flush is a
+        no-op with no window open.
+
+        THE MODEL (this is the crux -- chained swaps must compose). Inside
+        a window SOURCES never change cell; only cells change labels. So
+        the window carries a permutation of the cell labels, tracked as
+        SLOTS:
+
+        * ``uni[j]``  -- the sorted distinct labels the window was opened
+          with; slot ``j`` IS "the sources that carried ``uni[j]`` when
+          the window opened", and no source ever leaves its slot;
+        * ``cur[j]``  -- slot ``j``'s CURRENT label (plus ``cur_t`` /
+          ``cur_w``, the caller-supplied temp/walker that go with it);
+        * ``pos[j]``  -- which SLOT currently carries label ``uni[j]``.
+
+        Events name cells by their CURRENT label (the callers pack
+        ``(temp, walker, band)`` from live block state), so an event
+        resolves its cells through ``pos`` and then writes through ``cur``.
+        That indirection is what makes a chain compose: cell A swapped to
+        B, then "B" swapped to C, moves A's original sources both times,
+        because the second event's lookup of B lands back on A's slot.
+
+        ``cells`` must cover every cell any event in the window can name.
+        Both production callers have it exactly: the tempering unit's swap
+        grid, and the in-model block's row labels. A cell outside it is a
+        programming error, counted device-side (no per-event sync) and
+        raised by the flush.
+        """
+        if not _cell_label_deferred():
+            self._deferred_labels = None
+            return False
+        xp = self.xp
+        uni = xp.unique(xp.asarray(cells).flatten())
+        m = int(uni.shape[0])
+        self._deferred_labels = {
+            "uni": uni,
+            "cur": uni.copy(),
+            "cur_t": xp.zeros(m, dtype=self.temp_inds.dtype),
+            "cur_w": xp.zeros(m, dtype=self.walker_inds.dtype),
+            "pos": xp.arange(m),
+            "dirty": xp.zeros(m, dtype=bool),
+            # device-side alarms, read once at the flush
+            "bad": xp.zeros((), dtype=xp.int64),
+            # HOST-side pending count: the consumer guard reads this, so it
+            # must never need a sync (shapes are host metadata).
+            "n_pending": 0,
+        }
+        return True
+
+    def _defer_exchange(self, specials_a, temps_a, walkers_a,
+                        specials_b, temps_b, walkers_b) -> None:
+        """Compose one pairwise exchange into the open window. O(K)."""
+        st = self._deferred_labels
+        xp = self.xp
+        sa = xp.asarray(specials_a).reshape(-1)
+        sb = xp.asarray(specials_b).reshape(-1)
+        n = int(sa.shape[0])
+        if n == 0 or int(sb.shape[0]) == 0:
+            return
+        assert int(sb.shape[0]) == n, (
+            "BandSorter: deferred exchange needs equal-length cell sets")
+
+        def _wide(v):
+            a = xp.asarray(v).reshape(-1)
+            return a if int(a.shape[0]) == n else xp.broadcast_to(a, (n,))
+
+        ta, tb = _wide(temps_a), _wide(temps_b)
+        wa, wb = _wide(walkers_a), _wide(walkers_b)
+
+        uni = st["uni"]
+        m = int(uni.shape[0])
+        if m == 0:
+            st["bad"] += n
+            st["n_pending"] += 1
+            return
+
+        # Same band on both sides: the packed key's low digits ARE the band
+        # (pack_special_index), so this is the O(K) form of the full-table
+        # band assert the immediate path runs under GB_INDEX_ASSERTS -- no
+        # table scan, so it can stay armed whenever that knob is.
+        if _index_asserts():
+            st["bad"] += (sa % _SPECIAL_INDEX_BASE
+                          != sb % _SPECIAL_INDEX_BASE).sum()
+
+        j_a = xp.clip(xp.searchsorted(uni, sa), 0, m - 1)
+        j_b = xp.clip(xp.searchsorted(uni, sb), 0, m - 1)
+        # membership: accumulate on device, surface at the flush (a sync
+        # here would reintroduce exactly the per-event stall being removed)
+        st["bad"] += (uni[j_a] != sa).sum() + (uni[j_b] != sb).sum()
+
+        # slots currently carrying the two labels
+        i_a = st["pos"][j_a]
+        i_b = st["pos"][j_b]
+
+        st["cur"][i_a] = sb
+        st["cur_t"][i_a] = tb
+        st["cur_w"][i_a] = wb
+        st["cur"][i_b] = sa
+        st["cur_t"][i_b] = ta
+        st["cur_w"][i_b] = wa
+        st["dirty"][i_a] = True
+        st["dirty"][i_b] = True
+        # label uni[j_b] now sits in slot i_a, and uni[j_a] in slot i_b
+        st["pos"][j_b] = i_a
+        st["pos"][j_a] = i_b
+        st["n_pending"] += 1
+
+    def _assert_cell_labels_flushed(self, where: str) -> None:
+        """Guard for a consumer that must not read a deferred label.
+
+        Host-side only (``n_pending`` is a python int), so it is free and
+        can stay armed in production -- silent until something actually
+        pends, loud the moment a consumer would read a label the window has
+        already moved.
+        """
+        st = self._deferred_labels
+        assert st is None or st["n_pending"] == 0, (
+            f"BandSorter: {where} would read cell labels with "
+            f"{st['n_pending']} deferred relabel(s) pending -- "
+            "flush_cell_labels() before this consumer "
+            "(GB_CELL_LABEL_DEFERRED)."
+        )
+
+    def flush_cell_labels(self, close: bool = False) -> bool:
+        """Apply the window's accumulated permutation in ONE table pass.
+
+        Returns True when a window was open (whether or not anything
+        pended), False when there was none -- so an unconditional call at a
+        flush point is safe with the knob OFF.
+
+        ``close=False`` (the per-chunk flush point) applies and RE-ANCHORS:
+        the slots are re-based onto the labels the table now holds, which
+        is exactly the same invariant the window opened with, so the window
+        keeps running. ``close=True`` ends it.
+        """
+        st = self._deferred_labels
+        if st is None:
+            return False
+        xp = self.xp
+        # ``bad`` only ever grows inside _defer_exchange, which also bumps
+        # the host-side n_pending, so a window with nothing pending needs
+        # no device read at all -- an empty chunk costs zero syncs.
+        if st["n_pending"]:
+            if int(st["bad"]) != 0:
+                self._deferred_labels = None
+                raise AssertionError(
+                    "BandSorter: a deferred cell relabel named a cell "
+                    "outside the window's declared universe, or exchanged "
+                    "cells across bands -- the label table is inconsistent "
+                    "(GB_CELL_LABEL_DEFERRED)."
+                )
+            dirty = st["dirty"]
+            # uni is sorted and a boolean mask preserves order, so src is
+            # sorted -- no argsort needed (the immediate primitive pays one)
+            src = st["uni"][dirty]
+            if int(src.shape[0]) > 0:
+                dst_spec = st["cur"][dirty]
+                dst_t = st["cur_t"][dirty]
+                dst_w = st["cur_w"][dirty]
+                keep = xp.isin(self.special_band_inds, src)
+                take = xp.searchsorted(
+                    src, self.special_band_inds[keep], side="left")
+                self.special_band_inds[keep] = dst_spec[take]
+                self.temp_inds[keep] = dst_t[take]
+                self.walker_inds[keep] = dst_w[take]
+        if close:
+            self._deferred_labels = None
+            return True
+        m = int(st["uni"].shape[0])
+        st["cur"] = st["uni"].copy()
+        st["pos"] = xp.arange(m)
+        st["dirty"] = xp.zeros(m, dtype=bool)
+        st["n_pending"] = 0
+        return True
 
     def exchange_cell_labels(self, specials_a, temp_a, walkers_a,
                              specials_b, temp_b, walkers_b, bands=None) -> None:
@@ -4547,7 +4762,15 @@ class BandSorter(LISAToolsParallelModule):
         band; pass ``bands`` to assert that). Both membership maps are
         computed BEFORE any mutation so the two directions cannot see each
         other's relabelled sources.
+
+        With a deferred window open (:meth:`begin_cell_label_window`) this
+        composes into the window instead and the table is untouched until
+        the flush; the observable end state is identical.
         """
+        if self._deferred_labels is not None:
+            self._defer_exchange(specials_a, temp_a, walkers_a,
+                                 specials_b, temp_b, walkers_b)
+            return
         xp = self.xp
 
         def _map(specials_from):
@@ -4596,7 +4819,15 @@ class BandSorter(LISAToolsParallelModule):
         membership pass for all pairs. The per-call band assert is gated
         behind ``GB_INDEX_ASSERTS`` -- the block-end
         ``special_index_check`` remains the standing regression alarm.
+
+        With a deferred window open (:meth:`begin_cell_label_window`) this
+        composes into the window instead and the table is untouched until
+        the flush; the observable end state is identical.
         """
+        if self._deferred_labels is not None:
+            self._defer_exchange(specials_a, temps_a, walkers_a,
+                                 specials_b, temps_b, walkers_b)
+            return
         xp = self.xp
         src = xp.concatenate(
             [xp.asarray(specials_a).flatten(),
@@ -4632,6 +4863,9 @@ class BandSorter(LISAToolsParallelModule):
         return self.xp.unique(self.N_vals)
 
     def get_subset(self, *args, **kwargs):
+        # A subset COPIES the label arrays (the __dict__ loop above), so a
+        # relabel still pending in a deferred window would never reach it.
+        self._assert_cell_labels_flushed("get_subset")
         subset_inds = self.get_subset_inds(*args, **kwargs)
 
         if len(subset_inds) == 0:
@@ -4665,6 +4899,7 @@ class BandSorter(LISAToolsParallelModule):
         full_bool: Optional[np.ndarray] = None,
     ) -> np.ndarray:
 
+        self._assert_cell_labels_flushed("get_subset_bool")
         inds_keep = self.xp.ones_like(self.band_inds, dtype=bool)
 
         if full_bool is None:
@@ -4743,6 +4978,11 @@ class BandSorter(LISAToolsParallelModule):
         """
 
         num_band_preload = len(special_indices_unique)
+
+        # ``sources_now_map`` below is a row-index map built FROM the labels,
+        # and the buffer freezes it -- a pending deferred relabel would bind
+        # the wrong rows for the whole life of the buffer.
+        self.main_band_sorter._assert_cell_labels_flushed("get_buffer")
 
         # Array module from the SORTER's arrays, not the module-level ``cp``:
         # on a CPU run on a machine where cupy imports (cluster), ``cp`` is
@@ -4945,6 +5185,7 @@ class BandSorter(LISAToolsParallelModule):
         :meth:`index_friends` still runs per proposal (each proposal's sorter
         holds a different set of sources).
         """
+        self._assert_cell_labels_flushed("build_friend_table")
         cold = self.inds & (self.temp_inds == 0)
         if int(cold.sum()) < max(2, int(nfriends)):
             return None
@@ -5034,6 +5275,7 @@ class BandSorter(LISAToolsParallelModule):
 
     def get_band_info(self):
 
+        self._assert_cell_labels_flushed("get_band_info")
         uni_special, uni_special_counts = cp.unique(
             self.special_band_inds[self.inds], return_counts=True
         )

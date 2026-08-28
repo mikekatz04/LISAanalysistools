@@ -251,6 +251,20 @@ class _ProposeTimer:
         )
 
 
+def _assert_labels_flushed(band_sorter, where: str) -> None:
+    """Guard a direct label reader against a pending deferred relabel.
+
+    Duck-typed on purpose: ``band_sorter`` is a plain parameter here and
+    several test fixtures pass a ``SimpleNamespace`` stub, which carries no
+    deferral state and therefore nothing to check. Real
+    :class:`~lisatools.globalfit.moves.gbbands.BandSorter` instances always
+    have the method. Host-side only -- no device sync.
+    """
+    fn = getattr(band_sorter, "_assert_cell_labels_flushed", None)
+    if fn is not None:
+        fn(where)
+
+
 def _tspan(tm, name: str):
     """Timer span or no-op when the propose-level timer is absent."""
     return tm.span(name) if tm is not None else nullcontext()
@@ -4622,6 +4636,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         adjustment and the in-model pool gate (BOTH must see the
         pre-accept state).
         """
+        # Reads special_band_inds / temp_inds / walker_inds directly (and
+        # snapshots them into ``picked``), so it must never run with a
+        # deferred cell-label window mid-flight (GB_CELL_LABEL_DEFERRED).
+        _assert_labels_flushed(band_sorter, "_pick_sources")
         xp = self.xp
         cand = (
             eligible
@@ -8475,6 +8493,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _to_numpy(dev), dtype=np.int64)[:n]
                 census[key + "_dev"] = None
 
+    #: Whether this move's :meth:`in_model_proposal` reads the sorter's
+    #: CELL LABEL arrays (``temp_inds`` / ``walker_inds`` /
+    #: ``special_band_inds``). ``None`` means INFER, and the inference is
+    #: deliberately pessimistic: any override of ``in_model_proposal`` is
+    #: assumed to read them. Set it explicitly on a subclass that knows.
+    inmodel_proposal_reads_labels = None
+
+    @property
+    def _inmodel_labels_deferrable(self) -> bool:
+        """Whether the in-model repeat block may defer its cell relabels.
+
+        The deferred window spans the WHOLE block, so nothing called
+        between two vertical sweeps may read the sorter's label arrays.
+        That holds for the base :meth:`in_model_proposal`, which reaches
+        the sorter only through row ids (``coords``, ``draw_friends``).
+        It does NOT hold for
+        :meth:`VGBSpecialStretchMove.in_model_proposal`, which reads
+        ``band_sorter.temp_inds`` / ``walker_inds`` by ``source_ids`` to
+        rebuild the red-blue split -- with a window open those would be
+        pre-swap labels. That class sets
+        ``inmodel_proposal_reads_labels = True``.
+
+        Without an explicit flag, ANY override disables the window and
+        keeps the immediate relabel: a future override opts out until
+        someone checks it, rather than silently reading stale labels.
+        """
+        flag = getattr(self, "inmodel_proposal_reads_labels", None)
+        if flag is not None:
+            return not bool(flag)
+        return type(self).in_model_proposal is GBSpecialBase.in_model_proposal
+
     def _vertical_swap_sweep(self, band_sorter, band_temps, t_i, w_i, b_i,
                              slots, beta, ll_ref, ll_change_log, prop_counts,
                              acc_counts, cell_ll_state, parity, census=None):
@@ -9029,6 +9078,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _dg = self._cap_drift_gate_setup(band_sorter)
         _dg_n = xp.zeros((), dtype=xp.int64)
 
+        # ---- DEFERRED CELL RELABELS (orchestration audit 2026-08-27,
+        # candidate 2; GB_CELL_LABEL_DEFERRED, default OFF) ----
+        # The window spans the WHOLE repeat block, collapsing one
+        # full-table relabel per repeat step (one vertical sweep each) into
+        # one per block. Legal because nothing between the sweeps reads the
+        # sorter's label arrays:
+        #   * the sweep itself works off block-local t_i/w_i/b_i and packs
+        #     its cells with get_special_band_index, a pure function;
+        #   * in_model_proposal reaches the sorter only through row ids
+        #     (coords, draw_friends) -- see _inmodel_labels_deferrable for
+        #     the VGB override that does NOT, and opts out;
+        #   * the friend/info-matrix tables (_ensure_proposal_tables) and
+        #     the cap census (_cap_drift_gate_setup) are built ABOVE this
+        #     line, and the cap census is a documented block-start snapshot
+        #     that a vertical swap already does not update.
+        # Every cell a sweep can name is a block row's label, and the
+        # block's rows only ever trade labels among themselves, so the
+        # block's own cells are the exact universe.
+        _cell_window = False
+        if _vert_on and self._inmodel_labels_deferrable:
+            _cell_window = band_sorter.begin_cell_label_window(
+                band_sorter.get_special_band_index(t_i, w_i, b_i))
+
         for move_i in range(n_rep):
           for (sub, sl, n_sub, ids_s, slots_s, N_s, l_s, t_s, w_s, b_s,
                beta_s, n4_s, lo_s, hi_s, cold_s, n_cold_s) in _half_pre:
@@ -9404,6 +9476,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                   # stale. Rebuild rather than patch: cheap, and a missed
                   # field here scores the next repeat at the wrong beta.
                   _half_pre = _build_half_pre()
+
+        # BLOCK-BOUNDARY FLUSH + CLOSE (GB_CELL_LABEL_DEFERRED): one
+        # full-table relabel for the whole block instead of one per repeat
+        # step. Must land before ANY label consumer downstream -- the
+        # block-boundary ``special_index_check`` barrier below, the next
+        # block's ``_pick_sources`` / scheduler, and ultimately
+        # ``_write_back_state`` -- so it is the first thing after the loop.
+        if _cell_window:
+            band_sorter.flush_cell_labels(close=True)
 
         # ONE host pull per BLOCK for the accept-chain bookkeeping the loop
         # kept on device: fold the per-kind device tallies into the
@@ -9845,6 +9926,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
              num_bands_unit) = self._tempering_swap_grid(
                  band_sorter, start, units=units)
 
+            # ---- DEFERRED CELL RELABELS (orchestration audit 2026-08-27,
+            # candidate 2; GB_CELL_LABEL_DEFERRED, default OFF) ----
+            # Every cell this unit's rung-pair loop can name is in
+            # ``special_index`` -- it IS the unit's swap grid -- so it is
+            # exactly the universe the window needs. Inside the window an
+            # accepted swap composes in O(K) instead of scanning the flat
+            # source table (~40k accepted pairs/iteration, each an isin over
+            # 1e6-1e7 rows plus a syncing boolean getitem).
+            band_sorter.begin_cell_label_window(special_index)
+
             # Tempering chunk size as a CELL budget (rows x ntemps), not a
             # row count: the historic hardcoded 200 rows meant 200*ntemps
             # cells, which scaled the buffer (and its host-side staging)
@@ -10141,7 +10232,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         buffer_obj.unique_band_combos[:, 2],
                     )
                 ] = diffs.flatten()
+                # CHUNK-BOUNDARY FLUSH (GB_CELL_LABEL_DEFERRED): the next
+                # chunk opens by reading the labels -- the alive-cell
+                # occupancy census above and ``_cached_get_buffer``, whose
+                # ``sources_now_map`` is a row-index map built FROM them
+                # and then frozen on the buffer. Both must see materialized
+                # labels, so the window flushes here (staying open: the
+                # slots re-anchor onto the labels the table now holds).
+                band_sorter.flush_cell_labels()
                 num_bands_run += num_bands_preload_temp
+
+            # UNIT-BOUNDARY FLUSH + CLOSE: everything below reads labels --
+            # add_cold_chain_sources_to_residual goes through get_subset
+            # (temp == 0) and reads subset.walker_inds, and the standing
+            # special_index_check alarm must judge FLUSHED state.
+            band_sorter.flush_cell_labels(close=True)
 
             with _tspan(getattr(self, "_prop_timer", None), "temper_open_close"):
                 self.add_cold_chain_sources_to_residual(
@@ -10264,6 +10369,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (tempering only relabels temp/walker; leaves never move), so the
         per-leaf transform fills stay attached to the right source.
         """
+        # The FINAL repack: leaves are placed at the sources' CURRENT
+        # (temp, walker), so a deferred relabel still in flight here would
+        # write the ensemble back at pre-swap labels. Hard requirement.
+        _assert_labels_flushed(band_sorter, "_write_back_state")
         alive = band_sorter.inds
         # the working branch (the sub-state's tempered ensemble; writes land
         # on the sub-state arrays through the shared-memory view)
@@ -12340,6 +12449,13 @@ class VGBSpecialStretchMove(GBSpecialBase):
     # never builds a friend table: _build_friend_table = False below.)
     choose_c_vals = StretchMove.choose_c_vals
     get_new_points = StretchMove.get_new_points
+
+    # in_model_proposal below reads band_sorter.temp_inds / walker_inds by
+    # source_ids on EVERY repeat step, so the in-model repeat block must NOT
+    # defer its cell relabels across the block (GB_CELL_LABEL_DEFERRED) --
+    # a window spanning the block would hand this method pre-swap labels.
+    # Stated here rather than left to inference: this is where the hazard is.
+    inmodel_proposal_reads_labels = True
 
     # Base repeat block runs eryn's red-blue split per repeat (see
     # GBSpecialBase._run_in_model_repeats): repeats compose invariant
