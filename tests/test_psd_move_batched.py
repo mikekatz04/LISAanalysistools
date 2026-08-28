@@ -598,6 +598,10 @@ class _RepackStub:
         self.shape_sens = tuple(nsens)
         self.end_shape = (nfreq,)
         self.data_length = nfreq
+        # noise-dev decoupled the PSD buffer geometry from the data geometry
+        # (coarse sens_mat support); this stub keeps them equal.
+        self.psd_end_shape = (nfreq,)
+        self.psd_data_length = nfreq
         rng = np.random.default_rng(5)
         acs = []
         for _ in range(nwalkers):
