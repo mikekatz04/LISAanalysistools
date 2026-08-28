@@ -3006,30 +3006,40 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # subset — no draws consumed, no rounds, no counters.
             #
             # ==================================================================
-            # ONLY BIRTHS STOP. THE BAND DRAINS; IT DOES NOT FREEZE.
-            # (user ruling 2026-08-28 — do not "simplify" this away)
+            # A SHUT-OFF BAND IS FROZEN FOR RJ AT EVERY TEMPERATURE.
+            # (user ruling 2026-08-28, REVERSING the earlier births-only
+            # rule — read the history below before changing it back)
             # ==================================================================
-            # ``band_sorter.inds`` (ALIVE rows) is OR'd back in, so every
-            # source already resident in a shut-off band stays fully
-            # proposable: deaths and in-model moves continue normally. The
-            # shutoff removes only the DEAD (birth) slots.
+            # EVERY row of a shut-off band leaves the subset: dead rows
+            # (no births) AND alive rows (no deaths). The mask is indexed
+            # by BAND ALONE (``_shut_dev[band_sorter.band_inds]`` — no
+            # temperature term), so this holds at every temperature, hot
+            # chains included. The band is inert for RJ until revived.
             #
-            # Why that matters, concretely: the criterion is COLD-chain
-            # occupancy, but the enforcement mask is indexed by BAND ALONE
-            # (``_shut_dev[band_sorter.band_inds]`` — no temperature term),
-            # so births stop at EVERY temperature. Hot chains sample close
-            # to the prior and WILL have populated these barren high-f
-            # bands with junk leaves. If we also froze the alive rows,
-            # that junk would be trapped there permanently — the band
-            # would keep its prior-drawn occupants forever and the model
-            # would carry sources the cold chain has proven are not real.
-            # Letting deaths run means ``rj_prior_removal`` drains them
-            # out and the band settles genuinely empty.
+            # WHY THIS REVERSED. The original rule kept alive rows
+            # proposable so the band would DRAIN: hot chains sample close
+            # to the prior and DO populate barren high-f bands with junk
+            # leaves, and under a PERMANENT shutoff freezing them would
+            # trap that junk forever — the model would carry sources the
+            # cold chain had proven were not real, with no way out.
             #
-            # So the invariant is: shut-off band == no NEW sources at any
-            # temperature, existing sources free to leave. Anything that
-            # starts masking alive rows here reintroduces the trapped-junk
-            # bug.
+            # Revival removed that objection. The shutoff is no longer
+            # permanent: ``_band_shutoff_revive`` clears the set on a new
+            # F-stat epoch fit and, failing that, after
+            # GB_RJ_BAND_SHUTOFF_RESET_ITERS iterations. So trapped junk
+            # is bounded — it is released at the next revival and can be
+            # removed then. Given that, spending removal proposals and
+            # swap work on a band the cold chain has proven barren is
+            # waste, and freezing it outright is the cheaper choice.
+            #
+            # THE STANDING INVARIANT, therefore:
+            #   shut-off band == no RJ of any kind, at any temperature,
+            #   and no tempering swaps, until it is revived.
+            # ⚠ If revival is ever removed or disabled
+            # (GB_RJ_BAND_SHUTOFF_RESET_ITERS=0 AND no refits), this
+            # becomes a PERMANENT freeze and the trapped-junk problem
+            # above comes back. The two rules are coupled: do not disable
+            # revival without restoring the drain.
             # ==================================================================
             _shut = getattr(self, "_rj_band_shutoff", None)
             if (
@@ -3038,10 +3048,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             ):
                 xp_s2 = get_array_module(band_sorter.band_inds)
                 _shut_dev = xp_s2.asarray(_shut)
-                _shut_ok = (
-                    band_sorter.inds
-                    | ~_shut_dev[band_sorter.band_inds]
-                )
+                # FULL FREEZE, not a drain (user ruling 2026-08-28,
+                # REVERSING the earlier births-only rule). Every row of a
+                # shut-off band leaves the RJ subset -- alive as well as
+                # dead -- so the band takes no births AND no deaths until
+                # it is revived.
+                _shut_ok = ~_shut_dev[band_sorter.band_inds]
                 extra_bool = (
                     _shut_ok if extra_bool is None
                     else (extra_bool & _shut_ok)
