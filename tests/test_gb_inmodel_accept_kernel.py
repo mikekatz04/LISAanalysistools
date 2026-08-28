@@ -858,6 +858,108 @@ class InModelAcceptKernelKnobTest(unittest.TestCase):
         self.assertIn("gb_inmodel_accept_apply", fields)
 
 
+class BackendMethodsDownstreamContractTest(unittest.TestCase):
+    """Adding a field to ``LISAToolsBackendMethods`` must not break subclasses.
+
+    Downstream packages SUBCLASS the dataclass and add their own REQUIRED
+    fields (GBGPU's ``GBGPUBackendMethods``: ``GBTDIonTheFlyWrap``,
+    ``GBComputationGroupWrap``, ``get_ll``, ``fill_global``, ``sharedmem``),
+    then construct it from their own ``*_module_loader`` -- which of course
+    knows nothing about a field LAT added yesterday. When
+    ``gb_inmodel_gate_compact`` / ``gb_inmodel_accept_apply`` landed as
+    REQUIRED positional fields, EVERY downstream backend load died with
+    ``TypeError: GBGPUBackendMethods.__init__() missing 2 required positional
+    arguments`` (cluster job 354, 2026-08-28) -- LAT's own loaders were
+    updated, the downstream ones could not be.
+
+    The fix is ``kw_only=True`` + ``default=None``, not a plain ``= None``:
+    a plain default would put a defaulted field ahead of the subclass's
+    required ones and blow up at CLASS-DEFINITION time with "non-default
+    argument follows default argument". Keyword-only fields are exempt from
+    that ordering rule, so the subclass keeps its positional layout.
+
+    This test mimics the downstream pattern exactly, so a future field added
+    without a keyword-only default fails HERE instead of on the cluster.
+    """
+
+    @staticmethod
+    def _downstream_subclass():
+        import dataclasses
+
+        from lisatools.cutils import LISAToolsBackendMethods
+
+        @dataclasses.dataclass
+        class _FakeDownstreamMethods(LISAToolsBackendMethods):
+            """Stand-in for ``gbgpu.cutils.GBGPUBackendMethods``."""
+
+            downstream_required_wrap: object
+
+        return _FakeDownstreamMethods
+
+    @staticmethod
+    def _lat_fields():
+        """Every LAT/parent field a pre-2026-08-27 loader would have passed."""
+        import dataclasses
+
+        from lisatools.cutils import LISAToolsBackendMethods
+
+        skip = {"gb_inmodel_gate_compact", "gb_inmodel_accept_apply"}
+        return {
+            f.name: object()
+            for f in dataclasses.fields(LISAToolsBackendMethods)
+            if f.name not in skip
+        }
+
+    def test_subclass_definition_does_not_raise(self):
+        # Guards the "non-default argument follows default argument" trap:
+        # the subclass body itself must still be a legal dataclass.
+        self._downstream_subclass()
+
+    def test_subclass_constructs_without_the_new_fields(self):
+        cls = self._downstream_subclass()
+        methods = cls(downstream_required_wrap=object(), **self._lat_fields())
+        self.assertIsNone(methods.gb_inmodel_gate_compact)
+        self.assertIsNone(methods.gb_inmodel_accept_apply)
+
+    def test_subclass_still_accepts_the_new_fields(self):
+        cls = self._downstream_subclass()
+        gate, apply_ = object(), object()
+        methods = cls(
+            downstream_required_wrap=object(),
+            gb_inmodel_gate_compact=gate,
+            gb_inmodel_accept_apply=apply_,
+            **self._lat_fields(),
+        )
+        self.assertIs(methods.gb_inmodel_gate_compact, gate)
+        self.assertIs(methods.gb_inmodel_accept_apply, apply_)
+
+    def test_kernel_fields_are_keyword_only_with_a_none_default(self):
+        import dataclasses
+
+        from lisatools.cutils import LISAToolsBackendMethods
+
+        by_name = {f.name: f for f in dataclasses.fields(LISAToolsBackendMethods)}
+        for name in ("gb_inmodel_gate_compact", "gb_inmodel_accept_apply"):
+            with self.subTest(field=name):
+                self.assertTrue(by_name[name].kw_only, name)
+                self.assertIsNone(by_name[name].default, name)
+
+    def test_backend_mixin_tolerates_the_none_default(self):
+        """``LISAToolsBackend.__init__`` copies the fields; None must survive.
+
+        This is the path a stale ``.so`` takes today (the loaders' own
+        ``getattr(..., None)`` fallback), and now also the path a downstream
+        loader that never heard of the fields takes.
+        """
+        from lisatools.cutils import LISAToolsBackend, LISAToolsBackendMethods
+
+        methods = LISAToolsBackendMethods(**self._lat_fields())
+        holder = LISAToolsBackend.__new__(LISAToolsBackend)
+        LISAToolsBackend.__init__(holder, methods)
+        self.assertIsNone(holder.gb_inmodel_gate_compact)
+        self.assertIsNone(holder.gb_inmodel_accept_apply)
+
+
 class KnobOffCallSiteUnchangedTest(unittest.TestCase):
     """With the knob off the repeat loop must be the historical chain.
 

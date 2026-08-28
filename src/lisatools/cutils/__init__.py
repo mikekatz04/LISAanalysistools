@@ -30,6 +30,39 @@ class LISAToolsBackendMethods(BackendMethods):
     new C++/CUDA function to the package, add a field here and populate it from
     every backend's ``*_module_loader``.
 
+    .. warning::
+
+       **A new field MUST be keyword-only with a ``None`` default.** Declare
+       it at the END of the field list as::
+
+           new_symbol: typing.Optional[typing.Callable[(...), None]] = (
+               dataclasses.field(default=None, kw_only=True)
+           )
+
+       This dataclass is SUBCLASSED by downstream packages -- GBGPU's
+       ``gbgpu.cutils.GBGPUBackendMethods``, and the same pattern in BBHx /
+       FEW -- which add their own REQUIRED fields and construct the subclass
+       from their OWN module loaders. Those loaders cannot know about a
+       field LAT added yesterday, so a REQUIRED field here breaks every
+       downstream backend load at import time. That is exactly what commit
+       ``0f0fc73a`` did with ``gb_inmodel_gate_compact`` /
+       ``gb_inmodel_accept_apply``: cluster job 354 (2026-08-28) died with
+       ``TypeError: GBGPUBackendMethods.__init__() missing 2 required
+       positional arguments``.
+
+       ``kw_only=True`` is load-bearing, not decoration: a plain ``= None``
+       default would place a defaulted field ahead of the subclass's
+       required ones and fail at CLASS-DEFINITION time with "non-default
+       argument follows default argument". Keyword-only fields are exempt
+       from that ordering rule.
+
+       ``None`` is also the honest value: it means "this backend module does
+       not carry the symbol", which is the same state a stale ``.so``
+       produces via the loaders' ``getattr(_lat_pd, name, None)``. Every
+       consumer must already handle it. Same lesson as ``ddbe414`` -- the
+       compile/import-time contract is the one that bites in production,
+       and it bites in the OTHER repo.
+
     Attributes:
         OrbitsWrap: Native ``OrbitsWrap`` class (CPU or GPU variant) used as the
             low-level wrapper around an ``Orbits`` instance.
@@ -54,13 +87,6 @@ class LISAToolsBackendMethods(BackendMethods):
     check_orbits: typing.Callable[(...), None]
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
-    # Global-fit routing kernels (gf_routing_kernels.cu, 2026-08-27): the
-    # fused GB in-model pre-score gate/compaction and post-score
-    # accept/bookkeeping chains. ``None`` on a backend module built before
-    # they landed -- the call site (GB_INMODEL_ACCEPT_KERNEL) checks for that
-    # and refuses rather than letting a stale .so break backend import.
-    gb_inmodel_gate_compact: typing.Callable[(...), None]
-    gb_inmodel_accept_apply: typing.Callable[(...), None]
 
     # Phase 3L.7k (2026-06-04): LISA-response Wraps absorbed from the
     # now-retiring fastlisaresponse backend. Owners of the underlying
@@ -85,6 +111,23 @@ class LISAToolsBackendMethods(BackendMethods):
     # consumer-side helper for the TDI flavor int enum used by the
     # chunked-het + signal-het kernels.
     TDITypeDict: object
+
+    # --- KEYWORD-ONLY, DEFAULTED: fields added after downstream packages
+    # --- started subclassing this dataclass. See the class docstring.
+    #
+    # Global-fit routing kernels (gf_routing_kernels.cu, 2026-08-27): the
+    # fused GB in-model pre-score gate/compaction and post-score
+    # accept/bookkeeping chains. ``None`` when the backend module does not
+    # carry them -- either a stale ``.so`` built before they landed (LAT's
+    # own loaders below use ``getattr(..., None)``) or a downstream loader
+    # that never heard of them. The call site (GB_INMODEL_ACCEPT_KERNEL)
+    # checks for None and falls back to the python chain with a warning.
+    gb_inmodel_gate_compact: typing.Optional[typing.Callable[(...), None]] = (
+        dataclasses.field(default=None, kw_only=True)
+    )
+    gb_inmodel_accept_apply: typing.Optional[typing.Callable[(...), None]] = (
+        dataclasses.field(default=None, kw_only=True)
+    )
 
 
 class LISAToolsBackend:
@@ -115,9 +158,10 @@ class LISAToolsBackend:
     STFTFresnelWrap: object
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
-    # Global-fit routing kernels (see LISAToolsBackendMethods).
-    gb_inmodel_gate_compact: typing.Callable[(...), None]
-    gb_inmodel_accept_apply: typing.Callable[(...), None]
+    # Global-fit routing kernels (see LISAToolsBackendMethods). ``None`` when
+    # the loaded backend module does not carry them.
+    gb_inmodel_gate_compact: typing.Optional[typing.Callable[(...), None]]
+    gb_inmodel_accept_apply: typing.Optional[typing.Callable[(...), None]]
     # Phase 3L.7k LISA-response Wraps (see LISAToolsBackendMethods).
     TDSplineTDIWaveformWrap: object
     FDSplineTDIWaveformWrap: object
