@@ -216,11 +216,23 @@ class CoarseWDMRuntime:
         """
         n = len(acs)
         gpu_map = getattr(acs, "gpu_map", None)
-        if not gpu_map:
+        if gpu_map is None:
             return {None: list(range(n))}
+        if hasattr(gpu_map, "get"):
+            # dict-like (stubs/tests)
+            if not gpu_map:
+                return {None: list(range(n))}
+            values = [gpu_map.get(int(w)) for w in range(n)]
+        else:
+            # the real ACA: an int array, walker -> device id — but it is
+            # all-zeros on CPU too, so it only means ownership when the ACA
+            # actually runs on GPUs
+            if getattr(acs, "gpus", None) is None:
+                return {None: list(range(n))}
+            values = [int(v) for v in np.asarray(gpu_map)[:n]]
         groups: dict = {}
-        for w in range(n):
-            groups.setdefault(gpu_map.get(int(w)), []).append(int(w))
+        for w, device in enumerate(values):
+            groups.setdefault(device, []).append(w)
         return groups
 
     @property
