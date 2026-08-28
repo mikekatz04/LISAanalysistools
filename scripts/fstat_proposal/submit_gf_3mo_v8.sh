@@ -170,12 +170,46 @@
 # ##   different likelihood on identical shapes. The run itself now         ##
 # ##   persists a noise-model identity and REFUSES such a resume; this      ##
 # ##   script also preflights it before eating a slurm allocation.          ##
+# ## * COARSE NOISE LIKELIHOOD, delayed acceptance (Q=8, WS). EXACT: the   ##
+# ##   fine likelihood stays the sampled target in every stage. Measured    ##
+# ##   ~25% off the noise block (psd_pe 5.87 -> 2.32 s; galfor_pe 5.12 ->   ##
+# ##   5.92 s, i.e. galfor REGRESSED -- its band-limited fast path is not   ##
+# ##   wired into the all-source sidecar yet; Robbie to revisit).           ##
+# ##                                                                        ##
+# ## VALIDATED ON THE CLUSTER (probe jobs 369 exact-fine / 376 coarse):     ##
+# ##   * delay table: 126,233 epochs @ stride 200 over [9.77e7, 1.61e8] s,  ##
+# ##     anchored at data_t0=9.772994e7, digest f1f3f00ea5d9cf13;           ##
+# ##   * modulation: 199 epochs covering [0, 6.31e7] s of the data frame;   ##
+# ##   * layer_calibrated drift 6.320e-07 -- THREE ORDERS below the 1e-4    ##
+# ##     tolerance, correction spanning [0.99996, 1.08653] over 3240/3240   ##
+# ##     entries (so it is doing real work AND is comfortably in regime);   ##
+# ##   * both GPUs active; noise-window peaks 26.3 / 7.8 GB.                ##
+# ##                                                                        ##
 # ## WATCH ON FIRST LAUNCH:                                                 ##
 # ##   * "[unequal-arm] link-delay table ..." line: stride/epochs/digest;   ##
 # ##   * "[galfor-modulation] ... anchored at data_t0" line;                ##
-# ##   * the layer_calibrated validity warning must NOT fire;               ##
+# ##   * "coarse WDM sidecar runtime (all-source, mode=...)" -- ONE line,   ##
+# ##     confirming Q, Ncoarse, weighting and the fiducial digest;          ##
+# ##   * "[COARSE_AUDIT ...]" per propose: stage-2 acceptance and the       ##
+# ##     |dlogl| spread ARE the surrogate-accuracy metric (0 / 100% = an    ##
+# ##     exact surrogate). If |dlogl| is large or stage-2 acceptance is     ##
+# ##     poor, lower COARSE_Q -- accuracy of the SAMPLED chain is not at    ##
+# ##     risk either way (delayed acceptance is exact), only efficiency;    ##
+# ##   * the layer_calibrated validity warning must NOT fire (it did not    ##
+# ##     in 369/376; the only occurrences were inside the probe's own       ##
+# ##     unit-test block, on an unrestricted toy grid);                     ##
 # ##   * one-time basis build cost (~106 MiB/device at the 6-mo grid;       ##
 # ##     smaller here) before the first noise iteration.                    ##
+# ##                                                                        ##
+# ## OPEN PHYSICS WATCH -- GALFOR RAILING. Both probes drove the foreground ##
+# ##   toward prior edges while GB is still EMPTY (the galaxy is entirely   ##
+# ##   unsubtracted, so galfor absorbs it): 369 had f_1 climbing to 1.4e-6  ##
+# ##   below its 1e-2 ceiling; 376 had amp pinned at its 1e-41 ceiling and  ##
+# ##   f_2 at its 1e-5 floor. This is NOT settled as a modelling fault --   ##
+# ##   it may simply be the search doing its job against an unsubtracted    ##
+# ##   galaxy. RE-CHECK once gb_search populates leaves: if galfor is still ##
+# ##   railed after GB sources are subtracted, the ceilings are binding and ##
+# ##   the 2-yr plateau lesson is repeating at a new location.              ##
 # ## Whitening test (scripts/noise/whitening_test.py) on the first          ##
 # ## snapshot is the acceptance metric for the noise side.                  ##
 # ############################################################################
@@ -313,6 +347,31 @@ export GALFOR_MODULATION_PATH="$PWD/scripts/noise/modulation_unequal.dat"
 export GALFOR_MODULATION_T0=data
 echo "[V8-NOISE] UNEQUAL_ARM=${UNEQUAL_ARM} stride=${UNEQUAL_ARM_STRIDE} wdm_psd_method=${WDM_PSD_METHOD}"
 echo "[V8-NOISE] modulation=${GALFOR_MODULATION_PATH} t0=${GALFOR_MODULATION_T0}"
+
+# ---- coarse noise likelihood (pinned, not inherited) ------------------------
+# all_sources DEFAULTS these on now, but a submit script states its own
+# configuration: a reader must be able to tell which noise likelihood the run
+# used without cross-referencing the variant.
+#
+# delayed_acceptance is EXACT -- stage 1 screens PSD/galfor proposals on the
+# Q-fold time-coarsened surrogate, stage 2 corrects with the exact fine/coarse
+# ratio -- so the SAMPLED target is the fine likelihood in every stage,
+# whatever the surrogate's quality. (search_approx is faster but approximate;
+# in probe job 376 the search it drove railed galfor against two prior edges.
+# The noise block is a small share of wall clock, so that trade is not worth
+# taking here -- accuracy ruling 2026-08-28.)
+#
+# Q=8 measured on the 3-mo grid: Nt_active 2121 -> Ncoarse 266. WS weighting
+# (the Welch-Satterthwaite effective dof, frozen at the injection fiducial)
+# was exercised on GPU in job 376 -- the unequal-arm coarse basis path works
+# there. To fall back: COARSE_GPU_MODE=off restores the exact-fine likelihood
+# (job 369's configuration) and COARSE_USE_WS=0 swaps WS for Bartlett.
+export COARSE_Q=8
+export COARSE_GPU_MODE=delayed_acceptance
+export COARSE_USE_WS=1
+export COARSE_FIDUCIAL=injection
+echo "[V8-NOISE] coarse: Q=${COARSE_Q} mode=${COARSE_GPU_MODE} \
+use_ws=${COARSE_USE_WS} fiducial=${COARSE_FIDUCIAL}"
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
@@ -1258,10 +1317,25 @@ if os.path.exists(store):
                   "model. Use a fresh STORE_DIR.")
             raise SystemExit(2)
         a = dict(ident.attrs)
-        ok = bool(a.get("unequal_arm")) and str(a.get("wdm_psd_method", "")) == method
-        if not ok:
-            print(f"[V8-NOISE] REFUSING: stored noise identity {a} does not match "
-                  f"this config (unequal_arm=1, wdm_psd_method={method}).")
+        # The coarse mode/Q are PART of the noise identity: they change the
+        # PSD/galfor transition kernel on identical array shapes, so a resume
+        # across them is refused by run.py. Check them here too, or the
+        # mismatch only surfaces minutes into the allocation.
+        want_mode = os.environ.get("COARSE_GPU_MODE", "delayed_acceptance")
+        want_q = int(os.environ.get("COARSE_Q", "8"))
+        mismatches = {}
+        if not bool(a.get("unequal_arm")):
+            mismatches["unequal_arm"] = (a.get("unequal_arm"), True)
+        if str(a.get("wdm_psd_method", "")) != method:
+            mismatches["wdm_psd_method"] = (a.get("wdm_psd_method"), method)
+        if str(a.get("coarse_mode", "")) != want_mode:
+            mismatches["coarse_mode"] = (a.get("coarse_mode"), want_mode)
+        if int(a.get("coarse_Q", 1)) != want_q:
+            mismatches["coarse_Q"] = (a.get("coarse_Q"), want_q)
+        if mismatches:
+            print(f"[V8-NOISE] REFUSING: stored noise identity does not match this "
+                  f"config (stored, wanted): {mismatches}. Full stored identity: {a}. "
+                  "Use a fresh STORE_DIR.")
             raise SystemExit(2)
         print(f"[V8-NOISE] resume identity OK: {a}")
 PYEOF
