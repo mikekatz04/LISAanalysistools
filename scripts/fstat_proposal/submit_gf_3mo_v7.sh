@@ -880,6 +880,27 @@ export GB_REPLACE_PHASE_MAX=auto
 # acceptance vs the 0.0055-0.0063 baseline. =0 restores per-round
 # computation bit-for-bit (and the 726 s bill).
 export GB_FSTAT_PERROW_UNIT_CACHE=1
+# TODO(v8): REMOVE THIS -- diagnostic only, do not carry into the v8
+# consolidation run.
+# TABLE-vs-PER-ROW CENTER AUDIT (LAT 3c2502e1). Snapshot 12 measured the
+# unit cache as a WASH (rj_fstat_centers 725-743 s vs a 713-799 s pre-fix
+# band): there was no recomputation to dedupe, so ~63% of the search move
+# is an irreducible per-row F-stat solve unless the epoch TABLE can stand
+# in for it. The table was retired for candidate quality (2026-08-26
+# per-row ruling) without anyone measuring the gap -- this logs it.
+# READ-ONLY: rides on rows the unit precompute already solved per-row,
+# never feeds a proposal, so sampling and detailed balance are untouched.
+# Cost is one extra table lookup per sampled row (~free).
+# Telltale: one "[FSTAT_CTR_AUDIT] table-vs-perrow on N rows (med/p90/max)"
+# line per unit, ~9 per propose, reporting dphi0 / dcos_iota / dpsi /
+# dln_center / dln_snr plus the node gap (df0, dMc).
+# READ IT AS: small deltas => a coarse up-front map could replace the
+# solve (a NEW grid product -- the stored table holds ONE node per f0, so
+# its mc/sky columns are argmax outputs, not axes to interpolate);
+# wide deltas => the per-row solve is confirmed irreducible and the
+# multi-device lane rebalance is the remaining lever.
+# =0 (or unset) disables; any positive integer sets the sample size.
+export GB_FSTAT_CTR_AUDIT=1        # 4096-row sample per unit
 # DEFERRED CELL-LABEL RELABELS (LAT 9fa32109) -- A/B knob, default OFF.
 # ON: rung-pair/vertical-swap relabels accumulate in a slot table and
 # flush once per tempering chunk / repeat block (kills the full-table
