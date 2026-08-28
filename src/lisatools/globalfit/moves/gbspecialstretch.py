@@ -4038,12 +4038,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 logger.exception(
                     "[fstat-NM] lane adapter build failed; keeping the "
                     "pinned single-device route for this unit.")
-        if (
-            self.rj_fstat_dist_birth
-            and not self.rj_replace
-            and os.environ.get("GB_RJ_FSTAT_CTR_HOIST", "1") == "1"
-            and self._fstat_ctr_table_active() is None
-        ):
+        if self._fstat_ctr_hoist_wanted():
+            # Runs when no epoch table is live (historical unit mode) AND
+            # when per-row mode will bypass a live table (2026-08-27:
+            # without this the per-row path recomputed identical centers
+            # every pick round -- 726 s/row measured on job 349).
             with _tspan(tm, "rj_fstat_centers"):
                 self._fstat_ctr = self._precompute_fstat_centers(
                     model, band_sorter, subset
@@ -5408,6 +5407,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return float(raw)
         return 2.0 if self._fstat_ctr_mode() == "epoch" else 1.5
 
+    def _unit_cache_smear(self) -> float:
+        """Smear for the UNIT-OPEN cache path specifically.
+
+        The smear belongs to the serving MACHINERY's staleness, not the
+        mode env: under ``GB_FSTAT_CTR_MODE=epoch`` + per-row-through-
+        unit-cache (2026-08-27) the generic resolver would hand the
+        unit cache the 2.0 EPOCH smear although it only carries mid-unit
+        drift. Env override still always wins; otherwise the unit
+        staleness class -> 1.5. The precompute AND the lookup-miss
+        fallback both use this, preserving their identical-numbers
+        invariant.
+        """
+        raw = os.environ.get("GB_FSTAT_CTR_SMEAR", "").strip()
+        if raw:
+            return float(raw)
+        return 1.5
+
     def _fstat_ctr_table_active(self):
         """The live epoch center table, or ``None`` when it must not be used.
 
@@ -5462,7 +5478,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return (t["phi0"][pos], t["iota"][pos], t["psi"][pos],
                 ln_center, sigma, ln_snr)
 
-    def _fstat_ctr_compute(self, model, params):
+    def _fstat_ctr_compute(self, model, params, smear=None):
         """Batched F-stat center computation for a set of rows.
 
         The shared low-level path for the unit-open precompute
@@ -5508,7 +5524,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # that re-centers without paying the density -- deliberately
         # breaking detailed balance for faster burn-in -- was considered
         # and PARKED, user 2026-08-14: "maybe not ideal".)
-        sigma = sigma * self._fstat_ctr_smear()
+        # smear=None -> the mode-resolved default (table/epoch callers);
+        # the unit-cache precompute + its lookup fallback pass
+        # _unit_cache_smear() explicitly (machinery-staleness, 2026-08-27).
+        sigma = sigma * (self._fstat_ctr_smear() if smear is None
+                         else float(smear))
         ln_snr = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
         return phi0, iota, psi, ln_center, sigma, ln_snr
 
@@ -5575,7 +5595,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         params = band_sorter.coords[ids]
         _t0 = time.perf_counter()
         phi0, iota, psi, ln_center, sigma, ln_snr = self._fstat_ctr_compute(
-            model, params)
+            model, params, smear=self._unit_cache_smear())
         # Per-unit precompute census (2026-08-15, job-195 diagnostic: the
         # production rj_fstat_centers stage jumped 374 -> 1953 s/propose on
         # identical code with caps/cells/rounds flat -- this line pins
@@ -5648,7 +5668,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 "rows but the caller supplied no model/band_sorter for the "
                 "inline fallback"
             )
-        new_vals = self._fstat_ctr_compute(model, band_sorter.coords[miss_ids])
+        new_vals = self._fstat_ctr_compute(
+            model, band_sorter.coords[miss_ids],
+            smear=self._unit_cache_smear())
         new_ids = xp.concatenate([c["ids"], miss_ids])
         order = xp.argsort(new_ids)
         c["ids"] = new_ids[order]
@@ -5946,12 +5968,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # reverse densities stay exactly symmetric.
                 _tbl = self._fstat_ctr_table_active()
                 # Per-row centers for SEARCH births/deaths (user ruling
-                # 2026-08-26): bypass the epoch table AND the unit-open
-                # cache so both sides fall through to the exact
-                # _fstat_dist_centers path (see _rj_birth_perrow).
-                if _tbl is not None and self._rj_birth_perrow():
-                    _tbl = None
-                    _ctr = None
+                # 2026-08-26): bypass the f0-node epoch table. The
+                # unit-open cache SURVIVES the bypass by default
+                # (2026-08-27, _perrow_unit_cache: same exact per-row
+                # values, computed once per unit instead of every round);
+                # GB_FSTAT_PERROW_UNIT_CACHE=0 drops it too and every
+                # round falls through to _fstat_dist_centers directly.
+                _tbl, _ctr = self._resolve_rj_ctr(_tbl, _ctr)
                 # SNR-truncated distance proposal (2026-08-15, user-ruled
                 # lever; GB_RJ_SNR_TRUNC_DIST=0 restores the untruncated
                 # lognormal draw bit-identically): [GB_ACCEPT rj-split]
@@ -11132,6 +11155,66 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return False
         return "search" in str(getattr(self, "name", "")).lower()
 
+    def _perrow_unit_cache(self) -> bool:
+        """Route per-row F-stat centers through the UNIT-OPEN cache?
+
+        2026-08-27: job 349's [GB_TIMING] measured ``rj_fstat_centers``
+        at 726 s/row -- the per-row ruling (2026-08-26) bypassed the
+        f0-node epoch TABLE (its target) but ALSO the job-195 unit-open
+        center cache (collateral), so every pick round recomputed
+        centers whose inputs are fixed at unit open: birth coords are
+        pre-drawn at sorter build, alive coords cannot change before
+        their single in-model block at unit end, and the F-stat ignores
+        the extrinsic columns an accepted birth overwrites. Default ON:
+        per-row mode keeps its EXACT per-row values (the cache's
+        ``_fstat_ctr_compute`` is the same ``_fstat_dist_centers`` +
+        ``_dist_center_and_width`` path, batched once per unit, with the
+        blessed unit-mode snapshot smear widening sigma and the lookup's
+        inline miss fallback for cap-freed rows). Detailed balance: the
+        center remains one deterministic function of (intrinsics,
+        unit-open walker-ref residual) shared by the forward and reverse
+        densities -- the exact convention the 2026-08-14/15 unit-cache
+        rulings blessed. ``GB_FSTAT_PERROW_UNIT_CACHE=0`` restores the
+        per-round direct computation bit-for-bit.
+        """
+        return os.environ.get("GB_FSTAT_PERROW_UNIT_CACHE", "1") != "0"
+
+    def _fstat_ctr_hoist_wanted(self) -> bool:
+        """Should this unit run the unit-open center precompute?
+
+        Historical behavior: hoist only when NO epoch table is live (the
+        table served every lookup). With per-row mode bypassing a live
+        table, the hoist must run anyway (else per-row falls through to
+        the 726 s/row per-round path) -- gated by
+        :meth:`_perrow_unit_cache`. Replace keeps its direct per-row
+        evaluations (small row counts; its candidates are fresh draws).
+        """
+        if not getattr(self, "rj_fstat_dist_birth", False):
+            return False
+        if getattr(self, "rj_replace", False):
+            return False
+        if os.environ.get("GB_RJ_FSTAT_CTR_HOIST", "1") != "1":
+            return False
+        if self._fstat_ctr_table_active() is None:
+            return True
+        return self._rj_birth_perrow() and self._perrow_unit_cache()
+
+    def _resolve_rj_ctr(self, tbl, ctr):
+        """Resolve which (epoch table, unit cache) an RJ step consumes.
+
+        Per-row mode always bypasses the f0-node TABLE (the 2026-08-26
+        ruling's target: node-argmax extrinsics inconsistent with the
+        drawn intrinsics). The unit cache survives the bypass under
+        :meth:`_perrow_unit_cache` (default) -- exact per-row values,
+        computed once per unit; ``GB_FSTAT_PERROW_UNIT_CACHE=0`` drops
+        it too and every round computes directly.
+        """
+        if tbl is not None and self._rj_birth_perrow():
+            tbl = None
+            if not self._perrow_unit_cache():
+                ctr = None
+        return tbl, ctr
+
     def _harvest_death_capture(self, ids_death, d_h_raw, h_h_raw,
                                n_src) -> None:
         """Fold the death-side RJ scoring into the sorter d_h/h_h capture.
@@ -12164,7 +12247,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             logger.info(
                 "[FSTAT_CTR %s] propose total: mode=%s (%s), "
                 "fallback-computed rows %d", self.name,
-                ("perrow (table bypassed)" if self._rj_birth_perrow()
+                (("perrow (unit-cache)" if self._perrow_unit_cache()
+                  else "perrow (table bypassed, per-round)")
+                 if self._rj_birth_perrow()
                  else self._fstat_ctr_mode()),
                 f"{int(_tbl['f0_mHz'].shape[0])}-node table"
                 if _tbl is not None else "per-unit hoist",
