@@ -305,11 +305,18 @@ export GF_MOVE_TIMING=1
 # what makes a detailed before/after comparison trustworthy.
 # COST: ~8-10 extra device syncs per get_ll; measured +2.5% wall on the
 # GB propose, and it serializes some concurrent shard work.
-# >>> RECOMMENDED: keep BOTH for the first ~2-3 stored iterations to get
-# >>> the detailed attribution, then comment them out and resubmit so the
-# >>> steady-state numbers are honest baselines. The run resumes cleanly.
-export GF_MOVE_TIMING_SYNC=1
-export GB_PROP_TIMING_SYNC=1
+# >>> TURNED OFF 2026-08-28 (user ruling). The tempering audit found the
+# >>> sync cost is much larger than the +2.5% headline in the TEMPERING
+# >>> path specifically: `temper_swap_score` opens and closes INSIDE the
+# >>> rung loop, so with sync on it adds roughly 27,000 full device syncs
+# >>> per move -- a real part of the ~88 s that `run_tempering` could not
+# >>> account for. Leaving it on means the instrumentation is measuring
+# >>> itself. Detailed per-stage attribution is already banked from
+# >>> snapshots 11-13; steady-state numbers now matter more.
+# >>> Set BOTH back to 1 for 2-3 iterations if a fresh detailed
+# >>> attribution is ever needed again -- the run resumes cleanly.
+export GF_MOVE_TIMING_SYNC=0
+export GB_PROP_TIMING_SYNC=0
 # ---- 2026-08-15 perf batch (ALL code defaults; pinned for the run
 #      record; each knob independently revertible) ---------------------
 # De-synced in-model repeat loop (device-resident accept chain) rides

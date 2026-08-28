@@ -3003,8 +3003,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             # High-f barren-band shutoff enforcement (user design
             # 2026-08-14): dead rows of shut-off bands never enter the
-            # subset — no draws consumed, no rounds, no counters. Alive
-            # rows stay (deaths + in-model continue).
+            # subset — no draws consumed, no rounds, no counters.
+            #
+            # ==================================================================
+            # ONLY BIRTHS STOP. THE BAND DRAINS; IT DOES NOT FREEZE.
+            # (user ruling 2026-08-28 — do not "simplify" this away)
+            # ==================================================================
+            # ``band_sorter.inds`` (ALIVE rows) is OR'd back in, so every
+            # source already resident in a shut-off band stays fully
+            # proposable: deaths and in-model moves continue normally. The
+            # shutoff removes only the DEAD (birth) slots.
+            #
+            # Why that matters, concretely: the criterion is COLD-chain
+            # occupancy, but the enforcement mask is indexed by BAND ALONE
+            # (``_shut_dev[band_sorter.band_inds]`` — no temperature term),
+            # so births stop at EVERY temperature. Hot chains sample close
+            # to the prior and WILL have populated these barren high-f
+            # bands with junk leaves. If we also froze the alive rows,
+            # that junk would be trapped there permanently — the band
+            # would keep its prior-drawn occupants forever and the model
+            # would carry sources the cold chain has proven are not real.
+            # Letting deaths run means ``rj_prior_removal`` drains them
+            # out and the band settles genuinely empty.
+            #
+            # So the invariant is: shut-off band == no NEW sources at any
+            # temperature, existing sources free to leave. Anything that
+            # starts masking alive rows here reintroduces the trapped-junk
+            # bug.
+            # ==================================================================
             _shut = getattr(self, "_rj_band_shutoff", None)
             if (
                 _shut is not None and bool(_shut.any())
