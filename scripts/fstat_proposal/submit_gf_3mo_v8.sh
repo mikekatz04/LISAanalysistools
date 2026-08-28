@@ -1068,18 +1068,40 @@ export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # AFTER consecutive zero-birth-accept proposes stop proposing births
 # (deaths + in-model continue; [GB_BAND_SHUTOFF] log line per band).
 export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
-# PATIENCE RAISED 5 -> 50 (user ruling 2026-08-16, after a replay against
-# truth). Running the EXACT rule over iterations 5-60 of this run at
-# AFTER=5 switches off 74 bands above 10 mHz -- and 9 of them contain a
-# detectable catalogue source the run subsequently FOUND: SNR 45.7 (band
-# 142, 20.278-20.417 mHz, silenced at iteration 18), SNR 35.6 (band 90,
-# iter 14), SNR 34.3 (band 72, iter 19), SNR 32.7, 26.9, 24.0, 19.8, 15.0,
-# 12.5. Every one of those 9 bands is occupied today. Observed
-# time-to-first-source in them is 14-21 iterations, so a 5-iteration
-# occupancy clock silences bands the sampler merely has not reached yet --
-# and shutoff is PERMANENT for the process, so there is no recovery.
-export GB_RJ_BAND_SHUTOFF_AFTER=50
+# PATIENCE 50 -> 5 (user ruling 2026-08-28). 5 is the CODE DEFAULT; this
+# pin is what disabled the valve, and the audit behind the ruling found
+# the valve has NEVER FIRED IN PRODUCTION -- zero [GB_BAND_SHUTOFF] lines
+# in the whole v7 run log, because AFTER=50 needs 50 consecutive barren
+# iterations of the designated move and that run had only reached ~38. So
+# this line is both the behaviour change and the first real exercise of
+# the machinery.
+#
+# The 2026-08-16 replay that raised it to 50 still stands on its facts:
+# running the EXACT rule over iterations 5-60 at AFTER=5 switches off 74
+# bands above 10 mHz, and 9 of them contain a detectable catalogue source
+# the run subsequently FOUND -- SNR 45.7 (band 142, 20.278-20.417 mHz,
+# silenced at iteration 18), 35.6 (band 90, iter 14), 34.3 (band 72, iter
+# 19), 32.7, 26.9, 24.0, 19.8, 15.0, 12.5 -- with observed
+# time-to-first-source of 14-21 iterations. What changed is that replay's
+# closing clause, "shutoff is PERMANENT for the process, so there is no
+# recovery". It is no longer permanent: the shut-off set and the
+# occupancy streaks are now REVIVED on every new F-stat epoch (a refit
+# brings a new proposal grid AND an updated noise/foreground profile, so
+# a band that was unreachable may now be reachable) and, failing that,
+# after GB_RJ_BAND_SHUTOFF_RESET_ITERS iterations. With
+# GB_FSTAT_REFIT_EVERY=50 below, a band silenced at iteration 5 is open
+# again by ~50 and then has to re-earn its shutoff over a fresh 5-window,
+# so those 9 bands get repeated chances instead of one. The cost of the
+# short clock is now a DELAY on a genuinely barren-looking band, not a
+# permanent loss. Revivals log as [GB_BAND_REVIVE <move>].
+export GB_RJ_BAND_SHUTOFF_AFTER=5
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
+# Backstop revival (new 2026-08-28): iterations with NO new F-stat epoch
+# after which the shut-off set is cleared anyway; 0 disables the trigger.
+# Even with no refit the noise model keeps evolving, so a long stretch
+# should re-open the question on its own. 100 = 2x the refit cadence
+# below, so it only bites if refitting stalls or is turned off.
+export GB_RJ_BAND_SHUTOFF_RESET_ITERS=100
 # 100 -> 50 (2026-08-18): the refit re-derives the peaks against the LIVE
 # residual and the UPDATED foreground/PSD, which is the whole point of
 # refitting -- and the foreground converges well inside 20 iterations, so a

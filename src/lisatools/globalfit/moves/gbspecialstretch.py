@@ -5560,6 +5560,131 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return False
         return True
 
+    def _band_shutoff_reset_iters(self) -> int:
+        """Iterations with no F-stat update after which the shut-off set
+        is revived anyway (``GB_RJ_BAND_SHUTOFF_RESET_ITERS``, default
+        100; ``0`` disables this trigger).
+
+        USER RULING 2026-08-28. The epoch trigger
+        (:meth:`_band_shutoff_epoch_sync`) covers the case where a refit
+        hands the move a genuinely new proposal grid. But the noise /
+        foreground model keeps evolving BETWEEN refits, so a long enough
+        stretch with no refit at all should re-open the question on its
+        own rather than leaving a band OFF for the rest of the process.
+        """
+        try:
+            n = int(os.environ.get("GB_RJ_BAND_SHUTOFF_RESET_ITERS", "100"))
+        except ValueError:
+            return 100
+        return max(0, n)
+
+    def _band_shutoff_revive(self, reason: str) -> int:
+        """Clear the shut-off set + occupancy streaks -> #bands revived.
+
+        USER RULING 2026-08-28, replacing the previous "shutoff is
+        PERMANENT for the process" semantics. A shut-off band is a
+        statement about evidence ("the cold chain kept this band barren
+        under the grid and noise model in force at the time"), not a
+        permanent property of the band, so when that evidence goes stale
+        the OFF flag has to go with it.
+
+        The two triggers live in :meth:`_band_shutoff_epoch_sync` (a new
+        F-stat epoch) and :meth:`_update_band_shutoff` (elapsed
+        iterations). This method is the shared effect and is deliberately
+        ALL-OR-NOTHING: the streaks of bands that were still ON are
+        cleared too, because they were accumulated against the same stale
+        evidence.
+
+        NOTE the ``_band_occ_last`` reset to -1 rather than to 0: it is
+        the "occupancy at the previous update" memory, and the streak
+        rule only counts an iteration whose occupancy is UNCHANGED.
+        Leaving a stale value there would let the very next update score
+        an "unchanged" step against a value measured under the old
+        epoch -- the exact evidence this revival is throwing away. -1 is
+        unreachable for an occupancy count, so the next update always
+        starts a fresh streak at 1.
+
+        Safe before any shutoff state exists (a move whose first propose
+        has not run yet, or one for which the valve is disabled): every
+        array is looked up through ``__dict__`` and a missing one is
+        skipped, with no log line emitted.
+
+        The log prefix is deliberately NOT ``[GB_BAND_SHUTOFF ...]``:
+        the monitor's cap-plot overlay parses that prefix
+        (``\\[GB_BAND_SHUTOFF[^\\]]*\\] band (\\d+)``) to paint band rows
+        red, so a revival must not read to it as one more shutoff.
+        """
+        d = self.__dict__
+        shut = d.get("_rj_band_shutoff")
+        streak = d.get("_band_occ_streak")
+        last = d.get("_band_occ_last")
+        d["_band_shutoff_since_revive"] = 0
+        if shut is None and streak is None and last is None:
+            # Nothing has ever been shut off on this move -- no-op, and
+            # in particular no log line (every fstat move calls the epoch
+            # hook, only the designated one carries shutoff state).
+            return 0
+        revived = [] if shut is None else [int(b) for b in np.where(shut)[0]]
+        n = len(revived)
+        if shut is not None:
+            shut[:] = False
+        if streak is not None:
+            streak[:] = 0
+        if last is not None:
+            last[:] = -1
+        txt = ""
+        if revived:
+            edges = getattr(self, "band_edges", None)
+            if edges is not None:
+                edges = _to_numpy(edges)
+                shown = revived[:12]
+                txt = " [" + ", ".join(
+                    f"{b} ({edges[b] * 1e3:.3f}-{edges[b + 1] * 1e3:.3f} mHz)"
+                    for b in shown
+                ) + ("" if len(shown) == n
+                     else f", +{n - len(shown)} more") + "]"
+            else:
+                txt = " " + str(revived[:12])
+        logger.info(
+            "[GB_BAND_REVIVE %s] %s -- %d band(s) births back ON%s; "
+            "occupancy streaks reset (0 bands off)",
+            self.name, reason, n, txt)
+        return n
+
+    def _band_shutoff_epoch_sync(self) -> int:
+        """Revive when the F-stat EPOCH this move runs under has advanced.
+
+        HOOK-POINT RATIONALE (user ruling 2026-08-28). The trigger is
+        "the epoch in force now differs from the one the shut-off
+        evidence was gathered under", NOT "a fit function was called".
+        ``_fstat_epoch`` is adopted from three separate places --
+        a genuine refit and a complete-epoch load from disk (both land in
+        ``GBSpecialRJFStatGridMove._install``) and the cross-move
+        registry reuse in its ``setup`` -- while a RESUMED mid-fit epoch
+        deliberately keeps its old number and a "skip" decision does not
+        touch it at all. Comparing against the epoch stored at the last
+        revival covers all of that with one rule.
+
+        It CANNOT double-fire for one epoch: the stored epoch is advanced
+        BEFORE the revival runs, so any second call at the same epoch --
+        another adoption site, the once-per-iteration poll in
+        :meth:`_update_band_shutoff`, or a re-``setup`` that re-adopts an
+        unchanged epoch -- compares equal and returns 0.
+        """
+        d = self.__dict__
+        epoch = d.get("_fstat_epoch")
+        if "_band_shutoff_epoch" not in d:
+            # First observation on this move. Nothing can have been shut
+            # off under an EARLIER epoch, so adopt silently -- reviving
+            # here would only emit a no-op line at every process start.
+            d["_band_shutoff_epoch"] = epoch
+            d.setdefault("_band_shutoff_since_revive", 0)
+            return 0
+        if epoch == d["_band_shutoff_epoch"]:
+            return 0
+        d["_band_shutoff_epoch"] = epoch
+        return self._band_shutoff_revive(f"new F-stat epoch {epoch}")
+
     def _update_band_shutoff(self, occ_max) -> None:
         """Occupancy-based shutoff update (USER KEY CHANGE 2026-08-15).
 
@@ -5580,17 +5705,42 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
           (a fresh first source restarts the one-source clock; a
           death 2 -> 1 starts a fresh one-source streak).
 
-        Shutoff is permanent for the process (restart re-earns;
-        revival semantics deliberately not implemented — an OFF band
-        whose source later dies stays OFF). Emits the LOG CONTRACT
-        prefix the monitor's cap-plot overlay parses
-        (``[GB_BAND_SHUTOFF <move>] band <b> ...``).
+        Shutoff is NO LONGER permanent for the process (USER RULING
+        2026-08-28, superseding "revival semantics deliberately not
+        implemented"): the shut-off set and the streaks are cleared
+        whenever a NEW F-stat epoch is adopted (new proposal grid AND a
+        new noise/foreground profile, so a previously unreachable band
+        may now be reachable) or after ``GB_RJ_BAND_SHUTOFF_RESET_ITERS``
+        iterations without one. See :meth:`_band_shutoff_revive`. A
+        restart still re-earns from scratch (counters are in-memory).
+        Emits the LOG CONTRACT prefix the monitor's cap-plot overlay
+        parses (``[GB_BAND_SHUTOFF <move>] band <b> ...``); revivals use
+        the distinct ``[GB_BAND_REVIVE <move>] ...`` prefix.
         """
         occ_max = np.asarray(occ_max)
         if not hasattr(self, "_band_occ_streak"):
             self._band_occ_streak = np.zeros(self.num_bands, dtype=np.int64)
             self._band_occ_last = np.full(self.num_bands, -1, dtype=np.int64)
             self._rj_band_shutoff = np.zeros(self.num_bands, dtype=bool)
+        # ---- REVIVAL TRIGGERS (user ruling 2026-08-28) -------------------
+        # Checked once per iteration BEFORE the streaks are advanced, so a
+        # revival always leaves THIS iteration starting a fresh streak at 1
+        # (``_band_occ_last`` is -1 by then, so nothing reads as unchanged)
+        # and the band has to earn its shutoff again over a full AFTER
+        # window. The epoch poll here is the durable hook -- it observes
+        # every path that can move ``_fstat_epoch``, including ones added
+        # later -- and is idempotent, so the direct calls at the adoption
+        # sites (which revive a step earlier, before the propose that first
+        # uses the new grid) cannot make it fire twice for one epoch.
+        _d = self.__dict__
+        _d["_band_shutoff_since_revive"] = (
+            _d.get("_band_shutoff_since_revive", 0) + 1)
+        self._band_shutoff_epoch_sync()
+        _reset_iters = self._band_shutoff_reset_iters()
+        if _reset_iters and _d["_band_shutoff_since_revive"] >= _reset_iters:
+            self._band_shutoff_revive(
+                f"{_d['_band_shutoff_since_revive']} iterations with no "
+                "F-stat update")
         fmin_mhz = float(os.environ.get("GB_RJ_BAND_SHUTOFF_FMIN_MHZ", "10.0"))
         after = int(os.environ.get("GB_RJ_BAND_SHUTOFF_AFTER", "5"))
         # Band SHUTOFF stays a per-BAND rule (user design 2026-08-15: only
@@ -14078,6 +14228,12 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
         else:
             self.rj_proposal_distribution = {self.branch_name: container}
         self._fstat_epoch = k
+        # A new epoch means a new proposal grid AND a new noise/foreground
+        # profile, so the high-f barren-band evidence is stale: revive here,
+        # BEFORE the first propose that uses the new grid (user ruling
+        # 2026-08-28). No-op when the epoch is unchanged (a resumed mid-fit
+        # epoch keeps its number) or when this move carries no shutoff state.
+        self._band_shutoff_epoch_sync()
         # Last-fit mark on the refit clock. After a real fit DONE.json holds
         # the clock this process just journaled; on a LOAD of an existing
         # epoch it holds the clock the epoch was actually fitted at (0 for
@@ -14114,6 +14270,10 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
                 )
                 self.rj_proposal_distribution = container
                 self._fstat_epoch = epoch
+                # Same revival rule on the cross-move reuse path: this move
+                # adopts an epoch it did not fit itself, and the grid it is
+                # now proposing from is just as new to it (2026-08-28).
+                self._band_shutoff_epoch_sync()
                 self._fstat_last_fit_hit = self._epoch_fit_clock(epoch)
                 self._install_ctr_table(epoch, model=model, branches=branches)
                 return

@@ -52,6 +52,21 @@ from .wdm_het import (
 # opt back in with GB_INDEX_ASSERTS=1. Checked ONCE at import.
 _GB_INDEX_ASSERTS = os.environ.get("GB_INDEX_ASSERTS", "0") == "1"
 
+# F-stat basis-filter fold. The 4 Cornish & Crowder basis filters are 2 psi
+# stages x 2 phase quadratures, and the analytic TDI is an EXACT phasor in
+# phi0, so the quadrature partners are a constant unit-modulus rotation of the
+# two generated stages -- halving the waveform generations inside
+# ``wdm_het_get_fstat_ll_kernel`` at zero physics cost (the fold is exact;
+# only floating-point reassociation separates the two paths). See the FOLD
+# note in lat_chunked_het_kernels.hh for the rotation and its sign.
+#
+# Default OFF: a plain pull + GBGPU rebuild keeps the unfolded 4-generation
+# path bit-for-bit. Opt in with GB_FSTAT_FOLD=1. Checked ONCE at import; the
+# per-instance ``fstat_fold`` attribute (and the ``get_fstat_ll_wdm`` kwarg of
+# the same name) override it, which is how the parity gate runs both paths in
+# one process.
+_GB_FSTAT_FOLD = int(os.environ.get("GB_FSTAT_FOLD", "0") != "0")
+
 # Fused phase-max sign contract: the chunked kernels also accumulate the
 # quadrature of each candidate-linear inner product (Im of the parity-map
 # coefficient W with Re(W) = w, whose rotation tracks a carrier phase shift
@@ -108,6 +123,20 @@ class WDMComputationsBase(LISAToolsParallelModule):
     #: True); bbhx/SOBBH has not (stays False; its calls append nothing and
     #: ``d_h_im_out`` stashes None).
     _FUSED_QUAD_KERNELS = False
+    #: Whether this comp's C++ ``get_fstat_ll`` BINDING accepts the trailing
+    #: ``fstat_fold`` argument (basis-filter fold). Exactly the
+    #: ``_FUSED_QUAD_KERNELS`` contract: the LAT kernel/impl default the
+    #: parameter OFF, so a source class opts in only after its own binding TU
+    #: grows it -- GBGPU has (``GBWDMComputations`` sets True); bbhx/SOBBH has
+    #: not (stays False, nothing is appended, and the fold is simply
+    #: unreachable there). Appending unconditionally would be a TypeError in
+    #: every downstream wheel that has not rebuilt.
+    _FSTAT_FOLD_KERNELS = False
+    #: Basis-filter fold for :meth:`get_fstat_ll_wdm`: 0 = OFF (default -- the
+    #: unfolded 4-generation path, bit-for-bit the pre-fold kernel), 1 = ON
+    #: (2 generations + the exact phi0 rotation). Seeded from ``GB_FSTAT_FOLD``
+    #: at import; override per instance or per call.
+    fstat_fold = _GB_FSTAT_FOLD
 
     def __init__(self, wdm_settings, t_ref,
                  Nt_sub=256, n_pad=32, N_sparse=256,
@@ -420,6 +449,27 @@ class WDMComputationsBase(LISAToolsParallelModule):
             getattr(holder, "band_slab_Nf", None),
             getattr(holder, "slab_min_f", None),
         )
+
+    def _fstat_fold_kernel_args(self, fstat_fold=None):
+        """Trailing ``fstat_fold`` arg for the C++ ``get_fstat_ll`` kernel.
+
+        Splatted AFTER :meth:`_slab_kernel_args` (the kernel signature order
+        is ``..., Nf_slab, slab_min_f, fstat_fold``). Returns:
+
+        * ``()`` on the JAX backend (its ``get_fstat_ll`` is unimplemented)
+          and on any source class whose binding TU has not grown the
+          parameter (``_FSTAT_FOLD_KERNELS`` False) -- appending there would
+          be a TypeError in a downstream wheel that has not rebuilt.
+        * ``(int(fold),)`` otherwise, resolving ``None`` to the instance's
+          :attr:`fstat_fold` (seeded from ``GB_FSTAT_FOLD``, default 0/OFF).
+        """
+        if not self._FSTAT_FOLD_KERNELS:
+            return ()
+        if self.backend.name == self._BACKEND_PREFIX + "_jax":
+            return ()
+        if fstat_fold is None:
+            fstat_fold = self.fstat_fold
+        return (int(bool(int(fstat_fold))),)
 
     def _slab_args_from(self, band_slab_Nf, slab_min_f):
         """Build the trailing C++ slab kernel args from explicit values.
@@ -1157,7 +1207,8 @@ class WDMComputationsBase(LISAToolsParallelModule):
                           data_index=None, noise_index=None,
                           convert_to_ra_dec: Optional[bool] = None,
                           grid_dim: int = 0,
-                          m_band_half_width: int = 1):
+                          m_band_half_width: int = 1,
+                          fstat_fold: Optional[int] = None):
         """Chunked-heterodyne F-stat over the WDM domain.
 
         Builds the 4 Cornish & Crowder '05 basis filters per binary at the
@@ -1191,6 +1242,14 @@ class WDMComputationsBase(LISAToolsParallelModule):
             m_band_half_width: layer-band half-width around f0
                 (m_floor +/- m_band_half_width, 2*m_band_half_width+1
                 layers total per binary). Default 1.
+            fstat_fold: basis-filter fold. ``None`` (default) uses
+                :attr:`fstat_fold`, itself seeded from ``GB_FSTAT_FOLD``
+                (default 0 = OFF). 0 generates all 4 filters independently;
+                1 generates only the 2 psi stages and recovers the
+                quadrature partners by an exact constant rotation -- same
+                (N, M) to floating-point reassociation, half the waveform
+                work. Ignored unless ``_FSTAT_FOLD_KERNELS`` is set (i.e.
+                unless this source class's binding TU accepts the argument).
         """
         params_tmp = self.xp.asarray(self.xp.atleast_2d(params)).copy()
         num_bin = params_tmp.shape[0]
@@ -1249,6 +1308,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
             float(self.resolved_tukey_alpha), int(grid_dim),
             int(m_band_half_width),
             *self._slab_kernel_args(wdm_holder),
+            *self._fstat_fold_kernel_args(fstat_fold),
         )
 
         # WDM coefs are real -> imag is identically 0.
