@@ -210,16 +210,32 @@ class CompactRowsLadderTest(unittest.TestCase):
             self.assertEqual(int(res["proposed"][0].sum()), 0)
             self.assertEqual(int(res["proposed"][-1].sum()), 0)
 
-    def test_inert_bands_are_credited_no_likelihood_change(self):
-        """Dropped rows must leave their ll ledger entries at zero."""
-        for b in FULLY_INERT_BANDS:
-            self.assertTrue(
-                np.all(self.on["ll_change"][..., b] == 0.0),
-                f"a compacted-out row of band {b} was credited an ll delta",
-            )
-            np.testing.assert_array_equal(
-                self.on["ll_change"][..., b], self.off["ll_change"][..., b]
-            )
+    def test_compaction_does_not_change_the_ll_ledger(self):
+        """Compaction must not move the likelihood ledger AT ALL.
+
+        This replaces an assertion that could not have held (fixed
+        2026-08-28). The old version indexed ``ll_change[..., b]`` for b in
+        FULLY_INERT_BANDS and required zero. Two things were wrong with it:
+
+        * ``ll_change`` is ``(ntemps, nwalkers)`` -- it has NO band axis, so
+          ``[..., 3]`` selected WALKER 3, not band 3, and ``[..., 4]`` was
+          plain out of bounds on a size-4 axis. The test never examined a
+          band, and would have raised IndexError on its second iteration had
+          the first one passed.
+        * The nonzero entries it tripped on are present with compaction OFF
+          too, byte for byte -- they are ordinary top-rung swap deltas, not
+          a miscredit.
+
+        The per-band inertness claim is already covered, correctly and on
+        genuinely band-indexed arrays, by the accepted/proposed counter
+        tests above. What belongs here is the lever's own contract: it is a
+        pure performance change, so the whole ledger must be identical.
+        That is strictly stronger than the per-band zero claim it replaces.
+        """
+        np.testing.assert_array_equal(
+            self.on["ll_change"], self.off["ll_change"],
+            err_msg="row compaction changed the likelihood ledger",
+        )
 
     def test_alive_mask_and_residual_round_trip(self):
         np.testing.assert_array_equal(
