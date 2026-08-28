@@ -23,7 +23,7 @@ from lisatools.response.directresponse import ResponseWrapper
 from lisatools.response.tdiconfig import TDIConfig
 from lisatools.sources.sobbh import SOBBHWaveform
 from lisatools.utils.constants import YRSID_SI
-from lisatools.utils.utility import asnumpy, get_array_module
+from lisatools.utils.utility import get_array_module
 
 # Canonical EMRI response-wrapper machinery lives in the installed
 # ``lisatools.sources.emri`` package (2026-07-01 carve-out); re-exported here
@@ -267,10 +267,19 @@ class MBHTDIonFlyWaveWrap:
         # directly; drop the legacy ResponseWrapper kwarg if present.
         call_kwargs.pop("convert_to_ra_dec", None)
         m1, m2, s1z, s2z, dist, phi_ref, inc, psi, ra, dec, t_plunge = params
-        # asnumpy, not np.asarray: with a GPU-backed generator
-        # (SYNTHETIC_INJECTION_BACKEND=auto) the output is cupy, and
-        # np.asarray on cupy RAISES (no implicit host conversion).
-        arr = asnumpy(
+        # NO host conversion here (2026-08-27, job 353): return the
+        # generator's NATIVE array. ``__call__`` feeds this straight into
+        # ``TDSignal(arr, self.td_settings)``, and TDSignal takes its
+        # ``xp``/``backend`` from the SETTINGS while storing the array
+        # unconverted -- so pulling to host under GPU settings built a
+        # signal whose array (NumPy) and ``xp`` (CuPy) disagreed. The
+        # default window is then ``self.xp.ones(...)`` and ``fft`` does
+        # ``self.arr * window`` = NumPy * CuPy, which CuPy refuses:
+        # "TypeError: Unsupported type <class 'numpy.ndarray'>".
+        # The conversion was redundant anyway -- the one consumer that
+        # needs a host array (injections.py's synthetic stream builder)
+        # already wraps this call in its own ``asnumpy(...)``.
+        arr = (
             self.wave_gen(
                 m1, m2, s1z, s2z, dist, phi_ref, inc, ra, dec, psi, t_plunge,
                 upsample_t_arr=self.t_arr, combine=True, **call_kwargs,
@@ -369,10 +378,19 @@ class SOBBHTDIonFlyWaveWrap:
         call_kwargs.update(kwargs)
         call_kwargs.pop("convert_to_ra_dec", None)
         m1, m2, s1, s2, dist, inc, f_low, ra, dec, psi, phi0 = params
-        # asnumpy, not np.asarray: with a GPU-backed generator
-        # (SYNTHETIC_INJECTION_BACKEND=auto) the output is cupy, and
-        # np.asarray on cupy RAISES (no implicit host conversion).
-        arr = asnumpy(
+        # NO host conversion here (2026-08-27, job 353): return the
+        # generator's NATIVE array. ``__call__`` feeds this straight into
+        # ``TDSignal(arr, self.td_settings)``, and TDSignal takes its
+        # ``xp``/``backend`` from the SETTINGS while storing the array
+        # unconverted -- so pulling to host under GPU settings built a
+        # signal whose array (NumPy) and ``xp`` (CuPy) disagreed. The
+        # default window is then ``self.xp.ones(...)`` and ``fft`` does
+        # ``self.arr * window`` = NumPy * CuPy, which CuPy refuses:
+        # "TypeError: Unsupported type <class 'numpy.ndarray'>".
+        # The conversion was redundant anyway -- the one consumer that
+        # needs a host array (injections.py's synthetic stream builder)
+        # already wraps this call in its own ``asnumpy(...)``.
+        arr = (
             self.wave_gen(
                 m1, m2, s1, s2, dist, f_low, phi0, inc, ra, dec, psi,
                 upsample_t_arr=self.t_arr, combine=True, **call_kwargs,
