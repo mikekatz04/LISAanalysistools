@@ -171,6 +171,29 @@ def maybe_write(
             "tag": str(tag),
             "unix_time": time.time(),
         }
+        # TODO(checkpoint size): the payload is dominated by ALLOCATED leaf
+        # capacity, not occupied sources. Measured on the 3-mo v8 probe (job
+        # 369): 450.1 MB per write, 0.53 s. Breakdown at GB_NLEAVES_MAX=10000
+        # / GB_NTEMPS=24 / NWALKERS=24 / 9-param GB basis:
+        #     24 x 24 x 10000 x 9 x 8 B = 414.7 MB   tempered GB coords
+        #   + inds mask ~5.8 MB + per-leaf GB supplementals ~46 MB
+        # i.e. ~92% is the dense GB block, and during the noise stages (GB
+        # empty) essentially all of it is unoccupied slots.
+        # TIME is not the problem: 0.53 s throttled to one write per 600 s is
+        # ~0.09% of wall clock, cheap insurance against spot preemption.
+        # SPACE is: ~450 MB steady (one overwritten file) and ~900 MB while
+        # the .tmp exists. Options, best value first:
+        #   1. wrap the stream in gzip(level=1)/lz4 -- a mostly-zeros payload
+        #      should shrink 10-40x for ~1-3 s CPU; touches only this write
+        #      and load_for_resume, no format redesign;
+        #   2. persist only occupied leaves (mask-compress here, re-expand on
+        #      load) -- better asymptotically, but it is a format change on
+        #      the resume path, i.e. risk against the one feature whose job
+        #      is disaster recovery;
+        #   3. do nothing -- defensible on the numbers above.
+        # NOTE the same dense-capacity effect drives h5 growth and save_step,
+        # so revisiting GB_NLEAVES_MAX against real occupancy is the larger
+        # lever and should be checked first.
         t0 = time.perf_counter()
         with open(tmp, "wb") as fh:
             pickle.dump(
