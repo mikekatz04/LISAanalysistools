@@ -144,13 +144,39 @@ def build_coarse_P_batch(
         (nw, 3, 3) + tuple(settings.basis_shape_active), dtype=arr.dtype
     )
     chunk = max(1, int(chunk_bytes // max(8 * 3 * nf_active * max_cell, 1)))
+
+    # Uniform leading cells are contracted in ONE einsum over a rectangular
+    # (..., n_full, Q) view; only the ragged tail (at most a cell or two,
+    # since from_fine splits Nt_active into cells of Q plus a remainder) falls
+    # back to the per-cell path. On a GPU this is the difference between one
+    # kernel launch and one per coarse cell -- 266 of them at the 3-mo grid
+    # with Q=8. The contraction is over k WITHIN a cell either way, so the
+    # reduction order is unchanged.
+    sizes = np.asarray(settings.cell_sizes, dtype=np.int64)
+    starts = np.asarray(settings.cell_starts, dtype=np.int64)
+    n_full = 0
+    if sizes.size:
+        Q = int(sizes[0])
+        uniform = sizes == Q
+        n_full = int(np.argmin(uniform)) if not bool(uniform.all()) else int(sizes.size)
+        # the rectangular view is only valid while the cells stay contiguous
+        expected = np.arange(n_full, dtype=np.int64) * Q
+        if n_full and not np.array_equal(starts[:n_full], expected):
+            n_full = 0
+
     for lo in range(0, nw, chunk):
         rows = slice(lo, min(lo + chunk, nw))
         block_all = arr[rows]
-        for ci, (start, size) in enumerate(
-            zip(settings.cell_starts, settings.cell_sizes)
-        ):
-            block = block_all[..., int(start) : int(start + size)]
+        if n_full:
+            rect = block_all[..., : n_full * Q].reshape(
+                block_all.shape[0], 3, nf_active, n_full, Q
+            )
+            out[rows, ..., :n_full] = xp.einsum(
+                "wamqk,wbmqk->wabmq", rect, rect
+            ) / float(Q)
+        for ci in range(n_full, int(sizes.size)):
+            start, size = int(starts[ci]), int(sizes[ci])
+            block = block_all[..., start : start + size]
             out[rows, ..., ci] = xp.einsum(
                 "wamk,wbmk->wabm", block, block
             ) / float(size)

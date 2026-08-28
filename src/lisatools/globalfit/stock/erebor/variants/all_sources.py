@@ -222,6 +222,30 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
         default_factory=env_default("GALFOR_MODULATION_T0", None, str)
     )
 
+    # --- coarse real-WDM noise likelihood: ON BY DEFAULT here (user ruling
+    #     2026-08-28, "make the coarse the default ... faster PSD fitting is
+    #     always good"). Overrides the EreborGeneralSettings defaults, which
+    #     stay off/1 -- the noise-only variants REFUSE a coarse mode (they use
+    #     the CPU backend-replacement path), so this must not move on the
+    #     shared base.
+    #
+    #     Mode is `delayed_acceptance`, NOT `search_approx`: DA keeps the FINE
+    #     likelihood as the sampled target (stage 1 screens on the coarse
+    #     surrogate, stage 2 corrects with the exact fine/coarse ratio), so
+    #     turning it on changes how fast the chain moves, NOT what it samples.
+    #     `search_approx` is faster still but is an optimiser, not a posterior
+    #     sampler -- opt into it per search stage, never as a default.
+    #
+    #     COARSE_Q=8 matches the probe leg so the configuration that gets
+    #     measured is the configuration that ships; scripts/noise/coarse_q_scan.py
+    #     tunes it (bigger Q = cheaper surrogate but lower stage-1 survival,
+    #     which costs efficiency, never correctness).
+    #     Off switch: COARSE_GPU_MODE=off (or COARSE_Q=1).
+    coarse_Q: int = dataclasses.field(default_factory=env_default("COARSE_Q", 8, int))
+    coarse_gpu_mode: str = dataclasses.field(
+        default_factory=env_default("COARSE_GPU_MODE", "delayed_acceptance", str)
+    )
+
     # --- unequal-arm instrument noise (env UNEQUAL_ARM=1) ---
     # Swap the equal-arm InstrumentNoise for UnequalArmInstrumentNoise, the
     # six link light travel times read from the mojito NOISE brick's /ltts

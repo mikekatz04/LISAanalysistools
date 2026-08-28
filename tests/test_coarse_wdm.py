@@ -534,7 +534,9 @@ class CoarseKnobValidationTest(unittest.TestCase):
         from lisatools.globalfit.stock import erebor
         from lisatools.globalfit.stock.erebor.noise import validate_coarse_settings
 
-        fit = erebor.all_sources(lite=True, coarse_Q=4)
+        # BOTH knobs explicit: all_sources now DEFAULTS to coarse on, so a
+        # test that set only one would no longer construct a mismatch.
+        fit = erebor.all_sources(lite=True, coarse_Q=4, coarse_gpu_mode="off")
         with self.assertRaisesRegex(ValueError, "COARSE_GPU_MODE"):
             validate_coarse_settings(fit.general, all_source=True)
 
@@ -542,9 +544,29 @@ class CoarseKnobValidationTest(unittest.TestCase):
         from lisatools.globalfit.stock import erebor
         from lisatools.globalfit.stock.erebor.noise import validate_coarse_settings
 
-        fit = erebor.all_sources(lite=True, coarse_gpu_mode="delayed_acceptance")
+        fit = erebor.all_sources(
+            lite=True, coarse_gpu_mode="delayed_acceptance", coarse_Q=1
+        )
         with self.assertRaisesRegex(ValueError, "COARSE_Q > 1"):
             validate_coarse_settings(fit.general, all_source=True)
+
+    def test_defaults_coarse_on_for_all_sources_off_for_noise_only(self):
+        """The 2026-08-28 default ruling, pinned in both directions.
+
+        all_sources ships coarse ON in `delayed_acceptance` -- which keeps the
+        FINE likelihood as the sampled target -- while the noise-only variants
+        must stay off/1: their validator REFUSES a coarse mode (they use the
+        CPU backend-replacement path), so a shared-base flip would break them.
+        """
+        from lisatools.globalfit.stock import erebor
+
+        a = erebor.all_sources(lite=True)
+        self.assertEqual(a.general.coarse_gpu_mode, "delayed_acceptance")
+        self.assertGreater(a.general.coarse_Q, 1)
+        for name in ("noise_only_lite", "noise_sgwb_lite"):
+            n = erebor.get_stock(name)
+            self.assertEqual(n.general.coarse_gpu_mode, "off")
+            self.assertEqual(n.general.coarse_Q, 1)
 
     def test_all_source_valid_combo_passes(self):
         from lisatools.globalfit.stock import erebor
