@@ -1021,7 +1021,7 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # silence bands that a longer clock would have kept open, so read the
 # [GB_BAND_SHUTOFF] / [GB_BAND_REVIVE] pair as a machinery test, not as a
 # tuned search policy. Put it back to 5 once the machinery is confirmed.
-export GB_RJ_BAND_SHUTOFF_AFTER=1
+export GB_RJ_BAND_SHUTOFF_ITERS=1
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # Backstop revival (new 2026-08-28): iterations with NO new F-stat epoch
 # after which the shut-off set is cleared anyway; 0 disables the trigger.

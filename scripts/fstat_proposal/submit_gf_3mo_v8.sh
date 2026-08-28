@@ -1115,7 +1115,7 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # so those 9 bands get repeated chances instead of one. The cost of the
 # short clock is now a DELAY on a genuinely barren-looking band, not a
 # permanent loss. Revivals log as [GB_BAND_REVIVE <move>].
-export GB_RJ_BAND_SHUTOFF_AFTER=5
+export GB_RJ_BAND_SHUTOFF_ITERS=5
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # Backstop revival (new 2026-08-28): iterations with NO new F-stat epoch
 # after which the shut-off set is cleared anyway; 0 disables the trigger.

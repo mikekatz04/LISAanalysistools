@@ -120,6 +120,7 @@ class _MoveStub:
 
     _band_shutoff_revive = GBSpecialBase._band_shutoff_revive
     _band_shutoff_reset_iters = GBSpecialBase._band_shutoff_reset_iters
+    _band_shutoff_iters = GBSpecialBase._band_shutoff_iters
     _band_shutoff_epoch_sync = GBSpecialBase._band_shutoff_epoch_sync
     _update_band_shutoff = GBSpecialBase._update_band_shutoff
 
@@ -128,7 +129,7 @@ def _env(**kw):
     """Pin the shutoff knobs so a stray shell export cannot skew a test."""
     base = {
         "GB_RJ_BAND_SHUTOFF_FMIN_MHZ": "10.0",
-        "GB_RJ_BAND_SHUTOFF_AFTER": "5",
+        "GB_RJ_BAND_SHUTOFF_ITERS": "5",
         "GB_RJ_BAND_SHUTOFF_RESET_ITERS": "0",  # off unless a test asks
     }
     base.update(kw)
@@ -281,7 +282,7 @@ if __name__ == "__main__":
 
 
 class KillSwitchTest(unittest.TestCase):
-    """``GB_RJ_BAND_SHUTOFF_AFTER <= 0`` disables the valve entirely.
+    """``GB_RJ_BAND_SHUTOFF_ITERS <= 0`` disables the valve entirely.
 
     The shutoff is otherwise live with no way to turn it off from the
     environment, and its enforcement is a FULL RJ FREEZE -- so an operator
@@ -290,24 +291,24 @@ class KillSwitchTest(unittest.TestCase):
     """
 
     def test_zero_never_shuts_off(self):
-        with _env(GB_RJ_BAND_SHUTOFF_AFTER="0"):
+        with _env(GB_RJ_BAND_SHUTOFF_ITERS="0"):
             m = _MoveStub()
             _drive(m, 50)
             self.assertFalse(m._rj_band_shutoff.any())
 
     def test_minus_one_never_shuts_off(self):
-        with _env(GB_RJ_BAND_SHUTOFF_AFTER="-1"):
+        with _env(GB_RJ_BAND_SHUTOFF_ITERS="-1"):
             m = _MoveStub()
             _drive(m, 50)
             self.assertFalse(m._rj_band_shutoff.any())
 
     def test_disabling_mid_run_releases_shut_off_bands(self):
         """Flipping it off must not strand a frozen band."""
-        with _env(GB_RJ_BAND_SHUTOFF_AFTER="5"):
+        with _env(GB_RJ_BAND_SHUTOFF_ITERS="5"):
             m = _MoveStub()
             _drive(m, 5)
             self.assertTrue(m._rj_band_shutoff[3])
-        with _env(GB_RJ_BAND_SHUTOFF_AFTER="0"):
+        with _env(GB_RJ_BAND_SHUTOFF_ITERS="0"):
             _drive(m, 1)
             self.assertFalse(m._rj_band_shutoff.any())
             self.assertTrue((m._band_occ_streak == 0).all())
@@ -315,10 +316,53 @@ class KillSwitchTest(unittest.TestCase):
     def test_default_is_five(self):
         """Unset means 5, not disabled."""
         env = {k: v for k, v in os.environ.items()
-               if k != "GB_RJ_BAND_SHUTOFF_AFTER"}
+               if k not in ("GB_RJ_BAND_SHUTOFF_ITERS", "GB_RJ_BAND_SHUTOFF_AFTER")}
         with mock.patch.dict(os.environ, env, clear=True):
             os.environ["GB_RJ_BAND_SHUTOFF_FMIN_MHZ"] = "10.0"
             os.environ["GB_RJ_BAND_SHUTOFF_RESET_ITERS"] = "0"
+            m = _MoveStub()
+            _drive(m, 4)
+            self.assertFalse(m._rj_band_shutoff.any())
+            _drive(m, 1)
+            self.assertTrue(m._rj_band_shutoff[3])
+
+
+class LegacyKnobNameTest(unittest.TestCase):
+    """The old name still works, so an existing runbook is not downgraded.
+
+    An unrecognised env var is silently ignored, so a hard rename would
+    quietly fall back to the default instead of failing -- which is why the
+    legacy name is honoured rather than dropped.
+    """
+
+    def _clean(self, **kw):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GB_RJ_BAND_SHUTOFF_ITERS",
+                            "GB_RJ_BAND_SHUTOFF_AFTER")}
+        env["GB_RJ_BAND_SHUTOFF_FMIN_MHZ"] = "10.0"
+        env["GB_RJ_BAND_SHUTOFF_RESET_ITERS"] = "0"
+        env.update(kw)
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def test_legacy_name_is_honoured(self):
+        with self._clean(GB_RJ_BAND_SHUTOFF_AFTER="2"):
+            m = _MoveStub()
+            _drive(m, 1)
+            self.assertFalse(m._rj_band_shutoff.any())
+            _drive(m, 1)
+            self.assertTrue(m._rj_band_shutoff[3])
+
+    def test_canonical_name_wins_over_legacy(self):
+        with self._clean(GB_RJ_BAND_SHUTOFF_ITERS="5",
+                         GB_RJ_BAND_SHUTOFF_AFTER="1"):
+            m = _MoveStub()
+            _drive(m, 4)
+            self.assertFalse(m._rj_band_shutoff.any())
+            _drive(m, 1)
+            self.assertTrue(m._rj_band_shutoff[3])
+
+    def test_garbage_value_falls_back_to_five(self):
+        with self._clean(GB_RJ_BAND_SHUTOFF_ITERS="not-an-int"):
             m = _MoveStub()
             _drive(m, 4)
             self.assertFalse(m._rj_band_shutoff.any())

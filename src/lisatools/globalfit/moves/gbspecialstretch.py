@@ -5729,6 +5729,41 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return 100
         return max(0, n)
 
+    def _band_shutoff_iters(self) -> int:
+        """Consecutive ZERO-occupancy iterations required to shut a band off.
+
+        ``GB_RJ_BAND_SHUTOFF_ITERS`` (default 5). It is a COUNT, not an
+        absolute iteration index: the band shuts off ON the Nth consecutive
+        iteration at zero cold-chain occupancy, and any occupancy >= 1
+        resets the count to zero. ``0`` or any negative value DISABLES the
+        valve entirely (and releases anything already shut off).
+
+        Legacy name ``GB_RJ_BAND_SHUTOFF_AFTER`` is still honoured, with a
+        one-time warning. A hard rename would be silently destructive here:
+        an unrecognised environment variable is simply ignored, so an old
+        runbook exporting the legacy name would quietly fall back to the
+        default instead of failing -- the exact downgrade the repo's
+        ENV_ALIASES policy exists to prevent.
+        """
+        v = os.environ.get("GB_RJ_BAND_SHUTOFF_ITERS")
+        if v is None:
+            v = os.environ.get("GB_RJ_BAND_SHUTOFF_AFTER")
+            if v is not None and not getattr(
+                    self, "_band_shutoff_legacy_warned", False):
+                self._band_shutoff_legacy_warned = True
+                logger.warning(
+                    "%s: GB_RJ_BAND_SHUTOFF_AFTER is the legacy name for "
+                    "GB_RJ_BAND_SHUTOFF_ITERS and is still honoured "
+                    "(value %s); please rename it in the submit script.",
+                    self.name, v)
+        try:
+            return int(v) if v is not None else 5
+        except ValueError:
+            logger.warning(
+                "%s: GB_RJ_BAND_SHUTOFF_ITERS=%r is not an integer; "
+                "using the default 5.", self.name, v)
+            return 5
+
     def _band_shutoff_revive(self, reason: str) -> int:
         """Clear the shut-off set + occupancy streaks -> #bands revived.
 
@@ -5844,7 +5879,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         propose end of the (single) designated move. Rules, exactly as
         ruled:
 
-        - occupancy == 0 for ``GB_RJ_BAND_SHUTOFF_AFTER`` (default 5)
+        - occupancy == 0 for ``GB_RJ_BAND_SHUTOFF_ITERS`` (default 5)
           consecutive iterations -> the band is shut off (nothing ever
           sticks). **This is the ONLY qualifying state.**
         - ANY occupancy >= 1, or ANY occupancy change, resets the streak.
@@ -5881,7 +5916,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._band_occ_last = np.full(self.num_bands, -1, dtype=np.int64)
             self._rj_band_shutoff = np.zeros(self.num_bands, dtype=bool)
         # ---- KILL-SWITCH (user ruling 2026-08-28) ------------------------
-        # ``GB_RJ_BAND_SHUTOFF_AFTER`` is the iteration clock AND the
+        # ``GB_RJ_BAND_SHUTOFF_ITERS`` is the iteration clock AND the
         # on/off knob: <= 0 (use 0 or -1) disables the valve entirely.
         # Read FIRST, before any streak or revival bookkeeping, so a
         # disabled valve does nothing at all -- and so flipping it off
@@ -5890,11 +5925,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # leave shut-off bands frozen forever, which is exactly the
         # trapped-junk failure the revival design exists to prevent
         # (enforcement is a full RJ freeze, see ``run_proposal``).
-        after = int(os.environ.get("GB_RJ_BAND_SHUTOFF_AFTER", "5"))
+        after = self._band_shutoff_iters()
         if after <= 0:
             if self._rj_band_shutoff.any():
                 self._band_shutoff_revive(
-                    f"GB_RJ_BAND_SHUTOFF_AFTER={after} -- valve disabled")
+                    f"GB_RJ_BAND_SHUTOFF_ITERS={after} -- valve disabled")
             self._band_occ_streak[:] = 0
             self._band_occ_last[:] = -1
             return
