@@ -10990,6 +10990,41 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             out[g_dev] = g_dev[cp.random.permutation(len(g))]
         return out
 
+    def _batched_walker_permutations(self, n_rows):
+        """``(n_rows, nwalkers)`` independent walker permutations, batched.
+
+        The batched form of :meth:`_permute_walkers_for_swaps`
+        (``GB_TEMPER_BATCH_PERMS``): one uniform draw plus one
+        ``argsort`` for ALL rows, instead of one
+        ``cp.random.permutation`` launch per row.
+
+        An ``argsort`` of ``nwalkers`` iid continuous uniforms is a
+        uniformly-distributed random permutation -- all ``nwalkers!``
+        orderings are equally likely, because the uniforms are almost
+        surely distinct and every ordering of iid exchangeable variates
+        has equal probability. So each row here has exactly the same
+        distribution as one ``cp.random.permutation(nwalkers)``, and rows
+        are independent. The RNG STREAM differs, so realized values do
+        not match call for call -- distribution-identical, not
+        bit-identical.
+
+        The multi-GPU (``_tempering_walker_groups``) case keeps its
+        per-device-block structure: each block is permuted within itself,
+        so a swap pair's parent walkers still share a device.
+        """
+        groups = getattr(self, "_tempering_walker_groups", None)
+        if not groups:
+            return cp.argsort(
+                cp.random.uniform(size=(n_rows, self.nwalkers)), axis=1
+            )
+        out = cp.empty((n_rows, self.nwalkers), dtype=int)
+        for g in groups:
+            g_dev = cp.asarray(g)
+            n_g = int(g_dev.shape[0])
+            order = cp.argsort(cp.random.uniform(size=(n_rows, n_g)), axis=1)
+            out[:, g_dev] = g_dev[order]
+        return out
+
     def _tempering_swap_grid(self, band_sorter, start, units=2):
         """Permuted (band, walker, temp) cell grid for one tempering unit.
 
@@ -11017,16 +11052,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         num_bands_unit = np.arange(num_bands_tempered)[start::units].shape[0]
 
-        walkers_permuted = (
-            cp.asarray(
-                [
-                    self._permute_walkers_for_swaps()
-                    for _ in range(self.ntemps * num_bands_tempered)
-                ]
+        if _temper_batch_perms_on():
+            # Draw ONLY the kept (band, temp) rows. The legacy path below
+            # builds all ``num_bands_tempered * ntemps`` permutations and
+            # then throws away all but every ``units``-th band.
+            walkers_permuted = (
+                self._batched_walker_permutations(
+                    num_bands_unit * self.ntemps
+                )
+                .reshape(num_bands_unit, self.ntemps, self.nwalkers)
+                .transpose(0, 2, 1)
             )
-            .reshape(num_bands_tempered, self.ntemps, self.nwalkers)
-            .transpose(0, 2, 1)[start::units]
-        )
+        else:
+            walkers_permuted = (
+                cp.asarray(
+                    [
+                        self._permute_walkers_for_swaps()
+                        for _ in range(self.ntemps * num_bands_tempered)
+                    ]
+                )
+                .reshape(num_bands_tempered, self.ntemps, self.nwalkers)
+                .transpose(0, 2, 1)[start::units]
+            )
         temp_index = (
             cp.repeat(cp.arange(self.ntemps), num_bands_tempered * self.nwalkers)
             .reshape(self.ntemps, num_bands_tempered, self.nwalkers)
