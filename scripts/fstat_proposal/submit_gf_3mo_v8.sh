@@ -404,10 +404,21 @@ export GB_NLEAVES_MAX=10000
 # flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
 # full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
 export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
-# RJ pick thinning (user ruling 2026-08-14): each round proposes to a
-# 0.3 random subset of eligible slots; in-model repeats still cover
-# ALL alive sources (flip gate is rj-only by construction).
-export GB_RJ_FLIP_FRACTION=0.2
+# RJ pick thinning. UNSET as of 2026-08-28 -- the value now lives in code
+# (_SEARCH_RJ_FLIP_DEFAULT / _PE_RJ_FLIP_DEFAULT in recipe.py, both 0.2),
+# so behavior is UNCHANGED from the 0.2 this line used to export.
+#
+# Removed rather than kept because {BRANCH}_RJ_FLIP_FRACTION is a GLOBAL
+# override: one exported value lands on every RJ move in every stage, so
+# it silently collapses any future search/PE split. The five search-named
+# RJ moves are now passed the default explicitly at their construction
+# sites (LAT bba4219d) -- before that they only reached 0.2 BECAUSE of
+# this export, and would have fallen through to a hard-coded 1.0 without
+# it. The old comment here also said "0.3 random subset" while exporting
+# 0.2; that contradiction is gone with the line.
+# In-model repeats are unaffected either way -- they cover ALL alive
+# sources; the flip gate is rj-only by construction.
+# export GB_RJ_FLIP_FRACTION=0.2   # <- re-export ONLY to force ALL stages
 # In-model info-matrix jump scale: 0.005 default measured 95% cold
 # acceptance; 0.2 -> 0.61; 0.4 -> 0.60 (job 196). Job 197 flipped the
 # story: with the EXACT per-block SIGHET info matrices live, cold
@@ -1027,8 +1038,14 @@ export GB_PHASE_MAX_FUSED=1
 # iteration. The OFF baseline is already banked (snapshot 13, 830.2 s).
 # =0 restores the unfolded 4-generation path bit-for-bit.
 # REQUIRES A GBGPU REBUILD -- LAT does not compile that header. A stale
-# .so is a SILENT no-op here (no loader fallback, unlike the routing
-# kernels), so confirm by rj_fstat_centers moving, not by a clean build.
+# .so is a LOUD TypeError at the first F-stat call, NOT a silent no-op
+# (corrected 2026-08-28; the earlier note here said the opposite).
+# _FSTAT_FOLD_KERNELS in gbcomps.py is a hard constant rather than a probe
+# of the compiled binding, and the trailing fold arg is passed
+# unconditionally -- fold ON or OFF -- so a binding that predates the fold
+# cannot accept it and raises immediately. rj_fstat_centers ~830 -> ~400-450
+# s is still the check that the fold is doing work, but a bad build fails
+# first and visibly.
 export GB_FSTAT_FOLD=1
 # REPLACE PHASE-MAX + ROTATION-ON-ACCEPT. "auto" (not =1): ON for the
 # search replace exactly as =1 was, OFF for any PE-stamped replace. A hard
