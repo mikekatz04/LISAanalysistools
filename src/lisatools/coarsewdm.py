@@ -112,6 +112,175 @@ class CoarseWDMStatistic:
         self.P[...] = updated
 
 
+def build_coarse_P_batch(
+    residuals, settings: CoarseWDMSettings, chunk_bytes: int = 256 * 1024 * 1024
+):
+    """Per-walker coarse sample covariances ``(nw, 3, 3, Nf_active, Ncoarse)``.
+
+    The all-source seam: every walker owns its own residual, so the shared
+    single-statistic model does not apply. Bitwise-identical to one
+    :func:`_coarse_sample_covariance` per walker — each cell is the same
+    single einsum contraction, with a leading walker axis. ``chunk_bytes``
+    bounds the walker chunk via the largest cell block
+    (``8 B * 3 * Nf_active * max_cell`` per walker).
+    """
+    if not isinstance(settings, CoarseWDMSettings):
+        raise TypeError("settings must be CoarseWDMSettings.")
+    xp = get_array_module(residuals)
+    arr = xp.asarray(residuals)
+    expected_tail = (3,) + tuple(settings.fine_settings.basis_shape_active)
+    if arr.ndim != 4 or tuple(arr.shape[1:]) != expected_tail:
+        raise ValueError(
+            "residuals must have shape (nwalkers, "
+            f"{', '.join(map(str, expected_tail))}); got {tuple(arr.shape)}."
+        )
+    if np.iscomplexobj(arr):
+        raise ValueError("Coarse WDM likelihood currently supports real WDM data only.")
+
+    nw = int(arr.shape[0])
+    nf_active = int(settings.basis_shape_active[0])
+    max_cell = int(max(settings.cell_sizes))
+    out = xp.empty(
+        (nw, 3, 3) + tuple(settings.basis_shape_active), dtype=arr.dtype
+    )
+    chunk = max(1, int(chunk_bytes // max(8 * 3 * nf_active * max_cell, 1)))
+    for lo in range(0, nw, chunk):
+        rows = slice(lo, min(lo + chunk, nw))
+        block_all = arr[rows]
+        for ci, (start, size) in enumerate(
+            zip(settings.cell_starts, settings.cell_sizes)
+        ):
+            block = block_all[..., int(start) : int(start + size)]
+            out[rows, ..., ci] = xp.einsum(
+                "wamk,wbmk->wabm", block, block
+            ) / float(size)
+    return out
+
+
+@dataclass
+class CoarseWDMRuntime:
+    """Runtime-only coarse-noise state for an all-source run.
+
+    Owns the per-walker coarse residual statistics, the frozen effective dof,
+    and (once wired) the coarse sidecar backend. Configuration fields are
+    plain scalars; everything array-like or device-resident is dropped from
+    pickles/deepcopies (``__getstate__``), so the object never smuggles
+    statistics across MPI or onto the settings tree.
+
+    ``mode``: ``"off"`` | ``"search_approx"`` | ``"delayed_acceptance"``
+    (the only mode valid for production PE).
+    """
+
+    coarse_settings: CoarseWDMSettings
+    qeff: Optional[object] = None
+    qeff_channels: Optional[object] = None
+    use_ws: bool = True
+    mode: str = "off"
+    batch_bytes: int = 256 * 1024 * 1024
+    fiducial_digest: str = ""
+    coarse_backend: Optional[object] = None
+
+    _MODES = ("off", "search_approx", "delayed_acceptance")
+
+    def __post_init__(self):
+        if not isinstance(self.coarse_settings, CoarseWDMSettings):
+            raise TypeError("coarse_settings must be CoarseWDMSettings.")
+        if self.mode not in self._MODES:
+            raise ValueError(
+                f"mode must be one of {self._MODES}; got {self.mode!r}."
+            )
+        self._P = None
+        self._stat_template = None
+
+    @property
+    def xp(self):
+        """Array module derived from the settings backend (never stored)."""
+        return self.coarse_settings.xp
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state["_P"] = None
+        state["_stat_template"] = None
+        state["coarse_backend"] = None
+        state["qeff"] = None if self.qeff is None else np.asarray(self.qeff)
+        state["qeff_channels"] = (
+            None
+            if self.qeff_channels is None
+            else np.asarray(self.qeff_channels)
+        )
+        return state
+
+    def refresh_P(self, acs, walkers=None) -> None:
+        """Rebuild the per-walker statistics from the CURRENT residuals.
+
+        ``acs`` is any sequence whose elements expose ``data_res_arr`` (an
+        :class:`AnalysisContainer`, or a stub) or are plain arrays. The
+        correctness-first lifecycle refreshes every walker at the start of
+        each noise proposal block; partial refreshes (residual epochs) are a
+        later optimization and deliberately unsupported here.
+        """
+        if walkers is not None:
+            raise NotImplementedError(
+                "partial refresh is a later optimization (residual epochs); "
+                "refresh_P currently rebuilds every walker."
+            )
+        xp = self.xp
+        arrays = []
+        for item in acs:
+            arr = getattr(item, "data_res_arr", item)
+            arrays.append(xp.asarray(arr[:]))
+        stacked = xp.stack(arrays, axis=0)
+        self._P = build_coarse_P_batch(
+            stacked, self.coarse_settings, chunk_bytes=self.batch_bytes
+        )
+
+    def P_rows(self, walkers):
+        """Per-walker statistic rows ``(len(walkers), 3, 3, Nf_active, Ncoarse)``."""
+        if self._P is None:
+            raise RuntimeError(
+                "refresh_P has not run; the per-walker statistics are absent."
+            )
+        return self._P[self.xp.asarray(walkers, dtype=int)]
+
+    def _template_stat(self) -> "CoarseWDMStatistic":
+        if self._stat_template is None:
+            qeff = self.qeff
+            channels = self.qeff_channels
+            if qeff is None:
+                if self.use_ws:
+                    raise ValueError(
+                        "use_ws=True requires the frozen fiducial qeff."
+                    )
+                qeff, channels = compute_qeff(
+                    None, self.coarse_settings, use_ws=False, return_channels=True
+                )
+            shape = (3, 3) + tuple(self.coarse_settings.basis_shape_active)
+            self._stat_template = CoarseWDMStatistic(
+                P=self.xp.zeros(shape),
+                Qeff=self.xp.asarray(qeff),
+                settings=self.coarse_settings,
+                Qeff_channels=None if channels is None else self.xp.asarray(channels),
+            )
+        return self._stat_template
+
+    def coarse_log_like_batch(
+        self,
+        covariances,
+        walker_inds,
+        *,
+        noise_only: bool = False,
+        frequency_indices=None,
+    ) -> np.ndarray:
+        """Score candidate coarse covariances against their walkers' statistics."""
+        return coarse_wdm_log_likelihood_batch(
+            self._template_stat(),
+            covariances,
+            noise_only=noise_only,
+            frequency_indices=frequency_indices,
+            per_row_P=self.P_rows(walker_inds),
+        )
+
+
 def _fine_covariance_array(fiducial_sens_mat_fine):
     if fiducial_sens_mat_fine is None:
         return None
@@ -230,6 +399,7 @@ def coarse_wdm_log_likelihood_batch_frequency_terms(
     *,
     noise_only: bool = False,
     frequency_indices=None,
+    per_row_P=None,
 ):
     """Score a covariance batch and retain one likelihood term per layer.
 
@@ -291,22 +461,47 @@ def coarse_wdm_log_likelihood_batch_frequency_terms(
         detC = xp.where(bad_det, xp.ones_like(detC), detC)
 
     qeff = xp.asarray(stat.Qeff)
-    P = xp.asarray(stat.P)
+    if per_row_P is None:
+        P = xp.asarray(stat.P)
+    else:
+        # Per-walker statistics (all-source seam): one P row per covariance
+        # row, shaped (batch, 3, 3, Nf_active, Ncoarse) on the full grid.
+        P = xp.asarray(per_row_P)
+        expected_rows = (covariance.shape[0], 3, 3) + tuple(
+            stat.settings.basis_shape_active
+        )
+        if tuple(P.shape) != expected_rows:
+            raise ValueError(
+                f"per_row_P has shape {tuple(P.shape)}; expected {expected_rows}."
+            )
     if frequency_indices_xp is not None:
         qeff = qeff[frequency_indices_xp]
-        P = P[:, :, frequency_indices_xp]
+        P = (
+            P[:, :, frequency_indices_xp]
+            if per_row_P is None
+            else P[:, :, :, frequency_indices_xp]
+        )
+    P_finite = (
+        xp.all(xp.isfinite(P), axis=(0, 1))[None, ...]
+        if per_row_P is None
+        else xp.all(xp.isfinite(P), axis=(1, 2))
+    )
     valid = (
         (qeff[None, ...] > 0.0)
         & xp.isfinite(qeff)[None, ...]
         & xp.isfinite(detC)
         & (detC != 0.0)
         & xp.all(xp.isfinite(invC), axis=(0, 1))
-        & xp.all(xp.isfinite(P), axis=(0, 1))[None, ...]
+        & P_finite
     )
     weights = xp.where(valid, qeff[None, ...], 0.0)
     quadratic_pixel = xp.where(
         valid,
-        xp.real(xp.einsum("abxmq,abmq->xmq", invC, P)),
+        xp.real(
+            xp.einsum("abxmq,abmq->xmq", invC, P)
+            if per_row_P is None
+            else xp.einsum("abxmq,xabmq->xmq", invC, P)
+        ),
         0.0,
     )
     safe_det = xp.where(valid, xp.abs(detC), 1.0)
@@ -321,6 +516,7 @@ def coarse_wdm_log_likelihood_batch(
     *,
     noise_only: bool = False,
     frequency_indices=None,
+    per_row_P=None,
 ):
     """Score a batch of coarse 3x3 covariances in one native array pass.
 
@@ -335,6 +531,7 @@ def coarse_wdm_log_likelihood_batch(
         covariance,
         noise_only=noise_only,
         frequency_indices=frequency_indices,
+        per_row_P=per_row_P,
     )
     return get_array_module(terms).sum(terms, axis=1)
 

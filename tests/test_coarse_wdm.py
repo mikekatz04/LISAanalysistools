@@ -411,5 +411,162 @@ class CoarseWDMTest(unittest.TestCase):
                 np.testing.assert_array_equal(second.covariance(coarse), coarse_cov)
 
 
+class CoarseWDMRuntimeTest(unittest.TestCase):
+    """Per-walker batched coarse statistics + runtime container (plan-2 T2).
+
+    An all-source run gives every walker its own residual, so the shared
+    single-``CoarseWDMStatistic`` model does not apply: these pin the batched
+    per-walker builder bitwise against the existing per-signal reference, the
+    per-row-P scoring against the scalar loop, and the runtime's
+    pickle/deepcopy hygiene (no statistic arrays on the wire).
+    """
+
+    NW = 5
+
+    def setUp(self):
+        from lisatools.coarsewdm import (  # deferred: TDD, added by plan-2 T2
+            CoarseWDMRuntime,
+            build_coarse_P_batch,
+        )
+
+        self.CoarseWDMRuntime = CoarseWDMRuntime
+        self.build = build_coarse_P_batch
+        self.rng = np.random.default_rng(777)
+        self.fine = WDMSettings(Nf=8, Nt=10, dt=2.0, force_backend="cpu")
+        # Q=4 over Nt_active=10 -> ragged: cells of 4, 4, 2
+        self.coarse = CoarseWDMSettings.from_fine(self.fine, 4)
+        self.res = self.rng.normal(
+            size=(self.NW, 3) + tuple(self.fine.basis_shape_active)
+        )
+
+    def _sens(self, settings, covariance):
+        out = SensitivityMatrixBase(settings)
+        out.sens_mat = np.asarray(covariance)
+        return out
+
+    def _fine_cov(self):
+        shape = tuple(self.fine.basis_shape_active)
+        A = self.rng.normal(size=shape + (3, 3))
+        cov = np.einsum("...ik,...jk->...ij", A, A) + 0.5 * np.eye(3)
+        return cov.transpose(2, 3, 0, 1)
+
+    def _reference_P(self, res=None):
+        from lisatools.coarsewdm import _coarse_sample_covariance
+
+        res = self.res if res is None else res
+        return np.stack(
+            [
+                _coarse_sample_covariance(
+                    WDMSignal(res[w], self.fine), self.coarse
+                )
+                for w in range(res.shape[0])
+            ]
+        )
+
+    def test_build_matches_reference_bitwise(self):
+        np.testing.assert_array_equal(
+            np.asarray(self.build(self.res, self.coarse)), self._reference_P()
+        )
+
+    def test_build_chunking_invariant(self):
+        whole = np.asarray(self.build(self.res, self.coarse))
+        tiny = np.asarray(
+            self.build(self.res, self.coarse, chunk_bytes=1)
+        )
+        np.testing.assert_array_equal(whole, tiny)
+
+    def _stat_for(self, P_row, qeff, channels):
+        return CoarseWDMStatistic(
+            P=P_row, Qeff=qeff, settings=self.coarse, Qeff_channels=channels
+        )
+
+    def test_per_row_P_scoring_matches_loop(self):
+        P = self._reference_P()
+        fine_cov = self._fine_cov()
+        qeff, channels = compute_qeff(
+            self._sens(self.fine, fine_cov),
+            self.coarse,
+            use_ws=True,
+            return_channels=True,
+        )
+        scales = (0.7, 0.9, 1.1, 1.5, 2.0)
+        cov_rows = np.stack(
+            [s * self.coarse.cell_mean(fine_cov) for s in scales]
+        )
+        template = self._stat_for(np.zeros_like(P[0]), qeff, channels)
+        got = coarse_wdm_log_likelihood_batch(
+            template, cov_rows, per_row_P=P
+        )
+        expected = [
+            coarse_wdm_log_likelihood(
+                self._stat_for(P[w], qeff, channels),
+                self._sens(self.coarse, cov_rows[w]),
+            )
+            for w in range(self.NW)
+        ]
+        np.testing.assert_allclose(got, expected, rtol=2e-15, atol=0.0)
+
+    def test_per_row_degenerate_cell_is_row_local(self):
+        P = self._reference_P()
+        fine_cov = self._fine_cov()
+        qeff, channels = compute_qeff(
+            self._sens(self.fine, fine_cov),
+            self.coarse,
+            use_ws=True,
+            return_channels=True,
+        )
+        cov_rows = np.stack([self.coarse.cell_mean(fine_cov)] * self.NW)
+        template = self._stat_for(np.zeros_like(P[0]), qeff, channels)
+        clean = coarse_wdm_log_likelihood_batch(template, cov_rows, per_row_P=P)
+        P_bad = P.copy()
+        P_bad[2, 0, 0, 3, 1] = np.nan
+        dirty = coarse_wdm_log_likelihood_batch(
+            template, cov_rows, per_row_P=P_bad
+        )
+        self.assertNotEqual(clean[2], dirty[2])
+        np.testing.assert_array_equal(np.delete(clean, 2), np.delete(dirty, 2))
+        self.assertTrue(np.all(np.isfinite(dirty)))
+
+    class _ACStub:
+        def __init__(self, arr):
+            self.data_res_arr = arr
+
+    def test_runtime_refresh_and_rows(self):
+        rt = self.CoarseWDMRuntime(
+            coarse_settings=self.coarse,
+            use_ws=True,
+            mode="delayed_acceptance",
+        )
+        acs = [self._ACStub(self.res[w].copy()) for w in range(self.NW)]
+        rt.refresh_P(acs)
+        np.testing.assert_array_equal(
+            np.asarray(rt.P_rows(np.arange(self.NW))), self._reference_P()
+        )
+        # a mutated residual must be re-read on the next refresh
+        acs[1].data_res_arr *= 2.0
+        rt.refresh_P(acs)
+        new_res = self.res.copy()
+        new_res[1] *= 2.0
+        np.testing.assert_array_equal(
+            np.asarray(rt.P_rows(np.arange(self.NW))),
+            self._reference_P(new_res),
+        )
+
+    def test_runtime_pickle_deepcopy_drops_arrays(self):
+        rt = self.CoarseWDMRuntime(
+            coarse_settings=self.coarse,
+            use_ws=True,
+            mode="search_approx",
+            fiducial_digest="deadbeef",
+        )
+        rt.refresh_P([self._ACStub(self.res[w]) for w in range(self.NW)])
+        clone = pickle.loads(pickle.dumps(copy.deepcopy(rt)))
+        self.assertEqual(clone.mode, "search_approx")
+        self.assertEqual(clone.fiducial_digest, "deadbeef")
+        self.assertIsNone(clone._P)
+        # and the original still has its statistics
+        self.assertIsNotNone(rt._P)
+
+
 if __name__ == "__main__":
     unittest.main()
