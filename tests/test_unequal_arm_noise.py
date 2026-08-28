@@ -145,7 +145,7 @@ class UnequalArmNoiseTest(unittest.TestCase):
 
     def setUp(self):
         self.model = _model()
-        self.fd = FDSettings(1024, 2e-4)
+        self.fd = FDSettings(1024, 2e-4, force_backend="cpu")
         self.ltts = _unequal_ltts()
 
     # -- equal-arm reduction ------------------------------------------------
@@ -167,7 +167,7 @@ class UnequalArmNoiseTest(unittest.TestCase):
 
     def test_equal_arm_limit_matches_stock_wdm(self):
         """Same reduction in the WDM basis the noise PE actually runs in."""
-        wdm = WDMSettings(Nf=32, Nt=32, dt=5.0)
+        wdm = WDMSettings(Nf=32, Nt=32, dt=5.0, force_backend="cpu")
         ua = UnequalArmInstrumentNoise(
             np.full(6, L0), model=self.model, fill_nans=0.0
         ).covariance(wdm)
@@ -329,7 +329,7 @@ class LinkDelayTableTest(unittest.TestCase):
 
     def setUp(self):
         self.model = _model()
-        self.wdm = WDMSettings(Nf=32, Nt=16, dt=5.0)
+        self.wdm = WDMSettings(Nf=32, Nt=16, dt=5.0, force_backend="cpu")
         self.width = float(np.asarray(self.wdm.t_arr)[1] - np.asarray(self.wdm.t_arr)[0])
         # a delay series with a known linear ramp on every link, sampled far
         # finer than the wavelet columns
@@ -387,7 +387,7 @@ class LinkDelayTableTest(unittest.TestCase):
 
     def test_table_falls_back_to_run_average_without_time_axis(self):
         """FD has no time axis, so the table collapses instead of erroring."""
-        fd = FDSettings(256, 1e-3)
+        fd = FDSettings(256, 1e-3, force_backend="cpu")
         C = UnequalArmInstrumentNoise(
             self.table, model=self.model, fill_nans=0.0
         ).covariance(fd)
@@ -430,7 +430,7 @@ class LinkDelayTableTest(unittest.TestCase):
         # A production-like band: the calibration is a curvature correction,
         # so it is only meaningful where the TDI transfer varies slowly across
         # one layer (see test_layer_calibration_warns_out_of_band).
-        wdm = WDMSettings(Nf=256, Nt=64, dt=5.0, min_freq=3e-4, max_freq=8e-3)
+        wdm = WDMSettings(Nf=256, Nt=64, dt=5.0, min_freq=3e-4, max_freq=8e-3, force_backend="cpu")
         got = {
             method: UnequalArmInstrumentNoise(
                 self.table, model=self.model, fill_nans=0.0,
@@ -454,7 +454,7 @@ class LinkDelayTableTest(unittest.TestCase):
         and calibrating at one epoch no longer helps. That must warn rather
         than quietly return a covariance no better than layer_constant.
         """
-        wide = WDMSettings(Nf=256, Nt=64, dt=5.0)      # full band to Nyquist
+        wide = WDMSettings(Nf=256, Nt=64, dt=5.0, force_backend="cpu")      # full band to Nyquist
         with self.assertWarns(RuntimeWarning):
             UnequalArmInstrumentNoise(
                 self.table, model=self.model, fill_nans=0.0,
@@ -463,7 +463,7 @@ class LinkDelayTableTest(unittest.TestCase):
 
     def test_layer_calibration_quiet_in_band(self):
         """...and stays quiet where it is valid."""
-        wdm = WDMSettings(Nf=256, Nt=64, dt=5.0, min_freq=3e-4, max_freq=8e-3)
+        wdm = WDMSettings(Nf=256, Nt=64, dt=5.0, min_freq=3e-4, max_freq=8e-3, force_backend="cpu")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             UnequalArmInstrumentNoise(
