@@ -4742,12 +4742,17 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
 
         key = (
             id(settings),
+            # A build entered under a non-primary device_context must warm its
+            # OWN bases on that device rather than read the primary device's
+            # arrays cross-device on every proposal (same rule as the generic
+            # InstrumentNoise._bases key).
+            current_device(settings.xp),
             self.tdi_generation,
             self.fill_nans,
             tuple(self.element_sens_fns),
             type(self.model),
             self._basis_cache_key_extra(),
-            "fused_unit_covariances_v1",
+            "fused_unit_covariances_v2",
         )
         hit = self.basis_cache.get(key)
         if hit is not None and hit[0] is settings:
@@ -4794,7 +4799,57 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
             stacked[np.isnan(stacked)] = self.fill_nans
         # Leading (basis, channel, channel) axes are folded together, sharing
         # the cached gather/window map.  A real WDM pixel retains Re[C_ij].
+        # The fold executes on the settings backend; this method's contract is
+        # a HOST column either way (callers assemble on host, upload once).
+        if getattr(settings.backend, "uses_cupy", False):
+            folded = settings.fold_sparse_psd(settings.xp.asarray(stacked))
+            return np.asarray(asnumpy(folded))
         return np.asarray(settings.fold_sparse_psd(stacked))
+
+    def _folded_unit_columns_batched(
+        self,
+        settings: domains.WDMSettings,
+        ltts_rows,
+        chunk_bytes: int = 512 * 1024 * 1024,
+    ) -> np.ndarray:
+        """Exact sparse folds for many delay rows with chunked round trips.
+
+        Returns the host array ``(2, nch, nch, Nf_active, len(ltts_rows))``,
+        bitwise identical to one :meth:`_folded_unit_column` fold per row: the
+        fold reduces only its own final axis elementwise, so batching rows
+        along a leading axis cannot reorder any sum. Chunking is sized by the
+        fold's gather intermediate (``complex128 * 2*nch*nch * n_layers * Nt``
+        per row), the dominant transient on either backend; on a CuPy backend
+        each chunk costs one upload, one fold, one download instead of a
+        round trip per column.
+        """
+        f_active = np.asarray(asnumpy(settings.fold_frequency_arr), dtype=float)
+        nrows = len(ltts_rows)
+        stacked = None
+        for i, row in enumerate(ltts_rows):
+            one = np.stack(
+                unequal_arm_tdi2_unit_covariances(f_active, row), axis=0
+            )
+            if stacked is None:
+                stacked = np.empty((nrows,) + one.shape, dtype=one.dtype)
+            stacked[i] = one
+        if self.fill_nans is not None:
+            stacked[np.isnan(stacked)] = self.fill_nans
+
+        gather = settings.sparse_psd_fold_data()[1]
+        per_row = 16 * int(np.prod(stacked.shape[1:4])) * int(gather.size)
+        chunk = max(1, int(chunk_bytes // max(per_row, 1)))
+        outs = []
+        on_gpu = getattr(settings.backend, "uses_cupy", False)
+        for lo in range(0, nrows, chunk):
+            part = stacked[lo : lo + chunk]
+            if on_gpu:
+                folded = settings.fold_sparse_psd(settings.xp.asarray(part))
+                outs.append(np.asarray(asnumpy(folded)))
+            else:
+                outs.append(np.asarray(settings.fold_sparse_psd(part)))
+        # (rows, 2, nch, nch, Nf_active) -> (2, nch, nch, Nf_active, rows)
+        return np.moveaxis(np.concatenate(outs, axis=0), 0, -1)
 
     def _layer_calibration(self, settings: domains.WDMSettings) -> np.ndarray:
         """Per-layer ratio ``fold(B) / (0.5 B(f_m))``, from one exact fold.
@@ -5007,24 +5062,28 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
             raise NotImplementedError(
                 f"UnequalArmInstrumentNoise does not support {type(settings).__name__}."
             )
-        if getattr(settings.backend, "uses_cupy", False):
-            raise ValueError(
-                "The fused unequal-arm transfer kernel is CPU-only; single-GPU "
-                "support is planned."
-            )
-
         if ltts.ndim == 1:
             column = self._folded_unit_column(settings, ltts)
             bases = np.repeat(column[..., None], settings.Nt_active, axis=-1)
         else:
             if ltts.shape[0] != settings.Nt:
                 self._sensitivity_kwargs(settings, self.model)
-            columns = [
-                self._folded_unit_column(settings, ltts[g])
-                for g in range(settings.ind_min_t, settings.ind_max_t + 1)
+            rows = [
+                ltts[g] for g in range(settings.ind_min_t, settings.ind_max_t + 1)
             ]
-            bases = np.stack(columns, axis=-1)
-        return bases[0], bases[1]
+            if self.wdm_psd_method not in WDM_LAYER_CENTER_METHODS and getattr(
+                settings.backend, "uses_cupy", False
+            ):
+                # Exact fold per column on a CuPy backend: batch the columns so
+                # the device sees one upload/fold/download per chunk instead of
+                # a round trip per column.
+                bases = self._folded_unit_columns_batched(settings, rows)
+            else:
+                columns = [self._folded_unit_column(settings, row) for row in rows]
+                bases = np.stack(columns, axis=-1)
+        # The fused transfer evaluation is NumPy; the finished bases live on
+        # the settings backend (mirrors the FD branch above).
+        return tuple(settings.xp.asarray(bases[i]) for i in range(2))
 
     def _persistent_coarse_key(self, settings: domains.CoarseWDMSettings) -> str:
         """Stable content key for the exact coarse basis and fine diagonals."""
