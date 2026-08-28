@@ -1586,13 +1586,19 @@ class GlobalFit:
                 sub_reset_kwargs=sub_reset_kwargs,
                 **extra_reset_kwargs,
             )
-
-            # Persist the domain settings (FD / STFT / WDM) so a re-run can
-            # reconstruct everything from a single HDF5 file. ``general_info``
-            # already holds the resolved instances at this point.
-            domain_settings = general_info.domain_settings
-            if domain_settings is not None:
-                backend.write_domain_settings(domain_settings)
+        # Persist the domain settings (FD / STFT / WDM) so a re-run can
+        # reconstruct everything from a single HDF5 file. ``general_info``
+        # already holds the resolved instances at this point.
+        #
+        # Key this on ``iteration == 0`` rather than only on the reset branch:
+        # an initialized backend may be a prior attempt that died before its
+        # first sample. Such an attempt can retain a stale settings block even
+        # though callers correctly treat the empty chain as fresh. Conversely,
+        # never replace the historical metadata of a chain that has samples;
+        # doing so could erase the evidence of a mismatched resume.
+        domain_settings = general_info.domain_settings
+        if domain_settings is not None and int(backend.iteration) == 0:
+            backend.write_domain_settings(domain_settings)
 
         # setup_info_all = None
         # for name in branch_names:

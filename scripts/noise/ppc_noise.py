@@ -238,6 +238,32 @@ def stored_nt(path, group="global_fit"):
         return None if omega is None else int(omega.shape[0])
 
 
+def stored_band(path, group="global_fit"):
+    """``(min_freq, max_freq)`` the run sampled, or ``(None, None)``.
+
+    The active WDM band is stored on ``domain_settings/kwargs`` exactly like
+    ``omega`` is (see :func:`stored_nt`). It is NOT recoverable from the file
+    name or from any sampler shape -- a cropped run and an uncropped one have
+    identical chain arrays -- so a rebuild that does not read it back would
+    silently pour a different likelihood than the run sampled, which is the
+    same failure mode :func:`resolve_grid` guards for Nt.
+    """
+    import h5py
+
+    with h5py.File(path, "r") as f:
+        if group not in f:  # pre-rename backends
+            group = "mcmc"
+        grp = f.get(group)
+        kw = None if grp is None else grp.get("domain_settings/kwargs")
+        if kw is None:
+            return None, None
+        lo, hi = kw.attrs.get("min_freq"), kw.attrs.get("max_freq")
+        return (
+            None if lo is None else float(lo),
+            None if hi is None else float(hi),
+        )
+
+
 def resolve_grid(path, choice, noise_file):
     """``(full, two_years)`` -- the wavelet grid the run actually sampled.
 
@@ -302,6 +328,14 @@ def build_general_and_sources(args, mode, log_sampling):
     run_args.unequal_arm = args.unequal_arm
     run_args.wdm_psd_method = args.wdm_psd_method
     run_args.gpus = args.gpus
+    # The active band, read back off the run rather than re-specified: a
+    # cropped run (--min-freq/--max-freq) has the same chain SHAPE as an
+    # uncropped one, so nothing downstream would catch the mismatch.
+    band_lo, band_hi = stored_band(args.file)
+    if band_lo is not None:
+        run_args.min_freq = band_lo
+    if band_hi is not None:
+        run_args.max_freq = band_hi
     run_args.out_dir = os.path.join(args.scratch_dir, "")
     run_args.tag = "ppc"
     run_args.progress = False
