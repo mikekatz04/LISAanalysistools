@@ -79,6 +79,21 @@ logger = logging.getLogger(__name__)
 
 MOJITO_REFERENCE_TIME = 97729089.327664
 
+#: Per-mode ``rj_flip_fraction`` policy: the share of eligible RJ slots a
+#: single proposal round flips. Search flips EVERY slot (fast dimension
+#: exploration); PE settles to a random subset per proposal.
+#:
+#: Named constants rather than bare literals because the PE value was
+#: duplicated at two sites below and those are exactly the pairs that drift
+#: apart. ``{BRANCH}_RJ_FLIP_FRACTION`` and an explicit kwarg still override
+#: both -- but note the env var is GLOBAL across stages, so exporting it
+#: forces one value onto search AND PE; leaving it unset is what lets these
+#: per-mode defaults apply. Pinned in tests/test_rj_flip_fraction.py.
+_SEARCH_RJ_FLIP_DEFAULT = 1.0
+#: 0.1 -> 0.3 (user ruling 2026-08-28).
+_PE_RJ_FLIP_DEFAULT = 0.3
+
+
 class Recipe:
     """The global-fit recipe: declarative stage list + runtime step engine, one object.
 
@@ -3039,13 +3054,15 @@ def build_gb_moves(
     # birth instance (under GB_MODE=search the seeded GB_RJ_PHASE_MAXIMIZE
     # keeps the search behavior unchanged).
     # RJ flip fraction mode default: every slot flips in search (fast
-    # dimension exploration); PE settles to a 10% random subset per
+    # dimension exploration); PE settles to a 30% random subset per
     # proposal (rj_flip_fraction docs in gbspecialstretch). These two
     # moves ARE the GB_MODE=search birth path when that mode is on, so the
     # default follows the mode; the search-NAMED moves (rj_prior_search /
     # rj_fstat_mcmc_search / rj_prior_removal / rj_replace) keep the
     # implicit 1.0. {BRANCH}_RJ_FLIP_FRACTION / an explicit kwarg override.
-    _rj_flip_default = 1.0 if _gb_mode_search else 0.1
+    _rj_flip_default = (
+        _SEARCH_RJ_FLIP_DEFAULT if _gb_mode_search else _PE_RJ_FLIP_DEFAULT
+    )
     # Per-class repeat defaults for the pe-NAMED moves follow the mode the
     # same way the flip fraction does (search campaigns that run through
     # the pe-named stage get 200/25; true PE gets num_repeat_proposals).
@@ -3060,7 +3077,7 @@ def build_gb_moves(
     # carry BOTH search-named and pe-named GB stages in ONE process, e.g.
     # run_combined_staged.py): the pe-NAMED instances (rj_prior /
     # rj_fstat_mcmc / rj_refit) are configured strictly for PE -- no leaf
-    # caps, no birth phase-max, flip fraction 0.1 -- regardless of GB_MODE,
+    # caps, no birth phase-max, the PE flip fraction -- regardless of GB_MODE,
     # so GB_MODE=search arms ONLY the search-named stage's moves. Default
     # OFF because the single-stage campaigns (gb_no_fg GB_MODE=search) run
     # the SEARCH through the pe-named stage and rely on the mode-following
@@ -3079,7 +3096,7 @@ def build_gb_moves(
         {"leaf_cap_start": None, "leaf_cap_update": False} if _pe_strict else {}
     )
     if _pe_strict:
-        _rj_flip_default = 0.1
+        _rj_flip_default = _PE_RJ_FLIP_DEFAULT
         _imr_defaults = dict(_imr_pe)
 
     # PE extrinsic DRAW (user design ruling 2026-08-25): in the strict-PE

@@ -330,9 +330,12 @@ def _resolve_rj_flip_fraction(branch_name, kwarg_value, default=1.0):
     """Resolve ``rj_flip_fraction`` for a move (kwarg > env > ``default``).
 
     ``default`` is the stock/mode default the builder chose (the recipe
-    passes 1.0 for search-cycle RJ moves and 0.1 for PE-cycle ones); a
-    user env ``{BRANCH}_RJ_FLIP_FRACTION`` overrides it, an explicit kwarg
-    overrides both. VGB is fixed-leaf (``nleaves_min == nleaves_max``, no
+    passes ``_SEARCH_RJ_FLIP_DEFAULT`` = 1.0 for search-cycle RJ moves and
+    ``_PE_RJ_FLIP_DEFAULT`` = 0.3 for PE-cycle ones); a user env
+    ``{BRANCH}_RJ_FLIP_FRACTION`` overrides it, an explicit kwarg overrides
+    both. NOTE the env var is GLOBAL across stages -- one exported value
+    lands on every RJ move in every stage, so setting it to force a search
+    value also clobbers the PE one. Leave it unset to get both. VGB is fixed-leaf (``nleaves_min == nleaves_max``, no
     RJ), so it gets NO RJ knob surface: the fraction is pinned to 1.0 and
     the env/default are never consulted (an explicit kwarg on a vgb move
     is rejected rather than silently ignored).
