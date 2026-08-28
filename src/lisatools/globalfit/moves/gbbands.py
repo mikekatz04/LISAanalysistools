@@ -2781,7 +2781,21 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
     # ``__dict__`` — no sentinel objects, so deepcopy/pickle stay safe.)
 
     def _invalidate_slab_metadata_cache(self) -> None:
-        self.__dict__.pop("_band_slab_Nf_cached", None)
+        # ``_band_slab_Nf_cached`` is deliberately NOT dropped here (2026-08-28
+        # shared-overhead audit). ``_compute_band_slab_Nf`` reads only
+        # ``_wdm_band_slab_layers``, ``_basis_settings``, ``df`` and
+        # ``band_edges`` -- all fixed at construction -- so the slab extent is
+        # a RUN constant: a rebind changes which CELLS this buffer holds, not
+        # the band grid. Dropping it made ``band_slab_Nf`` (the first reader
+        # after every bind, via ``_get_fill_buffer_ind_map``) re-run
+        # ``band_support_halfwidths``, a 1232-iteration python loop over
+        # gbgpu's ``get_N``, ~2,100x/iteration -- 129.9 s/iteration (~6.6% of
+        # a ~1954 s iteration), hidden inside the ``fill_indmap_data`` span.
+        # The tell was a twin-call gap: ``fill_indmap_psd`` runs the same
+        # function with the same inputs (only a bool differs) at 0.195
+        # ms/chunk vs 56 ms for the data call. Keeping the value is
+        # bit-identical; the two caches below DO consume the live binding and
+        # must still go. See tests/test_band_slab_nf_cache.py.
         self.__dict__.pop("_slab_min_f_cached", None)
         # WDM per-slot start-layer store (see ``min_freq_inds``): constant
         # per bind (every entry is the parent ``ind_min_f``), invalidated on
