@@ -335,15 +335,20 @@ class FlushSemanticsTest(unittest.TestCase):
 
 
 class KnobOffTest(unittest.TestCase):
-    """OFF (the default) is today's immediate relabel, untouched."""
+    """OFF is the legacy immediate relabel; DEFERRED is the DEFAULT
+    (user ruling 2026-08-28: sources never move between cells inside a
+    window -- only cells change labels -- so deferral is the design's
+    native bookkeeping, with GB_CELL_LABEL_DEFERRED=0 as the escape
+    hatch)."""
 
-    def test_default_is_off(self):
+    def test_default_is_deferred(self):
         env = dict(os.environ)
         env.pop("GB_CELL_LABEL_DEFERRED", None)
         with mock.patch.dict(os.environ, env, clear=True):
             s = _table()
-            self.assertFalse(s.begin_cell_label_window(s.special_band_inds))
-            self.assertIsNone(s._deferred_labels)
+            self.assertTrue(s.begin_cell_label_window(s.special_band_inds))
+            self.assertIsNotNone(s._deferred_labels)
+            self.assertTrue(s.flush_cell_labels(close=True))
 
     def test_off_relabels_immediately(self):
         with mock.patch.dict(os.environ, OFF):

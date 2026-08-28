@@ -297,12 +297,17 @@ def _index_asserts() -> bool:
 def _cell_label_deferred() -> bool:
     """Whether cell relabels accumulate instead of hitting the full table.
 
-    ``GB_CELL_LABEL_DEFERRED`` (default ``"0"`` = OFF, today's immediate
-    relabel, byte-identical). ``"1"`` arms the deferred path: swaps inside
-    a window opened by :meth:`BandSorter.begin_cell_label_window` compose
-    into an O(K) permutation over that window's CELLS, and
+    ``GB_CELL_LABEL_DEFERRED`` -- **default ``"1"`` = DEFERRED** (user
+    ruling 2026-08-28: sources never move between cells inside a window,
+    ONLY CELLS CHANGE LABELS -- the design's own tempering invariant --
+    so deferral is the native bookkeeping, not an optimization mode).
+    Swaps inside a window opened by
+    :meth:`BandSorter.begin_cell_label_window` compose into an O(K)
+    permutation over that window's CELLS, and
     :meth:`BandSorter.flush_cell_labels` applies it to the flat source
-    table in ONE pass.
+    table in ONE pass. ``"0"`` is the escape hatch: the legacy immediate
+    per-swap full-table relabel, byte-identical to the pre-2026-08-28
+    behavior.
 
     WHY (orchestration audit 2026-08-27, candidate 2): the immediate
     relabel scans the FULL source table (``isin`` over 1e6-1e7 rows, a
@@ -314,7 +319,7 @@ def _cell_label_deferred() -> bool:
     Read per call so tests can flip it, exactly like :func:`_index_asserts`;
     the read is nanoseconds against a full-table pass.
     """
-    return os.environ.get("GB_CELL_LABEL_DEFERRED", "0") == "1"
+    return os.environ.get("GB_CELL_LABEL_DEFERRED", "1") == "1"
 
 
 def _router_device_resident() -> bool:
