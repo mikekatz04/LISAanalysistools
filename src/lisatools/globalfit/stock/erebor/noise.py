@@ -212,8 +212,30 @@ class PSDSetup(Setup):
 # EXCLUDED the physical values, so a foreground fit could not place the knee
 # in band: f_1 railed at its floor, and alpha -> 0 plus a shrinking amp
 # compensated by flattening ``(f/f_1)**alpha`` into a constant. The floors
-# below reach 1e-5 Hz for both; the old ceilings are kept so a configuration
-# still carrying slope-unit values validates rather than erroring.
+# below reach 1e-5 Hz for both.
+#
+# The CEILINGS are 1e-2 (fk, f_1) / 1e-2 (f_2), an order above the top of the
+# analysis band, and they are load-bearing: above ~1e-2 Hz both shape factors
+# go degenerate across the band -- ``exp(-(f/f_1)**alpha) -> 1`` and
+# ``0.5(1 + tanh(-(f - fk)/f_2)) -> 0.5`` -- so every decade past that is the
+# SAME model, the likelihood is flat over it, and alpha stops being identified
+# at all. They used to be the old slope-unit numbers (f_1 to 1e7, f_2 to 1e4),
+# kept for configurations still carrying slope-unit values, and that margin
+# cost a two-year run its posterior: under the uniform-in-log prior the
+# plateau was ~9 of f_1's 12 decades, i.e. where 3 of every 4 walkers start
+# (``run.py`` initializes from ``priors[key].rvs``). Measured on the two-year
+# foreground fit (noise-galfor-pe2 try3, 2026-08-11): the chain settled at
+# ``f_1 ~ 7e2 Hz`` (5-95%: 2e-2 .. 3e6) with the roll-off switched off and
+# ``amp``/``f_2`` at ~0.45x compensating inside a ~1%-wide local optimum, for
+# a whitened ``<w^2/C>`` of 0.983 (z = -11 to -17 per channel) and a 15%-high
+# ``Sa_a`` soaking up the residual; the same data at an in-band
+# ``f_1 = 2.5e-3 Hz`` whitens to 1.0002 (z = +0.1). Escaping the plateau needs
+# a simultaneous move in (amp, f_1, f_2), which a stretch proposal essentially
+# never makes -- so the range, not the sampler, is what has to give.
+#
+# f_2's ceiling is 1e-2 rather than 1e-3: the Fourier-domain least-squares fit
+# to this brick (cd1l-validation foreground_estimation.ipynb) lands at
+# f_2 = 9.89e-4, which a 1e-3 ceiling would truncate at 99% of its range.
 # amp centred on the GALFOR brick's measured level (2026-08). A
 # least-squares fit of this model to the brick's own X-channel PSD
 # (scripts/noise/fit_galfor.py) gives amp ~ 1.2e-44, i.e. log10 -43.9, within
@@ -224,10 +246,10 @@ class PSDSetup(Setup):
 # floor. Three decades either side of the measured value.
 GALFOR_PRIOR_RANGE = (
     (1e-47, 1e-41),  # amp
-    (1e-5, 1e-1),  # fk (knee)
+    (1e-5, 1e-2),  # fk (knee)
     (1e-3, 5.0),  # alpha
-    (1e-5, 1e7),  # f_1
-    (1e-5, 1e4),  # f_2
+    (1e-5, 1e-2),  # f_1
+    (1e-5, 1e-2),  # f_2
 )
 GALFOR_BASIS = ("amp", "fk", "alpha", "f_1", "f_2")
 # Everything except the power-law index spans decades and is strictly
@@ -438,11 +460,73 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
 # ============================================================
 
 
-def resolve_galfor_modulation(path):
-    """``None`` (stationary) or a :class:`GalForTimeModulation` from ``path``."""
+def validate_coarse_settings(gs, *, all_source: bool) -> None:
+    """Shared validation for the coarse real-WDM knobs (plan-2 §7).
+
+    Noise-only rules are the historical ones (CPU backend replacement); an
+    all-source run must opt into a sidecar mode explicitly, because coarse
+    scoring there changes the PSD/GALFOR transition kernel, not just speed.
+    """
+    import numbers
+
+    if (
+        isinstance(gs.coarse_Q, bool)
+        or not isinstance(gs.coarse_Q, numbers.Integral)
+        or gs.coarse_Q < 1
+    ):
+        raise ValueError(f"coarse_Q must be an integer >= 1; got {gs.coarse_Q!r}.")
+    gs.coarse_Q = int(gs.coarse_Q)
+    if gs.coarse_fiducial not in ("injection", "initial"):
+        raise ValueError(
+            "coarse_fiducial must be 'injection' or 'initial'; got "
+            f"{gs.coarse_fiducial!r}."
+        )
+    mode = str(getattr(gs, "coarse_gpu_mode", "off") or "off")
+    if mode not in ("off", "search_approx", "delayed_acceptance"):
+        raise ValueError(
+            "coarse_gpu_mode must be 'off', 'search_approx', or "
+            f"'delayed_acceptance'; got {mode!r}."
+        )
+    gs.coarse_gpu_mode = mode
+    if not all_source:
+        if mode != "off":
+            raise ValueError(
+                "coarse_gpu_mode applies to all-source runs only; the "
+                "noise-only variants use the CPU backend-replacement coarse "
+                "path (COARSE_Q alone)."
+            )
+        if gs.coarse_Q > 1 and gs.gpus is not None:
+            raise ValueError(
+                "coarse_Q > 1 is CPU-only for now; unset gpus/use_gpu. "
+                "Single-GPU support is a planned follow-up."
+            )
+        return
+    if gs.coarse_Q > 1 and mode == "off":
+        raise ValueError(
+            "coarse_Q > 1 in an all-source run requires an explicit "
+            "COARSE_GPU_MODE ('search_approx' for optimization stages, "
+            "'delayed_acceptance' for production PE): the coarse statistic "
+            "changes the PSD/GALFOR transition kernel, so it is never an "
+            "implicit speed knob here."
+        )
+    if mode != "off" and gs.coarse_Q <= 1:
+        raise ValueError(
+            f"coarse_gpu_mode={mode!r} needs COARSE_Q > 1 (got "
+            f"{gs.coarse_Q}); with Q=1 there is nothing coarse to score."
+        )
+
+
+def resolve_galfor_modulation(path, t0: float = 0.0):
+    """``None`` (stationary) or a :class:`GalForTimeModulation` from ``path``.
+
+    ``t0`` is the absolute epoch the table's time column is written against
+    (default 0.0 keeps a table already relative to the data start unchanged).
+    Construction is lazy, so a deferred anchor may also overwrite ``.t0``
+    before first use — see ``GeneralSetup._resolve_deferred_noise_model``.
+    """
     from lisatools.sensitivity import GalForTimeModulation
 
-    return GalForTimeModulation(path) if path else None
+    return GalForTimeModulation(path, t0=t0) if path else None
 
 
 def resolve_noise_file(
@@ -551,7 +635,14 @@ def prepare_galfor_branch(galfor):
 
 
 def noise_sensitivity_init_kwargs(
-    base, *, tdi_generation, galfor=None, psd=None, galfor_modulation_path=None, extra=None
+    base,
+    *,
+    tdi_generation,
+    galfor=None,
+    psd=None,
+    galfor_modulation_path=None,
+    galfor_modulation_t0=0.0,
+    extra=None,
 ):
     """Thread the per-branch noise-MODEL choice onto ``sensitivity_init_kwargs``.
 
@@ -567,7 +658,9 @@ def noise_sensitivity_init_kwargs(
         out["galfor_stochastic_fn"] = galfor.stochastic_fn
     branch_mod = getattr(galfor, "modulation", None) if galfor is not None else None
     out["galfor_modulation"] = (
-        branch_mod if branch_mod is not None else resolve_galfor_modulation(galfor_modulation_path)
+        branch_mod
+        if branch_mod is not None
+        else resolve_galfor_modulation(galfor_modulation_path, t0=galfor_modulation_t0)
     )
     if psd is not None:
         for attr in (
@@ -579,6 +672,15 @@ def noise_sensitivity_init_kwargs(
             val = getattr(psd, attr, None)
             if val is not None:
                 out[attr] = val
+        # ``wdm_psd_method`` used to live only inside the unequal-arm
+        # instrument constructor kwargs. Promote that legacy spelling to the
+        # backend-wide policy so foreground and SGWB cannot silently remain on
+        # the exact fold while the instrument uses a layer approximation.
+        component_kwargs = getattr(psd, "instrument_component_kwargs", None)
+        if component_kwargs and "wdm_psd_method" in component_kwargs:
+            out.setdefault(
+                "wdm_psd_method", component_kwargs["wdm_psd_method"]
+            )
     if extra:
         out.update(extra)
     return out

@@ -559,6 +559,43 @@ class GFHDFBackend(eryn_HDFBackend):
                 return None
             return _read_domain_settings(f[self.name], force_backend=force_backend)
 
+    def write_noise_model_identity(self, identity: dict) -> None:
+        """Record the semantic noise-model identity beside the domain settings.
+
+        Plain scalar attrs (instrument component class, WDM PSD method, delay
+        table / modulation digests, data epoch). A resume compares them so a
+        store sampled under one likelihood is never silently continued under
+        another whose arrays merely have the same shapes. Idempotent.
+        """
+        with self.open("a") as f:
+            grp = f[self.name]
+            if "noise_model_identity" in grp:
+                del grp["noise_model_identity"]
+            sub = grp.create_group("noise_model_identity")
+            for key, value in identity.items():
+                sub.attrs[key] = value
+
+    def read_noise_model_identity(self) -> Optional[dict]:
+        """Read back the stored noise-model identity (``None`` if absent)."""
+        with self.open() as f:
+            if self.name not in f or "noise_model_identity" not in f[self.name]:
+                return None
+            sub = f[self.name]["noise_model_identity"]
+            out = {}
+            for key, value in sub.attrs.items():
+                if isinstance(value, bytes):
+                    value = value.decode()
+                elif isinstance(value, np.bool_):
+                    value = bool(value)
+                elif isinstance(value, np.floating):
+                    value = float(value)
+                elif isinstance(value, np.integer):
+                    value = int(value)
+                elif isinstance(value, np.str_):
+                    value = str(value)
+                out[key] = value
+            return out
+
     @property
     def reset_kwargs(self):
         """Get reset_kwargs including sub-backend kwargs from h5 file."""

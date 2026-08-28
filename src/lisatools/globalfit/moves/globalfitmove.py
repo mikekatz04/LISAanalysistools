@@ -20,6 +20,48 @@ from eryn.moves import CombineMove
 from .. import midit_checkpoint
 
 
+def ensure_fine_noise_covariance_current(acs, coarse_runtime) -> None:
+    """Assert the canonical fine noise state is what source moves consume.
+
+    Cheap, assertion-only source-move precondition for coarse-sidecar runs
+    (plan-2 §6.4): every container's sensitivity matrix must live on the
+    run's FINE domain settings with the fine active shape. A violation is a
+    programming error in a noise move's publication sequence — fail loudly;
+    source moves never rebuild an unknown state or continue on coarse
+    covariance. No-op unless a coarse sidecar runtime is active.
+
+    Everything needed is derived from the runtime itself
+    (``coarse_settings.fine_settings`` is the run's fine domain), so the
+    caller only needs the shared ``acs`` and any move's ``coarse_runtime``.
+    """
+    runtime = coarse_runtime
+    if runtime is None or getattr(runtime, "mode", "off") == "off":
+        return
+    coarse_settings = runtime.coarse_settings
+    fine_settings = coarse_settings.fine_settings
+    for w in range(len(acs)):
+        sens_mat = acs[w].sens_mat
+        basis = getattr(sens_mat, "basis_settings", None)
+        if coarse_settings is not None and basis == coarse_settings:
+            raise AssertionError(
+                f"walker {w}: COARSE sensitivity matrix visible at a "
+                "source-move boundary — the noise move failed to publish the "
+                "fine state before returning."
+            )
+        if basis != fine_settings:
+            raise AssertionError(
+                f"walker {w}: sens_mat basis settings are not the run's fine "
+                "domain settings (source moves must see only full fine state)."
+            )
+        got = tuple(sens_mat.data_shape)
+        want = tuple(fine_settings.basis_shape_active)
+        if got[-len(want):] != want:
+            raise AssertionError(
+                f"walker {w}: sens_mat data_shape {got} does not end in the "
+                f"fine active shape {want}."
+            )
+
+
 @dataclasses.dataclass
 class MoveBuildContext:
     """Runtime context handed to every ``Move.setup`` at materialization.
@@ -466,6 +508,38 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         """One pass over the wrapped moves (the plain GFCombineMove body)."""
         return GFCombineMove._propose_moves(self, model, state)
 
+    def _gf_sidecar_runtime_lookup(self):
+        """The active coarse sidecar runtime carried by a wrapped noise move.
+
+        Cached per instance; None when no wrapped move carries one (the
+        overwhelmingly common case, and every pre-plan-2 run).
+        """
+        if not hasattr(self, "_gf_sidecar_runtime"):
+            runtime = None
+            for m in self.moves:
+                m = m[0] if isinstance(m, tuple) else m
+                cand = getattr(m, "coarse_runtime", None)
+                if cand is not None and getattr(cand, "mode", "off") != "off":
+                    runtime = cand
+                    break
+            self._gf_sidecar_runtime = runtime
+        return self._gf_sidecar_runtime
+
+    def _gf_precondition(self, move, model):
+        """Coarse-sidecar guard (plan-2 §6.4), run before every SOURCE sub-move.
+
+        Noise moves (they expose ``NOISE_BRANCHES``) own the publication and
+        are exempt; everyone else must observe full fine state. Assertion
+        cost is a per-walker attribute compare — negligible next to any
+        source proposal.
+        """
+        runtime = self._gf_sidecar_runtime_lookup()
+        if runtime is None or hasattr(move, "NOISE_BRANCHES"):
+            return
+        acs = getattr(model, "analysis_container_arr", None)
+        if acs is not None:
+            ensure_fine_noise_covariance_current(acs, runtime)
+
     def _propose_moves(self, model, state):
         if getattr(self, "weighted_cycle", False) and len(self.moves) > 1:
             # GB PE cycle style (user ruling 2026-08-26): one propose runs
@@ -495,6 +569,7 @@ class GFCombineMove(CombineMove, GlobalFitMove):
                         f"weighted_cycle -> {name}",
                         flush=True,
                     )
+                self._gf_precondition(move, model)
                 state, accepted = move.propose(model, state)
                 accepted_out = (
                     accepted.copy() if accepted_out is None
@@ -523,10 +598,15 @@ class GFCombineMove(CombineMove, GlobalFitMove):
             if os.environ.get("GF_MOVE_TIMING", "0") == "1":
                 print(f"[GF_TIMING] stage={getattr(self, 'gf_stage_name', '?')} "
                       f"random_choice -> {name}", flush=True)
+            self._gf_precondition(move, model)
             return move.propose(model, state)
 
         timing = os.environ.get("GF_MOVE_TIMING", "0") == "1"
-        if not timing and not midit_checkpoint.armed():
+        if (
+            not timing
+            and not midit_checkpoint.armed()
+            and self._gf_sidecar_runtime_lookup() is None
+        ):
             return super().propose(model, state)
 
         # Unified sequential loop: eryn CombineMove.propose semantics plus
@@ -545,6 +625,7 @@ class GFCombineMove(CombineMove, GlobalFitMove):
                 move = move[0]
             rss0 = _gf_rss_mb()
             t0 = time.perf_counter()
+            self._gf_precondition(move, model)
             state, accepted = move.propose(model, state)
             if sync and "cupy" in sys.modules:
                 try:

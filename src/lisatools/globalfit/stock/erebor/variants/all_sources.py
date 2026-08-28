@@ -55,6 +55,7 @@ from ..gb import GBSetup
 from ..mbh import MBHSetup
 from ..noise import (
     GalForSettings,
+    validate_coarse_settings,
     GalForSetup,
     PSDSetup,
     noise_sensitivity_init_kwargs,
@@ -211,6 +212,36 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     # (or GALFOR_MODULATION_PATH) to load a tabulated GalForTimeModulation.
     galfor_modulation_path: typing.Optional[str] = dataclasses.field(
         default_factory=env_default("GALFOR_MODULATION_PATH", None, str)
+    )
+    # Epoch of the modulation table's time column: None (default) keeps a
+    # table already written relative to the data start unchanged; the string
+    # "data" anchors the table at the data's first sample time (mission-clock
+    # tables such as scripts/noise/modulation_unequal.dat), resolved once the
+    # data has been processed; a float is an explicit absolute epoch [s].
+    galfor_modulation_t0: typing.Optional[str] = dataclasses.field(
+        default_factory=env_default("GALFOR_MODULATION_T0", None, str)
+    )
+
+    # --- unequal-arm instrument noise (env UNEQUAL_ARM=1) ---
+    # Swap the equal-arm InstrumentNoise for UnequalArmInstrumentNoise, the
+    # six link light travel times read from the mojito NOISE brick's /ltts
+    # group and averaged per WDM time column (LinkDelayTable). Mojito data
+    # only: synthetic/sangria carry no delay table and are refused loudly.
+    unequal_arm: bool = dataclasses.field(
+        default_factory=env_default("UNEQUAL_ARM", False, bool)
+    )
+    # Decimation of the tabulated per-link delays (brick tabulates one sample
+    # per 2.5 s; the delays vary on month timescales).
+    unequal_arm_stride: int = dataclasses.field(
+        default_factory=env_default("UNEQUAL_ARM_STRIDE", 200, int)
+    )
+    # WDM PSD evaluation method for the whole sensitivity backend: None ->
+    # the backend default ("fold", exact); "layer_constant";
+    # "layer_calibrated" (recommended with unequal_arm: one exact fold
+    # calibrates the ~200x cheaper layer-center evaluation; see
+    # sensitivity.py for its validity self-check).
+    wdm_psd_method: typing.Optional[str] = dataclasses.field(
+        default_factory=env_default("WDM_PSD_METHOD", None, str)
     )
 
     # --- opt-in SGWB branch (env FIT_SGWB=1) ---
@@ -561,14 +592,84 @@ class AllSourcesGlobalFit(EreborFit):
     #    fit.psd.instrument_model_cls / fit.sgwb.stochastic_fn) --
 
     def finalize_general(self, gs: AllSourcesGeneralSettings) -> None:
+        validate_coarse_settings(gs, all_source=True)
+        psd = getattr(self, "psd", None) if "psd" in self._branch_names else None
+        if gs.unequal_arm:
+            self._wire_unequal_arm(gs, psd)
+
+        extra = dict(self._sgwb_sens_kwargs(gs))
+        if gs.wdm_psd_method:
+            # Backend-wide policy (instrument, foreground, SGWB together).
+            extra["wdm_psd_method"] = gs.wdm_psd_method
+
+        # Modulation epoch: 0.0 (table already in the data frame), an explicit
+        # absolute epoch, or "data" -> deferred to the engine, which anchors
+        # the lazy table at the authoritative data_t0 after processing.
+        modulation_t0 = 0.0
+        raw_t0 = gs.galfor_modulation_t0
+        if raw_t0 not in (None, ""):
+            if str(raw_t0).strip().lower() == "data":
+                extra["galfor_modulation_anchor"] = "data_t0"
+            else:
+                modulation_t0 = float(raw_t0)
+
         gs.sensitivity_init_kwargs = noise_sensitivity_init_kwargs(
             gs.sensitivity_init_kwargs,
             tdi_generation=gs.tdi_gen,
             galfor=getattr(self, "galfor", None) if "galfor" in self._branch_names else None,
-            psd=getattr(self, "psd", None) if "psd" in self._branch_names else None,
+            psd=psd,
             galfor_modulation_path=gs.galfor_modulation_path,
-            extra=self._sgwb_sens_kwargs(gs),
+            galfor_modulation_t0=modulation_t0,
+            extra=extra,
         )
+
+    def _wire_unequal_arm(self, gs: AllSourcesGeneralSettings, psd) -> None:
+        """UNEQUAL_ARM=1: unequal-arm instrument noise fed by the brick's /ltts.
+
+        Only plain scalars/paths go on the settings tree here; the
+        :class:`~lisatools.sensitivity.LinkDelayTable` itself is built by
+        ``GeneralSetup._resolve_deferred_noise_model`` once the data epoch
+        (``data_t0``) is authoritative.
+        """
+        import h5py
+
+        from lisatools.sensitivity import UnequalArmInstrumentNoise
+
+        from ..noise import resolve_noise_file
+
+        if psd is None:
+            raise ValueError(
+                "unequal_arm=1 requires the psd branch (it swaps the psd "
+                "branch's instrument component)."
+            )
+        if gs.data_mode != "mojito":
+            raise ValueError(
+                f"unequal_arm=1 requires data_mode='mojito' (got "
+                f"{gs.data_mode!r}): the per-link delay table is read from "
+                "the mojito NOISE brick's /ltts group, and synthetic/sangria "
+                "data carries none."
+            )
+        noise_file = resolve_noise_file(gs.mojito_data_path, gs.noise_file)
+        if noise_file is None:
+            raise FileNotFoundError(
+                "unequal_arm=1 but no mojito NOISE brick was found: set "
+                "general.noise_file / NOISE_FILE or add "
+                f"data/INSTRUMENT/L1/NOISE_* under {gs.mojito_data_path!r}."
+            )
+        with h5py.File(noise_file, "r") as fh:
+            if "ltts" not in fh:
+                raise ValueError(
+                    f"unequal_arm=1 but {noise_file!r} has no /ltts group; "
+                    "use a NOISE brick that carries the per-link delays."
+                )
+        if psd.instrument_component_cls is None:
+            psd.instrument_component_cls = UnequalArmInstrumentNoise
+        kwargs = dict(psd.instrument_component_kwargs or {})
+        kwargs.setdefault("ltts_l1_file", noise_file)
+        kwargs.setdefault("ltts_stride", int(gs.unequal_arm_stride))
+        if gs.wdm_psd_method:
+            kwargs.setdefault("wdm_psd_method", gs.wdm_psd_method)
+        psd.instrument_component_kwargs = kwargs
 
     def _sgwb_sens_kwargs(self, gs: AllSourcesGeneralSettings) -> dict:
         if "sgwb" not in self._branch_names:

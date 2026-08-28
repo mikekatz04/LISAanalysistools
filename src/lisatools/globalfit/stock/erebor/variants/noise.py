@@ -54,6 +54,7 @@ from ....recipe import Recipe, Stage, build_noise_moves
 from ...base import env_default
 from ..fit import EreborFit, EreborGeneralSettings
 from ..noise import (
+    validate_coarse_settings,
     GalForSettings,
     GalForSetup,
     PSDSettings,
@@ -170,6 +171,12 @@ class NoiseGeneralSettings(EreborGeneralSettings):
     psd_build_threads: int = dataclasses.field(
         default_factory=env_default("PSD_BUILD_THREADS", 1, int)
     )
+
+    # coarse_Q / coarse_use_ws / coarse_fiducial (+ the coarse_gpu_* knobs)
+    # are inherited from EreborGeneralSettings (lifted 2026-08-28 so
+    # all_sources shares them). Noise-only semantics are unchanged: Q=1 is
+    # the ordinary fine likelihood; Q>1 replaces the backend with the CPU
+    # coarse path, WS weighting frozen at injection/initial fiducial.
 
     # "mojito" (default): the real NOISE brick; "synthetic": the Cholesky
     # draw from the injected covariance. Auto-falls back to synthetic when
@@ -299,6 +306,7 @@ class _NoiseFitBase(EreborFit):
     #    ``fit.sgwb.stochastic_fn`` / ``fit.psd.instrument_model_cls`` — no
     #    editing of general-level ``sensitivity_init_kwargs`` needed. --
     def finalize_general(self, gs: NoiseGeneralSettings) -> None:
+        validate_coarse_settings(gs, all_source=False)
         gs.sensitivity_init_kwargs = noise_sensitivity_init_kwargs(
             gs.sensitivity_init_kwargs,
             tdi_generation=gs.tdi_gen,

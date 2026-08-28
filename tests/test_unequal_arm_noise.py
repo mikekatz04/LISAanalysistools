@@ -19,10 +19,12 @@ The three properties worth pinning down:
 import copy
 import pickle
 import unittest
+import warnings
 
 import numpy as np
 
 from lisatools import detector as lisa
+from lisatools._unequal_arm_fused import unequal_arm_tdi2_unit_covariances
 from lisatools.domains import FDSettings, WDMSettings
 from lisatools.sensitivity import (
     UNEQUAL_ARM_LINKS,
@@ -177,6 +179,31 @@ class UnequalArmNoiseTest(unittest.TestCase):
         self.assertLess(rel.max(), 1e-11)
         # the WDM fold keeps only Re[C_ij], so the folded covariance is real
         self.assertFalse(np.iscomplexobj(ua))
+
+    def test_layer_constant_wdm_uses_existing_half_psd_normalization(self):
+        """Center evaluation is exactly 0.5*S(f_m), like get_sensitivity."""
+        wdm = WDMSettings(Nf=32, Nt=32, dt=5.0, force_backend="cpu")
+        ltts = _unequal_ltts()
+        got = UnequalArmInstrumentNoise(
+            ltts,
+            model=self.model,
+            fill_nans=0.0,
+            basis_cache={},
+            wdm_psd_method="layer_constant",
+        ).covariance(wdm)
+
+        B_oms, B_acc = unequal_arm_tdi2_unit_covariances(wdm.f_arr, ltts)
+        expected_column = 0.5 * np.real(
+            self.model.Soms_d * B_oms + self.model.Sa_a * B_acc
+        )
+        expected_column[np.isnan(expected_column)] = 0.0
+        expected = np.repeat(expected_column[..., None], wdm.Nt_active, axis=-1)
+        np.testing.assert_allclose(got, expected, rtol=2e-13, atol=0.0)
+
+        # The exact DFT->WDM fold has precisely the same normalization for a
+        # locally flat one-sided PSD, rather than merely approaching 1/2.
+        flat_fold = wdm.fold_sparse_psd(np.ones(len(wdm.fold_frequency_arr)))
+        np.testing.assert_array_equal(flat_fold, np.full(wdm.Nf_active, 0.5))
 
     # -- agreement with the C++ path ---------------------------------------
     def test_matches_cpp_reference(self):
@@ -391,11 +418,228 @@ class LinkDelayTableTest(unittest.TestCase):
         self.assertEqual(len(cache), 2)
         self.assertGreater(np.abs(a - b).max() / np.abs(a).max(), 1e-9)
 
+    def test_layer_calibrated_matches_fold(self):
+        """The calibrated layer-center path must track the exact fold.
+
+        ``layer_constant`` samples each unit basis at the layer center instead
+        of averaging it over the wavelet's frequency response, so it runs
+        systematically low. ``layer_calibrated`` divides that error out with a
+        single exact fold; both ingredients are parameter-independent, so the
+        residual is only the (second-order) delay dependence of the ratio.
+        """
+        # A production-like band: the calibration is a curvature correction,
+        # so it is only meaningful where the TDI transfer varies slowly across
+        # one layer (see test_layer_calibration_warns_out_of_band).
+        wdm = WDMSettings(Nf=256, Nt=64, dt=5.0, min_freq=3e-4, max_freq=8e-3)
+        got = {
+            method: UnequalArmInstrumentNoise(
+                self.table, model=self.model, fill_nans=0.0,
+                wdm_psd_method=method, basis_cache={},
+            ).covariance(wdm)
+            for method in ("fold", "layer_constant", "layer_calibrated")
+        }
+        scale = np.abs(got["fold"]).max()
+        uncorrected = np.abs(got["layer_constant"] - got["fold"]).max() / scale
+        corrected = np.abs(got["layer_calibrated"] - got["fold"]).max() / scale
+        # The uncorrected error must be real, or this test proves nothing.
+        self.assertGreater(uncorrected, 1e-4)
+        self.assertLess(corrected, 1e-5)
+        self.assertLess(corrected, uncorrected / 100.0)
+
+    def test_layer_calibration_warns_out_of_band(self):
+        """One reference epoch is not enough near Nyquist -- say so.
+
+        Above roughly the first TDI transfer null the transfer turns over
+        inside a single WDM layer, the correction stops being delay-independent,
+        and calibrating at one epoch no longer helps. That must warn rather
+        than quietly return a covariance no better than layer_constant.
+        """
+        wide = WDMSettings(Nf=256, Nt=64, dt=5.0)      # full band to Nyquist
+        with self.assertWarns(RuntimeWarning):
+            UnequalArmInstrumentNoise(
+                self.table, model=self.model, fill_nans=0.0,
+                wdm_psd_method="layer_calibrated", basis_cache={},
+            ).covariance(wide)
+
+    def test_layer_calibration_quiet_in_band(self):
+        """...and stays quiet where it is valid."""
+        wdm = WDMSettings(Nf=256, Nt=64, dt=5.0, min_freq=3e-4, max_freq=8e-3)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            UnequalArmInstrumentNoise(
+                self.table, model=self.model, fill_nans=0.0,
+                wdm_psd_method="layer_calibrated", basis_cache={},
+            ).covariance(wdm)
+        # Only ours; numpy raises unrelated invalid-value warnings in here.
+        mine = [w for w in caught if "layer_calibrated" in str(w.message)]
+        self.assertEqual(mine, [], f"unexpected calibration warning: {mine}")
+
+    def test_layer_calibration_cached_and_shared(self):
+        """The calibration fold is paid once, not once per component.
+
+        The backend rebuilds the component per proposal and hands it a shared
+        ``basis_cache``; if the calibration did not live there it would cost an
+        extra exact fold on every likelihood call.
+        """
+        cache = {}
+        first = UnequalArmInstrumentNoise(
+            self.table, model=self.model, fill_nans=0.0,
+            wdm_psd_method="layer_calibrated", basis_cache=cache,
+        ).covariance(self.wdm)
+        n_after_first = len(cache)
+        second = UnequalArmInstrumentNoise(
+            self.table, model=self.model, fill_nans=0.0,
+            wdm_psd_method="layer_calibrated", basis_cache=cache,
+        ).covariance(self.wdm)
+        self.assertEqual(len(cache), n_after_first)
+        np.testing.assert_allclose(second, first, rtol=1e-14, atol=0)
+
+    def test_unknown_wdm_psd_method_rejected(self):
+        with self.assertRaises(ValueError):
+            UnequalArmInstrumentNoise(
+                self.table, model=self.model, wdm_psd_method="layer_calibrated_typo"
+            )
+
     def test_bad_table_shape_rejected(self):
         with self.assertRaises(ValueError):
             LinkDelayTable(np.arange(5.0), np.zeros((4, 6)))
         with self.assertRaises(ValueError):
             LinkDelayTable(np.array([1.0, 0.0]), np.zeros((2, 6)))
+
+
+def _has_cupy():
+    try:
+        import cupy
+
+        return cupy.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        return False
+
+
+class UnequalArmGPUBoundaryTest(unittest.TestCase):
+    """Host/device boundary of the fused WDM unit bases (GPU unblock, 2026-08).
+
+    The fused transfer evaluation is NumPy; the fold and the final bases live
+    on the settings backend. These tests pin the CPU arithmetic bitwise against
+    an in-test naive reference, prove the batched fold path is bit-identical to
+    the per-column path, and record the current device in the basis-cache key
+    (the multi-GPU cache-poisoning fix; see noise-dev-merge-handoff.md §3.3).
+    """
+
+    def setUp(self):
+        self.model = _model()
+        self.wdm = WDMSettings(Nf=32, Nt=16, dt=5.0, force_backend="cpu")
+        self.ltts = _unequal_ltts()
+        # (Nt, 6) breathing table: static delays + a small per-epoch wobble
+        wob = 1e-4 * L0 * np.sin(
+            2 * np.pi * np.arange(self.wdm.Nt)[:, None] / self.wdm.Nt
+            + np.arange(6)[None, :]
+        )
+        self.ltts_t = self.ltts[None, :] + wob
+
+    def _naive_fold_bases(self, wdm, ltts_2d, fill_nans=0.0):
+        """Reference: one exact sparse fold per WDM time column."""
+        f_active = np.asarray(wdm.fold_frequency_arr, dtype=float)
+        cols = []
+        for g in range(wdm.ind_min_t, wdm.ind_max_t + 1):
+            bases = unequal_arm_tdi2_unit_covariances(f_active, ltts_2d[g])
+            stacked = np.stack(bases, axis=0)
+            stacked[np.isnan(stacked)] = fill_nans
+            cols.append(np.asarray(wdm.fold_sparse_psd(stacked)))
+        return np.stack(cols, axis=-1)
+
+    def test_fold_bases_match_naive_reference_time_resolved(self):
+        comp = UnequalArmInstrumentNoise(
+            self.ltts_t, model=self.model, fill_nans=0.0, basis_cache={}
+        )
+        B_oms, B_acc = comp._bases(self.wdm)
+        ref = self._naive_fold_bases(self.wdm, self.ltts_t)
+        np.testing.assert_array_equal(np.asarray(B_oms), ref[0])
+        np.testing.assert_array_equal(np.asarray(B_acc), ref[1])
+
+    def test_fold_bases_match_naive_reference_static(self):
+        comp = UnequalArmInstrumentNoise(
+            self.ltts, model=self.model, fill_nans=0.0, basis_cache={}
+        )
+        B_oms, B_acc = comp._bases(self.wdm)
+        one = self._naive_fold_bases(
+            self.wdm, np.tile(self.ltts, (self.wdm.Nt, 1))
+        )
+        np.testing.assert_array_equal(np.asarray(B_oms), one[0])
+        np.testing.assert_array_equal(np.asarray(B_acc), one[1])
+
+    def test_batched_fold_matches_per_column(self):
+        """The chunked batch fold is bitwise the per-column fold on CPU."""
+        comp = UnequalArmInstrumentNoise(
+            self.ltts_t, model=self.model, fill_nans=0.0, basis_cache={}
+        )
+        rows = [
+            self.ltts_t[g]
+            for g in range(self.wdm.ind_min_t, self.wdm.ind_max_t + 1)
+        ]
+        batched = comp._folded_unit_columns_batched(self.wdm, rows)
+        ref = self._naive_fold_bases(self.wdm, self.ltts_t)
+        np.testing.assert_array_equal(np.asarray(batched), ref)
+
+    def test_batched_fold_chunking_is_invariant(self):
+        comp = UnequalArmInstrumentNoise(
+            self.ltts_t, model=self.model, fill_nans=0.0, basis_cache={}
+        )
+        rows = [
+            self.ltts_t[g]
+            for g in range(self.wdm.ind_min_t, self.wdm.ind_max_t + 1)
+        ]
+        whole = comp._folded_unit_columns_batched(self.wdm, rows)
+        tiny = comp._folded_unit_columns_batched(
+            self.wdm, rows, chunk_bytes=1
+        )
+        np.testing.assert_array_equal(np.asarray(whole), np.asarray(tiny))
+
+    def test_basis_cache_key_records_device(self):
+        """A shared settings object must warm per-device bases (handoff §3.3)."""
+        from lisatools.utils.device import current_device
+
+        cache = {}
+        UnequalArmInstrumentNoise(
+            self.ltts, model=self.model, fill_nans=0.0, basis_cache=cache
+        ).covariance(self.wdm)
+        (key,) = cache.keys()
+        self.assertIn(current_device(self.wdm.xp), key)
+
+    def test_unit_bases_return_settings_backend_arrays(self):
+        comp = UnequalArmInstrumentNoise(
+            self.ltts_t, model=self.model, fill_nans=0.0, basis_cache={}
+        )
+        B_oms, B_acc = comp._bases(self.wdm)
+        self.assertIsInstance(B_oms, np.ndarray)
+        self.assertIsInstance(B_acc, np.ndarray)
+
+    @unittest.skipUnless(_has_cupy(), "needs a CUDA device + cupy")
+    def test_wdm_bases_on_gpu_match_cpu(self):
+        """GPU bases: device-resident, and equal to CPU to fp round-off."""
+        import cupy
+
+        for method in ("fold", "layer_constant", "layer_calibrated"):
+            with self.subTest(method=method):
+                cpu = UnequalArmInstrumentNoise(
+                    self.ltts_t,
+                    model=self.model,
+                    fill_nans=0.0,
+                    basis_cache={},
+                    wdm_psd_method=method,
+                ).covariance(self.wdm)
+                wdm_gpu = WDMSettings(Nf=32, Nt=16, dt=5.0, force_backend="cuda")
+                gpu = UnequalArmInstrumentNoise(
+                    self.ltts_t,
+                    model=self.model,
+                    fill_nans=0.0,
+                    basis_cache={},
+                    wdm_psd_method=method,
+                ).covariance(wdm_gpu)
+                self.assertIsInstance(gpu, cupy.ndarray)
+                np.testing.assert_allclose(
+                    cupy.asnumpy(gpu), np.asarray(cpu), rtol=1e-13, atol=0.0
+                )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import os
 from collections import namedtuple
@@ -330,6 +331,162 @@ class GeneralSetup(Setup, GeneralSettings):
     def data_dt(self) -> float:
         return self.data_td_settings.dt
 
+    def _resolve_deferred_noise_model(self, sensitivity_init_kwargs: dict) -> dict:
+        """Resolve deferred noise-model specs and record the model identity.
+
+        Variant ``finalize_general`` code runs before the data are processed,
+        so it cannot know the data epoch. Two deferred spellings — carrying
+        only plain scalars/paths on the settings tree — are resolved here,
+        where ``data_t0`` is authoritative:
+
+        * ``instrument_component_kwargs["ltts_l1_file"]`` (+ optional
+          ``"ltts_stride"``): replaced by a
+          :class:`~lisatools.sensitivity.LinkDelayTable` read from that L1
+          brick's ``/ltts`` group, anchored at ``data_t0``.
+        * ``galfor_modulation_anchor="data_t0"``: rewrites the lazy galfor
+          modulation table's epoch to ``data_t0``.
+
+        Every :class:`~lisatools.sensitivity.GalForTimeModulation` is also
+        coverage-checked against the observation span, failing loudly at
+        build instead of interpolating nonsense at first proposal.
+
+        Side effect: sets ``self.noise_model_identity`` — the semantic noise
+        model identity (instrument class, WDM PSD method, delay-table and
+        modulation digests, data epoch) the run backend persists so a resume
+        under a silently different likelihood is refused.
+        """
+        from ..sensitivity import GalForTimeModulation, LinkDelayTable
+
+        def _digest(*arrays) -> str:
+            h = hashlib.sha256()
+            for a in arrays:
+                a = np.ascontiguousarray(np.asarray(a, dtype=float))
+                h.update(str(a.shape).encode())
+                h.update(a.tobytes())
+            return h.hexdigest()[:16]
+
+        comp_kwargs = sensitivity_init_kwargs.get("instrument_component_kwargs")
+        ltts_digest = None
+        if isinstance(comp_kwargs, dict) and "ltts_l1_file" in comp_kwargs:
+            comp_kwargs = dict(comp_kwargs)
+            l1_path = comp_kwargs.pop("ltts_l1_file")
+            stride = int(comp_kwargs.pop("ltts_stride", 200))
+            table = LinkDelayTable.from_l1_file(
+                l1_path, stride=stride, data_t0=self.data_t0
+            )
+            step = float(table.t[1] - table.t[0]) if table.t.size > 1 else 0.0
+            if (
+                float(table.t[0]) - step > self.data_t0
+                or float(table.t[-1]) + step < self.data_t0 + self.Tobs
+            ):
+                raise ValueError(
+                    f"[unequal-arm] delay table {l1_path} spans "
+                    f"[{float(table.t[0]):.6e}, {float(table.t[-1]):.6e}] s "
+                    f"(mission clock) but the data occupy "
+                    f"[{self.data_t0:.6e}, {self.data_t0 + self.Tobs:.6e}] s "
+                    "-- wrong file or wrong epoch."
+                )
+            comp_kwargs["ltts"] = table
+            sensitivity_init_kwargs["instrument_component_kwargs"] = comp_kwargs
+            ltts_digest = _digest(table.t, table.ltts)
+            self.logger.info(
+                "[unequal-arm] link-delay table %s: stride=%d, %d epochs over "
+                "[%.6e, %.6e] s (mission clock), anchored at data_t0=%.6e, "
+                "digest=%s",
+                l1_path,
+                stride,
+                table.t.size,
+                float(table.t[0]),
+                float(table.t[-1]),
+                self.data_t0,
+                ltts_digest,
+            )
+
+        mod_anchor = sensitivity_init_kwargs.pop("galfor_modulation_anchor", None)
+        mod = sensitivity_init_kwargs.get("galfor_modulation")
+        mod_path = None
+        mod_digest = None
+        if mod_anchor is not None:
+            if mod_anchor != "data_t0":
+                raise ValueError(
+                    "galfor_modulation_anchor must be 'data_t0' or absent; "
+                    f"got {mod_anchor!r}."
+                )
+            if not isinstance(mod, GalForTimeModulation):
+                raise ValueError(
+                    "galfor_modulation_anchor='data_t0' requires a tabulated "
+                    "galfor modulation (set GALFOR_MODULATION_PATH / "
+                    "general.galfor_modulation_path)."
+                )
+            mod.t0 = float(self.data_t0)
+            self.logger.info(
+                "[galfor-modulation] table epoch anchored at data_t0=%.6e",
+                self.data_t0,
+            )
+        if isinstance(mod, GalForTimeModulation):
+            tbl = mod._table()
+            mod_path = os.path.basename(mod.path)
+            mod_digest = _digest(tbl)
+            t_rel = tbl[:, 0] - mod.t0
+            step = float(t_rel[1] - t_rel[0]) if t_rel.size > 1 else 0.0
+            if t_rel[0] - step > 0.0 or t_rel[-1] + step < self.Tobs:
+                raise ValueError(
+                    f"galfor modulation table {mod.path} covers "
+                    f"[{t_rel[0]:.6e}, {t_rel[-1]:.6e}] s relative to its "
+                    f"epoch (t0={mod.t0:.6e}) but the data span "
+                    f"[0, {self.Tobs:.6e}] s. A table on the absolute mission "
+                    "clock needs galfor_modulation_t0='data' "
+                    "(GALFOR_MODULATION_T0=data) or an explicit epoch."
+                )
+            self.logger.info(
+                "[galfor-modulation] %s: %d epochs covering "
+                "[%.6e, %.6e] s of the data frame (t0=%.6e), digest=%s",
+                mod.path,
+                tbl.shape[0],
+                float(t_rel[0]),
+                float(t_rel[-1]),
+                mod.t0,
+                mod_digest,
+            )
+
+        comp_kwargs_now = sensitivity_init_kwargs.get("instrument_component_kwargs") or {}
+        if ltts_digest is None and "ltts" in comp_kwargs_now:
+            lt = comp_kwargs_now["ltts"]
+            ltts_digest = (
+                _digest(lt.t, lt.ltts)
+                if isinstance(lt, LinkDelayTable)
+                else _digest(lt)
+            )
+        inst_cls = sensitivity_init_kwargs.get("instrument_component_cls")
+        wdm_method = (
+            sensitivity_init_kwargs.get("wdm_psd_method")
+            or comp_kwargs_now.get("wdm_psd_method")
+            or "fold"
+        )
+        self.noise_model_identity = {
+            "instrument_component": (
+                inst_cls.__name__ if isinstance(inst_cls, type) else str(inst_cls)
+            )
+            if inst_cls is not None
+            else "InstrumentNoise",
+            "unequal_arm": bool(ltts_digest is not None),
+            "wdm_psd_method": str(wdm_method),
+            "ltts_digest": ltts_digest or "",
+            "galfor_modulation": mod_path or "",
+            "galfor_modulation_digest": mod_digest or "",
+            "galfor_modulation_t0": float(getattr(mod, "t0", 0.0) or 0.0),
+            "data_t0": float(self.data_t0),
+            # Coarse-likelihood identity (plan-2): a resume across a coarse
+            # mode/Q/weighting change is a different PSD/GALFOR kernel on
+            # identical shapes. The fiducial digest is appended at write time
+            # by run.py once the sidecar runtime exists.
+            "coarse_mode": str(getattr(self, "coarse_gpu_mode", "off") or "off"),
+            "coarse_Q": int(getattr(self, "coarse_Q", 1) or 1),
+            "coarse_use_ws": bool(getattr(self, "coarse_use_ws", True)),
+        }
+        self.logger.info("[noise-model-identity] %s", self.noise_model_identity)
+        return sensitivity_init_kwargs
+
     # NOTE: ``catalogue`` is a plain attribute (a ``GeneralSettings``
     # dataclass field re-applied by ``Setup.__init__`` and refreshed from
     # ``data_processor.catalogue`` in ``init_data_information``) — it must
@@ -530,6 +687,16 @@ class GeneralSetup(Setup, GeneralSettings):
             sensitivity_init_kwargs["galactic_grid_kwargs"], dict
         ):
             sensitivity_init_kwargs["galactic_grid_kwargs"].setdefault("t0", self.data_t0)
+
+        # Late resolution of mission-clock noise-model inputs. finalize-time
+        # variant code cannot know the data epoch (the authoritative
+        # ``data_t0`` exists only after ``init_data_information``), so the
+        # stock variants pass deferred specs resolved here, exactly like the
+        # galactic-grid ``t0`` default above. Only plain scalars/paths ride
+        # the settings tree; the heavy/tabulated objects are built now.
+        sensitivity_init_kwargs = self._resolve_deferred_noise_model(
+            sensitivity_init_kwargs
+        )
 
         backend_cls = self.sensitivity_backend_class or CompositeSensitivityBackend
         if backend_cls is CompositeSensitivityBackend or (

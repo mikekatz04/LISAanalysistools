@@ -98,6 +98,33 @@ class EreborGeneralSettings(GeneralSettings):
         default_factory=env_default("BASE_FILE_NAME", "erebor_run")
     )
 
+    # --- coarse real-WDM likelihood (shared by the noise variants and
+    #     all_sources; lifted from NoiseGeneralSettings, plan-2 T3) ---
+    # Q=1 (default) leaves the ordinary fine likelihood untouched everywhere.
+    # Noise-only runs at Q>1 keep the CPU backend-replacement path; an
+    # all-source run additionally needs coarse_gpu_mode != "off" and builds a
+    # CoarseWDMRuntime sidecar (per-walker statistics) instead — the fine
+    # backend stays canonical and source moves never see coarse state.
+    coarse_Q: int = dataclasses.field(default_factory=env_default("COARSE_Q", 1, int))
+    coarse_use_ws: bool = dataclasses.field(
+        default_factory=env_default("COARSE_USE_WS", True, bool)
+    )
+    coarse_fiducial: str = dataclasses.field(
+        default_factory=env_default("COARSE_FIDUCIAL", "injection", str)
+    )
+    # "off" | "search_approx" (optimization stages only; not a posterior
+    # sampler) | "delayed_acceptance" (the only coarse mode valid for
+    # production PE: stage-1 coarse screen, stage-2 fine correction).
+    coarse_gpu_mode: str = dataclasses.field(
+        default_factory=env_default("COARSE_GPU_MODE", "off", str)
+    )
+    coarse_gpu_batch_bytes: int = dataclasses.field(
+        default_factory=env_default("COARSE_GPU_BATCH_BYTES", 256 * 1024 * 1024, int)
+    )
+    coarse_gpu_debug: bool = dataclasses.field(
+        default_factory=env_default("COARSE_GPU_DEBUG", False, bool)
+    )
+
     # --- grid / domain targets (env-backed) ---
     # ``Tobs`` (inherited) stays None; the build derives it as Nf*Nt*dt.
     dt: float = 2.5

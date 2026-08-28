@@ -10,6 +10,7 @@ The legacy multi-stage pipeline classes (``GlobalFitSegment``,
 ``MPIControlGlobalFit``) were removed 2026-07 (parallel-resources plan P0).
 """
 
+import hashlib
 import logging
 import os
 from copy import deepcopy
@@ -52,6 +53,13 @@ def _rss_mb() -> float:
     return ru / 1024.0 if sys.platform.startswith("linux") else ru / (1024.0**2)
 
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from ..coarsewdm import CoarseWDMRuntime, CoarseWDMStatistic, compute_qeff
+from ..domains import CoarseWDMSettings, WDMSettings
+from ..sensitivity import (
+    CompositeSensitivityBackend,
+    InstrumentNoise,
+    UnequalArmInstrumentNoise,
+)
 from ..utils.device import device_context, pin_main_device
 from ..utils.utility import asnumpy
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings, Setup
@@ -1077,6 +1085,312 @@ class GlobalFit:
 
         return state
 
+    def _prepare_coarse_wdm_runtime(self, state: GFState):
+        """Finalize the CPU-only coarse WDM likelihood once state exists."""
+        general_info = self.curr.general_info
+        Q = int(getattr(general_info, "coarse_Q", 1) or 1)
+        if Q <= 1:
+            return None
+
+        existing = getattr(general_info, "coarse_wdm_statistic", None)
+        if existing is not None:
+            return existing
+
+        allowed = {"psd", "galfor", "sgwb"}
+        branches = set(self.curr.engine_info.branch_names)
+        unsupported = sorted(branches - allowed)
+        mode = str(getattr(general_info, "coarse_gpu_mode", "off") or "off")
+        all_source_sidecar = bool(unsupported)
+        if all_source_sidecar and mode == "off":
+            raise ValueError(
+                "Coarse WDM noise likelihood cannot replace the fine backend "
+                f"with source branches {unsupported} present; its statistic "
+                "would go stale against per-walker residuals. An all-source "
+                "run must opt into the sidecar runtime explicitly: set "
+                "COARSE_GPU_MODE='search_approx' (optimization stages) or "
+                "'delayed_acceptance' (production PE)."
+            )
+        if not all_source_sidecar and mode != "off":
+            raise ValueError(
+                "coarse_gpu_mode applies to all-source runs only; noise-only "
+                "runs use the CPU backend-replacement coarse path."
+            )
+        if "psd" not in branches:
+            raise ValueError("Coarse WDM noise likelihood requires a psd branch.")
+        if not all_source_sidecar and general_info.gpus is not None:
+            raise ValueError(
+                "Coarse WDM noise likelihood is CPU-only in this implementation; "
+                "unset general.gpus. Single-GPU support is a planned follow-up."
+            )
+        fine_settings = general_info.domain_settings
+        if not isinstance(fine_settings, WDMSettings) or isinstance(
+            fine_settings, CoarseWDMSettings
+        ):
+            raise TypeError("coarse_Q > 1 requires a fine WDMSettings data domain.")
+        if getattr(fine_settings, "is_complex", False):
+            raise ValueError("Coarse WDM likelihood currently supports real WDM only.")
+
+        fine_backend = general_info.sensitivity_backend
+        if not isinstance(fine_backend, CompositeSensitivityBackend):
+            raise TypeError(
+                "Coarse WDM noise likelihood currently requires "
+                "CompositeSensitivityBackend."
+            )
+        backend_name = str(getattr(fine_backend.backend, "name", ""))
+        if not all_source_sidecar and not backend_name.endswith("_cpu"):
+            raise ValueError(
+                f"Coarse WDM noise likelihood is CPU-only; got backend {backend_name!r}."
+            )
+
+        policy = str(getattr(general_info, "coarse_fiducial", "injection"))
+        if policy not in ("injection", "initial"):
+            raise ValueError(
+                f"coarse_fiducial must be 'injection' or 'initial'; got {policy!r}."
+            )
+        use_ws = bool(getattr(general_info, "coarse_use_ws", True))
+
+        def _initial_median(name):
+            rows = np.asarray(state.branches_coords[name][0, :, 0], dtype=float)
+            transform = getattr(self.curr.source_info[name], "transform", None)
+            if transform is not None:
+                rows = np.asarray(transform.both_transforms(rows), dtype=float)
+            return np.median(rows, axis=0)
+
+        def _backend_has_samples():
+            path = general_info.main_file_path
+            if not os.path.exists(path):
+                return False
+            import h5py
+
+            with h5py.File(path, "r") as handle:
+                group = handle.get("global_fit") or handle.get("mcmc")
+                return group is not None and int(group.attrs.get("iteration", 0)) > 0
+
+        def _initial_fiducial_params():
+            """Load or atomically freeze the first-run physical medians."""
+            path = os.path.join(
+                general_info.artifacts_file_dir, "coarse_wdm_initial_fiducial.npz"
+            )
+            expected_has_galfor = "galfor" in branches
+            expected_has_sgwb = "sgwb" in branches
+            if os.path.exists(path):
+                with np.load(path, allow_pickle=False) as saved:
+                    saved_q = int(saved["coarse_Q"][0])
+                    saved_has_galfor = bool(saved["has_galfor"][0])
+                    saved_has_sgwb = bool(saved["has_sgwb"][0])
+                    if (
+                        saved_q != Q
+                        or saved_has_galfor != expected_has_galfor
+                        or saved_has_sgwb != expected_has_sgwb
+                    ):
+                        raise ValueError(
+                            f"Stored coarse fiducial {path!r} does not match this "
+                            "run's Q/branches. Use a new tag or remove both the "
+                            "backend and its artifact directory for a fresh run."
+                        )
+                    return (
+                        np.asarray(saved["psd"], dtype=float),
+                        np.asarray(saved["galfor"], dtype=float)
+                        if expected_has_galfor
+                        else None,
+                        np.asarray(saved["sgwb"], dtype=float)
+                        if expected_has_sgwb
+                        else None,
+                    )
+
+            if _backend_has_samples():
+                raise ValueError(
+                    "Cannot resume a coarse_fiducial='initial' chain because "
+                    f"its frozen parameter sidecar {path!r} is missing. "
+                    "Recomputing it from the last walkers would change the target "
+                    "likelihood; restore the sidecar or start under a new tag."
+                )
+
+            psd = _initial_median("psd")
+            galfor = _initial_median("galfor") if expected_has_galfor else None
+            sgwb = _initial_median("sgwb") if expected_has_sgwb else None
+            os.makedirs(general_info.artifacts_file_dir, exist_ok=True)
+            tmp_path = path + ".tmp.npz"
+            np.savez(
+                tmp_path,
+                coarse_Q=np.asarray([Q], dtype=int),
+                has_galfor=np.asarray([expected_has_galfor], dtype=bool),
+                has_sgwb=np.asarray([expected_has_sgwb], dtype=bool),
+                psd=psd,
+                galfor=np.asarray([] if galfor is None else galfor, dtype=float),
+                sgwb=np.asarray([] if sgwb is None else sgwb, dtype=float),
+            )
+            os.replace(tmp_path, path)
+            return psd, galfor, sgwb
+
+        if use_ws:
+            if policy == "initial":
+                psd_params, galfor_params, sgwb_params = _initial_fiducial_params()
+            else:
+                psd_params = np.asarray(general_info.psd_injection, dtype=float)
+                galfor_params = (
+                    np.asarray(general_info.galfor_injection, dtype=float)
+                    if "galfor" in branches
+                    else None
+                )
+                sgwb_params = (
+                    np.asarray(general_info.sgwb_injection, dtype=float)
+                    if "sgwb" in branches
+                    else None
+                )
+
+        else:
+            # Bartlett weights are exactly the cell sizes and have no
+            # fiducial dependence. Avoid both a fine covariance build and an
+            # unnecessary initial-policy resume sidecar on this opt-out path.
+            fiducial_fine = None
+        coarse_settings = CoarseWDMSettings.from_fine(fine_settings, Q)
+
+        backend_kwargs = dict(general_info.sensitivity_init_kwargs or {})
+        coarse_backend = type(fine_backend)(
+            settings=coarse_settings,
+            force_backend=general_info.force_backend,
+            **backend_kwargs,
+        )
+        # Reuse any fine unit-noise bases already paid for by the fiducial
+        # build. Unequal-arm coarse bases add their averaged entries here.
+        if getattr(fine_backend, "_instrument_basis_cache", None) is not None:
+            coarse_backend._instrument_basis_cache = fine_backend._instrument_basis_cache
+
+        qeff = qeff_channels = None
+        fused_unequal = (
+            use_ws
+            and isinstance(fine_backend.instrument_component_cls, type)
+            and issubclass(
+                fine_backend.instrument_component_cls, UnequalArmInstrumentNoise
+            )
+        )
+        if fused_unequal:
+            # Build only the non-instrument part on the fine grid.  The exact
+            # unequal-arm component streams its two unit bases directly into
+            # coarse cells and retains just their three fine diagonals, which
+            # are enough to moment-match total instrument+foreground/SGWB
+            # variances without ever materializing two dense fine 3x3 bases.
+            extra_diagonal = None
+            if galfor_params is not None or sgwb_params is not None:
+                extra_fine = fine_backend(
+                    "coarse_fiducial_noninstrument",
+                    None,
+                    galfor_params=galfor_params,
+                    sgwb_params=sgwb_params,
+                )
+                extra_covariance = np.asarray(asnumpy(extra_fine.sens_mat))
+                extra_diagonal = np.real(
+                    np.stack([extra_covariance[a, a] for a in range(3)], axis=0)
+                )
+                del extra_covariance, extra_fine
+
+            model = coarse_backend.instrument_model_cls(
+                float(psd_params[0]) ** 2,
+                float(psd_params[1]) ** 2,
+                coarse_backend._orbits,
+                f"{coarse_backend.model_name}:coarse_fiducial",
+            )
+            component_kwargs = dict(
+                tdi_generation=coarse_backend.tdi_generation,
+                model=model,
+                fill_nans=coarse_backend.instrument_fill_nans,
+                **coarse_backend.instrument_component_kwargs,
+            )
+            if coarse_backend._instrument_basis_cache is not None and issubclass(
+                coarse_backend.instrument_component_cls, InstrumentNoise
+            ):
+                component_kwargs["basis_cache"] = coarse_backend._instrument_basis_cache
+            component = coarse_backend.instrument_component_cls(**component_kwargs)
+            qeff, qeff_channels = component.coarse_qeff(
+                coarse_settings, extra_diagonal=extra_diagonal
+            )
+            fiducial_fine = None
+            del extra_diagonal
+        elif use_ws:
+            fiducial_fine = fine_backend(
+                "coarse_fiducial",
+                psd_params,
+                galfor_params=galfor_params,
+                sgwb_params=sgwb_params,
+            )
+
+        if all_source_sidecar:
+            # Fine backend stays canonical: build the runtime sidecar and
+            # leave every AnalysisContainer's coarse_stats as None. The
+            # per-walker statistics are refreshed by the noise moves.
+            if qeff is None and use_ws:
+                qeff, qeff_channels = compute_qeff(
+                    fiducial_fine,
+                    coarse_settings,
+                    use_ws=True,
+                    return_channels=True,
+                )
+            digest_src = hashlib.sha256()
+            for part in (policy, str(Q), str(bool(use_ws)), mode):
+                digest_src.update(part.encode())
+            if use_ws:
+                for arr in (psd_params, galfor_params, sgwb_params):
+                    if arr is not None:
+                        digest_src.update(
+                            np.ascontiguousarray(
+                                np.asarray(arr, dtype=float)
+                            ).tobytes()
+                        )
+            runtime = CoarseWDMRuntime(
+                coarse_settings=coarse_settings,
+                qeff=qeff,
+                qeff_channels=qeff_channels,
+                use_ws=use_ws,
+                mode=mode,
+                batch_bytes=int(
+                    getattr(general_info, "coarse_gpu_batch_bytes", 0)
+                    or 256 * 1024 * 1024
+                ),
+                fiducial_digest=digest_src.hexdigest()[:16],
+                coarse_backend=coarse_backend,
+            )
+            general_info.coarse_wdm_runtime = runtime
+            general_info.coarse_wdm_settings = coarse_settings
+            logger.info(
+                "coarse WDM sidecar runtime (all-source, mode=%s): Q=%d, "
+                "Nt_active=%d -> Ncoarse=%d, weighting=%s, fiducial=%s, "
+                "digest=%s",
+                mode,
+                Q,
+                fine_settings.Nt_active,
+                coarse_settings.Ncoarse,
+                "WS" if use_ws else "Bartlett",
+                policy if use_ws else "not used",
+                runtime.fiducial_digest,
+            )
+            return None
+
+        statistic = CoarseWDMStatistic.from_wdm_signal(
+            general_info.input_data_residual_array,
+            coarse_settings,
+            fiducial_sens_mat_fine=fiducial_fine,
+            use_ws=use_ws,
+            qeff=qeff,
+            qeff_channels=qeff_channels,
+        )
+
+        general_info.fine_sensitivity_backend = fine_backend
+        general_info.sensitivity_backend = coarse_backend
+        general_info.coarse_wdm_settings = coarse_settings
+        general_info.coarse_wdm_fiducial_sens_mat = fiducial_fine
+        general_info.coarse_wdm_statistic = statistic
+        logger.info(
+            "coarse WDM likelihood: CPU Q=%d, Nt_active=%d -> Ncoarse=%d, "
+            "weighting=%s, fiducial=%s",
+            Q,
+            fine_settings.Nt_active,
+            coarse_settings.Ncoarse,
+            "WS" if use_ws else "Bartlett",
+            policy if use_ws else "not used",
+        )
+        return statistic
+
     def setup_acs(self, state: GFState, rebuild_residuals: bool = False) -> AnalysisContainerArray:
         """
         Set up AnalysisContainerArray for likelihood computations.
@@ -1100,6 +1414,7 @@ class GlobalFit:
             sensitivity for all walkers.
         """
         general_info = self.curr.general_info
+        coarse_stats = self._prepare_coarse_wdm_runtime(state)
         pin_main_device(xp, general_info.gpus)
 
         # Per-branch params-based template generators registered into every
@@ -1206,6 +1521,7 @@ class GlobalFit:
                 deepcopy(sens_here),
                 signal_gen=dict(signal_gen_map) if signal_gen_map else None,
                 likelihood_source_only=ll_source_only,
+                coarse_stats=coarse_stats,
             )
 
         acs_tmp = []
@@ -1603,13 +1919,78 @@ class GlobalFit:
                 sub_reset_kwargs=sub_reset_kwargs,
                 **extra_reset_kwargs,
             )
+        # Persist the domain settings (FD / STFT / WDM) so a re-run can
+        # reconstruct everything from a single HDF5 file. ``general_info``
+        # already holds the resolved instances at this point.
+        #
+        # Key this on ``iteration == 0`` rather than only on the reset branch:
+        # an initialized backend may be a prior attempt that died before its
+        # first sample. Such an attempt can retain a stale settings block even
+        # though callers correctly treat the empty chain as fresh. Conversely,
+        # never replace the historical metadata of a chain that has samples;
+        # doing so could erase the evidence of a mismatched resume.
+        domain_settings = general_info.domain_settings
+        if domain_settings is not None and int(backend.iteration) == 0:
+            backend.write_domain_settings(domain_settings)
 
-            # Persist the domain settings (FD / STFT / WDM) so a re-run can
-            # reconstruct everything from a single HDF5 file. ``general_info``
-            # already holds the resolved instances at this point.
-            domain_settings = general_info.domain_settings
-            if domain_settings is not None:
-                backend.write_domain_settings(domain_settings)
+        # Noise-model identity: same shapes can hide a different likelihood
+        # (unequal-arm vs equal-arm, wdm_psd_method, delay table, modulation).
+        # Persist the semantic identity with a fresh chain; refuse to resume a
+        # sampled chain under a different one.
+        noise_identity = getattr(general_info, "noise_model_identity", None)
+        _coarse_runtime = getattr(general_info, "coarse_wdm_runtime", None)
+        if noise_identity and _coarse_runtime is not None:
+            noise_identity = {
+                **noise_identity,
+                "coarse_fiducial_digest": _coarse_runtime.fiducial_digest,
+            }
+        if noise_identity:
+            if int(backend.iteration) == 0:
+                backend.write_noise_model_identity(noise_identity)
+            else:
+                stored = backend.read_noise_model_identity()
+                if stored is None:
+                    non_default = (
+                        noise_identity.get("unequal_arm")
+                        or noise_identity.get("galfor_modulation")
+                        or noise_identity.get("wdm_psd_method", "fold") != "fold"
+                    )
+                    if non_default:
+                        raise ValueError(
+                            f"Cannot resume {backend_path!r}: it predates "
+                            "noise-model identity records, but this "
+                            "configuration requests a non-default noise model "
+                            f"({noise_identity}). The stored chain was almost "
+                            "certainly sampled under a different likelihood -- "
+                            "use a fresh store (new STORE_DIR/BASE_FILE_NAME)."
+                        )
+                    logger.warning(
+                        "Resuming %s with no stored noise-model identity "
+                        "(pre-identity store); current identity is the stock "
+                        "default, continuing.",
+                        backend_path,
+                    )
+                else:
+                    mismatched = {}
+                    for key, value in noise_identity.items():
+                        stored_value = stored.get(key)
+                        if isinstance(value, float):
+                            same = stored_value is not None and np.isclose(
+                                float(stored_value), value, rtol=0.0, atol=1e-6
+                            )
+                        else:
+                            same = stored_value == value
+                        if not same:
+                            mismatched[key] = (stored_value, value)
+                    if mismatched:
+                        raise ValueError(
+                            f"Cannot resume {backend_path!r}: stored "
+                            "noise-model identity differs from the configured "
+                            f"one: {mismatched} (stored, configured). Same "
+                            "array shapes, different likelihood -- use a "
+                            "fresh store or restore the original noise "
+                            "configuration."
+                        )
 
         # Arm mid-iteration checkpointing (sampling rank only -- this method
         # runs nowhere else). getattr defaults keep legacy pickled settings

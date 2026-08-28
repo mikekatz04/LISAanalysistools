@@ -48,7 +48,13 @@ from ...diagnostic import (
     psd_debug_checks_enabled,
 )
 from ...domaincomputation import DomainComputationGroupArray
-from ...domains import FDSettings, FDSignal, STFTSettings, WDMSettings
+from ...domains import (
+    CoarseWDMSettings,
+    FDSettings,
+    FDSignal,
+    STFTSettings,
+    WDMSettings,
+)
 from ...sensitivity import (
     _XYZ_ELEMENT_SENS,
     _mat3x3_det_inv,
@@ -125,6 +131,21 @@ class PSDMove(GlobalFitMove, StretchMove):
     # canonical noise-model branch order (psd is mandatory in the model;
     # galfor/sgwb optional)
     NOISE_BRANCHES = ("psd", "galfor", "sgwb")
+    # Do not trade runtime for an unbounded second copy of the PSD plane on
+    # uncoarsened two-year WDM runs.  The try5 coarse cache is only ~6.4 MiB;
+    # the equivalent Q=1 cache would approach 1 GiB for 14 walkers.
+    FIXED_COMPONENT_CACHE_MAX_BYTES = 256 * 1024**2
+    # Omitted foreground layers perturb every diagonal covariance by less
+    # than this fraction of the frozen instrument covariance.  At Q=150 the
+    # resulting worst-case accumulated log-likelihood error is O(1e-4), far
+    # below both floating Monte Carlo scatter and proposal-scale delta-log-L,
+    # while the try5 posterior keeps only ~38 of 59 active layers.
+    GALFOR_SUBBAND_REL_TOL = 1e-10
+    # A WDM layer averages a finite frequency window.  The cheap layer-center
+    # support estimate can cross the relative threshold one layer earlier than
+    # that exact average near a sharp foreground cutoff.  Retain two neighbors
+    # on either side before performing the exact selected-layer fold.
+    GALFOR_SUBBAND_GUARD_LAYERS = 2
 
     # per-iteration acceptance deltas; allocated by propose() at the module
     # ladder shape, so run_move() skips the tally when called on its own.
@@ -154,6 +175,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         run_async: bool = False,
         run_threaded: bool = False,
         build_threads: int = 1,
+        coarse_runtime=None,
         **kwargs,
     ):
 
@@ -175,6 +197,14 @@ class PSDMove(GlobalFitMove, StretchMove):
         # :meth:`_build_batch`). Holds the devices already warmed (``None``
         # is the CPU / single-device entry).
         self._build_warmed = set()
+        # All-source coarse sidecar (plan-2): a CoarseWDMRuntime owning the
+        # per-walker coarse statistics and the coarse backend. None (default)
+        # leaves every existing route untouched. The runtime is consulted
+        # only by compute_coarse_log_like and the propose-entry refresh; the
+        # fine callback, the containers' sens_mat, and the packed ACA buffer
+        # never see coarse state.
+        self.coarse_runtime = coarse_runtime
+        self._fixed_component_covariances_coarse = {}
         if dcga is not None:
             if acs is None:
                 acs = dcga.acs
@@ -202,6 +232,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         # cold-row snapshot of the non-sampled noise branches, refreshed at
         # every propose(); empty when this move samples the whole model
         self._fixed_noise_coords = {}
+        # Per-propose, per-walker additive covariances for noise branches that
+        # this Metropolis-within-Gibbs move freezes at their cold rows.  These
+        # arrays are exact and immutable for the whole repeat block.
+        self._fixed_component_covariances = {}
+        self._fixed_total_covariances = {}
+        self._fixed_total_loglikes = None
+        self._fixed_total_loglike_frequency_terms = None
 
         self.sensitivity_backend = sensitivity_backend
         self.psd_transform_fn = psd_transform_fn
@@ -445,6 +482,10 @@ class PSDMove(GlobalFitMove, StretchMove):
         """Drop the thread pool from pickles / deepcopies (sprint pickle rule)."""
         state = dict(self.__dict__)
         state["_build_pool"] = None
+        state["_fixed_component_covariances"] = {}
+        state["_fixed_total_covariances"] = {}
+        state["_fixed_total_loglikes"] = None
+        state["_fixed_total_loglike_frequency_terms"] = None
         # runtime device arrays (per-device bases/modulations/extras);
         # purely derived state, rebuilt on first use in the copy
         state["_batch_runtime"] = {}
@@ -766,7 +807,21 @@ class PSDMove(GlobalFitMove, StretchMove):
         # ``sgwb_params`` is only forwarded when present so the legacy
         # XYZSensitivityBackend (whose __call__ has no sgwb kwarg) keeps
         # working for runs without an sgwb branch.
+        psd_params = self._to_physical(self.psd_transform_fn, psd_params)
+        galfor_params = self._to_physical(self.galfor_transform_fn, galfor_params)
         sgwb_params = self._to_physical(self.sgwb_transform_fn, sgwb_params)
+        fixed = getattr(self, "_fixed_component_covariances", {}).get(
+            int(walker_index), {}
+        )
+        if fixed and hasattr(self.sensitivity_backend, "matrix_from_params"):
+            return self.sensitivity_backend.matrix_from_params(
+                f"walker_{walker_index}",
+                None if "psd" in fixed else psd_params,
+                galfor_params=None if "galfor" in fixed else galfor_params,
+                sgwb_params=None if "sgwb" in fixed else sgwb_params,
+                fixed_covariances=fixed,
+            )
+
         extra = {} if sgwb_params is None else dict(sgwb_params=sgwb_params)
         dev = self._walker_device(walker_index)
         settings_here = self._backend_settings_for_device(dev)
@@ -778,12 +833,482 @@ class PSDMove(GlobalFitMove, StretchMove):
             extra["basis_settings"] = settings_here
         xp = getattr(getattr(self, "acs", None), "xp", np)
         with device_context(xp, dev):
+            # NB: psd_params / galfor_params were already mapped to physical
+            # units at the top of this method (needed by the frozen-component
+            # route above), so they must NOT be transformed a second time here.
             return self.sensitivity_backend(
                 f"walker_{walker_index}",
-                self._to_physical(self.psd_transform_fn, psd_params),
-                galfor_params=self._to_physical(self.galfor_transform_fn, galfor_params),
+                psd_params,
+                galfor_params=galfor_params,
                 **extra,
             )
+
+    def _fixed_component_cache_available(self) -> bool:
+        """Whether exact additive-component caching is safe on this route."""
+        if self._dcga is not None:
+            return False
+        backend = getattr(self.sensitivity_backend, "backend", None)
+        return (
+            str(getattr(backend, "name", "")).endswith("_cpu")
+            and hasattr(self.sensitivity_backend, "component_covariance")
+        )
+
+    def _prepare_fixed_component_covariances(self) -> None:
+        """Build each frozen branch once per walker for this proposal block."""
+        self._fixed_component_covariances = {}
+        self._fixed_total_covariances = {}
+        self._fixed_total_loglikes = None
+        self._fixed_total_loglike_frequency_terms = None
+        if not self._fixed_noise_coords or not self._fixed_component_cache_available():
+            return
+
+        transforms = {
+            "psd": self.psd_transform_fn,
+            "galfor": self.galfor_transform_fn,
+            "sgwb": self.sgwb_transform_fn,
+        }
+        tasks = [
+            (branch, w, rows[w])
+            for branch, rows in self._fixed_noise_coords.items()
+            for w in range(len(rows))
+        ]
+
+        def _one(task):
+            branch, w, params = task
+            physical = self._to_physical(transforms[branch], params)
+            covariance = self.sensitivity_backend.component_covariance(
+                branch, physical, name=f"fixed_{branch}_{w}"
+            )
+            return branch, int(w), covariance
+
+        # Warm shared basis/spectral caches without a race, then spread the
+        # remaining independent rows exactly like the ordinary build path.
+        results = []
+        task_count = len(tasks)
+        if tasks:
+            first = _one(tasks.pop(0))
+            estimated_bytes = int(getattr(first[2], "nbytes", 0)) * task_count
+            if estimated_bytes > self.FIXED_COMPONENT_CACHE_MAX_BYTES:
+                logger.info(
+                    "skipping frozen noise-component cache: estimated %.1f MiB "
+                    "exceeds %.1f MiB limit",
+                    estimated_bytes / 1024**2,
+                    self.FIXED_COMPONENT_CACHE_MAX_BYTES / 1024**2,
+                )
+                return
+            results.append(first)
+            # per-device warm bookkeeping (see :meth:`_build_batch`); this
+            # route is CPU-only, so the one task warms the whole set.
+            self._build_warmed.add(self._walker_device(first[1]))
+        if self._build_threads > 1 and len(tasks) > 1:
+            results.extend(self.build_pool.map(_one, tasks))
+        else:
+            results.extend(_one(task) for task in tasks)
+        for branch, w, covariance in results:
+            self._fixed_component_covariances.setdefault(w, {})[branch] = covariance
+
+        # A galfor-only split move changes no other model component.  Keep the
+        # exact full-band frozen sum so its likelihood can serve as a baseline;
+        # each proposal then recomputes only the layers where foreground power
+        # measurably changes that sum.  Fixed extras are not represented in the
+        # branch cache, so retain the ordinary full-band path when present.
+        if (
+            self.sampled_branches == ["galfor"]
+            and not getattr(self.sensitivity_backend, "extra_components", ())
+        ):
+            required = set(self._fixed_noise_coords)
+            for w, components in self._fixed_component_covariances.items():
+                if set(components) != required:
+                    self._fixed_total_covariances = {}
+                    break
+                ordered = [
+                    components[key]
+                    for key in self.NOISE_BRANCHES
+                    if key in components
+                ]
+                total = ordered[0]
+                for covariance in ordered[1:]:
+                    total = total + covariance
+                self._fixed_total_covariances[w] = total
+
+    def _coarse_batch_fast_path_available(self) -> bool:
+        """True for the exact CPU coarse-WDM batched reduction."""
+        if not self._fixed_component_cache_available():
+            return False
+        if not hasattr(self.sensitivity_backend, "covariance_from_params"):
+            return False
+        acs = self.acs.flatten()
+        if len(acs) == 0 or getattr(acs[0], "coarse_stats", None) is None:
+            return False
+        stat = acs[0].coarse_stats
+        return all(getattr(ac, "coarse_stats", None) is stat for ac in acs)
+
+    def _galfor_subband_fast_path_available(self) -> bool:
+        """Whether a galfor-only move can score against a frozen baseline."""
+        return (
+            self._coarse_batch_fast_path_available()
+            and self.sampled_branches == ["galfor"]
+            and len(self._fixed_total_covariances) == len(self.acs.flatten())
+            and hasattr(self.sensitivity_backend, "galfor_coarse_profile")
+            and hasattr(
+                self.sensitivity_backend,
+                "galfor_coarse_profile_estimate",
+            )
+            and hasattr(
+                self.sensitivity_backend,
+                "galfor_coarse_covariance_from_profile",
+            )
+        )
+
+    def _galfor_profile_frequency_mask(self, profile, fixed_covariance):
+        """Layers whose foreground diagonal is non-negligible vs ``fixed``."""
+        column, modulation = profile
+        column = np.asarray(column)
+        modulation = np.asarray(modulation)
+        if modulation.ndim == 2:
+            modulation_diagonal = np.diag(modulation)[:, None]
+        else:
+            modulation_diagonal = np.stack(
+                [modulation[channel, channel] for channel in range(3)], axis=0
+            )
+        fixed_diagonal = np.real(
+            np.stack(
+                [fixed_covariance[channel, channel] for channel in range(3)],
+                axis=0,
+            )
+        )
+        numerator = (
+            np.abs(modulation_diagonal)[:, None, :]
+            * np.abs(column)[None, :, None]
+        )
+        denominator = np.abs(fixed_diagonal)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(
+                denominator > 0.0,
+                numerator / denominator,
+                np.where(numerator > 0.0, np.inf, 0.0),
+            )
+        return np.any(
+            ratio > self.GALFOR_SUBBAND_REL_TOL, axis=(0, 2)
+        )
+
+    def _compute_galfor_subband_loglike(
+        self, stat, walker_inds_keep, galfor_coords
+    ):
+        """Full baseline plus band-limited foreground likelihood corrections."""
+        from ...coarsewdm import (
+            coarse_wdm_log_likelihood_batch,
+            coarse_wdm_log_likelihood_batch_frequency_terms,
+        )
+
+        nwalkers = len(self.acs.flatten())
+        if self._fixed_total_loglikes is None:
+            fixed_batch = np.stack(
+                [self._fixed_total_covariances[w] for w in range(nwalkers)],
+                axis=0,
+            )
+            self._fixed_total_loglike_frequency_terms = np.asarray(
+                coarse_wdm_log_likelihood_batch_frequency_terms(
+                    stat, fixed_batch
+                )
+            )
+            self._fixed_total_loglikes = np.sum(
+                self._fixed_total_loglike_frequency_terms, axis=1
+            )
+
+        out = np.empty(walker_inds_keep.shape[0], dtype=float)
+        remaining = np.arange(walker_inds_keep.shape[0])
+        while remaining.size:
+            _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+            batch = remaining[np.sort(first)]
+            physical_params = []
+            masks = []
+            for row in batch:
+                row = int(row)
+                w = int(walker_inds_keep[row])
+                physical = self._to_physical(
+                    self.galfor_transform_fn, galfor_coords[row]
+                )
+                estimate = (
+                    self.sensitivity_backend.galfor_coarse_profile_estimate(
+                        physical
+                    )
+                )
+                if estimate is None:
+                    return None
+                physical_params.append(physical)
+                masks.append(
+                    self._galfor_profile_frequency_mask(
+                        estimate, self._fixed_total_covariances[w]
+                    )
+                )
+
+            support = np.any(masks, axis=0)
+            guard = self.GALFOR_SUBBAND_GUARD_LAYERS
+            if guard and np.any(support):
+                expanded = support.copy()
+                for shift in range(1, guard + 1):
+                    expanded[shift:] |= support[:-shift]
+                    expanded[:-shift] |= support[shift:]
+                support = expanded
+            frequency_indices = np.flatnonzero(support)
+            walkers = np.asarray(walker_inds_keep[batch], dtype=int)
+            if frequency_indices.size == 0:
+                out[batch] = self._fixed_total_loglikes[walkers]
+            else:
+                profiles = [
+                    self.sensitivity_backend.galfor_coarse_profile(
+                        physical,
+                        frequency_indices=frequency_indices,
+                    )
+                    for physical in physical_params
+                ]
+                if any(profile is None for profile in profiles):
+                    return None
+                fixed_subband = np.stack(
+                    [
+                        self._fixed_total_covariances[w][
+                            :, :, frequency_indices, :
+                        ]
+                        for w in walkers
+                    ],
+                    axis=0,
+                )
+                foreground = np.stack(
+                    [
+                        self.sensitivity_backend.galfor_coarse_covariance_from_profile(
+                            profile, frequency_indices
+                        )
+                        for profile in profiles
+                    ],
+                    axis=0,
+                )
+                fixed_subband_logl = np.sum(
+                    self._fixed_total_loglike_frequency_terms[
+                        walkers[:, None], frequency_indices[None, :]
+                    ],
+                    axis=1,
+                )
+                total_subband_logl = coarse_wdm_log_likelihood_batch(
+                    stat,
+                    fixed_subband + foreground,
+                    frequency_indices=frequency_indices,
+                )
+                out[batch] = (
+                    self._fixed_total_loglikes[walkers]
+                    + np.asarray(total_subband_logl)
+                    - np.asarray(fixed_subband_logl)
+                )
+            remaining = np.setdiff1d(remaining, batch)
+        return out
+
+    def _build_covariance_batch(
+        self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+    ):
+        """Build raw covariances for one-walker-per-row coarse batch."""
+        def _one(row):
+            row = int(row)
+            w = int(walker_inds_keep[row])
+            psd_here = self._to_physical(self.psd_transform_fn, psd_coords[row])
+            galfor_here = (
+                None
+                if galfor_coords is None
+                else self._to_physical(self.galfor_transform_fn, galfor_coords[row])
+            )
+            sgwb_here = (
+                None
+                if sgwb_coords is None
+                else self._to_physical(self.sgwb_transform_fn, sgwb_coords[row])
+            )
+            fixed = self._fixed_component_covariances.get(w, {})
+            return self.sensitivity_backend.covariance_from_params(
+                f"walker_{w}",
+                None if "psd" in fixed else psd_here,
+                galfor_params=None if "galfor" in fixed else galfor_here,
+                sgwb_params=None if "sgwb" in fixed else sgwb_here,
+                fixed_covariances=fixed,
+            )
+
+        rows = list(batch)
+        covariances = []
+        if rows:
+            # serial per-device cache warm (see :meth:`_build_batch`); this
+            # route is CPU-only, so the first row warms every later one.
+            dev = self._walker_device(int(walker_inds_keep[int(rows[0])]))
+            if dev not in self._build_warmed:
+                self._build_warmed.add(dev)
+                covariances.append(_one(rows.pop(0)))
+        if self._build_threads > 1 and len(rows) > 1:
+            covariances.extend(self.build_pool.map(_one, rows))
+        else:
+            covariances.extend(_one(row) for row in rows)
+        return np.stack(covariances, axis=0)
+
+    # ------------------------------------------------------------------
+    # All-source coarse sidecar (plan-2): surrogate scoring seam
+    # ------------------------------------------------------------------
+    @property
+    def coarse_sidecar_active(self) -> bool:
+        """True when this move carries a live sidecar runtime (mode != off)."""
+        rt = self.coarse_runtime
+        return rt is not None and getattr(rt, "mode", "off") != "off"
+
+    def _resolve_mode_like_fns(self):
+        """``(mode, init_fn, model_fn, swap_fn)`` for the current coarse mode.
+
+        ``init_fn`` seeds the working state's log-likes (the state invariant),
+        ``model_fn`` scores eryn's stage-1 proposals, ``swap_fn`` feeds the
+        temperature swaps. off: fine everywhere. search_approx: coarse
+        everywhere (an optimizer of the surrogate, not a posterior sampler).
+        delayed_acceptance: FINE state invariant + coarse stage-1 + fine
+        swaps — stage 2 in :meth:`_propose_delayed_acceptance` closes the
+        kernel on the fine target.
+        """
+        mode = self.coarse_runtime.mode if self.coarse_sidecar_active else "off"
+        if mode == "search_approx":
+            return (
+                mode,
+                self.compute_coarse_log_like,
+                self.compute_coarse_log_like,
+                self.compute_coarse_log_like,
+            )
+        if mode == "delayed_acceptance":
+            return (
+                mode,
+                self.compute_log_like,
+                self.compute_coarse_log_like,
+                self.compute_log_like,
+            )
+        return mode, self.compute_log_like, self.compute_log_like, self.compute_log_like
+
+    def _prepare_fixed_component_covariances_coarse(self) -> None:
+        """Coarse twin of :meth:`_prepare_fixed_component_covariances`.
+
+        Frozen-branch covariances on the COARSE grid for the sidecar's
+        candidate assembly. Rebuilt every proposal block (the cold rows a
+        preceding noise move accepted may have moved); coarse arrays are ~Q
+        times smaller than fine, so this is cheap and stays serial.
+        """
+        self._fixed_component_covariances_coarse = {}
+        if not self.coarse_sidecar_active or not self._fixed_noise_coords:
+            return
+        backend = self.coarse_runtime.coarse_backend
+        transforms = {
+            "psd": self.psd_transform_fn,
+            "galfor": self.galfor_transform_fn,
+            "sgwb": self.sgwb_transform_fn,
+        }
+        for branch, rows in self._fixed_noise_coords.items():
+            for w in range(len(rows)):
+                physical = self._to_physical(transforms[branch], rows[w])
+                covariance = backend.component_covariance(
+                    branch, physical, name=f"coarse_fixed_{branch}_{w}"
+                )
+                self._fixed_component_covariances_coarse.setdefault(int(w), {})[
+                    branch
+                ] = covariance
+
+    def _build_coarse_covariance_batch(
+        self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+    ):
+        """Coarse candidate covariances for one one-row-per-walker batch."""
+        runtime = self.coarse_runtime
+        backend = runtime.coarse_backend
+
+        def _one(row):
+            row = int(row)
+            w = int(walker_inds_keep[row])
+            psd_here = self._to_physical(self.psd_transform_fn, psd_coords[row])
+            galfor_here = (
+                None
+                if galfor_coords is None
+                else self._to_physical(self.galfor_transform_fn, galfor_coords[row])
+            )
+            sgwb_here = (
+                None
+                if sgwb_coords is None
+                else self._to_physical(self.sgwb_transform_fn, sgwb_coords[row])
+            )
+            fixed = self._fixed_component_covariances_coarse.get(w, {})
+            return backend.covariance_from_params(
+                f"coarse_walker_{w}",
+                None if "psd" in fixed else psd_here,
+                galfor_params=None if "galfor" in fixed else galfor_here,
+                sgwb_params=None if "sgwb" in fixed else sgwb_here,
+                fixed_covariances=fixed,
+            )
+
+        rows = [_one(row) for row in batch]
+        return runtime.xp.stack([runtime.xp.asarray(r) for r in rows], axis=0)
+
+    def compute_coarse_log_like(
+        self, coords, inds=None, logp=None, supps=None, branch_supps=None
+    ):
+        """Surrogate PSD/GALFOR log-likelihood against the coarse sidecar.
+
+        Same eryn row semantics as :meth:`compute_log_like` (prior mask,
+        ``walker_inds`` row mapping, frozen-branch merge), scored against the
+        sidecar runtime's per-walker coarse statistics. Never touches
+        ``state.log_like``, any container's ``sens_mat``, or the packed ACA
+        buffer — the values live only in move-local arrays.
+        """
+        if not self.coarse_sidecar_active:
+            raise RuntimeError(
+                "compute_coarse_log_like needs a live coarse sidecar runtime "
+                "(coarse_runtime with mode != 'off')."
+            )
+        if logp is None:
+            logp = self.compute_log_prior(
+                coords, inds=inds, supps=supps, branch_supps=branch_supps
+            )
+        logl = np.full_like(logp, -1e300)
+        logp_keep = ~np.isinf(logp)
+        if not np.any(logp_keep):
+            return logl, None
+        if supps is None:
+            raise ValueError("Must provide supps to identify the data streams.")
+
+        walker_inds_all = np.asarray(supps.holder["walker_inds"]).reshape(logp.shape)
+        walker_inds_keep = walker_inds_all[logp_keep].astype(int)
+        merged = self._merged_noise_rows(coords, logp_keep, walker_inds_keep)
+        psd_coords = merged["psd"]
+        galfor_coords = merged.get("galfor")
+        sgwb_coords = merged.get("sgwb")
+
+        # Rows grouped by owning device (None = CPU / single device), then by
+        # unique walker within the group — each batch builds and scores under
+        # its device's context against that device's statistic rows.
+        tmp_logl = np.empty(walker_inds_keep.shape[0], dtype=float)
+        row_device = [self._walker_device(int(w)) for w in walker_inds_keep]
+        for device in sorted(set(row_device), key=repr):
+            rows_dev = np.asarray(
+                [i for i, d in enumerate(row_device) if d == device], dtype=int
+            )
+            remaining = rows_dev
+            while remaining.size:
+                _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+                batch = remaining[np.sort(first)]
+                with device_context(self.acs.xp, device):
+                    covariances = self._build_coarse_covariance_batch(
+                        batch,
+                        walker_inds_keep,
+                        psd_coords,
+                        galfor_coords,
+                        sgwb_coords,
+                    )
+                tmp_logl[batch] = np.asarray(
+                    asnumpy(
+                        self.coarse_runtime.coarse_log_like_batch(
+                            covariances,
+                            walker_inds_keep[batch],
+                            device=device,
+                        )
+                    ),
+                    dtype=float,
+                )
+                remaining = np.setdiff1d(remaining, batch)
+        logl[logp_keep] = tmp_logl
+        return logl, None
 
     def _build_batch(self, batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords):
         """Install the proposed sensitivity matrix for every row in ``batch``.
@@ -921,6 +1446,16 @@ class PSDMove(GlobalFitMove, StretchMove):
             return _no("instrument basis cache disabled")
         if not issubclass(backend.instrument_component_cls, InstrumentNoise):
             return _no("instrument component is not an InstrumentNoise")
+        if isinstance(backend.basis_settings, CoarseWDMSettings):
+            # The batched scorer gathers the FINE residual buffer and scores
+            # it against ``C`` directly. On a coarse grid the model lives on
+            # (Nf_active, Ncoarse) while the residual is still fine, and the
+            # coarse likelihood is a different quantity anyway (it reads the
+            # precomputed sufficient statistic + frozen WS dof). The coarse
+            # routes in ``compute_log_like`` handle this case and run first;
+            # this is the second guard so the ordering there is not the only
+            # thing standing between a coarse run and a wrong likelihood.
+            return _no("coarse WDM likelihood uses its own batched route")
         if not isinstance(backend.basis_settings, (FDSettings, WDMSettings)):
             return _no(
                 f"unsupported domain {type(backend.basis_settings).__name__}"
@@ -1358,6 +1893,44 @@ class PSDMove(GlobalFitMove, StretchMove):
             self.prev_logl = logl.copy()
             return logl, None
 
+        # The coarse-WDM routes come FIRST: they score against the coarse
+        # sufficient statistic, which the PSD_BATCH route below knows nothing
+        # about (it gathers the FINE residual buffer). Both are guarded, but
+        # order is the first line of defence.
+        if self._galfor_subband_fast_path_available():
+            stat = self.acs.flatten()[0].coarse_stats
+            tmp_logl = self._compute_galfor_subband_loglike(
+                stat, walker_inds_keep, galfor_coords
+            )
+            if tmp_logl is not None:
+                logl[logp_keep] = tmp_logl
+                self.prev_logl = logl.copy()
+                return logl, None
+
+        if self._coarse_batch_fast_path_available():
+            from ...coarsewdm import coarse_wdm_log_likelihood_batch
+
+            stat = self.acs.flatten()[0].coarse_stats
+            tmp_logl = np.empty(walker_inds_keep.shape[0], dtype=float)
+            remaining = np.arange(walker_inds_keep.shape[0])
+            while remaining.size:
+                _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+                batch = remaining[np.sort(first)]
+                covariances = self._build_covariance_batch(
+                    batch,
+                    walker_inds_keep,
+                    psd_coords,
+                    galfor_coords if has_galfor else None,
+                    sgwb_coords if has_sgwb else None,
+                )
+                tmp_logl[batch] = np.asarray(
+                    coarse_wdm_log_likelihood_batch(stat, covariances)
+                )
+                remaining = np.setdiff1d(remaining, batch)
+            logl[logp_keep] = tmp_logl
+            self.prev_logl = logl.copy()
+            return logl, None
+
         if self._batched_route_ready():
             # PSD_BATCH walker-batched route (tier 3): one batched covariance
             # build + one batched likelihood per shard per scoring group.
@@ -1460,6 +2033,107 @@ class PSDMove(GlobalFitMove, StretchMove):
             )
         return logp
 
+    def _propose_delayed_acceptance(self, model, state):
+        """One stretch repeat under two-stage (delayed) acceptance.
+
+        Stage 1 reuses eryn's stretch accept VERBATIM as the surrogate
+        screen: the working state's log-likes are swapped to the coarse
+        values (so eryn's ``logP(x)`` is the tempered coarse posterior) and
+        ``model`` carries :meth:`compute_coarse_log_like` (so ``logP(y)`` is
+        too); the prior and the stretch factor therefore enter exactly once,
+        in stage 1. Stage 2 corrects the stage-1 survivors with
+
+            log alpha_2 = beta * [(Lf(y) - Lc(y)) - (Lf(x) - Lc(x))]
+
+        (priors and factors cancel), reverting rejects to their pre-proposal
+        coordinates. The returned state's ``log_like`` is FINE on every row
+        — the invariant the temperature swaps and the sub-state bookkeeping
+        rely on. Fine evaluations are spent only on stage-1 survivors (the
+        prior-mask trick: non-survivor rows enter the fine callback with a
+        ``-inf`` prior and are skipped).
+
+        The independent stage-2 uniforms come from ``model.random`` AFTER
+        eryn's stage-1 draws, so a fixed seed reproduces the full kernel.
+        """
+        # Pre-proposal snapshot: coords + FINE lls + priors. eryn's propose
+        # may mutate ``state`` in place, so this copy is the revert source
+        # and the alpha_2 reference. is_eryn_state_input: the working state
+        # is the module-ladder tmp_state (dict-constructed, no sub-states);
+        # the plain-GFState copy path would trip over its absent
+        # sub_state_bases, and the snapshot needs none of that machinery.
+        state_before = GFState(state, copy=True, is_eryn_state_input=True)
+        fine_x = np.asarray(state_before.log_like)
+
+        coarse_x = self.compute_coarse_log_like(
+            state.branches_coords,
+            logp=state.log_prior,
+            supps=state.supplemental,
+        )[0]
+
+        # Stage 1: eryn stretch accept on the tempered coarse posterior.
+        # The temperature control is DETACHED for this call: eryn's propose
+        # ends with temper_comps (the per-repeat identity swap), which would
+        # permute rungs between the stage-1 accept and the stage-2
+        # correction. The swap is re-applied below, after the fine invariant
+        # is restored — so it swaps on FINE values, as every other swap does.
+        state.log_like[:] = coarse_x
+        _tc = self.temperature_control
+        self.temperature_control = None
+        try:
+            new_state, accepted1 = super(PSDMove, self).propose(model, state)
+        finally:
+            self.temperature_control = _tc
+        acc = np.asarray(accepted1, dtype=bool)
+
+        if not acc.any():
+            new_state.log_like[:] = fine_x
+            self._da_debug_last = None
+            new_state = self.temperature_control.temper_comps(new_state)
+            return new_state, acc
+
+        # Stage 2: fine correction on the survivors only.
+        coarse_y = np.asarray(new_state.log_like).copy()
+        survivor_logp = np.where(acc, np.asarray(new_state.log_prior), -np.inf)
+        fine_y = self.compute_log_like(
+            new_state.branches_coords,
+            logp=survivor_logp,
+            supps=new_state.supplemental,
+        )[0]
+        betas = np.asarray(self.temperature_control.betas)[:, None]
+        log_alpha2 = betas * ((fine_y - coarse_y) - (fine_x - coarse_x))
+        u2 = model.random.uniform(size=acc.shape)
+        with np.errstate(divide="ignore"):
+            keep = acc & (np.log(u2) < log_alpha2)
+        revert = acc & ~keep
+
+        for key in new_state.branches:
+            new_state.branches[key].coords[revert] = state_before.branches[
+                key
+            ].coords[revert]
+        new_state.log_prior[revert] = np.asarray(state_before.log_prior)[revert]
+        # FINE invariant restored: survivors carry their fresh fine values,
+        # everything else keeps the pre-proposal fine values.
+        new_state.log_like[:] = np.where(keep, fine_y, fine_x)
+
+        self._da_debug_last = {
+            "accepted_stage1": acc,
+            "keep": keep,
+            "fine_x": fine_x,
+            "fine_y": fine_y,
+            "coarse_x": coarse_x,
+            "coarse_y": coarse_y,
+            "log_alpha2": log_alpha2,
+            "coords_final_prewap": np.array(
+                new_state.branches["psd"].coords, copy=True
+            )
+            if "psd" in new_state.branches
+            else None,
+        }
+        # The per-repeat identity swap eryn would have run inside propose,
+        # now on the restored FINE values.
+        new_state = self.temperature_control.temper_comps(new_state)
+        return new_state, keep
+
     def run_move(self, move_i, model, state):
         """Run one stretch-move iteration and (optionally) a tempering swap.
 
@@ -1472,7 +2146,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         Returns:
             Tuple ``(new_state, accepted)``.
         """
-        new_state, accepted = super(PSDMove, self).propose(model, state)
+        if (
+            self.coarse_sidecar_active
+            and self.coarse_runtime.mode == "delayed_acceptance"
+        ):
+            new_state, accepted = self._propose_delayed_acceptance(model, state)
+        else:
+            new_state, accepted = super(PSDMove, self).propose(model, state)
 
         # in-model bookkeeping: eryn returns (ntemps, nwalkers) acceptances and
         # every walker is proposed once per call, so the per-temperature deltas
@@ -1509,7 +2189,12 @@ class PSDMove(GlobalFitMove, StretchMove):
                 logp,
                 supps=supps,
                 branch_supps=branch_supps,
-                compute_log_like=self.compute_log_like,
+                # search_approx swaps on the surrogate (it optimizes that
+                # target); off/delayed_acceptance swap on the FINE values —
+                # identity swaps read the fine state.log_like and fancy swaps
+                # re-score through the fine callback (plan-2 §3.2).
+                compute_log_like=getattr(self, "_swap_like_fn", None)
+                or self.compute_log_like,
                 compute_log_prior=self.compute_log_prior,
                 fancy_swap=do_fancy,
                 permute_here=do_fancy,
@@ -1614,6 +2299,16 @@ class PSDMove(GlobalFitMove, StretchMove):
             for key in model_branches
             if key not in noise_branches
         }
+        self._prepare_fixed_component_covariances()
+        if self.coarse_sidecar_active:
+            # Correctness-first lifecycle (plan-2 §4.3): every noise proposal
+            # block re-reads every walker's CURRENT residual — a source move
+            # may have run since the last block. Residual epochs are a
+            # recorded later optimization, deliberately not built yet.
+            # the ACA itself: refresh_P reads its gpu_map so each device
+            # group's statistics are built under the owning device's context
+            self.coarse_runtime.refresh_P(self.acs)
+            self._prepare_fixed_component_covariances_coarse()
 
         # The working ensembles are the SUB-STATES' tempered branches (this
         # move's module ladder); the main state carries only the engine's
@@ -1658,15 +2353,31 @@ class PSDMove(GlobalFitMove, StretchMove):
         # ensuring it is up to date. Should not change anything.
         before_vals = model.analysis_container_arr.likelihood().copy()
 
+        # Coarse-sidecar mode dispatch (plan-2 §3.2/§6):
+        #   off               — fine everywhere (the historical path).
+        #   search_approx     — the whole inner loop optimizes the coarse
+        #                       surrogate (proposals, working state, swaps);
+        #                       NOT a posterior sampler. The end-of-propose
+        #                       publication below still recomputes the fine
+        #                       cold state, so the next move sees fine only.
+        #   delayed_acceptance— the working state's log_like invariant stays
+        #                       FINE; eryn scores stage-1 proposals with the
+        #                       coarse callback and _propose_delayed_acceptance
+        #                       applies the stage-2 fine correction. Swaps are
+        #                       fine-valued by construction.
+        _mode, _init_like_fn, _model_like_fn, self._swap_like_fn = (
+            self._resolve_mode_like_fns()
+        )
+
         tmp_state.log_prior = self.compute_log_prior(tmp_branches_coords)
-        tmp_state.log_like = self.compute_log_like(
+        tmp_state.log_like = _init_like_fn(
             tmp_branches_coords, logp=tmp_state.log_prior, supps=tmp_state.supplemental
         )[0]
         self.starting_now = False
 
         tmp_model = Model(
             state,
-            self.compute_log_like,
+            _model_like_fn,
             self.compute_log_prior,
             self.temperature_control,
             model.map_fn,
