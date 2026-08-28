@@ -254,8 +254,20 @@ export SOBBH_NTEMPS=12
 # More repeats amortize the per-visit expose/fold overhead over more
 # proposals -- worth it where the likelihood row is cheap (sobbh), less so
 # where it dominates (mbh/emri).
-export MBH_NUM_PROP_REPEATS=5
-export EMRI_NUM_PROP_REPEATS=5
+# MBH/EMRI back to the stock default of 2 (user ruling 2026-08-28; the 5
+# was chosen believing the default was higher). Repeats amortize a leaf's
+# fixed expose/fold cost over more proposals, which is why SOBBH wants
+# many -- but MBH/EMRI template builds CACHE (the injection stage showed
+# 14 s for the first EMRI then <1 s for the rest), so there is little
+# fixed cost to amortize and the extra repeats were close to pure spend.
+# Measured at 5 (job 373): mbh 1376 s (4 leaves), emri ~2000 s (8 leaves),
+# an iteration of ~57 min against a 10-min build -- job 373 ran 64 min and
+# missed the first [SAVE] by ~3 min, on EMRI's last leaf. At 2 the leaf
+# cost is a fixed part plus 2/5 of the per-repeat part, so expect mbh
+# ~9-14 min and emri ~13-20 min: an iteration around 23-35 min, which
+# banks a stored row inside any observed window.
+export MBH_NUM_PROP_REPEATS=2
+export EMRI_NUM_PROP_REPEATS=2
 # SOBBH 25 -> 10 for THIS measurement run (2026-08-28). The chunked fill
 # removed ~25 min of per-leaf dense bookkeeping (expose measured at 0.31 s,
 # job 372, down from 24 x 32 s), which leaves the repeat loop AS the entire

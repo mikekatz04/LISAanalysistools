@@ -221,6 +221,33 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         Returns:
             ``(ll, d_h, h_h)`` host arrays in row order.
         """
+        # TODO(sobbh scoring speed) -- REAL, but for much later. Measured on
+        # the 6-mo probe (job 373, 12 temps x 24 walkers x 10 repeats, 2
+        # shards, m_band_half_width=3): 8.0 s per leaf = 2880 rows =
+        # 2.78 ms/row, i.e. 800 ms per 288-row batched call. That should be
+        # beatable.
+        # WHY IT IS NOT WORTH DOING NOW: after the chunked fill landed, the
+        # whole SOBBH proposal is 48 s of a ~57 min iteration -- 1.4%. MBH
+        # (~1430 ms/row) and EMRI (~1040 ms/row) are the other ~98%, both
+        # still scoring ONE ROW AT A TIME. Any effort spent here buys at most
+        # 1.4% while the same effort on MBH/EMRI batching buys orders of
+        # magnitude. Revisit only once those are batched and SOBBH is
+        # actually visible in the budget.
+        # LEVERS, cheapest first, when that day comes:
+        #   1. SOBBH_M_BAND_HALF_WIDTH 3 -> 2. The scoring band is 2m+1
+        #      layers, so 7 -> 5 is ~30% off the row cost for a measured
+        #      0.1% of <h|h> (m=2 recovered 99.9%, m=3 is converged). Pure
+        #      config, no code.
+        #   2. Profile the per-CALL overhead: 47% GPU util during the SOBBH
+        #      phase with 800 ms calls smells like host-side staging /
+        #      launch overhead rather than kernel time. Measure before
+        #      optimizing -- the shard routing stages host arrays per call.
+        #   3. ``get_swap_ll_wdm`` (already on WDMComputationsBase) scores an
+        #      add and a remove in ONE call; the in-model repeat loop
+        #      currently pays two separate scoring paths.
+        # NB do NOT "batch the repeats": the repeat loop is a sequential MH
+        # chain, and batching repeats across sources was VETOED for GB
+        # (serial-within-band scheduling policy).
         if len(self.acs.linear_data_arr) == 1:
             ll = self.comp.get_ll_wdm(
                 params, self.acs,
