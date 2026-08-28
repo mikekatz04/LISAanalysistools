@@ -237,7 +237,30 @@ GPU_PROC_LOG=${STORE_DIR}/gpu_procs_${SLURM_JOB_ID:-manual_$(date +%s)}.csv
 nvidia-smi --query-compute-apps=timestamp,gpu_uuid,pid,process_name,used_memory \
   --format=csv,noheader,nounits -l $((GPU_SAMPLE_SEC * 6)) > "${GPU_PROC_LOG}" &
 GPU_PROC_PID=$!
-trap 'kill ${GPU_SMI_PID} ${GPU_PROC_PID} 2>/dev/null || true' EXIT
+
+# ---- slurm stdout MIRROR into the store dir --------------------------------
+# Ported from submit_gf_6mo_sources_probe.sh (noise-merge readout item: the
+# multi-GPU probe zip carried NO slurm log, so [GF_TIMING]/[MAXLOGL]/
+# [PROBE]/[SMOKE] never travelled). Everything that matters for the timing
+# readout goes to STDOUT -- i.e. the --output file above, which lives
+# OUTSIDE ${STORE_DIR} -- and the pulls are zips OF ${STORE_DIR}, so that
+# file has been missing from every pull. Mirror it in every 30 s: zipping
+# the store then captures it automatically, and because this is a copy loop
+# rather than an EXIT trap it survives a spot preemption (SIGKILL runs no
+# traps). Also note slurm stdout only FLUSHES at job end, so the mirror is
+# the only way to see these lines while the job is still running.
+SLURM_LOG=/shared/data/global_fit_output/gf3mo_v8_${SLURM_JOB_ID:-manual}.log
+LOG_MIRROR_PID=""
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+  ( while true; do
+      cp -f "${SLURM_LOG}" "${STORE_DIR}/slurm_stdout_${SLURM_JOB_ID}.log" 2>/dev/null || true
+      sleep 30
+    done ) &
+  LOG_MIRROR_PID=$!
+  echo "[LOGMIRROR] ${SLURM_LOG} -> ${STORE_DIR}/slurm_stdout_${SLURM_JOB_ID}.log every 30 s"
+fi
+
+trap 'kill ${GPU_SMI_PID} ${GPU_PROC_PID} ${LOG_MIRROR_PID:-} 2>/dev/null || true' EXIT
 
 # ---- threading policy (MPI-only, no OMP) -----------------------------------
 export OMP_NUM_THREADS=1
@@ -857,11 +880,20 @@ export GB_CAP_DRIFT_GATE=1
 # max-logL search. It must NOT ship at K=8: freezing empty cells at cap 1
 # with a 135-bin cell re-imposes the 24.5% exclusion above.
 export GB_LEAF_CAP_REQUIRE_IMPROVEMENT=1
-# 5, not 3 (probe-validated 2026-08-26): with the one-shot engagement
-# latch + occupied-only patience (c251b267) the clock only runs where
-# it should, and the probes showed 5 gives the likelihood time to
-# consolidate before a cell promotes.
-export GB_LEAF_CAP_MIN_ITERS=5
+# 4 (user ruling 2026-08-28, was 5): the v7 cap-gap analysis showed real
+# 2->3 increments arrive at median gap 9 with ZERO at the floor of 5 --
+# qualification-bound, but E[step] scales with the threshold, so 5->4 buys
+# ramp depth with a wide margin before the floor binds. 3 remains the
+# aggressive option if the ramp still lags. (Historical: 5-not-3 was
+# probe-validated 2026-08-26 with the one-shot engagement latch +
+# occupied-only patience, c251b267.)
+# ⚠ NOTE for the v8-vs-v7 comparison: this is the ONE knob that makes the
+# v8 GB configuration differ from v7's. The cluster checklist's gate 4
+# assumed "same GB config by construction, the noise marginals are the new
+# content" -- with this change the GB side moved too, so a v8-vs-v7 cap or
+# leaf-count difference is NOT purely a noise effect. Set back to 5 if you
+# want the noise comparison fully isolated.
+export GB_LEAF_CAP_MIN_ITERS=4
 export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
@@ -898,6 +930,73 @@ export GB_FSTAT_CTR_MODE=epoch
 # epoch-mode 2.0 default, which is what covers the <=100-propose table
 # staleness. The smeared sigma feeds BOTH the draw and the densities,
 # so detailed balance is exact at any smear.)
+#
+# ############################################################################
+# ## v7 CHANGE-SET FOLDED IN (2026-08-28). The v8 script was cut from the   ##
+# ## PRE-change-set v7, so these were missing. Every one was validated in   ##
+# ## v7 production (jobs 352-368, snapshots 8-12) unless noted.             ##
+# ############################################################################
+# FUSED TWO-QUADRATURE PHASE MAX (GBGPU c49fcb1 / LAT 9704c4a8). One kernel
+# call returns both quadratures instead of two evaluations at phi0 and
+# phi0+pi/2. GPU-VALIDATED in production job 352: 0 errors over 86k log
+# lines, TEMPER_CHECK 297/0, COLD audit medians at baseline. =0 is the
+# no-rebuild rollback to the legacy two-call path (bit-identical algorithm;
+# the fused path is epsilon-better, NOT bit-identical).
+export GB_PHASE_MAX_FUSED=1
+# REPLACE PHASE-MAX + ROTATION-ON-ACCEPT. "auto" (not =1): ON for the
+# search replace exactly as =1 was, OFF for any PE-stamped replace. A hard
+# =1 would force maximization onto PE, which the 2026-08-28 general rule
+# forbids ("no maximizing over parameters during PE" -- PE samples a
+# posterior; maximize-and-keep biases it). Live since job 352: cold replace
+# acceptance ~3x (0.0002-3 -> ~0.0010) at Delta-ll up to ~700.
+export GB_REPLACE_PHASE_MAX=auto
+# PER-ROW F-STAT CENTERS THROUGH THE UNIT-OPEN CACHE (LAT 86ed9353).
+# ⚠ MEASURED A WASH in snapshot 12: rj_fstat_centers 725-743 s vs a
+# 713-799 s pre-fix band. There was no recomputation to dedupe -- the
+# precompute row count ~= the picked row count, at an identical 0.667
+# ms/row. Kept ON because it is the code default and costs nothing either
+# way; it is NOT a speed lever. The real centers levers are the
+# multi-device lane rebalance and row-count reduction (see the scoping
+# notes). Telltale: [FSTAT_CTR] says "perrow (unit-cache)".
+export GB_FSTAT_PERROW_UNIT_CACHE=1
+# DEFERRED CELL-LABEL RELABELS (LAT 9fa32109; code default flipped ON in
+# bcdde159 per the user's "only cells change labels" design invariant).
+# Rung-pair/vertical-swap relabels accumulate in a slot+pos composition
+# table and flush once per tempering chunk / repeat block. Pinned here for
+# the run record. Tripwires: [GB_TEMPER_CHECK] must stay 100% MATCH with
+# "unit label checks passed" (340/340 in snapshot 12).
+export GB_CELL_LABEL_DEFERRED=1
+# FUSED IN-MODEL GATE/ACCEPT KERNEL (LAT 0f0fc73a + the 07634536 nvcc
+# guard fix). ~160 CuPy launches per repeat-step -> 3 backend calls.
+# ⚠ OFF FOR v8 PENDING THE v7 A/B (user ruling 2026-08-28: "if the
+# multi-GPU picture is not clearly better, keep it off for v8"). Expected
+# size is small -- ~450k launches removed => single-digit seconds, 0.2-1%
+# of a ~1130 s propose; the real hope was multi-GPU overlap, since the
+# kernel leaves ONE data-dependent host sync where the python chain had
+# many. FLIP TO 1 only if the v7 run's `inmodel_gate` mark plus
+# gpu_util_*.csv show a clear multi-GPU improvement. Requires ./install.sh
+# to have built the binary; without it the loaders degrade to the python
+# chain with a one-line warning (safe, just not faster).
+export GB_INMODEL_ACCEPT_KERNEL=0
+# NOT PINNED, ON BY DEFAULT -- recorded so the run log is interpretable:
+#  * GB_REPLACE_FSTAT_MAX resolves "auto" = ON for the search replace via
+#    the recipe's replace_search_stage stamp (the move is named plain
+#    "rj_replace", so the name idiom alone would MISS it). Search replace
+#    candidates are the full JKS maximizer: slot 0 pinned AT the per-row
+#    F-stat center, then priced through the UNCHANGED RJ densities as if
+#    drawn (maximize-then-pretend). Telltale: one [GB_REPLACE_FSTAT_MAX]
+#    line. =0 restores the exact-DB draw bit-identically.
+#  * GB_PE_RJ_REPLACE defaults ON: PE stages gain rj_replace_pe, an
+#    exact-MH replacement move (slot 0 genuinely drawn and priced,
+#    extrinsics drawn-and-priced through the shared pe_extrinsic_draw
+#    helpers, phase-max auto-OFF). NEW BEHAVIOUR vs v7.
+#  * GB_RJ_FSTAT_DIST_BIRTH is stamped ON for rj_fstat_pe, so PE births
+#    now draw from epoch-table F-stat centers instead of full prior
+#    widths (user ruling "yes mirror them"). NEW BEHAVIOUR vs v7; =0
+#    restores prior widths bit-identically.
+# GB_FSTAT_CTR_AUDIT is DELIBERATELY ABSENT: it is a v7-only diagnostic
+# (table-vs-per-row center deltas). Re-arm it here only if v7 never
+# produced a completed propose to read it from.
 export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # High-f barren-band birth shutoff (search scope): bands above FMIN with
 # AFTER consecutive zero-birth-accept proposes stop proposing births
