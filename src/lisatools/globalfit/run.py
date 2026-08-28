@@ -65,6 +65,7 @@ from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import (GFHDFBackend, promote_backup_if_store_unreadable,
                          save_to_backend_asynchronously_and_plot)
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
+from . import midit_checkpoint
 from .moves import GFCombineMove, GlobalFitMove, MoveBuildContext
 from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter, save_residuals
 from .recipe import Recipe
@@ -515,6 +516,72 @@ class GlobalFit:
         nt = getattr(info, "ntemps", None)
         return int(nt) if nt else self.ntemps
 
+    def _midit_checkpoint_validate(self, state) -> typing.Tuple[bool, str]:
+        """Config-compatibility gate for a mid-iteration checkpoint state.
+
+        A checkpoint is disposable: on ANY mismatch with the current run
+        configuration (branch set, walker/leaf/dim shapes, per-branch
+        temperature ladders, banded-branch band grids) it is rejected so
+        the run falls back to the normal resume paths, instead of
+        crashing later at the first save into differently-shaped
+        datasets (the 2026-08-27 6-temp-era-store vs 4-temp-relaunch
+        landmine, but for the pickle sidecar).
+        """
+        try:
+            names = set(self.engine_info.branch_names)
+            st_names = set(getattr(state, "branches", {}).keys())
+            if names != st_names:
+                return False, (
+                    f"branch set {sorted(st_names)} != config {sorted(names)}"
+                )
+            ll = np.asarray(state.log_like)
+            if ll.shape != (self.ntemps, self.nwalkers):
+                return False, (
+                    f"engine log_like shape {ll.shape} != "
+                    f"{(self.ntemps, self.nwalkers)}"
+                )
+            sub_states = getattr(state, "sub_states", None) or {}
+            for name in names:
+                coords = state.branches[name].coords
+                exp_tail = (
+                    self.engine_info.nleaves_max[name],
+                    self.curr.ndims[name],
+                )
+                if coords.shape[1] != self.nwalkers or coords.shape[-2:] != exp_tail:
+                    return False, (
+                        f"branch {name!r} coords {coords.shape} vs "
+                        f"nwalkers={self.nwalkers}, (nleaves, ndim)={exp_tail}"
+                    )
+                sub = sub_states.get(name)
+                if sub is None:
+                    continue
+                betas_all = getattr(sub, "betas_all", None)
+                if betas_all is not None:
+                    nt_branch = int(self._branch_ntemps(name))
+                    if np.asarray(betas_all).shape[-1] != nt_branch:
+                        return False, (
+                            f"branch {name!r} ladder has "
+                            f"{np.asarray(betas_all).shape[-1]} rungs; config "
+                            f"builds {nt_branch}"
+                        )
+                band_info = getattr(sub, "band_info", None)
+                if band_info and "band_edges" in band_info:
+                    cfg_edges = getattr(
+                        self.curr.source_info.get(name), "band_edges", None
+                    )
+                    if cfg_edges is not None:
+                        stored = np.asarray(band_info["band_edges"])
+                        cfg = np.asarray(cfg_edges)
+                        if stored.shape != cfg.shape or not np.allclose(stored, cfg):
+                            return False, (
+                                f"branch {name!r} band grid differs from the "
+                                f"run config (stored {stored.shape[0] - 1} "
+                                f"bands vs config {cfg.shape[0] - 1})"
+                            )
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 -- reject, never crash resume
+            return False, f"validation error: {exc!r}"
+
     def load_info(self, priors: typing.Dict[str, typing.Any]) -> GFState:
         """
         Load or initialize the MCMC state from backend or priors.
@@ -545,12 +612,43 @@ class GlobalFit:
                 promote_backup_if_store_unreadable(backend_path)
             except Exception as _heal_err:      # never block a healthy start
                 logger.warning("store self-heal check failed: %r", _heal_err)
+        backend = None
+        _stored_it = 0
         if os.path.exists(backend_path):
             backend = GFHDFBackend(
                 backend_path,
                 sub_state_bases=self.engine_info.branch_states,
                 sub_backend=self.engine_info.branch_backends,
             )
+            if getattr(backend, "initialized", False):
+                _stored_it = int(getattr(backend, "iteration", 0) or 0)
+
+        # Mid-iteration checkpoint (preemption protection): the sidecar
+        # snapshot beats the HDF store when it was written at (or after) the
+        # store's newest stored iteration -- it carries partial progress of
+        # the iteration the store never got to save. Config-incompatible or
+        # unreadable checkpoints are moved aside and the normal resume paths
+        # below take over (fail safe, never crash).
+        _ckpt = midit_checkpoint.load_for_resume(
+            backend_path,
+            _stored_it,
+            validate=self._midit_checkpoint_validate,
+            logger_=self.logger,
+        )
+        if _ckpt is not None:
+            state, _ckpt_meta = _ckpt
+            self.logger.info(
+                "RESUMING from mid-iteration checkpoint %s (boundary %r, "
+                "written with the store at iteration %d; store now holds %d): "
+                "partial-iteration progress recovered; a fresh iteration "
+                "starts from this state.",
+                midit_checkpoint.checkpoint_path(backend_path),
+                _ckpt_meta.get("tag"),
+                int(_ckpt_meta.get("stored_iteration", -1)),
+                _stored_it,
+            )
+
+        if backend is not None and state is None:
             # Only load if the backend has been initialized AND has at least
             # one stored sample. Otherwise fall through to past-file or prior
             # initialization. (An empty file gets created when the run sets
@@ -1721,7 +1819,22 @@ class GlobalFit:
                     },
                 }
 
-        if not backend.initialized:
+        _reset_backend = not backend.initialized
+        if backend.initialized and int(getattr(backend, "iteration", 0) or 0) == 0:
+            # An initialized store with ZERO saved iterations holds nothing
+            # worth keeping but may carry dataset shapes from an OLDER
+            # config: the first save_step into it would fail (or silently
+            # mis-shape) at exactly the moment the run finally survives long
+            # enough to save. Seen live 2026-08-27 on the 6-mo sources
+            # probe: a 6-temp-era empty store outlived several 4-temp
+            # relaunches because only ``not initialized`` triggered a reset.
+            self.logger.info(
+                "store %s is initialized but empty (0 stored iterations): "
+                "re-initializing it against the current run configuration.",
+                backend_path,
+            )
+            _reset_backend = True
+        if _reset_backend:
             # ``key_order`` mirrors what eryn's EnsembleSampler would
             # pass to ``backend.reset`` itself when the backend is fresh;
             # we have to feed it in here because our pre-reset disables
@@ -1811,6 +1924,22 @@ class GlobalFit:
                             "fresh store or restore the original noise "
                             "configuration."
                         )
+
+        # Arm mid-iteration checkpointing (sampling rank only -- this method
+        # runs nowhere else). getattr defaults keep legacy pickled settings
+        # objects working. save_step ticks the stored count via note_saved().
+        if getattr(general_info, "midit_checkpoint", True):
+            midit_checkpoint.arm(
+                backend_path,
+                min_interval=float(
+                    getattr(general_info, "midit_checkpoint_min_interval", 600.0)
+                ),
+                stored_iteration=(
+                    int(getattr(backend, "iteration", 0) or 0)
+                    if backend.initialized
+                    else 0
+                ),
+            )
 
         # setup_info_all = None
         # for name in branch_names:
@@ -1989,6 +2118,18 @@ class GlobalFit:
             ntemps=self.ntemps,
             nwalkers=self.nwalkers,
         )
+
+        # Checkpoint self-test on the FULLY-BUILT state (sub-state tempered
+        # blocks allocated, recipe materialized): write + read back through
+        # the real resume path, so this run reports in its first minute
+        # whether preemption protection actually works HERE (GPU node, this
+        # MPI layout, this branch set). Never fatal.
+        if midit_checkpoint.armed():
+            midit_checkpoint.self_test(
+                state,
+                validate=self._midit_checkpoint_validate,
+                logger_=self.logger,
+            )
 
     def run_global_fit(self):
         """Execute the main global fit MCMC sampling run.

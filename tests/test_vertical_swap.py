@@ -39,6 +39,7 @@ from lisatools.globalfit.moves.gbspecialstretch import (
     _resolve_temper_vertical,
 )
 from lisatools.globalfit.moves.gbbands import (
+    BandSorter,
     pack_special_index,
     unpack_special_index,
 )
@@ -48,6 +49,18 @@ NTEMPS, NWALKERS, NBANDS = 4, 2, 3
 
 class _FakeSorter:
     """Minimal BandSorter with the real special-index semantics."""
+
+    # The deferred-relabel machinery is carried REAL (not faked), so the
+    # repeat-block window that _run_in_model_repeats opens under
+    # GB_CELL_LABEL_DEFERRED runs end-to-end here -- this suite is the
+    # sweep-level integration coverage for it. See
+    # tests/test_cell_label_deferred.py for the unit-level composition.
+    xp = np
+    _deferred_labels = None
+    begin_cell_label_window = BandSorter.begin_cell_label_window
+    flush_cell_labels = BandSorter.flush_cell_labels
+    _defer_exchange = BandSorter._defer_exchange
+    _assert_cell_labels_flushed = BandSorter._assert_cell_labels_flushed
 
     def __init__(self, temp_inds, walker_inds, band_inds, nwalkers):
         self.temp_inds = np.asarray(temp_inds).copy()
@@ -64,6 +77,8 @@ class _FakeSorter:
 
     @property
     def special_index_check(self):
+        # mirrors the real property: the alarm must judge FLUSHED state
+        self._assert_cell_labels_flushed("special_index_check")
         return np.all(
             self.special_band_inds
             == self.get_special_band_index(
@@ -73,6 +88,9 @@ class _FakeSorter:
 
     def exchange_cell_labels(self, sa, ta, wa, sb, tb, wb, bands=None):
         """Real semantics: both membership maps computed before mutation."""
+        if self._deferred_labels is not None:
+            self._defer_exchange(sa, ta, wa, sb, tb, wb)
+            return
         keep_a = np.isin(self.special_band_inds, np.atleast_1d(sa))
         keep_b = np.isin(self.special_band_inds, np.atleast_1d(sb))
         self.special_band_inds[keep_a] = np.atleast_1d(sb)[0]
@@ -85,6 +103,9 @@ class _FakeSorter:
         """Batch = pairwise loop over this fake's own exchange (the real
         primitive's equivalence is pinned by
         BatchExchangeEquivalenceTest against the REAL BandSorter)."""
+        if self._deferred_labels is not None:
+            self._defer_exchange(sa, ta, wa, sb, tb, wb)
+            return
         sa, sb = np.atleast_1d(sa), np.atleast_1d(sb)
         ta, tb = np.atleast_1d(ta), np.atleast_1d(tb)
         wa, wb = np.atleast_1d(wa), np.atleast_1d(wb)
@@ -493,6 +514,21 @@ class VerticalWiringTest(unittest.TestCase):
             import test_inmodel_repeats as h
         return h
 
+    def _deferrable_harness(self):
+        """Declare the harness's fake proposal label-safe.
+
+        ``test_inmodel_repeats._HarnessMove`` overrides
+        ``in_model_proposal``, and ``_inmodel_labels_deferrable`` treats an
+        unknown override as label-reading (the conservative default). The
+        fake proposal touches no sorter labels, so say so explicitly --
+        otherwise the deferred window can never open under this harness and
+        the tests below would pass vacuously.
+        """
+        h = self._harness()
+        return mock.patch.object(
+            h._HarnessMove, "inmodel_proposal_reads_labels", False,
+            create=True)
+
     def _problem(self, n_rep, vertical, seed=11):
         h = self._harness()
         _FakeBuffer, _make_move = h._FakeBuffer, h._make_move
@@ -566,6 +602,125 @@ class VerticalWiringTest(unittest.TestCase):
         _, _, band_temps, _ = self._problem(6, vertical=True)
         np.testing.assert_array_equal(band_temps, _ladder())
 
+    # ---- deferred cell relabels (GB_CELL_LABEL_DEFERRED) ----
+
+    def test_deferred_relabel_matches_immediate_over_the_block(self):
+        """Knob ON == knob OFF for a whole repeat block.
+
+        The block runs one sweep per repeat step; with the knob ON they
+        compose into a single window flushed at the block boundary. Six
+        repeats of chained relabels is exactly the case a wrong
+        composition would get wrong.
+        """
+        with mock.patch.dict(os.environ, {"GB_CELL_LABEL_DEFERRED": "0"}):
+            _, s_off, _, picked = self._problem(6, vertical=True)
+        with mock.patch.dict(os.environ, {"GB_CELL_LABEL_DEFERRED": "1"}), \
+                self._deferrable_harness():
+            _, s_on, _, _ = self._problem(6, vertical=True)
+
+        np.testing.assert_array_equal(s_on.temp_inds, s_off.temp_inds)
+        np.testing.assert_array_equal(s_on.walker_inds, s_off.walker_inds)
+        np.testing.assert_array_equal(
+            s_on.special_band_inds, s_off.special_band_inds)
+        # the comparison is only worth anything if the block moved rows
+        self.assertFalse(
+            np.array_equal(s_off.temp_inds, picked["temp_inds"]),
+            "no swap was accepted -- the equivalence proves nothing",
+        )
+        # window closed behind it
+        self.assertIsNone(s_on._deferred_labels)
+
+    def test_one_window_per_block_not_per_repeat_step(self):
+        """The saving, pinned: ONE full-table relabel for the block.
+
+        Six repeat steps means six vertical sweeps; before this rework each
+        accepted sweep paid its own full-table isin + syncing boolean
+        getitem + 3 scatters.
+        """
+        opened, flushed = [], []
+        real_open = _FakeSorter.begin_cell_label_window
+        real_flush = _FakeSorter.flush_cell_labels
+
+        def spy_open(self, cells):
+            out = real_open(self, cells)
+            opened.append(int(np.asarray(cells).size))
+            return out
+
+        def spy_flush(self, close=False):
+            out = real_flush(self, close=close)
+            if out:
+                flushed.append(bool(close))
+            return out
+
+        with mock.patch.dict(os.environ, {"GB_CELL_LABEL_DEFERRED": "1"}), \
+                self._deferrable_harness(), \
+                mock.patch.object(
+                    _FakeSorter, "begin_cell_label_window", spy_open), \
+                mock.patch.object(
+                    _FakeSorter, "flush_cell_labels", spy_flush):
+            self._problem(6, vertical=True)
+
+        self.assertEqual(len(opened), 1, "one window per repeat BLOCK")
+        self.assertEqual(
+            flushed, [True], "exactly one closing flush at the block boundary")
+
+    def test_no_window_when_vertical_swaps_are_off(self):
+        """Nothing to defer without sweeps -- do not open a window."""
+        opened = []
+        real_open = _FakeSorter.begin_cell_label_window
+
+        def spy_open(self, cells):
+            opened.append(1)
+            return real_open(self, cells)
+
+        with mock.patch.dict(os.environ, {"GB_CELL_LABEL_DEFERRED": "1"}), \
+                self._deferrable_harness(), \
+                mock.patch.object(
+                    _FakeSorter, "begin_cell_label_window", spy_open):
+            self._problem(6, vertical=False)
+        self.assertEqual(opened, [])
+
+    def test_label_reading_proposal_override_opts_out(self):
+        """VGB reads sorter labels INSIDE the loop, so it must not defer.
+
+        ``VGBSpecialStretchMove.in_model_proposal`` looks up
+        ``band_sorter.temp_inds[source_ids]`` per repeat step; a window
+        spanning the block would hand it pre-swap labels. Any override is
+        treated as label-live.
+        """
+        from lisatools.globalfit.moves.gbspecialstretch import (
+            GBSpecialBase,
+            VGBSpecialStretchMove,
+        )
+
+        # the base move defers
+        self.assertTrue(_make_move()._inmodel_labels_deferrable)
+
+        # an UNKNOWN override does not (pessimistic inference)
+        class _Override(GBSpecialBase):
+            def in_model_proposal(self, *a, **k):  # pragma: no cover
+                raise NotImplementedError
+
+        self.assertFalse(
+            _Override.__new__(_Override)._inmodel_labels_deferrable)
+
+        # VGB says so explicitly, at the class that carries the hazard
+        self.assertIs(
+            VGBSpecialStretchMove.inmodel_proposal_reads_labels, True)
+        self.assertFalse(
+            VGBSpecialStretchMove.__new__(
+                VGBSpecialStretchMove)._inmodel_labels_deferrable)
+
+        # ... and an override that KNOWS it is label-safe can opt back in
+        class _SafeOverride(GBSpecialBase):
+            inmodel_proposal_reads_labels = False
+
+            def in_model_proposal(self, *a, **k):  # pragma: no cover
+                raise NotImplementedError
+
+        self.assertTrue(
+            _SafeOverride.__new__(_SafeOverride)._inmodel_labels_deferrable)
+
 
 class _RealMethodSorter:
     """Duck-typed state carrying ONLY what the real BandSorter label
@@ -573,6 +728,10 @@ class _RealMethodSorter:
     it on CPU: xp, special_band_inds, temp_inds, walker_inds, band_inds."""
 
     xp = np
+    # the exchange primitives check for an open deferred window first
+    # (GB_CELL_LABEL_DEFERRED); None keeps this fixture on the immediate
+    # path, which is what this suite pins
+    _deferred_labels = None
 
     def __init__(self, t, w, b, nwalkers):
         self.temp_inds = np.asarray(t).copy()

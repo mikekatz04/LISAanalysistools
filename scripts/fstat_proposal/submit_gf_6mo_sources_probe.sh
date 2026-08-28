@@ -38,8 +38,29 @@
 #   * SOBHB: all 6 (ids 0-5) -- most expected undetectable at 6 mo
 #     (user); 6 sources is cheap and answers which (if any) are not.
 #
-# RESUME: resubmitting resumes from the h5. Fresh start: move/delete the
-# store dir first.
+# RELAUNCH 2026-08-27 (post-preemption). Five launches that day stored ZERO
+# iterations: spot kills landed 30-75 min apart against an ~85-min exposure
+# to the first [SAVE]. Three changes make this relaunch answer the open
+# questions even if it is preempted again:
+#   1. SOBBH RUNS FIRST in the PE stage (user ruling). The still-unmeasured
+#      SOBBH leaf timings now arrive minutes after sampling starts instead
+#      of ~65 min in, behind mbh (~26 min) and emri (~37 min).
+#   2. MID-ITERATION CHECKPOINTS (MIDIT_CHECKPOINT below): the state is
+#      pickled at each PE leaf / stage sub-move, so a kill costs at most one
+#      leaf instead of the whole iteration. The run SELF-TESTS this in its
+#      first minute -- grep "[MIDIT_CKPT] SELF-TEST" to see PASSED/FAILED
+#      before trusting it (failure is loud, never fatal: the run then simply
+#      behaves as it did before the feature).
+#   3. The slurm stdout log is MIRRORED into the store dir, so the
+#      [GF_TIMING] table finally travels with the pull.
+#
+# RESUME: resubmitting resumes from the h5, and now also from the newer
+# *_midit_checkpoint.pkl sidecar when one is ahead of the store (a config
+# change safely invalidates it -- the snapshot is moved to *.rejected and
+# the run falls back). Fresh start: move/delete the store dir first. An
+# initialized-but-empty store is now re-initialized against the current
+# config automatically (it used to survive relaunches carrying the OLD
+# ladder shape, which would have crashed the first surviving save).
 # ============================================================================
 
 #SBATCH --job-name=gf6mo_src         # job name
@@ -76,7 +97,28 @@ GPU_PROC_LOG=${STORE_DIR}/gpu_procs_${SLURM_JOB_ID:-manual_$(date +%s)}.csv
 nvidia-smi --query-compute-apps=timestamp,gpu_uuid,pid,process_name,used_memory \
   --format=csv,noheader,nounits -l $((GPU_SAMPLE_SEC * 6)) > "${GPU_PROC_LOG}" &
 GPU_PROC_PID=$!
-trap 'kill ${GPU_SMI_PID} ${GPU_PROC_PID} 2>/dev/null || true' EXIT
+
+# ---- slurm stdout MIRROR into the store dir (2026-08-27) --------------------
+# Every line that matters for the timing readout -- [GF_TIMING], [SAVE],
+# [MIDIT_CKPT], the driver banner, any traceback -- goes to STDOUT, i.e. the
+# slurm --output file, which lives OUTSIDE ${STORE_DIR}. The pulls are zips
+# of ${STORE_DIR}, so that file has been missing from EVERY pull so far (it
+# was asked for by hand each time and never arrived). Mirror it into the
+# store every 30 s: zipping the store now captures it automatically, and
+# because this is a copy loop rather than an EXIT trap it survives a spot
+# preemption (SIGKILL runs no traps).
+SLURM_LOG=/shared/data/global_fit_output/gf6mo_src_${SLURM_JOB_ID:-manual}.log
+LOG_MIRROR_PID=""
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+  ( while true; do
+      cp -f "${SLURM_LOG}" "${STORE_DIR}/slurm_stdout_${SLURM_JOB_ID}.log" 2>/dev/null || true
+      sleep 30
+    done ) &
+  LOG_MIRROR_PID=$!
+  echo "[LOGMIRROR] ${SLURM_LOG} -> ${STORE_DIR}/slurm_stdout_${SLURM_JOB_ID}.log every 30 s"
+fi
+
+trap 'kill ${GPU_SMI_PID} ${GPU_PROC_PID} ${LOG_MIRROR_PID:-} 2>/dev/null || true' EXIT
 
 # ---- threading policy (MPI-only, no OMP) ------------------------------------
 export OMP_NUM_THREADS=1
@@ -186,13 +228,35 @@ fi
 export FILE_STORE_DIR=${STORE_DIR}
 export BASE_FILE_NAME=gf_prod_6mo_sources
 
-# ---- per-branch tempering (user ruling 2026-08-27): 4 rungs everywhere ------
+# ---- per-branch tempering + in-model repeats (user rulings 2026-08-27) ------
 # Source branches temper internally (engine ntemps is retired to 1).
-# 6 rungs measured too costly on this box (mbh leaf ~24 min); back to 4
-# (the historical per-branch default -- ladder cost is linear in rungs).
-export MBH_NTEMPS=4
-export EMRI_NTEMPS=4
-export SOBBH_NTEMPS=4
+# Ladder history: 6 rungs too costly (mbh leaf ~24 min) -> 4 (morning) ->
+# MBH/EMRI 2 for this relaunch. SOBBH goes the OTHER way: 12 rungs and 25
+# repeats, on the expectation that it is the cheap branch -- which is
+# precisely what this probe still has to measure, so it is a TEST, not a
+# settled setting (user: "assuming sobhb will be fine ... we will test
+# that"). It runs FIRST, so the answer lands minutes after sampling starts.
+#
+# COST ARITHMETIC (per-leaf work is ~ ntemps * nwalkers * repeats
+# likelihood rows on top of a fixed expose/fold round trip; the measured
+# baselines below were taken at ntemps=4, repeats=2):
+#   mbh   4x2=8  -> 2x5=10   = 1.25x  (1534 s -> ~32 min projected)
+#   emri  4x2=8  -> 2x5=10   = 1.25x  (2223 s -> ~46 min projected)
+#   sobbh 4x2=8  -> 12x25=300 = 37.5x over its default config (no measured
+#                               baseline yet -- this is the open question)
+# NB the halved ladders do NOT make mbh/emri cheaper: repeats 2->5 more
+# than offsets rungs 4->2. Both branches get slightly MORE expensive, and
+# the iteration total is dominated by whatever sobbh turns out to cost.
+export MBH_NTEMPS=2
+export EMRI_NTEMPS=2
+export SOBBH_NTEMPS=12
+# In-model stretch repeats per leaf visit (env default is 2 for all three).
+# More repeats amortize the per-visit expose/fold overhead over more
+# proposals -- worth it where the likelihood row is cheap (sobbh), less so
+# where it dominates (mbh/emri).
+export MBH_NUM_PROP_REPEATS=5
+export EMRI_NUM_PROP_REPEATS=5
+export SOBBH_NUM_PROP_REPEATS=25
 # Fancy (walker-permuting) temperature swap every 10 iterations (user
 # ruling 2026-08-27): the measured cost was ~17 min of an ~18.5-min MBH
 # leaf visit — ~5x the in-model work — when it fired every propose.
@@ -217,6 +281,19 @@ export SOBBH_PERMUTE_EVERY=10
 export MBH_START_FACTOR=1e-8
 export EMRI_START_FACTOR=1e-8
 export SOBBH_START_FACTOR=1e-8
+
+# ---- preemption protection (2026-08-27) -------------------------------------
+# Mid-iteration checkpointing: 2026-08-27 logged FIVE spot preemptions in
+# one day (kills 30-75 min apart) against an ~85-min exposure to the first
+# [SAVE] -- zero iterations ever stored. The sampler now pickles the state
+# at sub-iteration boundaries (each PE leaf; each stage sub-move) to
+# *_midit_checkpoint.pkl next to the h5, and a relaunch resumes from the
+# newest snapshot (a config change safely invalidates it). Default is ON
+# with a 600 s write throttle; the probe state is small (MBs), so tighten
+# to 5 min -> at most one ~leaf of work lost per kill. Look for
+# [MIDIT_CKPT] lines in global_fit.log. MIDIT_CHECKPOINT=0 disables.
+export MIDIT_CHECKPOINT=1
+export MIDIT_CHECKPOINT_MIN_INTERVAL=300
 
 # ---- shape ------------------------------------------------------------------
 # 24 walkers = the production 6mo_v1 shape, so the timing transfers to the

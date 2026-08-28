@@ -200,6 +200,16 @@ class GeneralSettings(Settings):
     domain_settings: Optional[DomainSettingsSpec] = None
     random_seed: int | None = None
     backup_iter: int | None = None
+    # Mid-iteration checkpointing (preemption protection): persist the
+    # in-memory state at sub-iteration boundaries (between a combine
+    # stage's moves; between PE leaves) so a killed job resumes from the
+    # newest snapshot instead of losing the whole iteration. See
+    # lisatools.globalfit.midit_checkpoint for the resume semantics.
+    midit_checkpoint: bool = True
+    # Minimum seconds between checkpoint writes (the worst-case overhead
+    # is one state pickle per interval; raise it for runs with very large
+    # states, e.g. full-galaxy GB fits).
+    midit_checkpoint_min_interval: float = 600.0
     # HDF backend chain compression (parallel-resources plan P2): gzip-4 by
     # default — level 9 costs the saver a lot of CPU for marginal size gains.
     hdf_compression: str = "gzip"

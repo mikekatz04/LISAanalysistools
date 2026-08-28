@@ -17,6 +17,8 @@ import typing
 import numpy as np
 from eryn.moves import CombineMove
 
+from .. import midit_checkpoint
+
 
 @dataclasses.dataclass
 class MoveBuildContext:
@@ -498,6 +500,15 @@ class GFCombineMove(CombineMove, GlobalFitMove):
                     accepted.copy() if accepted_out is None
                     else accepted_out + accepted
                 )
+                # sub-move boundary: coherent resume point (throttled; no-op
+                # unless run.py armed the module on this rank)
+                midit_checkpoint.maybe_write(
+                    state,
+                    tag=(
+                        f"stage={getattr(self, 'gf_stage_name', '?')} after "
+                        f"{getattr(move, 'gf_move_name', type(move).__name__)}"
+                    ),
+                )
             return state, accepted_out
 
         if getattr(self, "random_choice", False) and len(self.moves) > 1:
@@ -514,13 +525,18 @@ class GFCombineMove(CombineMove, GlobalFitMove):
                       f"random_choice -> {name}", flush=True)
             return move.propose(model, state)
 
-        if os.environ.get("GF_MOVE_TIMING", "0") != "1":
+        timing = os.environ.get("GF_MOVE_TIMING", "0") == "1"
+        if not timing and not midit_checkpoint.armed():
             return super().propose(model, state)
 
+        # Unified sequential loop: eryn CombineMove.propose semantics plus
+        # optional [GF_TIMING] instrumentation and mid-iteration checkpoints
+        # at the sub-move boundaries (each wrapped move returns a coherent
+        # state -- cold rows synced -- so every boundary is a resume point).
         self._gf_timing_iter = getattr(self, "_gf_timing_iter", 0) + 1
         it = self._gf_timing_iter
         stage = getattr(self, "gf_stage_name", "?")
-        sync = os.environ.get("GF_MOVE_TIMING_SYNC", "0") == "1"
+        sync = timing and os.environ.get("GF_MOVE_TIMING_SYNC", "0") == "1"
 
         accepted_out = None
         t_all = time.perf_counter()
@@ -535,26 +551,31 @@ class GFCombineMove(CombineMove, GlobalFitMove):
                     sys.modules["cupy"].cuda.get_current_stream().synchronize()
                 except Exception:
                     pass
-            wall = time.perf_counter() - t0
-            rss1 = _gf_rss_mb()
-            used, total = _gf_gpu_pool_mb()
             name = getattr(move, "gf_move_name", type(move).__name__)
-            print(
-                f"[GF_TIMING] stage={stage} move={name} it={it} "
-                f"wall_s={wall:.4f} rss_mb={rss1:.0f} d_rss_mb={rss1 - rss0:.0f} "
-                f"gpu_used_mb={used if used is not None else -1:.0f} "
-                f"gpu_pool_mb={total if total is not None else -1:.0f}",
-                flush=True,
-            )
+            if timing:
+                wall = time.perf_counter() - t0
+                rss1 = _gf_rss_mb()
+                used, total = _gf_gpu_pool_mb()
+                print(
+                    f"[GF_TIMING] stage={stage} move={name} it={it} "
+                    f"wall_s={wall:.4f} rss_mb={rss1:.0f} d_rss_mb={rss1 - rss0:.0f} "
+                    f"gpu_used_mb={used if used is not None else -1:.0f} "
+                    f"gpu_pool_mb={total if total is not None else -1:.0f}",
+                    flush=True,
+                )
             if accepted_out is None:
                 accepted_out = accepted.copy()
             else:
                 accepted_out += accepted
-        print(
-            f"[GF_TIMING] stage={stage} move=__total__ it={it} "
-            f"wall_s={time.perf_counter() - t_all:.4f} rss_mb={_gf_rss_mb():.0f}",
-            flush=True,
-        )
+            midit_checkpoint.maybe_write(
+                state, tag=f"stage={stage} after {name}"
+            )
+        if timing:
+            print(
+                f"[GF_TIMING] stage={stage} move=__total__ it={it} "
+                f"wall_s={time.perf_counter() - t_all:.4f} rss_mb={_gf_rss_mb():.0f}",
+                flush=True,
+            )
         return state, accepted_out
 
 

@@ -246,10 +246,16 @@ class FullYearCombinedGlobalFit(EreborFit):
                 Stage(
                     name="full_pe",
                     kind="pe",
+                    # SOBBH first (user ruling 2026-08-27): it is the cheap
+                    # branch, so on a preemption-prone partition the iteration
+                    # banks its progress -- and the still-unmeasured timing --
+                    # before the ~25-minute MBH and ~37-minute EMRI proposals
+                    # put the iteration at risk. Move order is not a sampling
+                    # statement; any order is a valid MH cycle.
                     moves=[
+                        Move("sobbh_pe", branch="sobbh"),
                         Move("mbh_pe", branch="mbh"),
                         Move("emri_pe", branch="emri"),
-                        Move("sobbh_pe", branch="sobbh"),
                     ],
                     combine_kwargs=dict(share_temperature_control=False),
                 )

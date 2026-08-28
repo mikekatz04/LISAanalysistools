@@ -36,6 +36,7 @@ from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray
 from ...utils.utility import asnumpy, get_array_module
+from .. import midit_checkpoint
 from .globalfitmove import GlobalFitMove
 
 logger = logging.getLogger(__name__)
@@ -1679,6 +1680,21 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
             logger.info(f"✓ {self.branch_name} leaf {leaf} complete ({time.time() - tic:.1f}s)")
+
+            # Mid-iteration checkpoint at the leaf boundary (throttled;
+            # no-op unless run.py armed the module). Everything accepted so
+            # far this propose is already folded into ``new_state`` (the
+            # sub-state work views + the residual); ``prepare`` mirrors the
+            # branch's cold row into the main state ONLY when a write is
+            # actually due, so a resume rebuilds exactly the residual this
+            # loop is carrying. This is the hook that matters for the
+            # minutes-per-leaf PE branches (MBH/EMRI), where a whole-branch
+            # propose outlives a spot-preemption window.
+            midit_checkpoint.maybe_write(
+                new_state,
+                tag=f"{self.branch_name} leaf {leaf}",
+                prepare=self._sync_cold_row,
+            )
 
         # udpate at the end
         logger.info(f"✓ {self.branch_name} proposal complete — all leaves processed ({time.time() - tic:.1f}s total)")
