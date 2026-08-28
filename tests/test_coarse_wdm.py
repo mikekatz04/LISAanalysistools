@@ -561,7 +561,7 @@ class CoarseKnobValidationTest(unittest.TestCase):
         from lisatools.globalfit.stock import erebor
 
         a = erebor.all_sources(lite=True)
-        self.assertEqual(a.general.coarse_gpu_mode, "delayed_acceptance")
+        self.assertEqual(a.general.coarse_gpu_mode, "auto")
         self.assertGreater(a.general.coarse_Q, 1)
         for name in ("noise_only_lite", "noise_sgwb_lite"):
             n = erebor.get_stock(name)
@@ -1068,6 +1068,59 @@ class CoarseModeDispatchTest(unittest.TestCase):
             self._move_with("delayed_acceptance")._resolve_mode_like_fns(),
             ("delayed_acceptance", "FINE", "COARSE", "FINE"),
         )
+
+    def test_auto_resolves_by_stage_kind(self):
+        """`auto`: surrogate while searching, exact target while doing PE."""
+        for kind, want in (
+            ("search", "search_approx"),
+            ("rj", "search_approx"),      # gb_search: a search by name+intent
+            ("pe", "delayed_acceptance"),
+        ):
+            with self.subTest(kind=kind):
+                stub = self._move_with("auto")
+                stub.gf_stage_kind = kind
+                self.assertEqual(stub._resolve_mode_like_fns()[0], want)
+
+    def test_auto_without_a_stage_falls_back_to_the_exact_mode(self):
+        """A bare move outside any stage must not silently sample a surrogate."""
+        self.assertEqual(
+            self._move_with("auto")._resolve_mode_like_fns()[0],
+            "delayed_acceptance",
+        )
+
+    def test_auto_follows_the_stage_across_reuse_of_one_instance(self):
+        """The reason the kind cannot be static.
+
+        Stock moves resolve BY NAME, so the very same PSDMove instance serves
+        noise_search and full_pe. Re-stamping before each propose must flip the
+        resolved mode with it.
+        """
+        stub = self._move_with("auto")
+        stub.gf_stage_kind = "search"
+        self.assertEqual(stub._resolve_mode_like_fns()[0], "search_approx")
+        stub.gf_stage_kind = "pe"
+        self.assertEqual(stub._resolve_mode_like_fns()[0], "delayed_acceptance")
+
+    def test_combine_move_stamps_the_stage_kind_on_sub_moves(self):
+        """GFCombineMove propagates its stage kind, noise moves included."""
+        import types
+
+        from lisatools.globalfit.moves.globalfitmove import GFCombineMove
+
+        noise_move = types.SimpleNamespace(NOISE_BRANCHES=("psd",))
+        nested = types.SimpleNamespace()
+        combo = types.SimpleNamespace(moves=[noise_move, nested])
+        combo.gf_stage_kind = "search"
+        combo._gf_sidecar_runtime_lookup = (
+            GFCombineMove._gf_sidecar_runtime_lookup.__get__(combo)
+        )
+        combo._gf_precondition = GFCombineMove._gf_precondition.__get__(combo)
+        model = types.SimpleNamespace(analysis_container_arr=None)
+        combo._gf_precondition(noise_move, model)
+        combo._gf_precondition(nested, model)
+        # the noise move is guard-exempt but must STILL be stamped
+        self.assertEqual(noise_move.gf_stage_kind, "search")
+        self.assertEqual(nested.gf_stage_kind, "search")
 
 
 class FineHandoffPreconditionTest(unittest.TestCase):

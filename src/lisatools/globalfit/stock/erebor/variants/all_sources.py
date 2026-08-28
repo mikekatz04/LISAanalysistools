@@ -229,12 +229,17 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     #     the CPU backend-replacement path), so this must not move on the
     #     shared base.
     #
-    #     Mode is `delayed_acceptance`, NOT `search_approx`: DA keeps the FINE
-    #     likelihood as the sampled target (stage 1 screens on the coarse
-    #     surrogate, stage 2 corrects with the exact fine/coarse ratio), so
-    #     turning it on changes how fast the chain moves, NOT what it samples.
-    #     `search_approx` is faster still but is an optimiser, not a posterior
-    #     sampler -- opt into it per search stage, never as a default.
+    #     Mode is `auto` (user ruling 2026-08-28): STAGE-DEPENDENT --
+    #     `search_approx` in search/rj stages (noise_search,
+    #     noise_vgb_search, gb_search), `delayed_acceptance` in pe stages
+    #     (full_pe, noise_vgb_pe). Searches are maximisations, so optimising
+    #     the cheap surrogate is legitimate there and is the bigger speed
+    #     win; PE keeps the FINE likelihood as the sampled target (stage 1
+    #     screens on the surrogate, stage 2 corrects with the exact
+    #     fine/coarse ratio), so what is SAMPLED never changes. Either mode
+    #     can still be forced explicitly for every stage.
+    #     Every noise move republishes the exact FINE covariance before it
+    #     returns, in BOTH modes, so source moves never see coarse state.
     #
     #     COARSE_Q=8 matches the probe leg so the configuration that gets
     #     measured is the configuration that ships; scripts/noise/coarse_q_scan.py
@@ -243,7 +248,7 @@ class AllSourcesGeneralSettings(EreborGeneralSettings):
     #     Off switch: COARSE_GPU_MODE=off (or COARSE_Q=1).
     coarse_Q: int = dataclasses.field(default_factory=env_default("COARSE_Q", 8, int))
     coarse_gpu_mode: str = dataclasses.field(
-        default_factory=env_default("COARSE_GPU_MODE", "delayed_acceptance", str)
+        default_factory=env_default("COARSE_GPU_MODE", "auto", str)
     )
 
     # --- unequal-arm instrument noise (env UNEQUAL_ARM=1) ---

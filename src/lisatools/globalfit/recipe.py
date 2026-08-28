@@ -886,6 +886,14 @@ class Stage:
         combine_kwargs.setdefault("verbose", run_verbose)
         combined = GFCombineMove(moves=runtime_moves, **combine_kwargs)
         combined.gf_stage_name = self.name
+        # ... and the stage KIND, which the coarse-noise mode resolver reads
+        # ("auto" -> search_approx in a search/rj stage, delayed_acceptance in
+        # a pe stage). It must ride the per-stage COMBINE move rather than the
+        # sub-moves: stock moves are shared by name, so the very same PSDMove
+        # instance serves noise_search and full_pe, and a static stamp on it
+        # would be whichever stage materialised last. GFCombineMove re-stamps
+        # its children immediately before each propose instead.
+        combined.gf_stage_kind = self.kind
         if not hasattr(combined, "accepted") or combined.accepted is None:
             combined.accepted = np.zeros((ctx.ntemps, ctx.nwalkers))
         return _STEP_CLASSES[self.kind](moves=[combined], **self.step_kwargs)

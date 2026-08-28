@@ -526,13 +526,28 @@ class GFCombineMove(CombineMove, GlobalFitMove):
         return self._gf_sidecar_runtime
 
     def _gf_precondition(self, move, model):
-        """Coarse-sidecar guard (plan-2 §6.4), run before every SOURCE sub-move.
+        """Per-sub-move preamble: stamp the stage kind, then guard the handoff.
+
+        (1) Propagate this stage's ``kind`` onto the sub-move. Stock moves are
+        shared BY NAME, so one PSDMove instance serves both a search stage and
+        the PE stage -- the kind cannot be a static attribute, and is
+        re-stamped here immediately before each propose. Nested combines
+        inherit it and pass it down the same way, so a move always sees the
+        stage actually running it.
+
+        (2) Coarse-sidecar guard (plan-2 §6.4), before every SOURCE sub-move.
 
         Noise moves (they expose ``NOISE_BRANCHES``) own the publication and
         are exempt; everyone else must observe full fine state. Assertion
         cost is a per-walker attribute compare — negligible next to any
         source proposal.
         """
+        kind = getattr(self, "gf_stage_kind", None)
+        if kind is not None:
+            try:
+                move.gf_stage_kind = kind
+            except AttributeError:  # exotic move objects: never fatal
+                pass
         runtime = self._gf_sidecar_runtime_lookup()
         if runtime is None or hasattr(move, "NOISE_BRANCHES"):
             return

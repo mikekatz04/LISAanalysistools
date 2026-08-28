@@ -1165,6 +1165,16 @@ class PSDMove(GlobalFitMove, StretchMove):
         kernel on the fine target.
         """
         mode = self.coarse_runtime.mode if self.coarse_sidecar_active else "off"
+        if mode == "auto":
+            # Stage-dependent (user ruling 2026-08-28): optimise the surrogate
+            # while searching, sample the exact target while doing PE. The kind
+            # is stamped by the running stage's GFCombineMove immediately
+            # before this propose (stock moves are shared by name, so it cannot
+            # be static). "rj" counts as a search: gb_search is a search by
+            # name and intent, and it is where the wall time is. Unstamped
+            # (a bare move outside any stage) falls back to the EXACT mode.
+            kind = getattr(self, "gf_stage_kind", None)
+            mode = "search_approx" if kind in ("search", "rj") else "delayed_acceptance"
         if mode == "search_approx":
             return (
                 mode,

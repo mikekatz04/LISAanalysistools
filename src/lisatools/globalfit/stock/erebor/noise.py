@@ -482,9 +482,9 @@ def validate_coarse_settings(gs, *, all_source: bool) -> None:
             f"{gs.coarse_fiducial!r}."
         )
     mode = str(getattr(gs, "coarse_gpu_mode", "off") or "off")
-    if mode not in ("off", "search_approx", "delayed_acceptance"):
+    if mode not in ("off", "auto", "search_approx", "delayed_acceptance"):
         raise ValueError(
-            "coarse_gpu_mode must be 'off', 'search_approx', or "
+            "coarse_gpu_mode must be 'off', 'auto', 'search_approx', or "
             f"'delayed_acceptance'; got {mode!r}."
         )
     gs.coarse_gpu_mode = mode

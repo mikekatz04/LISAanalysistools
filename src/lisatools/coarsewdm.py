@@ -206,7 +206,7 @@ class CoarseWDMRuntime:
     fiducial_digest: str = ""
     coarse_backend: Optional[object] = None
 
-    _MODES = ("off", "search_approx", "delayed_acceptance")
+    _MODES = ("off", "auto", "search_approx", "delayed_acceptance")
 
     def __post_init__(self):
         if not isinstance(self.coarse_settings, CoarseWDMSettings):
