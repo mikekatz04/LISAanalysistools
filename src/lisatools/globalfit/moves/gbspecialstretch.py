@@ -8431,7 +8431,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "proposed": 0, "accepted": 0,
             "acc_by_rung": np.zeros(max(int(ntemps) - 1, 1), dtype=np.int64),
             "prop_by_rung": np.zeros(max(int(ntemps) - 1, 1), dtype=np.int64),
+            # Device-side per-sweep accumulators (created lazily by the
+            # sweep; merged into the host arrays by _vertical_census_flush
+            # exactly once, at the block-end log).
+            "prop_by_rung_dev": None,
+            "acc_by_rung_dev": None,
         }
+
+    @staticmethod
+    def _vertical_census_flush(census) -> None:
+        """Merge the device-side rung accumulators into the host census
+        arrays (one D2H per block instead of two per sweep). Idempotent."""
+        if census is None:
+            return
+        for key in ("prop_by_rung", "acc_by_rung"):
+            dev = census.get(key + "_dev")
+            if dev is not None:
+                n = len(census[key])
+                census[key] += np.asarray(
+                    _to_numpy(dev), dtype=np.int64)[:n]
+                census[key + "_dev"] = None
 
     def _vertical_swap_sweep(self, band_sorter, band_temps, t_i, w_i, b_i,
                              slots, beta, ll_ref, ll_change_log, prop_counts,
@@ -8481,11 +8500,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         paccept = (b_cold - b_hot) * (ll_ref[hot] - ll_ref[cold])
         if census is not None:
             census["proposed"] += int(paccept.shape[0])
-            _pr = np.bincount(
-                _to_numpy(t_i[cold]).astype(int),
-                minlength=len(census["prop_by_rung"]),
+            # DEVICE-side rung accumulation (orchestration audit 2026-08-27
+            # candidate 6): the host bincount pull here was a forced sync
+            # per sweep = per repeat step, spent purely on the block-end
+            # log line. Accumulate on device; _vertical_census_flush merges
+            # once at the log site. (Shape-derived counters above are
+            # host-known ints -- no sync.)
+            _pr = xp.bincount(
+                t_i[cold], minlength=len(census["prop_by_rung"]),
             )[: len(census["prop_by_rung"])]
-            census["prop_by_rung"] += _pr
+            if census.get("prop_by_rung_dev") is None:
+                census["prop_by_rung_dev"] = _pr.astype(xp.int64)
+            else:
+                census["prop_by_rung_dev"] += _pr
         # Swap RNG lives on its own stream: the in-model repeat loop's draw
         # count/order must not change, or the bit-exact accept-chain
         # reference test breaks for a reason unrelated to correctness.
@@ -8504,11 +8531,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         w_hc, b_hc = w_i[h], b_i[h]
         if census is not None:
             census["accepted"] += n_acc
-            _ar = np.bincount(
-                _to_numpy(t_c).astype(int),
-                minlength=len(census["acc_by_rung"]),
+            # Device-side (see prop_by_rung above; flushed at the log site).
+            _ar = xp.bincount(
+                t_c, minlength=len(census["acc_by_rung"]),
             )[: len(census["acc_by_rung"])]
-            census["acc_by_rung"] += _ar
+            if census.get("acc_by_rung_dev") is None:
+                census["acc_by_rung_dev"] = _ar.astype(xp.int64)
+            else:
+                census["acc_by_rung_dev"] += _ar
 
         # --- sorter: every source of both cells trades its temperature ---
         # BATCHED relabel (orchestration audit 2026-08-27): the per-pair
@@ -9404,6 +9434,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"{_vert_acc} accepted swap(s) in this repeat block."
                 )
             _cn = _vert_census
+            self._vertical_census_flush(_cn)
             _avail = _cn["paired"] / max(_cn["rows"], 1)
             _rate = _cn["accepted"] / max(_cn["proposed"], 1)
             # PAIR AVAILABILITY is the headline: a vertical swap needs both

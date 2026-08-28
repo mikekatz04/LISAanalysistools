@@ -646,5 +646,42 @@ class BatchExchangeEquivalenceTest(unittest.TestCase):
             s.special_band_inds, ref.special_band_inds)
 
 
+class VerticalCensusDeSyncTest(unittest.TestCase):
+    """Rung counters accumulate DEVICE-side per sweep and flush ONCE at the
+    block-end log (orchestration audit 2026-08-27 candidate 6): the two
+    per-sweep host bincount pulls were 2 forced syncs x one sweep per
+    repeat step, spent purely on a log line."""
+
+    def _swept_census(self):
+        fx = _SweepFixture(ll=[-100.0, -10.0, -100.0, -100.0])
+        cn = fx.mv._vertical_census_new(NTEMPS)
+        n_acc = fx.mv._vertical_swap_sweep(
+            fx.sorter, fx.band_temps, fx.t, fx.w, fx.b,
+            fx.slots, fx.beta, fx.ll_ref, fx.ll_change,
+            fx.prop, fx.acc, fx.cell_ll, 0, census=cn,
+        )
+        return fx, cn, n_acc
+
+    def test_host_rung_arrays_untouched_per_sweep(self):
+        _, cn, _ = self._swept_census()
+        self.assertGreater(cn["proposed"], 0)
+        self.assertEqual(int(cn["prop_by_rung"].sum()), 0)
+        self.assertIsNotNone(cn.get("prop_by_rung_dev"))
+        self.assertGreater(int(np.asarray(cn["prop_by_rung_dev"]).sum()), 0)
+
+    def test_flush_merges_exactly_once_and_matches_totals(self):
+        fx, cn, n_acc = self._swept_census()
+        fx.mv._vertical_census_flush(cn)
+        self.assertEqual(int(cn["prop_by_rung"].sum()), cn["proposed"])
+        self.assertEqual(int(cn["acc_by_rung"].sum()), cn["accepted"])
+        self.assertEqual(cn["accepted"], n_acc)
+        self.assertIsNone(cn.get("prop_by_rung_dev"))
+        self.assertIsNone(cn.get("acc_by_rung_dev"))
+        # idempotent: flushing again changes nothing
+        before = cn["prop_by_rung"].copy()
+        fx.mv._vertical_census_flush(cn)
+        np.testing.assert_array_equal(cn["prop_by_rung"], before)
+
+
 if __name__ == "__main__":
     unittest.main()
