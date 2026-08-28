@@ -878,9 +878,11 @@ export GB_FSTAT_PERROW_UNIT_CACHE=1
 # flush once per tempering chunk / repeat block (kills the full-table
 # isin + forced sync per accepted swap). Bit-identical both states in
 # the suite; sync-free tripwires fail loudly on any missed flush point.
-# Flip to 1 after one clean A/B row (watch special_index_check + the
-# run_tempering/inmodel_vertical_swap [GB_TIMING] spans).
-export GB_CELL_LABEL_DEFERRED=0
+# ARMED 2026-08-28 (user ruling "why not"): failure mode is a LOUD
+# special_index_check/guard AssertionError (lost row + relaunch), never
+# silent corruption. Watch [GB_TEMPER_CHECK], [GB_VERT], and the
+# run_tempering/temper_buffer/inmodel_vertical_swap [GB_TIMING] spans.
+export GB_CELL_LABEL_DEFERRED=1
 # FUSED IN-MODEL ACCEPT/BOOKKEEPING KERNEL (LAT 0f0fc73a) -- A/B knob,
 # default OFF. Collapses ~160 cupy launches per repeat step to 3
 # (gate + compaction + accept/apply). REQUIRES the full ./install.sh
@@ -892,7 +894,11 @@ export GB_CELL_LABEL_DEFERRED=0
 # python chain by construction; the CPU-side A/B is already pinned in
 # tests/test_gb_inmodel_accept_kernel.py). NOTE: stands down
 # automatically when GB_INMODEL_TRACE / GB_JUMP_TRACE are armed.
-export GB_INMODEL_ACCEPT_KERNEL=0
+# ARMED 2026-08-28 (user ruling): INERT until the ./install.sh rebuild
+# provides the binary (one-line fallback warning + python chain until
+# then); first post-rebuild row's [GB_TIMING] inmodel_* spans +
+# standing checks are the de-facto A/B; =0 is the instant rollback.
+export GB_INMODEL_ACCEPT_KERNEL=1
 export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # High-f barren-band birth shutoff (search scope): bands above FMIN with
 # AFTER consecutive zero-birth-accept proposes stop proposing births
