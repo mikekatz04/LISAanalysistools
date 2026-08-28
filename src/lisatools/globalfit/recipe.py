@@ -3086,6 +3086,77 @@ def build_gb_moves(
     )
     gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers))
 
+    #* ------------------------- PE REPLACE (rj_replace_pe) -------------------------
+    # USER DIRECTIVE 2026-08-28: "we need a PE replace that also uses the
+    # same machinery as fstat pe". Same fixed-dimension REPLACEMENT move as
+    # the search install above (one alive source swapped for a fresh
+    # full-parameter F-stat candidate, EXACT add-deltas both sides), built
+    # from the SAME container the PE birth move carries -- under
+    # fstat_fit_in_move it is a grid move on the shared fit root, so
+    # _FSTAT_GRID_REGISTRY / _FSTAT_CTR_TABLE_REGISTRY hand it the
+    # identical birth container and epoch center table with no second fit;
+    # otherwise it takes the same ``_rj_birth_prop`` (custom container or
+    # the device-correct global prior) that rj_fstat_pe does, which is the
+    # container ``band_sorter.rj_prop`` resolves to for both moves.
+    #
+    # PE FLAVOR (the deltas vs the search install): PE repeat/SNR defaults
+    # + pe-strict cap config (``_imr_defaults`` / ``_pe_cap_off``), the PE
+    # flip-fraction default, and the shared PE tempering cadence
+    # (run_swaps=True + temper_every_proposes) instead of the search
+    # all-moves swap rule.
+    #
+    # EXACT DETAILED BALANCE: this install stamps NEITHER
+    # ``replace_search_stage`` NOR a name containing "search", so
+    # GBSpecialBase._replace_fstat_max resolves False and slot 0 is
+    # genuinely drawn + priced on both sides (the search-only
+    # maximize-then-pretend exception, which would maximization-bias the
+    # amplitude posterior, never arms in PE). ``pe_extrinsic_draw`` is
+    # deliberately left at the ctor default: _run_replace_step never reads
+    # _pe_extr_active -- the replace move carries its own extrinsic
+    # machinery (deterministic center pin + drawn/priced slot 0).
+    gb_pe_replace_move = None
+    # Build for a genuine PE stack: a pe-mode recipe, or a STAGED recipe
+    # running its pe-named moves strict-PE inside a GB_MODE=search process
+    # (GB_PE_MOVES_STRICT=1). A single-stage search campaign that runs its
+    # SEARCH through the pe-named moves keeps ``rj_replace`` and nothing
+    # else. The recipe's ``pe_move_names`` filter is the final say either
+    # way -- an unrequested move never installs.
+    if ((not _gb_mode_search or _pe_strict)
+            and getattr(gb_info, "pe_rj_replace", False)):
+        gb_pe_replace_move = _RJBirth(
+            *gb_move_args,
+            rj_proposal_distribution=(None if _fit_in_move else _rj_birth_prop),
+            **({"is_rj_prop": True} if _fit_in_move else {}),
+            **_fit_kwargs,
+            name="rj_replace_pe",
+            rj_replace=True,
+            # NEVER phase-maximize the RJ birth machinery here (the
+            # root-caused rj_replace ll-drift flaw); the separate
+            # GB_REPLACE_PHASE_MAX scoring knob is unaffected.
+            phase_maximize=False,
+            run_swaps=True,
+            temper_every_proposes=_pe_temper_every,
+            gpus=[],
+            **{**gb_move_kwargs, "leaf_cap_update": False,
+               "rj_flip_fraction_default": _rj_flip_default,
+               **_imr_defaults, **_pe_cap_off},
+        )
+        # The center pin IS this move's proposal, so it must not depend on
+        # the phase-max chain the ctor default follows (identical reasoning
+        # to the search install). GB_RJ_FSTAT_DIST_BIRTH still wins.
+        _fdb_env_pe = os.environ.get("GB_RJ_FSTAT_DIST_BIRTH")
+        gb_pe_replace_move.rj_fstat_dist_birth = (
+            bool(int(_fdb_env_pe)) if _fdb_env_pe is not None else True
+        )
+        # PE-stage stamp: "same machinery as fstat pe" == the EPOCH CENTER
+        # TABLE for the extrinsic centers (what _rj_birth_perrow hands the
+        # pe-named fstat moves). The move's plain name carries no stage
+        # info, so the stamp is what makes _replace_ctr_mode resolve
+        # "table"; search installs stay "perrow" bit-identically, and an
+        # explicit GB_REPLACE_CTR_MODE overrides either way.
+        gb_pe_replace_move.replace_pe_stage = True
+        gb_pe_replace_move.accepted = np.zeros((ntemps, nwalkers))
+
     # PURE prior-birth RJ move for the PE stage (2026-08-12 rename/split):
     # births drawn from the GLOBAL PRIOR (never the fstat grids), deaths
     # judged the same way -- the complement to rj_fstat_pe in a PE cycle.
@@ -3130,8 +3201,16 @@ def build_gb_moves(
     # (single ``rj_prior`` move under GB_MODE=search), and the
     # ``pe_move_names`` filter below keeps exactly the recipe-requested
     # subset either way.
-    gb_pe_moves = [gb_pe_prior_move, gb_pe_prior_birth_move,
-                   gb_pe_fstat_mcmc_move]
+    # ``rj_replace_pe`` sits directly AFTER the pe-named fstat birth move,
+    # the same relative position ``rj_replace`` takes in the search cycle
+    # (fstat-birth -> fstat-REPLACE): a freshly born leaf is the natural
+    # candidate for a replacement swap in the same iteration. The stage's
+    # recipe move list is what actually orders the GFCombineMove cycle;
+    # this order is the registration order the filter preserves.
+    gb_pe_moves = [gb_pe_prior_move]
+    if gb_pe_replace_move is not None:
+        gb_pe_moves.append(gb_pe_replace_move)
+    gb_pe_moves += [gb_pe_prior_birth_move, gb_pe_fstat_mcmc_move]
     if gb_replace_move is not None:
         gb_pe_moves.append(gb_replace_move)
     if gb_in_model_move is not None:

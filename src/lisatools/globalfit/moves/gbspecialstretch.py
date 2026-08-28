@@ -5192,10 +5192,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             phi0_max, iota_max, psi_max, ln_snr)
         return lg + self._LOG_EXTR_UNIFORM_VOL
 
-    @staticmethod
-    def _replace_ctr_mode() -> str:
+    def _replace_ctr_mode(self) -> str:
         """Extrinsic-center machinery for the REPLACE move: ``"perrow"``
-        (default) or ``"table"``.
+        (the SEARCH default) or ``"table"`` (the PE default).
 
         2026-08-24 candidate-quality root cause (a): the epoch center table
         pins phi0/iota/psi/ln_A_max by the NEAREST NODE IN F0 ONLY, so the
@@ -5211,15 +5210,43 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         phase maximization SHAPING the candidate while the acceptance
         stays exact-ll of the concrete parameters. The per-round cost is
         one batched F-stat evaluation per replace round (rows are few:
-        one per sub-band cell). ``GB_REPLACE_CTR_MODE=table`` restores the
-        table pin. Births/deaths are untouched — this knob is read ONLY by
-        :meth:`_run_replace_step`.
+        one per sub-band cell). Births/deaths are untouched — this knob is
+        read ONLY by :meth:`_run_replace_step`.
+
+        STAGE-AWARE DEFAULT (user directive 2026-08-28, "we need a PE
+        replace that also uses the same machinery as fstat pe"): the
+        pe-named F-stat RJ moves take their extrinsic centers from the
+        EPOCH CENTER TABLE (:meth:`_rj_birth_perrow` resolves ``table``
+        for every non-search name), so the PE replace must consume the
+        SAME source — one center table per epoch, shared through
+        ``_FSTAT_CTR_TABLE_REGISTRY``, no second F-stat sweep and no
+        per-round solve inside a PE cycle. The recipe's PE install site
+        stamps ``replace_pe_stage`` (mirroring the search install's
+        ``replace_search_stage``); the move's own name carries no stage
+        information, which is why the resolution keys off the stamp
+        rather than a name idiom.
+
+        ``GB_REPLACE_CTR_MODE``: ``auto`` (default) = ``table`` for a
+        ``replace_pe_stage``-stamped move, ``perrow`` for everything else
+        (SEARCH and every unstamped move resolve exactly what they
+        resolved before this knob became stage-aware — bit-identical).
+        ``perrow`` / ``table`` force either way, so an explicitly set env
+        var always wins over the stamp. A PE move whose epoch table is
+        missing degrades to the per-row path inside
+        :meth:`_run_replace_step` (``_fstat_ctr_table_active`` returns
+        ``None``), the same graceful fallback ``GB_FSTAT_CTR_MODE=epoch``
+        already relies on.
         """
-        mode = os.environ.get("GB_REPLACE_CTR_MODE", "perrow").strip().lower()
-        if mode not in ("perrow", "table"):
+        mode = os.environ.get("GB_REPLACE_CTR_MODE", "auto").strip().lower()
+        if mode in ("perrow", "table"):
+            return mode
+        if mode != "auto":
             raise ValueError(
-                f"GB_REPLACE_CTR_MODE must be 'perrow' or 'table', got {mode!r}")
-        return mode
+                "GB_REPLACE_CTR_MODE must be 'perrow', 'table' or 'auto', "
+                f"got {mode!r}")
+        if getattr(self, "replace_pe_stage", False):
+            return "table"
+        return "perrow"
 
     @staticmethod
     def _replace_incell_mode() -> str:
@@ -5294,8 +5321,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         idiom) OR carrying the recipe's ``replace_search_stage`` stamp --
         the production move is named plain "rj_replace", so its
         search-only install site in ``recipe.py`` stamps the stage
-        instead; a future PE replace install simply won't stamp it and
-        keeps the exact-DB draw path bit-identically (where
+        instead. The PE install (``rj_replace_pe``, 2026-08-28) stamps
+        ``replace_pe_stage`` and NOT this one, so it resolves False here
+        and keeps the exact-DB draw path bit-identically (where
         maximize-and-overwrite would maximization-bias the amplitude
         posterior). ``1`` / ``0`` force either way. Requires the F-stat
         birth container (``rj_fstat_dist_birth``) unconditionally:
@@ -6620,15 +6648,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
           on the grid's own high-F corners instead of uniform in-cell
           jitter;
         * extrinsics from a PER-ROW F-stat at the exact drawn intrinsics
-          (:meth:`_fstat_dist_centers`; the default,
+          (:meth:`_fstat_dist_centers`; the SEARCH default,
           ``GB_REPLACE_CTR_MODE=perrow`` — 2026-08-24 candidate-quality
           fix, see :meth:`_replace_ctr_mode`): phi0/iota/psi pinned to the
           amplitude-maximizing values FOR THE DRAWN (f0, Mc, sky), slot 0
           (distance / lnA) drawn from the (SNR-truncated) lognormal about
           the per-row center, floor-mixed with a small uniform over the
           container's slot-0 range (:meth:`_replace_slot0_floor_eps`).
-          ``GB_REPLACE_CTR_MODE=table`` restores the epoch center-table
-          pin (:meth:`_fstat_ctr_table_lookup`, nearest node in f0).
+          The PE install (``rj_replace_pe``, stamped
+          ``replace_pe_stage``) instead takes the epoch center-table pin
+          (:meth:`_fstat_ctr_table_lookup`, nearest node in f0) — the
+          SAME center machinery the pe-named F-stat RJ moves use, so one
+          shared table serves the whole PE cycle. ``GB_REPLACE_CTR_MODE``
+          forces either mode explicitly.
 
         SCORING (:meth:`SubBandBuffer.get_replace_ll`): both sides are
         add-deltas ``<r'|h> - 0.5<h|h>`` against the old-source-exposed

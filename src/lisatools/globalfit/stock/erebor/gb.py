@@ -529,6 +529,33 @@ class GBSettings(Settings):
     search_rj_replace: bool = dataclasses.field(
         default_factory=env_default("GB_SEARCH_RJ_REPLACE", True, bool)
     )
+    # pe_rj_replace: the PE-mode sibling of ``search_rj_replace`` (USER
+    # directive 2026-08-28, "we need a PE replace that also uses the same
+    # machinery as fstat pe"): build + install ``rj_replace_pe`` directly
+    # AFTER the pe-named F-stat birth move (``rj_fstat_pe``) in the PE
+    # cycle. SAME move, PE-flavored: PE repeat/SNR defaults, PE flip
+    # fraction, the shared PE tempering cadence, and the pe-strict cap
+    # config -- and, critically, the SAME extrinsic-center machinery the
+    # pe-named F-stat moves use, the epoch CENTER TABLE (the install
+    # stamps ``replace_pe_stage``, which is what
+    # GBSpecialBase._replace_ctr_mode resolves "table" from; the SEARCH
+    # install keeps per-row centers bit-identically).
+    #
+    # EXACT DETAILED BALANCE, unlike the search install: the PE move does
+    # NOT carry ``replace_search_stage`` and its name has no "search" in
+    # it, so GBSpecialBase._replace_fstat_max resolves False and slot 0 is
+    # genuinely DRAWN (truncated + floor-mixed lognormal about the epoch
+    # center) and priced on both sides -- the maximize-then-pretend search
+    # exception never arms here, where it would maximization-bias the
+    # amplitude posterior. See GBSpecialBase._run_replace_step for the
+    # acceptance derivation.
+    #
+    # Default ON (the move is exact-MH, so it is posterior-valid); set
+    # GB_PE_RJ_REPLACE=0 to build a PE cycle without it. Env:
+    # GB_PE_RJ_REPLACE.
+    pe_rj_replace: bool = dataclasses.field(
+        default_factory=env_default("GB_PE_RJ_REPLACE", True, bool)
+    )
     # search_prior_removal: build + install the removal-only pruning move
     # ``rj_prior_removal`` (GBSpecialRJPriorMove with the PRIOR container +
     # rj_removal_only=True: births force-rejected, deaths untouched). Env:

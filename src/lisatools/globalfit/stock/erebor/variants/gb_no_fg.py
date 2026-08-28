@@ -1258,10 +1258,11 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
     # cycle fstat-birth -> fstat-REPLACE -> prior-REMOVAL. Anchor priority
     # (2026-08-24, USER directive "immediately after the RJ move" in
     # gb_search): ``rj_fstat_search`` first, so STAGED recipes carrying
-    # both a gb_search and a full_pe stage get the cycle in the SEARCH
-    # stage and full_pe stays untouched (PE installation is future work);
-    # the pe-named anchors remain for the legacy single-stage search
-    # campaigns that run their search through the pe-named moves.
+    # both a gb_search and a full_pe stage get the SEARCH cycle in the
+    # search stage; the pe-named anchors remain for the legacy
+    # single-stage search campaigns that run their search through the
+    # pe-named moves. The PE cycle gets its OWN replace move
+    # (``rj_replace_pe``) from the block right below this one.
     if getattr(gb_info, "mode", "pe") == "search":
         _names = recipe.move_names()
         _anchor = next(
@@ -1299,6 +1300,31 @@ def setup_gb_moves(engine_info, curr, acs, priors, state) -> dict:
                 and "rj_prior_removal" not in recipe.move_names()
             ):
                 recipe.add_move("rj_prior_removal", after=_anchor, branch="gb")
+
+    # PE RJ cycle wiring (USER directive 2026-08-28, "we need a PE replace
+    # that also uses the same machinery as fstat pe"): insert
+    # ``rj_replace_pe`` right AFTER the pe-named F-stat birth move, the
+    # same relative position ``rj_replace`` takes in the search cycle, so
+    # the stage's GFCombineMove runs fstat-birth -> fstat-REPLACE per
+    # iteration. PE only -- a GB_MODE=search recipe gets the search
+    # ``rj_replace`` above and nothing here. The move is exact-MH (no
+    # maximize-then-pretend, no search stamp), so it is posterior-valid;
+    # GB_PE_RJ_REPLACE=0 / ``gb.pe_rj_replace = False`` leaves the PE
+    # cycle exactly as it was.
+    elif getattr(gb_info, "pe_rj_replace", False):
+        _pe_names = recipe.move_names()
+        _pe_anchor = next(
+            (n for n in ("rj_fstat_pe", "rj_prior") if n in _pe_names), None
+        )
+        if _pe_anchor is None:
+            logger.warning(
+                "gb.pe_rj_replace is on but the recipe has no 'rj_fstat_pe' "
+                "move to anchor the PE cycle on; skipping the rj_replace_pe "
+                "insertion (the replace move draws from the F-stat birth "
+                "move's container)."
+            )
+        elif "rj_replace_pe" not in _pe_names:
+            recipe.add_move("rj_replace_pe", after=_pe_anchor, branch="gb")
 
     requested = recipe.stock_names()
     include_search = any(name.endswith("_search") for name in requested)
