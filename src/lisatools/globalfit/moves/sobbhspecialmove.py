@@ -36,6 +36,7 @@ tolerance knob ``SOBBH_CHECK_LL_TOL``.
 
 import logging
 import os
+import time
 
 import numpy as np
 
@@ -318,8 +319,22 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         6-mo removal-null sweep: residual 6e-4 of <h|h> at the Nt_sub=32
         defaults). ``SOBBH_CHUNKED_FILL=0`` restores the exact dense pass.
         """
+        _what = "EXPOSE (r += h)" if sign > 0 else "FOLD-BACK (r -= h)"
         if os.environ.get("SOBBH_CHUNKED_FILL", "1").strip() != "1":
-            return super()._apply_cold_chain_sources(coords, sign)
+            # Say so: this path costs ~32 s PER ROW on the 6-mo grid, and a
+            # silent slow path is what made jobs 364/370 un-diagnosable.
+            logger.info(
+                "[SOBBH_FILL] %s via the DENSE per-row path "
+                "(SOBBH_CHUNKED_FILL=0): %d rows",
+                _what, int(np.shape(coords)[0]),
+            )
+            t0 = time.perf_counter()
+            out = super()._apply_cold_chain_sources(coords, sign)
+            logger.info(
+                "[SOBBH_FILL] dense %s done in %.1f s", _what,
+                time.perf_counter() - t0,
+            )
+            return out
 
         coords_np = np.atleast_2d(np.asarray(asnumpy(coords), dtype=np.float64))
         params = self.to_chunked_basis(coords_np)
@@ -337,13 +352,21 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
         idx = np.arange(params.shape[0], dtype=np.int32)[valid]
         p = params[valid]
         factors = np.full(p.shape[0], float(sign), dtype=np.float64)
+        n_shards = len(self.acs.linear_data_arr)
+        t0 = time.perf_counter()
 
-        if len(self.acs.linear_data_arr) == 1:
+        if n_shards == 1:
             self.comp.fill_global_wdm(
                 p, self.acs,
                 data_index=idx,
                 factors=factors,
                 m_band_half_width=self.m_band_half_width,
+            )
+            logger.info(
+                "[SOBBH_FILL] %s via CHUNKED fill_global_wdm: %d rows "
+                "(%d skipped) in %.2f s, 1 shard",
+                _what, int(p.shape[0]), int(params.shape[0] - p.shape[0]),
+                time.perf_counter() - t0,
             )
             return
 
@@ -364,6 +387,12 @@ class SOBBHChunkedLikeMove(ResidualAddOneRemoveOneMove):
                     factors=factors[pos],
                     m_band_half_width=self.m_band_half_width,
                 )
+        logger.info(
+            "[SOBBH_FILL] %s via CHUNKED fill_global_wdm: %d rows "
+            "(%d skipped) in %.2f s, %d shards",
+            _what, int(p.shape[0]), int(params.shape[0] - p.shape[0]),
+            time.perf_counter() - t0, n_shards,
+        )
 
     def _verify_prev_logl(self, prev_logl, old_coords_in, data_index_in, leaf):
         """Built-in fast-vs-slow A/B at MATCHING convention.

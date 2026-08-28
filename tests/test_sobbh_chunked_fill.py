@@ -29,8 +29,10 @@ So fill's "remove" means SUBTRACT FROM THE BUFFER, which is the move's
 ``factors = sign``, pinned by these tests in both directions.
 """
 
+import os
 import types
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -75,19 +77,25 @@ class _FakeACA:
 
 
 def _move(comp, acs, dense_calls=None):
-    """Minimal stand-in for a constructed SOBBHChunkedLikeMove."""
-    return types.SimpleNamespace(
-        comp=comp,
-        acs=acs,
-        branch_name="sobbh",
-        m_band_half_width=3,
-        _f_band_lo=F_LO,
-        _f_band_hi=F_HI,
-        to_chunked_basis=SOBBHChunkedLikeMove.to_chunked_basis,
-        _branch_waveform_kwargs=lambda: {},
-        _resolve_signal_gen_override=lambda ac: None,
-        # if the override ever falls back to the dense path, acs records it
-    )
+    """A REAL SOBBHChunkedLikeMove with __init__ bypassed.
+
+    ``__new__`` rather than a SimpleNamespace so the instance is a genuine
+    subclass instance: the zero-argument ``super()`` inside the override
+    (the dense fallback) resolves, and the class's own ``to_chunked_basis``
+    is used rather than a stand-in. The heavy ctor (chunked comp, WDM
+    settings, eryn move plumbing) is exactly what we do not want here.
+    """
+    move = SOBBHChunkedLikeMove.__new__(SOBBHChunkedLikeMove)
+    move.comp = comp
+    move.acs = acs
+    move.branch_name = "sobbh"
+    move.m_band_half_width = 3
+    move._f_band_lo = F_LO
+    move._f_band_hi = F_HI
+    # consumed only by the dense fallback; acs records that it was reached
+    move._branch_waveform_kwargs = lambda: {}
+    move._resolve_signal_gen_override = lambda ac: None
+    return move
 
 
 def _apply(move, coords, sign):
@@ -150,6 +158,42 @@ class ChunkedFillReplacesDenseBuildsTest(unittest.TestCase):
     def test_m_band_half_width_is_forwarded(self):
         _apply(self.move, _coords([IN_BAND]), +1)
         self.assertEqual(self.comp.fill_calls[0]["m_band_half_width"], 3)
+
+
+class ObservabilityTest(unittest.TestCase):
+    """Which residual path ran must be visible in the log.
+
+    Jobs 364 and 370 both sat ~14-16 min in SOBBH with no leaf and no
+    error, and the logs could not say whether the chunked fill was even
+    deployed -- the path was silent. One line per fold removes that
+    ambiguity for good.
+    """
+
+    def test_chunked_fill_logs_path_and_row_count(self):
+        comp = _FakeComp()
+        move = _move(comp, _FakeACA())
+        with self.assertLogs(
+            "lisatools.globalfit.moves.sobbhspecialmove", level="INFO"
+        ) as cm:
+            _apply(move, _coords([IN_BAND] * 7), +1)
+        line = "\n".join(cm.output)
+        self.assertIn("chunked", line.lower())
+        self.assertIn("7", line)          # rows actually filled
+
+    def test_dense_fallback_says_so(self):
+        """SOBBH_CHUNKED_FILL=0 must announce the slow path, not run it
+        silently -- that is the configuration that costs 32 s per row."""
+        comp = _FakeComp()
+        dense = []
+        move = _move(comp, _FakeACA(dense_calls=dense))
+        with mock.patch.dict(os.environ, {"SOBBH_CHUNKED_FILL": "0"}):
+            with self.assertLogs(
+                "lisatools.globalfit.moves.sobbhspecialmove", level="INFO"
+            ) as cm:
+                _apply(move, _coords([IN_BAND] * 3), +1)
+        self.assertIn("dense", "\n".join(cm.output).lower())
+        self.assertEqual(len(dense), 1)   # took the base path
+        self.assertEqual(comp.fill_calls, [])
 
 
 class ValidityMaskingTest(unittest.TestCase):
