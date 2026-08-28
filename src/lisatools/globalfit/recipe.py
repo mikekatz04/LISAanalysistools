@@ -3110,10 +3110,16 @@ def build_gb_moves(
     # GBSpecialBase._replace_fstat_max resolves False and slot 0 is
     # genuinely drawn + priced on both sides (the search-only
     # maximize-then-pretend exception, which would maximization-bias the
-    # amplitude posterior, never arms in PE). ``pe_extrinsic_draw`` is
-    # deliberately left at the ctor default: _run_replace_step never reads
-    # _pe_extr_active -- the replace move carries its own extrinsic
-    # machinery (deterministic center pin + drawn/priced slot 0).
+    # amplitude posterior, never arms in PE).
+    #
+    # NO MAXIMIZING IN PE (user general rule 2026-08-28): the move is
+    # seeded with ``pe_extrinsic_draw`` exactly like the pe-named births,
+    # so _run_replace_step DRAWS phi0/cos_iota/psi from the
+    # maximizer-centered proposal and charges the real forward/reverse
+    # densities (the shared _pe_or_pin_extrinsics / _pe_death_extr_corr
+    # helpers) instead of PINNING them at the JKS maximizers; the
+    # rotation-on-accept phase-max scoring likewise resolves OFF for a
+    # replace_pe_stage-stamped move. SEARCH keeps both maximizations.
     gb_pe_replace_move = None
     # Build for a genuine PE stack: a pe-mode recipe, or a STAGED recipe
     # running its pe-named moves strict-PE inside a GB_MODE=search process
@@ -3132,8 +3138,13 @@ def build_gb_moves(
             rj_replace=True,
             # NEVER phase-maximize the RJ birth machinery here (the
             # root-caused rj_replace ll-drift flaw); the separate
-            # GB_REPLACE_PHASE_MAX scoring knob is unaffected.
+            # GB_REPLACE_PHASE_MAX scoring knob resolves off from the PE
+            # stage stamp below.
             phase_maximize=False,
+            # The pe_extrinsic_draw treatment the PE births get: angles
+            # drawn from the maximizer-centered proposal and priced on
+            # both sides, never pinned at the maximizer.
+            pe_extrinsic_draw=_pe_extr_draw,
             run_swaps=True,
             temper_every_proposes=_pe_temper_every,
             gpus=[],

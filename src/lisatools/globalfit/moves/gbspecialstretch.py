@@ -5141,7 +5141,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             eps=self._pe_extr_floor_eps(), geom=self._pe_extr_sigma_geom())
 
     def _pe_or_pin_extrinsics(self, params, rows, phi0_max, iota_max,
-                              psi_max, ln_snr):
+                              psi_max, ln_snr, active=None):
         """Write the birth extrinsics for ``rows`` in place; return the RJ
         factor-correction contribution.
 
@@ -5156,9 +5156,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ``+log V_extr`` uniform-wash term in the birth factors with the
         real ``-log g_mix(drawn | centers)``, the mirror of the slot-0
         ``-_bl - _log_range`` swap.
+
+        ``active``: ``None`` (default) reads :meth:`_pe_extr_active`, so
+        the RJ birth call sites are unchanged. A bool overrides the gate
+        for a caller whose scoping is narrower than the move-level knob —
+        the REPLACE step passes :meth:`_replace_pe_extr_active`, which
+        additionally requires the PE stage stamp so a search replace can
+        never leave the blessed pin path.
         """
         xp = self.xp
-        if self._pe_extr_active():
+        _draw = self._pe_extr_active() if active is None else bool(active)
+        if _draw:
             p0, ci, ps = self._pe_extr_draw(phi0_max, iota_max, psi_max,
                                             ln_snr)
             params[rows, 3] = p0
@@ -5173,7 +5181,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         return 0.0
 
     def _pe_death_extr_corr(self, params, rows, phi0_max, iota_max,
-                            psi_max, ln_snr):
+                            psi_max, ln_snr, active=None):
         """Death-side mirror of :meth:`_pe_or_pin_extrinsics`.
 
         Knob OFF: ``0.0`` (uniform-wash constants stay), bit-identical.
@@ -5184,13 +5192,45 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         unit cache / per-row solve), so the pair is exactly symmetric.
         The eps floor bounds the bill for rows whose extrinsics have
         drifted far from their maximizers.
+
+        ``active`` overrides the gate exactly as in
+        :meth:`_pe_or_pin_extrinsics` — the two MUST be passed the same
+        value on the two sides of one proposal or the densities stop
+        pairing.
         """
-        if not self._pe_extr_active():
+        _draw = self._pe_extr_active() if active is None else bool(active)
+        if not _draw:
             return 0.0
         lg = self._pe_extr_logg(
             params[rows, 3], params[rows, 4], params[rows, 5],
             phi0_max, iota_max, psi_max, ln_snr)
         return lg + self._LOG_EXTR_UNIFORM_VOL
+
+    def _replace_pe_extr_active(self) -> bool:
+        """Does the REPLACE move DRAW-and-price its extrinsics?
+
+        USER RULING 2026-08-28 (Adjustment B): the PE replace must get
+        *"the pe_extrinsic_draw draw-and-price treatment the PE births
+        got"* — phi0/cos_iota/psi sampled from the maximizer-centered
+        proposal and charged at their real densities on both sides,
+        instead of PINNED at the JKS maximizers. Pinning is a
+        maximize-and-keep, which the general rule bans in PE.
+
+        Gated on BOTH the PE stage stamp and the move-level
+        :attr:`pe_extrinsic_draw` knob, so:
+
+        * the SEARCH replace (no stamp) keeps the JKS pin +
+          maximize-then-pretend path bit-identically — the blessed search
+          convention — even if the knob were somehow set on it;
+        * ``GB_PE_EXTRINSIC_DRAW=0`` restores the pin for the PE replace
+          too, one knob for the whole PE extrinsic story.
+
+        Read by :meth:`_run_replace_step` only; it passes the answer to
+        the shared :meth:`_pe_or_pin_extrinsics` /
+        :meth:`_pe_death_extr_corr` helpers as their ``active`` override.
+        """
+        return (bool(getattr(self, "replace_pe_stage", False))
+                and self._pe_extr_active())
 
     def _replace_ctr_mode(self) -> str:
         """Extrinsic-center machinery for the REPLACE move: ``"perrow"``
@@ -5290,11 +5330,67 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         established pinned-extrinsics detailed-balance convention
         applies unchanged. The old side is always scored at its ACTUAL
         phase (``delta_old_actual``; exact multi-shard since the router
-        assembles ``non_marg_d_h``). ``GB_REPLACE_PHASE_MAX=0`` restores
-        exact concrete-parameter scoring bit-identically. Read ONLY by
-        :meth:`_run_replace_step`.
+        assembles ``non_marg_d_h``).
+
+        STAGE SPLIT (USER GENERAL RULE 2026-08-28: *"no maximizing over
+        parameters during PE"*). Rotation-on-accept is a maximize-AND-KEEP
+        over phi0 -- the written angle IS the per-row maximizer -- so it is
+        banned in a PE stage, where it would collapse the phi0 posterior
+        onto the maximizer instead of sampling it. The PE replace install
+        stamps ``replace_pe_stage`` and therefore resolves False here; the
+        search install and every unstamped move resolve True exactly as
+        before.
+
+        ``GB_REPLACE_PHASE_MAX``: ``auto`` (default) = OFF for a
+        ``replace_pe_stage``-stamped move, ON otherwise (bit-identical for
+        every pre-existing caller). ``0`` forces OFF, anything else truthy
+        forces ON -- maximization is the usual SEARCH default but not a
+        requirement (user, 2026-08-28), so ``=0`` must keep switching it
+        off in search, and an explicit ``=1`` still wins over the PE stamp.
+
+        NOTE the scoring-time interlock in
+        :meth:`_replace_phase_max_scoring`: this knob's answer is vetoed
+        when the extrinsics were DRAWN and priced, because the rotation
+        would overwrite an angle whose proposal density is charged in the
+        RJ factors. Read ONLY by :meth:`_run_replace_step`.
         """
-        return os.environ.get("GB_REPLACE_PHASE_MAX", "1") != "0"
+        mode = os.environ.get("GB_REPLACE_PHASE_MAX", "auto").strip().lower()
+        if mode in ("0", "off", "false"):
+            return False
+        if mode != "auto":
+            return True
+        return not bool(getattr(self, "replace_pe_stage", False))
+
+    def _replace_phase_max_scoring(self, pe_extr_active: bool) -> bool:
+        """The phase-max mode :meth:`_run_replace_step` actually scores with.
+
+        :meth:`_replace_phase_max` answers "does the operator want the
+        maximized-with-write-back scoring"; this adds the one hard
+        interlock that answer cannot override.
+
+        DETAILED-BALANCE INTERLOCK: rotation-on-accept OVERWRITES the
+        candidate's sampling phi0. When the extrinsics were DRAWN from the
+        PE proposal (:meth:`_replace_pe_extr_active`) that phi0 carries a
+        charged forward density in the RJ factors, so re-mapping it
+        deterministically would price a value that was never proposed --
+        exactly the reason the PE birth path sets
+        ``_pin_mode = not self._pe_extr_active()``. The draw wins; the
+        rotation is dropped (and the operator told once).
+        """
+        if not self._replace_phase_max():
+            return False
+        if pe_extr_active:
+            if not getattr(self, "_replace_pm_veto_logged", False):
+                self._replace_pm_veto_logged = True
+                logger.warning(
+                    "%s: GB_REPLACE_PHASE_MAX is on but the PE extrinsic "
+                    "draw is active -- rotation-on-accept would overwrite a "
+                    "phi0 whose proposal density is charged in the RJ "
+                    "factors, so phase-maximized scoring is DISABLED for "
+                    "this move (detailed balance wins).", self.name,
+                )
+            return False
+        return True
 
     def _replace_fstat_max(self) -> bool:
         """SEARCH-mode maximize-and-pretend-uniform replace candidates?
@@ -6656,26 +6752,43 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
           the per-row center, floor-mixed with a small uniform over the
           container's slot-0 range (:meth:`_replace_slot0_floor_eps`).
           The PE install (``rj_replace_pe``, stamped
-          ``replace_pe_stage``) instead takes the epoch center-table pin
-          (:meth:`_fstat_ctr_table_lookup`, nearest node in f0) — the
-          SAME center machinery the pe-named F-stat RJ moves use, so one
-          shared table serves the whole PE cycle. ``GB_REPLACE_CTR_MODE``
-          forces either mode explicitly.
+          ``replace_pe_stage``) instead takes the epoch center-table
+          centers (:meth:`_fstat_ctr_table_lookup`, nearest node in f0) —
+          the SAME center machinery the pe-named F-stat RJ moves use, so
+          one shared table serves the whole PE cycle.
+          ``GB_REPLACE_CTR_MODE`` forces either mode explicitly.
+
+        PE EXTRINSICS — DRAW, NEVER PIN (user general rule 2026-08-28,
+        *"no maximizing over parameters during PE"*): in a PE stage the
+        centers above are only PROPOSAL CENTERS. phi0/cos_iota/psi are
+        DRAWN from the maximizer-centered mixture and their real forward
+        density is charged, with the matching reverse density of the old
+        row about ITS OWN maximizers charged on the other side — the
+        identical ``_pe_or_pin_extrinsics`` / ``_pe_death_extr_corr``
+        helpers (hence the identical von Mises / doubled-angle / floored
+        cos-iota proposal) that the ``pe_extrinsic_draw`` F-stat BIRTHS
+        use, called with ``active=``
+        :meth:`_replace_pe_extr_active`. SEARCH keeps the concrete PIN at
+        the maximizers with a 0.0 correction, bit-identically.
 
         SCORING (:meth:`SubBandBuffer.get_replace_ll`): both sides are
         add-deltas ``<r'|h> - 0.5<h|h>`` against the old-source-exposed
         residual ``r' = r + h_old``, through the RJ chunked-het / full
-        engine. Under :meth:`_replace_phase_max` (default ON, user
-        directive 2026-08-27) the NEW side is PHASE-MAXIMIZED and the
-        maximizing rotation is written into the accepted candidate's
-        sampling phi0 BEFORE the verifier and the accept write-back
-        (rotation-on-accept) -- the scored rows ARE the final rows, so
-        the maximized credit is exactly attainable (the 2026-08-24
-        drift flaw was credit WITHOUT the write-back). The OLD side is
-        always its ACTUAL-phase delta (``delta_old_actual``, exact
+        engine. Under :meth:`_replace_phase_max_scoring` (ON for a
+        search-stage install, user directive 2026-08-27) the NEW side is
+        PHASE-MAXIMIZED and the maximizing rotation is written into the
+        accepted candidate's sampling phi0 BEFORE the verifier and the
+        accept write-back (rotation-on-accept) -- the scored rows ARE the
+        final rows, so the maximized credit is exactly attainable (the
+        2026-08-24 drift flaw was credit WITHOUT the write-back). The OLD
+        side is always its ACTUAL-phase delta (``delta_old_actual``, exact
         multi-shard via the router's ``non_marg_d_h`` assembly).
         ``GB_REPLACE_PHASE_MAX=0`` restores exact concrete-parameter
-        scoring on both sides bit-identically. No sig-het in-model
+        scoring on both sides bit-identically. A PE-stage install
+        resolves it OFF (no maximizing over parameters in PE), and the
+        interlock forces it off unconditionally whenever the extrinsics
+        were drawn-and-priced -- rotating a charged angle would price a
+        value that was never proposed. No sig-het in-model
         reference is armed during the RJ phase (references are built and
         torn down inside ``_run_in_model_repeats``), so the sig-het
         trust region never sees -- and can never silently veto or
@@ -6697,11 +6810,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         (:meth:`_slot0_log_proposal_floored`) -- the birth/death factor
         pair of :meth:`_run_rj_step` applied to one row, with the same
         uniform-floor eps on both sides so the mixture stays exactly the
-        density that was drawn from. The pinned phi0/iota/psi are a
-        deterministic function of each side's intrinsics and keep the
-        container's uniform constants on BOTH sides (the established
-        birth/death bookkeeping convention), so those constants cancel in
-        the difference.
+        density that was drawn from.
+
+        The extrinsic angles enter one of two ways. SEARCH pin: phi0/
+        iota/psi are a deterministic function of each side's intrinsics
+        and keep the container's uniform constants on BOTH sides (the
+        established birth/death bookkeeping convention), so those
+        constants cancel in the difference and the correction is exactly
+        ``0.0``. PE draw (:meth:`_replace_pe_extr_active`): the same
+        ``(-log g_extr(new) - log V_extr)`` / ``(+log g_extr(old) +
+        log V_extr)`` pair is added, swapping the container's uniform-wash
+        constants for the real densities of the drawn angles -- the
+        ``pe_extrinsic_draw`` birth/death pairing, applied to the two
+        sides of one swap.
 
         SEARCH EXCEPTION (:meth:`_replace_fstat_max`, user ruling
         2026-08-28 -- default ON for search-stage installs): slot 0 is
@@ -6815,6 +6936,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         delta_new = cp.full(n_prop, -1e300)
         h_h_new = cp.zeros(n_prop)
 
+        # Drawn-and-priced extrinsics exist ONLY on the F-stat center path
+        # below; with it off nothing is drawn, so the scoring interlock in
+        # _replace_phase_max_scoring stays disarmed.
+        _pe_extr = False
         if self.rj_fstat_dist_birth and bool(keep.any()):
             # SELF-CONSISTENT extrinsics (2026-08-24 root cause (a), see
             # :meth:`_replace_ctr_mode`): the DEFAULT is the per-row F-stat
@@ -6905,15 +7030,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         cp.random.rand(len(k_idx)))
                     params_new[k_idx, 0] = xp.where(
                         _take_floor, _unif, params_new[k_idx, 0])
-            # CONCRETE extrinsics from the stored maxima: the candidate is
-            # fully specified here -- a pinned phi0 off its optimum only
-            # lowers acceptance, it can never bias the chain. Under
-            # _replace_phase_max the scoring below refines this phi0 pin
-            # to the per-row optimum (rotation-on-accept keeps the credit
-            # attainable); with the knob off it is scored exactly as-is.
-            params_new[k_idx, 4] = xp.cos(iota_max % np.pi)
-            params_new[k_idx, 5] = psi_max % np.pi
-            params_new[k_idx, 3] = phi0_max % (2 * np.pi)
+            # EXTRINSICS -- one shared helper, two stage conventions
+            # (:meth:`_pe_or_pin_extrinsics`, the SAME call the F-stat RJ
+            # births make):
+            #
+            # * SEARCH (``_replace_pe_extr_active`` False): the historical
+            #   CONCRETE PIN at the stored maxima, correction exactly 0.0
+            #   -- bit-identical to the pre-2026-08-28 lines it replaces
+            #   (same three columns, same order, same wrapping). A pinned
+            #   phi0 off its optimum only lowers acceptance, and under
+            #   _replace_phase_max the scoring below refines it to the
+            #   per-row optimum (rotation-on-accept keeps the credit
+            #   attainable).
+            # * PE (stamped + GB_PE_EXTRINSIC_DRAW): the angles are DRAWN
+            #   from the maximizer-centered proposal and the real forward
+            #   density is charged here, with the matching reverse density
+            #   of the OLD row about ITS OWN maximizers charged below --
+            #   the pe_extrinsic_draw birth/death pairing applied to the
+            #   two sides of one swap. USER GENERAL RULE 2026-08-28: no
+            #   maximizing over parameters during PE, so the pin (a
+            #   maximize-and-keep) is not allowed to survive in a PE stage.
+            _pe_extr = self._replace_pe_extr_active()
+            _extr_corr_b = self._pe_or_pin_extrinsics(
+                params_new, k_idx, phi0_max, iota_max, psi_max, ln_snr_b,
+                active=_pe_extr)
             # Density bookkeeping runs UNCHANGED in both modes -- under
             # _fmax the pinned slot 0 is priced exactly as if it had been
             # drawn (maximize-then-pretend; _bl is then the mixture density
@@ -6926,10 +7066,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # +/- log_range pair cancels but is kept for symmetry with the
             # birth/death bookkeeping.
             if _tbl is not None:
-                (_, _, _, ln_center_d, sigma_d,
+                (phi0_d, iota_d, psi_d, ln_center_d, sigma_d,
                  ln_snr_d) = self._fstat_ctr_table_lookup(params_old[k_idx])
             else:
-                Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
+                Ad, phi0_d, iota_d, psi_d, Fd = self._fstat_dist_centers(
                     model, params_old[k_idx], walker_ref)
                 ln_center_d, sigma_d = self._dist_center_and_width(
                     params_old[k_idx], Ad, Fd)
@@ -6941,8 +7081,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _dl = self._slot0_log_proposal_floored(
                 params_old[k_idx, 0], ln_center_d, sigma_d, alpha_d,
                 band_sorter, _floor_eps)
+            # Reverse extrinsic density of the OLD row about ITS OWN
+            # maximizers -- the death-side mirror of _extr_corr_b, from the
+            # SAME center source (table / per-row) on both sides so the
+            # pair is exactly symmetric. Exactly 0.0 in the pin (search)
+            # convention, so the factor line below is bit-identical there.
+            _extr_corr_d = self._pe_death_extr_corr(
+                params_old, k_idx, phi0_d, iota_d, psi_d, ln_snr_d,
+                active=_pe_extr)
+            # The container's uniform extrinsic constants enter both
+            # logpdf terms of ``factors``; under the draw the +/-log V_extr
+            # inside these two corrections swaps them for the real
+            # -log g(new) / +log g(old) densities (the birth/death
+            # convention of _run_rj_step, applied to one swapped row).
             factors[k_idx] = (
-                factors[k_idx] + (-_bl - _log_range) + (_dl + _log_range))
+                factors[k_idx]
+                + (-_bl - _log_range + _extr_corr_b)
+                + (_dl + _log_range + _extr_corr_d))
             # Re-evaluate the global prior at the recentered draw (f0 and
             # the band gate are unchanged by the overwrite).
             curr_logp[k_idx] = cp.asarray(
@@ -6994,8 +7149,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # GB_DEBUG. The OLD side stays at its ACTUAL phase always
             # (d_old_act; exact multi-shard now that the router assembles
             # non_marg_d_h). GB_REPLACE_PHASE_MAX=0 restores the exact
-            # concrete-parameter scoring bit-identically.
-            _pm = self._replace_phase_max()
+            # concrete-parameter scoring bit-identically, and the PE-stage
+            # install resolves it off by the general no-maximizing-in-PE
+            # rule; _replace_phase_max_scoring adds the hard interlock
+            # against rotating a DRAWN-and-priced phi0.
+            _pm = self._replace_phase_max_scoring(_pe_extr)
             if _pm and not getattr(self, "_replace_pm_logged", False):
                 self._replace_pm_logged = True
                 logger.info(

@@ -265,6 +265,149 @@ class RecipeInstallStructureTest(unittest.TestCase):
     def test_pe_stage_stamp_is_written_exactly_once(self):
         self.assertEqual(self._src().count("replace_pe_stage = True"), 1)
 
+    def test_pe_replace_is_seeded_with_the_extrinsic_draw_knob(self):
+        # ADJUSTMENT B: the PE replace must receive
+        # GBSettings.pe_extrinsic_draw, exactly like the pe-named births.
+        src = self._src()
+        start = src.index(f'name="{PE_REPLACE_NAME}"')
+        end = src.index("replace_pe_stage = True")
+        self.assertIn("pe_extrinsic_draw", src[start:end])
+
+
+class PEReplaceExtrinsicDrawTest(unittest.TestCase):
+    """ADJUSTMENT B (user ruling 2026-08-28): the PE replace stops PINNING
+    phi0/cos_iota/psi at the JKS maximizers and draws-and-prices them
+    through the SAME helpers the pe_extrinsic_draw births use
+    (``_pe_or_pin_extrinsics`` / ``_pe_death_extr_corr``) -- no copy of the
+    machinery. SEARCH keeps the pin bit-identically, so the draw is gated
+    on the ``replace_pe_stage`` stamp as well as the knob.
+    """
+
+    def _shim(self, **attrs):
+        from tests.test_gb_cap_cell_grid import _move
+
+        m = _move(4)
+        m.name = "rj_replace"
+        for k, v in attrs.items():
+            setattr(m, k, v)
+        return m
+
+    @staticmethod
+    def _centers(rng, n):
+        return (rng.uniform(0, 2 * np.pi, n),
+                rng.uniform(0.05, np.pi - 0.05, n),
+                rng.uniform(0, np.pi, n),
+                np.log(rng.uniform(5.0, 200.0, n)))
+
+    # -- the replace-scoped gate ------------------------------------------
+
+    def test_gate_needs_both_the_stamp_and_the_knob(self):
+        self.assertFalse(self._shim()._replace_pe_extr_active())
+        self.assertFalse(
+            self._shim(pe_extrinsic_draw=True)._replace_pe_extr_active())
+        self.assertFalse(
+            self._shim(replace_pe_stage=True)._replace_pe_extr_active())
+        self.assertTrue(
+            self._shim(replace_pe_stage=True, pe_extrinsic_draw=True)
+            ._replace_pe_extr_active())
+
+    def test_search_install_never_draws(self):
+        # Even if a search move were handed the knob, the missing PE stamp
+        # keeps it on the blessed JKS pin path.
+        m = self._shim(replace_search_stage=True, pe_extrinsic_draw=True)
+        self.assertFalse(m._replace_pe_extr_active())
+
+    # -- the shared helpers take an explicit activity override -------------
+
+    def test_active_override_forces_the_pin(self):
+        m = self._shim(pe_extrinsic_draw=True)   # knob ON
+        rng = np.random.default_rng(11)
+        n = 24
+        p0, io, ps, ls = self._centers(rng, n)
+        params = rng.random((n, 8))
+        rows = np.arange(n)
+        corr = m._pe_or_pin_extrinsics(params, rows, p0, io, ps, ls,
+                                       active=False)
+        self.assertEqual(corr, 0.0)
+        np.testing.assert_array_equal(params[:, 3], p0 % (2 * np.pi))
+        np.testing.assert_array_equal(params[:, 4], np.cos(io % np.pi))
+        np.testing.assert_array_equal(params[:, 5], ps % np.pi)
+        self.assertEqual(
+            m._pe_death_extr_corr(params, rows, p0, io, ps, ls, active=False),
+            0.0)
+
+    def test_active_override_forces_the_draw(self):
+        m = self._shim()                         # knob OFF
+        rng = np.random.default_rng(12)
+        n = 24
+        p0, io, ps, ls = self._centers(rng, n)
+        params = rng.random((n, 8))
+        rows = np.arange(n)
+        corr = m._pe_or_pin_extrinsics(params, rows, p0, io, ps, ls,
+                                       active=True)
+        self.assertEqual(np.shape(corr), (n,))
+        self.assertTrue(np.all(np.isfinite(corr)))
+        # a draw, not the pin
+        self.assertFalse(
+            np.allclose(params[:, 3], p0 % (2 * np.pi)))
+
+    def test_default_override_is_the_shared_gate(self):
+        # active=None (the default) must reproduce _pe_extr_active exactly,
+        # so the BIRTH call sites are untouched by the new parameter.
+        rng = np.random.default_rng(13)
+        n = 8
+        p0, io, ps, ls = self._centers(rng, n)
+        for knob, want_pin in ((False, True), (True, False)):
+            m = self._shim(pe_extrinsic_draw=knob)
+            params = rng.random((n, 8))
+            corr = m._pe_or_pin_extrinsics(params, np.arange(n), p0, io, ps, ls)
+            if want_pin:
+                self.assertEqual(corr, 0.0)
+            else:
+                self.assertEqual(np.shape(corr), (n,))
+
+    # -- detailed balance --------------------------------------------------
+
+    def test_forward_reverse_corrections_cancel_exactly(self):
+        # THE detailed-balance identity the replace factors rely on: the
+        # new-side ``-(log g + log V)`` and the old-side ``+(log g + log V)``
+        # evaluated at the SAME row about the SAME centers sum to zero, so
+        # the container's uniform-wash constants are swapped for the real
+        # densities with nothing left over.
+        m = self._shim(replace_pe_stage=True, pe_extrinsic_draw=True)
+        rng = np.random.default_rng(14)
+        n = 64
+        p0, io, ps, ls = self._centers(rng, n)
+        params = rng.random((n, 8))
+        rows = np.arange(n)
+        fwd = m._pe_or_pin_extrinsics(params, rows, p0, io, ps, ls)
+        rev = m._pe_death_extr_corr(params, rows, p0, io, ps, ls)
+        np.testing.assert_allclose(fwd + rev, 0.0, atol=1e-12)
+
+
+class ReplaceStepUsesTheSharedHelpersTest(unittest.TestCase):
+    """``_run_replace_step`` must call the shared birth/death helpers, not
+    a private copy of the draw."""
+
+    def _src(self):
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialBase
+
+        return inspect.getsource(GBSpecialBase._run_replace_step)
+
+    def test_calls_the_shared_extrinsic_helpers(self):
+        src = self._src()
+        self.assertIn("_pe_or_pin_extrinsics(", src)
+        self.assertIn("_pe_death_extr_corr(", src)
+
+    def test_does_not_reimplement_the_draw(self):
+        # never a second call into the raw samplers
+        src = self._src()
+        self.assertNotIn("pe_extrinsic_rvs", src)
+        self.assertNotIn("pe_extrinsic_logpdf", src)
+
+    def test_scores_through_the_interlock(self):
+        self.assertIn("_replace_phase_max_scoring(", self._src())
+
 
 if __name__ == "__main__":
     unittest.main()
