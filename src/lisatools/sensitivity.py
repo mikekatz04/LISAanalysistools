@@ -4432,7 +4432,21 @@ class LinkDelayTable:
         if hit is not None and hit[0] is settings:
             return hit[1]
 
-        centres = asnumpy(t_arr).astype(float).ravel()
+        # One row per WAVELET TIME COLUMN of the FULL grid, which is what both
+        # consumers index (``_unit_bases`` and ``_build_coarse_basis_data``
+        # slice rows ``ind_min_t .. ind_max_t`` by GLOBAL column index) and
+        # what this method's ``(Nt, 6)`` contract promises. A cropped WDM
+        # domain's ``t_arr`` covers only the ACTIVE columns, so deriving the
+        # centres from it silently returned an ``Nt_active``-row table: fine
+        # while ``edge_crop_wavelets == 0`` (every noise-only fit to date),
+        # a hard shape error the moment a cropped grid samples unequal arms
+        # (all_sources / v8; observed 2026-08-28: 2121 vs Nt=2160).
+        nt_full = getattr(settings, "Nt", None)
+        layer_dt = getattr(settings, "layer_dt", None)
+        if nt_full is not None and layer_dt is not None:
+            centres = np.arange(int(nt_full), dtype=float) * float(layer_dt)
+        else:
+            centres = asnumpy(t_arr).astype(float).ravel()
         nt = centres.size
         width = float(centres[1] - centres[0]) if nt > 1 else 1.0
         edges = np.concatenate([centres - 0.5 * width, [centres[-1] + 0.5 * width]])

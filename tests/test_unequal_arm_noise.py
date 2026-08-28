@@ -384,6 +384,37 @@ class LinkDelayTableTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(got)))
         self.assertEqual(got.shape, (self.wdm.Nt, 6))
 
+    def test_slice_averages_span_the_full_grid_when_cropped(self):
+        """A CROPPED grid still gets one row per FULL-grid column.
+
+        Both consumers slice ``ind_min_t .. ind_max_t`` by GLOBAL column
+        index, so the table must span the full grid. Deriving the centres
+        from ``t_arr`` (active-only on a cropped WDM domain) returned an
+        Nt_active-row table -- invisible at edge_crop=0, which is every
+        noise-only fit, and a hard shape error on the first cropped
+        all-source grid (v8, job 362: 2121 rows vs Nt=2160).
+        """
+        cropped = WDMSettings(
+            Nf=32, Nt=16, dt=5.0, force_backend="cpu",
+            min_time=2 * self.wdm.layer_dt,
+            max_time=13 * self.wdm.layer_dt,
+        )
+        self.assertLess(cropped.Nt_active, cropped.Nt)  # crop is real
+        got = self.table.slice_averages(cropped)
+        self.assertEqual(got.shape, (cropped.Nt, 6))
+        # the rows the consumers actually take must be finite and correct
+        active = got[cropped.ind_min_t : cropped.ind_max_t + 1]
+        self.assertEqual(active.shape, (cropped.Nt_active, 6))
+        self.assertTrue(np.all(np.isfinite(got)))
+        # and the component builds on the cropped grid rather than raising
+        comp = UnequalArmInstrumentNoise(
+            self.table, model=self.model, fill_nans=0.0
+        )
+        C = comp.covariance(cropped)
+        self.assertEqual(
+            C.shape, (3, 3) + tuple(cropped.basis_shape_active)
+        )
+
     def test_component_uses_slice_averages(self):
         """A table drives the per-column path; a constant table matches (6,)."""
         flat = LinkDelayTable(
