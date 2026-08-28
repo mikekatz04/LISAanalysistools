@@ -273,10 +273,25 @@ export GB_NLEAVES_MAX=10000
 # flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
 # full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
 export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
-# RJ pick thinning (user ruling 2026-08-14): each round proposes to a
-# 0.3 random subset of eligible slots; in-model repeats still cover
-# ALL alive sources (flip gate is rj-only by construction).
-export GB_RJ_FLIP_FRACTION=0.2
+# RJ pick thinning. UNSET as of 2026-08-28 (user: "should be 1 in search")
+# -- deliberately NOT set to 1.
+#
+# {BRANCH}_RJ_FLIP_FRACTION is a GLOBAL override: _resolve_rj_flip_fraction
+# ranks kwarg > env > per-move default, so ONE exported value lands on every
+# RJ move in every stage. The recipe already picks the right value per mode
+# (recipe.py: _rj_flip_default = 1.0 if _gb_mode_search else 0.1, and the
+# search-NAMED moves rj_prior_search / rj_fstat_mcmc_search /
+# rj_prior_removal / rj_replace keep an implicit 1.0). This script runs the
+# STAGED recipe, which ends in full_pe -- so exporting 1 would satisfy
+# "1 in search" but also force 1.0 onto the PE moves that are supposed to
+# settle to a 0.1 subset. Leaving it unset gives 1.0 in search AND 0.1 in
+# PE, which is the intent.
+#
+# The old 0.2 was wrong in both directions at once: it thinned search to a
+# fifth of eligible slots and inflated PE to double its intended subset.
+# In-model repeats are unaffected either way -- they cover ALL alive
+# sources; the flip gate is rj-only by construction.
+# export GB_RJ_FLIP_FRACTION=0.2   # <- re-export ONLY to force both stages
 # In-model info-matrix jump scale: 0.005 default measured 95% cold
 # acceptance; 0.2 -> 0.61; 0.4 -> 0.60 (job 196). Job 197 flipped the
 # story: with the EXACT per-block SIGHET info matrices live, cold
@@ -889,8 +904,15 @@ export GB_PHASE_MAX_FUSED=1
 # iteration. The OFF baseline is already banked (snapshot 13, 830.2 s).
 # =0 restores the unfolded 4-generation path bit-for-bit.
 # REQUIRES A GBGPU REBUILD -- LAT does not compile that header. A stale
-# .so is a SILENT no-op here (no loader fallback, unlike the routing
-# kernels), so confirm by rj_fstat_centers moving, not by a clean build.
+# .so is a LOUD TypeError at the first F-stat call, NOT a silent no-op
+# (corrected 2026-08-28; the earlier note here said the opposite).
+# _FSTAT_FOLD_KERNELS in gbcomps.py is a hard constant rather than a probe
+# of the compiled binding, and the trailing fold arg is passed
+# unconditionally -- fold ON or OFF -- so a binding that predates the fold
+# cannot accept it and raises immediately. The usual recompile-in-place
+# worry (stale build silently running old kernel code) does NOT apply to
+# this argument. rj_fstat_centers ~830 -> ~400-450 s is still the check
+# that the fold is doing work, but a bad build fails first and visibly.
 export GB_FSTAT_FOLD=1
 # REPLACE PHASE-MAX + ROTATION-ON-ACCEPT (LAT 1f15f28d; live since job
 # 352: cold replace acceptance ~3x at Delta-ll up to ~700). "auto"
