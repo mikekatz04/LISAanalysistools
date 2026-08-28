@@ -411,6 +411,122 @@ class CoarseWDMTest(unittest.TestCase):
                 np.testing.assert_array_equal(second.covariance(coarse), coarse_cov)
 
 
+class CoarseBasisDeviceTest(unittest.TestCase):
+    """Coarse unequal-arm bases on a GPU backend (plan-2 T8 / v8 fast PSD).
+
+    Two claims are pinned here:
+
+    * the DEVICE path's math -- the exact coarse basis is the cell-mean of the
+      fine columns, which is what the CPU streaming builder computes one
+      column at a time. Provable on CPU, and it is what lets a GPU run reuse
+      the already-cached device-resident fine bases instead of re-folding;
+    * coarse bases come back on the SETTINGS backend while the fine diagonals
+      stay on the host (coarse_qeff is host-NumPy and mixes them with a host
+      extra_diagonal).
+    """
+
+    def setUp(self):
+        self.model = LISAModel(
+            (15e-12) ** 2, (3e-15) ** 2, DefaultOrbits(), "coarse-dev"
+        )
+        L0 = 8.3391
+        self.fine = WDMSettings(Nf=16, Nt=12, dt=5.0, force_backend="cpu")
+        self.coarse = CoarseWDMSettings.from_fine(self.fine, 4)
+        base = L0 * (
+            np.array([1.004, 0.993, 1.002, 1.002, 0.993, 1.004])
+            + np.array([3.1e-5, 0.7e-5, -1.9e-5, 1.9e-5, -0.7e-5, -3.1e-5])
+        )
+        wob = 1e-4 * L0 * np.sin(
+            2 * np.pi * np.arange(self.fine.Nt)[:, None] / self.fine.Nt
+            + np.arange(6)[None, :]
+        )
+        self.ltts = base[None, :] + wob
+
+    def _comp(self, method="fold", cache=None):
+        return UnequalArmInstrumentNoise(
+            self.ltts,
+            model=self.model,
+            fill_nans=0.0,
+            basis_cache={} if cache is None else cache,
+            wdm_psd_method=method,
+        )
+
+    def test_streaming_builder_equals_cell_mean_of_fine_bases(self):
+        """The identity the device path relies on, checked on CPU."""
+        comp = self._comp("fold")
+        streamed, diagonals = comp._build_coarse_basis_data(self.coarse)
+
+        ref = self._comp("fold")
+        B_oms, B_acc = ref._bases(self.fine)
+        stacked = np.stack([B_oms, B_acc], axis=0)
+        celled = self.coarse.cell_mean(stacked, axis=-1)
+
+        for got, want in zip(streamed, (celled[0], celled[1])):
+            np.testing.assert_allclose(got, want, rtol=1e-13, atol=0.0)
+        # and the companion fine diagonals are the diagonal of those bases
+        want_diag = np.real(
+            np.stack([stacked[:, a, a] for a in range(3)], axis=1)
+        )
+        np.testing.assert_allclose(diagonals, want_diag, rtol=1e-13, atol=0.0)
+
+    def test_coarse_bases_land_on_settings_backend(self):
+        for method in ("fold", "layer_constant", "layer_calibrated"):
+            with self.subTest(method=method):
+                bases, diagonals = self._comp(method)._coarse_basis_data(
+                    self.coarse
+                )
+                for b in bases:
+                    self.assertIsInstance(b, np.ndarray)
+                    self.assertEqual(
+                        b.shape,
+                        (3, 3, self.fine.Nf_active, self.coarse.Ncoarse),
+                    )
+                # diagonals stay host-resident, fine-length
+                self.assertIsInstance(diagonals, np.ndarray)
+                self.assertEqual(
+                    diagonals.shape,
+                    (2, 3, self.fine.Nf_active, self.fine.Nt_active),
+                )
+
+    def test_coarse_qeff_consumes_the_diagonals(self):
+        """WS dof build end-to-end (the path run.py takes for unequal arms)."""
+        qeff, channels = self._comp("layer_calibrated").coarse_qeff(self.coarse)
+        self.assertEqual(qeff.shape, tuple(self.coarse.basis_shape_active))
+        self.assertEqual(channels.shape, (3,) + tuple(self.coarse.basis_shape_active))
+        self.assertTrue(np.all(np.isfinite(qeff)))
+        # WS dof can never exceed the cell size
+        self.assertTrue(
+            np.all(qeff <= np.asarray(self.coarse.cell_sizes, dtype=float) + 1e-9)
+        )
+
+    @unittest.skipUnless(
+        __import__("importlib").util.find_spec("cupy") is not None,
+        "needs cupy + a CUDA device",
+    )
+    def test_coarse_bases_device_resident_on_gpu(self):
+        """CLUSTER: bases on-device, diagonals host, values matching CPU."""
+        import cupy
+
+        fine_gpu = WDMSettings(Nf=16, Nt=12, dt=5.0, force_backend="cuda")
+        coarse_gpu = CoarseWDMSettings.from_fine(fine_gpu, 4)
+        for method in ("fold", "layer_constant", "layer_calibrated"):
+            with self.subTest(method=method):
+                cpu_bases, cpu_diag = self._comp(method)._coarse_basis_data(
+                    self.coarse
+                )
+                gpu_bases, gpu_diag = self._comp(method)._coarse_basis_data(
+                    coarse_gpu
+                )
+                for b in gpu_bases:
+                    self.assertIsInstance(b, cupy.ndarray)
+                self.assertIsInstance(gpu_diag, np.ndarray)  # host by contract
+                for got, want in zip(gpu_bases, cpu_bases):
+                    np.testing.assert_allclose(
+                        cupy.asnumpy(got), want, rtol=1e-12, atol=0.0
+                    )
+                np.testing.assert_allclose(gpu_diag, cpu_diag, rtol=1e-12, atol=0.0)
+
+
 class CoarseKnobValidationTest(unittest.TestCase):
     """Shared coarse-knob validation across noise-only and all_sources (T3)."""
 

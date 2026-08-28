@@ -5136,10 +5136,38 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
         """Stream fine columns into coarse bases, retaining only fine diagonals."""
         fine = settings.fine_settings
         if getattr(fine.backend, "uses_cupy", False):
-            raise ValueError(
-                "Exact unequal-arm coarse precomputation is CPU-only; "
-                "single-GPU support is planned."
+            # DEVICE PATH. The exact coarse basis IS the cell-mean of the fine
+            # columns -- the streaming loop below is precisely a per-cell sum
+            # of ``_folded_unit_column`` outputs divided by the cell size -- and
+            # on a GPU run those fine columns have ALREADY been built and
+            # cached device-resident by ``_bases``/``_unit_bases``. So reuse
+            # them instead of re-folding column by column: same quantity, and
+            # free whenever the fine backend warmed the cache first.
+            #
+            # The streaming loop exists to avoid materialising two dense fine
+            # bases on the 2-yr CPU grid; on the GPU grids this path targets
+            # that pair is ~54 MB (3-mo: 2 x 3 x 3 x 178 x 2121 x 8 B), so the
+            # memory argument does not apply. Results are returned on the HOST
+            # exactly like the streaming path -- ``_coarse_basis_data`` owns the
+            # single upload (and the persistent .npz cache needs host arrays).
+            xp = fine.xp
+            B_oms, B_acc = (
+                self._bases(fine)
+                if self.basis_cache is not None
+                else self._unit_bases(fine)
             )
+            stacked = xp.stack([xp.asarray(B_oms), xp.asarray(B_acc)], axis=0)
+            coarse = asnumpy(settings.cell_mean(stacked, axis=-1))
+            diagonals = np.asarray(
+                asnumpy(
+                    xp.real(
+                        xp.stack([stacked[:, a, a] for a in range(3)], axis=1)
+                    )
+                ),
+                dtype=np.float64,
+            )
+            coarse = np.asarray(coarse, dtype=np.float64)
+            return (coarse[0], coarse[1]), diagonals
         ltts = self._resolve_ltts(fine)
         shape_coarse = (2, 3, 3, fine.Nf_active, settings.Ncoarse)
         coarse_sums = np.zeros(shape_coarse, dtype=np.float64)
@@ -5185,6 +5213,21 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
         coarse_sums /= np.asarray(settings.cell_sizes, dtype=float)[None, None, None, None, :]
         return (coarse_sums[0], coarse_sums[1]), fine_diagonals
 
+    @staticmethod
+    def _coarse_bases_to_backend(settings, bases):
+        """Put coarse unit bases on the settings backend (host math -> device).
+
+        The builders evaluate in NumPy (the fused transfer kernel is a host
+        kernel, and the persistent .npz cache needs host arrays), but the
+        SCORING side multiplies these by sampled noise levels on the walker's
+        own device every proposal -- so upload exactly once, here, rather than
+        per row. The companion fine diagonals deliberately stay on the host:
+        :meth:`coarse_qeff` is host-NumPy and mixes them with a host
+        ``extra_diagonal``.
+        """
+        xp = settings.xp
+        return tuple(xp.asarray(b) for b in bases)
+
     def _coarse_basis_data(self, settings: domains.CoarseWDMSettings):
         """Load or build exact coarse bases plus fine diagonal unit bases."""
         key = (
@@ -5203,6 +5246,7 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
 
         if self.wdm_psd_method in WDM_LAYER_CENTER_METHODS:
             bases, diagonals = self._build_approximate_coarse_basis_data(settings)
+            bases = self._coarse_bases_to_backend(settings, bases)
             if self.basis_cache is not None:
                 self.basis_cache[key] = (settings, bases[0], bases[1], diagonals)
             return bases, diagonals
@@ -5250,6 +5294,7 @@ class UnequalArmInstrumentNoise(InstrumentNoise):
             if lock_handle is not None:
                 lock_handle.close()
 
+        bases = self._coarse_bases_to_backend(settings, bases)
         if self.basis_cache is not None:
             self.basis_cache[key] = (settings, bases[0], bases[1], diagonals)
         return bases, diagonals

@@ -31,12 +31,32 @@
 #   gpu_util_*.csv                        BOTH devices active during noise
 #   [SMOKE] / [PROBE] lines               preflight verdicts
 #
-# OPTIONAL COARSE LEG (fresh store REQUIRED -- the stored noise identity
-# refuses a mode change): NOISE_PROBE_COARSE=1 sbatch <this script>
-#   -> COARSE_Q=8, COARSE_GPU_MODE=search_approx, COARSE_USE_WS=0
-#      (Bartlett: the unequal-arm exact coarse WS precompute is CPU-gated).
-#   Read the same [GF_TIMING] walls + the coarse sidecar log line
-#   ("coarse WDM sidecar runtime (all-source, mode=...)").
+# OPTIONAL COARSE LEG -- THE FAST-PSD TEST (fresh store REQUIRED: the stored
+# noise identity refuses a coarse-mode change on resume):
+#   NOISE_PROBE_COARSE=1 sbatch <this script>
+#   -> COARSE_Q=8, COARSE_GPU_MODE=search_approx, COARSE_USE_WS=0.
+# The coarse noise likelihood scores PSD/galfor proposals on a Q-fold
+# time-coarsened grid (2121 -> ~265 columns at Q=8), which is where the
+# per-proposal 3x3 inversion + reduction cost lives. search_approx runs the
+# search stage ENTIRELY on that surrogate (valid for a maximisation stage;
+# the accepted cold state is still republished through the FINE backend
+# before the move returns, so no source move ever sees coarse state).
+# delayed_acceptance is the mode for production PE -- it keeps the fine
+# likelihood as the target via a stage-2 correction.
+#
+# GPU coarse bases were unblocked 2026-08-28: the exact coarse basis is the
+# cell-mean of the fine columns, so the device path reuses the already-cached
+# device-resident fine bases instead of re-folding column by column, and
+# _coarse_basis_data uploads once. Bartlett (COARSE_USE_WS=0) is the default
+# here because it skips the fiducial build entirely -- the simplest possible
+# first GPU exercise. WS (COARSE_USE_WS=1) SHOULD now work too via the same
+# device path (its qeff consumes host-resident fine diagonals); try it as a
+# second leg once Bartlett is green.
+#
+# WHAT TO COMPARE: psd_pe / galfor_pe walls against the exact-fine baseline
+# measured by the plain probe (job 369: psd_pe 5.87 s, galfor_pe 5.12 s
+# steady in noise_search). Also grep the sidecar banner
+# ("coarse WDM sidecar runtime (all-source, mode=...)") to confirm it armed.
 # ============================================================================
 # ============================================================================
 # PRODUCTION global fit -- 3-month Tobs (gb + vgb + psd + galfor, mojito)
