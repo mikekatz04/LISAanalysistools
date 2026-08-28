@@ -460,6 +460,62 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
 # ============================================================
 
 
+def validate_coarse_settings(gs, *, all_source: bool) -> None:
+    """Shared validation for the coarse real-WDM knobs (plan-2 §7).
+
+    Noise-only rules are the historical ones (CPU backend replacement); an
+    all-source run must opt into a sidecar mode explicitly, because coarse
+    scoring there changes the PSD/GALFOR transition kernel, not just speed.
+    """
+    import numbers
+
+    if (
+        isinstance(gs.coarse_Q, bool)
+        or not isinstance(gs.coarse_Q, numbers.Integral)
+        or gs.coarse_Q < 1
+    ):
+        raise ValueError(f"coarse_Q must be an integer >= 1; got {gs.coarse_Q!r}.")
+    gs.coarse_Q = int(gs.coarse_Q)
+    if gs.coarse_fiducial not in ("injection", "initial"):
+        raise ValueError(
+            "coarse_fiducial must be 'injection' or 'initial'; got "
+            f"{gs.coarse_fiducial!r}."
+        )
+    mode = str(getattr(gs, "coarse_gpu_mode", "off") or "off")
+    if mode not in ("off", "search_approx", "delayed_acceptance"):
+        raise ValueError(
+            "coarse_gpu_mode must be 'off', 'search_approx', or "
+            f"'delayed_acceptance'; got {mode!r}."
+        )
+    gs.coarse_gpu_mode = mode
+    if not all_source:
+        if mode != "off":
+            raise ValueError(
+                "coarse_gpu_mode applies to all-source runs only; the "
+                "noise-only variants use the CPU backend-replacement coarse "
+                "path (COARSE_Q alone)."
+            )
+        if gs.coarse_Q > 1 and gs.gpus is not None:
+            raise ValueError(
+                "coarse_Q > 1 is CPU-only for now; unset gpus/use_gpu. "
+                "Single-GPU support is a planned follow-up."
+            )
+        return
+    if gs.coarse_Q > 1 and mode == "off":
+        raise ValueError(
+            "coarse_Q > 1 in an all-source run requires an explicit "
+            "COARSE_GPU_MODE ('search_approx' for optimization stages, "
+            "'delayed_acceptance' for production PE): the coarse statistic "
+            "changes the PSD/GALFOR transition kernel, so it is never an "
+            "implicit speed knob here."
+        )
+    if mode != "off" and gs.coarse_Q <= 1:
+        raise ValueError(
+            f"coarse_gpu_mode={mode!r} needs COARSE_Q > 1 (got "
+            f"{gs.coarse_Q}); with Q=1 there is nothing coarse to score."
+        )
+
+
 def resolve_galfor_modulation(path, t0: float = 0.0):
     """``None`` (stationary) or a :class:`GalForTimeModulation` from ``path``.
 

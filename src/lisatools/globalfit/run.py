@@ -10,6 +10,7 @@ The legacy multi-stage pipeline classes (``GlobalFitSegment``,
 ``MPIControlGlobalFit``) were removed 2026-07 (parallel-resources plan P0).
 """
 
+import hashlib
 import logging
 import os
 from copy import deepcopy
@@ -52,7 +53,7 @@ def _rss_mb() -> float:
     return ru / 1024.0 if sys.platform.startswith("linux") else ru / (1024.0**2)
 
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from ..coarsewdm import CoarseWDMStatistic
+from ..coarsewdm import CoarseWDMRuntime, CoarseWDMStatistic, compute_qeff
 from ..domains import CoarseWDMSettings, WDMSettings
 from ..sensitivity import (
     CompositeSensitivityBackend,
@@ -1098,16 +1099,25 @@ class GlobalFit:
         allowed = {"psd", "galfor", "sgwb"}
         branches = set(self.curr.engine_info.branch_names)
         unsupported = sorted(branches - allowed)
-        if unsupported:
+        mode = str(getattr(general_info, "coarse_gpu_mode", "off") or "off")
+        all_source_sidecar = bool(unsupported)
+        if all_source_sidecar and mode == "off":
             raise ValueError(
-                "Coarse WDM noise likelihood cannot be used with source "
-                f"branches {unsupported}; its statistic is precomputed from "
-                "unsubtracted data. CoarseWDMStatistic.update_from_residual is "
-                "the future residual-refresh seam."
+                "Coarse WDM noise likelihood cannot replace the fine backend "
+                f"with source branches {unsupported} present; its statistic "
+                "would go stale against per-walker residuals. An all-source "
+                "run must opt into the sidecar runtime explicitly: set "
+                "COARSE_GPU_MODE='search_approx' (optimization stages) or "
+                "'delayed_acceptance' (production PE)."
+            )
+        if not all_source_sidecar and mode != "off":
+            raise ValueError(
+                "coarse_gpu_mode applies to all-source runs only; noise-only "
+                "runs use the CPU backend-replacement coarse path."
             )
         if "psd" not in branches:
             raise ValueError("Coarse WDM noise likelihood requires a psd branch.")
-        if general_info.gpus is not None:
+        if not all_source_sidecar and general_info.gpus is not None:
             raise ValueError(
                 "Coarse WDM noise likelihood is CPU-only in this implementation; "
                 "unset general.gpus. Single-GPU support is a planned follow-up."
@@ -1127,7 +1137,7 @@ class GlobalFit:
                 "CompositeSensitivityBackend."
             )
         backend_name = str(getattr(fine_backend.backend, "name", ""))
-        if not backend_name.endswith("_cpu"):
+        if not all_source_sidecar and not backend_name.endswith("_cpu"):
             raise ValueError(
                 f"Coarse WDM noise likelihood is CPU-only; got backend {backend_name!r}."
             )
@@ -1304,6 +1314,57 @@ class GlobalFit:
                 galfor_params=galfor_params,
                 sgwb_params=sgwb_params,
             )
+
+        if all_source_sidecar:
+            # Fine backend stays canonical: build the runtime sidecar and
+            # leave every AnalysisContainer's coarse_stats as None. The
+            # per-walker statistics are refreshed by the noise moves.
+            if qeff is None and use_ws:
+                qeff, qeff_channels = compute_qeff(
+                    fiducial_fine,
+                    coarse_settings,
+                    use_ws=True,
+                    return_channels=True,
+                )
+            digest_src = hashlib.sha256()
+            for part in (policy, str(Q), str(bool(use_ws)), mode):
+                digest_src.update(part.encode())
+            if use_ws:
+                for arr in (psd_params, galfor_params, sgwb_params):
+                    if arr is not None:
+                        digest_src.update(
+                            np.ascontiguousarray(
+                                np.asarray(arr, dtype=float)
+                            ).tobytes()
+                        )
+            runtime = CoarseWDMRuntime(
+                coarse_settings=coarse_settings,
+                qeff=qeff,
+                qeff_channels=qeff_channels,
+                use_ws=use_ws,
+                mode=mode,
+                batch_bytes=int(
+                    getattr(general_info, "coarse_gpu_batch_bytes", 0)
+                    or 256 * 1024 * 1024
+                ),
+                fiducial_digest=digest_src.hexdigest()[:16],
+                coarse_backend=coarse_backend,
+            )
+            general_info.coarse_wdm_runtime = runtime
+            general_info.coarse_wdm_settings = coarse_settings
+            logger.info(
+                "coarse WDM sidecar runtime (all-source, mode=%s): Q=%d, "
+                "Nt_active=%d -> Ncoarse=%d, weighting=%s, fiducial=%s, "
+                "digest=%s",
+                mode,
+                Q,
+                fine_settings.Nt_active,
+                coarse_settings.Ncoarse,
+                "WS" if use_ws else "Bartlett",
+                policy if use_ws else "not used",
+                runtime.fiducial_digest,
+            )
+            return None
 
         statistic = CoarseWDMStatistic.from_wdm_signal(
             general_info.input_data_residual_array,
@@ -1877,6 +1938,12 @@ class GlobalFit:
         # Persist the semantic identity with a fresh chain; refuse to resume a
         # sampled chain under a different one.
         noise_identity = getattr(general_info, "noise_model_identity", None)
+        _coarse_runtime = getattr(general_info, "coarse_wdm_runtime", None)
+        if noise_identity and _coarse_runtime is not None:
+            noise_identity = {
+                **noise_identity,
+                "coarse_fiducial_digest": _coarse_runtime.fiducial_digest,
+            }
         if noise_identity:
             if int(backend.iteration) == 0:
                 backend.write_noise_model_identity(noise_identity)

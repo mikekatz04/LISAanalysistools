@@ -476,6 +476,13 @@ class GeneralSetup(Setup, GeneralSettings):
             "galfor_modulation_digest": mod_digest or "",
             "galfor_modulation_t0": float(getattr(mod, "t0", 0.0) or 0.0),
             "data_t0": float(self.data_t0),
+            # Coarse-likelihood identity (plan-2): a resume across a coarse
+            # mode/Q/weighting change is a different PSD/GALFOR kernel on
+            # identical shapes. The fiducial digest is appended at write time
+            # by run.py once the sidecar runtime exists.
+            "coarse_mode": str(getattr(self, "coarse_gpu_mode", "off") or "off"),
+            "coarse_Q": int(getattr(self, "coarse_Q", 1) or 1),
+            "coarse_use_ws": bool(getattr(self, "coarse_use_ws", True)),
         }
         self.logger.info("[noise-model-identity] %s", self.noise_model_identity)
         return sensitivity_init_kwargs

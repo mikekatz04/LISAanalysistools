@@ -411,6 +411,61 @@ class CoarseWDMTest(unittest.TestCase):
                 np.testing.assert_array_equal(second.covariance(coarse), coarse_cov)
 
 
+class CoarseKnobValidationTest(unittest.TestCase):
+    """Shared coarse-knob validation across noise-only and all_sources (T3)."""
+
+    def test_all_source_q_without_mode_rejected(self):
+        from lisatools.globalfit.stock import erebor
+        from lisatools.globalfit.stock.erebor.noise import validate_coarse_settings
+
+        fit = erebor.all_sources(lite=True, coarse_Q=4)
+        with self.assertRaisesRegex(ValueError, "COARSE_GPU_MODE"):
+            validate_coarse_settings(fit.general, all_source=True)
+
+    def test_all_source_mode_without_q_rejected(self):
+        from lisatools.globalfit.stock import erebor
+        from lisatools.globalfit.stock.erebor.noise import validate_coarse_settings
+
+        fit = erebor.all_sources(lite=True, coarse_gpu_mode="delayed_acceptance")
+        with self.assertRaisesRegex(ValueError, "COARSE_Q > 1"):
+            validate_coarse_settings(fit.general, all_source=True)
+
+    def test_all_source_valid_combo_passes(self):
+        from lisatools.globalfit.stock import erebor
+        from lisatools.globalfit.stock.erebor.noise import validate_coarse_settings
+
+        fit = erebor.all_sources(
+            lite=True, coarse_Q=4, coarse_gpu_mode="delayed_acceptance"
+        )
+        validate_coarse_settings(fit.general, all_source=True)
+        self.assertEqual(fit.general.coarse_gpu_mode, "delayed_acceptance")
+
+    def test_bad_mode_rejected(self):
+        from lisatools.globalfit.stock import erebor
+        from lisatools.globalfit.stock.erebor.noise import validate_coarse_settings
+
+        fit = erebor.all_sources(lite=True, coarse_Q=4, coarse_gpu_mode="fastmode")
+        with self.assertRaisesRegex(ValueError, "coarse_gpu_mode"):
+            validate_coarse_settings(fit.general, all_source=True)
+
+    def test_noise_only_mode_rejected(self):
+        from lisatools.globalfit.stock import erebor
+        from lisatools.globalfit.stock.erebor.noise import validate_coarse_settings
+
+        fit = erebor.noise_only_lite(coarse_gpu_mode="search_approx")
+        with self.assertRaisesRegex(ValueError, "all-source"):
+            validate_coarse_settings(fit.general, all_source=False)
+
+    def test_noise_only_legacy_gpu_rejection_kept(self):
+        from lisatools.globalfit.stock import erebor
+        from lisatools.globalfit.stock.erebor.noise import validate_coarse_settings
+
+        fit = erebor.noise_only_lite(coarse_Q=4)
+        fit.general.gpus = [0]
+        with self.assertRaisesRegex(ValueError, "CPU-only"):
+            validate_coarse_settings(fit.general, all_source=False)
+
+
 class CoarseWDMRuntimeTest(unittest.TestCase):
     """Per-walker batched coarse statistics + runtime container (plan-2 T2).
 

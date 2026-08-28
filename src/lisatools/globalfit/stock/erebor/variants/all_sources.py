@@ -55,6 +55,7 @@ from ..gb import GBSetup
 from ..mbh import MBHSetup
 from ..noise import (
     GalForSettings,
+    validate_coarse_settings,
     GalForSetup,
     PSDSetup,
     noise_sensitivity_init_kwargs,
@@ -591,6 +592,7 @@ class AllSourcesGlobalFit(EreborFit):
     #    fit.psd.instrument_model_cls / fit.sgwb.stochastic_fn) --
 
     def finalize_general(self, gs: AllSourcesGeneralSettings) -> None:
+        validate_coarse_settings(gs, all_source=True)
         psd = getattr(self, "psd", None) if "psd" in self._branch_names else None
         if gs.unequal_arm:
             self._wire_unequal_arm(gs, psd)
