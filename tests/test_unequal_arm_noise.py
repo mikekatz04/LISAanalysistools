@@ -240,6 +240,29 @@ class UnequalArmNoiseTest(unittest.TestCase):
             self.assertLess(rel.max(), 1e-10, f"{name} disagrees with the C++ form")
 
     # -- structure ----------------------------------------------------------
+    def test_fused_bases_hermitian_by_construction(self):
+        """The kernel GUARANTEES Hermiticity; it does not inherit it from BLAS.
+
+        ``A S A^dagger`` is mathematically Hermitian, but einsum accumulates
+        ``(i, j)`` and ``(j, i)`` as independent reductions, so their last bits
+        agree only when the BLAS sums symmetric pairs in the same order --
+        true on Accelerate/ARM, false on the cluster's x86 BLAS (job 361:
+        ~1 ulp in Im). The kernel therefore mirrors the upper triangle
+        explicitly, alongside the diagonal-real step. Asserted bitwise here,
+        at the source of the guarantee.
+        """
+        f = np.logspace(-4, -1.2, 128)
+        for basis in unequal_arm_tdi2_unit_covariances(f, self.ltts):
+            for i in range(3):
+                self.assertEqual(
+                    np.abs(np.imag(basis[i, i])).max(), 0.0, f"auto {i} not real"
+                )
+                for j in range(3):
+                    np.testing.assert_array_equal(
+                        basis[i, j], np.conj(basis[j, i]),
+                        err_msg=f"element ({i}, {j}) is not the exact conjugate",
+                    )
+
     def test_hermitian_and_complex_cross_spectra(self):
         """Unequal arms => Hermitian complex covariance, real diagonal."""
         C = UnequalArmInstrumentNoise(

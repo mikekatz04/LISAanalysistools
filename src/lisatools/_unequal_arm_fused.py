@@ -170,6 +170,21 @@ def unequal_arm_tdi2_unit_covariances(f, ltts):
     for channel in range(3):
         oms[channel, channel] = oms[channel, channel].real
         acc[channel, channel] = acc[channel, channel].real
+    # Cross spectra are mathematically exact conjugate pairs -- the einsum is
+    # ``A S A^dagger`` with real ``S``, and each summand of ``(j, i)`` is the
+    # bitwise conjugate of the matching ``(i, j)`` summand.  But einsum
+    # accumulates the two elements as INDEPENDENT reductions, so their last
+    # bits agree only when the BLAS happens to sum symmetric pairs in the same
+    # order.  It does on Accelerate/ARM and does not on the cluster's x86 BLAS
+    # (observed 2026-08-28: ~1 ulp in Im, 56% of elements).  Mirror the upper
+    # triangle so Hermiticity is a construction guarantee on every platform,
+    # exactly like the diagonal-real step above; the WDM fold then yields an
+    # exactly symmetric real covariance too.  No-op where the BLAS was already
+    # symmetric, so validated numbers are unchanged there.
+    for i in range(3):
+        for j in range(i + 1, 3):
+            oms[j, i] = oms[i, j].conj()
+            acc[j, i] = acc[i, j].conj()
     return oms, acc
 
 
