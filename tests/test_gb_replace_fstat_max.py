@@ -1,15 +1,16 @@
 """rj_replace SEARCH-mode maximize-and-pretend-uniform knob.
 
-USER RULING 2026-08-28: search proposals "maximize parameters and pretend
-they all have uniform distributions" -- no detailed-balance bookkeeping.
-For the REPLACE move that means the candidate IS the JKS maximizer at its
-drawn intrinsics: slot 0 pinned AT the per-row F-stat center (no lognormal
-draw, no floor mix; phi0/iota/psi were already pinned) and the proposal
-factors dropped entirely from the acceptance. ``GB_REPLACE_FSTAT_MAX``:
-``auto`` (default) arms it only for moves with "search" in the name (the
-established band-shutoff / per-row-centers scoping idiom) that carry the
-F-stat birth container; ``1``/``0`` force either way. PE replace keeps
-the exact-DB draw path bit-identically.
+USER RULING 2026-08-28 (as refined): in search the REPLACE candidate IS
+the JKS maximizer at its drawn intrinsics -- slot 0 pinned AT the per-row
+F-stat center (no lognormal draw, no floor mix; phi0/iota/psi were
+already pinned) -- and is then MAXIMIZE-THEN-PRETEND priced: the RJ
+factor machinery stays identical to regular RJ, every proposal density
+still evaluated at the pinned value as if it had been drawn. Only the
+missing draw breaks detailed balance. ``GB_REPLACE_FSTAT_MAX``: ``auto``
+(default) arms it for moves with "search" in the name or carrying the
+recipe's search-stage stamp, when the F-stat birth container is armed;
+``1``/``0`` force either way. PE replace keeps the exact-DB draw path
+bit-identically.
 
 The full-flow numeric behavior rides on ``_debug_verify_replace_step``
 (GB_DEBUG) in production, matching the GB_REPLACE_PHASE_MAX precedent;
@@ -119,23 +120,6 @@ class ReplaceSlot0PinTest(unittest.TestCase):
         ln_center = np.array([-51.2, -49.7])
         out = GBSpecialBase._replace_slot0_pin(stub, ln_center, np)
         np.testing.assert_array_equal(out, ln_center)
-
-
-class ReplaceFactorsFinalTest(unittest.TestCase):
-    """Pretend-uniform: the whole factors vector is zeroed, in place."""
-
-    def test_fmax_zeroes_every_row(self):
-        f = np.array([0.3, -2.0, 5.0, -1e300])
-        out = GBSpecialBase._replace_factors_final(_SearchStub(), f, True)
-        self.assertIs(out, f)
-        np.testing.assert_array_equal(out, np.zeros_like(f))
-
-    def test_off_is_identity(self):
-        f = np.array([0.3, -2.0, 5.0])
-        ref = f.copy()
-        out = GBSpecialBase._replace_factors_final(_SearchStub(), f, False)
-        self.assertIs(out, f)
-        np.testing.assert_array_equal(out, ref)
 
 
 if __name__ == "__main__":

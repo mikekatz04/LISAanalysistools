@@ -2859,8 +2859,8 @@ def build_gb_moves(
         # search-only (_gb_mode_search above), and the move's plain
         # "rj_replace" name carries no stage info -- the stamp is what arms
         # _replace_fstat_max's auto mode (slot 0 pinned at the F-stat
-        # center + pretend-uniform factors). A future PE replace install
-        # must NOT set this.
+        # center, then priced through the unchanged RJ densities:
+        # maximize-then-pretend). A PE replace install must NOT set this.
         gb_replace_move.replace_search_stage = True
         gb_replace_move.accepted = np.zeros((ntemps, nwalkers))
     # Pure IN-MODEL move (2026-08-04): no RJ step at all -- ``is_rj_prop=False``
