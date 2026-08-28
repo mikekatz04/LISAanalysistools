@@ -938,7 +938,19 @@ export GB_CELL_LABEL_DEFERRED=1
 # TODO(v8) USER RULING 2026-08-28: if the multi-GPU picture is not clearly
 # better, ship v8 with this OFF -- the wall-clock win alone does not
 # justify carrying a second implementation of the gate chain.
-export GB_INMODEL_ACCEPT_KERNEL=1
+# TURNED OFF 2026-08-28 (user ruling) after the first live measurement.
+# The kernel DID build and engage this vintage (zero fallback warnings),
+# and the new `inmodel_gate` mark measured the entire chain it governs at
+# 1.877 s (rj_fstat_search) + 0.445 + 0.445 = ~2.8 s per iteration --
+# 0.14% of a ~2000 s iteration. Whatever it saved, there is nothing left
+# to win there, so carrying a second implementation of the gate chain is
+# not worth it. v8 ships =0 for the same reason.
+# BONUS from running at 0: `inmodel_gate` now reports the PYTHON-chain
+# cost, which is the OFF baseline the A/B never had (the mark did not
+# exist before this vintage). If that number comes back large, the
+# ruling is worth revisiting; if it is also ~seconds, the kernel is
+# closed permanently.
+export GB_INMODEL_ACCEPT_KERNEL=0
 export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # High-f barren-band birth shutoff (search scope): bands above FMIN with
 # AFTER consecutive zero-birth-accept proposes stop proposing births
