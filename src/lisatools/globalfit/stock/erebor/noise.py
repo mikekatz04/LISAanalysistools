@@ -460,11 +460,17 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
 # ============================================================
 
 
-def resolve_galfor_modulation(path):
-    """``None`` (stationary) or a :class:`GalForTimeModulation` from ``path``."""
+def resolve_galfor_modulation(path, t0: float = 0.0):
+    """``None`` (stationary) or a :class:`GalForTimeModulation` from ``path``.
+
+    ``t0`` is the absolute epoch the table's time column is written against
+    (default 0.0 keeps a table already relative to the data start unchanged).
+    Construction is lazy, so a deferred anchor may also overwrite ``.t0``
+    before first use — see ``GeneralSetup._resolve_deferred_noise_model``.
+    """
     from lisatools.sensitivity import GalForTimeModulation
 
-    return GalForTimeModulation(path) if path else None
+    return GalForTimeModulation(path, t0=t0) if path else None
 
 
 def resolve_noise_file(
@@ -573,7 +579,14 @@ def prepare_galfor_branch(galfor):
 
 
 def noise_sensitivity_init_kwargs(
-    base, *, tdi_generation, galfor=None, psd=None, galfor_modulation_path=None, extra=None
+    base,
+    *,
+    tdi_generation,
+    galfor=None,
+    psd=None,
+    galfor_modulation_path=None,
+    galfor_modulation_t0=0.0,
+    extra=None,
 ):
     """Thread the per-branch noise-MODEL choice onto ``sensitivity_init_kwargs``.
 
@@ -589,7 +602,9 @@ def noise_sensitivity_init_kwargs(
         out["galfor_stochastic_fn"] = galfor.stochastic_fn
     branch_mod = getattr(galfor, "modulation", None) if galfor is not None else None
     out["galfor_modulation"] = (
-        branch_mod if branch_mod is not None else resolve_galfor_modulation(galfor_modulation_path)
+        branch_mod
+        if branch_mod is not None
+        else resolve_galfor_modulation(galfor_modulation_path, t0=galfor_modulation_t0)
     )
     if psd is not None:
         for attr in (

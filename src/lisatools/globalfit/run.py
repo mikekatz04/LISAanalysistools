@@ -1759,6 +1759,59 @@ class GlobalFit:
         if domain_settings is not None and int(backend.iteration) == 0:
             backend.write_domain_settings(domain_settings)
 
+        # Noise-model identity: same shapes can hide a different likelihood
+        # (unequal-arm vs equal-arm, wdm_psd_method, delay table, modulation).
+        # Persist the semantic identity with a fresh chain; refuse to resume a
+        # sampled chain under a different one.
+        noise_identity = getattr(general_info, "noise_model_identity", None)
+        if noise_identity:
+            if int(backend.iteration) == 0:
+                backend.write_noise_model_identity(noise_identity)
+            else:
+                stored = backend.read_noise_model_identity()
+                if stored is None:
+                    non_default = (
+                        noise_identity.get("unequal_arm")
+                        or noise_identity.get("galfor_modulation")
+                        or noise_identity.get("wdm_psd_method", "fold") != "fold"
+                    )
+                    if non_default:
+                        raise ValueError(
+                            f"Cannot resume {backend_path!r}: it predates "
+                            "noise-model identity records, but this "
+                            "configuration requests a non-default noise model "
+                            f"({noise_identity}). The stored chain was almost "
+                            "certainly sampled under a different likelihood -- "
+                            "use a fresh store (new STORE_DIR/BASE_FILE_NAME)."
+                        )
+                    logger.warning(
+                        "Resuming %s with no stored noise-model identity "
+                        "(pre-identity store); current identity is the stock "
+                        "default, continuing.",
+                        backend_path,
+                    )
+                else:
+                    mismatched = {}
+                    for key, value in noise_identity.items():
+                        stored_value = stored.get(key)
+                        if isinstance(value, float):
+                            same = stored_value is not None and np.isclose(
+                                float(stored_value), value, rtol=0.0, atol=1e-6
+                            )
+                        else:
+                            same = stored_value == value
+                        if not same:
+                            mismatched[key] = (stored_value, value)
+                    if mismatched:
+                        raise ValueError(
+                            f"Cannot resume {backend_path!r}: stored "
+                            "noise-model identity differs from the configured "
+                            f"one: {mismatched} (stored, configured). Same "
+                            "array shapes, different likelihood -- use a "
+                            "fresh store or restore the original noise "
+                            "configuration."
+                        )
+
         # setup_info_all = None
         # for name in branch_names:
         #     if name not in self.curr.source_info:
