@@ -5193,6 +5193,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 f"got {mode!r}")
         return mode
 
+    def _replace_phase_max(self) -> bool:
+        """Whether the REPLACE move scores the NEW side phase-maximized
+        with ROTATION-ON-ACCEPT (user directive 2026-08-27; default ON).
+
+        The 2026-08-24 drift root cause was maximized CREDIT without the
+        maximizing phase ever being written -- the accepted source could
+        not reproduce its scored likelihood at any actual phi0. The fix
+        is not to renounce maximization but to make it attainable: the
+        engine's maximizing rotation ``phase_angle_new`` is SUBTRACTED
+        from the accepted candidate's sampling phi0 (the in-model
+        repeats' validated write-back convention), so the written
+        parameters re-score to exactly the credited delta --
+        ``_debug_verify_replace_step`` stage 2b asserts precisely this
+        under GB_DEBUG. Equivalently: phase maximization here is a
+        smarter DETERMINISTIC phi0 pin (per-row optimum against the
+        exposed residual) than the F-stat-center pin it replaces, so the
+        established pinned-extrinsics detailed-balance convention
+        applies unchanged. The old side is always scored at its ACTUAL
+        phase (``delta_old_actual``; exact multi-shard since the router
+        assembles ``non_marg_d_h``). ``GB_REPLACE_PHASE_MAX=0`` restores
+        exact concrete-parameter scoring bit-identically. Read ONLY by
+        :meth:`_run_replace_step`.
+        """
+        return os.environ.get("GB_REPLACE_PHASE_MAX", "1") != "0"
+
     def _temper_cadence_fire(self) -> bool:
         """Tempering cadence gate (user design 2026-08-14).
 
@@ -6472,15 +6497,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
           ``GB_REPLACE_CTR_MODE=table`` restores the epoch center-table
           pin (:meth:`_fstat_ctr_table_lookup`, nearest node in f0).
 
-        SCORING is EXACT: :meth:`SubBandBuffer.get_replace_ll` with
-        ``phase_maximize=False`` scores BOTH parameter sets as concrete
+        SCORING (:meth:`SubBandBuffer.get_replace_ll`): both sides are
         add-deltas ``<r'|h> - 0.5<h|h>`` against the old-source-exposed
         residual ``r' = r + h_old``, through the RJ chunked-het / full
-        engine. No sig-het in-model reference is armed during the RJ
-        phase (references are built and torn down inside
-        ``_run_in_model_repeats``), so the sig-het trust region never
-        sees -- and can never silently veto or mis-score -- these
-        many-bin candidate jumps.
+        engine. Under :meth:`_replace_phase_max` (default ON, user
+        directive 2026-08-27) the NEW side is PHASE-MAXIMIZED and the
+        maximizing rotation is written into the accepted candidate's
+        sampling phi0 BEFORE the verifier and the accept write-back
+        (rotation-on-accept) -- the scored rows ARE the final rows, so
+        the maximized credit is exactly attainable (the 2026-08-24
+        drift flaw was credit WITHOUT the write-back). The OLD side is
+        always its ACTUAL-phase delta (``delta_old_actual``, exact
+        multi-shard via the router's ``non_marg_d_h`` assembly).
+        ``GB_REPLACE_PHASE_MAX=0`` restores exact concrete-parameter
+        scoring on both sides bit-identically. No sig-het in-model
+        reference is armed during the RJ phase (references are built and
+        torn down inside ``_run_in_model_repeats``), so the sig-het
+        trust region never sees -- and can never silently veto or
+        mis-score -- these many-bin candidate jumps.
 
         ACCEPTANCE (detailed balance). For the swap old -> new,
 
@@ -6669,9 +6703,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 params_new[k_idx, 0] = xp.where(
                     _take_floor, _unif, params_new[k_idx, 0])
             # CONCRETE extrinsics from the stored maxima: the candidate is
-            # fully specified here and is scored EXACTLY below -- a table
-            # phi0 that is off its optimum only lowers acceptance, it can
-            # never bias the chain (no phase-max credit anywhere).
+            # fully specified here -- a pinned phi0 off its optimum only
+            # lowers acceptance, it can never bias the chain. Under
+            # _replace_phase_max the scoring below refines this phi0 pin
+            # to the per-row optimum (rotation-on-accept keeps the credit
+            # attainable); with the knob off it is scored exactly as-is.
             params_new[k_idx, 4] = xp.cos(iota_max % np.pi)
             params_new[k_idx, 5] = psi_max % np.pi
             params_new[k_idx, 3] = phi0_max % (2 * np.pi)
@@ -6740,15 +6776,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if _replace_debug:
                 _rt_rows = xp.unique(slots[k_idx].astype(xp.int64))
                 _rt_snap = buffer_obj.band_buffer[_rt_rows].copy()
-            # EXACT scoring, ALWAYS: phase_maximize is hard-coded False
-            # here regardless of the instance flag -- the phase-maximized
-            # acceptance was the root-caused rj_replace ll-drift flaw (the
-            # maximized value is not attainable at any actual phi0), so
-            # this move scores the concrete parameters and nothing else.
-            d_old, d_new, _phase_unused, d_old_act = buffer_obj.get_replace_ll(
+            # Scoring mode (user directive 2026-08-27, _replace_phase_max):
+            # DEFAULT = phase-maximized NEW side + ROTATION-ON-ACCEPT. The
+            # 2026-08-24 flaw was maximized CREDIT with no phi0 write-back
+            # (the value was unattainable at the written parameters); the
+            # rotation below makes the written phi0 the maximizing one, so
+            # the credit and the applied template agree exactly --
+            # _debug_verify_replace_step stage 2b asserts it under
+            # GB_DEBUG. The OLD side stays at its ACTUAL phase always
+            # (d_old_act; exact multi-shard now that the router assembles
+            # non_marg_d_h). GB_REPLACE_PHASE_MAX=0 restores the exact
+            # concrete-parameter scoring bit-identically.
+            _pm = self._replace_phase_max()
+            if _pm and not getattr(self, "_replace_pm_logged", False):
+                self._replace_pm_logged = True
+                logger.info(
+                    "%s [GB_REPLACE_PHASE_MAX] scoring the NEW side "
+                    "phase-maximized with rotation-on-accept "
+                    "(GB_REPLACE_PHASE_MAX=0 restores exact scoring).",
+                    self.name,
+                )
+            d_old, d_new, phase_new, d_old_act = buffer_obj.get_replace_ll(
                 params_old[k_idx], params_new[k_idx], slots[k_idx],
                 slots[k_idx], N_vals[k_idx],
-                phase_maximize=False, leaf_inds=l_i[k_idx],
+                phase_maximize=_pm, leaf_inds=l_i[k_idx],
             )
             if _replace_debug:
                 _rt_after = buffer_obj.band_buffer[_rt_rows]
@@ -6761,18 +6812,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     "bit-identical on %d cell rows.",
                     self.name, int(_rt_rows.shape[0]),
                 )
-            # Without phase maximization d_old IS the actual-phase delta
-            # (get_replace_ll contract); keep the explicit actual-phase
-            # return anyway so a future flag flip cannot silently
-            # reintroduce maximized credit.
+            # d_old_act is the old side's actual-phase delta on BOTH modes
+            # (get_replace_ll contract) -- maximized credit can never
+            # attach to the old side.
             delta_old[k_idx] = d_old_act
             delta_new[k_idx] = d_new
             h_h_new[k_idx] = buffer_obj.replace_h_h_new
-            # GB_DEBUG: the scored rows ARE the final rows now (no phi0
-            # write-back exists in the exact design); the verifier stash
-            # keeps its name for the plotting hooks that read it.
+            # GB_DEBUG stash of the PRE-write-back candidates (the drawn
+            # phi0 pin), before any rotation below.
             if self.debug:
                 self._dbg_params_new_prewb = params_new.copy()
+            # ROTATION-ON-ACCEPT (applied to the candidates now, before
+            # the verifier and the accept write-back, so the scored rows
+            # ARE the final rows): subtract the engine's maximizing
+            # rotation from sampling phi0 -- the in-model repeats'
+            # validated write-back convention (gb_phase_max_validate).
+            # The accept path re-wraps periodics before writing.
+            if _pm and phase_new is not None:
+                params_new[k_idx, self._phi0_col] = (
+                    params_new[k_idx, self._phi0_col] - phase_new
+                )
 
         # Independently re-verify the scored deltas through get_add_ll, the
         # same way _run_rj_step does via _debug_verify_rj_step. Replace was

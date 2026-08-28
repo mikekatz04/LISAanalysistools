@@ -75,7 +75,15 @@ class _StubEngine:
         n = len(intra)
         self.d_h_out = 1000.0 * dev + intra.astype(float)
         self.h_h_out = 2000.0 * dev + intra.astype(float)
-        self.phase_angle = None
+        if phase_maximize:
+            # Phase-max contract: engines stash the maximizing rotation and
+            # the un-maximized <d|h> (non_marg_d_h). Encoded per (device,
+            # intra) so the router's reassembly order is checkable.
+            self.phase_angle = 0.25 + intra.astype(float)
+            self.non_marg_d_h = 3000.0 * dev + intra.astype(float)
+        else:
+            self.phase_angle = None
+            self.non_marg_d_h = None
         self.kept_out = np.ones(n, dtype=bool)
         return 1000.0 * dev + intra.astype(float)
 
@@ -347,6 +355,38 @@ class ShardRouterTest(unittest.TestCase):
             seen_devices,
             sorted(set(self.holder.gpu_map[self.data_index].tolist())),
         )
+
+    def test_get_ll_phase_max_assembles_non_marg_d_h(self):
+        """Multi-shard phase-max: the router must assemble non_marg_d_h in
+        caller order (the replace move's exact-old-phase bookkeeping reads
+        it; without assembly it silently falls back to the maximized value
+        and the propose-level drift rebuild eats the difference)."""
+        self.router.get_ll(
+            self.holder, self.params,
+            data_index=self.data_index, noise_index=self.data_index,
+            N_vals=None, waveform_kwargs={}, phase_maximize=True,
+        )
+        dev = self.holder.gpu_map[self.data_index].astype(float)
+        intra = self._expected_intra(self.data_index).astype(float)
+        np.testing.assert_array_equal(
+            np.asarray(self.router.non_marg_d_h), 3000.0 * dev + intra)
+        np.testing.assert_array_equal(
+            np.asarray(self.router.phase_angle), 0.25 + intra)
+
+    def test_get_ll_unmaximized_clears_stale_non_marg(self):
+        """An unmaximized call AFTER a phase-max call must not leave the
+        previous call's non_marg_d_h visible (consumers guard on None)."""
+        self.router.get_ll(
+            self.holder, self.params,
+            data_index=self.data_index, noise_index=self.data_index,
+            N_vals=None, waveform_kwargs={}, phase_maximize=True,
+        )
+        self.router.get_ll(
+            self.holder, self.params,
+            data_index=self.data_index, noise_index=self.data_index,
+            N_vals=None, waveform_kwargs={}, phase_maximize=False,
+        )
+        self.assertIsNone(self.router.non_marg_d_h)
 
     def test_get_ll_params_rows_match_partition(self):
         self.router.get_ll(

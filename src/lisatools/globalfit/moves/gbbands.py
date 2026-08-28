@@ -1077,7 +1077,8 @@ class _RoutedBandEngine:
     def _mirror_engine_outputs(self):
         """Refresh routed-output attrs from the wrapped engine after a
         passthrough call so stale routed values never shadow them."""
-        for name in ("d_h_out", "h_h_out", "phase_angle", "kept_out"):
+        for name in ("d_h_out", "h_h_out", "phase_angle", "kept_out",
+                     "non_marg_d_h"):
             if hasattr(self._engine, name):
                 setattr(self, name, getattr(self._engine, name))
 
@@ -1195,7 +1196,7 @@ class _RoutedBandEngine:
         # One pre-sized slot per shard (threaded dispatch writes disjoint
         # slots; serial dispatch fills the same slots in the same order).
         slots = {name: [None] * len(views)
-                 for name in ("ll", "dh", "hh", "ang", "kept")}
+                 for name in ("ll", "dh", "hh", "ang", "kept", "nm")}
 
         def _shard(si, view, engine, pos, intra, intra_noise, p_part, n_part):
             with device_context(xp, view.device):
@@ -1215,20 +1216,29 @@ class _RoutedBandEngine:
                 kept = getattr(engine, "kept_out", None)
                 slots["kept"][si] = (pos,
                                      None if kept is None else take(kept))
+                # Phase-max bookkeeping: the un-maximized <d|h> the replace
+                # move reads for the old side's ACTUAL-phase delta. Gathered
+                # only when this call maximized -- an engine attr surviving
+                # from an earlier call must never be scattered as if fresh.
+                nm = (getattr(engine, "non_marg_d_h", None)
+                      if phase_maximize else None)
+                slots["nm"][si] = (pos, None if nm is None else take(nm))
 
         with _tspan(_rtm, "route_dispatch"):
             self._dispatch_shards(holder, items, _shard,
                                   state_ids=[id(it[2]) for it in items])
         with _tspan(_rtm, "route_assemble"):
-            ll_p, dh_p, hh_p, ang_p, kept_p = (
+            ll_p, dh_p, hh_p, ang_p, kept_p, nm_p = (
                 [p for p in slots[name] if p is not None]
-                for name in ("ll", "dh", "hh", "ang", "kept"))
+                for name in ("ll", "dh", "hh", "ang", "kept", "nm"))
             ll = assemble(ll_p, -1e300)
             if ll is None:
                 ll = xp.full(num, -1e300)
             self.d_h_out = assemble(dh_p, 0.0)
             self.h_h_out = assemble(hh_p, 0.0)
             self.phase_angle = assemble(ang_p, 0.0)
+            # None when unmaximized / no shard produced it (consumers guard).
+            self.non_marg_d_h = assemble(nm_p, 0.0)
             kept_arr = assemble(kept_p, False)
             self.kept_out = (
                 xp.ones(num, dtype=bool) if kept_arr is None else kept_arr
