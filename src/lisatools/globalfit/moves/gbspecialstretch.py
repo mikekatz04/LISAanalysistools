@@ -5269,6 +5269,75 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
         return os.environ.get("GB_REPLACE_PHASE_MAX", "1") != "0"
 
+    def _replace_fstat_max(self) -> bool:
+        """SEARCH-mode maximize-and-pretend-uniform replace candidates?
+
+        USER RULING 2026-08-28: search proposals "maximize parameters
+        and pretend they all have uniform distributions" -- detailed
+        balance is deliberately NOT preserved in search, so the replace
+        move should not pay for it either. When this returns True the
+        candidate IS the JKS maximizer at its drawn intrinsics: slot 0
+        is pinned AT the per-row F-stat center
+        (:meth:`_replace_slot0_pin`; no lognormal draw, no floor mix --
+        phi0/iota/psi were already pinned, and under
+        :meth:`_replace_phase_max` the scoring refines phi0 to the
+        per-row optimum), and the proposal factors are dropped entirely
+        (:meth:`_replace_factors_final`), leaving
+        ``ln alpha = beta * delta_ll + delta_prior``. Side effect: the
+        old side's reverse-density center batch is skipped -- one fewer
+        per-row F-stat solve per replace round.
+
+        ``GB_REPLACE_FSTAT_MAX``: ``auto`` (default) = ON for moves with
+        "search" in the name (the band-shutoff / per-row-centers scoping
+        idiom) OR carrying the recipe's ``replace_search_stage`` stamp --
+        the production move is named plain "rj_replace", so its
+        search-only install site in ``recipe.py`` stamps the stage
+        instead; a future PE replace install simply won't stamp it and
+        keeps the exact-DB draw path bit-identically (where
+        maximize-and-overwrite would maximization-bias the amplitude
+        posterior). ``1`` / ``0`` force either way. Requires the F-stat
+        birth container (``rj_fstat_dist_birth``) unconditionally:
+        without centers there is nothing to pin. Read ONLY by
+        :meth:`_run_replace_step`.
+        """
+        if not getattr(self, "rj_fstat_dist_birth", False):
+            return False
+        mode = os.environ.get("GB_REPLACE_FSTAT_MAX", "auto").strip().lower()
+        if mode in ("1", "on", "true"):
+            return True
+        if mode in ("0", "off", "false"):
+            return False
+        return (
+            "search" in str(getattr(self, "name", "")).lower()
+            or bool(getattr(self, "replace_search_stage", False))
+        )
+
+    def _replace_slot0_pin(self, ln_center, xp):
+        """Slot-0 value pinned AT the F-stat center, in the sampling basis.
+
+        ``ln_center`` is the log-amplitude-space center from
+        :meth:`_dist_center_and_width` / the epoch table; slot 0 of the
+        sampling basis is either ``dist`` (kpc) or already-log amplitude
+        (``_gb_use_distance``), matching the draw path's own basis
+        branch. Used only under :meth:`_replace_fstat_max`.
+        """
+        if _gb_use_distance(self):
+            return xp.exp(ln_center)
+        return ln_center
+
+    def _replace_factors_final(self, factors, fmax):
+        """Final proposal factors for the replace acceptance.
+
+        Under :meth:`_replace_fstat_max` (``fmax=True``) every proposal
+        density is pretended uniform, so the forward and reverse terms
+        cancel identically: the whole vector is zeroed IN PLACE (the
+        container +/- logpdf terms assembled in the draw block included).
+        Otherwise the exact-DB factors pass through untouched.
+        """
+        if fmax:
+            factors[:] = 0.0
+        return factors
+
     def _temper_cadence_fire(self) -> bool:
         """Tempering cadence gate (user design 2026-08-14).
 
@@ -6613,6 +6682,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         birth/death bookkeeping convention), so those constants cancel in
         the difference.
 
+        SEARCH EXCEPTION (:meth:`_replace_fstat_max`, user ruling
+        2026-08-28 -- default ON for search-named moves): the whole
+        bookkeeping above is dropped. Slot 0 is pinned AT the per-row
+        center (no lognormal draw, no floor mix), every proposal density
+        is pretended uniform, and the acceptance reduces to
+        ``ln alpha = beta * [add(new) - add(old)] + ln p(new) - ln
+        p(old)``. Search does not sample a posterior, so detailed
+        balance is deliberately not preserved there;
+        ``GB_REPLACE_FSTAT_MAX=0`` (or any non-search move name)
+        restores the exact-DB path bit-identically.
+
         CAP CELLS: a replacement is zero-sum in source count but can
         change the leaf's covering set. Newly-entered cells are gated on
         headroom BEFORE scoring (:meth:`_cap_new_entry_veto`: cells the
@@ -6730,6 +6810,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # convention) — so they cancel exactly.
             walker_ref = getattr(self, "_fstat_walker_ref", 0)
             k_idx = xp.arange(n_prop)[keep]
+            # SEARCH maximize-and-pretend-uniform (user ruling 2026-08-28,
+            # see _replace_fstat_max): slot 0 pinned AT the center, no
+            # draw, no floor mix, and the proposal factors dropped
+            # entirely below. PE replace resolves False and keeps the
+            # exact-DB draw path bit-identically.
+            _fmax = self._replace_fstat_max()
+            if _fmax and not getattr(self, "_replace_fmax_logged", False):
+                self._replace_fmax_logged = True
+                logger.info(
+                    "%s [GB_REPLACE_FSTAT_MAX] SEARCH replace candidates: "
+                    "slot 0 pinned at the per-row F-stat center, proposal "
+                    "factors dropped (maximize + pretend-uniform; "
+                    "GB_REPLACE_FSTAT_MAX=0 restores the exact-DB draw).",
+                    self.name,
+                )
             _log_range = self._log_dist_range(band_sorter)
             _tbl = (self._fstat_ctr_table_active()
                     if self._replace_ctr_mode() == "table" else None)
@@ -6751,32 +6846,39 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 ln_center, sigma = self._dist_center_and_width(
                     params_new[k_idx], A_max, F)
                 ln_snr_b = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
-            if _snr_trunc:
-                alpha_b = self._snr_trunc_alpha(ln_snr_b, sigma, _snr_lim)
-                z = self._truncnorm_std_draw(len(k_idx), alpha_b)
+            if _fmax:
+                # The candidate IS the maximizer: slot 0 AT the center
+                # (basis-aware), nothing drawn -- an off-center amplitude
+                # can only lower acceptance in search, and the factors are
+                # dropped wholesale below so no density ever prices it.
+                params_new[k_idx, 0] = self._replace_slot0_pin(ln_center, xp)
             else:
-                alpha_b = None
-                z = xp.asarray(cp.random.randn(len(k_idx)))
-            ln_draw = ln_center + sigma * z
-            if _gb_use_distance(self):
-                params_new[k_idx, 0] = xp.exp(ln_draw)
-            else:
-                params_new[k_idx, 0] = ln_draw  # slot 0 is lnA already
-            # Slot-0 uniform FLOOR component (root cause (c), see
-            # _replace_slot0_floor_eps): with prob eps the draw comes from
-            # the container's uniform slot-0 range instead of the
-            # lognormal; BOTH density sides below use the same mixture, so
-            # a polished incumbent 6+ sigma off its center pays a bounded
-            # (~log eps) reverse bill instead of -125 / -1e300.
-            _floor_eps = self._replace_slot0_floor_eps()
-            if _floor_eps > 0.0:
-                _lo0, _hi0 = self._slot0_range(band_sorter)
-                _take_floor = (
-                    xp.asarray(cp.random.rand(len(k_idx))) < _floor_eps)
-                _unif = _lo0 + (_hi0 - _lo0) * xp.asarray(
-                    cp.random.rand(len(k_idx)))
-                params_new[k_idx, 0] = xp.where(
-                    _take_floor, _unif, params_new[k_idx, 0])
+                if _snr_trunc:
+                    alpha_b = self._snr_trunc_alpha(ln_snr_b, sigma, _snr_lim)
+                    z = self._truncnorm_std_draw(len(k_idx), alpha_b)
+                else:
+                    alpha_b = None
+                    z = xp.asarray(cp.random.randn(len(k_idx)))
+                ln_draw = ln_center + sigma * z
+                if _gb_use_distance(self):
+                    params_new[k_idx, 0] = xp.exp(ln_draw)
+                else:
+                    params_new[k_idx, 0] = ln_draw  # slot 0 is lnA already
+                # Slot-0 uniform FLOOR component (root cause (c), see
+                # _replace_slot0_floor_eps): with prob eps the draw comes from
+                # the container's uniform slot-0 range instead of the
+                # lognormal; BOTH density sides below use the same mixture, so
+                # a polished incumbent 6+ sigma off its center pays a bounded
+                # (~log eps) reverse bill instead of -125 / -1e300.
+                _floor_eps = self._replace_slot0_floor_eps()
+                if _floor_eps > 0.0:
+                    _lo0, _hi0 = self._slot0_range(band_sorter)
+                    _take_floor = (
+                        xp.asarray(cp.random.rand(len(k_idx))) < _floor_eps)
+                    _unif = _lo0 + (_hi0 - _lo0) * xp.asarray(
+                        cp.random.rand(len(k_idx)))
+                    params_new[k_idx, 0] = xp.where(
+                        _take_floor, _unif, params_new[k_idx, 0])
             # CONCRETE extrinsics from the stored maxima: the candidate is
             # fully specified here -- a pinned phi0 off its optimum only
             # lowers acceptance, it can never bias the chain. Under
@@ -6786,30 +6888,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             params_new[k_idx, 4] = xp.cos(iota_max % np.pi)
             params_new[k_idx, 5] = psi_max % np.pi
             params_new[k_idx, 3] = phi0_max % (2 * np.pi)
-            _bl = self._slot0_log_proposal_floored(
-                params_new[k_idx, 0], ln_center, sigma, alpha_b,
-                band_sorter, _floor_eps)
-            # Reverse side: old's slot-0 density about its OWN table center
-            # (death convention; SAME table, SAME truncation rule). The
-            # +/- log_range pair cancels but is kept for symmetry with the
-            # birth/death bookkeeping.
-            if _tbl is not None:
-                (_, _, _, ln_center_d, sigma_d,
-                 ln_snr_d) = self._fstat_ctr_table_lookup(params_old[k_idx])
-            else:
-                Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
-                    model, params_old[k_idx], walker_ref)
-                ln_center_d, sigma_d = self._dist_center_and_width(
-                    params_old[k_idx], Ad, Fd)
-                ln_snr_d = 0.5 * xp.log(xp.clip(2.0 * Fd, 1.0, None))
-            alpha_d = (
-                self._snr_trunc_alpha(ln_snr_d, sigma_d, _snr_lim)
-                if _snr_trunc else None
-            )
-            _dl = self._slot0_log_proposal_floored(
-                params_old[k_idx, 0], ln_center_d, sigma_d, alpha_d,
-                band_sorter, _floor_eps)
-            factors[k_idx] = factors[k_idx] + (-_bl - _log_range) + (_dl + _log_range)
+            if not _fmax:
+                _bl = self._slot0_log_proposal_floored(
+                    params_new[k_idx, 0], ln_center, sigma, alpha_b,
+                    band_sorter, _floor_eps)
+                # Reverse side: old's slot-0 density about its OWN table center
+                # (death convention; SAME table, SAME truncation rule). The
+                # +/- log_range pair cancels but is kept for symmetry with the
+                # birth/death bookkeeping.
+                if _tbl is not None:
+                    (_, _, _, ln_center_d, sigma_d,
+                     ln_snr_d) = self._fstat_ctr_table_lookup(params_old[k_idx])
+                else:
+                    Ad, _pd, _id, _psd, Fd = self._fstat_dist_centers(
+                        model, params_old[k_idx], walker_ref)
+                    ln_center_d, sigma_d = self._dist_center_and_width(
+                        params_old[k_idx], Ad, Fd)
+                    ln_snr_d = 0.5 * xp.log(xp.clip(2.0 * Fd, 1.0, None))
+                alpha_d = (
+                    self._snr_trunc_alpha(ln_snr_d, sigma_d, _snr_lim)
+                    if _snr_trunc else None
+                )
+                _dl = self._slot0_log_proposal_floored(
+                    params_old[k_idx, 0], ln_center_d, sigma_d, alpha_d,
+                    band_sorter, _floor_eps)
+                factors[k_idx] = (
+                    factors[k_idx] + (-_bl - _log_range) + (_dl + _log_range))
+            # Pretend-uniform under _fmax: zero the WHOLE vector (the
+            # container's +/- logpdf terms from the draw block included).
+            factors = self._replace_factors_final(factors, _fmax)
             # Re-evaluate the global prior at the recentered draw (f0 and
             # the band gate are unchanged by the overwrite).
             curr_logp[k_idx] = cp.asarray(

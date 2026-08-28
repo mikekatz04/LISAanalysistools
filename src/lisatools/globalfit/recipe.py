@@ -2855,6 +2855,13 @@ def build_gb_moves(
         gb_replace_move.rj_fstat_dist_birth = (
             bool(int(_fdb_env)) if _fdb_env is not None else True
         )
+        # Search-stage stamp (user ruling 2026-08-28): this install site is
+        # search-only (_gb_mode_search above), and the move's plain
+        # "rj_replace" name carries no stage info -- the stamp is what arms
+        # _replace_fstat_max's auto mode (slot 0 pinned at the F-stat
+        # center + pretend-uniform factors). A future PE replace install
+        # must NOT set this.
+        gb_replace_move.replace_search_stage = True
         gb_replace_move.accepted = np.zeros((ntemps, nwalkers))
     # Pure IN-MODEL move (2026-08-04): no RJ step at all -- ``is_rj_prop=False``
     # skips the birth/death branch in the round loop, so every pick round is
