@@ -10731,6 +10731,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # couples residuals on different GPUs. Walkers are exchangeable, so
         # a device-local permutation is still a correct swap kernel; single
         # device -> one global block (behavior unchanged).
+        # Propose timer, bound once for the coverage marks below (the older
+        # spans in this method each re-read it inline).
+        tm = getattr(self, "_prop_timer", None)
         _aca = getattr(model, "analysis_container_arr", None)
         _splits = getattr(_aca, "gpu_splits", None)
         self._tempering_walker_groups = (
@@ -10850,6 +10853,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             num_bands_preload_temp = max(1, _cell_budget // self.ntemps)
             num_bands_run = 0
             while num_bands_run < self.nwalkers * num_bands_unit:
+                # COVERAGE MARK (2026-08-28 audit): run_tempering ran ~185 s
+                # per move with only ~97 s inside named spans -- ~287 s per
+                # ITERATION unmeasured, 15% of the wall. temper_chunk_setup
+                # covers the per-chunk slicing + the alive-source occupancy
+                # census below, up to the temper_buffer span.
+                _tm_chunk = _tmark_start(tm)
                 start_ind = num_bands_run
                 end_ind = start_ind + num_bands_preload_temp
 
@@ -10902,6 +10911,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         _n_rows * self.ntemps if _fill_slots is None
                         else int(_fill_slots.shape[0]),
                     )
+
+                _tmark_end(tm, "temper_chunk_setup", _tm_chunk)
 
                 with _tspan(getattr(self, "_prop_timer", None), "temper_buffer"):
                     buffer_obj = self._cached_get_buffer(
@@ -11014,6 +11025,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     beta1 = band_temps[(band_inds_now[:, 0], i1)]
                     beta2 = band_temps[(band_inds_now[:, 0], i2)]
 
+                    # COVERAGE MARK: the accept/apply half of each rung pair
+                    # -- MH ratio, the host sync on the selection mask, the
+                    # swap application and the per-band bookkeeping. Runs
+                    # ntemps-1 times per chunk, so it accumulates.
+                    _tm_acc = _tmark_start(tm)
                     paccept = beta1 * (new_lls[:, 1] - old_lls[:, 1]) + beta2 * (
                         new_lls[:, 0] - old_lls[:, 0]
                     ) # ! this is changed because it think this was wrong, below is the previous paccept (comparing with paccept in paper, it should now be good)
@@ -11119,7 +11135,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             specials_i2, i2, walker_inds_now[_sel_idx, i2],
                             bands=band_inds_now[_sel_idx, i2],
                         )
+                    _tmark_end(tm, "temper_accept", _tm_acc)
 
+                # COVERAGE MARK: per-chunk teardown -- census sync, the
+                # ll_change_log scatter and the deferred-label flush.
+                _tm_teardown = _tmark_start(tm)
                 # Flush the device-accumulated census terms: ONE sync per
                 # chunk instead of two per rung pair.
                 _ec_h = _to_numpy(_ec_dev)
@@ -11144,6 +11164,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # labels, so the window flushes here (staying open: the
                 # slots re-anchor onto the labels the table now holds).
                 band_sorter.flush_cell_labels()
+                _tmark_end(tm, "temper_teardown", _tm_teardown)
                 num_bands_run += num_bands_preload_temp
 
             # UNIT-BOUNDARY FLUSH + CLOSE: everything below reads labels --
