@@ -189,25 +189,61 @@ class CoarseWDMRuntime:
             raise ValueError(
                 f"mode must be one of {self._MODES}; got {self.mode!r}."
             )
-        self._P = None
-        self._stat_template = None
+        # {device: (walker_index_array, P_rows_on_device)}; device None is
+        # the CPU / single-device group.
+        self._P_store = {}
+        self._stat_templates = {}
+        self._device_qeff = {}
+
+    @property
+    def _P(self):
+        """Single-group view of the statistics (None before refresh).
+
+        Multi-device stores have no single array; use :meth:`P_rows` with a
+        device-homogeneous walker set instead.
+        """
+        if len(self._P_store) != 1:
+            return None
+        return next(iter(self._P_store.values()))[1]
+
+    @staticmethod
+    def _device_groups(acs):
+        """``{device: [walker indices]}`` from an ACA's ownership map.
+
+        A plain sequence (tests, CPU) is one ``None``-device group. An
+        :class:`AnalysisContainerArray` exposes ``gpu_map`` (walker ->
+        device); missing/empty means single-device.
+        """
+        n = len(acs)
+        gpu_map = getattr(acs, "gpu_map", None)
+        if not gpu_map:
+            return {None: list(range(n))}
+        groups: dict = {}
+        for w in range(n):
+            groups.setdefault(gpu_map.get(int(w)), []).append(int(w))
+        return groups
 
     @property
     def xp(self):
         """Array module derived from the settings backend (never stored)."""
         return self.coarse_settings.xp
 
+    @staticmethod
+    def _to_host(arr):
+        if arr is None:
+            return None
+        if isinstance(arr, np.ndarray):
+            return np.asarray(arr)
+        return arr.get()  # cupy
+
     def __getstate__(self):
         state = dict(self.__dict__)
-        state["_P"] = None
-        state["_stat_template"] = None
+        state["_P_store"] = {}
+        state["_stat_templates"] = {}
+        state["_device_qeff"] = {}
         state["coarse_backend"] = None
-        state["qeff"] = None if self.qeff is None else np.asarray(self.qeff)
-        state["qeff_channels"] = (
-            None
-            if self.qeff_channels is None
-            else np.asarray(self.qeff_channels)
-        )
+        state["qeff"] = self._to_host(self.qeff)
+        state["qeff_channels"] = self._to_host(self.qeff_channels)
         return state
 
     def refresh_P(self, acs, walkers=None) -> None:
@@ -224,26 +260,62 @@ class CoarseWDMRuntime:
                 "partial refresh is a later optimization (residual epochs); "
                 "refresh_P currently rebuilds every walker."
             )
-        xp = self.xp
-        arrays = []
-        for item in acs:
-            arr = getattr(item, "data_res_arr", item)
-            arrays.append(xp.asarray(arr[:]))
-        stacked = xp.stack(arrays, axis=0)
-        self._P = build_coarse_P_batch(
-            stacked, self.coarse_settings, chunk_bytes=self.batch_bytes
-        )
+        from .utils.device import device_context
 
-    def P_rows(self, walkers):
-        """Per-walker statistic rows ``(len(walkers), 3, 3, Nf_active, Ncoarse)``."""
-        if self._P is None:
+        xp = self.xp
+        store = {}
+        for device, idx in self._device_groups(acs).items():
+            with device_context(xp, device):
+                arrays = []
+                for w in idx:
+                    item = acs[w]
+                    arr = getattr(item, "data_res_arr", item)
+                    arrays.append(xp.asarray(arr[:]))
+                stacked = xp.stack(arrays, axis=0)
+                store[device] = (
+                    np.asarray(idx, dtype=int),
+                    build_coarse_P_batch(
+                        stacked,
+                        self.coarse_settings,
+                        chunk_bytes=self.batch_bytes,
+                    ),
+                )
+        self._P_store = store
+
+    def P_rows(self, walkers, device=None):
+        """Statistic rows ``(len(walkers), 3, 3, Nf_active, Ncoarse)``.
+
+        All requested walkers must belong to ONE device group (``device``;
+        the single-group store accepts any walkers with ``device=None``).
+        Multi-device callers iterate their own device grouping — exactly how
+        the scoring batches are dispatched.
+        """
+        if not self._P_store:
             raise RuntimeError(
                 "refresh_P has not run; the per-walker statistics are absent."
             )
-        return self._P[self.xp.asarray(walkers, dtype=int)]
+        if device is None and len(self._P_store) == 1:
+            device = next(iter(self._P_store))
+        if device not in self._P_store:
+            raise KeyError(
+                f"no statistics for device {device!r}; groups: "
+                f"{sorted(self._P_store, key=repr)}."
+            )
+        idx, P = self._P_store[device]
+        walkers = np.asarray(walkers, dtype=int)
+        pos = np.searchsorted(idx, walkers)
+        if np.any(pos >= idx.size) or np.any(idx[np.minimum(pos, idx.size - 1)] != walkers):
+            raise KeyError(
+                f"walkers {walkers.tolist()} are not all owned by device "
+                f"{device!r} (owned: {idx.tolist()})."
+            )
+        return P[self.xp.asarray(pos)]
 
-    def _template_stat(self) -> "CoarseWDMStatistic":
-        if self._stat_template is None:
+    def _template_stat(self, device=None) -> "CoarseWDMStatistic":
+        """Per-device statistic template carrying the (frozen) device-local qeff."""
+        if device not in self._stat_templates:
+            from .utils.device import device_context
+
             qeff = self.qeff
             channels = self.qeff_channels
             if qeff is None:
@@ -255,30 +327,42 @@ class CoarseWDMRuntime:
                     None, self.coarse_settings, use_ws=False, return_channels=True
                 )
             shape = (3, 3) + tuple(self.coarse_settings.basis_shape_active)
-            self._stat_template = CoarseWDMStatistic(
-                P=self.xp.zeros(shape),
-                Qeff=self.xp.asarray(qeff),
-                settings=self.coarse_settings,
-                Qeff_channels=None if channels is None else self.xp.asarray(channels),
-            )
-        return self._stat_template
+            with device_context(self.xp, device):
+                self._stat_templates[device] = CoarseWDMStatistic(
+                    P=self.xp.zeros(shape),
+                    Qeff=self.xp.asarray(qeff),
+                    settings=self.coarse_settings,
+                    Qeff_channels=None
+                    if channels is None
+                    else self.xp.asarray(channels),
+                )
+        return self._stat_templates[device]
 
     def coarse_log_like_batch(
         self,
         covariances,
         walker_inds,
         *,
+        device=None,
         noise_only: bool = False,
         frequency_indices=None,
     ) -> np.ndarray:
-        """Score candidate coarse covariances against their walkers' statistics."""
-        return coarse_wdm_log_likelihood_batch(
-            self._template_stat(),
-            covariances,
-            noise_only=noise_only,
-            frequency_indices=frequency_indices,
-            per_row_P=self.P_rows(walker_inds),
-        )
+        """Score candidate coarse covariances against their walkers' statistics.
+
+        ``device``: the owning device of every row (None = CPU / the
+        single-device group). Multi-device callers dispatch one call per
+        device group, each under that device's context.
+        """
+        from .utils.device import device_context
+
+        with device_context(self.xp, device):
+            return coarse_wdm_log_likelihood_batch(
+                self._template_stat(device),
+                covariances,
+                noise_only=noise_only,
+                frequency_indices=frequency_indices,
+                per_row_P=self.P_rows(walker_inds, device=device),
+            )
 
 
 def _fine_covariance_array(fiducial_sens_mat_fine):

@@ -607,6 +607,106 @@ class CoarseWDMRuntimeTest(unittest.TestCase):
             self._reference_P(new_res),
         )
 
+    class _FakeACA(list):
+        """Sequence + gpu_map, duck-typing the ACA ownership interface."""
+
+        gpu_map = None
+
+    def test_refresh_groups_by_gpu_map(self):
+        """Two-'device' ownership on numpy: grouping/routing runs for real.
+
+        device_context is a no-op under numpy, so integer device keys
+        exercise the per-device stores, the P_rows routing, and the
+        wrong-device refusal without needing cupy.
+        """
+        rt = self.CoarseWDMRuntime(
+            coarse_settings=self.coarse, use_ws=False, mode="delayed_acceptance"
+        )
+        acs = self._FakeACA(self._ACStub(self.res[w]) for w in range(self.NW))
+        acs.gpu_map = {0: 0, 1: 0, 2: 1, 3: 1, 4: 1}
+        rt.refresh_P(acs)
+
+        self.assertEqual(sorted(rt._P_store), [0, 1])
+        self.assertIsNone(rt._P)  # no single-group view for two devices
+        ref = self._reference_P()
+        np.testing.assert_array_equal(
+            np.asarray(rt.P_rows([0, 1], device=0)), ref[[0, 1]]
+        )
+        np.testing.assert_array_equal(
+            np.asarray(rt.P_rows([2, 4], device=1)), ref[[2, 4]]
+        )
+        with self.assertRaises(KeyError):
+            rt.P_rows([0, 2], device=0)  # walker 2 lives on device 1
+        with self.assertRaises(KeyError):
+            rt.P_rows([0], device=3)
+
+    def test_multi_group_scoring_matches_single_group(self):
+        """Per-device scoring == the single-group scoring, row for row."""
+        fine_cov = self._fine_cov()
+        cov_rows = np.stack(
+            [s * self.coarse.cell_mean(fine_cov) for s in (0.7, 0.9, 1.1, 1.5, 2.0)]
+        )
+        single = self.CoarseWDMRuntime(
+            coarse_settings=self.coarse, use_ws=False, mode="delayed_acceptance"
+        )
+        single.refresh_P([self._ACStub(self.res[w]) for w in range(self.NW)])
+        want = np.asarray(
+            single.coarse_log_like_batch(cov_rows, np.arange(self.NW))
+        )
+
+        multi = self.CoarseWDMRuntime(
+            coarse_settings=self.coarse, use_ws=False, mode="delayed_acceptance"
+        )
+        acs = self._FakeACA(self._ACStub(self.res[w]) for w in range(self.NW))
+        acs.gpu_map = {0: 0, 1: 1, 2: 0, 3: 1, 4: 0}
+        multi.refresh_P(acs)
+        got = np.empty(self.NW)
+        for device, rows in ((0, [0, 2, 4]), (1, [1, 3])):
+            got[rows] = np.asarray(
+                multi.coarse_log_like_batch(
+                    cov_rows[rows], np.asarray(rows), device=device
+                )
+            )
+        np.testing.assert_array_equal(got, want)
+
+    def _fine_cov(self):
+        shape = tuple(self.fine.basis_shape_active)
+        A = self.rng.normal(size=shape + (3, 3))
+        cov = np.einsum("...ik,...jk->...ij", A, A) + 0.5 * np.eye(3)
+        return cov.transpose(2, 3, 0, 1)
+
+    @unittest.skipUnless(
+        __import__("importlib").util.find_spec("cupy") is not None,
+        "needs cupy + a CUDA device",
+    )
+    def test_gpu_statistics_device_resident(self):
+        """CLUSTER: per-device P/qeff live on their owning devices."""
+        import cupy
+
+        fine_gpu = WDMSettings(Nf=8, Nt=10, dt=2.0, force_backend="cuda")
+        coarse_gpu = CoarseWDMSettings.from_fine(fine_gpu, 4)
+        rt = self.CoarseWDMRuntime(
+            coarse_settings=coarse_gpu, use_ws=False, mode="delayed_acceptance"
+        )
+        n_dev = cupy.cuda.runtime.getDeviceCount()
+        acs = self._FakeACA()
+        gpu_map = {}
+        for w in range(self.NW):
+            dev = w % max(1, min(n_dev, 2))
+            with cupy.cuda.Device(dev):
+                acs.append(self._ACStub(cupy.asarray(self.res[w])))
+            gpu_map[w] = dev
+        acs.gpu_map = gpu_map
+        rt.refresh_P(acs)
+        for dev, (idx, P) in rt._P_store.items():
+            self.assertEqual(int(P.device.id), int(dev))
+        # CPU parity of the statistics
+        ref = self._reference_P()
+        for dev, (idx, P) in rt._P_store.items():
+            np.testing.assert_allclose(
+                cupy.asnumpy(P), ref[idx], rtol=1e-13, atol=0
+            )
+
     def test_runtime_pickle_deepcopy_drops_arrays(self):
         rt = self.CoarseWDMRuntime(
             coarse_settings=self.coarse,
@@ -709,6 +809,9 @@ class PSDMoveCoarseSidecarTest(unittest.TestCase):
             NOISE_BRANCHES=PSDMove.NOISE_BRANCHES,
             _fixed_noise_coords=dict(fixed_noise_coords or {}),
             _fixed_component_covariances_coarse={},
+            # CPU single-device group (mirrors PSDMove on a CPU ACA)
+            _walker_device=lambda w: None,
+            acs=self._types.SimpleNamespace(xp=np),
         )
         want_logp = (
             np.zeros((self.NT, self.NW)) if logp is None else np.asarray(logp)
@@ -853,28 +956,63 @@ class FineHandoffPreconditionTest(unittest.TestCase):
         self.rt = CoarseWDMRuntime(
             coarse_settings=self.coarse, use_ws=False, mode="delayed_acceptance"
         )
-        import types
-
-        self.gi = types.SimpleNamespace(
-            coarse_wdm_runtime=self.rt,
-            coarse_wdm_settings=self.coarse,
-            domain_settings=self.fine,
-        )
 
     def _acs(self, settings):
         shape = (3, 3) + tuple(settings.basis_shape_active)
         return [self._AC(self._SM(settings, shape)) for _ in range(3)]
 
     def test_fine_state_passes(self):
-        self.check(self._acs(self.fine), self.gi)
+        self.check(self._acs(self.fine), self.rt)
 
     def test_coarse_state_fails_loudly(self):
         with self.assertRaisesRegex(AssertionError, "COARSE"):
-            self.check(self._acs(self.coarse), self.gi)
+            self.check(self._acs(self.coarse), self.rt)
 
     def test_inactive_runtime_is_a_noop(self):
-        self.gi.coarse_wdm_runtime = None
-        self.check(self._acs(self.coarse), self.gi)  # must not raise
+        self.check(self._acs(self.coarse), None)  # must not raise
+
+    def test_combine_move_guard_dispatch(self):
+        """GFCombineMove: source sub-moves guarded, noise sub-moves exempt."""
+        import types
+
+        from lisatools.globalfit.moves.globalfitmove import GFCombineMove
+
+        noise_move = types.SimpleNamespace(
+            coarse_runtime=self.rt, NOISE_BRANCHES=("psd", "galfor", "sgwb")
+        )
+        source_move = types.SimpleNamespace()
+        combo = types.SimpleNamespace(moves=[noise_move, source_move])
+        combo._gf_sidecar_runtime_lookup = (
+            GFCombineMove._gf_sidecar_runtime_lookup.__get__(combo)
+        )
+        combo._gf_precondition = GFCombineMove._gf_precondition.__get__(combo)
+
+        fine_model = types.SimpleNamespace(
+            analysis_container_arr=self._acs(self.fine)
+        )
+        coarse_model = types.SimpleNamespace(
+            analysis_container_arr=self._acs(self.coarse)
+        )
+        combo._gf_precondition(source_move, fine_model)  # fine -> passes
+        combo._gf_precondition(noise_move, coarse_model)  # noise exempt
+        with self.assertRaisesRegex(AssertionError, "COARSE"):
+            combo._gf_precondition(source_move, coarse_model)
+
+    def test_combine_guard_inert_without_runtime(self):
+        import types
+
+        from lisatools.globalfit.moves.globalfitmove import GFCombineMove
+
+        combo = types.SimpleNamespace(moves=[types.SimpleNamespace()])
+        combo._gf_sidecar_runtime_lookup = (
+            GFCombineMove._gf_sidecar_runtime_lookup.__get__(combo)
+        )
+        combo._gf_precondition = GFCombineMove._gf_precondition.__get__(combo)
+        coarse_model = types.SimpleNamespace(
+            analysis_container_arr=self._acs(self.coarse)
+        )
+        combo._gf_precondition(types.SimpleNamespace(), coarse_model)
+        self.assertIsNone(combo._gf_sidecar_runtime)
 
 
 if __name__ == "__main__":

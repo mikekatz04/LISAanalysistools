@@ -1275,23 +1275,38 @@ class PSDMove(GlobalFitMove, StretchMove):
         galfor_coords = merged.get("galfor")
         sgwb_coords = merged.get("sgwb")
 
+        # Rows grouped by owning device (None = CPU / single device), then by
+        # unique walker within the group — each batch builds and scores under
+        # its device's context against that device's statistic rows.
         tmp_logl = np.empty(walker_inds_keep.shape[0], dtype=float)
-        remaining = np.arange(walker_inds_keep.shape[0])
-        while remaining.size:
-            _, first = np.unique(walker_inds_keep[remaining], return_index=True)
-            batch = remaining[np.sort(first)]
-            covariances = self._build_coarse_covariance_batch(
-                batch, walker_inds_keep, psd_coords, galfor_coords, sgwb_coords
+        row_device = [self._walker_device(int(w)) for w in walker_inds_keep]
+        for device in sorted(set(row_device), key=repr):
+            rows_dev = np.asarray(
+                [i for i, d in enumerate(row_device) if d == device], dtype=int
             )
-            tmp_logl[batch] = np.asarray(
-                asnumpy(
-                    self.coarse_runtime.coarse_log_like_batch(
-                        covariances, walker_inds_keep[batch]
+            remaining = rows_dev
+            while remaining.size:
+                _, first = np.unique(walker_inds_keep[remaining], return_index=True)
+                batch = remaining[np.sort(first)]
+                with device_context(self.acs.xp, device):
+                    covariances = self._build_coarse_covariance_batch(
+                        batch,
+                        walker_inds_keep,
+                        psd_coords,
+                        galfor_coords,
+                        sgwb_coords,
                     )
-                ),
-                dtype=float,
-            )
-            remaining = np.setdiff1d(remaining, batch)
+                tmp_logl[batch] = np.asarray(
+                    asnumpy(
+                        self.coarse_runtime.coarse_log_like_batch(
+                            covariances,
+                            walker_inds_keep[batch],
+                            device=device,
+                        )
+                    ),
+                    dtype=float,
+                )
+                remaining = np.setdiff1d(remaining, batch)
         logl[logp_keep] = tmp_logl
         return logl, None
 
@@ -2290,9 +2305,9 @@ class PSDMove(GlobalFitMove, StretchMove):
             # block re-reads every walker's CURRENT residual — a source move
             # may have run since the last block. Residual epochs are a
             # recorded later optimization, deliberately not built yet.
-            self.coarse_runtime.refresh_P(
-                [self.acs[w] for w in range(len(self.acs))]
-            )
+            # the ACA itself: refresh_P reads its gpu_map so each device
+            # group's statistics are built under the owning device's context
+            self.coarse_runtime.refresh_P(self.acs)
             self._prepare_fixed_component_covariances_coarse()
 
         # The working ensembles are the SUB-STATES' tempered branches (this
