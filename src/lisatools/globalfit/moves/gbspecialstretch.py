@@ -5706,16 +5706,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ruled:
 
         - occupancy == 0 for ``GB_RJ_BAND_SHUTOFF_AFTER`` (default 5)
-          consecutive iterations -> births OFF (nothing ever sticks).
-        - occupancy == 1 for AFTER consecutive iterations, where the
-          band's leaf cap was > 1 THROUGHOUT the streak -> births OFF
-          (a second source was ALLOWED the whole time and never
-          arrived). Iterations at cap <= 1 RESET the streak rather
-          than pause it — the band never had the chance to add a
-          second, so they cannot count (conservative).
-        - occupancy >= 2, or ANY occupancy change, resets the streak
-          (a fresh first source restarts the one-source clock; a
-          death 2 -> 1 starts a fresh one-source streak).
+          consecutive iterations -> the band is shut off (nothing ever
+          sticks). **This is the ONLY qualifying state.**
+        - ANY occupancy >= 1, or ANY occupancy change, resets the streak.
+          A band that holds a source is never shut off, whatever its cap
+          would have permitted.
+
+        ZERO-ONLY (user ruling 2026-08-28, superseding the earlier
+        one-source rule). The old second clause also counted occupancy 1
+        whenever the leaf cap allowed a second, on the reasoning that a
+        second source had been permitted all along and never arrived.
+        In practice that silenced a band the moment it caught its FIRST
+        source -- and once the enforcement became a full RJ FREEZE
+        (births AND deaths, see the enforcement block in
+        ``run_proposal``), that first source was then trapped in the band
+        until revival. At small ``AFTER`` values the two rules together
+        would have frozen essentially the whole high-frequency model.
+        The cap no longer enters this decision at all.
 
         Shutoff is NO LONGER permanent for the process (USER RULING
         2026-08-28, superseding "revival semantics deliberately not
@@ -5766,7 +5773,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             cap_h = np.full(self.num_bands, np.iinfo(np.int64).max)
         else:
             cap_h = np.asarray(_to_numpy(cap))
-        qualifying = (occ_max == 0) | ((occ_max == 1) & (cap_h > 1))
+        # ZERO SOURCES IS THE ONLY QUALIFYING STATE (user ruling
+        # 2026-08-28). The old rule also counted occupancy 1 whenever the
+        # cap allowed a second -- which meant a band was silenced the
+        # moment it caught its FIRST source, and under the RJ freeze that
+        # source was then trapped until revival. A band that holds
+        # anything is now never shut off, whatever its cap permits.
+        # ``cap_h`` is retained only for the log line below.
+        qualifying = (occ_max == 0)
         unchanged = occ_max == self._band_occ_last
         self._band_occ_streak = np.where(
             qualifying & unchanged, self._band_occ_streak + 1,

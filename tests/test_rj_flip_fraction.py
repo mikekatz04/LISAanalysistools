@@ -257,31 +257,34 @@ class BandShutoffTest(unittest.TestCase):
         np.testing.assert_array_equal(
             m._rj_band_shutoff, [False, False, True, True])
 
-    def test_one_source_needs_cap_above_one(self):
-        # cap == 1: the one-source streak can NEVER count
-        m = self._move(cap=np.array([1, 1, 1, 1]))
-        for _ in range(10):
-            m._update_band_shutoff(np.array([1, 1, 1, 1]))
-        self.assertFalse(m._rj_band_shutoff.any())
-        # cap == 2: off after 5 one-source iterations
-        m2 = self._move(cap=np.array([2, 2, 2, 2]))
-        for _ in range(5):
-            m2._update_band_shutoff(np.array([1, 1, 1, 1]))
-        np.testing.assert_array_equal(
-            m2._rj_band_shutoff, [False, False, True, True])
+    def test_one_source_never_shuts_off(self):
+        """ZERO sources is the only qualifying state (user ruling
+        2026-08-28). A band holding a source is never silenced, whatever
+        its cap allowed -- previously occupancy 1 qualified when the cap
+        was above 1, which meant a band was shut off the moment it caught
+        its FIRST source. Under the RJ freeze that also trapped that
+        source until revival."""
+        for cap in (np.array([1, 1, 1, 1]), np.array([2, 2, 2, 2]), None):
+            m = self._move(cap=cap)
+            for _ in range(10):
+                m._update_band_shutoff(np.array([1, 1, 1, 1]))
+            self.assertFalse(
+                m._rj_band_shutoff.any(),
+                f"a band holding one source was shut off (cap={cap})")
 
     def test_occupancy_change_resets_streak(self):
         m = self._move(cap=np.array([2, 2, 2, 2]))
         for _ in range(4):
             m._update_band_shutoff(np.array([0, 0, 0, 0]))
-        # band 2 gains its first source -> its zero-streak resets; the
-        # one-source clock starts fresh and needs 5 of its own
+        # band 2 gains its first source -> its zero-streak resets and,
+        # since only ZERO qualifies, it can never re-arm while occupied
         for _ in range(4):
             m._update_band_shutoff(np.array([0, 0, 1, 0]))
         self.assertFalse(bool(m._rj_band_shutoff[2]))
         self.assertTrue(bool(m._rj_band_shutoff[3]))  # stayed 0 -> off
-        m._update_band_shutoff(np.array([0, 0, 1, 0]))
-        self.assertTrue(bool(m._rj_band_shutoff[2]))
+        for _ in range(20):
+            m._update_band_shutoff(np.array([0, 0, 1, 0]))
+        self.assertFalse(bool(m._rj_band_shutoff[2]))
 
     def test_two_or_more_never_counts(self):
         m = self._move(cap=np.array([3, 3, 3, 3]))
@@ -289,12 +292,15 @@ class BandShutoffTest(unittest.TestCase):
             m._update_band_shutoff(np.array([2, 2, 2, 2]))
         self.assertFalse(m._rj_band_shutoff.any())
 
-    def test_cap_none_means_second_always_allowed(self):
-        m = self._move(cap=None)
-        for _ in range(5):
-            m._update_band_shutoff(np.array([1, 1, 1, 1]))
-        np.testing.assert_array_equal(
-            m._rj_band_shutoff, [False, False, True, True])
+    def test_cap_is_irrelevant_now_that_only_zero_qualifies(self):
+        """The cap no longer enters the shutoff rule at all."""
+        for cap in (None, np.array([1, 1, 1, 1]), np.array([5, 5, 5, 5])):
+            m = self._move(cap=cap)
+            for _ in range(5):
+                m._update_band_shutoff(np.array([0, 0, 0, 0]))
+            np.testing.assert_array_equal(
+                m._rj_band_shutoff, [False, False, True, True],
+                err_msg=f"zero-source shutoff changed with cap={cap}")
 
 
 class SchedulerAddCountsTest(unittest.TestCase):
