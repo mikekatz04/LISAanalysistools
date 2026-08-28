@@ -80,6 +80,11 @@ def _make_stub_sorter(nwalkers=3, num_bands=8):
                 coords=np.zeros((0, 9)),
                 band_inds=np.zeros(0, dtype=np.int64),
                 leaf_inds=np.zeros(0, dtype=np.int64),
+                # BandSorter.get_buffer guards against a pending deferred
+                # relabel through main_band_sorter (gbbands.py, the
+                # GB_CELL_LABEL_DEFERRED work). A real sorter with nothing
+                # deferred is a no-op; the stub says so explicitly.
+                _assert_cell_labels_flushed=lambda where: None,
             )
 
         def get_separate_inds_from_special_index(self, specials):
