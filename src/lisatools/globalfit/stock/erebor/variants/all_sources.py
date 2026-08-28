@@ -334,9 +334,12 @@ class AllSourcesGlobalFit(EreborFit):
         return branches
 
     def default_recipe(self) -> Recipe:
-        # One combined PE stage, legacy order: noise moves first (split:
-        # psd / galfor / sgwb each under their own ladder), then mbh, emri,
-        # sobbh, gb.
+        # One combined PE stage: noise moves first (split: psd / galfor /
+        # sgwb each under their own ladder), then sobbh BEFORE mbh/emri
+        # (user ruling 2026-08-27: the cheap branch banks its progress
+        # before the minutes-per-leaf MBH/EMRI proposals put the iteration
+        # at risk on a preemption-prone partition; move order is not a
+        # sampling statement), then gb.
         noise_moves = [
             Move("psd_pe", branch="psd"),
             Move("galfor_pe", branch="galfor"),
@@ -350,9 +353,9 @@ class AllSourcesGlobalFit(EreborFit):
                     kind="pe",
                     moves=noise_moves
                     + [
+                        Move("sobbh_pe", branch="sobbh"),
                         Move("mbh_pe", branch="mbh"),
                         Move("emri_pe", branch="emri"),
-                        Move("sobbh_pe", branch="sobbh"),
                         Move("rj_fstat_pe", branch="gb"),
                     ],
                     combine_kwargs=dict(share_temperature_control=False),

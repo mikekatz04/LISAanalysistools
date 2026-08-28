@@ -17,6 +17,7 @@ from ..domains import (
     STFTSettings,
     WDMSettings,
 )
+from . import midit_checkpoint
 from .plot import RunResultsProduction
 from .state import (
     EMRIState,
@@ -746,6 +747,10 @@ class GFHDFBackend(eryn_HDFBackend):
             mb = float("nan")
         logger.info("[SAVE] save_step %.2f s (%s; h5 now %.1f MB)",
                     time.perf_counter() - t0, mode, mb)
+        # Mid-iteration checkpoint bookkeeping: a real save landed (sync
+        # write, or handed to the saver rank), so checkpoints written from
+        # here on belong to the NEXT iteration; earlier ones go stale.
+        midit_checkpoint.note_saved()
 
     def get_a_sample(self, it):
         """Access a sample in the chain
