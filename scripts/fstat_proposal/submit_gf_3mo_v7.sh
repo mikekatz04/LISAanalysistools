@@ -871,6 +871,27 @@ export GB_FSTAT_CTR_MODE=epoch
 # at baseline). =0 is the no-rebuild rollback to the legacy two-call
 # evaluation at phi0 + pi/2 (bit-identical old algorithm).
 export GB_PHASE_MAX_FUSED=1
+# F-STAT 4->2 BASIS-FILTER FOLD (GBGPU 8245ced / LAT ae8cdb87+07bbac97).
+# The chunked-WDM F-stat kernel generated four independent waveforms, but
+# the four basis filters are 2 polarization directions x 2 phase
+# quadratures (iota=pi/2 throughout, psi in {0, pi/4}, phi0 in quadrature
+# pairs) -- and the quadrature half is a constant unit-modulus rotation
+# {+1,-1,+i,-i} of the complex heterodyned representation, which the
+# d_h_im_out machinery already produces. Two generations span the
+# identical 4-space (rank 4, condition 1.000), so this is EXACT: no
+# physics loss, no sampling-semantics change.
+# VALIDATED: sign pinned CPU-side against a deliberately CONJUGATED build
+# that failed the gate, then the parity suite passed in full ON GPU.
+# The gate is on SIGNED (N, M) and must never be reduced to F -- a
+# conjugated sign is N->DN, M->DMD with D=diag(1,1,-1,-1), which leaves F
+# EXACTLY invariant (tests/test_fstat_filter_fold.py pins this).
+# EXPECT rj_fstat_centers ~830 s -> ~400-450 s, i.e. ~18-20% off the GB
+# iteration. The OFF baseline is already banked (snapshot 13, 830.2 s).
+# =0 restores the unfolded 4-generation path bit-for-bit.
+# REQUIRES A GBGPU REBUILD -- LAT does not compile that header. A stale
+# .so is a SILENT no-op here (no loader fallback, unlike the routing
+# kernels), so confirm by rj_fstat_centers moving, not by a clean build.
+export GB_FSTAT_FOLD=1
 # REPLACE PHASE-MAX + ROTATION-ON-ACCEPT (LAT 1f15f28d; live since job
 # 352: cold replace acceptance ~3x at Delta-ll up to ~700). "auto"
 # (f641f1c2, user rule 2026-08-28 "no maximizing over parameters during
