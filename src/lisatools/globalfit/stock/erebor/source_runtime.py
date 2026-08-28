@@ -1514,7 +1514,39 @@ def find_source_cfg(curr):
 
 def build_source_moves(curr, acs, priors, state, cfg) -> dict:
     """Build the mbh/emri/sobbh PE moves present on ``curr`` into a name->move
-    dict (matching the ``mbh_pe`` / ``emri_pe`` / ``sobbh_pe`` stock-move names)."""
+    dict (matching the ``mbh_pe`` / ``emri_pe`` / ``sobbh_pe`` stock-move names).
+
+    TODO(mbh/emri batching) -- KNOWN, DEFERRED BY DECISION (2026-08-28), not
+    an oversight. ``mbh_pe`` and ``emri_pe`` score ONE ROW AT A TIME through
+    ``AnalysisContainer.build_template`` (the base
+    ``ResidualAddOneRemoveOneMove`` path), where ``sobbh_pe`` was moved onto
+    the batched chunked-heterodyne kernel. Measured on the 6-mo probe, job
+    373:
+
+        sobbh   8.0 s/leaf   2880 rows      2.78 ms/row   (chunked, batched)
+        mbh     344 s/leaf    240 rows   ~1430 ms/row     (dense, per-row)
+        emri    250 s/leaf    240 rows   ~1040 ms/row     (dense, per-row)
+
+    i.e. the SOBBH proposal is ~1.4% of an iteration and MBH+EMRI are ~98%.
+
+    NOT being optimized now, deliberately: these branches are a PROOF OF
+    CONCEPT at 6 months, and faster waveforms plus wider batching support
+    are expected from upstream in the near future -- which would make any
+    batching layer written here now both redundant and a merge hazard. The
+    production 6-mo run that includes these branches simply runs them as
+    they are, with LOW ntemps and LOW repeats (the stock ``num_prop_repeats``
+    default of 2), accepting the per-row cost.
+
+    When it IS time, the routes differ per branch: MBH can go through BBHx's
+    existing batched ``numBinAll`` PhenomHM FD machinery (convention-sensitive
+    -- read the producer before assuming the strain/response conventions
+    match); EMRI has no batched representation today because FEW's ODE is
+    adaptive per source, so its route is the parked multimodal-heterodyne
+    plan rather than a batch axis. Their expose/fold is already cheap
+    (template builds cache -- the injection stage showed 14 s for the first
+    EMRI then <1 s after), so the win is in SCORING, not in the residual
+    bookkeeping that ``sobbh_pe`` fixed.
+    """
     stock_moves = {}
     if "mbh" in curr.source_info:
         stock_moves["mbh_pe"] = build_mbh_move_runtime(curr, acs, priors, state, cfg)

@@ -268,18 +268,16 @@ export SOBBH_NTEMPS=12
 # banks a stored row inside any observed window.
 export MBH_NUM_PROP_REPEATS=2
 export EMRI_NUM_PROP_REPEATS=2
-# SOBBH 25 -> 10 for THIS measurement run (2026-08-28). The chunked fill
-# removed ~25 min of per-leaf dense bookkeeping (expose measured at 0.31 s,
-# job 372, down from 24 x 32 s), which leaves the repeat loop AS the entire
-# leaf -- and unlike the dense floor it removed, that loop is exactly
-# proportional to repeats. Job 372 ran 8.4 min of scoring without finishing
-# a leaf, against a window of (preemption 20-25 min) - (build 11.5 min) =
-# 8.5-13.5 min: right on the edge, which is why every job misses by a hair.
-# At 10 the leaf is ~3.4 min, so boundaries land every ~3 min and
-# mid-iteration checkpointing can finally bank progress. Cost is LINEAR in
-# repeats, so this measures 25 by multiplication -- put it back up once the
-# run can survive a kill.
-export SOBBH_NUM_PROP_REPEATS=10
+# SOBBH back to 25 (user ruling 2026-08-28) now that the measurement is in.
+# The chunked fill removed ~25 min of per-leaf dense bookkeeping (expose and
+# fold-back both 0.31 s, job 373, down from 24 x 32 s each), and job 373
+# then measured the whole SOBBH proposal at 48.0 s -- 8.0 s per leaf over 6
+# leaves at 10 repeats, i.e. 2.78 ms per likelihood row. At 25 repeats that
+# is ~2 min for the entire branch, still ~4% of the iteration, so the extra
+# sampling is essentially free. Repeats also amortize the per-visit
+# expose/fold, which is why SOBBH wants many where MBH/EMRI (cached
+# template builds) do not.
+export SOBBH_NUM_PROP_REPEATS=25
 # Fancy (walker-permuting) temperature swap every 10 iterations (user
 # ruling 2026-08-27): the measured cost was ~17 min of an ~18.5-min MBH
 # leaf visit — ~5x the in-model work — when it fired every propose.
