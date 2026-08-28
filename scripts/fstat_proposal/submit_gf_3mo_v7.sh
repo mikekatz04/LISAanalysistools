@@ -865,9 +865,13 @@ export GB_FSTAT_CTR_MODE=epoch
 # evaluation at phi0 + pi/2 (bit-identical old algorithm).
 export GB_PHASE_MAX_FUSED=1
 # REPLACE PHASE-MAX + ROTATION-ON-ACCEPT (LAT 1f15f28d; live since job
-# 352: cold replace acceptance ~3x at Delta-ll up to ~700). =0 restores
-# exact concrete-parameter scoring on both sides bit-identically.
-export GB_REPLACE_PHASE_MAX=1
+# 352: cold replace acceptance ~3x at Delta-ll up to ~700). "auto"
+# (f641f1c2, user rule 2026-08-28 "no maximizing over parameters during
+# PE"): ON for the search replace exactly as =1 was, OFF for any
+# PE-stamped replace this run may later add -- a hard =1 here would
+# force phase-max onto PE. =0 restores exact concrete-parameter scoring
+# on both sides bit-identically.
+export GB_REPLACE_PHASE_MAX=auto
 # PER-ROW F-STAT CENTERS THROUGH THE UNIT-OPEN CACHE (LAT 86ed9353):
 # exact per-row JKS centers batched ONCE per unit (+ miss fallback)
 # instead of every pick round -- the measured 726 s/row
