@@ -60,12 +60,24 @@ _GB_INDEX_ASSERTS = os.environ.get("GB_INDEX_ASSERTS", "0") == "1"
 # only floating-point reassociation separates the two paths). See the FOLD
 # note in lat_chunked_het_kernels.hh for the rotation and its sign.
 #
-# Default OFF: a plain pull + GBGPU rebuild keeps the unfolded 4-generation
-# path bit-for-bit. Opt in with GB_FSTAT_FOLD=1. Checked ONCE at import; the
-# per-instance ``fstat_fold`` attribute (and the ``get_fstat_ll_wdm`` kwarg of
-# the same name) override it, which is how the parity gate runs both paths in
-# one process.
-_GB_FSTAT_FOLD = int(os.environ.get("GB_FSTAT_FOLD", "0") != "0")
+# DEFAULT ON (user ruling 2026-08-28, promoted from opt-in after the parity
+# suite passed in full ON GPU as well as CPU, with the rotation sign pinned
+# by a deliberately conjugated build that failed the gate). The fold is
+# EXACT -- two generations span the identical 4-space, rank 4, condition
+# 1.000 -- so there is no physics reason to keep the slower path as the
+# default. ``GB_FSTAT_FOLD=0`` restores the unfolded 4-generation path
+# bit-for-bit if it is ever needed as a reference.
+#
+# ⚠ CONSEQUENCE OF THE PROMOTION: a pull + GBGPU rebuild is NO LONGER a
+# no-op -- this is now the production path. It REQUIRES the rebuilt kernel:
+# with a stale GBGPU .so the extra kernel argument has nowhere to go and the
+# call raises (loudly, which is the good failure mode) rather than silently
+# running the old code.
+#
+# Checked ONCE at import; the per-instance ``fstat_fold`` attribute (and the
+# ``get_fstat_ll_wdm`` kwarg of the same name) override it, which is how the
+# parity gate runs both paths in one process.
+_GB_FSTAT_FOLD = int(os.environ.get("GB_FSTAT_FOLD", "1") != "0")
 
 # Fused phase-max sign contract: the chunked kernels also accumulate the
 # quadrature of each candidate-linear inner product (Im of the parity-map
