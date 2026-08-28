@@ -808,11 +808,14 @@ export GB_CAP_DRIFT_GATE=1
 # max-logL search. It must NOT ship at K=8: freezing empty cells at cap 1
 # with a 135-bin cell re-imposes the 24.5% exclusion above.
 export GB_LEAF_CAP_REQUIRE_IMPROVEMENT=1
-# 5, not 3 (probe-validated 2026-08-26): with the one-shot engagement
-# latch + occupied-only patience (c251b267) the clock only runs where
-# it should, and the probes showed 5 gives the likelihood time to
-# consolidate before a cell promotes.
-export GB_LEAF_CAP_MIN_ITERS=5
+# 4 (user ruling 2026-08-28, was 5): the v7 cap-gap analysis showed real
+# 2->3 increments arrive at median gap 9 with ZERO at the floor of 5 --
+# qualification-bound (~0.55 qualified/row), but E[step] scales with the
+# threshold, so 5->4 buys ramp depth with a wide safety margin before
+# the floor binds. 3 remains the aggressive option if the ramp still
+# lags. (Historical: 5-not-3 was probe-validated 2026-08-26 with the
+# one-shot engagement latch + occupied-only patience, c251b267.)
+export GB_LEAF_CAP_MIN_ITERS=4
 export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
