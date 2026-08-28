@@ -350,6 +350,187 @@ class NoiseCovarianceFastPathTest(unittest.TestCase):
         sparse = get_sensitivity(s, sens_fn=X2TDISens, model=model, fill_nans=0.0)[:, 0]
         np.testing.assert_array_equal(np.nan_to_num(folded_dense), sparse)
 
+    def test_sparse_psd_fold_caches_are_not_pickled(self):
+        """Compact gather arrays are derived and rebuild after a round trip."""
+        import pickle
+
+        s = self._wdm()
+        values = np.ones_like(s.fold_frequency_arr)
+        s.fold_sparse_psd(values)
+        indices = np.array([0, 2, s.Nf_active - 1])
+        selected_f, _, _, global_indices = s.sparse_psd_fold_data_for_layers(
+            indices
+        )
+        s.fold_sparse_psd(
+            values[global_indices], frequency_indices=indices
+        )
+        self.assertIn("_fold_shift_map_cache", s.__dict__)
+        self.assertIn("_sparse_psd_fold_cache", s.__dict__)
+        self.assertEqual(selected_f.size, global_indices.size)
+
+        rt = pickle.loads(pickle.dumps(s))
+        self.assertNotIn("_fold_shift_map_cache", rt.__dict__)
+        self.assertNotIn("_sparse_psd_fold_cache", rt.__dict__)
+        self.assertNotIn("_sparse_psd_layer_fold_cache", rt.__dict__)
+        np.testing.assert_array_equal(rt.fold_sparse_psd(values), s.fold_sparse_psd(values))
+
+    def test_selected_sparse_fold_matches_full_layers_exactly(self):
+        """A selected-layer fold is exactly the matching full-fold slice."""
+        s = self._wdm()
+        indices = np.array([0, 1, 4, s.Nf_active - 1])
+        full_values = 1.0 + np.arange(s.fold_frequency_arr.size, dtype=float)
+        _, _, _, global_indices = s.sparse_psd_fold_data_for_layers(indices)
+        selected = s.fold_sparse_psd(
+            full_values[global_indices], frequency_indices=indices
+        )
+        np.testing.assert_array_equal(
+            selected, s.fold_sparse_psd(full_values)[indices]
+        )
+
+    def test_calibrated_quadrature_preserves_flat_wdm_psd(self):
+        """Window quadrature is exactly normalized for a constant spectrum."""
+
+        class FlatSensitivity:
+            @staticmethod
+            def get_Sn(f, **kwargs):
+                return np.ones_like(f, dtype=float)
+
+        settings = self._wdm()
+        folded = get_sensitivity(
+            settings, sens_fn=FlatSensitivity, wdm_psd_method="fold"
+        )
+        calibrated = get_sensitivity(
+            settings,
+            sens_fn=FlatSensitivity,
+            wdm_psd_method="layer_calibrated",
+        )
+        np.testing.assert_allclose(calibrated, folded, rtol=2e-15, atol=0.0)
+
+    def test_backend_wdm_method_reaches_every_noise_component(self):
+        """One backend policy controls instrument, foreground, and SGWB."""
+        from lisatools.sensitivity import CompositeSensitivityBackend
+
+        backend = CompositeSensitivityBackend(
+            self._wdm(),
+            # This legacy unequal-arm-style nesting must be promoted rather
+            # than leaving the stochastic components silently on ``fold``.
+            instrument_component_kwargs={
+                "wdm_psd_method": "layer_calibrated"
+            },
+        )
+        self.assertEqual(backend.wdm_psd_method, "layer_calibrated")
+        components = dict(
+            backend._make_components(
+                "routing",
+                [15e-12, 3e-15],
+                galfor_params=[1.2e-44, 2.5e-3, 3.2, 2.1e-3, 1.1e-3],
+                sgwb_params=[-12.0, 0.0],
+            )
+        )
+        for branch in ("psd", "galfor", "sgwb"):
+            self.assertEqual(
+                components[branch].wdm_psd_method, "layer_calibrated"
+            )
+
+    def test_calibrated_foreground_and_sgwb_match_short_exact_fold(self):
+        """All stochastic components use the calibrated WDM quadrature."""
+        # Keep every wavelet window strictly above f=0; the stock exact path's
+        # fill_nans convention intentionally zeroes an entire layer if its fold
+        # touches the singular stochastic f=0 sample.
+        settings = self._wdm(min_freq=2e-3)
+        foreground_params = (1.2e-44, 2.5e-3, 3.2, 2.1e-3, 1.1e-3)
+        for component_exact, component_calibrated in (
+            (
+                GalacticForeground(foreground_params, wdm_psd_method="fold"),
+                GalacticForeground(
+                    foreground_params, wdm_psd_method="layer_calibrated"
+                ),
+            ),
+            (
+                SGWB((-12.0, 0.0), PowerLawSGWB, wdm_psd_method="fold"),
+                SGWB(
+                    (-12.0, 0.0),
+                    PowerLawSGWB,
+                    wdm_psd_method="layer_calibrated",
+                ),
+            ),
+        ):
+            np.testing.assert_allclose(
+                component_calibrated.covariance(settings),
+                component_exact.covariance(settings),
+                rtol=1e-12,
+                atol=0.0,
+            )
+
+    def test_hyperbolic_foreground_fast_fold_matches_generic_model(self):
+        """Cached spectral invariants preserve the five-parameter foreground."""
+        from lisatools.domains import CoarseWDMSettings
+        from lisatools.sensitivity import X2TDISens
+        from lisatools.stochastic import HyperbolicTangentGalacticForeground
+
+        fine = self._wdm()
+        params = (3.26651613e-44, 2.09278117e-3, 1.18300266, 3014.3, 2957.7)
+        foreground = GalacticForeground(params, tdi_generation=2)
+        for settings in (fine, CoarseWDMSettings.from_fine(fine, 7)):
+            reference = get_sensitivity(
+                settings,
+                sens_fn=X2TDISens,
+                stochastic_params=params,
+                stochastic_function=HyperbolicTangentGalacticForeground,
+                include_instrument=False,
+                fill_nans=0.0,
+            )
+            fast = foreground.base_covariance(settings)[0, 0]
+            np.testing.assert_allclose(fast, reference, rtol=1e-14, atol=0.0)
+
+    def test_hyperbolic_foreground_calibrated_matches_generic_model(self):
+        """Cached quadrature-node invariants preserve layer_calibrated."""
+        from lisatools.domains import CoarseWDMSettings
+        from lisatools.sensitivity import X2TDISens
+        from lisatools.stochastic import HyperbolicTangentGalacticForeground
+
+        fine = self._wdm()
+        params = (3.26651613e-44, 2.09278117e-3, 1.18300266, 3014.3, 2957.7)
+        foreground = GalacticForeground(
+            params, tdi_generation=2, wdm_psd_method="layer_calibrated"
+        )
+        for settings in (fine, CoarseWDMSettings.from_fine(fine, 7)):
+            reference = get_sensitivity(
+                settings,
+                sens_fn=X2TDISens,
+                stochastic_params=params,
+                stochastic_function=HyperbolicTangentGalacticForeground,
+                include_instrument=False,
+                fill_nans=0.0,
+                wdm_psd_method="layer_calibrated",
+            )
+            fast = foreground.base_covariance(settings)[0, 0]
+            # exp(alpha*(log f - log f_1)) for (f/f_1)**alpha is an algebraic
+            # rewrite, so this is FP-equal rather than bit-equal.
+            np.testing.assert_allclose(fast, reference, rtol=1e-13, atol=0.0)
+
+    def test_hyperbolic_foreground_selected_profile_matches_full(self):
+        """Selected foreground profiles retain exact full-fold covariance."""
+        from lisatools.domains import CoarseWDMSettings
+
+        coarse = CoarseWDMSettings.from_fine(self._wdm(), 7)
+        params = (1.2e-44, 2.5e-3, 3.2, 2.1e-3, 1.1e-3)
+        foreground = GalacticForeground(params, tdi_generation=2)
+        indices = np.array([0, 1, 3, coarse.Nf_active - 1])
+        full = foreground.coarse_wdm_profile(coarse)
+        selected = foreground.coarse_wdm_profile(
+            coarse, frequency_indices=indices
+        )
+        np.testing.assert_array_equal(selected[0], full[0][indices])
+        np.testing.assert_array_equal(selected[1], full[1])
+        full_covariance = foreground.coarse_wdm_covariance_from_profile(
+            coarse, full, indices
+        )
+        selected_covariance = foreground.coarse_wdm_covariance_from_profile(
+            coarse, selected, indices
+        )
+        np.testing.assert_array_equal(selected_covariance, full_covariance)
+
     # -- get_Sn stochastic short-circuit --------------------------------------
 
     def test_get_Sn_stochastic_short_circuit(self):
@@ -433,6 +614,27 @@ class NoiseCovarianceFastPathTest(unittest.TestCase):
                 np.nan_to_num(a), np.nan_to_num(b), rtol=1e-13, atol=0.0
             )
 
+    def test_backend_reuses_an_exact_frozen_component_covariance(self):
+        """A cached split-move component must reproduce a fresh full build."""
+        from lisatools.sensitivity import CompositeSensitivityBackend
+
+        settings = self._wdm()
+        backend = CompositeSensitivityBackend(settings, tdi_generation=2)
+        psd = np.array([12.3e-12, 4.2e-15])
+        galfor = np.array(
+            [3.26651613e-44, 2.09278117e-3, 1.18300266, 3014.3, 2957.7]
+        )
+        fresh = np.asarray(
+            backend("fresh", psd, galfor_params=galfor).sens_mat
+        )
+        fixed_galfor = backend.component_covariance("galfor", galfor)
+        reused = backend.covariance_from_params(
+            "cached",
+            psd,
+            fixed_covariances={"galfor": fixed_galfor},
+        )
+        np.testing.assert_array_equal(reused, fresh)
+
     def test_basis_cache_skipped_for_nonlinear_models(self):
         """A model that overrides ``lisanoises`` must not take the linear path."""
         class WeirdModel(lisa.LISAModel):
@@ -474,17 +676,24 @@ class NoiseCovarianceFastPathTest(unittest.TestCase):
 
         s = self._wdm()
         be = CompositeSensitivityBackend(s, tdi_generation=2)
-        be("w", np.array([15e-12, 3e-15]))
+        galfor = (3.26651613e-44, 2.09278117e-3, 1.18300266, 3014.3, 2957.7)
+        be("w", np.array([15e-12, 3e-15]), galfor_params=galfor)
         self.assertEqual(len(be._instrument_basis_cache), 1)
+        self.assertEqual(len(be._galfor_spectral_cache), 1)
 
         rt = pickle.loads(pickle.dumps(copy.deepcopy(be)))
         self.assertEqual(len(rt._instrument_basis_cache), 0)
+        self.assertEqual(len(rt._galfor_spectral_cache), 0)
         # and it still builds the right thing after the round trip
         direct = CompositeSensitivityBackend(
             s, tdi_generation=2, cache_instrument_basis=False
         )
         np.testing.assert_allclose(
-            np.nan_to_num(np.asarray(rt("w", np.array([9.3e-12, 4.1e-15])).sens_mat)),
-            np.nan_to_num(np.asarray(direct("w", np.array([9.3e-12, 4.1e-15])).sens_mat)),
+            np.nan_to_num(np.asarray(rt(
+                "w", np.array([9.3e-12, 4.1e-15]), galfor_params=galfor
+            ).sens_mat)),
+            np.nan_to_num(np.asarray(direct(
+                "w", np.array([9.3e-12, 4.1e-15]), galfor_params=galfor
+            ).sens_mat)),
             rtol=1e-13,
         )

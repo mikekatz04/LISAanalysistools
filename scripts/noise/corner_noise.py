@@ -18,6 +18,11 @@ Every run also prints a chain-diagnostics table -- integrated autocorrelation
 time ``tau`` per parameter and the resulting effective sample size -- unless
 ``--no-diagnostics`` is passed.
 
+Truth lines default to ``--reference lsq``: the least-squares fit of the noise
+model to the actual brick, which is what a mojito run should be judged against.
+``--reference injection`` restores the stock LDC parameters, which are a truth
+only for a synthetic run that injected them. See :data:`REFERENCES`.
+
 This script stays on the h5py + numpy floor deliberately, so it only ever looks
 at the CHAIN. To see the fit against the DATA -- posterior draws of the fitted
 evolutionary PSD over the data's own measured variance -- see ``ppc_noise.py``,
@@ -65,20 +70,76 @@ LOG_PARAMS = {"psd": (0, 1), "galfor": (0, 1, 3, 4)}
 # psd+galfor corner converts each block with its own function.
 LOG_FN = {"psd": np.log, "galfor": np.log10}
 
-# Stock injection truths (lisatools.globalfit.stock.erebor.variants.noise),
-# in LINEAR units -- a log-basis chain compares against LOG_FN[branch] of them.
-# In mojito mode the psd values are re-fit from the NOISE brick's tabulated
-# noise_estimates, landing within ~0.5% of these.
+# Reference values, in LINEAR units -- a log-basis chain compares against
+# LOG_FN[branch] of them. Two sets are available; --reference picks one.
 #
-# galfor f_1 / f_2 are the model-basis frequencies in Hz. They held the raw
+# psd: the stock injection (lisatools.globalfit.stock.erebor.variants.noise).
+# These ARE the levels the NOISE brick was generated at, so they are a truth in
+# the strict sense. In mojito mode the run re-fits them from the brick's
+# tabulated noise_estimates, landing within ~0.5%. The same values are used
+# under both references -- the LSQ fit below held them fixed at exactly these
+# while fitting the foreground, so there is no separate LSQ psd number.
+PSD_INJECTION = [15e-12, 3e-15]
+
+# galfor "injection": the stock 4-yr LDC parameters. NOT a truth for a mojito
+# run -- the GALFOR brick is a synthesized galaxy, not a draw from this
+# 5-parameter model, so nothing guarantees the brick's spectrum is reproduced
+# at these parameters (it is not: they sit ~0.4 decades high in amp and put the
+# roll-off in the wrong place). Useful only for synthetic runs that literally
+# injected them.
+#
+# f_1 / f_2 are the model-basis frequencies in Hz. They held the raw
 # "Slope1"/"Slope2" values (3014.3 / 2957.7) until 2026-08; those belong to a
 # different parameterization and are converted (f_1 = slope1**(-1/alpha),
 # f_2 = 1/slope2) before reaching the model. A chain plotted against the
 # unconverted numbers shows truth lines ~6.4 decades off in f_1 and ~6.9 in f_2.
-TRUTHS = {
-    "psd": [15e-12, 3e-15],
-    "galfor": [3.26651613e-44, 2.09278117e-03, 1.18300266e00, 1.14556409e-03, 3.38095297e-04],
+GALFOR_INJECTION = [
+    3.26651613e-44,  # amp
+    2.09278117e-03,  # fk
+    1.18300266e00,  # alpha
+    1.14556409e-03,  # f_1
+    3.38095297e-04,  # f_2
+]
+
+# galfor "lsq" (the DEFAULT): the Fourier-domain least-squares fit of this same
+# 5-parameter model to the GALFOR_731d_2.5s_L1 brick. This is the reference a
+# mojito foreground run should be compared against -- it is the best this model
+# can do on this data, which is the question a corner plot is actually asking.
+#
+# Provenance: cd1l-validation/galactic_foreground_estimation/
+# foreground_estimation.ipynb, the `least_squares` cell that prints "Fit
+# parameters" (the FIRST one; a later cell repeats the fit over a wider band
+# and lands elsewhere -- alpha 7.14, amp 8.29e-45 -- because the shape is
+# degenerate, see below). Its f_2 = 9.89e-4 is the number quoted in the
+# GALFOR_PRIOR_RANGE ceiling rationale (stock/erebor/noise.py).
+#
+# Fit conditions, which differ from a run's and bound how literally to read the
+# lines: log-residual least_squares with loss="soft_l1" over 2e-4 .. 5e-3 Hz,
+# against the brick's X-channel periodogram, using an EQUAL-ARM analytic TDI-2
+# X response and instrument noise held at PSD_INJECTION. A run fits
+# 3e-4 .. 8e-3 Hz with the unequal-arm model, so agreement to a few 0.01 dex in
+# amp / f_1 / alpha is the most that should be expected.
+#
+# Caveat that matters more than the numbers: fk and f_2 are NOT identified by
+# this data. The exp(-(f/f_1)^alpha) roll-off and the 0.5(1+tanh(-(f-fk)/f_2))
+# cutoff suppress the same high-frequency side, and above ~3.9 mHz the
+# foreground is already under the instrument noise, so the likelihood is flat
+# along a ridge in (amp, fk, f_2). Chains and least-squares fits alike settle at
+# whichever point on that ridge they wandered to. Read the fk / f_2 truth lines
+# as "one valid point on the ridge", not as a target the posterior must cover.
+GALFOR_LSQ = [
+    1.18955159143e-44,  # amp    (log10 -43.925)
+    2.10304500452e-03,  # fk     (log10  -2.677)
+    3.39975538551e00,  # alpha
+    2.46392506051e-03,  # f_1    (log10  -2.609)
+    9.89314627841e-04,  # f_2    (log10  -3.005)
+]
+
+REFERENCES = {
+    "lsq": {"psd": PSD_INJECTION, "galfor": GALFOR_LSQ},
+    "injection": {"psd": PSD_INJECTION, "galfor": GALFOR_INJECTION},
 }
+DEFAULT_REFERENCE = "lsq"
 
 
 # galfor chains written before 2026-08 carry ln, not log10. The two are
@@ -122,17 +183,23 @@ def resolve_basis(samples, basis="auto"):
     return "log" if samples.size and np.min(samples[:, 0]) < 0.0 else "linear"
 
 
-def labels_and_truths(branch, samples, basis="auto"):
+def labels_and_truths(branch, samples, basis="auto", reference=DEFAULT_REFERENCE):
     """``(labels, truths, basis)`` for a branch block in whichever basis it is in.
+
+    ``reference`` selects the truth set (see :data:`REFERENCES`): ``"lsq"`` (the
+    default) compares galfor against the least-squares fit of the model to the
+    GALFOR brick, ``"injection"`` against the stock LDC parameters. psd is the
+    injection under both.
 
     Branches with no log form (sgwb, unknown) come back linear untouched.
     """
+    truths_for = REFERENCES[reference]
     if branch not in LOG_PARAMS:
-        return list(LABELS[branch]), TRUTHS.get(branch), "linear"
+        return list(LABELS[branch]), truths_for.get(branch), "linear"
     basis = resolve_basis(samples, basis)
     if basis != "log":
-        return list(LABELS[branch]), list(TRUTHS[branch]), basis
-    truths = np.asarray(TRUTHS[branch], dtype=float)
+        return list(LABELS[branch]), list(truths_for[branch]), basis
+    truths = np.asarray(truths_for[branch], dtype=float)
     cols = list(LOG_PARAMS[branch])
     truths[cols] = LOG_FN[branch](truths[cols])  # ln for psd, log10 for galfor
     return list(LOG_LABELS[branch]), list(truths), basis
@@ -383,7 +450,7 @@ def plot_trace(iters, trace, labels, truths, out):
     plt.close(fig)
 
 
-def load_joint(path, branches, basis="auto", **kwargs):
+def load_joint(path, branches, basis="auto", reference=DEFAULT_REFERENCE, **kwargs):
     """Cold-chain samples for several branches, column-stacked -> ``(nsamples, sum(ndim))``.
 
     Valid because each branch's sub-state syncs its cold row into the shared
@@ -396,7 +463,7 @@ def load_joint(path, branches, basis="auto", **kwargs):
     for branch in branches:
         arr = load_samples(path, branch, mask=False, **kwargs)
         cols.append(arr)
-        lab, tr, _ = labels_and_truths(branch, arr, basis)
+        lab, tr, _ = labels_and_truths(branch, arr, basis, reference=reference)
         labels += [
             f"{branch}: {x}"
             for x in (lab if len(lab) == arr.shape[1] else [f"p{i}" for i in range(arr.shape[1])])
@@ -443,7 +510,24 @@ def main(argv=None):
         help="skip the tau / effective-sample-size table (it re-reads the chain "
         "with the iteration and walker axes kept)",
     )
-    p.add_argument("--truths", help="comma-separated truths (default: the stock injection)")
+    p.add_argument(
+        "--reference",
+        default=DEFAULT_REFERENCE,
+        choices=tuple(REFERENCES),
+        help="which reference values the truth lines show. 'lsq' (default) "
+        "uses the least-squares fit of the 5-param model to the GALFOR brick "
+        "-- the best this model can do on this data, and the right comparison "
+        "for a mojito run. 'injection' uses the stock LDC parameters, which "
+        "are only a truth for a synthetic run that injected them. psd is the "
+        "injection either way. NOTE: galfor's fk and f_2 are not identified by "
+        "this data (flat ridge above ~3.9 mHz, where the foreground is already "
+        "under the instrument noise), so their lines mark one point on that "
+        "ridge rather than a target the posterior has to cover",
+    )
+    p.add_argument(
+        "--truths",
+        help="comma-separated truths, overriding --reference entirely",
+    )
     p.add_argument("--no-truths", action="store_true")
     p.add_argument("-o", "--out", help="output png (default: <file>_<branch>_corner.png)")
     args = p.parse_args(argv)
@@ -455,10 +539,14 @@ def main(argv=None):
     read_kwargs = dict(discard=args.discard, thin=args.thin, tempered=args.tempered)
 
     if len(branches) > 1:
-        samples, labels, truths = load_joint(args.file, branches, basis=args.basis, **read_kwargs)
+        samples, labels, truths = load_joint(
+            args.file, branches, basis=args.basis, reference=args.reference, **read_kwargs
+        )
     else:
         samples = load_samples(args.file, branches[0], **read_kwargs)
-        labels, truths, basis = labels_and_truths(branches[0], samples, args.basis)
+        labels, truths, basis = labels_and_truths(
+            branches[0], samples, args.basis, reference=args.reference
+        )
         if branches[0] in LOG_PARAMS:
             print(f"{branches[0]} chain read as the {basis} basis")
         if samples.shape[1] != len(labels):
@@ -466,6 +554,15 @@ def main(argv=None):
 
     if args.truths:
         truths = [float(v) for v in args.truths.split(",")]
+        print("truth lines: --truths override")
+    elif args.no_truths:
+        pass
+    else:
+        print(f"truth lines: --reference {args.reference}")
+        if args.reference == "lsq" and "galfor" in branches:
+            # The plot cannot show this and it changes how the lines read.
+            print("  galfor fk / f_2 are unidentified by the data -- their")
+            print("  lines mark one point on a flat ridge, not a target.")
     if args.no_truths:
         truths = None
     if truths is not None and len(truths) != samples.shape[1]:

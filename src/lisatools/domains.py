@@ -84,6 +84,17 @@ class DomainSettingsBase(LISAToolsParallelModule):
         """Return a new settings object describing a sliced view of this domain."""
         raise NotImplementedError("get_slice needs to be implemented for this signal type.")
 
+    def evaluate_time_modulation(self, modulation):
+        """Evaluate a time modulation on this domain's active time grid.
+
+        ``modulation`` may be a callable or an already evaluated array.  Domain
+        subclasses with a reduced time representation can override this hook to
+        preserve cell averages instead of sampling at representative times.
+        """
+        if callable(modulation):
+            return modulation(self.t_arr)
+        return self.xp.asarray(modulation)
+
     # Whether the basis coefficients that enter the Gaussian likelihood are
     # *real* variables (TD, WDM) rather than the complex one-sided (FD/STFT
     # Whittle) coefficients. Subclasses flip this single flag; the numeric
@@ -2201,6 +2212,15 @@ class WDMSettings(DomainSettingsBase):
         sl = self.active_slice_t
         return sl.stop - sl.start
 
+    def __getstate__(self):
+        """Exclude derived WDM gather/fold caches from copies and pickles."""
+        state = dict(self.__dict__)
+        state.pop("_fold_shift_map_cache", None)
+        state.pop("_sparse_psd_fold_cache", None)
+        state.pop("_sparse_psd_layer_fold_cache", None)
+        state.pop("_wdm_layer_quadrature_cache", None)
+        return state
+
     def __eq__(self, value):
         if not isinstance(value, WDMSettings):
             return False
@@ -2368,6 +2388,201 @@ class WDMSettings(DomainSettingsBase):
     def fold_frequency_indices(self) -> np.ndarray:
         """Sorted unique rFFT bins the WDM fold reads (see :meth:`fold_shift_map`)."""
         return self.fold_shift_map()[3]
+
+    def sparse_psd_fold_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Cached data for folding a PSD sampled only where WDM reads it.
+
+        A stationary PSD fold does not need an rFFT-sized, mostly-zero array or
+        an :class:`FDSignal`.  It only needs the unique bins in
+        :attr:`fold_frequency_indices`, a map from the WDM gather matrix back
+        into that compact array, and the fixed squared WDM window.
+
+        Returns:
+            ``(frequencies, compact_gather, window_factor)`` where
+            ``frequencies`` has length ``len(fold_frequency_indices)``,
+            ``compact_gather`` has shape ``(n_special_layers, Nt)``, and
+            ``window_factor = window**2 * pi * data_dt``.  All arrays live on
+            the settings backend.
+
+        Notes:
+            This cache is CPU-oriented for now.  Keeping the primitive backend
+            agnostic makes a later single-GPU implementation local to this
+            method rather than to every stochastic model that uses it.
+        """
+        key = (
+            self.Nf,
+            self.Nt,
+            self.N,
+            self.data_dt,
+            self.ind_min_f,
+            self.ind_max_f,
+        )
+        cached = getattr(self, "_sparse_psd_fold_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        _, k, _, unique_k = self.fold_shift_map()
+        # ``rfftfreq`` uses arange(N//2+1) * (1 / (N*dt)); retain that
+        # operation order so evaluating a PSD here produces the same floating
+        # point frequencies as the dense reference path.
+        frequencies = unique_k * (1.0 / (self.N * self.data_dt))
+        compact_gather = self.xp.searchsorted(unique_k, k)
+        window_factor = self.window ** 2 * np.pi * self.data_dt
+        out = (frequencies, compact_gather, window_factor)
+        self._sparse_psd_fold_cache = (key, out)
+        return out
+
+    def sparse_psd_fold_data_for_layers(
+        self, frequency_indices
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Compact exact-fold data for selected active WDM layers.
+
+        The ordinary sparse fold evaluates every Fourier bin touched by every
+        active layer.  A component known to matter only on a strict subband
+        can use this view to evaluate only the Fourier bins touched by those
+        layers.  The final array contains their indices in the full sparse
+        frequency grid, which lets callers slice cached frequency invariants.
+        """
+        indices = np.asarray(frequency_indices, dtype=np.int64)
+        if indices.ndim != 1:
+            raise ValueError("frequency_indices must be one-dimensional.")
+        if indices.size and (
+            np.any(indices < 0) or np.any(indices >= self.Nf_active)
+        ):
+            raise IndexError(
+                f"frequency_indices must lie in [0, {self.Nf_active})."
+            )
+        key = tuple(map(int, indices))
+        cached = getattr(self, "_sparse_psd_layer_fold_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        frequencies, compact_gather, window_factor = self.sparse_psd_fold_data()
+        selected_gather = np.asarray(compact_gather)[indices]
+        global_indices, local_gather = np.unique(
+            selected_gather, return_inverse=True
+        )
+        local_gather = local_gather.reshape(selected_gather.shape)
+        out = (
+            np.asarray(frequencies)[global_indices],
+            local_gather,
+            window_factor,
+            global_indices,
+        )
+        self._sparse_psd_layer_fold_cache = (key, out)
+        return out
+
+    @property
+    def fold_frequency_arr(self) -> np.ndarray:
+        """Frequencies at which an exact sparse stationary PSD is evaluated."""
+        return self.sparse_psd_fold_data()[0]
+
+    def fold_sparse_psd(
+        self, psd: np.ndarray, *, frequency_indices=None
+    ) -> np.ndarray:
+        """Fold compact stationary PSD values into one WDM time column.
+
+        Args:
+            psd: PSD values whose last axis corresponds, in order, to
+                :attr:`fold_frequency_arr`, or to the compact selected grid
+                when ``frequency_indices`` is supplied. Leading batch/channel
+                axes are supported.
+            frequency_indices: Optional active-layer indices to fold.  Only
+                Fourier bins touched by these layers are evaluated and the
+                returned final axis has this selected length.
+
+        Returns:
+            An array with the same leading axes and a final axis of length
+            :attr:`Nf_active`.  This is algebraically identical to the
+            ``FDSignal.wdmtransform(..., is_psd=True)`` column used previously,
+            without allocating the full rFFT grid or the repeated WDM output.
+        """
+        values = self.xp.asarray(psd)
+        if frequency_indices is None:
+            frequencies, compact_gather, window_factor = self.sparse_psd_fold_data()
+        else:
+            frequencies, compact_gather, window_factor, _ = (
+                self.sparse_psd_fold_data_for_layers(frequency_indices)
+            )
+        if values.ndim == 0 or values.shape[-1] != frequencies.size:
+            raise ValueError(
+                "psd's last axis must have length len(fold_frequency_arr)="
+                f"{frequencies.size}; got shape {values.shape}."
+            )
+
+        # Match FDSignal.wdmtransform(is_psd=True)'s arithmetic order: divide
+        # by dt, multiply by window**2*pi*dt, sum, then divide by N.
+        gathered = values[..., compact_gather] / self.data_dt
+        folded = (gathered * window_factor).sum(axis=-1)
+        folded /= self.N
+        if frequency_indices is None:
+            folded = folded[..., : self.Nf_active]
+        return self.xp.real(folded)
+
+    def wdm_layer_quadrature_data(
+        self, node_count: int = 64
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Weighted frequency nodes for a fast proposal-dependent WDM fold.
+
+        The exact stationary PSD fold contains ``Nt`` samples per frequency
+        layer.  Partition the nonzero WDM window into ``node_count`` pieces,
+        place one node at each piece's window-weighted mean frequency, and
+        retain its exact total window weight.  This is deterministic and exact
+        for a constant PSD, while resolving proposal-dependent curvature far
+        better than a single layer-center sample.
+
+        Returns:
+            ``(frequencies, weights)`` with shapes
+            ``(Nf_active, min(node_count, Nwindow))`` and the matching
+            one-dimensional weight shape, where ``Nwindow`` is the number of
+            nonzero window samples. Multiplying a PSD evaluated at
+            ``frequencies`` by ``weights`` and summing the last axis yields its
+            calibrated WDM layer column.
+        """
+        if isinstance(node_count, bool) or int(node_count) != node_count:
+            raise ValueError("node_count must be a positive integer.")
+        node_count = int(node_count)
+        if node_count < 1:
+            raise ValueError("node_count must be a positive integer.")
+        key = (
+            node_count,
+            self.Nf,
+            self.Nt,
+            self.N,
+            self.data_dt,
+            self.ind_min_f,
+            self.ind_max_f,
+        )
+        cached = getattr(self, "_wdm_layer_quadrature_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        frequencies, compact_gather, window_factor = self.sparse_psd_fold_data()
+        frequencies = np.asarray(asnumpy(frequencies), dtype=float)
+        compact_gather = np.asarray(asnumpy(compact_gather), dtype=np.int64)
+        window_factor = np.asarray(asnumpy(window_factor), dtype=float)
+        nonzero = np.flatnonzero(window_factor > 0.0)
+        actual_node_count = min(node_count, nonzero.size)
+
+        # ``fold_shift_map`` carries one extra Nyquist row when the active band
+        # contains m=0.  A stationary per-layer column follows the established
+        # sparse-fold convention and returns the ordinary active rows here.
+        rows = frequencies[compact_gather][: self.Nf_active]
+        node_frequencies = []
+        node_weights = []
+        for indices in np.array_split(nonzero, actual_node_count):
+            weights = window_factor[indices]
+            total = np.sum(weights)
+            node_frequencies.append(
+                np.sum(rows[:, indices] * weights[None, :], axis=1) / total
+            )
+            node_weights.append(total / (self.data_dt * self.N))
+        out = (
+            self.xp.asarray(np.stack(node_frequencies, axis=1)),
+            self.xp.asarray(node_weights),
+        )
+        self._wdm_layer_quadrature_cache = (key, out)
+        return out
 
 
     # def window_norm(self) -> float:
@@ -2614,6 +2829,147 @@ class WDMSettings(DomainSettingsBase):
             dims_back = tuple(np.roll(np.arange(arr.ndim), -1))
             new_arr = new_arr.transpose(dims_back)
             return new_arr
+
+
+class CoarseWDMSettings(WDMSettings):
+    """Time-coarsened model view of a fine :class:`WDMSettings` grid.
+
+    The underlying WDM transform remains defined by ``Nf``/``Nt`` and the
+    original window.  Only the active model time axis is reduced, into
+    non-overlapping cells containing at most ``coarse_Q`` fine columns.  This
+    object is therefore a sensitivity-model descriptor, not a WDM transform
+    target; use :attr:`fine_settings` for transforms.
+    """
+
+    def __init__(
+        self,
+        Nf: int,
+        Nt: int,
+        dt: float,
+        *args,
+        coarse_Q: int,
+        **kwargs,
+    ):
+        if isinstance(coarse_Q, bool) or not isinstance(coarse_Q, (int, np.integer)):
+            raise TypeError("coarse_Q must be an integer.")
+        if int(coarse_Q) < 1:
+            raise ValueError("coarse_Q must be >= 1.")
+        self.coarse_Q = int(coarse_Q)
+        super().__init__(Nf, Nt, dt, *args, **kwargs)
+
+    @classmethod
+    def from_fine(cls, settings: WDMSettings, Q: int) -> "CoarseWDMSettings":
+        """Construct a coarse model view from a real fine WDM grid."""
+        if not isinstance(settings, WDMSettings) or isinstance(settings, cls):
+            raise TypeError("settings must be a plain WDMSettings instance.")
+        if getattr(settings, "is_complex", False):
+            raise ValueError("Coarse WDM likelihood currently supports real WDM only.")
+        out = cls(*settings.args, coarse_Q=Q, **settings.kwargs)
+        # Runtime identity lets expensive fine-grid component caches be reused
+        # while this coarse view is alive. Reconstruction from args/kwargs still
+        # works and simply recreates an equivalent plain fine settings object.
+        out._fine_settings_source = settings
+        return out
+
+    @property
+    def fine_settings(self) -> WDMSettings:
+        """Reconstruct the plain fine-grid settings used by WDM transforms."""
+        source = getattr(self, "_fine_settings_source", None)
+        if source is not None:
+            return source
+        return WDMSettings(*super().args, **super().kwargs)
+
+    @property
+    def Ncoarse(self) -> int:
+        return int(math.ceil(self.Nt_active / self.coarse_Q))
+
+    @property
+    def cell_starts(self) -> np.ndarray:
+        """Fine active-time offsets at which coarse cells begin."""
+        return np.arange(0, self.Nt_active, self.coarse_Q, dtype=int)
+
+    @property
+    def cell_sizes(self) -> np.ndarray:
+        """Number of fine active columns in each coarse cell."""
+        starts = self.cell_starts
+        return np.minimum(self.coarse_Q, self.Nt_active - starts)
+
+    @property
+    def basis_shape_active(self) -> tuple:
+        return (self.Nf_active, self.Ncoarse)
+
+    @property
+    def fine_t_arr(self) -> np.ndarray:
+        return super().t_arr
+
+    @property
+    def t_arr(self) -> np.ndarray:
+        return self.cell_mean(self.fine_t_arr)
+
+    @property
+    def t_arr_edges(self) -> np.ndarray:
+        fine_edges = super().t_arr_edges
+        inds = np.concatenate([self.cell_starts, np.array([self.Nt_active])])
+        return fine_edges[self.xp.asarray(inds)]
+
+    @property
+    def total_terms(self) -> int:
+        return self.Nf_active * self.Ncoarse
+
+    def cell_mean(self, arr, axis: int = -1):
+        """Average ``arr`` over coarse cells along a fine active-time axis."""
+        xp = get_array_module(arr)
+        arr = xp.asarray(arr)
+        axis = axis if axis >= 0 else arr.ndim + axis
+        if axis < 0 or axis >= arr.ndim:
+            raise ValueError(f"axis {axis} is out of bounds for an array of ndim {arr.ndim}.")
+        if arr.shape[axis] != self.Nt_active:
+            raise ValueError(
+                f"cell_mean axis has length {arr.shape[axis]}; expected "
+                f"Nt_active={self.Nt_active}."
+            )
+        pieces = []
+        for start, size in zip(self.cell_starts, self.cell_sizes):
+            index = [slice(None)] * arr.ndim
+            index[axis] = slice(int(start), int(start + size))
+            pieces.append(xp.mean(arr[tuple(index)], axis=axis))
+        return xp.stack(pieces, axis=axis)
+
+    def evaluate_time_modulation(self, modulation):
+        """Cell-average a callable or fine-grid modulation exactly."""
+        xp = self.xp
+        values = modulation(self.fine_t_arr) if callable(modulation) else xp.asarray(modulation)
+        values = xp.asarray(values)
+        if values.ndim <= 2:
+            return values
+        if values.shape[-1] == self.Nt:
+            values = values[..., self.active_slice_t]
+        if values.shape[-1] == self.Ncoarse:
+            return values
+        if values.shape[-1] != self.Nt_active:
+            raise ValueError(
+                "time modulation must have fine Nt/Nt_active or coarse Ncoarse "
+                f"samples; got {values.shape[-1]}."
+            )
+        return self.cell_mean(values)
+
+    def __eq__(self, value):
+        return (
+            isinstance(value, CoarseWDMSettings)
+            and self.coarse_Q == value.coarse_Q
+            and super().__eq__(value)
+        )
+
+    def eq_without_inds(self, value):
+        return (
+            isinstance(value, CoarseWDMSettings)
+            and self.coarse_Q == value.coarse_Q
+            and super().eq_without_inds(value)
+        )
+
+    @property
+    def kwargs(self) -> dict:
+        return {**super().kwargs, "coarse_Q": self.coarse_Q}
 
 
 class WDMSignal(WDMSettings, DomainBase):

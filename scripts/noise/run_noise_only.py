@@ -22,28 +22,37 @@ but the proposal steps are multiplicative — these parameters span 4 to 12
 decades, and a linear-uniform prior puts almost all its mass in the top one.
 ``--linear-psd`` / ``--linear-galfor`` restore the old basis.
 
-By default psd and galfor are sampled by SEPARATE moves on separate ladders
-(Metropolis-within-Gibbs: each proposes with the other frozen at its cold
-row). ``--joint-noise`` puts both branches in one move on one ladder, so the
-stretch proposal moves all 7 parameters together — worth it when the
-psd/galfor correlation ridge makes the split version mix slowly.
+By default psd and galfor are sampled JOINTLY in one move on one ladder, so
+the stretch proposal moves all 7 parameters together and avoids evaluating
+the full covariance twice per outer iteration. ``--split-noise`` restores
+separate Metropolis-within-Gibbs moves, each with the other branch frozen at
+its cold row.
 
 A per-iteration progress bar is on by default (``--no-progress`` to suppress
 it); ``--verbose`` additionally streams the run's DEBUG logs to the console.
 
 CPU runs are serial by default and dominated by the per-walker sensitivity
 rebuild (these fits use a WDM basis, where the batched C++ likelihood kernel
-does not apply). Three knobs, in descending order of payoff::
+does not apply). The main knobs are::
 
-    --joint-noise      one move over psd+galfor instead of two -> ~2x fewer
-                       covariance rebuilds per iteration, and it samples
-                       along the psd/galfor ridge rather than across it
+    --coarse-Q N       average N adjacent WDM time columns -> nominal Nx
+                       smaller covariance builds/reductions (CPU only). The
+                       Welch--Satterthwaite correction is on by default;
+                       --no-coarse-ws selects plain Bartlett weighting
+    --wdm-psd-method layer_calibrated
+                       apply the fast calibrated layer policy to instrument,
+                       foreground, and SGWB. Fixed instrument bases use their
+                       cached correction; sampled spectra use a 64-node
+                       window quadrature instead of Nt=16060 fold samples
+    --joint-noise      one move over psd+galfor (the foreground default)
+                       -> ~2x fewer covariance rebuilds per iteration
+    --split-noise      opt back into separate psd and galfor Gibbs moves
     --parallel-modes   with --mode both, the two fits run concurrently -> 2x
     --build-threads N  spread one batch's builds over N threads -> ~1.8x
                        (saturates at N=4; the arrays are too small for more)
 
-They compose. All three are off by default, so the stock behaviour is
-unchanged.
+They compose. Coarsening, parallel modes, and build threading are off by
+default; foreground noise sampling is joint by default.
 
 Lite laptop-smoke preset by default; ``--full`` for production sampling and
 ``--two-years`` for the complete brick duration::
@@ -75,6 +84,9 @@ GALFOR_FILE = os.path.join(SPRINT_ROOT, "GALFOR_731d_2.5s_L1.h5")
 MODULATION_FILE = os.path.join(HERE, "modulation_multi.dat")
 RUN_DT = 5.0
 RUN_NF = 768
+# Per-end edge trim, matching the engine's preprocess default
+# (globalfit/engine.py). --two-years sizes its WDM grid around it.
+TRIM_DURATION = 200 * 3600.0
 
 
 def _read_xyz(path):
@@ -88,13 +100,15 @@ def _read_xyz(path):
     return xyz, times, fs
 
 
-def _two_year_grid(path, dt=RUN_DT, nf=RUN_NF):
-    """Return the largest even-``Nt`` WDM grid covered by the whole brick.
+def _two_year_grid(path, dt=RUN_DT, nf=RUN_NF, trim_duration=TRIM_DURATION):
+    """Return the largest even-``Nt`` WDM grid the conditioned brick covers.
 
-    The WDM transform requires even ``Nf`` and ``Nt``.  At the stock 5 s / 768
-    layer grid the 731-day brick leaves only 392 downsampled samples (32.7 min)
-    outside the last complete WDM block, rather than losing the 200 hours at
-    each edge plus everything after the stock 45.5-day observation.
+    The WDM transform requires even ``Nf`` and ``Nt``.  ``trim_duration`` is
+    the engine's per-end edge trim (seconds), removed after downsampling and
+    before the ``Tobs`` cut, so the grid has to be sized on what survives it.
+    At the stock 5 s / 768 layer grid the 731-day brick keeps everything past
+    the stock 45.5-day observation, losing only the two trimmed edges and the
+    remainder outside the last complete WDM block.
     """
     from mojito import MojitoL1File
 
@@ -113,13 +127,50 @@ def _two_year_grid(path, dt=RUN_DT, nf=RUN_NF):
     # scipy.signal.resample_poly, used by the preprocessing path, returns the
     # ceiling of the input length divided by an integer decimation factor.
     n_downsampled = (n_native + decimation_int - 1) // decimation_int
-    nt = n_downsampled // nf
+    # SignalProcessor.trim takes int(duration / dt) off EACH end, on the
+    # already-downsampled series.
+    n_available = n_downsampled - 2 * int(trim_duration / dt)
+    nt = n_available // nf
     nt -= nt % 2
     if nt < 2:
         raise SystemExit(
-            f"--two-years input {path!r} is too short for an even {nf}xNt WDM grid"
+            f"--two-years input {path!r} is too short for an even {nf}xNt WDM "
+            f"grid after trimming {trim_duration / 3600:g} h from each end"
         )
-    return nf, nt, n_downsampled
+    return nf, nt, n_available
+
+
+def _domain_t0(noise_file, gs):
+    """Absolute time of the domain's ``t_arr[0]``.
+
+    Domains hand out a 0-based ``t_arr``, and every absolute-clock table (the
+    ``/ltts`` delays, the tabulated galactic modulation) is looked up at
+    ``t_arr + data_t0``.  ``data_t0`` is therefore the first sample of the
+    PROCESSED series, not of the file: the preprocess trims
+    ``int(duration / dt)`` samples off the head before the WDM pour, so the
+    file's own ``times[0]`` is early by exactly that much.  Missing the offset
+    reads every column's delays from ~200 h in the past, which is a ~1.7e-3
+    relative arm error -- small, but one-signed, and worth +0.0006 in
+    ``ln Soms_d`` on a two-year fit.
+    """
+    # Only the first sample time is needed -- do NOT go through _read_xyz,
+    # which pulls the whole 3 x N Doppler array (~600 MB on the two-year
+    # brick) to reach it.
+    from mojito import MojitoL1File
+
+    with MojitoL1File(noise_file) as handle:
+        t_first = float(handle.tdis.time_sampling.t()[0])
+    trim = (gs.preprocess_kwargs or {}).get("trim_kwargs")
+    head = 0.0
+    if trim and trim.get("trimming_type") == "from_each_end":
+        duration = float(trim["duration"])
+        if trim.get("is_percent"):
+            raise SystemExit(
+                "is_percent trims are not supported here; the domain t0 offset "
+                "cannot be resolved before the data is loaded."
+            )
+        head = int(duration / gs.dt) * gs.dt
+    return t_first + head
 
 
 class NoiseBrickStep(BaseProcessingStep):
@@ -159,7 +210,14 @@ def check_resume(fit, branches):
     # fields. Concatenation, not os.path.join, to match the engine exactly.
     gs = fit.general
     path = gs.file_store_dir + gs.base_file_name + "_" + gs.main_file_key + ".h5"
+    scheme_marker = path + ".noise_scheme"
+    requested_scheme = (
+        "joint" if bool(getattr(gs, "joint_noise_move", False)) else "split"
+    )
     if not os.path.exists(path):
+        if "galfor" in branches:
+            with open(scheme_marker, "w", encoding="utf-8") as marker:
+                marker.write(requested_scheme + "\n")
         return
 
     import h5py
@@ -168,10 +226,54 @@ def check_resume(fit, branches):
     with h5py.File(path, "r") as f:
         grp = f.get("global_fit") or f.get("mcmc")
         if grp is None or int(grp.attrs.get("iteration", 0)) <= 0:
+            if "galfor" in branches:
+                with open(scheme_marker, "w", encoding="utf-8") as marker:
+                    marker.write(requested_scheme + "\n")
             return
+        if "galfor" in branches:
+            if os.path.exists(scheme_marker):
+                with open(scheme_marker, encoding="utf-8") as marker:
+                    stored_scheme = marker.read().strip()
+            else:
+                # Before the joint-default change, the unmarked driver default
+                # was split. Treat old files conservatively so an explicit tag
+                # such as ``try5`` cannot silently resume under the new scheme.
+                stored_scheme = "split"
+            if stored_scheme != requested_scheme:
+                diffs.append(
+                    "noise move scheme: stored "
+                    f"{stored_scheme}, config {requested_scheme}"
+                )
         stored_nwalkers = int(grp.attrs["nwalkers"])
         if stored_nwalkers != fit.general.nwalkers:
             diffs.append(f"nwalkers: stored {stored_nwalkers}, config {fit.general.nwalkers}")
+        # The WDM time grid is NOT a sampler shape -- every chain array is
+        # (iteration, temp, walker, leaf, ndim) regardless of Nt -- so a run
+        # whose data grid moved would resume happily against the old walkers
+        # and sample a different likelihood. --two-years changes Nt whenever
+        # the conditioning changes (the edge trim shortens the record), which
+        # is exactly the silent case. The stored ``omega`` is one entry per
+        # WDM time column, so its length is the stored Nt.
+        kwargs_grp = grp.get("domain_settings/kwargs")
+        if kwargs_grp is not None:
+            for name, want in (
+                ("min_freq", fit.general.min_freq),
+                ("max_freq", fit.general.max_freq),
+            ):
+                stored = kwargs_grp.attrs.get(name)
+                if stored is None or want is None:
+                    continue
+                if not np.isclose(float(stored), float(want)):
+                    diffs.append(
+                        f"{name}: stored {float(stored):g}, config {float(want):g}"
+                    )
+        omega = grp.get("domain_settings/kwargs/omega")
+        if omega is not None and getattr(fit.general, "nt", None) is not None:
+            stored_nt = int(omega.shape[0])
+            if stored_nt != int(fit.general.nt):
+                diffs.append(
+                    f"WDM Nt: stored {stored_nt}, config {int(fit.general.nt)}"
+                )
         for name in branches:
             sub = grp.get(f"sub_backend/{name}")
             if sub is None:
@@ -189,6 +291,9 @@ def check_resume(fit, branches):
             "different --tag (lite and full already differ), or delete the file to "
             "start fresh.\n"
         )
+    if "galfor" in branches:
+        with open(scheme_marker, "w", encoding="utf-8") as marker:
+            marker.write(requested_scheme + "\n")
 
 
 def sampled_branches(mode):
@@ -221,6 +326,18 @@ def _basis_tag(mode, args):
     # covariance, so a resume across it would silently read equal-arm walkers.
     if getattr(args, "unequal_arm", False):
         tag += "_ua"
+    _wdm_method = getattr(args, "wdm_psd_method", "fold")
+    if _wdm_method == "layer_constant":
+        tag += "_wdmcenter"
+    elif _wdm_method == "layer_calibrated":
+        tag += "_wdmcal"
+    coarse_q = int(getattr(args, "coarse_Q", 1) or 1)
+    if coarse_q > 1:
+        tag += f"_cQ{coarse_q}"
+        if getattr(args, "no_coarse_ws", False):
+            tag += "_bartlett"
+        else:
+            tag += f"_ws_{getattr(args, 'coarse_fiducial', 'injection')}"
     return tag
 
 
@@ -247,6 +364,8 @@ def build_fit(mode, args):
         ("num_iterations", args.iterations),
         ("gpus", args.gpus),
         ("psd_build_threads", args.build_threads),
+        ("min_freq", args.min_freq),
+        ("max_freq", args.max_freq),
     ):
         if value is not None:
             knobs[key] = value
@@ -262,6 +381,9 @@ def build_fit(mode, args):
     # variant rebuilds its default recipe from this (variants/noise.py), so
     # the stage carries a single ``noise_pe`` move.
     knobs["joint_noise_move"] = args.joint_noise
+    knobs["coarse_Q"] = args.coarse_Q
+    knobs["coarse_use_ws"] = not args.no_coarse_ws
+    knobs["coarse_fiducial"] = args.coarse_fiducial
     # None -> stationary. A path is wrapped in GalForTimeModulation by the
     # variant's _resolve_modulation and threaded onto the GalacticForeground
     # component, which evaluates it on the domain's t_arr (0-based).
@@ -274,16 +396,37 @@ def build_fit(mode, args):
 
     fit = erebor.noise_only(**knobs)
     gs = fit.general
+    # One policy for every component entering the WDM noise likelihood.  The
+    # unequal-arm instrument has a specialized fixed-basis calibration; the
+    # sampled foreground/SGWB use the generic proposal-dependent quadrature.
+    gs.sensitivity_init_kwargs = dict(gs.sensitivity_init_kwargs or {})
+    gs.sensitivity_init_kwargs["wdm_psd_method"] = args.wdm_psd_method
 
     if args.two_years:
-        # Mojito L1 is already conditioned.  Bypass the engine's default
-        # highpass and 200-hour edge trim, downsample the whole brick, then
-        # retain the largest complete even WDM grid.  Tobs is explicit so a
-        # future preprocessing-default change cannot silently shorten it.
+        # Keep the engine's conditioning -- highpass then 200 h off each end --
+        # and take the largest complete even WDM grid inside what survives.
+        # The brick is NOT pre-conditioned: it carries a low-frequency wander
+        # tens of sigma above the noise rms, and the run's Tukey taper is only
+        # 2 wavelets per side, so tapering an unfiltered record turns that
+        # wander into a broadband transient in the edge time columns. Measured
+        # on this brick (X, 768x16436): dropping both left mean w^2/C = 5.7
+        # over all pixels against 1.001 in the interior, with 100% of the
+        # excess in the first and last ~5 columns and 243x in layer m=3 alone
+        # -- enough to pull Sa_a up ~50x in power, and to rail galfor's
+        # amplitude at its prior ceiling when that branch is free to absorb it.
+        # Restoring both puts it back at 1.003.
+        #
+        # Tobs is explicit so a future preprocessing-default change cannot
+        # silently shorten it; the trim duration is passed rather than left to
+        # the default so the grid and the trim can never disagree.
         tobs = nf * nt * gs.dt
         gs.preprocess_kwargs = dict(
-            highpass_kwargs=None,
-            trim_kwargs=None,
+            highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),
+            trim_kwargs=dict(
+                duration=TRIM_DURATION,
+                is_percent=False,
+                trimming_type="from_each_end",
+            ),
             downsample_kwargs=dict(target_fs=1.0 / gs.dt),
             Tobs=tobs,
             normalize=False,
@@ -291,8 +434,24 @@ def build_fit(mode, args):
         dropped = n_available - nf * nt
         print(
             f"[two-years] WDM grid Nf={nf}, Nt={nt}, dt={gs.dt:g} s; "
-            f"Tobs={tobs / 86400.0:.6f} d ({dropped} trailing "
-            f"downsampled samples outside the final complete WDM block)",
+            f"Tobs={tobs / 86400.0:.6f} d (highpass 2e-5 Hz, "
+            f"{TRIM_DURATION / 3600:g} h trimmed from each end, {dropped} "
+            "trailing downsampled samples outside the final complete WDM block)",
+            flush=True,
+        )
+
+    # The active band is a likelihood-content choice, not a grid detail, so it
+    # goes in the banner next to the grid whenever it is not the default.
+    if args.min_freq is not None or args.max_freq is not None:
+        layer_df = 1.0 / (2.0 * gs.nf * gs.dt)
+        ind_min = int(np.ceil(gs.min_freq / layer_df))
+        ind_max = min(int(gs.max_freq / layer_df), gs.nf - 1)
+        print(
+            f"[band] active WDM layers {ind_min}-{ind_max} "
+            f"({ind_min * layer_df * 1e3:.3f}-{ind_max * layer_df * 1e3:.3f} mHz, "
+            f"{ind_max - ind_min + 1} of {gs.nf} layers; "
+            f"layer_df={layer_df * 1e3:.4f} mHz) "
+            f"from min_freq={gs.min_freq:g}, max_freq={gs.max_freq:g}",
             flush=True,
         )
 
@@ -318,23 +477,32 @@ def build_fit(mode, args):
         # otherwise need here.) The stride decimates a 2.5 s cadence that is
         # wildly finer than the month timescale the delays actually vary on.
         #
-        # The table is averaged over each WDM time slice at first use, so every
-        # wavelet time column gets the delays that column actually saw -- the
-        # arms breathe ~1.5-1.8% over the run, which one epoch cannot represent.
+        # The exact method averages the table over every WDM time slice; the
+        # layer_constant approximation interpolates it at coarse cell centers.
+        # Either retains the ~1.5-1.8% breathing that one epoch cannot represent.
         # ``data_t0`` lines the file's absolute clock up with the domain's
-        # 0-based t_arr, the same offset the --modulation path applies.
+        # 0-based t_arr -- via _domain_t0, so the head trim is included. The
+        # --modulation path takes the same offset.
         #
         # Only plain arrays go onto the settings tree, never an orbits object:
         # the tree is deepcopied and pickled, and L1Orbits holds a C++/nanobind
         # wrap (sprint deepcopy/pickle rule).
         from lisatools.sensitivity import LinkDelayTable, UnequalArmInstrumentNoise
 
-        _, _times, _ = _read_xyz(args.noise_file)
         table = LinkDelayTable.from_l1_file(
-            args.noise_file, stride=200, data_t0=float(_times[0])
+            args.noise_file, stride=200, data_t0=_domain_t0(args.noise_file, gs)
         )
         fit.psd.instrument_component_cls = UnequalArmInstrumentNoise
-        fit.psd.instrument_component_kwargs = dict(ltts=table)
+        fit.psd.instrument_component_kwargs = dict(
+            ltts=table,
+            # Shared by instrument and foreground modes.  The cache contains
+            # exact coarse unit bases plus the three fine diagonals needed for
+            # arbitrary channelwise WS fiducials; it is safe to reuse across
+            # restarts and avoids rebuilding the breathing-arm transfer.
+            coarse_cache_dir=os.path.join(args.out_dir, "unequal_arm_coarse_cache"),
+            coarse_progress=True,
+            wdm_psd_method=args.wdm_psd_method,
+        )
         mean = table.run_average()
         span = table.ltts.max(axis=0) - table.ltts.min(axis=0)
         print(
@@ -343,7 +511,12 @@ def build_fit(mode, args):
             f"\n  arm spread (of the means): {(mean.max() - mean.min()) / mean.mean():.3%}"
             f"\n  breathing over run, per link: "
             f"{np.array2string(100 * span / mean, precision=2)} %"
-            "\n  averaged per WDM time slice at build.",
+            "\n  WDM PSD method: "
+            + (
+                "exact DFT fold and fine-column covariance average"
+                if args.wdm_psd_method == "fold"
+                else "0.5*S(f_m) at WDM frequency/coarse-time cell centers"
+            ),
             flush=True,
         )
 
@@ -377,9 +550,8 @@ def build_fit(mode, args):
         # single source of their own time axes.
         from lisatools.sensitivity import GalForTimeModulation
 
-        _, times, _ = _read_xyz(args.noise_file)
         fit.galfor.modulation = GalForTimeModulation(
-            _modulation_path, t0=float(times[0])
+            _modulation_path, t0=_domain_t0(args.noise_file, gs)
         )
 
     if mode == "instrument":
@@ -406,14 +578,34 @@ def parse_args(argv=None):
     p.add_argument("--galfor-file", default=GALFOR_FILE)
     p.add_argument("--full", action="store_true", help="drop the lite laptop-smoke preset")
     p.add_argument(
+        "--min-freq",
+        type=float,
+        default=None,
+        help="lower edge of the active WDM band in Hz (default 3e-4). The "
+        "band is CONTIGUOUS -- WDMSettings resolves it to layers "
+        "[ceil(min_freq/layer_df), floor(max_freq/layer_df)] and there is no "
+        "way to punch a hole in the middle. Cropping trades likelihood "
+        "leverage for freedom from a region the model cannot describe",
+    )
+    p.add_argument(
+        "--max-freq",
+        type=float,
+        default=None,
+        help="upper edge of the active WDM band in Hz (default 8e-3). NOTE "
+        "the 4-8 mHz layers are what anchor Soms_d -- the foreground is "
+        "negligible there -- so lowering this loosens Soms_d markedly",
+    )
+    p.add_argument(
         "--two-years",
         action="store_true",
         help="process the complete 731-day (~2 year) input brick instead of "
-        "the lite/full preset's short WDM time grid. Uses the largest complete "
-        "even 768xNt grid (730.489 days for the bundled brick), bypassing the "
-        "default highpass and 200-hour edge trim because mojito L1 is already "
-        "conditioned. Sampling scale remains independent: combine with --full "
-        "for production walkers/temperatures/iterations",
+        "the lite/full preset's short WDM time grid. Keeps the engine's "
+        "highpass and 200-hour edge trim (the brick is NOT pre-conditioned -- "
+        "without them the Tukey taper turns its low-frequency wander into a "
+        "broadband edge transient that biases the noise posterior), then uses "
+        "the largest complete even 768xNt grid inside what survives (713.8 "
+        "days for the bundled brick). Sampling scale remains independent: "
+        "combine with --full for production walkers/temperatures/iterations",
     )
     p.add_argument(
         "--linear-psd",
@@ -451,17 +643,72 @@ def parse_args(argv=None):
         "spread, the ~1.5-1.8%% breathing over the run, and the Sagnac "
         "splitting d_ij != d_ji -- which shift the TDI nulls per arm and make "
         "the cross-spectra complex. The delays are averaged over each WDM time "
-        "slice, so the noise PSD varies along the run. Costs one extra fold "
-        "per wavelet time column at build (once, then cached); the "
+        "slice, so the noise PSD varies along the run. The exact fused build "
+        "streams progress and is cached persistently under <out-dir>/"
+        "unequal_arm_coarse_cache for restarts and the other mode; the "
         "per-proposal sampling cost is unchanged",
     )
     p.add_argument(
+        "--wdm-psd-method",
+        choices=("fold", "layer_constant", "layer_calibrated"),
+        default="fold",
+        help="WDM PSD construction for every noise component (instrument, "
+        "galactic foreground, and SGWB). 'fold' (default) evaluates the "
+        "DFT-grid PSD and folds it exactly. "
+        "'layer_constant' uses the S_wdm[m]=0.5*S(f_m) approximation at WDM "
+        "frequency-layer centers and, with --coarse-Q > 1, evaluates breathing "
+        "arms at coarse time-cell centers -- it skips the expensive "
+        "initialization fold but under-predicts the covariance by up to ~1%% in "
+        "the lowest active layer, worth ~+0.0015 in ln Soms_d on a two-year "
+        "instrument fit. 'layer_calibrated' keeps the specialized one-fold "
+        "correction for the fixed instrument bases and uses a compact "
+        "window-weighted quadrature for sampled stochastic spectra, retaining "
+        "proposal-dependent curvature while keeping layer-center speed",
+    )
+    noise_move = p.add_mutually_exclusive_group()
+    noise_move.add_argument(
         "--joint-noise",
+        dest="joint_noise",
         action="store_true",
-        help="sample psd and galfor in ONE move on ONE ladder instead of the "
-        "default per-branch Gibbs split -- proposes all 7 parameters together "
-        "so it can travel along the psd/galfor correlation ridge. Requires "
-        "PSD_NTEMPS == GALFOR_NTEMPS (both default to 12)",
+        default=True,
+        help="sample psd and galfor in ONE move on ONE ladder (the default) -- "
+        "proposes all 7 parameters together and evaluates the full covariance "
+        "once per repeat. Requires PSD_NTEMPS == GALFOR_NTEMPS (both default "
+        "to 12)",
+    )
+    noise_move.add_argument(
+        "--split-noise",
+        dest="joint_noise",
+        action="store_false",
+        help="use separate psd and galfor Metropolis-within-Gibbs moves, each "
+        "with its own ladder and the other branch frozen at its cold row",
+    )
+    p.add_argument(
+        "--coarse-Q",
+        type=int,
+        default=1,
+        metavar="N",
+        help="coarsen the real WDM likelihood over N adjacent time columns "
+        "(default 1, disabled). N>1 is CPU-only for now and gives a nominal "
+        "Nx reduction in covariance construction/inversion work. Unequal-arm "
+        "covariances use an exact fine-grid cell average under "
+        "--wdm-psd-method=fold, or a coarse cell-center evaluation under "
+        "layer_constant/layer_calibrated",
+    )
+    p.add_argument(
+        "--coarse-fiducial",
+        choices=("injection", "initial"),
+        default="injection",
+        help="when WS is enabled, the fine-grid covariance at which the coarse "
+        "effective degrees of freedom are frozen: injected/reference parameters "
+        "(default) or the componentwise median physical parameters of the "
+        "initial cold walkers",
+    )
+    p.add_argument(
+        "--no-coarse-ws",
+        action="store_true",
+        help="opt out of the default channelwise Welch--Satterthwaite "
+        "effective-dof correction and use plain Bartlett weights Qeff=n_q",
     )
     p.add_argument(
         "--no-progress",
@@ -554,13 +801,13 @@ def run_modes_in_parallel(args, argv):
 
     # The progress bars are still there, they are just in the logs now. Say so
     # and hand over the command -- otherwise this looks exactly like a hang,
-    # and under --unequal-arm the first bar update is several MINUTES out (the
-    # per-WDM-time-slice LTT fold runs once before iteration 1).
+    # and under --unequal-arm there is a one-time exact transfer build before
+    # iteration 1 (now with its own progress/ETA output).
     print(
         "\nBoth runs are live; their progress bars are in the logs above.\n"
         f"  watch both:  tail -f {' '.join(logs)}\n"
-        "Under --unequal-arm expect several minutes of silence before the "
-        "first iteration ticks (one-time light-travel-time fold).\n"
+        "Under --unequal-arm, watch the one-time breathing-arm build progress "
+        "before the first iteration; the other mode/restarts reuse its cache.\n"
         "Drop --parallel-modes to get the bar on your terminal instead.",
         flush=True,
     )
@@ -582,6 +829,13 @@ def run_modes_in_parallel(args, argv):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.coarse_Q < 1:
+        raise SystemExit("--coarse-Q must be an integer >= 1")
+    if args.coarse_Q > 1 and args.gpus is not None:
+        raise SystemExit(
+            "--coarse-Q > 1 is CPU-only for now; omit --gpus. "
+            "Single-GPU support is planned."
+        )
     # The engine builds paths by string concatenation
     # (``file_store_dir + base_file_name + ...``), so a missing trailing
     # separator silently writes "<dir>noise_instrument_..." NEXT TO the

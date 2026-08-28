@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import numbers
 import typing
 
 import numpy as np
@@ -171,6 +172,18 @@ class NoiseGeneralSettings(EreborGeneralSettings):
         default_factory=env_default("PSD_BUILD_THREADS", 1, int)
     )
 
+    # CPU-only real-WDM time coarse graining. Q=1 leaves the ordinary fine
+    # likelihood untouched. For Q>1 Welch--Satterthwaite weighting is on by
+    # default and frozen at either the injection/reference model or the median
+    # initialized cold walker.
+    coarse_Q: int = dataclasses.field(default_factory=env_default("COARSE_Q", 1, int))
+    coarse_use_ws: bool = dataclasses.field(
+        default_factory=env_default("COARSE_USE_WS", True, bool)
+    )
+    coarse_fiducial: str = dataclasses.field(
+        default_factory=env_default("COARSE_FIDUCIAL", "injection", str)
+    )
+
     # "mojito" (default): the real NOISE brick; "synthetic": the Cholesky
     # draw from the injected covariance. Auto-falls back to synthetic when
     # the brick / mojito folder is missing.
@@ -299,6 +312,23 @@ class _NoiseFitBase(EreborFit):
     #    ``fit.sgwb.stochastic_fn`` / ``fit.psd.instrument_model_cls`` — no
     #    editing of general-level ``sensitivity_init_kwargs`` needed. --
     def finalize_general(self, gs: NoiseGeneralSettings) -> None:
+        if (
+            isinstance(gs.coarse_Q, bool)
+            or not isinstance(gs.coarse_Q, numbers.Integral)
+            or gs.coarse_Q < 1
+        ):
+            raise ValueError(f"coarse_Q must be an integer >= 1; got {gs.coarse_Q!r}.")
+        gs.coarse_Q = int(gs.coarse_Q)
+        if gs.coarse_fiducial not in ("injection", "initial"):
+            raise ValueError(
+                "coarse_fiducial must be 'injection' or 'initial'; got "
+                f"{gs.coarse_fiducial!r}."
+            )
+        if gs.coarse_Q > 1 and gs.gpus is not None:
+            raise ValueError(
+                "coarse_Q > 1 is CPU-only for now; unset gpus/use_gpu. "
+                "Single-GPU support is a planned follow-up."
+            )
         gs.sensitivity_init_kwargs = noise_sensitivity_init_kwargs(
             gs.sensitivity_init_kwargs,
             tdi_generation=gs.tdi_gen,
