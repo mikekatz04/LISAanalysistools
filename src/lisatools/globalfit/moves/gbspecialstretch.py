@@ -11276,8 +11276,73 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # (2026-07-23). Default 1200 cells == the validated 6-temp size.
             _cell_budget = int(os.environ.get("GB_TEMPER_PRELOAD_CELLS", "1200"))
             num_bands_preload_temp = max(1, _cell_budget // self.ntemps)
+
+            # ---- ROW FILTER: INERT-ROW COMPACTION (GB_TEMPER_COMPACT_ROWS)
+            #      + SHUT-OFF BAND EXCLUSION (GB_TEMPER_SKIP_SHUTOFF_BANDS)
+            # Both drop whole grid ROWS before the grid is chunked, so
+            # every chunk is cut from rows that do real work. The two
+            # reasons are tracked SEPARATELY because their ladder
+            # corrections differ (see the knob docstrings): inert rows are
+            # always-accepted and their counter contribution is restored
+            # exactly; shut-off rows contribute nothing by design.
+            _n_rows_unit = self.nwalkers * num_bands_unit
+            _inert_bands_unit = None      # bands of dropped INERT rows
+            _n_inert_rows_unit = 0
+            _compact_rows = _temper_compact_rows_on()
+            _skip_shut_bands = _temper_skip_shutoff_bands_on()
+            if (_compact_rows or _skip_shut_bands) and _n_rows_unit > 0:
+                _grid_sp = special_index.reshape(-1, self.ntemps)
+                _grid_bd = band_index.reshape(-1, self.ntemps)
+                _grid_wk = walkers_permuted.reshape(-1, self.ntemps)
+                _row_band = _grid_bd[:, 0]
+
+                # Shut-off rows first: the band is frozen whatever its
+                # occupancy, and these rows get NO counter restoration.
+                _shut_row = cp.zeros(_n_rows_unit, dtype=bool)
+                if _skip_shut_bands:
+                    _shut_u = getattr(self, "_rj_band_shutoff", None)
+                    if (_shut_u is not None and bool(_shut_u.any())
+                            and self._band_shutoff_enabled()):
+                        _shut_row = cp.asarray(_shut_u)[_row_band]
+
+                # Inert rows: no source at ANY temperature. Same proof the
+                # _fill_slots skip already uses, applied to scheduling.
+                _inert_row = cp.zeros(_n_rows_unit, dtype=bool)
+                if _compact_rows:
+                    if _census_hoist:
+                        _u_sp_f, _u_ct_f = _u_sp_unit, _u_ct_unit
+                    else:
+                        _mbs_f = band_sorter.main_band_sorter
+                        _u_sp_f, _u_ct_f = cp.unique(
+                            _mbs_f.special_band_inds[_mbs_f.inds],
+                            return_counts=True,
+                        )
+                    if int(_u_sp_f.shape[0]) > 0:
+                        _pos_f = cp.clip(
+                            cp.searchsorted(_u_sp_f, _grid_sp),
+                            0, max(int(_u_sp_f.shape[0]) - 1, 0),
+                        )
+                        _occ_f = cp.where(
+                            _u_sp_f[_pos_f] == _grid_sp, _u_ct_f[_pos_f], 0
+                        )
+                    else:
+                        _occ_f = cp.zeros_like(_grid_sp)
+                    # A shut-off row is accounted for as shut-off, never
+                    # as inert, so the two corrections cannot double-count.
+                    _inert_row = (_occ_f.sum(axis=1) == 0) & (~_shut_row)
+
+                _drop_row = _inert_row | _shut_row
+                if bool(_drop_row.any()):
+                    _keep_row = ~_drop_row
+                    _inert_bands_unit = _row_band[_inert_row]
+                    _n_inert_rows_unit = int(_inert_row.sum())
+                    band_index = _grid_bd[_keep_row]
+                    walkers_permuted = _grid_wk[_keep_row]
+                    special_index = _grid_sp[_keep_row]
+                    _n_rows_unit = int(band_index.shape[0])
+
             num_bands_run = 0
-            while num_bands_run < self.nwalkers * num_bands_unit:
+            while num_bands_run < _n_rows_unit:
                 # COVERAGE MARK (2026-08-28 audit): run_tempering ran ~185 s
                 # per move with only ~97 s inside named spans -- ~287 s per
                 # ITERATION unmeasured, 15% of the wall. temper_chunk_setup
@@ -11596,6 +11661,57 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 band_sorter.flush_cell_labels()
                 _tmark_end(tm, "temper_teardown", _tm_teardown)
                 num_bands_run += num_bands_preload_temp
+
+            # ---- LADDER RESTORATION for compacted INERT rows ----
+            # THE CORRECTNESS TRAP of GB_TEMPER_COMPACT_ROWS. An inert
+            # pair scores ``paccept == 0.0``, and ``0.0 > log(u)`` holds
+            # unconditionally (``cp.random.uniform`` is [0, 1), so
+            # ``log(u) < 0`` always), so today every inert row is recorded
+            # as an ACCEPTED swap that moves nothing -- +1 to both
+            # ``band_swaps_accepted`` and ``band_swaps_proposed``, at every
+            # one of the ``ntemps - 1`` rungs. Those counters drive
+            # ``_adapt_band_temps``, so dropping the rows without this
+            # restoration would move the temperature ladder of every
+            # PARTIALLY occupied band (a fully inert band is unaffected
+            # either way -- its ratio column is all-ones, whose
+            # differences are already zero).
+            #
+            # The contribution is deterministic, so it is added back
+            # analytically rather than simulated. Shut-off rows are
+            # deliberately NOT restored (see the knob docstring).
+            if _n_inert_rows_unit > 0 and _inert_bands_unit is not None:
+                _nb_tot_u = band_swaps_accepted.shape[0]
+                _inert_bc = cp.bincount(
+                    _inert_bands_unit, minlength=_nb_tot_u
+                ).astype(band_swaps_accepted.dtype)
+                # Same +1 at every rung -> one broadcast column add.
+                band_swaps_accepted += _inert_bc[:, None]
+                band_swaps_proposed += _inert_bc[:, None]
+                # Keep the two independent accept counters reconciled:
+                # the always-on [GB_TEMPER_CHECK] cross-check compares the
+                # host census against band_swaps_accepted.sum(), and an
+                # unrestored census would trip a spurious MISMATCH warning.
+                _n_rungs_u = self.ntemps - 1
+                _inert_pairs_u = _n_inert_rows_unit * _n_rungs_u
+                _empty_census["pairs"] += _inert_pairs_u
+                _empty_census["acc"] += _inert_pairs_u
+                _empty_census["both_empty"] += _inert_pairs_u
+                _empty_census["acc_both_empty"] += _inert_pairs_u
+
+            # CENSUS-HOIST INVARIANT (GB_TEMPER_CENSUS_HOIST): the hoisted
+            # occupancy is only valid while the alive mask is frozen for
+            # the whole unit. Checked here rather than trusted -- one
+            # reduction + one sync per unit, against ~590 full-table
+            # sorts saved.
+            if _census_hoist:
+                _inds_sum_end = int(band_sorter.main_band_sorter.inds.sum())
+                assert _inds_sum_end == _inds_sum_unit, (
+                    f"{self.name}: alive-source count changed inside "
+                    f"run_tempering unit {tmp} "
+                    f"({_inds_sum_unit} -> {_inds_sum_end}) -- the hoisted "
+                    f"occupancy census (GB_TEMPER_CENSUS_HOIST) is invalid. "
+                    f"Births/deaths must not reach the tempering loop."
+                )
 
             # UNIT-BOUNDARY FLUSH + CLOSE: everything below reads labels --
             # add_cold_chain_sources_to_residual goes through get_subset
