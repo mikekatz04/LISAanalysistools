@@ -924,8 +924,20 @@ export GB_CELL_LABEL_DEFERRED=1
 # automatically when GB_INMODEL_TRACE / GB_JUMP_TRACE are armed.
 # ARMED 2026-08-28 (user ruling): INERT until the ./install.sh rebuild
 # provides the binary (one-line fallback warning + python chain until
-# then); first post-rebuild row's [GB_TIMING] inmodel_* spans +
-# standing checks are the de-facto A/B; =0 is the instant rollback.
+# then); =0 is the instant rollback.
+# READ THE A/B OFF `inmodel_gate` (LAT: the mark brackets BOTH branches of
+# this one chain -- before it existed the gate hid inside inmodel_repeats
+# and a few-second effect was invisible). The default timer does not sync
+# at stage boundaries, so inmodel_gate carries HOST time: exactly what
+# collapsing ~160 launches/repeat-step to 3 should move.
+# EXPECTATION (snapshot-12 arithmetic): ~450k launches removed per propose
+# => single-digit seconds, ~0.2-1% of a ~1130 s propose. The second-order
+# hope is MULTI-GPU: the kernel leaves ONE data-dependent host sync where
+# the python chain had many, so watch gpu_util_*.csv for higher and more
+# BALANCED utilisation, not just a smaller inmodel_gate.
+# TODO(v8) USER RULING 2026-08-28: if the multi-GPU picture is not clearly
+# better, ship v8 with this OFF -- the wall-clock win alone does not
+# justify carrying a second implementation of the gate chain.
 export GB_INMODEL_ACCEPT_KERNEL=1
 export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # High-f barren-band birth shutoff (search scope): bands above FMIN with

@@ -276,6 +276,32 @@ def _tspan(tm, name: str):
     return tm.span(name) if tm is not None else nullcontext()
 
 
+def _tmark_start(tm):
+    """Open a checkpoint-style timing mark (``span`` without a with-block).
+
+    For stages whose body is too large to re-indent into a ``with``, or
+    that straddle an if/else. Mirrors :meth:`_ProposeTimer.span` exactly,
+    including its sync discipline (a no-op unless GB_PROP_TIMING_SYNC=1,
+    so by default the mark carries HOST time -- the quantity a
+    launch-overhead change is meant to move). Returns ``None`` when the
+    timer is absent; pair with :func:`_tmark_end`.
+    """
+    if tm is None:
+        return None
+    if tm._sync is not None:
+        tm._sync()
+    return time.perf_counter()
+
+
+def _tmark_end(tm, name: str, t0):
+    """Close a :func:`_tmark_start` mark, accumulating into ``name``."""
+    if tm is None or t0 is None:
+        return
+    if tm._sync is not None:
+        tm._sync()
+    tm.add(name, time.perf_counter() - t0)
+
+
 def _compact_index_ranges(indices, max_groups: int = 12) -> str:
     """``[0-3, 17, 40-44, ...]`` -- collapse an index list into runs.
 
@@ -9929,6 +9955,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # backend call whose ``n_keep`` read is the loop's single
                 # remaining data-dependent host sync -- exactly the one the
                 # ``xp.where(keep)`` compress already paid.
+                # A/B mark for GB_INMODEL_ACCEPT_KERNEL: brackets BOTH
+                # implementations of this one chain so the knob's effect
+                # reads off a single number instead of hiding inside
+                # inmodel_repeats. Default (unsynced) timer => host time,
+                # which is what collapsing ~160 launches/repeat-step to 3
+                # is supposed to move.
+                _gate_t0 = _tmark_start(tm)
                 if _acc is not None:
                     keep, keep_idx, keep_any = self._imk_gate(
                         _acc, _h_i, new, new_logp, curr, l_s,
@@ -10037,6 +10070,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # bit-identical.
                     keep_idx = xp.where(keep)[0]
                     keep_any = int(keep_idx.size) > 0
+            _tmark_end(tm, "inmodel_gate", _gate_t0)
             # Under the fused accept kernel the per-repeat ``new_ll`` buffer
             # is block-scope scratch (the kernel writes the -1e300 floor into
             # the non-kept lanes itself), so the allocate-and-fill is skipped.
