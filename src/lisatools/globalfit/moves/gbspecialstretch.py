@@ -571,6 +571,145 @@ def _inmodel_accept_kernel_on() -> bool:
     return os.environ.get("GB_INMODEL_ACCEPT_KERNEL", "0") == "1"
 
 
+def _temper_census_hoist_on() -> bool:
+    """Whether the tempering occupancy census is hoisted to per-unit.
+
+    ``GB_TEMPER_CENSUS_HOIST`` (default ``"0"`` -- OFF). The per-chunk
+    census answers "how many live sources sit in each of THIS chunk's
+    ~1200 cells", but it does so by gathering the WHOLE source table
+    (``special_band_inds[inds]``, 1e6-1e7 rows) and sorting it
+    (``cp.unique(..., return_counts=True)``) -- once per chunk, ~590
+    chunks per move. Only the final ``searchsorted`` is chunk-sized.
+
+    Hoisting the gather+sort to once per UNIT is exact. Two facts, both
+    verified against the code rather than assumed:
+
+    * ``inds`` -- the alive mask the gather selects on -- is never
+      written anywhere inside ``run_tempering``. Births and deaths happen
+      in ``run_proposal``/``_run_rj_step``; the only reachable write is
+      the copy constructor in ``get_subset``, which writes a fresh
+      deep-copied subset object, not the parent's buffer.
+    * ``special_band_inds`` IS written inside the loop -- every chunk
+      ends in ``flush_cell_labels()``, which relabels the rows of cells
+      that swapped. (Note this is stronger than "the table is
+      unchanged": when a 3-source cell swaps with an empty one the label
+      MULTISET changes, so the counts genuinely move.) It is still safe
+      to hoist, because a swap only ever exchanges two temperatures OF
+      THE SAME ROW, every row of a chunk belongs to that chunk, and
+      chunks slice the grid into DISJOINT cell sets. So a flush can only
+      redistribute labels among cells the loop has already finished
+      with; the counts for every cell a LATER chunk queries are
+      untouched. Packed labels are unique per (temp, walker, band), so
+      no relabelled cell can collide with a future chunk's label either.
+
+    Bit-identical: every chunk sees the same ``_occ_now`` it would have
+    computed for itself. Guarded at the unit boundary by an
+    ``inds.sum()`` invariant check (one reduction per unit).
+
+    Read per call so tests can flip it.
+    """
+    return os.environ.get("GB_TEMPER_CENSUS_HOIST", "0") == "1"
+
+
+def _temper_batch_perms_on() -> bool:
+    """Whether the tempering walker permutations are drawn in one batch.
+
+    ``GB_TEMPER_BATCH_PERMS`` (default ``"0"`` -- OFF). When off,
+    ``_tempering_swap_grid`` builds its ``(band, temp)`` walker
+    permutations one ``cp.random.permutation`` call at a time in a python
+    list comprehension -- ``ntemps * num_bands_tempered`` calls per unit
+    (24 * 1230 = 29,520 on the v6 production grid), of which the
+    ``[start::units]`` slice immediately discards all but ``1/units``.
+    Across a ``units``-pass move that is ~265,680 draws to keep ~29,520:
+    the stage is kernel-LAUNCH bound, not sort bound.
+
+    When on, only the KEPT ``(band, temp)`` rows are drawn, as one
+    ``(n_rows, nwalkers)`` uniform matrix plus one ``argsort`` -- 1-2
+    launches per unit instead of 29,520.
+
+    NOT bit-identical: an argsort of iid uniforms is a uniform random
+    permutation (so the swap-grid DISTRIBUTION is exactly preserved), but
+    it consumes a different RNG stream than ``cp.random.permutation``, so
+    the realized permutations -- and therefore every downstream swap
+    decision -- differ draw for draw. Distribution-identical, not
+    bit-identical.
+
+    Read per call so tests can flip it.
+    """
+    return os.environ.get("GB_TEMPER_BATCH_PERMS", "0") == "1"
+
+
+def _temper_compact_rows_on() -> bool:
+    """Whether inert grid rows are compacted out before chunking.
+
+    ``GB_TEMPER_COMPACT_ROWS`` (default ``"0"`` -- OFF). A grid ROW is one
+    (band, walker-permutation) column of the ladder, and a swap only ever
+    exchanges two TEMPERATURES OF THE SAME ROW -- so a row with no source
+    at any temperature can never acquire one. ``GB_TEMPER_SKIP_EMPTY``
+    already proves exactly this set and uses it to skip slab traffic
+    (``_fill_slots``), but NOT to schedule: chunks are still cut from the
+    grid in raw order, so a chunk of ~1200 cells holds ~44% live rows and
+    still pays a full bind plus all ``ntemps - 1`` rung iterations.
+
+    Compacting the unit's grid to its active rows before the chunk loop
+    makes every chunk full of work.
+
+    NOT bit-identical. The per-rung Metropolis draw
+    ``cp.random.uniform(size=paccept.shape)`` is sized by the chunk's row
+    count, so dropping rows shifts the RNG stream; retained pairs still
+    draw iid uniforms, so their decisions are distribution-identical.
+
+    The LADDER, however, is preserved EXACTLY. An inert pair has
+    ``paccept == 0.0``, which beats ``log(u)`` unconditionally, so today
+    every inert row contributes ``+1`` to BOTH ``band_swaps_accepted``
+    and ``band_swaps_proposed`` at EVERY rung -- and that ratio drives
+    ``_adapt_band_temps``. Dropping the rows silently would move the
+    temperature ladder of every PARTIALLY occupied band. The deterministic
+    contribution is added back analytically (``bincount`` of the dropped
+    rows' bands, broadcast over all ``ntemps - 1`` rungs).
+
+    Read per call so tests can flip it.
+    """
+    return os.environ.get("GB_TEMPER_COMPACT_ROWS", "0") == "1"
+
+
+def _temper_skip_shutoff_bands_on() -> bool:
+    """Whether shut-off bands are excluded from the tempering grid.
+
+    ``GB_TEMPER_SKIP_SHUTOFF_BANDS`` (default ``"0"`` -- OFF). USER RULING
+    2026-08-28: the high-frequency barren-band shutoff became a FULL
+    FREEZE -- "we want to shutoff that band for RJ and fancy swaps until
+    it resets". A shut-off band takes no RJ of any kind at any
+    temperature (enforced in ``run_proposal``); this knob extends the
+    same freeze to the swap machinery, so no cell of a shut-off band is
+    built, scored or swapped until the band is revived.
+
+    Cousin of ``GB_TEMPER_COMPACT_ROWS``, NOT a duplicate: compaction
+    drops rows that are inert because no temperature holds a source,
+    whereas a shut-off band is frozen even when hot chains DO hold
+    prior-drawn junk leaves in it -- exactly the case compaction keeps.
+
+    ⚠ LADDER SEMANTICS DIFFER FROM COMPACTION, DELIBERATELY. Inert rows
+    are always-accepted, so their counter contribution is deterministic
+    and is added back exactly. A shut-off band's rows may hold real
+    templates whose swaps would have been scored, so there is no
+    contribution to restore: the band simply stops producing swap
+    statistics. That leaves its ``accepted/proposed`` ratio at 0 for
+    every rung, and ``_adapt_band_temps`` turns an all-equal ratio column
+    into ``dSs == 0`` -- i.e. the band's ladder FREEZES while it is shut
+    off, which is the intent. ``_adapt_band_temps`` is per-band
+    (independent columns), so no other band's ladder is touched.
+
+    Safe only because shutoff is no longer permanent
+    (``_band_shutoff_revive`` on a new F-stat epoch, or after
+    ``GB_RJ_BAND_SHUTOFF_RESET_ITERS``): a frozen band is released
+    periodically. Do not disable revival without reconsidering this.
+
+    Read per call so tests can flip it.
+    """
+    return os.environ.get("GB_TEMPER_SKIP_SHUTOFF_BANDS", "0") == "1"
+
+
 def _inmodel_trace_knobs_active() -> bool:
     """Whether either per-repeat MH trace is armed (``GB_INMODEL_TRACE`` / ``GB_JUMP_TRACE``).
 
@@ -11062,6 +11201,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # 1e6-1e7 rows plus a syncing boolean getitem).
             band_sorter.begin_cell_label_window(special_index)
 
+            # ---- OCCUPANCY CENSUS HOIST (GB_TEMPER_CENSUS_HOIST, default
+            # OFF; see _temper_census_hoist_on for why this is exact) ----
+            # The gather+sort below is invariant across the unit's chunks;
+            # only the searchsorted against ``special_inds_now`` is
+            # chunk-specific, and that stays in the loop.
+            _census_hoist = _temper_census_hoist_on()
+            _u_sp_unit = None
+            _u_ct_unit = None
+            _inds_sum_unit = None
+            if _census_hoist:
+                _mbs_unit = band_sorter.main_band_sorter
+                _u_sp_unit, _u_ct_unit = cp.unique(
+                    _mbs_unit.special_band_inds[_mbs_unit.inds],
+                    return_counts=True,
+                )
+                # Invariant guard: the hoist is only valid while the alive
+                # mask holds still. A birth/death reaching this loop would
+                # silently poison every later chunk's occupancy.
+                _inds_sum_unit = int(_mbs_unit.inds.sum())
+
             # Tempering chunk size as a CELL budget (rows x ntemps), not a
             # row count: the historic hardcoded 200 rows meant 200*ntemps
             # cells, which scaled the buffer (and its host-side staging)
@@ -11094,8 +11253,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # zero here means the slot's template slab is provably
                 # untouched.
                 _main_bs = band_sorter.main_band_sorter
-                _alive_sp = _main_bs.special_band_inds[_main_bs.inds]
-                _u_sp, _u_ct = cp.unique(_alive_sp, return_counts=True)
+                if _census_hoist:
+                    # Hoisted at the unit boundary above -- bit-identical
+                    # for this chunk's cells (disjoint-chunk argument).
+                    _u_sp, _u_ct = _u_sp_unit, _u_ct_unit
+                else:
+                    _alive_sp = _main_bs.special_band_inds[_main_bs.inds]
+                    _u_sp, _u_ct = cp.unique(_alive_sp, return_counts=True)
                 _pos = cp.searchsorted(_u_sp, special_inds_now)
                 _pos = cp.clip(_pos, 0, max(int(_u_sp.shape[0]) - 1, 0))
                 _occ_now = cp.where(
