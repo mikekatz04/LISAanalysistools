@@ -737,11 +737,21 @@ def _ortho_boundary_pairs(
     rows. Returns ``(i_idx, j_idx)`` int arrays of row indices into the
     input arrays (empty when no cross-band pair exists).
     """
-    f0 = np.asarray(f0, dtype=float)
-    walker_inds = np.asarray(walker_inds)
-    band_inds = np.asarray(band_inds)
-    eligible = np.asarray(eligible, dtype=bool)
-    _rem = np.asarray(remainder)
+    # ``_to_numpy`` (= gpubackendtools asnumpy), NOT ``np.asarray``: the
+    # caller hands these straight off the BandSorter, so on a GPU run they
+    # are cupy and ``np.asarray`` raises "Implicit conversion to a NumPy
+    # array is not allowed". The whole body below is host numpy
+    # (``np.where`` / ``np.unique`` / ``np.argsort``), so the pull has to
+    # happen here. This silently disabled GB_ORTHO_CHECK for the entire
+    # 2026-08-29 v7 run -- every propose logged "premise check skipped:
+    # TypeError(...)" and produced no orthogonality data at all. The guard
+    # around the caller downgraded it to a warning, which is why it cost a
+    # run's worth of measurement rather than a crash.
+    f0 = np.asarray(_to_numpy(f0), dtype=float)
+    walker_inds = np.asarray(_to_numpy(walker_inds))
+    band_inds = np.asarray(_to_numpy(band_inds))
+    eligible = np.asarray(_to_numpy(eligible), dtype=bool)
+    _rem = np.asarray(_to_numpy(remainder))
     _in_class = (
         band_inds % int(units) == int(_rem) if _rem.ndim == 0
         else band_inds % int(units) == _rem.astype(int)[walker_inds]

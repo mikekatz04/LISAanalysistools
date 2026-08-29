@@ -353,6 +353,78 @@ class ScanScheduleLogLineTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class _DeviceLike:
+    """Stand-in for a cupy array: refuses implicit NumPy conversion.
+
+    cupy raises ``TypeError("Implicit conversion to a NumPy array is not
+    allowed. Please use `.get()`...")`` from ``__array__``. Reproducing that
+    here is what lets a CPU-only box catch the class of bug that silently
+    disabled GB_ORTHO_CHECK for a whole production run -- the real failure
+    was found in a cluster log, not by any test.
+    """
+
+    def __init__(self, arr):
+        self._a = np.asarray(arr)
+
+    def __array__(self, *a, **k):
+        raise TypeError(
+            "Implicit conversion to a NumPy array is not allowed. "
+            "Please use `.get()` to construct a NumPy array explicitly."
+        )
+
+    def get(self):
+        return self._a
+
+    @property
+    def shape(self):
+        return self._a.shape
+
+    @property
+    def dtype(self):
+        return self._a.dtype
+
+
+class OrthoBoundaryPairsDeviceArrayTest(unittest.TestCase):
+    """_ortho_boundary_pairs must accept device arrays, not just numpy."""
+
+    def _args(self, wrap):
+        f0 = np.array([1.0, 1.1, 2.0, 2.1, 3.0])
+        walkers = np.array([0, 0, 0, 0, 1])
+        bands = np.array([9, 10, 18, 19, 9])
+        elig = np.ones(5, dtype=bool)
+        return (wrap(f0), wrap(walkers), wrap(bands), wrap(elig))
+
+    def test_device_arrays_do_not_raise(self):
+        from lisatools.globalfit.moves.gbspecialstretch import (
+            _ortho_boundary_pairs,
+        )
+        f0, w, b, e = self._args(_DeviceLike)
+        i_idx, j_idx = _ortho_boundary_pairs(
+            f0, w, b, e, units=9, remainder=0, max_pairs=8)
+        self.assertEqual(len(i_idx), len(j_idx))
+
+    def test_device_and_host_agree(self):
+        from lisatools.globalfit.moves.gbspecialstretch import (
+            _ortho_boundary_pairs,
+        )
+        host = _ortho_boundary_pairs(
+            *self._args(np.asarray), units=9, remainder=0, max_pairs=8)
+        dev = _ortho_boundary_pairs(
+            *self._args(_DeviceLike), units=9, remainder=0, max_pairs=8)
+        np.testing.assert_array_equal(host[0], dev[0])
+        np.testing.assert_array_equal(host[1], dev[1])
+
+    def test_per_walker_remainder_on_device(self):
+        from lisatools.globalfit.moves.gbspecialstretch import (
+            _ortho_boundary_pairs,
+        )
+        f0, w, b, e = self._args(_DeviceLike)
+        i_idx, j_idx = _ortho_boundary_pairs(
+            f0, w, b, e, units=9,
+            remainder=_DeviceLike(np.array([0, 0])), max_pairs=8)
+        self.assertEqual(len(i_idx), len(j_idx))
+
+
 class OrthoBoundaryPairsPerWalkerTest(unittest.TestCase):
     def _inputs(self):
         # two walkers, four bands, two sources per band
