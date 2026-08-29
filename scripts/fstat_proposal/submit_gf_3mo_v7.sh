@@ -789,7 +789,37 @@ export GB_CAP_DIVISOR=1
 # ## search reruns under overlap enforcement). Fresh dir works too.        ##
 # ############################################################################
 export GB_CAP_OVERLAP_FRAC=0.25
-export GB_SEARCH_RJ_REPLACE=1
+# rj_replace DISABLED (user ruling 2026-08-29), 1 -> 0. Two reasons:
+#   (a) it is not earning its ~580 s/row -- cold acceptance 0.033-0.046%
+#       with FLAT delta-ll (per-call mean 102.7 early vs 103.2 late over 55
+#       calls), i.e. the phase-max + full-extrinsic upgrade did not move it;
+#   (b) its lnL ACCOUNTING IS BROKEN. 365 of 905 [GB_ORTHO_LL rj_replace]
+#       lines (40.3%) breach GB_ORTHO_LL_TOL=0.05, max 6.971e+03 -- four
+#       orders of magnitude worse than any other move (vgb_pe 2.2e-07,
+#       rj_fstat_search 6.3e-01). Its drift ledger claims +9,693 accepted
+#       delta-ll against a realized walker drift of -117,009: off by ~12x
+#       AND in sign, with 58.2% of drift events landing on walkers that had
+#       ZERO cold replace accepts that iteration. Chain state stays correct
+#       (drift is repaired from the residual) but the per-cell lnL the MH
+#       ratio prices against can be wrong by thousands of nats.
+# The pair-borrow substitution below is intended to cover the cross-band
+# relocation replace was nominally providing. Re-enable only after the
+# accounting is fixed and re-audited.
+export GB_SEARCH_RJ_REPLACE=0
+# ORTHOGONALITY PREMISE MONITOR (user ruling 2026-08-29), default "0" -> 1.
+# NOTE this is NOT GB_ORTHO_LL_CHECK (the lnL bookkeeping reconcile, already
+# on, and the check that caught the rj_replace defect above). GB_ORTHO_CHECK
+# measures the thing the whole band-decomposition RESTS on: the normalized
+# overlap |<h_i|h_j>| / sqrt(<h_i|h_i><h_j|h_j>) between CONCURRENTLY-OPEN
+# adjacent-band cold sources, through the installed swap-likelihood kernels.
+# The stride exists to keep that ~0 so per-cell delta-lnL add by bilinearity.
+# It has never run in production (zero [GB_ORTHO lines in the whole v7 log).
+# Cost is negligible and already sampled by design: GB_ORTHO_MAX_PAIRS
+# defaults to 8 pairs per unit, once per unit close, not per propose.
+# Diagnostic only -- never mutates state; internal failures log a warning
+# rather than breaking the sampler. Grep [GB_ORTHO ; warns above
+# GB_ORTHO_TOL (default 1e-3).
+export GB_ORTHO_CHECK=1
 # Stagger OFF with the aligned-cells grid (2026-08-26): the overlap lip
 # now does the cross-edge work the half-cell shift used to; stagger +
 # divisor 1 would just re-misalign cells against the sub-bands.
