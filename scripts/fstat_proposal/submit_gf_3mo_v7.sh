@@ -982,33 +982,6 @@ export GB_FSTAT_FOLD=1
 # force phase-max onto PE. =0 restores exact concrete-parameter scoring
 # on both sides bit-identically.
 export GB_REPLACE_PHASE_MAX=auto
-# PAIR-BORROW: joint two-band cold-chain substitution (LAT, 2026-08-29).
-# The 20.380377 mHz flagship splits across the 1141/1142 edge, and those
-# bands sit in different residue classes (7 and 8 mod 9), so they are
-# never open in the same unit -- a block-Gibbs trap no reordering or
-# single-band swap escapes. This borrows a clean donor walker's pair
-# content and prices it on the TRUE per-walker likelihood.
-#
-# MEASURE ONLY on this run: =1 enumerates, stages the substitution,
-# records the true dll and REVERTS, touching no chain state. Grep
-# [GB_PAIRBORROW] for "would this fix the flagship?" evidence -- donors,
-# pairs attempted/substituted and the true dll per pair.
-# HELD 2026-08-29 (user: "slow down on the pretending"), 1 -> 0. The
-# measure-only pass is non-destructive, but the true-dll it would report is
-# computed over the WHOLE-WALKER likelihood, and that gate window is exactly
-# what is unsettled: the spec said "the two touching sub-bands" (270 bins),
-# the implementation used whole-walker, and the natural middle -- the
-# template support actually spanning 3,240-5,400 bins per source -- has not
-# been measured against either. Evidence gathered under a disputed window is
-# not evidence. Re-arm once the window is decided, ideally reporting dll
-# under all three so one run settles it.
-export GB_PAIR_BORROW=0
-# The destructive half stays OFF until [GB_PAIRBORROW] shows real dll
-# wins on the flagship pair AND the apply path passes a cluster smoke
-# gate: it could not be verified end-to-end off-cluster (no GPU, and the
-# integration flow test is barred by policy).
-export GB_PAIR_BORROW_APPLY=0
-export GB_PAIR_BORROW_MAX_PAIRS=8
 # PER-ROW F-STAT CENTERS THROUGH THE UNIT-OPEN CACHE (LAT 86ed9353):
 # exact per-row JKS centers batched ONCE per unit (+ miss fallback)
 # instead of every pick round -- the measured 726 s/row
