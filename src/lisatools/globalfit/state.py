@@ -203,6 +203,106 @@ def ensure_cap_cell_fields(band_info: dict, num_cells: int) -> None:
         )
 
 
+#: the per-band RJ shutoff valve's persisted state. ALL-OR-NOTHING: the
+#: streak, the previous occupancy it is measured against, the shut-off set
+#: and the two revival counters are one consistent record, so a partial or
+#: mismatched set is discarded whole rather than half-honoured.
+BAND_SHUTOFF_FIELDS = (
+    "band_occ_streak",
+    "band_occ_last",
+    "band_rj_shutoff",
+    "band_shutoff_since_revive",
+    "band_shutoff_epoch",
+)
+
+#: sentinel for "no F-stat epoch recorded yet" in ``band_shutoff_epoch``
+BAND_SHUTOFF_EPOCH_UNSET = -1
+
+
+def _zero_band_shutoff(band_info: dict, num_bands: int) -> None:
+    """Install a fresh (zeroed) shutoff record on ``band_info``."""
+    band_info["band_occ_streak"] = np.zeros(num_bands, dtype=np.int64)
+    # -1, not 0: the streak only counts an iteration whose occupancy is
+    # UNCHANGED, and -1 is unreachable for a count, so the next update
+    # always starts a fresh streak at 1. Same rule as _band_shutoff_revive.
+    band_info["band_occ_last"] = np.full(num_bands, -1, dtype=np.int64)
+    band_info["band_rj_shutoff"] = np.zeros(num_bands, dtype=bool)
+    band_info["band_shutoff_since_revive"] = np.zeros(1, dtype=np.int64)
+    band_info["band_shutoff_epoch"] = np.full(
+        1, BAND_SHUTOFF_EPOCH_UNSET, dtype=np.int64)
+
+
+def ensure_band_shutoff_fields(band_info: dict, num_bands: int) -> str:
+    """Backfill/validate the per-band RJ shutoff valve state.
+
+    USER PROPOSAL 2026-08-29. The valve's counters used to be plain
+    per-process memory (allocated under ``if not hasattr(self, ...)`` on
+    the move), so every process restart wiped the clock. gf_prod_3mo_v7
+    took 26 launches with segments of 2-8 iterations against a 5-tick
+    clock, so on a spot-preempted cluster the valve would barely work even
+    though the call site is now fixed. Persisting the record here makes
+    the clock count GB proposes across the WHOLE run.
+
+    Rides the SAME channel as the ``band_leaf_cap`` family and needs no
+    schema change: ``GBState.storage_arrays`` persists every ndarray in
+    ``band_info``, and ``GBState.from_stored`` restores every ``band_*``
+    key, so naming is the whole wiring. Deliberately kept OUT of
+    ``band_info_keys`` (like the leaf-cap family) so band-info dicts from
+    older stores still pass the setter's required-key check, and out of
+    ``legacy_dtype_names`` so the counters keep int64/bool rather than
+    being coerced to the backend float dtype.
+
+    Returns a short origin token for the status line -- ``"fresh"``,
+    ``"restored"``, or ``"reset(...)"`` -- because a persisted clock that
+    silently failed to restore would be the same invisible failure this
+    whole investigation was about.
+
+    Degrades, never raises:
+
+    * ABSENT (any store written before this existed) -> fresh zeros.
+    * PARTIAL (a half-written record) -> discarded whole, fresh zeros.
+    * LENGTH MISMATCH (the band grid changed between runs) -> discarded,
+      fresh zeros, warning naming both lengths. Restoring a streak
+      indexed by a different grid would freeze arbitrary bands.
+    """
+    present = [f for f in BAND_SHUTOFF_FIELDS if band_info.get(f) is not None]
+    if not present:
+        _zero_band_shutoff(band_info, num_bands)
+        return "fresh"
+    if len(present) != len(BAND_SHUTOFF_FIELDS):
+        missing = [f for f in BAND_SHUTOFF_FIELDS if f not in present]
+        logger.warning(
+            "band shutoff state is incomplete (missing %s); discarding the "
+            "partial record and starting the valve's clock from zero.",
+            missing)
+        _zero_band_shutoff(band_info, num_bands)
+        return "reset(partial)"
+    for name in ("band_occ_streak", "band_occ_last", "band_rj_shutoff"):
+        stored = int(np.shape(band_info[name])[-1])
+        if stored != int(num_bands):
+            logger.warning(
+                "stored band shutoff state %r covers %d bands but this "
+                "run's grid has %d; the band grid changed between runs, so "
+                "the valve's clock is being restarted from zero rather than "
+                "restored onto a grid it was not measured on.",
+                name, stored, int(num_bands))
+            _zero_band_shutoff(band_info, num_bands)
+            return f"reset(grid {stored}!={int(num_bands)})"
+    # Restored: pin the dtypes. An HDF5 round trip is faithful for these
+    # (they are not in legacy_dtype_names) but a hand-built or migrated
+    # band_info need not be, and the streak arithmetic is integer.
+    band_info["band_occ_streak"] = np.asarray(
+        band_info["band_occ_streak"], dtype=np.int64)
+    band_info["band_occ_last"] = np.asarray(
+        band_info["band_occ_last"], dtype=np.int64)
+    band_info["band_rj_shutoff"] = np.asarray(
+        band_info["band_rj_shutoff"], dtype=bool)
+    for name in ("band_shutoff_since_revive", "band_shutoff_epoch"):
+        band_info[name] = np.asarray(
+            band_info[name], dtype=np.int64).reshape(-1)[:1]
+    return "restored"
+
+
 def ensure_leaf_cap_fields(band_info: dict, num_bands: int) -> None:
     """Backfill the per-band progressive leaf-cap arrays on ``band_info``.
 
@@ -701,6 +801,7 @@ class GBState(ModuleSubState):
                 dtype=int,
             )
             ensure_leaf_cap_fields(band_info, band_info["num_bands"])
+            ensure_band_shutoff_fields(band_info, band_info["num_bands"])
             if leaf_caps:
                 ensure_cap_cell_fields(band_info, band_info["num_cap_cells"])
             band_info["initialized"] = True
@@ -724,6 +825,10 @@ class GBState(ModuleSubState):
                 "band_swaps_proposed": 2, "band_swaps_accepted": 2,
                 "band_num_binaries": 3, "band_leaf_cap": 1,
                 "band_cap_iters": 1, "band_best_ll": 1,
+                # the RJ shutoff valve's persisted record (2026-08-29)
+                "band_occ_streak": 1, "band_occ_last": 1,
+                "band_rj_shutoff": 1, "band_shutoff_since_revive": 1,
+                "band_shutoff_epoch": 1,
                 "band_cold_ll": 2,
                 "cap_cell_leaf_cap": 1, "cap_cell_iters": 1,
                 "cap_cell_best_ll": 1, "cap_cell_cold_ll": 2,
@@ -742,6 +847,11 @@ class GBState(ModuleSubState):
             bi.setdefault("nwalkers", int(bi["band_num_binaries"].shape[-2]))
             ensure_leaf_cap_fields(bi, bi["num_bands"])
             ensure_cap_cell_fields(bi, bi["num_cap_cells"])
+            # RESUME path for the shutoff valve: a stored record whose grid
+            # no longer matches is DISCARDED here rather than restored onto
+            # a grid it was never measured on (see the function's docstring
+            # for the full degradation table).
+            ensure_band_shutoff_fields(bi, bi["num_bands"])
             _label = f"branch {branch_name!r}" if branch_name else "banded branch"
             _stored_nt = int(bi["ntemps"])
             _stored_nw = int(bi["nwalkers"])

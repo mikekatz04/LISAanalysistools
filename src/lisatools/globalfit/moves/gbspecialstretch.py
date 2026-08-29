@@ -70,6 +70,8 @@ from ...sampling.prior import FullGaussianMixtureModel, GBPriorWrap
 from ...utils.utility import get_array_module, get_groups_from_band_structure, searchsorted2d_vec
 from ..state import (
     GFState,
+    BAND_SHUTOFF_EPOCH_UNSET,
+    ensure_band_shutoff_fields,
     ensure_cap_cell_fields,
     ensure_leaf_cap_fields,
     make_cap_edge_extensions,
@@ -5903,7 +5905,60 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         d["_band_shutoff_epoch"] = epoch
         return self._band_shutoff_revive(f"new F-stat epoch {epoch}")
 
-    def _update_band_shutoff(self, occ_max) -> None:
+    def _band_shutoff_band_info(self, state):
+        """The GB sub-state's ``band_info`` dict, or None.
+
+        None means "no persistence channel on this call" -- a move without
+        a tempered sub-state (simple-API branches) or a direct unit-test
+        call. The valve then behaves exactly as it did before persistence
+        existed: in-memory counters for the life of the process.
+        """
+        if state is None:
+            return None
+        sub = (getattr(state, "sub_states", None) or {}).get(self.branch_name)
+        bi = getattr(sub, "band_info", None)
+        return bi if isinstance(bi, dict) else None
+
+    def _band_shutoff_restore(self, bi) -> str:
+        """Adopt the persisted valve record. Returns the origin token.
+
+        Copies OUT of ``band_info`` rather than aliasing it: the update
+        rebinds ``_band_occ_streak`` with ``np.where``, so an alias would
+        silently stop tracking after the first tick.
+        """
+        origin = ensure_band_shutoff_fields(bi, self.num_bands)
+        self._band_occ_streak = np.array(bi["band_occ_streak"], dtype=np.int64)
+        self._band_occ_last = np.array(bi["band_occ_last"], dtype=np.int64)
+        self._rj_band_shutoff = np.array(bi["band_rj_shutoff"], dtype=bool)
+        d = self.__dict__
+        d["_band_shutoff_since_revive"] = int(bi["band_shutoff_since_revive"][0])
+        ep = int(bi["band_shutoff_epoch"][0])
+        if ep != BAND_SHUTOFF_EPOCH_UNSET:
+            # Adopt the epoch the evidence was gathered under, so an epoch
+            # that advanced WHILE THIS PROCESS WAS DOWN still triggers the
+            # revival on the first tick back. Left unset when the store has
+            # none, in which case the epoch hook adopts silently.
+            d["_band_shutoff_epoch"] = ep
+        return origin
+
+    def _band_shutoff_store(self, bi) -> None:
+        """Write the valve record back to ``band_info`` (-> sub_backend/gb).
+
+        Plain numpy only -- ``band_info`` is deepcopied and pickled with the
+        state, so no device array or array module may land here.
+        """
+        d = self.__dict__
+        bi["band_occ_streak"] = np.asarray(self._band_occ_streak, dtype=np.int64)
+        bi["band_occ_last"] = np.asarray(self._band_occ_last, dtype=np.int64)
+        bi["band_rj_shutoff"] = np.asarray(self._rj_band_shutoff, dtype=bool)
+        bi["band_shutoff_since_revive"] = np.array(
+            [int(d.get("_band_shutoff_since_revive", 0))], dtype=np.int64)
+        ep = d.get("_band_shutoff_epoch", None)
+        bi["band_shutoff_epoch"] = np.array(
+            [int(ep) if isinstance(ep, (int, np.integer))
+             else BAND_SHUTOFF_EPOCH_UNSET], dtype=np.int64)
+
+    def _update_band_shutoff(self, occ_max, state=None) -> None:
         """Occupancy-based shutoff update (USER KEY CHANGE 2026-08-15).
 
         ``occ_max``: host int array (num_bands,) — COLD-CHAIN occupancy
@@ -5943,10 +5998,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the distinct ``[GB_BAND_REVIVE <move>] ...`` prefix.
         """
         occ_max = np.asarray(occ_max)
+        # ---- PERSISTENCE (user proposal 2026-08-29) ----------------------
+        # The counters used to be pure per-process memory, so every restart
+        # wiped the clock -- 26 launches of 2-8 iterations against a 5-tick
+        # clock meant the valve would barely work even with the call site
+        # fixed. Adopt the stored record ONCE per process, then write it
+        # back every tick so the clock counts GB proposes across the run.
+        bi = self._band_shutoff_band_info(state)
+        if bi is not None and not getattr(self, "_band_shutoff_loaded", False):
+            self._band_shutoff_loaded = True
+            origin = self._band_shutoff_restore(bi)
+            self._band_shutoff_origin = origin
+            if origin.startswith("reset"):
+                logger.warning(
+                    "[GB_BAND_SHUTOFF %s] persisted valve state NOT restored "
+                    "(%s); the clock restarts from zero. Bands must re-earn "
+                    "their shutoff over a full window.", self.name, origin)
+            elif origin == "restored":
+                logger.info(
+                    "[GB_BAND_SHUTOFF %s] valve state restored from the "
+                    "store: %d band(s) already off, %d mid-streak, %d "
+                    "iters since the last revival", self.name,
+                    int(self._rj_band_shutoff.sum()),
+                    int((self._band_occ_streak > 0).sum()),
+                    int(self.__dict__.get("_band_shutoff_since_revive", 0)))
         if not hasattr(self, "_band_occ_streak"):
             self._band_occ_streak = np.zeros(self.num_bands, dtype=np.int64)
             self._band_occ_last = np.full(self.num_bands, -1, dtype=np.int64)
             self._rj_band_shutoff = np.zeros(self.num_bands, dtype=bool)
+            self.__dict__.setdefault("_band_shutoff_origin", "memory")
         # ---- KILL-SWITCH (user ruling 2026-08-28) ------------------------
         # ``GB_RJ_BAND_SHUTOFF_ITERS`` is the iteration clock AND the
         # on/off knob: <= 0 (use 0 or -1) disables the valve entirely.
@@ -5964,6 +6044,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"GB_RJ_BAND_SHUTOFF_ITERS={after} -- valve disabled")
             self._band_occ_streak[:] = 0
             self._band_occ_last[:] = -1
+            # Persist the RELEASE too: a kill-switch that only cleared
+            # memory would let the next process restore the shut-off set
+            # from the store and re-freeze everything the operator just
+            # released.
+            if bi is not None:
+                self._band_shutoff_store(bi)
             return
         # ---- REVIVAL TRIGGERS (user ruling 2026-08-28) -------------------
         # Checked once per iteration BEFORE the streaks are advanced, so a
@@ -6044,14 +6130,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "[GB_BAND_SHUTOFF status %s] clock %d iters, floor %.3f mHz: "
             "%d/%d bands eligible, %d qualifying now (cold occ 0), "
             "streak max %d median %d, %d armed (streak >= clock); "
-            "%d off (+%d this tick); %d/%d iters since revive",
+            "%d off (+%d this tick); %d/%d iters since revive; persist %s",
             self.name, after, fmin_mhz, elig, int(self.num_bands),
             int((hi_f & qualifying).sum()),
             int(s_el.max()) if elig else 0,
             int(np.median(s_el)) if elig else 0,
             int((s_el >= after).sum()),
             int(self._rj_band_shutoff.sum()), int(new_off.sum()),
-            int(_d["_band_shutoff_since_revive"]), _reset_iters)
+            int(_d["_band_shutoff_since_revive"]), _reset_iters,
+            # "restored"/"fresh" = this process adopted the stored record
+            # (or found none); "reset(...)" = the store was there but
+            # unusable; "memory" = no store channel, counters die with the
+            # process. A clock that silently failed to persist would be the
+            # same invisible failure this whole investigation was about.
+            _d.get("_band_shutoff_origin", "memory"))
+
+        # Write the record back every tick so a process that is killed
+        # between ticks loses at most the tick in flight.
+        if bi is not None:
+            self._band_shutoff_store(bi)
 
     def _band_occupancy_cold_max(self, state) -> np.ndarray:
         """Cold-chain per-band occupancy, MAX over walkers (host array).
@@ -13797,7 +13894,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         try:
             if self._band_shutoff_enabled():
                 self._update_band_shutoff(
-                    self._band_occupancy_cold_max(new_state))
+                    self._band_occupancy_cold_max(new_state), new_state)
         except Exception:
             logger.warning(
                 "%s: band-shutoff tick failed this propose; the valve is "

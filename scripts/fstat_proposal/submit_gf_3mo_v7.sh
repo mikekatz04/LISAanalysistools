@@ -356,9 +356,35 @@ export GB_RJ_SNR_TRUNC_DIST=1      # birth distance draw truncated at the
 # count). Faster rows also tick the iteration-clocked cap patience
 # faster and give more permuted + vertical swap rounds per hour.
 # NOTE these env pins beat the PE mode default as well — both phases
-# run 250/25.
+# run the values below.
+#
+# SURVIVOR 25 -> 100 (user ruling 2026-08-29), restoring the value the
+# high-f probe ran (submit_gf_highf_grid.sh: 200/100). Reason: in-model
+# f0 drift is the ONLY mechanism in the codebase that can move a source
+# across a sub-band edge -- there is no merge or pair operator, RJ is
+# serial-within-band, and tempering swaps never cross bands. The 3-month
+# flagship at 20.380377 mHz sits 12.188 bins below the band 1141/1142
+# edge and its recovery is split across it: 30 leaves at -2.11..+8.85
+# bins in 1141, 22 at +12.60..+23.10 in 1142, NONE straddling. The two
+# populations carry anticorrelated power (quad SNR 302.8 vs 76.3,
+# corr -0.747, total conserved), i.e. Mode B is flagship power the
+# 1141 template is not capturing. Cutting the survivor budget 4x cut the
+# only available merge path 4x, and the probe that resolved this band to
+# a single near-truth source ran at 100.
+#
+# The endgame argument for 25 still stands on its own terms (survivor
+# polish saturates; cost rides all three RJ moves) -- this is a
+# deliberate trade of iteration RATE for the ability to close
+# edge-split pairs. Revisit once a genuine cross-band joint move exists,
+# which would make the drift path non-load-bearing.
+#
+# ⚠ The per-class split applies on the DIRECT-batch path only; the
+# grouped scheduler uses one budget for the whole pool taken from
+# _SURVIVOR, newborns included. v7 sets GB_RJ_DIRECT_BATCH=1 AND
+# GB_RJ_GROUPED_INMODEL=1, so wherever grouped scheduling runs this
+# raises the effective budget for everything, not just survivors.
 export GB_INMODEL_REPEATS_NEWBORN=250
-export GB_INMODEL_REPEATS_SURVIVOR=25
+export GB_INMODEL_REPEATS_SURVIVOR=100
 
 # VERTICAL TEMPERING ON (2026-08-26 user ruling: "this is crucial").
 # Per-repeat vertical band-temperature swaps inside the in-model loop
@@ -1054,23 +1080,37 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # The machinery now actually gets exercised -- for the first time ever,
 # because of the call-site fix above, not because of this value.
 #
-# ⚠ WHAT TO EXPECT ON THE NEXT LAUNCH, measured by replaying the exact
-# rule over this run's own store (57 iterations, 1232 GB bands): 688
-# bands sit above the 10 mHz floor and ALL 688 are barren through
-# iterations 0-4, so at a clock of 5 the valve fires on all 688 at once
-# on iteration 5 and the log gets 688 [GB_BAND_SHUTOFF] lines in one
-# tick. 634 of them stay barren for all 57 iterations and deserve it --
-# but 54 go on to acquire a cold source (first acquisition it5 median,
-# it46 latest; 91 sources held at it56), and enforcement is a FULL RJ
-# FREEZE, so those bands are shut to births AND deaths until revival.
-# That is the same hazard the 2026-08-16 replay found (9 bands holding
-# catalogue sources up to SNR 45.7). Revival bounds it -- next F-stat
-# epoch (GB_FSTAT_REFIT_EVERY below) or RESET_ITERS -- so the cost is a
-# delay, not a permanent loss. The knob is left at the ruled value of 5;
-# if the first run shows the freeze biting, the new
-# "[GB_BAND_SHUTOFF status ...]" line now reports eligible / qualifying /
-# armed / off and streak max+median on EVERY tick, so a single
-# `grep GB_BAND_SHUTOFF` answers it without another forensic dive.
+# WHAT TO EXPECT ON THE NEXT LAUNCH, measured by replaying the exact rule
+# over this run's own store on REAL TICK EVENTS. The tick fires only when
+# the GB move proposes, and the staged recipe runs noise_search then
+# noise_vgb_search first, so the GB stage does not start until it5 and
+# inds/gb is EMPTY for it0-4 (zero leaves in ANY band). Iterations 0-4
+# therefore contribute ZERO ticks -- 61 "Full runtime of ...
+# rj_fstat_search" lines over 52 GB-active rows -- and the valve cannot
+# fire at it5. Of 1232 GB bands, 688 sit above the 10 mHz floor, 634 NEVER
+# hold a cold source in 52 GB-active iterations and only 54 ever do:
+#
+#   clock  first fire  bands frozen  frozen that WOULD acquire later
+#       5        it9        645                    11
+#      10       it14        643                     9
+#      20       it24        642                     8
+#      50       it54        634                     0
+#
+# So the ruled clock of 5 costs a revival-bounded DELAY on 11 bands, not a
+# mass freeze. Revival bounds it further -- next F-stat epoch
+# (GB_FSTAT_REFIT_EVERY below) or RESET_ITERS. USER RULING 2026-08-29:
+# keep 5.
+#
+# The valve's clock now also SURVIVES RESTARTS (2026-08-29): the streak,
+# the shut-off set and the revival counters ride sub_backend/gb/ with the
+# band_leaf_cap family, so the clock counts GB proposes across the whole
+# run instead of within one process. That matters here -- this run took 26
+# launches with segments of 2-8 iterations, i.e. usually shorter than the
+# 5-tick clock. Every tick logs "[GB_BAND_SHUTOFF status ...]" with
+# eligible / qualifying / armed / off, streak max+median, and a
+# "persist restored|fresh|reset(...)|memory" token, so one
+# `grep GB_BAND_SHUTOFF` shows both what the valve is doing and whether
+# its clock actually survived the last restart.
 export GB_RJ_BAND_SHUTOFF_ITERS=5
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # Backstop revival (new 2026-08-28): iterations with NO new F-stat epoch

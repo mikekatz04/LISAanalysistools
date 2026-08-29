@@ -124,6 +124,18 @@ EXPECTED_SUB_SCHEMA = {
         "band_best_ll": (NUM_BANDS,),
         # per-cold-walker per-band ll, stored every step (leaf-cap audit)
         "band_cold_ll": (NWALKERS, NUM_BANDS),
+        # RJ band-shutoff valve state (2026-08-29). Persisted so the
+        # valve's clock counts GB proposes across the WHOLE run rather
+        # than within one process -- gf_prod_3mo_v7 took 26 launches with
+        # 2-8 iteration segments against a 5-tick clock, so in-memory
+        # counters were wiped before they could fire. Rides this channel
+        # with the band_leaf_cap family; no schema layer to update beyond
+        # this pin. The two (1,) arrays are the revival counters.
+        "band_occ_streak": (NUM_BANDS,),
+        "band_occ_last": (NUM_BANDS,),
+        "band_rj_shutoff": (NUM_BANDS,),
+        "band_shutoff_since_revive": (1,),
+        "band_shutoff_epoch": (1,),
         **_tempered_schema("gb"),
     },
     "mbh": {

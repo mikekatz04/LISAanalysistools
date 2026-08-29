@@ -123,6 +123,12 @@ class _MoveStub:
     _band_shutoff_iters = GBSpecialBase._band_shutoff_iters
     _band_shutoff_epoch_sync = GBSpecialBase._band_shutoff_epoch_sync
     _update_band_shutoff = GBSpecialBase._update_band_shutoff
+    # persistence (2026-08-29). ``_band_shutoff_band_info`` returns None
+    # for a stub with no ``branch_name``/sub-state, so the classes above
+    # keep their original in-memory behaviour unchanged.
+    _band_shutoff_band_info = GBSpecialBase._band_shutoff_band_info
+    _band_shutoff_restore = GBSpecialBase._band_shutoff_restore
+    _band_shutoff_store = GBSpecialBase._band_shutoff_store
 
 
 def _env(**kw):
@@ -622,3 +628,243 @@ class StatusLineTest(unittest.TestCase):
                 _drive(m, 3)
         # one eligible band (band 3), streak 3 after three barren ticks
         self.assertIn("streak max 3 median 3", "\n".join(cm.output))
+
+
+# ===========================================================================
+# PERSISTENCE (user proposal 2026-08-29). The valve's counters were plain
+# per-process memory, allocated under ``if not hasattr(self, ...)``. That was
+# irrelevant while the tick was dead, but it is the binding constraint now
+# that it runs: gf_prod_3mo_v7 took 26 launches with segments of 2-8
+# iterations, so against a 5-tick clock the streak was usually wiped before
+# it could fire. The clock has to count GB proposes across the WHOLE run, so
+# the state rides in the GB sub-backend alongside the ``band_leaf_cap``
+# family (``band_info`` -> GBState.storage_arrays -> sub_backend/gb/).
+# ===========================================================================
+
+
+class _SubStateStub:
+    def __init__(self, band_info):
+        self.band_info = band_info
+
+
+class _PersistState:
+    """A state carrying a GB sub-state, as ``_work_branch``'s owner does."""
+
+    def __init__(self, band_info):
+        self.sub_states = {"gb": _SubStateStub(band_info)}
+
+
+class _PersistMoveStub(_MoveStub):
+    """A move that reaches its sub-state -- i.e. a restartable one."""
+
+    branch_name = "gb"
+
+
+def _fresh_band_info(num_bands=4):
+    """The bare band_info a run allocates before the valve has ever ticked."""
+    return {"initialized": True, "num_bands": num_bands}
+
+
+def _drive_p(move, n, state, occ=BARREN):
+    for _ in range(n):
+        move._update_band_shutoff(occ, state)
+
+
+class ShutoffPersistenceTest(unittest.TestCase):
+    """The streak must outlive the process, not the propose loop."""
+
+    def test_streak_survives_a_save_restore_round_trip(self):
+        bi = _fresh_band_info()
+        st = _PersistState(bi)
+        with _env():
+            _drive_p(_PersistMoveStub(), 3, st)      # segment 1: 3 ticks
+            # the store now carries the streak, not the (dead) move object
+            self.assertEqual(int(bi["band_occ_streak"][3]), 3)
+            # a NEW process picks up the SAME band_info and finishes the clock
+            m2 = _PersistMoveStub()
+            _drive_p(m2, 1, st)
+            self.assertFalse(m2._rj_band_shutoff.any())   # 4 -- not yet
+            _drive_p(m2, 1, st)
+            self.assertTrue(m2._rj_band_shutoff[3])       # 5 -- fires
+        self.assertTrue(bool(bi["band_rj_shutoff"][3]))
+
+    def test_a_band_mid_streak_resumes_mid_streak_not_at_zero(self):
+        bi = _fresh_band_info()
+        st = _PersistState(bi)
+        with _env():
+            _drive_p(_PersistMoveStub(), 4, st)
+            m2 = _PersistMoveStub()                       # restart at streak 4
+            self.assertEqual(int(bi["band_occ_streak"][3]), 4)
+            _drive_p(m2, 1, st)
+            self.assertEqual(int(bi["band_occ_streak"][3]), 5)
+            self.assertTrue(m2._rj_band_shutoff[3])       # one tick was enough
+        # the pre-fix behaviour this pins: WITHOUT persistence the restart
+        # restarts the clock at 1 and a 2-8 iteration segment never fires.
+
+    def test_an_already_off_band_stays_off_across_a_restart(self):
+        bi = _fresh_band_info()
+        st = _PersistState(bi)
+        with _env():
+            _drive_p(_PersistMoveStub(), 5, st)
+            self.assertTrue(bool(bi["band_rj_shutoff"][3]))
+            m2 = _PersistMoveStub()
+            _drive_p(m2, 1, st)
+            self.assertTrue(m2._rj_band_shutoff[3])       # still frozen
+
+    def test_absent_state_restores_clean(self):
+        """Old stores carry none of these arrays; that must be a no-op."""
+        bi = _fresh_band_info()
+        st = _PersistState(bi)
+        with _env():
+            m = _PersistMoveStub()
+            _drive_p(m, 4, st)
+            self.assertFalse(m._rj_band_shutoff.any())
+            _drive_p(m, 1, st)
+            self.assertTrue(m._rj_band_shutoff[3])
+        self.assertIn("band_occ_streak", bi)
+
+    def test_length_mismatch_restores_clean_with_a_warning(self):
+        """A band-grid change between runs must not restore a stale grid."""
+        bi = _fresh_band_info()
+        # a COMPLETE record written by a previous run whose grid had 7 bands
+        bi["band_occ_streak"] = np.array([9, 9, 9, 9, 9, 9, 9], dtype=np.int64)
+        bi["band_occ_last"] = np.zeros(7, dtype=np.int64)
+        bi["band_rj_shutoff"] = np.ones(7, dtype=bool)
+        bi["band_shutoff_since_revive"] = np.array([3], dtype=np.int64)
+        bi["band_shutoff_epoch"] = np.array([0], dtype=np.int64)
+        st = _PersistState(bi)
+        with _env():
+            m = _PersistMoveStub()
+            with self.assertLogs(LOGGER_NAME, level="WARNING") as cm:
+                m._update_band_shutoff(BARREN, st)
+        text = "\n".join(cm.output)
+        self.assertIn("7", text)          # names the stored length
+        self.assertIn("4", text)          # and the expected one
+        # stale grid must NOT be honoured: nothing inherited from 7 bands
+        self.assertEqual(len(m._band_occ_streak), 4)
+        self.assertFalse(m._rj_band_shutoff.any())
+        self.assertEqual(int(m._band_occ_streak[3]), 1)   # a FRESH streak
+
+    def test_reset_iters_counter_survives_a_restart(self):
+        bi = _fresh_band_info()
+        st = _PersistState(bi)
+        with _env(GB_RJ_BAND_SHUTOFF_RESET_ITERS="6"):
+            _drive_p(_PersistMoveStub(), 4, st)
+            m2 = _PersistMoveStub()
+            _drive_p(m2, 1, st)                            # 5th overall
+            self.assertTrue(m2._rj_band_shutoff[3])
+            _drive_p(m2, 1, st)                            # 6th -> revival
+            self.assertFalse(m2._rj_band_shutoff.any())
+
+    def test_no_array_module_lands_in_band_info(self):
+        """Deepcopy/pickle safety: numpy only, no xp/device handles."""
+        import pickle
+        bi = _fresh_band_info()
+        st = _PersistState(bi)
+        with _env():
+            _drive_p(_PersistMoveStub(), 3, st)
+        for k, v in bi.items():
+            if isinstance(v, np.ndarray) or np.isscalar(v) or isinstance(v, bool):
+                continue
+            self.fail(f"band_info[{k!r}] is not a plain numpy/scalar: {type(v)}")
+        pickle.loads(pickle.dumps(bi))   # must round-trip
+
+    def test_partial_record_is_discarded_whole(self):
+        """Half a record is not half a clock -- it is no clock."""
+        bi = _fresh_band_info()
+        bi["band_occ_streak"] = np.array([0, 0, 0, 4], dtype=np.int64)
+        # the other four fields never made it to disk
+        st = _PersistState(bi)
+        with _env():
+            m = _PersistMoveStub()
+            with self.assertLogs(LOGGER_NAME, level="WARNING") as cm:
+                m._update_band_shutoff(BARREN, st)
+        self.assertIn("reset(partial)", "\n".join(cm.output))
+        self.assertEqual(int(m._band_occ_streak[3]), 1)   # not 5
+
+    def test_status_line_reports_the_persistence_origin(self):
+        bi = _fresh_band_info()
+        st = _PersistState(bi)
+        with _env():
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                _drive_p(_PersistMoveStub(), 1, st)
+            self.assertIn("persist fresh", "\n".join(cm.output))
+            # a second process finds the record and says so
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm2:
+                _drive_p(_PersistMoveStub(), 1, st)
+        self.assertIn("persist restored", "\n".join(cm2.output))
+
+    def test_status_line_says_memory_with_no_store(self):
+        with _env():
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                _MoveStub()._update_band_shutoff(BARREN)
+        self.assertIn("persist memory", "\n".join(cm.output))
+
+
+# ---------------------------------------------------------------------------
+# The REAL storage contract, not a dict stub. The record rides the same
+# channel as the band_leaf_cap family and needs NO schema change:
+# GBState.storage_arrays persists every ndarray in band_info, from_stored
+# restores every band_* key, and initialize_band_information strips the
+# stored leading step axis. Naming the keys "band_*" IS the wiring.
+# ---------------------------------------------------------------------------
+
+from lisatools.globalfit.state import BAND_SHUTOFF_FIELDS, GBState
+
+_EDGES = np.array([1e-3, 5e-3, 9e-3, 11e-3, 13e-3])
+
+
+def _gb_state():
+    return GBState.make_template(
+        nwalkers=2, ntemps=1, num_bands=4, band_edges=_EDGES,
+        nleaves_max=3, ndim=9,
+    )
+
+
+class ShutoffStorageContractTest(unittest.TestCase):
+    def test_fresh_state_allocates_the_record(self):
+        bi = _gb_state().band_info
+        for f in BAND_SHUTOFF_FIELDS:
+            self.assertIn(f, bi)
+
+    def test_record_is_in_the_per_iteration_storage_arrays(self):
+        """i.e. it lands in sub_backend/gb/ every saved iteration."""
+        arrs = _gb_state().storage_arrays()
+        for f in BAND_SHUTOFF_FIELDS:
+            self.assertIn(f, arrs)
+
+    def test_counters_keep_int_and_bool_dtypes(self):
+        """Kept OUT of legacy_dtype_names: a float streak would be wrong."""
+        arrs = _gb_state().storage_arrays()
+        self.assertEqual(arrs["band_occ_streak"].dtype, np.int64)
+        self.assertEqual(arrs["band_occ_last"].dtype, np.int64)
+        self.assertEqual(arrs["band_rj_shutoff"].dtype, np.bool_)
+
+    def test_full_store_reload_round_trip_preserves_the_clock(self):
+        st = _gb_state()
+        st.band_info["band_occ_streak"][:] = np.array([0, 0, 0, 4])
+        st.band_info["band_rj_shutoff"][3] = True
+        st.band_info["band_shutoff_since_revive"][0] = 7
+        # exactly how the backend lays a saved iteration down
+        stored = {k: np.asarray(v)[None] for k, v in st.storage_arrays().items()}
+        back = GBState.from_stored(
+            stored, statics=st.static_arrays(), attrs=st.storage_attrs())
+        back.initialize_band_information(2, 1, _EDGES, np.zeros((4, 1)))
+        bi = back.band_info
+        self.assertEqual(list(bi["band_occ_streak"]), [0, 0, 0, 4])
+        self.assertEqual(list(bi["band_rj_shutoff"]), [False, False, False, True])
+        self.assertEqual(int(bi["band_shutoff_since_revive"][0]), 7)
+
+    def test_a_reloaded_clock_finishes_in_the_move(self):
+        """End to end: store -> reload -> a NEW move fires one tick later."""
+        st = _gb_state()
+        st.band_info["band_occ_streak"][:] = np.array([0, 0, 0, 4])
+        st.band_info["band_occ_last"][:] = 0
+        stored = {k: np.asarray(v)[None] for k, v in st.storage_arrays().items()}
+        back = GBState.from_stored(
+            stored, statics=st.static_arrays(), attrs=st.storage_attrs())
+        back.initialize_band_information(2, 1, _EDGES, np.zeros((4, 1)))
+        with _env():
+            m = _PersistMoveStub()
+            m._update_band_shutoff(BARREN, _PersistState(back.band_info))
+        self.assertTrue(m._rj_band_shutoff[3])
