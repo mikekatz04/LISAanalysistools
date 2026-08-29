@@ -10,6 +10,59 @@
 # fresh start, move/delete ${STORE_DIR} first.
 #
 # ############################################################################
+# ## ⚠ RELAUNCH REQUIRED (2026-08-29): CAP GRID 1 -> 2 + STAGGER.          ##
+# ##                                                                        ##
+# ## GB_CAP_DIVISOR=1 -> 2 and GB_CAP_STAGGER=0 -> 1 CHANGE cap_edges, and  ##
+# ## cap_edges is one of GBState.static_names, so the resume guard          ##
+# ## (GBState.initialize_band_information) REFUSES a plain resume with      ##
+# ## "leaf-cap grid mismatch". A rewind + migration is required; rewinding  ##
+# ## FIRST is what makes the migration exact rather than approximate.       ##
+# ##                                                                        ##
+# ##   S=/shared/data/global_fit_output/gf_prod_3mo_v8/gf_prod_3mo_testing.h5
+# ##                                                                        ##
+# ##   scancel <jobid>            # stop the live job FIRST                 ##
+# ##   cd <repo> && git pull                                                ##
+# ##                                                                        ##
+# ##   # 1. rewind GB to zero leaves (dry run prints, then --apply)         ##
+# ##   python scripts/fstat_proposal/reset_recipe_stage.py \                ##
+# ##       "$S" gb_search --rewind-to-empty gb                              ##
+# ##   python scripts/fstat_proposal/reset_recipe_stage.py \                ##
+# ##       "$S" gb_search --rewind-to-empty gb --apply                      ##
+# ##                                                                        ##
+# ##   # 2. rewrite the cap grid in place. REFUSES if a .bak exists.        ##
+# ##   [ -e "$S.bak" ] && mv "$S.bak" "$S.bak.pre-stagger"                  ##
+# ##   python scripts/fstat_proposal/migrate_gb_cap_grid.py \               ##
+# ##       "$S" --cap-divisor 2 --stagger --dry-run                         ##
+# ##   python scripts/fstat_proposal/migrate_gb_cap_grid.py \               ##
+# ##       "$S" --cap-divisor 2 --stagger                                   ##
+# ##                                                                        ##
+# ##   # 3. the rewind invalidates all THREE sidecars -- the backup copy    ##
+# ##   #    sits at a LATER iteration and a truncation restore would        ##
+# ##   #    silently UNDO the rewind; the fstat cache was fitted against a  ##
+# ##   #    residual that removing every GB leaf just invalidated.          ##
+# ##   python scripts/fstat_proposal/compact_gf_store.py "$S" \             ##
+# ##       --reset-backup --reset-midit --reset-fstat --apply               ##
+# ##                                                                        ##
+# ##   # 4. resubmit                                                        ##
+# ##   sbatch scripts/fstat_proposal/submit_gf_3mo_v8.sh                    ##
+# ##                                                                        ##
+# ## A FRESH STORE ALSO WORKS and needs no migration, but pays ~1-2 h to    ##
+# ## refit the noise + VGB stages. NOTE v8's noise stages are the expensive ##
+# ## part (unequal-arm + layer_calibrated), so the rewind is worth more     ##
+# ## here than in v7.                                                       ##
+# ##                                                                        ##
+# ## WHY REWIND BEFORE MIGRATING. migrate_gb_cap_grid inherits per-cell     ##
+# ## state from the OWNING band (cell c -> band c // K), exact for interior ##
+# ## cells but approximate for the one straddling cell per seam -- and with ##
+# ## live GB leaves, sources within half a cell of a seam silently change   ##
+# ## cells. Rewound to zero leaves there is no occupancy to reattribute.    ##
+# ## The ramp state follows: band_leaf_cap / cap_cell_leaf_cap /            ##
+# ## cap_cell_iters are PER-ITERATION datasets (only band_edges and         ##
+# ## cap_edges are static), so the rewind returns them to the pre-search    ##
+# ## handover values and the migration broadcasts THOSE to the children.    ##
+# ############################################################################
+#
+# ############################################################################
 # ## V5 (2026-08-20) -- THE STAGGERED-GRID RUN.                             ##
 # ##                                                                        ##
 # ## One structural change on top of everything v4 learned:                 ##
@@ -887,18 +940,59 @@ export VGB_BAND_LAYERS=8
 export GB_INMODEL_SETUP_BATCH=4096
 export GB_INFOMAT_MEMPOOL_FREE=0
 export GB_INMODEL_BATCH_MEMPOOL_FREE=0
-# ALIGNED CAP CELLS (user ruling 2026-08-26, probe-validated on the
-# highf grid2 + dense v7 probes): cap cells LINE UP with the sub-bands
-# (divisor 1, stagger 0) and the 1/4 overlap below supplies the
-# cross-edge bridging the staggered grid used to -- any two leaves
-# within the shared lip see a common covering cell, and in-model /
-# replace f0 moves may cross a cap edge into a foreign cell up to
-# cap+GB_CAP_INMODEL_HEADROOM. This replaces the v6-lineage staggered
-# K=4 grid (probe endgame: 23/24 walkers -> ONE near-truth leaf, caps
-# ramped 1->3 where the evidence demanded). CAP EDGES CHANGE vs the
-# v6/v7-early stores: start FRESH, or run the header's
-# migrate_gb_cap_grid.py step before resuming a v6-lineage store.
-export GB_CAP_DIVISOR=1
+# ######################################################################### #
+# ## SEAM-STRADDLING CAP CELLS (divisor 2 + stagger, 2026-08-29).        ## #
+# ## ⚠ DO NOT "FIX" THE CAP GRID BACK INTO ALIGNMENT WITH THE SUB-BANDS. ## #
+# ######################################################################### #
+# This REPLACES the 2026-08-26 aligned-cells ruling (divisor 1, stagger 0)
+# on direct measurement. Read this before touching GB_CAP_DIVISOR or
+# GB_CAP_STAGGER -- alignment looks tidier and is exactly wrong.
+#
+# THE FINDING. The 3-month v7 run has a persistent bimodality at the
+# flagship 20.380377 mHz: leaves split across the band 1141/1142 seam
+# (+12.19 bins from the flagship) with an EMPTY GAP between the two
+# populations. The dedicated high-f probe SOLVED this on the same band,
+# and the probe's BAND grid is bit-identical to v7's -- so the band grid
+# is not the discriminator. THE CAP GRID IS. Cap-cell membership of the
+# actual flagship leaves at v7 row 5, under both geometries:
+#
+#   v7    (divisor=1, stagger=0):
+#      cell 1141  [-122.8, +12.2] bins   below-seam 24   above-seam  0
+#      cell 1142  [ +12.2, +147.2] bins  below-seam  0   above-seam 22
+#
+#   probe (divisor=2, stagger=1):
+#      cell 2284  [ -21.6,  +45.9] bins  below-seam 24   above-seam 22
+#                                        ^^^ SPANS THE SEAM
+#
+# WHY IT MATTERS. Under the aligned grid each band carries an INDEPENDENT
+# cap, so the two modes never compete and eight leaves can sit across the
+# seam forever. Under the staggered grid BOTH modes fall in ONE cell and
+# compete for ONE cap, which gives the RJ death move direct pressure to
+# kill the weaker side. This compounds with the block-Gibbs scan: bands
+# 1141/1142 are residue classes 7 and 8 mod GB_BAND_UNIT_STRIDE=9 and are
+# therefore NEVER co-open, so no single move can even see both modes at
+# once. The straddling cell is what reaches across that.
+#
+# make_cap_edges' own docstring states the intent: stagger exists so "no
+# source can sit on a band seam and a cap seam simultaneously", and the
+# cell at index b*K "physically STRADDLES the band-(b-1)/b boundary".
+#
+# GEOMETRY AT K=2. Sub-bands are 135 FD bins (GB_SUBBAND_DIVISOR=8), so
+# cells are 67.5 bins. Staggered edges land at the 1/4 and 3/4 points of
+# each band, so every band owns one INTERIOR centre cell and SHARES two
+# straddling cells with its neighbours. Every cap-cell boundary is
+# mid-band; NO cap edge sits on a band seam. 2464 cells, not 1232.
+#
+# PINNED BY tests/test_cap_stagger.py::SeamStraddlingCellTest, which
+# asserts that at (2, 1) two leaves either side of a band seam map to the
+# SAME cell index and at (1, 0) they do not. If you change this, that
+# test fails and tells you why.
+#
+# ⚠ CAP EDGES CHANGE -> the resume guard
+# (GBState.initialize_band_information) refuses a v7/v8-lineage store. See
+# the relaunch block at the top of this file: rewind GB to empty, then
+# migrate_gb_cap_grid.py --cap-divisor 2 --stagger.
+export GB_CAP_DIVISOR=2
 # ############################################################################
 # ## V7 (2026-08-24) = V6 + OVERLAPPING CAP CELLS, nothing else.            ##
 # ## GB_CAP_OVERLAP_FRAC=0.25 widens each cap cell's enforcement span on   ##
@@ -936,22 +1030,51 @@ export GB_CAP_DIVISOR=1
 # could be vetoed because EITHER side was full, not because its destination
 # was. Removing the lip makes each leaf count only where it actually is.
 #
-# ⚠ COUPLED KNOB -- GB_CAP_DRIFT_GATE_EDGE_LEAK BELOW MUST STAY 1 WITH THIS.
-# _cap_drift_gate_setup short-circuits to None when
-# (cap_divisor == 1 AND overlap <= 0 AND NOT edge_leak), on the premise that
-# in-model stays inside its band window. That premise is FALSE -- in-model may
-# cross by up to N/4 bins -- so overlap=0 WITHOUT the leak knob removes cap
-# enforcement on cross-edge moves entirely (the 2026-08-20 "29 leaves into a
-# cap-1 cell" mode, at the seams). Never change one without the other.
-#
 # Resume-safe, no migration: GBState.static_names is only
 # ("band_edges", "cap_edges"), and make_cap_edge_extensions (state.py:107) is
 # computed at runtime rather than persisted, so this touches no stored array.
+#
+# ⚠ STAYS 0 UNDER THE STAGGERED GRID (user ruling 2026-08-29). The probe
+# whose geometry we are adopting ran overlap=0.25 as WELL, so this is
+# deliberately NOT an exact probe reproduction. Reasoning:
+#
+#  * Stagger and overlap are THE SAME MECHANISM from opposite sides: both
+#    charge a leaf to a cell it does not sit in, creating competition for
+#    one cap. Whether that is good depends on WHERE.
+#  * At a BAND SEAM competition is what you want, because non-competition
+#    there compounds with the block-Gibbs trap (1141/1142 are residues 7
+#    and 8 mod 9, never co-open, so no single move sees both modes).
+#    STAGGER FIXES EXACTLY THAT CASE, and it is the case with direct
+#    evidence -- see the divisor block above.
+#  * At a CAP-CELL BOUNDARY MID-BAND competition is worth much less: those
+#    two leaves ARE in the same band, so they are co-open, RJ can propose
+#    to both and in-model moves freely. Non-competition there is an
+#    inefficiency, not a trap. That is the ONLY extra case overlap covers
+#    once staggered -- and it buys it by tightening effective capacity
+#    everywhere, against a cap measured as BINDING in 55 of 104
+#    (band, iteration) pairs = 53% at the flagship bands.
+#  * ATTRIBUTION: one change at a time. Stagger+overlap together and we
+#    cannot tell which mattered.
+#  * COMPOUNDING: at divisor 2, stagger AND overlap gives 67.5-bin cells
+#    widened to 90 with 22.5-bin shared zones -- every leaf near any
+#    boundary counted twice, layered on an already-binding cap.
+#
+# IF STAGGER ALONE DOES NOT CLEAR THE BIMODALITY, restoring
+# GB_CAP_OVERLAP_FRAC=0.25 is the obvious next step, and we will then know
+# which of the two was load-bearing.
 export GB_CAP_OVERLAP_FRAC=0
-# COUPLED WITH GB_CAP_OVERLAP_FRAC=0 ABOVE -- keeps the in-model cap drift gate
-# ARMED at cells == bands, so cross-edge crossings are bounded by
-# cap + GB_CAP_INMODEL_HEADROOM instead of unbounded. Default OFF is the
-# historical short-circuit and is WRONG for this configuration.
+# NO-OP AT GB_CAP_DIVISOR=2 -- RETAINED DELIBERATELY (verified 2026-08-29).
+# The drift gate's short-circuit is
+#   (cap_divisor == 1 AND overlap <= 0 AND NOT edge_leak) -> return None
+# so at divisor 2 the FIRST clause is already False and the gate is armed
+# regardless of this knob. Grep confirms it: `cap_drift_gate_edge_leak` has
+# exactly two references in the tree -- its ctor read and that one clause --
+# so it can have no other effect here.
+#
+# KEPT SET ANYWAY because it is only inert while divisor > 1: if anyone
+# reverts to GB_CAP_DIVISOR=1, this is what stops cap enforcement on
+# cross-edge in-model moves from silently vanishing (the 2026-08-20
+# "29 leaves into a cap-1 cell" mode, at the seams).
 export GB_CAP_DRIFT_GATE_EDGE_LEAK=1
 # N/4 IN-MODEL BAND WINDOW ACTUALLY MEANS N/4 (bug fix, aligned with v7).
 # The window was BUILT as band_N_vals * layer_df / 4 Hz (gbbands.py:3397-3401)
@@ -965,6 +1088,23 @@ export GB_BAND_WINDOW_STRICT=1
 # At cap_divisor == 1 _cap_cell_index returned band_inds and never read f0, so
 # current cell == new cell for every row and THE VETO COULD NOT FIRE -- the
 # cap+2 destination rule was a tautology. =0 is the escape hatch.
+#
+# STILL CORRECT AT GB_CAP_DIVISOR=2 + STAGGER=1 (verified 2026-08-29), and the
+# earlier "the clip folds an out-of-band proposal back into the leaf's own
+# boundary cell" reading DOES NOT APPLY: that clip lives in the NESTED branch
+# only. The staggered branch clips solely to the GLOBAL cell range, so sub may
+# run past K-1 (or below 0) and the leaf lands in the neighbouring STRADDLING
+# cell -- exactly what the geometry wants. Verified against
+# searchsorted(cap_edges, f) over +/- 0.9 band widths.
+#
+# On our UNIFORM band grid the b*K terms cancel algebraically, so the staggered
+# lookup gives the same cell for ANY handed-in band index and this knob is a
+# no-op -- EXCEPT exactly on a cap edge, where the cancellation is exact in
+# real arithmetic but not in floating point and the two band references can
+# round the tie to different sides (measured: 2 of 37 sample points, both on
+# edges; resolve_band matched searchsorted at both). Keep it ON: one
+# searchsorted, removes the tie ambiguity, and load-bearing on a ragged get_n
+# grid where the per-band steps differ.
 export GB_CAP_DEST_BAND=1
 # rj_replace DISABLED (aligned with v7 2026-08-29). Not earning its ~580 s/row
 # (cold acceptance 0.033-0.046%, delta-ll flat at ~103 mean across 55 calls),
@@ -980,10 +1120,12 @@ export GB_SEARCH_RJ_REPLACE=0
 # RESTS on: normalized |<h_i|h_j>| between concurrently-open adjacent-band cold
 # sources. 8 pairs per unit at unit close, diagnostic only, never mutates state.
 export GB_ORTHO_CHECK=1
-# Stagger OFF with the aligned-cells grid (2026-08-26): the overlap lip
-# now does the cross-edge work the half-cell shift used to; stagger +
-# divisor 1 would just re-misalign cells against the sub-bands.
-export GB_CAP_STAGGER=0
+# STAGGER ON (2026-08-29) -- the half-cell shift is the whole point of
+# this configuration; see the GB_CAP_DIVISOR block above for the measured
+# cell-membership numbers. It is meaningless without divisor > 1 (the move
+# forces it off at K == 1), and the pair (2, 1) is what the high-f probe
+# ran when it solved the flagship bimodality.
+export GB_CAP_STAGGER=1
 # Per-cell cap CEILING + entry headroom + stage hold (probe-validated
 # 2026-08-26 set):
 #   GB_CAP_CELL_MAX=20    -- belt on the cap updater, sized to the
@@ -1013,6 +1155,26 @@ export GB_CAP_STAGGER=0
 #                            gb_search while any engaged cap cell is
 #                            still mid-ramp (occupied at cap, below
 #                            ceiling): the stage holds for the ramp.
+# ---- BOTH RE-EXAMINED AT (divisor=2, stagger=1), 2026-08-29 ----
+# GB_CAP_CELL_MAX=20 KEPT. Cells now govern HALF a sub-band (67.5 bins,
+#   2464 cells), so 20 is loose -- but it is a BELT against the ratchet,
+#   not a design target, and it is what the probe effectively ran: the
+#   probe set no GB_CAP_CELL_MAX at all, so its ceiling fell back to
+#   nleaves_max, which the probe pinned at 20. Same effective per-cell
+#   ceiling, reached two different ways. Lowering it now would be a second
+#   simultaneous change with no evidence behind it.
+# GB_CAP_INMODEL_HEADROOM=2 KEPT, but note its SCOPE SHRANK. The veto only
+#   fires on a cell the row is NEWLY entering (_cap_new_entry_veto:
+#   `_foreign = _memb & (_cell != c_p) & ...`). With both flagship modes
+#   now inside ONE cell, a cross-seam in-model move has new cell == cur
+#   cell, is not foreign, and is NOT POLICED AT ALL -- correctly, since the
+#   occupancy census does not change when a leaf moves within a cell. What
+#   the headroom still governs are the two MID-BAND cap boundaries per band
+#   (the 1/4 and 3/4 points), where cap + 2 keeps peak handover possible
+#   against a cap measured as binding 53% of the time at the flagship
+#   bands. 2 remains right: it is an ADDITIVE allowance on destination
+#   occupancy, and the transient double-occupancy it must exceed did not
+#   change when the cell halved.
 export GB_CAP_CELL_MAX=20
 export GB_CAP_INMODEL_HEADROOM=2
 export GB_SEARCH_CAP_QUIESCENT=1

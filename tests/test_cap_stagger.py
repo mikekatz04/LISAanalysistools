@@ -223,5 +223,181 @@ class CapDriftGateTest(unittest.TestCase):
         self.assertEqual(int(counts[5]), -1)
 
 
+# ----------------------------------------------------------------------
+# THE SEAM-STRADDLING CELL: why v7/v8 run (divisor=2, stagger=1).
+# ----------------------------------------------------------------------
+#: v7 band grid: GB_SUBBAND_DIVISOR=8 -> uniform sub-bands of 135 FD bins.
+V7_BAND_BINS = 135
+#: 3-month observation -> the FD bin width the band grid is expressed in.
+V7_DF = 1.0 / (90.0 * 86400.0)
+#: the flagship bimodal source's band pair (measured, 2026-08-29).
+V7_SEAM_BAND = 1142
+
+
+def _v7_band_edges(num_bands=1400):
+    """A uniform band grid with v7's 135-FD-bin sub-bands."""
+    return 1e-3 + np.arange(num_bands + 1) * (V7_BAND_BINS * V7_DF)
+
+
+class SeamStraddlingCellTest(unittest.TestCase):
+    """The 3-month v7 bimodality mechanism, pinned so it cannot be lost.
+
+    MEASURED FINDING (2026-08-29, v7 row 5, flagship 20.380377 mHz). The
+    flagship's leaves split across the band 1141/1142 seam -- which sits
+    at +12.19 FD bins from the flagship -- with an empty gap between the
+    two populations. Cap-cell membership of those actual leaves::
+
+        v7    (divisor=1, stagger=0):
+           cell 1141  [-122.8, +12.2] bins   below-seam 24   above-seam  0
+           cell 1142  [ +12.2, +147.2] bins  below-seam  0   above-seam 22
+
+        probe (divisor=2, stagger=1):
+           cell 2284  [ -21.6,  +45.9] bins  below-seam 24   above-seam 22
+
+    Under the ALIGNED grid each band carries an INDEPENDENT cap, so the
+    two modes never compete and eight leaves can sit across the seam
+    forever. Under the STAGGERED grid both modes fall in ONE cell and
+    compete for one cap, which is what gives the RJ death move direct
+    pressure to kill the weaker side. The dedicated high-f probe, which
+    ran (2, 1), solved this on the same band with a bit-identical BAND
+    grid -- so the cap grid, not the band grid, is the discriminator.
+
+    This compounds with the block-Gibbs scan: bands 1141/1142 are residue
+    classes 7 and 8 mod GB_BAND_UNIT_STRIDE=9 and are therefore never
+    co-open, so no single move can even see both modes at once. The
+    straddling cell is what reaches across that.
+
+    DO NOT "FIX" THE ALIGNMENT BACK. Aligning cap edges to band edges is
+    exactly the configuration that cannot break this degeneracy.
+    """
+
+    def test_two_modes_across_a_seam_share_one_cell_only_when_staggered(self):
+        """THE MECHANISM: same cell at (2, 1), different cells at (1, 0)."""
+        be = _v7_band_edges()
+        seam = be[V7_SEAM_BAND]
+        # one leaf either side of the band seam, well inside their bands
+        f_below = seam - 5.0 * V7_DF
+        f_above = seam + 5.0 * V7_DF
+        freqs = np.array([f_below, f_above])
+        bands = np.array([V7_SEAM_BAND - 1, V7_SEAM_BAND])
+
+        staggered = _shim(be, 2, True)._cap_cell_index(bands, freqs)
+        self.assertEqual(
+            int(staggered[0]), int(staggered[1]),
+            msg="(divisor=2, stagger=1) MUST map two leaves either side of a "
+                "band seam into ONE cap cell -- that shared cap is the only "
+                "thing that makes the two modes compete.",
+        )
+        # and it is the straddling cell, index b*K of the UPPER band
+        self.assertEqual(int(staggered[0]), V7_SEAM_BAND * 2)
+
+        aligned = _shim(be, 1, False)._cap_cell_index(bands, freqs)
+        self.assertNotEqual(
+            int(aligned[0]), int(aligned[1]),
+            msg="(divisor=1, stagger=0) files them under independent caps -- "
+                "the configuration that produced the persistent bimodality.",
+        )
+        self.assertEqual([int(c) for c in aligned], list(bands))
+
+    def test_straddling_cell_reaches_half_a_cell_either_side_of_the_seam(self):
+        """The measured [-21.6, +45.9]-bin span, from the stored edges."""
+        be = _v7_band_edges()
+        mv = _shim(be, 2, True)
+        seam = be[V7_SEAM_BAND]
+        cell = V7_SEAM_BAND * 2
+        lo, hi = mv.cap_edges[cell], mv.cap_edges[cell + 1]
+        half_cell_bins = V7_BAND_BINS / 2.0 / 2.0          # band/K/2 = 33.75
+        self.assertAlmostEqual((seam - lo) / V7_DF, half_cell_bins, places=6)
+        self.assertAlmostEqual((hi - seam) / V7_DF, half_cell_bins, places=6)
+        # the flagship sits 12.19 bins BELOW the seam; reproduce the
+        # measured span relative to it
+        flagship = seam - 12.19 * V7_DF
+        self.assertAlmostEqual((lo - flagship) / V7_DF, -21.56, places=2)
+        self.assertAlmostEqual((hi - flagship) / V7_DF, +45.94, places=2)
+
+    def test_only_the_staggered_grid_has_no_cap_edge_on_a_band_seam(self):
+        """Aligned grids put a cap edge on EVERY seam; staggered on none."""
+        be = _v7_band_edges(num_bands=40)
+        for k, stagger, want_shared in ((1, False, True), (2, False, True),
+                                        (2, True, False)):
+            ce = _shim(be, k, stagger).cap_edges
+            shared = np.abs(be[:, None] - ce[None, :]).min(axis=1) <= 1e-15
+            # interior seams only (the two grid ends always coincide)
+            got_shared = bool(shared[1:-1].any())
+            self.assertEqual(
+                got_shared, want_shared,
+                msg=f"(divisor={k}, stagger={stagger}): interior band seams "
+                    f"sharing a cap edge = {got_shared}, expected "
+                    f"{want_shared}.",
+            )
+
+    def test_staggered_lookup_ignores_the_handed_band_on_a_uniform_grid(self):
+        """At (2, 1) on a UNIFORM grid the handed band index is irrelevant.
+
+        The staggered branch of ``_cap_cell_index`` applies NO per-band
+        clip (only the global cell range), so ``b*K + floor((f - lo_b)/
+        step_b + 1/2)`` is algebraically the SAME number for every band
+        index handed in when the bands are equal width: the ``b*K`` terms
+        cancel. An out-of-band destination frequency therefore resolves to
+        its TRUE cell instead of being folded back into the source band's
+        boundary cell -- the nested grid's behaviour, pinned in the next
+        test. So GB_CAP_DEST_BAND cannot change the answer here (it still
+        matters on a ragged ``get_n`` grid, where the steps differ).
+
+        EXACT CAP EDGES ARE THE ONE EXCEPTION (measured 2026-08-29): the
+        cancellation is exact in real arithmetic but not in floating
+        point, and a frequency sitting exactly ON a cap edge makes
+        ``(f - lo_b)/step_b + 1/2`` an integer, so the two band
+        references can round the tie to different sides and disagree by
+        one cell. Measure-zero, but it is a reason to keep
+        GB_CAP_DEST_BAND=1 even on a uniform grid: resolving the band
+        from f0 first reproduces ``searchsorted(cap_edges)`` on the ties
+        too, which the source-attributed lookup does not.
+        """
+        be = _v7_band_edges(num_bands=40)
+        mv = _shim(be, 2, True)
+        mv.band_edges = be
+        seam_band = 20
+        ce = mv.cap_edges
+        n_ties = 0
+        for d_bins in np.linspace(-0.9 * V7_BAND_BINS, 0.9 * V7_BAND_BINS, 37):
+            f = np.array([be[seam_band] + d_bins * V7_DF])
+            want = int(np.searchsorted(ce, f[0], side="right") - 1)
+            on_edge = np.abs(ce - f[0]).min() / V7_DF < 1e-6
+            # GB_CAP_DEST_BAND=1 is exact everywhere, ties included
+            self.assertEqual(
+                int(mv._cap_cell_index(np.array([seam_band - 1]), f,
+                                       resolve_band=True)[0]),
+                want, msg=f"resolve_band d={d_bins}",
+            )
+            if on_edge:
+                n_ties += 1
+                continue
+            for handed in (seam_band - 1, seam_band):
+                self.assertEqual(
+                    int(mv._cap_cell_index(np.array([handed]), f)[0]), want,
+                    msg=f"d={d_bins} handed={handed}",
+                )
+        self.assertGreater(n_ties, 0, "sampling never hit a cap edge")
+
+    def test_nested_grid_folds_an_out_of_band_frequency_back(self):
+        """Contrast: the NESTED branch DOES clip ``sub`` into ``[0, K-1]``.
+
+        Pins that the clip the stagger branch avoids is real, so nobody
+        reads the nested docstring and assumes it applies at (2, 1).
+        """
+        be = _v7_band_edges(num_bands=40)
+        mv = _shim(be, 2, False)
+        seam_band = 20
+        f_above = np.array([be[seam_band] + 10.0 * V7_DF])   # in band 20
+        folded = int(mv._cap_cell_index(np.array([seam_band - 1]), f_above)[0])
+        # charged to band 19's TOP cell, not to where it actually sits
+        self.assertEqual(folded, (seam_band - 1) * 2 + 1)
+        self.assertNotEqual(
+            folded,
+            int(np.searchsorted(mv.cap_edges, f_above[0], side="right") - 1),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
