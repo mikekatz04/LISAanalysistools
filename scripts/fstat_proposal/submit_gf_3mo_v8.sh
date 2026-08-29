@@ -885,8 +885,64 @@ export GB_CAP_DIVISOR=1
 # ## (inherits fitted noise + VGB ladder + fstat epoch cache; only the GB  ##
 # ## search reruns under overlap enforcement). Fresh dir works too.        ##
 # ############################################################################
-export GB_CAP_OVERLAP_FRAC=0.25
-export GB_SEARCH_RJ_REPLACE=1
+# CAP CELLS EXACTLY == SUB-BANDS (user ruling, aligned with v7 2026-08-29):
+# 0.25 -> 0. With GB_CAP_DIVISOR=1 and GB_CAP_STAGGER=0 the cap edges are
+# already bit-identical to the band edges; dropping the overlap removes the
+# widened ENFORCEMENT SPAN so a cap cell is exactly its sub-band, with no lip.
+#
+# WHY: the overlap makes "at cap" an OR over covering cells, so a leaf near a
+# band edge is charged against BOTH neighbours' budgets. Harmless when the cap
+# is slack -- but measured on the v7 store the cap BINDS: at the flagship bands
+# 1141/1142, max-over-walkers occupancy reached the cap in 55 of 104
+# (band, iteration) pairs = 53%. With a binding cap the overlap obstructs the
+# cross-edge in-model movement the headroom below is meant to allow: a leaf
+# could be vetoed because EITHER side was full, not because its destination
+# was. Removing the lip makes each leaf count only where it actually is.
+#
+# ⚠ COUPLED KNOB -- GB_CAP_DRIFT_GATE_EDGE_LEAK BELOW MUST STAY 1 WITH THIS.
+# _cap_drift_gate_setup short-circuits to None when
+# (cap_divisor == 1 AND overlap <= 0 AND NOT edge_leak), on the premise that
+# in-model stays inside its band window. That premise is FALSE -- in-model may
+# cross by up to N/4 bins -- so overlap=0 WITHOUT the leak knob removes cap
+# enforcement on cross-edge moves entirely (the 2026-08-20 "29 leaves into a
+# cap-1 cell" mode, at the seams). Never change one without the other.
+#
+# Resume-safe, no migration: GBState.static_names is only
+# ("band_edges", "cap_edges"), and make_cap_edge_extensions (state.py:107) is
+# computed at runtime rather than persisted, so this touches no stored array.
+export GB_CAP_OVERLAP_FRAC=0
+# COUPLED WITH GB_CAP_OVERLAP_FRAC=0 ABOVE -- keeps the in-model cap drift gate
+# ARMED at cells == bands, so cross-edge crossings are bounded by
+# cap + GB_CAP_INMODEL_HEADROOM instead of unbounded. Default OFF is the
+# historical short-circuit and is WRONG for this configuration.
+export GB_CAP_DRIFT_GATE_EDGE_LEAK=1
+# N/4 IN-MODEL BAND WINDOW ACTUALLY MEANS N/4 (bug fix, aligned with v7).
+# The window was BUILT as band_N_vals * layer_df / 4 Hz (gbbands.py:3397-3401)
+# while every consumer divides by the move's df = 1/Tobs -- so it was too wide
+# by layer_df*Tobs = Nt/2 = 1080x. Measured: N=256 intended +/-64 bins, actual
+# +/-69,120 bins = +/-512 sub-bands, WIDER THAN THE WHOLE 3-21 mHz BAND. The
+# per-step leash (|df0| <= N/4 bins) was always unit-correct and is untouched.
+# =0 restores the old unbounded window.
+export GB_BAND_WINDOW_STRICT=1
+# CAP GATE READS THE DESTINATION CELL FROM THE CANDIDATE f0 (bug fix, v7-aligned).
+# At cap_divisor == 1 _cap_cell_index returned band_inds and never read f0, so
+# current cell == new cell for every row and THE VETO COULD NOT FIRE -- the
+# cap+2 destination rule was a tautology. =0 is the escape hatch.
+export GB_CAP_DEST_BAND=1
+# rj_replace DISABLED (aligned with v7 2026-08-29). Not earning its ~580 s/row
+# (cold acceptance 0.033-0.046%, delta-ll flat at ~103 mean across 55 calls),
+# and its lnL ACCOUNTING IS BROKEN: 365 of 905 [GB_ORTHO_LL rj_replace] lines
+# (40.3%) breach GB_ORTHO_LL_TOL=0.05, max 6.971e+03 -- four orders worse than
+# any other move -- with a drift ledger claiming +9,693 against -117,009
+# realized. Chain state stays correct (drift is repaired from the residual) but
+# the per-cell lnL the MH ratio prices against can be wrong by thousands of
+# nats. Re-enable only after the accounting is fixed and re-audited.
+export GB_SEARCH_RJ_REPLACE=0
+# ORTHOGONALITY PREMISE MONITOR (v7-aligned). NOT GB_ORTHO_LL_CHECK (the lnL
+# bookkeeping reconcile, already on). This measures what the band decomposition
+# RESTS on: normalized |<h_i|h_j>| between concurrently-open adjacent-band cold
+# sources. 8 pairs per unit at unit close, diagnostic only, never mutates state.
+export GB_ORTHO_CHECK=1
 # Stagger OFF with the aligned-cells grid (2026-08-26): the overlap lip
 # now does the cross-edge work the half-cell shift used to; stagger +
 # divisor 1 would just re-misalign cells against the sub-bands.
