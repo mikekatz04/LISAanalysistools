@@ -749,7 +749,7 @@ export GB_BAND_UNIT_START_PER_WALKER=1
 # PER-WALKER DIRECTION (+/-1 rotation). Deliberately left OFF so this
 # run isolates the start effect; flip to 1 to add it. Same DB argument,
 # same partition property (every walker still visits every class once).
-export GB_BAND_UNIT_DIR_PER_WALKER=0
+export GB_BAND_UNIT_DIR_PER_WALKER=1
 # UNIT REPEATS: N consecutive passes over each class (open -> RJ ->
 # in-model -> close, N times) before advancing, so an edge source gets
 # several CONSECUTIVE attempts with the residual context refreshed
@@ -759,7 +759,7 @@ export GB_BAND_UNIT_DIR_PER_WALKER=0
 # today's behaviour, bit-identical) as a deliberate choice: raise it only
 # with the iteration-time budget in hand. Search-only either way (the
 # recipe pins pe-named moves to 1).
-export GB_BAND_UNIT_REPEATS=1
+export GB_BAND_UNIT_REPEATS=3
 # VGB DE-COUPLED from the fine grid (2026-08-22 timing autopsy): the VGB
 # branch inherits GB_SUBBAND_DIVISOR through GBSetup.init_band_structure,
 # so v6 silently ran the ~30-source VGB move on 1232 narrow bands --
