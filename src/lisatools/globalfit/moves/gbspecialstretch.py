@@ -613,6 +613,49 @@ def _inmodel_cap_headroom() -> int:
     return int(os.environ.get("GB_CAP_INMODEL_HEADROOM", "2") or 0)
 
 
+def _cap_dest_band() -> bool:
+    """``GB_CAP_DEST_BAND`` (default ``"1"`` -- ON).
+
+    User ruling 2026-08-29: the gate's destination "should always be from
+    the candidate f0". So this ships ON; ``GB_CAP_DEST_BAND=0`` is the
+    one-line escape hatch back to the legacy source-attributed lookup, kept
+    only so the change stays attributable on the cluster.
+
+    Items C + E of the 2026-08-29 contract, which are one mechanism.
+
+    C (destination vs source): ``_cap_cell_index`` maps a frequency to a
+    cap cell using the band index it is HANDED. At ``cap_divisor == 1``
+    -- the v7 production configuration -- it returns that band index
+    immediately and never reads ``freqs_hz`` at all. The in-model drift
+    gate passes the source's band ``b_s`` for BOTH endpoints, so the
+    current and destination cells are equal by construction, every row
+    looks non-crossing, and ``_cap_new_entry_veto`` is a tautology that
+    can never fire. Nothing checks the destination band's cap.
+
+    E (mid-propose re-homing): the same tautology disables the
+    accept-side ``_cap_covering_transition_scatter``, whose whole job is
+    to keep the per-unit occupancy census true after a source drifts
+    across an edge ("later rounds of this unit see true occupancy -- the
+    sorter's freqs snapshot cannot"). ``band_sorter.band_inds`` is a
+    construction-time snapshot and is never recomputed mid-propose, so
+    with the transition dead a drifted source keeps being charged to its
+    OLD band for the rest of the propose.
+
+    Armed, the in-model gate resolves BOTH endpoints' cells from their
+    actual frequencies, which fixes the veto (C) and revives the census
+    transition (E) with one change, since both read the same membership
+    tuples.
+
+    SCOPE: in-model only, and only the VETO's destination endpoint. The
+    census keeps construction-time filing either way (band assignment is
+    frozen for the propose -- see the gate-site comment), and the
+    replacement move keeps today's source-attributed behaviour bit-for-bit
+    (user ruling 2026-08-29: "keep this but we are not using replace right
+    now"); it is inert in v7 anyway (``GB_SEARCH_RJ_REPLACE=0``).
+    """
+    return os.environ.get("GB_CAP_DEST_BAND", "1") == "1"
+
+
 def _cap_with_inmodel_headroom(cap):
     """``cap`` widened by the in-model headroom, ARMED CELLS ONLY.
 
@@ -10368,6 +10411,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "u8": xp.empty(0, dtype=xp.uint8),
         }
         dg_on = dg is not None
+        # CUDA MIRROR for GB_CAP_DEST_BAND (item C). The fused gate kernel
+        # reproduces ``_cap_cell_index`` from ``cap_band_lo`` /
+        # ``cap_band_step`` / ``cap_divisor`` and is handed NO band-edge
+        # array, so it cannot resolve a destination band from a candidate
+        # frequency the way the host now does -- it would keep computing
+        # the source-attributed cell and silently disagree with the python
+        # gate. Rather than ship a divergent kernel, degrade to the python
+        # chain, which is always correct. Costs nothing in production: the
+        # kernel is default-OFF (GB_INMODEL_ACCEPT_KERNEL=0) and v7 does
+        # not arm it. Lifting this needs a backend CUDA change (pass the
+        # band edges + num_bands and searchsorted in-kernel), which cannot
+        # be built or validated off-cluster.
+        if dg_on and _cap_dest_band():
+            self._imk_warn_once(
+                "GB_CAP_DEST_BAND=1 resolves the cap gate's destination "
+                "band from f0, which the fused kernel cannot do; running "
+                "the python in-model chain for this block."
+            )
+            return None
         overlap_on = (
             dg_on
             and float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) > 0.0
@@ -10998,6 +11060,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # inmodel_repeats. Default (unsynced) timer => host time,
                 # which is what collapsing ~160 launches/repeat-step to 3
                 # is supposed to move.
+                # Cap-drift membership stash, consumed by the accept-side
+                # occupancy transition. Left None on the fused-kernel path
+                # (which runs its own gate and its own scatter), so the
+                # accept block below can tell "gate did not run" from
+                # "gate ran and produced memberships".
+                _dg_cur_memb = _dg_new_memb = None
                 _gate_t0 = _tmark_start(tm)
                 if _acc is not None:
                     keep, keep_idx, keep_any = self._imk_gate(
@@ -11075,12 +11143,54 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     if _dg is not None:
                         _dg_counts, _dg_cap = _dg
                         _fc_dg = self._f0_col
+                        _f_cur = curr[sl][:, _fc_dg] / 1e3
+                        _f_new = new[:, _fc_dg] / 1e3
+                        # ⚠ BAND ASSIGNMENT IS FROZEN FOR THE PROPOSE, AND
+                        # THAT IS DELIBERATE AND RESIDUAL-CRITICAL.
+                        # User ruling 2026-08-29, verbatim: "A source
+                        # (dead or alive) has to stay assigned to its band
+                        # determined at initial buffer fill within
+                        # propose(). If it goes across a band edge, do not
+                        # change its assignment. Its assignment will change
+                        # automatically the next time around."
+                        #
+                        # WHY: a source's buffer cell, its residual
+                        # add/remove bookkeeping and its fill index map are
+                        # all keyed to the band it was assigned at the
+                        # INITIAL BUFFER FILL. Re-homing a leaf that
+                        # drifted across an edge would add and subtract its
+                        # contribution in DIFFERENT cells and silently
+                        # corrupt the parent residual -- a wrong likelihood
+                        # with no exception to point at. The rule covers
+                        # DEAD rows too, not just alive ones that drift.
+                        # The next propose rebuilds the sorter and
+                        # re-derives every row's band from its current f0
+                        # (gbbands ``band_inds = searchsorted(...)``), so
+                        # drift IS honoured -- one propose later.
+                        #
+                        # So these two tuples keep construction-time
+                        # filing, and they are what the accept-side census
+                        # transition below reads. DO NOT "fix" the
+                        # stale-looking occupancy here.
+                        _dg_cur_memb = self._cap_cell_members(b_s, _f_cur)
+                        _dg_new_memb = self._cap_cell_members(b_s, _f_new)
+                        # VETO DESTINATION (item C, GB_CAP_DEST_BAND). The
+                        # gate asks "which band would this candidate land
+                        # in", which is a question about the CANDIDATE
+                        # FREQUENCY, not about how the row is filed -- so
+                        # it resolves the cell from f0. Nothing is
+                        # relabelled: this index is used for the veto test
+                        # only and never reaches the census, the buffer or
+                        # the residual. Off, this is ``_dg_new_memb`` and
+                        # the veto is exactly today's tautology.
+                        _dg_dest_memb = (
+                            self._cap_cell_members(
+                                b_s, _f_new, resolve_band=True)
+                            if _cap_dest_band() else _dg_new_memb
+                        )
                         _dg_veto = self._cap_new_entry_veto(
                             _dg_counts, _dg_cap, t_s, w_s,
-                            self._cap_cell_members(
-                                b_s, curr[sl][:, _fc_dg] / 1e3),
-                            self._cap_cell_members(
-                                b_s, new[:, _fc_dg] / 1e3),
+                            _dg_cur_memb, _dg_dest_memb,
                         )
                         new_logp[_dg_veto] = -np.inf
                         _dg_n = _dg_n + _dg_veto.sum()
@@ -11247,32 +11357,39 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # (weights are 0 for rejected/non-crossing rows) and
                     # duplicate-safe (scatter-add; staggered seam cells can be
                     # targeted from both adjacent bands in one batch).
-                    if _dg is not None:
-                        if self.cap_overlap_frac > 0.0:
-                            # Overlap mode (fix 2026-08-24): the veto branch
-                            # above works on membership SETS and never defines
-                            # ``_dg_cross``/``_dg_flat_n`` -- referencing them
-                            # here was an UnboundLocalError on the first
-                            # accepted in-model block of any armed overlap run.
-                            # The correct occupancy transition is per-SIDE set
-                            # difference: +1 every cell the accepted move NEWLY
-                            # covers, -1 every cell it no longer covers --
-                            # factored into _cap_covering_transition_scatter
-                            # (2026-08-24) so the replacement move's accept
-                            # path shares the identical accounting.
-                            self._cap_covering_transition_scatter(
-                                _dg[0], t_s, w_s,
-                                (_c_p, _c_nb, _c_hn), (_n_p, _n_nb, _n_hn),
-                                accept,
-                            )
-                        else:
-                            _dg_w = (accept & _dg_cross).astype(xp.int32)
-                            self._cap_gate_scatter_add(_dg[0], _dg_flat_n, _dg_w)
-                            self._cap_gate_scatter_add(
-                                _dg[0],
-                                self._cap_flat_index(t_s, w_s, _dg_cell_c),
-                                -_dg_w,
-                            )
+                    if _dg is not None and _dg_new_memb is not None:
+                        # ONE accounting for both overlap modes. The
+                        # covering-set transition is +1 into every cell the
+                        # accepted move newly covers and -1 out of every
+                        # cell it no longer covers; with single membership
+                        # (overlap 0, neighbour None) that reduces EXACTLY
+                        # to the partition rule -- +1 destination, -1
+                        # source, on crossing rows only -- which is what
+                        # the deleted ``_dg_cross`` branch computed.
+                        #
+                        # REGRESSION FIXED (e79dbd7c): that branch read
+                        # ``_dg_cross`` / ``_dg_flat_n`` / ``_dg_cell_c``,
+                        # and the overlap branch read ``_c_p`` / ``_n_p``
+                        # ..., but e79dbd7c replaced the inline veto that
+                        # DEFINED them with ``_cap_new_entry_veto`` and did
+                        # not update these readers. Both branches then
+                        # referenced locals that are never assigned, so any
+                        # in-model block with the drift gate armed --
+                        # exactly the v7 configuration
+                        # (GB_CAP_DRIFT_GATE=1 + GB_CAP_DRIFT_GATE_EDGE_LEAK=1)
+                        # -- raised UnboundLocalError here. Routing both
+                        # modes through the shared helper with the stashed
+                        # membership tuples removes the dead names.
+                        #
+                        # Filing stays construction-time (see the gate
+                        # comment above): these tuples are the
+                        # source-attributed ones, NOT the resolved veto
+                        # destination, so the census keeps charging a
+                        # drifted leaf to the band it was filled into.
+                        self._cap_covering_transition_scatter(
+                            _dg[0], t_s, w_s,
+                            _dg_cur_memb, _dg_new_memb, accept,
+                        )
                     # One pooled survivor per cell (serial-within-band), so the
                     # fancy-index += is elementwise; rejected rows add an exact
                     # 0.0 / False.
@@ -12721,8 +12838,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # Every helper here short-circuits at ``cap_divisor == 1`` so the whole
     # cap machinery collapses back onto the band grid bit-identically.
 
-    def _cap_cell_index(self, band_inds, freqs_hz):
+    def _cap_cell_index(self, band_inds, freqs_hz, resolve_band=False):
         """Cap-cell index of sources at ``freqs_hz`` inside ``band_inds``.
+
+        ``resolve_band`` (opt-in, GB_CAP_DEST_BAND) first re-derives the
+        band from ``freqs_hz`` itself instead of trusting the handed-in
+        ``band_inds``. Callers that ask "which cell would this frequency
+        land in" -- the in-model drift gate's destination endpoint -- need
+        this; callers that ask "which cell is this row filed under" must
+        NOT use it. Without it the divisor-1 short-circuit below returns
+        the caller's own band and the destination is never consulted; at
+        divisor > 1 the ``clip`` folds an out-of-band frequency back into
+        the SOURCE band's boundary cell, which has the same effect.
+
+        The resolution matches ``BandSorter``'s own labelling exactly
+        (``searchsorted(band_edges, freqs, side="right") - 1``), clipped
+        to the valid band range so a frequency off the end of the grid
+        attributes to the first/last band rather than indexing out of
+        bounds.
 
         Nested grid: containment (cell ``c`` belongs to band ``c // K``)
         makes this a pure per-source arithmetic lookup -- no searchsorted
@@ -12737,6 +12870,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Both branches agree exactly with ``searchsorted(cap_edges, f)-1``
         over the stored edges.
         """
+        if resolve_band and freqs_hz is not None:
+            xp = get_array_module(band_inds)
+            _be = xp.asarray(self.band_edges)
+            band_inds = xp.clip(
+                xp.searchsorted(_be, freqs_hz, side="right") - 1,
+                0, int(self.num_bands) - 1,
+            ).astype(band_inds.dtype)
         if self.cap_divisor == 1 or freqs_hz is None:
             return band_inds
         xp = get_array_module(band_inds)
@@ -12783,8 +12923,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # returns (primary, None, None) and all downstream code reduces to the
     # exact-partition expressions bit-identically.
 
-    def _cap_cell_members(self, band_inds, freqs_hz):
+    def _cap_cell_members(self, band_inds, freqs_hz, resolve_band=False):
         """``(primary, neighbour, has_neighbour)`` cap-cell membership.
+
+        ``resolve_band`` is forwarded to :meth:`_cap_cell_index`; see
+        there. It is opt-in so every existing caller keeps
+        source-attributed filing bit-for-bit.
 
         ``primary`` is exactly :meth:`_cap_cell_index`. ``neighbour`` /
         ``has_neighbour`` are ``None`` when overlap is off (or f0 is not
@@ -12794,7 +12938,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         neighbour index can never leave ``[0, num_cap_cells - 1]`` where
         ``has_neighbour`` is True.
         """
-        primary = self._cap_cell_index(band_inds, freqs_hz)
+        primary = self._cap_cell_index(
+            band_inds, freqs_hz, resolve_band=resolve_band)
         # NOTE divisor 1 is a live overlap configuration since 2026-08-26
         # (cells = bands, widened spans): only overlap-off or missing f0
         # short-circuits here.

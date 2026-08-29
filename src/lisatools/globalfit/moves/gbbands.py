@@ -83,6 +83,65 @@ _SPECIAL_INDEX_BASE = int(1e6)
 _WDM_SLAB_LEAKAGE_LAYERS = 2
 
 
+def _band_window_strict() -> bool:
+    """``GB_BAND_WINDOW_STRICT`` (default ``"0"`` -- today's behaviour).
+
+    OFF (default) reproduces the legacy expression to the bit. ON makes
+    :func:`rj_band_window` return the EXACT sub-band, so the only N/4
+    widening left anywhere is the in-model bin gate in
+    ``_run_in_model_repeats`` -- which is already expressed in the MOVE's
+    df. See that function's docstring for why this matters.
+    """
+    return os.environ.get("GB_BAND_WINDOW_STRICT", "0") == "1"
+
+
+def rj_band_window(band_edges, band_N_vals, band_inds, df, is_rj):
+    """``[lower, upper]`` frequency limits (Hz) of each slot's band window.
+
+    This is the array the RJ support gate compares a birth's f0 against
+    (``curr_logp[(~alive) & out_of_band] = -inf`` in
+    ``_run_rj_step``), and -- divided by the MOVE's df -- the ``lo_s`` /
+    ``hi_s`` the in-model bin gate widens by ``n4_s``.
+
+    ⚠ A UNIT COLLISION LIVES IN THE LEGACY BRANCH (2026-08-29). The
+    ``N/4`` widening below is computed in ``df`` = the BUFFER's df, which
+    on the WDM path is ``layer_df`` (see :attr:`SubBandBuffer.df`). Every
+    consumer then divides by the MOVE's df, which on WDM is ``1/Tobs``
+    (``GBSpecialBase._configure_domain``). ``band_N_vals`` is a count of
+    FD bins at ``1/Tobs`` (it comes from ``get_N(..., Tobs, ...)``), so
+    pairing it with ``layer_df`` overstates the widening by exactly
+    ``layer_df * Tobs == Nt/2``. On the v7 3-month grid that is 1080x:
+    an intended 128-bin (N=512) margin becomes 138,240 bins = 1024
+    sub-bands, i.e. wider than the entire 3-21 mHz analysis band, so the
+    window is effectively unbounded.
+
+    ``GB_BAND_WINDOW_STRICT=1`` removes the widening entirely rather
+    than re-deriving it in move units, because that is what the user's
+    contract asks for (2026-08-29): "The cap and RJ apply within the
+    sub-band limits only, not N/4 outside. ... We want in-model to allow
+    movement across the band edge up to N/4 outside." With the window
+    strict, the in-model gate's own ``n4_s`` -- already in move-df bins
+    -- supplies that N/4 and nothing double-counts it.
+
+    Args:
+        band_edges: Ascending band-edge frequencies (Hz).
+        band_N_vals: Per-band FD sample counts (bins at ``1/Tobs``).
+        band_inds: Band index of each slot.
+        df: The BUFFER's df (FD bin width, or ``layer_df`` on WDM).
+        is_rj: Truthy on RJ-provenance buffers (the sorter's
+            ``rj_prop``), which are the only ones ever widened.
+
+    Returns:
+        ``[lower_f_lim, higher_f_lim]``, fresh arrays in both branches.
+    """
+    lower = band_edges[band_inds]
+    upper = band_edges[band_inds + 1]
+    if not is_rj or _band_window_strict():
+        return [lower, upper]
+    widen = band_N_vals[band_inds] * df / 4
+    return [lower - widen, upper + widen]
+
+
 def band_support_halfwidths(
     band_edges, Tobs: float, *, oversample: int = 4, amp: float = 1e-30
 ) -> np.ndarray:
@@ -3387,18 +3446,25 @@ class SubBandBuffer(AnalysisContainerArray, LISAToolsParallelModule):
                 : self.start_freq_inds.shape[0]
             ] = self.start_freq_inds
 
-        lower_f_lim = self.band_edges[
-            self.unique_band_combos[:, 2]
-        ]  #  - self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
-        higher_f_lim = self.band_edges[
-            self.unique_band_combos[:, 2] + 1
-        ]  #  + self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
-
-        # allow to move over band edge when proposing in-model
-        if self.is_rj:
-            lower_f_lim -= self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
-            higher_f_lim += self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
-        self.frequency_lims = [lower_f_lim, higher_f_lim]
+        # Band window of every slot. On RJ-provenance buffers this is
+        # widened by N/4 "to allow to move over band edge when proposing
+        # in-model" -- births themselves need no widening at all, since a
+        # dead row's band is DERIVED from its own drawn f0 (the
+        # ``band_inds = searchsorted(band_edges, freqs)`` below), so a
+        # birth is inside its band by construction and the RJ support
+        # gate is a tautology for it.
+        #
+        # The widening's units are wrong by ``layer_df * Tobs == Nt/2``
+        # (1080x on the v7 3-month grid) -- see :func:`rj_band_window`.
+        # GB_BAND_WINDOW_STRICT=1 drops it, leaving the in-model gate's
+        # own ``n4_s`` (correctly in move-df bins) as the ONLY N/4.
+        self.frequency_lims = rj_band_window(
+            self.band_edges,
+            self.band_N_vals,
+            self.unique_band_combos[:, 2],
+            self.df,
+            self.is_rj,
+        )
 
     @property
     def _fd_store_length(self) -> int:
@@ -4493,6 +4559,17 @@ class BandSorter(LISAToolsParallelModule):
         # one; the per-leaf f0 fill (Eryn per-leaf fill_dict) otherwise --
         # needs ``leaf_inds``, so computed after the label arrays above.
         self.freqs = self._source_freqs_hz()
+        # ⚠ FROZEN FOR THE WHOLE PROPOSE. This is the initial buffer fill:
+        # every row (DEAD candidates included -- a birth's band is derived
+        # from its own drawn f0 right here, which is why a birth is inside
+        # its band by construction) gets the band assignment it keeps until
+        # the next propose rebuilds this sorter. A source that drifts
+        # across a band edge mid-propose KEEPS this label: its buffer cell,
+        # residual add/remove bookkeeping and fill index map are all keyed
+        # to it, so re-homing it mid-propose would add and subtract its
+        # contribution in different cells and silently corrupt the parent
+        # residual. Its assignment changes automatically the next time
+        # around, when this line re-runs against its current f0.
         self.band_inds = self.xp.searchsorted(band_edges, self.freqs, side="right") - 1
         self.special_band_inds = self.get_special_band_index(
             self.temp_inds, self.walker_inds, self.band_inds

@@ -884,6 +884,53 @@ export GB_CAP_OVERLAP_FRAC=0
 # seams. This keeps the gate armed in the cells == bands configuration so
 # cross-edge moves are bounded by cap + 2 instead of unbounded.
 export GB_CAP_DRIFT_GATE_EDGE_LEAK=1
+# ####################################################################### #
+# ## GB_BAND_WINDOW_STRICT=1 -- the N/4 in-model window, in the RIGHT   ## #
+# ## UNITS (2026-08-29).                                                ## #
+# ####################################################################### #
+# The gate above is only meaningful if "N/4 outside the band" is actually
+# N/4. It was not. gbbands built the RJ-buffer band window by adding
+#   band_N_vals * df / 4   Hz
+# where df is the BUFFER's df = layer_df on WDM, while every consumer
+# (gbspecialstretch lo_bin/hi_bin) divides by the MOVE's df = 1/Tobs.
+# band_N_vals counts FD bins at 1/Tobs, so pairing it with layer_df
+# overstates the window by exactly layer_df * Tobs == Nt/2 = 1080x here:
+#
+#   sub-band width           = layer_df/8 = 1.736e-05 Hz = 135 bins
+#   intended window (N=512)  = +/- 128 bins   = +/- 0.95 sub-bands
+#   ACTUAL window            = +/- 138,240 bins = +/- 1024 sub-bands
+#                              (0.0178 Hz -- the whole 3-21 mHz band)
+#
+# i.e. the window never bound at all, so "in-model may cross up to N/4
+# outside" was not being enforced and "the DESTINATION sub-band's
+# occupancy" was meaningless for a leaf allowed 1000 sub-bands out.
+#
+# Armed, frequency_lims is the EXACT sub-band and the in-model gate's own
+# n4_s -- already in move-df bins -- supplies the N/4, so the window is
+# band_edge +/- N/4 bins exactly, with no double count.
+#
+# EXPECT LITTLE VISIBLE CHANGE: measured in-model displacement is median
+# 0.046 bins/iteration (p90 3.04, p99 10.6, max 26.3), so even a correct
+# 64-128 bin window seldom binds. The value is coherence -- the cap+2 rule
+# now means something -- plus a guard against pathological drift.
+# The PER-STEP leash (|df0| <= N/4 bins) was always unit-correct and is
+# untouched. GB_BAND_WINDOW_STRICT=0 reverts.
+export GB_BAND_WINDOW_STRICT=1
+# ####################################################################### #
+# ## GB_CAP_DEST_BAND -- the cap gate reads the CANDIDATE f0            ## #
+# ####################################################################### #
+# Ships ON (user: the destination "should always be from the candidate
+# f0"), so this export is documentation, not activation. At
+# GB_CAP_DIVISOR=1 _cap_cell_index returned the band index it was HANDED
+# and never looked at f0, so the in-model drift gate compared a leaf's
+# source band against itself: cur cell == new cell for every row, nothing
+# ever looked "foreign", and _cap_new_entry_veto could not fire. The cap+2
+# destination rule was a tautology. Armed, the veto resolves the
+# destination cell from the candidate frequency.
+# NOTE this changes NO band assignment: a source stays filed under the band
+# it was given at initial buffer fill for the whole propose (residual
+# integrity), and is re-homed automatically at the next propose.
+export GB_CAP_DEST_BAND=1
 # rj_replace DISABLED (user ruling 2026-08-29), 1 -> 0. Two reasons:
 #   (a) it is not earning its ~580 s/row -- cold acceptance 0.033-0.046%
 #       with FLAT delta-ll (per-call mean 102.7 early vs 103.2 late over 55
