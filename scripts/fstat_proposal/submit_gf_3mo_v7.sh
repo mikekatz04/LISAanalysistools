@@ -721,6 +721,45 @@ export GB_SUBBAND_DIVISOR=8
 # stride-2-on-1-layer separation. ~137 concurrent bands/unit (v5: 77);
 # 9 units per pass instead of 2.
 export GB_BAND_UNIT_STRIDE=9
+# ---- BAND-CLASS SCAN SCHEDULE (2026-08-29) ----
+# The sweep visits the 9 residue classes IN ORDER from a start class
+# drawn once per propose. These knobs change only WHEN a class is
+# opened -- never which bands are in it: band b stays in class b % 9 for
+# every walker, band_edges stays one global array, band b is the same Hz
+# for everyone, and the stride-8 separation inside each walker's open set
+# is untouched.
+#
+# PER-WALKER START: walker w begins its rotation at its own start_w
+# instead of all 24 walkers sharing one. Cheap decorrelation hygiene at
+# ZERO detailed-balance cost -- the draw is uniform and reads no chain
+# state, which is the entire DB argument (see _draw_unit_scan_schedule).
+# It is NOT a fix for the flagship bimodality: reordering never makes two
+# classes concurrent (bands 1141/1142 are classes 7 and 8 mod 9 and are
+# never co-open under ANY rotation) and does not change any conditional;
+# within a sweep the only difference is whether a neighbour's
+# contribution is seen pre- or post-update. Grep [GB_UNIT_SCAN] for the
+# schedule actually used (one line per propose).
+#
+# APPLIES IN BOTH SEARCH AND PE (user ruling 2026-08-29, "this setup for
+# search and pe"): this is a process-wide env, and nothing in the recipe
+# pins it per stage. Its detailed-balance safety is therefore
+# load-bearing, not a search-stage convenience -- run_proposal asserts the
+# per-walker partition every propose and refuses to sample if it breaks.
+export GB_BAND_UNIT_START_PER_WALKER=1
+# PER-WALKER DIRECTION (+/-1 rotation). Deliberately left OFF so this
+# run isolates the start effect; flip to 1 to add it. Same DB argument,
+# same partition property (every walker still visits every class once).
+export GB_BAND_UNIT_DIR_PER_WALKER=0
+# UNIT REPEATS: N consecutive passes over each class (open -> RJ ->
+# in-model -> close, N times) before advancing, so an edge source gets
+# several CONSECUTIVE attempts with the residual context refreshed
+# between them instead of one attempt then an 8-class wait.
+# ⚠ COST IS LINEAR IN N -- 9*N passes instead of 9. N=2 roughly DOUBLES
+# the GB sweep per iteration, N=3 roughly triples it. Pinned at 1 (=
+# today's behaviour, bit-identical) as a deliberate choice: raise it only
+# with the iteration-time budget in hand. Search-only either way (the
+# recipe pins pe-named moves to 1).
+export GB_BAND_UNIT_REPEATS=1
 # VGB DE-COUPLED from the fine grid (2026-08-22 timing autopsy): the VGB
 # branch inherits GB_SUBBAND_DIVISOR through GBSetup.init_band_structure,
 # so v6 silently ran the ~30-source VGB move on 1232 narrow bands --
@@ -788,7 +827,49 @@ export GB_CAP_DIVISOR=1
 # ## (inherits fitted noise + VGB ladder + fstat epoch cache; only the GB  ##
 # ## search reruns under overlap enforcement). Fresh dir works too.        ##
 # ############################################################################
-export GB_CAP_OVERLAP_FRAC=0.25
+# CAP-CELL OVERLAP REMOVED, 0.25 -> 0 (user ruling 2026-08-29: "let's
+# remove the overlap of the cap-cells then, just make them equivalent to
+# the sub-bands"). At GB_CAP_DIVISOR=1 + GB_CAP_STAGGER=0 the cap edges
+# are already elementwise identical to the band edges (both 1233 entries,
+# max |diff| = 0.000e+00 in the live store), so overlap 0 makes a cap
+# cell EXACTLY its sub-band, with no lip.
+#
+# WHY. The overlap makes "at cap" an OR over covering cells, so a leaf
+# near a band edge counts against BOTH neighbours' budgets. Harmless when
+# the cap is slack -- but it is NOT slack where it matters: band_leaf_cap
+# for the flagship bands 1141/1142 runs 2 -> 4 across the run and
+# max-over-walkers occupancy REACHES the cap in 55 of 104 (band,
+# iteration) pairs, 53% of the time. With a binding cap the lip actively
+# obstructs the cross-edge movement we are trying to enable: a leaf
+# moving 1142 -> 1141 could be vetoed because EITHER side was full rather
+# than because its DESTINATION was. Overlap 0 charges each leaf only to
+# the band it is actually in.
+#
+# COMPOSES WITH (does not duplicate) the in-model headroom below:
+# headroom raises the ceiling (counts >= cap + 2 instead of >= cap),
+# overlap 0 stops a leaf being charged to a band it is not in. Both are
+# needed for "a source may cross the edge if the likelihood is better
+# there, under cap + 2" to actually hold.
+#
+# RESUME-SAFE, NO MIGRATION: GBState.static_names is only
+# ("band_edges", "cap_edges"), and make_cap_edge_extensions (state.py:107)
+# recomputes the widened spans at runtime from
+# band_edges/cap_edges/divisor/overlap_frac rather than persisting them.
+# This changes no stored array and cannot trip the "leaf-cap grid
+# mismatch" guard.
+export GB_CAP_OVERLAP_FRAC=0
+# ⚠ REQUIRED COMPANION TO overlap=0 (2026-08-29). The drift gate
+# short-circuits itself off at divisor 1 WITHOUT overlap, on the premise
+# that "in-model stays in its band window" -- which is FALSE: the
+# in-model window is the sub-band widened by N/4 bins per side, and
+# gbbands pre-widens frequency_lims by another N/4 on RJ buffers with the
+# comment "allow to move over band edge when proposing in-model". So at
+# overlap 0 an in-model move can carry a leaf up to N/4 (N/2) bins into
+# the neighbouring band with NOTHING checking that band's cap -- i.e. the
+# 2026-08-20 "29 leaves into a cap-1 cell" failure mode, reopened at the
+# seams. This keeps the gate armed in the cells == bands configuration so
+# cross-edge moves are bounded by cap + 2 instead of unbounded.
+export GB_CAP_DRIFT_GATE_EDGE_LEAK=1
 # rj_replace DISABLED (user ruling 2026-08-29), 1 -> 0. Two reasons:
 #   (a) it is not earning its ~580 s/row -- cold acceptance 0.033-0.046%
 #       with FLAT delta-ll (per-call mean 102.7 early vs 103.2 late over 55
@@ -849,6 +930,21 @@ export GB_CAP_STAGGER=0
 #                            foreign at-cap cell up to cap+2 (peak
 #                            handover across an edge); births still
 #                            respect the hard cap.
+#                            ⚠ THIS EXPORT WAS DEAD UNTIL 2026-08-29.
+#                            The headroom is read only inside
+#                            _cap_new_entry_veto, whose only caller was
+#                            the replace move -- itself gated on
+#                            cap_divisor > 1 (we run 1) and disabled
+#                            outright by GB_SEARCH_RJ_REPLACE=0. The
+#                            in-model gate carried its own inline copy
+#                            of the veto with a bare `counts >= cap`, so
+#                            the EFFECTIVE in-model headroom was 0. Both
+#                            paths now route through the operator and
+#                            the divisor guard is gone, so this value is
+#                            live for the first time: sources may cross
+#                            a band/cell edge toward higher likelihood
+#                            while post-move occupancy <= cap + 2.
+#                            Expect [GB_CAPGATE] veto counts to FALL.
 #   GB_SEARCH_CAP_QUIESCENT=1 -- the nleaves plateau cannot end
 #                            gb_search while any engaged cap cell is
 #                            still mid-ramp (occupied at cap, below

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -385,6 +386,301 @@ def _resolve_band_unit_stride(branch_name, ctor_value):
     return value
 
 
+def _env_flag(name: str, default: bool = False) -> Optional[bool]:
+    """Tri-state read of a boolean env knob (``None`` when unset/blank)."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_band_unit_start_per_walker(branch_name, ctor_value) -> bool:
+    """Per-walker START index for the band-class sweep (env > ctor > OFF).
+
+    The unit sweep in :meth:`GBSpecialBase.run_proposal` visits the
+    ``band_units`` residue classes (``band_index % units``) IN ORDER from
+    a start class drawn once per propose. Historically that start was ONE
+    GLOBAL draw shared by every walker; ``{BRANCH}_BAND_UNIT_START_PER_WALKER``
+    promotes it to a per-walker vector, so walker ``w`` begins its
+    rotation at its own ``start_w``.
+
+    Stride and MEMBERSHIP are untouched: band ``b`` is in class
+    ``b % units`` for every walker, ``band_edges`` stays one global 1-D
+    array, and band ``b`` means the same Hz for everyone. ONLY the phase
+    of the rotation becomes per-walker. Default OFF = today's single
+    global start, bit-identical.
+    """
+    env_val = _env_flag(
+        f"{str(branch_name).upper()}_BAND_UNIT_START_PER_WALKER"
+    )
+    if env_val is not None:
+        return env_val
+    return bool(ctor_value)
+
+
+def _resolve_band_unit_dir_per_walker(branch_name, ctor_value) -> bool:
+    """Per-walker DIRECTION of the band-class rotation (env > ctor > OFF).
+
+    With ``{BRANCH}_BAND_UNIT_DIR_PER_WALKER`` armed, walker ``w`` walks
+    its classes ``start_w, start_w + d_w, start_w + 2 d_w, ...`` with
+    ``d_w`` drawn uniformly from ``{+1, -1}``. The classes are still
+    visited IN ORDER -- this is the direction of a cyclic rotation, never
+    a scrambled permutation -- and ``gcd(1, units) == 1`` keeps the
+    partition property in both directions: every walker still visits
+    every class exactly once per sweep.
+
+    Meaningless at ``units <= 2`` (the two directions trace the same
+    cycle), where the draw is skipped. Default OFF = direction ``+1``
+    for every walker, bit-identical.
+    """
+    env_val = _env_flag(f"{str(branch_name).upper()}_BAND_UNIT_DIR_PER_WALKER")
+    if env_val is not None:
+        return env_val
+    return bool(ctor_value)
+
+
+def _resolve_band_unit_repeats(branch_name, ctor_value) -> int:
+    """Consecutive passes per band-class (ctor > env > 1). SEARCH-ONLY.
+
+    ``N > 1`` runs the WHOLE per-class block (open -> RJ + in-model
+    repeats -> close) ``N`` times consecutively before the sweep advances
+    to the next class: ``a a a, b b b, c c c`` instead of ``a, b, c``.
+    Combined with the per-walker start this concentrates working time on
+    a walker's currently-open sub-bands: a source near a band edge gets
+    several CONSECUTIVE attempts to move, with the residual context
+    refreshed between them, instead of one attempt then a ``units - 1``
+    class wait.
+
+    ⚠ COST SCALES LINEARLY IN ``N``. The sweep runs ``units * N`` passes
+    instead of ``units``, and each pass pays the full per-class bill --
+    the cold-chain open/close residual fills, the buffer bind, the RJ
+    step and every in-model repeat. ``N = 2`` roughly DOUBLES the GB
+    sweep work per iteration, ``N = 3`` roughly TRIPLES it. There is no
+    partial-block or amortized-open variant here (see the note in
+    :meth:`GBSpecialBase.run_proposal` for why the unit is re-opened per
+    pass); budget for the full multiple.
+
+    Resolution is ``kwarg > env > 1`` (NOT the env-wins convention of the
+    stride) precisely so the recipe's SEARCH-ONLY pin works: pe-named
+    moves are constructed with ``band_unit_repeats=1`` and that beats an
+    exported ``{BRANCH}_BAND_UNIT_REPEATS``, exactly as the per-mode
+    in-model repeat defaults do.
+    """
+    value = ctor_value
+    if value is None:
+        value = os.environ.get(
+            f"{str(branch_name).upper()}_BAND_UNIT_REPEATS", None
+        )
+    if value is None:
+        value = 1
+    value = int(value)
+    if value < 1:
+        raise ValueError(
+            f"band-unit repeats must be >= 1, got {value}."
+        )
+    return value
+
+
+def _draw_unit_scan_schedule(
+    random_state, nwalkers, units, per_walker_start, per_walker_dir
+):
+    """Draw ``(starts, directions)`` for one propose's band-class sweep.
+
+    ⚠⚠ DETAILED BALANCE LIVES HERE. ⚠⚠
+    A random-rotation sweep over blocks preserves stationarity ONLY
+    because the order is drawn UNIFORMLY and INDEPENDENTLY OF THE CURRENT
+    CHAIN STATE: for a fixed rotation the composed per-block kernel
+    preserves the target (each block move is MH-reversible), and a
+    mixture over rotations preserves it too PROVIDED the mixture weights
+    do not depend on the state. Per-walker rotations are just ``nwalkers``
+    independent draws of the same object, so the argument is unchanged
+    from today's single global draw.
+
+    THEREFORE THIS FUNCTION TAKES NO STATE, BY DESIGN. It sees only the
+    RNG and the shape of the sweep -- no ``model``, no ``state``, no
+    ``band_sorter``, no likelihoods, no occupancy. Choosing a start or a
+    direction by ANY heuristic ("which walker looks stuck", by logL, by
+    band occupancy) would silently convert this DB-safe change into a
+    DB-BREAKING one. Do not add a state argument; the test
+    ``UniformStateIndependentDrawTest`` pins the signature and the body.
+
+    ``random_state`` is eryn's ``model.random`` so the schedule stays
+    seed-reproducible. With both flags off the draw consumes EXACTLY the
+    one legacy ``randint(units)``, keeping the RNG stream -- and hence
+    the whole propose -- bit-identical.
+
+    Returns ``(starts, directions)``, both ``(nwalkers,)`` int arrays.
+    """
+    units = int(units)
+    nwalkers = int(nwalkers)
+    if per_walker_start:
+        starts = np.asarray(
+            random_state.randint(units, size=nwalkers), dtype=int
+        )
+    else:
+        starts = np.full(nwalkers, int(random_state.randint(units)), dtype=int)
+    if per_walker_dir:
+        directions = np.where(
+            np.asarray(random_state.randint(2, size=nwalkers)) == 0, -1, 1
+        ).astype(int)
+    else:
+        directions = np.ones(nwalkers, dtype=int)
+    return starts, directions
+
+
+def _assert_unit_scan_partition(starts, directions, units):
+    """Fail LOUDLY unless every walker visits every class exactly once.
+
+    The partition property is what makes the sweep a legitimate blocked
+    scan: each source is opened exactly once, and combined with the
+    uniform state-independent draw that is the whole detailed-balance
+    argument. The schedule now runs in PE as well as search, so a silent
+    scheduling bug would corrupt the POSTERIOR, not merely slow mixing --
+    cheap to verify (``units x nwalkers`` ints per propose), so verify it
+    rather than trust it.
+    """
+    units = int(units)
+    schedule = np.stack(
+        [
+            _unit_pass_remainder(starts, directions, unit_i, units)
+            for unit_i in range(units)
+        ]
+    )
+    expect = np.arange(units)[:, None]
+    if not bool((np.sort(schedule, axis=0) == expect).all()):
+        bad = int(
+            np.argmax(~(np.sort(schedule, axis=0) == expect).all(axis=0))
+        )
+        raise RuntimeError(
+            "band-class scan schedule is not a per-walker permutation of "
+            f"the {units} residue classes (walker {bad} visits "
+            f"{schedule[:, bad].tolist()}). Detailed balance rests on every "
+            "walker opening every class exactly once per sweep from a "
+            "uniform, state-independent draw -- refusing to sample on a "
+            "schedule that violates it."
+        )
+    return schedule
+
+
+def _unit_sweep_passes(units, repeats):
+    """``(unit_i, repeat_i)`` for every pass of one propose's sweep.
+
+    Each residue class is visited ``repeats`` times CONSECUTIVELY before
+    the sweep advances (``a a, b b, c c``), so the pass count -- and the
+    work -- is linear in ``repeats``. ``repeats == 1`` reproduces the
+    legacy ``for unit_i in range(units)`` exactly.
+    """
+    for unit_i in range(int(units)):
+        for repeat_i in range(int(repeats)):
+            yield unit_i, repeat_i
+
+
+def _unit_pass_remainder(starts, directions, unit_i, units):
+    """Residue class each walker has OPEN at sweep position ``unit_i``.
+
+    ``(start_w + unit_i * d_w) % units`` -- the classes in order, from a
+    per-walker start, in a per-walker direction.
+    """
+    return (
+        np.asarray(starts, dtype=int)
+        + int(unit_i) * np.asarray(directions, dtype=int)
+    ) % int(units)
+
+
+def _unit_residue_mask(band_inds, walker_inds, units, remainder):
+    """Per-source mask selecting each row's OPEN residue class.
+
+    Scalar ``remainder`` reproduces the global rule
+    ``band_inds % units == remainder``; an array of shape ``(nwalkers,)``
+    applies the PER-WALKER rule ``band_inds % units ==
+    remainder[walker_inds]``. Vectorized -- no python loop over walkers --
+    and array-module agnostic (numpy or cupy, following ``band_inds``).
+    """
+    xp = get_array_module(band_inds)
+    rem = np.asarray(remainder)
+    if rem.ndim == 0:
+        return band_inds % int(units) == int(rem)
+    rem_dev = xp.asarray(rem.astype(np.int64))
+    return band_inds % int(units) == rem_dev[walker_inds]
+
+
+def _unit_class_label(remainder) -> str:
+    """Single-line label for the class(es) a sweep pass has open."""
+    rem = np.asarray(remainder)
+    if rem.ndim == 0:
+        return str(int(rem))
+    uniq = np.unique(rem)
+    if uniq.size == 1:
+        return str(int(uniq[0]))
+    return "per-walker" + np.array2string(
+        rem, threshold=12, max_line_width=10**6, separator=","
+    )
+
+
+def _format_unit_scan_schedule(starts, directions, units, repeats, name=""):
+    """The once-per-propose ``[GB_UNIT_SCAN]`` line.
+
+    Names the whole sweep schedule on ONE greppable line: the per-walker
+    ``start`` and rotation ``direction`` (``3+`` = start 3 going up,
+    ``3-`` = start 3 going down), the stride, and the repeat count in
+    force. Large walker counts fall back to a stable digest plus the
+    first few walkers so the line never wraps.
+    """
+    starts = np.asarray(starts, dtype=int).ravel()
+    directions = np.asarray(directions, dtype=int).ravel()
+    pairs = [
+        f"{int(s)}{'+' if int(d) >= 0 else '-'}"
+        for s, d in zip(starts, directions)
+    ]
+    per_walker = bool(
+        starts.size > 1
+        and ((starts != starts[0]).any() or (directions != directions[0]).any())
+    )
+    digest = hashlib.md5(
+        np.ascontiguousarray(
+            np.stack([starts, directions]).astype(np.int64)
+        ).tobytes()
+    ).hexdigest()[:8]
+    if not per_walker:
+        body = f"{pairs[0] if pairs else '-'} (all walkers)"
+    elif len(pairs) <= 32:
+        body = ",".join(pairs)
+    else:
+        body = ",".join(pairs[:4]) + ",..."
+    tag = f"[GB_UNIT_SCAN{(' ' + str(name)) if name else ''}]"
+    return (
+        f"{tag} band-class sweep: mode={'per-walker' if per_walker else 'global'}"
+        f" units={units} repeats={repeats} nwalkers={starts.size}"
+        f" digest={digest} start/dir={body}"
+    )
+
+
+def _inmodel_cap_headroom() -> int:
+    """``GB_CAP_INMODEL_HEADROOM`` (default 2) -- one reader, two paths.
+
+    Fixed-dimension f0 moves (in-model repeats + the replacement move)
+    may enter a foreign cap cell up to this many leaves OVER its cap, so
+    a source can relocate across a band/cell edge toward higher
+    likelihood even where the cap binds. RJ BIRTH gates are unaffected --
+    they read the at-cap masks, not this. ``0`` restores the strict
+    destination gate.
+    """
+    return int(os.environ.get("GB_CAP_INMODEL_HEADROOM", "2") or 0)
+
+
+def _cap_with_inmodel_headroom(cap):
+    """``cap`` widened by the in-model headroom, ARMED CELLS ONLY.
+
+    Disarmed cells carry ``cap < 0`` and must stay disarmed -- adding the
+    headroom to ``-1`` would arm them at ``+1``.
+    """
+    h = _inmodel_cap_headroom()
+    if h == 0:
+        return cap
+    xp = get_array_module(cap)
+    return xp.where(cap >= 0, cap + h, cap).astype(cap.dtype)
+
+
 def _tempering_open_remainder(start: int, units: int) -> int:
     """Band-index remainder class opened for tempering unit ``start``.
 
@@ -445,15 +741,24 @@ def _ortho_boundary_pairs(
     sort by ``f0`` and take every consecutive pair that crosses a band
     boundary; return the ``max_pairs`` smallest-``|df|`` pairs overall.
 
-    All inputs are host numpy arrays. Returns ``(i_idx, j_idx)`` int
-    arrays of row indices into the input arrays (empty when no
-    cross-band pair exists).
+    All inputs are host numpy arrays. ``remainder`` is either a scalar
+    (one class open for every walker) or a ``(nwalkers,)`` array (the
+    per-walker start/direction sweep), in which case each walker's own
+    open class is used -- the premise being checked is per-walker
+    anyway, since concurrently-scored cells credit into per-walker parent
+    rows. Returns ``(i_idx, j_idx)`` int arrays of row indices into the
+    input arrays (empty when no cross-band pair exists).
     """
     f0 = np.asarray(f0, dtype=float)
     walker_inds = np.asarray(walker_inds)
     band_inds = np.asarray(band_inds)
     eligible = np.asarray(eligible, dtype=bool)
-    sel = np.where(eligible & (band_inds % int(units) == int(remainder)))[0]
+    _rem = np.asarray(remainder)
+    _in_class = (
+        band_inds % int(units) == int(_rem) if _rem.ndim == 0
+        else band_inds % int(units) == _rem.astype(int)[walker_inds]
+    )
+    sel = np.where(eligible & _in_class)[0]
     pairs_i, pairs_j, pair_df = [], [], []
     for wv in np.unique(walker_inds[sel]):
         rows = sel[walker_inds[sel] == wv]
@@ -1056,6 +1361,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         search_kwargs=None,
         stretch_probability=0.0,
         band_units=2,
+        band_unit_start_per_walker=None,
+        band_unit_dir_per_walker=None,
+        band_unit_repeats=None,
         jump_factor=0.005,
         leaf_cap_start=None,
         leaf_cap_ll_improve=True,
@@ -1472,6 +1780,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.cap_drift_gate = (
             os.environ.get("GB_CAP_DRIFT_GATE", "1") == "1"
         )
+        # EDGE-LEAK POLICING (GB_CAP_DRIFT_GATE_EDGE_LEAK, default OFF =
+        # today's behavior). _cap_drift_gate_setup short-circuits to None
+        # at cap_divisor == 1 WITHOUT overlap on the premise that "cell
+        # identity cannot change with f0 (in-model stays in its band
+        # window)". THAT PREMISE IS FALSE: the in-model window is the
+        # sub-band widened by N/4 bins per side (gbspecialstretch
+        # ``new_bin < lo_s - n4_s`` / ``> hi_s + n4_s``), and on
+        # RJ-provenance buffers frequency_lims is ITSELF pre-widened by
+        # another N/4 (gbbands ``# allow to move over band edge when
+        # proposing in-model``). So an in-model move CAN carry a leaf up
+        # to N/4 (N/2 on RJ buffers) bins into the neighbouring band --
+        # where, with the gate short-circuited, NOTHING checks that
+        # band's cap. Arming this keeps the drift gate live in the
+        # cells == bands configuration so cross-edge moves are bounded by
+        # cap + GB_CAP_INMODEL_HEADROOM instead of being unbounded.
+        self.cap_drift_gate_edge_leak = (
+            os.environ.get("GB_CAP_DRIFT_GATE_EDGE_LEAK", "0") == "1"
+        )
         _be_host = _to_numpy(self.band_edges)
         _cap_edges_host = make_cap_edges(_be_host, self.cap_divisor,
                                          stagger=self.cap_stagger)
@@ -1616,6 +1942,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # unit loop (run_proposal) and the tempering unit loop
         # (run_tempering).
         self.band_units = _resolve_band_unit_stride(branch_name, band_units)
+        # ---- band-class SCAN SCHEDULE (order + repeats), all default-OFF ----
+        # These change only WHEN each residue class is opened, never WHICH
+        # bands belong to it: stride and membership are untouched, band b
+        # stays in class b % band_units for every walker, band_edges stays
+        # one global 1-D array, and band b means the same Hz for everyone.
+        #
+        # {BRANCH}_BAND_UNIT_START_PER_WALKER -- per-walker start of the
+        #   rotation; {BRANCH}_BAND_UNIT_DIR_PER_WALKER -- per-walker +/-1
+        #   direction. These apply in BOTH SEARCH AND PE (user ruling
+        #   2026-08-29), so their detailed-balance safety is load-bearing,
+        #   not a search-stage convenience: both draws are UNIFORM AND
+        #   STATE-INDEPENDENT (see _draw_unit_scan_schedule), and that is
+        #   the whole argument. It must never be weakened into a heuristic
+        #   ("which walker looks stuck", by logL, by occupancy).
+        # {BRANCH}_BAND_UNIT_REPEATS -- N consecutive passes per class.
+        #   SEARCH-ONLY (recipe pins pe-named moves to 1) and its cost is
+        #   LINEAR IN N: units*N passes instead of units.
+        self.band_unit_start_per_walker = _resolve_band_unit_start_per_walker(
+            branch_name, band_unit_start_per_walker
+        )
+        self.band_unit_dir_per_walker = _resolve_band_unit_dir_per_walker(
+            branch_name, band_unit_dir_per_walker
+        )
+        self.band_unit_repeats = _resolve_band_unit_repeats(
+            branch_name, band_unit_repeats
+        )
         # ORTHOGONALITY concurrency diagnostic (physics ruling; 2026-08-15
         # support-based form -- see check_band_support_separation): the
         # gap between same-unit bands is compared against the sum of the
@@ -2981,6 +3333,39 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         cold-chain changes into the parent residual for the next unit and
         for the tempering stage.
 
+        SCAN SCHEDULE. The classes are visited IN ORDER from a start
+        class drawn once per propose. Three default-OFF knobs shape that
+        sweep without touching stride or membership:
+        ``{BRANCH}_BAND_UNIT_START_PER_WALKER`` gives each walker its own
+        start, ``{BRANCH}_BAND_UNIT_DIR_PER_WALKER`` its own +/-1
+        rotation direction, and ``{BRANCH}_BAND_UNIT_REPEATS`` (N,
+        search-only, cost LINEAR in N) runs the whole per-class block N
+        times consecutively before advancing. The order draws are uniform
+        and state-independent (detailed balance -- see
+        :func:`_draw_unit_scan_schedule`); the schedule is logged once
+        per propose as ``[GB_UNIT_SCAN]``.
+
+        ORTHOGONALITY UNDER A PER-WALKER ORDER. The concurrency argument
+        is already a PER-WALKER property and survives unchanged:
+        concurrently-scored cells credit their deltas additively into the
+        same PARENT ROW, and parent rows are per-walker, so cells of
+        different walkers write to disjoint rows and cannot interfere.
+        Each walker still keeps ``band_units - 1`` closed bands of
+        separation within its own open set. GB_ORTHO_LL_CHECK compares
+        credited vs realized lnL per walker and stays valid as is.
+
+        CROSS-WALKER AGGREGATION (checked, not assumed). Nothing inside
+        this loop aggregates across walkers: the at-cap census is per
+        ``(temp, walker, cap cell)``. The two aggregators that DO pool
+        cold walkers per band -- ``_update_band_leaf_caps`` and
+        ``_update_band_shutoff`` -- both run once per propose at the END
+        of ``propose``, by which time every walker has visited every
+        class exactly once, so they see the same fully-refreshed
+        population as under the global order. ⚠ If a cross-walker
+        aggregation is ever moved INSIDE this loop, a per-walker order
+        would hand it a partially-refreshed population within the
+        iteration; re-derive it per walker or hoist it back out.
+
         Returns ``(ll_change_log, prop_counts, acc_counts)``; the count
         arrays have shape ``(2, ntemps, nwalkers, num_bands)`` with row 0 =
         RJ proposals and row 1 = in-model proposals.
@@ -3005,7 +3390,82 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
 
         units = self.band_units if self.num_bands > 1 else 1
-        start_unit = model.random.randint(units)
+
+        # ================= BAND-CLASS SCAN SCHEDULE =================
+        # Historically ONE global rotation: start_unit = randint(units),
+        # then classes in order for every walker. Two knobs generalize it
+        # (both default OFF = the single global start, direction +1, and
+        # exactly one randint(units) drawn, so the RNG stream and the
+        # whole propose stay bit-identical):
+        #
+        #   * per-walker START -- walker w begins at its own start_w;
+        #   * per-walker DIRECTION -- walker w rotates by d_w in {+1,-1}
+        #     (meaningless at units <= 2, where both directions trace the
+        #     same cycle, so the draw is skipped there).
+        #
+        # The classes are still visited IN ORDER: this is the phase and
+        # sign of a cyclic rotation, NOT a scrambled permutation. Since
+        # gcd(1, units) == 1, every walker still visits every class
+        # exactly once per sweep (the partition property), so every
+        # source is opened exactly once.
+        #
+        # ⚠ DETAILED BALANCE: the draw is uniform and reads NO chain
+        # state -- see _draw_unit_scan_schedule, which takes no state
+        # argument by design. Never pick a start or direction by a
+        # heuristic (stuckness, logL, occupancy): that breaks
+        # stationarity even though the sweep still looks like a sweep.
+        #
+        # WHAT THIS IS AND IS NOT. Cheap decorrelation hygiene at zero DB
+        # cost. Reordering never makes two classes concurrent (classes
+        # are still opened one at a time, per walker, with units - 1
+        # closed bands of separation), and it does not change any
+        # conditional. Within one sweep the only difference is whether a
+        # neighbouring class's contribution is seen pre- or post-update.
+        _per_walker_start = bool(self.band_unit_start_per_walker) and units > 1
+        _per_walker_dir = bool(self.band_unit_dir_per_walker) and units > 2
+        _unit_starts, _unit_dirs = _draw_unit_scan_schedule(
+            model.random, self.nwalkers, units,
+            _per_walker_start, _per_walker_dir,
+        )
+        _unit_per_walker = _per_walker_start or _per_walker_dir
+        # Verify the partition rather than trust it. These knobs run in PE
+        # as well as search (user ruling 2026-08-29), so a broken schedule
+        # would be a POSTERIOR bug, not just slow mixing -- and it would be
+        # invisible. units*nwalkers ints per propose.
+        _assert_unit_scan_partition(_unit_starts, _unit_dirs, units)
+
+        # SEARCH-ONLY unit repeats. N consecutive passes over each class
+        # before advancing, the WHOLE block (open -> RJ -> in-model
+        # repeats -> close) each time.
+        #
+        # ⚠ COST IS LINEAR IN N: units*N passes instead of units, so N=2
+        # roughly doubles the GB sweep work per iteration and N=3 roughly
+        # triples it.
+        #
+        # WHY THE CLASS IS RE-OPENED EVERY PASS rather than held open
+        # across the N passes (which would save the open/close residual
+        # fills). Two reasons, and the first is the point of the feature:
+        #   1. the refreshed residual context IS the mechanism -- closing
+        #      re-subtracts the cold-chain templates at their newly
+        #      accepted coordinates, so pass k+1 proposes against
+        #      neighbours that have actually moved. Holding the class
+        #      open would give N passes against one frozen context.
+        #   2. several per-pass caches are (re)built at unit open from
+        #      the sorter's unit-open census -- the at-cap mask
+        #      (_rj_at_cap_mask), the replace census (_replace_cap_census,
+        #      whose docstring records that band_sorter.freqs is a
+        #      construction-time snapshot), the RJ flip draw. Reusing
+        #      them across passes would score later passes against a
+        #      stale census.
+        _unit_repeats = int(getattr(self, "band_unit_repeats", 1) or 1)
+
+        # OBSERVABILITY: one greppable line per propose naming the whole
+        # schedule (per-walker start/direction pairs + stride + repeats).
+        logger.info(
+            _format_unit_scan_schedule(
+                _unit_starts, _unit_dirs, units, _unit_repeats, name=self.name
+            )
+        )
 
         # [GB_ORTHO_LL] bilinearity bookkeeping check (default OFF,
         # GB_ORTHO_LL_CHECK (default ON, user ruling 2026-08-15 -- the
@@ -3021,8 +3481,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # concurrent sub-band scheduling.
         _ortho_ll_on = os.environ.get("GB_ORTHO_LL_CHECK", "1") == "1"
 
-        for unit_i in range(units):
-            remainder = (start_unit + unit_i) % units
+        for unit_i, _unit_rep in _unit_sweep_passes(units, _unit_repeats):
+            remainder = _unit_pass_remainder(
+                _unit_starts, _unit_dirs, unit_i, units
+            )
+            if not _unit_per_walker:
+                # scalar path: literally the legacy call signature, so
+                # the knob-OFF sweep is bit-identical by construction.
+                remainder = int(remainder[0])
+                _res_mask = None
+                _unit_kw = dict(units=units, remainder=remainder)
+            else:
+                # PER-WALKER path: the residue test moves into the
+                # ``extra_bool`` hook get_subset_bool already ANDs in
+                # (shape (num_sources,)), so it stays one vectorized
+                # expression -- no loop over walkers, and slot packing
+                # (special = (temp*nwalkers + walker)*1e6 + band) keeps
+                # cells unique across walkers regardless.
+                _res_mask = _unit_residue_mask(
+                    band_sorter.band_inds, band_sorter.walker_inds,
+                    units, remainder,
+                )
+                _unit_kw = dict(extra_bool=_res_mask)
+            _rem_lbl = _unit_class_label(remainder)
 
             if _ortho_ll_on:
                 _oll_direct0 = _to_numpy(
@@ -3039,9 +3520,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # Open this parity class in the parent residual.
             with _tspan(getattr(self, "_prop_timer", None), "unit_open_close"):
                 self.remove_cold_chain_sources_from_residual(
-                    model, band_sorter, units=units, remainder=remainder
+                    model, band_sorter, **_unit_kw
                 )
-            self._debug_cold_chain_residual_loaded(model, remainder)
+            self._debug_cold_chain_residual_loaded(model, _rem_lbl)
 
             # RJ subsets include the dead (freshly-drawn) slots so births
             # can be proposed — EXCEPT removal-only, where _run_rj_step
@@ -3056,6 +3537,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             extra_bool = (
                 (band_sorter.band_inds < self.num_bands - 1) & (band_sorter.band_inds > 0)
             ) if self.num_bands > 1 else None
+
+            # Per-walker residue test rides in with the other row gates
+            # (the units/remainder kwargs below go None in that mode).
+            if _res_mask is not None:
+                extra_bool = (
+                    _res_mask if extra_bool is None
+                    else (extra_bool & _res_mask)
+                )
 
             # AT-CAP RJ pick skip (2026-08-12, GB_RJ_SKIP_CAPPED=0 disables):
             # a birth into a band already holding cap[b] alive sources is
@@ -3245,8 +3734,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     )
 
             subset = band_sorter.get_subset(
-                units=units,
-                remainder=remainder,
+                units=None if _unit_per_walker else units,
+                remainder=None if _unit_per_walker else remainder,
                 apply_inds=apply_inds,
                 extra_bool=extra_bool,
             )
@@ -3266,7 +3755,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # Close: re-subtract with (possibly updated) cold-chain coords.
             with _tspan(getattr(self, "_prop_timer", None), "unit_open_close"):
                 self.add_cold_chain_sources_to_residual(
-                    model, band_sorter, units=units, remainder=remainder
+                    model, band_sorter, **_unit_kw
                 )
 
             if _ortho_ll_on:
@@ -3277,10 +3766,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     float(os.environ.get("GB_ORTHO_LL_TOL", "0.05")),
                 )
                 logger.info(
-                    "[GB_ORTHO_LL %s] unit %d (bands %% %d == %d): "
+                    "[GB_ORTHO_LL %s] unit %d rep %d (bands %% %d == %s): "
                     "|direct - credited| cold-walker lnL discrepancy mean "
                     "%.3e max %.3e (walker %d).",
-                    self.name, unit_i, units, remainder,
+                    self.name, unit_i, _unit_rep, units, _rem_lbl,
                     _oll["mean_abs"], _oll["max_abs"], _oll["worst_walker"],
                 )
                 if _oll["flagged"]:
@@ -3303,9 +3792,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _direct = _dbg_ll_unit_end - _dbg_ll_unit_start
                 _tracked = _dbg_change_end - _dbg_change_start
                 logger.info(
-                    "[GB_DEBUG %s] unit %d (remainder %d) parent-ll reconcile: "
+                    "[GB_DEBUG %s] unit %d (remainder %s) parent-ll reconcile: "
                     "direct per-walker %s vs tracked %s (max abs diff %.3e)",
-                    self.name, unit_i, remainder,
+                    self.name, unit_i, _rem_lbl,
                     np.array2string(_direct, precision=3),
                     np.array2string(_tracked, precision=3),
                     float(np.abs(_direct - _tracked).max()),
@@ -4190,9 +4679,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             if i_idx.size == 0:
                 logger.info(
-                    "[GB_ORTHO %s] unit (bands %% %d == %d): no cold-chain "
+                    "[GB_ORTHO %s] unit (bands %% %d == %s): no cold-chain "
                     "cross-band boundary pairs to check.",
-                    self.name, units, remainder,
+                    self.name, units, _unit_class_label(remainder),
                 )
                 return
             xp = self.xp
@@ -4223,10 +4712,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             df_pairs = f0[j_idx] - f0[i_idx]
             tol = float(os.environ.get("GB_ORTHO_TOL", "1e-3"))
             logger.info(
-                "[GB_ORTHO %s] unit (bands %% %d == %d): %d boundary pairs; "
+                "[GB_ORTHO %s] unit (bands %% %d == %s): %d boundary pairs; "
                 "normalized overlap |<h_i|h_j>|/sqrt(<h_i|h_i><h_j|h_j>) "
                 "mean %.3e max %.3e (walker %d, bands %d/%d, df %.3e Hz).",
-                self.name, units, remainder, int(overlap.size),
+                self.name, units, _unit_class_label(remainder), int(overlap.size),
                 float(overlap.mean()), float(overlap[k]),
                 int(w_i[i_idx[k]]), int(b_i[i_idx[k]]), int(b_i[j_idx[k]]),
                 float(df_pairs[k]),
@@ -7850,9 +8339,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # maintained on accept below).
         _rc_state = None
         _rc_cur = _rc_new = None
+        # No cap_divisor gate (2026-08-29): the production config runs
+        # GB_CAP_DIVISOR=1 WITH overlap, where covering sets do change
+        # across the widened seams, so the destination gate is meaningful
+        # at divisor 1 too. The old ``cap_divisor > 1`` guard is what made
+        # this whole gate -- and with it GB_CAP_INMODEL_HEADROOM -- dead
+        # code in production.
         if (
             self._cap_leaf_cap is not None
-            and self.cap_divisor > 1
             and self._f0_col is not None
         ):
             f_cur_hz = band_sorter.coords_freqs_hz(params_old)
@@ -9981,7 +10475,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "window_on": self._f0_col is not None,
             "dg_on": dg_on, "overlap_on": overlap_on,
             "dg_counts": dg[0] if dg_on else empty["i32"],
-            "dg_cap": dg[1] if dg_on else empty["i32"],
+            # HEADROOM MIRROR (2026-08-29): the fused gate kernel tests
+            # ``counts >= cap`` with no headroom term, so the host path's
+            # GB_CAP_INMODEL_HEADROOM is folded into the cap it is handed
+            # (armed cells only -- adding to a disarmed cap < 0 would arm
+            # it). Keeps the kernel and _cap_new_entry_veto in agreement;
+            # the kernel is default-OFF (GB_INMODEL_ACCEPT_KERNEL=0) but
+            # must not silently diverge when it is next armed.
+            "dg_cap": _cap_with_inmodel_headroom(dg[1]) if dg_on
+            else empty["i32"],
             "cap_band_lo": _cap_arr("_cap_band_lo"),
             "cap_band_step": _cap_arr("_cap_band_step"),
             "cap_edges": _cap_arr("cap_edges") if overlap_on else empty["f64"],
@@ -10615,47 +11117,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # rejection). Within-cell moves and moves out of over-full
                     # cells always pass; disarmed cells (cap < 0) never veto.
                     # Device-only per repeat; census flushed once per block.
+                    #
+                    # ROUTED THROUGH THE SHARED OPERATOR (2026-08-29). This
+                    # block used to carry its own inline copy of
+                    # _cap_new_entry_veto WITHOUT the headroom term, so
+                    # GB_CAP_INMODEL_HEADROOM (default 2) -- read only inside
+                    # that operator -- never reached the in-model path and the
+                    # effective in-model headroom was 0. The operator's
+                    # docstring already claimed both callers used it; now they
+                    # do. At headroom 0 this is the previous behavior exactly:
+                    # with overlap off _cap_cell_members returns
+                    # (primary, None, None), for which the operator's
+                    # ``_foreign`` reduces to the old ``_dg_cross``.
+                    #
+                    # USER RULE (2026-08-29): sources may cross a band/cell
+                    # edge toward higher likelihood up to cap + 2, i.e. the
+                    # move is allowed while post-move occupancy <= cap + 2.
+                    # RJ BIRTH gates stay strict -- they read the at-cap
+                    # masks, not this veto -- so the headroom only ever
+                    # relocates existing leaves, never creates them.
                     if _dg is not None:
                         _dg_counts, _dg_cap = _dg
                         _fc_dg = self._f0_col
-                        if self.cap_overlap_frac > 0.0:
-                            # Overlap mode (2026-08-23): membership is a SET of
-                            # covering cells. A proposal is vetoed when any cell
-                            # it NEWLY enters (a covering cell of the new f0
-                            # that does not cover the current f0) is armed and
-                            # at cap. Cells the source already covers never
-                            # veto (within-span moves and drains stay allowed).
-                            _c_p, _c_nb, _c_hn = self._cap_cell_members(
-                                b_s, curr[sl][:, _fc_dg] / 1e3)
-                            _n_p, _n_nb, _n_hn = self._cap_cell_members(
-                                b_s, new[:, _fc_dg] / 1e3)
-                            _dg_veto = cp.zeros(_n_p.shape, dtype=bool)
-                            _ones = cp.ones(_n_p.shape, dtype=bool)
-                            for _cell, _memb in ((_n_p, _ones), (_n_nb, _n_hn)):
-                                _foreign = (
-                                    _memb
-                                    & (_cell != _c_p)
-                                    & (~_c_hn | (_cell != _c_nb))
-                                )
-                                _flat_m = self._cap_flat_index(t_s, w_s, _cell)
-                                _dg_veto = _dg_veto | (
-                                    _foreign
-                                    & (_dg_cap[_cell] >= 0)
-                                    & (_dg_counts[_flat_m] >= _dg_cap[_cell])
-                                )
-                        else:
-                            _dg_cell_c = self._cap_cell_index(
-                                b_s, curr[sl][:, _fc_dg] / 1e3)
-                            _dg_cell_n = self._cap_cell_index(
-                                b_s, new[:, _fc_dg] / 1e3)
-                            _dg_cross = _dg_cell_n != _dg_cell_c
-                            _dg_flat_n = self._cap_flat_index(
-                                t_s, w_s, _dg_cell_n)
-                            _dg_veto = (
-                                _dg_cross
-                                & (_dg_cap[_dg_cell_n] >= 0)
-                                & (_dg_counts[_dg_flat_n] >= _dg_cap[_dg_cell_n])
-                            )
+                        _dg_veto = self._cap_new_entry_veto(
+                            _dg_counts, _dg_cap, t_s, w_s,
+                            self._cap_cell_members(
+                                b_s, curr[sl][:, _fc_dg] / 1e3),
+                            self._cap_cell_members(
+                                b_s, new[:, _fc_dg] / 1e3),
+                        )
                         new_logp[_dg_veto] = -np.inf
                         _dg_n = _dg_n + _dg_veto.sum()
 
@@ -12442,9 +12932,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # (cells = bands, in-model stays in its band window) -- nothing to
         # police. WITH overlap (2026-08-26 config) covering sets DO change
         # across the widened seams, so the gate stays armed.
+        #
+        # ⚠ THAT PREMISE IS FALSE (2026-08-29). The in-model window is the
+        # sub-band widened by N/4 bins per side (``new_bin < lo_s - n4_s``
+        # / ``> hi_s + n4_s`` in _run_in_model_repeats), and on
+        # RJ-provenance buffers ``frequency_lims`` is itself pre-widened by
+        # another N/4 (gbbands: "allow to move over band edge when
+        # proposing in-model"). So at cells == bands an in-model move CAN
+        # change cell -- by up to N/4 bins (N/2 on RJ buffers) -- and this
+        # short-circuit means nothing checks the destination band's cap.
+        # That is the 2026-08-20 "in-model repeats walked 29 leaves into a
+        # cap-1 cell" failure mode, just confined to the band seams.
+        # GB_CAP_DRIFT_GATE_EDGE_LEAK=1 keeps the gate armed here so those
+        # crossings are bounded by cap + GB_CAP_INMODEL_HEADROOM rather
+        # than unbounded. Default OFF = the historical short-circuit.
         if (
             (self.cap_divisor == 1
-             and float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) <= 0.0)
+             and float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) <= 0.0
+             and not bool(getattr(self, "cap_drift_gate_edge_leak", False)))
             or self._f0_col is None
         ):
             return None
@@ -12535,10 +13040,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         never veto: the mover's own -- about to be vacated -- cells are
         legal destinations, so a replacement into cells occupied only by
         the leaf being replaced passes, and drains out of over-full cells
-        stay allowed. The in-model CAP DRIFT GATE semantics
-        (``_run_in_model_repeats``), shared by the replacement move; at
-        overlap 0 memberships are primary-only and this is exactly the
-        partition rule (veto iff crossing into an armed at-cap cell).
+        stay allowed. At overlap 0 memberships are primary-only and this
+        is exactly the partition rule (veto iff crossing into an armed
+        at-cap cell).
+
+        BOTH fixed-dimension callers route here: the in-model CAP DRIFT
+        GATE (``_run_in_model_repeats``) and the replacement move
+        (``_run_replace_step``). That was not true before 2026-08-29 --
+        the in-model gate carried an inline copy without the headroom
+        term, and the replace call was gated on ``cap_divisor > 1``, so
+        in the production divisor-1 configuration NOTHING called this and
+        the effective in-model headroom was 0. Keep both callers pointed
+        here: this is the single definition of the destination rule.
         """
         xp = get_array_module(counts)
         c_p, c_nb, c_hn = cur_memb
@@ -12549,16 +13062,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ones = xp.ones(n_p.shape, dtype=bool)
         pairs = ((n_p, ones),) if n_nb is None else ((n_p, ones), (n_nb, n_hn))
         veto = xp.zeros(n_p.shape, dtype=bool)
-        # IN-MODEL HEADROOM (user ruling 2026-08-26): fixed-dimension f0
-        # moves (in-model repeats + the replacement move -- the two callers
-        # of this veto) may enter a foreign cell up to
-        # GB_CAP_INMODEL_HEADROOM (default 2) leaves OVER its cap, so
-        # sources can relocate across the cap barrier even at the highest
-        # cap; the surplus occupants count in every census and RJ birth
-        # gates stay strict (they use the at-cap masks, not this veto).
-        # Effective in-model cap = rj cap + headroom. =0 restores the
-        # strict destination gate.
-        _h = int(os.environ.get("GB_CAP_INMODEL_HEADROOM", "2") or 0)
+        # IN-MODEL HEADROOM (user ruling 2026-08-26, reaffirmed
+        # 2026-08-29 "if sources move across the band edge because there
+        # is higher likelihood there then so be it (under cap + 2)"):
+        # fixed-dimension f0 moves (in-model repeats + the replacement
+        # move -- the two callers of this veto) may enter a foreign cell
+        # up to GB_CAP_INMODEL_HEADROOM (default 2) leaves OVER its cap,
+        # so sources can relocate across the cap barrier even at the
+        # highest cap; the surplus occupants count in every census and RJ
+        # birth gates stay strict (they use the at-cap masks, not this
+        # veto). Effective in-model cap = rj cap + headroom. =0 restores
+        # the strict destination gate.
+        _h = _inmodel_cap_headroom()
         for _cell, _memb in pairs:
             _foreign = (
                 _memb & (_cell != c_p) & (~c_hn | (_cell != c_nb))

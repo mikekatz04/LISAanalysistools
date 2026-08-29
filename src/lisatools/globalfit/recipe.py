@@ -3115,6 +3115,20 @@ def build_gb_moves(
         _rj_flip_default = _PE_RJ_FLIP_DEFAULT
         _imr_defaults = dict(_imr_pe)
 
+    # BAND-UNIT REPEATS ARE SEARCH-ONLY (user ruling 2026-08-29). N
+    # consecutive passes per band residue class costs LINEARLY in N, and
+    # it is a search-stage concentration device -- PE must never inherit
+    # it from an exported GB_BAND_UNIT_REPEATS. Pinned to 1 (the ctor
+    # kwarg beats the env in _resolve_band_unit_repeats) whenever this
+    # move is not a search move:
+    #   * pe-named moves under GB_PE_MOVES_STRICT (a staged process
+    #     carrying both search- and pe-named GB stages), and
+    #   * every GB move outside GB_MODE=search.
+    # Under GB_MODE=search WITHOUT strict-PE the pe-named moves ARE the
+    # search (the single-stage gb_no_fg campaigns), so they take the env.
+    if _pe_strict or not _gb_mode_search:
+        _pe_cap_off = {**_pe_cap_off, "band_unit_repeats": 1}
+
     # PE extrinsic DRAW (user design ruling 2026-08-25): in the strict-PE
     # flavor the pe-named RJ moves draw phi0/cos_iota/psi from genuine
     # maximizer-centered distributions and charge the real forward/reverse
