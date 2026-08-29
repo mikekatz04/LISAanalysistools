@@ -1010,13 +1010,24 @@ export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # AFTER consecutive zero-birth-accept proposes stop proposing births
 # (deaths + in-model continue; [GB_BAND_SHUTOFF] log line per band).
 export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
-# PATIENCE 50 -> 5 (user ruling 2026-08-28). 5 is the CODE DEFAULT; this
-# pin is what disabled the valve, and the audit behind the ruling found
-# the valve has NEVER FIRED IN PRODUCTION -- zero [GB_BAND_SHUTOFF] lines
-# in the whole run log, because AFTER=50 needs 50 consecutive barren
-# iterations of the designated move and the run had only reached ~38. So
-# this line is both the behaviour change and the first real exercise of
-# the machinery.
+# PATIENCE 50 -> 5 (user ruling 2026-08-28). 5 is the CODE DEFAULT.
+#
+# ⚠ CORRECTION 2026-08-28 (read before re-tuning this knob). The audit
+# behind the ruling was right that the valve had NEVER FIRED IN
+# PRODUCTION -- zero [GB_BAND_SHUTOFF] lines in a 32 MB run log -- but
+# WRONG about why. It blamed this pin: "AFTER=50 needs 50 consecutive
+# barren iterations and the run had only reached ~38". The real cause was
+# a DEAD CALL SITE, and no clock value would have changed it: the
+# once-per-iteration tick sat at the tail of run_proposal reading
+# ``new_state``, a local of ``propose`` that is not in run_proposal's
+# scope, so every propose raised NameError into a bare
+# ``except Exception: pass``. _update_band_shutoff never ran once, the
+# streak arrays were never even allocated, and the enforcement site's
+# getattr(...) therefore never found a shut-off set to enforce. Fixed by
+# moving the tick into propose() after _write_back_state (where the
+# occupancy is also no longer a propose stale). Dead since 02324b2b
+# introduced the occupancy valve on 2026-08-15 -- i.e. it had never
+# worked in ANY run, at 50 or at 5.
 #
 # The 2026-08-16 replay that raised it to 50 still stands on its facts:
 # running the EXACT rule over iterations 5-60 at AFTER=5 switches off 74
@@ -1040,15 +1051,26 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # this is now an UNATTENDED long run, so it takes the tuned value rather
 # than the aggressive test value. v7 and v8 therefore agree at 5.
 #
-# The machinery still gets proved. The valve had never fired in production
-# -- zero [GB_BAND_SHUTOFF] lines across the whole run -- but only because
-# the OLD pin was 50 while the run had reached ~it38, so it could not
-# physically have triggered. 5 is well inside reach, so the first
-# [GB_BAND_SHUTOFF] line should still arrive on its own, followed by
-# [GB_BAND_REVIVE] at the next epoch refit. What we give up versus 1 is
-# speed of that confirmation, not the confirmation itself -- and we avoid
-# silencing bands a tuned clock would have kept open, which is the right
-# trade for a run nobody is watching.
+# The machinery now actually gets exercised -- for the first time ever,
+# because of the call-site fix above, not because of this value.
+#
+# ⚠ WHAT TO EXPECT ON THE NEXT LAUNCH, measured by replaying the exact
+# rule over this run's own store (57 iterations, 1232 GB bands): 688
+# bands sit above the 10 mHz floor and ALL 688 are barren through
+# iterations 0-4, so at a clock of 5 the valve fires on all 688 at once
+# on iteration 5 and the log gets 688 [GB_BAND_SHUTOFF] lines in one
+# tick. 634 of them stay barren for all 57 iterations and deserve it --
+# but 54 go on to acquire a cold source (first acquisition it5 median,
+# it46 latest; 91 sources held at it56), and enforcement is a FULL RJ
+# FREEZE, so those bands are shut to births AND deaths until revival.
+# That is the same hazard the 2026-08-16 replay found (9 bands holding
+# catalogue sources up to SNR 45.7). Revival bounds it -- next F-stat
+# epoch (GB_FSTAT_REFIT_EVERY below) or RESET_ITERS -- so the cost is a
+# delay, not a permanent loss. The knob is left at the ruled value of 5;
+# if the first run shows the freeze biting, the new
+# "[GB_BAND_SHUTOFF status ...]" line now reports eligible / qualifying /
+# armed / off and streak max+median on EVERY tick, so a single
+# `grep GB_BAND_SHUTOFF` answers it without another forensic dive.
 export GB_RJ_BAND_SHUTOFF_ITERS=5
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # Backstop revival (new 2026-08-28): iterations with NO new F-stat epoch

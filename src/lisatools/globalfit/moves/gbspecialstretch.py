@@ -3383,15 +3383,44 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # rj_replace's own swap census (populated only by
             # _run_replace_step; no-op for every other move).
             self._replace_census_report()
-            # High-f band shutoff bookkeeping — OCCUPANCY-based (user key
-            # change 2026-08-15): cold-chain per-band occupancy, max over
-            # walkers, once per iteration on the designated move (log
-            # contract line emitted inside _update_band_shutoff).
-            if self._band_shutoff_enabled():
-                self._update_band_shutoff(
-                    self._band_occupancy_cold_max(new_state))
+            # The high-f band shutoff tick USED TO SIT HERE and must not
+            # come back (defect 2026-08-28, dead since 02324b2b introduced
+            # it on 08-15). Two independent reasons:
+            #
+            #  1. SCOPE. It read ``new_state`` -- a local of ``propose``,
+            #     never a name in ``run_proposal``'s scope, whose state
+            #     parameter is plain ``state``. Every propose raised
+            #     NameError into the guard below, which swallowed it in
+            #     silence, so the valve never ran once in a 57-iteration
+            #     production run while 640 of 1232 bands sat barren
+            #     against a 5-iteration clock.
+            #  2. STALENESS. Even spelled correctly it would read the
+            #     WRONG occupancy: this propose's births and deaths live
+            #     in ``band_sorter`` until ``_write_back_state`` repacks
+            #     them into the branch, and that runs after
+            #     ``run_proposal`` RETURNS. Occupancy read here is the
+            #     PRE-propose value, so a band could be shut off on the
+            #     very iteration it caught its first source -- and the
+            #     enforcement is a full RJ freeze, so that source would
+            #     then be trapped until revival. That is exactly the
+            #     trapped-source hazard the ZERO-ONLY ruling exists to
+            #     prevent.
+            #
+            # The tick now lives in ``propose``, immediately after
+            # ``_write_back_state``. See _update_band_shutoff.
         except Exception:  # diagnostics must never kill a propose
-            pass
+            # ...but they must never be SILENT either. A bare ``pass``
+            # here is what hid the band-shutoff NameError for a whole
+            # run: the only evidence the valve could ever produce was a
+            # log line it could not reach. Warn ONCE per move (exc_info
+            # so the traceback names the offending line) and stay out of
+            # the way after that.
+            if not getattr(self, "_diag_tail_warned", False):
+                self._diag_tail_warned = True
+                logger.warning(
+                    "%s: propose diagnostics tail raised; acceptance / "
+                    "census reporting may be incomplete for this move "
+                    "(reported once per move)", self.name, exc_info=True)
         # Per-propose F-stat peak census: how many birth draws each peak
         # received (settings lever: if peaks are drawn many times with no
         # acceptance, futility-based retirement / flip fraction can shrink
@@ -5993,6 +6022,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 self.name, int(b), edges[b] * 1e3, edges[b + 1] * 1e3,
                 int(self._band_occ_streak[b]), int(occ_max[b]),
                 int(self._rj_band_shutoff.sum()))
+
+        # ---- STATUS LINE (2026-08-28) -----------------------------------
+        # The valve logged ONLY when it FIRED, so "never fired" and "never
+        # ran" were indistinguishable from the log -- which is exactly how
+        # a NameError at the call site survived 57 iterations, 26 job
+        # launches and a 32 MB run log without one line of evidence. This
+        # line makes the valve's state legible when it does nothing: if it
+        # is ABSENT, the tick is not running; if it is present with
+        # "armed 0", the bands genuinely do not qualify.
+        #
+        # The tag stays inside the monitor's shutoff family so a single
+        # `grep GB_BAND_SHUTOFF` finds fires AND status, but it can never
+        # be misread as a fire: the cap-plot overlay regex is
+        # ``\[GB_BAND_SHUTOFF[^\]]*\] band (\d+)`` and this line reads
+        # "] clock ..." (see test_status_line_is_not_parsed_as_a_shutoff).
+        # Cost is one max/median over the eligible slice, once per propose.
+        elig = int(hi_f.sum())
+        s_el = self._band_occ_streak[hi_f]
+        logger.info(
+            "[GB_BAND_SHUTOFF status %s] clock %d iters, floor %.3f mHz: "
+            "%d/%d bands eligible, %d qualifying now (cold occ 0), "
+            "streak max %d median %d, %d armed (streak >= clock); "
+            "%d off (+%d this tick); %d/%d iters since revive",
+            self.name, after, fmin_mhz, elig, int(self.num_bands),
+            int((hi_f & qualifying).sum()),
+            int(s_el.max()) if elig else 0,
+            int(np.median(s_el)) if elig else 0,
+            int((s_el >= after).sum()),
+            int(self._rj_band_shutoff.sum()), int(new_off.sum()),
+            int(_d["_band_shutoff_since_revive"]), _reset_iters)
 
     def _band_occupancy_cold_max(self, state) -> np.ndarray:
         """Cold-chain per-band occupancy, MAX over walkers (host array).
@@ -13718,6 +13777,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # TODO ask michael about this print("make sure this works for rj")
         with tm.span("write_back"):
             self._write_back_state(new_state, band_sorter)
+
+        # High-f band shutoff tick — OCCUPANCY-based (user key change
+        # 2026-08-15), once per iteration on the designated move.
+        #
+        # POSITION IS LOAD-BEARING: immediately after ``_write_back_state``,
+        # which is the first moment ``new_state``'s branch reflects THIS
+        # propose's births and deaths (until it runs they live only in
+        # ``band_sorter``). Ticking any earlier reads the PRE-propose
+        # occupancy and can shut off — and, under the full RJ freeze, trap a
+        # source in — a band on the very iteration it stopped being barren.
+        # It sat at the tail of ``run_proposal`` from 2026-08-15 to
+        # 2026-08-28 reading an out-of-scope ``new_state``, raising NameError
+        # into a silent guard on every propose; the valve never fired once.
+        #
+        # Guarded, because a diagnostic must not kill a propose — but the
+        # guard LOGS. A silent one is what made the original defect survive
+        # 57 iterations and 26 job launches without a single line of evidence.
+        try:
+            if self._band_shutoff_enabled():
+                self._update_band_shutoff(
+                    self._band_occupancy_cold_max(new_state))
+        except Exception:
+            logger.warning(
+                "%s: band-shutoff tick failed this propose; the valve is "
+                "NOT running (streaks are frozen wherever they stood)",
+                self.name, exc_info=True)
 
         et_all = time.perf_counter()
         logger.info(f"Full runtime of {self.name} is {round(et_all - st_all, 3)} seconds.")

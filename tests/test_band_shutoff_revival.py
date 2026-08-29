@@ -368,3 +368,257 @@ class LegacyKnobNameTest(unittest.TestCase):
             self.assertFalse(m._rj_band_shutoff.any())
             _drive(m, 1)
             self.assertTrue(m._rj_band_shutoff[3])
+
+
+# ===========================================================================
+# THE CALL SITE — production defect 2026-08-28 (57 iterations, zero fires).
+#
+# Every test above drives ``_update_band_shutoff`` DIRECTLY, so the valve's
+# LOGIC was covered 24 ways while its WIRING was not covered at all. In
+# production the once-per-iteration tick sat at the tail of ``run_proposal``
+# and read ``new_state`` — a local of ``propose``, never a name in
+# ``run_proposal``'s scope (its parameter is ``state``). Every propose raised
+# ``NameError: name 'new_state' is not defined`` straight into the enclosing
+# ``except Exception: pass`` diagnostics guard, so:
+#
+#   * ``_update_band_shutoff`` never ran once, hence
+#   * ``_band_occ_streak`` / ``_rj_band_shutoff`` were never even allocated,
+#   * the enforcement site's ``getattr(self, "_rj_band_shutoff", None)``
+#     stayed None so nothing was ever frozen, and
+#   * ``_band_shutoff_revive`` no-oped WITHOUT a log line (it returns 0
+#     silently when no state exists), so the two F-stat epoch changes in the
+#     run produced zero ``[GB_BAND_REVIVE]`` lines too.
+#
+# 640 of the 1232 GB bands sat at zero cold occupancy for all 57 iterations
+# against a 5-iteration clock. The defect was invisible because the only
+# evidence it could ever have produced was a log line it could not reach.
+# ===========================================================================
+
+import builtins
+import dis
+import types
+
+from lisatools.globalfit.moves import gbspecialstretch as _gbmod
+
+
+def _codes(code):
+    """``code`` and every code object nested inside it."""
+    yield code
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            yield from _codes(const)
+
+
+def _unresolvable_globals(func):
+    """Global names ``func`` loads that resolve nowhere at runtime.
+
+    A LOAD_GLOBAL for a name that is neither a module attribute nor a
+    builtin is a guaranteed ``NameError`` the moment that line executes.
+    Inside a bare ``except Exception`` guard that is a silent no-op, which
+    is exactly how the band-shutoff valve stayed dead for a whole run.
+    """
+    known = set(vars(_gbmod)) | set(dir(builtins))
+    bad = set()
+    for code in _codes(func.__code__):
+        for ins in dis.get_instructions(code):
+            if ins.opname == "LOAD_GLOBAL" and ins.argval not in known:
+                bad.add(ins.argval)
+    return sorted(bad)
+
+
+def _tick_carriers():
+    """Methods of ``GBSpecialBase`` that drive the per-iteration tick."""
+    out = []
+    for name, fn in vars(GBSpecialBase).items():
+        if not isinstance(fn, types.FunctionType):
+            continue
+        names = set()
+        for code in _codes(fn.__code__):
+            names.update(code.co_names)
+        if "_update_band_shutoff" in names or "_band_occupancy_cold_max" in names:
+            out.append((name, fn))
+    return out
+
+
+class ValveWiringTest(unittest.TestCase):
+    """The valve must be REACHABLE, not merely correct."""
+
+    def test_the_tick_call_site_has_no_undefined_names(self):
+        carriers = _tick_carriers()
+        # the tick must live somewhere other than its own definition
+        self.assertTrue(
+            [n for n, _ in carriers if n != "_update_band_shutoff"],
+            "nothing calls _update_band_shutoff — the valve is unreachable",
+        )
+        for name, fn in carriers:
+            with self.subTest(method=name):
+                self.assertEqual(
+                    _unresolvable_globals(fn), [],
+                    f"GBSpecialBase.{name} loads a global that resolves "
+                    "nowhere; it will raise NameError into the diagnostics "
+                    "guard and the shutoff tick will never run",
+                )
+
+    def test_run_proposal_and_propose_have_no_undefined_names(self):
+        for name in ("run_proposal", "propose"):
+            with self.subTest(method=name):
+                self.assertEqual(
+                    _unresolvable_globals(getattr(GBSpecialBase, name)), [],
+                    f"GBSpecialBase.{name} references an undefined global",
+                )
+
+
+# ---------------------------------------------------------------------------
+# The OTHER half of the dead path. ``_band_occupancy_cold_max`` is what feeds
+# the valve, and because the tick never ran it had never executed once in
+# production either. It carries two easy-to-get-wrong conversions — coords
+# f0 is in mHz while ``band_edges`` is in Hz, and the cold chain is row 0 of
+# the module sub-state's FULL ladder, not of the main state — so pin both
+# before the tick goes live.
+# ---------------------------------------------------------------------------
+
+from lisatools.globalfit.moves.globalfitmove import GlobalFitMove
+
+
+class _Branch:
+    def __init__(self, inds, coords):
+        self.inds, self.coords = inds, coords
+
+
+class _State:
+    sub_states = None
+
+    def __init__(self, branch):
+        self.branches = {"gb": branch}
+
+
+class _OccStub:
+    """Minimal move for ``_band_occupancy_cold_max``: 4 bands, 3 walkers."""
+
+    name = "rj_fstat_search"
+    branch_name = "gb"
+    num_bands = 4
+    nwalkers = 3
+
+    def __init__(self):
+        self.band_edges = np.array([1e-3, 5e-3, 9e-3, 11e-3, 13e-3])
+
+    _work_branch = GlobalFitMove._work_branch
+    _band_occupancy_cold_max = GBSpecialBase._band_occupancy_cold_max
+
+
+def _mk_state(f0_mhz_per_walker, alive_per_walker, ntemps=3):
+    """(ntemps, nwalkers, nleaves) branch; f0 lives in coords column 1."""
+    nw = len(f0_mhz_per_walker)
+    nl = max(len(r) for r in f0_mhz_per_walker)
+    coords = np.zeros((ntemps, nw, nl, 8))
+    inds = np.zeros((ntemps, nw, nl), dtype=bool)
+    for w, (f0s, alive) in enumerate(zip(f0_mhz_per_walker, alive_per_walker)):
+        for l, (f0, a) in enumerate(zip(f0s, alive)):
+            coords[0, w, l, 1] = f0
+            inds[0, w, l] = a
+    # hot rows are deliberately STUFFED: the valve is a cold-chain rule, so
+    # a hot-chain junk leaf must not keep a barren band alive.
+    coords[1:, :, :, 1] = 12.0
+    inds[1:] = True
+    return _State(_Branch(inds, coords))
+
+
+class ColdOccupancyTest(unittest.TestCase):
+    def test_f0_is_read_in_mhz_against_hz_band_edges(self):
+        # 12 mHz -> band 3 (11-13 mHz); 6 mHz -> band 1 (5-9 mHz)
+        st = _mk_state([[12.0, 6.0]], [[True, True]])
+        st.branches["gb"].inds = st.branches["gb"].inds[:, :1]
+        st.branches["gb"].coords = st.branches["gb"].coords[:, :1]
+        m = _OccStub()
+        m.nwalkers = 1
+        occ = m._band_occupancy_cold_max(st)
+        self.assertEqual(list(occ), [0, 1, 0, 1])
+
+    def test_max_over_walkers_not_sum(self):
+        # every walker holds one source in band 3 -> max is 1, not 3
+        st = _mk_state([[12.0], [12.5], [11.5]], [[True], [True], [True]])
+        occ = _OccStub()._band_occupancy_cold_max(st)
+        self.assertEqual(list(occ), [0, 0, 0, 1])
+
+    def test_dead_leaves_do_not_count(self):
+        st = _mk_state([[12.0], [12.5], [11.5]],
+                       [[False], [False], [False]])
+        occ = _OccStub()._band_occupancy_cold_max(st)
+        self.assertEqual(list(occ), [0, 0, 0, 0])
+
+    def test_hot_chain_occupancy_is_ignored(self):
+        """The 640 barren production bands are barren IN THE COLD CHAIN."""
+        st = _mk_state([[6.0], [6.0], [6.0]], [[True], [True], [True]])
+        occ = _OccStub()._band_occupancy_cold_max(st)
+        self.assertEqual(occ[3], 0)  # hot rows are all at 12 mHz
+
+    def test_leaves_outside_the_grid_are_dropped(self):
+        st = _mk_state([[0.5, 99.0, 12.0]], [[True, True, True]])
+        st.branches["gb"].inds = st.branches["gb"].inds[:, :1]
+        st.branches["gb"].coords = st.branches["gb"].coords[:, :1]
+        m = _OccStub()
+        m.nwalkers = 1
+        occ = m._band_occupancy_cold_max(st)
+        self.assertEqual(list(occ), [0, 0, 0, 1])
+
+
+# ---------------------------------------------------------------------------
+# OBSERVABILITY. The valve logged only when it FIRED, so a valve that never
+# ran and a valve with nothing to do produced byte-identical evidence: none.
+# The status line has to be emitted on every tick, including the boring ones.
+# ---------------------------------------------------------------------------
+
+_STATUS_RE = re.compile(r"\[GB_BAND_SHUTOFF status ([a-z_0-9]+)\]")
+
+
+class StatusLineTest(unittest.TestCase):
+    def test_status_is_emitted_even_when_nothing_fires(self):
+        with _env():
+            m = _MoveStub()
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                m._update_band_shutoff(BARREN)          # tick 1 of 5
+        text = "\n".join(cm.output)
+        self.assertEqual(_STATUS_RE.findall(text), ["rj_fstat_search"])
+        self.assertFalse(m._rj_band_shutoff.any())      # nothing fired
+        self.assertIn("clock 5 iters", text)
+        self.assertIn("floor 10.000 mHz", text)
+        self.assertIn("1/4 bands eligible", text)
+        self.assertIn("1 qualifying now (cold occ 0)", text)
+        self.assertIn("0 armed (streak >= clock)", text)
+
+    def test_status_line_is_not_parsed_as_a_shutoff(self):
+        """The monitor's cap-plot overlay must not paint a band from it."""
+        with _env():
+            m = _MoveStub()
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                _drive(m, 4)
+        self.assertEqual(
+            _MONITOR_SHUTOFF_RE.findall("\n".join(cm.output)), [])
+
+    def test_status_reports_the_resolved_clock_not_the_default(self):
+        with _env(GB_RJ_BAND_SHUTOFF_ITERS="9"):
+            m = _MoveStub()
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                m._update_band_shutoff(BARREN)
+        self.assertIn("clock 9 iters", "\n".join(cm.output))
+
+    def test_status_counts_armed_and_off_when_the_valve_fires(self):
+        with _env():
+            m = _MoveStub()
+            _drive(m, 4)
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                m._update_band_shutoff(BARREN)          # the 5th -> fires
+        text = "\n".join(cm.output)
+        self.assertIn("1 armed (streak >= clock)", text)
+        self.assertIn("1 off (+1 this tick)", text)
+        # and the real fire line is still there for the monitor
+        self.assertEqual(_MONITOR_SHUTOFF_RE.findall(text), ["3"])
+
+    def test_status_tracks_streak_max_and_median(self):
+        with _env():
+            m = _MoveStub()
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                _drive(m, 3)
+        # one eligible band (band 3), streak 3 after three barren ticks
+        self.assertIn("streak max 3 median 3", "\n".join(cm.output))
