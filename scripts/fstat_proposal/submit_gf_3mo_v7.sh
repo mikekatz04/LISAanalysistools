@@ -993,7 +993,16 @@ export GB_REPLACE_PHASE_MAX=auto
 # records the true dll and REVERTS, touching no chain state. Grep
 # [GB_PAIRBORROW] for "would this fix the flagship?" evidence -- donors,
 # pairs attempted/substituted and the true dll per pair.
-export GB_PAIR_BORROW=1
+# HELD 2026-08-29 (user: "slow down on the pretending"), 1 -> 0. The
+# measure-only pass is non-destructive, but the true-dll it would report is
+# computed over the WHOLE-WALKER likelihood, and that gate window is exactly
+# what is unsettled: the spec said "the two touching sub-bands" (270 bins),
+# the implementation used whole-walker, and the natural middle -- the
+# template support actually spanning 3,240-5,400 bins per source -- has not
+# been measured against either. Evidence gathered under a disputed window is
+# not evidence. Re-arm once the window is decided, ideally reporting dll
+# under all three so one run settles it.
+export GB_PAIR_BORROW=0
 # The destructive half stays OFF until [GB_PAIRBORROW] shows real dll
 # wins on the flagship pair AND the apply path passes a cluster smoke
 # gate: it could not be verified end-to-end off-cluster (no GPU, and the
