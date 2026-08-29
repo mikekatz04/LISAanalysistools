@@ -273,25 +273,29 @@ export GB_NLEAVES_MAX=10000
 # flat 42-45/31 GB on 96 GB cards. If the unit-open lines stay flat,
 # full residency (50000 -> 44,352 slots, ~11.3 GB) is the next step.
 export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
-# RJ pick thinning. UNSET as of 2026-08-28 (user: "should be 1 in search")
-# -- deliberately NOT set to 1.
+# RJ pick thinning. UNSET -- the value lives in code (recipe.py
+# _SEARCH_RJ_FLIP_DEFAULT / _PE_RJ_FLIP_DEFAULT, BOTH 0.2 = v6 parity).
 #
-# {BRANCH}_RJ_FLIP_FRACTION is a GLOBAL override: _resolve_rj_flip_fraction
-# ranks kwarg > env > per-move default, so ONE exported value lands on every
-# RJ move in every stage. The recipe already picks the right value per mode
-# (recipe.py: _rj_flip_default = 1.0 if _gb_mode_search else 0.1, and the
-# search-NAMED moves rj_prior_search / rj_fstat_mcmc_search /
-# rj_prior_removal / rj_replace keep an implicit 1.0). This script runs the
-# STAGED recipe, which ends in full_pe -- so exporting 1 would satisfy
-# "1 in search" but also force 1.0 onto the PE moves that are supposed to
-# settle to a 0.1 subset. Leaving it unset gives 1.0 in search AND 0.1 in
-# PE, which is the intent.
+# ⚠ THE TEXT THAT WAS HERE CAUSED A PRODUCTION REGRESSION. It said
+# "leaving it unset gives 1.0 in search", which was true ONLY for the
+# 7m46s between commit 511d45e5 (removed this export) and bba4219d
+# (wired _SEARCH_RJ_FLIP_DEFAULT into the five search-named moves). A
+# checkout taken inside that window runs search at the hard-coded 1.0
+# fallback at gbspecialstretch.py:1692 instead of 0.2. THAT HAPPENED:
+# the 2026-08-28 14:48 UTC relaunch landed in the window and countable
+# BIRTH precompute rows jumped 5.036x (death rows flat -- the exact
+# signature, since the flip gate thins births early at unit-open and
+# never touches deaths), taking rj_fstat_centers 861.7 -> 1469.3 s and
+# then ~1600-1700 s, i.e. 53-56% of the whole iteration wall.
 #
-# The old 0.2 was wrong in both directions at once: it thinned search to a
-# fifth of eligible slots and inflated PE to double its intended subset.
+# {BRANCH}_RJ_FLIP_FRACTION is a GLOBAL override (_resolve_rj_flip_fraction
+# ranks kwarg > env > per-move default), so ONE exported value lands on
+# every RJ move in EVERY stage and cannot express a search/PE split. That
+# is why the value belongs in code, not here.
+#
 # In-model repeats are unaffected either way -- they cover ALL alive
 # sources; the flip gate is rj-only by construction.
-# export GB_RJ_FLIP_FRACTION=0.2   # <- re-export ONLY to force both stages
+# export GB_RJ_FLIP_FRACTION=0.2   # <- re-export ONLY to force ALL stages
 # In-model info-matrix jump scale: 0.005 default measured 95% cold
 # acceptance; 0.2 -> 0.61; 0.4 -> 0.60 (job 196). Job 197 flipped the
 # story: with the EXACT per-block SIGHET info matrices live, cold
