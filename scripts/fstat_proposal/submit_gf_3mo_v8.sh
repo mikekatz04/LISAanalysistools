@@ -829,6 +829,32 @@ export GB_SUBBAND_DIVISOR=8
 # stride-2-on-1-layer separation. ~137 concurrent bands/unit (v5: 77);
 # 9 units per pass instead of 2.
 export GB_BAND_UNIT_STRIDE=9
+# PER-WALKER BAND-CLASS ROTATION (aligned with v7 2026-08-29). The stride and
+# class membership are UNCHANGED -- band b stays in class b % 9 for every
+# walker and band_edges stays one global array, so band b means the same Hz
+# everywhere. Only the ORDER changes: each walker gets its own random START
+# class and its own +/-1 cycle DIRECTION, then visits the classes in order
+# from there. Every walker still covers all 9 classes per sweep (gcd(1,9)=1),
+# so it is a rotation, never a permutation -- a walker's concurrently-open
+# bands stay one residue class apart and the orthogonality argument is
+# untouched (it is a per-walker property: cells of different walkers write to
+# disjoint parent rows).
+#
+# APPLIES IN BOTH SEARCH AND PE (user ruling), so the detailed-balance safety
+# is load-bearing rather than a search-stage convenience: both draws are
+# UNIFORM and STATE-INDEPENDENT, drawn from model.random so they stay
+# seed-reproducible, and run_proposal asserts the per-walker partition every
+# propose and refuses to sample if it breaks. NEVER weaken the draw into a
+# heuristic ("which walker looks stuck", by logL, by occupancy) -- that
+# silently converts a DB-safe change into a DB-breaking one.
+#
+# ARMED AHEAD OF v7 EVIDENCE (user decision 2026-08-29: "assume it will work
+# and it will help or be neutral at worst"). v7 is running these now; if its
+# logs show a problem, set both to 0 -- knob-OFF is bit-identical to the
+# single global start by construction, not by coincidence. Grep [GB_UNIT_SCAN]
+# for the schedule actually used.
+export GB_BAND_UNIT_START_PER_WALKER=1
+export GB_BAND_UNIT_DIR_PER_WALKER=1
 # VGB DE-COUPLED from the fine grid (2026-08-22 timing autopsy): the VGB
 # branch inherits GB_SUBBAND_DIVISOR through GBSetup.init_band_structure,
 # so v6 silently ran the ~30-source VGB move on 1232 narrow bands --
