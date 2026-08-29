@@ -34,6 +34,22 @@ iteration, the band grid, the cap-cell grid, and the on-disk F-stat epoch cache
 under ``gb_fstat_fit/`` (which is not in the h5 at all). That is the expensive
 part of a run and there is no reason to pay for it twice.
 
+Two things this does NOT do, both handled by ``compact_gf_store.py``:
+
+* It does not shrink the FILE. Moving the counter leaves the discarded rows
+  allocated, and neither ``resize`` nor ``h5repack`` reclaims them, because
+  ``sub_backend/gb/chain`` chunks the STEP axis 32 rows at a time -- the chunk
+  holding the live rows also holds discarded ones, so it is partially live and
+  cannot be freed. ``compact_gf_store.py`` rebuilds the store with only the
+  live rows written, which is the only way the space comes back.
+* It does not touch the sidecars, and after ``--rewind-to-empty`` all three are
+  stale: ``*_running_backup_copy.h5`` sits at a LATER iteration (a truncation
+  restore would silently undo the rewind), ``*_midit_checkpoint.pkl`` holds
+  pre-rewind mid-iteration state, and the ``gb_fstat_fit/`` cache kept above is
+  right for a stage RE-OPEN but wrong here -- its grids were fitted against a
+  live residual that the removal of every GB leaf has just invalidated. See
+  ``compact_gf_store.py --reset-backup/--reset-midit/--reset-fstat``.
+
 What it does NOT change: array SHAPES. In particular a store written with a
 2-rung GB ladder has ``band_temps`` shaped ``(nrows, nbands, 2)`` at every row,
 so rewinding cannot restore a 24-rung ladder -- resume derives the rung count
