@@ -617,7 +617,7 @@ class StatusLineTest(unittest.TestCase):
                 m._update_band_shutoff(BARREN)          # the 5th -> fires
         text = "\n".join(cm.output)
         self.assertIn("1 armed (streak >= clock)", text)
-        self.assertIn("1 off (+1 this tick)", text)
+        self.assertIn("1 off (+1 this tick, -0 re-homed)", text)
         # and the real fire line is still there for the monitor
         self.assertEqual(_MONITOR_SHUTOFF_RE.findall(text), ["3"])
 
@@ -868,3 +868,99 @@ class ShutoffStorageContractTest(unittest.TestCase):
             m = _PersistMoveStub()
             m._update_band_shutoff(BARREN, _PersistState(back.band_info))
         self.assertTrue(m._rj_band_shutoff[3])
+
+
+# ===========================================================================
+# RE-HOMED LEAVES (conflict found 2026-08-29 by the bimodality dive).
+#
+# Band membership is NOT pinned at birth: gbbands re-derives it from f0 with
+# searchsorted on every propose (verified against the store -- band_num_
+# binaries == searchsorted(band_edges, f0) with 0 mismatches over 24x1232
+# cells at it30/it44/it56). So an IN-MODEL f0 drift can carry a leaf across
+# an edge INTO a frozen band. That entry is not a birth, so the freeze does
+# not gate it -- and because the freeze blocks deaths too, no move could
+# then remove it.
+#
+# This is live for the flagship at 20.380377 mHz (bands 1141/1142, well
+# above the 10 mHz floor and so shutoff-eligible). It did not matter while
+# the valve was dead; it does the moment the valve runs.
+#
+# NOT already handled by the occupancy tick: occupancy reset the STREAK but
+# nothing ever cleared the frozen FLAG (the only per-band write set it True;
+# the only clear was the all-or-nothing revival), so the band stayed frozen
+# until the next global revival -- up to RESET_ITERS=100 iterations.
+# ===========================================================================
+
+
+class ReHomedLeafTest(unittest.TestCase):
+    def _frozen(self):
+        m = _MoveStub()
+        _drive(m, 5)
+        self.assertTrue(m._rj_band_shutoff[3])
+        return m
+
+    def test_a_leaf_drifting_in_does_not_become_unremovable(self):
+        """The whole point: RJ must be able to act on the band again."""
+        with _env():
+            m = self._frozen()
+            occupied = np.array([0, 0, 0, 1], dtype=np.int64)
+            m._update_band_shutoff(occupied)
+            # released -> the enforcement mask no longer freezes band 3, so
+            # a death proposal can reach the stray leaf
+            self.assertFalse(m._rj_band_shutoff[3])
+
+    def test_release_is_logged_as_a_revival_not_a_shutoff(self):
+        with _env():
+            m = self._frozen()
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                m._update_band_shutoff(np.array([0, 0, 0, 1], dtype=np.int64))
+        text = "\n".join(cm.output)
+        self.assertIn("[GB_BAND_REVIVE rj_fstat_search]", text)
+        self.assertIn("re-acquired a cold leaf", text)
+        # must not paint a band row red in the monitor's cap plot
+        self.assertEqual(_MONITOR_SHUTOFF_RE.findall(text), [])
+
+    def test_release_is_per_band_not_all_or_nothing(self):
+        """Unlike _band_shutoff_revive, one stray must not open everything."""
+        m = _MoveStub()
+        m.band_edges = np.array([1e-3, 11e-3, 12e-3, 13e-3, 14e-3])
+        with _env():
+            _drive(m, 5, occ=np.zeros(4, dtype=np.int64))
+            self.assertTrue(m._rj_band_shutoff[1:].all())   # 3 eligible bands
+            m._update_band_shutoff(np.array([0, 1, 0, 0], dtype=np.int64))
+            self.assertFalse(m._rj_band_shutoff[1])         # released
+            self.assertTrue(m._rj_band_shutoff[2])          # untouched
+            self.assertTrue(m._rj_band_shutoff[3])
+
+    def test_a_released_band_must_re_earn_its_shutoff(self):
+        """It cannot snap straight back off and re-trap the leaf."""
+        with _env():
+            m = self._frozen()
+            m._update_band_shutoff(np.array([0, 0, 0, 1], dtype=np.int64))
+            self.assertFalse(m._rj_band_shutoff[3])
+            _drive(m, 4)                     # barren again, but only 4 ticks
+            self.assertFalse(m._rj_band_shutoff[3])
+            _drive(m, 1)                     # 5th -> may shut off again
+            self.assertTrue(m._rj_band_shutoff[3])
+
+    def test_status_line_counts_the_re_homed_releases(self):
+        with _env():
+            m = self._frozen()
+            with self.assertLogs(LOGGER_NAME, level="INFO") as cm:
+                m._update_band_shutoff(np.array([0, 0, 0, 1], dtype=np.int64))
+        self.assertIn("-1 re-homed", "\n".join(cm.output))
+
+    def test_the_release_is_persisted(self):
+        """A restart must not restore the band to frozen and re-trap it."""
+        bi = _fresh_band_info()
+        st = _PersistState(bi)
+        with _env():
+            _drive_p(_PersistMoveStub(), 5, st)
+            self.assertTrue(bool(bi["band_rj_shutoff"][3]))
+            _PersistMoveStub()._update_band_shutoff(
+                np.array([0, 0, 0, 1], dtype=np.int64), st)
+            self.assertFalse(bool(bi["band_rj_shutoff"][3]))
+            # a fresh process picks up the RELEASED state, not the frozen one
+            m3 = _PersistMoveStub()
+            m3._update_band_shutoff(np.array([0, 0, 0, 1], dtype=np.int64), st)
+            self.assertFalse(m3._rj_band_shutoff[3])

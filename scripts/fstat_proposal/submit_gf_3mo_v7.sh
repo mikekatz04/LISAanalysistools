@@ -1101,16 +1101,33 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # (GB_FSTAT_REFIT_EVERY below) or RESET_ITERS. USER RULING 2026-08-29:
 # keep 5.
 #
+# Those same 11 bands are also the RE-HOMING case (2026-08-29). Band
+# membership is not pinned at birth -- gbbands re-derives it from f0 by
+# searchsorted every propose -- so an in-model drift can carry a leaf
+# ACROSS an edge into a frozen band. That entry is not a birth, so the
+# freeze does not gate it, and because the freeze blocks deaths too
+# nothing could then remove it. A frozen band that acquires a cold leaf is
+# now RELEASED on the spot (logged "[GB_BAND_REVIVE ...] re-acquired a
+# cold leaf"), so the stray stays removable; the band must then re-earn
+# its shutoff over a full window. Replay says this fires 11 times across
+# 11 distinct bands over the run. The flagship at 20.380377 mHz (bands
+# 1141/1142) is NOT affected: both hold cold occupancy >= 1 on every one
+# of the 52 GB-active ticks, so under the ZERO-ONLY rule they never
+# accumulate a streak and are never frozen in the first place.
+#
 # The valve's clock now also SURVIVES RESTARTS (2026-08-29): the streak,
 # the shut-off set and the revival counters ride sub_backend/gb/ with the
 # band_leaf_cap family, so the clock counts GB proposes across the whole
 # run instead of within one process. That matters here -- this run took 26
 # launches with segments of 2-8 iterations, i.e. usually shorter than the
 # 5-tick clock. Every tick logs "[GB_BAND_SHUTOFF status ...]" with
-# eligible / qualifying / armed / off, streak max+median, and a
-# "persist restored|fresh|reset(...)|memory" token, so one
-# `grep GB_BAND_SHUTOFF` shows both what the valve is doing and whether
-# its clock actually survived the last restart.
+# eligible / qualifying / armed / off, streak max+median, the count of
+# frozen bands released this tick for holding a leaf ("-N re-homed"), and
+# a "persist restored|fresh|reset(...)|memory" token, so one
+# `grep GB_BAND_SHUTOFF` shows what the valve is doing, whether its clock
+# survived the last restart, and whether drift is pushing leaves into
+# frozen bands. A persistently nonzero "re-homed" count is the signal that
+# the band grid and the in-model step are fighting each other.
 export GB_RJ_BAND_SHUTOFF_ITERS=5
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # Backstop revival (new 2026-08-28): iterations with NO new F-stat epoch

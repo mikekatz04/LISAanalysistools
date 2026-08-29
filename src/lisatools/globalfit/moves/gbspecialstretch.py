@@ -6097,6 +6097,47 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         )
         self._band_occ_last = occ_max.copy()
         edges = _to_numpy(self.band_edges)
+
+        # ---- RE-HOMED LEAVES (2026-08-29) --------------------------------
+        # "A band that holds a source is never shut off" was only true at
+        # the MOMENT of the shutoff decision, not as a standing property:
+        # nothing ever cleared the frozen flag for a band that later
+        # acquired a leaf (the only per-band write set it True; the only
+        # clear was the all-or-nothing revival). That is a trap, because
+        # band membership is NOT pinned at birth -- it is re-derived from
+        # f0 by searchsorted on every propose (gbbands), so an IN-MODEL
+        # drift can carry a leaf across an edge INTO a frozen band. That
+        # entry is not a birth, so the freeze does not gate it; and since
+        # the freeze blocks deaths too, no move could then remove it. It
+        # would sit there until the next global revival (up to
+        # RESET_ITERS=100 iterations).
+        #
+        # So make the invariant STANDING: any frozen band found holding a
+        # cold leaf is released on the spot. Its streak is already 0 (the
+        # ZERO-ONLY rule above), so it has to re-earn its shutoff over a
+        # full window -- and by then the stray has either been removed
+        # (RJ works again) or drifted back out.
+        #
+        # COLD occupancy specifically, matching the shutoff criterion it
+        # inverts. Using all-temperature occupancy would let hot-chain
+        # churn un-freeze bands continuously -- the same failure that made
+        # the original ACCEPTANCE-based criterion never fire, and the
+        # reason the rule is cold-chain occupancy in the first place.
+        rehomed = self._rj_band_shutoff & (occ_max > 0)
+        n_rehomed = int(rehomed.sum())
+        if n_rehomed:
+            self._rj_band_shutoff[rehomed] = False
+            _rb = [int(b) for b in np.where(rehomed)[0]]
+            logger.info(
+                "[GB_BAND_REVIVE %s] %d frozen band(s) re-acquired a cold "
+                "leaf and were released so it stays removable: %s%s "
+                "(%d bands still off)", self.name, n_rehomed,
+                ", ".join(
+                    f"{b} ({edges[b] * 1e3:.3f}-{edges[b + 1] * 1e3:.3f} "
+                    f"mHz, occ {int(occ_max[b])})" for b in _rb[:8]),
+                "" if len(_rb) <= 8 else f", +{len(_rb) - 8} more",
+                int(self._rj_band_shutoff.sum()))
+
         hi_f = edges[:-1] * 1e3 >= fmin_mhz
         new_off = hi_f & ~self._rj_band_shutoff & (
             self._band_occ_streak >= after)
@@ -6130,13 +6171,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "[GB_BAND_SHUTOFF status %s] clock %d iters, floor %.3f mHz: "
             "%d/%d bands eligible, %d qualifying now (cold occ 0), "
             "streak max %d median %d, %d armed (streak >= clock); "
-            "%d off (+%d this tick); %d/%d iters since revive; persist %s",
+            "%d off (+%d this tick, -%d re-homed); %d/%d iters since "
+            "revive; persist %s",
             self.name, after, fmin_mhz, elig, int(self.num_bands),
             int((hi_f & qualifying).sum()),
             int(s_el.max()) if elig else 0,
             int(np.median(s_el)) if elig else 0,
             int((s_el >= after).sum()),
             int(self._rj_band_shutoff.sum()), int(new_off.sum()),
+            # frozen bands found holding a cold leaf this tick and released
+            # for it. Should normally read 0; a persistent nonzero count
+            # means in-model drift keeps carrying leaves across a frozen
+            # edge, which is worth seeing rather than silently absorbing.
+            n_rehomed,
             int(_d["_band_shutoff_since_revive"]), _reset_iters,
             # "restored"/"fresh" = this process adopted the stored record
             # (or found none); "reset(...)" = the store was there but
