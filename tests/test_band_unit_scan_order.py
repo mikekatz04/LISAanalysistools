@@ -1,4 +1,4 @@
-"""Per-walker start index / direction, unit repeats, and the in-model cap headroom.
+"""Per-walker start index / direction and the in-model cap headroom.
 
 Three knobbed changes to the search-stage band-unit sweep in
 ``GBSpecialStretchMove.run_proposal``, all defaulting to today's
@@ -14,22 +14,7 @@ behaviour:
 2. **Per-walker DIRECTION** (``{BRANCH}_BAND_UNIT_DIR_PER_WALKER``): the
    per-walker cycle may run ``-1`` instead of ``+1``.
 
-3. **Unit REPEATS** (``{BRANCH}_BAND_UNIT_REPEATS``, default 1,
-   search-only): each class is opened/closed ``N`` times consecutively
-   before the sweep advances to the next class.
 
-Plus the in-model cap-drift gate now goes through
-:meth:`GBSpecialBase._cap_new_entry_veto`, which is where the
-already-existing ``GB_CAP_INMODEL_HEADROOM`` (default 2) lives.
-
-⚠ THE DETAILED-BALANCE CONSTRAINT. A random-scan / random-rotation sweep
-over blocks preserves stationarity ONLY if the order is drawn UNIFORMLY
-and INDEPENDENTLY OF THE CURRENT CHAIN STATE. Choosing a walker's start
-or direction by any heuristic (which walker looks stuck, by logL, by band
-occupancy) silently converts a DB-safe change into a DB-breaking one.
-:class:`UniformStateIndependentDrawTest` is the guard: it pins that the
-draw site takes NO state argument, that its body reads nothing but the
-RNG, and that starts/directions come out uniform.
 """
 
 import ast
@@ -44,11 +29,9 @@ from lisatools.globalfit.moves.gbspecialstretch import (
     _format_unit_scan_schedule,
     _ortho_boundary_pairs,
     _resolve_band_unit_dir_per_walker,
-    _resolve_band_unit_repeats,
     _resolve_band_unit_start_per_walker,
     _unit_pass_remainder,
     _unit_residue_mask,
-    _unit_sweep_passes,
     GBSpecialBase,
 )
 
@@ -88,10 +71,8 @@ class ResolveKnobsTest(unittest.TestCase):
         for n in (
             "GB_BAND_UNIT_START_PER_WALKER",
             "GB_BAND_UNIT_DIR_PER_WALKER",
-            "GB_BAND_UNIT_REPEATS",
             "VGB_BAND_UNIT_START_PER_WALKER",
             "VGB_BAND_UNIT_DIR_PER_WALKER",
-            "VGB_BAND_UNIT_REPEATS",
         ):
             os.environ.pop(n, None)
             self.addCleanup(os.environ.pop, n, None)
@@ -112,24 +93,6 @@ class ResolveKnobsTest(unittest.TestCase):
     def test_env_wins_over_ctor_for_order_knobs(self):
         os.environ["GB_BAND_UNIT_START_PER_WALKER"] = "0"
         self.assertFalse(_resolve_band_unit_start_per_walker("gb", True))
-
-    def test_repeats_default_one(self):
-        self.assertEqual(_resolve_band_unit_repeats("gb", None), 1)
-
-    def test_repeats_env(self):
-        os.environ["GB_BAND_UNIT_REPEATS"] = "3"
-        self.assertEqual(_resolve_band_unit_repeats("gb", None), 3)
-
-    def test_repeats_explicit_kwarg_wins_over_env(self):
-        # the SEARCH-ONLY pin: recipe passes band_unit_repeats=1 to the
-        # pe-named moves, and that must beat an exported env.
-        os.environ["GB_BAND_UNIT_REPEATS"] = "4"
-        self.assertEqual(_resolve_band_unit_repeats("gb", 1), 1)
-
-    def test_repeats_rejects_below_one(self):
-        with self.assertRaises(ValueError):
-            _resolve_band_unit_repeats("gb", 0)
-
 
 # ---------------------------------------------------------------------------
 # ⚠ Detailed balance: the draw must be uniform and state-independent
@@ -350,27 +313,6 @@ class ResidueMaskTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class SweepPassesTest(unittest.TestCase):
-    def test_repeats_one_is_the_legacy_sweep(self):
-        self.assertEqual(
-            list(_unit_sweep_passes(9, 1)), [(i, 0) for i in range(9)]
-        )
-
-    def test_each_class_repeated_consecutively(self):
-        got = list(_unit_sweep_passes(3, 4))
-        self.assertEqual(
-            [u for u, _ in got],
-            [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2],
-            "each residue class must repeat N times BEFORE the sweep "
-            "advances to the next class",
-        )
-        self.assertEqual([r for _, r in got], [0, 1, 2, 3] * 3)
-
-    def test_pass_count_is_linear_in_repeats(self):
-        for n in (1, 2, 3, 5):
-            self.assertEqual(len(list(_unit_sweep_passes(9, n))), 9 * n)
-
-
 # ---------------------------------------------------------------------------
 # Observability
 # ---------------------------------------------------------------------------
@@ -380,11 +322,10 @@ class ScanScheduleLogLineTest(unittest.TestCase):
     def test_line_is_greppable_and_single_line(self):
         starts = np.array([0, 3, 5, 8])
         dirs = np.array([1, -1, 1, -1])
-        line = _format_unit_scan_schedule(starts, dirs, units=9, repeats=2)
+        line = _format_unit_scan_schedule(starts, dirs, units=9)
         self.assertNotIn("\n", line)
         self.assertIn("[GB_UNIT_SCAN]", line)
         self.assertIn("units=9", line)
-        self.assertIn("repeats=2", line)
         # the per-walker (start, direction) pairs are recoverable
         self.assertIn("0+", line)
         self.assertIn("3-", line)
@@ -394,14 +335,14 @@ class ScanScheduleLogLineTest(unittest.TestCase):
         rng = np.random.RandomState(1)
         starts = rng.randint(0, 9, size=512)
         dirs = np.where(rng.randint(0, 2, size=512) == 0, -1, 1)
-        line = _format_unit_scan_schedule(starts, dirs, units=9, repeats=1)
+        line = _format_unit_scan_schedule(starts, dirs, units=9)
         self.assertNotIn("\n", line)
         self.assertLess(len(line), 400)
         self.assertIn("digest=", line)
 
     def test_global_schedule_is_named_too(self):
         line = _format_unit_scan_schedule(
-            np.full(24, 4), np.ones(24, dtype=int), units=9, repeats=1
+            np.full(24, 4), np.ones(24, dtype=int), units=9
         )
         self.assertIn("[GB_UNIT_SCAN]", line)
         self.assertIn("global", line)
@@ -546,7 +487,7 @@ class WiringTest(unittest.TestCase):
         """
         src = inspect.getsource(GBSpecialBase.run_proposal)
         self.assertIn("dict(units=units, remainder=remainder)", src)
-        self.assertIn("_unit_sweep_passes(units, _unit_repeats)", src)
+        self.assertIn("for unit_i in range(units):", src)
         self.assertIn("_draw_unit_scan_schedule(", src)
 
     def test_partition_guard_accepts_every_legal_schedule(self):
@@ -617,14 +558,6 @@ class WiringTest(unittest.TestCase):
             "with the edge-leak knob armed the gate must stay live in the "
             "cells == bands configuration",
         )
-
-    def test_recipe_pins_repeats_off_for_non_search_moves(self):
-        import lisatools.globalfit.recipe as recipe_mod
-
-        src = inspect.getsource(recipe_mod)
-        self.assertIn('"band_unit_repeats": 1', src)
-        self.assertIn("_pe_strict or not _gb_mode_search", src)
-
 
 if __name__ == "__main__":
     unittest.main()

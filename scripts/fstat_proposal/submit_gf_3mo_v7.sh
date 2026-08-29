@@ -746,20 +746,34 @@ export GB_BAND_UNIT_STRIDE=9
 # load-bearing, not a search-stage convenience -- run_proposal asserts the
 # per-walker partition every propose and refuses to sample if it breaks.
 export GB_BAND_UNIT_START_PER_WALKER=1
-# PER-WALKER DIRECTION (+/-1 rotation). Deliberately left OFF so this
-# run isolates the start effect; flip to 1 to add it. Same DB argument,
-# same partition property (every walker still visits every class once).
+# PER-WALKER DIRECTION (+/-1 rotation). ARMED -- each walker draws its
+# own cycle direction alongside its start, so walkers traverse the class
+# ring both ways. Same DB argument, same partition property (every walker
+# still visits every class exactly once per sweep).
 export GB_BAND_UNIT_DIR_PER_WALKER=1
-# UNIT REPEATS: N consecutive passes over each class (open -> RJ ->
-# in-model -> close, N times) before advancing, so an edge source gets
-# several CONSECUTIVE attempts with the residual context refreshed
-# between them instead of one attempt then an 8-class wait.
-# ⚠ COST IS LINEAR IN N -- 9*N passes instead of 9. N=2 roughly DOUBLES
-# the GB sweep per iteration, N=3 roughly triples it. Pinned at 1 (=
-# today's behaviour, bit-identical) as a deliberate choice: raise it only
-# with the iteration-time budget in hand. Search-only either way (the
-# recipe pins pe-named moves to 1).
-export GB_BAND_UNIT_REPEATS=3
+#
+# TODO(band-unit-repeats): repeating each residue class N times per sweep
+# was implemented and then REMOVED on 2026-08-29 because it could not
+# deliver what it promised. The intent was that the whole (RJ + in-model)
+# block repeat. It does not, because two things are fixed for the entire
+# propose at BandSorter construction -- which happens in propose(),
+# OUTSIDE the unit loop in run_proposal():
+#   1. RJ birth coordinates are PRE-DRAWN once per propose (the sorter
+#      pre-draw, gbbands.py ~4302/4433), so every pass sees the SAME
+#      candidate set; and
+#   2. band_sorter.has_run_rj is allocated at gbbands.py:4475 and is
+#      NEVER reset mid-propose -- only ever set True (gbspecialstretch
+#      ~5460) -- while pick eligibility excludes ~has_run_rj (~5412), so
+#      a source RJ-picked on pass 1 is CONSUMED for the rest of the
+#      propose.
+# Net effect measured from the code: N=3 delivers 1x RJ + 3x in-model,
+# not 3x of the block, while paying three full open/close cycles.
+# TO DO IT PROPERLY: reset has_run_rj at the start of each repeat pass
+# AND refresh the pre-drawn birth coordinates (or rebuild the BandSorter
+# per pass -- expensive, sorter_build is its own timed span). Either way
+# the RJ proposal-density bookkeeping needs re-checking first, because
+# repeated picks on the same rows within one propose is not what the
+# current accounting assumes.
 # VGB DE-COUPLED from the fine grid (2026-08-22 timing autopsy): the VGB
 # branch inherits GB_SUBBAND_DIVISOR through GBSetup.init_band_structure,
 # so v6 silently ran the ~30-source VGB move on 1232 narrow bands --

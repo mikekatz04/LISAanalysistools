@@ -439,48 +439,6 @@ def _resolve_band_unit_dir_per_walker(branch_name, ctor_value) -> bool:
     return bool(ctor_value)
 
 
-def _resolve_band_unit_repeats(branch_name, ctor_value) -> int:
-    """Consecutive passes per band-class (ctor > env > 1). SEARCH-ONLY.
-
-    ``N > 1`` runs the WHOLE per-class block (open -> RJ + in-model
-    repeats -> close) ``N`` times consecutively before the sweep advances
-    to the next class: ``a a a, b b b, c c c`` instead of ``a, b, c``.
-    Combined with the per-walker start this concentrates working time on
-    a walker's currently-open sub-bands: a source near a band edge gets
-    several CONSECUTIVE attempts to move, with the residual context
-    refreshed between them, instead of one attempt then a ``units - 1``
-    class wait.
-
-    ⚠ COST SCALES LINEARLY IN ``N``. The sweep runs ``units * N`` passes
-    instead of ``units``, and each pass pays the full per-class bill --
-    the cold-chain open/close residual fills, the buffer bind, the RJ
-    step and every in-model repeat. ``N = 2`` roughly DOUBLES the GB
-    sweep work per iteration, ``N = 3`` roughly TRIPLES it. There is no
-    partial-block or amortized-open variant here (see the note in
-    :meth:`GBSpecialBase.run_proposal` for why the unit is re-opened per
-    pass); budget for the full multiple.
-
-    Resolution is ``kwarg > env > 1`` (NOT the env-wins convention of the
-    stride) precisely so the recipe's SEARCH-ONLY pin works: pe-named
-    moves are constructed with ``band_unit_repeats=1`` and that beats an
-    exported ``{BRANCH}_BAND_UNIT_REPEATS``, exactly as the per-mode
-    in-model repeat defaults do.
-    """
-    value = ctor_value
-    if value is None:
-        value = os.environ.get(
-            f"{str(branch_name).upper()}_BAND_UNIT_REPEATS", None
-        )
-    if value is None:
-        value = 1
-    value = int(value)
-    if value < 1:
-        raise ValueError(
-            f"band-unit repeats must be >= 1, got {value}."
-        )
-    return value
-
-
 def _draw_unit_scan_schedule(
     random_state, nwalkers, units, per_walker_start, per_walker_dir
 ):
@@ -562,19 +520,6 @@ def _assert_unit_scan_partition(starts, directions, units):
     return schedule
 
 
-def _unit_sweep_passes(units, repeats):
-    """``(unit_i, repeat_i)`` for every pass of one propose's sweep.
-
-    Each residue class is visited ``repeats`` times CONSECUTIVELY before
-    the sweep advances (``a a, b b, c c``), so the pass count -- and the
-    work -- is linear in ``repeats``. ``repeats == 1`` reproduces the
-    legacy ``for unit_i in range(units)`` exactly.
-    """
-    for unit_i in range(int(units)):
-        for repeat_i in range(int(repeats)):
-            yield unit_i, repeat_i
-
-
 def _unit_pass_remainder(starts, directions, unit_i, units):
     """Residue class each walker has OPEN at sweep position ``unit_i``.
 
@@ -617,13 +562,13 @@ def _unit_class_label(remainder) -> str:
     )
 
 
-def _format_unit_scan_schedule(starts, directions, units, repeats, name=""):
+def _format_unit_scan_schedule(starts, directions, units, name=""):
     """The once-per-propose ``[GB_UNIT_SCAN]`` line.
 
     Names the whole sweep schedule on ONE greppable line: the per-walker
     ``start`` and rotation ``direction`` (``3+`` = start 3 going up,
-    ``3-`` = start 3 going down), the stride, and the repeat count in
-    force. Large walker counts fall back to a stable digest plus the
+    ``3-`` = start 3 going down) and the stride. Large walker counts
+    fall back to a stable digest plus the
     first few walkers so the line never wraps.
     """
     starts = np.asarray(starts, dtype=int).ravel()
@@ -650,7 +595,7 @@ def _format_unit_scan_schedule(starts, directions, units, repeats, name=""):
     tag = f"[GB_UNIT_SCAN{(' ' + str(name)) if name else ''}]"
     return (
         f"{tag} band-class sweep: mode={'per-walker' if per_walker else 'global'}"
-        f" units={units} repeats={repeats} nwalkers={starts.size}"
+        f" units={units} nwalkers={starts.size}"
         f" digest={digest} start/dir={body}"
     )
 
@@ -1363,7 +1308,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_units=2,
         band_unit_start_per_walker=None,
         band_unit_dir_per_walker=None,
-        band_unit_repeats=None,
         jump_factor=0.005,
         leaf_cap_start=None,
         leaf_cap_ll_improve=True,
@@ -1956,17 +1900,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         #   STATE-INDEPENDENT (see _draw_unit_scan_schedule), and that is
         #   the whole argument. It must never be weakened into a heuristic
         #   ("which walker looks stuck", by logL, by occupancy).
-        # {BRANCH}_BAND_UNIT_REPEATS -- N consecutive passes per class.
-        #   SEARCH-ONLY (recipe pins pe-named moves to 1) and its cost is
-        #   LINEAR IN N: units*N passes instead of units.
         self.band_unit_start_per_walker = _resolve_band_unit_start_per_walker(
             branch_name, band_unit_start_per_walker
         )
         self.band_unit_dir_per_walker = _resolve_band_unit_dir_per_walker(
             branch_name, band_unit_dir_per_walker
-        )
-        self.band_unit_repeats = _resolve_band_unit_repeats(
-            branch_name, band_unit_repeats
         )
         # ORTHOGONALITY concurrency diagnostic (physics ruling; 2026-08-15
         # support-based form -- see check_band_support_separation): the
@@ -3334,13 +3272,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         for the tempering stage.
 
         SCAN SCHEDULE. The classes are visited IN ORDER from a start
-        class drawn once per propose. Three default-OFF knobs shape that
+        class drawn once per propose. Two default-OFF knobs shape that
         sweep without touching stride or membership:
         ``{BRANCH}_BAND_UNIT_START_PER_WALKER`` gives each walker its own
-        start, ``{BRANCH}_BAND_UNIT_DIR_PER_WALKER`` its own +/-1
-        rotation direction, and ``{BRANCH}_BAND_UNIT_REPEATS`` (N,
-        search-only, cost LINEAR in N) runs the whole per-class block N
-        times consecutively before advancing. The order draws are uniform
+        start and ``{BRANCH}_BAND_UNIT_DIR_PER_WALKER`` its own +/-1
+        rotation direction. Each class is visited exactly ONCE per sweep
+        (see TODO(band-unit-repeats) in submit_gf_3mo_v7.sh for why the
+        N-consecutive-passes variant was removed). The order draws are uniform
         and state-independent (detailed balance -- see
         :func:`_draw_unit_scan_schedule`); the schedule is logged once
         per propose as ``[GB_UNIT_SCAN]``.
@@ -3457,13 +3395,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         #      construction-time snapshot), the RJ flip draw. Reusing
         #      them across passes would score later passes against a
         #      stale census.
-        _unit_repeats = int(getattr(self, "band_unit_repeats", 1) or 1)
-
         # OBSERVABILITY: one greppable line per propose naming the whole
         # schedule (per-walker start/direction pairs + stride + repeats).
         logger.info(
             _format_unit_scan_schedule(
-                _unit_starts, _unit_dirs, units, _unit_repeats, name=self.name
+                _unit_starts, _unit_dirs, units, name=self.name
             )
         )
 
@@ -3481,7 +3417,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # concurrent sub-band scheduling.
         _ortho_ll_on = os.environ.get("GB_ORTHO_LL_CHECK", "1") == "1"
 
-        for unit_i, _unit_rep in _unit_sweep_passes(units, _unit_repeats):
+        for unit_i in range(units):
             remainder = _unit_pass_remainder(
                 _unit_starts, _unit_dirs, unit_i, units
             )
@@ -3766,10 +3702,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     float(os.environ.get("GB_ORTHO_LL_TOL", "0.05")),
                 )
                 logger.info(
-                    "[GB_ORTHO_LL %s] unit %d rep %d (bands %% %d == %s): "
+                    "[GB_ORTHO_LL %s] unit %d (bands %% %d == %s): "
                     "|direct - credited| cold-walker lnL discrepancy mean "
                     "%.3e max %.3e (walker %d).",
-                    self.name, unit_i, _unit_rep, units, _rem_lbl,
+                    self.name, unit_i, units, _rem_lbl,
                     _oll["mean_abs"], _oll["max_abs"], _oll["worst_walker"],
                 )
                 if _oll["flagged"]:
