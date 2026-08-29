@@ -1333,6 +1333,29 @@ def peak_box_weights(peak_F, peak_f0_mHz=None, band_edges=None,
     out[good] = w[good] / tot[ci][good]
     if np.any(~good):
         out[~good] = 1.0 / cnt[ci][~good]
+    # TODO(cell-weighting, 6-month or later): occupied cells are currently
+    # given EQUAL total mass -- that is what this line does, and it is
+    # deliberate (it replaced the global ``w ~ F**alpha`` mixture, whose
+    # per-cell mass ran max/median ~10x and starved sparse cells). But equal
+    # is almost certainly not optimal either: a cell holding 40 candidate
+    # peaks and a cell holding 1 draw the same total mass, so a source in the
+    # dense cell is proposed ~40x less often than one in the sparse cell.
+    #
+    # IDEA (user 2026-08-29): weight the CELL draw by roughly sqrt of the
+    # number of sources/peaks it contains, i.e. ``out /= sum(sqrt(cnt[occ]))``
+    # with a per-cell factor ``sqrt(cnt)`` instead of the flat 1. That sits
+    # between today's flat-per-cell and the historical proportional mixture:
+    # dense cells get more mass than sparse ones, but sub-linearly, so they
+    # cannot dominate the way ``w ~ F**alpha`` did.
+    #
+    # WHY NOT NOW: this changes the RJ birth proposal distribution, so the
+    # proposal density bookkeeping must be re-derived with it (the mixture is
+    # exact today -- see GroupedStackedFStatProposal, group mass = summed box
+    # weights). Worth doing when the source density per cell is high enough
+    # for the difference to matter, i.e. the 6-month and longer runs, where
+    # cells hold many more peaks than at 3 months. NOTE ``cnt`` counts PEAKS,
+    # not confirmed sources -- decide deliberately which the weight should
+    # follow before implementing.
     out /= max(occ.size, 1)
     if not np.any(out > 0):
         return None
