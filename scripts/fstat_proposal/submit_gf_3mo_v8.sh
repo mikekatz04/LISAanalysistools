@@ -481,7 +481,18 @@ export GB_RJ_SNR_TRUNC_DIST=1      # birth distance draw truncated at the
 # NOTE these env pins beat the PE mode default as well — both phases
 # run 250/25.
 export GB_INMODEL_REPEATS_NEWBORN=250
-export GB_INMODEL_REPEATS_SURVIVOR=25
+# SURVIVOR 25 -> 100 (user ruling 2026-08-29, aligned with v7), restoring the
+# value the high-f probe ran (200/100). In-model f0 drift is the ONLY mechanism
+# that moves a source across a sub-band edge -- there is no merge operator, RJ
+# is serial-within-band, and tempering swaps never cross bands -- and the
+# measured crossing rate shows how underpowered it is at 25: median NN-matched
+# displacement 0.046 bins/iteration, only 1.64% of matched pairs cross a band
+# edge, 0.59% clear a 12-bin gap in one step. Trades iteration RATE for the
+# ability to close edge-split pairs.
+# ⚠ The per-class split applies on the DIRECT-batch path only; the grouped
+# scheduler takes ONE budget for the whole pool from _SURVIVOR, so with
+# GB_RJ_GROUPED_INMODEL=1 this raises the effective budget for newborns too.
+export GB_INMODEL_REPEATS_SURVIVOR=100
 
 # VERTICAL TEMPERING ON (2026-08-26 user ruling: "this is crucial").
 # Per-repeat vertical band-temperature swaps inside the in-model loop
