@@ -298,6 +298,47 @@ export GPUS=0,1
 export FILE_STORE_DIR=${STORE_DIR}
 export BASE_FILE_NAME=gf_prod_3mo
 
+# ---- noise model (ported from v8, 2026-08-30) ------------------------------
+# The v8 noise stack, brought into v7 so the TEST BED runs the same noise
+# model the clean run will. v8 stays reserved for the production launch
+# once this is proven, with the diagnostics (GB_FSTAT_CTR_AUDIT and any
+# timing knobs) off. Keep these in step with v8: they are no longer a
+# v7-vs-v8 difference, so a change to one must be made to both.
+# [V8-NOISE] echo tags are kept verbatim so log greps match across runs.
+export UNEQUAL_ARM=1
+export UNEQUAL_ARM_STRIDE=200
+export WDM_PSD_METHOD=layer_calibrated
+export GALFOR_MODULATION_PATH="$PWD/scripts/noise/modulation_unequal.dat"
+export GALFOR_MODULATION_T0=data
+echo "[V8-NOISE] UNEQUAL_ARM=${UNEQUAL_ARM} stride=${UNEQUAL_ARM_STRIDE} wdm_psd_method=${WDM_PSD_METHOD}"
+echo "[V8-NOISE] modulation=${GALFOR_MODULATION_PATH} t0=${GALFOR_MODULATION_T0}"
+
+# ---- coarse noise likelihood (pinned, not inherited) ------------------------
+# all_sources DEFAULTS these on now, but a submit script states its own
+# configuration: a reader must be able to tell which noise likelihood the run
+# used without cross-referencing the variant.
+#
+# delayed_acceptance is EXACT -- stage 1 screens PSD/galfor proposals on the
+# Q-fold time-coarsened surrogate, stage 2 corrects with the exact fine/coarse
+# ratio -- so the SAMPLED target is the fine likelihood in every stage,
+# whatever the surrogate's quality. (search_approx is faster but approximate;
+# in probe job 376 the search it drove railed galfor against two prior edges.
+# The noise block is a small share of wall clock, so that trade is not worth
+# taking here -- accuracy ruling 2026-08-28.)
+#
+# Q=8 measured on the 3-mo grid: Nt_active 2121 -> Ncoarse 266. WS weighting
+# (the Welch-Satterthwaite effective dof, frozen at the injection fiducial)
+# was exercised on GPU in job 376 -- the unequal-arm coarse basis path works
+# there. To fall back: COARSE_GPU_MODE=off restores the exact-fine likelihood
+# (job 369's configuration) and COARSE_USE_WS=0 swaps WS for Bartlett.
+export COARSE_Q=8
+export COARSE_GPU_MODE=delayed_acceptance
+export COARSE_USE_WS=1
+export COARSE_FIDUCIAL=injection
+echo "[V8-NOISE] coarse: Q=${COARSE_Q} mode=${COARSE_GPU_MODE} \
+use_ws=${COARSE_USE_WS} fiducial=${COARSE_FIDUCIAL}"
+
+
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
 export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER was a dead name)
