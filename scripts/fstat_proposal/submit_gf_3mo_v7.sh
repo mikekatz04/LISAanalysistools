@@ -417,7 +417,14 @@ export GF_MOVE_TIMING_SYNC=0
 # fstat_nm_h2d + fstat_nm_lane_score) / fstat_nm_invert / fstat_ctr_map
 # as SHARES OF fstat_ctr_solve. That decides cheaper-kernel vs fewer-rows
 # on a bucket that is 68% of the propose and ~97% dead birth slots.
-export GB_PROP_TIMING_SYNC=all
+# DEFAULT 0. Override from the submitting shell WITHOUT editing this file:
+#     GB_PROP_TIMING_SYNC=all sbatch scripts/fstat_proposal/submit_gf_3mo_v7.sh
+# (sbatch exports the submitting environment by default, and ":=" below
+# only assigns when the variable is unset or empty, so an exported value
+# wins.) A plain `export VAR=...` here would clobber that, which is why
+# this one line uses the :=  form.
+: "${GB_PROP_TIMING_SYNC:=0}"
+export GB_PROP_TIMING_SYNC
 # ---- 2026-08-15 perf batch (ALL code defaults; pinned for the run
 #      record; each knob independently revertible) ---------------------
 # De-synced in-model repeat loop (device-resident accept chain) rides
