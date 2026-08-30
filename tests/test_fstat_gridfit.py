@@ -675,9 +675,14 @@ class PeakWeightAlphaTest(unittest.TestCase):
 
 
 class PerCellPeakWeightTest(unittest.TestCase):
-    """Uniform-cell x F**alpha birth weighting (user design 2026-08-16).
+    """Per-SUB-BAND x F**alpha birth weighting.
 
-    Draw a CAP CELL uniformly, then draw within it with w ~ F**alpha. This
+    Draw a SUB-BAND STRATUM uniformly, then draw within it with
+    w ~ F**alpha (user ruling 2026-08-29: "the sub-bands should define that
+    grid since those are the effective rj limits as well" -- it used to be
+    a CAP CELL, tracking GB_CAP_DIVISOR, which coupled the RJ birth
+    proposal to a cap knob and stratified on cells that deliberately
+    straddle sub-band seams). This
     is expressed as FLAT per-box weights rather than a two-stage sampler,
     because ``StackedFStatProposal4D`` drives both ``rvs`` (CDF built from
     ``w_k``) and ``logpdf`` (``+ log(w_k)``) off the same ``self.weights``
@@ -687,7 +692,9 @@ class PerCellPeakWeightTest(unittest.TestCase):
     silent mismatch there biases the posterior instead of crashing.
     """
 
-    # 2 sub-bands, K=4 -> 8 cells of 0.25 mHz each over 1-3 mHz
+    # 2 sub-bands, K=4 -> 4 strata per sub-band = 8 x 0.25 mHz over 1-3 mHz
+    # (uniform band grid, so the per-sub-band subdivision and the old global
+    # linspace coincide here -- that is why these cases are unaffected)
     BE = np.array([1e-3, 2e-3, 3e-3])
 
     def _w(self, F, f0_mHz, **kw):
@@ -716,17 +723,24 @@ class PerCellPeakWeightTest(unittest.TestCase):
         """THE POINT: the global mixture gives the loud cell 30x the mass."""
         F = np.array([900.0, 1.0])
         f0 = np.array([1.05, 2.40])                      # different cells
-        glob = self._w(F, f0, alpha=0.5, cells=1)
+        glob = self._w(F, f0, alpha=0.5, cells=0)   # 0 = global (was 1)
         glob = glob / glob.sum()
         self.assertAlmostEqual(glob[0] / glob[1], 30.0, places=6)
         cellw = self._w(F, f0, alpha=0.5, cells=4)
         self.assertAlmostEqual(cellw[0] / cellw[1], 1.0, places=10)
 
-    def test_cells_le_1_is_the_historical_global_mixture(self):
+    def test_cells_zero_is_the_historical_global_mixture(self):
+        """Only 0 is the global mixture now. ``cells=1`` used to mean
+        "no stratification"; it now means ONE STRATUM PER SUB-BAND, which
+        is the default."""
         F = np.array([900.0, 100.0, 4.0])
         f0 = np.array([1.05, 1.60, 2.40])
-        np.testing.assert_allclose(self._w(F, f0, alpha=1.0, cells=1), F)
         np.testing.assert_allclose(self._w(F, f0, alpha=1.0, cells=0), F)
+        w1 = self._w(F, f0, alpha=1.0, cells=1)
+        self.assertAlmostEqual(float(np.sum(w1)), 1.0, places=12)
+        # peaks at 1.05/1.60 share sub-band 0; 2.40 is alone in sub-band 1
+        self.assertAlmostEqual(float(w1[0] + w1[1]), 0.5, places=12)
+        self.assertAlmostEqual(float(w1[2]), 0.5, places=12)
 
     def test_equal_still_wins_over_everything(self):
         self.assertIsNone(self._w(np.array([9.0, 1.0]), np.array([1.05, 2.4]),
@@ -740,18 +754,23 @@ class PerCellPeakWeightTest(unittest.TestCase):
         self.assertAlmostEqual(w[0], w[1], places=12)
         self.assertAlmostEqual(w[0] + w[1], w[2], places=12)
 
-    def test_env_default_tracks_GB_CAP_DIVISOR_but_is_overridable(self):
+    def test_env_default_is_per_sub_band_and_ignores_the_cap_divisor(self):
+        """The draw grid must NOT track GB_CAP_DIVISOR (2026-08-29).
+
+        Coupling them meant a cap knob silently re-stratified the RJ birth
+        proposal -- e.g. the move to the midpoint-to-midpoint cap grid.
+        """
         from lisatools.sampling.fstat_gridfit import peak_weight_cells_env
         for k in ("FSTAT_PEAK_WEIGHT_CELLS", "GB_CAP_DIVISOR"):
             os.environ.pop(k, None)
             self.addCleanup(os.environ.pop, k, None)
-        self.assertEqual(peak_weight_cells_env(), 1)          # neither set
+        self.assertEqual(peak_weight_cells_env(), 1)     # one per sub-band
         os.environ["GB_CAP_DIVISOR"] = "8"
-        self.assertEqual(peak_weight_cells_env(), 8)          # tracks the cap
-        os.environ["FSTAT_PEAK_WEIGHT_CELLS"] = "1"
-        self.assertEqual(peak_weight_cells_env(), 1)          # explicit OFF
+        self.assertEqual(peak_weight_cells_env(), 1)     # cap knob IGNORED
+        os.environ["FSTAT_PEAK_WEIGHT_CELLS"] = "0"
+        self.assertEqual(peak_weight_cells_env(), 0)     # explicit global
         os.environ["FSTAT_PEAK_WEIGHT_CELLS"] = "32"
-        self.assertEqual(peak_weight_cells_env(), 32)         # decoupled
+        self.assertEqual(peak_weight_cells_env(), 32)    # explicit override
 
     def test_rvs_AND_logpdf_agree_under_the_composite_weights(self):
         """The one that protects the RJ acceptance ratio.

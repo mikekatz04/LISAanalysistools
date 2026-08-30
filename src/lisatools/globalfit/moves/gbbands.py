@@ -83,6 +83,62 @@ _SPECIAL_INDEX_BASE = int(1e6)
 _WDM_SLAB_LEAKAGE_LAYERS = 2
 
 
+def fstat_nm_lane_bounds(n, lanes, weights=None):
+    """Contiguous row-lane boundaries for the multi-device F-stat scorer.
+
+    Returns ``lanes + 1`` ascending ints; lane ``i`` scores rows
+    ``[bounds[i], bounds[i+1])``. Lanes are CONTIGUOUS so the merge stays
+    a pure permutation into disjoint host row ranges.
+
+    ``weights=None`` (the default, and any unusable spec) reproduces
+    ``(n * arange(lanes + 1)) // lanes`` EXACTLY -- the historical split.
+    Bit-identity matters here: the boundaries decide which device scores
+    which row, so an unset knob must not perturb a production run.
+
+    ``weights`` is a list of positive ints or a comma-separated string
+    (``GB_FSTAT_NM_LANE_WEIGHTS``, e.g. ``"3,1"``). Rows are apportioned
+    by INTEGER cumulative arithmetic ``(n * cw[i]) // cw[-1]``, which is
+    what makes the equal-weight case collapse onto the legacy formula
+    instead of drifting by a row through float rounding.
+
+    WHY (measured, 2026-08-29 3-month v7 restart): the run's two H100 NVLs
+    are not interchangeable -- GPU0 sat at 39.1% mean utilisation with a
+    90,698 MiB peak, GPU1 at 72.1% with 70,020 MiB -- while the split was
+    exactly 50/50 and every one of ~1,409 joins per propose waited on the
+    slower lane. A weight lets the operator move rows toward the idle card
+    without touching the kernel or the math.
+
+    Anything malformed (wrong length, non-integer, negative, all-zero)
+    falls back to the equal split: this is operator input read on a
+    production node, and a typo must not stop a run.
+    """
+    lanes = int(lanes)
+    n = int(n)
+    equal = (n * np.arange(lanes + 1)) // lanes
+    if weights is None:
+        return equal
+    if isinstance(weights, str):
+        spec = weights.strip()
+        if not spec:
+            return equal
+        parts = [p.strip() for p in spec.split(",")]
+        try:
+            w = [int(p) for p in parts]
+        except ValueError:
+            return equal
+    else:
+        try:
+            w = [int(x) for x in weights]
+        except (TypeError, ValueError):
+            return equal
+        if any(float(a) != float(b) for a, b in zip(w, weights)):
+            return equal
+    if len(w) != lanes or any(x < 0 for x in w) or sum(w) <= 0:
+        return equal
+    cw = np.concatenate([[0], np.cumsum(np.asarray(w, dtype=np.int64))])
+    return (n * cw) // int(cw[-1])
+
+
 def _band_window_strict() -> bool:
     """``GB_BAND_WINDOW_STRICT`` (default ``"0"`` -- today's behaviour).
 
@@ -2124,6 +2180,12 @@ class _RoutedBandEngine:
         return call_fstat
 
     @classmethod
+    def _lane_weight_spec(cls):
+        """``GB_FSTAT_NM_LANE_WEIGHTS`` as given (None when unset/blank)."""
+        v = os.environ.get("GB_FSTAT_NM_LANE_WEIGHTS", "").strip()
+        return v or None
+
+    @classmethod
     def make_fstat_nm_lanes(cls, comp, method_name, holder, walker_ref,
                             *, check=False, timer=None, **kwargs):
         """All-device fan-out for the per-row F-stat ``(N, M)`` scorer.
@@ -2202,11 +2264,21 @@ class _RoutedBandEngine:
                     xp.asarray(data_row_host), xp.asarray(psd_row_host))
             lanes.append((dev, cls._comp_for(comp, holder, ref_holder),
                           ref_holder))
+        # Row-lane weighting (GB_FSTAT_NM_LANE_WEIGHTS, default equal =
+        # bit-identical to the historical 50/50 split). Resolved ONCE here,
+        # not per batch: call_NM runs ~1,409 times per propose and an
+        # os.environ read per call is pure overhead on the hot path.
+        _lane_w = cls._lane_weight_spec()
+        _probe = fstat_nm_lane_bounds(len(lanes) * 1000, len(lanes), _lane_w)
         logger.info(
             "[fstat-NM] multi-device per-row scorer: %d lanes on devices "
-            "%s for walker_ref=%d%s (GB_FSTAT_NM_MULTIDEV=0 restores the "
-            "single-device pin)", len(lanes), [d for d, _, _ in lanes],
-            int(walker_ref), " + pinned shadow CHECK" if check else "")
+            "%s for walker_ref=%d%s, row split %s (GB_FSTAT_NM_MULTIDEV=0 "
+            "restores the single-device pin)", len(lanes),
+            [d for d, _, _ in lanes], int(walker_ref),
+            " + pinned shadow CHECK" if check else "",
+            ("equal" if _lane_w is None else
+             f"GB_FSTAT_NM_LANE_WEIGHTS={_lane_w!r} -> "
+             f"{list(np.diff(_probe) / (len(lanes) * 10.0))}%"))
 
         comp_pin = cls._comp_for(comp, holder, view) if check else None
 
@@ -2223,7 +2295,7 @@ class _RoutedBandEngine:
             with _tspan(timer, "fstat_nm_h2d"):
                 params_host = np.atleast_2d(asnumpy(params_phys))
             n = int(params_host.shape[0])
-            bounds = (n * np.arange(len(lanes) + 1)) // len(lanes)
+            bounds = fstat_nm_lane_bounds(n, len(lanes), _lane_w)
             N_host = np.zeros((n, 4), dtype=np.float64)
             M_host = np.zeros((n, 10), dtype=np.float64)
 

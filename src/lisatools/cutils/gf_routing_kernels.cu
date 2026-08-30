@@ -77,9 +77,14 @@ static CUDA_CALLABLE_MEMBER int32_t gf_cap_cell_index(
     int32_t band, double f_hz, const double *cap_band_lo,
     const double *cap_band_step, int cap_divisor, int cap_stagger,
     int num_cap_cells) {
-  // Python short-circuits on ``cap_divisor == 1`` ALONE (cells == bands),
-  // stagger or not -- match that exactly.
-  if (cap_divisor == 1) {
+  // Python short-circuits on ``_cap_is_band_grid`` == (cap_divisor == 1
+  // AND NOT stagger) -- match that exactly. K=1 WITH stagger is the
+  // midpoint-to-midpoint grid: the cell COUNT still equals the band count
+  // but membership is shifted by half a sub-band, so a band index is NOT a
+  // cell index and the general formula below must run. If this predicate
+  // ever drifts from the python one the disagreement is SILENT -- the two
+  // sides simply census a source into different cells.
+  if (cap_divisor == 1 && !cap_stagger) {
     return band;
   }
   double sub = floor((f_hz - cap_band_lo[band]) / cap_band_step[band] +

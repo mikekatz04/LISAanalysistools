@@ -602,10 +602,16 @@ class WiringTest(unittest.TestCase):
 
         class _Stub:
             cap_divisor = 1
+            # NOT staggered: this stub is the pre-2026-08-15 regime where
+            # the cap grid IS the band grid, which is what the short-circuit
+            # under test keys on (``_cap_is_band_grid``, borrowed from the
+            # real class so the stub cannot drift from production).
+            cap_stagger = False
             cap_overlap_frac = 0.0
             cap_drift_gate = True
             _f0_col = 1
             reached_caps = False
+            _cap_is_band_grid = GBSpecialBase._cap_is_band_grid
             _cap_drift_gate_setup = GBSpecialBase._cap_drift_gate_setup
 
             @property

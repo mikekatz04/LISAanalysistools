@@ -947,7 +947,36 @@ export GB_INMODEL_BATCH_MEMPOOL_FREE=0
 # (GBState.initialize_band_information) refuses a v7-lineage store. See
 # the relaunch block at the top of this file: rewind GB to empty, then
 # migrate_gb_cap_grid.py --cap-divisor 2 --stagger.
-export GB_CAP_DIVISOR=2
+export GB_CAP_DIVISOR=1
+# 2 -> 1 (user design 2026-08-29). WITH GB_CAP_STAGGER=1 this is the
+# MIDPOINT-TO-MIDPOINT grid: 1232 cap cells for 1232 sub-bands, each
+# interior cell running from the midpoint of one sub-band to the midpoint
+# of the next, so the seam sits at the CENTRE of a cell and the two sides
+# of a seam compete for ONE cap. Verified against the real 1232-band grid:
+# interior cap edges == band midpoints exactly; widths half / 1.7361e-5 Hz
+# (= one full sub-band) / 1.5x at the two ends.
+#
+# WHY NOT 2 (what the 2026-08-29 restart ran): divisor 2 makes cells HALF
+# a sub-band, which (a) halves the straddle reach to +/-0.25 sub-band, so
+# a seam-straddling pair further apart falls out of the shared cell,
+# (b) doubles the cells, halving per-cell occupancy and delaying at-cap
+# birth-row exclusion -- measured +39% F-stat candidate rows at matched
+# iteration -- and (c) gives each band TWO owned cells, which is what let
+# a birth into an already-full straddling cell slip past the old
+# band-saturation gate (4 of 24 walkers held 2 leaves in a cap-1 cell at
+# rows 5-6 while no sub-band ever held more than one).
+#
+# REBUILD: not required for THIS config, but do it anyway on relaunch.
+# gf_routing_kernels.cu::gf_cap_cell_index used to short-circuit on
+# ``cap_divisor == 1`` alone and now carries python's ``&& !cap_stagger``
+# predicate. That code is reached ONLY through the fused in-model path,
+# which is OFF here (GB_INMODEL_ACCEPT_KERNEL=0, also the code default), so
+# a stale .so cannot affect this run -- the drift gate runs the python
+# chain. It WOULD matter the moment anyone sets
+# GB_INMODEL_ACCEPT_KERNEL=1 against a stale build, and the disagreement
+# is silent (python and kernel would census a source into different
+# cells), so rebuild and keep the two in step.
+# The python-side changes need no rebuild: the install is editable.
 # ############################################################################
 # ## V7 (2026-08-24) = V6 + OVERLAPPING CAP CELLS, nothing else.            ##
 # ## GB_CAP_OVERLAP_FRAC=0.25 widens each cap cell's enforcement span on   ##
@@ -1378,6 +1407,58 @@ export GB_FSTAT_PERROW_UNIT_CACHE=1
 # multi-device lane rebalance is the remaining lever.
 # =0 (or unset) disables; any positive integer sets the sample size.
 export GB_FSTAT_CTR_AUDIT=1        # 4096-row sample per unit
+#
+# AUDIT VERDICT (2026-08-29, first staggered restart, 18 unit lines):
+# THE TABLE CANNOT REPLACE THE SOLVE. Medians dphi0 1.21-1.29 rad,
+# dpsi 0.57-0.63 rad, dcos_iota 0.22-0.29, dln_center 0.81 -> 1.21
+# (a factor ~3 in amplitude), dln_snr 0.85 -> 1.25 -- while the f0 NODE
+# GAP is tiny (median 1.1e-5 mHz = 1.1e-8 Hz ~ 0.08/Tobs). A fine grid
+# with useless centers means the gap is NOT resolution: the table was
+# solved against the epoch-0000 residual and the F-stat maximum is
+# data-dependent, so it drifts as the search subtracts sources -- which
+# is exactly what dln_center climbing monotonically 0.81 -> 1.21 across
+# the nine units of one propose shows. dMc is nan on every line (the
+# stored table has no populated Mc axis). The per-row solve is CONFIRMED
+# IRREDUCIBLE; the two remaining levers are the batch size and the lane
+# split, both below.
+#
+# ---- F-STAT COST LEVER A: BATCH SIZE (bit-identical, free) ----------
+# rj_fstat_centers is 1,692 s of a 2,277 s move on a 2,774 s iteration
+# (61% of the whole thing), and it is ~100% one span: fstat_ctr_solve ->
+# fstat_nm_lanes -> fstat_nm_lane_score. At the 4096 default that is a
+# SERIAL python loop of ~158 batches per unit x 9 units = ~1,409 batches
+# per propose, each fanned out to only ~2048 rows PER DEVICE -- small for
+# an H100 NVL. Raising it is pure re-chunking: every row's centre solve
+# is independent and the lane fan-out is bit-identical to the pinned
+# path (GB_FSTAT_NM_MULTIDEV=check proves it), so results do not move.
+#
+# DECISIVE EITHER WAY: if fstat_nm_lane_score drops, the stage was
+# launch/occupancy-bound and the win is free; if it is FLAT, the kernel
+# is work-bound and the only remaining lever is FEWER ROWS (99.1% of the
+# 5.75 M rows are birth candidates on dead slots -- 0 alive on seven of
+# nine units at first light, and `0 at-cap excluded` because nothing is
+# near GB_CAP_CELL_MAX=20 yet).
+#
+# MEMORY IS THE CONSTRAINT, NOT CORRECTNESS: GPU0 ran to p99 86,976 MiB
+# and max 90,698 of 95,830 (GPU1: 70,020). If the per-row scratch scales
+# with batch, 4x could OOM the tight card. STEP 4096 -> 8192 FIRST.
+: "${GB_FSTAT_CTR_BATCH:=4096}"
+export GB_FSTAT_CTR_BATCH
+#
+# ---- F-STAT COST LEVER B: LANE SPLIT (bit-identical default) --------
+# make_fstat_nm_lanes splits each batch into equal CONTIGUOUS row lanes
+# and joins on the slowest. The two cards are NOT symmetric in this run:
+# GPU0 39.1% mean util / 90,698 MiB peak, GPU1 72.1% / 70,020 MiB -- yet
+# the split is exactly 50/50, so all ~1,409 joins per propose wait on the
+# busier card. Integer weights, one per device in holder.gpus order, move
+# rows toward the idle one: "3,2" gives GPU0 60% / GPU1 40%.
+# UNSET/blank => the historical equal split, bit-identical (integer
+# cumulative arithmetic, so it reproduces (n*arange(L+1))//L exactly).
+# Malformed input falls back to equal rather than stopping the run.
+# NOTE the two knobs interact: a heavier lane needs MORE scratch, so
+# raise the batch and shift weight toward GPU0 in separate steps.
+: "${GB_FSTAT_NM_LANE_WEIGHTS:=}"
+export GB_FSTAT_NM_LANE_WEIGHTS
 # DEFERRED CELL-LABEL RELABELS (LAT 9fa32109) -- A/B knob, default OFF.
 # ON: rung-pair/vertical-swap relabels accumulate in a slot table and
 # flush once per tempering chunk / repeat block (kills the full-table

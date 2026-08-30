@@ -1910,10 +1910,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # v5 grid): interior cap edges shifted half a cell so NO cap edge
         # coincides with a band edge. Band b still OWNS cells b*K..b*K+K-1
         # (all index arithmetic / reshapes / array sizes unchanged), but
-        # cell b*K physically straddles the band-(b-1)/b seam. Meaningless
-        # at K == 1 (the cap grid IS the band grid), so it is forced off
-        # there and VGB/tests keep the per-band behaviour.
-        self.cap_stagger = bool(cap_stagger) and self.cap_divisor > 1
+        # cell b*K physically straddles the band-(b-1)/b seam.
+        #
+        # K == 1 + STAGGER is the MIDPOINT-TO-MIDPOINT grid (user design
+        # 2026-08-29): one cap cell per sub-band, running from the midpoint
+        # of one sub-band to the midpoint of the next, so every interior
+        # cell straddles exactly ONE seam with the seam at its centre and
+        # a reach of +/- half a sub-band either side. It used to be forced
+        # OFF here ("meaningless at K == 1"), which made the grid the user
+        # actually wants inexpressible and pushed the 2026-08-29 v7 restart
+        # onto K == 2 -- half-width cells (half the straddle reach), 2x the
+        # cells, +39% F-stat candidate rows, and a band owning TWO cells,
+        # which is what let a birth into a full straddling cell slip past
+        # the old band-saturation gate.
+        self.cap_stagger = bool(cap_stagger)
         # IN-MODEL CAP DRIFT GATE (user design 2026-08-20). Root-caused on
         # the confined high-f probe: births respect the per-cell cap gate,
         # but in-model repeats walked leaves ACROSS cell boundaries with no
@@ -8145,21 +8155,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _flat_acc = self._cap_flat_index(
                     t_i[accept], w_i[accept], _cells_acc
                 )
-                _pre = _counts_pre[_flat_acc]
                 _cap_acc = _cap_arr[_cells_acc]
                 _alive_acc = alive[accept]
-                if self.cap_divisor == 1:
-                    _freed = _alive_acc & (_pre == _cap_acc)
-                    _capped = (~_alive_acc) & (_pre + 1 >= _cap_acc)
-                else:
-                    # The scheduler's finish budget is per BAND cell and a
-                    # dead row is pickable while ANY cap cell of its band
-                    # still has headroom, so the budget transitions are
-                    # band SATURATION transitions: a death frees the band
-                    # only if the band was fully saturated before it, and a
-                    # birth re-caps it only if it fills the last cell with
-                    # headroom. (At divisor 1 this is exactly the branch
-                    # above -- kept separate so that path stays untouched.)
+                if True:  # noqa: SIM108 - keeps the block's indentation
+                    # OWN-CELL budget transitions at every divisor
+                    # (2026-08-29). The pick pool gates a dead row on the
+                    # cell its birth LANDS IN, so the finish budget has to
+                    # move on the same rule or the scheduler drifts out of
+                    # step with what it will actually hand out. See
+                    # _cap_budget_transitions for why this reduces exactly
+                    # to the old divisor-1 expressions.
                     _delta = xp.where(_alive_acc, -1, 1)
                     _counts_post = _counts_pre.copy()
                     if self.cap_overlap_frac > 0.0:
@@ -8194,15 +8199,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         # accept per (temp, walker, band) per round, so a
                         # scatter-add is unambiguous
                         _counts_post[_flat_acc] += _delta
-                    _bflat_acc = self._band_flat_index(
-                        t_i[accept], w_i[accept], b_i[accept]
+                    _freed, _capped = self._cap_budget_transitions(
+                        _counts_pre, _counts_post, _flat_acc, _cap_acc,
+                        _alive_acc,
                     )
-                    _sat_pre = self._band_saturated_flat(
-                        _counts_pre, _cap_arr)[_bflat_acc]
-                    _sat_post = self._band_saturated_flat(
-                        _counts_post, _cap_arr)[_bflat_acc]
-                    _freed = _alive_acc & _sat_pre & ~_sat_post
-                    _capped = (~_alive_acc) & ~_sat_pre & _sat_post
                 if bool(_freed.any()) or bool(_capped.any()):
                     _tr_specials = picked["specials"][accept]
                     _avail = (
@@ -13242,7 +13242,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 xp.searchsorted(_be, freqs_hz, side="right") - 1,
                 0, int(self.num_bands) - 1,
             ).astype(band_inds.dtype)
-        if self.cap_divisor == 1 or freqs_hz is None:
+        if self._cap_is_band_grid or freqs_hz is None:
             return band_inds
         xp = get_array_module(band_inds)
         sub = xp.floor(
@@ -13393,7 +13393,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # crossings are bounded by cap + GB_CAP_INMODEL_HEADROOM rather
         # than unbounded. Default OFF = the historical short-circuit.
         if (
-            (self.cap_divisor == 1
+            (self._cap_is_band_grid
              and float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) <= 0.0
              and not bool(getattr(self, "cap_drift_gate_edge_leak", False)))
             or self._f0_col is None
@@ -13562,7 +13562,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Dead rows are handled through band SATURATION instead
         (:meth:`_band_saturated_flat`).
         """
-        if self.cap_divisor == 1:
+        if self._cap_is_band_grid:
             return band_sorter.band_inds
         return self._cap_cell_index(band_sorter.band_inds, band_sorter.freqs)
 
@@ -13572,7 +13572,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         The multi-membership twin of :meth:`_sorter_cap_cells` (same ALIVE
         caveat). ``(cells, None, None)`` when overlap is off.
         """
-        if self.cap_divisor == 1:
+        if self._cap_is_band_grid:
             return band_sorter.band_inds, None, None
         return self._cap_cell_members(band_sorter.band_inds,
                                       band_sorter.freqs)
@@ -13648,6 +13648,66 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     alive_nb, minlength=nbins).astype(xp.int32)
         return flat, counts
 
+    @property
+    def _cap_is_band_grid(self) -> bool:
+        """Is the cap grid literally the sub-band grid?
+
+        TRUE only for ``cap_divisor == 1`` WITHOUT stagger. That is the
+        pre-2026-08-15 regime where cap cell ``i`` IS sub-band ``i``, so
+        every cap computation may short-circuit to the band arrays and the
+        band index doubles as the cell index.
+
+        It is NOT true at ``cap_divisor == 1`` WITH stagger. There the cell
+        COUNT still equals the band count, but membership is shifted by
+        half a sub-band -- cell ``i`` runs midpoint-to-midpoint and holds
+        the top half of band ``i-1`` plus the bottom half of band ``i`` --
+        so a band index is emphatically not a cell index. Every site that
+        used to test ``cap_divisor == 1`` means THIS predicate; testing the
+        divisor alone silently mixes the two grids (a birth would be
+        censused into one cell and gated on another).
+        """
+        return self.cap_divisor == 1 and not self.cap_stagger
+
+    @staticmethod
+    def _cap_budget_transitions(counts_pre, counts_post, flat_acc, cap_acc,
+                                alive_acc):
+        """``(freed, capped)`` per accepted RJ move, by OWN-CELL capacity.
+
+        The scheduler's finish budget must track the SAME rule the pick
+        pool is gated on. Since 2026-08-29 a dead row is gated on the cell
+        its birth lands in (:meth:`_cap_at_cap_mask`), so the budget
+        transitions are OWN-CELL saturation transitions:
+
+        - ``freed``  -- an accepted DEATH took its cell from at-cap to
+          below-cap, so that cell's unpicked staged birth rows rejoin the
+          finish budget and become pickable next round;
+        - ``capped`` -- an accepted BIRTH took its cell from below-cap to
+          at-cap, so they leave the budget again.
+
+        Previously this was computed from BAND saturation at ``K >= 2``
+        (``_band_saturated_flat``), which paired with the old band-level
+        dead-row gate. With the gate now per-cell, band-level transitions
+        would leave the scheduler's budget out of step with what the pick
+        pool actually admits -- the budget would keep rows it will never
+        hand out (band unsaturated, destination cell full) and would fail
+        to release rows it should (destination cell freed inside a band
+        that was never fully saturated).
+
+        Reduces EXACTLY to the historical ``cap_divisor == 1`` expressions:
+        for a death ``pre >= cap and pre-1 < cap`` is ``pre == cap``; for a
+        birth ``pre < cap and pre+1 >= cap`` is the old ``pre + 1 >= cap``
+        plus the ``pre < cap`` term, which is implied anyway because the
+        gate would not have offered a row whose cell was already full.
+
+        ``counts_post`` is passed in rather than derived so overlap mode
+        can apply its multi-membership scatter first.
+        """
+        sat_pre = counts_pre[flat_acc] >= cap_acc
+        sat_post = counts_post[flat_acc] >= cap_acc
+        freed = alive_acc & sat_pre & ~sat_post
+        capped = (~alive_acc) & ~sat_pre & sat_post
+        return freed, capped
+
     def _band_saturated_flat(self, counts, cap):
         """``(ntemps*nwalkers*num_bands,)`` bool: EVERY cap cell of the band full.
 
@@ -13664,7 +13724,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         cell has room, so it joins the all-full test. The last band has no
         upper neighbour (its top half-cell folds into its own final cell).
         """
-        if self.cap_divisor == 1:
+        if self._cap_is_band_grid:
             return counts >= cap
         k = self.cap_divisor
         nb = self.num_bands
@@ -13691,41 +13751,62 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def _cap_at_cap_mask(self, band_sorter, counts, cap, flat, cap_inds,
                          nb_inds=None, has_nb=None):
-        """Per-row at-cap mask, alive rows by CELL and dead rows by BAND.
+        """Per-row at-cap mask: EVERY row is gated on ITS OWN cap cell.
 
         - alive row: is MY cap cell at capacity (drives the in-model pool
           gate -- an at-cap cell never freezes sources into the pool);
-        - dead row: is EVERY cap cell of my band at capacity (drives the
-          birth pick skip / staged reserve -- a birth anywhere in the band
-          is impossible only then).
+        - dead row: is the cell MY BIRTH WOULD LAND IN at capacity. A dead
+          row's ``cap_inds`` is the destination cell computed from its
+          pre-drawn birth f0, so this is exactly "is this birth possible".
 
-        At ``cap_divisor == 1`` both branches are the same expression the
-        pre-2026-08-15 code used, so the mask is bit-identical.
+        DEAD ROWS USED TO BE GATED ON BAND SATURATION and that was a real
+        defect (fixed 2026-08-29). The old rule asked "is EVERY cap cell of
+        my band at capacity", on the reasoning that a birth SOMEWHERE in
+        the band is impossible only then. But a band's ownership of cells
+        ``b*K .. b*K+K-1`` is INDEX ARITHMETIC, not geometry: under a
+        staggered grid the cell a birth physically lands in may be the
+        straddling cell shared with the neighbour band. So a band could
+        read "unsaturated" on the strength of an empty owned cell while the
+        birth's actual destination was already full, and the birth was
+        waved through.
 
-        OVERLAP MODE: an alive row is at cap when ANY of its covering
-        cells is at cap (pass ``nb_inds``/``has_nb`` from
-        :meth:`_sorter_cap_members`). The dead-row band-saturation test is
-        UNCHANGED and stays exact: every point's covering cells include
-        its primary (one of the band's cells), so all-cells-full still
-        blocks every draw; and a below-cap cell always keeps a non-empty
-        exclusive CORE inside the band (p < 0.5), so some draw remains
-        possible whenever a cell has headroom.
+        MEASURED (3-month v7, rows 5 and 6): cap cell 2284 straddles the
+        1141/1142 seam at 20.381944 mHz, ``cap_cell_leaf_cap`` was 1.0 for
+        all 2464 cells, no sub-band ever held more than one leaf -- and 4
+        of 24 cold walkers held TWO leaves in that cap-1 cell, one from
+        each side of the seam. That is the whole anti-bimodality mechanism
+        failing to engage: the stagger correctly put both modes in ONE
+        cell and the gate declined to fire.
+
+        Gating a dead row on its destination cell is strictly MORE
+        accurate, not more conservative -- it forbids exactly the births
+        that are impossible and no others (a dead row whose f0 lands in a
+        below-cap cell of a partly-full band stays proposable). It also
+        makes ``_precompute_fstat_centers``' countable-row test sharper,
+        since ``countable = subset.inds | ~cap_m[ids]`` now excludes
+        birth rows whose own destination is full rather than only those in
+        wholly-saturated bands.
+
+        ``_band_saturated_flat`` is retained (and still tested): it is the
+        honest answer to "can this band accept any birth at all", which is
+        a different question from "can THIS row be born".
+
+        OVERLAP MODE: a row is at cap when ANY of its covering cells is at
+        cap (pass ``nb_inds``/``has_nb`` from
+        :meth:`_sorter_cap_members`) -- now applied uniformly to alive and
+        dead rows, where before the neighbour union reached alive rows
+        only.
+
+        At ``cap_divisor == 1`` this is the same expression the
+        pre-2026-08-15 code used, so the per-band mask is unchanged there.
         """
         own = counts[flat] >= cap[cap_inds]
-        if self.cap_divisor == 1:
-            return own
         if nb_inds is not None:
             flat_nb = self._cap_flat_index(
                 band_sorter.temp_inds, band_sorter.walker_inds, nb_inds
             )
             own = own | (has_nb & (counts[flat_nb] >= cap[nb_inds]))
-        sat = self._band_saturated_flat(counts, cap)
-        band_flat = self._band_flat_index(
-            band_sorter.temp_inds, band_sorter.walker_inds,
-            band_sorter.band_inds,
-        )
-        xp = get_array_module(own)
-        return xp.where(band_sorter.inds, own, sat[band_flat])
+        return own
 
     def _cap_cells_of_band(self, band_index: int):
         """``(lo, hi)`` cap-cell index range owned by sub-band ``band_index``."""
@@ -13742,7 +13823,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ask. (SUM would report the band-total allowance, which is not what
         any existing consumer means by ``band_leaf_cap``.)
         """
-        if self.cap_divisor == 1:
+        if self._cap_is_band_grid:
             return
         cell_cap = bi.get("cap_cell_leaf_cap")
         if cell_cap is None:
@@ -13758,11 +13839,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         arrays are allocated at all, so a store written before the cap grid
         existed resumes untouched and the whole gate is bit-identical.
         """
-        if self.cap_divisor == 1:
+        if self._cap_is_band_grid:
             return (
                 bi["band_leaf_cap"], bi["band_cap_iters"], bi["band_best_ll"],
             )
-        ensure_cap_cell_fields(bi, self.num_cap_cells)
+        ensure_cap_cell_fields(bi, self.num_cap_cells,
+                               staggered=self.cap_stagger)
         return (
             bi["cap_cell_leaf_cap"], bi["cap_cell_iters"],
             bi["cap_cell_best_ll"],
@@ -13887,7 +13969,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def _cold_occupancy(self, band_counts, new_state):
         """Cold-chain per-unit occupancy for the ``require_occupancy`` test."""
-        if self.cap_divisor == 1:
+        if self._cap_is_band_grid:
             return _to_numpy(band_counts[0])  # (nwalkers, num_bands)
         branch = self._work_branch(new_state)
         coords = _to_numpy(branch.coords[0])
@@ -14164,7 +14246,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # windows can be empty on sub-layer band grids while the
         # source-attributed cell statistic stays defined).
         is_cells = (
-            self.cap_divisor > 1
+            not self._cap_is_band_grid
             or float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) > 0.0
         )
 
@@ -14182,7 +14264,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             if ("cap_cell_cold_ll" in bi
                     and bi["cap_cell_cold_ll"].shape == lls.shape):
                 bi["cap_cell_cold_ll"][:] = lls
-            if (self.cap_divisor == 1 and "band_cold_ll" in bi
+            if (self._cap_is_band_grid and "band_cold_ll" in bi
                     and bi["band_cold_ll"].shape == lls.shape):
                 # divisor 1: cells == bands and there is no cap_cell_cold_ll
                 # storage -- record WHAT THE GATE READ in band_cold_ll
@@ -14346,7 +14428,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             nleaves_max, _cell_max)
         converged &= cap < _ceiling
 
-        _unit = "cap cells" if self.cap_divisor > 1 else "bands"
+        _unit = "cap cells" if not self._cap_is_band_grid else "bands"
         if np.any(converged):
             inc = np.where(converged)[0]
             cap[converged] += 1
@@ -14558,11 +14640,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     f"store requires a fresh store."
                 )
             ensure_leaf_cap_fields(bi, self.num_bands)
-            ensure_cap_cell_fields(bi, self.num_cap_cells)
+            ensure_cap_cell_fields(bi, self.num_cap_cells,
+                               staggered=self.cap_stagger)
             cap_arr = self._cap_state_arrays(bi)[0]
             if np.all(cap_arr < 0):
                 cap_arr[:] = int(self.leaf_cap_start)
-                if self.cap_divisor > 1:
+                if not self._cap_is_band_grid:
                     bi["band_leaf_cap"][:] = int(self.leaf_cap_start)
                 # Overlap echo: geometry in FD bins (w = s/(1-p), core =
                 # s - 2x; s = the median cap-cell stride -- uniform grids
@@ -14581,7 +14664,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 logger.info(
                     f"{self.name}: armed leaf cap at "
                     f"{int(self.leaf_cap_start)} for {len(cap_arr)} "
-                    + ("cap cells " if self.cap_divisor > 1 else "bands ")
+                    + ("cap cells " if not self._cap_is_band_grid else "bands ")
                     + f"(divisor {self.cap_divisor} over "
                     f"{self.num_bands} sub-bands"
                     + (", STAGGERED grid" if self.cap_stagger else "")
@@ -14595,7 +14678,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._band_leaf_cap = bi["band_leaf_cap"]
             self._mirror_band_leaf_cap(bi)
         elif self._leaf_cap_enabled and (
-            self.cap_divisor > 1
+            not self._cap_is_band_grid
             or float(getattr(self, "cap_overlap_frac", 0.0) or 0.0) > 0.0
         ):
             # READ-ONLY cap reference for non-RJ moves: they never arm or
@@ -14605,7 +14688,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # arming, no mirroring, no counter updates here. At divisor 1
             # (+overlap) the band arrays ARE the cell arrays.
             bi = state.sub_states[self.branch_name].band_info
-            if self.cap_divisor == 1:
+            if self._cap_is_band_grid:
                 if bi.get("band_leaf_cap") is not None:
                     self._cap_leaf_cap = bi["band_leaf_cap"]
             elif bi.get("cap_cell_leaf_cap") is not None:

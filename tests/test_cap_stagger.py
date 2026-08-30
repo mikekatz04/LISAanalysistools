@@ -5,7 +5,7 @@ coincides with a sub-band edge. These tests pin:
 
 * the staggered ``make_cap_edges`` construction (edge/cell counts match
   the nested grid exactly; no shared band/cap edges; half + 1.5 boundary
-  cells; ``K == 1`` ignores the flag),
+  cells; ``K == 1`` + stagger = the midpoint-to-midpoint grid),
 * exact agreement of the move's arithmetic cell lookup
   (``_cap_cell_index`` and its numpy twin ``_np_cap_cells``) with
   ``searchsorted`` over the stored edges, in BOTH modes, on uniform AND
@@ -15,11 +15,14 @@ coincides with a sub-band edge. These tests pin:
 
 All through the installed classes -- no reimplementation of the grid.
 """
+import types
 import unittest
 
 import numpy as np
 
-from lisatools.globalfit.state import make_cap_edges, cap_divisor_from_edges
+from lisatools.globalfit.state import (
+    make_cap_edges, cap_divisor_from_edges, ensure_cap_cell_fields,
+)
 from lisatools.globalfit.moves.gbspecialstretch import GBSpecialBase
 
 
@@ -28,7 +31,11 @@ def _shim(band_edges, k, stagger):
     mv = object.__new__(GBSpecialBase)
     be = np.asarray(band_edges, dtype=float)
     mv.cap_divisor = int(k)
-    mv.cap_stagger = bool(stagger) and k > 1
+    # Mirrors production (gbspecialstretch.py: ``self.cap_stagger =
+    # bool(cap_stagger) and self.cap_divisor > 1``) EXCEPT that K=1 stagger
+    # is honoured here, so the K=1 lookup tests below pin the target
+    # behaviour rather than today's short-circuit. See _K1_LOOKUP_TODO.
+    mv.cap_stagger = bool(stagger)
     mv.num_bands = len(be) - 1
     mv.num_cap_cells = mv.num_bands * k
     mv.cap_edges = make_cap_edges(be, k, stagger=mv.cap_stagger)
@@ -72,11 +79,57 @@ class MakeCapEdgesStaggerTest(unittest.TestCase):
         self.assertAlmostEqual(stag[0], be[0])
         self.assertAlmostEqual(stag[-1], be[-1])
 
-    def test_k1_ignores_stagger(self):
+    def test_k1_unstaggered_is_the_band_grid(self):
         np.testing.assert_array_equal(
-            make_cap_edges(UNIFORM, 1, stagger=True),
-            make_cap_edges(UNIFORM, 1),
+            make_cap_edges(UNIFORM, 1), UNIFORM,
         )
+
+    def test_k1_staggered_runs_midpoint_to_midpoint(self):
+        """K=1 + stagger: one cell per sub-band, seam in the MIDDLE.
+
+        User design 2026-08-29: "The cap cell should go from the midpoint
+        of 1 sub-band to the midpoint of the next. There should be
+        approximately the same number of cap cells and sub-bands (with
+        some slight adjustment on the edges)."
+
+        This is what makes a cap cell straddle exactly one band seam while
+        keeping cell count == band count, so a band's own cell IS its
+        destination cell and the dead-row birth gate (which falls through
+        to the ``cap_divisor == 1`` own-cell branch of
+        ``_cap_at_cap_mask``) tests the cell a birth actually lands in.
+        """
+        for be in (UNIFORM, RAGGED):
+            stag = make_cap_edges(be, 1, stagger=True)
+            mids = 0.5 * (be[:-1] + be[1:])
+            # one cell per sub-band, so one more edge than there are bands
+            self.assertEqual(len(stag), len(be))
+            self.assertEqual(len(stag) - 1, len(be) - 1)
+            # ends pinned to the band grid, interior edges are the midpoints
+            self.assertAlmostEqual(stag[0], be[0])
+            self.assertAlmostEqual(stag[-1], be[-1])
+            np.testing.assert_allclose(stag[1:-1], mids[:-1], rtol=1e-12)
+            # strictly ascending, and no cap edge sits on a band seam
+            self.assertTrue(np.all(np.diff(stag) > 0))
+            for e in be[1:-1]:
+                self.assertGreater(np.abs(stag[1:-1] - e).min(), 1e-9 * abs(e))
+
+    def test_k1_staggered_boundary_cell_widths(self):
+        be = UNIFORM
+        w_band = be[1] - be[0]
+        w = np.diff(make_cap_edges(be, 1, stagger=True))
+        self.assertAlmostEqual(w[0], w_band / 2, delta=1e-12 * w_band)
+        self.assertAlmostEqual(w[-1], 1.5 * w_band, delta=1e-12 * w_band)
+        np.testing.assert_allclose(w[1:-1], w_band, rtol=1e-9)
+
+    def test_k1_staggered_cell_straddles_exactly_one_seam(self):
+        """Interior cell i spans the top half of band i and the bottom half
+        of band i+1 -- so the two sides of a seam share ONE cap cell."""
+        be = UNIFORM
+        stag = make_cap_edges(be, 1, stagger=True)
+        for i in range(1, len(stag) - 2):
+            seam = be[i]
+            self.assertLess(stag[i], seam)
+            self.assertGreater(stag[i + 1], seam)
 
 
 class CellAssignmentTest(unittest.TestCase):
@@ -106,6 +159,44 @@ class CellAssignmentTest(unittest.TestCase):
     def test_staggered_ragged(self):
         self._check(RAGGED, 4, stagger=True)
 
+    # K=1 STAGGER LOOKUP (landed 2026-08-29). ``make_cap_edges`` builds
+    # the midpoint-to-midpoint grid and every ``cap_divisor == 1``
+    # short-circuit was requalified to ``_cap_is_band_grid``
+    # (``divisor == 1 AND NOT stagger``), so the band index is no longer
+    # mistaken for a cell index under this grid. The CUDA twin
+    # (gf_routing_kernels.cu ``gf_cap_cell_index``) carries the same
+    # predicate and MUST be rebuilt with it -- python and kernel disagreeing
+    # on cell membership is silent, not loud.
+    def test_k1_staggered_uniform(self):
+        """K=1 stagger must agree with searchsorted on the stored edges.
+
+        The membership formula ``b*K + floor((f-lo_b)/step_b + 1/2)``
+        reduces at K=1 to "band b if f is in b's LOWER half, band b+1 if
+        in its UPPER half" -- which is exactly the midpoint-to-midpoint
+        cell containing f. Guards the clip at the 1.5-width last cell.
+        """
+        self._check(UNIFORM, 1, stagger=True)
+
+    def test_k1_staggered_ragged(self):
+        self._check(RAGGED, 1, stagger=True)
+
+    def test_k1_unstaggered_still_the_band_grid(self):
+        self._check(UNIFORM, 1, stagger=False)
+
+    def test_k1_staggered_straddle_ownership(self):
+        """Just below a seam -> the NEXT band's (only) cell; just above ->
+        the same cell. That shared cell IS the anti-bimodality mechanism."""
+        be = UNIFORM
+        mv = _shim(be, 1, stagger=True)
+        w = be[1] - be[0]
+        lo = np.array([be[1] - 0.25 * w])      # top half of band 0
+        hi = np.array([be[1] + 0.25 * w])      # bottom half of band 1
+        c_lo = int(mv._cap_cell_index(np.array([0], dtype=np.int64), lo)[0])
+        c_hi = int(mv._cap_cell_index(np.array([1], dtype=np.int64), hi)[0])
+        self.assertEqual(c_lo, 1)
+        self.assertEqual(c_hi, 1)
+        self.assertEqual(c_lo, c_hi)
+
     def test_staggered_straddle_ownership(self):
         """A source just below a band seam lands in the NEXT band's cell 0."""
         be, k = UNIFORM, 8
@@ -114,6 +205,384 @@ class CellAssignmentTest(unittest.TestCase):
         f = np.array([be[1] - 0.25 * step])   # top half-cell of band 0
         band = np.array([0], dtype=np.int64)
         self.assertEqual(int(mv._cap_cell_index(band, f)[0]), k)  # cell 1*K
+
+
+def _gate_shim(band_edges, k, stagger, ntemps=1, nwalkers=1):
+    """``_shim`` plus the (temp, walker) axes the flat indexers need."""
+    mv = _shim(band_edges, k, stagger)
+    mv.ntemps = int(ntemps)
+    mv.nwalkers = int(nwalkers)
+    mv.cap_overlap_frac = 0.0
+    return mv
+
+
+class DeadRowGateTest(unittest.TestCase):
+    """A BIRTH must be gated on the cell it LANDS IN, not on band saturation.
+
+    THE PRODUCTION FAILURE (3-month v7, rows 5 and 6, 2026-08-29): cap cell
+    2284 straddles the 1141/1142 seam at 20.381944 mHz and held BOTH
+    flagship modes; ``cap_cell_leaf_cap`` was 1.0 for all 2464 cells; and
+    yet 4 of 24 cold walkers held TWO leaves in that cap-1 cell, while no
+    sub-band ever held more than one.
+
+    Because a dead (birth-candidate) row was gated on
+    ``_band_saturated_flat`` -- "is EVERY cap cell of my band full" -- and
+    a band's ownership of cells ``b*K .. b*K+K-1`` is index arithmetic, not
+    geometry. Band 1142 owns the full straddling cell 2284 AND the empty
+    2285, so the band reads unsaturated and the birth is waved into a cell
+    that is already at capacity.
+
+    The fix: gate a dead row on its OWN destination cell, exactly as an
+    alive row is gated. Strictly more accurate -- it forbids precisely the
+    births that are impossible -- and it is what makes a straddling cap
+    cell actually able to force two sides of a seam to compete.
+    """
+
+    def _full_cell_scenario(self, k):
+        """Band 1's straddling cell full, its interior cell empty.
+
+        Returns the pieces ``_cap_at_cap_mask`` takes, for two rows:
+        row 0 = a DEAD birth candidate whose f0 lands in the FULL
+        straddling cell; row 1 = a DEAD candidate landing in the EMPTY
+        interior cell (the control -- it must stay proposable).
+        """
+        be = UNIFORM
+        mv = _gate_shim(be, k, stagger=True)
+        w = be[1] - be[0]
+        straddling = 1 * k          # band 1's cell 0 straddles the 0/1 seam
+        interior = 1 * k + k // 2   # comfortably inside band 1
+
+        # f0s that actually land in those two cells
+        f_full = be[1] + 0.10 * (w / k)      # just above the 0/1 seam
+        f_free = be[1] + 0.55 * w            # mid-band 1
+        freqs = np.array([f_full, f_free])
+        bands = np.array([1, 1], dtype=np.int64)
+        cells = mv._cap_cell_index(bands, freqs)
+        self.assertEqual(int(cells[0]), straddling)
+        self.assertEqual(int(cells[1]), interior)
+
+        counts = np.zeros(mv.ntemps * mv.nwalkers * mv.num_cap_cells,
+                          dtype=np.int64)
+        cap = np.ones(mv.num_cap_cells, dtype=np.int64)
+        flat = mv._cap_flat_index(
+            np.zeros(2, dtype=np.int64), np.zeros(2, dtype=np.int64), cells)
+        counts[int(flat[0])] = 1          # the straddling cell is FULL
+
+        sorter = types.SimpleNamespace(
+            temp_inds=np.zeros(2, dtype=np.int64),
+            walker_inds=np.zeros(2, dtype=np.int64),
+            band_inds=bands,
+            inds=np.array([False, False]),   # both are DEAD birth candidates
+        )
+        return mv, sorter, counts, cap, flat, cells
+
+    def test_birth_into_a_full_straddling_cell_is_blocked(self):
+        for k in (2, 4, 8):
+            mv, sorter, counts, cap, flat, cells = self._full_cell_scenario(k)
+            mask = mv._cap_at_cap_mask(sorter, counts, cap, flat, cells)
+            self.assertTrue(
+                bool(mask[0]),
+                msg=f"K={k}: birth into a FULL straddling cell was allowed "
+                    f"because the band still had an empty owned cell",
+            )
+
+    def test_birth_into_a_free_cell_of_the_same_band_still_allowed(self):
+        """The control: gating on the destination cell must not over-block."""
+        for k in (2, 4, 8):
+            mv, sorter, counts, cap, flat, cells = self._full_cell_scenario(k)
+            mask = mv._cap_at_cap_mask(sorter, counts, cap, flat, cells)
+            self.assertFalse(bool(mask[1]), msg=f"K={k}")
+
+    def test_alive_row_gating_is_unchanged(self):
+        """Alive rows were ALREADY gated on their own cell -- keep it."""
+        for k in (2, 4):
+            mv, sorter, counts, cap, flat, cells = self._full_cell_scenario(k)
+            sorter.inds = np.array([True, True])
+            mask = mv._cap_at_cap_mask(sorter, counts, cap, flat, cells)
+            self.assertTrue(bool(mask[0]))
+            self.assertFalse(bool(mask[1]))
+
+    def test_dead_and_alive_rows_agree_on_the_same_cell(self):
+        """The whole point: one rule for both, so a cap means a cap."""
+        for k in (2, 4, 8):
+            mv, sorter, counts, cap, flat, cells = self._full_cell_scenario(k)
+            sorter.inds = np.array([False, False])
+            dead = mv._cap_at_cap_mask(sorter, counts, cap, flat, cells)
+            sorter.inds = np.array([True, True])
+            alive = mv._cap_at_cap_mask(sorter, counts, cap, flat, cells)
+            np.testing.assert_array_equal(dead, alive)
+
+
+class K1StaggerDriftTest(unittest.TestCase):
+    """Does the K=1 midpoint-to-midpoint grid survive in-model DRIFT?
+
+    Two facts collide here:
+
+    * a source's band label is FROZEN at initial buffer fill within
+      ``propose`` and is NOT re-homed when its f0 drifts across a seam
+      (architectural invariant -- the label keys the residual bookkeeping);
+    * an in-model repeat may move f0 by up to N/4 bins past the band edge,
+      and N/2 on RJ-provenance buffers whose ``frequency_lims`` are
+      pre-widened -- which at a 3-month band width of ~135 FD bins and
+      N=512 is comfortably MORE THAN A WHOLE BAND.
+
+    So the cap census routinely computes a cell from a STALE band label and
+    a drifted f0. If the answer depended on the label, the drift gate would
+    police the wrong cell.
+    """
+
+    def _cells(self, mv, f, band):
+        return int(mv._cap_cell_index(
+            np.array([band], dtype=np.int64), np.array([f]))[0])
+
+    def test_stale_band_label_gives_the_same_cell_on_a_uniform_grid(self):
+        """The whole safety argument: on a UNIFORM grid the handed band
+        index cancels out of ``b + floor((f-lo_b)/w + 1/2)``, so a frozen
+        label and the true label agree for ANY drift."""
+        be = UNIFORM
+        mv = _gate_shim(be, 1, stagger=True)
+        w = be[1] - be[0]
+        rng = np.random.default_rng(3)
+        for _ in range(400):
+            f = rng.uniform(be[0], be[-1] * (1 - 1e-12))
+            true_band = int(np.clip(
+                np.searchsorted(be, f, side="right") - 1, 0, mv.num_bands - 1))
+            truth = int(np.clip(
+                np.searchsorted(mv.cap_edges, f, side="right") - 1,
+                0, mv.num_cap_cells - 1))
+            # every plausible stale label: up to +/- 2 whole bands away
+            for off in (-2, -1, 0, 1, 2):
+                stale = int(np.clip(true_band + off, 0, mv.num_bands - 1))
+                self.assertEqual(
+                    self._cells(mv, f, stale), truth,
+                    msg=f"f={f!r} true_band={true_band} stale={stale}")
+
+    def test_drift_of_more_than_a_full_band_still_censuses_correctly(self):
+        """N/2 bins on an RJ buffer can exceed a band width -- check the
+        census follows the source rather than its frozen label."""
+        be = UNIFORM
+        mv = _gate_shim(be, 1, stagger=True)
+        w = be[1] - be[0]
+        start_band = 4
+        for drift in (-1.9, -1.1, -0.6, -0.2, 0.2, 0.6, 1.1, 1.9):
+            f = be[start_band] + 0.5 * w + drift * w
+            truth = int(np.clip(
+                np.searchsorted(mv.cap_edges, f, side="right") - 1,
+                0, mv.num_cap_cells - 1))
+            self.assertEqual(self._cells(mv, f, start_band), truth,
+                             msg=f"drift={drift} bands")
+
+    def test_ragged_grid_is_the_documented_limitation(self):
+        """On a NON-uniform grid the extrapolation uses the stale band's
+        OWN width, so a stale label CAN mis-census. Production runs a
+        uniform grid (1232 bands, equal 1.7361e-5 Hz); this pins the
+        caveat so a future get_n free-frequency grid trips it loudly."""
+        be = RAGGED
+        mv = _gate_shim(be, 1, stagger=True)
+        disagreements = 0
+        for b in range(mv.num_bands):
+            for frac in (0.1, 0.5, 0.9):
+                f = be[b] + frac * (be[b + 1] - be[b])
+                truth = int(np.clip(
+                    np.searchsorted(mv.cap_edges, f, side="right") - 1,
+                    0, mv.num_cap_cells - 1))
+                for stale in range(mv.num_bands):
+                    if self._cells(mv, f, stale) != truth:
+                        disagreements += 1
+        self.assertGreater(
+            disagreements, 0,
+            "if this ever hits zero the ragged caveat is gone and this "
+            "test should be replaced by the uniform guarantee")
+
+    def test_production_band_grid_is_uniform(self):
+        """The safety argument above holds because the run grid is uniform."""
+        be = np.linspace(0.555555556e-3, 21.944444444e-3, 1233)
+        d = np.diff(be)
+        # uniform to floating-point rounding (linspace spreads the widths by
+        # ~3e-18 absolute = 2e-13 relative); the cell-index extrapolation
+        # needs equal widths, not bit-equal ones
+        np.testing.assert_allclose(d, d[0], rtol=1e-12)
+
+    def test_drift_gate_arms_at_k1_stagger_without_the_edge_leak_knob(self):
+        """``GB_CAP_DRIFT_GATE_EDGE_LEAK`` was a workaround for the FALSE
+        premise that cells==bands means f0 cannot change cell. Under the
+        staggered grid the premise is correctly false by construction, so
+        the gate must arm on its own -- the knob becomes moot."""
+        mv = _gate_shim(UNIFORM, 1, stagger=True)
+        # The short-circuit reads
+        #     _cap_is_band_grid and overlap <= 0 and not edge_leak
+        # so a False first term keeps the gate live whatever the knob says.
+        self.assertFalse(
+            mv._cap_is_band_grid,
+            "K=1 + stagger must NOT be treated as the band grid, or the "
+            "drift gate short-circuits off and nothing polices seam "
+            "crossings",
+        )
+
+    def test_unstaggered_k1_still_short_circuits(self):
+        """The historical regime is untouched: cells ARE bands there."""
+        mv = _gate_shim(UNIFORM, 1, stagger=False)
+        self.assertTrue(mv._cap_is_band_grid)
+
+
+class EnsureCapCellFieldsTest(unittest.TestCase):
+    """``ensure_cap_cell_fields`` must not use ``num_cells == num_bands``
+    as a proxy for "the cap grid is the band grid".
+
+    At K=1 + stagger the counts are EQUAL (1232 cells over 1232 sub-bands)
+    while membership is shifted half a sub-band, so the cap-cell arrays are
+    genuinely needed. The count proxy skipped allocating them, and
+    ``_cap_state_arrays`` -- which correctly takes the cell branch under
+    ``_cap_is_band_grid`` -- then read ``bi["cap_cell_leaf_cap"]`` on a
+    dict that had none. KeyError at move construction, on the first
+    propose of the relaunch.
+    """
+
+    def _bi(self, nbands=10, nwalkers=4):
+        return {"num_bands": nbands, "nwalkers": nwalkers}
+
+    def test_allocates_when_counts_match_but_grid_is_staggered(self):
+        bi = self._bi()
+        ensure_cap_cell_fields(bi, 10, staggered=True)
+        for k in ("cap_cell_leaf_cap", "cap_cell_iters", "cap_cell_best_ll"):
+            self.assertIn(k, bi, msg=f"{k} missing at K=1 + stagger")
+            self.assertEqual(np.shape(bi[k]), (10,))
+        self.assertEqual(np.shape(bi["cap_cell_cold_ll"]), (4, 10))
+
+    def test_sentinels_are_the_documented_ones(self):
+        bi = self._bi()
+        ensure_cap_cell_fields(bi, 10, staggered=True)
+        np.testing.assert_array_equal(bi["cap_cell_leaf_cap"],
+                                      np.full(10, -1))
+        np.testing.assert_array_equal(bi["cap_cell_iters"], np.zeros(10))
+        self.assertTrue(np.all(np.isneginf(bi["cap_cell_best_ll"])))
+
+    def test_band_grid_still_short_circuits(self):
+        """divisor 1 WITHOUT stagger keeps reading the band_* arrays."""
+        bi = self._bi()
+        ensure_cap_cell_fields(bi, 10, staggered=False)
+        self.assertNotIn("cap_cell_leaf_cap", bi)
+
+    def test_default_preserves_the_historical_behaviour(self):
+        bi = self._bi()
+        ensure_cap_cell_fields(bi, 10)
+        self.assertNotIn("cap_cell_leaf_cap", bi)
+
+    def test_more_cells_than_bands_always_allocates(self):
+        for staggered in (False, True):
+            bi = self._bi()
+            ensure_cap_cell_fields(bi, 40, staggered=staggered)
+            self.assertEqual(np.shape(bi["cap_cell_leaf_cap"]), (40,))
+
+
+class CudaTwinPredicateTest(unittest.TestCase):
+    """The CUDA cell lookup must short-circuit on the SAME predicate.
+
+    ``gf_routing_kernels.cu::gf_cap_cell_index`` mirrors
+    ``_cap_cell_index``. If one of them treats the band index as the cell
+    index and the other does not, nothing raises -- the two sides simply
+    census a source into different cells, and the caps enforce against a
+    census that disagrees with the router. There is no numeric parity test
+    (the kernel needs a built backend), so this pins the source text, the
+    same technique the band-unit scan-order suite uses on the drift gate.
+    """
+
+    def _cu(self):
+        import pathlib
+        import lisatools
+        p = (pathlib.Path(lisatools.__file__).parent
+             / "cutils" / "gf_routing_kernels.cu")
+        self.assertTrue(p.is_file(), f"missing {p}")
+        return p.read_text()
+
+    def test_kernel_short_circuit_requires_not_stagger(self):
+        src = self._cu()
+        self.assertIn("cap_divisor == 1 && !cap_stagger", src)
+
+    def test_kernel_has_no_bare_divisor1_short_circuit(self):
+        """A bare ``cap_divisor == 1`` return would silently re-break K=1."""
+        src = self._cu()
+        self.assertNotIn("if (cap_divisor == 1) {", src)
+
+    def test_python_predicate_is_the_named_property(self):
+        """Python must route through ``_cap_is_band_grid``, not the divisor."""
+        import inspect
+        src = inspect.getsource(GBSpecialBase._cap_cell_index)
+        self.assertIn("_cap_is_band_grid", src)
+        self.assertNotIn("cap_divisor == 1", src)
+
+    def test_property_is_divisor_and_stagger(self):
+        for divisor, stagger, expected in (
+            (1, False, True),    # the historical band-grid regime
+            (1, True, False),    # midpoint-to-midpoint: cells != bands
+            (2, True, False),
+            (8, False, False),
+        ):
+            mv = _shim(UNIFORM, divisor, stagger)
+            self.assertIs(mv._cap_is_band_grid, expected,
+                          msg=f"divisor={divisor} stagger={stagger}")
+
+
+class CapBudgetTransitionTest(unittest.TestCase):
+    """The scheduler's finish budget must move on the SAME rule as the gate.
+
+    The pick pool gates a dead row on the cell its birth lands in, so the
+    budget transitions have to be own-cell transitions. If they stayed
+    band-level the scheduler would hold rows it will never hand out (band
+    unsaturated, destination cell full) and fail to release rows it should
+    (cell freed inside a band that was never fully saturated).
+    """
+
+    def _t(self, pre, post, cap, alive):
+        pre = np.asarray(pre, dtype=np.int64)
+        post = np.asarray(post, dtype=np.int64)
+        flat = np.arange(len(pre))
+        return GBSpecialBase._cap_budget_transitions(
+            pre, post, flat, np.asarray(cap, dtype=np.int64),
+            np.asarray(alive, dtype=bool),
+        )
+
+    def test_death_from_at_cap_frees_the_cell(self):
+        freed, capped = self._t([2], [1], [2], [True])
+        self.assertTrue(bool(freed[0]))
+        self.assertFalse(bool(capped[0]))
+
+    def test_death_from_below_cap_frees_nothing(self):
+        freed, capped = self._t([1], [0], [2], [True])
+        self.assertFalse(bool(freed[0]))
+
+    def test_birth_that_fills_the_cell_caps_it(self):
+        freed, capped = self._t([1], [2], [2], [False])
+        self.assertTrue(bool(capped[0]))
+        self.assertFalse(bool(freed[0]))
+
+    def test_birth_leaving_headroom_does_not_cap(self):
+        freed, capped = self._t([0], [1], [2], [False])
+        self.assertFalse(bool(capped[0]))
+
+    def test_reduces_to_the_historical_divisor1_expressions(self):
+        """Exhaustive equivalence with the pre-2026-08-29 divisor-1 form."""
+        for cap in (1, 2, 3, 5):
+            for pre in range(0, cap + 2):
+                for alive in (True, False):
+                    post = pre - 1 if alive else pre + 1
+                    freed, capped = self._t([pre], [post], [cap], [alive])
+                    old_freed = alive and (pre == cap)
+                    # the old birth form lacked the `pre < cap` term; it is
+                    # implied because the gate never offers a full cell
+                    old_capped = (not alive) and (pre + 1 >= cap)
+                    self.assertEqual(bool(freed[0]), old_freed,
+                                     msg=f"cap={cap} pre={pre} alive={alive}")
+                    if pre < cap:
+                        self.assertEqual(
+                            bool(capped[0]), old_capped,
+                            msg=f"cap={cap} pre={pre} alive={alive}")
+
+    def test_a_cap1_straddling_cell_caps_on_the_first_birth(self):
+        """The v7 case: cap 1, empty cell, one birth -> capped immediately,
+        so the SECOND side of the seam finds no headroom."""
+        freed, capped = self._t([0], [1], [1], [False])
+        self.assertTrue(bool(capped[0]))
 
 
 class BandSaturationTest(unittest.TestCase):

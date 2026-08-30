@@ -77,10 +77,32 @@ def make_cap_edges(band_edges, divisor: int, stagger: bool = False):
     frequency in band ``b`` is ``b*K + floor((f - lo_b)/step_b + 1/2)``,
     clipped to the global cell range -- see the move's ``_cap_cell_index``.
 
-    ``divisor == 1`` returns a copy of ``band_edges`` itself (``stagger``
-    is ignored: with one cell per band the cap grid IS the band grid), so
-    every downstream cap computation reduces bit-identically to the
-    pre-2026-08-15 per-band behaviour.
+    ``divisor == 1`` UNSTAGGERED returns a copy of ``band_edges`` itself
+    (the cap grid IS the band grid), so every downstream cap computation
+    reduces bit-identically to the pre-2026-08-15 per-band behaviour.
+
+    ``divisor == 1`` WITH ``stagger`` is the MIDPOINT-TO-MIDPOINT grid
+    (user design 2026-08-29: "the cap cell should go from the midpoint of
+    1 sub-band to the midpoint of the next; there should be approximately
+    the same number of cap cells and sub-bands, with some slight
+    adjustment on the edges"). Edges are ``[be[0], mid_0, ..., mid_-2,
+    be[-1]]`` -- one cell per sub-band, each interior cell straddling
+    exactly ONE band seam, a half-width first cell and a 1.5-width last
+    one. This is the grid that makes the two sides of a seam compete for
+    a single cap WITHOUT halving the cell width (``divisor=2`` cells are
+    half a sub-band wide, which doubles the cell count, halves per-cell
+    occupancy and thereby DELAYS at-cap birth-row exclusion -- measured
+    at +39% F-stat candidate rows on the 2026-08-29 v7 restart).
+
+    It also matters for ENFORCEMENT: ``_cap_at_cap_mask`` tests a dead
+    (birth-candidate) row against BAND saturation at ``K >= 2`` -- "is
+    every cap cell of my band full" -- and a band's ownership of cells
+    ``b*K ... b*K+K-1`` is index arithmetic, so under a staggered grid the
+    cell a birth physically LANDS in may belong to a neighbour's index
+    range and be at cap while the birth's own band still has headroom
+    (observed: 4 of 24 walkers holding 2 leaves in a cap-1 straddling
+    cell, v7 rows 5-6). At ``K == 1`` that function returns the own-cell
+    test for every row, so the destination cell is what gates the birth.
 
     Args:
         band_edges: 1D ascending array of sub-band edges (Hz).
@@ -93,7 +115,7 @@ def make_cap_edges(band_edges, divisor: int, stagger: bool = False):
     """
     be = np.asarray(band_edges, dtype=float)
     k = max(1, int(divisor))
-    if k == 1:
+    if k == 1 and not stagger:
         return be.copy()
     lo = be[:-1]
     step = (be[1:] - be[:-1]) / k
@@ -169,7 +191,30 @@ def cap_divisor_from_edges(band_edges, cap_edges) -> int:
     return nc // nb
 
 
-def ensure_cap_cell_fields(band_info: dict, num_cells: int) -> None:
+def _cap_grid_is_staggered(band_info: dict) -> bool:
+    """Does the stored cap grid differ in VALUE from the band grid?
+
+    The two are distinguishable only by their edge VALUES when the counts
+    match: an unstaggered divisor-1 grid IS ``band_edges``, while the
+    midpoint-to-midpoint grid has the same length with every interior edge
+    shifted to a band midpoint. A count comparison cannot tell them apart,
+    which is exactly the conflation :func:`ensure_cap_cell_fields`
+    documents. Different counts (divisor >= 2) allocate regardless, so the
+    answer only has to be right when the lengths are equal.
+    """
+    be = band_info.get("band_edges")
+    ce = band_info.get("cap_edges")
+    if be is None or ce is None:
+        return False
+    be = np.asarray(be, dtype=float)
+    ce = np.asarray(ce, dtype=float)
+    if be.shape != ce.shape:
+        return False
+    return not np.allclose(be, ce, rtol=0.0, atol=1e-12)
+
+
+def ensure_cap_cell_fields(band_info: dict, num_cells: int,
+                           staggered: bool = False) -> None:
     """Backfill the per-CAP-CELL progressive leaf-cap arrays on ``band_info``.
 
     The cap-cell twins of the ``band_*`` cap arrays (see
@@ -186,12 +231,24 @@ def ensure_cap_cell_fields(band_info: dict, num_cells: int) -> None:
     - ``cap_cell_cold_ll``: ``(nwalkers, num_cells)`` per-cold-walker
       statistic, refreshed every step so the decision is auditable.
 
-    DIVISOR-1 SHORT CIRCUIT: when the cap grid is the band grid there is
+    DIVISOR-1 SHORT CIRCUIT: when the cap grid IS the band grid there is
     nothing to allocate -- the move reads the ``band_*`` arrays directly, so
     divisor 1 is bit-identical to the pre-2026-08-15 code AND keeps
     resuming stores written before the cap grid existed.
+
+    ``staggered`` DISABLES that short circuit (2026-08-29). The count
+    ``num_cells == num_bands`` is NOT the same question as "the cap grid is
+    the band grid": at ``cap_divisor == 1`` WITH stagger the counts are
+    equal (1232 cells over 1232 sub-bands) while membership is shifted half
+    a sub-band -- cell ``i`` runs midpoint-to-midpoint. Those arrays are
+    then genuinely needed, and the move's ``_cap_state_arrays`` correctly
+    asks for them (its predicate is ``_cap_is_band_grid`` =
+    ``divisor == 1 and not stagger``). Keying this on the count instead
+    skipped the allocation and the move raised ``KeyError`` on
+    ``cap_cell_leaf_cap`` at construction.
     """
-    if int(num_cells) == int(band_info.get("num_bands", num_cells)):
+    if (not staggered
+            and int(num_cells) == int(band_info.get("num_bands", num_cells))):
         return
     band_info.setdefault("cap_cell_leaf_cap", np.full(num_cells, -1, dtype=int))
     band_info.setdefault("cap_cell_iters", np.zeros(num_cells, dtype=int))
@@ -803,7 +860,9 @@ class GBState(ModuleSubState):
             ensure_leaf_cap_fields(band_info, band_info["num_bands"])
             ensure_band_shutoff_fields(band_info, band_info["num_bands"])
             if leaf_caps:
-                ensure_cap_cell_fields(band_info, band_info["num_cap_cells"])
+                ensure_cap_cell_fields(
+                    band_info, band_info["num_cap_cells"],
+                    staggered=_cap_grid_is_staggered(band_info))
             band_info["initialized"] = True
             self.band_info = band_info
             return int(band_info["ntemps"])
@@ -846,7 +905,8 @@ class GBState(ModuleSubState):
             bi.setdefault("ntemps", int(bi["band_temps"].shape[-1]))
             bi.setdefault("nwalkers", int(bi["band_num_binaries"].shape[-2]))
             ensure_leaf_cap_fields(bi, bi["num_bands"])
-            ensure_cap_cell_fields(bi, bi["num_cap_cells"])
+            ensure_cap_cell_fields(bi, bi["num_cap_cells"],
+                                   staggered=_cap_grid_is_staggered(bi))
             # RESUME path for the shutoff valve: a stored record whose grid
             # no longer matches is DISCARDED here rather than restored onto
             # a grid it was never measured on (see the function's docstring

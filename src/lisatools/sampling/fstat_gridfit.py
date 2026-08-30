@@ -1268,17 +1268,29 @@ def peak_box_weights(peak_F, peak_f0_mHz=None, band_edges=None,
 
     Two schemes, both returned as FLAT per-box weights:
 
-    * ``cells = K > 1`` -- the HIERARCHICAL scheme and the DEFAULT (user
-      design 2026-08-16): draw a CAP CELL uniformly, then draw within that
-      cell with ``w ~ F**alpha``. Each sub-band is split into ``K`` equal
-      cells (the same construction as the leaf-cap grid, so ``K`` tracks
-      ``GB_CAP_DIVISOR``), and the composite weight of box ``j`` in cell
-      ``c`` is::
+    * ``cells = K >= 1`` -- the HIERARCHICAL scheme and the DEFAULT: draw a
+      SUB-BAND STRATUM uniformly, then draw within it with ``w ~ F**alpha``.
+      ``K = 1`` (the default) is one stratum per sub-band; ``K > 1``
+      sub-divides each sub-band into K parts of ITS OWN width. The
+      composite weight of box ``j`` in stratum ``c`` is::
 
-          w_j = (1 / N_occupied_cells) * F_j**alpha / sum_{k in c} F_k**alpha
+          w_j = (1 / N_occupied) * F_j**alpha / sum_{k in c} F_k**alpha
 
-    * ``cells <= 1`` -- the historical GLOBAL mixture, ``w ~ F**alpha``
+    * ``cells <= 0`` -- the historical GLOBAL mixture, ``w ~ F**alpha``
       over every box at once. Always reachable as a fallback.
+
+    WHY SUB-BANDS AND NOT CAP CELLS (user ruling 2026-08-29). Until now the
+    stratum count tracked ``GB_CAP_DIVISOR`` and the docstring claimed the
+    cells were "the same construction as the leaf-cap grid". Both were
+    wrong. Births are confined to sub-bands and scheduled
+    serial-within-band, so the sub-band is the unit a birth competes in --
+    "those are the effective rj limits as well". Cap cells are a cap
+    overlay that deliberately STRADDLES sub-band seams (offset half a cell)
+    so the two sides of a seam contend for one cap; stratifying a proposal
+    on them mismatches the RJ limits. And the code never actually built cap
+    cells here -- it built ``np.linspace(be[0], be[-1], nb*K + 1)``, which
+    equals the sub-bands only on a uniform band grid and equals the
+    staggered cap cells never.
 
     WHY THIS IS EXPRESSED AS FLAT WEIGHTS rather than a two-stage sampler.
     ``StackedFStatProposal4D`` drives BOTH ``rvs`` and ``logpdf`` from
@@ -1307,10 +1319,10 @@ def peak_box_weights(peak_F, peak_f0_mHz=None, band_edges=None,
     """
     F = np.clip(np.asarray(peak_F, dtype=float).ravel(), 0.0, None)
     cells = int(cells or 0)
-    if equal or (alpha == 0.0 and cells <= 1):
+    if equal or (alpha == 0.0 and cells <= 0):
         return None
     w = F if alpha == 1.0 else np.power(F, alpha)
-    if cells <= 1:
+    if cells <= 0:
         return w if np.any(w > 0) else None
     if peak_f0_mHz is None or band_edges is None:
         logger.warning("[birth] per-cell peak weighting requested but the "
@@ -1318,12 +1330,37 @@ def peak_box_weights(peak_F, peak_f0_mHz=None, band_edges=None,
                        "global w ~ F**alpha mixture.")
         return w if np.any(w > 0) else None
 
+    # STRATA ARE SUB-BANDS (user ruling 2026-08-29): "the sub-bands should
+    # define that grid since those are the effective rj limits as well."
+    # A birth is confined to a sub-band (the draw is global, then candidates
+    # are divided up and assigned by drawn f0) and scheduling is
+    # serial-within-band, so the sub-band is the unit a birth competes in.
+    #
+    # THIS USED TO BE ``np.linspace(be[0], be[-1], ncell + 1)`` -- a uniform
+    # grid over the whole range that ignored ``band_edges`` entirely. It
+    # coincided with the sub-bands only when the band grid happened to be
+    # uniform (it is today, GB_BAND_EDGES_MODE=uniform, but get_n grids are
+    # frequency-dependent), and it never matched the leaf-cap cells the old
+    # docstring claimed it mirrored -- those are STAGGERED, offset half a
+    # cell so they straddle seams. Bucketing on band edges makes the strata
+    # the RJ limits by construction, on any band grid.
+    #
+    # ``cells = K`` sub-divides each sub-band into K parts of ITS OWN width
+    # (nested/aligned -- deliberately not staggered: these are proposal
+    # limits, not caps). K=1 is one stratum per sub-band, the default.
     be = np.asarray(band_edges, dtype=float).ravel()
     nb = be.size - 1
-    ncell = nb * cells
-    edges = np.linspace(be[0], be[-1], ncell + 1)
+    k = max(1, int(cells))
+    ncell = nb * k
     f0 = np.asarray(peak_f0_mHz, dtype=float).ravel() * 1e-3      # mHz -> Hz
-    ci = np.clip(np.searchsorted(edges, f0, side="right") - 1, 0, ncell - 1)
+    b = np.clip(np.searchsorted(be, f0, side="right") - 1, 0, nb - 1)
+    if k == 1:
+        ci = b
+    else:
+        width = be[b + 1] - be[b]
+        frac = np.divide(f0 - be[b], width, out=np.zeros_like(f0),
+                         where=width > 0)
+        ci = b * k + np.clip((frac * k).astype(np.int64), 0, k - 1)
 
     out = np.zeros_like(w)
     tot = np.bincount(ci, weights=w, minlength=ncell)
@@ -1359,33 +1396,46 @@ def peak_box_weights(peak_F, peak_f0_mHz=None, band_edges=None,
     out /= max(occ.size, 1)
     if not np.any(out > 0):
         return None
-    logger.info("[birth] per-cell peak weighting: K=%d -> %d cells, %d "
-                "occupied (%.0f%%); alpha=%.3g; per-cell mass equalised "
-                "(was max/median %.1fx under the global mixture).",
-                cells, ncell, occ.size,
+    logger.info("[birth] per-SUB-BAND peak weighting: K=%d subdivision(s) "
+                "-> %d strata over %d sub-bands, %d occupied (%.0f%%); "
+                "alpha=%.3g; per-stratum mass equalised (was max/median "
+                "%.1fx under the global mixture).",
+                k, ncell, nb, occ.size,
                 100.0 * occ.size / max(ncell, 1), alpha,
                 float(np.max(tot[occ]) / max(np.median(tot[occ]), 1e-300))
                 if occ.size else 1.0)
     return out
 
 
-def peak_weight_cells_env(default_divisor="GB_CAP_DIVISOR"):
-    """Resolve ``FSTAT_PEAK_WEIGHT_CELLS`` -- the cell divisor for the draw.
+def peak_weight_cells_env():
+    """Resolve ``FSTAT_PEAK_WEIGHT_CELLS`` -- sub-band subdivisions per draw
+    stratum.
 
-    DEFAULT ON, tracking ``GB_CAP_DIVISOR`` (user ruling 2026-08-16: the
-    uniform-cell reweighting is the default but must stay optional). Set
-    ``FSTAT_PEAK_WEIGHT_CELLS=1`` (or 0) to fall back to the historical
-    global ``w ~ F**alpha`` mixture; set it to an explicit integer to
-    decouple the draw grid from the cap grid.
+    DEFAULT 1 = ONE STRATUM PER SUB-BAND (user ruling 2026-08-29: "the
+    sub-bands should define that grid since those are the effective rj
+    limits as well").
+
+    It used to default to ``GB_CAP_DIVISOR``, tying the birth draw's
+    stratification to the LEAF-CAP grid. That was a 2026-08-16 choice which
+    no longer holds: caps live on cap cells (staggered, straddling seams by
+    design so the two sides of a seam compete for one cap) while births are
+    confined to sub-bands and scheduled serial-within-band. Coupling them
+    also meant a change to ``GB_CAP_DIVISOR`` -- e.g. the 2026-08-29 move
+    to the midpoint-to-midpoint grid -- silently re-stratified the RJ birth
+    proposal, which is not something a cap knob should do.
+
+    ``0`` falls back to the historical global ``w ~ F**alpha`` mixture; an
+    explicit integer ``K > 1`` sub-divides each sub-band into K strata of
+    its own width.
     """
     raw = os.environ.get("FSTAT_PEAK_WEIGHT_CELLS", "").strip()
     if not raw:
-        raw = os.environ.get(default_divisor, "1").strip() or "1"
+        return 1
     try:
         return max(int(float(raw)), 0)
     except ValueError:
         logger.warning("[birth] FSTAT_PEAK_WEIGHT_CELLS=%r is not an "
-                       "integer; using the global mixture.", raw)
+                       "integer; using one stratum per sub-band.", raw)
         return 1
 
 

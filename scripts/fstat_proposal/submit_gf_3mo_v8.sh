@@ -1045,7 +1045,29 @@ export GB_INMODEL_BATCH_MEMPOOL_FREE=0
 # (GBState.initialize_band_information) refuses a v7/v8-lineage store. See
 # the relaunch block at the top of this file: rewind GB to empty, then
 # migrate_gb_cap_grid.py --cap-divisor 2 --stagger.
-export GB_CAP_DIVISOR=2
+export GB_CAP_DIVISOR=1
+# 2 -> 1 (user design 2026-08-29). WITH GB_CAP_STAGGER=1 this is the
+# MIDPOINT-TO-MIDPOINT grid: 1232 cap cells for 1232 sub-bands, each
+# interior cell running from the midpoint of one sub-band to the midpoint
+# of the next, so the seam sits at the CENTRE of a cell and the two sides
+# of a seam compete for ONE cap. Verified against the real 1232-band grid:
+# interior cap edges == band midpoints exactly; widths half / 1.7361e-5 Hz
+# (= one full sub-band) / 1.5x at the two ends.
+#
+# WHY NOT 2 (what the 2026-08-29 restart ran): divisor 2 makes cells HALF
+# a sub-band, which (a) halves the straddle reach to +/-0.25 sub-band, so
+# a seam-straddling pair further apart falls out of the shared cell,
+# (b) doubles the cells, halving per-cell occupancy and delaying at-cap
+# birth-row exclusion -- measured +39% F-stat candidate rows at matched
+# iteration -- and (c) gives each band TWO owned cells, which is what let
+# a birth into an already-full straddling cell slip past the old
+# band-saturation gate (4 of 24 walkers held 2 leaves in a cap-1 cell at
+# rows 5-6 while no sub-band ever held more than one).
+#
+# REBUILD: not required for THIS config (the CUDA cell lookup is reached
+# only via the fused in-model path, and GB_INMODEL_ACCEPT_KERNEL=0 here),
+# but rebuild on relaunch anyway so python and kernel stay in step -- the
+# disagreement would be silent if anyone ever set that knob to 1.
 # ############################################################################
 # ## V7 (2026-08-24) = V6 + OVERLAPPING CAP CELLS, nothing else.            ##
 # ## GB_CAP_OVERLAP_FRAC=0.25 widens each cap cell's enforcement span on   ##
@@ -1409,6 +1431,33 @@ export GB_INMODEL_ACCEPT_KERNEL=0
 # GB_FSTAT_CTR_AUDIT is DELIBERATELY ABSENT: it is a v7-only diagnostic
 # (table-vs-per-row center deltas). Re-arm it here only if v7 never
 # produced a completed propose to read it from.
+#
+# ITS VERDICT IS ALREADY IN (v7, 2026-08-29, 18 unit lines): the epoch
+# table CANNOT serve birth centers. Medians dphi0 1.21-1.29 rad, dpsi
+# 0.57-0.63 rad, dcos_iota 0.22-0.29, dln_center 0.81 -> 1.21 (factor ~3
+# in amplitude) -- with a TINY f0 node gap (~1.1e-8 Hz ~ 0.08/Tobs), so
+# the gap is not resolution: the table is solved against the epoch-0000
+# residual and the F-stat maximum is data-dependent, drifting as sources
+# are subtracted. That is why v8 does not re-run the audit and does not
+# use the table. The per-row solve stands; the two levers below are what
+# is left.
+#
+# ---- F-STAT COST LEVERS (both bit-identical at their defaults) ------
+# rj_fstat_centers measured at 61% of a v7 iteration, ~100% inside
+# fstat_nm_lane_score. GB_FSTAT_CTR_BATCH is the serial python chunk
+# (4096 default => only ~2048 rows per device per launch, ~1,409 launches
+# per propose); raising it is pure re-chunking, results unchanged.
+# ⚠ GPU0 peaked at 90,698 MiB of 95,830 in v7 -- step 4096 -> 8192 first.
+# GB_FSTAT_NM_LANE_WEIGHTS reweights the CONTIGUOUS row lanes across
+# devices (v7: GPU0 39.1% util vs GPU1 72.1%, yet split 50/50, so every
+# join waited on the busier card). Integer weights in holder.gpus order,
+# e.g. "3,2" = 60/40; unset/blank/malformed => the exact equal split.
+# Both are overridable from the submitting shell without editing this
+# file, e.g.  GB_FSTAT_CTR_BATCH=8192 sbatch <this script>
+: "${GB_FSTAT_CTR_BATCH:=4096}"
+export GB_FSTAT_CTR_BATCH
+: "${GB_FSTAT_NM_LANE_WEIGHTS:=}"
+export GB_FSTAT_NM_LANE_WEIGHTS
 export GB_TEMPER_ON_REMOVAL=1      # band swaps run inside rj_prior_removal
 # High-f barren-band birth shutoff (search scope): bands above FMIN with
 # AFTER consecutive zero-birth-accept proposes stop proposing births
