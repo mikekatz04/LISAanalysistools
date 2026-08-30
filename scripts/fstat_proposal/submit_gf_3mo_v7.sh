@@ -391,7 +391,33 @@ export GF_MOVE_TIMING=1
 # >>> Set BOTH back to 1 for 2-3 iterations if a fresh detailed
 # >>> attribution is ever needed again -- the run resumes cleanly.
 export GF_MOVE_TIMING_SYNC=0
-export GB_PROP_TIMING_SYNC=0
+# GB_PROP_TIMING_SYNC 0 -> "all" (DIAGNOSTIC, user ruling 2026-08-29 --
+# run it TOGETHER with the stagger experiment rather than as a second
+# restart). Set back to 0 once two or three [GB_TIMING] lines are banked.
+#
+# "all" not "1": deviceSynchronize is CURRENT-DEVICE-ONLY, and
+# GB_FSTAT_NM_MULTIDEV=1 fans the (N,M) scorer across both GPUs, so "1"
+# would drain only one of them and the lane numbers would be wrong.
+#
+# THIS DOES NOT AFFECT SAMPLING. Sync adds device drains at span
+# boundaries for attribution only -- no RNG, proposal or acceptance
+# change -- so the stagger result (does the flagship seam stop growing)
+# is unaffected and both questions get answered in one run.
+#
+# ⚠ EXPECT A LARGE THROUGHPUT HIT, larger than the historical +2.5%
+# headline. The new interior spans (fstat_nm_transform / _lanes / _h2d /
+# _lane_score / _invert / fstat_ctr_map) sit INSIDE the
+# GB_FSTAT_CTR_BATCH loop, which runs ~1,114 batches per propose
+# (4.55 M rows / 4096). With "all" each span boundary drains BOTH
+# devices, so this adds order 10^4 syncs per propose. That is the price
+# of honest per-phase attribution on the 0.293 ms/row -- it is a
+# measurement configuration, not a run configuration.
+#
+# WHAT IT ANSWERS: read fstat_nm_transform / fstat_nm_lanes (split into
+# fstat_nm_h2d + fstat_nm_lane_score) / fstat_nm_invert / fstat_ctr_map
+# as SHARES OF fstat_ctr_solve. That decides cheaper-kernel vs fewer-rows
+# on a bucket that is 68% of the propose and ~97% dead birth slots.
+export GB_PROP_TIMING_SYNC=all
 # ---- 2026-08-15 perf batch (ALL code defaults; pinned for the run
 #      record; each knob independently revertible) ---------------------
 # De-synced in-model repeat loop (device-resident accept chain) rides
