@@ -2125,7 +2125,7 @@ class _RoutedBandEngine:
 
     @classmethod
     def make_fstat_nm_lanes(cls, comp, method_name, holder, walker_ref,
-                            *, check=False, **kwargs):
+                            *, check=False, timer=None, **kwargs):
         """All-device fan-out for the per-row F-stat ``(N, M)`` scorer.
 
         Production autopsy (v7 snapshot 2, 2026-08-27):
@@ -2154,6 +2154,25 @@ class _RoutedBandEngine:
         owning shard's view + intra index) and compared bit-for-bit,
         with per-lane forensics on the first divergence -- the
         on-cluster parity gate, mirroring ``FSTAT_SIGHET_MULTIDEV=check``.
+
+        ``timer``: optional ``gbspecialstretch._ProposeTimer``. The returned
+        ``call_NM`` then reports two sub-spans inside the move's
+        ``fstat_nm_lanes`` stage --
+
+        * ``fstat_nm_h2d`` -- ``asnumpy(params_phys)``. A FORCED DEVICE
+          SYNC, so under ``GB_PROP_TIMING_SYNC=0`` it can absorb kernels
+          queued before it (the transform, the caller's gathers) and read
+          high; under ``=1``/``=all`` it is the copy. Worth isolating
+          regardless: at 4.55 M candidate rows per propose this leg
+          host-stages every one of them.
+        * ``fstat_nm_lane_score`` -- the threaded per-device scoring and its
+          own per-lane D2H merge. This one is a genuine blocking join in
+          BOTH modes (the futures are awaited), so it is the closest thing
+          to an honest sync-off measurement in the whole centre chain.
+
+        Only the main thread is timed: the per-lane bodies run in the holder
+        thread pool and accumulating into a shared dict from several threads
+        would race.
 
         Returns ``call_NM(params_phys) -> (N, M)`` on the caller's array
         module, or ``None`` for single-shard holders (caller keeps the
@@ -2201,7 +2220,8 @@ class _RoutedBandEngine:
                 return asnumpy(N_ref), asnumpy(M_ref)
 
         def call_NM(params_phys):
-            params_host = np.atleast_2d(asnumpy(params_phys))
+            with _tspan(timer, "fstat_nm_h2d"):
+                params_host = np.atleast_2d(asnumpy(params_phys))
             n = int(params_host.shape[0])
             bounds = (n * np.arange(len(lanes) + 1)) // len(lanes)
             N_host = np.zeros((n, 4), dtype=np.float64)
@@ -2223,13 +2243,14 @@ class _RoutedBandEngine:
                       if bounds[i + 1] > bounds[i]]
             pool = (getattr(holder, "thread_pool", None)
                     if len(active) > 1 else None)
-            if pool is not None:
-                futures = [pool.submit(_score, i) for i in active]
-                for f in futures:
-                    f.result()  # re-raise lane exceptions in caller
-            else:
-                for i in active:
-                    _score(i)
+            with _tspan(timer, "fstat_nm_lane_score"):
+                if pool is not None:
+                    futures = [pool.submit(_score, i) for i in active]
+                    for f in futures:
+                        f.result()  # re-raise lane exceptions in caller
+                else:
+                    for i in active:
+                        _score(i)
             if comp_pin is not None:
                 N_ref, M_ref = _pinned(params_host)
                 if not (np.array_equal(N_host, N_ref)

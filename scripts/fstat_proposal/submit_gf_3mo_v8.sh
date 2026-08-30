@@ -512,6 +512,59 @@ export GF_MOVE_TIMING=1
 # >>> attribution is ever needed again -- the run resumes cleanly.
 export GF_MOVE_TIMING_SYNC=0
 export GB_PROP_TIMING_SYNC=0
+#
+# ---- rj_fstat_centers INTERIOR PROBE (2026-08-29) --------------------
+# WHAT IS ALREADY KNOWN (do not re-derive, and do not re-open it as a
+# "missing time" question -- that was an arithmetic error):
+#   v7 snapshot: total=1955.1s run_proposal=1810.6s
+#   rj_fstat_centers=1334.874s (68% of the propose).
+#   The "[FSTAT_CTR ...] unit precompute: ... in 149.75s" line is emitted
+#   ONCE PER BAND UNIT and the move runs NINE units per propose. The nine
+#   lines sum to ~1339 s vs the reported 1334.874 s -- the bucket closes
+#   to 0.2%. Cross-checked twice: the other _run_rj_step marks bound the
+#   per-round centre chain at <= 3.077 s, and the nine unit row counts sum
+#   to exactly picked_sources = 4,546,846.
+#   => ~99.8% of the stage is _precompute_fstat_centers -> _fstat_ctr_compute,
+#      4.55 M rows/propose at ~0.293 ms/row, ~97% of them dead birth slots,
+#      "0 at-cap excluded".
+#
+# WHAT IS NOT KNOWN, AND WHAT THIS PROBE IS FOR: what that 0.293 ms/row is
+# made of. Basis-filter/scorer kernel? Jaranowski-Krol inversion? Host
+# staging of 4.55 M rows? The answer decides the attack -- a cheaper
+# kernel vs fewer rows. rj_fstat_centers now decomposes (all NESTED, so
+# `tracked` is unchanged):
+#   unit-open precompute : fstat_ctr_select / fstat_ctr_solve /
+#                          fstat_ctr_census / fstat_ctr_audit /
+#                          fstat_ctr_pack
+#   the scorer itself    : fstat_nm_transform / fstat_nm_lanes |
+#                          fstat_nm_routed / fstat_nm_invert /
+#                          fstat_ctr_map / fstat_nm_h2d /
+#                          fstat_nm_lane_score / fstat_nm_lane_build /
+#                          fstat_ctr_miss_fallback
+#   per pick round       : rj_ctr_keep_gate / rj_ctr_birth_lookup /
+#                          rj_ctr_birth_draw / rj_ctr_death_lookup /
+#                          rj_ctr_death_dens
+# plus counters fstat_ctr_units / fstat_ctr_rows / fstat_nm_rows /
+# rj_ctr_route_{table,cache,direct} / fstat_ctr_audit_rows.
+#
+# ***READ THE SPLIT FROM A SYNC-ON PROPOSE, NOT A PRODUCTION ONE.*** The
+# TOTAL is solid either way (it is confirmed above), but the SHARES inside
+# it are not: with GB_PROP_TIMING_SYNC=0 the spans do not synchronize, so
+# a sub-stage that contains a sync point is billed for kernels launched by
+# earlier ones -- the fill_indmap_data precedent (598 s measured, 45 s
+# real). Splitting a 1,331 s interior is exactly where that bites.
+#
+#     GB_PROP_TIMING_SYNC=all   # 'all' drains EVERY run device;
+#                               # '1' drains only the current one, which
+#                               # is not enough with GB_FSTAT_NM_MULTIDEV
+#                               # fanning the scorer across both GPUs.
+#
+# Relaunch this script with that exported (and NUM_ITERATIONS small, or
+# just kill it after a couple of [GB_TIMING] lines) -- the run resumes
+# cleanly from the checkpoint, exactly as the 2026-08-28 note above says.
+# Then read fstat_nm_transform / fstat_nm_lanes (with its fstat_nm_h2d +
+# fstat_nm_lane_score) / fstat_nm_invert / fstat_ctr_map as shares of
+# fstat_ctr_solve. Leave it at 0 for production.
 # ---- 2026-08-15 perf batch (ALL code defaults; pinned for the run
 #      record; each knob independently revertible) ---------------------
 # De-synced in-model repeat loop (device-resident accept chain) rides

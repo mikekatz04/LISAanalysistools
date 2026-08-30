@@ -198,7 +198,11 @@ class _ProposeTimer:
     stage that *forces* the sync (the next ``_to_numpy`` / ``.item()`` /
     explicit synchronize). Set ``GB_PROP_TIMING_SYNC=1`` to synchronize the
     device at every span boundary instead — slightly slower overall, but
-    each stage then carries exactly its own kernel time. Either view is
+    each stage then carries exactly its own kernel time. ``=all`` does the
+    same across EVERY run device, which is what a multi-GPU box needs
+    (``deviceSynchronize`` drains only the current device, so with the
+    F-stat NM lanes fanned across both GPUs ``=1`` still leaves a queue
+    outstanding). See :func:`_prop_timer_sync_fn`. Either view is
     diagnostic: if host time dominates in stages with tiny kernels
     (``inmodel_repeats`` with few cells), the run is launch-overhead-bound
     (too few sub-bands/cells per launch to keep the GPU busy).
@@ -247,6 +251,15 @@ class _ProposeTimer:
             # on the two proposes that refit -- see
             # tests/test_fstat_grid_fit_timing.py.
             "fstat_grid_fit",
+            # NOTE: the rj_fstat_centers decomposition (_FSTAT_CTR_SUBSTAGES)
+            # is deliberately ABSENT here. Those stages are NESTED inside
+            # run_proposal / inside the rj_fstat_centers window itself;
+            # tracking them would double-count seconds run_proposal already
+            # carries. They still PRINT -- ``items`` below is every stage,
+            # not just the tracked ones -- which is all the visibility a
+            # nested stage needs. (fstat_grid_fit is in this list for the
+            # opposite reason: it is real propose time OUTSIDE every other
+            # top-level span.)
         )
         items = sorted(self.stages.items(), key=lambda kv: -kv[1])
         tracked = sum(v for k, v in self.stages.items() if k in top)
@@ -303,6 +316,143 @@ def _tmark_end(tm, name: str, t0):
     if tm._sync is not None:
         tm._sync()
     tm.add(name, time.perf_counter() - t0)
+
+
+# ---------------------------------------------------------------------------
+# rj_fstat_centers INTERIOR decomposition (2026-08-29)
+# ---------------------------------------------------------------------------
+# THE BUCKET IS REAL, AND IT IS ALREADY ACCOUNTED FOR. Record the
+# arithmetic here, because it has been mis-read once already:
+#
+#   ``[FSTAT_CTR <move>] unit precompute: ... in 149.75s`` is emitted ONCE
+#   PER BAND UNIT, and the move runs NINE units per propose. Reading a
+#   single one of those lines as the whole precompute produces a phantom
+#   ~1,185 s "unattributed" hole. There is no hole. On the v7 snapshot the
+#   NINE census lines sum to ~1,339 s against a reported
+#   ``rj_fstat_centers=1334.874s`` -- the bucket closes to 0.2%.
+#
+#   Confirmed two further ways: (a) subtracting the other ``_run_rj_step``
+#   marks bounds the per-round centre chain at <= 3.077 s, so the per-round
+#   ``_mark("rj_fstat_centers")`` contribution is negligible; (b) the nine
+#   unit row counts sum to exactly ``picked_sources`` = 4,546,846.
+#
+#   So ~99.8% of the stage is ONE call path:
+#     _precompute_fstat_centers -> _fstat_ctr_compute
+#   at 4.55 M rows per propose, ~0.293 ms/row, with ~97% of those rows
+#   dead birth slots and ``0 at-cap excluded``.
+#
+# WHY THE SUB-STAGES EXIST ANYWAY: that 0.293 ms/row is the single largest
+# lever in the move and NOBODY KNOWS WHAT IT IS MADE OF. The stages below
+# split the ~1,331 s interior into the basis-filter/scorer call
+# (``fstat_nm_lanes`` / ``fstat_nm_routed``, plus its host staging
+# ``fstat_nm_h2d`` / ``fstat_nm_lane_score``), the coordinate transform
+# (``fstat_nm_transform``), the Jaranowski-Krol inversion
+# (``fstat_nm_invert``) and the centre mapping (``fstat_ctr_map``). Which
+# of those dominates decides the attack: a cheaper kernel, or fewer rows.
+# The remaining stages cost the phases AROUND the solve so that the split
+# can be read without arithmetic (selection, census, audit, pack) and so
+# that the small per-round chain stays separable from the unit-open one.
+#
+# READING THE NUMBERS -- every sub-stage means something DIFFERENT under
+# the two sync modes. This is a general property of the timer, NOT a claim
+# about this bucket (whose total is independently confirmed above):
+#
+#   GB_PROP_TIMING_SYNC=0 (production default, free): HOST wall between
+#     boundaries. A sub-stage that contains a sync point (a ``bool()`` /
+#     ``int()`` / ``float()`` on a device array, a boolean fancy index, an
+#     ``asnumpy``) absorbs the drain of everything queued before it, so its
+#     number is an upper bound on that phase's own cost. The precedent is
+#     ``fill_indmap_data``: 598 s measured, 45 s real.
+#   GB_PROP_TIMING_SYNC=1 (current device) / =all (every run device): the
+#     device is drained at every boundary, so each sub-stage carries
+#     exactly its own kernel time.
+#
+# Since the INTERIOR split is the whole point here, and the interior is
+# where the async attribution actually bites, the first read of these
+# numbers should be a GB_PROP_TIMING_SYNC=all propose -- not to look for a
+# missing bucket, but so the shares within the 1,331 s are trustworthy.
+#
+# All of these are NESTED inside ``run_proposal`` (or, for the per-round
+# marks, inside the ``rj_fstat_centers`` window itself), so they are
+# deliberately kept OUT of ``_ProposeTimer.report``'s ``_TOP`` list --
+# adding them there would double-count seconds ``run_proposal`` already
+# carries and drive ``untracked`` negative-then-clamped. ``report`` prints
+# every stage it holds regardless of ``_TOP``, so they are visible in
+# ``[GB_TIMING]`` without being tracked.
+_FSTAT_CTR_SUBSTAGES = (
+    # -- unit-open precompute (_precompute_fstat_centers) ------------------
+    # countable-row mask + coordinate gather. FIRST sync in the span.
+    "fstat_ctr_select",
+    # the per-row F-stat centre solve (_fstat_ctr_compute); the ONLY phase
+    # the [FSTAT_CTR] census line has ever reported.
+    "fstat_ctr_solve",
+    # the census log line itself (int(subset.inds.sum()) is a sync).
+    "fstat_ctr_census",
+    # GB_FSTAT_CTR_AUDIT (armed in v7): table-vs-per-row diagnostic. Runs
+    # AFTER the census line, so its cost was inside the span but outside
+    # the census number.
+    "fstat_ctr_audit",
+    # cache-dict assembly. Pure host: the decomposition's noise floor.
+    "fstat_ctr_pack",
+    # -- shared per-row scorer, whichever caller reaches it ----------------
+    "fstat_nm_transform",       # sampling -> physical basis
+    "fstat_nm_lanes",           # multi-device (N, M) fan-out (call_NM)
+    "fstat_nm_routed",          # pinned/shard-routed (N, M) (route_fstat_ll)
+    "fstat_nm_invert",          # Jaranowski-Krol 4x4 inversion
+    "fstat_ctr_map",            # (A, F) -> (ln_center, sigma, ln_snr)
+    "fstat_nm_lane_build",      # per-unit lane adapter construction
+    # emitted from gbbands.make_fstat_nm_lanes' call_NM (nested inside
+    # fstat_nm_lanes): the forced D2H of the candidate rows, and the
+    # threaded per-device scoring + merge.
+    "fstat_nm_h2d",
+    "fstat_nm_lane_score",
+    "fstat_ctr_miss_fallback",  # live-cap reserve rows solved per round
+    # -- per-pick-round centre chain (_run_rj_step) ------------------------
+    # keep-gate + birth_k/death_k formation: three boolean fancy indexes
+    # and a bool(); the first syncs after rj_prior_gate.
+    "rj_ctr_keep_gate",
+    "rj_ctr_birth_lookup",      # table / unit cache / direct per-row
+    "rj_ctr_birth_draw",        # truncation, draw, extrinsics, density
+    "rj_ctr_death_lookup",
+    "rj_ctr_death_dens",
+)
+
+
+def _prop_timer_sync_fn(xp, gpus, mode):
+    """Resolve ``GB_PROP_TIMING_SYNC`` into a span-boundary sync callable.
+
+    * ``"0"`` (default, PRODUCTION) -> ``None``. A span costs two
+      ``perf_counter`` calls and nothing else: no device sync is added
+      anywhere on the default path, so instrumentation is free and the
+      run's behaviour is unchanged.
+    * ``"1"`` -> ``xp.cuda.runtime.deviceSynchronize``: drain the CURRENT
+      device at every boundary, so each stage carries its own kernel time.
+    * ``"all"`` -> drain EVERY run device in ``gpus``. ``deviceSynchronize``
+      is current-device-only, and with the multi-device F-stat NM lanes
+      armed (``GB_FSTAT_NM_MULTIDEV=1``, the v7 default) the sibling GPU's
+      queue survives a ``"1"`` sync -- so even the sync-on decomposition
+      would push that lane's work into a later phase. Falls back to the
+      current-device sync when no device list is available.
+
+    Kept as a module-level function (not a lambda in ``propose``) so the
+    three modes are unit-testable without a GPU.
+    """
+    mode = str(mode).strip().lower()
+    if mode in ("", "0", "off", "false"):
+        return None
+    _cur = xp.cuda.runtime.deviceSynchronize
+    if mode != "all":
+        return _cur
+    devs = [int(g) for g in (gpus or [])]
+    if not devs:
+        return _cur
+
+    def _sync_all_devices():
+        for _d in devs:
+            with xp.cuda.Device(_d):
+                _cur()
+
+    return _sync_all_devices
 
 
 def _compact_index_ranges(indices, max_groups: int = 12) -> str:
@@ -4797,10 +4947,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         ):
             try:
                 _comp, _mname = self._fstat_comp_method()
-                _call = _RoutedBandEngine.make_fstat_nm_lanes(
-                    _comp, _mname, model.analysis_container_arr,
-                    int(_wref), check=(_nm_mode == "check"),
-                    convert_to_ra_dec=False)
+                # fstat_nm_lane_build: the per-unit adapter copies the
+                # reference walker's residual + inverse-PSD rows onto EVERY
+                # run device (host-routed, forced D2H then H2D). It runs
+                # once per parity unit, immediately BEFORE the
+                # rj_fstat_centers span, and had no span of its own inside
+                # run_proposal. Cheap to name, and it is the setup half of
+                # the multi-device scorer whose per-call half
+                # (fstat_nm_lanes) is the thing being decomposed.
+                with _tspan(tm, "fstat_nm_lane_build"):
+                    _call = _RoutedBandEngine.make_fstat_nm_lanes(
+                        _comp, _mname, model.analysis_container_arr,
+                        int(_wref), check=(_nm_mode == "check"),
+                        timer=tm, convert_to_ra_dec=False)
                 if _call is not None:
                     self._fstat_nm_lanes = (int(_wref), _call)
             except Exception:
@@ -5526,15 +5685,37 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # shard (route_fstat_ll partitions by walker, and every row here
         # carries the same one). Falls through to the pinned route whenever
         # the adapter is absent or armed for a different walker.
+        # Timing: the two routes are named SEPARATELY (fstat_nm_lanes vs
+        # fstat_nm_routed) because they have completely different profiles
+        # and only one of them runs in a given configuration. Both contain
+        # a forced D2H (``asnumpy``), so even under GB_PROP_TIMING_SYNC=0
+        # they are comparatively honest -- but they still absorb whatever
+        # was queued before them; use GB_PROP_TIMING_SYNC=all to separate.
+        # NOTE route_fstat_ll's own route_host_stage / route_dispatch /
+        # route_assemble spans read ``holder._prop_timer``, which the parent
+        # ACA does NOT carry -- so the [GB_TIMING] ``route_dispatch`` number
+        # is band-engine routing only and has never included the F-stat.
+        tm = getattr(self, "_prop_timer", None)
+        if tm is not None:
+            tm.count("fstat_nm_calls", 1)
+            tm.count("fstat_nm_rows", int(params_phys.shape[0]))
         _lanes = getattr(self, "_fstat_nm_lanes", None)
         if _lanes is not None and _lanes[0] == int(walker_ref):
-            return _lanes[1](params_phys)
-        di = xp.full(params_phys.shape[0], int(walker_ref), dtype=xp.int32)
-        holder = model.analysis_container_arr
-        comp, method_name = self._fstat_comp_method()
-        return _RoutedBandEngine.route_fstat_ll(
-            comp, method_name, holder, params_phys,
-            data_index=di, noise_index=di, convert_to_ra_dec=False)
+            _t = _tmark_start(tm)
+            try:
+                return _lanes[1](params_phys)
+            finally:
+                _tmark_end(tm, "fstat_nm_lanes", _t)
+        _t = _tmark_start(tm)
+        try:
+            di = xp.full(params_phys.shape[0], int(walker_ref), dtype=xp.int32)
+            holder = model.analysis_container_arr
+            comp, method_name = self._fstat_comp_method()
+            return _RoutedBandEngine.route_fstat_ll(
+                comp, method_name, holder, params_phys,
+                data_index=di, noise_index=di, convert_to_ra_dec=False)
+        finally:
+            _tmark_end(tm, "fstat_nm_routed", _t)
 
     def _fstat_comp_method(self):
         """The (comp OBJECT, entry-point NAME) pair for per-row F-stat.
@@ -5573,15 +5754,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         from ...sampling.fstat_proposal import fstat_maximized_extrinsics
 
         xp = self.xp
+        # Sub-marks: the scorer is reached from the unit-open precompute,
+        # from the per-round direct path and from the replace move, so
+        # naming the phases HERE costs them once wherever they run.
+        tm = getattr(self, "_prop_timer", None)
         # physical layout: [A, f0, fdot, fddot, phi0, iota, psi, alpha, delta]
+        _t = _tmark_start(tm)
         x_phys = self.transform_fn.both_transforms(rows_params, xp=xp)
+        _tmark_end(tm, "fstat_nm_transform", _t)
         N_arr, M_upper = self._fstat_NM(model, x_phys, walker_ref)
+        # The Jaranowski-Krol inversion: a batched 4x4 solve + trig, all on
+        # device and all launched asynchronously. Under SYNC-OFF this mark
+        # is nearly pure LAUNCH time (the kernels drain at the next sync);
+        # under SYNC-ON it is the inversion's real cost.
+        _t = _tmark_start(tm)
         A_max, phi0_max, iota_max, psi_max, F = fstat_maximized_extrinsics(
             N_arr, M_upper)
-        return (
+        out = (
             xp.asarray(A_max), xp.asarray(phi0_max),
             xp.asarray(iota_max), xp.asarray(psi_max), xp.asarray(F),
         )
+        _tmark_end(tm, "fstat_nm_invert", _t)
+        return out
 
     def _dist_center_and_width(self, rows_params, A_max, F):
         """``(ln_center, sigma)`` of the slot-0 log proposal from the F-stat.
@@ -6857,6 +7051,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             (A[st:en], phi0[st:en], iota[st:en], psi[st:en],
              F[st:en]) = self._fstat_dist_centers(
                 model, params[st:en], walker_ref)
+        # ---- fstat_ctr_map ----------------------------------------------
+        # (A_max, F) -> the slot-0 lognormal (ln_center, sigma) + ln_snr.
+        # Small elementwise device work; expected to be a rounding error
+        # against the scorer. Named so it can be ruled OUT.
+        _t_map = _tmark_start(getattr(self, "_prop_timer", None))
         ln_center, sigma = self._dist_center_and_width(params, A, F)
         # Snapshot-drift smear (user ruling 2026-08-14): the cache reads the
         # live walker-ref residual ONCE at unit open, so the lognormal is
@@ -6873,6 +7072,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         sigma = sigma * (self._fstat_ctr_smear() if smear is None
                          else float(smear))
         ln_snr = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
+        _tmark_end(getattr(self, "_prop_timer", None), "fstat_ctr_map",
+                   _t_map)
         return phi0, iota, psi, ln_center, sigma, ln_snr
 
     @staticmethod
@@ -6913,8 +7114,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         is the cheap alternative, retired for candidate quality by the
         2026-08-26 per-row ruling without anyone measuring the gap. This
         logs that gap on a subsample of rows the precompute has ALREADY
-        solved per-row, so it costs one extra (near-free) table lookup and
-        nothing else.
+        solved per-row.
+
+        COST (corrected 2026-08-29; the earlier "one extra, near-free table
+        lookup and nothing else" here was wrong in KIND, though right in
+        order of magnitude). Per unit it runs the table lookup PLUS seven
+        delta arrays through median / p90 / max, and ``_absdiff_summary``
+        pulls every one of those 21 scalars to the host with ``float()``.
+        Measured on CPU at the 4096-row default sample: ~6.5 ms/unit, i.e.
+        ~3x the bare lookup, ~1 s per 511k-row propose -- negligible as
+        ARITHMETIC. What it is NOT free of is SYNCHRONIZATION: those 21
+        ``float()`` calls are 21 forced device syncs per unit, sitting
+        inside the ``rj_fstat_centers`` span, so under
+        ``GB_PROP_TIMING_SYNC=0`` they can pull queued kernel time INTO
+        that span. That is a caveat about the timer, not an explanation of
+        the stage: rj_fstat_centers is independently confirmed to be ~99.8%
+        the per-row solve. Its own cost is now measured by the
+        ``fstat_ctr_audit`` sub-stage; do not re-derive it by subtraction.
 
         NEVER feeds a proposal -- read-only, no sampling or
         detailed-balance consequence. Off by default
@@ -6942,6 +7158,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         step = max(n // n_aud, 1)
         sel = xp.arange(0, n, step)[:n_aud]
         p = params[sel]
+        # Audit volume, so the fstat_ctr_audit stage can be normalized per
+        # row. NB the "one extra table lookup per sampled row" reading of
+        # this method is INCOMPLETE: the lookup is followed by 7 delta
+        # arrays x 3 reductions, and _absdiff_summary pulls each result to
+        # the host with float() -- ~21 forced device syncs per unit.
+        _tm_aud = getattr(self, "_prop_timer", None)
+        if _tm_aud is not None:
+            _tm_aud.count("fstat_ctr_audit_rows", int(sel.shape[0]))
+            _tm_aud.count("fstat_ctr_audit_units", 1)
         try:
             t_phi0, t_iota, t_psi, t_lnc, _t_sig, t_lnsnr = (
                 self._fstat_ctr_table_lookup(p))
@@ -7023,9 +7248,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         the loud stale-cache RuntimeError.
         """
         xp = self.xp
+        # Sub-span decomposition of the rj_fstat_centers span (see
+        # _FSTAT_CTR_SUBSTAGES for what each number means under
+        # GB_PROP_TIMING_SYNC=0 vs =1/all). Marks, not `with` blocks, so the
+        # body keeps its indentation and its exact statement order --
+        # nothing here touches the RNG, the proposal values or acceptance.
+        tm = getattr(self, "_prop_timer", None)
         ids = subset.inds_main_band_sorter
         if int(len(ids)) == 0:
             return None
+        # ---- fstat_ctr_select -------------------------------------------
+        # Countable-row selection + the coordinate gather. Expected to be
+        # small: the census arithmetic (see _FSTAT_CTR_SUBSTAGES) already
+        # puts ~99.8% of the stage in the solve below. Named so that stays
+        # CHECKED rather than assumed -- and note the CuPy boolean fancy
+        # index ``ids[countable]`` is the first device sync inside the
+        # span, so under GB_PROP_TIMING_SYNC=0 it can absorb drain from the
+        # unit open (buffer_build, the NM lane snapshot) and read high.
+        _t_sel = _tmark_start(tm)
         # Full unit membership (ascending), kept for the lookup fallback's
         # reserve-row vs foreign-id distinction.
         unit_ids = xp.asarray(ids)
@@ -7037,13 +7277,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             countable = subset.inds | ~cap_m[ids]
             ids = ids[countable]
         params = band_sorter.coords[ids]
+        _tmark_end(tm, "fstat_ctr_select", _t_sel)
+        # ---- fstat_ctr_solve --------------------------------------------
+        # THE STAGE. The per-row F-stat centre solve is ~99.8% of
+        # rj_fstat_centers (nine per-unit census lines summing to ~1,339 s
+        # against a reported 1,334.874 s on the v7 snapshot). It is the
+        # phase the [FSTAT_CTR] census line below reports PER UNIT, so
+        # ``fstat_ctr_solve`` accumulates to the SUM of those nine numbers.
+        # Its interior -- the thing nobody has measured -- decomposes into
+        # fstat_nm_transform / fstat_nm_{lanes,routed} / fstat_nm_invert /
+        # fstat_ctr_map. ``_t0`` is opened INSIDE the mark so the census
+        # line keeps exactly its historical meaning.
+        _t_solve = _tmark_start(tm)
         _t0 = time.perf_counter()
         phi0, iota, psi, ln_center, sigma, ln_snr = self._fstat_ctr_compute(
             model, params, smear=self._unit_cache_smear())
+        _tmark_end(tm, "fstat_ctr_solve", _t_solve)
+        # ---- fstat_ctr_census -------------------------------------------
         # Per-unit precompute census (2026-08-15, job-195 diagnostic: the
         # production rj_fstat_centers stage jumped 374 -> 1953 s/propose on
         # identical code with caps/cells/rounds flat -- this line pins
         # whether the ROW POPULATION or the PER-ROW F-stat cost grew).
+        # NOTE FOR ANYONE SUMMING THESE LINES: one is emitted PER BAND UNIT
+        # and the move runs NINE units per propose. Nine lines, not one,
+        # make up rj_fstat_centers; treating a single line as the whole
+        # precompute invents a ~1,185 s phantom hole (2026-08-29).
+        # ``int(subset.inds.sum())`` is a device sync evaluated BEFORE the
+        # elapsed read, so the census line's "in %.2fs" corresponds to
+        # ``fstat_ctr_solve + fstat_ctr_census``, not to solve alone.
+        _t_cen = _tmark_start(tm)
         _n_unit = int(len(unit_ids))
         _n_rows = int(len(ids))
         _n_alive = int(subset.inds.sum()) if _n_unit else 0
@@ -7055,13 +7317,29 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _n_unit - _n_rows, _n_unit, time.perf_counter() - _t0,
             int(getattr(self, "_fstat_ctr_fallback_rows", 0)),
         )
-        # DIAGNOSTIC (GB_FSTAT_CTR_AUDIT, default off): measure the epoch
-        # table against the per-row values just solved. Read-only.
+        _tmark_end(tm, "fstat_ctr_census", _t_cen)
+        # ---- fstat_ctr_audit --------------------------------------------
+        # DIAGNOSTIC (GB_FSTAT_CTR_AUDIT, default off; ARMED IN v7): measure
+        # the epoch table against the per-row values just solved. Read-only
+        # -- it never feeds a proposal. It runs AFTER the census line, so
+        # its cost sat inside the rj_fstat_centers span but OUTSIDE the
+        # census number and was invisible until this mark. It is NOT "one
+        # extra table lookup": besides the lookup it takes 7 delta arrays
+        # through median/p90/max and pulls all 21 of those scalars to the
+        # host with ``float()``. Measured ~6.5 ms/unit on CPU (~1 s per
+        # propose) -- small against a ~1,331 s stage, but now measured
+        # rather than asserted.
+        _t_aud = _tmark_start(tm)
         try:
             self._fstat_ctr_audit(params, phi0, iota, psi, ln_center, ln_snr)
         except Exception as e:  # pragma: no cover - never kill a propose
             logger.info("%s [FSTAT_CTR_AUDIT] skipped: %r", self.name, e)
-        return {
+        _tmark_end(tm, "fstat_ctr_audit", _t_aud)
+        # ---- fstat_ctr_pack ---------------------------------------------
+        # Pure host dict assembly: the decomposition's NOISE FLOOR. If this
+        # is ever non-trivial, the surrounding numbers are drain, not work.
+        _t_pack = _tmark_start(tm)
+        out = {
             # ids is ascending by construction (arange[bool] in
             # get_subset_inds; the countable mask preserves that order) --
             # _fstat_ctr_lookup relies on it.
@@ -7071,6 +7349,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             "ln_center": ln_center, "sigma": sigma, "ln_snr": ln_snr,
             "n_miss": 0,
         }
+        _tmark_end(tm, "fstat_ctr_pack", _t_pack)
+        if tm is not None:
+            tm.count("fstat_ctr_units", 1)
+            tm.count("fstat_ctr_rows", _n_rows)
+            tm.count("fstat_ctr_atcap_excluded", _n_unit - _n_rows)
+        return out
 
     def _fstat_ctr_lookup(self, rows_ids, model=None, band_sorter=None):
         """Cache positions of main-sorter ``rows_ids`` (verified gather).
@@ -7118,6 +7402,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 "rows but the caller supplied no model/band_sorter for the "
                 "inline fallback"
             )
+        # ---- fstat_ctr_miss_fallback ------------------------------------
+        # Live-cap reserve rows exposed mid-unit: a SECOND per-row F-stat
+        # solve, inside a pick round, billed to the per-round
+        # rj_fstat_centers mark rather than to the unit-open span. Named so
+        # the two solves can never be confused for one. Its scorer phases
+        # still show up under fstat_nm_* (shared instrumentation).
+        _tm_fb = getattr(self, "_prop_timer", None)
+        _t_fb = _tmark_start(_tm_fb)
         new_vals = self._fstat_ctr_compute(
             model, band_sorter.coords[miss_ids],
             smear=self._unit_cache_smear())
@@ -7127,6 +7419,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         for name, vals in zip(self._FSTAT_CTR_FIELDS, new_vals):
             c[name] = xp.concatenate([c[name], vals])[order]
         c["n_miss"] = int(c.get("n_miss", 0)) + int(miss_ids.shape[0])
+        _tmark_end(_tm_fb, "fstat_ctr_miss_fallback", _t_fb)
+        if _tm_fb is not None:
+            _tm_fb.count("fstat_ctr_miss_rows", int(miss_ids.shape[0]))
         self._fstat_ctr_fallback_rows = (
             int(getattr(self, "_fstat_ctr_fallback_rows", 0))
             + int(miss_ids.shape[0])
@@ -7314,6 +7609,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             _gate_cap_hn = gate_hn
 
         _mark("rj_prior_gate")
+        # ---- rj_ctr_keep_gate --------------------------------------------
+        # NESTED sub-mark inside the rj_fstat_centers window (which opens
+        # HERE, at rj_prior_gate, and closes at the _mark below -- that is
+        # why the stage is far bigger than any centre arithmetic). This
+        # covers the keep gate and the birth/death index formation:
+        # ``bool(keep.any())`` plus three boolean fancy indexes, i.e. the
+        # FIRST device syncs after the prior gate -- so under SYNC-OFF it
+        # can carry the prior gate's / pick's / cap gate's drain rather
+        # than its own cost. The whole per-round chain is SMALL: on the v7
+        # snapshot the other _run_rj_step marks bound it at <= 3.077 s
+        # against a 1,334.874 s stage. These marks exist to keep it
+        # separable from the unit-open solve, not because it is the lever.
+        # The nested marks use the independent _tmark_* cursor, so the
+        # rj_fstat_centers checkpoint chain is UNCHANGED and every earlier
+        # log stays comparable.
+        _t_kg = _tmark_start(_tm_rj)
         delta_ll = cp.full_like(logp, -1e300)
         d_h = cp.zeros_like(logp)
         h_h = cp.zeros_like(logp)
@@ -7378,6 +7689,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             k_ids = xp.arange(len(ids))[keep]
             birth_k = k_ids[~alive[keep]]
             death_k = k_ids[alive[keep]]
+            _tmark_end(_tm_rj, "rj_ctr_keep_gate", _t_kg)
+            _t_kg = None
 
             def _eval(rows, phase_maximize):
                 buffer_obj.get_ll(
@@ -7443,6 +7756,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     and _snr_lim > 0.0
                 )
                 if len(birth_k):
+                    # ---- rj_ctr_birth_lookup ---------------------------
+                    # Resolving this round's birth centres, by whichever of
+                    # the three routes is live (epoch table searchsorted /
+                    # unit-cache gather + inline miss fallback / direct
+                    # per-row F-stat solve). Route counters below say which
+                    # one actually ran, so a big number can never be
+                    # attributed to the wrong machinery.
+                    _t_bl = _tmark_start(_tm_rj)
+                    if _tm_rj is not None:
+                        _tm_rj.count("rj_ctr_birth_rows", int(len(birth_k)))
+                        _tm_rj.count(
+                            "rj_ctr_route_table" if _tbl is not None
+                            else ("rj_ctr_route_cache" if _ctr is not None
+                                  else "rj_ctr_route_direct"), 1)
                     if _tbl is not None:
                         (phi0_max, iota_max, psi_max, ln_center, sigma,
                          ln_snr_b) = self._fstat_ctr_table_lookup(
@@ -7471,6 +7798,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         ln_center, sigma = self._dist_center_and_width(
                             params[birth_k], A_max, F)
                         ln_snr_b = 0.5 * xp.log(xp.clip(2.0 * F, 1.0, None))
+                    _tmark_end(_tm_rj, "rj_ctr_birth_lookup", _t_bl)
+                    # ---- rj_ctr_birth_draw -----------------------------
+                    # Everything the centres are USED for: the SNR
+                    # truncation boundary, the truncated lognormal draw,
+                    # the slot-0 write, the extrinsic pin/draw and the
+                    # forward proposal density. Timing only brackets this
+                    # block -- the draw order, the number of uniforms and
+                    # the values are untouched.
+                    _t_bd = _tmark_start(_tm_rj)
                     if _snr_trunc:
                         alpha_b = self._snr_trunc_alpha(
                             ln_snr_b, sigma, _snr_lim)
@@ -7492,6 +7828,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     _bl = self._slot0_log_proposal(
                         params[birth_k, 0], ln_center, sigma, alpha=alpha_b)
                     _fstat_factor_corr[birth_k] = -_bl - _log_range + _extr_corr_b
+                    _tmark_end(_tm_rj, "rj_ctr_birth_draw", _t_bd)
                     _mark("rj_fstat_centers")
                     # Re-evaluate the global prior at the drawn distance/angles
                     # (the earlier curr_logp used the placeholder draw); f0,
@@ -7511,6 +7848,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 if len(death_k):
                     oob_rows = xp.concatenate([oob_rows, _eval(death_k, False)])
                     _mark("rj_getll")
+                    # ---- rj_ctr_death_lookup ---------------------------
+                    # The reverse-density side: same three routes, same
+                    # caveats, separate number (a death round and a birth
+                    # round do not cost the same, and the death lookup runs
+                    # AFTER a get_ll -- so under SYNC-OFF it inherits that
+                    # kernel's drain).
+                    _t_dl = _tmark_start(_tm_rj)
+                    if _tm_rj is not None:
+                        _tm_rj.count("rj_ctr_death_rows", int(len(death_k)))
                     if _tbl is not None:
                         (phi0_d, iota_d, psi_d, ln_center_d, sigma_d,
                          ln_snr_d) = self._fstat_ctr_table_lookup(
@@ -7532,6 +7878,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         ln_center_d, sigma_d = self._dist_center_and_width(
                             params[death_k], Ad, Fd)
                         ln_snr_d = 0.5 * xp.log(xp.clip(2.0 * Fd, 1.0, None))
+                    _tmark_end(_tm_rj, "rj_ctr_death_lookup", _t_dl)
+                    # ---- rj_ctr_death_dens -----------------------------
+                    _t_dd = _tmark_start(_tm_rj)
                     # Reverse (birth-direction) density at the removed
                     # source's own center: the SAME per-row truncation
                     # boundary as the birth side, so the pair is exactly
@@ -7551,6 +7900,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         + self._pe_death_extr_corr(
                             params, death_k, phi0_d, iota_d, psi_d,
                             ln_snr_d))
+                    _tmark_end(_tm_rj, "rj_ctr_death_dens", _t_dd)
                     _mark("rj_fstat_centers")
             elif self.phase_maximize and len(birth_k):
                 # Maximise the birth phase; deaths keep the true phase.
@@ -7647,6 +7997,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # rj_birth_prior + rj_getll + rj_score_rest (sum the four to compare
         # against old logs). rj_score_rest = delta-ll assembly, SNR gate and
         # debug hooks after the scoring calls.
+        # Close rj_ctr_keep_gate when NOTHING was keepable this round (the
+        # branch above never ran, so the nested mark is still open). No-op
+        # when it was already closed -- _t_kg is None then.
+        _tmark_end(_tm_rj, "rj_ctr_keep_gate", _t_kg)
+        _t_kg = None
         _mark("rj_score_rest")
         beta = band_temps[picked["band_inds"], picked["temp_inds"]]
         factors = band_sorter.factors[ids]
@@ -14065,11 +14420,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # Per-propose stage timing (GPU-efficiency diagnosis): one INFO line
         # per propose with the sorted stage breakdown. GB_PROP_TIMING_SYNC=1
-        # synchronizes the device at every span boundary so device work is
-        # attributed to the launching stage (see _ProposeTimer docstring).
+        # synchronizes the CURRENT device at every span boundary so device
+        # work is attributed to the launching stage; =all drains every run
+        # device, which is what a multi-GPU box needs before any sub-stage
+        # number can be trusted (see _prop_timer_sync_fn and the
+        # _FSTAT_CTR_SUBSTAGES note). =0 (default) adds no sync at all.
         _tm_sync = None
-        if self.backend.uses_cupy and os.environ.get("GB_PROP_TIMING_SYNC", "0") == "1":
-            _tm_sync = self.xp.cuda.runtime.deviceSynchronize
+        if self.backend.uses_cupy:
+            _tm_sync = _prop_timer_sync_fn(
+                self.xp,
+                getattr(model.analysis_container_arr, "gpus", None),
+                os.environ.get("GB_PROP_TIMING_SYNC", "0"),
+            )
         self._prop_timer = tm = _ProposeTimer(sync_fn=_tm_sync)
         # Tempering-cadence census: every propose of this branch ticks the
         # shared counter (see _temper_cadence_fire).
