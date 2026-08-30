@@ -1291,7 +1291,44 @@ export GB_CAP_STAGGER=1
 #   occupancy, and the thing it must exceed (a transient double-occupancy
 #   during handover) did not change when the cell halved.
 export GB_CAP_CELL_MAX=20
-export GB_CAP_INMODEL_HEADROOM=2
+#
+# ── SUPERSEDED 2026-08-30. The block above reasons about the divisor-2
+# geometry (two mid-band cap boundaries per band, "when the cell halved").
+# Under GB_CAP_DIVISOR=1 + STAGGER there is ONE cap boundary per band, at
+# its midpoint, and the straddling cell is centred on the SEAM.
+#
+# 2 -> 0: ENFORCE CAP-CELL OCCUPANCY FOR IN-MODEL (user ruling). Sub-band
+# boundaries stay PERMEABLE -- the N/4 bin leak in _run_in_model_repeats
+# (``new_bin < lo_s - n4_s``) is untouched, and GB_BAND_WINDOW_STRICT
+# governs the RJ window, not this. A source may still walk across a
+# sub-band edge; what it may no longer do is walk into a cap cell that is
+# already at capacity.
+#
+# MEASURED, first hour of the 2026-08-30 run (row 2, the first GB propose):
+# 555 cap cells held two leaves, one either side of a sub-band seam. Those
+# doubles CANNOT have been born:
+#   - the cap armed 08:28:41, before the grid fit and all births;
+#   - only bands c-1 and c can reach cell c, and 555/555 doubles had
+#     |delta band| = 1 with 0/555 sharing a residue mod GB_BAND_UNIT_STRIDE
+#     -- so the two bands NEVER co-open and two births into one cell inside
+#     a single unit is geometrically impossible;
+#   - a later unit's birth is blocked: the at-cap mask is rebuilt at every
+#     unit open and applied, exclusions growing 213,239 -> 1,462,467.
+# By elimination the second leaf WANDERED IN, crossing the cap edge at the
+# sub-band midpoint into a cell already at cap -- which headroom 2
+# explicitly permits. Occupancy topped out at exactly 2, never 3: a gate
+# holding at cap + headroom, not a gate that was missing.
+#
+# So the birth gate and the staggered grid are working, and this one knob
+# manufactured every seam double. 1 does NOT help (cap + 1 = 2 is the
+# observed state); only 0 closes it.
+#
+# ACCEPTED RISK: at 0 a source cannot enter an occupied cell at all, so a
+# seam pair resolves by one leaf DYING rather than by the two merging.
+# Deaths stay proposable in over-cap cells and a leaf still moves freely
+# within its own cell, which is the intended mechanism: the cap forces one
+# source per straddling cell, and tempering handles the mid-band pairs.
+export GB_CAP_INMODEL_HEADROOM=0
 export GB_SEARCH_CAP_QUIESCENT=1
 # ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
 #      so the store's provenance is unambiguous) ----
