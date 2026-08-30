@@ -750,6 +750,69 @@ def _format_unit_scan_schedule(starts, directions, units, name=""):
     )
 
 
+def tempering_swap_cap_ok(occ_a, occ_b, from_band_a, from_band_b, cap):
+    """Would a band-swap leave every affected cap cell within cap?
+
+    THE HOLE THIS CLOSES (user diagnosis 2026-08-30). Tempering exchanges a
+    whole ``(temp, walker, band)`` cell between rungs -- "every source of
+    both cells trades its temperature" -- and NOTHING in ~700 lines of
+    ``run_tempering`` / ``_vertical_swap_sweep`` / ``_tempering_swap_grid``
+    / ``_permute_walkers_for_swaps`` reads a cap. That was SAFE while cap
+    cells were ALIGNED with sub-bands: a band swap then moved a cell's
+    entire contents, so occupancy transferred exactly and could never
+    exceed cap. **Staggering split each band across two cells and silently
+    removed that invariant** -- a swap now moves PART of two cells, so
+    "swap down from two neighbouring sub-bands" can load two sources into
+    one straddling cell with no gate anywhere in the path.
+
+    That is the third route into the cold chain. The RJ birth gate and the
+    in-model drift gate both hold (measured: ``capped`` 859,590 births
+    rejected in one propose; closing the in-model route changed nothing),
+    which is exactly why auditing those two found nothing.
+
+    Arrays are per candidate swap pair, shape ``(npair, ncells_affected)``
+    -- at ``cap_divisor == 1`` a band touches exactly the two cells that
+    share its edges, so ``ncells_affected == 2``:
+
+    * ``occ_a`` / ``occ_b`` -- current occupancy of those cells on each
+      side of the swap (side A = one ``(temp, walker)``, side B = the
+      other);
+    * ``from_band_a`` / ``from_band_b`` -- how many of those come from the
+      band being swapped. Everything else in the cell stays put, which is
+      the whole point: the NEIGHBOUR band's contribution does not move.
+    * ``cap`` -- the per-cell cap (caps are per cell, not per rung, so one
+      array serves both sides).
+
+    Post-swap each side keeps its non-swapped remainder and receives the
+    partner's band contribution. Both sides are checked because search
+    caps bind at EVERY temperature.
+
+    THIS IS A SEARCH-ONLY CONSTRAINT, NOT A CORRECTNESS FIX (user
+    correction 2026-08-30). The RJ ``curr_logp = -inf`` cap gate is a
+    PROPOSAL-level veto on birth rows; it is not a prior term, and
+    tempering's ratio is pure likelihood --
+    ``(b_cold - b_hot) * (ll_ref[hot] - ll_ref[cold])`` -- so the cap has
+    never entered a swap's acceptance and cannot be said to be "already in
+    the target". Vetoing a swap here ADDS a constraint the sampled density
+    does not carry. That is admissible under the search policy (search
+    does not need detailed balance) and must NOT be carried into PE.
+
+    DISARMED CAPS ARE UNCONSTRAINED. ``-1`` is the disarmed sentinel, and
+    PE runs with every cap disarmed, so a naive ``post <= cap`` would read
+    ``post <= -1`` and reject EVERY swap in PE. Negative caps are treated
+    as no limit.
+
+    Returns a per-pair bool: True = the swap is admissible.
+    """
+    xp = get_array_module(occ_a)
+    post_a = occ_a - from_band_a + from_band_b
+    post_b = occ_b - from_band_b + from_band_a
+    free = cap < 0                       # disarmed sentinel -> no limit
+    ok_a = free | (post_a <= cap)
+    ok_b = free | (post_b <= cap)
+    return xp.all(ok_a & ok_b, axis=-1)
+
+
 def _cap_diag_on() -> bool:
     """``GB_CAP_DIAG`` (default OFF) -- seam-double forensics.
 
@@ -10614,6 +10677,36 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # reference test breaks for a reason unrelated to correctness.
         u = self._temper_rng.random(int(paccept.shape[0]))
         acc = paccept >= xp.log(xp.asarray(u))
+        # ---- CAP GATE on the swap (user diagnosis 2026-08-30) ------------
+        # A swap trades EVERY source of both (temp, walker, band) cells.
+        # While cap cells were ALIGNED with sub-bands that moved a cell's
+        # whole contents and occupancy transferred exactly. STAGGERING
+        # splits a band across two cells, so "a swap down from two
+        # neighbouring sub-bands" can load two sources into one straddling
+        # cell -- and nothing in ~700 lines of tempering reads a cap.
+        # This is the third route into the cold chain; RJ births and
+        # in-model drift are both gated and both measured clean.
+        #
+        # SEARCH-ONLY, and deliberately so: the RJ ``-inf`` cap is a
+        # PROPOSAL veto on birth rows, not a prior, and this ratio is pure
+        # likelihood -- so the cap was never in the swap's target and this
+        # ADDS a constraint. Admissible because search does not need
+        # detailed balance; inert in PE, where every cap is disarmed and
+        # the predicate is vacuously True.
+        if self._temper_cap_gate_on() and self._cap_leaf_cap is not None:
+            try:
+                _cens = self._cap_swap_census(band_sorter)
+                _ok = self._swap_cap_ok(
+                    _cens, t_i[hot], w_i[hot], t_i[cold], w_i[cold],
+                    b_i[hot])
+                _nv = int((acc & ~_ok).sum())
+                if _nv and census is not None:
+                    census["cap_vetoed"] = census.get("cap_vetoed", 0) + _nv
+                acc = acc & _ok
+            except Exception as _e:  # never break a sweep on the gate
+                logger.warning(
+                    "[GB_CAP_TEMPER %s] vertical swap cap gate skipped: %r",
+                    self.name, _e)
         # ONE data-dependent sync for the accept set; integer gathers after
         # (the boolean getitems each re-synced). Orchestration audit
         # 2026-08-27: this sweep was ~51 of the 70 ms/repeat-step.
@@ -12806,6 +12899,38 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     sel = paccept > raccept
                     # ONE host pull of the accept mask per pair; every
                     # host-side consumer below derives from it.
+                    # ---- CAP GATE on the permuted swap ------------------
+                    # Same hole as the vertical sweep (see there): a band
+                    # swap moves PART of two staggered cells, so two
+                    # neighbouring sub-bands can swap a pair into one
+                    # straddling cell with no cap anywhere in the path.
+                    # Rejected pairs fall through to the existing revert
+                    # below (``~_sel_h`` -> swap_template_slots), so this
+                    # needs no new unwind. Search-only; vacuous in PE.
+                    if (self._temper_cap_gate_on()
+                            and self._cap_leaf_cap is not None):
+                        try:
+                            _cens = self._cap_swap_census(band_sorter)
+                            _bnd = band_inds_now[:, 0]
+                            _n = int(_bnd.shape[0])
+                            _ok = self._swap_cap_ok(
+                                _cens,
+                                cp.full(_n, i2, dtype=cp.int64),
+                                walker_inds_now[:, i2],
+                                cp.full(_n, i1, dtype=cp.int64),
+                                walker_inds_now[:, i1],
+                                _bnd,
+                            )
+                            _nv = int((sel & ~_ok).sum())
+                            if _nv:
+                                self._temper_cap_vetoed = (
+                                    getattr(self, "_temper_cap_vetoed", 0)
+                                    + _nv)
+                            sel = sel & _ok
+                        except Exception as _e:
+                            logger.warning(
+                                "[GB_CAP_TEMPER %s] permuted swap cap gate "
+                                "skipped: %r", self.name, _e)
                     _sel_h = _to_numpy(sel)
                     _sel_idx_h = np.where(_sel_h)[0]
                     _sel_idx = cp.asarray(_sel_idx_h)
@@ -13410,6 +13535,75 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     # two conditions are mutually exclusive. At p == 0 every helper
     # returns (primary, None, None) and all downstream code reduces to the
     # exact-partition expressions bit-identically.
+
+    def _temper_cap_gate_on(self) -> bool:
+        """``GB_CAP_TEMPER_GATE`` (default ON at K=1+stagger, else OFF).
+
+        Only the midpoint-to-midpoint grid needs it, and only there is the
+        band->cell split cheap: a band touches exactly cells ``b`` and
+        ``b+1``. At ``cap_divisor >= 2`` a band spans ``K+1`` cells and the
+        census below would have to widen -- not built, so the gate stays
+        off there rather than silently half-policing.
+        """
+        if self._cap_is_band_grid or self.cap_divisor != 1:
+            return False
+        return os.environ.get("GB_CAP_TEMPER_GATE", "1") == "1"
+
+    def _cap_swap_census(self, band_sorter):
+        """``(counts, band_lo, band_hi, cap)`` for the tempering cap gate.
+
+        * ``counts`` -- ``(ntemps*nwalkers*ncells,)`` alive occupancy, the
+          same census the birth gate reads;
+        * ``band_lo`` / ``band_hi`` -- ``(ntemps*nwalkers*nbands,)``, how
+          many of band ``b``'s alive sources at ``(t, w)`` sit in cell
+          ``b`` (its lower half) versus cell ``b+1`` (its upper half).
+          A band swap moves exactly these; everything else in the two
+          affected cells belongs to the NEIGHBOUR bands and stays put --
+          which is the whole reason a swap can overfill a straddling cell.
+        """
+        xp = get_array_module(band_sorter.band_inds)
+        cells = self._sorter_cap_cells(band_sorter)
+        flat = self._cap_flat_index(
+            band_sorter.temp_inds, band_sorter.walker_inds, cells)
+        alive = band_sorter.inds
+        nbins = self.ntemps * self.nwalkers * self.num_cap_cells
+        counts = xp.bincount(flat[alive], minlength=nbins)[:nbins]
+        bflat = self._band_flat_index(
+            band_sorter.temp_inds, band_sorter.walker_inds,
+            band_sorter.band_inds)
+        nbb = self.ntemps * self.nwalkers * self.num_bands
+        upper = cells > band_sorter.band_inds     # K=1: cell b+1 vs cell b
+        lo = xp.bincount(bflat[alive & ~upper], minlength=nbb)[:nbb]
+        hi = xp.bincount(bflat[alive & upper], minlength=nbb)[:nbb]
+        return counts, lo, hi, xp.asarray(self._cap_leaf_cap)
+
+    def _swap_cap_ok(self, census, t_a, w_a, t_b, w_b, bands):
+        """Per-pair bool: may this band swap happen without exceeding cap?
+
+        ``(t_a, w_a)`` and ``(t_b, w_b)`` are the two sides -- the vertical
+        sweep shares a walker, the permuted path does not, so both are
+        passed explicitly.
+        """
+        counts, lo, hi, cap = census
+        xp = get_array_module(bands)
+        b = bands.astype(xp.int64)
+        c0 = xp.clip(b, 0, self.num_cap_cells - 1)
+        c1 = xp.clip(b + 1, 0, self.num_cap_cells - 1)
+        cells = xp.stack([c0, c1], axis=-1)
+
+        def _occ(t, w):
+            return xp.stack([
+                counts[self._cap_flat_index(t, w, c0)],
+                counts[self._cap_flat_index(t, w, c1)],
+            ], axis=-1)
+
+        def _fromband(t, w):
+            f = self._band_flat_index(t, w, b)
+            return xp.stack([lo[f], hi[f]], axis=-1)
+
+        return tempering_swap_cap_ok(
+            _occ(t_a, w_a), _occ(t_b, w_b),
+            _fromband(t_a, w_a), _fromband(t_b, w_b), cap[cells])
 
     def _cap_cell_members(self, band_inds, freqs_hz, resolve_band=False):
         """``(primary, neighbour, has_neighbour)`` cap-cell membership.
