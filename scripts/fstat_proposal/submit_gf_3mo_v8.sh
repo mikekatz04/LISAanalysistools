@@ -1522,19 +1522,40 @@ export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explic
 # picks this up against the existing epoch cache.
 # alpha=1 restores the previous behaviour bit-identically.
 export FSTAT_PEAK_WEIGHT_ALPHA=0.5
-# HIERARCHICAL BIRTH DRAW (v3): pick a CAP CELL uniformly, then draw within
-# it with w ~ F**alpha. Unset, this tracks GB_CAP_DIVISOR; pinned here so
-# the draw grid is explicit and can be decoupled from the cap grid later.
-# Set to 1 to fall back to the historical global w ~ F**alpha mixture.
-# Checked on the epoch-0 peak set: at K=32, 95% of peaks still sit in a
-# multi-peak cell (median 3, max 21), so the F**0.5 preference keeps real
-# work to do INSIDE each cell -- this equalises across the band without
-# degenerating into flat weighting.
+# HIERARCHICAL BIRTH DRAW: pick a STRATUM uniformly, then draw within it
+# with w ~ F**alpha. K = strata PER SUB-BAND.
+#
+# K 32 -> 1 (user ruling 2026-08-29): "the fstat proposal should probably
+# just group by sub-band". ONE STRATUM PER SUB-BAND. Only one RJ source is
+# proposed per sub-band per round (serial-within-band scheduling), so the
+# sub-band is the unit a birth actually competes in -- "those are the
+# effective rj limits as well". Sub-dividing it over-served the sparse
+# parts of a sub-band relative to the dense ones, for a partition that
+# corresponds to nothing physical: at K=32 a stratum was 1.7361e-5/32 =
+# ~4.2 FD bins, far narrower than a source's ~+-16-bin support, and the
+# recorded epoch-0 check (median 3 peaks per occupied cell, max 21) means
+# the draw was close to flat-per-peak. At K=1 the anti-starvation motive
+# is still met -- mass is equalised across the 1232 occupied SUB-BANDS --
+# while the F**alpha preference now does real work among the many peaks
+# inside each one, which is what it was for.
+#
+# NOT A COST KNOB. rj_fstat_centers (61% of an iteration) is a per-row
+# solve and does not know this exists; K only sets the birth PROPOSAL
+# density.
+#
+# The strata are derived from band_edges (2026-08-29). They used to be
+# np.linspace(be[0], be[-1], nb*K+1) -- identical on this uniform band
+# grid, but equal to the sub-bands only by luck and to the STAGGERED cap
+# cells never, despite the old comment above calling them cap cells. The
+# env default also no longer tracks GB_CAP_DIVISOR: a cap knob must not
+# silently re-stratify the RJ birth proposal.
+#
+# Set to 0 for the historical global w ~ F**alpha mixture.
 # Implemented as flat composite weights, w_j = (1/N_occupied) *
-# F_j**alpha / sum_cell(F**alpha), so StackedFStatProposal4D's rvs AND
+# F_j**alpha / sum_stratum(F**alpha), so StackedFStatProposal4D's rvs AND
 # logpdf stay mutually exact by construction (both read self.weights) --
 # the RJ acceptance ratio is never at the mercy of two implementations.
-export FSTAT_PEAK_WEIGHT_CELLS=32
+export FSTAT_PEAK_WEIGHT_CELLS=1
 # Slab 5 (user ruling): measured-safe (+-1 layer holds >=1-1e-7 of tone
 # energy; 5 = 2x that need) and ~30%% smaller band buffers than the AUTO 7.
 # Smoke 2 exonerated the slab as the VGB [GB_CELL_LL] growth cause (growth
