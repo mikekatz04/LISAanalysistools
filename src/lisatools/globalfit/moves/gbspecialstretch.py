@@ -750,6 +750,67 @@ def _format_unit_scan_schedule(starts, directions, units, name=""):
     )
 
 
+def _cap_diag_on() -> bool:
+    """``GB_CAP_DIAG`` (default OFF) -- seam-double forensics.
+
+    WHY THIS EXISTS (2026-08-30). Cap cells are capped at 1 and the
+    staggered grid puts each sub-band seam at a cell CENTRE, so a pair
+    straddling a seam shares one cell and the cap should forbid it. It
+    does not: 528 cells held two leaves, one either side of a seam, at
+    5.1x the chance rate at duplication separation. Every static path
+    checks out --
+
+      * the cap arms before any birth;
+      * the occupancy census is cap-cell indexed end to end
+        (``_cap_cell_members`` -> ``_cap_cell_index``, ``_cap_flat_index``
+        x ``num_cap_cells``, ``cap[cap_inds]`` on the per-cell array);
+      * the scoring gate uses the DRAWN f0 (``_f0_prop``), not the dead
+        slot's stale coords, and rejected 859,590 births in one propose;
+      * the pick-pool exclusion is applied (``extra_bool``);
+      * the two bands that can reach one cell differ by exactly 1 and
+        NEVER share a residue mod ``GB_BAND_UNIT_STRIDE``, so they never
+        co-open and cannot both birth into the cell in one round;
+      * closing the in-model route (``GB_CAP_INMODEL_HEADROOM=0``)
+        changed nothing -- 559 -> 531 cells.
+
+    So the route is dynamic, and reading more code has now been wrong
+    twice. This counts the thing directly instead of inferring it:
+    ACCEPTED BIRTHS WHOSE DESTINATION CELL WAS ALREADY AT CAP in the very
+    census the gate scored against. If it is non-zero the gate leaks and
+    the log says in which move and how often; if it is zero, births are
+    exonerated and the leaves arrive by some third route.
+
+    Read-only: counters only, no proposal, density or acceptance touched.
+    """
+    return os.environ.get("GB_CAP_DIAG", "0") == "1"
+
+
+def cap_diag_birth_violations(counts, cap_per_cell, flat, cells):
+    """``(n_births, n_into_at_cap, n_same_flat_repeats)``.
+
+    ``counts`` is the occupancy census the gate scored against, ``flat``
+    and ``cells`` the accepted births' flat and cap-cell indices.
+
+    * ``n_into_at_cap`` -- births whose destination cell ALREADY held
+      ``>= cap``. The gate sets ``curr_logp = -inf`` for exactly these, so
+      a non-zero count means the enforcement was bypassed, not merely
+      out-voted.
+    * ``n_same_flat_repeats`` -- births beyond the first landing in the
+      SAME ``(temp, walker, cell)`` within one scored batch. Serial
+      -within-band plus the residue stride is supposed to make this
+      impossible; if it fires, the round is racing itself.
+
+    Pure and array-module agnostic so it is unit-testable off-GPU.
+    """
+    xp = get_array_module(flat)
+    n = int(flat.shape[0])
+    if n == 0:
+        return 0, 0, 0
+    into = int((counts[flat] >= cap_per_cell[cells]).sum())
+    _, ct = xp.unique(flat, return_counts=True)
+    return n, into, int((ct - 1).sum())
+
+
 def _inmodel_cap_headroom() -> int:
     """``GB_CAP_INMODEL_HEADROOM`` (default 2) -- one reader, two paths.
 
@@ -4020,6 +4081,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     sp.get("kernel", 0), sp.get("deaths", 0),
                     sp.get("death_acc", 0))
                 self._rj_split = None
+            # ---- GB_CAP_DIAG report (read-only) --------------------------
+            # THE DECISIVE LINE. into_at_cap > 0 => the birth gate leaked
+            # and births ARE the route; == 0 => births are exonerated and
+            # the seam doubles arrive some other way. same_flat_repeat > 0
+            # => two births into one (temp, walker, cell) inside a single
+            # scored batch, which serial-within-band + the residue stride
+            # is supposed to make impossible.
+            _cd = getattr(self, "_cap_diag_acc", None)
+            if _cd:
+                logger.info(
+                    "[GB_CAP_DIAG %s] accepted births %d over %d scored "
+                    "batches: INTO AN AT-CAP CELL %d (%.4f%%), same-cell "
+                    "repeats within a batch %d || COLD: births %d, "
+                    "into-at-cap %d, same-cell repeats %d",
+                    self.name, _cd.get("births", 0), _cd.get("rounds", 0),
+                    _cd.get("into_at_cap", 0),
+                    100.0 * _cd.get("into_at_cap", 0)
+                    / max(_cd.get("births", 0), 1),
+                    _cd.get("same_flat_repeat", 0),
+                    _cd.get("cold_births", 0),
+                    _cd.get("cold_into_at_cap", 0),
+                    _cd.get("cold_same_flat_repeat", 0),
+                )
+                self._cap_diag_acc = None
+                self._diag_gate = None
             # rj_replace's own swap census (populated only by
             # _run_replace_step; no-op for every other move).
             self._replace_census_report()
@@ -7613,6 +7699,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
             _split_over_cap = (~alive) & over_cap
             curr_logp[(~alive) & over_cap] = -np.inf
+            # GB_CAP_DIAG reads the gate's OWN census + cap array, so the
+            # probe cannot disagree with the thing it is auditing.
+            if _cap_diag_on():
+                self._diag_gate = (cell_counts, cap_xp)
             # The accept block's cap-transition budget needs the SAME cells.
             _gate_cap_cells = cap_cells_gate
             _gate_cap_nb = gate_nb
@@ -8134,6 +8224,39 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             birth_acc = accept & (~alive)
             death_acc = accept & alive
+
+            # ---- GB_CAP_DIAG: did a birth land in an at-cap cell? --------
+            # Counts against the SAME census and cap array the gate scored
+            # with (``cell_counts`` / ``cap_xp`` stashed as _diag_gate_*),
+            # so a non-zero ``into`` is the gate being bypassed rather than
+            # a different opinion about occupancy. See _cap_diag_on.
+            _dg = getattr(self, "_diag_gate", None)
+            if _cap_diag_on() and _dg is not None and _gate_cap_cells is not None:
+                try:
+                    _dc, _dcap = _dg
+                    _bcells = _gate_cap_cells[birth_acc]
+                    _bflat = self._cap_flat_index(
+                        t_i[birth_acc], w_i[birth_acc], _bcells)
+                    _nb, _into, _rep = cap_diag_birth_violations(
+                        _dc, _dcap, _bflat, _bcells)
+                    _d = getattr(self, "_cap_diag_acc", None) or {}
+                    _d["births"] = _d.get("births", 0) + _nb
+                    _d["into_at_cap"] = _d.get("into_at_cap", 0) + _into
+                    _d["same_flat_repeat"] = _d.get("same_flat_repeat", 0) + _rep
+                    _d["rounds"] = _d.get("rounds", 0) + 1
+                    # cold-only twin: the chain the seam doubles were measured on
+                    _cm = t_i[birth_acc] == 0
+                    if bool(_cm.any()):
+                        _cn, _ci, _cr = cap_diag_birth_violations(
+                            _dc, _dcap, _bflat[_cm], _bcells[_cm])
+                        _d["cold_births"] = _d.get("cold_births", 0) + _cn
+                        _d["cold_into_at_cap"] = _d.get("cold_into_at_cap", 0) + _ci
+                        _d["cold_same_flat_repeat"] = (
+                            _d.get("cold_same_flat_repeat", 0) + _cr)
+                    self._cap_diag_acc = _d
+                except Exception as _e:  # diagnostic only -- never break a run
+                    logger.warning("[GB_CAP_DIAG %s] birth probe skipped: %r",
+                                   self.name, _e)
 
             # Live cap-transition budget adjustment (user design
             # 2026-08-14; invariant: cell_counts == picked + currently

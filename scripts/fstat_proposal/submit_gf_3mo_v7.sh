@@ -1485,6 +1485,37 @@ export GB_FSTAT_PERROW_UNIT_CACHE=1
 # multi-device lane rebalance is the remaining lever.
 # =0 (or unset) disables; any positive integer sets the sample size.
 export GB_FSTAT_CTR_AUDIT=1        # 4096-row sample per unit
+# ---- GB_CAP_DIAG: seam-double forensics (v7 test bed only) -----------------
+# THE OPEN QUESTION. Cap cells are capped at 1 and the staggered grid puts
+# every sub-band seam at a cell CENTRE, so a pair straddling a seam shares
+# one cell and the cap must forbid it. It does not: 528 cells held two
+# leaves, one either side of a seam, at 5.1x the chance rate at duplication
+# separation (5-25 bins: 63 at sub-band edges / 6.09x, vs 21 at cap-cell
+# edges / 2.03x -- 3:1, and the pathology is specifically at SUB-BAND
+# edges, which sit mid-cap-cell).
+#
+# Every static path audits CLEAN: cap armed before any birth; census
+# cap-cell indexed end to end; the scoring gate uses the DRAWN f0 and
+# rejected 859,590 births in one propose; the pick-pool exclusion is
+# applied; the two bands that can reach one cell differ by exactly 1 and
+# never share a residue mod GB_BAND_UNIT_STRIDE, so they cannot both birth
+# into it in one round. And closing the in-model route
+# (GB_CAP_INMODEL_HEADROOM 2 -> 0) changed nothing: 559 -> 531 cells.
+#
+# Reading the code has now been wrong twice, so this COUNTS the event:
+# accepted births whose destination cell was already at cap in the very
+# census the gate scored against.
+#   into_at_cap > 0  -> the gate leaks; births ARE the route, and the line
+#                       names the move and the rate.
+#   into_at_cap == 0 -> births are exonerated and the second leaf arrives
+#                       by a route neither reading found.
+# same_flat_repeat > 0 -> two births into one (temp, walker, cell) inside a
+# single scored batch, which serial-within-band + the residue stride is
+# supposed to make impossible.
+#
+# Read-only: counters only, no proposal, density or acceptance touched.
+# One [GB_CAP_DIAG] line per move per propose. Turn OFF once answered.
+export GB_CAP_DIAG=1
 #
 # AUDIT VERDICT (2026-08-29, first staggered restart, 18 unit lines):
 # THE TABLE CANNOT REPLACE THE SOLVE. Medians dphi0 1.21-1.29 rad,
