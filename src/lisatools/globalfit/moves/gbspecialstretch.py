@@ -11602,6 +11602,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         _swap_cens = (
             self._cap_swap_census(band_sorter)
             if self._temper_cap_gate_on() else None)
+        # ---- ONE CENSUS, THREE WRITERS (2026-08-30) --------------------
+        # The drift gate and the swap gate used to keep SEPARATE occupancy
+        # arrays, each updated only by its own accepts, so either could
+        # read a count that was low by one and admit a swap it should have
+        # vetoed. The concrete sneak: a source drifts across its band's
+        # midpoint into cell c (drift gate allows it, cell c was empty, and
+        # updates ITS census); a vertical swap for the neighbouring band
+        # then reads the SWAP census, still says cell c is empty, and
+        # accepts -- cell c ends with two, one from each adjacent band.
+        # That is what the 53 surviving cross-seam doubles look like.
+        #
+        # They now share ONE ``counts`` array: the drift gate writes it via
+        # _cap_covering_transition_scatter, the swap gates via
+        # _cap_swap_apply, and the lower/upper split via
+        # _cap_lohi_transition below. Sharing the ARRAY (not a copy) is the
+        # whole mechanism -- do not reintroduce a second allocation here.
+        if _dg is not None and _swap_cens is not None:
+            _dg = (_swap_cens[0], _dg[1])
         # FUSED GATE/ACCEPT KERNELS (GB_INMODEL_ACCEPT_KERNEL, default OFF).
         # Block-scope scratch + the casted per-half index arrays, or None to
         # run the historical python chain. Every device counter the kernel
@@ -11995,6 +12013,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             _dg[0], t_s, w_s,
                             _dg_cur_memb, _dg_new_memb, accept,
                         )
+                        # Shared-census third writer: counts is handled
+                        # above, but the swap gate also reads the per-band
+                        # lower/upper split, and a drift across the band's
+                        # midpoint moves a source between those buckets.
+                        if _swap_cens is not None:
+                            try:
+                                self._cap_lohi_transition(
+                                    _swap_cens[1], _swap_cens[2],
+                                    t_s, w_s, b_s,
+                                    _dg_cur_memb[0], _dg_new_memb[0],
+                                    accept,
+                                )
+                            except Exception as _e:
+                                logger.warning(
+                                    "[GB_CAP_TEMPER %s] lo/hi transition "
+                                    "skipped: %r", self.name, _e)
                     # One pooled survivor per cell (serial-within-band), so the
                     # fancy-index += is elementwise; rejected rows add an exact
                     # 0.0 / False.
@@ -13623,6 +13657,38 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         lo = xp.bincount(bflat[alive & ~upper], minlength=nbb)[:nbb]
         hi = xp.bincount(bflat[alive & upper], minlength=nbb)[:nbb]
         return counts, lo, hi, xp.asarray(self._cap_leaf_cap)
+
+    def _cap_lohi_transition(self, lo, hi, t, w, b, cur_cell, new_cell,
+                             accept):
+        """Keep the per-band lower/upper split current across IN-MODEL drift.
+
+        The third writer of the shared census. ``counts`` is already
+        maintained on in-model crossings by
+        :meth:`_cap_covering_transition_scatter`, but ``lo``/``hi`` -- how
+        many of band ``b``'s sources sit in cell ``b`` versus ``b+1`` --
+        were not, and :meth:`_cap_swap_apply` reads them to decide what a
+        swap moves. A source drifting across its band's MIDPOINT changes
+        that split without changing its band, so leaving lo/hi stale makes
+        the swap gate mis-account the very cells it is policing.
+
+        At ``cap_divisor == 1`` a band's sources can only be in cells ``b``
+        or ``b+1`` (the in-model window reaches at most N/4 past an edge,
+        so the membership formula's ``sub`` is 0 or 1), which is what makes
+        a two-bucket split complete.
+        """
+        xp = get_array_module(b)
+        m = accept & (new_cell != cur_cell)
+        if not bool(m.any()):
+            return
+        bb = b[m].astype(xp.int64)
+        f = self._band_flat_index(t[m], w[m], bb)
+        was_up = cur_cell[m] > bb
+        now_up = new_cell[m] > bb
+        up = (~was_up) & now_up          # lower -> upper
+        dn = was_up & (~now_up)          # upper -> lower
+        d = up.astype(xp.int64) - dn.astype(xp.int64)
+        self._cap_gate_scatter_add(lo, f, -d)
+        self._cap_gate_scatter_add(hi, f, d)
 
     def _cap_swap_apply(self, census, t_a, w_a, t_b, w_b, bands, accepted):
         """Move an accepted swap's occupancy between the two sides, IN PLACE.

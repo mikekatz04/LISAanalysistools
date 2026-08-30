@@ -223,5 +223,115 @@ class IncrementalCensusTest(unittest.TestCase):
         for got, exp in zip((counts, lo, hi), before):
             np.testing.assert_array_equal(got, exp)
 
+class SharedCensusThreeWritersTest(unittest.TestCase):
+    """One census, three writers -- and the drift writer is the one that
+    was missing.
+
+    THE SNEAK THIS CLOSES. The drift gate and the swap gate kept SEPARATE
+    occupancy arrays. A source drifts across its band's midpoint into cell
+    c (drift gate allows it -- c was empty -- and updates ITS census); a
+    vertical swap for the NEIGHBOURING band then reads the SWAP census,
+    which still says c is empty, and accepts. Cell c ends holding two, one
+    from each adjacent band. That is the shape of all 53 cross-seam
+    doubles that survived the tempering gate (down from 528).
+
+    counts is now one shared array; ``lo``/``hi`` -- the per-band split the
+    swap gate reads to decide what a swap moves -- are carried across drift
+    by _cap_lohi_transition, which is what these pin.
+    """
+
+    NT, NW, NB = 2, 2, 4
+
+    def _mv(self):
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialBase
+        mv = object.__new__(GBSpecialBase)
+        mv.ntemps, mv.nwalkers = self.NT, self.NW
+        mv.num_bands = mv.num_cap_cells = self.NB
+        return mv
+
+    def _bflat(self, t, w, b):
+        return (t * self.NW + w) * self.NB + b
+
+    def test_drift_across_the_midpoint_moves_lower_to_upper(self):
+        mv = self._mv()
+        lo = np.zeros(self.NT * self.NW * self.NB, dtype=np.int64)
+        hi = np.zeros_like(lo)
+        f = self._bflat(0, 0, 1)
+        lo[f] = 1                                  # one source, lower half
+        mv._cap_lohi_transition(
+            lo, hi,
+            np.array([0]), np.array([0]), np.array([1]),
+            cur_cell=np.array([1]),                # cell b   (lower)
+            new_cell=np.array([2]),                # cell b+1 (upper)
+            accept=np.array([True]))
+        self.assertEqual(int(lo[f]), 0)
+        self.assertEqual(int(hi[f]), 1)
+
+    def test_drift_back_is_the_exact_inverse(self):
+        mv = self._mv()
+        lo = np.zeros(self.NT * self.NW * self.NB, dtype=np.int64)
+        hi = np.zeros_like(lo)
+        f = self._bflat(1, 1, 2)
+        hi[f] = 1
+        mv._cap_lohi_transition(
+            lo, hi, np.array([1]), np.array([1]), np.array([2]),
+            np.array([3]), np.array([2]), np.array([True]))
+        self.assertEqual((int(lo[f]), int(hi[f])), (1, 0))
+
+    def test_non_crossing_and_rejected_moves_change_nothing(self):
+        mv = self._mv()
+        lo = np.zeros(self.NT * self.NW * self.NB, dtype=np.int64)
+        hi = np.zeros_like(lo)
+        lo[self._bflat(0, 0, 1)] = 1
+        before = (lo.copy(), hi.copy())
+        # same cell -> no transition
+        mv._cap_lohi_transition(lo, hi, np.array([0]), np.array([0]),
+                                np.array([1]), np.array([1]), np.array([1]),
+                                np.array([True]))
+        # crossing but REJECTED
+        mv._cap_lohi_transition(lo, hi, np.array([0]), np.array([0]),
+                                np.array([1]), np.array([1]), np.array([2]),
+                                np.array([False]))
+        for got, exp in zip((lo, hi), before):
+            np.testing.assert_array_equal(got, exp)
+
+    def test_the_sneak_is_vetoed_once_the_census_is_shared(self):
+        """End to end: drift fills cell c, then the neighbour's swap is
+        offered. With lo/hi carried across the drift, the gate sees the
+        occupancy and refuses."""
+        mv = self._mv()
+        counts = np.zeros(self.NT * self.NW * self.NB, dtype=np.int64)
+        lo = np.zeros(self.NT * self.NW * self.NB, dtype=np.int64)
+        hi = np.zeros_like(lo)
+        cap = np.ones(self.NB, dtype=np.int64)
+
+        # cold (t0,w0): band 1 holds one source in its LOWER half -> cell 1
+        f1 = self._bflat(0, 0, 1)
+        lo[f1] = 1
+        counts[(0 * self.NW + 0) * self.NB + 1] = 1
+        # hot (t1,w0): band 2 holds one source in its LOWER half -> cell 2
+        f2 = self._bflat(1, 0, 2)
+        lo[f2] = 1
+        counts[(1 * self.NW + 0) * self.NB + 2] = 1
+
+        # DRIFT: the cold band-1 source crosses its midpoint into cell 2.
+        mv._cap_lohi_transition(lo, hi, np.array([0]), np.array([0]),
+                                np.array([1]), np.array([1]), np.array([2]),
+                                np.array([True]))
+        counts[(0 * self.NW + 0) * self.NB + 1] -= 1
+        counts[(0 * self.NW + 0) * self.NB + 2] += 1   # shared counts array
+
+        # Now offer the band-2 swap between cold and hot. Post-swap the
+        # cold side would hold its drifted source AND the hot band-2 one.
+        ok = mv._swap_cap_ok(
+            (counts, lo, hi, cap),
+            np.array([0]), np.array([0]),      # cold side
+            np.array([1]), np.array([0]),      # hot side
+            np.array([2]))
+        self.assertFalse(bool(ok[0]),
+                         "the swap that produced the surviving cross-seam "
+                         "doubles must now be vetoed")
+
+
 if __name__ == "__main__":
     unittest.main()
