@@ -391,38 +391,7 @@ export GF_MOVE_TIMING=1
 # >>> Set BOTH back to 1 for 2-3 iterations if a fresh detailed
 # >>> attribution is ever needed again -- the run resumes cleanly.
 export GF_MOVE_TIMING_SYNC=0
-# GB_PROP_TIMING_SYNC 0 -> 1 (DIAGNOSTIC, 2026-08-29). Turn back to 0 once
-# the attribution below is banked -- it is not a steady-state setting.
-#
-# WHY: rj_fstat_centers is 1334.9 s of a 1955.1 s propose (68%), but the
-# unit-precompute census accounts for only 149.75 s of it. The other
-# ~1185 s has never been decomposed -- and is very likely NOT REAL WORK
-# in that stage. _mark() charges host wall since the PREVIOUS mark, and
-# with sync off nothing synchronises, so async device work lands on
-# whichever mark forces the next sync. rj_fstat_centers owns the two
-# widest unsynced regions of the pick loop (7316->7495 and 7513->7554)
-# and sits immediately after the prior gate, i.e. exactly where queued
-# kernels from pick/scheduler/buffer work would first stall a host read.
-# The code's own comment at the top of that region says as much.
-#
-# The same signature already fooled us once: fill_indmap_data measured
-# 598 s, a decomposition effort was nearly built on it, and the true cost
-# was 45 s -- the rest was misattributed drain. Two more tells here:
-# untracked is 0.247 s of 1955 (near-perfect accounting is what you get
-# when marks merely partition host wall), and "fallback rows so far 0"
-# means the one path that would legitimately make per-pick centre work
-# expensive -- cache misses recomputing inline through
-# _fstat_ctr_compute -- is not firing at all.
-#
-# With sync on, every mark carries its own kernel time, so this either
-# confirms ~1185 s of real centre work or redistributes it across
-# rj_getll / route_dispatch / gll_engine. Read it after 2-3 GB rows.
-#
-# GF_MOVE_TIMING_SYNC stays 0 DELIBERATELY: temper_swap_score opens and
-# closes inside the rung loop, so arming it adds ~27,000 device syncs per
-# move and the instrumentation starts measuring itself. Only the GB
-# propose path is in question here.
-export GB_PROP_TIMING_SYNC=1
+export GB_PROP_TIMING_SYNC=0
 # ---- 2026-08-15 perf batch (ALL code defaults; pinned for the run
 #      record; each knob independently revertible) ---------------------
 # De-synced in-model repeat loop (device-resident accept chain) rides
