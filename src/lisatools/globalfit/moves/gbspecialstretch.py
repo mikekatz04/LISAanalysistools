@@ -10613,7 +10613,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def _vertical_swap_sweep(self, band_sorter, band_temps, t_i, w_i, b_i,
                              slots, beta, ll_ref, ll_change_log, prop_counts,
-                             acc_counts, cell_ll_state, parity, census=None):
+                             acc_counts, cell_ll_state, parity, census=None,
+                             swap_census=None):
         """ONE vertical swap sweep. Returns the number of accepted swaps.
 
         Pure RELABEL: no buffer is touched and no likelihood is evaluated.
@@ -10693,16 +10694,21 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # ADDS a constraint. Admissible because search does not need
         # detailed balance; inert in PE, where every cap is disarmed and
         # the predicate is vacuously True.
-        if self._temper_cap_gate_on() and self._cap_leaf_cap is not None:
+        # ⚠ ``swap_census`` is built ONCE PER BLOCK by the caller and carried
+        # forward by _cap_swap_apply. Rebuilding it here was an OOM: this
+        # sweep runs per repeat step, and the census walks ~5.5 M sorter
+        # rows. Never call _cap_swap_census from inside this function.
+        _cap_swap_acc = None
+        if swap_census is not None:
             try:
-                _cens = self._cap_swap_census(band_sorter)
                 _ok = self._swap_cap_ok(
-                    _cens, t_i[hot], w_i[hot], t_i[cold], w_i[cold],
+                    swap_census, t_i[hot], w_i[hot], t_i[cold], w_i[cold],
                     b_i[hot])
                 _nv = int((acc & ~_ok).sum())
                 if _nv and census is not None:
                     census["cap_vetoed"] = census.get("cap_vetoed", 0) + _nv
                 acc = acc & _ok
+                _cap_swap_acc = acc
             except Exception as _e:  # never break a sweep on the gate
                 logger.warning(
                     "[GB_CAP_TEMPER %s] vertical swap cap gate skipped: %r",
@@ -10714,6 +10720,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         n_acc = int(acc_idx.shape[0])
         if n_acc == 0:
             return 0
+
+        # Carry the census forward for the NEXT sweep in this block.
+        if swap_census is not None and _cap_swap_acc is not None:
+            try:
+                self._cap_swap_apply(
+                    swap_census, t_i[hot], w_i[hot], t_i[cold], w_i[cold],
+                    b_i[hot], _cap_swap_acc)
+            except Exception as _e:
+                logger.warning(
+                    "[GB_CAP_TEMPER %s] swap census update skipped: %r",
+                    self.name, _e)
 
         h, c = hot[acc_idx], cold[acc_idx]
         t_h, t_c = t_i[h].copy(), t_i[c].copy()
@@ -11578,6 +11595,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # cell-crossing move so later repeats/sources see it. None = off.
         _dg = self._cap_drift_gate_setup(band_sorter)
         _dg_n = xp.zeros((), dtype=xp.int64)
+        # TEMPERING CAP GATE census -- built ONCE HERE, per block, and
+        # carried by _cap_swap_apply. It walks ~5.5 M sorter rows, so
+        # rebuilding it inside the per-repeat vertical sweep was an OOM
+        # (GPU0 78.5 -> 95.3 GB). Same lifetime rule as _dg above.
+        _swap_cens = (
+            self._cap_swap_census(band_sorter)
+            if self._temper_cap_gate_on() else None)
         # FUSED GATE/ACCEPT KERNELS (GB_INMODEL_ACCEPT_KERNEL, default OFF).
         # Block-scope scratch + the casted per-half index arrays, or None to
         # run the historical python chain. Every device counter the kernel
@@ -12079,6 +12103,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                       band_sorter, band_temps, t_i, w_i, b_i, slots, beta,
                       ll_ref, ll_change_log, prop_counts, acc_counts,
                       cell_ll_state, move_i % 2, census=_vert_census,
+                      swap_census=_swap_cens,
                   )
               if _n:
                   _vert_acc += _n
@@ -12706,6 +12731,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     special_index = _grid_sp[_keep_row]
                     _n_rows_unit = int(band_index.shape[0])
 
+            # TEMPERING CAP GATE census -- ONE build for this whole unit,
+            # carried by _cap_swap_apply on every accepted swap. It walks
+            # ~5.5 M sorter rows; rebuilding it per rung pair (ntemps-1 per
+            # while-iteration) was the other half of the OOM.
+            _swap_cens_t = (
+                self._cap_swap_census(band_sorter)
+                if self._temper_cap_gate_on() else None)
             num_bands_run = 0
             while num_bands_run < _n_rows_unit:
                 # COVERAGE MARK (2026-08-28 audit): run_tempering ran ~185 s
@@ -12907,10 +12939,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # Rejected pairs fall through to the existing revert
                     # below (``~_sel_h`` -> swap_template_slots), so this
                     # needs no new unwind. Search-only; vacuous in PE.
-                    if (self._temper_cap_gate_on()
-                            and self._cap_leaf_cap is not None):
+                    if _swap_cens_t is not None:
                         try:
-                            _cens = self._cap_swap_census(band_sorter)
+                            _cens = _swap_cens_t
                             _bnd = band_inds_now[:, 0]
                             _n = int(_bnd.shape[0])
                             _ok = self._swap_cap_ok(
@@ -12927,6 +12958,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                     getattr(self, "_temper_cap_vetoed", 0)
                                     + _nv)
                             sel = sel & _ok
+                            self._cap_swap_apply(
+                                _cens,
+                                cp.full(_n, i2, dtype=cp.int64),
+                                walker_inds_now[:, i2],
+                                cp.full(_n, i1, dtype=cp.int64),
+                                walker_inds_now[:, i1],
+                                _bnd, sel,
+                            )
                         except Exception as _e:
                             logger.warning(
                                 "[GB_CAP_TEMPER %s] permuted swap cap gate "
@@ -13542,10 +13581,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         Only the midpoint-to-midpoint grid needs it, and only there is the
         band->cell split cheap: a band touches exactly cells ``b`` and
         ``b+1``. At ``cap_divisor >= 2`` a band spans ``K+1`` cells and the
-        census below would have to widen -- not built, so the gate stays
-        off there rather than silently half-policing.
+        census would have to widen -- not built, so the gate stays off
+        there rather than silently half-policing.
+
+        DEFENSIVE BY CONVENTION, like ``cap_drift_gate``: a move or a test
+        harness that never built the cap machinery must get the gate OFF,
+        not an AttributeError. Every missing attribute means off.
         """
-        if self._cap_is_band_grid or self.cap_divisor != 1:
+        if int(getattr(self, "cap_divisor", 0) or 0) != 1:
+            return False
+        if not bool(getattr(self, "cap_stagger", False)):
+            return False        # divisor 1 unstaggered IS the band grid
+        if getattr(self, "_cap_leaf_cap", None) is None:
             return False
         return os.environ.get("GB_CAP_TEMPER_GATE", "1") == "1"
 
@@ -13576,6 +13623,48 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         lo = xp.bincount(bflat[alive & ~upper], minlength=nbb)[:nbb]
         hi = xp.bincount(bflat[alive & upper], minlength=nbb)[:nbb]
         return counts, lo, hi, xp.asarray(self._cap_leaf_cap)
+
+    def _cap_swap_apply(self, census, t_a, w_a, t_b, w_b, bands, accepted):
+        """Move an accepted swap's occupancy between the two sides, IN PLACE.
+
+        Why this exists: :meth:`_cap_swap_census` walks ~5.5 M sorter rows
+        and allocates ~8 arrays of that length. Rebuilding it per call was
+        an OOM -- the vertical sweep runs per REPEAT STEP, thousands of
+        times a propose, and ``flat[alive]`` varies in size so CuPy's pool
+        fragments rather than reuses (measured: GPU0 78.5 -> 95.3 GB,
+        GPU1 55.2 -> 91.4 GB, both at the ceiling). The census is now built
+        ONCE per block and carried forward by this O(npair) update, the
+        same pattern the in-model drift gate already uses.
+
+        A swap trades band ``b``'s sources between the two sides, so each
+        side loses its own contribution to cells ``b`` / ``b+1`` and gains
+        the partner's; the neighbour bands' shares of those cells do not
+        move. Scatter-add because several accepted pairs can touch one
+        cell.
+        """
+        counts, lo, hi, _cap = census
+        xp = get_array_module(bands)
+        if not bool(accepted.any()):
+            return
+        b = bands[accepted].astype(xp.int64)
+        ta, wa = t_a[accepted], w_a[accepted]
+        tb, wb = t_b[accepted], w_b[accepted]
+        fa = self._band_flat_index(ta, wa, b)
+        fb = self._band_flat_index(tb, wb, b)
+        lo_a, hi_a = lo[fa].copy(), hi[fa].copy()
+        lo_b, hi_b = lo[fb].copy(), hi[fb].copy()
+        c0 = xp.clip(b, 0, self.num_cap_cells - 1)
+        c1 = xp.clip(b + 1, 0, self.num_cap_cells - 1)
+        for (t_, w_, d0, d1) in (
+            (ta, wa, lo_b - lo_a, hi_b - hi_a),
+            (tb, wb, lo_a - lo_b, hi_a - hi_b),
+        ):
+            self._cap_gate_scatter_add(
+                counts, self._cap_flat_index(t_, w_, c0), d0)
+            self._cap_gate_scatter_add(
+                counts, self._cap_flat_index(t_, w_, c1), d1)
+        lo[fa], hi[fa] = lo_b, hi_b
+        lo[fb], hi[fb] = lo_a, hi_a
 
     def _swap_cap_ok(self, census, t_a, w_a, t_b, w_b, bands):
         """Per-pair bool: may this band swap happen without exceeding cap?

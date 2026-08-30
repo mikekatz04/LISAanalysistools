@@ -145,5 +145,83 @@ class DisarmedCapTest(unittest.TestCase):
             self.assertTrue(bool(np.all(got)))
 
 
+
+class IncrementalCensusTest(unittest.TestCase):
+    """``_cap_swap_apply`` must leave the census exactly where a full
+    rebuild would.
+
+    This is the OOM fix's correctness condition. ``_cap_swap_census`` walks
+    ~5.5 M sorter rows and allocates ~8 arrays that long; rebuilding it
+    inside the per-repeat vertical sweep drove GPU0 78.5 -> 95.3 GB and
+    GPU1 55.2 -> 91.4 GB, both to the ceiling, and killed the run. It is
+    now built once per block and carried forward by an O(npair) update --
+    so the update has to be exact, or the gate silently drifts off the
+    truth it is supposed to enforce.
+
+    Modelled directly on the array layout: ``counts`` is flat over
+    (temp, walker, cell), ``lo``/``hi`` flat over (temp, walker, band).
+    """
+
+    NT, NW, NB = 2, 2, 4          # -> NCELLS == NB at divisor 1
+
+    def _flat_cell(self, t, w, c):
+        return (t * self.NW + w) * self.NB + c
+
+    def _rebuild(self, occ):
+        """Full census from a per-(t,w,band) -> (lower, upper) table."""
+        counts = np.zeros(self.NT * self.NW * self.NB, dtype=np.int64)
+        lo = np.zeros(self.NT * self.NW * self.NB, dtype=np.int64)
+        hi = np.zeros_like(lo)
+        for (t, w, b), (nlo, nhi) in occ.items():
+            f = (t * self.NW + w) * self.NB + b
+            lo[f], hi[f] = nlo, nhi
+            counts[self._flat_cell(t, w, b)] += nlo
+            counts[self._flat_cell(t, w, min(b + 1, self.NB - 1))] += nhi
+        return counts, lo, hi
+
+    def test_update_matches_a_full_rebuild(self):
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialBase
+        mv = object.__new__(GBSpecialBase)
+        mv.ntemps, mv.nwalkers = self.NT, self.NW
+        mv.num_bands = mv.num_cap_cells = self.NB
+
+        occ = {(0, 0, 1): (1, 0), (1, 0, 1): (0, 1),
+               (0, 1, 2): (1, 1), (1, 1, 2): (0, 0)}
+        counts, lo, hi = self._rebuild(occ)
+        cap = np.full(self.NB, 5, dtype=np.int64)
+
+        # swap band 1 between (t0,w0) and (t1,w0); band 2 between the w1 pair
+        t_a = np.array([0, 0]); w_a = np.array([0, 1])
+        t_b = np.array([1, 1]); w_b = np.array([0, 1])
+        bands = np.array([1, 2])
+        acc = np.array([True, True])
+
+        mv._cap_swap_apply((counts, lo, hi, cap), t_a, w_a, t_b, w_b,
+                           bands, acc)
+
+        swapped = dict(occ)
+        for (ta, wa, tb, wb, b) in ((0, 0, 1, 0, 1), (0, 1, 1, 1, 2)):
+            swapped[(ta, wa, b)], swapped[(tb, wb, b)] = (
+                occ[(tb, wb, b)], occ[(ta, wa, b)])
+        exp_counts, exp_lo, exp_hi = self._rebuild(swapped)
+        np.testing.assert_array_equal(counts, exp_counts)
+        np.testing.assert_array_equal(lo, exp_lo)
+        np.testing.assert_array_equal(hi, exp_hi)
+
+    def test_rejected_pairs_leave_the_census_untouched(self):
+        from lisatools.globalfit.moves.gbspecialstretch import GBSpecialBase
+        mv = object.__new__(GBSpecialBase)
+        mv.ntemps, mv.nwalkers = self.NT, self.NW
+        mv.num_bands = mv.num_cap_cells = self.NB
+        occ = {(0, 0, 1): (1, 0), (1, 0, 1): (0, 1)}
+        counts, lo, hi = self._rebuild(occ)
+        before = (counts.copy(), lo.copy(), hi.copy())
+        mv._cap_swap_apply(
+            (counts, lo, hi, np.full(self.NB, 5, dtype=np.int64)),
+            np.array([0]), np.array([0]), np.array([1]), np.array([0]),
+            np.array([1]), np.array([False]))
+        for got, exp in zip((counts, lo, hi), before):
+            np.testing.assert_array_equal(got, exp)
+
 if __name__ == "__main__":
     unittest.main()
