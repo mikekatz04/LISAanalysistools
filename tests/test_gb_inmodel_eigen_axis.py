@@ -52,6 +52,7 @@ from lisatools.globalfit.moves.gbspecialstretch import (
     gb_lnfdot_gradient,
     gb_prior_box_scales,
     gb_ridge_axis,
+    axis_prior_bounds,
     project_out_direction,
     _eigen_axis_on,
 )
@@ -354,6 +355,37 @@ class EigenAxisSetTest(unittest.TestCase):
                                    rows, F0, MC, R)
         np.testing.assert_allclose(axes[0], axes[2], rtol=1e-10, atol=1e-12)
         np.testing.assert_allclose(sig[0], sig[2], rtol=1e-10)
+
+
+class AxisPriorBoundTest(unittest.TestCase):
+    """Per-axis step bound from the prior box (the scale-correct clamp)."""
+
+    def test_unit_basis_axis_is_bounded_by_its_own_width(self):
+        axes = np.repeat(np.eye(4)[None, ...], 1, axis=0)
+        w = np.array([2.0, 5.0, 0.5, 10.0])
+        b = axis_prior_bounds(axes, w)
+        np.testing.assert_allclose(b[0], w, rtol=1e-12)
+
+    def test_diagonal_axis_is_bounded_by_the_tightest_component(self):
+        a = np.zeros((1, 3, 1)); a[0, :, 0] = np.array([0.6, 0.8, 0.0])
+        w = np.array([6.0, 4.0, 100.0])
+        # 6/0.6 = 10 vs 4/0.8 = 5 -> the tighter one wins
+        self.assertAlmostEqual(float(axis_prior_bounds(a, w)[0, 0]), 5.0)
+
+    def test_untouched_components_do_not_bound(self):
+        """A narrow parameter the axis does not move must not clamp it."""
+        a = np.zeros((1, 3, 1)); a[0, :, 0] = np.array([1.0, 0.0, 0.0])
+        w = np.array([7.0, 1e-9, 1e-9])
+        self.assertAlmostEqual(float(axis_prior_bounds(a, w)[0, 0]), 7.0)
+
+    def test_is_positive_and_finite_for_real_axes(self):
+        F = _flagship_fisher()
+        axes, _ = _axis_set(F, FLAGSHIP[None, :])
+        w = np.array([30.0, 19.0, 1.0, 2 * np.pi, 2.0, np.pi,
+                      2 * np.pi, 2.0, 4.0])
+        b = axis_prior_bounds(axes, w)
+        self.assertTrue(np.all(np.isfinite(b)))
+        self.assertTrue(np.all(b > 0))
 
 
 class DrawAxisStepTest(unittest.TestCase):
