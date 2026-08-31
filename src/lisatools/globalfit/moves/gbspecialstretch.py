@@ -1050,6 +1050,215 @@ def _ortho_boundary_pairs(
     return i_all[keep], j_all[keep]
 
 
+def _eigen_axis_on() -> bool:
+    """``GB_INMODEL_EIGEN_AXIS=1`` arms the per-eigenaxis in-model proposal.
+
+    Default OFF: the joint Gaussian draw stays the production path until
+    this is validated on a cluster run.
+    """
+    return os.environ.get("GB_INMODEL_EIGEN_AXIS", "0") == "1"
+
+
+def gb_prior_box_scales(lo, hi):
+    """Per-column whitening scales = prior box widths.
+
+    The information matrix is eigendecomposed with a RELATIVE floor
+    (``1e-10 * lambda_max``), which is not scale invariant: in raw sampling
+    units (f0 ~ 20 mHz, dist ~ 9 kpc, Mc ~ 0.47, angles ~ 1) *which*
+    directions fall under the floor is decided by the unit choice rather
+    than by curvature. Whitening to the prior box makes every coordinate
+    O(1) so the spectrum reflects real anisotropy.
+
+    Degenerate columns (a fixed / per-leaf-filled parameter has zero prior
+    width) keep a scale of 1.0 rather than dividing by zero.
+    """
+    lo = np.asarray(lo, dtype=float)
+    hi = np.asarray(hi, dtype=float)
+    s = np.abs(hi - lo)
+    s[~np.isfinite(s) | (s <= 0.0)] = 1.0
+    return s
+
+
+def gb_fiber_tangent(coords, dist_col, mc_col, r_col):
+    """Unit tangent of the EXACT ``(dist, Mc, r)`` likelihood fiber.
+
+    ``(dist, Mc, r)`` enter the waveform only through ``(A, fdot)`` with
+    ``fdot ~ Mc^(5/3) (1+r)`` and ``A ~ Mc^(5/3) / dist``, so holding both
+    invariants fixed leaves a 1-D curve along which the likelihood is
+    exactly constant (see :mod:`lisatools.sampling.ridge_fiber`, which
+    resamples it in closed form with zero likelihood calls). Differentiating
+    the invariants at fixed ``(A, fdot)`` gives
+
+        dr/dMc    = -(1 + r) * (5/3) / Mc
+        ddist/dMc =  (5/3) * dist / Mc
+
+    Measured on the flagship: ``t^T F t / lambda_max = 4.7e-26`` and the
+    overlap with the smallest eigenvector is 1.0000 -- i.e. this is exactly
+    the direction the relative eigen-floor exists to tame. Projecting it out
+    lets the floor be dropped for the directions that actually carry
+    curvature.
+    """
+    xp = get_array_module(coords)
+    n, ndim = coords.shape
+    t = xp.zeros((n, ndim), dtype=xp.float64)
+    mc = coords[:, mc_col]
+    safe_mc = xp.where(xp.abs(mc) > 0, mc, xp.ones_like(mc))
+    t[:, mc_col] = 1.0
+    t[:, r_col] = -(1.0 + coords[:, r_col]) * (5.0 / 3.0) / safe_mc
+    t[:, dist_col] = (5.0 / 3.0) * coords[:, dist_col] / safe_mc
+    nrm = xp.sqrt((t * t).sum(axis=-1, keepdims=True))
+    return t / xp.where(nrm > 0, nrm, xp.ones_like(nrm))
+
+
+def project_out_direction(info, t):
+    """``P F P`` with ``P = I - t t^T``, batched over sources.
+
+    Removes one direction from the information matrix. Written out rather
+    than materialising ``P`` so the cost stays O(ndim^2) per source.
+    """
+    xp = get_array_module(info)
+    Ft = xp.einsum("nij,nj->ni", info, t)
+    tFt = xp.einsum("ni,ni->n", t, Ft)
+    out = (info
+           - t[:, :, None] * Ft[:, None, :]
+           - Ft[:, :, None] * t[:, None, :]
+           + t[:, :, None] * t[:, None, :] * tFt[:, None, None])
+    return 0.5 * (out + xp.swapaxes(out, -1, -2))
+
+
+def gb_lnfdot_gradient(coords, f0_col, mc_col, r_col):
+    """``grad ln(fdot)`` in the sampling basis.
+
+    ``fdot = fdot_gr(f0, Mc) * (1 + r)`` with ``fdot_gr ~ Mc^(5/3)
+    f0^(11/3)``, so ``ln fdot = (5/3) ln Mc + (11/3) ln f0 + ln(1+r)``.
+
+    This gradient is EXACTLY orthogonal to :func:`gb_fiber_tangent`
+    (the fiber holds ``fdot`` fixed by construction:
+    ``(5/3)/Mc * 1 + 1/(1+r) * (-(1+r)(5/3)/Mc) = 0``), which is what makes
+    the ridge axis below well posed on the fiber-projected matrix.
+    """
+    xp = get_array_module(coords)
+    n, ndim = coords.shape
+    g = xp.zeros((n, ndim), dtype=xp.float64)
+    mc = coords[:, mc_col]
+    f0 = coords[:, f0_col]
+    opr = 1.0 + coords[:, r_col]
+    one = xp.ones_like(mc)
+    g[:, mc_col] = (5.0 / 3.0) / xp.where(xp.abs(mc) > 0, mc, one)
+    g[:, f0_col] = (11.0 / 3.0) / xp.where(xp.abs(f0) > 0, f0, one)
+    g[:, r_col] = 1.0 / xp.where(xp.abs(opr) > 0, opr, one)
+    return g
+
+
+def gb_ridge_axis(evals, evecs, grad):
+    """The direction that buys the most ``fdot`` motion per unit lnL cost.
+
+    Maximising ``(g . a)^2 / (a^T F a)`` over ``a`` gives ``a ~ F^+ g`` (any
+    other direction is smaller by Cauchy-Schwarz), with the achieved value
+    ``g^T F^+ g`` -- i.e. the MARGINAL variance of ``ln fdot``. That is
+    exactly the quantity the flagship needs: no eigenvector points along
+    this direction, so the best eigen-axis moves ``ln(fdot)`` by only 0.040
+    per 1-sigma step against the 0.35 required to walk the near-truth
+    cluster (f0 -1.38 bins, fdot 1.35x truth) to the peak.
+
+    ``evals``/``evecs`` must ALREADY EXCLUDE the fiber direction (the caller
+    drops it after sorting by fiber overlap). There is deliberately no
+    relative eigenvalue tolerance here: a cut of the form ``tol * lam_max``
+    is the very pathology this change exists to remove -- with
+    ``lam_max ~ 8.5e11`` even ``tol = 1e-12`` discards the genuinely
+    informative ``lam = 3.6e-2`` direction, which breaks the Cauchy-Schwarz
+    optimality above. Only non-positive eigenvalues (numerical noise) are
+    skipped.
+    """
+    xp = get_array_module(evecs)
+    gv = xp.einsum("ni,nik->nk", grad, evecs)
+    pos = evals > 0
+    inv = xp.where(pos, 1.0 / xp.where(pos, evals, xp.ones_like(evals)),
+                   xp.zeros_like(evals))
+    a = xp.einsum("nk,nik->ni", gv * inv, evecs)
+    nrm = xp.sqrt((a * a).sum(axis=-1, keepdims=True))
+    gn = xp.sqrt((grad * grad).sum(axis=-1, keepdims=True))
+    fallback = grad / xp.where(gn > 0, gn, xp.ones_like(gn))
+    return xp.where(nrm > 0, a / xp.where(nrm > 0, nrm, xp.ones_like(nrm)),
+                    fallback)
+
+
+def eigen_axis_set(info, t_fiber, coords, f0_col, mc_col, r_col,
+                   sigma_max=1.0):
+    """Per-source proposal axes and their own 1-sigma widths.
+
+    Returns ``(axes, sigmas)`` with ``axes`` shaped ``(n, ndim, ndim)``
+    (column ``k`` is axis ``k``) and ``sigmas`` shaped ``(n, ndim)``.
+
+    The set is the ``ndim - 1`` eigenvectors of the fiber-projected
+    information matrix PLUS the explicit ridge axis in the LAST column (it
+    replaces the fiber-aligned eigenvector). The ridge axis is
+    orthogonalised against the fiber -- that component changes ``fdot`` not
+    at all and belongs to ``gb_ridge_gibbs``.
+
+    ``sigma_k = 1 / sqrt(a_k^T F a_k)`` uses the ORIGINAL information
+    matrix, so each axis is scaled by its own curvature. A 1-D move pays no
+    ``d``-dimensional cost penalty, which is why no relative eigen-floor is
+    needed: that floor exists only because a joint draw must share one
+    global scale, and on the flagship it shrinks the true steps by 645x
+    (dist), 95x (Mc, r), 43x (phi0) and 22x (psi).
+
+    ``sigma_max`` bounds a genuinely flat direction instead of letting
+    ``1/sqrt(~0)`` explode. In prior-box-whitened coordinates the natural
+    bound is 1.0 = one prior width; it binds only on near-null axes.
+    """
+    xp = get_array_module(info)
+    Fp = project_out_direction(info, t_fiber)
+    evals, evecs = xp.linalg.eigh(Fp)
+    # Order columns by |overlap with the fiber| so the fiber-aligned
+    # eigenvector lands last, then overwrite it with the ridge axis.
+    ov = xp.abs(xp.einsum("ni,nij->nj", t_fiber, evecs))
+    order = xp.argsort(ov, axis=-1)
+    axes = xp.take_along_axis(evecs, order[:, None, :], axis=-1)
+    lam = xp.take_along_axis(evals, order, axis=-1)
+    grad = gb_lnfdot_gradient(coords, f0_col, mc_col, r_col)
+    # Pseudo-inverse over the NON-fiber columns only. The fiber sorts last
+    # by construction; dropping it by RANK rather than by an eigenvalue
+    # threshold is what keeps the soft-but-real directions in.
+    ridge = gb_ridge_axis(lam[:, :-1], axes[:, :, :-1], grad)
+    ridge = ridge - t_fiber * (t_fiber * ridge).sum(axis=-1, keepdims=True)
+    rn = xp.sqrt((ridge * ridge).sum(axis=-1, keepdims=True))
+    ridge = ridge / xp.where(rn > 0, rn, xp.ones_like(rn))
+    axes[:, :, -1] = ridge
+    quad = xp.einsum("nik,nij,njk->nk", axes, info, axes)
+    sigmas = 1.0 / xp.sqrt(xp.maximum(quad, 1e-300))
+    return axes, xp.minimum(sigmas, float(sigma_max))
+
+
+def draw_axis_step(axes, sigmas, rng, jump_factor=1.0):
+    """Draw a 1-D Gaussian step along ONE uniformly chosen axis per source.
+
+    Cost-neutral against the joint draw (still one likelihood call per
+    repeat), but each direction is scaled by its own width and reports its
+    own acceptance. The proposal is symmetric along a fixed axis, so the
+    Metropolis-Hastings factor stays zero -- the axis set is built once per
+    block from a fixed information matrix, so the basis does not depend on
+    the current point within a repeat sweep.
+
+    Returns ``(dy, picked_axis)``; ``picked_axis`` is host numpy for the
+    per-axis acceptance counters.
+    """
+    xp = get_array_module(axes)
+    n, _, naxes = axes.shape
+    if hasattr(rng, "integers"):
+        pick = np.asarray(rng.integers(naxes, size=n))
+        z = np.asarray(rng.standard_normal(n))
+    else:                                   # legacy RandomState / cupy
+        pick = np.asarray(rng.randint(0, naxes, n))
+        z = np.asarray(rng.randn(n))
+    pick_x = pick if xp is np else xp.asarray(pick)
+    z_x = z if xp is np else xp.asarray(z)
+    rows = xp.arange(n)
+    a = axes[rows, :, pick_x]
+    s = sigmas[rows, pick_x]
+    return (float(jump_factor) * s * z_x)[:, None] * a, pick
+
+
 def _resolve_inmodel_repeats(branch_name, class_name, kwarg_value, default):
     """Resolve a per-provenance-class in-model repeat count.
 
