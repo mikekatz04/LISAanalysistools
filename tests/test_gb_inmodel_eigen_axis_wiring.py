@@ -252,3 +252,38 @@ class EndToEndContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AxisAcceptanceReportTest(unittest.TestCase):
+    """Per-axis acceptance logging -- the diagnostic a pooled rate hides."""
+
+    def _stub_with_acc(self):
+        s = _stub()
+        s._axis_acc_store = None
+        s._axis_acc = GBSpecialStretchMove._axis_acc.fget(s)
+        return s
+
+    def test_accumulator_starts_at_zero_and_is_sized_by_min_dim(self):
+        s = self._stub_with_acc()
+        prop, good = s._axis_acc
+        self.assertEqual(prop.shape, (NDIM,))
+        self.assertEqual(float(prop.sum()), 0.0)
+        self.assertEqual(float(good.sum()), 0.0)
+
+    def test_report_is_a_noop_before_any_proposal(self):
+        s = _stub(); s._axis_acc_store = None
+        GBSpecialStretchMove._report_axis_acceptance(s)   # must not raise
+
+    def test_report_logs_each_axis_and_resets(self):
+        s = _stub()
+        prop = np.zeros(NDIM); good = np.zeros(NDIM)
+        prop[0], good[0] = 100.0, 20.0
+        prop[NDIM - 1], good[NDIM - 1] = 50.0, 35.0      # the ridge axis
+        s._axis_acc_store = [prop, good]
+        with self.assertLogs(
+                "lisatools.globalfit.moves.gbspecialstretch", "INFO") as cm:
+            GBSpecialStretchMove._report_axis_acceptance(s)
+        msg = "\n".join(cm.output)
+        self.assertIn("a0 20/100 (0.2000)", msg)
+        self.assertIn("a8(ridge) 35/50 (0.7000)", msg)
+        self.assertIsNone(s._axis_acc_store, "must reset after reporting")

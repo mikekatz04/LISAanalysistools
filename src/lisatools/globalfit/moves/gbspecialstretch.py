@@ -4361,6 +4361,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             "(jump_factor=%.4g)", self.name, parts,
                             self.jump_factor)
                 self._im_kind_counts = {}
+            self._report_axis_acceptance()
             # GB_JUMP_TRACE: emitted next to [GB_ACCEPT] so the rate and the
             # displacement that produced it are read together.
             self._jump_trace_report()
@@ -9780,6 +9781,41 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             J[:, :, i] = dphys / (2.0 * h)[:, None] * s[i]
         return J
 
+    @property
+    def _axis_acc(self):
+        """``[proposed, accepted]`` per axis for the eigen-axis path."""
+        acc = getattr(self, "_axis_acc_store", None)
+        if acc is None:
+            n = int(getattr(self, "_eigen_axis_min_dim", 9))
+            acc = [self.xp.zeros(n, dtype=self.xp.float64),
+                   self.xp.zeros(n, dtype=self.xp.float64)]
+            self._axis_acc_store = acc
+        return acc
+
+    def _report_axis_acceptance(self):
+        """Log per-axis in-model acceptance, then reset.
+
+        The pooled in-model rate averages nine directions into one number
+        -- which is precisely how a direction stepping 95x too short stayed
+        invisible. The last axis is the f0-fdot ridge; watch its rate and
+        its share of accepted moves.
+        """
+        acc = getattr(self, "_axis_acc_store", None)
+        if acc is None:
+            return
+        prop = _to_numpy(acc[0])
+        good = _to_numpy(acc[1])
+        if float(prop.sum()) <= 0:
+            return
+        parts = "; ".join(
+            f"a{k}{'(ridge)' if k == prop.size - 1 else ''} "
+            f"{int(good[k])}/{int(prop[k])} "
+            f"({good[k] / max(prop[k], 1.0):.4f})"
+            for k in range(prop.size))
+        logger.info("[GB_EIGEN_AXIS %s] in-model acceptance by axis -- %s",
+                    self.name, parts)
+        self._axis_acc_store = None
+
     def _eigen_axis_ready(self) -> bool:
         """Armed AND the basis exposes the columns the fiber tangent needs.
 
@@ -12300,6 +12336,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         rec[2] += n_cold_s
                         rec[1] = rec[1] + accept.sum()
                         rec[3] = rec[3] + (accept & cold_s).sum()
+                    # Per-AXIS tally for the eigen-axis path. A pooled 67%
+                    # acceptance is exactly what hid the problem this move
+                    # exists to fix, so each axis reports separately. Guarded
+                    # on length: if the gate compacted rows, ``pick`` no
+                    # longer aligns with ``accept`` and the tally is skipped
+                    # rather than silently attributed to the wrong axis.
+                    if _kind == "eigen_axis":
+                        _pk = getattr(self, "_last_axis_pick", None)
+                        if _pk is not None and _pk.shape[0] == accept.shape[0]:
+                            _na = int(getattr(self, "_eigen_axis_min_dim", 9))
+                            _ax = self._axis_acc
+                            _ax[0] = _ax[0] + cp.bincount(
+                                _pk, minlength=_na)[:_na]
+                            _ax[1] = _ax[1] + cp.bincount(
+                                _pk, weights=accept.astype(cp.float64),
+                                minlength=_na)[:_na]
 
                     # Unconditional masked accept application: ``cp.where``
                     # copies the accepted values verbatim (rejected rows keep
