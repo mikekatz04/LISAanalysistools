@@ -1183,6 +1183,32 @@ def gb_ridge_axis(evals, evecs, grad):
                     fallback)
 
 
+def axis_prior_bounds(axes, widths):
+    """Largest sensible 1-sigma step along each axis, from the prior box.
+
+    For unit axis ``a`` the step that just leaves the box is
+    ``min_i (width_i / |a_i|)`` over the components it actually moves. This
+    is the scale-correct way to bound a step WITHOUT re-expressing the
+    information matrix in whitened coordinates: a bare ``sigma_max = 1``
+    only means "one prior width" if the coordinates were whitened first,
+    and whitening would change the conditioning of the existing joint draw
+    (which is live in production). Bounding per axis achieves the same end
+    -- prior-aware, unit-correct step sizes -- and touches nothing else.
+
+    ``widths`` is the per-column prior box width from
+    :func:`gb_prior_box_scales`. Components below ``1e-12`` of the axis
+    norm are ignored so a direction that barely touches a narrow parameter
+    is not bounded by it.
+    """
+    xp = get_array_module(axes)
+    aa = xp.abs(axes)
+    big = aa > 1e-12
+    ratio = xp.where(big, widths[None, :, None] / xp.where(big, aa,
+                                                           xp.ones_like(aa)),
+                     xp.full(aa.shape, xp.inf))
+    return ratio.min(axis=1)
+
+
 def eigen_axis_set(info, t_fiber, coords, f0_col, mc_col, r_col,
                    sigma_max=1.0):
     """Per-source proposal axes and their own 1-sigma widths.
@@ -2604,9 +2630,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 _ib.index("fdot_astro_ratio") if "fdot_astro_ratio" in _ib
                 else None
             )
+            # Columns the per-eigenaxis proposal needs to build the exact
+            # (dist, Mc, r) fiber tangent. Absent in the 8-column / VGB
+            # bases, which is why every use below is guarded.
+            self._dist_col = _ib.index("dist") if "dist" in _ib else None
+            self._mc_col = _ib.index("Mc") if "Mc" in _ib else None
         else:
             # legacy GB layout when no container is supplied
             self._f0_col, self._fdot_col, self._phi0_col = 1, 2, 3
+            self._dist_col = self._mc_col = None
             self._fdot_astro_col = None
         # Per-leaf fill metadata (Eryn per-leaf fill_dict): position of f0
         # among the fill keys + the (nleaves, n_fill) value table, for band
@@ -9748,6 +9780,64 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             J[:, :, i] = dphys / (2.0 * h)[:, None] * s[i]
         return J
 
+    def _eigen_axis_ready(self) -> bool:
+        """Armed AND the basis exposes the columns the fiber tangent needs.
+
+        Guarded rather than asserted: the VGB move and the 8-column bases
+        have no ``dist`` / ``Mc`` / ``fdot_astro_ratio``, and they must keep
+        using the joint draw.
+        """
+        return (
+            _eigen_axis_on()
+            and getattr(self, "_dist_col", None) is not None
+            and getattr(self, "_mc_col", None) is not None
+            and getattr(self, "_fdot_astro_col", None) is not None
+            and getattr(self, "_f0_col", None) is not None
+        )
+
+    #: minimum sampled dimension for the per-axis path (a basis smaller
+    #: than the full 9-column one cannot carry the fiber + ridge structure)
+    _eigen_axis_min_dim = 9
+
+    def _eigen_axis_widths(self, ndim):
+        """Per-column prior box widths for :func:`axis_prior_bounds`.
+
+        Read once from the branch prior and cached. Falls back to ones --
+        i.e. no prior bound beyond ``sigma_max`` -- when a prior does not
+        expose finite limits, which keeps the path usable rather than
+        crashing on an exotic prior.
+        """
+        cached = getattr(self, "_eigen_axis_widths_cache", None)
+        if cached is not None and cached.shape[0] == ndim:
+            return cached
+        lo = np.zeros(ndim)
+        hi = np.ones(ndim)
+        try:
+            pri = self.gpu_priors[self.branch_name].priors_in
+            for col, dist in pri.items():
+                idx = col if isinstance(col, (int, np.integer)) else None
+                if idx is None or not (0 <= int(idx) < ndim):
+                    continue
+                # eryn's uniform exposes ``minimum``/``maximum``; the
+                # ``min_val``/``max_val`` spelling belongs to other
+                # distributions. Try both rather than silently falling back
+                # to unit widths (which would drop the prior bound
+                # entirely and is invisible at runtime).
+                _mn = getattr(dist, "minimum",
+                              getattr(dist, "min_val", None))
+                _mx = getattr(dist, "maximum",
+                              getattr(dist, "max_val", None))
+                if _mn is None or _mx is None:
+                    continue
+                lo[int(idx)] = float(_mn)
+                hi[int(idx)] = float(_mx)
+        except Exception as exc:            # never break the sampler
+            logger.warning("[GB_EIGEN_AXIS %s] prior box unavailable (%r); "
+                           "falling back to unit widths", self.name, exc)
+        w = self.xp.asarray(gb_prior_box_scales(lo, hi))
+        self._eigen_axis_widths_cache = w
+        return w
+
     def _compute_proposal_cholesky(self, model, band_sorter, ids, slots=None,
                                    buffer_obj=None):
         """Batched Cholesky of the inverse information matrix for ``ids``.
@@ -9854,6 +9944,26 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # spectrum to a relative floor; B = V diag(lambda^-1/2) satisfies
         # B B^T = inv(info) and is all the Gaussian proposal needs (the
         # proposal shape only -- M-H corrects).
+        # GB_INMODEL_EIGEN_AXIS: replace the joint V diag(lambda^-1/2) draw
+        # with a per-axis set. The return SHAPE is unchanged -- column k
+        # holds ``sigma_k * a_k`` -- so every caller (including the
+        # ``chol[sl]`` slicing in the repeat loop) works untouched; only
+        # ``in_model_proposal`` reads it differently, picking one column
+        # instead of contracting all of them against a normal draw.
+        if (self._eigen_axis_ready()
+                and int(self._eigen_axis_min_dim) <= int(ndim)):
+            with _tspan(_tm, "infomat_eigen_axis"):
+                t_fiber = gb_fiber_tangent(
+                    coords, self._dist_col, self._mc_col,
+                    self._fdot_astro_col)
+                axes, sig = eigen_axis_set(
+                    info_y, t_fiber, coords, self._f0_col, self._mc_col,
+                    self._fdot_astro_col, sigma_max=xp.inf)
+                bounds = axis_prior_bounds(axes, self._eigen_axis_widths(ndim))
+                sig = xp.minimum(sig, bounds)
+                self._last_axis_sigmas = sig
+                return axes * sig[:, None, :]
+
         with _tspan(_tm, "infomat_eigh"):
             evals, evecs = xp.linalg.eigh(info_y)
             floor = 1e-10 * xp.maximum(
@@ -9920,8 +10030,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             assert chol is not None, (
                 "info-matrix branch requires use_info_mat_proposal=True"
             )
-            _rand = xp.random.randn(*coords.shape)
-            dy = xp.einsum("...ij,...j->...i", chol, _rand)
+            if self._eigen_axis_ready() and chol.shape[-1] >= int(
+                    self._eigen_axis_min_dim):
+                # Per-axis draw: column k of ``chol`` already holds
+                # ``sigma_k * a_k``, so one column times one normal IS the
+                # 1-D step. Symmetric along a fixed axis (the basis is built
+                # once per block and held across repeats), so ``factors``
+                # stays zero exactly as in the joint branch.
+                n = chol.shape[0]
+                naxes = chol.shape[-1]
+                pick = xp.asarray(
+                    np.random.randint(0, naxes, size=n))
+                _z = xp.random.randn(n)
+                dy = chol[xp.arange(n), :, pick] * _z[:, None]
+                self._last_axis_pick = pick
+                self._last_im_kind = "eigen_axis"
+            else:
+                _rand = xp.random.randn(*coords.shape)
+                dy = xp.einsum("...ij,...j->...i", chol, _rand)
             new_coords = coords + self.jump_factor * dy * self._proposal_param_scales[None, :]
             factors = xp.zeros(coords.shape[0])   # symmetric draw
 
