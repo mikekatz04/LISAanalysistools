@@ -1055,6 +1055,22 @@ def _eigen_axis_on() -> bool:
 
     Default OFF: the joint Gaussian draw stays the production path until
     this is validated on a cluster run.
+
+    TODO (deferred by the user, 2026-08-31): interval REFLECTION for
+    ``cos_iota`` and ``sin_delta``. The periodic angles are already handled
+    -- ``periodic.wrap`` runs on the proposal before the prior sees it,
+    with ``{"phi0": 2pi, "psi": pi, "alpha": 2pi}`` -- but the cosines are
+    uniform on [-1, 1] with NO reflection anywhere in the GB in-model path,
+    so an out-of-range step is simply rejected. This matters more once the
+    steps grow: the flagship sits at ``cos_iota = -0.883``, only 0.117 from
+    the edge, while an unfloored eigen-axis step along the
+    ``r``/``cos_iota`` direction moves it by ~0.58. The fix is the billiard
+    bounce ``x -> 2b - x``, which is measure preserving and symmetric so
+    detailed balance still needs no factor. Treat it as a proposal device
+    on a bounded interval, NOT a physical continuation: reflecting
+    ``sin_delta`` through the pole would also have to shift ``alpha`` by pi,
+    and a "physical" reflection that moved ``sin_delta`` alone would land on
+    the wrong sky point and silently corrupt sky posteriors.
     """
     return os.environ.get("GB_INMODEL_EIGEN_AXIS", "0") == "1"
 
