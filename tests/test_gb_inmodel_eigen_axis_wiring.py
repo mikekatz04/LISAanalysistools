@@ -46,9 +46,16 @@ def _stub(**over):
     )
     for k, v in over.items():
         setattr(s, k, v)
-    # in_model_proposal calls self._eigen_axis_ready(); bind the REAL method
-    # so the draw branch is gated by production logic, not a test double.
+    # in_model_proposal calls these; bind the REAL methods so the draw
+    # branch is gated by production logic, not by a test double. The
+    # observable gate comes FIRST in in_model_proposal, so every test in
+    # this file runs with GB_INMODEL_PROPOSAL=legacy -- these cover the
+    # legacy path, and _stub carries no transform_fn / df to build a map
+    # with anyway.
     s._eigen_axis_ready = lambda: GBSpecialStretchMove._eigen_axis_ready(s)
+    s._observable_basis_ready = (
+        lambda: GBSpecialStretchMove._observable_basis_ready(s))
+    s._observable_map = lambda: GBSpecialStretchMove._observable_map(s)
     return s
 
 
@@ -66,12 +73,14 @@ class GateTest(unittest.TestCase):
             self.assertFalse(READY(_stub()))
 
     def test_on_when_armed_and_basis_complete(self):
-        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1"}):
+        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1",
+                                          "GB_INMODEL_PROPOSAL": "legacy"}):
             self.assertTrue(READY(_stub()))
 
     def test_refuses_a_basis_without_the_fiber_columns(self):
         """VGB / 8-column bases have no dist / Mc / r -- must stay joint."""
-        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1"}):
+        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1",
+                                          "GB_INMODEL_PROPOSAL": "legacy"}):
             for missing in ("_dist_col", "_mc_col", "_fdot_astro_col",
                             "_f0_col"):
                 self.assertFalse(READY(_stub(**{missing: None})),
@@ -81,7 +90,8 @@ class GateTest(unittest.TestCase):
         """A move built before this change has no _dist_col at all."""
         s = _stub()
         del s._dist_col
-        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1"}):
+        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1",
+                                          "GB_INMODEL_PROPOSAL": "legacy"}):
             self.assertFalse(READY(s))
 
 
@@ -139,7 +149,8 @@ class DrawBranchTest(unittest.TestCase):
     def _run(self, armed):
         coords = np.zeros((6, NDIM))
         bs = types.SimpleNamespace(friend_start_inds=None)
-        env = {"GB_INMODEL_EIGEN_AXIS": "1" if armed else "0"}
+        env = {"GB_INMODEL_EIGEN_AXIS": "1" if armed else "0",
+               "GB_INMODEL_PROPOSAL": "legacy"}
         with mock.patch.dict(os.environ, env):
             s = _stub()
             new, factors = PROPOSE(s, coords, self._chol(), bs,
@@ -182,7 +193,8 @@ class DrawBranchTest(unittest.TestCase):
         coords = np.zeros((3, 4))
         chol = np.repeat(np.eye(4)[None, ...], 3, axis=0)
         bs = types.SimpleNamespace(friend_start_inds=None)
-        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1"}):
+        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1",
+                                          "GB_INMODEL_PROPOSAL": "legacy"}):
             s = _stub(_proposal_param_scales=np.ones(4))
             new, _ = PROPOSE(s, coords, chol, bs, np.arange(3), None)
         self.assertEqual(s._last_im_kind, "infomat")
@@ -220,7 +232,8 @@ class EndToEndContractTest(unittest.TestCase):
         chol = self.axes * self.sig[:, None, :]
         coords = np.zeros((1, NDIM))
         bs = types.SimpleNamespace(friend_start_inds=None)
-        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1"}):
+        with mock.patch.dict(os.environ, {"GB_INMODEL_EIGEN_AXIS": "1",
+                                          "GB_INMODEL_PROPOSAL": "legacy"}):
             s = _stub()
             for _ in range(60):
                 new, _ = PROPOSE(s, coords.copy(), chol, bs, np.arange(1),

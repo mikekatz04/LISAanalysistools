@@ -68,6 +68,11 @@ from eryn.utils.utility import groups_from_inds
 
 from ...diagnostic import inner_product
 from ...sampling.prior import FullGaussianMixtureModel, GBPriorWrap
+from ...sampling.gb_observable_basis import (
+    GBObservableFiberBasis,
+    fdot_gr,
+    gb_observable_step_scales,
+)
 from ...utils.utility import get_array_module, get_groups_from_band_structure, searchsorted2d_vec
 from ..state import (
     GFState,
@@ -1073,6 +1078,66 @@ def _eigen_axis_on() -> bool:
     the wrong sky point and silently corrupt sky posteriors.
     """
     return os.environ.get("GB_INMODEL_EIGEN_AXIS", "0") == "1"
+
+
+#: In-model proposal when ``GB_INMODEL_PROPOSAL`` is unset. Flipped to
+#: ``"observable"`` at plan phase 6, once the cluster probes pass.
+_INMODEL_PROPOSAL_DEFAULT = "legacy"
+_INMODEL_PROPOSAL_KINDS = ("observable", "legacy")
+
+#: Cached refusal marker for :meth:`_observable_map` -- distinct from
+#: ``None`` so "not built yet" and "ineligible basis" cannot be confused.
+_OBS_MAP_INELIGIBLE = object()
+
+#: ``rho`` for a source whose block snapshot is missing. EFFICIENCY ONLY:
+#: it sets a step size, not a measure, so a wrong value costs acceptance
+#: and never correctness. Deliberately not 0 -- that is an infinite step.
+_OBS_RHO_FALLBACK = 10.0
+
+#: Extrinsic step as a fraction of the prior box, used only when no
+#: information matrix is available (``chol is None``).
+_OBS_PRIOR_STEP_FRAC = 0.1
+
+
+def _inmodel_proposal_kind() -> str:
+    """Which in-model proposal runs: ``"observable"`` or ``"legacy"``.
+
+    Two spellings of one decision. ``GB_INMODEL_PROPOSAL`` is the master
+    switch; ``GB_INMODEL_OBSERVABLE_BASIS`` is the per-feature arm and
+    WINS when set, so a runbook that armed the feature explicitly keeps
+    meaning what it meant after the default flips.
+
+    An unrecognised value warns rather than falling through silently: an
+    unknown env var is otherwise ignored without a trace (see
+    ``CLAUDE.md``), which is exactly how a typo downgrades a production
+    run to the proposal it was launched to replace.
+    """
+    explicit = os.environ.get("GB_INMODEL_OBSERVABLE_BASIS")
+    if explicit is not None and explicit.strip() != "":
+        return "observable" if explicit.strip() == "1" else "legacy"
+    kind = os.environ.get("GB_INMODEL_PROPOSAL", "").strip().lower()
+    if not kind:
+        return _INMODEL_PROPOSAL_DEFAULT
+    if kind not in _INMODEL_PROPOSAL_KINDS:
+        logger.warning(
+            "GB_INMODEL_PROPOSAL=%r is not one of %s -- falling back to %r. "
+            "This is a typo, not a feature: fix the runbook.",
+            kind, _INMODEL_PROPOSAL_KINDS, _INMODEL_PROPOSAL_DEFAULT)
+        return _INMODEL_PROPOSAL_DEFAULT
+    return kind
+
+
+def _observable_knob(name, default):
+    """``float`` env knob that refuses to fail silently on a bad value."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a float -- using %g", name, raw,
+                       float(default))
+        return float(default)
 
 
 def gb_prior_box_scales(lo, hi):
@@ -4378,6 +4443,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             self.jump_factor)
                 self._im_kind_counts = {}
             self._report_axis_acceptance()
+            self._report_obs_motion()
             # GB_JUMP_TRACE: emitted next to [GB_ACCEPT] so the rate and the
             # displacement that produced it are read together.
             self._jump_trace_report()
@@ -5006,6 +5072,30 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                               f"{row(factors, r):+.3e} (MUST be 0)")
                     except Exception as _e:
                         db = f"chol solve failed: {_e!r}"
+
+            # DETAILED BALANCE (obs_basis): the step is symmetric in the
+            # INTERNAL basis, so ``factors`` is exactly the log-Jacobian
+            # ``ln|dy/dz|_new - ln|dy/dz|_old``. That is the one term in
+            # this path that can be wrong, and a wrong one produces a skew
+            # that reads as an astrophysical result rather than as a bug.
+            # So recompute it here from the raw columns, INDEPENDENTLY of
+            # the code that produced it -- a live in-production check.
+            if kind == "obs_basis":
+                try:
+                    dc, mcc = self._dist_col, self._mc_col
+                    lj = float(
+                        np.log(nw_[dc])
+                        - np.log(fdot_gr(nw_[fc] * 1e-3, nw_[mcc]))
+                        - np.log(c[dc])
+                        + np.log(fdot_gr(c[fc] * 1e-3, c[mcc])))
+                    got = row(factors, r)
+                    ok = (np.isfinite(lj) and np.isfinite(got)
+                          and abs(got - lj) <= 1e-8 * max(1.0, abs(lj)))
+                    db = (f"ln|dy/dz| recomputed={lj:+.9e} "
+                          f"factors={got:+.9e} -> "
+                          + ("match" if ok else "*** MISMATCH ***"))
+                except Exception as _e:
+                    db = f"obs_basis recompute failed: {_e!r}"
 
             logger.info(
                 "[GB_INMODEL_TRACE %s] rep %d kind=%s (T%d,w%d,b%d) beta=%.4g"
@@ -9832,6 +9922,71 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     self.name, parts)
         self._axis_acc_store = None
 
+    def _obs_motion_accum(self, cur, new, accept):
+        """``|d ln fdot|`` and ``|d f_mid|`` per in-model draw; device-only.
+
+        The probe gate's headline number. A pooled acceptance rate cannot
+        tell "moving well" from "not moving at all" -- the eigen-axis path
+        reached 67% cold acceptance while its best axis moved ``ln(fdot)``
+        by 0.040 against the 0.35 the flagship needed -- so the motion is
+        counted separately, proposed and accepted.
+
+        ``f_mid`` rather than ``f0`` because ``f_mid`` is what the
+        likelihood pays for: the legacy draw spends 0.170 bins of it per
+        fdot step against a 0.012-bin posterior width at rho = 46, and
+        that penalty is the whole reason fdot does not move.
+
+        Six device adds per repeat, no host sync; the pull happens once
+        per propose in :meth:`_report_obs_motion`.
+        """
+        if cur is None or new is None or int(cur.shape[0]) == 0:
+            return
+        xp = self.xp
+        f0c, mcc, rc = self._f0_col, self._mc_col, self._fdot_astro_col
+        if f0c is None or mcc is None or rc is None:
+            return
+        fd_o = fdot_gr(cur[:, f0c] * 1e-3, cur[:, mcc]) * (1.0 + cur[:, rc])
+        fd_n = fdot_gr(new[:, f0c] * 1e-3, new[:, mcc]) * (1.0 + new[:, rc])
+        d_lnfd = xp.abs(xp.log(xp.abs(fd_n)) - xp.log(xp.abs(fd_o)))
+        tobs = 1.0 / float(self.df)
+        d_fmid = xp.abs((new[:, f0c] - cur[:, f0c]) * 1e-3
+                        + 0.5 * tobs * (fd_n - fd_o)) * tobs      # bins
+        # Non-finite rows (a candidate stepped fdot through zero) would
+        # poison the running sums for the whole propose; drop them from
+        # BOTH the numerator and the count so the mean stays meaningful.
+        ok = xp.isfinite(d_lnfd) & xp.isfinite(d_fmid)
+        d_lnfd = xp.where(ok, d_lnfd, 0.0)
+        d_fmid = xp.where(ok, d_fmid, 0.0)
+        a = (accept & ok).astype(xp.float64)
+        m = getattr(self, "_obs_motion", None)
+        if m is None:
+            m = xp.zeros(6, dtype=xp.float64)
+        m[0] += ok.sum()
+        m[1] += a.sum()
+        m[2] += d_lnfd.sum()
+        m[3] += (d_lnfd * a).sum()
+        m[4] += d_fmid.sum()
+        m[5] += (d_fmid * a).sum()
+        self._obs_motion = m
+
+    def _report_obs_motion(self):
+        """Log the observable-path motion census, then reset."""
+        m = getattr(self, "_obs_motion", None)
+        if m is None:
+            return
+        v = [float(x) for x in _to_numpy(m)]
+        if v[0] <= 0:
+            self._obs_motion = None
+            return
+        logger.info(
+            "[GB_OBS_BASIS %s] in-model motion -- draws %d accepted %d "
+            "(%.4f); mean |dln_fdot| prop=%.5f acc=%.5f; mean |df_mid| "
+            "prop=%.4f acc=%.4f bins",
+            self.name, int(v[0]), int(v[1]), v[1] / max(v[0], 1.0),
+            v[2] / max(v[0], 1.0), v[3] / max(v[1], 1.0),
+            v[4] / max(v[0], 1.0), v[5] / max(v[1], 1.0))
+        self._obs_motion = None
+
     def _eigen_axis_ready(self) -> bool:
         """Armed AND the basis exposes the columns the fiber tangent needs.
 
@@ -9889,6 +10044,179 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         w = self.xp.asarray(gb_prior_box_scales(lo, hi))
         self._eigen_axis_widths_cache = w
         return w
+
+    # ---- observable-basis in-model proposal ----------------------------
+    # The map and its measure are proved in tests/test_gb_observable_basis*
+    # -- everything here is plumbing, which is where what is left can go
+    # wrong. See the module docstring of
+    # ``lisatools.sampling.gb_observable_basis`` for WHY the sampling basis
+    # is the wrong basis to propose in.
+
+    def _observable_map(self):
+        """Cached ``y <-> z`` map; ``None`` when the basis is ineligible.
+
+        ``Tobs = 1.0 / self.df``, **never** ``self._basis_settings.Tobs``:
+        the latter does not exist on ``FDSettings`` and an unconditional
+        read has already broken every FD-domain GB flow once. It is
+        snapshotted into the map here so nothing downstream can re-read
+        it -- and by the determinant result a stale ``Tobs`` would cost
+        efficiency only, never correctness.
+        """
+        m = getattr(self, "_observable_map_cache", None)
+        if m is not None:
+            return None if m is _OBS_MAP_INELIGIBLE else m
+        try:
+            m = GBObservableFiberBasis(
+                self.transform_fn,
+                Tobs=1.0 / float(self.df),
+                shear=_observable_knob("GB_INMODEL_OBSERVABLE_SHEAR", 0.5),
+                fiber_coord="Mc",
+            )
+        except Exception as exc:
+            # Loud ONCE, then cached. Falling back to the legacy draw for
+            # a whole run is the failure this warns about; re-warning per
+            # block would bury it in the same log it is meant to surface.
+            logger.warning(
+                "[GB_OBS_BASIS %s] observable-basis proposal unavailable "
+                "(%r) -- using the legacy in-model draw", self.name, exc)
+            self._observable_map_cache = _OBS_MAP_INELIGIBLE
+            return None
+        self._observable_map_cache = m
+        return m
+
+    def _observable_basis_ready(self) -> bool:
+        """Armed AND the basis carries the observable columns.
+
+        Guarded rather than asserted: VGB's 5-column basis and the
+        8-column ``(A, fdot)`` basis have no ``dist`` / ``Mc`` /
+        ``fdot_astro_ratio``, and must keep the legacy draw.
+        """
+        return (
+            _inmodel_proposal_kind() == "observable"
+            and getattr(self, "_dist_col", None) is not None
+            and getattr(self, "_mc_col", None) is not None
+            and getattr(self, "_fdot_astro_col", None) is not None
+            and getattr(self, "_f0_col", None) is not None
+            and self._observable_map() is not None
+        )
+
+    def _observable_rho_snapshot(self, buffer_obj, ids, n_src):
+        """Per-source ``rho = sqrt(h_h)``, snapshotted ONCE per block.
+
+        A CORRECTNESS condition, not a cache. The step scales go as
+        ``1/rho``; inside the repeat loop ``h_h_out`` holds the
+        CANDIDATE's power rather than the block anchor's, so re-reading it
+        there would make the step size depend on the current point. The
+        proposal then stops being symmetric and ``factors = Jacobian
+        only`` silently stops being true -- with the acceptance rate
+        looking perfectly healthy the whole time.
+
+        Scattered by SOURCE ID into a full-length array, because
+        :meth:`in_model_proposal` sees ``source_ids`` and not the block's
+        slice into them.
+        """
+        xp = self.xp
+        hh = getattr(buffer_obj, "h_h_out", None)
+        if hh is None or ids is None:
+            return
+        rho = getattr(self, "_obs_rho", None)
+        if rho is None or int(rho.shape[0]) != int(n_src):
+            # NaN, not zero: an unset row must be DISTINGUISHABLE so the
+            # fallback below can spot it. Zero would sail through as an
+            # infinite step, which is not a quiet no-op.
+            rho = xp.full(int(n_src), xp.nan)
+        v = xp.asarray(hh).real.ravel()
+        i = xp.asarray(ids).ravel()
+        m = min(int(v.shape[0]), int(i.shape[0]))
+        if m:
+            rho[i[:m]] = xp.sqrt(xp.clip(v[:m], 0.0, None))
+        self._obs_rho = rho
+
+    def _observable_step_scales(self, chol, source_ids, ndim):
+        """Per-column INTERNAL-basis step scales. ``(n, 9)``.
+
+        **Deliberately takes no ``coords``.** State-dependence belongs in
+        the coordinate change, never in the step size; a signature that
+        cannot express it is cheaper than remembering not to write it.
+
+        ``(lnA, f_mid, fdot)`` are analytic and go as ``1/rho`` from the
+        block snapshot. The five extrinsic columns are shared verbatim
+        between the two bases, so their width is the legacy marginal
+        ``sqrt(diag(B B^T))`` times ``_proposal_param_scales`` -- exactly
+        what the production path would have used. ``Mc`` is prior-set
+        because the likelihood is flat along the fiber.
+        """
+        xp = self.xp
+        m = self._observable_map()
+        ids = xp.asarray(source_ids).ravel()
+        n = int(ids.shape[0])
+        rho = getattr(self, "_obs_rho", None)
+        if rho is None:
+            r = xp.full(n, _OBS_RHO_FALLBACK)
+        else:
+            r = rho[ids]
+            r = xp.where(xp.isfinite(r) & (r > 0.0), r, _OBS_RHO_FALLBACK)
+
+        cols = list(m._extrinsic)
+        if (chol is not None and getattr(chol, "ndim", 0) == 3
+                and int(chol.shape[0]) == n):
+            sc = xp.asarray(self._proposal_param_scales).ravel()
+            ex = xp.stack(
+                [xp.sqrt((chol[:, c, :] ** 2).sum(axis=-1)) * sc[c]
+                 for c in cols], axis=-1)
+        else:
+            w = self._eigen_axis_widths(ndim)   # generic prior-box reader
+            ex = xp.broadcast_to(
+                _OBS_PRIOR_STEP_FRAC * xp.asarray([w[c] for c in cols]),
+                (n, len(cols)))
+
+        # ``Mc`` as a FRACTION of its prior box: the absolute width of
+        # m_chirp_lims is a run setting, and a step quoted in solar masses
+        # would silently mean something different in every run.
+        mc_box = float(self._eigen_axis_widths(ndim)[self._mc_col])
+        return gb_observable_step_scales(
+            r, m.Tobs,
+            extrinsic_scales=ex,
+            mc_step=mc_box * _observable_knob(
+                "GB_INMODEL_OBSERVABLE_MC_STEP", 0.05),
+            jump=_observable_knob("GB_INMODEL_OBSERVABLE_JUMP", 1.0),
+        )
+
+    def _observable_proposal(self, coords, chol, source_ids):
+        """One composite observable step. ``(new_coords, factors)``.
+
+        The 8 observable components and the ``Mc`` fiber component come
+        from ONE draw, so the fiber ride costs zero extra likelihood
+        calls -- it travels inside a scoring call that happens anyway,
+        and along it ``delta_ll == 0`` analytically, so the tempered
+        acceptance reduces to the prior ratio at every rung with no
+        special-casing. Making it an alternative BRANCH instead would
+        need a "skip the scoring call" path, which
+        ``_resolve_inmodel_repeats`` forbids (fixed budgets keep the
+        rigid chunk shapes CUDA-graph capture needs) and which would
+        leave ``h_h_out`` / ``d_h_out`` stale for the SNR clamp.
+        """
+        xp = self.xp
+        m = self._observable_map()
+        z = m.to_internal(coords)
+        scales = self._observable_step_scales(chol, source_ids,
+                                              int(coords.shape[1]))
+        dz = xp.asarray(xp.random.randn(*z.shape)) * scales
+        # Fiber weight defaults to 0.0 at first arming: the change under
+        # test is the 8-observable step, and ``gb_ridge_gibbs`` already
+        # supplies fiber mixing on the main state for free. Independent
+        # A/B rather than a coupled one.
+        dz[:, m.FIBER_INDEX] = dz[:, m.FIBER_INDEX] * _observable_knob(
+            "GB_INMODEL_OBSERVABLE_FIBER_WEIGHT", 0.0)
+        new = m.from_internal(z + dz, template=coords)
+        # ``factors`` MUST be device-resident, float64, C-contiguous, 1-D.
+        # ``_imk_layout_problem`` checks dtype and contiguity only, and
+        # ``cupy.float64 is numpy.float64``, so a HOST array passes the
+        # gate and is then dereferenced as a device pointer: garbage
+        # acceptance, no exception, plausible-looking chains.
+        factors = xp.ascontiguousarray(
+            xp.asarray(m.factors(coords, new)).ravel(), dtype=xp.float64)
+        return new, factors
 
     def _compute_proposal_cholesky(self, model, band_sorter, ids, slots=None,
                                    buffer_obj=None):
@@ -10055,8 +10383,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         one full pass (``self.time >= 1``) and the cold-chain friend table
         exists; it is then drawn with probability ``stretch_probability``
         per repeat round (the info-matrix Cholesky jump otherwise).
+
+        When ``GB_INMODEL_PROPOSAL=observable`` this becomes THE in-model
+        proposal for every GB draw and the two legacy components below are
+        not reached at all. That is deliberate: for GB,
+        ``stretch_probability`` defaults to 0.0, so ``infomat`` is in
+        practice the only one of them that ever runs -- and it is the
+        measured-broken one (67% cold acceptance against a ~23% 9-D
+        optimum, soft directions crushed 95-645x by a relative eigen-floor
+        that is not scale-invariant in this basis, and an ``f0`` derivative
+        34% wrong). ``GB_INMODEL_PROPOSAL=legacy`` reverts, which is what
+        makes a same-seed comparison against the v7 baseline possible.
         """
         xp = self.xp
+        if self._observable_basis_ready():
+            self._last_im_kind = "obs_basis"
+            return self._observable_proposal(coords, chol, source_ids)
+
         use_stretch = (
             self.stretch_probability > 0.0
             and self.time >= 1
@@ -11833,6 +12176,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self._sorter_dh[ids] = cp.asarray(buffer_obj.d_h_out).real
             self._sorter_hh[ids] = cp.asarray(buffer_obj.h_h_out).real
 
+        # Observable-basis step scales go as 1/rho. Snapshot rho HERE --
+        # at the block anchor, before the repeat loop, off the same
+        # get_add_ll that just filled h_h_out for ``curr`` -- and never
+        # again. Inside the loop h_h_out holds the CANDIDATE's power, so
+        # re-reading it would make the step size depend on the current
+        # point: the proposal stops being symmetric, ``factors = Jacobian
+        # only`` quietly stops being true, and the acceptance rate goes on
+        # looking perfectly healthy. Zero extra likelihood evaluations.
+        if self._observable_basis_ready():
+            self._observable_rho_snapshot(
+                buffer_obj, ids, int(band_sorter.inds.shape[0]))
+
         # Per-source SNR-scaled amplitude gate (see the ctor comment):
         # snr_ref = sqrt(h_h) at the anchor, stashed by the ll_ref
         # evaluation just above. Vectorized once per block; the repeat
@@ -12358,6 +12713,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # on length: if the gate compacted rows, ``pick`` no
                     # longer aligns with ``accept`` and the tally is skipped
                     # rather than silently attributed to the wrong axis.
+                    # Observable path: no axes to split by (the step is a
+                    # single joint draw), so the motion itself is the
+                    # diagnostic. See _obs_motion_accum.
+                    if _kind == "obs_basis":
+                        self._obs_motion_accum(curr[sl], new, accept)
                     if _kind == "eigen_axis":
                         _pk = getattr(self, "_last_axis_pick", None)
                         if _pk is not None and _pk.shape[0] == accept.shape[0]:
