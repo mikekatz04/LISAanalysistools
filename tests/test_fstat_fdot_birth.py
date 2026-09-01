@@ -432,5 +432,138 @@ class ContainerWiringTest(unittest.TestCase):
                                f"armed={armed}: only {frac:.1%} scoreable")
 
 
+class EndToEndGridFitTest(unittest.TestCase):
+    """comb -> stage B -> npz -> birth container, with the axis ARMED.
+
+    The units above prove the pieces; this proves the CHAIN, which is the
+    thing that has never actually run. Defaulting a path on without ever
+    executing it end to end is how a knob ships broken.
+    """
+
+    # THE FLAGSHIP BAND. The shared _fake_call_fstat in test_fstat_gridfit
+    # puts its bumps at 6.3/6.6/6.9 mHz, where the shear is 0.04 bins and
+    # every defect this path fixes is invisible. At 20.38 mHz the shear is
+    # 3.1 bins and the fdot axis spans +-5 fdot_gr -- the regime the
+    # redesign exists for, and the one probe A will run.
+    BAND = np.array([20.30e-3, 20.35e-3, 20.40e-3, 20.45e-3])
+    F0_LIMS = (20.30e-3, 20.45e-3)
+    MC = [0.01, 1.0]
+    TOBS_E2E = 7.776e6
+
+    @staticmethod
+    def _flagship_call():
+        """``params -> (N, M_upper)`` with one bump AT the flagship.
+
+        Same shape as test_fstat_gridfit's fake (identity M_upper, so
+        ``compute_fstat`` reduces to ``0.5 * sum(N**2)``), moved to
+        20.380377 mHz so this band has something to find.
+        """
+        def call(params):
+            p = np.asarray(params.get() if hasattr(params, "get") else params)
+            n = p.shape[0]
+            f0_mHz = p[:, 1] * 1e3
+            amp = 60.0 * np.exp(-0.5 * ((f0_mHz - 20.380377) / 5.0e-3) ** 2)
+            N = np.zeros((n, 4))
+            N[:, 0] = np.sqrt(2.0 * np.maximum(amp, 0.0))
+            M = np.zeros((n, 10))
+            M[:, 0] = M[:, 4] = M[:, 7] = M[:, 9] = 1.0
+            return N, M
+        return call
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self._call = self._flagship_call
+        self.d = tempfile.mkdtemp(prefix="fdot_e2e_")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self._env = {k: os.environ.get(k) for k in
+                     ("FSTAT_FDOT_AXIS", "FSTAT_PEAKS_PER_BAND",
+                      "FSTAT_N_ALPHA", "FSTAT_N_SINDELTA", "FSTAT_COMB_NSKY")}
+        os.environ.update(FSTAT_PEAKS_PER_BAND="3", FSTAT_N_ALPHA="3",
+                          FSTAT_N_SINDELTA="3", FSTAT_COMB_NSKY="2")
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _fit(self, armed):
+        import lisatools.sampling.fstat_gridfit as G
+        os.environ["FSTAT_FDOT_AXIS"] = "1" if armed else "0"
+        stacked, n = G.run_fstat_grid_fit(
+            self._call(), xp=np, Tobs=self.TOBS_E2E, band_edges_hz=self.BAND,
+            f0_lims_hz=self.F0_LIMS, mc_lims=self.MC, cache_dir=self.d,
+            ratio_max=RATIO_MAX)
+        return G, stacked, n
+
+    def test_the_armed_fit_runs_and_stamps_the_basis(self):
+        G, stacked, n = self._fit(armed=True)
+        self.assertIsNotNone(stacked)
+        self.assertGreater(n, 0)
+        npz = os.path.join(self.d, G.GRID_BASENAME).replace(
+            ".npz", "_peaks_stacked.npz")
+        d = np.load(npz, allow_pickle=False)
+        self.assertEqual(str(np.asarray(d["grid_basis"]).item()), "fdot")
+        self.assertAlmostEqual(float(np.asarray(d["grid_c_t"]).item()),
+                               0.5 * self.TOBS_E2E, places=3)
+
+    def test_the_axis_actually_spans_negative_fdot(self):
+        G, _, _ = self._fit(armed=True)
+        npz = os.path.join(self.d, G.GRID_BASENAME).replace(
+            ".npz", "_peaks_stacked.npz")
+        d = np.load(npz, allow_pickle=False)
+        axes = ([d["mc_ax"]] if "mc_ax" in d.files
+                else [d[f"mc_ax_g{i}"]
+                      for i in range(len(np.asarray(d["group_sizes"])))])
+        for ax in axes:
+            self.assertLess(float(np.min(ax)), 0.0,
+                            "the fdot axis must reach negative fdot")
+            self.assertGreater(float(np.max(ax)), 0.0)
+
+    def test_the_birth_container_is_built_and_scores(self):
+        G, _, _ = self._fit(armed=True)
+        cont = G.build_gb_birth_distribution(
+            cache_dir=self.d, mc_lims=self.MC, A_lims=[1e-24, 1e-21],
+            dist_lims=[0.1, 30.0], fdot_astro_ratio_max=RATIO_MAX,
+            use_cupy=False, floor_eps=0.1, comb_weight=0.0,
+            tobs=self.TOBS_E2E)
+        self.assertIsNotNone(cont)
+        x = np.asarray(cont.rvs(size=(512,)))
+        self.assertEqual(x.shape, (512, 9))
+        lp = np.asarray(cont.logpdf(x))
+        self.assertTrue(np.all(np.isfinite(lp)),
+                        "the uniform floor must keep logpdf finite on its "
+                        "own draws")
+
+    def test_a_cache_from_the_other_basis_is_REFUSED(self):
+        """Axis 2 is a chirp mass in one basis and Hz/s in the other.
+
+        Reusing one as the other raises no error anywhere downstream -- it
+        just places births at absurd parameters -- so the refusal has to
+        happen here.
+        """
+        G, _, _ = self._fit(armed=False)          # fit in the Mc basis
+        os.environ["FSTAT_FDOT_AXIS"] = "1"       # ... reload as fdot
+        with self.assertRaises(ValueError) as cm:
+            G.build_gb_birth_distribution(
+                cache_dir=self.d, mc_lims=self.MC, A_lims=[1e-24, 1e-21],
+                dist_lims=[0.1, 30.0], fdot_astro_ratio_max=RATIO_MAX,
+                use_cupy=False, floor_eps=0.1, comb_weight=0.0,
+                tobs=self.TOBS_E2E)
+        self.assertIn("basis", str(cm.exception).lower())
+
+    def test_center_nodes_are_shear_aware(self):
+        """The table is looked up BY f0; a non-sheared one is silently off."""
+        G, _, _ = self._fit(armed=True)
+        nodes = G.enumerate_center_nodes(self.d, mc_lims=self.MC)
+        self.assertGreater(nodes["f0_mHz"].size, 0)
+        for k in ("f0_mHz", "mc", "alpha", "sin_delta"):
+            self.assertTrue(np.all(np.isfinite(nodes[k])), k)
+        self.assertTrue(np.all(nodes["mc"] >= self.MC[0] - 1e-12))
+        self.assertTrue(np.all(nodes["mc"] <= self.MC[1] + 1e-12))
+
+
 if __name__ == "__main__":
     unittest.main()

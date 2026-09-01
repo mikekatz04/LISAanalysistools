@@ -53,6 +53,28 @@ import numpy as np
 from tests.test_gb_cap_cell_grid import BAND_EDGES, _move, _move_overlap
 
 
+# These tests were written against the Mc-basis grid, which is what
+# FSTAT_FDOT_AXIS=0 selects -- and that path must keep working, since it is
+# the documented escape from the fdot axis and the way an in-flight run
+# resumes across the change. Pin it for the whole module rather than
+# letting the new default silently retarget them; the fdot basis has its
+# own end-to-end coverage in test_fstat_fdot_birth.
+_FDOT_AXIS_SAVED = None
+
+
+def setUpModule():
+    global _FDOT_AXIS_SAVED
+    _FDOT_AXIS_SAVED = os.environ.get("FSTAT_FDOT_AXIS")
+    os.environ["FSTAT_FDOT_AXIS"] = "0"
+
+
+def tearDownModule():
+    if _FDOT_AXIS_SAVED is None:
+        os.environ.pop("FSTAT_FDOT_AXIS", None)
+    else:
+        os.environ["FSTAT_FDOT_AXIS"] = _FDOT_AXIS_SAVED
+
+
 def _members_sets(m, band, f):
     """Python-set covering-cell membership per row (brute-force oracle)."""
     band = np.asarray(band)

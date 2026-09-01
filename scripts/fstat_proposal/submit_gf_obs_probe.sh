@@ -10,9 +10,13 @@
 # config is forked, so a probe result transfers to v8.
 #
 #   ./submit_gf_obs_probe.sh A obs     # high-f, observable   <- the fix
-#   ./submit_gf_obs_probe.sh A leg     # high-f, legacy       <- its control
 #   ./submit_gf_obs_probe.sh B obs     # low-f,  observable   <- neutrality
-#   ./submit_gf_obs_probe.sh B leg     # low-f,  legacy       <- its control
+#   ./submit_gf_obs_probe.sh A leg     # high-f, legacy       <- A's control
+#   ./submit_gf_obs_probe.sh B leg     # low-f,  legacy       <- B's control
+#
+# A and B run CONCURRENTLY, one GPU each, on gpu-40-spot. Fire the two
+# "obs" arms first and read them at ~25 min; the "leg" controls are only
+# needed if the obs arms show something worth attributing.
 #
 # WHY FOUR AND NOT TWO. Twice this campaign a control caught a defect in the
 # TEST rather than in the code, and an invariance claim without one proves
@@ -99,8 +103,23 @@ case "${MODE}" in
   *) echo "usage: $0 {A|B} {obs|leg}" >&2; exit 2 ;;
 esac
 
-# The four tuning knobs pinned at their defaults, exactly as v8 pins them,
-# so a probe result transfers without a second variable.
+# BOTH new paths ARMED. These are now the code defaults; pinned anyway so
+# the probe cannot change meaning if a default is revisited, and so the
+# knob diff names what is under test.
+#   1. the observable-basis IN-MODEL proposal (set per-arm above), and
+#   2. the fdot-axis F-STAT GRID: fdot becomes a first-class grid axis
+#      instead of the r = 0 manifold the grid searches today. The two are
+#      complementary -- the grid places births on the ridge, the in-model
+#      move refines them along it -- so shipping one alone can read as "no
+#      effect". Attribution comes from DISJOINT observables, chiefly the
+#      fraction of births with fdot < 0, which the old grid cannot produce
+#      at all.
+# NOTE: the fdot grid REFUSES an *_peaks_stacked.npz fitted in the Mc
+# basis, by design. These probes use fresh stores, so they refit.
+export FSTAT_FDOT_AXIS=1
+export FSTAT_FDOT_RATIO_MAX=5.0
+# The four in-model tuning knobs pinned at their defaults, exactly as v8
+# pins them, so a probe result transfers without a second variable.
 export GB_INMODEL_OBSERVABLE_FIBER_WEIGHT=0.0
 export GB_INMODEL_OBSERVABLE_JUMP=1.0
 export GB_INMODEL_OBSERVABLE_MC_STEP=0.05
@@ -122,8 +141,11 @@ export GB_CAP_DIAG=1
 : "${OBS_PROBE_ROOT:=/shared/data/global_fit_output}"
 export STORE_DIR="${OBS_PROBE_ROOT}/gf_obsprobe_${TAG}_${MODE}/"
 export BASE_FILE_NAME="gf_obsprobe_${TAG}_${MODE}"
-# Enough to see the flagship walk (it sat static for 19) without burning a
-# 24 h allocation on a question answered in the first 50.
+# 4 h of allocation, but the READ is at 20-30 minutes: at ~70-200 s per
+# iteration that is roughly 8-25 iterations, and the flagship sat static
+# for 19, so a walk should already be visible by then. The extra hours
+# cost nothing on a spot partition and mean a promising arm can simply
+# keep going instead of being resubmitted. Resume-safe either way.
 export NUM_ITERATIONS=200
 
 mkdir -p "${STORE_DIR}"
@@ -138,6 +160,12 @@ cat <<EOF
   base script     ${BASE}
 EOF
 
+# gpu-40-spot, 1 GPU each, so A and B occupy two slots and run together.
+# 4 h wall; read the log at 20-30 min and stop the arm early if it has
+# already answered. The store is resume-safe, so re-submitting continues.
 exec sbatch --job-name="obs_${TAG}_${MODE}" \
+  --partition=gpu-40-spot \
+  --gres=gpu:1 \
+  --time=04:00:00 \
   --output="${OBS_PROBE_ROOT}/obs_${TAG}_${MODE}_%j.log" \
   --export=ALL "${BASE}"

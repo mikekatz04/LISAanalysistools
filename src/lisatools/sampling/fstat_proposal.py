@@ -95,6 +95,7 @@ __all__ = [
     "fstat_peak_min_F",
     "fstat_n_f0",
     "fstat_n_mc",
+    "fdot_axis_on",
     "fstat_n_axis",
 ]
 
@@ -205,6 +206,24 @@ def _fdot_gr(mc, f0_hz):
         * (_MSUN_S * float(mc)) ** (5.0 / 3.0)
         * float(f0_hz) ** (11.0 / 3.0)
     )
+
+
+def fdot_axis_on() -> bool:
+    """``FSTAT_FDOT_AXIS`` -- fdot as a first-class grid axis. Default ON.
+
+    ONE reader for a flag with four consumers (stage-B assembly, the cache
+    loader's basis guard, the birth container's key, and the uniform
+    floor's box). They must agree: axis 2 is a chirp mass in one basis and
+    Hz/s in the other, and any pair of them disagreeing produces births at
+    absurd parameters with no error anywhere. A single helper is cheaper
+    than four literals that can drift.
+
+    Default flipped to ON 2026-09-01. Set ``FSTAT_FDOT_AXIS=0`` to restore
+    the r = 0 grid bit-identically -- but note that an existing
+    ``*_peaks_stacked.npz`` fitted in the other basis is REFUSED on load
+    (by design), so flipping this on an in-flight run means refitting.
+    """
+    return os.environ.get("FSTAT_FDOT_AXIS", "1").strip() == "1"
 
 
 def fstat_n_mc(f0_mHz: float, mc_lo: float, mc_hi: float,
@@ -1545,8 +1564,7 @@ def stacked_from_cache(d, weights=None, seed: Optional[int] = None,
     parameters. An absent stamp is the legacy ``"Mc"`` basis.
     """
     keys = getattr(d, "files", None) or list(d)
-    want = "fdot" if os.environ.get("FSTAT_FDOT_AXIS", "0").strip() == "1" \
-        else "Mc"
+    want = "fdot" if fdot_axis_on() else "Mc"
     got = str(np.asarray(d["grid_basis"]).item()) if "grid_basis" in keys \
         else "Mc"
     if got != want:
@@ -1765,8 +1783,7 @@ def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False,
     # conversion and carries its own measure; it REPLACES both the separate
     # U[-M, M] ratio column and RatioTightenedBirth, whose whole job was to
     # patch up a draw the grid never scored.
-    _fdot_axis = (M is not None
-                  and os.environ.get("FSTAT_FDOT_AXIS", "0").strip() == "1")
+    _fdot_axis = M is not None and fdot_axis_on()
     if _fdot_axis:
         if not tobs:
             raise ValueError(

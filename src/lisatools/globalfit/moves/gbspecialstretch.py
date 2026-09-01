@@ -17055,10 +17055,15 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             stacked, n_peaks = run_fstat_grid_fit(
                 self._fstat_call(model, walker_ref),
                 xp=self.xp,
-                Tobs=float(self._basis_settings.Tobs),
+                # 1.0/self.df, NOT basis_settings.Tobs: the latter is absent
+                # on FDSettings, and under FSTAT_FDOT_AXIS this value is no
+                # longer only a node-density input -- it sets the f_mid shear
+                # coefficient, so a wrong one costs acceptance on every birth.
+                Tobs=1.0 / float(self.df),
                 band_edges_hz=band_edges,
                 f0_lims_hz=f0_lims,
                 mc_lims=mc_lims,
+                ratio_max=_gb_fdot_astro_ratio_max(self),
                 cache_dir=cache_dir,
                 fingerprint_extra=f"|epoch={k}|gbfree={int(_gb_free)}",
                 epoch=k,

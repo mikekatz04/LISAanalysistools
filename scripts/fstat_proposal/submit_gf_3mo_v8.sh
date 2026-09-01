@@ -1503,6 +1503,27 @@ export GB_INMODEL_OBSERVABLE_MC_STEP=0.05
 # determinant 1 for ANY coefficient (verified for 0, T/2, 0.41T, T, -3T),
 # so a wrong value here costs acceptance and never correctness.
 export GB_INMODEL_OBSERVABLE_SHEAR=0.5
+# ---- AND THE F-STAT GRID IN THE SAME BASIS -------------------------
+# fdot becomes a FIRST-CLASS grid axis instead of the r = 0 manifold the
+# grid searches today. Measured in v7: 39.6% of low-f and 10.5% of high-f
+# alive leaves carry fdot < 0, which the current grid CANNOT represent --
+# every one of them arrived from the blind post-hoc r-draw or in-model
+# drift, never from the search. The new axis also costs FEWER nodes
+# (20.38 mHz: 71 -> 53, and v7's top group used exactly 71) while covering
+# 10x the range, because the aligned coherence width is 13.4x coarser.
+#
+# Complementary to the in-model move above -- the grid places births on
+# the ridge, the move refines them along it -- so shipping one alone can
+# read as "no effect". ATTRIBUTION comes from disjoint observables, the
+# sharpest being the fraction of births with fdot < 0: the old grid cannot
+# produce one at all, so any non-zero count is unambiguously this change.
+#
+# WARNING: an *_peaks_stacked.npz fitted in the Mc basis is REFUSED on
+# load (by design -- axis 2 is a chirp mass in one basis and Hz/s in the
+# other). v8 starts fresh, so it refits; a resume of an older store would
+# need its epoch caches cleared.
+export FSTAT_FDOT_AXIS=1
+export FSTAT_FDOT_RATIO_MAX=5.0
 # DIFF DISCIPLINE: v7 exported GB_CAP_DIAG=1 and it costs time. Leaving it
 # on in v7 and off in v8 would make v8 look faster for reasons unrelated
 # to the proposal, so it is pinned ON here -- and the cap census is wanted

@@ -83,6 +83,7 @@ def _fmt_secs(s: float) -> str:
 # The host-transfer helper already exists in fstat_proposal -- import it
 # rather than keeping a second copy.
 from lisatools.sampling.fstat_proposal import _host as _to_host  # noqa: E402
+from lisatools.sampling.fstat_proposal import fdot_axis_on  # noqa: E402
 from lisatools.sampling.gb_observable_basis import (  # noqa: E402
     fdot_axis_bounds,
     mc_floor_for_fdot,
@@ -1065,7 +1066,7 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
     # Measured node cost at 90 d: 6.5 mHz 3->3, 10.2 6->5, 15.6 27->20,
     # 20.38 71->53 -- FEWER nodes over 10x the range, because the aligned
     # coherence width is 13.4x coarser.
-    _fdot_axis = os.environ.get("FSTAT_FDOT_AXIS", "0").strip() == "1"
+    _fdot_axis = fdot_axis_on()
     _rm_env = os.environ.get("FSTAT_FDOT_RATIO_MAX", "").strip()
     _ratio_max = (float(_rm_env) if _rm_env
                   else (None if ratio_max is None else float(ratio_max)))
@@ -1237,7 +1238,8 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
 
 def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
                        band_edges_hz, f0_lims_hz, mc_lims, cache_dir: str,
-                       fingerprint_extra: str = "", epoch=None):
+                       fingerprint_extra: str = "", epoch=None,
+                       ratio_max=None):
     """Full fit with resume: comb scan -> peak select -> stage B.
 
     ``epoch`` selects the peak-box weighting tilt only (see
@@ -1305,7 +1307,7 @@ def run_fstat_grid_fit(call_fstat: Callable, *, xp, Tobs: float,
 
     stacked = run_stacked_stage_b(
         call_fstat, peaks, xp=xp, Tobs=Tobs, band_edges_hz=band_edges_hz,
-        mc_lims=mc_lims, cache_path=cache_path,
+        mc_lims=mc_lims, ratio_max=ratio_max, cache_path=cache_path,
         fingerprint_extra=fingerprint_extra, epoch=epoch,
     )
     return stacked, int(len(peaks))
@@ -1727,8 +1729,27 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
         n0 = int(peak_component.logp_grids.shape[1])
         f0_lo = float(f0_los.min())
         f0_hi = float((f0_los + (n0 - 1) * f0_dxs).max())
-    lo = [f0_lo, mc_lims[0], 0.0, -1.0]
-    hi = [f0_hi, mc_lims[-1], 2.0 * np.pi, 1.0]
+    # AXIS 1 IS NOT ALWAYS Mc. Under FSTAT_FDOT_AXIS it is fdot in Hz/s, and
+    # the floor must span the fdot axis, not the chirp-mass box. Getting this
+    # wrong is spectacular rather than subtle -- a floor draw of "Mc = 1.0"
+    # read as 1.0 Hz/s gives f0 = f_mid - (T/2)*1.0 = -3.9e9 mHz -- but it
+    # surfaces only as a non-finite logpdf on the container's own draws,
+    # which reads as a floor bug rather than an axis mix-up. Read the range
+    # off the fitted axis itself, so it cannot drift from what stage B built.
+    _ax1_lo, _ax1_hi = float(mc_lims[0]), float(mc_lims[-1])
+    if cache is not None and "grid_basis" in cache.files and \
+            str(np.asarray(cache["grid_basis"]).item()) == "fdot":
+        _axes = ([cache["mc_ax"]] if "mc_ax" in cache.files
+                 else [cache[f"mc_ax_g{i}"]
+                       for i in range(len(np.asarray(cache["group_sizes"])))])
+        _ax1_lo = float(min(float(np.min(a)) for a in _axes))
+        _ax1_hi = float(max(float(np.max(a)) for a in _axes))
+    elif stacked_live is not None and fdot_axis_on():
+        _comps = getattr(stacked_live, "components", [stacked_live])
+        _ax1_lo = float(min(float(c._lo3[0]) for c in _comps))
+        _ax1_hi = float(max(float(c._hi3[0]) for c in _comps))
+    lo = [f0_lo, _ax1_lo, 0.0, -1.0]
+    hi = [f0_hi, _ax1_hi, 2.0 * np.pi, 1.0]
     mix = UniformFloorMixture(base, lo, hi, eps=float(floor_eps))
     logger.info("[birth] floor box f0=[%.5f, %.5f] mHz  eps=%s  use_cupy=%s",
                 f0_lo, f0_hi, floor_eps, use_cupy)
