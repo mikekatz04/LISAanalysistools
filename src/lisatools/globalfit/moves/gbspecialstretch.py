@@ -17191,8 +17191,14 @@ class GBSpecialRJFStatGridMove(GBSpecialRJPriorMove):
             # within 3 sigma of a usable fdot. GB_FSTAT_BIRTH_RATIO_TIGHT=0
             # reverts; PHASE (rad of carrier-phase drift error, default one
             # cycle) sets the width, EPS the full-prior floor share.
+            # Tobs = 1.0/self.df, NEVER basis_settings.Tobs: it is absent
+            # on FDSettings, and the getattr default of 0.0 that used to sit
+            # here did not raise -- it made RatioTightenedBirth's width
+            # 1/(pi*0**2) = inf, which clips to M and SILENTLY restores the
+            # untightened U[-M, M] draw the tightening exists to replace.
+            tobs=1.0 / float(self.df),
             ratio_tight=(dict(
-                tobs=float(getattr(self._basis_settings, "Tobs", 0.0)),
+                tobs=1.0 / float(self.df),
                 phase_rad=float(os.environ.get(
                     "GB_FSTAT_BIRTH_RATIO_PHASE", 2.0 * np.pi)),
                 eps=float(os.environ.get("GB_FSTAT_BIRTH_RATIO_EPS", "0.1")),

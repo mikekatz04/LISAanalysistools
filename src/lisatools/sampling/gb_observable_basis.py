@@ -63,10 +63,14 @@ __all__ = [
     "GBObservableFiberBasis",
     "f0_from_f_mid",
     "f_mid_from_f0",
+    "fdot_axis_bounds",
     "fdot_coherence_width",
     "fdot_gr",
     "fdot_shear_hz",
     "gb_observable_step_scales",
+    "mc_floor_for_fdot",
+    "n_fdot_nodes",
+    "r_from_fdot",
 ]
 
 # Constants taken from the SAME source as gbgpu.utils.utility.get_fdot /
@@ -159,6 +163,102 @@ def fdot_coherence_width(tobs, *, aligned=False, eta=1.0):
     if aligned:
         return float(eta) * np.sqrt(720.0) / (2.0 * np.pi * t2)
     return float(eta) / (np.pi * t2)
+
+
+# ---------------------------------------------------------------------------
+# F-stat grid: fdot as a FIRST-CLASS axis, and the conversion back.
+#
+# The grid's Mc axis is already a fdot axis -- just a bad one. It assembles
+# rows as ``fdot = fdot_gr(f0, Mc_node)``, i.e. the ``r = 0`` manifold, so
+# uniform-in-Mc nodes are NON-uniform in fdot (``fdot ~ Mc^(5/3)``) while
+# StackedFStatProposal4D hard-assumes uniform axes, and negative fdot is
+# UNREPRESENTABLE -- against 40% of low-f and 21% of high-f v7 leaves that
+# carry ``fdot < 0``. Replacing it with a LINEAR fdot axis in Hz/s fixes
+# coverage, spacing and the uniform-axis assumption at once.
+# ---------------------------------------------------------------------------
+
+def fdot_axis_bounds(f0_ref_hz, mc_hi, ratio_max):
+    """Reachable ``fdot`` over the whole prior box. ``(lo, hi)`` in Hz/s.
+
+    ``fdot = fdot_gr(f0, Mc) * (1 + r)`` with ``Mc`` in ``[mc_lo, mc_hi]``
+    and ``r`` in ``[-M, M]``. ``fdot_gr > 0`` and increasing in ``Mc``, so
+    both extremes sit at ``Mc = mc_hi``: ``(1 -+ M) * fdot_gr(f0, mc_hi)``.
+
+    **``mc_lo`` deliberately does not appear.** The tempting form
+    ``[fdot_gr(mc_lo)(1-M), fdot_gr(mc_hi)(1+M)]`` looks symmetric and is
+    wrong: at the production ``mc_lo = 0.001`` its lower bound is 1e-5 of
+    the upper, so the axis would come out effectively one-sided and the
+    negative-fdot defect would survive the redesign untouched.
+
+    ``f0_ref_hz`` is a per-GROUP CONSTANT (never the node's own f0). That
+    is what keeps ``fdot`` independent of ``f0``, which in turn makes
+    ``f0 = f_mid - (T/2) fdot`` an exact unit-determinant shear. With the
+    node's own f0 the determinant is ``1 - 2.6e-4`` -- a needless
+    inexactness in a term that reaches the RJ acceptance ratio.
+    """
+    g = fdot_gr(float(f0_ref_hz), float(mc_hi))
+    return (1.0 - float(ratio_max)) * g, (1.0 + float(ratio_max)) * g
+
+
+def n_fdot_nodes(fdot_lo, fdot_hi, tobs, *, eta=1.0, aligned=True,
+                 clip=(3, 96)):
+    """Node count for the fdot axis: one per coherence width across it.
+
+    Same one-radian criterion as the Mc rule it replaces, so the two are
+    directly comparable -- but evaluated on the ALIGNED width
+    (``sqrt(720)/(2 pi T^2)``, 13.4x coarser; see
+    :func:`fdot_coherence_width`) and across the FULL prior range rather
+    than the positive ``r = 0`` sliver. At the flagship that is ~50 nodes
+    over 10x the coverage, against ~70-96 today.
+
+    The ``[3, 96]`` clamp is inherited verbatim. The floor matters at low
+    frequency, where ``fdot`` is simply not measurable over 90 d and the
+    span is under one width -- 3 nodes there is the correct answer, not a
+    degradation.
+    """
+    span = abs(float(fdot_hi) - float(fdot_lo))
+    width = fdot_coherence_width(tobs, aligned=aligned, eta=eta)
+    n = int(np.clip(round(span / width) + 1, int(clip[0]), int(clip[1])))
+    return n
+
+
+def mc_floor_for_fdot(fdot, f0_hz, ratio_max, mc_lo):
+    """Smallest ``Mc`` that can carry ``fdot`` with ``|r| <= ratio_max``.
+
+    ``1 + r = fdot / fdot_gr(f0, Mc)`` and ``fdot_gr`` grows with ``Mc``,
+    so a large ``|fdot|`` needs a large ``Mc``. The binding constraint is
+    ``|1 + r| <= c``, with ``c = 1 + M`` when ``fdot > 0`` (the ``1 - M``
+    side is slack once ``M > 1``) and ``c = M - 1`` when ``fdot < 0``:
+
+        Mc_min = ( |fdot| / (c * FDOT_K * f0**(11/3)) )**(3/5)
+
+    floored at ``mc_lo``. ``fdot = 0`` gives ``r = -1`` for any ``Mc``, so
+    the floor is just ``mc_lo``.
+
+    This is derived independently of the ``|r| <= M`` check, and
+    ``Mc >= mc_floor`` must be EXACTLY that condition -- pinned by
+    ``test_the_mc_floor_is_exactly_the_r_in_range_condition``. If the two
+    ever disagree, one of the derivations is wrong.
+    """
+    xp = get_array_module(fdot)
+    fd = xp.asarray(fdot, dtype=xp.float64)
+    # f0 is PER ROW in every real caller (the birth block derives it from
+    # each row's own f_mid and fdot). An earlier version took float(f0_hz)
+    # and worked only because the unit tests all passed a scalar.
+    f0 = xp.asarray(f0_hz, dtype=xp.float64)
+    M = float(ratio_max)
+    c = xp.where(fd >= 0.0, 1.0 + M, abs(M - 1.0))
+    denom = xp.maximum(c, 1e-300) * FDOT_K * xp.abs(f0) ** (11.0 / 3.0)
+    need = xp.abs(fd) / xp.maximum(denom, 1e-300)
+    return xp.maximum(need ** (3.0 / 5.0), float(mc_lo))
+
+
+def r_from_fdot(fdot, f0_hz, mc):
+    """``r = fdot / fdot_gr(f0, Mc) - 1``, the fiber conversion."""
+    xp = get_array_module(fdot)
+    g = fdot_gr(xp.asarray(f0_hz, dtype=xp.float64),
+                xp.asarray(mc, dtype=xp.float64))
+    return xp.asarray(fdot, dtype=xp.float64) / xp.maximum(g, 1e-300) - 1.0
 
 
 def gb_observable_step_scales(snr, tobs, *, extrinsic_scales, mc_step,
