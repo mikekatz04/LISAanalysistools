@@ -251,7 +251,7 @@ cd /shared/home/mlkatz1/lisa-analysis-tools
 # stage-groups, branch set and gb nleaves shapes all mismatch. BASE_FILE_NAME
 # stays gf_prod_3mo so every analysis tool (monitor generator, digests)
 # works unchanged -- they take the DIRECTORY as their argument.
-STORE_DIR=/shared/data/global_fit_output/gf_prod_3mo_highf_grid/
+: "${STORE_DIR:=/shared/data/global_fit_output/gf_prod_3mo_highf_grid/}"
 
 # ---- GPU telemetry ---------------------------------------------------------
 # Background nvidia-smi sampler: one CSV row per GPU into the run store
@@ -341,11 +341,11 @@ export PSD_FROM_NOISE_FILE=1
 
 # ---- output ----------------------------------------------------------------
 export FILE_STORE_DIR=${STORE_DIR}
-export BASE_FILE_NAME=gf_prod_3mo
+: "${BASE_FILE_NAME:=gf_prod_3mo}"; export BASE_FILE_NAME
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
-export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER was a dead name)
+: "${NUM_ITERATIONS:=2000}"; export NUM_ITERATIONS          # total engine iterations (resume-safe; NITER was a dead name)
 
 # ---- band + domain ---------------------------------------------------------
 # EXPLICIT Tobs (2026-08-13): sbatch propagates the submitting shell's env,
@@ -360,8 +360,15 @@ export MAX_FREQ=2.5e-2
 # 20.380377 mHz flagship. The 20-leaf budget now lives entirely here.
 # Geometry per band is unchanged (divisor 8 / stride 9 / cap divisor 4,
 # staggered, overlap 0.25) -- just ~32 sub-bands instead of 1232.
-export GB_MIN_FREQ=2.006944e-02    # 144.5 layers -> snaps to 145
-export GB_MAX_FREQ=2.076389e-02    # 149.5 layers -> snaps to 149
+#
+# := FORM (2026-09-01), so submit_gf_obs_probe.sh can retarget the band
+# without forking this file. Same idiom, and same reason, as
+# GB_PROP_TIMING_SYNC: a plain `export` clobbers an sbatch-time override.
+# NOT applied to TOBS_TARGET above -- a stale value there silently re-grids
+# the run, which is the failure that comment exists to prevent.
+: "${GB_MIN_FREQ:=2.006944e-02}"   # 144.5 layers -> snaps to 145
+: "${GB_MAX_FREQ:=2.076389e-02}"   # 149.5 layers -> snaps to 149
+export GB_MIN_FREQ GB_MAX_FREQ
 
 # ---- GB knobs (everything else rides the flipped defaults: sig-het in-model,
 #      fstat-fit-in-move + sig-het fstat, D/2 leaf-cap gate w/ min-iters 5,
@@ -370,7 +377,7 @@ export GB_MAX_FREQ=2.076389e-02    # 149.5 layers -> snaps to 149
 # 20 (user, 2026-08-24): the overlap test runs with a SMALL leaf budget --
 # deliberately not the v6 production value (10000). Intentional delta #2 of
 # the four listed in the header (overlap frac, leaf budget, 1 GPU, GB-only).
-export GB_NLEAVES_MAX=20
+: "${GB_NLEAVES_MAX:=20}"; export GB_NLEAVES_MAX
 # FULL parity-unit residency (grouped RJ->in-model scheduling, 2026-08-13):
 # one unit = 77 bands x 24 temps x 24 walkers = 44,352 cells; the scheduler
 # clamps n_slots to min(GB_N_SUBBANDS, cells), so 50000 means every cell is
