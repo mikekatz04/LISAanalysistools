@@ -56,6 +56,7 @@ from lisatools.globalfit.moves.gbspecialstretch import (
     project_out_direction,
     _eigen_axis_on,
 )
+from lisatools.sampling.gb_observable_basis import FDOT_K
 
 # Flagship sampling-basis point (validated round-trip through the stock
 # transform container: max rel err vs the catalogue phys row 3.4e-16).
@@ -63,7 +64,8 @@ FLAGSHIP = np.array([9.05215813e00, 2.03803767e01, 4.65777687e-01,
                      -3.41840873e00, -8.83190852e-01, 3.89809240e-01,
                      4.06170662e00, -7.86384411e-01, -1.11022302e-15])
 DIST, F0, MC, R = 0, 1, 2, 8
-MHZ_PER_BIN = 1e3 / 7.776e6          # 1 bin = 1/Tobs Hz, f0 sampled in mHz
+TOBS = 7.776e6                       # 90 d, the production 3-month run
+MHZ_PER_BIN = 1e3 / TOBS             # 1 bin = 1/Tobs Hz, f0 sampled in mHz
 
 
 def _flagship_fisher():
@@ -243,7 +245,16 @@ class LnFdotGradientTest(unittest.TestCase):
 
 
 class RidgeAxisTest(unittest.TestCase):
-    """``a ~ F^+ g`` -- provably the best fdot-mover per unit lnL cost."""
+    """``a ~ F^+ g`` -- provably the best fdot-mover per unit lnL cost.
+
+    NO LONGER INSTALLED (2026-09-01): ``eigen_axis_set`` now carries the
+    ANALYTIC shear ridge instead. The optimality proved below is real, but
+    it is optimality with respect to ``F``, and this ``F``'s f0 block is
+    34% off -- so the axis it selects points 80% too steep. Kept because
+    the construction becomes correct again the day the information
+    matrix's f0 block is trustworthy, and because a deleted derivation is
+    a derivation someone re-does wrong.
+    """
 
     def test_axis_is_unit_norm(self):
         u, _ = _ridge_from(_flagship_fisher(), FLAGSHIP[None, :])
@@ -286,7 +297,8 @@ class RidgeAxisTest(unittest.TestCase):
 
 def _axis_set(F, coords, **kw):
     t = gb_fiber_tangent(coords, DIST, MC, R)
-    return eigen_axis_set(F[None, ...], t, coords, F0, MC, R, **kw)
+    return eigen_axis_set(F[None, ...], t, coords, F0, MC, R, DIST,
+                          TOBS, **kw)
 
 
 class EigenAxisSetTest(unittest.TestCase):
@@ -328,31 +340,52 @@ class EigenAxisSetTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(sig)))
         self.assertTrue(np.all(sig > 0))
 
-    def test_the_ridge_axis_delivers_the_fdot_motion_eigenaxes_cannot(self):
+    def test_the_ridge_axis_walks_the_analytic_shear_ridge(self):
         """THE regression guard for the whole change.
 
-        Measured on the real flagship Fisher: the best eigen-axis moves
-        ln(fdot) by 0.040 per 1-sigma step, against the 0.35 needed to walk
-        the near-truth cluster to the peak. The explicit ridge axis must
-        beat every eigen-axis on that metric, or the change does not do the
-        thing it was built for.
+        The installed ridge is the ANALYTIC shear ridge, not ``F^+ g``.
+        ``F^+ g`` is provably the best fdot-mover per unit lnL cost GIVEN
+        a correct ``F`` -- but this ``F``'s joint draw walks a ridge of
+        slope ``d f0 / d fdot = -0.898 T`` against the geometry's
+        ``-T/2``, so the "optimal" axis inherits that error. Optimising
+        against a wrong metric is the failure being retired, which is why
+        this asserts the GEOMETRY and not a score under ``F``.
+
+        The ratio survives the fiber orthogonalisation exactly: the fiber
+        holds ``A`` and ``fdot`` fixed and does not touch ``f0``, so it is
+        null for all three observables, and the renormalisation that
+        follows is a common positive factor.
         """
-        F = _flagship_fisher()
-        axes, sig = _axis_set(F, FLAGSHIP[None, :], sigma_max=1e30)
+        axes, _ = _axis_set(_flagship_fisher(), FLAGSHIP[None, :])
+        a = axes[0, :, -1]
         g = gb_lnfdot_gradient(FLAGSHIP[None, :], F0, MC, R)[0]
-        vals = [abs(float(g @ axes[0, :, k]) * sig[0, k])
-                for k in range(axes.shape[-1])]
-        self.assertEqual(int(np.argmax(vals)), axes.shape[-1] - 1,
-                         "the ridge axis must be the best fdot mover")
-        self.assertGreater(vals[-1], 1.5 * max(vals[:-1]),
-                           "and by a clear margin, not a tie")
+        fd = (FDOT_K * FLAGSHIP[MC] ** (5 / 3)
+              * (FLAGSHIP[F0] * 1e-3) ** (11 / 3) * (1 + FLAGSHIP[R]))
+        d_lnfdot = float(g @ a)
+        self.assertGreater(abs(d_lnfdot), 1e-6, "the ridge must move fdot")
+        slope = (a[F0] * 1e-3) / (fd * d_lnfdot)          # d f0[Hz] / d fdot
+        self.assertAlmostEqual(slope / TOBS, -0.5, places=6)
+
+    def test_the_ridge_axis_holds_the_measured_amplitude_fixed(self):
+        """``A``, not ``dist``, is what the data measures.
+
+        ``ln A = const + (5/3) ln Mc + (2/3) ln f0 - ln dist``; a ridge
+        that moved it would spend likelihood on amplitude while trying to
+        move fdot, which is the same class of defect as the f_mid leak.
+        """
+        axes, _ = _axis_set(_flagship_fisher(), FLAGSHIP[None, :])
+        a = axes[0, :, -1]
+        d_lnA = ((5 / 3) * a[MC] / FLAGSHIP[MC]
+                 + (2 / 3) * a[F0] / FLAGSHIP[F0]
+                 - a[DIST] / FLAGSHIP[DIST])
+        self.assertLess(abs(float(d_lnA)), 1e-10)
 
     def test_batched_over_sources_is_row_independent(self):
         F = _flagship_fisher()
         rows = np.repeat(FLAGSHIP[None, :], 3, axis=0)
         t = gb_fiber_tangent(rows, DIST, MC, R)
         axes, sig = eigen_axis_set(np.repeat(F[None, ...], 3, axis=0), t,
-                                   rows, F0, MC, R)
+                                   rows, F0, MC, R, DIST, TOBS)
         np.testing.assert_allclose(axes[0], axes[2], rtol=1e-10, atol=1e-12)
         np.testing.assert_allclose(sig[0], sig[2], rtol=1e-10)
 

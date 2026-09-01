@@ -1080,9 +1080,28 @@ def _eigen_axis_on() -> bool:
     return os.environ.get("GB_INMODEL_EIGEN_AXIS", "0") == "1"
 
 
-#: In-model proposal when ``GB_INMODEL_PROPOSAL`` is unset. Flipped to
-#: ``"observable"`` at plan phase 6, once the cluster probes pass.
-_INMODEL_PROPOSAL_DEFAULT = "legacy"
+#: In-model proposal when ``GB_INMODEL_PROPOSAL`` is unset.
+#:
+#: ``"observable"`` since 2026-09-01. The two legacy components it
+#: replaces are, in practice, one: GB sets ``stretch_probability = 0.0``
+#: (:1885), so ``infomat`` is the only in-model proposal that actually
+#: runs -- confirmed in the v7 log, where every GB line reads
+#: ``in-model by proposal type -- infomat:`` and only VGB (which sets
+#: ``stretch_probability = 1.0`` in its own ctor and overrides
+#: ``in_model_proposal`` outright) reports ``stretch:``.
+#:
+#: And ``infomat`` is the measured-broken one. On the real flagship Fisher
+#: its joint draw walks an ``f0``-``fdot`` ridge of slope ``-0.898 T``
+#: where the chirp geometry demands ``-T/2``; the excess lands as 0.170
+#: bins of spurious ``f_mid`` motion per fdot step, against a 0.012-bin
+#: posterior width at rho = 46. Every attempt to move ``fdot`` therefore
+#: pays ~14 sigma, which is why ``fdot`` does not move.
+#:
+#: ``GB_INMODEL_PROPOSAL=legacy`` reverts, deliberately: v7 is the
+#: baseline and a same-seed revert path is what makes the v8 comparison
+#: readable. Do not delete the legacy branches while that comparison is
+#: still wanted.
+_INMODEL_PROPOSAL_DEFAULT = "observable"
 _INMODEL_PROPOSAL_KINDS = ("observable", "legacy")
 
 #: Cached refusal marker for :meth:`_observable_map` -- distinct from
@@ -1231,8 +1250,63 @@ def gb_lnfdot_gradient(coords, f0_col, mc_col, r_col):
     return g
 
 
+def gb_shear_ridge_axis(coords, f0_col, mc_col, r_col, dist_col, tobs):
+    """Unit tangent of the ANALYTIC ``f0``-``fdot`` ridge. ``(n, ndim)``.
+
+    Replaces ``F^+ g`` as the installed ridge column (2026-09-01).
+    ``F^+ g`` maximises ``fdot`` motion per unit lnL cost, which is the
+    right thing to do GIVEN a correct ``F``. This ``F`` is not correct
+    where it matters: on the real flagship its joint draw walks a ridge of
+    slope ``d f0 / d fdot = -0.898 T`` against the chirp geometry's
+    ``-T/2``, so an "optimal" axis built from it inherits exactly that
+    wrong direction. (Root cause: the numerical Jacobian differentiates
+    through ``f0`` with a step that hits grid quantisation inside
+    ``run_wave``; the f0 derivative comes out 34% off.)
+
+    The geometry does not need estimating, so take it directly. ``f0`` is
+    the frequency at the START of the data while the data constrains the
+    frequency at the MIDDLE, ``f_mid = f0 + fdot*T/2``; and the amplitude
+    is measured as ``A``, not as ``dist``. Holding both fixed while moving
+    ``ln fdot`` by ``u``, at fixed ``Mc`` (that is the fiber, and
+    ``gb_ridge_gibbs`` owns it):
+
+        df0   = -(T/2) * fdot * u                        [Hz]
+        dr    = (1 + r) * u * [1 + (11/3) * (T/2) * fdot / f0]
+        ddist = -(2/3) * dist * (T/2) * fdot * u / f0
+
+    from ``ln fdot = const + (5/3) ln Mc + (11/3) ln f0 + ln(1+r)`` and
+    ``ln A = const + (5/3) ln Mc + (2/3) ln f0 - ln dist``.
+
+    ``T/2`` enters as a DIRECTION only, so a wrong ``tobs`` tilts the axis
+    a little and costs acceptance -- never correctness. Same guarantee as
+    the observable-basis shear, and for the same reason.
+    """
+    xp = get_array_module(coords)
+    n, ndim = coords.shape
+    a = xp.zeros((n, ndim), dtype=xp.float64)
+    f0 = coords[:, f0_col] * 1e-3                       # mHz -> Hz
+    one = xp.ones_like(f0)
+    safe_f0 = xp.where(xp.abs(f0) > 0, f0, one)
+    fd = fdot_gr(f0, coords[:, mc_col]) * (1.0 + coords[:, r_col])
+    half_t = 0.5 * float(tobs)
+    a[:, f0_col] = -half_t * fd * 1e3                   # Hz -> mHz
+    a[:, r_col] = (1.0 + coords[:, r_col]) * (
+        1.0 + (11.0 / 3.0) * half_t * fd / safe_f0)
+    a[:, dist_col] = -(2.0 / 3.0) * coords[:, dist_col] * half_t * fd / safe_f0
+    nrm = xp.sqrt((a * a).sum(axis=-1, keepdims=True))
+    return a / xp.where(nrm > 0, nrm, xp.ones_like(nrm))
+
+
 def gb_ridge_axis(evals, evecs, grad):
     """The direction that buys the most ``fdot`` motion per unit lnL cost.
+
+    .. warning::
+       **NO LONGER INSTALLED** as ``eigen_axis_set``'s ridge column
+       (2026-09-01) -- see :func:`gb_shear_ridge_axis`. The formula below
+       is right; the ``F`` it was being fed is not, and the axis inherits
+       the error. Kept because the derivation is worth having and because
+       it becomes correct again the day the information matrix's ``f0``
+       block is trustworthy.
 
     Maximising ``(g . a)^2 / (a^T F a)`` over ``a`` gives ``a ~ F^+ g`` (any
     other direction is smaller by Cauchy-Schwarz), with the achieved value
@@ -1291,7 +1365,7 @@ def axis_prior_bounds(axes, widths):
 
 
 def eigen_axis_set(info, t_fiber, coords, f0_col, mc_col, r_col,
-                   sigma_max=1.0):
+                   dist_col, tobs, sigma_max=1.0):
     """Per-source proposal axes and their own 1-sigma widths.
 
     Returns ``(axes, sigmas)`` with ``axes`` shaped ``(n, ndim, ndim)``
@@ -1300,8 +1374,18 @@ def eigen_axis_set(info, t_fiber, coords, f0_col, mc_col, r_col,
     The set is the ``ndim - 1`` eigenvectors of the fiber-projected
     information matrix PLUS the explicit ridge axis in the LAST column (it
     replaces the fiber-aligned eigenvector). The ridge axis is
-    orthogonalised against the fiber -- that component changes ``fdot`` not
-    at all and belongs to ``gb_ridge_gibbs``.
+    orthogonalised against the fiber -- that component changes ``fdot``
+    not at all and belongs to ``gb_ridge_gibbs``. Removing it is free for
+    the observables too: the fiber holds ``A`` and ``fdot`` fixed and does
+    not touch ``f0``, so ``f_mid`` is fixed along it as well.
+
+    The ridge column is the ANALYTIC shear ridge
+    (:func:`gb_shear_ridge_axis`), not ``F^+ g``: this ``F``'s ``f0``
+    block is 34% off, so the "optimal" axis built from it pointed 80% too
+    steep. ``dist_col`` and ``tobs`` are required for that construction --
+    deliberately not defaulted, since a silently omitted ``tobs`` would
+    give a plausible-looking axis along the wrong ridge, which is the
+    exact failure being retired.
 
     ``sigma_k = 1 / sqrt(a_k^T F a_k)`` uses the ORIGINAL information
     matrix, so each axis is scaled by its own curvature. A 1-D move pays no
@@ -1322,12 +1406,8 @@ def eigen_axis_set(info, t_fiber, coords, f0_col, mc_col, r_col,
     ov = xp.abs(xp.einsum("ni,nij->nj", t_fiber, evecs))
     order = xp.argsort(ov, axis=-1)
     axes = xp.take_along_axis(evecs, order[:, None, :], axis=-1)
-    lam = xp.take_along_axis(evals, order, axis=-1)
-    grad = gb_lnfdot_gradient(coords, f0_col, mc_col, r_col)
-    # Pseudo-inverse over the NON-fiber columns only. The fiber sorts last
-    # by construction; dropping it by RANK rather than by an eigenvalue
-    # threshold is what keeps the soft-but-real directions in.
-    ridge = gb_ridge_axis(lam[:, :-1], axes[:, :, :-1], grad)
+    ridge = gb_shear_ridge_axis(coords, f0_col, mc_col, r_col, dist_col,
+                                tobs)
     ridge = ridge - t_fiber * (t_fiber * ridge).sum(axis=-1, keepdims=True)
     rn = xp.sqrt((ridge * ridge).sum(axis=-1, keepdims=True))
     ridge = ridge / xp.where(rn > 0, rn, xp.ones_like(rn))
@@ -10338,7 +10418,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     self._fdot_astro_col)
                 axes, sig = eigen_axis_set(
                     info_y, t_fiber, coords, self._f0_col, self._mc_col,
-                    self._fdot_astro_col, sigma_max=xp.inf)
+                    self._fdot_astro_col, self._dist_col,
+                    1.0 / float(self.df), sigma_max=xp.inf)
                 bounds = axis_prior_bounds(axes, self._eigen_axis_widths(ndim))
                 sig = xp.minimum(sig, bounds)
                 self._last_axis_sigmas = sig

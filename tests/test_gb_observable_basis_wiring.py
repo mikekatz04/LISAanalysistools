@@ -139,6 +139,18 @@ class ProposalKindTest(unittest.TestCase):
                     os.environ.pop(k, None)
             return _inmodel_proposal_kind()
 
+    def test_the_default_is_observable(self):
+        """Phase 6: this is now THE in-model proposal for GB.
+
+        Pinned rather than assumed -- an accidental revert of the default
+        would silently put every GB run back on the proposal whose f0-fdot
+        ridge is 80% too steep, and nothing else would say so.
+        """
+        self.assertEqual(self._kind(), "observable")
+
+    def test_legacy_remains_reachable_for_the_v7_baseline_comparison(self):
+        self.assertEqual(self._kind(GB_INMODEL_PROPOSAL="legacy"), "legacy")
+
     def test_legacy_and_observable_both_selectable(self):
         self.assertEqual(self._kind(GB_INMODEL_PROPOSAL="legacy"), "legacy")
         self.assertEqual(self._kind(GB_INMODEL_PROPOSAL="observable"),
