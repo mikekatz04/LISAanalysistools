@@ -57,8 +57,19 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+# Scalar physics shared with the in-model observable-basis proposal, so the
+# grid rows and the chain-side move cannot drift apart. The column-resolution
+# half of that module is deliberately NOT used here: grid rows are the
+# physical 9-column waveform layout and carry no transform_container.
+from .gb_observable_basis import (
+    fdot_gr,
+    mc_floor_for_fdot,
+    r_from_fdot,
+)
+
 __all__ = [
     "GridSpec",
+    "FdotAxisBirth",
     "FStatProposal4D",
     "StackedFStatProposal4D",
     "GroupedStackedFStatProposal",
@@ -1527,8 +1538,24 @@ def stacked_from_cache(d, weights=None, seed: Optional[int] = None,
     per-box weight vector; each group's stack receives its slice (a
     zero-mass group falls back to equal weights internally and simply
     never gets drawn).
+
+    Refuses a cache whose ``grid_basis`` disagrees with ``FSTAT_FDOT_AXIS``.
+    Axis 2 means chirp mass in one basis and Hz/s in the other; a consumer
+    that reads one as the other gets NO error, just births at absurd
+    parameters. An absent stamp is the legacy ``"Mc"`` basis.
     """
     keys = getattr(d, "files", None) or list(d)
+    want = "fdot" if os.environ.get("FSTAT_FDOT_AXIS", "0").strip() == "1" \
+        else "Mc"
+    got = str(np.asarray(d["grid_basis"]).item()) if "grid_basis" in keys \
+        else "Mc"
+    if got != want:
+        raise ValueError(
+            f"F-stat grid cache was fitted in the {got!r} basis but "
+            f"FSTAT_FDOT_AXIS asks for {want!r}. Axis 2 is a chirp mass in "
+            f"one and Hz/s in the other -- reusing it would place births at "
+            f"absurd parameters with no error. Delete the "
+            f"*_peaks_stacked.npz cache to refit, or restore the flag.")
     if "logp_grids" in keys:
         return StackedFStatProposal4D.from_cache(
             d, weights=weights, seed=seed, mem_budget_mb=mem_budget_mb,
@@ -1681,7 +1708,7 @@ class UniformFloorMixture:
 
 def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False,
                                fdot_astro_ratio_max=None, dist_lims=None,
-                               ratio_tight=None):
+                               ratio_tight=None, tobs=None, mc_lims=None):
     """Wrap a 4-D intrinsic proposal into the 8/9-column GB RJ birth container.
 
     Mirrors the stock GMM birth container
@@ -1721,24 +1748,48 @@ def make_gb_rj_birth_container(intrinsic_dist, A_lims, use_cupy: bool = False,
         slot0_prior = UniformDistribution(*np.log(np.asarray(A_lims, dtype=float)))
     priors_in = {
         slot0_name: slot0_prior,
-        ("f0", "Mc", "alpha", "sin_delta"): intrinsic_dist,
         "phi0": UniformDistribution(0.0, 2.0 * np.pi),
         "cos_iota": UniformDistribution(-1.0, 1.0),
         "psi": UniformDistribution(0.0, np.pi),
     }
     key_order = [slot0_name, "f0", "Mc", "phi0", "cos_iota", "psi",
                  "alpha", "sin_delta"]
-    if fdot_astro_ratio_max is not None:
-        M = float(fdot_astro_ratio_max)
-        priors_in["fdot_astro_ratio"] = UniformDistribution(-M, M)
+    M = None if fdot_astro_ratio_max is None else float(fdot_astro_ratio_max)
+    if M is not None:
         key_order.append("fdot_astro_ratio")
+
+    # FSTAT_FDOT_AXIS: the grid lives in (f_mid, fdot, alpha, sin_delta), so
+    # the intrinsic block must own ``r`` as well -- inverting
+    # ``fdot = fdot_gr(f0, Mc)(1 + r)`` needs both Mc and r, and the 4-D key
+    # below has neither r nor any way to acquire it. The 5-D block does the
+    # conversion and carries its own measure; it REPLACES both the separate
+    # U[-M, M] ratio column and RatioTightenedBirth, whose whole job was to
+    # patch up a draw the grid never scored.
+    _fdot_axis = (M is not None
+                  and os.environ.get("FSTAT_FDOT_AXIS", "0").strip() == "1")
+    if _fdot_axis:
+        if not tobs:
+            raise ValueError(
+                "FSTAT_FDOT_AXIS=1 needs tobs for the f_mid shear; got "
+                f"{tobs!r}. Pass 1.0/df, never basis_settings.Tobs -- the "
+                "latter is absent on FDSettings and a getattr default of 0.0 "
+                "would silently disable the shear.")
+        _mc = list(mc_lims or [0.001, 1.0])
+        priors_in[("f0", "Mc", "fdot_astro_ratio", "alpha", "sin_delta")] = (
+            FdotAxisBirth(intrinsic_dist, tobs=float(tobs),
+                          mc_lo=float(_mc[0]), mc_hi=float(_mc[-1]),
+                          ratio_max=M, use_cupy=use_cupy))
+    else:
+        priors_in[("f0", "Mc", "alpha", "sin_delta")] = intrinsic_dist
+        if M is not None:
+            priors_in["fdot_astro_ratio"] = UniformDistribution(-M, M)
+
     dist = ProbDistContainer(priors_in, use_cupy=use_cupy)
     # reset_key_order re-maps rvs/logpdf columns to the sampler layout
     # (a bare ``key_order = [...]`` assignment would NOT re-map).
     dist.reset_key_order(key_order)
-    if fdot_astro_ratio_max is not None and ratio_tight is not None:
-        return RatioTightenedBirth(dist, float(fdot_astro_ratio_max),
-                                   use_cupy=use_cupy, **ratio_tight)
+    if M is not None and ratio_tight is not None and not _fdot_axis:
+        return RatioTightenedBirth(dist, M, use_cupy=use_cupy, **ratio_tight)
     return dist
 
 
@@ -1834,6 +1885,185 @@ class RatioTightenedBirth:
         with np.errstate(divide="ignore"):
             lp = lp + np.log(2.0 * self.M) + xp.log(q)
         return xp.where(xp.isnan(lp), -xp.inf, lp)
+
+
+class FdotAxisBirth:
+    """5-D birth block ``(f0, Mc, r, alpha, sin_delta)`` over an fdot grid.
+
+    THE CHANGE. The F-stat grid's ``Mc`` axis is already an ``fdot`` axis,
+    just a bad one: rows are assembled as ``fdot = fdot_gr(f0, Mc_node)``,
+    i.e. the ``r = 0`` MANIFOLD. So the grid searches only GR-driven
+    chirps, ``fdot ~ Mc^(5/3)`` makes uniform-in-Mc nodes non-uniform in
+    the coordinate that matters (while ``StackedFStatProposal4D``
+    hard-assumes uniform axes), and negative ``fdot`` is UNREPRESENTABLE
+    -- against 40% of low-f and 21% of high-f v7 leaves that carry
+    ``fdot < 0``. Under this class the grid lives in
+    ``(f_mid, fdot, alpha, sin_delta)`` with ``fdot`` a first-class linear
+    axis, and the conversion to the sampling basis happens here.
+
+    WHY 5-D AND NOT 4-D. Inverting ``fdot = fdot_gr(f0, Mc)(1 + r)``
+    needs BOTH ``Mc`` and ``r``, so the conversion cannot live in the
+    4-D ``(f0, Mc, alpha, sin_delta)`` block. Owning ``r`` here RETIRES
+    :class:`RatioTightenedBirth`'s blind draw -- which is the point: today
+    ``r`` is drawn by something the grid never scored, and it shears the
+    candidate back off the ridge the grid just put it on.
+
+    THE MEASURE. ``Mc`` is the fiber coordinate (the likelihood is flat
+    along it), drawn uniformly on the FEASIBLE interval
+    ``[mc_floor(fdot, f0), mc_hi]`` -- the set on which ``|r| <= M``. With
+    ``g = fdot_gr(f0, Mc)``, the map ``(f_mid, fdot, Mc) -> (f0, Mc, r)``
+    has determinant ``1/g``::
+
+        det = dr/dfdot + c_t * dr/df_mid
+            = [1/g + c_t*d*g_f0/g**2] - [c_t*d*g_f0/g**2]
+            = 1/g
+
+    The two shear terms cancel EXACTLY even though ``g`` depends on
+    ``f0`` -- so the shear contributes nothing and a wrong ``c_t`` costs
+    efficiency only, never correctness. Hence::
+
+        log q = log p_grid(f_mid, fdot, alpha, sd)
+                + log g                       # dfdot/dr
+                - log(mc_hi - mc_floor)       # the uniform Mc draw
+
+    ``rvs`` and ``logpdf`` are exactly consistent, so the RJ
+    Metropolis-Hastings factors stay correct. That consistency is the one
+    thing here that can be silently wrong -- a mismatch biases the
+    acceptance ratio in both directions and raises no error -- so it is
+    pinned by an independence-proposal invariance test with five negative
+    controls (``tests/test_fstat_fdot_birth.py``).
+
+    ``_defect`` injects a deliberate error for those controls. It is a
+    TEST-ONLY hook and it validates its argument: a silently-ignored
+    defect name would make a control pass while testing nothing.
+    """
+
+    param_names = ("f0", "Mc", "fdot_astro_ratio", "alpha", "sin_delta")
+    ndim = 5
+
+    #: recognised ``_defect`` values (test-only; see the class docstring)
+    DEFECTS = (None, "omit_jac", "flip_jac", "omit_mcwidth",
+               "shear_rvs_only", "mc_full_box_rvs")
+
+    def __init__(self, grid4, *, tobs, mc_lo, mc_hi, ratio_max,
+                 shear=0.5, seed=None, use_cupy=False, _defect=None):
+        if _defect not in self.DEFECTS:
+            raise ValueError(
+                f"unknown _defect {_defect!r}; expected one of {self.DEFECTS}")
+        self.grid4 = grid4
+        self.tobs = float(tobs)
+        self.mc_lo = float(mc_lo)
+        self.mc_hi = float(mc_hi)
+        self.M = float(ratio_max)
+        self.shear = float(shear)
+        self.use_cupy = bool(use_cupy)
+        self._defect = _defect
+        self._rng = np.random.default_rng(seed)
+
+    @property
+    def _c_t(self):
+        return self.shear * self.tobs
+
+    def _xp(self, x=None):
+        if x is not None:
+            from ..utils.utility import get_array_module
+            return get_array_module(x)
+        if self.use_cupy:
+            import cupy as cp
+            return cp
+        return np
+
+    def _floor(self, fdot, f0_hz, *, side):
+        """Feasible ``Mc`` floor. ``side`` is ``"rvs"`` or ``"logpdf"``.
+
+        ``side`` exists ONLY for the ``mc_full_box_rvs`` control, and the
+        asymmetry is the point. An earlier version applied that defect
+        here unconditionally -- so both paths saw the same widened
+        interval, the proposal stayed self-consistent, and the control
+        correctly failed to skew (KS p = 0.005). A defect injected into a
+        shared helper is not a defect; it has to break rvs against logpdf.
+        """
+        if self._defect == "mc_full_box_rvs" and side == "rvs":
+            xp = self._xp(fdot)
+            return xp.full(xp.shape(fdot), self.mc_lo)
+        return mc_floor_for_fdot(fdot, f0_hz, self.M, self.mc_lo)
+
+    def rvs(self, size=1):
+        n = int(np.prod(size)) if not isinstance(size, int) else int(size)
+        z = np.atleast_2d(np.asarray(self.grid4.rvs(size=n), dtype=float))
+        xp = self._xp(z)
+        f_mid_hz = z[:, 0] * 1e-3
+        fdot = z[:, 1]
+        f0_hz = f_mid_hz - self._c_t * fdot
+        floor = self._floor(fdot, f0_hz, side="rvs")
+        # INFEASIBLE ROWS. The grid's fdot axis is sized at ONE reference
+        # f0, but each row's own f0 comes off the shear, and the reachable
+        # |fdot| goes as f0^(11/3) -- so a row whose f0 falls below the
+        # reference can be handed an fdot no Mc in the box can carry, i.e.
+        # mc_floor > mc_hi. That is a MIS-SIZED GRID (fix it by sizing the
+        # axis at the group's lowest f0 -- run_stacked_stage_b intersects
+        # the per-box bounds for exactly this reason), not something to
+        # paper over: such a row is priced -inf and rejected forever, which
+        # reads as inefficiency rather than as a bug. Clamp so the draw
+        # stays in the box, and COUNT it so a mis-sized grid is visible.
+        bad = floor > self.mc_hi
+        n_bad = int(xp.count_nonzero(bad))
+        if n_bad:
+            self.n_infeasible = getattr(self, "n_infeasible", 0) + n_bad
+            floor = xp.minimum(floor, self.mc_hi)
+        # Mc is the FIBER coordinate: the likelihood is flat along it, so
+        # it is prior-set rather than grid-informed. Uniform on the
+        # feasible interval, which is exactly the set where |r| <= M.
+        mc = floor + xp.asarray(self._rng.random(n)) * (self.mc_hi - floor)
+        r = r_from_fdot(fdot, f0_hz, mc)
+        out = xp.zeros((n, 5), dtype=xp.float64)
+        out[:, 0] = f0_hz * 1e3
+        out[:, 1] = mc
+        out[:, 2] = r
+        out[:, 3] = z[:, 2]
+        out[:, 4] = z[:, 3]
+        return out
+
+    def logpdf(self, x):
+        xp = self._xp(x)
+        x = xp.atleast_2d(xp.asarray(x, dtype=xp.float64))
+        f0_hz = x[:, 0] * 1e-3
+        mc = x[:, 1]
+        r = x[:, 2]
+        g = fdot_gr(f0_hz, mc)
+        fdot = g * (1.0 + r)
+        # The shear must be applied on BOTH sides. Applying it in rvs only
+        # (or logpdf only) silently biases the RJ ratio in both directions
+        # with no error anywhere -- the control that catches it is the
+        # single most important test in this file.
+        c_t = 0.0 if self._defect == "shear_rvs_only" else self._c_t
+        f_mid_mHz = (f0_hz + c_t * fdot) * 1e3
+        q = xp.stack([f_mid_mHz, fdot, x[:, 3], x[:, 4]], axis=-1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lp = xp.asarray(self.grid4.logpdf(q), dtype=xp.float64)
+            floor = self._floor(fdot, f0_hz, side="logpdf")
+            width = self.mc_hi - floor
+            if self._defect != "omit_mcwidth":
+                lp = lp - xp.log(xp.where(width > 0, width, 1.0))
+            if self._defect == "flip_jac":
+                lp = lp - xp.log(g)
+            elif self._defect != "omit_jac":
+                lp = lp + xp.log(g)
+        # Tolerant at the boundary, deliberately. At the top of the fdot
+        # axis ``floor -> mc_hi``, the feasible Mc interval collapses and
+        # ``|r| = M`` EXACTLY; ``logpdf`` then re-derives fdot from
+        # ``(f0, Mc, r)`` and the floor from that, so a round trip of a
+        # boundary row lands a few ulp outside. A hard comparison rejects
+        # ~0.4% of the block's own draws -- the classic silent RJ bug where
+        # a birth is made, priced at -inf and rejected forever, so the move
+        # looks merely inefficient. The excluded set has measure zero, so a
+        # relative epsilon changes no density, only the boundary verdict.
+        eps = 1e-9
+        ok = ((width > 0) & (mc >= floor * (1.0 - eps) - eps)
+              & (mc <= self.mc_hi * (1.0 + eps) + eps)
+              & (xp.abs(r) <= self.M * (1.0 + eps) + eps)
+              & xp.isfinite(lp))
+        return xp.where(ok, lp, -xp.inf)
 
 
 class MixtureProposal:

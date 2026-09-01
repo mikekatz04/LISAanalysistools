@@ -83,6 +83,11 @@ def _fmt_secs(s: float) -> str:
 # The host-transfer helper already exists in fstat_proposal -- import it
 # rather than keeping a second copy.
 from lisatools.sampling.fstat_proposal import _host as _to_host  # noqa: E402
+from lisatools.sampling.gb_observable_basis import (  # noqa: E402
+    fdot_axis_bounds,
+    mc_floor_for_fdot,
+    n_fdot_nodes,
+)
 
 
 def _windowed_max(a, w, xp):
@@ -829,12 +834,27 @@ def run_comb_scan(call_fstat: Callable, *, xp, Tobs: float, band_edges_hz,
 def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
                            alpha_ax, sd_ax, node_shape, *, xp,
                            ckpt: Optional[str] = None,
-                           fingerprint_extra: str = ""):
+                           fingerprint_extra: str = "",
+                           fdot_axis: bool = False, c_t: float = 0.0):
     """ONE chunked kernel stream over EVERY peak box of EVERY sub-band.
 
-    ``node_shape`` is ``(K, n_f0, n_Mc, n_alpha, n_sd)``. Rows are assembled
+    ``node_shape`` is ``(K, n_f0, n_1, n_alpha, n_sd)``. Rows are assembled
     per chunk from index arithmetic (so the full ``n_total x 9`` array never
     materializes); the kernel sees a single ``FSTAT_BATCH``-chunked stream.
+
+    Axis 2 has two meanings, selected by ``fdot_axis``:
+
+    * ``False`` (default, byte-identical to the historical path) -- ``mc_ax``
+      is a CHIRP MASS axis and ``fdot = fdot_gr(f0, Mc)``. That is the
+      ``r = 0`` manifold: the sweep scores only GR-driven chirps, and
+      negative ``fdot`` is unreachable.
+    * ``True`` -- ``mc_ax`` is an ``fdot`` axis in Hz/s, scored directly.
+      Axis 0 then carries ``f_mid`` rather than ``f0``, and the physical
+      ``f0 = f_mid - c_t * fdot`` is derived per row. Because ``fdot`` is a
+      free axis and ``c_t`` a constant, that is an EXACT unit-determinant
+      shear -- it decorrelates the ``(f0, fdot)`` metric at zero cost to
+      the measure, which is what licenses the coarser aligned node
+      spacing (see :func:`fdot_coherence_width`).
     """
     from gbgpu.utils.utility import get_fdot
 
@@ -842,10 +862,17 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
 
     n_total = int(np.prod(node_shape))
     batch = fstat_knob("FSTAT_BATCH", int)
+    # THE AXIS FLAG IS PART OF THE FINGERPRINT. The axis VALUES already
+    # differ between the two meanings, but relying on that is not enough:
+    # a resumed fit whose grid_basis disagrees with the checkpoint would
+    # reuse F values scored at entirely different physical templates, and
+    # nothing downstream would notice. Same precedent as GB_FSTAT_GB_FREE.
     fp = (ckpt_fingerprint(np.asarray(f0_los), np.asarray(f0_dxs),
                            np.asarray(mc_ax), np.asarray(alpha_ax),
                            np.asarray(sd_ax),
-                           extra=str(node_shape) + fingerprint_extra)
+                           extra=(str(node_shape) + fingerprint_extra
+                                  + f"|fdot_axis={int(bool(fdot_axis))}"
+                                  + f"|c_t={float(c_t):.6e}"))
           if ckpt else "")
     f0_los_d = xp.asarray(f0_los)
     f0_dxs_d = xp.asarray(f0_dxs)
@@ -870,8 +897,15 @@ def run_stacked_peak_sweep(call_fstat: Callable, f0_los, f0_dxs, mc_ax,
             k, i0, i1, i2, i3 = xp.unravel_index(xp.arange(s, e), node_shape)
             pr = xp.zeros((e - s, 9), dtype=xp.float64)
             pr[:, 0] = 1e-22
-            pr[:, 1] = (f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
-            pr[:, 2] = xp.asarray(get_fdot(f=pr[:, 1], Mc=mc_d[i1]))
+            if fdot_axis:
+                # axis 2 IS fdot; axis 0 carries f_mid, so the physical f0
+                # is sheared off it. Order matters: fdot first.
+                pr[:, 2] = mc_d[i1]
+                pr[:, 1] = ((f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
+                            - float(c_t) * pr[:, 2])
+            else:
+                pr[:, 1] = (f0_los_d[k] + i0 * f0_dxs_d[k]) * 1e-3
+                pr[:, 2] = xp.asarray(get_fdot(f=pr[:, 1], Mc=mc_d[i1]))
             pr[:, 5] = 0.5 * np.pi
             pr[:, 7] = al_d[i2]
             pr[:, 8] = xp.arcsin(sd_d[i3])
@@ -933,7 +967,7 @@ def mc_ladder_levels(n_req):
 
 
 def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
-                        band_edges_hz, mc_lims,
+                        band_edges_hz, mc_lims, ratio_max=None,
                         cache_path: Optional[str] = None,
                         fingerprint_extra: str = "", epoch=None):
     """Stage B: clamped boxes -> batched sweep(s) -> stacked grids.
@@ -1019,10 +1053,40 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
     # One group -- every confined probe, a pinned FSTAT_N_MC, or
     # FSTAT_MC_GROUPING=0 -- is bit-identical to the historical
     # single-stack path (n_Mc = the max-f0 requirement, legacy cache).
-    n_req = np.array([
-        fstat_n_mc(float(f0), mc_range[0], mc_range[1], float(Tobs))
-        for f0 in peaks[:, 0]
-    ])
+    # FSTAT_FDOT_AXIS: replace the Mc axis with a LINEAR fdot axis in Hz/s
+    # (user ruling: fit in (f0, fdot_total), convert after). The Mc axis is
+    # already an fdot axis -- rows are scored at fdot = fdot_gr(f0, Mc), the
+    # r = 0 manifold -- so this changes what axis 2 MEANS, not the grid's
+    # shape or the machinery around it. Three defects go at once: the axis
+    # reaches NEGATIVE fdot (unreachable today, against 40% of low-f and 21%
+    # of high-f v7 leaves), spacing becomes uniform in the coordinate
+    # StackedFStatProposal4D assumes is uniform (fdot ~ Mc^(5/3) is not),
+    # and coverage goes from 10% of the prior fdot range to all of it.
+    # Measured node cost at 90 d: 6.5 mHz 3->3, 10.2 6->5, 15.6 27->20,
+    # 20.38 71->53 -- FEWER nodes over 10x the range, because the aligned
+    # coherence width is 13.4x coarser.
+    _fdot_axis = os.environ.get("FSTAT_FDOT_AXIS", "0").strip() == "1"
+    _rm_env = os.environ.get("FSTAT_FDOT_RATIO_MAX", "").strip()
+    _ratio_max = (float(_rm_env) if _rm_env
+                  else (None if ratio_max is None else float(ratio_max)))
+    _c_t = 0.5 * float(Tobs)
+    if _fdot_axis:
+        if _ratio_max is None:
+            raise ValueError(
+                "FSTAT_FDOT_AXIS=1 needs the fdot_astro_ratio prior "
+                "half-width: pass ratio_max= or set FSTAT_FDOT_RATIO_MAX. "
+                "Guessing it would silently size the axis to the wrong "
+                "physical range.")
+        _fd_bounds = [fdot_axis_bounds(float(f0) * 1e-3, mc_range[1],
+                                       _ratio_max) for f0 in peaks[:, 0]]
+        n_req = np.array([n_fdot_nodes(lo, hi, float(Tobs), aligned=True,
+                                       eta=fstat_knob("FSTAT_MC_ETA", float))
+                          for lo, hi in _fd_bounds])
+    else:
+        n_req = np.array([
+            fstat_n_mc(float(f0), mc_range[0], mc_range[1], float(Tobs))
+            for f0 in peaks[:, 0]
+        ])
     if os.environ.get("FSTAT_MC_GROUPING", "1") == "1":
         levels = mc_ladder_levels(n_req)
     else:
@@ -1052,13 +1116,35 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
     for gi in range(n_groups):
         a, b = int(g_edges[gi]), int(g_edges[gi + 1])
         n_Mc = int(n_req[a:b].max())
-        mc_ax = np.linspace(mc_range[0], mc_range[1], n_Mc)
+        if _fdot_axis:
+            # ONE reference f0 for the whole group, so fdot is independent
+            # of f0 and the f_mid shear stays exactly unit-determinant.
+            #
+            # INTERSECTION, not union. The bound scales as f0^(11/3), so a
+            # box at the group's LOW-f0 end cannot physically reach the fdot
+            # a high-f0 box can: with the union, drawing that fdot makes the
+            # feasible Mc interval EMPTY (mc_floor > mc_hi), and the birth
+            # conversion then emits a row its own logpdf prices at -inf --
+            # proposed forever, accepted never, and it reads as mere
+            # inefficiency. Taking the min of the upper bounds (and the max
+            # of the lower) sizes the axis at the group's lowest f0, so
+            # every drawn fdot is reachable at every f0 in the group.
+            # The ladder holds a group's f0 within 2^(3/11) = 1.21, so this
+            # costs at most ~21% of span at a group edge -- efficiency.
+            _lo = max(b_[0] for b_ in _fd_bounds[a:b])
+            _hi = min(b_[1] for b_ in _fd_bounds[a:b])
+            mc_ax = np.linspace(_lo, _hi, n_Mc)
+        else:
+            mc_ax = np.linspace(mc_range[0], mc_range[1], n_Mc)
         node_shape = (b - a, n_f0, n_Mc, n_alpha, n_sd)
         logger.info(
             "[stageB] group %d/%d: %d peak boxes x %dx%dx%dx%d nodes "
-            "(f0 %.4f-%.4f mHz); Mc box %s; f0 boxes clamped to their "
+            "(f0 %.4f-%.4f mHz); axis2 = %s %s; f0 boxes clamped to their "
             "sub-bands.", gi + 1, n_groups, b - a, n_f0, n_Mc, n_alpha,
-            n_sd, float(f0_los[a]), float(f0_los[b - 1]), mc_range)
+            n_sd, float(f0_los[a]), float(f0_los[b - 1]),
+            "fdot[Hz/s]" if _fdot_axis else "Mc",
+            (f"[{mc_ax[0]:.4e}, {mc_ax[-1]:.4e}]" if _fdot_axis
+             else str(mc_range)))
         # single group keeps the historical "stageb" checkpoint name so
         # in-flight fits resume across this code change.
         _ck = "stageb" if n_groups == 1 else f"stageb_g{gi}"
@@ -1067,6 +1153,7 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
             node_shape, xp=xp,
             ckpt=os.path.join(_parts, _ck) if _parts else None,
             fingerprint_extra=fingerprint_extra,
+            fdot_axis=_fdot_axis, c_t=_c_t,
         ))  # beta = 1: logp = F
         mc_ax_g.append(mc_ax)
         n_mc_g.append(n_Mc)
@@ -1084,6 +1171,13 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
                 logp_grids=_to_host(grids_g[0]), f0_los=f0_los,
                 f0_dxs=f0_dxs, mc_ax=mc_ax_g[0], alpha_ax=alpha_ax,
                 sin_delta_ax=sd_ax,
+                # THE BASIS IS PART OF THE CACHE. Axis 2's VALUES differ
+                # between the two meanings, but a consumer that reads them
+                # as chirp masses when they are Hz/s gets no error at all --
+                # just births at absurd parameters. Stamp it, and refuse a
+                # mismatch on load.
+                grid_basis=("fdot" if _fdot_axis else "Mc"),
+                grid_c_t=float(_c_t if _fdot_axis else 0.0),
                 peak_f0_mHz=peaks[:, 0], peak_F=peaks[:, 1],
                 band_idx=band_idx,
                 band_f0_lo=band_edges_mHz[band_idx],
@@ -1123,6 +1217,8 @@ def run_stacked_stage_b(call_fstat: Callable, peaks, *, xp, Tobs: float,
             stacked_path,
             group_sizes=_sizes, f0_los=f0_los, f0_dxs=f0_dxs,
             alpha_ax=alpha_ax, sin_delta_ax=sd_ax,
+            grid_basis=("fdot" if _fdot_axis else "Mc"),
+            grid_c_t=float(_c_t if _fdot_axis else 0.0),
             peak_f0_mHz=peaks[:, 0], peak_F=peaks[:, 1], band_idx=band_idx,
             band_f0_lo=band_edges_mHz[band_idx],
             band_f0_hi=band_edges_mHz[band_idx + 1],
@@ -1486,7 +1582,7 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
                                 comb_weight: Optional[float] = None,
                                 stacked_live=None,
                                 expected_band_edges=None, epoch=None,
-                                ratio_tight=None):
+                                ratio_tight=None, tobs=None):
     """Stacked grids (+ optional comb) -> floor -> RJ birth container.
 
     ``stacked_live`` short-circuits the npz reload when the caller just built
@@ -1652,7 +1748,7 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
     return make_gb_rj_birth_container(
         mix, A_lims, use_cupy=use_cupy,
         fdot_astro_ratio_max=fdot_astro_ratio_max, dist_lims=dist_lims,
-        ratio_tight=ratio_tight,
+        ratio_tight=ratio_tight, tobs=tobs, mc_lims=mc_lims,
     )
 
 
@@ -1718,16 +1814,37 @@ def enumerate_center_nodes(cache_dir: str, *, mc_lims=None,
                  np.asarray(d[f"mc_ax_g{gi}"], dtype=float))
                 for gi, (a, b) in enumerate(zip(bounds[:-1], bounds[1:]))
             ]
+        # Under the fdot basis axis 2 is fdot [Hz/s], not Mc, and axis 0
+        # carries f_mid. The table is looked up BY f0, so a non-sheared
+        # table puts every entry up to ~11 bins from its own maximum --
+        # degrading birth quality with no error at all.
+        _basis = (str(np.asarray(d["grid_basis"]).item())
+                  if "grid_basis" in d.files else "Mc")
+        _c_t = (float(np.asarray(d["grid_c_t"]).item())
+                if "grid_c_t" in d.files else 0.0)
         for grids, f0_los, f0_dxs, mc_ax in blocks:
             K, n_f0 = grids.shape[0], grids.shape[1]
-            # argmax over the (Mc, alpha, sin_delta) block at each
+            # argmax over the (axis2, alpha, sin_delta) block at each
             # (box, f0 node)
             flat = grids.reshape(K, n_f0, -1).argmax(axis=2)
             i_mc, i_al, i_sd = np.unravel_index(
                 flat, (len(mc_ax), len(al_ax), len(sd_ax)))
             f0 = f0_los[:, None] + np.arange(n_f0)[None, :] * f0_dxs[:, None]
+            if _basis == "fdot":
+                fd = mc_ax[i_mc]                       # Hz/s at the argmax
+                f0 = f0 - _c_t * fd * 1e3              # f_mid -> f0 [mHz]
+                # A REPRESENTATIVE chirp mass, since the contract is
+                # (f0, mc, alpha, sd): the midpoint of the feasible
+                # interval, i.e. the centre of the Mc range on which this
+                # fdot is reachable with |r| <= M. mc_lims is the caller's
+                # prior box; without it fall back to the axis' own range.
+                _ml = list(mc_lims or [0.001, 1.0])
+                _rm = float(os.environ.get("FSTAT_FDOT_RATIO_MAX", "5.0"))
+                floor = mc_floor_for_fdot(fd, f0 * 1e-3, _rm, float(_ml[0]))
+                mc_parts.append((0.5 * (floor + float(_ml[-1]))).ravel())
+            else:
+                mc_parts.append(mc_ax[i_mc].ravel())
             f0_parts.append(f0.ravel())
-            mc_parts.append(mc_ax[i_mc].ravel())
             al_parts.append(al_ax[i_al].ravel())
             sd_parts.append(sd_ax[i_sd].ravel())
             n_peak += int(f0.size)
