@@ -1456,6 +1456,60 @@ export GB_CELL_LABEL_DEFERRED=1
 # to have built the binary; without it the loaders degrade to the python
 # chain with a one-line warning (safe, just not faster).
 export GB_INMODEL_ACCEPT_KERNEL=0
+# ---- THE v8 EXPERIMENT: OBSERVABLE-BASIS IN-MODEL PROPOSAL ----------
+# Pinned EXPLICITLY even though it is now the code default, so this run
+# does not silently change meaning if the default is ever revisited, and
+# so the v7/v8 knob diff names the thing under test.
+#
+# WHAT IT CHANGES. In-model steps are drawn in
+#   z = [lnA, f_mid, fdot, phi0, cos_iota, psi, alpha, sin_delta, Mc]
+# and mapped back; the SAMPLING basis is untouched (f0 stays anchored at
+# t_ref, so bands, cap cells, storage and the catalogue conversion are all
+# unaffected). Two measured defects motivate it, both invisible in the
+# sampling basis:
+#   1. (dist, Mc, r) -> (A, fdot) is 3->2, so Mc and r both drive fdot and
+#      a joint draw can move both and leave fdot_total put.
+#   2. f0 is the frequency at the START of the data while the data
+#      constrains the frequency at the MIDDLE. On the real flagship Fisher
+#      the legacy joint draw walks an f0-fdot ridge of slope -0.898 T
+#      against the geometry's -T/2; the excess is 0.170 bins of spurious
+#      f_mid motion per fdot step, ~14 sigma at rho = 46.
+#
+# WHAT TO WATCH, in [GB_ACCEPT] / [GB_OBS_BASIS] lines:
+#   * "in-model by proposal type -- obs_basis:" replaces "infomat:"
+#   * cold acceptance 0.67 (v7) should fall toward 0.23-0.44
+#   * "[GB_OBS_BASIS ...] in-model motion" gives mean |dln_fdot| and
+#     |df_mid| in bins, proposed and accepted -- the direct read of
+#     whether fdot is finally moving
+#   * the flagship's fdot/truth should walk off 1.35
+# FALSIFIABLE PREDICTION: the shear goes as fdot*T^2, so this must be
+# essentially NEUTRAL below ~7 mHz (0.04 bins) and large above ~15 mHz
+# (3.1 bins). A material low-f change means a BUG, not a win.
+#
+# =legacy reverts to the v7 proposal bit-identically (same seed), which is
+# what makes the comparison readable. Keep that path until v8 is read.
+export GB_INMODEL_PROPOSAL=observable
+# Fiber (Mc) component of the composite step. 0.0 = the 8-observable step
+# only; gb_ridge_gibbs already supplies fiber mixing on the main state for
+# free, so this stays an INDEPENDENT A/B rather than a coupled one.
+export GB_INMODEL_OBSERVABLE_FIBER_WEIGHT=0.0
+# Overall step multiplier for this path. Deliberately its own knob and NOT
+# the legacy jump_factor, which was tuned against the eigen-floored draw.
+export GB_INMODEL_OBSERVABLE_JUMP=1.0
+# Mc step as a FRACTION of the m_chirp prior box (only reachable when the
+# fiber weight above is non-zero).
+export GB_INMODEL_OBSERVABLE_MC_STEP=0.05
+# Shear coefficient as a fraction of Tobs; 0.5 => f_mid. The shear has
+# determinant 1 for ANY coefficient (verified for 0, T/2, 0.41T, T, -3T),
+# so a wrong value here costs acceptance and never correctness.
+export GB_INMODEL_OBSERVABLE_SHEAR=0.5
+# DIFF DISCIPLINE: v7 exported GB_CAP_DIAG=1 and it costs time. Leaving it
+# on in v7 and off in v8 would make v8 look faster for reasons unrelated
+# to the proposal, so it is pinned ON here -- and the cap census is wanted
+# regardless. (GB_FSTAT_CTR_AUDIT stays absent: measured at 0.260 s of a
+# ~2000 s propose, 0.013%, so it carries no timing weight, and its verdict
+# is already in -- see below.)
+export GB_CAP_DIAG=1
 # NOT PINNED, ON BY DEFAULT -- recorded so the run log is interpretable:
 #  * GB_REPLACE_FSTAT_MAX resolves "auto" = ON for the search replace via
 #    the recipe's replace_search_stage stamp (the move is named plain
