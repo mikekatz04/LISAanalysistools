@@ -37,9 +37,12 @@ THE MEASURE
 the ``lnA`` column gives ``(-dist) * (-1/fdot_gr)``. Verified three ways:
 analytically; numerically (ratio to analytic 0.9999987, and **identical for
 shear coefficients 0, T/2, 0.41T, T, -3T** -- the shear is unit-determinant so
-it contributes nothing); and by prior-invariance simulation, where the correct
-sign preserves every marginal while a flipped sign collapses ``dist`` to
-KS ``p = 2.4e-38``.
+it contributes nothing); and by prior-invariance simulation under a flat
+likelihood, where the correct sign preserves all nine marginals (min KS
+p = 0.084) while each of four injected defects collapses at least one below
+1e-6. See ``tests/test_gb_observable_basis_invariance.py`` -- note that no
+SINGLE marginal catches every defect, so the controls take a minimum over
+``{dist, Mc, r}``.
 
 **A wrong shear coefficient costs efficiency only, never correctness.** That
 is what the determinant result buys, and it is why ``Tobs`` may be recomputed
@@ -291,8 +294,9 @@ class GBObservableFiberBasis:
     def factors(self, old_coords, new_coords):
         """MH log-factor for the move ``old -> new``: **NEW minus OLD**.
 
-        Sign confirmed by prior-invariance simulation -- correct preserves
-        every marginal, flipped collapses ``dist`` to KS ``p = 2.4e-38``.
+        Sign confirmed by prior-invariance simulation -- correct preserves all
+        nine marginals, flipped collapses ``dist`` and ``Mc`` (KS p underflows
+        to 0 and 2.5e-253 respectively).
 
         Non-finite rows are clamped to a large FINITE negative rather than
         ``nan``: this is evaluated before the prior gate, so ``ln`` of a
