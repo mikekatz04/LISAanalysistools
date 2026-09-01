@@ -88,9 +88,21 @@ _TWO_POW_1_5 = 2.0 ** (1.0 / 5.0)
 # EFFICIENCY ONLY -- these set a symmetric step size, not a Jacobian, so a
 # wrong value costs acceptance and never correctness. Do not "fix" one under
 # time pressure and then worry about bias; there is none.
+#
+# All three are the FULL marginal 1-sigma at signal-to-noise ``rho``, from
+# the same one-radian criterion, so they stay comparable:
+#   lnA :  rho propto A          => sigma(lnA) = 1/rho
+#   f_mid, fdot: with the decorrelated form ``Q = a'**2/12 + b**2/720``
+#     (``a' = df_mid*T``, ``b = dfdot*T**2``; see fdot_coherence_width) the
+#     rms phase residual ``2*pi*sqrt(Q)`` equals ``1/rho`` at one sigma, so
+#       sigma(a') = sqrt(12)/(2 pi rho)  = 0.5513/rho   [bins]
+#       sigma(b)  = sqrt(720)/(2 pi rho) = 4.2705/rho   [bins per Tobs]
+# NOTE 2026-09-01: STEP_C_FDOT was 2.14, i.e. HALF its marginal while the
+# other two carried their full one. That is the coordinate the whole change
+# exists to move, so the inconsistency cost exactly the wrong thing.
 STEP_C_LNA = 1.0        # dimensionless
-STEP_C_FMID = 0.55      # in frequency bins (1/Tobs)
-STEP_C_FDOT = 2.14      # in bins per Tobs (1/Tobs**2)
+STEP_C_FMID = 0.5513    # in frequency bins (1/Tobs)
+STEP_C_FDOT = 4.2705    # in bins per Tobs (1/Tobs**2)
 
 
 def fdot_gr(f0_hz, mc):
