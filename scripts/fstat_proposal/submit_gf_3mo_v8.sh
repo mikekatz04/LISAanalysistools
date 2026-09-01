@@ -511,7 +511,14 @@ export GF_MOVE_TIMING=1
 # >>> Set BOTH back to 1 for 2-3 iterations if a fresh detailed
 # >>> attribution is ever needed again -- the run resumes cleanly.
 export GF_MOVE_TIMING_SYNC=0
-export GB_PROP_TIMING_SYNC=0
+# GB_PROP_TIMING_SYNC uses the := form to MATCH submit_gf_3mo_v7.sh:467,
+# whose comment states the reason: a plain `export VAR=0` CLOBBERS an
+# sbatch-time override, so `GB_PROP_TIMING_SYNC=all sbatch ...` would
+# silently do nothing -- exactly the re-arm the comment above tells you to
+# perform. Resolved value is still 0, so run behaviour is unchanged; this
+# only removes a v7/v8 asymmetry and restores the documented escape hatch.
+: "${GB_PROP_TIMING_SYNC:=0}"
+export GB_PROP_TIMING_SYNC
 #
 # ---- rj_fstat_centers INTERIOR PROBE (2026-08-29) --------------------
 # WHAT IS ALREADY KNOWN (do not re-derive, and do not re-open it as a
