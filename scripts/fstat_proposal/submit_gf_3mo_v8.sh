@@ -1538,6 +1538,20 @@ export FSTAT_FDOT_RATIO_MAX=5.0
 # clean probe arms ran exactly this env, so this is the validated
 # configuration; a PE-only re-arm needs its own scoped knob first.
 export GB_RJ_FSTAT_DIST_BIRTH=0
+# RJ PHASE MAXIMIZATION (user ruling 2026-09-02, r2 probe verdict). With
+# centering off, birth maximization would otherwise be GONE ENTIRELY: in
+# v7-style search the maximizers came VIA the centers path, and
+# GB_RJ_PHASE_MAXIMIZE defaults 0. The r2 probes measured the difference
+# directly -- with phase-maximized birth scoring the flagship was ON
+# TARGET at the FIRST stored iteration (-0.23 bins / fdot 0.92x,
+# multiplicity 1.00 all run, 0% negative-fdot leaves) where the
+# unmaximized r1 arm needed ~10 iterations; low-f stayed neutral and all
+# 979 live detailed-balance traces still matched (phase max touches
+# scoring only, never the observable-basis factors).
+export GB_RJ_PHASE_MAXIMIZE=1     # birth lands on target at iteration 0
+# Amp max DEFAULTS TO FOLLOW phase_maximize -- it would silently arm with
+# the line above. User ruling: phase max only, no amp max for now.
+export GB_RJ_AMP_MAXIMIZE=0
 # DIFF DISCIPLINE: v7 exported GB_CAP_DIAG=1 and it costs time. Leaving it
 # on in v7 and off in v8 would make v8 look faster for reasons unrelated
 # to the proposal, so it is pinned ON here -- and the cap census is wanted
