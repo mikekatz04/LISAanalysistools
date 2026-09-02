@@ -226,6 +226,21 @@ def main():
         p[2] = fd
         cands.append(p)
         labels.append(f"fdot={fd:.0e}")
+    # FSTAT_FDOT_AXIS coverage (2026-09-02): the fdot grid axis is default
+    # ON, so stage-B sweeps now score nodes across fdot ~ fdot_gr(f0) * [1-M,
+    # 1+M] (M = FSTAT_FDOT_RATIO_MAX, default 5) INCLUDING the negative half
+    # the old r = 0 grid could not represent. The historical rows above stop
+    # at |fdot| = 3e-16 -- orders of magnitude short of the axis corners at
+    # mHz frequencies. Score the corners through the SAME helper the grid
+    # axis is built from (gbgpu.utils.utility.get_fdot), at a heavy chirp
+    # mass so this is the worst case the fit can ask the scorer for.
+    from gbgpu.utils.utility import get_fdot
+    _fdot_gr = float(get_fdot(f=float(center[1]), Mc=1.0))
+    for mult in (1.0, -1.0, 5.0, -5.0):
+        p = center.copy()
+        p[2] = mult * _fdot_gr
+        cands.append(p)
+        labels.append(f"fdot={mult:+.0f}xgr")
     cands = np.asarray(cands)
     Ncb, Mcb = chunked_NM(chunked, holder, cands, m_half)
     Nsb, Msb = sighet_NM(sighet, holder, cands, fstat_mode=0)

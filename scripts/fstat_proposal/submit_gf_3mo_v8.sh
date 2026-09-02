@@ -1524,6 +1524,20 @@ export GB_INMODEL_OBSERVABLE_SHEAR=0.5
 # need its epoch caches cleared.
 export FSTAT_FDOT_AXIS=1
 export FSTAT_FDOT_RATIO_MAX=5.0
+# F-STAT CENTERING OFF (probe verdict 2026-09-02, 4-arm A/B, readout
+# artifact 2f5d673c): centered births are a stacking engine in BOTH test
+# bands (A_ctr multiplicity 4.33/walker on a 1-source band, 23% neg-fdot
+# junk; B_ctr cold logL max FELL 1,478 nats after it 65) while OFF is
+# clean in both -- and best logL was identical-within-1-nat, so the junk
+# bought nothing. Maximizing all F-stat quantities finds local maxima too
+# easily. This also retires v7's rj_fstat_centers cost (54%/iteration).
+# ⚠ THE ENV ALWAYS WINS over the install-site stamps
+# (_fstat_dist_birth_stamp): =0 ALSO reverts the 08-28 "mirror them" PE
+# ruling, so rj_fstat_pe births go back to full prior widths
+# (bit-identically the pre-stamp path). That is DELIBERATE here: the
+# clean probe arms ran exactly this env, so this is the validated
+# configuration; a PE-only re-arm needs its own scoped knob first.
+export GB_RJ_FSTAT_DIST_BIRTH=0
 # DIFF DISCIPLINE: v7 exported GB_CAP_DIAG=1 and it costs time. Leaving it
 # on in v7 and off in v8 would make v8 look faster for reasons unrelated
 # to the proposal, so it is pinned ON here -- and the cap census is wanted
@@ -1543,10 +1557,11 @@ export GB_CAP_DIAG=1
 #    exact-MH replacement move (slot 0 genuinely drawn and priced,
 #    extrinsics drawn-and-priced through the shared pe_extrinsic_draw
 #    helpers, phase-max auto-OFF). NEW BEHAVIOUR vs v7.
-#  * GB_RJ_FSTAT_DIST_BIRTH is stamped ON for rj_fstat_pe, so PE births
-#    now draw from epoch-table F-stat centers instead of full prior
-#    widths (user ruling "yes mirror them"). NEW BEHAVIOUR vs v7; =0
-#    restores prior widths bit-identically.
+#  * GB_RJ_FSTAT_DIST_BIRTH: the rj_fstat_pe stamp WOULD arm epoch-table
+#    centers for PE births (user ruling 2026-08-28 "yes mirror them"),
+#    but the explicit =0 export above overrides every stamp -- probe
+#    verdict 2026-09-02, see that block. PE births draw at full prior
+#    widths in v8.
 # GB_FSTAT_CTR_AUDIT is DELIBERATELY ABSENT: it is a v7-only diagnostic
 # (table-vs-per-row center deltas). Re-arm it here only if v7 never
 # produced a completed propose to read it from.
