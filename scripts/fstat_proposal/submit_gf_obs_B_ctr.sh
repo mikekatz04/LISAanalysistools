@@ -13,7 +13,7 @@
 # itself is submit_gf_highf_grid.sh, sourced at the bottom (its own
 # #SBATCH header is inert once sourced -- only THIS header is parsed).
 # ===========================================================================
-#SBATCH --job-name=obs_B_lowf_ctr
+#SBATCH --job-name=obs_B_lowf_ctr_r2
 #SBATCH --partition=gpu-40-spot
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -21,13 +21,16 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0
 #SBATCH --time=04:00:00
-#SBATCH --output=/shared/data/global_fit_output/obs_B_lowf_ctr_%j.log
+#SBATCH --output=/shared/data/global_fit_output/obs_B_lowf_ctr_r2_%j.log
 
 # ---- this arm ---------------------------------------------------------
+# NOTE (r2): v8 pins centering OFF, so this ctr arm is now a DELIBERATE
+# DEVIATION from v8 (the A/B contrast arm), not a v8 representative.
+# The noctr arm is the v8-parity run.
 # layers 44.5-49.5; 200 leaves because at 20 the cap would BIND
 # and turn a neutrality test into a cap test
-export STORE_DIR=/shared/data/global_fit_output/gf_obs_B_lowf_ctr/
-export BASE_FILE_NAME=gf_obs_B_lowf_ctr
+export STORE_DIR=/shared/data/global_fit_output/gf_obs_B_lowf_ctr_r2/
+export BASE_FILE_NAME=gf_obs_B_lowf_ctr_r2
 export GB_MIN_FREQ=6.180556e-03
 export GB_MAX_FREQ=6.875000e-03
 export GB_NLEAVES_MAX=200

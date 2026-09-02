@@ -5397,7 +5397,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             t_i = _to_numpy(band_sorter.temp_inds)
             w_i = _to_numpy(band_sorter.walker_inds)
             b_i = _to_numpy(band_sorter.band_inds)
-            f0 = _to_numpy(band_sorter.coords_in[:, 1])  # physical f0 (Hz)
+            # ONE coords_in evaluation. It is a PROPERTY that runs
+            # ``both_transforms`` over EVERY source (with per-leaf fills on
+            # the VGB branch), and this method used to touch it three times
+            # -- three full transforms of the whole sorter per unit close,
+            # for a diagnostic. Hoisting also narrows the surface: if the
+            # transform is what raises, it now raises in one identifiable
+            # place instead of three.
+            coords_in = band_sorter.coords_in
+            f0 = _to_numpy(coords_in[:, 1])              # physical f0 (Hz)
             max_pairs = int(os.environ.get("GB_ORTHO_MAX_PAIRS", "8"))
             i_idx, j_idx = _ortho_boundary_pairs(
                 f0, w_i, b_i, alive & (t_i == 0), units, remainder,
@@ -5413,8 +5421,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             xp = self.xp
             rows_i = xp.asarray(i_idx)
             rows_j = xp.asarray(j_idx)
-            params_i = band_sorter.coords_in[rows_i]
-            params_j = band_sorter.coords_in[rows_j]
+            params_i = coords_in[rows_i]
+            params_j = coords_in[rows_j]
             data_index = xp.asarray(w_i[i_idx]).astype(xp.int32)
             N_vals = xp.maximum(
                 band_sorter.N_vals[rows_i], band_sorter.N_vals[rows_j]
@@ -5458,8 +5466,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     int(b_i[j_idx[k]]), float(df_pairs[k]),
                 )
         except Exception as exc:  # diagnostic only: never break the sampler
+            # WITH A TRACEBACK, ONCE. This handler is correct to swallow --
+            # a diagnostic must never break the sampler -- but the version
+            # that logged only ``repr(exc)`` cost an entire production run:
+            # the v7 log carried 3,350 identical
+            # "TypeError('Implicit conversion to a NumPy array...')" lines
+            # and never said WHICH line raised, so the check produced zero
+            # orthogonality data for the whole campaign and nobody could
+            # tell why. One traceback would have made it a five-minute fix.
+            # First failure per move gets exc_info; the rest stay one-liners
+            # so 3,350 tracebacks do not become the next problem.
+            _first = not getattr(self, "_ortho_check_failed", False)
+            self._ortho_check_failed = True
             logger.warning(
-                "[GB_ORTHO %s] premise check skipped: %r", self.name, exc
+                "[GB_ORTHO %s] premise check skipped: %r%s", self.name, exc,
+                " (traceback below; further failures are logged without one)"
+                if _first else "",
+                exc_info=_first,
             )
 
     def _run_band_unit(self, model, band_sorter, subset, band_temps,

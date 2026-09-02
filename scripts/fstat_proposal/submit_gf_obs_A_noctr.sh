@@ -14,7 +14,7 @@
 # itself is submit_gf_highf_grid.sh, sourced at the bottom (its own
 # #SBATCH header is inert once sourced -- only THIS header is parsed).
 # ===========================================================================
-#SBATCH --job-name=obs_A_highf_noctr
+#SBATCH --job-name=obs_A_highf_noctr_r2
 #SBATCH --partition=gpu-40-spot
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -22,12 +22,12 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=0
 #SBATCH --time=04:00:00
-#SBATCH --output=/shared/data/global_fit_output/obs_A_highf_noctr_%j.log
+#SBATCH --output=/shared/data/global_fit_output/obs_A_highf_noctr_r2_%j.log
 
 # ---- this arm ---------------------------------------------------------
 # layers 144.5-149.5; leaf budget 20 is the proven high-f value
-export STORE_DIR=/shared/data/global_fit_output/gf_obs_A_highf_noctr/
-export BASE_FILE_NAME=gf_obs_A_highf_noctr
+export STORE_DIR=/shared/data/global_fit_output/gf_obs_A_highf_noctr_r2/
+export BASE_FILE_NAME=gf_obs_A_highf_noctr_r2
 export GB_MIN_FREQ=2.006944e-02
 export GB_MAX_FREQ=2.076389e-02
 export GB_NLEAVES_MAX=20

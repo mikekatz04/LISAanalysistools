@@ -392,8 +392,14 @@ export GB_MIN_FREQ GB_MAX_FREQ
 export GB_N_SUBBANDS=8192  # PER GPU; TRUE per-slot cost incl. XYZ invC (~1 MB @3mo, ~8 MB @23mo) x 2 move caches -- job-183 sizing   # PER GPU (LAT >= this commit): total = x n_gpus
 # RJ pick thinning (user ruling 2026-08-14): each round proposes to a
 # 0.3 random subset of eligible slots; in-model repeats still cover
+# ---- V8-PARITY MODE (2026-09-02) -------------------------------------
+# OBS_PROBE_V8_PARITY=1 (set by obs_probe_common.sh) suppresses this
+# script's PROBE-ERA knob values below (each guarded in place) so the
+# values exported by the sourcing arm/common scripts stand. The knob set
+# was derived from an export-line diff against submit_gf_3mo_v8.sh; run
+# standalone (no parity var) this script behaves exactly as before.
 # ALL alive sources (flip gate is rj-only by construction).
-export GB_RJ_FLIP_FRACTION=0.2
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_RJ_FLIP_FRACTION=0.2
 # In-model info-matrix jump scale: 0.005 default measured 95% cold
 # acceptance; 0.2 -> 0.61; 0.4 -> 0.60 (job 196). Job 197 flipped the
 # story: with the EXACT per-block SIGHET info matrices live, cold
@@ -425,8 +431,8 @@ export GF_MOVE_TIMING=1
 # >>> RECOMMENDED: keep BOTH for the first ~2-3 stored iterations to get
 # >>> the detailed attribution, then comment them out and resubmit so the
 # >>> steady-state numbers are honest baselines. The run resumes cleanly.
-export GF_MOVE_TIMING_SYNC=1
-export GB_PROP_TIMING_SYNC=1
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GF_MOVE_TIMING_SYNC=1
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_PROP_TIMING_SYNC=1
 # ---- 2026-08-15 perf batch (ALL code defaults; pinned for the run
 #      record; each knob independently revertible) ---------------------
 # De-synced in-model repeat loop (device-resident accept chain) rides
@@ -442,7 +448,7 @@ export GB_RJ_SNR_TRUNC_DIST=1      # birth distance draw truncated at the
 # c251b267: ALL alive GBs pool every round, so the survivor budget is
 # THE polish budget for seated sources; was 25). NOTE these env pins
 # beat the PE mode default as well — both phases run 200/100 here.
-export GB_INMODEL_REPEATS_NEWBORN=200
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_INMODEL_REPEATS_NEWBORN=200
 export GB_INMODEL_REPEATS_SURVIVOR=100
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
@@ -774,8 +780,8 @@ export VGB_BAND_LAYERS=8
 # 1230/1232 bands occupied) finally outgrew the card. Same knobs as the
 # 3-mo v5 script; the in-model staging loop also pool-sweeps between
 # sub-blocks (GB_INMODEL_BATCH_MEMPOOL_FREE default on).
-export GB_INMODEL_SETUP_BATCH=1024
-export GB_INFOMAT_MEMPOOL_FREE=1
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_INMODEL_SETUP_BATCH=1024
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_INFOMAT_MEMPOOL_FREE=1
 # K=4, NOT v5's 32: (layer/8)/4 = layer/32 cells -- the staggered
 # cap-cell grid comes out BIT-IDENTICAL to v5's, so the cap machinery
 # is a controlled variable in this comparison.
@@ -787,7 +793,7 @@ export GB_INFOMAT_MEMPOOL_FREE=1
 # 22.5 shared | 45 core | 22.5 shared: a mid-core source cannot fragment
 # outside its own cell; the 22.5-bin seams cover the observed 5-25-bin
 # splits (worst-case seam channel is handled by rj_replace).
-export GB_CAP_DIVISOR=2
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_CAP_DIVISOR=2
 # V5: STAGGER the cap grid against the band grid (user design 2026-08-20).
 # Interior cap edges shift half a cell (2.17 uHz / ~17 FD bins at K=32) so
 # no cap edge coincides with a band edge; the cell at each band seam
@@ -824,7 +830,7 @@ export GB_CAP_STAGGER=1
 # catalogue), so wide exclusion suppresses nothing here; the rj_replace
 # move (5845073f) handles any first-birth lockout inside the wide span.
 # Full-band runs later want the frequency-scaled per-edge extension instead.
-export GB_CAP_OVERLAP_FRAC=0.25
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_CAP_OVERLAP_FRAC=0.25
 # ---- THE TWO v4-POSTMORTEM FIXES (code defaults since 8d926f27; pinned
 #      so the store's provenance is unambiguous) ----
 # Birth fix (1274a66c): births draw fdot_astro_ratio | (f0, Mc) from the
@@ -867,7 +873,7 @@ export GB_LEAF_CAP_REQUIRE_IMPROVEMENT=1
 # 22.5|45|22.5 cells, overlap 0.25, rj_replace ON -- picks up the
 # acceptance fix via git pull when it lands -- GB-only, injection PSD,
 # 20 leaves, 1 GPU, confined band).
-export GB_LEAF_CAP_MIN_ITERS=5
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_LEAF_CAP_MIN_ITERS=5
 
 # ############################################################################
 # ## F-STAT GRID REBALANCE (user directive 2026-08-24) -- the birth/replace ##
@@ -910,8 +916,8 @@ export GB_LEAF_CAP_MIN_ITERS=5
 # ## already lands ~2-3 rad near the real Mc range; log spacing mainly      ##
 # ## buys the near-zero-fdot tail. Follow-up.                               ##
 # ############################################################################
-export FSTAT_N_MC=24
-export FSTAT_PEAKS_TO_FIT=300
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export FSTAT_N_MC=24
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export FSTAT_PEAKS_TO_FIT=300
 export GB_CAP_LL_CHECK=1
 # Grouped RJ scheduling: accumulate inds=True picks across RJ rounds
 # (1 proposal per cell per round), then ONE full-width in-model block.
@@ -922,7 +928,7 @@ export GB_RJ_GROUPED_INMODEL=1
 #      each =0 reverts that piece independently) --------------------------
 export GB_RJ_DIRECT_BATCH=1        # rigid batches -> one end-of-unit in-model
                                    # phase; =0 restores the staged scheduler
-export GB_RJ_LIVE_CAP_PICK=1       # live at-cap birth gate + same-unit
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_RJ_LIVE_CAP_PICK=1       # live at-cap birth gate + same-unit
                                    # re-entry (freed cells birth again)
 export GB_BUFFER_FIXED_CAPACITY=1  # ONE capacity buffer; smaller units
                                    # resize-rebind instead of drop+rebuild
@@ -954,7 +960,7 @@ export GB_RJ_BAND_SHUTOFF_FMIN_MHZ=10.0
 # time-to-first-source in them is 14-21 iterations, so a 5-iteration
 # occupancy clock silences bands the sampler merely has not reached yet --
 # and shutoff is PERMANENT for the process, so there is no recovery.
-export GB_RJ_BAND_SHUTOFF_AFTER=50
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export GB_RJ_BAND_SHUTOFF_AFTER=50
 export GB_RJ_BAND_SHUTOFF_SCOPE=search
 # 100 -> 50 (2026-08-18): the refit re-derives the peaks against the LIVE
 # residual and the UPDATED foreground/PSD, which is the whole point of
@@ -993,7 +999,7 @@ export FSTAT_PEAK_WEIGHT_ALPHA=0.5
 # F_j**alpha / sum_cell(F**alpha), so StackedFStatProposal4D's rvs AND
 # logpdf stay mutually exact by construction (both read self.weights) --
 # the RJ acceptance ratio is never at the mercy of two implementations.
-export FSTAT_PEAK_WEIGHT_CELLS=32
+[[ "${OBS_PROBE_V8_PARITY:-0}" == "1" ]] || export FSTAT_PEAK_WEIGHT_CELLS=32
 # Slab 5 (user ruling): measured-safe (+-1 layer holds >=1-1e-7 of tone
 # energy; 5 = 2x that need) and ~30%% smaller band buffers than the AUTO 7.
 # Smoke 2 exonerated the slab as the VGB [GB_CELL_LL] growth cause (growth
