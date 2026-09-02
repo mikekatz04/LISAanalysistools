@@ -14510,19 +14510,35 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
           which is the whole reason a swap can overfill a straddling cell.
         """
         xp = get_array_module(band_sorter.band_inds)
+
+        def _bc(sel, n):
+            # cupy.bincount computes max(x) first and RAISES on a zero-size
+            # array (numpy returns zeros), and every selection below goes
+            # empty in ordinary sparse states: no alive sources at all (the
+            # zero-leaf search start -- v8 opens gb_search on an EMPTY
+            # branch), or every alive leaf in its band's upper/lower half
+            # (one source in a band does this constantly; it killed the
+            # first v8-parity probe in its opening propose). Same guard,
+            # same int32 rationale as _cap_cell_counts: newer cupy dropped
+            # int64 from the scatter-add dtypes, and these are per-
+            # (temp,walker,cell) leaf COUNTS, so int32 is ample.
+            if sel.shape[0] == 0:
+                return xp.zeros(n, dtype=xp.int32)
+            return xp.bincount(sel, minlength=n)[:n]
+
         cells = self._sorter_cap_cells(band_sorter)
         flat = self._cap_flat_index(
             band_sorter.temp_inds, band_sorter.walker_inds, cells)
         alive = band_sorter.inds
         nbins = self.ntemps * self.nwalkers * self.num_cap_cells
-        counts = xp.bincount(flat[alive], minlength=nbins)[:nbins]
+        counts = _bc(flat[alive], nbins)
         bflat = self._band_flat_index(
             band_sorter.temp_inds, band_sorter.walker_inds,
             band_sorter.band_inds)
         nbb = self.ntemps * self.nwalkers * self.num_bands
         upper = cells > band_sorter.band_inds     # K=1: cell b+1 vs cell b
-        lo = xp.bincount(bflat[alive & ~upper], minlength=nbb)[:nbb]
-        hi = xp.bincount(bflat[alive & upper], minlength=nbb)[:nbb]
+        lo = _bc(bflat[alive & ~upper], nbb)
+        hi = _bc(bflat[alive & upper], nbb)
         return counts, lo, hi, xp.asarray(self._cap_leaf_cap)
 
     def _cap_lohi_transition(self, lo, hi, t, w, b, cur_cell, new_cell,
