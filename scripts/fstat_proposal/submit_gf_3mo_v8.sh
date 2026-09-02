@@ -1578,6 +1578,15 @@ export GB_RJ_PHASE_MAXIMIZE=1     # birth lands on target at iteration 0
 # Amp max DEFAULTS TO FOLLOW phase_maximize -- it would silently arm with
 # the line above. User ruling: phase max only, no amp max for now.
 export GB_RJ_AMP_MAXIMIZE=0
+# LIVE DETAILED-BALANCE TRACE (audit follow-up 2026-09-02). Recomputes the
+# observable-basis log-Jacobian INDEPENDENTLY for one traced source per
+# repeat and prints "-> match" / "*** MISMATCH ***". Negligible cost, and
+# this run is the FIRST MULTI-GPU exposure of the factors path -- every
+# probe ran gres=gpu:1 -- so the one failure class the probes could not
+# see (a device-routing fault in factors) is exactly what this catches.
+# 979/979 matched in the r2 probes; any MISMATCH line here is a stop
+# signal. =0 disarms.
+export GB_INMODEL_TRACE=1
 # DIFF DISCIPLINE: v7 exported GB_CAP_DIAG=1 and it costs time. Leaving it
 # on in v7 and off in v8 would make v8 look faster for reasons unrelated
 # to the proposal, so it is pinned ON here -- and the cap census is wanted
