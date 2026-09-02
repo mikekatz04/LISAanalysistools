@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import warnings
 from contextlib import nullcontext
 from copy import deepcopy
@@ -2298,8 +2299,20 @@ class _RoutedBandEngine:
             bounds = fstat_nm_lane_bounds(n, len(lanes), _lane_w)
             N_host = np.zeros((n, 4), dtype=np.float64)
             M_host = np.zeros((n, 10), dtype=np.float64)
+            # Per-lane wall times for THIS batch. Each lane thread writes
+            # only its own slot (no shared-dict race -- the reason the
+            # docstring gives for not timing lane bodies stops at dicts);
+            # the MAIN thread folds them into the timer after the join.
+            # Honest per lane: _score ends with its own D2H (asnumpy), so
+            # the lane's queued kernels are drained inside its own span.
+            # This is the instrument the GPU0-35%/GPU1-71% imbalance needs:
+            # equal-count lanes with unequal times pin the asymmetry to
+            # row cost / device contention, and the time ratio is directly
+            # the GB_FSTAT_NM_LANE_WEIGHTS vector to arm.
+            lane_secs = [0.0] * len(lanes)
 
             def _score(i):
+                t0 = time.perf_counter()
                 s, e = int(bounds[i]), int(bounds[i + 1])
                 dev, comp_d, rh = lanes[i]
                 with device_context(holder.xp, dev):
@@ -2310,6 +2323,7 @@ class _RoutedBandEngine:
                     # permutation merge into disjoint host row ranges
                     N_host[s:e] = asnumpy(N_s)
                     M_host[s:e] = asnumpy(M_s)
+                lane_secs[i] = time.perf_counter() - t0
 
             active = [i for i in range(len(lanes))
                       if bounds[i + 1] > bounds[i]]
@@ -2323,6 +2337,16 @@ class _RoutedBandEngine:
                 else:
                     for i in active:
                         _score(i)
+            if timer is not None and len(active) > 1:
+                stages = getattr(timer, "stages", None)
+                count = getattr(timer, "count", None)
+                for i in active:
+                    key = f"fstat_nm_lane{i}_dev{lanes[i][0]}"
+                    if stages is not None:
+                        stages[key] = stages.get(key, 0.0) + lane_secs[i]
+                    if count is not None:
+                        count(f"fstat_nm_lane{i}_rows",
+                              int(bounds[i + 1]) - int(bounds[i]))
             if comp_pin is not None:
                 N_ref, M_ref = _pinned(params_host)
                 if not (np.array_equal(N_host, N_ref)
