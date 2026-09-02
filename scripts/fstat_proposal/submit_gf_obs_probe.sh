@@ -9,10 +9,14 @@
 # the store and the proposal knob, then execs it. Nothing about the physics
 # config is forked, so a probe result transfers to v8.
 #
-#   ./submit_gf_obs_probe.sh A obs     # high-f, observable   <- the fix
-#   ./submit_gf_obs_probe.sh B obs     # low-f,  observable   <- neutrality
-#   ./submit_gf_obs_probe.sh A leg     # high-f, legacy       <- A's control
-#   ./submit_gf_obs_probe.sh B leg     # low-f,  legacy       <- B's control
+#   ./submit_gf_obs_probe.sh A obs           # high-f, observable
+#   ./submit_gf_obs_probe.sh B obs           # low-f,  observable
+#   ./submit_gf_obs_probe.sh A leg           # high-f, legacy   (control)
+#   ./submit_gf_obs_probe.sh B leg           # low-f,  legacy   (control)
+#
+# Third argument selects the F-stat CENTERING arm (default "ctr"):
+#   ./submit_gf_obs_probe.sh A obs noctr     # high-f, observable, no centering
+#   ./submit_gf_obs_probe.sh B obs noctr     # low-f,  observable, no centering
 #
 # A and B run CONCURRENTLY, one GPU each, on gpu-40-spot. Fire the two
 # "obs" arms first and read them at ~25 min; the "leg" controls are only
@@ -76,6 +80,7 @@ BASE="${HERE}/submit_gf_highf_grid.sh"
 
 PROBE="${1:-A}"
 MODE="${2:-obs}"
+CTR="${3:-ctr}"
 
 case "${PROBE}" in
   A|a|highf)
@@ -100,7 +105,31 @@ esac
 case "${MODE}" in
   obs|observable) export GB_INMODEL_PROPOSAL=observable ;;
   leg|legacy)     export GB_INMODEL_PROPOSAL=legacy ;;
-  *) echo "usage: $0 {A|B} {obs|leg}" >&2; exit 2 ;;
+  *) echo "usage: $0 {A|B} {obs|leg} [ctr|noctr]" >&2; exit 2 ;;
+esac
+
+# ---- F-STAT CENTERING ARM ------------------------------------------
+# "noctr" turns OFF the F-stat distance/amplitude centering and lets the
+# birth fall back to the usual phase-maximised d_h/h_h amplitude pin
+# (rj_amp_maximize), i.e. plain phase maximisation in the likelihood as
+# search/RJ has always done.
+#
+# WHY IT IS WORTH A PROBE. GB_RJ_FSTAT_DIST_BIRTH=0 gates the ENTIRE
+# centers chain, not just the draw -- and in v7 rj_fstat_centers was
+# 1407.5 s of the 1961.8 s rj_fstat_search move, i.e. 54% OF EVERY
+# ITERATION, comfortably the single largest cost in the run. The question
+# this arm answers is whether that 54% is still buying anything now that
+# the grid places births on the ridge (fdot axis) and the in-model move
+# refines them along it: if recovery holds without centering, the run gets
+# roughly twice as fast for free.
+#
+# The knob normally FOLLOWS rj_amp_maximize, so it must be pinned in both
+# arms -- leaving it unset in the "ctr" arm would make the comparison
+# depend on a per-move default rather than on this switch.
+case "${CTR}" in
+  ctr)   export GB_RJ_FSTAT_DIST_BIRTH=1 ;;
+  noctr) export GB_RJ_FSTAT_DIST_BIRTH=0 ;;
+  *) echo "usage: $0 {A|B} {obs|leg} [ctr|noctr]" >&2; exit 2 ;;
 esac
 
 # BOTH new paths ARMED. These are now the code defaults; pinned anyway so
@@ -139,8 +168,15 @@ export GB_CAP_DIAG=1
 # is a read-only mount on a laptop) -- do not point a real probe elsewhere
 # without also moving the sbatch --output below.
 : "${OBS_PROBE_ROOT:=/shared/data/global_fit_output}"
-export STORE_DIR="${OBS_PROBE_ROOT}/gf_obsprobe_${TAG}_${MODE}/"
-export BASE_FILE_NAME="gf_obsprobe_${TAG}_${MODE}"
+# The centering arm is part of the store name for "noctr" ONLY. The
+# "ctr" arm keeps the original unsuffixed name deliberately, so
+# re-submitting it RESUMES the runs already in flight rather than starting
+# a fresh store beside them; "noctr" gets its own store so it cannot
+# resume into them, which would read as "the change did nothing".
+_ARM="${TAG}_${MODE}"
+[[ "${CTR}" == "noctr" ]] && _ARM="${_ARM}_noctr"
+export STORE_DIR="${OBS_PROBE_ROOT}/gf_obsprobe_${_ARM}/"
+export BASE_FILE_NAME="gf_obsprobe_${_ARM}"
 # 4 h of allocation, but the READ is at 20-30 minutes: at ~70-200 s per
 # iteration that is roughly 8-25 iterations, and the flagship sat static
 # for 19, so a walk should already be visible by then. The extra hours
@@ -151,10 +187,11 @@ export NUM_ITERATIONS=200
 mkdir -p "${STORE_DIR}"
 
 cat <<EOF
-=== observable-basis probe ${TAG} / ${MODE} ===
+=== observable-basis probe ${TAG} / ${MODE} / ${CTR} ===
   band            ${GB_MIN_FREQ} - ${GB_MAX_FREQ} Hz
   leaves          ${GB_NLEAVES_MAX}
   proposal        ${GB_INMODEL_PROPOSAL}
+  fstat centering ${GB_RJ_FSTAT_DIST_BIRTH}  (1 = on, 0 = phase-max pin)
   store           ${STORE_DIR}
   iterations      ${NUM_ITERATIONS}
   base script     ${BASE}
@@ -163,9 +200,9 @@ EOF
 # gpu-40-spot, 1 GPU each, so A and B occupy two slots and run together.
 # 4 h wall; read the log at 20-30 min and stop the arm early if it has
 # already answered. The store is resume-safe, so re-submitting continues.
-exec sbatch --job-name="obs_${TAG}_${MODE}" \
+exec sbatch --job-name="obs_${_ARM}" \
   --partition=gpu-40-spot \
   --gres=gpu:1 \
   --time=04:00:00 \
-  --output="${OBS_PROBE_ROOT}/obs_${TAG}_${MODE}_%j.log" \
+  --output="${OBS_PROBE_ROOT}/obs_${_ARM}_%j.log" \
   --export=ALL "${BASE}"
