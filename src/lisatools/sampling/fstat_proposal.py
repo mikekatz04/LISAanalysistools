@@ -2139,9 +2139,22 @@ class CombIntrinsicProposal:
 
     ndim = 4
 
+    #: When set, column 1 is FDOT [Hz/s] drawn CONDITIONALLY on the row's
+    #: own f0 -- uniform over ``fdot_axis_bounds(f0, mc_hi, ratio_max)``,
+    #: the range a physical source at that f0 can actually carry. Without
+    #: it, under FSTAT_FDOT_AXIS this component drew "Mc uniform on
+    #: [0.001, 1]" that the 5-D birth block then read as Hz/s: every comb
+    #: birth became f0 ~ -1e6 mHz, was priced -inf and silently rejected --
+    #: 30% of the proposal mass wasted and the comb's whole job (births
+    #: where no peak box exists) dead, with nothing louder than a slightly
+    #: low birth acceptance to show for it. The conditional width enters
+    #: rvs and logpdf through the SAME function, so the pair stays
+    #: mutually exact and the RJ factors stay correct.
     def __init__(self, f0_nodes_mHz, F_max, mc_lims, alpha_lims=(0.0, 2 * np.pi),
                  sin_delta_lims=(-1.0, 1.0), power: float = 1.0,
-                 seed: Optional[int] = None):
+                 seed: Optional[int] = None, fdot_conditional: bool = False,
+                 ratio_max: Optional[float] = None,
+                 mc_hi: Optional[float] = None):
         self.f0_nodes = np.asarray(f0_nodes_mHz, dtype=float)
         F = np.clip(np.asarray(F_max, dtype=float), 0.0, None) ** float(power)
         w = 0.5 * (F[:-1] + F[1:])
@@ -2157,11 +2170,31 @@ class CombIntrinsicProposal:
         self.mc_lims = tuple(map(float, mc_lims))
         self.alpha_lims = tuple(map(float, alpha_lims))
         self.sin_delta_lims = tuple(map(float, sin_delta_lims))
+        self.fdot_conditional = bool(fdot_conditional)
+        if self.fdot_conditional:
+            if ratio_max is None or mc_hi is None:
+                raise ValueError(
+                    "fdot_conditional=True needs ratio_max and mc_hi to "
+                    "size the per-f0 feasible range; guessing them would "
+                    "silently mis-scale every comb birth.")
+            self._ratio_max = float(ratio_max)
+            self._mc_hi = float(mc_hi)
         self._log_uni = -sum(
             np.log(hi - lo) for lo, hi in
             (self.mc_lims, self.alpha_lims, self.sin_delta_lims)
         )
+        # sky-only part, for the conditional mode (the fdot width is per-row)
+        self._log_uni_sky = -sum(
+            np.log(hi - lo) for lo, hi in
+            (self.alpha_lims, self.sin_delta_lims)
+        )
         self._rng = np.random.default_rng(seed)
+
+    def _fdot_lo_width(self, f0_mHz, xp=np):
+        """Per-row feasible-fdot (lo, width) at ``mc_hi`` -- ONE function
+        for rvs and logpdf, so the pair cannot drift apart."""
+        g = fdot_gr(xp.asarray(f0_mHz, dtype=xp.float64) * 1e-3, self._mc_hi)
+        return (1.0 - self._ratio_max) * g, 2.0 * self._ratio_max * g
 
     def rvs(self, size=1):
         if isinstance(size, int):
@@ -2173,7 +2206,11 @@ class CombIntrinsicProposal:
         out = np.empty((n, 4))
         out[:, 0] = (self.f0_nodes[idx]
                      + u * (self.f0_nodes[idx + 1] - self.f0_nodes[idx]))
-        out[:, 1] = self._rng.uniform(*self.mc_lims, n)
+        if self.fdot_conditional:
+            lo1, w1 = self._fdot_lo_width(out[:, 0])
+            out[:, 1] = lo1 + self._rng.random(n) * w1
+        else:
+            out[:, 1] = self._rng.uniform(*self.mc_lims, n)
         out[:, 2] = self._rng.uniform(*self.alpha_lims, n)
         out[:, 3] = self._rng.uniform(*self.sin_delta_lims, n)
         return out.reshape(size + (4,))
@@ -2188,14 +2225,23 @@ class CombIntrinsicProposal:
         idx = xp.searchsorted(f0_nodes, f0, side="right") - 1
         in_f0 = (f0 >= f0_nodes[0]) & (f0 <= f0_nodes[-1])
         idx = xp.clip(idx, 0, len(self._w) - 1)
-        inside = (
-            in_f0
-            & (x[:, 1] >= self.mc_lims[0]) & (x[:, 1] <= self.mc_lims[1])
-            & (x[:, 2] >= self.alpha_lims[0]) & (x[:, 2] <= self.alpha_lims[1])
+        in_sky = (
+            (x[:, 2] >= self.alpha_lims[0]) & (x[:, 2] <= self.alpha_lims[1])
             & (x[:, 3] >= self.sin_delta_lims[0])
             & (x[:, 3] <= self.sin_delta_lims[1])
         )
-        out = xp.asarray(self._log_f0_pdf)[idx] + self._log_uni
+        if self.fdot_conditional:
+            lo1, w1 = self._fdot_lo_width(f0, xp=xp)
+            inside = (in_f0 & in_sky
+                      & (x[:, 1] >= lo1) & (x[:, 1] <= lo1 + w1))
+            with np.errstate(divide="ignore"):
+                out = (xp.asarray(self._log_f0_pdf)[idx] + self._log_uni_sky
+                       - xp.log(xp.maximum(w1, 1e-300)))
+        else:
+            inside = (in_f0 & in_sky
+                      & (x[:, 1] >= self.mc_lims[0])
+                      & (x[:, 1] <= self.mc_lims[1]))
+            out = xp.asarray(self._log_f0_pdf)[idx] + self._log_uni
         return xp.where(inside, out, -xp.inf)
 
 

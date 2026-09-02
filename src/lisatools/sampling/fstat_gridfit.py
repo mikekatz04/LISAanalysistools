@@ -1706,8 +1706,24 @@ def build_gb_birth_distribution(*, cache_dir: str, mc_lims, A_lims,
     comps_list, weights = [peak_component], [1.0]
     c = np.load(comb_cache, allow_pickle=False) if os.path.exists(comb_cache) else None
     if c is not None and comb_weight > 0:
+        # AXIS 1 IS NOT ALWAYS Mc (same hazard as the floor box below).
+        # Under the fdot basis the comb draws its column 1 as fdot
+        # CONDITIONAL on the drawn f0 -- uniform over the feasible range at
+        # that f0 -- because a global fdot range sized by the band's top is
+        # unreachable almost everywhere below it, and the Mc box read as
+        # Hz/s is garbage everywhere.
+        _comb_kw = {}
+        if fdot_axis_on():
+            if fdot_astro_ratio_max is None:
+                raise ValueError(
+                    "FSTAT_FDOT_AXIS=1 with a comb component needs "
+                    "fdot_astro_ratio_max to size the conditional fdot "
+                    "draw; refusing rather than guessing.")
+            _comb_kw = dict(fdot_conditional=True,
+                            ratio_max=float(fdot_astro_ratio_max),
+                            mc_hi=float(mc_lims[-1]))
         comps_list.append(CombIntrinsicProposal(
-            c["f0_nodes_mHz"], c["F_max"], mc_lims=mc_lims,
+            c["f0_nodes_mHz"], c["F_max"], mc_lims=mc_lims, **_comb_kw,
         ))
         weights = [1.0 - comb_weight, float(comb_weight)]
         logger.info("[birth] comb component (linear-in-F) weight=%s",
@@ -1862,7 +1878,16 @@ def enumerate_center_nodes(cache_dir: str, *, mc_lims=None,
                 _ml = list(mc_lims or [0.001, 1.0])
                 _rm = float(os.environ.get("FSTAT_FDOT_RATIO_MAX", "5.0"))
                 floor = mc_floor_for_fdot(fd, f0 * 1e-3, _rm, float(_ml[0]))
-                mc_parts.append((0.5 * (floor + float(_ml[-1]))).ravel())
+                # CLIP to the box: the floor is evaluated at the SHEARED f0
+                # (up to ~1 bin below the node's f_mid), so at group-edge
+                # nodes it can overshoot mc_hi by ~1e-4 -- the same
+                # boundary-rounding class the birth block absorbs with an
+                # epsilon. This is a REPRESENTATIVE centre for a smeared
+                # lognormal table lookup, so clipping is exact enough by
+                # construction.
+                mc_parts.append(np.clip(
+                    0.5 * (floor + float(_ml[-1])),
+                    float(_ml[0]), float(_ml[-1])).ravel())
             else:
                 mc_parts.append(mc_ax[i_mc].ravel())
             f0_parts.append(f0.ravel())

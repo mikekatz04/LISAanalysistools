@@ -1118,6 +1118,17 @@ _OBS_RHO_FALLBACK = 10.0
 _OBS_PRIOR_STEP_FRAC = 0.1
 
 
+def _rj_amp_maximize_on() -> bool:
+    """``GB_RJ_AMP_MAXIMIZE=1`` arms the d_h/h_h birth amplitude pin.
+
+    Deliberately INDEPENDENT of ``phase_maximize`` (user ruling
+    2026-09-02) and default OFF. A knob that silently follows another is
+    how a config change in one place rearms machinery in another with no
+    line saying so.
+    """
+    return os.environ.get("GB_RJ_AMP_MAXIMIZE", "0").strip() == "1"
+
+
 def _inmodel_proposal_kind() -> str:
     """Which in-model proposal runs: ``"observable"`` or ``"legacy"``.
 
@@ -2322,19 +2333,22 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self._configure_domain(acs)
         self.phase_maximize = phase_maximize
 
-        # Analytic amplitude maximisation of RJ births (search heuristic that
-        # pairs with phase_maximize). The template is linear in amplitude, so
-        # a birth's add-delta ``s*d_h - 0.5*s^2*h_h`` is maximised at the ML
-        # scale ``s* = d_h/h_h``; rescaling the sampled amplitude/distance to
-        # s* lets a well-placed intrinsic draw (e.g. an F-stat proposal on a
-        # real peak) reach ``delta ~ 0.5*SNR^2`` instead of being rejected on
-        # a random prior-drawn amplitude. Like phase-max this relaxes strict
-        # reversibility, so it is a search move only. Defaults to follow
-        # ``phase_maximize``; ``GB_RJ_AMP_MAXIMIZE`` overrides.
-        _amp_env = os.environ.get("GB_RJ_AMP_MAXIMIZE")
-        self.rj_amp_maximize = (
-            bool(int(_amp_env)) if _amp_env is not None else bool(phase_maximize)
-        )
+        # Analytic amplitude maximisation of RJ births (search heuristic).
+        # The template is linear in amplitude, so a birth's add-delta
+        # ``s*d_h - 0.5*s^2*h_h`` is maximised at the ML scale
+        # ``s* = d_h/h_h``; rescaling the sampled amplitude/distance to s*
+        # lets a well-placed intrinsic draw reach ``delta ~ 0.5*SNR^2``
+        # instead of being rejected on a random prior-drawn amplitude. Like
+        # phase-max it relaxes strict reversibility, so it is a search
+        # heuristic only.
+        #
+        # INDEPENDENT of phase_maximize (user ruling 2026-09-02: "they
+        # should be separate knobs"). It used to DEFAULT-FOLLOW
+        # phase_maximize, which is the silent-coupling anti-pattern that
+        # already bit twice this campaign (centering-off stripped birth
+        # maximization entirely; arming phase max would have silently armed
+        # amp max). GB_RJ_AMP_MAXIMIZE=1 is now the ONLY way to arm it.
+        self.rj_amp_maximize = _rj_amp_maximize_on()
 
         # F-stat distance-birth proposal (step 2, supersedes the d_h/h_h pin
         # above). Centers the birth on the F-statistic's 4-parameter maximized

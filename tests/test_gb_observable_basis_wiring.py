@@ -180,6 +180,32 @@ class ProposalKindTest(unittest.TestCase):
             self._kind(GB_INMODEL_PROPOSAL="obserable")
 
 
+class AmpMaxDecoupledTest(unittest.TestCase):
+    """GB_RJ_AMP_MAXIMIZE is its own knob — it must never follow phase max.
+
+    The follow-default is the silent-coupling anti-pattern that bit twice
+    in one day: centering-off stripped birth maximization entirely, and
+    arming phase max would have silently armed amp max. User ruling
+    2026-09-02: separate knobs.
+    """
+
+    def _on(self, **env):
+        from lisatools.globalfit.moves.gbspecialstretch import (
+            _rj_amp_maximize_on)
+        with mock.patch.dict(os.environ, env, clear=False):
+            if "GB_RJ_AMP_MAXIMIZE" not in env:
+                os.environ.pop("GB_RJ_AMP_MAXIMIZE", None)
+            return _rj_amp_maximize_on()
+
+    def test_default_off_even_when_phase_max_is_armed(self):
+        self.assertFalse(self._on(GB_RJ_PHASE_MAXIMIZE="1"))
+
+    def test_armed_only_by_its_own_env(self):
+        self.assertTrue(self._on(GB_RJ_AMP_MAXIMIZE="1"))
+        self.assertFalse(self._on(GB_RJ_AMP_MAXIMIZE="0",
+                                  GB_RJ_PHASE_MAXIMIZE="1"))
+
+
 # ----------------------------------------------------------------- gate
 
 class GateTest(unittest.TestCase):

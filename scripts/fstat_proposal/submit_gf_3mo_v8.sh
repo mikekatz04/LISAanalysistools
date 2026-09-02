@@ -10,6 +10,24 @@
 # fresh start, move/delete ${STORE_DIR} first.
 #
 # ############################################################################
+# ## ⚠⚠ LAUNCH RULE (2026-09-02 audit): FRESH STORE_DIR, MANDATORY.        ##
+# ##                                                                        ##
+# ## An old gf_prod_3mo_v8/ store exists from the 2026-08-30 attempt. It    ##
+# ## is TRIPLY incompatible with this config and must be moved aside:       ##
+# ##   1. its cap grid is divisor 2 (this file now runs 1 + stagger) --     ##
+# ##      the resume guard refuses with "leaf-cap grid mismatch";           ##
+# ##   2. its F-stat epoch caches were fitted in the Mc BASIS -- the        ##
+# ##      FSTAT_FDOT_AXIS loader refuses them by design;                    ##
+# ##   3. its chains were sampled under the legacy in-model proposal.       ##
+# ##      mv /shared/data/global_fit_output/gf_prod_3mo_v8 \
+# ##         /shared/data/global_fit_output/gf_prod_3mo_v8_aug30_attempt    ##
+# ## Also run ./install.sh after git pull: f166f344 touched                 ##
+# ## lat_chunked_het_kernels.hh (native, sig-het path).                     ##
+# ##                                                                        ##
+# ## The RELAUNCH block below is SUPERSEDED -- it migrates to divisor 2,    ##
+# ## which is no longer this file's grid. Kept for history only.            ##
+# ############################################################################
+# ############################################################################
 # ## ⚠ RELAUNCH REQUIRED (2026-08-29): CAP GRID 1 -> 2 + STAGGER.          ##
 # ##                                                                        ##
 # ## GB_CAP_DIVISOR=1 -> 2 and GB_CAP_STAGGER=0 -> 1 CHANGE cap_edges, and  ##
@@ -915,8 +933,10 @@ export GB_INFOMAT_PER_BLOCK=1
 # Bilinearity bookkeeping monitor (code default ON, user ruling: ~1.5 s
 # per propose = negligible): per-unit [GB_ORTHO_LL] line compares the
 # realized cold parent-residual delta against the summed per-buffer
-# deltas; WARNs above GB_ORTHO_LL_TOL (0.05). The [GB_ORTHO] premise
-# check (GB_ORTHO_CHECK) stays OFF until the sub-band shakedown.
+# deltas; WARNs above GB_ORTHO_LL_TOL (0.05). (Stale note removed 2026-09-02: the [GB_ORTHO]
+# premise check is ON below -- GB_ORTHO_CHECK=1 -- and had its first
+# GPU validation in the r2 probes: 332/332 measured, max boundary
+# overlap 2.95e-04, premise sound.)
 export GB_ORTHO_LL_CHECK=1
 # Cap-cell grid (user design 2026-08-15): leaf caps on a band/8 grid at
 # the confusion scale; scheduling unchanged. RESUME REQUIRES migration

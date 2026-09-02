@@ -554,6 +554,103 @@ class EndToEndGridFitTest(unittest.TestCase):
                 tobs=self.TOBS_E2E)
         self.assertIn("basis", str(cm.exception).lower())
 
+    def test_multi_group_band_fits_and_scores(self):
+        """The v8 production shape: MULTIPLE fdot groups, one run.
+
+        Both GPU probes happened to produce single-group grids (one band
+        each), so the grouped fdot path — per-group INTERSECTED axis
+        bounds, the grouped npz format, the grouped cache reload, the
+        grouped floor box, enumerate_center_nodes over blocks — had never
+        executed end to end before v8 would run it at 1,232 sub-bands.
+        A wide multi-peak band with a big f0 span forces the node-count
+        ladder to split groups the way the full band will.
+        """
+        import shutil
+        import tempfile
+        import lisatools.sampling.fstat_gridfit as G
+
+        d2 = tempfile.mkdtemp(prefix="fdot_e2e_mg_")
+        self.addCleanup(shutil.rmtree, d2, ignore_errors=True)
+        # peaks from ~6.6 to ~20.4 mHz: n_fdot requirements 3 -> ~53, so
+        # mc_ladder_levels must produce >= 2 groups. NOTE the outermost
+        # bands are EDGE bands — peak boxes are fitted for INTERIOR bands
+        # only (a first version of this test put two bumps in edge bands
+        # and "proved" a single group that was just its own geometry) —
+        # so every bump sits in bands 1..n-2 and the ends stay empty.
+        band = np.array([6.0e-3, 6.4e-3, 6.8e-3, 7.2e-3,
+                         20.2e-3, 20.55e-3, 20.9e-3])
+        centers = (6.6, 7.0, 20.380377)
+
+        def call(params):
+            p = np.asarray(params.get() if hasattr(params, "get")
+                           else params)
+            f0_mHz = p[:, 1] * 1e3
+            amp = np.zeros(p.shape[0])
+            for c in centers:
+                amp += 60.0 * np.exp(-0.5 * ((f0_mHz - c) / 5.0e-3) ** 2)
+            N = np.zeros((p.shape[0], 4))
+            N[:, 0] = np.sqrt(2.0 * np.maximum(amp, 0.0))
+            M = np.zeros((p.shape[0], 10))
+            M[:, 0] = M[:, 4] = M[:, 7] = M[:, 9] = 1.0
+            return N, M
+
+        os.environ["FSTAT_FDOT_AXIS"] = "1"
+        stacked, n = G.run_fstat_grid_fit(
+            call, xp=np, Tobs=self.TOBS_E2E, band_edges_hz=band,
+            f0_lims_hz=(6.0e-3, 20.9e-3), mc_lims=self.MC, cache_dir=d2,
+            ratio_max=RATIO_MAX)
+        self.assertIsNotNone(stacked)
+        npz = os.path.join(d2, G.GRID_BASENAME).replace(
+            ".npz", "_peaks_stacked.npz")
+        z = np.load(npz, allow_pickle=False)
+        self.assertEqual(str(np.asarray(z["grid_basis"]).item()), "fdot")
+        self.assertIn("group_sizes", z.files,
+                      "a 6.4-20.4 mHz span must produce the GROUPED format")
+        ngroups = len(np.asarray(z["group_sizes"]))
+        self.assertGreaterEqual(ngroups, 2)
+        # per-group axes must differ (low-f narrow, high-f wide) and every
+        # one must reach negative fdot
+        spans = []
+        for gi in range(ngroups):
+            ax = np.asarray(z[f"mc_ax_g{gi}"])
+            self.assertLess(float(ax.min()), 0.0, f"group {gi}")
+            spans.append(float(ax.max() - ax.min()))
+        self.assertGreater(max(spans), 10.0 * min(spans))
+
+        # grouped cache -> birth container -> 9-col rvs/logpdf round trip,
+        # WITH the comb at v8's default weight. Pre-fix this was the sharp
+        # discriminator: the comb drew "Mc uniform" that the fdot basis
+        # read as Hz/s, so ~27% of draws (0.9 * comb 0.3) were garbage-f0
+        # rows priced -inf and the scoreable fraction sat near 0.66.
+        cont = G.build_gb_birth_distribution(
+            cache_dir=d2, mc_lims=self.MC, A_lims=[1e-24, 1e-21],
+            dist_lims=[0.1, 30.0], fdot_astro_ratio_max=RATIO_MAX,
+            use_cupy=False, floor_eps=0.1, comb_weight=0.3,
+            tobs=self.TOBS_E2E)
+        self.assertIsNotNone(cont)
+        x = np.asarray(cont.rvs(size=(2000,)))
+        self.assertEqual(x.shape, (2000, 9))
+        lp = np.asarray(cont.logpdf(x))
+        frac = float(np.isfinite(lp).mean())
+        # Principled bar: peak-box and comb draws are feasible BY
+        # CONSTRUCTION (per-group intersected axes; f0-conditional comb),
+        # so only FLOOR draws (eps = 0.1 of the mass) can land on
+        # infeasible (low-f0, big-fdot) corners of the global box. That
+        # waste is bounded by eps and is a known, accepted inefficiency.
+        self.assertGreater(frac, 1.0 - 0.1 - 0.02,
+                           f"only {frac:.1%} scoreable")
+        # births must reach BOTH ends of the band and negative fdot
+        self.assertLess(float(x[:, 1].min()), 8.0)
+        self.assertGreater(float(x[:, 1].max()), 19.0)
+        fd = fdot_gr(x[:, 1] * 1e-3, x[:, 2]) * (1.0 + x[:, 8])
+        self.assertGreater(float((fd < 0).mean()), 0.02)
+
+        # the center-node table walks the grouped blocks shear-aware
+        nodes = G.enumerate_center_nodes(d2, mc_lims=self.MC)
+        self.assertGreater(nodes["f0_mHz"].size, 0)
+        self.assertTrue(np.all(np.isfinite(nodes["mc"])))
+        self.assertTrue(np.all(nodes["mc"] <= self.MC[1] + 1e-9))
+
     def test_center_nodes_are_shear_aware(self):
         """The table is looked up BY f0; a non-sheared one is silently off."""
         G, _, _ = self._fit(armed=True)
