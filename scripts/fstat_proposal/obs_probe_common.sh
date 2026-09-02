@@ -74,6 +74,9 @@ export GB_SEARCH_CAP_QUIESCENT=1
 # v8 386e3855: the SEARCH replace move is OFF (the PE replace,
 # GB_PE_RJ_REPLACE, stays at its default ON — that is v8's config too).
 export GB_SEARCH_RJ_REPLACE=0
+# PE replace also OFF (user ruling 2026-09-02; v8 pins the same) -- it
+# registered but never proposed in the r2 probes.
+export GB_PE_RJ_REPLACE=0
 export GB_TEMPER_EVERY_PROPOSES=1
 export GB_TEMPER_VERTICAL=1
 

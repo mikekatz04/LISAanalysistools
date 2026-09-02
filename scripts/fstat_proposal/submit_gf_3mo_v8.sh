@@ -1217,6 +1217,12 @@ export GB_CAP_DEST_BAND=1
 # the per-cell lnL the MH ratio prices against can be wrong by thousands of
 # nats. Re-enable only after the accounting is fixed and re-audited.
 export GB_SEARCH_RJ_REPLACE=0
+# PE replace OFF too (user ruling 2026-09-02). It was default-ON and would
+# have been the only replace flavor left; in both r2 probes it registered
+# but never exercised a single proposal, and with centering off its
+# center-table inputs are gone -- installed-but-inert machinery in a
+# production run is surface area with no upside. =1 restores it.
+export GB_PE_RJ_REPLACE=0
 # ORTHOGONALITY PREMISE MONITOR (v7-aligned). NOT GB_ORTHO_LL_CHECK (the lnL
 # bookkeeping reconcile, already on). This measures what the band decomposition
 # RESTS on: normalized |<h_i|h_j>| between concurrently-open adjacent-band cold
@@ -1587,10 +1593,9 @@ export GB_CAP_DIAG=1
 #    F-stat center, then priced through the UNCHANGED RJ densities as if
 #    drawn (maximize-then-pretend). Telltale: one [GB_REPLACE_FSTAT_MAX]
 #    line. =0 restores the exact-DB draw bit-identically.
-#  * GB_PE_RJ_REPLACE defaults ON: PE stages gain rj_replace_pe, an
-#    exact-MH replacement move (slot 0 genuinely drawn and priced,
-#    extrinsics drawn-and-priced through the shared pe_extrinsic_draw
-#    helpers, phase-max auto-OFF). NEW BEHAVIOUR vs v7.
+#  * GB_PE_RJ_REPLACE: now pinned OFF above (user ruling 2026-09-02) --
+#    the default-ON rj_replace_pe registered but never proposed in either
+#    r2 probe, so it shipped as inert machinery.
 #  * GB_RJ_FSTAT_DIST_BIRTH: the rj_fstat_pe stamp WOULD arm epoch-table
 #    centers for PE births (user ruling 2026-08-28 "yes mirror them"),
 #    but the explicit =0 export above overrides every stamp -- probe
