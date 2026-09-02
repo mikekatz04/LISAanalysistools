@@ -34,6 +34,25 @@ export GB_NLEAVES_MAX=200
 export GB_INMODEL_PROPOSAL=observable
 export GB_RJ_FSTAT_DIST_BIRTH=1
 
-_HERE="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# LOCATE THE REPO COPY OF THESE SCRIPTS.
+# sbatch COPIES the batch file to /var/spool/slurmd/jobNNNNN/slurm_script and
+# runs it from there, so ${BASH_SOURCE[0]} points at the spool copy and its
+# directory holds nothing else -- dirname "$0" cannot work under Slurm.
+# Try, in order: an explicit override, the submit directory, the repo path
+# the run script itself already hard-codes, and finally dirname (which does
+# work when this file is run directly, outside Slurm).
+for _c in "${OBS_PROBE_DIR:-}" \
+          "${SLURM_SUBMIT_DIR:-}" \
+          "/shared/home/mlkatz1/lisa-analysis-tools/scripts/fstat_proposal" \
+          "$( cd "$( dirname "${BASH_SOURCE[0]}" )" 2>/dev/null && pwd )"; do
+  if [[ -n "${_c}" && -f "${_c}/obs_probe_common.sh" ]]; then _HERE="${_c}"; break; fi
+done
+if [[ -z "${_HERE:-}" ]]; then
+  echo "ERROR: cannot find obs_probe_common.sh beside this script." >&2
+  echo "  Set OBS_PROBE_DIR=<repo>/scripts/fstat_proposal and resubmit." >&2
+  exit 5
+fi
+echo "  script dir      ${_HERE}"
+
 source "${_HERE}/obs_probe_common.sh"
 source "${_HERE}/submit_gf_highf_grid.sh"
