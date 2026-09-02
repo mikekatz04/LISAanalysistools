@@ -71,8 +71,7 @@ export GB_REPLACE_PHASE_MAX=auto
 export GB_RJ_BAND_SHUTOFF_ITERS=5
 export GB_RJ_BAND_SHUTOFF_RESET_ITERS=100
 export GB_SEARCH_CAP_QUIESCENT=1
-# v8 386e3855: the SEARCH replace move is OFF (the PE replace,
-# GB_PE_RJ_REPLACE, stays at its default ON — that is v8's config too).
+# v8 386e3855: the SEARCH replace move is OFF.
 export GB_SEARCH_RJ_REPLACE=0
 # PE replace also OFF (user ruling 2026-09-02; v8 pins the same) -- it
 # registered but never proposed in the r2 probes.
