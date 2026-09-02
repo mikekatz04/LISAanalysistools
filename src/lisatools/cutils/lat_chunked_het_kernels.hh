@@ -2431,7 +2431,14 @@ void wdm_het_get_fstat_ll_kernel(
     // bit-for-bit the pre-fold behaviour). 1 = fold: generate the two psi
     // stages only and recover filters 2 and 3 by an exact constant phase
     // rotation. See the FOLD note in the kernel body.
-    int        fstat_fold = 0)
+    int        fstat_fold = 0,
+    // Orbit spline-cache density per chunk (0 = direct global-mem orbit
+    // lookups; the pre-cache behaviour). Mirrors wdm_het_get_ll_kernel's
+    // N_cp_orbit: > 0 builds a cooperative shared-mem cubic-spline cache of
+    // the orbit tables once per chunk and routes the TD-build through
+    // get_tdi_Xf_single_cached. The F-stat then scores with EXACTLY the
+    // same orbit approximation the get_ll likelihood uses.
+    int        N_cp_orbit = 0)
 {
     // F-stat: build 4 basis waveforms per Cornish & Crowder '05 with fixed
     //   (A, iota, psi, phi0) = (2, pi/2, {0, pi/4, 0, pi/4}, {0, pi, 3pi/2, pi/2})
@@ -2512,22 +2519,30 @@ void wdm_het_get_fstat_ll_kernel(
     constexpr int IDX_PSI  = 6;
 
     // Dynamic shared-memory layout (must match shared_bytes at launch):
-    //   fd_chunk_buf[fi=0..3][nchannels * N_sparse] cmplx
-    //                                              -- per-filter chunk-FD,
+    //   fd_chunk_buf[fi=0..n_stages-1][nchannels * N_sparse] cmplx
+    //                                              -- per-STAGE chunk-FD,
     //                                                 built ONCE per chunk
+    //                                                 (4 unfolded, 2 folded:
+    //                                                 filters 2/3 are derived
+    //                                                 at the parity stage)
     //   layer_buf   [nchannels * Nt_sub]           cmplx -- per-(m, fi) scratch
     //   partial_N   [N_FILTERS  * blockDim.x]      double  ( 4 * NTH)
     //   partial_M   [N_M_PART   * blockDim.x]      double  (10 * NTH)
-    // ~67 KB at Nt_sub=N_sparse=256, blockDim=64. Exceeds the 48 KB default
-    // limit -- the launcher calls cudaFuncSetAttribute(...,
-    // cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes) to raise it.
+    // ~67 KB unfolded / ~44 KB folded at Nt_sub=N_sparse=256, blockDim=64.
+    // When it exceeds the 48 KB default limit the launcher calls
+    // cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize,
+    // shared_bytes) to raise it.
 #ifdef __CUDACC__
     extern CUDA_SHARED char shared_mem[];
     cmplx  *fd_chunk_buf[N_FILTERS];
     fd_chunk_buf[0] = (cmplx *) shared_mem;
     for (int fi_p = 1; fi_p < N_FILTERS; ++fi_p)
-        fd_chunk_buf[fi_p] = &fd_chunk_buf[fi_p - 1][(size_t) nchannels * N_sparse];
-    cmplx  *layer_buf = &fd_chunk_buf[N_FILTERS - 1][(size_t) nchannels * N_sparse];
+        fd_chunk_buf[fi_p] = (fi_p < n_stages)
+            ? &fd_chunk_buf[fi_p - 1][(size_t) nchannels * N_sparse]
+            // Folded: buffers 2/3 are never materialized NOR read -- alias
+            // them onto their stage so the pointers stay in-bounds.
+            : fd_chunk_buf[fi_p - n_stages];
+    cmplx  *layer_buf = &fd_chunk_buf[n_stages - 1][(size_t) nchannels * N_sparse];
     // 4 N + 10 M = 14 partial buffers, each blockDim.x wide.
     double *partial_N = (double *) &layer_buf[(size_t) nchannels * Nt_sub];
     double *partial_M = &partial_N[(size_t) N_FILTERS * NUM_THREADS_HERE];
@@ -2546,6 +2561,28 @@ void wdm_het_get_fstat_ll_kernel(
     double *partial_M       = partial_M_cpu;
     char   *fft_scratch     = nullptr;
 #endif
+
+    // Orbit spline-cache buffers (used only if N_cp_orbit > 0). Exactly the
+    // buffer set wdm_het_get_ll_kernel declares at its own top -- sized at
+    // FAST_WDM_N_CP_ORBIT_MAX so the kernel JITs once and dispatches against
+    // any 0 < N_cp_orbit <= max (~27 KB static shared at the cap of 48;
+    // CUDA_SHARED expands to plain locals on CPU). Replaces global-mem orbit
+    // table reads inside the per-stage TD-build with cooperative shared-mem
+    // cubic spline evals.
+    CUDA_SHARED double orbit_t_cp_buf  [FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_ltt_y_buf [6 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_ltt_c1_buf[6 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_ltt_c2_buf[6 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_ltt_c3_buf[6 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_pos_y_buf [9 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_pos_c1_buf[9 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_pos_c2_buf[9 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_pos_c3_buf[9 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_B_buf     [FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED double orbit_pcr_buf   [8 * FAST_WDM_N_CP_ORBIT_MAX];
+    CUDA_SHARED OrbitsSplineCache orbit_cache_storage;
+    const bool use_orbit_cache =
+        (N_cp_orbit > 0 && N_cp_orbit <= FAST_WDM_N_CP_ORBIT_MAX);
 
     constexpr int N_M_PARTIALS = (N_FILTERS * (N_FILTERS + 1)) / 2;  // = 10
 
@@ -2600,6 +2637,26 @@ void wdm_het_get_fstat_ll_kernel(
             const double chunk_t0    = chunk_t_starts[j];
             const double dt_sparse   = T_chunk / (double) N_sparse;
 
+            // Populate the orbit spline cache once over this chunk's time
+            // window [chunk_t0, chunk_t0 + T_chunk] -- stage-independent, so
+            // it sits OUTSIDE the per-stage build loop. All threads
+            // cooperate (PCR solver on GPU, Thomas on CPU). Skipped when
+            // N_cp_orbit == 0. Mirrors wdm_het_get_ll_kernel.
+            OrbitsSplineCache *orbit_cache_ptr = nullptr;
+            if (use_orbit_cache) {
+                populate_orbit_spline_cache(
+                    &orbit_cache_storage, orbits,
+                    chunk_t0, T_chunk, N_cp_orbit,
+                    orbit_t_cp_buf,
+                    orbit_ltt_y_buf, orbit_ltt_c1_buf,
+                    orbit_ltt_c2_buf, orbit_ltt_c3_buf,
+                    orbit_pos_y_buf, orbit_pos_c1_buf,
+                    orbit_pos_c2_buf, orbit_pos_c3_buf,
+                    orbit_B_buf, orbit_pcr_buf);
+                CUDA_SYNC_THREADS;
+                orbit_cache_ptr = &orbit_cache_storage;
+            }
+
             // ============================================================
             // CHUNK-LEVEL: build all 4 chunk-FD buffers (one per basis
             // filter). Steps 1-3 (TD-build, heterodyne, Tukey, FFT) do
@@ -2637,9 +2694,18 @@ void wdm_het_get_fstat_ll_kernel(
                          i += BLOCK_INCR_X) {
                         const double t = chunk_t0 + (double) i * dt_sparse;
                         cmplx tdi_tmp[3];
-                        src.get_tdi_Xf_single(&tdi_tmp[0], t, params_basis,
-                                              k_sky, u_sky, v_sky,
-                                              link_sc_rec, link_sc_em, bin_i);
+                        if (orbit_cache_ptr != nullptr) {
+                            src.get_tdi_Xf_single_cached(
+                                &tdi_tmp[0], t, params_basis,
+                                k_sky, u_sky, v_sky,
+                                link_sc_rec, link_sc_em, bin_i,
+                                orbit_cache_ptr);
+                        } else {
+                            src.get_tdi_Xf_single(&tdi_tmp[0], t, params_basis,
+                                                  k_sky, u_sky, v_sky,
+                                                  link_sc_rec, link_sc_em,
+                                                  bin_i);
+                        }
                         for (int c = 0; c < nchannels; ++c)
                             fd_chunk_buf[fi_b][c * N_sparse + i] = tdi_tmp[c];
                     }
@@ -2680,23 +2746,14 @@ void wdm_het_get_fstat_ll_kernel(
             } // end build-FD per filter
 
             // ---- FOLD: stages {0, 1} -> filters {0, 1, 2, 3} --------------
-            // alpha = {+1, -1, +i, -i} on stages {0, 1, 0, 1}, applied as
-            // exact sign flips / real-imag swaps (no cos/sin, no FP error).
-            // Each thread owns its own ``idx`` in every buffer, so reading
-            // s0/s1 before overwriting buf[1] is race-free.
-            if (fold_on) {
-                for (int idx = THREAD_START_X; idx < nchannels * N_sparse;
-                     idx += BLOCK_INCR_X) {
-                    const cmplx s0 = fd_chunk_buf[0][idx];   // psi = 0
-                    const cmplx s1 = fd_chunk_buf[1][idx];   // psi = pi/4
-                    // fd_chunk_buf[0] *= +1  -> left as generated.
-                    fd_chunk_buf[1][idx] = cmplx(-s1.real(), -s1.imag());
-                    fd_chunk_buf[2][idx] = cmplx(-s0.imag(),  s0.real());
-                    fd_chunk_buf[3][idx] = cmplx( s1.imag(), -s1.real());
-                }
-                CUDA_SYNC_THREADS;
-            }
-            // All 4 chunk-FDs now resident in shared mem; reuse across m below.
+            // alpha = {+1, -1, +i, -i} on stages {0, 1, 0, 1}. The rotation
+            // is NOT applied here: it is a sign flip / real-imag swap, which
+            // commutes BIT-EXACTLY through the (linear, real-coefficient)
+            // window and the FFT butterflies, so it is deferred all the way
+            // to the parity pick in step 6 below. That saves the writeback
+            // pass here, two window+iFFT passes per m-layer (steps 4-5 run
+            // per STAGE, not per filter), and two shared chunk-FD buffers.
+            // Only the generated stages are resident in shared mem below.
 
             // ============================================================
             // PER-M-LAYER: for each m, build all 4 basis layer values and
@@ -2713,8 +2770,10 @@ void wdm_het_get_fstat_ll_kernel(
                 double w_basis_reg[N_FILTERS * FAST_WDM_NCHANNELS_MAX * K_MAX_REG];
                 const int fft_offset = m * half_Nt_sub - half_Nt_sub - k_f0;
 
-                // Build each of the 4 basis waveforms' layer at this m.
-                for (int fi = 0; fi < N_FILTERS; ++fi) {
+                // Build each generated stage's layer at this m (4 unfolded,
+                // 2 folded -- the folded step 6 stages BOTH quadrature
+                // filters from each stage's complex layer values).
+                for (int fi = 0; fi < n_stages; ++fi) {
                     // ---- 4) window + rearrange: fd_chunk_buf[fi] -> layer_buf ----
                     for (int c = 0; c < nchannels; ++c) {
                         for (int k_idx = THREAD_START_X; k_idx < Nt_sub;
@@ -2741,6 +2800,13 @@ void wdm_het_get_fstat_ll_kernel(
                     }
 
                     // ---- 6) parity factor; stage w_i[c, n_loc] in regs ----
+                    // Folded, this is where the alpha = {+1, -1, +i, -i}
+                    // rotation lands: the WDM parity pick P(z) is a real-or
+                    // -imag component, so filter ``fi`` (alpha = +/-1) is
+                    // +/- P(z) and its quadrature partner ``fi + 2``
+                    // (alpha = i * alpha_fi) is +/- P(i z) -- the SAME fold
+                    // as rotating the chunk-FD buffer (bit-exact commute
+                    // through window + FFT), minus the extra iFFT passes.
                     int k_idx_reg = 0;
                     for (int n_loc = keep_lo + THREAD_START_X; n_loc < keep_hi;
                          n_loc += BLOCK_INCR_X) {
@@ -2750,8 +2816,22 @@ void wdm_het_get_fstat_ll_kernel(
                         for (int c = 0; c < nchannels; ++c) {
                             const cmplx z  = layer_buf[c * Nt_sub + n_loc];
                             const double rp = parity_even ? z.real() : z.imag();
-                            w_basis_reg[(fi * nchannels + c) * K_MAX_REG
-                                          + k_idx_reg] = kappa * sign * rp;
+                            if (!fold_on) {
+                                w_basis_reg[(fi * nchannels + c) * K_MAX_REG
+                                              + k_idx_reg] = kappa * sign * rp;
+                            } else {
+                                // alpha_fi in {+1, -1}; alpha_{fi+2} = i * alpha_fi.
+                                const double s_a = (fi == 0) ? 1.0 : -1.0;
+                                // P(i z): i*(a+bi) = -b + ai.
+                                const double qp  = parity_even ? -z.imag()
+                                                               :  z.real();
+                                w_basis_reg[(fi * nchannels + c) * K_MAX_REG
+                                              + k_idx_reg]
+                                    = s_a * kappa * sign * rp;
+                                w_basis_reg[((fi + 2) * nchannels + c) * K_MAX_REG
+                                              + k_idx_reg]
+                                    = s_a * kappa * sign * qp;
+                            }
                         }
                         ++k_idx_reg;
                     }
@@ -2774,30 +2854,127 @@ void wdm_het_get_fstat_ll_kernel(
                                                     * Nt_active + n_act;
                                 d_arr[c] = data_d_b[g_d];
                             }
+                            // Hoist invC for this pixel: the same <= 6 values
+                            // were re-read from global memory inside every one
+                            // of the 4 N + 10 M filter loops below (~84
+                            // loads/pixel for TDI_XYZ). Read them ONCE. Same
+                            // values, same accumulation order -> bit-identical.
+                            double inv_diag[FAST_WDM_NCHANNELS_MAX];
+                            double inv_offd[(FAST_WDM_NCHANNELS_MAX
+                                             * (FAST_WDM_NCHANNELS_MAX - 1)) / 2];
+                            for (int c = 0; c < nchannels; ++c) {
+                                const size_t g_inv = (tdi_type == TDI_XYZ)
+                                    ? (((size_t) c * nchannels + c)
+                                        * slab_Nf + m_act) * Nt_active + n_act
+                                    : ((size_t) c * slab_Nf + m_act)
+                                        * Nt_active + n_act;
+                                inv_diag[c] = invC_b[g_inv];
+                            }
+                            if (tdi_type == TDI_XYZ) {
+                                int p_off = 0;
+                                for (int c1 = 0; c1 < nchannels - 1; ++c1) {
+                                    for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
+                                        const size_t g_inv =
+                                            (((size_t) c1 * nchannels + c2)
+                                              * slab_Nf + m_act)
+                                              * Nt_active + n_act;
+                                        inv_offd[p_off++] = invC_b[g_inv];
+                                    }
+                                }
+                            }
+                            if (fold_on) {
+                                // ---- EXACT bilinear factorization ----
+                                // Every N_i / M_ij is the bilinear
+                                // x^T C y of the SAME symmetric 3x3 invC,
+                                // so factor e_j = C w_j ONCE per pixel and
+                                // reduce each entry to a plain dot product:
+                                //   N_i  = d^T e_i,   M_ij = w_i^T e_j.
+                                // Same sums, different association ->
+                                // covered by the fold parity gate's
+                                // rtol (NOT bit-identical), which is why
+                                // this lives in the FOLDED branch only:
+                                // the unfolded path below keeps its
+                                // bit-for-bit pre-fold contract.
+                                // Cuts ~210 -> ~78 multiplies and, more
+                                // importantly on GPU, ~216 -> ~24 reads of
+                                // the (spilled) w_basis_reg per pixel.
+                                // NOTE: the RWA "Gram" shortcut (accumulate
+                                // 4 of the 10 M entries, derive the rest
+                                // from M_22=M_00 etc.) was MEASURED and
+                                // REJECTED 2026-09-01: the identities hold
+                                // only in the complex envelope; the real
+                                // WDM M violates them at ~0.7% (antenna
+                                // modulation, f0-independent), which moves
+                                // the maximized extrinsics by up to
+                                // ~0.1 rad while leaving F EXACTLY blind
+                                // to the error. Do not re-propose it.
+                                double w_reg[N_FILTERS]
+                                            [FAST_WDM_NCHANNELS_MAX];
+                                double e_reg[N_FILTERS]
+                                            [FAST_WDM_NCHANNELS_MAX];
+                                for (int fi = 0; fi < N_FILTERS; ++fi) {
+                                    for (int c = 0; c < nchannels; ++c) {
+                                        w_reg[fi][c] =
+                                            w_basis_reg[(fi * nchannels + c)
+                                                          * K_MAX_REG
+                                                          + k_idx_reg];
+                                        e_reg[fi][c] =
+                                            inv_diag[c] * w_reg[fi][c];
+                                    }
+                                    if (tdi_type == TDI_XYZ) {
+                                        int p_off = 0;
+                                        for (int c1 = 0; c1 < nchannels - 1;
+                                             ++c1) {
+                                            for (int c2 = c1 + 1;
+                                                 c2 < nchannels; ++c2) {
+                                                const double inv =
+                                                    inv_offd[p_off++];
+                                                e_reg[fi][c1] +=
+                                                    inv * w_reg[fi][c2];
+                                                e_reg[fi][c2] +=
+                                                    inv * w_reg[fi][c1];
+                                            }
+                                        }
+                                    }
+                                }
+                                for (int fi = 0; fi < N_FILTERS; ++fi) {
+                                    double sum_dh = 0.0;
+                                    for (int c = 0; c < nchannels; ++c)
+                                        sum_dh += d_arr[c] * e_reg[fi][c];
+                                    tmp_N[fi] += sum_dh;
+                                }
+                                for (int fi = 0; fi < N_FILTERS; ++fi) {
+                                    for (int fj = fi; fj < N_FILTERS; ++fj) {
+                                        double sum_hh = 0.0;
+                                        for (int c = 0; c < nchannels; ++c)
+                                            sum_hh += w_reg[fi][c]
+                                                       * e_reg[fj][c];
+                                        tmp_M[m_idx(fi, fj)] += sum_hh;
+                                    }
+                                }
+                                // The shared per-pixel increment sits AFTER
+                                // the in-window if below -- mirror it before
+                                // short-circuiting past the legacy loops.
+                                ++k_idx_reg;
+                                continue;
+                            }
                             // 4 N partials: <d | A_i>
                             for (int fi = 0; fi < N_FILTERS; ++fi) {
                                 double sum_dh = 0.0;
                                 if (tdi_type == TDI_XYZ) {
-                                    // Symmetric invC: 3 diag + 3 off-diag reads.
+                                    // Symmetric invC: 3 diag + 3 off-diag terms.
                                     for (int c = 0; c < nchannels; ++c) {
-                                        const size_t g_inv =
-                                            (((size_t) c * nchannels + c)
-                                              * slab_Nf + m_act)
-                                              * Nt_active + n_act;
-                                        const double inv = invC_b[g_inv];
+                                        const double inv = inv_diag[c];
                                         const double w_i =
                                             w_basis_reg[(fi * nchannels + c)
                                                           * K_MAX_REG
                                                           + k_idx_reg];
                                         sum_dh += d_arr[c] * w_i * inv;
                                     }
+                                    int p_off = 0;
                                     for (int c1 = 0; c1 < nchannels - 1; ++c1) {
                                         for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
-                                            const size_t g_inv =
-                                                (((size_t) c1 * nchannels + c2)
-                                                  * slab_Nf + m_act)
-                                                  * Nt_active + n_act;
-                                            const double inv = invC_b[g_inv];
+                                            const double inv = inv_offd[p_off++];
                                             const double w_c1 =
                                                 w_basis_reg[(fi * nchannels + c1)
                                                               * K_MAX_REG
@@ -2812,10 +2989,7 @@ void wdm_het_get_fstat_ll_kernel(
                                     }
                                 } else {
                                     for (int c = 0; c < nchannels; ++c) {
-                                        const size_t g_inv = ((size_t) c * slab_Nf
-                                                                + m_act)
-                                                              * Nt_active + n_act;
-                                        const double inv = invC_b[g_inv];
+                                        const double inv = inv_diag[c];
                                         const double w_i =
                                             w_basis_reg[(fi * nchannels + c)
                                                           * K_MAX_REG
@@ -2835,11 +3009,7 @@ void wdm_het_get_fstat_ll_kernel(
                                         // interchangeable when fi != fj, so
                                         // off-diag terms sum both orderings.
                                         for (int c = 0; c < nchannels; ++c) {
-                                            const size_t g_inv =
-                                                (((size_t) c * nchannels + c)
-                                                  * slab_Nf + m_act)
-                                                  * Nt_active + n_act;
-                                            const double inv = invC_b[g_inv];
+                                            const double inv = inv_diag[c];
                                             const double w_i =
                                                 w_basis_reg[(fi * nchannels + c)
                                                               * K_MAX_REG
@@ -2850,13 +3020,10 @@ void wdm_het_get_fstat_ll_kernel(
                                                               + k_idx_reg];
                                             sum_hh += w_i * w_j * inv;
                                         }
+                                        int p_off = 0;
                                         for (int c1 = 0; c1 < nchannels - 1; ++c1) {
                                             for (int c2 = c1 + 1; c2 < nchannels; ++c2) {
-                                                const size_t g_inv =
-                                                    (((size_t) c1 * nchannels + c2)
-                                                      * slab_Nf + m_act)
-                                                      * Nt_active + n_act;
-                                                const double inv = invC_b[g_inv];
+                                                const double inv = inv_offd[p_off++];
                                                 const double w_i_c1 =
                                                     w_basis_reg[(fi * nchannels + c1)
                                                                   * K_MAX_REG
@@ -2879,11 +3046,7 @@ void wdm_het_get_fstat_ll_kernel(
                                         }
                                     } else {
                                         for (int c = 0; c < nchannels; ++c) {
-                                            const size_t g_inv = ((size_t) c
-                                                                    * slab_Nf
-                                                                    + m_act)
-                                                                  * Nt_active + n_act;
-                                            const double inv = invC_b[g_inv];
+                                            const double inv = inv_diag[c];
                                             const double w_i =
                                                 w_basis_reg[(fi * nchannels + c)
                                                               * K_MAX_REG
@@ -3305,7 +3468,10 @@ inline void wdm_het_get_fstat_ll_impl(
     int Nf_slab = 0, const int *slab_min_f = nullptr,
     // Basis-filter fold: 0 = OFF (default, unfolded 4 generations,
     // bit-for-bit the pre-fold path), 1 = ON. See the kernel's FOLD note.
-    int fstat_fold = 0)
+    int fstat_fold = 0,
+    // Orbit spline-cache density per chunk (0 = direct lookups). See the
+    // kernel's note; static shared, so no shared_bytes contribution here.
+    int N_cp_orbit = 0)
 {
 #ifdef __CUDACC__
     // One binary per block on grid.X (always). The grid_dim arg is
@@ -3314,16 +3480,20 @@ inline void wdm_het_get_fstat_ll_impl(
     (void) grid_dim;
     const int gd_x = num_bin;
     // Shared-mem layout (must match wdm_het_get_fstat_ll_kernel):
-    //   fd_chunk_buf[fi=0..3][nchannels * N_sparse] cmplx -- per-filter chunk-FD
+    //   fd_chunk_buf[fi=0..n_stages-1][nchannels * N_sparse] cmplx
+    //                        -- per-STAGE chunk-FD: 4 unfolded, 2 folded
+    //                           (folded filters 2/3 are derived at the parity
+    //                            stage and never materialized)
     //   layer_buf            [nchannels * Nt_sub]   cmplx -- per-(m, fi) scratch
     //   partial_N            [ 4 * blockDim.x]      double (4 basis filters)
     //   partial_M            [10 * blockDim.x]      double (upper-tri of 4x4 M)
     //   fft_scratch          [wdm_cufftdx_max_scratch()] bytes -- 0 unless cufftdx is on
-    // ~67 KB at Nt_sub=N_sparse=256, blockDim=64 -- exceeds default 48 KB
-    // limit, so we raise the cap via cudaFuncSetAttribute below.
-    constexpr int N_FILTERS_LAUNCH = 4;
+    // ~67 KB unfolded / ~44 KB folded at Nt_sub=N_sparse=256, blockDim=64 --
+    // when over the default 48 KB limit we raise the cap via
+    // cudaFuncSetAttribute below.
+    const int n_fd_bufs_launch = (fstat_fold != 0) ? 2 : 4;
     const size_t shared_bytes =
-        (size_t) N_FILTERS_LAUNCH * (size_t) nchannels * (size_t) N_sparse * sizeof(cmplx) +
+        (size_t) n_fd_bufs_launch * (size_t) nchannels * (size_t) N_sparse * sizeof(cmplx) +
         (size_t) nchannels * (size_t) Nt_sub * sizeof(cmplx) +
         (size_t) 14        * (size_t) NUM_THREADS_HERE * sizeof(double) +
         wdm_cufftdx_max_scratch();
@@ -3358,7 +3528,7 @@ inline void wdm_het_get_fstat_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        Nf_slab, slab_min_f, fstat_fold);
+        Nf_slab, slab_min_f, fstat_fold, N_cp_orbit);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
     gpuErrchk(cudaFree(orbits_gpu));
@@ -3376,7 +3546,7 @@ inline void wdm_het_get_fstat_ll_impl(
         Nt_sub, log2_Nt_sub, N_sparse, log2_N_sparse,
         nchannels, n_rfft_chunk,
         T_chunk, dt, T, t_ref, tdi_type, tukey_alpha, m_band_half_width,
-        Nf_slab, slab_min_f, fstat_fold);
+        Nf_slab, slab_min_f, fstat_fold, N_cp_orbit);
 #endif
 }
 

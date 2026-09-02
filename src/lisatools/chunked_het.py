@@ -79,6 +79,16 @@ _GB_INDEX_ASSERTS = os.environ.get("GB_INDEX_ASSERTS", "0") == "1"
 # parity gate runs both paths in one process.
 _GB_FSTAT_FOLD = int(os.environ.get("GB_FSTAT_FOLD", "1") != "0")
 
+# Orbit spline cache for the F-stat kernel (2026-09-01). The get_ll kernel has
+# routed its TD-builds through a per-chunk shared-mem cubic-spline cache of the
+# orbit tables whenever the comp's ``N_cp_orbit`` > 0; the F-stat kernel never
+# did, so every basis generation paid direct global-mem orbit lookups. With the
+# port, the F-stat follows the SAME per-comp ``N_cp_orbit`` -- i.e. it scores
+# candidates with exactly the orbit approximation the likelihood uses, which is
+# the consistent choice. ``GB_FSTAT_ORBIT_CACHE=0`` forces the F-stat back to
+# direct lookups (get_ll unaffected) as the reference / safety valve.
+_GB_FSTAT_ORBIT_CACHE = int(os.environ.get("GB_FSTAT_ORBIT_CACHE", "1") != "0")
+
 # Fused phase-max sign contract: the chunked kernels also accumulate the
 # quadrature of each candidate-linear inner product (Im of the parity-map
 # coefficient W with Re(W) = w, whose rotation tracks a carrier phase shift
@@ -149,6 +159,18 @@ class WDMComputationsBase(LISAToolsParallelModule):
     #: (2 generations + the exact phi0 rotation). Seeded from ``GB_FSTAT_FOLD``
     #: at import; override per instance or per call.
     fstat_fold = _GB_FSTAT_FOLD
+    #: Whether this comp's C++ ``get_fstat_ll`` BINDING accepts the trailing
+    #: ``N_cp_orbit`` argument (orbit spline cache). Same contract as
+    #: ``_FSTAT_FOLD_KERNELS``: opt-in per source class after its binding TU
+    #: grows the parameter -- GBGPU has (``GBWDMComputations`` sets True);
+    #: bbhx/SOBBH has not (stays False, nothing appended).
+    _FSTAT_ORBIT_CACHE_KERNELS = False
+    #: Orbit spline cache for :meth:`get_fstat_ll_wdm`: 1 (default) = follow
+    #: the comp's own :attr:`N_cp_orbit` (so the F-stat and get_ll share one
+    #: orbit approximation); 0 = force direct orbit lookups in the F-stat
+    #: kernel only. Seeded from ``GB_FSTAT_ORBIT_CACHE`` at import; override
+    #: per instance.
+    fstat_orbit_cache = _GB_FSTAT_ORBIT_CACHE
 
     def __init__(self, wdm_settings, t_ref,
                  Nt_sub=256, n_pad=32, N_sparse=256,
@@ -482,6 +504,26 @@ class WDMComputationsBase(LISAToolsParallelModule):
         if fstat_fold is None:
             fstat_fold = self.fstat_fold
         return (int(bool(int(fstat_fold))),)
+
+    def _fstat_orbit_cache_kernel_args(self):
+        """Trailing ``N_cp_orbit`` arg for the C++ ``get_fstat_ll`` kernel.
+
+        Splatted AFTER :meth:`_fstat_fold_kernel_args` (the kernel signature
+        order is ``..., Nf_slab, slab_min_f, fstat_fold, N_cp_orbit``).
+        Returns ``()`` on JAX / on a source class whose binding TU has not
+        grown the parameter (``_FSTAT_ORBIT_CACHE_KERNELS`` False), else
+        ``(int(self.N_cp_orbit),)`` -- or ``(0,)`` when
+        :attr:`fstat_orbit_cache` is disarmed (``GB_FSTAT_ORBIT_CACHE=0``),
+        which forces the F-stat back to direct orbit lookups without
+        touching get_ll.
+        """
+        if not self._FSTAT_ORBIT_CACHE_KERNELS:
+            return ()
+        if self.backend.name == self._BACKEND_PREFIX + "_jax":
+            return ()
+        if not self.fstat_orbit_cache:
+            return (0,)
+        return (int(self.N_cp_orbit),)
 
     def _slab_args_from(self, band_slab_Nf, slab_min_f):
         """Build the trailing C++ slab kernel args from explicit values.
@@ -1321,6 +1363,7 @@ class WDMComputationsBase(LISAToolsParallelModule):
             int(m_band_half_width),
             *self._slab_kernel_args(wdm_holder),
             *self._fstat_fold_kernel_args(fstat_fold),
+            *self._fstat_orbit_cache_kernel_args(),
         )
 
         # WDM coefs are real -> imag is identically 0.
