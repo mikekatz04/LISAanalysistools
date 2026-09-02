@@ -228,12 +228,37 @@ cat <<EOF
   base script     ${BASE}
 EOF
 
-# gpu-40-spot, 1 GPU each, so A and B occupy two slots and run together.
-# 4 h wall; read the log at 20-30 min and stop the arm early if it has
-# already answered. The store is resume-safe, so re-submitting continues.
+# ---- SUBMIT -----------------------------------------------------------
+# These flags OVERRIDE the #SBATCH header inside the base script (which
+# asks for gpu-80-spot / 24 h): sbatch takes command line > environment >
+# header. That is legal but it means the file does not read like what
+# runs, so the resolved command is echoed below and the partition is
+# checked to exist first -- a bad partition otherwise shows up as a job
+# sitting in the wrong place, or with no GPU, long after submit.
+: "${OBS_PROBE_PARTITION:=gpu-40-spot}"
+: "${OBS_PROBE_TIME:=04:00:00}"
+
+if command -v sinfo >/dev/null 2>&1; then
+  if ! sinfo -h -p "${OBS_PROBE_PARTITION}" -o '%P' 2>/dev/null | grep -q .; then
+    echo "ERROR: partition '${OBS_PROBE_PARTITION}' does not exist here." >&2
+    echo "  available:" >&2
+    sinfo -h -o '    %P  (%a, %D nodes, gres=%G)' 2>/dev/null | sort -u >&2
+    echo "  set OBS_PROBE_PARTITION=<name> to choose one." >&2
+    exit 4
+  fi
+fi
+
+# SBATCH_* env vars outrank the #SBATCH header and would silently retarget
+# this job; the explicit flags below outrank them in turn, but an inherited
+# one is worth seeing rather than guessing about.
+for _v in SBATCH_PARTITION SBATCH_GRES SBATCH_TIMELIMIT SBATCH_ACCOUNT; do
+  [[ -n "${!_v:-}" ]] && echo "  NOTE: ${_v}=${!_v} is set in your environment"
+done
+
+set -x
 exec sbatch --job-name="obs_${_ARM}" \
-  --partition=gpu-40-spot \
+  --partition="${OBS_PROBE_PARTITION}" \
   --gres=gpu:1 \
-  --time=04:00:00 \
+  --time="${OBS_PROBE_TIME}" \
   --output="${OBS_PROBE_ROOT}/obs_${_ARM}_%j.log" \
   --export=ALL "${BASE}"
