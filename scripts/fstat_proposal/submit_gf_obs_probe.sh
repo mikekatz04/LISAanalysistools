@@ -78,6 +78,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE="${HERE}/submit_gf_highf_grid.sh"
 [[ -f "${BASE}" ]] || { echo "missing ${BASE}" >&2; exit 1; }
 
+# STRICT ARGUMENT VALIDATION. The version of this script before the
+# centering arm existed took only $1 and $2, so "A obs noctr" run against
+# it SILENTLY DROPPED the third argument and routed the job into the
+# ctr arm's store -- two MPI jobs appending to one gzip HDF5 with
+# HDF5_USE_FILE_LOCKING=FALSE, which tore the file and killed both runs
+# with "filter returned failure during read". A script that quietly
+# ignores an argument it does not understand is the bug generator; refuse
+# instead.
+if [[ $# -gt 3 ]]; then
+  echo "ERROR: too many arguments ($#). usage: $0 {A|B} {obs|leg} [ctr|noctr]" >&2
+  exit 2
+fi
 PROBE="${1:-A}"
 MODE="${2:-obs}"
 CTR="${3:-ctr}"
@@ -183,6 +195,25 @@ export BASE_FILE_NAME="gf_obsprobe_${_ARM}"
 # cost nothing on a spot partition and mean a promising arm can simply
 # keep going instead of being resubmitted. Resume-safe either way.
 export NUM_ITERATIONS=200
+
+# ---- ONE WRITER PER STORE -------------------------------------------
+# The real protection, and it does not depend on getting the naming right:
+# refuse to submit if a job for this exact arm is already queued or
+# running. Two jobs sharing a store corrupt it in minutes and the failure
+# surfaces later, in the saver rank, looking like an HDF5 bug rather than
+# a duplicate launch.
+if command -v squeue >/dev/null 2>&1; then
+  _live="$(squeue -h -u "${USER}" -o '%i %j %T' 2>/dev/null \
+           | awk -v n="obs_${_ARM}" '$2 == n {print $1" "$3}')"
+  if [[ -n "${_live}" ]]; then
+    echo "REFUSING TO SUBMIT: a job for this arm is already active:" >&2
+    echo "    ${_live}" >&2
+    echo "  store: ${STORE_DIR}" >&2
+    echo "  Two jobs writing one gzip HDF5 tear it -- that is what killed" >&2
+    echo "  the first high-f probes. Cancel it first, or pick another arm." >&2
+    exit 3
+  fi
+fi
 
 mkdir -p "${STORE_DIR}"
 
