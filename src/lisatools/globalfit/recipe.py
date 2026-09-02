@@ -2948,10 +2948,17 @@ def build_gb_moves(
             rj_proposal_distribution=gpu_priors,  # THE prior container
             name="rj_prior_removal",
             rj_removal_only=True,
-            # Deaths never phase-maximize; False also keeps the amp-pin /
-            # fstat-dist-birth ctor defaults off, so death factors are the
-            # plain prior logpdf.
-            phase_maximize=False,
+            # Follows GB_RJ_PHASE_MAXIMIZE, same as rj_fstat_search (user
+            # ruling 2026-09-02: "phase maximization on for the prior
+            # removal just like fstat"). What it arms here is the move's
+            # IN-MODEL repeat scoring (two-quadrature, rotation-on-accept);
+            # the RJ side is unaffected in practice -- this move proposes
+            # deaths only (births 0 throughout in the r2 probes) and deaths
+            # always keep the true phase. The old hard False also leaned on
+            # amp-pin/dist-birth ctor defaults following it; both are now
+            # independent knobs (GB_RJ_AMP_MAXIMIZE decoupled 0e4e45d7,
+            # GB_RJ_FSTAT_DIST_BIRTH env-pinned), so nothing else moves.
+            phase_maximize=_rj_phase_max,
             # Band-temperature swaps live HERE when _temper_on_removal
             # (see the placement comment at the search-move block).
             run_swaps=_temper_all_moves or _temper_on_removal,
