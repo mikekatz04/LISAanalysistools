@@ -11459,6 +11459,46 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return not bool(flag)
         return type(self).in_model_proposal is GBSpecialBase.in_model_proposal
 
+    def _ladder_debug_target(self):
+        """``(band, walker)`` from ``GB_LADDER_DEBUG_BAND`` / ``_WALKER``.
+
+        Returns ``None`` (disabled) unless ``GB_LADDER_DEBUG_BAND`` is set;
+        the walker defaults to 0. Cached so the hot loop pays one dict read.
+        """
+        c = getattr(self, "_ladder_dbg_target_cache", "unset")
+        if c != "unset":
+            return c
+        b = os.environ.get("GB_LADDER_DEBUG_BAND")
+        if not b:
+            self._ladder_dbg_target_cache = None
+        else:
+            w = int(os.environ.get("GB_LADDER_DEBUG_WALKER", "0") or 0)
+            self._ladder_dbg_target_cache = (int(b), w)
+        return self._ladder_dbg_target_cache
+
+    def _ladder_debug_line(self, t_i, w_i, b_i, ll_ref, band, walker):
+        """``walker``'s per-temperature cell ll at ``band``, cold(t0)->hot.
+
+        Read off the vertical swap's ``ll_ref`` (the per-cell ll WITH the
+        picked source in). The store keeps NO per-temp per-walker
+        log_like -- ``band_cold_ll`` / ``cap_cell_cold_ll`` are COLD-only
+        (per walker) and the band-swap counts are aggregated over walkers
+        -- so a stuck walker's VERTICAL ladder is otherwise invisible.
+        Returns ``None`` if no row matches. User ask 2026-09-03.
+        """
+        ti = np.asarray(_to_numpy(t_i)).ravel()
+        wi = np.asarray(_to_numpy(w_i)).ravel()
+        bi = np.asarray(_to_numpy(b_i)).ravel()
+        lr = np.asarray(_to_numpy(ll_ref)).ravel()
+        m = (bi == int(band)) & (wi == int(walker))
+        if not m.any():
+            return None
+        tt = ti[m]
+        ll = lr[m]
+        order = np.argsort(tt)
+        parts = " ".join(f"t{int(tt[i])}:{float(ll[i]):+.2f}" for i in order)
+        return f"[GB_LADDER band {band} walker {walker}] {parts}"
+
     def _vertical_swap_sweep(self, band_sorter, band_temps, t_i, w_i, b_i,
                              slots, beta, ll_ref, ll_change_log, prop_counts,
                              acc_counts, cell_ll_state, parity, census=None,
@@ -11506,6 +11546,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         b_hot = band_temps[b_i[hot], t_i[hot]]
         b_cold = band_temps[b_i[cold], t_i[cold]]
         paccept = (b_cold - b_hot) * (ll_ref[hot] - ll_ref[cold])
+        # LADDER DEBUG (default off): one line/propose with a target walker's
+        # per-temp cell ll at a target band -- the vertical-ladder view the
+        # store cannot hold. Guarded by env; fires once per propose.
+        _lt = self._ladder_debug_target()
+        if _lt is not None and not getattr(self, "_ladder_dbg_fired", False):
+            _line = self._ladder_debug_line(t_i, w_i, b_i, ll_ref, _lt[0], _lt[1])
+            if _line is not None:
+                logger.info("%s: %s", self.name, _line)
+                self._ladder_dbg_fired = True
         if census is not None:
             census["proposed"] += int(paccept.shape[0])
             # DEVICE-side rung accumulation (orchestration audit 2026-08-27
@@ -15897,6 +15946,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         """
 
         st_all = time.perf_counter()
+        # LADDER DEBUG: one [GB_LADDER] line per propose (reset the latch).
+        self._ladder_dbg_fired = False
 
         # Per-propose stage timing (GPU-efficiency diagnosis): one INFO line
         # per propose with the sorted stage breakdown. GB_PROP_TIMING_SYNC=1

@@ -1841,3 +1841,50 @@ class BandBestLLTrackingTest(unittest.TestCase):
                 os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = _prev
         np.testing.assert_allclose(
             bi["band_best_ll"], [-2.5, -1.0, -3.5, -2.0])
+
+
+class LadderDebugLineTest(unittest.TestCase):
+    """Per-walker per-temperature cell-ll trace for one band (user ask
+    2026-09-03: the store keeps no per-temp per-walker log_like, so a stuck
+    walker's vertical ladder is invisible; this formats what the vertical
+    swap already holds in ll_ref)."""
+
+    def _m(self):
+        m = _move(1)
+        m._ladder_dbg_fired = False
+        return m
+
+    def test_filters_to_band_and_walker_sorted_by_temp(self):
+        m = self._m()
+        # rows: (temp, walker, band, ll_ref) -- two temps of walker 19 band 1142,
+        # plus decoys in other bands/walkers that must be excluded
+        t = np.array([2, 0, 1, 5, 0])
+        w = np.array([19, 19, 19, 3, 7])
+        b = np.array([1142, 1142, 999, 1142, 1142])
+        ll = np.array([-12.0, -3.0, -99.0, -50.0, -60.0])
+        line = m._ladder_debug_line(t, w, b, ll, band=1142, walker=19)
+        self.assertIn("band 1142", line); self.assertIn("walker 19", line)
+        # only the two walker-19/band-1142 rows, cold(t0) before t2
+        self.assertLess(line.index("t0:"), line.index("t2:"))
+        self.assertIn("t0:-3.00", line); self.assertIn("t2:-12.00", line)
+        self.assertNotIn("t1:", line)   # band 999 excluded
+        self.assertNotIn("t5:", line)   # walker 3 excluded
+
+    def test_no_match_returns_none(self):
+        m = self._m()
+        t = np.array([0, 1]); w = np.array([3, 3]); b = np.array([5, 5])
+        ll = np.array([-1.0, -2.0])
+        self.assertIsNone(m._ladder_debug_line(t, w, b, ll, band=1142, walker=19))
+
+    def test_target_resolves_from_env(self):
+        m = self._m()
+        for k in ("GB_LADDER_DEBUG_BAND", "GB_LADDER_DEBUG_WALKER"):
+            os.environ.pop(k, None)
+        m._ladder_dbg_target_cache = "unset"
+        self.assertIsNone(m._ladder_debug_target())
+        os.environ["GB_LADDER_DEBUG_BAND"] = "1142"
+        os.environ["GB_LADDER_DEBUG_WALKER"] = "19"
+        m._ladder_dbg_target_cache = "unset"
+        self.assertEqual(m._ladder_debug_target(), (1142, 19))
+        for k in ("GB_LADDER_DEBUG_BAND", "GB_LADDER_DEBUG_WALKER"):
+            os.environ.pop(k, None)
