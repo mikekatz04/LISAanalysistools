@@ -15201,6 +15201,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.num_bands, self.cap_divisor
         ).max(axis=1)
 
+    def _track_band_best_ll(self, bi, band_lls) -> None:
+        """Keep ``band_best_ll`` tracking when the caps run on a CELL grid.
+
+        On the band grid (:meth:`_cap_is_band_grid`) the cap gate itself
+        owns ``band_best_ll`` -- running max plus reset-on-increment -- so
+        this is a no-op there. On every cell grid the gate reads and writes
+        the ``cap_cell_*`` arrays instead, and ``band_best_ll`` would
+        otherwise keep its ``-inf`` fill forever (measured on the v8
+        production store 2026-09-02: all 1232 bands at every stored row).
+        Maintained as a pure monitor series -- the running max over
+        iterations of the per-band cold-walker residual ll -- with NO
+        reset: band caps are a mirror on cell grids and never gate, so
+        there is no increment to re-converge after.
+        """
+        if self._cap_is_band_grid:
+            return
+        best = bi.get("band_best_ll")
+        lls = np.asarray(band_lls)
+        if best is None or lls.ndim != 2 or best.shape != (lls.shape[1],):
+            return
+        # NaN statistics (degenerate residual windows) must never poison
+        # the running max -- fold them to -inf before the column max.
+        cur = np.max(np.where(np.isnan(lls), -np.inf, lls), axis=0)
+        np.maximum(best, cur, out=best)
+
     def _cap_state_arrays(self, bi):
         """``(cap, iters, best)`` for whichever grid drives the caps.
 
@@ -15627,6 +15652,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if ("band_cold_ll" in bi
                 and bi["band_cold_ll"].shape == band_lls.shape):
             bi["band_cold_ll"][:] = band_lls
+        # Cell grids: the gate below never touches the band-level running
+        # best, so track it here (no-op on the band grid, where the gate
+        # owns it). User ask 2026-09-02.
+        self._track_band_best_ll(bi, band_lls)
 
         if is_cells:
             lls, dof = self._cap_cell_lls(model, new_state, band_lls)

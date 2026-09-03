@@ -1744,3 +1744,100 @@ class RjBirthCtrModeTest(unittest.TestCase):
         os.environ["GB_RJ_BIRTH_CTR_MODE"] = "table"
         self.assertFalse(self._named("rj_fstat_search")._rj_birth_perrow())
 
+
+
+class BandBestLLTrackingTest(unittest.TestCase):
+    """``band_best_ll`` must keep tracking on CELL grids (user ask 2026-09-02).
+
+    On the band grid the cap gate itself owns ``band_best_ll`` (running max
+    plus reset-on-increment). On every cell grid the gate runs on the
+    ``cap_cell_*`` arrays and, before this change, ``band_best_ll`` kept its
+    ``-inf`` fill forever -- measured on the v8 production store: all 1232
+    bands at every stored row, in all three h5 files. The tracker maintains
+    it as a pure monitor series: the running max over iterations of the
+    per-band cold-walker residual ll, with NO reset (band caps are a mirror
+    on cell grids and never gate).
+    """
+
+    def _bi(self, nwalkers=2):
+        bi = {"nwalkers": nwalkers}
+        ensure_leaf_cap_fields(bi, NUM_BANDS)
+        return bi
+
+    def test_cell_grid_tracks_running_max(self):
+        m = _move(4)
+        bi = self._bi()
+        lls = np.array([[-5.0, -1.0, -3.0, -2.0],
+                        [-4.0, -2.0, -1.0, -8.0]])
+        m._track_band_best_ll(bi, lls)
+        np.testing.assert_allclose(
+            bi["band_best_ll"], [-4.0, -1.0, -1.0, -2.0])
+        # lower lls later must not regress the running best
+        m._track_band_best_ll(bi, lls - 10.0)
+        np.testing.assert_allclose(
+            bi["band_best_ll"], [-4.0, -1.0, -1.0, -2.0])
+        # a single improvement advances only its own band
+        lls2 = lls.copy()
+        lls2[0, 2] = 0.5
+        m._track_band_best_ll(bi, lls2)
+        np.testing.assert_allclose(
+            bi["band_best_ll"], [-4.0, -1.0, 0.5, -2.0])
+
+    def test_staggered_divisor_one_tracks(self):
+        m = _move(1)
+        m.cap_stagger = True  # the v8 production grid
+        self.assertFalse(m._cap_is_band_grid)
+        bi = self._bi()
+        m._track_band_best_ll(bi, np.full((2, NUM_BANDS), -3.5))
+        np.testing.assert_allclose(bi["band_best_ll"], -3.5)
+
+    def test_band_grid_is_untouched(self):
+        # divisor 1 without stagger: the gate owns band_best_ll, including
+        # its reset-on-increment semantics -- the tracker must not touch it.
+        m = _move(1)
+        self.assertTrue(m._cap_is_band_grid)
+        bi = self._bi()
+        m._track_band_best_ll(bi, np.zeros((2, NUM_BANDS)))
+        self.assertTrue(np.all(np.isneginf(bi["band_best_ll"])))
+
+    def test_guards_shape_and_nan(self):
+        m = _move(4)
+        bi = self._bi()
+        bi["band_best_ll"] = np.full(NUM_BANDS + 1, -np.inf)  # wrong shape
+        m._track_band_best_ll(bi, np.zeros((2, NUM_BANDS)))  # must not crash
+        self.assertTrue(np.all(np.isneginf(bi["band_best_ll"])))
+        bi2 = self._bi()
+        lls = np.full((2, NUM_BANDS), np.nan)
+        lls[0, 0] = -2.0
+        m._track_band_best_ll(bi2, lls)
+        self.assertEqual(bi2["band_best_ll"][0], -2.0)
+        # NaN statistics never poison the series
+        self.assertTrue(np.all(np.isneginf(bi2["band_best_ll"][1:])))
+
+    def test_updater_wires_the_tracker(self):
+        # the REAL _update_band_leaf_caps on the v8-style staggered grid
+        m = _move(1)
+        m.cap_stagger = True
+        m.branch_name = "gb"
+        m.leaf_cap_ll_improve = True
+        m.leaf_cap_min_iters = 4
+        m.leaf_cap_ndim = 8
+        m.cap_overlap_frac = 0.0
+        bi = self._bi()
+        band_lls = np.array([[-3.0, -1.0, -4.0, -2.0],
+                             [-2.5, -1.5, -3.5, -2.5]])
+        m._band_residual_lls = lambda acs: band_lls
+        m._cap_cell_lls = lambda model, st, blls: (
+            band_lls, np.full(NUM_BANDS, 10.0))
+        m._work_branch = lambda st: np.zeros((1, 1, 10, 9))
+        new_state = SimpleNamespace(
+            sub_states={"gb": SimpleNamespace(band_info=bi)})
+        model = SimpleNamespace(analysis_container_arr=None)
+        _prev = os.environ.pop("GB_LEAF_CAP_REQUIRE_IMPROVEMENT", None)
+        try:
+            m._update_band_leaf_caps(model, new_state, band_counts=None)
+        finally:
+            if _prev is not None:
+                os.environ["GB_LEAF_CAP_REQUIRE_IMPROVEMENT"] = _prev
+        np.testing.assert_allclose(
+            bi["band_best_ll"], [-2.5, -1.0, -3.5, -2.0])
