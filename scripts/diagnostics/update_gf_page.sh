@@ -36,8 +36,11 @@ case "$SNAP" in
   *) echo "ERROR: $SNAP is neither .tar.gz nor .zip" >&2; exit 2 ;;
 esac
 
-# the run dir = the directory holding the live/extract store
-RUN_DIR=$(dirname "$(ls -t "$OUT"/*/*testing*.h5 "$OUT"/*/*_extract.h5 2>/dev/null | head -1)")
+# the run dir = the directory holding the live/extract store. find, not a
+# fixed-depth glob: make_snapshots.sh tars with the full cluster path
+# (shared/data/global_fit_output/<run>/...), so the store sits FOUR levels
+# below OUT there, while hand-zips put it at depth one (2026-09-02).
+RUN_DIR=$(dirname "$(find "$OUT" \( -name "*testing*.h5" -o -name "*_extract.h5" \) -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -1)")
 if [ -z "$RUN_DIR" ] || [ ! -d "$RUN_DIR" ]; then
   echo "ERROR: no store h5 found under $OUT after extraction" >&2; exit 3
 fi
