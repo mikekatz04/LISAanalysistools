@@ -645,7 +645,21 @@ export GB_TEMPER_VERTICAL=1
 # swaps move whole band contents between rungs, vertical pumps
 # per-repeat during polish -- the full transport stack. Probe cost
 # ~+40 s/it (tempering block x3); production ~+3%. =3 reverts.
+# CORRECTION (measured live, v8 its 4-6, 2026-09-02): run_tempering is
+# 323 s of the 852 s iteration -- 38%, not 3%. Cadence stays =1 by the
+# 08-26 transport ruling; re-take that decision against the measured
+# number if the wall becomes binding, not by silently editing this line.
 export GB_TEMPER_EVERY_PROPOSES=1
+# Temper chunk budget 1200 -> 2400 (user-approved 2026-09-02). The v6
+# shave-plan lever, still live at v8: ~590 chunks/firing at 1200 and
+# ~63 s/firing of unattributed chunk-loop machinery; doubling halves the
+# chunk count with BIT-IDENTICAL math (chunking is pure scheduling).
+# v6 measured ~55 s/firing at 2400; at v8's 2 firings/iteration that is
+# ~50-100 s/iter. COST: ~+1.5 GB device memory against 5.2 GB peak
+# headroom (peaks 90.5/90.6 of 95.8 GB with leaves still climbing) --
+# WATCH gpu_util_*.csv per-card max after restart and REVERT to 1200 if
+# peaks cross ~93 GB. Unset = code default 1200.
+export GB_TEMPER_PRELOAD_CELLS=2400
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First
