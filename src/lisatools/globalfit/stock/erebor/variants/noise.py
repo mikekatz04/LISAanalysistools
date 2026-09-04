@@ -63,6 +63,7 @@ from ..noise import (
     prepare_galfor_branch,
     prepare_psd_branch,
     resolve_galfor_modulation,
+    wire_unequal_arm_psd,
 )
 from ..stochastic import SGWBSettings, SGWBSetup
 
@@ -170,6 +171,30 @@ class NoiseGeneralSettings(EreborGeneralSettings):
     # over devices instead.
     psd_build_threads: int = dataclasses.field(
         default_factory=env_default("PSD_BUILD_THREADS", 1, int)
+    )
+
+    # --- unequal-arm instrument noise (env UNEQUAL_ARM=1) ---
+    # Mirror all_sources so this diagnostic exercises v8's EXACT noise model:
+    # swap the equal-arm InstrumentNoise for UnequalArmInstrumentNoise, the six
+    # link light travel times read from the mojito NOISE brick's /ltts group and
+    # averaged per WDM time column (LinkDelayTable). Mojito data only;
+    # synthetic/sangria carry no delay table and are refused loudly. Default
+    # False -> standard InstrumentNoise, bit-identical to before.
+    unequal_arm: bool = dataclasses.field(
+        default_factory=env_default("UNEQUAL_ARM", False, bool)
+    )
+    # Decimation of the tabulated per-link delays (brick tabulates one sample
+    # per 2.5 s; the delays vary on month timescales).
+    unequal_arm_stride: int = dataclasses.field(
+        default_factory=env_default("UNEQUAL_ARM_STRIDE", 200, int)
+    )
+    # WDM PSD evaluation method for the whole sensitivity backend: None ->
+    # the backend default ("fold", exact); "layer_constant";
+    # "layer_calibrated" (recommended with unequal_arm: one exact fold
+    # calibrates the ~200x cheaper layer-center evaluation; see
+    # sensitivity.py for its validity self-check).
+    wdm_psd_method: typing.Optional[str] = dataclasses.field(
+        default_factory=env_default("WDM_PSD_METHOD", None, str)
     )
 
     # coarse_Q / coarse_use_ws / coarse_fiducial (+ the coarse_gpu_* knobs)
@@ -318,11 +343,28 @@ class _NoiseFitBase(EreborFit):
     #    editing of general-level ``sensitivity_init_kwargs`` needed. --
     def finalize_general(self, gs: NoiseGeneralSettings) -> None:
         validate_coarse_settings(gs, all_source=False)
+        # v8 EXACT noise model (env UNEQUAL_ARM=1): swap the equal-arm
+        # InstrumentNoise for UnequalArmInstrumentNoise + (optionally) the
+        # layer_calibrated WDM PSD method, exactly as all_sources does, via the
+        # shared wire_unequal_arm_psd helper so the two paths stay in lockstep.
+        # The psd branch block (self.psd) is the fit-level settings object
+        # created by add_branch at construction; mutating it here is picked up
+        # both by noise_sensitivity_init_kwargs below (the data/likelihood noise
+        # model) and by prepare_branch_settings' later deepcopy (the sampled
+        # model) -- same object, same as resolve_data_source mutates it. Inert
+        # unless UNEQUAL_ARM is set (default False -> standard InstrumentNoise,
+        # bit-identical to before).
+        psd = getattr(self, "psd", None) if "psd" in self._branch_names else None
+        if gs.unequal_arm:
+            wire_unequal_arm_psd(gs, psd)
         # Modulation epoch resolution (same logic as all_sources._wire...):
         # "data" defers to the engine, which anchors the lazy table at the
         # authoritative data_t0 after processing; a number is an explicit
         # absolute epoch; None/"" leaves the table in the data frame (0.0).
         extra = dict(self._sgwb_sens_kwargs(gs) or {})
+        if gs.wdm_psd_method:
+            # Backend-wide policy (instrument, foreground, SGWB together).
+            extra["wdm_psd_method"] = gs.wdm_psd_method
         modulation_t0 = 0.0
         raw_t0 = gs.galfor_modulation_t0
         if raw_t0 not in (None, ""):
@@ -334,7 +376,7 @@ class _NoiseFitBase(EreborFit):
             gs.sensitivity_init_kwargs,
             tdi_generation=gs.tdi_gen,
             galfor=getattr(self, "galfor", None),
-            psd=getattr(self, "psd", None),
+            psd=psd,
             galfor_modulation_path=gs.galfor_modulation_path,
             galfor_modulation_t0=modulation_t0,
             extra=extra,

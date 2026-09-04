@@ -557,6 +557,62 @@ def resolve_noise_file(
         return None
 
 
+def wire_unequal_arm_psd(gs, psd) -> None:
+    """UNEQUAL_ARM=1: unequal-arm instrument noise fed by the brick's ``/ltts``.
+
+    Swaps the psd branch's equal-arm ``InstrumentNoise`` for
+    :class:`~lisatools.sensitivity.UnequalArmInstrumentNoise`, whose six link
+    light-travel times are read from the mojito NOISE brick's ``/ltts`` group
+    and averaged per WDM time column (``LinkDelayTable``). Only plain
+    scalars/paths go on the settings tree here; the
+    :class:`~lisatools.sensitivity.LinkDelayTable` itself is built by
+    ``GeneralSetup._resolve_deferred_noise_model`` once the data epoch
+    (``data_t0``) is authoritative. Mojito data only: synthetic/sangria carry
+    no delay table and are refused loudly.
+
+    Shared by ``all_sources`` and the noise-only variants so the two paths stay
+    in lockstep; reads ``gs.unequal_arm_stride`` / ``gs.wdm_psd_method`` /
+    ``gs.mojito_data_path`` / ``gs.noise_file`` and mutates ``psd`` in place.
+    """
+    import h5py
+
+    from lisatools.sensitivity import UnequalArmInstrumentNoise
+
+    if psd is None:
+        raise ValueError(
+            "unequal_arm=1 requires the psd branch (it swaps the psd "
+            "branch's instrument component)."
+        )
+    if gs.data_mode != "mojito":
+        raise ValueError(
+            f"unequal_arm=1 requires data_mode='mojito' (got "
+            f"{gs.data_mode!r}): the per-link delay table is read from "
+            "the mojito NOISE brick's /ltts group, and synthetic/sangria "
+            "data carries none."
+        )
+    noise_file = resolve_noise_file(gs.mojito_data_path, gs.noise_file)
+    if noise_file is None:
+        raise FileNotFoundError(
+            "unequal_arm=1 but no mojito NOISE brick was found: set "
+            "general.noise_file / NOISE_FILE or add "
+            f"data/INSTRUMENT/L1/NOISE_* under {gs.mojito_data_path!r}."
+        )
+    with h5py.File(noise_file, "r") as fh:
+        if "ltts" not in fh:
+            raise ValueError(
+                f"unequal_arm=1 but {noise_file!r} has no /ltts group; "
+                "use a NOISE brick that carries the per-link delays."
+            )
+    if psd.instrument_component_cls is None:
+        psd.instrument_component_cls = UnequalArmInstrumentNoise
+    kwargs = dict(psd.instrument_component_kwargs or {})
+    kwargs.setdefault("ltts_l1_file", noise_file)
+    kwargs.setdefault("ltts_stride", int(gs.unequal_arm_stride))
+    if gs.wdm_psd_method:
+        kwargs.setdefault("wdm_psd_method", gs.wdm_psd_method)
+    psd.instrument_component_kwargs = kwargs
+
+
 def noise_params_from_file(
     noise_file: str,
     band: typing.Optional[typing.Tuple[float, float]] = None,
