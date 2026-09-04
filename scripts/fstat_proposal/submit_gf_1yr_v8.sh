@@ -1730,7 +1730,29 @@ export GB_RJ_BAND_SHUTOFF_RESET_ITERS=100
 # (FSTAT_PEAK_WEIGHT_ALPHA_LATE, default 0.25), so this cadence is also
 # when that takes effect.
 export GB_FSTAT_REFIT_EVERY=50     # production cadence (5 was verify-only)
-export FSTAT_PEAKS_PER_BAND=200    # per-sub-band peak cap (code default; explicit)
+# ===================================================================
+# 1YR F-STAT TRACTABILITY BLOCK (2026-09-04). The first 1yr epoch-0 fit
+# OOM'd GPU0 (87.8 GB) and crawled at ~5k evals/s (13 h ETA) in stage-B
+# GROUP 6 (high-f, f0 9.3-20 mHz): the T^2 fdot scaling + finer 1yr f0
+# resolution blew that group to 4234 peak boxes x 96x96x8x8 nodes =
+# ~1.65B evals (176x the 3mo box count, 96x the 3mo group-6 work). These
+# knobs make the FIRST fit tractable; the obs-basis in-model move refines
+# births afterward and refits (every 50) re-fit anyway, so a coarser
+# first grid loses little. REVERT to defaults (batch 4096, peaks 200,
+# N_F0 auto, MC_ETA 1.0) if a finer grid is wanted once memory allows.
+export FSTAT_BATCH=1024            # SAFE memory lever: kernel rows/call, 4096->1024
+                                   #   -> ~4x smaller per-batch scratch, SAME grid,
+                                   #   SAME result (pure chunking). Stops the OOM.
+export FSTAT_N_F0=64               # f0 cells/box, auto-96 -> 64 (1.5x fewer; a peak
+                                   #   box is +-2.5e-3 mHz, 64 cells is ample)
+export FSTAT_MC_ETA=1.5            # fdot/Mc node density 1.0->1.5 (~1.3x fewer fdot
+                                   #   nodes; the aligned width is already 13.4x coarse)
+export FSTAT_PEAKS_PER_BAND=200    # DEFAULT (2026-09-04: measured the cap does NOT
+                                   #   bind -- busiest group averages 31 boxes/band,
+                                   #   group 6 only 6.7, both far below 200; lowering
+                                   #   it chops ZERO boxes. Box count is set by the
+                                   #   SNR-8 peak density, not this cap. To cut boxes
+                                   #   raise FSTAT_PEAK_MIN_SNR instead; left at 200.)
 # BIRTH-DRAW ALLOCATION (2026-08-16). Peak boxes are weighted w ~ F**alpha,
 # and the F-statistic goes like SNR^2 -- so the historical alpha=1 hands an
 # SNR-10 source 9x FEWER birth attempts than an SNR-30 one, exactly
