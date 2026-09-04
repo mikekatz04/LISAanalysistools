@@ -552,6 +552,60 @@ class ModuleSubState(eryn_State):
                 setattr(self, name, dc(getattr(other, name)))
         self._tempered_initialized = True
 
+    #: Per-rung STATE arrays cloned by :meth:`reseed_cold_into_hottest`.
+    #: ``d_h``/``h_h`` are cold-chain-only (no temperature axis) so the
+    #: hottest-rung reseed never touches them; ``betas`` defines the ladder and
+    #: the ``*_proposed``/``*_accepted`` counters drive ladder adaptation --
+    #: all three are deliberately left intact.
+    _reseed_state_arrays: tuple = ("coords", "inds", "log_like", "log_prior")
+
+    def reseed_cold_into_hottest(
+        self, perm=None, rng=None, *, cold_rung: int = 0, hot_rung=None
+    ):
+        """Literally copy the cold rung's per-walker state into the hottest rung.
+
+        For each per-rung state array ``A`` (``coords``/``inds``/``log_like``/
+        ``log_prior``), ``A[hot_rung] = A[cold_rung][perm]`` -- a walker-permuted
+        *copy* of the cold ensemble into the highest-temperature rung. Every
+        other rung (the cold rung included) is left byte-for-byte unchanged, as
+        are ``betas`` and the adaptation counters. ``d_h``/``h_h`` carry no
+        temperature axis (cold-chain only), so they are never involved.
+
+        The raw ``log_like``/``log_prior`` are temperature-independent (the
+        tempered acceptance applies ``beta`` separately), so copying the cold
+        rung's values into the hottest rung keeps that rung self-consistent
+        with the cloned coords/inds -- no recompute is needed.
+
+        SEARCH-ONLY: this is a deterministic injection, not a detailed-balance
+        move. Callers must gate it to search stages (the standing search-waiver
+        policy).
+
+        Args:
+            perm: length-``nwalkers`` permutation of the cold walkers. If
+                omitted, one is drawn from ``rng`` (or a fresh ``default_rng``).
+            rng: numpy ``Generator`` used to draw ``perm`` when it is ``None``.
+            cold_rung: source rung index (default ``0``, the cold chain).
+            hot_rung: destination rung index (default ``ntemps - 1``).
+        """
+        if not self.tempered_initialized:
+            return
+        if hot_rung is None:
+            hot_rung = int(self.ntemps) - 1
+        if int(hot_rung) == int(cold_rung):
+            return  # single-rung ladder (or degenerate request): nothing to do
+        if perm is None:
+            rng = rng if rng is not None else np.random.default_rng()
+            perm = rng.permutation(int(self.nwalkers))
+        from lisatools.utils.utility import get_array_module
+
+        xp = get_array_module(self.coords)
+        perm = xp.asarray(perm)
+        for name in self._reseed_state_arrays:
+            A = getattr(self, name, None)
+            if A is None:
+                continue
+            A[hot_rung] = A[cold_rung][perm]
+
     @property
     def branch(self) -> eryn_Branch:
         """An eryn ``Branch`` VIEW over this sub-state's coords/inds (shared memory)."""

@@ -5645,6 +5645,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # applied ``inds``; for RJ it includes the freshly-drawn dead ones).
         eligible = self.xp.zeros(band_sorter.num_sources, dtype=bool)
         eligible[subset.inds_main_band_sorter] = True
+        if getattr(self, "_reseed_firing", False):
+            # reseed+replace combined proposal (v9): the hottest rung is owned
+            # by the grandfathered reseed, so the replace sweep must not pick
+            # (and thus overwrite) its sources. Drop the top temperature from
+            # eligibility -- replace runs on temps < hottest only.
+            eligible = eligible & (band_sorter.temp_inds != (self.ntemps - 1))
         # Unit-scoped eligibility, consumed by _run_rj_step's cap-transition
         # budget adjustment (counting a freed/re-capped cell's UNPICKED
         # staged birth rows requires knowing which main-sorter rows belong
@@ -7011,6 +7017,54 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return False
         GBSpecialBase._branch_last_temper[self.branch_name] = cnt
         return True
+
+    def _reseed_host_armed(self) -> bool:
+        """Is THIS move the armed host of the reseed+replace combined proposal?
+
+        The combined proposal (user design 2026-09-04, the v9 run) is hosted on
+        the SEARCH replace move: every ``GB_COLD_RESEED_EVERY`` iterations it
+        does multi-pass replace on temps < hottest, a grandfathered cold->hot
+        reseed on the hottest rung, in-model + vertical swaps, then a forced
+        fancy-swap round; on the other N-1 iterations the replace move is a
+        no-op. ``GB_COLD_RESEED_EVERY <= 0`` (default) leaves the replace move
+        untouched -- v8 stays bit-identical. Search-only: a PE replace move is
+        pe-named (no "search"), so it is never a host (deterministic injection
+        stays out of detailed-balance PE, per the search-waiver policy).
+        """
+        try:
+            n = int(os.environ.get("GB_COLD_RESEED_EVERY", "0"))
+        except ValueError:
+            n = 0
+        return n > 0 and bool(self.rj_replace) and ("search" in self.name)
+
+    def _cold_reseed_fire(self) -> bool:
+        """Firing gate for the reseed+replace host: True on every Nth propose.
+
+        Advances the host move's own propose counter and returns True on every
+        ``GB_COLD_RESEED_EVERY``-th call. Only meaningful on the armed host
+        (:meth:`_reseed_host_armed`); returns False otherwise. Because the
+        replace move is the single host, its propose count IS the search
+        iteration count, so "every N iterations" is well-defined.
+        """
+        if not self._reseed_host_armed():
+            return False
+        n = int(os.environ.get("GB_COLD_RESEED_EVERY", "0"))
+        c = getattr(self, "_cold_reseed_count", 0) + 1
+        self._cold_reseed_count = c
+        return (c % n) == 0
+
+    def _cold_reseed_replace_passes(self) -> int:
+        """How many multi-pass replace sweeps per firing (``GB_COLD_RESEED_REPLACE_PASSES``).
+
+        The combined proposal fires only 1-in-N iterations, so it goes around
+        the alive-source group several times per firing to keep the replace
+        throughput up. Default 3; clamped to >= 1.
+        """
+        try:
+            p = int(os.environ.get("GB_COLD_RESEED_REPLACE_PASSES", "3"))
+        except ValueError:
+            p = 3
+        return max(1, p)
 
     def _band_shutoff_enabled(self) -> bool:
         """High-frequency band birth shutoff: is it on for this move?
@@ -16038,6 +16092,46 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.nwalkers = nwalkers
         self.ntemps = ntemps
 
+        # --- reseed+replace combined proposal (v9 run, GB_COLD_RESEED_EVERY) --
+        # Hosted on the SEARCH replace move. When armed it fires only 1-in-N
+        # iterations; on the other N-1 the replace move is a COMPLETE no-op.
+        # On the firing iteration this move does (see the run_proposal /
+        # tempering sites below): multi-pass replace on temps < hottest, a
+        # grandfathered cold->hot reseed on the hottest rung, in-model +
+        # vertical swaps, then a forced fancy (permuted) swap round. Motivation
+        # = the measured #2 sampling trap: a weak source's hot rungs go EMPTY
+        # (RJ-killed at high beta) so tempering has nothing to transport down,
+        # even though the ladder mixes freely (~83% swaps) and the true mode is
+        # the global max. Deterministic injection -> SEARCH-ONLY (search-waiver
+        # policy). GB_COLD_RESEED_EVERY<=0 (default) -> _reseed_host_armed False
+        # -> this whole block is inert and v8 is bit-identical.
+        self._reseed_firing = False
+        if self._reseed_host_armed():
+            if not self._cold_reseed_fire():
+                # non-firing iteration: the replace host proposes nothing.
+                return state, np.zeros(
+                    (engine_ntemps, nwalkers), dtype=bool)
+            self._reseed_firing = True
+            # Reseed the hottest rung NOW -- BEFORE new_state=GFState(state,
+            # copy=True) below, so ``work`` and ``band_sorter`` (built from
+            # that copy) carry the reseed. Grandfathered: a direct clone, no
+            # MH test. Replace then runs on temps < hottest only (the eligible
+            # mask in run_proposal drops the hottest temp), so the hottest rung
+            # keeps exactly this reseed. d_h/h_h are cold-only, so untouched;
+            # a cloned cold column already satisfies the per-band caps.
+            _sub = (getattr(state, "sub_states", None) or {}).get(
+                self.branch_name)
+            if _sub is not None and getattr(_sub, "tempered_initialized", False):
+                _sub.reseed_cold_into_hottest(
+                    perm=np.random.permutation(int(_sub.nwalkers)))
+                logger.info(
+                    "[GB_COLD_RESEED] %s: FIRING -- reseeded hottest rung "
+                    "(%d walkers, permuted); replace passes=%d; every %s iters",
+                    self.name, int(_sub.nwalkers),
+                    self._cold_reseed_replace_passes(),
+                    os.environ.get("GB_COLD_RESEED_EVERY"),
+                )
+
         # Arm the per-band progressive leaf cap (search mode). The cap array
         # lives in ``state.band_info`` (HDF5-persisted); a fresh state
         # carries the -1 sentinel and is armed to ``leaf_cap_start`` here.
@@ -16266,10 +16360,32 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # involved (two rj_replace drifts at 1.5-1.9e3 -- 3 orders above
         # every other move -- prompted this).
         self._replace_accept_forensics = []
-        with tm.span("run_proposal"):
-            ll_change_log, prop_counts, acc_counts = self.run_proposal(
-                model, new_state, band_sorter, band_temps
-            )
+        # reseed+replace combined proposal (v9): on the firing iteration go
+        # around the alive-source group GB_COLD_RESEED_REPLACE_PASSES times
+        # (default 3), and force vertical swaps ON for the in-model phase of
+        # every pass. Each extra pass applies its own cold-chain ll delta; the
+        # final pass's delta is applied by the existing update just below, so
+        # a single pass (_passes==1, the not-firing path) is bit-identical.
+        # temper_vertical is saved/restored so the flag change is scoped to
+        # this propose only.
+        _reseed_firing = getattr(self, "_reseed_firing", False)
+        _passes = self._cold_reseed_replace_passes() if _reseed_firing else 1
+        _saved_temper_vertical = getattr(self, "temper_vertical", False)
+        if _reseed_firing:
+            self.temper_vertical = True
+        try:
+            with tm.span("run_proposal"):
+                ll_change_log, prop_counts, acc_counts = self.run_proposal(
+                    model, new_state, band_sorter, band_temps
+                )
+                for _p in range(1, _passes):
+                    new_state.log_like[0] += _to_numpy(
+                        ll_change_log.sum(axis=-1)[0])
+                    ll_change_log, prop_counts, acc_counts = self.run_proposal(
+                        model, new_state, band_sorter, band_temps
+                    )
+        finally:
+            self.temper_vertical = _saved_temper_vertical
         et_prop = time.perf_counter()
         # Diagnostic: per-temperature alive source counts after run_proposal
         _alive_per_temp_post_prop = [
@@ -16365,13 +16481,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             )
         if (
             self.temperature_control is not None
-            and self.time % 1 == 0
             and self.ntemps > 1
-            and (self.is_rj_prop or self.swap_on_in_model)
-            and self.run_swaps
-            # cadence LAST: only consumes the per-branch budget when every
-            # other gate already passed (see _temper_cadence_fire).
-            and self._temper_cadence_fire()
+            and (
+                (
+                    self.time % 1 == 0
+                    and (self.is_rj_prop or self.swap_on_in_model)
+                    and self.run_swaps
+                    # cadence LAST: only consumes the per-branch budget when
+                    # every other gate already passed (see _temper_cadence_fire).
+                    and self._temper_cadence_fire()
+                )
+                # reseed+replace combined proposal (v9): the firing iteration
+                # ALWAYS ends on a fancy (permuted) swap round -- "make sure it
+                # does this" -- regardless of the move's normal run_swaps /
+                # cadence gate. run_swaps False short-circuits before
+                # _temper_cadence_fire, so its counter is not touched here.
+                or getattr(self, "_reseed_firing", False)
+            )
         ):
             st_temp = time.perf_counter()
             with tm.span("ll_checks"):
