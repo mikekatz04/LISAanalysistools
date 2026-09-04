@@ -81,6 +81,7 @@ from .variants.lite import (  # noqa: E402
     VGBLiteGlobalFit,
 )
 from .variants.noise import NoiseOnlyGlobalFit, NoiseSGWBGlobalFit  # noqa: E402
+from .variants.noise_mojito import MojitoNoiseGlobalFit  # noqa: E402
 from .variants.vgb import VGBGlobalFit  # noqa: E402
 
 for _cls in (
@@ -91,6 +92,7 @@ for _cls in (
     FullYearCombinedGlobalFit,
     NoiseOnlyGlobalFit,
     NoiseSGWBGlobalFit,
+    MojitoNoiseGlobalFit,
     GBNoForegroundLiteGlobalFit,
     AllSourcesLiteGlobalFit,
     FullYearCombinedLiteGlobalFit,
@@ -119,6 +121,7 @@ all_sources = AllSourcesGlobalFit()
 full_year_combined = FullYearCombinedGlobalFit()
 noise_only = NoiseOnlyGlobalFit()
 noise_sgwb = NoiseSGWBGlobalFit()
+noise_mojito = MojitoNoiseGlobalFit()
 gb_no_fg_lite = GBNoForegroundLiteGlobalFit()
 vgb_lite = VGBLiteGlobalFit()
 all_sources_lite = AllSourcesLiteGlobalFit()

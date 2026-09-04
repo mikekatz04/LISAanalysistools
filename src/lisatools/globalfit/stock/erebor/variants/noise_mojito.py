@@ -42,7 +42,9 @@ import logging
 import typing
 
 from ....engine import Settings
-from ...base import MoveSpec, RecipeSpec, StageSpec, env_default
+from ...base import env_default
+from ....moves import Move
+from ....recipe import Recipe, Stage
 from ..fit import EreborFit
 from ..noise import PSDSetup
 from .noise import NoiseGeneralSettings, NoisePSDSettings, _NoiseFitBase, setup_recipe
@@ -66,8 +68,12 @@ class MojitoNoiseGeneralSettings(NoiseGeneralSettings):
     nt: typing.Optional[int] = 2160
 
     # Full analysis band, not the smoke-friendly 0.3-8 mHz of the synthetic fits.
-    min_freq: float = 1e-4
-    max_freq: float = 2.5e-2
+    # Env-backed (2026-09-04) so a run can pin the SAME band a production GB run
+    # uses -- MIN_FREQ/MAX_FREQ, mirroring gb_no_fg. Default 1e-4 unchanged.
+    min_freq: float = dataclasses.field(
+        default_factory=env_default("MIN_FREQ", 1e-4, float))
+    max_freq: float = dataclasses.field(
+        default_factory=env_default("MAX_FREQ", 2.5e-2, float))
 
     # Real data: rectangular window + a wavelet-edge crop, matching the tested
     # mojito settings in ``all_sources`` (the synthetic noise fits crop nothing
@@ -120,14 +126,19 @@ class MojitoNoiseGlobalFit(_NoiseFitBase):
         # psd only: the INSTRUMENT stream has no galaxy for a galfor branch.
         return {"psd": NoisePSDSettings()}
 
-    def default_recipe(self) -> RecipeSpec:
-        return RecipeSpec(
+    def default_recipe(self) -> Recipe:
+        # psd-ONLY PE stage (no galfor branch on this variant). New
+        # Move/Recipe/Stage API (2026-09-04 migration; the old
+        # RecipeSpec/StageSpec/MoveSpec version was pre-refactor dead code).
+        # The shared setup_recipe (default_setup_function, module end)
+        # materializes it and likewise degrades to psd-only.
+        return Recipe(
             [
-                StageSpec(
+                Stage(
                     name="noise_pe",
                     kind="pe",
-                    moves=[MoveSpec("psd_pe", branch="psd")],
-                    combine_kwargs=dict(verbose=True, share_temperature_control=False),
+                    moves=[Move("psd_pe", branch="psd")],
+                    combine_kwargs=dict(share_temperature_control=False),
                 )
             ]
         )
