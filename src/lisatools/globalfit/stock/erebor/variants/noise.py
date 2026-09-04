@@ -206,6 +206,17 @@ class NoiseGeneralSettings(EreborGeneralSettings):
         default_factory=env_default("GALFOR_MODULATION_PATH", None, str)
     )
 
+    # Modulation table epoch (mirrors all_sources): None/"" => 0.0 (table
+    # already in the data frame); "data" => anchor the lazy table at the
+    # authoritative data_t0 in the engine; a number => that explicit epoch.
+    # Required when the tabulated modulation (e.g. modulation_unequal.dat) is
+    # on the ABSOLUTE mission clock: a noise-only run with
+    # GALFOR_MODULATION_T0=data must anchor it, or the table's absolute span
+    # mismatches the data's [0, Tobs] frame (a build-time ValueError).
+    galfor_modulation_t0: typing.Optional[str] = dataclasses.field(
+        default_factory=env_default("GALFOR_MODULATION_T0", None, str)
+    )
+
 
 class _NoiseFitBase(EreborFit):
     """Shared build behaviour for the noise fits (not registered directly)."""
@@ -307,13 +318,26 @@ class _NoiseFitBase(EreborFit):
     #    editing of general-level ``sensitivity_init_kwargs`` needed. --
     def finalize_general(self, gs: NoiseGeneralSettings) -> None:
         validate_coarse_settings(gs, all_source=False)
+        # Modulation epoch resolution (same logic as all_sources._wire...):
+        # "data" defers to the engine, which anchors the lazy table at the
+        # authoritative data_t0 after processing; a number is an explicit
+        # absolute epoch; None/"" leaves the table in the data frame (0.0).
+        extra = dict(self._sgwb_sens_kwargs(gs) or {})
+        modulation_t0 = 0.0
+        raw_t0 = gs.galfor_modulation_t0
+        if raw_t0 not in (None, ""):
+            if str(raw_t0).strip().lower() == "data":
+                extra["galfor_modulation_anchor"] = "data_t0"
+            else:
+                modulation_t0 = float(raw_t0)
         gs.sensitivity_init_kwargs = noise_sensitivity_init_kwargs(
             gs.sensitivity_init_kwargs,
             tdi_generation=gs.tdi_gen,
             galfor=getattr(self, "galfor", None),
             psd=getattr(self, "psd", None),
             galfor_modulation_path=gs.galfor_modulation_path,
-            extra=self._sgwb_sens_kwargs(gs),
+            galfor_modulation_t0=modulation_t0,
+            extra=extra,
         )
 
     # -- per-branch priors / injections --
