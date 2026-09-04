@@ -1923,9 +1923,18 @@ if [ -e "${STORE_DIR}/${BASE_FILE_NAME}_testing.h5" ]; then
 import sys, h5py
 store, want = sys.argv[1], int(sys.argv[2])
 with h5py.File(store, "r") as f:
-    bt = f["global_fit"]["sub_backend"]["gb"].get("band_temps")
+    # Guard EACH level: a psd-only (noise-only) store has NO
+    # global_fit/sub_backend/gb group, so a subscript would KeyError
+    # before the .get("band_temps") no-op path is reached. h5py
+    # Group.get(name) returns None on a missing key -- treat any missing
+    # level ("global_fit" -> "sub_backend" -> "gb" -> "band_temps") as
+    # "no gb ladder, nothing to check".
+    gf = f.get("global_fit")
+    sb = gf.get("sub_backend") if gf is not None else None
+    gb = sb.get("gb") if sb is not None else None
+    bt = gb.get("band_temps") if gb is not None else None
     if bt is None:
-        print("[LADDER] no gb band_temps; nothing to check.")
+        print("[LADDER] no gb branch; skipping")
         raise SystemExit(0)
     have = int(bt.shape[-1])
 print(f"[LADDER] stored gb rungs = {have}, GB_NTEMPS = {want}")
