@@ -660,6 +660,17 @@ export GB_TEMPER_EVERY_PROPOSES=1
 # WATCH gpu_util_*.csv per-card max after restart and REVERT to 1200 if
 # peaks cross ~93 GB. Unset = code default 1200.
 export GB_TEMPER_PRELOAD_CELLS=2400
+# ===== RELAUNCH EFFICIENCY (2026-09-04, wall-time relaunch) =====
+# Two env-only tempering scheduling wins, both exactness-preserving and
+# now A/B-validated by 11 clean snapshots (TEMPER_CHECK MATCH throughout).
+# CENSUS_HOIST: one occupancy census per unit instead of per chunk
+# (assert-guarded exact). COMPACT_ROWS: drop inert (all-temp-sourceless)
+# grid rows before chunking -- payoff scales with the empty-cell fraction
+# (~85% at this population); the always-accepted vacuous pairs' counter
+# contribution + the TEMPER_CHECK reconciliation are restored analytically.
+# Combined ~30-50 s/iter and growing; unset either to revert bit-for-bit.
+export GB_TEMPER_CENSUS_HOIST=1
+export GB_TEMPER_COMPACT_ROWS=1
 # Per-block EXACT info matrices through the sig-het fast route
 # (~2.4 ms/src vs ~29-46 chunked). The data_index misindex is FIXED and
 # multi-GPU slots now route by the BUFFER's slot shards. First
@@ -818,8 +829,12 @@ export GB_SIGHET_TRUST_PHASE_C=49
 # climbs with rung count, stop and investigate before spending days on it.
 # Cost: one extra exact batched call per in-model block (measured 0.053 s
 # against inmodel_repeats ~4-5 s).
-export GB_SIGHET_ANCHOR_CHECK=1
-export GB_SIGHET_DRIFT_CHECK=1
+# SIG-HET AUDITS RETIRED AT RELAUNCH (2026-09-04): the script's own "arm
+# for the first few iterations then remove" gate PASSED (measured all-rung
+# delta-vs-delta p50 0.054, cold max 5.48, well inside tolerance over the
+# whole run). ~18 s/iter. Re-arm (=1) if a sig-het accuracy question reopens.
+export GB_SIGHET_ANCHOR_CHECK=0
+export GB_SIGHET_DRIFT_CHECK=0
 # TIER SCAN RETIRED FOR THE CLEAN RESTART (2026-08-19). It has NO iteration
 # cap (the "first-few-iterations" note above it was wrong): it ran 13 extra
 # scoring passes -- half of them chunked-exact -- on EVERY in-model block,
@@ -1241,7 +1256,12 @@ export GB_PE_RJ_REPLACE=0
 # bookkeeping reconcile, already on). This measures what the band decomposition
 # RESTS on: normalized |<h_i|h_j>| between concurrently-open adjacent-band cold
 # sources. 8 pairs per unit at unit close, diagnostic only, never mutates state.
-export GB_ORTHO_CHECK=1
+# DISARMED AT RELAUNCH (2026-09-04): this premise check DIES on the 2-GPU
+# path (get_swap_ll shards index a numpy data_index with a cupy keep_idx ->
+# guarded TypeError skip, ~166/snapshot of pure log spam, never runs). The
+# companion GB_ORTHO_LL_CHECK (credited-vs-direct) still runs and stays on.
+# Re-arm =1 only after the gb_likelihood.py:907 cupy/numpy fix lands.
+export GB_ORTHO_CHECK=0
 # STAGGER ON (2026-08-29) -- the half-cell shift is the whole point of
 # this configuration; see the GB_CAP_DIVISOR block above for the measured
 # cell-membership numbers. It is meaningless without divisor > 1 (the move
