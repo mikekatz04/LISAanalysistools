@@ -1046,9 +1046,19 @@ export VGB_BAND_LAYERS=8
 # launches over ~14 ms of physics at width 2048) -- doubling the width
 # halves the number of 100/250-step trains and with them the
 # launch-train overhead. Same full_pe revert rule as above.
-export GB_INMODEL_SETUP_BATCH=4096
-export GB_INFOMAT_MEMPOOL_FREE=0
-export GB_INMODEL_BATCH_MEMPOOL_FREE=0
+# OOM FIX (2026-09-04, job crashed at gb_tdi_on_the_fly.cu:3410, the
+# in-model sig-het FD-heterodyne reference buffer, ~iter 146 of gb_search):
+# the memory-for-speed gamble above (batch 4096 + mempool sweeps OFF) was
+# safe at snapshot-2's 45-68 GB idle but the leaf count grew deeper in the
+# search and the disabled mempools never reclaim between sub-blocks, so the
+# device tipped over its ~90 GB peak. Applying the script's OWN documented
+# safe fallback: batch 4096->1024 (quarter the per-build reference alloc)
+# and RE-ENABLE both mempool frees (reclaim accumulated buffers). Slower
+# (more launch trains + free/realloc cycles) but memory-safe. Raise batch
+# back toward 2048 only if the relaunch telemetry shows real margin.
+export GB_INMODEL_SETUP_BATCH=1024
+export GB_INFOMAT_MEMPOOL_FREE=1
+export GB_INMODEL_BATCH_MEMPOOL_FREE=1
 # ######################################################################### #
 # ## SEAM-STRADDLING CAP CELLS (divisor 2 + stagger, 2026-08-29).        ## #
 # ## ⚠ DO NOT "FIX" THE CAP GRID BACK INTO ALIGNMENT WITH THE SUB-BANDS. ## #
