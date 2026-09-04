@@ -420,29 +420,28 @@ echo "[V8-NOISE] UNEQUAL_ARM=${UNEQUAL_ARM} stride=${UNEQUAL_ARM_STRIDE} wdm_psd
 echo "[V8-NOISE] modulation=${GALFOR_MODULATION_PATH} t0=${GALFOR_MODULATION_T0}"
 
 # ---- coarse noise likelihood (pinned, not inherited) ------------------------
-# all_sources DEFAULTS these on now, but a submit script states its own
-# configuration: a reader must be able to tell which noise likelihood the run
-# used without cross-referencing the variant.
+# NOTE (noise-only variant): the GPU coarse sidecar (delayed_acceptance / Q>8)
+# is an ALL-SOURCE-only path. noise_mojito is a noise-only variant, and
+# validate_coarse_settings(all_source=False) (stock/erebor/noise.py:491) HARD
+# REJECTS coarse_gpu_mode != off, and forbids coarse_Q > 1 while GPUs are set
+# (Q>1 is CPU-only on that path). Job 432 crashed at build on exactly this.
 #
-# delayed_acceptance is EXACT -- stage 1 screens PSD/galfor proposals on the
-# Q-fold time-coarsened surrogate, stage 2 corrects with the exact fine/coarse
-# ratio -- so the SAMPLED target is the fine likelihood in every stage,
-# whatever the surrogate's quality. (search_approx is faster but approximate;
-# in probe job 376 the search it drove railed galfor against two prior edges.
-# The noise block is a small share of wall clock, so that trade is not worth
-# taking here -- accuracy ruling 2026-08-28.)
-#
-# Q=8 measured on the 3-mo grid: Nt_active 2121 -> Ncoarse 266. WS weighting
-# (the Welch-Satterthwaite effective dof, frozen at the injection fiducial)
-# was exercised on GPU in job 376 -- the unequal-arm coarse basis path works
-# there. To fall back: COARSE_GPU_MODE=off restores the exact-fine likelihood
-# (job 369's configuration) and COARSE_USE_WS=0 swaps WS for Bartlett.
-export COARSE_Q=8
-export COARSE_GPU_MODE=delayed_acceptance
+# So this diagnostic runs the EXACT-FINE likelihood: COARSE_GPU_MODE=off (the
+# job-369 configuration, an explicitly validated fallback -- see the original
+# 3mo script) with COARSE_Q=1. This is the RIGHT choice here regardless of the
+# constraint: the run's whole purpose is to verify the PSD MODEL recovers the
+# true Soms_d/Sa_a on pure instrument noise, so scoring it exactly (no coarse
+# surrogate) removes the one approximation that could bias that check. The PSD
+# MODEL itself is unchanged from v8 (UNEQUAL_ARM, layer_calibrated WDM, the
+# injection modulation, fiducial=injection); only the sampling-speed surrogate
+# is dropped in favor of exact scoring. The psd branch is 2 params, so exact is
+# cheap.
+export COARSE_Q=1
+export COARSE_GPU_MODE=off
 export COARSE_USE_WS=1
 export COARSE_FIDUCIAL=injection
 echo "[V8-NOISE] coarse: Q=${COARSE_Q} mode=${COARSE_GPU_MODE} \
-use_ws=${COARSE_USE_WS} fiducial=${COARSE_FIDUCIAL}"
+use_ws=${COARSE_USE_WS} fiducial=${COARSE_FIDUCIAL} (exact-fine; noise-only variant)"
 
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
@@ -2003,9 +2002,15 @@ PYEOF
 
 # ===================================================================
 # NOISE-ONLY PSD VERIFICATION RUN (2026-09-04, user request).
-# THE ONLY changes vs submit_gf_3mo_v8.sh: this driver line + naming.
-# Every noise-model / PSD / WDM / domain / Tobs setting above is v8
-# VERBATIM, so the PSD model is IDENTICAL to the production run.
+# Changes vs submit_gf_3mo_v8.sh: this driver line + naming, PLUS the
+# coarse block above (COARSE_Q 8->1, COARSE_GPU_MODE delayed_acceptance
+# ->off): the GPU coarse sidecar is an all-source-only path that the
+# noise-only variant hard-rejects (see the coarse block note; job 432
+# crashed on it). The PSD MODEL is still v8 VERBATIM -- only the
+# sampling-speed surrogate is dropped for exact-fine scoring, which is
+# the more faithful choice for a model-fidelity diagnostic anyway.
+# Every other noise-model / WDM / domain / Tobs setting above is v8
+# VERBATIM.
 #
 # erebor.noise_mojito: fits ONLY the instrument PSD (2 params Soms_d,
 # Sa_a) to mojito's REAL injected instrument-noise realization
