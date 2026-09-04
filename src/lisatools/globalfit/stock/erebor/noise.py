@@ -257,13 +257,22 @@ GALFOR_BASIS = ("amp", "fk", "alpha", "f_1", "f_2")
 GALFOR_LOG_PARAMS = ("amp", "fk", "f_1", "f_2")
 
 
-def galfor_prior_dict(log_sampling: bool = False) -> dict:
+def galfor_prior_dict(log_sampling: bool = False, *, alpha_max=None) -> dict:
     """``{index: uniform_dist}`` for the 5-param galactic-foreground branch.
 
     ``log_sampling`` switches ``amp, fk, f_1, f_2`` (:data:`GALFOR_LOG_PARAMS`)
     to ``log10`` over the same physical support (:data:`GALFOR_PRIOR_RANGE`);
     ``alpha`` is an O(1) power-law index and stays linear. Pair it with
     :func:`make_galfor_log_transform_container`.
+
+    ``alpha_max`` (env ``GALFOR_ALPHA_MAX``; default the module range's 5.0)
+    raises ONLY the alpha upper cap. Diagnostic (2026-09-04): in the 3-month
+    v8 run alpha rails against 5.0 while the instrument PSD is biased ~1.4x --
+    the foreground appears to want a steeper shape than the cap allows, so the
+    mismatch may be leaking into the instrument PSD. Widening the cap lets the
+    slope explore; nothing else in the prior changes, and the default leaves
+    every other run bit-identical. Resuming a chain under the wider cap is
+    safe -- railed alpha values stay inside the new support.
 
     **Base-10, not natural log** (2026-08): these four span 4-12 decades and
     every one of them is quoted in decades in the literature and in run logs,
@@ -274,8 +283,16 @@ def galfor_prior_dict(log_sampling: bool = False) -> dict:
     to the constant ``ln 10``, so the posterior is unchanged; only the stored
     numbers and the step scale differ.
     """
+    if alpha_max is None:
+        _env = os.environ.get("GALFOR_ALPHA_MAX")
+        alpha_max = float(_env) if _env else None
+    ranges = list(GALFOR_PRIOR_RANGE)
+    if alpha_max is not None:
+        ia = GALFOR_BASIS.index("alpha")
+        lo_a, _hi_a = ranges[ia]
+        ranges[ia] = (lo_a, float(alpha_max))
     priors = {}
-    for i, (name, (lo, hi)) in enumerate(zip(GALFOR_BASIS, GALFOR_PRIOR_RANGE)):
+    for i, (name, (lo, hi)) in enumerate(zip(GALFOR_BASIS, ranges)):
         if log_sampling and name in GALFOR_LOG_PARAMS:
             lo, hi = np.log10(lo), np.log10(hi)
         priors[i] = uniform_dist(lo, hi)

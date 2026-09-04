@@ -455,6 +455,17 @@ export COARSE_RESTAMP_IDENTITY=1
 echo "[V8-NOISE] coarse: Q=${COARSE_Q} mode=${COARSE_GPU_MODE} \
 use_ws=${COARSE_USE_WS} fiducial=${COARSE_FIDUCIAL} restamp=${COARSE_RESTAMP_IDENTITY}"
 
+# DIAGNOSTIC (2026-09-04, tested TOGETHER with the coarse->fine switch above):
+# the galfor slope index alpha rails at its prior cap 5.0 in the 3mo run (~60%
+# of samples at the edge) while the instrument PSD is biased ~1.4x high. The
+# foreground appears to want a steeper shape than 5.0 allows, so the mismatch
+# may be leaking into the instrument PSD. Raise the alpha cap so the slope can
+# explore. Env-configurable (default stock 5.0 -> other runs unchanged);
+# revert = drop this line. The prior is rebuilt from code each run, so it takes
+# effect on resume; railed alpha values stay inside the widened [1e-3, 20].
+export GALFOR_ALPHA_MAX=20.0
+echo "[V8-NOISE] galfor alpha cap = ${GALFOR_ALPHA_MAX} (stock 5.0)"
+
 # ---- sampler shape ---------------------------------------------------------
 export NWALKERS=24                 # 24 walkers / 24 GB temps (user ruling)
 export NUM_ITERATIONS=2000         # total engine iterations (resume-safe; NITER was a dead name)
